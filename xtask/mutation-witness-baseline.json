@@ -29,6 +29,20 @@
       ]
     },
     {
+      "path": "crates/mvm-backends/src/driver/hvf_restore.rs",
+      "package": "mvm-backends",
+      "claims": [
+        18
+      ]
+    },
+    {
+      "path": "crates/mvm-backends/src/fc/host.rs",
+      "package": "mvm-backends",
+      "claims": [
+        18
+      ]
+    },
+    {
       "path": "crates/mvm-backends/src/legacy/libkrun.rs",
       "package": "mvm-backends",
       "claims": [
@@ -239,6 +253,13 @@
       "claims": [
         3,
         10
+      ]
+    },
+    {
+      "path": "crates/mvm-runtime/src/workload_runner/runner.rs",
+      "package": "mvm-runtime",
+      "claims": [
+        18
       ]
     },
     {

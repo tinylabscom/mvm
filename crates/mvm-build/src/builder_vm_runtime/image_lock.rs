@@ -466,6 +466,32 @@ fn contended_lock_error(lock_path: &Path, waited: Duration, wait: LockWait) -> B
     ))
 }
 
+/// Is another process holding the store image right now?
+///
+/// A probe, not a claim: it tries the lock without waiting and releases it
+/// immediately. `true` means a builder VM currently owns the image, which is
+/// the signal that this build should look for a session to share rather than
+/// queue behind it.
+///
+/// Any non-contention error reads as not-contended, so a broken or
+/// unlockable sidecar sends the caller down the ordinary path, where the real
+/// acquire reports the real error instead of this probe guessing at it.
+pub fn nix_store_image_is_contended(builder_cache_dir: &Path, arch: &str) -> bool {
+    let image = builder_cache_dir.join(format!("nix-store-{arch}.img"));
+    let lock_path = sidecar_lock_path(&image);
+    if !lock_path.exists() {
+        // No sidecar means no builder has ever locked this image, and probing
+        // would create the file as a side effect. Report free.
+        return false;
+    }
+    match acquire_sidecar_lock_within(&lock_path, LockWait::none()) {
+        // Took it, so nobody else held it. Released as this returns.
+        Ok(_) => false,
+        Err(BuilderVmError::ExtractionFailed(msg)) => msg.contains("is still held by"),
+        Err(_) => false,
+    }
+}
+
 /// Find or create the persistent `<builder_cache_dir>/nix-store-<arch>.img`
 /// sparse image and hold an exclusive host-side lock on it.
 ///
@@ -550,6 +576,71 @@ pub(crate) fn acquire_nix_store_image_lock_named_within(
     sparse_create_image(&path, size_bytes)?;
 
     Ok(NixStoreImageLock { path, _file: lock })
+}
+
+/// Materialize the Nix store image **without** taking its lock, and return the
+/// image path alongside the sidecar the owner must lock.
+///
+/// For the persistent builder, where the process that starts the VM is not the
+/// process that should hold the lock: the starter creates the image and names
+/// the sidecar, and the supervisor — which lives exactly as long as the VM —
+/// acquires it via [`hold_image_lock`]. A starter that locked first would have
+/// to hand the lock over, and the gap between its release and the supervisor's
+/// acquire is precisely the window another builder could win.
+///
+/// One-shot builders must keep using [`acquire_nix_store_image_lock`]: there
+/// the caller outlives the VM, so caller-held is already correct.
+pub fn ensure_nix_store_image_unlocked(
+    builder_cache_dir: &Path,
+    arch: &str,
+    size_mib: u64,
+) -> Result<UnlockedStoreImage, BuilderVmError> {
+    std::fs::create_dir_all(builder_cache_dir).map_err(|e| {
+        BuilderVmError::ExtractionFailed(format!(
+            "creating builder cache dir {}: {e}",
+            builder_cache_dir.display()
+        ))
+    })?;
+    let path = builder_cache_dir.join(format!("nix-store-{arch}.img"));
+    let size_bytes = size_mib.checked_mul(1024 * 1024).ok_or_else(|| {
+        BuilderVmError::ExtractionFailed(format!(
+            "nix-store size_mib overflowed multiplying to bytes: {size_mib}"
+        ))
+    })?;
+    sparse_create_image(&path, size_bytes)?;
+    let lock_path = sidecar_lock_path(&path);
+    Ok(UnlockedStoreImage { path, lock_path })
+}
+
+/// A store image that exists on disk and is **not** locked by this process.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnlockedStoreImage {
+    path: PathBuf,
+    lock_path: PathBuf,
+}
+
+impl UnlockedStoreImage {
+    /// The image to attach as a virtio-blk device.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// The sidecar whose exclusive lock confers the right to write the image.
+    /// Handed to the supervisor, which holds it for the VM's lifetime.
+    pub fn lock_path(&self) -> &Path {
+        &self.lock_path
+    }
+}
+
+/// Take the exclusive sidecar lock at `lock_path` and return the open file
+/// whose lifetime *is* the lock's.
+///
+/// Called by a supervisor at startup for the image its VM will write. The
+/// returned handle must stay alive for the process's lifetime — binding it to
+/// `_` rather than a named `_guard` drops it immediately and silently unlocks
+/// the image.
+pub fn hold_image_lock(lock_path: &Path, wait: LockWait) -> Result<std::fs::File, BuilderVmError> {
+    acquire_sidecar_lock_within(lock_path, wait)
 }
 
 #[cfg(test)]
@@ -727,6 +818,84 @@ mod tests {
             describe_lock_holder(&lock_path, 0),
             "another mvm builder process"
         );
+    }
+
+    #[test]
+    fn ensure_nix_store_image_unlocked_creates_the_image_and_leaves_it_free() {
+        // The whole point of this entry point: the starter materializes the
+        // image but takes no lock, so the supervisor can take it without a
+        // handoff — and without a window where neither process holds it.
+        let scratch = tempfile::TempDir::new().unwrap();
+        let cache = scratch.path().join("builder-vm");
+
+        let image = ensure_nix_store_image_unlocked(&cache, "aarch64", 64).expect("ensure image");
+        assert!(image.path().is_file(), "image must exist on disk");
+        assert_eq!(
+            image.lock_path(),
+            sidecar_lock_path(image.path()),
+            "the named sidecar must be the one the lock helpers use"
+        );
+
+        // Free: a fresh acquire succeeds immediately.
+        let held = acquire_sidecar_lock_within(image.lock_path(), LockWait::none())
+            .expect("the sidecar must be unlocked after an unlocked ensure");
+        drop(held);
+    }
+
+    #[test]
+    fn hold_image_lock_excludes_a_second_holder_until_it_drops() {
+        let scratch = tempfile::TempDir::new().unwrap();
+        let cache = scratch.path().join("builder-vm");
+        let image = ensure_nix_store_image_unlocked(&cache, "aarch64", 64).expect("ensure image");
+
+        let guard = hold_image_lock(image.lock_path(), LockWait::none()).expect("first holder");
+        let err = hold_image_lock(image.lock_path(), LockWait::none())
+            .expect_err("a second holder must be refused while the first holds it");
+        assert!(
+            format!("{err}").contains("is still held by"),
+            "unexpected error: {err}"
+        );
+
+        drop(guard);
+        hold_image_lock(image.lock_path(), LockWait::none())
+            .expect("the lock must be free once its holder drops");
+    }
+
+    #[test]
+    fn a_free_store_image_does_not_read_as_contended() {
+        let scratch = tempfile::TempDir::new().unwrap();
+        let cache = scratch.path().join("builder-vm");
+
+        // Never locked: no sidecar exists yet, and probing must not create one
+        // as a side effect.
+        assert!(!nix_store_image_is_contended(&cache, "aarch64"));
+        assert!(
+            !cache.join("nix-store-aarch64.img.lock").exists(),
+            "the probe must not leave a sidecar behind"
+        );
+
+        // Locked once, then released.
+        let guard = acquire_nix_store_image_lock(&cache, "aarch64", 64).unwrap();
+        drop(guard);
+        assert!(
+            !nix_store_image_is_contended(&cache, "aarch64"),
+            "a released lock is not contention"
+        );
+    }
+
+    #[test]
+    fn a_held_store_image_reads_as_contended_and_the_probe_does_not_steal_it() {
+        let scratch = tempfile::TempDir::new().unwrap();
+        let cache = scratch.path().join("builder-vm");
+        let guard = acquire_nix_store_image_lock(&cache, "aarch64", 64).unwrap();
+
+        assert!(nix_store_image_is_contended(&cache, "aarch64"));
+        // Probing is not acquiring: the holder still holds it afterwards, so a
+        // second probe sees the same answer.
+        assert!(nix_store_image_is_contended(&cache, "aarch64"));
+
+        drop(guard);
+        assert!(!nix_store_image_is_contended(&cache, "aarch64"));
     }
 
     #[test]

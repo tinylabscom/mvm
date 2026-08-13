@@ -168,6 +168,74 @@ pub fn continuation_from_entry(entry: &PlanAuditEntry) -> Option<Continuation> {
     })
 }
 
+/// Record that a prefix of the chain's segments was deliberately removed.
+///
+/// Rotation made the log splittable; this makes a *deletion* accountable rather
+/// than merely detectable. Without it, an operator who prunes leaves a chain
+/// that reports `TruncatedFront` forever with no way to say the removal was
+/// intended — which makes pruning strictly worse than not pruning, so nobody
+/// ever does it and "keep everything" stops being a choice.
+pub const CHAIN_PRUNED: &str = "chain.pruned";
+
+/// Highest segment sequence number removed. The range is always `1..=this`.
+pub const LABEL_PRUNED_THROUGH: &str = "chain.pruned_through";
+
+/// base64 url-safe-no-pad of the final line hash of segment
+/// [`LABEL_PRUNED_THROUGH`] — the one fact the surviving chain can still check.
+pub const LABEL_PRUNED_TIP: &str = "chain.pruned_tip";
+
+/// Total entries removed across the pruned prefix.
+pub const LABEL_PRUNED_ENTRIES: &str = "chain.pruned_entries";
+
+/// The parsed content of a [`CHAIN_PRUNED`] record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Pruned {
+    /// Highest sequence number removed; the range is `1..=through`.
+    pub through: u64,
+    /// Final line hash of segment `through`, as claimed inside the signed body.
+    pub tip: [u8; 32],
+    /// Total entries removed.
+    pub entries: u64,
+}
+
+/// Labels for a prune record covering `1..=through`.
+#[must_use]
+pub fn pruned_labels(pruned: &Pruned) -> BTreeMap<String, String> {
+    BTreeMap::from([
+        (LABEL_PRUNED_THROUGH.to_string(), pruned.through.to_string()),
+        (
+            LABEL_PRUNED_TIP.to_string(),
+            URL_SAFE_NO_PAD.encode(pruned.tip),
+        ),
+        (LABEL_PRUNED_ENTRIES.to_string(), pruned.entries.to_string()),
+    ])
+}
+
+/// Read a [`CHAIN_PRUNED`] record, or `None` if `entry` is not one or is
+/// missing a field.
+///
+/// Only a prefix can be pruned, so `through` is the whole range and a record
+/// claiming `through = 0` is refused: it would describe removing nothing while
+/// still being offered as an explanation for a gap.
+#[must_use]
+pub fn pruned_from_entry(entry: &AuditEntry) -> Option<Pruned> {
+    if entry.event != CHAIN_PRUNED {
+        return None;
+    }
+    let through = label_u64(&entry.labels, LABEL_PRUNED_THROUGH)?;
+    if through == 0 {
+        return None;
+    }
+    let raw = URL_SAFE_NO_PAD
+        .decode(entry.labels.get(LABEL_PRUNED_TIP)?)
+        .ok()?;
+    Some(Pruned {
+        through,
+        tip: raw.try_into().ok()?,
+        entries: label_u64(&entry.labels, LABEL_PRUNED_ENTRIES)?,
+    })
+}
+
 /// The starting chain hash a segment's opening entry authorizes, if it is a
 /// well-formed continuation.
 ///

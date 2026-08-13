@@ -21,6 +21,13 @@ Feature: s22_oci_provenance
     Then the command exits with code 1
     And the error output contains "requires a digest-pinned reference"
 
+  @MVM-SEC-14 @build
+  Scenario: Image repository capitalization is normalized before admission
+    When I run mvmctl with "image pull --prod GHCR.IO/Acme/Widget:ReleaseCandidate" and an isolated mvm home
+    Then the command exits with code 1
+    And the error output contains "requires a digest-pinned reference"
+    But the error output does not contain "invalid image reference"
+
   # The discriminating half. Without it, the scenario above would pass just as
   # well against a blanket `--prod` refusal that never looked at the reference:
   # a digest-pinned reference must get *past* the pin check and be refused for

@@ -360,6 +360,12 @@ pub fn verify_audit_chain_bytes(
 /// each audit line advances the running `prev_hash` by. Shared with
 /// `merkle` (the empty-tree Merkle root is the SHA-256 of the empty
 /// input, i.e. `hash_line(&[])`).
+///
+/// Public because the writer must advance the chain by exactly the rule the
+/// verifiers replay. A second definition of this function is a second
+/// definition of what the chain *is*: the two would agree until one was
+/// edited, and the symptom would be a log that stopped verifying rather
+/// than a failing build. Every producer and consumer calls this one.
 pub fn hash_line(bytes: &[u8]) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
@@ -746,5 +752,29 @@ mod tests {
             verifying_key_from_hex(&"zz".repeat(32)),
             Err(AuditVerifyError::KeyDecode(_))
         ));
+    }
+    #[test]
+    fn hash_line_is_plain_sha256_of_the_line() {
+        // Pins the rule itself, not just that two callers agree. Until now
+        // this function was written out three times -- here, and twice in
+        // mvm-hostd -- so "the chain hash" had three definitions that
+        // happened to match. Anything that changes this (a domain-separation
+        // prefix, a different digest, hashing the trimmed line) breaks every
+        // chain already on disk, and should have to edit this test to do it.
+        use sha2::{Digest, Sha256};
+
+        let line = br#"{"entry":{},"prev_hash":"","signature":""}"#;
+        let mut expected = Sha256::new();
+        expected.update(line);
+        let expected: [u8; 32] = expected.finalize().into();
+
+        assert_eq!(hash_line(line), expected);
+        // Genesis: the empty input, which merkle also relies on.
+        assert_eq!(hash_line(&[]), {
+            let mut h = Sha256::new();
+            h.update([]);
+            let out: [u8; 32] = h.finalize().into();
+            out
+        });
     }
 }

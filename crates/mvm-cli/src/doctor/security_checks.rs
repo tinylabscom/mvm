@@ -45,6 +45,13 @@ pub(crate) struct AuditChainScan {
     /// not walked. Reported for the same reason as `resumed`: the check cannot
     /// be allowed to read as having attested more than it did.
     pub(crate) sealed_segments: usize,
+    /// Chains carrying a corroborated prune record.
+    pub(crate) pruned_chains: usize,
+    /// Entries those prunes removed. Surfaced because a verified chain that is
+    /// missing history on purpose is a different statement from a verified
+    /// chain that has all of it, and only one of them is what an auditor
+    /// assumes when they read "verifies".
+    pub(crate) pruned_entries: u64,
 }
 
 /// Verification status of the chain-signed audit log.
@@ -127,16 +134,23 @@ fn scan_audit_chains() -> AuditChainScan {
         // First the structure across segments: every handoff's signature and
         // every claimed predecessor hash, at O(segments) rather than O(entire
         // history). This is what catches a segment that was removed.
-        let reports =
+        let verified =
             match mvm_hostd::supervisor::verify_segment_topology(&dir, base, &signer.verifying) {
-                Ok(reports) => reports,
+                Ok(verified) => verified,
                 Err(e) => {
                     scan.broken
                         .push((active.display().to_string(), format!("{e:#}")));
                     continue;
                 }
             };
-        scan.sealed_segments += reports.iter().filter(|r| !r.active).count();
+        scan.sealed_segments += verified.segments.iter().filter(|r| !r.active).count();
+        // A pruned chain verifies, and is also missing history on purpose. Both
+        // are true, and reporting only the first would make "verifies" mean
+        // something different for this host than for every other one.
+        if let Some(pruned) = verified.pruned {
+            scan.pruned_entries += pruned.entries;
+            scan.pruned_chains += 1;
+        }
 
         // Then the live segment's contents, resuming from a checkpoint when one
         // is available. `mvmctl trust audit verify` deliberately keeps the
@@ -212,7 +226,11 @@ fn audit_chain_check_from_scan(scan: &AuditChainScan) -> Check {
         name,
         category,
         ok: true,
-        info: match (scan.verified, scan.resumed, scan.sealed_segments) {
+        info: match (
+            scan.verified,
+            scan.resumed,
+            scan.sealed_segments + scan.pruned_chains,
+        ) {
             (0, _, _) => "no host-lifecycle chains yet".to_string(),
             (n, 0, 0) => format!("{n} chain(s) verify against the host signer"),
             // Both reductions are named. Neither is a full-history statement:
@@ -226,12 +244,26 @@ fn audit_chain_check_from_scan(scan: &AuditChainScan) -> Check {
                 if r > 0 {
                     caveats.push(format!("{r} verified incrementally since the last run"));
                 }
-                if sealed > 0 {
+                if scan.sealed_segments > 0 {
                     caveats.push(format!(
-                        "{sealed} retired segment(s) checked at their handoffs only, \
-                         interiors not re-walked"
+                        "{} retired segment(s) checked at their handoffs only, \
+                         interiors not re-walked",
+                        scan.sealed_segments
                     ));
                 }
+                // Named first among equals in the operator's mind: the others
+                // are things this run did not re-check, but a prune is history
+                // that no run can ever check again.
+                if scan.pruned_chains > 0 {
+                    caveats.push(format!(
+                        "{} chain(s) are missing a deliberately pruned prefix of {} \
+                         entr{}, which no longer verify at all",
+                        scan.pruned_chains,
+                        scan.pruned_entries,
+                        if scan.pruned_entries == 1 { "y" } else { "ies" }
+                    ));
+                }
+                let _ = sealed;
                 format!(
                     "{n} chain(s) verify against the host signer ({}; `mvmctl trust audit \
                      verify` re-checks every segment from the first entry)",
@@ -886,6 +918,8 @@ mod tests {
             not_assessed: None,
             resumed: 0,
             sealed_segments: 0,
+            pruned_chains: 0,
+            pruned_entries: 0,
         };
         let info = audit_chain_check_from_scan(&scan).info;
         assert!(info.contains("3 chain(s) verify"), "{info}");
@@ -906,6 +940,8 @@ mod tests {
             not_assessed: None,
             resumed: 2,
             sealed_segments: 0,
+            pruned_chains: 0,
+            pruned_entries: 0,
         };
         let info = audit_chain_check_from_scan(&scan).info;
         assert!(info.contains("2 verified incrementally"), "{info}");
@@ -926,6 +962,8 @@ mod tests {
             not_assessed: None,
             resumed: 0,
             sealed_segments: 0,
+            pruned_chains: 0,
+            pruned_entries: 0,
         };
         let c = audit_chain_check_from_scan(&scan);
         assert!(!c.ok, "a broken chain is a posture failure: {}", c.info);
@@ -949,6 +987,8 @@ mod tests {
             not_assessed: None,
             resumed: 0,
             sealed_segments: 0,
+            pruned_chains: 0,
+            pruned_entries: 0,
         };
         let info = audit_chain_check_from_scan(&scan).info;
         assert!(info.contains("Quarantine"), "{info}");
@@ -1045,6 +1085,8 @@ mod tests {
             not_assessed: Some("partial sweep".into()),
             resumed: 0,
             sealed_segments: 0,
+            pruned_chains: 0,
+            pruned_entries: 0,
         };
         assert!(!audit_chain_check_from_scan(&scan).ok);
     }

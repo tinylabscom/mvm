@@ -744,6 +744,120 @@ pub fn session_record_path() -> Option<PathBuf> {
         .map(|d| d.join("run").join("persistent-builder.json"))
 }
 
+/// Starts a persistent builder session and returns its record.
+///
+/// Registered by `mvm-cli`, which owns what a start needs — host-binary
+/// extraction, builder-image resolution, writing the session record — none of
+/// which this crate can reach without inverting the dependency direction. Same
+/// arrangement as `builder_backend_select::register_hvf_builder`.
+pub type SessionStarter = Box<dyn Fn() -> anyhow::Result<SessionRecord> + Send + Sync>;
+
+static SESSION_STARTER: std::sync::OnceLock<SessionStarter> = std::sync::OnceLock::new();
+
+/// Register the session starter. Called once at CLI startup; later calls are
+/// ignored.
+pub fn register_session_starter(starter: SessionStarter) {
+    let _ = SESSION_STARTER.set(starter);
+}
+
+/// Marker naming the process currently starting a session.
+///
+/// Created with `create_new`, so exactly one racing builder wins it. Two builds
+/// hitting a contended store image at the same moment would otherwise both
+/// boot a VM, and the loser's supervisor would fail to take the store lock and
+/// exit — safe, but a wasted boot and a confusing error.
+fn session_start_marker_path() -> Option<PathBuf> {
+    session_record_path().map(|p| p.with_extension("starting"))
+}
+
+/// How long a build that lost the start race waits for the winner's record.
+/// Covers a cold builder boot, which formats and seeds the store disk; the
+/// alternative is falling through to queue for the image anyway.
+const SESSION_START_WAIT: Duration = Duration::from_secs(180);
+
+/// Outcome of trying to obtain a session to dispatch into.
+#[derive(Debug)]
+pub enum SessionAcquisition {
+    /// A session to dispatch this build into.
+    Ready(SessionRecord),
+    /// No session, and none was started. The caller falls back to the
+    /// single-shot builder, which queues for the store image.
+    Unavailable,
+}
+
+/// Get a session to share, starting one if nobody has.
+///
+/// Called when the store image is already held: this build cannot have the
+/// image to itself, so its options are to queue for it or to join the VM that
+/// holds it. This is the second option.
+///
+/// Losing the start race is not a failure — the loser waits for the winner's
+/// record and dispatches into that same session, which is the point.
+pub fn adopt_or_start_session() -> SessionAcquisition {
+    if let Some(record) = read_active_session() {
+        return SessionAcquisition::Ready(record);
+    }
+    let Some(starter) = SESSION_STARTER.get() else {
+        // Nothing registered (mvmd, tests): adoption only, never auto-start.
+        return SessionAcquisition::Unavailable;
+    };
+    let Some(marker) = session_start_marker_path() else {
+        return SessionAcquisition::Unavailable;
+    };
+    if let Some(parent) = marker.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&marker)
+    {
+        Ok(_) => {
+            let started = starter();
+            // The marker arbitrates the race; it is not a lock. Remove it as
+            // soon as the outcome is known, win or lose, so a failed start
+            // cannot wedge every later build into the waiting branch.
+            let _ = std::fs::remove_file(&marker);
+            match started {
+                Ok(record) => SessionAcquisition::Ready(record),
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "starting a persistent builder for the contended store image failed; \
+                         falling back to the single-shot builder"
+                    );
+                    SessionAcquisition::Unavailable
+                }
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            wait_for_started_session(&marker)
+        }
+        Err(_) => SessionAcquisition::Unavailable,
+    }
+}
+
+/// Wait for whoever won the start race to publish a session record.
+fn wait_for_started_session(marker: &Path) -> SessionAcquisition {
+    let deadline = std::time::Instant::now() + SESSION_START_WAIT;
+    while std::time::Instant::now() < deadline {
+        if let Some(record) = read_active_session() {
+            return SessionAcquisition::Ready(record);
+        }
+        if !marker.exists() {
+            // The winner finished or gave up. One more read closes the gap
+            // between it writing the record and removing the marker.
+            return match read_active_session() {
+                Some(record) => SessionAcquisition::Ready(record),
+                None => SessionAcquisition::Unavailable,
+            };
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    SessionAcquisition::Unavailable
+}
+
 /// Read the session record and verify the supervisor is alive.
 /// Returns `None` if the record is missing, malformed, or the
 /// recorded PID isn't a live process — all of which are "no
@@ -1352,6 +1466,75 @@ mod tests {
         let body = std::fs::read(run_dir.join("persistent-builder.json")).unwrap();
         let back: SessionRecord = serde_json::from_slice(&body).unwrap();
         assert_eq!(back.last_activity_unix_secs, Some(55));
+    }
+
+    #[test]
+    fn adoption_prefers_a_live_session_over_starting_another() {
+        // A build that finds the image busy and a session already serving it
+        // must join that session, not boot a second builder.
+        let scratch = tempfile::tempdir().expect("tempdir");
+        let run_dir = scratch.path().join("mvm-home").join("run");
+        std::fs::create_dir_all(&run_dir).expect("run dir");
+        let record = SessionRecord {
+            session_id: "live".into(),
+            dispatch_socket_path: run_dir.join("dispatch.sock"),
+            job_dir: run_dir.join("jobs"),
+            workspace_root: scratch.path().to_path_buf(),
+            // This process: alive by construction.
+            supervisor_pid: std::process::id(),
+            last_activity_unix_secs: None,
+        };
+        std::fs::write(
+            run_dir.join("persistent-builder.json"),
+            serde_json::to_vec(&record).unwrap(),
+        )
+        .expect("write record");
+
+        let mut env = TestEnv::new();
+        env.set("MVM_HOME", scratch.path().join("mvm-home"));
+
+        match adopt_or_start_session() {
+            SessionAcquisition::Ready(got) => assert_eq!(got.session_id, "live"),
+            other => panic!("expected the live session, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn without_a_registered_starter_there_is_nothing_to_adopt_or_start() {
+        // mvmd and the unit suite register no starter: adoption only, and
+        // never an auto-start behind the caller's back.
+        let scratch = tempfile::tempdir().expect("tempdir");
+        let mut env = TestEnv::new();
+        env.set("MVM_HOME", scratch.path().join("mvm-home"));
+
+        assert!(matches!(
+            adopt_or_start_session(),
+            SessionAcquisition::Unavailable
+        ));
+        // And no marker was left behind to wedge a later build into waiting.
+        assert!(
+            !scratch
+                .path()
+                .join("mvm-home")
+                .join("run")
+                .join("persistent-builder.starting")
+                .exists()
+        );
+    }
+
+    #[test]
+    fn the_start_marker_sits_beside_the_session_record() {
+        // The two must share a directory: the loser of the race polls for the
+        // record while watching the marker, so a mismatch would make it wait
+        // the full window every time.
+        let scratch = tempfile::tempdir().expect("tempdir");
+        let mut env = TestEnv::new();
+        env.set("MVM_HOME", scratch.path().join("mvm-home"));
+
+        let record = session_record_path().expect("record path");
+        let marker = session_start_marker_path().expect("marker path");
+        assert_eq!(record.parent(), marker.parent());
+        assert_ne!(record, marker);
     }
 
     #[test]

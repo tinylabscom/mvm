@@ -9,7 +9,7 @@ use cucumber::{given, then, when};
 use mvm_contract::protocol::broker::ServiceId;
 use mvm_core::arch::GuestArch;
 use mvm_core::plan::test_support::PlanFixture;
-use mvm_core::vm_backend::{RuntimeSourcePolicy, VmStartConfig};
+use mvm_core::vm_backend::{RuntimeSourcePolicy, VmStartConfig, VmVolume, VmVolumeKind};
 use mvm_fs::sdk_sidecar::{
     SDK_SIDECAR_IMAGE_FILE, SDK_SIDECAR_VERSION_FILE, SdkSidecarLayout, SdkSidecarResolver,
 };
@@ -224,6 +224,18 @@ fn plan_binds_service(world: &mut CliWorld, service: String) {
     world.sdk_sidecar_plan = Some(PlanFixture::new().services(vec![id]).build());
 }
 
+#[given(expr = "a read-only directory mount at {string}")]
+fn read_only_directory_mount(world: &mut CliWorld, guest_path: String) {
+    world.sdk_sidecar_user_volumes.push(VmVolume {
+        host: "/host/wheels".to_string(),
+        guest: guest_path,
+        size: String::new(),
+        read_only: true,
+        kind: VmVolumeKind::DirShare,
+        encrypted: false,
+    });
+}
+
 #[when(expr = "the launch path resolves the SDK sidecar")]
 fn resolve_sidecar(world: &mut CliWorld) {
     let root = cache_root(world);
@@ -236,6 +248,77 @@ fn resolve_sidecar(world: &mut CliWorld) {
             GuestArch::host(),
         )
         .map_err(|e| format!("{e:#}")),
+    );
+}
+
+#[when(expr = "the SDK sends a framed host time request to its bound broker")]
+fn sdk_sends_host_time_request(world: &mut CliWorld) {
+    use std::sync::Arc;
+    use std::sync::mpsc;
+
+    let state = tempfile::tempdir().expect("create broker state dir");
+    let socket = state.path().join("broker.sock");
+    let bindings = world.sdk_sidecar_services.clone();
+    let (ready_tx, ready_rx) = mpsc::channel();
+    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
+    let server_socket = socket.clone();
+    let server = std::thread::spawn(move || -> Result<(), String> {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|error| error.to_string())?;
+        runtime.block_on(async move {
+            let listener = tokio::net::UnixListener::bind(&server_socket)
+                .map_err(|error| error.to_string())?;
+            let mut registry = mvm_hostd::broker::registry::Registry::new();
+            mvm_hostd::broker::handlers::register_bound_handlers(&mut registry, &bindings);
+            ready_tx.send(()).map_err(|error| error.to_string())?;
+            tokio::select! {
+                result = mvm_hostd::broker::server::serve_on_listener(
+                    listener,
+                    Arc::new(registry),
+                    "bdd-workload".into(),
+                    "bdd-tenant".into(),
+                    65_536,
+                ) => result.map_err(|error| error.to_string()),
+                _ = stop_rx => Ok(()),
+            }
+        })
+    });
+
+    ready_rx
+        .recv()
+        .expect("broker must bind before the SDK dials");
+    let result = std::os::unix::net::UnixStream::connect(&socket)
+        .map_err(anyhow::Error::from)
+        .and_then(|mut stream| {
+            mvm_agentd::host_time::now_on(&mut stream).map_err(anyhow::Error::from)
+        })
+        .map(|response| response.wall_ms)
+        .map_err(|error| format!("{error:#}"));
+    let _ = stop_tx.send(());
+    server
+        .join()
+        .expect("broker server thread must not panic")
+        .expect("broker server must stop cleanly");
+    world.sdk_host_time_result = Some(result);
+}
+
+#[then(expr = "the SDK receives a current host wall clock without a transport error")]
+fn sdk_receives_host_time(world: &mut CliWorld) {
+    let wall_ms = world
+        .sdk_host_time_result
+        .as_ref()
+        .expect("a prior step must call host.time.v1")
+        .as_ref()
+        .unwrap_or_else(|error| panic!("host.time.v1 must cross the framed transport: {error}"));
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("host clock must be after the Unix epoch")
+        .as_millis();
+    assert!(
+        now_ms.saturating_sub(u128::from(*wall_ms)) < 5_000,
+        "broker returned a stale wall clock: {wall_ms}"
     );
 }
 
@@ -285,10 +368,11 @@ fn plan_of(world: &CliWorld) -> &mvm_core::plan::ExecutionPlan {
 }
 
 fn attached_volumes(world: &CliWorld) -> Vec<mvm_core::vm_backend::VmVolume> {
-    match resolved(world) {
-        Ok(Some(a)) => vec![a.volume.clone()],
-        _ => Vec::new(),
+    let mut volumes = world.sdk_sidecar_user_volumes.clone();
+    if let Ok(Some(attachment)) = resolved(world) {
+        volumes.push(attachment.volume.clone());
     }
+    volumes
 }
 
 #[then(expr = "admission accepts the launch with no sidecar attachment")]
@@ -403,5 +487,25 @@ fn cmdline_names_sidecar(world: &mut CliWorld) {
     assert!(
         cmdline.contains("mvm.sdk_dev=/dev/vde"),
         "the cmdline must name the device the backend attached: {cmdline}"
+    );
+}
+
+#[then(expr = "the user-volume manifest names {string} but not the SDK mount")]
+fn user_volume_manifest_excludes_sidecar(world: &mut CliWorld, guest_path: String) {
+    let cmdline = assembled_cmdline(world);
+    let user_path = hex::encode(guest_path.as_bytes());
+    let sdk_path = hex::encode(mvm_core::plan::SDK_SIDECAR_GUEST_PATH.as_bytes());
+    let manifest = cmdline
+        .split_ascii_whitespace()
+        .find(|token| token.starts_with("mvm.uvols="))
+        .expect("the ordinary directory mount must emit a user-volume manifest");
+
+    assert!(
+        manifest.contains(&format!("uvol0:{user_path}:ro:fs")),
+        "the ordinary mount must remain in user-volume activation: {cmdline}"
+    );
+    assert!(
+        !manifest.contains(&sdk_path),
+        "the reserved SDK mount must bypass user-volume activation: {cmdline}"
     );
 }

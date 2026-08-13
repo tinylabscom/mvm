@@ -49,6 +49,27 @@ pub(in crate::commands) enum AuditAction {
         #[arg(long, default_value = "local")]
         tenant: String,
     },
+    /// Delete retired audit segments, recording the removal in the chain.
+    ///
+    /// Only a prefix can be pruned — segments 1 through `--through` — because
+    /// that leaves exactly one boundary between what went and what stayed, and
+    /// it is the one boundary the surviving chain can still corroborate.
+    ///
+    /// Refuses on a chain that does not verify: pruning a broken chain would
+    /// delete the evidence of whatever broke it.
+    Prune {
+        /// Highest segment sequence number to remove. The range is always
+        /// 1..=THROUGH.
+        #[arg(long)]
+        through: u64,
+        /// Tenant whose chain to prune. Defaults to `"local"`.
+        #[arg(long, default_value = "local")]
+        tenant: String,
+        /// Required. Pruning destroys evidence that cannot be reconstructed;
+        /// without this the command reports what it would remove and stops.
+        #[arg(long)]
+        ack: bool,
+    },
     /// Show every audit chain entry bound to a specific plan_id.
     Show {
         /// The plan_id (`sha256:<hex>` content-address) to filter by.
@@ -212,6 +233,11 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             }
         }
         AuditAction::Verify { tenant } => audit_verify(&tenant),
+        AuditAction::Prune {
+            through,
+            tenant,
+            ack,
+        } => audit_prune(&tenant, through, ack),
         AuditAction::Show {
             plan_id,
             tenant,
@@ -893,6 +919,65 @@ fn audit_verify(tenant: &str) -> Result<()> {
             refusal.detail
         );
     }
+    Ok(())
+}
+
+/// Delete a prefix of retired segments, recording the removal in the chain.
+///
+/// Dry-run unless `--ack`. Pruning removes evidence that cannot be
+/// reconstructed, and the entries it removes stop being independently
+/// verifiable forever — so the default is to say what would go and stop.
+fn audit_prune(tenant: &str, through: u64, ack: bool) -> Result<()> {
+    let dir = default_audit_dir()?;
+    let signer = host_signer::load_or_init().context("loading host signer to prune audit chain")?;
+
+    let verified = mvm_hostd::supervisor::verify_segment_set(&dir, tenant, &signer.verifying)
+        .with_context(|| {
+            format!(
+                "refusing to prune tenant '{tenant}': its chain does not verify. Pruning a \
+                 broken chain would delete the evidence of whatever broke it"
+            )
+        })?;
+
+    let floor = verified.pruned.map_or(1, |p| p.through + 1);
+    let doomed: Vec<_> = verified
+        .segments
+        .iter()
+        .filter(|s| !s.active && s.seq >= floor && s.seq <= through)
+        .collect();
+    if doomed.is_empty() {
+        ui::info(&format!(
+            "Nothing to prune for tenant '{tenant}': no retired segments in {floor}..={through}."
+        ));
+        return Ok(());
+    }
+    let entries: usize = doomed.iter().filter_map(|s| s.entries).sum();
+
+    if !ack {
+        ui::warn(&format!(
+            "Would remove {} segment(s) ({}..={}) and {entries} entries from tenant \
+             '{tenant}'.\nThose entries stop being independently verifiable — the surviving \
+             chain will attest that they were removed, and how many, but never again what \
+             they said.\nRe-run with --ack to proceed.",
+            doomed.len(),
+            floor,
+            through
+        ));
+        return Ok(());
+    }
+
+    let file_signer = mvm_hostd::supervisor::FileAuditSigner::open(signer.signing.clone(), &dir)
+        .context("opening the audit signer to record the prune")?;
+    let pruned = file_signer
+        .prune_through(&mvm_core::plan::TenantId(tenant.to_string()), through)
+        .context("pruning audit segments")?;
+
+    ui::success(&format!(
+        "Pruned segments 1..={} from tenant '{tenant}': {} entries removed and recorded in \
+         the chain. `mvmctl trust audit verify` will now report the chain as verified with a \
+         deliberate gap.",
+        pruned.through, pruned.entries
+    ));
     Ok(())
 }
 

@@ -406,6 +406,39 @@ fn dev_build_via_builder_vm_uncached(
         }
     }
 
+    // No session was adopted above. Before falling through to a single-shot
+    // builder — which will *queue* for the store image — check whether the
+    // image is already held. If it is, this build cannot have it to itself,
+    // and waiting serializes two builds that could have shared one warm store.
+    // A session is how they share it: adopt a live one, or start one.
+    //
+    // Contention is the trigger, deliberately. An uncontended build takes the
+    // image directly, which is cheaper than booting a session it would be the
+    // only user of.
+    if persistent_routing_allowed(&residency, persistent_dispatch_disabled())
+        && crate::builder_vm_runtime::nix_store_image_is_contended(
+            &crate::builder_vm::builder_vm_cache_dir(),
+            crate::libkrun_builder::host_arch_tag(),
+        )
+        && let crate::persistent_builder::SessionAcquisition::Ready(record) =
+            crate::persistent_builder::adopt_or_start_session()
+    {
+        tracing::info!(
+            session_id = %record.session_id,
+            "store image is busy; sharing the persistent builder that holds it"
+        );
+        match try_typed_persistent_build(env, &record, profile) {
+            Some(Ok(result)) => return Ok(result),
+            Some(Err(e)) => {
+                tracing::warn!(
+                    error = %e,
+                    "dispatch into the shared builder failed; queueing for the store image"
+                );
+            }
+            None => {}
+        }
+    }
+
     // The single-shot path honours the builder-backend selection
     // (`--builder` / `MVM_BUILDER_BACKEND` / auto-detect) instead of
     // hardcoding libkrun, so `mvmctl build` routes a steady-state build through

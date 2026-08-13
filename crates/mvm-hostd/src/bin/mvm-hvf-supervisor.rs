@@ -283,6 +283,29 @@ fn main() -> anyhow::Result<()> {
         };
         disks.push(img);
     }
+    // Take the exclusive store-image lock before the guest can attach the
+    // image, and hold it for this process's life — which, for the persistent
+    // builder that sets this, is the VM's life. A named binding, not `_`:
+    // `let _ = ...` drops the file here and silently unlocks the image while
+    // the VM runs. Failure is fatal; booting anyway would attach an image
+    // another VM is writing, which is the corruption the lock prevents.
+    let _image_lock = match cfg.exclusive_image_lock.as_ref() {
+        None => None,
+        Some(lock_path) => Some(
+            mvm_build::builder_vm_runtime::hold_image_lock(
+                lock_path,
+                mvm_build::builder_vm_runtime::LockWait::from_env(),
+            )
+            .with_context(|| {
+                format!(
+                    "mvm-hvf-supervisor refusing to boot without the exclusive \
+                     store-image lock at {}",
+                    lock_path.display()
+                )
+            })?,
+        ),
+    };
+
     // timeout_secs == 0 ⇒ persistent: run until stopped (SIGTERM). A multi-year
     // cap backstops a stuck guest. Otherwise it's a bounded run.
     let timeout = if cfg.timeout_secs == 0 {

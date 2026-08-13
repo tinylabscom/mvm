@@ -596,6 +596,9 @@ impl VmBackend for HvfBackend {
             // The legacy start path serves workloads only; a persistent builder
             // comes up through the driver seam with its ports named in the spec.
             builder_control_sockets: Vec::new(),
+            // Workload starts only; the persistent builder comes up through
+            // the driver seam, which is where the lock is named.
+            exclusive_image_lock: None,
             handoff_socket: None,
             handoff_root: None,
             handoff_verify_key: None,
@@ -670,6 +673,13 @@ impl VmBackend for HvfBackend {
         // still runs). The guard reaps the registration if a later start step
         // fails; defused once the VM is confirmed up (the stop path then owns
         // teardown).
+        let host_services = config
+            .plan_json
+            .as_deref()
+            .map(mvm_core::plan::plan_from_admitted_json)
+            .transpose()
+            .context("parse admitted plan host services")?
+            .map_or_else(Vec::new, |plan| plan.services);
         let mut host_agent_guard =
             match mvm_vmm::host::host_agent_spawn::register_host_agent_services_if_admitted(
                 mvm_vmm::host::host_agent_spawn::HostAgentServicesParams {
@@ -678,6 +688,7 @@ impl VmBackend for HvfBackend {
                     vm_name: &config.name,
                     state_dir: &state_dir,
                     broker_listen_socket: &broker_listen_socket,
+                    services: &host_services,
                 },
             ) {
                 Ok(g) => g,

@@ -54,6 +54,26 @@ impl HvfDriver {
             backend: HvfBackend,
         }
     }
+
+    /// Boot a VM whose supervisor must hold the exclusive lock at `lock_path`
+    /// for as long as it runs.
+    ///
+    /// For the persistent builder, and deliberately not part of [`VmmDriver`]:
+    /// the caller that starts such a VM exits immediately afterwards, so the
+    /// lock cannot live with it. Every other boot leaves the lock with its
+    /// caller, which outlives the VM and is already correct.
+    ///
+    /// An inherent method rather than a `VmmSpec` field because exactly one
+    /// call site sets this, and threading it through the spec would touch
+    /// every `VmmSpec` literal in the workspace for a property none of them
+    /// have.
+    pub fn boot_holding_image_lock(
+        &self,
+        spec: &VmmSpec,
+        lock_path: &Path,
+    ) -> Result<Box<dyn RunningVm>> {
+        boot_with_handoff(spec, None, Some(lock_path))
+    }
 }
 
 impl Default for HvfDriver {
@@ -103,13 +123,14 @@ impl SupervisorPaths {
 /// off the box, so a spec without it fails closed rather than booting ungated.
 #[cfg(test)]
 fn relay_supervisor_config(spec: &VmmSpec, paths: &SupervisorPaths) -> Result<HvfSupervisorConfig> {
-    relay_supervisor_config_with_handoff(spec, paths, None)
+    relay_supervisor_config_with_handoff(spec, paths, None, None)
 }
 
 fn relay_supervisor_config_with_handoff(
     spec: &VmmSpec,
     paths: &SupervisorPaths,
     handoff: Option<&HandoffConfig>,
+    exclusive_image_lock: Option<&Path>,
 ) -> Result<HvfSupervisorConfig> {
     let kernel = match &spec.kernel {
         KernelImage::Path(p) => p.clone(),
@@ -243,6 +264,7 @@ fn relay_supervisor_config_with_handoff(
         broker_socket: spec.host_socket_for_service(GuestService::Broker),
         console_data_sockets,
         builder_control_sockets,
+        exclusive_image_lock: exclusive_image_lock.map(Path::to_path_buf),
         handoff_socket: handoff.map(|value| value.socket.clone()),
         handoff_root: handoff.map(|value| value.root.clone()),
         handoff_verify_key: handoff.map(|value| value.verify_key.clone()),
@@ -280,6 +302,7 @@ fn bounded_supervisor_command(supervisor: &Path, spec: &VmmSpec, state_dir: &Pat
 fn boot_with_handoff(
     spec: &VmmSpec,
     handoff: Option<&HandoffConfig>,
+    exclusive_image_lock: Option<&Path>,
 ) -> Result<Box<dyn RunningVm>> {
     let state_dir = vm_state_dir(&spec.name);
     std::fs::create_dir_all(&state_dir)
@@ -291,7 +314,7 @@ fn boot_with_handoff(
         .unwrap_or(0);
     let paths = SupervisorPaths::resolve(state_dir, timeout_secs);
     let _ = std::fs::remove_file(&paths.workload_exit);
-    let cfg = relay_supervisor_config_with_handoff(spec, &paths, handoff)?;
+    let cfg = relay_supervisor_config_with_handoff(spec, &paths, handoff, exclusive_image_lock)?;
     let config_path = paths.state_dir.join("supervisor.json");
     std::fs::write(
         &config_path,
@@ -383,7 +406,7 @@ impl VmmDriver for HvfDriver {
         fields(vm = %spec.name, vcpus = spec.vcpus, memory_mib = spec.memory_mib)
     )]
     fn boot(&self, spec: &VmmSpec) -> Result<Box<dyn RunningVm>> {
-        boot_with_handoff(spec, None)
+        boot_with_handoff(spec, None, None)
     }
 
     fn spawn_standby_parent(
@@ -392,7 +415,7 @@ impl VmmDriver for HvfDriver {
     ) -> std::result::Result<StandbyHandle, StandbyError> {
         let handoff = handoff_config(&req.spec.id)
             .map_err(|e| StandbyError::SpawnFailed(format!("prepare HVF handoff: {e}")))?;
-        let vm = boot_with_handoff(req.boot, Some(&handoff))
+        let vm = boot_with_handoff(req.boot, Some(&handoff), None)
             .map_err(|e| StandbyError::SpawnFailed(format!("boot HVF standby: {e}")))?;
         let state_dir = vm_state_dir(&req.spec.id);
         let pid = hvf_backend::read_pid(&state_dir.join(PID_FILE_NAME)).ok_or_else(|| {

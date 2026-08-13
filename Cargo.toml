@@ -89,6 +89,14 @@ members = [
 # errors. ADR-001 §W4.2.
 exclude = [
     "crates/mvm-agentd/fuzz",
+    # FlowMux wire-contract fuzz harnesses: the frame decoder and the
+    # session/stream state machine. The decoder is the first thing on the
+    # workload networking path to touch guest-controlled bytes, and the
+    # state machine is the first thing to rule on a sequence of them, so
+    # each is fuzzed separately. Same libfuzzer-sys linker constraints as
+    # the other fuzz crates; CI gate at
+    # `.github/workflows/security.yml::fuzz`.
+    "crates/mvm-contract/fuzz",
     # Plan 214 Phase 8 — hardened snapshot-frame parser fuzz harness
     # (`parse_header` / `parse_sections`, the cap-before-alloc /
     # bounds-checked path). Same libfuzzer-sys linker-flag constraints as
@@ -228,8 +236,11 @@ thiserror = "2"
 toml = "0.8"
 
 # CLI
+# `error-context` is what makes a parse error name the offending argument;
+# without it clap prints only the error kind ("unexpected argument found").
 clap = { version = "4", default-features = false, features = [
     "derive",
+    "error-context",
     "help",
     "std",
     "usage",

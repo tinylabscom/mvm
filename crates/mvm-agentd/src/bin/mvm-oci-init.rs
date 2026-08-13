@@ -30,6 +30,10 @@ mod linux {
             std::process::exit(1);
         }
         ensure_runtime_dirs();
+        if let Err(error) = mount_sdk_sidecar() {
+            eprintln!("mvm-oci-init: SDK sidecar activation failed: {error}");
+            std::process::exit(1);
+        }
         if let Err(error) = mount_user_volumes() {
             eprintln!("mvm-oci-init: user-volume activation failed: {error}");
             std::process::exit(1);
@@ -122,6 +126,14 @@ mod linux {
             .map_err(|error| error.to_string())
     }
 
+    fn mount_sdk_sidecar() -> Result<(), String> {
+        let Some(device) = cmdline_value("mvm.sdk_dev") else {
+            return Ok(());
+        };
+        mvm_agentd::guest_mount::mount_sdk_sidecar(&device, Path::new("/"))
+            .map_err(|error| error.to_string())
+    }
+
     fn parse_user_volumes(encoded: &str) -> Result<Vec<mvm_agentd::vsock::VolumeConfig>, String> {
         let mut volumes = Vec::new();
         for item in encoded.split(';').filter(|s| !s.is_empty()) {
@@ -166,22 +178,26 @@ mod linux {
                 names.push(name.to_string());
             }
         }
-        trailing_user_block_devices(names, count)
+        let sdk_device = cmdline_value("mvm.sdk_dev");
+        trailing_user_block_devices(names, count, sdk_device.as_deref())
     }
 
     fn trailing_user_block_devices(
         names: Vec<String>,
         count: usize,
+        excluded_device: Option<&str>,
     ) -> Result<Vec<PathBuf>, String> {
         if count == 0 {
             return Ok(Vec::new());
         }
+        let excluded_name = excluded_device.and_then(|device| device.strip_prefix("/dev/"));
         let mut devices: Vec<String> = names
             .into_iter()
             .filter(|name| {
                 let bytes = name.as_bytes();
                 bytes.len() == 3 && bytes.starts_with(b"vd") && bytes[2].is_ascii_lowercase()
             })
+            .filter(|name| excluded_name != Some(name.as_str()))
             .collect();
         devices.sort_unstable();
         if devices.len() < count {
@@ -330,6 +346,7 @@ mod linux {
                     "nvme0n1".to_string(),
                 ],
                 2,
+                None,
             )
             .unwrap();
             assert_eq!(
@@ -340,17 +357,28 @@ mod linux {
 
         #[test]
         fn user_block_devices_refuse_an_incomplete_vmm_disk_set() {
-            let error = trailing_user_block_devices(vec!["vda".to_string()], 2).unwrap_err();
+            let error = trailing_user_block_devices(vec!["vda".to_string()], 2, None).unwrap_err();
             assert!(error.contains("expected 2 user block devices"));
         }
 
         #[test]
         fn user_block_devices_are_empty_when_no_block_volume_was_requested() {
             assert!(
-                trailing_user_block_devices(Vec::new(), 0)
+                trailing_user_block_devices(Vec::new(), 0, None)
                     .unwrap()
                     .is_empty()
             );
+        }
+
+        #[test]
+        fn user_block_devices_exclude_the_dedicated_sdk_sidecar() {
+            let devices = trailing_user_block_devices(
+                vec!["vda".to_string(), "vdb".to_string(), "vdc".to_string()],
+                1,
+                Some("/dev/vdc"),
+            )
+            .unwrap();
+            assert_eq!(devices, vec![PathBuf::from("/dev/vdb")]);
         }
 
         #[test]

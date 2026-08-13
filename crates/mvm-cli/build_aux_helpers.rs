@@ -25,6 +25,16 @@ pub(crate) fn aux_helper_specs(
     let mut specs = vec![
         AuxHelperSpec {
             package: "mvm-hostd",
+            bin: "mvm-host-agent",
+            features: &[],
+        },
+        AuxHelperSpec {
+            package: "mvm-hostd",
+            bin: "mvm-signer-helper",
+            features: &[],
+        },
+        AuxHelperSpec {
+            package: "mvm-hostd",
             bin: "mvm-substitution-endpoint",
             features: &[],
         },
@@ -99,6 +109,14 @@ mod tests {
                 .iter()
                 .any(|spec| spec.bin == "mvm-substitution-endpoint")
         );
+    }
+
+    #[test]
+    fn host_service_helpers_are_built_beside_mvmctl() {
+        let specs = aux_helper_specs("macos", "aarch64", false);
+        for required in ["mvm-host-agent", "mvm-signer-helper"] {
+            assert!(specs.iter().any(|spec| spec.bin == required));
+        }
     }
 
     #[test]

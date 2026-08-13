@@ -218,6 +218,10 @@ pub struct CliWorld {
     pub sdk_sidecar_release: Option<tempfile::TempDir>,
     /// Host-service bindings the scenario's plan carries.
     pub sdk_sidecar_services: Vec<mvm_contract::protocol::broker::ServiceId>,
+    /// Ordinary workload mounts assembled beside the reserved SDK sidecar.
+    /// Keeping these separate lets the sidecar scenarios prove the two guest
+    /// activation channels cannot accidentally be conflated.
+    pub sdk_sidecar_user_volumes: Vec<mvm_core::vm_backend::VmVolume>,
     /// The signed-plan fixture the sidecar scenarios gate against.
     pub sdk_sidecar_plan: Option<mvm_core::plan::ExecutionPlan>,
     /// Outcome of the most recent sidecar resolution: `Ok(None)` for "not
@@ -225,6 +229,9 @@ pub struct CliWorld {
     /// fail-closed refusal.
     pub sdk_sidecar_result:
         Option<Result<Option<mvm_runtime::sdk_sidecar::SdkSidecarAttachment>, String>>,
+    /// Result of a framed `host.time.v1::now` request against the same bound
+    /// broker registry the host-agent constructs for a workload.
+    pub sdk_host_time_result: Option<Result<u64, String>>,
     /// Root directory for the OCI unpack scenarios.
     pub unpack_root: Option<tempfile::TempDir>,
     /// Paths written by prior layers when unpacking multiple layers.

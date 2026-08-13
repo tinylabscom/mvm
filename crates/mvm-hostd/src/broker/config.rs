@@ -8,6 +8,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
+use mvm_core::protocol::broker::ServiceId;
 use serde::{Deserialize, Serialize};
 
 /// Config the supervisor hands to a `mvm-broker` subprocess at spawn.
@@ -44,6 +45,9 @@ pub struct SubprocessConfig {
     /// Parse timeout in milliseconds. Capped at 50ms by default.
     #[serde(default = "default_parse_timeout_ms", with = "duration_ms")]
     pub parse_timeout: Duration,
+    /// Exact host-service bindings admitted for this workload.
+    #[serde(default)]
+    pub services_bindings: Vec<ServiceId>,
 }
 
 fn default_max_frame_bytes() -> usize {
@@ -98,6 +102,7 @@ mod tests {
             audit_signer_uds_path: Some(PathBuf::from("/tmp/test/audit-signer.sock")),
             max_frame_bytes: 65_536,
             parse_timeout: Duration::from_millis(50),
+            services_bindings: vec![],
         };
         let bytes = serde_json::to_vec(&cfg).unwrap();
         let parsed: SubprocessConfig = parse(&bytes).unwrap();

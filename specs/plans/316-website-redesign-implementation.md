@@ -20,6 +20,35 @@ gate and a code-sample provenance gate — run in CI-able Node scripts.
 **Tech Stack:** Astro 5.18, Starlight 0.37.6, Tailwind 4, React 19 islands,
 prism-react-renderer, pnpm 10, Node 22.
 
+## Status: DELIVERED, RESHAPED IN PART (#2359, merged)
+
+The redesign shipped in #2359. The step checkboxes below were never ticked
+during execution and are **not** a record of what happened — read this section
+instead, and treat the boxes as the original intent.
+
+Five tasks named a component that was never created, because a maintainer
+review midway through restructured the page (the numbered eyebrows, card grids
+and multi-bloom treatment were what made it read as generated, and were cut).
+What shipped maps onto the plan like this:
+
+| Task | Planned artifact | Outcome |
+| --- | --- | --- |
+| 1–10 | toolchain pin, both gates, tokens, self-hosted fonts, five primitives, Hero | **Shipped as specified.** |
+| 11 | `Install.tsx` | Shipped as `Quickstart.tsx`. |
+| 12 | `Features.tsx` — numbered feature walk | **Reshaped.** The numbered walk was cut in review; the content lives in `WhyMicrovm.tsx` and `Positioning.tsx`. |
+| 13 | `Walkthrough.tsx` — scroll-synced code walkthrough | **Dropped.** `CodeExample.tsx` was deleted rather than replaced; no scroll-synced walkthrough is on the page. |
+| 14 | `Surfaces.tsx` — SDK/CLI tab block | **Reshaped.** No standalone section; the tab treatment is folded into `Hero.tsx` and `Quickstart.tsx`. |
+| 15 | `Architecture.tsx` | **Reshaped** into `Boundary.tsx` plus two inline-SVG diagrams (`HeroStackDiagram.tsx`, `ContainmentDiagram.tsx`), which carry the visual identity the card grid was meant to. |
+| 16–19 | Security, CTA/Footer, docs chrome, docs prose | **Shipped as specified**, with the docs top bar additionally removed at maintainer request. |
+| 20 | Final verification + screenshot matrix | Verification was performed and is recorded in `specs/REFACTOR-STATUS.md` (focus indicators, contrast, reduced-motion, overflow, gutters). The screenshot matrix itself was scratch under `/tmp` and is not an artifact. |
+
+Two goals stated in the header did **not** ship: the scroll-synced code
+walkthrough and the SDK/CLI tab block as a distinct section. Both were
+deliberate review decisions, not oversights.
+
+Still open: maintainer design review — the remaining question is whether the
+result reads well, which no measurement answers.
+
 ## Global Constraints
 
 - **Work in the worktree** `/Users/auser/work/tinylabs/mvmco/.worktrees/mvm-website-redesign` on branch `feat/website-redesign`. Do not `cd` to the main checkout.

@@ -230,6 +230,8 @@ pub struct BrokerSpawnParams<'a> {
     /// `host.audit.v1` handler forwards entries here, and only registers that
     /// service when this is set.
     pub audit_signer_uds_path: &'a Path,
+    /// Exact host-service bindings from the admitted execution plan.
+    pub services: &'a [mvm_core::protocol::broker::ServiceId],
 }
 
 /// Handle to a spawned broker: the per-VM `BROKER_PORT` UDS the VMM proxies the
@@ -260,6 +262,7 @@ fn spawn_broker_with_timeout(
         broker_uds_path,
         state_dir,
         audit_signer_uds_path,
+        services,
     } = params;
 
     let bin = resolve_subprocess_bin("mvm-broker", "MVM_BROKER_PATH")?;
@@ -280,6 +283,7 @@ fn spawn_broker_with_timeout(
         // host.audit.v1 forwards each accepted entry to the per-VM audit-signer;
         // the broker only registers that service when this is set.
         "audit_signer_uds_path": audit_signer_uds_path,
+        "services_bindings": services,
     });
 
     let child = spawn_detached_with_config(&bin, &cfg, "mvm-broker")?;
@@ -376,6 +380,8 @@ pub struct BrokerServicesSpawnParams<'a> {
     /// passes `vm_vsock_port_socket` on libkrun, `vm_hvf_vsock_port_socket` on
     /// hvf; the VMM forwards the guest's `connect_host_vsock(BROKER_PORT)` here).
     pub broker_listen_socket: &'a Path,
+    /// Exact host-service bindings from the admitted execution plan.
+    pub services: &'a [mvm_core::protocol::broker::ServiceId],
 }
 
 /// Spawn the per-VM broker services (audit-signer **then** broker) when the VM
@@ -396,6 +402,7 @@ pub fn spawn_broker_services_if_admitted(
         vm_name,
         state_dir,
         broker_listen_socket,
+        services,
     } = params;
     let Some(tenant_id) = tenant_id else {
         return Ok(BrokerServicesGuard::defused());
@@ -416,6 +423,7 @@ pub fn spawn_broker_services_if_admitted(
         broker_uds_path: broker_listen_socket,
         state_dir,
         audit_signer_uds_path: &audit.uds_path,
+        services,
     })?;
     Ok(guard)
 }
@@ -632,6 +640,7 @@ mod tests {
             broker_uds_path: &uds,
             state_dir: &state_dir,
             audit_signer_uds_path: &audit_uds,
+            services: &[],
         });
 
         let handle = res.expect("spawn with stub broker should succeed");
@@ -678,6 +687,7 @@ mod tests {
             state_dir: &dir,
             // Unused on the unadmitted path (the gate short-circuits first).
             broker_listen_socket: &dir,
+            services: &[],
         })
         .expect("unadmitted VM yields a defused no-op guard");
         drop(guard); // a defused guard's Drop reaps nothing
@@ -733,6 +743,7 @@ mod tests {
             vm_name: "vm-1",
             state_dir: &state_dir,
             broker_listen_socket: &broker_uds,
+            services: &[],
         });
 
         let mut guard = res.expect("admitted VM spawns both broker services");

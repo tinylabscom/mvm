@@ -189,7 +189,7 @@ export default defineConfig({
             { label: "Matryoshka Model", slug: "security/matryoshka" },
             { label: "Security claim ledger", slug: "security/claim-ledger" },
             { label: "Threat model", slug: "security/threat-model" },
-            { label: "Seven CI claims", slug: "security/ci-claims" },
+            { label: "CI-enforced claims", slug: "security/ci-claims" },
             { label: "Verified boot", slug: "security/verified-boot" },
             { label: "Sandbox parity status", slug: "security/sandbox-parity-status" },
           ],

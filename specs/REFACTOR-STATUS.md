@@ -6,6 +6,10 @@ This is the cross-plan progress index. The owning plan remains authoritative
 for detailed scope and acceptance criteria.
 
 ## Completed issue closeouts
+- [x] **Plan 325 — lowercase OCI image names.** Registry and repository
+      capitalization is normalized before validation across every shared OCI
+      pull and launch path, while case-sensitive tags and strict digest
+      validation remain unchanged.
 - [x] **Plan 322 — persistent-machine README contract.** `machine create`
       accepts the optional machine name positionally, and real-binary coverage,
       all three SDKs, shared fixtures, BDD scenarios, recovery guidance, and
@@ -94,17 +98,37 @@ for detailed scope and acceptance criteria.
       zero; the later workload boot stopped at a separate readiness timeout.
 
 ## In-flight plans
-- [~] Plan 323 — Concurrent builds through one builder VM
+- [~] Plan 325 — SDK sidecar reserved mount
+      (`specs/plans/325-sdk-sidecar-reserved-mount.md`)
+  - [x] Reserved SDK disk is excluded from generic user-volume activation
+  - [x] Legacy and universal guest boot paths mount `mvm.sdk_dev` read-only at
+        `/mvm/sdk`
+  - [x] Explicit worktree binaries source guest artifacts from the same worktree
+  - [x] Guest Cargo target graphs and artifact caches are source-isolated
+  - [x] Sealed OCI roots carry the reserved `/mvm/sdk` mountpoint
+  - [x] Agent timeouts preserve a redacted console diagnostic before cleanup
+  - [x] The hermetic `/mnt/wheels` plus SDK-sidecar BDD regression passes, and
+        host preflight refuses invalid `/wheels` mounts before VM boot
+  - [x] Source builds include the host-agent helpers and exact admitted service
+        bindings reach a real `host.time.v1` handler
+  - [x] The framed broker/SDK BDD regression and native HVF Python-wheel command
+        pass
+  - [ ] Native libkrun Python host-time acceptance passes
+
+- [x] Plan 323 — Concurrent builds through one builder VM
       (`specs/plans/323-concurrent-builds-one-builder-vm.md`)
   - [x] Phase 1 — a contended Nix-store image lock queues (naming the holding
         pid and command) instead of failing the second build outright;
         `MVM_BUILDER_LOCK_WAIT_SECS` bounds the wait and `0` restores
         fail-fast for CI
-  - [ ] Phase 2 — an HVF persistent builder, so the multiplexing path exists
-        on the macOS 26+ default backend
-  - [ ] Phase 3 — adopt (or start) a persistent builder on contention so
-        concurrent builds share one VM instead of queueing
-  - [ ] Phase 4 — troubleshooting + CLI-reference documentation
+  - [x] Phase 2 — `HvfPersistentHostVm` uses the virtio-fs persistent-builder
+        spec (`work`, `mvm-bins`, `job`, `out` shares) so the multiplexing
+        path exists on the macOS 26+ default backend
+  - [x] Phase 3 — a contended store image adopts a live persistent session or
+        auto-starts one (arbitrated by a start marker), so concurrent builds
+        share one VM instead of queueing
+  - [x] Phase 4 — troubleshooting and CLI-reference docs cover the contention
+        message, the wait override, and the persistent-builder path
 
 - [x] Plan 322 — Scope merge-group Rust CI to behavior-changing diffs
       (`specs/plans/322-merge-group-ci-scope.md`)
@@ -147,7 +171,18 @@ for detailed scope and acceptance criteria.
         gutters 108/34/26 across every section and the header
   - [ ] Maintainer design review — ongoing; the remaining question is whether
         the result reads well, which no measurement answers
-  - [ ] PR #2359 open against `main`
+  - [x] PR #2359 merged to `main`
+  - [x] Implementation plan reconciled against what shipped: five tasks named
+        components that were never created, because the mid-flight review
+        restructured the page, and two stated goals (the scroll-synced code
+        walkthrough and the SDK/CLI tab block as its own section) were dropped
+        by that review. Mapping recorded in the plan's status header; the step
+        checkboxes were never ticked during execution and are not a record of
+        what happened
+  - [x] Docs security pages carried a "seven claims" framing predating most of
+        ADR-001's ledger (#2398); `ci-claims.md` now mirrors the full table and
+        `matryoshka.md` separates layer-defending from backend-independent
+        claims
 
 - [~] Plan 315 — HVF virtio-vsock transmit-credit regression
       (`specs/plans/315-hvf-vsock-credit-regression.md`)
@@ -1157,7 +1192,20 @@ for detailed scope and acceptance criteria.
         `spawn_netd`/`host_datapath` (29 allowlist entries); synthesis,
         admission, and CLI preflight refuse `raw_ip_stack=true`/`L3Vsock` with
         a migration error naming the loopback adapters and typed connectors
-  - [ ] Phase 1 — pin protocol, resource, and performance baselines (#2370)
+  - [~] Phase 1 — pin protocol, resource, and performance baselines (#2370).
+        Landed: `mvm-contract::protocol::network_flow` — the v1 frame header
+        (20 bytes, `u32` length field because 64 KiB does not fit a `u16`),
+        all 27 opcodes with their class/sender/confirmation relations,
+        state-independent cap-before-allocate decoding with golden byte
+        fixtures, and the session/stream state machine (parity-split stream
+        IDs, watermark reuse rejection rather than an unbounded set, per-stream
+        credit, declared-listener-backed ingress, fail-closed on every
+        refusal). 87 unit tests. `crates/mvm-contract/fuzz` adds
+        `fuzz_network_flow_decode` and `fuzz_network_flow_state` with 95
+        committed seeds, wired into `security.yml`. Transport-neutral signed
+        `NetworkLimits` is also implemented with default-byte compatibility,
+        validation, and one legacy/FlowMux accessor. Remaining: session
+        extraction and the perf harness + baselines.
   - [ ] Phase 2 — the one authenticated endpoint (#2371)
   - [ ] Phase 3 — converge egress TCP, UDP, and DNS (#2372)
   - [ ] Phase 4 — stream typed transformations (#2373)

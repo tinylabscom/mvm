@@ -344,3 +344,40 @@ fn machine_warm_restore_json_flag_parses() {
     );
     let _ = std::fs::remove_dir_all(&tmp);
 }
+
+/// A mistyped flag must be named here, not shipped to the guest as argv where
+/// it surfaces as `/bin/sh: exec: illegal option --` after a boot the caller
+/// already paid for.
+#[test]
+fn machine_run_names_an_unknown_flag_instead_of_booting() {
+    let tmp = tempfile::tempdir().unwrap();
+    #[allow(deprecated)]
+    let out = Command::cargo_bin("mvmctl")
+        .unwrap()
+        .env("HOME", tmp.path())
+        .env("MVM_HOME", tmp.path())
+        .env("MVM_NO_AUTO_DEV", "1")
+        .args([
+            "machine",
+            "run",
+            "--image",
+            "alpine",
+            "--no-such-flag",
+            "8080:80",
+            "--",
+            "uname",
+            "-a",
+        ])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "an unknown flag must not run");
+    assert!(
+        stderr.contains("--no-such-flag"),
+        "the error must name the flag, stderr: {stderr}"
+    );
+    assert!(
+        !stderr.contains("illegal option"),
+        "the flag must never reach a guest shell, stderr: {stderr}"
+    );
+}

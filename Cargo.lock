@@ -3092,6 +3092,7 @@ dependencies = [
  "ed25519-dalek",
  "flate2",
  "hex",
+ "mvm-agentd",
  "mvm-build",
  "mvm-cli",
  "mvm-client",

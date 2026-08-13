@@ -41,6 +41,7 @@ use crate::audit_signer::helper_client::SignerHelperClient;
 use super::audit_client::AuditClient;
 use super::control::{ControlRequest, ControlResponse, RegisterVm, SignedControl};
 use super::handlers::host_audit_v1::HostAuditV1Handler;
+use super::handlers::register_bound_handlers;
 use super::registry::Registry;
 use super::server::{read_frame, serve_on_listener, write_frame};
 
@@ -370,7 +371,12 @@ impl HostAgentDaemon {
         registry
             .admit_capabilities(r.capability_bindings.clone())
             .context("load host-signed capability bindings")?;
-        if let Some(helper) = &self.signer_helper_uds_path {
+        register_bound_handlers(&mut registry, &r.services_bindings);
+        let host_audit = mvm_core::protocol::broker::ServiceId::parse("host.audit.v1")
+            .expect("host.audit.v1 is a valid ServiceId");
+        if r.services_bindings.contains(&host_audit)
+            && let Some(helper) = &self.signer_helper_uds_path
+        {
             let handler = Arc::new(HostAuditV1Handler::new(AuditClient::new_signer_helper(
                 helper.clone(),
                 r.vm_id.clone(),
@@ -381,7 +387,9 @@ impl HostAgentDaemon {
                     .register_capability(handler.clone(), descriptor)
                     .context("register host.audit typed capability")?;
             }
-        } else if let Some(signer) = &r.audit_signer_uds_path {
+        } else if r.services_bindings.contains(&host_audit)
+            && let Some(signer) = &r.audit_signer_uds_path
+        {
             let handler = Arc::new(HostAuditV1Handler::new(AuditClient::new(signer.clone())));
             registry.register(handler.clone());
             for descriptor in HostAuditV1Handler::capability_descriptors() {
@@ -1046,6 +1054,37 @@ mod tests {
         assert_ne!(correlation_id.as_str(), "guest-picked-id");
     }
 
+    #[tokio::test]
+    async fn host_time_binding_serves_time_without_widening_to_host_audit() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut d = daemon("local");
+        let mut reg = register(dir.path(), "vm-time", "local", None);
+        reg.services_bindings = vec![ServiceId::parse("host.time.v1").unwrap()];
+        let sock = PathBuf::from(&reg.broker_listen_socket);
+        d.apply(&ControlRequest::Register(reg)).unwrap();
+
+        let mut time_client = UnixStream::connect(&sock).await.unwrap();
+        let time_call = ServiceCall {
+            service: ServiceId::parse("host.time.v1").unwrap(),
+            verb: "now".into(),
+            correlation_id: mvm_core::protocol::broker::CorrelationId::new("guest-time"),
+            payload: serde_json::json!({}),
+            capability: None,
+        };
+        write_frame(&mut time_client, &time_call).await.unwrap();
+        let time_response: ServiceResponse = read_frame(&mut time_client, 64 * 1024).await.unwrap();
+        assert!(matches!(time_response, ServiceResponse::Ok { .. }));
+
+        let audit_response = emit_audit(&sock, "not-bound").await;
+        assert!(matches!(
+            audit_response,
+            ServiceResponse::Err {
+                code: mvm_core::protocol::broker::ServiceErrorCode::NotBound,
+                ..
+            }
+        ));
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn helper_backed_registered_vm_can_only_write_its_own_chain() {
         let dir = tempfile::tempdir().unwrap();
@@ -1056,10 +1095,12 @@ mod tests {
 
         let vk = SigningKey::from_bytes(&[5u8; 32]).verifying_key();
         let mut d = HostAgentDaemon::new_with_signer_helper("local", vk, &helper_sock, 64 * 1024);
-        let reg_a = register(dir.path(), "vm-a", "local", None);
+        let mut reg_a = register(dir.path(), "vm-a", "local", None);
+        reg_a.services_bindings = vec![ServiceId::parse("host.audit.v1").unwrap()];
         let sock_a = PathBuf::from(&reg_a.broker_listen_socket);
         let chain_a = PathBuf::from(&reg_a.workload_chain_path);
-        let reg_b = register(dir.path(), "vm-b", "local", None);
+        let mut reg_b = register(dir.path(), "vm-b", "local", None);
+        reg_b.services_bindings = vec![ServiceId::parse("host.audit.v1").unwrap()];
         let chain_b = PathBuf::from(&reg_b.workload_chain_path);
 
         d.apply(&ControlRequest::Register(reg_a)).unwrap();
@@ -1101,7 +1142,8 @@ mod tests {
 
         let vk = SigningKey::from_bytes(&[5u8; 32]).verifying_key();
         let mut d = HostAgentDaemon::new_with_signer_helper("local", vk, &helper_sock, 64 * 1024);
-        let reg = register(dir.path(), "vm-a", "local", None);
+        let mut reg = register(dir.path(), "vm-a", "local", None);
+        reg.services_bindings = vec![ServiceId::parse("host.audit.v1").unwrap()];
         let sock = PathBuf::from(&reg.broker_listen_socket);
         let chain = PathBuf::from(&reg.workload_chain_path);
         d.apply(&ControlRequest::Register(reg)).unwrap();

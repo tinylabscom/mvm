@@ -10,7 +10,7 @@ api.example.com
 --profile
 dev
 --mount
-/tmp/mvm-sdk-src:/workspace:ro
+/tmp/mvm-sdk-src:/work:ro
 --env
 TOKEN=secret
 --env

@@ -320,6 +320,7 @@ pub fn synthesize_plan(input: &SynthesisInput<'_>) -> Result<ExecutionPlan> {
         // refuses both directions), so synthesis is the one place that can
         // guarantee they never do.
         l3_network: l3_spec_for(input.network_mode, input.l3_network.as_ref()),
+        network_limits: Default::default(),
         schema_version: SCHEMA_VERSION,
         // Placeholder — overwritten below with the content-address once every
         // load-bearing field is set. The derivation excludes `plan_id`, so this

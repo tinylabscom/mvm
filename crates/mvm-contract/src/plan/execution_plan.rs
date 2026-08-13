@@ -17,7 +17,7 @@ use crate::plan::bundle::PlanArtifact;
 use crate::plan::types::{
     AdmissionProfile, ArtifactPolicy, AttestationRequirement, AuditLabels, BuildProvenance,
     DepsVolumeBinding, EnvironmentRef, FsPolicyRef, HostShareGrant, KeyRotationSpec, L3NetworkSpec,
-    NetworkMode, Nonce, PlanId, PolicyRef, PostRunLifecycle, ReleasePin, Resources,
+    NetworkLimits, NetworkMode, Nonce, PlanId, PolicyRef, PostRunLifecycle, ReleasePin, Resources,
     RuntimeProfileRef, SecretBinding, SignedImageRef, StreamRetention, TenantId, WorkloadId,
 };
 use crate::plan::verb::VerbId;
@@ -118,6 +118,13 @@ pub struct ExecutionPlan {
     /// without the field deserializes as the safe absent case.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub l3_network: Option<L3NetworkSpec>,
+
+    /// Transport-neutral endpoint resource ceilings. Defaults are omitted so
+    /// adding this signed field does not change bytes produced for existing
+    /// plans. New networking transports consume this value instead of
+    /// transport-specific limits.
+    #[serde(default, skip_serializing_if = "NetworkLimits::is_default")]
+    pub network_limits: NetworkLimits,
 
     /// Opt-in warm-snapshot timing. `None` (default) = this workload is not
     /// warm-snapshotted; `Some(at)` = the host may capture a warm snapshot when
@@ -271,6 +278,29 @@ pub struct ExecutionPlan {
     pub stream_retention: StreamRetention,
 }
 
+impl ExecutionPlan {
+    /// Resolve the transport-neutral networking ceilings for this plan.
+    ///
+    /// A pre-migration L3 plan can still carry non-default flow and DNS
+    /// ceilings in its legacy transport block. Those values are projected
+    /// into the neutral type here so callers have one limit interface while
+    /// the old signed representation remains verifiable.
+    pub fn effective_network_limits(
+        &self,
+    ) -> Result<NetworkLimits, crate::plan::types::NetworkLimitsError> {
+        if !self.network_limits.is_default() {
+            return Ok(self.network_limits);
+        }
+        let Some(legacy) = &self.l3_network else {
+            return Ok(self.network_limits);
+        };
+        NetworkLimits::builder()
+            .max_tcp_flows(legacy.max_flows)
+            .max_dns_bindings(legacy.max_dns_bindings)
+            .build()
+    }
+}
+
 /// Minimal, valid local `ExecutionPlan`. Rebuilt inline rather than
 /// reusing `mvm-core`'s `plan::signing::test_support::sample_plan` —
 /// that fixture lives above `plan::signing` (which stays in
@@ -319,6 +349,7 @@ pub(crate) fn minimal_plan() -> ExecutionPlan {
         network_policy: PolicyRef("local-default".to_string()),
         network_mode: Default::default(),
         l3_network: None,
+        network_limits: Default::default(),
         snapshot_at: Default::default(),
         build_provenance: Default::default(),
         fs_policy: FsPolicyRef("local-default".to_string()),
@@ -360,6 +391,33 @@ mod tests {
     use alloc::vec;
 
     use super::*;
+
+    #[test]
+    fn default_network_limits_preserve_existing_signed_bytes() {
+        let plan = minimal_plan();
+        let json = serde_json::to_string(&plan).unwrap();
+        assert!(!json.contains("network_limits"), "default leaked: {json}");
+
+        let mut value = serde_json::to_value(&plan).unwrap();
+        value.as_object_mut().unwrap().remove("network_limits");
+        let back: ExecutionPlan = serde_json::from_value(value).unwrap();
+        assert_eq!(back.network_limits, NetworkLimits::default());
+    }
+
+    #[test]
+    fn legacy_l3_limits_project_into_the_transport_neutral_type() {
+        let mut plan = minimal_plan();
+        let mut legacy = L3NetworkSpec::v1();
+        legacy.max_flows = 17;
+        legacy.max_dns_bindings = 23;
+        plan.l3_network = Some(legacy);
+
+        let effective = plan.effective_network_limits().unwrap();
+        assert_eq!(effective.max_tcp_flows, 17);
+        assert_eq!(effective.max_dns_bindings, 23);
+        assert_eq!(effective.max_udp_associations, 256);
+        assert_eq!(effective.max_ingress_listeners, 16);
+    }
 
     #[test]
     fn services_default_empty_and_roundtrip() {

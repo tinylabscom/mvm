@@ -182,7 +182,7 @@ fn assert_sdk_run_admission_inputs(summary: super::super::vm::exec::RunSecurityS
     assert_eq!(summary.preflight_mounts, summary.receipt_mounts);
     assert_eq!(summary.preflight_mounts.len(), 1);
     let mount = &summary.preflight_mounts[0];
-    assert_eq!(mount.guest_path, "/workspace");
+    assert_eq!(mount.guest_path, "/work");
     assert!(mount.read_only);
     assert!(!mount.host_path_sha256.contains("/tmp/mvm-sdk-src"));
     assert_eq!(summary.preflight_timeout_secs, 30);
@@ -248,6 +248,38 @@ fn run_parses_image_and_trailing_argv() {
     let args = parse_run(&["run", "--image", "alpine", "--", "echo", "hello"]).expect("parse");
     assert_eq!(args.image.as_deref(), Some("alpine"));
     assert_eq!(args.argv, vec!["echo", "hello"]);
+}
+
+#[test]
+fn run_rejects_an_unknown_flag_before_the_argv_separator() {
+    // Swallowing it into argv ships the typo to the guest shell, which answers
+    // with something like `exec: illegal option --` instead of naming the flag.
+    let err = parse_run(&[
+        "run",
+        "--image",
+        "alpine",
+        "--nonexistent",
+        "8080:80",
+        "--",
+        "uname",
+        "-a",
+    ])
+    .expect_err("unknown flag must not be swallowed into argv");
+    assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
+}
+
+#[test]
+fn exec_rejects_an_unknown_flag_before_the_argv_separator() {
+    let err = parse(&["exec", "web", "--nonexistent", "--", "uname", "-a"])
+        .expect_err("unknown flag must not be swallowed into argv");
+    assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
+}
+
+#[test]
+fn run_keeps_hyphenated_argv_after_the_separator() {
+    let args = parse_run(&["run", "--image", "alpine", "--", "uname", "-a", "--all"])
+        .expect("hyphenated argv after `--` stays argv");
+    assert_eq!(args.argv, vec!["uname", "-a", "--all"]);
 }
 
 #[test]
@@ -1117,7 +1149,7 @@ fn rust_sdk_machine_run_matches_cli_admission_and_receipt_inputs() {
         .cpus(4)
         .memory("1G")
         .profile("dev")
-        .volume("/tmp/mvm-sdk-src:/workspace:ro")
+        .volume("/tmp/mvm-sdk-src:/work:ro")
         .env("TOKEN=secret")
         .env("MODE=test")
         .timeout(30)
@@ -2680,16 +2712,11 @@ fn machine_run_exposes_no_network_mode_selector() {
             "machine run must not expose a networking transport selector, found {id:?}"
         );
     }
-    // `argv` is a trailing var-arg, so a stray `--network-mode` is not
-    // rejected — it is collected as workload arguments. What matters is
-    // that it configures nothing: the transport is derived either way.
-    let args = parse_run(&["run", "--image", "alpine", "--network-mode", "l3-vsock"])
-        .expect("trailing args parse as workload argv");
-    assert!(
-        args.argv.iter().any(|a| a == "--network-mode"),
-        "a stray flag must land in the workload's argv, not configure mvm: {:?}",
-        args.argv
-    );
+    // A stray `--network-mode` configures nothing: it is not an mvm flag, and
+    // it is refused rather than smuggled into the workload's argv.
+    let err = parse_run(&["run", "--image", "alpine", "--network-mode", "l3-vsock"])
+        .expect_err("a transport selector must not parse");
+    assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
 }
 
 /// The default is the socket-aware transport — the stronger posture, and
