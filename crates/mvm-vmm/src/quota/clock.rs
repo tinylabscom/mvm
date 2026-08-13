@@ -13,6 +13,7 @@ pub trait ThreadCpuClock: Send + 'static {
 }
 
 /// A handle to another thread's CPU accounting, captured on that thread.
+#[derive(Debug)]
 pub struct ThreadCpuHandle {
     #[cfg(target_os = "macos")]
     port: libc::mach_port_t,
