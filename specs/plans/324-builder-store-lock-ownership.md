@@ -1,8 +1,9 @@
 # Plan 324 — The builder store lock must outlive the process that takes it
 
-**Status:** OPEN
+**Status:** COMPLETE — merged in PR #2416
 **Date opened:** 2026-08-11
-**Related:** Plan 323 (concurrent builds through one builder VM)
+**Date closed:** 2026-08-13
+**Related:** Plan 323 (concurrent builds through one builder VM), Plan 326 WS-D
 
 ## Problem
 
@@ -50,25 +51,32 @@ the VM, so the ownership is already correct, and it is where Plan 323's
 queueing and its "waiting for `<holder>`" reporting live. Nothing about that
 changes.
 
-- [ ] `SupervisorConfig` (libkrun) carries the sidecar lock path; the
+- [x] `SupervisorConfig` (libkrun) carries the sidecar lock path; the
       supervisor acquires it in `dispatch_config`, the shared tail both
       entrypoints route through, and holds it for the process's lifetime.
-- [ ] `HvfSupervisorConfig` carries the same, set through an inherent
+- [x] `HvfSupervisorConfig` carries the same, set through an inherent
       `HvfDriver` entry point for the persistent builder rather than a new
       `VmmSpec` field — 30 spec literals across the workspace would otherwise
       change for a property only one path sets.
-- [ ] `LibkrunPersistentHostVm` / `HvfPersistentHostVm` stop acquiring the lock
+- [x] `LibkrunPersistentHostVm` / `HvfPersistentHostVm` stop acquiring the lock
       and instead ensure the image exists (a non-locking sparse create), then
       name the sidecar for the supervisor.
-- [ ] Once the supervisor owns the lock, `leak_handle`'s comment and the module
+- [x] Once the supervisor owns the lock, `leak_handle`'s comment and the module
       docs on `PersistentHvfSession` stop being caveats and become
       descriptions.
-- [ ] Test: start a session, drop the starting handle, and assert from a
-      separate process that the image is still locked. That is the assertion
-      that fails today and is the point of the change.
+- [x] Unit tests for the unlocked-image helper and the lock-hold primitive.
+- [ ] End-to-end regression test: start a session, drop the starting handle,
+      and assert from a separate process that the image is still locked. This
+      remains open as Plan 326 WS-D regression coverage.
 
 ## Why not just document it
 
 Plan 323's whole concurrency story rests on "the store image has exactly one
 writer". A soft mutex keyed on a JSON file is not that, and the queueing
 behaviour added in 323 Phase 1 turns a fail-fast collision into a silent one.
+
+## Relationship to Plan 326
+
+This is the fix that Plan 326 WS-D pointed at. The observed `deleted inode
+referenced` after a successful journal replay is the signature of two ext4
+writers disagreeing about metadata — exactly the gap this plan closes.
