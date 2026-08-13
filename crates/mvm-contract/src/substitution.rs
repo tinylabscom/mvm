@@ -28,9 +28,10 @@
 //! glance in this crate.
 
 use alloc::collections::BTreeMap;
-use alloc::string::String;
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
 
-use crate::ir::{SecretRef, host_is_bound};
+use crate::ir::{AuthType, SecretRef, host_is_bound};
 
 /// The host-owned namespace every minted [`Placeholder`] carries. This prefix
 /// is reserved: it must never appear in a workload's own egress, so the
@@ -263,4 +264,257 @@ impl PlaceholderMap {
 /// identical bytes.
 pub fn substitute_into(text: &str, placeholder: &str, value: &str) -> String {
     text.replace(placeholder, value)
+}
+
+/// A request whose headers may carry opaque placeholders.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProxyRequest {
+    pub method: String,
+    pub url: String,
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
+}
+
+/// A request with placeholders substituted, ready to forward.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparedRequest {
+    pub method: String,
+    pub url: String,
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
+}
+
+/// Errors from the pure header-walk preparation step.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PrepareError<E> {
+    /// More than one signing placeholder appeared in one request.
+    MultipleSigningPlaceholders,
+    /// The driver produced an error.
+    Driver(E),
+}
+
+impl<E> From<E> for PrepareError<E> {
+    fn from(e: E) -> Self {
+        Self::Driver(e)
+    }
+}
+
+impl<E: core::fmt::Display> core::fmt::Display for PrepareError<E> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::MultipleSigningPlaceholders => {
+                write!(f, "more than one signing placeholder in one request")
+            }
+            Self::Driver(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+/// Driver for [`prepare_request`]: resolves a placeholder's auth type,
+/// substitutes inject-style secrets, and signs signing-style secrets.
+///
+/// The trait is object-safe in intent but uses an associated error type so
+/// the host can carry its rich error enums while the browser demo carries
+/// a simple string.
+pub trait SubstitutionDriver {
+    /// Error returned by [`Self::substitute`] and [`Self::sign`].
+    type Error: core::fmt::Display;
+
+    /// The auth type of a placeholder, if known.
+    fn auth_type(&self, placeholder: &str) -> Option<AuthType>;
+
+    /// Substitute `placeholder` in `text` for `destination`.
+    fn substitute(
+        &self,
+        placeholder: &str,
+        destination: &str,
+        text: &str,
+    ) -> Result<String, Self::Error>;
+
+    /// Sign the request described by `method`, `url`, `headers`, and `body`
+    /// under `placeholder` bound to `destination`. Returns the complete
+    /// signed headers (the caller replaces its header vec with this).
+    fn sign(
+        &self,
+        placeholder: &str,
+        destination: &str,
+        method: &str,
+        url: &str,
+        headers: &[(String, String)],
+        body: &[u8],
+    ) -> Result<Vec<(String, String)>, Self::Error>;
+}
+
+/// Walk `req`'s headers, dispatching each placeholder through `driver`.
+///
+/// Inject-style placeholders (Bearer/Basic) are substituted in-place.
+/// Signing-style placeholders (SigV4/Hmac) cause their header to be dropped
+/// and a single sign pass to run after the walk. More than one signing
+/// placeholder is an error.
+///
+/// `destination` is the host (no port) extracted from the request URL by the
+/// caller; keeping URL parsing out of this function keeps the crate
+/// `url`-dependency-free.
+pub fn prepare_request<D: SubstitutionDriver>(
+    driver: &D,
+    destination: &str,
+    req: ProxyRequest,
+) -> Result<PreparedRequest, PrepareError<D::Error>> {
+    let mut headers = Vec::with_capacity(req.headers.len());
+    let mut signing: Option<String> = None;
+
+    for (name, value) in req.headers {
+        let new_value = match find_placeholder(&value) {
+            Some(ph) => {
+                let ph = ph.to_string();
+                match driver.auth_type(&ph) {
+                    Some(AuthType::Bearer) | Some(AuthType::Basic) => {
+                        driver.substitute(&ph, destination, &value)?
+                    }
+                    Some(AuthType::Sigv4 | AuthType::Hmac) => {
+                        if signing.is_some() {
+                            return Err(PrepareError::MultipleSigningPlaceholders);
+                        }
+                        signing = Some(ph);
+                        continue;
+                    }
+                    None => driver.substitute(&ph, destination, &value)?,
+                }
+            }
+            None => value,
+        };
+        headers.push((name, new_value));
+    }
+
+    if let Some(ph) = signing {
+        headers = driver.sign(&ph, destination, &req.method, &req.url, &headers, &req.body)?;
+    }
+
+    Ok(PreparedRequest {
+        method: req.method,
+        url: req.url,
+        headers,
+        body: req.body,
+    })
+}
+
+#[cfg(test)]
+mod prepare_tests {
+    use super::*;
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct DummyDriver {
+        allow_substitute: bool,
+    }
+
+    impl SubstitutionDriver for DummyDriver {
+        type Error = &'static str;
+
+        fn auth_type(&self, placeholder: &str) -> Option<AuthType> {
+            match placeholder {
+                "mvm-secret-bea70000" => Some(AuthType::Bearer),
+                "mvm-secret-deadbeef" => Some(AuthType::Hmac),
+                "mvm-secret-cafebabe" => Some(AuthType::Hmac),
+                _ => None,
+            }
+        }
+
+        fn substitute(
+            &self,
+            placeholder: &str,
+            _destination: &str,
+            text: &str,
+        ) -> Result<String, Self::Error> {
+            if !self.allow_substitute {
+                return Err("substitute refused");
+            }
+            Ok(text.replace(placeholder, "REAL"))
+        }
+
+        fn sign(
+            &self,
+            _placeholder: &str,
+            _destination: &str,
+            _method: &str,
+            _url: &str,
+            headers: &[(String, String)],
+            _body: &[u8],
+        ) -> Result<Vec<(String, String)>, Self::Error> {
+            let mut out = headers.to_vec();
+            out.push(("x-signature".to_string(), "sig".to_string()));
+            Ok(out)
+        }
+    }
+
+    fn req() -> ProxyRequest {
+        ProxyRequest {
+            method: "GET".to_string(),
+            url: "https://api.example.com/v1".to_string(),
+            headers: Vec::new(),
+            body: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn passes_through_a_request_with_no_placeholder() {
+        let driver = DummyDriver { allow_substitute: true };
+        let req = ProxyRequest {
+            headers: vec![("Accept".to_string(), "application/json".to_string())],
+            ..req()
+        };
+        let prepared = prepare_request(&driver, "api.example.com", req).unwrap();
+        assert_eq!(prepared.headers, vec![("Accept".to_string(), "application/json".to_string())]);
+    }
+
+    #[test]
+    fn substitutes_an_inject_placeholder() {
+        let driver = DummyDriver { allow_substitute: true };
+        let req = ProxyRequest {
+            headers: vec![("Authorization".to_string(), "Bearer mvm-secret-bea70000".to_string())],
+            ..req()
+        };
+        let prepared = prepare_request(&driver, "api.example.com", req).unwrap();
+        assert_eq!(prepared.headers, vec![("Authorization".to_string(), "Bearer REAL".to_string())]);
+    }
+
+    #[test]
+    fn propagates_a_driver_substitute_error() {
+        let driver = DummyDriver { allow_substitute: false };
+        let req = ProxyRequest {
+            headers: vec![("Authorization".to_string(), "Bearer mvm-secret-bea70000".to_string())],
+            ..req()
+        };
+        let err = prepare_request(&driver, "api.example.com", req).unwrap_err();
+        assert!(matches!(err, PrepareError::Driver("substitute refused")));
+    }
+
+    #[test]
+    fn refuses_more_than_one_signing_placeholder() {
+        let driver = DummyDriver { allow_substitute: true };
+        let req = ProxyRequest {
+            headers: vec![
+                ("Authorization".to_string(), "Bearer mvm-secret-cafebabe".to_string()),
+                ("X-Other".to_string(), "mvm-secret-deadbeef".to_string()),
+            ],
+            ..req()
+        };
+        let err = prepare_request(&driver, "api.example.com", req).unwrap_err();
+        assert!(matches!(err, PrepareError::MultipleSigningPlaceholders));
+    }
+
+    #[test]
+    fn signing_placeholder_drops_its_header_then_signs() {
+        let driver = DummyDriver { allow_substitute: true };
+        let req = ProxyRequest {
+            headers: vec![
+                ("Authorization".to_string(), "Bearer mvm-secret-cafebabe".to_string()),
+                ("Accept".to_string(), "application/json".to_string()),
+            ],
+            ..req()
+        };
+        let prepared = prepare_request(&driver, "api.example.com", req).unwrap();
+        assert!(!prepared.headers.iter().any(|(k, _)| k == "Authorization"));
+        assert!(prepared.headers.contains(&("Accept".to_string(), "application/json".to_string())));
+        assert!(prepared.headers.contains(&("x-signature".to_string(), "sig".to_string())));
+    }
 }
