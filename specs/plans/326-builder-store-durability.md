@@ -124,7 +124,7 @@ refuted.** Something else did.
       mounts produce, not what one mount losing writes produces. Plan 324 /
       PR #2416 closed that gap by moving store-lock ownership to the supervisor
       process whose lifetime matches the VM's. That fix merged 2026-08-13.
-- [ ] Regression coverage. Add an end-to-end test that starts a persistent
+- [x] Regression coverage. Add an end-to-end test that starts a persistent
       builder, drops the starting CLI handle, and asserts from a separate
       process that the store image sidecar is still exclusively locked until
       the supervisor exits.
@@ -135,6 +135,6 @@ WS-A and WS-B are merged in PR #2419. WS-D's reproduction is also in #2419.
 WS-C is re-scoped and not built. WS-D's mechanism finding is resolved by Plan
 324 / PR #2416, which has merged.
 
-The only remaining work is the WS-D regression test. Do not revive WS-C unless
+Plan 326 is complete. Do not revive WS-C unless
 a new failure mode shows that a single dying build can actually damage the base
 store.
