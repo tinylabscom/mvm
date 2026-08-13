@@ -771,16 +771,13 @@ for detailed scope and acceptance criteria.
         + gzipped-size budget in the existing wasm lane; B5 delete
         `web/audit-verify/`, fix the stale `mvm-verify` refs in ADR-031, add
         `mvmctl audit pubkey`
-- [~] Plan 320 — A live wasm sandbox demo on the website
-      (`specs/plans/320-wasm-browser-demo.md`) — E1 and E2 shipped; E3
-      (audit-entry construction / chain-signing relocation) is complete and
-      green against the frozen byte fixture. Browser-engine sandbox at `/demo`
-      + landing teaser; relocates the egress decision (`projection.rs`),
-      placeholder substitution, and audit-entry construction/chain-signing
-      into `mvm-contract` so host and browser run identical code. Claim-free
-      by ADR-024 §3; adds no claim-catalog witness.
-      Sequencing: the landing teaser must be built against PR #2359's redesigned
-      landing page, not the current one.
+- [x] Plan 320 — A live wasm sandbox demo on the website
+      (`specs/plans/320-wasm-browser-demo.md`) — PR #2429 merged to `main`.
+      E1, E2, and E3 shipped; the browser-engine sandbox at `/demo` + landing
+      teaser shipped against the redesigned landing page. Relocates the egress
+      decision (`projection.rs`), placeholder substitution, and audit-entry
+      construction/chain-signing into `mvm-contract` so host and browser run
+      identical code. Claim-free by ADR-024 §3; adds no claim-catalog witness.
   - [x] E2.1 — the placeholder leaf relocated as
         `mvm_contract::substitution`; the constant hard-renamed to
         `SECRET_PLACEHOLDER_PREFIX` to avoid colliding with
@@ -823,17 +820,15 @@ for detailed scope and acceptance criteria.
         green.
   - [x] Oracle for both: `wasm_egress_witness.rs` must stay green
         **unmodified**.
-  - [~] `web/mvm-demo/` wasm-bindgen crate, workspace-excluded; Worker + thin
-        proxy; three curated fixtures (allowed / denied / unbound); tamper
-        button; `wasm-opt -Oz` + gzipped-size budget in the existing wasm lane.
-        Crate skeleton created with `decide_egress`,
+  - [x] `web/mvm-demo/` wasm-bindgen crate, workspace-excluded; Worker-owned
+        UI + thin main-thread proxy; three curated WASI fixtures
+        (allowed / denied / unbound) with `wasm-opt -Oz` and a gzipped-size
+        budget; tamper button; Astro `/demo` route and landing teaser. The
+        `build.sh` produces the deployable bundle and the `website.yml`
+        workflow builds it before Astro. Crate exposes `decide_egress`,
         `substitute_placeholder`, `verify`, and `run_scenario` shims over
-        `mvm-contract`; `seal()` is now available in `mvm-contract` for the
-        demo to sign real audit entries. A standalone `index.html` demo page
-        (same deployment pattern as `web/audit-verify/`) lets the visitor run
-        the three scenarios, see module/destination views, and verify/tamper a
-        fixture audit chain. Full Worker ownership + real curated WASI modules
-        remain.
+        `mvm-contract`; `seal()` is available in `mvm-contract` for the demo
+        to sign real audit entries.
   - [ ] Does **not** retire `web/audit-verify/` (no Merkle inclusion) — B5 and
         `mvmctl audit pubkey` remain plan 301's
 - [ ] Plan 321 — wasm as a workload format inside a real microVM
