@@ -13,11 +13,11 @@
 fn main() {
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     {
-        use mvm_core::vm_backend::{VmBackend, VmStartConfig, VmStatus};
-        use mvm_runtime::backends::hvf::HvfBackend;
+        use mvm_core::vm_backend::{VmStartConfig, VmStatus};
+        use mvm_runtime::AnyBackend;
         use std::time::Duration;
 
-        let backend = HvfBackend;
+        let backend = AnyBackend::from_hypervisor("hvf").into_dyn();
         let cfg = VmStartConfig {
             name: "hvf-backend-demo".to_string(),
             kernel_path: Some(
@@ -29,7 +29,7 @@ fn main() {
             ..Default::default()
         };
 
-        let id = backend.start(&cfg).expect("HvfBackend::start");
+        let id = backend.start(&cfg).expect("hvf runner start");
         println!("started: {id:?}");
         println!("status after start: {:?}", backend.status(&id).unwrap());
         println!(
@@ -61,7 +61,7 @@ fn main() {
         println!("status after stop: {:?}", backend.status(&id).unwrap());
         if userspace {
             println!(
-                "PROOF: HvfBackend started a guest to userspace (PID 1) via the detached \
+                "PROOF: hvf runner started a guest to userspace (PID 1) via the detached \
                  mvm-hvf-supervisor, observed it via status/logs, and stopped it."
             );
         } else {

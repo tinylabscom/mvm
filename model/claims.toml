@@ -46,7 +46,7 @@ witnesses = [
     "fn:seccomp_allows_listed_denies_unlisted",
     "fn:validated_conversion_enforces_mount_allow_list",
     "fn:dir_share_two_part_defaults_ro",
-    "fn:libkrun_refuses_read_only_virtiofs_share",
+    "fn:relay_config_maps_dir_shares_with_dax_and_read_only",
     "fn:enforce_admitted_shares_refuses_unadmitted_or_mismatched",
     "ci:seccomp-functional",
 ]
@@ -246,7 +246,7 @@ statement = "A sealed production microVM has no shell, no do_exec, and no PTY"
 # they are claimed separately, as Preview MVM-SEC-17, with their limits.
 witnesses = [
     "fn:console_refused_on_sealed_image",
-    "fn:prod_console_attachment_has_no_input",
+    "fn:following_the_console_never_writes_to_it",
     "fn:prod_safe_grant_refuses_all_dev_only_requests",
     "ci:guest-agent-runtime-boundary",
 ]

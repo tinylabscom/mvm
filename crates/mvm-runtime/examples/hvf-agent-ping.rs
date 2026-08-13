@@ -15,8 +15,8 @@
 fn main() {
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     {
-        use mvm_core::vm_backend::{VmBackend, VmStartConfig};
-        use mvm_runtime::backends::hvf::HvfBackend;
+        use mvm_core::vm_backend::VmStartConfig;
+        use mvm_runtime::AnyBackend;
         use std::time::Duration;
 
         let sock = std::env::var("MVM_HVF_AGENT_SOCKET")
@@ -25,7 +25,7 @@ fn main() {
         unsafe { std::env::set_var("MVM_HVF_AGENT_SOCKET", &sock) };
         let _ = std::fs::remove_file(&sock);
 
-        let backend = HvfBackend;
+        let backend = AnyBackend::from_hypervisor("hvf").into_dyn();
         let cfg = VmStartConfig {
             name: "hvf-agent-ping".to_string(),
             kernel_path: Some(std::env::var("MVM_HVF_KERNEL").expect("MVM_HVF_KERNEL")),
@@ -33,7 +33,7 @@ fn main() {
             ..Default::default()
         };
 
-        let id = backend.start(&cfg).expect("HvfBackend::start");
+        let id = backend.start(&cfg).expect("hvf runner start");
         println!("started {id:?}; agent socket = {sock}");
 
         // The agent comes up after /init's Stage 2.5 (a few seconds post-boot). Poll

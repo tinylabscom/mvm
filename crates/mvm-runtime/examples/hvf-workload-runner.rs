@@ -2,7 +2,7 @@
 //! `VmmDriver` seam — boots a real guest with claim-10 egress enforced by the
 //! host endpoint. This exercises the core path (spawn the gating endpoint
 //! → map the config to a `VmmSpec` → `HvfDriver::boot`), which is distinct
-//! from `HvfBackend`'s inline start and is what will replace it.
+//! from the legacy HVF inline start and is what will replace it.
 //!
 //! Boots the initramfs echo guest with an allow-list policy that admits a
 //! discovered LAN destination, and asserts the guest reached it over vsock — the

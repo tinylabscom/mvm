@@ -439,7 +439,7 @@ prod_pull_requires_digest_pin_before_network` and
     to `console.log` with no host input fd
     (`mvm_runtime::libkrun::open_console_capture` — `mvm_backend` is
     not a crate, this is a function in `mvm-runtime` — and
-    `prod_console_attachment_has_no_input`); (4) the host
+    `following_the_console_never_writes_to_it`); (4) the host
     `enforce_accessible_gate` refuses `mvmctl console` on a sealed VM
     (`console_refused_on_sealed_image`); (5) the agent console and DevOnly
     handlers are grant-gated. CI: the `guest-agent-runtime-boundary` job in

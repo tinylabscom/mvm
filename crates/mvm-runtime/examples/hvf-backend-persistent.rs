@@ -14,14 +14,14 @@
 fn main() {
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     {
-        use mvm_core::vm_backend::{VmBackend, VmStartConfig, VmStatus};
-        use mvm_runtime::backends::hvf::HvfBackend;
+        use mvm_core::vm_backend::{VmStartConfig, VmStatus};
+        use mvm_runtime::AnyBackend;
         use std::time::Duration;
 
         // SAFETY: single-threaded; ensure no bounded timeout so the run is persistent.
         unsafe { std::env::remove_var("MVM_HVF_TIMEOUT") };
 
-        let backend = HvfBackend;
+        let backend = AnyBackend::from_hypervisor("hvf").into_dyn();
         let cfg = VmStartConfig {
             name: "hvf-persistent-demo".to_string(),
             kernel_path: Some(
@@ -72,7 +72,7 @@ fn main() {
         );
         if userspace {
             println!(
-                "PROOF: HvfBackend ran a persistent guest (Running for 8s, no timeout), \
+                "PROOF: hvf runner ran a persistent guest (Running for 8s, no timeout), \
                  then stop() ended it gracefully with the console flushed."
             );
         } else {

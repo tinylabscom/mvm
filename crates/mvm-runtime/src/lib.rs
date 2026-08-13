@@ -8,12 +8,15 @@
 //
 // Concrete `VmBackend` implementations:
 //
-// - **Firecracker** (`backend::FirecrackerBackend`) + the `AnyBackend`
-//   dispatch enum — the production Tier 1 path.
-// - **HVF** (`hvf_backend::HvfBackend`) — the in-house Hypervisor.framework
-//   VMM; the macOS-26 workload default.
-// - **libkrun** (`libkrun::LibkrunBackend`) — raw libkrun shim
-//   (Linux KVM / macOS HVF).
+// - **Firecracker** (`backend::AnyBackend::Firecracker`) — the Linux KVM
+//   production Tier 1 path, driven through `WorkloadRunner<FcDriver>`.
+// - **HVF** (`backend::AnyBackend::Hvf`) — the in-house Hypervisor.framework
+//   path, driven through `WorkloadRunner<HvfDriver>`.
+// - **libkrun** (`backend::AnyBackend::Libkrun`) — driven through
+//   `WorkloadRunner<LibkrunDriver>`.
+// - **QEMU** (`backend::AnyBackend::Qemu`) — Tier-2 dev/test substrate only.
+// - **Wasm** (`wasm_backend::WasmBackend`) — claim-free portability/demo
+//   exception; direct `VmBackend` implementation.
 //
 // Plus the FC support modules: `firecracker` (installer helpers),
 // `microvm` (control/lifecycle), and `image` (Mvmfile.toml); and the
@@ -166,11 +169,9 @@ pub use base::{config, linux_env, shell, ui};
 // `mvmd-runtime` security modules).
 pub use base::shell_mock;
 
-pub use backend::{AnyBackend, FirecrackerBackend, FirecrackerConfig};
+pub use backend::{AnyBackend, FirecrackerConfig};
 #[cfg(feature = "test-support")]
 pub use mock::MockBackend;
-pub use mvm_backends::legacy::libkrun::LibkrunBackend;
-pub use mvm_backends::legacy::qemu::QemuBackend;
 pub use warm_service::{PrewarmFn, WarmLaunchService};
 pub use workload_backend::{EgressSubstitutionTransport, WorkloadBackend};
 

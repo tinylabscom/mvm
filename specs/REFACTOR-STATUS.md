@@ -10,6 +10,16 @@ for detailed scope and acceptance criteria.
       capitalization is normalized before validation across every shared OCI
       pull and launch path, while case-sensitive tags and strict digest
       validation remain unchanged.
+- [x] **Plan 269 — backend shim removal.** Inverted the driver/backend
+      relationship: `FcDriver`, `HvfDriver`, `LibkrunDriver`, and `QemuDriver`
+      now own their VMM mechanics, the legacy `FirecrackerBackend` /
+      `HvfBackend` / `LibkrunBackend` / `QemuBackend` shells are deleted, and
+      every selectable microVM backend reaches production through the blanket
+      `impl VmBackend for WorkloadRunner<D: VmmDriver, ...>`. `WasmBackend` is
+      the sole documented direct-`VmBackend` exemption. Workspace nextest,
+      all-target Clippy, and `check-claim-catalog` are green; migration
+      boundary recorded in `MIGRATION-269.md`.
+
 - [x] **Plan 322 — persistent-machine README contract.** `machine create`
       accepts the optional machine name positionally, and real-binary coverage,
       all three SDKs, shared fixtures, BDD scenarios, recovery guidance, and

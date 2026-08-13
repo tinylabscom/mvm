@@ -1,8 +1,7 @@
 //! `HvfDriver` — the `VmmDriver` for the first-party VMM (HVF on macOS, KVM
-//! on Linux via the shared `vmm` device model). Identity and capabilities
-//! delegate to the proven `HvfBackend`. `boot` maps a policy-free `VmmSpec` to a
-//! relay supervisor config, spawns `mvm-hvf-supervisor`, and returns a live
-//! handle. The claim-10 egress gate and secret substitution live in the
+//! on Linux via the shared `vmm` device model). `boot` maps a policy-free
+//! `VmmSpec` to a relay supervisor config, spawns `mvm-hvf-supervisor`, and
+//! returns a live handle. The claim-10 egress gate and secret substitution live in the
 //! host-side endpoint the caller binds to the spec's `EGRESS_PORT` socket; the
 //! driver only wires that socket through as the supervisor's egress relay — it
 //! carries no policy and never sees a `NetworkPolicy`.
@@ -17,8 +16,9 @@ use ed25519_dalek::Signer;
 use mvm_agentd::vsock::{CONSOLE_PORT_BASE, GUEST_AGENT_PORT, dev_console_data_ports};
 use mvm_core::config::{vm_hvf_vsock_port_socket_at, vm_state_dir, vms_dir};
 use mvm_core::vm_backend::{
-    BackendKind, BackendSecurityProfile, GuestChannelInfo, StandbyError, StandbyHandle,
-    StandbyState, VmBackend, VmCapabilities, VmExitStatus, VmId, VmStatus,
+    BackendKind, BackendSecurityProfile, ClaimStatus, GuestChannelInfo, LayerCoverage,
+    ResourceControls, StandbyError, StandbyHandle, StandbyState, VmCapabilities, VmExitStatus,
+    VmId, VmStatus,
 };
 use mvm_net::channel::GuestService;
 use mvm_vmm::host::hvf_supervisor::{
@@ -26,8 +26,8 @@ use mvm_vmm::host::hvf_supervisor::{
 };
 use mvm_vmm::hvf_handoff::HvfHandoffRequest;
 
-use crate::legacy::hvf::{
-    self as hvf_backend, HvfBackend, PID_FILE_NAME, PID_FILE_TIMEOUT, resolve_supervisor_path,
+use crate::driver::hvf_legacy::{
+    self as hvf_backend, PID_FILE_NAME, PID_FILE_TIMEOUT, resolve_supervisor_path,
 };
 use mvm_core::checkpoint::{DeviceAnchors, HVF_FRAME_BLOB};
 use mvm_vmm::checkpoint::VmFullControl;
@@ -44,15 +44,11 @@ const SNAPSHOT_PUBLISH_TIMEOUT: std::time::Duration = std::time::Duration::from_
 /// It boots what a `VmmSpec` describes and relays the guest's egress port to the
 /// host-side bridge; the claim-10 gate and substitution live in that bridge, not
 /// here.
-pub struct HvfDriver {
-    backend: HvfBackend,
-}
+pub struct HvfDriver;
 
 impl HvfDriver {
     pub fn new() -> Self {
-        Self {
-            backend: HvfBackend,
-        }
+        Self
     }
 
     /// Boot a VM whose supervisor must hold the exclusive lock at `lock_path`
@@ -373,23 +369,84 @@ fn boot_with_handoff(
 
 impl VmmDriver for HvfDriver {
     fn name(&self) -> &str {
-        self.backend.name()
+        "hvf"
     }
 
     fn kind(&self) -> BackendKind {
-        self.backend.kind()
+        BackendKind::Hvf
     }
 
     fn is_available(&self) -> Result<bool> {
-        self.backend.is_available()
+        // Selection/doctor probe: the detached supervisor must exist and the
+        // host must report a runnable HVF path.
+        Ok(resolve_supervisor_path().is_ok() && hvf_backend::hvf_workload_support_available())
     }
 
     fn capabilities(&self) -> VmCapabilities {
-        self.backend.capabilities()
+        let proxy_path_ready = hvf_backend::hvf_workload_support_available();
+        // vsock is live-proven through the unified run loop; the rest land as
+        // pause/snapshot/networking are wired onto the primitive.
+        VmCapabilities {
+            pause_resume: true,
+            // The supervisor serializes guest RAM plus vCPU and deterministic
+            // device state under an acknowledged pause, and reloads both into a
+            // fresh VMM. That is coarse save/restore of machine state, not the
+            // incremental live-memory tier: a capture copies the whole mapping.
+            snapshot_capability: mvm_core::vm_backend::SnapshotCapability::SaveRestore,
+            // The native resident handoff is the warm-launch implementation;
+            // admission still requires the backend's ordinary availability and
+            // security gates before a parent can be created or claimed.
+            standby_pool: true,
+            vsock: true,
+            // The hvf VMM is vsock-only by design: no guest NIC, and egress rides
+            // the host vsock proxy (the per-VM gating endpoint), not a guest NIC.
+            // Both are unconditional so the backend fails closed: a degraded host
+            // (the detached supervisor can't launch) loses egress entirely — it
+            // never falls back to a routable guest NIC. HVF never advertises a NIC
+            // and always routes egress through the per-VM endpoint over vsock.
+            no_routable_guest_nic: true,
+            host_vsock_proxy: true,
+            // HVF presents no network device to the guest whatsoever.
+            l3_vsock: true,
+            // The hvf VMM can serve the unpacked OCI tree as a read-only
+            // virtiofs root (dev tier); the run-path tier gate selects it only for
+            // non-prod, non-sealed workloads. This stays gated on the launchable
+            // supervisor path — it is a dev-tier boot capability, not egress.
+            virtiofs_root: proxy_path_ready,
+            // Named explicitly rather than left to `..Default::default()`:
+            // the honest HVF answer (no cgroup, but a supervisor wall-clock
+            // timer) differs from the all-`None` default.
+            resource_controls: ResourceControls::for_backend(BackendKind::Hvf),
+            // pause/snapshot/cow/remap land as they are wired onto the primitive.
+            ..Default::default()
+        }
     }
 
     fn security_profile(&self) -> BackendSecurityProfile {
-        self.backend.security_profile()
+        // Hypervisor.framework microVM tier (Tier 2): the in-house VMM owns the
+        // surface and the data plane is vsock-only (no guest NIC; egress rides
+        // the host gating endpoint). Claims 1-2/4-7 hold as on FC; claim 3
+        // (verified boot) does not hold on the default path — the virtiofs-root
+        // serves a host directory that cannot be dm-verity-sealed.
+        BackendSecurityProfile {
+            claims: [
+                ClaimStatus::Holds,       // 1 — host-fs isolation via the VMM + admitted shares
+                ClaimStatus::Holds,       // 2 — uid-0 protections, guest-side (same as FC)
+                ClaimStatus::DoesNotHold, // 3 — virtiofs-root has no dm-verity; block+ext4 (FC/Option B) only
+                ClaimStatus::Holds,       // 4 — guest agent has no do_exec in prod
+                ClaimStatus::Holds,       // 5 — vsock framing fuzzed
+                ClaimStatus::Holds,       // 6 — dev image hash verified
+                ClaimStatus::Holds,       // 7 — cargo deps audited
+            ],
+            layer_coverage: LayerCoverage::all_layers(),
+            tier: "Tier 2",
+            notes: &[
+                "In-house Hypervisor.framework VMM on macOS 26+ Apple silicon (the default tier).",
+                "vsock-only data plane: no guest NIC; egress rides the host gating endpoint (auditable).",
+                "Claim 3 (verified boot) does not hold on the virtiofs-root path — dm-verity targets the block+ext4 backends (Firecracker + Option B).",
+                "Pause/resume + snapshot land as they are wired onto the primitive.",
+            ],
+        }
     }
 
     fn supports_directory_shares(&self) -> bool {
@@ -397,7 +454,7 @@ impl VmmDriver for HvfDriver {
     }
 
     fn supports_resident_handoff(&self) -> bool {
-        self.backend.capabilities().standby_pool
+        self.capabilities().standby_pool
     }
 
     #[tracing::instrument(
@@ -579,12 +636,15 @@ impl VmmDriver for HvfDriver {
         }))
     }
 
-    fn guest_channel_info(&self, id: &VmId) -> Result<GuestChannelInfo> {
-        self.backend.guest_channel_info(id)
+    fn guest_channel_info(&self, _id: &VmId) -> Result<GuestChannelInfo> {
+        // The HVF driver does not expose a queryable per-VM guest channel:
+        // the agent bridge is a fixed vsock port wired by the runner, not a
+        // channel the driver answers on demand.
+        bail!("hvf does not provide guest channel info")
     }
 
     fn workload_base_bootargs(&self, virtiofs_root: bool, has_disk: bool) -> String {
-        crate::legacy::hvf_bootargs::workload_bootargs(virtiofs_root, has_disk)
+        crate::driver::hvf_bootargs::workload_bootargs(virtiofs_root, has_disk)
     }
 }
 
@@ -1016,10 +1076,7 @@ mod tests {
         assert_eq!(d.kind(), BackendKind::Hvf);
         assert!(d.capabilities().vsock);
         assert_eq!(d.snapshot_capability(), SnapshotCapability::SaveRestore);
-        assert_eq!(
-            d.security_profile().tier,
-            HvfBackend.security_profile().tier
-        );
+        assert_eq!(d.security_profile().tier, "Tier 2");
     }
 
     #[test]
@@ -1027,23 +1084,22 @@ mod tests {
         let d = HvfDriver::new();
         assert_eq!(
             d.workload_base_bootargs(false, true),
-            crate::legacy::hvf_bootargs::workload_bootargs(false, true)
+            crate::driver::hvf_bootargs::workload_bootargs(false, true)
         );
         assert_eq!(
             d.workload_base_bootargs(true, false),
-            crate::legacy::hvf_bootargs::workload_bootargs(true, false)
+            crate::driver::hvf_bootargs::workload_bootargs(true, false)
         );
     }
 
     #[test]
-    fn guest_channel_info_delegates_to_the_hvf_backend() {
-        // HvfBackend declares no guest channel (the agent bridge is a fixed
-        // vsock port, not a queryable per-VM channel) — the driver must relay
-        // that same fail-closed answer rather than inventing one.
+    fn guest_channel_info_is_unsupported() {
+        // The HVF driver does not expose a queryable per-VM guest channel —
+        // the agent bridge is a fixed vsock port wired by the runner, not a
+        // channel the driver answers on demand.
         let d = HvfDriver::new();
         let id = VmId("hvf-guest-channel-info-test-vm".into());
         assert!(d.guest_channel_info(&id).is_err());
-        assert!(HvfBackend.guest_channel_info(&id).is_err());
     }
 
     #[test]

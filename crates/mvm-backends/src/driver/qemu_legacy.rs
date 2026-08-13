@@ -45,21 +45,12 @@
 //! - `status` probes the qemu PID; `list` walks `~/.mvm/vms/*/qemu.pid`.
 
 use anyhow::{Context, Result, anyhow, bail};
-use mvm_core::config::{vm_console_log, vm_state_dir, vms_dir};
-use mvm_core::vm_backend::{
-    BackendKind, BackendSecurityProfile, ClaimStatus, GuestChannelInfo, LayerCoverage,
-    ResourceControls, SnapshotCapability, StartMode, VmBackend, VmCapabilities, VmId, VmInfo,
-    VmStartConfig, VmStatus,
-};
+use mvm_core::config::{vm_state_dir, vms_dir};
+use mvm_core::vm_backend::VmStartConfig;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
-
-use mvm_vmm::host::ui;
-
-/// QEMU workload backend (Linux dev/test; KVM where present, TCG fallback).
-pub struct QemuBackend;
 
 /// How long a boot waits for qemu's `-pidfile` to appear
 /// before declaring the boot failed.
@@ -71,11 +62,11 @@ pub(crate) const PID_FILE_TIMEOUT: Duration = Duration::from_secs(10);
 pub(crate) const BRIDGE_SOCKET_TIMEOUT: Duration = Duration::from_secs(5);
 /// SIGTERM→SIGKILL grace on `stop`.
 pub(crate) const STOP_TIMEOUT: Duration = Duration::from_secs(3);
-const FORCE_KILL_TIMEOUT: Duration = Duration::from_millis(500);
+pub const FORCE_KILL_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// QEMU's unprivileged user-mode network gives dev/test guests transparent
 /// TCP and UDP without requiring a host TAP device or elevated setup.
-fn qemu_user_network_args() -> [&'static str; 4] {
+pub fn qemu_user_network_args() -> [&'static str; 4] {
     [
         "-netdev",
         "user,id=n0",
@@ -96,10 +87,10 @@ pub(crate) const BRIDGE_SPEC_FILE: &str = "qemu-vsock-bridge.json";
 /// (vs libkrun's `hvc0`); `root=/dev/vda rw init=/init` matches the same
 /// Nix-built workload rootfs the other backends boot. `mvm.backend=qemu`
 /// marks the dev tier (parity with the builder marker).
-const DEFAULT_CMDLINE: &str = "console=ttyS0 root=/dev/vda rw init=/init mvm.backend=qemu";
-const VERITY_CMDLINE: &str = "console=ttyS0 mvm.backend=qemu";
+pub const DEFAULT_CMDLINE: &str = "console=ttyS0 root=/dev/vda rw init=/init mvm.backend=qemu";
+pub const VERITY_CMDLINE: &str = "console=ttyS0 mvm.backend=qemu";
 
-fn qemu_verity_initrd_path(config: &VmStartConfig) -> Option<PathBuf> {
+pub fn qemu_verity_initrd_path(config: &VmStartConfig) -> Option<PathBuf> {
     config
         .verity_path
         .as_deref()
@@ -112,7 +103,7 @@ fn qemu_verity_initrd_path(config: &VmStartConfig) -> Option<PathBuf> {
         .filter(|p| p.exists())
 }
 
-fn qemu_effective_initrd(config: &VmStartConfig) -> Option<PathBuf> {
+pub fn qemu_effective_initrd(config: &VmStartConfig) -> Option<PathBuf> {
     config
         .initrd_path
         .as_ref()
@@ -120,13 +111,13 @@ fn qemu_effective_initrd(config: &VmStartConfig) -> Option<PathBuf> {
         .or_else(|| qemu_verity_initrd_path(config))
 }
 
-fn qemu_verity_enabled(config: &VmStartConfig) -> bool {
+pub fn qemu_verity_enabled(config: &VmStartConfig) -> bool {
     config.verity_path.is_some()
         && config.roothash.is_some()
         && qemu_effective_initrd(config).is_some()
 }
 
-fn qemu_runtime_overlay(config: &VmStartConfig) -> Option<(&str, &str, &str)> {
+pub fn qemu_runtime_overlay(config: &VmStartConfig) -> Option<(&str, &str, &str)> {
     Some((
         config.runtime_overlay_path.as_deref()?,
         config.runtime_overlay_verity_path.as_deref()?,
@@ -134,7 +125,7 @@ fn qemu_runtime_overlay(config: &VmStartConfig) -> Option<(&str, &str, &str)> {
     ))
 }
 
-fn ensure_qemu_runtime_source_supported(config: &VmStartConfig) -> Result<()> {
+pub fn ensure_qemu_runtime_source_supported(config: &VmStartConfig) -> Result<()> {
     if config.runtime_source_policy != mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay {
         return Ok(());
     }
@@ -162,7 +153,7 @@ fn ensure_qemu_runtime_source_supported(config: &VmStartConfig) -> Result<()> {
     Ok(())
 }
 
-fn qemu_cmdline(config: &VmStartConfig) -> String {
+pub fn qemu_cmdline(config: &VmStartConfig) -> String {
     let mut cmdline = if qemu_verity_enabled(config) {
         VERITY_CMDLINE.to_string()
     } else {
@@ -210,7 +201,7 @@ fn qemu_cmdline(config: &VmStartConfig) -> String {
     cmdline
 }
 
-fn qemu_drive_args(config: &VmStartConfig) -> Vec<String> {
+pub fn qemu_drive_args(config: &VmStartConfig) -> Vec<String> {
     if qemu_verity_enabled(config) {
         let mut drives = vec![
             format!(
@@ -248,7 +239,7 @@ fn qemu_drive_args(config: &VmStartConfig) -> Vec<String> {
     drives
 }
 
-fn append_qemu_user_disks(drives: &mut Vec<String>, config: &VmStartConfig) {
+pub fn append_qemu_user_disks(drives: &mut Vec<String>, config: &VmStartConfig) {
     drives.extend(
         config
             .volumes
@@ -261,7 +252,7 @@ fn append_qemu_user_disks(drives: &mut Vec<String>, config: &VmStartConfig) {
     );
 }
 
-fn ensure_qemu_volumes_supported(config: &VmStartConfig) -> Result<()> {
+pub fn ensure_qemu_volumes_supported(config: &VmStartConfig) -> Result<()> {
     if let Some(volume) = config
         .volumes
         .iter()
@@ -276,369 +267,9 @@ fn ensure_qemu_volumes_supported(config: &VmStartConfig) -> Result<()> {
     Ok(())
 }
 
-impl VmBackend for QemuBackend {
-    fn name(&self) -> &str {
-        "qemu"
-    }
-
-    fn kind(&self) -> BackendKind {
-        BackendKind::Qemu
-    }
-
-    fn capabilities(&self) -> VmCapabilities {
-        VmCapabilities {
-            // QEMU can pause/resume + snapshot via QMP, but mvm doesn't
-            // wire a QMP monitor today. Declared false until the
-            // monitor lands.
-            pause_resume: false,
-            snapshots: false,
-            snapshot_capability: SnapshotCapability::Unsupported,
-            standby_pool: false,
-            vsock: true,
-            // User-mode (slirp) networking — no host TAP device.
-            tap_networking: false,
-            balloon: false,
-            fs_quick_checkpoint: false,
-            // Named explicitly: this backend's per-VM process is cgroup-able,
-            // unlike the all-`None` struct-update default.
-            resource_controls: ResourceControls::for_backend(BackendKind::Qemu),
-            ..VmCapabilities::default()
-        }
-    }
-
-    fn start(&self, config: &VmStartConfig) -> Result<VmId> {
-        ensure_qemu_volumes_supported(config)?;
-        let qemu_bin = locate_qemu()?;
-        let kernel = resolve_workload_kernel(config)?;
-        ensure_qemu_runtime_source_supported(config)?;
-
-        let state_dir = vm_state_dir(&config.name);
-        std::fs::create_dir_all(&state_dir)
-            .map_err(|e| anyhow!("create per-VM state dir {}: {e}", state_dir.display()))?;
-
-        // Same admission gate + runtime-meta record as the libkrun path so
-        // `mvmctl console`'s accessible/sealed gate (claim 15) and the
-        // overlay-aware contract hold on QEMU-launched VMs too.
-        let rootfs = Path::new(&config.rootfs_path);
-        let rootfs_dir = rootfs.parent().unwrap_or_else(|| Path::new("."));
-        mvm_vmm::host::runtime_meta::admit_runtime_overlay_contract(
-            rootfs_dir,
-            config.runtime_source_policy,
-        )?;
-        mvm_vmm::host::runtime_meta::record_from_start_config(
-            &config.name,
-            StartMode::Detached,
-            config,
-        )?;
-
-        let kvm = kvm_available();
-        if !kvm {
-            // Loud Tier-3 banner for the unaccelerated TCG fallback.
-            ui::warn(&format!(
-                "QEMU workload '{}' is running UNACCELERATED (TCG — no /dev/kvm). \
-                 This is a Tier-3 dev/test fallback: slow, and unaudited vs ADR-002. \
-                 For production use a /dev/kvm host (Firecracker).",
-                config.name
-            ));
-        }
-
-        let cid = allocate_cid(&config.name)?;
-        let pid_file = state_dir.join(QEMU_PID_FILE);
-        let _ = std::fs::remove_file(&pid_file);
-        let console_log = vm_console_log(&config.name);
-        // Write-only console sink (claim 15): qemu opens `-serial file:`
-        // for output only; there is no host fd from which the guest could
-        // read console input. We pre-create the sink through the shared
-        // write-only opener so the invariant + truncate-on-boot match the
-        // other backends.
-        drop(
-            mvm_vmm::host::console_capture::open_console_capture(&console_log)
-                .map_err(|e| anyhow!("open console sink {}: {e}", console_log.display()))?,
-        );
-
-        let cmdline = qemu_cmdline(config);
-
-        let vcpus = config.cpus.clamp(1, u32::from(u8::MAX));
-
-        ui::info(&format!(
-            "Starting QEMU workload '{}' (cpus={vcpus}, mem={}MiB, {}) via {}...",
-            config.name,
-            config.memory_mib,
-            if kvm { "KVM" } else { "TCG" },
-            qemu_bin,
-        ));
-
-        let mut cmd = Command::new(&qemu_bin);
-        cmd.args(["-m", &config.memory_mib.to_string()]);
-        cmd.args(["-smp", &vcpus.to_string()]);
-        if kvm {
-            cmd.args(["-enable-kvm", "-cpu", "host"]);
-        } else {
-            cmd.args(["-cpu", "max"]);
-        }
-        cmd.arg("-kernel").arg(&kernel);
-        if let Some(initrd) = qemu_effective_initrd(config) {
-            cmd.arg("-initrd").arg(initrd);
-        }
-        cmd.arg("-append").arg(&cmdline);
-        for drive in qemu_drive_args(config) {
-            cmd.arg("-drive").arg(drive);
-        }
-        // virtio-vsock on the per-VM guest CID. The host reaches the agent
-        // through the AF_VSOCK↔UNIX bridge spawned below.
-        cmd.arg("-device")
-            .arg(format!("vhost-vsock-pci,guest-cid={cid}"));
-        // User-mode (slirp) networking — no root, no TAP.
-        cmd.args(qemu_user_network_args());
-        cmd.args(["-display", "none", "-monitor", "none", "-no-reboot"]);
-        cmd.arg("-serial")
-            .arg(format!("file:{}", console_log.display()));
-        cmd.arg("-D").arg(state_dir.join(QEMU_LOG_FILE));
-        // qemu forks into the background and writes its own pidfile.
-        cmd.args(["-daemonize"]);
-        cmd.arg("-pidfile").arg(&pid_file);
-
-        let status = cmd
-            .status()
-            .map_err(|e| anyhow!("spawn qemu ({qemu_bin}): {e}"))?;
-        if !status.success() {
-            bail!(
-                "qemu-system exited {} before daemonizing workload '{}'; see {}",
-                status.code().unwrap_or(-1),
-                config.name,
-                state_dir.join(QEMU_LOG_FILE).display()
-            );
-        }
-
-        // `-daemonize` returns only after the pidfile is written, but poll
-        // defensively so a slow fork doesn't race the bridge spawn below.
-        let deadline = Instant::now() + PID_FILE_TIMEOUT;
-        while !pid_file.exists() {
-            if Instant::now() >= deadline {
-                bail!(
-                    "qemu did not write pidfile {} within {:?}",
-                    pid_file.display(),
-                    PID_FILE_TIMEOUT
-                );
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        }
-
-        // If the bridge can't come up, the already-daemonized qemu would be
-        // orphaned (a failed `start` won't be followed by `stop`). Roll back:
-        // kill qemu + drop the pid/cid sidecars so a retry re-allocates a CID
-        // instead of pinning the (possibly conflicting) one this attempt wrote.
-        let bridge_spec = QemuBridgeSpec::agent_only(&config.name, cid, &state_dir);
-        if let Err(e) = spawn_vsock_bridges(&config.name, &state_dir, &bridge_spec) {
-            if let Some(pid) = read_pid(&pid_file) {
-                send_signal(pid, libc::SIGTERM);
-            }
-            let _ = std::fs::remove_file(&pid_file);
-            let _ = std::fs::remove_file(state_dir.join(QEMU_CID_FILE));
-            return Err(e);
-        }
-
-        // No egress substitution moat here: QEMU is type-barred from carrying
-        // an untrusted (secret-bearing) workload, so a signed plan with secrets
-        // never reaches this backend.
-
-        ui::success(&format!(
-            "QEMU workload '{}' started (pid: {}).",
-            config.name,
-            pid_file.display()
-        ));
-        Ok(VmId(config.name.clone()))
-    }
-
-    fn stop(&self, id: &VmId) -> Result<()> {
-        let state_dir = vm_state_dir(&id.0);
-        // Reap the bridge first so it can't keep serving a half-dead VM.
-        // Guard on liveness so a stale pidfile (crash without cleanup) whose
-        // PID the OS has since recycled isn't signalled by mistake.
-        if let Some(bpid) = read_pid(&state_dir.join(BRIDGE_PID_FILE))
-            && pid_alive(bpid)
-        {
-            send_signal(bpid, libc::SIGTERM);
-        }
-        let _ = std::fs::remove_file(state_dir.join(BRIDGE_PID_FILE));
-        cleanup_vsock_bridge_sockets(&state_dir);
-
-        let pid_path = state_dir.join(QEMU_PID_FILE);
-        let Some(pid) = read_pid(&pid_path) else {
-            ui::info(&format!(
-                "QEMU VM '{}' has no PID file at {}; nothing to stop.",
-                id.0,
-                pid_path.display()
-            ));
-            return Ok(());
-        };
-        if !pid_alive(pid) {
-            let _ = std::fs::remove_file(&pid_path);
-            ui::info(&format!("QEMU VM '{}' was not running.", id.0));
-            return Ok(());
-        }
-        let observer = mvm_vmm::host::process_exit::ProcessExitObserver::arm(pid).ok();
-        send_signal(pid, libc::SIGTERM);
-        let exited = mvm_vmm::host::process_exit::wait_for_pid_exit(
-            pid,
-            Instant::now() + STOP_TIMEOUT,
-            observer.as_ref(),
-        );
-        if !exited {
-            ui::info(&format!(
-                "QEMU VM '{}' PID {pid} ignored SIGTERM; sending SIGKILL.",
-                id.0
-            ));
-            send_signal(pid, libc::SIGKILL);
-            if !mvm_vmm::host::process_exit::wait_for_pid_exit(
-                pid,
-                Instant::now() + FORCE_KILL_TIMEOUT,
-                observer.as_ref(),
-            ) {
-                bail!(
-                    "QEMU VM '{}' PID {pid} could not be proven dead after SIGKILL; preserving {}",
-                    id.0,
-                    pid_path.display()
-                );
-            }
-        }
-        let _ = std::fs::remove_file(&pid_path);
-        ui::success(&format!("QEMU VM '{}' stopped.", id.0));
-        Ok(())
-    }
-
-    fn stop_all(&self) -> Result<()> {
-        let mut last_err = None;
-        for vm in self.list()? {
-            if let Err(e) = self.stop(&VmId(vm.name.clone())) {
-                tracing::warn!(name = vm.name, error = %e, "qemu stop_all: stop failed");
-                last_err = Some(e);
-            }
-        }
-        last_err.map_or(Ok(()), Err)
-    }
-
-    fn pause(&self, _id: &VmId) -> Result<()> {
-        bail!("pause is not supported by the qemu backend (QMP monitor not wired)")
-    }
-
-    fn resume(&self, _id: &VmId) -> Result<()> {
-        bail!("resume is not supported by the qemu backend (QMP monitor not wired)")
-    }
-
-    fn status(&self, id: &VmId) -> Result<VmStatus> {
-        match read_pid(&vm_state_dir(&id.0).join(QEMU_PID_FILE)) {
-            Some(pid) if pid_alive(pid) => Ok(VmStatus::Running),
-            _ => Ok(VmStatus::Stopped),
-        }
-    }
-
-    fn list(&self) -> Result<Vec<VmInfo>> {
-        let root = vms_dir();
-        let entries = match std::fs::read_dir(&root) {
-            Ok(it) => it,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(e) => return Err(anyhow!("read {}: {e}", root.display())),
-        };
-        let mut vms = Vec::new();
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if !path.is_dir() {
-                continue;
-            }
-            let pid_path = path.join(QEMU_PID_FILE);
-            if !pid_path.exists() {
-                // Not a QEMU-managed VM (other backends share ~/.mvm/vms/).
-                continue;
-            }
-            let Ok(name) = entry.file_name().into_string() else {
-                continue;
-            };
-            let alive = read_pid(&pid_path).is_some_and(pid_alive);
-            vms.push(VmInfo {
-                id: VmId(name.clone()),
-                name,
-                status: if alive {
-                    VmStatus::Running
-                } else {
-                    VmStatus::Stopped
-                },
-                guest_ip: None,
-                cpus: 0,
-                memory_mib: 0,
-                profile: None,
-                revision: None,
-                flake_ref: None,
-                ports: Vec::new(),
-            });
-        }
-        Ok(vms)
-    }
-
-    fn logs(&self, id: &VmId, lines: u32, hypervisor: bool) -> Result<String> {
-        let state_dir = vm_state_dir(&id.0);
-        let path = if hypervisor {
-            state_dir.join(QEMU_LOG_FILE)
-        } else {
-            vm_console_log(&id.0)
-        };
-        let body = std::fs::read_to_string(&path).unwrap_or_default();
-        Ok(tail(&body, lines as usize))
-    }
-
-    fn guest_channel_info(&self, id: &VmId) -> Result<GuestChannelInfo> {
-        // The shared agent client connects to the UNIX socket the bridge
-        // binds (`vm_vsock_port_socket`); the `cid` here is the guest CID
-        // the bridge dials over AF_VSOCK, surfaced for diagnostics.
-        let cid = read_cid(&id.0).unwrap_or(3);
-        Ok(GuestChannelInfo::Vsock {
-            cid,
-            port: mvm_agentd::vsock::GUEST_AGENT_PORT,
-        })
-    }
-
-    fn is_available(&self) -> Result<bool> {
-        Ok(locate_qemu().is_ok())
-    }
-
-    fn install(&self) -> Result<()> {
-        ui::info(
-            "QEMU must be installed via the host package manager \
-             (`apt install qemu-system-x86 qemu-utils` / `dnf install qemu-system-x86`).",
-        );
-        Ok(())
-    }
-
-    fn security_profile(&self) -> BackendSecurityProfile {
-        // Tier 2 best-case (KVM), the microvm.nix-lineage QEMU profile:
-        // QEMU's device model is much larger than Firecracker's (higher L2
-        // audit cost), and claim 3 (verified boot) targets Firecracker.
-        // The TCG (no-KVM) mode is a runtime Tier-3 degradation surfaced by
-        // the `start` banner + doctor, not by this compile-time tier.
-        BackendSecurityProfile {
-            claims: [
-                ClaimStatus::Holds,       // 1
-                ClaimStatus::Holds,       // 2
-                ClaimStatus::DoesNotHold, // 3 — verified boot targets Firecracker
-                ClaimStatus::Holds,       // 4
-                ClaimStatus::Holds,       // 5
-                ClaimStatus::Holds,       // 6
-                ClaimStatus::Holds,       // 7
-            ],
-            layer_coverage: LayerCoverage::all_layers(),
-            tier: "Tier 2",
-            notes: &[
-                "QEMU workload runtime (Plan 166 / ADR-014); dev/test tier only.",
-                "KVM-accelerated where /dev/kvm is present; TCG software-emulation fallback otherwise (runtime Tier-3, banner-flagged).",
-                "Larger device model than Firecracker → higher L2 audit cost; outside ADR-002 claims. Never a production runtime.",
-            ],
-        }
-    }
-}
-
 // ─── KVM / qemu probing ─────────────────────────────────────────────
 
-fn host_arch() -> &'static str {
+pub fn host_arch() -> &'static str {
     if cfg!(target_arch = "aarch64") {
         "aarch64"
     } else {
@@ -650,7 +281,7 @@ fn host_arch() -> &'static str {
 /// the build's emitted `vmlinux` when there is one, else the cached builder
 /// fallback. Thin wrapper over [`resolve_workload_kernel_path`] for the
 /// config-carrying raw path.
-fn resolve_workload_kernel(config: &VmStartConfig) -> Result<PathBuf> {
+pub fn resolve_workload_kernel(config: &VmStartConfig) -> Result<PathBuf> {
     resolve_workload_kernel_path(&config.name, config.kernel_path.as_deref().map(Path::new))
 }
 
@@ -770,7 +401,7 @@ pub(crate) fn allocate_cid(name: &str) -> Result<u32> {
 
 /// CIDs recorded by VMs whose qemu process is still alive. A stale sidecar
 /// from a crashed VM is ignored so its CID can be reclaimed.
-fn used_cids() -> std::collections::HashSet<u32> {
+pub fn used_cids() -> std::collections::HashSet<u32> {
     let mut set = std::collections::HashSet::new();
     let root = vms_dir();
     let Ok(entries) = std::fs::read_dir(&root) else {
@@ -849,7 +480,7 @@ impl QemuBridgeSpec {
     /// The bridge plan for the raw (pre-runner) boot path: only the agent
     /// RPC channel, in the host-dialed direction — exactly what the legacy
     /// single-port bridge served.
-    fn agent_only(name: &str, cid: u32, state_dir: &Path) -> Self {
+    pub fn agent_only(name: &str, cid: u32, state_dir: &Path) -> Self {
         Self {
             cid,
             watch_pid_file: state_dir.join(QEMU_PID_FILE),
@@ -950,7 +581,7 @@ pub(crate) fn cleanup_vsock_bridge_sockets(state_dir: &Path) {
     }
 }
 
-fn resolve_bridge_executable() -> Result<PathBuf> {
+pub fn resolve_bridge_executable() -> Result<PathBuf> {
     mvm_vmm::host::aux_bin::resolve(&mvm_vmm::host::aux_bin::AuxBin {
         bin: "mvmctl",
         env_var: "MVM_QEMU_BRIDGE_PATH",
@@ -973,7 +604,7 @@ pub fn run_vsock_bridge_from_spec_file(spec_path: &Path) -> Result<()> {
 /// Body of the `mvmctl __qemu-vsock-bridge` subcommand: bind every channel
 /// in the plan, then watch the VM's pid file and exit (cleaning up the
 /// host-dialed sockets) when the VM is gone.
-fn run_vsock_bridge(spec: &QemuBridgeSpec) -> Result<()> {
+pub fn run_vsock_bridge(spec: &QemuBridgeSpec) -> Result<()> {
     // Host-dialed channels: one UNIX listener per channel; each accepted
     // connection is spliced to AF_VSOCK(cid, guest_port).
     for dial in &spec.host_dials {
@@ -1035,7 +666,7 @@ fn run_vsock_bridge(spec: &QemuBridgeSpec) -> Result<()> {
 /// Accept loop for one host-dialed channel: splice each UNIX connection to
 /// `AF_VSOCK(cid, port)`. A failed guest dial (agent not up yet) drops the
 /// client; the caller retries.
-fn serve_host_dial(listener: std::os::unix::net::UnixListener, cid: u32, port: u32) {
+pub fn serve_host_dial(listener: std::os::unix::net::UnixListener, cid: u32, port: u32) {
     loop {
         match listener.accept() {
             Ok((client, _)) => {
@@ -1054,7 +685,7 @@ fn serve_host_dial(listener: std::os::unix::net::UnixListener, cid: u32, port: u
 /// Accept loop for one guest-dialed channel: splice each AF_VSOCK
 /// connection to the runner-bound UNIX listener. A failed target connect
 /// (endpoint not bound yet) drops the guest's dial; the guest retries.
-fn serve_guest_dial(listener: VsockListener, target_uds: PathBuf) {
+pub fn serve_guest_dial(listener: VsockListener, target_uds: PathBuf) {
     loop {
         match listener.accept() {
             Ok(guest) => {
@@ -1074,7 +705,7 @@ fn serve_guest_dial(listener: VsockListener, target_uds: PathBuf) {
 /// listener share one definition. A field edit that desyncs the `socklen`
 /// passed to connect(2)/bind(2) trips the layout contract below.
 #[repr(C)]
-struct SockaddrVm {
+pub struct SockaddrVm {
     svm_family: libc::sa_family_t,
     svm_reserved1: u16,
     svm_port: u32,
@@ -1104,9 +735,9 @@ const _: () = {
     assert!(offset_of!(SockaddrVm, svm_zero) == 13);
 };
 
-const AF_VSOCK: libc::c_int = 40;
+pub const AF_VSOCK: libc::c_int = 40;
 
-fn sockaddr_vm(cid: u32, port: u32) -> SockaddrVm {
+pub fn sockaddr_vm(cid: u32, port: u32) -> SockaddrVm {
     SockaddrVm {
         svm_family: AF_VSOCK as libc::sa_family_t,
         svm_reserved1: 0,
@@ -1117,7 +748,7 @@ fn sockaddr_vm(cid: u32, port: u32) -> SockaddrVm {
     }
 }
 
-fn vsock_socket() -> std::io::Result<libc::c_int> {
+pub fn vsock_socket() -> std::io::Result<libc::c_int> {
     // SAFETY: standard socket(2) on AF_VSOCK.
     let fd = unsafe { libc::socket(AF_VSOCK, libc::SOCK_STREAM, 0) };
     if fd < 0 {
@@ -1131,14 +762,14 @@ fn vsock_socket() -> std::io::Result<libc::c_int> {
 /// `vhost-vsock-pci` delivers a guest's `connect(cid=host, port)` to a host
 /// process listening here, so the bridge terminates those dials and
 /// splices them to the runner-bound UNIX listeners.
-struct VsockListener {
+pub struct VsockListener {
     fd: libc::c_int,
 }
 
 impl VsockListener {
     /// Bind `AF_VSOCK(VMADDR_CID_ANY, port)` and start listening.
-    fn bind(port: u32) -> std::io::Result<Self> {
-        const VMADDR_CID_ANY: u32 = 0xFFFF_FFFF;
+    pub fn bind(port: u32) -> std::io::Result<Self> {
+        pub const VMADDR_CID_ANY: u32 = 0xFFFF_FFFF;
         let fd = vsock_socket()?;
         let addr = sockaddr_vm(VMADDR_CID_ANY, port);
         // SAFETY: bind(2)/listen(2) on a valid fd; addr is fully initialized
@@ -1165,7 +796,7 @@ impl VsockListener {
 
     /// Accept one guest connection, wrapped in a [`std::net::TcpStream`]
     /// (an owned fd with read/write + shutdown; no TCP methods are used).
-    fn accept(&self) -> std::io::Result<std::net::TcpStream> {
+    pub fn accept(&self) -> std::io::Result<std::net::TcpStream> {
         use std::os::fd::FromRawFd;
         // SAFETY: accept(2) on a listening fd; the returned fd is owned and
         // wrapped exactly once.
@@ -1188,7 +819,7 @@ impl Drop for VsockListener {
 /// Dial `AF_VSOCK(cid, port)` and wrap the fd in a [`std::net::TcpStream`]
 /// for `splice_bidirectional` (TcpStream is just an owned fd with
 /// read/write + shutdown; we never call TCP-specific methods).
-fn dial_vsock(cid: u32, port: u32) -> std::io::Result<std::net::TcpStream> {
+pub fn dial_vsock(cid: u32, port: u32) -> std::io::Result<std::net::TcpStream> {
     use std::os::fd::FromRawFd;
 
     let fd = vsock_socket()?;
@@ -1211,7 +842,7 @@ fn dial_vsock(cid: u32, port: u32) -> std::io::Result<std::net::TcpStream> {
 }
 
 /// Splice two streams in both directions until either closes.
-fn splice_bidirectional(a: std::os::unix::net::UnixStream, b: std::net::TcpStream) {
+pub fn splice_bidirectional(a: std::os::unix::net::UnixStream, b: std::net::TcpStream) {
     use std::io::{Read, Write};
     let Ok(a2) = a.try_clone() else { return };
     let Ok(b2) = b.try_clone() else { return };
@@ -1254,360 +885,10 @@ pub(crate) fn send_signal(pid: libc::pid_t, sig: libc::c_int) {
     }
 }
 
-fn tail(s: &str, n: usize) -> String {
+pub fn tail(s: &str, n: usize) -> String {
     if n == 0 {
         return String::new();
     }
     let lines: Vec<&str> = s.lines().collect();
     lines[lines.len().saturating_sub(n)..].join("\n")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn qemu_backend_name_is_qemu() {
-        assert_eq!(QemuBackend.name(), "qemu");
-    }
-
-    #[test]
-    fn bridge_executable_honors_the_explicit_override() {
-        let _guard = mvm_vmm::host::runtime_meta::HOME_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let temp = tempfile::tempdir().expect("tempdir");
-        let bridge = temp.path().join("mvmctl");
-        std::fs::write(&bridge, b"bridge fixture").expect("write bridge fixture");
-        let mut env = mvm_core::util::test_env::TestEnv::new();
-        env.set("MVM_QEMU_BRIDGE_PATH", &bridge);
-
-        assert_eq!(
-            resolve_bridge_executable().expect("resolve bridge override"),
-            bridge
-        );
-    }
-
-    #[test]
-    fn bridge_socket_cleanup_removes_only_derived_owned_paths() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let owned = mvm_core::config::vm_vsock_port_socket_at(
-            temp.path(),
-            mvm_agentd::vsock::GUEST_AGENT_PORT,
-        );
-        let redirected = temp.path().join("redirected.sock");
-        let unrelated = temp.path().join("unrelated.sock");
-        std::fs::create_dir_all(owned.parent().expect("owned parent")).expect("create socket dir");
-        std::fs::write(&owned, b"owned").expect("write owned path");
-        std::fs::write(&redirected, b"redirected").expect("write redirected path");
-        std::fs::write(&unrelated, b"unrelated").expect("write unrelated path");
-        let spec = QemuBridgeSpec {
-            cid: 7,
-            watch_pid_file: temp.path().join(QEMU_PID_FILE),
-            host_dials: vec![
-                QemuBridgeHostDial {
-                    guest_port: mvm_agentd::vsock::GUEST_AGENT_PORT,
-                    listen_uds: owned.clone(),
-                },
-                QemuBridgeHostDial {
-                    guest_port: mvm_agentd::vsock::WORKLOAD_EXIT_PORT,
-                    listen_uds: redirected.clone(),
-                },
-            ],
-            guest_dials: Vec::new(),
-            exit_capture_state_dir: None,
-        };
-        std::fs::write(
-            temp.path().join(BRIDGE_SPEC_FILE),
-            serde_json::to_vec(&spec).expect("serialize bridge spec"),
-        )
-        .expect("write bridge spec");
-
-        cleanup_vsock_bridge_sockets(temp.path());
-
-        assert!(!owned.exists());
-        assert!(redirected.exists());
-        assert!(unrelated.exists());
-    }
-
-    #[test]
-    fn stop_reaps_a_supervisor_through_the_shared_exit_wait() {
-        let _guard = mvm_vmm::host::runtime_meta::HOME_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
-        let temp = tempfile::tempdir().expect("tempdir");
-        let mut env = mvm_core::util::test_env::TestEnv::new();
-        env.isolate_mvm_home(temp.path());
-
-        let vm_name = "qemu-event-stop";
-        let mut child = std::process::Command::new("sleep")
-            .arg("30")
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .expect("spawn supervisor fixture");
-        let pid_path = vm_state_dir(vm_name).join(QEMU_PID_FILE);
-        std::fs::create_dir_all(pid_path.parent().expect("pid parent")).expect("state dir");
-        std::fs::write(&pid_path, child.id().to_string()).expect("write pid marker");
-
-        QemuBackend
-            .stop(&VmId(vm_name.to_string()))
-            .expect("stop should prove the fixture exited");
-        let _ = child.wait();
-
-        assert!(
-            !pid_path.exists(),
-            "verified exit should remove the pid marker"
-        );
-        assert!(!pid_alive(child.id() as libc::pid_t));
-    }
-
-    #[test]
-    fn qemu_capabilities_vsock_only() {
-        let c = QemuBackend.capabilities();
-        assert!(c.vsock);
-        assert!(!c.pause_resume);
-        assert!(!c.snapshots);
-        assert!(!c.tap_networking);
-    }
-
-    #[test]
-    fn qemu_user_network_is_rootless_and_transparent() {
-        assert_eq!(
-            qemu_user_network_args(),
-            [
-                "-netdev",
-                "user,id=n0",
-                "-device",
-                "virtio-net-pci,netdev=n0",
-            ]
-        );
-    }
-
-    #[test]
-    fn qemu_security_profile_is_tier_2_partial_claim_3() {
-        let p = QemuBackend.security_profile();
-        assert!(p.tier.starts_with("Tier 2"));
-        // Claim 3 (verified boot) targets Firecracker.
-        assert_eq!(p.dropped_claims(), vec![3]);
-    }
-
-    #[test]
-    fn pause_resume_unsupported() {
-        assert!(QemuBackend.pause(&VmId("x".into())).is_err());
-        assert!(QemuBackend.resume(&VmId("x".into())).is_err());
-    }
-
-    #[test]
-    fn tail_returns_last_n_lines() {
-        assert_eq!(tail("a\nb\nc\nd", 2), "c\nd");
-        assert_eq!(tail("a\nb", 0), "");
-        assert_eq!(tail("a\nb", 10), "a\nb");
-    }
-
-    #[test]
-    fn qemu_cmdline_uses_verity_shape_and_runtime_overlay_tokens() {
-        let dir = tempfile::tempdir().unwrap();
-        let rootfs = dir.path().join("rootfs.ext4");
-        let verity = dir.path().join("rootfs.verity");
-        let initrd = dir.path().join("rootfs.initrd");
-        std::fs::write(&rootfs, b"rootfs").unwrap();
-        std::fs::write(&verity, b"verity").unwrap();
-        std::fs::write(&initrd, b"initrd").unwrap();
-
-        let config = VmStartConfig {
-            rootfs_path: rootfs.display().to_string(),
-            verity_path: Some(verity.display().to_string()),
-            roothash: Some("a".repeat(64)),
-            runtime_overlay_path: Some("/tmp/runtime.ext4".into()),
-            runtime_overlay_verity_path: Some("/tmp/runtime.verity".into()),
-            runtime_overlay_roothash: Some("b".repeat(64)),
-            runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay,
-            ..Default::default()
-        };
-        let cmdline = qemu_cmdline(&config);
-        assert!(!cmdline.contains("root=/dev/vda"));
-        assert!(!cmdline.contains("init=/init"));
-        assert!(cmdline.contains("mvm.roothash="));
-        assert!(cmdline.contains("mvm.data=/dev/vda"));
-        assert!(cmdline.contains("mvm.hash=/dev/vdb"));
-        assert!(cmdline.contains("mvm.runtime_roothash="));
-        assert!(cmdline.contains("mvm.runtime_data=/dev/vdc"));
-        assert!(cmdline.contains("mvm.runtime_hash=/dev/vdd"));
-        assert!(cmdline.contains("mvm.runtime_source_policy=required_overlay"));
-    }
-
-    #[test]
-    fn qemu_drive_args_use_read_only_verity_layout_with_overlay() {
-        let dir = tempfile::tempdir().unwrap();
-        let rootfs = dir.path().join("rootfs.ext4");
-        let verity = dir.path().join("rootfs.verity");
-        let initrd = dir.path().join("rootfs.initrd");
-        std::fs::write(&rootfs, b"rootfs").unwrap();
-        std::fs::write(&verity, b"verity").unwrap();
-        std::fs::write(&initrd, b"initrd").unwrap();
-
-        let config = VmStartConfig {
-            rootfs_path: rootfs.display().to_string(),
-            verity_path: Some(verity.display().to_string()),
-            roothash: Some("a".repeat(64)),
-            runtime_overlay_path: Some("/tmp/runtime.ext4".into()),
-            runtime_overlay_verity_path: Some("/tmp/runtime.verity".into()),
-            runtime_overlay_roothash: Some("b".repeat(64)),
-            ..Default::default()
-        };
-        let drives = qemu_drive_args(&config);
-        assert_eq!(drives.len(), 4);
-        assert!(drives.iter().all(|drive| drive.contains("readonly=on")));
-        assert!(drives[0].contains(&config.rootfs_path));
-        assert!(drives[1].contains(config.verity_path.as_deref().expect("verity path")));
-        assert!(drives[2].contains("/tmp/runtime.ext4"));
-        assert!(drives[3].contains("/tmp/runtime.verity"));
-    }
-
-    #[test]
-    fn qemu_non_verity_boot_attaches_runtime_overlay_as_vdb() {
-        // A plain dev rootfs (no verity) with a resolved overlay triple: the
-        // rootfs keeps /dev/vda read-write, the overlay rides /dev/vdb
-        // read-only, and the cmdline names the same device.
-        let config = VmStartConfig {
-            rootfs_path: "/tmp/rootfs.ext4".into(),
-            runtime_overlay_path: Some("/tmp/runtime.ext4".into()),
-            runtime_overlay_verity_path: Some("/tmp/runtime.verity".into()),
-            runtime_overlay_roothash: Some("b".repeat(64)),
-            runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy::PreferOverlay,
-            ..Default::default()
-        };
-        let drives = qemu_drive_args(&config);
-        assert_eq!(drives.len(), 2);
-        assert!(drives[0].contains("/tmp/rootfs.ext4"));
-        assert!(!drives[0].contains("readonly=on"));
-        assert!(drives[1].contains("/tmp/runtime.ext4"));
-        assert!(drives[1].contains("readonly=on"));
-
-        let cmdline = qemu_cmdline(&config);
-        assert!(cmdline.contains("root=/dev/vda"), "got: {cmdline}");
-        assert!(
-            cmdline.contains("mvm.runtime_data=/dev/vdb"),
-            "got: {cmdline}"
-        );
-        assert!(!cmdline.contains("mvm.runtime_hash="), "got: {cmdline}");
-    }
-
-    #[test]
-    fn qemu_non_verity_boot_without_overlay_stays_single_disk() {
-        let config = VmStartConfig {
-            rootfs_path: "/tmp/rootfs.ext4".into(),
-            runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy::PreferOverlay,
-            ..Default::default()
-        };
-        assert_eq!(qemu_drive_args(&config).len(), 1);
-        assert!(!qemu_cmdline(&config).contains("mvm.runtime_data="));
-    }
-
-    #[test]
-    fn qemu_attaches_disk_volumes_with_requested_access_mode() {
-        let config = VmStartConfig {
-            rootfs_path: "/tmp/rootfs.ext4".into(),
-            volumes: vec![
-                mvm_core::vm_backend::VmVolume {
-                    host: "/tmp/writable.ext4".into(),
-                    guest: "/data/writable".into(),
-                    kind: mvm_core::vm_backend::VmVolumeKind::Disk,
-                    ..Default::default()
-                },
-                mvm_core::vm_backend::VmVolume {
-                    host: "/tmp/readonly.ext4".into(),
-                    guest: "/data/readonly".into(),
-                    read_only: true,
-                    kind: mvm_core::vm_backend::VmVolumeKind::Disk,
-                    ..Default::default()
-                },
-            ],
-            ..Default::default()
-        };
-
-        let drives = qemu_drive_args(&config);
-        assert_eq!(drives.len(), 3);
-        assert!(drives[1].contains("/tmp/writable.ext4"));
-        assert!(!drives[1].contains("readonly=on"));
-        assert!(drives[2].contains("/tmp/readonly.ext4"));
-        assert!(drives[2].contains("readonly=on"));
-    }
-
-    #[test]
-    fn qemu_refuses_directory_share_before_start() {
-        let config = VmStartConfig {
-            volumes: vec![mvm_core::vm_backend::VmVolume {
-                host: "/tmp/share".into(),
-                guest: "/data/share".into(),
-                kind: mvm_core::vm_backend::VmVolumeKind::DirShare,
-                ..Default::default()
-            }],
-            ..Default::default()
-        };
-
-        let err = ensure_qemu_volumes_supported(&config).unwrap_err();
-        assert!(err.to_string().contains("directory-share"));
-        assert!(err.to_string().contains("/data/share"));
-    }
-
-    #[test]
-    fn required_overlay_qemu_support_rejects_missing_overlay_artifacts() {
-        let dir = tempfile::tempdir().unwrap();
-        let rootfs = dir.path().join("rootfs.ext4");
-        let verity = dir.path().join("rootfs.verity");
-        let initrd = dir.path().join("rootfs.initrd");
-        std::fs::write(&rootfs, b"rootfs").unwrap();
-        std::fs::write(&verity, b"verity").unwrap();
-        std::fs::write(&initrd, b"initrd").unwrap();
-
-        let config = VmStartConfig {
-            rootfs_path: rootfs.display().to_string(),
-            verity_path: Some(verity.display().to_string()),
-            roothash: Some("a".repeat(64)),
-            runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay,
-            ..Default::default()
-        };
-        let err = ensure_qemu_runtime_source_supported(&config).unwrap_err();
-        assert!(err.to_string().contains("runtime overlay artifact triple"));
-    }
-
-    #[test]
-    fn required_overlay_qemu_support_rejects_missing_initrd() {
-        let dir = tempfile::tempdir().unwrap();
-        let rootfs = dir.path().join("rootfs.ext4");
-        let verity = dir.path().join("rootfs.verity");
-        std::fs::write(&rootfs, b"rootfs").unwrap();
-        std::fs::write(&verity, b"verity").unwrap();
-
-        let config = VmStartConfig {
-            rootfs_path: rootfs.display().to_string(),
-            verity_path: Some(verity.display().to_string()),
-            roothash: Some("a".repeat(64)),
-            runtime_overlay_path: Some("/tmp/runtime.ext4".into()),
-            runtime_overlay_verity_path: Some("/tmp/runtime.verity".into()),
-            runtime_overlay_roothash: Some("b".repeat(64)),
-            runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay,
-            ..Default::default()
-        };
-        let err = ensure_qemu_runtime_source_supported(&config).unwrap_err();
-        assert!(err.to_string().contains("rootfs.initrd"));
-    }
-
-    #[test]
-    fn required_overlay_qemu_support_accepts_non_verity_block_overlay() {
-        // A non-verity dev boot carrying the resolved overlay triple is served by
-        // the plain read-only /dev/vdb mount — no verity metadata or initrd.
-        let config = VmStartConfig {
-            rootfs_path: "/tmp/rootfs.ext4".into(),
-            runtime_overlay_path: Some("/tmp/runtime.ext4".into()),
-            runtime_overlay_verity_path: Some("/tmp/runtime.verity".into()),
-            runtime_overlay_roothash: Some("b".repeat(64)),
-            runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay,
-            ..Default::default()
-        };
-        assert!(ensure_qemu_runtime_source_supported(&config).is_ok());
-    }
 }
