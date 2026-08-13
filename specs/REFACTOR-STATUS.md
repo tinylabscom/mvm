@@ -775,12 +775,15 @@ for detailed scope and acceptance criteria.
         `mvmctl audit pubkey`
 - [x] Plan 320 — A live wasm sandbox demo on the website
       (`specs/plans/320-wasm-browser-demo.md`) — PR #2429 merged to `main`;
-      hardening items closed in #2441. Browser-engine sandbox at `/demo`,
-      landing teaser, Web Worker ownership, curated `wasm32-wasip1` fixtures,
-      Rust fixture-parity tests, and `wasm-opt -Oz` + gzipped size budget in
-      the Linux wasm lane. Egress decision, placeholder substitution, and
-      audit-entry construction/chain signing are relocated into `mvm-contract`
-      so host and browser run
+      hardening items closed in #2441. This follow-up fix (#2447) adds the
+      wasm build to `.github/workflows/pages.yml` and corrects
+      `web/mvm-demo/build.sh` to preserve the `pkg/` subdirectory when staging,
+      so the live `/demo` route serves the bundle. Browser-engine sandbox at
+      `/demo`, landing teaser, Web Worker ownership, curated `wasm32-wasip1`
+      fixtures, Rust fixture-parity tests, and `wasm-opt -Oz` + gzipped size
+      budget in the Linux wasm lane. Egress decision, placeholder substitution,
+      and audit-entry construction/chain signing are relocated into
+      `mvm-contract` so host and browser run
       identical code. Claim-free by ADR-024 §3; adds no claim-catalog witness.
   - [x] E2.1 — the placeholder leaf relocated as
         `mvm_contract::substitution`; the constant hard-renamed to
