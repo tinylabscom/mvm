@@ -2,7 +2,10 @@
 
 ## Status
 
-DESIGN — approved in brainstorming, implementation not started.
+**SHIPPED — PR #2429 merged to `main`.** E1, E2, and E3 are complete and the
+browser demo is live at `/demo`. A few hardening items (fixture-parity Rust
+assertion, size budget in the `wasm32` CI lane, builder-VM artifact build) remain
+open and are tracked in the checkboxes below.
 
 Bound by [ADR-024](../adrs/024-wasm-sandbox-backend.md)'s three constraints.
 Adds no numbered security claim, and does not request one.
@@ -367,12 +370,9 @@ E3.1 was unaffected and is done; the frozen fixture passes on post-319
       the legacy chain with `SignatureInvalid { line: 0 }`.
       Checked against #2379's branch as well: clean merge, 6/6 green, so
       rotation does not change whether existing logs verify.
-- [~] E3.2a — **one `hash_line`.** The re-validation found it written out
-      three times byte-identically: `mvm-contract`'s `verify.rs`,
-      `audit_file.rs`, and — added by #2379 — `audit_set.rs`. It is the
-      function that *is* the chain link, so three definitions are three
-      definitions of what the chain is. Independent of every other E3 step
-      (no `AuditEntry` dependency), so it lands first and alone.
+- [x] E3.2a — **one `hash_line`.** De-duplicated into `mvm-contract::verify`
+      as part of E3.3; `audit_file.rs` and `audit_set.rs` now call the single
+      definition.
 - [x] E3.2 — hard-rename one of the two `AuditEntry`s. No alias.
 - [x] E3.3 — `hash_line` + `signed_bytes_for` de-duplicated to one
       definition each, `mvm-hostd` calling `mvm-contract`.
@@ -502,10 +502,12 @@ relocation and the design is wrong.
 - [ ] A fixture-parity test: the three browser fixtures produce the same
       outcomes the host witness asserts.
 - [x] `web/mvm-demo/` excluded from the workspace, as `web/audit-verify/` is.
-- [ ] `wasm-opt -Oz` plus a gzipped-size budget in that same lane (plan 301 B4's
-      discipline), failing the lane on regression.
-- [ ] Built in the builder VM, never a host toolchain (ADR-004 / ADR-007).
-- [ ] `cargo fmt --all -- --check` (nightly, per CI Lint),
+- [ ] `wasm-opt -Oz` plus a gzipped-size budget in the existing `wasm32` CI lane
+      (plan 301 B4's discipline), failing the lane on regression. The demo's
+      local `build.sh` enforces this today; the lane itself does not yet run it.
+- [ ] Built in the builder VM, never a host toolchain (ADR-004 / ADR-007). The
+      website workflow currently builds the wasm bundle on the GitHub runner.
+- [x] `cargo fmt --all -- --check` (nightly, per CI Lint),
       `cargo clippy --workspace --all-targets -- -D warnings`,
       `cargo test --workspace --doc`, xtask gates.
 
