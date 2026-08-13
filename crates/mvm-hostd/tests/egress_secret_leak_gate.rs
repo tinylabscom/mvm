@@ -33,7 +33,7 @@ use mvm_hostd::keyholder::{
 };
 use mvm_hostd::supervisor::audit_file::FileAuditSigner;
 use mvm_hostd::supervisor::audit_recorder::Recorder;
-use mvm_hostd::supervisor::substitution_proxy::{
+use mvm_hostd::supervisor::network_endpoint_proxy::{
     ForwardError, ForwardResponse, Forwarder, FromPlanInputs, PreparedRequest, SubstitutionService,
 };
 
@@ -164,7 +164,7 @@ fn handed_placeholders_never_contain_the_secret_value() {
 /// `endpoint_refuses_unbound_destination_and_never_forwards` over the public
 /// service surface, as the standing leak-gate witness.
 #[tokio::test]
-async fn substitution_endpoint_refuses_unbound_destination() {
+async fn network_endpoint_refuses_unbound_destination() {
     let dir = tempdir().unwrap();
     let store = FileSecretStore::with_dir(dir.path().join("secrets"));
     store

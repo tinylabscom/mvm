@@ -28,7 +28,7 @@ fn the_host_independent_helpers_build_on_every_host() {
         for libkrun in [false, true] {
             let specs = aux_helper_specs(os, arch, libkrun);
             let bins = bins(&specs);
-            for required in ["mvm-substitution-endpoint", "mvm-netd"] {
+            for required in ["mvm-network-endpoint", "mvm-netd"] {
                 assert!(
                     bins.contains(&required),
                     "{required} must build on {os}/{arch} (libkrun={libkrun}), got {bins:?}"

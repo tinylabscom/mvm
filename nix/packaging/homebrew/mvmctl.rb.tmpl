@@ -37,7 +37,7 @@ class Mvmctl < Formula
       mvm-bridge
       mvm-hvf-supervisor
       mvm-libkrun-supervisor
-      mvm-substitution-endpoint
+      mvm-network-endpoint
     ].each do |hostbin|
       bin.install hostbin if File.exist?(hostbin)
     end

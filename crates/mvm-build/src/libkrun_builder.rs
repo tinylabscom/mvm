@@ -307,7 +307,7 @@ impl BuilderVsockEgressEndpoint {
         state_dir: &Path,
         transport: BuilderEndpointTransport,
     ) -> Result<Self, BuilderVmError> {
-        let endpoint_path = resolve_substitution_endpoint_path()?;
+        let endpoint_path = resolve_network_endpoint_path()?;
         let config = serde_json::json!({
             "tenant_id": "builder",
             "secrets": [],
@@ -411,7 +411,7 @@ impl Drop for BuilderVsockEgressEndpoint {
     }
 }
 
-fn resolve_substitution_endpoint_path() -> Result<PathBuf, BuilderVmError> {
+fn resolve_network_endpoint_path() -> Result<PathBuf, BuilderVmError> {
     if let Some(path) = std::env::var_os("MVM_SUBSTITUTION_ENDPOINT_PATH").map(PathBuf::from) {
         if path.is_file() {
             return Ok(path);
@@ -425,7 +425,7 @@ fn resolve_substitution_endpoint_path() -> Result<PathBuf, BuilderVmError> {
     if let Ok(current_exe) = std::env::current_exe()
         && let Some(dir) = current_exe.parent()
     {
-        let candidate = dir.join("mvm-substitution-endpoint");
+        let candidate = dir.join("mvm-network-endpoint");
         if candidate.is_file() {
             return Ok(candidate);
         }
@@ -434,7 +434,7 @@ fn resolve_substitution_endpoint_path() -> Result<PathBuf, BuilderVmError> {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let Some(workspace_root) = manifest_dir.parent().and_then(|p| p.parent()) else {
         return Err(BuilderVmError::ExtractionFailed(
-            "resolve workspace root for mvm-substitution-endpoint".to_string(),
+            "resolve workspace root for mvm-network-endpoint".to_string(),
         ));
     };
 
@@ -455,7 +455,7 @@ fn resolve_substitution_endpoint_path() -> Result<PathBuf, BuilderVmError> {
 
     for root in &target_roots {
         for variant in ["release", "debug"] {
-            let candidate = root.join(variant).join("mvm-substitution-endpoint");
+            let candidate = root.join(variant).join("mvm-network-endpoint");
             if candidate.is_file() {
                 return Ok(candidate);
             }
@@ -469,7 +469,7 @@ fn resolve_substitution_endpoint_path() -> Result<PathBuf, BuilderVmError> {
         "-p",
         "mvm-hostd",
         "--bin",
-        "mvm-substitution-endpoint",
+        "mvm-network-endpoint",
     ]);
     if !build
         .status()
@@ -477,21 +477,21 @@ fn resolve_substitution_endpoint_path() -> Result<PathBuf, BuilderVmError> {
         .unwrap_or(false)
     {
         return Err(BuilderVmError::ExtractionFailed(
-            "build mvm-substitution-endpoint".to_string(),
+            "build mvm-network-endpoint".to_string(),
         ));
     }
 
     for root in &target_roots {
-        let built = root.join("debug").join("mvm-substitution-endpoint");
+        let built = root.join("debug").join("mvm-network-endpoint");
         if built.is_file() {
             return Ok(built);
         }
     }
     Err(BuilderVmError::ExtractionFailed(format!(
-        "mvm-substitution-endpoint not found after build (searched: {})",
+        "mvm-network-endpoint not found after build (searched: {})",
         target_roots
             .iter()
-            .map(|root| root.join("debug").join("mvm-substitution-endpoint"))
+            .map(|root| root.join("debug").join("mvm-network-endpoint"))
             .map(|path| path.display().to_string())
             .collect::<Vec<_>>()
             .join(", ")

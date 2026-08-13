@@ -9,7 +9,7 @@
 //!
 //! The accept loop that drives this (`SubstitutionService::serve_terminator`)
 //! is Linux-only (it needs `SO_ORIGINAL_DST`) and lives in
-//! `substitution_proxy.rs` so it can reuse the service's private registry /
+//! `network_endpoint_proxy.rs` so it can reuse the service's private registry /
 //! resolver / recorder. These serializer + splice helpers are pure and stay
 //! unit-testable on every host.
 
@@ -20,7 +20,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use url::Url;
 
-use crate::supervisor::substitution_proxy::PreparedRequest;
+use crate::supervisor::network_endpoint_proxy::PreparedRequest;
 
 /// 16 MiB cap on a single destination response — mirrors `read.rs`'s request
 /// bound so a hostile/buggy upstream can't drive an unbounded host allocation.

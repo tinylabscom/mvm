@@ -46,8 +46,8 @@ use mvm_hostd::keyholder::{
 };
 use mvm_hostd::supervisor::audit_file::{FileAuditSigner, verify_audit_chain};
 use mvm_hostd::supervisor::audit_recorder::Recorder;
-use mvm_hostd::supervisor::substitution_endpoint::build_egress_gate;
-use mvm_hostd::supervisor::substitution_proxy::{
+use mvm_hostd::supervisor::network_endpoint::build_egress_gate;
+use mvm_hostd::supervisor::network_endpoint_proxy::{
     ForwardError, ForwardResponse, Forwarder, PreparedRequest, SubstitutionService,
 };
 use mvm_runtime::wasm_backend::WasmBackend;

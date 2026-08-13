@@ -26,7 +26,7 @@ pub mod runtime_meta;
 pub mod shell;
 pub mod snapshot_upper;
 pub mod spec_map;
-pub mod substitution_spawn;
+pub mod network_endpoint_spawn;
 pub mod ui;
 pub mod virtiofsd;
 pub mod workload_wait;

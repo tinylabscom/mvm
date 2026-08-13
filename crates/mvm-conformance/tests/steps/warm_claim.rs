@@ -168,7 +168,7 @@ struct WarmClaimSpawner {
 impl EndpointSpawner for WarmClaimSpawner {
     fn spawn(&self, req: &EndpointSpawnRequest<'_>) -> anyhow::Result<PathBuf> {
         *self.seen_vm.lock().unwrap() = Some(req.vm_name.to_string());
-        Ok(mvm_core::config::vm_substitution_endpoint_socket(
+        Ok(mvm_core::config::vm_network_endpoint_socket(
             req.vm_name,
         ))
     }
@@ -187,7 +187,7 @@ impl ChildGrantIssuer for WarmClaimGrantIssuer {
 
 #[when(expr = "the parent is claimed with an admitted child plan")]
 fn when_claim_parent(world: &mut CliWorld) {
-    // `vm_state_dir` / `vm_substitution_endpoint_socket` are `MVM_HOME`-rooted.
+    // `vm_state_dir` / `vm_network_endpoint_socket` are `MVM_HOME`-rooted.
     // Serialize against any other test in this process that mutates it, and
     // restore the previous value when this step (the only place in the
     // conformance suite driving the runner's guarded claim path in-process)

@@ -11,7 +11,7 @@
 //!
 //! This module is the bin's library half: the stdin config contract
 //! (`EndpointConfig`) and `assemble` (open stores + build the service).
-//! The `mvm-substitution-endpoint` bin is the thin process wrapper that parses
+//! The `mvm-network-endpoint` bin is the thin process wrapper that parses
 //! the config, reports the minted placeholders, and runs the serve loop.
 
 use std::path::PathBuf;
@@ -29,13 +29,13 @@ use mvm_core::plan::SecretBinding;
 use crate::keyholder::{
     FileBindingStore, HandedPlaceholders, LocalResolver, RemoteResolver, SecretResolver,
 };
-use crate::supervisor::substitution_proxy::SubstitutionService;
+use crate::supervisor::network_endpoint_proxy::SubstitutionService;
 
 /// The endpoint's ready-handshake line. Defined next to
-/// [`spawn_substitution_endpoint`](mvm_runtime::spawn_substitution_endpoint)'s
+/// [`spawn_network_endpoint`](mvm_runtime::spawn_network_endpoint)'s
 /// reader and re-exported here so the bin, its tests and the spawner share one
 /// wire definition without a dependency cycle.
-pub use mvm_vmm::host::substitution_spawn::EndpointHandshake;
+pub use mvm_vmm::host::network_endpoint_spawn::EndpointHandshake;
 
 /// Default forward-leg timeout (host → real destination) in seconds.
 fn default_forward_timeout_secs() -> u64 {
@@ -96,10 +96,10 @@ pub enum ResolverBackend {
 }
 
 /// How the guest reaches this endpoint. Defined in `mvm-backend` (next to the
-/// `spawn_substitution_endpoint` writer) and re-exported here so the bin, its
+/// `spawn_network_endpoint` writer) and re-exported here so the bin, its
 /// tests, and `EndpointConfig` share one wire definition without a dependency
 /// cycle (mvm-hostd → mvm-backend, never the reverse).
-pub use mvm_vmm::host::substitution_spawn::EndpointTransport;
+pub use mvm_vmm::host::network_endpoint_spawn::EndpointTransport;
 
 /// Which egress protocol the guest speaks on the relayed EGRESS_PORT stream.
 /// A VM uses exactly one, fixed at admission (secrets ⇒ WireRequest, else raw),
@@ -137,7 +137,7 @@ impl std::fmt::Debug for TlsIntermediate {
     }
 }
 
-/// Config the backend hands the `mvm-substitution-endpoint` subprocess on
+/// Config the backend hands the `mvm-network-endpoint` subprocess on
 /// stdin at spawn. Carries the workload's secret bindings (NOT values — the
 /// endpoint resolves values itself from the host store) plus where to listen.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -291,7 +291,7 @@ pub fn assemble(
     // `resolver` in means it no longer hardcodes a `LocalResolver`, so a
     // `Remote` backend actually reaches its `RemoteResolver`.
     let (service, handed) =
-        SubstitutionService::from_plan(crate::supervisor::substitution_proxy::FromPlanInputs {
+        SubstitutionService::from_plan(crate::supervisor::network_endpoint_proxy::FromPlanInputs {
             plan_secrets: &cfg.secrets,
             tenant: &cfg.tenant_id,
             bindings: &bindings,
@@ -381,7 +381,7 @@ pub fn fingerprint_bound_secrets(cfg: &EndpointConfig) -> anyhow::Result<Vec<Sec
 /// (`<keys>/host-signer.ed25519` + `<audit>/`), or `None` if the signer key
 /// isn't present (the endpoint then serves un-audited, matching the prior
 /// optional-recorder posture). The audit dir + the key are inside the
-/// endpoint's Landlock grants (see `ConfinementSpec::substitution_endpoint`).
+/// endpoint's Landlock grants (see `ConfinementSpec::network_endpoint`).
 pub fn build_audit_recorder(tenant: &str) -> Option<crate::supervisor::audit_recorder::Recorder> {
     use crate::supervisor::audit_file::FileAuditSigner;
     use crate::supervisor::audit_recorder::Recorder;

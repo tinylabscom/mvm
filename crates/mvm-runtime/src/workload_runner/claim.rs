@@ -17,7 +17,7 @@ use mvm_core::policy::RedactionPolicy;
 use mvm_core::policy::network_policy::NetworkPolicy;
 use mvm_core::vm_backend::VmId;
 
-use crate::substitution_spawn::EndpointGuard;
+use crate::network_endpoint_spawn::EndpointGuard;
 use crate::workload_runner::runner::{EndpointSpawnRequest, EndpointSpawner};
 
 #[derive(Debug, thiserror::Error)]
@@ -343,7 +343,7 @@ mod tests {
     impl EndpointSpawner for FakeSpawner {
         fn spawn(&self, req: &EndpointSpawnRequest<'_>) -> anyhow::Result<PathBuf> {
             *self.seen_vm.lock().unwrap() = Some(req.vm_name.to_string());
-            Ok(mvm_core::config::vm_substitution_endpoint_socket(
+            Ok(mvm_core::config::vm_network_endpoint_socket(
                 req.vm_name,
             ))
         }
@@ -380,8 +380,8 @@ mod tests {
                 443,
             )]);
         let state = tempfile::tempdir().unwrap();
-        let expected_child = mvm_core::config::vm_substitution_endpoint_socket("child-a");
-        let expected_sibling = mvm_core::config::vm_substitution_endpoint_socket("child-b");
+        let expected_child = mvm_core::config::vm_network_endpoint_socket("child-a");
+        let expected_sibling = mvm_core::config::vm_network_endpoint_socket("child-b");
 
         let mut child = guards
             .spawn_endpoint(

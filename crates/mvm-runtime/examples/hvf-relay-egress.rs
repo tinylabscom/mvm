@@ -2,7 +2,7 @@
 //! guest run loop — on the hvf VMM.
 //!
 //! Boots the echo guest through `HvfDriver` with its `EGRESS_PORT` relayed to a
-//! per-VM `mvm-substitution-endpoint` that carries the resolved `NetworkPolicy`.
+//! per-VM `mvm-network-endpoint` that carries the resolved `NetworkPolicy`.
 //! The run loop is a pure relay (no in-loop gate); the endpoint gates. Runs twice
 //! against a discovered LAN echo server: once with a policy that admits it (reply
 //! expected) and once with a policy that admits only a different port (reply
@@ -12,10 +12,10 @@
 //! macOS / Apple silicon. The per-VM aux bins must be built first:
 //! ```sh
 //! cargo build -p mvm-hostd --bin mvm-hvf-supervisor
-//! cargo build -p mvm-hostd --bin mvm-substitution-endpoint
+//! cargo build -p mvm-hostd --bin mvm-network-endpoint
 //! OUT=/tmp/hvf-egress-guest bash crates/mvm-runtime/examples/hvf-egress-guest/build.sh
 //! MVM_HVF_SUPERVISOR_PATH=target/debug/mvm-hvf-supervisor \
-//!   MVM_SUBSTITUTION_ENDPOINT_PATH=target/debug/mvm-substitution-endpoint \
+//!   MVM_SUBSTITUTION_ENDPOINT_PATH=target/debug/mvm-network-endpoint \
 //!   MVM_HVF_KERNEL=/tmp/mvm-hvf-kernel/Image-builder \
 //!   MVM_HVF_INITRD=/tmp/hvf-egress-guest/initramfs.cpio \
 //!   cargo run -p mvm-runtime --example hvf-relay-egress
@@ -70,7 +70,7 @@ fn main() {
 
     fn endpoint_bin() -> PathBuf {
         std::env::var("MVM_SUBSTITUTION_ENDPOINT_PATH")
-            .unwrap_or_else(|_| "target/debug/mvm-substitution-endpoint".into())
+            .unwrap_or_else(|_| "target/debug/mvm-network-endpoint".into())
             .into()
     }
 
@@ -90,7 +90,7 @@ fn main() {
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .spawn()
-            .expect("spawn mvm-substitution-endpoint");
+            .expect("spawn mvm-network-endpoint");
         child
             .stdin
             .take()

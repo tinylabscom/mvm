@@ -50,7 +50,7 @@ pub enum WireResponse {
 }
 
 /// A `SecretResolver` request over the fleet secret-resolution socket
-/// (mvmd's tenant vault, or the standalone `mvm-substitution-endpoint`'s
+/// (mvmd's tenant vault, or the standalone `mvm-network-endpoint`'s
 /// local fallback): resolve `name` to its raw credential value, bound to
 /// `allowed_hosts` for this workload. `auth_type` is the snake_case
 /// `AuthType` label (kept as a bare string here so `mvm-core` doesn't need

@@ -153,7 +153,7 @@ impl NetdAuditor {
     /// serve, matching the substitution endpoint's posture at the same seam.
     pub fn open(context: NetdAuditContext) -> Self {
         let recorder =
-            crate::supervisor::substitution_endpoint::build_audit_recorder(&context.tenant.clone());
+            crate::supervisor::network_endpoint::build_audit_recorder(&context.tenant.clone());
         Self::with_recorder(recorder, context)
     }
 

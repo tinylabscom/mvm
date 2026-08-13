@@ -444,7 +444,7 @@ impl ConsoleStreamer for StreamPlane {
 /// Binding unconditionally rather than skipping the empty case keeps a stale
 /// set from a previous VM of the same name out of the gate.
 fn bind_known_secrets(vm: &str) {
-    let fingerprints = mvm_vmm::host::substitution_spawn::recorded_secret_fingerprints(vm);
+    let fingerprints = mvm_vmm::host::network_endpoint_spawn::recorded_secret_fingerprints(vm);
     tracing::debug!(
         vm = %vm,
         fingerprints = fingerprints.len(),

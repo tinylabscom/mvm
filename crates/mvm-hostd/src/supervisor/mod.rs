@@ -100,12 +100,12 @@ pub mod sensitive_detector;
 pub mod socks5_udp;
 /// The per-VM substitution endpoint subprocess library half: the
 /// stdin config contract + store-opening/service assembly. The
-/// `mvm-substitution-endpoint` bin is the process wrapper.
-pub mod substitution_endpoint;
+/// `mvm-network-endpoint` bin is the process wrapper.
+pub mod network_endpoint;
 /// Host substitution endpoint request preparation (placeholder → real
 /// credential, binding-checked). The forward leg + the guest-facing
 /// listener are separate transport steps.
-pub mod substitution_proxy;
+pub mod network_endpoint_proxy;
 /// Transparent egress terminator primitives: original destination
 /// recovery after nft REDIRECT, plus the future forward/substitute
 /// legs (orig_dst is the only piece here now).

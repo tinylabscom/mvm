@@ -589,7 +589,7 @@ mod reap_orphans_tests {
         let command = concat!(
             "/tmp/other-worktree/target/debug/mvmctl ",
             "__builder-egress-supervisor --endpoint ",
-            "/tmp/other-worktree/target/debug/mvm-substitution-endpoint"
+            "/tmp/other-worktree/target/debug/mvm-network-endpoint"
         );
         let snapshot = ProcSnapshot::from_parts(
             [(pid, 1)].into_iter().collect(),

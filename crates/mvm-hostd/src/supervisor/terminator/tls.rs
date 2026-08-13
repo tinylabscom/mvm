@@ -17,7 +17,7 @@
 //! bounds blast radius if a per-VM intermediate ever leaked.
 //!
 //! This module's SNI peek/parse is pure + host-testable; the live terminate /
-//! splice glue (Linux accept loop) lives in `substitution_proxy.rs`.
+//! splice glue (Linux accept loop) lives in `network_endpoint_proxy.rs`.
 
 use std::io::{Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpStream};
@@ -34,9 +34,9 @@ use mvm_contract::ir::AuthType;
 use super::error::TerminatorError;
 use super::read::read_http_request;
 use super::request::proxy_request_from_origin_form_https;
-use crate::keyholder::substitution::SubstitutionEndpoint;
+use crate::keyholder::substitution::NetworkEndpoint;
 use crate::supervisor::network::stages::{RedactingSubstitution, RedactionHits};
-use crate::supervisor::substitution_proxy::{
+use crate::supervisor::network_endpoint_proxy::{
     PreparedRequest, collect_substituted_meta, destination_host, fail_closed_reason,
     prepare_request, redact_request,
 };
@@ -112,7 +112,7 @@ pub fn server_config_for_sni(
 pub struct TlsTermination<'a> {
     config: Arc<rustls::ServerConfig>,
     orig_dst: SocketAddr,
-    endpoint: &'a SubstitutionEndpoint<'a>,
+    endpoint: &'a NetworkEndpoint<'a>,
     redactor: &'a RedactingSubstitution,
     action: &'a RedactionAction,
 }
@@ -130,7 +130,7 @@ impl<'a> TlsTermination<'a> {
 pub struct TlsTerminationBuilder<'a> {
     config: Option<Arc<rustls::ServerConfig>>,
     orig_dst: Option<SocketAddr>,
-    endpoint: Option<&'a SubstitutionEndpoint<'a>>,
+    endpoint: Option<&'a NetworkEndpoint<'a>>,
     redactor: Option<&'a RedactingSubstitution>,
     action: Option<&'a RedactionAction>,
 }
@@ -144,7 +144,7 @@ impl<'a> TlsTerminationBuilder<'a> {
         self.orig_dst = Some(orig_dst);
         self
     }
-    pub fn with_endpoint(mut self, endpoint: &'a SubstitutionEndpoint<'a>) -> Self {
+    pub fn with_endpoint(mut self, endpoint: &'a NetworkEndpoint<'a>) -> Self {
         self.endpoint = Some(endpoint);
         self
     }
@@ -591,7 +591,7 @@ mod tests {
         let cfg = Arc::clone(&server_cfg);
         let server = std::thread::spawn(move || {
             let (sock, _) = listener.accept().unwrap();
-            let endpoint = SubstitutionEndpoint::new(&reg, &resolver);
+            let endpoint = NetworkEndpoint::new(&reg, &resolver);
             let orig_dst: SocketAddr = "203.0.113.7:443".parse().unwrap();
             let redactor = RedactingSubstitution::with_default_rules();
             let action = RedactionAction::default();
@@ -778,7 +778,7 @@ mod tests {
         let cfg = Arc::clone(&server_cfg);
         let server = std::thread::spawn(move || -> Result<(), String> {
             let (sock, _) = listener.accept().unwrap();
-            let endpoint = SubstitutionEndpoint::new(&reg, &resolver);
+            let endpoint = NetworkEndpoint::new(&reg, &resolver);
             let orig_dst: SocketAddr = "203.0.113.7:443".parse().unwrap();
             let redactor = RedactingSubstitution::with_default_rules();
             let mut carried = false;

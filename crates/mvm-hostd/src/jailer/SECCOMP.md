@@ -1,6 +1,6 @@
 # mvm-jailer-lite seccomp profile
 
-`ConfinementSpec::substitution_endpoint()` allowlists the syscalls
+`ConfinementSpec::network_endpoint()` allowlists the syscalls
 required for: read request bytes (read, splice, recvmsg);
 write audit-chain entries (write, fsync, openat, close); socket
 bind/accept/connect; memory + threading (mmap, munmap, futex,

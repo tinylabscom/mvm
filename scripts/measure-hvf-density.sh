@@ -129,7 +129,7 @@ capture_busy_host_processes() {
         found = 1
         next
       }
-      if (args ~ /(mvm-hvf-supervisor|mvmctl|mvm-substitution-endpoint|mvm-host-agent)/) {
+      if (args ~ /(mvm-hvf-supervisor|mvmctl|mvm-network-endpoint|mvm-host-agent)/) {
         print
         found = 1
         next
@@ -195,13 +195,13 @@ seed_workload_kernel
 
 if [[ "${SKIP_BUILD}" != "1" ]]; then
   "${run_env[@]}" cargo build -p mvmctl --bin mvmctl
-  "${run_env[@]}" cargo build -p mvm-hostd --bin mvm-substitution-endpoint
+  "${run_env[@]}" cargo build -p mvm-hostd --bin mvm-network-endpoint
   "${run_env[@]}" cargo build -p mvm-vm-host --bin mvm-hvf-supervisor
 fi
 
 MVMCTL_BIN="${MVM_HVF_DENSITY_MVMCTL:-${TARGET_DIR}/debug/mvmctl}"
 SUPERVISOR_BIN="${MVM_HVF_SUPERVISOR_PATH:-${TARGET_DIR}/debug/mvm-hvf-supervisor}"
-ENDPOINT_BIN="${MVM_SUBSTITUTION_ENDPOINT_PATH:-${TARGET_DIR}/debug/mvm-substitution-endpoint}"
+ENDPOINT_BIN="${MVM_SUBSTITUTION_ENDPOINT_PATH:-${TARGET_DIR}/debug/mvm-network-endpoint}"
 
 if [[ ! -x "${MVMCTL_BIN}" ]]; then
   echo "refusing: mvmctl not executable at ${MVMCTL_BIN}" >&2
@@ -212,7 +212,7 @@ if [[ ! -x "${SUPERVISOR_BIN}" ]]; then
   exit 68
 fi
 if [[ ! -x "${ENDPOINT_BIN}" ]]; then
-  echo "refusing: mvm-substitution-endpoint not executable at ${ENDPOINT_BIN}" >&2
+  echo "refusing: mvm-network-endpoint not executable at ${ENDPOINT_BIN}" >&2
   exit 69
 fi
 
@@ -267,7 +267,7 @@ capture_processes() {
       args = $0
       comp = ""
       if (args ~ /mvm-hvf-supervisor/) comp = "mvm-hvf-supervisor"
-      else if (args ~ /mvm-substitution-endpoint/) comp = "mvm-substitution-endpoint"
+      else if (args ~ /mvm-network-endpoint/) comp = "mvm-network-endpoint"
       else if (args ~ /mvm-host-agent/) comp = "mvm-host-agent"
       else if (args ~ /mvm-signer-helper/) comp = "mvm-signer-helper"
       else if (args ~ /mvm-host-signer/) comp = "mvm-host-signer"
@@ -376,7 +376,7 @@ cleanup_wave() {
   echo -e "seeded_kernel_source\t${SEEDED_KERNEL_SOURCE}"
   echo -e "mvmctl\t${MVMCTL_BIN}"
   echo -e "supervisor\t${SUPERVISOR_BIN}"
-  echo -e "substitution_endpoint\t${ENDPOINT_BIN}"
+  echo -e "network_endpoint\t${ENDPOINT_BIN}"
 } >"${SUMMARY}"
 
 for wave in "${WAVES[@]}"; do

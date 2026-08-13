@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 
 use mvm_core::checkpoint::{CheckpointId, CheckpointMeta};
-use mvm_core::config::{vm_state_dir, vm_substitution_endpoint_socket, vms_dir};
+use mvm_core::config::{vm_state_dir, vm_network_endpoint_socket, vms_dir};
 use mvm_core::crypto::vmgenid::fresh_generation_token;
 use mvm_core::plan::{ExecutionPlan, SecretBinding, StreamRetention};
 use mvm_core::policy::RedactionPolicy;
@@ -52,9 +52,9 @@ use mvm_vmm::host::egress_shared::{decode_plan_secrets_from_state, plan_stream_r
 use mvm_vmm::host::spec_map::{
     WorkloadSpecInputs, ensure_dir_share_support, workload_spec, workload_vsock_ports,
 };
-use mvm_vmm::host::substitution_spawn::{
-    EndpointTransport, SubstitutionSpawnParams, reap_substitution_endpoint,
-    spawn_substitution_endpoint,
+use mvm_vmm::host::network_endpoint_spawn::{
+    EndpointTransport, SubstitutionSpawnParams, reap_network_endpoint,
+    spawn_network_endpoint,
 };
 use mvm_vmm::post_restore::PostRestoreOutcome;
 
@@ -85,14 +85,14 @@ pub trait EndpointSpawner: Send + Sync {
     fn spawn(&self, req: &EndpointSpawnRequest<'_>) -> Result<PathBuf>;
 }
 
-/// The production `EndpointSpawner`: spawns the real `mvm-substitution-endpoint`
+/// The production `EndpointSpawner`: spawns the real `mvm-network-endpoint`
 /// over the in-process-VMM UDS transport.
 pub struct RealEndpointSpawner;
 
 impl EndpointSpawner for RealEndpointSpawner {
     fn spawn(&self, req: &EndpointSpawnRequest<'_>) -> Result<PathBuf> {
-        let uds = vm_substitution_endpoint_socket(req.vm_name);
-        spawn_substitution_endpoint(SubstitutionSpawnParams {
+        let uds = vm_network_endpoint_socket(req.vm_name);
+        spawn_network_endpoint(SubstitutionSpawnParams {
             vm_name: req.vm_name,
             state_dir: req.state_dir,
             tenant: req.tenant,
@@ -3329,7 +3329,7 @@ mod tests {
     impl EndpointSpawner for KeyingSpawner {
         fn spawn(&self, req: &EndpointSpawnRequest<'_>) -> Result<PathBuf> {
             *self.seen_vm.lock().unwrap() = Some(req.vm_name.to_string());
-            Ok(vm_substitution_endpoint_socket(req.vm_name))
+            Ok(vm_network_endpoint_socket(req.vm_name))
         }
     }
 

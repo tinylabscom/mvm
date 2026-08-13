@@ -1,4 +1,4 @@
-//! `mvm-substitution-endpoint` — the per-VM secret-substitution moat.
+//! `mvm-network-endpoint` — the per-VM secret-substitution moat.
 //! Spawned per-VM by the backend, it is the one process that holds
 //! the workload's secrets in the clear: it opens the host's encrypted secret +
 //! binding stores, builds the per-VM `SubstitutionService`, and serves the
@@ -30,7 +30,7 @@ use anyhow::{Context, Result};
 use tracing::info;
 
 use mvm_hostd::keyholder::secret_placeholder_env;
-use mvm_hostd::supervisor::substitution_endpoint::{
+use mvm_hostd::supervisor::network_endpoint::{
     EgressMode, EndpointConfig, EndpointHandshake, EndpointTransport, ResolverBackend, assemble,
     build_audit_recorder, build_egress_gate, fingerprint_bound_secrets, parse,
 };
@@ -40,7 +40,7 @@ fn read_stdin_blocking() -> Result<Vec<u8>> {
     std::io::stdin()
         .lock()
         .read_to_end(&mut buf)
-        .context("mvm-substitution-endpoint stdin read failed")?;
+        .context("mvm-network-endpoint stdin read failed")?;
     Ok(buf)
 }
 
@@ -65,11 +65,11 @@ fn main() -> Result<()> {
         .init();
 
     let raw = read_stdin_blocking()?;
-    let cfg = parse(&raw).context("mvm-substitution-endpoint config parse failed")?;
+    let cfg = parse(&raw).context("mvm-network-endpoint config parse failed")?;
     info!(
         tenant_id = %cfg.tenant_id,
         secrets = cfg.secrets.len(),
-        "mvm-substitution-endpoint config loaded"
+        "mvm-network-endpoint config loaded"
     );
 
     // Bind BEFORE the handshake so the backend knows the endpoint is reachable
@@ -169,7 +169,7 @@ fn raw_egress_gate(cfg: &EndpointConfig) -> mvm_runtime::vmm::egress_gate::Egres
 /// a standalone, non-platform-gated function (rather than inlined into
 /// `confine_endpoint`, whose real body is Linux-only) so the `Remote ⇒
 /// Some(uds)` decision is unit-testable on every contributor host, not just
-/// Linux CI — see `ConfinementSpec::substitution_endpoint`'s doc for what this
+/// Linux CI — see `ConfinementSpec::network_endpoint`'s doc for what this
 /// grants once it reaches the confinement builder.
 fn resolver_uds_path(cfg: &EndpointConfig) -> Option<&std::path::Path> {
     match &cfg.resolver {
@@ -189,7 +189,7 @@ fn resolver_uds_path(cfg: &EndpointConfig) -> Option<&std::path::Path> {
 #[cfg(target_os = "linux")]
 fn confine_endpoint(cfg: &EndpointConfig) -> Result<()> {
     use mvm_hostd::jailer::{ConfinementSpec, confine_self};
-    use mvm_hostd::supervisor::substitution_endpoint::resolve_store_dirs;
+    use mvm_hostd::supervisor::network_endpoint::resolve_store_dirs;
 
     let (secret_dir, binding_dir) =
         resolve_store_dirs(cfg).context("resolve substitution-endpoint store dirs")?;
@@ -198,7 +198,7 @@ fn confine_endpoint(cfg: &EndpointConfig) -> Result<()> {
     // endpoint can chain-sign substitution events. `resolver_uds_path` widens
     // the grant with the ONE resolver socket when (and only when) `cfg.resolver`
     // is `Remote` — `Local` leaves the confinement unchanged.
-    let spec = ConfinementSpec::substitution_endpoint(
+    let spec = ConfinementSpec::network_endpoint(
         secret_dir,
         binding_dir,
         mvm_core::config::mvm_audit_dir(),
@@ -230,7 +230,7 @@ fn confine_endpoint(cfg: &EndpointConfig) -> Result<()> {
 enum Bound {
     Uds(std::os::unix::net::UnixListener),
     #[cfg(target_os = "linux")]
-    Vsock(mvm_hostd::supervisor::substitution_proxy::vsock::VsockListener),
+    Vsock(mvm_hostd::supervisor::network_endpoint_proxy::vsock::VsockListener),
 }
 
 fn bind_transport(transport: &EndpointTransport) -> Result<Bound> {
@@ -249,7 +249,7 @@ fn bind_transport(transport: &EndpointTransport) -> Result<Bound> {
         EndpointTransport::Vsock { port } => {
             #[cfg(target_os = "linux")]
             {
-                use mvm_hostd::supervisor::substitution_proxy::vsock::VsockListener;
+                use mvm_hostd::supervisor::network_endpoint_proxy::vsock::VsockListener;
                 let listener = VsockListener::bind(*port)
                     .with_context(|| format!("AF_VSOCK bind on port {port} failed"))?;
                 info!(port = *port, "substitution endpoint bound (vsock)");
@@ -284,7 +284,7 @@ fn bind_terminator(addr: Option<std::net::SocketAddr>) -> Result<Option<std::net
 /// (placeholder-bearing requests) AND the redirected terminator path.
 async fn serve(
     cfg: &EndpointConfig,
-    service: Option<std::sync::Arc<mvm_hostd::supervisor::substitution_proxy::SubstitutionService>>,
+    service: Option<std::sync::Arc<mvm_hostd::supervisor::network_endpoint_proxy::SubstitutionService>>,
     bound: Bound,
     terminator: Option<std::net::TcpListener>,
     forward_timeout: std::time::Duration,
@@ -331,7 +331,7 @@ fn can_skip_substitution_assembly(cfg: &EndpointConfig) -> bool {
 
 /// The WireRequest substitution serve loop over the adopted listener.
 async fn serve_wire(
-    service: std::sync::Arc<mvm_hostd::supervisor::substitution_proxy::SubstitutionService>,
+    service: std::sync::Arc<mvm_hostd::supervisor::network_endpoint_proxy::SubstitutionService>,
     bound: Bound,
     _forward_timeout: std::time::Duration,
 ) -> Result<()> {
@@ -382,7 +382,7 @@ mod tests {
             tenant_id: "local".into(),
             secrets: Vec::new(),
             transport: EndpointTransport::Uds {
-                path: "/tmp/mvm-substitution-endpoint-test.sock".into(),
+                path: "/tmp/mvm-network-endpoint-test.sock".into(),
             },
             redaction: mvm_core::policy::RedactionPolicy::default(),
             reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
@@ -410,7 +410,7 @@ mod tests {
             tenant_id: "acme".into(),
             secrets: vec![],
             transport: EndpointTransport::Uds {
-                path: PathBuf::from("/tmp/mvm-substitution-endpoint-test.sock"),
+                path: PathBuf::from("/tmp/mvm-network-endpoint-test.sock"),
             },
             redaction: mvm_core::policy::RedactionPolicy::default(),
             reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),

@@ -1,7 +1,7 @@
 //! Seccomp property test (`mvm-jailer-lite`).
 //!
 //! Parent test forks the test binary with `SECCOMP_PROBE=1`; child
-//! applies `ConfinementSpec::substitution_endpoint` confinement and
+//! applies `ConfinementSpec::network_endpoint` confinement and
 //! probes one allowed syscall (`clock_gettime` via `Instant::now`)
 //! and one disallowed (`mkdir` via `std::fs::create_dir`, which on
 //! Linux dispatches `SYS_mkdirat` — confirmed absent from
@@ -72,7 +72,7 @@ fn run_probe() {
     // The substitution endpoint is the live confined role. The spec this used
     // to build belonged to a deleted sidecar and named a gateway binary as a
     // readable path, so the probe only ran where that binary was installed.
-    let spec = ConfinementSpec::substitution_endpoint(
+    let spec = ConfinementSpec::network_endpoint(
         "/tmp/mvm-seccomp-probe-secrets".into(),
         "/tmp/mvm-seccomp-probe-bindings".into(),
         "/tmp/mvm-seccomp-probe-audit".into(),

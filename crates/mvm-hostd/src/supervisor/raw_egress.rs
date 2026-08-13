@@ -264,12 +264,12 @@ where
 /// decision as the UDS path.
 #[cfg(target_os = "linux")]
 pub async fn serve_raw_egress_vsock(
-    listener: crate::supervisor::substitution_proxy::vsock::VsockListener,
+    listener: crate::supervisor::network_endpoint_proxy::vsock::VsockListener,
     gate: Arc<EgressGate>,
     recorder: Option<Arc<Recorder>>,
     timeout: Duration,
 ) {
-    use crate::supervisor::substitution_proxy::vsock;
+    use crate::supervisor::network_endpoint_proxy::vsock;
     let rate_guard = Arc::new(egress_rate::EgressRateGuard::default());
     loop {
         let listen_fd = listener.raw_fd();

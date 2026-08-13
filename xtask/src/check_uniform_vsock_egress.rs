@@ -109,14 +109,14 @@ const FORBIDDEN_ENUM_ARMS: &[&str] = &[
 /// `RealEndpointSpawner`), the builder role, the raw `libkrun.rs` +
 /// `microvm/egress_bridge.rs` + `egress_redirect.rs` (held live by the hostd
 /// supervisor + Firecracker standby fleet path), the endpoint definition
-/// (`substitution_spawn.rs`) + the `mvm-hostd` supervisor + the substitution
+/// (`network_endpoint_spawn.rs`) + the `mvm-hostd` supervisor + the substitution
 /// endpoint binary, and `bench/probe.rs`.
 const GUARDED_PATHS: &[&str] = &["crates/mvm-runtime/src/driver", APPLE_CONTAINER_RS];
 
 /// Raw egress-spawn tokens. Any of these on the guarded driver surface means a
 /// per-VM endpoint is being spawned outside `RealEndpointSpawner`.
 const FORBIDDEN: &[&str] = &[
-    "spawn_substitution_endpoint",
+    "spawn_network_endpoint",
     "EndpointTransport::Uds",
     "EndpointTransport::Vsock",
     "spawn_libkrun_egress_endpoint_if_needed",
@@ -410,14 +410,14 @@ mod tests {
         std::fs::create_dir_all(&driver).expect("create driver dir");
         std::fs::write(
             driver.join("rogue.rs"),
-            "fn wire() {\n    spawn_substitution_endpoint(params);\n}\n",
+            "fn wire() {\n    spawn_network_endpoint(params);\n}\n",
         )
         .expect("write rogue driver");
 
         let err = check_no_driver_egress_spawn(root.path())
             .expect_err("a driver spawning an endpoint must fail the gate");
         assert!(
-            err.to_string().contains("spawn_substitution_endpoint"),
+            err.to_string().contains("spawn_network_endpoint"),
             "got {err}"
         );
     }
@@ -628,14 +628,14 @@ mod tests {
         std::fs::create_dir_all(path.parent().expect("parent")).expect("create dirs");
         std::fs::write(
             &path,
-            "fn start(&self) {\n    spawn_substitution_endpoint(params);\n}\n",
+            "fn start(&self) {\n    spawn_network_endpoint(params);\n}\n",
         )
         .expect("write rogue apple-container backend");
 
         let err = check_no_driver_egress_spawn(root.path())
             .expect_err("an egress spawn in the apple-container backend must fail the gate");
         let err = err.to_string();
-        assert!(err.contains("spawn_substitution_endpoint"), "got {err}");
+        assert!(err.contains("spawn_network_endpoint"), "got {err}");
         assert!(err.contains("apple_container_backend.rs"), "got {err}");
     }
 

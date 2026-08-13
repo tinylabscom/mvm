@@ -34,7 +34,7 @@ use mvm_core::vm_backend::{StandbyClaim, StandbyError, StandbySpec, VmStartConfi
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use mvm_vmm::host::substitution_spawn::EndpointGuard;
+use mvm_vmm::host::network_endpoint_spawn::EndpointGuard;
 
 /// Spawn the per-VM egress endpoint for libkrun workloads. Secret-bound runs
 /// get the WireRequest substitution path; secret-free runs can opt into the
@@ -47,8 +47,8 @@ pub fn spawn_libkrun_egress_endpoint_if_needed(
     config_tenant: &str,
     network_policy: &mvm_core::network_policy::NetworkPolicy,
 ) -> Result<EndpointGuard> {
-    use mvm_vmm::host::substitution_spawn::{
-        EndpointTransport, SubstitutionSpawnParams, spawn_substitution_endpoint,
+    use mvm_vmm::host::network_endpoint_spawn::{
+        EndpointTransport, SubstitutionSpawnParams, spawn_network_endpoint,
     };
     let default_redaction = mvm_core::policy::RedactionPolicy::default();
     let decoded = mvm_vmm::host::egress_shared::decode_plan_secrets_from_state(state_dir)?;
@@ -68,7 +68,7 @@ pub fn spawn_libkrun_egress_endpoint_if_needed(
     if secrets.is_empty() && !network_policy.allows_egress() {
         return Ok(EndpointGuard::defused());
     }
-    spawn_substitution_endpoint(SubstitutionSpawnParams {
+    spawn_network_endpoint(SubstitutionSpawnParams {
         vm_name,
         state_dir,
         tenant,

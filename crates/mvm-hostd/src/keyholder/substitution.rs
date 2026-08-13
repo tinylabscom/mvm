@@ -93,13 +93,13 @@ pub enum SubstituteError {
 /// The host substitution endpoint core: resolve a guest's placeholder to its
 /// secret, then substitute the real credential toward a bound destination.
 /// Dispatch only — the transport + real-TLS forward live elsewhere.
-pub struct SubstitutionEndpoint<'a> {
+pub struct NetworkEndpoint<'a> {
     registry: &'a SubstitutionRegistry,
     resolver: &'a dyn SecretResolver,
     injector: Injector<'a>,
 }
 
-impl<'a> SubstitutionEndpoint<'a> {
+impl<'a> NetworkEndpoint<'a> {
     pub fn new(registry: &'a SubstitutionRegistry, resolver: &'a dyn SecretResolver) -> Self {
         Self {
             registry,
@@ -270,7 +270,7 @@ mod tests {
             AuthType::Sigv4,
             &["example.amazonaws.com"],
         ));
-        let endpoint = SubstitutionEndpoint::new(&reg, &spy);
+        let endpoint = NetworkEndpoint::new(&reg, &spy);
         // aws-sig-v4-test-suite `get-vanilla` — the signer's known-answer oracle.
         let input = SigningInput::SigV4(SigV4Input {
             canonical_request: "GET\n/\n\nhost:example.amazonaws.com\n\
@@ -302,7 +302,7 @@ mod tests {
             AuthType::Hmac,
             &["hooks.example.com"],
         ));
-        let endpoint = SubstitutionEndpoint::new(&reg, &spy);
+        let endpoint = NetworkEndpoint::new(&reg, &spy);
         let input = SigningInput::Hmac {
             payload: b"what do ya want for nothing?".to_vec(),
         };
@@ -325,7 +325,7 @@ mod tests {
             AuthType::Sigv4,
             &["example.amazonaws.com"],
         ));
-        let endpoint = SubstitutionEndpoint::new(&reg, &spy);
+        let endpoint = NetworkEndpoint::new(&reg, &spy);
         let err = endpoint
             .sign(
                 ph.as_str(),
@@ -346,7 +346,7 @@ mod tests {
         use crate::keyholder::SigningInput;
         let (_dir, spy) = spy_with("aws", "key");
         let reg = SubstitutionRegistry::new();
-        let endpoint = SubstitutionEndpoint::new(&reg, &spy);
+        let endpoint = NetworkEndpoint::new(&reg, &spy);
         let err = endpoint
             .sign(
                 "mvm-secret-deadbeef",
@@ -364,7 +364,7 @@ mod tests {
         let (_dir, spy) = spy_with("api", "tok");
         let mut reg = SubstitutionRegistry::new();
         let ph = reg.mint(bearer_ref("api", &["api.example.com"]));
-        let endpoint = SubstitutionEndpoint::new(&reg, &spy);
+        let endpoint = NetworkEndpoint::new(&reg, &spy);
         let err = endpoint
             .sign(
                 ph.as_str(),
@@ -396,7 +396,7 @@ mod tests {
         let (_dir, spy) = spy_with("openai", "sk-live-zzz");
         let mut reg = SubstitutionRegistry::new();
         let ph = reg.mint(bearer_ref("openai", &["api.openai.com"]));
-        let endpoint = SubstitutionEndpoint::new(&reg, &spy);
+        let endpoint = NetworkEndpoint::new(&reg, &spy);
 
         let req = format!(
             "GET /v1 HTTP/1.1\r\nAuthorization: Bearer {}\r\n\r\n",
@@ -413,7 +413,7 @@ mod tests {
     fn unknown_placeholder_is_refused_without_decrypting() {
         let (_dir, spy) = spy_with("openai", "sk-live-zzz");
         let reg = SubstitutionRegistry::new();
-        let endpoint = SubstitutionEndpoint::new(&reg, &spy);
+        let endpoint = NetworkEndpoint::new(&reg, &spy);
         let err = endpoint
             .substitute(
                 "mvm-secret-deadbeef",
@@ -430,7 +430,7 @@ mod tests {
         let (_dir, spy) = spy_with("openai", "sk-live-zzz");
         let mut reg = SubstitutionRegistry::new();
         let ph = reg.mint(bearer_ref("openai", &["api.openai.com"]));
-        let endpoint = SubstitutionEndpoint::new(&reg, &spy);
+        let endpoint = NetworkEndpoint::new(&reg, &spy);
         let err = endpoint
             .substitute(
                 ph.as_str(),

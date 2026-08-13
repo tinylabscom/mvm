@@ -208,7 +208,7 @@ bdd:
 
 # a targeted rebuild or CI.
 build-supervisors:
-    cargo build -p mvm-hostd --bin mvm-substitution-endpoint --bin mvm-hvf-supervisor
+    cargo build -p mvm-hostd --bin mvm-network-endpoint --bin mvm-hvf-supervisor
     cargo build -p mvm-hostd --bin mvm-libkrun-supervisor --features libkrun-sys
 
 # Build the dm-verity-capable workload kernel into the local mvm cache.

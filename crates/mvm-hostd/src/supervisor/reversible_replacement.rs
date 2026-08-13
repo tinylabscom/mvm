@@ -16,7 +16,7 @@ use crate::supervisor::secrets_scanner::{SecretMatch, SecretsScanner};
 use crate::supervisor::sensitive_detector::{
     LeakGuardCredentialDetector, SensitiveDetector, SensitiveMatch,
 };
-use crate::supervisor::substitution_proxy::ForwardResponse;
+use crate::supervisor::network_endpoint_proxy::ForwardResponse;
 
 type HmacSha256 = Hmac<Sha256>;
 

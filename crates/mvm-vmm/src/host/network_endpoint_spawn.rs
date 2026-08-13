@@ -2,7 +2,7 @@
 //!
 //! One implementation behind the workload backends that need it, so the
 //! endpoint-spawn logic cannot drift between copies. The endpoint is
-//! `mvm-substitution-endpoint` (an `mvm-hostd` bin):
+//! `mvm-network-endpoint` (an `mvm-hostd` bin):
 //! when the admitted plan carries secret bindings it runs as a per-VM host
 //! process that resolves placeholders for the guest's egress so the real
 //! secret never enters the guest. The converged Firecracker, libkrun, and HVF
@@ -26,7 +26,7 @@ use std::time::Duration;
 /// AF_VSOCK listener; Firecracker/libkrun route guest→host through a per-port
 /// UDS the in-process VMM proxies, so the host binds that UDS.
 ///
-/// This is the wire contract the `mvm-substitution-endpoint` bin parses on
+/// This is the wire contract the `mvm-network-endpoint` bin parses on
 /// stdin; mvm-hostd re-exports it so the bin and its tests keep one definition.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -173,7 +173,7 @@ pub fn build_egress_tls_delivery(bound_hosts: &[&str], ca_dir: &Path) -> Result<
     })
 }
 
-/// PID of the per-VM `mvm-substitution-endpoint` moat, and the JSON
+/// PID of the per-VM `mvm-network-endpoint` moat, and the JSON
 /// file holding the `(guest var, placeholder)` env pairs it minted (the invoke
 /// path reads this to inject `HTTP_PROXY` + placeholder vars). Spawned only when
 /// the admitted plan carries secret bindings.
@@ -182,11 +182,11 @@ pub const SUBST_PID_FILE: &str = "substitution.pid";
 /// line before the caller declares the spawn failed.
 pub const SUBST_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Locate the `mvm-substitution-endpoint` binary. Compiled by mvmctl's build
+/// Locate the `mvm-network-endpoint` binary. Compiled by mvmctl's build
 /// script; see [`mvm_vmm::host::aux_bin`] for the search order.
-fn resolve_substitution_endpoint_path() -> Result<PathBuf> {
+fn resolve_network_endpoint_path() -> Result<PathBuf> {
     crate::host::aux_bin::resolve(&crate::host::aux_bin::AuxBin {
-        bin: "mvm-substitution-endpoint",
+        bin: "mvm-network-endpoint",
         env_var: "MVM_SUBSTITUTION_ENDPOINT_PATH",
     })
 }
@@ -194,7 +194,7 @@ fn resolve_substitution_endpoint_path() -> Result<PathBuf> {
 /// `resolver_remote` config for [`SubstitutionSpawnParams`]: resolve secret
 /// *values* over a UDS to a remote fleet-secrets daemon (mvmd's tenant
 /// vault) instead of the endpoint's local encrypted secret store. Mirrors
-/// `mvm_hostd::supervisor::substitution_endpoint::ResolverBackend::Remote`'s
+/// `mvm_hostd::supervisor::network_endpoint::ResolverBackend::Remote`'s
 /// two fields exactly — but is defined here (not imported from `mvm-hostd`)
 /// because `mvm-hostd` depends on `mvm-vmm`, never the reverse; a shared
 /// field-shape (not a shared type) is how the two stay in sync without a
@@ -208,7 +208,7 @@ pub struct RemoteResolverSpawnConfig<'a> {
     pub timeout_secs: u64,
 }
 
-/// Inputs to [`spawn_substitution_endpoint`]. Grouped into a struct (rather
+/// Inputs to [`spawn_network_endpoint`]. Grouped into a struct (rather
 /// than threading bare positional args) so the backend-shaped fields —
 /// `transport` (vsock vs UDS), `terminator_listen`, `tls_intermediate` — read
 /// at the callsite and stay under the argument-count lint.
@@ -317,7 +317,7 @@ fn build_endpoint_config_json(params: &SubstitutionSpawnParams<'_>) -> serde_jso
     cfg
 }
 
-/// Spawn the per-VM `mvm-substitution-endpoint` moat. Hands it the
+/// Spawn the per-VM `mvm-network-endpoint` moat. Hands it the
 /// plan's secret bindings on stdin, reads back the minted `(guest var,
 /// placeholder)` handshake line, and persists it to the per-VM substitution env
 /// file for the invoke path to inject (`HTTP_PROXY` + placeholder vars). The
@@ -327,19 +327,19 @@ fn build_endpoint_config_json(params: &SubstitutionSpawnParams<'_>) -> serde_jso
 /// `mvmctl up`; the stop path reaps
 /// it via [`SUBST_PID_FILE`]. The real secret values never leave the endpoint's
 /// address space — only the opaque placeholders are persisted/handed out.
-pub fn spawn_substitution_endpoint(params: SubstitutionSpawnParams<'_>) -> Result<()> {
+pub fn spawn_network_endpoint(params: SubstitutionSpawnParams<'_>) -> Result<()> {
     use std::io::Write;
     let cfg = build_endpoint_config_json(&params);
     let SubstitutionSpawnParams {
         vm_name, state_dir, ..
     } = params;
 
-    let bin = resolve_substitution_endpoint_path()?;
+    let bin = resolve_network_endpoint_path()?;
 
     // Capture endpoint diagnostics to /tmp so hangs/refusals are observable.
     // The file is per-VM and truncated each run; stderr was previously /dev/null.
     let stderr_log =
-        std::path::PathBuf::from("/tmp").join(format!("mvm-substitution-endpoint-{vm_name}.log"));
+        std::path::PathBuf::from("/tmp").join(format!("mvm-network-endpoint-{vm_name}.log"));
     let log_file = std::fs::OpenOptions::new()
         .create(true)
         .truncate(true)
@@ -525,7 +525,7 @@ impl Drop for EndpointGuard {
     fn drop(&mut self) {
         if let Some(ref name) = self.vm_name {
             tracing::warn!(vm = %name, "EndpointGuard: reaping orphaned substitution endpoint");
-            reap_substitution_endpoint(&mvm_core::config::vm_state_dir(name), name);
+            reap_network_endpoint(&mvm_core::config::vm_state_dir(name), name);
         }
     }
 }
@@ -534,7 +534,7 @@ impl Drop for EndpointGuard {
 /// decrypted secrets don't outlive the guest, and drop the pid + env sidecars.
 /// Best-effort + idempotent: a VM with no endpoint (no secrets) is a no-op. The
 /// liveness guard prevents signalling a recycled PID from a stale pidfile.
-pub fn reap_substitution_endpoint(state_dir: &Path, vm_name: &str) {
+pub fn reap_network_endpoint(state_dir: &Path, vm_name: &str) {
     if let Some(spid) = read_pid(&state_dir.join(SUBST_PID_FILE))
         && pid_alive(spid)
     {
@@ -583,9 +583,9 @@ mod tests {
     fn reap_is_noop_when_nothing_exists() {
         let dir = std::env::temp_dir().join(format!("mvm-reap-noop-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        reap_substitution_endpoint(&dir, "nonexistent-vm");
+        reap_network_endpoint(&dir, "nonexistent-vm");
         // Idempotent: a second call on the same empty dir is still clean.
-        reap_substitution_endpoint(&dir, "nonexistent-vm");
+        reap_network_endpoint(&dir, "nonexistent-vm");
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -703,13 +703,13 @@ mod tests {
         let _ = child.wait();
     }
 
-    // The libkrun/HVF transport: `spawn_substitution_endpoint` must serialize the
+    // The libkrun/HVF transport: `spawn_network_endpoint` must serialize the
     // `Uds` variant into the config JSON the endpoint bin parses
     // (`{"kind":"uds","path":...}`). Drive it with a stub bin (via
     // `MVM_SUBSTITUTION_ENDPOINT_PATH`) that copies its stdin config to a file
     // for inspection and prints a one-line ready handshake.
     #[test]
-    fn spawn_substitution_endpoint_emits_uds_transport() {
+    fn spawn_network_endpoint_emits_uds_transport() {
         let _g = HOME_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let mut env = TestEnv::new();
         let dir = std::env::temp_dir().join(format!("mvm-subst-uds-{}", std::process::id()));
@@ -745,7 +745,7 @@ mod tests {
 
         let sock = dir.join("vsock-5253.sock");
         let redaction = mvm_core::policy::RedactionPolicy::default();
-        let res = spawn_substitution_endpoint(SubstitutionSpawnParams {
+        let res = spawn_network_endpoint(SubstitutionSpawnParams {
             vm_name: "uds-xport-vm",
             state_dir: &dir,
             tenant: "tenant-x",
@@ -802,7 +802,7 @@ mod tests {
             std::fs::create_dir_all(parent).unwrap();
         }
         let redaction = mvm_core::policy::RedactionPolicy::default();
-        spawn_substitution_endpoint(SubstitutionSpawnParams {
+        spawn_network_endpoint(SubstitutionSpawnParams {
             vm_name: vm,
             state_dir: &dir,
             tenant: "tenant-x",
@@ -839,7 +839,7 @@ mod tests {
 
         // And the reap that ends the endpoint ends the set with it, so a
         // recycled VM name cannot inherit a dead workload's shapes.
-        reap_substitution_endpoint(&dir, vm);
+        reap_network_endpoint(&dir, vm);
         assert!(recorded_secret_fingerprints(vm).is_empty());
 
         std::fs::remove_dir_all(&dir).ok();
@@ -866,7 +866,7 @@ mod tests {
 
         let vm = "handshake-garbage-vm";
         let redaction = mvm_core::policy::RedactionPolicy::default();
-        let err = spawn_substitution_endpoint(SubstitutionSpawnParams {
+        let err = spawn_network_endpoint(SubstitutionSpawnParams {
             vm_name: vm,
             state_dir: &dir,
             tenant: "tenant-x",
@@ -931,7 +931,7 @@ mod tests {
         env.set("MVM_SUBSTITUTION_ENDPOINT_PATH", &stub);
 
         let redaction = mvm_core::policy::RedactionPolicy::default();
-        let result = spawn_substitution_endpoint(SubstitutionSpawnParams {
+        let result = spawn_network_endpoint(SubstitutionSpawnParams {
             vm_name: "rollback-vm",
             state_dir: &state_dir,
             tenant: "tenant-x",
@@ -1038,7 +1038,7 @@ mod tests {
     // values over a UDS to its per-VM resolver daemon, and to read
     // allowed_hosts/auth_type bindings from a per-VM binding-store dir — not the
     // host defaults. Assert both land in the JSON exactly as
-    // `mvm_hostd::supervisor::substitution_endpoint::EndpointConfig`'s
+    // `mvm_hostd::supervisor::network_endpoint::EndpointConfig`'s
     // `#[serde(tag = "backend", rename_all = "snake_case")]` `ResolverBackend`
     // and `binding_store_dir` fields expect them shaped. Pure (no subprocess).
     #[test]

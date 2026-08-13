@@ -1,4 +1,4 @@
-//! End-to-end test of the `mvm-substitution-endpoint` subprocess over UDS.
+//! End-to-end test of the `mvm-network-endpoint` subprocess over UDS.
 //!
 //! Drives the real bin: writes an `EndpointConfig` on stdin, reads the
 //! placeholder handshake line from stdout, then routes a request through the
@@ -17,12 +17,12 @@ use mvm_core::crypto::secret_store::{FileSecretStore, SecretStore};
 use mvm_core::plan::{SecretBinding, SecretSource};
 use mvm_core::substitution_wire::{WireRequest, WireResponse};
 use mvm_hostd::keyholder::{BindingStore, FileBindingStore, SecretBindingMeta};
-use mvm_hostd::supervisor::substitution_endpoint::{
+use mvm_hostd::supervisor::network_endpoint::{
     EgressMode, EndpointConfig, EndpointTransport, ResolverBackend,
 };
 use secrecy::SecretBox;
 
-const BIN: &str = env!("CARGO_BIN_EXE_mvm-substitution-endpoint");
+const BIN: &str = env!("CARGO_BIN_EXE_mvm-network-endpoint");
 
 fn write_frame<W: Write>(w: &mut W, value: &impl serde::Serialize) {
     let body = serde_json::to_vec(value).unwrap();
@@ -194,7 +194,7 @@ fn endpoint_bin_claim10_gate_refuses_a_bound_but_unadmitted_destination() {
         tls_intermediate: None,
         // Deny-all: the endpoint gates every destination — even the bound one.
         network_policy: Some(mvm_core::policy::network_policy::NetworkPolicy::deny_all()),
-        egress_mode: mvm_hostd::supervisor::substitution_endpoint::EgressMode::Wire,
+        egress_mode: mvm_hostd::supervisor::network_endpoint::EgressMode::Wire,
         resolver: ResolverBackend::default(),
     };
 

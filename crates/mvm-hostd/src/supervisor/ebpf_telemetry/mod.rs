@@ -206,7 +206,7 @@ mod tests {
             },
             helpers: vec![mvm_runtime::base::observability_target::ProcessTarget {
                 role: "substitution".to_string(),
-                process_name: "mvm-substitution-endpoint".to_string(),
+                process_name: "mvm-network-endpoint".to_string(),
                 pid_file: tmp.path().join("substitution.pid"),
                 pid: None,
             }],

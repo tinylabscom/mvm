@@ -424,7 +424,7 @@ fn internal_builder_egress_supervisor_command_is_hidden_but_parseable() {
         "mvmctl",
         "__builder-egress-supervisor",
         "--endpoint",
-        "/tmp/mvm-substitution-endpoint",
+        "/tmp/mvm-network-endpoint",
     ])
     .unwrap();
     assert!(matches!(cli.command, Commands::BuilderEgressSupervisor(_)));

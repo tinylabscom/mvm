@@ -28,7 +28,7 @@ use mvm_core::substitution_wire::{WireRequest, WireResponse};
 use crate::framing::{FrameError, read_json_frame, write_json_frame};
 use crate::keyholder::{
     AssembleError, BindingStore, HandedPlaceholders, SecretResolver, SignDispatchError,
-    SigningInput, SubstituteError, SubstitutionEndpoint, SubstitutionRegistry, assemble_registry,
+    SigningInput, SubstituteError, NetworkEndpoint, SubstitutionRegistry, assemble_registry,
     build_sigv4_input, find_placeholder,
 };
 use crate::supervisor::audit_recorder::Recorder;
@@ -107,7 +107,7 @@ pub enum ProxyError {
 /// secret at `api.openai.com` in the binding but send the bytes elsewhere: the
 /// bind-check uses the URL we will actually dial.
 pub fn prepare_request(
-    endpoint: &SubstitutionEndpoint<'_>,
+    endpoint: &NetworkEndpoint<'_>,
     req: ProxyRequest,
 ) -> Result<PreparedRequest, ProxyError> {
     let dest = destination_host(&req.url)?;
@@ -120,7 +120,7 @@ pub fn prepare_request(
     }
 }
 
-impl<'a> SubstitutionDriver for SubstitutionEndpoint<'a> {
+impl<'a> SubstitutionDriver for NetworkEndpoint<'a> {
     type Error = ProxyError;
 
     fn auth_type(&self, placeholder: &str) -> Option<AuthType> {
@@ -245,7 +245,7 @@ impl<'a> SignRequestBuilder<'a> {
 /// Fail-closed: a missing SigV4 binding, a bad request, or a refused/failed sign
 /// returns `Err` and the caller forwards nothing.
 fn sign_into_headers(
-    endpoint: &SubstitutionEndpoint<'_>,
+    endpoint: &NetworkEndpoint<'_>,
     req: &SignRequest<'_>,
     headers: &mut Vec<(String, String)>,
 ) -> Result<(), ProxyError> {
@@ -359,7 +359,7 @@ fn url_host_port(url: &str) -> Option<String> {
 /// the UDS/vsock `process` path and the terminator path so their two audit
 /// emissions can't drift.
 pub(crate) fn collect_substituted_meta(
-    endpoint: &SubstitutionEndpoint<'_>,
+    endpoint: &NetworkEndpoint<'_>,
     headers: &[(String, String)],
 ) -> Vec<(String, AuthType)> {
     headers
@@ -877,7 +877,7 @@ impl SubstitutionService {
         stream: tokio::net::TcpStream,
         timeout: std::time::Duration,
     ) -> anyhow::Result<()> {
-        use crate::keyholder::SubstitutionEndpoint;
+        use crate::keyholder::NetworkEndpoint;
         use crate::supervisor::terminator;
         use std::io::Write;
 
@@ -915,7 +915,7 @@ impl SubstitutionService {
         // same as the UDS/vsock `process` path (shared helper so they can't
         // drift). resolve_meta touches no value, so this is claim-13 safe.
         let req = terminator::request::proxy_request_from_origin_form(&raw, orig_dst)?;
-        let endpoint = SubstitutionEndpoint::new(&self.registry, self.resolver.as_ref());
+        let endpoint = NetworkEndpoint::new(&self.registry, self.resolver.as_ref());
         let destination = destination_host(&req.url).ok();
         let substituted = collect_substituted_meta(&endpoint, &req.headers);
         // Whether the request smuggled a host placeholder at all — decides if a
@@ -942,7 +942,7 @@ impl SubstitutionService {
         let registry = Arc::clone(&self.registry);
         let resolver = Arc::clone(&self.resolver);
         let forwarded = tokio::task::spawn_blocking(move || {
-            let endpoint = SubstitutionEndpoint::new(&registry, resolver.as_ref());
+            let endpoint = NetworkEndpoint::new(&registry, resolver.as_ref());
             // The redactor is the shared curated ruleset (same as the service's),
             // rebuilt here so the closure stays 'static without cloning rule state.
             let redactor = RedactingSubstitution::with_default_rules();
@@ -1002,7 +1002,7 @@ impl SubstitutionService {
         orig_dst: std::net::SocketAddr,
         timeout: std::time::Duration,
     ) -> anyhow::Result<()> {
-        use crate::keyholder::SubstitutionEndpoint;
+        use crate::keyholder::NetworkEndpoint;
         use crate::supervisor::terminator::{self, tls};
 
         // Peek the SNI without consuming the stream (blocking).
@@ -1040,7 +1040,7 @@ impl SubstitutionService {
         let forwarder = Arc::clone(&self.forwarder);
         let handle = tokio::runtime::Handle::current();
         let (outcome, carried_placeholder) = tokio::task::spawn_blocking(move || {
-            let endpoint = SubstitutionEndpoint::new(&registry, resolver.as_ref());
+            let endpoint = NetworkEndpoint::new(&registry, resolver.as_ref());
             let redactor = RedactingSubstitution::with_default_rules();
             let mut carried = false;
             let outcome = tls::terminate_and_substitute(
@@ -1145,7 +1145,7 @@ impl SubstitutionService {
         // Per-request endpoint: two refs, cheap; the registry is read-only
         // after admission minted its placeholders.
         let registry: &SubstitutionRegistry = &self.registry;
-        let endpoint = SubstitutionEndpoint::new(registry, self.resolver.as_ref());
+        let endpoint = NetworkEndpoint::new(registry, self.resolver.as_ref());
         // Capture audit metadata (name + auth-type per substituted secret, and
         // the destination) before `prepare_request` consumes `req`.
         let destination = destination_host(&req.url).ok();
@@ -1628,7 +1628,7 @@ mod tests {
             "s3",
             "us-east-1",
         ));
-        let endpoint = SubstitutionEndpoint::new(&reg, &resolver);
+        let endpoint = NetworkEndpoint::new(&reg, &resolver);
 
         // The guest puts the opaque placeholder in the Authorization header,
         // exactly like Bearer; the endpoint branches on the resolved auth_type.
@@ -1703,7 +1703,7 @@ mod tests {
             "service",
             "us-east-1",
         ));
-        let endpoint = SubstitutionEndpoint::new(&reg, &resolver);
+        let endpoint = NetworkEndpoint::new(&reg, &resolver);
         let req = ProxyRequest {
             method: "GET".into(),
             url: "https://example.amazonaws.com/".into(),
@@ -1741,7 +1741,7 @@ mod tests {
             "s3",
             "us-east-1",
         ));
-        let endpoint = SubstitutionEndpoint::new(&reg, &resolver);
+        let endpoint = NetworkEndpoint::new(&reg, &resolver);
 
         let req = ProxyRequest {
             method: "GET".into(),
@@ -1770,7 +1770,7 @@ mod tests {
         let (_dir, resolver) = resolver_with("aws", AWS_SECRET_ACCESS_KEY);
         let mut reg = SubstitutionRegistry::new();
         let ph = reg.mint(sigv4_ref_no_params("aws", &["s3.us-east-1.amazonaws.com"]));
-        let endpoint = SubstitutionEndpoint::new(&reg, &resolver);
+        let endpoint = NetworkEndpoint::new(&reg, &resolver);
 
         let req = ProxyRequest {
             method: "GET".into(),
@@ -1798,7 +1798,7 @@ mod tests {
             "s3",
             "us-east-1",
         ));
-        let endpoint = SubstitutionEndpoint::new(&reg, &resolver);
+        let endpoint = NetworkEndpoint::new(&reg, &resolver);
         let req = ProxyRequest {
             method: "GET".into(),
             url: "https://s3.us-east-1.amazonaws.com/x".into(),
@@ -1826,7 +1826,7 @@ mod tests {
         let (_dir, resolver) = resolver_with("hook", "Jefe");
         let mut reg = SubstitutionRegistry::new();
         let ph = reg.mint(hmac_ref("hook", &["hooks.example.com"]));
-        let endpoint = SubstitutionEndpoint::new(&reg, &resolver);
+        let endpoint = NetworkEndpoint::new(&reg, &resolver);
         let req = ProxyRequest {
             method: "POST".into(),
             url: "https://hooks.example.com/event".into(),
@@ -1856,7 +1856,7 @@ mod tests {
         let (_dir, resolver) = resolver_with("hook", "Jefe");
         let mut reg = SubstitutionRegistry::new();
         let ph = reg.mint(hmac_ref("hook", &["hooks.example.com"]));
-        let endpoint = SubstitutionEndpoint::new(&reg, &resolver);
+        let endpoint = NetworkEndpoint::new(&reg, &resolver);
         let req = ProxyRequest {
             method: "POST".into(),
             url: "https://evil.example.com/event".into(), // unbound
@@ -1878,7 +1878,7 @@ mod tests {
         let (_dir, resolver) = resolver_with("openai", "sk-live-zzz");
         let mut reg = SubstitutionRegistry::new();
         let ph = reg.mint(bearer_ref("openai", &["api.openai.com"]));
-        let endpoint = SubstitutionEndpoint::new(&reg, &resolver);
+        let endpoint = NetworkEndpoint::new(&reg, &resolver);
 
         let req = ProxyRequest {
             method: "POST".into(),
@@ -1903,7 +1903,7 @@ mod tests {
         let (_dir, resolver) = resolver_with("openai", "sk-live-zzz");
         let mut reg = SubstitutionRegistry::new();
         let ph = reg.mint(bearer_ref("openai", &["api.openai.com"]));
-        let endpoint = SubstitutionEndpoint::new(&reg, &resolver);
+        let endpoint = NetworkEndpoint::new(&reg, &resolver);
 
         let req = ProxyRequest {
             method: "POST".into(),
@@ -1919,7 +1919,7 @@ mod tests {
     fn passes_through_a_request_without_a_placeholder() {
         let (_dir, resolver) = resolver_with("openai", "sk-live-zzz");
         let reg = SubstitutionRegistry::new();
-        let endpoint = SubstitutionEndpoint::new(&reg, &resolver);
+        let endpoint = NetworkEndpoint::new(&reg, &resolver);
 
         let req = ProxyRequest {
             method: "GET".into(),
@@ -1935,7 +1935,7 @@ mod tests {
     fn rejects_a_url_without_a_host() {
         let (_dir, resolver) = resolver_with("openai", "sk-live-zzz");
         let reg = SubstitutionRegistry::new();
-        let endpoint = SubstitutionEndpoint::new(&reg, &resolver);
+        let endpoint = NetworkEndpoint::new(&reg, &resolver);
         let req = ProxyRequest {
             method: "GET".into(),
             url: "not a url".into(),

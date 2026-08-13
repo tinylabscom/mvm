@@ -35,7 +35,7 @@ pub(crate) fn aux_helper_specs(
         },
         AuxHelperSpec {
             package: "mvm-hostd",
-            bin: "mvm-substitution-endpoint",
+            bin: "mvm-network-endpoint",
             features: &[],
         },
         // The per-VM L3 gateway. Built everywhere mvmctl is: whether a host
@@ -102,12 +102,12 @@ mod tests {
     }
 
     #[test]
-    fn hostd_helpers_include_substitution_endpoint() {
+    fn hostd_helpers_include_network_endpoint() {
         let specs = aux_helper_specs("macos", "aarch64", false);
         assert!(
             specs
                 .iter()
-                .any(|spec| spec.bin == "mvm-substitution-endpoint")
+                .any(|spec| spec.bin == "mvm-network-endpoint")
         );
     }
 
