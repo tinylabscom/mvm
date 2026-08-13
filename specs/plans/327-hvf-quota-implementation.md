@@ -505,6 +505,9 @@ impl VcpuQuota {
 
 ### Task 5: The record and the tier — what was achieved, not what was asked
 
+**Status:** COMPLETE — `VcpuQuotaRecord`, `mvm-core::vcpu_quota` read-back,
+`HvfVcpuQuota` controls/tier, and wasm32 gate pass.
+
 **Files:**
 - Create: `crates/mvm-contract/src/protocol/vcpu_quota.rs`,
   `crates/mvm-core/src/vcpu_quota.rs`
@@ -575,7 +578,7 @@ pub fn tier_for_vm(state_dir: &Path) -> EnforcedTier;
   `the_libkrun_tier_cannot_bound_cpu_off_linux`. Renaming a witness means
   updating the ADR-001 claims table in Task 7 — note it in the report.
 
-- [ ] **Step 1: Write the failing tests**, run them, paste the failure:
+- [x] **Step 1: Write the failing tests**, run them, paste the failure:
 
   | Test | Asserts |
   | --- | --- |
@@ -592,9 +595,9 @@ pub fn tier_for_vm(state_dir: &Path) -> EnforcedTier;
   | `the_libkrun_tier_still_cannot_bound_cpu_off_linux` | unchanged — libkrun is permanently out of scope |
   | `every_enforced_tier_has_a_distinct_label` | the new label is unique |
 
-- [ ] **Step 2: Implement.** Keep `mvm-contract` `no_std`; the file I/O lives
+- [x] **Step 2: Implement.** Keep `mvm-contract` `no_std`; the file I/O lives
       in `mvm-core`.
-- [ ] **Step 3:** `cargo nextest run -p mvm-contract -p mvm-core`, plus a
+- [x] **Step 3:** `cargo nextest run -p mvm-contract -p mvm-core`, plus a
       `wasm32-unknown-unknown` build of `mvm-contract`, clippy, fmt.
 
 ---

@@ -22,4 +22,5 @@ pub mod resource_controls;
 pub mod routing;
 pub mod signed_config;
 pub mod signing;
+pub mod vcpu_quota;
 pub mod vm_backend;

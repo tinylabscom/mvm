@@ -71,6 +71,7 @@ pub mod launch_metadata;
 pub mod launch_trace;
 /// Shared backoff for polls that wait on a condition.
 pub mod poll_backoff;
+pub mod vcpu_quota;
 // Guest lifecycle markers + snapshot timing (the `mvm-init` ↔ host
 // contract) are a pure-DTO leaf that now lives in `mvm-contract`;
 // re-exported here as a module alias so every existing
