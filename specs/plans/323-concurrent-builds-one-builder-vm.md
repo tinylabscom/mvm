@@ -1,6 +1,6 @@
 # Plan 323 — Concurrent builds through one builder VM
 
-**Status:** Phase 1 COMPLETE, Phases 2-4 OPEN
+**Status:** COMPLETE
 **Date opened:** 2026-08-11
 **Branch:** Phase 1 on `worktree-builder-lock-wait`
 
@@ -91,7 +91,7 @@ check-test-home-isolation` doesn't catch them because they never move
 cross-process lock. Worth either isolating them or extending the gate with a
 "unit test reaches a host-wide lock" rule.
 
-### Phase 2 — an HVF persistent builder (OPEN)
+### Phase 2 — an HVF persistent builder (COMPLETE)
 
 The persistent-builder session is the existing multiplexing mechanism: one
 long-lived VM holds the store lock for its lifetime and serves jobs over vsock
@@ -159,7 +159,7 @@ init are stale as of the virtio-fs work in PR #2387.
       released on kill. Live: a dispatched build returning artifacts, once
       #2387 lands.
 
-### Phase 3 — adopt the persistent builder on contention (OPEN)
+### Phase 3 — adopt the persistent builder on contention (COMPLETE)
 
 With Phase 2 in place, a waiting build has a better option than waiting.
 
@@ -178,7 +178,7 @@ With Phase 2 in place, a waiting build has a better option than waiting.
 - [x] `mvmctl doctor`: report whether a session is live and how many builds are
       routed through it.
 
-### Phase 4 — documentation (OPEN)
+### Phase 4 — documentation (COMPLETE)
 
 - [x] `public/src/content/docs/guides/troubleshooting.md`: the contention
       message, the wait override, and the persistent-builder path.
