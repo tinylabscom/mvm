@@ -107,6 +107,14 @@ pub mod secrets_scanner;
 pub mod sensitive_detector;
 /// Policy-gated SOCKS5 UDP Associate relay over the egress vsock stream.
 pub mod socks5_udp;
+/// The per-VM substitution endpoint subprocess library half: the
+/// stdin config contract + store-opening/service assembly. The
+/// `mvm-network-endpoint` bin is the process wrapper.
+pub mod network_endpoint;
+/// Host substitution endpoint request preparation (placeholder → real
+/// credential, binding-checked). The forward leg + the guest-facing
+/// listener are separate transport steps.
+pub mod network_endpoint_proxy;
 /// Transparent egress terminator primitives: original destination
 /// recovery after nft REDIRECT, plus the future forward/substitute
 /// legs (orig_dst is the only piece here now).

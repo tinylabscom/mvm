@@ -168,7 +168,9 @@ struct WarmClaimSpawner {
 impl EndpointSpawner for WarmClaimSpawner {
     fn spawn(&self, req: &EndpointSpawnRequest<'_>) -> anyhow::Result<PathBuf> {
         *self.seen_vm.lock().unwrap() = Some(req.vm_name.to_string());
-        Ok(mvm_core::config::vm_network_endpoint_socket(req.vm_name))
+        Ok(mvm_core::config::vm_network_endpoint_socket(
+            req.vm_name,
+        ))
     }
 }
 

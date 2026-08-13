@@ -141,23 +141,6 @@ impl std::fmt::Debug for TlsIntermediate {
     }
 }
 
-/// Identity material for one authenticated FlowMux session.
-///
-/// The host signing key authenticates the endpoint to the guest; the guest
-/// verifying key is the pinned anchor the endpoint accepts. Both are carried
-/// as base64 on the stdin wire so no raw bytes escape the spawn boundary in
-/// shell-unsafe form.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct FlowMuxIdentity {
-    /// Unique session identifier, distinct per VM boot.
-    pub session_id: String,
-    /// Base64-encoded 32-byte Ed25519 host signing key.
-    pub host_signing_key_base64: String,
-    /// Base64-encoded 32-byte Ed25519 guest verifying key.
-    pub guest_verifying_key_base64: String,
-}
-
 /// Config the backend hands the `mvm-network-endpoint` subprocess on
 /// stdin at spawn. Carries the workload's secret bindings (NOT values — the
 /// endpoint resolves values itself from the host store) plus where to listen.
@@ -315,8 +298,8 @@ pub fn assemble(
     // the redaction / reversible-replacement / TLS / recorder wiring; passing
     // `resolver` in means it no longer hardcodes a `LocalResolver`, so a
     // `Remote` backend actually reaches its `RemoteResolver`.
-    let (service, handed) = SubstitutionService::from_plan(
-        crate::supervisor::network_endpoint_proxy::FromPlanInputs {
+    let (service, handed) =
+        SubstitutionService::from_plan(crate::supervisor::network_endpoint_proxy::FromPlanInputs {
             plan_secrets: &cfg.secrets,
             tenant: &cfg.tenant_id,
             bindings: &bindings,

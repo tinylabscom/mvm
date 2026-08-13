@@ -208,21 +208,6 @@ pub struct RemoteResolverSpawnConfig<'a> {
     pub timeout_secs: u64,
 }
 
-/// Identity material for an authenticated FlowMux session.
-///
-/// Mirrors `mvm_hostd::supervisor::network_endpoint::FlowMuxIdentity` field-for-
-/// field so the JSON on stdin is identical, without creating a dependency cycle
-/// (mvm-hostd depends on mvm-vmm, never the reverse).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FlowMuxIdentitySpawnConfig {
-    /// Unique session identifier, distinct per VM boot.
-    pub session_id: String,
-    /// Base64-encoded 32-byte Ed25519 host signing key.
-    pub host_signing_key_base64: String,
-    /// Base64-encoded 32-byte Ed25519 guest verifying key.
-    pub guest_verifying_key_base64: String,
-}
-
 /// Inputs to [`spawn_network_endpoint`]. Grouped into a struct (rather
 /// than threading bare positional args) so the backend-shaped fields —
 /// `transport` (vsock vs UDS), `terminator_listen`, `tls_intermediate` — read

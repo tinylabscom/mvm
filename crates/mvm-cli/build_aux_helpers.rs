@@ -104,7 +104,11 @@ mod tests {
     #[test]
     fn hostd_helpers_include_network_endpoint() {
         let specs = aux_helper_specs("macos", "aarch64", false);
-        assert!(specs.iter().any(|spec| spec.bin == "mvm-network-endpoint"));
+        assert!(
+            specs
+                .iter()
+                .any(|spec| spec.bin == "mvm-network-endpoint")
+        );
     }
 
     #[test]
