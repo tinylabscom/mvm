@@ -324,7 +324,7 @@ function DesktopNest() {
       subSize={12}
       workloadLabelSize={15}
       tabInset={16}
-      className="hidden w-full lg:block"
+      className="hidden w-full md:block"
     />
   );
 }
@@ -349,10 +349,11 @@ function MobileNest() {
 }
 
 export function ContainmentDiagram() {
+  // The nested-ring diagram only reads well on wide viewports; below the
+  // large breakpoint the text list in WhyMicrovm carries the point on its own.
   return (
     <figure className="w-full" role="img" aria-label={DESCRIPTION}>
       <DesktopNest />
-      <MobileNest />
     </figure>
   );
 }

@@ -17,7 +17,7 @@ const GIVES_YOU = [
 export function WhyMicrovm() {
   return (
     <Section rule space="tight">
-      <div className="grid gap-10 lg:grid-cols-2 lg:items-center lg:gap-14">
+      <div className="grid gap-10 md:grid-cols-2 md:items-center md:gap-14">
         <div>
           <Eyebrow>The boundary</Eyebrow>
           <h2 className="mb-3 lowercase font-display text-2xl font-bold leading-tight text-title sm:text-3xl">
