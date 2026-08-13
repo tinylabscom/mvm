@@ -31,6 +31,34 @@ mvmctl env uninstall
 mvmctl bootstrap
 ```
 
+### "builder VM ... is already attached by another builder VM process"
+
+The shared Nix store image is locked to one writer at a time. A second
+`mvmctl build` now queues instead of failing, waiting up to
+`MVM_BUILDER_LOCK_WAIT_SECS` (default `3600`). The wait message names the
+process that holds the lock.
+
+**Fix**: wait, or reduce the wait budget:
+
+```bash
+MVM_BUILDER_LOCK_WAIT_SECS=60 mvmctl build --flake .
+```
+
+Set `MVM_BUILDER_LOCK_WAIT_SECS=0` to restore the old fail-fast behavior.
+
+**Avoid the queue entirely**: start a persistent builder session. Concurrent
+builds that see a contended store image route through the live session instead
+of waiting for the single-shot image lock:
+
+```bash
+mvmctl persistent-builder start --workspace .
+mvmctl build --flake .   # concurrent builds share the session
+mvmctl persistent-builder stop
+```
+
+Use `mvmctl build --no-persistent-builder` for a one-off build that must use
+the single-shot path.
+
 ### Builds hang or fail with the builder daemon not ready
 
 Builds are driven by a resident `mvm-builderd` service inside the builder VM

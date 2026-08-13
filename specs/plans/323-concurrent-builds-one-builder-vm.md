@@ -127,34 +127,34 @@ takes the virtio-fs path (`parse_disk_transport_cmdline`, the Track B fan-out).
 and attaches the shares. The `hvf VMM has no virtio-fs` comments in the guest
 init are stale as of the virtio-fs work in PR #2387.
 
-- [ ] **Depends on #2387** (HVF virtio-fs shared-memory discovery). Until it
+- [x] **Depends on #2387** (HVF virtio-fs shared-memory discovery). Until it
       merges, an HVF virtio-fs share does not come up, so nothing below can be
       verified live. Host-side unit coverage does not depend on it.
-- [ ] A persistent-builder variant of `builder_spec`: drop
+- [x] A persistent-builder variant of `builder_spec`: drop
       `mvm.builder_transport=disk` / `mvm.builder_input` / `mvm.builder_output`
       from `BUILDER_CMDLINE`, drop the input/output disks, and populate
       `VmmSpec.shares` with `work`, `job`, `out`, `mvm-bins`. Keep the
       nix-store disk at `vdb` and the runtime overlay. `builder_spec` currently
       hardcodes `shares: Vec::new()` and the disk-transport cmdline
       (`crates/mvm-runtime/src/builder_runner/spec.rs:17`).
-- [ ] `HvfPersistentHostVm` alongside `HvfBuilderVm` in
+- [x] `HvfPersistentHostVm` alongside `HvfBuilderVm` in
       `crates/mvm-runtime/src/builder_runner/`: hold the `NixStoreImageLock`
       for the VM's lifetime, register the same vsock ports libkrun does
       (`BUILDER_DISPATCH_PORT`, `WORKLOAD_FORWARD_PORT`,
       `BUILDERD_CONTROL_PORT`, host-listen `EGRESS_PORT`), wait for the
       dispatch-ready marker, and return a handle whose kill/wait releases the
       lock.
-- [ ] Move the shared persistent-session helpers out of `libkrun_builder.rs`,
+- [x] Move the shared persistent-session helpers out of `libkrun_builder.rs`,
       where they sit behind `#[cfg(feature = "builder-vm")]`, into the
       backend-agnostic `builder_vm_runtime`: `stage_persistent_job_dir`, the
       dispatch markers, `wait_for_path`, and `PersistentVmHandle`. Copying them
       into a second backend is the failure mode this repo has hit before.
-- [ ] Wire it into `persistent_builder::start` so the hvf bail becomes a
+- [x] Wire it into `persistent_builder::start` so the hvf bail becomes a
       supported branch. The session record is backend-agnostic already;
       confirm `stop`/`status` work unchanged.
-- [ ] Confirm the Stage 0 reaper and `mvmctl cache prune` see the hvf
+- [x] Confirm the Stage 0 reaper and `mvmctl cache prune` see the hvf
       persistent VM state dir (the `mvm-persistent-builder-hvf-*` prefix).
-- [ ] Tests: spec shape (no disk-transport token, four shares present),
+- [x] Tests: spec shape (no disk-transport token, four shares present),
       session start/stop round-trip, lock held for the VM's lifetime and
       released on kill. Live: a dispatched build returning artifacts, once
       #2387 lands.
@@ -163,26 +163,26 @@ init are stale as of the virtio-fs work in PR #2387.
 
 With Phase 2 in place, a waiting build has a better option than waiting.
 
-- [ ] On `WouldBlock` at the store lock, before queueing: re-read the session
+- [x] On `WouldBlock` at the store lock, before queueing: re-read the session
       record. If a live session exists, dispatch into it instead of waiting.
       (Today the session is only consulted *before* the single-shot path
       decides to boot its own VM, so a build that already committed to
       single-shot queues rather than re-checking.)
-- [ ] Decide whether contention should *auto-start* a session rather than only
+- [x] Decide whether contention should *auto-start* a session rather than only
       adopt one. Recommended: yes, behind the same residency policy that
       already governs `persistent_routing_allowed` — a second concurrent build
       is exactly the signal that a shared builder is worth its RAM. Needs a
       guard against two contending processes both trying to start one (the
       store lock itself is the natural arbiter: whoever holds it starts the
       session).
-- [ ] `mvmctl doctor`: report whether a session is live and how many builds are
+- [x] `mvmctl doctor`: report whether a session is live and how many builds are
       routed through it.
 
 ### Phase 4 — documentation (OPEN)
 
-- [ ] `public/src/content/docs/guides/troubleshooting.md`: the contention
+- [x] `public/src/content/docs/guides/troubleshooting.md`: the contention
       message, the wait override, and the persistent-builder path.
-- [ ] `public/src/content/docs/reference/cli-commands.md`: document
+- [x] `public/src/content/docs/reference/cli-commands.md`: document
       `MVM_BUILDER_LOCK_WAIT_SECS` alongside the other builder env knobs.
 
 ## Invariants this must not break
