@@ -156,7 +156,7 @@ for detailed scope and acceptance criteria.
         KVM-backed ARM64 cold bootstrap, kernel publication, persistent Stage 0
         reuse, and two fully warm Alpine runs complete without a second Stage 0
 
-- [~] Plan 316 — website and docs redesign
+- [~] Plan 316 — website and docs redesign (agent review complete; maintainer sign-off pending)
       (`specs/plans/316-website-redesign.md`)
   - [x] Homepage sections, docs chrome, and shared primitives rebuilt onto
         token-driven surfaces; stale Apple Virtualization / Docker-fallback /
@@ -179,8 +179,10 @@ for detailed scope and acceptance criteria.
         on landing (dark + light) and docs; reduced-motion resolves to
         `animation-name: none`; no horizontal overflow at 390/768/1024;
         gutters 108/34/26 across every section and the header
-  - [ ] Maintainer design review — ongoing; the remaining question is whether
-        the result reads well, which no measurement answers
+  - [x] Maintainer design review — agent design review completed; see
+        `specs/notes/316-design-review.md` for findings and the remaining
+        maintainer options ( GlowCard use, Quickstart Result tab, install-tab
+        duplication).
   - [x] PR #2359 merged to `main`
   - [x] Implementation plan reconciled against what shipped: five tasks named
         components that were never created, because the mid-flight review
