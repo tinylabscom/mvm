@@ -53,11 +53,10 @@ for detailed scope and acceptance criteria.
       long-help blocks and caps overlong summaries at 79 columns; generated-tree
       BDD coverage executes the real binary, rejects continuation lines and
       overlong output, and automatically includes future subcommands.
-- [~] **Issue-closeout batch — #2165, #2321, and #2323.** The workload runner
-      now emits read-only root bootargs for read-only root devices, the
-      credential-bearing substitution response is incrementally capped, and
-      Firecracker teardown uses the shared poll backoff. PR merge and required
-      live evidence remain before these issues close.
+- [x] **Issue-closeout batch — #2165, #2321, and #2323.** #2165 closed as
+      completed by PR #2330: the workload runner now emits read-only root
+      bootargs for read-only root devices. #2321 and #2323 were previously
+      closed; the batch is complete.
 - [x] **Issue #2128 — kernel pin freshness.** The libkrunfw bundle and custom
       guest kernel now share the verified Linux 6.12.102 LTS source pin;
       structural parity coverage prevents the consumers from drifting apart.
@@ -67,10 +66,11 @@ for detailed scope and acceptance criteria.
       deferred post-hoc records without changing chain content or ordering,
       retained fail-safe sync for unknown events, and preserved torn-tail
       detection. The separate receipt-store cost remains open as #2318.
-- [~] **Issue #2289 — kernel pin freshness follow-up.** This PR synchronizes
-      the libkrunfw and custom guest kernel inputs on the verified Linux
-      6.12.103 LTS source pin and updates structural parity coverage with the
-      upstream tarball's verified SRI hash. Merge and rollout evidence remain.
+- [x] **Issue #2289 — kernel pin freshness follow-up.** Closed as completed
+      by PR #2301. The libkrunfw and custom guest kernel inputs now
+      synchronize on the verified Linux 6.12.103 LTS source pin, and
+      structural parity coverage uses the upstream tarball's verified SRI
+      hash.
 
 ## Fast machine substrate
 - [x] **Issue #2279 — define the fast machine substrate and canonical template
@@ -278,12 +278,14 @@ for detailed scope and acceptance criteria.
         thread and pass 20/20 parallel stress runs
   - [ ] Run the exact Linux Security workflow, merge the fix, and observe a
         clean scheduled or release run before closing the issue
-- [~] Plan 300 — 30-issue reconciliation and closeout
+- [~] Plan 300 — 31-issue reconciliation and closeout
       (`specs/plans/300-open-issue-closeout.md`)
-  - [x] Inventory all 30 issues open at the 2026-08-10 snapshot against
+  - [x] Inventory all 39 issues open at the 2026-08-13 snapshot against
         current `origin/main`, issue comments, owning plans, and workflow state
-  - [x] Close #2293 with merged implementation, CI, and KVM evidence
-  - [ ] Execute the remaining 29 closure paths in the plan's dependency order
+  - [x] Close eight issues on 2026-08-13: #2165, #2289, #2333, #2423 as
+        completed by merged PRs; #2180, #2181, #2305, #2413 as not planned /
+        superseded
+  - [ ] Execute the remaining 31 closure paths in the plan's dependency order
   - [ ] Reconcile a fresh GitHub query after every phase and at final closeout
 - [~] Runtime hardening for production — plan 303, branch
       `feat/plan-303-runtime-hardening`

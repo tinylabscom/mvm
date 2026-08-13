@@ -1,15 +1,16 @@
 # Plan 300 — Open issue reconciliation and closeout
 
-**Status:** IN PROGRESS — concrete-fix batch underway
-**Snapshot date:** 2026-08-10
+**Status:** IN PROGRESS — 2026-08-13 reconciliation executed; 8 issues closed, 31 remain
+**Snapshot date:** 2026-08-13
 
 ## Objective
 
-Reconcile the 30 issues that were open at the snapshot against merged code,
-current product intent, tests, live evidence, and the owning plans. Close work
-that is demonstrably complete, preserve active defects and security gaps, and
-execute the remainder in dependency order until every issue is either completed
-or deliberately declined with its remaining requirements transferred.
+Reconcile the 31 issues currently open against merged code, current product
+intent, tests, live evidence, and the owning plans. Close work that is
+demonstrably complete, combine or supersede duplicates, preserve active defects
+and security gaps, and execute the remainder in dependency order until every
+issue is either completed or deliberately declined with its remaining
+requirements transferred.
 
 The snapshot contains one issue whose implementation is complete but whose
 GitHub state is stale (#2293). The other 29 issues retain material acceptance
@@ -45,40 +46,64 @@ Generated trackers close only after the generating workflow is green. An issue
 is not closed because adjacent code exists, its title was superseded, or a plan
 mentions it.
 
+## 2026-08-13 reconciliation update
+
+**Current open issue count: 31.** Eight issues were closed on 2026-08-13:
+#2165, #2289, #2333, #2423, #2180, #2181, #2305, and #2413.
+
+### Closed on 2026-08-13
+
+| Issue | Closed as | Reason |
+|---|---|---|
+| #2165 | completed | PR #2330 merged; workload block-root bootargs agree with read-only root attachment |
+| #2289 | completed | Kernel/libkrunfw pins now at 6.12.103 via PR #2301 |
+| #2333 | completed | PR #2335 merged; `pool warm --image <ref>` fills the pool |
+| #2423 | completed | PR #2428 merged; RFC 6962 consistency proofs landed |
+| #2180 | not planned | Superseded by Plan 316 L3 deletion |
+| #2181 | not planned | Superseded by Plan 316 L3 deletion |
+| #2305 | not planned | Superseded by Plan 313 egress token accounting |
+| #2413 | not planned | 0.10.4 bpf-linker pin remains stable; 0.11.0 not worth system LLVM cost |
+
+### Plan 316 note
+
+- #2370 (Phase 1) is closed; #2368 umbrella should be updated to mark Phase 1
+  complete and Phase 2 (#2371) actionable.
+
 ## Snapshot disposition
 
-| Issue | Disposition at snapshot | Closure owner |
+| Issue | Disposition at 2026-08-13 | Closure owner |
 |---|---|---|
-| #2083 | Open; Studio server contract is an external dependency | Agent/Studio phase |
-| #2101 | Primary kernel defect fixed; OCI privilege posture remains | Security phase |
-| #2107 | Open; audit mirror is absent | Audit/observability phase |
-| #2135 | Open; latest scheduled Security run is red | Evidence-repair phase |
-| #2165 | Fix is in draft PR #2330; live witnesses remain | Boot-correctness phase |
-| #2166 | Parent epic; three contract children are closed, #2169 remains | Agent/Studio phase |
-| #2169 | Open; bounded inspector contract and APIs remain | Agent/Studio phase |
-| #2180 | Open; full L3 spec is still unreachable from user input | L3 phase |
-| #2181 | Open; real dual-backend IPv6 witness is absent | L3 phase |
+| #2083 | Open; Studio server contract external dependency | Agent/Studio phase |
+| #2101 | Kernel defect fixed; OCI privilege posture remains | Security phase |
+| #2107 | Open; audit mirror absent | Audit/observability phase |
+| #2135 | Open; Security lane red | Evidence-repair phase |
+| #2166 | Parent epic; #2169 and #2083 remain | Agent/Studio phase |
+| #2169 | Open; bounded inspector contract/APIs remain | Agent/Studio phase |
 | #2193 | Partial artifact-prewarm substrate; backend factories remain | Warm-launch phase |
 | #2194 | Partial HVF paused-parent handoff; final live contract remains | Warm-launch phase |
 | #2195 | Open; fixed read-only share binding remains | Warm-launch phase |
-| #2196 | Partial Firecracker standby path; full KVM matrix remains | Warm-launch phase |
+| #2196 | Partial Firecracker standby path; #2336 blocks KVM matrix | Warm-launch phase |
 | #2197 | Open; resident-process hardening remains | Warm-launch phase |
-| #2198 | Partial typed timing; user-visible refusal/cold contract remains | Warm-launch phase |
+| #2198 | Partial typed timing; refusal/cold contract remains | Warm-launch phase |
 | #2199 | Partial benchmark substrate; 1,000-claim matrix remains | Warm-launch phase |
-| #2211 | Partial eBPF spike; bytes/latency and scope decision remain | Observability phase |
-| #2256 | Open; Plan 306 has not started | Governance phase |
+| #2211 | Partial eBPF spike; bytes/latency/scope decision remains | Observability phase |
+| #2256 | Open; Plan 306 not started | Governance phase |
 | #2280 | Partial measurement substrate; native host matrix remains | Performance phase |
 | #2281 | Partial ext4 baseline; candidate comparison/decision remains | Performance phase |
-| #2289 | Kernel 6.12.103 merged; release/VM rollout evidence remains | Kernel phase |
 | #2292 | Host-side overhead mostly fixed; percentile gate remains | Performance phase |
-| #2293 | Complete in merged PRs #2302 and #2317 | Immediate closeout |
-| #2299 | Open investigation; cross-backend phase accounting is not comparable | Performance phase |
-| #2305 | Open under Plan 313 Phases 2–4; streaming is prerequisite | Egress phase |
+| #2299 | Open; cross-backend phase accounting not comparable | Performance phase |
 | #2307 | Known filter fixed; fail-open configuration gate remains | CI phase |
 | #2318 | Open; receipt durability and head recovery decision remains | Audit/performance phase |
-| #2321 | Open security defect; wire response allocation is unbounded | Immediate safety phase |
-| #2323 | Open; teardown attribution and adaptive polling remain | Performance phase |
-| #2333 | Open; pre-boot launch preparation blocks all pool filling | Warm-launch phase |
+| #2336 | Open; Firecracker post-restore handshake failure | Warm-launch phase |
+| #2347 | Open; NVMe baseline for launch contract | Performance phase |
+| #2368 | Plan 316 umbrella; Phase 1 complete, Phase 2+ open | Networking rewrite phase |
+| #2371 | Plan 316 Phase 2 — authenticated endpoint | Networking rewrite phase |
+| #2372 | Plan 316 Phase 3 — converge egress TCP/UDP/DNS | Networking rewrite phase |
+| #2373 | Plan 316 Phase 4 — stream typed transformations | Networking rewrite phase |
+| #2374 | Plan 316 Phase 5 — declared ingress on FlowMux | Networking rewrite phase |
+| #2375 | Plan 316 Phase 6 — compatibility boundary | Networking rewrite phase |
+| #2376 | Plan 316 Phase 7 — delete L3 completely | Networking rewrite phase |
+| #2377 | Plan 316 Phase 8 — mechanically enforce one path | Networking rewrite phase |
 
 ## Phase 0 — Close completed work and restore evidence quality
 
@@ -120,11 +145,8 @@ mentions it.
       those stateful tests now share one lock and join their completion thread,
       with 20/20 parallel stress passes. A clean exact Linux Security workflow
       and subsequent scheduled or release run remain the merge-and-close gates.
-- [ ] **#2289 — finish the kernel freshness closeout.** Linux 6.12.103 and the
-      verified shared hash are merged in #2301, and kernel build/freshness CI
-      passed. Build the release artifacts, run the verified-boot and
-      reproducibility witnesses, apply `mvmctl vm rekernel` to every existing
-      local VM from the builder VM, record the rollout inventory, then close.
+- [x] **#2289 — closed by PR #2301.** Kernel and libkrunfw pins are now at
+      6.12.103; normal release artifact refresh follows.
 - [ ] **#2292 — finish the Firecracker host-overhead closeout.** Retain #2298's
       in-process API client, backoff, and split spans. Remove or explicitly
       justify the two remaining privileged operations, then run
@@ -134,18 +156,6 @@ mentions it.
 
 ## Phase 1 — Fix safety and boot-correctness defects
 
-- [ ] **#2321 — cap substitution forward responses first.** Give the wire-mode
-      response an explicit maximum, reject rather than truncate on overflow,
-      stop reading immediately at the limit, and emit a sanitized refusal.
-      Test a truthful oversized `Content-Length`, a lying or absent length,
-      chunked delivery, and allocation bounded to the configured ceiling. This
-      is a prerequisite for Plan 313 streaming and metering work.
-- [ ] **#2165 — make block attachment and bootargs one contract.** Merge the
-      typed read-only-root fix from #2330 after review, eliminate duplicate
-      root declarations rather than relying on argument order, and add
-      runner-level consistency tests. Close after plain-ext4 guests reach
-      authenticated userspace on HVF and Firecracker with the root mounted in
-      the declared mode.
 - [ ] **#2101 — finish OCI privilege hardening.** Narrow the issue body to the
       remaining `NoNewPrivs` and capability-bounding-set decision now that
       #2102 fixed kernel selection. Define the minimal capability set required
@@ -166,18 +176,8 @@ mentions it.
       filter matches, register it in xtask help/available commands and CI, and
       add a self-test that moves a module and observes a nonzero exit.
 
-## Phase 2 — Complete L3, audit, and host observability
+## Phase 2 — Audit mirror and host observability
 
-- [ ] **#2180 — make `L3NetworkSpec` user-reachable.** Add typed workload-IR
-      fields for MTU, queue count, DNS, ingress, and IPv6; carry the exact spec
-      through synthesis, signing, admission, and boot; remove hardcoded mode
-      reconstruction. Add a user-visible BDD scenario and a negative host-
-      capability refusal proving the boot receives the admitted values.
-- [ ] **#2181 — publish the live IPv6 witness.** After #2180, boot an admitted
-      dual-stack guest, verify its address, peer route, and default route from
-      inside the guest, carry an admitted IPv6 TCP round trip, and prove an
-      unadmitted destination and spoofed source fail. Run on Firecracker and
-      HVF or split unsupported backend claims explicitly.
 - [ ] **#2107 — mirror audit appends into tracing without coupling.** Emit one
       sanitized event at a dedicated target only after a successful signed
       append. Share the verified-reader projection so field selection cannot
@@ -193,11 +193,6 @@ mentions it.
 
 ## Phase 3 — Establish comparable performance evidence
 
-- [ ] **#2323 — remove teardown polling quantization.** First split guest flush,
-      signal delivery, pid disappearance, and cleanup spans. Reuse
-      `poll_backoff::poll_delay` for Firecracker termination, prove an already-
-      exited VM does not pay a full tick, determine whether libkrun's 2.3 s is
-      the same cause, and publish 20-sample p50/p95/p99 teardown results.
 - [ ] **#2299 — make guest-boot measurements comparable before optimizing.**
       Define a backend-neutral interval from vCPU start to authenticated agent
       readiness, instrument both HVF and Firecracker at the same boundaries,
@@ -217,13 +212,18 @@ mentions it.
       xattrs, whiteouts, verity failure, read-only enforcement, CoW cleanliness,
       and tenant isolation. Record the decision without creating another cache
       graph.
+- [ ] **#2347 — re-baseline the launch contract on NVMe.** Provision or identify
+      a Linux `/dev/kvm` host with NVMe, re-run the launch baseline, publish it
+      beside the current rotational numbers, and re-scope fsync-bound work
+      against the NVMe baseline. Define the storage class for the ≤200 ms
+      contract.
 
 ## Phase 4 — Make the warm pool usable, then prove it
 
 The executable dependency order is:
 
 ```text
-#2333 pre-boot launch preparation
+#2336 Firecracker post-restore identity handshake
     -> #2193 verified artifact prewarm
     -> #2194 HVF parent / #2196 Firecracker parent
     -> #2195 fixed read-only shares
@@ -232,13 +232,12 @@ The executable dependency order is:
     -> #2199 1,000-claim release matrix
 ```
 
-- [ ] **#2333 — extract bootless launch preparation.** Refactor Plan 299 Phase
-      2 into a reusable preparation result containing rootfs and verity
-      sidecars, runtime overlay/initramfs, kernel/cmdline, tenant, and signed
-      admitted plan without starting a VM. Make `pool warm --image <ref>` pass
-      that launch shape, remove or implement the ignored `--rootfs` option,
-      show a nonzero idle count, and claim it on Firecracker against the 549 ms
-      cold baseline.
+- [ ] **#2336 — diagnose and fix the Firecracker post-restore identity
+      handshake.** Capture the full `signal.post_restore` error chain, determine
+      whether the failure is in the vsock connection state after snapshot
+      restore, the child's CID/port mapping after fork, or the authenticated
+      session itself, then fix it. This is the single point of failure blocking
+      the whole Firecracker warm-claim chain.
 - [ ] **#2193 — connect asynchronous prewarm to real factories.** Feed the
       bootless prepared shape through the existing content-addressed jobs and
       authenticated readiness verifier. Test hit, miss, corruption,
@@ -276,15 +275,8 @@ The executable dependency order is:
       Retain all outliers and publish p50/p95/p99/max/refusal rate; CI fails at
       `>=300 ms`, p50 >30 ms, p99 >50 ms, or any mislabeled fallback.
 
-## Phase 5 — Finish egress accounting and governance
+## Phase 5 — Governance and tier honesty
 
-- [ ] **#2305 — implement Plan 313 Phases 1–4.** After #2321, stream responses
-      with bounded buffers and redaction-safe overlap; attribute bytes to the
-      admitted binding; parse provider usage including terminal SSE usage
-      without guessing; represent unavailable token counts as unknown; emit a
-      payload-free chain-signed `plan.egress_usage`; and expose per-VM totals
-      through the verified audit reader. Enforcement and prompt compression
-      remain separate decisions.
 - [ ] **#2256 — execute Plan 306 in its recorded order.** Land declared-backing
       headers and a failing self-test; derive the ADR-001 backend matrix from
       `capabilities()`; refuse unfaithful egress and add the pre-run probe;
@@ -294,7 +286,55 @@ The executable dependency order is:
       double-key stale-name exemptions. Each workstream updates its plan box,
       sprint, and rollup only after its tests pass.
 
-## Phase 6 — Complete the agent and Studio surface
+## Phase 6 — Complete the single FlowMux networking path (Plan 316)
+
+Plan 316 Phases run strictly in order. Phase 0 (#2369) and Phase 1 (#2370) are
+already complete. Update the umbrella issue #2368 to mark Phase 1 done and
+Phase 2 actionable, then execute the remaining phases in order:
+
+```text
+#2368 umbrella
+    -> #2371 Phase 2 — authenticated endpoint
+        -> #2372 Phase 3 — converge egress TCP/UDP/DNS
+            -> #2373 Phase 4 — stream typed transformations
+                -> #2374 Phase 5 — declared ingress on FlowMux
+                    -> #2375 Phase 6 — compatibility boundary
+                        -> #2376 Phase 7 — delete L3 completely
+                            -> #2377 Phase 8 — mechanically enforce one path
+```
+
+- [ ] **#2371 — Phase 2: introduce the one authenticated endpoint.** Rename the
+      production role to `mvm-network-endpoint`, rename `GuestService::Substitution`
+      to `NetworkFlow`, authenticate one long-lived FlowMux session before
+      accepting frames, add bounded per-stream registries and graceful shutdown,
+      and keep legacy dispatch behind a transition adapter that calls the new
+      endpoint's canonical functions.
+- [ ] **#2372 — Phase 3: converge egress TCP, UDP, and DNS.** Replace raw
+      preludes with typed frames, move parsing/DNS/rate/audit into one pipeline,
+      delete `EgressMode` and protocol sniffing, and add integration tests for
+      deny-all, pinning, concurrent flows, and endpoint crash.
+- [ ] **#2373 — Phase 4: stream typed transformations over the same path.**
+      Replace whole-body JSON exchange with bounded streaming frames, route
+      typed connectors through the endpoint, apply substitution/redaction as an
+      explicit admitted flow class, and prove split-frame secret detection.
+- [ ] **#2374 — Phase 5: implement declared ingress on FlowMux.** Move
+      `L3IngressMapping` to a transport-neutral signed plan, bind listeners only
+      after admission, implement TCP/UDP and HTTP/TLS ingress with host-owned
+      certificates, and remove the second listener process/policy type.
+- [ ] **#2375 — Phase 6: set the compatibility boundary.** Keep loopback proxy,
+      SOCKS5h, SOCKS5 UDP, DNS stub, ping helper, and typed connectors as the
+      supported surfaces; reject `raw_ip_stack` and close Plan 278; document that
+      unsupported traffic has no route.
+- [ ] **#2376 — Phase 7: delete L3 completely.** Remove `mvm-contract::l3`,
+      `mvm-net/src/l3/`, `mvm-agentd/src/l3/`, `mvm-hostd/src/netd/`, smoltcp,
+      `CONFIG_TUN`, and the L3-only tests and suites. This closes #2180 and
+      #2181 by making them obsolete.
+- [ ] **#2377 — Phase 8: make one path mechanically enforceable.** Replace the
+      temporary Phase-0 ratchet with `check-single-network-path`, add a socket-
+      owner gate, prove all network shapes reach the same policy/audit sink, run
+      the final `xtask network-perf` matrix, and live-witness every backend.
+
+## Phase 7 — Complete the agent and Studio surface
 
 The durable session (#2167), runtime approval (#2168), typed bindings (#2170),
 and SDK parity (#2163) are already closed. Remaining order:
@@ -324,7 +364,7 @@ and SDK parity (#2163) are already closed. Remaining order:
 
 ## Final reconciliation gate
 
-- [ ] Every issue from the 30-issue snapshot has a final disposition and
+- [ ] Every issue from the current 31-issue set has a final disposition and
       linked evidence.
 - [ ] Every active requirement has exactly one issue and one owning plan; no
       acceptance criterion exists only in a comment or in this rollup.
