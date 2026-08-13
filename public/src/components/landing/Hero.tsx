@@ -45,11 +45,11 @@ function InstallRow({ command }: { command: string }) {
       onClick={copy}
       aria-label="Copy install command"
     >
-      <span className="text-accent/60 text-sm">$</span>
       {/* basis-full pushes the Copy badge onto its own line on narrow
           viewports instead of squeezing the command into a slim leftover
           column — the command gets the row's full width to wrap into. */}
       <code className="order-1 min-w-0 flex-1 basis-full text-sm leading-relaxed break-normal font-mono text-emphasis/90 sm:basis-auto">
+        <span className="text-accent/60">$</span>{" "}
         {withSlashBreaks(command)}
       </code>
       <span className="order-2 shrink-0 rounded border border-edge/50 px-2 py-0.5 text-[11px] text-label transition-colors group-hover:border-accent/30 group-hover:text-accent sm:ml-auto">
