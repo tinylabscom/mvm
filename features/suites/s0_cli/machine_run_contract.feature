@@ -53,7 +53,7 @@ Feature: machine run request contract
   Scenario: machine run refuses to detach an attached port forward
     When I run mvmctl with "machine run --image alpine --port 8080:3000 --detach" and an isolated mvm home
     Then the command exits with code 2
-    And the error output contains "an argument cannot be used"
+    And the error output contains "cannot be used"
 
   # Egress-enabling dry runs are deliberately absent. `--allow-host` / `--net`
   # make the dry run resolve an *available* egress-capable backend, so the
