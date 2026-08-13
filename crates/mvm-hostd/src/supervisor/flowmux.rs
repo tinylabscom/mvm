@@ -16,6 +16,8 @@ use mvm_contract::protocol::network_flow::{
     Direction, FrameError, Opcode, SessionValidator, decode,
 };
 use mvm_core::net::session::Session;
+
+use self::registry::{RegistryLimits, StreamRegistry, class_for_open};
 use tracing::{info, warn};
 
 /// Why the FlowMux session ended.
@@ -45,6 +47,7 @@ pub struct FlowMuxSession<S> {
     stream: S,
     session: Session,
     validator: SessionValidator,
+    registry: StreamRegistry,
     read_buf: Vec<u8>,
 }
 
@@ -64,6 +67,7 @@ impl<S: Read + Write> FlowMuxSession<S> {
         session_id: &str,
         host_key: SigningKey,
         guest_anchor: &VerifyingKey,
+        limits: RegistryLimits,
     ) -> Result<Self, FlowMuxError> {
         let (session, _peer_key) = Session::host(&mut stream, session_id, host_key)
             .map_err(|e| FlowMuxError::Handshake(e.to_string()))?;
@@ -80,6 +84,7 @@ impl<S: Read + Write> FlowMuxSession<S> {
             stream,
             session,
             validator: SessionValidator::default(),
+            registry: StreamRegistry::new(limits),
             read_buf: Vec::with_capacity(4096),
         })
     }
@@ -146,8 +151,36 @@ impl<S: Read + Write> FlowMuxSession<S> {
                     // A second Hello is illegal after the session is established;
                     // the validator already refuses it.
                 }
+                Opcode::OpenTcp | Opcode::OpenUdp => {
+                    // Record the guest-initiated stream so the registry tracks
+                    // ceilings and parity; Phase 3 will connect the socket and
+                    // reply with Opened/UdpOpened.
+                    if let Some(class) = class_for_open(opcode)
+                        && let Err(e) = self.registry.open_guest(stream_id, class)
+                    {
+                        warn!(error = %e, stream_id, "FlowMux refusing open");
+                        self.send_goaway(&e.to_string())?;
+                        return Ok(());
+                    }
+                    warn!(?opcode, stream_id, "FlowMux skeleton rejects flow frame");
+                    self.send_goaway("flow frames not yet implemented")?;
+                    return Ok(());
+                }
+                Opcode::HalfClose | Opcode::Reset | Opcode::CloseUdp => {
+                    if self.registry.get(stream_id).is_some() {
+                        let _ = self.registry.retire(stream_id);
+                    }
+                    warn!(?opcode, stream_id, "FlowMux skeleton rejects close/reset");
+                    self.send_goaway("flow frames not yet implemented")?;
+                    return Ok(());
+                }
                 _ => {
-                    warn!(?opcode, "FlowMux skeleton rejects flow frame");
+                    if self.registry.get(stream_id).is_none() {
+                        warn!(?opcode, stream_id, "FlowMux frame on unknown stream");
+                        self.send_goaway("unknown stream")?;
+                        return Ok(());
+                    }
+                    warn!(?opcode, stream_id, "FlowMux skeleton rejects flow frame");
                     self.send_goaway("flow frames not yet implemented")?;
                     return Ok(());
                 }
@@ -251,7 +284,14 @@ mod tests {
         let (host_stream, mut guest_stream) = UnixStream::pair().unwrap();
 
         let host_handle = thread::spawn(move || {
-            FlowMuxSession::accept(host_stream, "test-session", host_key, &wrong_verify).map(|_| ())
+            FlowMuxSession::accept(
+                host_stream,
+                "test-session",
+                host_key,
+                &wrong_verify,
+                RegistryLimits::default(),
+            )
+            .map(|_| ())
         });
 
         // Drive the guest side of the handshake with the *correct* guest key;
@@ -289,9 +329,14 @@ mod tests {
         let (host_stream, mut guest_stream) = UnixStream::pair().unwrap();
 
         let host_handle = thread::spawn(move || {
-            let mut session =
-                FlowMuxSession::accept(host_stream, "test-session", host_key, &guest_verify)
-                    .unwrap();
+            let mut session = FlowMuxSession::accept(
+                host_stream,
+                "test-session",
+                host_key,
+                &guest_verify,
+                RegistryLimits::default(),
+            )
+            .unwrap();
             session.serve()
         });
 

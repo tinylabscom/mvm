@@ -141,10 +141,7 @@ impl StreamRegistry {
     /// Returns `RegistryError::Ceiling` if the class ceiling is already hit, or
     /// `RegistryError::InvalidStreamId` if the ID space wrapped.
     pub fn alloc_guest(&mut self, class: FlowClass) -> Result<u32, RegistryError> {
-        let limit = match class {
-            FlowClass::Tcp => self.limits.max_tcp,
-            FlowClass::Udp => self.limits.max_udp,
-        };
+        let limit = self.class_limit(class);
         if self.live_count(class) >= limit {
             return Err(RegistryError::Ceiling { class, limit });
         }
@@ -160,14 +157,64 @@ impl StreamRegistry {
         Ok(id)
     }
 
+    /// Record a guest-initiated stream ID supplied by the peer. The ID must be
+    /// odd, not already live, and within the class ceiling.
+    pub fn open_guest(&mut self, stream_id: u32, class: FlowClass) -> Result<(), RegistryError> {
+        if stream_id == 0 || stream_id.is_multiple_of(2) {
+            return Err(RegistryError::InvalidStreamId { stream_id });
+        }
+        if self.live_count(class) >= self.class_limit(class) {
+            return Err(RegistryError::Ceiling {
+                class,
+                limit: self.class_limit(class),
+            });
+        }
+        if self.streams.contains_key(&stream_id) {
+            return Err(RegistryError::IllegalState {
+                stream_id,
+                state: StreamState::Opening,
+            });
+        }
+        self.next_guest_id = self.next_guest_id.max(stream_id + 2);
+        self.insert(stream_id, class);
+        Ok(())
+    }
+
+    /// Record a host-initiated stream ID supplied by the local ingress handler.
+    /// The ID must be even, not already live, and within the class ceiling.
+    pub fn open_host(&mut self, stream_id: u32, class: FlowClass) -> Result<(), RegistryError> {
+        if !stream_id.is_multiple_of(2) {
+            return Err(RegistryError::InvalidStreamId { stream_id });
+        }
+        if self.live_count(class) >= self.class_limit(class) {
+            return Err(RegistryError::Ceiling {
+                class,
+                limit: self.class_limit(class),
+            });
+        }
+        if self.streams.contains_key(&stream_id) {
+            return Err(RegistryError::IllegalState {
+                stream_id,
+                state: StreamState::Opening,
+            });
+        }
+        self.next_host_id = self.next_host_id.max(stream_id + 2);
+        self.insert(stream_id, class);
+        Ok(())
+    }
+
+    fn class_limit(&self, class: FlowClass) -> usize {
+        match class {
+            FlowClass::Tcp => self.limits.max_tcp,
+            FlowClass::Udp => self.limits.max_udp,
+        }
+    }
+
     /// Allocate a fresh host-initiated (ingress) stream ID for `class` and
     /// record it as `Opening`. Host-initiated IDs are even and monotonically
     /// increasing.
     pub fn alloc_host(&mut self, class: FlowClass) -> Result<u32, RegistryError> {
-        let limit = match class {
-            FlowClass::Tcp => self.limits.max_tcp,
-            FlowClass::Udp => self.limits.max_udp,
-        };
+        let limit = self.class_limit(class);
         if self.live_count(class) >= limit {
             return Err(RegistryError::Ceiling { class, limit });
         }
