@@ -43,7 +43,8 @@ use crate::warm_snapshot::{
 use crate::workload_backend::{EgressSubstitutionTransport, WorkloadBackend};
 use crate::workload_runner::child_grant::{ChildGrantIssuer, issue_child_grant};
 use crate::workload_runner::claim::{
-    ClaimGuards, ClaimRefusal, EndpointSpawnInputs, bind_plan_to_parent, parent_rootfs_digest,
+    ClaimGuards, ClaimRefusal, EndpointSpawnInputs, bind_plan_to_parent,
+    ensure_child_grants_within_host_ceiling, parent_rootfs_digest,
 };
 use crate::workload_runner::standby_boot::{factory_parent_config, factory_parent_spec};
 use mvm_vmm::host::cmdline;
@@ -579,6 +580,25 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
                 })
             },
         )?;
+        // A standby parent carries no grant, so the comparison above has
+        // nothing to bind a claimed child's CPU share against and would admit
+        // any share at all. The host's own ceiling is what bounds it instead —
+        // the same operator-configured maximum every cold boot on this host
+        // clears, read from host config rather than from the plan being
+        // admitted. It is a host-wide maximum and not a pool-specific grant, so
+        // it bounds a claim no more tightly than it bounds anything else here;
+        // it is only stronger than the unbounded claim it replaces.
+        //
+        // Deliberately after the parent has been matched and reserved rather
+        // than part of the pool's compatibility key: keying on a grant value
+        // would split one pool into a pool per distinct share and cost the warm
+        // hit rate the pool exists for. The price is a claim that matches and is
+        // then refused, so the refusal names the ceiling and the request.
+        ensure_child_grants_within_host_ceiling(
+            plan.grants.as_ref(),
+            &mvm_core::user_config::load(None).grant_ceiling(),
+        )
+        .map_err(refuse)?;
 
         // (6a) Fresh, registry-unique identity for the child.
         let child = match preloaded_child_name.clone() {
@@ -1430,7 +1450,6 @@ fn verify_preloaded_child_name_is_available(
     }
     Ok(())
 }
-
 /// The child's launch config: the CLI-populated claim config (carrying the
 /// verity fields the CLI already resolved on the cloned rootfs) rekeyed onto the
 /// fresh child identity and its materialized rootfs. The runner consumes verity;
@@ -1477,7 +1496,6 @@ fn resident_parent_rootfs_dir(parent_vm_name: &str) -> std::result::Result<PathB
         ))
     })
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4768,6 +4786,232 @@ mod tests {
         runner
             .claim_standby(&ctx, &handle, &claim)
             .expect("a narrowing child must still be claimable");
+    }
+
+    /// Persist a host config whose CPU ceiling is `millicores`, so a claim in
+    /// this test's isolated `MVM_HOME` is bounded by a known number rather than
+    /// by whatever the default config happens to carry.
+    fn host_ceiling_of(millicores: u32) {
+        let cfg = mvm_core::user_config::MvmConfig {
+            max_cpu_millicores: Some(millicores),
+            ..Default::default()
+        };
+        mvm_core::user_config::save(&cfg, None).expect("write host config");
+    }
+
+    /// A parent-less bound: the standby parent deliberately carries no grant,
+    /// so the parent-subset comparison clears any share at all and the host's
+    /// own ceiling is what refuses. Without the ceiling check this claim boots
+    /// a child holding four cores on a host configured to allow two.
+    #[test]
+    fn a_claimed_child_over_the_host_ceiling_is_refused() {
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.set("MVM_HOME", home.path());
+        host_ceiling_of(2000);
+
+        let store_root = tempfile::tempdir().unwrap();
+        let src = tempfile::tempdir().unwrap();
+        // A grant-less parent, which is what a factory parent actually is.
+        let (checkpoints, snapshots, parent_id, parent_meta) =
+            seed_audited_parent_with_grants(store_root.path(), src.path(), true, None);
+        let parent_digest = parent_rootfs_digest(&parent_meta).unwrap().to_string();
+
+        let pool = SupervisorStandbyPool::at(store_root.path().join("pool"));
+        let handle = idle_parent_handle("warm-parent", &store_root.path().join("control.sock"));
+        pool.record(&handle).unwrap();
+        let registry_path = store_root.path().join("vm-names.json");
+        let anchor = ClaimTestAnchor::audited(&parent_meta);
+
+        let claim = admitted_child_claim(
+            &src.path().join("rootfs.ext4"),
+            signed_child_plan_json_with_grants(
+                &parent_digest,
+                Some(mvm_contract::grants::Grants {
+                    cpu: Some(mvm_contract::grants::CpuGrant::Share { millicores: 4000 }),
+                    ..Default::default()
+                }),
+            ),
+        );
+
+        let runner = WorkloadRunner::new(
+            MockDriver::default(),
+            KeyingSpawner::default(),
+            RecordingBrokerRegistrar::new(),
+        );
+        let ctx = ClaimContext {
+            pool: &pool,
+            checkpoints: &checkpoints,
+            snapshots: &snapshots,
+            anchor: &anchor,
+            parent_checkpoint: &parent_id,
+            registry_path: &registry_path,
+            grant_issuer: None,
+        };
+
+        let err = runner
+            .claim_standby(&ctx, &handle, &claim)
+            .expect_err("a claim over the host ceiling must be refused");
+        assert!(
+            err.to_string().contains("grant ceiling"),
+            "refusal must read as a bound: {err}"
+        );
+
+        // The host, not the parent, refused: warm capacity goes back and
+        // nothing was minted for the child.
+        assert_eq!(
+            pool.load("warm-parent").unwrap().state,
+            StandbyState::Idle,
+            "a ceiling refusal must return the parent to claimable"
+        );
+        assert_eq!(orphan_child_dirs(), 0, "no child dir on a ceiling refusal");
+        assert!(runner.driver.forked_children().is_empty());
+    }
+
+    /// The other side: a claim at or under the ceiling still gets its warm
+    /// start. Without this the refusal witness above would pass equally well
+    /// against a check that refused every claim.
+    #[test]
+    fn a_claimed_child_within_the_ceiling_is_admitted() {
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.set("MVM_HOME", home.path());
+        host_ceiling_of(2000);
+
+        let store_root = tempfile::tempdir().unwrap();
+        let src = tempfile::tempdir().unwrap();
+        let (checkpoints, snapshots, parent_id, parent_meta) =
+            seed_audited_parent_with_grants(store_root.path(), src.path(), true, None);
+        let parent_digest = parent_rootfs_digest(&parent_meta).unwrap().to_string();
+
+        let pool = SupervisorStandbyPool::at(store_root.path().join("pool"));
+        let handle = idle_parent_handle("warm-parent", &store_root.path().join("control.sock"));
+        pool.record(&handle).unwrap();
+        let registry_path = store_root.path().join("vm-names.json");
+        let anchor = ClaimTestAnchor::audited(&parent_meta);
+
+        let claim = admitted_child_claim(
+            &src.path().join("rootfs.ext4"),
+            signed_child_plan_json_with_grants(
+                &parent_digest,
+                Some(mvm_contract::grants::Grants {
+                    cpu: Some(mvm_contract::grants::CpuGrant::Share { millicores: 1500 }),
+                    ..Default::default()
+                }),
+            ),
+        );
+
+        let runner = WorkloadRunner::new(
+            MockDriver::default(),
+            KeyingSpawner::default(),
+            RecordingBrokerRegistrar::new(),
+        );
+        let ctx = ClaimContext {
+            pool: &pool,
+            checkpoints: &checkpoints,
+            snapshots: &snapshots,
+            anchor: &anchor,
+            parent_checkpoint: &parent_id,
+            registry_path: &registry_path,
+            grant_issuer: None,
+        };
+
+        runner
+            .claim_standby(&ctx, &handle, &claim)
+            .expect("a claim within the host ceiling must still be claimable");
+    }
+
+    /// Because the bound is checked after the pool has already matched, a
+    /// refused claim looks superficially like a pool bug: the parent was found,
+    /// reserved, and then the claim died. The message is the only thing that
+    /// distinguishes the two, so it has to carry both numbers — what the host
+    /// allows and what the plan asked for.
+    #[test]
+    fn the_refusal_names_the_ceiling_and_the_request() {
+        let refusal = ensure_child_grants_within_host_ceiling(
+            Some(&mvm_contract::grants::Grants {
+                cpu: Some(mvm_contract::grants::CpuGrant::Share { millicores: 4000 }),
+                ..Default::default()
+            }),
+            &mvm_contract::grants::ceiling::GrantCeiling {
+                max_cpu_millicores: Some(2000),
+                ..Default::default()
+            },
+        )
+        .expect_err("4000 millicores exceeds a 2000-millicore ceiling");
+
+        let text = refusal.to_string();
+        assert!(
+            text.contains("2000"),
+            "refusal must name the ceiling: {text}"
+        );
+        assert!(
+            text.contains("4000"),
+            "refusal must name the request: {text}"
+        );
+        assert!(
+            text.contains("cpu.share_millicores"),
+            "refusal must name the bounded dimension: {text}"
+        );
+        assert!(
+            text.contains("ceiling"),
+            "refusal must read as a bound being enforced, not a failure: {text}"
+        );
+    }
+
+    /// The bound is checked after matching, never folded into the pool's
+    /// compatibility key: keying on a grant would split one pool into a pool
+    /// per distinct share and cost the warm hit rate the pool exists for.
+    ///
+    /// Two halves, both needed. The exhaustive destructure fails to compile the
+    /// day a grant dimension is added to the key — which is the move this test
+    /// exists to prevent — and the selection half proves the live consequence:
+    /// one warm parent serves claims asking for different shares.
+    #[test]
+    fn pool_matching_is_unchanged_by_the_bound() {
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.set("MVM_HOME", home.path());
+        host_ceiling_of(2000);
+
+        let store_root = tempfile::tempdir().unwrap();
+        let pool = SupervisorStandbyPool::at(store_root.path().join("pool"));
+        let handle = idle_parent_handle("warm-parent", &store_root.path().join("control.sock"));
+        pool.record(&handle).unwrap();
+
+        let mvm_core::vm_backend::StandbyCompat {
+            template_id: _,
+            kernel_sha256: _,
+            vcpus: _,
+            mem_mib: _,
+            image_sha256: _,
+            vsock_egress: _,
+        } = handle.compat();
+
+        // The key is derived from the parent's boot shape and takes no grant as
+        // input, so every claim on this boot shape resolves the one warm parent
+        // whatever share its plan asks for — including one the ceiling will go
+        // on to refuse. Matching and bounding stay separate decisions.
+        let want = handle.compat();
+        let picked = pool
+            .select_idle_compatible(&want)
+            .unwrap()
+            .expect("a claim on this boot shape must match the warm parent");
+        assert_eq!(picked.id, "warm-parent");
+        assert_eq!(
+            picked.compat(),
+            want,
+            "the matched parent's key must be the one that was asked for"
+        );
     }
 
     /// A parent whose sealed `meta.json` is edited after capture — without

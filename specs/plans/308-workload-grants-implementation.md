@@ -3187,3 +3187,42 @@ kernel to substitute on a restore path.
 than passing green, but the matcher now squeezes whitespace and the fixture
 carries a wrapped body so the regression is caught in unit tests. This is the
 third gate in this plan to be tripped by rustfmt wrapping a signature.
+### Task 23: Bound a warm-claimed child by the host ceiling
+
+The last open enforcement gap in claim 18. A warm-claimed child is bounded by
+its parent for egress (an absent parent grant is deny-all) but not for CPU:
+the standby parent deliberately carries no grant, so `claim_standby`'s subset
+check has nothing to bind against and the child boots unbounded.
+
+Sealing the provisioning workload's grant on the parent was considered and
+rejected in-tree, for a good reason that still holds: one parent serves every
+later claim, so that would bound unrelated claims to a stranger's number.
+
+**The decision, taken deliberately: derive the pool's bound from the host
+`GrantCeiling` rather than inventing a pool config surface.** The ceiling is
+already resolved at admission from host configuration, already bounds every
+cold boot, and needs no new declaring concept. It is the weakest of the
+options considered — a ceiling is a host-wide maximum, not a pool-specific
+grant — and it is strictly better than the status quo of unbounded. Say that
+plainly in the code rather than implying the bound is tighter than it is.
+
+**And: the bound is checked *after* pool matching, not folded into the
+compatibility key.** Folding it in would fragment pools per distinct grant
+value, so a 1500-millicore claim could not reuse a 2000-millicore pool and the
+warm-start hit rate — the entire point of the pool — would drop. The cost is
+that a claim can match a pool and then be refused; that is a worse error
+message, not a worse outcome, and the refusal must name the ceiling and the
+asked-for value so it reads as a bound rather than a bug.
+
+**Scope discipline.** This does not make a warm-claimed child *spawn*-bounded
+the way a cold boot or a restore is — that still needs the claim path to reach
+`bind_cpu_grant`, which is a separate question about where a claimed child's
+VMM process is spawned. Determine whether that is reachable here; if it is,
+do it and the limit closes fully. If it is not, bound at admission, say so,
+and leave the spawn half declared rather than implying more.
+
+**Witnesses:**
+- `a_claimed_child_over_the_host_ceiling_is_refused`
+- `a_claimed_child_within_the_ceiling_is_admitted`
+- `the_refusal_names_the_ceiling_and_the_request`
+- `pool_matching_is_unchanged_by_the_bound` — the compatibility key did not move

@@ -278,21 +278,46 @@ not paraphrase this row without them.
    inside a host call consumes no fuel, so a fuel-only grant is refused rather
    than accepted as partial enforcement. Witnessed by
    `fn:a_fuel_grant_halts_a_runaway_module`.
-4. **A warm-claimed child is unbounded by its parent. (PARTIAL.)** A
-   *restored* child is now spawn-bounded: its admitted grant rides
-   `RestoredChild.cpu_grant` to the restore callback, where HVF wraps the
-   supervisor spawn and Firecracker prefixes its launch line through the same
-   seams their cold boots use — witnessed by
-   `fn:a_restored_child_is_cpu_bounded_by_its_admitted_grant`.
-   A *warm-claimed* child is not, and the reason is deliberate: a factory
-   parent holds no plan, tenant or `cpu_grant` by construction, because one
-   parent serves every later claim and sealing the provisioning workload's
-   grant would bound unrelated claims to a stranger's number. The claim path
-   checks a child's grants against the parent's (so it cannot widen) but has
-   nothing to bind against. Closing this needs a grant on `StandbySpec`
-   plumbed from pool configuration — a declaring surface that does not exist
-   yet, plus a decision on whether that grant joins the pool compatibility
-   key.
+4. **A forked child is spawn-bounded; a warm-claimed child is
+   admission-bounded everywhere and spawn-bounded on one of its three claim
+   paths. (PARTIALLY OPEN.)** A `vm_full` fork boots a fresh VMM under the
+   child's own admitted plan and carries that plan's CPU grant into the spawn —
+   Firecracker through the bounded snapshot-load launch line, HVF through the
+   wrapped supervisor `Command`
+   (`fn:a_restored_child_is_cpu_bounded_by_its_admitted_grant`, once per
+   backend). A same-identity `restore` binds nothing, deliberately rather than
+   as a gap: it admits no plan of its own, so there is no grant to bind, and
+   inventing one from the checkpoint record would be a bound nobody signed for
+   that run.
+
+   A warm-claimed child is bounded at admission on every path, by the host's
+   own `GrantCeiling`. The standby parent is deliberately spawned with no
+   grant — one parent serves every later claim, so sealing a provisioning
+   workload's grant onto it would bind unrelated claims to a stranger's
+   number — which leaves the parent-subset comparison nothing to bind against,
+   so the ceiling is what refuses instead
+   (`fn:a_claimed_child_over_the_host_ceiling_is_refused`,
+   `fn:a_claimed_child_within_the_ceiling_is_admitted`). Read that for exactly
+   what it is: a host-wide maximum every cold boot on this host already clears,
+   not a pool-specific grant, and so the weakest of the bounds considered —
+   strictly stronger than the unbounded claim it replaces and no stronger than
+   that. It is checked after the pool has matched rather than folded into the
+   compatibility key, because keying on a grant would fragment one pool into a
+   pool per distinct share and cost the warm hit rate the pool exists for; the
+   price is that a claim can match a parent and then be refused, so the refusal
+   names both numbers (`fn:the_refusal_names_the_ceiling_and_the_request`,
+   `fn:pool_matching_is_unchanged_by_the_bound`).
+
+   The spawn half is closed only where a claim spawns something. The
+   Firecracker saved-state fork goes through the same bounded restore a
+   `vm_full` fork does. The other two claim paths spawn no process to wrap:
+   Firecracker's preloaded child was started before the claim arrived, and the
+   HVF resident handoff resumes the parent's own supervisor by signal — a
+   process born grant-less as shared pool capacity, which binding now would
+   bind the pool rather than the claim. `bind_cpu_grant` wraps a `Command` and
+   this tree has no post-spawn attach, so on those two paths a claimed child's
+   CPU bound is a ledger entry and not a `cpu.max`. Wall clock is unbounded on
+   all of them, per limit 2.
 5. **The budget is not a precise cliff. (OPEN, by choice.)** Two admissions
    racing each other can both read the same total and both be admitted,
    overshooting by one boot; closing that needs a host-wide lock held across
@@ -690,7 +715,7 @@ tracked separately as a follow-up audit (see "deferred follow-ups").
 | 15 | A sealed production microVM has no shell, no DevOnly guest-agent verbs, and no PTY | fn:console_refused_on_sealed_image, ci:guest-agent-runtime-boundary, fn:prod_console_attachment_has_no_input | runtime profile + signed VerbGrant + host accessible-gate + console policy (ADR-001 §W4.3 extension). The host→guest input plane is deliberately *not* claimed here: its properties are policy, not absence, and are witnessed at row 17 | Shipped |
 | 16 | Egress substitution keeps a raw secret off the guest, bound-only, no value in audit | fn:handed_placeholders_never_contain_the_secret_value, fn:substitution_endpoint_refuses_unbound_destination, fn:audit_chain_carries_no_secret_value | egress substitution leak-gate; reinforces claims 12+13 on the egress delivery (ADR-023, specs/claims/claim-egress-no-secret-to-guest.md) | Preview |
 | 17 | Workload stdin is grant-gated, single-writer, secret-scanned across frames, and every refusal is audited | fn:input_is_refused_without_a_plan_grant, fn:a_second_writer_is_refused_while_the_lease_is_held, fn:secret_material_split_across_frames_is_still_refused, fn:every_refusal_is_audited, fn:a_shell_entrypoint_with_the_grant_is_refused_and_names_the_reason, fn:the_endpoint_fingerprints_what_it_resolved_and_reports_no_value, fn:the_handshakes_two_halves_go_to_two_different_places, fn:a_secret_split_across_two_frames_does_not_reassemble_in_the_workload, fn:a_fingerprint_refusal_does_not_claim_the_bytes_are_the_secret | input grant token in a signed ExecutionPlan.services + per-VM lease with TTL + fingerprint-matching sliding-window secret scan + chain-signed payload-free refusal audit + sealed-tier shell-entrypoint refusal. Read the limits note below before treating this as enforced | Preview |
-| 18 | A workload's resource consumption is bounded at admission — per workload and across the host — and CPU-bound at spawn where the host has a mechanism | fn:a_boot_past_the_headroom_is_refused, fn:budget_ignores_dead_machines, fn:budget_counts_the_configured_maximum_not_current_usage, fn:an_empty_host_admits_a_boot_within_headroom, fn:an_unreadable_charge_record_is_skipped_rather_than_fatal, fn:admission_refuses_a_grant_over_the_ceiling, fn:the_ceiling_bounds_memory_even_though_no_one_granted_it, fn:prod_refuses_a_cpu_grant_on_a_backend_that_cannot_bound_cpu, fn:the_libkrun_tier_cannot_bound_cpu_off_linux, fn:a_share_grant_binds_the_spawn_when_the_mechanism_is_present, fn:a_vm_with_no_recorded_scope_reads_back_as_declared_not_as_an_error, fn:an_admitted_boot_writes_the_achieved_tier_to_the_audit_chain, fn:a_wall_clock_bound_needs_a_clock_that_can_stop_the_workload, fn:a_granted_cpu_share_binds_a_real_spawn_to_its_quota | operator-configured per-workload ceiling + host-wide budget summed over live machines only (pid-marker probe, configured maximum not current usage) + cgroup v2 `cpu.max` on a systemd transient scope, read back and written to the chain-signed audit log. CPU is declared-only off Linux, wall clock is enforced on libkrun only, wasm bounds via fuel and epoch, a restored child is re-bound at spawn and a warm-claimed one is not — read the "Preview 18 limits" note below before treating this as enforced | Preview |
+| 18 | A workload's resource consumption is bounded at admission — per workload and across the host — and CPU-bound at spawn where the host has a mechanism | fn:a_boot_past_the_headroom_is_refused, fn:budget_ignores_dead_machines, fn:budget_counts_the_configured_maximum_not_current_usage, fn:an_empty_host_admits_a_boot_within_headroom, fn:an_unreadable_charge_record_is_skipped_rather_than_fatal, fn:admission_refuses_a_grant_over_the_ceiling, fn:the_ceiling_bounds_memory_even_though_no_one_granted_it, fn:prod_refuses_a_cpu_grant_on_a_backend_that_cannot_bound_cpu, fn:the_libkrun_tier_cannot_bound_cpu_off_linux, fn:a_share_grant_binds_the_spawn_when_the_mechanism_is_present, fn:a_vm_with_no_recorded_scope_reads_back_as_declared_not_as_an_error, fn:an_admitted_boot_writes_the_achieved_tier_to_the_audit_chain, fn:a_wall_clock_bound_needs_a_clock_that_can_stop_the_workload, fn:a_granted_cpu_share_binds_a_real_spawn_to_its_quota, fn:a_restored_child_is_cpu_bounded_by_its_admitted_grant, fn:a_claimed_child_over_the_host_ceiling_is_refused, fn:a_claimed_child_within_the_ceiling_is_admitted, fn:the_refusal_names_the_ceiling_and_the_request, fn:pool_matching_is_unchanged_by_the_bound | operator-configured per-workload ceiling + host-wide budget summed over live machines only (pid-marker probe, configured maximum not current usage) + cgroup v2 `cpu.max` on a systemd transient scope, read back and written to the chain-signed audit log. CPU is declared-only off Linux, wall clock is enforced on libkrun only, wasm bounds via fuel and epoch, a forked child is re-bound at spawn, and a warm-claimed child is bounded by the host ceiling at admission but spawn-bound on only one of its three claim paths — read the "Preview 18 limits" note below before treating this as enforced | Preview |
 
 Row 16 is the egress-substitution leak-gate. Like claim 14 (OCI provenance),
 it is registered here for witness machine-checking and tracked by its own doc
