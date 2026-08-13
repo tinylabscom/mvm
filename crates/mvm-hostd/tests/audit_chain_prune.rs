@@ -7,7 +7,7 @@
 
 use ed25519_dalek::SigningKey;
 use mvm_core::plan::{PlanId, TenantId};
-use mvm_hostd::supervisor::audit::{AuditEntry, AuditSigner};
+use mvm_hostd::supervisor::audit::{AuditSigner, PlanAuditEntry};
 use mvm_hostd::supervisor::audit_file::{FileAuditSigner, RotationPolicy};
 use mvm_hostd::supervisor::audit_segment::{LABEL_PRUNED_THROUGH, LABEL_PRUNED_TIP};
 use mvm_hostd::supervisor::audit_set::{SegmentSetError, verify_segment_set};
@@ -17,8 +17,8 @@ fn key() -> SigningKey {
     SigningKey::from_bytes(&[11u8; 32])
 }
 
-fn entry(n: usize) -> AuditEntry {
-    AuditEntry {
+fn entry(n: usize) -> PlanAuditEntry {
+    PlanAuditEntry {
         timestamp: chrono::Utc::now(),
         tenant: TenantId("local".to_string()),
         plan_id: PlanId(format!("plan-{n}")),

@@ -218,7 +218,7 @@ pub fn pruned_labels(pruned: &Pruned) -> BTreeMap<String, String> {
 /// claiming `through = 0` is refused: it would describe removing nothing while
 /// still being offered as an explanation for a gap.
 #[must_use]
-pub fn pruned_from_entry(entry: &AuditEntry) -> Option<Pruned> {
+pub fn pruned_from_entry(entry: &PlanAuditEntry) -> Option<Pruned> {
     if entry.event != CHAIN_PRUNED {
         return None;
     }

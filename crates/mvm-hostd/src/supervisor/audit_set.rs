@@ -539,7 +539,10 @@ pub fn verify_segment_entries(
     base: &str,
     vk: &VerifyingKey,
 ) -> Result<Vec<crate::supervisor::audit::PlanAuditEntry>, SegmentSetError> {
-    Ok(walk(dir, base, vk, true)?
+    let walked = walk(dir, base, vk, true)?;
+    adjudicate(&walked, vk)?;
+    Ok(walked
+        .contents
         .into_iter()
         .flat_map(|s| s.entries.unwrap_or_default())
         .collect())
@@ -753,7 +756,7 @@ fn adjudicate(walked: &Walked, vk: &VerifyingKey) -> Result<Option<Pruned>, Segm
 
 /// The prune record with the largest range in one segment. A segment can carry
 /// more than one if the chain was pruned twice without rotating in between.
-fn newest_prune(entries: &[crate::supervisor::audit::AuditEntry]) -> Option<Pruned> {
+fn newest_prune(entries: &[crate::supervisor::audit::PlanAuditEntry]) -> Option<Pruned> {
     entries
         .iter()
         .filter_map(pruned_from_entry)
