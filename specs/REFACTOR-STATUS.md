@@ -196,7 +196,7 @@ for detailed scope and acceptance criteria.
         `matryoshka.md` separates layer-defending from backend-independent
         claims
 
-- [~] Plan 315 — HVF virtio-vsock transmit-credit regression
+- [x] Plan 315 — HVF virtio-vsock transmit-credit regression
       (`specs/plans/315-hvf-vsock-credit-regression.md`)
   - [x] Restore bounded guest credit recording, fail-closed unknown-credit
         behavior, protocol counter wrapping, and complete state teardown
@@ -207,8 +207,10 @@ for detailed scope and acceptance criteria.
   - [x] Pass all 446 `mvm-vmm` tests, the serial aggregate workspace suite,
         workspace check, macOS workspace all-target Clippy, and the focused
         x86_64 Linux cross-build
-  - [ ] Run Linux-native workspace Clippy/tests in the project builder
-        environment
+  - [x] Run Linux-native workspace Clippy/tests — CI test-linux and
+        lint-core passed on PR #2324; local x86_64 Linux cross-build
+        (`cargo zigbuild --target x86_64-unknown-linux-gnu -p mvm-vmm
+        --lib --all-features`) passes on current `main`
 
 - [x] Plan 318 — span-timing profiling
       (`specs/plans/318-span-timing-profiling.md`)
