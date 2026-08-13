@@ -8,7 +8,7 @@
 //!
 //! - **`~/.mvm/audit/<tenant>.jsonl`** — plan-bound chain-signed
 //!   events (`plan.admitted`, `plan.launched`, `plan.failed`).
-//!   Shape: `AuditEntry` carries
+//!   Shape: `PlanAuditEntry` carries
 //!   `plan_id`/`plan_version`/`image_*` mandatorily.
 //! - **`~/.mvm/audit/secrets.jsonl`** — operator `mvmctl secret`
 //!   CRUD audit. Ad-hoc JSON shape.
@@ -54,7 +54,7 @@ use mvm_core::observability::metrics::Metrics;
 use mvm_core::plan::{ExecutionPlan, PlanId, TenantId};
 use mvm_core::policy::PolicyBundle;
 
-use crate::supervisor::audit::{AuditEntry, AuditError, AuditSigner};
+use crate::supervisor::audit::{PlanAuditEntry, AuditError, AuditSigner};
 
 /// Canonical audit-event categories. The string form (the
 /// `event_name` field's prefix) is the wire-stable identifier
@@ -246,7 +246,7 @@ impl Recorder {
         let event_name = event_name.into();
         validate_event_prefix(category, &event_name)?;
         let merged = merge_extras(category, extras);
-        let entry = AuditEntry::for_plan(plan, bundle, event_name, merged);
+        let entry = PlanAuditEntry::for_plan(plan, bundle, event_name, merged);
         self.signer.sign_and_emit(&entry).await?;
         self.bump_metric(category);
         Ok(())
@@ -303,9 +303,9 @@ impl Recorder {
         category: EventCategory,
         event_name: String,
         extras: impl IntoIterator<Item = (String, String)>,
-    ) -> AuditEntry {
+    ) -> PlanAuditEntry {
         let labels = merge_extras(category, extras);
-        AuditEntry {
+        PlanAuditEntry {
             timestamp: chrono::Utc::now(),
             tenant: self.default_tenant.clone(),
             plan_id: PlanId(UNBOUND_PLAN_ID.to_string()),

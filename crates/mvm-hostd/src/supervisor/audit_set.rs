@@ -239,7 +239,7 @@ pub struct SegmentContent {
     /// Authenticated entries, when this segment's interior was walked. `None`
     /// for a sealed segment under [`verify_segment_topology`], so a caller can
     /// never present an interior it did not read as though it had.
-    pub entries: Option<Vec<crate::supervisor::audit::AuditEntry>>,
+    pub entries: Option<Vec<crate::supervisor::audit::PlanAuditEntry>>,
 }
 
 impl SegmentContent {
@@ -448,7 +448,7 @@ pub fn verify_segment_entries(
     dir: &Path,
     base: &str,
     vk: &VerifyingKey,
-) -> Result<Vec<crate::supervisor::audit::AuditEntry>, SegmentSetError> {
+) -> Result<Vec<crate::supervisor::audit::PlanAuditEntry>, SegmentSetError> {
     Ok(walk(dir, base, vk, true)?
         .into_iter()
         .flat_map(|s| s.entries.unwrap_or_default())

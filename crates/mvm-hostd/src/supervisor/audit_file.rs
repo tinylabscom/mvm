@@ -1,6 +1,6 @@
 //! Chain-signed file-backed [`AuditSigner`].
 //!
-//! Each emitted [`AuditEntry`] is wrapped in a [`SignedEnvelope`] that carries
+//! Each emitted [`PlanAuditEntry`] is wrapped in a [`SignedEnvelope`] that carries
 //! the exact bytes the signature covers, the SHA-256 hash of the previous
 //! envelope on disk, and an Ed25519 signature over
 //! `signed_bytes || prev_hash`. Tampering with any entry — re-ordering,
@@ -47,7 +47,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use crate::supervisor::audit::{AuditEntry, AuditError, AuditSigner};
+use crate::supervisor::audit::{PlanAuditEntry, AuditError, AuditSigner};
 
 /// On-disk representation of one audit line: the entry, the exact bytes that
 /// were signed, the hash of the previous envelope (genesis = 32 zero bytes),
@@ -72,7 +72,7 @@ use crate::supervisor::audit::{AuditEntry, AuditError, AuditSigner};
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct SignedEnvelope {
-    pub entry: AuditEntry,
+    pub entry: PlanAuditEntry,
     /// base64 url-safe-no-pad of the exact entry bytes covered by
     /// `signature`.
     ///
@@ -384,7 +384,7 @@ impl FileAuditSigner {
 
     /// Append one signed entry to `path`, assuming the chain lock is held.
     /// Returns the new chain tip.
-    fn append_locked(&self, path: &Path, entry: &AuditEntry) -> Result<[u8; 32], AuditError> {
+    fn append_locked(&self, path: &Path, entry: &PlanAuditEntry) -> Result<[u8; 32], AuditError> {
         // Refresh the cursor under the lock — another process may have appended
         // between our last in-memory snapshot and this call. The in-memory
         // cursor cache stays a fast-path hint; restoration here is the source
@@ -397,7 +397,7 @@ impl FileAuditSigner {
     fn write_signed(
         &self,
         path: &Path,
-        entry: &AuditEntry,
+        entry: &PlanAuditEntry,
         prev_hash: [u8; 32],
         sync: SyncPolicy,
     ) -> Result<[u8; 32], AuditError> {
@@ -474,8 +474,8 @@ impl FileAuditSigner {
         tenant: &mvm_core::plan::TenantId,
         event: &str,
         labels: std::collections::BTreeMap<String, String>,
-    ) -> AuditEntry {
-        AuditEntry {
+    ) -> PlanAuditEntry {
+        PlanAuditEntry {
             timestamp: chrono::Utc::now(),
             tenant: tenant.clone(),
             plan_id: mvm_core::plan::PlanId(
@@ -649,7 +649,7 @@ pub(crate) fn highest_sealed_segment(
 
 #[async_trait]
 impl AuditSigner for FileAuditSigner {
-    async fn sign_and_emit(&self, entry: &AuditEntry) -> Result<(), AuditError> {
+    async fn sign_and_emit(&self, entry: &PlanAuditEntry) -> Result<(), AuditError> {
         let tenant = entry.tenant.0.clone();
         let path = self.tenant_path(&tenant);
         let cursor_key = self
@@ -745,7 +745,7 @@ fn signed_bytes_for(envelope: &SignedEnvelope, line: usize) -> Result<Vec<u8>, V
             line,
             reason: format!("canonical b64: {e}"),
         })?;
-    let decoded: AuditEntry =
+    let decoded: PlanAuditEntry =
         serde_json::from_slice(&bytes).map_err(|e| VerifyError::Malformed {
             line,
             reason: format!("canonical entry parse: {e}"),
@@ -771,7 +771,7 @@ pub fn verify_audit_chain(path: &Path, verifying_key: &VerifyingKey) -> Result<u
 pub fn verify_audit_chain_entries(
     path: &Path,
     verifying_key: &VerifyingKey,
-) -> Result<Vec<AuditEntry>, VerifyError> {
+) -> Result<Vec<PlanAuditEntry>, VerifyError> {
     let content = std::fs::read_to_string(path).map_err(|e| VerifyError::Io(e.to_string()))?;
     let walk = walk_chain(&content, verifying_key, ChainStart::Genesis)?;
     Ok(walk.entries)
@@ -786,7 +786,7 @@ pub fn verify_audit_chain_entries(
 #[derive(Debug, Clone)]
 pub struct SegmentWalk {
     /// Authenticated entries, in chain order.
-    pub entries: Vec<AuditEntry>,
+    pub entries: Vec<PlanAuditEntry>,
     /// SHA-256 of the final line — what a successor segment must claim.
     pub tip: [u8; 32],
 }
@@ -822,7 +822,7 @@ enum ChainStart {
 
 /// What a completed walk established.
 struct ChainWalk {
-    entries: Vec<AuditEntry>,
+    entries: Vec<PlanAuditEntry>,
     /// Total lines consumed, including any skipped prefix.
     lines: usize,
     /// Running chain hash after the last line.
@@ -907,7 +907,7 @@ fn verify_line(
     idx: usize,
     prev_hash: &[u8; 32],
     verifying_key: &VerifyingKey,
-    entries: &mut Vec<AuditEntry>,
+    entries: &mut Vec<PlanAuditEntry>,
 ) -> Result<[u8; 32], VerifyError> {
     let envelope: SignedEnvelope =
         serde_json::from_str(line).map_err(|e| VerifyError::Malformed {
@@ -1066,8 +1066,8 @@ mod tests {
         }
     }
 
-    fn make_entry(tenant: &str, event: &str) -> AuditEntry {
-        AuditEntry {
+    fn make_entry(tenant: &str, event: &str) -> PlanAuditEntry {
+        PlanAuditEntry {
             timestamp: Utc::now(),
             tenant: TenantId(tenant.to_string()),
             plan_id: PlanId("plan-1".to_string()),
@@ -1316,7 +1316,7 @@ mod tests {
     }
 
     // Pin the wasm-clean `mvm_contract::verify` re-implementation to the
-    // bytes this crate actually writes. If `AuditEntry`'s serde shape
+    // bytes this crate actually writes. If `PlanAuditEntry`'s serde shape
     // drifts from `mvm_contract::verify::MirrorEntry`, a genuine line
     // stops verifying and this fails here (loudly, in CI) rather than
     // only in the browser tool.
@@ -1352,8 +1352,8 @@ mod tests {
                 .join("vectors")
         }
 
-        fn fixed_entry(tenant: &str, event: &str, ts: &str) -> AuditEntry {
-            AuditEntry {
+        fn fixed_entry(tenant: &str, event: &str, ts: &str) -> PlanAuditEntry {
+            PlanAuditEntry {
                 timestamp: ts.parse().expect("valid RFC 3339"),
                 tenant: TenantId(tenant.to_string()),
                 plan_id: PlanId("plan-frozen".to_string()),

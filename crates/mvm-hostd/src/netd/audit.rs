@@ -555,7 +555,7 @@ mod tests {
     use mvm_net::l3::{DenyCode, SessionId};
 
     use super::*;
-    use crate::supervisor::audit::AuditEntry;
+    use crate::supervisor::audit::PlanAuditEntry;
     use crate::supervisor::{FileAuditSigner, verify_audit_chain_entries};
 
     const TENANT: &str = "local";
@@ -590,7 +590,7 @@ mod tests {
     /// Every entry on the tenant's chain, verified rather than parsed: an
     /// assertion over an unverified log would pass on a log a tamper had
     /// already broken.
-    fn chain(dir: &Path, key: &VerifyingKey) -> Vec<AuditEntry> {
+    fn chain(dir: &Path, key: &VerifyingKey) -> Vec<PlanAuditEntry> {
         let path = dir.join(format!("{TENANT}.jsonl"));
         if !path.exists() {
             return Vec::new();
@@ -598,7 +598,7 @@ mod tests {
         verify_audit_chain_entries(&path, key).expect("the chain must verify")
     }
 
-    fn events(entries: &[AuditEntry], event: &str) -> Vec<AuditEntry> {
+    fn events(entries: &[PlanAuditEntry], event: &str) -> Vec<PlanAuditEntry> {
         entries
             .iter()
             .filter(|e| e.event == event)

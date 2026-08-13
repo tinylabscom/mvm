@@ -135,7 +135,7 @@ pub use aggregate::{
 pub use artifact::{
     ArtifactCollector, ArtifactError, LiveArtifactCollector, NoopArtifactCollector,
 };
-pub use audit::{AuditEntry, AuditError, AuditSigner, CapturingAuditSigner, NoopAuditSigner};
+pub use audit::{PlanAuditEntry, AuditError, AuditSigner, CapturingAuditSigner, NoopAuditSigner};
 pub use audit_dedup::{Decision, DedupKey, RetryStormSummary, RetryStormSuppressor};
 pub use audit_file::{
     ChainCheckpoint, FileAuditSigner, IncrementalVerification, RotationPolicy, SegmentWalk,

@@ -32,7 +32,7 @@ use thiserror::Error;
 /// hash, producing a tamper-evident stream).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct AuditEntry {
+pub struct PlanAuditEntry {
     pub timestamp: DateTime<Utc>,
     pub tenant: TenantId,
 
@@ -60,7 +60,7 @@ pub struct AuditEntry {
     pub labels: std::collections::BTreeMap<String, String>,
 }
 
-impl AuditEntry {
+impl PlanAuditEntry {
     /// Construct an audit entry bound to a plan + (optional) bundle.
     /// The plan's `audit_labels` are merged into the entry's labels;
     /// per-event extras override on collision.
@@ -207,8 +207,8 @@ pub const LABEL_TRANSCRIPT_ROOT: &str = "transcript_root";
 /// Label containing the number of ordered ciphertext chunks.
 pub const LABEL_CHUNK_COUNT: &str = "chunk_count";
 
-/// Per-direction flow label for [`AuditEntry::flow_opened`] /
-/// [`AuditEntry::flow_closed`]. Egress = guest → internet,
+/// Per-direction flow label for [`PlanAuditEntry::flow_opened`] /
+/// [`PlanAuditEntry::flow_closed`]. Egress = guest → internet,
 /// Ingress = internet → guest. North-south only — east-west
 /// microVM ↔ microVM lateral flows are out of scope here, deferred.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -230,7 +230,7 @@ impl FlowDirection {
     }
 }
 
-/// Close discriminator for [`AuditEntry::flow_closed`].
+/// Close discriminator for [`PlanAuditEntry::flow_closed`].
 ///
 /// `Eof` is the steady-state happy path (TCP FIN, UDP timeout,
 /// DGRAM peer closed). `BridgeError` covers bridge-task panic
@@ -283,14 +283,14 @@ pub trait AuditSigner: Send + Sync {
     /// `prev_hash` from the previous entry, derives the current
     /// entry's signature, and writes both to the audit stream
     /// destination(s).
-    async fn sign_and_emit(&self, entry: &AuditEntry) -> Result<(), AuditError>;
+    async fn sign_and_emit(&self, entry: &PlanAuditEntry) -> Result<(), AuditError>;
 }
 
 pub struct NoopAuditSigner;
 
 #[async_trait]
 impl AuditSigner for NoopAuditSigner {
-    async fn sign_and_emit(&self, _entry: &AuditEntry) -> Result<(), AuditError> {
+    async fn sign_and_emit(&self, _entry: &PlanAuditEntry) -> Result<(), AuditError> {
         Err(AuditError::NotWired)
     }
 }
@@ -303,7 +303,7 @@ impl AuditSigner for NoopAuditSigner {
 /// The chain-signing real impl will replace this for production,
 /// but keep this around for `cargo test` and `mvmctl --dev`.
 pub struct CapturingAuditSigner {
-    entries: Mutex<Vec<AuditEntry>>,
+    entries: Mutex<Vec<PlanAuditEntry>>,
 }
 
 impl CapturingAuditSigner {
@@ -313,7 +313,7 @@ impl CapturingAuditSigner {
         }
     }
 
-    pub fn entries(&self) -> Vec<AuditEntry> {
+    pub fn entries(&self) -> Vec<PlanAuditEntry> {
         self.entries
             .lock()
             .expect("CapturingAuditSigner mutex poisoned")
@@ -329,7 +329,7 @@ impl Default for CapturingAuditSigner {
 
 #[async_trait]
 impl AuditSigner for CapturingAuditSigner {
-    async fn sign_and_emit(&self, entry: &AuditEntry) -> Result<(), AuditError> {
+    async fn sign_and_emit(&self, entry: &PlanAuditEntry) -> Result<(), AuditError> {
         self.entries
             .lock()
             .expect("CapturingAuditSigner mutex poisoned")
@@ -445,7 +445,7 @@ mod tests {
 
     #[test]
     fn audit_entry_serde_roundtrip() {
-        let entry = AuditEntry {
+        let entry = PlanAuditEntry {
             timestamp: Utc::now(),
             tenant: TenantId("t".to_string()),
             plan_id: PlanId("p".to_string()),
@@ -458,7 +458,7 @@ mod tests {
             labels: BTreeMap::from([("actor".to_string(), "supervisor".to_string())]),
         };
         let bytes = serde_json::to_vec(&entry).unwrap();
-        let parsed: AuditEntry = serde_json::from_slice(&bytes).unwrap();
+        let parsed: PlanAuditEntry = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(parsed, entry);
     }
 
@@ -466,7 +466,7 @@ mod tests {
     fn entry_for_plan_binds_plan_bundle_image() {
         let plan = sample_plan();
         let bundle = sample_bundle();
-        let entry = AuditEntry::for_plan(&plan, Some(&bundle), "plan.verified", []);
+        let entry = PlanAuditEntry::for_plan(&plan, Some(&bundle), "plan.verified", []);
         assert_eq!(entry.plan_id, plan.plan_id);
         assert_eq!(entry.plan_version, plan.plan_version);
         assert_eq!(entry.tenant, plan.tenant);
@@ -483,7 +483,7 @@ mod tests {
     #[test]
     fn entry_for_plan_handles_missing_bundle() {
         let plan = sample_plan();
-        let entry = AuditEntry::for_plan(&plan, None, "plan.verified", []);
+        let entry = PlanAuditEntry::for_plan(&plan, None, "plan.verified", []);
         assert_eq!(entry.bundle_id, None);
         assert_eq!(entry.bundle_version, None);
         // Image still bound from plan.
@@ -493,7 +493,7 @@ mod tests {
     #[test]
     fn entry_for_plan_extras_override_plan_labels() {
         let plan = sample_plan(); // has workflow=etl-1
-        let entry = AuditEntry::for_plan(
+        let entry = PlanAuditEntry::for_plan(
             &plan,
             None,
             "evt",
@@ -570,7 +570,7 @@ mod tests {
     #[test]
     fn flow_opened_helper_carries_canonical_event_and_labels() {
         let plan = sample_plan();
-        let entry = AuditEntry::flow_opened(&plan, None, "f00ba4", FlowDirection::Egress);
+        let entry = PlanAuditEntry::flow_opened(&plan, None, "f00ba4", FlowDirection::Egress);
 
         assert_eq!(entry.event, FLOW_OPENED_EVENT);
         assert_eq!(entry.event, "gateway.flow_opened");
@@ -585,7 +585,7 @@ mod tests {
     fn transcript_sealed_helper_carries_only_ciphertext_root_metadata() {
         let plan = sample_plan();
         let root = "ab".repeat(32);
-        let entry = AuditEntry::transcript_sealed(&plan, None, "capture-1", "vm-1", &root, 7);
+        let entry = PlanAuditEntry::transcript_sealed(&plan, None, "capture-1", "vm-1", &root, 7);
 
         assert_eq!(entry.event, TRANSCRIPT_SEALED_EVENT);
         assert_eq!(
@@ -602,7 +602,7 @@ mod tests {
     #[test]
     fn flow_closed_helper_carries_canonical_event_and_labels() {
         let plan = sample_plan();
-        let entry = AuditEntry::flow_closed(
+        let entry = PlanAuditEntry::flow_closed(
             &plan,
             None,
             "f00ba4",
@@ -624,7 +624,7 @@ mod tests {
         // "what workload was this flow attributed to?" without
         // dereferencing plan_id separately.
         let plan = sample_plan(); // sample_plan adds workflow=etl-1.
-        let entry = AuditEntry::flow_opened(&plan, None, "f1", FlowDirection::Egress);
+        let entry = PlanAuditEntry::flow_opened(&plan, None, "f1", FlowDirection::Egress);
         assert_eq!(entry.labels.get("workflow"), Some(&"etl-1".to_string()));
     }
 
@@ -641,7 +641,7 @@ mod tests {
             FlowCloseReason::PolicyDropped,
             FlowCloseReason::Shutdown,
         ] {
-            let entry = AuditEntry::flow_closed(&plan, None, "f1", FlowDirection::Egress, reason);
+            let entry = PlanAuditEntry::flow_closed(&plan, None, "f1", FlowDirection::Egress, reason);
             emitted.insert(entry.labels.get("reason").cloned().unwrap());
         }
         assert_eq!(emitted.len(), 4, "all four reasons must be distinguishable");
@@ -650,7 +650,7 @@ mod tests {
     #[test]
     fn flow_observer_fault_helper_attributes_observer_and_reason() {
         let plan = sample_plan();
-        let entry = AuditEntry::flow_observer_fault(
+        let entry = PlanAuditEntry::flow_observer_fault(
             &plan,
             None,
             "vm-egress",
@@ -676,7 +676,7 @@ mod tests {
     fn capturing_audit_signer_records_entries() {
         let signer = CapturingAuditSigner::new();
         let plan = sample_plan();
-        let entry = AuditEntry::for_plan(&plan, None, "plan.verified", []);
+        let entry = PlanAuditEntry::for_plan(&plan, None, "plan.verified", []);
 
         // Sync block_on via a fresh tokio runtime — the trait method
         // is async; mvm-supervisor's tokio dev-dep covers this.

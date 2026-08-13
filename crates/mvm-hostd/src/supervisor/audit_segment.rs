@@ -36,7 +36,7 @@ use std::collections::BTreeMap;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
-use crate::supervisor::audit::AuditEntry;
+use crate::supervisor::audit::PlanAuditEntry;
 
 /// Terminal record of a retired segment. Its presence is what distinguishes a
 /// segment that was *sealed* from one that was truncated at a convenient point.
@@ -127,7 +127,7 @@ fn label_u64(labels: &BTreeMap<String, String>, key: &str) -> Option<u64> {
 /// against its successor, and silently accepting it would make the count check
 /// optional in exactly the case where someone tampered with it.
 #[must_use]
-pub fn sealed_from_entry(entry: &AuditEntry) -> Option<Sealed> {
+pub fn sealed_from_entry(entry: &PlanAuditEntry) -> Option<Sealed> {
     if entry.event != CHAIN_SEALED {
         return None;
     }
@@ -148,7 +148,7 @@ pub fn sealed_from_entry(entry: &AuditEntry) -> Option<Sealed> {
 /// Read a [`CHAIN_CONTINUED`] record, or `None` if `entry` is not one or is
 /// missing a field.
 #[must_use]
-pub fn continuation_from_entry(entry: &AuditEntry) -> Option<Continuation> {
+pub fn continuation_from_entry(entry: &PlanAuditEntry) -> Option<Continuation> {
     if entry.event != CHAIN_CONTINUED {
         return None;
     }
@@ -177,18 +177,18 @@ pub fn continuation_from_entry(entry: &AuditEntry) -> Option<Continuation> {
 /// out. Handing back the tip rather than a boolean is what forces that: the
 /// caller has to feed it into the signature check to use it.
 #[must_use]
-pub fn continuation_start_hash(entry: &AuditEntry) -> Option<[u8; 32]> {
+pub fn continuation_start_hash(entry: &PlanAuditEntry) -> Option<[u8; 32]> {
     continuation_from_entry(entry).map(|c| c.prev_tip)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::supervisor::audit::AuditEntry;
+    use crate::supervisor::audit::PlanAuditEntry;
     use mvm_core::plan::{PlanId, TenantId};
 
-    fn entry(event: &str, labels: BTreeMap<String, String>) -> AuditEntry {
-        AuditEntry {
+    fn entry(event: &str, labels: BTreeMap<String, String>) -> PlanAuditEntry {
+        PlanAuditEntry {
             timestamp: chrono::Utc::now(),
             tenant: TenantId("local".to_string()),
             plan_id: PlanId("00000000-0000-0000-0000-000000000000".to_string()),

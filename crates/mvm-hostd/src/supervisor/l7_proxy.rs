@@ -113,7 +113,7 @@ pub struct EvaluationResult {
 
 /// Sink the proxy hands [`AuditFields`] to. The supervisor's
 /// production wiring wraps this around an `AuditSigner` +
-/// plan/bundle binding, building proper `AuditEntry` records.
+/// plan/bundle binding, building proper `PlanAuditEntry` records.
 /// Tests use [`CapturingEgressAuditSink`] directly.
 #[async_trait]
 pub trait EgressAuditSink: Send + Sync {

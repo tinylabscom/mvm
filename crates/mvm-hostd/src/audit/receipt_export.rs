@@ -19,13 +19,13 @@ use mvm_core::receipt::{
 };
 use serde_json::Value;
 
-use crate::supervisor::audit::AuditEntry;
+use crate::supervisor::audit::PlanAuditEntry;
 use crate::supervisor::audit_file::verify_audit_chain_entries;
 
 /// Export signed execution receipts from a tenant's chain-signed audit log.
 ///
 /// The chain is verified under `signing_key.verifying_key()` before any
-/// entry is converted. Each authenticated `AuditEntry` that maps to a known
+/// entry is converted. Each authenticated `PlanAuditEntry` that maps to a known
 /// receipt type is converted, signed, and returned in chain order.
 ///
 /// If `plan_id_filter` is `Some`, only entries whose `plan_id` matches are
@@ -67,7 +67,7 @@ pub fn export_receipts(
 /// Returns `None` for events that have no defined receipt mapping.
 /// The receipt's `receipt_id` is computed from the canonical payload so
 /// callers can verify content addressing offline.
-pub fn audit_entry_to_receipt(entry: &AuditEntry, host_did: &str) -> Option<ExecutionReceipt> {
+pub fn audit_entry_to_receipt(entry: &PlanAuditEntry, host_did: &str) -> Option<ExecutionReceipt> {
     let (receipt_type, outcome) = map_event_to_receipt_type(&entry.event)?;
     let action = build_action(entry, receipt_type);
     let extensions = build_extensions(entry);
@@ -120,7 +120,7 @@ fn map_event_to_receipt_type(event: &str) -> Option<(&'static str, ReceiptOutcom
 ///
 /// The verb/resource are derived from the receipt type. All labels except
 /// those consumed as top-level receipt fields become `params`.
-fn build_action(entry: &AuditEntry, receipt_type: &str) -> ReceiptAction {
+fn build_action(entry: &PlanAuditEntry, receipt_type: &str) -> ReceiptAction {
     let mut params: BTreeMap<String, Value> = BTreeMap::new();
     for (k, v) in &entry.labels {
         if is_top_level_label(k) {
@@ -165,7 +165,7 @@ fn is_top_level_label(key: &str) -> bool {
 
 /// Build namespace-prefixed extensions that preserve audit-entry metadata
 /// not otherwise represented in the receipt payload.
-fn build_extensions(entry: &AuditEntry) -> BTreeMap<String, Value> {
+fn build_extensions(entry: &PlanAuditEntry) -> BTreeMap<String, Value> {
     let mut ext = BTreeMap::new();
     ext.insert(
         "mvm.tenant".to_string(),
@@ -205,15 +205,15 @@ mod tests {
     use mvm_core::receipt::ReceiptOutcome;
 
     use crate::supervisor::AuditSigner;
-    use crate::supervisor::audit::AuditEntry;
+    use crate::supervisor::audit::PlanAuditEntry;
     use crate::supervisor::audit_file::FileAuditSigner;
 
     fn sample_plan_id() -> PlanId {
         PlanId("sha256:0000000000000000000000000000000000000000000000000000000000000001".into())
     }
 
-    fn sample_audit_entry(event: &str, labels: BTreeMap<String, String>) -> AuditEntry {
-        AuditEntry {
+    fn sample_audit_entry(event: &str, labels: BTreeMap<String, String>) -> PlanAuditEntry {
+        PlanAuditEntry {
             timestamp: Utc.with_ymd_and_hms(2026, 8, 6, 0, 0, 0).unwrap(),
             tenant: TenantId("local".into()),
             plan_id: sample_plan_id(),
