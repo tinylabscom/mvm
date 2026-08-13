@@ -459,13 +459,19 @@ pub fn dispatch_nix_build(
 /// the legacy `render_flake_cmd_sh` copy block: an out-path that is itself a
 /// file is the rootfs; an out-path that is a directory carries the kernel under
 /// `vmlinux`/`Image`/`bzImage` plus `rootfs.ext4`.
+///
+/// Before the rootfs is copied to `output_dir`, a writable copy is mounted and
+/// the `before_build` lifecycle hook (`/etc/mvm/hooks/before_build.sh`) is run
+/// inside it. The hook is baked into workload rootfses by
+/// `mkFunctionService.nix`; if the script is absent (e.g., a host-tool image) it
+/// is treated as a no-op by the runner.
 fn export_image_artifacts(nix_out: &Path, output_dir: &Path) -> Result<(), String> {
     std::fs::create_dir_all(output_dir)
         .map_err(|e| format!("create {}: {e}", output_dir.display()))?;
     let meta =
         std::fs::metadata(nix_out).map_err(|e| format!("stat {}: {e}", nix_out.display()))?;
     if meta.is_file() {
-        copy_artifact(nix_out, &output_dir.join("rootfs.ext4"))?;
+        copy_rootfs_with_hook(nix_out, &output_dir.join("rootfs.ext4"))?;
         return Ok(());
     }
     if let Some(kernel) = ["vmlinux", "Image", "bzImage"]
@@ -477,11 +483,57 @@ fn export_image_artifacts(nix_out: &Path, output_dir: &Path) -> Result<(), Strin
     }
     let rootfs = nix_out.join("rootfs.ext4");
     if rootfs.is_file() {
-        copy_artifact(&rootfs, &output_dir.join("rootfs.ext4"))?;
+        copy_rootfs_with_hook(&rootfs, &output_dir.join("rootfs.ext4"))?;
     } else {
         return Err(format!("no rootfs.ext4 in {}", nix_out.display()));
     }
     Ok(())
+}
+
+/// Copy `src_rootfs` to `dst`, running the `before_build` hook on a writable
+/// temp copy first. The temp copy lives on `/tmp` inside the builder VM so the
+/// original Nix store output is never modified.
+fn copy_rootfs_with_hook(src_rootfs: &Path, dst: &Path) -> Result<(), String> {
+    let tmp = tempfile::NamedTempFile::with_suffix(".ext4")
+        .map_err(|e| format!("create temp rootfs copy: {e}"))?;
+    let tmp_path = tmp.path().to_path_buf();
+    std::fs::copy(src_rootfs, &tmp_path).map_err(|e| {
+        format!(
+            "copy {} -> {}: {e}",
+            src_rootfs.display(),
+            tmp_path.display()
+        )
+    })?;
+    run_before_build_hook(&tmp_path)?;
+    std::fs::copy(&tmp_path, dst)
+        .map_err(|e| format!("copy {} -> {}: {e}", tmp_path.display(), dst.display()))?;
+    let _ = tmp.close();
+    Ok(())
+}
+
+/// Run the builder-VM before_build hook runner on `rootfs_path`.
+///
+/// If the runner binary is not present (e.g., unit tests driving
+/// `export_image_artifacts` on a dev host), the hook is skipped. The
+/// binary is always baked into the builder VM rootfs in production.
+fn run_before_build_hook(rootfs_path: &Path) -> Result<(), String> {
+    let runner = std::path::Path::new("/sbin/mvm-host-vm-init");
+    if !runner.is_file() {
+        return Ok(());
+    }
+    let status = std::process::Command::new(runner)
+        .arg("run-before-build-hook")
+        .arg(rootfs_path)
+        .status()
+        .map_err(|e| format!("spawn before_build hook runner: {e}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "before_build hook failed (exit {:?})",
+            status.code()
+        ))
+    }
 }
 
 /// Copy one artifact, dereferencing symlinks (nix store paths are read-only
