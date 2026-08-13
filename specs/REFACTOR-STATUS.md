@@ -111,6 +111,15 @@ for detailed scope and acceptance criteria.
 
 ## In-flight plans
 
+- [~] Plan 330 — Decision provenance layer
+  (`specs/plans/330-decision-provenance-layer.md`)
+  - [ ] Phase 0 — RFC and ADR approved
+  - [ ] Phase 1 — PROV-O export of existing events
+  - [ ] Phase 2 — Enrich existing audit events with authorizer/rationale
+  - [ ] Phase 3 — DecisionRecord API and content-addressed store
+  - [ ] Phase 4 — Query API and causal chains
+  - [ ] Phase 5 — Optional standards interoperability
+
 - [~] Plan 325 — SDK sidecar reserved mount
   (`specs/plans/325-sdk-sidecar-reserved-mount.md`)
   - [x] Reserved SDK disk is excluded from generic user-volume activation
@@ -213,7 +222,7 @@ for detailed scope and acceptance criteria.
   - [x] Run Linux-native workspace Clippy/tests — CI test-linux and
         lint-core passed on PR #2324; local x86_64 Linux cross-build
         (`cargo zigbuild --target x86_64-unknown-linux-gnu -p mvm-vmm
-    --lib --all-features`) passes on current `main`
+--lib --all-features`) passes on current `main`
 
 - [x] Plan 318 — span-timing profiling
       (`specs/plans/318-span-timing-profiling.md`)
@@ -282,7 +291,7 @@ for detailed scope and acceptance criteria.
   - [ ] Run the exact Linux Security workflow, merge the fix, and observe a
         clean scheduled or release run before closing the issue
 - [~] Plan 300 — 31-issue reconciliation and closeout
-      (`specs/plans/300-open-issue-closeout.md`)
+  (`specs/plans/300-open-issue-closeout.md`)
   - [x] Inventory all 39 issues open at the 2026-08-13 snapshot against
         current `origin/main`, issue comments, owning plans, and workflow state
   - [x] Close eight issues on 2026-08-13: #2165, #2289, #2333, #2423 as
@@ -1042,7 +1051,7 @@ for detailed scope and acceptance criteria.
         test fidelity, not liveness
   - [x] T17 — the operator surface, landed with a live entrypoint resolver in
         the same change as the plan required. `machine run --entrypoint --stdin
-    -` opens the route under the plan that boot was admitted under, pumps
+-` opens the route under the plan that boot was admitted under, pumps
         the caller's stdin through the gate in acceptance order on its own
         thread, refreshes the lease on a ticker while the writer is idle, and
         closes the workload's stdin on the caller's EOF. The grant is
@@ -1205,7 +1214,7 @@ for detailed scope and acceptance criteria.
         networking; `specs/refactor/03-networking.md` corrected from "the raw
         packet path is deleted" to the actual two-path state; ADR-001's tier
         matrix and claim-10 section qualified; `xtask
-    check-l3-expansion-freeze` added as a temporary shrink-only ratchet
+check-l3-expansion-freeze` added as a temporary shrink-only ratchet
         over `L3Vsock`/`raw_ip_stack`/`NetworkControl`/`NetworkData`/
         `spawn_netd`/`host_datapath` (29 allowlist entries); synthesis,
         admission, and CLI preflight refuse `raw_ip_stack=true`/`L3Vsock` with
@@ -1227,18 +1236,18 @@ for detailed scope and acceptance criteria.
         FlowMux, with tests for replay, tampering, wrong identity, and counter
         exhaustion. Remaining: the perf harness + baselines.
   - [x] Phase 2 — the one authenticated endpoint (#2371). `GuestService::NetworkFlow`
-    now names the port-5253 channel; the endpoint binary, proxy, spawner, and
-    test files are renamed to `mvm-network-endpoint`/`network_endpoint_*`;
-    `mvm-hostd::supervisor::flowmux` landed the authenticated FlowMux session
-    acceptor (`FlowMuxSession::accept`, `serve`, `Hello`/`HelloAck`, `GoAway`
-    for unimplemented flows) and bounded per-stream registries
-    (`flowmux::registry`) with unit tests for parity, ceilings, state
-    transitions, and credit accounting. The acceptor is wired into the
-    `mvm-network-endpoint` binary (`EgressMode::FlowMux`,
-    `EndpointConfig::flowmux_identity`, `serve_flowmux`) and the spawner emits
-    the identity on stdin. Backend witness tests in `mvm-vmm::host::spec_map`
-    and the Firecracker/HVF/libkrun driver modules prove exactly one
-    `NetworkFlow` service and no L3 services per granted workload.
+        now names the port-5253 channel; the endpoint binary, proxy, spawner, and
+        test files are renamed to `mvm-network-endpoint`/`network_endpoint_*`;
+        `mvm-hostd::supervisor::flowmux` landed the authenticated FlowMux session
+        acceptor (`FlowMuxSession::accept`, `serve`, `Hello`/`HelloAck`, `GoAway`
+        for unimplemented flows) and bounded per-stream registries
+        (`flowmux::registry`) with unit tests for parity, ceilings, state
+        transitions, and credit accounting. The acceptor is wired into the
+        `mvm-network-endpoint` binary (`EgressMode::FlowMux`,
+        `EndpointConfig::flowmux_identity`, `serve_flowmux`) and the spawner emits
+        the identity on stdin. Backend witness tests in `mvm-vmm::host::spec_map`
+        and the Firecracker/HVF/libkrun driver modules prove exactly one
+        `NetworkFlow` service and no L3 services per granted workload.
   - [ ] Phase 3 — converge egress TCP, UDP, and DNS (#2372)
   - [ ] Phase 4 — stream typed transformations (#2373)
   - [ ] Phase 5 — declared ingress on FlowMux (#2374)
@@ -1343,7 +1352,7 @@ for detailed scope and acceptance criteria.
   - [x] Linux cross-compile stubs for Hypervisor.framework symbols
   - [x] Console-streaming test isolated with temp `MVM_HOME`
   - [x] `cargo test -p mvm-runtime` green; `cargo clippy -p mvm-runtime
-    -p mvm-build -- -D warnings` clean on macOS and Linux builder VM
+-p mvm-build -- -D warnings` clean on macOS and Linux builder VM
   - [x] Full workspace test run on x86_64 Linux builder VM —
         `cargo nextest run --workspace`: 10372 passed, 19 skipped (4 threads)
 
