@@ -94,6 +94,8 @@ fn parent_config(state_dir: &std::path::Path) -> HvfSupervisorConfig {
         handoff_socket: Some(PathBuf::from("/parent/state/hvf-handoff.sock")),
         handoff_root: Some(PathBuf::from("/parent/vms")),
         handoff_verify_key: Some("ab".repeat(32)),
+        cpu_millicores: None,
+        quota_record: None,
     }
 }
 
