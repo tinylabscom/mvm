@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 
 use ed25519_dalek::SigningKey;
 use mvm_hostd::supervisor::{
-    AuditEntry, AuditSigner, FileAuditSigner, VerifyError, verify_audit_chain,
+    AuditSigner, FileAuditSigner, PlanAuditEntry, VerifyError, verify_audit_chain,
 };
 
 /// Set on a re-exec'd child: `<audit_dir>|<key_path>|<worker_index>`.
@@ -147,7 +147,7 @@ fn run_worker(spec: &str) {
 /// An entry big enough that its line exceeds a single atomic write. A short
 /// entry can slip past an unlocked appender by accident; the torn-line half of
 /// this test needs a line the kernel will not write in one piece.
-fn entry(worker: usize, seq: usize) -> AuditEntry {
+fn entry(worker: usize, seq: usize) -> PlanAuditEntry {
     use mvm_core::plan::{PlanId, TenantId};
 
     let mut labels = std::collections::BTreeMap::new();
@@ -162,7 +162,7 @@ fn entry(worker: usize, seq: usize) -> AuditEntry {
         );
     }
 
-    AuditEntry {
+    PlanAuditEntry {
         timestamp: chrono::Utc::now(),
         tenant: TenantId(TENANT.to_string()),
         plan_id: PlanId(format!("plan-{worker}-{seq}")),

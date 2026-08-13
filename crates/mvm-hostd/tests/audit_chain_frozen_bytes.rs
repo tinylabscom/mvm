@@ -22,7 +22,7 @@
 //! keep verifying "indefinitely" by re-serializing `entry`. That promise is
 //! the one thing here that depends on byte-exact serde agreement across
 //! crates, and it is the first thing a careless refactor of either
-//! `AuditEntry` breaks.
+//! `PlanAuditEntry` breaks.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -36,7 +36,7 @@ use tempfile::tempdir;
 
 use mvm_core::plan::{PlanId, TenantId};
 use mvm_core::policy::PolicyId;
-use mvm_hostd::supervisor::audit::{AuditEntry, AuditSigner};
+use mvm_hostd::supervisor::audit::{AuditSigner, PlanAuditEntry};
 use mvm_hostd::supervisor::audit_file::{FileAuditSigner, VerifyError, verify_audit_chain};
 
 /// Set to regenerate both fixtures in place, then inspect the diff before
@@ -64,7 +64,7 @@ fn fixture_path(name: &str) -> PathBuf {
 
 /// Fixed timestamps. `Utc::now()` would make the bytes unfreezable, which is
 /// why the entries are built field-by-field rather than through
-/// `AuditEntry::for_plan`.
+/// `PlanAuditEntry::for_plan`.
 fn ts(s: &str) -> DateTime<Utc> {
     DateTime::parse_from_rfc3339(s)
         .expect("fixture timestamp parses")
@@ -75,7 +75,7 @@ fn ts(s: &str) -> DateTime<Utc> {
 /// bytes: both states of the two `skip_serializing_if` options, an empty and a
 /// populated `labels` map (whose `BTreeMap` ordering is the canonical one),
 /// and a barrier event alongside a deferred one.
-fn frozen_entries() -> Vec<AuditEntry> {
+fn frozen_entries() -> Vec<PlanAuditEntry> {
     let mut labels = BTreeMap::new();
     labels.insert("workload".to_string(), "api".to_string());
     // Inserted out of order on purpose: the BTreeMap must emit them sorted, so
@@ -83,7 +83,7 @@ fn frozen_entries() -> Vec<AuditEntry> {
     labels.insert("region".to_string(), "us-east-1".to_string());
 
     vec![
-        AuditEntry {
+        PlanAuditEntry {
             timestamp: ts("2026-01-01T00:00:00Z"),
             tenant: TenantId("frozen-tenant".to_string()),
             plan_id: PlanId("plan-frozen-001".to_string()),
@@ -96,7 +96,7 @@ fn frozen_entries() -> Vec<AuditEntry> {
             event: "plan.admitted".to_string(),
             labels: BTreeMap::new(),
         },
-        AuditEntry {
+        PlanAuditEntry {
             timestamp: ts("2026-01-01T00:00:01Z"),
             tenant: TenantId("frozen-tenant".to_string()),
             plan_id: PlanId("plan-frozen-001".to_string()),
@@ -109,7 +109,7 @@ fn frozen_entries() -> Vec<AuditEntry> {
             event: "plan.policy_resolved".to_string(),
             labels: labels.clone(),
         },
-        AuditEntry {
+        PlanAuditEntry {
             timestamp: ts("2026-01-01T00:00:02Z"),
             tenant: TenantId("frozen-tenant".to_string()),
             plan_id: PlanId("plan-frozen-001".to_string()),
@@ -265,7 +265,7 @@ fn a_pre_canonical_chain_still_verifies() {
     let frozen = std::fs::read_to_string(&path).expect("committed legacy fixture is readable");
 
     // Verification is asserted before the byte comparison on purpose. Both
-    // fail if `AuditEntry`'s serde changes, but they say different things and
+    // fail if `PlanAuditEntry`'s serde changes, but they say different things and
     // this is the one worth reading first: a pre-`canonical` line carries no
     // signed bytes, so the verifier re-serializes `entry`. A serde change
     // therefore does not merely alter what a *new* writer emits — it stops
@@ -281,7 +281,7 @@ fn a_pre_canonical_chain_still_verifies() {
     assert_eq!(
         legacy_chain_bytes(),
         frozen,
-        "`AuditEntry`'s serialized form changed."
+        "`PlanAuditEntry`'s serialized form changed."
     );
 }
 
@@ -289,7 +289,7 @@ fn a_pre_canonical_chain_still_verifies() {
 fn the_no_std_verifier_also_accepts_the_pre_canonical_chain() {
     // The mirror carries the heaviest coupling here: with no `canonical` field
     // there are no signed bytes on the line to read, so `MirrorEntry` has to
-    // re-serialize to the same bytes `AuditEntry` did, in another crate.
+    // re-serialize to the same bytes `PlanAuditEntry` did, in another crate.
     let bytes =
         std::fs::read_to_string(fixture_path("audit_chain_legacy_no_canonical_v1.jsonl")).unwrap();
     let key_hex = hex::encode(signing_key().verifying_key().to_bytes());
