@@ -46,8 +46,8 @@
 
 use anyhow::{Context, Result};
 use ed25519_dalek::VerifyingKey;
-use mvm_contract::grants::Grants;
 use mvm_contract::grants::ceiling::GrantCeiling;
+use mvm_contract::grants::{CpuGrant, Grants};
 use mvm_contract::protocol::capability_negotiation::negotiate_grants;
 use mvm_contract::protocol::resource_controls::{EnforcedGrants, ResourceControls};
 use mvm_core::plan::bundle::{BundleResolver, TrustStore};
@@ -57,6 +57,7 @@ use mvm_core::plan::{
 };
 use mvm_core::policy::PolicyBundle;
 use mvm_core::vm_backend::BackendKind;
+use mvm_vmm::quota::QuotaConfig;
 use std::sync::Mutex;
 
 use crate::audit::host_keypair::host_signer_id;
@@ -541,17 +542,26 @@ fn host_cpu_mechanism_gap(
 ) -> Option<String> {
     // Only a share rides on this mechanism. A fuel budget is wasmtime's, and an
     // absent CPU grant has nothing to enforce.
-    if !matches!(
-        grants.cpu,
-        Some(mvm_contract::grants::CpuGrant::Share { .. })
-    ) {
-        return None;
-    }
+    let millicores = match grants.cpu {
+        Some(CpuGrant::Share { millicores }) => millicores,
+        _ => return None,
+    };
     if !ResourceControls::for_backend(kind).cpu.serves_share() {
         // The tier itself cannot serve a share; `negotiate_grants` already
         // spoke to that, and saying it twice would name one problem as two.
         return None;
     }
+
+    // HVF enforces shares with its own in-process scheduler; the cgroup probe
+    // is irrelevant there. A share that the scheduler cannot parameterize is
+    // the only missing-mechanism case on this tier.
+    if kind == BackendKind::Hvf {
+        if let Err(e) = QuotaConfig::for_share(millicores) {
+            return Some(format!("the hvf tier cannot enforce cpu.share: {e}"));
+        }
+        return None;
+    }
+
     let gap = gap?;
     Some(format!(
         "the {tier} tier bounds CPU with a cgroup quota, but this host cannot attach one: {reason}",
@@ -1764,6 +1774,43 @@ mod tests {
             cpu: Some(mvm_contract::grants::CpuGrant::Share { millicores }),
             ..mvm_contract::grants::Grants::default()
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn host_cpu_mechanism_gap_honors_hvf_quota_range() {
+        // On macOS the HVF tier serves CPU shares through its own scheduler.
+        // A share outside the scheduler's range is a missing mechanism; a
+        // share inside the range is enforceable.
+        assert!(
+            host_cpu_mechanism_gap(&cpu_share(1500), BackendKind::Hvf, None).is_some(),
+            "1500 millicores is out of range and must be reported as unenforceable"
+        );
+        assert!(
+            host_cpu_mechanism_gap(&cpu_share(500), BackendKind::Hvf, None).is_none(),
+            "500 millicores is inside the scheduler range and is enforceable"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn prod_admits_a_valid_hvf_cpu_share() {
+        let (_env, _home) = host_with_ceiling(Default::default());
+        let keys = tempfile::tempdir().unwrap();
+
+        let mut input = fixture_input("vm-hvf-valid-share");
+        input.backend_name = "hvf";
+        input.grants = Some(cpu_share(500));
+
+        admit_for_run(
+            &input,
+            &SystemClock,
+            &InMemoryNonceLedger::new(),
+            Some(keys.path()),
+            None,
+            RunPosture::on_backend(Variant::Prod, BackendKind::Hvf),
+        )
+        .expect("a 500 millicore share is enforceable on HVF");
     }
 
     #[cfg(target_os = "linux")]

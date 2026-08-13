@@ -15,11 +15,26 @@ use std::time::{Duration, Instant};
 /// Locate the helper binary that this test drives.
 ///
 /// Cargo sets `CARGO_BIN_EXE_<name>` when running integration tests so tests
-/// can find binaries declared in the same crate.
+/// can find binaries declared in the same crate. Nextest uses the same binary
+/// layout but sets `NEXTEST_BIN_EXE_<name>` instead, and a plain `cargo test`
+/// run from an IDE may set neither, so every layout the CI matrix exercises is
+/// covered.
 fn helper_path() -> PathBuf {
-    std::env::var_os("CARGO_BIN_EXE_mvm-test-image-lock-holder")
-        .map(PathBuf::from)
-        .expect("Cargo did not set CARGO_BIN_EXE_mvm-test-image-lock-holder")
+    if let Some(path) = std::env::var_os("CARGO_BIN_EXE_mvm-test-image-lock-holder") {
+        return PathBuf::from(path);
+    }
+    if let Some(path) = std::env::var_os("NEXTEST_BIN_EXE_mvm-test-image-lock-holder") {
+        return PathBuf::from(path);
+    }
+    // Fallback for harnesses that do not set the cargo env: the helper lives in
+    // the same profile directory as the test binary (e.g. target/debug).
+    let test_bin = std::env::current_exe().expect("current test binary path");
+    test_bin
+        .parent()
+        .and_then(|deps| deps.parent())
+        .map(|profile| profile.join("mvm-test-image-lock-holder"))
+        .filter(|path| path.exists())
+        .expect("mvm-test-image-lock-holder helper not found next to test binary")
 }
 
 /// Append `.lock` to an image path, matching `image_lock::sidecar_lock_path`.

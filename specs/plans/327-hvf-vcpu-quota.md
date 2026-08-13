@@ -1,6 +1,6 @@
 # Plan 327 — A CPU quota for the HVF tier, enforced in our own run loop
 
-**Status: OPEN — Phase 0 COMPLETE (verdict: Phase 1 proceeds); Phases 1+ open**
+**Status: OPEN — Phase 0 COMPLETE; Phase 1 COMPLETE; Phase 2 COMPLETE; Phase 3 open**
 
 Phase 0 results: [`327-hvf-quota-spike-findings.md`](327-hvf-quota-spike-findings.md).
 Measured 0.5000 cores against a 0.5000 target (-0.01 %) over 60 s at a 10 ms
@@ -68,34 +68,34 @@ the three questions, and its value is the numbers.
 
 ## Phase 1 — the scheduler
 
-- [ ] A quota controller owning `(quota, period)` per VM, driving the existing
+- [x] A quota controller owning `(quota, period)` per VM, driving the existing
       `force_exit` seam and the `run_with_pause_hook` seam already in the run
       loop. No new hypervisor plumbing.
-- [ ] **Predictive, with debt carry-over — not polling.** The spike measured
+- [x] **Predictive, with debt carry-over — not polling.** The spike measured
       polling at 1.55% of the budget at a 10 ms period and 8.57% at 1 ms *while
       still missing by +16%*; the predictive controller hit -0.01% at 0.46%
       cost. Without carrying debt across periods every period ran 8-33% high.
-- [ ] **Period floor of 5 ms**, and the period must exceed the slowest device
+- [x] **Period floor of 5 ms**, and the period must exceed the slowest device
       operation — a 1 ms device op at a 500 us period produced -11.5%
       instantaneous error. Below 5 ms no controller design pays for itself.
-- [ ] **Three existing-code constraints**, each surfaced by the spike:
+- [x] **Three existing-code constraints**, each surfaced by the spike:
       the HVF backend is uniprocessor, so the ceiling is 1.0 core until that
       changes; the run-loop pause hold sleeps 1 ms, which kills 1 ms periods and
       the 10%/90% quotas at 10 ms; and the production watchdog cancels only
       every 5 ms, so the controller must hold the `VcpuHandle` itself rather
       than relying on the watchdog.
-- [ ] Per-vCPU-thread accounting via Mach `thread_info`, summed per VM.
-- [ ] `ResourceControls::for_backend(Hvf)` gains a real `CpuControl`, replacing
+- [x] Per-vCPU-thread accounting via Mach `thread_info`, summed per VM.
+- [x] `ResourceControls::for_backend(Hvf)` gains a real `CpuControl`, replacing
       today's honest `None`.
 
 ## Phase 2 — report what was achieved, not what was asked
 
-- [ ] A new `EnforcedTier` variant for this mechanism, reported from the
+- [x] A new `EnforcedTier` variant for this mechanism, reported from the
       scheduler's own state. This is the one place the Linux design does not
       transfer: there is no kernel file to read back, so the tier's honesty
       rests on the scheduler reporting its *measured* achievement, not its
       configured target. Design that in from the start.
-- [ ] The tier reaches the audit chain and `machine inspect` through the paths
+- [x] The tier reaches the audit chain and `machine inspect` through the paths
       Plan 308 already built.
 
 ## Phase 3 — claim 18

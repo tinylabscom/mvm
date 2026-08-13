@@ -39,6 +39,8 @@ use crate::vmm::virtio::{DiskImage, VirtioBlk, VirtioFs};
 use crate::vmm::virtio_rng::VirtioRng;
 use crate::vmm::vsock::VirtioVsock;
 use crate::vmm::{fdt, kernel_image};
+use mvm_core::vcpu_quota::VcpuQuotaRecord;
+use mvm_vmm::quota::{QuotaConfig, QuotaPolicy, ThreadCpuHandle, VcpuQuota};
 
 /// Guest RAM base (2 GiB, per the aarch64 Linux boot convention). The GIC +
 /// PL011 sit below RAM so their accesses fault out as MMIO.
@@ -261,6 +263,12 @@ pub struct KernelBootUntilParams<'a> {
     stop: &'static AtomicBool,
     paused: &'static AtomicBool,
     channels: HostChannels,
+    /// CPU share to enforce via the in-process vCPU quota scheduler.
+    /// `None` ⇒ no quota (the pre-Plan-327 path).
+    cpu_millicores: Option<u32>,
+    /// Where to write the measured quota record on exit.
+    /// `None` ⇒ no record is written.
+    quota_record: Option<PathBuf>,
 }
 
 impl<'a> KernelBootUntilParams<'a> {
@@ -274,6 +282,8 @@ impl<'a> KernelBootUntilParams<'a> {
             stop: &NEVER_STOP,
             paused: &NEVER_PAUSE,
             channels: HostChannels::default(),
+            cpu_millicores: None,
+            quota_record: None,
         }
     }
 
@@ -287,6 +297,8 @@ impl<'a> KernelBootUntilParams<'a> {
             stop: &NEVER_STOP,
             paused: &NEVER_PAUSE,
             channels: HostChannels::default(),
+            cpu_millicores: None,
+            quota_record: None,
         }
     }
 }
@@ -300,6 +312,8 @@ pub struct KernelBootUntilParamsBuilder<'a> {
     stop: &'static AtomicBool,
     paused: &'static AtomicBool,
     channels: HostChannels,
+    cpu_millicores: Option<u32>,
+    quota_record: Option<PathBuf>,
 }
 
 impl<'a> KernelBootUntilParamsBuilder<'a> {
@@ -338,6 +352,16 @@ impl<'a> KernelBootUntilParamsBuilder<'a> {
         self
     }
 
+    pub fn cpu_millicores(mut self, cpu_millicores: Option<u32>) -> Self {
+        self.cpu_millicores = cpu_millicores;
+        self
+    }
+
+    pub fn quota_record(mut self, quota_record: Option<PathBuf>) -> Self {
+        self.quota_record = quota_record;
+        self
+    }
+
     pub fn build(self) -> KernelBootUntilParams<'a> {
         KernelBootUntilParams {
             kernel: self.kernel,
@@ -348,6 +372,8 @@ impl<'a> KernelBootUntilParamsBuilder<'a> {
             stop: self.stop,
             paused: self.paused,
             channels: self.channels,
+            cpu_millicores: self.cpu_millicores,
+            quota_record: self.quota_record,
         }
     }
 }
@@ -455,6 +481,8 @@ fn boot_kernel_impl(params: KernelBootUntilParams<'_>) -> Result<KernelBootResul
         stop,
         paused,
         channels,
+        cpu_millicores,
+        quota_record,
     } = params;
     if disks.len() > MAX_DISKS {
         return Err(HvfError::BadKernel);
@@ -605,6 +633,8 @@ fn boot_kernel_impl(params: KernelBootUntilParams<'_>) -> Result<KernelBootResul
                 handoff_socket: channels.handoff_socket,
                 handoff_root: channels.handoff_root,
                 handoff_verify_key: channels.handoff_verify_key,
+                cpu_millicores,
+                quota_record,
             },
             stop,
             paused,
@@ -664,6 +694,10 @@ struct RunInputs {
     handoff_socket: Option<PathBuf>,
     handoff_root: Option<PathBuf>,
     handoff_verify_key: Option<String>,
+    /// CPU share to enforce via the in-process vCPU quota scheduler.
+    cpu_millicores: Option<u32>,
+    /// Where to write the measured quota record on exit.
+    quota_record: Option<PathBuf>,
 }
 
 unsafe fn run(
@@ -698,6 +732,8 @@ unsafe fn run(
         handoff_socket,
         handoff_root,
         handoff_verify_key,
+        cpu_millicores,
+        quota_record,
     } = inputs;
     unsafe {
         // In-kernel GICv3 — created after the VM, before any vCPU. Base
@@ -782,6 +818,22 @@ unsafe fn run(
         let substitution_socket = substitution_socket
             .or_else(|| std::env::var_os("MVM_HVF_SUBSTITUTION_SOCKET").map(PathBuf::from));
         let handle = vcpu.exit_token();
+
+        // Start the in-process CPU quota controller when the supervisor config
+        // carries a share. Failing to start the controller must not fail the
+        // boot; the VM falls back to the unbounded path and writes no record.
+        let mut quota: Option<VcpuQuota<HvfHandle>> = None;
+        if let Some(millicores) = cpu_millicores
+            && let Ok(config) = QuotaConfig::for_share(millicores)
+            && let Ok(clock) = ThreadCpuHandle::for_current_thread()
+        {
+            quota = Some(VcpuQuota::start(handle, clock, QuotaPolicy::new(config)));
+        }
+        let throttle_flag = quota
+            .as_ref()
+            .map(|q| q.throttle_flag().clone())
+            .unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
+
         let watchdog = std::thread::spawn(move || {
             let step = Duration::from_millis(5);
             let mut waited = Duration::ZERO;
@@ -1041,88 +1093,94 @@ unsafe fn run(
                 }
             };
             let snapshot_guest_ram = &*guest_ram;
-            run::run_with_pause_hook(
+            run::run_with_hooks(
                 &vcpu,
                 set_irq,
                 &mut devices,
-                |vc: &HvfVcpu, esr, _phys| {
-                    if esr_ec(esr) == EC_HVC_AARCH64 {
-                        hvc_calls += 1;
-                        let fn_id = vc.get_core(CoreReg::X(0))?;
-                        if psci_fns.len() < 16 && !psci_fns.contains(&fn_id) {
-                            psci_fns.push(fn_id);
+                run::RunHooks {
+                    on_exception: |vc: &HvfVcpu, esr, _phys| {
+                        if esr_ec(esr) == EC_HVC_AARCH64 {
+                            hvc_calls += 1;
+                            let fn_id = vc.get_core(CoreReg::X(0))?;
+                            if psci_fns.len() < 16 && !psci_fns.contains(&fn_id) {
+                                psci_fns.push(fn_id);
+                            }
+                            match fn_id {
+                                PSCI_SYSTEM_OFF | PSCI_SYSTEM_RESET => return Ok(RunControl::Stop),
+                                PSCI_VERSION_FN => vc.set_core(CoreReg::X(0), 0x1_0000)?, // PSCI v1.0
+                                _ => vc.set_core(CoreReg::X(0), PSCI_NOT_SUPPORTED)?,
+                            }
+                            // HVC is completed: HVF already advanced PC. Do NOT advance.
+                            Ok(RunControl::Continue)
+                        } else {
+                            let ec = esr_ec(esr);
+                            other_exceptions += 1;
+                            if other_ecs.len() < 16 && !other_ecs.contains(&ec) {
+                                other_ecs.push(ec);
+                            }
+                            // Advance past the faulting instruction and keep going.
+                            let pc = vc.get_core(CoreReg::Pc)?;
+                            vc.set_core(CoreReg::Pc, pc + 4)?;
+                            Ok(RunControl::Continue)
                         }
-                        match fn_id {
-                            PSCI_SYSTEM_OFF | PSCI_SYSTEM_RESET => return Ok(RunControl::Stop),
-                            PSCI_VERSION_FN => vc.set_core(CoreReg::X(0), 0x1_0000)?, // PSCI v1.0
-                            _ => vc.set_core(CoreReg::X(0), PSCI_NOT_SUPPORTED)?,
-                        }
-                        // HVC is completed: HVF already advanced PC. Do NOT advance.
-                        Ok(RunControl::Continue)
-                    } else {
-                        let ec = esr_ec(esr);
-                        other_exceptions += 1;
-                        if other_ecs.len() < 16 && !other_ecs.contains(&ec) {
-                            other_ecs.push(ec);
-                        }
-                        // Advance past the faulting instruction and keep going.
-                        let pc = vc.get_core(CoreReg::Pc)?;
-                        vc.set_core(CoreReg::Pc, pc + 4)?;
-                        Ok(RunControl::Continue)
-                    }
-                },
-                // A forced exit is a real stop only when `stop` is set (timeout or
-                // graceful); otherwise it's a heartbeat wake so the run loop can drain
-                // egress sockets into a guest blocked in WFI (vsock-only egress async proxy).
-                move || stop.load(Ordering::Relaxed),
-                // Park the vCPU in the run loop's pause hold while `paused` is set,
-                // freezing guest RAM + device state in place until resume clears it.
-                move || {
-                    let requested = paused.load(Ordering::Relaxed);
-                    if requested {
-                        if !pause_ack.swap(true, Ordering::AcqRel)
+                    },
+                    // A forced exit is a real stop only when `stop` is set (timeout or
+                    // graceful); otherwise it's a heartbeat wake so the run loop can drain
+                    // egress sockets into a guest blocked in WFI (vsock-only egress async proxy).
+                    should_stop: move || stop.load(Ordering::Relaxed),
+                    // Park the vCPU in the run loop's pause hold while `paused` is set,
+                    // freezing guest RAM + device state in place until resume clears it.
+                    should_pause: move || {
+                        let requested = paused.load(Ordering::Relaxed);
+                        if requested {
+                            if !pause_ack.swap(true, Ordering::AcqRel)
+                                && let Some(path) = &pause_state
+                            {
+                                let _ = std::fs::write(path, b"paused\n");
+                            }
+                        } else if pause_ack.swap(false, Ordering::AcqRel)
                             && let Some(path) = &pause_state
                         {
-                            let _ = std::fs::write(path, b"paused\n");
+                            let _ = std::fs::remove_file(path);
                         }
-                    } else if pause_ack.swap(false, Ordering::AcqRel)
-                        && let Some(path) = &pause_state
-                    {
-                        let _ = std::fs::remove_file(path);
-                    }
-                    requested
-                },
-                move |vcpu, devices| {
-                    let (Some(request_path), Some(ram_path), Some(frame_path)) = (
-                        snapshot_request.as_deref(),
-                        snapshot_ram.as_deref(),
-                        snapshot_frame.as_deref(),
-                    ) else {
-                        return Ok(());
-                    };
-                    if !request_path.exists() {
-                        return Ok(());
-                    }
-                    let ram_bytes = snapshot_guest_ram.snapshot_bytes();
-                    let device_bytes = capture_device_states(devices)
-                        .map_err(|_| HvfError::SnapshotState("snapshot device capture failed"))?;
-                    let vcpu_state = vcpu.capture_state()?;
-                    let frame = super::snapshot::encode_hvf_snapshot_frame(
-                        HVF_SNAPSHOT_BACKEND_KIND,
-                        0,
-                        &ram_bytes,
-                        &device_bytes,
-                        &vcpu_state,
-                        &[],
-                    )
-                    .map_err(|_| HvfError::SnapshotState("snapshot frame encode failed"))?;
-                    std::fs::write(ram_path, &ram_bytes)
-                        .map_err(|_| HvfError::SnapshotState("snapshot RAM write failed"))?;
-                    std::fs::write(frame_path, frame)
-                        .map_err(|_| HvfError::SnapshotState("snapshot frame write failed"))?;
-                    std::fs::remove_file(request_path)
-                        .map_err(|_| HvfError::SnapshotState("snapshot request cleanup failed"))?;
-                    Ok(())
+                        requested
+                    },
+                    on_pause: move |vcpu, devices| {
+                        let (Some(request_path), Some(ram_path), Some(frame_path)) = (
+                            snapshot_request.as_deref(),
+                            snapshot_ram.as_deref(),
+                            snapshot_frame.as_deref(),
+                        ) else {
+                            return Ok(());
+                        };
+                        if !request_path.exists() {
+                            return Ok(());
+                        }
+                        let ram_bytes = snapshot_guest_ram.snapshot_bytes();
+                        let device_bytes = capture_device_states(devices).map_err(|_| {
+                            HvfError::SnapshotState("snapshot device capture failed")
+                        })?;
+                        let vcpu_state = vcpu.capture_state()?;
+                        let frame = super::snapshot::encode_hvf_snapshot_frame(
+                            HVF_SNAPSHOT_BACKEND_KIND,
+                            0,
+                            &ram_bytes,
+                            &device_bytes,
+                            &vcpu_state,
+                            &[],
+                        )
+                        .map_err(|_| HvfError::SnapshotState("snapshot frame encode failed"))?;
+                        std::fs::write(ram_path, &ram_bytes)
+                            .map_err(|_| HvfError::SnapshotState("snapshot RAM write failed"))?;
+                        std::fs::write(frame_path, frame)
+                            .map_err(|_| HvfError::SnapshotState("snapshot frame write failed"))?;
+                        std::fs::remove_file(request_path).map_err(|_| {
+                            HvfError::SnapshotState("snapshot request cleanup failed")
+                        })?;
+                        Ok(())
+                    },
+                    should_throttle: move || throttle_flag.load(Ordering::Relaxed),
+                    _marker: std::marker::PhantomData,
                 },
             )?
         };
@@ -1132,6 +1190,29 @@ unsafe fn run(
         let watchdog_join_started = Instant::now();
         let stop_observed_at = watchdog.join().ok().flatten();
         let watchdog_join = watchdog_join_started.elapsed();
+
+        // Stop the quota controller and persist the measured achievement. The
+        // record is written before the vsock I/O thread joins so the file is
+        // durable alongside the other VM outputs.
+        if let Some(q) = quota.take() {
+            let achievement = q.stop();
+            if let Some(path) = &quota_record
+                && let Some(parent) = path.parent()
+            {
+                let record = VcpuQuotaRecord {
+                    target_millicores: achievement.target_millicores,
+                    achieved_millicores: achievement.achieved_millicores,
+                    period_ms: u32::try_from(achievement.period.as_millis()).unwrap_or(u32::MAX),
+                    measured_wall_ms: u64::try_from(achievement.measured_wall.as_millis())
+                        .unwrap_or(u64::MAX),
+                    measured_cpu_ms: u64::try_from(achievement.measured_cpu.as_millis())
+                        .unwrap_or(u64::MAX),
+                    periods: achievement.periods,
+                };
+                let _ = mvm_core::vcpu_quota::write_record(parent, &record);
+            }
+        }
+
         // Join the vsock host-I/O thread before touching device state or freeing
         // the guest RAM it points into — the join is the memory-safety barrier.
         let io_thread_join_started = Instant::now();

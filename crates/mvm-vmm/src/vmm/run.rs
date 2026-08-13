@@ -148,7 +148,7 @@ where
     /// its CPU quota. Polled like `should_pause`, but parks the vCPU without
     /// touching any snapshot machinery.
     pub should_throttle: T,
-    _marker: std::marker::PhantomData<fn() -> C>,
+    pub _marker: std::marker::PhantomData<fn() -> C>,
 }
 
 /// Run `vcpu` until it halts/cancels or `on_exception` says stop.

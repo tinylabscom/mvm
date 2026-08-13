@@ -219,6 +219,14 @@ pub struct HvfSupervisorConfig {
     /// Hex-encoded host identity key used to authenticate handoff requests.
     #[serde(default)]
     pub handoff_verify_key: Option<String>,
+    /// CPU share to enforce via the in-process HVF quota scheduler.
+    /// `None` ⇒ no quota (the pre-Plan-327 path).
+    #[serde(default)]
+    pub cpu_millicores: Option<u32>,
+    /// Where the supervisor should write the measured quota record on exit.
+    /// `None` ⇒ no record is written.
+    #[serde(default)]
+    pub quota_record: Option<PathBuf>,
 }
 
 #[cfg(test)]
@@ -268,6 +276,8 @@ mod tests {
             handoff_socket: Some("/state/handoff.sock".into()),
             handoff_root: Some("/state/vms".into()),
             handoff_verify_key: Some("11".repeat(32)),
+            cpu_millicores: Some(500),
+            quota_record: Some("/state/quota.json".into()),
         };
         let json = serde_json::to_string(&cfg).unwrap();
         assert_eq!(
@@ -289,6 +299,8 @@ mod tests {
         assert_eq!(cfg.handoff_socket, None);
         assert_eq!(cfg.handoff_root, None);
         assert_eq!(cfg.handoff_verify_key, None);
+        assert_eq!(cfg.cpu_millicores, None);
+        assert_eq!(cfg.quota_record, None);
     }
 
     #[test]
@@ -373,6 +385,8 @@ mod tests {
             handoff_socket: None,
             handoff_root: None,
             handoff_verify_key: None,
+            cpu_millicores: None,
+            quota_record: None,
         };
         let json = serde_json::to_string(&cfg).unwrap();
         let decoded: HvfSupervisorConfig = serde_json::from_str(&json).unwrap();

@@ -394,13 +394,23 @@ pub fn bind_cpu_grant(
 /// an enforcement that a silently-dropped quota makes false, which is the
 /// overstatement this whole seam exists to prevent.
 ///
+/// For the in-house HVF VMM the cgroup probe is skipped: the supervisor writes
+/// a measured quota record instead, and that record is read back here when it
+/// is present.
+///
 /// Wall clock is [`EnforcedTier::Declared`] because nothing here bounds it. It
 /// is reported rather than omitted so a receipt says which dimensions were
 /// measured and found unenforced, instead of leaving a reader to guess.
 #[must_use]
 pub fn enforced_grants_for_vm(state_dir: &Path) -> EnforcedGrants {
+    let vcpu_quota_tier = crate::vcpu_quota::tier_for_vm(state_dir);
+    let cpu = if vcpu_quota_tier == EnforcedTier::HvfVcpuQuota {
+        EnforcedTier::HvfVcpuQuota
+    } else {
+        ScopeProbe::default().tier_for_vm(state_dir)
+    };
     EnforcedGrants {
-        cpu: ScopeProbe::default().tier_for_vm(state_dir),
+        cpu,
         wall_clock: EnforcedTier::Declared,
     }
 }

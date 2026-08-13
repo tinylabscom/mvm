@@ -29,6 +29,7 @@ use mvm_vmm::hvf_handoff::HvfHandoffRequest;
 use crate::driver::hvf_legacy::{
     self as hvf_backend, PID_FILE_NAME, PID_FILE_TIMEOUT, resolve_supervisor_path,
 };
+use mvm_contract::grants::CpuGrant;
 use mvm_core::checkpoint::{DeviceAnchors, HVF_FRAME_BLOB};
 use mvm_vmm::checkpoint::VmFullControl;
 use mvm_vmm::driver::spec::{BlockDev, KernelImage, VmmSpec};
@@ -214,6 +215,14 @@ fn relay_supervisor_config_with_handoff(
         })
         .collect();
 
+    let (cpu_millicores, quota_record) = match spec.cpu_grant {
+        Some(CpuGrant::Share { millicores }) => (
+            Some(millicores),
+            Some(paths.state_dir.join("vcpu_quota.json")),
+        ),
+        Some(CpuGrant::Fuel { .. }) | None => (None, None),
+    };
+
     Ok(HvfSupervisorConfig {
         kernel,
         cmdline,
@@ -264,6 +273,8 @@ fn relay_supervisor_config_with_handoff(
         handoff_socket: handoff.map(|value| value.socket.clone()),
         handoff_root: handoff.map(|value| value.root.clone()),
         handoff_verify_key: handoff.map(|value| value.verify_key.clone()),
+        cpu_millicores,
+        quota_record,
     })
 }
 
@@ -1327,6 +1338,42 @@ mod tests {
         let cfg = relay_supervisor_config(&spec, &sample_paths()).unwrap();
         assert_eq!(cfg.egress_relay_socket, None);
         assert!(cfg.agent_socket.is_some());
+    }
+
+    #[test]
+    fn relay_config_threads_cpu_share_to_quota_scheduler() {
+        let mut spec = spec_with(
+            KernelImage::Path("/img/Image".into()),
+            vec![egress_port("/run/egress.sock")],
+            vec![],
+        );
+        spec.cpu_grant = Some(CpuGrant::Share { millicores: 500 });
+        let cfg = relay_supervisor_config(&spec, &sample_paths()).unwrap();
+        assert_eq!(cfg.cpu_millicores, Some(500));
+        assert_eq!(
+            cfg.quota_record,
+            Some(PathBuf::from("/state/w/vcpu_quota.json"))
+        );
+    }
+
+    #[test]
+    fn relay_config_leaves_quota_unset_for_fuel_and_no_grant() {
+        let mut spec = spec_with(
+            KernelImage::Path("/img/Image".into()),
+            vec![egress_port("/run/egress.sock")],
+            vec![],
+        );
+        spec.cpu_grant = Some(CpuGrant::Fuel {
+            instructions: 1_000_000,
+        });
+        let cfg = relay_supervisor_config(&spec, &sample_paths()).unwrap();
+        assert_eq!(cfg.cpu_millicores, None);
+        assert_eq!(cfg.quota_record, None);
+
+        spec.cpu_grant = None;
+        let cfg = relay_supervisor_config(&spec, &sample_paths()).unwrap();
+        assert_eq!(cfg.cpu_millicores, None);
+        assert_eq!(cfg.quota_record, None);
     }
 
     #[test]

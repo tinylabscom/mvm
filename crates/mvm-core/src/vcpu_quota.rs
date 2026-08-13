@@ -104,4 +104,14 @@ mod tests {
         write_record(dir.path(), &r).unwrap();
         assert_eq!(read_record(dir.path()), Some(r));
     }
+
+    #[test]
+    fn apply_grants_reads_quota_record_from_state_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        write_record(dir.path(), &record(500, 490, 20)).unwrap();
+        assert_eq!(tier_for_vm(dir.path()), EnforcedTier::HvfVcpuQuota);
+
+        let no_record = tempfile::tempdir().unwrap();
+        assert_eq!(tier_for_vm(no_record.path()), EnforcedTier::Declared);
+    }
 }
