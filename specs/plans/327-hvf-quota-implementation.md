@@ -342,6 +342,9 @@ impl ThreadCpuClock for ThreadCpuHandle { .. }
 
 ### Task 3: A throttle hold in the run loop, distinct from the pause hold
 
+**Status:** COMPLETE — `RunHooks`, `run_with_hooks`, throttle hold, and wrapper
+entry points implemented; 7 new tests pass; `mvm-runtime` callers unaffected.
+
 **Files:**
 - Modify: `crates/mvm-vmm/src/vmm/run.rs`
 
@@ -392,7 +395,7 @@ while (hooks.should_throttle)() && !(hooks.should_stop)() && !(hooks.should_paus
 }
 ```
 
-- [ ] **Step 1: Write the failing tests** in `run.rs`'s existing test module,
+- [x] **Step 1: Write the failing tests** in `run.rs`'s existing test module,
       alongside `canceled_with_pause_holds_until_resume_then_continues`
       (`run.rs:572`), which is the pattern to copy. Run them, paste the failure:
 
@@ -406,9 +409,9 @@ while (hooks.should_throttle)() && !(hooks.should_stop)() && !(hooks.should_paus
   | `a_pause_during_a_throttle_takes_precedence` | with both set, the loop is in the pause hold (snapshot machinery runs) and leaves the throttle hold |
   | `the_existing_entry_points_throttle_never` | `run` and `run_with_pause_hook` behave exactly as before — a regression net for the two `kvm/vm.rs` callers |
 
-- [ ] **Step 2: Implement** `RunHooks`, `run_with_hooks`, the throttle hold,
+- [x] **Step 2: Implement** `RunHooks`, `run_with_hooks`, the throttle hold,
       and rewrite `run`/`run_with_pause_hook` as wrappers.
-- [ ] **Step 3:** `cargo nextest run -p mvm-vmm --lib vmm::run`, plus `cargo
+- [x] **Step 3:** `cargo nextest run -p mvm-vmm --lib vmm::run`, plus `cargo
       nextest run -p mvm-runtime --lib` (the KVM callers), clippy, fmt.
 
 ---
