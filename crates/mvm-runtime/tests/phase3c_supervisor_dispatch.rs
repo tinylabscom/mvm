@@ -93,6 +93,7 @@ fn supervisor_takes_bridge_path_when_tenant_id_some() {
         bridge_restart_policy: libkrun_sys::BridgeRestartPolicy::HardFail,
         transparent_terminator_port: None,
         egress_relay_socket: None,
+        exclusive_image_lock: None,
     };
 
     let json = serde_json::to_string_pretty(&cfg).unwrap();
@@ -170,6 +171,7 @@ fn supervisor_takes_legacy_path_when_tenant_id_none() {
         bridge_restart_policy: libkrun_sys::BridgeRestartPolicy::HardFail,
         transparent_terminator_port: None,
         egress_relay_socket: None,
+        exclusive_image_lock: None,
     };
 
     let json = serde_json::to_string_pretty(&cfg).unwrap();

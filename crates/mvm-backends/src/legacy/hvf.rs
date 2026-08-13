@@ -596,6 +596,9 @@ impl VmBackend for HvfBackend {
             // The legacy start path serves workloads only; a persistent builder
             // comes up through the driver seam with its ports named in the spec.
             builder_control_sockets: Vec::new(),
+            // Workload starts only; the persistent builder comes up through
+            // the driver seam, which is where the lock is named.
+            exclusive_image_lock: None,
             handoff_socket: None,
             handoff_root: None,
             handoff_verify_key: None,
