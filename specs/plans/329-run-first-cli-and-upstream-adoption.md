@@ -106,8 +106,8 @@ flagship while keeping mvm's stronger assurance posture intact:
 
 ### Phase 0 — Ratify the CLI decision
 
-- [ ] Draft an amendment to ADR-027 recording Option C.
-- [ ] Review the amendment in the simplification worktree; confirm no claim
+- [x] Draft an amendment to ADR-027 recording Option C.
+- [x] Review the amendment in the simplification worktree; confirm no claim
       conflict.
 - [x] Audit every in-repo reference to `mvmctl machine run` (tests, docs,
       SDKs, examples, BDD fixtures, scripts).
