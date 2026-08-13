@@ -1639,12 +1639,12 @@ mod tests {
             vec![],
         );
         let ports = &spec.vsock;
-        let services: std::collections::BTreeSet<_> = ports.iter().map(|p| p.service).collect();
+        let mut services: Vec<_> = ports.iter().map(|p| p.service).collect();
+        services.sort();
+        let expected = [GuestService::MachineControl, GuestService::NetworkFlow];
         assert_eq!(
-            services,
-            [GuestService::MachineControl, GuestService::NetworkFlow]
-                .into_iter()
-                .collect()
+            services, expected,
+            "HVF spec vsock must contain exactly one NetworkFlow and no retired L3 services"
         );
     }
 }

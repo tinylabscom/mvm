@@ -1181,17 +1181,17 @@ mod tests {
     #[test]
     fn workload_channels_carry_exactly_one_network_flow_and_no_l3() {
         let ports = workload_channels();
-        let services: std::collections::BTreeSet<_> = ports.iter().map(|p| p.service).collect();
+        let mut services: Vec<_> = ports.iter().map(|p| p.service).collect();
+        services.sort();
+        let expected = [
+            GuestService::MachineControl,
+            GuestService::WorkloadExit,
+            GuestService::Broker,
+            GuestService::NetworkFlow,
+        ];
         assert_eq!(
-            services,
-            [
-                GuestService::MachineControl,
-                GuestService::NetworkFlow,
-                GuestService::Broker,
-                GuestService::WorkloadExit,
-            ]
-            .into_iter()
-            .collect()
+            services, expected,
+            "workload channels must contain exactly one NetworkFlow and no retired L3 services"
         );
     }
 
