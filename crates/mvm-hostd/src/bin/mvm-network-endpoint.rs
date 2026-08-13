@@ -30,6 +30,7 @@ use anyhow::{Context, Result};
 use tracing::info;
 
 use mvm_hostd::keyholder::secret_placeholder_env;
+use mvm_hostd::supervisor::flowmux::{FlowMuxSession, registry::RegistryLimits};
 use mvm_hostd::supervisor::network_endpoint::{
     EgressMode, EndpointConfig, EndpointHandshake, EndpointTransport, ResolverBackend, assemble,
     build_audit_recorder, build_egress_gate, fingerprint_bound_secrets, parse,
@@ -399,27 +400,14 @@ async fn serve_flowmux(cfg: &EndpointConfig, bound: Bound) -> Result<()> {
         .context("FlowMux accept task")?
         .context("accept FlowMux connection")?;
 
-    // RegistryLimits uses defaults here because the spawner does not yet
-    // thread the admitted plan's limits through cfg.network_policy / NetworkLimits.
+    // TODO: derive RegistryLimits from cfg.network_policy / NetworkLimits once
+    // the spawner threads the admitted plan's limits through.
     let limits = RegistryLimits::default();
-    let gate = cfg
-        .network_policy
-        .as_ref()
-        .map(mvm_hostd::supervisor::network_endpoint::build_egress_gate)
-        .unwrap_or_else(mvm_runtime::vmm::egress_gate::EgressGate::default_deny);
     let session_id = identity.session_id.clone();
-    let recorder = build_audit_recorder(&cfg.tenant_id).map(std::sync::Arc::new);
     tokio::task::spawn_blocking(move || {
-        let mut session = FlowMuxSession::accept_with_recorder(
-            stream,
-            &session_id,
-            host_key,
-            &guest_anchor,
-            limits,
-            gate,
-            recorder,
-        )
-        .context("accept FlowMux session")?;
+        let mut session =
+            FlowMuxSession::accept(stream, &session_id, host_key, &guest_anchor, limits)
+                .context("accept FlowMux session")?;
         session.serve().context("serve FlowMux session")
     })
     .await
@@ -434,7 +422,6 @@ fn accept_one_sync(bound: Bound) -> std::io::Result<std::os::unix::net::UnixStre
         }
         #[cfg(target_os = "linux")]
         Bound::Vsock(listener) => {
-            use std::os::fd::FromRawFd;
             let fd =
                 mvm_hostd::supervisor::network_endpoint_proxy::vsock::accept(listener.raw_fd())?;
             // SAFETY: `fd` is an owned connected stream socket from accept(2);
