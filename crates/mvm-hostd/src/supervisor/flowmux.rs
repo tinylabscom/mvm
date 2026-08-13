@@ -7,6 +7,8 @@
 //! plumbing and gives the next changes a stable place to add `OpenTcp`,
 //! `OpenUdp`, `Resolve`, and typed-HTTP dispatch.
 
+pub mod registry;
+
 use std::io::{Read, Write};
 
 use ed25519_dalek::{SigningKey, VerifyingKey};

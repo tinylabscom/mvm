@@ -8,9 +8,8 @@
 //! another?", and "how much credit remains?".
 
 use std::collections::BTreeMap;
-use std::time::Duration;
 
-use mvm_contract::protocol::network_flow::{Direction, MAX_STREAM_CREDIT};
+use mvm_contract::protocol::network_flow::Direction;
 use tracing::warn;
 
 /// Why a stream/association operation was refused.
@@ -35,7 +34,6 @@ pub enum RegistryError {
 pub enum FlowClass {
     Tcp,
     Udp,
-    Dns,
 }
 
 impl std::fmt::Display for FlowClass {
@@ -43,7 +41,6 @@ impl std::fmt::Display for FlowClass {
         match self {
             FlowClass::Tcp => write!(f, "tcp"),
             FlowClass::Udp => write!(f, "udp"),
-            FlowClass::Dns => write!(f, "dns"),
         }
     }
 }
@@ -71,24 +68,12 @@ pub struct StreamEntry {
     pub host_credit: u32,
 }
 
-/// Resource ceilings and runtime bounds for one registry.
+/// Resource ceilings for one registry.
 #[derive(Debug, Clone, Copy)]
 pub struct RegistryLimits {
     pub max_tcp: usize,
     pub max_udp: usize,
-    pub max_dns: usize,
     pub initial_credit: u32,
-    /// How long a UDP association may sit idle before the host closes it.
-    pub udp_idle_timeout: Duration,
-    /// Maximum distinct peers a single UDP association may communicate with.
-    pub max_udp_peers: usize,
-    /// New TCP connection attempts per second (burst == rate). Zero disables
-    /// the limiter.
-    pub tcp_connect_rate: u32,
-    /// New UDP association opens per second (burst == rate). Zero disables.
-    pub udp_open_rate: u32,
-    /// DNS resolve requests per second (burst == rate). Zero disables.
-    pub dns_resolve_rate: u32,
 }
 
 impl Default for RegistryLimits {
@@ -96,13 +81,7 @@ impl Default for RegistryLimits {
         Self {
             max_tcp: 4096,
             max_udp: 256,
-            max_dns: 256,
             initial_credit: 64 * 1024,
-            udp_idle_timeout: Duration::from_secs(60),
-            max_udp_peers: 16,
-            tcp_connect_rate: 0,
-            udp_open_rate: 0,
-            dns_resolve_rate: 0,
         }
     }
 }
@@ -146,15 +125,6 @@ impl StreamRegistry {
             .count()
     }
 
-    /// How many live DNS resolution streams exist.
-    #[must_use]
-    pub fn live_dns(&self) -> usize {
-        self.streams
-            .values()
-            .filter(|e| e.class == FlowClass::Dns && e.state != StreamState::Closed)
-            .count()
-    }
-
     /// Return the entry for a live stream, if any.
     #[must_use]
     pub fn get(&self, stream_id: u32) -> Option<&StreamEntry> {
@@ -171,7 +141,10 @@ impl StreamRegistry {
     /// Returns `RegistryError::Ceiling` if the class ceiling is already hit, or
     /// `RegistryError::InvalidStreamId` if the ID space wrapped.
     pub fn alloc_guest(&mut self, class: FlowClass) -> Result<u32, RegistryError> {
-        let limit = self.class_limit(class);
+        let limit = match class {
+            FlowClass::Tcp => self.limits.max_tcp,
+            FlowClass::Udp => self.limits.max_udp,
+        };
         if self.live_count(class) >= limit {
             return Err(RegistryError::Ceiling { class, limit });
         }
@@ -187,65 +160,14 @@ impl StreamRegistry {
         Ok(id)
     }
 
-    /// Record a guest-initiated stream ID supplied by the peer. The ID must be
-    /// odd, not already live, and within the class ceiling.
-    pub fn open_guest(&mut self, stream_id: u32, class: FlowClass) -> Result<(), RegistryError> {
-        if stream_id == 0 || stream_id.is_multiple_of(2) {
-            return Err(RegistryError::InvalidStreamId { stream_id });
-        }
-        if self.live_count(class) >= self.class_limit(class) {
-            return Err(RegistryError::Ceiling {
-                class,
-                limit: self.class_limit(class),
-            });
-        }
-        if self.streams.contains_key(&stream_id) {
-            return Err(RegistryError::IllegalState {
-                stream_id,
-                state: StreamState::Opening,
-            });
-        }
-        self.next_guest_id = self.next_guest_id.max(stream_id + 2);
-        self.insert(stream_id, class);
-        Ok(())
-    }
-
-    /// Record a host-initiated stream ID supplied by the local ingress handler.
-    /// The ID must be even, not already live, and within the class ceiling.
-    pub fn open_host(&mut self, stream_id: u32, class: FlowClass) -> Result<(), RegistryError> {
-        if !stream_id.is_multiple_of(2) {
-            return Err(RegistryError::InvalidStreamId { stream_id });
-        }
-        if self.live_count(class) >= self.class_limit(class) {
-            return Err(RegistryError::Ceiling {
-                class,
-                limit: self.class_limit(class),
-            });
-        }
-        if self.streams.contains_key(&stream_id) {
-            return Err(RegistryError::IllegalState {
-                stream_id,
-                state: StreamState::Opening,
-            });
-        }
-        self.next_host_id = self.next_host_id.max(stream_id + 2);
-        self.insert(stream_id, class);
-        Ok(())
-    }
-
-    fn class_limit(&self, class: FlowClass) -> usize {
-        match class {
-            FlowClass::Tcp => self.limits.max_tcp,
-            FlowClass::Udp => self.limits.max_udp,
-            FlowClass::Dns => self.limits.max_dns,
-        }
-    }
-
     /// Allocate a fresh host-initiated (ingress) stream ID for `class` and
     /// record it as `Opening`. Host-initiated IDs are even and monotonically
     /// increasing.
     pub fn alloc_host(&mut self, class: FlowClass) -> Result<u32, RegistryError> {
-        let limit = self.class_limit(class);
+        let limit = match class {
+            FlowClass::Tcp => self.limits.max_tcp,
+            FlowClass::Udp => self.limits.max_udp,
+        };
         if self.live_count(class) >= limit {
             return Err(RegistryError::Ceiling { class, limit });
         }
@@ -331,39 +253,14 @@ impl StreamRegistry {
             .streams
             .get_mut(&stream_id)
             .ok_or(RegistryError::NotLive { stream_id })?;
-        entry.guest_credit = entry
-            .guest_credit
-            .saturating_add(delta)
-            .min(MAX_STREAM_CREDIT);
-        Ok(())
-    }
-
-    /// Consume `len` bytes of host credit on `stream_id`.
-    pub fn consume_host_credit(&mut self, stream_id: u32, len: u32) -> Result<(), RegistryError> {
-        let entry = self
-            .streams
-            .get_mut(&stream_id)
-            .ok_or(RegistryError::NotLive { stream_id })?;
-        if len > entry.host_credit {
-            return Err(RegistryError::IllegalState {
-                stream_id,
-                state: entry.state,
-            });
-        }
-        entry.host_credit -= len;
-        Ok(())
-    }
-
-    /// Add `delta` bytes to the host credit on `stream_id`.
-    pub fn grant_host_credit(&mut self, stream_id: u32, delta: u32) -> Result<(), RegistryError> {
-        let entry = self
-            .streams
-            .get_mut(&stream_id)
-            .ok_or(RegistryError::NotLive { stream_id })?;
-        entry.host_credit = entry
-            .host_credit
-            .saturating_add(delta)
-            .min(MAX_STREAM_CREDIT);
+        entry.guest_credit =
+            entry
+                .guest_credit
+                .checked_add(delta)
+                .ok_or(RegistryError::IllegalState {
+                    stream_id,
+                    state: entry.state,
+                })?;
         Ok(())
     }
 
@@ -371,7 +268,6 @@ impl StreamRegistry {
         match class {
             FlowClass::Tcp => self.live_tcp(),
             FlowClass::Udp => self.live_udp(),
-            FlowClass::Dns => self.live_dns(),
         }
     }
 
@@ -397,7 +293,6 @@ pub fn class_for_open(opcode: mvm_contract::protocol::network_flow::Opcode) -> O
     match opcode {
         Opcode::OpenTcp | Opcode::InboundOpen => Some(FlowClass::Tcp),
         Opcode::OpenUdp => Some(FlowClass::Udp),
-        Opcode::Resolve => Some(FlowClass::Dns),
         _ => None,
     }
 }
@@ -436,9 +331,7 @@ mod tests {
         let mut reg = StreamRegistry::new(RegistryLimits {
             max_tcp: 2,
             max_udp: 1,
-            max_dns: 64,
             initial_credit: 1024,
-            ..Default::default()
         });
         reg.alloc_guest(FlowClass::Tcp).unwrap();
         reg.alloc_guest(FlowClass::Tcp).unwrap();
@@ -478,9 +371,7 @@ mod tests {
         let mut reg = StreamRegistry::new(RegistryLimits {
             max_tcp: 1,
             max_udp: 0,
-            max_dns: 64,
             initial_credit: 100,
-            ..Default::default()
         });
         let id = reg.alloc_guest(FlowClass::Tcp).unwrap();
         reg.consume_guest_credit(id, 30).unwrap();
@@ -488,39 +379,6 @@ mod tests {
         reg.grant_guest_credit(id, 10).unwrap();
         assert_eq!(reg.get(id).unwrap().guest_credit, 80);
         assert!(reg.consume_guest_credit(id, 81).is_err());
-    }
-
-    #[test]
-    fn host_credit_is_tracked() {
-        let mut reg = StreamRegistry::new(RegistryLimits {
-            max_tcp: 1,
-            max_udp: 0,
-            max_dns: 64,
-            initial_credit: 100,
-            ..Default::default()
-        });
-        let id = reg.alloc_guest(FlowClass::Tcp).unwrap();
-        reg.consume_host_credit(id, 30).unwrap();
-        assert_eq!(reg.get(id).unwrap().host_credit, 70);
-        reg.grant_host_credit(id, 10).unwrap();
-        assert_eq!(reg.get(id).unwrap().host_credit, 80);
-        assert!(reg.consume_host_credit(id, 81).is_err());
-    }
-
-    #[test]
-    fn credit_grants_are_capped_at_max_stream_credit() {
-        let mut reg = StreamRegistry::new(RegistryLimits {
-            max_tcp: 1,
-            max_udp: 0,
-            max_dns: 64,
-            initial_credit: 100,
-            ..Default::default()
-        });
-        let id = reg.alloc_guest(FlowClass::Tcp).unwrap();
-        reg.grant_guest_credit(id, u32::MAX).unwrap();
-        reg.grant_host_credit(id, u32::MAX).unwrap();
-        assert_eq!(reg.get(id).unwrap().guest_credit, MAX_STREAM_CREDIT);
-        assert_eq!(reg.get(id).unwrap().host_credit, MAX_STREAM_CREDIT);
     }
 
     #[test]
