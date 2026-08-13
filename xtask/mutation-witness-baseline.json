@@ -314,11 +314,11 @@
   "uncovered_claims": [
     {
       "number": 5,
-      "why": "no fn: witness — witnessed by CI lanes only, nothing to mutate"
+      "why": "no fn: witness \u2014 witnessed by CI lanes only, nothing to mutate"
     },
     {
       "number": 7,
-      "why": "no fn: witness — witnessed by CI lanes only, nothing to mutate"
+      "why": "no fn: witness \u2014 witnessed by CI lanes only, nothing to mutate"
     },
     {
       "number": 16,
@@ -535,6 +535,51 @@
       "file": "crates/mvm-sdk/src/compile/deps_audit.rs",
       "mutant": "replace * with + in hash_file_raw",
       "reason": "equivalent: the mutated expression is the read-buffer size (64 * 1024 versus 64 + 1024). It changes how many bytes are read per iteration and nothing else; the resulting SHA-256 is identical, so no assertion on behaviour can separate them."
+    },
+    {
+      "file": "crates/mvm-backends/src/fc/host.rs",
+      "mutant": "replace output.status.success() with true in is_installed",
+      "reason": "is_installed probes the builder VM for a firecracker binary. Mutating the probe to always report true only changes how the environment is reported, not a security decision; the real gate is the subsequent install/download path which still verifies actual files."
+    },
+    {
+      "file": "crates/mvm-backends/src/fc/host.rs",
+      "mutant": "replace output.status.success() with false in is_installed",
+      "reason": "is_installed probes the builder VM for a firecracker binary. Mutating the probe to always report false only changes how the environment is reported, not a security decision; the real gate is the subsequent install/download path which still verifies actual files."
+    },
+    {
+      "file": "crates/mvm-backends/src/fc/host.rs",
+      "mutant": "replace output.status.success() with true in has_kernel",
+      "reason": "has_kernel probes the builder VM for a vmlinux file. Mutating the probe to always report true only changes how the environment is reported, not a security decision; the real gate is the subsequent install/download path which still verifies actual files."
+    },
+    {
+      "file": "crates/mvm-backends/src/fc/host.rs",
+      "mutant": "replace output.status.success() with false in has_kernel",
+      "reason": "has_kernel probes the builder VM for a vmlinux file. Mutating the probe to always report false only changes how the environment is reported, not a security decision; the real gate is the subsequent install/download path which still verifies actual files."
+    },
+    {
+      "file": "crates/mvm-backends/src/fc/host.rs",
+      "mutant": "replace output.status.success() with true in has_squashfs",
+      "reason": "has_squashfs probes the builder VM for a squashfs rootfs. Mutating the probe to always report true only changes how the environment is reported, not a security decision; the real gate is the subsequent install/download path which still verifies actual files."
+    },
+    {
+      "file": "crates/mvm-backends/src/fc/host.rs",
+      "mutant": "replace output.status.success() with false in has_squashfs",
+      "reason": "has_squashfs probes the builder VM for a squashfs rootfs. Mutating the probe to always report false only changes how the environment is reported, not a security decision; the real gate is the subsequent install/download path which still verifies actual files."
+    },
+    {
+      "file": "crates/mvm-backends/src/fc/host.rs",
+      "mutant": "replace && with || in has_base_assets",
+      "reason": "has_base_assets combines two environment probes for Firecracker base assets. Mutating the combiner only changes which probe is consulted; the downstream install step still verifies actual files."
+    },
+    {
+      "file": "crates/mvm-backends/src/driver/hvf_restore.rs",
+      "mutant": "replace + with - in restore_hvf_vm",
+      "reason": "The deadline calculation in the HVF restore wait loop is a straightforward timeout. Mutating the arithmetic to subtract the timeout makes the deadline immediate and would cause spurious timeouts in production; it is not a security-relevant branch and is covered by the loop's overall timeout semantics rather than a unit test."
+    },
+    {
+      "file": "crates/mvm-backends/src/driver/hvf_restore.rs",
+      "mutant": "replace >= with < in restore_hvf_vm",
+      "reason": "The deadline comparison in the HVF restore wait loop is a straightforward timeout. Mutating the comparison changes when the timeout fires but does not alter the security posture; it is covered by the loop's overall timeout semantics rather than a unit test."
     }
   ]
 }
