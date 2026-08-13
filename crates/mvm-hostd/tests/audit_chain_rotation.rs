@@ -127,7 +127,9 @@ async fn a_rotated_chain_verifies_per_segment_and_across_the_set() {
     let vk = key().verifying_key();
     // Each segment verifies on its own — the continuing ones through their
     // authenticated handoff, not by claiming genesis.
-    let reports = verify_segment_set(dir.path(), "local", &vk).unwrap();
+    let reports = verify_segment_set(dir.path(), "local", &vk)
+        .unwrap()
+        .segments;
     assert!(
         reports.len() >= 2,
         "expected several segments, got {reports:?}"
@@ -361,7 +363,8 @@ async fn concurrent_writers_rotate_exactly_once_per_boundary() {
     tb.await.unwrap();
 
     let reports = verify_segment_set(dir.path(), "local", &key().verifying_key())
-        .expect("concurrent writers must leave a verifiable set");
+        .expect("concurrent writers must leave a verifiable set")
+        .segments;
     let boundaries = reports.len() - 1;
     let total: usize = reports.iter().map(|r| r.entries.unwrap()).sum();
     assert_eq!(
@@ -385,7 +388,9 @@ async fn the_topology_check_reports_no_count_for_interiors_it_did_not_walk() {
     emit(dir.path(), RotationPolicy::at_bytes(4096), 60).await;
     let vk = key().verifying_key();
 
-    let reports = verify_segment_topology(dir.path(), "local", &vk).unwrap();
+    let reports = verify_segment_topology(dir.path(), "local", &vk)
+        .unwrap()
+        .segments;
     assert!(reports.len() >= 2);
     for r in &reports {
         assert!(
@@ -395,7 +400,10 @@ async fn the_topology_check_reports_no_count_for_interiors_it_did_not_walk() {
     }
 
     // And the full walk does report every count.
-    for r in verify_segment_set(dir.path(), "local", &vk).unwrap() {
+    for r in verify_segment_set(dir.path(), "local", &vk)
+        .unwrap()
+        .segments
+    {
         assert!(r.entries.is_some());
     }
 }
@@ -463,7 +471,8 @@ fn an_empty_chain_verifies_as_zero_entries_not_as_a_break() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("local.jsonl"), "").unwrap();
     let reports = verify_segment_set(dir.path(), "local", &key().verifying_key())
-        .expect("an untouched chain is not a broken one");
+        .expect("an untouched chain is not a broken one")
+        .segments;
     assert_eq!(reports.len(), 1);
     assert_eq!(reports[0].entries, Some(0));
 }

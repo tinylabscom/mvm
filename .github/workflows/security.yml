@@ -390,6 +390,33 @@ jobs:
         # outside it (an out-of-range span becomes an OOB slice downstream).
         run: cargo fuzz run fuzz_response_parse -- -max_total_time="$DURATION"
 
+      - name: Fuzz FlowMux frame decode (fuzz_network_flow_decode)
+        working-directory: crates/mvm-contract
+        env:
+          DURATION: ${{ steps.duration.outputs.secs }}
+          RUSTUP_TOOLCHAIN: nightly-2026-06-11
+        # The FlowMux decoder is the first thing on the single workload
+        # networking path to touch guest-controlled bytes. Same "never panic
+        # on any input" contract as the other harnesses, plus two invariants
+        # a parse bug would break silently: never report a payload past the
+        # protocol cap, and re-encode a decoded frame to exactly the bytes it
+        # decoded from. The second is the interesting one — a decoder that
+        # normalizes a malformed field is where the two ends of a connection
+        # start disagreeing about what they just exchanged.
+        run: cargo fuzz run fuzz_network_flow_decode -- -max_total_time="$DURATION"
+
+      - name: Fuzz FlowMux session state (fuzz_network_flow_state)
+        working-directory: crates/mvm-contract
+        env:
+          DURATION: ${{ steps.duration.outputs.secs }}
+          RUSTUP_TOOLCHAIN: nightly-2026-06-11
+        # A different attack from the decoder's: every frame here is
+        # individually well-formed, and the question is whether a *sequence*
+        # of them can break the machine that decides what is allowed. Asserts
+        # the ceilings hold, a retired stream id is never re-admitted, credit
+        # never passes its window, and a refused frame moves nothing.
+        run: cargo fuzz run fuzz_network_flow_state -- -max_total_time="$DURATION"
+
       - name: Fuzz gateway packet parse + rebuild (host-side)
         working-directory: crates/mvm-hostd
         env:

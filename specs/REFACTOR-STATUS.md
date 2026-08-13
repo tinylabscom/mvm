@@ -6,6 +6,10 @@ This is the cross-plan progress index. The owning plan remains authoritative
 for detailed scope and acceptance criteria.
 
 ## Completed issue closeouts
+- [x] **Plan 325 — lowercase OCI image names.** Registry and repository
+      capitalization is normalized before validation across every shared OCI
+      pull and launch path, while case-sensitive tags and strict digest
+      validation remain unchanged.
 - [x] **Plan 322 — persistent-machine README contract.** `machine create`
       accepts the optional machine name positionally, and real-binary coverage,
       all three SDKs, shared fixtures, BDD scenarios, recovery guidance, and
@@ -147,7 +151,18 @@ for detailed scope and acceptance criteria.
         gutters 108/34/26 across every section and the header
   - [ ] Maintainer design review — ongoing; the remaining question is whether
         the result reads well, which no measurement answers
-  - [ ] PR #2359 open against `main`
+  - [x] PR #2359 merged to `main`
+  - [x] Implementation plan reconciled against what shipped: five tasks named
+        components that were never created, because the mid-flight review
+        restructured the page, and two stated goals (the scroll-synced code
+        walkthrough and the SDK/CLI tab block as its own section) were dropped
+        by that review. Mapping recorded in the plan's status header; the step
+        checkboxes were never ticked during execution and are not a record of
+        what happened
+  - [x] Docs security pages carried a "seven claims" framing predating most of
+        ADR-001's ledger (#2398); `ci-claims.md` now mirrors the full table and
+        `matryoshka.md` separates layer-defending from backend-independent
+        claims
 
 - [~] Plan 315 — HVF virtio-vsock transmit-credit regression
       (`specs/plans/315-hvf-vsock-credit-regression.md`)
@@ -1151,10 +1166,20 @@ for detailed scope and acceptance criteria.
         `spawn_netd`/`host_datapath` (29 allowlist entries); synthesis,
         admission, and CLI preflight refuse `raw_ip_stack=true`/`L3Vsock` with
         a migration error naming the loopback adapters and typed connectors
-  - [~] Phase 1 — pin protocol, resource, and performance baselines (#2370):
-        transport-neutral signed `NetworkLimits` is implemented with
-        default-byte compatibility, validation, and one legacy/FlowMux
-        accessor; protocol, authentication, fuzz, and benchmark work remains
+  - [~] Phase 1 — pin protocol, resource, and performance baselines (#2370).
+        Landed: `mvm-contract::protocol::network_flow` — the v1 frame header
+        (20 bytes, `u32` length field because 64 KiB does not fit a `u16`),
+        all 27 opcodes with their class/sender/confirmation relations,
+        state-independent cap-before-allocate decoding with golden byte
+        fixtures, and the session/stream state machine (parity-split stream
+        IDs, watermark reuse rejection rather than an unbounded set, per-stream
+        credit, declared-listener-backed ingress, fail-closed on every
+        refusal). 87 unit tests. `crates/mvm-contract/fuzz` adds
+        `fuzz_network_flow_decode` and `fuzz_network_flow_state` with 95
+        committed seeds, wired into `security.yml`. Transport-neutral signed
+        `NetworkLimits` is also implemented with default-byte compatibility,
+        validation, and one legacy/FlowMux accessor. Remaining: session
+        extraction and the perf harness + baselines.
   - [ ] Phase 2 — the one authenticated endpoint (#2371)
   - [ ] Phase 3 — converge egress TCP, UDP, and DNS (#2372)
   - [ ] Phase 4 — stream typed transformations (#2373)

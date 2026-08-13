@@ -268,6 +268,35 @@ const EXT4_SUPERBLOCK_READ: usize = 512;
 /// Pure function so darwin `cargo test` exercises it without a
 /// Linux cross-compile; the file-IO and `BLKGETSIZE64` ioctl that
 /// feed it live inside the linux module.
+/// Whether the kernel has recorded filesystem errors on this ext4 volume.
+///
+/// Reads `s_state` (u16 at `0x3A` of the superblock). Bit 1
+/// (`EXT4_ERROR_FS`) is set by the kernel when it detects corruption and
+/// survives a remount, so it is still set on the *next* boot — which is
+/// exactly when we want to refuse.
+///
+/// `None` means there is no ext4 here to judge; the caller treats that as
+/// "needs formatting", not as an error.
+///
+/// Catching this up front matters because the damage otherwise surfaces
+/// somewhere arbitrary and unrecognisable downstream: a corrupt store showed
+/// up as `/bin/chown -R 902:902 /nix/var/nix exited 1`, which names neither
+/// the disk nor corruption.
+#[cfg(any(target_os = "linux", test))]
+fn parse_ext4_recorded_error_state(sb: &[u8]) -> Option<bool> {
+    /// `s_state` bit 1: the kernel detected filesystem errors.
+    const EXT4_ERROR_FS: u16 = 0x0002;
+
+    if sb.len() < 0x3A + 2 {
+        return None;
+    }
+    if sb[0x38] != 0x53 || sb[0x39] != 0xEF {
+        return None;
+    }
+    let state = u16::from_le_bytes(sb[0x3A..0x3C].try_into().ok()?);
+    Some(state & EXT4_ERROR_FS != 0)
+}
+
 #[cfg(any(target_os = "linux", test))]
 fn parse_ext4_recorded_size_bytes(sb: &[u8]) -> Option<u64> {
     if sb.len() < 0x150 + 4 {
@@ -599,6 +628,51 @@ fn closure_marker_contents(closure_hash: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── ext4 store damage detection ──
+
+    /// A minimal ext4 superblock with the magic set and `s_state` as given.
+    fn sb_with_state(state: u16) -> Vec<u8> {
+        let mut sb = vec![0u8; 0x160];
+        sb[0x38] = 0x53;
+        sb[0x39] = 0xEF;
+        sb[0x3A..0x3C].copy_from_slice(&state.to_le_bytes());
+        sb
+    }
+
+    #[test]
+    fn a_cleanly_unmounted_store_is_not_flagged_as_damaged() {
+        // EXT4_VALID_FS only. The common case must not start refusing builds.
+        assert_eq!(
+            parse_ext4_recorded_error_state(&sb_with_state(0x0001)),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn a_store_the_kernel_flagged_is_reported_as_damaged() {
+        // EXT4_ERROR_FS. This is what an abruptly-killed builder VM left
+        // behind, and what previously surfaced as an unrelated chown failure.
+        assert_eq!(
+            parse_ext4_recorded_error_state(&sb_with_state(0x0002)),
+            Some(true)
+        );
+        // Set alongside VALID_FS, which is how it actually appears.
+        assert_eq!(
+            parse_ext4_recorded_error_state(&sb_with_state(0x0003)),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn a_non_ext4_or_short_superblock_yields_no_verdict() {
+        // No ext4 to judge; the caller formats rather than refusing.
+        let mut not_ext4 = sb_with_state(0x0002);
+        not_ext4[0x38] = 0x00;
+        assert_eq!(parse_ext4_recorded_error_state(&not_ext4), None);
+        assert_eq!(parse_ext4_recorded_error_state(&[]), None);
+        assert_eq!(parse_ext4_recorded_error_state(&[0u8; 0x3A]), None);
+    }
 
     // ── guest-agent fork (universal-agent invariant) ──
 
@@ -2814,6 +2888,11 @@ mod linux {
             append_init_breadcrumb("setup_nix_store_format", &reason);
             eprintln!("mvm-host-vm-init: formatting {NIX_STORE_DEV} ({reason})");
             format_ext4(NIX_STORE_DEV)?;
+        } else {
+            // A store the kernel has already flagged is not safe to build on:
+            // mounting it succeeds, and the damage then surfaces somewhere
+            // arbitrary downstream. Refuse here, where we can name the cause.
+            nix_store_dev_refuse_if_damaged(NIX_STORE_DEV)?;
         }
         mount_fs(NIX_STORE_DEV, NIX_STORE_MOUNT, "ext4")?;
         append_init_breadcrumb("setup_nix_store_mounted", NIX_STORE_MOUNT);
@@ -3780,6 +3859,24 @@ mod linux {
     /// rather than aborting before the build can run. The
     /// `/nix-store` volume is a cache; reformatting loses nothing
     /// that can't be rebuilt by the next nix build.
+    /// Refuse a store volume the kernel has recorded errors on.
+    ///
+    /// The message is the whole point: it names the device, says the store is
+    /// damaged, and gives the narrow recovery, so nobody has to read kernel
+    /// output to find `EXT4-fs (vdb): mounting fs with errors`.
+    fn nix_store_dev_refuse_if_damaged(dev: &str) -> Result<(), String> {
+        let sb = read_ext4_superblock(dev)?;
+        if crate::parse_ext4_recorded_error_state(&sb) == Some(true) {
+            return Err(format!(
+                "nix store on {dev} is damaged: the kernel recorded ext4 errors on it. \
+                 Refusing to build on a corrupt store. \
+                 Recover with `mvmctl cache repair --store-only`, which resets only \
+                 this store image and keeps the builder images and stage0 seed."
+            ));
+        }
+        Ok(())
+    }
+
     fn nix_store_dev_needs_format(dev: &str) -> Result<Option<String>, String> {
         let sb = read_ext4_superblock(dev)?;
         let Some(fs_bytes) = crate::parse_ext4_recorded_size_bytes(&sb) else {

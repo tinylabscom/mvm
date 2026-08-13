@@ -1,6 +1,6 @@
 ---
 title: "The Matryoshka model: how mvm isolates untrusted code"
-description: "mvm runs untrusted Linux workloads in microVMs. This page explains the five trust layers, the seven CI-enforced security claims, and which claims hold for each backend."
+description: "mvm runs untrusted Linux workloads in microVMs. This page explains the five trust layers, the CI-enforced security claims, and which claims hold for each backend."
 ---
 
 mvm's job is to let you run **untrusted code** — third-party software, AI-generated scripts, CI runners, sandbox workloads — and trust the isolation. This page explains the security model in one diagram and one matrix.
@@ -74,19 +74,38 @@ Each layer trusts only the layer **below** it. An attacker has to break through 
 
 This pattern (sometimes called the *matryoshka* model after the nested Russian dolls) is the same defense-in-depth used across the production microVM / hardened-isolation ecosystem. mvm's adaptation is that **L5 is enforced inside the guest** — even a guest-kernel compromise doesn't give arbitrary access to other in-guest services. See [ADR-001](https://github.com/tinylabscom/mvm/blob/main/specs/adrs/001-microvm-security-posture.md) for the full decision record.
 
-## The seven claims
+## The claims
 
-mvm makes seven CI-enforced security claims. Each one is backed by a continuous-integration check that fails the build if the claim ceases to hold.
+mvm makes fifteen CI-enforced security claims, plus three preview claims whose
+witnesses run but whose guarantee is narrower. Each one is backed by a test or a
+continuous-integration check that fails the build if the claim ceases to hold.
+The claims that defend a nesting layer are what the layer model is about; the
+rest defend the supply chain and the admission path, which decide what is
+allowed to run inside those layers at all.
 
 | # | Claim | Defends layer | How it's enforced |
 |---|---|---|---|
-| 1 | No host-fs access from a guest beyond explicit shares | L2 / L5 | Per-service uid + seccomp `standard` default + setpriv bounding-set drop |
+| 1 | No host-fs access from a guest beyond explicit shares | L2 / L5 | Per-service uid + seccomp `standard` default + setpriv bounding-set drop; user-volume allow-list defaulting to read-only |
 | 2 | No guest binary can elevate to uid 0 | L2 / L4 | `setpriv --no-new-privs` in launch path; `/etc/{passwd,group}` are read-only bind-mounts |
-| 3 | A tampered rootfs ext4 fails to boot | L3 | dm-verity sidecar + roothash on cmdline + `mvm-verity-init` initramfs |
+| 3 | A tampered rootfs ext4 fails to boot | L3 | dm-verity sidecar + roothash on cmdline + a verity-aware initramfs owning the boot pivot |
 | 4 | A production-safe run cannot invoke DevOnly guest-agent verbs | L4 | Runtime profile + signed `VerbGrant` intersection; grant and conformance tests enforce the full DevOnly set |
-| 5 | Vsock framing is fuzzed | L2 / L4 | `cargo-fuzz` targets cover every host↔guest message; `deny_unknown_fields` on every type |
-| 6 | Pre-built dev image is hash-verified | supply chain | SHA-256 manifest streamed through the download |
+| 5 | Vsock framing, supervisor-config JSON, and the datapath ingress are fuzzed | L2 / L4 | `cargo-fuzz` targets over the host↔guest messages, the supervisor config parser, and the userspace datapath ingress; `deny_unknown_fields` on every type |
+| 6 | Pre-built dev image is hash-verified | supply chain | SHA-256 manifest streamed through the download; a mismatch rejects and deletes it |
 | 7 | Cargo deps are audited on every PR | supply chain | `cargo-deny` + `cargo-audit` jobs; reproducibility double-build |
+| 8 | Every workload runs from a signed, audited `ExecutionPlan` | admission | Ed25519 host-signer keypair; validity window + nonce replay-store; chain-signed admission entries |
+| 9 | Every published bundle is content-addressed and key_id-pinned | supply chain | A rejection ladder at fetch and at admit time: unknown key, tampered manifest, key_id mismatch, unsafe path, pin drift |
+| 10 | No untrusted workload reaches the network unless policy admits it | data containment | Policy defaults to deny-all; the workload guest has no NIC, so egress leaves only over vsock to a host endpoint that authorizes it |
+| 11 | Every application-dependency volume is sealed and audited | supply chain (app layer) | A hash-locked volume carrying an SBOM, a CVE scan, and a hash-chained manifest; admission refuses a tampered volume |
+| 12 | Every broker service is bound to a signed plan binding | admission | Binding-gated dispatch, enforced before the handler runs, with a rejection ladder for unbound and out-of-profile calls |
+| 13 | No raw secret value crosses the broker channel | data containment | Destination-bound, time-bound signed credentials only; raw secret bytes never leave the supervisor's address space |
+| 14 | Every OCI image admission records provenance in the audit log | supply chain | A provenance entry carries registry, repo, resolved digest, layer digests, and trust verdict; production refuses a mutable reference |
+| 15 | A sealed production microVM has no shell, no DevOnly verbs, no PTY | L4 | Only the dev `/init` serves a console; console capture is write-only with no host input; the host gate refuses `console` on a sealed image |
+
+Three further claims — 16 (egress substitution keeps a raw secret off the
+guest), 17 (workload stdin is grant-gated and secret-scanned), and 18 (workload
+resource bounding) — are **preview**. Their witnesses run in CI, but each
+carries a limits note in ADR-001 that has to be read before treating it as
+enforced. See [CI-enforced security claims](/security/ci-claims/#preview-claims).
 
 L1 (host + hypervisor) doesn't carry its own claim — the host is **trusted** by definition. If your host is compromised, every layer falls. Locking down the host (firewall, package hygiene, full-disk encryption) is your responsibility.
 
@@ -106,14 +125,20 @@ This does **not** add a second seccomp implementation or new execution capabilit
 
 ## Per-backend tier matrix
 
-mvm runs on multiple backends. Not all backends carry all seven claims. The tier you actually get depends on which backend mvm picks for your run.
+mvm runs on multiple backends. Not all backends carry every claim. The tier you
+actually get depends on which backend mvm picks for your run.
+
+The columns below are the **nesting layers**, so this matrix covers the claims
+that defend a layer. The supply-chain and admission claims (6, 7, 8, 9, 11, 12,
+14) are backend-independent — they gate what is allowed to run before any
+backend is chosen, and hold identically across all of them.
 
 | Backend | L1 | L2 | L3 | L4 | L5 | Tier |
 |---|---|---|---|---|---|---|
-| **Firecracker** (Linux + KVM) | ✅ | ✅ | ✅ | ✅ | ✅ | **Tier 1** — full ADR-001. All seven claims hold. |
+| **Firecracker** (Linux + KVM) | ✅ | ✅ | ✅ | ✅ | ✅ | **Tier 1** — full ADR-001. Every layer-defending claim holds. |
 | **HVF** (macOS 26+ Apple Silicon — auto-default) | ✅ | ✅ | ⚠️ | ✅ | ✅ | Tier 2 — claim 3 (verified boot) partial; `Hypervisor.framework`, vsock-only egress (no guest NIC). The macOS-26 auto-default. |
 | **libkrun** (Linux KVM, macOS Apple Silicon HVF) | ✅ | ✅ | ⚠️ | ✅ | ✅ | Tier 2 — same as HVF. |
-| **QEMU** (Linux KVM/TCG) | ✅ | ⚠️ | ⚠️ | ✅ | ✅ | Tier 2 — claim 3 partial; QEMU's larger device model raises L2 audit cost. **Dev/test only** (`--hypervisor qemu`; the no-`/dev/kvm` path via TCG software emulation). Never selected by `mvmd`. |
+| **QEMU** (Linux KVM/TCG) | ✅ | ⚠️ | ⚠️ | ✅ | ✅ | Tier 2 — claim 3 partial; QEMU's larger device model raises L2 audit cost. Deliberately outside claim 10's egress enforcement, because it carries no untrusted multi-tenant workload. **Dev/test only** (`--hypervisor qemu`; the no-`/dev/kvm` path via TCG software emulation). Never selected by `mvmd`. |
 
 ✅ = layer fully enforced.  ⚠️ = layer partial (named exception).  ❌ = layer collapsed (claim does not apply).
 
@@ -145,6 +170,6 @@ If your threat model needs any of those, mvm is not the right tool today. ADR-00
 ## See also
 
 - [ADR-001 (full decision record)](https://github.com/tinylabscom/mvm/blob/main/specs/adrs/001-microvm-security-posture.md)
-- [Plan 25 (microVM hardening — the implementation sequence for the seven claims)](https://github.com/tinylabscom/mvm/blob/main/specs/plans/25-microvm-hardening.md)
+- [Plan 25 (microVM hardening — the implementation sequence for claims 1–7)](https://github.com/tinylabscom/mvm/blob/main/specs/plans/25-microvm-hardening.md)
 - [Plan 53 (cross-platform roadmap — backend tier discipline)](https://github.com/tinylabscom/mvm/blob/main/specs/plans/53-cross-platform-roadmap.md)
 - ["Your container is not a sandbox" (emirb, 2026)](https://emirb.github.io/blog/microvm-2026/) — the post that crystallized the matryoshka framing in the broader microVM ecosystem.

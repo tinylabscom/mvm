@@ -1,0 +1,35 @@
+[package]
+name = "mvm-contract-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+# Detached from the parent workspace: the root Cargo.toml excludes this
+# path, but cargo also requires the excluded sub-package to self-identify
+# as standalone. An empty [workspace] table is the documented fix.
+[workspace]
+
+# cargo-fuzz looks for this metadata key.
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.mvm-contract]
+path = ".."
+
+# libfuzzer harnesses only; never a bench/test/doc target.
+[[bin]]
+name = "fuzz_network_flow_decode"
+path = "fuzz_targets/fuzz_network_flow_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_network_flow_state"
+path = "fuzz_targets/fuzz_network_flow_state.rs"
+test = false
+doc = false
+bench = false

@@ -146,10 +146,12 @@ pub use audit_recorder::{
     EventCategory, Recorder, RecorderError, UNBOUND_IMAGE_NAME, UNBOUND_IMAGE_SHA256,
     UNBOUND_PLAN_ID,
 };
-pub use audit_segment::{CHAIN_CONTINUED, CHAIN_SEALED, Continuation, Sealed};
+pub use audit_segment::{
+    CHAIN_CONTINUED, CHAIN_PRUNED, CHAIN_SEALED, Continuation, Pruned, Sealed,
+};
 pub use audit_set::{
-    SegmentContent, SegmentReport, SegmentSetError, read_verified_set, verify_segment_entries,
-    verify_segment_set, verify_segment_topology,
+    SegmentContent, SegmentReport, SegmentSetError, SetVerification, read_verified_set,
+    verify_segment_entries, verify_segment_set, verify_segment_topology,
 };
 pub use backend::{BackendError, BackendLaunchSpec, BackendLauncher, NoopBackendLauncher};
 #[cfg(target_os = "macos")]
