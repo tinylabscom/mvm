@@ -1452,7 +1452,6 @@ fn verify_preloaded_child_name_is_available(
     }
     Ok(())
 }
-
 /// The child's launch config: the CLI-populated claim config (carrying the
 /// verity fields the CLI already resolved on the cloned rootfs) rekeyed onto the
 /// fresh child identity and its materialized rootfs. The runner consumes verity;
@@ -1499,7 +1498,6 @@ fn resident_parent_rootfs_dir(parent_vm_name: &str) -> std::result::Result<PathB
         ))
     })
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
