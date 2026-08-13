@@ -36,11 +36,12 @@ python3 "$SCRIPT_DIR/fixtures/build.py"
 
 # Stage everything the Astro site serves at /demo/.
 rm -rf "$DEST_DIR"
+mkdir -p "$DEST_DIR/pkg"
 mkdir -p "$DEST_DIR/fixtures"
 cp "$SCRIPT_DIR/index.html" "$DEST_DIR/index.html"
 cp "$SCRIPT_DIR/demo.js" "$DEST_DIR/demo.js"
 cp "$SCRIPT_DIR/worker.js" "$DEST_DIR/worker.js"
-cp "$SCRIPT_DIR/pkg"/* "$DEST_DIR/"
+cp "$SCRIPT_DIR/pkg"/* "$DEST_DIR/pkg/"
 cp "$SCRIPT_DIR/fixtures/"*.opt.wasm "$DEST_DIR/fixtures/"
 
 echo "Demo staged to $DEST_DIR"

@@ -4,8 +4,10 @@
 
 **SHIPPED — PR #2429 merged to `main`; hardening items closed in #2441.** E1,
 E2, and E3 are complete, the browser demo is live at `/demo`, and the remaining
-hardening items (fixture-parity Rust assertion, size budget in the `wasm32` CI
-lane, builder-VM-style artifact build) are now closed.
+hardening items are now closed. This follow-up fix (#2447) adds the wasm build
+to `.github/workflows/pages.yml` and corrects `web/mvm-demo/build.sh` to
+preserve the `pkg/` subdirectory when staging, so the live `/demo` route serves
+the generated bundle.
 
 Bound by [ADR-024](../adrs/024-wasm-sandbox-backend.md)'s three constraints.
 Adds no numbered security claim, and does not request one.
@@ -508,6 +510,9 @@ relocation and the design is wrong.
 - [x] `cargo fmt --all -- --check` (nightly, per CI Lint),
       `cargo clippy --workspace --all-targets -- -D warnings`,
       `cargo test --workspace --doc`, xtask gates.
+- [x] GitHub Pages deploy workflow (`.github/workflows/pages.yml`) builds the
+      wasm demo with `wasm-pack` + `wasm-opt` before `pnpm build`, so the live
+      `/demo` route includes the generated `pkg/` bundle.
 
 ## Sequencing constraints
 
