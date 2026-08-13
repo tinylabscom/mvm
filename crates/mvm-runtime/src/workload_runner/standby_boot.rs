@@ -747,7 +747,7 @@ mod tests {
                 .contains("hvf-agent.sock")
         );
         assert!(
-            ports[&GuestService::Substitution]
+            ports[&GuestService::NetworkFlow]
                 .to_string_lossy()
                 .ends_with("standby-egress.sock")
         );
