@@ -190,7 +190,8 @@ pub use mvm_vmm::host::host_agent_spawn;
 /// Host-agent registration helpers used by integration tests and the
 /// `mvmctl` host-agent path. Re-exported from `mvm-vmm::host::host_agent_spawn`.
 pub use mvm_vmm::host::host_agent_spawn::{
-    deregister_vm, ensure_host_agent_daemon, load_host_signing_key, register_vm,
+    HostAgentServicesParams, deregister_vm, ensure_host_agent_daemon, load_host_signing_key,
+    reap_host_agent_services_from_state, register_host_agent_services_if_admitted, register_vm,
 };
 
 /// Substitution-endpoint helpers used by integration tests and the

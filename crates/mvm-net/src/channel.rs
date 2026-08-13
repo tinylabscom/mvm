@@ -45,6 +45,9 @@ pub enum GuestService {
     /// numeric value remains transport detail; callers still select the
     /// service by its semantic role.
     ConsoleData { port: u32 },
+    /// One explicitly declared TCP ingress channel. The guest agent listens
+    /// on this vsock port and bridges it only to the declared guest TCP port.
+    IngressTcp { port: u32 },
     /// Job dispatch into a persistent builder VM's in-guest loop.
     ///
     /// Builder-tier only: the guest end is `mvm-host-vm-init`'s dispatch
@@ -72,6 +75,7 @@ impl GuestService {
             Self::NetworkData { queue } => mvm_contract::l3::data_port(queue),
             Self::Broker => 5300,
             Self::ConsoleData { port } => port,
+            Self::IngressTcp { port } => port,
             // Pinned literals, mirroring `mvm_agentd::builder_agent`'s
             // constants. This crate sits below `mvm-agentd` and cannot name
             // them; the tests below pin both ends to the same numbers.
@@ -90,6 +94,7 @@ impl GuestService {
             Self::Broker => "broker",
             Self::Substitution => "substitution",
             Self::ConsoleData { .. } => "console-data",
+            Self::IngressTcp { .. } => "ingress-tcp",
             Self::BuilderDispatch => "builder-dispatch",
             Self::BuilderdControl => "builderd-control",
         }
@@ -115,6 +120,7 @@ impl fmt::Display for GuestService {
         match self {
             Self::NetworkData { queue } => write!(f, "network-data[{queue}]"),
             Self::ConsoleData { port } => write!(f, "console-data[{port}]"),
+            Self::IngressTcp { port } => write!(f, "ingress-tcp[{port}]"),
             other => write!(f, "{}", other.as_str()),
         }
     }

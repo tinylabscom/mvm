@@ -2,16 +2,14 @@
 
 use anyhow::{Context, Result};
 
-use mvm_runtime::firecracker;
 use mvm_runtime::microvm;
 
 /// Resolve a VM name to its absolute directory path and verify the VM
 /// is running.
 pub fn resolve_running_vm(name: &str) -> Result<String> {
     let abs_dir = microvm::resolve_running_vm_dir(name)?;
-    let pid_file = format!("{}/fc.pid", abs_dir);
-
-    if !firecracker::is_vm_running(&pid_file)? {
+    let hypervisor = super::resolve_effective_hypervisor("firecracker");
+    if !mvm_client::backend_is_running(&hypervisor, name) {
         anyhow::bail!(
             "VM '{}' is not running. Use 'mvmctl status' to list running VMs.",
             name

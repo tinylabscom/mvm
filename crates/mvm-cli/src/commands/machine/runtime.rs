@@ -176,10 +176,10 @@ pub(super) enum PostStart {
 /// Resolve the post-start behaviour from the flags alone, so the choice is
 /// testable without booting anything.
 pub(super) fn post_start_action(args: &MachineRunArgs) -> PostStart {
-    if !args.port.is_empty() {
-        PostStart::Forward
-    } else if args.up_json {
+    if args.up_json {
         PostStart::Envelope
+    } else if !args.port.is_empty() {
+        PostStart::Forward
     } else if args.json {
         PostStart::Quiet
     } else if args.detach {

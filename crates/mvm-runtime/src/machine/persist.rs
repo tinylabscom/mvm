@@ -51,6 +51,10 @@ pub struct MachineSpec {
     pub runtime_pack: bool,
     pub net: bool,
     pub allow_host: Vec<String>,
+    /// Declared loopback ingress mappings (`HOST:GUEST`). These are persisted
+    /// so the backend can pre-open only the corresponding vsock channels.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ports: Vec<String>,
     pub cpus: u32,
     pub memory: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -177,6 +181,7 @@ pub fn machine_config_matches(a: &MachineSpec, b: &MachineSpec) -> bool {
         && a.runtime_pack == b.runtime_pack
         && a.net == b.net
         && a.allow_host == b.allow_host
+        && a.ports == b.ports
         && a.cpus == b.cpus
         && a.memory == b.memory
         && a.mem_initial == b.mem_initial
@@ -206,6 +211,9 @@ pub fn machine_config_diff(current: &MachineSpec, desired: &MachineSpec) -> Stri
     }
     if current.allow_host != desired.allow_host {
         changed.push("allow-host");
+    }
+    if current.ports != desired.ports {
+        changed.push("ports");
     }
     if current.cpus != desired.cpus {
         changed.push("cpus");
@@ -367,6 +375,7 @@ mod tests {
             runtime_pack: false,
             net: false,
             allow_host: vec![],
+            ports: vec![],
             cpus: 2,
             memory: "512M".to_string(),
             mem_initial: None,
@@ -582,6 +591,7 @@ mod tests {
             runtime_pack: false,
             net: false,
             allow_host: vec![],
+            ports: vec![],
             cpus: 2,
             memory: "512M".into(),
             mem_initial: None,

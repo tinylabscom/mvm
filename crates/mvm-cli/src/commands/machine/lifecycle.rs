@@ -173,6 +173,7 @@ pub(super) fn start_machine(args: MachineStartArgs) -> Result<()> {
         mem_initial_mib,
         volumes: &volume_cfg,
         network_policy,
+        ports: &spec.ports,
         backend_name: &effective_hypervisor,
         no_supervisor: args.no_supervisor,
         kernel_path,

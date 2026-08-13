@@ -2,6 +2,7 @@
 //! `StartPortForward` / `StartUnixSocketForward` requests from the host.
 
 use std::mem::size_of;
+use std::net::Shutdown;
 use std::os::fd::{FromRawFd, RawFd};
 
 use crate::socket::{
@@ -91,9 +92,11 @@ pub(crate) fn run_port_forwarder(vsock_port: u32, tcp_port: u16) {
 
             let h1 = std::thread::spawn(move || {
                 let _ = std::io::copy(&mut vsock_read, &mut tcp_write);
+                let _ = tcp_write.shutdown(Shutdown::Write);
             });
             let h2 = std::thread::spawn(move || {
                 let _ = std::io::copy(&mut tcp_read, &mut vsock_write);
+                let _ = vsock_write.shutdown(Shutdown::Write);
             });
             let _ = h1.join();
             let _ = h2.join();

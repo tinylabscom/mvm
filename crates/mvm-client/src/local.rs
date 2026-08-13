@@ -1296,6 +1296,7 @@ mod tests {
             health_check: None,
             deployment: None,
             grants: None,
+            ports: vec![],
         };
         save_machine_spec(&spec, false).expect("persist_test_spec: save failed");
     }

@@ -54,11 +54,14 @@ jobs:
   #      tier — moving either to mvmd would force every per-VM flow
   #      through the control plane.
   #   3. Per-VM port-forward proxy — `start_port_proxy`
-  #      (`crates/mvm-cli/src/commands/shared/vsock.rs`). A loopback
+  #      (`crates/mvm-cli/src/commands/shared/vsock.rs`) and the
+  #      `mvmctl forward` implementation
+  #      (`crates/mvm-cli/src/commands/vm/forward.rs`). A loopback
   #      `TcpListener` that splices `localhost:<host_port>` to the
-  #      guest's forwarded vsock port for `mvmctl up -p`. Per-VM
-  #      port-forwarding substrate; relocated here when the in-process
-  #      apple_container provider that formerly held it was deleted.
+  #      guest's forwarded vsock port for `mvmctl up -p` and
+  #      `mvmctl forward`. Per-VM port-forwarding substrate; relocated
+  #      here when the in-process apple_container provider that formerly
+  #      held it was deleted.
   #   4. Observability — Prometheus metrics endpoint
   #      (`crates/mvm-cli/src/metrics_server.rs`) plus per-VM gateway
   #      audit sockets in `crates/mvm-hostd/src/supervisor/gateway_bridge.rs`
@@ -238,6 +241,7 @@ jobs:
               --glob '!**/fuzz/**' \
               --glob '!crates/mvm-build/src/egress_proxy/**' \
               --glob '!crates/mvm-cli/src/commands/shared/vsock.rs' \
+              --glob '!crates/mvm-cli/src/commands/vm/forward.rs' \
               --glob '!crates/mvm-cli/src/metrics_server.rs' \
               --glob '!crates/mvm-cli/src/template_cmd.rs' \
               --glob '!crates/deps/libkrun-sys/src/native_gateway.rs' \

@@ -187,9 +187,9 @@ pub struct HvfSupervisorConfig {
     /// other backends. `None` ⇒ `BROKER_PORT` fails closed (no broker reachable).
     #[serde(default)]
     pub broker_socket: Option<PathBuf>,
-    /// Dev-only console data sockets: one entry per guest vsock data port the
-    /// console driver may connect to. Empty for sealed prod configs (claim 15).
-    /// Populated by the driver when `VmStartConfig.dev_console` is true.
+    /// Explicit host-dial sockets: dev-only console channels plus any declared
+    /// TCP ingress forward channels. An empty list binds no extra guest ports;
+    /// sealed production boots therefore expose only explicitly admitted ingress.
     #[serde(default)]
     pub console_data_sockets: Vec<HostDialSocket>,
     /// Builder-tier control sockets: job dispatch and the resident daemon's

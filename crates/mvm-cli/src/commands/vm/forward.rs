@@ -1,18 +1,23 @@
 //! `mvmctl forward` — forward a port from a running microVM to localhost.
 
+use std::{
+    collections::BTreeMap,
+    io,
+    net::{Shutdown, TcpListener, TcpStream},
+    os::unix::net::UnixStream,
+    thread,
+    time::{Duration, Instant},
+};
+
 use anyhow::{Context, Result};
 use clap::Args as ClapArgs;
 
 use crate::ui;
 
+use super::Cli;
+use super::shared::{clap_port_spec, clap_vm_name, parse_port_spec, resolve_running_vm};
 use mvm_core::naming::validate_vm_name;
 use mvm_core::user_config::MvmConfig;
-use mvm_runtime::microvm;
-
-use super::Cli;
-use super::shared::{
-    CHILD_PIDS, clap_port_spec, clap_vm_name, parse_port_spec, resolve_running_vm,
-};
 
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct Args {
@@ -35,8 +40,9 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
 
 /// Forward a port from a running microVM to localhost.
 ///
-/// The microVM is directly reachable on the host bridge, so this spawns a
-/// local socat proxy on every platform.
+/// The host listener reaches the guest through the VM's authenticated control
+/// channel and a dedicated vsock data port. Guests have no host-reachable NIC,
+/// so forwarding must never depend on a legacy dev VM, guest IP, or `socat`.
 ///
 /// Each `port_spec` is either `GUEST_PORT` (binds to same local port) or
 /// `LOCAL_PORT:GUEST_PORT`.  Multiple ports are forwarded concurrently —
@@ -46,12 +52,10 @@ pub(in crate::commands) fn forward_ports(name: &str, port_specs: &[String]) -> R
     // Verify the VM is actually running.
     let _abs_dir = resolve_running_vm(name)?;
 
-    // Read the VM's guest IP from run-info.json.
-    let info = microvm::read_vm_run_info(name)?;
-
     // Use CLI port specs if provided, otherwise fall back to persisted ports.
     let parsed: Vec<(u16, u16)> = if port_specs.is_empty() {
-        if info.ports.is_empty() {
+        let spec = mvm_runtime::machine::persist::load_machine_spec(name)?;
+        if spec.ports.is_empty() {
             anyhow::bail!(
                 "VM '{}' has no port mappings configured.\n\
                  Specify ports: mvmctl forward {} <PORT>...\n\
@@ -61,78 +65,113 @@ pub(in crate::commands) fn forward_ports(name: &str, port_specs: &[String]) -> R
             );
         }
         ui::info("Using port mappings from VM config.");
-        info.ports.iter().map(|p| (p.host, p.guest)).collect()
+        spec.ports
+            .iter()
+            .map(|port| parse_port_spec(port))
+            .collect::<Result<_>>()?
     } else {
         port_specs
             .iter()
             .map(|s| parse_port_spec(s))
             .collect::<Result<_>>()?
     };
-    let guest_ip = info
-        .guest_ip
-        .as_deref()
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "VM '{}' has no guest_ip in run-info. Was it started with 'mvmctl run'?",
-                name,
-            )
-        })?;
-
+    let mut listeners = Vec::with_capacity(parsed.len());
+    let mut guest_channels = BTreeMap::new();
     for &(local_port, guest_port) in &parsed {
+        let vsock_port = if let Some(port) = guest_channels.get(&guest_port) {
+            *port
+        } else {
+            let mut agent = mvm_runtime::vsock_transport::for_vm(name)?
+                .connect(mvm_agentd::vsock::GUEST_AGENT_PORT)
+                .with_context(|| format!("connect to guest agent for port {guest_port}"))?;
+            let port = mvm_agentd::vsock::start_port_forward_on(&mut agent, guest_port)
+                .with_context(|| format!("request guest port forward for TCP {guest_port}"))?;
+            wait_for_forward_channel(name, port)?;
+            guest_channels.insert(guest_port, port);
+            port
+        };
+        let listener = TcpListener::bind(("127.0.0.1", local_port))
+            .with_context(|| format!("bind forwarding listener 127.0.0.1:{local_port}"))?;
         ui::info(&format!(
-            "Forwarding localhost:{} -> {}:{} (VM '{}')",
-            local_port, guest_ip, guest_port, name,
+            "Forwarding localhost:{} -> vsock:{} -> tcp://localhost:{} (VM '{}')",
+            local_port, vsock_port, guest_port, name,
         ));
+        listeners.push((listener, vsock_port));
     }
     ui::info("Press Ctrl-C to stop forwarding.");
 
-    // socat proxy: the microVM is directly reachable on the host
-    // bridge. Lima's SSH-tunnel fallback is gone.
-    let mut children: Vec<std::process::Child> = Vec::new();
-    for &(local_port, guest_port) in &parsed {
-        let child = std::process::Command::new("socat")
-            .arg(socat_listen_arg(local_port))
-            .arg(format!("TCP:{}:{}", guest_ip, guest_port))
-            .spawn()
-            .context("Failed to start socat. Install it with: sudo apt install socat")?;
-        // Register PID so the signal handler can clean it up.
-        if let Ok(mut pids) = CHILD_PIDS.lock() {
-            pids.push(child.id());
-        }
-        children.push(child);
+    let mut workers = Vec::with_capacity(listeners.len());
+    for (listener, vsock_port) in listeners {
+        let name = name.to_string();
+        workers.push(thread::spawn(move || {
+            serve_listener(&name, listener, vsock_port)
+        }));
     }
-    // Wait for all children to exit (Ctrl-C triggers the signal handler
-    // which sends SIGTERM to each tracked child).
-    for mut child in children {
-        if let Err(e) = child.wait() {
-            tracing::warn!("failed to wait on socat child: {e}");
-        }
-    }
-    // Clear tracked PIDs after children exit.
-    if let Ok(mut pids) = CHILD_PIDS.lock() {
-        pids.clear();
+    for worker in workers {
+        worker
+            .join()
+            .map_err(|_| anyhow::anyhow!("port-forward listener thread panicked"))??;
     }
 
     Ok(())
 }
 
-/// Build the host listener argument. Forwarding is a local-development
-/// surface, so it binds loopback explicitly rather than exposing the guest on
-/// every host interface through socat's wildcard default.
-fn socat_listen_arg(local_port: u16) -> String {
-    format!("TCP-LISTEN:{local_port},fork,reuseaddr,bind=127.0.0.1")
+fn wait_for_forward_channel(name: &str, vsock_port: u32) -> Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if mvm_runtime::vsock_transport::for_vm(name)
+            .and_then(|transport| transport.connect(vsock_port))
+            .is_ok()
+        {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            anyhow::bail!(
+                "guest forward channel vsock:{vsock_port} was not ready within 5 seconds"
+            );
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn serve_listener(name: &str, listener: TcpListener, vsock_port: u32) -> Result<()> {
+    for incoming in listener.incoming() {
+        let tcp = incoming.context("accept forwarded TCP connection")?;
+        let name = name.to_string();
+        thread::spawn(move || {
+            let result = mvm_runtime::vsock_transport::for_vm(&name)
+                .and_then(|transport| transport.connect(vsock_port))
+                .and_then(|guest| proxy(tcp, guest).map_err(Into::into));
+            if let Err(error) = result {
+                tracing::warn!(vm = %name, vsock_port, %error, "forwarded connection failed");
+            }
+        });
+    }
+    Ok(())
+}
+
+fn proxy(mut tcp: TcpStream, mut guest: UnixStream) -> io::Result<()> {
+    let mut tcp_reader = tcp.try_clone()?;
+    let mut guest_writer = guest.try_clone()?;
+    let upload = thread::spawn(move || {
+        let result = io::copy(&mut tcp_reader, &mut guest_writer);
+        let _ = guest_writer.shutdown(Shutdown::Write);
+        result
+    });
+    let download = io::copy(&mut guest, &mut tcp);
+    let _ = tcp.shutdown(Shutdown::Write);
+    let upload = upload
+        .join()
+        .map_err(|_| io::Error::other("forward upload thread panicked"))?;
+    upload?;
+    download?;
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::socat_listen_arg;
-
     #[test]
-    fn forwarding_listener_is_loopback_only() {
-        assert_eq!(
-            socat_listen_arg(8080),
-            "TCP-LISTEN:8080,fork,reuseaddr,bind=127.0.0.1"
-        );
+    fn forwarding_vsock_port_is_stable() {
+        assert_eq!(mvm_agentd::vsock::PORT_FORWARD_BASE + 8080, 18080);
     }
 }
