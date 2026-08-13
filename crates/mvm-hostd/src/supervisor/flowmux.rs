@@ -407,9 +407,10 @@ impl FlowMuxSession {
 
         let (tx, rx) = std::sync::mpsc::channel();
         let writer = Arc::clone(&self.writer);
+        let registry_arc = Arc::clone(&self.registry);
         std::thread::Builder::new()
             .name(format!("flowmux-udp-{stream_id}"))
-            .spawn(move || run_udp_relay(stream_id, socket, writer, timeout, rx))
+            .spawn(move || run_udp_relay(stream_id, socket, writer, timeout, rx, registry_arc))
             .map_err(FlowMuxError::Transport)?;
 
         self.udp_associations
@@ -585,17 +586,9 @@ impl FlowMuxSession {
         let payload_end = payload_start + payload_len as usize;
         let payload = &self.read_buf[payload_start..payload_end];
         let delta = u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]);
-        let reg = lock_registry(&self.registry);
-        if reg.get(stream_id).is_none() {
-            return Err(FlowMuxError::FrameRefused(format!(
-                "WindowUpdate on unknown stream {stream_id}"
-            )));
-        }
-        // The registry currently tracks only guest credit. Host credit grants
-        // from the guest are accepted and ignored until per-direction host
-        // accounting is wired in.
-        let _ = delta;
-        Ok(())
+        lock_registry(&self.registry)
+            .grant_host_credit(stream_id, delta)
+            .map_err(|e| FlowMuxError::FrameRefused(e.to_string()))
     }
 
     fn reset_stream(&mut self, stream_id: u32) -> Result<(), FlowMuxError> {
@@ -777,6 +770,13 @@ fn run_tcp_relay(
                 break;
             }
             Ok(n) => {
+                if let Err(e) = lock_registry(&registry).consume_host_credit(stream_id, n as u32) {
+                    warn!(stream_id, error = %e, "FlowMux host credit exhausted");
+                    let _ =
+                        write_frame_to(&writer, Opcode::Reset, stream_id, b"host credit exhausted");
+                    host_half_closed.store(true, Ordering::Relaxed);
+                    break;
+                }
                 if write_frame_to(&writer, Opcode::Data, stream_id, &buf[..n]).is_err() {
                     warn!(stream_id, "FlowMux relay failed to send Data");
                     break;
@@ -806,6 +806,7 @@ fn run_udp_relay(
     writer: Arc<Mutex<UnixStream>>,
     timeout: Duration,
     rx: std::sync::mpsc::Receiver<UdpSendMsg>,
+    registry: Arc<Mutex<StreamRegistry>>,
 ) {
     if socket.set_read_timeout(Some(timeout)).is_err() {
         warn!(stream_id, "FlowMux UDP relay failed to set read timeout");
@@ -818,6 +819,13 @@ fn run_udp_relay(
             Ok((len, source)) => {
                 let mut payload = encode_udp_addr(source.ip(), source.port());
                 payload.extend_from_slice(&buf[..len]);
+                let frame_len = u32::try_from(payload.len()).unwrap_or(u32::MAX);
+                if let Err(e) = lock_registry(&registry).consume_host_credit(stream_id, frame_len) {
+                    warn!(stream_id, error = %e, "FlowMux UDP host credit exhausted");
+                    let _ =
+                        write_frame_to(&writer, Opcode::Reset, stream_id, b"host credit exhausted");
+                    break;
+                }
                 if write_frame_to(&writer, Opcode::UdpRecv, stream_id, &payload).is_err() {
                     break;
                 }
