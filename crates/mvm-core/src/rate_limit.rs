@@ -3,7 +3,6 @@
 use std::time::Instant;
 
 /// Lazily refilled token bucket with a one-second burst capacity.
-// allow(secret-debug): numeric rate-limit state only; not a secret.
 #[derive(Debug)]
 pub struct TokenBucket {
     tokens: f64,

@@ -82,6 +82,13 @@ pub struct RegistryLimits {
     pub udp_idle_timeout: Duration,
     /// Maximum distinct peers a single UDP association may communicate with.
     pub max_udp_peers: usize,
+    /// New TCP connection attempts per second (burst == rate). Zero disables
+    /// the limiter.
+    pub tcp_connect_rate: u32,
+    /// New UDP association opens per second (burst == rate). Zero disables.
+    pub udp_open_rate: u32,
+    /// DNS resolve requests per second (burst == rate). Zero disables.
+    pub dns_resolve_rate: u32,
 }
 
 impl Default for RegistryLimits {
@@ -93,6 +100,9 @@ impl Default for RegistryLimits {
             initial_credit: 64 * 1024,
             udp_idle_timeout: Duration::from_secs(60),
             max_udp_peers: 16,
+            tcp_connect_rate: 0,
+            udp_open_rate: 0,
+            dns_resolve_rate: 0,
         }
     }
 }

@@ -1243,11 +1243,12 @@ for detailed scope and acceptance criteria.
         guest-initiated `OpenTcp` with typed `Opened`/`Refused` replies,
         `OpenUdp`/`UdpSend`/`UdpRecv` associations, `Resolve`/`Resolved` DNS
         frames, per-direction host credit accounting, UDP idle expiry, per-
-        association peer bounds, and host-side integration tests for allowed/
-        denied TCP, UDP round-trip, DNS pinning, UDP idle expiry, and peer
-        bounds. Remaining: guest-side loopback service adapter, deletion of the
-        raw egress path, payload-free audit emission, and endpoint crash/
-        restart tests.
+        association peer bounds, per-class connection-rate limiting, payload-
+        free audit emission for TCP/UDP allows/denies and DNS resolves/refusals,
+        and host-side integration tests for allowed/denied TCP, UDP round-trip,
+        DNS pinning, UDP idle expiry, peer bounds, half-close, reset, and rate-
+        limit overflow. Remaining: guest-side loopback service adapter, deletion
+        of the raw egress path, and endpoint crash/restart tests.
   - [ ] Phase 4 — stream typed transformations (#2373)
   - [ ] Phase 5 — declared ingress on FlowMux (#2374)
   - [ ] Phase 6 — compatibility boundary (#2375)
