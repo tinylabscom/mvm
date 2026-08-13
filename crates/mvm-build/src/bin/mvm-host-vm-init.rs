@@ -115,7 +115,26 @@ mod workload;
 #[path = "mvm-host-vm-init/workload_proxy.rs"]
 mod workload_proxy;
 
+/// Builder-VM lifecycle hook runner. Mounts a workload rootfs and runs
+/// `/etc/mvm/hooks/before_build.sh` inside a chroot. Linux-only; the
+/// module is compiled on other hosts only for workspace ergonomics.
+#[cfg(target_os = "linux")]
+#[allow(dead_code)]
+#[path = "mvm-host-vm-init/builder_hooks.rs"]
+mod builder_hooks;
+
 fn main() -> ExitCode {
+    // Subcommand dispatch for builder-VM utility operations. When invoked
+    // as `mvm-host-vm-init run-before-build-hook <rootfs.ext4>`, mount the
+    // rootfs, run the before_build lifecycle hook inside a chroot, and
+    // return the hook's exit status. This keeps the hook runner in the
+    // same cross-compiled binary the builder VM already embeds at
+    // `/sbin/mvm-host-vm-init`.
+    #[cfg(target_os = "linux")]
+    if std::env::args().nth(1).as_deref() == Some("run-before-build-hook") {
+        return run_before_build_hook_subcommand();
+    }
+
     #[cfg(target_os = "linux")]
     {
         linux::run()
@@ -131,6 +150,21 @@ fn main() -> ExitCode {
              specs/plans/72-builder-vm-via-libkrun.md §W3."
         );
         ExitCode::FAILURE
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn run_before_build_hook_subcommand() -> ExitCode {
+    let rootfs = std::env::args().nth(2).unwrap_or_else(|| {
+        eprintln!("usage: mvm-host-vm-init run-before-build-hook <rootfs.ext4>");
+        std::process::exit(2);
+    });
+    match builder_hooks::run_before_build_hook(std::path::Path::new(&rootfs)) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("mvm-host-vm-init: run-before-build-hook failed: {e}");
+            ExitCode::FAILURE
+        }
     }
 }
 

@@ -591,25 +591,49 @@ mkdir -p /nix/var/nix/gcroots 2>/dev/null || true
 # Retire the pre-fix single root so it stops protecting a stale closure.
 rm -f /nix/var/nix/gcroots/mvm-warm-latest 2>/dev/null || true
 
-# Copy the artifacts the host expects into /out. A plain mkGuest
-# workload image is a *bare ext4 file* ($NIX_OUT is the rootfs
-# itself; libkrun boots its bundled libkrunfw kernel, so no vmlinux
-# is emitted). Builder / interactive images are a *directory* carrying
+# Resolve the rootfs source path and any kernel source path. A plain
+# mkGuest workload image is a bare ext4 file ($NIX_OUT is the rootfs
+# itself); builder / interactive images are a directory carrying
 # `vmlinux` + `rootfs.ext4`. Accept either `vmlinux` / `Image` /
 # `bzImage` for the kernel across flake conventions.
+ROOTFS_SRC=
+KERNEL_SRC=
 if [ -f "$NIX_OUT" ]; then
-    cp -L "$NIX_OUT" /out/rootfs.ext4
-else
-    if   [ -f "$NIX_OUT/vmlinux" ]; then cp -L "$NIX_OUT/vmlinux" /out/vmlinux
-    elif [ -f "$NIX_OUT/Image"   ]; then cp -L "$NIX_OUT/Image"   /out/vmlinux
-    elif [ -f "$NIX_OUT/bzImage" ]; then cp -L "$NIX_OUT/bzImage" /out/vmlinux
+    ROOTFS_SRC="$NIX_OUT"
+elif [ -d "$NIX_OUT" ]; then
+    if   [ -f "$NIX_OUT/vmlinux" ]; then KERNEL_SRC="$NIX_OUT/vmlinux"
+    elif [ -f "$NIX_OUT/Image"   ]; then KERNEL_SRC="$NIX_OUT/Image"
+    elif [ -f "$NIX_OUT/bzImage" ]; then KERNEL_SRC="$NIX_OUT/bzImage"
     fi
     if [ -f "$NIX_OUT/rootfs.ext4" ]; then
-        cp -L "$NIX_OUT/rootfs.ext4" /out/rootfs.ext4
-    else
-        echo "no rootfs.ext4 in nix build output at $NIX_OUT" >&2
-        exit 1
+        ROOTFS_SRC="$NIX_OUT/rootfs.ext4"
     fi
+fi
+
+if [ -z "$ROOTFS_SRC" ] || [ ! -f "$ROOTFS_SRC" ]; then
+    echo "no rootfs.ext4 in nix build output at $NIX_OUT" >&2
+    exit 1
+fi
+
+# Run the before_build lifecycle hook inside a writable copy of the
+# rootfs before the artifact is copied to /out. The hook is baked
+# into the rootfs at /etc/mvm/hooks/before_build.sh by
+# mkFunctionService; mvm-host-vm-init provides the builder-VM
+# consumer.
+BUILD_HOOK_ROOTFS="/tmp/mvm-rootfs-before-build.ext4"
+cp -L "$ROOTFS_SRC" "$BUILD_HOOK_ROOTFS"
+echo "mvm-builder-vm: running before_build hook" >&2
+if ! /sbin/mvm-host-vm-init run-before-build-hook "$BUILD_HOOK_ROOTFS"; then
+    hook_rc=$?
+    echo "mvm-builder-vm: before_build hook failed (exit $hook_rc)" >&2
+    rm -f "$BUILD_HOOK_ROOTFS"
+    exit $hook_rc
+fi
+cp -L "$BUILD_HOOK_ROOTFS" /out/rootfs.ext4
+rm -f "$BUILD_HOOK_ROOTFS"
+
+if [ -n "$KERNEL_SRC" ]; then
+    cp -L "$KERNEL_SRC" /out/vmlinux
 fi
 
 # Permissions for the host-side reader. Ignore failures —
@@ -1966,6 +1990,41 @@ mod tests {
         assert!(
             warm_idx < gc_idx,
             "warm gcroot must be registered before the GC tail"
+        );
+    }
+
+    #[test]
+    fn render_flake_cmd_sh_runs_before_build_hook_before_copying_artifact() {
+        let body = render_flake_cmd_sh(".", "default", false);
+        // The hook runner is invoked on a writable temp copy so the Nix
+        // store output is never modified in place.
+        assert!(
+            body.contains("/sbin/mvm-host-vm-init run-before-build-hook"),
+            "missing before_build hook runner invocation in:\n{body}"
+        );
+        assert!(
+            body.contains("/tmp/mvm-rootfs-before-build.ext4"),
+            "missing writable temp rootfs path in:\n{body}"
+        );
+        // The hook must run before the final rootfs is copied to /out.
+        let hook_idx = body
+            .find("/sbin/mvm-host-vm-init run-before-build-hook")
+            .expect("hook runner present");
+        let out_copy_idx = body
+            .find(r#"cp -L "$BUILD_HOOK_ROOTFS" /out/rootfs.ext4"#)
+            .expect("final rootfs copy present");
+        assert!(
+            hook_idx < out_copy_idx,
+            "before_build hook must run before /out/rootfs.ext4 is copied"
+        );
+        // A failed hook must fail the build, leaving no partial artifact.
+        assert!(
+            body.contains("mvm-builder-vm: before_build hook failed"),
+            "missing hook failure message in:\n{body}"
+        );
+        assert!(
+            body.contains(r#"rm -f "$BUILD_HOOK_ROOTFS""#),
+            "temp rootfs must be cleaned up on hook failure in:\n{body}"
         );
     }
 

@@ -205,10 +205,11 @@ in
     };
     # Lifecycle hook scripts. The bootScript
     # invokes `before_start.sh` before exec'ing PID 1's idle loop;
-    # `after_start.sh` is the readiness probe a future watchdog will
-    # poll; `before_stop.sh` runs at shutdown when wired by the agent;
-    # `before_build.sh` is rendered for parity but runs in the builder
-    # VM, whose consumer is not yet wired.
+    # `after_start.sh` is the readiness probe the worker pool polls;
+    # `before_stop.sh` runs at shutdown when wired by the agent;
+    # `before_build.sh` runs in the builder VM via
+    # `mvm-host-vm-init run-before-build-hook` before the rootfs is
+    # copied to /out.
     # `source =` (copy the script file), NOT `content =` (which would
     # writeText the store-PATH string as the file body — a 0755 file
     # whose only content is a bare /nix/store path with no shebang,
