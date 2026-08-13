@@ -130,7 +130,8 @@ complete; no unresolved capability gap.
       into `RunArgs`; consider flattening the wrapper in a follow-up slice).
 - [ ] Ensure the consolidated args can drive both the direct execution path
       and the `mvm-client::MvmClient::run_machine` facade method.
-- [ ] Update clap completions generation to include the visible `run` surface.
+- [x] Update clap completions generation to include the visible `run` surface
+      (done automatically now that `Commands::Run` is visible).
 - [x] Adjust tests that assumed `run` was hidden.
 
 **Acceptance:** `cargo test -p mvm-cli --lib` and `cargo clippy -p mvm-cli
