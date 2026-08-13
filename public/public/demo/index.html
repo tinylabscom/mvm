@@ -21,6 +21,7 @@
   #result.ok { background: #e6f4ea; color: #14532d; }
   #result.bad { background: #fde8e8; color: #7f1d1d; }
   .pane { background: #8881; padding: 0.75rem; border-radius: 6px; margin-top: 0.5rem; font-family: ui-monospace, monospace; font-size: 12px; }
+  .notice { margin-top: 1rem; padding: 0.75rem; border-radius: 6px; font-size: 13px; background: #8881; }
   footer { margin-top: 2rem; font-size: 12px; opacity: 0.7; }
 </style>
 </head>
@@ -43,7 +44,7 @@
       <option value="unbound">unbound — host admitted, secret not bound</option>
     </select>
     <label for="policy">Network policy (JSON)</label>
-    <textarea id="policy">{"mode":"closed","rules":[{"host":"api.openai.com","port":443}]}</textarea>
+    <textarea id="policy">{"type":"allowlist","rules":[{"host":"api.openai.com","port":443}]}</textarea>
     <button id="run">Run sandbox</button>
     <button id="run-wasi">Run real WASI fixture</button>
   </div>
@@ -58,7 +59,7 @@
 
 <div class="card" style="margin-top: 1rem;">
   <h2>4. Audit chain</h2>
-  <label for="chain">Pre-signed fixture chain (JSONL)</label>
+  <label for="chain">Audit chain (JSONL, one envelope per line)</label>
   <textarea id="chain"></textarea>
   <label for="pubkey">Verifying key (hex)</label>
   <input id="pubkey" placeholder="64 hex characters" />
@@ -67,11 +68,10 @@
   <div id="result" hidden></div>
 </div>
 
+<div id="capability-notice" class="notice" aria-live="polite"></div>
+
 <footer>
   Built from <code>web/mvm-demo/</code> over <code>mvm-contract</code>.
-  The browser is the wasm engine; the host <code>WasmBackend</code> is not
-  exercised. Egress decision, placeholder substitution, host-is-bound,
-  audit signing, and chain verification are the same code the host runs.
   The <em>Run real WASI fixture</em> button executes a tiny compiled
   <code>wasm32-wasip1</code> module in a Web Worker, with the same
   <code>mvm:egress</code> host import the Firecracker/libkrun/HVF wasm

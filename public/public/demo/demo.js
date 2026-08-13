@@ -1,19 +1,41 @@
 const $ = (id) => document.getElementById(id);
 
 const policies = {
-  allowed: '{"mode":"closed","rules":[{"host":"api.openai.com","port":443}]}',
-  denied: '{"mode":"closed","rules":[]}',
-  unbound: '{"mode":"closed","rules":[{"host":"api.openai.com","port":443}]}',
+  allowed: '{"type":"allowlist","rules":[{"host":"api.openai.com","port":443}]}',
+  denied: '{"type":"allowlist","rules":[]}',
+  unbound: '{"type":"allowlist","rules":[{"host":"api.openai.com","port":443}]}',
 };
 
 const worker = new Worker("./worker.js", { type: "module" });
 let msgId = 0;
 const pending = new Map();
 
+let readyResolve;
+const readyPromise = new Promise((resolve) => {
+  readyResolve = resolve;
+});
+
+function setCapabilityNotice(notice) {
+  const el = $("capability-notice");
+  if (el) el.textContent = notice;
+}
+
 worker.onmessage = (event) => {
-  const { id, ok, payload, error } = event.data;
-  const { resolve, reject } = pending.get(id);
+  const data = event.data;
+  if (data.type === "ready") {
+    if (data.verifyingKeyHex) {
+      $("pubkey").value = data.verifyingKeyHex;
+    }
+    setCapabilityNotice(data.capabilityNotice);
+    readyResolve();
+    return;
+  }
+
+  const { id, ok, payload, error } = data;
+  const handlers = pending.get(id);
+  if (!handlers) return;
   pending.delete(id);
+  const { resolve, reject } = handlers;
   if (ok) {
     resolve(payload);
   } else {
@@ -29,25 +51,34 @@ function post(type, payload) {
   });
 }
 
-await worker.ready;
+await readyPromise;
 
 $("scenario").addEventListener("change", (e) => {
   $("policy").value = policies[e.target.value];
 });
 
+function appendChainLine(line) {
+  const el = $("chain");
+  const text = el.value.trim();
+  el.value = text ? `${text}\n${JSON.stringify(line)}` : JSON.stringify(line);
+}
+
 $("run").addEventListener("click", async () => {
   const scenario = $("scenario").value;
   try {
-    const result = await post("runScenario", { scenario, policyJson: $("policy").value });
+    const result = await post("runScenario", {
+      scenario,
+      policyJson: $("policy").value,
+      timestamp: new Date().toISOString(),
+    });
+    if (!result.ok) {
+      throw new Error(result.error);
+    }
     $("module-view").textContent = result.module_view;
     $("destination-view").textContent =
       result.destination_view ?? "(request refused; destination never contacted)";
-    if (result.chain_line) {
-      $("chain").value = JSON.stringify(result.chain_line);
-      showResult(`audit_event: ${result.audit_event} — signed envelope generated`, true);
-    } else {
-      showResult(`audit_event: ${result.audit_event}`, true);
-    }
+    appendChainLine(result.chain_line);
+    showResult(`audit_event: ${result.audit_event}`, true);
   } catch (err) {
     showResult(err.message, false);
   }
@@ -95,9 +126,3 @@ function showResult(text, ok) {
   el.className = ok ? "ok" : "bad";
   el.textContent = text;
 }
-
-// Publish a deterministic verifying key so the visitor can verify a signed
-// envelope produced by the demo.  This is the public counterpart to the
-// private key baked into worker.js.
-$("pubkey").value =
-  "ff57575dc7af8bfc4d0837cc1ce2017b686a88145dc5579a958e3462fe9a908e";
