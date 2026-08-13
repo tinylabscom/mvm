@@ -2,6 +2,7 @@
 
 use anyhow::{Context, Result};
 use clap::{Args as ClapArgs, Subcommand};
+use std::io::Write;
 
 use crate::ui;
 
@@ -186,6 +187,12 @@ pub(in crate::commands) enum AuditAction {
         #[arg(long, default_value = "local")]
         tenant: String,
     },
+    /// Export audit events as W3C PROV-O Turtle for compliance reporting.
+    /// Read-only: does not emit new audit events.
+    Provenance {
+        #[command(subcommand)]
+        action: ProvenanceAction,
+    },
     /// Export chain-signed audit entries as offline-verifiable
     /// ExecutionReceipts. Read-only: does not emit new audit events.
     Receipts {
@@ -197,6 +204,23 @@ pub(in crate::commands) enum AuditAction {
     Transcript {
         #[command(subcommand)]
         action: super::transcript::TranscriptAction,
+    },
+}
+
+/// Subcommands under `mvmctl audit provenance`.
+#[derive(Subcommand, Debug, Clone)]
+pub(in crate::commands) enum ProvenanceAction {
+    /// Export audit events as W3C PROV-O Turtle for compliance reporting.
+    Export {
+        /// Tenant whose chain-signed log to read. Defaults to `"local"`.
+        #[arg(long, default_value = "local")]
+        tenant: String,
+        /// Output file. Defaults to stdout.
+        #[arg(long, short = 'o')]
+        output: Option<std::path::PathBuf>,
+        /// Export the local `mvmctl` audit log instead of the chain-signed tenant log.
+        #[arg(long)]
+        local: bool,
     },
 }
 
@@ -244,6 +268,13 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             json,
         } => audit_show(&tenant, &plan_id, json),
         AuditAction::Posture { json } => super::audit_posture::run(json),
+        AuditAction::Provenance { action } => match action {
+            ProvenanceAction::Export {
+                tenant,
+                output,
+                local,
+            } => audit_provenance_export(&tenant, output.as_deref(), local),
+        },
         AuditAction::Receipts { action } => match action {
             ReceiptsAction::Export {
                 tenant,
@@ -275,6 +306,57 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
 
 // ─────────────────────────────────────────────────────────────────
 // ─────────────────────────────────────────────────────────────────
+
+/// Export audit events as W3C PROV-O Turtle.
+///
+/// Reads either the chain-signed tenant log or the local mvmctl audit log,
+/// maps each entry to PROV-O activities/agents/entities, and writes Turtle
+/// to stdout or the requested output file.
+fn audit_provenance_export(
+    tenant: &str,
+    output: Option<&std::path::Path>,
+    local: bool,
+) -> Result<()> {
+    use std::io::BufReader;
+
+    let (reader, source_name): (Box<dyn std::io::BufRead>, &str) = if local {
+        let path = mvm_core::policy::audit::default_audit_log();
+        let file = std::fs::File::open(&path)
+            .with_context(|| format!("opening local audit log: {path}"))?;
+        (Box::new(BufReader::new(file)), "local audit log")
+    } else {
+        let dir = default_audit_dir().context("resolving audit directory")?;
+        let path = audit_path_for_tenant(&dir, tenant);
+        let file = std::fs::File::open(&path)
+            .with_context(|| format!("opening chain-signed audit log: {}", path.display()))?;
+        (Box::new(BufReader::new(file)), "tenant audit chain")
+    };
+
+    let mut output_writer: Box<dyn Write> = match output {
+        Some(path) => {
+            let file = std::fs::File::create(path)
+                .with_context(|| format!("creating output file: {}", path.display()))?;
+            Box::new(file)
+        }
+        None => Box::new(std::io::stdout()),
+    };
+
+    if local {
+        mvm_core::provenance::export_local_audit_log(reader, &mut output_writer)
+            .context("exporting local audit log to PROV-O")?;
+    } else {
+        mvm_core::provenance::export_tenant_audit_log(reader, &mut output_writer)
+            .context("exporting tenant audit log to PROV-O")?;
+    }
+
+    if output.is_none() {
+        // Ensure stdout ends with a newline when writing to a terminal.
+        writeln!(output_writer).ok();
+    }
+
+    ui::success(&format!("exported {source_name} to PROV-O Turtle"));
+    Ok(())
+}
 
 /// Export signed [`ExecutionReceipt`]s from the tenant's chain-signed
 /// audit log and render them.

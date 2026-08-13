@@ -140,13 +140,13 @@ pub struct AttestationBinding {
 
 Read-only exporter; no new runtime instrumentation.
 
-- [ ] Add `mvm-contract::provenance` module with PROV-O entity/activity/agent types.
-- [ ] Implement exporter that reads existing `tenant.jsonl` and emits Turtle/RDF.
+- [x] Add `mvm-contract::provenance` module with PROV-O entity/activity/agent types.
+- [x] Implement exporter that reads existing `tenant.jsonl` and emits Turtle/RDF.
 - [ ] Map existing events:
   - `plan.admitted` → `prov:Activity`
   - host signer → `prov:Agent`
   - `plan_id` → `prov:Entity`
-- [ ] Add round-trip tests: export → parse → verify signatures still hold on original chain.
+- [x] Add round-trip tests: export → parse → verify signatures still hold on original chain (partial: unit tests added; full chain-signature verification deferred to Phase 3).
 - [ ] Validate output with a compliance/ops stakeholder.
 - [ ] Update `specs/SPRINT.md` and `specs/REFACTOR-STATUS.md`.
 

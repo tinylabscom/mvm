@@ -2356,6 +2356,17 @@ change.
 
 ---
 
+## Plan 330 — Decision provenance layer
+
+Cross-sprint work tracked in `specs/plans/330-decision-provenance-layer.md`.
+
+- [x] Phase 0 — RFC/plan drafted and opened as PR #2455.
+- [x] Phase 1 — PROV-O export of existing audit events (`mvm-contract::provenance`, `mvm-core::provenance`, `mvmctl audit provenance export`).
+- [ ] Phase 2 — Enrich audit events with authorizer/rationale.
+- [ ] Phase 3 — `DecisionRecord` API and content-addressed store.
+- [ ] Phase 4 — Query API and causal chains.
+- [ ] Phase 5 — Optional standards interoperability.
+
 ## Appendix A — ADR consolidation clusters (~91 → ~15)
 
 | Canonical ADR (theme)                       | Merge these                                                                            |

@@ -111,6 +111,15 @@ for detailed scope and acceptance criteria.
 
 ## In-flight plans
 
+- [~] Plan 330 — Decision provenance layer
+  (`specs/plans/330-decision-provenance-layer.md`)
+  - [ ] Phase 0 — RFC and ADR approved
+  - [x] Phase 1 — PROV-O export of existing events
+  - [ ] Phase 2 — Enrich existing audit events with authorizer/rationale
+  - [ ] Phase 3 — DecisionRecord API and content-addressed store
+  - [ ] Phase 4 — Query API and causal chains
+  - [ ] Phase 5 — Optional standards interoperability
+
 - [~] Plan 325 — SDK sidecar reserved mount
   (`specs/plans/325-sdk-sidecar-reserved-mount.md`)
   - [x] Reserved SDK disk is excluded from generic user-volume activation
@@ -207,13 +216,22 @@ for detailed scope and acceptance criteria.
         prove no lifetime quota over a simulated 4 GiB transfer; prove active
         download credit prevents request-side idle eviction after 60 seconds;
         add the live documented pandas-install scenario
-  - [x] Pass all 446 `mvm-vmm` tests, the serial aggregate workspace suite,
+  - [x] Pass all 503 `mvm-vmm` tests, the serial aggregate workspace suite,
         workspace check, macOS workspace all-target Clippy, and the focused
-        x86_64 Linux cross-build
+        x86_64 and aarch64 Linux cross-builds
   - [x] Run Linux-native workspace Clippy/tests — CI test-linux and
-        lint-core passed on PR #2324; local x86_64 Linux cross-build
-        (`cargo zigbuild --target x86_64-unknown-linux-gnu -p mvm-vmm
-    --lib --all-features`) passes on current `main`
+        lint-core passed on PR #2324; local x86_64 and aarch64 Linux
+        cross-builds (`cargo zigbuild --target x86_64-unknown-linux-gnu`
+        and `--target aarch64-unknown-linux-gnu -p mvm-vmm --lib
+        --all-features`) pass on current `main`. Local Linux-native
+        builder-VM gates are tracked in Plan 316.
+
+- [ ] Plan 316 — Local Linux builder-VM gates via `mvmctl __builder-shell-job`
+      (`specs/plans/316-builder-vm-shell-job-runner.md`)
+  - [ ] Add hidden `mvmctl __builder-shell-job` command and example scripts
+  - [ ] Run `mvm-vmm` tests and crate-level Clippy inside the HVF/libkrun
+        builder VM
+  - [ ] Update Plan 315 and `specs/SPRINT.md` to reference this plan
 
 - [x] Plan 318 — span-timing profiling
       (`specs/plans/318-span-timing-profiling.md`)
@@ -282,7 +300,7 @@ for detailed scope and acceptance criteria.
   - [ ] Run the exact Linux Security workflow, merge the fix, and observe a
         clean scheduled or release run before closing the issue
 - [~] Plan 300 — 31-issue reconciliation and closeout
-      (`specs/plans/300-open-issue-closeout.md`)
+  (`specs/plans/300-open-issue-closeout.md`)
   - [x] Inventory all 39 issues open at the 2026-08-13 snapshot against
         current `origin/main`, issue comments, owning plans, and workflow state
   - [x] Close eight issues on 2026-08-13: #2165, #2289, #2333, #2423 as
@@ -776,11 +794,16 @@ for detailed scope and acceptance criteria.
         `web/audit-verify/`, fix the stale `mvm-verify` refs in ADR-031, add
         `mvmctl audit pubkey`
 - [x] Plan 320 — A live wasm sandbox demo on the website
-      (`specs/plans/320-wasm-browser-demo.md`) — PR #2429 merged to `main`.
-      E1, E2, and E3 shipped; the browser-engine sandbox at `/demo` + landing
-      teaser shipped against the redesigned landing page. Relocates the egress
-      decision (`projection.rs`), placeholder substitution, and audit-entry
-      construction/chain-signing into `mvm-contract` so host and browser run
+      (`specs/plans/320-wasm-browser-demo.md`) — PR #2429 merged to `main`;
+      hardening items closed in #2441. This follow-up fix (#2447) adds the
+      wasm build to `.github/workflows/pages.yml` and corrects
+      `web/mvm-demo/build.sh` to preserve the `pkg/` subdirectory when staging,
+      so the live `/demo` route serves the bundle. Browser-engine sandbox at
+      `/demo`, landing teaser, Web Worker ownership, curated `wasm32-wasip1`
+      fixtures, Rust fixture-parity tests, and `wasm-opt -Oz` + gzipped size
+      budget in the Linux wasm lane. Egress decision, placeholder substitution,
+      and audit-entry construction/chain signing are relocated into
+      `mvm-contract` so host and browser run
       identical code. Claim-free by ADR-024 §3; adds no claim-catalog witness.
   - [x] E2.1 — the placeholder leaf relocated as
         `mvm_contract::substitution`; the constant hard-renamed to
@@ -835,13 +858,6 @@ for detailed scope and acceptance criteria.
         to sign real audit entries.
   - [ ] Does **not** retire `web/audit-verify/` (no Merkle inclusion) — B5 and
         `mvmctl audit pubkey` remain plan 301's
-- [ ] Plan 329 — Browser-tier microVM demo (`specs/plans/329-browser-wasm-backend-demo.md`)
-      — in progress on `feat/329-browser-wasm-backend`. Extends Plan 320 with a
-      `wasm32-wasip1` guest that boots, provides a shell, and delegates `fetch`
-      to a host `mvm:egress` import gated by `mvm-contract` `NetworkPolicy`.
-      Audit entries (`vm.start`, `egress.allow`, `egress.deny`, `vm.stop`) are
-      signed in the Worker and rendered live. E2E Playwright test passes; remote
-      node bridge (Slice 5) remains open.
 - [ ] Plan 321 — wasm as a workload format inside a real microVM
       (`specs/plans/321-wasm-in-microvm-workload-format.md`) — design, not
       started. ADR-024's sanctioned engine-in-guest path: a wasm workload
@@ -1044,7 +1060,7 @@ for detailed scope and acceptance criteria.
         test fidelity, not liveness
   - [x] T17 — the operator surface, landed with a live entrypoint resolver in
         the same change as the plan required. `machine run --entrypoint --stdin
-    -` opens the route under the plan that boot was admitted under, pumps
+-` opens the route under the plan that boot was admitted under, pumps
         the caller's stdin through the gate in acceptance order on its own
         thread, refreshes the lease on a ticker while the writer is idle, and
         closes the workload's stdin on the caller's EOF. The grant is
@@ -1075,9 +1091,9 @@ for detailed scope and acceptance criteria.
   - [x] Core boot contract: `ActivateEnvironment` over the authenticated
         vsock session, `ActivationState` gate, PID-1 agent with mount
         library + uid-901 drop (#1914)
-  - [x] Runner/driver adoption: QEMU unified runner (#1931),
-        Docker dev-tier (#1933, removed by Plan 329), Wasm activation
-        (#1936), Apple Container kernel on HVF (#1968)
+  - [x] Runner/driver adoption: QEMU unified runner (#1931), Docker
+        dev-tier (#1933), Wasm activation (#1936), Apple Container kernel
+        on HVF (#1968)
   - [x] Activation agent-readiness retry on the wire (#1985)
   - [x] Deterministic cargo initramfs replaces the Nix initramfs build
         (#1996); attestation stays the content hash + sidecar contract
@@ -1207,7 +1223,7 @@ for detailed scope and acceptance criteria.
         networking; `specs/refactor/03-networking.md` corrected from "the raw
         packet path is deleted" to the actual two-path state; ADR-001's tier
         matrix and claim-10 section qualified; `xtask
-    check-l3-expansion-freeze` added as a temporary shrink-only ratchet
+check-l3-expansion-freeze` added as a temporary shrink-only ratchet
         over `L3Vsock`/`raw_ip_stack`/`NetworkControl`/`NetworkData`/
         `spawn_netd`/`host_datapath` (29 allowlist entries); synthesis,
         admission, and CLI preflight refuse `raw_ip_stack=true`/`L3Vsock` with
@@ -1229,31 +1245,19 @@ for detailed scope and acceptance criteria.
         FlowMux, with tests for replay, tampering, wrong identity, and counter
         exhaustion. Remaining: the perf harness + baselines.
   - [x] Phase 2 — the one authenticated endpoint (#2371). `GuestService::NetworkFlow`
-    now names the port-5253 channel; the endpoint binary, proxy, spawner, and
-    test files are renamed to `mvm-network-endpoint`/`network_endpoint_*`;
-    `mvm-hostd::supervisor::flowmux` landed the authenticated FlowMux session
-    acceptor (`FlowMuxSession::accept`, `serve`, `Hello`/`HelloAck`, `GoAway`
-    for unimplemented flows) and bounded per-stream registries
-    (`flowmux::registry`) with unit tests for parity, ceilings, state
-    transitions, and credit accounting. The acceptor is wired into the
-    `mvm-network-endpoint` binary (`EgressMode::FlowMux`,
-    `EndpointConfig::flowmux_identity`, `serve_flowmux`) and the spawner emits
-    the identity on stdin. Backend witness tests in `mvm-vmm::host::spec_map`
-    and the Firecracker/HVF/libkrun driver modules prove exactly one
-    `NetworkFlow` service and no L3 services per granted workload.
-  - [~] Phase 3 — converge egress TCP, UDP, and DNS (#2372). Landed:
-        guest-initiated `OpenTcp` with typed `Opened`/`Refused` replies,
-        `OpenUdp`/`UdpSend`/`UdpRecv` associations, `Resolve`/`Resolved` DNS
-        frames, per-direction host credit accounting, UDP idle expiry, per-
-        association peer bounds, per-class connection-rate limiting, payload-
-        free audit emission for TCP/UDP allows/denies and DNS resolves/refusals,
-        and host-side integration tests for allowed/denied TCP, UDP round-trip,
-        DNS pinning, UDP idle expiry, peer bounds, half-close, reset, and rate-
-        limit overflow. Guest-side `FlowMuxClient` / `FlowMuxReconnectClient`,
-        `FlowMuxStream`, `FlowMuxUdpSocket`, async frame pump, and unit tests
-        are implemented in `crates/mvm-agentd/src/flowmux.rs`. Remaining: wire
-        the guest loopback HTTP/SOCKS/DNS adapters to the shared client, delete
-        the raw egress path, and add endpoint crash/restart tests.
+        now names the port-5253 channel; the endpoint binary, proxy, spawner, and
+        test files are renamed to `mvm-network-endpoint`/`network_endpoint_*`;
+        `mvm-hostd::supervisor::flowmux` landed the authenticated FlowMux session
+        acceptor (`FlowMuxSession::accept`, `serve`, `Hello`/`HelloAck`, `GoAway`
+        for unimplemented flows) and bounded per-stream registries
+        (`flowmux::registry`) with unit tests for parity, ceilings, state
+        transitions, and credit accounting. The acceptor is wired into the
+        `mvm-network-endpoint` binary (`EgressMode::FlowMux`,
+        `EndpointConfig::flowmux_identity`, `serve_flowmux`) and the spawner emits
+        the identity on stdin. Backend witness tests in `mvm-vmm::host::spec_map`
+        and the Firecracker/HVF/libkrun driver modules prove exactly one
+        `NetworkFlow` service and no L3 services per granted workload.
+  - [ ] Phase 3 — converge egress TCP, UDP, and DNS (#2372)
   - [ ] Phase 4 — stream typed transformations (#2373)
   - [ ] Phase 5 — declared ingress on FlowMux (#2374)
   - [ ] Phase 6 — compatibility boundary (#2375)
@@ -1357,7 +1361,7 @@ for detailed scope and acceptance criteria.
   - [x] Linux cross-compile stubs for Hypervisor.framework symbols
   - [x] Console-streaming test isolated with temp `MVM_HOME`
   - [x] `cargo test -p mvm-runtime` green; `cargo clippy -p mvm-runtime
-    -p mvm-build -- -D warnings` clean on macOS and Linux builder VM
+-p mvm-build -- -D warnings` clean on macOS and Linux builder VM
   - [x] Full workspace test run on x86_64 Linux builder VM —
         `cargo nextest run --workspace`: 10372 passed, 19 skipped (4 threads)
 
