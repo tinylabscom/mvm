@@ -42,7 +42,7 @@ export function WhyMicrovm() {
           </ul>
         </div>
 
-        <Reveal>
+        <Reveal className="mx-auto w-full max-w-[18rem] sm:max-w-[22rem] lg:max-w-none">
           <ContainmentDiagram />
         </Reveal>
       </div>
