@@ -92,7 +92,7 @@ mentions it.
 | #2281 | Partial ext4 baseline; candidate comparison/decision remains | Performance phase |
 | #2292 | Host-side overhead mostly fixed; percentile gate remains | Performance phase |
 | #2299 | Open; cross-backend phase accounting not comparable | Performance phase |
-| #2307 | Known filter fixed; fail-open configuration gate remains | CI phase |
+| #2307 | `xtask check-nextest-groups` implemented; CI wiring remains | CI phase |
 | #2318 | Open; receipt durability and head recovery decision remains | Audit/performance phase |
 | #2336 | Open; Firecracker post-restore handshake failure | Warm-launch phase |
 | #2347 | Open; NVMe baseline for launch contract | Performance phase |
@@ -170,7 +170,7 @@ mentions it.
       tenant lock, and prove concurrent append ordering. Re-measure the KVM
       `emit: receipt` span against 100.7 ms and require at most one durability
       barrier per append unless the written model proves two are necessary.
-- [ ] **#2307 — gate nextest override filters.** Add
+- [x] **#2307 — gate nextest override filters.** Add
       `xtask check-nextest-groups` using `cargo nextest list -E` for each
       configured override, reject nonexistent workspace packages and empty
       filter matches, register it in xtask help/available commands and CI, and

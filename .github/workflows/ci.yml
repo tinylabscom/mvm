@@ -529,6 +529,9 @@ jobs:
       - name: Build
         run: cargo build --all-targets
 
+      - name: Validate nextest override filters
+        run: cargo run -p xtask -- check-nextest-groups
+
       - name: xtask man-page tests
         # gen-man lives behind xtask's off-by-default `man` feature. It pulls
         # mvm-cli and its build script, so exercise it on Test's already-warm

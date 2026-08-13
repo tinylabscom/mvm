@@ -237,6 +237,9 @@ jobs:
       - name: Build
         run: cargo build --all-targets
 
+      - name: Validate nextest override filters
+        run: cargo run -p xtask -- check-nextest-groups
+
       - name: Run tests
         run: cargo nextest run --workspace --all-targets --profile ci
 
