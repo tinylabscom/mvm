@@ -838,6 +838,13 @@ for detailed scope and acceptance criteria.
         to sign real audit entries.
   - [ ] Does **not** retire `web/audit-verify/` (no Merkle inclusion) — B5 and
         `mvmctl audit pubkey` remain plan 301's
+- [ ] Plan 329 — Browser-tier microVM demo (`specs/plans/329-browser-wasm-backend-demo.md`)
+      — in progress on `feat/329-browser-wasm-backend`. Extends Plan 320 with a
+      `wasm32-wasip1` guest that boots, provides a shell, and delegates `fetch`
+      to a host `mvm:egress` import gated by `mvm-contract` `NetworkPolicy`.
+      Audit entries (`vm.start`, `egress.allow`, `egress.deny`, `vm.stop`) are
+      signed in the Worker and rendered live. E2E Playwright test passes; remote
+      node bridge (Slice 5) remains open.
 - [ ] Plan 321 — wasm as a workload format inside a real microVM
       (`specs/plans/321-wasm-in-microvm-workload-format.md`) — design, not
       started. ADR-024's sanctioned engine-in-guest path: a wasm workload
