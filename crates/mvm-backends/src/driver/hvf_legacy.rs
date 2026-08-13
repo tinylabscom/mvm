@@ -197,12 +197,12 @@ pub fn spawn_hvf_gating_endpoint_if_needed(
     network_policy: &mvm_core::policy::network_policy::NetworkPolicy,
     config_tenant: &str,
 ) -> Result<(
-    mvm_vmm::host::substitution_spawn::EndpointGuard,
+    mvm_vmm::host::network_endpoint_spawn::EndpointGuard,
     Option<PathBuf>,
 )> {
     use mvm_core::policy::RedactionPolicy;
-    use mvm_vmm::host::substitution_spawn::{
-        EndpointGuard, EndpointTransport, SubstitutionSpawnParams, spawn_substitution_endpoint,
+    use mvm_vmm::host::network_endpoint_spawn::{
+        EndpointGuard, EndpointTransport, SubstitutionSpawnParams, spawn_network_endpoint,
     };
 
     if !hvf_endpoint_needed(network_policy, state_dir) {
@@ -225,8 +225,8 @@ pub fn spawn_hvf_gating_endpoint_if_needed(
             },
         ),
     };
-    let socket = mvm_core::config::vm_substitution_endpoint_socket(vm_name);
-    spawn_substitution_endpoint(SubstitutionSpawnParams {
+    let socket = mvm_core::config::vm_network_endpoint_socket(vm_name);
+    spawn_network_endpoint(SubstitutionSpawnParams {
         vm_name,
         state_dir,
         tenant,
@@ -243,6 +243,7 @@ pub fn spawn_hvf_gating_endpoint_if_needed(
         raw_egress: secrets.is_empty(),
         resolver_remote: None,
         binding_store_dir: None,
+        flowmux_identity: None,
     })?;
     Ok((EndpointGuard::new(vm_name), Some(socket)))
 }

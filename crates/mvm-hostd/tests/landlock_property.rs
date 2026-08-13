@@ -1,6 +1,6 @@
 //! Landlock property test (`mvm-jailer-lite`).
 //!
-//! Same-process test: applies `ConfinementSpec::substitution_endpoint`
+//! Same-process test: applies `ConfinementSpec::network_endpoint`
 //! confinement, writes inside the spec's `audit_dir` (must succeed
 //! — the rw_bridge_access grant covers `WriteFile` + `MakeReg`)
 //! and writes to `/tmp` outside the ruleset (must fail with
@@ -35,7 +35,7 @@ fn landlock_denies_paths_outside_ruleset() {
     let binding_dir = "/tmp/mvm-landlock-probe-bindings";
     std::fs::create_dir_all(secret_dir).ok();
     std::fs::create_dir_all(binding_dir).ok();
-    let spec = ConfinementSpec::substitution_endpoint(
+    let spec = ConfinementSpec::network_endpoint(
         secret_dir.into(),
         binding_dir.into(),
         audit_dir.into(),

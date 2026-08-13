@@ -192,7 +192,7 @@ pub fn stop_vm(name: &str) -> Result<()> {
     // are best-effort + idempotent (no-op when the VM carried no secrets). The
     // substitution sidecars live under `vm_state_dir(name)`, not the workspace
     // `abs_dir`. Mirrors qemu.rs ordering (reap-before-not-running-return).
-    mvm_vmm::host::substitution_spawn::reap_substitution_endpoint(
+    mvm_vmm::host::network_endpoint_spawn::reap_network_endpoint(
         &mvm_core::config::vm_state_dir(name),
         name,
     );

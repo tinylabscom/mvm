@@ -66,7 +66,7 @@ final-status-level = "flaky"
 process-handshake = { max-threads = 4 }
 
 [[profile.default.overrides]]
-filter = 'package(mvm-vmm) and (test(/substitution_spawn::/) or test(/broker_services_spawn::/))'
+filter = 'package(mvm-vmm) and (test(/network_endpoint_spawn::/) or test(/broker_services_spawn::/))'
 test-group = "process-handshake"
 
 [[profile.default.overrides]]
@@ -74,7 +74,7 @@ filter = 'package(mvm-hostd) and (binary(host_agent_restart) or binary(per_tenan
 test-group = "process-handshake"
 
 [[profile.ci.overrides]]
-filter = 'package(mvm-vmm) and (test(/substitution_spawn::/) or test(/broker_services_spawn::/))'
+filter = 'package(mvm-vmm) and (test(/network_endpoint_spawn::/) or test(/broker_services_spawn::/))'
 test-group = "process-handshake"
 
 [[profile.ci.overrides]]

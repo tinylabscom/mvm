@@ -21,7 +21,7 @@ impl<D: VmmDriver + 'static, S: EndpointSpawner + 'static, B: BrokerRegistrar + 
 
         let endpoint_started = Instant::now();
         let state_dir = vm_state_dir(&id.0);
-        reap_substitution_endpoint(&state_dir, &id.0);
+        reap_network_endpoint(&state_dir, &id.0);
         mvm_vmm::host::netd_spawn::reap_netd(&state_dir);
         mvm_vmm::host::broker_services_spawn::reap_broker_services(&state_dir);
         mvm_vmm::host::host_agent_spawn::reap_host_agent_services_from_state(&state_dir, &id.0);

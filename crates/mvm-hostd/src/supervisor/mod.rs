@@ -79,7 +79,16 @@ pub mod names_gazetteer;
 // Observers consume `&FlowEvent` references inside `signer_task`
 // (fan-out before chain signing). Host-allowlisted via
 // `~/.mvm/observers/allowlist.toml` (mode 0600).
+/// Host substitution endpoint request preparation (placeholder → real
+/// credential, binding-checked). The forward leg + the guest-facing
+/// listener are separate transport steps.
+pub mod flowmux;
 pub mod network;
+/// The per-VM substitution endpoint subprocess library half: the
+/// stdin config contract + store-opening/service assembly. The
+/// `mvm-network-endpoint` bin is the process wrapper.
+pub mod network_endpoint;
+pub mod network_endpoint_proxy;
 pub mod pii_redactor;
 pub mod policy_tool_gate;
 pub mod proxy;
@@ -98,14 +107,6 @@ pub mod secrets_scanner;
 pub mod sensitive_detector;
 /// Policy-gated SOCKS5 UDP Associate relay over the egress vsock stream.
 pub mod socks5_udp;
-/// The per-VM substitution endpoint subprocess library half: the
-/// stdin config contract + store-opening/service assembly. The
-/// `mvm-substitution-endpoint` bin is the process wrapper.
-pub mod substitution_endpoint;
-/// Host substitution endpoint request preparation (placeholder → real
-/// credential, binding-checked). The forward leg + the guest-facing
-/// listener are separate transport steps.
-pub mod substitution_proxy;
 /// Transparent egress terminator primitives: original destination
 /// recovery after nft REDIRECT, plus the future forward/substitute
 /// legs (orig_dst is the only piece here now).

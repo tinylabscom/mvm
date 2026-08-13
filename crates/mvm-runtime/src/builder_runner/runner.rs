@@ -19,8 +19,8 @@ use mvm_core::vm_backend::VmStatus;
 
 use super::spec::{BuilderSpecInputs, builder_spec};
 use crate::driver::VmmDriver;
-use crate::substitution_spawn::{
-    EndpointGuard, EndpointTransport, SubstitutionSpawnParams, spawn_substitution_endpoint,
+use crate::network_endpoint_spawn::{
+    EndpointGuard, EndpointTransport, SubstitutionSpawnParams, spawn_network_endpoint,
 };
 
 /// The minimum input-disk size; the disk grows past this to hold the packed
@@ -140,7 +140,7 @@ impl<D: VmmDriver + 'static> BuilderRunner<D> {
         });
 
         let builder_policy = NetworkPolicy::trusted_build_egress();
-        spawn_substitution_endpoint(SubstitutionSpawnParams {
+        spawn_network_endpoint(SubstitutionSpawnParams {
             vm_name: b.name,
             state_dir: &state_dir,
             tenant: "builder",
@@ -155,6 +155,7 @@ impl<D: VmmDriver + 'static> BuilderRunner<D> {
             raw_egress: true,
             resolver_remote: None,
             binding_store_dir: None,
+            flowmux_identity: None,
         })?;
         let mut endpoint_guard = EndpointGuard::new(b.name);
 
@@ -205,7 +206,7 @@ mod tests {
     /// shell stub.
     ///
     /// The stub is not a convenience: without it the run spawns the real
-    /// `mvm-substitution-endpoint`, which is an `mvm-hostd` binary. A
+    /// `mvm-network-endpoint`, which is an `mvm-hostd` binary. A
     /// package-scoped `cargo nextest run -p mvm-runtime` never builds it,
     /// so a test that omits the stub passes only when something else in
     /// the same target dir happened to build another package's binary.

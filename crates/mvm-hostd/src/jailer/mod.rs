@@ -50,7 +50,7 @@ pub struct ConfinementSpec {
 }
 
 impl ConfinementSpec {
-    /// Canonical spec for `mvm-substitution-endpoint` — the per-VM process
+    /// Canonical spec for `mvm-network-endpoint` — the per-VM process
     /// that holds the workload's decrypted secrets AND parses untrusted guest
     /// bytes over vsock/UDS. Confining it bounds the blast radius of a parser
     /// compromise: a hijacked endpoint can read only its own tenant's stores
@@ -98,7 +98,7 @@ impl ConfinementSpec {
     /// there is nothing narrower to add for AF_UNIX specifically. The
     /// confinement narrowing for `Remote` is entirely a Landlock (path)
     /// concern.
-    pub fn substitution_endpoint(
+    pub fn network_endpoint(
         secret_store_dir: PathBuf,
         binding_store_dir: PathBuf,
         audit_dir: PathBuf,
@@ -179,7 +179,7 @@ fn existing_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
 /// process on any error — there is no `disengage` API in either
 /// kernel LSM, and a half-confined process running attacker-influenced
 /// code is strictly worse than a confined one. The
-/// `mvm-substitution-endpoint` honours this contract by returning the error
+/// `mvm-network-endpoint` honours this contract by returning the error
 /// up to `main`, which logs and exits nonzero; the supervisor turns that exit
 /// into a VM teardown.
 #[cfg(target_os = "linux")]
@@ -216,7 +216,7 @@ mod tests {
     /// would let a compromised endpoint replace the key it signs with, and
     /// every existing assertion would still pass.
     #[test]
-    fn substitution_endpoint_spec_keeps_the_signer_key_read_only() {
+    fn network_endpoint_spec_keeps_the_signer_key_read_only() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let secrets = tmp.path().join("secrets");
         let bindings = tmp.path().join("bindings");
@@ -228,7 +228,7 @@ mod tests {
 
         // `None` resolver backend: this test is about the key grant, and a
         // resolver socket would add an unrelated write path.
-        let spec = ConfinementSpec::substitution_endpoint(
+        let spec = ConfinementSpec::network_endpoint(
             secrets.clone(),
             bindings.clone(),
             audit.clone(),
@@ -261,7 +261,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn confined_role_allowlist_includes_required_syscalls() {
-        let spec = ConfinementSpec::substitution_endpoint(
+        let spec = ConfinementSpec::network_endpoint(
             "/tmp/secrets".into(),
             "/tmp/bindings".into(),
             "/tmp/audit".into(),
@@ -275,7 +275,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn confined_role_allowlist_rejects_dangerous_syscalls() {
-        let spec = ConfinementSpec::substitution_endpoint(
+        let spec = ConfinementSpec::network_endpoint(
             "/tmp/secrets".into(),
             "/tmp/bindings".into(),
             "/tmp/audit".into(),
@@ -290,12 +290,12 @@ mod tests {
     }
 
     #[test]
-    fn substitution_endpoint_spec_grants_read_on_stores() {
+    fn network_endpoint_spec_grants_read_on_stores() {
         // Use real existing dirs so they survive the `existing_paths` filter;
         // the binary's own crate manifest dir is guaranteed present.
         let store = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let bindings = store.clone();
-        let spec = ConfinementSpec::substitution_endpoint(
+        let spec = ConfinementSpec::network_endpoint(
             store.clone(),
             bindings.clone(),
             store.clone(),
@@ -313,11 +313,11 @@ mod tests {
     }
 
     #[test]
-    fn substitution_endpoint_spec_grants_audit_dir_write_and_keys_read() {
+    fn network_endpoint_spec_grants_audit_dir_write_and_keys_read() {
         // The audit recorder appends to the audit dir and reads the signer key,
         // so the audit dir is read-write and the keys dir readable.
         let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let spec = ConfinementSpec::substitution_endpoint(
+        let spec = ConfinementSpec::network_endpoint(
             dir.clone(),
             dir.clone(),
             dir.clone(),
@@ -331,11 +331,11 @@ mod tests {
     }
 
     #[test]
-    fn substitution_endpoint_spec_drops_nonexistent_paths() {
+    fn network_endpoint_spec_drops_nonexistent_paths() {
         // A bogus store dir is filtered out — Landlock's `open` on a missing
         // path fails closed, which would abort an otherwise-healthy endpoint.
         let missing = PathBuf::from("/definitely/not/a/real/store/dir/xyzzy");
-        let spec = ConfinementSpec::substitution_endpoint(
+        let spec = ConfinementSpec::network_endpoint(
             missing.clone(),
             missing.clone(),
             missing.clone(),
@@ -352,9 +352,9 @@ mod tests {
     /// identical to before the resolver-UDS grant existed — no socket path
     /// anywhere in either grant set.
     #[test]
-    fn substitution_endpoint_spec_local_backend_grants_no_socket() {
+    fn network_endpoint_spec_local_backend_grants_no_socket() {
         let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let spec = ConfinementSpec::substitution_endpoint(
+        let spec = ConfinementSpec::network_endpoint(
             dir.clone(),
             dir.clone(),
             dir.clone(),
@@ -372,10 +372,10 @@ mod tests {
     /// connect + read/write on that ONE socket — the exact extra grant this
     /// task adds, and nothing more.
     #[test]
-    fn substitution_endpoint_spec_remote_backend_grants_resolver_uds() {
+    fn network_endpoint_spec_remote_backend_grants_resolver_uds() {
         let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let uds = dir.join("Cargo.toml");
-        let spec = ConfinementSpec::substitution_endpoint(
+        let spec = ConfinementSpec::network_endpoint(
             dir.clone(),
             dir.clone(),
             dir.clone(),
@@ -400,10 +400,10 @@ mod tests {
     /// empty grant that lets confinement "succeed" while leaving `Remote`
     /// unable to resolve anything.
     #[test]
-    fn substitution_endpoint_spec_keeps_resolver_uds_even_if_missing() {
+    fn network_endpoint_spec_keeps_resolver_uds_even_if_missing() {
         let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let missing = PathBuf::from("/definitely/not/a/real/resolver/socket/xyzzy.sock");
-        let spec = ConfinementSpec::substitution_endpoint(
+        let spec = ConfinementSpec::network_endpoint(
             dir.clone(),
             dir.clone(),
             dir.clone(),
@@ -421,9 +421,9 @@ mod tests {
     /// path needs them) and the dangerous names still absent.
     #[cfg(target_os = "linux")]
     #[test]
-    fn substitution_endpoint_allowlist_covers_tls_and_runtime() {
+    fn network_endpoint_allowlist_covers_tls_and_runtime() {
         let store = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let spec = ConfinementSpec::substitution_endpoint(
+        let spec = ConfinementSpec::network_endpoint(
             store.clone(),
             store.clone(),
             store.clone(),
@@ -445,9 +445,9 @@ mod tests {
 
     #[cfg(not(target_os = "linux"))]
     #[test]
-    fn substitution_endpoint_allowlist_empty_off_linux() {
+    fn network_endpoint_allowlist_empty_off_linux() {
         let store = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let spec = ConfinementSpec::substitution_endpoint(
+        let spec = ConfinementSpec::network_endpoint(
             store.clone(),
             store.clone(),
             store.clone(),

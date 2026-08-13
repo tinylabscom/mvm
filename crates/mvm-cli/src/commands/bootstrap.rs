@@ -97,7 +97,7 @@ mod tests {
     fn builder_egress_supervisor_arms_parent_watchdog_before_spawn() {
         let watchdog_armed = Cell::new(false);
         let args = BuilderEgressSupervisorArgs {
-            endpoint: PathBuf::from("/definitely/missing/mvm-substitution-endpoint"),
+            endpoint: PathBuf::from("/definitely/missing/mvm-network-endpoint"),
         };
 
         let error = run_builder_egress_supervisor_inner(&args, || watchdog_armed.set(true))

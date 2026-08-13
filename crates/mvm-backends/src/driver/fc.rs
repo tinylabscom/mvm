@@ -1165,10 +1165,27 @@ mod tests {
     fn workload_channels() -> Vec<VsockPort> {
         vec![
             host_dials(GuestService::MachineControl, "/run/agent.sock"),
-            guest_dials(GuestService::Substitution, "/run/egress.sock"),
+            guest_dials(GuestService::NetworkFlow, "/run/egress.sock"),
             guest_dials(GuestService::Broker, "/run/broker.sock"),
             guest_dials(GuestService::WorkloadExit, "/state/w/workload.exit"),
         ]
+    }
+
+    #[test]
+    fn workload_channels_carry_exactly_one_network_flow_and_no_l3() {
+        let ports = workload_channels();
+        let mut services: Vec<_> = ports.iter().map(|p| p.service).collect();
+        services.sort();
+        let expected = [
+            GuestService::MachineControl,
+            GuestService::WorkloadExit,
+            GuestService::Broker,
+            GuestService::NetworkFlow,
+        ];
+        assert_eq!(
+            services, expected,
+            "workload channels must contain exactly one NetworkFlow and no retired L3 services"
+        );
     }
 
     fn spec_with(kernel: KernelImage, vsock: Vec<VsockPort>, blocks: Vec<BlockDev>) -> VmmSpec {
@@ -1403,7 +1420,7 @@ mod tests {
     fn config_threads_cmdline_verbatim_and_configures_no_nic() {
         let mut spec = spec_with(
             KernelImage::Path("/img/vmlinux".into()),
-            vec![guest_dials(GuestService::Substitution, "/run/egress.sock")],
+            vec![guest_dials(GuestService::NetworkFlow, "/run/egress.sock")],
             vec![ro_block("/img/rootfs.ext4", 0)],
         );
         spec.cmdline = "  console=ttyS0 root=/dev/vda mvm.roothash=abc mvm.vsock_egress=1  ".into();

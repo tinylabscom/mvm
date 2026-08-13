@@ -45,7 +45,7 @@ pub mod backend;
 pub mod backends;
 pub mod base;
 /// Per-VM broker-services (`mvm-broker` / `mvm-audit-signer`) subprocess
-/// spawn/reap helpers, mirroring [`substitution_spawn`].
+/// spawn/reap helpers, mirroring [`network_endpoint_spawn`].
 /// The builder role layer: boots a builder VM over the `VmmDriver` seam with the
 /// disk-only job/artifact transport (trusted, no egress endpoint, no virtio-fs).
 pub mod builder_runner;
@@ -179,7 +179,7 @@ pub use workload_backend::{EgressSubstitutionTransport, WorkloadBackend};
 /// (mvm-cli) calls this while assembling the guest secrets drive: the cert is
 /// pushed onto the drive, the key is persisted host-side for the terminator
 /// Per-VM egress-substitution spawn helpers. Re-exported from `mvm-vmm::host`.
-pub use mvm_vmm::host::substitution_spawn;
+pub use mvm_vmm::host::network_endpoint_spawn;
 
 /// Per-VM broker-services spawn/reap. Re-exported from `mvm-vmm::host`.
 pub use mvm_vmm::host::broker_services_spawn;
@@ -195,8 +195,8 @@ pub use mvm_vmm::host::host_agent_spawn::{
 };
 
 /// Substitution-endpoint helpers used by integration tests and the
-/// `mvmctl` secrets-drive path. Re-exported from `mvm-vmm::host::substitution_spawn`.
-pub use mvm_vmm::host::substitution_spawn::{EndpointHandshake, record_secret_fingerprints};
+/// `mvmctl` secrets-drive path. Re-exported from `mvm-vmm::host::network_endpoint_spawn`.
+pub use mvm_vmm::host::network_endpoint_spawn::{EndpointHandshake, record_secret_fingerprints};
 
 /// Spawn/reap the per-VM substitution-endpoint moat, its params, and the
 /// remote-resolver spawn config — re-exported at the crate root so fleet
@@ -204,11 +204,11 @@ pub use mvm_vmm::host::substitution_spawn::{EndpointHandshake, record_secret_fin
 /// broker / D8 spawn-wiring, reaching them via `mvmctl::backend`) can drive the
 /// same per-VM endpoint the libkrun/HVF/Firecracker backends use, instead of
 /// duplicating the subprocess spawn/handshake/PID-file logic. The
-/// `substitution_spawn` module is also re-exported above; these root aliases
+/// `network_endpoint_spawn` module is also re-exported above; these root aliases
 /// mirror the original `mvm-backend` crate-root surface those callers named.
-pub use mvm_vmm::host::substitution_spawn::{
-    RemoteResolverSpawnConfig, SubstitutionSpawnParams, reap_substitution_endpoint,
-    spawn_substitution_endpoint,
+pub use mvm_vmm::host::network_endpoint_spawn::{
+    RemoteResolverSpawnConfig, SubstitutionSpawnParams, reap_network_endpoint,
+    spawn_network_endpoint,
 };
 
 /// Crate-wide test serialization for tests that mutate `HOME` or

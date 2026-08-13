@@ -1,7 +1,7 @@
 //! The host-side substitution bridge — guest egress stream ↔ per-VM endpoint UDS.
 //!
 //! A pure byte relay: the guest's egress port streams to the per-VM
-//! `mvm-substitution-endpoint`, which owns the whole egress decision — claim-10
+//! `mvm-network-endpoint`, which owns the whole egress decision — claim-10
 //! default-deny and claims-12/13 secret substitution. The bridge opens the
 //! endpoint on a stream's first frame and relays verbatim in both directions; it
 //! never parses or gates. The stream may be raw TCP or the WireRequest
@@ -264,7 +264,7 @@ pub(crate) trait GuestEndpointRelay {
 
 /// The substitution transport for one guest.
 pub(crate) struct SubstitutionBridge {
-    /// Per-VM `mvm-substitution-endpoint` socket. `None` ⇒ no endpoint, fail-closed.
+    /// Per-VM `mvm-network-endpoint` socket. `None` ⇒ no endpoint, fail-closed.
     endpoint: Option<PathBuf>,
     /// Open endpoint connections keyed by the guest vsock `src_port`.
     conns: HashMap<u32, EndpointConn>,

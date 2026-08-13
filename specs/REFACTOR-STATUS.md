@@ -6,6 +6,7 @@ This is the cross-plan progress index. The owning plan remains authoritative
 for detailed scope and acceptance criteria.
 
 ## Completed issue closeouts
+
 - [x] **Plan 325 — lowercase OCI image names.** Registry and repository
       capitalization is normalized before validation across every shared OCI
       pull and launch path, while case-sensitive tags and strict digest
@@ -73,6 +74,7 @@ for detailed scope and acceptance criteria.
       hash.
 
 ## Fast machine substrate
+
 - [x] **Issue #2279 — define the fast machine substrate and canonical template
       contract.** The cross-plan note joins Plans 298, 299, 265, 270, and 292
       around one prepared template identity, explicit lifecycle phases, a
@@ -108,8 +110,9 @@ for detailed scope and acceptance criteria.
       zero; the later workload boot stopped at a separate readiness timeout.
 
 ## In-flight plans
+
 - [~] Plan 325 — SDK sidecar reserved mount
-      (`specs/plans/325-sdk-sidecar-reserved-mount.md`)
+  (`specs/plans/325-sdk-sidecar-reserved-mount.md`)
   - [x] Reserved SDK disk is excluded from generic user-volume activation
   - [x] Legacy and universal guest boot paths mount `mvm.sdk_dev` read-only at
         `/mvm/sdk`
@@ -210,7 +213,7 @@ for detailed scope and acceptance criteria.
   - [x] Run Linux-native workspace Clippy/tests — CI test-linux and
         lint-core passed on PR #2324; local x86_64 Linux cross-build
         (`cargo zigbuild --target x86_64-unknown-linux-gnu -p mvm-vmm
-        --lib --all-features`) passes on current `main`
+    --lib --all-features`) passes on current `main`
 
 - [x] Plan 318 — span-timing profiling
       (`specs/plans/318-span-timing-profiling.md`)
@@ -288,7 +291,7 @@ for detailed scope and acceptance criteria.
   - [ ] Execute the remaining 31 closure paths in the plan's dependency order
   - [ ] Reconcile a fresh GitHub query after every phase and at final closeout
 - [~] Runtime hardening for production — plan 303, branch
-      `feat/plan-303-runtime-hardening`
+  `feat/plan-303-runtime-hardening`
   - [x] WS1 — `overflow-checks = true` in `[profile.release]`, a
         `release-witness` profile, and a CI lane running the untrusted-input
         crates under it (wired into the `test` aggregate and pinned by
@@ -306,17 +309,17 @@ for detailed scope and acceptance criteria.
         redacts only (exiting would break three `catch_unwind` isolation
         sites, and signing from a hook can deadlock or double-panic)
   - [~] WS6 — **not** "add Landlock": the jailer already implements it
-        (`jailer/landlock.rs` + `LANDLOCK.md` + a live property test). Real
-        gap is that `confine_self` is called by only two bins, leaving
-        `mvm-host-signer`, `mvm-audit-signer`, `mvm-signer-helper` and
-        `mvm-broker` unconfined. Blocked on per-role seccomp allowlists,
-        which need live-Linux validation and should follow `feat/seccomp-audit`
+    (`jailer/landlock.rs` + `LANDLOCK.md` + a live property test). Real
+    gap is that `confine_self` is called by only two bins, leaving
+    `mvm-host-signer`, `mvm-audit-signer`, `mvm-signer-helper` and
+    `mvm-broker` unconfined. Blocked on per-role seccomp allowlists,
+    which need live-Linux validation and should follow `feat/seccomp-audit`
   - [x] WS7 — Miri lane over `mvm-contract`, advisory (nightly + dispatch,
         `continue-on-error`). 511 tests, no UB, ~4m25s with `merkle::` skipped
         — those sweeps ran past 30 min under the interpreter. Widening to
         `mvm-core` crypto and the `mvm-fs` ext4 writer deferred
 - [~] Delete the dead guest-NIC gateway stack — plan 305, branch
-      `feat/305-delete-gateway-stack`
+  `feat/305-delete-gateway-stack`
   - [x] WS2 — the deletion: ~15,600 lines net. The gateway `NetworkingMode`
         variants and net-attach FFI, `libkrun-sys`'s bridge + gateway spawn
         modules, `mvm-hostd`'s `gateway_bridge/`, the four `rvproxy_*`
@@ -353,8 +356,8 @@ for detailed scope and acceptance criteria.
   - [x] BDD suite `s11_snapshot/hvf_save_restore.feature` + benchmark evidence
 
 - [~] Plan 299 — Prepared cold-launch performance
-      (`specs/plans/299-cold-launch-performance.md`), branch
-      `plan/cold-launch-performance`
+  (`specs/plans/299-cold-launch-performance.md`), branch
+  `plan/cold-launch-performance`
   - [x] Phase 0 — trustworthy baseline COMPLETE. Both native lanes measured
         from release binaries: HVF/aarch64 prepared cold 112.6 ms p50 /
         116.6 ms p99 (warm claim 18.9 / 20.0 ms), Firecracker/x86_64 674.0 /
@@ -364,50 +367,50 @@ for detailed scope and acceptance criteria.
         Phase 6 ahead of Phase 3.
   - [ ] Phase 1 — content-addressed `--mount` image cache
   - [~] Phase 2 — artifact preparation outside the launch path. The resolution
-        half landed as the warm pool's hard prerequisite (**#2333**):
-        `crate::exec::resolve_launch` yields a bootable `VmStartConfig` without
-        starting a VM, `run_inner` calls it instead of inlining it, and
-        `pool warm --image` uses it to spawn parents a matching launch claims.
-        `pool warm` could previously spawn nothing on any backend. The
-        prepared-artifact manifest and the acquire/prepare split are still open,
-        so a cold cache is still populated inline.
+    half landed as the warm pool's hard prerequisite (**#2333**):
+    `crate::exec::resolve_launch` yields a bootable `VmStartConfig` without
+    starting a VM, `run_inner` calls it instead of inlining it, and
+    `pool warm --image` uses it to spawn parents a matching launch claims.
+    `pool warm` could previously spawn nothing on any backend. The
+    prepared-artifact manifest and the acquire/prepare split are still open,
+    so a cold cache is still populated inline.
   - [~] Phase 3 — reduce backend cold-start latency. Re-measured on KVM at
-        `c866611af` as Phase 5 asked: `driver_boot` is 630.5 ms, unmoved from
-        623.6 ms, so the cost is real rather than a poll artifact and can be
-        decomposed. It is a shell `sleep 0.1` socket poll plus ~9 curl/sudo
-        subprocesses (**#2292**). On HVF there is little left — `vmm_create`
-        11.6 ms, `driver_boot` 7.8 ms — the remaining cold cost there is guest
-        boot at 58.6 ms.
+    `c866611af` as Phase 5 asked: `driver_boot` is 630.5 ms, unmoved from
+    623.6 ms, so the cost is real rather than a poll artifact and can be
+    decomposed. It is a shell `sleep 0.1` socket poll plus ~9 curl/sudo
+    subprocesses (**#2292**). On HVF there is little left — `vmm_create`
+    11.6 ms, `driver_boot` 7.8 ms — the remaining cold cost there is guest
+    boot at 58.6 ms.
   - [ ] Phase 4 — parallelize independent host work
   - [~] Phase 5 — event-driven guest readiness. The flat 50 ms readiness poll
-        was quantizing every launch: adaptive backoff cut `guest_kernel_entry`
-        from 53.8 ms to 18.0 ms p50 and HVF dispatch from 117.2 ms to 81.4 ms.
-        Three further fixed 50 ms polls (driver PID-file wait, standby agent
-        wait, teardown pid-exit) now share one backoff in
-        `mvm_core::poll_backoff`: VM creation reads 4.6 ms rather than 53.8 ms
-        of tick, and total is 310.1 ms p50. The authenticated readiness
-        notification itself remains.
+    was quantizing every launch: adaptive backoff cut `guest_kernel_entry`
+    from 53.8 ms to 18.0 ms p50 and HVF dispatch from 117.2 ms to 81.4 ms.
+    Three further fixed 50 ms polls (driver PID-file wait, standby agent
+    wait, teardown pid-exit) now share one backoff in
+    `mvm_core::poll_backoff`: VM creation reads 4.6 ms rather than 53.8 ms
+    of tick, and total is 310.1 ms p50. The authenticated readiness
+    notification itself remains.
   - [~] Phase 6 — move cleanup off the foreground critical path. Teardown
-        decomposed and the warm-pool refill removed from it: a default
-        `machine run` went 1366 ms -> 353.8 ms p50. Remaining teardown is
-        `stop_transient` 142.9 ms, which is real cleanup. The Plan 314 event
-        path then completed a native macOS 26.5.2 / arm64 1,000-cycle HVF run
-        in the Rust test profile with p50/p95/p99 stop times of
-        703.48/1,151.28/1,865.07 ms and zero SIGKILL escalations. That run is
-        a lifecycle stress baseline, not a replacement for the release
-        prepared-cold numbers above: its stop tail is dominated by detached
-        supervisor PID disappearance. Follow-up: give pool maintenance to the
-        resident per-tenant daemon and continue reducing supervisor shutdown
-        latency.
+    decomposed and the warm-pool refill removed from it: a default
+    `machine run` went 1366 ms -> 353.8 ms p50. Remaining teardown is
+    `stop_transient` 142.9 ms, which is real cleanup. The Plan 314 event
+    path then completed a native macOS 26.5.2 / arm64 1,000-cycle HVF run
+    in the Rust test profile with p50/p95/p99 stop times of
+    703.48/1,151.28/1,865.07 ms and zero SIGKILL escalations. That run is
+    a lifecycle stress baseline, not a replacement for the release
+    prepared-cold numbers above: its stop tail is dominated by detached
+    supervisor PID disappearance. Follow-up: give pool maintenance to the
+    resident per-tenant daemon and continue reducing supervisor shutdown
+    latency.
   - [ ] Phase 7 — live validation and regression gates
   - [x] Cross-plan fast-machine-substrate contract documented in
         `specs/notes/2026-08-10-fast-machine-substrate.md` (issue #2279)
   - [~] Kernel/boot-substrate budget and filesystem-path evaluation tracked by
-        issues #2280 and #2281. The artifact-ledger slice of #2280 and the
-        pure-Rust ext4 baseline report are landed. Whole-VMM warm-ready and
-        first-command memory/fault instrumentation is also landed; its
-        real-host matrix, canonical budget/gates, candidate filesystem
-        comparison, and the adopt/decline decision remain open.
+    issues #2280 and #2281. The artifact-ledger slice of #2280 and the
+    pure-Rust ext4 baseline report are landed. Whole-VMM warm-ready and
+    first-command memory/fault instrumentation is also landed; its
+    real-host matrix, canonical budget/gates, candidate filesystem
+    comparison, and the adopt/decline decision remain open.
 
 - [ ] Plan 311 — Launch critical-path waste on real-sized images
       (`specs/plans/311-launch-critical-path-waste.md`), branch
@@ -436,19 +439,19 @@ for detailed scope and acceptance criteria.
         sample, both refused by the prepared lanes — **#2276**. Plan 299's
         contract table now names the image behind each percentile.
   - [~] Phase F — validated on both backends. HVF meets the contract at
-        p50/p95/p99 on a 1.1 GB image (dispatch 77.3 / 79.7 / 90.1 ms against
-        ≤200 / ≤250 / ≤300), and `alpine` and `python:3.12` now agree inside
-        run-to-run noise where they used to differ by ~780 ms. claim-8 /
-        claim-14 digests unchanged, chain still verifies. Firecracker/KVM
-        repeated: the fixes hold there (both counters zero) but that backend
-        misses the contract for reasons this plan does not own — residual
-        Firecracker boot work (**#2292**, **#2299**) and receipt durability on
-        the admission path (**#2318**). Audit-chain batching and duplicate
-        admission are closed under #2293. Outstanding: the warm-lane
-        comparison, blocked because no standby pool can be filled today.
+    p50/p95/p99 on a 1.1 GB image (dispatch 77.3 / 79.7 / 90.1 ms against
+    ≤200 / ≤250 / ≤300), and `alpine` and `python:3.12` now agree inside
+    run-to-run noise where they used to differ by ~780 ms. claim-8 /
+    claim-14 digests unchanged, chain still verifies. Firecracker/KVM
+    repeated: the fixes hold there (both counters zero) but that backend
+    misses the contract for reasons this plan does not own — residual
+    Firecracker boot work (**#2292**, **#2299**) and receipt durability on
+    the admission path (**#2318**). Audit-chain batching and duplicate
+    admission are closed under #2293. Outstanding: the warm-lane
+    comparison, blocked because no standby pool can be filled today.
 
 - [~] eBPF vsock egress telemetry spike — **issue #2211**, branch
-      `feat/ebpf-vsock-egress-telemetry`
+  `feat/ebpf-vsock-egress-telemetry`
   - [x] Remove the standalone `mvm-ebpf-egress` crate; fold the Aya loader
         and eBPF program into `mvm-hostd` and the observability target
         metadata into `mvm-runtime`
@@ -471,14 +474,14 @@ for detailed scope and acceptance criteria.
   - [x] Validate load/attach on a live Linux host (PR #2221)
 
 - [~] Plan 287 — Userspace socket datapath
-      (`specs/plans/287-userspace-socket-datapath.md`, ADR-037)
-      Tracked end to end under epic #2111, which also carries plan 285's
-      deferred set. Every workstream below has its own issue; the epic
-      records the ordering and the two gates that are not preference.
-      **Frozen by plan 316 Phase 0.** ADR-037 is superseded for production
-      workload networking: this datapath forwarded raw IP packets for
-      `l3-vsock`, which no longer boots. No feature work lands on its runtime
-      path; deletion is plan 316 Phase 7 (#2376).
+  (`specs/plans/287-userspace-socket-datapath.md`, ADR-037)
+  Tracked end to end under epic #2111, which also carries plan 285's
+  deferred set. Every workstream below has its own issue; the epic
+  records the ordering and the two gates that are not preference.
+  **Frozen by plan 316 Phase 0.** ADR-037 is superseded for production
+  workload networking: this datapath forwarded raw IP packets for
+  `l3-vsock`, which no longer boots. No feature work lands on its runtime
+  path; deletion is plan 316 Phase 7 (#2376).
   - [x] Phase A (WS0) — fix the two platform-neutral defects in the shipped
         `mvm-netd` drive loop that blocked this work and affected Linux
         today: a pollable descriptor out of `GuestConnection`, a
@@ -648,19 +651,19 @@ for detailed scope and acceptance criteria.
         rather than standing up a second harness. Aggregate host→guest
         throughput **rises 3.2×** from 1 to 16 flows (6.6 → 20.9 Gb/s
         median, 8 runs), so a single serial service pass is not the ceiling
-        multi-queue presumes. What limits *one* flow is a fixed ~12.8 µs
+        multi-queue presumes. What limits _one_ flow is a fixed ~12.8 µs
         per-pass cost that is almost entirely one syscall: on macOS a
         zero-timeout `kevent` returning **no** events costs ~12,600 ns
         against 171–430 ns when it returns one, reproduced in pure C with
         none of this code in the picture, and `drain_for` only terminates on
-        a zero return. **Since fixed**: the drain now stops on a *short*
+        a zero return. **Since fixed**: the drain now stops on a _short_
         return, which a drained queue is already reporting, so the
         terminating empty call is gone. Re-measured on the same host —
         guest→host **2.9×** (1.9 → 5.5 Gb/s), host→guest 1.12× (7.0 → 7.8),
         round-trip p50 68 → 53 µs. The gain splits that way because the
-        removed call is the *second* one, and only ~37% of host→guest drains
+        removed call is the _second_ one, and only ~37% of host→guest drains
         find anything to make a second call about. The remaining ~12 µs is
-        the empty *first* poll, and the obvious fix for it — skip the drain
+        the empty _first_ poll, and the obvious fix for it — skip the drain
         when readiness did not wake the pass — is measurably **unsound**: an
         outer kqueue is edge-triggered on the inner set going non-empty, so
         a set left dirty never wakes the drive loop again, and the
@@ -677,32 +680,32 @@ for detailed scope and acceptance criteria.
   - [ ] WS5 (#2118) — zero-copy / batched transfer, gated on the same
         measurement; must keep the memory ceiling assertable
   - [~] WS7 (#2119) — node-to-node transport for cross-host VM traffic.
-        **Designed, deliberately not implemented: ADR-040.** Three of the
-        four properties the hop must preserve cannot be preserved today,
-        each for a reason outside the transport. No cross-node trust root
-        exists and building one here would be a second one beside the
-        plan-signing root (needs WS8); addresses are not unique across
-        nodes, so a destination IP does not name a VM and a peer's address
-        collides with a local machine's; the policy language cannot name a
-        peer workload and `IngressTable::admits` takes no source, so
-        admitting a peer means admitting the host network. The fourth
-        blocker — no audit record for the hop to preserve — is now closed
-        by the gateway audit path below. The ADR records the design, the
-        rejected alternatives, and the four unblocking conditions
+    **Designed, deliberately not implemented: ADR-040.** Three of the
+    four properties the hop must preserve cannot be preserved today,
+    each for a reason outside the transport. No cross-node trust root
+    exists and building one here would be a second one beside the
+    plan-signing root (needs WS8); addresses are not unique across
+    nodes, so a destination IP does not name a VM and a peer's address
+    collides with a local machine's; the policy language cannot name a
+    peer workload and `IngressTable::admits` takes no source, so
+    admitting a peer means admitting the host network. The fourth
+    blocker — no audit record for the hop to preserve — is now closed
+    by the gateway audit path below. The ADR records the design, the
+    rejected alternatives, and the four unblocking conditions
   - [~] WS8 (#2120) — mvmd-facing node-control API, mvm side only.
-        **The mvm half is implemented** (`mvm_hostd::nodectl`, ADR-041,
-        sequenced in `specs/plans/295-node-control-api.md`): ownership is
-        a uid comparison against the connection's peer credential and
-        never a field in the message, so a caller is refused a machine it
-        does not own and a listing carries only its own. Forcing
-        `CallerIdentity::owns` to `true` reddens five tests. Wire types
-        are `deny_unknown_fields`, tables are bounded and drop rather
-        than evict, and nothing here binds a listener. **The cross-node
-        issuer is deliberately not built**: ADR-041 answers ADR-040's
-        open question by placing the issuer with the control plane and
-        the verification seam here, so this *half*-unblocks #2119 rather
-        than unblocking it — a key scoped to a node pair would still be a
-        second trust root. The fleet-orchestration half stays in mvmd
+    **The mvm half is implemented** (`mvm_hostd::nodectl`, ADR-041,
+    sequenced in `specs/plans/295-node-control-api.md`): ownership is
+    a uid comparison against the connection's peer credential and
+    never a field in the message, so a caller is refused a machine it
+    does not own and a listing carries only its own. Forcing
+    `CallerIdentity::owns` to `true` reddens five tests. Wire types
+    are `deny_unknown_fields`, tables are bounded and drop rather
+    than evict, and nothing here binds a listener. **The cross-node
+    issuer is deliberately not built**: ADR-041 answers ADR-040's
+    open question by placing the issuer with the control plane and
+    the verification seam here, so this _half_-unblocks #2119 rather
+    than unblocking it — a key scoped to a node pair would still be a
+    second trust root. The fleet-orchestration half stays in mvmd
   - [x] Gateway audit (#2151) — the L3 gateway now writes chain-signed
         entries. `mvm_hostd::netd::audit::NetdAuditor` routes every
         `GatewayEvent` through the **existing** supervisor `Recorder`
@@ -769,8 +772,7 @@ for detailed scope and acceptance criteria.
   - [ ] Part B (P4 browser): B1 extract the `no_std` OCI decoders — **the long
         pole; they do not exist today** (`mvm-fs` is std-heavy), via the
         Increment 3 verbatim-relocation method; B2 Worker + thin proxy;
-        B3 OPFS content-addressed cache with verify-on-read; B4 `wasm-opt -Oz`
-        + gzipped-size budget in the existing wasm lane; B5 delete
+        B3 OPFS content-addressed cache with verify-on-read; B4 `wasm-opt -Oz` + gzipped-size budget in the existing wasm lane; B5 delete
         `web/audit-verify/`, fix the stale `mvm-verify` refs in ADR-031, add
         `mvmctl audit pubkey`
 - [x] Plan 320 — A live wasm sandbox demo on the website
@@ -893,12 +895,12 @@ for detailed scope and acceptance criteria.
           and signed grant enforcement reject the complete DevOnly request set.
 
 - [~] Plan 290 — Sensitive egress redaction
-      (`specs/plans/290-sensitive-egress-redaction.md`)
+  (`specs/plans/290-sensitive-egress-redaction.md`)
   - [x] Validated byte detector and pinned, no-default-feature LeakGuard adapter
   - [x] Shared supplemental coverage for masking and reversible replacement
   - [x] Default secret/PII policy arms compressed and over-cap fail-closed gates
   - [~] Host workspace tests/check, workspace all-target Clippy and supply-chain
-        gates pass; Linux builder-VM workspace all-target Clippy remains
+    gates pass; Linux builder-VM workspace all-target Clippy remains
   - [ ] Structured/streaming body coverage and split-boundary witnesses
   - [ ] Signed CLI policy lowering and admission posture reporting
   - [ ] Build-level claim promotion and adversarial backend witnesses
@@ -965,7 +967,7 @@ for detailed scope and acceptance criteria.
   - [x] Reconcile rejected speculative clauses and close #2040 with evidence
 
 - [~] Plan 295 — Workload stream plane
-      (`specs/plans/295-workload-stream-plane.md`)
+  (`specs/plans/295-workload-stream-plane.md`)
   - [x] T1–T3 — stream record DTOs + chain verify; transcript stream
         directions and per-chunk linkage; ring retention
   - [x] T4–T5b — guest pump emits as produced; fd-3 control records; the
@@ -1018,8 +1020,8 @@ for detailed scope and acceptance criteria.
         the grant/lease/secret-scan gate; agent-side delivery and EOF; the
         route from gate to guest sink; the sealed-tier refusal of the input
         grant for a shell-shaped entrypoint; and the claims ledger — claim 15
-        reworded (it used to hold by *absence*, there being no host→guest byte
-        path at all, and now holds by *policy*) and claim 17 added at status
+        reworded (it used to hold by _absence_, there being no host→guest byte
+        path at all, and now holds by _policy_) and claim 17 added at status
         `Preview` with a limits note (T17 below closed two; plan 293 WS1 closed
         the third by giving the scan fingerprints, and its follow-on closed the
         blanket carry's stall with a content-independent idle release; the two
@@ -1035,12 +1037,12 @@ for detailed scope and acceptance criteria.
         `reference/guest-agent.md`, which had drifted from the `ProdSafe`
         classification of `StreamInput`/`CloseStreamInput`. ADR-001's limit 3
         sharpened: `StreamPlane::open_input` is the only route into the gate and
-        has no caller outside `tests/workload_input_plane.rs`, so *neither* half
+        has no caller outside `tests/workload_input_plane.rs`, so _neither_ half
         of the input plane has run on a real VM — "proven end to end" described
         test fidelity, not liveness
   - [x] T17 — the operator surface, landed with a live entrypoint resolver in
         the same change as the plan required. `machine run --entrypoint --stdin
-        -` opens the route under the plan that boot was admitted under, pumps
+    -` opens the route under the plan that boot was admitted under, pumps
         the caller's stdin through the gate in acceptance order on its own
         thread, refreshes the lease on a ticker while the writer is idle, and
         closes the workload's stdin on the caller's EOF. The grant is
@@ -1050,16 +1052,16 @@ for detailed scope and acceptance criteria.
         the `mkGuest` and OCI build paths, because the host cannot read inside a
         materialized ext4 — and admission **fails closed** when it cannot
         resolve one, so the shell refusal cannot go dormant again
-  - [~] Residual after T9b/T9d: T9d closed the *seal* half — a detached run's
-        transcript is now sealed by whatever stops the VM. The *follow* half
-        remains: the console follower still dies with the starting process, so
-        output a detached VM produces after that point reaches no capture at
-        all until a resident host process owns the plane
+  - [~] Residual after T9b/T9d: T9d closed the _seal_ half — a detached run's
+    transcript is now sealed by whatever stops the VM. The _follow_ half
+    remains: the console follower still dies with the starting process, so
+    output a detached VM produces after that point reaches no capture at
+    all until a resident host process owns the plane
   - [ ] Deferred to the broker task: state a follower's start sequence in the
         first batch, so the reader can close the accept-window gap between the
         transcript snapshot and the live subscription
   - [ ] Deferred to the broker task: re-seal the stream transcript periodically,
-        so durable history exists for a *running* VM and survives a kill
+        so durable history exists for a _running_ VM and survives a kill
 - [x] Plan 282 — Merge queue auto-requeue
       (`specs/plans/282-merge-queue-auto-requeue.md`)
   - [x] Refuse conflicts and bound retry attempts per PR
@@ -1067,7 +1069,7 @@ for detailed scope and acceptance criteria.
   - [x] Complete repository validation and queue the PR
 
 - [~] Plan 270 — Universal initramfs + vsock-activated boot
-      (`specs/plans/270-universal-initramfs-vsock-activated-boot.md`)
+  (`specs/plans/270-universal-initramfs-vsock-activated-boot.md`)
   - [x] Core boot contract: `ActivateEnvironment` over the authenticated
         vsock session, `ActivationState` gate, PID-1 agent with mount
         library + uid-901 drop (#1914)
@@ -1083,15 +1085,15 @@ for detailed scope and acceptance criteria.
   - [x] Pin `mvmctl` embedding to the builder/bootstrap host and seed
         manifests
   - [~] Deviations recorded at the unticked steps in the plan: capability-bit
-        negotiation, chain-signed boot events, and vm_id/session binding were
-        superseded by the path discriminator + session-key pinning; the
-        guest-side activation idle timeout and focused zombie-reaping tests
-        remain open
+    negotiation, chain-signed boot events, and vm_id/session binding were
+    superseded by the path discriminator + session-key pinning; the
+    guest-side activation idle timeout and focused zombie-reaping tests
+    remain open
   - [~] Remaining rollout, snapshot, BDD, and live-smoke work stays in the
-        plan
+    plan
 
 - [~] Plan 271 — Apple Container backend: Apple's container kernel on HVF
-      (`specs/plans/271-apple-container-backend.md`)
+  (`specs/plans/271-apple-container-backend.md`)
   - [x] Stage 1 — fail-closed skeleton: kernel artifact resolution + thin
         HVF-runner delegation
   - [x] Stage 2 — live validation + claim review (2026-08-01): required
@@ -1126,7 +1128,7 @@ for detailed scope and acceptance criteria.
         (416 of 1872 files, 22%, stop being cache keys)
 
 - [x] Plan 284 — CI lint and merge-queue latency
-  (`specs/plans/284-ci-lint-latency.md`)
+      (`specs/plans/284-ci-lint-latency.md`)
   - [x] Target only the packages that own `test-support` code
   - [x] Remove branch-local multi-gigabyte Cargo target caches
   - [x] Share nested `mvm-cli` builds across feature fingerprints
@@ -1142,7 +1144,7 @@ for detailed scope and acceptance criteria.
   - [x] Keep targeted feature coverage and Linux conformance coverage intact
   - [x] Complete workflow and repository verification
 - [~] Plan 276 — Content-addressing conformance and defense
-      (`specs/plans/276-content-addressing-conformance-and-defense.md`)
+  (`specs/plans/276-content-addressing-conformance-and-defense.md`)
   - [x] WS0 — plan + recon note landed (#1964); axis/policy ratification open
   - [x] WS1 — pin the evidence each claim rests on: `witness_kinds` per claim
         in `model/claims.toml`, gated by `check-claim-catalog`. The original
@@ -1151,11 +1153,11 @@ for detailed scope and acceptance criteria.
         delisted from a whole kind of witness with every gate green
   - [x] WS2 — prose over-claim meta-gate, shipped as `xtask check-no-overclaim`
   - [~] WS3 — replay golden-vector corpus. `ir_hash`, `leaf_hash`,
-        `interior_hash`, `merkle_root`, `compute_plan_id` and `bundle_sha256`
-        now carry frozen addresses. The existing `ir_hash` tests were all
-        *relational*, so a canonicalization change moving every address
-        consistently passed all four — planted and confirmed. The audit `prev_hash`
-        spine is closed by WS4's frozen signed corpus
+    `interior_hash`, `merkle_root`, `compute_plan_id` and `bundle_sha256`
+    now carry frozen addresses. The existing `ir_hash` tests were all
+    _relational_, so a canonicalization change moving every address
+    consistently passed all four — planted and confirmed. The audit `prev_hash`
+    spine is closed by WS4's frozen signed corpus
   - [x] WS4 — one frozen signed audit chain both verifiers read. The existing
         parity test compared them over a randomly-keyed chain generated per
         run, which no verifier outside that process could ever see. riscv32 is
@@ -1163,31 +1165,31 @@ for detailed scope and acceptance criteria.
         verifier and the no_std mirror, with wasm executing the mirror
   - [ ] WS5 — bind each witness to its recorded red-proof
   - [~] WS6 — **lead item**: content-address the caches, verify on read. The
-        2026-08-01 recon revision reverses finding 2 — integrity-on-read is the
-        one attestation property no surveyed system enforces, mvm included —
-        which promoted this from tail to lead
+    2026-08-01 recon revision reverses finding 2 — integrity-on-read is the
+    one attestation property no surveyed system enforces, mvm included —
+    which promoted this from tail to lead
     - [x] Dev-build artifact cache, shipped in #2053: `mvm_core::action` +
           `verify_artifacts_on_disk`, verify on read, fail closed to a cold
           miss, and eviction of **both** the record and the build directory —
           a record-only eviction would leave the poisoned tree under a name a
           later build re-adopts. Unblocks plan 279 WS1
     - [~] Workload/builder kernel cache: plan 288
-          (`specs/plans/288-kernel-cache-verify-on-read.md`). WS1–WS3 + WS5
-          landed — the fetch path verifies against the published checksum
-          manifest and records a digest sidecar, the read path verifies against
-          it and evicts the whole entry on failure, and
-          `check-verified-kernel-reads` keeps new callers on the seam. WS1's
-          `VerifiedKernel` initially reached only the arms that used it: the
-          Firecracker/qemu arm and the CLI's kernel-less-image fallback still
-          booted on presence until 2026-08-11. WS4 (shared sidecar helper with
-          the BLAKE3 artifact path) is the remainder
+      (`specs/plans/288-kernel-cache-verify-on-read.md`). WS1–WS3 + WS5
+      landed — the fetch path verifies against the published checksum
+      manifest and records a digest sidecar, the read path verifies against
+      it and evicts the whole entry on failure, and
+      `check-verified-kernel-reads` keeps new callers on the seam. WS1's
+      `VerifiedKernel` initially reached only the arms that used it: the
+      Firecracker/qemu arm and the CLI's kernel-less-image fallback still
+      booted on presence until 2026-08-11. WS4 (shared sidecar helper with
+      the BLAKE3 artifact path) is the remainder
     - [ ] Cold-tier background scrub (recon §7.9)
   - [~] WS7 — σ/κ separation: `mvm_core::at_rest` gives the protocol digest
-        over plaintext and the storage address over bytes at rest as disjoint
-        types, σ as a set, and the transform descriptor as an open enumeration.
-        The plan's "everything is Identity today" premise was wrong — OCI
-        layers are tar+gzip and transcripts store ciphertext — which
-        strengthens the case. Remaining: adopt the types at those two sites
+    over plaintext and the storage address over bytes at rest as disjoint
+    types, σ as a set, and the transform descriptor as an open enumeration.
+    The plan's "everything is Identity today" premise was wrong — OCI
+    layers are tar+gzip and transcripts store ciphertext — which
+    strengthens the case. Remaining: adopt the types at those two sites
   - [x] Discharged elsewhere: sealed transcript root anchored into the audit
         chain (recon §7.6 → plan 280, #2017); post-restore child verb grant
         (recon §7.7 → #2019)
@@ -1203,26 +1205,40 @@ for detailed scope and acceptance criteria.
         networking; `specs/refactor/03-networking.md` corrected from "the raw
         packet path is deleted" to the actual two-path state; ADR-001's tier
         matrix and claim-10 section qualified; `xtask
-        check-l3-expansion-freeze` added as a temporary shrink-only ratchet
+    check-l3-expansion-freeze` added as a temporary shrink-only ratchet
         over `L3Vsock`/`raw_ip_stack`/`NetworkControl`/`NetworkData`/
         `spawn_netd`/`host_datapath` (29 allowlist entries); synthesis,
         admission, and CLI preflight refuse `raw_ip_stack=true`/`L3Vsock` with
         a migration error naming the loopback adapters and typed connectors
-  - [~] Phase 1 — pin protocol, resource, and performance baselines (#2370).
-        Landed: `mvm-contract::protocol::network_flow` — the v1 frame header
-        (20 bytes, `u32` length field because 64 KiB does not fit a `u16`),
-        all 27 opcodes with their class/sender/confirmation relations,
-        state-independent cap-before-allocate decoding with golden byte
-        fixtures, and the session/stream state machine (parity-split stream
+  - [x] Phase 1 — pin protocol, resource, and performance baselines (#2370).
+        Closed 2026-08-13. Landed: `mvm-contract::protocol::network_flow` — the
+        v1 frame header (20 bytes, `u32` length field because 64 KiB does not
+        fit a `u16`), all 27 opcodes with their class/sender/confirmation
+        relations, state-independent cap-before-allocate decoding with golden
+        byte fixtures, and the session/stream state machine (parity-split stream
         IDs, watermark reuse rejection rather than an unbounded set, per-stream
         credit, declared-listener-backed ingress, fail-closed on every
         refusal). 87 unit tests. `crates/mvm-contract/fuzz` adds
         `fuzz_network_flow_decode` and `fuzz_network_flow_state` with 95
         committed seeds, wired into `security.yml`. Transport-neutral signed
         `NetworkLimits` is also implemented with default-byte compatibility,
-        validation, and one legacy/FlowMux accessor. Remaining: session
-        extraction and the perf harness + baselines.
-  - [ ] Phase 2 — the one authenticated endpoint (#2371)
+        validation, and one legacy/FlowMux accessor. `mvm-core::net::session`
+        extracts the authenticated session so it is shared by control RPC and
+        FlowMux, with tests for replay, tampering, wrong identity, and counter
+        exhaustion. Remaining: the perf harness + baselines.
+  - [x] Phase 2 — the one authenticated endpoint (#2371). `GuestService::NetworkFlow`
+    now names the port-5253 channel; the endpoint binary, proxy, spawner, and
+    test files are renamed to `mvm-network-endpoint`/`network_endpoint_*`;
+    `mvm-hostd::supervisor::flowmux` landed the authenticated FlowMux session
+    acceptor (`FlowMuxSession::accept`, `serve`, `Hello`/`HelloAck`, `GoAway`
+    for unimplemented flows) and bounded per-stream registries
+    (`flowmux::registry`) with unit tests for parity, ceilings, state
+    transitions, and credit accounting. The acceptor is wired into the
+    `mvm-network-endpoint` binary (`EgressMode::FlowMux`,
+    `EndpointConfig::flowmux_identity`, `serve_flowmux`) and the spawner emits
+    the identity on stdin. Backend witness tests in `mvm-vmm::host::spec_map`
+    and the Firecracker/HVF/libkrun driver modules prove exactly one
+    `NetworkFlow` service and no L3 services per granted workload.
   - [ ] Phase 3 — converge egress TCP, UDP, and DNS (#2372)
   - [ ] Phase 4 — stream typed transformations (#2373)
   - [ ] Phase 5 — declared ingress on FlowMux (#2374)
@@ -1276,7 +1292,7 @@ for detailed scope and acceptance criteria.
         ~5–6 ms gap is Firecracker process startup + snapshot resume.
 
 - [x] Plan 273 — SDK sidecar release acquisition
-  (`specs/plans/273-sdk-sidecar-release-acquisition.md`)
+      (`specs/plans/273-sdk-sidecar-release-acquisition.md`)
   - [x] Publish `sdk-sidecar-<arch>.tar.gz` per-arch release assets, with
         `tests/release_assets.rs` pinning the workflow's names to the Rust
         constructor that requests them
@@ -1287,7 +1303,7 @@ for detailed scope and acceptance criteria.
         source checkout keeps the fail-closed refusal
 
 - [x] Plan 277 — release-artifact signature verification
-  (`specs/plans/277-release-artifact-signature-verification.md`)
+      (`specs/plans/277-release-artifact-signature-verification.md`)
   - [x] Sign the image tarballs with `--new-bundle-format`, the only shape the
         in-binary Rust verifier parses; binary tarballs stay legacy for the
         cosign-CLI consumers (`install.sh`, `mvmctl update`)
@@ -1297,7 +1313,7 @@ for detailed scope and acceptance criteria.
   - [x] Docs + rollup; closes plan 273's one deferred gap
 
 - [x] Plan 266 — lightweight microVM guest
-  (`specs/plans/266-lightweight-microvm-guest.md`)
+      (`specs/plans/266-lightweight-microvm-guest.md`)
   - [x] WS-1/WS-2: static-musl privilege drop via the in-house `mvm-setpriv`
   - [x] WS-3: static-musl runtime overlay with the glibc SDK FFI split out
   - [x] WS-3 follow-up: plan-driven automatic SDK-sidecar attachment, gated
@@ -1308,7 +1324,7 @@ for detailed scope and acceptance criteria.
         with the optional SDK sidecar reported separately
 
 - [x] Plan 280 — transcript root audit binding
-  (`specs/plans/280-transcript-root-audit-binding.md`)
+      (`specs/plans/280-transcript-root-audit-binding.md`)
   - [x] Version-2 manifest root over fixed metadata and ordered ciphertext
         chunk records, with deterministic and mutation coverage
   - [x] Ordered `gateway.transcript_sealed` emission after atomic manifest
@@ -1317,7 +1333,7 @@ for detailed scope and acceptance criteria.
         and decryption, with hermetic operator-path BDD coverage
 
 - [x] Backend crate separation + HVF DAX + QEMU virtio-fs
-  (**PR #2220**, branch `feat/backend-crate-separation`)
+      (**PR #2220**, branch `feat/backend-crate-separation`)
   - [x] Consolidate HVF under `mvm-runtime/src/backends/hvf`
   - [x] Extract shared `mvm-vmm` crate for VMM primitives
   - [x] Backend-agnostic `VmmSpec` with typed `VirtioFsShare` entries
@@ -1327,7 +1343,7 @@ for detailed scope and acceptance criteria.
   - [x] Linux cross-compile stubs for Hypervisor.framework symbols
   - [x] Console-streaming test isolated with temp `MVM_HOME`
   - [x] `cargo test -p mvm-runtime` green; `cargo clippy -p mvm-runtime
-        -p mvm-build -- -D warnings` clean on macOS and Linux builder VM
+    -p mvm-build -- -D warnings` clean on macOS and Linux builder VM
   - [x] Full workspace test run on x86_64 Linux builder VM —
         `cargo nextest run --workspace`: 10372 passed, 19 skipped (4 threads)
 
@@ -1342,10 +1358,10 @@ for detailed scope and acceptance criteria.
   - [x] Persistent-machine Firecracker stop fails closed and preserves state
         until process exit is verified (#2007; live KVM recheck passed)
   - [~] Live warm-launch, fork-isolation, and restore-clock verification
-        — parent audit anchoring is fixed and live-proven (#1962); native HVF
-        now has a paused-parent handoff with child-owned channel wiring and
-        post-restore identity/grant re-pin (#2174). Serialized fresh-VMM
-        restore and live Apple Silicon witnesses remain open.
+    — parent audit anchoring is fixed and live-proven (#1962); native HVF
+    now has a paused-parent handoff with child-owned channel wiring and
+    post-restore identity/grant re-pin (#2174). Serialized fresh-VMM
+    restore and live Apple Silicon witnesses remain open.
   - [ ] Typed-connector egress-policy enrichment
   - [ ] OCI-image template build path and CLI facade completion
 
@@ -1372,7 +1388,7 @@ for detailed scope and acceptance criteria.
         to reproduce serde field order
 
 - [ ] Plan 306 — declared backing, tier honesty, and the check-time law
-  (`specs/plans/306-declared-backing-and-tier-honesty.md`)
+      (`specs/plans/306-declared-backing-and-tier-honesty.md`)
   - [ ] Declared-backing header + admission gate on contributor prose, which
         `check-doc-claims` deliberately excludes
   - [ ] Derive the ADR-001 per-backend tier matrix from `capabilities()`
@@ -1385,7 +1401,7 @@ for detailed scope and acceptance criteria.
   - [ ] Double-key the stale-name relief valves
 
 - [ ] Plan 309 — dependency reduction
-  (`specs/plans/309-dependency-reduction.md`)
+      (`specs/plans/309-dependency-reduction.md`)
   - [x] Phase 0 — the three defects: `mvm-build`'s hardcoded `thiserror` 1,
         the dead `rtnetlink` workspace entry, and `mvm-sdk`'s unconditional
         `schemars` leaking through feature unification into every consumer
@@ -1404,7 +1420,7 @@ for detailed scope and acceptance criteria.
         that number does not move when a dependency is removed (~120 orphans)
 
 - [ ] Plan 313 — egress token accounting, streaming, and compaction
-  (`specs/plans/313-egress-token-accounting-and-compaction.md`)
+      (`specs/plans/313-egress-token-accounting-and-compaction.md`)
   - [x] Phase 0 — verified: the substitution path buffers the whole response
         (`resp.bytes()`), loses chunk framing, has no body cap, and kills any
         stream held past the 30s whole-request timeout. Streaming and secret
@@ -1438,18 +1454,18 @@ for detailed scope and acceptance criteria.
         that came back, and a sealed run refuses a grant no mechanism on that
         tier backs (dev warns). No backend implements a real control yet —
         every tier still answers `declared`, which is WS4/WS5
-  - [x] WS4.0 — spike COMPLETE. `cpu` *is* delegated and `cpu.max` *is*
+  - [x] WS4.0 — spike COMPLETE. `cpu` _is_ delegated and `cpu.max` _is_
         writable, but cgroup v2 **migration** needs write access to the common
         ancestor and a login session's `session-N.scope` is `Delegate=no`. So
         WS4 became a systemd transient scope: measured 1.4937 cores against a
         1.5 target, `nr_throttled` confirming live throttling
   - [~] WS4 — CPU quota via `systemd-run --user --scope` (born bounded for
-        free: systemd registers the scope before exec'ing the payload). Per-boot
-        unique unit name, recorded in the VM state dir so the read-back can
-        still resolve it. Prod gate consults host mechanism availability, not
-        just backend kind. STILL OPEN: `exec_secs` enforcement; and the live
-        measurement predates the read-back landing, so a bounded boot's
-        *reported tier* is unwitnessed on hardware
+    free: systemd registers the scope before exec'ing the payload). Per-boot
+    unique unit name, recorded in the VM state dir so the read-back can
+    still resolve it. Prod gate consults host mechanism availability, not
+    just backend kind. STILL OPEN: `exec_secs` enforcement; and the live
+    measurement predates the read-back landing, so a bounded boot's
+    _reported tier_ is unwitnessed on hardware
   - [x] WS4b — the host admission budget: `HostBudget`/`MachineCharge` in
         `mvm-contract`, measured in `mvm-hostd/src/admission_budget.rs` and
         checked in `admit_for_run`. Counts only machines with a live pid marker
@@ -1468,42 +1484,42 @@ for detailed scope and acceptance criteria.
   - [ ] WS5 — wasm fuel **and** epoch (fuel alone bounds nothing in a host
         call) + `StoreLimits`
   - [~] WS5b — grants across snapshot/fork/restore; child ⊆ parent, closing
-        the restore-laundering path. `grants_are_subset` in mvm-contract (CPU
-        and wall clock read absence as unbounded, egress as deny-all;
-        mismatched CPU units refused, never converted), `CheckpointMeta.grants`
-        inside the content-address so a tampered parent record cannot justify
-        a wider child (skip-serialized when absent, so an older checkpoint
-        reads as schema-stale rather than tampered). BOTH restore paths check,
-        through one predicate `ensure_child_grants_within_parent`: the vm_full
-        fork and the warm-pool claim.
-        (a) LANDED: the cleared child grant rides `RestoredChild.cpu_grant` to
-        the child's spawn, and each restorer binds it where its cold boot binds
-        `VmmSpec.cpu_grant` — HVF wraps the supervisor spawn, FC prefixes its
-        launch line, the warm claim threads `ChildForkRequest.cpu_grant`. A
-        restored child's tier now reads back `Cgroup2CpuMax`. A same-identity
-        restore and a preloaded child stay unbounded by construction: neither
-        has an admitted plan at the moment its VMM starts.
-        STILL OPEN: (b) a warm parent seals no grant — a factory parent holds no
-        plan or `cpu_grant` by construction and one parent serves every claim,
-        so bounding a claimed child's CPU/wall clock needs a pool-level grant on
-        `StandbySpec`; its egress is already bounded (absent egress = deny-all).
-        Assessed and deferred with reason: there is no pool configuration to
-        plumb from — a pool's identity is *derived* from the provisioning
-        launch, so the grant needs a declaring surface and a compat-key
-        decision before it can be plumbed anywhere
+    the restore-laundering path. `grants_are_subset` in mvm-contract (CPU
+    and wall clock read absence as unbounded, egress as deny-all;
+    mismatched CPU units refused, never converted), `CheckpointMeta.grants`
+    inside the content-address so a tampered parent record cannot justify
+    a wider child (skip-serialized when absent, so an older checkpoint
+    reads as schema-stale rather than tampered). BOTH restore paths check,
+    through one predicate `ensure_child_grants_within_parent`: the vm_full
+    fork and the warm-pool claim.
+    (a) LANDED: the cleared child grant rides `RestoredChild.cpu_grant` to
+    the child's spawn, and each restorer binds it where its cold boot binds
+    `VmmSpec.cpu_grant` — HVF wraps the supervisor spawn, FC prefixes its
+    launch line, the warm claim threads `ChildForkRequest.cpu_grant`. A
+    restored child's tier now reads back `Cgroup2CpuMax`. A same-identity
+    restore and a preloaded child stay unbounded by construction: neither
+    has an admitted plan at the moment its VMM starts.
+    STILL OPEN: (b) a warm parent seals no grant — a factory parent holds no
+    plan or `cpu_grant` by construction and one parent serves every claim,
+    so bounding a claimed child's CPU/wall clock needs a pool-level grant on
+    `StandbySpec`; its egress is already bounded (absent egress = deny-all).
+    Assessed and deferred with reason: there is no pool configuration to
+    plumb from — a pool's identity is _derived_ from the provisioning
+    launch, so the grant needs a declaring surface and a compat-key
+    decision before it can be plumbed anywhere
   - [~] WS6 — four surfaces: manifest `[grants]`, `--grants-file` JSON,
-        `--cpu-limit` CLI flag (`--timeout` supplies the wall-clock dimension),
-        and `grants` on the `MachineSpec` DTO + `LaunchRequest` builder,
-        resolved per dimension by `mvm_core::grants_resolve` and wired into the
-        real `mvmctl` admission — `admission.rs` no longer hardcodes
-        `grants: None`. The projection now has production callers, so its
-        `dormant-controls.toml` entry is deleted. STILL OPEN: the SDK parity
-        fixture
+    `--cpu-limit` CLI flag (`--timeout` supplies the wall-clock dimension),
+    and `grants` on the `MachineSpec` DTO + `LaunchRequest` builder,
+    resolved per dimension by `mvm_core::grants_resolve` and wired into the
+    real `mvmctl` admission — `admission.rs` no longer hardcodes
+    `grants: None`. The projection now has production callers, so its
+    `dormant-controls.toml` entry is deleted. STILL OPEN: the SDK parity
+    fixture
   - [~] WS6b — doctor/inspect tier reporting, persisted-spec migration, docs.
-        The CLI boot path now calls `apply_grants` (via
-        `mvm_client::enforced_grants_after_start`), records the tier per-VM,
-        emits `plan.grants_enforced` on the chain, warns when a requested bound
-        did not happen, and surfaces the achieved tier in `machine inspect`.
-        Two `dormant-controls.toml` entries keep it from going unreachable
-        again. STILL OPEN: doctor reporting, persisted-spec migration, docs
-        gate, BDD suite
+    The CLI boot path now calls `apply_grants` (via
+    `mvm_client::enforced_grants_after_start`), records the tier per-VM,
+    emits `plan.grants_enforced` on the chain, warns when a requested bound
+    did not happen, and surfaces the achieved tier in `machine inspect`.
+    Two `dormant-controls.toml` entries keep it from going unreachable
+    again. STILL OPEN: doctor reporting, persisted-spec migration, docs
+    gate, BDD suite

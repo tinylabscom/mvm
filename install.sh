@@ -138,7 +138,7 @@ $SUDO install -m 0755 "$SRC/mvmctl" "$INSTALL_DIR/mvmctl"
 # ships the bridge + endpoint).
 # mvm-bridge and the substitution endpoint need no VM entitlement. The
 # supervisors are signed below before the install is reported successful.
-for hostbin in mvm-bridge mvm-hvf-supervisor mvm-libkrun-supervisor mvm-substitution-endpoint; do
+for hostbin in mvm-bridge mvm-hvf-supervisor mvm-libkrun-supervisor mvm-network-endpoint; do
   if [ -f "$SRC/$hostbin" ]; then
     $SUDO install -m 0755 "$SRC/$hostbin" "$INSTALL_DIR/$hostbin"
     say "Installed: $INSTALL_DIR/$hostbin"

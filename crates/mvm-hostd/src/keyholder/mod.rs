@@ -23,8 +23,8 @@ pub use resolver::{LocalResolver, ResolveError, SecretResolver};
 pub use signer::{SigV4Input, SignError, Signature, Signer, SigningInput};
 pub use sigv4::{SigV4BuildError, build_sigv4_input};
 pub use substitution::{
-    Placeholder, SECRET_PLACEHOLDER_PREFIX, SignDispatchError, SubstituteError,
-    SubstitutionEndpoint, SubstitutionRegistry, find_placeholder,
+    NetworkEndpoint, Placeholder, SECRET_PLACEHOLDER_PREFIX, SignDispatchError, SubstituteError,
+    SubstitutionRegistry, find_placeholder,
 };
 
 /// Re-exported so a caller who only depends on `mvm-hostd` (e.g. mvmd,

@@ -331,7 +331,7 @@ fn docker_endpoint_plan(
     }))
 }
 
-/// Build the [`crate::substitution_spawn::SubstitutionSpawnParams`] a docker
+/// Build the [`crate::network_endpoint_spawn::SubstitutionSpawnParams`] a docker
 /// run's endpoint spawn needs from a decided [`DockerEndpointPlan`]. Pure
 /// (no I/O) so the docker-specific literal fields are unit-testable: always
 /// `Uds` inside the bind-mounted run dir (the in-container forward proxy
@@ -339,17 +339,17 @@ fn docker_endpoint_plan(
 /// intermediate, and `raw_egress` unconditionally `false` — the agent's
 /// forward proxy always speaks the `WireRequest` wire protocol, never a
 /// raw byte relay.
-fn docker_substitution_spawn_params<'a>(
+fn docker_network_endpoint_spawn_params<'a>(
     plan: &'a DockerEndpointPlan,
     network_policy: &'a mvm_core::network_policy::NetworkPolicy,
-) -> crate::substitution_spawn::SubstitutionSpawnParams<'a> {
-    crate::substitution_spawn::SubstitutionSpawnParams {
+) -> crate::network_endpoint_spawn::SubstitutionSpawnParams<'a> {
+    crate::network_endpoint_spawn::SubstitutionSpawnParams {
         vm_name: &plan.vm_name,
         state_dir: &plan.state_dir,
         tenant: &plan.tenant,
         secrets: &plan.secrets,
         redaction: &plan.redaction,
-        transport: crate::substitution_spawn::EndpointTransport::Uds {
+        transport: crate::network_endpoint_spawn::EndpointTransport::Uds {
             path: plan.socket_path.clone(),
         },
         terminator_listen: None,
@@ -358,6 +358,7 @@ fn docker_substitution_spawn_params<'a>(
         raw_egress: false,
         resolver_remote: None,
         binding_store_dir: None,
+        flowmux_identity: None,
     }
 }
 
@@ -374,8 +375,8 @@ fn spawn_docker_egress_endpoint_if_needed(
     let Some(plan) = docker_endpoint_plan(config, state_dir, run_dir)? else {
         return Ok(None);
     };
-    let params = docker_substitution_spawn_params(&plan, &config.network_policy);
-    crate::substitution_spawn::spawn_substitution_endpoint(params)?;
+    let params = docker_network_endpoint_spawn_params(&plan, &config.network_policy);
+    crate::network_endpoint_spawn::spawn_network_endpoint(params)?;
     Ok(Some(plan.socket_path))
 }
 
@@ -568,7 +569,7 @@ impl VmBackend for DockerBackend {
         if !out.status.success() {
             // Roll back a half-spawned endpoint so a failed start leaves no
             // decrypted-secret process behind.
-            crate::substitution_spawn::reap_substitution_endpoint(&state_dir, &config.name);
+            crate::network_endpoint_spawn::reap_network_endpoint(&state_dir, &config.name);
             bail!(
                 "docker run failed for workload '{}': {}",
                 config.name,
@@ -583,7 +584,7 @@ impl VmBackend for DockerBackend {
             let _ = Command::new(&docker)
                 .args(["rm", "-f", &config.name])
                 .output();
-            crate::substitution_spawn::reap_substitution_endpoint(&state_dir, &config.name);
+            crate::network_endpoint_spawn::reap_network_endpoint(&state_dir, &config.name);
             return Err(e);
         }
 
@@ -636,7 +637,7 @@ impl VmBackend for DockerBackend {
         // Reap the per-VM substitution endpoint first, so a crashed
         // container's decrypted-secret process can't outlive it. Idempotent
         // + a no-op when the run spawned none.
-        crate::substitution_spawn::reap_substitution_endpoint(&vm_state_dir(&id.0), &id.0);
+        crate::network_endpoint_spawn::reap_network_endpoint(&vm_state_dir(&id.0), &id.0);
         let docker = locate_docker()?;
         let target = self.docker_target(id);
         // Graceful stop, then remove the container so the name can be
@@ -1113,10 +1114,10 @@ mod tests {
             "the endpoint socket must live inside the bind-mounted run dir"
         );
 
-        let params = docker_substitution_spawn_params(&plan, &config.network_policy);
+        let params = docker_network_endpoint_spawn_params(&plan, &config.network_policy);
         assert_eq!(
             params.transport,
-            crate::substitution_spawn::EndpointTransport::Uds {
+            crate::network_endpoint_spawn::EndpointTransport::Uds {
                 path: plan.socket_path.clone(),
             }
         );

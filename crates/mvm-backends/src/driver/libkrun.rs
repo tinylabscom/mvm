@@ -211,7 +211,7 @@ fn relay_libkrun_supervisor_config(spec: &VmmSpec, state_dir: &Path) -> Result<S
         // there. A spec without an EGRESS_PORT channel (none of the workload
         // paths) leaves this unset and the derived socket unchanged.
         transparent_terminator_port: None,
-        egress_relay_socket: spec.host_socket_for_service(GuestService::Substitution),
+        egress_relay_socket: spec.host_socket_for_service(GuestService::NetworkFlow),
         exclusive_image_lock: None,
     })
 }
@@ -700,7 +700,7 @@ mod tests {
             KernelImage::Path("/img/Image".into()),
             vec![
                 host_dials(GuestService::MachineControl, "/run/agent.sock"),
-                guest_dials(GuestService::Substitution, "/run/egress.sock"),
+                guest_dials(GuestService::NetworkFlow, "/run/egress.sock"),
             ],
             vec![],
         );
@@ -920,7 +920,7 @@ mod tests {
             KernelImage::Path("/img/Image".into()),
             vec![
                 host_dials(GuestService::MachineControl, "/run/agent.sock"),
-                guest_dials(GuestService::Substitution, "/run/egress.sock"),
+                guest_dials(GuestService::NetworkFlow, "/run/egress.sock"),
                 guest_dials(GuestService::WorkloadExit, "/run/exit.sock"),
                 guest_dials(GuestService::Broker, "/run/broker.sock"),
                 host_dials(
@@ -1158,6 +1158,26 @@ mod tests {
         assert_eq!(
             mvm_core::cpu_scope::rendered_argv(&cmd),
             vec!["/usr/bin/mvm-libkrun-supervisor"]
+        );
+    }
+
+    #[test]
+    fn libkrun_spec_carries_exactly_one_network_flow_and_no_l3() {
+        let spec = spec_with(
+            KernelImage::Bundled,
+            vec![
+                guest_dials(GuestService::NetworkFlow, "/run/egress.sock"),
+                host_dials(GuestService::MachineControl, "/run/agent.sock"),
+            ],
+            vec![],
+        );
+        let ports = &spec.vsock;
+        let mut services: Vec<_> = ports.iter().map(|p| p.service).collect();
+        services.sort();
+        let expected = [GuestService::MachineControl, GuestService::NetworkFlow];
+        assert_eq!(
+            services, expected,
+            "libkrun spec vsock must contain exactly one NetworkFlow and no retired L3 services"
         );
     }
 }

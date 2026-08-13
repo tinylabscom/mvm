@@ -4,11 +4,11 @@
 //! This module remains as the shared low-level process-spawn scaffold and for
 //! tests that exercise the old `mvm-broker` / `mvm-audit-signer` binaries.
 //!
-//! The helpers mirror [`crate::host::substitution_spawn`]: locate the bin, hand it a
+//! The helpers mirror [`crate::host::network_endpoint_spawn`]: locate the bin, hand it a
 //! JSON config on stdin, detach via `setsid`, wait for readiness, and write a
 //! PID file for direct reaping in tests. mvm-backend can't depend on mvm-hostd,
 //! so the config is emitted as raw JSON matching the bin's `deny_unknown_fields`
-//! `SubprocessConfig` — exactly as `spawn_substitution_endpoint` does for its
+//! `SubprocessConfig` — exactly as `spawn_network_endpoint` does for its
 //! `EndpointConfig`.
 //!
 //! Chain provenance: the audit-signer signs with the **host-signer key**
@@ -130,7 +130,7 @@ fn spawn_audit_signer_with_timeout(
 
 /// Locate a per-VM subprocess binary `bin`: `<env_var>` override → sibling of
 /// the current exe → workspace `target/{release,debug}`. Mirrors
-/// `substitution_spawn::resolve_substitution_endpoint_path`; shared by the
+/// `network_endpoint_spawn::resolve_network_endpoint_path`; shared by the
 /// audit-signer + broker spawns so the lookup can't drift.
 pub(crate) fn resolve_subprocess_bin(bin: &str, env_var: &str) -> Result<PathBuf> {
     if let Some(p) = std::env::var_os(env_var).map(PathBuf::from) {
@@ -438,7 +438,7 @@ pub fn reap_broker_services(state_dir: &Path) {
 /// RAII reaper for the per-VM broker services, armed while a backend's `start`
 /// wires the VM and dropped on any early-return so a half-spawned pair can't
 /// outlive a failed launch. Defused once the VM is fully up (the `stop` path
-/// then owns teardown). Mirrors `substitution_spawn::EndpointGuard`.
+/// then owns teardown). Mirrors `network_endpoint_spawn::EndpointGuard`.
 pub struct BrokerServicesGuard {
     /// `Some(state_dir)` while armed; `None` once defused.
     state_dir: Option<PathBuf>,

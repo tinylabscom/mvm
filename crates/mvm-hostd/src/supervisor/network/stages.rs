@@ -139,7 +139,7 @@ impl RedactingSubstitution {
     ///
     /// This is the single redaction definition shared by both host-side egress
     /// chokepoints — the packet-level gateway bridge (`substitute`, libkrun/FC)
-    /// and the request-level substitution endpoint (`substitution_proxy`,
+    /// and the request-level substitution endpoint (`network_endpoint_proxy`,
     /// QEMU + any backend that routes egress through the per-VM endpoint) — so
     /// the two scrub identically with no drift.
     pub fn redact_bytes(&self, payload: &[u8]) -> Option<(Vec<u8>, RedactionHits)> {

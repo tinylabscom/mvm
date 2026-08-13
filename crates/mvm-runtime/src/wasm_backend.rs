@@ -372,7 +372,7 @@ impl WasmBackend {
 /// Owned inputs for a wasm run's per-VM substitution-endpoint spawn, decided
 /// once by [`wasm_endpoint_plan`] so the skip/spawn branch is unit-testable
 /// without touching a subprocess. Kept separate from
-/// `crate::substitution_spawn::SubstitutionSpawnParams` (which borrows) so
+/// `crate::network_endpoint_spawn::SubstitutionSpawnParams` (which borrows) so
 /// the decided values can be asserted directly in a test.
 struct WasmEndpointPlan {
     vm_name: String,
@@ -416,11 +416,11 @@ fn wasm_endpoint_plan(
         tenant,
         secrets,
         redaction,
-        socket_path: mvm_core::config::vm_substitution_endpoint_socket(&config.name),
+        socket_path: mvm_core::config::vm_network_endpoint_socket(&config.name),
     }))
 }
 
-/// Build the [`substitution_spawn::SubstitutionSpawnParams`] a wasm run's
+/// Build the [`network_endpoint_spawn::SubstitutionSpawnParams`] a wasm run's
 /// endpoint spawn needs from a decided [`WasmEndpointPlan`]. Pure (no I/O)
 /// so the wasm-specific literal fields are unit-testable without a spawn:
 /// always `Uds` (the host-import connects to the endpoint directly — wasm has
@@ -430,17 +430,17 @@ fn wasm_endpoint_plan(
 /// when a run carries no secrets — `raw_egress` is unconditionally `false`:
 /// the `mvm:egress` host-import always speaks the `WireRequest` wire
 /// protocol, never a raw byte relay.
-fn wasm_substitution_spawn_params<'a>(
+fn wasm_network_endpoint_spawn_params<'a>(
     plan: &'a WasmEndpointPlan,
     network_policy: &'a mvm_core::network_policy::NetworkPolicy,
-) -> crate::substitution_spawn::SubstitutionSpawnParams<'a> {
-    crate::substitution_spawn::SubstitutionSpawnParams {
+) -> crate::network_endpoint_spawn::SubstitutionSpawnParams<'a> {
+    crate::network_endpoint_spawn::SubstitutionSpawnParams {
         vm_name: &plan.vm_name,
         state_dir: &plan.state_dir,
         tenant: &plan.tenant,
         secrets: &plan.secrets,
         redaction: &plan.redaction,
-        transport: crate::substitution_spawn::EndpointTransport::Uds {
+        transport: crate::network_endpoint_spawn::EndpointTransport::Uds {
             path: plan.socket_path.clone(),
         },
         terminator_listen: None,
@@ -449,6 +449,7 @@ fn wasm_substitution_spawn_params<'a>(
         raw_egress: false,
         resolver_remote: None,
         binding_store_dir: None,
+        flowmux_identity: None,
     }
 }
 
@@ -468,8 +469,8 @@ fn spawn_wasm_egress_endpoint_if_needed(
     };
     std::fs::create_dir_all(state_dir)
         .map_err(|e| anyhow::anyhow!("create per-VM state dir {}: {e}", state_dir.display()))?;
-    let params = wasm_substitution_spawn_params(&plan, &config.network_policy);
-    crate::substitution_spawn::spawn_substitution_endpoint(params)?;
+    let params = wasm_network_endpoint_spawn_params(&plan, &config.network_policy);
+    crate::network_endpoint_spawn::spawn_network_endpoint(params)?;
     Ok(Some(plan.socket_path))
 }
 
@@ -544,7 +545,7 @@ impl VmBackend for WasmBackend {
             // A wasm run is synchronous end-to-end inside `start` — there is
             // no later `stop()` boundary to reap the endpoint at, so its
             // decrypted secrets must not outlive this call either way.
-            crate::substitution_spawn::reap_substitution_endpoint(&state_dir, &config.name);
+            crate::network_endpoint_spawn::reap_network_endpoint(&state_dir, &config.name);
             mvm_vmm::host::netd_spawn::reap_netd(&state_dir);
         }
         let completed = result?;
@@ -1361,7 +1362,7 @@ mod tests {
         // the host import rather than a vsock device.
         assert_eq!(
             by_name("vsock").alternative,
-            CapabilityAlternative::SubstitutionEndpointOverWasmImport
+            CapabilityAlternative::NetworkEndpointOverWasmImport
         );
         // No vCPU state to restore, so the substitute is a cold start driven
         // by the same signed plan.
@@ -1760,7 +1761,7 @@ mod tests {
         );
     }
 
-    // ── P3b.1: wasm_endpoint_plan / wasm_substitution_spawn_params ──
+    // ── P3b.1: wasm_endpoint_plan / wasm_network_endpoint_spawn_params ──
     // Decision + params only — no subprocess is ever spawned in this module.
 
     // Mirrors `libkrun_substitution_not_spawned_when_no_secrets_and_no_egress`:
@@ -1838,14 +1839,14 @@ mod tests {
         assert_eq!(plan.secrets, vec![secret]);
         assert_eq!(
             plan.socket_path,
-            mvm_core::config::vm_substitution_endpoint_socket("secret-wasm-vm")
+            mvm_core::config::vm_network_endpoint_socket("secret-wasm-vm")
         );
 
-        let params = wasm_substitution_spawn_params(&plan, &config.network_policy);
+        let params = wasm_network_endpoint_spawn_params(&plan, &config.network_policy);
         assert_eq!(params.vm_name, "secret-wasm-vm");
         assert_eq!(
             params.transport,
-            crate::substitution_spawn::EndpointTransport::Uds {
+            crate::network_endpoint_spawn::EndpointTransport::Uds {
                 path: plan.socket_path.clone(),
             }
         );
@@ -2491,7 +2492,7 @@ mod tests {
             /// `canned_response`, and hand the received request back on the
             /// join handle — the stub substitution endpoint the P3a gate
             /// proves the wasm round-trip against.
-            fn spawn_stub_substitution_endpoint(
+            fn spawn_stub_network_endpoint(
                 socket_path: std::path::PathBuf,
                 canned_response: WireResponse,
             ) -> thread::JoinHandle<WireRequest> {
@@ -2522,7 +2523,7 @@ mod tests {
                 };
 
                 let server =
-                    spawn_stub_substitution_endpoint(socket_path.clone(), canned_response.clone());
+                    spawn_stub_network_endpoint(socket_path.clone(), canned_response.clone());
 
                 let request_json = serde_json::to_string(&expected_request).unwrap();
                 let resp_ptr: i32 = 4096;

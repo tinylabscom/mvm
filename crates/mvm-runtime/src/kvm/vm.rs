@@ -175,7 +175,7 @@ impl KvmVm {
     ) -> Result<KvmEgressResult, KvmError> {
         self.run_with_vsock_egress(mem, cfg, timeout, stop, |vsock, active| {
             vsock.set_substitution_activity(active.clone());
-            vsock.set_substitution_endpoint(endpoint_uds);
+            vsock.set_network_endpoint(endpoint_uds);
         })
     }
 
