@@ -5,9 +5,11 @@
 **SHIPPED — PR #2429 merged to `main`; hardening items closed in #2441.** E1,
 E2, and E3 are complete, the browser demo is live at `/demo`, and the remaining
 hardening items are now closed. This follow-up fix (#2447) adds the wasm build
-to `.github/workflows/pages.yml` and corrects `web/mvm-demo/build.sh` to
-preserve the `pkg/` subdirectory when staging, so the live `/demo` route serves
-the generated bundle.
+to `.github/workflows/pages.yml`, corrects `web/mvm-demo/build.sh` to
+preserve the `pkg/` subdirectory when staging, and adds `public/src/pages/demo.astro`
+so `/demo` resolves in Astro dev mode without being intercepted by Starlight's
+catch-all route. Generated `public/public/demo/` artifacts are ignored and rebuilt
+on demand.
 
 Bound by [ADR-024](../adrs/024-wasm-sandbox-backend.md)'s three constraints.
 Adds no numbered security claim, and does not request one.
@@ -513,6 +515,9 @@ relocation and the design is wrong.
 - [x] GitHub Pages deploy workflow (`.github/workflows/pages.yml`) builds the
       wasm demo with `wasm-pack` + `wasm-opt` before `pnpm build`, so the live
       `/demo` route includes the generated `pkg/` bundle.
+- [x] Local Astro dev server serves `/demo/` in dev mode via
+      `public/src/pages/demo.astro`; the generated `public/public/demo/`
+      directory is ignored so it cannot be committed stale.
 
 ## Sequencing constraints
 
