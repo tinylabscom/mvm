@@ -2,19 +2,26 @@
 
 ## Status
 
-Accepted — boundary ratified; scoped as the **shared-kernel container dev
-tier** (opt-in, never auto-selected, refused by production admission,
-honest capabilities, none of the hardware-isolation claims). Implemented
-by `DockerBackend` (`mvm_runtime::docker_backend`), selectable only via
-`--hypervisor docker` / `MVM_BACKEND=docker`.
+**Retired — reversed by Plan 329.** The Docker dev-tier backend has been
+removed entirely. MVM is now unapologetically microVM-only: workloads run
+through hardware-virtualized backends (Firecracker, libkrun, HVF, QEMU) or
+the claim-free Wasm portability tier. Hosts without a usable hypervisor fail
+closed with a clear diagnostic; there is no container fallback, opt-in or
+otherwise.
 
-This ADR deliberately narrows two older statements: ADR-007's "no Docker
-backend anywhere on the execution path" and the security posture doc's "no
-container fallback". Both stand for the **production and default** paths;
-what changes is that a clearly-labeled, explicitly-selected container tier
-now exists for development, demo, and CI-sandbox use. The production rule
-is unchanged: a host with no microVM substrate still fails closed on every
-path it did not explicitly opt out of.
+This ADR is kept as a historical record of the decision to add the tier and
+of the discipline that governed it while it existed. The reversal does not
+change the facts recorded below; it removes their implementation. ADR-007's
+"no Docker backend anywhere on the execution path" and the security posture
+doc's "no container fallback" are restored without carve-out.
+
+> **Retirement rationale:** The existence of a Docker-backed tier created
+> brand confusion between containers and microVMs, carried a large
+> host-privileged code path, and diluted MVM's core value proposition of
+> hardware-isolated per-workload kernels. The engineering cost of keeping
+> the tier honest (seccomp, capability, namespace, and cgroup hardening
+> that still could not reach hardware isolation) exceeded its value as a
+> dev convenience. The simpler, more honest product is microVM-only.
 
 ## Context
 

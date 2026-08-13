@@ -163,9 +163,7 @@ pub fn build_from_start_config(
             ("mvm-hvf-supervisor", state_dir.join("hvf.pid"), false)
         }
         BackendKind::Qemu => ("qemu-system-", state_dir.join("qemu.pid"), false),
-        BackendKind::Mock | BackendKind::Wasm | BackendKind::Docker => {
-            ("", state_dir.join("noop.pid"), false)
-        }
+        BackendKind::Mock | BackendKind::Wasm => ("", state_dir.join("noop.pid"), false),
     };
 
     let substitution_socket = mvm_core::config::vm_network_endpoint_socket(name);

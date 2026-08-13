@@ -12,8 +12,7 @@ use mvm_build::guest_agent_build::{
 use mvm_build::verity_initrd::install_verity_initrd_from_binary;
 use mvm_core::arch::GuestArch;
 use mvm_core::plan::test_support::PlanFixture;
-use mvm_core::vm_backend::{VmBackend, VmStartConfig, VmVolume, VmVolumeKind};
-use mvm_runtime::docker_backend::DockerBackend;
+use mvm_core::vm_backend::{VmVolume, VmVolumeKind};
 use mvm_runtime::vm::volume_registry::LocalVolumeCatalog;
 
 use crate::world::CliWorld;
@@ -187,42 +186,6 @@ fn unadmitted_volume_is_refused(world: &mut CliWorld) {
         .expect_err("an unadmitted volume must be refused");
     assert!(
         error.contains("not named in the signed ExecutionPlan"),
-        "unexpected refusal: {error}"
-    );
-}
-
-#[when("I ask the Docker backend to attach a block volume")]
-fn ask_docker_for_block_volume(world: &mut CliWorld) {
-    let config = VmStartConfig {
-        name: "bdd-docker-volume".to_string(),
-        rootfs_path: "alpine:latest".to_string(),
-        volumes: vec![VmVolume {
-            host: "/private/work.ext4".to_string(),
-            guest: "/data".to_string(),
-            read_only: true,
-            kind: VmVolumeKind::Disk,
-            ..Default::default()
-        }],
-        ..Default::default()
-    };
-    world.volume_backend_result = Some(
-        DockerBackend::new()
-            .start(&config)
-            .map(|_| ())
-            .map_err(|error| error.to_string()),
-    );
-}
-
-#[then("the backend refuses the unsupported block volume before boot")]
-fn unsupported_block_volume_is_refused(world: &mut CliWorld) {
-    let error = world
-        .volume_backend_result
-        .as_ref()
-        .expect("the backend capability check must run")
-        .as_ref()
-        .expect_err("Docker must refuse block volumes");
-    assert!(
-        error.contains("cannot attach block volume"),
         "unexpected refusal: {error}"
     );
 }

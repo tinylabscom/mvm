@@ -240,7 +240,6 @@ mod tests {
     #[test]
     fn collect_warm_start_support_reports_per_backend_tier() {
         let r = collect_warm_start_support();
-        assert_eq!(r.backends.get("docker"), Some(&"unsupported"));
         assert_eq!(r.backends.get("firecracker"), Some(&"unsupported"));
         assert_eq!(r.backends.get("libkrun"), Some(&"unsupported"));
         assert_eq!(r.backends.get("qemu"), Some(&"unsupported"));
@@ -259,7 +258,6 @@ mod tests {
 
         let mut expected_backends = vec![
             ("apple-container".to_string(), "save-restore"),
-            ("docker".to_string(), "unsupported"),
             ("firecracker".to_string(), "unsupported"),
             ("hvf".to_string(), "save-restore"),
             ("libkrun".to_string(), "unsupported"),
@@ -268,7 +266,6 @@ mod tests {
         ];
         let mut expected_standby_pool = vec![
             ("apple-container".to_string(), false),
-            ("docker".to_string(), false),
             ("firecracker".to_string(), true),
             ("hvf".to_string(), true),
             ("libkrun".to_string(), false),
@@ -301,7 +298,6 @@ mod tests {
         let names: Vec<_> = rows.iter().map(|r| r.backend.as_str()).collect();
         let mut expected = vec![
             "apple-container",
-            "docker",
             "firecracker",
             "hvf",
             "libkrun",

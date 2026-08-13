@@ -44,7 +44,6 @@ pub enum PackBackend {
     Firecracker,
     Libkrun,
     Qemu,
-    Docker,
     Hvf,
 }
 
@@ -54,7 +53,6 @@ impl fmt::Display for PackBackend {
             PackBackend::Firecracker => "firecracker",
             PackBackend::Libkrun => "libkrun",
             PackBackend::Qemu => "qemu",
-            PackBackend::Docker => "docker",
             PackBackend::Hvf => "hvf",
         })
     }

@@ -123,13 +123,6 @@ impl ResourceControls {
                 cpu: CpuControl::WasmFuel,
                 wall_clock: WallClockControl::WasmEpoch,
             },
-            // Shares the host kernel; a cgroup here is the container runtime's
-            // to own, not ours. Nor is there a supervisor process of ours to
-            // hold a deadline.
-            BackendKind::Docker => Self {
-                cpu: CpuControl::None,
-                wall_clock: WallClockControl::None,
-            },
             BackendKind::Mock => Self {
                 cpu: CpuControl::None,
                 wall_clock: WallClockControl::None,
@@ -223,7 +216,6 @@ mod tests {
             BackendKind::Mock,
             BackendKind::Hvf,
             BackendKind::Wasm,
-            BackendKind::Docker,
             BackendKind::AppleContainer,
         ] {
             let _ = ResourceControls::for_backend(kind);
@@ -272,7 +264,6 @@ mod tests {
             BackendKind::Qemu,
             BackendKind::Hvf,
             BackendKind::AppleContainer,
-            BackendKind::Docker,
             BackendKind::Mock,
         ] {
             assert_eq!(

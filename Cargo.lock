@@ -2736,7 +2736,6 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tracing",
- "which",
 ]
 
 [[package]]
@@ -3342,7 +3341,6 @@ dependencies = [
  "vm-memory",
  "wasmtime",
  "wasmtime-wasi",
- "which",
  "zeroize",
 ]
 

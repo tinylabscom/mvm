@@ -1086,6 +1086,7 @@ impl ReceiptInput {
             }
         };
 
+        mvm_runtime::backend::AnyBackend::require_hypervisor_selectable(backend)?;
         let selected_backend = mvm_runtime::backend::AnyBackend::from_hypervisor(backend);
         crate::exec::validate_image_egress_backend(
             &selected_backend,

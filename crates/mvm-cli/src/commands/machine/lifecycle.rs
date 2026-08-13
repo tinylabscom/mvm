@@ -79,6 +79,7 @@ pub(super) fn start_machine(args: MachineStartArgs) -> Result<()> {
         .as_deref()
         .map(String::from)
         .unwrap_or_else(|| shared::resolve_effective_hypervisor("firecracker"));
+    mvm_runtime::backend::AnyBackend::require_hypervisor_selectable(&effective_hypervisor)?;
     let receipt_input = machine_start_receipt_input(&spec, &effective_hypervisor)?;
     // A granted allow-list is what the gate enforces; the legacy
     // `net`/`allow_host` fields decide the policy only for a spec that granted
