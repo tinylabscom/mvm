@@ -427,6 +427,7 @@ fn accept_one_sync(bound: Bound) -> std::io::Result<std::os::unix::net::UnixStre
         }
         #[cfg(target_os = "linux")]
         Bound::Vsock(listener) => {
+            use std::os::fd::FromRawFd;
             let fd =
                 mvm_hostd::supervisor::network_endpoint_proxy::vsock::accept(listener.raw_fd())?;
             // SAFETY: `fd` is an owned connected stream socket from accept(2);
