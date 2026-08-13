@@ -73,7 +73,8 @@
       the focused x86_64 Linux cross-build are green. The CI test-linux and lint-core lanes passed on PR #2324, and a
       local x86_64 Linux cross-build passes on current main; the platform
       gates are complete.
-- [x] Issue-closeout batch — **#2165, #2321, #2323**. #2165 closed as
+- [x] Issue-closeout batch — **#2165, #2321, #2323**. Closed 2026-08-13.
+      #2165 closed as
       completed by PR #2330: workload-runner root bootargs now agree with
       read-only block attachments across the selected drivers. #2321 and #2323
       were previously closed; the batch is complete.
