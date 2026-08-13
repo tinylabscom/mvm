@@ -20,13 +20,14 @@
 //! Handlers registered at startup:
 //!
 //! - `host.audit.v1` — workload-emitted audit emission. Only
-//!   registered when `cfg.audit_signer_uds_path` is set, since the
+//!   registered when admitted and `cfg.audit_signer_uds_path` is set, since the
 //!   handler needs a UDS path to forward to. If the supervisor spawns
 //!   without an audit-signer (test fixtures, doctor probes), the
 //!   binary logs a warn and `host.audit.v1` calls return `NotBound`.
+//! - `host.time.v1` — registered only when named by the exact admitted
+//!   service bindings; returns the host-authoritative wall clock.
 //!
-//! `host.time.v1`, `host.cost.v1`, and `broker.v1` are still
-//! unregistered; their handler scaffolds land later.
+//! `host.cost.v1` and `broker.v1` remain unregistered.
 
 use std::io::Read;
 use std::sync::Arc;
@@ -38,6 +39,7 @@ use tracing::{error, info, warn};
 use mvm_hostd::broker::audit_client::AuditClient;
 use mvm_hostd::broker::config::{SubprocessConfig, parse as parse_config};
 use mvm_hostd::broker::handlers::host_audit_v1::HostAuditV1Handler;
+use mvm_hostd::broker::handlers::register_bound_handlers;
 use mvm_hostd::broker::registry::Registry;
 use mvm_hostd::broker::server::serve_on_listener;
 
@@ -119,6 +121,12 @@ fn main() -> Result<()> {
 /// leaves the registry without that handler; callers get
 /// `Err(NotBound)` for the missing service.
 fn register_handlers(registry: &mut Registry, cfg: &SubprocessConfig) {
+    register_bound_handlers(registry, &cfg.services_bindings);
+    let host_audit = mvm_core::protocol::broker::ServiceId::parse("host.audit.v1")
+        .expect("host.audit.v1 is a valid ServiceId");
+    if !cfg.services_bindings.contains(&host_audit) {
+        return;
+    }
     match &cfg.audit_signer_uds_path {
         Some(path) => {
             let client = AuditClient::new(path.clone());

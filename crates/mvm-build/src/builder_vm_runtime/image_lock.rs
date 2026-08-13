@@ -466,6 +466,32 @@ fn contended_lock_error(lock_path: &Path, waited: Duration, wait: LockWait) -> B
     ))
 }
 
+/// Is another process holding the store image right now?
+///
+/// A probe, not a claim: it tries the lock without waiting and releases it
+/// immediately. `true` means a builder VM currently owns the image, which is
+/// the signal that this build should look for a session to share rather than
+/// queue behind it.
+///
+/// Any non-contention error reads as not-contended, so a broken or
+/// unlockable sidecar sends the caller down the ordinary path, where the real
+/// acquire reports the real error instead of this probe guessing at it.
+pub fn nix_store_image_is_contended(builder_cache_dir: &Path, arch: &str) -> bool {
+    let image = builder_cache_dir.join(format!("nix-store-{arch}.img"));
+    let lock_path = sidecar_lock_path(&image);
+    if !lock_path.exists() {
+        // No sidecar means no builder has ever locked this image, and probing
+        // would create the file as a side effect. Report free.
+        return false;
+    }
+    match acquire_sidecar_lock_within(&lock_path, LockWait::none()) {
+        // Took it, so nobody else held it. Released as this returns.
+        Ok(_) => false,
+        Err(BuilderVmError::ExtractionFailed(msg)) => msg.contains("is still held by"),
+        Err(_) => false,
+    }
+}
+
 /// Find or create the persistent `<builder_cache_dir>/nix-store-<arch>.img`
 /// sparse image and hold an exclusive host-side lock on it.
 ///
@@ -833,6 +859,43 @@ mod tests {
         drop(guard);
         hold_image_lock(image.lock_path(), LockWait::none())
             .expect("the lock must be free once its holder drops");
+    }
+
+    #[test]
+    fn a_free_store_image_does_not_read_as_contended() {
+        let scratch = tempfile::TempDir::new().unwrap();
+        let cache = scratch.path().join("builder-vm");
+
+        // Never locked: no sidecar exists yet, and probing must not create one
+        // as a side effect.
+        assert!(!nix_store_image_is_contended(&cache, "aarch64"));
+        assert!(
+            !cache.join("nix-store-aarch64.img.lock").exists(),
+            "the probe must not leave a sidecar behind"
+        );
+
+        // Locked once, then released.
+        let guard = acquire_nix_store_image_lock(&cache, "aarch64", 64).unwrap();
+        drop(guard);
+        assert!(
+            !nix_store_image_is_contended(&cache, "aarch64"),
+            "a released lock is not contention"
+        );
+    }
+
+    #[test]
+    fn a_held_store_image_reads_as_contended_and_the_probe_does_not_steal_it() {
+        let scratch = tempfile::TempDir::new().unwrap();
+        let cache = scratch.path().join("builder-vm");
+        let guard = acquire_nix_store_image_lock(&cache, "aarch64", 64).unwrap();
+
+        assert!(nix_store_image_is_contended(&cache, "aarch64"));
+        // Probing is not acquiring: the holder still holds it afterwards, so a
+        // second probe sees the same answer.
+        assert!(nix_store_image_is_contended(&cache, "aarch64"));
+
+        drop(guard);
+        assert!(!nix_store_image_is_contended(&cache, "aarch64"));
     }
 
     #[test]

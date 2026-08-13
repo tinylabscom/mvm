@@ -252,6 +252,7 @@ fn build_volume_configs(config: &VmStartConfig) -> Result<Vec<VolumeConfig>> {
         .volumes
         .iter()
         .zip(block_devices)
+        .filter(|(volume, _)| !mvm_vmm::host::spec_map::is_sdk_sidecar_volume(volume))
         .enumerate()
         .map(|(idx, (volume, device))| {
             let (kind, device) = match volume.kind {
@@ -450,6 +451,31 @@ mod tests {
             mvm_agentd::vsock::VolumeConfigKind::Block
         ));
         assert_eq!(env.volumes[1].device.as_deref(), Some("/dev/vdb"));
+    }
+
+    #[test]
+    fn build_env_excludes_the_reserved_sdk_sidecar_from_user_volumes() {
+        let (_env, _dir) = test_env();
+        let config = VmStartConfig {
+            name: "test-vm".into(),
+            roothash: Some(VALID_HASH.into()),
+            runtime_overlay_roothash: Some(VALID_HASH.into()),
+            volumes: vec![
+                VmVolumeKind::Disk.into_volume("/host/data", "/data", false),
+                VmVolumeKind::Disk.into_volume(
+                    "/host/sdk.ext4",
+                    mvm_core::plan::SDK_SIDECAR_GUEST_PATH,
+                    true,
+                ),
+            ],
+            ..base_config()
+        };
+
+        let env = build_activation_environment(&config).unwrap();
+        assert_eq!(env.volumes.len(), 1);
+        assert_eq!(env.volumes[0].tag, "uvol0");
+        assert_eq!(env.volumes[0].mountpoint, "/data");
+        assert_eq!(env.volumes[0].device.as_deref(), Some("/dev/vdb"));
     }
 
     #[test]

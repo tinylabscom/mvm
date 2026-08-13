@@ -113,6 +113,15 @@ pub fn workload_volume_devices(config: &VmStartConfig) -> Vec<Option<String>> {
         .collect()
 }
 
+/// Return whether a configured volume is the reserved SDK sidecar.
+///
+/// The sidecar is physically a disk, but it is not a user volume: the guest
+/// mounts it through the dedicated `mvm.sdk_dev` contract at `/mvm/sdk`.
+pub fn is_sdk_sidecar_volume(volume: &mvm_core::vm_backend::VmVolume) -> bool {
+    volume.guest == mvm_core::plan::SDK_SIDECAR_GUEST_PATH
+        && matches!(volume.kind, VmVolumeKind::Disk)
+}
+
 /// The guest device node the SDK sidecar lands on for this launch config, or
 /// `None` when no sidecar is attached.
 ///
@@ -122,9 +131,7 @@ pub fn workload_volume_devices(config: &VmStartConfig) -> Vec<Option<String>> {
 /// boot carries a verity sidecar, a runtime overlay, and how many user volumes
 /// precede it.
 pub fn sdk_sidecar_block_device(config: &VmStartConfig) -> Option<String> {
-    let sidecar_index = config.volumes.iter().position(|v| {
-        v.guest == mvm_core::plan::SDK_SIDECAR_GUEST_PATH && matches!(v.kind, VmVolumeKind::Disk)
-    })?;
+    let sidecar_index = config.volumes.iter().position(is_sdk_sidecar_volume)?;
     workload_volume_devices(config)
         .get(sidecar_index)
         .cloned()

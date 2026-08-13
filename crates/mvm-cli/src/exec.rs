@@ -1908,6 +1908,7 @@ fn run_in_guest(
     use std::io::Write as _;
 
     if !wait_for_agent_timed(vm_name, 30, sub) {
+        emit_guest_console_diagnostic(vm_name);
         anyhow::bail!("guest agent did not become reachable within 30s");
     }
     // Agent reachable over vsock: the command is about to be dispatched.
@@ -1998,6 +1999,41 @@ fn run_in_guest(
         Either::Left(exit_code)
     };
     Ok((either, vsock_ready))
+}
+
+const AGENT_FAILURE_CONSOLE_LINES: usize = 80;
+
+fn emit_guest_console_diagnostic(vm_name: &str) {
+    let path = mvm_core::config::vm_console_log(vm_name);
+    let Ok(contents) = std::fs::read(&path) else {
+        eprintln!(
+            "[mvm] Guest console was unavailable at {} before transient cleanup.",
+            path.display()
+        );
+        return;
+    };
+    let diagnostic = redacted_console_tail(&contents, AGENT_FAILURE_CONSOLE_LINES);
+    if diagnostic.is_empty() {
+        eprintln!(
+            "[mvm] Guest console at {} was empty before transient cleanup.",
+            path.display()
+        );
+        return;
+    }
+    eprintln!(
+        "[mvm] Guest console tail before transient cleanup ({}):\n{}",
+        path.display(),
+        diagnostic
+    );
+}
+
+fn redacted_console_tail(contents: &[u8], line_count: usize) -> String {
+    let redactor = mvm_core::pii::PiiRedactor::with_default_rules();
+    let (redacted, _) = redactor.redact(contents);
+    let text = String::from_utf8_lossy(&redacted);
+    let lines = text.lines().collect::<Vec<_>>();
+    let start = lines.len().saturating_sub(line_count);
+    lines[start..].join("\n")
 }
 
 struct PtyConsoleRequest {
@@ -3341,6 +3377,20 @@ mod tests {
             transient_run_dev_console(true, image_sealed),
             "verity-backed accessible OCI images must keep the interactive console armed"
         );
+    }
+
+    #[test]
+    fn agent_failure_console_tail_is_bounded_and_redacted() {
+        let diagnostic = redacted_console_tail(
+            b"discarded\nbooting\nmvm-oci-init: failed for dev@example.com\nkernel panic\n",
+            3,
+        );
+        assert!(!diagnostic.contains("discarded"));
+        assert!(diagnostic.contains("booting"));
+        assert!(diagnostic.contains("mvm-oci-init: failed"));
+        assert!(!diagnostic.contains("dev@example.com"));
+        assert!(diagnostic.contains("XXX"));
+        assert!(diagnostic.contains("kernel panic"));
     }
 
     #[test]

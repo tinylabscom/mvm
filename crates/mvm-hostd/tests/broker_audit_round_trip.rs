@@ -136,6 +136,7 @@ fn host_audit_v1_round_trip_signs_a_verifiable_workload_chain() {
         "uds_path": broker_sock,
         "host_signer_public_key_path": public_key,
         "audit_signer_uds_path": audit_sock,
+        "services_bindings": ["host.audit.v1"],
     });
     let _broker_guard = Kill(spawn_with_config(BROKER_BIN, &broker_cfg));
 

@@ -26,6 +26,27 @@ Feature: SDK sidecar attaches only for admitted SDK host-service bindings
     And admission accepts the launch with the sidecar attachment
     And the assembled workload cmdline names the SDK sidecar device the backend attached
 
+  Scenario: the SDK sidecar bypasses user-volume activation beside a wheel mount
+    Given a verified SDK sidecar in the cache
+    And a workload plan that binds host service "host.time.v1"
+    And a read-only directory mount at "/mnt/wheels"
+    When the launch path resolves the SDK sidecar
+    Then the SDK sidecar is attached read-only at "/mvm/sdk"
+    And admission accepts the launch with the sidecar attachment
+    And the assembled workload cmdline names the SDK sidecar device the backend attached
+    And the user-volume manifest names "/mnt/wheels" but not the SDK mount
+
+  Scenario: a bound host time request crosses the SDK broker transport
+    Given a workload plan that binds host service "host.time.v1"
+    When the SDK sends a framed host time request to its bound broker
+    Then the SDK receives a current host wall clock without a transport error
+
+  Scenario: a wheel mount outside the guest allow-roots is refused before boot
+    When I run mvmctl with "machine run --image python:3.12 --mount .:/wheels:ro --dry-run -- /bin/true" and an isolated mvm home
+    Then the command exits with code 1
+    And the error output contains "user volumes may only mount under /data, /work, /mnt"
+    And the error output does not contain "guest agent did not become reachable"
+
   Scenario: a required sidecar that is missing from the cache fails the launch closed
     Given an empty SDK sidecar cache
     And a workload plan that binds host service "host.secrets.v1"

@@ -1017,6 +1017,13 @@ impl VmBackend for LibkrunBackend {
         // (the default; opt out with MVM_HOST_AGENT_DAEMON=0).
         let broker_listen_socket =
             mvm_core::config::vm_vsock_port_socket(&config.name, mvm_agentd::vsock::BROKER_PORT);
+        let host_services = config
+            .plan_json
+            .as_deref()
+            .map(mvm_core::plan::plan_from_admitted_json)
+            .transpose()
+            .context("parse admitted plan host services")?
+            .map_or_else(Vec::new, |plan| plan.services);
         let mut broker_guard = if mvm_vmm::host::host_agent_spawn::host_agent_daemon_enabled() {
             match mvm_vmm::host::host_agent_spawn::register_host_agent_services_if_admitted(
                 mvm_vmm::host::host_agent_spawn::HostAgentServicesParams {
@@ -1025,6 +1032,7 @@ impl VmBackend for LibkrunBackend {
                     vm_name: &config.name,
                     state_dir: &state_dir,
                     broker_listen_socket: &broker_listen_socket,
+                    services: &host_services,
                 },
             ) {
                 Ok(g) => mvm_vmm::host::host_agent_spawn::ServicesGuard::Agent(g),
@@ -1041,6 +1049,7 @@ impl VmBackend for LibkrunBackend {
                     vm_name: &config.name,
                     state_dir: &state_dir,
                     broker_listen_socket: &broker_listen_socket,
+                    services: &host_services,
                 },
             ) {
                 Ok(guard) => mvm_vmm::host::host_agent_spawn::ServicesGuard::Fork(guard),

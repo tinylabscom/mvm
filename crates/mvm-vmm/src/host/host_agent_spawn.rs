@@ -233,6 +233,8 @@ pub struct HostAgentServicesParams<'a> {
     /// The backend-specific `BROKER_PORT` socket the daemon should bind for this
     /// VM (libkrun `vm_vsock_port_socket`, hvf `vm_hvf_vsock_port_socket`).
     pub broker_listen_socket: &'a Path,
+    /// Exact host-service bindings from the admitted execution plan.
+    pub services: &'a [mvm_core::protocol::broker::ServiceId],
 }
 
 /// Daemon-path equivalent of `spawn_broker_services_if_admitted`: ensure the
@@ -251,6 +253,7 @@ pub fn register_host_agent_services_if_admitted(
         vm_name,
         state_dir,
         broker_listen_socket,
+        services,
     } = params;
     let Some(tenant) = tenant_id else {
         return Ok(HostAgentServicesGuard::defused());
@@ -284,7 +287,7 @@ pub fn register_host_agent_services_if_admitted(
                     .into_owned(),
             ),
             audit_signer_uds_path: None,
-            services_bindings: vec![],
+            services_bindings: services.to_vec(),
             capability_bindings: vec![],
         },
     )?;
@@ -746,6 +749,7 @@ mod tests {
             vm_name: "vm",
             state_dir: dir.path(),
             broker_listen_socket: &dir.path().join("vsock-5300.sock"),
+            services: &[],
         })
         .expect("unadmitted VM registers nothing");
         drop(guard); // defused Drop reaps nothing

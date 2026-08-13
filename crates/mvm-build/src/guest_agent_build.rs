@@ -59,6 +59,10 @@ pub struct GuestRuntimeBinaryPaths<'a> {
     pub verity_init: &'a Path,
 }
 
+/// Bump when a previously populated source-keyed guest cache may contain
+/// outputs produced through an incompatible build-cache contract.
+const GUEST_SOURCE_CACHE_EPOCH: u32 = 2;
+
 impl GuestAgentLayout {
     /// `cache_key` names the cache generation: an mvmctl `version` for a
     /// compatibility cache, or a guest source fingerprint (`source_cache_key`)
@@ -259,11 +263,17 @@ impl GuestAgentBuildSpec {
     }
 }
 
-/// The cache-scoped cargo target dir for the guest cross-compile under
-/// `cache_root`. Kept off the source tree so a contributor's `run --image`
-/// guest build never writes into any checkout's `target/`.
-pub fn guest_build_target_dir(cache_root: &Path) -> PathBuf {
-    cache_root.join("guest-agent-build").join("target")
+/// The source-isolated Cargo target dir for a guest cross-compile.
+///
+/// Sharing one target directory across worktrees lets Cargo accept another
+/// checkout's newer output without recompiling. Hashing the content key keeps
+/// paths safe and gives every source generation a distinct dependency graph.
+pub fn guest_build_target_dir(cache_root: &Path, build_key: &str) -> PathBuf {
+    let digest = Sha256::digest(build_key.as_bytes());
+    cache_root
+        .join("guest-agent-build")
+        .join("targets")
+        .join(&hex::encode(digest)[..16])
 }
 
 /// True when `dir` is the root of an mvm source checkout: it carries a top-level
@@ -285,18 +295,31 @@ pub fn source_workspace_from(start: &Path) -> Option<PathBuf> {
 /// The mvm source workspace to build the legacy rootfs-injected guest runtime
 /// from, or `None` for an installed binary with no source fallback.
 ///
-/// Resolution: the invoking process's `current_dir` first (so a contributor
-/// running from any worktree/clone builds THAT tree's guest sources, not the
-/// checkout mvmctl happened to be compiled in), walking up to the root; then the
-/// compile-time `CARGO_MANIFEST_DIR` ancestor (preserves an in-place `cargo run`
-/// whose cwd isn't the root); else `None`.
+/// Resolution: the running executable's checkout first, then the invoking
+/// process's current checkout, then the compile-time `CARGO_MANIFEST_DIR`
+/// ancestor. An explicitly invoked worktree binary must keep its host and guest
+/// code from the same tree even when the caller's shell is in another checkout.
+/// Installed binaries have no checkout ancestor and therefore retain the
+/// current-directory source fallback.
 pub fn detect_source_workspace() -> Option<PathBuf> {
-    if let Ok(cwd) = std::env::current_dir()
-        && let Some(ws) = source_workspace_from(&cwd)
-    {
-        return Some(ws);
-    }
-    source_workspace_from(Path::new(env!("CARGO_MANIFEST_DIR")))
+    let executable = std::env::current_exe().ok();
+    let current_dir = std::env::current_dir().ok();
+    source_workspace_for(
+        executable.as_deref(),
+        current_dir.as_deref(),
+        Path::new(env!("CARGO_MANIFEST_DIR")),
+    )
+}
+
+fn source_workspace_for(
+    executable: Option<&Path>,
+    current_dir: Option<&Path>,
+    compiled_manifest_dir: &Path,
+) -> Option<PathBuf> {
+    executable
+        .and_then(source_workspace_from)
+        .or_else(|| current_dir.and_then(source_workspace_from))
+        .or_else(|| source_workspace_from(compiled_manifest_dir))
 }
 
 /// Cache-key segment for a source-checkout guest build: a `src-` prefixed
@@ -305,7 +328,10 @@ pub fn detect_source_workspace() -> Option<PathBuf> {
 /// version+arch-cached agent. The `src-` prefix keeps it from ever colliding
 /// with a version-keyed (shipped-binary) cache entry.
 pub fn source_cache_key(workspace_root: &Path) -> Result<String, GuestAgentBuildError> {
-    Ok(format!("src-{}", guest_source_fingerprint(workspace_root)?))
+    Ok(format!(
+        "src-v{GUEST_SOURCE_CACHE_EPOCH}-{}",
+        guest_source_fingerprint(workspace_root)?
+    ))
 }
 
 /// Where the guest binaries come from on this host, and the cache key that
@@ -436,7 +462,7 @@ pub fn resolve_or_build_guest_binaries(
     let spec = GuestAgentBuildSpec::new(
         workspace_root.to_path_buf(),
         arch,
-        guest_build_target_dir(cache_root),
+        guest_build_target_dir(cache_root, cache_key),
     );
     let built = build_guest_binaries(&spec)?;
     install_into_cache(
@@ -524,7 +550,13 @@ pub fn resolve_or_build_runtime_overlay_guest_binaries(
     if layout.is_complete() {
         return Ok(layout.binaries());
     }
-    build_runtime_overlay_guest_binaries_into_cache(cache_root, &layout, workspace_root, arch)
+    build_runtime_overlay_guest_binaries_into_cache(
+        cache_root,
+        &layout,
+        workspace_root,
+        arch,
+        &fingerprint,
+    )
 }
 
 pub fn runtime_overlay_source_checkout_fingerprint(
@@ -558,12 +590,13 @@ fn build_runtime_overlay_guest_binaries_into_cache(
     layout: &RuntimeOverlayGuestLayout,
     workspace_root: &Path,
     arch: GuestArch,
+    fingerprint: &str,
 ) -> Result<RuntimeOverlayGuestBinaries, GuestAgentBuildError> {
     std::fs::create_dir_all(&layout.dir)?;
     let spec = GuestAgentBuildSpec::new(
         workspace_root.to_path_buf(),
         arch,
-        guest_build_target_dir(cache_root),
+        guest_build_target_dir(cache_root, fingerprint),
     );
     let triple = spec.target_triple();
     let cargo = spec.cargo.clone().unwrap_or_else(|| "cargo".into());
@@ -1041,10 +1074,13 @@ mod tests {
     }
 
     #[test]
-    fn guest_build_target_dir_is_under_cache_root() {
-        assert_eq!(
-            guest_build_target_dir(Path::new("/c")),
-            PathBuf::from("/c/guest-agent-build/target")
+    fn guest_build_target_dirs_are_isolated_by_source_key() {
+        let first = guest_build_target_dir(Path::new("/c"), "src-aaa");
+        assert!(first.starts_with("/c/guest-agent-build/targets"));
+        assert_ne!(
+            first,
+            guest_build_target_dir(Path::new("/c"), "src-bbb"),
+            "different source checkouts must never share Cargo outputs"
         );
     }
 
@@ -1207,6 +1243,24 @@ mod tests {
     fn source_workspace_from_none_for_non_checkout() {
         let tmp = tempfile::tempdir().unwrap();
         assert_eq!(source_workspace_from(tmp.path()), None);
+    }
+
+    #[test]
+    fn executable_checkout_wins_over_an_unrelated_current_checkout() {
+        let executable_checkout = tempfile::tempdir().unwrap();
+        let current_checkout = tempfile::tempdir().unwrap();
+        make_fake_checkout(executable_checkout.path(), "fn main() { /* executable */ }");
+        make_fake_checkout(current_checkout.path(), "fn main() { /* current */ }");
+
+        let executable = executable_checkout.path().join("target/debug/mvmctl");
+        let current_dir = current_checkout.path().join("crates/mvm-agentd");
+        let compiled_manifest = executable_checkout.path().join("crates/mvm-build");
+
+        assert_eq!(
+            source_workspace_for(Some(&executable), Some(&current_dir), &compiled_manifest),
+            Some(executable_checkout.path().to_path_buf()),
+            "an explicitly invoked worktree binary must inject guest code from that worktree"
+        );
     }
 
     #[test]

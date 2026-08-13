@@ -107,6 +107,10 @@ pub(crate) fn apply_activation(
     let new_root = guest_mount::mount_rootfs(&env.rootfs)?;
     guest_mount::mount_runtime_overlay(env.runtime.as_ref(), &new_root)?;
     guest_mount::mount_volumes(&env.volumes, &new_root)?;
+    #[cfg(target_os = "linux")]
+    if let Some(device) = mvm_agentd::guest_bootstrap::cmdline_value("mvm.sdk_dev") {
+        guest_mount::mount_sdk_sidecar(&device, &new_root)?;
+    }
     if env.rootfs.in_place {
         // Shared-kernel container: the runtime already owns `/`, so there is
         // no staged root to pivot into — activation is the privilege drop

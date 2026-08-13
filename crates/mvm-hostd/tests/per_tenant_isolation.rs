@@ -164,7 +164,7 @@ async fn start_tenant(id: &str) -> TenantHandle {
                 .into_owned(),
         ),
         audit_signer_uds_path: None,
-        services_bindings: vec![],
+        services_bindings: vec![ServiceId::parse("host.audit.v1").expect("service id")],
         capability_bindings: vec![],
     };
     register_vm(&control_socket, &key_bytes, reg).expect("register vm");
