@@ -19,7 +19,9 @@ use std::time::Instant;
 use chrono::Utc;
 use ed25519_dalek::SigningKey;
 use mvm_core::plan::{PlanId, TenantId};
-use mvm_hostd::supervisor::{AuditEntry, AuditSigner, FileAuditSigner, verify_audit_chain_entries};
+use mvm_hostd::supervisor::{
+    AuditSigner, FileAuditSigner, PlanAuditEntry, verify_audit_chain_entries,
+};
 
 /// Chain length to measure. Chosen to match the ~3.3k entries a few months of
 /// ordinary use produced on a real host, so the per-entry figure is taken at a
@@ -37,11 +39,11 @@ fn signing_key() -> SigningKey {
 /// An entry shaped like a real one: the labels and identifiers are what the
 /// launch path actually emits, so the JSON parsed per line is representative
 /// in size.
-fn entry(seq: usize) -> AuditEntry {
+fn entry(seq: usize) -> PlanAuditEntry {
     let mut labels = BTreeMap::new();
     labels.insert("backend".to_string(), "hvf".to_string());
     labels.insert("vm".to_string(), format!("machine-{seq}"));
-    AuditEntry {
+    PlanAuditEntry {
         timestamp: Utc::now(),
         tenant: TenantId("local".to_string()),
         plan_id: PlanId(format!("plan-{seq}")),

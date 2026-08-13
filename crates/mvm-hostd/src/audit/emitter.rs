@@ -40,7 +40,9 @@ use std::path::{Path, PathBuf};
 
 use crate::audit::receipt_export::audit_entry_to_receipt;
 use crate::audit::receipt_store::ReceiptStore;
-use crate::supervisor::{AuditEntry, AuditSigner, FileAuditSigner};
+use crate::supervisor::{
+    AuditSigner, FileAuditSigner, PlanAuditEntry, for_plan, transcript_sealed,
+};
 use anyhow::{Context, Result};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
@@ -811,7 +813,7 @@ impl AuditEmitter {
         sealed_root_hex: &str,
         chunk_count: usize,
     ) -> Result<()> {
-        let entry = AuditEntry::transcript_sealed(
+        let entry = transcript_sealed(
             plan,
             None,
             capture_id,
@@ -935,11 +937,11 @@ impl AuditEmitter {
     where
         E: IntoIterator<Item = (String, String)>,
     {
-        let entry = AuditEntry::for_plan(plan, None, event, extras);
+        let entry = for_plan(plan, None, event, extras);
         self.emit_entry(&entry)
     }
 
-    fn emit_entry(&self, entry: &AuditEntry) -> Result<()> {
+    fn emit_entry(&self, entry: &PlanAuditEntry) -> Result<()> {
         // Callers may be synchronous (the CLI) or already inside an async
         // runtime (an in-process `MvmClient` consumer). Building + blocking
         // on a runtime from an async worker thread panics, so when a runtime
@@ -957,7 +959,7 @@ impl AuditEmitter {
         self.emit_entry_blocking(entry)
     }
 
-    fn emit_entry_blocking(&self, entry: &AuditEntry) -> Result<()> {
+    fn emit_entry_blocking(&self, entry: &PlanAuditEntry) -> Result<()> {
         let t0 = std::time::Instant::now();
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -987,7 +989,7 @@ impl AuditEmitter {
     /// Best-effort emission of a signed [`ExecutionReceipt`] for an audit
     /// entry. Errors are logged and swallowed: receipts are a derived cache
     /// and must never block the primary audit emit.
-    fn emit_receipt_for_entry(&self, entry: &AuditEntry) {
+    fn emit_receipt_for_entry(&self, entry: &PlanAuditEntry) {
         if !self.receipts_enabled {
             return;
         }

@@ -336,7 +336,7 @@ impl Supervisor {
         // is part of that payload.
         //
         // No audit emit on signature failure: we have no parsed
-        // plan to bind to (`AuditEntry` is keyed on plan_id, which
+        // plan to bind to (`PlanAuditEntry` is keyed on plan_id, which
         // we do not know without trusting the payload). A later pass may
         // add a separate `EnvelopeRejected` audit type that carries
         // only the envelope's signer_id and a rejection reason; for
@@ -720,7 +720,7 @@ impl Supervisor {
         if !reason.is_empty() {
             merged.push(("reason".to_string(), reason.to_string()));
         }
-        let entry = crate::supervisor::audit::AuditEntry::for_plan(plan, None, event, merged);
+        let entry = crate::supervisor::audit::for_plan(plan, None, event, merged);
         match self.audit.sign_and_emit(&entry).await {
             Ok(()) => Ok(()),
             Err(crate::supervisor::audit::AuditError::NotWired) => {
@@ -2194,7 +2194,7 @@ mod tests {
         impl crate::supervisor::audit::AuditSigner for FailingAudit {
             async fn sign_and_emit(
                 &self,
-                _entry: &crate::supervisor::audit::AuditEntry,
+                _entry: &crate::supervisor::audit::PlanAuditEntry,
             ) -> Result<(), crate::supervisor::audit::AuditError> {
                 Err(crate::supervisor::audit::AuditError::Io("disk full".into()))
             }

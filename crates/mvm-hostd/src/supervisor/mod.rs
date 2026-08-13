@@ -135,12 +135,15 @@ pub use aggregate::{
 pub use artifact::{
     ArtifactCollector, ArtifactError, LiveArtifactCollector, NoopArtifactCollector,
 };
-pub use audit::{AuditEntry, AuditError, AuditSigner, CapturingAuditSigner, NoopAuditSigner};
+pub use audit::{
+    AuditError, AuditSigner, CapturingAuditSigner, NoopAuditSigner, PlanAuditEntry, SignedEnvelope,
+    flow_closed, flow_observer_fault, flow_opened, for_plan, transcript_sealed,
+};
 pub use audit_dedup::{Decision, DedupKey, RetryStormSummary, RetryStormSuppressor};
 pub use audit_file::{
     ChainCheckpoint, FileAuditSigner, IncrementalVerification, RotationPolicy, SegmentWalk,
-    SignedEnvelope, VerifyError, verify_audit_chain, verify_audit_chain_entries,
-    verify_audit_chain_incremental, verify_chain_bytes,
+    VerifyError, verify_audit_chain, verify_audit_chain_entries, verify_audit_chain_incremental,
+    verify_chain_bytes,
 };
 pub use audit_recorder::{
     EventCategory, Recorder, RecorderError, UNBOUND_IMAGE_NAME, UNBOUND_IMAGE_SHA256,

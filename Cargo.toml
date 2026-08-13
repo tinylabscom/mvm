@@ -141,6 +141,9 @@ exclude = [
     # it depends on the in-workspace `mvm-contract` crate by path and is
     # built separately with `wasm-pack` (see web/audit-verify/README.md).
     "web/audit-verify",
+    # Browser wasm sandbox demo. Excluded for the same wasm-bindgen/wasm32
+    # reasons; built separately with `wasm-pack` (see web/mvm-demo/README.md).
+    "web/mvm-demo",
 ]
 resolver = "3"
 

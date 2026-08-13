@@ -6,7 +6,7 @@
 
 use ed25519_dalek::SigningKey;
 use mvm_core::plan::{PlanId, TenantId};
-use mvm_hostd::supervisor::audit::{AuditEntry, AuditSigner};
+use mvm_hostd::supervisor::audit::{AuditSigner, PlanAuditEntry};
 use mvm_hostd::supervisor::audit_file::{
     FileAuditSigner, RotationPolicy, VerifyError, verify_audit_chain,
 };
@@ -22,8 +22,8 @@ fn key() -> SigningKey {
     SigningKey::from_bytes(&[42u8; 32])
 }
 
-fn entry(n: usize) -> AuditEntry {
-    AuditEntry {
+fn entry(n: usize) -> PlanAuditEntry {
+    PlanAuditEntry {
         timestamp: chrono::Utc::now(),
         tenant: TenantId("local".to_string()),
         plan_id: PlanId(format!("plan-{n}")),

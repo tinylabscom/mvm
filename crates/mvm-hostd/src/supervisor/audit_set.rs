@@ -24,12 +24,12 @@ use std::path::{Path, PathBuf};
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use thiserror::Error;
 
-use mvm_contract::verify::hash_line;
-
-use crate::supervisor::audit_file::{SignedEnvelope, VerifyError, verify_chain_bytes};
+use crate::supervisor::SignedEnvelope;
+use crate::supervisor::audit_file::{VerifyError, verify_chain_bytes};
 use crate::supervisor::audit_segment::{
     Continuation, Pruned, Sealed, continuation_from_entry, pruned_from_entry, sealed_from_entry,
 };
+use mvm_contract::verify::hash_line;
 
 /// What went wrong across the set, as opposed to within one file.
 #[derive(Debug, Error)]
@@ -288,7 +288,7 @@ pub struct SegmentContent {
     /// Authenticated entries, when this segment's interior was walked. `None`
     /// for a sealed segment under [`verify_segment_topology`], so a caller can
     /// never present an interior it did not read as though it had.
-    pub entries: Option<Vec<crate::supervisor::audit::AuditEntry>>,
+    pub entries: Option<Vec<crate::supervisor::audit::PlanAuditEntry>>,
 }
 
 impl SegmentContent {
@@ -538,7 +538,7 @@ pub fn verify_segment_entries(
     dir: &Path,
     base: &str,
     vk: &VerifyingKey,
-) -> Result<Vec<crate::supervisor::audit::AuditEntry>, SegmentSetError> {
+) -> Result<Vec<crate::supervisor::audit::PlanAuditEntry>, SegmentSetError> {
     let walked = walk(dir, base, vk, true)?;
     adjudicate(&walked, vk)?;
     Ok(walked
@@ -756,7 +756,7 @@ fn adjudicate(walked: &Walked, vk: &VerifyingKey) -> Result<Option<Pruned>, Segm
 
 /// The prune record with the largest range in one segment. A segment can carry
 /// more than one if the chain was pruned twice without rotating in between.
-fn newest_prune(entries: &[crate::supervisor::audit::AuditEntry]) -> Option<Pruned> {
+fn newest_prune(entries: &[crate::supervisor::audit::PlanAuditEntry]) -> Option<Pruned> {
     entries
         .iter()
         .filter_map(pruned_from_entry)

@@ -112,7 +112,7 @@ pub fn build_inclusion_in(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::supervisor::{AuditEntry, AuditSigner, FileAuditSigner};
+    use crate::supervisor::{AuditSigner, FileAuditSigner, PlanAuditEntry};
     use ed25519_dalek::SigningKey;
     use mvm_contract::merkle::{verify_inclusion, verify_signed_root};
     use mvm_core::plan::{PlanId, TenantId};
@@ -124,8 +124,8 @@ mod tests {
         SigningKey::from_bytes(&seed)
     }
 
-    fn entry(tenant: &str, event: &str) -> AuditEntry {
-        AuditEntry {
+    fn entry(tenant: &str, event: &str) -> PlanAuditEntry {
+        PlanAuditEntry {
             timestamp: chrono::Utc::now(),
             tenant: TenantId(tenant.to_string()),
             plan_id: PlanId(format!("plan-{event}")),

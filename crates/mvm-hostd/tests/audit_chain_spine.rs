@@ -24,7 +24,7 @@ use mvm_core::plan::{PlanId, TenantId};
 use mvm_hostd::audit_signer::canonical::CanonicalEntry;
 use mvm_hostd::audit_signer::chain::{Chain, OnDiskEntry};
 use mvm_hostd::audit_signer::verify::{WorkloadVerifyError, verify_workload_chain};
-use mvm_hostd::supervisor::audit::{AuditEntry, AuditSigner};
+use mvm_hostd::supervisor::audit::{AuditSigner, PlanAuditEntry};
 use mvm_hostd::supervisor::audit_file::{FileAuditSigner, VerifyError, verify_audit_chain};
 
 /// Fresh host key, following the workspace's explicit seed-fill idiom.
@@ -34,8 +34,8 @@ fn host_key() -> SigningKey {
     SigningKey::from_bytes(&seed)
 }
 
-fn lifecycle_entry(tenant: &str, event: &str) -> AuditEntry {
-    AuditEntry {
+fn lifecycle_entry(tenant: &str, event: &str) -> PlanAuditEntry {
+    PlanAuditEntry {
         timestamp: Utc::now(),
         tenant: TenantId(tenant.to_string()),
         plan_id: PlanId("plan-1".to_string()),

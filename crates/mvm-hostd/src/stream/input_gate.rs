@@ -1281,7 +1281,7 @@ mod tests {
     /// label set means a future label carrying frame bytes fails here whatever
     /// it is named.
     ///
-    /// The plan carries an audit label of its own, because `AuditEntry` merges
+    /// The plan carries an audit label of its own, because `PlanAuditEntry` merges
     /// `plan.audit_labels` into every entry: against a plan with none, the key
     /// set would be the gate's labels alone and the assertion would prove less
     /// than it claims on any production plan.

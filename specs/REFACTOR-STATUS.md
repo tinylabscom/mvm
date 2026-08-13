@@ -768,11 +768,13 @@ for detailed scope and acceptance criteria.
         `web/audit-verify/`, fix the stale `mvm-verify` refs in ADR-031, add
         `mvmctl audit pubkey`
 - [~] Plan 320 — A live wasm sandbox demo on the website
-      (`specs/plans/320-wasm-browser-demo.md`) — E1 shipped, E2/E3 and the demo
-      itself not started. Browser-engine sandbox at `/demo` + landing teaser; relocates the
-      egress decision (`projection.rs`), placeholder substitution, and audit-entry
-      construction/chain-signing into `mvm-contract` so host and browser run
-      identical code. Claim-free by ADR-024 §3; adds no claim-catalog witness.
+      (`specs/plans/320-wasm-browser-demo.md`) — E1 and E2 shipped; E3
+      (audit-entry construction / chain-signing relocation) is complete and
+      green against the frozen byte fixture. Browser-engine sandbox at `/demo`
+      + landing teaser; relocates the egress decision (`projection.rs`),
+      placeholder substitution, and audit-entry construction/chain-signing
+      into `mvm-contract` so host and browser run identical code. Claim-free
+      by ADR-024 §3; adds no claim-catalog witness.
       Sequencing: the landing teaser must be built against PR #2359's redesigned
       landing page, not the current one.
   - [x] E2.1 — the placeholder leaf relocated as
@@ -790,40 +792,44 @@ for detailed scope and acceptance criteria.
         54 projection tests plus 10 mandatory-deny tests now run under
         `wasm32-wasip1` (651 → 715), closing plan 301 P1's "tests under wasm"
         gap for this module.
-  - [~] E2 substitution core — moves/stays pass **done**, code not started
-        (E2.1–E2.5 in the plan). The pass corrected the design on three
-        points: the runtime placeholder is `mvm-secret-<hex>`, not `${NAME}`
-        (which also constrains what demo pane 2 may render); the core spans
-        `keyholder/{admission,substitution,injector}.rs` +
-        `supervisor/substitution_proxy.rs`, not one 509-line file; and
-        `mint`'s `rand::thread_rng` draw has to split out. The claim-12 bind
-        check is written **three** times today (the third is
-        `mvm-client/src/secret.rs`, over `SecretBindingMeta`) and is being
-        de-duplicated ahead of E2 as `mvm_contract::ir::host_is_bound` — a
-        standing drift hazard on a security predicate does not belong behind
-        this plan.
-  - [~] E3 audit writer core — moves/stays pass **done and re-validated
-        against post-319 `main`**, E3.0 decided (**option A**), E3.1 (frozen
-        byte fixture) shipped and green after #2379. `SignedEnvelope`'s shape
-        and `MirrorEntry`'s field-identity both survived the rotation work, so
-        option A stands; but the mirror now carries
-        `continuation_start_hash`, so retiring it is more urgent and the
-        E3.4/E3.5 diff is larger than first estimated. Next step is E3.2a —
-        collapsing three byte-identical `hash_line` definitions (#2379 added
-        the third) into one. `mvm-contract`'s `verify.rs`
-        already carries a field-identical `SignedEnvelope` over a
-        hand-maintained `MirrorEntry`, so E3 unifies with it rather than
-        adding a second: move the real `AuditEntry` down and retire the
-        mirror, which chrono and the id newtypes landing in Increment 3
-        already made possible. Needs the hard-rename treatment Increment 3 gave
-        `BundleNetworkPolicy`: two unrelated `AuditEntry` types would
-        otherwise collide in one crate. Unlike E1, E3 touches signed bytes,
-        so Increment 3's frozen-byte-fixture gate is mandatory.
-  - [ ] Oracle for both: `wasm_egress_witness.rs` must stay green
+  - [x] E2 substitution core — complete. E2.1 relocated the placeholder
+        leaf as `mvm_contract::substitution` with the hard-renamed
+        `SECRET_PLACEHOLDER_PREFIX`. E2.2 de-duplicated the claim-12 bind
+        check as `mvm_contract::ir::host_is_bound`. E2.3 moved the portable
+        half of `SubstitutionRegistry` down as `PlaceholderMap`
+        (insert/resolve/host_is_bound), leaving the OS-RNG `mint` in the
+        host wrapper so the browser bundle does not pull `getrandom`. E2.4
+        relocated the pure text replacement as
+        `mvm_contract::substitution::substitute_into`; the host `Injector`
+        wraps the result in `Zeroizing`. E2.5 extracted the pure header-walk
+        core of `prepare_request` into
+        `mvm_contract::substitution::prepare_request` over a
+        `SubstitutionDriver` trait; the host `SubstitutionEndpoint` implements
+        the trait and the existing `prepare_request` wrapper keeps all call
+        sites and tests unchanged.
+  - [x] E3 audit writer core — option A landed. E3.2 hard-renamed the host
+        chain-signed entry to `PlanAuditEntry`; E3.3 de-duplicated
+        `hash_line` and `signed_bytes_for` into `mvm-contract::verify`; E3.4
+        moved `PlanAuditEntry` into `mvm-contract` as a generic type (host
+        instantiates with `TenantId`/`PlanId`/`PolicyId`/`DateTime<Utc>`, the
+        browser uses string defaults); E3.5 unified `SignedEnvelope` and
+        retired `MirrorEntry`; E3.6 exposed the pure `seal()` helper and made
+        `FileAuditSigner::write_signed` call it. The frozen audit-chain
+        fixture still verifies unchanged and `wasm_egress_witness.rs` is
+        green.
+  - [x] Oracle for both: `wasm_egress_witness.rs` must stay green
         **unmodified**.
-  - [ ] `web/mvm-demo/` wasm-bindgen crate, workspace-excluded; Worker + thin
+  - [~] `web/mvm-demo/` wasm-bindgen crate, workspace-excluded; Worker + thin
         proxy; three curated fixtures (allowed / denied / unbound); tamper
-        button; `wasm-opt -Oz` + gzipped-size budget in the existing wasm lane
+        button; `wasm-opt -Oz` + gzipped-size budget in the existing wasm lane.
+        Crate skeleton created with `decide_egress`,
+        `substitute_placeholder`, `verify`, and `run_scenario` shims over
+        `mvm-contract`; `seal()` is now available in `mvm-contract` for the
+        demo to sign real audit entries. A standalone `index.html` demo page
+        (same deployment pattern as `web/audit-verify/`) lets the visitor run
+        the three scenarios, see module/destination views, and verify/tamper a
+        fixture audit chain. Full Worker ownership + real curated WASI modules
+        remain.
   - [ ] Does **not** retire `web/audit-verify/` (no Merkle inclusion) — B5 and
         `mvmctl audit pubkey` remain plan 301's
 - [ ] Plan 321 — wasm as a workload format inside a real microVM

@@ -230,7 +230,7 @@ into `mvm-contract` to preserve a signature.
       sites, no alias. A test asserts the two constants differ and that
       `find_placeholder` returns `None` on an `mvm-managed:` string.
       `Placeholder::new` takes the token as given so the RNG stays host-side.
-- [~] E2.2 — de-duplicate the bind check into one fn, **before it crosses a
+- [x] E2.2 — de-duplicate the bind check into one fn, **before it crosses a
       crate boundary**, so the claim-12 predicate has exactly one definition
       at the moment it moves. **Landing separately and first**, as
       `mvm_contract::ir::host_is_bound` — it is a standing drift hazard on a
@@ -240,10 +240,10 @@ into `mvm-contract` to preserve a signature.
       `mvm-client/src/secret.rs:428`, over `SecretBindingMeta` rather than
       `SecretRef`. Hence a free fn over `&[String]` rather than a method on
       either type.
-- [ ] E2.3 — `SubstitutionRegistry` map/`resolve`/`host_is_bound` →P;
+- [x] E2.3 — `SubstitutionRegistry` map/`resolve`/`host_is_bound` →P;
       `mint` splits.
-- [ ] E2.4 — `substitute_into` →P; `Injector` calls it.
-- [ ] E2.5 — decide `prepare_request`. Own commit, own review.
+- [x] E2.4 — `substitute_into` →P; `Injector` calls it.
+- [x] E2.5 — decide `prepare_request`. Own commit, own review.
 
 ### E3 — audit-entry construction and chain signing
 
@@ -373,12 +373,12 @@ E3.1 was unaffected and is done; the frozen fixture passes on post-319
       function that *is* the chain link, so three definitions are three
       definitions of what the chain is. Independent of every other E3 step
       (no `AuditEntry` dependency), so it lands first and alone.
-- [ ] E3.2 — hard-rename one of the two `AuditEntry`s. No alias.
-- [ ] E3.3 — `hash_line` + `signed_bytes_for` de-duplicated to one
+- [x] E3.2 — hard-rename one of the two `AuditEntry`s. No alias.
+- [x] E3.3 — `hash_line` + `signed_bytes_for` de-duplicated to one
       definition each, `mvm-hostd` calling `mvm-contract`.
-- [ ] E3.4 — `AuditEntry` →P; `for_plan` becomes a free fn.
-- [ ] E3.5 — unify `SignedEnvelope`, retire `MirrorEntry`.
-- [ ] E3.6 — `seal()` →P; `FileAuditSigner::sign_and_emit` calls it.
+- [x] E3.4 — `AuditEntry` →P; `for_plan` becomes a free fn.
+- [x] E3.5 — unify `SignedEnvelope`, retire `MirrorEntry`.
+- [x] E3.6 — `seal()` →P; `FileAuditSigner::sign_and_emit` calls it.
 
 ### Why relocate rather than reimplement
 
@@ -501,7 +501,7 @@ relocation and the design is wrong.
       not merely wasm clean.
 - [ ] A fixture-parity test: the three browser fixtures produce the same
       outcomes the host witness asserts.
-- [ ] `web/mvm-demo/` excluded from the workspace, as `web/audit-verify/` is.
+- [x] `web/mvm-demo/` excluded from the workspace, as `web/audit-verify/` is.
 - [ ] `wasm-opt -Oz` plus a gzipped-size budget in that same lane (plan 301 B4's
       discipline), failing the lane on regression.
 - [ ] Built in the builder VM, never a host toolchain (ADR-004 / ADR-007).

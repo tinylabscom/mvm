@@ -11,7 +11,7 @@ use assert_cmd::Command;
 use ed25519_dalek::SigningKey;
 use mvm_core::plan::{PlanId, TenantId};
 use mvm_core::receipt::{ReceiptOutcome, receipt_type};
-use mvm_hostd::supervisor::audit::AuditEntry;
+use mvm_hostd::supervisor::audit::PlanAuditEntry;
 use mvm_hostd::supervisor::{AuditSigner, FileAuditSigner};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -56,8 +56,8 @@ fn sample_plan_id() -> PlanId {
     PlanId("sha256:0000000000000000000000000000000000000000000000000000000000000001".into())
 }
 
-fn sample_audit_entry(event: &str, labels: BTreeMap<String, String>) -> AuditEntry {
-    AuditEntry {
+fn sample_audit_entry(event: &str, labels: BTreeMap<String, String>) -> PlanAuditEntry {
+    PlanAuditEntry {
         timestamp: chrono::Utc::now(),
         tenant: TenantId("local".into()),
         plan_id: sample_plan_id(),

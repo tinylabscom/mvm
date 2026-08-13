@@ -90,7 +90,7 @@ impl Default for InMemoryNonceLedger {
 
 /// Result of a successful admission. Carries everything the caller
 /// needs to hand to the backend (the plan + its id), to the audit
-/// chain (the plan again, for `AuditEntry::for_plan`), and — for the
+/// chain (the plan again, for `crate::supervisor::audit::for_plan`), and — for the
 /// bridge audit substrate and any cross-process consumer — the canonical
 /// `SignedExecutionPlan` envelope, which [`populate_audit_substrate`]
 /// serializes verbatim onto `VmStartConfig.plan_json`.

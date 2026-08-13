@@ -39,6 +39,10 @@ use crate::supervisor::secret_audit::{
     emit_secret_substituted,
 };
 use crate::supervisor::tools::http_hardening::hardened_client_builder;
+pub use mvm_contract::substitution::{
+    PrepareError, PreparedRequest, ProxyRequest, SubstitutionDriver,
+    prepare_request as prepare_request_core,
+};
 
 /// 16 MiB cap on a single routed request/response frame.
 const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
@@ -46,17 +50,6 @@ const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 const MAX_FORWARD_RESPONSE_BYTES: usize = MAX_FRAME_BYTES;
 #[cfg(not(target_os = "linux"))]
 const RVPROXY_ORIGINAL_DST_MAGIC: &[u8; 8] = b"RVPXOD01";
-
-/// A request the guest routed to the substitution endpoint. Header values may
-/// carry an opaque placeholder where a credential goes.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProxyRequest {
-    pub method: String,
-    /// The real destination URL (e.g. `https://api.openai.com/v1/...`).
-    pub url: String,
-    pub headers: Vec<(String, String)>,
-    pub body: Vec<u8>,
-}
 
 fn recover_terminator_original_destination(
     stream: &mut std::net::TcpStream,
@@ -81,16 +74,6 @@ fn recover_terminator_original_destination(
         let port = u16::from_be_bytes([header[12], header[13]]);
         Ok(std::net::SocketAddr::from((ip, port)))
     }
-}
-
-/// A request with every placeholder substituted to its real credential, ready
-/// for the forward leg to send to the destination over real TLS.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PreparedRequest {
-    pub method: String,
-    pub url: String,
-    pub headers: Vec<(String, String)>,
-    pub body: Vec<u8>,
 }
 
 /// Errors from preparing a routed request for forwarding.
@@ -128,67 +111,58 @@ pub fn prepare_request(
     req: ProxyRequest,
 ) -> Result<PreparedRequest, ProxyError> {
     let dest = destination_host(&req.url)?;
-    // Inject pass (Bearer/Basic): the credential is substituted *into* the
-    // header value in place. A signing placeholder (SigV4/HMAC) is left as-is
-    // here and handled in the sign pass below — it never carries the value.
-    let mut headers = Vec::with_capacity(req.headers.len());
-    let mut signing: Option<(String, AuthType)> = None;
-    for (name, value) in req.headers {
-        let new_value = match find_placeholder(&value) {
-            Some(ph) => {
-                let ph = ph.to_string();
-                match endpoint.resolve_ref(&ph).map(|r| r.auth_type) {
-                    Some(AuthType::Bearer) | Some(AuthType::Basic) => {
-                        // `substitute` carries the claim-12 bind-check: an
-                        // unbound destination or unknown token errors here,
-                        // before forwarding.
-                        endpoint.substitute(&ph, &dest, &value)?.to_string()
-                    }
-                    Some(sign_auth @ (AuthType::Sigv4 | AuthType::Hmac)) => {
-                        // A signing secret: remember the placeholder and DROP its
-                        // header value (it only ever held the opaque token). The
-                        // real signature header is assembled in the sign pass.
-                        if signing.is_some() {
-                            return Err(ProxyError::Refused(
-                                "more than one signing placeholder in one request".into(),
-                            ));
-                        }
-                        signing = Some((ph, sign_auth));
-                        continue; // drop this header entirely
-                    }
-                    None => {
-                        // Unknown token: route through `substitute` so the
-                        // existing claim-12 `UnknownPlaceholder` refusal fires.
-                        endpoint.substitute(&ph, &dest, &value)?.to_string()
-                    }
-                }
-            }
-            None => value,
-        };
-        headers.push((name, new_value));
+    match prepare_request_core(endpoint, &dest, req) {
+        Ok(prepared) => Ok(prepared),
+        Err(PrepareError::MultipleSigningPlaceholders) => Err(ProxyError::Refused(
+            "more than one signing placeholder in one request".into(),
+        )),
+        Err(PrepareError::Driver(e)) => Err(e),
+    }
+}
+
+impl<'a> SubstitutionDriver for SubstitutionEndpoint<'a> {
+    type Error = ProxyError;
+
+    fn auth_type(&self, placeholder: &str) -> Option<AuthType> {
+        self.resolve_ref(placeholder).map(|r| r.auth_type)
     }
 
-    // Sign pass: a SigV4/HMAC secret signs the whole request and adds its own
-    // header. The signing key never leaves the signer; the bind-check is
-    // enforced inside `endpoint.sign` (claim 12). Any failure is fail-closed.
-    if let Some((ph, auth_type)) = signing {
+    fn substitute(
+        &self,
+        placeholder: &str,
+        destination: &str,
+        text: &str,
+    ) -> Result<String, ProxyError> {
+        Ok(self
+            .substitute(placeholder, destination, text)
+            .map(|z| z.to_string())?)
+    }
+
+    fn sign(
+        &self,
+        placeholder: &str,
+        destination: &str,
+        method: &str,
+        url: &str,
+        headers: &[(String, String)],
+        body: &[u8],
+    ) -> Result<Vec<(String, String)>, ProxyError> {
+        let auth_type = self
+            .resolve_ref(placeholder)
+            .map(|r| r.auth_type)
+            .ok_or(ProxyError::Substitute(SubstituteError::UnknownPlaceholder))?;
         let sign_req = SignRequest::builder()
-            .with_placeholder(&ph)
+            .with_placeholder(placeholder)
             .with_auth_type(auth_type)
-            .with_dest(&dest)
-            .with_method(&req.method)
-            .with_url(&req.url)
-            .with_body(&req.body)
+            .with_dest(destination)
+            .with_method(method)
+            .with_url(url)
+            .with_body(body)
             .build();
-        sign_into_headers(endpoint, &sign_req, &mut headers)?;
+        let mut headers = headers.to_vec();
+        sign_into_headers(self, &sign_req, &mut headers)?;
+        Ok(headers)
     }
-
-    Ok(PreparedRequest {
-        method: req.method,
-        url: req.url,
-        headers,
-        body: req.body,
-    })
 }
 
 /// `yyyymmddThhmmssZ` UTC, the SigV4 `x-amz-date` format.

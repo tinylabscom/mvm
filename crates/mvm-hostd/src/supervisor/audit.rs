@@ -16,176 +16,139 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// One audit-stream entry — the "audit binding": every entry
-/// references the plan, the policy bundle, and the image that were
-/// in force when the event happened. A runbook can answer "what was
-/// the runtime contract at the moment of incident?" in O(1) by
-/// reading any one entry, without re-deriving from logs.
+/// Canonical chain-signed audit entry used by the host.
 ///
-/// `bundle_id` + `bundle_version` are `Option`-typed because audit
-/// entries can be emitted before policy resolution lands or in
-/// degraded modes where no bundle is available (e.g. `--dev`
-/// override). When present they carry the same `(id, version)`
-/// shape the bundle itself does.
-///
-/// The real `AuditSigner` impl wraps this struct in a chain-signed
-/// envelope (each entry's signature includes the previous entry's
-/// hash, producing a tamper-evident stream).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct AuditEntry {
-    pub timestamp: DateTime<Utc>,
-    pub tenant: TenantId,
+/// This is the typed instantiation of [`mvm_contract::verify::PlanAuditEntry`]:
+/// `TenantId`, `PlanId`, and `PolicyId` upstream serialize as bare strings, so
+/// the JSON shape matches the browser verifier while the host keeps strongly
+/// typed identifiers internally.
+pub type PlanAuditEntry =
+    mvm_contract::verify::PlanAuditEntry<TenantId, PlanId, PolicyId, DateTime<Utc>>;
 
-    pub plan_id: PlanId,
-    pub plan_version: u32,
+/// On-disk representation of one host audit line.
+pub type SignedEnvelope = mvm_contract::verify::SignedEnvelope<PlanAuditEntry>;
 
-    /// Bundle id at the moment the event happened. Optional because
-    /// some events emit before the policy has been resolved.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub bundle_id: Option<PolicyId>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub bundle_version: Option<u32>,
-
-    /// Image SHA-256 the workload was running. Always recorded
-    /// because the image is fixed at plan-verification time
-    /// (the plan carries `SignedImageRef`).
-    pub image_name: String,
-    pub image_sha256: String,
-
-    pub event: String,
-
-    /// Free-form labels. Inherits `audit_labels` from the plan plus
-    /// per-event extras the supervisor adds.
-    #[serde(default)]
-    pub labels: std::collections::BTreeMap<String, String>,
-}
-
-impl AuditEntry {
-    /// Construct an audit entry bound to a plan + (optional) bundle.
-    /// The plan's `audit_labels` are merged into the entry's labels;
-    /// per-event extras override on collision.
-    pub fn for_plan(
-        plan: &ExecutionPlan,
-        bundle: Option<&PolicyBundle>,
-        event: impl Into<String>,
-        extras: impl IntoIterator<Item = (String, String)>,
-    ) -> Self {
-        let mut labels = plan.audit_labels.clone();
-        labels.extend(extras);
-        Self {
-            timestamp: Utc::now(),
-            tenant: plan.tenant.clone(),
-            plan_id: plan.plan_id.clone(),
-            plan_version: plan.plan_version,
-            bundle_id: bundle.map(|b| b.bundle_id.clone()),
-            bundle_version: bundle.map(|b| b.bundle_version),
-            image_name: plan.image.name.clone(),
-            image_sha256: plan.image.sha256.to_ascii_lowercase(),
-            event: event.into(),
-            labels,
-        }
-    }
-
-    /// Construct a chain entry for a `FlowOpened` event (claim 10
-    /// leg 2: bytes leaving the trust boundary). The gateway bridge
-    /// calls this on the first byte per direction of a new flow.
-    pub fn flow_opened(
-        plan: &ExecutionPlan,
-        bundle: Option<&PolicyBundle>,
-        flow_id: &str,
-        direction: FlowDirection,
-    ) -> Self {
-        Self::for_plan(
-            plan,
-            bundle,
-            FLOW_OPENED_EVENT,
-            [
-                ("flow_id".to_string(), flow_id.to_string()),
-                ("direction".to_string(), direction.as_str().to_string()),
-            ],
-        )
-    }
-
-    /// Construct a chain entry for a `FlowClosed` event. Pairs with
-    /// [`Self::flow_opened`] on the same `flow_id`. `reason` carries
-    /// the close discriminator (EOF / bridge fault / policy drop /
-    /// shutdown).
-    pub fn flow_closed(
-        plan: &ExecutionPlan,
-        bundle: Option<&PolicyBundle>,
-        flow_id: &str,
-        direction: FlowDirection,
-        reason: FlowCloseReason,
-    ) -> Self {
-        Self::for_plan(
-            plan,
-            bundle,
-            FLOW_CLOSED_EVENT,
-            [
-                ("flow_id".to_string(), flow_id.to_string()),
-                ("direction".to_string(), direction.as_str().to_string()),
-                ("reason".to_string(), reason.as_str().to_string()),
-            ],
-        )
-    }
-
-    /// Construct a chain entry recording that a host-allowlisted observer
-    /// forced a fail-closed flow kill. `reason` is one of `drop` /
-    /// `modify_over_mtu` / `modify_unserializable`. The
-    /// entry attributes the `observer` so an operator can answer "which
-    /// observer killed this flow and why?" from the signed chain alone.
-    pub fn flow_observer_fault(
-        plan: &ExecutionPlan,
-        bundle: Option<&PolicyBundle>,
-        flow_id: &str,
-        direction: FlowDirection,
-        observer: &str,
-        reason: &str,
-    ) -> Self {
-        Self::for_plan(
-            plan,
-            bundle,
-            FLOW_OBSERVER_FAULT_EVENT,
-            [
-                ("flow_id".to_string(), flow_id.to_string()),
-                ("direction".to_string(), direction.as_str().to_string()),
-                ("observer".to_string(), observer.to_string()),
-                ("reason".to_string(), reason.to_string()),
-            ],
-        )
-    }
-
-    /// Construct the chain entry that authenticates a sealed transcript's
-    /// ciphertext-manifest root without exposing payload bytes or plaintext
-    /// digests to the audit stream.
-    pub fn transcript_sealed(
-        plan: &ExecutionPlan,
-        bundle: Option<&PolicyBundle>,
-        capture_id: &str,
-        vm_name: &str,
-        sealed_root_hex: &str,
-        chunk_count: usize,
-    ) -> Self {
-        Self::for_plan(
-            plan,
-            bundle,
-            TRANSCRIPT_SEALED_EVENT,
-            [
-                (LABEL_CAPTURE_ID.to_string(), capture_id.to_string()),
-                (LABEL_VM_NAME.to_string(), vm_name.to_string()),
-                (
-                    LABEL_TRANSCRIPT_ROOT.to_string(),
-                    sealed_root_hex.to_string(),
-                ),
-                (LABEL_CHUNK_COUNT.to_string(), chunk_count.to_string()),
-            ],
-        )
+/// Construct an audit entry bound to a plan + (optional) bundle.
+/// The plan's `audit_labels` are merged into the entry's labels;
+/// per-event extras override on collision.
+pub fn for_plan(
+    plan: &ExecutionPlan,
+    bundle: Option<&PolicyBundle>,
+    event: impl Into<String>,
+    extras: impl IntoIterator<Item = (String, String)>,
+) -> PlanAuditEntry {
+    let mut labels = plan.audit_labels.clone();
+    labels.extend(extras);
+    PlanAuditEntry {
+        timestamp: Utc::now(),
+        tenant: plan.tenant.clone(),
+        plan_id: plan.plan_id.clone(),
+        plan_version: plan.plan_version,
+        bundle_id: bundle.map(|b| b.bundle_id.clone()),
+        bundle_version: bundle.map(|b| b.bundle_version),
+        image_name: plan.image.name.clone(),
+        image_sha256: plan.image.sha256.to_ascii_lowercase(),
+        event: event.into(),
+        labels,
     }
 }
 
-/// Canonical `event` string for a `FlowOpened` chain entry. Pinned
-/// so downstream parsers (mvmd tenant audit rollup, `mvmctl audit
-/// traffic`) can filter on a stable literal.
+/// Construct a chain entry for a `FlowOpened` event (claim 10
+/// leg 2: bytes leaving the trust boundary). The gateway bridge
+/// calls this on the first byte per direction of a new flow.
+pub fn flow_opened(
+    plan: &ExecutionPlan,
+    bundle: Option<&PolicyBundle>,
+    flow_id: &str,
+    direction: FlowDirection,
+) -> PlanAuditEntry {
+    for_plan(
+        plan,
+        bundle,
+        FLOW_OPENED_EVENT,
+        [
+            ("flow_id".to_string(), flow_id.to_string()),
+            ("direction".to_string(), direction.as_str().to_string()),
+        ],
+    )
+}
+
+/// Construct a chain entry for a `FlowClosed` event. Pairs with
+/// [`flow_opened`] on the same `flow_id`. `reason` carries
+/// the close discriminator (EOF / bridge fault / policy drop /
+/// shutdown).
+pub fn flow_closed(
+    plan: &ExecutionPlan,
+    bundle: Option<&PolicyBundle>,
+    flow_id: &str,
+    direction: FlowDirection,
+    reason: FlowCloseReason,
+) -> PlanAuditEntry {
+    for_plan(
+        plan,
+        bundle,
+        FLOW_CLOSED_EVENT,
+        [
+            ("flow_id".to_string(), flow_id.to_string()),
+            ("direction".to_string(), direction.as_str().to_string()),
+            ("reason".to_string(), reason.as_str().to_string()),
+        ],
+    )
+}
+
+/// Construct a chain entry recording that a host-allowlisted observer
+/// forced a fail-closed flow kill. `reason` is one of `drop` /
+/// `modify_over_mtu` / `modify_unserializable`. The
+/// entry attributes the `observer` so an operator can answer "which
+/// observer killed this flow and why?" from the signed chain alone.
+pub fn flow_observer_fault(
+    plan: &ExecutionPlan,
+    bundle: Option<&PolicyBundle>,
+    flow_id: &str,
+    direction: FlowDirection,
+    observer: &str,
+    reason: &str,
+) -> PlanAuditEntry {
+    for_plan(
+        plan,
+        bundle,
+        FLOW_OBSERVER_FAULT_EVENT,
+        [
+            ("flow_id".to_string(), flow_id.to_string()),
+            ("direction".to_string(), direction.as_str().to_string()),
+            ("observer".to_string(), observer.to_string()),
+            ("reason".to_string(), reason.to_string()),
+        ],
+    )
+}
+
+/// Construct the chain entry that authenticates a sealed transcript's
+/// ciphertext-manifest root without exposing payload bytes or plaintext
+/// digests to the audit stream.
+pub fn transcript_sealed(
+    plan: &ExecutionPlan,
+    bundle: Option<&PolicyBundle>,
+    capture_id: &str,
+    vm_name: &str,
+    sealed_root_hex: &str,
+    chunk_count: usize,
+) -> PlanAuditEntry {
+    for_plan(
+        plan,
+        bundle,
+        TRANSCRIPT_SEALED_EVENT,
+        [
+            (LABEL_CAPTURE_ID.to_string(), capture_id.to_string()),
+            (LABEL_VM_NAME.to_string(), vm_name.to_string()),
+            (
+                LABEL_TRANSCRIPT_ROOT.to_string(),
+                sealed_root_hex.to_string(),
+            ),
+            (LABEL_CHUNK_COUNT.to_string(), chunk_count.to_string()),
+        ],
+    )
+}
+
 pub const FLOW_OPENED_EVENT: &str = "gateway.flow_opened";
 
 /// Canonical `event` string for a `FlowClosed` chain entry.
@@ -207,8 +170,8 @@ pub const LABEL_TRANSCRIPT_ROOT: &str = "transcript_root";
 /// Label containing the number of ordered ciphertext chunks.
 pub const LABEL_CHUNK_COUNT: &str = "chunk_count";
 
-/// Per-direction flow label for [`AuditEntry::flow_opened`] /
-/// [`AuditEntry::flow_closed`]. Egress = guest → internet,
+/// Per-direction flow label for [`flow_opened`] /
+/// [`flow_closed`]. Egress = guest → internet,
 /// Ingress = internet → guest. North-south only — east-west
 /// microVM ↔ microVM lateral flows are out of scope here, deferred.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -230,7 +193,7 @@ impl FlowDirection {
     }
 }
 
-/// Close discriminator for [`AuditEntry::flow_closed`].
+/// Close discriminator for [`flow_closed`].
 ///
 /// `Eof` is the steady-state happy path (TCP FIN, UDP timeout,
 /// DGRAM peer closed). `BridgeError` covers bridge-task panic
@@ -283,14 +246,14 @@ pub trait AuditSigner: Send + Sync {
     /// `prev_hash` from the previous entry, derives the current
     /// entry's signature, and writes both to the audit stream
     /// destination(s).
-    async fn sign_and_emit(&self, entry: &AuditEntry) -> Result<(), AuditError>;
+    async fn sign_and_emit(&self, entry: &PlanAuditEntry) -> Result<(), AuditError>;
 }
 
 pub struct NoopAuditSigner;
 
 #[async_trait]
 impl AuditSigner for NoopAuditSigner {
-    async fn sign_and_emit(&self, _entry: &AuditEntry) -> Result<(), AuditError> {
+    async fn sign_and_emit(&self, _entry: &PlanAuditEntry) -> Result<(), AuditError> {
         Err(AuditError::NotWired)
     }
 }
@@ -303,7 +266,7 @@ impl AuditSigner for NoopAuditSigner {
 /// The chain-signing real impl will replace this for production,
 /// but keep this around for `cargo test` and `mvmctl --dev`.
 pub struct CapturingAuditSigner {
-    entries: Mutex<Vec<AuditEntry>>,
+    entries: Mutex<Vec<PlanAuditEntry>>,
 }
 
 impl CapturingAuditSigner {
@@ -313,7 +276,7 @@ impl CapturingAuditSigner {
         }
     }
 
-    pub fn entries(&self) -> Vec<AuditEntry> {
+    pub fn entries(&self) -> Vec<PlanAuditEntry> {
         self.entries
             .lock()
             .expect("CapturingAuditSigner mutex poisoned")
@@ -329,7 +292,7 @@ impl Default for CapturingAuditSigner {
 
 #[async_trait]
 impl AuditSigner for CapturingAuditSigner {
-    async fn sign_and_emit(&self, entry: &AuditEntry) -> Result<(), AuditError> {
+    async fn sign_and_emit(&self, entry: &PlanAuditEntry) -> Result<(), AuditError> {
         self.entries
             .lock()
             .expect("CapturingAuditSigner mutex poisoned")
@@ -446,7 +409,7 @@ mod tests {
 
     #[test]
     fn audit_entry_serde_roundtrip() {
-        let entry = AuditEntry {
+        let entry = PlanAuditEntry {
             timestamp: Utc::now(),
             tenant: TenantId("t".to_string()),
             plan_id: PlanId("p".to_string()),
@@ -459,7 +422,7 @@ mod tests {
             labels: BTreeMap::from([("actor".to_string(), "supervisor".to_string())]),
         };
         let bytes = serde_json::to_vec(&entry).unwrap();
-        let parsed: AuditEntry = serde_json::from_slice(&bytes).unwrap();
+        let parsed: PlanAuditEntry = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(parsed, entry);
     }
 
@@ -467,7 +430,7 @@ mod tests {
     fn entry_for_plan_binds_plan_bundle_image() {
         let plan = sample_plan();
         let bundle = sample_bundle();
-        let entry = AuditEntry::for_plan(&plan, Some(&bundle), "plan.verified", []);
+        let entry = for_plan(&plan, Some(&bundle), "plan.verified", []);
         assert_eq!(entry.plan_id, plan.plan_id);
         assert_eq!(entry.plan_version, plan.plan_version);
         assert_eq!(entry.tenant, plan.tenant);
@@ -484,7 +447,7 @@ mod tests {
     #[test]
     fn entry_for_plan_handles_missing_bundle() {
         let plan = sample_plan();
-        let entry = AuditEntry::for_plan(&plan, None, "plan.verified", []);
+        let entry = for_plan(&plan, None, "plan.verified", []);
         assert_eq!(entry.bundle_id, None);
         assert_eq!(entry.bundle_version, None);
         // Image still bound from plan.
@@ -494,7 +457,7 @@ mod tests {
     #[test]
     fn entry_for_plan_extras_override_plan_labels() {
         let plan = sample_plan(); // has workflow=etl-1
-        let entry = AuditEntry::for_plan(
+        let entry = for_plan(
             &plan,
             None,
             "evt",
@@ -571,7 +534,7 @@ mod tests {
     #[test]
     fn flow_opened_helper_carries_canonical_event_and_labels() {
         let plan = sample_plan();
-        let entry = AuditEntry::flow_opened(&plan, None, "f00ba4", FlowDirection::Egress);
+        let entry = flow_opened(&plan, None, "f00ba4", FlowDirection::Egress);
 
         assert_eq!(entry.event, FLOW_OPENED_EVENT);
         assert_eq!(entry.event, "gateway.flow_opened");
@@ -586,7 +549,7 @@ mod tests {
     fn transcript_sealed_helper_carries_only_ciphertext_root_metadata() {
         let plan = sample_plan();
         let root = "ab".repeat(32);
-        let entry = AuditEntry::transcript_sealed(&plan, None, "capture-1", "vm-1", &root, 7);
+        let entry = transcript_sealed(&plan, None, "capture-1", "vm-1", &root, 7);
 
         assert_eq!(entry.event, TRANSCRIPT_SEALED_EVENT);
         assert_eq!(
@@ -603,7 +566,7 @@ mod tests {
     #[test]
     fn flow_closed_helper_carries_canonical_event_and_labels() {
         let plan = sample_plan();
-        let entry = AuditEntry::flow_closed(
+        let entry = flow_closed(
             &plan,
             None,
             "f00ba4",
@@ -625,7 +588,7 @@ mod tests {
         // "what workload was this flow attributed to?" without
         // dereferencing plan_id separately.
         let plan = sample_plan(); // sample_plan adds workflow=etl-1.
-        let entry = AuditEntry::flow_opened(&plan, None, "f1", FlowDirection::Egress);
+        let entry = flow_opened(&plan, None, "f1", FlowDirection::Egress);
         assert_eq!(entry.labels.get("workflow"), Some(&"etl-1".to_string()));
     }
 
@@ -642,7 +605,7 @@ mod tests {
             FlowCloseReason::PolicyDropped,
             FlowCloseReason::Shutdown,
         ] {
-            let entry = AuditEntry::flow_closed(&plan, None, "f1", FlowDirection::Egress, reason);
+            let entry = flow_closed(&plan, None, "f1", FlowDirection::Egress, reason);
             emitted.insert(entry.labels.get("reason").cloned().unwrap());
         }
         assert_eq!(emitted.len(), 4, "all four reasons must be distinguishable");
@@ -651,7 +614,7 @@ mod tests {
     #[test]
     fn flow_observer_fault_helper_attributes_observer_and_reason() {
         let plan = sample_plan();
-        let entry = AuditEntry::flow_observer_fault(
+        let entry = flow_observer_fault(
             &plan,
             None,
             "vm-egress",
@@ -677,7 +640,7 @@ mod tests {
     fn capturing_audit_signer_records_entries() {
         let signer = CapturingAuditSigner::new();
         let plan = sample_plan();
-        let entry = AuditEntry::for_plan(&plan, None, "plan.verified", []);
+        let entry = for_plan(&plan, None, "plan.verified", []);
 
         // Sync block_on via a fresh tokio runtime — the trait method
         // is async; mvm-supervisor's tokio dev-dep covers this.

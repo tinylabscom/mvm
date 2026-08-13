@@ -12,7 +12,7 @@ use chrono::Utc;
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use mvm_core::plan::{PlanId, TenantId};
 use mvm_hostd::supervisor::{
-    AuditEntry, AuditSigner, ChainCheckpoint, FileAuditSigner, VerifyError,
+    AuditSigner, ChainCheckpoint, FileAuditSigner, PlanAuditEntry, VerifyError,
     verify_audit_chain_entries, verify_audit_chain_incremental,
 };
 
@@ -20,8 +20,8 @@ fn signing_key() -> SigningKey {
     SigningKey::from_bytes(&[11u8; 32])
 }
 
-fn entry(seq: usize) -> AuditEntry {
-    AuditEntry {
+fn entry(seq: usize) -> PlanAuditEntry {
+    PlanAuditEntry {
         timestamp: Utc::now(),
         tenant: TenantId("local".to_string()),
         plan_id: PlanId(format!("plan-{seq}")),

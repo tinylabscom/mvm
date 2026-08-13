@@ -289,8 +289,13 @@ mod tests {
 
     #[test]
     fn telemetry_probe_attaches_with_pid() {
+        // Use a non-existent object path so the test exercises the attach
+        // plumbing without requiring privileged eBPF load/attach on the
+        // runner. The procfs fallback keeps the call successful.
         let telemetry = EgressTelemetry::new(ProbeConfig {
-            ebpf_object_path: None,
+            ebpf_object_path: Some(std::path::PathBuf::from(
+                "/nonexistent/mvm-hostd-ebpf-object",
+            )),
             enable_procfs_fallback: true,
         });
         let target = ObservabilityTarget::new("vm-with-pid").with_substitution_pid(1234);

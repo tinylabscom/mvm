@@ -17,7 +17,7 @@ use clap::Args as ClapArgs;
 use ed25519_dalek::VerifyingKey;
 use serde::Serialize;
 
-use mvm_hostd::supervisor::{AuditEntry, SignedEnvelope, verify_audit_chain};
+use mvm_hostd::supervisor::{PlanAuditEntry, SignedEnvelope, verify_audit_chain};
 
 use super::audit_chain::{audit_path_for_tenant, default_audit_dir};
 use super::host_signer;
@@ -184,7 +184,7 @@ pub(in crate::commands) fn collect_run(
     let content = std::fs::read_to_string(path)
         .with_context(|| format!("reading audit chain {}", path.display()))?;
 
-    let mut all_entries: Vec<AuditEntry> = Vec::new();
+    let mut all_entries: Vec<PlanAuditEntry> = Vec::new();
     for line in content.lines() {
         if line.trim().is_empty() {
             continue;
@@ -197,7 +197,7 @@ pub(in crate::commands) fn collect_run(
         }
     }
 
-    let matches: Vec<&AuditEntry> = all_entries
+    let matches: Vec<&PlanAuditEntry> = all_entries
         .iter()
         .filter(|e| {
             e.plan_id.0 == run_id || e.plan_id.0.starts_with(run_id) || e.image_name == run_id
@@ -225,7 +225,7 @@ pub(in crate::commands) fn collect_run(
         .expect("matches is non-empty, so distinct_plan_ids is non-empty"))
     .to_string();
 
-    let final_events: Vec<&AuditEntry> = all_entries
+    let final_events: Vec<&PlanAuditEntry> = all_entries
         .iter()
         .filter(|e| e.plan_id.0 == plan_id)
         .collect();
