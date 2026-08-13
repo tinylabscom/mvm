@@ -34,6 +34,9 @@ pub mod entrypoint;
 /// threads, so a consumer that blocks — a host that stopped reading — cannot
 /// defer the child's deadline or grow the pump's queue without bound.
 pub mod entrypoint_stream;
+/// Guest-side FlowMux client for the converged single networking path.
+#[cfg(feature = "addons")]
+pub mod flowmux;
 /// In-guest forward-proxy front: parses a workload's proxied request into a
 /// `WireRequest` for the substitution client.
 pub mod forward_proxy;
