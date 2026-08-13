@@ -1,6 +1,6 @@
 # Refactor status
 
-Last updated: 2026-08-12
+Last updated: 2026-08-13
 
 This is the cross-plan progress index. The owning plan remains authoritative
 for detailed scope and acceptance criteria.
@@ -156,7 +156,7 @@ for detailed scope and acceptance criteria.
         KVM-backed ARM64 cold bootstrap, kernel publication, persistent Stage 0
         reuse, and two fully warm Alpine runs complete without a second Stage 0
 
-- [~] Plan 316 — website and docs redesign (agent review complete; maintainer sign-off pending)
+- [x] Plan 316 — website and docs redesign (agent design review completed and maintainer sign-off received; merged via #2438)
       (`specs/plans/316-website-redesign.md`)
   - [x] Homepage sections, docs chrome, and shared primitives rebuilt onto
         token-driven surfaces; stale Apple Virtualization / Docker-fallback /
