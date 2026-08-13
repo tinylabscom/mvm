@@ -2,7 +2,7 @@
 
 ## Status
 
-**Phase 0 complete (#2369). Phase 1 complete (#2370). Phase 2 in progress (#2371): the production endpoint role, channel identity, and spawner files have been renamed; a host-side authenticated FlowMux session acceptor has landed and is exercised by unit tests.**
+**Phase 0 complete (#2369). Phase 1 complete (#2370). Phase 2 complete (#2371). Phase 3 in progress (#2372): converge egress TCP, UDP, and DNS over FlowMux `OpenTcp`/`OpenUdp`/`Resolve` frames.**
 
 ADR-042 is accepted and the raw-packet path is frozen: new
 `raw_ip_stack=true` / `NetworkMode::L3Vsock` launches are refused at synthesis,

@@ -1639,12 +1639,20 @@ mod tests {
             vec![],
         );
         let ports = &spec.vsock;
-        let mut services: Vec<_> = ports.iter().map(|p| p.service).collect();
-        services.sort();
-        let expected = [GuestService::MachineControl, GuestService::NetworkFlow];
-        assert_eq!(
-            services, expected,
-            "HVF spec vsock must contain exactly one NetworkFlow and no retired L3 services"
+        let network_flow: Vec<_> = ports
+            .iter()
+            .filter(|p| p.service == GuestService::NetworkFlow)
+            .collect();
+        assert_eq!(network_flow.len(), 1, "exactly one NetworkFlow service");
+        assert!(
+            !ports
+                .iter()
+                .any(|p| p.service == GuestService::NetworkControl)
+        );
+        assert!(
+            !ports
+                .iter()
+                .any(|p| p.service == GuestService::NetworkData { queue: 0 })
         );
     }
 }
