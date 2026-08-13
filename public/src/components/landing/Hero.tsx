@@ -191,7 +191,9 @@ export function Hero() {
               headline does. */}
           <Reveal delay={360} className="relative">
             <div className="pointer-events-none absolute -inset-4 rounded-2xl bg-linear-to-br from-glow-1 via-transparent to-glow-3 blur-xl" />
-            <HeroStackDiagram />
+            <div className="mx-auto w-full max-w-[18rem] sm:max-w-[22rem] lg:max-w-none">
+              <HeroStackDiagram />
+            </div>
           </Reveal>
         </div>
       </div>

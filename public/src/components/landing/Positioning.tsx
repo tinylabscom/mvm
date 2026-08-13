@@ -94,7 +94,7 @@ export function Positioning() {
   return (
     <Section rule space="roomy" className="bg-raised">
       <Reveal>
-        <h2 className="max-w-xl lowercase font-display text-3xl font-bold leading-tight text-title sm:text-4xl">
+        <h2 className="mb-6 max-w-xl lowercase font-display text-3xl font-bold leading-tight text-title sm:text-4xl">
           one project.
           <br />
           <span className="inline-block bg-accent-2 px-2 py-0.5 text-canvas">
@@ -103,7 +103,7 @@ export function Positioning() {
         </h2>
       </Reveal>
 
-      <div className="mt-16 flex flex-col gap-16 lg:mt-20 lg:gap-24">
+      <div className="mt-20 flex flex-col gap-16 lg:mt-24 lg:gap-24">
         {ROWS.map((row, i) => (
           <Reveal key={row.heading} delay={i * 60}>
             <div className="grid gap-8 lg:grid-cols-2 lg:items-center lg:gap-16">
