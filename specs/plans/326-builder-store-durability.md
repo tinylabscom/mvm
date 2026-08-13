@@ -2,7 +2,11 @@
 
 ## Status
 
-IN PROGRESS — WS-A and WS-B complete; WS-D next, then WS-C.
+COMPLETE — WS-A, WS-B, and the WS-D reproduction merged in PR #2419. The
+mechanism behind the observed corruption is identified and fixed by Plan 324 /
+PR #2416. WS-C is re-scoped / not built. One follow-up item remains: an
+end-to-end regression test proving the store image stays locked across the
+persistent-builder start/exit boundary.
 
 ## The problem
 
@@ -64,6 +68,7 @@ Do not describe WS-A as fixing the observed corruption until WS-D says so.
 - [x] A read-only or RAM-backed disk answers flush `OK` without work.
 - [x] Device-level tests: flush is accepted; a flush reaches the file; an
       unknown request type is still refused.
+- [x] Merged in PR #2419.
 
 Closes the host-crash hole. With `F_FLUSH` negotiated, guest ext4 issues real
 barriers and jbd2's commit ordering becomes enforceable instead of assumed.
@@ -79,20 +84,19 @@ barriers and jbd2's commit ordering becomes enforceable instead of assumed.
       Stage 0 seed and the builder images.
 - [x] `mvmctl cache repair --store-only` exposes it; the blanket clear stays
       available but stops being the only option.
+- [x] Merged in PR #2419.
 
 This is the piece that converts an hour of misdirected debugging into one
 actionable line.
 
 ### WS-C — a build cannot damage the base store
 
-- [ ] Each build attaches a CoW overlay over the base store image rather than
-      mutating it in place.
-- [ ] The overlay is committed to the base only on a clean, synced exit.
-- [ ] An abrupt death discards the overlay; the base is untouched by
-      construction, so no failure mode can corrupt it.
-
-WS-A makes corruption unlikely; WS-C makes it structurally impossible for the
-base image. This is the workstream that actually delivers "never".
+**Re-scoped / not built.** WS-D refuted the failure mode WS-C was conceived to
+prevent: a CoW overlay protects the base image from a *build that dies*, and a
+build that dies demonstrably does not damage it. The real mechanism was
+concurrent writers, fixed by single-writer enforcement in Plan 324 / #2416. A
+CoW overlay would add a large amount of machinery against a threat that is not
+the one we have.
 
 ### WS-D — establish the mechanism, then keep it fixed
 
@@ -115,25 +119,22 @@ which outlives the process.
 So **the premise that a killed builder VM caused the observed corruption is
 refuted.** Something else did.
 
-- [ ] Find what did. Two candidates, in order of suspicion:
-      1. **Two writers on the same image.** This is the shape that produces
-         `deleted inode referenced` after a successful journal replay: two
-         mounts disagreeing about metadata, not one mount losing writes. Plan
-         324 / #2416 is reworking store-lock ownership precisely because the
-         lock did not cover the whole window a VM is alive; that gap and this
-         corruption are consistent with each other.
-      2. A host-level event (panic / power loss) losing page cache. WS-A
-         closes this one regardless.
-- [ ] Regression coverage for whatever this establishes.
+- [x] Find what did. The evidence pointed at two writers on one image: `deleted
+      inode referenced` surviving a successful journal replay is what disagreeing
+      mounts produce, not what one mount losing writes produces. Plan 324 /
+      PR #2416 closed that gap by moving store-lock ownership to the supervisor
+      process whose lifetime matches the VM's. That fix merged 2026-08-13.
+- [ ] Regression coverage. Add an end-to-end test that starts a persistent
+      builder, drops the starting CLI handle, and asserts from a separate
+      process that the store image sidecar is still exclusively locked until
+      the supervisor exits.
 
 ## Sequencing
 
-WS-A is independent and lands first. WS-B is independent of WS-A and can land
-in parallel.
+WS-A and WS-B are merged in PR #2419. WS-D's reproduction is also in #2419.
+WS-C is re-scoped and not built. WS-D's mechanism finding is resolved by Plan
+324 / PR #2416, which has merged.
 
-WS-C should now be re-scoped before it is built. WS-D refuted the failure mode
-WS-C was conceived to prevent: a CoW overlay protects the base image from a
-*build that dies*, and a build that dies turns out not to damage it. If the
-real mechanism is concurrent writers, the fix is single-writer enforcement
-(#2416's territory), and a CoW overlay would add a large amount of machinery
-against a threat that is not the one we have. Settle WS-D's open item first.
+The only remaining work is the WS-D regression test. Do not revive WS-C unless
+a new failure mode shows that a single dying build can actually damage the base
+store.
