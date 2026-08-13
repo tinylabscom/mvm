@@ -501,7 +501,7 @@ relocation and the design is wrong.
       not merely wasm clean.
 - [ ] A fixture-parity test: the three browser fixtures produce the same
       outcomes the host witness asserts.
-- [ ] `web/mvm-demo/` excluded from the workspace, as `web/audit-verify/` is.
+- [x] `web/mvm-demo/` excluded from the workspace, as `web/audit-verify/` is.
 - [ ] `wasm-opt -Oz` plus a gzipped-size budget in that same lane (plan 301 B4's
       discipline), failing the lane on regression.
 - [ ] Built in the builder VM, never a host toolchain (ADR-004 / ADR-007).

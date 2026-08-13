@@ -775,9 +775,11 @@ for detailed scope and acceptance criteria.
         so Increment 3's frozen-byte-fixture gate is mandatory.
   - [ ] Oracle for both: `wasm_egress_witness.rs` must stay green
         **unmodified**.
-  - [ ] `web/mvm-demo/` wasm-bindgen crate, workspace-excluded; Worker + thin
+  - [~] `web/mvm-demo/` wasm-bindgen crate, workspace-excluded; Worker + thin
         proxy; three curated fixtures (allowed / denied / unbound); tamper
-        button; `wasm-opt -Oz` + gzipped-size budget in the existing wasm lane
+        button; `wasm-opt -Oz` + gzipped-size budget in the existing wasm lane.
+        Crate skeleton created with `decide_egress`,
+        `substitute_placeholder`, and `verify` shims over `mvm-contract`.
   - [ ] Does **not** retire `web/audit-verify/` (no Merkle inclusion) — B5 and
         `mvmctl audit pubkey` remain plan 301's
 - [ ] Plan 321 — wasm as a workload format inside a real microVM
