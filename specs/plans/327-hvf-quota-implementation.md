@@ -277,6 +277,8 @@ impl QuotaPolicy {
 
 ### Task 2: The thread CPU clock
 
+**Status:** COMPLETE — implemented, tested, clippy/fmt clean, Linux cross-build passes.
+
 **Files:**
 - Create: `crates/mvm-vmm/src/quota/clock.rs`
 
@@ -323,7 +325,7 @@ impl ThreadCpuClock for ThreadCpuHandle { .. }
   Task 4's "predictive, not polling" witness asserts against, so it must be
   observable.
 
-- [ ] **Step 1: Write the failing tests**, run them, paste the failure:
+- [x] **Step 1: Write the failing tests**, run them, paste the failure:
 
   | Test | Asserts |
   | --- | --- |
@@ -332,8 +334,8 @@ impl ThreadCpuClock for ThreadCpuHandle { .. }
   | `a_scripted_clock_counts_its_reads` | the fake reports its readings in order and exposes the read count |
   | `capturing_a_thread_off_macos_fails_loudly_rather_than_reading_zero` | non-macOS: `for_current_thread()` is `Err` |
 
-- [ ] **Step 2: Implement.**
-- [ ] **Step 3:** `cargo nextest run -p mvm-vmm --lib quota::clock`, clippy,
+- [x] **Step 2: Implement.**
+- [x] **Step 3:** `cargo nextest run -p mvm-vmm --lib quota::clock`, clippy,
       fmt, and `just check-linux` to prove the Linux arm compiles.
 
 ---
