@@ -1,8 +1,8 @@
-# ADR-027: `machine` is the sole CLI surface for workload microVMs
+# ADR-027: `machine` is the workload-VM noun; `run` is the transient-run verb
 
 ## Status
 
-Accepted
+Accepted — amended 2026-08-13
 
 ## Context
 
@@ -29,11 +29,19 @@ There is no separate `vm` noun; its verbs are `machine`'s verbs. There is
 no `up`, `down`, `run` (as a top-level verb), `console`, or `invoke`
 command — those names do not exist at the top level.
 
-Two other top-level surfaces exist deliberately alongside `machine`,
-because they are different objects: `dev` (host build substrate, not a
-workload) and the SDK-only `run` transport, kept but hidden from
-`--help`, retained solely because the Python/TS SDKs shell to it as their
-launch mechanism — not a user-facing command.
+Three top-level surfaces exist deliberately alongside `machine`,
+because they are different objects:
+
+- `dev` — the host build substrate, not a workload.
+- `run` — the one-shot transient-run command (`mvmctl run python3 script.py`).
+  It is the ergonomic flagship for users who want the lowest-friction path,
+  and it remains the SDK transport the Python/TS SDKs shell to. It is a
+  first-class, visible command.
+- The hidden SDK-only `__sdk-no-vm` transport for `MVM_NO_VM=1`.
+
+`run` and `machine run` are not two implementations: `machine run` converts
+its machine-specific flags into the same `RunArgs` shape that `run` uses,
+and both converge on `run_secure_with_source`.
 
 ### One listing, over every store
 
@@ -70,7 +78,7 @@ materialize path, `--flake <path>` (or a discovered manifest) for the Nix
 build-in-the-builder-VM path. The two are mutually exclusive at the flag
 level. There is no separate command tree per image source.
 
-### `machine run` unifies transient, persistent, and interactive lifecycles
+### `machine run` continues to unify transient, persistent, and interactive lifecycles
 
 Persistence and interactivity are independent, flag-selected axes on one
 command, not separate verbs:
@@ -149,6 +157,21 @@ follow-on work, not yet done.
 - A single noun carrying dozens of verbs is inherently a large `--help`
   tree; the mitigation is `display_order`/grouping inside `machine`, not
   a second noun.
+
+## Amendment (2026-08-13)
+
+The original ADR declared `run` a hidden SDK-only transport and folded the
+user-facing transient-run role into `machine run`. Experience and a survey
+of comparable sandboxes showed that users also expect a flat `run <command>`
+flagship alongside the noun-grouped `machine run` shape. This amendment
+makes `run` visible while keeping `machine` as the workload lifecycle noun.
+
+The change is surface-only:
+
+- `mvmctl run` and `mvmctl machine run` share one `RunArgs` argument shape
+  and one execution path.
+- No admission, audit, or security behavior changes.
+- No aliases are introduced or retained.
 
 ## Alternatives considered
 
