@@ -16,6 +16,7 @@ use mvm_contract::protocol::network_flow::{
     Direction, FrameError, Opcode, SessionValidator, decode,
 };
 use mvm_core::net::session::Session;
+use mvm_vmm::vsock_egress_bridge::egress_gate::{EgressGate, EgressVerdict};
 
 use self::registry::{RegistryLimits, StreamRegistry, class_for_open};
 use tracing::{info, warn};
@@ -48,6 +49,7 @@ pub struct FlowMuxSession<S> {
     session: Session,
     validator: SessionValidator,
     registry: StreamRegistry,
+    gate: EgressGate,
     read_buf: Vec<u8>,
 }
 
@@ -68,6 +70,7 @@ impl<S: Read + Write> FlowMuxSession<S> {
         host_key: SigningKey,
         guest_anchor: &VerifyingKey,
         limits: RegistryLimits,
+        gate: EgressGate,
     ) -> Result<Self, FlowMuxError> {
         let (session, _peer_key) = Session::host(&mut stream, session_id, host_key)
             .map_err(|e| FlowMuxError::Handshake(e.to_string()))?;
@@ -85,6 +88,7 @@ impl<S: Read + Write> FlowMuxSession<S> {
             session,
             validator: SessionValidator::default(),
             registry: StreamRegistry::new(limits),
+            gate,
             read_buf: Vec::with_capacity(4096),
         })
     }
@@ -151,18 +155,36 @@ impl<S: Read + Write> FlowMuxSession<S> {
                     // A second Hello is illegal after the session is established;
                     // the validator already refuses it.
                 }
-                Opcode::OpenTcp | Opcode::OpenUdp => {
+                Opcode::OpenTcp => {
+                    if let Err(e) = self.handle_open_tcp(stream_id, payload_len) {
+                        warn!(error = %e, stream_id, "FlowMux refusing TCP open");
+                        self.send_refused(stream_id, &e.to_string())?;
+                        self.send_goaway("flow frames not yet implemented")?;
+                        return Ok(());
+                    }
+                    // Phase 3 next step: spawn the host socket relay for this stream.
+                    warn!(
+                        stream_id,
+                        "FlowMux TCP open accepted; data relay not yet implemented"
+                    );
+                    self.send_goaway("flow frames not yet implemented")?;
+                    return Ok(());
+                }
+                Opcode::OpenUdp => {
                     // Record the guest-initiated stream so the registry tracks
                     // ceilings and parity; Phase 3 will connect the socket and
-                    // reply with Opened/UdpOpened.
+                    // reply with UdpOpened.
                     if let Some(class) = class_for_open(opcode)
                         && let Err(e) = self.registry.open_guest(stream_id, class)
                     {
-                        warn!(error = %e, stream_id, "FlowMux refusing open");
+                        warn!(error = %e, stream_id, "FlowMux refusing UDP open");
                         self.send_goaway(&e.to_string())?;
                         return Ok(());
                     }
-                    warn!(?opcode, stream_id, "FlowMux skeleton rejects flow frame");
+                    warn!(
+                        ?opcode,
+                        stream_id, "FlowMux skeleton rejects UDP flow frame"
+                    );
                     self.send_goaway("flow frames not yet implemented")?;
                     return Ok(());
                 }
@@ -188,6 +210,38 @@ impl<S: Read + Write> FlowMuxSession<S> {
         }
     }
 
+    fn handle_open_tcp(&mut self, stream_id: u32, payload_len: u32) -> Result<(), FlowMuxError> {
+        if payload_len == 0 || payload_len > 256 {
+            return Err(FlowMuxError::FrameRefused(
+                "OpenTcp target missing or too long".to_string(),
+            ));
+        }
+        // Read the payload bytes from the stream. `read_frame` has already
+        // decoded the header and left the payload in `self.read_buf`.
+        let payload = &self.read_buf[self.read_buf.len() - payload_len as usize..];
+        let target = std::str::from_utf8(payload)
+            .map_err(|_| FlowMuxError::FrameRefused("OpenTcp target is not UTF-8".to_string()))?;
+        let (host, port) = parse_host_port(target)
+            .map_err(|e| FlowMuxError::FrameRefused(format!("invalid OpenTcp target: {e}")))?;
+
+        let verdict = self.gate.decide_request(&format!("{host}:{port}"));
+        match verdict {
+            EgressVerdict::Allow { .. } => {
+                self.registry
+                    .open_guest(stream_id, registry::FlowClass::Tcp)
+                    .map_err(|e| FlowMuxError::FrameRefused(e.to_string()))?;
+                self.send_opened(stream_id)?;
+                Ok(())
+            }
+            EgressVerdict::Deny(reason) => Err(FlowMuxError::FrameRefused(format!(
+                "destination refused: {reason:?}"
+            ))),
+            EgressVerdict::Malformed => Err(FlowMuxError::FrameRefused(
+                "malformed destination".to_string(),
+            )),
+        }
+    }
+
     fn send_hello_ack(&mut self) -> Result<(), FlowMuxError> {
         self.write_frame(Opcode::HelloAck, 0, b"")
     }
@@ -195,6 +249,16 @@ impl<S: Read + Write> FlowMuxSession<S> {
     fn send_goaway(&mut self, reason: &str) -> Result<(), FlowMuxError> {
         warn!(%reason, "FlowMux sending GoAway");
         self.write_frame(Opcode::GoAway, 0, reason.as_bytes())
+    }
+
+    fn send_opened(&mut self, stream_id: u32) -> Result<(), FlowMuxError> {
+        info!(stream_id, "FlowMux sending Opened");
+        self.write_frame(Opcode::Opened, stream_id, b"")
+    }
+
+    fn send_refused(&mut self, stream_id: u32, reason: &str) -> Result<(), FlowMuxError> {
+        warn!(stream_id, %reason, "FlowMux sending Refused");
+        self.write_frame(Opcode::Refused, stream_id, reason.as_bytes())
     }
 
     fn write_frame(
@@ -255,6 +319,19 @@ impl<S: Read + Write> FlowMuxSession<S> {
     }
 }
 
+fn parse_host_port(target: &str) -> Result<(&str, u16), String> {
+    let (host, port_str) = target
+        .rsplit_once(':')
+        .ok_or_else(|| "target must be host:port".to_string())?;
+    if host.is_empty() {
+        return Err("host must not be empty".to_string());
+    }
+    let port = port_str
+        .parse::<u16>()
+        .map_err(|_| format!("port must be a 16-bit integer: {port_str}"))?;
+    Ok((host, port))
+}
+
 #[cfg(test)]
 mod tests {
     use std::os::unix::net::UnixStream;
@@ -283,6 +360,7 @@ mod tests {
 
         let (host_stream, mut guest_stream) = UnixStream::pair().unwrap();
 
+        let gate = mvm_vmm::vsock_egress_bridge::egress_gate::EgressGate::default_deny();
         let host_handle = thread::spawn(move || {
             FlowMuxSession::accept(
                 host_stream,
@@ -290,6 +368,7 @@ mod tests {
                 host_key,
                 &wrong_verify,
                 RegistryLimits::default(),
+                gate,
             )
             .map(|_| ())
         });
@@ -328,6 +407,7 @@ mod tests {
 
         let (host_stream, mut guest_stream) = UnixStream::pair().unwrap();
 
+        let gate = mvm_vmm::vsock_egress_bridge::egress_gate::EgressGate::default_deny();
         let host_handle = thread::spawn(move || {
             let mut session = FlowMuxSession::accept(
                 host_stream,
@@ -335,6 +415,7 @@ mod tests {
                 host_key,
                 &guest_verify,
                 RegistryLimits::default(),
+                gate,
             )
             .unwrap();
             session.serve()
@@ -353,10 +434,10 @@ mod tests {
         let (opcode, _payload) = read_flowmux_frame(&mut guest_stream);
         assert_eq!(opcode, Opcode::HelloAck);
 
-        // Send a flow frame and expect a GoAway, because flow frames are not
-        // implemented yet.
+        // Send a flow frame on an unknown stream and expect a GoAway, because
+        // flow frames are not implemented yet.
         let mut payload = Vec::new();
-        encode_into(&mut payload, Opcode::OpenTcp, 1, b"example.com:443").unwrap();
+        encode_into(&mut payload, Opcode::Data, 1, b"hello").unwrap();
         guest_stream.write_all(&payload).unwrap();
         guest_stream.flush().unwrap();
 

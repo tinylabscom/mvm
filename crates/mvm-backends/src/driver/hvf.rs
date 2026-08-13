@@ -1639,20 +1639,12 @@ mod tests {
             vec![],
         );
         let ports = &spec.vsock;
-        let network_flow: Vec<_> = ports
-            .iter()
-            .filter(|p| p.service == GuestService::NetworkFlow)
-            .collect();
-        assert_eq!(network_flow.len(), 1, "exactly one NetworkFlow service");
-        assert!(
-            !ports
-                .iter()
-                .any(|p| p.service == GuestService::NetworkControl)
-        );
-        assert!(
-            !ports
-                .iter()
-                .any(|p| p.service == GuestService::NetworkData { queue: 0 })
+        let services: std::collections::BTreeSet<_> = ports.iter().map(|p| p.service).collect();
+        assert_eq!(
+            services,
+            [GuestService::MachineControl, GuestService::NetworkFlow]
+                .into_iter()
+                .collect()
         );
     }
 }
