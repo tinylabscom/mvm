@@ -73,12 +73,11 @@
       the focused x86_64 Linux cross-build are green. The CI test-linux and lint-core lanes passed on PR #2324, and a
       local x86_64 Linux cross-build passes on current main; the platform
       gates are complete.
-- [~] Issue-closeout batch — **#2165, #2321, #2323**. Workload-runner root
-      bootargs now agree with read-only block attachments across the selected
-      drivers; the substitution forward leg rejects oversized declared or
-      streamed response bodies before accumulation; and Firecracker teardown
-      uses the shared bounded poll backoff. Targeted tests and clippy pass;
-      merge and backend live evidence remain before closure.
+- [x] Issue-closeout batch — **#2165, #2321, #2323**. Closed 2026-08-13.
+      Workload-runner root bootargs agree with read-only block attachments
+      across the selected drivers; the substitution forward leg rejects
+      oversized declared or streamed response bodies before accumulation; and
+      Firecracker teardown uses the shared bounded poll backoff.
 
 - [x] Release-artifact download failures no longer send macOS users into a
       host-Nix setup that writes SSH credentials under `/etc/nix` and forces a
