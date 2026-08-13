@@ -290,8 +290,8 @@ pub fn assemble(
     // the redaction / reversible-replacement / TLS / recorder wiring; passing
     // `resolver` in means it no longer hardcodes a `LocalResolver`, so a
     // `Remote` backend actually reaches its `RemoteResolver`.
-    let (service, handed) =
-        SubstitutionService::from_plan(crate::supervisor::network_endpoint_proxy::FromPlanInputs {
+    let (service, handed) = SubstitutionService::from_plan(
+        crate::supervisor::network_endpoint_proxy::FromPlanInputs {
             plan_secrets: &cfg.secrets,
             tenant: &cfg.tenant_id,
             bindings: &bindings,
@@ -301,7 +301,8 @@ pub fn assemble(
             reversible_replacement: cfg.reversible_replacement.clone(),
             tls_intermediate,
             recorder,
-        })?;
+        },
+    )?;
 
     // Claim-10: when the backend threaded the VM's resolved network policy, this
     // endpoint becomes the egress gate. Resolve host-allowlist pins once (fails

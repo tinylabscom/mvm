@@ -2,9 +2,7 @@
 
 ## Status
 
-**Phase 0 complete (#2369). Phase 1 in progress (#2370): the wire contract
-and its fuzz harnesses have landed; `NetworkLimits`, the session extraction,
-and the performance baselines remain.**
+**Phase 0 complete (#2369). Phase 1 complete (#2370). Phase 2 in progress (#2371): the production endpoint role, channel identity, and spawner files have been renamed; a host-side authenticated FlowMux session acceptor has landed and is exercised by unit tests.**
 
 ADR-042 is accepted and the raw-packet path is frozen: new
 `raw_ip_stack=true` / `NetworkMode::L3Vsock` launches are refused at synthesis,
@@ -285,6 +283,25 @@ cannot represent is not really enforced at the parse boundary.
 - [ ] Add tests proving Firecracker, HVF, and libkrun specs expose exactly one
       `NetworkFlow` service when networking is granted, none when it is absent,
       and never expose L3 control/data services.
+
+**Landed so far (Phase 2).** The production endpoint process is renamed from
+`mvm-substitution-endpoint` to `mvm-network-endpoint` (`network_endpoint.rs`,
+`network_endpoint_proxy.rs`, `network_endpoint_spawn.rs`,
+`mvm-network-endpoint.rs`, and the corresponding test file). All backend
+spawners (Firecracker, HVF, libkrun, QEMU) route to the single
+`spawn_network_endpoint` site. `GuestService::NetworkFlow` (port 5253) is the
+one declared vsock channel for workload networking.
+
+`mvm-hostd::supervisor::flowmux` introduces `FlowMuxSession`, the host-side
+authenticated FlowMux acceptor. It reuses the shared `mvm-core::net::session`
+handshake, pins the guest identity against the plan's verifying key, and talks
+the v1 FlowMux wire contract. Unit tests prove wrong anchors are rejected, the
+handshake completes, `Hello`/`HelloAck` open the session, and an unimplemented
+flow frame receives `GoAway` before the session closes cleanly.
+
+`mvm-contract::protocol::network_flow::SessionValidator` gained
+`mark_hello_ack_sent` so a host-side driver can advance its own state machine
+after sending the ack; the validator still only observes inbound frames.
 
 ### Phase 3 — Converge egress TCP, UDP, and DNS
 

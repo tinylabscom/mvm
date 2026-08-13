@@ -27,8 +27,8 @@ use mvm_core::substitution_wire::{WireRequest, WireResponse};
 
 use crate::framing::{FrameError, read_json_frame, write_json_frame};
 use crate::keyholder::{
-    AssembleError, BindingStore, HandedPlaceholders, SecretResolver, SignDispatchError,
-    SigningInput, SubstituteError, NetworkEndpoint, SubstitutionRegistry, assemble_registry,
+    AssembleError, BindingStore, HandedPlaceholders, NetworkEndpoint, SecretResolver,
+    SignDispatchError, SigningInput, SubstituteError, SubstitutionRegistry, assemble_registry,
     build_sigv4_input, find_placeholder,
 };
 use crate::supervisor::audit_recorder::Recorder;

@@ -90,8 +90,8 @@ fn canonical_child_bindings(
 ) -> std::io::Result<VsockHostBindings> {
     let agent_socket =
         (mask & HANDOFF_AGENT != 0).then(|| mvm_core::config::vm_hvf_agent_socket_at(state_dir));
-    let network_endpoint = (mask & HANDOFF_EGRESS != 0)
-        .then(|| mvm_core::config::vm_network_endpoint_socket(name));
+    let network_endpoint =
+        (mask & HANDOFF_EGRESS != 0).then(|| mvm_core::config::vm_network_endpoint_socket(name));
     let broker_path =
         mvm_core::config::vm_vsock_port_socket_at(state_dir, mvm_agentd::vsock::BROKER_PORT);
     let broker_endpoint = (mask & HANDOFF_BROKER != 0).then_some(broker_path);
