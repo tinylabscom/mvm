@@ -54,6 +54,25 @@ fn hvf_console_data_sockets(state_dir: &Path, dev_console: bool) -> Vec<HostDial
         .collect()
 }
 
+fn hvf_host_dial_sockets(config: &VmStartConfig, state_dir: &Path) -> Result<Vec<HostDialSocket>> {
+    let mut sockets = hvf_console_data_sockets(state_dir, config.dev_console);
+    for mapping in &config.ports {
+        let guest_port = mvm_agentd::vsock::PORT_FORWARD_BASE + u32::from(mapping.guest);
+        if sockets.iter().any(|socket| socket.guest_port == guest_port) {
+            bail!(
+                "declared TCP port {} maps to reserved vsock port {}",
+                mapping.guest,
+                guest_port
+            );
+        }
+        sockets.push(HostDialSocket {
+            guest_port,
+            host_socket: mvm_core::config::vm_hvf_vsock_port_socket_at(state_dir, guest_port),
+        });
+    }
+    Ok(sockets)
+}
+
 pub(crate) fn read_pid(path: &Path) -> Option<libc::pid_t> {
     std::fs::read_to_string(path).ok()?.trim().parse().ok()
 }
@@ -534,7 +553,7 @@ impl VmBackend for HvfBackend {
         // ports so the host can attach a shell; the supervisor binds them under
         // the shared HVF-style console socket dir. Create that dir up front so
         // the bind can't miss.
-        let console_data_sockets = hvf_console_data_sockets(&state_dir, config.dev_console);
+        let console_data_sockets = hvf_host_dial_sockets(config, &state_dir)?;
         if !console_data_sockets.is_empty() {
             let vsock_dir = console_data_sockets[0]
                 .host_socket

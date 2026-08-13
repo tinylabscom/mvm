@@ -75,6 +75,8 @@ pub(in crate::commands) struct PersistentImageStartParams<'a> {
     pub mem_initial_mib: Option<u32>,
     pub volumes: &'a [image::RuntimeVolume],
     pub network_policy: mvm_core::network_policy::NetworkPolicy,
+    /// Loopback ingress mappings persisted with the machine.
+    pub ports: &'a [String],
     /// Concrete backend selected by the caller.
     pub backend_name: &'a str,
     /// Skip plan-admission signing (test escape).
@@ -187,6 +189,7 @@ pub(in crate::commands) fn start_persistent_oci_machine(
         mem_initial_mib,
         volumes,
         network_policy,
+        ports,
         backend_name,
         no_supervisor,
         kernel_path,
@@ -293,6 +296,13 @@ pub(in crate::commands) fn start_persistent_oci_machine(
         network_policy,
     }
     .into_start_config();
+    start_config.ports = ports
+        .iter()
+        .map(|mapping| {
+            let (host, guest) = crate::commands::shared::parse_port_spec(mapping)?;
+            Ok(mvm_core::vm_backend::VmPortMapping { host, guest })
+        })
+        .collect::<Result<Vec<_>>>()?;
     start_config.runtime_source_policy = runtime_source_policy;
     // Only dev-profile machines can be attached to later with `machine shell`
     // or `machine console`. Keep the host-side console listeners absent for

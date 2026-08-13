@@ -693,6 +693,7 @@ fn spec_fixture(name: &str) -> MachineSpec {
         runtime_pack: false,
         net: false,
         allow_host: vec![],
+        ports: vec![],
         cpus: 2,
         memory: "512M".to_string(),
         mem_initial: None,
@@ -1611,6 +1612,7 @@ fn mark_machine_started_sets_digest_and_timestamp() {
         runtime_pack: false,
         net: false,
         allow_host: Vec::new(),
+        ports: vec![],
         cpus: 2,
         memory: "512M".to_string(),
         mem_initial: None,
@@ -1835,6 +1837,7 @@ fn machine_start_receipt_input_redacts_host_paths_and_surfaces_policy() {
         runtime_pack: false,
         net: false,
         allow_host: vec!["api.example.com".to_string()],
+        ports: vec![],
         cpus: 4,
         memory: "2G".to_string(),
         mem_initial: Some("512M".to_string()),
@@ -1923,6 +1926,7 @@ fn machine_start_preflight_reports_uniform_l4_enforcement_for_oci_allow_host() {
         runtime_pack: false,
         net: false,
         allow_host: vec!["api.example.com".to_string()],
+        ports: vec![],
         cpus: 2,
         memory: "512M".to_string(),
         mem_initial: None,
@@ -1983,6 +1987,7 @@ fn create_refuses_overwrite_without_force() {
         runtime_pack: false,
         net: false,
         allow_host: Vec::new(),
+        ports: vec![],
         cpus: 2,
         memory: "512M".to_string(),
         mem_initial: None,
@@ -2014,6 +2019,7 @@ fn remove_machine_spec_requires_confirmation_and_deletes_dir() {
         runtime_pack: false,
         net: false,
         allow_host: Vec::new(),
+        ports: vec![],
         cpus: 2,
         memory: "512M".to_string(),
         mem_initial: None,
@@ -2047,6 +2053,7 @@ fn seed_machine_spec(name: &str) {
         runtime_pack: false,
         net: false,
         allow_host: Vec::new(),
+        ports: vec![],
         cpus: 2,
         memory: "512M".to_string(),
         mem_initial: None,
@@ -2484,6 +2491,7 @@ fn reconfigure_spec_fixture() -> MachineSpec {
         runtime_pack: false,
         net: false,
         allow_host: vec![],
+        ports: vec![],
         cpus: 2,
         memory: "512M".into(),
         mem_initial: None,
@@ -2562,6 +2570,7 @@ fn patch_allow_host_replace_and_clear() {
 
     let base = MachineSpec {
         allow_host: vec!["old:443".into()],
+        ports: vec![],
         ..reconfigure_spec_fixture()
     };
     let mut clear = reconfigure_args_fixture("web");

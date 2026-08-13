@@ -190,14 +190,14 @@ fn relay_supervisor_config_with_handoff(
         (!c.is_empty()).then(|| c.to_string())
     };
 
-    // Collect dev-only console data sockets: the spec carries one HostDials entry
-    // per pre-opened console data port (exact members of dev_console_data_ports()).
-    // Sealed prod specs carry none, so this vec is empty in production.
+    // Collect explicitly host-dialable channels: dev consoles are range-gated,
+    // while TCP ingress appears only when the admitted launch spec declared it.
     let console_data_sockets = spec
         .vsock
         .iter()
         .filter(|p| {
             matches!(p.service, GuestService::ConsoleData { port } if dev_console_data_ports().any(|cp| cp == port))
+                || matches!(p.service, GuestService::IngressTcp { .. })
         })
         .map(|p| HostDialSocket {
             guest_port: p.port(),

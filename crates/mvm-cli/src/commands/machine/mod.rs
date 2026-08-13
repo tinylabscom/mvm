@@ -323,7 +323,7 @@ pub(in crate::commands) struct MachineRunArgs {
         long,
         value_name = "HOST_PORT:GUEST_PORT",
         value_parser = super::shared::clap_port_spec,
-        conflicts_with_all = ["detach", "up_json", "json", "tty", "interactive", "entrypoint"]
+        conflicts_with_all = ["detach", "json", "tty", "interactive", "entrypoint"]
     )]
     pub port: Vec<String>,
     /// Return machine startup details as JSON.
@@ -752,6 +752,7 @@ fn machine_run_spec(
         runtime_pack: args.runtime_pack,
         net: args.net,
         allow_host: args.allow_host.clone(),
+        ports: args.port.clone(),
         cpus: args.cpus,
         memory: args.memory.clone(),
         mem_initial: None,
@@ -1175,6 +1176,7 @@ impl MachineCreateArgs {
             runtime_pack: false,
             net,
             allow_host,
+            ports: Vec::new(),
             cpus,
             memory,
             mem_initial,

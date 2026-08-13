@@ -61,9 +61,11 @@ fn ram_size_bytes(mem_mib: u32) -> usize {
 const KERNEL_LOAD_OFFSET: u64 = 0x8_0000;
 /// DTB reserved window at the top of RAM (matches `fdt::FDT_MAX_SIZE` budget).
 const FDT_MAX_SIZE: u64 = 0x20_0000;
-/// initramfs load offset within RAM (256 MiB in — clear of the kernel, below the
-/// DTB window).
-const INITRD_OFFSET: u64 = 0x1000_0000;
+/// Preferred initramfs load offset within RAM. Smaller guests may not extend to
+/// 256 MiB, so boot placement falls back to the first 2 MiB-aligned region after
+/// the kernel rather than rejecting an otherwise valid arm64 image.
+const PREFERRED_INITRD_OFFSET: u64 = 0x1000_0000;
+const INITRD_ALIGNMENT: usize = 0x20_0000;
 const UART_BASE: u64 = fdt::SERIAL_MMIO_BASE;
 /// virtio-mmio device windows (above the GIC, below RAM) + their SPIs.
 const VIRTIO_MMIO_BASE: u64 = 0x0a00_0000;
@@ -445,6 +447,34 @@ impl KernelImageSource<'_> {
     }
 }
 
+fn initrd_load_offset(
+    kernel_end: usize,
+    initrd_len: usize,
+    dtb_offset: usize,
+) -> Result<usize, HvfError> {
+    let preferred = PREFERRED_INITRD_OFFSET as usize;
+    if preferred >= kernel_end
+        && preferred
+            .checked_add(initrd_len)
+            .is_some_and(|end| end <= dtb_offset)
+    {
+        return Ok(preferred);
+    }
+
+    let fallback = kernel_end
+        .checked_add(INITRD_ALIGNMENT - 1)
+        .map(|value| value / INITRD_ALIGNMENT * INITRD_ALIGNMENT)
+        .ok_or(HvfError::BadKernel)?;
+    if fallback
+        .checked_add(initrd_len)
+        .is_some_and(|end| end <= dtb_offset)
+    {
+        Ok(fallback)
+    } else {
+        Err(HvfError::BadKernel)
+    }
+}
+
 fn boot_kernel_impl(params: KernelBootUntilParams<'_>) -> Result<KernelBootResult, HvfError> {
     let KernelBootUntilParams {
         kernel,
@@ -472,16 +502,11 @@ fn boot_kernel_impl(params: KernelBootUntilParams<'_>) -> Result<KernelBootResul
     if kernel_end > dtb_off {
         return Err(HvfError::BadKernel);
     }
-    // Place initramfs at INITRD_OFFSET; must clear the kernel and the DTB window.
-    let initrd_off = INITRD_OFFSET as usize;
-    if let Some(rd) = initramfs
-        && (initrd_off < kernel_end
-            || initrd_off
-                .checked_add(rd.len())
-                .is_none_or(|end| end > dtb_off))
-    {
-        return Err(HvfError::BadKernel);
-    }
+    // Keep the stable 256 MiB placement when it fits, but support constrained
+    // guests by placing the initramfs immediately after the kernel.
+    let initrd_off = initramfs.map_or(Ok(PREFERRED_INITRD_OFFSET as usize), |rd| {
+        initrd_load_offset(kernel_end, rd.len(), dtb_off)
+    })?;
 
     // Demand-zero anonymous mapping: host pages fault in as the guest touches
     // them, so idle residency tracks the working set instead of `ram_size`.
@@ -521,8 +546,8 @@ fn boot_kernel_impl(params: KernelBootUntilParams<'_>) -> Result<KernelBootResul
     }
     let initrd_bounds = initramfs.map(|rd| {
         (
-            RAM_BASE + INITRD_OFFSET,
-            RAM_BASE + INITRD_OFFSET + rd.len() as u64,
+            RAM_BASE + initrd_off as u64,
+            RAM_BASE + initrd_off as u64 + rd.len() as u64,
         )
     });
     let mut virtio_nodes: Vec<(u64, u32)> = Vec::new();
@@ -1239,6 +1264,22 @@ mod tests {
         let meta = KernelImageSource::Bytes(&image).metadata().unwrap();
         assert_eq!(meta.file_len, 4096);
         assert_eq!(meta.reserved_len, 4096);
+    }
+
+    #[test]
+    fn initrd_uses_stable_offset_when_guest_ram_has_room() {
+        assert_eq!(
+            initrd_load_offset(10 * 1024 * 1024, 1024 * 1024, 510 * 1024 * 1024).unwrap(),
+            PREFERRED_INITRD_OFFSET as usize
+        );
+    }
+
+    #[test]
+    fn initrd_falls_back_below_dtb_for_256_mib_guest() {
+        let offset = initrd_load_offset(10 * 1024 * 1024, 1024 * 1024, 254 * 1024 * 1024).unwrap();
+
+        assert_eq!(offset, 10 * 1024 * 1024);
+        assert!(offset + 1024 * 1024 <= 254 * 1024 * 1024);
     }
 
     #[test]
