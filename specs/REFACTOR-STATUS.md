@@ -1234,7 +1234,15 @@ for detailed scope and acceptance criteria.
     the identity on stdin. Backend witness tests in `mvm-vmm::host::spec_map`
     and the Firecracker/HVF/libkrun driver modules prove exactly one
     `NetworkFlow` service and no L3 services per granted workload.
-  - [ ] Phase 3 — converge egress TCP, UDP, and DNS (#2372)
+  - [~] Phase 3 — converge egress TCP, UDP, and DNS (#2372). Landed:
+        guest-initiated `OpenTcp` with typed `Opened`/`Refused` replies,
+        `OpenUdp`/`UdpSend`/`UdpRecv` associations, `Resolve`/`Resolved` DNS
+        frames, per-direction host credit accounting, UDP idle expiry, per-
+        association peer bounds, and host-side integration tests for allowed/
+        denied TCP, UDP round-trip, DNS pinning, UDP idle expiry, and peer
+        bounds. Remaining: guest-side loopback service adapter, deletion of the
+        raw egress path, payload-free audit emission, and endpoint crash/
+        restart tests.
   - [ ] Phase 4 — stream typed transformations (#2373)
   - [ ] Phase 5 — declared ingress on FlowMux (#2374)
   - [ ] Phase 6 — compatibility boundary (#2375)

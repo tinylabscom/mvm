@@ -323,17 +323,17 @@ in `spawn_blocking`.
 
 ### Phase 3 — Converge egress TCP, UDP, and DNS
 
-- [ ] Replace the raw `"host:port\n"` prelude with `OpenTcp`; return `Opened`
+- [x] Replace the raw `"host:port\n"` prelude with `OpenTcp`; return `Opened`
       only after a host connection succeeds, and return a typed refusal for
       policy, DNS, timeout, resource, and connection failures.
 - [ ] Move canonical host/port parsing, DNS resolution and pinning, mandatory
       range denial, redirect revalidation, `EgressGate`, byte accounting,
       connection rate limiting, and payload-free audit emission into one
       endpoint pipeline used by every outbound flow type.
-- [ ] Replace `MVM_DNS/1` and its line-sniffed dispatch with `Resolve` frames.
+- [x] Replace `MVM_DNS/1` and its line-sniffed dispatch with `Resolve` frames.
       Preserve QNAME/QTYPE/answer audit metadata, TTL bounds, rebinding checks,
       and direct-IP/domain-policy distinctions.
-- [ ] Replace `MVM_SOCKS5_UDP/1` and its private framing with `OpenUdp`,
+- [x] Replace `MVM_SOCKS5_UDP/1` and its private framing with `OpenUdp`,
       `UdpSend`, and `UdpRecv`. Preserve destination checks on every datagram,
       peer bounds, idle expiry, byte/rate limits, and silence-on-refusal toward
       the SOCKS client.
@@ -344,7 +344,7 @@ in `spawn_blocking`.
 - [ ] Delete `EgressMode`, `raw_egress`, protocol sniffing, duplicate line
       markers, and the raw-vs-wire admission choice. A workload with and without
       secret bindings uses the same protocol and endpoint.
-- [ ] Add integration tests for deny-all, allowed/denied TCP, truthful connect
+- [x] Add integration tests for deny-all, allowed/denied TCP, truthful connect
       failure, DNS pinning/rebinding, UDP association/expiry, concurrent flows,
       half-close, cancellation, endpoint crash, and restart with a fresh boot
       identity.
