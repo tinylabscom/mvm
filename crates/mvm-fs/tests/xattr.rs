@@ -59,7 +59,7 @@ fn file_capability_round_trips_through_the_reader() {
             value: cap.clone(),
         }],
     }];
-    let dev = Arc::new(MemDev(build_image(&nodes).expect("build with xattr")));
+    let dev = Arc::new(MemDev(build_image(nodes).expect("build with xattr")));
     let fs = Filesystem::mount(dev.clone()).expect("mount");
 
     let (ino, ft) = root_entry(&fs, "ping");
@@ -88,7 +88,7 @@ fn xattrs_are_deterministic_and_order_independent() {
         if order {
             xattrs.reverse();
         }
-        build_image(&[Node::File {
+        build_image(vec![Node::File {
             path: "/f".into(),
             mode: 0o644,
             data: b"x".to_vec(),

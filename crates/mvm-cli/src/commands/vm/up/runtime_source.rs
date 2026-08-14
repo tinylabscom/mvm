@@ -503,7 +503,7 @@ mod sdk_sidecar_host_resolution_tests {
                 xattrs: Vec::new(),
             },
         ];
-        mvm_fs::ext4::build_image(&nodes).expect("build sidecar ext4 fixture")
+        mvm_fs::ext4::build_image(nodes).expect("build sidecar ext4 fixture")
     }
 
     fn seed_sidecar_cache(cache: &std::path::Path, version: &str, arch: GuestArch) {
@@ -818,7 +818,7 @@ mod runtime_overlay_attach_tests {
                 xattrs: Vec::new(),
             });
         }
-        mvm_fs::ext4::build_image(&nodes).expect("build valid overlay ext4 fixture")
+        mvm_fs::ext4::build_image(nodes).expect("build valid overlay ext4 fixture")
     }
 
     /// Stage a complete overlay cache entry (the four files the resolver

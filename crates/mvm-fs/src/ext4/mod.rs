@@ -363,6 +363,18 @@ impl Image {
     }
 }
 
+// One parent→child link, recorded while the node list is consumed and wired
+// into the parent's directory entries once every inode number is known.
+struct ChildEdge {
+    parent: u32,
+    name: String,
+    child: u32,
+    ft: u8,
+    // The child's normalized path, kept for the parent-is-not-a-directory
+    // refusal so it can name the offending path rather than just the leaf.
+    path: String,
+}
+
 // A planned inode: its number, kind, and the data blocks assigned to it.
 struct Planned {
     ino: u32,
@@ -538,14 +550,14 @@ impl RegionAllocator {
 
 /// Build a deterministic read-only ext4 image containing `nodes` (plus the
 /// implicit root directory). Returns the raw image bytes.
-pub fn build_image(nodes: &[Node]) -> Result<Vec<u8>, Ext4Error> {
+pub fn build_image(nodes: Vec<Node>) -> Result<Vec<u8>, Ext4Error> {
     build_image_with_options(nodes, &BuildOptions::default())
 }
 
 /// Emit a deterministic read-only ext4 image containing `nodes` as a series of
 /// sparse `(offset, bytes)` chunks. Returns the final image length in bytes so
 /// callers can size the destination file without guessing.
-pub fn emit_image<E, F>(nodes: &[Node], emit: F) -> Result<u64, EmitImageError<E>>
+pub fn emit_image<E, F>(nodes: Vec<Node>, emit: F) -> Result<u64, EmitImageError<E>>
 where
     F: FnMut(u64, &[u8]) -> Result<(), E>,
 {
@@ -553,7 +565,7 @@ where
 }
 
 pub fn build_image_with_options(
-    nodes: &[Node],
+    nodes: Vec<Node>,
     options: &BuildOptions,
 ) -> Result<Vec<u8>, Ext4Error> {
     let mut dense = Vec::new();
@@ -575,7 +587,7 @@ pub fn build_image_with_options(
 }
 
 pub fn emit_image_with_options<E, F>(
-    nodes: &[Node],
+    nodes: Vec<Node>,
     options: &BuildOptions,
     mut emit: F,
 ) -> Result<u64, EmitImageError<E>>
@@ -583,20 +595,28 @@ where
     F: FnMut(u64, &[u8]) -> Result<(), E>,
 {
     // 1. Deterministic order: sort by path so inode numbers + block layout are
-    //    a pure function of the input set.
-    let mut sorted: Vec<&Node> = nodes.iter().collect();
-    sorted.sort_by(|a, b| a.path().cmp(b.path()));
+    //    a pure function of the input set. Normalizing once here and carrying
+    //    the result keeps a file's bytes moving through the planner exactly
+    //    once — a walked tree holds every file in memory, so a second copy
+    //    doubles the build's peak footprint.
+    let mut sorted: Vec<(String, Node)> = nodes
+        .into_iter()
+        .map(|n| normalize(n.path()).map(|p| (p, n)))
+        .collect::<Result<_, _>>()
+        .map_err(EmitImageError::Build)?;
+    sorted.sort_by(|a, b| a.0.cmp(&b.0));
 
     // 2. Assign inode numbers: root=2, then FIRST_INO.. in sorted order.
     let mut ino_of: BTreeMap<String, u32> = BTreeMap::new();
     ino_of.insert("/".to_string(), ROOT_INO);
     let mut next = FIRST_INO;
-    for n in &sorted {
-        let p = normalize(n.path()).map_err(EmitImageError::Build)?;
+    for (path, _) in &sorted {
         // `ino_of` already holds "/" → ROOT_INO, so a node re-claiming root or
         // any repeated path collides here and is refused before layout.
-        if ino_of.insert(p.clone(), next).is_some() {
-            return Err(EmitImageError::Build(Ext4Error::DuplicatePath(p)));
+        if ino_of.insert(path.clone(), next).is_some() {
+            return Err(EmitImageError::Build(Ext4Error::DuplicatePath(
+                path.clone(),
+            )));
         }
         next += 1;
     }
@@ -619,38 +639,61 @@ where
         links: 2,
         xattr_block: Vec::new(),
     });
-    for n in &sorted {
-        let p = normalize(n.path()).map_err(EmitImageError::Build)?;
-        let ino = ino_of[&p];
-        let parent_path = parent_of(&p);
+    // Collected here so step 4 can validate and wire the tree without
+    // re-walking the node list, which step 3 consumes.
+    let mut child_edges: Vec<ChildEdge> = Vec::with_capacity(sorted.len());
+    for (path, node) in sorted {
+        let ino = ino_of[&path];
         let parent_ino = *ino_of
-            .get(&parent_path)
-            .ok_or_else(|| Ext4Error::MissingParent(p.clone()))
+            .get(&parent_of(&path))
+            .ok_or_else(|| Ext4Error::MissingParent(path.clone()))
             .map_err(EmitImageError::Build)?;
-        let (kind, mode, data, symlink_target, size) = match n {
-            Node::Dir { mode, .. } => {
-                (Kind::Dir, S_IFDIR | (mode & 0o7777), Vec::new(), None, 0u64)
-            }
-            Node::File { mode, data, .. } => (
-                Kind::File,
-                S_IFREG | (mode & 0o7777),
-                data.clone(),
-                None,
-                data.len() as u64,
-            ),
-            Node::Symlink { target, .. } => (
-                Kind::Symlink,
-                S_IFLNK | 0o777,
-                Vec::new(),
-                Some(target.clone()),
-                target.len() as u64,
-            ),
-        };
         // Encode the inode's xattrs into its in-inode region now; an oversized
         // set surfaces as XattrTooLarge (a capacity limit → builder-VM fallback).
-        let xattr_block = encode_inline_xattrs(n.xattrs())
+        let xattr_block = encode_inline_xattrs(node.xattrs())
             .ok_or(Ext4Error::XattrTooLarge { ino })
             .map_err(EmitImageError::Build)?;
+        // `node` is consumed here: a file's bytes move into the plan rather
+        // than being cloned out of it.
+        let (kind, mode, data, symlink_target, size, ft) = match node {
+            Node::Dir { mode, .. } => (
+                Kind::Dir,
+                S_IFDIR | (mode & 0o7777),
+                Vec::new(),
+                None,
+                0u64,
+                FT_DIR,
+            ),
+            Node::File { mode, data, .. } => {
+                let size = data.len() as u64;
+                (
+                    Kind::File,
+                    S_IFREG | (mode & 0o7777),
+                    data,
+                    None,
+                    size,
+                    FT_FILE,
+                )
+            }
+            Node::Symlink { target, .. } => {
+                let size = target.len() as u64;
+                (
+                    Kind::Symlink,
+                    S_IFLNK | 0o777,
+                    Vec::new(),
+                    Some(target),
+                    size,
+                    FT_SYMLINK,
+                )
+            }
+        };
+        child_edges.push(ChildEdge {
+            parent: parent_ino,
+            name: leaf_name(&path),
+            child: ino,
+            ft,
+            path,
+        });
         planned.push(Planned {
             ino,
             kind,
@@ -676,30 +719,16 @@ where
         .enumerate()
         .map(|(i, p)| (p.ino, i))
         .collect();
-    // Collect (parent_ino, name, child_ino, ft) first to avoid borrow conflicts.
-    let mut child_edges: Vec<(u32, String, u32, u8)> = Vec::new();
-    for n in &sorted {
-        let p = normalize(n.path()).map_err(EmitImageError::Build)?;
-        let ino = ino_of[&p];
-        let parent_ino = *ino_of.get(&parent_of(&p)).unwrap();
+    for edge in child_edges {
         // The parent must be a directory. A file/symlink parent would leave this
         // node orphaned (no dirent references it), so refuse rather than emit an
         // unreachable inode. Root (ROOT_INO) is always a directory.
-        if planned[index[&parent_ino]].kind != Kind::Dir {
-            return Err(EmitImageError::Build(Ext4Error::NotADirectory(p.clone())));
+        let pi = index[&edge.parent];
+        if planned[pi].kind != Kind::Dir {
+            return Err(EmitImageError::Build(Ext4Error::NotADirectory(edge.path)));
         }
-        let name = leaf_name(&p);
-        let ft = match n {
-            Node::Dir { .. } => FT_DIR,
-            Node::File { .. } => FT_FILE,
-            Node::Symlink { .. } => FT_SYMLINK,
-        };
-        child_edges.push((parent_ino, name, ino, ft));
-    }
-    for (parent_ino, name, child_ino, ft) in child_edges {
-        let pi = index[&parent_ino];
-        planned[pi].children.push((name, child_ino, ft));
-        if ft == FT_DIR {
+        planned[pi].children.push((edge.name, edge.child, edge.ft));
+        if edge.ft == FT_DIR {
             planned[pi].links += 1;
         }
     }
@@ -1280,7 +1309,7 @@ mod tests {
             0xee, 0xff,
         ];
         let image = build_image_with_options(
-            &[],
+            Vec::new(),
             &BuildOptions::default()
                 .with_uuid(uuid)
                 .with_volume_name(b"mvm-rootfs"),
@@ -1317,9 +1346,10 @@ mod tests {
                 xattrs: Vec::new(),
             },
         ];
-        let dense = build_image_with_options(&nodes, &BuildOptions::default()).expect("dense");
+        let dense =
+            build_image_with_options(nodes.clone(), &BuildOptions::default()).expect("dense");
         let mut streamed = Vec::new();
-        let total = emit_image_with_options(&nodes, &BuildOptions::default(), |offset, bytes| {
+        let total = emit_image_with_options(nodes, &BuildOptions::default(), |offset, bytes| {
             let start = offset as usize;
             let end = start + bytes.len();
             if streamed.len() < end {
@@ -1341,7 +1371,7 @@ mod tests {
             data: vec![1u8; super::BLOCK_SIZE_USIZE * 2],
             xattrs: Vec::new(),
         }];
-        let err = emit_image_with_options(&nodes, &BuildOptions::default(), |_offset, _bytes| {
+        let err = emit_image_with_options(nodes, &BuildOptions::default(), |_offset, _bytes| {
             Err::<(), _>("synthetic sink failure")
         })
         .expect_err("sink error must surface");

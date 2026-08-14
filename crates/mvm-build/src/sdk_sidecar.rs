@@ -321,7 +321,7 @@ mod tests {
                 xattrs: Vec::new(),
             },
         ];
-        mvm_fs::ext4::build_image(&nodes).expect("build the sidecar ext4 fixture")
+        mvm_fs::ext4::build_image(nodes).expect("build the sidecar ext4 fixture")
     }
 
     fn append_file<W: std::io::Write>(tar: &mut tar::Builder<W>, path: &str, bytes: &[u8]) {

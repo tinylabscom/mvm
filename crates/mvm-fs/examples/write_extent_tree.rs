@@ -39,7 +39,7 @@ fn main() {
         },
     ];
 
-    let image = build_image(&nodes).expect("build depth-1 extent-tree ext4 image");
+    let image = build_image(nodes).expect("build depth-1 extent-tree ext4 image");
     let one_group = 32768usize * mvm_fs::ext4::BLOCK_SIZE as usize;
     assert!(
         image.len() > 4 * one_group,
