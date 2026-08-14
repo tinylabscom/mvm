@@ -1091,8 +1091,8 @@ mod tests {
         let mut spec = spec_with(KernelImage::Path("/k/Image".into()), vec![], vec![]);
         spec.plan_binding = Some(mvm_vmm::driver::spec::PlanBinding {
             plan_json: serde_json::json!({"resources": {"timeouts": {"exec_secs": 30}}}),
-            audit_dir: "/home/u/.mvm/audit".into(),
-            signing_key_path: "/home/u/.mvm/keys/host-signer.ed25519".into(),
+            audit_dir: "/fixture/audit".into(),
+            signing_key_path: "/fixture/keys/host-signer.ed25519".into(),
         });
         let cfg = relay_supervisor_config(&spec, &sample_paths()).expect("config");
 
@@ -1106,13 +1106,11 @@ mod tests {
         );
         assert_eq!(
             cfg.audit_dir.as_deref(),
-            Some(std::path::Path::new("/home/u/.mvm/audit"))
+            Some(std::path::Path::new("/fixture/audit"))
         );
         assert_eq!(
             cfg.signing_key_path.as_deref(),
-            Some(std::path::Path::new(
-                "/home/u/.mvm/keys/host-signer.ed25519"
-            ))
+            Some(std::path::Path::new("/fixture/keys/host-signer.ed25519"))
         );
     }
 
@@ -1121,8 +1119,8 @@ mod tests {
         let mut spec = spec_with(KernelImage::Path("/k/Image".into()), vec![], vec![]);
         spec.plan_binding = Some(mvm_vmm::driver::spec::PlanBinding {
             plan_json: serde_json::json!({"resources": {"timeouts": {"exec_secs": 30}}}),
-            audit_dir: "/home/u/.mvm/audit".into(),
-            signing_key_path: "/home/u/.mvm/keys/host-signer.ed25519".into(),
+            audit_dir: "/fixture/audit".into(),
+            signing_key_path: "/fixture/keys/host-signer.ed25519".into(),
         });
         let cfg = relay_supervisor_config(&spec, &sample_paths()).expect("config");
 

@@ -657,8 +657,8 @@ mod tests {
     fn binding() -> mvm_vmm::driver::spec::PlanBinding {
         mvm_vmm::driver::spec::PlanBinding {
             plan_json: serde_json::json!({"resources": {"timeouts": {"exec_secs": 30}}}),
-            audit_dir: "/home/u/.mvm/audit".into(),
-            signing_key_path: "/home/u/.mvm/keys/host-signer.ed25519".into(),
+            audit_dir: "/fixture/audit".into(),
+            signing_key_path: "/fixture/keys/host-signer.ed25519".into(),
         }
     }
 
@@ -675,13 +675,10 @@ mod tests {
             Some(serde_json::json!(30)),
             "the supervisor arms its wall-clock timer from `plan`; without it every bound is inert"
         );
-        assert_eq!(
-            cfg.audit_dir.as_deref(),
-            Some(Path::new("/home/u/.mvm/audit"))
-        );
+        assert_eq!(cfg.audit_dir.as_deref(), Some(Path::new("/fixture/audit")));
         assert_eq!(
             cfg.signing_key_path.as_deref(),
-            Some(Path::new("/home/u/.mvm/keys/host-signer.ed25519"))
+            Some(Path::new("/fixture/keys/host-signer.ed25519"))
         );
     }
 
