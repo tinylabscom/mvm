@@ -167,10 +167,22 @@ jobs:
       # because a changed job can break a reference in a file it did not touch.
       # Placed after shellcheck is installed (actionlint shells out to it) but
       # before the slow toolchain steps, so a workflow error fails fast.
+      # Pinned + checksum-verified rather than an installer action: actionlint
+      # is a Go binary, so `install-action` has no recipe for it and its
+      # cargo-binstall fallback looks for a crate that does not exist.
       - name: Install actionlint
-        uses: taiki-e/install-action@v2
-        with:
-          tool: actionlint
+        env:
+          ACTIONLINT_VERSION: 1.7.12
+          ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+        run: |
+          set -euo pipefail
+          tarball="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          curl -fL --retry 3 -o "$tarball" \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/${tarball}"
+          echo "${ACTIONLINT_SHA256}  ${tarball}" | sha256sum -c -
+          tar -xzf "$tarball" actionlint
+          sudo install -m 0755 actionlint /usr/local/bin/actionlint
+          actionlint --version
 
       - name: Lint workflow files
         run: actionlint .github/workflows/*.yml
