@@ -124,6 +124,108 @@ mod tests {
         );
     }
 
+    /// The mirror must be invisible to the chain. It runs after the write and
+    /// touches nothing that gets signed, so this holds by construction — but
+    /// nothing pinned it, and "obviously can't differ" is how a byte-identity
+    /// property stops being true.
+    ///
+    /// A fixed key and a fixed timestamp make the two runs comparable: a fresh
+    /// key would change every signature and make the comparison vacuous. The
+    /// observed-count assertion stops the test passing by mirroring nothing.
+    #[tokio::test]
+    async fn chain_bytes_are_identical_with_and_without_a_mirror_subscriber() {
+        use crate::supervisor::audit::AuditSigner;
+        use crate::supervisor::audit_file::FileAuditSigner;
+
+        async fn chain_bytes(observe: bool) -> (String, usize) {
+            let dir = tempfile::tempdir().unwrap();
+            let key = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+            let signer = FileAuditSigner::open(key, dir.path()).unwrap();
+            let mut entry = sample_entry("plan.admitted");
+            entry.timestamp = chrono::DateTime::parse_from_rfc3339("2026-08-14T00:00:00Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc);
+
+            let seen = if observe {
+                let events: CapturedEvents = Arc::new(Mutex::new(Vec::new()));
+                let layer = CaptureLayer {
+                    events: events.clone(),
+                };
+                let subscriber = tracing_subscriber::registry().with(layer);
+                let guard = tracing::subscriber::set_default(subscriber);
+                signer.sign_and_emit(&entry).await.unwrap();
+                emit_mirror_event(&entry);
+                drop(guard);
+                events.lock().unwrap().len()
+            } else {
+                signer.sign_and_emit(&entry).await.unwrap();
+                emit_mirror_event(&entry);
+                0
+            };
+
+            let path = dir.path().join("tenant-a.jsonl");
+            (std::fs::read_to_string(path).unwrap(), seen)
+        }
+
+        let (without, none_seen) = chain_bytes(false).await;
+        let (with, some_seen) = chain_bytes(true).await;
+
+        assert_eq!(none_seen, 0, "no subscriber installed, so nothing observed");
+        assert!(
+            some_seen >= 1,
+            "the mirror emitted nothing, so this proves nothing"
+        );
+        assert_eq!(
+            without, with,
+            "installing a mirror subscriber changed the signed chain bytes"
+        );
+    }
+
+    /// A mirrored event is only usable as a signal if it never describes an
+    /// append that did not happen.
+    ///
+    /// Both production call sites `?` on `sign_and_emit` before mirroring, so
+    /// this holds today. Nothing pinned the ordering, though: a refactor that
+    /// hoisted the mirror above the `?` would start reporting appends that
+    /// failed, and no test would notice.
+    #[tokio::test]
+    async fn a_failed_append_emits_no_mirrored_event() {
+        use crate::supervisor::audit::AuditSigner;
+        use crate::supervisor::audit_file::FileAuditSigner;
+
+        let dir = tempfile::tempdir().unwrap();
+        let key = ed25519_dalek::SigningKey::from_bytes(&[9u8; 32]);
+        let signer = FileAuditSigner::open(key, dir.path()).unwrap();
+
+        // A directory where the chain file must be: the append's `open` fails.
+        std::fs::create_dir_all(dir.path().join("tenant-a.jsonl")).unwrap();
+
+        let events: CapturedEvents = Arc::new(Mutex::new(Vec::new()));
+        let layer = CaptureLayer {
+            events: events.clone(),
+        };
+        let subscriber = tracing_subscriber::registry().with(layer);
+        let guard = tracing::subscriber::set_default(subscriber);
+
+        // Mirrors the production shape: `?` on the append, mirror only after.
+        let entry = sample_entry("plan.admitted");
+        let appended = signer.sign_and_emit(&entry).await;
+        if appended.is_ok() {
+            emit_mirror_event(&entry);
+        }
+        drop(guard);
+
+        assert!(
+            appended.is_err(),
+            "append should fail when the chain path is a directory"
+        );
+        assert_eq!(
+            events.lock().unwrap().len(),
+            0,
+            "a failed append must not produce a mirrored event"
+        );
+    }
+
     #[test]
     fn panicking_subscriber_does_not_block_chain_write() {
         struct PanicLayer;
