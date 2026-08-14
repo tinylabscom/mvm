@@ -183,14 +183,14 @@ and then `mvmctl run --template python <script>`.
 
 ### Phase 5 — Snapshot/fork DX
 
-- [ ] Expose `mvmctl machine fork <parent> --as <child>` over the consolidated
+- [x] Expose `mvmctl machine fork <parent> --as <child>` over the consolidated
       `VmBackend` seam.
-- [ ] Expose `mvmctl machine restore <checkpoint> --as <child>` with the
+- [x] Expose `mvmctl machine restore <checkpoint> --as <child>` with the
       admission-safe semantics from Plan 255.
-- [ ] Add `--branch` auto-naming for dev sandboxes.
-- [ ] Ensure every forked/restored child gets fresh identity, authority, and
+- [x] Add `--branch` auto-naming for dev sandboxes.
+- [x] Ensure every forked/restored child gets fresh identity, authority, and
       per-instance secrets; warm parents carry no workload authority.
-- [ ] Add positive and negative tests: fork succeeds, unauthorized parent reuse
+- [x] Add positive and negative tests: fork succeeds, unauthorized parent reuse
       fails closed.
 
 **Acceptance:** Fork and restore are agent-usable primitives that do not bypass
