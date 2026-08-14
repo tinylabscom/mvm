@@ -301,6 +301,20 @@ for detailed scope and acceptance criteria.
     backend/runtime survivors in the mutation-witness baseline; Security
     workflow run 31817896244 is the final verification gate before merge
     and issue closure
+- [~] Issue #2101 — OCI workload privilege hardening
+  - [x] `harden_init_process()` in `mvm-oci-init` narrows the bounding set to
+        `RESTORE_AGENT_CAPABILITIES` and sets `no_new_privs` before the agent
+        is spawned; `drop_workload_capability_bounding_set()` empties it in the
+        entrypoint `pre_exec`; `drop_guest_agent_privilege_raw` matches, so the
+        initramfs and OCI paths reach the same posture
+  - [x] Fixed a real bug in the drop loop: it walks slots 0..=63 but tested the
+        keep mask with `1u32 << cap`, panicking at slot 32 in debug and
+        mis-answering every slot above 31. Mask arithmetic split out and tested
+        on every host; reverting the widening turns two of three tests red
+  - [ ] Re-run the adversarial probe on HVF **and** Firecracker — the closure
+        gate, not yet run; no Linux/KVM host available
+  - [ ] Record the ADR-001 claims 1/2 scope decision (owner call; determines
+        whether this is claim-bearing or defense-in-depth)
 - [~] Plan 300 — open-issue reconciliation and closeout
   (`specs/plans/300-open-issue-closeout.md`)
   - [x] Inventory all 39 issues open at the 2026-08-13 snapshot against
