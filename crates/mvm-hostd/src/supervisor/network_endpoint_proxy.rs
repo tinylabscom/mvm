@@ -31,6 +31,9 @@ use crate::keyholder::{
     SignDispatchError, SigningInput, SubstituteError, SubstitutionRegistry, assemble_registry,
     build_sigv4_input, find_placeholder,
 };
+use crate::supervisor::accept_loop::{
+    AcceptAction, classify_accept_error, record_listener_stopped,
+};
 use crate::supervisor::audit_recorder::Recorder;
 use crate::supervisor::network::stages::{RedactingSubstitution, RedactionHits};
 use crate::supervisor::reversible_replacement::{ReplacementEngine, ReplacementFlow};
@@ -775,11 +778,14 @@ impl SubstitutionService {
     }
 
     /// Accept loop: one routed request per connection, framed JSON, a task per
-    /// connection. Runs until the listener errors.
+    /// connection. Runs until the listener fails in a way it cannot recover from;
+    /// transient accept errors are retried.
     pub async fn serve(self: Arc<Self>, listener: UnixListener) {
+        let mut transient = 0u32;
         loop {
             match listener.accept().await {
                 Ok((stream, _)) => {
+                    transient = 0;
                     let me = Arc::clone(&self);
                     tokio::spawn(async move {
                         if let Err(e) = me.handle_connection(stream).await {
@@ -787,10 +793,23 @@ impl SubstitutionService {
                         }
                     });
                 }
-                Err(e) => {
-                    tracing::warn!(error = %e, "substitution endpoint accept failed; stopping");
-                    return;
-                }
+                Err(e) => match classify_accept_error(&e, transient) {
+                    AcceptAction::Retry(delay) => {
+                        tracing::warn!(error = %e, "substitution endpoint accept failed; retrying");
+                        transient = transient.saturating_add(1);
+                        tokio::time::sleep(delay).await;
+                    }
+                    AcceptAction::Fatal => {
+                        tracing::error!(error = %e, "substitution endpoint accept failed; stopping");
+                        record_listener_stopped(
+                            self.recorder.as_ref(),
+                            "substitution-uds",
+                            &e.to_string(),
+                        )
+                        .await;
+                        return;
+                    }
+                },
             }
         }
     }
@@ -803,17 +822,43 @@ impl SubstitutionService {
     /// the async forward leg is driven via `Handle::block_on`. No new dep.
     #[cfg(target_os = "linux")]
     pub async fn serve_vsock(self: Arc<Self>, listener: vsock::VsockListener) {
+        let mut transient = 0u32;
         loop {
             let listen_fd = listener.raw_fd();
             let accepted = tokio::task::spawn_blocking(move || vsock::accept(listen_fd)).await;
             let conn_fd = match accepted {
-                Ok(Ok(fd)) => fd,
-                Ok(Err(e)) => {
-                    tracing::warn!(error = %e, "vsock substitution accept failed; stopping");
-                    return;
+                Ok(Ok(fd)) => {
+                    transient = 0;
+                    fd
                 }
+                Ok(Err(e)) => match classify_accept_error(&e, transient) {
+                    AcceptAction::Retry(delay) => {
+                        tracing::warn!(error = %e, "vsock substitution accept failed; retrying");
+                        transient = transient.saturating_add(1);
+                        tokio::time::sleep(delay).await;
+                        continue;
+                    }
+                    AcceptAction::Fatal => {
+                        tracing::error!(error = %e, "vsock substitution accept failed; stopping");
+                        record_listener_stopped(
+                            self.recorder.as_ref(),
+                            "substitution-vsock",
+                            &e.to_string(),
+                        )
+                        .await;
+                        return;
+                    }
+                },
+                // A panic in the accept task is a bug in this process, not host
+                // pressure that will clear. Retrying would hide it.
                 Err(e) => {
-                    tracing::warn!(error = %e, "vsock accept task panicked; stopping");
+                    tracing::error!(error = %e, "vsock accept task panicked; stopping");
+                    record_listener_stopped(
+                        self.recorder.as_ref(),
+                        "substitution-vsock",
+                        &e.to_string(),
+                    )
+                    .await;
                     return;
                 }
             };
@@ -849,9 +894,11 @@ impl SubstitutionService {
         listener: tokio::net::TcpListener,
         timeout: std::time::Duration,
     ) {
+        let mut transient = 0u32;
         loop {
             match listener.accept().await {
                 Ok((stream, _)) => {
+                    transient = 0;
                     let me = Arc::clone(&self);
                     tokio::spawn(async move {
                         if let Err(e) = me.handle_terminator_connection(stream, timeout).await {
@@ -859,10 +906,23 @@ impl SubstitutionService {
                         }
                     });
                 }
-                Err(e) => {
-                    tracing::warn!(error = %e, "terminator accept failed; stopping");
-                    return;
-                }
+                Err(e) => match classify_accept_error(&e, transient) {
+                    AcceptAction::Retry(delay) => {
+                        tracing::warn!(error = %e, "terminator accept failed; retrying");
+                        transient = transient.saturating_add(1);
+                        tokio::time::sleep(delay).await;
+                    }
+                    AcceptAction::Fatal => {
+                        tracing::error!(error = %e, "terminator accept failed; stopping");
+                        record_listener_stopped(
+                            self.recorder.as_ref(),
+                            "terminator",
+                            &e.to_string(),
+                        )
+                        .await;
+                        return;
+                    }
+                },
             }
         }
     }
