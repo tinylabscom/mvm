@@ -113,10 +113,6 @@ const TEMPLATE_SUB: &[(&str, AuditPosture)] = &[
     ("list", AuditPosture::ReadOnly),
     ("search", AuditPosture::ReadOnly),
     ("info", AuditPosture::ReadOnly),
-    // `template build --image` materializes a user-built image template and
-    // writes it into `~/.mvm/templates/built/`. The operation is a config
-    // change to the local template registry.
-    ("build", AuditPosture::Emits("TemplateBuild")),
 ];
 
 const KERNEL_SUB: &[(&str, AuditPosture)] = &[("build", AuditPosture::ReadOnly)];
