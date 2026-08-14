@@ -123,6 +123,15 @@ guest-RPC surface, fleet-shaped workflows).
 | `mvmctl env cleanup --keep <N>` | Keep the N newest build revisions |
 | `mvmctl env cleanup --verbose` | Print each cached build path that gets removed |
 | `mvmctl env cleanup --cache` | Remove the regenerable `~/.mvm/cache` |
+| `mvmctl env cleanup --state` | `--cache` plus the regenerable subdirs `dev`, `vms`, `log`, `dev-cluster`, `mock-vms`, `tool-staging`. Preserves identity, templates, and everything not named here |
+| `mvmctl env cleanup --nuclear` | Remove **every** entry under `~/.mvm`, leaving the (0700) root directory itself in place. Defined by subtraction, so a state directory added by a future subsystem is covered without editing a list. Always requires typing `DELETE-EVERYTHING` at an interactive prompt; `--yes` does not bypass it |
+| `mvmctl env cleanup --nuclear --keep-identity` | As above, but spares the material a rebuild cannot regenerate: `keys`, `audit`, `attestation`, `secrets`, `secret-bindings`, `egress-ca`, `.secret-store.key`, `snapshot.key`, `config.toml`. Past audit logs stay verifiable. Templates, images, machines, checkpoints and snapshots still go |
+| `mvmctl env cleanup --<tier> --dry-run` | Print the paths a tier sweep would remove, with sizes, and remove nothing |
+| `mvmctl env cleanup --<tier> --force` | Let the sweep proceed even when a VM appears to be running. Wiping live VM state corrupts the running guest — use only when the PID file is known stale |
+
+To reclaim disk without losing anything unrecoverable, `--nuclear --keep-identity`
+is the command. `mvmctl env uninstall --all` also wipes `~/.mvm`, but it removes
+`/var/lib/mvm` and the `mvmctl` binary too, and needs `sudo`.
 
 ## Manifests
 

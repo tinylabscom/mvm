@@ -8,16 +8,28 @@
 //! flags add host-side directory sweeps that run after the in-VM
 //! step and are gated by a confirmation prompt.
 //!
+//! `--cache` and `--state` are selective, so they name the paths they
+//! take. `--nuclear` is the opposite: it enumerates the mvm root and
+//! removes every entry it finds, minus whatever `--keep-identity`
+//! spares. Defining "everything" by subtraction is the point — the
+//! allow-list this replaced spared any directory nobody remembered to
+//! add to it, which had grown to most of the tree (`images`,
+//! `machines`, `checkpoints`, `snapshots`, `instances`, `pool`,
+//! `state`, `share`, `bin`, ...).
+//!
 //! Safety:
 //! - Tier flags refuse to run if any VM is currently running, unless
 //!   `--force` is set. Wiping `~/.mvm/vms/<id>/` or
 //!   `~/.mvm/cache/builder-vm/vms/<id>/` while a supervisor is reading
-//!   the state dir corrupts the running guest.
+//!   the state dir corrupts the running guest. Liveness goes through
+//!   the shared `state_dir_has_live_process` probe so every backend's
+//!   PID marker counts, not just libkrun's.
 //! - `--nuclear` always requires an interactive text confirmation
 //!   (`DELETE-EVERYTHING`). `--yes` does not bypass it.
 
 use anyhow::{Context, Result, anyhow};
 use clap::{ArgGroup, Args as ClapArgs};
+use std::ffi::OsStr;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
@@ -25,6 +37,7 @@ use crate::ui;
 
 use mvm_core::user_config::MvmConfig;
 use mvm_runtime::shell;
+use mvm_vmm::host::process_liveness::state_dir_has_live_process;
 
 use super::Cli;
 
@@ -52,12 +65,18 @@ pub(in crate::commands) struct Args {
     /// `config.toml`) and `templates`.
     #[arg(long)]
     pub state: bool,
-    /// Wipe everything `--state` covers PLUS identity (`keys`, `audit`,
-    /// `volumes`, `secrets`, `config.toml`) and `templates`. Past audit
-    /// logs become unverifiable under the new signer. Requires an
-    /// interactive text confirmation; `--yes` does NOT bypass it.
+    /// Wipe every entry under `~/.mvm`, leaving the (0700) root dir
+    /// itself in place. Past audit logs become unverifiable under the
+    /// new signer. Requires an interactive text confirmation; `--yes`
+    /// does NOT bypass it.
     #[arg(long)]
     pub nuclear: bool,
+    /// With `--nuclear`, spare the host's cryptographic identity:
+    /// `keys`, `audit`, `attestation`, `secrets`, `secret-bindings`,
+    /// `egress-ca`, `.secret-store.key`, `snapshot.key` and
+    /// `config.toml`. Everything else under `~/.mvm` still goes.
+    #[arg(long, requires = "nuclear")]
+    pub keep_identity: bool,
 
     /// Print what would be removed by the tier sweep without removing it.
     /// Has no effect on the in-VM cleanup step.
@@ -90,6 +109,59 @@ impl Tier {
         }
     }
 }
+
+/// Whether a nuclear sweep spares the host's cryptographic identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Identity {
+    /// Delete identity material along with everything else.
+    Wipe,
+    /// Preserve [`IDENTITY_PATHS`] so past audit logs stay verifiable
+    /// and stored secrets stay decryptable.
+    Keep,
+}
+
+impl Identity {
+    fn from_flag(keep: bool) -> Self {
+        if keep { Identity::Keep } else { Identity::Wipe }
+    }
+
+    /// Entry names a sweep must skip under this setting.
+    fn spared(self) -> &'static [&'static str] {
+        match self {
+            Identity::Wipe => &[],
+            Identity::Keep => IDENTITY_PATHS,
+        }
+    }
+
+    fn suffix(self) -> &'static str {
+        match self {
+            Identity::Wipe => "",
+            Identity::Keep => " (identity preserved)",
+        }
+    }
+}
+
+/// Entries directly under the mvm root that `--keep-identity` spares.
+///
+/// Everything here is either a private key, material encrypted under
+/// one, the audit chain those keys sign, or the hand-written
+/// `config.toml` — the paths a rebuild cannot reproduce. They travel
+/// together because sparing one without the others is useless:
+/// dropping `keys` makes every past audit entry unverifiable, and
+/// dropping `.secret-store.key` leaves `secrets` an undecryptable
+/// blob. Everything else under the root is rebuildable, refetchable,
+/// or regenerated on next use.
+const IDENTITY_PATHS: &[&str] = &[
+    "keys",
+    "audit",
+    "attestation",
+    "secrets",
+    "secret-bindings",
+    "egress-ca",
+    ".secret-store.key",
+    "snapshot.key",
+    "config.toml",
+];
 
 pub(in crate::commands) fn run(cli: &Cli, args: Args, _cfg: &MvmConfig) -> Result<()> {
     let tier = pick_tier(&args);
@@ -188,9 +260,10 @@ pub(in crate::commands) fn run(cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resul
     if let Some(t) = tier {
         let data_root = PathBuf::from(mvm_core::config::mvm_home());
         let cache_root = PathBuf::from(mvm_core::config::mvm_cache_dir());
-        let plan = build_plan_at(&data_root, &cache_root, t);
+        let identity = Identity::from_flag(args.keep_identity);
+        let plan = build_plan_at(&data_root, &cache_root, t, identity);
 
-        ui::info(&format!("Cleanup tier: {}", t.name()));
+        ui::info(&format!("Cleanup tier: {}{}", t.name(), identity.suffix()));
         if plan.paths.is_empty() {
             ui::info("Nothing to wipe — none of the tier's paths exist on disk.");
             return Ok(());
@@ -210,7 +283,7 @@ pub(in crate::commands) fn run(cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resul
             return Ok(());
         }
 
-        if !confirm_tier(t, args.yes)? {
+        if !confirm_tier(t, identity, args.yes)? {
             ui::info("Cancelled.");
             return Ok(());
         }
@@ -251,8 +324,10 @@ fn pick_tier(args: &Args) -> Option<Tier> {
 
 /// Prompt the user to confirm a tier sweep. `--nuclear` always requires
 /// an interactive text confirmation (`DELETE-EVERYTHING`) and ignores
-/// `--yes`. `--cache`/`--state` accept a y/N prompt that `--yes` can bypass.
-fn confirm_tier(tier: Tier, yes_flag: bool) -> Result<bool> {
+/// `--yes` — with or without `--keep-identity`, since it still destroys
+/// templates, machines, checkpoints and images irreversibly.
+/// `--cache`/`--state` accept a y/N prompt that `--yes` can bypass.
+fn confirm_tier(tier: Tier, identity: Identity, yes_flag: bool) -> Result<bool> {
     if tier == Tier::Nuclear {
         if !std::io::stdin().is_terminal() {
             anyhow::bail!(
@@ -260,11 +335,20 @@ fn confirm_tier(tier: Tier, yes_flag: bool) -> Result<bool> {
                  Run from a TTY."
             );
         }
-        ui::warn(
-            "NUCLEAR will delete the host signer keypair, audit chain, \
-             sealed-deps master keys, secrets, config.toml, and templates. \
-             Past audit logs will become unverifiable.",
-        );
+        match identity {
+            Identity::Wipe => ui::warn(
+                "NUCLEAR will delete every entry under the mvm root, \
+                 including the host signer keypair, audit chain, \
+                 attestation identity, secrets and config.toml. Past \
+                 audit logs will become unverifiable. Pass --keep-identity \
+                 to spare them.",
+            ),
+            Identity::Keep => ui::warn(
+                "NUCLEAR will delete every entry under the mvm root except \
+                 the host's cryptographic identity: templates, machines, \
+                 images, checkpoints and snapshots all go.",
+            ),
+        }
         let entered = ui::prompt_text("Type DELETE-EVERYTHING to confirm:")
             .context("reading destructive confirmation from interactive prompt")?;
         Ok(entered.trim() == "DELETE-EVERYTHING")
@@ -276,42 +360,28 @@ fn confirm_tier(tier: Tier, yes_flag: bool) -> Result<bool> {
 }
 
 /// Returns the name of the first VM that appears to be running, or
-/// None if none are. Probes any libkrun-managed VM whose
-/// `~/.mvm/vms/<id>/libkrun.pid` points at a live process. Errors during
-/// the probe are conservative: a failed readdir returns None (the check
-/// is a guardrail, not a guarantee).
+/// None if none are. Errors during the probe are conservative: a
+/// failed readdir returns None (the check is a guardrail, not a
+/// guarantee).
 fn first_running_vm() -> Option<String> {
-    let vms_root = mvm_core::config::vms_dir();
-    let entries = std::fs::read_dir(&vms_root).ok()?;
-    for entry in entries.flatten() {
-        let pid_path = entry.path().join("libkrun.pid");
-        if !pid_path.exists() {
-            continue;
-        }
-        let Ok(pid_text) = std::fs::read_to_string(&pid_path) else {
-            continue;
-        };
-        let Ok(pid) = pid_text.trim().parse::<i32>() else {
-            continue;
-        };
-        if pid_alive(pid) {
-            let name = entry.file_name().to_string_lossy().into_owned();
-            return Some(name);
-        }
-    }
-    None
+    first_running_vm_at(&mvm_core::config::vms_dir())
 }
 
-fn pid_alive(pid: i32) -> bool {
-    // SAFETY: kill(pid, 0) does not deliver a signal; it only validates
-    // that the kernel can address `pid`. ESRCH -> dead; 0 / EPERM -> alive.
-    let rc = unsafe { libc::kill(pid, 0) };
-    if rc == 0 {
-        return true;
-    }
-    // EPERM means the process exists but we lack permission to signal —
-    // still alive for our purposes.
-    std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+/// `first_running_vm` against an explicit VM state root, so tests can
+/// point it at a tempdir.
+///
+/// Liveness goes through the shared [`state_dir_has_live_process`]
+/// probe rather than a local `libkrun.pid` read. That probe knows all
+/// five supervisor PID markers; a `libkrun.pid`-only check reports a
+/// running HVF, Firecracker or QEMU guest as stopped, and HVF is the
+/// auto-detect default on macOS 26+. It also treats a zombie as dead,
+/// which a bare `kill(pid, 0)` does not.
+fn first_running_vm_at(vms_root: &Path) -> Option<String> {
+    std::fs::read_dir(vms_root)
+        .ok()?
+        .flatten()
+        .find(|entry| state_dir_has_live_process(&entry.path()))
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -324,12 +394,30 @@ struct CleanupPlan {
 /// `mvm_home()` / `mvm_cache_dir()`. A path is only added if it
 /// currently exists on disk — the plan IS the actual delete list, not
 /// a hypothetical superset.
-fn build_plan_at(data_root: &Path, cache_root: &Path, tier: Tier) -> CleanupPlan {
+fn build_plan_at(
+    data_root: &Path,
+    cache_root: &Path,
+    tier: Tier,
+    identity: Identity,
+) -> CleanupPlan {
+    if tier == Tier::Nuclear {
+        // No `cache_root`: `mvm_cache_dir()` is unconditionally
+        // `<mvm_home>/cache`, so the root walk already covers it.
+        return nuclear_plan(data_root, identity);
+    }
+    selective_plan(data_root, cache_root, tier)
+}
+
+/// The `--cache` / `--state` plan: enumerate the regenerable subdirs
+/// those tiers are defined to take. Enumerating is correct here —
+/// these tiers are selective by intent, so a directory that isn't
+/// named is one they are supposed to leave alone.
+fn selective_plan(data_root: &Path, cache_root: &Path, tier: Tier) -> CleanupPlan {
     let mut paths = Vec::new();
     if cache_root.exists() {
         paths.push(cache_root.to_path_buf());
     }
-    if matches!(tier, Tier::State | Tier::Nuclear) {
+    if tier == Tier::State {
         for sub in &[
             "dev",
             "vms",
@@ -344,18 +432,34 @@ fn build_plan_at(data_root: &Path, cache_root: &Path, tier: Tier) -> CleanupPlan
             }
         }
     }
-    if tier == Tier::Nuclear {
-        for sub in &["keys", "audit", "volumes", "secrets", "templates"] {
-            let p = data_root.join(sub);
-            if p.exists() {
-                paths.push(p);
-            }
-        }
-        let cfg = data_root.join("config.toml");
-        if cfg.exists() {
-            paths.push(cfg);
-        }
-    }
+    CleanupPlan { paths }
+}
+
+/// The `--nuclear` plan: every entry under the mvm root, minus the
+/// identity material `--keep-identity` spares. The root directory
+/// itself survives so its 0700 mode cannot be re-established
+/// wrong by whichever command next calls `ensure_home_dir()`.
+///
+/// This is deliberately defined by subtraction. The enumerated version
+/// it replaced named thirteen paths and therefore spared every state
+/// directory added after it was written — by then `images`,
+/// `machines`, `checkpoints`, `snapshots`, `instances`, `pool`,
+/// `state`, `share`, `bin`, `host-agent`, `observers` and `run`, or
+/// most of the tree by size. A subsystem that adds a directory is now
+/// covered the day it lands, with no list to remember.
+fn nuclear_plan(data_root: &Path, identity: Identity) -> CleanupPlan {
+    let spared = identity.spared();
+    let mut paths: Vec<PathBuf> = match std::fs::read_dir(data_root) {
+        Ok(entries) => entries
+            .flatten()
+            .filter(|e| !spared.iter().any(|s| OsStr::new(s) == e.file_name()))
+            .map(|e| e.path())
+            .collect(),
+        Err(_) => Vec::new(),
+    };
+    // readdir order is unspecified; sort so the preview the user
+    // confirms lists the same paths in the same order every run.
+    paths.sort();
     CleanupPlan { paths }
 }
 
@@ -435,6 +539,33 @@ mod tests {
         touch(&root.join("mock-vms/.keep"), 1);
         touch(&root.join("tool-staging/scratch"), 50);
         touch(&root.join("config.toml"), 80);
+        // Directories that postdate the enumerated nuclear plan. On a
+        // real host these are the bulk of the tree, and the allow-list
+        // spared every one of them.
+        touch(&root.join("images/sha256-abc/rootfs.ext4"), 8192);
+        touch(&root.join("machines/web/machine.json"), 256);
+        touch(&root.join("checkpoints/web/mem.snap"), 4096);
+        touch(&root.join("snapshots/web/state.bin"), 2048);
+        touch(&root.join("instances/one/meta.json"), 64);
+        touch(&root.join("pool/standby/a"), 32);
+        touch(&root.join("state/inventory.json"), 128);
+        touch(&root.join("share/dev/socket"), 16);
+        touch(&root.join("bin/mvm-libkrun-supervisor"), 1024);
+        touch(&root.join("host-agent/local/agent.sock"), 8);
+        touch(&root.join("observers/one.json"), 24);
+        touch(&root.join("attestation/identity.ed25519"), 32);
+        touch(&root.join("egress-ca/ca.key"), 32);
+        touch(&root.join("secret-bindings/one.json"), 48);
+        touch(&root.join(".secret-store.key"), 32);
+        touch(&root.join("snapshot.key"), 32);
+    }
+
+    /// Entry names directly under `root`, for asserting plan contents.
+    fn plan_names(plan: &CleanupPlan, root: &Path) -> Vec<PathBuf> {
+        plan.paths
+            .iter()
+            .map(|p| p.strip_prefix(root).unwrap_or(p).to_path_buf())
+            .collect()
     }
 
     fn populate_cache(root: &Path) {
@@ -449,7 +580,7 @@ mod tests {
         populate(data.path());
         populate_cache(cache.path());
 
-        let plan = build_plan_at(data.path(), cache.path(), Tier::Cache);
+        let plan = build_plan_at(data.path(), cache.path(), Tier::Cache, Identity::Wipe);
         assert_eq!(plan.paths, vec![cache.path().to_path_buf()]);
     }
 
@@ -460,7 +591,7 @@ mod tests {
         populate(data.path());
         populate_cache(cache.path());
 
-        let plan = build_plan_at(data.path(), cache.path(), Tier::State);
+        let plan = build_plan_at(data.path(), cache.path(), Tier::State, Identity::Wipe);
         let names: Vec<_> = plan
             .paths
             .iter()
@@ -493,37 +624,105 @@ mod tests {
     }
 
     #[test]
-    fn tier_nuclear_includes_identity_templates_and_config() {
+    fn tier_nuclear_takes_every_entry_under_the_root() {
         let data = tempdir().unwrap();
         let cache = tempdir().unwrap();
         populate(data.path());
         populate_cache(cache.path());
 
-        let plan = build_plan_at(data.path(), cache.path(), Tier::Nuclear);
-        let names: Vec<_> = plan
-            .paths
-            .iter()
-            .map(|p| p.strip_prefix(data.path()).unwrap_or(p).to_path_buf())
+        let plan = build_plan_at(data.path(), cache.path(), Tier::Nuclear, Identity::Wipe);
+        let names = plan_names(&plan, data.path());
+
+        let mut on_disk: Vec<PathBuf> = std::fs::read_dir(data.path())
+            .unwrap()
+            .flatten()
+            .map(|e| PathBuf::from(e.file_name()))
             .collect();
-        for sub in &[
-            "dev",
-            "vms",
-            "log",
-            "dev-cluster",
-            "mock-vms",
-            "tool-staging",
-            "keys",
-            "audit",
-            "volumes",
-            "secrets",
-            "templates",
-            "config.toml",
-        ] {
+        on_disk.sort();
+        let mut got = names.clone();
+        got.sort();
+        assert_eq!(got, on_disk, "nuclear must take every root entry");
+    }
+
+    /// The regression that motivated replacing the enumerated plan: a
+    /// directory no list knows about must still be swept. This is the
+    /// assertion the allow-list version cannot pass at any length,
+    /// because the failure mode was always the next unlisted name.
+    #[test]
+    fn tier_nuclear_covers_a_directory_no_list_knows_about() {
+        let data = tempdir().unwrap();
+        let cache = tempdir().unwrap();
+        populate(data.path());
+        touch(&data.path().join("some-future-subsystem/state.db"), 512);
+
+        let plan = build_plan_at(data.path(), cache.path(), Tier::Nuclear, Identity::Wipe);
+        let names = plan_names(&plan, data.path());
+        assert!(
+            names
+                .iter()
+                .any(|p| p == Path::new("some-future-subsystem")),
+            "nuclear plan missing the unlisted dir: {names:?}",
+        );
+    }
+
+    #[test]
+    fn tier_nuclear_keep_identity_spares_exactly_the_identity_paths() {
+        let data = tempdir().unwrap();
+        let cache = tempdir().unwrap();
+        populate(data.path());
+
+        let plan = build_plan_at(data.path(), cache.path(), Tier::Nuclear, Identity::Keep);
+        let names = plan_names(&plan, data.path());
+
+        for sub in IDENTITY_PATHS {
             assert!(
-                names.iter().any(|p| p == Path::new(sub)),
-                "nuclear plan missing `{sub}`: {names:?}",
+                !names.iter().any(|p| p == Path::new(sub)),
+                "--keep-identity must spare `{sub}`: {names:?}",
             );
         }
+        // Everything else still goes — sparing identity is not sparing
+        // the workload state that makes nuclear worth running.
+        for sub in &["images", "checkpoints", "snapshots", "templates", "dev"] {
+            assert!(
+                names.iter().any(|p| p == Path::new(sub)),
+                "--keep-identity must still take `{sub}`: {names:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn tier_nuclear_empties_the_root_but_leaves_it_in_place() {
+        let data = tempdir().unwrap();
+        let cache = tempdir().unwrap();
+        populate(data.path());
+
+        let plan = build_plan_at(data.path(), cache.path(), Tier::Nuclear, Identity::Wipe);
+        execute_plan(&plan).unwrap();
+
+        assert!(data.path().is_dir(), "the mvm root itself must survive");
+        assert_eq!(
+            std::fs::read_dir(data.path()).unwrap().count(),
+            0,
+            "the mvm root must be empty",
+        );
+    }
+
+    /// `mvm_cache_dir()` is always `<mvm_home>/cache`, so nuclear picks
+    /// the cache up from the root walk and lists it exactly once.
+    #[test]
+    fn tier_nuclear_lists_the_in_root_cache_exactly_once() {
+        let data = tempdir().unwrap();
+        let cache = data.path().join("cache");
+        populate(data.path());
+        populate_cache(&cache);
+
+        let plan = build_plan_at(data.path(), &cache, Tier::Nuclear, Identity::Wipe);
+        let hits = plan.paths.iter().filter(|p| **p == cache).count();
+        assert_eq!(
+            hits, 1,
+            "in-root cache listed {hits} times: {:?}",
+            plan.paths
+        );
     }
 
     #[test]
@@ -533,7 +732,7 @@ mod tests {
         touch(&data.path().join("keys/host-signer.ed25519"), 32);
         touch(&data.path().join("dev/builds/x"), 8);
 
-        let plan = build_plan_at(data.path(), cache.path(), Tier::Nuclear);
+        let plan = build_plan_at(data.path(), cache.path(), Tier::Nuclear, Identity::Wipe);
         let names: Vec<_> = plan
             .paths
             .iter()
@@ -556,7 +755,7 @@ mod tests {
         populate(data.path());
         populate_cache(cache.path());
 
-        let plan = build_plan_at(data.path(), cache.path(), Tier::Nuclear);
+        let plan = build_plan_at(data.path(), cache.path(), Tier::Nuclear, Identity::Wipe);
         let total_in_plan: u64 = plan.paths.iter().map(|p| dir_size(p)).sum();
         let report = execute_plan(&plan).unwrap();
 
@@ -584,6 +783,50 @@ mod tests {
         assert_eq!(dir_size(&f), 42);
     }
 
+    /// A reaped child's PID: guaranteed to name no live process.
+    fn dead_pid() -> u32 {
+        let mut child = std::process::Command::new("/usr/bin/true")
+            .spawn()
+            .expect("spawning /usr/bin/true");
+        let pid = child.id();
+        child.wait().expect("reaping /usr/bin/true");
+        pid
+    }
+
+    /// HVF is the auto-detect default on macOS 26+, and its supervisor
+    /// writes `hvf.pid`. A guard that only reads `libkrun.pid` waves
+    /// the sweep through while that guest is running.
+    #[test]
+    fn running_vm_guard_sees_a_non_libkrun_backend() {
+        for marker in &["hvf.pid", "fc.pid", "qemu.pid", "pid"] {
+            let vms = tempdir().unwrap();
+            let dir = vms.path().join("web");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join(marker), std::process::id().to_string()).unwrap();
+            assert_eq!(
+                first_running_vm_at(vms.path()).as_deref(),
+                Some("web"),
+                "`{marker}` must read as running",
+            );
+        }
+    }
+
+    #[test]
+    fn running_vm_guard_ignores_a_dead_pid() {
+        let vms = tempdir().unwrap();
+        let dir = vms.path().join("web");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("libkrun.pid"), dead_pid().to_string()).unwrap();
+        assert_eq!(first_running_vm_at(vms.path()), None);
+    }
+
+    #[test]
+    fn running_vm_guard_returns_none_on_an_empty_root() {
+        let vms = tempdir().unwrap();
+        assert_eq!(first_running_vm_at(vms.path()), None);
+        assert_eq!(first_running_vm_at(&vms.path().join("nope")), None);
+    }
+
     #[test]
     fn pick_tier_priority_nuclear_wins() {
         // Clap's ArgGroup enforces mutual exclusion at parse time, but the
@@ -595,6 +838,7 @@ mod tests {
             cache: true,
             state: true,
             nuclear: true,
+            keep_identity: false,
             dry_run: false,
             yes: false,
             force: false,
@@ -610,6 +854,7 @@ mod tests {
             cache: false,
             state: false,
             nuclear: false,
+            keep_identity: false,
             dry_run: false,
             yes: false,
             force: false,
