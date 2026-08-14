@@ -607,6 +607,39 @@ pub fn rendered_argv(cmd: &Command) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    /// Never claim HVF vCPU-quota enforcement without a bounded quota record.
+    ///
+    /// `enforced_grants_for_vm` branches on `vcpu_quota_tier ==
+    /// EnforcedTier::HvfVcpuQuota`. Inverting that comparison makes the
+    /// *absence* of a record report `HvfVcpuQuota` — a receipt asserting an
+    /// enforcement mechanism that never ran, which is precisely the
+    /// overstatement this seam exists to prevent.
+    ///
+    /// A state dir with no record is the common case on every non-HVF backend,
+    /// so this is not a corner.
+    #[test]
+    fn a_vm_with_no_quota_record_never_reports_hvf_quota_enforcement() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let grants = super::enforced_grants_for_vm(dir.path());
+        assert_ne!(
+            grants.cpu,
+            EnforcedTier::HvfVcpuQuota,
+            "no quota record was written, so no HVF quota can have been enforced"
+        );
+    }
+
+    /// Wall clock is reported as declared rather than omitted, so a receipt
+    /// says which dimensions were measured and found unenforced instead of
+    /// leaving a reader to infer it from silence.
+    #[test]
+    fn wall_clock_is_reported_declared_rather_than_omitted() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert_eq!(
+            super::enforced_grants_for_vm(dir.path()).wall_clock,
+            EnforcedTier::Declared
+        );
+    }
+
     use super::*;
 
     #[test]

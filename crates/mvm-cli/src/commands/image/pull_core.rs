@@ -616,6 +616,50 @@ mod tests {
         );
     }
 
+    /// The other half of the digest-pin rule, and the half nothing asserted.
+    ///
+    /// `prod && !pinned` has two operands, so a test that only drives
+    /// `prod=true, pinned=false` pins one cell of a four-cell truth table.
+    /// Flipping the `&&` to `||` still refuses the mutable prod pull above —
+    /// it just *also* refuses everything else, and no test noticed.
+    ///
+    /// A digest-pinned prod pull must get past this check. It will still fail,
+    /// because the test has no registry, but it must fail for a reason that is
+    /// not the pin rule.
+    #[test]
+    fn a_digest_pinned_prod_pull_is_not_refused_by_the_pin_rule() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        // A closed local port: the pull fails on connect in milliseconds
+        // instead of reaching a real registry. Which check rejected it is the
+        // only thing under test, so the registry never needs to answer — and a
+        // unit test that pulls from the internet is a flake waiting to happen.
+        let pinned = concat!(
+            "127.0.0.1:1/library/alpine@sha256:",
+            "0000000000000000000000000000000000000000000000000000000000000000"
+        );
+        let err = pull_image_with_trust(tmp.path(), pinned, true)
+            .expect_err("no registry is listening on this port");
+        assert!(
+            !err.to_string()
+                .contains("requires a digest-pinned reference"),
+            "a digest-pinned reference must clear the pin rule; got: {err}"
+        );
+    }
+
+    /// The dev cell of the same truth table. A mutable tag outside `--prod` is
+    /// the ordinary case, and `||` would refuse it.
+    #[test]
+    fn a_mutable_tag_outside_prod_is_not_refused_by_the_pin_rule() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let err = pull_image_with_trust(tmp.path(), "127.0.0.1:1/library/alpine:3.20", false)
+            .expect_err("no registry is listening on this port");
+        assert!(
+            !err.to_string()
+                .contains("requires a digest-pinned reference"),
+            "the pin rule applies only under --prod; got: {err}"
+        );
+    }
+
     #[test]
     fn prod_run_image_requires_digest_pin_before_network() {
         let tmp = tempfile::tempdir().expect("tempdir");

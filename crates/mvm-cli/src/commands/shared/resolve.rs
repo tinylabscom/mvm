@@ -312,6 +312,54 @@ mod tests {
     use mvm_core::network_policy::{HostPort, NetworkPolicy, NetworkPreset};
     use mvm_core::util::test_env::TestEnv;
 
+    /// A VM that is not running must be refused.
+    ///
+    /// The check is `if !backend_is_running(..)`. Deleting the `!` inverts it:
+    /// a stopped VM resolves successfully and the caller proceeds to operate on
+    /// a machine that is not there. Nothing asserted the refusal, so the
+    /// inversion survived.
+    #[test]
+    fn a_vm_that_is_not_running_is_refused() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let mut env = TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        let err = resolve_running_vm("definitely-not-running")
+            .expect_err("a VM that is not running must not resolve");
+        assert!(
+            err.to_string().contains("is not running"),
+            "refusal must name the reason; got: {err}"
+        );
+    }
+
+    /// A bare directory name is a manifest *path*, not a registry name.
+    ///
+    /// `looks_like_path` is a chain of `||`s ending in `path.is_dir()`.
+    /// Replacing that last `||` with `&&` binds tighter, collapsing the tail to
+    /// `path.is_file() && path.is_dir()` — which no path satisfies. A bare name
+    /// that is really a directory then gets misread as a legacy registry name,
+    /// and every earlier operand misses it: no `/`, no leading `.`, no `.toml`.
+    ///
+    /// Changes the process working directory, which is safe here because the
+    /// named test gate is nextest and nextest runs one process per test.
+    #[test]
+    fn a_bare_directory_name_is_treated_as_a_path_not_a_registry_name() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        // No slash, no leading dot, no .toml — only `is_dir` can classify it.
+        let bare = "manifestdir";
+        std::fs::create_dir(tmp.path().join(bare)).expect("create dir");
+
+        let previous = std::env::current_dir().expect("cwd");
+        std::env::set_current_dir(tmp.path()).expect("chdir");
+        let resolved = resolve_manifest_arg(bare);
+        std::env::set_current_dir(previous).expect("restore cwd");
+
+        // It resolves as a path — which fails, because the directory holds no
+        // manifest. The point is that it was not silently taken for a name.
+        if let Ok(ManifestArgRef::Name(n)) = resolved {
+            panic!("a directory was misclassified as the registry name {n:?}");
+        }
+    }
+
     #[test]
     fn run_net_default_is_deny_all() {
         assert_eq!(
