@@ -607,6 +607,9 @@ impl MachineCreateBuilder {
 #[derive(Debug, Clone)]
 pub struct MachineStartBuilder {
     name: String,
+    image: Option<String>,
+    cpus: Option<u32>,
+    memory: Option<String>,
     receipt: Option<String>,
     json: bool,
     dry_run: bool,
@@ -616,10 +619,31 @@ impl MachineStartBuilder {
     fn new(name: String) -> Self {
         Self {
             name,
+            image: None,
+            cpus: None,
+            memory: None,
             receipt: None,
             json: false,
             dry_run: false,
         }
+    }
+
+    /// OCI image reference to use when the machine must be created on start.
+    pub fn image(mut self, image: impl Into<String>) -> Self {
+        self.image = Some(image.into());
+        self
+    }
+
+    /// vCPU cores for a machine created on start.
+    pub fn cpus(mut self, cpus: u32) -> Self {
+        self.cpus = Some(cpus);
+        self
+    }
+
+    /// Memory for a machine created on start.
+    pub fn memory(mut self, memory: impl Into<String>) -> Self {
+        self.memory = Some(memory.into());
+        self
     }
 
     /// Write a machine-start receipt to `path`.
@@ -645,6 +669,13 @@ impl MachineStartBuilder {
         let name = require_non_empty(self.name.clone(), "name")?;
         // `machine start` takes a positional name, not `--name`.
         let mut args = vec!["start".to_string(), name];
+        append_optional(&mut args, "--image", self.image.as_deref())?;
+        append_optional(
+            &mut args,
+            "--cpus",
+            self.cpus.map(|c| c.to_string()).as_deref(),
+        )?;
+        append_optional(&mut args, "--memory", self.memory.as_deref())?;
         append_optional(&mut args, "--receipt", self.receipt.as_deref())?;
         if self.json {
             args.push("--json".to_string());

@@ -1,0 +1,8 @@
+start
+web
+--image
+nginx
+--cpus
+2
+--memory
+512M
