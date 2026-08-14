@@ -21,7 +21,7 @@ template: doc
 - [Policy profiles](/guides/policy-profiles/): restrictive, standard, dev, permissive, host-share, env, and seccomp posture.
 - [Secrets and credentials](/guides/secrets-and-credentials/): reference-first credential delivery, grants, redaction, and retention rules.
 - [Persistent workspaces](/guides/persistent-workspaces/): encrypted volumes, host-backed mounts, copy workflows, snapshots, and cleanup policy.
-- [Audit and receipts](/guides/audit-and-receipts/): signed run receipts, audit chain checks, metrics, and boot reports.
+- [Audit and receipts](/guides/audit-and-receipts/): signed run receipts, audit chain checks, decision-provenance export (JSON and TIBET-JSON), PROV-O/Turtle export, metrics, and boot reports.
 - [Workload output streaming](/guides/workload-output-streaming/): following stdout/stderr live and after exit, the verification model, the `--stream` filter, retention, and the three limits.
 - [Observability and results](/guides/observability-and-results/): result correlation, logs, receipts, audit IDs, boot reports, metrics, and redaction rules.
 - [Network egress policy](/guides/network-egress-policy/): deny-first outbound grants for agents, services, package installs, and browser automation.

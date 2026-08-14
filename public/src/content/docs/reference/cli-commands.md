@@ -184,6 +184,13 @@ guest-RPC surface, fleet-shaped workflows).
 | `mvmctl trust audit publish-root [--tenant <t>]` | Build, sign, and publish a Merkle transparency-log root over the tenant's chain-signed audit log to `~/.mvm/audit/<tenant>.root.json`. Only builds over a chain that verifies clean |
 | `mvmctl trust audit prove <selector> [--tenant <t>] [--json]` | Emit an inclusion proof that one audit line is in the log, paired with the current signed root. `<selector>` is a numeric line index, a `plan_id`, or `sha256:<hex>` of the exact line; an ambiguous selector is refused |
 | `mvmctl trust audit verify-inclusion --proof <file\|-> [--root <file>] [--pubkey <file>] [--tenant <t>]` | Verify an inclusion proof against a host-signed root: verifies the signed root under the trusted host key, checks its tenant, verifies the proof, and binds root_hash + tree_size. Nonzero exit naming the failed check |
+| `mvmctl trust audit provenance export [--tenant <t>] [--local] [-o <path>]` | Export the chain-signed audit log as W3C PROV-O/Turtle for compliance reporting |
+| `mvmctl trust audit decisions export [--tenant <t>] [--format json\|tibet] [-o <path>]` | Export cached decision records for a tenant; default format is JSON |
+| `mvmctl trust audit decisions list [--tenant <t>] [--json]` | List cached decision records for a tenant |
+| `mvmctl trust audit decisions show <decision-id> [--tenant <t>] [--json]` | Show a single decision record by its content address |
+| `mvmctl trust audit decisions trace <decision-id> [--tenant <t>] [--json]` | Trace the causal chain that led to a decision |
+| `mvmctl trust audit decisions impact <decision-id> [--tenant <t>] [--json]` | Show decisions that depend on or were caused by a decision |
+| `mvmctl trust audit decisions similar <decision-id> [--tenant <t>] [--json]` | Find cached decisions similar to the given decision |
 
 ## Local Secrets
 
