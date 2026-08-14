@@ -1,6 +1,6 @@
 # Refactor status
 
-Last updated: 2026-08-13
+Last updated: 2026-08-14
 
 This is the cross-plan progress index. The owning plan remains authoritative
 for detailed scope and acceptance criteria.
@@ -1485,6 +1485,21 @@ check-l3-expansion-freeze` added as a temporary shrink-only ratchet
   - [ ] Pin the egress predicate algebra; enumerate escalation as deny-loud
   - [ ] Replay vectors for the audit chain's canonical signed bytes
   - [ ] Double-key the stale-name relief valves
+
+- [ ] Plan 333 — dependency hygiene: four defects and a ratchet, not a cut
+      (`specs/plans/333-dependency-hygiene.md`)
+  - [ ] Phase 5 — the four defects: `hickory-proto` declared unconditionally in
+        `mvm-hostd` while every consumer is `cfg(target_os = "linux")` (−5 on
+        macOS, retires the shipped duplicate `rand` major there); the dead
+        `memchr` workspace entry and its false justification; 69 member-manifest
+        version pins that bypass `[workspace.dependencies]`; four stale
+        `deny.toml` skip entries `cargo deny` already warns on
+  - [ ] Phase 5.5 — the gate for the class: `xtask
+        check-workspace-dep-inheritance`, plus a second
+        `check-closure-budget` target for `aarch64-apple-darwin` (currently
+        ungated, which is why the `hickory-proto` edge survived). Each proven red
+  - Re-measured Plan 309 Phase 3 independently and reproduced it; its declines
+    stand and are not re-opened
 
 - [ ] Plan 309 — dependency reduction
       (`specs/plans/309-dependency-reduction.md`)
