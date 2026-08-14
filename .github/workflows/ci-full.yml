@@ -673,7 +673,7 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: macos-latest
     # `cargo build --all-targets` builds the Rust-native per-VM host bins
-    # (workspace `[[bin]]`s in mvm-vm-host) — no Swift build step.
+    # (workspace `[[bin]]`s in mvm-hostd) — no Swift build step.
     steps:
       - uses: actions/checkout@v6
 

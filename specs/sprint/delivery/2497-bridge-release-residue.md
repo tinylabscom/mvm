@@ -34,3 +34,21 @@ is deliberately left alone — it records measurements taken at a point in time.
 
 `shellcheck` on all three scripts, and `verify-release-assets.test.sh` at
 12 passed / 0 failed — both the lanes `ci.yml` runs for these files.
+
+## Second instance of the same bug class
+
+Generalizing the check — enumerate every real binary and crate from `cargo
+metadata`, then scan packaging, CI, scripts, and docs for names that do not
+exist — found one more live break. `-p mvm-vm-host`, a crate the Bar-A
+consolidation absorbed into `mvm-hostd`, was still being built by
+`scripts/check-hvf-oci-allow-host-smoke.sh` (wired into a `just` recipe) and
+`scripts/measure-hvf-density.sh`. Both fail on that line:
+
+```
+error: package ID specification `mvm-vm-host` did not match any packages
+```
+
+In both scripts the preceding line already said `-p mvm-hostd`, so only the
+supervisor's line was missed when the crate moved. A comment in `ci-full.yml`
+named it too. Same root cause as the bridge: the rename updated the code and
+not its callers.
