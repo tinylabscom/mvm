@@ -119,17 +119,37 @@ branch touches is `crates/mvm-conformance/tests/` and `xtask/src/`, and
   — fails isolated too (`expected one stdout gap, got []`). A real red test on
   main, unrelated to the SDK. No open issue found.
 
+### Surface divergence, measured and mostly closed
+
+The aggregate number was misleading. Of 38 Python-only names, 12 are
+`export type` in TypeScript — erased by tsc, present in the API. Of 18
+TypeScript-only names, 9 exist in Python but only inside private `_hostsvc`.
+
+Two decidable problems, both fixed:
+
+- TypeScript exported 7 internals (`LiveTransport`, `SandboxCommands`,
+  `SandboxFiles`, `currentRecording`, `deriveAttachedBuildMode`,
+  `flushRecordingToOutPath`, `parseUpEnvelope`). Unexported; the tests that
+  reached them through the package index now import the owning module.
+- Python could not name its own host-service failures: `mvm.audit.emit(...)`
+  raises `NotBoundError`, but `except mvm.HostServiceError` did not resolve.
+  All 9 are now exported from the root, matching TypeScript.
+
+TypeScript-only divergence: 18 names → 2. Shared surface: 33 → 42.
+
+`surface_divergence.json` now records the reviewed remainder and a BDD scenario
+fails when reality stops matching it — confirmed red when one internal is
+re-exported.
+
 ## Deferred
 
-The Python and TypeScript public surfaces have diverged: 33 shared names, 38
-Python-only, 18 TypeScript-only. Two problems are mixed together — TypeScript
-exporting internals (`LiveTransport`, `parseUpEnvelope`,
-`deriveAttachedBuildMode`, `flushRecordingToOutPath`, `currentRecording`,
-`SandboxCommands`, `SandboxFiles`) and TypeScript missing real Python surface
-(`func`, `session`, `egress`, the `dns_*` trio, `addon_use`, `host_port`, the
-`*_deps` trio, `derive_schema`, `warm_process`, `workload_ref`,
-`current_session_id`, `RemoteFunction`).
+27 names remain genuinely absent from TypeScript, and porting them is a feature
+port rather than a parity cleanup: the whole `@mvm.func` remote-invocation
+surface (`func`, `session`, `Session`, `RemoteFunction`, `current_session_id`,
+`workload_ref`, `WorkloadRef`, `derive_schema`, `warm_process` and their error
+taxonomy) plus the declarative network/deps helpers (`egress`, the `dns_*`
+trio, the `*_deps` trio, `addon_use`, `host_port`).
 
-Separating erased-at-runtime type exports from genuine gaps needs a decision
-about which surface is canonical, so it is tracked as WS-G in
-`specs/plans/332-sdk-parity-and-bdd-coverage.md` rather than guessed at.
+That needs product intent, so it is tracked as WS-G4 in
+`specs/plans/332-sdk-parity-and-bdd-coverage.md`. The gate pins the current
+divergence in the meantime, so it cannot widen unnoticed.

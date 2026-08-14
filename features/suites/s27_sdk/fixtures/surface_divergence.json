@@ -1,0 +1,55 @@
+{
+  "_comment": [
+    "Reviewed divergence between the Python and TypeScript public surfaces.",
+    "The BDD scenario fails when the real divergence stops matching this file,",
+    "so a name can only appear or disappear here deliberately.",
+    "Regenerate intentionally; do not paste over a failure."
+  ],
+  "python_only_type_erased_in_typescript": [
+    "ExecResult",
+    "FsEntry",
+    "FsStat",
+    "MachineResult",
+    "ProcessResult",
+    "ProcessStreamEvent",
+    "Runtime",
+    "RuntimeFsEntry",
+    "RuntimeFsStat",
+    "RuntimeProcessEvent",
+    "RuntimeProcessResult",
+    "SandboxInfo"
+  ],
+  "python_only_absent_from_typescript": [
+    "EmittingContextError",
+    "MVM_MACHINE_MAX_OUTPUT_ENV",
+    "MVM_MACHINE_TIMEOUT_ENV",
+    "MsgpackUnavailable",
+    "MvmTransportError",
+    "NoVmIntrospectionError",
+    "PayloadTooLarge",
+    "RemoteError",
+    "RemoteFunction",
+    "SecretInArgError",
+    "SecretInArgWarning",
+    "addon_use",
+    "current_recording_dict",
+    "current_session_id",
+    "derive_schema",
+    "dns_none",
+    "dns_resolver",
+    "dns_system",
+    "egress",
+    "func",
+    "host_port",
+    "no_deps",
+    "node_deps",
+    "python_deps",
+    "session",
+    "warm_process",
+    "workload_ref"
+  ],
+  "typescript_only_absent_from_python": [
+    "MVM_SDK_MODE_ENV",
+    "MVM_SDK_OUT_PATH_ENV"
+  ]
+}

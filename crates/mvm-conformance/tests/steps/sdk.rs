@@ -377,3 +377,143 @@ fn no_guarded_verb_reached_the_cli(world: &mut CliWorld) {
         );
     }
 }
+
+// ────────────────────────────────────────────────────────────────────
+// Cross-language surface parity.
+//
+// The two SDKs drifted far apart once already — TypeScript exporting seven
+// internals while missing surface Python had — and nothing noticed, because
+// nothing compared them. This pins the comparison: the shared surface must
+// agree, and every difference must appear in a reviewed list.
+// ────────────────────────────────────────────────────────────────────
+
+/// Normalize a public name to a language-neutral form, so `emitRecordingJson`
+/// and `emit_recording_json` compare equal.
+fn neutral_name(name: &str) -> String {
+    let mut out = String::with_capacity(name.len() + 4);
+    for (index, ch) in name.chars().enumerate() {
+        if ch.is_uppercase() && index != 0 {
+            out.push('_');
+        }
+        out.extend(ch.to_lowercase());
+    }
+    out
+}
+
+/// Run a surface-dump fixture and parse its sorted name list.
+fn surface_names(language: &str) -> Vec<String> {
+    let fixtures = sdk_fixture_dir();
+    let (program, script) = match language {
+        "python" => ("python3", fixtures.join("python_surface.py")),
+        _ => ("node", fixtures.join("typescript_surface.mjs")),
+    };
+    let mut command = Command::new(program);
+    if language == "python" {
+        command.env("PYTHONPATH", repo_root().join("crates/mvm-sdk/sdks/python"));
+    }
+    let output = command
+        .current_dir(repo_root())
+        .arg(&script)
+        .output()
+        .unwrap_or_else(|error| panic!("spawn {program} for {}: {error}", script.display()));
+    assert!(
+        output.status.success(),
+        "{language} surface fixture failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).expect("surface fixture did not emit a JSON array")
+}
+
+#[when("I collect the Python and TypeScript public surfaces")]
+fn collect_sdk_surfaces(world: &mut CliWorld) {
+    world
+        .sdk_recorded_argv
+        .insert("python-surface".into(), vec![surface_names("python")]);
+    world.sdk_recorded_argv.insert(
+        "typescript-surface".into(),
+        vec![surface_names("typescript")],
+    );
+}
+
+/// The two surfaces, split into what they share and what only one has.
+fn partition_surfaces(world: &CliWorld) -> (Vec<String>, Vec<String>, usize) {
+    let python = &recorded(world, "python-surface")[0];
+    let typescript = &recorded(world, "typescript-surface")[0];
+    let py_neutral: std::collections::BTreeMap<String, String> = python
+        .iter()
+        .map(|name| (neutral_name(name), name.clone()))
+        .collect();
+    let ts_neutral: std::collections::BTreeMap<String, String> = typescript
+        .iter()
+        .map(|name| (neutral_name(name), name.clone()))
+        .collect();
+    let mut python_only: Vec<String> = py_neutral
+        .iter()
+        .filter(|(key, _)| !ts_neutral.contains_key(*key))
+        .map(|(_, name)| name.clone())
+        .collect();
+    let mut typescript_only: Vec<String> = ts_neutral
+        .iter()
+        .filter(|(key, _)| !py_neutral.contains_key(*key))
+        .map(|(_, name)| name.clone())
+        .collect();
+    python_only.sort();
+    typescript_only.sort();
+    let shared = py_neutral
+        .keys()
+        .filter(|key| ts_neutral.contains_key(*key))
+        .count();
+    (python_only, typescript_only, shared)
+}
+
+#[then("the shared surface agrees between the two languages")]
+fn shared_surface_agrees(world: &mut CliWorld) {
+    let (_, _, shared) = partition_surfaces(world);
+    assert!(
+        shared > 30,
+        "only {shared} names are shared between the SDKs — the surfaces have \
+         diverged far enough that the reviewed list is no longer meaningful"
+    );
+}
+
+#[then("any divergence matches the reviewed divergence list")]
+fn divergence_matches_reviewed_list(world: &mut CliWorld) {
+    let path = sdk_fixture_dir().join("surface_divergence.json");
+    let reviewed: Value = serde_json::from_str(
+        &std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("read {}: {error}", path.display())),
+    )
+    .expect("reviewed divergence list is not JSON");
+
+    let names = |key: &str| -> Vec<String> {
+        reviewed[key]
+            .as_array()
+            .unwrap_or_else(|| panic!("{key} missing from the reviewed divergence list"))
+            .iter()
+            .map(|value| {
+                value
+                    .as_str()
+                    .expect("divergence entry is not a string")
+                    .to_string()
+            })
+            .collect()
+    };
+    let mut expected_python_only = names("python_only_type_erased_in_typescript");
+    expected_python_only.extend(names("python_only_absent_from_typescript"));
+    expected_python_only.sort();
+    let expected_typescript_only = names("typescript_only_absent_from_python");
+
+    let (python_only, typescript_only, _) = partition_surfaces(world);
+    assert_eq!(
+        python_only,
+        expected_python_only,
+        "Python-only surface changed; update {} deliberately if that was intended",
+        path.display()
+    );
+    assert_eq!(
+        typescript_only,
+        expected_typescript_only,
+        "TypeScript-only surface changed; update {} deliberately if that was intended",
+        path.display()
+    );
+}

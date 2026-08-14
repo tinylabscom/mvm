@@ -195,14 +195,37 @@ snapshots and verified boot are driven by crates outside this filter and stay
 covered only by the release-tag lane. Widening it is a call about PR latency,
 not an oversight.
 
-### WS-G — deferred, needs a decision (Defect 7)
+### WS-G — surface divergence (Defect 7)
 
-- [ ] G1. Decide which SDK surface is canonical
-- [ ] G2. Stop exporting `LiveTransport`, `parseUpEnvelope`,
-      `deriveAttachedBuildMode`, `flushRecordingToOutPath`, `currentRecording`,
-      `SandboxCommands`, `SandboxFiles` from the TypeScript package
-- [ ] G3. Close the genuine Python-only gaps in TypeScript
-- [ ] G4. Gate the agreed surface so it cannot drift again
+Measured precisely rather than in aggregate. Of the original 38 Python-only
+names, 12 are `export type` in TypeScript — erased by tsc, so absent at runtime
+while genuinely present in the API. Of the 18 TypeScript-only names, 9 exist in
+Python too but only inside the private `_hostsvc` module.
+
+That leaves two decidable problems and one that is a feature port:
+
+- [x] G1. Stop exporting the 7 internals — `LiveTransport`, `SandboxCommands`,
+      `SandboxFiles`, `currentRecording`, `deriveAttachedBuildMode`,
+      `flushRecordingToOutPath`, `parseUpEnvelope`. The tests that reached them
+      through the package index now import the owning module, which is what
+      testing an internal is supposed to look like.
+- [x] G2. Export the 9 host-service errors from Python's root. TypeScript had
+      this right: `mvm.audit.emit(...)` and `mvm.host.time()` raise them, so a
+      caller has to be able to name what it catches, and `except
+      mvm.HostServiceError` was impossible.
+- [x] G3. Gate it. `surface_divergence.json` records the reviewed difference and
+      a BDD scenario fails when reality stops matching it — confirmed to go red
+      when a single internal is re-exported.
+- [ ] G4. Port the 27 genuinely-absent names to TypeScript. This is a feature
+      port, not a parity cleanup: it is the whole `@mvm.func` remote-invocation
+      surface (`func`, `session`, `Session`, `RemoteFunction`,
+      `current_session_id`, `workload_ref`, `WorkloadRef`, `derive_schema`,
+      `warm_process` and their error taxonomy) plus the declarative
+      network/deps helpers (`egress`, the `dns_*` trio, the `*_deps` trio,
+      `addon_use`, `host_port`). Needs product intent, not a mechanical fix.
+
+Result: TypeScript-only divergence went from 18 names to 2
+(`MVM_SDK_MODE_ENV`, `MVM_SDK_OUT_PATH_ENV`); shared surface went from 33 to 42.
 
 ### WS-F — gates and docs
 

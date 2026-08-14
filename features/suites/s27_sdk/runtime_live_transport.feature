@@ -39,3 +39,8 @@ Feature: Runtime SDK live transport
       | language   |
       | Python     |
       | TypeScript |
+
+  Scenario: the two SDK surfaces diverge only where a human signed off
+    When I collect the Python and TypeScript public surfaces
+    Then the shared surface agrees between the two languages
+    And any divergence matches the reviewed divergence list
