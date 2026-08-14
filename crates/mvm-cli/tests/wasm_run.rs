@@ -30,7 +30,8 @@ fn machine_run_wasm_module_prints_and_exits_zero() {
         .arg("wasm")
         .arg("--manifest")
         .arg(&manifest)
-        .env("MVM_HOME", &mvm_home);
+        .env("MVM_HOME", &mvm_home)
+        .env("HOME", &mvm_home);
 
     let output = cmd.output().expect("spawn mvmctl");
     let stdout = String::from_utf8_lossy(&output.stdout);

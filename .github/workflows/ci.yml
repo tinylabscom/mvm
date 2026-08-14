@@ -623,6 +623,8 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: wasm32-wasip1
 
       - name: Install system build deps
         run: |
