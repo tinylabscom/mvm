@@ -140,6 +140,12 @@ pub(in crate::commands) enum MachineAction {
     /// Restore a full-VM checkpoint into a fresh child VM
     #[command(name = "warm-restore", display_order = 18)]
     WarmRestore(MachineWarmRestoreArgs),
+    /// Fork a running machine into a fresh child VM with a new identity.
+    #[command(display_order = 19)]
+    Fork(MachineForkArgs),
+    /// Restore a vm_full checkpoint into a fresh child VM with a new identity.
+    #[command(display_order = 20)]
+    Restore(MachineRestoreArgs),
     /// Advanced single-VM operations (pause, snapshot, cp, fs, …). Hidden; use `machine <verb>` directly.
     #[command(flatten)]
     Vm(VmCmd),
@@ -174,6 +180,8 @@ impl MachineAction {
             MachineAction::Rewind(_) => "rewind",
             MachineAction::Advance(_) => "advance",
             MachineAction::WarmRestore(_) => "warm-restore",
+            MachineAction::Fork(_) => "fork",
+            MachineAction::Restore(_) => "restore",
         }
     }
 }
@@ -1075,6 +1083,38 @@ pub(in crate::commands) struct MachineWarmRestoreArgs {
     pub json: bool,
 }
 
+#[derive(ClapArgs, Debug, Clone)]
+pub(in crate::commands) struct MachineForkArgs {
+    /// Running machine to fork.
+    #[arg(value_name = "PARENT")]
+    pub parent: String,
+    /// Name for the fresh child VM.
+    #[arg(long = "as", value_name = "NAME", conflicts_with = "branch")]
+    pub child_name: Option<String>,
+    /// Auto-name the child as `<parent>-<branch>-<timestamp>`.
+    #[arg(long, value_name = "BRANCH", conflicts_with = "child_name")]
+    pub branch: Option<String>,
+    /// Output the result as JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(ClapArgs, Debug, Clone)]
+pub(in crate::commands) struct MachineRestoreArgs {
+    /// vm_full checkpoint id to restore.
+    #[arg(value_name = "CHECKPOINT_ID")]
+    pub checkpoint: String,
+    /// Name for the fresh child VM.
+    #[arg(long = "as", value_name = "NAME", conflicts_with = "branch")]
+    pub child_name: Option<String>,
+    /// Auto-name the child as `<checkpoint>-<branch>-<timestamp>`.
+    #[arg(long, value_name = "BRANCH", conflicts_with = "child_name")]
+    pub branch: Option<String>,
+    /// Output the result as JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
 #[derive(Debug, Serialize)]
 struct MachineRemoveSummary {
     name: String,
@@ -1499,6 +1539,8 @@ pub(in crate::commands) fn run(cli: &Cli, args: Args, cfg: &MvmConfig) -> Result
             complete_revert(cli, cfg, super::vm::checkpoint::run_advance(a)?)
         }
         MachineAction::WarmRestore(args) => run_warm_restore(args),
+        MachineAction::Fork(args) => run_fork(args),
+        MachineAction::Restore(args) => run_restore(args),
         MachineAction::Vm(cmd) => {
             super::vm::group::run(cli, super::vm::group::Args { action: cmd }, cfg)
         }
@@ -1513,6 +1555,26 @@ fn run_warm_restore(args: MachineWarmRestoreArgs) -> Result<()> {
         json: args.json,
     })?;
     Ok(())
+}
+
+/// Run `machine fork`: capture and branch a running machine into a fresh child VM.
+fn run_fork(args: MachineForkArgs) -> Result<()> {
+    checkpoint::fork_machine(checkpoint::ForkMachineInput {
+        parent_name: args.parent,
+        child_name: args.child_name,
+        branch: args.branch,
+        json: args.json,
+    })
+}
+
+/// Run `machine restore`: branch a vm_full checkpoint into a fresh child VM.
+fn run_restore(args: MachineRestoreArgs) -> Result<()> {
+    checkpoint::restore_machine(checkpoint::RestoreMachineInput {
+        checkpoint_id: args.checkpoint,
+        child_name: args.child_name,
+        branch: args.branch,
+        json: args.json,
+    })
 }
 
 /// Finish a restore. A checkpoint restore completes inside the engine (the fork

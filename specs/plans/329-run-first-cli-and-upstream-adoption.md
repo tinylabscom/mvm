@@ -106,50 +106,50 @@ flagship while keeping mvm's stronger assurance posture intact:
 
 ### Phase 0 — Ratify the CLI decision
 
-- [x] Draft an amendment to ADR-027 recording Option C.
-- [x] Review the amendment in the simplification worktree; confirm no claim
+- [ ] Draft an amendment to ADR-027 recording Option C.
+- [ ] Review the amendment in the simplification worktree; confirm no claim
       conflict.
-- [x] Audit every in-repo reference to `mvmctl machine run` (tests, docs,
+- [ ] Audit every in-repo reference to `mvmctl machine run` (tests, docs,
       SDKs, examples, BDD fixtures, scripts).
-- [x] Verify that `mvmctl run` and `mvmctl machine run` converge on the same
-      execution path (`run_secure_with_source`); document any gaps.
-- [x] Confirm SDK subprocess calls continue to work with the now-visible
-      `mvmctl run` surface (no path change required).
+- [ ] Verify that the hidden `mvmctl run` and `mvmctl machine run` were not
+      diverging in capability; document any gaps that must close before removal.
+- [ ] Update SDK subprocess calls to use the new canonical `mvmctl run` path.
 
 **Acceptance:** ADR-027 amendment accepted; inventory of `machine run` uses
 complete; no unresolved capability gap.
 
 ### Phase 1 — Consolidate the `run` argument surface
 
-- [x] Remove the legacy `vm::exec::Args` struct and fold its consumers onto
-      `vm::exec::RunArgs`.
-- [x] Promote `Commands::Run` from `hide = true` to a documented, ordered
-      top-level subcommand while keeping `machine run` visible.
-- [ ] Ensure `MachineAction::Run` and the top-level `Commands::Run` both consume
-      the same consolidated `RunArgs` struct (currently `MachineRunArgs` converts
-      into `RunArgs`; consider flattening the wrapper in a follow-up slice).
+- [ ] Merge `vm::exec::Args`, `vm::exec::RunArgs`, and
+      `machine::MachineRunArgs` into a single `RunArgs` source of truth in
+      `mvm-cli`.
 - [ ] Ensure the consolidated args can drive both the direct execution path
       and the `mvm-client::MvmClient::run_machine` facade method.
-- [x] Update clap completions generation to include the visible `run` surface
-      (done automatically now that `Commands::Run` is visible).
-- [x] Adjust tests that assumed `run` was hidden.
+- [ ] Ensure `MachineAction::Run` and the top-level `Commands::Run` both consume
+      the same consolidated `RunArgs` struct.
+- [ ] Promote `Commands::Run` from `hide = true` to a documented, ordered
+      top-level subcommand while keeping `machine run` visible.
+- [ ] Update clap completions generation to include the visible `run` surface.
+- [ ] Adjust tests and BDD fixtures that assumed `run` was hidden or that
+      `machine run` had a divergent argument surface.
 
-**Acceptance:** `cargo test -p mvm-cli --lib` and `cargo clippy -p mvm-cli
+**Acceptance:** `cargo nextest run --workspace` and `cargo clippy --workspace
 --all-targets -- -D warnings` green; `mvmctl run --help` and
-`mvmctl machine run --help` both resolve and document the same execution path.
+`mvmctl machine run --help` both resolve and document the same consolidated
+argument surface.
 
 ### Phase 2 — Runtime auto-detection
 
-- [x] Define a small, auditable runtime catalog mapping command names and
+- [ ] Define a small, auditable runtime catalog mapping command names and
       project files to OCI image refs (e.g. `python3` / `requirements.txt` →
       `python:3.12-alpine`, `cargo` / `Cargo.toml` → `rust:1.85-alpine`).
-- [x] Implement detection order: explicit `--image`, then argv[0], then
+- [ ] Implement detection order: explicit `--image`, then argv[0], then
       project files in the working directory, then the bundled default image.
-- [x] Add `--no-detect` to force the default image, and `--image` to override.
+- [ ] Add `--no-detect` to force the default image, and `--image` to override.
 - [ ] Add `--template` to pick a built-in template by name.
-- [x] Ensure auto-detected runs still produce a signed `ExecutionPlan` with
+- [ ] Ensure auto-detected runs still produce a signed `ExecutionPlan` with
       default-deny egress.
-- [x] Add unit tests for each detection rule and BDD scenarios for at least
+- [ ] Add unit tests for each detection rule and BDD scenarios for at least
       Python, Node, Rust, and Go.
 
 **Acceptance:** `mvmctl run python3 -c "print('ok')"` boots the right image
@@ -157,40 +157,40 @@ without a manifest; detection is deterministic and tested.
 
 ### Phase 3 — Security profile presets
 
-- [x] Add `--profile {restrictive,standard,dev,permissive}` to `mvmctl run`.
-- [x] Map each preset unambiguously to existing policy flags (env passthrough,
+- [ ] Add `--profile {restrictive,standard,dev,permissive}` to `mvmctl run`.
+- [ ] Map each preset unambiguously to existing policy flags (env passthrough,
       host mounts, network allowlist, seccomp posture).
-- [x] Surface the effective profile in execution receipts and `mvmctl doctor`.
-- [x] Reject `--profile permissive` unless `MVM_ACK_PERMISSIVE_RUN=1` is set,
+- [ ] Surface the effective profile in execution receipts and `mvmctl doctor`.
+- [ ] Reject `--profile permissive` unless `MVM_ACK_PERMISSIVE_RUN=1` is set,
       matching the current escape-hatch behavior.
-- [x] Add tests for preset-to-policy mapping and receipt contents.
+- [ ] Add tests for preset-to-policy mapping and receipt contents.
 
 **Acceptance:** Presets work, are documented, and do not create new privileged
 paths beyond the existing policy vocabulary.
 
 ### Phase 4 — Templates and OCI-image bases
 
-- [x] Implement `mvmctl template build --image <ref>` as a first-class path,
+- [ ] Implement `mvmctl template build --image <ref>` as a first-class path,
       alongside the existing Nix-flake path.
-- [x] Add built-in language templates (python, node, rust, go, ruby, java,
+- [ ] Add built-in language templates (python, node, rust, go, ruby, java,
       shell, data-science, web-dev) backed by pinned OCI refs.
 - [ ] Allow saving a running dev-tier sandbox as a custom template.
 - [ ] Integrate templates with the snapshot-first storage from Plan 255.
-- [x] Add BDD scenarios for template build and reuse (save is deferred).
+- [ ] Add BDD scenarios for template build, save, and reuse.
 
 **Acceptance:** A user can `mvmctl template build --image python:3.12-alpine`
 and then `mvmctl run --template python <script>`.
 
 ### Phase 5 — Snapshot/fork DX
 
-- [ ] Expose `mvmctl machine fork <parent> --as <child>` over the consolidated
+- [x] Expose `mvmctl machine fork <parent> --as <child>` over the consolidated
       `VmBackend` seam.
-- [ ] Expose `mvmctl machine restore <checkpoint> --as <child>` with the
+- [x] Expose `mvmctl machine restore <checkpoint> --as <child>` with the
       admission-safe semantics from Plan 255.
-- [ ] Add `--branch` auto-naming for dev sandboxes.
-- [ ] Ensure every forked/restored child gets fresh identity, authority, and
+- [x] Add `--branch` auto-naming for dev sandboxes.
+- [x] Ensure every forked/restored child gets fresh identity, authority, and
       per-instance secrets; warm parents carry no workload authority.
-- [ ] Add positive and negative tests: fork succeeds, unauthorized parent reuse
+- [x] Add positive and negative tests: fork succeeds, unauthorized parent reuse
       fails closed.
 
 **Acceptance:** Fork and restore are agent-usable primitives that do not bypass

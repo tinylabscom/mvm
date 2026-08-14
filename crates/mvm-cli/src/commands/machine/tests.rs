@@ -56,6 +56,20 @@ fn parse_owned_run(argv: &[String]) -> Result<MachineRunArgs, clap::Error> {
     })
 }
 
+fn parse_fork(argv: &[&str]) -> Result<MachineForkArgs, clap::Error> {
+    parse(argv).map(|action| match action {
+        MachineAction::Fork(f) => f,
+        other => panic!("expected fork action, got {other:?}"),
+    })
+}
+
+fn parse_restore(argv: &[&str]) -> Result<MachineRestoreArgs, clap::Error> {
+    parse(argv).map(|action| match action {
+        MachineAction::Restore(r) => r,
+        other => panic!("expected restore action, got {other:?}"),
+    })
+}
+
 const SDK_RUN_EGRESS_BACKEND: &str = "libkrun";
 const SDK_RUN_EGRESS_ENFORCEMENT: &str = "libkrun:l4-host-port";
 
@@ -96,6 +110,8 @@ fn machine_subcommand(action: &MachineAction) -> &'static str {
         MachineAction::Rewind(_) => "rewind",
         MachineAction::Advance(_) => "advance",
         MachineAction::WarmRestore(_) => "warm-restore",
+        MachineAction::Fork(_) => "fork",
+        MachineAction::Restore(_) => "restore",
         MachineAction::Vm(_) => "vm",
     }
 }
@@ -105,6 +121,59 @@ fn machine_subcommand(action: &MachineAction) -> &'static str {
 /// CLI parser actually accepts, and must map to the verb its first line
 /// names. This is what catches an SDK emitting a flag the CLI rejects (e.g.
 /// `stop --name X` when `stop` takes a positional name).
+#[test]
+fn fork_parses_with_as() {
+    let args = parse_fork(&["fork", "parent", "--as", "child"]).unwrap();
+    assert_eq!(args.parent, "parent");
+    assert_eq!(args.child_name, Some("child".to_string()));
+    assert!(args.branch.is_none());
+}
+
+#[test]
+fn fork_parses_with_branch() {
+    let args = parse_fork(&["fork", "parent", "--branch", "feature-x"]).unwrap();
+    assert_eq!(args.parent, "parent");
+    assert!(args.child_name.is_none());
+    assert_eq!(args.branch, Some("feature-x".to_string()));
+}
+
+#[test]
+fn fork_rejects_as_and_branch_together() {
+    assert!(parse_fork(&["fork", "parent", "--as", "child", "--branch", "feature-x"]).is_err());
+}
+
+#[test]
+fn fork_allows_no_name() {
+    let args = parse_fork(&["fork", "parent"]).unwrap();
+    assert_eq!(args.parent, "parent");
+    assert!(args.child_name.is_none());
+    assert!(args.branch.is_none());
+}
+
+#[test]
+fn restore_auto_names_when_as_and_branch_are_omitted() {
+    let args = parse_restore(&["restore", "ckpt-abc"]).unwrap();
+    assert_eq!(args.checkpoint, "ckpt-abc");
+    assert!(args.child_name.is_none());
+    assert!(args.branch.is_none());
+}
+
+#[test]
+fn restore_parses_with_as() {
+    let args = parse_restore(&["restore", "ckpt-abc", "--as", "child"]).unwrap();
+    assert_eq!(args.checkpoint, "ckpt-abc");
+    assert_eq!(args.child_name, Some("child".to_string()));
+    assert!(args.branch.is_none());
+}
+
+#[test]
+fn restore_parses_with_branch() {
+    let args = parse_restore(&["restore", "ckpt-abc", "--branch", "feature-x"]).unwrap();
+    assert_eq!(args.checkpoint, "ckpt-abc");
+    assert!(args.child_name.is_none());
+    assert_eq!(args.branch, Some("feature-x".to_string()));
+}
+
 #[test]
 fn every_shared_machine_fixture_parses_to_its_verb() {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/machine-fixtures");

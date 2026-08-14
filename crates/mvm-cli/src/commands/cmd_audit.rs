@@ -150,6 +150,8 @@ impl Commands {
                 machine::MachineAction::Revert(a) | machine::MachineAction::Rewind(a) => a.json,
                 machine::MachineAction::Advance(a) => a.json,
                 machine::MachineAction::Ls(a) => a.json,
+                machine::MachineAction::Fork(a) => a.json,
+                machine::MachineAction::Restore(a) => a.json,
                 _ => false,
             },
             _ => false,
