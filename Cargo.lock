@@ -3011,6 +3011,7 @@ dependencies = [
  "libkrun-sys",
  "lzma-rs",
  "mvm-agentd",
+ "mvm-contract",
  "mvm-core",
  "mvm-fs",
  "mvm-http",

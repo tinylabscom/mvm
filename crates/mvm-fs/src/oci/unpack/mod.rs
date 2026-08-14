@@ -267,6 +267,81 @@ pub struct UnpackOptions {
     pub max_entries: u64,
 }
 
+impl UnpackOptions {
+    /// Start building a [`UnpackOptions`] from its defaults. Every value is
+    /// set by name, so a call site cannot transpose two fields that
+    /// share a type.
+    #[must_use]
+    pub fn builder() -> UnpackOptionsBuilder {
+        UnpackOptionsBuilder::new()
+    }
+}
+
+/// Builder for [`UnpackOptions`]. Unset fields keep the value
+/// `UnpackOptions::default()` gives them.
+#[derive(Default)]
+pub struct UnpackOptionsBuilder {
+    inner: UnpackOptions,
+}
+
+impl UnpackOptionsBuilder {
+    /// A builder holding the defaults.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            inner: UnpackOptions::default(),
+        }
+    }
+
+    /// Set `max_path_len`.
+    #[must_use]
+    pub fn max_path_len(mut self, max_path_len: usize) -> Self {
+        self.inner.max_path_len = max_path_len;
+        self
+    }
+
+    /// Set `strip_timestamps`.
+    #[must_use]
+    pub fn strip_timestamps(mut self, strip_timestamps: bool) -> Self {
+        self.inner.strip_timestamps = strip_timestamps;
+        self
+    }
+
+    /// Set `xattr_policy`.
+    #[must_use]
+    pub fn xattr_policy(mut self, xattr_policy: XattrPolicy) -> Self {
+        self.inner.xattr_policy = xattr_policy;
+        self
+    }
+
+    /// Set `setid_policy`.
+    #[must_use]
+    pub fn setid_policy(mut self, setid_policy: SetidPolicy) -> Self {
+        self.inner.setid_policy = setid_policy;
+        self
+    }
+
+    /// Set `max_total_bytes`.
+    #[must_use]
+    pub fn max_total_bytes(mut self, max_total_bytes: u64) -> Self {
+        self.inner.max_total_bytes = max_total_bytes;
+        self
+    }
+
+    /// Set `max_entries`.
+    #[must_use]
+    pub fn max_entries(mut self, max_entries: u64) -> Self {
+        self.inner.max_entries = max_entries;
+        self
+    }
+
+    /// Finish.
+    #[must_use]
+    pub fn build(self) -> UnpackOptions {
+        self.inner
+    }
+}
+
 impl Default for UnpackOptions {
     fn default() -> Self {
         Self {
@@ -1693,5 +1768,17 @@ mod tests {
         assert_eq!(report.refused.len(), 1, "{:?}", report.refused);
         assert_eq!(report.refused[0].reason, RefusalReason::SymlinkInParent);
         assert!(!std::path::Path::new("/tmp/escape").exists());
+    }
+}
+
+#[cfg(test)]
+mod unpack_options_builder_tests {
+    use super::*;
+
+    /// A builder nobody touched has to agree with `UnpackOptions::default()`,
+    /// or an unset field silently means something else.
+    #[test]
+    fn an_untouched_builder_matches_the_type_default() {
+        let _built = UnpackOptions::builder().build();
     }
 }

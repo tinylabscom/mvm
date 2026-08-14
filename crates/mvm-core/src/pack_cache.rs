@@ -25,6 +25,7 @@ use crate::packs::{
     VerifiedPack, verify_pack_at, verify_pack_keyless_at,
 };
 use crate::plan::bundle::KeyId;
+use mvm_contract::builder::BuilderError;
 
 /// Serialized manifest written alongside the verified file set so a promoted
 /// pack is self-describing and `resolve_pack` can re-verify it without external
@@ -581,6 +582,80 @@ pub struct PackProvenanceInput {
     pub channel: String,
     pub release_version: String,
     pub promoted_at_unix: u64,
+}
+
+impl PackProvenanceInput {
+    /// Start building a [`PackProvenanceInput`]. Every value is set by name, so a
+    /// call site cannot transpose two fields that share a type.
+    #[must_use]
+    pub fn builder() -> PackProvenanceInputBuilder {
+        PackProvenanceInputBuilder::new()
+    }
+}
+
+/// Builder for [`PackProvenanceInput`]. Required fields are checked by
+/// [`PackProvenanceInputBuilder::build`] rather than defaulted, so an unset one is a
+/// reported error and never a silently empty value.
+pub struct PackProvenanceInputBuilder {
+    channel: Option<String>,
+    release_version: Option<String>,
+    promoted_at_unix: Option<u64>,
+}
+
+impl PackProvenanceInputBuilder {
+    /// An empty builder: nothing set yet.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            channel: None,
+            release_version: None,
+            promoted_at_unix: None,
+        }
+    }
+
+    /// Set `channel`.
+    #[must_use]
+    pub fn channel(mut self, channel: String) -> Self {
+        self.channel = Some(channel);
+        self
+    }
+
+    /// Set `release_version`.
+    #[must_use]
+    pub fn release_version(mut self, release_version: String) -> Self {
+        self.release_version = Some(release_version);
+        self
+    }
+
+    /// Set `promoted_at_unix`.
+    #[must_use]
+    pub fn promoted_at_unix(mut self, promoted_at_unix: u64) -> Self {
+        self.promoted_at_unix = Some(promoted_at_unix);
+        self
+    }
+
+    /// Finish, or name the first required field left unset.
+    pub fn build(self) -> Result<PackProvenanceInput, BuilderError> {
+        Ok(PackProvenanceInput {
+            channel: self
+                .channel
+                .ok_or(BuilderError::missing("PackProvenanceInput", "channel"))?,
+            release_version: self.release_version.ok_or(BuilderError::missing(
+                "PackProvenanceInput",
+                "release_version",
+            ))?,
+            promoted_at_unix: self.promoted_at_unix.ok_or(BuilderError::missing(
+                "PackProvenanceInput",
+                "promoted_at_unix",
+            ))?,
+        })
+    }
+}
+
+impl Default for PackProvenanceInputBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// One recorded pack version, as surfaced by [`list_versions`]: the
@@ -1702,5 +1777,20 @@ mod tests {
                 .iter()
                 .any(|v| v.pack_hash == promoted_a.verified.pack_hash && v.active)
         );
+    }
+}
+
+#[cfg(test)]
+mod pack_provenance_input_builder_tests {
+    use super::*;
+
+    /// An empty builder must refuse to finish, naming the first
+    /// required field it is missing — never substituting a default.
+    #[test]
+    fn an_empty_builder_names_the_first_missing_field() {
+        let Err(err) = PackProvenanceInput::builder().build() else {
+            panic!("an empty PackProvenanceInput builder must not build");
+        };
+        assert_eq!(err, BuilderError::missing("PackProvenanceInput", "channel"));
     }
 }

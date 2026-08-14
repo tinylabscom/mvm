@@ -34,6 +34,7 @@ use sha2::{Digest, Sha256};
 use super::Cli;
 use super::vm::checkpoint::SignedChainAnchor;
 use super::vm::host_signer;
+use mvm_contract::builder::BuilderError;
 use mvm_core::plan::{PlanSeccompTier, SecretReleasePolicy, SynthesisInput};
 use mvm_hostd::plan_admission::{
     AdmittedPlan, InMemoryNonceLedger, SystemClock, admit_for_run, stash_plan_and_mint_verb_grant,
@@ -113,6 +114,181 @@ pub struct StandbySpecParams<'a> {
     /// key's egress half, read off the launch's effective enablement. A restored
     /// child inherits the token from the parent's memory, so this is fixed here.
     pub vsock_egress: bool,
+}
+
+impl<'a> StandbySpecParams<'a> {
+    /// Start building a [`StandbySpecParams`]. Every value is set by name, so a
+    /// call site cannot transpose two fields that share a type.
+    #[must_use]
+    pub fn builder() -> StandbySpecParamsBuilder<'a> {
+        StandbySpecParamsBuilder::new()
+    }
+}
+
+/// Builder for [`StandbySpecParams`]. Required fields are checked by
+/// [`StandbySpecParamsBuilder::build`] rather than defaulted, so an unset one is a
+/// reported error and never a silently empty value.
+pub struct StandbySpecParamsBuilder<'a> {
+    pool_root: Option<&'a Path>,
+    template_id: Option<&'a str>,
+    vms_root: Option<&'a Path>,
+    kernel: Option<&'a Path>,
+    kernel_sha256: Option<&'a str>,
+    vcpus: Option<u8>,
+    mem_mib: Option<u32>,
+    signer_id: Option<&'a str>,
+    signing_key_path: Option<&'a Path>,
+    image_path: Option<&'a Path>,
+    image_sha256: Option<&'a str>,
+    vsock_egress: Option<bool>,
+}
+
+impl<'a> StandbySpecParamsBuilder<'a> {
+    /// An empty builder: nothing set yet.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            pool_root: None,
+            template_id: None,
+            vms_root: None,
+            kernel: None,
+            kernel_sha256: None,
+            vcpus: None,
+            mem_mib: None,
+            signer_id: None,
+            signing_key_path: None,
+            image_path: None,
+            image_sha256: None,
+            vsock_egress: None,
+        }
+    }
+
+    /// Set `pool_root`.
+    #[must_use]
+    pub fn pool_root(mut self, pool_root: &'a Path) -> Self {
+        self.pool_root = Some(pool_root);
+        self
+    }
+
+    /// Set `template_id`. Takes a value or an `Option`; unset means `None`.
+    #[must_use]
+    pub fn template_id(mut self, template_id: impl Into<Option<&'a str>>) -> Self {
+        self.template_id = template_id.into();
+        self
+    }
+
+    /// Set `vms_root`.
+    #[must_use]
+    pub fn vms_root(mut self, vms_root: &'a Path) -> Self {
+        self.vms_root = Some(vms_root);
+        self
+    }
+
+    /// Set `kernel`.
+    #[must_use]
+    pub fn kernel(mut self, kernel: &'a Path) -> Self {
+        self.kernel = Some(kernel);
+        self
+    }
+
+    /// Set `kernel_sha256`.
+    #[must_use]
+    pub fn kernel_sha256(mut self, kernel_sha256: &'a str) -> Self {
+        self.kernel_sha256 = Some(kernel_sha256);
+        self
+    }
+
+    /// Set `vcpus`.
+    #[must_use]
+    pub fn vcpus(mut self, vcpus: u8) -> Self {
+        self.vcpus = Some(vcpus);
+        self
+    }
+
+    /// Set `mem_mib`.
+    #[must_use]
+    pub fn mem_mib(mut self, mem_mib: u32) -> Self {
+        self.mem_mib = Some(mem_mib);
+        self
+    }
+
+    /// Set `signer_id`.
+    #[must_use]
+    pub fn signer_id(mut self, signer_id: &'a str) -> Self {
+        self.signer_id = Some(signer_id);
+        self
+    }
+
+    /// Set `signing_key_path`.
+    #[must_use]
+    pub fn signing_key_path(mut self, signing_key_path: &'a Path) -> Self {
+        self.signing_key_path = Some(signing_key_path);
+        self
+    }
+
+    /// Set `image_path`. Takes a value or an `Option`; unset means `None`.
+    #[must_use]
+    pub fn image_path(mut self, image_path: impl Into<Option<&'a Path>>) -> Self {
+        self.image_path = image_path.into();
+        self
+    }
+
+    /// Set `image_sha256`. Takes a value or an `Option`; unset means `None`.
+    #[must_use]
+    pub fn image_sha256(mut self, image_sha256: impl Into<Option<&'a str>>) -> Self {
+        self.image_sha256 = image_sha256.into();
+        self
+    }
+
+    /// Set `vsock_egress`.
+    #[must_use]
+    pub fn vsock_egress(mut self, vsock_egress: bool) -> Self {
+        self.vsock_egress = Some(vsock_egress);
+        self
+    }
+
+    /// Finish, or name the first required field left unset.
+    pub fn build(self) -> Result<StandbySpecParams<'a>, BuilderError> {
+        Ok(StandbySpecParams {
+            pool_root: self
+                .pool_root
+                .ok_or(BuilderError::missing("StandbySpecParams", "pool_root"))?,
+            template_id: self.template_id,
+            vms_root: self
+                .vms_root
+                .ok_or(BuilderError::missing("StandbySpecParams", "vms_root"))?,
+            kernel: self
+                .kernel
+                .ok_or(BuilderError::missing("StandbySpecParams", "kernel"))?,
+            kernel_sha256: self
+                .kernel_sha256
+                .ok_or(BuilderError::missing("StandbySpecParams", "kernel_sha256"))?,
+            vcpus: self
+                .vcpus
+                .ok_or(BuilderError::missing("StandbySpecParams", "vcpus"))?,
+            mem_mib: self
+                .mem_mib
+                .ok_or(BuilderError::missing("StandbySpecParams", "mem_mib"))?,
+            signer_id: self
+                .signer_id
+                .ok_or(BuilderError::missing("StandbySpecParams", "signer_id"))?,
+            signing_key_path: self.signing_key_path.ok_or(BuilderError::missing(
+                "StandbySpecParams",
+                "signing_key_path",
+            ))?,
+            image_path: self.image_path,
+            image_sha256: self.image_sha256,
+            vsock_egress: self
+                .vsock_egress
+                .ok_or(BuilderError::missing("StandbySpecParams", "vsock_egress"))?,
+        })
+    }
+}
+
+impl<'a> Default for StandbySpecParamsBuilder<'a> {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Build a `StandbySpec` from [`StandbySpecParams`]. The control UDS lives under
@@ -388,20 +564,22 @@ pub fn warm_to_target(pool: &SupervisorStandbyPool, p: &WarmParams<'_>) -> Resul
     for _ in have..p.target {
         // Every compat field comes from `want`, so the recorded handle's own
         // `compat()` is `want` — the exact value the claim searches for.
-        let spec = build_standby_spec(&StandbySpecParams {
-            pool_root: &pool_root,
-            template_id: want.template_id.as_deref(),
-            vms_root: &vms_root,
-            kernel,
-            kernel_sha256: &want.kernel_sha256,
-            vcpus: want.vcpus,
-            mem_mib: want.mem_mib,
-            signer_id: p.signer_id,
-            signing_key_path: p.signing_key_path,
-            image_path: Some(image),
-            image_sha256: want.image_sha256.as_deref(),
-            vsock_egress: want.vsock_egress,
-        })?;
+        let spec = build_standby_spec(
+            &StandbySpecParams::builder()
+                .pool_root(&pool_root)
+                .template_id(want.template_id.as_deref())
+                .vms_root(&vms_root)
+                .kernel(kernel)
+                .kernel_sha256(&want.kernel_sha256)
+                .vcpus(want.vcpus)
+                .mem_mib(want.mem_mib)
+                .signer_id(p.signer_id)
+                .signing_key_path(p.signing_key_path)
+                .image_path(image)
+                .image_sha256(want.image_sha256.as_deref())
+                .vsock_egress(want.vsock_egress)
+                .build()?,
+        )?;
         match p.backend.spawn_standby_via_runner(&spawn_ctx, &spec) {
             Ok(handle) => {
                 // Audit before recording: the claim refuses a parent with no
@@ -885,6 +1063,49 @@ mod tests {
             plan_json: Some("{}".into()),
             ..Default::default()
         }
+    }
+
+    /// The optional half of a standby spec — the template binding and the
+    /// image identity — is what a claim searches a parent by, so each optional
+    /// setter has to land rather than leaving `None` behind.
+    #[test]
+    fn the_optional_standby_setters_reach_the_built_value() {
+        let pool_root = Path::new("/pool");
+        let vms_root = Path::new("/vms");
+        let kernel = Path::new("/vmlinux");
+        let key = Path::new("/key");
+        let image = Path::new("/rootfs.ext4");
+        let Ok(built) = StandbySpecParams::builder()
+            .pool_root(pool_root)
+            .template_id("tpl-1")
+            .vms_root(vms_root)
+            .kernel(kernel)
+            .kernel_sha256("deadbeef")
+            .vcpus(2)
+            .mem_mib(1024)
+            .signer_id("host:test")
+            .signing_key_path(key)
+            .image_path(image)
+            .image_sha256("cafebabe")
+            .vsock_egress(true)
+            .build()
+        else {
+            panic!("every StandbySpecParams field is set");
+        };
+        assert_eq!(built.template_id, Some("tpl-1"));
+        assert_eq!(built.image_path, Some(image));
+        assert_eq!(built.image_sha256, Some("cafebabe"));
+        assert!(built.vsock_egress);
+    }
+
+    /// A required field left unset is named, never defaulted into a spec that
+    /// spawns a standby no launch can claim.
+    #[test]
+    fn an_empty_standby_builder_names_the_first_missing_field() {
+        let Err(err) = StandbySpecParams::builder().build() else {
+            panic!("an empty StandbySpecParams builder must not build");
+        };
+        assert_eq!(err, BuilderError::missing("StandbySpecParams", "pool_root"));
     }
 
     #[test]
@@ -1378,21 +1599,23 @@ mod tests {
         std::fs::write(&kp, b"k").unwrap();
         let pool_root = tmp.path().join("pool");
         let vms_root = tmp.path().join("vms");
-        let spec = build_standby_spec(&StandbySpecParams {
-            pool_root: &pool_root,
-            template_id: None,
-            vms_root: &vms_root,
-            kernel: &kp,
-            kernel_sha256: &kernel_sha256_hex(&kp).unwrap(),
-            vcpus: 2,
-            mem_mib: 1024,
-            signer_id: "host:test",
-            signing_key_path: &tmp.path().join("key"),
-            image_path: None,
-            image_sha256: None,
-            vsock_egress: false,
-        })
-        .unwrap();
+        let kernel_sha256 = kernel_sha256_hex(&kp).unwrap();
+        let key_path = tmp.path().join("key");
+        let Ok(params) = StandbySpecParams::builder()
+            .pool_root(&pool_root)
+            .vms_root(&vms_root)
+            .kernel(&kp)
+            .kernel_sha256(&kernel_sha256)
+            .vcpus(2)
+            .mem_mib(1024)
+            .signer_id("host:test")
+            .signing_key_path(&key_path)
+            .vsock_egress(false)
+            .build()
+        else {
+            panic!("every required StandbySpecParams field is set");
+        };
+        let spec = build_standby_spec(&params).unwrap();
         // The socket lives under the nonce-derived `standby-<16hex>` dir; the filename is
         // short + fixed so the path fits SUN_LEN (the full 64-char nonce would overflow it).
         assert!(spec.id.starts_with("standby-"));

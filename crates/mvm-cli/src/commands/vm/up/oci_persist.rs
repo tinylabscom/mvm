@@ -273,29 +273,29 @@ pub(in crate::commands) fn start_persistent_oci_machine(
             "the persistent OCI start path resolves no entrypoint",
         ),
     })?;
-    let mut start_config = VmStartParams {
-        name: name.to_string(),
-        rootfs_path: rootfs_path.display().to_string(),
-        vmlinux_path: kernel_path,
-        initrd_path,
-        verity_path,
-        roothash,
-        revision_hash: resolved_digest.to_string(),
-        flake_ref: format!("oci:{image_label}"),
-        profile: Some(profile.to_string()),
-        cpus,
-        memory_mib,
-        mem_initial_mib,
-        volumes,
-        config_files: &[],
-        secret_files: &[],
-        port_mappings: &[],
+    let mut start_config = VmStartParams::builder()
+        .name(name.to_string())
+        .rootfs_path(rootfs_path.display().to_string())
+        .vmlinux_path(kernel_path)
+        .initrd_path(initrd_path)
+        .verity_path(verity_path)
+        .roothash(roothash)
+        .revision_hash(resolved_digest.to_string())
+        .flake_ref(format!("oci:{image_label}"))
+        .profile(profile.to_string())
+        .cpus(cpus)
+        .memory_mib(memory_mib)
+        .mem_initial_mib(mem_initial_mib)
+        .volumes(volumes)
+        .config_files(&[])
+        .secret_files(&[])
+        .port_mappings(&[])
         // Persistent named machines are long-lived; they are not transient
         // auto-named launches and are never claimed from the warm standby pool.
-        warm_pool_size: 0,
-        network_policy,
-    }
-    .into_start_config();
+        .warm_pool_size(0)
+        .network_policy(network_policy)
+        .build()?
+        .into_start_config();
     start_config.ports = ports
         .iter()
         .map(|mapping| {

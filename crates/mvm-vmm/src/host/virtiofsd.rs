@@ -10,6 +10,7 @@ use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
+use mvm_contract::builder::BuilderError;
 
 /// Which `virtiofsd` implementation is installed. The two share the
 /// `--socket-path` flag but nothing else: the QEMU-bundled **C** daemon takes
@@ -80,6 +81,126 @@ pub struct SpawnParams<'a> {
     pub dir: &'a Path,
     pub read_only: bool,
     pub dax: bool,
+}
+
+impl<'a> SpawnParams<'a> {
+    /// Start building a [`SpawnParams`]. Every value is set by name, so a
+    /// call site cannot transpose two fields that share a type.
+    #[must_use]
+    pub fn builder() -> SpawnParamsBuilder<'a> {
+        SpawnParamsBuilder::new()
+    }
+}
+
+/// Builder for [`SpawnParams`]. Required fields are checked by
+/// [`SpawnParamsBuilder::build`] rather than defaulted, so an unset one is a
+/// reported error and never a silently empty value.
+pub struct SpawnParamsBuilder<'a> {
+    bin: Option<&'a Path>,
+    flavor: Option<VirtiofsdFlavor>,
+    tag: Option<&'a str>,
+    sock: Option<&'a Path>,
+    dir: Option<&'a Path>,
+    read_only: Option<bool>,
+    dax: Option<bool>,
+}
+
+impl<'a> SpawnParamsBuilder<'a> {
+    /// An empty builder: nothing set yet.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            bin: None,
+            flavor: None,
+            tag: None,
+            sock: None,
+            dir: None,
+            read_only: None,
+            dax: None,
+        }
+    }
+
+    /// Set `bin`.
+    #[must_use]
+    pub fn bin(mut self, bin: &'a Path) -> Self {
+        self.bin = Some(bin);
+        self
+    }
+
+    /// Set `flavor`.
+    #[must_use]
+    pub fn flavor(mut self, flavor: VirtiofsdFlavor) -> Self {
+        self.flavor = Some(flavor);
+        self
+    }
+
+    /// Set `tag`.
+    #[must_use]
+    pub fn tag(mut self, tag: &'a str) -> Self {
+        self.tag = Some(tag);
+        self
+    }
+
+    /// Set `sock`.
+    #[must_use]
+    pub fn sock(mut self, sock: &'a Path) -> Self {
+        self.sock = Some(sock);
+        self
+    }
+
+    /// Set `dir`.
+    #[must_use]
+    pub fn dir(mut self, dir: &'a Path) -> Self {
+        self.dir = Some(dir);
+        self
+    }
+
+    /// Set `read_only`.
+    #[must_use]
+    pub fn read_only(mut self, read_only: bool) -> Self {
+        self.read_only = Some(read_only);
+        self
+    }
+
+    /// Set `dax`.
+    #[must_use]
+    pub fn dax(mut self, dax: bool) -> Self {
+        self.dax = Some(dax);
+        self
+    }
+
+    /// Finish, or name the first required field left unset.
+    pub fn build(self) -> Result<SpawnParams<'a>, BuilderError> {
+        Ok(SpawnParams {
+            bin: self
+                .bin
+                .ok_or(BuilderError::missing("SpawnParams", "bin"))?,
+            flavor: self
+                .flavor
+                .ok_or(BuilderError::missing("SpawnParams", "flavor"))?,
+            tag: self
+                .tag
+                .ok_or(BuilderError::missing("SpawnParams", "tag"))?,
+            sock: self
+                .sock
+                .ok_or(BuilderError::missing("SpawnParams", "sock"))?,
+            dir: self
+                .dir
+                .ok_or(BuilderError::missing("SpawnParams", "dir"))?,
+            read_only: self
+                .read_only
+                .ok_or(BuilderError::missing("SpawnParams", "read_only"))?,
+            dax: self
+                .dax
+                .ok_or(BuilderError::missing("SpawnParams", "dax"))?,
+        })
+    }
+}
+
+impl<'a> Default for SpawnParamsBuilder<'a> {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl<'a> SpawnParams<'a> {
@@ -184,4 +305,19 @@ fn wait_for_socket(sock: &Path, timeout: Duration) -> Result<()> {
         std::thread::sleep(Duration::from_millis(50));
     }
     bail!("timed out after {timeout:?}")
+}
+
+#[cfg(test)]
+mod spawn_params_builder_tests {
+    use super::*;
+
+    /// An empty builder must refuse to finish, naming the first
+    /// required field it is missing — never substituting a default.
+    #[test]
+    fn an_empty_builder_names_the_first_missing_field() {
+        let Err(err) = SpawnParams::builder().build() else {
+            panic!("an empty SpawnParams builder must not build");
+        };
+        assert_eq!(err, BuilderError::missing("SpawnParams", "bin"));
+    }
 }

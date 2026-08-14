@@ -428,6 +428,60 @@ pub struct MaterializeOptions {
 }
 
 impl MaterializeOptions {
+    /// Start building a [`MaterializeOptions`] from its defaults. Every value is
+    /// set by name, so a call site cannot transpose two fields that
+    /// share a type.
+    #[must_use]
+    pub fn builder() -> MaterializeOptionsBuilder {
+        MaterializeOptionsBuilder::new()
+    }
+}
+
+/// Builder for [`MaterializeOptions`]. Unset fields keep the value
+/// `MaterializeOptions::default()` gives them.
+#[derive(Default)]
+pub struct MaterializeOptionsBuilder {
+    inner: MaterializeOptions,
+}
+
+impl MaterializeOptionsBuilder {
+    /// A builder holding the defaults.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            inner: MaterializeOptions::default(),
+        }
+    }
+
+    /// Set `walk`.
+    #[must_use]
+    pub fn walk(mut self, walk: WalkOptions) -> Self {
+        self.inner.walk = walk;
+        self
+    }
+
+    /// Set `build`.
+    #[must_use]
+    pub fn with_build(mut self, build: BuildOptions) -> Self {
+        self.inner.build = build;
+        self
+    }
+
+    /// Set `extra_nodes`.
+    #[must_use]
+    pub fn extra_nodes(mut self, extra_nodes: Vec<Node>) -> Self {
+        self.inner.extra_nodes = extra_nodes;
+        self
+    }
+
+    /// Finish.
+    #[must_use]
+    pub fn build(self) -> MaterializeOptions {
+        self.inner
+    }
+}
+
+impl MaterializeOptions {
     /// Set the unsupported-node policy for the walk.
     pub fn with_unsupported_node_policy(mut self, policy: UnsupportedNodePolicy) -> Self {
         self.walk.on_unsupported = policy;
@@ -1111,5 +1165,17 @@ mod tests {
             target: "bash".to_string(),
         }];
         assert_eq!(merge_extra_nodes(walked.clone(), Vec::new()), walked);
+    }
+}
+
+#[cfg(test)]
+mod materialize_options_builder_tests {
+    use super::*;
+
+    /// A builder nobody touched has to agree with `MaterializeOptions::default()`,
+    /// or an unset field silently means something else.
+    #[test]
+    fn an_untouched_builder_matches_the_type_default() {
+        assert!(MaterializeOptions::builder().build() == MaterializeOptions::default());
     }
 }

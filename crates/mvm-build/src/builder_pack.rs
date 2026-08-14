@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 use ed25519_dalek::SigningKey;
+use mvm_contract::builder::BuilderError;
 use mvm_core::arch::GuestArch;
 use mvm_core::packs::{
     HostCapability, PackBackend, PackBuilder, PackInputs, PackKind, PackManifest,
@@ -92,6 +93,225 @@ pub struct BuildBuilderPackParams {
     pub signature: SignatureValidity,
 }
 
+impl BuildBuilderPackParams {
+    /// Start building a [`BuildBuilderPackParams`]. Every value is set by name, so a
+    /// call site cannot transpose two fields that share a type.
+    #[must_use]
+    pub fn builder() -> BuildBuilderPackParamsBuilder {
+        BuildBuilderPackParamsBuilder::new()
+    }
+}
+
+/// Builder for [`BuildBuilderPackParams`]. Required fields are checked by
+/// [`BuildBuilderPackParamsBuilder::build`] rather than defaulted, so an unset one is a
+/// reported error and never a silently empty value.
+pub struct BuildBuilderPackParamsBuilder {
+    vmlinux: Option<PathBuf>,
+    rootfs: Option<PathBuf>,
+    closure: Option<PathBuf>,
+    target_arch: Option<GuestArch>,
+    channel: Option<String>,
+    builder_identity: Option<String>,
+    build_environment_identity: Option<String>,
+    build_timestamp: Option<DateTime<Utc>>,
+    reproducibility: Option<ReproducibilityStatus>,
+    sbom: Option<SbomReference>,
+    expires_at: Option<DateTime<Utc>>,
+    revocation_channel: Option<String>,
+    mirror_identity: Option<String>,
+    transparency_log: Option<TransparencyLogReference>,
+    signature: Option<SignatureValidity>,
+}
+
+impl BuildBuilderPackParamsBuilder {
+    /// An empty builder: nothing set yet.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            vmlinux: None,
+            rootfs: None,
+            closure: None,
+            target_arch: None,
+            channel: None,
+            builder_identity: None,
+            build_environment_identity: None,
+            build_timestamp: None,
+            reproducibility: None,
+            sbom: None,
+            expires_at: None,
+            revocation_channel: None,
+            mirror_identity: None,
+            transparency_log: None,
+            signature: None,
+        }
+    }
+
+    /// Set `vmlinux`.
+    #[must_use]
+    pub fn vmlinux(mut self, vmlinux: PathBuf) -> Self {
+        self.vmlinux = Some(vmlinux);
+        self
+    }
+
+    /// Set `rootfs`.
+    #[must_use]
+    pub fn rootfs(mut self, rootfs: PathBuf) -> Self {
+        self.rootfs = Some(rootfs);
+        self
+    }
+
+    /// Set `closure`. Takes a value or an `Option`; unset means `None`.
+    #[must_use]
+    pub fn closure(mut self, closure: impl Into<Option<PathBuf>>) -> Self {
+        self.closure = closure.into();
+        self
+    }
+
+    /// Set `target_arch`.
+    #[must_use]
+    pub fn target_arch(mut self, target_arch: GuestArch) -> Self {
+        self.target_arch = Some(target_arch);
+        self
+    }
+
+    /// Set `channel`.
+    #[must_use]
+    pub fn channel(mut self, channel: String) -> Self {
+        self.channel = Some(channel);
+        self
+    }
+
+    /// Set `builder_identity`.
+    #[must_use]
+    pub fn builder_identity(mut self, builder_identity: String) -> Self {
+        self.builder_identity = Some(builder_identity);
+        self
+    }
+
+    /// Set `build_environment_identity`.
+    #[must_use]
+    pub fn build_environment_identity(mut self, build_environment_identity: String) -> Self {
+        self.build_environment_identity = Some(build_environment_identity);
+        self
+    }
+
+    /// Set `build_timestamp`.
+    #[must_use]
+    pub fn build_timestamp(mut self, build_timestamp: DateTime<Utc>) -> Self {
+        self.build_timestamp = Some(build_timestamp);
+        self
+    }
+
+    /// Set `reproducibility`.
+    #[must_use]
+    pub fn reproducibility(mut self, reproducibility: ReproducibilityStatus) -> Self {
+        self.reproducibility = Some(reproducibility);
+        self
+    }
+
+    /// Set `sbom`.
+    #[must_use]
+    pub fn sbom(mut self, sbom: SbomReference) -> Self {
+        self.sbom = Some(sbom);
+        self
+    }
+
+    /// Set `expires_at`.
+    #[must_use]
+    pub fn expires_at(mut self, expires_at: DateTime<Utc>) -> Self {
+        self.expires_at = Some(expires_at);
+        self
+    }
+
+    /// Set `revocation_channel`.
+    #[must_use]
+    pub fn revocation_channel(mut self, revocation_channel: String) -> Self {
+        self.revocation_channel = Some(revocation_channel);
+        self
+    }
+
+    /// Set `mirror_identity`. Takes a value or an `Option`; unset means `None`.
+    #[must_use]
+    pub fn mirror_identity(mut self, mirror_identity: impl Into<Option<String>>) -> Self {
+        self.mirror_identity = mirror_identity.into();
+        self
+    }
+
+    /// Set `transparency_log`. Takes a value or an `Option`; unset means `None`.
+    #[must_use]
+    pub fn transparency_log(
+        mut self,
+        transparency_log: impl Into<Option<TransparencyLogReference>>,
+    ) -> Self {
+        self.transparency_log = transparency_log.into();
+        self
+    }
+
+    /// Set `signature`.
+    #[must_use]
+    pub fn signature(mut self, signature: SignatureValidity) -> Self {
+        self.signature = Some(signature);
+        self
+    }
+
+    /// Finish, or name the first required field left unset.
+    pub fn build(self) -> Result<BuildBuilderPackParams, BuilderError> {
+        Ok(BuildBuilderPackParams {
+            vmlinux: self
+                .vmlinux
+                .ok_or(BuilderError::missing("BuildBuilderPackParams", "vmlinux"))?,
+            rootfs: self
+                .rootfs
+                .ok_or(BuilderError::missing("BuildBuilderPackParams", "rootfs"))?,
+            closure: self.closure,
+            target_arch: self.target_arch.ok_or(BuilderError::missing(
+                "BuildBuilderPackParams",
+                "target_arch",
+            ))?,
+            channel: self
+                .channel
+                .ok_or(BuilderError::missing("BuildBuilderPackParams", "channel"))?,
+            builder_identity: self.builder_identity.ok_or(BuilderError::missing(
+                "BuildBuilderPackParams",
+                "builder_identity",
+            ))?,
+            build_environment_identity: self.build_environment_identity.ok_or(
+                BuilderError::missing("BuildBuilderPackParams", "build_environment_identity"),
+            )?,
+            build_timestamp: self.build_timestamp.ok_or(BuilderError::missing(
+                "BuildBuilderPackParams",
+                "build_timestamp",
+            ))?,
+            reproducibility: self.reproducibility.ok_or(BuilderError::missing(
+                "BuildBuilderPackParams",
+                "reproducibility",
+            ))?,
+            sbom: self
+                .sbom
+                .ok_or(BuilderError::missing("BuildBuilderPackParams", "sbom"))?,
+            expires_at: self.expires_at.ok_or(BuilderError::missing(
+                "BuildBuilderPackParams",
+                "expires_at",
+            ))?,
+            revocation_channel: self.revocation_channel.ok_or(BuilderError::missing(
+                "BuildBuilderPackParams",
+                "revocation_channel",
+            ))?,
+            mirror_identity: self.mirror_identity,
+            transparency_log: self.transparency_log,
+            signature: self
+                .signature
+                .ok_or(BuilderError::missing("BuildBuilderPackParams", "signature"))?,
+        })
+    }
+}
+
+impl Default for BuildBuilderPackParamsBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Inputs to [`build_keyless_runtime_pack`]. Mirrors [`BuildBuilderPackParams`]
 /// but carries a runtime pack's artifacts (`vmlinux` + a verity-sealed workload
 /// `rootfs.ext4` + its dm-verity hash tree + root hash) instead of the builder
@@ -133,6 +353,239 @@ pub struct BuildRuntimePackParams {
     pub transparency_log: Option<TransparencyLogReference>,
     /// Validity window stamped onto the produced signature.
     pub signature: SignatureValidity,
+}
+
+impl BuildRuntimePackParams {
+    /// Start building a [`BuildRuntimePackParams`]. Every value is set by name, so a
+    /// call site cannot transpose two fields that share a type.
+    #[must_use]
+    pub fn builder() -> BuildRuntimePackParamsBuilder {
+        BuildRuntimePackParamsBuilder::new()
+    }
+}
+
+/// Builder for [`BuildRuntimePackParams`]. Required fields are checked by
+/// [`BuildRuntimePackParamsBuilder::build`] rather than defaulted, so an unset one is a
+/// reported error and never a silently empty value.
+pub struct BuildRuntimePackParamsBuilder {
+    vmlinux: Option<PathBuf>,
+    rootfs: Option<PathBuf>,
+    verity: Option<PathBuf>,
+    roothash: Option<PathBuf>,
+    target_arch: Option<GuestArch>,
+    channel: Option<String>,
+    builder_identity: Option<String>,
+    build_environment_identity: Option<String>,
+    build_timestamp: Option<DateTime<Utc>>,
+    reproducibility: Option<ReproducibilityStatus>,
+    sbom: Option<SbomReference>,
+    expires_at: Option<DateTime<Utc>>,
+    revocation_channel: Option<String>,
+    mirror_identity: Option<String>,
+    transparency_log: Option<TransparencyLogReference>,
+    signature: Option<SignatureValidity>,
+}
+
+impl BuildRuntimePackParamsBuilder {
+    /// An empty builder: nothing set yet.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            vmlinux: None,
+            rootfs: None,
+            verity: None,
+            roothash: None,
+            target_arch: None,
+            channel: None,
+            builder_identity: None,
+            build_environment_identity: None,
+            build_timestamp: None,
+            reproducibility: None,
+            sbom: None,
+            expires_at: None,
+            revocation_channel: None,
+            mirror_identity: None,
+            transparency_log: None,
+            signature: None,
+        }
+    }
+
+    /// Set `vmlinux`.
+    #[must_use]
+    pub fn vmlinux(mut self, vmlinux: PathBuf) -> Self {
+        self.vmlinux = Some(vmlinux);
+        self
+    }
+
+    /// Set `rootfs`.
+    #[must_use]
+    pub fn rootfs(mut self, rootfs: PathBuf) -> Self {
+        self.rootfs = Some(rootfs);
+        self
+    }
+
+    /// Set `verity`.
+    #[must_use]
+    pub fn verity(mut self, verity: PathBuf) -> Self {
+        self.verity = Some(verity);
+        self
+    }
+
+    /// Set `roothash`.
+    #[must_use]
+    pub fn roothash(mut self, roothash: PathBuf) -> Self {
+        self.roothash = Some(roothash);
+        self
+    }
+
+    /// Set `target_arch`.
+    #[must_use]
+    pub fn target_arch(mut self, target_arch: GuestArch) -> Self {
+        self.target_arch = Some(target_arch);
+        self
+    }
+
+    /// Set `channel`.
+    #[must_use]
+    pub fn channel(mut self, channel: String) -> Self {
+        self.channel = Some(channel);
+        self
+    }
+
+    /// Set `builder_identity`.
+    #[must_use]
+    pub fn builder_identity(mut self, builder_identity: String) -> Self {
+        self.builder_identity = Some(builder_identity);
+        self
+    }
+
+    /// Set `build_environment_identity`.
+    #[must_use]
+    pub fn build_environment_identity(mut self, build_environment_identity: String) -> Self {
+        self.build_environment_identity = Some(build_environment_identity);
+        self
+    }
+
+    /// Set `build_timestamp`.
+    #[must_use]
+    pub fn build_timestamp(mut self, build_timestamp: DateTime<Utc>) -> Self {
+        self.build_timestamp = Some(build_timestamp);
+        self
+    }
+
+    /// Set `reproducibility`.
+    #[must_use]
+    pub fn reproducibility(mut self, reproducibility: ReproducibilityStatus) -> Self {
+        self.reproducibility = Some(reproducibility);
+        self
+    }
+
+    /// Set `sbom`.
+    #[must_use]
+    pub fn sbom(mut self, sbom: SbomReference) -> Self {
+        self.sbom = Some(sbom);
+        self
+    }
+
+    /// Set `expires_at`.
+    #[must_use]
+    pub fn expires_at(mut self, expires_at: DateTime<Utc>) -> Self {
+        self.expires_at = Some(expires_at);
+        self
+    }
+
+    /// Set `revocation_channel`.
+    #[must_use]
+    pub fn revocation_channel(mut self, revocation_channel: String) -> Self {
+        self.revocation_channel = Some(revocation_channel);
+        self
+    }
+
+    /// Set `mirror_identity`. Takes a value or an `Option`; unset means `None`.
+    #[must_use]
+    pub fn mirror_identity(mut self, mirror_identity: impl Into<Option<String>>) -> Self {
+        self.mirror_identity = mirror_identity.into();
+        self
+    }
+
+    /// Set `transparency_log`. Takes a value or an `Option`; unset means `None`.
+    #[must_use]
+    pub fn transparency_log(
+        mut self,
+        transparency_log: impl Into<Option<TransparencyLogReference>>,
+    ) -> Self {
+        self.transparency_log = transparency_log.into();
+        self
+    }
+
+    /// Set `signature`.
+    #[must_use]
+    pub fn signature(mut self, signature: SignatureValidity) -> Self {
+        self.signature = Some(signature);
+        self
+    }
+
+    /// Finish, or name the first required field left unset.
+    pub fn build(self) -> Result<BuildRuntimePackParams, BuilderError> {
+        Ok(BuildRuntimePackParams {
+            vmlinux: self
+                .vmlinux
+                .ok_or(BuilderError::missing("BuildRuntimePackParams", "vmlinux"))?,
+            rootfs: self
+                .rootfs
+                .ok_or(BuilderError::missing("BuildRuntimePackParams", "rootfs"))?,
+            verity: self
+                .verity
+                .ok_or(BuilderError::missing("BuildRuntimePackParams", "verity"))?,
+            roothash: self
+                .roothash
+                .ok_or(BuilderError::missing("BuildRuntimePackParams", "roothash"))?,
+            target_arch: self.target_arch.ok_or(BuilderError::missing(
+                "BuildRuntimePackParams",
+                "target_arch",
+            ))?,
+            channel: self
+                .channel
+                .ok_or(BuilderError::missing("BuildRuntimePackParams", "channel"))?,
+            builder_identity: self.builder_identity.ok_or(BuilderError::missing(
+                "BuildRuntimePackParams",
+                "builder_identity",
+            ))?,
+            build_environment_identity: self.build_environment_identity.ok_or(
+                BuilderError::missing("BuildRuntimePackParams", "build_environment_identity"),
+            )?,
+            build_timestamp: self.build_timestamp.ok_or(BuilderError::missing(
+                "BuildRuntimePackParams",
+                "build_timestamp",
+            ))?,
+            reproducibility: self.reproducibility.ok_or(BuilderError::missing(
+                "BuildRuntimePackParams",
+                "reproducibility",
+            ))?,
+            sbom: self
+                .sbom
+                .ok_or(BuilderError::missing("BuildRuntimePackParams", "sbom"))?,
+            expires_at: self.expires_at.ok_or(BuilderError::missing(
+                "BuildRuntimePackParams",
+                "expires_at",
+            ))?,
+            revocation_channel: self.revocation_channel.ok_or(BuilderError::missing(
+                "BuildRuntimePackParams",
+                "revocation_channel",
+            ))?,
+            mirror_identity: self.mirror_identity,
+            transparency_log: self.transparency_log,
+            signature: self
+                .signature
+                .ok_or(BuilderError::missing("BuildRuntimePackParams", "signature"))?,
+        })
+    }
+}
+
+impl Default for BuildRuntimePackParamsBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[derive(Debug, Error)]
@@ -905,5 +1358,41 @@ mod tests {
         )
         .expect_err("garbage bundle fails the signature step, not the shape gate");
         assert!(matches!(err, PackVerifyError::KeylessSignatureInvalid(_)));
+    }
+}
+
+#[cfg(test)]
+mod build_builder_pack_params_builder_tests {
+    use super::*;
+
+    /// An empty builder must refuse to finish, naming the first
+    /// required field it is missing — never substituting a default.
+    #[test]
+    fn an_empty_builder_names_the_first_missing_field() {
+        let Err(err) = BuildBuilderPackParams::builder().build() else {
+            panic!("an empty BuildBuilderPackParams builder must not build");
+        };
+        assert_eq!(
+            err,
+            BuilderError::missing("BuildBuilderPackParams", "vmlinux")
+        );
+    }
+}
+
+#[cfg(test)]
+mod build_runtime_pack_params_builder_tests {
+    use super::*;
+
+    /// An empty builder must refuse to finish, naming the first
+    /// required field it is missing — never substituting a default.
+    #[test]
+    fn an_empty_builder_names_the_first_missing_field() {
+        let Err(err) = BuildRuntimePackParams::builder().build() else {
+            panic!("an empty BuildRuntimePackParams builder must not build");
+        };
+        assert_eq!(
+            err,
+            BuilderError::missing("BuildRuntimePackParams", "vmlinux")
+        );
     }
 }

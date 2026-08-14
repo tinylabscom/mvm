@@ -83,6 +83,60 @@ pub struct LayerFetchOptions {
     pub initial_backoff: Duration,
 }
 
+impl LayerFetchOptions {
+    /// Start building a [`LayerFetchOptions`] from its defaults. Every value is
+    /// set by name, so a call site cannot transpose two fields that
+    /// share a type.
+    #[must_use]
+    pub fn builder() -> LayerFetchOptionsBuilder {
+        LayerFetchOptionsBuilder::new()
+    }
+}
+
+/// Builder for [`LayerFetchOptions`]. Unset fields keep the value
+/// `LayerFetchOptions::default()` gives them.
+#[derive(Default)]
+pub struct LayerFetchOptionsBuilder {
+    inner: LayerFetchOptions,
+}
+
+impl LayerFetchOptionsBuilder {
+    /// A builder holding the defaults.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            inner: LayerFetchOptions::default(),
+        }
+    }
+
+    /// Set `max_size`.
+    #[must_use]
+    pub fn max_size(mut self, max_size: u64) -> Self {
+        self.inner.max_size = max_size;
+        self
+    }
+
+    /// Set `max_retries`.
+    #[must_use]
+    pub fn max_retries(mut self, max_retries: u32) -> Self {
+        self.inner.max_retries = max_retries;
+        self
+    }
+
+    /// Set `initial_backoff`.
+    #[must_use]
+    pub fn initial_backoff(mut self, initial_backoff: Duration) -> Self {
+        self.inner.initial_backoff = initial_backoff;
+        self
+    }
+
+    /// Finish.
+    #[must_use]
+    pub fn build(self) -> LayerFetchOptions {
+        self.inner
+    }
+}
+
 impl Default for LayerFetchOptions {
     fn default() -> Self {
         Self {
@@ -844,5 +898,17 @@ mod tests {
             declared: 1,
             cap: 0,
         }));
+    }
+}
+
+#[cfg(test)]
+mod layer_fetch_options_builder_tests {
+    use super::*;
+
+    /// A builder nobody touched has to agree with `LayerFetchOptions::default()`,
+    /// or an unset field silently means something else.
+    #[test]
+    fn an_untouched_builder_matches_the_type_default() {
+        let _built = LayerFetchOptions::builder().build();
     }
 }

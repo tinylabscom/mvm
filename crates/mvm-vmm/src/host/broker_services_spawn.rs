@@ -31,6 +31,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow, bail};
+use mvm_contract::builder::BuilderError;
 
 /// Filename of the per-VM audit-signer UDS under the VM state dir (the broker
 /// connects here; the supervisor owns it).
@@ -62,6 +63,91 @@ pub struct AuditSignerSpawnParams<'a> {
     pub vm_name: &'a str,
     /// Per-VM state dir; holds the audit-signer UDS + PID + secondary-head files.
     pub state_dir: &'a Path,
+}
+
+impl<'a> AuditSignerSpawnParams<'a> {
+    /// Start building a [`AuditSignerSpawnParams`]. Every value is set by name, so a
+    /// call site cannot transpose two fields that share a type.
+    #[must_use]
+    pub fn builder() -> AuditSignerSpawnParamsBuilder<'a> {
+        AuditSignerSpawnParamsBuilder::new()
+    }
+}
+
+/// Builder for [`AuditSignerSpawnParams`]. Required fields are checked by
+/// [`AuditSignerSpawnParamsBuilder::build`] rather than defaulted, so an unset one is a
+/// reported error and never a silently empty value.
+pub struct AuditSignerSpawnParamsBuilder<'a> {
+    workload_id: Option<&'a str>,
+    tenant_id: Option<&'a str>,
+    vm_name: Option<&'a str>,
+    state_dir: Option<&'a Path>,
+}
+
+impl<'a> AuditSignerSpawnParamsBuilder<'a> {
+    /// An empty builder: nothing set yet.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            workload_id: None,
+            tenant_id: None,
+            vm_name: None,
+            state_dir: None,
+        }
+    }
+
+    /// Set `workload_id`.
+    #[must_use]
+    pub fn workload_id(mut self, workload_id: &'a str) -> Self {
+        self.workload_id = Some(workload_id);
+        self
+    }
+
+    /// Set `tenant_id`.
+    #[must_use]
+    pub fn tenant_id(mut self, tenant_id: &'a str) -> Self {
+        self.tenant_id = Some(tenant_id);
+        self
+    }
+
+    /// Set `vm_name`.
+    #[must_use]
+    pub fn vm_name(mut self, vm_name: &'a str) -> Self {
+        self.vm_name = Some(vm_name);
+        self
+    }
+
+    /// Set `state_dir`.
+    #[must_use]
+    pub fn state_dir(mut self, state_dir: &'a Path) -> Self {
+        self.state_dir = Some(state_dir);
+        self
+    }
+
+    /// Finish, or name the first required field left unset.
+    pub fn build(self) -> Result<AuditSignerSpawnParams<'a>, BuilderError> {
+        Ok(AuditSignerSpawnParams {
+            workload_id: self.workload_id.ok_or(BuilderError::missing(
+                "AuditSignerSpawnParams",
+                "workload_id",
+            ))?,
+            tenant_id: self
+                .tenant_id
+                .ok_or(BuilderError::missing("AuditSignerSpawnParams", "tenant_id"))?,
+            vm_name: self
+                .vm_name
+                .ok_or(BuilderError::missing("AuditSignerSpawnParams", "vm_name"))?,
+            state_dir: self
+                .state_dir
+                .ok_or(BuilderError::missing("AuditSignerSpawnParams", "state_dir"))?,
+        })
+    }
+}
+
+impl<'a> Default for AuditSignerSpawnParamsBuilder<'a> {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Handle to a spawned audit-signer: the UDS the broker's `host.audit.v1`
@@ -234,6 +320,116 @@ pub struct BrokerSpawnParams<'a> {
     pub services: &'a [mvm_core::protocol::broker::ServiceId],
 }
 
+impl<'a> BrokerSpawnParams<'a> {
+    /// Start building a [`BrokerSpawnParams`]. Every value is set by name, so a
+    /// call site cannot transpose two fields that share a type.
+    #[must_use]
+    pub fn builder() -> BrokerSpawnParamsBuilder<'a> {
+        BrokerSpawnParamsBuilder::new()
+    }
+}
+
+/// Builder for [`BrokerSpawnParams`]. Required fields are checked by
+/// [`BrokerSpawnParamsBuilder::build`] rather than defaulted, so an unset one is a
+/// reported error and never a silently empty value.
+pub struct BrokerSpawnParamsBuilder<'a> {
+    workload_id: Option<&'a str>,
+    tenant_id: Option<&'a str>,
+    broker_uds_path: Option<&'a Path>,
+    state_dir: Option<&'a Path>,
+    audit_signer_uds_path: Option<&'a Path>,
+    services: Option<&'a [mvm_core::protocol::broker::ServiceId]>,
+}
+
+impl<'a> BrokerSpawnParamsBuilder<'a> {
+    /// An empty builder: nothing set yet.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            workload_id: None,
+            tenant_id: None,
+            broker_uds_path: None,
+            state_dir: None,
+            audit_signer_uds_path: None,
+            services: None,
+        }
+    }
+
+    /// Set `workload_id`.
+    #[must_use]
+    pub fn workload_id(mut self, workload_id: &'a str) -> Self {
+        self.workload_id = Some(workload_id);
+        self
+    }
+
+    /// Set `tenant_id`.
+    #[must_use]
+    pub fn tenant_id(mut self, tenant_id: &'a str) -> Self {
+        self.tenant_id = Some(tenant_id);
+        self
+    }
+
+    /// Set `broker_uds_path`.
+    #[must_use]
+    pub fn broker_uds_path(mut self, broker_uds_path: &'a Path) -> Self {
+        self.broker_uds_path = Some(broker_uds_path);
+        self
+    }
+
+    /// Set `state_dir`.
+    #[must_use]
+    pub fn state_dir(mut self, state_dir: &'a Path) -> Self {
+        self.state_dir = Some(state_dir);
+        self
+    }
+
+    /// Set `audit_signer_uds_path`.
+    #[must_use]
+    pub fn audit_signer_uds_path(mut self, audit_signer_uds_path: &'a Path) -> Self {
+        self.audit_signer_uds_path = Some(audit_signer_uds_path);
+        self
+    }
+
+    /// Set `services`.
+    #[must_use]
+    pub fn services(mut self, services: &'a [mvm_core::protocol::broker::ServiceId]) -> Self {
+        self.services = Some(services);
+        self
+    }
+
+    /// Finish, or name the first required field left unset.
+    pub fn build(self) -> Result<BrokerSpawnParams<'a>, BuilderError> {
+        Ok(BrokerSpawnParams {
+            workload_id: self
+                .workload_id
+                .ok_or(BuilderError::missing("BrokerSpawnParams", "workload_id"))?,
+            tenant_id: self
+                .tenant_id
+                .ok_or(BuilderError::missing("BrokerSpawnParams", "tenant_id"))?,
+            broker_uds_path: self.broker_uds_path.ok_or(BuilderError::missing(
+                "BrokerSpawnParams",
+                "broker_uds_path",
+            ))?,
+            state_dir: self
+                .state_dir
+                .ok_or(BuilderError::missing("BrokerSpawnParams", "state_dir"))?,
+            audit_signer_uds_path: self.audit_signer_uds_path.ok_or(BuilderError::missing(
+                "BrokerSpawnParams",
+                "audit_signer_uds_path",
+            ))?,
+            services: self
+                .services
+                .ok_or(BuilderError::missing("BrokerSpawnParams", "services"))?,
+        })
+    }
+}
+
+impl<'a> Default for BrokerSpawnParamsBuilder<'a> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Handle to a spawned broker: the per-VM `BROKER_PORT` UDS the VMM proxies the
 /// guest's `connect_host_vsock(BROKER_PORT)` to.
 #[derive(Debug)]
@@ -382,6 +578,117 @@ pub struct BrokerServicesSpawnParams<'a> {
     pub broker_listen_socket: &'a Path,
     /// Exact host-service bindings from the admitted execution plan.
     pub services: &'a [mvm_core::protocol::broker::ServiceId],
+}
+
+impl<'a> BrokerServicesSpawnParams<'a> {
+    /// Start building a [`BrokerServicesSpawnParams`]. Every value is set by name, so a
+    /// call site cannot transpose two fields that share a type.
+    #[must_use]
+    pub fn builder() -> BrokerServicesSpawnParamsBuilder<'a> {
+        BrokerServicesSpawnParamsBuilder::new()
+    }
+}
+
+/// Builder for [`BrokerServicesSpawnParams`]. Required fields are checked by
+/// [`BrokerServicesSpawnParamsBuilder::build`] rather than defaulted, so an unset one is a
+/// reported error and never a silently empty value.
+pub struct BrokerServicesSpawnParamsBuilder<'a> {
+    workload_id: Option<&'a str>,
+    tenant_id: Option<&'a str>,
+    vm_name: Option<&'a str>,
+    state_dir: Option<&'a Path>,
+    broker_listen_socket: Option<&'a Path>,
+    services: Option<&'a [mvm_core::protocol::broker::ServiceId]>,
+}
+
+impl<'a> BrokerServicesSpawnParamsBuilder<'a> {
+    /// An empty builder: nothing set yet.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            workload_id: None,
+            tenant_id: None,
+            vm_name: None,
+            state_dir: None,
+            broker_listen_socket: None,
+            services: None,
+        }
+    }
+
+    /// Set `workload_id`.
+    #[must_use]
+    pub fn workload_id(mut self, workload_id: &'a str) -> Self {
+        self.workload_id = Some(workload_id);
+        self
+    }
+
+    /// Set `tenant_id`. Takes a value or an `Option`; unset means `None`.
+    #[must_use]
+    pub fn tenant_id(mut self, tenant_id: impl Into<Option<&'a str>>) -> Self {
+        self.tenant_id = tenant_id.into();
+        self
+    }
+
+    /// Set `vm_name`.
+    #[must_use]
+    pub fn vm_name(mut self, vm_name: &'a str) -> Self {
+        self.vm_name = Some(vm_name);
+        self
+    }
+
+    /// Set `state_dir`.
+    #[must_use]
+    pub fn state_dir(mut self, state_dir: &'a Path) -> Self {
+        self.state_dir = Some(state_dir);
+        self
+    }
+
+    /// Set `broker_listen_socket`.
+    #[must_use]
+    pub fn broker_listen_socket(mut self, broker_listen_socket: &'a Path) -> Self {
+        self.broker_listen_socket = Some(broker_listen_socket);
+        self
+    }
+
+    /// Set `services`.
+    #[must_use]
+    pub fn services(mut self, services: &'a [mvm_core::protocol::broker::ServiceId]) -> Self {
+        self.services = Some(services);
+        self
+    }
+
+    /// Finish, or name the first required field left unset.
+    pub fn build(self) -> Result<BrokerServicesSpawnParams<'a>, BuilderError> {
+        Ok(BrokerServicesSpawnParams {
+            workload_id: self.workload_id.ok_or(BuilderError::missing(
+                "BrokerServicesSpawnParams",
+                "workload_id",
+            ))?,
+            tenant_id: self.tenant_id,
+            vm_name: self.vm_name.ok_or(BuilderError::missing(
+                "BrokerServicesSpawnParams",
+                "vm_name",
+            ))?,
+            state_dir: self.state_dir.ok_or(BuilderError::missing(
+                "BrokerServicesSpawnParams",
+                "state_dir",
+            ))?,
+            broker_listen_socket: self.broker_listen_socket.ok_or(BuilderError::missing(
+                "BrokerServicesSpawnParams",
+                "broker_listen_socket",
+            ))?,
+            services: self.services.ok_or(BuilderError::missing(
+                "BrokerServicesSpawnParams",
+                "services",
+            ))?,
+        })
+    }
+}
+
+impl<'a> Default for BrokerServicesSpawnParamsBuilder<'a> {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Spawn the per-VM broker services (audit-signer **then** broker) when the VM
@@ -757,5 +1064,59 @@ mod tests {
         guard.defuse();
         reap_broker_services(&state_dir);
         std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
+#[cfg(test)]
+mod broker_spawn_params_builder_tests {
+    use super::*;
+
+    /// An empty builder must refuse to finish, naming the first
+    /// required field it is missing — never substituting a default.
+    #[test]
+    fn an_empty_builder_names_the_first_missing_field() {
+        let Err(err) = BrokerSpawnParams::builder().build() else {
+            panic!("an empty BrokerSpawnParams builder must not build");
+        };
+        assert_eq!(
+            err,
+            BuilderError::missing("BrokerSpawnParams", "workload_id")
+        );
+    }
+}
+
+#[cfg(test)]
+mod broker_services_spawn_params_builder_tests {
+    use super::*;
+
+    /// An empty builder must refuse to finish, naming the first
+    /// required field it is missing — never substituting a default.
+    #[test]
+    fn an_empty_builder_names_the_first_missing_field() {
+        let Err(err) = BrokerServicesSpawnParams::builder().build() else {
+            panic!("an empty BrokerServicesSpawnParams builder must not build");
+        };
+        assert_eq!(
+            err,
+            BuilderError::missing("BrokerServicesSpawnParams", "workload_id")
+        );
+    }
+}
+
+#[cfg(test)]
+mod audit_signer_spawn_params_builder_tests {
+    use super::*;
+
+    /// An empty builder must refuse to finish, naming the first
+    /// required field it is missing — never substituting a default.
+    #[test]
+    fn an_empty_builder_names_the_first_missing_field() {
+        let Err(err) = AuditSignerSpawnParams::builder().build() else {
+            panic!("an empty AuditSignerSpawnParams builder must not build");
+        };
+        assert_eq!(
+            err,
+            BuilderError::missing("AuditSignerSpawnParams", "workload_id")
+        );
     }
 }
