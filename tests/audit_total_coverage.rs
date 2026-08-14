@@ -479,6 +479,8 @@ const AUDIT_POSTURE: &[(&str, AuditPosture)] = &[
     // and `init`.
     ("bootstrap", AuditPosture::InteractiveOrControl),
     ("doctor", AuditPosture::ReadOnly),
+    // Resolves and validates the Studio install; spawns nothing today.
+    ("dashboard", AuditPosture::ReadOnly),
     // Deploy mutates the local sealed-artifact store and is wrapped by the
     // top-level cmd.* audit envelope even when no remote is configured.
     ("deploy", AuditPosture::Emits("cmd.deploy")),

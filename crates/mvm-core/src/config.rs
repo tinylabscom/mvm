@@ -217,6 +217,17 @@ pub fn mvm_state_dir() -> String {
     format!("{}/state", mvm_home())
 }
 
+/// Managed-binary directory: `<mvm_home>/bin`.
+///
+/// The second and last place `mvmctl dashboard` will look for the Studio
+/// server artifact, after a sibling beside `mvmctl` itself. Deliberately not
+/// on `PATH` and deliberately not user-supplied: a launcher that resolves an
+/// executable by name through the environment inherits whatever the
+/// environment says, which is the shape this directory exists to avoid.
+pub fn mvm_bin_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from(mvm_home()).join("bin")
+}
+
 /// Share directory for templates, network definitions, and registries:
 /// `<mvm_home>/share`.
 pub fn mvm_share_dir() -> String {
