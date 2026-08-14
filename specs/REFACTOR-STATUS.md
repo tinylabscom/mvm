@@ -167,6 +167,10 @@ for detailed scope and acceptance criteria.
         the 461-test `xtask --features man` CI lane, and 172 BDD scenarios pass;
         KVM-backed ARM64 cold bootstrap, kernel publication, persistent Stage 0
         reuse, and two fully warm Alpine runs complete without a second Stage 0
+  - [x] Persistent Stage 0 ext4 reuse requires clean filesystem state; cold
+        repair and warm reuse pass live ARM64 builder runs without ext4 errors
+  - [~] Workspace tests expose unrelated non-deterministic `mvm-hostd` failures;
+        Linux all-target Clippy remains for CI or a supported builder entry point
 
 - [x] Plan 316 — website and docs redesign (agent design review completed and maintainer sign-off received; merged via #2438)
       (`specs/plans/316-website-redesign.md`)

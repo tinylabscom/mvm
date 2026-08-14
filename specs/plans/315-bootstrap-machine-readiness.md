@@ -15,7 +15,9 @@ byte-marker probe falsely rejected the valid KALLSYMS-free ARM64 kernel.
 machine path. It prepares host tooling, the builder VM, and the verified workload kernel.
 An interrupted producer never replaces a usable cache entry or leaves a partial
 entry that can be served, and the next retry explains that its persistent Nix
-store remains reusable.
+store remains reusable. Stage 0 reuses that store only while its ext4
+superblock reports a clean unmount, and it flushes, checks, and unmounts the
+store before publishing guest success.
 
 ## Work
 
@@ -49,9 +51,18 @@ store remains reusable.
 - [x] Follow only bounded, HTTPS OCI blob redirects to the exact trusted Docker
       CDN origins, stripping registry authorization at the origin boundary and
       refusing redirects for manifests.
+- [x] Prevent kernel lazy inode-table initialization from racing allocations in
+      the in-process ext4 image, and clear prior contents before a recovery
+      reformat advertises zeroed inode tables.
+- [x] Require both the external seed marker and a clean ext4 superblock before
+      reusing the persistent store; flush, reject recorded ext4 errors, and
+      unmount the store before Stage 0 emits its success marker.
 - [x] Cover bootstrap ordering/failure, verified resolution, incompatible-cache
       eviction, KALLSYMS-free acceptance, config rejection, atomic publication,
-      interrupted-staging cleanup, buffered symlink copy, and Ctrl-C messaging.
+      interrupted-staging cleanup, buffered symlink copy, Ctrl-C messaging,
+      marked-store corruption recovery, clean-store preservation, group
+      descriptor initialization, and the guest error-count gate. Prove cold
+      recovery and warm reuse with live ARM64 Stage 0 builds.
 - [x] Close repository-wide verification. Formatting, focused tests, `cargo
       check --workspace`, host `cargo clippy --workspace --all-targets -- -D
       warnings`, the complete serialized workspace suite including doctests,
@@ -60,6 +71,15 @@ store remains reusable.
       bootstrap, reused the persistent Stage 0 Nix store, rebuilt and published
       the workload kernel with dm-verity plus 8250 console support, and then ran
       Alpine twice from the fully warm cache without launching Stage 0.
+- [ ] Close repository-wide verification exceptions. Formatting, focused tests,
+      `cargo check --workspace`, host `cargo clippy --workspace --all-targets --
+      -D warnings`, and all 172 BDD scenarios pass. The full workspace test run
+      passes the changed crates but remains red in untouched `mvm-hostd`
+      shared-state/timing tests; isolated reruns produce a different telemetry
+      failure and a hanging UDS test. The Linux all-target Clippy rerun remains
+      for CI or a supported builder-VM execution entry point; the shipped
+      builder is headless and this macOS session must not run Linux tooling
+      outside it.
 
 ## Security properties
 
