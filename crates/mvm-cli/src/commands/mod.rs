@@ -1,5 +1,7 @@
 mod bootstrap;
 mod build;
+#[cfg(feature = "builder-vm")]
+mod builder_shell_job;
 mod bundle;
 pub mod catalog;
 mod cmd_audit;
@@ -165,6 +167,10 @@ pub(in crate::commands) enum Commands {
     /// Internal: keep a persistent builder's egress endpoint alive.
     #[command(name = "__builder-egress-supervisor", hide = true)]
     BuilderEgressSupervisor(bootstrap::BuilderEgressSupervisorArgs),
+    /// Internal: run a shell script inside the Linux builder VM.
+    #[command(name = "__builder-shell-job", hide = true)]
+    #[cfg(feature = "builder-vm")]
+    BuilderShellJob(builder_shell_job::Args),
     /// Environment / install lifecycle (bootstrap, update, sign, …)
     #[command(hide = true)]
     Env(env::group::Args),

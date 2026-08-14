@@ -37,16 +37,18 @@ host response can overrun the guest receive window.
 - [x] Run `cargo test --workspace` and `cargo check --workspace` on the macOS
       host.
 - [x] Run workspace all-target Clippy and the Linux-gated `mvm-vmm` tests —
-      the CI `test-linux` and `lint-core` lanes passed on PR #2324; a local
-      x86_64 Linux cross-build (`cargo zigbuild --target
-      x86_64-unknown-linux-gnu -p mvm-vmm --lib --all-features`) passes on
-      current `main`.
+      the CI `test-linux` and `lint-core` lanes passed on PR #2324; local
+      x86_64 and aarch64 Linux cross-builds (`cargo zigbuild --target
+      x86_64-unknown-linux-gnu -p mvm-vmm --lib --all-features` and `--target
+      aarch64-unknown-linux-gnu`) pass on current `main`. Local Linux-native
+      `mvm-vmm` tests and crate-level Clippy inside the builder VM are
+      tracked separately in Plan 316.
 - [x] Record the repair in `specs/SPRINT.md` and
       `specs/REFACTOR-STATUS.md`.
 
 ## Verification evidence
 
-- `cargo test -p mvm-vmm --quiet`: 446 passed.
+- `cargo test -p mvm-vmm --quiet`: 503 passed.
 - The focused credit group covers counter wrap, table bound,
   connection-wide idle eviction, teardown, first-window stop/resume, and the
   deterministic 32 MiB byte-for-byte relay. A zero-wait clock witness advances
@@ -57,6 +59,8 @@ host response can overrun the guest receive window.
 - `cargo check --workspace`: passed.
 - `cargo clippy --workspace --all-targets -- -D warnings` on macOS: passed.
 - `cargo zigbuild --target x86_64-unknown-linux-gnu -p mvm-vmm --lib
+  --all-features` with the pinned Rust 1.96 toolchain: passed.
+- `cargo zigbuild --target aarch64-unknown-linux-gnu -p mvm-vmm --lib
   --all-features` with the pinned Rust 1.96 toolchain: passed.
 - `cargo test --workspace -- --test-threads=1`: passed, including all doctests.
   The serial run passed both `mvm-hostd` isolation tests that had failed in
@@ -69,7 +73,14 @@ host response can overrun the guest receive window.
   plan by `mvm-sdk`'s `SubprocessBackend` missing the all-features
   `backend_capabilities` trait method. The macOS 26 execution tier has no
   interactive project builder-VM command path, so Linux-native tests and
-  all-target Clippy remain open for CI or a builder-enabled session.
+  all-target Clippy remain open for CI or a builder-enabled session. The
+  builder VM image also does not bake a Rust toolchain or the Linux system
+  libraries (e.g. libcap-ng, libkrun headers) that the workspace's
+  `--all-features` clippy/test binaries need, so a local builder-VM run of
+  those gates would first require either a cargo-capable dev image/flake or
+  an exposed `BuilderShellJob` runner that can `nix shell` the required
+  toolchain and libraries into the persistent Nix store. That local-gates
+  work is now tracked in Plan 316.
 
 ## Non-goals
 

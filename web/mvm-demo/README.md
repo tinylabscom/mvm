@@ -1,50 +1,44 @@
-# `mvm-demo-web`
+# Browser wasm sandbox demo
 
-Browser-side wasm sandbox demo. Mirrors `web/audit-verify/`: it is excluded
-from the main workspace so `wasm-bindgen` and the `wasm32` target never enter
-`cargo build --workspace`, and it is built with `wasm-pack`.
+A live, claim-free governance demo that runs in the visitor's browser. It is
+built from the same `mvm-contract` code the host uses for:
+
+- egress policy decisions (`mvm-contract::policy::projection`),
+- placeholder substitution / bind-checks (`mvm-contract::substitution`),
+- audit-entry construction and chain signing (`mvm-contract::verify`).
+
+This crate is deliberately **excluded from the root Cargo workspace** (see the
+root `Cargo.toml`) so `wasm-bindgen` and the `wasm32-unknown-unknown` target
+never enter `cargo build --workspace` or the main workspace CI lane.
 
 ## Build
 
 ```bash
-wasm-pack build --target web --out-dir pkg
+./build.sh
 ```
 
-This requires the `wasm32-unknown-unknown` target. In the project builder VM
-it is installed by the wasm CI lane; on a bare macOS host you may need to add
-it to your toolchain.
+The script:
+
+1. Runs `wasm-pack build --target web`.
+2. Runs `wasm-opt -Oz` on the wasm bundle.
+3. Enforces a gzipped size budget of **300 KiB**.
+4. Builds the three curated `wasm32-wasip1` fixtures.
+5. Stages everything into `public/public/demo/` so Astro serves it at `/demo`.
 
 ## Run locally
 
-After `wasm-pack build`, serve this directory with any static file server:
+After `./build.sh`, serve the `public/public/demo/` directory (for example with
+`python3 -m http.server 8000 --directory public/public/demo`) and open
+`/demo/`.
+
+## Tests
 
 ```bash
-python3 -m http.server 8080
-# open http://localhost:8080
+cargo test
 ```
 
-## What it demonstrates
+The tests assert the honesty guardrails required by Plan 320:
 
-The page runs three curated scenarios against the same `mvm-contract`
-governance code the host uses:
-
-- **allowed** — destination is in the allow-list and the secret is bound to
-  it; the destination receives the real credential while the module held only
-  the opaque placeholder.
-- **denied** — default-deny; the destination is never contacted.
-- **unbound** — host is admitted but the secret is not bound to it; the
-  request is forwarded with the placeholder dropped.
-
-The audit-chain pane verifies (or tampers with) a pre-signed fixture chain
-using `mvm_contract::verify`. Real chain signing in the browser is plan 320
-E3.
-
-## Honesty guardrails
-
-The page states plainly:
-
-- The browser's own wasm engine runs the code; the host `WasmBackend` is not
-  exercised.
-- This is a governance/portability demo, not an isolation boundary.
-- The claims-bearing way to run a wasm workload is plan 321's engine-in-guest
-  path.
+- the real secret value never appears in the compiled fixture modules,
+- the three scenarios produce the same outcomes the host witness asserts,
+- the capability notice and verifying key are stable Rust-owned values.

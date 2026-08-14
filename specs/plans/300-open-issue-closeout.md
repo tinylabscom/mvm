@@ -90,7 +90,7 @@ mentions it.
 | #2256 | Open; Plan 306 not started | Governance phase |
 | #2280 | Partial measurement substrate; native host matrix remains | Performance phase |
 | #2281 | Partial ext4 baseline; candidate comparison/decision remains | Performance phase |
-| #2292 | Host-side overhead mostly fixed; percentile gate remains | Performance phase |
+| #2292 | Code landed (driver_boot split, no sudo bash launch); ColdLaunchBench pending | Performance phase |
 | #2299 | Open; cross-backend phase accounting not comparable | Performance phase |
 | #2307 | Known filter fixed; fail-open configuration gate remains | CI phase |
 | #2318 | Open; receipt durability and head recovery decision remains | Audit/performance phase |

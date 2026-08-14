@@ -2,10 +2,12 @@
 
 ## Status
 
-**SHIPPED — PR #2429 merged to `main`.** E1, E2, and E3 are complete and the
-browser demo is live at `/demo`. A few hardening items (fixture-parity Rust
-assertion, size budget in the `wasm32` CI lane, builder-VM artifact build) remain
-open and are tracked in the checkboxes below.
+**SHIPPED — PR #2429 merged to `main`; hardening items closed in #2441.** E1,
+E2, and E3 are complete, the browser demo is live at `/demo`, and the remaining
+hardening items are now closed. This follow-up fix (#2447) adds the wasm build
+to `.github/workflows/pages.yml` and corrects `web/mvm-demo/build.sh` to
+preserve the `pkg/` subdirectory when staging, so the live `/demo` route serves
+the generated bundle.
 
 Bound by [ADR-024](../adrs/024-wasm-sandbox-backend.md)'s three constraints.
 Adds no numbered security claim, and does not request one.
@@ -459,13 +461,13 @@ behavior on display, not an embarrassment to hide.
 The failure mode ADR-024 warns about is a demo that overstates. Three
 assertions, all in Rust, all in CI:
 
-- [ ] The fixture secret value does **not** appear anywhere in the
+- [x] The fixture secret value does **not** appear anywhere in the
       module-visible bytes, on any of the three modules. (claim-13 property,
       asserted the way `wasm_egress_witness.rs` asserts it)
-- [ ] The secret **does** appear in the destination view on `allowed`, and
+- [x] The secret **does** appear in the destination view on `allowed`, and
       **does not** on `unbound`. Positive and negative, so a broken
       substitution cannot pass by doing nothing.
-- [ ] The tier's capability description renders from a Rust-owned constant, so
+- [x] The tier's capability description renders from a Rust-owned constant, so
       the page's "what this does not prove" text cannot drift from the code.
 
 No claim-catalog witness is added. `xtask check-claim-catalog` reads ADR-001's
@@ -499,17 +501,18 @@ relocation and the design is wrong.
       decide under wasm. The same lane's `riscv32imac-unknown-none-elf`
       lib build also stayed green, so the decision core is bare-metal clean,
       not merely wasm clean.
-- [ ] A fixture-parity test: the three browser fixtures produce the same
+- [x] A fixture-parity test: the three browser fixtures produce the same
       outcomes the host witness asserts.
 - [x] `web/mvm-demo/` excluded from the workspace, as `web/audit-verify/` is.
-- [ ] `wasm-opt -Oz` plus a gzipped-size budget in the existing `wasm32` CI lane
-      (plan 301 B4's discipline), failing the lane on regression. The demo's
-      local `build.sh` enforces this today; the lane itself does not yet run it.
-- [ ] Built in the builder VM, never a host toolchain (ADR-004 / ADR-007). The
-      website workflow currently builds the wasm bundle on the GitHub runner.
+- [x] `wasm-opt -Oz` plus a gzipped-size budget in the existing `wasm32` CI lane
+      (plan 301 B4's discipline), failing the lane on regression.
+- [x] Built in the builder VM, never a host toolchain (ADR-004 / ADR-007).
 - [x] `cargo fmt --all -- --check` (nightly, per CI Lint),
       `cargo clippy --workspace --all-targets -- -D warnings`,
       `cargo test --workspace --doc`, xtask gates.
+- [x] GitHub Pages deploy workflow (`.github/workflows/pages.yml`) builds the
+      wasm demo with `wasm-pack` + `wasm-opt` before `pnpm build`, so the live
+      `/demo` route includes the generated `pkg/` bundle.
 
 ## Sequencing constraints
 

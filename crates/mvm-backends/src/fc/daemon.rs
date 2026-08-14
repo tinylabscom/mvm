@@ -4,7 +4,7 @@
 use anyhow::{Context, Result};
 use tracing::instrument;
 
-use mvm_vmm::host::shell::{run_in_vm_stdout, run_in_vm_visible, shell_quote};
+use mvm_vmm::host::shell::{run_in_vm_visible, shell_quote};
 use mvm_vmm::host::ui;
 
 use super::{firecracker_vsock_uds_path, resolve_running_vm_dir};
@@ -120,6 +120,13 @@ fn start_vm_firecracker_inner(
 /// launch line. An unwrapped Firecracker boots identically and is simply not
 /// bounded, which is precisely the failure that needs a test rather than an
 /// inspection.
+///
+/// Privilege justification: Firecracker is launched through `sudo` because, on
+/// the reference builder-VM host, the invoking user does not have direct access
+/// to `/dev/kvm` and the TAP/vsock network plumbing it configures. The launch
+/// no longer uses an intermediate `bash -c`: `sudo` execs `setsid` directly,
+/// which then execs Firecracker, so the only extra process is the one required
+/// for elevation.
 fn firecracker_launch_script(
     abs_dir: &str,
     abs_socket: &str,
@@ -128,22 +135,28 @@ fn firecracker_launch_script(
 ) -> String {
     let vsock = firecracker_vsock_uds_path(abs_dir);
     let vsock_cleanup = if clean_vsock {
-        format!("rm -f {vsock} {abs_dir}/v.sock")
+        format!(
+            "rm -f {} {}",
+            shell_quote(&vsock),
+            shell_quote(&format!("{abs_dir}/v.sock"))
+        )
     } else {
         String::new()
     };
+    let q_dir = shell_quote(abs_dir);
+    let q_socket = shell_quote(abs_socket);
     format!(
         r#"
-        mkdir -p {dir}
-        sudo rm -f {socket}
+        mkdir -p {q_dir}
+        sudo rm -f {q_socket}
         {vsock_cleanup}
-        touch {dir}/console.log {dir}/firecracker.log
-        {cpu_scope}sudo bash -c 'nohup setsid firecracker --api-sock {socket} --enable-pci \
-            </dev/null >{dir}/console.log 2>{dir}/firecracker.log &
-            echo $! > {dir}/fc.pid'
+        touch {q_dir}/console.log {q_dir}/firecracker.log
+        {cpu_scope}sudo setsid nohup firecracker --api-sock {q_socket} --enable-pci \
+            </dev/null >{q_dir}/console.log 2>{q_dir}/firecracker.log &
+        echo $! > {q_dir}/fc.pid
         "#,
-        socket = abs_socket,
-        dir = abs_dir,
+        q_dir = q_dir,
+        q_socket = q_socket,
         vsock_cleanup = vsock_cleanup,
         cpu_scope = cpu_scope,
     )
@@ -236,6 +249,12 @@ fn fc_api_call(method: &str, socket: &str, path: &str, data: Option<&str>) -> Re
 /// be a `sudo curl`. Transferring ownership once, at mode 0600, lets the rest
 /// of the boot speak to the socket in-process.
 ///
+/// Privilege justification: `chown` is privileged and must be done once, by the
+/// same `sudo` session that launched Firecracker. After this hand-off the rest
+/// of the boot path (including the vsock mux socket, see
+/// [`secure_vsock_socket_for_caller`]) talks to Firecracker without any further
+/// elevation.
+///
 /// This is the same trade [`secure_vsock_socket_for_caller`] already makes for
 /// the vsock multiplexer, and the principal is unchanged: the user running
 /// mvmctl already drives this VM, via `sudo`, on every call. What changes is
@@ -251,12 +270,13 @@ pub fn adopt_api_socket(socket: &str) -> Result<()> {
 
 /// Read the pid recorded by [`start_vm_firecracker`].
 pub fn read_firecracker_pid(abs_dir: &str) -> Result<u32> {
-    let q_dir = shell_quote(abs_dir);
-    let output = run_in_vm_stdout(&format!("cat {q_dir}/fc.pid"))?;
+    let path = std::path::Path::new(abs_dir).join("fc.pid");
+    let output =
+        std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
     output
         .trim()
         .parse::<u32>()
-        .with_context(|| format!("parse Firecracker pid from {abs_dir}/fc.pid"))
+        .with_context(|| format!("parse Firecracker pid from {}", path.display()))
 }
 
 #[cfg(test)]
@@ -369,7 +389,9 @@ mod tests {
             "the scope must precede the launch: {script}"
         );
         let scope_at = script.find("systemd-run").expect("prefix present");
-        let launch_at = script.find("sudo bash -c").expect("launch present");
+        let launch_at = script
+            .find("sudo setsid nohup firecracker")
+            .expect("launch present");
         assert!(scope_at < launch_at, "{script}");
     }
 
@@ -377,9 +399,10 @@ mod tests {
     fn an_ungranted_launch_line_carries_no_scope() {
         let script = firecracker_launch_script("/tmp/vm", "/tmp/vm/fc.socket", true, "");
         assert!(!script.contains("systemd-run"), "{script}");
+        assert!(script.contains("sudo setsid nohup firecracker"), "{script}");
         assert!(
-            script.contains("sudo bash -c 'nohup setsid firecracker"),
-            "{script}"
+            !script.contains("bash -c"),
+            "launch must not spawn an intermediate bash: {script}"
         );
     }
 

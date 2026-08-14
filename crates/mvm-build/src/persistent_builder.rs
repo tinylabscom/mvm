@@ -1004,7 +1004,17 @@ pub fn stage_flake_dispatch_job(
              exit 4\n\
          fi\n\
          cp -L \"$STORE_PATH/vmlinux\" \"$OUT_DIR/vmlinux\"\n\
-         cp -L \"$STORE_PATH/rootfs.ext4\" \"$OUT_DIR/rootfs.ext4\"\n\
+         BUILD_HOOK_ROOTFS=\"/tmp/mvm-rootfs-before-build.ext4\"\n\
+         cp -L \"$STORE_PATH/rootfs.ext4\" \"$BUILD_HOOK_ROOTFS\"\n\
+         echo 'mvm-host-vm-init: running before_build hook' >&2\n\
+         if ! /sbin/mvm-host-vm-init run-before-build-hook \"$BUILD_HOOK_ROOTFS\"; then\n\
+             hook_rc=$?\n\
+             echo \"mvm-host-vm-init: before_build hook failed (exit $hook_rc)\" >&2\n\
+             rm -f \"$BUILD_HOOK_ROOTFS\"\n\
+             exit $hook_rc\n\
+         fi\n\
+         cp -L \"$BUILD_HOOK_ROOTFS\" \"$OUT_DIR/rootfs.ext4\"\n\
+         rm -f \"$BUILD_HOOK_ROOTFS\"\n\
          if [ -f \"$STORE_PATH/manifest.json\" ]; then\n\
              cp -L \"$STORE_PATH/manifest.json\" \"$OUT_DIR/manifest.json\"\n\
          fi\n",
@@ -1603,6 +1613,38 @@ mod tests {
             artifact_dir.is_dir(),
             "expected pre-staged artifact dir at {}",
             artifact_dir.display()
+        );
+    }
+
+    #[test]
+    fn stage_flake_dispatch_job_runs_before_build_hook_before_copying_rootfs() {
+        let scratch = tempfile::tempdir().expect("tempdir");
+        let job_dir = scratch.path().to_path_buf();
+        let job_id =
+            stage_flake_dispatch_job(&job_dir, "path:/work", "packages.aarch64-linux.default")
+                .expect("stage");
+        let body = std::fs::read_to_string(job_dir.join(&job_id).join("cmd.sh")).expect("read");
+        assert!(
+            body.contains("/sbin/mvm-host-vm-init run-before-build-hook"),
+            "missing before_build hook runner invocation in:\n{body}"
+        );
+        assert!(
+            body.contains("/tmp/mvm-rootfs-before-build.ext4"),
+            "missing writable temp rootfs path in:\n{body}"
+        );
+        let hook_idx = body
+            .find("/sbin/mvm-host-vm-init run-before-build-hook")
+            .expect("hook runner present");
+        let out_copy_idx = body
+            .find("cp -L \"$BUILD_HOOK_ROOTFS\" \"$OUT_DIR/rootfs.ext4\"")
+            .expect("final rootfs copy present");
+        assert!(
+            hook_idx < out_copy_idx,
+            "before_build hook must run before rootfs.ext4 is copied to OUT_DIR"
+        );
+        assert!(
+            body.contains("mvm-host-vm-init: before_build hook failed"),
+            "missing hook failure message in:\n{body}"
         );
     }
 
