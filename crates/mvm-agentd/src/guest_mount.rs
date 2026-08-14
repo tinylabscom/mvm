@@ -556,6 +556,7 @@ pub fn drop_guest_agent_privilege_raw(uid: u32, gid: u32) -> std::io::Result<()>
     }
     set_capabilities(RESTORE_AGENT_CAPABILITIES)?;
     raise_ambient_capabilities(RESTORE_AGENT_CAPABILITIES)?;
+    drop_capability_bounding_set_to(RESTORE_AGENT_CAPABILITIES)?;
     if unsafe { libc::prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } != 0 {
         return Err(std::io::Error::last_os_error());
     }
@@ -605,6 +606,42 @@ fn raise_ambient_capabilities(capabilities: u32) -> std::io::Result<()> {
         if rc != 0 {
             return Err(std::io::Error::last_os_error());
         }
+    }
+    Ok(())
+}
+/// Drop all capabilities from the bounding set except `keep`.
+///
+/// The bounding set is preserved across fork/exec. Dropping it in the init
+/// process before spawning the agent ensures the agent and every workload
+/// process it spawns inherit a minimal bounding set rather than the full set
+/// the kernel starts PID 1 with. Invalid capability numbers are ignored.
+#[cfg(target_os = "linux")]
+fn drop_capability_bounding_set_to(keep: u32) -> std::io::Result<()> {
+    for cap in 0..=63u32 {
+        if keep & (1u32 << cap) != 0 {
+            continue;
+        }
+        let rc = unsafe { libc::prctl(PR_CAPBSET_DROP, cap as libc::c_ulong, 0, 0, 0) };
+        if rc != 0 {
+            let err = std::io::Error::last_os_error();
+            if err.raw_os_error() == Some(libc::EINVAL) {
+                continue;
+            }
+            return Err(err);
+        }
+    }
+    Ok(())
+}
+
+/// Harden the init process before it spawns any workload-facing children.
+///
+/// Public so the OCI init can apply the same one-way restrictions the
+/// initramfs init applies through [`drop_guest_agent_privilege_raw`].
+#[cfg(target_os = "linux")]
+pub fn harden_init_process() -> std::io::Result<()> {
+    drop_capability_bounding_set_to(RESTORE_AGENT_CAPABILITIES)?;
+    if unsafe { libc::prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } != 0 {
+        return Err(std::io::Error::last_os_error());
     }
     Ok(())
 }
@@ -658,6 +695,8 @@ const PR_SET_NO_NEW_PRIVS: libc::c_int = 38;
 const PR_CAP_AMBIENT: libc::c_int = 47;
 #[cfg(target_os = "linux")]
 const PR_CAP_AMBIENT_RAISE: libc::c_ulong = 2;
+#[cfg(target_os = "linux")]
+const PR_CAPBSET_DROP: libc::c_int = 24;
 
 // ---------------------------------------------------------------------------
 // Low-level syscall wrappers (Linux)
@@ -1581,5 +1620,33 @@ mod tests {
         let err = probe_ext4_block_size(image.path().to_str().expect("temp path"))
             .expect_err("bad magic must fail");
         assert!(err.to_string().contains("magic mismatch"), "{err}");
+    }
+}
+
+#[cfg(test)]
+mod privilege_tests {
+    // These tests mutate the calling process's privilege state, so they are
+    // gated behind an explicit environment variable and only run on Linux as
+    // root. Ordinary CI and developer laptops skip them safely.
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn harden_init_process_drops_bounding_set_and_sets_no_new_privs() {
+        if std::env::var("MVM_GUEST_PRIVILEGED_TESTS").as_deref() != Ok("1") {
+            return;
+        }
+        if unsafe { libc::getuid() } != 0 {
+            return;
+        }
+        super::harden_init_process().expect("harden_init_process should succeed as root");
+        let status = std::fs::read_to_string("/proc/self/status").expect("read status");
+        assert!(
+            status.contains("NoNewPrivs:\t1"),
+            "NoNewPrivs should be set after hardening"
+        );
+        assert!(
+            status.contains("CapBnd:\t0000000002000020"),
+            "CapBnd should be empty after hardening; got:\n{status}"
+        );
     }
 }

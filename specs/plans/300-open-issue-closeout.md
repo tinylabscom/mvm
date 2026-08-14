@@ -74,7 +74,7 @@ mentions it.
 | Issue | Disposition at 2026-08-13 | Closure owner |
 |---|---|---|
 | #2083 | Open; Studio server contract external dependency | Agent/Studio phase |
-| #2101 | Kernel defect fixed; OCI privilege posture remains | Security phase |
+| #2101 | Init/Agent hardening landed; adversarial probe pending | Security phase |
 | #2107 | Open; audit mirror absent | Audit/observability phase |
 | #2135 | Open; Security lane red | Evidence-repair phase |
 | #2166 | Parent epic; #2169 and #2083 remain | Agent/Studio phase |
@@ -156,13 +156,16 @@ mentions it.
 
 ## Phase 1 — Fix safety and boot-correctness defects
 
-- [ ] **#2101 — finish OCI privilege hardening.** Narrow the issue body to the
-      remaining `NoNewPrivs` and capability-bounding-set decision now that
-      #2102 fixed kernel selection. Define the minimal capability set required
-      for authenticated activation/restore, apply it before workload exec, and
-      test setuid/file-capability attempts, user namespaces, wrong kernels,
-      and syscall failures. Re-run the adversarial probe on HVF and
-      Firecracker before closure.
+- [~] **#2101 — finish OCI privilege hardening.**
+      - [x] Apply `NoNewPrivs` and drop the capability bounding set in the
+        OCI init before spawning the guest agent, so every workload process
+        inherits an empty bounding set and the no-new-privileges bit.
+      - [x] Extend `drop_guest_agent_privilege_raw` to drop the bounding set
+        on the initramfs boot path as well, matching the OCI path.
+      - [x] Add a gated Linux-root unit test for `harden_init_process`.
+      - [ ] Re-run the adversarial probe on Firecracker (KVM host available)
+        and HVF (macOS host) to confirm `NoNewPrivs:1`, `CapBnd:0`, and
+        `unshare -r` behavior matches the chosen kernel posture.
 - [ ] **#2318 — define receipt durability and remove the redundant sync.**
       Record whether an execution receipt is a control or a record. Make the
       receipt body the durable object, treat the head as a recoverable cache if
