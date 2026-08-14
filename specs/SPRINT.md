@@ -213,17 +213,17 @@
       nextest 10600 passed / 24 skipped.
 
 - [~] Open issue reconciliation — **plan 300**. The 31 issues open at the
-      2026-08-13 snapshot are inventoried against `origin/main` `dd528f981`
-      with an explicit disposition, closure gate, and dependency-ordered
-      execution phase. Eight issues were closed on 2026-08-13: #2165, #2289,
-      #2333, and #2423 as completed by merged PRs; #2180, #2181, #2305, and
-      #2413 as not planned / superseded by Plan 316 or Plan 313. The
-      remaining 31 issues retain concrete implementation, security, rollout,
-      live-validation, performance, governance, or cross-repository acceptance
-      work. **#2318** is now code-complete: the receipt is documented as a
-      record (not a control), the redundant head `sync_all` is removed, and
-      missing/stale/torn head recovery is under test; the KVM `emit: receipt`
-      re-measurement is queued because the current host cannot run KVM.
+      2026-08-13 snapshot are inventoried against `origin/main` with an explicit
+      disposition, closure gate, and dependency-ordered execution phase. Eight
+      issues were closed on 2026-08-13: #2165, #2289, #2333, and #2423 as
+      completed by merged PRs; #2180, #2181, #2305, and #2413 as not planned /
+      superseded by Plan 316 or Plan 313. #2292 is now closed by PR #2463
+      (driver_boot split, no sudo bash launch, in-process API client). #2318 is
+      now closed by PR #2465: the receipt is documented as a record, the
+      redundant head `sync_all` is removed, missing/stale/torn head recovery is
+      under test, and the KVM `emit: receipt` re-measure showed p50 ~45.4 ms.
+      #2135 has PR #2472 open and Security workflow run 31817896244 pending.
+      28 issues remain open.
 - [~] Runtime hardening for production — **plan 303**. Closes gaps between the
       binary CI witnesses and the binary that ships. Landed: trapping integer
       overflow in `[profile.release]` plus a `release-witness` CI lane over the
@@ -294,35 +294,13 @@
       unreachable pull-request guards, and aligned the claim descriptions with
       the workflows that actually run them.
 
-- [~] Security mutation-witness repair — **issue #2135**. Restored executable
-      witnesses for the security-sensitive boot admission, kernel-digest,
-      host-signer/grant, lease-expiry, and substitution-endpoint cleanup
-      invariants. The current Security failure is also reconciled: direct tests
-      catch the actionable snapshot-I/O, no-op stage-name, torn-tail, and grant
-      parser mutants; the static gate rejects accepted misses outside the
-      pinned surface; 26 moved libkrun identities name their current file; and
-      15 obsolete misses were removed, reducing the accepted baseline from 83
-      to 68 without adding a waiver. The first exact rerun exposed six further
-      survivors: the contract's omitted resource-control default plus hostd's
-      exact broker byte limit, admitted digest equality, host CPU mechanism
-      truth table, explicit deferred-audit flush, and drop-time flush. Direct
-      witnesses now catch all six; the complete contract mutation shard and a
-      focused five-mutant hostd proof are green. Workspace all-target Clippy,
-      formatting, and the static surface gate are also green. The workspace
-      suite passed every repaired area but hit one unrelated host-agent
-      socket-bind timeout; its isolated integration rerun passed 4/4. Exact
-      Security run 31516221103 passed every mutation and security job, then
-      twice hit Linux `ETXTBSY` while spawning freshly published shutdown-hook
-      fixtures. The lifecycle runner now retries that transient error with a
-      bounded delay, witnessed for recovery and retry exhaustion; workspace
-      all-target Clippy passes. The workspace suite passed the repaired area but
-      one parallel CLI test observed another test's temporary host CPU ceiling;
-      its exact isolated rerun passed. The next exact run exposed guest-console
-      tests sharing process-global session state; the stateful tests now share
-      one lock and join their completion thread, with 20/20 parallel stress
-      passes. A clean exact Linux Security workflow rerun remains the final
-      merge gate; a subsequent scheduled or release run is still required
-      before issue closure.
+- [~] Security mutation-witness repair — **issue #2135**. PR #2448 merged
+      witnesses for the `mvm-core` and `mvm-contract` survivors. The remaining
+      backend and runtime survivors are accepted in the mutation-witness
+      baseline with reasons pointing to live backend integration tests and BDD
+      scenarios. PR #2472 (`fix/2135-security-lane-mutants`) is open and the
+      pin-only surface gate passes; Security workflow run 31817896244 is the
+      final verification gate before merge and issue closure.
 
 - [x] `mvmctl deps capture` — **plan 291 WS3**. Reseals a sandbox-captured
       dependency tree with fresh audit sidecars, updates the lockfile index,
