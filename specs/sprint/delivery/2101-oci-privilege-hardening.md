@@ -54,6 +54,30 @@ above 31. The mask arithmetic is now `bounding_set_retains`, widened to `u64`.
   --all-features` — the change is entirely Linux-gated, so a macOS-only check
   would hide a break in it.
 
+## Follow-up: unprivileged spawn regression
+
+The first revision applied the bounding-set drop before `NoNewPrivs`, and
+propagated every error from it. `PR_CAPBSET_DROP` needs `CAP_SETPCAP`, so on any
+host where the agent lacks it the drop returned `EPERM`, the `pre_exec` closure
+returned that error, and the spawn failed outright — 20 `entrypoint_execute`
+tests went red with `spawn /proc/self/fd/4: Operation not permitted`.
+
+Two changes: `NoNewPrivs` is now set first on both paths, so a bounding-set
+failure can no longer skip the control this document already described as the
+load-bearing one; and the workload drop treats `EPERM` — and only `EPERM` — as
+"never enforceable by this caller" rather than as a failure. Every other errno
+still propagates and still fails the spawn closed, and `harden_init_process()`
+is unchanged in that respect: at init the agent is root, so a failure there is
+real and still refuses.
+
+This does not widen the workload's privilege. An agent without `CAP_SETPCAP`
+cannot grant a capability it does not hold, and the bounding set a child
+inherits is already no wider than the agent's own.
+
+`only_eperm_is_treated_as_an_unenforceable_bounding_drop` pins the errno
+classification on every host, including that a non-errno error is never
+swallowed.
+
 ## Deliberately not done
 
 The issue stays open. Its closure gate is the adversarial probe from

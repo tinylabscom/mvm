@@ -311,6 +311,11 @@ for detailed scope and acceptance criteria.
         keep mask with `1u32 << cap`, panicking at slot 32 in debug and
         mis-answering every slot above 31. Mask arithmetic split out and tested
         on every host; reverting the widening turns two of three tests red
+  - [x] Ordered `NoNewPrivs` before the bounding-set drop and made the
+        workload drop tolerate `EPERM`. The drop needs `CAP_SETPCAP`, so an
+        unprivileged spawn failed outright, and because it ran first the
+        failure also skipped `NoNewPrivs` — the load-bearing control. The
+        privileged init path still fails closed
   - [ ] Re-run the adversarial probe on HVF **and** Firecracker — the closure
         gate, not yet run; no Linux/KVM host available
   - [ ] Record the ADR-001 claims 1/2 scope decision (owner call; determines

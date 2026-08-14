@@ -669,8 +669,12 @@ fn drop_capability_bounding_set_to(keep: u32) -> std::io::Result<()> {
 /// empty bounding set from [`drop_workload_capability_bounding_set`] at spawn.
 #[cfg(target_os = "linux")]
 pub fn harden_init_process() -> std::io::Result<()> {
-    drop_capability_bounding_set_to(RESTORE_AGENT_CAPABILITIES)?;
-    set_no_new_privileges()
+    // `NoNewPrivs` first: it is the control that actually makes file
+    // capabilities and setuid bits inert on exec, it cannot fail for lack of
+    // privilege, and ordering it first means a bounding-set failure can never
+    // leave a descendant running without it.
+    set_no_new_privileges()?;
+    drop_capability_bounding_set_to(RESTORE_AGENT_CAPABILITIES)
 }
 
 /// Empty the bounding set for a workload process, immediately before exec.
@@ -685,8 +689,25 @@ pub fn harden_init_process() -> std::io::Result<()> {
 /// calls and no allocation.
 #[cfg(target_os = "linux")]
 pub fn drop_workload_capability_bounding_set() -> std::io::Result<()> {
-    drop_capability_bounding_set_to(0)?;
-    set_no_new_privileges()
+    set_no_new_privileges()?;
+    match drop_capability_bounding_set_to(0) {
+        Err(err) if bounding_drop_is_unenforceable(&err) => Ok(()),
+        result => result,
+    }
+}
+
+/// Whether a `PR_CAPBSET_DROP` failure means "this caller was never able to
+/// enforce it" rather than "enforcement was attempted and broke".
+///
+/// `PR_CAPBSET_DROP` needs `CAP_SETPCAP`. An agent without it cannot shrink the
+/// bounding set — but it equally cannot grant a capability it does not hold, and
+/// the set a child inherits is already no wider than the agent's own. Treating
+/// that one errno as a skip keeps an unprivileged spawn working without
+/// weakening the privileged path, where the drop still fails closed. Every other
+/// errno means the drop was possible and went wrong, so it still propagates.
+#[cfg(any(target_os = "linux", test))]
+fn bounding_drop_is_unenforceable(err: &std::io::Error) -> bool {
+    err.raw_os_error() == Some(libc::EPERM)
 }
 
 /// `prctl(PR_SET_NO_NEW_PRIVS, 1)`. One-way and inherited across fork/exec.
@@ -1733,6 +1754,27 @@ mod privilege_tests {
             WORKLOAD_KEEP, RESTORE_AGENT_CAPABILITIES,
             "the workload must be strictly narrower than the agent"
         );
+    }
+
+    /// `EPERM` is the one errno that means the caller never held `CAP_SETPCAP`,
+    /// so the drop was never enforceable. It is the only one treated as a skip;
+    /// anything else means enforcement was possible and failed, and must
+    /// propagate so the spawn fails closed.
+    #[test]
+    fn only_eperm_is_treated_as_an_unenforceable_bounding_drop() {
+        assert!(bounding_drop_is_unenforceable(
+            &std::io::Error::from_raw_os_error(libc::EPERM)
+        ));
+        for errno in [libc::EINVAL, libc::EFAULT, libc::EACCES, libc::ENOSYS] {
+            assert!(
+                !bounding_drop_is_unenforceable(&std::io::Error::from_raw_os_error(errno)),
+                "errno {errno} must propagate rather than be skipped"
+            );
+        }
+        // A non-OS error carries no errno and must never be swallowed.
+        assert!(!bounding_drop_is_unenforceable(&std::io::Error::other(
+            "not an errno"
+        )));
     }
 
     /// Mirrors `CAPABILITY_SLOTS` so the test compiles off Linux, where the
