@@ -2,7 +2,19 @@
 
 ## Status
 
-**Phase 0 complete (#2369). Phase 1 complete (#2370). Phase 2 complete (#2371). Phase 3 in progress (#2372): converge egress TCP, UDP, and DNS over FlowMux `OpenTcp`/`OpenUdp`/`Resolve` frames.**
+**Phase 0 complete (#2369). Phase 1 complete (#2370). Phase 2 substantially landed but NOT complete (#2371). Phase 3 in progress (#2372).**
+
+Phase 2 previously carried a `COMPLETE` status while six of its seven
+checkboxes were unchecked below. Two are verifiably undone on `main`: the
+`EndpointSpawner` → `NetworkEndpointSpawner` rename has not happened, and the
+hand-maintained duplicate `EGRESS_VSOCK_PORT = 5253` still exists in
+`mvm-egress-client.rs` and `mvm-addon-dns.rs` because `mvm-agentd` does not
+depend on `mvm-net` and so cannot reach the typed service mapping.
+
+Phase 3 is now ahead of Phase 2. The strict ordering was the mechanism meant to
+catch Phase 2 residue, so that residue will not be caught by a later phase gate
+and must be closed deliberately — in particular the fail-closed readiness
+assertion, which is invariant 4 and the reason Phase 2 exists.
 
 ADR-042 is accepted and the raw-packet path is frozen: new
 `raw_ip_stack=true` / `NetworkMode::L3Vsock` launches are refused at synthesis,
@@ -260,21 +272,31 @@ cannot represent is not really enforced at the parse boundary.
 
 ### Phase 2 — Introduce the one authenticated endpoint without changing callers
 
-**Status: COMPLETE.** The production endpoint role is renamed, the
-authenticated FlowMux session acceptor and bounded stream registry are wired
-into `mvm-network-endpoint`, and backend witnesses prove exactly one
-`NetworkFlow` service per granted workload with no L3 services.
+**Status: SUBSTANTIALLY LANDED, NOT COMPLETE.** The production endpoint role
+is renamed, the authenticated FlowMux session acceptor and bounded stream
+registry are wired into `mvm-network-endpoint`, and backend witnesses prove
+exactly one `NetworkFlow` service per granted workload with no L3 services.
+Unchecked boxes below are unchecked because they are not done, not because the
+bookkeeping lagged — see the Status section.
 
 - [ ] Rename the production role from `mvm-substitution-endpoint` to
       `mvm-network-endpoint`, including Cargo bin declarations, release
       packaging, updater manifests, helper resolution, confinement profiles,
       scripts, process reaping, metrics labels, and operator diagnostics.
-- [x] Rename `GuestService::Substitution` to `GuestService::NetworkFlow`, retain
+- [~] Rename `GuestService::Substitution` to `GuestService::NetworkFlow`, retain
       port 5253, and delete the hand-maintained duplicate
       `EGRESS_VSOCK_PORT` constant in favor of the typed service mapping.
+      `GuestService::NetworkFlow` exists in `mvm-net/src/channel.rs` mapped to
+      5253 with a `port()` test. The duplicate constant survives in
+      `crates/mvm-agentd/src/bin/mvm-egress-client.rs:16` and
+      `crates/mvm-agentd/src/bin/mvm-addon-dns.rs:93` — `mvm-agentd` does not
+      depend on `mvm-net`, so either give the guest the typed mapping or record
+      why 5253 is pinned twice and gate the two values equal.
 - [ ] Rename `EndpointSpawner`/`RealEndpointSpawner` to
       `NetworkEndpointSpawner`/`RealNetworkEndpointSpawner`; keep exactly one
-      production `spawn` implementation in `WorkloadRunner`.
+      production `spawn` implementation in `WorkloadRunner`. **Not started:**
+      `crates/mvm-hostd/tests/workload_stream_plane.rs` still imports
+      `EndpointSpawner`, and the new names appear nowhere in the workspace.
 - [ ] Make the endpoint authenticate one long-lived FlowMux session before it
       accepts any flow frame. A failed or missing session prevents workload
       readiness when the signed plan grants networking.

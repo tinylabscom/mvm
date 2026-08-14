@@ -301,14 +301,25 @@ for detailed scope and acceptance criteria.
     backend/runtime survivors in the mutation-witness baseline; Security
     workflow run 31817896244 is the final verification gate before merge
     and issue closure
-- [~] Plan 300 — 31-issue reconciliation and closeout
+- [~] Plan 300 — open-issue reconciliation and closeout
   (`specs/plans/300-open-issue-closeout.md`)
   - [x] Inventory all 39 issues open at the 2026-08-13 snapshot against
         current `origin/main`, issue comments, owning plans, and workflow state
   - [x] Close eight issues on 2026-08-13: #2165, #2289, #2333, #2423 as
         completed by merged PRs; #2180, #2181, #2305, #2413 as not planned /
         superseded
-  - [ ] Execute the remaining 28 closure paths in the plan's dependency order
+  - [x] Close #2292, #2307, #2318 as completed by merged PRs
+  - [x] Second reconciliation pass 2026-08-14 against `2bc7dc2bc`: re-read all
+        28 and verified each against the tree. No issue was complete-but-stale.
+        Closed five combinations — #2347→#2299, #2281→#2280, #2199→#2198,
+        #2193→#2194/#2196, #2166→#2169 — each transferring its acceptance
+        criteria to the surviving issue in the same action. Deliberately not
+        combined: Plan 316's eight phases (the ordering is the safety property),
+        the warm-pool workstreams #2194–#2197 (different live-validation
+        surfaces), and #2135 (a generated tracker, closed by workflow state)
+  - [x] Correct Plan 316's Phase 2 status: it was marked COMPLETE with six of
+        seven boxes unchecked and two verifiably undone on `main`
+  - [ ] Execute the remaining 23 closure paths in the plan's dependency order
   - [ ] Reconcile a fresh GitHub query after every phase and at final closeout
 - [~] Runtime hardening for production — plan 303, branch
   `feat/plan-303-runtime-hardening`
@@ -1247,7 +1258,16 @@ check-l3-expansion-freeze` added as a temporary shrink-only ratchet
         extracts the authenticated session so it is shared by control RPC and
         FlowMux, with tests for replay, tampering, wrong identity, and counter
         exhaustion. Remaining: the perf harness + baselines.
-  - [x] Phase 2 — the one authenticated endpoint (#2371). `GuestService::NetworkFlow`
+  - [~] Phase 2 — the one authenticated endpoint (#2371). Substantially landed,
+        **not complete**: the `EndpointSpawner` → `NetworkEndpointSpawner` rename
+        has not happened (`crates/mvm-hostd/tests/workload_stream_plane.rs` still
+        imports `EndpointSpawner`), the duplicate `EGRESS_VSOCK_PORT = 5253`
+        survives in `mvm-egress-client.rs` and `mvm-addon-dns.rs` because
+        `mvm-agentd` does not depend on `mvm-net`, and the fail-closed readiness
+        assertion — a networking-granted workload must not reach ready when the
+        FlowMux session fails to authenticate — is unwitnessed. Phase 3 is
+        already ahead of this, so the phase gate will not catch the residue.
+        Landed: `GuestService::NetworkFlow`
         now names the port-5253 channel; the endpoint binary, proxy, spawner, and
         test files are renamed to `mvm-network-endpoint`/`network_endpoint_*`;
         `mvm-hostd::supervisor::flowmux` landed the authenticated FlowMux session
