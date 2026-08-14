@@ -93,7 +93,7 @@ mentions it.
 | #2292 | Code landed (driver_boot split, no sudo bash launch); ColdLaunchBench pending | Performance phase |
 | #2299 | Open; cross-backend phase accounting not comparable | Performance phase |
 | #2307 | `xtask check-nextest-groups` implemented; CI wiring remains | CI phase |
-| #2318 | Open; receipt durability and head recovery decision remains | Audit/performance phase |
+| #2318 | Decision/tests landed; KVM re-measure queued | Audit/performance phase |
 | #2336 | Open; Firecracker post-restore handshake failure | Warm-launch phase |
 | #2347 | Open; NVMe baseline for launch contract | Performance phase |
 | #2368 | Plan 316 umbrella; Phase 1 complete, Phase 2+ open | Networking rewrite phase |
@@ -163,13 +163,20 @@ mentions it.
       test setuid/file-capability attempts, user namespaces, wrong kernels,
       and syscall failures. Re-run the adversarial probe on HVF and
       Firecracker before closure.
-- [ ] **#2318 — define receipt durability and remove the redundant sync.**
-      Record whether an execution receipt is a control or a record. Make the
-      receipt body the durable object, treat the head as a recoverable cache if
-      that matches the decision, rebuild a missing/stale/torn head under the
-      tenant lock, and prove concurrent append ordering. Re-measure the KVM
-      `emit: receipt` span against 100.7 ms and require at most one durability
-      barrier per append unless the written model proves two are necessary.
+- [x] **#2318 — define receipt durability and remove the redundant sync.**
+      - [x] Record the decision: execution receipts are records, not controls.
+        A failed receipt emit is logged and does not block admission; the
+        audit chain is the only durability boundary that can refuse a run.
+      - [x] Remove the redundant head fsync. `write_head` now uses
+        `write_atomic_unsynced`; the head is a recoverable cache and the
+        receipt body is the durable object.
+      - [x] Rebuild a missing/stale/torn head under the tenant lock.
+        `read_head` takes the later of the stored head and `scan_tip()`, with
+        tests for removed, rewound, truncated, and unparseable heads.
+      - [x] Prove concurrent append ordering. `concurrent_writers_extend_one
+        _chain_without_forking` already covers this.
+      - [ ] Re-measure the KVM `emit: receipt` span against 100.7 ms on a
+        Linux/KVM host. This is queued; the current host cannot run KVM.
 - [x] **#2307 — gate nextest override filters.** Add
       `xtask check-nextest-groups` using `cargo nextest list -E` for each
       configured override, reject nonexistent workspace packages and empty
