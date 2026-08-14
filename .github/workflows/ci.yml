@@ -79,7 +79,7 @@ jobs:
           # Anything that can change a compiled target, generated artifact, or
           # the commands used by a Rust lane keeps the full compiler/test
           # matrix. Prose, site assets, and process-only specs do not.
-          if grep -zE '^(crates/|src/|tests/|xtask/|scripts/|features/|schema/|model/|assets/|\.cargo/|\.config/|\.github/actions/|\.github/workflows/ci\.yml$|nix/packaging/release/verify-release-assets[^/]*\.sh$|Cargo\.(toml|lock)$|rust-toolchain\.toml$|build\.rs$|install\.sh$|[Jj]ustfile$)' "$CHANGED_FILE" >/dev/null; then
+          if grep -zE '^(crates/|src/|tests/|xtask/|scripts/|features/|schema/|model/|assets/|\.cargo/|\.config/|\.github/actions/|\.github/workflows/|nix/packaging/release/verify-release-assets[^/]*\.sh$|Cargo\.(toml|lock)$|rust-toolchain\.toml$|build\.rs$|install\.sh$|[Jj]ustfile$)' "$CHANGED_FILE" >/dev/null; then
             echo "code=true" >> "$GITHUB_OUTPUT"
           else
             echo "code=false" >> "$GITHUB_OUTPUT"
@@ -159,6 +159,33 @@ jobs:
       # compiler lint lane, so start them on their own runner.
       - name: Install system build deps
         run: sudo rm -f /etc/apt/sources.list.d/microsoft*.list /etc/apt/sources.list.d/azure*.list; sudo apt-get update && sudo apt-get install -y libcap-ng-dev lld shellcheck
+
+      # Nothing else validates the workflow files. A wrong `if:`, a typo'd
+      # `needs:` job name, or a bad `${{ }}` reference does not fail a PR — it
+      # silently disables the lane, which still reads as covered to anyone
+      # auditing the file. Runs over every workflow, not just changed ones,
+      # because a changed job can break a reference in a file it did not touch.
+      # Placed after shellcheck is installed (actionlint shells out to it) but
+      # before the slow toolchain steps, so a workflow error fails fast.
+      # Pinned + checksum-verified rather than an installer action: actionlint
+      # is a Go binary, so `install-action` has no recipe for it and its
+      # cargo-binstall fallback looks for a crate that does not exist.
+      - name: Install actionlint
+        env:
+          ACTIONLINT_VERSION: 1.7.12
+          ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+        run: |
+          set -euo pipefail
+          tarball="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          curl -fL --retry 3 -o "$tarball" \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/${tarball}"
+          echo "${ACTIONLINT_SHA256}  ${tarball}" | sha256sum -c -
+          tar -xzf "$tarball" actionlint
+          sudo install -m 0755 actionlint /usr/local/bin/actionlint
+          actionlint --version
+
+      - name: Lint workflow files
+        run: actionlint .github/workflows/*.yml
 
       - name: Set up uv
         uses: astral-sh/setup-uv@v8.2.0

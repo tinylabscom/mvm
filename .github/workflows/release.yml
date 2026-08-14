@@ -373,15 +373,18 @@ jobs:
           cd staging
           # Build the checksums list dynamically — sidecars are
           # optional, so only include what's actually present.
-          FILES="builder-vm-vmlinux-${ARCH} builder-vm-rootfs-${ARCH}.ext4"
-          [ -f "builder-vm-${ARCH}.cmdline.txt" ]   && FILES="$FILES builder-vm-${ARCH}.cmdline.txt"
-          [ -f "builder-vm-${ARCH}.manifest.json" ] && FILES="$FILES builder-vm-${ARCH}.manifest.json"
+          # An array, not a space-joined string: the string form relies on word
+          # splitting to become arguments, so a name containing a space would
+          # split into two paths that do not exist.
+          FILES=("builder-vm-vmlinux-${ARCH}" "builder-vm-rootfs-${ARCH}.ext4")
+          [ -f "builder-vm-${ARCH}.cmdline.txt" ]   && FILES+=("builder-vm-${ARCH}.cmdline.txt")
+          [ -f "builder-vm-${ARCH}.manifest.json" ] && FILES+=("builder-vm-${ARCH}.manifest.json")
           # The attested pack is optional (signing may be skipped or fail); only
           # checksum its files when they are actually present.
           if [ -f "builder-vm-${ARCH}.pack-manifest.json.bundle" ]; then
-            FILES="$FILES builder-vm-${ARCH}.pack-manifest.json builder-vm-${ARCH}.pack-manifest.json.bundle builder-vm-${ARCH}.sbom.txt"
+            FILES+=("builder-vm-${ARCH}.pack-manifest.json" "builder-vm-${ARCH}.pack-manifest.json.bundle" "builder-vm-${ARCH}.sbom.txt")
           fi
-          sha256sum $FILES > "builder-vm-${ARCH}-checksums-sha256.txt"
+          sha256sum "${FILES[@]}" > "builder-vm-${ARCH}-checksums-sha256.txt"
 
       - name: Upload builder VM image artifacts
         uses: actions/upload-artifact@v7
@@ -647,17 +650,19 @@ jobs:
           ARCH: ${{ matrix.arch }}
         run: |
           cd staging
-          FILES="default-microvm-vmlinux-${ARCH} \
-                 default-microvm-rootfs-${ARCH}.ext4 \
-                 default-microvm-rootfs-${ARCH}.verity \
-                 default-microvm-rootfs-${ARCH}.roothash \
-                 default-microvm-meta-${ARCH}.json"
+          FILES=(
+            "default-microvm-vmlinux-${ARCH}"
+            "default-microvm-rootfs-${ARCH}.ext4"
+            "default-microvm-rootfs-${ARCH}.verity"
+            "default-microvm-rootfs-${ARCH}.roothash"
+            "default-microvm-meta-${ARCH}.json"
+          )
           # The attested pack is optional (signing may be skipped or fail); only
           # checksum its files when they are actually present.
           if [ -f "default-microvm-${ARCH}.pack-manifest.json.bundle" ]; then
-            FILES="$FILES default-microvm-${ARCH}.pack-manifest.json default-microvm-${ARCH}.pack-manifest.json.bundle default-microvm-${ARCH}.sbom.txt"
+            FILES+=("default-microvm-${ARCH}.pack-manifest.json" "default-microvm-${ARCH}.pack-manifest.json.bundle" "default-microvm-${ARCH}.sbom.txt")
           fi
-          sha256sum $FILES > "default-microvm-${ARCH}-checksums-sha256.txt"
+          sha256sum "${FILES[@]}" > "default-microvm-${ARCH}-checksums-sha256.txt"
 
       - name: Upload default microVM image artifacts
         uses: actions/upload-artifact@v7
@@ -713,7 +718,8 @@ jobs:
         run: |
           cd artifacts
           # Combine per-platform checksums into one file
-          cat *.sha256 > checksums-sha256.txt
+          # ./ prefix: a file named like an option must stay a filename.
+          cat ./*.sha256 > checksums-sha256.txt
           echo "Combined checksums:"
           cat checksums-sha256.txt
 

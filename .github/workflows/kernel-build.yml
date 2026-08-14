@@ -191,10 +191,10 @@ jobs:
           printf '{"arch":"%s","y_symbol_count":%d,"vmlinux_bytes":%d,"vmlinux_gz_bytes":%d}\n' \
             "$ARCH" "$Y_COUNT" "$RAW_BYTES" "$GZ_BYTES" > "staging/kernel-metrics-${ARCH}.json"
           cd staging
-          sha256sum vmlinux-${ARCH}-* > "kernel-${ARCH}-checksums-sha256.txt"
+          sha256sum vmlinux-"${ARCH}"-* > "kernel-${ARCH}-checksums-sha256.txt"
           echo "=== kernel artifacts (${ARCH}) ==="
           cat "kernel-${ARCH}-checksums-sha256.txt" "kernel-${ARCH}.json" "kernel-metrics-${ARCH}.json"
-          du -h vmlinux-${ARCH}-*
+          du -h vmlinux-"${ARCH}"-*
 
       - name: Upload kernel artifacts (CI visibility)
         # `always()` because the budget gate above exits non-zero on a

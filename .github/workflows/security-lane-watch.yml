@@ -71,6 +71,8 @@ jobs:
 
           if [ ! -s failing.md ]; then
             if [ -n "$EXISTING" ]; then
+              # Backticks here are markdown, not command substitution; %s carries the values.
+              # shellcheck disable=SC2016
               printf 'Security run [%s](%s) on `%s` is green again — closing.\n' \
                 "$RUN_ID" "$RUN_URL" "$HEAD_SHA" > body.md
               gh issue comment "$EXISTING" --repo "$REPO" --body-file body.md
@@ -81,12 +83,16 @@ jobs:
           fi
 
           {
+            # Backticks here are markdown, not command substitution; %s carries the values.
+            # shellcheck disable=SC2016
             printf 'The `Security` workflow (%s) failed on `%s`.\n\n' "$RUN_EVENT" "$HEAD_SHA"
             printf 'Run: %s\n\n' "$RUN_URL"
             printf 'Failing jobs:\n\n'
             cat failing.md
             printf '\nThese lanes do not run on pull requests, so a failure here is\n'
             printf 'invisible until someone reads run history. Several of them are the\n'
+            # Backticks here are markdown, not command substitution; %s carries the values.
+            # shellcheck disable=SC2016
             printf 'only witness for a numbered claim in `specs/adrs/001-microvm-security-posture.md`\n'
             printf '— while a lane is red, that claim has no live evidence behind it.\n'
           } > body.md
