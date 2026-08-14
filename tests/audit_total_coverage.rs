@@ -398,6 +398,18 @@ const TRANSCRIPT_SUB: &[(&str, AuditPosture)] = &[
 // the same audit posture as `verify-cert`.
 const RECEIPTS_SUB: &[(&str, AuditPosture)] = &[("export", AuditPosture::ReadOnly)];
 
+// `trust audit provenance <sub>` — read-only PROV-O/Turtle export of the
+// chain-signed audit log. Does not emit new audit events.
+const PROVENANCE_SUB: &[(&str, AuditPosture)] = &[("export", AuditPosture::ReadOnly)];
+
+// `trust audit decisions <sub>` — read-only queries against the cached
+// decision-store derived from the chain-signed audit log.
+const DECISIONS_SUB: &[(&str, AuditPosture)] = &[
+    ("list", AuditPosture::ReadOnly),
+    ("show", AuditPosture::ReadOnly),
+    ("export", AuditPosture::ReadOnly),
+];
+
 const AUDIT_SUB: &[(&str, AuditPosture)] = &[
     ("tail", AuditPosture::ReadOnly),
     ("verify", AuditPosture::ReadOnly),
@@ -413,6 +425,8 @@ const AUDIT_SUB: &[(&str, AuditPosture)] = &[
     // behind it is indistinguishable from tampering.
     ("prune", AuditPosture::Emits("chain.pruned")),
     ("receipts", AuditPosture::DelegatesToSub(RECEIPTS_SUB)),
+    ("provenance", AuditPosture::DelegatesToSub(PROVENANCE_SUB)),
+    ("decisions", AuditPosture::DelegatesToSub(DECISIONS_SUB)),
     ("transcript", AuditPosture::DelegatesToSub(TRANSCRIPT_SUB)),
 ];
 
