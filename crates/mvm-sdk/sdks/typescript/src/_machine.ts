@@ -51,6 +51,11 @@ export interface MachineCheckArtifactOptions {
 }
 
 export interface MachineStartOptions {
+  /** Describe the machine to create when the named spec does not exist yet;
+   *  `machine start` auto-creates from these. */
+  image?: string;
+  cpus?: number;
+  memory?: string;
   receipt?: string;
   json?: boolean;
   dryRun?: boolean;
@@ -215,6 +220,9 @@ export function machineCheckArtifactArgv(options: MachineCheckArtifactOptions): 
 export function machineStartArgv(name: string, options: MachineStartOptions = {}): string[] {
   // `machine start` takes a positional name, not `--name`.
   const argv = ["start", requireString(name, "name")];
+  if (options.image !== undefined) argv.push("--image", requireString(options.image, "image"));
+  if (options.cpus !== undefined) argv.push("--cpus", String(options.cpus));
+  if (options.memory !== undefined) argv.push("--memory", requireString(options.memory, "memory"));
   if (options.receipt !== undefined) argv.push("--receipt", requireString(options.receipt, "receipt"));
   if (options.json) argv.push("--json");
   if (options.dryRun) argv.push("--dry-run");
