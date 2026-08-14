@@ -38,6 +38,7 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::audit::decisions::DecisionStore;
 use crate::audit::receipt_export::audit_entry_to_receipt;
 use crate::audit::receipt_store::ReceiptStore;
 use crate::supervisor::{
@@ -46,8 +47,14 @@ use crate::supervisor::{
 use anyhow::{Context, Result};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use chrono::Utc;
 use ed25519_dalek::{Signer, SigningKey};
 use mvm_contract::merkle::{SignedAuditRoot, root_signing_bytes};
+use mvm_contract::provenance::{
+    ActorRef, AttestationBinding, DecisionActorRole, DecisionCategory, DecisionId, DecisionOutcome,
+    DecisionRecord, DecisionRecordBuilder,
+};
+use mvm_contract::verify::hash_line;
 use mvm_core::plan::ExecutionPlan;
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -337,6 +344,9 @@ pub struct AuditEmitter {
     audit_dir: PathBuf,
     receipts_enabled: bool,
     receipt_stores: Mutex<HashMap<String, ReceiptStore>>,
+    decisions_enabled: bool,
+    decisions_dir: Option<PathBuf>,
+    decision_stores: Mutex<HashMap<String, DecisionStore>>,
 }
 
 impl AuditEmitter {
@@ -375,6 +385,9 @@ impl AuditEmitter {
             audit_dir: audit_dir.to_path_buf(),
             receipts_enabled: false,
             receipt_stores: Mutex::new(HashMap::new()),
+            decisions_enabled: false,
+            decisions_dir: None,
+            decision_stores: Mutex::new(HashMap::new()),
         })
     }
 
@@ -424,6 +437,27 @@ impl AuditEmitter {
         self
     }
 
+    /// Enable runtime caching of decision records under the default
+    /// `~/.mvm/decisions/` directory (respects `MVM_HOME`).
+    pub fn with_decisions(mut self) -> Result<Self> {
+        self.decisions_enabled = true;
+        self.decisions_dir = Some(DecisionStore::default_dir()?);
+        Ok(self)
+    }
+
+    /// Test seam — caller supplies the decision-store directory.
+    /// Production callers use [`Self::with_decisions`].
+    pub fn with_decisions_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.decisions_enabled = true;
+        self.decisions_dir = Some(dir.into());
+        self
+    }
+
+    /// True when the emitter will cache decision records locally.
+    pub fn decisions_enabled(&self) -> bool {
+        self.decisions_enabled
+    }
+
     /// Emit `plan.admitted` — fires immediately after `admit_for_run`
     /// succeeds. Binds the plan_id, signer (via `audit_labels` extras),
     /// and the workload context.
@@ -439,12 +473,154 @@ impl AuditEmitter {
             "plan.admitted",
             [
                 ("signer_id".to_string(), signer_id.to_string()),
+                ("authorizer_principal".to_string(), signer_id.to_string()),
                 (
                     stream_audit::LABEL_RETENTION.to_string(),
                     plan.stream_retention.as_str().to_string(),
                 ),
             ],
         )
+    }
+
+    /// Emit `plan.admission_refused` — fires when `admit_plan_for_run` refuses
+    /// to admit a plan before the VM is created. The stage and reason are
+    /// recorded in the chain so an auditor can distinguish a refusal from a
+    /// missing admission.
+    pub fn emit_refused(&self, plan: &ExecutionPlan, stage: &str, reason: &str) -> Result<()> {
+        self.emit(
+            plan,
+            "plan.admission_refused",
+            [
+                ("stage".to_string(), stage.to_string()),
+                ("reason".to_string(), reason.to_string()),
+                (
+                    "authorizer_principal".to_string(),
+                    crate::audit::host_keypair::host_signer_id(),
+                ),
+            ],
+        )
+    }
+
+    /// Emit `control_key.used` — fires when a `ControlKey` is used to
+    /// authorize an orchestrator action. Carries the key id, role, and a
+    /// short action label. No secret material is logged.
+    pub fn emit_control_key_used(
+        &self,
+        plan: &ExecutionPlan,
+        key: &mvm_core::mvmd_iface::ControlKey,
+        action: &str,
+    ) -> Result<()> {
+        self.emit(
+            plan,
+            "control_key.used",
+            [
+                ("kid".to_string(), key.kid.clone()),
+                ("role".to_string(), format!("{:?}", key.role)),
+                ("action".to_string(), action.to_string()),
+                ("authorizer_principal".to_string(), key.kid.clone()),
+            ],
+        )?;
+
+        if self.decisions_enabled() {
+            let record = Self::control_key_decision_record(plan, key, action);
+            let _ = self.emit_decision_record(plan, record);
+        }
+        Ok(())
+    }
+
+    fn control_key_decision_record(
+        plan: &ExecutionPlan,
+        key: &mvm_core::mvmd_iface::ControlKey,
+        action: &str,
+    ) -> DecisionRecord {
+        let role = match key.role {
+            mvm_core::mvmd_iface::ControlKeyRole::Promoter => Some(DecisionActorRole::Promoter),
+            mvm_core::mvmd_iface::ControlKeyRole::Inventory => Some(DecisionActorRole::Inventory),
+            mvm_core::mvmd_iface::ControlKeyRole::Orchestrator => {
+                Some(DecisionActorRole::Orchestrator)
+            }
+        };
+        DecisionRecordBuilder::new()
+            .version(1)
+            .category(DecisionCategory::Approval)
+            .actor(ActorRef {
+                principal: key.kid.clone(),
+                key_id: key.kid.clone(),
+                key_role: role,
+            })
+            .scenario(mvm_contract::provenance::DecisionScenario {
+                plan_id: Some(plan.plan_id.0.clone()),
+                ..Default::default()
+            })
+            .reasoning(format!("control key authorized action: {action}"))
+            .outcome(DecisionOutcome::Approved)
+            .timestamp(Utc::now().to_rfc3339())
+            .attestation(AttestationBinding {
+                plan_id: Some(plan.plan_id.0.clone()),
+                ..AttestationBinding::default()
+            })
+            .build()
+            .expect("control-key decision record is well-formed")
+    }
+
+    /// Emit a `decision_record` chain entry and cache the record locally.
+    ///
+    /// The record's content-address is recomputed from its semantic body
+    /// (excluding `attestation`), then the attestation is updated with a
+    /// hash of the audit context entry. The final record is serialized into
+    /// the chain entry's `record` label and written to the decision store if
+    /// enabled.
+    pub fn emit_decision_record(
+        &self,
+        plan: &ExecutionPlan,
+        mut record: DecisionRecord,
+    ) -> Result<DecisionId> {
+        record.decision_id = record.compute_id();
+
+        // Hash a minimal context entry so the decision attests to the audit
+        // chain without a circular dependency on the full record label.
+        let context_entry = for_plan(
+            plan,
+            None,
+            "decision_record",
+            [
+                ("decision_id".to_string(), record.decision_id.0.clone()),
+                ("category".to_string(), format!("{:?}", record.category)),
+            ],
+        );
+        let context_bytes =
+            serde_json::to_vec(&context_entry).context("serializing decision context entry")?;
+        record.attestation.audit_entry_hash = hex::encode(hash_line(&context_bytes));
+        record.attestation.signer_pubkey = format!(
+            "ed25519:{}",
+            hex::encode(self.signing_key.verifying_key().to_bytes())
+        );
+
+        let record_json = serde_json::to_string(&record).context("serializing decision record")?;
+        let entry = for_plan(
+            plan,
+            None,
+            "decision_record",
+            [
+                ("decision_id".to_string(), record.decision_id.0.clone()),
+                ("category".to_string(), format!("{:?}", record.category)),
+                ("record".to_string(), record_json),
+            ],
+        );
+        self.emit_entry(&entry)?;
+
+        if self.decisions_enabled
+            && let Some(store) = self.decision_store_for_tenant(&plan.tenant.0)
+            && let Err(e) = store.put(&record)
+        {
+            tracing::warn!(
+                decision_id = %record.decision_id.0,
+                error = %e,
+                "failed to cache decision record (non-fatal)"
+            );
+        }
+
+        Ok(record.decision_id)
     }
 
     /// Emit `plan.launched` — fires after `backend.start()` returns Ok.
@@ -1043,6 +1219,31 @@ impl AuditEmitter {
         }
         Some(store)
     }
+
+    /// Return the cached decision store for `tenant`, creating it on first
+    /// use. Returns `None` if no decision-store directory is configured or
+    /// the store cannot be opened.
+    fn decision_store_for_tenant(&self, tenant: &str) -> Option<DecisionStore> {
+        let decisions_dir = self.decisions_dir.as_ref()?;
+        {
+            let stores = self.decision_stores.lock().ok()?;
+            if let Some(store) = stores.get(tenant) {
+                return Some(store.clone());
+            }
+        }
+        let store = match DecisionStore::open(decisions_dir, tenant) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(tenant, error = %e, "failed to open decision store");
+                return None;
+            }
+        };
+        {
+            let mut stores = self.decision_stores.lock().ok()?;
+            stores.insert(tenant.to_string(), store.clone());
+        }
+        Some(store)
+    }
 }
 
 /// Write `bytes` to `path` atomically: a same-directory temp file is
@@ -1267,6 +1468,74 @@ mod tests {
         let ordered = input_refused_labels("vm-1", &R::OutOfOrder { seq: 3, after: 9 });
         assert!(ordered.contains(&(k::LABEL_SEQ.to_string(), "3".to_string())));
         assert!(ordered.contains(&(k::LABEL_AFTER_SEQ.to_string(), "9".to_string())));
+    }
+
+    /// A structured refusal carries the stage, a human-readable reason, and
+    /// the host signer as the authorizer principal, so an auditor can answer
+    /// "who refused this and why?" from the signed chain alone.
+    #[test]
+    fn admission_refusal_records_stage_reason_and_authorizer() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = {
+            let mut __ed_seed = [0u8; 32];
+            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            SigningKey::from_bytes(&__ed_seed)
+        };
+        let vk = key.verifying_key();
+        let emitter = AuditEmitter::with_dir(key, dir.path()).unwrap();
+        let plan = fixture_plan("local", "plan-refused");
+
+        emitter
+            .emit_refused(&plan, "grant_ceiling", "cpu tier exceeds ceiling")
+            .unwrap();
+
+        let entry = only_entry(dir.path(), "local");
+        assert_eq!(entry["event"], "plan.admission_refused");
+        assert_eq!(entry["labels"]["stage"], "grant_ceiling");
+        assert_eq!(entry["labels"]["reason"], "cpu tier exceeds ceiling");
+        let principal = entry["labels"]["authorizer_principal"]
+            .as_str()
+            .expect("authorizer_principal label");
+        assert!(
+            principal.starts_with("host:"),
+            "authorizer must be the host signer: {principal}"
+        );
+        verify_audit_chain(&dir.path().join("local.jsonl"), &vk).expect("refusal entry verifies");
+    }
+
+    /// Control-key use is recorded with the key id and role as the
+    /// authorizer principal, so orchestrator decisions are attributable.
+    #[test]
+    fn control_key_used_records_kid_role_action_and_authorizer() {
+        use mvm_core::mvmd_iface::ControlKeyRole;
+
+        let dir = tempfile::tempdir().unwrap();
+        let key = {
+            let mut __ed_seed = [0u8; 32];
+            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            SigningKey::from_bytes(&__ed_seed)
+        };
+        let vk = key.verifying_key();
+        let emitter = AuditEmitter::with_dir(key, dir.path()).unwrap();
+        let plan = fixture_plan("local", "plan-ctl");
+        let control_key = mvm_core::mvmd_iface::ControlKey {
+            kid: "ck-prod-1".to_string(),
+            role: ControlKeyRole::Orchestrator,
+            expiry_unix_secs: u64::MAX,
+        };
+
+        emitter
+            .emit_control_key_used(&plan, &control_key, "vm.stop")
+            .unwrap();
+
+        let entry = only_entry(dir.path(), "local");
+        assert_eq!(entry["event"], "control_key.used");
+        assert_eq!(entry["labels"]["kid"], "ck-prod-1");
+        assert_eq!(entry["labels"]["role"], "Orchestrator");
+        assert_eq!(entry["labels"]["action"], "vm.stop");
+        assert_eq!(entry["labels"]["authorizer_principal"], "ck-prod-1");
+        verify_audit_chain(&dir.path().join("local.jsonl"), &vk)
+            .expect("control-key entry verifies");
     }
 
     /// The single entry in a tenant's chain, unwrapped from its signed
@@ -2122,5 +2391,62 @@ mod tests {
         let signed: mvm_core::receipt::SignedExecutionReceipt =
             serde_json::from_slice(&std::fs::read(&files[0]).unwrap()).unwrap();
         signed.verify().expect("checkpoint receipt verifies");
+    }
+
+    #[test]
+    fn decision_record_event_is_chain_signed_and_cached() {
+        use mvm_contract::provenance::{
+            ActorRef, AttestationBinding, DecisionCategory, DecisionOutcome, DecisionRecordBuilder,
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let decisions_dir = tempfile::tempdir().unwrap();
+        let key = {
+            let mut __ed_seed = [0u8; 32];
+            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            SigningKey::from_bytes(&__ed_seed)
+        };
+        let vk = key.verifying_key();
+        let emitter = AuditEmitter::with_dir(key, dir.path())
+            .unwrap()
+            .with_decisions_dir(decisions_dir.path());
+        let plan = fixture_plan("local", "plan-decision");
+
+        let record = DecisionRecordBuilder::new()
+            .version(1)
+            .category(DecisionCategory::Admission)
+            .actor(ActorRef {
+                principal: "host:builder".to_string(),
+                key_id: "host-signer-1".to_string(),
+                key_role: None,
+            })
+            .reasoning("grant ceiling satisfied")
+            .outcome(DecisionOutcome::Approved)
+            .timestamp("2026-08-13T00:00:00Z".to_string())
+            .attestation(AttestationBinding {
+                plan_id: Some("sha256:abc".to_string()),
+                audit_entry_hash: String::new(),
+                signer_pubkey: hex::encode(vk.to_bytes()),
+                ..AttestationBinding::default()
+            })
+            .build()
+            .expect("valid record");
+
+        let id = emitter.emit_decision_record(&plan, record.clone()).unwrap();
+        assert!(!id.0.is_empty());
+
+        let entry = only_entry(dir.path(), "local");
+        assert_eq!(entry["event"], "decision_record");
+        assert_eq!(entry["labels"]["decision_id"], id.0);
+        assert!(entry["labels"].get("record").is_some());
+        verify_audit_chain(&dir.path().join("local.jsonl"), &vk)
+            .expect("decision record entry verifies");
+
+        let decisions = crate::audit::decisions::DecisionStore::open(decisions_dir.path(), "local")
+            .unwrap()
+            .list()
+            .unwrap();
+        assert_eq!(decisions.len(), 1);
+        assert_eq!(decisions[0].decision_id, id);
     }
 }

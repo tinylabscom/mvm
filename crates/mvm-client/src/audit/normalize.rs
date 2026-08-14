@@ -32,6 +32,12 @@ pub(crate) fn normalize_lifecycle_entry(
     seq: u64,
     entry: &PlanAuditEntry,
 ) -> VerifiedAuditEvent {
+    const SURFACED_LABELS: &[&str] = &[
+        "authorizer_principal",
+        "authorization_reason",
+        "authorization_ticket_ref",
+    ];
+
     VerifiedAuditEvent {
         id: AuditEventId {
             source: source.clone(),
@@ -43,7 +49,19 @@ pub(crate) fn normalize_lifecycle_entry(
         machine: lifecycle_machine(entry),
         event: sanitize_free_text(&entry.event, MAX_FIELD_LEN),
         plan_id: lifecycle_plan_id(entry),
-        detail: render_labels(&entry.labels),
+        detail: render_labels(&entry.labels, SURFACED_LABELS),
+        authorizer_principal: entry
+            .labels
+            .get("authorizer_principal")
+            .map(|v| sanitize_free_text(v, MAX_FIELD_LEN)),
+        authorization_reason: entry
+            .labels
+            .get("authorization_reason")
+            .map(|v| sanitize_free_text(v, MAX_FIELD_LEN)),
+        authorization_ticket_ref: entry
+            .labels
+            .get("authorization_ticket_ref")
+            .map(|v| sanitize_free_text(v, MAX_FIELD_LEN)),
     }
 }
 
@@ -73,6 +91,9 @@ pub(crate) fn normalize_workload_entry(
         event: sanitize_free_text(&entry.category, MAX_FIELD_LEN),
         plan_id: None,
         detail: Some(sanitize_free_text(&detail, MAX_DETAIL_LEN)),
+        authorizer_principal: None,
+        authorization_reason: None,
+        authorization_ticket_ref: None,
     }
 }
 
@@ -100,12 +121,13 @@ fn lifecycle_plan_id(entry: &PlanAuditEntry) -> Option<String> {
     }
 }
 
-/// Render labels as sorted `k=v` pairs, dropping sensitive keys and
-/// redacting path-like values, capped at the detail limit.
-fn render_labels(labels: &BTreeMap<String, String>) -> Option<String> {
+/// Render labels as sorted `k=v` pairs, dropping sensitive keys,
+/// path-like values, and any keys that are surfaced as dedicated fields.
+/// The result is capped at the detail limit.
+fn render_labels(labels: &BTreeMap<String, String>, exclude_keys: &[&str]) -> Option<String> {
     let pairs: Vec<String> = labels
         .iter()
-        .filter(|(key, _)| !is_sensitive_label_key(key))
+        .filter(|(key, _)| !is_sensitive_label_key(key) && !exclude_keys.contains(&key.as_str()))
         .map(|(key, value)| {
             format!(
                 "{}={}",
@@ -352,6 +374,32 @@ mod tests {
         let out = normalize_lifecycle_entry(&lifecycle_source(), 0, &e);
         let detail = out.detail.unwrap();
         assert!(detail.chars().count() <= MAX_DETAIL_LEN, "{}", detail.len());
+    }
+
+    #[test]
+    fn authorizer_labels_are_surfaced_as_dedicated_fields_and_omitted_from_detail() {
+        let mut e = entry("plan.admitted");
+        e.labels
+            .insert("authorizer_principal".into(), "host:builder".into());
+        e.labels
+            .insert("authorization_reason".into(), "scheduled rollout".into());
+        e.labels
+            .insert("authorization_ticket_ref".into(), "CHG-12345".into());
+        e.labels.insert("verb".into(), "up".into());
+
+        let out = normalize_lifecycle_entry(&lifecycle_source(), 0, &e);
+        assert_eq!(out.authorizer_principal.as_deref(), Some("host:builder"));
+        assert_eq!(
+            out.authorization_reason.as_deref(),
+            Some("scheduled rollout")
+        );
+        assert_eq!(out.authorization_ticket_ref.as_deref(), Some("CHG-12345"));
+
+        let detail = out.detail.expect("detail exists");
+        assert!(detail.contains("verb=up"), "{detail}");
+        assert!(!detail.contains("authorizer_principal"), "{detail}");
+        assert!(!detail.contains("authorization_reason"), "{detail}");
+        assert!(!detail.contains("authorization_ticket_ref"), "{detail}");
     }
 
     #[test]

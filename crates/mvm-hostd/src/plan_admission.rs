@@ -45,11 +45,16 @@
 //! Production callers use `SystemClock` + the host's nonce store.
 
 use anyhow::{Context, Result};
+use chrono::Utc;
 use ed25519_dalek::VerifyingKey;
 use mvm_contract::grants::ceiling::GrantCeiling;
 use mvm_contract::grants::{CpuGrant, Grants};
 use mvm_contract::protocol::capability_negotiation::negotiate_grants;
 use mvm_contract::protocol::resource_controls::{EnforcedGrants, ResourceControls};
+use mvm_contract::provenance::{
+    ActorRef, AttestationBinding, DecisionActorRole, DecisionCategory, DecisionOutcome,
+    DecisionRecord, DecisionRecordBuilder,
+};
 use mvm_core::plan::bundle::{BundleResolver, TrustStore};
 use mvm_core::plan::{
     ExecutionPlan, NonceStore, PlanId, PlanValidityError, SignedExecutionPlan, Variant,
@@ -207,31 +212,33 @@ pub struct BundleAdmissionContext<'a> {
 /// sealed production launch or a developer's boot, and which backend will
 /// actually boot it. See [`RunPosture`].
 #[tracing::instrument(skip_all)]
-pub fn admit_for_run(
-    input: &SynthesisInput<'_>,
+/// Admission decision over an already-synthesized plan.
+///
+/// This is the inner admission routine that [`admit_for_run`] uses after
+/// synthesizing a plan. Keeping it separate lets callers emit a structured
+/// refusal audit entry when admission fails, binding the refusal to the
+/// plan that was refused.
+pub fn admit_plan_for_run(
+    plan: &ExecutionPlan,
     clock: &dyn Clock,
     ledger: &InMemoryNonceLedger,
     host_signer_keys_dir: Option<&std::path::Path>,
     bundle_ctx: Option<&BundleAdmissionContext<'_>>,
     posture: RunPosture,
 ) -> Result<AdmittedPlan> {
-    // Build the unsigned plan first. Synthesis failures are caught
-    // before we touch the keystore — keeps "signed bad plan" from
-    // being an outcome.
-    let plan = synthesize_plan(input).context("synthesizing plan")?;
-
-    // Grants are checked in that same pre-keystore window, and for the same
-    // reason: a plan we would refuse must never leave here with a signature on
-    // it. A signed refused plan is indistinguishable from a signed admitted one
-    // to anything downstream that only checks the signature.
-    admit_grants(&plan, &host_grant_ceiling(), posture)?;
+    // Grants are checked in the pre-keystore window, and for the same
+    // reason as synthesis: a plan we would refuse must never leave here with a
+    // signature on it. A signed refused plan is indistinguishable from a
+    // signed admitted one to anything downstream that only checks the
+    // signature.
+    admit_grants(plan, &host_grant_ceiling(), posture)?;
 
     // The ceiling above bounds this one workload; the budget bounds the sum of
     // every live one. Both sit in the pre-keystore window for the same reason,
     // and both read host config rather than the plan. The total is measured
     // over live machines only — counting records instead would turn a single
     // crashed VM into a permanent refusal of every later boot.
-    admit_within_host_budget(&plan)?;
+    admit_within_host_budget(plan)?;
 
     // Load or generate the host signer. load_or_init refuses
     // loose perms; that error propagates verbatim.
@@ -244,7 +251,7 @@ pub fn admit_for_run(
     // Sign + verify roundtrip. Verifying our own signature catches
     // wire-format bugs that would otherwise surface at a real
     // verifier (mvmd's supervisor, an upstream consumer's mvm).
-    let signed = sign_plan(&plan, &signer.signing, &signer_id);
+    let signed = sign_plan(plan, &signer.signing, &signer_id);
     let trusted: [(&str, &VerifyingKey); 1] = [(&signer_id, &signer.verifying)];
     let verified = verify_plan(&signed, &trusted).context("verifying just-signed plan")?;
 
@@ -303,6 +310,35 @@ pub fn admit_for_run(
         plan: verified,
         signed,
     })
+}
+
+/// Synthesize a plan and admit it for execution.
+///
+/// This is the high-level admission entry point. It first synthesizes the
+/// plan, then delegates to [`admit_plan_for_run`]. Callers that need to emit
+/// a structured refusal audit entry should synthesize first and call
+/// [`admit_plan_for_run`] directly.
+#[tracing::instrument(skip_all)]
+pub fn admit_for_run(
+    input: &SynthesisInput<'_>,
+    clock: &dyn Clock,
+    ledger: &InMemoryNonceLedger,
+    host_signer_keys_dir: Option<&std::path::Path>,
+    bundle_ctx: Option<&BundleAdmissionContext<'_>>,
+    posture: RunPosture,
+) -> Result<AdmittedPlan> {
+    // Build the unsigned plan first. Synthesis failures are caught
+    // before we touch the keystore — keeps "signed bad plan" from
+    // being an outcome.
+    let plan = synthesize_plan(input).context("synthesizing plan")?;
+    admit_plan_for_run(
+        &plan,
+        clock,
+        ledger,
+        host_signer_keys_dir,
+        bundle_ctx,
+        posture,
+    )
 }
 
 /// The bound this host puts on what any workload may be granted.
@@ -1117,6 +1153,30 @@ fn run_post_admission_gates(
     Ok(config)
 }
 
+fn launch_decision_record(plan: &ExecutionPlan, backend_name: &str) -> DecisionRecord {
+    DecisionRecordBuilder::new()
+        .version(1)
+        .category(DecisionCategory::Launch)
+        .actor(ActorRef {
+            principal: crate::audit::host_keypair::host_signer_id(),
+            key_id: crate::audit::host_keypair::host_signer_id(),
+            key_role: Some(DecisionActorRole::Orchestrator),
+        })
+        .scenario(mvm_contract::provenance::DecisionScenario {
+            plan_id: Some(plan.plan_id.0.clone()),
+            ..Default::default()
+        })
+        .reasoning(format!("workload launched on backend {backend_name}"))
+        .outcome(DecisionOutcome::Approved)
+        .timestamp(Utc::now().to_rfc3339())
+        .attestation(AttestationBinding {
+            plan_id: Some(plan.plan_id.0.clone()),
+            ..AttestationBinding::default()
+        })
+        .build()
+        .expect("launch decision record is well-formed")
+}
+
 /// What rolling a launch back needs to know. A struct rather than seven
 /// positional arguments, so a caller cannot silently swap the stage label for
 /// the reason.
@@ -1168,14 +1228,33 @@ pub fn admit_and_start(
     // name: the grant gate decides which resource controls a run is measured
     // against, and deciding that from a string is how a plan ends up measured
     // against a tier it is not running on.
-    let admitted = admit_for_run(
-        params.synthesis,
+    let posture = RunPosture::on_backend(params.variant, backend.kind());
+
+    // Synthesize the plan up-front so a refusal can be recorded with the
+    // plan context if admission fails. Synthesis failures have no plan to
+    // anchor to; they propagate without a chain entry.
+    let plan = synthesize_plan(params.synthesis).context("synthesizing plan")?;
+
+    let admitted = match admit_plan_for_run(
+        &plan,
         params.clock,
         params.ledger,
         params.host_signer_keys_dir,
         params.bundle_ctx,
-        RunPosture::on_backend(params.variant, backend.kind()),
-    )?;
+        posture,
+    ) {
+        Ok(admitted) => admitted,
+        Err(err) => {
+            if let Some(emitter) = params.emitter
+                && let Err(e) =
+                    emitter.emit_refused(&plan, "admit_plan_for_run", &format!("{err:#}"))
+            {
+                tracing::warn!(error = %e, "audit emit_refused failed (non-fatal)");
+            }
+            return Err(err);
+        }
+    };
+
     crate::audit::durability::record_admission(
         params.emitter,
         admitted.plan(),
@@ -1248,6 +1327,10 @@ pub fn admit_and_start(
             if let Some(emitter) = params.emitter {
                 if let Err(e) = emitter.emit_launched(admitted.plan(), &backend_name) {
                     tracing::warn!(error = %e, "audit emit_launched failed (non-fatal)");
+                }
+                let record = launch_decision_record(admitted.plan(), &backend_name);
+                if let Err(e) = emitter.emit_decision_record(admitted.plan(), record) {
+                    tracing::warn!(error = %e, "audit emit_decision_record for launch failed (non-fatal)");
                 }
                 if let Err(e) = emitter.emit_grants_enforced(admitted.plan(), &enforced_grants) {
                     tracing::warn!(error = %e, "audit emit_grants_enforced failed (non-fatal)");

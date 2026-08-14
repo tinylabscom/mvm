@@ -19,6 +19,11 @@
 //! truth and the only durability boundary that can refuse a run.
 
 use anyhow::{Context, Result};
+use chrono::Utc;
+use mvm_contract::provenance::{
+    ActorRef, AttestationBinding, DecisionActorRole, DecisionCategory, DecisionOutcome,
+    DecisionRecord, DecisionRecordBuilder,
+};
 use mvm_core::plan::ExecutionPlan;
 
 use crate::audit::emitter::AuditEmitter;
@@ -80,7 +85,13 @@ pub fn record_admission(
     };
 
     match emitter.emit_admitted(plan, signer_id) {
-        Ok(()) => Ok(()),
+        Ok(()) => {
+            let record = admission_decision_record(plan, signer_id);
+            if let Err(e) = emitter.emit_decision_record(plan, record) {
+                tracing::warn!(error = %e, "audit emit_decision_record failed (non-fatal)");
+            }
+            Ok(())
+        }
         Err(e) if durability.is_required() => Err(e).context(
             "recording the admission in the chain-signed audit log; refusing to boot a \
              sealed-production workload whose admission cannot be proven afterwards",
@@ -90,6 +101,30 @@ pub fn record_admission(
             Ok(())
         }
     }
+}
+
+fn admission_decision_record(plan: &ExecutionPlan, signer_id: &str) -> DecisionRecord {
+    DecisionRecordBuilder::new()
+        .version(1)
+        .category(DecisionCategory::Admission)
+        .actor(ActorRef {
+            principal: signer_id.to_string(),
+            key_id: signer_id.to_string(),
+            key_role: Some(DecisionActorRole::Orchestrator),
+        })
+        .scenario(mvm_contract::provenance::DecisionScenario {
+            plan_id: Some(plan.plan_id.0.clone()),
+            ..Default::default()
+        })
+        .reasoning("plan admitted after host grant ceiling and budget checks")
+        .outcome(DecisionOutcome::Approved)
+        .timestamp(Utc::now().to_rfc3339())
+        .attestation(AttestationBinding {
+            plan_id: Some(plan.plan_id.0.clone()),
+            ..AttestationBinding::default()
+        })
+        .build()
+        .expect("admission decision record is well-formed")
 }
 
 #[cfg(test)]

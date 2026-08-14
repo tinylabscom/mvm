@@ -590,9 +590,11 @@ pub(crate) fn bind_checkpoint_created(name: &str, meta: &mvm_core::checkpoint::C
             return;
         }
     };
-    let emitter = match super::audit_chain::AuditEmitter::new(signer.signing) {
-        Ok(e) => e.with_receipts(),
-        Err(e) => {
+    let emitter = match super::audit_chain::AuditEmitter::new(signer.signing)
+        .map(|e| e.with_receipts().with_decisions())
+    {
+        Ok(Ok(e)) => e,
+        Ok(Err(e)) | Err(e) => {
             tracing::warn!(error = %e, "audit emitter unavailable; chain entry skipped");
             return;
         }
