@@ -1076,6 +1076,11 @@ pub fn scaffold_from_template_entry(
         TemplateSource::Bundled { preset } => {
             scaffold_template_files(dir, name, preset, None)?;
         }
+        TemplateSource::Image { image_ref } => {
+            anyhow::bail!(
+                "image template {name:?} ({image_ref}) is used directly with                  `mvmctl run --template {name} -- <cmd>`; use `mvmctl init` to scaffold a flake-based project"
+            );
+        }
         TemplateSource::Remote { cache_dir } => {
             let flake_path = dir.join("flake.nix");
             if !flake_path.exists() {

@@ -1,10 +1,17 @@
 ---
 title: Templates
-description: Reusable mvm project blueprints built from manifests and Nix flakes.
+description: Reusable mvm project blueprints built from manifests, Nix flakes, or OCI images.
 ---
 
-The old `mvmctl template` command family is gone. The current reusable
-blueprint is a project directory with:
+Templates are reusable workload bases. There are two kinds:
+
+- **Project templates** — a project directory with an `mvm.toml` / `Mvmfile.toml`
+  and a `flake.nix` that defines the guest rootfs.
+- **Image templates** — a named OCI image reference, either built-in
+  (`python`, `node`, `rust`, `go`, `ruby`, `java`, `shell`, `data-science`,
+  `web-dev`) or created with `mvmctl template build --image <ref>`.
+
+The current reusable blueprint is a project directory with:
 
 - `mvm.toml` or `Mvmfile.toml` for build input and runtime sizing;
 - `flake.nix` for the guest rootfs, packages, users, services, and kernel/rootfs content;
@@ -34,6 +41,20 @@ and update the current revision for that slot.
 - Put guest packages and services in the flake, not in ad-hoc host scripts.
 - Treat network, secrets, and state retention as explicit runtime policy.
 - Avoid mutable OCI tags for production examples; resolve to immutable digests.
+
+## Image templates
+
+For one-shot runs that do not need a custom Nix flake, use an image template:
+
+```sh
+mvmctl run --template python script.py
+mvmctl template build --image python:3.12-alpine --name my-python
+mvmctl run --template my-python script.py
+```
+
+`--template` is mutually exclusive with `--image`, `--manifest`, and
+`--launch-plan`. The name resolves first to a user-built template, then to a
+built-in language template, then to a bundled project template.
 
 ## Related pages
 

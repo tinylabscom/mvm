@@ -132,6 +132,13 @@ pub(in crate::commands) struct RunArgs {
     /// Path to an mvmforge launch document. Mutually exclusive with trailing argv.
     #[arg(long, value_name = "PATH", conflicts_with = "argv")]
     pub launch_plan: Option<String>,
+    /// Run using a named template's OCI image reference.
+    ///
+    /// The name resolves to a user-built image template, a built-in language
+    /// template, or (for non-image sources) a bundled/remote template. Mutually
+    /// exclusive with `--image`, `--manifest`, and `--launch-plan`.
+    #[arg(long, value_name = "NAME", conflicts_with_all = ["image", "manifest", "launch_plan"])]
+    pub template: Option<String>,
     /// SDK transport mode for `mvmctl run`.
     ///
     /// - `--mode plan`: synthesize an ExecutionPlan per Sandbox call
@@ -268,6 +275,17 @@ pub(in crate::commands) fn run_secure_with_source(
     cfg: &MvmConfig,
     source_override: Option<crate::exec::ImageSource>,
 ) -> Result<()> {
+    // Resolve a named template to its OCI image reference before auto-detection.
+    // `--template` is mutually exclusive with `--image`, `--manifest`, and
+    // `--launch-plan` at the clap layer.
+    if let Some(template_name) = args.template.as_deref()
+        && args.image.is_none()
+    {
+        let image_ref = crate::template_registry::resolve_image_ref(template_name)
+            .with_context(|| format!("template {template_name:?} is not an image template"))?;
+        args.image = Some(image_ref);
+    }
+
     // Auto-detect the runtime image from the command or project files when
     // no explicit source was supplied. Explicit `--image` / `--manifest` /
     // `--launch-plan` always win; `--no-detect` disables this.
@@ -1621,6 +1639,7 @@ mod tests {
             dry_run: false,
             no_detect: false,
             launch_plan: None,
+            template: None,
             mode: None,
             dev: false,
             prod: false,

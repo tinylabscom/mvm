@@ -170,13 +170,13 @@ paths beyond the existing policy vocabulary.
 
 ### Phase 4 — Templates and OCI-image bases
 
-- [ ] Implement `mvmctl template build --image <ref>` as a first-class path,
+- [x] Implement `mvmctl template build --image <ref>` as a first-class path,
       alongside the existing Nix-flake path.
-- [ ] Add built-in language templates (python, node, rust, go, ruby, java,
+- [x] Add built-in language templates (python, node, rust, go, ruby, java,
       shell, data-science, web-dev) backed by pinned OCI refs.
 - [ ] Allow saving a running dev-tier sandbox as a custom template.
 - [ ] Integrate templates with the snapshot-first storage from Plan 255.
-- [ ] Add BDD scenarios for template build, save, and reuse.
+- [x] Add BDD scenarios for template build and reuse (save is deferred).
 
 **Acceptance:** A user can `mvmctl template build --image python:3.12-alpine`
 and then `mvmctl run --template python <script>`.

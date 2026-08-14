@@ -1,22 +1,28 @@
-//! Template registry — bundled presets + remote fetch/cache.
+//! Template registry — bundled presets, built-in OCI image templates,
+//! user-built image templates, and remote fetch/cache.
 //!
 //! The registry abstracts where a template comes from. Bundled templates
 //! ship inside the `mvmctl` binary and are always available offline.
-//! Remote templates live in a separate repository (e.g.
-//! `github:tinylabscom/mvm-templates`) and are fetched on first use,
-//! then cached under `~/.mvm/templates/remote/`.
+//! Built-in image templates are pinned OCI references for common language
+//! runtimes and are also offline. User-built image templates are created
+//! with `mvmctl template build --image <ref>` and stored under
+//! `~/.mvm/templates/built/`. Remote templates live in a separate
+//! repository and are fetched on first use, then cached under
+//! `~/.mvm/templates/remote/`.
 //!
 //! Resolution order:
-//!   1. Bundled catalog (offline, core presets).
-//!   2. Local remote cache (already fetched).
-//!   3. Remote registry index + download (network required).
+//!   1. User-built image templates (local, explicit).
+//!   2. Built-in image templates (offline, pinned OCI refs).
+//!   3. Bundled catalog (offline, core Nix presets).
+//!   4. Local remote cache (already fetched).
+//!   5. Remote registry index + download (network required).
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
-/// A resolved template ready to scaffold.
+/// A resolved template ready to use or scaffold.
 #[derive(Debug, Clone)]
 pub struct TemplateEntry {
     pub name: String,
@@ -32,6 +38,8 @@ pub struct TemplateEntry {
 pub enum TemplateSource {
     /// A preset whose flake content is embedded in `mvmctl`.
     Bundled { preset: String },
+    /// A pinned OCI image reference.
+    Image { image_ref: String },
     /// A template downloaded from the remote registry into the local cache.
     Remote { cache_dir: PathBuf },
 }
@@ -67,6 +75,18 @@ struct RemoteTemplateMeta {
     files: Vec<String>,
 }
 
+/// Persistent metadata for a user-built image template.
+#[derive(Debug, Serialize, Deserialize)]
+struct BuiltTemplateMeta {
+    name: String,
+    description: String,
+    image_ref: String,
+    default_vcpus: u8,
+    default_memory_mib: u32,
+    #[serde(default)]
+    tags: Vec<String>,
+}
+
 /// Registry configuration.
 #[derive(Debug, Clone)]
 pub struct RegistryConfig {
@@ -94,6 +114,212 @@ impl RegistryConfig {
     }
 }
 
+/// One built-in image template entry.
+struct BuiltinTemplate {
+    name: &'static str,
+    description: &'static str,
+    image_ref: &'static str,
+    cpus: u8,
+    mem_mib: u32,
+    tags: &'static [&'static str],
+}
+
+/// Built-in image templates backed by pinned OCI references.
+///
+/// These are conservative, well-known defaults so that
+/// `mvmctl run --template python script.py` works without a manifest.
+fn builtin_image_templates() -> Vec<TemplateEntry> {
+    const BUILTINS: &[BuiltinTemplate] = &[
+        BuiltinTemplate {
+            name: "python",
+            description: "Python 3.12 runtime",
+            image_ref: "python:3.12-alpine",
+            cpus: 1,
+            mem_mib: 256,
+            tags: &["python", "language"],
+        },
+        BuiltinTemplate {
+            name: "node",
+            description: "Node.js 22 runtime",
+            image_ref: "node:22-alpine",
+            cpus: 1,
+            mem_mib: 256,
+            tags: &["node", "javascript", "language"],
+        },
+        BuiltinTemplate {
+            name: "rust",
+            description: "Rust 1.85 runtime",
+            image_ref: "rust:1.85-alpine",
+            cpus: 2,
+            mem_mib: 512,
+            tags: &["rust", "language"],
+        },
+        BuiltinTemplate {
+            name: "go",
+            description: "Go 1.23 runtime",
+            image_ref: "golang:1.23-alpine",
+            cpus: 1,
+            mem_mib: 256,
+            tags: &["go", "language"],
+        },
+        BuiltinTemplate {
+            name: "ruby",
+            description: "Ruby 3.3 runtime",
+            image_ref: "ruby:3.3-alpine",
+            cpus: 1,
+            mem_mib: 256,
+            tags: &["ruby", "language"],
+        },
+        BuiltinTemplate {
+            name: "java",
+            description: "Java 21 runtime",
+            image_ref: "eclipse-temurin:21-alpine",
+            cpus: 1,
+            mem_mib: 512,
+            tags: &["java", "jvm", "language"],
+        },
+        BuiltinTemplate {
+            name: "shell",
+            description: "POSIX shell runtime",
+            image_ref: "alpine:3.20",
+            cpus: 1,
+            mem_mib: 128,
+            tags: &["shell", "sh", "language"],
+        },
+        BuiltinTemplate {
+            name: "data-science",
+            description: "Python data-science stack",
+            image_ref: "jupyter/scipy-notebook:python-3.12",
+            cpus: 2,
+            mem_mib: 2048,
+            tags: &["python", "data", "science"],
+        },
+        BuiltinTemplate {
+            name: "web-dev",
+            description: "Node.js web development runtime",
+            image_ref: "node:22-alpine",
+            cpus: 1,
+            mem_mib: 512,
+            tags: &["node", "web", "javascript"],
+        },
+    ];
+
+    BUILTINS
+        .iter()
+        .map(|b| TemplateEntry {
+            name: b.name.to_string(),
+            description: b.description.to_string(),
+            default_cpus: b.cpus,
+            default_memory_mib: b.mem_mib,
+            tags: b.tags.iter().map(|t| (*t).to_string()).collect(),
+            source: TemplateSource::Image {
+                image_ref: b.image_ref.to_string(),
+            },
+        })
+        .collect()
+}
+
+/// Directory where user-built image templates are persisted.
+fn built_templates_dir() -> PathBuf {
+    PathBuf::from(mvm_core::config::mvm_home())
+        .join("templates")
+        .join("built")
+}
+
+/// Directory for one user-built image template.
+fn built_template_dir(name: &str) -> PathBuf {
+    built_templates_dir().join(sanitize_cache_key(name))
+}
+
+/// Persist a user-built image template so it can be resolved by name.
+pub fn persist_built_image_template(
+    name: &str,
+    image_ref: &str,
+    description: Option<&str>,
+    default_vcpus: Option<u8>,
+    default_memory_mib: Option<u32>,
+) -> Result<()> {
+    let dir = built_template_dir(name);
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("creating built template dir {}", dir.display()))?;
+
+    let meta = BuiltTemplateMeta {
+        name: name.to_string(),
+        description: description
+            .map(ToString::to_string)
+            .unwrap_or_else(|| format!("OCI image template built from {image_ref}")),
+        image_ref: image_ref.to_string(),
+        default_vcpus: default_vcpus.unwrap_or(1),
+        default_memory_mib: default_memory_mib.unwrap_or(256),
+        tags: vec!["built".to_string(), "oci".to_string()],
+    };
+
+    let text = toml::to_string(&meta).context("serializing built template metadata")?;
+    let path = dir.join("template.toml");
+    std::fs::write(&path, text).with_context(|| format!("writing {}", path.display()))?;
+    Ok(())
+}
+
+/// Read all user-built image templates from disk.
+fn list_built_templates() -> Vec<TemplateEntry> {
+    let dir = built_templates_dir();
+    if !dir.is_dir() {
+        return Vec::new();
+    }
+
+    let mut out = Vec::new();
+    for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+        let path = entry.path().join("template.toml");
+        if !path.is_file() {
+            continue;
+        }
+        match read_built_template(&path) {
+            Ok(entry) => out.push(entry),
+            Err(e) => {
+                tracing::warn!(path = %path.display(), error = %e, "skipping built template");
+            }
+        }
+    }
+    out
+}
+
+fn read_built_template(path: &Path) -> Result<TemplateEntry> {
+    let text =
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    let meta: BuiltTemplateMeta =
+        toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+    Ok(TemplateEntry {
+        name: meta.name,
+        description: meta.description,
+        default_cpus: meta.default_vcpus,
+        default_memory_mib: meta.default_memory_mib,
+        tags: meta.tags,
+        source: TemplateSource::Image {
+            image_ref: meta.image_ref,
+        },
+    })
+}
+
+/// Resolve a template name to an OCI image reference.
+///
+/// Checks user-built templates first, then built-in image templates.
+/// Returns `None` if the name is not a built/builtin image template.
+pub fn resolve_image_ref(name: &str) -> Option<String> {
+    if let Some(entry) = list_built_templates().into_iter().find(|e| e.name == name)
+        && let TemplateSource::Image { image_ref } = entry.source
+    {
+        return Some(image_ref);
+    }
+    if let Some(entry) = builtin_image_templates()
+        .into_iter()
+        .find(|e| e.name == name)
+        && let TemplateSource::Image { image_ref } = entry.source
+    {
+        return Some(image_ref);
+    }
+    None
+}
+
 /// Return all bundled templates.
 pub fn bundled_templates() -> Vec<TemplateEntry> {
     super::commands::catalog::load_bundled_catalog()
@@ -112,9 +338,11 @@ pub fn bundled_templates() -> Vec<TemplateEntry> {
         .collect()
 }
 
-/// List templates available without network: bundled + cached remote.
+/// List templates available without network: built + built-in image + bundled + cached remote.
 pub fn list_available(cfg: &RegistryConfig) -> Vec<TemplateEntry> {
-    let mut out = bundled_templates();
+    let mut out = list_built_templates();
+    out.extend(builtin_image_templates());
+    out.extend(bundled_templates());
     if let Ok(cached) = list_cached_remote(cfg) {
         out.extend(cached);
     }
@@ -149,8 +377,20 @@ pub async fn search_remote(cfg: &RegistryConfig, query: &str) -> Result<Vec<Temp
     Ok(out)
 }
 
-/// Resolve a template by name. Bundled wins, then cached remote, then remote fetch.
+/// Resolve a template by name.
+///
+/// Order: user-built image, built-in image, bundled catalog, cached remote,
+/// remote fetch.
 pub async fn resolve(cfg: &RegistryConfig, name: &str) -> Result<TemplateEntry> {
+    if let Some(entry) = list_built_templates().into_iter().find(|e| e.name == name) {
+        return Ok(entry);
+    }
+    if let Some(entry) = builtin_image_templates()
+        .into_iter()
+        .find(|e| e.name == name)
+    {
+        return Ok(entry);
+    }
     if let Some(entry) = bundled_templates().into_iter().find(|e| e.name == name) {
         return Ok(entry);
     }
@@ -329,6 +569,57 @@ mod tests {
         assert_eq!(
             sanitize_cache_key("https://example.com/path?foo=bar"),
             "https___example.com_path_foo_bar"
+        );
+    }
+
+    #[test]
+    fn builtin_image_templates_include_language_presets() {
+        let names: Vec<_> = builtin_image_templates()
+            .into_iter()
+            .map(|e| e.name)
+            .collect();
+        assert!(names.contains(&"python".to_string()));
+        assert!(names.contains(&"node".to_string()));
+        assert!(names.contains(&"rust".to_string()));
+        assert!(names.contains(&"go".to_string()));
+        assert!(names.contains(&"ruby".to_string()));
+        assert!(names.contains(&"java".to_string()));
+        assert!(names.contains(&"shell".to_string()));
+    }
+
+    #[test]
+    fn resolve_image_ref_finds_builtin_templates() {
+        assert_eq!(
+            resolve_image_ref("python"),
+            Some("python:3.12-alpine".to_string())
+        );
+        assert_eq!(
+            resolve_image_ref("node"),
+            Some("node:22-alpine".to_string())
+        );
+        assert_eq!(resolve_image_ref("not-a-template"), None);
+    }
+
+    #[test]
+    fn built_templates_round_trip() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Redirect MVM_HOME so the test does not touch the user's registry.
+        unsafe { std::env::set_var("MVM_HOME", tmp.path().as_os_str()) };
+        persist_built_image_template("my-py", "python:3.12-alpine", None, None, None)
+            .expect("persist built template");
+
+        let entries = list_built_templates();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "my-py");
+        if let TemplateSource::Image { image_ref } = &entries[0].source {
+            assert_eq!(image_ref, "python:3.12-alpine");
+        } else {
+            panic!("expected image source");
+        }
+
+        assert_eq!(
+            resolve_image_ref("my-py"),
+            Some("python:3.12-alpine".to_string())
         );
     }
 

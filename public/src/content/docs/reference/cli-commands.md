@@ -121,7 +121,7 @@ guest-RPC surface, fleet-shaped workflows).
 
 ## Manifests
 
-> **Status:** the `mvmctl init/build/manifest *` surface below is the **plan-38 model**, shipped on `feat/manifest-driven-template-dx-claude`. The user-facing primitive is an `mvm.toml` file alongside your `flake.nix`. See the [Manifests guide](/guides/manifests/) for the conceptual model. The old `mvmctl template <verb>` namespace was removed; clap returns "unrecognized subcommand" for old invocations. `mvmctl manifest push` / `pull` are planned in [plan 39](https://github.com/tinylabscom/mvm/blob/main/specs/plans/39-manifest-push-pull.md) but not yet implemented.
+> **Status:** the `mvmctl init/build/manifest *` surface below is the **plan-38 model**, shipped on `feat/manifest-driven-template-dx-claude`. The user-facing primitive is still an `mvm.toml` file alongside your `flake.nix`. See the [Manifests guide](/guides/manifests/) for the conceptual model. The `mvmctl template` namespace has been revived for **image templates**: `template list`, `template info`, `template build --image`, and the `mvmctl run --template <name>` shortcut. `mvmctl manifest push` / `pull` are planned in [plan 39](https://github.com/tinylabscom/mvm/blob/main/specs/plans/39-manifest-push-pull.md) but not yet implemented.
 
 ### Scaffolding (top-level)
 
@@ -160,6 +160,16 @@ guest-RPC surface, fleet-shaped workflows).
 | `mvmctl manifest prune --orphans` | Remove builds whose source manifest is gone |
 | `mvmctl manifest prune --orphans --dry-run` | Preview what would be removed |
 | `mvmctl manifest push` / `mvmctl manifest pull` | **Planned, not yet implemented.** Tracked in [plan 39](https://github.com/tinylabscom/mvm/blob/main/specs/plans/39-manifest-push-pull.md). |
+
+## Templates
+
+| Command | Description |
+|---------|-------------|
+| `mvmctl template list` | List built, built-in image, bundled, and cached remote templates |
+| `mvmctl template info <name>` | Show template details including source and (for image templates) the OCI reference |
+| `mvmctl template build --image <ref> --name <name>` | Persist an OCI image reference as a reusable named template |
+| `mvmctl run --template <name> -- <cmd>...` | Run a command using the named template's image |
+| `mvmctl machine run --template <name> -- <cmd>...` | Same, under the `machine` noun group |
 
 ## Configuration
 

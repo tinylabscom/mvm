@@ -452,6 +452,7 @@ pub(in crate::commands) fn boot_persistent_by_name(
             image: None,
             manifest: None,
             deployment: None,
+            template: None,
             runtime_pack: false,
             flake_profile: None,
             net: false,

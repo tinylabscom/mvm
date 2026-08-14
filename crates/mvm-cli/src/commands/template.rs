@@ -1,16 +1,20 @@
-//! `mvmctl template` — browse bundled and remote microVM templates.
+//! `mvmctl template` — browse, build, and inspect microVM templates.
 //!
-//! Templates are parameterized project scaffolds. The bundled core set
-//! ships offline with `mvmctl`; additional templates live in a separate
-//! registry repository and are fetched on demand.
+//! Templates are reusable workload bases. The bundled core set ships offline
+//! with `mvmctl`; built-in image templates provide pinned OCI runtimes for
+//! common languages; user-built image templates are created with
+//! `mvmctl template build --image <ref>`; and additional templates live in a
+//! separate registry repository fetched on demand.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Args as ClapArgs, Subcommand};
 
 use mvm_core::user_config::MvmConfig;
 
 use super::Cli;
-use crate::template_registry::{RegistryConfig, list_available, search_remote};
+use crate::template_registry::{
+    RegistryConfig, list_available, persist_built_image_template, search_remote,
+};
 
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct Args {
@@ -20,14 +24,32 @@ pub(in crate::commands) struct Args {
 
 #[derive(Subcommand, Debug, Clone)]
 pub(in crate::commands) enum TemplateAction {
-    /// List available templates (bundled + cached remote).
+    /// List available templates (built + built-in image + bundled + cached remote).
     List,
+    /// Build a reusable image-backed template from an OCI reference.
+    Build {
+        /// OCI image reference (e.g. `python:3.12-alpine`).
+        #[arg(long, value_name = "REF")]
+        image: String,
+        /// Name for the template. Defaults to the image repository basename.
+        #[arg(long, value_name = "NAME")]
+        name: Option<String>,
+        /// Human-readable description.
+        #[arg(long, value_name = "TEXT")]
+        description: Option<String>,
+        /// Default vCPUs for runs using this template.
+        #[arg(long, value_name = "N")]
+        cpus: Option<u8>,
+        /// Default memory in MiB for runs using this template.
+        #[arg(long, value_name = "MIB")]
+        memory: Option<u32>,
+    },
     /// Search the remote registry for templates matching a query.
     Search {
         /// Search query.
         query: String,
     },
-    /// Show details for one template (bundled or remote).
+    /// Show details for one template (built, bundled, or remote).
     Info {
         /// Template name.
         name: String,
@@ -39,6 +61,19 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
     let cfg = RegistryConfig::load();
     match args.action {
         TemplateAction::List => run_list(&cfg),
+        TemplateAction::Build {
+            image,
+            name,
+            description,
+            cpus,
+            memory,
+        } => run_build(
+            &image,
+            name.as_deref(),
+            description.as_deref(),
+            cpus,
+            memory,
+        ),
         TemplateAction::Search { query } => run_search(&cfg, &query),
         TemplateAction::Info { name } => run_info(&cfg, &name),
     }
@@ -52,6 +87,42 @@ fn run_list(cfg: &RegistryConfig) -> Result<()> {
     }
     print_table(&entries);
     Ok(())
+}
+
+fn run_build(
+    image_ref: &str,
+    name: Option<&str>,
+    description: Option<&str>,
+    cpus: Option<u8>,
+    memory: Option<u32>,
+) -> Result<()> {
+    let name = name
+        .map(ToString::to_string)
+        .unwrap_or_else(|| default_name_from_image_ref(image_ref));
+
+    persist_built_image_template(&name, image_ref, description, cpus, memory)
+        .with_context(|| format!("persisting built template {name}"))?;
+
+    println!("Built image template '{name}' from {image_ref}");
+    println!("Use it with: mvmctl run --template {name} -- <cmd>...");
+    Ok(())
+}
+
+fn default_name_from_image_ref(image_ref: &str) -> String {
+    // Strip tag/digest and repository prefix; keep the last path component.
+    let without_digest = image_ref
+        .split_once('@')
+        .map(|(l, _)| l)
+        .unwrap_or(image_ref);
+    let without_tag = without_digest
+        .split_once(':')
+        .map(|(l, _)| l)
+        .unwrap_or(without_digest);
+    without_tag
+        .split('/')
+        .next_back()
+        .unwrap_or(without_tag)
+        .to_string()
 }
 
 fn run_search(cfg: &RegistryConfig, query: &str) -> Result<()> {
@@ -77,6 +148,10 @@ fn run_info(cfg: &RegistryConfig, name: &str) -> Result<()> {
     match entry.source {
         crate::template_registry::TemplateSource::Bundled { .. } => {
             println!("source:      bundled");
+        }
+        crate::template_registry::TemplateSource::Image { image_ref } => {
+            println!("source:      image");
+            println!("image:       {image_ref}");
         }
         crate::template_registry::TemplateSource::Remote { cache_dir } => {
             println!("source:      remote");

@@ -263,6 +263,9 @@ pub(in crate::commands) struct MachineRunArgs {
     /// Boot a local attested deployment (deploy.json plus rootfs.ext4).
     #[arg(long, value_name = "DIR", conflicts_with_all = ["image", "manifest", "flake", "runtime_pack"])]
     pub deployment: Option<PathBuf>,
+    /// Boot the OCI image referenced by a named template.
+    #[arg(long, value_name = "NAME", conflicts_with_all = ["image", "manifest", "flake", "runtime_pack", "deployment"])]
+    pub template: Option<String>,
     /// Select a flake package.
     #[arg(long, value_name = "PROFILE", requires = "flake")]
     pub flake_profile: Option<String>,
@@ -432,6 +435,7 @@ impl MachineRunArgs {
             pty: false,
             vm_name: self.name,
             image: self.image,
+            template: self.template,
             runtime_pack: self.runtime_pack,
             net: self.net,
             allow_host: self.allow_host,
@@ -1564,6 +1568,7 @@ fn run_args_for_image_revert(
             stdin: None,
             manifest,
             deployment: None,
+            template: None,
             runtime_pack: false,
             flake_profile: None,
             net: false,

@@ -11,7 +11,7 @@ Feature: mvmctl template registry
     And the output contains "python"
 
   Scenario: template info resolves a bundled preset
-    When I run mvmctl with "template info python"
+    When I run mvmctl with "template info minimal"
     Then the command exits with code 0
     And the output contains "source:      bundled"
 

@@ -134,6 +134,11 @@ fn isolated_mvm_home(world: &mut CliWorld) {
     world.isolated_home = Some(tempfile::tempdir().expect("create isolated MVM_HOME"));
 }
 
+#[given(expr = "I have run mvmctl in the isolated mvm home with {string}")]
+fn given_run_mvmctl_in_isolated_home(world: &mut CliWorld, args: String) {
+    run_mvmctl_in_isolated_home(world, args);
+}
+
 #[given(expr = "an isolated mvm home with a cached non-verity workload kernel")]
 fn isolated_mvm_home_with_non_verity_kernel(world: &mut CliWorld) {
     let home = tempfile::tempdir().expect("create isolated MVM_HOME");

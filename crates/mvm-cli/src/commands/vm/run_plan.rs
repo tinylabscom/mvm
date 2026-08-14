@@ -574,6 +574,7 @@ mod tests {
             receipt: None,
             json: false,
             launch_plan: None,
+            template: None,
             mode: Some(RunMode::Plan),
             dev: false,
             prod: false,

@@ -15,6 +15,7 @@ Use one-shot mode for isolated code execution. Use named-VM commands when you ar
 ```sh
 mvmctl run -- uname -a
 mvmctl run python3 script.py
+mvmctl run --template python script.py
 mvmctl run --profile restrictive -- python -c 'print("hello")'
 mvmctl run --timeout 30 --receipt /tmp/run-receipt.json -- python task.py
 ```
