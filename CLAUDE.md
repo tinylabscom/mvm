@@ -491,11 +491,17 @@ systemd transient scope on Linux and the achieved tier is read back off
 primitive, so the run loop enforces the share in-process using the vCPU
 thread's Mach CPU time; the achieved tier is read back from the scheduler's
 measured record and audited. libkrun has no in-process vCPU control, so a CPU
-grant there stays `declared` and `--prod` refuses it. Wall clock is claimed by
-nothing: it is authored, ceiling-checked, admitted and audited as a tier
-label, and no code in this tree stops a workload at its deadline. wasm
-fuel/epoch is likewise declared and unwired, and a restored or warm-claimed
-child is admission-bounded without its host-side CPU control being re-armed.
+grant there stays `declared` and `--prod` refuses it. Wall clock is enforced
+by the per-VM supervisor on libkrun and HVF: the process that owns the guest
+for its whole life arms a timer from the admitted plan, and a workload that
+outruns its bound is killed with exit `124` and a chain-signed entry. A bound
+whose kill could not be audited refuses to boot rather than running unbounded.
+Firecracker has no such supervisor process and is not covered. wasm
+fuel/epoch is declared and unwired, and a restored or warm-claimed child is
+admission-bounded without its host-side CPU control **or its wall-clock
+timer** being re-armed — a restore deliberately does not inherit the parent's
+plan, since auditing a child's kill under its parent's identity would write a
+wrong entry rather than a missing one.
 ADR-001's ledger carries the "Preview 18 limits" note; do not paraphrase
 this row as enforced without it.
 

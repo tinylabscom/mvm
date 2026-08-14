@@ -171,6 +171,14 @@ pub fn hvf_child_restore_config(
         restore_ram: Some(restore_ram),
         restore_frame: Some(restore_frame),
         timeout_secs: parent.timeout_secs,
+        // A restored child does not re-arm the wall-clock timer. Inheriting the
+        // parent's plan would audit the child's kill against the parent's
+        // identity — a wrong entry in the chain is worse than a missing one.
+        // The child is still admission-bounded; this mirrors the host-side CPU
+        // control, which a restore does not re-arm either.
+        plan: None,
+        audit_dir: None,
+        signing_key_path: None,
         agent_socket: Some(mvm_core::config::vm_hvf_agent_socket_at(req.state_dir)),
         // Authority-bearing relays never survive a restore: the child reaches
         // the network, the broker and an interactive console only through
@@ -311,6 +319,9 @@ mod tests {
             restore_ram: None,
             restore_frame: None,
             timeout_secs: 0,
+            plan: None,
+            audit_dir: None,
+            signing_key_path: None,
             agent_socket: Some(PathBuf::from("/parent/hvf-agent.sock")),
             substitution_socket: Some(PathBuf::from("/parent/substitution.sock")),
             egress_relay_socket: Some(PathBuf::from("/parent/egress.sock")),

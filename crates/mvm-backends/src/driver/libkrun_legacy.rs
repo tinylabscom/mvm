@@ -24,10 +24,7 @@
 //! - `list` walks `~/.mvm/vms/*/libkrun.pid`.
 
 use anyhow::{Context, Result, anyhow, bail};
-use libkrun_sys::{
-    BridgeRestartPolicy, KrunContext, SupervisorAttachConfig, SupervisorBaseConfig,
-    SupervisorConfig,
-};
+use libkrun_sys::{BridgeRestartPolicy, KrunContext, SupervisorAttachConfig, SupervisorBaseConfig};
 use mvm_core::config::vm_console_log;
 use mvm_core::kernel_format::KernelFormat;
 use mvm_core::vm_backend::{StandbyClaim, StandbyError, StandbySpec, VmStartConfig};
@@ -569,54 +566,6 @@ pub fn parse_plan_and_bundle(
         None => None,
     };
     Ok((plan, bundle))
-}
-
-pub fn build_supervisor_config(
-    config: &VmStartConfig,
-    state_dir: &Path,
-) -> Result<SupervisorConfig> {
-    let kernel = config
-        .kernel_path
-        .as_deref()
-        .ok_or_else(|| anyhow!("libkrun backend requires a kernel path"))?;
-    let (kernel, kernel_format) = libkrun_kernel_for_host(kernel)?;
-    let vcpus = u8::try_from(config.cpus.clamp(1, u32::from(u8::MAX))).unwrap_or(u8::MAX);
-    let cmdline = build_guest_cmdline(config, state_dir);
-    let krun =
-        build_workload_krun_context(config, &kernel, kernel_format, vcpus, &cmdline, state_dir)?;
-    let substrate = resolve_audit_substrate(config)?;
-    let (plan, bundle) = parse_plan_and_bundle(config)?;
-
-    Ok(SupervisorConfig {
-        krun,
-        exclusive_image_lock: None,
-        vm_state_dir: state_dir.to_string_lossy().into_owned(),
-        pid_file_name: None,
-        tenant_id: substrate.tenant_id,
-        audit_dir: substrate.audit_dir,
-        gateway_audit_socket: substrate.gateway_audit_socket,
-        gateway_events_socket: substrate.gateway_events_socket,
-        signing_key_path: substrate.signing_key_path,
-        plan,
-        bundle,
-        // Always carry the resolved egress policy so the bridge enforces it
-        // on the no-bundle path (deny-all included — that's the enforced
-        // default). Inert for the legacy non-bridge path (it only spawns the
-        // bridge when admitted), and superseded by `bundle` when one resolves.
-        network_policy: Some(
-            serde_json::to_value(&config.network_policy)
-                .map_err(|e| anyhow!("serialize VmStartConfig.network_policy: {e}"))?,
-        ),
-        // Only `HardFail` is
-        // implemented today. Defaulting here keeps the producer site
-        // explicit while a future change can introduce policy-driven
-        // selection.
-        bridge_restart_policy: libkrun_sys::BridgeRestartPolicy::HardFail,
-        transparent_terminator_port: Some(
-            mvm_vmm::host::egress_redirect::terminator_port_for_vm_name(&config.name),
-        ),
-        egress_relay_socket: None,
-    })
 }
 
 pub fn supervisor_config_dump_path(state_dir: &Path) -> PathBuf {

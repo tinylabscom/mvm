@@ -191,16 +191,26 @@ fn relay_libkrun_supervisor_config(spec: &VmmSpec, state_dir: &Path) -> Result<S
         krun,
         vm_state_dir: state_dir_str,
         pid_file_name: None,
-        // Role fields — tenant/plan/policy/audit substrate live in the runner
-        // above this driver now, never in the pure VMM mechanics. All inert so
-        // the supervisor takes its legacy run path and enforces no admission.
+        // Role fields — tenant/policy/gateway substrate lives in the runner
+        // above this driver, never in the pure VMM mechanics. Inert here so the
+        // supervisor takes its legacy run path and enforces no admission: that
+        // branch keys off `tenant_id`, which stays `None`.
         tenant_id: None,
-        audit_dir: None,
         gateway_audit_socket: None,
         gateway_events_socket: None,
-        signing_key_path: None,
-        plan: None,
         bundle: None,
+        // The plan and the two paths its wall-clock kill is audited under are
+        // the exception. The supervisor owns the guest for its whole life, so
+        // it holds the only timer that can still fire once `mvmctl` is gone —
+        // and it arms that timer from `plan`. Leaving these `None` is what left
+        // every wall-clock bound unenforced. They select no admission route;
+        // the audit entry takes its tenant from the plan itself.
+        plan: spec.plan_binding.as_ref().map(|b| b.plan_json.clone()),
+        audit_dir: spec.plan_binding.as_ref().map(|b| b.audit_dir.clone()),
+        signing_key_path: spec
+            .plan_binding
+            .as_ref()
+            .map(|b| b.signing_key_path.clone()),
         network_policy: None,
         bridge_restart_policy: BridgeRestartPolicy::HardFail,
         // No transparent :80/:443 terminator: the runner routes egress through
@@ -636,11 +646,73 @@ mod tests {
                 log_path: "/tmp/console.log".into(),
             },
             trusted_builder: false,
+            plan_binding: None,
         }
     }
 
     fn relay(spec: &VmmSpec) -> SupervisorConfig {
         relay_libkrun_supervisor_config(spec, Path::new("/state/w")).unwrap()
+    }
+
+    fn binding() -> mvm_vmm::driver::spec::PlanBinding {
+        mvm_vmm::driver::spec::PlanBinding {
+            plan_json: serde_json::json!({"resources": {"timeouts": {"exec_secs": 30}}}),
+            audit_dir: "/home/u/.mvm/audit".into(),
+            signing_key_path: "/home/u/.mvm/keys/host-signer.ed25519".into(),
+        }
+    }
+
+    #[test]
+    fn a_plan_bound_spec_hands_the_supervisor_what_it_needs_to_enforce_the_bound() {
+        let mut spec = spec_with(KernelImage::Path("/k/Image".into()), vec![], vec![]);
+        spec.plan_binding = Some(binding());
+        let cfg = relay(&spec);
+
+        assert_eq!(
+            cfg.plan
+                .as_ref()
+                .map(|p| p["resources"]["timeouts"]["exec_secs"].clone()),
+            Some(serde_json::json!(30)),
+            "the supervisor arms its wall-clock timer from `plan`; without it every bound is inert"
+        );
+        assert_eq!(
+            cfg.audit_dir.as_deref(),
+            Some(Path::new("/home/u/.mvm/audit"))
+        );
+        assert_eq!(
+            cfg.signing_key_path.as_deref(),
+            Some(Path::new("/home/u/.mvm/keys/host-signer.ed25519"))
+        );
+    }
+
+    #[test]
+    fn carrying_a_plan_does_not_move_the_supervisor_off_its_legacy_route() {
+        let mut spec = spec_with(KernelImage::Path("/k/Image".into()), vec![], vec![]);
+        spec.plan_binding = Some(binding());
+        let cfg = relay(&spec);
+
+        // The supervisor selects its admission route on `tenant_id`, not on
+        // `plan`. Enforcing a wall-clock bound must not silently switch a
+        // workload onto the admission path; the audit entry takes its tenant
+        // from the plan itself.
+        assert!(
+            cfg.tenant_id.is_none(),
+            "a wall-clock bound must not change which route the supervisor takes"
+        );
+        assert!(cfg.gateway_audit_socket.is_none());
+        assert!(cfg.gateway_events_socket.is_none());
+    }
+
+    #[test]
+    fn a_spec_without_a_plan_leaves_the_role_fields_inert() {
+        let cfg = relay(&spec_with(
+            KernelImage::Path("/k/Image".into()),
+            vec![],
+            vec![],
+        ));
+        assert!(cfg.plan.is_none());
+        assert!(cfg.audit_dir.is_none());
+        assert!(cfg.signing_key_path.is_none());
     }
 
     #[test]

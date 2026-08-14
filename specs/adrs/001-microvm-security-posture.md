@@ -228,11 +228,13 @@ back from the scheduler's own measured record. In both cases the receipt
 records what was measured rather than what was asked for. libkrun has no
 in-process vCPU control and stays declared-only.
 
-*Wall clock* is claimed by nothing. It is authored, ceiling-checked, admitted
-and audited as a tier label, and no code in this tree stops a workload at its
-deadline. That is stated as limit 2 below rather than softened, because the
-capability table currently answers `SupervisorTimer` for three backend kinds
-and a reader could take the row as covering it.
+*Wall clock* is enforced on the tiers with a per-VM supervisor process of
+ours — libkrun, HVF, and the AppleContainer tier that runs the same driver and
+supervisor. The supervisor arms a timer from the admitted plan and kills the
+workload at its deadline with exit `124` and a chain-signed entry, so an
+enforced timeout stays distinguishable from a crash. It is claimed by nothing
+on Firecracker and QEMU, whose VMM is a bare child of an `mvmctl` that has
+already exited; limit 2 below states what that leaves open.
 
 This is a preview and not a numbered claim for the ordinary reason plus one
 specific one: the CPU control's only *measured* witness — the live
@@ -265,16 +267,20 @@ not paraphrase this row without them.
    is implementable — substantial work, not a closed door. Recorded so the
    distinction between "nobody has built it" and "cannot be built" does not
    quietly harden into the latter.
-2. **Wall clock is enforced on libkrun only. (PARTIAL.)** The mechanism is a
-   supervisor-side timer that audits `plan.wall_clock_expired` to the
-   chain-signed log *before* killing, so an enforced timeout is
-   distinguishable from a crash; it is armed in `mvm-libkrun-supervisor`.
-   libkrun is the only tier that has one, and the reason is structural rather
-   than incidental: it is the only VMM tier with a process of ours that
-   outlives the workload. `ResourceControls::for_backend` answers
-   `WallClockControl::None` for Firecracker, QEMU, HVF, AppleContainer and
-   Docker, so a wall-clock grant on those tiers is refused under `--prod` and
-   warned under dev rather than admitted against nothing. Witnessed by
+2. **Wall clock is enforced only where a supervisor process holds the plan.
+   (PARTIAL.)** The mechanism is a supervisor-side timer that audits the
+   expiry to the chain-signed log *before* killing, so an enforced timeout is
+   distinguishable from a crash; it is armed in `mvm-libkrun-supervisor` and
+   `mvm-hvf-supervisor`. The dividing line is structural rather than
+   incidental: those are the VMM tiers with a process of ours that outlives
+   the workload *and* is handed the admitted plan to read a bound from. A
+   restore is deliberately not covered — a child does not inherit its parent's
+   plan, because auditing a child's kill under the parent's identity would
+   write a wrong entry rather than a missing one.
+   `ResourceControls::for_backend` answers `WallClockControl::None` for
+   Firecracker, QEMU and Mock, so a wall-clock grant on those tiers is refused
+   under `--prod` and warned under dev rather than admitted against nothing.
+   Witnessed by
    `fn:an_expired_workload_is_killed_and_the_kill_is_audited` and
    `fn:a_wall_clock_bound_needs_a_clock_that_can_stop_the_workload`.
 3. **wasm fuel, epoch and store limits are wired. (CLOSED.)** The wasm tier
@@ -322,8 +328,8 @@ not paraphrase this row without them.
    process born grant-less as shared pool capacity, which binding now would
    bind the pool rather than the claim. `bind_cpu_grant` wraps a `Command` and
    this tree has no post-spawn attach, so on those two paths a claimed child's
-   CPU bound is a ledger entry and not a `cpu.max`. Wall clock is unbounded on
-   all of them, per limit 2.
+   CPU bound is a ledger entry and not a `cpu.max`. Wall clock is likewise not
+   re-armed on a restored or claimed child, per limit 2.
 5. **The budget is not a precise cliff. (OPEN, by choice.)** Two admissions
    racing each other can both read the same total and both be admitted,
    overshooting by one boot; closing that needs a host-wide lock held across
@@ -721,7 +727,7 @@ tracked separately as a follow-up audit (see "deferred follow-ups").
 | 15 | A sealed production microVM has no shell, no DevOnly guest-agent verbs, and no PTY | fn:console_refused_on_sealed_image, ci:guest-agent-runtime-boundary, fn:following_the_console_never_writes_to_it | runtime profile + signed VerbGrant + host accessible-gate + console policy (ADR-001 §W4.3 extension). The host→guest input plane is deliberately *not* claimed here: its properties are policy, not absence, and are witnessed at row 17 | Shipped |
 | 16 | Egress substitution keeps a raw secret off the guest, bound-only, no value in audit | fn:handed_placeholders_never_contain_the_secret_value, fn:network_endpoint_refuses_unbound_destination, fn:audit_chain_carries_no_secret_value | egress substitution leak-gate; reinforces claims 12+13 on the egress delivery (ADR-023, specs/claims/claim-egress-no-secret-to-guest.md) | Preview |
 | 17 | Workload stdin is grant-gated, single-writer, secret-scanned across frames, and every refusal is audited | fn:input_is_refused_without_a_plan_grant, fn:a_second_writer_is_refused_while_the_lease_is_held, fn:secret_material_split_across_frames_is_still_refused, fn:every_refusal_is_audited, fn:a_shell_entrypoint_with_the_grant_is_refused_and_names_the_reason, fn:the_endpoint_fingerprints_what_it_resolved_and_reports_no_value, fn:the_handshakes_two_halves_go_to_two_different_places, fn:a_secret_split_across_two_frames_does_not_reassemble_in_the_workload, fn:a_fingerprint_refusal_does_not_claim_the_bytes_are_the_secret | input grant token in a signed ExecutionPlan.services + per-VM lease with TTL + fingerprint-matching sliding-window secret scan + chain-signed payload-free refusal audit + sealed-tier shell-entrypoint refusal. Read the limits note below before treating this as enforced | Preview |
-| 18 | A workload's resource consumption is bounded at admission — per workload and across the host — and CPU-bound at spawn where the host has a mechanism | fn:a_boot_past_the_headroom_is_refused, fn:budget_ignores_dead_machines, fn:budget_counts_the_configured_maximum_not_current_usage, fn:an_empty_host_admits_a_boot_within_headroom, fn:an_unreadable_charge_record_is_skipped_rather_than_fatal, fn:admission_refuses_a_grant_over_the_ceiling, fn:the_ceiling_bounds_memory_even_though_no_one_granted_it, fn:prod_refuses_a_cpu_grant_on_a_backend_that_cannot_bound_cpu, fn:the_libkrun_tier_cannot_bound_cpu_off_linux, fn:host_cpu_mechanism_gap_honors_hvf_quota_range, fn:relay_config_threads_cpu_share_to_quota_scheduler, fn:apply_grants_reads_quota_record_from_state_dir, fn:a_share_grant_binds_the_spawn_when_the_mechanism_is_present, fn:a_vm_with_no_recorded_scope_reads_back_as_declared_not_as_an_error, fn:an_admitted_boot_writes_the_achieved_tier_to_the_audit_chain, fn:a_wall_clock_bound_needs_a_clock_that_can_stop_the_workload, fn:a_granted_cpu_share_binds_a_real_spawn_to_its_quota, fn:a_restored_child_is_cpu_bounded_by_its_admitted_grant, fn:a_claimed_child_over_the_host_ceiling_is_refused, fn:a_claimed_child_within_the_ceiling_is_admitted, fn:the_refusal_names_the_ceiling_and_the_request, fn:pool_matching_is_unchanged_by_the_bound | operator-configured per-workload ceiling + host-wide budget summed over live machines only (pid-marker probe, configured maximum not current usage) + cgroup v2 `cpu.max` on a systemd transient scope on Linux, or an in-process HVF run-loop scheduler on macOS, read back and written to the chain-signed audit log. CPU is declared-only for libkrun, wall clock is enforced on libkrun only, wasm bounds via fuel and epoch, a forked child is re-bound at spawn, and a warm-claimed child is bounded by the host ceiling at admission but spawn-bound on only one of its three claim paths — read the "Preview 18 limits" note below before treating this as enforced | Preview |
+| 18 | A workload's resource consumption is bounded at admission — per workload and across the host — and CPU-bound at spawn where the host has a mechanism | fn:a_boot_past_the_headroom_is_refused, fn:budget_ignores_dead_machines, fn:budget_counts_the_configured_maximum_not_current_usage, fn:an_empty_host_admits_a_boot_within_headroom, fn:an_unreadable_charge_record_is_skipped_rather_than_fatal, fn:admission_refuses_a_grant_over_the_ceiling, fn:the_ceiling_bounds_memory_even_though_no_one_granted_it, fn:prod_refuses_a_cpu_grant_on_a_backend_that_cannot_bound_cpu, fn:the_libkrun_tier_cannot_bound_cpu_off_linux, fn:host_cpu_mechanism_gap_honors_hvf_quota_range, fn:relay_config_threads_cpu_share_to_quota_scheduler, fn:apply_grants_reads_quota_record_from_state_dir, fn:a_share_grant_binds_the_spawn_when_the_mechanism_is_present, fn:a_vm_with_no_recorded_scope_reads_back_as_declared_not_as_an_error, fn:an_admitted_boot_writes_the_achieved_tier_to_the_audit_chain, fn:a_wall_clock_bound_needs_a_clock_that_can_stop_the_workload, fn:a_granted_cpu_share_binds_a_real_spawn_to_its_quota, fn:a_restored_child_is_cpu_bounded_by_its_admitted_grant, fn:a_claimed_child_over_the_host_ceiling_is_refused, fn:a_claimed_child_within_the_ceiling_is_admitted, fn:the_refusal_names_the_ceiling_and_the_request, fn:pool_matching_is_unchanged_by_the_bound | operator-configured per-workload ceiling + host-wide budget summed over live machines only (pid-marker probe, configured maximum not current usage) + cgroup v2 `cpu.max` on a systemd transient scope on Linux, or an in-process HVF run-loop scheduler on macOS, read back and written to the chain-signed audit log. CPU is declared-only for libkrun, wall clock is enforced on the tiers whose supervisor holds the admitted plan (libkrun, HVF, AppleContainer), wasm bounds via fuel and epoch, a forked child is re-bound at spawn, and a warm-claimed child is bounded by the host ceiling at admission but spawn-bound on only one of its three claim paths — read the "Preview 18 limits" note below before treating this as enforced | Preview |
 
 Row 16 is the egress-substitution leak-gate. Like claim 14 (OCI provenance),
 it is registered here for witness machine-checking and tracked by its own doc
