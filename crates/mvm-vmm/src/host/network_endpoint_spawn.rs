@@ -10,6 +10,7 @@
 
 use crate::host::drive_file::DriveFile;
 use anyhow::{Result, anyhow, bail};
+use mvm_contract::builder::BuilderError;
 use mvm_contract::stream::secret_fingerprint::SecretFingerprint;
 use mvm_core::crypto::egress_ca::EgressCa;
 use mvm_core::plan::SecretBinding;
@@ -266,6 +267,202 @@ pub struct SubstitutionSpawnParams<'a> {
     /// Identity material for the authenticated FlowMux session. `Some` selects
     /// the converged FlowMux path; `None` keeps the legacy Wire/Raw path.
     pub flowmux_identity: Option<FlowMuxIdentitySpawnConfig>,
+}
+
+impl<'a> SubstitutionSpawnParams<'a> {
+    /// Start building a [`SubstitutionSpawnParams`]. Every value is set by name, so a
+    /// call site cannot transpose two fields that share a type.
+    #[must_use]
+    pub fn builder() -> SubstitutionSpawnParamsBuilder<'a> {
+        SubstitutionSpawnParamsBuilder::new()
+    }
+}
+
+/// Builder for [`SubstitutionSpawnParams`]. Required fields are checked by
+/// [`SubstitutionSpawnParamsBuilder::build`] rather than defaulted, so an unset one is a
+/// reported error and never a silently empty value.
+pub struct SubstitutionSpawnParamsBuilder<'a> {
+    vm_name: Option<&'a str>,
+    state_dir: Option<&'a Path>,
+    tenant: Option<&'a str>,
+    secrets: Option<&'a [SecretBinding]>,
+    redaction: Option<&'a mvm_core::policy::RedactionPolicy>,
+    transport: Option<EndpointTransport>,
+    terminator_listen: Option<SocketAddr>,
+    tls_intermediate: Option<(String, String)>,
+    network_policy: Option<&'a mvm_core::policy::network_policy::NetworkPolicy>,
+    raw_egress: Option<bool>,
+    resolver_remote: Option<RemoteResolverSpawnConfig<'a>>,
+    binding_store_dir: Option<&'a Path>,
+    flowmux_identity: Option<FlowMuxIdentitySpawnConfig>,
+}
+
+impl<'a> SubstitutionSpawnParamsBuilder<'a> {
+    /// An empty builder: nothing set yet.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            vm_name: None,
+            state_dir: None,
+            tenant: None,
+            secrets: None,
+            redaction: None,
+            transport: None,
+            terminator_listen: None,
+            tls_intermediate: None,
+            network_policy: None,
+            raw_egress: None,
+            resolver_remote: None,
+            binding_store_dir: None,
+            flowmux_identity: None,
+        }
+    }
+
+    /// Set `vm_name`.
+    #[must_use]
+    pub fn vm_name(mut self, vm_name: &'a str) -> Self {
+        self.vm_name = Some(vm_name);
+        self
+    }
+
+    /// Set `state_dir`.
+    #[must_use]
+    pub fn state_dir(mut self, state_dir: &'a Path) -> Self {
+        self.state_dir = Some(state_dir);
+        self
+    }
+
+    /// Set `tenant`.
+    #[must_use]
+    pub fn tenant(mut self, tenant: &'a str) -> Self {
+        self.tenant = Some(tenant);
+        self
+    }
+
+    /// Set `secrets`.
+    #[must_use]
+    pub fn secrets(mut self, secrets: &'a [SecretBinding]) -> Self {
+        self.secrets = Some(secrets);
+        self
+    }
+
+    /// Set `redaction`.
+    #[must_use]
+    pub fn redaction(mut self, redaction: &'a mvm_core::policy::RedactionPolicy) -> Self {
+        self.redaction = Some(redaction);
+        self
+    }
+
+    /// Set `transport`.
+    #[must_use]
+    pub fn transport(mut self, transport: EndpointTransport) -> Self {
+        self.transport = Some(transport);
+        self
+    }
+
+    /// Set `terminator_listen`. Takes a value or an `Option`; unset means `None`.
+    #[must_use]
+    pub fn terminator_listen(mut self, terminator_listen: impl Into<Option<SocketAddr>>) -> Self {
+        self.terminator_listen = terminator_listen.into();
+        self
+    }
+
+    /// Set `tls_intermediate`. Takes a value or an `Option`; unset means `None`.
+    #[must_use]
+    pub fn tls_intermediate(
+        mut self,
+        tls_intermediate: impl Into<Option<(String, String)>>,
+    ) -> Self {
+        self.tls_intermediate = tls_intermediate.into();
+        self
+    }
+
+    /// Set `network_policy`. Takes a value or an `Option`; unset means `None`.
+    #[must_use]
+    pub fn network_policy(
+        mut self,
+        network_policy: impl Into<Option<&'a mvm_core::policy::network_policy::NetworkPolicy>>,
+    ) -> Self {
+        self.network_policy = network_policy.into();
+        self
+    }
+
+    /// Set `raw_egress`.
+    #[must_use]
+    pub fn raw_egress(mut self, raw_egress: bool) -> Self {
+        self.raw_egress = Some(raw_egress);
+        self
+    }
+
+    /// Set `resolver_remote`. Takes a value or an `Option`; unset means `None`.
+    #[must_use]
+    pub fn resolver_remote(
+        mut self,
+        resolver_remote: impl Into<Option<RemoteResolverSpawnConfig<'a>>>,
+    ) -> Self {
+        self.resolver_remote = resolver_remote.into();
+        self
+    }
+
+    /// Set `binding_store_dir`. Takes a value or an `Option`; unset means `None`.
+    #[must_use]
+    pub fn binding_store_dir(mut self, binding_store_dir: impl Into<Option<&'a Path>>) -> Self {
+        self.binding_store_dir = binding_store_dir.into();
+        self
+    }
+
+    /// Set `flowmux_identity`. Takes a value or an `Option`; unset means `None`.
+    #[must_use]
+    pub fn flowmux_identity(
+        mut self,
+        flowmux_identity: impl Into<Option<FlowMuxIdentitySpawnConfig>>,
+    ) -> Self {
+        self.flowmux_identity = flowmux_identity.into();
+        self
+    }
+
+    /// Finish, or name the first required field left unset.
+    pub fn build(self) -> Result<SubstitutionSpawnParams<'a>, BuilderError> {
+        Ok(SubstitutionSpawnParams {
+            vm_name: self
+                .vm_name
+                .ok_or(BuilderError::missing("SubstitutionSpawnParams", "vm_name"))?,
+            state_dir: self.state_dir.ok_or(BuilderError::missing(
+                "SubstitutionSpawnParams",
+                "state_dir",
+            ))?,
+            tenant: self
+                .tenant
+                .ok_or(BuilderError::missing("SubstitutionSpawnParams", "tenant"))?,
+            secrets: self
+                .secrets
+                .ok_or(BuilderError::missing("SubstitutionSpawnParams", "secrets"))?,
+            redaction: self.redaction.ok_or(BuilderError::missing(
+                "SubstitutionSpawnParams",
+                "redaction",
+            ))?,
+            transport: self.transport.ok_or(BuilderError::missing(
+                "SubstitutionSpawnParams",
+                "transport",
+            ))?,
+            terminator_listen: self.terminator_listen,
+            tls_intermediate: self.tls_intermediate,
+            network_policy: self.network_policy,
+            raw_egress: self.raw_egress.ok_or(BuilderError::missing(
+                "SubstitutionSpawnParams",
+                "raw_egress",
+            ))?,
+            resolver_remote: self.resolver_remote,
+            binding_store_dir: self.binding_store_dir,
+            flowmux_identity: self.flowmux_identity,
+        })
+    }
+}
+
+impl<'a> Default for SubstitutionSpawnParamsBuilder<'a> {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Build the EndpointConfig JSON the endpoint reads on stdin. Pure (no spawn)
@@ -1191,5 +1388,23 @@ mod tests {
             "key bytes leaked via Debug: {dbg}"
         );
         std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
+#[cfg(test)]
+mod substitution_spawn_params_builder_tests {
+    use super::*;
+
+    /// An empty builder must refuse to finish, naming the first
+    /// required field it is missing — never substituting a default.
+    #[test]
+    fn an_empty_builder_names_the_first_missing_field() {
+        let Err(err) = SubstitutionSpawnParams::builder().build() else {
+            panic!("an empty SubstitutionSpawnParams builder must not build");
+        };
+        assert_eq!(
+            err,
+            BuilderError::missing("SubstitutionSpawnParams", "vm_name")
+        );
     }
 }

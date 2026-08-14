@@ -22,6 +22,9 @@
 
 extern crate alloc;
 
+/// The one error a generated builder returns: a required field was
+/// never set. Shared so every input struct reports it identically.
+pub mod builder;
 #[cfg(feature = "protocol")]
 pub mod entrypoint;
 /// A workload's permission set — CPU, wall clock, egress destinations.

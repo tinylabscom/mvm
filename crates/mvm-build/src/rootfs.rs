@@ -17,6 +17,7 @@
 use std::path::Path;
 use std::path::PathBuf;
 
+use mvm_contract::builder::BuilderError;
 use thiserror::Error;
 
 const DEFAULT_MIN_IMAGE_SIZE_BYTES: u64 = 64 * 1024 * 1024;
@@ -60,6 +61,115 @@ pub struct MaterializeExt4Input {
     /// [`mvm_fs::oci::unpack::UnpackReport::deferred_nodes`]. Empty on
     /// Linux and on any case-sensitive volume.
     pub deferred_nodes: Vec<mvm_fs::ext4::Node>,
+}
+
+impl MaterializeExt4Input {
+    /// Start building a [`MaterializeExt4Input`]. Every value is set by name, so a
+    /// call site cannot transpose two fields that share a type.
+    #[must_use]
+    pub fn builder() -> MaterializeExt4InputBuilder {
+        MaterializeExt4InputBuilder::new()
+    }
+}
+
+/// Builder for [`MaterializeExt4Input`]. Required fields are checked by
+/// [`MaterializeExt4InputBuilder::build`] rather than defaulted, so an unset one is a
+/// reported error and never a silently empty value.
+pub struct MaterializeExt4InputBuilder {
+    unpacked_root: Option<PathBuf>,
+    output: Option<PathBuf>,
+    uncompressed_size_bytes: Option<u64>,
+    emit_verity: Option<bool>,
+    volume_label: Option<String>,
+    deferred_nodes: Option<Vec<mvm_fs::ext4::Node>>,
+}
+
+impl MaterializeExt4InputBuilder {
+    /// An empty builder: nothing set yet.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            unpacked_root: None,
+            output: None,
+            uncompressed_size_bytes: None,
+            emit_verity: None,
+            volume_label: None,
+            deferred_nodes: None,
+        }
+    }
+
+    /// Set `unpacked_root`.
+    #[must_use]
+    pub fn unpacked_root(mut self, unpacked_root: PathBuf) -> Self {
+        self.unpacked_root = Some(unpacked_root);
+        self
+    }
+
+    /// Set `output`.
+    #[must_use]
+    pub fn output(mut self, output: PathBuf) -> Self {
+        self.output = Some(output);
+        self
+    }
+
+    /// Set `uncompressed_size_bytes`.
+    #[must_use]
+    pub fn uncompressed_size_bytes(mut self, uncompressed_size_bytes: u64) -> Self {
+        self.uncompressed_size_bytes = Some(uncompressed_size_bytes);
+        self
+    }
+
+    /// Set `emit_verity`.
+    #[must_use]
+    pub fn emit_verity(mut self, emit_verity: bool) -> Self {
+        self.emit_verity = Some(emit_verity);
+        self
+    }
+
+    /// Set `volume_label`. Takes a value or an `Option`; unset means `None`.
+    #[must_use]
+    pub fn volume_label(mut self, volume_label: impl Into<Option<String>>) -> Self {
+        self.volume_label = volume_label.into();
+        self
+    }
+
+    /// Set `deferred_nodes`.
+    #[must_use]
+    pub fn deferred_nodes(mut self, deferred_nodes: Vec<mvm_fs::ext4::Node>) -> Self {
+        self.deferred_nodes = Some(deferred_nodes);
+        self
+    }
+
+    /// Finish, or name the first required field left unset.
+    pub fn build(self) -> Result<MaterializeExt4Input, BuilderError> {
+        Ok(MaterializeExt4Input {
+            unpacked_root: self.unpacked_root.ok_or(BuilderError::missing(
+                "MaterializeExt4Input",
+                "unpacked_root",
+            ))?,
+            output: self
+                .output
+                .ok_or(BuilderError::missing("MaterializeExt4Input", "output"))?,
+            uncompressed_size_bytes: self.uncompressed_size_bytes.ok_or(BuilderError::missing(
+                "MaterializeExt4Input",
+                "uncompressed_size_bytes",
+            ))?,
+            emit_verity: self
+                .emit_verity
+                .ok_or(BuilderError::missing("MaterializeExt4Input", "emit_verity"))?,
+            volume_label: self.volume_label,
+            deferred_nodes: self.deferred_nodes.ok_or(BuilderError::missing(
+                "MaterializeExt4Input",
+                "deferred_nodes",
+            ))?,
+        })
+    }
+}
+
+impl Default for MaterializeExt4InputBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl MaterializeExt4Input {
@@ -109,6 +219,67 @@ pub struct MaterializeExt4Options {
     /// backends attach their persistent Nix store as `/dev/vdb`, so the
     /// first caller-provided extra disk is `/dev/vdc`.
     pub guest_output_device: String,
+}
+
+impl MaterializeExt4Options {
+    /// Start building a [`MaterializeExt4Options`] from its defaults. Every value is
+    /// set by name, so a call site cannot transpose two fields that
+    /// share a type.
+    #[must_use]
+    pub fn builder() -> MaterializeExt4OptionsBuilder {
+        MaterializeExt4OptionsBuilder::new()
+    }
+}
+
+/// Builder for [`MaterializeExt4Options`]. Unset fields keep the value
+/// `MaterializeExt4Options::default()` gives them.
+#[derive(Default)]
+pub struct MaterializeExt4OptionsBuilder {
+    inner: MaterializeExt4Options,
+}
+
+impl MaterializeExt4OptionsBuilder {
+    /// A builder holding the defaults.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            inner: MaterializeExt4Options::default(),
+        }
+    }
+
+    /// Set `min_image_size_bytes`.
+    #[must_use]
+    pub fn min_image_size_bytes(mut self, min_image_size_bytes: u64) -> Self {
+        self.inner.min_image_size_bytes = min_image_size_bytes;
+        self
+    }
+
+    /// Set `size_multiplier_numerator`.
+    #[must_use]
+    pub fn size_multiplier_numerator(mut self, size_multiplier_numerator: u64) -> Self {
+        self.inner.size_multiplier_numerator = size_multiplier_numerator;
+        self
+    }
+
+    /// Set `size_multiplier_denominator`.
+    #[must_use]
+    pub fn size_multiplier_denominator(mut self, size_multiplier_denominator: u64) -> Self {
+        self.inner.size_multiplier_denominator = size_multiplier_denominator;
+        self
+    }
+
+    /// Set `guest_output_device`.
+    #[must_use]
+    pub fn guest_output_device(mut self, guest_output_device: String) -> Self {
+        self.inner.guest_output_device = guest_output_device;
+        self
+    }
+
+    /// Finish.
+    #[must_use]
+    pub fn build(self) -> MaterializeExt4Options {
+        self.inner
+    }
 }
 
 impl Default for MaterializeExt4Options {
@@ -896,5 +1067,35 @@ mod tests {
         let err = materialize_ext4(&input, &MaterializeExt4Options::default()).unwrap_err();
         assert!(matches!(err, RootfsError::BuilderVmFeatureDisabled));
         assert!(!output.exists());
+    }
+}
+
+#[cfg(test)]
+mod materialize_ext4_input_builder_tests {
+    use super::*;
+
+    /// An empty builder must refuse to finish, naming the first
+    /// required field it is missing — never substituting a default.
+    #[test]
+    fn an_empty_builder_names_the_first_missing_field() {
+        let Err(err) = MaterializeExt4Input::builder().build() else {
+            panic!("an empty MaterializeExt4Input builder must not build");
+        };
+        assert_eq!(
+            err,
+            BuilderError::missing("MaterializeExt4Input", "unpacked_root")
+        );
+    }
+}
+
+#[cfg(test)]
+mod materialize_ext4_options_builder_tests {
+    use super::*;
+
+    /// A builder nobody touched has to agree with `MaterializeExt4Options::default()`,
+    /// or an unset field silently means something else.
+    #[test]
+    fn an_untouched_builder_matches_the_type_default() {
+        assert!(MaterializeExt4Options::builder().build() == MaterializeExt4Options::default());
     }
 }

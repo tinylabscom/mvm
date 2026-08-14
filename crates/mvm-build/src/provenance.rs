@@ -11,6 +11,7 @@
 use std::io;
 use std::path::Path;
 
+use mvm_contract::builder::BuilderError;
 use mvm_core::crypto::image_verify::sha256_file;
 use mvm_core::plan::types::{ArtifactDigests, BuildProvenance, InputKind};
 
@@ -33,6 +34,86 @@ pub struct ProvenanceInput {
     pub input_ref: String,
     pub lock_digest: Option<String>,
     pub builder_id: Option<String>,
+}
+
+impl ProvenanceInput {
+    /// Start building a [`ProvenanceInput`]. Every value is set by name, so a
+    /// call site cannot transpose two fields that share a type.
+    #[must_use]
+    pub fn builder() -> ProvenanceInputBuilder {
+        ProvenanceInputBuilder::new()
+    }
+}
+
+/// Builder for [`ProvenanceInput`]. Required fields are checked by
+/// [`ProvenanceInputBuilder::build`] rather than defaulted, so an unset one is a
+/// reported error and never a silently empty value.
+pub struct ProvenanceInputBuilder {
+    input_kind: Option<InputKind>,
+    input_ref: Option<String>,
+    lock_digest: Option<String>,
+    builder_id: Option<String>,
+}
+
+impl ProvenanceInputBuilder {
+    /// An empty builder: nothing set yet.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            input_kind: None,
+            input_ref: None,
+            lock_digest: None,
+            builder_id: None,
+        }
+    }
+
+    /// Set `input_kind`.
+    #[must_use]
+    pub fn input_kind(mut self, input_kind: InputKind) -> Self {
+        self.input_kind = Some(input_kind);
+        self
+    }
+
+    /// Set `input_ref`.
+    #[must_use]
+    pub fn input_ref(mut self, input_ref: String) -> Self {
+        self.input_ref = Some(input_ref);
+        self
+    }
+
+    /// Set `lock_digest`. Takes a value or an `Option`; unset means `None`.
+    #[must_use]
+    pub fn lock_digest(mut self, lock_digest: impl Into<Option<String>>) -> Self {
+        self.lock_digest = lock_digest.into();
+        self
+    }
+
+    /// Set `builder_id`. Takes a value or an `Option`; unset means `None`.
+    #[must_use]
+    pub fn builder_id(mut self, builder_id: impl Into<Option<String>>) -> Self {
+        self.builder_id = builder_id.into();
+        self
+    }
+
+    /// Finish, or name the first required field left unset.
+    pub fn build(self) -> Result<ProvenanceInput, BuilderError> {
+        Ok(ProvenanceInput {
+            input_kind: self
+                .input_kind
+                .ok_or(BuilderError::missing("ProvenanceInput", "input_kind"))?,
+            input_ref: self
+                .input_ref
+                .ok_or(BuilderError::missing("ProvenanceInput", "input_ref"))?,
+            lock_digest: self.lock_digest,
+            builder_id: self.builder_id,
+        })
+    }
+}
+
+impl Default for ProvenanceInputBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Content-address each present artifact and assemble the [`BuildProvenance`]
@@ -141,5 +222,20 @@ mod tests {
             ..Default::default()
         };
         assert!(record_provenance(input(), &paths).is_err());
+    }
+}
+
+#[cfg(test)]
+mod provenance_input_builder_tests {
+    use super::*;
+
+    /// An empty builder must refuse to finish, naming the first
+    /// required field it is missing — never substituting a default.
+    #[test]
+    fn an_empty_builder_names_the_first_missing_field() {
+        let Err(err) = ProvenanceInput::builder().build() else {
+            panic!("an empty ProvenanceInput builder must not build");
+        };
+        assert_eq!(err, BuilderError::missing("ProvenanceInput", "input_kind"));
     }
 }

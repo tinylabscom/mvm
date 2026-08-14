@@ -34,6 +34,7 @@ use crate::builder_protocol::{
     BootTimingsWire, HostVmRequest, HostVmResponse, JobId, JobTimings, WorkloadId,
 };
 use crate::builder_vm::BuilderJob;
+use mvm_contract::builder::BuilderError;
 
 /// Host-side hook the persistent dispatch
 /// supervisor calls at the boundaries of each dispatched job so a
@@ -139,6 +140,116 @@ pub struct WorkloadStartParams {
     pub vcpus: u32,
     pub memory_mib: u32,
     pub kernel_cmdline_extras: String,
+}
+
+impl WorkloadStartParams {
+    /// Start building a [`WorkloadStartParams`]. Every value is set by name, so a
+    /// call site cannot transpose two fields that share a type.
+    #[must_use]
+    pub fn builder() -> WorkloadStartParamsBuilder {
+        WorkloadStartParamsBuilder::new()
+    }
+}
+
+/// Builder for [`WorkloadStartParams`]. Required fields are checked by
+/// [`WorkloadStartParamsBuilder::build`] rather than defaulted, so an unset one is a
+/// reported error and never a silently empty value.
+pub struct WorkloadStartParamsBuilder {
+    kernel_path: Option<String>,
+    rootfs_path: Option<String>,
+    vsock_socket_dir: Option<String>,
+    vcpus: Option<u32>,
+    memory_mib: Option<u32>,
+    kernel_cmdline_extras: Option<String>,
+}
+
+impl WorkloadStartParamsBuilder {
+    /// An empty builder: nothing set yet.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            kernel_path: None,
+            rootfs_path: None,
+            vsock_socket_dir: None,
+            vcpus: None,
+            memory_mib: None,
+            kernel_cmdline_extras: None,
+        }
+    }
+
+    /// Set `kernel_path`.
+    #[must_use]
+    pub fn kernel_path(mut self, kernel_path: String) -> Self {
+        self.kernel_path = Some(kernel_path);
+        self
+    }
+
+    /// Set `rootfs_path`.
+    #[must_use]
+    pub fn rootfs_path(mut self, rootfs_path: String) -> Self {
+        self.rootfs_path = Some(rootfs_path);
+        self
+    }
+
+    /// Set `vsock_socket_dir`.
+    #[must_use]
+    pub fn vsock_socket_dir(mut self, vsock_socket_dir: String) -> Self {
+        self.vsock_socket_dir = Some(vsock_socket_dir);
+        self
+    }
+
+    /// Set `vcpus`.
+    #[must_use]
+    pub fn vcpus(mut self, vcpus: u32) -> Self {
+        self.vcpus = Some(vcpus);
+        self
+    }
+
+    /// Set `memory_mib`.
+    #[must_use]
+    pub fn memory_mib(mut self, memory_mib: u32) -> Self {
+        self.memory_mib = Some(memory_mib);
+        self
+    }
+
+    /// Set `kernel_cmdline_extras`.
+    #[must_use]
+    pub fn kernel_cmdline_extras(mut self, kernel_cmdline_extras: String) -> Self {
+        self.kernel_cmdline_extras = Some(kernel_cmdline_extras);
+        self
+    }
+
+    /// Finish, or name the first required field left unset.
+    pub fn build(self) -> Result<WorkloadStartParams, BuilderError> {
+        Ok(WorkloadStartParams {
+            kernel_path: self
+                .kernel_path
+                .ok_or(BuilderError::missing("WorkloadStartParams", "kernel_path"))?,
+            rootfs_path: self
+                .rootfs_path
+                .ok_or(BuilderError::missing("WorkloadStartParams", "rootfs_path"))?,
+            vsock_socket_dir: self.vsock_socket_dir.ok_or(BuilderError::missing(
+                "WorkloadStartParams",
+                "vsock_socket_dir",
+            ))?,
+            vcpus: self
+                .vcpus
+                .ok_or(BuilderError::missing("WorkloadStartParams", "vcpus"))?,
+            memory_mib: self
+                .memory_mib
+                .ok_or(BuilderError::missing("WorkloadStartParams", "memory_mib"))?,
+            kernel_cmdline_extras: self.kernel_cmdline_extras.ok_or(BuilderError::missing(
+                "WorkloadStartParams",
+                "kernel_cmdline_extras",
+            ))?,
+        })
+    }
+}
+
+impl Default for WorkloadStartParamsBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Outcome of a successful `WorkloadStart` dispatch:
@@ -1710,5 +1821,23 @@ mod tests {
         let dst = scratch.path().join("dst");
         let err = copy_dir_recursive(&src, &dst).expect_err("missing src");
         assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+    }
+}
+
+#[cfg(test)]
+mod workload_start_params_builder_tests {
+    use super::*;
+
+    /// An empty builder must refuse to finish, naming the first
+    /// required field it is missing — never substituting a default.
+    #[test]
+    fn an_empty_builder_names_the_first_missing_field() {
+        let Err(err) = WorkloadStartParams::builder().build() else {
+            panic!("an empty WorkloadStartParams builder must not build");
+        };
+        assert_eq!(
+            err,
+            BuilderError::missing("WorkloadStartParams", "kernel_path")
+        );
     }
 }

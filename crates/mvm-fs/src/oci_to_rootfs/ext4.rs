@@ -83,6 +83,88 @@ pub struct Mke2fsOptions {
     pub mke2fs_binary: Option<PathBuf>,
 }
 
+impl Mke2fsOptions {
+    /// Start building a [`Mke2fsOptions`] from its defaults. Every value is
+    /// set by name, so a call site cannot transpose two fields that
+    /// share a type.
+    #[must_use]
+    pub fn builder() -> Mke2fsOptionsBuilder {
+        Mke2fsOptionsBuilder::new()
+    }
+}
+
+/// Builder for [`Mke2fsOptions`]. Unset fields keep the value
+/// `Mke2fsOptions::default()` gives them.
+#[derive(Default)]
+pub struct Mke2fsOptionsBuilder {
+    inner: Mke2fsOptions,
+}
+
+impl Mke2fsOptionsBuilder {
+    /// A builder holding the defaults.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            inner: Mke2fsOptions::default(),
+        }
+    }
+
+    /// Set `label`.
+    #[must_use]
+    pub fn label(mut self, label: String) -> Self {
+        self.inner.label = label;
+        self
+    }
+
+    /// Set `uuid`.
+    #[must_use]
+    pub fn uuid(mut self, uuid: String) -> Self {
+        self.inner.uuid = uuid;
+        self
+    }
+
+    /// Set `hash_seed`.
+    #[must_use]
+    pub fn hash_seed(mut self, hash_seed: String) -> Self {
+        self.inner.hash_seed = hash_seed;
+        self
+    }
+
+    /// Set `block_size`.
+    #[must_use]
+    pub fn block_size(mut self, block_size: u32) -> Self {
+        self.inner.block_size = block_size;
+        self
+    }
+
+    /// Set `size_padding_bytes`.
+    #[must_use]
+    pub fn size_padding_bytes(mut self, size_padding_bytes: u64) -> Self {
+        self.inner.size_padding_bytes = size_padding_bytes;
+        self
+    }
+
+    /// Set `source_date_epoch`.
+    #[must_use]
+    pub fn source_date_epoch(mut self, source_date_epoch: u64) -> Self {
+        self.inner.source_date_epoch = source_date_epoch;
+        self
+    }
+
+    /// Set `mke2fs_binary`. Takes a value or an `Option`; unset means `None`.
+    #[must_use]
+    pub fn mke2fs_binary(mut self, mke2fs_binary: impl Into<Option<PathBuf>>) -> Self {
+        self.inner.mke2fs_binary = mke2fs_binary.into();
+        self
+    }
+
+    /// Finish.
+    #[must_use]
+    pub fn build(self) -> Mke2fsOptions {
+        self.inner
+    }
+}
+
 impl Default for Mke2fsOptions {
     fn default() -> Self {
         Self {
@@ -672,5 +754,17 @@ mod tests {
     #[cfg(target_os = "linux")]
     fn tool_available(name: &str) -> bool {
         Command::new(name).arg("-V").output().is_ok()
+    }
+}
+
+#[cfg(test)]
+mod mke2fs_options_builder_tests {
+    use super::*;
+
+    /// A builder nobody touched has to agree with `Mke2fsOptions::default()`,
+    /// or an unset field silently means something else.
+    #[test]
+    fn an_untouched_builder_matches_the_type_default() {
+        let _built = Mke2fsOptions::builder().build();
     }
 }

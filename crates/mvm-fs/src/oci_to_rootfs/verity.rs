@@ -102,6 +102,81 @@ pub struct VeritysetupOptions {
     pub veritysetup_binary: Option<PathBuf>,
 }
 
+impl VeritysetupOptions {
+    /// Start building a [`VeritysetupOptions`] from its defaults. Every value is
+    /// set by name, so a call site cannot transpose two fields that
+    /// share a type.
+    #[must_use]
+    pub fn builder() -> VeritysetupOptionsBuilder {
+        VeritysetupOptionsBuilder::new()
+    }
+}
+
+/// Builder for [`VeritysetupOptions`]. Unset fields keep the value
+/// `VeritysetupOptions::default()` gives them.
+#[derive(Default)]
+pub struct VeritysetupOptionsBuilder {
+    inner: VeritysetupOptions,
+}
+
+impl VeritysetupOptionsBuilder {
+    /// A builder holding the defaults.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            inner: VeritysetupOptions::default(),
+        }
+    }
+
+    /// Set `data_block_size`.
+    #[must_use]
+    pub fn data_block_size(mut self, data_block_size: u32) -> Self {
+        self.inner.data_block_size = data_block_size;
+        self
+    }
+
+    /// Set `hash_block_size`.
+    #[must_use]
+    pub fn hash_block_size(mut self, hash_block_size: u32) -> Self {
+        self.inner.hash_block_size = hash_block_size;
+        self
+    }
+
+    /// Set `salt`.
+    #[must_use]
+    pub fn salt(mut self, salt: String) -> Self {
+        self.inner.salt = salt;
+        self
+    }
+
+    /// Set `algorithm`.
+    #[must_use]
+    pub fn algorithm(mut self, algorithm: String) -> Self {
+        self.inner.algorithm = algorithm;
+        self
+    }
+
+    /// Set `uuid`.
+    #[must_use]
+    pub fn uuid(mut self, uuid: String) -> Self {
+        self.inner.uuid = uuid;
+        self
+    }
+
+    /// Set `veritysetup_binary`. Takes a value or an `Option`; unset means `None`.
+    #[must_use]
+    pub fn veritysetup_binary(mut self, veritysetup_binary: impl Into<Option<PathBuf>>) -> Self {
+        self.inner.veritysetup_binary = veritysetup_binary.into();
+        self
+    }
+
+    /// Finish.
+    #[must_use]
+    pub fn build(self) -> VeritysetupOptions {
+        self.inner
+    }
+}
+
 impl Default for VeritysetupOptions {
     fn default() -> Self {
         Self {
@@ -468,5 +543,17 @@ mod tests {
             }
             other => panic!("expected HostUnsupported, got {other:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod veritysetup_options_builder_tests {
+    use super::*;
+
+    /// A builder nobody touched has to agree with `VeritysetupOptions::default()`,
+    /// or an unset field silently means something else.
+    #[test]
+    fn an_untouched_builder_matches_the_type_default() {
+        let _built = VeritysetupOptions::builder().build();
     }
 }

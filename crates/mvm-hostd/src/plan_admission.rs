@@ -66,6 +66,7 @@ use mvm_vmm::quota::QuotaConfig;
 use std::sync::Mutex;
 
 use crate::audit::host_keypair::host_signer_id;
+use mvm_contract::builder::BuilderError;
 use mvm_core::plan::{SynthesisInput, synthesize_plan};
 use mvm_core::vm_backend::{VmId, VmStartConfig};
 use mvm_runtime::AnyBackend;
@@ -1037,6 +1038,167 @@ pub struct AdmitAndStartParams<'a> {
     /// it is the record that the run was allowed, and it is written before the
     /// backend starts, so refusing on it actually stops the unaudited run.
     pub audit_durability: crate::audit::durability::AuditDurability,
+}
+
+impl<'a> AdmitAndStartParams<'a> {
+    /// Start building a [`AdmitAndStartParams`]. Every value is set by name, so a
+    /// call site cannot transpose two fields that share a type.
+    #[must_use]
+    pub fn builder() -> AdmitAndStartParamsBuilder<'a> {
+        AdmitAndStartParamsBuilder::new()
+    }
+}
+
+/// Builder for [`AdmitAndStartParams`]. Required fields are checked by
+/// [`AdmitAndStartParamsBuilder::build`] rather than defaulted, so an unset one is a
+/// reported error and never a silently empty value.
+pub struct AdmitAndStartParamsBuilder<'a> {
+    synthesis: Option<&'a SynthesisInput<'a>>,
+    config: Option<VmStartConfig>,
+    clock: Option<&'a dyn Clock>,
+    ledger: Option<&'a InMemoryNonceLedger>,
+    host_signer_keys_dir: Option<&'a std::path::Path>,
+    bundle_ctx: Option<&'a BundleAdmissionContext<'a>>,
+    variant: Option<Variant>,
+    policy_bundle: Option<&'a PolicyBundle>,
+    emitter: Option<&'a crate::audit::emitter::AuditEmitter>,
+    audit_durability: Option<crate::audit::durability::AuditDurability>,
+}
+
+impl<'a> AdmitAndStartParamsBuilder<'a> {
+    /// An empty builder: nothing set yet.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            synthesis: None,
+            config: None,
+            clock: None,
+            ledger: None,
+            host_signer_keys_dir: None,
+            bundle_ctx: None,
+            variant: None,
+            policy_bundle: None,
+            emitter: None,
+            audit_durability: None,
+        }
+    }
+
+    /// Set `synthesis`.
+    #[must_use]
+    pub fn synthesis(mut self, synthesis: &'a SynthesisInput<'a>) -> Self {
+        self.synthesis = Some(synthesis);
+        self
+    }
+
+    /// Set `config`.
+    #[must_use]
+    pub fn config(mut self, config: VmStartConfig) -> Self {
+        self.config = Some(config);
+        self
+    }
+
+    /// Set `clock`.
+    #[must_use]
+    pub fn clock(mut self, clock: &'a dyn Clock) -> Self {
+        self.clock = Some(clock);
+        self
+    }
+
+    /// Set `ledger`.
+    #[must_use]
+    pub fn ledger(mut self, ledger: &'a InMemoryNonceLedger) -> Self {
+        self.ledger = Some(ledger);
+        self
+    }
+
+    /// Set `host_signer_keys_dir`. Takes a value or an `Option`; unset means `None`.
+    #[must_use]
+    pub fn host_signer_keys_dir(
+        mut self,
+        host_signer_keys_dir: impl Into<Option<&'a std::path::Path>>,
+    ) -> Self {
+        self.host_signer_keys_dir = host_signer_keys_dir.into();
+        self
+    }
+
+    /// Set `bundle_ctx`. Takes a value or an `Option`; unset means `None`.
+    #[must_use]
+    pub fn bundle_ctx(
+        mut self,
+        bundle_ctx: impl Into<Option<&'a BundleAdmissionContext<'a>>>,
+    ) -> Self {
+        self.bundle_ctx = bundle_ctx.into();
+        self
+    }
+
+    /// Set `variant`.
+    #[must_use]
+    pub fn variant(mut self, variant: Variant) -> Self {
+        self.variant = Some(variant);
+        self
+    }
+
+    /// Set `policy_bundle`. Takes a value or an `Option`; unset means `None`.
+    #[must_use]
+    pub fn policy_bundle(mut self, policy_bundle: impl Into<Option<&'a PolicyBundle>>) -> Self {
+        self.policy_bundle = policy_bundle.into();
+        self
+    }
+
+    /// Set `emitter`. Takes a value or an `Option`; unset means `None`.
+    #[must_use]
+    pub fn emitter(
+        mut self,
+        emitter: impl Into<Option<&'a crate::audit::emitter::AuditEmitter>>,
+    ) -> Self {
+        self.emitter = emitter.into();
+        self
+    }
+
+    /// Set `audit_durability`.
+    #[must_use]
+    pub fn audit_durability(
+        mut self,
+        audit_durability: crate::audit::durability::AuditDurability,
+    ) -> Self {
+        self.audit_durability = Some(audit_durability);
+        self
+    }
+
+    /// Finish, or name the first required field left unset.
+    pub fn build(self) -> Result<AdmitAndStartParams<'a>, BuilderError> {
+        Ok(AdmitAndStartParams {
+            synthesis: self
+                .synthesis
+                .ok_or(BuilderError::missing("AdmitAndStartParams", "synthesis"))?,
+            config: self
+                .config
+                .ok_or(BuilderError::missing("AdmitAndStartParams", "config"))?,
+            clock: self
+                .clock
+                .ok_or(BuilderError::missing("AdmitAndStartParams", "clock"))?,
+            ledger: self
+                .ledger
+                .ok_or(BuilderError::missing("AdmitAndStartParams", "ledger"))?,
+            host_signer_keys_dir: self.host_signer_keys_dir,
+            bundle_ctx: self.bundle_ctx,
+            variant: self
+                .variant
+                .ok_or(BuilderError::missing("AdmitAndStartParams", "variant"))?,
+            policy_bundle: self.policy_bundle,
+            emitter: self.emitter,
+            audit_durability: self.audit_durability.ok_or(BuilderError::missing(
+                "AdmitAndStartParams",
+                "audit_durability",
+            ))?,
+        })
+    }
+}
+
+impl<'a> Default for AdmitAndStartParamsBuilder<'a> {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Refuse a boot whose kernel is not the one the plan pinned.
@@ -3538,5 +3700,23 @@ mod tests {
         let clean = tmp.path().join("clean-state");
         std::fs::create_dir_all(&clean).unwrap();
         assert!(mint_verb_grant_sidecar("{}", "vm-fresh", &clean).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod admit_and_start_params_builder_tests {
+    use super::*;
+
+    /// An empty builder must refuse to finish, naming the first
+    /// required field it is missing — never substituting a default.
+    #[test]
+    fn an_empty_builder_names_the_first_missing_field() {
+        let Err(err) = AdmitAndStartParams::builder().build() else {
+            panic!("an empty AdmitAndStartParams builder must not build");
+        };
+        assert_eq!(
+            err,
+            BuilderError::missing("AdmitAndStartParams", "synthesis")
+        );
     }
 }

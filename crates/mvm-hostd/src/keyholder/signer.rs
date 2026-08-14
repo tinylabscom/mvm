@@ -18,6 +18,7 @@ use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
 use super::resolver::{ResolveError, SecretResolver};
+use mvm_contract::builder::BuilderError;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -63,6 +64,114 @@ pub struct SigV4Input {
     /// the `SignedHeaders=` field of the `Authorization` header. Request
     /// metadata, not key material, so Debug can't leak a secret.
     pub signed_headers: String,
+}
+
+impl SigV4Input {
+    /// Start building a [`SigV4Input`]. Every value is set by name, so a
+    /// call site cannot transpose two fields that share a type.
+    #[must_use]
+    pub fn builder() -> SigV4InputBuilder {
+        SigV4InputBuilder::new()
+    }
+}
+
+/// Builder for [`SigV4Input`]. Required fields are checked by
+/// [`SigV4InputBuilder::build`] rather than defaulted, so an unset one is a
+/// reported error and never a silently empty value.
+pub struct SigV4InputBuilder {
+    canonical_request: Option<String>,
+    amz_date: Option<String>,
+    date_stamp: Option<String>,
+    region: Option<String>,
+    service: Option<String>,
+    signed_headers: Option<String>,
+}
+
+impl SigV4InputBuilder {
+    /// An empty builder: nothing set yet.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            canonical_request: None,
+            amz_date: None,
+            date_stamp: None,
+            region: None,
+            service: None,
+            signed_headers: None,
+        }
+    }
+
+    /// Set `canonical_request`.
+    #[must_use]
+    pub fn canonical_request(mut self, canonical_request: String) -> Self {
+        self.canonical_request = Some(canonical_request);
+        self
+    }
+
+    /// Set `amz_date`.
+    #[must_use]
+    pub fn amz_date(mut self, amz_date: String) -> Self {
+        self.amz_date = Some(amz_date);
+        self
+    }
+
+    /// Set `date_stamp`.
+    #[must_use]
+    pub fn date_stamp(mut self, date_stamp: String) -> Self {
+        self.date_stamp = Some(date_stamp);
+        self
+    }
+
+    /// Set `region`.
+    #[must_use]
+    pub fn region(mut self, region: String) -> Self {
+        self.region = Some(region);
+        self
+    }
+
+    /// Set `service`.
+    #[must_use]
+    pub fn service(mut self, service: String) -> Self {
+        self.service = Some(service);
+        self
+    }
+
+    /// Set `signed_headers`.
+    #[must_use]
+    pub fn signed_headers(mut self, signed_headers: String) -> Self {
+        self.signed_headers = Some(signed_headers);
+        self
+    }
+
+    /// Finish, or name the first required field left unset.
+    pub fn build(self) -> Result<SigV4Input, BuilderError> {
+        Ok(SigV4Input {
+            canonical_request: self
+                .canonical_request
+                .ok_or(BuilderError::missing("SigV4Input", "canonical_request"))?,
+            amz_date: self
+                .amz_date
+                .ok_or(BuilderError::missing("SigV4Input", "amz_date"))?,
+            date_stamp: self
+                .date_stamp
+                .ok_or(BuilderError::missing("SigV4Input", "date_stamp"))?,
+            region: self
+                .region
+                .ok_or(BuilderError::missing("SigV4Input", "region"))?,
+            service: self
+                .service
+                .ok_or(BuilderError::missing("SigV4Input", "service"))?,
+            signed_headers: self
+                .signed_headers
+                .ok_or(BuilderError::missing("SigV4Input", "signed_headers"))?,
+        })
+    }
+}
+
+impl Default for SigV4InputBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl SigV4Input {
@@ -276,5 +385,23 @@ mod tests {
             err,
             SignError::Resolve(ResolveError::Unbound { .. })
         ));
+    }
+}
+
+#[cfg(test)]
+mod sig_v4_input_builder_tests {
+    use super::*;
+
+    /// An empty builder must refuse to finish, naming the first
+    /// required field it is missing — never substituting a default.
+    #[test]
+    fn an_empty_builder_names_the_first_missing_field() {
+        let Err(err) = SigV4Input::builder().build() else {
+            panic!("an empty SigV4Input builder must not build");
+        };
+        assert_eq!(
+            err,
+            BuilderError::missing("SigV4Input", "canonical_request")
+        );
     }
 }

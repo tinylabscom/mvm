@@ -51,6 +51,7 @@ use crate::plan::{
 };
 use anyhow::Result;
 use chrono::{Duration, Utc};
+use mvm_contract::builder::BuilderError;
 use rand::RngCore;
 use std::collections::BTreeMap;
 
@@ -199,6 +200,429 @@ pub struct SynthesisInput<'a> {
     /// live and keeps nothing. Admitted rather than flagged so an absent
     /// transcript is attributable to a signed decision.
     pub stream_retention: StreamRetention,
+}
+
+impl<'a> SynthesisInput<'a> {
+    /// Start building a [`SynthesisInput`]. Every value is set by name, so a
+    /// call site cannot transpose two fields that share a type.
+    #[must_use]
+    pub fn builder() -> SynthesisInputBuilder<'a> {
+        SynthesisInputBuilder::new()
+    }
+}
+
+/// Builder for [`SynthesisInput`]. Required fields are checked by
+/// [`SynthesisInputBuilder::build`] rather than defaulted, so an unset one is a
+/// reported error and never a silently empty value.
+pub struct SynthesisInputBuilder<'a> {
+    vm_name: Option<&'a str>,
+    tenant: Option<&'a str>,
+    backend_name: Option<&'a str>,
+    image_name: Option<&'a str>,
+    image_sha256: Option<&'a str>,
+    kernel_sha256: Option<&'a str>,
+    image_cosign_bundle: Option<&'a str>,
+    intent: Option<&'a str>,
+    seccomp_tier: Option<PlanSeccompTier>,
+    network_policy_ref: Option<&'a str>,
+    fs_policy_ref: Option<&'a str>,
+    egress_policy_ref: Option<&'a str>,
+    tool_policy_ref: Option<&'a str>,
+    secret_release: Option<SecretReleasePolicy>,
+    secrets: Option<Vec<SecretBinding>>,
+    audit_event_prefix: Option<&'a str>,
+    network_mode: Option<NetworkMode>,
+    l3_network: Option<L3NetworkSpec>,
+    grants: Option<mvm_contract::grants::Grants>,
+    cpus: Option<u32>,
+    mem_mib: Option<u64>,
+    disk_mib: Option<u64>,
+    boot_timeout_secs: Option<u32>,
+    destroy_on_exit: Option<bool>,
+    bundle_pin: Option<crate::plan::bundle::PlanArtifact>,
+    deps_volume: Option<DepsVolumeBinding>,
+    shares: Option<Vec<crate::plan::HostShareGrant>>,
+    redaction: Option<crate::policy::RedactionPolicy>,
+    reversible_replacement: Option<crate::policy::ReversibleReplacementPolicy>,
+    audit_labels: Option<AuditLabels>,
+    agent_verbs: Option<Vec<crate::plan::VerbId>>,
+    services: Option<Vec<mvm_contract::protocol::broker::ServiceId>>,
+    stream_edges: Option<Vec<mvm_contract::stream::StreamEdge>>,
+    stream_retention: Option<StreamRetention>,
+}
+
+impl<'a> SynthesisInputBuilder<'a> {
+    /// An empty builder: nothing set yet.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            vm_name: None,
+            tenant: None,
+            backend_name: None,
+            image_name: None,
+            image_sha256: None,
+            kernel_sha256: None,
+            image_cosign_bundle: None,
+            intent: None,
+            seccomp_tier: None,
+            network_policy_ref: None,
+            fs_policy_ref: None,
+            egress_policy_ref: None,
+            tool_policy_ref: None,
+            secret_release: None,
+            secrets: None,
+            audit_event_prefix: None,
+            network_mode: None,
+            l3_network: None,
+            grants: None,
+            cpus: None,
+            mem_mib: None,
+            disk_mib: None,
+            boot_timeout_secs: None,
+            destroy_on_exit: None,
+            bundle_pin: None,
+            deps_volume: None,
+            shares: None,
+            redaction: None,
+            reversible_replacement: None,
+            audit_labels: None,
+            agent_verbs: None,
+            services: None,
+            stream_edges: None,
+            stream_retention: None,
+        }
+    }
+
+    /// Set `vm_name`.
+    #[must_use]
+    pub fn vm_name(mut self, vm_name: &'a str) -> Self {
+        self.vm_name = Some(vm_name);
+        self
+    }
+
+    /// Set `tenant`. Takes a value or an `Option`; unset means `None`.
+    #[must_use]
+    pub fn tenant(mut self, tenant: impl Into<Option<&'a str>>) -> Self {
+        self.tenant = tenant.into();
+        self
+    }
+
+    /// Set `backend_name`.
+    #[must_use]
+    pub fn backend_name(mut self, backend_name: &'a str) -> Self {
+        self.backend_name = Some(backend_name);
+        self
+    }
+
+    /// Set `image_name`.
+    #[must_use]
+    pub fn image_name(mut self, image_name: &'a str) -> Self {
+        self.image_name = Some(image_name);
+        self
+    }
+
+    /// Set `image_sha256`.
+    #[must_use]
+    pub fn image_sha256(mut self, image_sha256: &'a str) -> Self {
+        self.image_sha256 = Some(image_sha256);
+        self
+    }
+
+    /// Set `kernel_sha256`. Takes a value or an `Option`; unset means `None`.
+    #[must_use]
+    pub fn kernel_sha256(mut self, kernel_sha256: impl Into<Option<&'a str>>) -> Self {
+        self.kernel_sha256 = kernel_sha256.into();
+        self
+    }
+
+    /// Set `image_cosign_bundle`. Takes a value or an `Option`; unset means `None`.
+    #[must_use]
+    pub fn image_cosign_bundle(mut self, image_cosign_bundle: impl Into<Option<&'a str>>) -> Self {
+        self.image_cosign_bundle = image_cosign_bundle.into();
+        self
+    }
+
+    /// Set `intent`. Takes a value or an `Option`; unset means `None`.
+    #[must_use]
+    pub fn intent(mut self, intent: impl Into<Option<&'a str>>) -> Self {
+        self.intent = intent.into();
+        self
+    }
+
+    /// Set `seccomp_tier`.
+    #[must_use]
+    pub fn seccomp_tier(mut self, seccomp_tier: PlanSeccompTier) -> Self {
+        self.seccomp_tier = Some(seccomp_tier);
+        self
+    }
+
+    /// Set `network_policy_ref`. Takes a value or an `Option`; unset means `None`.
+    #[must_use]
+    pub fn network_policy_ref(mut self, network_policy_ref: impl Into<Option<&'a str>>) -> Self {
+        self.network_policy_ref = network_policy_ref.into();
+        self
+    }
+
+    /// Set `fs_policy_ref`. Takes a value or an `Option`; unset means `None`.
+    #[must_use]
+    pub fn fs_policy_ref(mut self, fs_policy_ref: impl Into<Option<&'a str>>) -> Self {
+        self.fs_policy_ref = fs_policy_ref.into();
+        self
+    }
+
+    /// Set `egress_policy_ref`. Takes a value or an `Option`; unset means `None`.
+    #[must_use]
+    pub fn egress_policy_ref(mut self, egress_policy_ref: impl Into<Option<&'a str>>) -> Self {
+        self.egress_policy_ref = egress_policy_ref.into();
+        self
+    }
+
+    /// Set `tool_policy_ref`. Takes a value or an `Option`; unset means `None`.
+    #[must_use]
+    pub fn tool_policy_ref(mut self, tool_policy_ref: impl Into<Option<&'a str>>) -> Self {
+        self.tool_policy_ref = tool_policy_ref.into();
+        self
+    }
+
+    /// Set `secret_release`.
+    #[must_use]
+    pub fn secret_release(mut self, secret_release: SecretReleasePolicy) -> Self {
+        self.secret_release = Some(secret_release);
+        self
+    }
+
+    /// Set `secrets`.
+    #[must_use]
+    pub fn secrets(mut self, secrets: Vec<SecretBinding>) -> Self {
+        self.secrets = Some(secrets);
+        self
+    }
+
+    /// Set `audit_event_prefix`. Takes a value or an `Option`; unset means `None`.
+    #[must_use]
+    pub fn audit_event_prefix(mut self, audit_event_prefix: impl Into<Option<&'a str>>) -> Self {
+        self.audit_event_prefix = audit_event_prefix.into();
+        self
+    }
+
+    /// Set `network_mode`.
+    #[must_use]
+    pub fn network_mode(mut self, network_mode: NetworkMode) -> Self {
+        self.network_mode = Some(network_mode);
+        self
+    }
+
+    /// Set `l3_network`. Takes a value or an `Option`; unset means `None`.
+    #[must_use]
+    pub fn l3_network(mut self, l3_network: impl Into<Option<L3NetworkSpec>>) -> Self {
+        self.l3_network = l3_network.into();
+        self
+    }
+
+    /// Set `grants`. Takes a value or an `Option`; unset means `None`.
+    #[must_use]
+    pub fn grants(mut self, grants: impl Into<Option<mvm_contract::grants::Grants>>) -> Self {
+        self.grants = grants.into();
+        self
+    }
+
+    /// Set `cpus`.
+    #[must_use]
+    pub fn cpus(mut self, cpus: u32) -> Self {
+        self.cpus = Some(cpus);
+        self
+    }
+
+    /// Set `mem_mib`.
+    #[must_use]
+    pub fn mem_mib(mut self, mem_mib: u64) -> Self {
+        self.mem_mib = Some(mem_mib);
+        self
+    }
+
+    /// Set `disk_mib`.
+    #[must_use]
+    pub fn disk_mib(mut self, disk_mib: u64) -> Self {
+        self.disk_mib = Some(disk_mib);
+        self
+    }
+
+    /// Set `boot_timeout_secs`.
+    #[must_use]
+    pub fn boot_timeout_secs(mut self, boot_timeout_secs: u32) -> Self {
+        self.boot_timeout_secs = Some(boot_timeout_secs);
+        self
+    }
+
+    /// Set `destroy_on_exit`.
+    #[must_use]
+    pub fn destroy_on_exit(mut self, destroy_on_exit: bool) -> Self {
+        self.destroy_on_exit = Some(destroy_on_exit);
+        self
+    }
+
+    /// Set `bundle_pin`. Takes a value or an `Option`; unset means `None`.
+    #[must_use]
+    pub fn bundle_pin(
+        mut self,
+        bundle_pin: impl Into<Option<crate::plan::bundle::PlanArtifact>>,
+    ) -> Self {
+        self.bundle_pin = bundle_pin.into();
+        self
+    }
+
+    /// Set `deps_volume`. Takes a value or an `Option`; unset means `None`.
+    #[must_use]
+    pub fn deps_volume(mut self, deps_volume: impl Into<Option<DepsVolumeBinding>>) -> Self {
+        self.deps_volume = deps_volume.into();
+        self
+    }
+
+    /// Set `shares`.
+    #[must_use]
+    pub fn shares(mut self, shares: Vec<crate::plan::HostShareGrant>) -> Self {
+        self.shares = Some(shares);
+        self
+    }
+
+    /// Set `redaction`.
+    #[must_use]
+    pub fn redaction(mut self, redaction: crate::policy::RedactionPolicy) -> Self {
+        self.redaction = Some(redaction);
+        self
+    }
+
+    /// Set `reversible_replacement`.
+    #[must_use]
+    pub fn reversible_replacement(
+        mut self,
+        reversible_replacement: crate::policy::ReversibleReplacementPolicy,
+    ) -> Self {
+        self.reversible_replacement = Some(reversible_replacement);
+        self
+    }
+
+    /// Set `audit_labels`.
+    #[must_use]
+    pub fn audit_labels(mut self, audit_labels: AuditLabels) -> Self {
+        self.audit_labels = Some(audit_labels);
+        self
+    }
+
+    /// Set `agent_verbs`. Takes a value or an `Option`; unset means `None`.
+    #[must_use]
+    pub fn agent_verbs(mut self, agent_verbs: impl Into<Option<Vec<crate::plan::VerbId>>>) -> Self {
+        self.agent_verbs = agent_verbs.into();
+        self
+    }
+
+    /// Set `services`.
+    #[must_use]
+    pub fn services(mut self, services: Vec<mvm_contract::protocol::broker::ServiceId>) -> Self {
+        self.services = Some(services);
+        self
+    }
+
+    /// Set `stream_edges`.
+    #[must_use]
+    pub fn stream_edges(mut self, stream_edges: Vec<mvm_contract::stream::StreamEdge>) -> Self {
+        self.stream_edges = Some(stream_edges);
+        self
+    }
+
+    /// Set `stream_retention`.
+    #[must_use]
+    pub fn stream_retention(mut self, stream_retention: StreamRetention) -> Self {
+        self.stream_retention = Some(stream_retention);
+        self
+    }
+
+    /// Finish, or name the first required field left unset.
+    pub fn build(self) -> Result<SynthesisInput<'a>, BuilderError> {
+        Ok(SynthesisInput {
+            vm_name: self
+                .vm_name
+                .ok_or(BuilderError::missing("SynthesisInput", "vm_name"))?,
+            tenant: self.tenant,
+            backend_name: self
+                .backend_name
+                .ok_or(BuilderError::missing("SynthesisInput", "backend_name"))?,
+            image_name: self
+                .image_name
+                .ok_or(BuilderError::missing("SynthesisInput", "image_name"))?,
+            image_sha256: self
+                .image_sha256
+                .ok_or(BuilderError::missing("SynthesisInput", "image_sha256"))?,
+            kernel_sha256: self.kernel_sha256,
+            image_cosign_bundle: self.image_cosign_bundle,
+            intent: self.intent,
+            seccomp_tier: self
+                .seccomp_tier
+                .ok_or(BuilderError::missing("SynthesisInput", "seccomp_tier"))?,
+            network_policy_ref: self.network_policy_ref,
+            fs_policy_ref: self.fs_policy_ref,
+            egress_policy_ref: self.egress_policy_ref,
+            tool_policy_ref: self.tool_policy_ref,
+            secret_release: self
+                .secret_release
+                .ok_or(BuilderError::missing("SynthesisInput", "secret_release"))?,
+            secrets: self
+                .secrets
+                .ok_or(BuilderError::missing("SynthesisInput", "secrets"))?,
+            audit_event_prefix: self.audit_event_prefix,
+            network_mode: self
+                .network_mode
+                .ok_or(BuilderError::missing("SynthesisInput", "network_mode"))?,
+            l3_network: self.l3_network,
+            grants: self.grants,
+            cpus: self
+                .cpus
+                .ok_or(BuilderError::missing("SynthesisInput", "cpus"))?,
+            mem_mib: self
+                .mem_mib
+                .ok_or(BuilderError::missing("SynthesisInput", "mem_mib"))?,
+            disk_mib: self
+                .disk_mib
+                .ok_or(BuilderError::missing("SynthesisInput", "disk_mib"))?,
+            boot_timeout_secs: self
+                .boot_timeout_secs
+                .ok_or(BuilderError::missing("SynthesisInput", "boot_timeout_secs"))?,
+            destroy_on_exit: self
+                .destroy_on_exit
+                .ok_or(BuilderError::missing("SynthesisInput", "destroy_on_exit"))?,
+            bundle_pin: self.bundle_pin,
+            deps_volume: self.deps_volume,
+            shares: self
+                .shares
+                .ok_or(BuilderError::missing("SynthesisInput", "shares"))?,
+            redaction: self
+                .redaction
+                .ok_or(BuilderError::missing("SynthesisInput", "redaction"))?,
+            reversible_replacement: self.reversible_replacement.ok_or(BuilderError::missing(
+                "SynthesisInput",
+                "reversible_replacement",
+            ))?,
+            audit_labels: self
+                .audit_labels
+                .ok_or(BuilderError::missing("SynthesisInput", "audit_labels"))?,
+            agent_verbs: self.agent_verbs,
+            services: self
+                .services
+                .ok_or(BuilderError::missing("SynthesisInput", "services"))?,
+            stream_edges: self
+                .stream_edges
+                .ok_or(BuilderError::missing("SynthesisInput", "stream_edges"))?,
+            stream_retention: self
+                .stream_retention
+                .ok_or(BuilderError::missing("SynthesisInput", "stream_retention"))?,
+        })
+    }
+}
+
+impl<'a> Default for SynthesisInputBuilder<'a> {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// The L3 spec a plan carries, given its mode.
@@ -889,5 +1313,20 @@ mod l3_spec_tests {
                 "{mode:?} produced an inadmissible mode/spec pairing"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod synthesis_input_builder_tests {
+    use super::*;
+
+    /// An empty builder must refuse to finish, naming the first
+    /// required field it is missing — never substituting a default.
+    #[test]
+    fn an_empty_builder_names_the_first_missing_field() {
+        let Err(err) = SynthesisInput::builder().build() else {
+            panic!("an empty SynthesisInput builder must not build");
+        };
+        assert_eq!(err, BuilderError::missing("SynthesisInput", "vm_name"));
     }
 }
