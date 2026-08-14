@@ -31,7 +31,7 @@ hex.workspace = true
 sha2.workspace = true
 # Folded in with mvm-plan: `plan::bundle` reads/writes
 # tar bundle archives. Sync — adds no async/runtime dep to mvm-core.
-tar = "0.4"
+tar.workspace = true
 thiserror.workspace = true
 # Optional: the only default-build async surface left is
 # `protocol`'s hostd IPC transport, gated behind `hostd-transport`.

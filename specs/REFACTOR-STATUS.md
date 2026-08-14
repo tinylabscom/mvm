@@ -1,6 +1,6 @@
 # Refactor status
 
-Last updated: 2026-08-13
+Last updated: 2026-08-14
 
 This is the cross-plan progress index. The owning plan remains authoritative
 for detailed scope and acceptance criteria.
@@ -1489,6 +1489,29 @@ check-l3-expansion-freeze` added as a temporary shrink-only ratchet
   - [ ] Pin the egress predicate algebra; enumerate escalation as deny-loud
   - [ ] Replay vectors for the audit chain's canonical signed bytes
   - [ ] Double-key the stale-name relief valves
+
+- [x] Plan 333 — dependency hygiene: four defects and a ratchet, not a cut
+      (`specs/plans/333-dependency-hygiene.md`)
+  - [x] Phase 5 — the four defects: `hickory-proto` declared unconditionally in
+        `mvm-hostd` while every consumer is `cfg(target_os = "linux")` (−6 on
+        macOS, retires the shipped duplicate `rand` major there; `rand_core`
+        0.10 stays, reached via aes-gcm/crypto-common, a P309 non-goal); the dead
+        `memchr` workspace entry and its false justification; 69 member-manifest
+        version pins that bypass `[workspace.dependencies]`; four stale
+        `deny.toml` skip entries `cargo deny` already warns on. Landed: macOS
+        closure 238 -> 232, Linux unchanged at 243; 18 of 25 deny skips were
+        stale, not 4; only 7 of the 69 pins were safely convertible (
+        `mvm-contract`'s 9 no_std narrowings must stay local or `std` leaks
+        into a wasm32 crate)
+  - [x] Phase 5.5 — the gate for the class: `xtask
+        check-workspace-dep-inheritance`, plus a second
+        `check-closure-budget` target for `aarch64-apple-darwin` (currently
+        ungated, which is why the `hickory-proto` edge survived). Each proven
+        red: re-pinning `thiserror = "1"`, re-adding `memchr`, and re-declaring
+        `hickory-proto` unconditionally all fail, the last on macOS while Linux
+        stays green
+  - Re-measured Plan 309 Phase 3 independently and reproduced it; its declines
+    stand and are not re-opened
 
 - [ ] Plan 309 — dependency reduction
       (`specs/plans/309-dependency-reduction.md`)

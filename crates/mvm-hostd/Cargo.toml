@@ -111,7 +111,7 @@ mvm-build = { workspace = true, features = ["builder-vm"] }
 # libkrun bindings/wrapper; FFI linkage gated by the libkrun-sys feature.
 libkrun-sys = { workspace = true }
 anyhow.workspace = true
-async-trait = "0.1"
+async-trait.workspace = true
 base64.workspace = true
 chrono.workspace = true
 # rand_core feature for the signers' Ed25519 keygen.
@@ -135,7 +135,6 @@ socket2 = { workspace = true, features = ["all"] }
 # custom-dns pulls hickory 0.26 (needs Rust 1.88); the default build
 # carries no hickory and stays on the workspace 1.85 floor.
 hickory-resolver = { workspace = true, features = ["tokio"], optional = true }
-hickory-proto.workspace = true
 rand.workspace = true
 regex.workspace = true
 leakguard.workspace = true
@@ -198,6 +197,14 @@ aya = { version = "0.13", optional = true }
 aya-log = { version = "0.2", optional = true }
 seccompiler = { workspace = true }
 landlock = { workspace = true }
+# DNS wire codec for the raw-egress resolver. Every consumer in
+# `supervisor/raw_egress.rs` -- the four imports, the five encode/decode/query
+# functions, and the test module's -- is `cfg(target_os = "linux")`; the
+# `cfg(not(target_os = "linux"))` arm resolves through the host instead and
+# touches none of it. Declared unconditionally this linked hickory-proto plus
+# a second CSPRNG (`rand` 0.10, `rand_core` 0.10, `chacha20`) and
+# `data-encoding` into a macOS `mvmctl` with no consumer at all.
+hickory-proto = { workspace = true }
 
 [dev-dependencies]
 tempfile.workspace = true
