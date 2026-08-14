@@ -741,6 +741,11 @@ jobs:
           sudo rm -f /etc/apt/sources.list.d/microsoft*.list /etc/apt/sources.list.d/azure*.list; sudo apt-get update
           sudo apt-get install -y libcap-ng-dev lld
 
+      # Building the root package runs `crates/mvm-cli/build.rs`, which
+      # cross-compiles the embedded host binaries and needs the pinned zig.
+      # Without it the lane fails before it ever boots anything.
+      - uses: ./.github/actions/install-zigbuild
+
       - uses: ./.github/actions/rust-cache
         with:
           key: boot-latency

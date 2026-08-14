@@ -41,12 +41,28 @@ host-descriptor-pinned) belongs on a dedicated host and is not this lane. One
 threshold cannot do both jobs, and a gate that flakes is a gate that gets
 switched off.
 
+## First run: a build failure, not a boot failure
+
+The lane's first run failed before booting anything. `mvm-cli`'s `build.rs`
+cross-compiles the embedded host binaries and needs the pinned zig, which the
+lane did not install — so the root package would not build. Fixed by adding the
+existing `./.github/actions/install-zigbuild` step, the same one `bdd.yml` and
+`cache-warm.yml` use.
+
+Everything ahead of the boot did work on that run: firecracker installed,
+`/dev/kvm` granted, and the pinned image fetched and sha256-verified against the
+release manifest. So the lane's shape is right and only the toolchain step was
+missing.
+
+Worth noting for the workflow-linting gap tracked separately: no linter would
+have caught this. The YAML was valid and `actionlint` passed both before and
+after. A missing build dependency is only observable by running the job.
+
 ## Not verified here
 
-**The lane has never executed.** GitHub Actions cannot be run locally, so its
-first run on this PR is its own validation. Specifically unproven: that the
-`v0.17.0` default-microvm rootfs reaches guest-agent readiness under plain
-firecracker on a hosted runner, and that 6000ms clears it there. If the first
-run fails, the number or the readiness signal is wrong — not the lane's shape.
+**The budget has still never been exercised.** The first run died in the build step, so the
+boot itself has still not happened. Specifically unproven: that the `v0.17.0`
+default-microvm rootfs reaches guest-agent readiness under plain firecracker on
+a hosted runner, and that 6000ms clears it there.
 
 The relative-baseline half of the issue is not implemented, so #2484 stays open.
