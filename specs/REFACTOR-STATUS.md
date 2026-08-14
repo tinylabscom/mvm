@@ -54,11 +54,10 @@ for detailed scope and acceptance criteria.
       long-help blocks and caps overlong summaries at 79 columns; generated-tree
       BDD coverage executes the real binary, rejects continuation lines and
       overlong output, and automatically includes future subcommands.
-- [~] **Issue-closeout batch — #2165, #2321, and #2323.** The workload runner
-  now emits read-only root bootargs for read-only root devices, the
-  credential-bearing substitution response is incrementally capped, and
-  Firecracker teardown uses the shared poll backoff. PR merge and required
-  live evidence remain before these issues close.
+- [x] **Issue-closeout batch — #2165, #2321, and #2323.** #2165 closed as
+      completed by PR #2330: the workload runner now emits read-only root
+      bootargs for read-only root devices. #2321 and #2323 were previously
+      closed; the batch is complete.
 - [x] **Issue #2128 — kernel pin freshness.** The libkrunfw bundle and custom
       guest kernel now share the verified Linux 6.12.102 LTS source pin;
       structural parity coverage prevents the consumers from drifting apart.
@@ -67,11 +66,12 @@ for detailed scope and acceptance criteria.
       plan that boots. PR #2317 made admission the pre-action sync barrier,
       deferred post-hoc records without changing chain content or ordering,
       retained fail-safe sync for unknown events, and preserved torn-tail
-      detection. The separate receipt-store cost remains open as #2318.
-- [~] **Issue #2289 — kernel pin freshness follow-up.** This PR synchronizes
-  the libkrunfw and custom guest kernel inputs on the verified Linux
-  6.12.103 LTS source pin and updates structural parity coverage with the
-  upstream tarball's verified SRI hash. Merge and rollout evidence remain.
+      detection. PR #2328 removed the redundant head fsync and added head recovery; the follow-up in this branch records the record-vs-control decision and adds torn-head coverage. The KVM `emit: receipt` re-measurement remains queued on a Linux/KVM host.
+- [x] **Issue #2289 — kernel pin freshness follow-up.** Closed as completed
+      by PR #2301. The libkrunfw and custom guest kernel inputs now
+      synchronize on the verified Linux 6.12.103 LTS source pin, and
+      structural parity coverage uses the upstream tarball's verified SRI
+      hash.
 
 ## Fast machine substrate
 
@@ -110,6 +110,15 @@ for detailed scope and acceptance criteria.
       zero; the later workload boot stopped at a separate readiness timeout.
 
 ## In-flight plans
+
+- [~] Plan 330 — Decision provenance layer
+  (`specs/plans/330-decision-provenance-layer.md`)
+  - [ ] Phase 0 — RFC and ADR approved
+  - [x] Phase 1 — PROV-O export of existing events
+  - [x] Phase 2 — Enrich existing audit events with authorizer/rationale
+  - [x] Phase 3 — DecisionRecord API and content-addressed store
+  - [x] Phase 4 — Query API and causal chains
+  - [ ] Phase 5 — Optional standards interoperability
 
 - [~] Plan 325 — SDK sidecar reserved mount
   (`specs/plans/325-sdk-sidecar-reserved-mount.md`)
@@ -211,9 +220,18 @@ for detailed scope and acceptance criteria.
         workspace check, macOS workspace all-target Clippy, and the focused
         x86_64 and aarch64 Linux cross-builds
   - [x] Run Linux-native workspace Clippy/tests — CI test-linux and
-        lint-core passed on PR #2324; local x86_64 Linux cross-build
-        (`cargo zigbuild --target x86_64-unknown-linux-gnu -p mvm-vmm
-    --lib --all-features`) passes on current `main`
+        lint-core passed on PR #2324; local x86_64 and aarch64 Linux
+        cross-builds (`cargo zigbuild --target x86_64-unknown-linux-gnu`
+        and `--target aarch64-unknown-linux-gnu -p mvm-vmm --lib
+        --all-features`) pass on current `main`. Local Linux-native
+        builder-VM gates are tracked in Plan 316.
+
+- [ ] Plan 316 — Local Linux builder-VM gates via `mvmctl __builder-shell-job`
+      (`specs/plans/316-builder-vm-shell-job-runner.md`)
+  - [ ] Add hidden `mvmctl __builder-shell-job` command and example scripts
+  - [ ] Run `mvm-vmm` tests and crate-level Clippy inside the HVF/libkrun
+        builder VM
+  - [ ] Update Plan 315 and `specs/SPRINT.md` to reference this plan
 
 - [x] Plan 318 — span-timing profiling
       (`specs/plans/318-span-timing-profiling.md`)
@@ -281,9 +299,9 @@ for detailed scope and acceptance criteria.
         thread and pass 20/20 parallel stress runs
   - [ ] Run the exact Linux Security workflow, merge the fix, and observe a
         clean scheduled or release run before closing the issue
-- [~] Plan 300 — 30-issue reconciliation and closeout
+- [~] Plan 300 — 31-issue reconciliation and closeout
   (`specs/plans/300-open-issue-closeout.md`)
-  - [x] Inventory all 30 issues open at the 2026-08-10 snapshot against
+  - [x] Inventory all 39 issues open at the 2026-08-13 snapshot against
         current `origin/main`, issue comments, owning plans, and workflow state
   - [x] Close eight issues on 2026-08-13: #2165, #2289, #2333, #2423 as
         completed by merged PRs; #2180, #2181, #2305, #2413 as not planned /
@@ -1042,7 +1060,7 @@ for detailed scope and acceptance criteria.
         test fidelity, not liveness
   - [x] T17 — the operator surface, landed with a live entrypoint resolver in
         the same change as the plan required. `machine run --entrypoint --stdin
-    -` opens the route under the plan that boot was admitted under, pumps
+-` opens the route under the plan that boot was admitted under, pumps
         the caller's stdin through the gate in acceptance order on its own
         thread, refreshes the lease on a ticker while the writer is idle, and
         closes the workload's stdin on the caller's EOF. The grant is
@@ -1205,7 +1223,7 @@ for detailed scope and acceptance criteria.
         networking; `specs/refactor/03-networking.md` corrected from "the raw
         packet path is deleted" to the actual two-path state; ADR-001's tier
         matrix and claim-10 section qualified; `xtask
-    check-l3-expansion-freeze` added as a temporary shrink-only ratchet
+check-l3-expansion-freeze` added as a temporary shrink-only ratchet
         over `L3Vsock`/`raw_ip_stack`/`NetworkControl`/`NetworkData`/
         `spawn_netd`/`host_datapath` (29 allowlist entries); synthesis,
         admission, and CLI preflight refuse `raw_ip_stack=true`/`L3Vsock` with
@@ -1227,18 +1245,18 @@ for detailed scope and acceptance criteria.
         FlowMux, with tests for replay, tampering, wrong identity, and counter
         exhaustion. Remaining: the perf harness + baselines.
   - [x] Phase 2 — the one authenticated endpoint (#2371). `GuestService::NetworkFlow`
-    now names the port-5253 channel; the endpoint binary, proxy, spawner, and
-    test files are renamed to `mvm-network-endpoint`/`network_endpoint_*`;
-    `mvm-hostd::supervisor::flowmux` landed the authenticated FlowMux session
-    acceptor (`FlowMuxSession::accept`, `serve`, `Hello`/`HelloAck`, `GoAway`
-    for unimplemented flows) and bounded per-stream registries
-    (`flowmux::registry`) with unit tests for parity, ceilings, state
-    transitions, and credit accounting. The acceptor is wired into the
-    `mvm-network-endpoint` binary (`EgressMode::FlowMux`,
-    `EndpointConfig::flowmux_identity`, `serve_flowmux`) and the spawner emits
-    the identity on stdin. Backend witness tests in `mvm-vmm::host::spec_map`
-    and the Firecracker/HVF/libkrun driver modules prove exactly one
-    `NetworkFlow` service and no L3 services per granted workload.
+        now names the port-5253 channel; the endpoint binary, proxy, spawner, and
+        test files are renamed to `mvm-network-endpoint`/`network_endpoint_*`;
+        `mvm-hostd::supervisor::flowmux` landed the authenticated FlowMux session
+        acceptor (`FlowMuxSession::accept`, `serve`, `Hello`/`HelloAck`, `GoAway`
+        for unimplemented flows) and bounded per-stream registries
+        (`flowmux::registry`) with unit tests for parity, ceilings, state
+        transitions, and credit accounting. The acceptor is wired into the
+        `mvm-network-endpoint` binary (`EgressMode::FlowMux`,
+        `EndpointConfig::flowmux_identity`, `serve_flowmux`) and the spawner emits
+        the identity on stdin. Backend witness tests in `mvm-vmm::host::spec_map`
+        and the Firecracker/HVF/libkrun driver modules prove exactly one
+        `NetworkFlow` service and no L3 services per granted workload.
   - [~] Phase 3 — converge egress TCP, UDP, and DNS (#2372). Landed:
         guest-initiated `OpenTcp` with typed `Opened`/`Refused` replies,
         `OpenUdp`/`UdpSend`/`UdpRecv` associations, `Resolve`/`Resolved` DNS
@@ -1361,7 +1379,7 @@ for detailed scope and acceptance criteria.
   - [x] Linux cross-compile stubs for Hypervisor.framework symbols
   - [x] Console-streaming test isolated with temp `MVM_HOME`
   - [x] `cargo test -p mvm-runtime` green; `cargo clippy -p mvm-runtime
-    -p mvm-build -- -D warnings` clean on macOS and Linux builder VM
+-p mvm-build -- -D warnings` clean on macOS and Linux builder VM
   - [x] Full workspace test run on x86_64 Linux builder VM —
         `cargo nextest run --workspace`: 10372 passed, 19 skipped (4 threads)
 

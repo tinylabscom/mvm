@@ -1,7 +1,7 @@
 # Guest FlowMux loopback adapter (Plan 316 Phase 3)
 
 **Issue:** #2372  
-**Branch:** `feat/316-complete-migration`
+**Branch:** `feat/316-guest-flowmux-adapter`
 
 Wired the in-guest loopback egress proxy and addon DNS forwarder to the shared
 `FlowMuxReconnectClient`, replacing the legacy raw-egress line-prelude protocol
@@ -38,3 +38,11 @@ on the guest side.
 
 Host-side raw-egress deletion and endpoint crash/restart integration tests are
 outstanding and tracked under Plan 316 Phase 3.
+
+
+## PR
+
+- <https://github.com/tinylabscom/mvm/pull/2468>
+- The previous PR #2459 on `feat/316-complete-migration` entered the merge
+  queue before this branch split; this branch carries the same guest-adapter
+  change on a new name so it can be reviewed/merged independently.
