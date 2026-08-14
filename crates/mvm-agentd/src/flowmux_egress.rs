@@ -433,7 +433,7 @@ pub mod dns_stub {
 
         #[tokio::test]
         async fn dns_stub_forwards_udp_query_and_rewrites_id() {
-            let (guest_stream, mut host_stream) = tokio::io::duplex(4096);
+            let (guest_stream, host_stream) = tokio::io::duplex(4096);
             let (guest_key, _guest_anchor) = generate_keypair();
             let (host_key, host_anchor) = generate_keypair();
 
@@ -501,7 +501,7 @@ pub mod dns_stub {
             client_socket.send_to(&query, stub_addr).await.unwrap();
 
             let mut buf = vec![0u8; 512];
-            let (len, _) = tokio::time::timeout(
+            let (_len, _) = tokio::time::timeout(
                 std::time::Duration::from_secs(2),
                 client_socket.recv_from(&mut buf),
             )

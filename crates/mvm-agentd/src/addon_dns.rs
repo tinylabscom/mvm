@@ -958,7 +958,7 @@ mod tests {
             crate::flowmux::read_frame_from(stream).await.unwrap()
         }
 
-        let (guest_stream, mut host_stream) = tokio::io::duplex(4096);
+        let (guest_stream, host_stream) = tokio::io::duplex(4096);
         let (guest_key, _guest_anchor) = generate_keypair();
         let (host_key, host_anchor) = generate_keypair();
 
