@@ -1247,8 +1247,11 @@ for detailed scope and acceptance criteria.
         free audit emission for TCP/UDP allows/denies and DNS resolves/refusals,
         and host-side integration tests for allowed/denied TCP, UDP round-trip,
         DNS pinning, UDP idle expiry, peer bounds, half-close, reset, and rate-
-        limit overflow. Remaining: guest-side loopback service adapter, deletion
-        of the raw egress path, and endpoint crash/restart tests.
+        limit overflow. Guest-side `FlowMuxClient` / `FlowMuxReconnectClient`,
+        `FlowMuxStream`, `FlowMuxUdpSocket`, async frame pump, and unit tests
+        are implemented in `crates/mvm-agentd/src/flowmux.rs`. Remaining: wire
+        the guest loopback HTTP/SOCKS/DNS adapters to the shared client, delete
+        the raw egress path, and add endpoint crash/restart tests.
   - [ ] Phase 4 — stream typed transformations (#2373)
   - [ ] Phase 5 — declared ingress on FlowMux (#2374)
   - [ ] Phase 6 — compatibility boundary (#2375)
