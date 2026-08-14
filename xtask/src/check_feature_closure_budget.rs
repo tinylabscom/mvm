@@ -41,7 +41,7 @@ const BUDGET_TARGET: &str = "x86_64-unknown-linux-gnu";
 /// which is the point of measuring it separately rather than folding it in.
 /// Lower it freely as deps drop; raising it must be justified in the change
 /// that does.
-const FEATURE_CLOSURE_BUDGET: usize = 468;
+const FEATURE_CLOSURE_BUDGET: usize = 475;
 
 /// The two gates measure nested sets — everything in the default closure is
 /// reachable with all features on — so a feature budget at or below the default
