@@ -120,10 +120,39 @@ stays open.
 of seven boxes merged, ahead of Phase 2's completion. This matters because the
 strict ordering was the mechanism meant to catch Phase 2 residue, so that
 residue will not be caught by any later phase gate and has to be closed
-deliberately. The specific item at risk is Phase 2's fail-closed readiness
-assertion — a workload whose signed plan grants networking must not reach ready
-when the FlowMux session fails to authenticate. That is invariant 4 and it is
-what Phase 2 exists to establish.
+deliberately.
+
+**FlowMux is not on the production path at all.** This is the more serious
+finding and it was only visible by reading the call sites rather than the
+checkboxes. The host-side acceptor (`mvm-hostd::supervisor::flowmux`) and the
+guest-side client (`mvm-agentd::flowmux`, wired to the loopback adapters by
+#2468) both exist and are unit-tested. Nothing connects them on a real launch:
+
+- `RealNetworkEndpointSpawner::spawn` — the single production spawn — passes
+  `flowmux_identity: None`, hard-coded.
+- `EndpointSpawnRequest` has **no** `flowmux_identity` field, so no caller can
+  ask for it.
+- The only construction of `FlowMuxIdentitySpawnConfig` in the workspace is
+  inside `#[cfg(test)] fn endpoint_config_json_emits_flowmux_identity()`.
+- `claim.rs` still computes `let raw_egress = inputs.secrets.is_empty();` —
+  the raw-vs-wire admission choice Phase 3 is supposed to delete is the live
+  selector.
+
+So every admitted workload today speaks `Wire` or `Raw`, and the converged path
+is unreachable machinery. Two consequences that change the plan:
+
+1. **Phase 3's last checkbox cannot be executed as written.** Deleting
+   `EgressMode`, `raw_egress`, and the raw-vs-wire choice would remove the only
+   modes production uses and break all egress. The real remaining work is
+   *switch production onto FlowMux*, and only then delete the legacy modes.
+2. **Phase 2's and Phase 3's remaining boxes are one piece of work.** Phase 2
+   owes "a failed FlowMux session prevents workload readiness"; Phase 3 owes
+   "every flow type reaches one pipeline". Neither is meaningful until the
+   production spawn carries a FlowMux identity. They should land together.
+
+That work changes the egress path for every workload on every backend, so it
+needs a live witness before merge, not just unit tests. It belongs with the
+hardware-blocked set rather than the free-running set.
 
 ## Current disposition — 23 open
 
@@ -428,7 +457,8 @@ residue before starting anything after Phase 3.
     -> #2373 Phase 4 -> #2374 Phase 5 -> #2375 Phase 6 -> #2376+#2377 Phases 7+8
 ```
 
-- [ ] **#2371 — Phase 2 residue.** Rename `EndpointSpawner`/`RealEndpointSpawner`
+- [ ] **#2371 — Phase 2 residue (rename portion landed in PR #2481).**
+      Rename `EndpointSpawner`/`RealEndpointSpawner`
       to `NetworkEndpointSpawner`/`RealNetworkEndpointSpawner` and confirm one
       production `spawn` in `WorkloadRunner`. Resolve the duplicate
       `EGRESS_VSOCK_PORT = 5253` in `mvm-egress-client.rs` and `mvm-addon-dns.rs`
@@ -440,13 +470,25 @@ residue before starting anything after Phase 3.
       implementation, proved by test rather than convention; and no lock guard
       crosses an `.await`. Tick each plan checkbox in the change that makes it
       true.
-- [ ] **#2372 — Phase 3 residue.** One box left: delete `EgressMode`,
-      `raw_egress`, protocol sniffing, duplicate line markers, and the
-      raw-vs-wire admission choice, so a workload with and without secret
-      bindings uses the same protocol and endpoint. `EgressMode` still exists in
-      `crates/mvm-hostd/src/supervisor/network_endpoint.rs:109` and
-      `crates/mvm-contract/src/policy/network_policy.rs:181`. Add the endpoint
-      crash/restart integration tests.
+- [ ] **#2371 + #2372 — put FlowMux on the production path.** These are one
+      piece of work; see the findings section. Do this before deleting anything.
+      - [ ] Add `flowmux_identity` to `EndpointSpawnRequest` and populate it in
+            `RealNetworkEndpointSpawner::spawn` from the admitted plan's
+            session identity and verifying key. Today it is hard-coded `None`
+            and the request type has no field for it, so the converged path is
+            unreachable outside tests.
+      - [ ] Make a failed or missing FlowMux session prevent workload readiness
+            when the signed plan grants networking — fail closed, not degrade.
+            This is invariant 4 and Phase 2's central acceptance criterion.
+      - [ ] Only then delete `EgressMode` (the `mvm-hostd` one — the
+            `mvm-contract` enum of the same name is the L3 enforcement layer and
+            belongs to Phase 7), `raw_egress`, protocol sniffing, duplicate line
+            markers, and the `let raw_egress = inputs.secrets.is_empty()`
+            admission choice in `claim.rs`.
+      - [ ] Add the endpoint crash/restart integration tests.
+      - [ ] Live-witness on at least one backend before merge. This changes the
+            egress path for every workload; unit tests do not cover a
+            regression that only appears against a real guest.
 - [ ] **#2373 — Phase 4: stream typed transformations.** Replace
       `WireRequest`/`WireResponse` whole-body JSON/base64 with `OpenHttp` plus
       bounded streaming head/body frames, folding in Plan 313 Phase 1 so long

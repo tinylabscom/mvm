@@ -1280,7 +1280,15 @@ check-l3-expansion-freeze` added as a temporary shrink-only ratchet
         the identity on stdin. Backend witness tests in `mvm-vmm::host::spec_map`
         and the Firecracker/HVF/libkrun driver modules prove exactly one
         `NetworkFlow` service and no L3 services per granted workload.
-  - [~] Phase 3 — converge egress TCP, UDP, and DNS (#2372). Landed:
+  - [~] Phase 3 — converge egress TCP, UDP, and DNS (#2372). **The machinery
+    below is landed and unit-tested but is NOT on the production path:**
+    `RealNetworkEndpointSpawner::spawn` hard-codes `flowmux_identity: None`,
+    `EndpointSpawnRequest` has no field for it, and the only
+    `FlowMuxIdentitySpawnConfig` construction in the workspace is inside a
+    `#[cfg(test)]` function. `claim.rs` still selects the mode with
+    `let raw_egress = inputs.secrets.is_empty()`, so every admitted workload
+    speaks `Wire` or `Raw`. The last checkbox (delete `EgressMode`/`raw_egress`)
+    therefore cannot be executed as written — it would break all egress. Landed:
     guest-initiated `OpenTcp` with typed `Opened`/`Refused` replies,
     `OpenUdp`/`UdpSend`/`UdpRecv` associations, `Resolve`/`Resolved` DNS
     frames, per-direction host credit accounting, UDP idle expiry, per-

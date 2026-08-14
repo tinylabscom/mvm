@@ -2,7 +2,25 @@
 
 ## Status
 
-**Phase 0 complete (#2369). Phase 1 complete (#2370). Phase 2 substantially landed but NOT complete (#2371). Phase 3 in progress (#2372).**
+**Phase 0 complete (#2369). Phase 1 complete (#2370). Phase 2 substantially landed but NOT complete (#2371). Phase 3 machinery landed but NOT on the production path (#2372).**
+
+**Read this before ticking another Phase 3 box.** The host-side FlowMux
+acceptor and the guest-side FlowMux client both exist and are unit-tested, and
+nothing connects them on a real launch. `RealNetworkEndpointSpawner::spawn` —
+the single production spawn — passes `flowmux_identity: None`, hard-coded;
+`EndpointSpawnRequest` has no field for it, so no caller can ask; and the only
+construction of `FlowMuxIdentitySpawnConfig` in the workspace is inside a
+`#[cfg(test)]` function. `claim.rs` still selects the mode with
+`let raw_egress = inputs.secrets.is_empty()`. Every admitted workload today
+speaks `Wire` or `Raw`.
+
+Two consequences. Phase 3's last checkbox cannot be executed as written —
+deleting `EgressMode` and `raw_egress` would remove the only modes production
+uses and break all egress. And Phase 2's remaining box and Phase 3's remaining
+box are the same work: neither "a failed FlowMux session prevents readiness"
+nor "every flow type reaches one pipeline" means anything until the production
+spawn carries a FlowMux identity. Land them together, with a live witness —
+this changes the egress path for every workload on every backend.
 
 Phase 2 previously carried a `COMPLETE` status while six of its seven
 checkboxes were unchecked below. Two are verifiably undone on `main`: the
