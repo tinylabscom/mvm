@@ -18,7 +18,7 @@ use crate::microvm::FlakeRunConfig;
 use crate::mock::MockBackend;
 use crate::wasm_backend::WasmBackend;
 use crate::workload_runner::{
-    RealBrokerRegistrar, RealEndpointSpawner, StopTiming, WorkloadRunner,
+    RealBrokerRegistrar, RealNetworkEndpointSpawner, StopTiming, WorkloadRunner,
 };
 use mvm_backends::driver::hvf::HvfDriver;
 use mvm_backends::driver::{LibkrunDriver, QemuDriver};
@@ -29,14 +29,19 @@ use mvm_vmm::host::drive_file::DriveFile;
 /// `auto_select` default). NIC-less: egress routes to the per-VM gating endpoint
 /// over vsock only; the legacy direct `HvfBackend` shim has been deleted, so
 /// this runner is the only hvf workload launch path.
-pub(crate) type HvfRunner = WorkloadRunner<HvfDriver, RealEndpointSpawner, RealBrokerRegistrar>;
+pub(crate) type HvfRunner =
+    WorkloadRunner<HvfDriver, RealNetworkEndpointSpawner, RealBrokerRegistrar>;
 
 /// Construct the hvf VMM's workload runner. Like [`libkrun_runner`] and
 /// [`fc_runner`] the runner is not const-constructible, so this helper is the
 /// one construction site the enum variant, `auto_select`, the descriptor
 /// catalog, and the capability selector all call.
 pub(crate) fn hvf_runner() -> HvfRunner {
-    WorkloadRunner::new(HvfDriver::new(), RealEndpointSpawner, RealBrokerRegistrar)
+    WorkloadRunner::new(
+        HvfDriver::new(),
+        RealNetworkEndpointSpawner,
+        RealBrokerRegistrar,
+    )
 }
 
 /// libkrun driven through the same unified workload-runner role — libkrun's
@@ -44,7 +49,7 @@ pub(crate) fn hvf_runner() -> HvfRunner {
 /// Egress routes to the per-VM gating endpoint over vsock only; the legacy
 /// direct `LibkrunBackend` shim has been deleted, so this runner is the only
 /// libkrun workload launch path.
-type LibkrunRunner = WorkloadRunner<LibkrunDriver, RealEndpointSpawner, RealBrokerRegistrar>;
+type LibkrunRunner = WorkloadRunner<LibkrunDriver, RealNetworkEndpointSpawner, RealBrokerRegistrar>;
 
 /// Construct libkrun's workload runner. The runner is not const-constructible,
 /// so this helper is the one construction site the enum variant, `auto_select`,
@@ -52,7 +57,7 @@ type LibkrunRunner = WorkloadRunner<LibkrunDriver, RealEndpointSpawner, RealBrok
 pub(crate) fn libkrun_runner() -> LibkrunRunner {
     WorkloadRunner::new(
         LibkrunDriver::new(),
-        RealEndpointSpawner,
+        RealNetworkEndpointSpawner,
         RealBrokerRegistrar,
     )
 }
@@ -64,28 +69,36 @@ pub(crate) fn libkrun_runner() -> LibkrunRunner {
 /// egress routes to the per-VM gating endpoint over vsock only, through the
 /// per-VM AF_VSOCK↔UNIX bridge. The legacy direct `QemuBackend`
 /// has been deleted; this runner is the only QEMU workload launch path.
-type QemuRunner = WorkloadRunner<QemuDriver, RealEndpointSpawner, RealBrokerRegistrar>;
+type QemuRunner = WorkloadRunner<QemuDriver, RealNetworkEndpointSpawner, RealBrokerRegistrar>;
 
 /// Construct QEMU's workload runner. Like [`libkrun_runner`] the runner is not
 /// const-constructible, so this helper is the one construction site the enum
 /// variant, `from_build_output`, the descriptor catalog, and the capability
 /// selector all call.
 pub(crate) fn qemu_runner() -> QemuRunner {
-    WorkloadRunner::new(QemuDriver::new(), RealEndpointSpawner, RealBrokerRegistrar)
+    WorkloadRunner::new(
+        QemuDriver::new(),
+        RealNetworkEndpointSpawner,
+        RealBrokerRegistrar,
+    )
 }
 
 /// Firecracker (Linux KVM) driven through the unified workload-runner role
 /// — Firecracker's sole mvmctl-CLI workload launch path (`--hypervisor
 /// firecracker`, `default_backend`, and `auto_select`). NIC-less: egress routes
 /// to the per-VM gating endpoint over vsock only.
-type FcRunner = WorkloadRunner<FcDriver, RealEndpointSpawner, RealBrokerRegistrar>;
+type FcRunner = WorkloadRunner<FcDriver, RealNetworkEndpointSpawner, RealBrokerRegistrar>;
 
 /// Construct Firecracker's workload runner. Like [`libkrun_runner`] the runner
 /// is not const-constructible, so this helper is the one construction site the
 /// enum variant, `auto_select`, the descriptor catalog, and the capability
 /// selector all call.
 pub(crate) fn fc_runner() -> FcRunner {
-    WorkloadRunner::new(FcDriver::new(), RealEndpointSpawner, RealBrokerRegistrar)
+    WorkloadRunner::new(
+        FcDriver::new(),
+        RealNetworkEndpointSpawner,
+        RealBrokerRegistrar,
+    )
 }
 
 /// Compatibility wrapper for the retired raw Firecracker configuration.

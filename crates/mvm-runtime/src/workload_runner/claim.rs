@@ -18,7 +18,7 @@ use mvm_core::policy::network_policy::NetworkPolicy;
 use mvm_core::vm_backend::VmId;
 
 use crate::network_endpoint_spawn::EndpointGuard;
-use crate::workload_runner::runner::{EndpointSpawnRequest, EndpointSpawner};
+use crate::workload_runner::runner::{NetworkEndpointSpawnRequest, NetworkEndpointSpawner};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ClaimRefusal {
@@ -196,11 +196,11 @@ impl EndpointHandle {
 /// substitution endpoint. Both cold boot and the warm claim call it, so the two
 /// cannot diverge to a weaker posture.
 pub struct ClaimGuards<'a> {
-    spawner: &'a dyn EndpointSpawner,
+    spawner: &'a dyn NetworkEndpointSpawner,
 }
 
 impl<'a> ClaimGuards<'a> {
-    pub fn new(spawner: &'a dyn EndpointSpawner) -> Self {
+    pub fn new(spawner: &'a dyn NetworkEndpointSpawner) -> Self {
         Self { spawner }
     }
 
@@ -245,7 +245,7 @@ impl<'a> ClaimGuards<'a> {
             });
         }
         let raw_egress = inputs.secrets.is_empty();
-        let egress_uds = self.spawner.spawn(&EndpointSpawnRequest {
+        let egress_uds = self.spawner.spawn(&NetworkEndpointSpawnRequest {
             vm_name: &vm.0,
             state_dir: inputs.state_dir,
             tenant: inputs.tenant,
@@ -325,14 +325,14 @@ mod tests {
 
     // ---- ClaimGuards: the runner-side shared host steps ----
 
-    use crate::workload_runner::runner::{EndpointSpawnRequest, EndpointSpawner};
+    use crate::workload_runner::runner::{NetworkEndpointSpawnRequest, NetworkEndpointSpawner};
     use mvm_core::policy::RedactionPolicy;
     use mvm_core::policy::network_policy::NetworkPolicy;
     use std::path::PathBuf;
     use std::sync::Mutex;
 
-    /// An `EndpointSpawner` double: records the `vm_name` it was handed and,
-    /// mirroring `RealEndpointSpawner`, returns the per-VM socket keyed on that
+    /// An `NetworkEndpointSpawner` double: records the `vm_name` it was handed and,
+    /// mirroring `RealNetworkEndpointSpawner`, returns the per-VM socket keyed on that
     /// name — so a test can prove `ClaimGuards` threads the child's own id
     /// through and never reuses a sibling's socket, with no real endpoint process.
     #[derive(Default)]
@@ -340,8 +340,8 @@ mod tests {
         seen_vm: Mutex<Option<String>>,
     }
 
-    impl EndpointSpawner for FakeSpawner {
-        fn spawn(&self, req: &EndpointSpawnRequest<'_>) -> anyhow::Result<PathBuf> {
+    impl NetworkEndpointSpawner for FakeSpawner {
+        fn spawn(&self, req: &NetworkEndpointSpawnRequest<'_>) -> anyhow::Result<PathBuf> {
             *self.seen_vm.lock().unwrap() = Some(req.vm_name.to_string());
             Ok(mvm_core::config::vm_network_endpoint_socket(req.vm_name))
         }

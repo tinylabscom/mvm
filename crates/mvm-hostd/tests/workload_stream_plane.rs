@@ -32,7 +32,7 @@ use mvm_core::vm_backend::{VmBackend, VmId, VmStartConfig};
 use mvm_hostd::stream::StreamPlane;
 use mvm_runtime::driver::MockDriver;
 use mvm_runtime::workload_runner::{
-    ConsoleStreamer, EndpointSpawnRequest, EndpointSpawner, RealBrokerRegistrar,
+    ConsoleStreamer, NetworkEndpointSpawnRequest, NetworkEndpointSpawner, RealBrokerRegistrar,
     WorkloadLaunchInputs, WorkloadRunner, console_streamer_installed,
 };
 
@@ -44,13 +44,13 @@ const DEADLINE: Duration = Duration::from_secs(10);
 /// its reader before the test produces bytes it expects that reader to see.
 const ACCEPT_SETTLE: Duration = Duration::from_millis(250);
 
-/// The one gating-endpoint stand-in: `RealEndpointSpawner` would fork the
+/// The one gating-endpoint stand-in: `RealNetworkEndpointSpawner` would fork the
 /// substitution endpoint subprocess, which this test has no use for. Every
 /// other collaborator on the start path is the production one.
-struct StubEndpointSpawner;
+struct StubNetworkEndpointSpawner;
 
-impl EndpointSpawner for StubEndpointSpawner {
-    fn spawn(&self, _req: &EndpointSpawnRequest<'_>) -> Result<PathBuf> {
+impl NetworkEndpointSpawner for StubNetworkEndpointSpawner {
+    fn spawn(&self, _req: &NetworkEndpointSpawnRequest<'_>) -> Result<PathBuf> {
         Ok(PathBuf::from("/run/mvm-test-endpoint.sock"))
     }
 }
@@ -64,12 +64,12 @@ fn isolated_home() -> (TestEnv, tempfile::TempDir) {
     (env, tmp)
 }
 
-fn runner() -> WorkloadRunner<MockDriver, StubEndpointSpawner, RealBrokerRegistrar> {
+fn runner() -> WorkloadRunner<MockDriver, StubNetworkEndpointSpawner, RealBrokerRegistrar> {
     // No `with_console_streamer`: the hook has to arrive from the process
     // registration, or this test proves nothing about production.
     WorkloadRunner::new(
         MockDriver::default(),
-        StubEndpointSpawner,
+        StubNetworkEndpointSpawner,
         RealBrokerRegistrar,
     )
 }
@@ -83,10 +83,10 @@ fn runner() -> WorkloadRunner<MockDriver, StubEndpointSpawner, RealBrokerRegistr
 /// the path is the production collaborator, including the plane itself.
 fn runner_in_process(
     plane: &Arc<StreamPlane>,
-) -> WorkloadRunner<MockDriver, StubEndpointSpawner, RealBrokerRegistrar> {
+) -> WorkloadRunner<MockDriver, StubNetworkEndpointSpawner, RealBrokerRegistrar> {
     WorkloadRunner::new(
         MockDriver::default(),
-        StubEndpointSpawner,
+        StubNetworkEndpointSpawner,
         RealBrokerRegistrar,
     )
     .with_console_streamer(Arc::clone(plane) as Arc<dyn ConsoleStreamer>)
@@ -115,7 +115,10 @@ fn payloads(records: &[OutputRecord]) -> Vec<Vec<u8>> {
     records.iter().map(|r| r.payload.clone()).collect()
 }
 
-fn launch(runner: &WorkloadRunner<MockDriver, StubEndpointSpawner, RealBrokerRegistrar>, vm: &str) {
+fn launch(
+    runner: &WorkloadRunner<MockDriver, StubNetworkEndpointSpawner, RealBrokerRegistrar>,
+    vm: &str,
+) {
     let config = VmStartConfig {
         name: vm.to_string(),
         rootfs_path: "/img/rootfs.ext4".into(),
