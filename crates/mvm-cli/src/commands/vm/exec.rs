@@ -92,9 +92,10 @@ pub(in crate::commands) struct RunArgs {
     /// Security profile for the transient run.
     #[arg(long, value_enum, default_value = "standard")]
     pub profile: RunProfile,
-    /// Attach a live read-only host directory at a guest path.
-    /// Format: `HOST_PATH:/GUEST_PATH:ro`. Repeatable.
-    #[arg(long = "mount", value_name = "HOST:GUEST:ro")]
+    /// Attach a live host directory at a guest path.
+    /// Format: `HOST_PATH:/GUEST_PATH[:ro|rw]`. Repeatable.
+    /// `ro` is the default; `rw` requires `--profile dev` or `--profile permissive`.
+    #[arg(long = "mount", value_name = "HOST:GUEST:MODE")]
     pub mounts: Vec<String>,
     /// Explicit environment variable to inject (KEY=VALUE). Repeatable.
     /// Disabled by `--profile restrictive`.
@@ -350,7 +351,7 @@ pub(in crate::commands) fn run_secure_with_source(
     let admit_sdk_sidecar_grant = admit_sidecar.map(|a| a.grant);
     let admit_pty = args.pty;
     let admit_has_argv = !args.argv.is_empty();
-    let admit_is_dev = matches!(args.profile, RunProfile::Dev);
+    let admit_is_dev = profile_uses_dev_agent(args.profile);
     // The audit substrate carries no emitter, so stash the AdmissionContext here
     // as the closure runs (during boot) and emit launched/failed after `run`
     // returns — mirroring `up.rs`, so the claim-8 admitted/launched/failed
@@ -376,7 +377,7 @@ pub(in crate::commands) fn run_secure_with_source(
             boot_artifact_identity: None,
             cpus: admit_cpus,
             mem_mib: admit_mem_mib,
-            seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
+            seccomp_tier: seccomp_tier_for_profile(args.profile),
             // No secrets on the plain transient path; deny secret release.
             secret_release: mvm_core::plan::SecretReleasePolicy::default(),
             secrets: vec![],
@@ -580,6 +581,32 @@ fn parse_env_run_mode(raw: &str) -> Result<RunMode> {
     }
 }
 
+/// Map a run profile to the seccomp tier recorded on the admitted plan.
+fn seccomp_tier_for_profile(profile: RunProfile) -> mvm_core::plan::PlanSeccompTier {
+    match profile {
+        RunProfile::Restrictive => mvm_core::plan::PlanSeccompTier::Essential,
+        RunProfile::Standard => mvm_core::plan::PlanSeccompTier::Standard,
+        RunProfile::Dev => mvm_core::plan::PlanSeccompTier::Network,
+        RunProfile::Permissive => mvm_core::plan::PlanSeccompTier::Unrestricted,
+    }
+}
+
+/// Whether the profile grants the dev guest-agent posture
+/// (`require_auth: false`, console enabled).
+fn profile_uses_dev_agent(profile: RunProfile) -> bool {
+    matches!(profile, RunProfile::Dev | RunProfile::Permissive)
+}
+
+/// Whether the profile allows writable live host-directory shares.
+fn profile_allows_writable_mount(profile: RunProfile) -> bool {
+    matches!(profile, RunProfile::Dev | RunProfile::Permissive)
+}
+
+/// Whether the profile allows any network request (`--net` or `--allow-host`).
+fn profile_allows_network(profile: RunProfile) -> bool {
+    !matches!(profile, RunProfile::Restrictive)
+}
+
 fn validate_run_profile(args: &RunArgs) -> Result<()> {
     if args.profile == RunProfile::Permissive
         && std::env::var_os("MVM_ACK_PERMISSIVE_RUN").is_none()
@@ -596,12 +623,31 @@ fn validate_run_profile(args: &RunArgs) -> Result<()> {
         if !args.mounts.is_empty() {
             anyhow::bail!("--profile restrictive does not allow --mount");
         }
+        if args.net || !args.allow_host.is_empty() {
+            anyhow::bail!("--profile restrictive does not allow --net or --allow-host");
+        }
+    }
+
+    if !profile_allows_network(args.profile) && (args.net || !args.allow_host.is_empty()) {
+        anyhow::bail!(
+            "--profile {} does not allow --net or --allow-host",
+            args.profile
+                .to_possible_value()
+                .expect("value enum")
+                .get_name()
+        );
     }
 
     for spec in &args.mounts {
         let share = crate::commands::parse_dir_share_spec(spec)?;
-        if !share.read_only {
-            anyhow::bail!("--mount '{spec}' requests rw, but transient live shares are read-only");
+        if !share.read_only && !profile_allows_writable_mount(args.profile) {
+            anyhow::bail!(
+                "--mount '{spec}' requests rw, but --profile {} only allows read-only shares",
+                args.profile
+                    .to_possible_value()
+                    .expect("value enum")
+                    .get_name()
+            );
         }
     }
 
@@ -1412,6 +1458,22 @@ mod tests {
     }
 
     #[test]
+    fn receipt_records_selected_profile() {
+        let standard = ReceiptInput::from_run_args(&run_args(RunProfile::Standard), "firecracker")
+            .expect("receipt input");
+        assert_eq!(standard.profile, "standard");
+
+        let restrictive =
+            ReceiptInput::from_run_args(&run_args(RunProfile::Restrictive), "firecracker")
+                .expect("receipt input");
+        assert_eq!(restrictive.profile, "restrictive");
+
+        let dev = ReceiptInput::from_run_args(&run_args(RunProfile::Dev), "firecracker")
+            .expect("receipt input");
+        assert_eq!(dev.profile, "dev");
+    }
+
+    #[test]
     fn receipt_enforcement_tier_is_uniform_l4_host_port() {
         // The signed receipt records the REQUESTED posture and, separately, the
         // enforcement fidelity. host:port is now L4-enforced on every backend, so
@@ -1637,15 +1699,6 @@ mod tests {
     }
 
     #[test]
-    fn standard_profile_rejects_writable_host_share() {
-        let mut args = run_args(RunProfile::Standard);
-        args.mounts.push(".:/work:rw".to_string());
-
-        let err = validate_run_profile(&args).expect_err("standard rejects rw share");
-        assert!(err.to_string().contains("requests rw"));
-    }
-
-    #[test]
     fn restrictive_profile_rejects_env() {
         let mut args = run_args(RunProfile::Restrictive);
         args.env.push("FOO=bar".to_string());
@@ -1664,12 +1717,65 @@ mod tests {
     }
 
     #[test]
-    fn dev_profile_rejects_writable_host_share() {
+    fn dev_profile_allows_writable_host_share() {
         let mut args = run_args(RunProfile::Dev);
         args.mounts.push(".:/work:rw".to_string());
 
-        let err = validate_run_profile(&args).expect_err("transient shares are always read-only");
-        assert!(err.to_string().contains("requests rw"));
+        validate_run_profile(&args).expect("dev allows rw share");
+    }
+
+    #[test]
+    fn permissive_profile_allows_writable_host_share() {
+        // SAFETY: tests run single-threaded; no other thread reads this env var.
+        unsafe { std::env::set_var("MVM_ACK_PERMISSIVE_RUN", "1") };
+        let mut args = run_args(RunProfile::Permissive);
+        args.mounts.push(".:/work:rw".to_string());
+
+        validate_run_profile(&args).expect("permissive allows rw share");
+        // SAFETY: tests run single-threaded.
+        unsafe { std::env::remove_var("MVM_ACK_PERMISSIVE_RUN") };
+    }
+
+    #[test]
+    fn standard_profile_rejects_writable_host_share() {
+        let mut args = run_args(RunProfile::Standard);
+        args.mounts.push(".:/work:rw".to_string());
+
+        let err = validate_run_profile(&args).expect_err("standard rejects rw share");
+        assert!(err.to_string().contains("only allows read-only shares"));
+    }
+
+    #[test]
+    fn restrictive_profile_rejects_network_flags() {
+        let mut args = run_args(RunProfile::Restrictive);
+        args.net = true;
+        let err = validate_run_profile(&args).expect_err("restrictive rejects --net");
+        assert!(err.to_string().contains("does not allow --net"));
+
+        let mut args = run_args(RunProfile::Restrictive);
+        args.allow_host.push("example.com:443".to_string());
+        let err = validate_run_profile(&args).expect_err("restrictive rejects --allow-host");
+        assert!(err.to_string().contains("--allow-host"));
+    }
+
+    #[test]
+    fn profile_seccomp_tier_mapping() {
+        assert_eq!(
+            seccomp_tier_for_profile(RunProfile::Restrictive),
+            mvm_core::plan::PlanSeccompTier::Essential
+        );
+        assert_eq!(
+            seccomp_tier_for_profile(RunProfile::Standard),
+            mvm_core::plan::PlanSeccompTier::Standard
+        );
+        assert_eq!(
+            seccomp_tier_for_profile(RunProfile::Dev),
+            mvm_core::plan::PlanSeccompTier::Network
+        );
+        assert_eq!(
+            seccomp_tier_for_profile(RunProfile::Permissive),
+            mvm_core::plan::PlanSeccompTier::Unrestricted
+        );
     }
 
     #[test]

@@ -818,6 +818,17 @@ pub(super) fn security_snapshot_dirs_check() -> Check {
 /// entitlement for its runtime role. Probes all paths from
 /// `collect_sign_targets` so an unsigned supervisor is not left unreported.
 /// Off macOS the check is n/a (returns the early-exit n/a `Check`).
+/// Surface the run-profile preset mapping so `mvmctl doctor` reports the
+/// effective policy shape of the one-shot `mvmctl run` surface.
+pub(super) fn security_run_profile_preset_check() -> Check {
+    Check {
+        name: "run profile presets",
+        category: "security",
+        ok: true,
+        info: "restrictive=no env/mount/network, seccomp=essential; standard=env+ro mounts, seccomp=standard; dev=env+rw mounts+network syscalls, seccomp=network; permissive=ack-required escape hatch, seccomp=unrestricted; default=standard; egress default-deny unless --net/--allow-host".to_string(),
+    }
+}
+
 pub(super) fn security_signing_check() -> Check {
     use mvm_runtime::codesign::{collect_sign_targets, entitlement_present};
     let targets = collect_sign_targets();

@@ -315,10 +315,11 @@ shell).
 | `mvmctl run --manifest <name-or-path> -- <cmd>...` | Boot a registered manifest/template instead of the default |
 | `mvmctl run --image <ref> -- <cmd>...` | Pull or reuse a cached OCI image, emit signed audit-chain provenance for the resolved image, boot its prepared OCI rootfs (read-only virtiofs-root on capable dev-tier backends, otherwise block `rootfs.ext4`), run `<cmd>`, exit |
 | `mvmctl run --image <ref> --prod -- <cmd>...` | Production OCI-image policy: require `<ref>` to be digest-pinned and cosign-verified by the OCI policy before cache use or boot |
-| `mvmctl run --profile standard -- <cmd>` | Default profile: explicit env is allowed; host shares must be read-only |
-| `mvmctl run --profile restrictive -- <cmd>` | No env injection and no host directory shares |
+| `mvmctl run --profile standard -- <cmd>` | Default profile: explicit env allowed; read-only host shares; network default-deny unless `--net`/`--allow-host`; seccomp `standard` |
+| `mvmctl run --profile restrictive -- <cmd>` | No env, no host shares, no network flags; seccomp `essential` |
+| `mvmctl run --profile dev -- <cmd>` | Env allowed; writable host shares allowed; network default-deny unless `--net`/`--allow-host`; seccomp `network`; dev guest agent posture |
 | `mvmctl run --mount .:/work:ro -- <cmd>` | Attach a live read-only host-directory share |
-| `mvmctl run --profile permissive -- <cmd>` | Escape hatch; requires `MVM_ACK_PERMISSIVE_RUN=1` |
+| `mvmctl run --profile permissive -- <cmd>` | Escape hatch; same capabilities as `dev` plus seccomp `unrestricted`; requires `MVM_ACK_PERMISSIVE_RUN=1` |
 | `mvmctl run --mount HOST:GUEST:ro -- <cmd>` | Attach a live read-only host-directory share |
 | `mvmctl run --env KEY=VAL -- <cmd>` | Inject an explicit environment variable. Repeatable; disabled by `--profile restrictive` |
 | `mvmctl run --cpus <n> --memory <size> -- <cmd>` | Resize the transient VM |

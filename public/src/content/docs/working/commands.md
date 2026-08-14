@@ -48,10 +48,12 @@ Use this path when the VM has state, files, services, or snapshots that should s
 
 | Profile | Use it when | Notes |
 | --- | --- | --- |
-| `restrictive` | Running generated or untrusted code. | No env injection and no host directory shares. |
-| `standard` | Normal local runs. | Explicit env is allowed; host shares must be read-only. |
-| `dev` | Iterating on a local project. | Writable host shares are allowed. |
-| `permissive` | Last-resort debugging. | Requires explicit acknowledgement. |
+| `restrictive` | Running generated or untrusted code. | No `--env`, `--mount`, `--net`, or `--allow-host`. Seccomp tier: `essential`. |
+| `standard` | Normal local runs. | Explicit `--env` allowed; host shares are read-only. Network is default-deny unless you opt in with `--net`/`--allow-host`. Seccomp tier: `standard`. |
+| `dev` | Iterating on a local project. | Explicit `--env` allowed; writable host shares allowed. Seccomp tier: `network`. |
+| `permissive` | Last-resort debugging. | Same capabilities as `dev`, plus `seccomp=unrestricted`. Requires `MVM_ACK_PERMISSIVE_RUN=1`. |
+
+Network egress remains default-deny for every profile except where you pass `--net` or `--allow-host`; `restrictive` refuses those flags outright.
 
 ## Security notes
 

@@ -157,13 +157,13 @@ without a manifest; detection is deterministic and tested.
 
 ### Phase 3 — Security profile presets
 
-- [ ] Add `--profile {restrictive,standard,dev,permissive}` to `mvmctl run`.
-- [ ] Map each preset unambiguously to existing policy flags (env passthrough,
+- [x] Add `--profile {restrictive,standard,dev,permissive}` to `mvmctl run`.
+- [x] Map each preset unambiguously to existing policy flags (env passthrough,
       host mounts, network allowlist, seccomp posture).
-- [ ] Surface the effective profile in execution receipts and `mvmctl doctor`.
-- [ ] Reject `--profile permissive` unless `MVM_ACK_PERMISSIVE_RUN=1` is set,
+- [x] Surface the effective profile in execution receipts and `mvmctl doctor`.
+- [x] Reject `--profile permissive` unless `MVM_ACK_PERMISSIVE_RUN=1` is set,
       matching the current escape-hatch behavior.
-- [ ] Add tests for preset-to-policy mapping and receipt contents.
+- [x] Add tests for preset-to-policy mapping and receipt contents.
 
 **Acceptance:** Presets work, are documented, and do not create new privileged
 paths beyond the existing policy vocabulary.
