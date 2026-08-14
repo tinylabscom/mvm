@@ -130,6 +130,19 @@ fn start_matches_shared_fixture() {
 }
 
 #[test]
+fn start_image_matches_shared_fixture() {
+    let argv = Machine::named("web")
+        .unwrap()
+        .start()
+        .image("nginx")
+        .cpus(2)
+        .memory("512M")
+        .machine_args()
+        .expect("start-image argv");
+    assert_eq!(argv, fixture("start-image"));
+}
+
+#[test]
 fn exec_matches_shared_fixture() {
     let argv = Machine::named("web")
         .unwrap()
@@ -252,6 +265,7 @@ fn fixture_coverage_is_accounted_for() {
         "run-default",
         "shell",
         "start",
+        "start-image",
         "stop",
     ];
     assert_eq!(

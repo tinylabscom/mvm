@@ -69,6 +69,7 @@ fn run_persistent(
         action,
         MachineStartArgs {
             name: name.clone(),
+            create_flags: MachineStartCreateFlags::default(),
             receipt: args.receipt.clone(),
             json: args.json,
             dry_run: false,
