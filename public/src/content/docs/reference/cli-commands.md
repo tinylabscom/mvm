@@ -22,7 +22,7 @@ verification under `trust`. Domains that already own their own subcommands
 
 | Group / top-level | Commands |
 |--------|----------|
-| Daily drivers (top-level) | `machine` (`run`/`exec`/`console`/`logs`/`stop`/`forward`/…), `ls`, `build`, `doctor`, `init`, `bootstrap` |
+| Daily drivers (top-level) | `machine` (`run`/`fork`/`restore`/`exec`/`console`/`logs`/`stop`/`forward`/…), `ls`, `build`, `doctor`, `init`, `bootstrap` |
 | `vm <sub>` | `pause`, `resume`, `snapshot`, `save`, `restore`, `checkpoint`, `cp`, `fs`, `proc`, `diff`, `wait`, `boot-report`, `set-ttl`, `forward`, `sandbox`, `session`, `volume` |
 | `build <sub>` | `image` (the former `build`), `compile`, `validate`, `kernel`, `runtime-overlay` |
 | `ops <sub>` | `metrics`, `bench`, `config` |
@@ -82,6 +82,11 @@ guest-RPC surface, fleet-shaped workflows).
 | `mvmctl machine wait <name> --timeout <secs> --interval-ms <ms>` | Tune the deadline and poll cadence. Defaults: 60s / 250ms. |
 | `mvmctl machine boot-report <name>` | Print a single readiness snapshot + per-phase boot timings. Plan 76 Phase 4. |
 | `mvmctl machine boot-report <name> --json` | Same payload as JSON. |
+| `mvmctl machine fork <parent> --as <child>` | Snapshot a running machine as a `vm_full` checkpoint and branch it into a fresh child VM with a new identity. The child is admitted through the same path as `machine warm-restore`. |
+| `mvmctl machine fork <parent> --branch <slug>` | Auto-name the child `<parent>-<slug>-<timestamp>` instead of using `--as`. |
+| `mvmctl machine restore <checkpoint> --as <child>` | Branch an existing `vm_full` checkpoint into a fresh child VM with a new identity. |
+| `mvmctl machine restore <checkpoint> --branch <slug>` | Auto-name the child `<checkpoint>-<slug>-<timestamp>` instead of using `--as`. |
+| `mvmctl machine warm-restore <checkpoint> [--name <name>]` | Low-level synonym for restoring a `vm_full` checkpoint into a fresh child VM. Prefer `machine restore` for new scripts. |
 
 ## Environment Management
 
@@ -695,6 +700,17 @@ digest-pinned reference through the admitted `machine run` path.
 | `mvmctl machine revert <id\|digest> [--kind checkpoint\|image] [--hypervisor <backend>] [--new-id <name>] [--json]` | Restore a prior state: launch a fresh, re-admitted VM at the node the target names. Checkpoint restores fork a new VM identity (`--new-id` names it; `--hypervisor` picks the backend, default `firecracker`); image-node restores re-run the node's digest-pinned reference through the admitted run path and auto-name their VM. |
 | `mvmctl machine rewind <id\|digest> [--kind checkpoint\|image] [--hypervisor <backend>] [--new-id <name>] [--json]` | Restore the target's parent — one step back in the lineage. Same re-admission and fail-closed guarantees as `revert`; refuses a genesis root (no parent) or a structurally broken lineage. |
 | `mvmctl machine advance <id\|digest> [--to <child-digest>] [--kind checkpoint\|image] [--hypervisor <backend>] [--new-id <name>] [--json]` | Restore a child of the target — one step forward. Forward is a tree, so `--to <child-digest>` is required when the target has more than one child (a fork). Same re-admission and fail-closed guarantees as `revert`. |
+
+### Fork / restore
+
+`mvmctl machine fork` and `mvmctl machine restore` are the agent-facing
+primitives for branching a running machine or an existing `vm_full` checkpoint
+into a fresh child VM. Both capture/branch through the consolidated
+`VmBackend`/checkpoint seam and deliver a new identity, authority, and
+per-instance secrets; the parent carries no workload authority into the child.
+Use `--as <name>` for an explicit child name or `--branch <slug>` for an
+auto-generated dev-sandbox name. The lower-level `machine checkpoint fork` and
+`machine checkpoint restore` surfaces remain available for power users.
 
 ## Sandbox State
 
