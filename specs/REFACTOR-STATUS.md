@@ -66,7 +66,7 @@ for detailed scope and acceptance criteria.
       plan that boots. PR #2317 made admission the pre-action sync barrier,
       deferred post-hoc records without changing chain content or ordering,
       retained fail-safe sync for unknown events, and preserved torn-tail
-      detection. PR #2328 removed the redundant head fsync and added head recovery; the follow-up in this branch records the record-vs-control decision and adds torn-head coverage. The KVM `emit: receipt` re-measurement remains queued on a Linux/KVM host.
+      detection. PR #2328 removed the redundant head fsync and added head recovery. PR #2465 records the record-vs-control decision, adds torn-head coverage, and closes the issue; the KVM `emit: receipt` re-measure showed p50 ~45.4 ms on a Linux/KVM host.
 - [x] **Issue #2289 — kernel pin freshness follow-up.** Closed as completed
       by PR #2301. The libkrunfw and custom guest kernel inputs now
       synchronize on the verified Linux 6.12.103 LTS source pin, and
@@ -223,7 +223,7 @@ for detailed scope and acceptance criteria.
         lint-core passed on PR #2324; local x86_64 and aarch64 Linux
         cross-builds (`cargo zigbuild --target x86_64-unknown-linux-gnu`
         and `--target aarch64-unknown-linux-gnu -p mvm-vmm --lib
-        --all-features`) pass on current `main`. Local Linux-native
+--all-features`) pass on current `main`. Local Linux-native
         builder-VM gates are tracked in Plan 316.
 
 - [ ] Plan 316 — Local Linux builder-VM gates via `mvmctl __builder-shell-job`
@@ -297,8 +297,10 @@ for detailed scope and acceptance criteria.
   - [x] Serialize the guest-console tests that share process-global session
         state after the next exact run exposed their race; join the completion
         thread and pass 20/20 parallel stress runs
-  - [ ] Run the exact Linux Security workflow, merge the fix, and observe a
-        clean scheduled or release run before closing the issue
+  - [~] PR #2472 (`fix/2135-security-lane-mutants`) accepts the remaining
+    backend/runtime survivors in the mutation-witness baseline; Security
+    workflow run 31817896244 is the final verification gate before merge
+    and issue closure
 - [~] Plan 300 — 31-issue reconciliation and closeout
   (`specs/plans/300-open-issue-closeout.md`)
   - [x] Inventory all 39 issues open at the 2026-08-13 snapshot against
@@ -306,7 +308,7 @@ for detailed scope and acceptance criteria.
   - [x] Close eight issues on 2026-08-13: #2165, #2289, #2333, #2423 as
         completed by merged PRs; #2180, #2181, #2305, #2413 as not planned /
         superseded
-  - [ ] Execute the remaining 31 closure paths in the plan's dependency order
+  - [ ] Execute the remaining 28 closure paths in the plan's dependency order
   - [ ] Reconcile a fresh GitHub query after every phase and at final closeout
 - [~] Runtime hardening for production — plan 303, branch
   `feat/plan-303-runtime-hardening`
@@ -396,7 +398,7 @@ for detailed scope and acceptance criteria.
     `c866611af` as Phase 5 asked: `driver_boot` is 630.5 ms, unmoved from
     623.6 ms, so the cost is real rather than a poll artifact and can be
     decomposed. It is a shell `sleep 0.1` socket poll plus ~9 curl/sudo
-    subprocesses (**#2292**). On HVF there is little left — `vmm_create`
+    subprocesses (**#2292**, closed by PR #2463). On HVF there is little left — `vmm_create`
     11.6 ms, `driver_boot` 7.8 ms — the remaining cold cost there is guest
     boot at 58.6 ms.
   - [ ] Phase 4 — parallelize independent host work
@@ -463,8 +465,9 @@ for detailed scope and acceptance criteria.
     claim-14 digests unchanged, chain still verifies. Firecracker/KVM
     repeated: the fixes hold there (both counters zero) but that backend
     misses the contract for reasons this plan does not own — residual
-    Firecracker boot work (**#2292**, **#2299**) and receipt durability on
-    the admission path (**#2318**). Audit-chain batching and duplicate
+    Firecracker boot work (**#2299**; **#2292** is closed by PR #2463) and
+    receipt durability on the admission path (**#2318** is closed by PR #2465).
+    Audit-chain batching and duplicate
     admission are closed under #2293. Outstanding: the warm-lane
     comparison, blocked because no standby pool can be filled today.
 
@@ -1258,24 +1261,24 @@ check-l3-expansion-freeze` added as a temporary shrink-only ratchet
         and the Firecracker/HVF/libkrun driver modules prove exactly one
         `NetworkFlow` service and no L3 services per granted workload.
   - [~] Phase 3 — converge egress TCP, UDP, and DNS (#2372). Landed:
-        guest-initiated `OpenTcp` with typed `Opened`/`Refused` replies,
-        `OpenUdp`/`UdpSend`/`UdpRecv` associations, `Resolve`/`Resolved` DNS
-        frames, per-direction host credit accounting, UDP idle expiry, per-
-        association peer bounds, per-class connection-rate limiting, payload-
-        free audit emission for TCP/UDP allows/denies and DNS resolves/refusals,
-        and host-side integration tests for allowed/denied TCP, UDP round-trip,
-        DNS pinning, UDP idle expiry, peer bounds, half-close, reset, and rate-
-        limit overflow. Guest-side `FlowMuxClient` / `FlowMuxReconnectClient`,
-        `FlowMuxStream`, `FlowMuxUdpSocket`, async frame pump, and unit tests
-        are implemented in `crates/mvm-agentd/src/flowmux.rs`. Guest-side
-        adapters are now wired: `mvm-egress-client` uses
-        `flowmux_egress::run` with a single `FlowMuxReconnectClient`,
-        `mvm-addon-dns` optionally forwards through `FlowMuxClient::resolve`,
-        and the legacy line-prelude symbols (`HTTP_FORWARD_FRAME`,
-        `MVM_DNS/1`, `MVM_SOCKS5_UDP/1`) are removed from the guest modules.
-        Unit tests cover the new DNS and SOCKS5/HTTP parsing paths.
-        Remaining: delete the host-side raw-egress dispatcher and add endpoint
-        crash/restart integration tests.
+    guest-initiated `OpenTcp` with typed `Opened`/`Refused` replies,
+    `OpenUdp`/`UdpSend`/`UdpRecv` associations, `Resolve`/`Resolved` DNS
+    frames, per-direction host credit accounting, UDP idle expiry, per-
+    association peer bounds, per-class connection-rate limiting, payload-
+    free audit emission for TCP/UDP allows/denies and DNS resolves/refusals,
+    and host-side integration tests for allowed/denied TCP, UDP round-trip,
+    DNS pinning, UDP idle expiry, peer bounds, half-close, reset, and rate-
+    limit overflow. Guest-side `FlowMuxClient` / `FlowMuxReconnectClient`,
+    `FlowMuxStream`, `FlowMuxUdpSocket`, async frame pump, and unit tests
+    are implemented in `crates/mvm-agentd/src/flowmux.rs`. Guest-side
+    adapters are now wired: `mvm-egress-client` uses
+    `flowmux_egress::run` with a single `FlowMuxReconnectClient`,
+    `mvm-addon-dns` optionally forwards through `FlowMuxClient::resolve`,
+    and the legacy line-prelude symbols (`HTTP_FORWARD_FRAME`,
+    `MVM_DNS/1`, `MVM_SOCKS5_UDP/1`) are removed from the guest modules.
+    Unit tests cover the new DNS and SOCKS5/HTTP parsing paths.
+    Remaining: delete the host-side raw-egress dispatcher and add endpoint
+    crash/restart integration tests.
   - [~] Phase 4 — stream typed transformations (#2373)
   - [ ] Phase 5 — declared ingress on FlowMux (#2374)
   - [ ] Phase 6 — compatibility boundary (#2375)

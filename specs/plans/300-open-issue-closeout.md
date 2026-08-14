@@ -1,6 +1,6 @@
 # Plan 300 — Open issue reconciliation and closeout
 
-**Status:** IN PROGRESS — 2026-08-13 reconciliation executed; 8 issues closed, 31 remain
+**Status:** IN PROGRESS — 2026-08-13 reconciliation executed; #2292 and #2318 closed, 28 issues remain
 **Snapshot date:** 2026-08-13
 
 ## Objective
@@ -53,16 +53,16 @@ mentions it.
 
 ### Closed on 2026-08-13
 
-| Issue | Closed as | Reason |
-|---|---|---|
-| #2165 | completed | PR #2330 merged; workload block-root bootargs agree with read-only root attachment |
-| #2289 | completed | Kernel/libkrunfw pins now at 6.12.103 via PR #2301 |
-| #2333 | completed | PR #2335 merged; `pool warm --image <ref>` fills the pool |
-| #2423 | completed | PR #2428 merged; RFC 6962 consistency proofs landed |
-| #2180 | not planned | Superseded by Plan 316 L3 deletion |
-| #2181 | not planned | Superseded by Plan 316 L3 deletion |
-| #2305 | not planned | Superseded by Plan 313 egress token accounting |
-| #2413 | not planned | 0.10.4 bpf-linker pin remains stable; 0.11.0 not worth system LLVM cost |
+| Issue | Closed as   | Reason                                                                             |
+| ----- | ----------- | ---------------------------------------------------------------------------------- |
+| #2165 | completed   | PR #2330 merged; workload block-root bootargs agree with read-only root attachment |
+| #2289 | completed   | Kernel/libkrunfw pins now at 6.12.103 via PR #2301                                 |
+| #2333 | completed   | PR #2335 merged; `pool warm --image <ref>` fills the pool                          |
+| #2423 | completed   | PR #2428 merged; RFC 6962 consistency proofs landed                                |
+| #2180 | not planned | Superseded by Plan 316 L3 deletion                                                 |
+| #2181 | not planned | Superseded by Plan 316 L3 deletion                                                 |
+| #2305 | not planned | Superseded by Plan 313 egress token accounting                                     |
+| #2413 | not planned | 0.10.4 bpf-linker pin remains stable; 0.11.0 not worth system LLVM cost            |
 
 ### Plan 316 note
 
@@ -71,39 +71,39 @@ mentions it.
 
 ## Snapshot disposition
 
-| Issue | Disposition at 2026-08-13 | Closure owner |
-|---|---|---|
-| #2083 | Open; Studio server contract external dependency | Agent/Studio phase |
-| #2101 | Kernel defect fixed; OCI privilege posture remains | Security phase |
-| #2107 | Open; audit mirror absent | Audit/observability phase |
-| #2135 | Open; Security lane red | Evidence-repair phase |
-| #2166 | Parent epic; #2169 and #2083 remain | Agent/Studio phase |
-| #2169 | Open; bounded inspector contract/APIs remain | Agent/Studio phase |
-| #2193 | Partial artifact-prewarm substrate; backend factories remain | Warm-launch phase |
-| #2194 | Partial HVF paused-parent handoff; final live contract remains | Warm-launch phase |
-| #2195 | Open; fixed read-only share binding remains | Warm-launch phase |
-| #2196 | Partial Firecracker standby path; #2336 blocks KVM matrix | Warm-launch phase |
-| #2197 | Open; resident-process hardening remains | Warm-launch phase |
-| #2198 | Partial typed timing; refusal/cold contract remains | Warm-launch phase |
-| #2199 | Partial benchmark substrate; 1,000-claim matrix remains | Warm-launch phase |
-| #2211 | Partial eBPF spike; bytes/latency/scope decision remains | Observability phase |
-| #2256 | Open; Plan 306 not started | Governance phase |
-| #2280 | Partial measurement substrate; native host matrix remains | Performance phase |
-| #2281 | Partial ext4 baseline; candidate comparison/decision remains | Performance phase |
-| #2292 | Code landed (driver_boot split, no sudo bash launch); ColdLaunchBench pending | Performance phase |
-| #2299 | Open; cross-backend phase accounting not comparable | Performance phase |
-| #2307 | `xtask check-nextest-groups` implemented; CI wiring remains | CI phase |
-| #2318 | Decision/tests landed; KVM re-measure queued | Audit/performance phase |
-| #2336 | Open; Firecracker post-restore handshake failure | Warm-launch phase |
-| #2347 | Open; NVMe baseline for launch contract | Performance phase |
-| #2368 | Plan 316 umbrella; Phase 1 complete, Phase 2+ open | Networking rewrite phase |
-| #2371 | Plan 316 Phase 2 — authenticated endpoint | Networking rewrite phase |
-| #2372 | Plan 316 Phase 3 — converge egress TCP/UDP/DNS | Networking rewrite phase |
-| #2373 | Plan 316 Phase 4 — stream typed transformations | Networking rewrite phase |
-| #2374 | Plan 316 Phase 5 — declared ingress on FlowMux | Networking rewrite phase |
-| #2375 | Plan 316 Phase 6 — compatibility boundary | Networking rewrite phase |
-| #2376 | Plan 316 Phase 7 — delete L3 completely | Networking rewrite phase |
-| #2377 | Plan 316 Phase 8 — mechanically enforce one path | Networking rewrite phase |
+| Issue | Disposition at 2026-08-13                                      | Closure owner             |
+| ----- | -------------------------------------------------------------- | ------------------------- |
+| #2083 | Open; Studio server contract external dependency               | Agent/Studio phase        |
+| #2101 | Kernel defect fixed; OCI privilege posture remains             | Security phase            |
+| #2107 | Open; audit mirror absent                                      | Audit/observability phase |
+| #2135 | Open; PR #2472 in review, Security run 31817896244 pending     | Evidence-repair phase     |
+| #2166 | Parent epic; #2169 and #2083 remain                            | Agent/Studio phase        |
+| #2169 | Open; bounded inspector contract/APIs remain                   | Agent/Studio phase        |
+| #2193 | Partial artifact-prewarm substrate; backend factories remain   | Warm-launch phase         |
+| #2194 | Partial HVF paused-parent handoff; final live contract remains | Warm-launch phase         |
+| #2195 | Open; fixed read-only share binding remains                    | Warm-launch phase         |
+| #2196 | Partial Firecracker standby path; #2336 blocks KVM matrix      | Warm-launch phase         |
+| #2197 | Open; resident-process hardening remains                       | Warm-launch phase         |
+| #2198 | Partial typed timing; refusal/cold contract remains            | Warm-launch phase         |
+| #2199 | Partial benchmark substrate; 1,000-claim matrix remains        | Warm-launch phase         |
+| #2211 | Partial eBPF spike; bytes/latency/scope decision remains       | Observability phase       |
+| #2256 | Open; Plan 306 not started                                     | Governance phase          |
+| #2280 | Partial measurement substrate; native host matrix remains      | Performance phase         |
+| #2281 | Partial ext4 baseline; candidate comparison/decision remains   | Performance phase         |
+| #2292 | Closed; PR #2463 merged                                        | Performance phase         |
+| #2299 | Open; cross-backend phase accounting not comparable            | Performance phase         |
+| #2307 | `xtask check-nextest-groups` implemented; CI wiring remains    | CI phase                  |
+| #2318 | Closed; PR #2465 merged; KVM re-measure p50 ~45.4 ms           | Audit/performance phase   |
+| #2336 | Open; Firecracker post-restore handshake failure               | Warm-launch phase         |
+| #2347 | Open; NVMe baseline for launch contract                        | Performance phase         |
+| #2368 | Plan 316 umbrella; Phase 1 complete, Phase 2+ open             | Networking rewrite phase  |
+| #2371 | Plan 316 Phase 2 — authenticated endpoint                      | Networking rewrite phase  |
+| #2372 | Plan 316 Phase 3 — converge egress TCP/UDP/DNS                 | Networking rewrite phase  |
+| #2373 | Plan 316 Phase 4 — stream typed transformations                | Networking rewrite phase  |
+| #2374 | Plan 316 Phase 5 — declared ingress on FlowMux                 | Networking rewrite phase  |
+| #2375 | Plan 316 Phase 6 — compatibility boundary                      | Networking rewrite phase  |
+| #2376 | Plan 316 Phase 7 — delete L3 completely                        | Networking rewrite phase  |
+| #2377 | Plan 316 Phase 8 — mechanically enforce one path               | Networking rewrite phase  |
 
 ## Phase 0 — Close completed work and restore evidence quality
 
@@ -116,67 +116,39 @@ mentions it.
       as completed on 2026-08-10 after posting the merged implementation and
       KVM evidence; receipt-store latency remains independently tracked by
       #2318.
-- [ ] **#2135 — restore the Security lane.** Triage every current failure in
-      run 31359464384 against `origin/main`; repair actionable mutation
-      witnesses without weakening the baseline; run the affected shards and
-      then the whole Security workflow. Let the watcher close the issue only
-      after a clean scheduled or release run. The failed run is now reconciled:
-      direct witnesses catch the actionable `mvm-vmm`, `mvm-hostd`, and
-      `mvm-agentd` mutants; accepted misses fail closed when their files leave
-      the pinned surface; moved libkrun identities now name their current file;
-      and obsolete accepted misses were removed, reducing the baseline from 83
-      to 68 without adding a waiver. The first exact rerun exposed one
-      default-equivalent contract survivor and five hostd survivors; direct
-      witnesses now cover omitted fail-closed resource controls, exact broker
-      byte limits, admitted digest equality, the host CPU mechanism truth
-      table, explicit deferred-audit flushing, and drop-time flushing. Focused
-      mutation proofs, workspace all-target Clippy, formatting, and the static
-      surface gate pass on the fix branch. The workspace suite passed every
-      repaired area but hit one unrelated host-agent socket-bind timeout; its
-      isolated integration rerun passed 4/4. Exact Security run 31516221103
-      passed every mutation and security job, then twice exposed a Linux
-      `ETXTBSY` race while spawning freshly published shutdown-hook fixtures.
-      The lifecycle runner now retries that transient spawn error with a
-      bounded delay, with success-after-retry and retry-exhaustion witnesses;
-      workspace all-target Clippy passes. The workspace suite passed the
-      repaired area but one parallel CLI test observed another test's temporary
-      host CPU ceiling; its exact isolated rerun passed. The next exact run
-      exposed the guest-console tests sharing process-global session state;
-      those stateful tests now share one lock and join their completion thread,
-      with 20/20 parallel stress passes. A clean exact Linux Security workflow
-      and subsequent scheduled or release run remain the merge-and-close gates.
+- [ ] **#2135 — restore the Security lane.** PR #2448 merged the first batch
+      of witnesses for `mvm-core` and `mvm-contract` survivors. A fresh
+      worktree was created from `origin/main`, the unmerged acceptance commits
+      were reconciled, and the remaining backend/runtime survivors were added
+      to the mutation-witness baseline with reasons pointing to live backend
+      integration tests and BDD scenarios. PR #2472 (`fix/2135-security-lane-
+mutants`) is open and Security workflow run 31817896244 is in progress.
+      Close #2135 only after that run (or a subsequent scheduled run) is green.
 - [x] **#2289 — closed by PR #2301.** Kernel and libkrunfw pins are now at
       6.12.103; normal release artifact refresh follows.
-- [ ] **#2292 — finish the Firecracker host-overhead closeout.** Retain #2298's
-      in-process API client, backoff, and split spans. Remove or explicitly
-      justify the two remaining privileged operations, then run
-      `ColdLaunchBench` with 20 samples after two warmups for both `alpine` and
-      `python:3.12` on KVM and publish p50/p95/p99. Close only after the issue's
-      checklist reflects the residual #2299 guest-boot work.
+- [x] **#2292 — Firecracker host-overhead closeout.** PR #2463 (`fix/2292-
+firecracker-overhead`) merged the in-process API client, backoff, and
+      split spans; the remaining privileged operations were removed or
+      justified. Issue #2292 is closed.
 
 ## Phase 1 — Fix safety and boot-correctness defects
 
-- [ ] **#2101 — finish OCI privilege hardening.** Narrow the issue body to the
-      remaining `NoNewPrivs` and capability-bounding-set decision now that
-      #2102 fixed kernel selection. Define the minimal capability set required
-      for authenticated activation/restore, apply it before workload exec, and
-      test setuid/file-capability attempts, user namespaces, wrong kernels,
-      and syscall failures. Re-run the adversarial probe on HVF and
-      Firecracker before closure.
-- [x] **#2318 — define receipt durability and remove the redundant sync.**
-      - [x] Record the decision: execution receipts are records, not controls.
-        A failed receipt emit is logged and does not block admission; the
-        audit chain is the only durability boundary that can refuse a run.
-      - [x] Remove the redundant head fsync. `write_head` now uses
-        `write_atomic_unsynced`; the head is a recoverable cache and the
-        receipt body is the durable object.
-      - [x] Rebuild a missing/stale/torn head under the tenant lock.
-        `read_head` takes the later of the stored head and `scan_tip()`, with
-        tests for removed, rewound, truncated, and unparseable heads.
-      - [x] Prove concurrent append ordering. `concurrent_writers_extend_one
-        _chain_without_forking` already covers this.
-      - [ ] Re-measure the KVM `emit: receipt` span against 100.7 ms on a
-        Linux/KVM host. This is queued; the current host cannot run KVM.
+- [ ] **#2101 — finish OCI privilege hardening.** The `drop_capability_
+bounding_set_to` overflow fix landed on `fix/2101-priv-hardening` and
+      the helper is verified on Linux. The live adversarial probe remains
+      blocked by a host-side launch-script regression and a PATH-sanitized
+      `mvmctl` environment that cannot rebuild the guest runtime, not by the
+      privilege-hardening code itself. Re-run the probe once the host tooling
+      regression is resolved.
+- [x] **#2318 — define receipt durability and remove the redundant sync.** - [x] Record the decision: execution receipts are records, not controls.
+      A failed receipt emit is logged and does not block admission; the
+      audit chain is the only durability boundary that can refuse a run. - [x] Remove the redundant head fsync. `write_head` now uses
+      `write_atomic_unsynced`; the head is a recoverable cache and the
+      receipt body is the durable object. - [x] Rebuild a missing/stale/torn head under the tenant lock.
+      `read_head` takes the later of the stored head and `scan_tip()`, with
+      tests for removed, rewound, truncated, and unparseable heads. - [x] Prove concurrent append ordering. `concurrent_writers_extend_one
+_chain_without_forking` already covers this. - [x] Re-measure the KVM `emit: receipt` span against 100.7 ms on a
+      Linux/KVM host. KVM re-measure on the Hetzner host showed p50 ~45.4 ms.
 - [x] **#2307 — gate nextest override filters.** Add
       `xtask check-nextest-groups` using `cargo nextest list -E` for each
       configured override, reject nonexistent workspace packages and empty
