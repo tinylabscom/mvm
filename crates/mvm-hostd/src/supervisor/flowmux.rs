@@ -986,6 +986,9 @@ impl FlowMuxSession {
         match self.reader.read_exact(&mut len_buf) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
+            // A reset or abort from the guest is an ungraceful but expected
+            // close of the Unix stream; treat it the same as EOF.
+            Err(e) if is_peer_disconnect(&e) => return Ok(None),
             Err(e) => return Err(e.into()),
         }
         let frame_len = u32::from_be_bytes(len_buf) as usize;
@@ -999,7 +1002,12 @@ impl FlowMuxSession {
         }
         self.read_buf.resize(4 + frame_len, 0);
         self.read_buf[..4].copy_from_slice(&len_buf);
-        self.reader.read_exact(&mut self.read_buf[4..])?;
+        if let Err(e) = self.reader.read_exact(&mut self.read_buf[4..]) {
+            if is_peer_disconnect(&e) {
+                return Ok(None);
+            }
+            return Err(e.into());
+        }
 
         // The payload is currently passed through unencrypted because the
         // encrypted wire format for `SealedFrame` is not yet defined.
@@ -1016,6 +1024,17 @@ impl FlowMuxSession {
             frame.header.payload_len,
         )))
     }
+}
+
+/// Returns true for the common "peer closed the connection" I/O errors that
+/// can race with an in-flight read when the guest drops its socket.
+fn is_peer_disconnect(e: &std::io::Error) -> bool {
+    matches!(
+        e.kind(),
+        std::io::ErrorKind::ConnectionReset
+            | std::io::ErrorKind::ConnectionAborted
+            | std::io::ErrorKind::BrokenPipe
+    )
 }
 
 /// Lock the shared writer, recovering from poison so a crashed relay thread
