@@ -13,7 +13,7 @@
 use std::process::ExitCode;
 
 #[cfg(target_os = "linux")]
-const EGRESS_VSOCK_PORT: u32 = 5253;
+use mvm_agentd::vsock::EGRESS_PORT as EGRESS_VSOCK_PORT;
 
 fn main() -> ExitCode {
     tracing_subscriber::fmt()

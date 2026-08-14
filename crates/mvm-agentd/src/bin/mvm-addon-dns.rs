@@ -90,7 +90,7 @@ async fn main() -> Result<()> {
 }
 
 async fn build_flowmux_resolver() -> Result<FlowMuxReconnectClient> {
-    const EGRESS_VSOCK_PORT: u32 = 5253;
+    const EGRESS_VSOCK_PORT: u32 = mvm_agentd::vsock::EGRESS_PORT;
     let guest_signing_key = flowmux_keys::load_guest_signing_key().await?;
     let host_anchor = flowmux_keys::load_host_signer_verifying_key(Path::new(
         flowmux_keys::DEFAULT_HOST_SIGNER_PUBKEY_PATH,
