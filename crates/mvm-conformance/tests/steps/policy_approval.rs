@@ -160,6 +160,8 @@ fn unauthorized_operator_responds(world: &mut CliWorld) {
                 operator_id: operator("ops-b"),
                 outcome: ApprovalOutcome::Approved,
                 response_nonce: 1,
+                reason: None,
+                ticket_ref: None,
             },
             1_002,
         )
@@ -192,6 +194,8 @@ fn authorized_operator_approves(world: &mut CliWorld) {
                 operator_id: operator("ops-a"),
                 outcome: ApprovalOutcome::Approved,
                 response_nonce: 2,
+                reason: None,
+                ticket_ref: None,
             },
             1_003,
         )
@@ -256,6 +260,8 @@ fn late_authorized_operator_responds(world: &mut CliWorld) {
                 operator_id: operator("ops-a"),
                 outcome: ApprovalOutcome::Approved,
                 response_nonce: 3,
+                reason: None,
+                ticket_ref: None,
             },
             2_001,
         )

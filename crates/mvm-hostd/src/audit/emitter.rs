@@ -439,10 +439,51 @@ impl AuditEmitter {
             "plan.admitted",
             [
                 ("signer_id".to_string(), signer_id.to_string()),
+                ("authorizer_principal".to_string(), signer_id.to_string()),
                 (
                     stream_audit::LABEL_RETENTION.to_string(),
                     plan.stream_retention.as_str().to_string(),
                 ),
+            ],
+        )
+    }
+
+    /// Emit `plan.admission_refused` — fires when `admit_plan_for_run` refuses
+    /// to admit a plan before the VM is created. The stage and reason are
+    /// recorded in the chain so an auditor can distinguish a refusal from a
+    /// missing admission.
+    pub fn emit_refused(&self, plan: &ExecutionPlan, stage: &str, reason: &str) -> Result<()> {
+        self.emit(
+            plan,
+            "plan.admission_refused",
+            [
+                ("stage".to_string(), stage.to_string()),
+                ("reason".to_string(), reason.to_string()),
+                (
+                    "authorizer_principal".to_string(),
+                    crate::audit::host_keypair::host_signer_id(),
+                ),
+            ],
+        )
+    }
+
+    /// Emit `control_key.used` — fires when a `ControlKey` is used to
+    /// authorize an orchestrator action. Carries the key id, role, and a
+    /// short action label. No secret material is logged.
+    pub fn emit_control_key_used(
+        &self,
+        plan: &ExecutionPlan,
+        key: &mvm_core::mvmd_iface::ControlKey,
+        action: &str,
+    ) -> Result<()> {
+        self.emit(
+            plan,
+            "control_key.used",
+            [
+                ("kid".to_string(), key.kid.clone()),
+                ("role".to_string(), format!("{:?}", key.role)),
+                ("action".to_string(), action.to_string()),
+                ("authorizer_principal".to_string(), key.kid.clone()),
             ],
         )
     }
@@ -1267,6 +1308,74 @@ mod tests {
         let ordered = input_refused_labels("vm-1", &R::OutOfOrder { seq: 3, after: 9 });
         assert!(ordered.contains(&(k::LABEL_SEQ.to_string(), "3".to_string())));
         assert!(ordered.contains(&(k::LABEL_AFTER_SEQ.to_string(), "9".to_string())));
+    }
+
+    /// A structured refusal carries the stage, a human-readable reason, and
+    /// the host signer as the authorizer principal, so an auditor can answer
+    /// "who refused this and why?" from the signed chain alone.
+    #[test]
+    fn admission_refusal_records_stage_reason_and_authorizer() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = {
+            let mut __ed_seed = [0u8; 32];
+            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            SigningKey::from_bytes(&__ed_seed)
+        };
+        let vk = key.verifying_key();
+        let emitter = AuditEmitter::with_dir(key, dir.path()).unwrap();
+        let plan = fixture_plan("local", "plan-refused");
+
+        emitter
+            .emit_refused(&plan, "grant_ceiling", "cpu tier exceeds ceiling")
+            .unwrap();
+
+        let entry = only_entry(dir.path(), "local");
+        assert_eq!(entry["event"], "plan.admission_refused");
+        assert_eq!(entry["labels"]["stage"], "grant_ceiling");
+        assert_eq!(entry["labels"]["reason"], "cpu tier exceeds ceiling");
+        let principal = entry["labels"]["authorizer_principal"]
+            .as_str()
+            .expect("authorizer_principal label");
+        assert!(
+            principal.starts_with("host:"),
+            "authorizer must be the host signer: {principal}"
+        );
+        verify_audit_chain(&dir.path().join("local.jsonl"), &vk).expect("refusal entry verifies");
+    }
+
+    /// Control-key use is recorded with the key id and role as the
+    /// authorizer principal, so orchestrator decisions are attributable.
+    #[test]
+    fn control_key_used_records_kid_role_action_and_authorizer() {
+        use mvm_core::mvmd_iface::ControlKeyRole;
+
+        let dir = tempfile::tempdir().unwrap();
+        let key = {
+            let mut __ed_seed = [0u8; 32];
+            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            SigningKey::from_bytes(&__ed_seed)
+        };
+        let vk = key.verifying_key();
+        let emitter = AuditEmitter::with_dir(key, dir.path()).unwrap();
+        let plan = fixture_plan("local", "plan-ctl");
+        let control_key = mvm_core::mvmd_iface::ControlKey {
+            kid: "ck-prod-1".to_string(),
+            role: ControlKeyRole::Orchestrator,
+            expiry_unix_secs: u64::MAX,
+        };
+
+        emitter
+            .emit_control_key_used(&plan, &control_key, "vm.stop")
+            .unwrap();
+
+        let entry = only_entry(dir.path(), "local");
+        assert_eq!(entry["event"], "control_key.used");
+        assert_eq!(entry["labels"]["kid"], "ck-prod-1");
+        assert_eq!(entry["labels"]["role"], "Orchestrator");
+        assert_eq!(entry["labels"]["action"], "vm.stop");
+        assert_eq!(entry["labels"]["authorizer_principal"], "ck-prod-1");
+        verify_audit_chain(&dir.path().join("local.jsonl"), &vk)
+            .expect("control-key entry verifies");
     }
 
     /// The single entry in a tenant's chain, unwrapped from its signed

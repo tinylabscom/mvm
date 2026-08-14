@@ -154,15 +154,15 @@ Read-only exporter; no new runtime instrumentation.
 
 Add structured decision fields to events that already exist.
 
-- [ ] Extend `ApprovalResponse` with `reason: Option<String>` and `ticket_ref: Option<String>`.
-- [ ] Extend `AgentApprovalEvent::Responded` with the same fields.
-- [ ] Extend `PlanAuditEntry` / `AuditEntry` with optional `authorizer_principal`, `authorization_reason`, `authorization_ticket_ref`.
-- [ ] Emit admission **refusals** as chain-signed events with rationale.
-- [ ] Emit orchestrator `ControlKey` usage events (kid, role, action digest, timestamp, optional rationale).
-- [ ] Add serde round-trip and schema tests for all enriched types.
-- [ ] Add negative tests: missing rationale on required events fails validation.
-- [ ] Update audit reader (`mvm-client::audit`) to surface new fields.
-- [ ] Update `specs/SPRINT.md` and `specs/REFACTOR-STATUS.md`.
+- [x] Extend `ApprovalResponse` with `reason: Option<String>` and `ticket_ref: Option<String>`.
+- [x] Extend `AgentApprovalEvent::Responded` with the same fields.
+- [x] Extend `AuditEntry` with optional `authorizer_principal`, `authorization_reason`, `authorization_ticket_ref`; chain-signed plan events carry the same metadata via canonical labels so existing `PlanAuditEntry` readers keep working.
+- [x] Emit admission **refusals** as chain-signed events with rationale.
+- [x] Emit orchestrator `ControlKey` usage events (kid, role, action, authorizer principal).
+- [x] Add serde round-trip and schema tests for all enriched types.
+- [ ] Add negative tests: missing rationale on required events fails validation (deferred to Phase 3 when `DecisionRecord` validation rules land).
+- [x] Update audit reader (`mvm-client::audit`) to surface new fields.
+- [x] Update `specs/SPRINT.md` and `specs/REFACTOR-STATUS.md`.
 
 ### Phase 3 — DecisionRecord API and content-addressed store
 

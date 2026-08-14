@@ -196,16 +196,26 @@ pub fn audit_entry_to_provenance(entry: &AuditEntry, sequence: u64) -> Provenanc
     let mut graph = ProvenanceGraph::new();
 
     let activity_id = format!("mvm:audit_activity_{sequence}");
-    let agent_id = format!("mvm:tenant_{}", turtle_safe_local(&entry.tenant_id));
+    let tenant_agent_id = format!("mvm:tenant_{}", turtle_safe_local(&entry.tenant_id));
     let action_label = format!("{:?}", entry.action);
 
     graph.add_type(&activity_id, "prov:Activity");
     graph.add_literal(&activity_id, "rdfs:label", action_label);
     graph.add_datetime(&activity_id, "prov:startedAtTime", &entry.timestamp);
 
-    graph.add_type(&agent_id, "prov:Agent");
-    graph.add_literal(&agent_id, "rdfs:label", &entry.tenant_id);
-    graph.add_iri(&activity_id, "prov:wasAssociatedWith", &agent_id);
+    // Tenant is always an agent in the activity.
+    graph.add_type(&tenant_agent_id, "prov:Agent");
+    graph.add_literal(&tenant_agent_id, "rdfs:label", &entry.tenant_id);
+    graph.add_iri(&activity_id, "prov:wasAssociatedWith", &tenant_agent_id);
+
+    // When an authorizer principal is recorded, model it as the specific
+    // actor that authorized the action.
+    if let Some(authorizer) = &entry.authorizer_principal {
+        let authorizer_id = format!("mvm:authorizer_{}", turtle_safe_local(authorizer));
+        graph.add_type(&authorizer_id, "prov:Agent");
+        graph.add_literal(&authorizer_id, "rdfs:label", authorizer);
+        graph.add_iri(&activity_id, "prov:wasAssociatedWith", &authorizer_id);
+    }
 
     if let Some(instance_id) = &entry.instance_id {
         let entity_id = format!("mvm:instance_{}", turtle_safe_local(instance_id));
@@ -216,6 +226,14 @@ pub fn audit_entry_to_provenance(entry: &AuditEntry, sequence: u64) -> Provenanc
 
     if let Some(detail) = &entry.detail {
         graph.add_literal(&activity_id, "rdfs:comment", detail);
+    }
+
+    if let Some(reason) = &entry.authorization_reason {
+        graph.add_literal(&activity_id, "rdfs:comment", reason);
+    }
+
+    if let Some(ticket_ref) = &entry.authorization_ticket_ref {
+        graph.add_literal(&activity_id, "rdfs:seeAlso", ticket_ref);
     }
 
     graph
@@ -322,6 +340,9 @@ mod tests {
             threats: vec![],
             gate_decision: None,
             frame_sequence: None,
+            authorizer_principal: None,
+            authorization_reason: None,
+            authorization_ticket_ref: None,
         };
 
         let graph = audit_entry_to_provenance(&entry, 1);

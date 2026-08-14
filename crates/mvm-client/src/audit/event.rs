@@ -99,6 +99,15 @@ pub struct VerifiedAuditEvent {
     /// dropped and path-like values redacted before rendering.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+    /// Principal that authorized the decision, when the event records one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authorizer_principal: Option<String>,
+    /// Free-form rationale for the authorization decision, when recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authorization_reason: Option<String>,
+    /// Optional ticket / incident / change-request reference.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authorization_ticket_ref: Option<String>,
 }
 
 /// Why events from a source were withheld. Withheld means withheld: a
@@ -408,6 +417,9 @@ mod tests {
             event: "plan.launched".into(),
             plan_id: Some("sha256:abc".into()),
             detail: Some("verb=up".into()),
+            authorizer_principal: Some("host:builder".into()),
+            authorization_reason: Some("scheduled rollout".into()),
+            authorization_ticket_ref: Some("CHG-12345".into()),
         }
     }
 

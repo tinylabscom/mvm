@@ -94,6 +94,9 @@ mod tests {
             threats: vec![],
             gate_decision: None,
             frame_sequence: None,
+            authorizer_principal: None,
+            authorization_reason: None,
+            authorization_ticket_ref: None,
         };
         let line = serde_json::to_string(&entry).unwrap();
         let input: &[u8] = line.as_bytes();
