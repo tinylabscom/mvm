@@ -1,9 +1,9 @@
 //! Guest-side FlowMux client for the converged workload networking path.
 //!
-//! This module implements the in-guest half of Plan 316 Phase 3: one
-//! authenticated FlowMux session to the host `GuestService::NetworkFlow` port,
-//! shared by SOCKS5/HTTP/DNS loopback adapters. See
-//! `specs/notes/316-guest-flowmux-adapter.md` for the full design.
+//! This module implements the in-guest half of the converged workload
+//! networking path: one authenticated FlowMux session to the host
+//! `GuestService::NetworkFlow` port, shared by SOCKS5/HTTP/DNS loopback
+//! adapters. See `specs/notes/316-guest-flowmux-adapter.md` for the full design.
 
 #![warn(missing_docs)]
 
