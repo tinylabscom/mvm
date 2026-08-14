@@ -55,6 +55,7 @@ use mvm_core::plan::{ExecutionPlan, PlanId, TenantId};
 use mvm_core::policy::PolicyBundle;
 
 use crate::supervisor::audit::{AuditError, AuditSigner, PlanAuditEntry, for_plan};
+use crate::supervisor::audit_mirror;
 
 /// Canonical audit-event categories. The string form (the
 /// `event_name` field's prefix) is the wire-stable identifier
@@ -248,6 +249,7 @@ impl Recorder {
         let merged = merge_extras(category, extras);
         let entry = for_plan(plan, bundle, event_name, merged);
         self.signer.sign_and_emit(&entry).await?;
+        audit_mirror::emit_mirror_event(&entry);
         self.bump_metric(category);
         Ok(())
     }
@@ -359,7 +361,7 @@ fn merge_extras(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::supervisor::audit::CapturingAuditSigner;
 

@@ -302,7 +302,7 @@ impl AuditSigner for CapturingAuditSigner {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use chrono::TimeZone;
     use mvm_core::plan::{
@@ -315,7 +315,7 @@ mod tests {
     };
     use std::collections::BTreeMap;
 
-    fn sample_plan() -> ExecutionPlan {
+    pub(crate) fn sample_plan() -> ExecutionPlan {
         ExecutionPlan {
             grants: None,
             environment: None,
