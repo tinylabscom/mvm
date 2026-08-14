@@ -49,3 +49,43 @@ Feature: machine lifecycle request contract
     Then the command exits with code 1
     And the error output contains "does not exist"
     And the error output contains "machine create ghost"
+
+  # `machine start` can create the spec on demand, so the request-contract
+  # behavior is testable without booting a guest.
+  Scenario: start with a source creates the spec without booting when dry-run
+    Given an isolated mvm home
+    When I run mvmctl in the isolated mvm home with "machine start bdd-start-create --image alpine --dry-run"
+    Then the command exits with code 0
+    And the output contains "no VM will be booted"
+    And the output contains "image: OCI reference"
+
+  Scenario: start without a source on a missing machine suggests creating it
+    When I run mvmctl with "machine start bdd-missing" and an isolated mvm home
+    Then the command exits with code 1
+    And the error output contains "does not exist"
+    And the error output contains "--image"
+
+  Scenario: start with the same config reuses an existing machine
+    Given an isolated mvm home
+    When I run mvmctl in the isolated mvm home with "machine create bdd-reuse --image alpine"
+    Then the command exits with code 0
+    When I run mvmctl in the isolated mvm home with "machine start bdd-reuse --image alpine --dry-run"
+    Then the command exits with code 0
+    And the output contains "no VM will be booted"
+
+  Scenario: start with a changed config refuses to recreate without force
+    Given an isolated mvm home
+    When I run mvmctl in the isolated mvm home with "machine create bdd-change --image alpine"
+    Then the command exits with code 0
+    When I run mvmctl in the isolated mvm home with "machine start bdd-change --image ubuntu --dry-run"
+    Then the command exits with code 1
+    And the error output contains "different config"
+    And the error output contains "--force"
+
+  Scenario: start with a changed config and force recreates the machine
+    Given an isolated mvm home
+    When I run mvmctl in the isolated mvm home with "machine create bdd-force --image alpine"
+    Then the command exits with code 0
+    When I run mvmctl in the isolated mvm home with "machine start bdd-force --image ubuntu --force --dry-run"
+    Then the command exits with code 0
+    And the output contains "no VM will be booted"
