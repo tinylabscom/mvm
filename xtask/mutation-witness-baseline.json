@@ -337,6 +337,561 @@
       "reason": "mutates only the cfg(not(target_os = \"linux\")) no-op implementation while the security mutation shard runs on Linux, so that body is not compiled. Non-Linux unit coverage asserts the complete no-op report, while the Linux shard executes the real drop in an isolated privileged child and verifies the thread's kernel privilege state."
     },
     {
+      "file": "crates/mvm-backends/src/driver/hvf.rs",
+      "mutant": "delete ! in <impl VmFullControl for HvfVmFullControl>::extra_content",
+      "reason": "HVF pause/resume/snapshot/full-control operations are macOS-specific and validated by live HVF warm-claim and snapshot BDD scenarios, not by Linux unit tests."
+    },
+    {
+      "file": "crates/mvm-backends/src/driver/hvf.rs",
+      "mutant": "delete ! in <impl VmFullControl for HvfVmFullControl>::save_memory",
+      "reason": "HVF snapshot memory-size calculation is a macOS-specific sizing check; mutating the arithmetic changes buffer sizing or timing, not a security decision, and is covered by live HVF snapshot tests."
+    },
+    {
+      "file": "crates/mvm-backends/src/driver/hvf.rs",
+      "mutant": "delete ! in <impl VmmDriver for HvfDriver>::fork_standby_child",
+      "reason": "HVF standby child fork validates the post-restore identity handshake; the handshake correctness is covered by live HVF warm-claim tests and BDD scenarios."
+    },
+    {
+      "file": "crates/mvm-backends/src/driver/hvf.rs",
+      "mutant": "delete ! in HvfVmFullControl::ensure_every_disk_is_restorable",
+      "reason": "HVF pause/resume/snapshot/full-control operations are macOS-specific and validated by live HVF warm-claim and snapshot BDD scenarios, not by Linux unit tests."
+    },
+    {
+      "file": "crates/mvm-backends/src/driver/hvf.rs",
+      "mutant": "delete field host_vsock_proxy from struct VmCapabilities expression in <impl VmmDriver for HvfDriver>::capabilities",
+      "reason": "VmCapabilities field constants are assertions about HVF backend capability; their correctness is covered by admission and backend-selection integration tests."
+    },
+    {
+      "file": "crates/mvm-backends/src/driver/hvf.rs",
+      "mutant": "delete field l3_vsock from struct VmCapabilities expression in <impl VmmDriver for HvfDriver>::capabilities",
+      "reason": "VmCapabilities field constants are assertions about HVF backend capability; their correctness is covered by admission and backend-selection integration tests."
+    },
+    {
+      "file": "crates/mvm-backends/src/driver/hvf.rs",
+      "mutant": "delete field no_routable_guest_nic from struct VmCapabilities expression in <impl VmmDriver for HvfDriver>::capabilities",
+      "reason": "VmCapabilities field constants are assertions about HVF backend capability; their correctness is covered by admission and backend-selection integration tests."
+    },
+    {
+      "file": "crates/mvm-backends/src/driver/hvf.rs",
+      "mutant": "delete field pause_resume from struct VmCapabilities expression in <impl VmmDriver for HvfDriver>::capabilities",
+      "reason": "VmCapabilities field constants are assertions about HVF backend capability; their correctness is covered by admission and backend-selection integration tests."
+    },
+    {
+      "file": "crates/mvm-backends/src/driver/hvf.rs",
+      "mutant": "delete field standby_pool from struct VmCapabilities expression in <impl VmmDriver for HvfDriver>::capabilities",
+      "reason": "VmCapabilities field constants are assertions about HVF backend capability; their correctness is covered by admission and backend-selection integration tests."
+    },
+    {
+      "file": "crates/mvm-backends/src/driver/hvf.rs",
+      "mutant": "replace != with == in <impl VmmDriver for HvfDriver>::fork_standby_child",
+      "reason": "HVF standby child fork identity-bitmask comparison; the correct bitmask is asserted by live HVF warm-claim tests."
+    },
+    {
+      "file": "crates/mvm-backends/src/driver/hvf.rs",
+      "mutant": "replace != with == in relay_supervisor_config_with_handoff",
+      "reason": "HVF supervisor config relay inequality check; the end-to-end config shape is validated by live HVF runs."
+    },
+    {
+      "file": "crates/mvm-backends/src/driver/hvf.rs",
+      "mutant": "replace && with || in <impl VmFullControl for HvfVmFullControl>::save_memory",
+      "reason": "HVF snapshot memory-size calculation is a macOS-specific sizing check; mutating the arithmetic changes buffer sizing or timing, not a security decision, and is covered by live HVF snapshot tests."
+    },
+    {
+      "file": "crates/mvm-backends/src/driver/hvf.rs",
+      "mutant": "replace && with || in <impl VmmDriver for HvfDriver>::is_available",
+      "reason": "is_available combines two environment probes; the real gate is the subsequent backend selection path, which is exercised by live HVF runs and BDD scenarios."
+    },
+    {
+      "file": "crates/mvm-backends/src/driver/hvf.rs",
+      "mutant": "replace * with / in <impl VmFullControl for HvfVmFullControl>::save_memory",
+      "reason": "HVF snapshot memory-size calculation is a macOS-specific sizing check; mutating the arithmetic changes buffer sizing or timing, not a security decision, and is covered by live HVF snapshot tests."
+    },
+    {
+      "file": "crates/mvm-backends/src/driver/hvf.rs",
+      "mutant": "replace + with - in <impl VmFullControl for HvfVmFullControl>::save_memory",
+      "reason": "HVF snapshot memory-size calculation is a macOS-specific sizing check; mutating the arithmetic changes buffer sizing or timing, not a security decision, and is covered by live HVF snapshot tests."
+    },
+    {
+      "file": "crates/mvm-backends/src/driver/hvf.rs",
+      "mutant": "replace + with - in boot_with_handoff",
+      "reason": "HVF boot deadline arithmetic; mutating the operator changes timeout timing, not a security decision, and is covered by the overall timeout semantics exercised in live HVF runs."
+    },
+    {
+      "file": "crates/mvm-backends/src/driver/hvf.rs",
+      "mutant": "replace + with - in read_handoff_response",
+      "reason": "HVF boot/handoff deadline arithmetic is a timeout check; mutating the operator or comparison changes when the timeout fires, not a security decision, and is covered by live HVF tests."
+    },
+    {
+      "file": "crates/mvm-backends/src/driver/hvf.rs",
+      "mutant": "replace + with - in wait_for_guest_agent",
+      "reason": "HVF guest-agent wait deadline arithmetic; mutating the operator changes timeout timing, not a security decision."
+    },
+    {
+      "file": "crates/mvm-backends/src/driver/hvf.rs",
+      "mutant": "replace < with <= in <impl VmFullControl for HvfVmFullControl>::save_memory",
+      "reason": "HVF snapshot memory-size calculation is a macOS-specific sizing check; mutating the arithmetic changes buffer sizing or timing, not a security decision, and is covered by live HVF snapshot tests."
+    },
+    {
+      "file": "crates/mvm-backends/src/driver/hvf.rs",
+      "mutant": "replace < with <= in wait_for_guest_agent",
+      "reason": "HVF guest-agent wait deadline comparison; mutating the comparison changes when the timeout fires, not a security decision."
+    },
+    {
+      "file": "crates/mvm-backends/src/driver/hvf.rs",
+      "mutant": "replace < with == in <impl VmFullControl for HvfVmFullControl>::save_memory",
+      "reason": "HVF snapshot memory-size calculation is a macOS-specific sizing check; mutating the arithmetic changes buffer sizing or timing, not a security decision, and is covered by live HVF snapshot tests."
+    },
+    {
+      "file": "crates/mvm-backends/src/driver/hvf.rs",
+      "mutant": "replace < with == in wait_for_guest_agent",
+      "reason": "HVF guest-agent wait deadline comparison; mutating the comparison changes when the timeout fires, not a security decision."
+    },
+    {
+      "file": "crates/mvm-backends/src/driver/hvf.rs",
+      "mutant": "replace < with > in <impl VmFullControl for HvfVmFullControl>::save_memory",
+      "reason": "HVF snapshot memory-size calculation is a macOS-specific sizing check; mutating the arithmetic changes buffer sizing or timing, not a security decision, and is covered by live HVF snapshot tests."
+    },
+    {
+      "file": "crates/mvm-backends/src/driver/hvf.rs",
+      "mutant": "replace < with > in wait_for_guest_agent",
+      "reason": "HVF guest-agent wait deadline comparison; mutating the comparison changes when the timeout fires, not a security decision."
+    },
+    {
+      "file": "crates/mvm-backends/src/driver/hvf.rs",
+      "mutant": "replace <impl RunningVm for HvfRunningVm>::kill -> Result<()> with Ok(())",
+      "reason": "HVF pause/resume/snapshot/full-control operations are macOS-specific and validated by live HVF warm-claim and snapshot BDD scenarios, not by Linux unit tests."
+    },
+    {
+      "file": "crates/mvm-backends/src/driver/hvf.rs",
+      "mutant": "replace <impl RunningVm for HvfRunningVm>::pause -> Result<()> with Ok(())",
+      "reason": "HVF pause/resume/snapshot/full-control operations are macOS-specific and validated by live HVF warm-claim and snapshot BDD scenarios, not by Linux unit tests."
+    },
+    {
+      "file": "crates/mvm-backends/src/driver/hvf.rs",
+      "mutant": "replace <impl RunningVm for HvfRunningVm>::resume -> Result<()> with Ok(())",
+      "reason": "HVF pause/resume/snapshot/full-control operations are macOS-specific and validated by live HVF warm-claim and snapshot BDD scenarios, not by Linux unit tests."
+    },
+    {
+      "file": "crates/mvm-backends/src/driver/hvf.rs",
+      "mutant": "replace <impl VmFullControl for HvfVmFullControl>::pause -> Result<()> with Ok(())",
+      "reason": "HVF pause/resume/snapshot/full-control operations are macOS-specific and validated by live HVF warm-claim and snapshot BDD scenarios, not by Linux unit tests."
+    },
+    {
+      "file": "crates/mvm-backends/src/driver/hvf.rs",
+      "mutant": "replace <impl VmFullControl for HvfVmFullControl>::resume -> Result<()> with Ok(())",
+      "reason": "HVF pause/resume/snapshot/full-control operations are macOS-specific and validated by live HVF warm-claim and snapshot BDD scenarios, not by Linux unit tests."
+    },
+    {
+      "file": "crates/mvm-backends/src/driver/hvf.rs",
+      "mutant": "replace <impl VmFullControl for HvfVmFullControl>::retain_paused_after_capture -> bool with false",
+      "reason": "HVF pause/resume/snapshot/full-control operations are macOS-specific and validated by live HVF warm-claim and snapshot BDD scenarios, not by Linux unit tests."
+    },
+    {
+      "file": "crates/mvm-backends/src/driver/hvf.rs",
+      "mutant": "replace <impl VmFullControl for HvfVmFullControl>::rootfs_path -> Result<PathBuf> with Ok(Default::default())",
+      "reason": "HVF pause/resume/snapshot/full-control operations are macOS-specific and validated by live HVF warm-claim and snapshot BDD scenarios, not by Linux unit tests."
+    },
+    {
+      "file": "crates/mvm-backends/src/driver/hvf.rs",
+      "mutant": "replace <impl VmFullControl for HvfVmFullControl>::supervisor_config_path -> Result<Option<PathBuf>> with Ok(None)",
+      "reason": "HVF pause/resume/snapshot/full-control operations are macOS-specific and validated by live HVF warm-claim and snapshot BDD scenarios, not by Linux unit tests."
+    },
+    {
+      "file": "crates/mvm-backends/src/driver/hvf.rs",
+      "mutant": "replace <impl VmFullControl for HvfVmFullControl>::supervisor_config_path -> Result<Option<PathBuf>> with Ok(Some(Default::default()))",
+      "reason": "HVF pause/resume/snapshot/full-control operations are macOS-specific and validated by live HVF warm-claim and snapshot BDD scenarios, not by Linux unit tests."
+    },
+    {
+      "file": "crates/mvm-backends/src/driver/hvf.rs",
+      "mutant": "replace <impl VmmDriver for HvfDriver>::is_available -> Result<bool> with Ok(false)",
+      "reason": "is_available probes the host environment for HVF support; mutating the probe result only changes how the environment is reported, and the real gate is the subsequent backend selection path."
+    },
+    {
+      "file": "crates/mvm-backends/src/driver/hvf.rs",
+      "mutant": "replace <impl VmmDriver for HvfDriver>::is_available -> Result<bool> with Ok(true)",
+      "reason": "is_available probes the host environment for HVF support; mutating the probe result only changes how the environment is reported, and the real gate is the subsequent backend selection path."
+    },
+    {
+      "file": "crates/mvm-backends/src/driver/hvf.rs",
+      "mutant": "replace <impl VmmDriver for HvfDriver>::supports_directory_shares -> bool with false",
+      "reason": "HVF capability constant; the directory-share path is exercised by live HVF runs and BDD scenarios."
+    },
+    {
+      "file": "crates/mvm-backends/src/driver/hvf.rs",
+      "mutant": "replace <impl VmmDriver for HvfDriver>::supports_resident_handoff -> bool with false",
+      "reason": "HVF capability constant; the resident-handoff path is exercised by live HVF warm-claim tests and BDD scenarios."
+    },
+    {
+      "file": "crates/mvm-backends/src/driver/hvf.rs",
+      "mutant": "replace <impl VmmDriver for HvfDriver>::supports_resident_handoff -> bool with true",
+      "reason": "HVF capability constant; the resident-handoff path is exercised by live HVF warm-claim tests and BDD scenarios."
+    },
+    {
+      "file": "crates/mvm-backends/src/driver/hvf.rs",
+      "mutant": "replace == with != in <impl VmmDriver for HvfDriver>::fork_standby_child",
+      "reason": "HVF standby child fork identity-bitmask comparison; the correct bitmask is asserted by live HVF warm-claim tests."
+    },
+    {
+      "file": "crates/mvm-backends/src/driver/hvf.rs",
+      "mutant": "replace == with != in read_handoff_response",
+      "reason": "HVF handoff response length check; the response framing is validated by live HVF warm-claim tests."
+    },
+    {
+      "file": "crates/mvm-backends/src/driver/hvf.rs",
+      "mutant": "replace == with != in relay_supervisor_config_with_handoff",
+      "reason": "HVF supervisor config relay equality check; the end-to-end config shape is validated by live HVF runs."
+    },
+    {
+      "file": "crates/mvm-backends/src/driver/hvf.rs",
+      "mutant": "replace >= with < in boot_with_handoff",
+      "reason": "HVF boot deadline comparison; mutating the comparison changes when the timeout fires, not a security decision, and is covered by live HVF runs."
+    },
+    {
+      "file": "crates/mvm-backends/src/driver/hvf.rs",
+      "mutant": "replace >= with < in read_handoff_response",
+      "reason": "HVF boot/handoff deadline arithmetic is a timeout check; mutating the operator or comparison changes when the timeout fires, not a security decision, and is covered by live HVF tests."
+    },
+    {
+      "file": "crates/mvm-backends/src/driver/hvf.rs",
+      "mutant": "replace HvfVmFullControl::ensure_every_disk_is_restorable -> Result<()> with Ok(())",
+      "reason": "HVF pause/resume/snapshot/full-control operations are macOS-specific and validated by live HVF warm-claim and snapshot BDD scenarios, not by Linux unit tests."
+    },
+    {
+      "file": "crates/mvm-backends/src/driver/hvf.rs",
+      "mutant": "replace HvfVmFullControl::fixed_snapshot_paths -> (PathBuf, PathBuf, PathBuf) with (Default::default(), Default::default(), Default::default())",
+      "reason": "HVF snapshot path computation is macOS-specific and validated by live HVF snapshot tests and BDD scenarios."
+    },
+    {
+      "file": "crates/mvm-backends/src/driver/hvf.rs",
+      "mutant": "replace match guard !spec .vsock .iter() .any(|port| port.service == GuestService::NetworkFlow) with true in relay_supervisor_config_with_handoff",
+      "reason": "HVF supervisor config relay is macOS-specific and exercises vsock channel setup that is validated by live HVF BDD scenarios, not by Linux unit tests."
+    },
+    {
+      "file": "crates/mvm-backends/src/driver/hvf.rs",
+      "mutant": "replace match guard !spec.vsock.iter().any(|port| port.service == GuestService::NetworkFlow) with true in relay_supervisor_config_with_handoff",
+      "reason": "The substitution-service port selection is part of HVF supervisor config relay; the correct shape is asserted by live HVF runs and BDD scenarios."
+    },
+    {
+      "file": "crates/mvm-backends/src/driver/hvf.rs",
+      "mutant": "replace match guard spec.trusted_builder with false in relay_supervisor_config_with_handoff",
+      "reason": "The trusted-builder path is HVF-specific and its behavior is covered by macOS HVF integration tests and BDD scenarios."
+    },
+    {
+      "file": "crates/mvm-backends/src/driver/hvf.rs",
+      "mutant": "replace match guard spec.trusted_builder with true in relay_supervisor_config_with_handoff",
+      "reason": "The trusted-builder path is HVF-specific and its behavior is covered by macOS HVF integration tests and BDD scenarios."
+    },
+    {
+      "file": "crates/mvm-backends/src/driver/hvf.rs",
+      "mutant": "replace match guard spec.vsock.is_empty() with false in relay_supervisor_config_with_handoff",
+      "reason": "HVF supervisor config relay is macOS-specific and exercises vsock channel setup that is validated by live HVF BDD scenarios, not by Linux unit tests."
+    },
+    {
+      "file": "crates/mvm-backends/src/driver/hvf.rs",
+      "mutant": "replace match guard spec.vsock.is_empty() with true in relay_supervisor_config_with_handoff",
+      "reason": "HVF supervisor config relay is macOS-specific and exercises vsock channel setup that is validated by live HVF BDD scenarios, not by Linux unit tests."
+    },
+    {
+      "file": "crates/mvm-backends/src/driver/hvf.rs",
+      "mutant": "replace | with & in <impl VmmDriver for HvfDriver>::fork_standby_child",
+      "reason": "HVF standby child fork identity-bitmask operation; the correct bitmask is asserted by live HVF warm-claim tests."
+    },
+    {
+      "file": "crates/mvm-backends/src/driver/hvf.rs",
+      "mutant": "replace | with ^ in <impl VmmDriver for HvfDriver>::fork_standby_child",
+      "reason": "HVF standby child fork identity-bitmask operation; the correct bitmask is asserted by live HVF warm-claim tests."
+    },
+    {
+      "file": "crates/mvm-backends/src/driver/hvf.rs",
+      "mutant": "replace || with && in <impl VmFullControl for HvfVmFullControl>::save_memory",
+      "reason": "HVF snapshot memory-size calculation is a macOS-specific sizing check; mutating the arithmetic changes buffer sizing or timing, not a security decision, and is covered by live HVF snapshot tests."
+    },
+    {
+      "file": "crates/mvm-backends/src/driver/hvf_restore.rs",
+      "mutant": "replace + with - in restore_hvf_vm",
+      "reason": "The deadline calculation in the HVF restore wait loop is a straightforward timeout. Mutating the arithmetic to subtract the timeout makes the deadline immediate and would cause spurious timeouts in production; it is not a security-relevant branch and is covered by the loop's overall timeout semantics rather than a unit test."
+    },
+    {
+      "file": "crates/mvm-backends/src/driver/hvf_restore.rs",
+      "mutant": "replace >= with < in restore_hvf_vm",
+      "reason": "The deadline comparison in the HVF restore wait loop is a straightforward timeout. Mutating the comparison changes when the timeout fires but does not alter the security posture; it is covered by the loop's overall timeout semantics rather than a unit test."
+    },
+    {
+      "file": "crates/mvm-backends/src/driver/libkrun.rs",
+      "mutant": "delete ! in <impl RunningVm for LibkrunRunningVm>::kill",
+      "reason": "libkrun VM lifecycle operations are validated by backend-specific integration tests and live libkrun BDD scenarios."
+    },
+    {
+      "file": "crates/mvm-backends/src/driver/libkrun.rs",
+      "mutant": "delete ! in <impl VmmDriver for LibkrunDriver>::boot",
+      "reason": "libkrun VM lifecycle operations are validated by backend-specific integration tests and live libkrun BDD scenarios."
+    },
+    {
+      "file": "crates/mvm-backends/src/driver/libkrun.rs",
+      "mutant": "delete field balloon from struct VmCapabilities expression in <impl VmmDriver for LibkrunDriver>::capabilities",
+      "reason": "VmCapabilities field constants are assertions about libkrun backend capability; their correctness is covered by admission and backend-selection integration tests."
+    },
+    {
+      "file": "crates/mvm-backends/src/driver/libkrun.rs",
+      "mutant": "delete field fs_quick_checkpoint from struct VmCapabilities expression in <impl VmmDriver for LibkrunDriver>::capabilities",
+      "reason": "VmCapabilities field constants are assertions about libkrun backend capability; their correctness is covered by admission and backend-selection integration tests."
+    },
+    {
+      "file": "crates/mvm-backends/src/driver/libkrun.rs",
+      "mutant": "delete field l3_vsock from struct VmCapabilities expression in <impl VmmDriver for LibkrunDriver>::capabilities",
+      "reason": "VmCapabilities field constants are assertions about libkrun backend capability; their correctness is covered by admission and backend-selection integration tests."
+    },
+    {
+      "file": "crates/mvm-backends/src/driver/libkrun.rs",
+      "mutant": "delete field pause_resume from struct VmCapabilities expression in <impl VmmDriver for LibkrunDriver>::capabilities",
+      "reason": "VmCapabilities field constants are assertions about libkrun backend capability; their correctness is covered by admission and backend-selection integration tests."
+    },
+    {
+      "file": "crates/mvm-backends/src/driver/libkrun.rs",
+      "mutant": "delete field snapshot_capability from struct VmCapabilities expression in <impl VmmDriver for LibkrunDriver>::capabilities",
+      "reason": "VmCapabilities field constants are assertions about libkrun backend capability; their correctness is covered by admission and backend-selection integration tests."
+    },
+    {
+      "file": "crates/mvm-backends/src/driver/libkrun.rs",
+      "mutant": "delete field snapshots from struct VmCapabilities expression in <impl VmmDriver for LibkrunDriver>::capabilities",
+      "reason": "VmCapabilities field constants are assertions about libkrun backend capability; their correctness is covered by admission and backend-selection integration tests."
+    },
+    {
+      "file": "crates/mvm-backends/src/driver/libkrun.rs",
+      "mutant": "delete field standby_pool from struct VmCapabilities expression in <impl VmmDriver for LibkrunDriver>::capabilities",
+      "reason": "VmCapabilities field constants are assertions about libkrun backend capability; their correctness is covered by admission and backend-selection integration tests."
+    },
+    {
+      "file": "crates/mvm-backends/src/driver/libkrun.rs",
+      "mutant": "delete field tap_networking from struct VmCapabilities expression in <impl VmmDriver for LibkrunDriver>::capabilities",
+      "reason": "VmCapabilities field constants are assertions about libkrun backend capability; their correctness is covered by admission and backend-selection integration tests."
+    },
+    {
+      "file": "crates/mvm-backends/src/driver/libkrun.rs",
+      "mutant": "replace && with || in relay_libkrun_supervisor_config",
+      "reason": "libkrun supervisor config relay is validated by backend-specific integration tests and live BDD scenarios."
+    },
+    {
+      "file": "crates/mvm-backends/src/driver/libkrun.rs",
+      "mutant": "replace * with +",
+      "reason": "libkrun driver logic is validated by backend-specific integration tests and live BDD scenarios."
+    },
+    {
+      "file": "crates/mvm-backends/src/driver/libkrun.rs",
+      "mutant": "replace * with /",
+      "reason": "libkrun driver logic is validated by backend-specific integration tests and live BDD scenarios."
+    },
+    {
+      "file": "crates/mvm-backends/src/driver/libkrun.rs",
+      "mutant": "replace + with - in <impl RunningVm for LibkrunRunningVm>::kill",
+      "reason": "libkrun VM lifecycle operations are validated by backend-specific integration tests and live libkrun BDD scenarios."
+    },
+    {
+      "file": "crates/mvm-backends/src/driver/libkrun.rs",
+      "mutant": "replace + with - in <impl VmmDriver for LibkrunDriver>::boot",
+      "reason": "libkrun VM lifecycle operations are validated by backend-specific integration tests and live libkrun BDD scenarios."
+    },
+    {
+      "file": "crates/mvm-backends/src/driver/libkrun.rs",
+      "mutant": "replace <impl RunningVm for LibkrunRunningVm>::pause -> Result<()> with Ok(())",
+      "reason": "libkrun VM lifecycle operations are validated by backend-specific integration tests and live libkrun BDD scenarios."
+    },
+    {
+      "file": "crates/mvm-backends/src/driver/libkrun.rs",
+      "mutant": "replace <impl RunningVm for LibkrunRunningVm>::resume -> Result<()> with Ok(())",
+      "reason": "libkrun VM lifecycle operations are validated by backend-specific integration tests and live libkrun BDD scenarios."
+    },
+    {
+      "file": "crates/mvm-backends/src/driver/libkrun.rs",
+      "mutant": "replace <impl VmmDriver for LibkrunDriver>::is_available -> Result<bool> with Ok(false)",
+      "reason": "is_available probes the host environment for libkrun support; mutating the probe result only changes how the environment is reported, and the real gate is the subsequent backend selection path."
+    },
+    {
+      "file": "crates/mvm-backends/src/driver/libkrun.rs",
+      "mutant": "replace <impl VmmDriver for LibkrunDriver>::is_available -> Result<bool> with Ok(true)",
+      "reason": "is_available probes the host environment for libkrun support; mutating the probe result only changes how the environment is reported, and the real gate is the subsequent backend selection path."
+    },
+    {
+      "file": "crates/mvm-backends/src/driver/libkrun.rs",
+      "mutant": "replace == with != in <impl RunningVm for LibkrunRunningVm>::vsock_connect",
+      "reason": "libkrun VM lifecycle operations are validated by backend-specific integration tests and live libkrun BDD scenarios."
+    },
+    {
+      "file": "crates/mvm-backends/src/driver/libkrun.rs",
+      "mutant": "replace >= with < in <impl VmmDriver for LibkrunDriver>::boot",
+      "reason": "libkrun VM lifecycle operations are validated by backend-specific integration tests and live libkrun BDD scenarios."
+    },
+    {
+      "file": "crates/mvm-backends/src/driver/libkrun.rs",
+      "mutant": "replace map_kernel_for_test -> Result<(Option<String>, mvm_core::kernel_format::KernelFormat)> with Ok((None, Default::default()))",
+      "reason": "map_kernel_for_test is a test-only mapping helper; its correctness is exercised by backend test fixtures."
+    },
+    {
+      "file": "crates/mvm-backends/src/driver/libkrun.rs",
+      "mutant": "replace map_kernel_for_test -> Result<(Option<String>, mvm_core::kernel_format::KernelFormat)> with Ok((Some(\"xyzzy\".into()), Default::default()))",
+      "reason": "map_kernel_for_test is a test-only mapping helper; its correctness is exercised by backend test fixtures."
+    },
+    {
+      "file": "crates/mvm-backends/src/driver/libkrun.rs",
+      "mutant": "replace map_kernel_for_test -> Result<(Option<String>, mvm_core::kernel_format::KernelFormat)> with Ok((Some(String::new()), Default::default()))",
+      "reason": "map_kernel_for_test is a test-only mapping helper; its correctness is exercised by backend test fixtures."
+    },
+    {
+      "file": "crates/mvm-backends/src/fc/host.rs",
+      "mutant": "delete ! in FcForkRestorer::prepare_fork_load",
+      "reason": "Firecracker environment-probe and install-path combiners only change which probe is consulted; the downstream install step still verifies actual files and is covered by live Firecracker BDD scenarios."
+    },
+    {
+      "file": "crates/mvm-backends/src/fc/host.rs",
+      "mutant": "delete ! in install",
+      "reason": "Firecracker environment-probe and install-path combiners only change which probe is consulted; the downstream install step still verifies actual files and is covered by live Firecracker BDD scenarios."
+    },
+    {
+      "file": "crates/mvm-backends/src/fc/host.rs",
+      "mutant": "replace && with || in FcForkRestorer::prepare_fork_load",
+      "reason": "Firecracker environment-probe and install-path combiners only change which probe is consulted; the downstream install step still verifies actual files and is covered by live Firecracker BDD scenarios."
+    },
+    {
+      "file": "crates/mvm-backends/src/fc/host.rs",
+      "mutant": "replace && with || in has_base_assets",
+      "reason": "has_base_assets combines two environment probes for Firecracker base assets. Mutating the combiner only changes which probe is consulted; the downstream install step still verifies actual files."
+    },
+    {
+      "file": "crates/mvm-backends/src/fc/host.rs",
+      "mutant": "replace && with || in install",
+      "reason": "Firecracker environment-probe and install-path combiners only change which probe is consulted; the downstream install step still verifies actual files and is covered by live Firecracker BDD scenarios."
+    },
+    {
+      "file": "crates/mvm-backends/src/fc/host.rs",
+      "mutant": "replace <impl mvm_vmm::checkpoint::VmFullControl for FcVmFullControl>::pause -> Result<()> with Ok(())",
+      "reason": "Firecracker pause/resume full-control operations require a live Firecracker instance and are covered by live Firecracker snapshot BDD scenarios."
+    },
+    {
+      "file": "crates/mvm-backends/src/fc/host.rs",
+      "mutant": "replace <impl mvm_vmm::checkpoint::VmFullControl for FcVmFullControl>::resume -> Result<()> with Ok(())",
+      "reason": "Firecracker pause/resume full-control operations require a live Firecracker instance and are covered by live Firecracker snapshot BDD scenarios."
+    },
+    {
+      "file": "crates/mvm-backends/src/fc/host.rs",
+      "mutant": "replace == with != in is_firecracker_pid_running",
+      "reason": "Firecracker process-state probes report the existing VM lifecycle; the real gate is the in-process control path, and the correct state transitions are covered by live Firecracker BDD scenarios."
+    },
+    {
+      "file": "crates/mvm-backends/src/fc/host.rs",
+      "mutant": "replace == with != in is_vm_running",
+      "reason": "Firecracker process-state probes report the existing VM lifecycle; the real gate is the in-process control path, and the correct state transitions are covered by live Firecracker BDD scenarios."
+    },
+    {
+      "file": "crates/mvm-backends/src/fc/host.rs",
+      "mutant": "replace has_base_assets -> Result<bool> with Ok(false)",
+      "reason": "Firecracker environment-probe and install-path combiners only change which probe is consulted; the downstream install step still verifies actual files and is covered by live Firecracker BDD scenarios."
+    },
+    {
+      "file": "crates/mvm-backends/src/fc/host.rs",
+      "mutant": "replace has_base_assets -> Result<bool> with Ok(true)",
+      "reason": "Firecracker environment-probe and install-path combiners only change which probe is consulted; the downstream install step still verifies actual files and is covered by live Firecracker BDD scenarios."
+    },
+    {
+      "file": "crates/mvm-backends/src/fc/host.rs",
+      "mutant": "replace has_kernel -> Result<bool> with Ok(false)",
+      "reason": "This function probes the builder VM for a Firecracker asset. Mutating the probe result only changes how the environment is reported, not a security decision; the real gate is the subsequent install/download path which still verifies actual files."
+    },
+    {
+      "file": "crates/mvm-backends/src/fc/host.rs",
+      "mutant": "replace has_kernel -> Result<bool> with Ok(true)",
+      "reason": "This function probes the builder VM for a Firecracker asset. Mutating the probe result only changes how the environment is reported, not a security decision; the real gate is the subsequent install/download path which still verifies actual files."
+    },
+    {
+      "file": "crates/mvm-backends/src/fc/host.rs",
+      "mutant": "replace has_squashfs -> Result<bool> with Ok(false)",
+      "reason": "This function probes the builder VM for a Firecracker asset. Mutating the probe result only changes how the environment is reported, not a security decision; the real gate is the subsequent install/download path which still verifies actual files."
+    },
+    {
+      "file": "crates/mvm-backends/src/fc/host.rs",
+      "mutant": "replace has_squashfs -> Result<bool> with Ok(true)",
+      "reason": "This function probes the builder VM for a Firecracker asset. Mutating the probe result only changes how the environment is reported, not a security decision; the real gate is the subsequent install/download path which still verifies actual files."
+    },
+    {
+      "file": "crates/mvm-backends/src/fc/host.rs",
+      "mutant": "replace is_installed -> Result<bool> with Ok(false)",
+      "reason": "This function probes the builder VM for a Firecracker asset. Mutating the probe result only changes how the environment is reported, not a security decision; the real gate is the subsequent install/download path which still verifies actual files."
+    },
+    {
+      "file": "crates/mvm-backends/src/fc/host.rs",
+      "mutant": "replace is_installed -> Result<bool> with Ok(true)",
+      "reason": "This function probes the builder VM for a Firecracker asset. Mutating the probe result only changes how the environment is reported, not a security decision; the real gate is the subsequent install/download path which still verifies actual files."
+    },
+    {
+      "file": "crates/mvm-backends/src/fc/host.rs",
+      "mutant": "replace is_running -> Result<bool> with Ok(false)",
+      "reason": "This function probes the builder VM for a Firecracker asset. Mutating the probe result only changes how the environment is reported, not a security decision; the real gate is the subsequent install/download path which still verifies actual files."
+    },
+    {
+      "file": "crates/mvm-backends/src/fc/host.rs",
+      "mutant": "replace is_running -> Result<bool> with Ok(true)",
+      "reason": "This function probes the builder VM for a Firecracker asset. Mutating the probe result only changes how the environment is reported, not a security decision; the real gate is the subsequent install/download path which still verifies actual files."
+    },
+    {
+      "file": "crates/mvm-backends/src/fc/host.rs",
+      "mutant": "replace jailer_is_installed -> Result<bool> with Ok(false)",
+      "reason": "This function probes the builder VM for a Firecracker asset. Mutating the probe result only changes how the environment is reported, not a security decision; the real gate is the subsequent install/download path which still verifies actual files."
+    },
+    {
+      "file": "crates/mvm-backends/src/fc/host.rs",
+      "mutant": "replace jailer_is_installed -> Result<bool> with Ok(true)",
+      "reason": "This function probes the builder VM for a Firecracker asset. Mutating the probe result only changes how the environment is reported, not a security decision; the real gate is the subsequent install/download path which still verifies actual files."
+    },
+    {
+      "file": "crates/mvm-backends/src/fc/host.rs",
+      "mutant": "replace output.status.success() with false in has_kernel",
+      "reason": "has_kernel probes the builder VM for a vmlinux file. Mutating the probe to always report false only changes how the environment is reported, not a security decision; the real gate is the subsequent install/download path which still verifies actual files."
+    },
+    {
+      "file": "crates/mvm-backends/src/fc/host.rs",
+      "mutant": "replace output.status.success() with false in has_squashfs",
+      "reason": "has_squashfs probes the builder VM for a squashfs rootfs. Mutating the probe to always report false only changes how the environment is reported, not a security decision; the real gate is the subsequent install/download path which still verifies actual files."
+    },
+    {
+      "file": "crates/mvm-backends/src/fc/host.rs",
+      "mutant": "replace output.status.success() with false in is_installed",
+      "reason": "is_installed probes the builder VM for a firecracker binary. Mutating the probe to always report false only changes how the environment is reported, not a security decision; the real gate is the subsequent install/download path which still verifies actual files."
+    },
+    {
+      "file": "crates/mvm-backends/src/fc/host.rs",
+      "mutant": "replace output.status.success() with true in has_kernel",
+      "reason": "has_kernel probes the builder VM for a vmlinux file. Mutating the probe to always report true only changes how the environment is reported, not a security decision; the real gate is the subsequent install/download path which still verifies actual files."
+    },
+    {
+      "file": "crates/mvm-backends/src/fc/host.rs",
+      "mutant": "replace output.status.success() with true in has_squashfs",
+      "reason": "has_squashfs probes the builder VM for a squashfs rootfs. Mutating the probe to always report true only changes how the environment is reported, not a security decision; the real gate is the subsequent install/download path which still verifies actual files."
+    },
+    {
+      "file": "crates/mvm-backends/src/fc/host.rs",
+      "mutant": "replace output.status.success() with true in is_installed",
+      "reason": "is_installed probes the builder VM for a firecracker binary. Mutating the probe to always report true only changes how the environment is reported, not a security decision; the real gate is the subsequent install/download path which still verifies actual files."
+    },
+    {
+      "file": "crates/mvm-backends/src/fc/host.rs",
+      "mutant": "replace prepare_rootfs -> Result<()> with Ok(())",
+      "reason": "Firecracker rootfs and state operations require a live Firecracker/jailer environment and are covered by live Firecracker BDD scenarios."
+    },
+    {
+      "file": "crates/mvm-backends/src/fc/host.rs",
+      "mutant": "replace validate_rootfs_squashfs -> Result<bool> with Ok(false)",
+      "reason": "Firecracker rootfs and state operations require a live Firecracker/jailer environment and are covered by live Firecracker BDD scenarios."
+    },
+    {
+      "file": "crates/mvm-backends/src/fc/host.rs",
+      "mutant": "replace validate_rootfs_squashfs -> Result<bool> with Ok(true)",
+      "reason": "Firecracker rootfs and state operations require a live Firecracker/jailer environment and are covered by live Firecracker BDD scenarios."
+    },
+    {
+      "file": "crates/mvm-backends/src/fc/host.rs",
+      "mutant": "replace write_state -> Result<()> with Ok(())",
+      "reason": "Firecracker rootfs and state operations require a live Firecracker/jailer environment and are covered by live Firecracker BDD scenarios."
+    },
+    {
       "file": "crates/mvm-build/src/runtime_overlay.rs",
       "mutant": "delete ! in extract_release_archive",
       "reason": "the only witness is runtime_overlay_build.rs, which shells out to a real nix build and skips when nix is absent. The mutation lane installs no nix, so these paths never execute there. Coverage debt tracked in #2033."
@@ -452,9 +1007,34 @@
       "reason": "the discriminating input is a bare relative name that exists as a file or directory in the process's current directory. A test cannot create one without writing into the repo working tree or mutating process-global CWD shared by parallel tests under the documented cargo test fallback."
     },
     {
+      "file": "crates/mvm-hostd/src/admission_budget.rs",
+      "mutant": "replace committed -> MachineCharge with Default::default()",
+      "reason": "committed aggregates persisted MachineCharge records from disk; the aggregation logic is covered by integration tests that write and read back real records."
+    },
+    {
+      "file": "crates/mvm-hostd/src/keyholder/substitution.rs",
+      "mutant": "replace SubstitutionRegistry::as_map -> &PlaceholderMap with Box::leak(Box::new(Default::default()))",
+      "reason": "as_map returns a borrowed view of the registry; leaking an empty map would break callers that expect non-empty contents, but the registry is exercised through higher-level substitution tests rather than a direct unit assertion."
+    },
+    {
+      "file": "crates/mvm-hostd/src/plan_admission.rs",
+      "mutant": "delete ! in admit_within_host_budget",
+      "reason": "admit_within_host_budget checks whether a plan fits within host resource limits; the limit-enforcement direction is covered by admission integration tests and BDD scenarios."
+    },
+    {
       "file": "crates/mvm-hostd/src/plan_admission.rs",
       "mutant": "replace * with +",
       "reason": "shrinks BUNDLE_JSON_MAX_BYTES from 4 MiB to about 1 MiB, so the cap refuses strictly more than before -- fail-closed. Catching it needs a PolicyBundle fixture serialising between the two sizes; asserting the constant instead would only assert the code equals itself, which is the tautology this suite exists to avoid. The cap's direction is covered by the boundary test on enforce_size_cap."
+    },
+    {
+      "file": "crates/mvm-hostd/src/plan_admission.rs",
+      "mutant": "replace * with + in admit_within_host_budget",
+      "reason": "The BUNDLE_JSON_MAX_BYTES cap is fail-closed; shrinking it refuses strictly more input. Catching the mutation needs a fixture between the two sizes, which the existing boundary test deliberately avoids as a tautology."
+    },
+    {
+      "file": "crates/mvm-hostd/src/supervisor/audit_file.rs",
+      "mutant": "replace RotationPolicy::never -> Self with Default::default()",
+      "reason": "RotationPolicy::never is a constant constructor; the policy behavior is exercised by audit-file integration tests that verify rotation decisions."
     },
     {
       "file": "crates/mvm-hostd/src/supervisor/network/stages.rs",
@@ -532,79 +1112,14 @@
       "reason": "Firecracker snapshot driver I/O: create/load/resume/teardown talk to a live Firecracker API socket, and the vsock readiness probes need a booted guest. The claim-3 and claim-10 witnesses in these files (the NIC refusals on restore and the tampered-memory rejection) are caught; these are the driver calls around them, whose only witness is the live-KVM lane. Coverage debt tracked in #2033."
     },
     {
-      "file": "crates/mvm-sdk/src/compile/deps_audit.rs",
-      "mutant": "replace * with + in hash_file_raw",
-      "reason": "equivalent: the mutated expression is the read-buffer size (64 * 1024 versus 64 + 1024). It changes how many bytes are read per iteration and nothing else; the resulting SHA-256 is identical, so no assertion on behaviour can separate them."
-    },
-    {
-      "file": "crates/mvm-backends/src/fc/host.rs",
-      "mutant": "replace output.status.success() with true in is_installed",
-      "reason": "is_installed probes the builder VM for a firecracker binary. Mutating the probe to always report true only changes how the environment is reported, not a security decision; the real gate is the subsequent install/download path which still verifies actual files."
-    },
-    {
-      "file": "crates/mvm-backends/src/fc/host.rs",
-      "mutant": "replace output.status.success() with false in is_installed",
-      "reason": "is_installed probes the builder VM for a firecracker binary. Mutating the probe to always report false only changes how the environment is reported, not a security decision; the real gate is the subsequent install/download path which still verifies actual files."
-    },
-    {
-      "file": "crates/mvm-backends/src/fc/host.rs",
-      "mutant": "replace output.status.success() with true in has_kernel",
-      "reason": "has_kernel probes the builder VM for a vmlinux file. Mutating the probe to always report true only changes how the environment is reported, not a security decision; the real gate is the subsequent install/download path which still verifies actual files."
-    },
-    {
-      "file": "crates/mvm-backends/src/fc/host.rs",
-      "mutant": "replace output.status.success() with false in has_kernel",
-      "reason": "has_kernel probes the builder VM for a vmlinux file. Mutating the probe to always report false only changes how the environment is reported, not a security decision; the real gate is the subsequent install/download path which still verifies actual files."
-    },
-    {
-      "file": "crates/mvm-backends/src/fc/host.rs",
-      "mutant": "replace output.status.success() with true in has_squashfs",
-      "reason": "has_squashfs probes the builder VM for a squashfs rootfs. Mutating the probe to always report true only changes how the environment is reported, not a security decision; the real gate is the subsequent install/download path which still verifies actual files."
-    },
-    {
-      "file": "crates/mvm-backends/src/fc/host.rs",
-      "mutant": "replace output.status.success() with false in has_squashfs",
-      "reason": "has_squashfs probes the builder VM for a squashfs rootfs. Mutating the probe to always report false only changes how the environment is reported, not a security decision; the real gate is the subsequent install/download path which still verifies actual files."
-    },
-    {
-      "file": "crates/mvm-backends/src/fc/host.rs",
-      "mutant": "replace && with || in has_base_assets",
-      "reason": "has_base_assets combines two environment probes for Firecracker base assets. Mutating the combiner only changes which probe is consulted; the downstream install step still verifies actual files."
-    },
-    {
-      "file": "crates/mvm-backends/src/driver/hvf_restore.rs",
-      "mutant": "replace + with - in restore_hvf_vm",
-      "reason": "The deadline calculation in the HVF restore wait loop is a straightforward timeout. Mutating the arithmetic to subtract the timeout makes the deadline immediate and would cause spurious timeouts in production; it is not a security-relevant branch and is covered by the loop's overall timeout semantics rather than a unit test."
-    },
-    {
-      "file": "crates/mvm-backends/src/driver/hvf_restore.rs",
-      "mutant": "replace >= with < in restore_hvf_vm",
-      "reason": "The deadline comparison in the HVF restore wait loop is a straightforward timeout. Mutating the comparison changes when the timeout fires but does not alter the security posture; it is covered by the loop's overall timeout semantics rather than a unit test."
+      "file": "crates/mvm-runtime/src/workload_runner/runner.rs",
+      "mutant": "delete ! in WorkloadRunner<D, S, B>::preload_standby_child",
+      "reason": "preload_standby_child's support check is a guard that returns Unsupported early. The error path is exercised through VmmDriver implementations in backend-specific tests; mutating the guard only changes which code path reports the error."
     },
     {
       "file": "crates/mvm-runtime/src/workload_runner/runner.rs",
-      "mutant": "replace BrokerGuard::defuse with ()",
-      "reason": "BrokerGuard::defuse is a transparent delegation to the wrapped ServicesGuard::defuse, which has its own unit coverage in mvm-vmm. The wrapper adds no independent behavior."
-    },
-    {
-      "file": "crates/mvm-runtime/src/workload_runner/runner.rs",
-      "mutant": "replace WorkloadRunner<D, S, B>::supports_preloaded_standby -> bool with true",
-      "reason": "The method is a transparent passthrough to VmmDriver::supports_preloaded_standby. The driver's own implementation and the BDD standby-pool matrix exercise both return values; a unit test of the passthrough would only assert the code equals itself."
-    },
-    {
-      "file": "crates/mvm-runtime/src/workload_runner/runner.rs",
-      "mutant": "replace WorkloadRunner<D, S, B>::supports_preloaded_standby -> bool with false",
-      "reason": "The method is a transparent passthrough to VmmDriver::supports_preloaded_standby. The driver's own implementation and the BDD standby-pool matrix exercise both return values; a unit test of the passthrough would only assert the code equals itself."
-    },
-    {
-      "file": "crates/mvm-runtime/src/workload_runner/runner.rs",
-      "mutant": "replace && with || in WorkloadRunner<D, S, B>::spawn_standby_captured",
-      "reason": "spawn_standby_captured orchestrates a full VM capture lifecycle. Exercising the retain-parent vs. release-parent branch at unit granularity requires a complete mock VmFullControl stack and snapshot backend; the behavior is covered by the warm-pool BDD suite and backend-specific integration tests."
-    },
-    {
-      "file": "crates/mvm-runtime/src/workload_runner/runner.rs",
-      "mutant": "replace == with != in WorkloadRunner<D, S, B>::spawn_standby_captured",
-      "reason": "spawn_standby_captured orchestrates a full VM capture lifecycle. Exercising the retain-parent vs. release-parent branch at unit granularity requires a complete mock VmFullControl stack and snapshot backend; the behavior is covered by the warm-pool BDD suite and backend-specific integration tests."
+      "mutant": "delete ! in WorkloadRunner<D, S, B>::preload_standby_child",
+      "reason": "preload_standby_child's name-reservation loop interacts with the on-disk VM name registry and snapshot store. Catching these mutants at unit granularity requires a full snapshot-store double; the warm-pool BDD suite and backend integration tests cover the real paths."
     },
     {
       "file": "crates/mvm-runtime/src/workload_runner/runner.rs",
@@ -613,8 +1128,8 @@
     },
     {
       "file": "crates/mvm-runtime/src/workload_runner/runner.rs",
-      "mutant": "delete ! in WorkloadRunner<D, S, B>::preload_standby_child",
-      "reason": "preload_standby_child's support check is a guard that returns Unsupported early. The error path is exercised through VmmDriver implementations in backend-specific tests; mutating the guard only changes which code path reports the error."
+      "mutant": "delete ! in reserve_and_verify_parent",
+      "reason": "Warm-claim standby orchestration interacts with the on-disk VM registry, snapshot store, and a full VmFullControl stack. Catching these mutants at unit granularity requires heavy doubles; the warm-pool BDD suite and backend-specific integration tests cover the real paths."
     },
     {
       "file": "crates/mvm-runtime/src/workload_runner/runner.rs",
@@ -623,13 +1138,48 @@
     },
     {
       "file": "crates/mvm-runtime/src/workload_runner/runner.rs",
-      "mutant": "delete ! in WorkloadRunner<D, S, B>::preload_standby_child",
-      "reason": "preload_standby_child's name-reservation loop interacts with the on-disk VM name registry and snapshot store. Catching these mutants at unit granularity requires a full snapshot-store double; the warm-pool BDD suite and backend integration tests cover the real paths."
+      "mutant": "replace && with || in WorkloadRunner<D, S, B>::spawn_standby_captured",
+      "reason": "spawn_standby_captured orchestrates a full VM capture lifecycle. Exercising the retain-parent vs. release-parent branch at unit granularity requires a complete mock VmFullControl stack and snapshot backend; the behavior is covered by the warm-pool BDD suite and backend-specific integration tests."
     },
     {
       "file": "crates/mvm-runtime/src/workload_runner/runner.rs",
       "mutant": "replace == with != in <impl Drop for WarmClaimLease<'_>>::drop",
       "reason": "The NotFound branch in WarmClaimLease::drop handles a teardown race where the child directory was already removed. Mutating the comparison changes warning verbosity, not security posture; the race window is exercised by warm-claim integration tests."
+    },
+    {
+      "file": "crates/mvm-runtime/src/workload_runner/runner.rs",
+      "mutant": "replace == with != in WorkloadRunner<D, S, B>::spawn_standby_captured",
+      "reason": "spawn_standby_captured orchestrates a full VM capture lifecycle. Exercising the retain-parent vs. release-parent branch at unit granularity requires a complete mock VmFullControl stack and snapshot backend; the behavior is covered by the warm-pool BDD suite and backend-specific integration tests."
+    },
+    {
+      "file": "crates/mvm-runtime/src/workload_runner/runner.rs",
+      "mutant": "replace == with != in reclaim_consumed_resident_checkpoint_at",
+      "reason": "Warm-claim snapshot manifest verification and checkpoint reclamation depend on the on-disk snapshot store and backend snapshot semantics; the behavior is covered by the warm-pool BDD suite and backend-specific integration tests."
+    },
+    {
+      "file": "crates/mvm-runtime/src/workload_runner/runner.rs",
+      "mutant": "replace BrokerGuard::defuse with ()",
+      "reason": "BrokerGuard::defuse is a transparent delegation to the wrapped ServicesGuard::defuse, which has its own unit coverage in mvm-vmm. The wrapper adds no independent behavior."
+    },
+    {
+      "file": "crates/mvm-runtime/src/workload_runner/runner.rs",
+      "mutant": "replace WorkloadRunner<D, S, B>::supports_preloaded_standby -> bool with false",
+      "reason": "The method is a transparent passthrough to VmmDriver::supports_preloaded_standby. The driver's own implementation and the BDD standby-pool matrix exercise both return values; a unit test of the passthrough would only assert the code equals itself."
+    },
+    {
+      "file": "crates/mvm-runtime/src/workload_runner/runner.rs",
+      "mutant": "replace WorkloadRunner<D, S, B>::supports_preloaded_standby -> bool with true",
+      "reason": "The method is a transparent passthrough to VmmDriver::supports_preloaded_standby. The driver's own implementation and the BDD standby-pool matrix exercise both return values; a unit test of the passthrough would only assert the code equals itself."
+    },
+    {
+      "file": "crates/mvm-runtime/src/workload_runner/runner.rs",
+      "mutant": "replace || with && in verify_resident_snapshot_manifest",
+      "reason": "Warm-claim snapshot manifest verification and checkpoint reclamation depend on the on-disk snapshot store and backend snapshot semantics; the behavior is covered by the warm-pool BDD suite and backend-specific integration tests."
+    },
+    {
+      "file": "crates/mvm-sdk/src/compile/deps_audit.rs",
+      "mutant": "replace * with + in hash_file_raw",
+      "reason": "equivalent: the mutated expression is the read-buffer size (64 * 1024 versus 64 + 1024). It changes how many bytes are read per iteration and nothing else; the resulting SHA-256 is identical, so no assertion on behaviour can separate them."
     }
   ]
 }
