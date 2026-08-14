@@ -54,8 +54,8 @@ members = [
     # its own crate. The supervisor lifecycle + cosign-verify +
     # cgroup + seccomp + binary hardening land in W1b.2.
     # Plan 113 / ADR-003 §Decision 5 — A2 confinement helper wrapping
-    # seccompiler 0.5 + landlock 0.4. Called by the per-VM
-    # `mvm-bridge` sidecar just after startup so
+    # seccompiler 0.5 + landlock 0.4. Called by the per-VM supervisor
+    # just after startup so
     # the kernel-LSM ruleset + seccomp filter are installed before the
     # packet loop touches untrusted bytes. Linux-only at runtime; the
     # crate compiles as inert stubs on macOS / Windows so workspace
@@ -376,15 +376,6 @@ mvm-sdk = { path = "crates/mvm-sdk", version = "0.18.0" }
 # workspace. Default feature set is empty; consumers wanting real FFI
 # enable `libkrun-sys` on a host with libkrun installed.
 libkrun-sys = { path = "crates/deps/libkrun-sys", version = "0.18.0" }
-
-# Plan 113 / ADR-003 §Decision 5 — A2 confinement helper (seccompiler +
-# landlock). Consumed by the per-VM `mvm-bridge` sidecar.
-
-# Plan 113 §Task 12 / ADR-003 — per-VM Firecracker bridge sidecar binary
-# crate. Leaf entry resolved by Task 13's `FirecrackerBackend` at runtime
-# (fork+exec, never linked as a library). Linux-only at runtime; the
-# crate's `src/main.rs` cfg-gates the body so `cargo check --workspace`
-# stays green on macOS / Windows contributor hosts.
 
 # Dev dependencies
 assert_cmd = "2"

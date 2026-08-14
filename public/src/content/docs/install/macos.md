@@ -38,15 +38,14 @@ git clone https://github.com/tinylabscom/mvm.git
 cd mvm
 cargo build --release --bin mvmctl
 cargo build --release -p mvm-hostd \
-  --bin mvm-bridge --bin mvm-hvf-supervisor \
+  --bin mvm-hvf-supervisor \
   --bin mvm-libkrun-supervisor --features libkrun-sys
-cargo build --release -p mvm-hostd --bin mvm-substitution-endpoint
+cargo build --release -p mvm-hostd --bin mvm-network-endpoint
 install -m 0755 \
   target/release/mvmctl \
-  target/release/mvm-bridge \
   target/release/mvm-hvf-supervisor \
   target/release/mvm-libkrun-supervisor \
-  target/release/mvm-substitution-endpoint \
+  target/release/mvm-network-endpoint \
   ~/.local/bin/
 ```
 

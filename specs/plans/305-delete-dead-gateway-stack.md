@@ -168,6 +168,14 @@ a cycle would not terminate.
 - [x] An orphaned doc comment in `mvm-hostd/src/lib.rs` described the deleted
       bridge module while sitting on `pub mod broker;`
 
+- [x] The packaging and install layer kept naming the deleted binary after
+      WS3 corrected the prose. `verify-release-assets.sh` required `mvm-bridge`
+      on every target while `release.yml` never builds it, so the next tagged
+      release would have failed asset verification; the test carried the same
+      stale list, so the fixture manufactured the file and the gate stayed
+      green. Fixed with a drift gate deriving the shipped set from the
+      workflow (#2497).
+
 ### WS4 — Then confine the signer roles
 
 The original plan-305 scope, deferred behind the deletion because it is a
