@@ -2684,13 +2684,21 @@ fn test_vm_save_json_parses() {
 }
 
 #[test]
-fn test_vm_restore_json_parses() {
-    let cli = Cli::try_parse_from(["mvmctl", "machine", "restore", "ckpt-abc", "--json"]).unwrap();
+fn test_machine_restore_json_parses() {
+    let cli = Cli::try_parse_from([
+        "mvmctl", "machine", "restore", "ckpt-abc", "--as", "child", "--json",
+    ])
+    .unwrap();
     assert!(matches!(
         cli.command,
         Commands::Machine(machine::Args {
-            action: machine::MachineAction::Vm(group::VmCmd::Restore(checkpoint::RestoreArgs { id, json: true }))
-        }) if id == "ckpt-abc"
+            action: machine::MachineAction::Restore(machine::MachineRestoreArgs {
+                checkpoint,
+                child_name,
+                json: true,
+                ..
+            })
+        }) if checkpoint == "ckpt-abc" && child_name.as_deref() == Some("child")
     ));
 }
 
@@ -4615,7 +4623,7 @@ fn state_touching_commands_trigger_entry_convergence() {
     assert!(touches(&["mvmctl", "machine", "console", "myvm"]));
     assert!(touches(&["mvmctl", "machine", "pause", "myvm"]));
     assert!(touches(&["mvmctl", "machine", "save", "myvm"]));
-    assert!(touches(&["mvmctl", "machine", "restore", "ckpt-myvm"]));
+    assert!(touches(&["mvmctl", "machine", "resume", "myvm"]));
     assert!(touches(&["mvmctl", "machine", "ls"]));
 }
 

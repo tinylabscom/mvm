@@ -323,6 +323,76 @@ fn machine_warm_restore_rejects_missing_checkpoint() {
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
+/// `machine fork --help` advertises the expected child naming options.
+#[test]
+fn machine_fork_help_lists_args() {
+    #[allow(deprecated)]
+    let out = Command::cargo_bin("mvmctl")
+        .unwrap()
+        .args(["machine", "fork", "--help"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "machine fork --help must exit 0, stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let help = String::from_utf8_lossy(&out.stdout);
+    assert!(help.contains("fork"));
+    assert!(help.contains("PARENT"));
+    assert!(help.contains("--as"));
+    assert!(help.contains("--branch"));
+    assert!(help.contains("--json"));
+}
+
+/// `machine restore --help` advertises the expected child naming options.
+#[test]
+fn machine_restore_help_lists_args() {
+    #[allow(deprecated)]
+    let out = Command::cargo_bin("mvmctl")
+        .unwrap()
+        .args(["machine", "restore", "--help"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "machine restore --help must exit 0, stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let help = String::from_utf8_lossy(&out.stdout);
+    assert!(help.contains("restore"));
+    assert!(help.contains("CHECKPOINT_ID"));
+    assert!(help.contains("--as"));
+    assert!(help.contains("--branch"));
+    assert!(help.contains("--json"));
+}
+
+/// A non-existent checkpoint id fails gracefully from `machine restore`.
+#[test]
+fn machine_restore_rejects_missing_checkpoint() {
+    let tmp = std::env::temp_dir().join(format!("mvm-restore-test-{}", std::process::id()));
+    std::fs::create_dir_all(&tmp).unwrap();
+    #[allow(deprecated)]
+    let out = Command::cargo_bin("mvmctl")
+        .unwrap()
+        .env("HOME", &tmp)
+        .env("MVM_HOME", &tmp)
+        .args(["machine", "restore", "no-such-checkpoint", "--as", "child"])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success(),
+        "restore must fail for a missing checkpoint; stderr: {stderr}"
+    );
+    assert!(!stderr.contains("panic"), "restore panicked: {stderr}");
+    assert!(
+        !stderr.contains("thread panicked"),
+        "restore panicked: {stderr}"
+    );
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
 /// The `--json` output flag is accepted by the parser.
 #[test]
 fn machine_warm_restore_json_flag_parses() {

@@ -20,6 +20,8 @@ boundary only when a workflow actually needs Linux build or evaluation work.
 | Use a local image archive | `mvmctl machine run --image-archive ./image.tar -- <cmd>` | Offline-friendly image input through the same hardened unpack/admission path. |
 | Keep a dev machine around | `mvmctl machine create dev --image alpine` | Durable spec plus `start`, `exec`, `shell`, `stop`, `inspect`, and `rm`. |
 | Declare a repeatable machine | `mvmctl machine create dev --manifest ./mvm.toml` | TOML-backed image, sizing, network, volume, and dev-init settings. |
+| Branch a running machine | `mvmctl machine fork dev --as dev-branch` | Snapshot a running VM and boot a fresh child with new identity and secrets. |
+| Branch a saved checkpoint | `mvmctl machine restore ckpt-dev-123 --as dev-restore` | Restore a `vm_full` checkpoint into a fresh child VM with new identity and secrets. |
 | Verify a portable artifact | `mvmctl machine check-artifact ./app.mvm --key ./publisher.pub` | Signature, hash, format, and host-architecture verification before admission. |
 
 Portable artifact creation and `machine run <artifact>` are still preview
@@ -85,6 +87,27 @@ mvmctl machine start js-dev
 
 Unknown manifest keys are rejected. That is intentional: typos should not
 silently widen network, volume, or dev-init behavior.
+
+## Fork and Restore
+
+Use `machine fork` to branch a running VM into a fresh child, or `machine
+restore` to branch an existing `vm_full` checkpoint. Both produce a new VM
+identity and admit a new plan, so the child starts with fresh authority and
+per-instance secrets; the parent carries no workload authority into the child.
+
+```bash
+# Snapshot a running machine and branch it
+mvmctl machine fork alpine-dev --as alpine-dev-feature-x
+
+# Auto-name with a branch slug
+mvmctl machine fork alpine-dev --branch feature-x
+
+# Branch from an existing checkpoint
+mvmctl machine restore ckpt-alpine-dev-1720000000 --as alpine-dev-from-checkpoint
+```
+
+For explicit control over class selection or same-identity restore, the
+lower-level `machine checkpoint` surface remains available.
 
 ## Read This Before Depending On A Capability
 

@@ -38,10 +38,6 @@ pub(in crate::commands) enum VmCmd {
     /// memory-snapshot support)
     #[command(hide = true)]
     Save(checkpoint::SaveArgs),
-    /// Restore a VM from a saved memory checkpoint (requires a backend with
-    /// memory-snapshot support)
-    #[command(hide = true)]
-    Restore(checkpoint::RestoreArgs),
     /// Capture, list, remove, or fork rootfs checkpoints
     #[command(hide = true)]
     Checkpoint(checkpoint::CheckpointArgs),
@@ -92,7 +88,6 @@ impl VmCmd {
                 }
             },
             VmCmd::Save(a) => a.json,
-            VmCmd::Restore(a) => a.json,
             _ => false,
         }
     }
@@ -105,11 +100,7 @@ impl VmCmd {
     pub(in crate::commands) fn touches_vm_state(&self) -> bool {
         matches!(
             self,
-            VmCmd::Pause(_)
-                | VmCmd::Resume(_)
-                | VmCmd::Snapshot(_)
-                | VmCmd::Save(_)
-                | VmCmd::Restore(_)
+            VmCmd::Pause(_) | VmCmd::Resume(_) | VmCmd::Snapshot(_) | VmCmd::Save(_)
         )
     }
 
@@ -123,7 +114,6 @@ impl VmCmd {
             VmCmd::Resume(_) => "resume",
             VmCmd::Snapshot(_) => "snapshot",
             VmCmd::Save(_) => "save",
-            VmCmd::Restore(_) => "restore",
             VmCmd::Checkpoint(_) => "checkpoint",
             VmCmd::Cp(_) => "cp",
             VmCmd::Fs(_) => "fs",
@@ -147,7 +137,6 @@ pub(in crate::commands) fn run(cli: &Cli, args: Args, cfg: &MvmConfig) -> Result
         VmCmd::Resume(a) => pause::run_resume(cli, a, cfg),
         VmCmd::Snapshot(a) => snapshot::run_snapshot(cli, a, cfg),
         VmCmd::Save(a) => checkpoint::run_save(cli, a),
-        VmCmd::Restore(a) => checkpoint::run_restore(cli, a),
         VmCmd::Checkpoint(a) => checkpoint::run_checkpoint(cli, a),
         VmCmd::Cp(a) => cp::run(cli, a, cfg),
         VmCmd::Fs(a) => fs::run(cli, a, cfg),
