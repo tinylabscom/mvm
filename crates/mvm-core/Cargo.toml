@@ -95,6 +95,10 @@ libc.workspace = true
 
 [features]
 default = []
+# Read-only PROV-O/Turtle export of chain-signed audit logs. Kept off by
+# default so lean builder-VM binaries (e.g. mvm-host-vm-init) do not pay
+# for the serializer or its extra dependencies.
+provenance = []
 # The per-VM name-constrained egress CA
 # (`crypto::egress_ca`). Pulls `rcgen` (sync — ring/yasna, no tokio), so the
 # runtime-free default build is unaffected. Enabled by mvm-runtime (cert

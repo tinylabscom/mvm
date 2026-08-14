@@ -125,6 +125,7 @@ pub mod plan;
 pub mod platform;
 pub mod policy;
 pub mod protocol;
+#[cfg(feature = "provenance")]
 pub mod provenance;
 pub mod rate_limit;
 pub mod receipt;
