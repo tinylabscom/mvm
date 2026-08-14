@@ -438,6 +438,10 @@ docs-dev:
 docs-build:
     cd public && pnpm build
 
+# Build the browser-tier microVM demo assets (wasm core + guest + fixtures)
+demo-build:
+    ./web/mvm-demo/build.sh
+
 # ── VMM setup ────────────────────────────────────────────────────────────
 
 # Install libkrun (the macOS VMM mvm targets)

@@ -32,5 +32,8 @@
     "sharp": "^0.33.0",
     "tailwind-merge": "^3.3.0",
     "tailwindcss": "^4.1.0"
+  },
+  "devDependencies": {
+    "playwright": "^1.62.1"
   }
 }

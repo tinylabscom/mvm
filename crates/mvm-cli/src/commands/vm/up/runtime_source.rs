@@ -140,6 +140,11 @@ pub(crate) fn attach_runtime_overlay_if_cached_version(
     hypervisor: &str,
     expected_version: Option<&str>,
 ) -> Result<()> {
+    // The wasm backend runs a WASI module directly; it has no guest agent
+    // runtime overlay to attach.
+    if hypervisor == "wasm" {
+        return Ok(());
+    }
     let version = expected_version.unwrap_or(env!("CARGO_PKG_VERSION"));
     let cache_root = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir());
     let arch = mvm_core::arch::GuestArch::host();
@@ -351,6 +356,10 @@ fn attach_universal_initramfs_with_resolver(
         mvm_build::initramfs::InitramfsBuildError,
     >,
 ) -> Result<()> {
+    // No kernel means no initramfs leg (e.g. the wasm backend).
+    if start_config.kernel_path.is_none() {
+        return Ok(());
+    }
     let version = env!("CARGO_PKG_VERSION");
     let cache_root = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir()).join("initramfs");
     let arch = mvm_core::arch::GuestArch::host();
@@ -1464,7 +1473,10 @@ mod universal_initramfs_attach_tests {
         // initramfs resolver seeds a miss from `$HOME/.mvm/cache`.
         env.isolate_mvm_home(dir.path());
 
-        let mut sc = VmStartConfig::default();
+        let mut sc = VmStartConfig {
+            kernel_path: Some("/dummy/vmlinux".to_string()),
+            ..Default::default()
+        };
         let resolver_called = std::cell::Cell::new(false);
         attach_universal_initramfs_with_resolver(&mut sc, |_, _, _, _| {
             resolver_called.set(true);
@@ -1492,7 +1504,10 @@ mod universal_initramfs_attach_tests {
         env.isolate_mvm_home(dir.path());
         seed_warm_universal_initramfs(dir.path());
 
-        let mut sc = VmStartConfig::default();
+        let mut sc = VmStartConfig {
+            kernel_path: Some("/dummy/vmlinux".to_string()),
+            ..Default::default()
+        };
         attach_universal_initramfs_if_cached(&mut sc).unwrap();
 
         assert!(

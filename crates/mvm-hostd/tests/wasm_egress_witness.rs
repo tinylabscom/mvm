@@ -255,7 +255,7 @@ fn wat_escape(s: &str) -> String {
 }
 
 /// Build a WASI module that, on `_start`, writes `request_json` into linear
-/// memory, calls the real `mvm:egress` host-import (the P3a ABI:
+/// memory, calls the real `mvm:egress_json` host-import (the P3a ABI:
 /// `(req_ptr,req_len,resp_ptr,resp_cap)->i32`), and exits `0` only if the
 /// import returned a `WireResponse` whose bytes begin with `ok_prefix` —
 /// i.e. only if the module itself observed `WireResponse::Ok{status:200,..}`.
@@ -270,7 +270,7 @@ fn egress_probe_wat(request_json: &str, ok_prefix: &str) -> String {
     format!(
         r#"(module
   (import "wasi_snapshot_preview1" "proc_exit" (func $proc_exit (param i32)))
-  (import "mvm" "egress" (func $mvm_egress (param i32 i32 i32 i32) (result i32)))
+  (import "mvm" "egress_json" (func $mvm_egress (param i32 i32 i32 i32) (result i32)))
   (memory (export "memory") 2)
   (data (i32.const 0) "{req}")
   (data (i32.const {pattern_ptr}) "{pattern}")

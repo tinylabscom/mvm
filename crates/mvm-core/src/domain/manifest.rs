@@ -124,6 +124,12 @@ pub struct Manifest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image: Option<String>,
 
+    /// Path to a pre-built `wasm32-wasip1` module (source selector). This
+    /// bypasses the Nix/OCI build path and runs the module directly under
+    /// the wasm backend. Mutually exclusive with `flake` and `image`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wasm: Option<String>,
+
     /// Flake package selector — picks `packages.<system>.<profile>`
     /// out of the flake's outputs.
     #[serde(default = "default_profile")]
@@ -194,10 +200,27 @@ impl Manifest {
     }
 
     /// Read and parse a manifest at a file path.
+    ///
+    /// Relative paths in the `wasm` field are resolved against the manifest's
+    /// parent directory before validation, so a module referenced as
+    /// `target/wasm32-wasip1/release/foo.wasm` is found next to `mvm.toml`.
     pub fn read_file(path: &Path) -> Result<Self> {
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("Failed to read manifest at {}", path.display()))?;
-        Self::from_toml_str(&text)
+        let mut manifest: Self = toml::from_str(&text).context("Failed to parse manifest TOML")?;
+        if let Some(wasm) = manifest.wasm.take() {
+            let wasm_path = std::path::Path::new(&wasm);
+            let resolved = if wasm_path.is_absolute() {
+                wasm_path.to_path_buf()
+            } else {
+                path.parent()
+                    .unwrap_or_else(|| std::path::Path::new("."))
+                    .join(wasm_path)
+            };
+            manifest.wasm = Some(resolved.display().to_string());
+        }
+        manifest.validate()?;
+        Ok(manifest)
     }
 
     /// Validate the manifest's contents.
@@ -209,27 +232,47 @@ impl Manifest {
                 MANIFEST_SCHEMA_VERSION
             ));
         }
-        // Exactly one source selector. `image` and `flake` are
-        // mutually exclusive; both omitted defaults to the flake ".".
-        match (self.image.as_deref(), self.flake.as_deref()) {
-            (Some(_), Some(_)) => {
-                return Err(anyhow!(
-                    "manifest fields `image` and `flake` are mutually exclusive \
-                     source selectors; set exactly one"
-                ));
-            }
-            (Some(image), None) => {
-                validate_image_ref(image)
+        // Exactly one source selector among `flake`, `image`, and `wasm`.
+        let image = self.image.as_deref();
+        let flake = self.flake.as_deref();
+        let wasm = self.wasm.as_deref();
+        match (image, flake, wasm) {
+            (Some(_), None, None) => {
+                validate_image_ref(image.unwrap())
                     .with_context(|| format!("invalid `image` field: {image:?}"))?;
             }
-            (None, _) => {
-                // Flake source — explicit, or the default "." when omitted.
+            (None, Some(_), None) => {
                 let flake = self.flake_ref();
                 if flake.trim().is_empty() {
                     return Err(anyhow!("manifest field `flake` must not be empty"));
                 }
                 validate_flake_ref(flake)
                     .with_context(|| format!("invalid `flake` field: {flake:?}"))?;
+            }
+            (None, None, Some(wasm)) => {
+                if wasm.trim().is_empty() {
+                    return Err(anyhow!("manifest field `wasm` must not be empty"));
+                }
+                let path = std::path::Path::new(wasm);
+                if !path.is_file() {
+                    return Err(anyhow!(
+                        "manifest field `wasm` must point to an existing file: {wasm:?}"
+                    ));
+                }
+            }
+            (None, None, None) => {
+                // Default flake source — explicit, or the default "." when omitted.
+                let flake = self.flake_ref();
+                if flake.trim().is_empty() {
+                    return Err(anyhow!("manifest field `flake` must not be empty"));
+                }
+                validate_flake_ref(flake)
+                    .with_context(|| format!("invalid `flake` field: {flake:?}"))?;
+            }
+            _ => {
+                return Err(anyhow!(
+                    "manifest fields `image`, `flake`, and `wasm` are mutually exclusive                      source selectors; set exactly one"
+                ));
             }
         }
         if self.cpus == 0 {
@@ -300,9 +343,14 @@ impl Manifest {
     }
 
     /// True when this manifest selects an OCI image as its build source
-    /// rather than a Nix flake.
+    /// rather than a Nix flake or a wasm module.
     pub fn is_image_source(&self) -> bool {
         self.image.is_some()
+    }
+
+    /// True when this manifest selects a wasm module as its build source.
+    pub fn is_wasm_source(&self) -> bool {
+        self.wasm.is_some()
     }
 
     /// Typed machine-oriented view of the manifest. Only image-backed

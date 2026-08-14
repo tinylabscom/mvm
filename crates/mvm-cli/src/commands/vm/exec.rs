@@ -863,6 +863,7 @@ fn resolve_default_image_source(prod: bool) -> Result<crate::exec::ImageSource> 
                 slot_hash,
                 revision_hash,
             } => format!("{slot_hash}@{revision_hash}"),
+            crate::exec::ImageSource::WasmModule { label, .. } => label.clone(),
         };
         ui::info(&format!(
             "Instant boot from verified runtime pack ({label}); skipping the build."
@@ -900,20 +901,22 @@ fn build_exec_request(
         prod,
         runtime_pack,
     } = selection;
-    let target = match (args.launch_plan.as_ref(), args.argv.is_empty()) {
-        (Some(_), false) => {
+    let is_wasm = args.hypervisor.as_deref() == Some("wasm");
+    let target = match (args.launch_plan.as_ref(), args.argv.is_empty(), is_wasm) {
+        (Some(_), false, _) => {
             anyhow::bail!("--launch-plan and a trailing argv are mutually exclusive");
         }
-        (Some(path), true) => {
+        (Some(path), true, _) => {
             let entrypoint = crate::exec::load_launch_plan(std::path::Path::new(path))?;
             crate::exec::ExecTarget::LaunchPlan { entrypoint }
         }
-        (None, true) => {
+        (None, true, true) => crate::exec::ExecTarget::Inline { argv: Vec::new() },
+        (None, true, false) => {
             anyhow::bail!(
                 "{command_name} requires a command (after `--`) or `--launch-plan <PATH>`"
             )
         }
-        (None, false) => crate::exec::ExecTarget::Inline { argv: args.argv },
+        (None, false, _) => crate::exec::ExecTarget::Inline { argv: args.argv },
     };
     let memory_mib = parse_human_size(&args.memory).context("Invalid --memory")?;
     let mut dir_shares = Vec::with_capacity(args.mounts.len());
@@ -953,13 +956,25 @@ fn build_exec_request(
     } else {
         match (args.manifest, image_ref) {
             (Some(_), Some(_)) => unreachable!("clap conflicts_with prevents --manifest + --image"),
-            (Some(arg), None) => {
-                let resolved = match super::shared::resolve_manifest_arg(&arg)? {
-                    super::shared::ManifestArgRef::Name(n) => n,
-                    super::shared::ManifestArgRef::Slot { slot_hash } => slot_hash,
-                };
-                crate::exec::ImageSource::Template(resolved)
-            }
+            (Some(arg), None) => match super::shared::resolve_manifest_arg(&arg)? {
+                super::shared::ManifestArgRef::Name(n) => crate::exec::ImageSource::Template(n),
+                super::shared::ManifestArgRef::Slot { slot_hash } => {
+                    crate::exec::ImageSource::Template(slot_hash)
+                }
+                super::shared::ManifestArgRef::WasmModule {
+                    manifest_path,
+                    module_path,
+                } => crate::exec::ImageSource::WasmModule {
+                    module_path: module_path.display().to_string(),
+                    label: format!(
+                        "wasm:{}",
+                        std::path::Path::new(&manifest_path)
+                            .file_stem()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or("wasm")
+                    ),
+                },
+            },
             (None, image_ref) => {
                 resolve_launch_image_source(image_ref.as_deref(), prod, Some(oci_provenance))?
             }

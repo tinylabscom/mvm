@@ -44,7 +44,11 @@ impl VmStartParams<'_> {
         mvm_core::vm_backend::VmStartConfig {
             name: self.name,
             rootfs_path: self.rootfs_path,
-            kernel_path: Some(self.vmlinux_path),
+            kernel_path: if self.vmlinux_path.is_empty() {
+                None
+            } else {
+                Some(self.vmlinux_path)
+            },
             initrd_path: self.initrd_path,
             verity_path: self.verity_path,
             roothash: self.roothash,

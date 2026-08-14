@@ -49,6 +49,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
+use crate::workload_backend::{EgressSubstitutionTransport, WorkloadBackend};
 use anyhow::Result;
 use mvm_contract::grants::{CpuGrant, Grants, WallClockGrant};
 use mvm_contract::protocol::resource_controls::EnforcedGrants;
@@ -704,6 +705,14 @@ impl VmBackend for WasmBackend {
     }
 }
 
+impl WorkloadBackend for WasmBackend {
+    fn egress_substitution_transport(&self) -> EgressSubstitutionTransport {
+        // The wasm tier mediates egress through a host import that speaks the
+        // same substitution-endpoint wire protocol the vsock-backed tiers use.
+        EgressSubstitutionTransport::WasmHostImport
+    }
+}
+
 /// The `wasmtime`-touching internals, split so the outer `WasmBackend` type
 /// and its `VmBackend` impl compile identically with or without the
 /// `wasm-backend` feature. Only this inner module references `wasmtime` —
@@ -721,7 +730,9 @@ mod engine {
     use mvm_contract::protocol::resource_controls::{EnforcedGrants, EnforcedTier};
     use mvm_core::substitution_wire::{WireRequest, WireResponse};
     use mvm_core::vm_backend::VmExitStatus;
-    use wasmtime::{Caller, Engine, Extern, Linker, Memory, Module, Store, StoreLimits};
+    use wasmtime::{
+        Caller, Engine, Extern, FuncType, Linker, Memory, Module, Store, StoreLimits, Val, ValType,
+    };
     use wasmtime_wasi::p1::{self, WasiP1Ctx};
     use wasmtime_wasi::{DirPerms, FilePerms, WasiCtxBuilder};
 
@@ -886,6 +897,12 @@ mod engine {
         ResponseSerializeFailed = -8,
         ResponseTooLargeForBuffer = -9,
         ResponseWriteOutOfBounds = -10,
+        HostOutOfBounds = -11,
+        BodyOutOfBounds = -12,
+        PortInvalid = -13,
+        ResponseDecodeFailed = -14,
+        EgressRefused = -15,
+        InvalidArguments = -16,
     }
 
     impl std::fmt::Display for EgressImportError {
@@ -903,6 +920,12 @@ mod engine {
                     "response does not fit in the guest-provided buffer"
                 }
                 Self::ResponseWriteOutOfBounds => "response ptr/cap out of bounds",
+                Self::HostOutOfBounds => "egress host ptr/len out of bounds",
+                Self::BodyOutOfBounds => "egress body ptr/len out of bounds",
+                Self::PortInvalid => "egress port is not a valid 16-bit value",
+                Self::ResponseDecodeFailed => "failed to decode the endpoint response body",
+                Self::EgressRefused => "egress refused by policy or endpoint",
+                Self::InvalidArguments => "mvm:egress called with wrong argument types/count",
             };
             f.write_str(msg)
         }
@@ -917,16 +940,15 @@ mod engine {
         ptr: i32,
         len: i32,
     ) -> std::result::Result<Vec<u8>, EgressImportError> {
-        let ptr = usize::try_from(ptr).map_err(|_| EgressImportError::RequestOutOfBounds)?;
-        let len = usize::try_from(len).map_err(|_| EgressImportError::RequestOutOfBounds)?;
-        if len > MAX_REQUEST_BYTES {
-            return Err(EgressImportError::RequestTooLarge);
-        }
-        let mut buf = vec![0u8; len];
-        memory
-            .read(store, ptr, &mut buf)
-            .map_err(|_| EgressImportError::RequestOutOfBounds)?;
-        Ok(buf)
+        read_bytes(
+            memory,
+            store,
+            ptr,
+            len,
+            EgressImportError::RequestOutOfBounds,
+            EgressImportError::RequestTooLarge,
+            MAX_REQUEST_BYTES,
+        )
     }
 
     /// Write `bytes` into `memory` at `ptr`, refusing to write beyond the
@@ -947,6 +969,27 @@ mod engine {
             .write(store, ptr, bytes)
             .map_err(|_| EgressImportError::ResponseWriteOutOfBounds)?;
         i32::try_from(bytes.len()).map_err(|_| EgressImportError::ResponseTooLargeForBuffer)
+    }
+
+    /// Read `len` guest-controlled bytes at `ptr` out of `memory`, using
+    /// `bounds_err` and `too_large_err` instead of the JSON-request codes.
+    fn read_bytes(
+        memory: &Memory,
+        store: impl wasmtime::AsContext,
+        ptr: i32,
+        len: i32,
+        bounds_err: EgressImportError,
+        too_large_err: EgressImportError,
+        max_len: usize,
+    ) -> std::result::Result<Vec<u8>, EgressImportError> {
+        let ptr = usize::try_from(ptr).map_err(|_| bounds_err)?;
+        let len = usize::try_from(len).map_err(|_| bounds_err)?;
+        if len > max_len {
+            return Err(too_large_err);
+        }
+        let mut buf = vec![0u8; len];
+        memory.read(store, ptr, &mut buf).map_err(|_| bounds_err)?;
+        Ok(buf)
     }
 
     /// Connect to the substitution endpoint at `endpoint` and relay one
@@ -1017,7 +1060,7 @@ mod engine {
         write_response_bytes(&memory, caller, resp_ptr, resp_cap, &resp_bytes)
     }
 
-    /// The `"mvm"`/`"egress"` host-import:
+    /// The `"mvm"`/`"egress_json"` host-import:
     /// `(req_ptr: i32, req_len: i32, resp_ptr: i32, resp_cap: i32) -> i32`.
     ///
     /// Reads a `WireRequest` JSON blob from `req_len` bytes at `req_ptr` in
@@ -1027,7 +1070,7 @@ mod engine {
     /// panics or traps the host on guest-controlled input: every failure
     /// returns a negative [`EgressImportError`] code and is logged
     /// host-side instead.
-    fn mvm_egress_import(
+    fn mvm_egress_json_import(
         mut caller: Caller<'_, WasmHostState>,
         req_ptr: i32,
         req_len: i32,
@@ -1037,10 +1080,162 @@ mod engine {
         match mvm_egress_import_inner(&mut caller, req_ptr, req_len, resp_ptr, resp_cap) {
             Ok(len) => len,
             Err(err) => {
-                tracing::warn!(error = %err, "mvm:egress host-import failed closed");
+                tracing::warn!(error = %err, "mvm:egress_json host-import failed closed");
                 err as i32
             }
         }
+    }
+
+    /// Maximum host name length the browser-style `mvm:egress` import will
+    /// accept. Public DNS names are short; this keeps a malicious length from
+    /// forcing an oversized host allocation.
+    const MAX_EGRESS_HOST_BYTES: usize = 1024;
+
+    /// Maximum body length the browser-style `mvm:egress` import will accept.
+    const MAX_EGRESS_BODY_BYTES: usize = 64 * 1024;
+
+    /// Arguments to the browser-style `mvm:egress` host-import:
+    /// `(host_ptr, host_len, port, body_ptr, body_len, out_ptr, out_cap)`.
+    ///
+    /// Grouping them keeps the import callback's parameter count small and
+    /// makes the validated, parsed shape explicit.
+    struct BrowserEgressArgs {
+        host_ptr: i32,
+        host_len: i32,
+        port: i32,
+        body_ptr: i32,
+        body_len: i32,
+        out_ptr: i32,
+        out_cap: i32,
+    }
+
+    impl BrowserEgressArgs {
+        fn from_params(params: &[Val]) -> std::result::Result<Self, EgressImportError> {
+            let get = |i: usize| {
+                params
+                    .get(i)
+                    .and_then(Val::i32)
+                    .ok_or(EgressImportError::InvalidArguments)
+            };
+            Ok(Self {
+                host_ptr: get(0)?,
+                host_len: get(1)?,
+                port: get(2)?,
+                body_ptr: get(3)?,
+                body_len: get(4)?,
+                out_ptr: get(5)?,
+                out_cap: get(6)?,
+            })
+        }
+    }
+
+    /// The `"mvm"`/`"egress"` host-import (browser-style ABI):
+    /// `(host_ptr: i32, host_len: i32, port: i32, body_ptr: i32, body_len: i32,
+    ///   out_ptr: i32, out_cap: i32) -> i32`.
+    ///
+    /// Builds a `WireRequest` from `host`, `port`, and `body`, relays it to
+    /// the configured substitution-endpoint UDS, and writes the decoded
+    /// response body into `out_ptr` (up to `out_cap` bytes). On refusal the
+    /// refusal message is written to `out_ptr` and a negative code is
+    /// returned. This ABI matches the browser-tier demo guest so the same
+    /// module can run under host `wasmtime` and in a browser Worker.
+    fn mvm_egress_browser_import(
+        caller: &mut Caller<'_, WasmHostState>,
+        args: BrowserEgressArgs,
+    ) -> std::result::Result<i32, EgressImportError> {
+        let memory = match caller.get_export("memory") {
+            Some(Extern::Memory(mem)) => mem,
+            _ => return Err(EgressImportError::NoMemoryExport),
+        };
+
+        let host_bytes = read_bytes(
+            &memory,
+            &*caller,
+            args.host_ptr,
+            args.host_len,
+            EgressImportError::HostOutOfBounds,
+            EgressImportError::HostOutOfBounds,
+            MAX_EGRESS_HOST_BYTES,
+        )?;
+        let host = String::from_utf8_lossy(&host_bytes);
+        let port = u16::try_from(args.port).map_err(|_| EgressImportError::PortInvalid)?;
+
+        let body = read_bytes(
+            &memory,
+            &*caller,
+            args.body_ptr,
+            args.body_len,
+            EgressImportError::BodyOutOfBounds,
+            EgressImportError::BodyOutOfBounds,
+            MAX_EGRESS_BODY_BYTES,
+        )?;
+
+        let url = format!("https://{host}:{port}/");
+        let method = if body.is_empty() { "GET" } else { "POST" };
+        let req = WireRequest {
+            method: method.to_string(),
+            url,
+            headers: Vec::new(),
+            body_b64: base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &body),
+        };
+
+        let endpoint = caller
+            .data()
+            .egress_endpoint
+            .clone()
+            .ok_or(EgressImportError::NoEndpointConfigured)?;
+        let timeout = caller.data().egress_timeout;
+
+        let resp = call_egress_endpoint(&endpoint, &req, timeout)?;
+        let out_bytes = match resp {
+            WireResponse::Ok { body_b64, .. } => {
+                base64::Engine::decode(&base64::engine::general_purpose::STANDARD, body_b64)
+                    .map_err(|_| EgressImportError::ResponseDecodeFailed)?
+            }
+            WireResponse::Refused { message } => {
+                let bytes = message.into_bytes();
+                write_response_bytes(&memory, caller, args.out_ptr, args.out_cap, &bytes)?;
+                return Err(EgressImportError::EgressRefused);
+            }
+        };
+        write_response_bytes(&memory, caller, args.out_ptr, args.out_cap, &out_bytes)
+    }
+
+    fn install_egress_import(
+        linker: &mut Linker<WasmHostState>,
+    ) -> std::result::Result<(), wasmtime::Error> {
+        let ty = FuncType::new(
+            linker.engine(),
+            vec![
+                ValType::I32,
+                ValType::I32,
+                ValType::I32,
+                ValType::I32,
+                ValType::I32,
+                ValType::I32,
+                ValType::I32,
+            ],
+            vec![ValType::I32],
+        );
+        linker.func_new("mvm", "egress", ty, |mut caller, params, results| {
+            let args = match BrowserEgressArgs::from_params(params) {
+                Ok(args) => args,
+                Err(err) => {
+                    tracing::warn!(error = %err, "mvm:egress host-import failed closed (bad args)");
+                    results[0] = Val::I32(err as i32);
+                    return Ok(());
+                }
+            };
+            match mvm_egress_browser_import(&mut caller, args) {
+                Ok(len) => results[0] = Val::I32(len),
+                Err(err) => {
+                    tracing::warn!(error = %err, "mvm:egress host-import failed closed");
+                    results[0] = Val::I32(err as i32);
+                }
+            }
+            Ok(())
+        })?;
+        Ok(())
     }
 
     /// Everything one run needs, plus the read-back of what is bounding it.
@@ -1082,11 +1277,15 @@ mod engine {
                 reason: format!("failed to wire WASI imports: {e}"),
             },
         )?;
+        install_egress_import(&mut linker).map_err(|e| WasmBackendError::ModuleLoadFailed {
+            path: String::new(),
+            reason: format!("failed to wire the mvm:egress host-import: {e}"),
+        })?;
         linker
-            .func_wrap("mvm", "egress", mvm_egress_import)
+            .func_wrap("mvm", "egress_json", mvm_egress_json_import)
             .map_err(|e| WasmBackendError::ModuleLoadFailed {
                 path: String::new(),
-                reason: format!("failed to wire the mvm:egress host-import: {e}"),
+                reason: format!("failed to wire the mvm:egress_json host-import: {e}"),
             })?;
 
         let mut wasi_builder = WasiCtxBuilder::new();
@@ -2166,7 +2365,7 @@ mod tests {
             .unwrap();
             let wat = format!(
                 r#"(module
-  (import "mvm" "egress" (func $mvm_egress (param i32 i32 i32 i32) (result i32)))
+  (import "mvm" "egress_json" (func $mvm_egress (param i32 i32 i32 i32) (result i32)))
   (memory (export "memory") 2)
   (data (i32.const 0) "{escaped}")
   (func (export "_start")
@@ -2470,7 +2669,7 @@ mod tests {
             fn egress_fixture_wat(request_json: &str, resp_ptr: i32, resp_cap: i32) -> String {
                 format!(
                     r#"(module
-  (import "mvm" "egress" (func $mvm_egress (param i32 i32 i32 i32) (result i32)))
+  (import "mvm" "egress_json" (func $mvm_egress (param i32 i32 i32 i32) (result i32)))
   (memory (export "memory") 2)
   (data (i32.const 0) "{escaped}")
   (func (export "run_egress") (result i32)
@@ -2606,7 +2805,7 @@ mod tests {
                 // the import's bound, without actually writing that much
                 // data — proves the size check runs before any read.
                 let wat = r#"(module
-  (import "mvm" "egress" (func $mvm_egress (param i32 i32 i32 i32) (result i32)))
+  (import "mvm" "egress_json" (func $mvm_egress (param i32 i32 i32 i32) (result i32)))
   (memory (export "memory") 2)
   (func (export "run_egress") (result i32)
     (call $mvm_egress
@@ -2637,6 +2836,60 @@ mod tests {
                     .unwrap();
                 let code = run_egress.call(&mut store, ()).unwrap();
                 assert!(code < 0, "expected a negative error code, got {code}");
+            }
+
+            #[test]
+            fn round_trips_browser_abi_over_a_stub_uds_endpoint() {
+                let dir = tempfile::tempdir().unwrap();
+                let socket_path = dir.path().join("egress.sock");
+                let canned_response = WireResponse::Ok {
+                    status: 200,
+                    headers: vec![],
+                    body_b64: B64.encode(b"pong"),
+                };
+                let server = spawn_stub_substitution_endpoint(socket_path.clone(), canned_response);
+                let wat = r#"(module
+  (import "mvm" "egress" (func $mvm_egress (param i32 i32 i32 i32 i32 i32 i32) (result i32)))
+  (memory (export "memory") 2)
+  (data (i32.const 0) "example.test")
+  (data (i32.const 64) "ping")
+  (func (export "run_egress") (result i32)
+    (call $mvm_egress
+      (i32.const 0)
+      (i32.const 12)
+      (i32.const 443)
+      (i32.const 64)
+      (i32.const 4)
+      (i32.const 256)
+      (i32.const 256)))
+  (func (export "_start")))
+"#;
+                let module = wat_module(wat);
+                let backend = WasmBackend::new().with_egress_endpoint(socket_path);
+                let engine::InstantiatedForTest {
+                    mut store,
+                    instance,
+                    ..
+                } = engine::instantiate_for_test(
+                    module.path().to_str().unwrap(),
+                    backend.egress_endpoint.clone(),
+                    None,
+                    WasmBounds::unbounded(),
+                )
+                .expect("module with the browser-style mvm:egress import must instantiate");
+                let run_egress = instance
+                    .get_typed_func::<(), i32>(&mut store, "run_egress")
+                    .unwrap();
+                let len = run_egress.call(&mut store, ()).unwrap();
+                assert!(len > 0, "expected a positive response length, got {len}");
+                let memory = instance.get_memory(&mut store, "memory").unwrap();
+                let mut resp_bytes = vec![0u8; len as usize];
+                memory.read(&store, 256, &mut resp_bytes).unwrap();
+                assert_eq!(resp_bytes, b"pong");
+                let got_request = server.join().unwrap();
+                assert_eq!(got_request.method, "POST");
+                assert_eq!(got_request.url, "https://example.test:443/");
+                assert_eq!(B64.decode(&got_request.body_b64).unwrap(), b"ping");
             }
         }
     }

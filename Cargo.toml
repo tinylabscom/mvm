@@ -144,6 +144,9 @@ exclude = [
     # Browser wasm sandbox demo. Excluded for the same wasm-bindgen/wasm32
     # reasons; built separately with `wasm-pack` (see web/mvm-demo/README.md).
     "web/mvm-demo",
+    # Browser-tier mvm microVM guest workload. Excluded for the same wasm32
+    # reasons; built separately with `cargo build --target wasm32-wasip1`.
+    "web/mvm-demo-guest",
 ]
 resolver = "3"
 

@@ -510,7 +510,9 @@ impl MachineRunArgs {
             }
             (false, false) => {
                 self.require_image_for_fresh_boot()?;
-                if self.argv.is_empty() {
+                // The wasm backend runs the module itself; there is no guest
+                // agent command to dispatch, so an empty argv is allowed.
+                if self.argv.is_empty() && self.hypervisor.as_deref() != Some("wasm") {
                     bail!(
                         "machine run needs a command: pass `-- <cmd>`, \
                          or `-d`/`--detach` to boot a persistent machine, \

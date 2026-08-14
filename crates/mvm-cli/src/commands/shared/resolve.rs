@@ -38,6 +38,11 @@ pub enum ManifestArgRef {
     Name(String),
     /// Manifest-keyed slot.
     Slot { slot_hash: String },
+    /// Manifest selects a pre-built wasm module; no Nix/OCI build or slot.
+    WasmModule {
+        manifest_path: std::path::PathBuf,
+        module_path: std::path::PathBuf,
+    },
 }
 
 /// Decide whether a `--manifest` argument refers to a manifest path
@@ -109,6 +114,35 @@ pub fn resolve_manifest_arg(arg: &str) -> Result<ManifestArgRef> {
             manifest_path.display()
         )
     })?;
+
+    // A manifest that selects a wasm module bypasses the build/slot system
+    // entirely: the module exists at the declared path and is run directly.
+    let manifest = mvm_core::domain::manifest::Manifest::read_file(&canonical)
+        .with_context(|| format!("Reading manifest {} for wasm source", canonical.display()))?;
+    if let Some(wasm) = manifest.wasm.as_deref() {
+        let module_path = std::path::Path::new(wasm);
+        if !module_path.is_absolute() {
+            let base = canonical.parent().expect("manifest has a parent directory");
+            let joined = base.join(module_path);
+            if joined.is_file() {
+                return Ok(ManifestArgRef::WasmModule {
+                    manifest_path: canonical,
+                    module_path: joined,
+                });
+            }
+        }
+        if !module_path.is_file() {
+            anyhow::bail!(
+                "Manifest wasm module '{}' does not exist",
+                module_path.display()
+            );
+        }
+        return Ok(ManifestArgRef::WasmModule {
+            manifest_path: canonical,
+            module_path: module_path.to_path_buf(),
+        });
+    }
+
     let slot_hash = canonical_key_for_path(&canonical)?;
 
     // Verify the slot exists; surface a clear error otherwise so

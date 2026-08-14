@@ -622,6 +622,24 @@ fn resolve_mode_covers_the_behavior_matrix() {
 }
 
 #[test]
+fn resolve_mode_wasm_allows_empty_argv() {
+    // The wasm backend runs the module itself; no guest-agent command is
+    // required, so a transient run with an empty argv is valid.
+    let args = parse_run(&[
+        "run",
+        "--hypervisor",
+        "wasm",
+        "--manifest",
+        "fixture/mvm.toml",
+    ])
+    .expect("parse");
+    assert_eq!(
+        args.resolve_mode().expect("resolve"),
+        MachineRunMode::Transient
+    );
+}
+
+#[test]
 fn resolve_mode_accepts_materialized_flake_slot_after_build() {
     let mut args = parse_run(&["run", "--flake", ".", "--", "cmd"]).expect("parse");
     let flake = args.flake.take().expect("flake source present");
