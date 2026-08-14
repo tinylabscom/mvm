@@ -1,6 +1,6 @@
 # Refactor status
 
-Last updated: 2026-08-14
+Last updated: 2026-08-13
 
 This is the cross-plan progress index. The owning plan remains authoritative
 for detailed scope and acceptance criteria.
@@ -118,7 +118,7 @@ for detailed scope and acceptance criteria.
   - [x] Phase 2 — Enrich existing audit events with authorizer/rationale
   - [x] Phase 3 — DecisionRecord API and content-addressed store
   - [x] Phase 4 — Query API and causal chains
-  - [ ] Phase 5 — Optional standards interoperability
+  - [x] Phase 5 — Optional standards interoperability (TIBET-JSON export; C2PA/in-toto/SPDX evaluated, not adopted)
 
 - [~] Plan 325 — SDK sidecar reserved mount
   (`specs/plans/325-sdk-sidecar-reserved-mount.md`)

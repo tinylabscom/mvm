@@ -250,6 +250,15 @@ pub(in crate::commands) enum ReceiptsAction {
     },
 }
 
+/// Output format for `mvmctl trust audit decisions export`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub(in crate::commands) enum DecisionExportFormat {
+    /// Native JSON array of `DecisionRecord`s.
+    Json,
+    /// TIBET-compatible JSON tokens.
+    Tibet,
+}
+
 /// Subcommands under `mvmctl trust audit decisions`.
 #[derive(Subcommand, Debug, Clone)]
 pub(in crate::commands) enum DecisionsAction {
@@ -273,7 +282,7 @@ pub(in crate::commands) enum DecisionsAction {
         #[arg(long)]
         json: bool,
     },
-    /// Export all cached decision records for a tenant as JSON.
+    /// Export all cached decision records for a tenant.
     Export {
         /// Tenant whose decision cache to read. Defaults to `"local"`.
         #[arg(long, default_value = "local")]
@@ -281,6 +290,9 @@ pub(in crate::commands) enum DecisionsAction {
         /// Output file. Defaults to stdout.
         #[arg(long, short = 'o')]
         output: Option<std::path::PathBuf>,
+        /// Output format. Defaults to JSON.
+        #[arg(long, value_enum, default_value_t = DecisionExportFormat::Json)]
+        format: DecisionExportFormat,
     },
     /// Trace the causal chain that led to a decision (backward traversal).
     Trace {
@@ -368,9 +380,11 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
                 tenant,
                 json,
             } => decisions_show(&tenant, &decision_id, json),
-            DecisionsAction::Export { tenant, output } => {
-                decisions_export(&tenant, output.as_deref())
-            }
+            DecisionsAction::Export {
+                tenant,
+                output,
+                format,
+            } => decisions_export(&tenant, output.as_deref(), format),
             DecisionsAction::Trace {
                 decision_id,
                 tenant,
@@ -2059,7 +2073,11 @@ fn decisions_show(tenant: &str, decision_id: &str, json: bool) -> Result<()> {
     Ok(())
 }
 
-fn decisions_export(tenant: &str, output: Option<&std::path::Path>) -> Result<()> {
+fn decisions_export(
+    tenant: &str,
+    output: Option<&std::path::Path>,
+    format: DecisionExportFormat,
+) -> Result<()> {
     let store = open_decision_store(tenant)?;
     let records = store
         .list()
@@ -2074,7 +2092,18 @@ fn decisions_export(tenant: &str, output: Option<&std::path::Path>) -> Result<()
         None => Box::new(std::io::stdout()),
     };
 
-    serde_json::to_writer_pretty(&mut writer, &records).context("serializing decision records")?;
+    match format {
+        DecisionExportFormat::Json => {
+            serde_json::to_writer_pretty(&mut writer, &records)
+                .context("serializing decision records")?;
+        }
+        DecisionExportFormat::Tibet => {
+            let json = mvm_core::provenance::tibet::decision_records_to_tibet_json(&records);
+            writer
+                .write_all(json.as_bytes())
+                .context("writing TIBET decision export")?;
+        }
+    }
     writeln!(writer).context("finalizing decision export")?;
 
     if output.is_none() {

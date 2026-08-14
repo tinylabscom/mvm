@@ -314,7 +314,7 @@ keyring = "3"
 tempfile = "3"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
-uuid = { version = "1", features = ["v4", "serde"] }
+uuid = { version = "1", features = ["v4", "v5", "serde"] }
 which = "7"
 
 # Addon machinery (mvm-sdk addon module, SDK port Phase 1b — ported

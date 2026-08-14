@@ -96,6 +96,63 @@ mvmctl audit show 018f2d9b-7b52-7c9a-9233-2a62a4d8d521 --tenant local
 Use the audit chain for host-local investigation. Use receipts when another
 system needs a portable artifact for a specific command result.
 
+## Export decision provenance
+
+`mvm` can export the chain-signed decision records it caches from audit events.
+These exports are read-only views of the derived decision store; the
+chain-signed audit log remains the source of truth.
+
+Export all cached decision records for a tenant as JSON:
+
+```sh
+mvmctl trust audit decisions export --tenant local
+```
+
+Export as TIBET-compatible JSON tokens:
+
+```sh
+mvmctl trust audit decisions export --tenant local --format tibet
+```
+
+Write the export to a file:
+
+```sh
+mvmctl trust audit decisions export --tenant local --format tibet -o decisions.tibet.json
+```
+
+Trace the causal chain that led to a decision (backward traversal):
+
+```sh
+mvmctl trust audit decisions trace <decision-id> --tenant local
+```
+
+Show decisions that depend on or were caused by a decision (forward traversal):
+
+```sh
+mvmctl trust audit decisions impact <decision-id> --tenant local
+```
+
+Find cached decisions that are similar to a given decision:
+
+```sh
+mvmctl trust audit decisions similar <decision-id> --tenant local
+```
+
+Export the full audit chain as W3C PROV-O/Turtle for compliance reporting:
+
+```sh
+mvmctl trust audit provenance export --tenant local -o provenance.ttl
+```
+
+Use `--local` with `provenance export` to read the local `mvmctl` audit log
+instead of the chain-signed tenant log.
+
+The TIBET export is informational: `token_id` is derived deterministically
+from the decision content address, `hash` covers the canonical token body, and
+`signature` is empty because the read-only export path does not have access to
+the host signer. Verify the underlying chain-signed audit entry when a
+signature is required.
+
 ## Inspect boot and metrics data
 
 Boot reports are useful when the question is "did the sandbox boot and become
