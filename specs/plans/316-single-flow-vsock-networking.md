@@ -283,20 +283,24 @@ bookkeeping lagged — see the Status section.
       `mvm-network-endpoint`, including Cargo bin declarations, release
       packaging, updater manifests, helper resolution, confinement profiles,
       scripts, process reaping, metrics labels, and operator diagnostics.
-- [~] Rename `GuestService::Substitution` to `GuestService::NetworkFlow`, retain
+- [x] Rename `GuestService::Substitution` to `GuestService::NetworkFlow`, retain
       port 5253, and delete the hand-maintained duplicate
       `EGRESS_VSOCK_PORT` constant in favor of the typed service mapping.
-      `GuestService::NetworkFlow` exists in `mvm-net/src/channel.rs` mapped to
-      5253 with a `port()` test. The duplicate constant survives in
-      `crates/mvm-agentd/src/bin/mvm-egress-client.rs:16` and
-      `crates/mvm-agentd/src/bin/mvm-addon-dns.rs:93` — `mvm-agentd` does not
-      depend on `mvm-net`, so either give the guest the typed mapping or record
-      why 5253 is pinned twice and gate the two values equal.
-- [ ] Rename `EndpointSpawner`/`RealEndpointSpawner` to
+      The port now has exactly one definition in the workspace:
+      `mvm_contract::protocol::network_flow::NETWORK_FLOW_PORT`. It lives in
+      `mvm-contract` rather than `mvm-net` because the guest cannot depend on
+      `mvm-net` — the same arrangement `l3::L3_CONTROL_PORT` already uses.
+      `mvm_net::GuestService::NetworkFlow` and `mvm_agentd::vsock::EGRESS_PORT`
+      both derive from it, so the ~80 existing `EGRESS_PORT` call sites
+      transitively name one value. A `const` assertion in `mvm-agentd` makes
+      drift a compile error; `mvm-net`'s `port()` test asserts the mapping and
+      the contract constant agree.
+- [x] Rename `EndpointSpawner`/`RealEndpointSpawner` to
       `NetworkEndpointSpawner`/`RealNetworkEndpointSpawner`; keep exactly one
-      production `spawn` implementation in `WorkloadRunner`. **Not started:**
-      `crates/mvm-hostd/tests/workload_stream_plane.rs` still imports
-      `EndpointSpawner`, and the new names appear nowhere in the workspace.
+      production `spawn` implementation in `WorkloadRunner`.
+      `EndpointSpawnRequest` moved with them, and `xtask
+      check-uniform-vsock-egress` — which pins the converged runner shape by
+      type name — was updated in the same change.
 - [ ] Make the endpoint authenticate one long-lived FlowMux session before it
       accepts any flow frame. A failed or missing session prevents workload
       readiness when the signed plan grants networking.

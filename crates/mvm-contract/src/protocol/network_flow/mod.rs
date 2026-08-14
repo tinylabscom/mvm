@@ -29,6 +29,15 @@ pub mod limits;
 pub mod opcode;
 pub mod state;
 
+/// The vsock port a workload's FlowMux session is carried on.
+///
+/// Lives here rather than in `mvm-net` because both ends need it and the
+/// guest cannot reach `mvm-net`: `mvm-agentd` links the sealed agent and
+/// depends only on this crate. `mvm_net::GuestService::NetworkFlow` maps to
+/// this constant, so host and guest name one value instead of two literals
+/// that can drift — the same arrangement `l3::L3_CONTROL_PORT` already uses.
+pub const NETWORK_FLOW_PORT: u32 = 5253;
+
 pub use frame::{
     Direction, FrameError, FrameHeader, MAGIC, ParsedFrame, SESSION_STREAM_ID, decode, encode,
     encode_into, peek_frame_len,

@@ -26,8 +26,8 @@ use mvm_runtime::driver::MockDriver;
 use mvm_runtime::standby_pool::SupervisorStandbyPool;
 use mvm_runtime::workload_runner::claim::parent_rootfs_digest;
 use mvm_runtime::workload_runner::{
-    ChildGrantIssuer, ClaimContext, EndpointSpawnRequest, EndpointSpawner, RealBrokerRegistrar,
-    WorkloadRunner,
+    ChildGrantIssuer, ClaimContext, NetworkEndpointSpawnRequest, NetworkEndpointSpawner,
+    RealBrokerRegistrar, WorkloadRunner,
 };
 
 use crate::world::{CliWorld, WarmClaimOutcome, WarmClaimWitness};
@@ -158,15 +158,15 @@ impl CheckpointChainAnchor for WarmClaimAnchor {
     }
 }
 
-/// An `EndpointSpawner` double: keys its returned socket on the vm name it is
+/// An `NetworkEndpointSpawner` double: keys its returned socket on the vm name it is
 /// handed (mirroring the production spawner), with no real endpoint process.
 #[derive(Default)]
 struct WarmClaimSpawner {
     seen_vm: Mutex<Option<String>>,
 }
 
-impl EndpointSpawner for WarmClaimSpawner {
-    fn spawn(&self, req: &EndpointSpawnRequest<'_>) -> anyhow::Result<PathBuf> {
+impl NetworkEndpointSpawner for WarmClaimSpawner {
+    fn spawn(&self, req: &NetworkEndpointSpawnRequest<'_>) -> anyhow::Result<PathBuf> {
         *self.seen_vm.lock().unwrap() = Some(req.vm_name.to_string());
         Ok(mvm_core::config::vm_network_endpoint_socket(req.vm_name))
     }

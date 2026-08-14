@@ -117,7 +117,13 @@ pub const WORKLOAD_EXIT_PORT: u32 = 5251;
 /// host-mediated egress, formerly named `EGRESS_PORT`). Each microVM has its
 /// own vsock; this is a fixed well-known service number reused per VM, not a secret.
 /// NOTE: exposing it end-to-end needs the host-side proxy port-allowlist to admit it.
-pub const EGRESS_PORT: u32 = 5253;
+pub const EGRESS_PORT: u32 = mvm_contract::protocol::network_flow::NETWORK_FLOW_PORT;
+
+// A compile-time proof rather than a test: the guest dials this port and the
+// host binds it from `mvm_net::GuestService::NetworkFlow`. Both derive from the
+// contract constant, so drift is not expressible — this pins the value the
+// derivation must land on.
+const _: () = assert!(EGRESS_PORT == 5253);
 
 /// vsock port the host-services broker is exposed on. The in-guest broker
 /// client ([`crate::broker_client`]) dials this to reach the supervisor's
