@@ -74,6 +74,25 @@ one recording `mvmctl` double shared by both languages:
 The fixtures import the *built* artifacts, not the sources. That is what makes
 these scenarios able to see the ESM defect at all.
 
+### The BDD suite did not gate a PR
+
+`bdd.yml` was only ever called from release/tag-triggered workflows. On a pull
+request `ci.yml` compiled the step definitions and ran `--test meta`, but never
+executed a scenario — so every scenario under `features/suites/`, including the
+pre-existing SDK ones, could go red and merge green. That is how both the
+shadowed corpus and the ESM defect survived.
+
+`ci.yml` now carries a `bdd-conformance` lane calling the same reusable
+workflow the release path calls, gated on a second fail-closed `scope` output
+and folded into the already-required `Test` aggregate. The filter covers
+`crates/mvm-sdk/`, `crates/mvm-cli/`, `crates/mvm-conformance/`, `features/`,
+`tests/machine-fixtures/`, the two workflow files and the Justfile — verified
+to fire on each and to skip docs-only and unrelated-crate changes.
+
+It is narrower than the suite's reach on purpose: egress, snapshot and
+verified-boot scenarios are driven by crates outside the filter and remain
+release-tag only.
+
 ## Verification
 
 | gate | before | after |

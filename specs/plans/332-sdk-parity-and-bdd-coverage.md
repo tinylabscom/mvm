@@ -166,6 +166,35 @@ which surface is canonical, so it is split out rather than guessed at here.
       against the claim model, not the feature-file set; the new suite is picked
       up by the runner's directory walk. Gate confirmed clean.
 
+### WS-H — make the BDD suite gate a PR (Defect 8)
+
+`bdd.yml` was only ever called from `release.yml`, `publish-crates.yml`,
+`publish-sdk.yml` and `kernel-build.yml`, all release/tag-triggered. On a pull
+request `ci.yml` compiled the step definitions (`clippy --features bdd`) and ran
+`--test meta`, but never executed a single Gherkin scenario. Every scenario in
+`features/suites/` — the six added here and the pre-existing s27 SDK ones —
+could go red and still merge green. That is how both Defect 1 and Defect 6
+survived.
+
+- [x] H1. `scope` job publishes a second `bdd` output, fail-closed alongside
+      `code`
+- [x] H2. `bdd-conformance` lane calls the same reusable `bdd.yml` the release
+      path calls, so the PR gate and the release gate cannot drift
+- [x] H3. Filter scoped to what the scenarios actually exercise:
+      `crates/mvm-sdk/`, `crates/mvm-cli/`, `crates/mvm-conformance/`,
+      `features/`, `tests/machine-fixtures/`, the two workflow files, the
+      Justfile
+- [x] H4. Folded into the already-required `Test` aggregate, matched against its
+      own scope — no branch-protection change needed
+- [x] H5. Classifier exercised against real and synthetic change sets: fires on
+      SDK / CLI / corpus / feature edits, skips on docs-only and on an
+      unrelated crate
+
+Deliberately narrower than the suite's full reach: scenarios over egress,
+snapshots and verified boot are driven by crates outside this filter and stay
+covered only by the release-tag lane. Widening it is a call about PR latency,
+not an oversight.
+
 ### WS-G — deferred, needs a decision (Defect 7)
 
 - [ ] G1. Decide which SDK surface is canonical
