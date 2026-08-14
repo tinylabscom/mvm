@@ -66,7 +66,7 @@ for detailed scope and acceptance criteria.
       plan that boots. PR #2317 made admission the pre-action sync barrier,
       deferred post-hoc records without changing chain content or ordering,
       retained fail-safe sync for unknown events, and preserved torn-tail
-      detection. The separate receipt-store cost remains open as #2318.
+      detection. PR #2328 removed the redundant head fsync and added head recovery; the follow-up in this branch records the record-vs-control decision and adds torn-head coverage. The KVM `emit: receipt` re-measurement remains queued on a Linux/KVM host.
 - [x] **Issue #2289 — kernel pin freshness follow-up.** Closed as completed
       by PR #2301. The libkrunfw and custom guest kernel inputs now
       synchronize on the verified Linux 6.12.103 LTS source pin, and

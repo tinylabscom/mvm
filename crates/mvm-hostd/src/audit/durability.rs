@@ -11,6 +11,12 @@
 //! that is a control. Under [`AuditDurability::Required`], a workload cannot
 //! run unless its admission reached the chain; without it, a workload that ran
 //! unaudited is afterwards indistinguishable from one that never ran at all.
+//!
+//! Execution receipts, written by the separate [`crate::audit::receipt_store`],
+//! are explicitly records, not controls. They cache signed receipts that were
+//! already emitted to the audit chain; a failure to write or persist a receipt
+//! is logged and the boot continues. The audit chain remains the source of
+//! truth and the only durability boundary that can refuse a run.
 
 use anyhow::{Context, Result};
 use mvm_core::plan::ExecutionPlan;

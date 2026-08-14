@@ -220,7 +220,10 @@
       #2413 as not planned / superseded by Plan 316 or Plan 313. The
       remaining 31 issues retain concrete implementation, security, rollout,
       live-validation, performance, governance, or cross-repository acceptance
-      work.
+      work. **#2318** is now code-complete: the receipt is documented as a
+      record (not a control), the redundant head `sync_all` is removed, and
+      missing/stale/torn head recovery is under test; the KVM `emit: receipt`
+      re-measurement is queued because the current host cannot run KVM.
 - [~] Runtime hardening for production — **plan 303**. Closes gaps between the
       binary CI witnesses and the binary that ships. Landed: trapping integer
       overflow in `[profile.release]` plus a `release-witness` CI lane over the
