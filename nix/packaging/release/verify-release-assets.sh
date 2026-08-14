@@ -67,10 +67,10 @@ sha256_of() {
 required_bins_for_target() {
   case "$1" in
     *apple-darwin)
-      echo "mvmctl mvm-bridge mvm-hvf-supervisor mvm-libkrun-supervisor mvm-network-endpoint"
+      echo "mvmctl mvm-hvf-supervisor mvm-libkrun-supervisor mvm-network-endpoint"
       ;;
     *)
-      echo "mvmctl mvm-bridge mvm-network-endpoint"
+      echo "mvmctl mvm-network-endpoint"
       ;;
   esac
 }

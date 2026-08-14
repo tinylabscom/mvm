@@ -21,8 +21,8 @@ sha256_of() {
 
 bins_for() {
   case "$1" in
-    *apple-darwin) echo "mvmctl mvm-bridge mvm-hvf-supervisor mvm-libkrun-supervisor mvm-network-endpoint" ;;
-    *)             echo "mvmctl mvm-bridge mvm-network-endpoint" ;;
+    *apple-darwin) echo "mvmctl mvm-hvf-supervisor mvm-libkrun-supervisor mvm-network-endpoint" ;;
+    *)             echo "mvmctl mvm-network-endpoint" ;;
   esac
 }
 
@@ -140,6 +140,24 @@ d="$(build_valid_fixture)"
 printf 'tampered-kernel\n' > "$d/vmlinux-aarch64-workload"
 if run "$d"; then bad "checksum-mismatched workload kernel must fail"; else ok "checksum-mismatched workload kernel fails closed"; fi
 rm -rf "$d"
+
+# 12. Every binary the verifier REQUIRES must be one release.yml actually
+# bundles. The fixtures above cannot catch a stale name: build_valid_fixture
+# creates whatever bins_for names, so a required-but-unbuilt binary verifies
+# green here and fails only at release time. Compare against the workflow.
+RELEASE_YML="$HERE/../../../.github/workflows/release.yml"
+shipped="mvmctl $(sed -n 's/^[[:space:]]*for hostbin in \(.*\); do$/\1/p' "$RELEASE_YML" | head -1)"
+required="$(sed -n '/^required_bins_for_target()/,/^}/p' "$SCRIPT" \
+  | sed -n 's/.*echo "\([^"]*\)".*/\1/p' | tr ' ' '\n' | sort -u)"
+drift=""
+for b in $required; do
+  case " $shipped " in *" $b "*) ;; *) drift="$drift $b" ;; esac
+done
+if [ -n "$required" ] && [ -z "$drift" ]; then
+  ok "every required bin is one release.yml ships"
+else
+  bad "verifier requires bin(s) release.yml never builds:${drift:- <none parsed>}"
+fi
 
 echo "verify-release-assets pack-gate: $PASS passed, $FAILN failed"
 [ "$FAILN" -eq 0 ]
