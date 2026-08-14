@@ -9,12 +9,15 @@
 //! to keep the trusted compute base and dependency footprint small. The
 //! output is valid Turtle for the subset of PROV-O that `mvm` uses.
 
+use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
-use core::fmt::Write as _;
+use core::fmt::{self, Write as _};
 
+use crate::ir::ir_hash;
 use crate::policy::audit::{AuditEntry, LocalAuditEvent};
+use serde::{Deserialize, Serialize};
 
 /// Default PROV-O namespace URI.
 pub const NS_PROV: &str = "http://www.w3.org/ns/prov#";
@@ -313,6 +316,360 @@ fn turtle_escape_string(s: &str) -> String {
         .replace('\t', "\\t")
 }
 
+/// Content-addressed identifier for a decision record.
+///
+/// The id is the SHA-256 of the canonical decision body excluding the
+/// `decision_id` field, rendered as a 64-character lowercase hex string.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(transparent)]
+pub struct DecisionId(pub String);
+
+/// Role an authorizing key asserted when making a decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum DecisionActorRole {
+    /// Drives release promotions.
+    Promoter,
+    /// Reports or updates host inventory.
+    Inventory,
+    /// Catch-all for orchestrator actions.
+    Orchestrator,
+}
+
+/// Principal that authorized the decision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct ActorRef {
+    /// Human, on-call rotation, or automated-system identity.
+    pub principal: String,
+    /// Signing key identifier.
+    pub key_id: String,
+    /// Role the key asserted, if known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_role: Option<DecisionActorRole>,
+}
+
+/// What triggered the decision.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct DecisionScenario {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workload_addr: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capability_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_id: Option<String>,
+}
+
+/// Category of decision recorded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum DecisionCategory {
+    /// Workload admission decision.
+    Admission,
+    /// Workload launch decision.
+    Launch,
+    /// Network egress decision.
+    Egress,
+    /// Checkpoint create/restore/fork decision.
+    Checkpoint,
+    /// Human or automated approval decision.
+    Approval,
+    /// Policy resolution decision.
+    Policy,
+    /// Control-plane orchestrator decision.
+    Control,
+}
+
+/// Outcome of a decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum DecisionOutcome {
+    Approved,
+    Denied,
+    Deferred,
+}
+
+/// Relationship between a decision and a prior decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum CausalRelation {
+    Caused,
+    Influenced,
+    PrecedentFor,
+    Invalidated,
+}
+
+/// Link to a prior decision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct CausalLink {
+    pub relation: CausalRelation,
+    pub decision_id: DecisionId,
+}
+
+/// Free-form compliance metadata.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct DecisionMetadata {
+    /// Optional ticket / incident / change-request reference.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ticket_ref: Option<String>,
+    /// Optional policy reference.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_ref: Option<String>,
+    /// Regulation scopes (e.g. EU-AI-Act, NIS2).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub regulation_scope: Vec<String>,
+}
+
+/// Cryptographic binding to the existing audit substrate.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct AttestationBinding {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workload_addr: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub artifact_digests: BTreeMap<String, String>,
+    /// Hash of the chain-signed audit entry that carries this decision.
+    pub audit_entry_hash: String,
+    /// Public key that signed the audit entry.
+    pub signer_pubkey: String,
+}
+
+/// A content-addressed decision record.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct DecisionRecord {
+    pub decision_id: DecisionId,
+    pub version: u32,
+    pub category: DecisionCategory,
+    pub actor: ActorRef,
+    pub scenario: DecisionScenario,
+    pub reasoning: String,
+    pub outcome: DecisionOutcome,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<f64>,
+    pub timestamp: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub causal_links: Vec<CausalLink>,
+    pub metadata: DecisionMetadata,
+    pub attestation: AttestationBinding,
+}
+
+/// Serializable subset of `DecisionRecord` used to compute its content address.
+///
+/// The attestation binding is excluded from the id body so that the same
+/// semantic decision keeps the same address even when it is carried by
+/// different audit entries. The attestation is still part of the stored
+/// record and is verified independently.
+#[derive(Serialize)]
+struct DecisionRecordBody<'a> {
+    version: &'a u32,
+    category: &'a DecisionCategory,
+    actor: &'a ActorRef,
+    scenario: &'a DecisionScenario,
+    reasoning: &'a str,
+    outcome: &'a DecisionOutcome,
+    confidence: &'a Option<f64>,
+    timestamp: &'a str,
+    causal_links: &'a [CausalLink],
+    metadata: &'a DecisionMetadata,
+}
+
+impl DecisionRecord {
+    /// Recompute the content-address of this record.
+    ///
+    /// The hash is taken over the canonical JSON of the decision body
+    /// (everything except `decision_id` and `attestation`) so the id
+    /// identifies the semantic decision, not the chain entry that carries it.
+    pub fn compute_id(&self) -> DecisionId {
+        let body = DecisionRecordBody {
+            version: &self.version,
+            category: &self.category,
+            actor: &self.actor,
+            scenario: &self.scenario,
+            reasoning: &self.reasoning,
+            outcome: &self.outcome,
+            confidence: &self.confidence,
+            timestamp: &self.timestamp,
+            causal_links: &self.causal_links,
+            metadata: &self.metadata,
+        };
+        DecisionId(ir_hash(&body).expect("canonical JSON serialization cannot fail"))
+    }
+
+    /// Verify that the stored `decision_id` matches the record body.
+    pub fn verify_id(&self) -> bool {
+        self.decision_id == self.compute_id()
+    }
+}
+
+/// Error returned when a `DecisionRecordBuilder` cannot produce a record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DecisionRecordError {
+    MissingField(&'static str),
+}
+
+impl fmt::Display for DecisionRecordError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MissingField(field) => {
+                write!(f, "missing required decision-record field: {field}")
+            }
+        }
+    }
+}
+
+/// Builder for [`DecisionRecord`].
+///
+/// The builder separates construction from content-address computation:
+/// `build()` validates required fields, computes the `DecisionId`, and
+/// returns an immutable record.
+#[derive(Debug, Clone, Default)]
+pub struct DecisionRecordBuilder {
+    version: u32,
+    category: Option<DecisionCategory>,
+    actor: Option<ActorRef>,
+    scenario: DecisionScenario,
+    reasoning: Option<String>,
+    outcome: Option<DecisionOutcome>,
+    confidence: Option<f64>,
+    timestamp: Option<String>,
+    causal_links: Vec<CausalLink>,
+    metadata: DecisionMetadata,
+    attestation: Option<AttestationBinding>,
+}
+
+impl DecisionRecordBuilder {
+    /// Start a builder for a decision of the given category and outcome.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the schema version.
+    pub fn version(mut self, version: u32) -> Self {
+        self.version = version;
+        self
+    }
+
+    /// Set the decision category.
+    pub fn category(mut self, category: DecisionCategory) -> Self {
+        self.category = Some(category);
+        self
+    }
+
+    /// Set the authorizing actor.
+    pub fn actor(mut self, actor: ActorRef) -> Self {
+        self.actor = Some(actor);
+        self
+    }
+
+    /// Set the scenario that triggered the decision.
+    pub fn scenario(mut self, scenario: DecisionScenario) -> Self {
+        self.scenario = scenario;
+        self
+    }
+
+    /// Set the human-readable reasoning.
+    pub fn reasoning(mut self, reasoning: impl Into<String>) -> Self {
+        self.reasoning = Some(reasoning.into());
+        self
+    }
+
+    /// Set the decision outcome.
+    pub fn outcome(mut self, outcome: DecisionOutcome) -> Self {
+        self.outcome = Some(outcome);
+        self
+    }
+
+    /// Set an optional confidence score.
+    pub fn confidence(mut self, confidence: f64) -> Self {
+        self.confidence = Some(confidence);
+        self
+    }
+
+    /// Set the RFC 3339 timestamp.
+    pub fn timestamp(mut self, timestamp: impl Into<String>) -> Self {
+        self.timestamp = Some(timestamp.into());
+        self
+    }
+
+    /// Add a causal link to a prior decision.
+    pub fn causal_link(mut self, link: CausalLink) -> Self {
+        self.causal_links.push(link);
+        self
+    }
+
+    /// Set compliance metadata.
+    pub fn metadata(mut self, metadata: DecisionMetadata) -> Self {
+        self.metadata = metadata;
+        self
+    }
+
+    /// Set the cryptographic attestation binding.
+    pub fn attestation(mut self, attestation: AttestationBinding) -> Self {
+        self.attestation = Some(attestation);
+        self
+    }
+
+    /// Build and content-address the decision record.
+    pub fn build(self) -> Result<DecisionRecord, DecisionRecordError> {
+        let category = self
+            .category
+            .ok_or(DecisionRecordError::MissingField("category"))?;
+        let actor = self
+            .actor
+            .ok_or(DecisionRecordError::MissingField("actor"))?;
+        let reasoning = self
+            .reasoning
+            .ok_or(DecisionRecordError::MissingField("reasoning"))?;
+        let outcome = self
+            .outcome
+            .ok_or(DecisionRecordError::MissingField("outcome"))?;
+        let timestamp = self
+            .timestamp
+            .ok_or(DecisionRecordError::MissingField("timestamp"))?;
+        let attestation = self
+            .attestation
+            .ok_or(DecisionRecordError::MissingField("attestation"))?;
+
+        let record = DecisionRecord {
+            decision_id: DecisionId(String::new()),
+            version: self.version,
+            category,
+            actor,
+            scenario: self.scenario,
+            reasoning,
+            outcome,
+            confidence: self.confidence,
+            timestamp,
+            causal_links: self.causal_links,
+            metadata: self.metadata,
+            attestation,
+        };
+
+        Ok(DecisionRecord {
+            decision_id: record.compute_id(),
+            ..record
+        })
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -386,5 +743,96 @@ mod tests {
         assert_eq!(turtle_escape_string("a\"b"), "a\\\"b");
         assert_eq!(turtle_escape_string("a\\b"), "a\\\\b");
         assert_eq!(turtle_escape_string("a\nb"), "a\\nb");
+    }
+
+    fn sample_decision_record() -> DecisionRecord {
+        DecisionRecordBuilder::new()
+            .version(1)
+            .category(DecisionCategory::Admission)
+            .actor(ActorRef {
+                principal: "host:builder".to_string(),
+                key_id: "host-signer-1".to_string(),
+                key_role: Some(DecisionActorRole::Orchestrator),
+            })
+            .scenario(DecisionScenario {
+                plan_id: Some("sha256:abc".to_string()),
+                ..DecisionScenario::default()
+            })
+            .reasoning("plan satisfies grant ceiling")
+            .outcome(DecisionOutcome::Approved)
+            .timestamp("2026-08-13T00:00:00Z".to_string())
+            .metadata(DecisionMetadata {
+                ticket_ref: Some("CHG-123".to_string()),
+                ..DecisionMetadata::default()
+            })
+            .attestation(AttestationBinding {
+                plan_id: Some("sha256:abc".to_string()),
+                audit_entry_hash: "sha256:entryhash".to_string(),
+                signer_pubkey: "ed25519:pubkey".to_string(),
+                ..AttestationBinding::default()
+            })
+            .build()
+            .expect("valid decision record")
+    }
+
+    #[test]
+    fn decision_record_builder_computes_id() {
+        let record = sample_decision_record();
+        assert!(!record.decision_id.0.is_empty());
+        assert_eq!(record.decision_id.0.len(), 64);
+        assert!(record.verify_id());
+    }
+
+    #[test]
+    fn decision_id_is_stable_across_clones() {
+        let record = sample_decision_record();
+        let cloned = record.clone();
+        assert_eq!(record.decision_id, cloned.decision_id);
+        assert_eq!(record.compute_id(), cloned.compute_id());
+    }
+
+    #[test]
+    fn decision_id_changes_when_body_changes() {
+        let mut record = sample_decision_record();
+        let id1 = record.decision_id.clone();
+        record.reasoning = "different rationale".to_string();
+        record.decision_id = record.compute_id();
+        assert_ne!(record.decision_id, id1);
+    }
+
+    #[test]
+    fn decision_record_serde_roundtrip() {
+        let record = sample_decision_record();
+        let json = serde_json::to_string(&record).unwrap();
+        let parsed: DecisionRecord = serde_json::from_str(&json).unwrap();
+        assert_eq!(record, parsed);
+        assert!(parsed.verify_id());
+    }
+
+    #[test]
+    fn decision_record_builder_requires_required_fields() {
+        let err = DecisionRecordBuilder::new()
+            .reasoning("only reasoning set")
+            .build()
+            .expect_err("missing fields");
+        assert!(matches!(err, DecisionRecordError::MissingField(_)));
+    }
+
+    #[test]
+    fn decision_record_causal_links_roundtrip() {
+        let parent = sample_decision_record();
+        let mut child = sample_decision_record();
+        child.causal_links.push(CausalLink {
+            decision_id: parent.decision_id.clone(),
+            relation: CausalRelation::PrecedentFor,
+        });
+        child.decision_id = child.compute_id();
+        assert_ne!(child.decision_id, parent.decision_id);
+
+        let json = serde_json::to_string(&child).unwrap();
+        let parsed: DecisionRecord = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.causal_links.len(), 1);
+        assert_eq!(parsed.causal_links[0].decision_id, parent.decision_id);
+        assert!(parsed.verify_id());
     }
 }

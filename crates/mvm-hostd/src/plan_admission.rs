@@ -45,11 +45,16 @@
 //! Production callers use `SystemClock` + the host's nonce store.
 
 use anyhow::{Context, Result};
+use chrono::Utc;
 use ed25519_dalek::VerifyingKey;
 use mvm_contract::grants::ceiling::GrantCeiling;
 use mvm_contract::grants::{CpuGrant, Grants};
 use mvm_contract::protocol::capability_negotiation::negotiate_grants;
 use mvm_contract::protocol::resource_controls::{EnforcedGrants, ResourceControls};
+use mvm_contract::provenance::{
+    ActorRef, AttestationBinding, DecisionActorRole, DecisionCategory, DecisionOutcome,
+    DecisionRecord, DecisionRecordBuilder,
+};
 use mvm_core::plan::bundle::{BundleResolver, TrustStore};
 use mvm_core::plan::{
     ExecutionPlan, NonceStore, PlanId, PlanValidityError, SignedExecutionPlan, Variant,
@@ -1148,6 +1153,30 @@ fn run_post_admission_gates(
     Ok(config)
 }
 
+fn launch_decision_record(plan: &ExecutionPlan, backend_name: &str) -> DecisionRecord {
+    DecisionRecordBuilder::new()
+        .version(1)
+        .category(DecisionCategory::Launch)
+        .actor(ActorRef {
+            principal: crate::audit::host_keypair::host_signer_id(),
+            key_id: crate::audit::host_keypair::host_signer_id(),
+            key_role: Some(DecisionActorRole::Orchestrator),
+        })
+        .scenario(mvm_contract::provenance::DecisionScenario {
+            plan_id: Some(plan.plan_id.0.clone()),
+            ..Default::default()
+        })
+        .reasoning(format!("workload launched on backend {backend_name}"))
+        .outcome(DecisionOutcome::Approved)
+        .timestamp(Utc::now().to_rfc3339())
+        .attestation(AttestationBinding {
+            plan_id: Some(plan.plan_id.0.clone()),
+            ..AttestationBinding::default()
+        })
+        .build()
+        .expect("launch decision record is well-formed")
+}
+
 /// What rolling a launch back needs to know. A struct rather than seven
 /// positional arguments, so a caller cannot silently swap the stage label for
 /// the reason.
@@ -1298,6 +1327,10 @@ pub fn admit_and_start(
             if let Some(emitter) = params.emitter {
                 if let Err(e) = emitter.emit_launched(admitted.plan(), &backend_name) {
                     tracing::warn!(error = %e, "audit emit_launched failed (non-fatal)");
+                }
+                let record = launch_decision_record(admitted.plan(), &backend_name);
+                if let Err(e) = emitter.emit_decision_record(admitted.plan(), record) {
+                    tracing::warn!(error = %e, "audit emit_decision_record for launch failed (non-fatal)");
                 }
                 if let Err(e) = emitter.emit_grants_enforced(admitted.plan(), &enforced_grants) {
                     tracing::warn!(error = %e, "audit emit_grants_enforced failed (non-fatal)");

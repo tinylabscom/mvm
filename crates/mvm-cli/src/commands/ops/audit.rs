@@ -15,6 +15,8 @@ use mvm_hostd::supervisor::SignedEnvelope;
 use super::super::vm::audit_chain::{AuditEmitter, audit_path_for_tenant, default_audit_dir};
 use super::super::vm::host_signer;
 use super::Cli;
+use mvm_contract::provenance::DecisionId;
+use mvm_hostd::audit::decisions::DecisionStore;
 
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct Args {
@@ -199,6 +201,12 @@ pub(in crate::commands) enum AuditAction {
         #[command(subcommand)]
         action: ReceiptsAction,
     },
+    /// Query and export content-addressed decision records cached from the
+    /// chain-signed audit log. Read-only: does not emit new audit events.
+    Decisions {
+        #[command(subcommand)]
+        action: DecisionsAction,
+    },
     /// Opt-in forensic network transcript capture: arm / disarm / list /
     /// export. Off by default; separate from the metadata-only flow audit.
     Transcript {
@@ -239,6 +247,40 @@ pub(in crate::commands) enum ReceiptsAction {
         /// Emit receipts as a JSON array to stdout.
         #[arg(long)]
         json: bool,
+    },
+}
+
+/// Subcommands under `mvmctl trust audit decisions`.
+#[derive(Subcommand, Debug, Clone)]
+pub(in crate::commands) enum DecisionsAction {
+    /// List cached decision records for a tenant.
+    List {
+        /// Tenant whose decision cache to read. Defaults to `"local"`.
+        #[arg(long, default_value = "local")]
+        tenant: String,
+        /// Emit records as a JSON array to stdout.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show a single decision record by its content-address.
+    Show {
+        /// Content-address (`sha256:<hex>`) of the decision record.
+        decision_id: String,
+        /// Tenant whose decision cache to read. Defaults to `"local"`.
+        #[arg(long, default_value = "local")]
+        tenant: String,
+        /// Emit the record as JSON to stdout.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Export all cached decision records for a tenant as JSON.
+    Export {
+        /// Tenant whose decision cache to read. Defaults to `"local"`.
+        #[arg(long, default_value = "local")]
+        tenant: String,
+        /// Output file. Defaults to stdout.
+        #[arg(long, short = 'o')]
+        output: Option<std::path::PathBuf>,
     },
 }
 
@@ -283,6 +325,17 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             } => audit_receipts_export(&tenant, plan_id.as_deref(), json),
         },
         AuditAction::Transcript { action } => super::transcript::run(action),
+        AuditAction::Decisions { action } => match action {
+            DecisionsAction::List { tenant, json } => decisions_list(&tenant, json),
+            DecisionsAction::Show {
+                decision_id,
+                tenant,
+                json,
+            } => decisions_show(&tenant, &decision_id, json),
+            DecisionsAction::Export { tenant, output } => {
+                decisions_export(&tenant, output.as_deref())
+            }
+        },
         AuditAction::VerifyCert {
             cert,
             pubkey,
@@ -1887,4 +1940,97 @@ mod merkle_verb_tests {
         std::fs::write(&path, "not-a-key").unwrap();
         assert!(load_verifying_key(&path).is_err());
     }
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Decision-record cache queries
+// ─────────────────────────────────────────────────────────────────
+
+fn open_decision_store(tenant: &str) -> Result<DecisionStore> {
+    let dir = DecisionStore::default_dir().context("resolving decision store directory")?;
+    DecisionStore::open(&dir, tenant)
+        .with_context(|| format!("opening decision store for tenant '{tenant}'"))
+}
+
+fn decisions_list(tenant: &str, json: bool) -> Result<()> {
+    let store = open_decision_store(tenant)?;
+    let records = store
+        .list()
+        .with_context(|| format!("listing decisions for tenant '{tenant}'"))?;
+
+    if json {
+        crate::json_out::emit_json(&records)?;
+        return Ok(());
+    }
+
+    if records.is_empty() {
+        ui::info(&format!(
+            "No decision records cached for tenant '{tenant}'."
+        ));
+        return Ok(());
+    }
+
+    ui::success(&format!(
+        "{n} decision record(s) for tenant '{tenant}'",
+        n = records.len()
+    ));
+    println!(
+        "{:<64} {:<12} {:<10} PLAN_ID",
+        "DECISION_ID", "CATEGORY", "OUTCOME"
+    );
+    for r in &records {
+        let plan_id = r.scenario.plan_id.as_deref().unwrap_or("-");
+        println!(
+            "{:<64} {:<12?} {:<10?} {}",
+            r.decision_id.0, r.category, r.outcome, plan_id
+        );
+    }
+    Ok(())
+}
+
+fn decisions_show(tenant: &str, decision_id: &str, json: bool) -> Result<()> {
+    let store = open_decision_store(tenant)?;
+    let id = DecisionId(decision_id.to_string());
+    let record = store
+        .get(&id)
+        .with_context(|| format!("reading decision '{decision_id}' for tenant '{tenant}'"))?;
+    let record = record
+        .with_context(|| format!("decision '{decision_id}' not found for tenant '{tenant}'"))?;
+
+    if json {
+        crate::json_out::emit_json(&record)?;
+    } else {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&record).context("formatting decision record")?
+        );
+    }
+    Ok(())
+}
+
+fn decisions_export(tenant: &str, output: Option<&std::path::Path>) -> Result<()> {
+    let store = open_decision_store(tenant)?;
+    let records = store
+        .list()
+        .with_context(|| format!("listing decisions for tenant '{tenant}'"))?;
+
+    let mut writer: Box<dyn Write> = match output {
+        Some(path) => {
+            let file = std::fs::File::create(path)
+                .with_context(|| format!("creating output file: {}", path.display()))?;
+            Box::new(file)
+        }
+        None => Box::new(std::io::stdout()),
+    };
+
+    serde_json::to_writer_pretty(&mut writer, &records).context("serializing decision records")?;
+    writeln!(writer).context("finalizing decision export")?;
+
+    if output.is_none() {
+        ui::success(&format!(
+            "exported {n} decision record(s) for tenant '{tenant}'",
+            n = records.len()
+        ));
+    }
+    Ok(())
 }

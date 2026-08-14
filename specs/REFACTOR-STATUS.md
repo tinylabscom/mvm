@@ -116,7 +116,7 @@ for detailed scope and acceptance criteria.
   - [ ] Phase 0 — RFC and ADR approved
   - [x] Phase 1 — PROV-O export of existing events
   - [x] Phase 2 — Enrich existing audit events with authorizer/rationale
-  - [ ] Phase 3 — DecisionRecord API and content-addressed store
+  - [x] Phase 3 — DecisionRecord API and content-addressed store
   - [ ] Phase 4 — Query API and causal chains
   - [ ] Phase 5 — Optional standards interoperability
 

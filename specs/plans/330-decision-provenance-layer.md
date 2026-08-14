@@ -148,7 +148,7 @@ Read-only exporter; no new runtime instrumentation.
   - `plan_id` → `prov:Entity`
 - [x] Add round-trip tests: export → parse → verify signatures still hold on original chain (partial: unit tests added; full chain-signature verification deferred to Phase 3).
 - [ ] Validate output with a compliance/ops stakeholder.
-- [ ] Update `specs/SPRINT.md` and `specs/REFACTOR-STATUS.md`.
+- [x] Update `specs/SPRINT.md` and `specs/REFACTOR-STATUS.md`.
 
 ### Phase 2 — Enrich existing audit events
 
@@ -166,14 +166,14 @@ Add structured decision fields to events that already exist.
 
 ### Phase 3 — DecisionRecord API and content-addressed store
 
-- [ ] Add `DecisionRecord`, `ActorRef`, `DecisionScenario`, `CausalLink`, `DecisionMetadata`, `AttestationBinding` types to `mvm-contract::provenance`.
-- [ ] Implement `DecisionId` as SHA-256 of canonical decision body.
-- [ ] Add `DecisionRecordBuilder`.
-- [ ] Integrate `DecisionRecord` emission into `AuditEmitter` for admission/launch/egress/checkpoint/approval events.
-- [ ] Add optional content-addressed decision store under `~/.mvm/decisions/` (rebuildable from chain).
-- [ ] Ensure decision store is derivable from the chain-signed log.
-- [ ] Add tests: builder, content-address stability, store rebuild, chain verification.
-- [ ] Update CLI `mvmctl trust audit` subcommands to optionally include decision records.
+- [x] Add `DecisionRecord`, `ActorRef`, `DecisionScenario`, `CausalLink`, `DecisionMetadata`, `AttestationBinding` types to `mvm-contract::provenance`.
+- [x] Implement `DecisionId` as SHA-256 of canonical decision body.
+- [x] Add `DecisionRecordBuilder`.
+- [x] Integrate `DecisionRecord` emission into `AuditEmitter` for admission/launch/egress/checkpoint/approval events.
+- [x] Add optional content-addressed decision store under `~/.mvm/decisions/` (rebuildable from chain).
+- [x] Ensure decision store is derivable from the chain-signed log.
+- [x] Add tests: builder, content-address stability, store rebuild, chain verification.
+- [x] Update CLI `mvmctl trust audit` subcommands to optionally include decision records.
 - [ ] Update `specs/SPRINT.md` and `specs/REFACTOR-STATUS.md`.
 
 ### Phase 4 — Query API and causal chains

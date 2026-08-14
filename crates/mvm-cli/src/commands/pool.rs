@@ -293,7 +293,10 @@ fn audit_captured_parent(
     let signer = host_signer::load_or_init()
         .context("loading the host signer to sign the parent's creation entry")?;
     let emitter = super::vm::audit_chain::AuditEmitter::new(signer.signing)
-        .context("opening the audit chain to record the parent's creation")?;
+        .context("opening the audit chain to record the parent's creation")?
+        .with_receipts()
+        .with_decisions()
+        .context("enabling the decision store for the pool audit")?;
     mvm_hostd::audit::bind::bind_checkpoint_created(&emitter, admitted.plan(), &meta)
         .context("emitting checkpoint.created for the captured standby parent")
 }

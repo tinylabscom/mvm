@@ -12,10 +12,11 @@ pub(super) fn build_default_audit_emitter(
     signing_key: ed25519_dalek::SigningKey,
     audit_dir: Option<&std::path::Path>,
 ) -> Result<AuditEmitter> {
-    match audit_dir {
+    let emitter = match audit_dir {
         Some(dir) => AuditEmitter::with_dir(signing_key, dir),
         None => AuditEmitter::new(signing_key),
-    }
+    }?;
+    emitter.with_decisions()
 }
 
 pub(super) fn build_policy_audit_emitter(
@@ -23,7 +24,7 @@ pub(super) fn build_policy_audit_emitter(
     audit_dir: Option<&std::path::Path>,
     policy: Option<&mvm_core::policy::AuditPolicy>,
 ) -> Result<AuditEmitter> {
-    match policy {
+    let emitter = match policy {
         Some(policy) => {
             let dir = match audit_dir {
                 Some(dir) => dir.to_path_buf(),
@@ -32,7 +33,8 @@ pub(super) fn build_policy_audit_emitter(
             AuditEmitter::with_policy(signing_key, &dir, policy)
         }
         None => build_default_audit_emitter(signing_key, audit_dir),
-    }
+    }?;
+    emitter.with_decisions()
 }
 
 pub(super) fn emit_policy_resolved(
