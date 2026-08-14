@@ -20,6 +20,7 @@ use mvm_agentd::vsock::{
     WORKLOAD_EXIT_PORT, connect_to_port, dev_console_data_ports, send_request_stream,
 };
 use mvm_core::config::vm_state_dir;
+use mvm_core::launch_trace::LaunchTraceRecorder;
 use mvm_core::vm_backend::{
     BackendKind, BackendSecurityProfile, ClaimStatus, GuestChannelInfo, LayerCoverage,
     ResourceControls, SnapshotCapability, StandbyError, StandbyHandle, StandbyState,
@@ -819,6 +820,7 @@ impl VmmDriver for FcDriver {
         let state_dir = vm_state_dir(&spec.name);
         std::fs::create_dir_all(&state_dir)
             .map_err(|e| anyhow!("create state dir {}: {e}", state_dir.display()))?;
+        let mut trace = LaunchTraceRecorder::new("fc");
         let pid_file = fc_pid_path(&spec.name)
             .ok_or_else(|| anyhow!("resolve Firecracker pid path for '{}'", spec.name))?;
         // Clear only a marker proven stale. Removing a live process's marker
@@ -884,6 +886,8 @@ impl VmmDriver for FcDriver {
         crate::fc::secure_vsock_socket_for_caller(&vsock_uds)
             .context("restrict Firecracker vsock socket to the invoking user")?;
 
+        trace.mark("vmm_start");
+
         // Wire the guest-dial egress/broker bridges and bind the workload-exit
         // capture — the whole host channel set must be in place before the guest
         // boots and dials out.
@@ -946,6 +950,9 @@ impl VmmDriver for FcDriver {
             ms = started_at.elapsed().as_secs_f64() * 1000.0,
             "fc boot: guest boot to serving agent"
         );
+
+        trace.mark("guest_boot");
+        trace.write_to(&state_dir);
 
         let vm = Box::new(FcRunningVm {
             id: VmId(spec.name.clone()),
