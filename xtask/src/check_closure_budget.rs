@@ -131,7 +131,13 @@ const BUDGET_TARGET: &str = "x86_64-unknown-linux-gnu";
 /// `rustls-platform-verifier` stay, because `mvm-http` uses them rather than
 /// hand-rolling header validation, head parsing, URL parsing, or trust-store
 /// handling. Measured net −20.
-pub(crate) const CLOSURE_BUDGET: usize = 242;
+///
+/// 243 (was 242): `uuid`'s `v5` feature, for the TIBET decision-record export
+/// reachable from `mvmctl ops audit --format tibet`. UUIDv5 is defined over
+/// SHA-1, so it cannot reuse the workspace's `sha2`; the feature pulls exactly
+/// one crate, `sha1_smol`, which is a leaf with no dependencies of its own.
+/// Measured net +1.
+pub(crate) const CLOSURE_BUDGET: usize = 243;
 
 pub fn run(workspace: &Path) -> Result<()> {
     let count = default_closure_crate_count(workspace)?;

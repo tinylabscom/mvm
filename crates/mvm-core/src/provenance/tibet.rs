@@ -24,6 +24,9 @@ use mvm_contract::provenance::{CausalLink, DecisionCategory, DecisionOutcome, De
 const TOKEN_NAMESPACE: Uuid = Uuid::from_u128(0x7384183e_8a55_4bcc_8f7b_d453fceb424a);
 
 /// A TIBET-shaped token produced from a [`DecisionRecord`].
+// allow(secret-debug): "token" here is a provenance evidence document, not a
+// credential — every field is already public in the exported JSON, and
+// `signature` is an empty placeholder because this path holds no signing key.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct TibetToken {
     /// Deterministic UUIDv5 derived from the decision content address.
@@ -61,6 +64,8 @@ pub struct TibetToken {
 ///
 /// Identical to [`TibetToken`] except `hash` and `signature` are omitted,
 /// matching the TIBET canonicalization rule.
+// allow(secret-debug): the hash pre-image of a public evidence document; it is
+// strictly a subset of `TibetToken`'s already-public fields.
 #[derive(Debug, Clone, Serialize)]
 struct TibetTokenBody {
     token_id: String,
@@ -395,7 +400,7 @@ mod tests {
     #[test]
     fn json_export_produces_array() {
         let record = sample_record();
-        let json = decision_records_to_tibet_json(&[record.clone()]);
+        let json = decision_records_to_tibet_json(std::slice::from_ref(&record));
         let parsed: Vec<serde_json::Value> = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0]["type"], "decision");
