@@ -8,6 +8,12 @@
 
 import { cliResolutionHint, resolveCliBin } from "./_cli.js";
 
+// This package is ESM ("type": "module"), so `require` does not exist at
+// runtime. These node builtins are imported statically; a lazy `require` here
+// throws `ReferenceError: require is not defined` for every consumer of the
+// built artifact.
+import * as child from "node:child_process";
+
 export interface MachineResult {
   exitCode: number;
   stdout: string;
@@ -140,7 +146,6 @@ function runMachine(argv: string[]): MachineResult {
   }
   const full = [bin, "machine", ...argv];
   // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const child = require("node:child_process") as typeof import("node:child_process");
   let result;
   try {
     result = child.spawnSync(bin, ["machine", ...argv], { encoding: "utf-8" });

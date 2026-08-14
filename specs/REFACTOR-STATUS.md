@@ -7,6 +7,19 @@ for detailed scope and acceptance criteria.
 
 ## Completed issue closeouts
 
+- [x] **Plan 332 — runtime SDK parity + live-transport BDD.** The golden
+      `tests/machine-fixtures` corpus was shadowed by an unanchored copy under
+      `crates/`, which is what the Python and TypeScript suites resolved to;
+      both were red on main and blind to `machine start --image`. Corpus
+      collapsed to one, both languages repointed and given Rust-equivalent
+      coverage tripwires, `xtask check-single-fixture-corpus` added. Fixed a
+      packaging defect that made every host-side TypeScript entry point throw
+      `ReferenceError: require is not defined` in the published ESM artifact —
+      invisible to vitest, which supplies CJS interop. New
+      `s27_sdk/runtime_live_transport.feature` drives the built artifacts in
+      both languages against a shared recording CLI double. WS-G (Python↔TS
+      public-surface divergence) deferred pending a canonical-surface decision.
+
 - [x] **Plan 325 — lowercase OCI image names.** Registry and repository
       capitalization is normalized before validation across every shared OCI
       pull and launch path, while case-sensitive tags and strict digest

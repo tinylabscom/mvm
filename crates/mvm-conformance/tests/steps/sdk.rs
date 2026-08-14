@@ -171,3 +171,209 @@ fn sdk_codegen_drift_check_passes(world: &mut CliWorld) {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+// ────────────────────────────────────────────────────────────────────
+// Live-transport witnesses.
+//
+// The decorator and record-mode scenarios above never leave the SDK's own
+// address space. These drive the *live* surface, where every Sandbox call
+// shells to `mvmctl machine …`, against a recording double — so the argv
+// contract between each language SDK and the CLI is asserted directly, and
+// the two languages are asserted against each other.
+// ────────────────────────────────────────────────────────────────────
+
+/// Directory holding the shared fixtures both languages run.
+fn sdk_fixture_dir() -> PathBuf {
+    repo_root()
+        .join("features")
+        .join("suites")
+        .join("s27_sdk")
+        .join("fixtures")
+}
+
+/// Run a named fixture in live mode against the recording `mvmctl` double,
+/// returning its output alongside the argv the double captured.
+fn run_live_fixture(
+    world: &mut CliWorld,
+    language: &str,
+    fixture_stem: &str,
+    build_mode: &str,
+) -> Output {
+    let fixtures = sdk_fixture_dir();
+    let log_dir = world
+        .sdk_argv_log_dir
+        .get_or_insert_with(|| tempfile::tempdir().expect("create SDK argv log dir"));
+    let log = log_dir
+        .path()
+        .join(format!("{language}-{fixture_stem}.jsonl"));
+
+    let (program, script) = match language.to_ascii_lowercase().as_str() {
+        "python" => (
+            "python3",
+            fixtures.join(format!("python_{fixture_stem}.py")),
+        ),
+        "typescript" => (
+            "node",
+            fixtures.join(format!("typescript_{fixture_stem}.mjs")),
+        ),
+        other => panic!("unsupported SDK fixture language {other:?}"),
+    };
+
+    let mut command = Command::new(program);
+    if language.eq_ignore_ascii_case("python") {
+        command.env("PYTHONPATH", repo_root().join("crates/mvm-sdk/sdks/python"));
+    }
+    let output = command
+        .current_dir(repo_root())
+        .arg(&script)
+        .env("MVM_SDK_MODE", "live")
+        .env("MVM_CLI_BIN", fixtures.join("recording-mvmctl"))
+        .env("MVM_BDD_ARGV_LOG", &log)
+        .env("MVM_BDD_BUILD_MODE", build_mode)
+        .output()
+        .unwrap_or_else(|error| panic!("spawn {program} for {}: {error}", script.display()));
+
+    let recorded = std::fs::read_to_string(&log).unwrap_or_default();
+    let argv: Vec<Vec<String>> = recorded
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str(line).expect("recording double emitted non-JSON argv"))
+        .collect();
+    world
+        .sdk_recorded_argv
+        .insert(language.to_ascii_lowercase(), argv);
+    output
+}
+
+/// The one field that legitimately varies between runs: `machine run --name`
+/// carries a random suffix so concurrent sandboxes don't collide.
+fn normalize_vm_name(argv: &[Vec<String>]) -> Vec<Vec<String>> {
+    argv.iter()
+        .map(|invocation| {
+            let mut out = invocation.clone();
+            if let Some(at) = out.iter().position(|arg| arg == "--name")
+                && let Some(name) = out.get_mut(at + 1)
+                && name.starts_with("sdk-")
+            {
+                *name = "<vm-name>".to_string();
+            }
+            out
+        })
+        .collect()
+}
+
+fn recorded(world: &CliWorld, language: &str) -> Vec<Vec<String>> {
+    world
+        .sdk_recorded_argv
+        .get(language)
+        .unwrap_or_else(|| panic!("no recorded argv for {language}"))
+        .clone()
+}
+
+#[when(expr = "I run the {string} SDK live-transport fixture")]
+fn run_live_transport_fixture(world: &mut CliWorld, language: String) {
+    world.sdk_output = Some(run_live_fixture(world, &language, "live", "dev"));
+}
+
+#[when(expr = "I run the {string} SDK refusal fixture against a sealed machine")]
+fn run_refusal_fixture(world: &mut CliWorld, language: String) {
+    world.sdk_output = Some(run_live_fixture(world, &language, "refusals", "prod"));
+}
+
+#[then("the recorded mvmctl argv matches the golden live session")]
+fn recorded_argv_matches_golden(world: &mut CliWorld) {
+    let golden_path = sdk_fixture_dir().join("live_session.jsonl");
+    let golden: Vec<Vec<String>> = std::fs::read_to_string(&golden_path)
+        .unwrap_or_else(|error| panic!("read {}: {error}", golden_path.display()))
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str(line).expect("golden live session is not JSON"))
+        .collect();
+
+    let language = world
+        .sdk_recorded_argv
+        .keys()
+        .next_back()
+        .expect("no fixture has run")
+        .clone();
+    let actual = normalize_vm_name(&recorded(world, &language));
+    assert_eq!(
+        actual,
+        golden,
+        "{language} live-mode argv drifted from {}",
+        golden_path.display()
+    );
+}
+
+#[then("the two recorded argv traces are identical")]
+fn recorded_argv_traces_agree(world: &mut CliWorld) {
+    let python = normalize_vm_name(&recorded(world, "python"));
+    let typescript = normalize_vm_name(&recorded(world, "typescript"));
+    assert_eq!(
+        python, typescript,
+        "Python and TypeScript drove `mvmctl` differently in live mode"
+    );
+}
+
+/// The `machine` subcommands the live SDK is allowed to reach for. Anchored on
+/// the CLI's own `MachineAction` / `VmCmd` surface: a live SDK call naming a
+/// verb outside this set would be rejected by the real parser.
+const LIVE_MACHINE_VERBS: [&str; 6] = ["run", "ls", "proc", "fs", "cp", "stop"];
+
+#[then("every recorded invocation names a machine verb the CLI defines")]
+fn recorded_argv_names_real_verbs(world: &mut CliWorld) {
+    let language = world
+        .sdk_recorded_argv
+        .keys()
+        .next_back()
+        .expect("no fixture has run")
+        .clone();
+    for invocation in recorded(world, &language) {
+        assert_eq!(
+            invocation.first().map(String::as_str),
+            Some("machine"),
+            "live SDK reached outside the `machine` command group: {invocation:?}"
+        );
+        let verb = invocation.get(1).map(String::as_str).unwrap_or_default();
+        assert!(
+            LIVE_MACHINE_VERBS.contains(&verb),
+            "live SDK named `machine {verb}`, which is not a verb the CLI defines \
+             for this path: {invocation:?}"
+        );
+    }
+}
+
+#[then("the SDK refused every dev-only and invalid-mode operation")]
+fn sdk_refused_every_guarded_operation(world: &mut CliWorld) {
+    let verdicts = sdk_json(world);
+    for (key, expected) in [
+        ("sealed_commands_start", "SandboxDevOnly"),
+        ("sealed_files_write", "SandboxDevOnly"),
+        ("plan_mode", "SandboxModeError"),
+        ("unknown_mode", "SandboxModeError"),
+    ] {
+        assert_eq!(
+            verdicts[key], expected,
+            "{key} was not refused; got {:?}",
+            verdicts[key]
+        );
+    }
+}
+
+#[then("no process or filesystem verb reached the CLI")]
+fn no_guarded_verb_reached_the_cli(world: &mut CliWorld) {
+    let language = world
+        .sdk_recorded_argv
+        .keys()
+        .next_back()
+        .expect("no fixture has run")
+        .clone();
+    for invocation in recorded(world, &language) {
+        let verb = invocation.get(1).map(String::as_str).unwrap_or_default();
+        assert!(
+            verb != "proc" && verb != "fs",
+            "a sealed machine let `machine {verb}` through to the CLI — the refusal \
+             must land before the shell-out: {invocation:?}"
+        );
+    }
+}

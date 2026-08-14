@@ -117,6 +117,11 @@ pub struct CliWorld {
     pub sdk_output: Option<Output>,
     /// SDK fixture surface most recently exercised (`decorator` or `runtime`).
     pub sdk_surface: Option<String>,
+    /// `mvmctl` argv the recording double captured, one entry per invocation,
+    /// keyed by the language whose fixture produced it.
+    pub sdk_recorded_argv: BTreeMap<String, Vec<Vec<String>>>,
+    /// Scenario-local directory holding the recording double's argv logs.
+    pub sdk_argv_log_dir: Option<tempfile::TempDir>,
     /// Result of exercising the signed-plan share gate with an attachment the
     /// plan did not authorize.
     pub volume_admission_result: Option<Result<(), String>>,

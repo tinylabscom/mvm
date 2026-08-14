@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+# Recording `mvmctl` double for the s27 SDK live-transport scenarios.
+#
+# One double, shared by the Python and TypeScript fixtures, so a scenario can
+# assert both languages drive the CLI through the same verbs in the same order.
+# The per-language unit suites each hand-roll their own stub; this one exists to
+# compare the two against each other and against a golden trace.
+#
+# Each invocation appends one JSON array of its full argv to $MVM_BDD_ARGV_LOG.
+# JSON rather than one-arg-per-line because argv legitimately contains `--`, so
+# any in-band line separator would be ambiguous.
+#
+# Responses are the minimum each verb's caller parses, nothing more.
+
+set -u
+
+if [ -n "${MVM_BDD_ARGV_LOG:-}" ]; then
+  python3 -c 'import json,sys; print(json.dumps(sys.argv[1:]))' "$@" >> "$MVM_BDD_ARGV_LOG"
+fi
+
+# `build_mode` decides whether the SDK permits the dev-only process and
+# filesystem verbs. Scenarios set it to `prod` to exercise the refusal path.
+build_mode="${MVM_BDD_BUILD_MODE:-dev}"
+vm_id="${MVM_BDD_VM_ID:-sdk-bdd-vm}"
+
+group="${1:-}"
+shift || true
+
+if [ "$group" != "machine" ]; then
+  echo "recording-mvmctl: expected the \`machine\` command group, got: $group" >&2
+  exit 64
+fi
+
+verb="${1:-}"
+shift || true
+
+case "$verb" in
+  run)
+    # `--up-json` envelope. `vm_id` is echoed back fixed so every later
+    # invocation carries a stable, assertable id.
+    echo "{\"schema_version\":1,\"vm_id\":\"$vm_id\",\"build_mode\":\"$build_mode\"}"
+    ;;
+  ls)
+    echo "[{\"name\":\"$vm_id\",\"build_mode\":\"$build_mode\"}]"
+    ;;
+  proc)
+    sub="${1:-}"
+    case "$sub" in
+      start) echo "${MVM_BDD_PROC_TOKEN:-ptok-bdd}" ;;
+      wait)
+        printf '%s' "${MVM_BDD_PROC_STDOUT:-}"
+        printf '%s' "${MVM_BDD_PROC_STDERR:-}" >&2
+        exit "${MVM_BDD_PROC_EXIT:-0}"
+        ;;
+      stdin) cat > /dev/null ;;
+      signal | kill) ;;
+      *)
+        echo "recording-mvmctl: unknown proc verb: $sub" >&2
+        exit 64
+        ;;
+    esac
+    ;;
+  fs)
+    sub="${1:-}"
+    case "$sub" in
+      write) cat > /dev/null ;;
+      read) printf '%s' "${MVM_BDD_FS_READ:-}" ;;
+      ls) echo "${MVM_BDD_FS_LS:-[]}" ;;
+      stat) echo "${MVM_BDD_FS_STAT:-{\}}" ;;
+      mkdir | rm | mv) ;;
+      *)
+        echo "recording-mvmctl: unknown fs verb: $sub" >&2
+        exit 64
+        ;;
+    esac
+    ;;
+  cp | stop | forward) ;;
+  *)
+    echo "recording-mvmctl: unknown machine verb: $verb" >&2
+    exit 64
+    ;;
+esac
+
+exit 0

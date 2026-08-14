@@ -73,6 +73,44 @@ record-mode ops, and codegen drift. Uncovered: live-mode transport, the
 (prod) refusal path, `MVM_SDK_MODE` resolution, recording caps, and Python↔TS
 public-surface parity.
 
+### Defect 6 — the published TypeScript SDK throws on every host-side call
+
+`@runmvm/mvm` is `"type": "module"` and `tsc` emits ESM, but `_sandbox.ts` and
+`_machine.ts` reached for node builtins with `require()` — 16 call sites. In ESM
+`require` is not defined, so **every** host-side entry point (`Machine.run` and
+every sibling verb, `Sandbox.create` in live mode, and each fs/proc operation)
+threw `ReferenceError: require is not defined` for anyone consuming the built
+package.
+
+The 132-test vitest suite never saw it: vitest runs the TypeScript *sources*
+through a module runner that supplies CJS interop. The defect only exists in the
+emitted artifact. `_hostsvc.ts` had already hit this and solved it correctly with
+`createRequire` — that fix just never propagated.
+
+Fixed by importing the builtins statically. `koffi` stays lazy behind
+`createRequire`: it is a native addon and deferring its load is deliberate. The
+new live-transport scenarios run the built ESM under plain `node`, which is what
+keeps this fixed.
+
+### Defect 7 — the Python and TypeScript public surfaces have diverged
+
+Comparing `mvm.__all__` against the TypeScript namespace's runtime keys
+(normalising case convention) gives 33 shared names, 38 Python-only and 18
+TypeScript-only. Two distinct problems are mixed together:
+
+- TypeScript exports internals that were never meant to be public:
+  `LiveTransport`, `parseUpEnvelope`, `deriveAttachedBuildMode`,
+  `flushRecordingToOutPath`, `currentRecording`, `SandboxCommands`,
+  `SandboxFiles`.
+- TypeScript is missing real Python surface: `func`, `session`, `egress`,
+  `dns_none` / `dns_resolver` / `dns_system`, `addon_use`, `host_port`,
+  `no_deps` / `node_deps` / `python_deps`, `derive_schema`, `warm_process`,
+  `workload_ref`, `current_session_id`, `RemoteFunction`.
+
+Some of the Python-only names are erased-at-runtime type exports and are not
+real divergence; separating those from the genuine gaps needs a decision about
+which surface is canonical, so it is split out rather than guessed at here.
+
 ## Non-goals
 
 - Booting a real microVM from a BDD scenario. The s27 suite stays hermetic;
@@ -105,32 +143,42 @@ public-surface parity.
 - [x] C3. Confirm each tripwire goes red when a fixture is added without an
       assertion
 
-### WS-D — one CLI double, anchored on the real parser
+### WS-D — fix the ESM packaging defect
 
-- [ ] D1. Teach `fake-mvm` the `machine {fs,proc,cp,forward}` routes the live
-      SDK actually calls; drop the retired top-level routes
-- [ ] D2. Record every argv the SDK emits under live mode
-- [ ] D3. Assert each recorded argv parses under the real `mvmctl` clap parser,
-      the same anchor the machine fixtures already have
+- [x] D1. Import node builtins statically in `_sandbox.ts` / `_machine.ts`;
+      keep `koffi` lazy behind `createRequire`
+- [x] D2. `npm run typecheck` and `npm run build` clean
+- [x] D3. Built artifact exercised under plain `node`, not only under vitest
 
-### WS-E — BDD coverage for the uncovered SDK surface
+### WS-E — BDD coverage for the live runtime surface
 
-- [ ] E1. `runtime_live_transport.feature` — live mode emits the expected
-      `mvmctl machine …` argv sequence, Python and TypeScript
-- [ ] E2. `machine_verbs.feature` — the `Machine` surface, all three languages,
-      against the canonical corpus
-- [ ] E3. `sandbox_fs_proc.feature` — filesystem and process ops round-trip
-- [ ] E4. `sdk_refusals.feature` — sealed-tier `commands.start` refusal,
-      `MVM_SDK_MODE=plan` rejection, recording caps
-- [ ] E5. `sdk_surface_parity.feature` — Python and TypeScript export the same
-      public surface
-- [ ] E6. Register the new suites in `model/claims.toml` / the conformance
-      runner as required by `xtask check-conformance`
+- [x] E1. `recording-mvmctl` — one CLI double shared by both languages,
+      capturing each invocation's argv as JSON
+- [x] E2. `python_live.py` / `typescript_live.mjs` — the same Sandbox session in
+      both languages, driving the built artifacts
+- [x] E3. `runtime_live_transport.feature` — the argv trace matches a golden
+      session, both languages produce identical traces, and every invocation
+      names a `machine` verb the CLI defines
+- [x] E4. Sealed-machine refusals: `commands.start` and `files.write` refused,
+      `MVM_SDK_MODE=plan` and an unknown mode rejected, and nothing reached the
+      CLI in any of those cases
+- [x] E5. No registration needed — `check-conformance` gates CONFORMANCE.md
+      against the claim model, not the feature-file set; the new suite is picked
+      up by the runner's directory walk. Gate confirmed clean.
+
+### WS-G — deferred, needs a decision (Defect 7)
+
+- [ ] G1. Decide which SDK surface is canonical
+- [ ] G2. Stop exporting `LiveTransport`, `parseUpEnvelope`,
+      `deriveAttachedBuildMode`, `flushRecordingToOutPath`, `currentRecording`,
+      `SandboxCommands`, `SandboxFiles` from the TypeScript package
+- [ ] G3. Close the genuine Python-only gaps in TypeScript
+- [ ] G4. Gate the agreed surface so it cannot drift again
 
 ### WS-F — gates and docs
 
-- [ ] F1. `cargo fmt --all -- --check`, `cargo clippy --workspace -- -D warnings`
+- [x] F1. `cargo fmt --all -- --check`, `cargo clippy --workspace -- -D warnings`
 - [ ] F2. `cargo nextest run --workspace` + `cargo test --workspace --doc`
-- [ ] F3. Python + TypeScript suites green
-- [ ] F4. `specs/REFACTOR-STATUS.md` rollup updated
-- [ ] F5. Delivery note under `specs/sprint/delivery/`
+- [x] F3. Python + TypeScript suites green
+- [x] F4. `specs/REFACTOR-STATUS.md` rollup updated
+- [x] F5. Delivery note under `specs/sprint/delivery/`
