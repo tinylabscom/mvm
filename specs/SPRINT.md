@@ -212,18 +212,33 @@
       `features/suites/s11_snapshot/hvf_save_restore.feature`; workspace
       nextest 10600 passed / 24 skipped.
 
-- [~] Open issue reconciliation — **plan 300**. The 31 issues open at the
-      2026-08-13 snapshot are inventoried against `origin/main` with an explicit
-      disposition, closure gate, and dependency-ordered execution phase. Eight
-      issues were closed on 2026-08-13: #2165, #2289, #2333, and #2423 as
-      completed by merged PRs; #2180, #2181, #2305, and #2413 as not planned /
-      superseded by Plan 316 or Plan 313. #2292 is now closed by PR #2463
-      (driver_boot split, no sudo bash launch, in-process API client). #2318 is
-      now closed by PR #2465: the receipt is documented as a record, the
-      redundant head `sync_all` is removed, missing/stale/torn head recovery is
-      under test, and the KVM `emit: receipt` re-measure showed p50 ~45.4 ms.
-      #2135 has PR #2472 open and Security workflow run 31817896244 pending.
-      28 issues remain open.
+- [~] Open issue reconciliation — **plan 300**. Every open issue is inventoried
+      against `origin/main` with an explicit disposition, closure gate, and
+      dependency-ordered execution phase. The count has moved 39 → 31 → 28 → 23.
+      Closed 2026-08-13: #2165, #2289, #2333, #2423 as completed by merged PRs;
+      #2180, #2181, #2305, #2413 as not planned / superseded by Plan 316 or Plan
+      313. Then #2292 (PR #2463 — driver_boot split, no sudo bash launch,
+      in-process API client), #2307, and #2318 (PR #2465 — the receipt is a
+      record not a control, the redundant head `sync_all` is removed, torn-head
+      recovery is under test, KVM `emit: receipt` re-measure p50 ~45.4 ms).
+      The 2026-08-14 pass closed five more, all combinations rather than
+      completions: #2347 into #2299 (both say the launch numbers are
+      untrustworthy — one because the test host is 7200rpm, one because
+      `guest_kernel_entry_ms` is 0.038 ms and the backends are not measured at
+      the same boundaries); #2281 into #2280 (two axes of one substrate, one
+      harness, one blocked-on-native-hosts prerequisite); #2199 into #2198 (a
+      contract and its enforcement gate, neither meaningful alone); #2193 into
+      #2194/#2196 (the prewarm substrate is merged; the residual per-backend
+      factory is only testable through each backend's live matrix); and the
+      #2166 epic into #2169 (three of four workstreams closed). Every
+      transferred criterion is recorded in the surviving issue. Two discrepancies
+      surfaced: Plan 316 Phase 2 was marked COMPLETE with six of seven boxes
+      unchecked and two verifiably undone, and Plan 316's phase ordering has
+      already slipped — Phase 3 is ahead of Phase 2. Both are corrected in the
+      plan. **23 issues remain open**, three of them blocked outside this
+      repository: #2299 and #2280 need an NVMe `/dev/kvm` host, #2083 needs
+      `mvm-studio#18`. #2135 has PR #2472 open with Security run 31817896244
+      pending.
 - [~] Runtime hardening for production — **plan 303**. Closes gaps between the
       binary CI witnesses and the binary that ships. Landed: trapping integer
       overflow in `[profile.release]` plus a `release-witness` CI lane over the
