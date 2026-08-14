@@ -211,6 +211,14 @@ build-supervisors:
     cargo build -p mvm-hostd --bin mvm-network-endpoint --bin mvm-hvf-supervisor
     cargo build -p mvm-hostd --bin mvm-libkrun-supervisor --features libkrun-sys
 
+# Drop the cached cross-compiled host binaries so the next build rebuilds them.
+# Dev builds reuse these instead of re-running cargo-zigbuild, which is ~93% of
+# mvm-cli's build-script wall time. Run this after editing anything they link
+# (mvm-build, mvm-core, ...) when you are about to boot a real VM; ordinary
+# check/test/clippy runs never need it. Release builds always rebuild.
+embed-refresh:
+    rm -rf target/*/build/mvm-cli-nested-target/host-vm-target
+
 # Build the dm-verity-capable workload kernel into the local mvm cache.
 # Set MVM_KERNEL_SOURCE=download to use the hash-verified release artifact, or
 
