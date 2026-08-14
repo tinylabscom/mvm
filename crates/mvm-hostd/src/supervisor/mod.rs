@@ -32,6 +32,7 @@ pub mod audit;
 pub mod audit_checkpoint;
 pub mod audit_dedup;
 pub mod audit_file;
+pub mod audit_mirror;
 pub mod audit_recorder;
 pub mod audit_segment;
 pub mod audit_set;
