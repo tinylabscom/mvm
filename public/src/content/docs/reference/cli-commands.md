@@ -448,6 +448,11 @@ guest, on any tier.
 | `mvmctl machine start <name> --dry-run --json` | Print the machine-start preflight summary as redacted JSON |
 | `mvmctl machine start <name> --json` | Print a redacted JSON start summary instead of plain text |
 | `mvmctl machine start <name> --receipt <path>` | Write a signed machine-start receipt with effective policy plus the resolved digest and start timestamp |
+| `mvmctl machine start <name> --image <ref>` | Start a persisted machine, creating its spec on demand if it does not exist. Combines `machine create <name> --image <ref>` and `machine start <name>` into one command |
+| `mvmctl machine start <name> --manifest <path>` | When auto-creating, source defaults (image, sizing, network, volumes, dev-init) from an image-backed `mvm.toml` / `Mvmfile.toml` |
+| `mvmctl machine start <name> --image <ref> --cpus N --memory SIZE` | Size the machine when auto-creating it (same defaults as `machine create`) |
+| `mvmctl machine start <name> --image <ref> --net --allow-host <host[:port]>` | Set egress policy when auto-creating the machine |
+| `mvmctl machine start <name> --image <ref> --force` | If the machine exists with a different config, stop the old instance, overwrite the spec, and start. Without `--force` a config mismatch errors |
 | `mvmctl machine restart <name>...` | Restart one or more named machines: stop if running, then start (same stop→start as a config-change recreate). This is also how a running machine picks up a newer version-matched runtime overlay. |
 | `mvmctl machine ls` (alias `ps`) | List persisted named machine specs |
 | `mvmctl machine ls --json` | Print persisted named machine specs as JSON |
