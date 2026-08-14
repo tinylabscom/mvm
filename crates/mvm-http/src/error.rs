@@ -45,6 +45,18 @@ pub enum Error {
     BodyTooLarge { limit: u64 },
     #[error("invalid header: {0}")]
     Header(String),
+    /// The upstream proxy refused or mishandled the tunnel. Distinct from
+    /// `Connect` (which is about reaching the proxy at all) so an operator can
+    /// tell "cannot reach the proxy" from "the proxy said no".
+    #[error("proxy {proxy} refused the tunnel to {target}: {reason}")]
+    Proxy {
+        proxy: String,
+        target: String,
+        reason: String,
+    },
+    /// The proxy configuration itself is unusable.
+    #[error(transparent)]
+    ProxyConfig(#[from] crate::proxy::ProxyError),
     #[error("response body was not valid utf-8")]
     NotUtf8,
     #[error("json error: {0}")]
