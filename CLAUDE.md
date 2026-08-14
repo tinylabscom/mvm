@@ -322,9 +322,22 @@ ADR-001 §"Appendix: Cardoso minimum-viable-policy checklist".
 10. **No untrusted workload reaches the network unless explicitly
     admitted by policy.** Sprint 52 W3. `policy_default_is_deny_all`
     and `run_net_default_is_deny_all` (the ADR-001 row's witnesses)
-    assert the default-deny posture; `mvmctl up` emits an opt-in warning when
-    the resolved policy is `unrestricted` (escape hatch is
-    `MVM_ACK_UNRESTRICTED_NETWORK=1`, never set in CI). Cardoso-flavoured
+    assert the default-deny posture. An unrecognised preset name refuses
+    rather than falling through to a permissive default, at the CLI and on
+    the wire alike (`crates/mvm-contract/tests/egress_predicate_algebra.rs`).
+
+    This bullet used to claim that "`mvmctl up` emits an opt-in warning when
+    the resolved policy is `unrestricted`", with an escape hatch of
+    `MVM_ACK_UNRESTRICTED_NETWORK=1`. **None of that exists.** `up` is not a
+    dispatched verb — `up::Args` is not a `Commands` variant, so its
+    `--network-preset` and `--network-allow` fields are unreachable CLI
+    surface. `MVM_ACK_UNRESTRICTED_NETWORK` is read nowhere in the workspace;
+    its only occurrence is a doc comment in `mvm-contract::stream::edge`
+    saying another mechanism is "shaped after" it. There is no unrestricted
+    acknowledgement, so nothing is being bypassed — but nothing warns either,
+    and `specs/plans/296` cites the non-existent hatch as prior art for its
+    E7 redaction opt-out. Building the acknowledgement is Plan 306 WS5.
+    Cardoso-flavoured
     audit of DNS / vsock control-plane carve-out / Plan 104 broker
     channels as covert egress is tracked in Plan 111 Workstream A.
 11. **Every application-dep volume is hash-locked, attestation-checked,
