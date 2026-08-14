@@ -2367,7 +2367,7 @@ Cross-sprint work tracked in `specs/plans/330-decision-provenance-layer.md`.
 - [x] Phase 1 — PROV-O export of existing audit events (`mvm-contract::provenance`, `mvm-core::provenance`, `mvmctl audit provenance export`). Implementation PR #2461.
 - [x] Phase 2 — Enrich audit events with authorizer/rationale. Implementation PR #2461.
 - [x] Phase 3 — `DecisionRecord` API and content-addressed store (PR #2461).
-- [ ] Phase 4 — Query API and causal chains.
+- [x] Phase 4 — Query API and causal chains: `trace`, `impact`, and `similar` queries over the cached decision store, exposed through `mvmctl trust audit decisions {trace,impact,similar}`.
 - [ ] Phase 5 — Optional standards interoperability.
 
 ## Appendix A — ADR consolidation clusters (~91 → ~15)

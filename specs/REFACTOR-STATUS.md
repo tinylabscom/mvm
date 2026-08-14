@@ -1,6 +1,6 @@
 # Refactor status
 
-Last updated: 2026-08-13
+Last updated: 2026-08-14
 
 This is the cross-plan progress index. The owning plan remains authoritative
 for detailed scope and acceptance criteria.
@@ -117,7 +117,7 @@ for detailed scope and acceptance criteria.
   - [x] Phase 1 — PROV-O export of existing events
   - [x] Phase 2 — Enrich existing audit events with authorizer/rationale
   - [x] Phase 3 — DecisionRecord API and content-addressed store
-  - [ ] Phase 4 — Query API and causal chains
+  - [x] Phase 4 — Query API and causal chains
   - [ ] Phase 5 — Optional standards interoperability
 
 - [~] Plan 325 — SDK sidecar reserved mount
