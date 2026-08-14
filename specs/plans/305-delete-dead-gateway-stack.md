@@ -188,7 +188,13 @@ roles build `tokio::runtime::Builder::new_multi_thread()`, so any allowlist it
 produces today is incomplete by construction and the failure mode is SIGSYS
 under load. Extend the tracer with `PTRACE_O_TRACECLONE` first.
 
-- [ ] Extend `seccomp-audit` to follow clones/threads
+- [x] Extend `seccomp-audit` to follow clones/threads. Two defects, not one:
+      the tracer set neither `PTRACE_O_TRACECLONE`/`FORK`/`VFORK` nor `__WALL`
+      and waited only on the main pid, and its syscall entry/exit state was a
+      single flag for the whole session — which pairs one thread's entry with
+      another's exit once siblings interleave. Fixing the option without the
+      per-tracee state would have produced a plausible but wrong allowlist,
+      which is worse than the honest limitation it replaced.
 - [ ] Derive the four allowlists on the live Linux box
 - [ ] One PR per role
 
