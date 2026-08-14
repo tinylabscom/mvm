@@ -10,9 +10,9 @@
 //!   symlink, no group- or world-writable artifact or directory.
 //! - [`posture`] decides *whether* to launch at all.
 //! - The version/capability handshake and the private readiness channel are
-//!   the server's half of the contract and are tracked upstream in
-//!   `mvm-studio#18`. Until that contract is frozen this command resolves,
-//!   validates, and refuses — it does not spawn.
+//!   the server's half of the contract and are owned by the Studio server
+//!   project. Until that contract is frozen this command resolves, validates,
+//!   and refuses — it does not spawn.
 //!
 //! That last point is deliberate. Spawning against an unfrozen handshake would
 //! mean shipping a success path that cannot be verified against a real server,
@@ -32,9 +32,9 @@ pub(in crate::commands) struct Args {
     /// Check the install and the environment, then report; never spawn.
     ///
     /// This is the only mode today. The spawn half needs the server's
-    /// version/capability handshake, which is frozen upstream in
-    /// `mvm-studio#18`, and a launch path that cannot be verified against a
-    /// real server is not worth shipping.
+    /// version/capability handshake, which the Studio server project owns and
+    /// has not frozen; a launch path that cannot be verified against a real
+    /// server is not worth shipping.
     #[arg(long, default_value_t = true)]
     pub check: bool,
 }
@@ -67,8 +67,8 @@ pub(in crate::commands) fn run(args: Args) -> Result<()> {
     if args.check {
         ui::info(
             "Not starting it: the version/capability handshake is the server's half of \
-             the contract and is still being frozen upstream (mvm-studio#18). \
-             This command validates the install and the environment today.",
+             the contract and has not been frozen yet. This command validates the \
+             install and the environment today.",
         );
     }
     Ok(())

@@ -358,13 +358,13 @@ mod tests {
     fn there_are_exactly_two_candidate_locations() {
         let candidates = candidate_paths(
             Path::new("/opt/mvm/bin/mvmctl"),
-            Path::new("/home/u/.mvm/bin"),
+            Path::new("/home/u/mvm-home/bin"),
         );
         assert_eq!(
             candidates,
             vec![
                 PathBuf::from("/opt/mvm/bin").join(STUDIO_SERVER_BIN),
-                PathBuf::from("/home/u/.mvm/bin").join(STUDIO_SERVER_BIN),
+                PathBuf::from("/home/u/mvm-home/bin").join(STUDIO_SERVER_BIN),
             ],
             "the search space is two fixed locations, in this order"
         );
