@@ -78,6 +78,33 @@ Each failure has been one layer deeper than the last and none has been the
 budget: first the build toolchain, then the image contract. That is the cost of
 a lane that could not be exercised before landing.
 
+## Third run: a Firecracker version too old for the launch path
+
+The sidecar gate passed and Firecracker was actually invoked, then:
+
+```
+Firecracker API socket .../fc.socket did not appear within 3s
+```
+
+The launch path passes `--enable-pci`, which the pinned v1.10.1 rejects
+outright — it exits before creating its API socket. The socket-wait timeout is
+the only symptom, and it names nothing about the cause.
+
+v1.10.1 came from copying `ci-full.yml`'s older spawn-smoke lane, which predates
+the PCI flag. The canonical version is
+`crates/mvm-core/src/config.rs::FC_VERSION_DEFAULT` (`v1.14.1`), which
+`nix/ops/hetzner/cloud-init.yaml` already tracks with a comment saying so; this
+lane now does too.
+
+**The same stale pin is still in `ci-full.yml`'s `workload-spawn-smoke-linux`
+lane.** It is `workflow_dispatch`-only, so nobody has run it into this. Not
+changed here because this PR cannot verify that lane, but it is very likely
+broken for the same one-line reason.
+
+A `failure()` step now dumps `firecracker.log` and `console.log` from the per-VM
+state dir. Firecracker's stderr goes there and never reached the job output,
+which is why three runs produced symptoms rather than causes.
+
 ## Not verified here
 
 **The budget has still never been exercised.** The first run died in the build step, so the

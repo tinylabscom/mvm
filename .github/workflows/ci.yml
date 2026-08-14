@@ -727,7 +727,11 @@ jobs:
       # would surprise-break on an unrelated image cut, and it would look like
       # a latency regression when it is not.
       IMAGE_TAG: v0.17.0
-      FC_VERSION: v1.10.1
+      # Must track `crates/mvm-core/src/config.rs::FC_VERSION_DEFAULT`. The
+      # launch path passes `--enable-pci`, which older Firecracker rejects
+      # outright: it exits before creating its API socket, and the only symptom
+      # is a socket-wait timeout that says nothing about the cause.
+      FC_VERSION: v1.14.1
     steps:
       - uses: actions/checkout@v6
 
@@ -817,6 +821,23 @@ jobs:
         run: |
           cargo test --test runtime_boot_bench \
             prebuilt_runtime_image_boots_within_budget -- --exact --nocapture
+
+      - name: Dump VMM diagnostics on failure
+        if: failure()
+        # Firecracker's stderr goes to `firecracker.log` in the per-VM state
+        # dir and its console to `console.log`; neither reaches the job output.
+        # Without this a launch failure surfaces only as "API socket did not
+        # appear", which is a symptom and never the cause.
+        run: |
+          for d in "$HOME"/.mvm/vms/*/; do
+            echo "===== $d ====="
+            ls -la "$d" || true
+            for f in firecracker.log console.log; do
+              if [ -s "$d$f" ]; then
+                echo "--- $f ---"; tail -50 "$d$f"
+              fi
+            done
+          done
 
   nix-flake-check:
     name: Nix flake check (Linux eval)
