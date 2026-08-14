@@ -1,5 +1,8 @@
 # mvm -- Firecracker MicroVM Development Tool
 
+Backing: shipped-source
+Validation: check-claim-catalog
+
 ## Project Overview
 
 Rust CLI for building and running Firecracker microVMs on macOS and Linux. Handles the full dev lifecycle: bootstrapping, Nix-based image builds, single-VM management, and reusable template creation.

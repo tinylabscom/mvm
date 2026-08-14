@@ -1,5 +1,8 @@
 # Agent Working Agreement
 
+Backing: shipped-source
+Validation: check-sprint-append
+
 ## Builder VM Requirement
 
 All Nix builds/evals, Firecracker operations, `mvmctl` runtime commands (anything that boots, talks to, or manages microVMs), and Linux-specific syscalls MUST run inside the project builder VM, not a Lima VM. Do not use `limactl` for this repo. The builder VM is the current Linux execution boundary for Nix and microVM work.

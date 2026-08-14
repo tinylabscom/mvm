@@ -1,5 +1,8 @@
 # Plan 300 — Open issue reconciliation and closeout
 
+Backing: shipped-source
+Validation: none
+
 **Status:** IN PROGRESS — tracker closed to zero 2026-08-14; the plans are now the ledger
 **Snapshot date:** 2026-08-14, against `origin/main` `2bc7dc2bc`
 
