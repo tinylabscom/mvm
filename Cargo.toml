@@ -327,11 +327,6 @@ flate2 = "1"
 hex = "0.4"
 tar = "0.4"
 xattr = "1"
-# Skip-capable substring search. Already compiled into every host binary via
-# globset -> aho-corasick, so a direct edge adds an import and no build cost.
-# Used where a scan runs over a whole multi-megabyte artifact on the launch
-# path, which a naive `windows().any()` walks quadratically.
-memchr = "2"
 # Read-only ext4 walker (deps bitflags + crc only). Replaces hand-rolled
 # raw-byte ext4 poking in the Stage 0 validators with a real inode lookup
 # (`fs.exists("/sbin/mvm-host-vm-init")`). `std` enables `load_from_path`.

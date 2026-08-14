@@ -301,6 +301,12 @@ jobs:
       - name: mvmctl default closure within budget
         run: cargo run -p xtask -- check-closure-budget
 
+      # Manifest-level sibling to the closure budgets, which resolve trees and
+      # therefore cannot see a member pinning a version behind the workspace
+      # table's back, or a table entry nobody inherits.
+      - name: workspace dependency table is the single version source
+        run: cargo run -p xtask -- check-workspace-dep-inheritance
+
       # Sibling to the default-closure budget: bounds what any *feature* can
       # pull in, which is where an off-by-default tree (wasm-backend's
       # wasmtime/cranelift family) would otherwise grow unobserved.

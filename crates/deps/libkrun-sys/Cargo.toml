@@ -36,7 +36,7 @@ doctest = false
 [dependencies]
 mvm-core.workspace = true
 libc.workspace = true
-tracing = "0.1"
+tracing.workspace = true
 # `serde` is always on (with `derive`) so the `KrunContext`,
 # `KrunDisk`, and `SupervisorConfig` types are serializable from
 # any consumer — notably `mvm-runtime::LibkrunBackend`, which

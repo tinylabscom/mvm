@@ -2,7 +2,8 @@
 
 ## Status
 
-**Not started.** Successor to [Plan 309](309-dependency-reduction.md), whose
+**Phase 5 and Phase 5.5 COMPLETE** (2026-08-14). macOS closure **238 → 232**;
+Linux unchanged at 243. Two gates added, each proven red. Successor to [Plan 309](309-dependency-reduction.md), whose
 Phases 0–2 and 4 landed and whose Phase 3 measured and declined the remaining
 candidates.
 
@@ -62,7 +63,7 @@ duplicated major:
 Each is a correction with no behaviour change, in the same class as Plan 309's
 Phase 0 (`rtnetlink`, `schemars`, `thiserror = "1"`).
 
-- [ ] **5.1 — `hickory-proto` is unconditional but every consumer is
+- [x] **5.1 — `hickory-proto` is unconditional but every consumer is
       `cfg(target_os = "linux")`.** `crates/mvm-hostd/Cargo.toml:138` declares
       `hickory-proto.workspace = true` in the plain `[dependencies]` table. Its
       only host consumer is `supervisor/raw_egress.rs`, where **all four
@@ -82,9 +83,15 @@ Phase 0 (`rtnetlink`, `schemars`, `thiserror = "1"`).
       `[target.'cfg(target_os = "linux")'.dependencies]`, beside the
       `seccompiler`/`landlock` entries that already model this correctly.
 
-      **−5 crates on macOS; 0 on Linux.** It also retires the shipped duplicate
-      `rand` major on macOS — a second CSPRNG and a second `getrandom` shim
-      compiled into a security product for nothing.
+      **Measured −6 on macOS (238 → 232); 0 on Linux.** It retires the shipped
+      duplicate `rand` major on macOS along with `chacha20` and
+      `data-encoding`.
+
+      Narrower than this plan first claimed: `rand_core` 0.10 **stays** on
+      macOS, reached through `aes-gcm` → `aead` → `crypto-common`. That is the
+      RustCrypto 0.11 stack the sealed guest agent needs, which Plan 309's
+      non-goals protect explicitly. So the duplicate `rand` is gone; the
+      duplicate `rand_core` is not, and is not this plan's to remove.
 
       This does **not** re-open Plan 309 Phase 3's decline of `hickory-proto`.
       That decline was against *replacing* it with bespoke DNS parsing, which
@@ -95,7 +102,7 @@ Phase 0 (`rtnetlink`, `schemars`, `thiserror = "1"`).
       --target x86_64-unknown-linux-gnu` stays green; the `raw_egress` DNS
       tests are Linux-gated already and must stay green there.
 
-- [ ] **5.2 — `memchr` is a dead `[workspace.dependencies]` entry.**
+- [x] **5.2 — `memchr` is a dead `[workspace.dependencies]` entry.**
       `Cargo.toml` declares it with a justification that is **factually
       false**: *"Already compiled into every host binary via globset ->
       aho-corasick, so a direct edge adds an import and no build cost. Used
@@ -111,7 +118,7 @@ Phase 0 (`rtnetlink`, `schemars`, `thiserror = "1"`).
       **0 crates** (`memchr` stays in the closure transitively via
       `aho-corasick`), one false claim removed.
 
-- [ ] **5.3 — 69 dependency declarations bypass `[workspace.dependencies]`.**
+- [x] **5.3 — 69 dependency declarations bypass `[workspace.dependencies]`.**
       Hardcoded versions across the member manifests, including three that
       duplicate a workspace-table entry verbatim (`async-trait = "0.1"` in
       `mvm-hostd`, `mvm-fs`, `mvm-runtime`; `rand = "0.8"` in `mvm-build`) and
@@ -124,12 +131,35 @@ Phase 0 (`rtnetlink`, `schemars`, `thiserror = "1"`).
       compiled a second proc-macro into the shipped binary until someone
       noticed by hand.
 
-      Fix: convert every declaration that has a workspace-table counterpart to
-      `.workspace = true`; leave genuinely single-consumer deps
-      (`virtio-queue`, `vm-memory`, `am-fs-ext4`, `wasmtime`) local, since
-      hoisting a one-crate dep into the shared table is its own smell.
+      **Scope corrected during implementation — the original wording here was
+      wrong and would have been destructive.** It said "convert every
+      declaration that has a workspace-table counterpart". Only 17 of the 69
+      have one, and **9 of those 17 are deliberate narrowings in
+      `mvm-contract`**, which is `#![no_std]` + alloc and builds on
+      `wasm32-unknown-unknown`. It declares `serde`, `serde_json`, `chrono`,
+      `ipnet`, `base64`, `ed25519-dalek`, `sha2` and `thiserror` with
+      `default-features = false` and `alloc` where the workspace table asks for
+      `std`. Converting those to `.workspace = true` would enable `std` in a
+      `no_std` crate and break the wasm target — and, through Cargo's
+      workspace-wide feature unification, could leak `std` into `mvm-contract`
+      for every consumer. `mvm-core`'s `rustls` entry is a narrowing too.
 
-- [ ] **5.4 — four stale entries in `deny.toml`'s `skip` list.**
+      Converted: only the **7 pins whose spec is byte-identical** to the table
+      — `rand` (mvm-build), `async-trait` (mvm-fs, mvm-hostd, mvm-runtime),
+      `tar` (mvm-cli, mvm-core), `tracing` (libkrun-sys). Pure redundancy, no
+      resolution change.
+
+      Left alone: the 9 `mvm-contract` narrowings, `mvm-core`'s `rustls`, and
+      the 52 genuinely single-consumer deps (`virtio-queue`, `vm-memory`,
+      `am-fs-ext4`, `wasmtime`, the four `nix` pins — the table has no `nix`
+      entry at all), since hoisting a one-crate dep into the shared table is
+      its own smell.
+
+      The gate in 5.5 encodes exactly this rule: a differing **version
+      requirement** is the bug; narrowing **features** at the same version is
+      the intended escape hatch.
+
+- [x] **5.4 — four stale entries in `deny.toml`'s `skip` list.**
       `cargo deny check bans` warns on `thiserror`, `thiserror-impl` (now
       single-version — Plan 309's write-up says it removed these; it did not),
       `which` (single-version), and `unicode-width` (not in the graph at all).
@@ -137,11 +167,19 @@ Phase 0 (`rtnetlink`, `schemars`, `thiserror = "1"`).
       "found, not fixed".
 
       A stale skip is a hole, not clutter: it silently pre-authorizes a future
-      duplicate of that exact crate. Remove the four warned entries, re-check
-      the nine `windows-*` ones, and prune whatever is stale.
+      duplicate of that exact crate.
 
-**Phase 5 exit:** Linux closure unchanged at 243; macOS 238 → 233. `cargo deny
-check bans` warning-free.
+      **Measured worse than the warnings first suggested: 18 of the 25 entries
+      were stale.** Beyond the four warned at the time, the whole per-arch
+      Windows shim family (`windows-targets` and nine `windows_<arch>_<abi>`
+      crates) and the host-syscall group (`linux-raw-sys`, `mio`, `nix`,
+      `redox_syscall`, `rustix`) had all converged to single versions. Seven
+      entries survive and are real: `windows-core`, `windows-sys`, `bitflags`,
+      `getrandom`, `rand`, `rand_core`, `vmm-sys-util`. `cargo deny check bans`
+      is now warning-free.
+
+**Phase 5 exit — achieved.** Linux closure unchanged at 243; macOS **238 → 232**
+(one better than the projected 233). `cargo deny check bans` warning-free.
 
 ---
 
@@ -154,13 +192,13 @@ shadows the workspace table (5.3) are all invisible to
 `check-closure-budget`, which measures one target with default features and
 therefore cannot observe any of them.
 
-- [ ] **`xtask check-workspace-dep-inheritance`** (new). Fails when a member
+- [x] **`xtask check-workspace-dep-inheritance`** (new). Fails when a member
       manifest hardcodes a version for a crate that `[workspace.dependencies]`
       already names, and when a `[workspace.dependencies]` entry has no
       inheritor. Catches 5.2 and 5.3 permanently, and would have caught the
       `thiserror = "1"` bug at the commit that introduced it.
 
-- [ ] **Extend `check-closure-budget` to a second target.** The gate measures
+- [x] **Extend `check-closure-budget` to a second target.** The gate measures
       only `x86_64-unknown-linux-gnu`, which is why 5.1 survived: macOS is the
       primary contributor and HVF-workload platform, and its closure is
       currently ungated. Add an `aarch64-apple-darwin` budget alongside the
@@ -169,12 +207,27 @@ therefore cannot observe any of them.
       This is the item with the most durable value in the plan. Every
       macOS-only dependency regression to date has been unobservable.
 
-- [ ] **Verify each gate goes red.** Per the repo's standing rule, a gate that
+- [x] **Verify each gate goes red.** Per the repo's standing rule, a gate that
       has not been proven to fail is not a gate: introduce the defect, confirm
       the failure, revert.
 
-**Phase 5.5 exit:** two new gates in the `Lint policy` job, each demonstrated
-red.
+**Phase 5.5 exit — achieved.** Both gates run in `ci.yml`'s lint job, and all
+three failure paths were demonstrated red and then restored:
+
+| proof | gate | observed |
+|---|---|---|
+| `mvm-build` re-pins `thiserror = "1"` | inheritance | names the file, both requirements, and the fix |
+| `memchr` re-added to the table | inheritance | reports it has no inheritor |
+| `hickory-proto` re-declared unconditionally | closure budget | **macOS 238 over budget 232, while Linux stayed green at 243** |
+
+The third proof is the plan's own thesis, executed: the defect is invisible to
+the Linux budget and caught by the macOS one.
+
+Writing the gate also surfaced a defect in itself. Its first run reported
+`predicates` as a dead table entry; the root `Cargo.toml` is both the workspace
+root *and* the `mvmctl` package, and its own `[dev-dependencies]` are the only
+inheritors of several entries. Scanning members but not the root reported those
+as dead. Fixed, with a regression test.
 
 ---
 
@@ -202,9 +255,17 @@ sealed guest, `clap`/`chrono`/`serde`/`flate2`/`rand`, `tree-sitter`,
 | Milestone | Linux | macOS | State |
 |---|---|---|---|
 | Baseline (Plan 309 exit) | 243 | 238 | — |
-| Phase 5 | 243 | **233** | planned |
-| Phase 5.5 | 243 | 233 | two gates, no cut |
+| Phase 5 | 243 | **232** | **landed** |
+| Phase 5.5 | 243 | 232 | **landed** — two gates, no cut |
 
-The honest summary: **−5 crates, on one platform.** The reason this plan is
-worth landing is not the five. It is that three separate dependency edges were
-invisible to every gate in the repo, and after Phase 5.5 they are not.
+The honest summary: **−6 crates, on one platform.** The reason this plan was
+worth landing is not the six. It is that three dependency edges and eighteen
+stale duplicate-authorisations were invisible to every gate in the repo, and
+after Phase 5.5 they are not.
+
+The plan's own 5.3 is the cautionary note. As first written it would have
+converted `mvm-contract`'s nine deliberate `no_std` narrowings to workspace
+inheritance, enabling `std` in a `no_std` crate and breaking the wasm target —
+a "hygiene" cleanup that would have been a genuine regression. Dependency
+hygiene work fails in exactly this way: the mechanical rule is easy and the
+exceptions are load-bearing.

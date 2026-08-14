@@ -106,47 +106,26 @@ highlight = "all"
 # as upstream majors converge or a dep is replaced — never grow it
 # without a recorded reason.
 skip = [
-    # Windows host-target shim families. The windows-sys / -core /
-    # -targets umbrellas and their per-arch link shims legitimately
-    # coexist at several majors across the graph; they are host/build
-    # only and carry no runtime surface on the Linux guest path.
+    # Windows host-target shim umbrellas. `windows-sys` and `windows-core`
+    # still coexist at two majors across the graph; they are host/build only
+    # and carry no runtime surface on the Linux guest path. The eleven
+    # per-arch link shims (`windows-targets`, `windows_<arch>_<abi>`) that
+    # used to be listed here have all converged to a single version and were
+    # removed -- a skip that matches nothing is a standing pre-authorisation
+    # for a duplicate that has not happened yet.
     "windows-core",
     "windows-sys",
-    "windows-targets",
-    "windows_aarch64_gnullvm",
-    "windows_aarch64_msvc",
-    "windows_i686_gnu",
-    "windows_i686_gnullvm",
-    "windows_i686_msvc",
-    "windows_x86_64_gnu",
-    "windows_x86_64_gnullvm",
-    "windows_x86_64_msvc",
 
-    # Host syscall layer mid-migration. rustix's move to linux-raw-sys
-    # 0.12, the nix 0.29→0.31 churn, and mio/redox_syscall sit at two
-    # majors because different deps track different releases. mvm pins
-    # a single major where it depends directly; the rest is transitive.
-    "linux-raw-sys",
-    "mio",
-    "nix",
-    "redox_syscall",
-    "rustix",
-
-    # Foundational crates mid v1→v2 ecosystem migration. mvm pins one
-    # major for each it uses directly (e.g. which = 7); the other major
-    # is dragged in by deps that have not finished migrating. Not
-    # collapsible without forking those deps.
+    # Foundational crates mid v1->v2 ecosystem migration. mvm pins one major
+    # for each it uses directly; the other is dragged in by deps that have not
+    # finished migrating. Not collapsible without forking those deps.
     "bitflags",
     "getrandom",
-    "thiserror",
-    "thiserror-impl",
-    "unicode-width",
-    "which",
 
-    # rand 0.8 (workspace direct) vs rand 0.10 (hickory-proto 0.26).
-    # hickory-proto already dragged rand 0.10 into the graph before
-    # the B4/C1 RustCrypto 0.11 migration; rand_core likewise.
-    # Not new duplicates — pre-existing, now documented.
+    # rand 0.8 (workspace direct) vs rand 0.10 (hickory-proto 0.26), and
+    # rand_core likewise. Linux-only as of the raw-egress target gating --
+    # hickory-proto no longer enters the macOS graph, so this pair is a
+    # duplicate on `*-linux-*` targets alone.
     "rand",
     "rand_core",
 
