@@ -40,15 +40,9 @@ thiserror.workspace = true
 tokio = { workspace = true, optional = true }
 toml.workspace = true
 tracing.workspace = true
-tracing-subscriber.workspace = true
 uuid.workspace = true
 regex.workspace = true
 tempfile.workspace = true
-# `mandatory_deny_ranges` parses a small set of
-# IPv4/IPv6 CIDRs (cloud metadata endpoint, link-local, CGNAT,
-# host loopback). Workspace-pinned (already used by
-# `mvm-supervisor::proxy::l4`).
-ipnet = { workspace = true }
 
 # Folded in with the former mvm-security crate: the
 # `crypto` module's AEAD (aes-gcm), HMAC, OS keychain (keyring),
@@ -173,6 +167,9 @@ name = "verify-pack-revocation-list"
 required-features = ["manifest-verify"]
 
 [dev-dependencies]
+# Test-only: the mandatory-deny range test parses CIDRs to cross-check the
+# generated iptables script. No production path in this crate uses it.
+ipnet = { workspace = true }
 # `OsRng` for generating fresh ed25519 keys in signed_config tests
 # without committing static fixtures. (Also a non-dev dep above for the
 # crypto module; kept here so a future dep-trim of the main `rand` does

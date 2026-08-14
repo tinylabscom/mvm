@@ -172,7 +172,16 @@ const MACOS_CLOSURE_BUDGET: usize = 232;
 /// SHA-1, so it cannot reuse the workspace's `sha2`; the feature pulls exactly
 /// one crate, `sha1_smol`, which is a leaf with no dependencies of its own.
 /// Measured net +1.
-pub(crate) const CLOSURE_BUDGET: usize = 243;
+/// 244 (was 243): the new first-party `mvm-observability` crate, which takes
+/// the subscriber-assembly half of `mvm-core::observability` (`logging` +
+/// the span-timing `Layer`). It carries no new third-party code —
+/// `tracing-subscriber` was already in this closure via `mvm-core`, and is
+/// now reached via `mvm-observability` instead. The point of the split is
+/// the crates that do NOT install a subscriber: `mvm-core` 110 -> 101, and
+/// the sealed guest agent `mvm-agentd` 111 -> 102 (its `tracing-subscriber`
+/// is now gated behind `addons`, since only the helper bins install one).
+/// Measured +1 here, -9 on the guest agent and the embedded musl bins.
+pub(crate) const CLOSURE_BUDGET: usize = 244;
 
 pub fn run(workspace: &Path) -> Result<()> {
     for budget in BUDGETS {

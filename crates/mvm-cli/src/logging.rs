@@ -1,9 +1,9 @@
 //! CLI logging setup.
 //!
-//! The subscriber assembly itself lives in `mvm_core::observability::logging`;
+//! The subscriber assembly itself lives in `mvm_observability::logging`;
 //! this module only maps the CLI's `-v` count onto a filter.
 
-pub use mvm_core::observability::logging::LogFormat;
+pub use mvm_observability::LogFormat;
 
 /// The default tracing filter for a `-v` count when `RUST_LOG` is unset.
 /// 0 = quiet (errors only); each `-v` widens it.
@@ -25,7 +25,7 @@ pub fn filter_for_verbosity(verbosity: u8) -> &'static str {
 /// Span profiling is independent of verbosity: when `MVM_SPAN_TIMINGS` is set,
 /// spans are measured even at the default quiet filter.
 pub fn init(format: LogFormat, verbosity: u8) {
-    mvm_core::observability::logging::init_with_filter(format, filter_for_verbosity(verbosity));
+    mvm_observability::init_with_filter(format, filter_for_verbosity(verbosity));
 }
 
 #[cfg(test)]

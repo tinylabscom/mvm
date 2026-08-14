@@ -3060,6 +3060,7 @@ dependencies = [
  "mvm-hostd",
  "mvm-http",
  "mvm-net",
+ "mvm-observability",
  "mvm-runtime",
  "mvm-sdk",
  "mvm-vmm",
@@ -3205,7 +3206,6 @@ dependencies = [
  "tokio",
  "toml 0.8.23",
  "tracing",
- "tracing-subscriber",
  "unicode-normalization",
  "uuid",
  "x25519-dalek",
@@ -3331,6 +3331,16 @@ dependencies = [
  "serde_json",
  "sha2 0.11.0",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "mvm-observability"
+version = "0.18.0"
+dependencies = [
+ "mvm-core",
+ "serde_json",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

@@ -7,7 +7,8 @@
 use std::thread::sleep;
 use std::time::Duration;
 
-use mvm_core::observability::span_timing::{SpanReport, SpanTimingLayer, SpanTimings};
+use mvm_core::observability::span_timing::{SpanReport, SpanTimings};
+use mvm_observability::SpanTimingLayer;
 use tracing::instrument;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::prelude::*;
