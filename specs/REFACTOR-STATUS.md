@@ -1098,9 +1098,9 @@ for detailed scope and acceptance criteria.
   - [x] Core boot contract: `ActivateEnvironment` over the authenticated
         vsock session, `ActivationState` gate, PID-1 agent with mount
         library + uid-901 drop (#1914)
-  - [x] Runner/driver adoption: QEMU unified runner (#1931), Docker
-        dev-tier (#1933), Wasm activation (#1936), Apple Container kernel
-        on HVF (#1968)
+  - [x] Runner/driver adoption: QEMU unified runner (#1931),
+        Docker dev-tier (#1933, removed by Plan 329), Wasm activation
+        (#1936), Apple Container kernel on HVF (#1968)
   - [x] Activation agent-readiness retry on the wire (#1985)
   - [x] Deterministic cargo initramfs replaces the Nix initramfs build
         (#1996); attestation stays the content hash + sidecar contract

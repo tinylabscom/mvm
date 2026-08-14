@@ -2059,7 +2059,7 @@ WS4/WS5/WS6 can proceed in parallel with WS1 sub-steps. WS3 depends on `mvm-net`
 
 ### Workstream: universal initramfs + vsock-activated boot (Plan 270) — COMPLETE
 
-Shipped in #1914 (core), #1931 (QEMU unified runner), #1933 (Docker dev-tier), #1936 (Wasm activation), #1968 (Apple Container kernel on HVF), #1985 (activation agent-readiness retry), and #1996 (deterministic cargo initramfs, which replaced the Nix initramfs build described below). Tracked in `specs/plans/270-universal-initramfs-vsock-activated-boot.md`. This workstream replaces the per-rootfs init paths (`mvm-verity-init`, `mvm-oci-init`, busybox `/init`) with one content-addressed initramfs in which `mvm-agentd` is PID 1 and receives a signed `ActivateEnvironment` command over vsock.
+Shipped in #1914 (core), #1931 (QEMU unified runner), #1933 (Docker dev-tier, subsequently removed by Plan 329), #1936 (Wasm activation), #1968 (Apple Container kernel on HVF), #1985 (activation agent-readiness retry), and #1996 (deterministic cargo initramfs, which replaced the Nix initramfs build described below). Tracked in `specs/plans/270-universal-initramfs-vsock-activated-boot.md`. This workstream replaces the per-rootfs init paths (`mvm-verity-init`, `mvm-oci-init`, busybox `/init`) with one content-addressed initramfs in which `mvm-agentd` is PID 1 and receives a signed `ActivateEnvironment` command over vsock.
 
 **Prerequisites:** satisfied. `feat/vsock-control-conformance` and `feat/firecracker-vsock-only-final` are already merged to `main`; `feat/hvf-converge-vsock` cleanup is in PR #1905.
 

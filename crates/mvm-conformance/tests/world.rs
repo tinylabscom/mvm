@@ -120,9 +120,6 @@ pub struct CliWorld {
     /// Result of exercising the signed-plan share gate with an attachment the
     /// plan did not authorize.
     pub volume_admission_result: Option<Result<(), String>>,
-    /// Result of asking a backend to accept a block-volume shape it cannot
-    /// honestly support.
-    pub volume_backend_result: Option<Result<(), String>>,
     // --- L3 TUN-over-vsock witnesses ---
     /// The machine a launch-guard scenario built.
     pub l3_machine: Option<mvm_runtime::machine::Machine>,

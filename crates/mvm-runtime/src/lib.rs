@@ -53,7 +53,6 @@ pub mod catalog;
 pub mod checkpoint;
 pub mod codesign;
 pub mod compat;
-pub mod docker_backend;
 pub mod driver;
 /// Per-VM transparent egress redirect used by the legacy libkrun gateway path.
 /// Cfg-free decode of the admitted plan's egress secret bindings, shared by

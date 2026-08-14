@@ -146,7 +146,10 @@ backend is chosen, and hold identically across all of them.
 
 On every default and production path, mvm has **no Tier 3** and no container/Docker fallback. A shared-kernel container is not a microVM: its isolation comes from the host kernel's namespace and cgroup machinery, which is shared with the host. In 2024–2025 the container ecosystem produced multiple CVEs (Leaky Vessels, NVIDIAScape, runc race conditions, Docker Desktop priv-esc, runc masked-path) that yielded **host escape** from inside a container — none of which matter inside a microVM, where the guest kernel is isolated by hardware. If a host has no microVM-capable backend, mvm does not silently drop to a weaker boundary; it fails closed.
 
-The one carve-out is an **explicitly selected dev tier** (ADR-034): `--hypervisor docker` runs the real `mvm-guest-agent` as a container's PID 1 with the real activation contract and RPC surface, so KVM-less dev and CI hosts can exercise workloads against the same code production runs. It is opt-in only (auto-detection never picks it), refused by production admission, labeled Tier 3 shared-kernel everywhere the tier is shown, and carries none of the hardware-isolation claims. It is a development substrate, not a fallback: nothing routes to it by default, by accident, or under production admission.
+There is no carve-out. ADR-034 has been retired and the Docker dev-tier
+backend removed (Plan 329). A host without a usable microVM backend fails
+closed; mvm does not offer a shared-kernel container path on any default,
+production, or explicitly selected runtime path.
 
 ### Choosing a tier
 

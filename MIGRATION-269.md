@@ -74,8 +74,7 @@ shells.
   sole path for selectable microVM backends.
 - `MockBackend` (`test-support` only).
 - `WasmBackend` (documented exemption — a WASI module boundary, not a microVM).
-- `AppleContainerBackend` and `DockerBackend` (pre-existing container-tier
-  backends; not part of this VMM-shim removal).
+- `AppleContainerBackend` (pre-existing container-tier backend; not part of this VMM-shim removal).
 - Test doubles inside `#[cfg(test)]` modules.
 
 ## Verification greps (run at start and end)

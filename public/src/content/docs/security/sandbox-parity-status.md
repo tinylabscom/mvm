@@ -58,9 +58,10 @@ exists.
 
 Today mvm builds rootfs from a Nix flake or from a bundled template
 catalog. There is no `mvmctl image pull` command, no OCI layer
-unpacker, and no digest-pinned launch path. The
-[round-trip OCI bridge](https://github.com/tinylabscom/mvm/blob/main/crates/mvm-runtime/src/docker.rs)
-loads mvm-built images into Docker; it does NOT pull upstream images.
+unpacker, and no digest-pinned launch path. There is no round-trip OCI bridge into a container runtime. OCI image
+support remains on the roadmap as a first-class microVM ingest path
+(digest-pinned pull and unpack into a verity-backed rootfs), not a
+container fallback.
 
 To move to Preview: ship `mvmctl image pull` with digest
 verification, layer unpack with whiteout, symlink, and hardlink

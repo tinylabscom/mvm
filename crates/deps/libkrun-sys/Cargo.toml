@@ -69,12 +69,6 @@ serde_json.workspace = true
 # `mvm-providers` + `serde_json` deps that previously gated the bin
 # moved with it. `serde_json` is still needed in `[dev-dependencies]`
 # for the `SupervisorConfig` / `KrunContext` serde-roundtrip tests.
-# The supervisor probes $PATH for helper binaries before
-# spawning it. `which` is already in the workspace dep tree
-# (mvm-cli/mvm-build); pulling it in here keeps the dep graph
-# uniform and avoids reinventing PATH search.
-which.workspace = true
-
 [features]
 default = []
 # Opt-in: generate FFI bindings and link `libkrun`. Off by default so

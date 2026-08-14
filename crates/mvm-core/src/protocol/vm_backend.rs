@@ -346,7 +346,7 @@ pub struct StandbyClaim {
 ///
 /// This trait lives in `mvm-core` so it has no runtime dependencies.
 /// Implementations live in `mvm` (Firecracker, Apple Container)
-/// or future crates (Docker).
+/// or backend-specific crates.
 ///
 /// # Examples
 ///

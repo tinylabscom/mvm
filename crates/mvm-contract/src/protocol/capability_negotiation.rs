@@ -404,8 +404,8 @@ mod tests {
     fn a_guest_nic_gap_has_no_alternative_and_says_why() {
         let required = require(|r| r.no_routable_guest_nic = true);
         let gaps = barren()
-            .negotiate(&required, BackendKind::Docker)
-            .expect_err("a shared-kernel tier cannot promise a NIC-less guest");
+            .negotiate(&required, BackendKind::Wasm)
+            .expect_err("a claim-free tier cannot promise a NIC-less guest");
         assert!(
             !gaps[0].is_actionable(),
             "a security boundary must not resolve to a workaround"

@@ -98,8 +98,8 @@ pub const fn install_hint() -> &'static str {
     }
     #[cfg(target_os = "windows")]
     {
-        "libkrun is not supported on Windows. Use --hypervisor docker \
-         or install WSL2 and run mvm inside a Linux distro."
+        "libkrun is not supported on Windows. Install WSL2
+         and run mvm inside a Linux distro."
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {

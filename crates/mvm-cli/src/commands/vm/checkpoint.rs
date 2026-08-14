@@ -943,6 +943,7 @@ fn boot_forked_child(p: BootForkedChildParams<'_>) -> Result<()> {
     use mvm_runtime::backend::AnyBackend;
 
     let effective_hypervisor = super::super::shared::resolve_effective_hypervisor(p.hypervisor);
+    AnyBackend::require_hypervisor_selectable(&effective_hypervisor)?;
     let parent_agent_verbs = parent_agent_verb_override(p.parent_checkpoint, p.store);
     let parent_meta = p.store.read_meta(p.parent_checkpoint)?;
 
