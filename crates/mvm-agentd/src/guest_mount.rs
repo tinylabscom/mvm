@@ -618,7 +618,7 @@ fn raise_ambient_capabilities(capabilities: u32) -> std::io::Result<()> {
 #[cfg(target_os = "linux")]
 fn drop_capability_bounding_set_to(keep: u32) -> std::io::Result<()> {
     for cap in 0..=63u32 {
-        if keep & (1u32 << cap) != 0 {
+        if keep as u64 & (1u64 << cap) != 0 {
             continue;
         }
         let rc = unsafe { libc::prctl(PR_CAPBSET_DROP, cap as libc::c_ulong, 0, 0, 0) };
