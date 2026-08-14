@@ -633,6 +633,40 @@ of the original and rewritten bytes) rather than the value itself. This
 reinforces claims 12 and 13 on the egress-delivery path; it does not
 replace either.
 
+## The check-time law
+
+*An effect may be checked no later than its last undo point.*
+
+We have obeyed this in two places without ever having stated it, which made it
+a judgement call each time instead of a lookup. A reversible effect can be
+checked at commit, because there is still something to undo. An irreversible
+one — a packet on the wire, a published artifact, a released secret — must be
+checked before it happens, because after it happens there is no state to
+restore.
+
+This is why `EgressGate` sits before the connection is opened rather than after
+the first byte, and why the audit chain records after the fact: the connection
+cannot be un-opened, and the record is not the effect.
+
+The value is prospective. When a new governed effect appears, "where does its
+gate go?" stops being a design discussion and becomes a question about whether
+the effect has an undo point.
+
+| Governed effect | Checked | Why |
+| --- | --- | --- |
+| Outbound connection (claim 10) | before | A packet on the wire cannot be recalled. |
+| Secret substitution (claims 12, 13) | before | A credential that reached the guest is disclosed, whatever happens next. |
+| Workload admission (claim 8) | before | Admission authorizes a boot; the boot is the effect. |
+| Rootfs integrity (claim 3) | before | A tampered image that executes has already run. |
+| Capability/`no_new_privs` drop | before | Both are one-way and inherited across exec; after exec there is nothing to drop. |
+| Ingress listener bind (Plan 316 phase 5) | before | A bound port is reachable from the moment it binds. |
+| Audit chain append (claim 8) | at commit | The record is evidence of an effect, not the effect. |
+| Execution receipt | at commit | A record, not a control — a failed emit is logged and does not block admission. |
+| Resource-usage accounting (preview 18) | at commit | Charges an effect that already occurred; the ceiling is the before-check. |
+
+A row that says *before* and a mechanism that runs after is a defect, not a
+tuning decision.
+
 ## Consequences
 
 ### Positive
