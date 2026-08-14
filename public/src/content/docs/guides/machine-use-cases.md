@@ -19,6 +19,7 @@ boundary only when a workflow actually needs Linux build or evaluation work.
 | Run a command in an OCI image | `mvmctl machine run --image ghcr.io/org/app:tag -- <cmd>` | OCI provenance, cache reuse, admission, receipts, and audit. |
 | Use a local image archive | `mvmctl machine run --image-archive ./image.tar -- <cmd>` | Offline-friendly image input through the same hardened unpack/admission path. |
 | Keep a dev machine around | `mvmctl machine create dev --image alpine` | Durable spec plus `start`, `exec`, `shell`, `stop`, `inspect`, and `rm`. |
+| Start a machine, creating it if missing | `mvmctl machine start dev --image alpine` | Combines `create` + `start`; useful for scripts and idempotent workflows. |
 | Declare a repeatable machine | `mvmctl machine create dev --manifest ./mvm.toml` | TOML-backed image, sizing, network, volume, and dev-init settings. |
 | Branch a running machine | `mvmctl machine fork dev --as dev-branch` | Snapshot a running VM and boot a fresh child with new identity and secrets. |
 | Branch a saved checkpoint | `mvmctl machine restore ckpt-dev-123 --as dev-restore` | Restore a `vm_full` checkpoint into a fresh child VM with new identity and secrets. |
@@ -56,8 +57,13 @@ Use digest-pinned image references for production or repeatable environments.
 Use named machines when you want state across starts:
 
 ```bash
+# Create and start as separate steps
 mvmctl machine create alpine-dev --image alpine:3.20 --net
 mvmctl machine start alpine-dev
+
+# Or combine them: start creates the spec if it does not exist
+mvmctl machine start alpine-dev --image alpine:3.20 --net
+
 mvmctl machine exec alpine-dev -- apk add jq
 mvmctl machine shell alpine-dev
 mvmctl machine stop alpine-dev
