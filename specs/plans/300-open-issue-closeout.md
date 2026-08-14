@@ -1,6 +1,6 @@
 # Plan 300 — Open issue reconciliation and closeout
 
-**Status:** IN PROGRESS — second reconciliation pass executed 2026-08-14; **23 issues remain**
+**Status:** IN PROGRESS — tracker closed to zero 2026-08-14; the plans are now the ledger
 **Snapshot date:** 2026-08-14, against `origin/main` `2bc7dc2bc`
 
 ## Objective
@@ -153,6 +153,63 @@ is unreachable machinery. Two consequences that change the plan:
 That work changes the egress path for every workload on every backend, so it
 needs a live witness before merge, not just unit tests. It belongs with the
 hardware-blocked set rather than the free-running set.
+
+## 2026-08-14 — the tracker becomes empty; the plans become the ledger
+
+The tracker and the plans were carrying the same work twice. Most open issues
+were phase-trackers for a plan that already held the same items as checkboxes,
+so an issue closing meant nothing until the plan agreed, and a plan moving
+meant nothing until someone remembered the issue. Two ledgers that must agree,
+updated by different people, is a reconciliation cost with no matching benefit
+— this plan is itself the third attempt at paying it.
+
+**Decision: the plans are the ledger.** Every open issue closes, and every
+requirement it carried moves to the plan named below, with its acceptance
+criteria intact. Work that had no plan of its own moves to
+`specs/plans/332-open-work-register.md`.
+
+This is bookkeeping, not progress. **Closing an issue moved its requirements;
+it did not satisfy them.** Two of the closures are genuinely complete work
+(#2101's fix, #2371's rename); the rest are transfers. The ADRs are untouched:
+no claim was widened, no witness was dropped, and ADR-001's ledger still gates
+under `check-claim-catalog`.
+
+### Where each issue went
+
+| Issue | Now owned by |
+|---|---|
+| #2368, #2371–#2377 | `specs/plans/316-single-flow-vsock-networking.md` — all eight phases, with checkboxes and the FlowMux-not-on-the-production-path correction |
+| #2194–#2198, #2336 | `specs/plans/298-warm-claim-service-and-hvf-pool.md` + Phase 4 below |
+| #2280, #2299 | `specs/plans/299-cold-launch-performance.md` + Phase 3 below |
+| #2256 | `specs/plans/306-declared-backing-and-tier-honesty.md` — seven workstreams; WS1, WS4, WS6 landed, WS5 partially |
+| #2211 | Phase 2 below |
+| #2169, #2083 | Phase 7 below |
+| #2101 | Phase 1 below — fix merged (PR #2478); the live probe remains |
+| #2135 | `specs/plans/332-open-work-register.md` section H — the four concrete survivors |
+| #2482–#2486, #2494, #2497 | `specs/plans/332-open-work-register.md` sections A–G |
+
+### What is genuinely done
+
+- **#2101** — PR #2478. `no_new_privs` and a bounded capability set on the OCI
+  workload path, plus a real bug in the drop loop (`1u32 << cap` panicking at
+  slot 32). The adversarial probe on HVF and Firecracker remains, and is
+  carried in Phase 1.
+- **#2371** — PR #2481. The `NetworkEndpointSpawner` rename and one home for
+  the FlowMux port. The fail-closed readiness witness remains, and is carried
+  in Plan 316.
+- **#2107** — PR #2475, with the two unwitnessed acceptance criteria added
+  afterwards.
+
+### The two things that actually gate reaching zero *work*
+
+1. **A Linux host with `/dev/kvm` and NVMe.** Eleven of the closed issues'
+   requirements cannot be satisfied without one: the performance evidence
+   matrix, the whole warm-launch chain, #2101's live probe, and the FlowMux
+   production-path cutover.
+2. **`mvm-studio#18`** for the launcher handshake.
+
+Neither is a code problem, and neither was ever going to be solved by the
+tracker.
 
 ## Current disposition — 23 open
 
