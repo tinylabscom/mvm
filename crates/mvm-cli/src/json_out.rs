@@ -5,13 +5,13 @@
 use anyhow::Result;
 use serde::Serialize;
 
-pub fn emit_json<T: Serialize>(value: &T) -> Result<()> {
+pub fn emit_json<T: Serialize + ?Sized>(value: &T) -> Result<()> {
     println!("{}", serde_json::to_string_pretty(value)?);
     Ok(())
 }
 
 /// Render to a `String` (test seam; `emit_json` prints this + newline).
-pub fn to_json_string<T: Serialize>(value: &T) -> Result<String> {
+pub fn to_json_string<T: Serialize + ?Sized>(value: &T) -> Result<String> {
     Ok(serde_json::to_string_pretty(value)?)
 }
 

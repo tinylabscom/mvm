@@ -178,12 +178,12 @@ Add structured decision fields to events that already exist.
 
 ### Phase 4 — Query API and causal chains
 
-- [ ] Implement `trace_decision_chain(decision_id)` over the decision store.
-- [ ] Implement `analyze_decision_impact(decision_id)` (forward traversal).
-- [ ] Implement `find_similar_decisions(scenario)` by category and artifact digests.
-- [ ] Add read-only query commands to `mvmctl` or `mvm-client`.
-- [ ] Add property-based tests for chain traversal.
-- [ ] Update `specs/SPRINT.md` and `specs/REFACTOR-STATUS.md`.
+- [x] Implement `trace_decision_chain(decision_id)` over the decision store.
+- [x] Implement `analyze_decision_impact(decision_id)` (forward traversal).
+- [x] Implement `find_similar_decisions(scenario)` by category and artifact digests.
+- [x] Add read-only query commands to `mvmctl` or `mvm-client`.
+- [x] Add property-based tests for chain traversal.
+- [x] Update `specs/SPRINT.md` and `specs/REFACTOR-STATUS.md`.
 
 ### Phase 5 — Optional standards interoperability
 

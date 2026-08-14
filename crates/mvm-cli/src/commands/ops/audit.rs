@@ -282,6 +282,42 @@ pub(in crate::commands) enum DecisionsAction {
         #[arg(long, short = 'o')]
         output: Option<std::path::PathBuf>,
     },
+    /// Trace the causal chain that led to a decision (backward traversal).
+    Trace {
+        /// Content-address (`sha256:<hex>`) of the decision to trace from.
+        decision_id: String,
+        /// Tenant whose decision cache to read. Defaults to `"local"`.
+        #[arg(long, default_value = "local")]
+        tenant: String,
+        /// Emit the chain as a JSON array to stdout.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show decisions that depend on or were caused by a decision (forward traversal).
+    Impact {
+        /// Content-address (`sha256:<hex>`) of the decision to analyze.
+        decision_id: String,
+        /// Tenant whose decision cache to read. Defaults to `"local"`.
+        #[arg(long, default_value = "local")]
+        tenant: String,
+        /// Emit the impacted decisions as a JSON array to stdout.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Find cached decisions similar to a given one.
+    ///
+    /// Similarity requires the same category and at least one overlapping
+    /// scenario field or artifact digest.
+    Similar {
+        /// Content-address (`sha256:<hex>`) of the seed decision.
+        decision_id: String,
+        /// Tenant whose decision cache to read. Defaults to `"local"`.
+        #[arg(long, default_value = "local")]
+        tenant: String,
+        /// Emit matches as a JSON array to stdout.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Result<()> {
@@ -335,6 +371,21 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             DecisionsAction::Export { tenant, output } => {
                 decisions_export(&tenant, output.as_deref())
             }
+            DecisionsAction::Trace {
+                decision_id,
+                tenant,
+                json,
+            } => decisions_trace(&tenant, &decision_id, json),
+            DecisionsAction::Impact {
+                decision_id,
+                tenant,
+                json,
+            } => decisions_impact(&tenant, &decision_id, json),
+            DecisionsAction::Similar {
+                decision_id,
+                tenant,
+                json,
+            } => decisions_similar(&tenant, &decision_id, json),
         },
         AuditAction::VerifyCert {
             cert,
@@ -2031,6 +2082,75 @@ fn decisions_export(tenant: &str, output: Option<&std::path::Path>) -> Result<()
             "exported {n} decision record(s) for tenant '{tenant}'",
             n = records.len()
         ));
+    }
+    Ok(())
+}
+
+fn decisions_trace(tenant: &str, decision_id: &str, json: bool) -> Result<()> {
+    let store = open_decision_store(tenant)?;
+    let id = DecisionId(decision_id.to_string());
+    let chain = store.trace_decision_chain(&id).with_context(|| {
+        format!("tracing decision chain for '{decision_id}' in tenant '{tenant}'")
+    })?;
+    emit_decision_records(&chain, json, "chain trace", tenant)
+}
+
+fn decisions_impact(tenant: &str, decision_id: &str, json: bool) -> Result<()> {
+    let store = open_decision_store(tenant)?;
+    let id = DecisionId(decision_id.to_string());
+    let impact = store.analyze_decision_impact(&id).with_context(|| {
+        format!("analyzing impact of decision '{decision_id}' in tenant '{tenant}'")
+    })?;
+    emit_decision_records(&impact, json, "impact analysis", tenant)
+}
+
+fn decisions_similar(tenant: &str, decision_id: &str, json: bool) -> Result<()> {
+    let store = open_decision_store(tenant)?;
+    let id = DecisionId(decision_id.to_string());
+    let seed = store
+        .get(&id)
+        .with_context(|| format!("reading seed decision '{decision_id}' in tenant '{tenant}'"))?
+        .with_context(|| {
+            format!("seed decision '{decision_id}' not found for tenant '{tenant}'")
+        })?;
+    let similar = store.find_similar_decisions(&seed).with_context(|| {
+        format!("finding similar decisions for '{decision_id}' in tenant '{tenant}'")
+    })?;
+    emit_decision_records(&similar, json, "similar-decision query", tenant)
+}
+
+fn emit_decision_records(
+    records: &[mvm_contract::provenance::DecisionRecord],
+    json: bool,
+    label: &str,
+    tenant: &str,
+) -> Result<()> {
+    if json {
+        crate::json_out::emit_json(records)?;
+        return Ok(());
+    }
+
+    if records.is_empty() {
+        ui::info(&format!(
+            "No decision records found for {label} in tenant '{tenant}'."
+        ));
+        return Ok(());
+    }
+
+    ui::success(&format!(
+        "{n} decision record(s) for {label} in tenant '{tenant}'",
+        n = records.len()
+    ));
+    println!(
+        "{:<64} {:<12} {:<10} PLAN_ID",
+        "DECISION_ID", "CATEGORY", "OUTCOME"
+    );
+    for r in records {
+        let plan_id = r.scenario.plan_id.as_deref().unwrap_or("-");
+        println!(
+            "{:<64} {:<12?} {:<10?} {}",
+            r.decision_id.0, r.category, r.outcome, plan_id
+        );
     }
     Ok(())
 }

@@ -416,6 +416,9 @@ const DECISIONS_SUB: &[(&str, AuditPosture)] = &[
     ("list", AuditPosture::ReadOnly),
     ("show", AuditPosture::ReadOnly),
     ("export", AuditPosture::ReadOnly),
+    ("trace", AuditPosture::ReadOnly),
+    ("impact", AuditPosture::ReadOnly),
+    ("similar", AuditPosture::ReadOnly),
 ];
 
 const AUDIT_SUB: &[(&str, AuditPosture)] = &[

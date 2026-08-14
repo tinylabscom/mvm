@@ -18,12 +18,13 @@
 //! store can be deleted and rebuilt by replaying verified `decision_record`
 //! events from `tenant.jsonl`.
 
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use ed25519_dalek::VerifyingKey;
-use mvm_contract::provenance::{DecisionId, DecisionRecord};
+use mvm_contract::provenance::{DecisionId, DecisionRecord, DecisionScenario};
 
 use crate::audit::emitter::write_atomic;
 use crate::supervisor::audit_file::{flock_exclusive, verify_audit_chain_entries};
@@ -169,6 +170,94 @@ impl DecisionStore {
         Ok(())
     }
 
+    /// Trace the causal chain that led to `id`.
+    ///
+    /// Performs a backward traversal over the cached decision records, following
+    /// every `causal_links` entry to its predecessor. The returned vector is
+    /// ordered from the earliest ancestor to `id` itself, so the last element is
+    /// the requested decision. Cycles are broken by a visited set.
+    pub fn trace_decision_chain(&self, id: &DecisionId) -> Result<Vec<DecisionRecord>> {
+        let records = self.list()?;
+        let by_id: HashMap<DecisionId, DecisionRecord> = records
+            .into_iter()
+            .map(|r| (r.decision_id.clone(), r))
+            .collect();
+        let mut visited = HashSet::new();
+        let mut chain = Vec::new();
+        trace_dfs(id, &by_id, &mut visited, &mut chain)
+            .with_context(|| format!("tracing causal chain for decision {}", id.0))?;
+        Ok(chain)
+    }
+
+    /// Analyze the forward impact of a decision.
+    ///
+    /// Returns every cached decision that transitively depends on `id`, ordered
+    /// by distance from `id` (breadth-first). The first element is `id` itself.
+    /// Cycles are broken by a visited set.
+    pub fn analyze_decision_impact(&self, id: &DecisionId) -> Result<Vec<DecisionRecord>> {
+        let records = self.list()?;
+        let by_id: HashMap<DecisionId, DecisionRecord> = records
+            .iter()
+            .map(|r| (r.decision_id.clone(), r.clone()))
+            .collect();
+        let mut reverse: HashMap<DecisionId, Vec<DecisionId>> = HashMap::new();
+        for record in &records {
+            for link in &record.causal_links {
+                reverse
+                    .entry(link.decision_id.clone())
+                    .or_default()
+                    .push(record.decision_id.clone());
+            }
+        }
+
+        let mut visited = HashSet::new();
+        let mut queue = VecDeque::new();
+        queue.push_back(id.clone());
+        visited.insert(id.clone());
+
+        let mut impact = Vec::new();
+        while let Some(current) = queue.pop_front() {
+            let record = by_id.get(&current).with_context(|| {
+                format!("missing decision record {} in impact analysis", current.0)
+            })?;
+            impact.push(record.clone());
+            let children = reverse.get(&current).map(|v| v.as_slice()).unwrap_or(&[]);
+            for child in children {
+                if visited.insert(child.clone()) {
+                    queue.push_back(child.clone());
+                }
+            }
+        }
+        Ok(impact)
+    }
+
+    /// Find cached decisions similar to `seed`.
+    ///
+    /// Similarity requires the same `category` and at least one overlapping
+    /// scenario field (`plan_id`, `workload_addr`, `capability_id`, `approval_id`)
+    /// or artifact digest entry. The seed record itself is excluded from results.
+    pub fn find_similar_decisions(&self, seed: &DecisionRecord) -> Result<Vec<DecisionRecord>> {
+        let records = self.list()?;
+        let mut similar = Vec::new();
+        for record in records {
+            if record.decision_id == seed.decision_id {
+                continue;
+            }
+            if record.category != seed.category {
+                continue;
+            }
+            if scenarios_overlap(&record.scenario, &seed.scenario)
+                || artifact_digests_overlap(
+                    &record.attestation.artifact_digests,
+                    &seed.attestation.artifact_digests,
+                )
+            {
+                similar.push(record);
+            }
+        }
+        Ok(similar)
+    }
+
     fn path_for(&self, id: &DecisionId) -> PathBuf {
         self.tenant_dir.join(format!("{}.json", id.0))
     }
@@ -186,6 +275,44 @@ impl DecisionStore {
     }
 }
 
+fn trace_dfs(
+    id: &DecisionId,
+    by_id: &HashMap<DecisionId, DecisionRecord>,
+    visited: &mut HashSet<DecisionId>,
+    out: &mut Vec<DecisionRecord>,
+) -> Result<()> {
+    if !visited.insert(id.clone()) {
+        return Ok(());
+    }
+    let record = by_id
+        .get(id)
+        .with_context(|| format!("missing decision record {} in causal chain", id.0))?;
+    for link in &record.causal_links {
+        trace_dfs(&link.decision_id, by_id, visited, out)?;
+    }
+    out.push(record.clone());
+    Ok(())
+}
+
+fn scenarios_overlap(a: &DecisionScenario, b: &DecisionScenario) -> bool {
+    option_eq(a.plan_id.as_deref(), b.plan_id.as_deref())
+        || option_eq(a.workload_addr.as_deref(), b.workload_addr.as_deref())
+        || option_eq(a.capability_id.as_deref(), b.capability_id.as_deref())
+        || option_eq(a.approval_id.as_deref(), b.approval_id.as_deref())
+}
+
+fn option_eq(a: Option<&str>, b: Option<&str>) -> bool {
+    matches!((a, b), (Some(a), Some(b)) if a == b)
+}
+
+fn artifact_digests_overlap(
+    a: &std::collections::BTreeMap<String, String>,
+    b: &std::collections::BTreeMap<String, String>,
+) -> bool {
+    a.iter()
+        .any(|(key, value)| b.get(key).map(|v| v == value).unwrap_or(false))
+}
+
 /// Holds the decision store's exclusive lock for as long as it is alive.
 struct LockGuard {
     _file: std::fs::File,
@@ -196,6 +323,7 @@ mod tests {
     use super::*;
     use mvm_contract::provenance::{
         ActorRef, AttestationBinding, DecisionCategory, DecisionOutcome, DecisionRecordBuilder,
+        DecisionScenario,
     };
 
     fn sample_record(plan_id: &str) -> DecisionRecord {
@@ -206,6 +334,10 @@ mod tests {
                 principal: "host:builder".to_string(),
                 key_id: "signer-1".to_string(),
                 key_role: None,
+            })
+            .scenario(DecisionScenario {
+                plan_id: Some(plan_id.to_string()),
+                ..DecisionScenario::default()
             })
             .reasoning("grant ceiling satisfied")
             .outcome(DecisionOutcome::Approved)
@@ -328,5 +460,127 @@ mod tests {
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].decision_id, id);
         assert_eq!(list[0].category, DecisionCategory::Admission);
+    }
+
+    #[test]
+    fn trace_decision_chain_follows_causal_links() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = DecisionStore::open(tmp.path(), "local").unwrap();
+
+        let a = sample_record("plan-a");
+        let a_id = store.put(&a).unwrap();
+
+        let mut b = sample_record("plan-b");
+        b.causal_links.push(mvm_contract::provenance::CausalLink {
+            relation: mvm_contract::provenance::CausalRelation::Caused,
+            decision_id: a_id.clone(),
+        });
+        b.decision_id = b.compute_id();
+        let b_id = store.put(&b).unwrap();
+
+        let mut c = sample_record("plan-c");
+        c.causal_links.push(mvm_contract::provenance::CausalLink {
+            relation: mvm_contract::provenance::CausalRelation::Caused,
+            decision_id: b_id.clone(),
+        });
+        c.decision_id = c.compute_id();
+        let c_id = store.put(&c).unwrap();
+
+        let chain = store.trace_decision_chain(&c_id).unwrap();
+        assert_eq!(chain.len(), 3);
+        assert_eq!(chain[0].decision_id, a_id);
+        assert_eq!(chain[1].decision_id, b_id);
+        assert_eq!(chain[2].decision_id, c_id);
+    }
+
+    #[test]
+    fn analyze_decision_impact_traverses_forward() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = DecisionStore::open(tmp.path(), "local").unwrap();
+
+        let a = sample_record("plan-a");
+        let a_id = store.put(&a).unwrap();
+
+        let mut b = sample_record("plan-b");
+        b.causal_links.push(mvm_contract::provenance::CausalLink {
+            relation: mvm_contract::provenance::CausalRelation::Caused,
+            decision_id: a_id.clone(),
+        });
+        b.decision_id = b.compute_id();
+        let b_id = store.put(&b).unwrap();
+
+        let mut c = sample_record("plan-c");
+        c.causal_links.push(mvm_contract::provenance::CausalLink {
+            relation: mvm_contract::provenance::CausalRelation::Caused,
+            decision_id: b_id.clone(),
+        });
+        c.decision_id = c.compute_id();
+        let c_id = store.put(&c).unwrap();
+
+        let impact = store.analyze_decision_impact(&a_id).unwrap();
+        assert_eq!(impact.len(), 3);
+        assert_eq!(impact[0].decision_id, a_id);
+        assert_eq!(impact[1].decision_id, b_id);
+        assert_eq!(impact[2].decision_id, c_id);
+    }
+
+    #[test]
+    fn find_similar_decisions_matches_category_and_scenario() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = DecisionStore::open(tmp.path(), "local").unwrap();
+
+        let mut seed = sample_record("plan-shared");
+        seed.category = DecisionCategory::Launch;
+        seed.attestation
+            .artifact_digests
+            .insert("kernel".to_string(), "sha256:abc".to_string());
+        seed.decision_id = seed.compute_id();
+        let seed_id = store.put(&seed).unwrap();
+
+        let mut similar = sample_record("plan-shared");
+        similar.category = DecisionCategory::Launch;
+        similar.reasoning = "similar launch".to_string();
+        similar.decision_id = similar.compute_id();
+        store.put(&similar).unwrap();
+
+        let mut different_category = sample_record("plan-shared");
+        different_category.category = DecisionCategory::Admission;
+        different_category.decision_id = different_category.compute_id();
+        store.put(&different_category).unwrap();
+
+        let mut different_plan = sample_record("plan-other");
+        different_plan.category = DecisionCategory::Launch;
+        different_plan.decision_id = different_plan.compute_id();
+        store.put(&different_plan).unwrap();
+
+        let mut by_digest = sample_record("plan-unrelated");
+        by_digest.category = DecisionCategory::Launch;
+        by_digest.scenario.plan_id = Some("plan-unrelated".to_string());
+        by_digest
+            .attestation
+            .artifact_digests
+            .insert("kernel".to_string(), "sha256:abc".to_string());
+        by_digest.decision_id = by_digest.compute_id();
+        store.put(&by_digest).unwrap();
+
+        let found = store.find_similar_decisions(&seed).unwrap();
+        let ids: Vec<_> = found.iter().map(|r| r.decision_id.0.clone()).collect();
+        assert!(
+            ids.contains(&similar.decision_id.0),
+            "same plan launch should match"
+        );
+        assert!(
+            !ids.contains(&different_category.decision_id.0),
+            "different category should not match"
+        );
+        assert!(
+            !ids.contains(&different_plan.decision_id.0),
+            "different plan should not match"
+        );
+        assert!(
+            ids.contains(&by_digest.decision_id.0),
+            "matching digest should match"
+        );
+        assert!(!ids.contains(&seed_id.0), "seed should be excluded");
     }
 }
