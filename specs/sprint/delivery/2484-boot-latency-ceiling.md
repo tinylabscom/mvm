@@ -58,6 +58,26 @@ Worth noting for the workflow-linting gap tracked separately: no linter would
 have caught this. The YAML was valid and `actionlint` passed both before and
 after. A missing build dependency is only observable by running the job.
 
+## Second run: the pinned image needs its sidecar
+
+With zig installed the lane built and reached a real VM start, which then
+refused:
+
+```
+refusing to start VM: rootfs at /tmp/boot-image has no `mvm-meta.json` sidecar
+```
+
+`admit_runtime_overlay_contract` reads `mvm-meta.json` from the rootfs's own
+directory. The release does publish that sidecar, as
+`default-microvm-meta-x86_64.json` — arch-qualified, because release assets
+share one flat namespace — so the lane fetches it, verifies it under that name,
+and copies it to the name the gate looks for. Its `overlayAware: true` is what
+the gate needs under the default runtime-source policy.
+
+Each failure has been one layer deeper than the last and none has been the
+budget: first the build toolchain, then the image contract. That is the cost of
+a lane that could not be exercised before landing.
+
 ## Not verified here
 
 **The budget has still never been exercised.** The first run died in the build step, so the

@@ -780,15 +780,22 @@ jobs:
           set -euo pipefail
           mkdir -p /tmp/boot-image && cd /tmp/boot-image
           base="https://github.com/tinylabscom/mvm/releases/download/${IMAGE_TAG}"
-          for f in default-microvm-vmlinux-x86_64 default-microvm-rootfs-x86_64.ext4; do
+          for f in default-microvm-vmlinux-x86_64 default-microvm-rootfs-x86_64.ext4 \
+                   default-microvm-meta-x86_64.json; do
             curl -fL --retry 3 -o "$f" "$base/$f"
           done
           curl -fL --retry 3 -o checksums.txt \
             "$base/default-microvm-x86_64-checksums-sha256.txt"
-          grep -E ' (default-microvm-vmlinux-x86_64|default-microvm-rootfs-x86_64\.ext4)$' \
+          grep -E ' (default-microvm-vmlinux-x86_64|default-microvm-rootfs-x86_64\.ext4|default-microvm-meta-x86_64\.json)$' \
             checksums.txt > expected.txt
           test -s expected.txt
           sha256sum -c expected.txt
+          # The runtime-overlay admission gate reads `mvm-meta.json` from the
+          # rootfs's own directory and refuses to boot without it. The release
+          # publishes that sidecar under an arch-qualified asset name, so it has
+          # to be put back under the name the gate looks for. Verified above
+          # under its asset name before being renamed.
+          cp default-microvm-meta-x86_64.json mvm-meta.json
           ls -la
 
       - name: Boot within the ceiling
