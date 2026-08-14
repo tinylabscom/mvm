@@ -5,6 +5,7 @@ mod builder_shell_job;
 mod bundle;
 pub mod catalog;
 mod cmd_audit;
+mod dashboard;
 mod deploy;
 mod deps;
 mod dispatch;
@@ -134,6 +135,10 @@ pub(in crate::commands) enum Commands {
     /// System diagnostics and dependency checks
     #[command(display_order = 5)]
     Doctor(env::doctor::Args),
+    /// Check the local mvm-studio dashboard install (dev surface; hidden until
+    /// the server handshake is frozen upstream)
+    #[command(display_order = 20, hide = true)]
+    Dashboard(dashboard::Args),
     /// Report whether a verified runtime pack is ready for instant launch
     #[command(display_order = 6)]
     Prepare(vm::prepare::Args),
