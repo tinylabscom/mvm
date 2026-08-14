@@ -105,7 +105,6 @@ tempfile.workspace = true
 thiserror.workspace = true
 toml.workspace = true
 tracing.workspace = true
-tokio = { workspace = true, features = ["rt-multi-thread", "sync"] }
 # `builder_protocol::{HostVmRequest,HostVmResponse}`
 # carry a `JobId(Uuid)` to disambiguate concurrent dispatches over
 # the persistent VM channel. Existing mvm-core / mvm-cli call sites
