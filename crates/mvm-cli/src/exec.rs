@@ -96,6 +96,9 @@ pub enum ImageSource {
         /// from this candidate + the backend capability + sealed state.
         virtiofs_oci_root: Option<VirtiofsOciRoot>,
     },
+    /// Pre-built `wasm32-wasip1` module run directly under the wasm backend.
+    /// No kernel, initrd, or rootfs — the module path is the workload.
+    WasmModule { module_path: String, label: String },
 }
 
 /// A candidate unpacked OCI tree to boot as a virtiofs root, carried from OCI
@@ -131,6 +134,9 @@ pub fn runtime_source_policy_for(
         }
         ImageSource::Prebuilt { .. } => {
             mvm_core::vm_backend::RuntimeSourceLaunchKind::InjectedRootfs
+        }
+        ImageSource::WasmModule { .. } => {
+            mvm_core::vm_backend::RuntimeSourceLaunchKind::WorkloadImage
         }
     };
     let root_strategy = match root_strategy {
@@ -1026,8 +1032,17 @@ fn run_inner(
     // Install Ctrl-C handler that tears the VM down.
     let interrupted = install_ctrlc_teardown(&vm_name, backend.name());
 
-    // Run the command + always tear down.
-    let run_outcome = run_in_guest(&vm_name, &req, capture, timing, &mut sub_marks);
+    // Run the command + always tear down. The wasm backend has no guest
+    // agent; the module already ran inside `start`, so we just collect its
+    // exit status instead of waiting for a vsock console.
+    let run_outcome = if backend.name() == "wasm" {
+        match run_wasm_module(&backend, &vm_name) {
+            Ok(code) => Ok((Either::Left(code), None)),
+            Err(e) => Err(e),
+        }
+    } else {
+        run_in_guest(&vm_name, &req, capture, timing, &mut sub_marks)
+    };
     let t_command_done = timing.then(std::time::Instant::now);
     let (result, t_vsock_ready) = match run_outcome {
         Ok((either, vsock_ready)) => (Ok(either), vsock_ready),
@@ -1325,6 +1340,16 @@ fn resolve_image_artifacts(image: &ImageSource) -> Result<ResolvedImage> {
             snap_info: None,
             template_id: None,
         }),
+        ImageSource::WasmModule { module_path, label } => Ok(ResolvedImage {
+            vmlinux: String::new(),
+            initrd: None,
+            rootfs: module_path.clone(),
+            revision: String::new(),
+            flake_ref: label.clone(),
+            profile: None,
+            snap_info: None,
+            template_id: None,
+        }),
     }
 }
 
@@ -1366,8 +1391,13 @@ fn resolve_boot_strategy(
     // ship `rootfs.verity` + `rootfs.roothash` next to `rootfs.ext4`. Their
     // absence is the dev-VM exemption. This is host-local and side-effect-free;
     // foreground OCI launches must never boot the builder/dev VM just to probe.
+    // Wasm modules have no block rootfs, so there is no sidecar to probe.
     sub.start(SubPhase::ArtifactVerify);
-    let (verity_path, roothash) = mvm_runtime::microvm::probe_verity_sidecar(&resolved.rootfs);
+    let (verity_path, roothash) = if backend.name() == "wasm" {
+        (None, None)
+    } else {
+        mvm_runtime::microvm::probe_verity_sidecar(&resolved.rootfs)
+    };
     sub.finish(SubPhase::ArtifactVerify);
 
     // Run-path tier gate: a virtiofs-capable backend + a non-prod, non-sealed OCI
@@ -1421,18 +1451,39 @@ fn build_start_config(
     // Pre-open console data sockets for interactive PTY runs against
     // non-sealed images. OCI/dev images can carry verity sidecars and still be
     // interactive, so the sidecar's sealed bit is the load-bearing signal here.
-    let image_sealed = crate::commands::vm::image_is_sealed(std::path::Path::new(&resolved.rootfs));
-    let dev_console = transient_run_dev_console(shape.pty, image_sealed);
+    let is_wasm = shape.hypervisor == Some("wasm");
+    let image_sealed = if is_wasm {
+        false
+    } else {
+        crate::commands::vm::image_is_sealed(std::path::Path::new(&resolved.rootfs))
+    };
+    let dev_console = if is_wasm {
+        false
+    } else {
+        transient_run_dev_console(shape.pty, image_sealed)
+    };
 
     VmStartConfig {
         name: vm_name.to_string(),
         template_id: resolved.template_id.clone(),
         rootfs_path: resolved.rootfs.clone(),
         virtiofs_root: boot.virtiofs_root.clone(),
-        kernel_path: Some(resolved.vmlinux.clone()),
-        initrd_path: boot.effective_initrd.clone(),
-        verity_path: boot.verity_path.clone(),
-        roothash: boot.roothash.clone(),
+        kernel_path: if is_wasm {
+            None
+        } else {
+            Some(resolved.vmlinux.clone())
+        },
+        initrd_path: if is_wasm {
+            None
+        } else {
+            boot.effective_initrd.clone()
+        },
+        verity_path: if is_wasm {
+            None
+        } else {
+            boot.verity_path.clone()
+        },
+        roothash: if is_wasm { None } else { boot.roothash.clone() },
         dev_console,
         revision_hash: resolved.revision.clone(),
         flake_ref: resolved.flake_ref.clone(),
@@ -1890,6 +1941,23 @@ fn restore_via_snapshot(
         &snap_dir,
         snap_info,
     )
+}
+
+/// Wait for a wasm-backend run to complete.
+///
+/// The wasm backend runs the module synchronously inside `start`, so by the
+/// time control reaches here the guest code has already executed. We just
+/// wait for the recorded exit status and surface its code. Stdio is
+/// inherited by the host `wasmtime` engine, so streaming/capture are not
+/// handled here.
+fn run_wasm_module(
+    backend: &mvm_runtime::backend::AnyBackend,
+    vm_name: &str,
+) -> anyhow::Result<i32> {
+    let status = backend
+        .wait(&mvm_core::vm_backend::VmId(vm_name.to_string()))
+        .with_context(|| format!("waiting for wasm module '{vm_name}' to finish"))?;
+    Ok(status.code.unwrap_or(1))
 }
 
 /// Send the wrapped command to the guest agent and either stream
@@ -2394,6 +2462,50 @@ mod tests {
         );
         assert_eq!(hc.interval_secs, 10);
         assert_eq!(build_healthcheck(None, 30, 5, 3, 0), None);
+    }
+
+    #[test]
+    fn resolve_launch_wasm_module_skips_kernel_initrd_and_verity() {
+        let module_path = "/tmp/dummy.wasm";
+        let image = ImageSource::WasmModule {
+            module_path: module_path.to_string(),
+            label: "wasm:test".to_string(),
+        };
+        let shape = LaunchShape {
+            name: Some("wasm-test"),
+            image: &image,
+            cpus: 1,
+            memory_mib: 64,
+            mem_initial_mib: None,
+            dir_shares: &[],
+            pty: false,
+            network_policy: &mvm_core::network_policy::NetworkPolicy::deny_all(),
+            warm_pool_size: 0,
+            sdk_sidecar: None,
+            hypervisor: Some("wasm"),
+        };
+        let mut marks = LaunchResolveMarks::new(false);
+        let mut sub = crate::commands::vm::phase_timing::LaunchSubMarks::default();
+        let resolved =
+            resolve_launch(&shape, None, &mut marks, &mut sub).expect("wasm launch should resolve");
+        assert_eq!(resolved.start_config.rootfs_path, module_path);
+        assert!(
+            resolved.start_config.kernel_path.is_none(),
+            "wasm has no kernel"
+        );
+        assert!(
+            resolved.start_config.initrd_path.is_none(),
+            "wasm has no initrd"
+        );
+        assert!(
+            resolved.start_config.verity_path.is_none(),
+            "wasm has no verity"
+        );
+        assert!(
+            resolved.start_config.roothash.is_none(),
+            "wasm has no roothash"
+        );
+        assert_eq!(resolved.backend.name(), "wasm");
     }
 
     #[test]

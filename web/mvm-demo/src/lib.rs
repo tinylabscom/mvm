@@ -20,7 +20,7 @@ use wasm_bindgen::prelude::*;
 
 /// Human-readable limitation notice for the browser tier. The page renders this
 /// from Rust so the disclaimer cannot drift from the code.
-const CAPABILITY_NOTICE: &str = "The browser is the wasm engine. The host WasmBackend is not exercised. This is a portability and governance demo, not an isolation boundary. The claims-bearing way to run a wasm workload is the engine-in-guest path.";
+const CAPABILITY_NOTICE: &str = "This page enforces the same mvm NetworkPolicy, authority, and audit semantics that the host WasmBackend enforces, but it does so inside the browser's own WebAssembly engine rather than host wasmtime. The guest is a wasm32-wasip1 workload, not a hardware-virtualized Linux kernel, so this is a browser-tier sandbox — not an isolation boundary.";
 
 fn demo_pins() -> DnsPinRegistry {
     let mut pins = DnsPinRegistry::new();
@@ -40,6 +40,17 @@ fn demo_pins() -> DnsPinRegistry {
         DEMO_NOW,
         "2099-01-01T00:00:00Z",
     ));
+    // Deterministic demo-only host. The browser Worker intercepts this host
+    // and returns a mock response, so the allow path always succeeds without
+    // depending on external CORS behavior or live DNS.
+    pins.add(DnsPin::at(
+        "echo.mvm.local",
+        vec![core::net::IpAddr::V4(core::net::Ipv4Addr::new(
+            192, 0, 2, 1,
+        ))],
+        DEMO_NOW,
+        "2099-01-01T00:00:00Z",
+    ));
     pins
 }
 const DEMO_URL: &str = "https://api.openai.com/v1/chat/completions";
@@ -47,7 +58,7 @@ const DEMO_PLACEHOLDER_TOKEN: &str = "mvm-secret-deadbeef";
 const DEMO_SECRET_VALUE: &str = "sk-real-openai-key";
 const DEMO_SIGNING_KEY_HEX: &str =
     "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
-const DEMO_ALLOWED_HOSTS: &[&str] = &["api.openai.com"];
+const DEMO_ALLOWED_HOSTS: &[&str] = &["api.openai.com", "echo.mvm.local"];
 
 #[wasm_bindgen]
 pub fn demo_capability_notice() -> String {
@@ -81,8 +92,11 @@ fn decide_egress_core(policy_json: &str, url: &str) -> Result<bool, String> {
     let canonical = canonicalize_network_policy(&policy, &pins, DEMO_NOW)
         .map_err(|e| format!("canonicalize policy: {e}"))?;
     let (host, port) = parse_url_host_port(url)?;
-    let ip =
-        lookup_host(host).ok_or_else(|| format!("demo fixture has no IP for host: {host}"))?;
+    let ip = lookup_host(host).ok_or_else(|| {
+        format!(
+            "browser demo cannot resolve host '{host}' (only api.openai.com and api.github.com have pinned IPs in this demo)",
+        )
+    })?;
     Ok(canonical.permits(&Proto::Tcp, ip, port))
 }
 
@@ -94,6 +108,21 @@ pub fn substitute_placeholder(text: &str, value: &str) -> String {
             serde_json::json!({ "ok": true, "text": out }).to_string()
         }
         None => serde_json::json!({ "ok": false, "error": "no placeholder found" }).to_string(),
+    }
+}
+
+#[wasm_bindgen]
+pub fn validate_network_policy(policy_json: &str) -> String {
+    let outcome = (|| -> Result<(), String> {
+        let policy: NetworkPolicy =
+            serde_json::from_str(policy_json).map_err(|e| format!("parse policy: {e}"))?;
+        let _ = canonicalize_network_policy(&policy, &demo_pins(), DEMO_NOW)
+            .map_err(|e| format!("canonicalize policy: {e}"))?;
+        Ok(())
+    })();
+    match outcome {
+        Ok(()) => serde_json::json!({ "ok": true }).to_string(),
+        Err(e) => serde_json::json!({ "ok": false, "error": e }).to_string(),
     }
 }
 
@@ -337,6 +366,9 @@ fn lookup_host(host: &str) -> Option<core::net::IpAddr> {
         "api.github.com" => Some(core::net::IpAddr::V4(core::net::Ipv4Addr::new(
             140, 82, 121, 6,
         ))),
+        "echo.mvm.local" => Some(core::net::IpAddr::V4(core::net::Ipv4Addr::new(
+            192, 0, 2, 1,
+        ))),
         _ => None,
     }
 }
@@ -365,7 +397,7 @@ mod tests {
     #[test]
     fn capability_notice_lists_browser_limitation() {
         let notice = demo_capability_notice();
-        assert!(notice.contains("browser is the wasm engine"));
+        assert!(notice.contains("browser\'s own WebAssembly engine"));
         assert!(notice.contains("not an isolation boundary"));
     }
 

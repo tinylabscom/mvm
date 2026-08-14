@@ -20,6 +20,10 @@ pub enum EgressSubstitutionTransport {
     /// Proxy-aware channel only: the guest dials the substitution port over
     /// vsock, bridged to a host unix socket; no transparent `:80/:443` leg.
     VsockUdsChannel,
+    /// Proxy-aware channel via a wasm host import: the guest calls
+    /// `mvm:egress` and the host relays the request to the substitution
+    /// endpoint over a local unix socket. No guest NIC, no vsock device.
+    WasmHostImport,
     /// This backend does not run egress substitution (the mock test double).
     None,
 }
@@ -75,6 +79,7 @@ mod tests {
 
     // Compile-time proof the workload backends implement the marker (incl. the
     // mock test double; qemu is intentionally absent).
+    #[cfg(any(feature = "test-support", feature = "wasm-backend"))]
     fn assert_is_workload_backend<T: WorkloadBackend>() {}
 
     #[test]
@@ -85,6 +90,8 @@ mod tests {
         let _: &dyn WorkloadBackend = &firecracker;
         #[cfg(feature = "test-support")]
         assert_is_workload_backend::<MockBackend>();
+        #[cfg(feature = "wasm-backend")]
+        assert_is_workload_backend::<crate::wasm_backend::WasmBackend>();
         // libkrun is now a workload backend via the runner's blanket impl, not a
         // standalone one; the refuses-bucket test below coerces a live
         // `libkrun_runner()` to `&dyn WorkloadBackend`, which is that proof.

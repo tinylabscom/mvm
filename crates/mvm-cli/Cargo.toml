@@ -90,7 +90,14 @@ hex.workspace = true
 # never hang.
 libc.workspace = true
 
+[[test]]
+name = "wasm_run"
+required-features = ["wasm-backend"]
+
 [features]
+# Forward to `mvm-runtime/wasm-backend`: enables `mvmctl --hypervisor wasm`.
+# Off by default so the default workspace build carries no `wasmtime` dependency.
+wasm-backend = ["mvm-runtime/wasm-backend"]
 # `builder-vm` is default so builds prefer the libkrun-backed builder VM
 # with a persistent /nix store. Runtime gating via
 # `libkrun_sys::is_available()` still falls back cleanly when libkrun

@@ -561,11 +561,10 @@ impl AnyBackend {
             // mkGuest workload boot, a host-reachable guest agent, and an egress
             // relay to the per-VM endpoint that owns claim-10 and claims 12/13.
             AnyBackend::Hvf(b) => Some(b),
-            // Wasm has no egress substitution channel yet — it mediates no
-            // networking at all (a later phase wires the governed WASI
-            // egress seam). Barred from the admitted launch funnel until
-            // then, the same carve-out as `Qemu`.
-            AnyBackend::Wasm(_) => None,
+            // Wasm mediates egress through a host import that relays to the
+            // same substitution endpoint the vsock-backed tiers use. It is a
+            // real workload backend, just claim-free.
+            AnyBackend::Wasm(b) => Some(b),
             // Apple Container boots the full admitted stack — it IS the HVF
             // workload runner with only the kernel image substituted, so the
             // same egress endpoint, broker registration, and activation gate
@@ -1787,7 +1786,7 @@ mod tests {
     fn as_workload_backend_some_for_workload_variants() {
         // mock is included: it is the hermetic lifecycle test double that
         // stands in for a workload backend on the admitted path.
-        let mut names = vec!["firecracker", "libkrun", "hvf"];
+        let mut names = vec!["firecracker", "libkrun", "hvf", "wasm"];
         if cfg!(feature = "test-support") {
             names.push("mock");
         }

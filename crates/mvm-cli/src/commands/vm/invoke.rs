@@ -405,6 +405,9 @@ pub(in crate::commands) fn run_entrypoint(call: EntrypointCall) -> Result<()> {
     let template_id = match super::shared::resolve_manifest_arg(&call.source)? {
         super::shared::ManifestArgRef::Name(n) => n,
         super::shared::ManifestArgRef::Slot { slot_hash } => slot_hash,
+        super::shared::ManifestArgRef::WasmModule { .. } => {
+            anyhow::bail!("wasm module manifests are not supported for this command")
+        }
     };
 
     let stream_stdin = call.stdin.is_streaming();

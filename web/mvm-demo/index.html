@@ -3,79 +3,264 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>mvm wasm sandbox demo</title>
+<title>mvm browser-tier microVM demo</title>
 <style>
-  :root { color-scheme: light dark; }
-  body { font: 15px/1.5 system-ui, sans-serif; max-width: 900px; margin: 2rem auto; padding: 0 1rem; }
-  h1 { font-size: 1.5rem; }
-  p.lede { opacity: 0.85; }
-  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
-  @media (max-width: 720px) { .grid { grid-template-columns: 1fr; } }
-  .card { border: 1px solid #8884; border-radius: 8px; padding: 1rem; }
-  .card h2 { font-size: 1.1rem; margin-top: 0; }
-  label { display: block; font-weight: 600; margin: 0.75rem 0 0.25rem; }
-  textarea, input, select { width: 100%; box-sizing: border-box; font-family: ui-monospace, monospace; font-size: 13px; }
-  textarea { height: 6rem; }
-  button { margin-top: 0.75rem; padding: 0.5rem 1rem; font-size: 15px; cursor: pointer; }
-  #result { margin-top: 1rem; padding: 0.75rem 1rem; border-radius: 6px; white-space: pre-wrap; word-break: break-all; }
-  #result.ok { background: #e6f4ea; color: #14532d; }
-  #result.bad { background: #fde8e8; color: #7f1d1d; }
-  .pane { background: #8881; padding: 0.75rem; border-radius: 6px; margin-top: 0.5rem; font-family: ui-monospace, monospace; font-size: 12px; }
-  .notice { margin-top: 1rem; padding: 0.75rem; border-radius: 6px; font-size: 13px; background: #8881; }
-  footer { margin-top: 2rem; font-size: 12px; opacity: 0.7; }
+  :root {
+    --term-bg: #0b0c0f;
+    --term-fg: #c9d1d9;
+    --term-prompt: #3fb950;
+    --term-accent: #58a6ff;
+    --term-warn: #d29922;
+    --term-danger: #f85149;
+    --term-border: #30363d;
+    --term-font: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+    color-scheme: dark;
+  }
+  body {
+    font: 15px/1.5 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 2rem 1rem;
+    background: #010409;
+    color: var(--term-fg);
+  }
+  h1 {
+    font-size: 1.6rem;
+    font-weight: 600;
+    margin: 0 0 0.25rem;
+  }
+  p.lede {
+    opacity: 0.85;
+    margin: 0 0 1.5rem;
+    max-width: 70ch;
+  }
+  .grid {
+    display: grid;
+    grid-template-columns: 340px 1fr;
+    gap: 1.25rem;
+    align-items: start;
+  }
+  @media (max-width: 900px) {
+    .grid { grid-template-columns: 1fr; } }
+  .card {
+    background: #161b22;
+    border: 1px solid var(--term-border);
+    border-radius: 10px;
+    padding: 1rem;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.35);
+  }
+  .card h2 {
+    font-size: 1rem;
+    font-weight: 600;
+    margin: 0 0 0.75rem;
+    color: #f0f6fc;
+  }
+  label {
+    display: block;
+    font-weight: 600;
+    margin: 0.75rem 0 0.25rem;
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    color: #8b949e;
+  }
+  textarea, input, select {
+    width: 100%;
+    box-sizing: border-box;
+    font-family: var(--term-font);
+    font-size: 13px;
+    background: #0d1117;
+    color: var(--term-fg);
+    border: 1px solid var(--term-border);
+    border-radius: 6px;
+    padding: 0.5rem;
+  }
+  textarea { height: 5.5rem; resize: vertical; }
+  input[type="number"] { width: 6rem; }
+  input:focus, textarea:focus {
+    outline: none;
+    border-color: var(--term-accent);
+    box-shadow: 0 0 0 2px rgba(88,166,255,0.2);
+  }
+  button {
+    margin-top: 0.75rem;
+    margin-right: 0.5rem;
+    padding: 0.5rem 1rem;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    background: #238636;
+    color: #fff;
+    border: 1px solid rgba(46,160,67,0.4);
+    border-radius: 6px;
+    transition: background 0.15s ease;
+  }
+  button:hover:not(:disabled) { background: #2ea043; }
+  button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+  #stop { background: #da3633; border-color: rgba(248,81,73,0.4); }
+  #stop:hover:not(:disabled) { background: #f85149; }
+  .cli-preview {
+    background: var(--term-bg);
+    color: var(--term-fg);
+    font-family: var(--term-font);
+    font-size: 12px;
+    padding: 0.75rem;
+    border-radius: 6px;
+    white-space: pre-wrap;
+    word-break: break-all;
+    border: 1px solid var(--term-border);
+  }
+  .console-wrap {
+    display: flex;
+    flex-direction: column;
+    height: 32rem;
+  }
+  .console {
+    flex: 1;
+    background: var(--term-bg);
+    color: var(--term-fg);
+    font-family: var(--term-font);
+    font-size: 13px;
+    line-height: 1.5;
+    padding: 0.85rem;
+    border-radius: 8px;
+    border: 1px solid var(--term-border);
+    box-shadow: inset 0 0 0 1px rgba(48,54,61,0.5), 0 0 24px rgba(88,166,255,0.06);
+    overflow-y: auto;
+    cursor: text;
+  }
+  .console:focus {
+    outline: none;
+    border-color: var(--term-accent);
+  }
+  .console-line {
+    display: flex;
+    gap: 0.5rem;
+    min-height: 1.5em;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  .console .prompt {
+    color: var(--term-prompt);
+    user-select: none;
+    white-space: nowrap;
+    font-weight: 600;
+  }
+  .console input {
+    background: transparent;
+    color: var(--term-fg);
+    border: none;
+    outline: none;
+    font: inherit;
+    flex: 1;
+    min-width: 0;
+    padding: 0;
+    caret-color: var(--term-prompt);
+  }
+  .console-status {
+    display: flex;
+    gap: 0.75rem;
+    margin-top: 0.5rem;
+    font-size: 11px;
+    color: #8b949e;
+    font-family: var(--term-font);
+  }
+  .notice {
+    margin-top: 1rem;
+    padding: 0.75rem;
+    border-radius: 6px;
+    font-size: 13px;
+    background: #21262d;
+    border: 1px solid var(--term-border);
+  }
+  .notice.warn {
+    background: rgba(210,153,34,0.12);
+    border-color: rgba(210,153,34,0.3);
+    color: #e3b341;
+  }
+  footer {
+    margin-top: 2rem;
+    font-size: 12px;
+    opacity: 0.7;
+    color: #8b949e;
+  }
 </style>
 </head>
 <body>
-<h1>mvm wasm sandbox demo</h1>
+<h1>mvm browser-tier microVM</h1>
 <p class="lede">
-  A live in-browser governance sandbox. The wasm bundle is built from the
-  same <code>mvm-contract</code> code the host uses for egress decisions and
-  placeholder substitution. This page demonstrates policy, substitution, and
-  audit-chain verification — not an isolation boundary.
+  Launch an mvm-defined microVM inside a WebAssembly sandbox. The same
+  <code>NetworkPolicy</code>, authority, and audit semantics the host uses are
+  enforced here by the browser's wasm engine instead of host
+  <code>wasmtime</code>.
 </p>
 
 <div class="grid">
   <div class="card">
-    <h2>1. Module + policy</h2>
-    <label for="scenario">Scenario</label>
-    <select id="scenario">
-      <option value="allowed">allowed — secret bound to destination</option>
-      <option value="denied">denied — default-deny policy</option>
-      <option value="unbound">unbound — host admitted, secret not bound</option>
-    </select>
+    <h2>Launch config</h2>
+    <label for="name">VM name</label>
+    <input id="name" value="browser-vm" />
+
+    <label for="image">Workload image</label>
+    <input id="image" value="mvm-demo-guest:latest" />
+
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.75rem;">
+      <div>
+        <label for="memory">Memory (MiB)</label>
+        <input id="memory" type="number" value="128" min="16" max="512" />
+      </div>
+      <div>
+        <label for="cpus">vCPUs</label>
+        <input id="cpus" type="number" value="1" min="1" max="4" />
+      </div>
+    </div>
+
     <label for="policy">Network policy (JSON)</label>
-    <textarea id="policy">{"type":"allowlist","rules":[{"host":"api.openai.com","port":443}]}</textarea>
-    <button id="run">Run sandbox</button>
-    <button id="run-wasi">Run real WASI fixture</button>
+    <textarea id="policy">{"type":"allowlist","rules":[{"host":"echo.mvm.local","port":443}]}</textarea>
+
+    <label for="authority">Authority verifying key (hex, optional)</label>
+    <input id="authority" placeholder="64 hex chars" />
+
+    <button id="launch">Launch microVM</button>
+    <button id="stop" disabled>Stop</button>
+
+    <div class="notice" style="margin-top:1rem;">
+      Equivalent CLI:
+      <pre class="cli-preview" id="cli-preview">mvmctl up browser-vm --image mvm-demo-guest:latest --memory 128 --cpus 1</pre>
+    </div>
   </div>
 
   <div class="card">
-    <h2>2. Module view</h2>
-    <div id="module-view" class="pane">—</div>
-    <h2>3. Destination view</h2>
-    <div id="destination-view" class="pane">—</div>
+    <h2>Console</h2>
+    <div class="console-wrap">
+      <div id="console" class="console" aria-live="polite" tabindex="0">
+        <div class="console-line" id="input-line" style="display:none;">
+          <span class="prompt">root@mvm:~#</span>
+          <input id="command" type="text" autocomplete="off" spellcheck="false" />
+        </div>
+      </div>
+      <div class="console-status">
+        <span>Tip: click the console to type. ↑/↓ history, Tab completion, Ctrl+C interrupt, Ctrl+L clear.</span>
+      </div>
+    </div>
   </div>
 </div>
 
 <div class="card" style="margin-top: 1rem;">
-  <h2>4. Audit chain</h2>
-  <label for="chain">Audit chain (JSONL, one envelope per line)</label>
-  <textarea id="chain"></textarea>
-  <label for="pubkey">Verifying key (hex)</label>
-  <input id="pubkey" placeholder="64 hex characters" />
-  <button id="verify">Verify chain</button>
-  <button id="tamper">Tamper + re-verify</button>
-  <div id="result" hidden></div>
+  <h2>Audit chain</h2>
+  <p class="lede" style="font-size:13px;">Each launch, stop, allow, and deny event is signed with the demo Ed25519 key. The chain can be verified with the same <code>verify_audit_chain_bytes</code> code the host uses.</p>
+  <pre id="audit-chain" class="cli-preview" style="max-height:14rem;overflow:auto;">—</pre>
 </div>
 
-<div id="capability-notice" class="notice" aria-live="polite"></div>
+<div id="capability-notice" class="notice warn" aria-live="polite"></div>
 
 <footer>
   Built from <code>web/mvm-demo/</code> over <code>mvm-contract</code>.
-  The <em>Run real WASI fixture</em> button executes a tiny compiled
-  <code>wasm32-wasip1</code> module in a Web Worker, with the same
-  <code>mvm:egress</code> host import the Firecracker/libkrun/HVF wasm
-  backend provides.
+  This is a browser-tier sandbox: it enforces mvm's constraints, but it is not
+  a hardware-virtualized microVM and does not run host <code>wasmtime</code>.
 </footer>
 
 <script type="module" src="demo.js"></script>

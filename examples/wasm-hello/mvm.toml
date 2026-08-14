@@ -1,0 +1,3 @@
+name = "wasm-hello"
+profile = "dev"
+wasm = "target/wasm32-wasip1/release/wasm-hello.wasm"

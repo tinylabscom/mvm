@@ -1,0 +1,22 @@
+# Browser-tier mvm microVM guest workload.
+# Excluded from the main workspace so the wasm32-wasip1 target does not enter
+# `cargo build --workspace`. Built separately and staged by web/mvm-demo/build.sh.
+[package]
+name = "mvm-demo-guest"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "mvm-demo-guest"
+path = "src/main.rs"
+
+[dependencies]
+# No dependencies: the guest is a tiny shell that relies only on std + WASI.
+
+[profile.release]
+# Optimize for size: this ships to a browser.
+opt-level = "s"
+lto = true
+strip = true
+panic = "abort"

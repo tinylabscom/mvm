@@ -386,6 +386,14 @@ pub(super) fn run_dispatch(cli: &Cli, mut args: MachineRunArgs, cfg: &MvmConfig)
 
     let mode = args.resolve_mode()?;
     let warm_pool_size = mode.warm_pool_size(None, args.name.is_some());
+    // The wasm backend is a claim-free, host-wasmtime runner: it has no
+    // standby-pool machinery and should never be blocked by a warm-pool
+    // default that it cannot satisfy.
+    let warm_pool_size = if args.hypervisor.as_deref() == Some("wasm") {
+        0
+    } else {
+        warm_pool_size
+    };
     tracing::debug!(?mode, warm_pool_size, "machine run warm-pool eligibility");
     match mode {
         MachineRunMode::Transient => {
