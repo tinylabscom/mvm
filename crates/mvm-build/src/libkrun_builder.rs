@@ -2637,8 +2637,20 @@ pub(crate) fn prepopulate_stage0_nix_store_image(
 
     let marker = stage0_nix_store_host_marker(&seed_store)?;
     let marker_path = stage0_nix_store_host_marker_path(store_image);
-    if std::fs::read_to_string(&marker_path).is_ok_and(|existing| existing == marker) {
+    if std::fs::read_to_string(&marker_path).is_ok_and(|existing| existing == marker)
+        && stage0_store_superblock_is_clean(store_image)?
+    {
         return Ok(());
+    }
+
+    // The marker binds the image to the seed closure, but it is deliberately
+    // outside the filesystem and therefore cannot attest filesystem health.
+    // Drop it before rebuilding so an interrupted format can never make a
+    // damaged image look reusable on the next invocation.
+    if marker_path.exists() {
+        std::fs::remove_file(&marker_path).map_err(|e| {
+            BuilderVmError::ExtractionFailed(format!("remove {}: {e}", marker_path.display()))
+        })?;
     }
 
     let Some(mkfs) = find_host_mkfs_ext4() else {
@@ -2702,6 +2714,22 @@ fn format_stage0_store_empty_in_process(store_image: &Path) -> Result<(), Builde
         .map_err(|e| {
             BuilderVmError::ExtractionFailed(format!("open {}: {e}", store_image.display()))
         })?;
+    let device_size = file
+        .metadata()
+        .map_err(|e| {
+            BuilderVmError::ExtractionFailed(format!("stat {}: {e}", store_image.display()))
+        })?
+        .len();
+    // `format_empty_ext4` writes only filesystem metadata so a large sparse
+    // backing file stays sparse. Reset the file first: every inode table the
+    // formatter advertises as zeroed must actually be zero even when this is a
+    // recovery reformat of an image containing an older Nix store.
+    file.set_len(0).map_err(|e| {
+        BuilderVmError::ExtractionFailed(format!("truncate {}: {e}", store_image.display()))
+    })?;
+    file.set_len(device_size).map_err(|e| {
+        BuilderVmError::ExtractionFailed(format!("resize {}: {e}", store_image.display()))
+    })?;
     let summary = mvm_fs::ext4::mkfs::format_empty_ext4(&mut file, size_bytes).map_err(|e| {
         BuilderVmError::ExtractionFailed(format!(
             "pure-Rust ext4 format of {}: {e}",
@@ -2761,6 +2789,34 @@ fn host_file_4k_blocks_for_ext4(store_image: &Path) -> Result<u64, BuilderVmErro
 
 fn stage0_nix_store_host_marker_path(store_image: &Path) -> PathBuf {
     store_image.with_extension("stage0-seed")
+}
+
+const EXT4_SUPERBLOCK_MAGIC_OFFSET: u64 = 1024 + 0x38;
+const EXT4_SUPERBLOCK_MAGIC: u16 = 0xEF53;
+const EXT4_VALID_FS: u16 = 0x0001;
+
+/// The external seed marker is only reusable when ext4 itself reports a clean
+/// unmount. A zero/dirty/error state forces a fresh sparse format before boot.
+fn stage0_store_superblock_is_clean(store_image: &Path) -> Result<bool, BuilderVmError> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let mut file = std::fs::File::open(store_image).map_err(|e| {
+        BuilderVmError::ExtractionFailed(format!("open {}: {e}", store_image.display()))
+    })?;
+    file.seek(SeekFrom::Start(EXT4_SUPERBLOCK_MAGIC_OFFSET))
+        .map_err(|e| {
+            BuilderVmError::ExtractionFailed(format!("seek {}: {e}", store_image.display()))
+        })?;
+    let mut fields = [0u8; 4];
+    file.read_exact(&mut fields).map_err(|e| {
+        BuilderVmError::ExtractionFailed(format!(
+            "read ext4 state from {}: {e}",
+            store_image.display()
+        ))
+    })?;
+    let magic = u16::from_le_bytes([fields[0], fields[1]]);
+    let state = u16::from_le_bytes([fields[2], fields[3]]);
+    Ok(magic == EXT4_SUPERBLOCK_MAGIC && state == EXT4_VALID_FS)
 }
 
 fn stage0_nix_store_host_marker(seed_store: &Path) -> Result<String, BuilderVmError> {
@@ -5321,14 +5377,13 @@ mod tests {
         );
     }
 
-    /// A second prepopulation of an already-prepared store must be a no-op — it
-    /// records the host marker on the first pass and honours it on the second,
-    /// so the guest-seeded, grown store survives instead of being reformatted
-    /// (which would wipe every persisted build result). Discriminated by
-    /// corrupting the superblock after pass one: a reformat would restore it.
+    /// A matching external marker must not hide filesystem corruption. The
+    /// second prepopulation pass reformats an image whose ext4 error-state bit
+    /// is set, restoring a usable sparse store instead of handing it back to
+    /// Stage 0.
     #[cfg(feature = "pure-mkfs")]
     #[test]
-    fn stage0_store_prepopulate_is_idempotent_and_preserves_store() {
+    fn stage0_store_prepopulate_repairs_corrupt_marked_store() {
         use std::io::{Read, Seek, SeekFrom, Write};
 
         let scratch = TempDir::new().unwrap();
@@ -5360,29 +5415,76 @@ mod tests {
             f.read_exact(&mut b).unwrap();
             u16::from_le_bytes(b)
         };
+        let read_state = |p: &Path| {
+            let mut f = std::fs::File::open(p).unwrap();
+            f.seek(SeekFrom::Start(magic_off + 2)).unwrap();
+            let mut b = [0u8; 2];
+            f.read_exact(&mut b).unwrap();
+            u16::from_le_bytes(b)
+        };
         assert_eq!(
             read_magic(&store_image),
             0xEF53,
             "pass 1 wrote a valid ext4"
         );
 
-        // Corrupt the superblock magic; only a reformat would restore it.
+        // Set EXT4_ERROR_FS in the superblock state; only a reformat restores
+        // the valid-filesystem state.
         {
             let mut f = std::fs::OpenOptions::new()
                 .write(true)
                 .open(&store_image)
                 .unwrap();
-            f.seek(SeekFrom::Start(magic_off)).unwrap();
-            f.write_all(&[0, 0]).unwrap();
+            f.seek(SeekFrom::Start(magic_off + 2)).unwrap();
+            f.write_all(&0x0002_u16.to_le_bytes()).unwrap();
         }
 
-        // Pass 2: marker matches → early return, no reformat.
+        // Pass 2: marker matches, but filesystem health does not → reformat.
         prepopulate_stage0_nix_store_image(&image, &store_image).unwrap();
         assert_eq!(
-            read_magic(&store_image),
-            0,
-            "second prepopulate must preserve the store, not reformat it"
+            read_state(&store_image),
+            EXT4_VALID_FS,
+            "a corrupt marked store must be reformatted"
         );
+    }
+
+    #[cfg(feature = "pure-mkfs")]
+    #[test]
+    fn stage0_store_prepopulate_preserves_clean_marked_store() {
+        use std::io::{Read, Seek, SeekFrom, Write};
+
+        let scratch = TempDir::new().unwrap();
+        let root_dir = scratch.path().join("root");
+        let seed_store = root_dir.join("nix").join("store");
+        std::fs::create_dir_all(&seed_store).unwrap();
+        std::fs::write(seed_store.join("aaa-seed-pkg"), b"x").unwrap();
+        let image = BuilderVmImage::RootDir {
+            root_dir,
+            entry_path: "init".into(),
+        };
+        let store_image = scratch.path().join("nix-store-stage0-test.img");
+        std::fs::File::create(&store_image)
+            .unwrap()
+            .set_len(64 * 1024 * 1024)
+            .unwrap();
+
+        prepopulate_stage0_nix_store_image(&image, &store_image).unwrap();
+        let sentinel_offset = 8 * 1024 * 1024;
+        let mut file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&store_image)
+            .unwrap();
+        file.seek(SeekFrom::Start(sentinel_offset)).unwrap();
+        file.write_all(b"warm-cache").unwrap();
+        drop(file);
+
+        prepopulate_stage0_nix_store_image(&image, &store_image).unwrap();
+        let mut file = std::fs::File::open(&store_image).unwrap();
+        file.seek(SeekFrom::Start(sentinel_offset)).unwrap();
+        let mut sentinel = [0u8; 10];
+        file.read_exact(&mut sentinel).unwrap();
+        assert_eq!(&sentinel, b"warm-cache");
     }
 
     // `read_job_result_*`, `extract_nix_store_hash_*`,

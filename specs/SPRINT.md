@@ -54,6 +54,12 @@
       scenarios pass. A KVM-backed ARM64 acceptance run completed cold
       bootstrap and kernel publication, then ran Alpine twice from a fully warm
       cache without launching Stage 0.
+      Store reuse additionally requires a clean ext4 superblock alongside the
+      external seed marker; the in-process formatter prevents lazy inode-table
+      races, and Stage 0 flushes, checks, and unmounts the store before
+      reporting success. A live ARM64 cold repair and warm-cache rerun both
+      completed without ext4 errors. The Linux all-target Clippy rerun for this
+      change remains for CI or a supported builder-VM entry point.
 
 - [x] HVF large-response integrity — **plan 315**. Restored bounded
       virtio-vsock host-to-guest credit accounting that had been removed while
