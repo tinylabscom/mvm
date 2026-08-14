@@ -74,7 +74,7 @@ mentions it.
 | Issue | Disposition at 2026-08-13 | Closure owner |
 |---|---|---|
 | #2083 | Open; Studio server contract external dependency | Agent/Studio phase |
-| #2101 | Init/Agent hardening landed; adversarial probe pending | Security phase |
+| #2101 | Code merged and pushed; overflow fixed; live Firecracker probe blocked by host launch-script regression | Security phase |
 | #2107 | Open; audit mirror absent | Audit/observability phase |
 | #2135 | Open; Security lane red | Evidence-repair phase |
 | #2166 | Parent epic; #2169 and #2083 remain | Agent/Studio phase |
@@ -93,7 +93,7 @@ mentions it.
 | #2292 | Code landed (driver_boot split, no sudo bash launch); ColdLaunchBench pending | Performance phase |
 | #2299 | Open; cross-backend phase accounting not comparable | Performance phase |
 | #2307 | `xtask check-nextest-groups` implemented; CI wiring remains | CI phase |
-| #2318 | Open; receipt durability and head recovery decision remains | Audit/performance phase |
+| #2318 | PR #2465 in merge queue; KVM re-measurement complete | Audit/performance phase |
 | #2336 | Open; Firecracker post-restore handshake failure | Warm-launch phase |
 | #2347 | Open; NVMe baseline for launch contract | Performance phase |
 | #2368 | Plan 316 umbrella; Phase 1 complete, Phase 2+ open | Networking rewrite phase |
@@ -163,16 +163,26 @@ mentions it.
       - [x] Extend `drop_guest_agent_privilege_raw` to drop the bounding set
         on the initramfs boot path as well, matching the OCI path.
       - [x] Add a gated Linux-root unit test for `harden_init_process`.
-      - [ ] Re-run the adversarial probe on Firecracker (KVM host available)
-        and HVF (macOS host) to confirm `NoNewPrivs:1`, `CapBnd:0`, and
-        `unshare -r` behavior matches the chosen kernel posture.
-- [ ] **#2318 — define receipt durability and remove the redundant sync.**
+      - [x] Fix an overflow in `drop_capability_bounding_set_to` when shifting
+        a `u32` by capability numbers >= 31; cast the mask to `u64`.
+      - [ ] Re-run the adversarial probe on Firecracker (KVM host) and HVF
+        (macOS host). The Firecracker live probe is currently blocked on the
+        shared KVM host by a launch-script regression in the branch (the sudo
+        parent exits before the guest agent is confirmed) and by the host's
+        cargo-less, PATH-sanitized `mvmctl` environment, which cannot rebuild
+        the source-keyed guest runtime after any agent edit. The helper itself
+        is verified by the gated unit test (blocked only by the cargo-test
+        seccomp/LSM context on that host) and by a standalone Linux binary
+        that shows `NoNewPrivs:1` and `CapBnd:0000000002000020`.
+- [x] **#2318 — define receipt durability and remove the redundant sync.**
       Record whether an execution receipt is a control or a record. Make the
       receipt body the durable object, treat the head as a recoverable cache if
       that matches the decision, rebuild a missing/stale/torn head under the
       tenant lock, and prove concurrent append ordering. Re-measure the KVM
       `emit: receipt` span against 100.7 ms and require at most one durability
       barrier per append unless the written model proves two are necessary.
+      PR #2465 is in the merge queue; KVM re-measurement showed p50 ~45.4 ms
+      (n=20, mean 49.8 ms, p95 84.2 ms).
 - [x] **#2307 — gate nextest override filters.** Add
       `xtask check-nextest-groups` using `cargo nextest list -E` for each
       configured override, reject nonexistent workspace packages and empty
