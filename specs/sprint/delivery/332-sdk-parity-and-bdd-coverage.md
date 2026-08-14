@@ -88,6 +88,18 @@ these scenarios able to see the ESM defect at all.
 Both new tripwires and the new xtask gate were confirmed to go red when the
 condition they guard is reintroduced.
 
+`cargo nextest run --workspace`: 11603 tests, 11601 passed, 2 failed, 26
+skipped. Both failures are in `mvm-agentd::entrypoint_execute` and are
+pre-existing on the base commit, not caused by this work — the only Rust this
+branch touches is `crates/mvm-conformance/tests/` and `xtask/src/`, and
+`mvm-agentd` depends on neither:
+
+- `test_execute_wrapper_cannot_forge_an_agent_gap_record_on_fd3` — passes when
+  re-run isolated; parallel-execution flake.
+- `test_execute_stdout_cap_prunes_and_marks_a_gap_without_killing_the_wrapper`
+  — fails isolated too (`expected one stdout gap, got []`). A real red test on
+  main, unrelated to the SDK. No open issue found.
+
 ## Deferred
 
 The Python and TypeScript public surfaces have diverged: 33 shared names, 38
