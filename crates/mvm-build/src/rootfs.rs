@@ -693,7 +693,7 @@ mod tests {
         let nodes =
             mvm_fs::rootfs::collect_nodes(src.path(), mvm_fs::rootfs::WalkOptions::default())
                 .expect("collect nodes");
-        let dense = mvm_fs::ext4::build_image(&nodes).expect("dense ext4 image");
+        let dense = mvm_fs::ext4::build_image(nodes).expect("dense ext4 image");
 
         let out = tempfile::tempdir().unwrap();
         let out_path = out.path().join("rootfs.ext4");

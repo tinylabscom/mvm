@@ -33,7 +33,7 @@ fn parent_that_is_a_file_is_rejected() {
             xattrs: Vec::new(),
         },
     ];
-    build_image(&nodes).expect_err("a file cannot be a parent directory");
+    build_image(nodes).expect_err("a file cannot be a parent directory");
 }
 
 /// Two nodes at the same path would allocate two inodes and emit two dirents of
@@ -56,7 +56,7 @@ fn duplicate_paths_are_rejected() {
             xattrs: Vec::new(),
         },
     ];
-    build_image(&nodes).expect_err("duplicate path must be rejected");
+    build_image(nodes).expect_err("duplicate path must be rejected");
 }
 
 /// Paths with empty (`//`), dot (`.`/`..`), or NUL-bearing components are
@@ -73,7 +73,7 @@ fn malformed_path_components_are_rejected() {
             xattrs: Vec::new(),
         }];
         assert!(
-            build_image(&nodes).is_err(),
+            build_image(nodes).is_err(),
             "malformed path {bad:?} must be rejected"
         );
     }
@@ -103,7 +103,7 @@ fn deep_nesting_round_trips() {
         xattrs: Vec::new(),
     });
 
-    let fs = mount(build_image(&nodes).expect("deep valid tree builds"));
+    let fs = mount(build_image(nodes).expect("deep valid tree builds"));
     // Walk d0/d1/.../d63/leaf and read it back.
     let mut ino = 2u32; // root
     for i in 0..DEPTH {
@@ -139,7 +139,7 @@ fn symlink_cycles_are_stored_verbatim() {
             target: "/s".into(),
         },
     ];
-    let fs = mount(build_image(&nodes).expect("symlink cycle builds"));
+    let fs = mount(build_image(nodes).expect("symlink cycle builds"));
     let root = list_dir(&fs, 2);
     for (name, target) in [("a", "/b"), ("b", "/a"), ("s", "/s")] {
         let (ino, ft) = find(&root, name).unwrap_or_else(|| panic!("/{name} present"));
@@ -175,7 +175,7 @@ fn directory_over_one_block_spans_multiple_blocks() {
         });
     }
 
-    let fs = mount(build_image(&nodes).expect("over-full directory builds as multi-block"));
+    let fs = mount(build_image(nodes).expect("over-full directory builds as multi-block"));
     let (big_ino, ft) = find(&list_dir(&fs, 2), "big").expect("/big present");
     assert_eq!(ft, DirEntryType::Directory);
 

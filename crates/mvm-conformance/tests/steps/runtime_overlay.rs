@@ -41,7 +41,7 @@ fn build_minimal_runtime_overlay(source_dir: &Path) -> mvm_fs::overlay::RuntimeO
         })
         .collect();
 
-    let ext4_bytes = mvm_fs::ext4::build_image(&nodes).expect("build minimal overlay ext4");
+    let ext4_bytes = mvm_fs::ext4::build_image(nodes).expect("build minimal overlay ext4");
     std::fs::write(source_dir.join("overlay.ext4"), ext4_bytes).expect("write overlay.ext4");
     std::fs::write(source_dir.join("overlay.verity"), b"verity-sidecar")
         .expect("write overlay.verity");

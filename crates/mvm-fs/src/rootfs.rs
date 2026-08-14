@@ -361,7 +361,7 @@ pub fn measure_ext4_pure(
     let walk_micros = elapsed_micros(walk_started.elapsed());
 
     let build_started = Instant::now();
-    let image = crate::ext4::build_image_with_options(&nodes, &options.build)?;
+    let image = crate::ext4::build_image_with_options(nodes, &options.build)?;
     let image_size_bytes = image.len() as u64;
     let image_sha256 = hex::encode(sha2::Sha256::digest(&image));
     let build_micros = elapsed_micros(build_started.elapsed());
@@ -485,6 +485,10 @@ fn merge_extra_nodes(mut walked: Vec<Node>, extra: Vec<Node>) -> Vec<Node> {
 /// Returns the raw image bytes and the final image size. The whole tree and the
 /// assembled image are held in memory, so callers can compute content-addressed
 /// sidecars (e.g. dm-verity) from `image` before writing anything to disk.
+///
+/// Peak memory is roughly 2.5× the tree's byte size — the walked nodes plus the
+/// assembled image. The nodes are consumed by the build rather than copied into
+/// it, which is why the image does not cost a third copy.
 pub fn build_ext4_pure(
     root: &Path,
     options: &MaterializeOptions,
@@ -493,7 +497,7 @@ pub fn build_ext4_pure(
         collect_nodes(root, options.walk)?,
         options.extra_nodes.clone(),
     );
-    let image = crate::ext4::build_image_with_options(&nodes, &options.build)?;
+    let image = crate::ext4::build_image_with_options(nodes, &options.build)?;
     let size_bytes = image.len() as u64;
     Ok((image, size_bytes))
 }
@@ -504,9 +508,12 @@ pub fn build_ext4_pure(
 /// directory fails with [`MaterializeError::Walk`].
 ///
 /// The whole tree is held in memory (each file's bytes + the assembled image),
-/// which is fine for small/medium rootfs; a tree past the writer's structural
-/// limits surfaces as [`MaterializeError::Build`] with a capacity-limit
-/// classification callers can use to route to an out-of-process fallback.
+/// costing roughly 2.5× the tree's size at peak, which is fine for small/medium
+/// rootfs; a tree past the writer's structural limits surfaces as
+/// [`MaterializeError::Build`] with a capacity-limit classification callers can
+/// use to route to an out-of-process fallback. That classification is
+/// structural, not memory-based: the writer's own ceiling is 16 TiB, so a large
+/// tree exhausts host memory long before it trips.
 ///
 /// Callers that need to compute sidecars from the image bytes before any disk
 /// write should use [`build_ext4_pure`] instead and handle the write
@@ -526,7 +533,7 @@ pub fn materialize_ext4_pure(
             source,
         })?;
     }
-    let size_bytes = stream_ext4_to_file(&nodes, output, &options.build)?;
+    let size_bytes = stream_ext4_to_file(nodes, output, &options.build)?;
     Ok(MaterializedImage {
         path: output.to_path_buf(),
         size_bytes,
@@ -536,7 +543,7 @@ pub fn materialize_ext4_pure(
 /// Stream the writer's sparse ranges into a file at `output`, then extend the
 /// file to the image's full size (untouched ranges stay holes).
 fn stream_ext4_to_file(
-    nodes: &[Node],
+    nodes: Vec<Node>,
     output: &Path,
     options: &BuildOptions,
 ) -> Result<u64, MaterializeError> {
@@ -844,7 +851,7 @@ mod tests {
         std::fs::write(src.path().join("hello"), b"hi\n").unwrap();
 
         let nodes = collect_nodes(src.path(), WalkOptions::default()).expect("collect nodes");
-        let dense = crate::ext4::build_image(&nodes).expect("dense ext4 image");
+        let dense = crate::ext4::build_image(nodes).expect("dense ext4 image");
 
         let out = tempfile::tempdir().unwrap();
         let out_path = out.path().join("rootfs.ext4");

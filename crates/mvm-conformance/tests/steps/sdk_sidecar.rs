@@ -42,7 +42,7 @@ fn sidecar_ext4_bytes() -> Vec<u8> {
             xattrs: Vec::new(),
         },
     ];
-    mvm_fs::ext4::build_image(&nodes).expect("build the sidecar ext4 fixture")
+    mvm_fs::ext4::build_image(nodes).expect("build the sidecar ext4 fixture")
 }
 
 fn cache_root(world: &mut CliWorld) -> std::path::PathBuf {

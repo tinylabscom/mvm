@@ -143,7 +143,7 @@ mod tests {
                 xattrs: Vec::new(),
             },
         ];
-        mvm_fs::ext4::build_image(&nodes).expect("build sidecar ext4 fixture")
+        mvm_fs::ext4::build_image(nodes).expect("build sidecar ext4 fixture")
     }
 
     fn seed_sidecar_cache(cache: &std::path::Path, version: &str, arch: GuestArch) {
