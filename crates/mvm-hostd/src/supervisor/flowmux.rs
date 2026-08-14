@@ -986,8 +986,6 @@ impl FlowMuxSession {
         match self.reader.read_exact(&mut len_buf) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
-            // A reset or abort from the guest is an ungraceful but expected
-            // close of the Unix stream; treat it the same as EOF.
             Err(e) if is_peer_disconnect(&e) => return Ok(None),
             Err(e) => return Err(e.into()),
         }

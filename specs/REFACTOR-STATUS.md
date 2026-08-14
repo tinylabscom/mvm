@@ -1257,8 +1257,26 @@ check-l3-expansion-freeze` added as a temporary shrink-only ratchet
         the identity on stdin. Backend witness tests in `mvm-vmm::host::spec_map`
         and the Firecracker/HVF/libkrun driver modules prove exactly one
         `NetworkFlow` service and no L3 services per granted workload.
-  - [ ] Phase 3 — converge egress TCP, UDP, and DNS (#2372)
-  - [ ] Phase 4 — stream typed transformations (#2373)
+  - [~] Phase 3 — converge egress TCP, UDP, and DNS (#2372). Landed:
+        guest-initiated `OpenTcp` with typed `Opened`/`Refused` replies,
+        `OpenUdp`/`UdpSend`/`UdpRecv` associations, `Resolve`/`Resolved` DNS
+        frames, per-direction host credit accounting, UDP idle expiry, per-
+        association peer bounds, per-class connection-rate limiting, payload-
+        free audit emission for TCP/UDP allows/denies and DNS resolves/refusals,
+        and host-side integration tests for allowed/denied TCP, UDP round-trip,
+        DNS pinning, UDP idle expiry, peer bounds, half-close, reset, and rate-
+        limit overflow. Guest-side `FlowMuxClient` / `FlowMuxReconnectClient`,
+        `FlowMuxStream`, `FlowMuxUdpSocket`, async frame pump, and unit tests
+        are implemented in `crates/mvm-agentd/src/flowmux.rs`. Guest-side
+        adapters are now wired: `mvm-egress-client` uses
+        `flowmux_egress::run` with a single `FlowMuxReconnectClient`,
+        `mvm-addon-dns` optionally forwards through `FlowMuxClient::resolve`,
+        and the legacy line-prelude symbols (`HTTP_FORWARD_FRAME`,
+        `MVM_DNS/1`, `MVM_SOCKS5_UDP/1`) are removed from the guest modules.
+        Unit tests cover the new DNS and SOCKS5/HTTP parsing paths.
+        Remaining: delete the host-side raw-egress dispatcher and add endpoint
+        crash/restart integration tests.
+  - [~] Phase 4 — stream typed transformations (#2373)
   - [ ] Phase 5 — declared ingress on FlowMux (#2374)
   - [ ] Phase 6 — compatibility boundary (#2375)
   - [ ] Phase 7 — delete L3 completely (#2376)
