@@ -337,7 +337,7 @@ in `spawn_blocking`.
       `UdpSend`, and `UdpRecv`. Preserve destination checks on every datagram,
       peer bounds, idle expiry, byte/rate limits, and silence-on-refusal toward
       the SOCKS client.
-- [ ] Adapt the guest loopback HTTP/SOCKS/DNS services to one FlowMux client and
+- [x] Adapt the guest loopback HTTP/SOCKS/DNS services to one FlowMux client and
       one reconnect owner. A session loss fails all live local flows promptly
       and reconnects under bounded exponential backoff without replaying an
       `Open`, request body, or datagram.

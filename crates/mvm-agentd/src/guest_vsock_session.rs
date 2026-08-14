@@ -6,9 +6,7 @@
 //! The guest stays responsible for the exact prelude bytes, and the
 //! host stays responsible for all admission/policy decisions.
 
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-
-use mvm_core::guest_netd::ConnectAck;
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 
 /// Guest→host vsock stream. A native async AF_VSOCK stream on Linux guests
 /// (the only place a microVM ever runs), and a never-constructed stand-in on
@@ -82,10 +80,6 @@ fn tag(end: ProxyEnd, error: std::io::Error) -> std::io::Error {
 }
 
 /// Stamps every I/O error from the wrapped stream with the half it belongs to.
-///
-/// `Unpin` is not a new constraint: `copy_bidirectional`, the only consumer,
-/// already requires it of both halves, so a plain `Pin::new` projection is
-/// sound and this needs no pin-projection dependency.
 struct TagEnd<T> {
     inner: T,
     end: ProxyEnd,
@@ -143,6 +137,20 @@ impl<T: AsyncWrite + Unpin> AsyncWrite for TagEnd<T> {
     }
 }
 
+/// Splice a guest-side `client` stream and a host-side `upstream` stream both
+/// ways, tagging errors with the half they came from.
+pub(crate) async fn splice_streams<C, U>(client: C, upstream: U) -> std::io::Result<()>
+where
+    C: AsyncRead + AsyncWrite + Unpin,
+    U: AsyncRead + AsyncWrite + Unpin,
+{
+    let mut client = TagEnd::new(client, ProxyEnd::Client);
+    let mut upstream = TagEnd::new(upstream, ProxyEnd::Upstream);
+    tokio::io::copy_bidirectional(&mut client, &mut upstream)
+        .await
+        .map(|_| ())
+}
+
 /// One guest-initiated session to a host AF_VSOCK port.
 pub struct HostVsockSession<U> {
     upstream: U,
@@ -174,45 +182,15 @@ where
     }
 
     /// Proxy bytes between the guest-side client and the host-side upstream.
-    ///
-    /// Any error is tagged with the half that produced it. `copy_bidirectional`
-    /// collapses both directions into one opaque `io::Error`, which makes a
-    /// local client hanging up — routine, the client got what it wanted —
-    /// indistinguishable from the host resetting the egress stream, which is a
-    /// real fault. They must not read the same way in a log.
-    pub async fn splice<C>(mut self, client: C) -> std::io::Result<()>
+    pub async fn splice<C>(self, client: C) -> std::io::Result<()>
     where
         C: AsyncRead + AsyncWrite + Unpin,
     {
-        let mut client = TagEnd::new(client, ProxyEnd::Client);
-        let mut upstream = TagEnd::new(&mut self.upstream, ProxyEnd::Upstream);
-        tokio::io::copy_bidirectional(&mut client, &mut upstream)
-            .await
-            .map(|_| ())
-    }
-
-    /// Recover the wrapped upstream stream for flows that need a custom relay.
-    pub fn into_inner(self) -> U {
-        self.upstream
-    }
-
-    /// Read the host's one-byte connect-result ack that follows the target-line
-    /// frame on the raw-egress protocol. Fail-closed: EOF or an unrecognised byte
-    /// is treated as a connect failure so the caller answers its client honestly.
-    pub async fn read_connect_ack(&mut self) -> ConnectAck {
-        let mut byte = [0u8; 1];
-        match self.upstream.read_exact(&mut byte).await {
-            Ok(_) => ConnectAck::from_byte(byte[0]).unwrap_or(ConnectAck::Fail),
-            Err(_) => ConnectAck::Fail,
-        }
+        splice_streams(client, self.upstream).await
     }
 }
 
 /// Open a native async AF_VSOCK stream to the host.
-///
-/// The error is left with its OS `ErrorKind` intact — a caller can still tell
-/// connect-refused / timed-out / reset apart — and carries the host CID+port as
-/// context.
 #[cfg(target_os = "linux")]
 pub async fn connect_host_vsock(port: u32) -> std::io::Result<HostVsockStream> {
     use tokio_vsock::{VsockAddr, VsockStream};
@@ -245,8 +223,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_client_hangup_is_attributed_to_the_client_half() {
-        // The in-guest program goes away mid-transfer. Routine, and it must be
-        // distinguishable from the host resetting the stream.
         let (client_side, client_bridge) = tokio::io::duplex(8);
         let (upstream_bridge, mut upstream_side) = tokio::io::duplex(8);
 
@@ -257,7 +233,6 @@ mod tests {
         });
 
         drop(client_side);
-        // Push enough that the copy must write into the dropped client.
         let _ = upstream_side.write_all(&[b'x'; 4096]).await;
 
         let error = task.await.unwrap().expect_err("client went away");
@@ -267,8 +242,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_host_reset_is_attributed_to_the_upstream_half() {
-        // The failure mode the egress-budget bug produced. This one is a fault
-        // and must stay loud.
         let (mut client_side, client_bridge) = tokio::io::duplex(8);
         let (upstream_bridge, upstream_side) = tokio::io::duplex(8);
 
@@ -333,29 +306,5 @@ mod tests {
         drop(client_side);
         drop(upstream_side);
         task.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn read_connect_ack_maps_host_byte() {
-        let (mut host_side, guest_bridge) = tokio::io::duplex(8);
-        let mut session = HostVsockSession::new(guest_bridge);
-
-        host_side
-            .write_all(&[ConnectAck::Ok.as_byte()])
-            .await
-            .unwrap();
-        assert_eq!(session.read_connect_ack().await, ConnectAck::Ok);
-
-        host_side.write_all(&[0xFF]).await.unwrap();
-        assert_eq!(session.read_connect_ack().await, ConnectAck::Fail);
-    }
-
-    #[tokio::test]
-    async fn read_connect_ack_treats_eof_as_fail() {
-        let (host_side, guest_bridge) = tokio::io::duplex(8);
-        let mut session = HostVsockSession::new(guest_bridge);
-
-        drop(host_side);
-        assert_eq!(session.read_connect_ack().await, ConnectAck::Fail);
     }
 }

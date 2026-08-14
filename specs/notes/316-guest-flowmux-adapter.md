@@ -205,12 +205,12 @@ No new guest-side key material or config file is required.
 
 ## Acceptance criteria
 
-- [ ] `mvm-egress-client` no longer emits `host:port\n`, `MVM_HTTP_FORWARD/1`,
+- [x] `mvm-egress-client` no longer emits `host:port\n`, `MVM_HTTP_FORWARD/1`,
       or `MVM_DNS/1` line frames.
-- [ ] One `FlowMuxClient` task owns the authenticated session; adapters share
+- [x] One `FlowMuxClient` task owns the authenticated session; adapters share
       it via clones of an `Arc<FlowMuxClient>`.
-- [ ] Session loss fails live flows and reconnects with bounded backoff.
-- [ ] All new code has unit/integration tests; `cargo clippy --workspace
+- [x] Session loss fails live flows and reconnects with bounded backoff.
+- [x] All new code has unit/integration tests; `cargo clippy --workspace
       --all-targets -- -D warnings` is clean.
-- [ ] `specs/plans/316-single-flow-vsock-networking.md` Phase 3 guest-adapter
+- [x] `specs/plans/316-single-flow-vsock-networking.md` Phase 3 guest-adapter
       checkbox is ticked.

@@ -1249,10 +1249,16 @@ for detailed scope and acceptance criteria.
         DNS pinning, UDP idle expiry, peer bounds, half-close, reset, and rate-
         limit overflow. Guest-side `FlowMuxClient` / `FlowMuxReconnectClient`,
         `FlowMuxStream`, `FlowMuxUdpSocket`, async frame pump, and unit tests
-        are implemented in `crates/mvm-agentd/src/flowmux.rs`. Remaining: wire
-        the guest loopback HTTP/SOCKS/DNS adapters to the shared client, delete
-        the raw egress path, and add endpoint crash/restart tests.
-  - [ ] Phase 4 — stream typed transformations (#2373)
+        are implemented in `crates/mvm-agentd/src/flowmux.rs`. Guest-side
+        adapters are now wired: `mvm-egress-client` uses
+        `flowmux_egress::run` with a single `FlowMuxReconnectClient`,
+        `mvm-addon-dns` optionally forwards through `FlowMuxClient::resolve`,
+        and the legacy line-prelude symbols (`HTTP_FORWARD_FRAME`,
+        `MVM_DNS/1`, `MVM_SOCKS5_UDP/1`) are removed from the guest modules.
+        Unit tests cover the new DNS and SOCKS5/HTTP parsing paths.
+        Remaining: delete the host-side raw-egress dispatcher and add endpoint
+        crash/restart integration tests.
+  - [~] Phase 4 — stream typed transformations (#2373)
   - [ ] Phase 5 — declared ingress on FlowMux (#2374)
   - [ ] Phase 6 — compatibility boundary (#2375)
   - [ ] Phase 7 — delete L3 completely (#2376)

@@ -751,7 +751,7 @@ where
     }
 }
 
-async fn read_frame_from<S>(
+pub(crate) async fn read_frame_from<S>(
     stream: &mut S,
 ) -> Result<Option<(Opcode, u32, u32, Vec<u8>)>, FlowMuxError>
 where
@@ -940,17 +940,17 @@ impl Drop for FlowMuxUdpSocket {
 
 /// Bridge an async stream into a synchronous `Read`/`Write` stream so the
 /// synchronous `Session::guest` handshake can run on it from `spawn_blocking`.
-struct AsyncStreamSyncAdapter<S> {
+pub(crate) struct AsyncStreamSyncAdapter<S> {
     stream: S,
     handle: tokio::runtime::Handle,
 }
 
 impl<S> AsyncStreamSyncAdapter<S> {
-    fn new(stream: S, handle: tokio::runtime::Handle) -> Self {
+    pub(crate) fn new(stream: S, handle: tokio::runtime::Handle) -> Self {
         Self { stream, handle }
     }
 
-    fn into_inner(self) -> S {
+    pub(crate) fn into_inner(self) -> S {
         self.stream
     }
 }
@@ -1186,6 +1186,15 @@ impl FlowMuxReconnectClient {
             .await
             .map_err(|_| FlowMuxError::SessionClosed("reconnect timed out".into()))??;
         client.resolve(name, qtype).await
+    }
+
+    /// Build a reconnect client from an existing watch receiver.
+    ///
+    /// Test-only: lets in-crate tests stand up a client that is already
+    /// connected to a mock host without going through the reconnect factory.
+    #[cfg(test)]
+    pub(crate) fn from_receiver(current: watch::Receiver<Option<Arc<FlowMuxClient>>>) -> Self {
+        Self { current }
     }
 }
 
