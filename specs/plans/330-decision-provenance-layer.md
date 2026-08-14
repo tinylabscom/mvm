@@ -187,10 +187,28 @@ Add structured decision fields to events that already exist.
 
 ### Phase 5 — Optional standards interoperability
 
-- [ ] Evaluate `tibet-core` as an export format (not dependency) for decision records.
-- [ ] If valuable, add optional TIBET-JSON serializer without taking a crate dependency.
-- [ ] Evaluate C2PA / in-toto / SPDX relevance for build-time vs runtime provenance.
-- [ ] Update `specs/SPRINT.md` and `specs/REFACTOR-STATUS.md`.
+- [x] Evaluate `tibet-core` as an export format (not dependency) for decision records.
+- [x] Add optional TIBET-JSON serializer without taking a crate dependency.
+- [x] Evaluate C2PA / in-toto / SPDX relevance for build-time vs runtime provenance.
+- [x] Update `specs/REFACTOR-STATUS.md`.
+
+Implementation:
+- `crates/mvm-core/src/provenance/tibet.rs` maps `DecisionRecord` to TIBET-shaped tokens.
+- `token_id` is a deterministic UUIDv5 derived from the `DecisionId` content address.
+- Canonical JSON for the token hash is produced with `serde_jcs`; the `hash` field is `sha256:<hex>` over the body excluding `hash` and `signature`.
+- `signature` is intentionally empty in the export: the read-only path has no access to the host signer. Verifiers use the chain-signed audit entry referenced in `erachter.attestation`.
+- `mvmctl trust audit decisions export --format tibet` emits a TIBET-JSON array.
+
+#### C2PA, in-toto, and SPDX evaluation
+
+| Standard | Relevance to `mvm` | Verdict |
+|---|---|---|
+| **TIBET** | Lightweight regulator-facing decision-provenance token. Maps cleanly onto `DecisionRecord` without a platform dependency. | **Adopt as optional read-only export.** |
+| **C2PA** | Designed for media/content authenticity (manifests bound to image/audio/video). Could describe a built workload image but not control-plane decisions or causal chains. | **Not a fit for decision provenance.** Useful only if `mvm` later needs to attest media/AI-model artifacts produced by a guest. |
+| **in-toto** | Supply-chain step attestation (layout + link metadata). `mvm` build pipeline already records signed plans and image digests; in-toto link metadata would duplicate that substrate and add a heavy metadata model. | **Not adopted now.** Revisit if a downstream consumer explicitly requires in-toto layouts for the build pipeline. |
+| **SPDX** | Software bill of materials. Excellent for build-time dependency provenance, but SPDX documents describe packages/licenses, not runtime admission/launch/egress decisions. | **Not a fit for decision provenance.** Existing OCI/image SBOM work should use SPDX independently; do not fold it into the decision layer. |
+
+Bottom line: decision-provenance export stays focused on PROV-O (primary) and TIBET-JSON (optional). Build-time artifact provenance remains the responsibility of the existing image/OCI/SBOM pipeline.
 
 ## Testing strategy
 
