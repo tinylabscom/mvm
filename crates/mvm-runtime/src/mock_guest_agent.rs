@@ -162,7 +162,30 @@ fn load_host_signer(host_key_path: &Path) -> Result<[u8; 32]> {
                 .parent()
                 .context("host signer key has no parent directory")?;
             std::fs::create_dir_all(parent)?;
-            std::fs::write(host_key_path, bytes)?;
+            // Write the mock seed with the same restrictive mode as the
+            // production host signer so tests that forget to isolate MVM_HOME
+            // do not leave a group/world-readable secret in the real keys dir.
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+                let mut f = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(0o600)
+                    .open(host_key_path)
+                    .with_context(|| format!("creating {}", host_key_path.display()))?;
+                f.write_all(&bytes)
+                    .with_context(|| format!("writing {}", host_key_path.display()))?;
+                drop(f);
+                let perms = std::fs::Permissions::from_mode(0o600);
+                std::fs::set_permissions(host_key_path, perms)
+                    .with_context(|| format!("chmod 0600 {}", host_key_path.display()))?;
+            }
+            #[cfg(not(unix))]
+            {
+                std::fs::write(host_key_path, bytes)
+                    .with_context(|| format!("writing {}", host_key_path.display()))?;
+            }
             Ok(bytes)
         }
         Err(error) => Err(error).with_context(|| "read mock host signer key"),

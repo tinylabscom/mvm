@@ -84,6 +84,17 @@ pub fn load_or_init() -> Result<HostSigner> {
 pub fn load_or_init_at(keys_dir: &Path) -> Result<HostSigner> {
     std::fs::create_dir_all(keys_dir)
         .with_context(|| format!("creating {}", keys_dir.display()))?;
+    #[cfg(unix)]
+    {
+        let mut perms = std::fs::metadata(keys_dir)
+            .with_context(|| format!("stat {}", keys_dir.display()))?
+            .permissions();
+        if perms.mode() & 0o777 != 0o700 {
+            perms.set_mode(0o700);
+            std::fs::set_permissions(keys_dir, perms)
+                .with_context(|| format!("chmod 0700 {}", keys_dir.display()))?;
+        }
+    }
 
     let secret_path = keys_dir.join(SECRET_FILENAME);
     let public_path = keys_dir.join(PUBLIC_FILENAME);
@@ -147,7 +158,9 @@ fn generate_new(secret_path: &Path, public_path: &Path) -> Result<HostSigner> {
     let verifying = signing.verifying_key();
 
     // Write secret half mode 0600 atomically — create_new refuses if
-    // a concurrent caller raced us into existence.
+    // a concurrent caller raced us into existence. `mode()` is subject
+    // to the process umask on Unix, so also chmod explicitly after the
+    // write to guarantee the secret half is never group- or world-readable.
     {
         let mut f = OpenOptions::new()
             .write(true)
@@ -158,6 +171,9 @@ fn generate_new(secret_path: &Path, public_path: &Path) -> Result<HostSigner> {
         f.write_all(signing.to_bytes().as_ref())
             .with_context(|| format!("writing {}", secret_path.display()))?;
         f.sync_all().ok();
+        let perms = std::fs::Permissions::from_mode(SECRET_MODE);
+        std::fs::set_permissions(secret_path, perms)
+            .with_context(|| format!("chmod 0600 {}", secret_path.display()))?;
     }
 
     // Write public half mode 0644.
@@ -271,8 +287,10 @@ mod tests {
         assert!(secret.exists());
         assert!(public.exists());
 
+        let dmode = std::fs::metadata(dir.path()).unwrap().permissions().mode() & 0o777;
         let smode = std::fs::metadata(&secret).unwrap().permissions().mode() & 0o777;
         let pmode = std::fs::metadata(&public).unwrap().permissions().mode() & 0o777;
+        assert_eq!(dmode, 0o700, "keys directory must be 0700");
         assert_eq!(smode, SECRET_MODE, "secret-half must be 0600");
         assert_eq!(pmode, PUBLIC_MODE, "public-half must be 0644");
     }
