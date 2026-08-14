@@ -216,13 +216,16 @@ That leaves two decidable problems and one that is a feature port:
 - [x] G3. Gate it. `surface_divergence.json` records the reviewed difference and
       a BDD scenario fails when reality stops matching it — confirmed to go red
       when a single internal is re-exported.
-- [ ] G4. Port the 27 genuinely-absent names to TypeScript. This is a feature
-      port, not a parity cleanup: it is the whole `@mvm.func` remote-invocation
-      surface (`func`, `session`, `Session`, `RemoteFunction`,
-      `current_session_id`, `workload_ref`, `WorkloadRef`, `derive_schema`,
-      `warm_process` and their error taxonomy) plus the declarative
-      network/deps helpers (`egress`, the `dns_*` trio, the `*_deps` trio,
-      `addon_use`, `host_port`). Needs product intent, not a mechanical fix.
+- [x] G4. Scoped out into `specs/plans/333-sdk-surface-generated-from-rust.md`.
+      Investigating it changed the shape of the answer: `egress`, `host_port`,
+      the `dns_*` trio and the `*_deps` trio already exist in
+      `mvm_sdk::ctor` and are hand-copied into Python, so porting them to
+      TypeScript would make three copies rather than two. Plan 333 generates
+      that layer from Rust instead, which also deletes the Python copies.
+- [x] G5. Fix the parity gate's normalization. Folding case collapsed the class
+      `Session` onto the function `session` — both SDKs export both — hiding one
+      of each pair and able to report parity when only half had been added. Keys
+      are now category-scoped; the absent count corrected from 27 to 29.
 
 Result: TypeScript-only divergence went from 18 names to 2
 (`MVM_SDK_MODE_ENV`, `MVM_SDK_OUT_PATH_ENV`); shared surface went from 33 to 42.

@@ -387,9 +387,27 @@ fn no_guarded_verb_reached_the_cli(world: &mut CliWorld) {
 // agree, and every difference must appear in a reviewed list.
 // ────────────────────────────────────────────────────────────────────
 
-/// Normalize a public name to a language-neutral form, so `emitRecordingJson`
+/// Normalize a public name to a language-neutral key, so `emitRecordingJson`
 /// and `emit_recording_json` compare equal.
+///
+/// Case is folded only for callables, and the category is part of the key.
+/// Folding everything collapses the class `Session` onto the function
+/// `session` — both SDKs export both — which hides one of the pair and would
+/// report parity when only half of it had been added.
+///
+/// The categories follow the convention both SDKs already keep: types are
+/// PascalCase in either language and so compare verbatim, constants are
+/// SCREAMING_SNAKE in either language and likewise, and only callables differ
+/// (`camelCase` against `snake_case`).
 fn neutral_name(name: &str) -> String {
+    let has_lowercase = name.chars().any(char::is_lowercase);
+    let starts_upper = name.starts_with(char::is_uppercase);
+    if starts_upper && has_lowercase {
+        return format!("type:{name}");
+    }
+    if !has_lowercase {
+        return format!("const:{name}");
+    }
     let mut out = String::with_capacity(name.len() + 4);
     for (index, ch) in name.chars().enumerate() {
         if ch.is_uppercase() && index != 0 {
@@ -397,7 +415,7 @@ fn neutral_name(name: &str) -> String {
         }
         out.extend(ch.to_lowercase());
     }
-    out
+    format!("fn:{out}")
 }
 
 /// Run a surface-dump fixture and parse its sorted name list.

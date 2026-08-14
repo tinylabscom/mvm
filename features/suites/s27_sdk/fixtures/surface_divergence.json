@@ -31,6 +31,8 @@
     "RemoteFunction",
     "SecretInArgError",
     "SecretInArgWarning",
+    "Session",
+    "WorkloadRef",
     "addon_use",
     "current_recording_dict",
     "current_session_id",
