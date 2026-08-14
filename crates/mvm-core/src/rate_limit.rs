@@ -3,6 +3,8 @@
 use std::time::Instant;
 
 /// Lazily refilled token bucket with a one-second burst capacity.
+// allow(secret-debug): numeric rate-limit state only; not a secret.
+#[derive(Debug)]
 pub struct TokenBucket {
     tokens: f64,
     capacity: f64,
@@ -20,6 +22,11 @@ impl TokenBucket {
             refill_per_sec: capacity,
             last_refill: Instant::now(),
         }
+    }
+
+    /// The configured burst capacity (also the per-second rate).
+    pub fn capacity(&self) -> f64 {
+        self.capacity
     }
 
     /// Consume one token when available.

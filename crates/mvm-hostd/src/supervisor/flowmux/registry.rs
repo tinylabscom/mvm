@@ -8,8 +8,9 @@
 //! another?", and "how much credit remains?".
 
 use std::collections::BTreeMap;
+use std::time::Duration;
 
-use mvm_contract::protocol::network_flow::Direction;
+use mvm_contract::protocol::network_flow::{Direction, MAX_STREAM_CREDIT};
 use tracing::warn;
 
 /// Why a stream/association operation was refused.
@@ -34,6 +35,7 @@ pub enum RegistryError {
 pub enum FlowClass {
     Tcp,
     Udp,
+    Dns,
 }
 
 impl std::fmt::Display for FlowClass {
@@ -41,6 +43,7 @@ impl std::fmt::Display for FlowClass {
         match self {
             FlowClass::Tcp => write!(f, "tcp"),
             FlowClass::Udp => write!(f, "udp"),
+            FlowClass::Dns => write!(f, "dns"),
         }
     }
 }
@@ -68,12 +71,24 @@ pub struct StreamEntry {
     pub host_credit: u32,
 }
 
-/// Resource ceilings for one registry.
+/// Resource ceilings and runtime bounds for one registry.
 #[derive(Debug, Clone, Copy)]
 pub struct RegistryLimits {
     pub max_tcp: usize,
     pub max_udp: usize,
+    pub max_dns: usize,
     pub initial_credit: u32,
+    /// How long a UDP association may sit idle before the host closes it.
+    pub udp_idle_timeout: Duration,
+    /// Maximum distinct peers a single UDP association may communicate with.
+    pub max_udp_peers: usize,
+    /// New TCP connection attempts per second (burst == rate). Zero disables
+    /// the limiter.
+    pub tcp_connect_rate: u32,
+    /// New UDP association opens per second (burst == rate). Zero disables.
+    pub udp_open_rate: u32,
+    /// DNS resolve requests per second (burst == rate). Zero disables.
+    pub dns_resolve_rate: u32,
 }
 
 impl Default for RegistryLimits {
@@ -81,7 +96,13 @@ impl Default for RegistryLimits {
         Self {
             max_tcp: 4096,
             max_udp: 256,
+            max_dns: 256,
             initial_credit: 64 * 1024,
+            udp_idle_timeout: Duration::from_secs(60),
+            max_udp_peers: 16,
+            tcp_connect_rate: 0,
+            udp_open_rate: 0,
+            dns_resolve_rate: 0,
         }
     }
 }
@@ -122,6 +143,15 @@ impl StreamRegistry {
         self.streams
             .values()
             .filter(|e| e.class == FlowClass::Udp && e.state != StreamState::Closed)
+            .count()
+    }
+
+    /// How many live DNS resolution streams exist.
+    #[must_use]
+    pub fn live_dns(&self) -> usize {
+        self.streams
+            .values()
+            .filter(|e| e.class == FlowClass::Dns && e.state != StreamState::Closed)
             .count()
     }
 
@@ -207,6 +237,7 @@ impl StreamRegistry {
         match class {
             FlowClass::Tcp => self.limits.max_tcp,
             FlowClass::Udp => self.limits.max_udp,
+            FlowClass::Dns => self.limits.max_dns,
         }
     }
 
@@ -300,14 +331,39 @@ impl StreamRegistry {
             .streams
             .get_mut(&stream_id)
             .ok_or(RegistryError::NotLive { stream_id })?;
-        entry.guest_credit =
-            entry
-                .guest_credit
-                .checked_add(delta)
-                .ok_or(RegistryError::IllegalState {
-                    stream_id,
-                    state: entry.state,
-                })?;
+        entry.guest_credit = entry
+            .guest_credit
+            .saturating_add(delta)
+            .min(MAX_STREAM_CREDIT);
+        Ok(())
+    }
+
+    /// Consume `len` bytes of host credit on `stream_id`.
+    pub fn consume_host_credit(&mut self, stream_id: u32, len: u32) -> Result<(), RegistryError> {
+        let entry = self
+            .streams
+            .get_mut(&stream_id)
+            .ok_or(RegistryError::NotLive { stream_id })?;
+        if len > entry.host_credit {
+            return Err(RegistryError::IllegalState {
+                stream_id,
+                state: entry.state,
+            });
+        }
+        entry.host_credit -= len;
+        Ok(())
+    }
+
+    /// Add `delta` bytes to the host credit on `stream_id`.
+    pub fn grant_host_credit(&mut self, stream_id: u32, delta: u32) -> Result<(), RegistryError> {
+        let entry = self
+            .streams
+            .get_mut(&stream_id)
+            .ok_or(RegistryError::NotLive { stream_id })?;
+        entry.host_credit = entry
+            .host_credit
+            .saturating_add(delta)
+            .min(MAX_STREAM_CREDIT);
         Ok(())
     }
 
@@ -315,6 +371,7 @@ impl StreamRegistry {
         match class {
             FlowClass::Tcp => self.live_tcp(),
             FlowClass::Udp => self.live_udp(),
+            FlowClass::Dns => self.live_dns(),
         }
     }
 
@@ -340,6 +397,7 @@ pub fn class_for_open(opcode: mvm_contract::protocol::network_flow::Opcode) -> O
     match opcode {
         Opcode::OpenTcp | Opcode::InboundOpen => Some(FlowClass::Tcp),
         Opcode::OpenUdp => Some(FlowClass::Udp),
+        Opcode::Resolve => Some(FlowClass::Dns),
         _ => None,
     }
 }
@@ -378,7 +436,9 @@ mod tests {
         let mut reg = StreamRegistry::new(RegistryLimits {
             max_tcp: 2,
             max_udp: 1,
+            max_dns: 64,
             initial_credit: 1024,
+            ..Default::default()
         });
         reg.alloc_guest(FlowClass::Tcp).unwrap();
         reg.alloc_guest(FlowClass::Tcp).unwrap();
@@ -418,7 +478,9 @@ mod tests {
         let mut reg = StreamRegistry::new(RegistryLimits {
             max_tcp: 1,
             max_udp: 0,
+            max_dns: 64,
             initial_credit: 100,
+            ..Default::default()
         });
         let id = reg.alloc_guest(FlowClass::Tcp).unwrap();
         reg.consume_guest_credit(id, 30).unwrap();
@@ -426,6 +488,39 @@ mod tests {
         reg.grant_guest_credit(id, 10).unwrap();
         assert_eq!(reg.get(id).unwrap().guest_credit, 80);
         assert!(reg.consume_guest_credit(id, 81).is_err());
+    }
+
+    #[test]
+    fn host_credit_is_tracked() {
+        let mut reg = StreamRegistry::new(RegistryLimits {
+            max_tcp: 1,
+            max_udp: 0,
+            max_dns: 64,
+            initial_credit: 100,
+            ..Default::default()
+        });
+        let id = reg.alloc_guest(FlowClass::Tcp).unwrap();
+        reg.consume_host_credit(id, 30).unwrap();
+        assert_eq!(reg.get(id).unwrap().host_credit, 70);
+        reg.grant_host_credit(id, 10).unwrap();
+        assert_eq!(reg.get(id).unwrap().host_credit, 80);
+        assert!(reg.consume_host_credit(id, 81).is_err());
+    }
+
+    #[test]
+    fn credit_grants_are_capped_at_max_stream_credit() {
+        let mut reg = StreamRegistry::new(RegistryLimits {
+            max_tcp: 1,
+            max_udp: 0,
+            max_dns: 64,
+            initial_credit: 100,
+            ..Default::default()
+        });
+        let id = reg.alloc_guest(FlowClass::Tcp).unwrap();
+        reg.grant_guest_credit(id, u32::MAX).unwrap();
+        reg.grant_host_credit(id, u32::MAX).unwrap();
+        assert_eq!(reg.get(id).unwrap().guest_credit, MAX_STREAM_CREDIT);
+        assert_eq!(reg.get(id).unwrap().host_credit, MAX_STREAM_CREDIT);
     }
 
     #[test]
