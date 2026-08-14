@@ -227,10 +227,27 @@ That leaves two decidable problems and one that is a feature port:
 Result: TypeScript-only divergence went from 18 names to 2
 (`MVM_SDK_MODE_ENV`, `MVM_SDK_OUT_PATH_ENV`); shared surface went from 33 to 42.
 
+### WS-I — two `mvm-agentd` flakes surfaced by the workspace run
+
+Not SDK work, but surfaced by verifying this branch and fixed rather than
+deferred: `test_execute_stdout_cap_prunes_and_marks_a_gap_without_killing_the_wrapper`
+and `test_execute_wrapper_cannot_forge_an_agent_gap_record_on_fd3` both assert
+on output a still-running wrapper produced, under a 300 ms deadline that has to
+cover fork/exec plus a first write plus one poll.
+
+- [x] I1. Root cause established by construction — a 1 ms deadline reproduces
+      the reported `gaps=0 stdout_len=0` on every run, with the retention path
+      uninvolved
+- [x] I2. Both given a deadline sized to the property; crate suite time
+      unchanged
+- [x] I3. Ten runs of each under 16-way CPU saturation pass
+- [x] I4. The neighbouring timeout test left alone — it asserts only that the
+      timeout fired, never on captured output
+
 ### WS-F — gates and docs
 
 - [x] F1. `cargo fmt --all -- --check`, `cargo clippy --workspace -- -D warnings`
-- [ ] F2. `cargo nextest run --workspace` + `cargo test --workspace --doc`
+- [x] F2. `cargo nextest run --workspace` + `cargo test --workspace --doc`
 - [x] F3. Python + TypeScript suites green
 - [x] F4. `specs/REFACTOR-STATUS.md` rollup updated
 - [x] F5. Delivery note under `specs/sprint/delivery/`

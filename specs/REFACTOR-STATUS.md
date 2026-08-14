@@ -17,8 +17,13 @@ for detailed scope and acceptance criteria.
       `ReferenceError: require is not defined` in the published ESM artifact —
       invisible to vitest, which supplies CJS interop. New
       `s27_sdk/runtime_live_transport.feature` drives the built artifacts in
-      both languages against a shared recording CLI double. WS-G (Python↔TS
-      public-surface divergence) deferred pending a canonical-surface decision.
+      both languages against a shared recording CLI double, and the suite now
+      gates a PR at all — it previously ran only from release-tag workflows.
+      Cross-language surface divergence measured and mostly closed: TypeScript
+      stopped exporting 7 internals, Python gained the 9 host-service errors a
+      caller has to name, TS-only divergence 18 → 2, remainder pinned by a
+      reviewed list. WS-G4 (porting the 27 absent names — the `@mvm.func`
+      surface) deferred: a feature port needing product intent.
 
 - [x] **Plan 325 — lowercase OCI image names.** Registry and repository
       capitalization is normalized before validation across every shared OCI

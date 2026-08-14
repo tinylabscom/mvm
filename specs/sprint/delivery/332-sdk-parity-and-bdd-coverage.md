@@ -103,21 +103,44 @@ release-tag only.
 | conformance (`--features bdd`) | 49 features | 55 features, 188 scenarios, 187 passed, 1 skipped |
 | `cargo clippy` (conformance + xtask, all targets) | — | clean |
 | `xtask check-conformance` / `check-claim-catalog` / `check-no-spec-refs-in-comments` / `check-single-fixture-corpus` | — | clean |
+| `cargo test --workspace --doc` | — | 17 crates, 6 passed, 0 failed, 8 ignored |
+| `cargo nextest run -p xtask -p mvm-agentd` | — | 1334 passed |
 
 Both new tripwires and the new xtask gate were confirmed to go red when the
 condition they guard is reintroduced.
 
-`cargo nextest run --workspace`: 11603 tests, 11601 passed, 2 failed, 26
-skipped. Both failures are in `mvm-agentd::entrypoint_execute` and are
-pre-existing on the base commit, not caused by this work — the only Rust this
-branch touches is `crates/mvm-conformance/tests/` and `xtask/src/`, and
-`mvm-agentd` depends on neither:
+### Two `mvm-agentd` flakes, root-caused and fixed
 
-- `test_execute_wrapper_cannot_forge_an_agent_gap_record_on_fd3` — passes when
-  re-run isolated; parallel-execution flake.
-- `test_execute_stdout_cap_prunes_and_marks_a_gap_without_killing_the_wrapper`
-  — fails isolated too (`expected one stdout gap, got []`). A real red test on
-  main, unrelated to the SDK. No open issue found.
+The first workspace run surfaced two failures in `mvm-agentd::entrypoint_execute`,
+both pre-existing on the base commit — the SDK work touches no Rust that
+`mvm-agentd` depends on. They are fixed here rather than left for later, because
+they share one cause and it is a cause worth naming.
+
+An early reading of this called one of them "a real red test on main" that
+"fails isolated too". That was one sample. Repeated runs put it near 20% under
+load and green on an idle machine; neither test is deterministically red.
+
+Both assert on output a *still-running* wrapper produced, under a 300 ms
+deadline. That deadline has to cover fork/exec of the wrapper binary, its first
+4 KiB write, and one 10 ms poll. Under load it does not, and the failure
+presents as `gaps=0 stdout_len=0` — which reads as though retention broke, when
+in fact the child never ran.
+
+Established by construction, not inference: dropping the deadline to 1 ms
+reproduces `gaps=0 stdout_len=0` on every run. The retention path is not
+involved. The wrapper writes 4 KiB blocks against a 1 KiB bound, so the first
+successful write always breaches the cap; an empty capture can only mean no
+write happened.
+
+Both now use a deadline sized to the property they test. The crate suite time
+is unchanged — these wrappers never exit, so the deadline is the test's
+runtime, and the crate's slowest test already sat above it. Ten runs of each
+under 16-way CPU saturation pass; the same loop reproduced the failure before.
+
+This is the same defect class an earlier commit named when it stopped the
+result-oriented tests in this file using a spawn deadline as an assertion.
+These two were left out of that pass because they genuinely need the `Timeout`
+outcome — but needing the timeout does not mean racing it.
 
 ### Surface divergence, measured and mostly closed
 
