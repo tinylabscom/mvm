@@ -141,10 +141,8 @@ function printWelcome(policy) {
   const rules = (policy && policy.rules) || [];
   const allowedHost = rules.length > 0 ? rules[0].host : null;
   appendConsole("");
-  appendConsole("This is a shell inside a policy-governed microVM sandbox —");
-  appendConsole("network egress is deny-by-default and every decision is");
-  appendConsole("signed into the tamper-evident audit chain shown in the");
-  appendConsole("Audit chain panel. Things to try:");
+  appendConsole("A shell in a policy-governed sandbox: egress is deny-by-");
+  appendConsole("default, every decision signed into the audit chain. Try:");
   if (allowedHost) {
     appendConsole(`  fetch ${allowedHost}   → allowed by the launch policy`);
   }
