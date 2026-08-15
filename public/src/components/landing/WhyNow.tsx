@@ -49,12 +49,18 @@ export function WhyNow() {
       </div>
 
       <Reveal delay={160}>
-        <p className="mt-10 max-w-3xl font-display text-xl font-bold leading-snug text-title sm:text-2xl">
-          MVM assumes the worst —{" "}
-          <span className="text-accent-2">
-            Security first isn&rsquo;t a tier, it&rsquo;s the default.
-          </span>{" "}
-          As easy as a container, without the shared kernel.
+        {/* No max-width cap: the first line needs the section's full
+            column to stay on one line at desktop sizes. */}
+        <p className="mt-10 font-display text-lg font-bold leading-snug text-title sm:text-2xl">
+          <span className="block">
+            MVM assumes the worst —{" "}
+            <span className="text-accent-2">
+              Security first isn&rsquo;t a tier, it&rsquo;s the default.
+            </span>
+          </span>
+          <span className="mt-2 block">
+            As easy as a container, without the shared kernel.
+          </span>
         </p>
         <div className="mt-6 flex flex-wrap gap-x-6 gap-y-2">
           <a
