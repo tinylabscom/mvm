@@ -100,11 +100,6 @@ let
     in
     "${attrText} ${asString}";
 
-  deindent = text:
-    lib.concatStringsSep "\n" (
-      map (line: lib.removePrefix "    " line) (lib.splitString "\n" text)
-    );
-
 in
 { name
 , entrypoint
@@ -351,7 +346,7 @@ let
   #
   # PID 1 stays uid 0 (kernel mandate); both children run rootless
   # by default in production (see uids resolution above).
-  initScript = pkgs.writeScript "mvm-init" (deindent ''
+  initText = ''
     #!/bin/sh
     # mvm /init — busybox PID 1.
 
@@ -939,7 +934,7 @@ let
     # workload that reads stdin shortly after boot. /dev/null is the correct
     # stdin for a non-interactive sealed workload; stdout/stderr stay on the
     # console for capture, and the exit-code capture below is unaffected.
-   . "$MVM_BOOT" </dev/null
+    . "$MVM_BOOT" </dev/null
     MVM_CODE=$?
     # Report the exit code to the host (best-effort), then power off —
     # never reboot. The host reads it from the control vsock port.
@@ -968,7 +963,23 @@ let
     fi
     /bin/busybox sync
     /bin/busybox poweroff -f
-  '');
+  '';
+
+  # The kernel exec()s /init directly, so `#!` must be the first two bytes of
+  # the file: shift them by even one column and the boot dies with ENOEXEC
+  # before any userspace runs, leaving a kernel panic as the only symptom.
+  # Nix derives an indented string's baseline from its least-indented line, so
+  # one under-indented line anywhere in the block above silently moves every
+  # other line — including the shebang — one column right. Assert the rendered
+  # bytes instead of trusting the indentation to stay uniform.
+  initScript =
+    lib.throwIf (!lib.hasPrefix "#!/bin/sh\n" initText) ''
+      mkGuest: the rendered /init does not start with the "#!/bin/sh" shebang.
+      The kernel exec()s /init and will panic with ENOEXEC. This almost always
+      means a line inside the /init block of nix/lib/mk-guest.nix is indented
+      less than its neighbours, which moves the whole script one or more
+      columns right. Re-align that line.
+    '' (pkgs.writeScript "mvm-init" initText);
 
   # Render the entrypoint as a shell-sourced fragment. /init does
   # `. /etc/mvm/entrypoint`, so this is just a script.
