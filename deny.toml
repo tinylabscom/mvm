@@ -119,7 +119,6 @@ skip = [
     # Foundational crates mid v1->v2 ecosystem migration. mvm pins one major
     # for each it uses directly; the other is dragged in by deps that have not
     # finished migrating. Not collapsible without forking those deps.
-    "bitflags",
     "getrandom",
 
     # rand 0.8 (workspace direct) vs rand 0.10 (hickory-proto 0.26), and
@@ -135,6 +134,18 @@ skip = [
     # majors; this pair can only collapse once kvm-bindings / kvm-ioctls bump to
     # vmm-sys-util 0.15. Shrink when they do.
     "vmm-sys-util",
+
+    # bitflags 1.3.2 vs 2.x. mvm depends on neither major directly — both are
+    # wholly transitive, so there is no local pin to change. The 1.x side has
+    # two independent parents in the shipped closure: smoltcp 0.13.1 (the
+    # mvm-hostd userspace datapath) and both vmm-sys-util majors above.
+    # smoltcp 0.13.1 is the latest release and declares bitflags ^1.0
+    # non-optionally, as does vmm-sys-util 0.15.0; neither exposes a feature
+    # that selects 2.x. Collapsing this therefore needs *both* smoltcp and the
+    # rust-vmm crates to migrate — moving either one alone changes nothing,
+    # which is why no upstream request is filed against one of them in
+    # isolation. It costs exactly one crate. Drop when both have moved.
+    "bitflags",
 ]
 skip-tree = []
 
