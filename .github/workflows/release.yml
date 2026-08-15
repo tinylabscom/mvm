@@ -723,7 +723,7 @@ jobs:
           echo "Combined checksums:"
           cat checksums-sha256.txt
 
-      - name: Sign release tarballs and SBOM
+      - name: Sign release tarballs, checksum manifests, and SBOM
         shell: bash
         run: |
           set -euo pipefail
@@ -739,7 +739,27 @@ jobs:
           #
           # Requires cosign >= v2.4 on any host that verifies by hand; that is
           # the floor this project targets and there is no legacy fallback.
-          for blob in artifacts/*.tar.gz sbom.cdx.json; do
+          #
+          # The checksum manifests are in this list because they are what
+          # actually gates boot bytes: every downloader hashes the artifact and
+          # compares it against the manifest, so an unsigned manifest lets
+          # whoever can swap an artifact swap its recorded hash too and the
+          # comparison still passes. Signing the tarball alone does not close
+          # that — the image blobs (kernel, rootfs, verity sidecar) are not
+          # tarballs and carry no per-file signature of their own; the manifest
+          # is their only integrity anchor.
+          #
+          # The two image manifests are globs, so nullglob drops them when the
+          # image job that would have produced them failed — image signing stays
+          # best-effort exactly as image publication is. The combined binary
+          # manifest is a literal because the preceding step always writes it
+          # and this job hard-gates on the binary build.
+          for blob in \
+            artifacts/*.tar.gz \
+            artifacts/builder-vm-*-checksums-sha256.txt \
+            artifacts/default-microvm-*-checksums-sha256.txt \
+            artifacts/checksums-sha256.txt \
+            sbom.cdx.json; do
             cosign sign-blob \
               --yes \
               --new-bundle-format \
@@ -857,6 +877,7 @@ jobs:
             artifacts/*.tar.gz
             artifacts/*.tar.gz.bundle
             artifacts/checksums-sha256.txt
+            artifacts/checksums-sha256.txt.bundle
             artifacts/builder-vm-vmlinux-*
             artifacts/builder-vm-rootfs-*
             artifacts/builder-vm-*.cmdline.txt
@@ -865,6 +886,7 @@ jobs:
             artifacts/builder-vm-*.pack-manifest.json.bundle
             artifacts/builder-vm-*.sbom.txt
             artifacts/builder-vm-*-checksums-sha256.txt
+            artifacts/builder-vm-*-checksums-sha256.txt.bundle
             artifacts/runtime-overlay-*.tar.gz
             artifacts/runtime-overlay-*.tar.gz.sha256
             artifacts/sdk-sidecar-*.tar.gz
@@ -878,6 +900,7 @@ jobs:
             artifacts/default-microvm-*.pack-manifest.json.bundle
             artifacts/default-microvm-*.sbom.txt
             artifacts/default-microvm-*-checksums-sha256.txt
+            artifacts/default-microvm-*-checksums-sha256.txt.bundle
             sbom.cdx.json
             sbom.cdx.json.bundle
           )

@@ -64,6 +64,30 @@ sha256_of() {
   else shasum -a 256 "$1" | awk '{print $1}'; fi
 }
 
+# Every downloader anchors on a checksum manifest: it hashes the artifact and
+# compares against this file. That makes an unsigned manifest the weak link —
+# whoever can swap an artifact can swap its recorded hash too, and the
+# comparison still passes. So each manifest ships a cosign bundle beside it,
+# and a release that skipped signing one is a packaging bug worth failing on
+# here: the download would still succeed and still "verify", which is precisely
+# the silent failure this catches.
+require_signed_manifest() {
+  manifest="$1"; label="$2"
+  bundle="$manifest.bundle"
+  # Every return is explicit: the script runs under `set -e`, so a bare `return`
+  # after a failed test propagates that failure and aborts the whole run instead
+  # of recording one problem and carrying on.
+  [ -f "$bundle" ] || { fail "$label signature bundle missing: $(basename "$bundle")"; return 0; }
+  [ "$DO_COSIGN" = 1 ] || return 0
+  command -v cosign >/dev/null 2>&1 || { fail "--cosign given but cosign not on PATH"; return 0; }
+  cosign verify-blob --bundle "$bundle" \
+    ${COSIGN_IDENTITY_REGEXP:+--certificate-identity-regexp "$COSIGN_IDENTITY_REGEXP"} \
+    ${COSIGN_IDENTITY:+--certificate-identity "$COSIGN_IDENTITY"} \
+    ${COSIGN_OIDC_ISSUER:+--certificate-oidc-issuer "$COSIGN_OIDC_ISSUER"} \
+    "$manifest" >/dev/null 2>&1 \
+    || fail "$label cosign verify-blob failed"
+}
+
 required_bins_for_target() {
   case "$1" in
     *apple-darwin)
@@ -77,6 +101,7 @@ required_bins_for_target() {
 
 COMBINED="$ASSETS_DIR/checksums-sha256.txt"
 [ -f "$COMBINED" ] || fail "combined checksums manifest missing: checksums-sha256.txt"
+require_signed_manifest "$COMBINED" "combined checksums manifest"
 
 for target in $TARGETS; do
   tarball="$ASSETS_DIR/mvmctl-${target}.tar.gz"
@@ -148,6 +173,7 @@ for arch in $KERNEL_ARCHES; do
 
   [ -f "$workload_kernel" ] || { fail "[$arch] workload kernel missing: vmlinux-${arch}-workload"; continue; }
   [ -f "$kernel_checks" ] || { fail "[$arch] kernel checksums manifest missing: kernel-${arch}-checksums-sha256.txt"; continue; }
+  require_signed_manifest "$kernel_checks" "[$arch] kernel checksums manifest"
 
   want=$(awk -v n="vmlinux-${arch}-workload" '$2 == n { print $1 }' "$kernel_checks" | head -1)
   if [ -z "$want" ]; then
@@ -189,6 +215,7 @@ for arch in $BUILDER_ARCHES; do
   fi
 
   [ -f "$bp_checks" ] || { fail "[$arch] builder checksums manifest missing: builder-vm-${arch}-checksums-sha256.txt"; continue; }
+  require_signed_manifest "$bp_checks" "[$arch] builder checksums manifest"
   for f in "$bp_manifest" "$bp_bundle" "$bp_sbom"; do
     want=$(awk -v n="$f" '$2 == n { print $1 }' "$bp_checks" | head -1)
     if [ -z "$want" ]; then
@@ -227,6 +254,7 @@ for arch in $RUNTIME_ARCHES; do
   fi
 
   [ -f "$rp_checks" ] || { fail "[$arch] default-microvm checksums manifest missing: default-microvm-${arch}-checksums-sha256.txt"; continue; }
+  require_signed_manifest "$rp_checks" "[$arch] default-microvm checksums manifest"
   for f in "$rp_manifest" "$rp_bundle" "$rp_sbom"; do
     want=$(awk -v n="$f" '$2 == n { print $1 }' "$rp_checks" | head -1)
     if [ -z "$want" ]; then

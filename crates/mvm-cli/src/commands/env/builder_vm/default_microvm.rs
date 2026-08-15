@@ -496,14 +496,20 @@ fn download_default_microvm_image(
 
     let assets = default_microvm_assets(cache_dir, arch);
     let checksums_name = format!("default-microvm-{arch}-checksums-sha256.txt");
-    let checksums_url = format!("{base_url}/{checksums_name}");
 
     ui::info(&format!(
         "Downloading default microVM image (v{version})..."
     ));
 
     let asset_names: Vec<&str> = assets.iter().map(|(n, _)| n.as_str()).collect();
-    let expected = fetch_expected_hashes(&checksums_url, &asset_names)?;
+    let expected = fetch_expected_hashes(
+        &ChecksumManifest {
+            base_url: &base_url,
+            asset: &checksums_name,
+            version,
+        },
+        &asset_names,
+    )?;
 
     for (name, dest) in &assets {
         ui::info(&format!("  Fetching {name}..."));

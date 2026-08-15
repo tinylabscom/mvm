@@ -24,7 +24,9 @@ use sha2::{Digest, Sha256};
 
 #[cfg(feature = "release-artifact-bootstrap")]
 use super::artifact_verify::bump_verify_outcome;
-use super::artifact_verify::{download_file, fetch_expected_hashes, verify_artifact_hash};
+use super::artifact_verify::{
+    ChecksumManifest, download_file, fetch_expected_hashes, verify_artifact_hash,
+};
 use crate::ui;
 #[cfg(all(test, feature = "builder-vm"))]
 use bootstrap::BuildHeartbeat;
