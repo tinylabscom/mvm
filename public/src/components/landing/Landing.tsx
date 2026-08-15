@@ -6,6 +6,7 @@ import { DemoTeaser } from "./DemoTeaser";
 import { DeploymentTiers } from "./DeploymentTiers";
 import { Positioning } from "./Positioning";
 import { RequestAccess } from "./RequestAccess";
+import { WhyNow } from "./WhyNow";
 import { WhyMicrovm } from "./WhyMicrovm";
 import { FAQ } from "./FAQ";
 import { CTABanner } from "./CTABanner";
@@ -16,6 +17,12 @@ import { Footer } from "./Footer";
 //   2. Demo teaser      — browser sandbox, straight after the claim so a
 //                         visitor can see governance behavior immediately,
 //                         before installing anything.
+//   2b. Why now          — the vibecoding-era narrative: AI writes and runs
+//                         more of the code, review doesn't scale, so the
+//                         runtime must assume the code is hostile. The
+//                         emotional core; placed after the demo so the
+//                         reader has just *seen* the governance the story
+//                         argues for.
 //   3. Quickstart       — the shortest path from install to a running microVM.
 //   5. Positioning      — "one project, three ways to drive it": CLI,
 //                         Declare, Runtime, each given its own row.
@@ -51,6 +58,7 @@ export function Landing() {
     <div className="min-h-screen w-full bg-canvas">
       <Hero />
       <DemoTeaser />
+      <WhyNow />
       <Quickstart />
       <Positioning />
       <WhyMicrovm />
