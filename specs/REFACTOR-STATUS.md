@@ -1,6 +1,6 @@
 # Refactor status
 
-Last updated: 2026-08-13
+Last updated: 2026-08-14
 
 This is the cross-plan progress index. The owning plan remains authoritative
 for detailed scope and acceptance criteria.
@@ -320,6 +320,14 @@ for detailed scope and acceptance criteria.
         unprivileged spawn failed outright, and because it ran first the
         failure also skipped `NoNewPrivs` — the load-bearing control. The
         privileged init path still fails closed
+  - [x] Issue #2522 — the `EPERM` tolerance above covered the workload spawn
+        but not the agent's own drop, which ran the same bounding-set narrowing
+        *after* `set_capabilities` had already removed `CAP_SETPCAP`. Every
+        `machine run --image` failed: the errno left the `pre_exec` hook, the
+        agent never started, and the host timed out waiting for it. The
+        narrowing now runs before the identity change, while the caller still
+        holds the capability the syscall needs, and both call sites share one
+        helper. Bisected against the parent commit and witnessed live on HVF
   - [ ] Re-run the adversarial probe on HVF **and** Firecracker — the closure
         gate, not yet run; no Linux/KVM host available
   - [ ] Record the ADR-001 claims 1/2 scope decision (owner call; determines

@@ -354,6 +354,11 @@ fn main() -> anyhow::Result<()> {
                     .iter()
                     .map(|share| (share.tag.clone(), share.path.clone()))
                     .collect(),
+                // Streamed as the guest emits it, so the log is readable while
+                // the VM is still running — which is when a boot that never
+                // reaches the agent has to be diagnosed. The authoritative
+                // rewrite after the run loop returns is unchanged.
+                console_log: Some(cfg.console_log.clone()),
                 pause_state: cfg.pause_state.clone(),
                 snapshot_request: cfg.snapshot_request.clone(),
                 snapshot_ram: cfg.snapshot_ram.clone(),
