@@ -1,5 +1,8 @@
 # Plan 336 — Runtime SDK parity repair + BDD coverage
 
+Backing: shipped-source
+Validation: check-two-surfaces
+
 **Status: IN PROGRESS**
 **Opened:** 2026-08-14
 

@@ -1,5 +1,8 @@
 # Plan 337 — Generate the SDK surface from Rust instead of porting it
 
+Backing: preview
+Validation: none
+
 **Status: NOT STARTED**
 **Opened:** 2026-08-14
 **Follows:** Plan 336 WS-G4
