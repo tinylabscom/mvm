@@ -182,7 +182,7 @@ Verified: 17 `flowmux_drive` + 9 `flowmux_identity` tests, `mvm-agentd` 668, `mv
 `mvm-build` 791 lib tests, and a clean `--workspace --all-targets --all-features` cross-check
 for `x86_64-unknown-linux-gnu`.
 
-### WS3 — Thread the identity to every spawn site
+### WS3 — Thread the identity to every spawn site — **complete**
 
 - [ ] `NetworkEndpointSpawnRequest` (`crates/mvm-runtime/src/workload_runner/runner/spawner.rs:10-19`)
       carries the identity; `RealNetworkEndpointSpawner::spawn` (`:32-55`) sets it
@@ -200,6 +200,55 @@ for `x86_64-unknown-linux-gnu`.
 
 **At the end of WS3 the reported command works again.**
 
+**As built.** The spawner trait now returns a `SpawnedEndpoint { egress_uds, identity_drive }`
+rather than a bare path, and takes a `FlowMuxIdentitySource` — `Mint` or
+`InheritFrom(parent_state_dir)`.
+
+**The warm path forced a design decision the plan had not anticipated.** A claimed child
+restores from its parent's memory image, so it *already holds the parent's signing key*, and
+there is no way to put a different one into a running guest's memory. A fresh per-child mint
+would therefore have broken every warm claim with an unexplainable handshake failure. So a
+cold boot mints and attaches a drive; a warm claim inherits, reading what the parent persisted
+at its own boot. A claim from a parent that persisted no identity is **refused** rather than
+handed a key its guest does not hold.
+
+Only the inheritable half is persisted, via a dedicated `InheritableIdentity` type. The first
+version of this reused `FlowMuxIdentitySpawnConfig`, which also carries
+`host_signing_key_base64` — the host signer's *private* key — and would have copied it into
+every per-VM state dir once per boot. Two tests now assert neither private key appears in that
+file.
+
+`raw_egress` is gone from `SubstitutionSpawnParams`, so `build_endpoint_config_json` no longer
+selects a protocol: identity present ⇒ `flow_mux`, absent ⇒ `wire`. `ClaimGuards::spawn_endpoint`
+lost its `secrets.is_empty()` fork, which is the specific line that let the guest and host
+disagree. Whether a workload carries secrets now decides what the endpoint *does* with a flow,
+not which protocol the guest speaks.
+
+Both legacy driver spawn functions (`spawn_libkrun_egress_endpoint_if_needed`,
+`spawn_hvf_gating_endpoint_if_needed`) were **deleted rather than wired**: they had no callers
+at all, only doc references and the xtask gate's tripwire, which stays as a guard against
+reintroduction.
+
+Drives are attached at every tier: the workload spec appends it last in `workload_spec` (found
+by label, so user volumes cannot shift it), the builder runner and all five `libkrun_builder`
+spawn sites attach it to their krun context, and all three `qemu_builder` sites add a
+read-only `-drive`. The builder helper derives its session id from the per-VM state dir's own
+name — the call sites variously have a name, a differently-named one, or none.
+
+**Open, found by a failing test (WS3).** The FlowMux host key is deliberately the host
+signer, because the guest writes the anchor to `/run/mvm/host-signer.pub` — the *same* file
+the agent pins for verb-grant verification. A separate per-boot host key would silently break
+grant verification, so this is not a free choice.
+
+That means a builder VM now needs `~/.mvm/keys/host-signer.ed25519` to exist, and on a fresh
+install `mvmctl build image` can run before anything has created it. The creator
+(`mvm_hostd::audit::host_keypair::load_or_init_at`) sits *above* `mvm-vmm` in the graph, so
+the mint site cannot call it, and adding a second creator of the host identity is not
+acceptable. For now the error names the fix (`mvmctl doctor` creates it). The proper fix is
+to move the host-keypair module down into `mvm-core`, where crypto already lives, so there is
+one creator reachable by every layer — worth doing, but it is a security-sensitive 421-line
+move that does not belong in this change.
+
 ### WS4 — Fold substitution onto `OpenHttp`
 
 - [ ] Guest `forward_proxy` keeps its loopback listener and `parse_proxied_request` but relays
@@ -213,6 +262,34 @@ for `x86_64-unknown-linux-gnu`.
 - [ ] Bodies stream as bounded chunks instead of whole-body base64 JSON (the Phase 4 win)
 - [ ] Hard gate: `can_skip_substitution_assembly` (`mvm-network-endpoint.rs:330-336`) keys on
       the substituting flow being available, and the failure is a launch failure
+
+**Design, from reading the seams (not yet implemented).**
+
+The guest side is already factored for this. `forward_proxy::start_forward_proxy` calls
+`serve(&listener, relay)` where `relay` is an injected closure taking a `WireRequest` and
+returning a `WireResponse` — production passes a `substitution_client` closure, tests pass a
+mock host. So the guest change is a *new closure* over the FlowMux session; the loopback
+listener and the absolute-form request parser are untouched.
+
+The host side has an equally clean seam: `SubstitutionService::process(WireRequest) ->
+WireResponse` (`network_endpoint_proxy.rs:1206`) is the whole substitution + forward leg. The
+`Http` arm assembles frames into a `WireRequest`, calls `process`, and emits the response
+frames. `process` needs to become `pub(crate)`. Substitution, redaction, the claim-10 gate and
+payload-free audit are all *called*, not reimplemented — confirming the framing-only claim.
+
+**The hazard: `FlowMuxSession::serve` is synchronous and runs inside `spawn_blocking`, while
+`process` is async.** The obvious `block_on` is exactly what the comment at
+`network_endpoint_proxy.rs:1182-1188` warns against — a `spawn_blocking` thread is still inside
+the runtime context, so tokio's `block_on` panics there. The `Http` arm therefore cannot call
+`process` directly. It must hand the assembled request to an async task that owns the
+`SubstitutionService` over an mpsc channel and take the response back on a oneshot. Worth
+knowing before writing the arm rather than after.
+
+**Scope note.** The first cut buffers the body before calling `process`, exactly as the Wire
+path does today. Streaming bounded chunks is the performance win Phase 4 wanted, but it is a
+property of `process`'s signature, not of transport unification — folding the protocol onto
+FlowMux is what "one transport" requires, and streaming can follow without another protocol
+change.
 
 ### WS5 — Fold ICMP in
 

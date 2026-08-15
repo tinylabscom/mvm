@@ -261,10 +261,6 @@ pub struct SubstitutionSpawnParams<'a> {
     /// egress itself (the relay path — the run loop no longer gates); `None` ⇒
     /// ungated here (the legacy in-loop gate is the enforcer).
     pub network_policy: Option<&'a mvm_core::policy::network_policy::NetworkPolicy>,
-    /// True ⇒ the guest speaks raw TCP egress (`host:port` first line) and the
-    /// endpoint serves `egress_mode: "raw"`; false ⇒ the WireRequest substitution
-    /// protocol (`"wire"`, the default). A VM's mode is fixed at admission.
-    pub raw_egress: bool,
     /// `Some` ⇒ the endpoint resolves secret *values* remotely (see
     /// [`RemoteResolverSpawnConfig`]) instead of its local encrypted store.
     /// `None` preserves today's `Local` (unchanged) resolver behavior.
@@ -300,7 +296,6 @@ pub struct SubstitutionSpawnParamsBuilder<'a> {
     terminator_listen: Option<SocketAddr>,
     tls_intermediate: Option<(String, String)>,
     network_policy: Option<&'a mvm_core::policy::network_policy::NetworkPolicy>,
-    raw_egress: Option<bool>,
     resolver_remote: Option<RemoteResolverSpawnConfig<'a>>,
     binding_store_dir: Option<&'a Path>,
     flowmux_identity: Option<FlowMuxIdentitySpawnConfig>,
@@ -321,7 +316,6 @@ impl<'a> SubstitutionSpawnParamsBuilder<'a> {
             terminator_listen: None,
             tls_intermediate: None,
             network_policy: None,
-            raw_egress: None,
             resolver_remote: None,
             binding_store_dir: None,
             flowmux_identity: None,
@@ -398,13 +392,6 @@ impl<'a> SubstitutionSpawnParamsBuilder<'a> {
         self
     }
 
-    /// Set `raw_egress`.
-    #[must_use]
-    pub fn raw_egress(mut self, raw_egress: bool) -> Self {
-        self.raw_egress = Some(raw_egress);
-        self
-    }
-
     /// Set `resolver_remote`. Takes a value or an `Option`; unset means `None`.
     #[must_use]
     pub fn resolver_remote(
@@ -467,10 +454,6 @@ impl<'a> SubstitutionSpawnParamsBuilder<'a> {
             terminator_listen: self.terminator_listen,
             tls_intermediate: self.tls_intermediate,
             network_policy: self.network_policy,
-            raw_egress: self.raw_egress.ok_or(BuilderError::missing(
-                "SubstitutionSpawnParams",
-                "raw_egress",
-            ))?,
             resolver_remote: self.resolver_remote,
             binding_store_dir: self.binding_store_dir,
             flowmux_identity: self.flowmux_identity,
@@ -522,6 +505,35 @@ impl EgressProxySpawnConfig {
     }
 }
 
+/// The endpoint config a spawn with (or without) a FlowMux identity emits.
+///
+/// Exposed so the conformance suite can assert the **production** protocol
+/// selection rather than a re-implementation of it. The regression this guards
+/// against was precisely a guest and a host disagreeing about the protocol
+/// while each side's own tests passed.
+pub fn endpoint_config_for_identity(
+    flowmux_identity: Option<FlowMuxIdentitySpawnConfig>,
+) -> serde_json::Value {
+    let redaction = mvm_core::policy::RedactionPolicy::default();
+    build_endpoint_config_json(&SubstitutionSpawnParams {
+        vm_name: "conformance",
+        state_dir: Path::new("/nonexistent"),
+        tenant: "local",
+        secrets: &[],
+        redaction: &redaction,
+        transport: EndpointTransport::Uds {
+            path: PathBuf::from("/nonexistent/vsock-5253.sock"),
+        },
+        terminator_listen: None,
+        egress_proxy: None,
+        tls_intermediate: None,
+        network_policy: None,
+        resolver_remote: None,
+        binding_store_dir: None,
+        flowmux_identity,
+    })
+}
+
 /// Build the EndpointConfig JSON the endpoint reads on stdin. Pure (no spawn)
 /// so the wire form — including the claim-10 policy + egress mode — is unit-testable.
 fn build_endpoint_config_json(params: &SubstitutionSpawnParams<'_>) -> serde_json::Value {
@@ -536,13 +548,12 @@ fn build_endpoint_config_json(params: &SubstitutionSpawnParams<'_>) -> serde_jso
         // (Vsock); libkrun/HVF route through the per-VM UDS the VMM proxies (Uds).
         "transport": serde_json::to_value(&params.transport)
             .expect("EndpointTransport serializes to JSON"),
-        // Which egress protocol the relayed stream carries. Always emit: an
-        // explicit "wire" is identical to the endpoint's default, so legacy
-        // callers stay backward compatible.
+        // Which egress protocol the relayed stream carries. One authenticated
+        // FlowMux session whenever this boot has an identity; "wire" only for
+        // the tiers that still speak the substitution protocol directly.
+        // "raw" is gone: nothing selects it, and the guest cannot speak it.
         "egress_mode": if params.flowmux_identity.is_some() {
             "flow_mux"
-        } else if params.raw_egress {
-            "raw"
         } else {
             "wire"
         },
@@ -1062,7 +1073,6 @@ mod tests {
             egress_proxy: None,
             tls_intermediate: None,
             network_policy: None,
-            raw_egress: false,
             resolver_remote: None,
             binding_store_dir: None,
             flowmux_identity: None,
@@ -1123,7 +1133,6 @@ mod tests {
             egress_proxy: None,
             tls_intermediate: None,
             network_policy: None,
-            raw_egress: false,
             resolver_remote: None,
             binding_store_dir: None,
             flowmux_identity: None,
@@ -1189,7 +1198,6 @@ mod tests {
             egress_proxy: None,
             tls_intermediate: None,
             network_policy: None,
-            raw_egress: false,
             resolver_remote: None,
             binding_store_dir: None,
             flowmux_identity: None,
@@ -1256,7 +1264,6 @@ mod tests {
             egress_proxy: None,
             tls_intermediate: None,
             network_policy: None,
-            raw_egress: false,
             resolver_remote: None,
             binding_store_dir: None,
             flowmux_identity: None,
@@ -1302,7 +1309,6 @@ mod tests {
         redaction: &'a mvm_core::policy::RedactionPolicy,
         sock: &Path,
         network_policy: Option<&'a mvm_core::policy::network_policy::NetworkPolicy>,
-        raw_egress: bool,
     ) -> SubstitutionSpawnParams<'a> {
         SubstitutionSpawnParams {
             vm_name: "cfg-vm",
@@ -1317,7 +1323,6 @@ mod tests {
             egress_proxy: None,
             tls_intermediate: None,
             network_policy,
-            raw_egress,
             resolver_remote: None,
             binding_store_dir: None,
             flowmux_identity: None,
@@ -1331,7 +1336,7 @@ mod tests {
     fn endpoint_config_json_omits_policy_and_defaults_to_wire_when_legacy() {
         let redaction = mvm_core::policy::RedactionPolicy::default();
         let sock = Path::new("/tmp/vsock-5253.sock");
-        let cfg = build_endpoint_config_json(&minimal_params(&redaction, sock, None, false));
+        let cfg = build_endpoint_config_json(&minimal_params(&redaction, sock, None));
 
         assert!(
             cfg.get("network_policy").is_none(),
@@ -1357,7 +1362,7 @@ mod tests {
     fn endpoint_config_json_omits_proxy_keys_when_none_is_configured() {
         let redaction = mvm_core::policy::RedactionPolicy::default();
         let sock = Path::new("/tmp/vsock-5253.sock");
-        let cfg = build_endpoint_config_json(&minimal_params(&redaction, sock, None, false));
+        let cfg = build_endpoint_config_json(&minimal_params(&redaction, sock, None));
         for key in ["proxy_https", "proxy_http", "no_proxy"] {
             assert!(
                 cfg.get(key).is_none(),
@@ -1370,7 +1375,7 @@ mod tests {
     fn endpoint_config_json_carries_each_configured_proxy_leg() {
         let redaction = mvm_core::policy::RedactionPolicy::default();
         let sock = Path::new("/tmp/vsock-5253.sock");
-        let mut params = minimal_params(&redaction, sock, None, false);
+        let mut params = minimal_params(&redaction, sock, None);
         params.egress_proxy = Some(EgressProxySpawnConfig {
             https: Some("http://secure.corp:3128".into()),
             http: Some("socks5://plain.corp:1080".into()),
@@ -1386,7 +1391,7 @@ mod tests {
     fn a_partially_configured_proxy_emits_only_the_leg_that_is_set() {
         let redaction = mvm_core::policy::RedactionPolicy::default();
         let sock = Path::new("/tmp/vsock-5253.sock");
-        let mut params = minimal_params(&redaction, sock, None, false);
+        let mut params = minimal_params(&redaction, sock, None);
         params.egress_proxy = Some(EgressProxySpawnConfig {
             https: Some("http://secure.corp:3128".into()),
             ..Default::default()
@@ -1410,7 +1415,7 @@ mod tests {
         let sock = Path::new("/tmp/vsock-5253.sock");
         let resolver_uds = Path::new("/run/mvmd/tenant-x/resolver.sock");
         let binding_dir = Path::new("/var/lib/mvm/tenant-x/secret-bindings");
-        let mut params = minimal_params(&redaction, sock, None, false);
+        let mut params = minimal_params(&redaction, sock, None);
         params.resolver_remote = Some(RemoteResolverSpawnConfig {
             uds_path: resolver_uds,
             timeout_secs: 5,
@@ -1430,18 +1435,20 @@ mod tests {
         );
     }
 
-    // The relay path: `Some(policy)` + `raw_egress: true` must land the policy in
+    // The relay path: `Some(policy)` must land the policy in
     // the config (deserializing back to the same policy) and select `raw` mode.
     #[test]
-    fn endpoint_config_json_carries_policy_and_raw_when_set() {
+    fn endpoint_config_json_carries_the_policy_it_was_given() {
         use mvm_core::policy::network_policy::{HostPort, NetworkPolicy};
         let redaction = mvm_core::policy::RedactionPolicy::default();
         let sock = Path::new("/tmp/vsock-5253.sock");
         let policy = NetworkPolicy::allow_list(vec![HostPort::new("api.openai.com", 443)]);
-        let cfg =
-            build_endpoint_config_json(&minimal_params(&redaction, sock, Some(&policy), true));
+        let cfg = build_endpoint_config_json(&minimal_params(&redaction, sock, Some(&policy)));
 
-        assert_eq!(cfg["egress_mode"], "raw");
+        // No identity on this params set, so the endpoint still speaks the
+        // substitution protocol. "raw" is gone: nothing selects it and the
+        // guest cannot speak it.
+        assert_eq!(cfg["egress_mode"], "wire");
         let round: NetworkPolicy = serde_json::from_value(cfg["network_policy"].clone())
             .expect("network_policy deserializes back");
         assert_eq!(round, policy);
@@ -1454,7 +1461,7 @@ mod tests {
     fn endpoint_config_json_emits_flowmux_identity() {
         let redaction = mvm_core::policy::RedactionPolicy::default();
         let sock = Path::new("/tmp/vsock-5253.sock");
-        let mut params = minimal_params(&redaction, sock, None, false);
+        let mut params = minimal_params(&redaction, sock, None);
         params.flowmux_identity = Some(FlowMuxIdentitySpawnConfig {
             session_id: "vm-123-boot-456".to_string(),
             host_signing_key_base64: "aG9zdC1rZXktYnl0ZXM".to_string(),

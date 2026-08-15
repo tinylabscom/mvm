@@ -12,6 +12,7 @@ mod initramfs;
 mod kernel_pin;
 mod l3_vsock;
 mod oci_unpack;
+mod one_transport;
 mod policy_approval;
 mod readme_contract;
 mod runtime_overlay;

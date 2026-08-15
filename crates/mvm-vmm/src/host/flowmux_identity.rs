@@ -99,8 +99,14 @@ impl FlowMuxIdentityMaterial {
     pub fn mint_from_host_signer(session_id: impl Into<String>) -> Result<Self> {
         let path =
             mvm_core::config::mvm_keys_dir().join(super::broker_services_spawn::HOST_SIGNER_KEY);
-        let bytes = std::fs::read(&path)
-            .with_context(|| format!("reading the host signer key at {}", path.display()))?;
+        let bytes = std::fs::read(&path).with_context(|| {
+            format!(
+                "reading the host signer key at {}. It is created on first use \
+                 by the host-signer loader, which lives a layer above this \
+                 crate; run `mvmctl doctor` once to create it.",
+                path.display()
+            )
+        })?;
         let seed: [u8; 32] = bytes.as_slice().try_into().map_err(|_| {
             anyhow::anyhow!(
                 "host signer key at {} is {} bytes, expected 32",
@@ -157,6 +163,71 @@ impl FlowMuxIdentityMaterial {
         write_private(path, &image)
             .with_context(|| format!("writing the FlowMux identity drive to {}", path.display()))?;
         Ok(())
+    }
+}
+
+/// Filename the identity drive is written under, inside the VM's state dir.
+pub const IDENTITY_DRIVE_FILE: &str = "flowmux-identity.ext4";
+
+/// Filename the inheritable half of a boot's identity is persisted under,
+/// inside the VM's own state dir.
+pub const PUBLIC_IDENTITY_FILE: &str = "flowmux-identity.json";
+
+/// What a warm child needs to inherit from its parent, and nothing more.
+///
+/// Deliberately **not** [`FlowMuxIdentitySpawnConfig`]: that struct also
+/// carries `host_signing_key_base64`, which is the host signer's *private*
+/// key. It belongs in the endpoint's stdin and in `~/.mvm/keys`, not copied
+/// into a per-VM state dir once per boot.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InheritableIdentity {
+    /// The session id the parent's guest handshakes under.
+    pub session_id: String,
+    /// The verifying key the parent's guest holds the private half of.
+    pub guest_verifying_key_base64: String,
+}
+
+impl FlowMuxIdentityMaterial {
+    /// The inheritable half of this identity.
+    pub fn inheritable(&self) -> InheritableIdentity {
+        InheritableIdentity {
+            session_id: self.spawn.session_id.clone(),
+            guest_verifying_key_base64: self.spawn.guest_verifying_key_base64.clone(),
+        }
+    }
+
+    /// Persist the inheritable half beside the VM's state.
+    ///
+    /// A warm child restores from its parent's memory image, so it already
+    /// holds the parent's signing key and cannot be handed a fresh one — there
+    /// is no path back into a running guest's memory. The child's endpoint must
+    /// therefore pin the parent's verifying key, and this file is how the claim
+    /// path learns it. The host's own signing key is not written here.
+    pub fn persist_inheritable(&self, state_dir: &Path) -> Result<()> {
+        std::fs::create_dir_all(state_dir)
+            .with_context(|| format!("creating {}", state_dir.display()))?;
+        let path = state_dir.join(PUBLIC_IDENTITY_FILE);
+        let json = serde_json::to_vec_pretty(&self.inheritable())
+            .context("serializing the inheritable FlowMux identity")?;
+        std::fs::write(&path, json).with_context(|| format!("writing {}", path.display()))
+    }
+}
+
+/// Load the inheritable identity a previous boot persisted in `state_dir`.
+///
+/// `None` when the VM was booted without one — a workload with no admitted
+/// egress never gets an identity, and a claim from such a parent must not
+/// invent one.
+pub fn load_inheritable_identity(state_dir: &Path) -> Result<Option<InheritableIdentity>> {
+    let path = state_dir.join(PUBLIC_IDENTITY_FILE);
+    match std::fs::read(&path) {
+        Ok(bytes) => Ok(Some(
+            serde_json::from_slice(&bytes)
+                .with_context(|| format!("parsing {}", path.display()))?,
+        )),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
     }
 }
 
@@ -308,6 +379,46 @@ mod tests {
             .mode()
             & 0o777;
         assert_eq!(mode, 0o600, "identity drive must not be readable off-owner");
+    }
+
+    #[test]
+    fn only_public_material_is_persisted_for_a_warm_child_to_inherit() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let material = FlowMuxIdentityMaterial::mint("s1", &host_key()).expect("mint");
+        material.persist_inheritable(dir.path()).expect("persist");
+
+        let raw = std::fs::read(dir.path().join(PUBLIC_IDENTITY_FILE)).expect("read");
+        assert!(
+            !raw.windows(32)
+                .any(|w| w == material.guest_signing_key.as_slice()),
+            "the guest signing key must never be persisted host-side"
+        );
+        let text = String::from_utf8(raw).expect("json is utf8");
+        assert!(
+            !text.contains(&material.spawn_config().host_signing_key_base64),
+            "the host signer's private key must not be copied into per-VM state"
+        );
+
+        let loaded = load_inheritable_identity(dir.path())
+            .expect("load")
+            .expect("a persisted identity is there");
+        assert_eq!(
+            loaded.guest_verifying_key_base64,
+            material.spawn_config().guest_verifying_key_base64,
+            "a warm child must pin exactly the key its parent's guest holds"
+        );
+        assert_eq!(loaded.session_id, material.spawn_config().session_id);
+    }
+
+    #[test]
+    fn a_parent_that_booted_without_egress_has_no_identity_to_inherit() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert!(
+            load_inheritable_identity(dir.path())
+                .expect("absence is not an error")
+                .is_none(),
+            "a claim from an egress-less parent must not invent an identity"
+        );
     }
 
     #[test]

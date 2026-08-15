@@ -166,9 +166,17 @@ struct WarmClaimSpawner {
 }
 
 impl NetworkEndpointSpawner for WarmClaimSpawner {
-    fn spawn(&self, req: &NetworkEndpointSpawnRequest<'_>) -> anyhow::Result<PathBuf> {
+    fn spawn(
+        &self,
+        req: &NetworkEndpointSpawnRequest<'_>,
+    ) -> anyhow::Result<mvm_runtime::workload_runner::SpawnedEndpoint> {
         *self.seen_vm.lock().unwrap() = Some(req.vm_name.to_string());
-        Ok(mvm_core::config::vm_network_endpoint_socket(req.vm_name))
+        Ok(mvm_runtime::workload_runner::SpawnedEndpoint {
+            egress_uds: mvm_core::config::vm_network_endpoint_socket(req.vm_name),
+            // A warm claim attaches no drive: the restored child already holds
+            // its parent's key in the memory image it woke from.
+            identity_drive: None,
+        })
     }
 }
 

@@ -233,9 +233,12 @@ fn run_stage0_qemu(
     );
     let guest_cid = allocate_qemu_builder_guest_cid();
     #[cfg(feature = "builder-vm")]
+    let (identity_material, identity_drive) =
+        crate::libkrun_builder::stage_builder_flowmux_identity(&work)?;
     let egress_endpoint = BuilderVsockEgressEndpoint::spawn_with_transport(
         &work,
         BuilderEndpointTransport::Vsock { port: egress_port },
+        identity_material.spawn_config(),
     )?;
     let mut cmd = Command::new("timeout");
     cmd.arg(STAGE0_TIMEOUT_SECS.to_string()).arg(&qemu_bin);
@@ -255,7 +258,7 @@ fn run_stage0_qemu(
         crate::builder_cmdline::checked_builder_cmdline(append)
             .map_err(BuilderVmError::NixBuildFailed)?,
     );
-    for disk in [&vda, &vdb, &vdc, &vdd] {
+    for disk in [&vda, &vdb, &vdc, &vdd, &identity_drive] {
         cmd.arg("-drive")
             .arg(format!("file={},if=virtio,format=raw", disk.display()));
     }
@@ -913,10 +916,17 @@ fn run_shell_script_qemu(job: &BuilderShellJob) -> Result<BuilderShellResult, Bu
             "vhost-user-fs-pci,queue-size=1024,chardev=vfs-{tag},tag={tag}"
         ));
     }
+    let (identity_material, identity_drive) =
+        crate::libkrun_builder::stage_builder_flowmux_identity(&vm_state_dir)?;
     let egress_endpoint = BuilderVsockEgressEndpoint::spawn_with_transport(
         &vm_state_dir,
         BuilderEndpointTransport::Vsock { port: egress_port },
+        identity_material.spawn_config(),
     )?;
+    cmd.arg("-drive").arg(format!(
+        "file={},if=virtio,format=raw,readonly=on",
+        identity_drive.display()
+    ));
     cmd.arg("-device")
         .arg(format!("vhost-vsock-pci,guest-cid={guest_cid}"));
     cmd.args(["-display", "none"]);
@@ -1185,10 +1195,17 @@ fn run_build_qemu(
             "vhost-user-fs-pci,queue-size=1024,chardev=vfs-{tag},tag={tag}"
         ));
     }
+    let (identity_material, identity_drive) =
+        crate::libkrun_builder::stage_builder_flowmux_identity(&vm_state_dir)?;
     let egress_endpoint = BuilderVsockEgressEndpoint::spawn_with_transport(
         &vm_state_dir,
         BuilderEndpointTransport::Vsock { port: egress_port },
+        identity_material.spawn_config(),
     )?;
+    cmd.arg("-drive").arg(format!(
+        "file={},if=virtio,format=raw,readonly=on",
+        identity_drive.display()
+    ));
     cmd.arg("-device")
         .arg(format!("vhost-vsock-pci,guest-cid={guest_cid}"));
     cmd.args(["-display", "none"]);
