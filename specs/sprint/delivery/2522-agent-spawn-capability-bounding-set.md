@@ -100,6 +100,25 @@ not fixed here.
 `bounding_drop_is_unenforceable`, which is already tested on every host; it is
 Linux-gated and needs root, so it has no separate unit test.
 
-The end-to-end witness is the live boot: `machine run --image alpine` and
-`--image python:3.12` both succeed on macOS 26 / HVF, against the pre-#2478
-binary as the known-good baseline.
+The end-to-end witness is the live boot, against the pre-#2478 binary as the
+known-good baseline:
+
+| backend | broken `main` | fixed |
+| --- | --- | --- |
+| HVF (macOS 26) | agent unreachable after 30s | `alpine` → `hi`, `python:3.12` → `4` |
+| libkrun (macOS) | agent unreachable after 30s | `alpine` → `hi` |
+| Firecracker (Linux/KVM) | not witnessed — see below | not witnessed |
+
+libkrun matters as the second witness because it shares nothing with HVF except
+the guest, which is where the bug is. It also printed the failing line straight
+to the terminal — it hands the console fd to the VMM — so on that backend the
+diagnostic worked all along.
+
+Firecracker could not be witnessed either way. That host fails earlier, at vCPU
+resume, with the Firecracker process exiting before the guest emits anything;
+this branch fails identically there. That is #2510, a distinct defect this does
+not fix — the agent-spawn `EPERM` cannot make a VMM exit, because
+`mvm-oci-init` logs the failure and falls through to `idle_forever()`, leaving
+the VM alive. Firecracker reaches the same privilege drop through the same code,
+so it is affected by construction; it just cannot be observed there until #2510
+is resolved.
