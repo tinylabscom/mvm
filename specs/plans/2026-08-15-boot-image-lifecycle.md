@@ -90,8 +90,28 @@ Images move to their own tag namespace and publish independently:
 
 ```
 v0.18.0              -> mvmctl binaries, crates
-boot-image/v3        -> vmlinux, rootfs, verity sidecars, meta, SBOM, pack
+boot-image/v0.1.0    -> vmlinux, rootfs, verity sidecars, meta, SBOM, pack
 ```
+
+Plain semver on its own counter, starting at `0.1.0`. Three choices worth
+stating, since each had a plausible alternative:
+
+- **The tag does not encode the guest protocol.** Tying the major to
+  `PROTOCOL_VERSION_AUTHENTICATED` reads as self-documenting until the two axes
+  diverge — a rootfs layout change that an older `mvmctl` cannot mount is
+  breaking without being a protocol break, and then the major cannot move
+  honestly. The tag carries identity and ordering; the sidecar's
+  `protocol_version` carries compatibility. One fact, one place.
+- **It starts at `0.x`, not `1.0.0`.** The CLI is pre-1.0; an image line opening
+  at `1.0.0` would imply a stability commitment that has not been made.
+- **The counter is fresh rather than continuing `v0.17.x`.** Images have never
+  had a version of their own, so continuing a number would imply a history that
+  does not exist. Previously published assets stay reachable under their old
+  tags either way — that is what the dual-publish window below is for.
+
+`boot-image/v*` does not match the existing `v*` release trigger: GitHub tag
+globs do not cross `/` and the pattern anchors at the start, so neither train
+can fire the other by accident.
 
 `release.yml` splits: the binary/crate jobs stay on `v*`, the four image jobs
 (`default-microvm`, `builder-vm-image`, `runtime-overlay-image`,
@@ -262,6 +282,6 @@ move first at low cost.
 ## Workstreams
 
 - [ ] WS1 — boot the staged image before publish (x86_64 boot, aarch64 header check)
-- [ ] WS2 — `boot-image/v*` release train, dual-publish window, `DEFAULT_BOOT_IMAGE_TAG`
+- [ ] WS2 — `boot-image/v*` release train (semver from `v0.1.0`), dual-publish window, `DEFAULT_BOOT_IMAGE_TAG`
 - [ ] WS3 — sidecar provenance fields + `mvmctl image boot status｜check｜update`
 - [ ] WS4 — `MVM_BOOT_IMAGE` escape hatch + doctor readout
