@@ -35,7 +35,14 @@ export function WhyNow() {
         </h2>
       </Reveal>
 
-      <div className="mt-10 grid gap-4 sm:grid-cols-3">
+      {/* Inline margins, not mt-* utilities: Starlight's unlayered
+          stylesheet beats layered utilities on this page (see
+          Positioning.tsx), and these gaps keep the headline, the cards,
+          and the closer from sitting on top of each other. */}
+      <div
+        className="grid gap-4 sm:grid-cols-3"
+        style={{ marginTop: "2.5rem" }}
+      >
         {SHIFTS.map((shift, i) => (
           <Reveal key={shift.label} delay={i * 80}>
             <div className="h-full rounded-xl border border-glass-border/60 bg-canvas p-5">
@@ -51,7 +58,10 @@ export function WhyNow() {
       <Reveal delay={160}>
         {/* No max-width cap: the first line needs the section's full
             column to stay on one line at desktop sizes. */}
-        <p className="mt-10 font-display text-lg font-bold leading-snug text-title sm:text-2xl">
+        <p
+          className="font-display text-lg font-bold leading-snug text-title sm:text-2xl"
+          style={{ marginTop: "2.5rem" }}
+        >
           <span className="block">
             MVM assumes the worst —{" "}
             <span className="text-accent-2">
@@ -62,7 +72,10 @@ export function WhyNow() {
             As easy as a container, without the shared kernel.
           </span>
         </p>
-        <div className="mt-6 flex flex-wrap gap-x-6 gap-y-2">
+        <div
+          className="flex flex-wrap gap-x-6 gap-y-2"
+          style={{ marginTop: "1.5rem" }}
+        >
           <a
             href={`${base}security/threat-model/`}
             className="text-sm text-accent underline underline-offset-2 hover:text-accent/80"
