@@ -38,6 +38,13 @@ jobs:
           - arch: x86_64
             runner: ubuntu-latest
     runs-on: ${{ matrix.runner }}
+    # Narrowed to this job rather than the workflow, so the reusable bdd call
+    # above does not also inherit an OIDC token it has no use for. A job-level
+    # block replaces the inherited set outright, hence contents: write is
+    # repeated here for the release upload.
+    permissions:
+      contents: write
+      id-token: write
     steps:
       - uses: actions/checkout@v6
 
@@ -69,6 +76,13 @@ jobs:
             staging/kernel-metrics-${{ matrix.arch }}.json
             staging/workload-config-${{ matrix.arch }}
 
+      # Only on the publish path: a non-tag diagnostic run has nothing to sign,
+      # and keyless signing would write that run into the public transparency
+      # log for no reason.
+      - name: Install cosign
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: sigstore/cosign-installer@v3
+
       - name: Publish to release
         if: startsWith(github.ref, 'refs/tags/v')
         env:
@@ -78,12 +92,28 @@ jobs:
         # `mvmctl kernel build --source download` resolves these by the
         # mvmctl release tag + arch + variant, then SHA-256-verifies each
         # against the checksums manifest before admitting it to the cache.
+        #
+        # That makes the manifest, not the vmlinux blobs, the thing an attacker
+        # has to beat: swap a kernel and its recorded hash together and the
+        # download-side check still passes. So the manifest is cosign-signed
+        # here and its bundle published beside it, giving the verifier
+        # something to anchor on that is not itself swappable.
+        #
+        # --new-bundle-format is not optional: it is the one Sigstore bundle
+        # shape the in-binary Rust verifier parses, and every other signed blob
+        # in this project's releases uses it.
         run: |
           set -euo pipefail
           cd staging
+          cosign sign-blob \
+            --yes \
+            --new-bundle-format \
+            --bundle "kernel-${ARCH}-checksums-sha256.txt.bundle" \
+            "kernel-${ARCH}-checksums-sha256.txt"
           gh release upload "$TAG" \
             "vmlinux-${ARCH}-builder" \
             "vmlinux-${ARCH}-workload" \
             "kernel-${ARCH}-checksums-sha256.txt" \
+            "kernel-${ARCH}-checksums-sha256.txt.bundle" \
             "kernel-${ARCH}.json" \
             --clobber
