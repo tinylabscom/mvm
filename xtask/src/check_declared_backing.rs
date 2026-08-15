@@ -306,6 +306,31 @@ fn scoped_files(root: &Path) -> Vec<PathBuf> {
     out
 }
 
+/// Substring search that will not match inside a longer word.
+///
+/// `contains` alone reads "provenance" as the assertive "proven", which is a
+/// word this repo uses constantly and truthfully. A hit only counts when both
+/// sides of it are a boundary, so multi-word entries like "proof that" still
+/// match as written.
+pub(crate) fn contains_word(haystack: &str, needle: &str) -> bool {
+    let is_word = |c: char| c.is_alphanumeric() || c == '_';
+    let mut from = 0;
+    while let Some(rel) = haystack[from..].find(needle) {
+        let start = from + rel;
+        let end = start + needle.len();
+        let before_ok = haystack[..start]
+            .chars()
+            .next_back()
+            .is_none_or(|c| !is_word(c));
+        let after_ok = haystack[end..].chars().next().is_none_or(|c| !is_word(c));
+        if before_ok && after_ok {
+            return true;
+        }
+        from = start + needle.chars().next().map_or(1, char::len_utf8);
+    }
+    false
+}
+
 /// Which files each file cites, for the one-way citation rule. Only intra-repo
 /// markdown links into the scanned scope count; an external URL is not a claim
 /// about our own evidence.
@@ -451,7 +476,7 @@ pub fn run_with(root: &Path, pending_list: &[&str]) -> Result<()> {
         if header.backing == Backing::Preview {
             let lower = text.to_lowercase();
             for word in ASSERTIVE {
-                if lower.contains(word) {
+                if contains_word(&lower, word) {
                     errors.push(format!(
                         "{rel_s}: declares `preview` but uses \"{word}\". A document whose \
                          own header says it is a preview does not get the assertive \
@@ -596,6 +621,36 @@ pub fn self_test() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use super::contains_word;
+
+    /// The regression this exists for. "provenance" contains "proven", and a
+    /// substring match refused every preview document that used the word —
+    /// which in this repo is most of them, and truthfully.
+    #[test]
+    fn an_assertive_word_does_not_match_inside_a_longer_word() {
+        assert!(!contains_word("image provenance fields", "proven"));
+        assert!(!contains_word("the prover ran", "proven"));
+        assert!(!contains_word("disproven by the run", "proven"));
+    }
+
+    /// The other half: the rule still has to fire on the real thing, or the
+    /// fix above would be indistinguishable from deleting the rule.
+    #[test]
+    fn an_assertive_word_still_matches_when_it_stands_alone() {
+        assert!(contains_word("this proven mechanism", "proven"));
+        assert!(contains_word("proven.", "proven"));
+        assert!(contains_word("(proven)", "proven"));
+        assert!(contains_word("it is proven", "proven"));
+    }
+
+    /// Multi-word entries carry an interior space, so the boundary test has to
+    /// look at the ends of the phrase rather than each word.
+    #[test]
+    fn a_multi_word_phrase_matches_as_written() {
+        assert!(contains_word("that is proof that it works", "proof that"));
+        assert!(!contains_word("bulletproof thatch", "proof that"));
+    }
+
     use super::*;
 
     #[test]
