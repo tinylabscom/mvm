@@ -1,6 +1,6 @@
 # Refactor status
 
-Last updated: 2026-08-14
+Last updated: 2026-08-15
 
 This is the cross-plan progress index. The owning plan remains authoritative
 for detailed scope and acceptance criteria.
@@ -128,6 +128,16 @@ for detailed scope and acceptance criteria.
       zero; the later workload boot stopped at a separate readiness timeout.
 
 ## In-flight plans
+
+- [~] **Launch path as declared stages**
+      (`specs/plans/2026-08-15-launch-path-as-declared-stages.md`). Opened
+      2026-08-15; no workstream started. Split out of the artifact-derived
+      runtime identity work, which landed first so its cache-staleness class
+      would not muddy these timing measurements.
+  - [ ] WS1 — split the two `attach_*` calls into `lookup_*` + `attach_*`
+  - [ ] WS2 — stage `resolve_launch`, parallel probes in stage 2
+  - [ ] WS3 — `SubPhase` per stage + `every_launch_stage_is_timed`
+  - [ ] WS4 — golden-compare `VmStartConfig`, record `dispatch_window_ms()`
 
 - [~] **Plan 335 — merge-queue throughput.** Automatic architecture and kernel
       checks now share the main CI scope gate, required check names are
