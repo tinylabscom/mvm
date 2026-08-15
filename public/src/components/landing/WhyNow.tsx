@@ -29,15 +29,10 @@ export function WhyNow() {
     <Section id="why-now" rule className="bg-raised">
       <Reveal>
         <Eyebrow>Why now</Eyebrow>
-        <h2 className="mb-4 max-w-2xl lowercase font-display text-2xl font-bold leading-tight text-title sm:text-3xl">
+        <h2 className="max-w-2xl lowercase font-display text-2xl font-bold leading-tight text-title sm:text-3xl">
           code is getting cheaper to write.{" "}
           <span className="text-accent-2">so are exploits.</span>
         </h2>
-        <p className="max-w-2xl text-base leading-relaxed text-body">
-          AI writes the code, then runs it — deps, tools, real data. Most of
-          it is fine. Some is slop. A little is hostile. You can&rsquo;t
-          review it all.
-        </p>
       </Reveal>
 
       <div className="mt-10 grid gap-4 sm:grid-cols-3">
