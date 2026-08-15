@@ -176,6 +176,24 @@
     color: #8b949e;
     font-family: var(--term-font);
   }
+  /* Guided-intro lines printed by demo.js at boot. */
+  .console .hint { color: var(--term-prompt); }
+  /* Audit chain renders newest-first as one block per entry; a fresh entry
+     flashes green as it arrives. */
+  #audit-chain .audit-entry {
+    padding: 0.45rem 0.25rem;
+    border-bottom: 1px dashed var(--term-border);
+    white-space: pre-wrap;
+    border-radius: 4px;
+  }
+  #audit-chain .audit-entry:last-child { border-bottom: none; }
+  #audit-chain .audit-entry.audit-new {
+    animation: audit-flash 1.6s ease-out;
+  }
+  @keyframes audit-flash {
+    from { background: rgba(63, 185, 80, 0.25); }
+    to { background: transparent; }
+  }
   .notice {
     margin-top: 1rem;
     padding: 0.75rem;

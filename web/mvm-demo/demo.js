@@ -65,7 +65,7 @@ worker.onmessage = (event) => {
   else handlers.reject(new Error(error));
 };
 
-function appendConsole(text) {
+function appendConsole(text, cls) {
   // A form-feed from the guest is a clear-screen request.
   if (text === "\x0c") {
     clearConsole();
@@ -74,6 +74,7 @@ function appendConsole(text) {
   const line = document.createElement("div");
   line.className = "console-line";
   const span = document.createElement("span");
+  if (cls) span.className = cls;
   span.textContent = text;
   line.appendChild(span);
   consoleEl.insertBefore(line, inputLineEl);
@@ -105,14 +106,29 @@ function setInput(enabled) {
   }
 }
 
+// Newest entry first, so the latest allow/deny is visible without
+// scrolling; entries the panel hasn't shown before get a highlight flash.
 function renderAuditChain(chain) {
   if (!chain || chain.length === 0) {
     auditChainEl.textContent = "—";
+    auditChainEl.dataset.count = "0";
     return;
   }
-  auditChainEl.textContent = chain
-    .map((line) => JSON.stringify(JSON.parse(line), null, 2))
-    .join("\n---\n");
+  const known = parseInt(auditChainEl.dataset.count || "0", 10);
+  auditChainEl.textContent = "";
+  chain
+    .slice()
+    .reverse()
+    .forEach((line, i) => {
+      const originalIndex = chain.length - 1 - i;
+      const entry = document.createElement("div");
+      entry.className = "audit-entry";
+      if (originalIndex >= known) entry.classList.add("audit-new");
+      entry.textContent = JSON.stringify(JSON.parse(line), null, 2);
+      auditChainEl.appendChild(entry);
+    });
+  auditChainEl.dataset.count = String(chain.length);
+  auditChainEl.scrollTop = 0;
 }
 
 // Surface the launched policy's reachable destinations next to the console,
@@ -136,20 +152,22 @@ function renderEgressDomains(policy) {
 
 // A short guided intro printed into the console at boot, so a first-time
 // visitor knows what this is and what to type. The allowed-fetch example is
-// derived from the launched policy rather than hardcoded.
+// derived from the launched policy rather than hardcoded. Rendered in the
+// prompt green (.hint) so instructions read apart from guest output.
 function printWelcome(policy) {
   const rules = (policy && policy.rules) || [];
   const allowedHost = rules.length > 0 ? rules[0].host : null;
   appendConsole("");
-  appendConsole("A shell in a policy-governed sandbox: egress is deny-by-");
-  appendConsole("default, every decision signed into the audit chain. Try:");
+  appendConsole(
+    "You are in a shell in a policy-governed sandbox. Try the following:",
+    "hint",
+  );
   if (allowedHost) {
-    appendConsole(`  fetch ${allowedHost}   → allowed by the launch policy`);
+    appendConsole(`  fetch ${allowedHost}   → allowed by the launch policy`, "hint");
   }
-  appendConsole("  fetch api.openai.com   → denied: not in the policy;");
-  appendConsole("                           watch the audit chain record it");
-  appendConsole("  ls, cat, env, ps       → explore the guest");
-  appendConsole("  help                   → the full command list");
+  appendConsole("  fetch api.openai.com   → denied by policy; watch the audit chain", "hint");
+  appendConsole("  ls, cat, env, ps       → explore the guest", "hint");
+  appendConsole("  help                   → the full command list", "hint");
   appendConsole("");
 }
 
@@ -223,6 +241,7 @@ launchBtn.addEventListener("click", async () => {
   }
   try {
     clearConsole();
+    auditChainEl.dataset.count = "0";
     launchBtn.disabled = true;
 
     const policy = $("policy").value;
