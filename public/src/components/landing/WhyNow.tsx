@@ -1,4 +1,3 @@
-import { Eyebrow } from "./primitives/Eyebrow";
 import { Reveal } from "./primitives/Reveal";
 import { Section } from "./primitives/Section";
 
@@ -28,8 +27,7 @@ export function WhyNow() {
   return (
     <Section id="why-now" rule className="bg-raised">
       <Reveal>
-        <Eyebrow>Why now</Eyebrow>
-        <h2 className="max-w-2xl lowercase font-display text-2xl font-bold leading-tight text-title sm:text-3xl">
+        <h2 className="lowercase font-display text-2xl font-bold leading-tight text-title sm:text-3xl">
           code is getting cheaper to write.{" "}
           <span className="text-accent-2">so are exploits.</span>
         </h2>
