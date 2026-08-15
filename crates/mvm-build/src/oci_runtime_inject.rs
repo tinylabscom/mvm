@@ -100,6 +100,12 @@ impl MvmRuntimeBinaries {
                     format!("read runtime artifact {name} at {}: {e}", path.display()),
                 )
             })?;
+            // The prepared-cold launch lane forbids `artifact_hash`, and its
+            // premise is that a sample which hashed nothing passes. A digest
+            // that read five megabytes without saying so would leave that
+            // probe blind to the one thing it is named for.
+            mvm_core::launch_trace::record_artifact_bytes_hashed(bytes.len() as u64);
+
             h.update(name.as_bytes());
             h.update([0u8]);
             // Framing hygiene, not load-bearing today: the field set is fixed

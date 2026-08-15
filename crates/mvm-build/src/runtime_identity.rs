@@ -145,6 +145,40 @@ mod tests {
     /// The whole point of the sidecar: the steady-state path must not read the
     /// artifacts. Proven by making them unreadable — if the bytes were being
     /// digested, this would fail with EACCES.
+    /// The prepared-cold launch lane forbids `artifact_hash` and reads the
+    /// counter in `mvm_core::launch_trace`. A recompute reads every artifact
+    /// end-to-end, so it has to report that rather than hash silently.
+    ///
+    /// Only the positive direction is asserted here. `artifact_bytes_hashed` is
+    /// a process-global counter, so "a sidecar hit added nothing" cannot be
+    /// checked while sibling tests in the same process are also hashing. That
+    /// half is covered structurally, and more strongly, by
+    /// [`a_valid_sidecar_is_used_without_reading_artifact_bytes`]: it makes the
+    /// artifacts unreadable and still requires the identity to resolve, so no
+    /// read can have happened at all.
+    #[test]
+    fn a_recompute_reports_the_bytes_it_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let bins = bins_in(dir.path());
+        let expected: u64 = bins
+            .artifacts()
+            .iter()
+            .map(|(_, p)| std::fs::metadata(p).unwrap().len())
+            .sum();
+
+        let before = mvm_core::launch_trace::recorded_acquisition().artifact_bytes_hashed;
+        identity_with_sidecar(&bins, dir.path()).unwrap();
+        let after = mvm_core::launch_trace::recorded_acquisition().artifact_bytes_hashed;
+
+        // `>=` rather than `==`: the counter is shared, so a concurrent test may
+        // have added to it. The floor is what this call itself must have read.
+        assert!(
+            after >= before + expected,
+            "a recompute read {expected} bytes but reported {}",
+            after - before
+        );
+    }
+
     #[test]
     fn a_valid_sidecar_is_used_without_reading_artifact_bytes() {
         let dir = tempfile::tempdir().unwrap();
