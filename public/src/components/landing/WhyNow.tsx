@@ -60,7 +60,7 @@ export function WhyNow() {
           className="font-display text-lg font-bold leading-snug text-title sm:text-2xl"
           style={{ marginTop: "2.5rem" }}
         >
-          MVM assumes the worst —{" "}
+          MVM assumes the worst — and contains it.{" "}
           <span className="text-accent-2">
             Security first isn&rsquo;t a tier, it&rsquo;s the default.
           </span>
