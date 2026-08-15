@@ -119,10 +119,13 @@ export function Hero() {
               </h1>
             </Reveal>
 
-            <Reveal delay={160}>
-              <p className="max-w-[46ch] text-base leading-relaxed text-body">
-                One command boots it in a microVM with its own kernel. No
-                daemon, no SSH, and no network until policy admits it.
+            <Reveal delay={120}>
+              <p className="font-display text-xl font-semibold leading-snug text-title sm:text-2xl">
+                Infra for the next‑gen AI stack.
+              </p>
+              <p className="mt-2 max-w-[46ch] text-base leading-relaxed text-body">
+                Hardened microVMs. Sub-150&nbsp;ms boot. Configurable to the
+                kernel.
               </p>
             </Reveal>
 
@@ -163,9 +166,9 @@ export function Hero() {
               <a href={`${base}getting-started/installation/`}>
                 <Button size="lg">Get Started</Button>
               </a>
-              <a href="https://github.com/tinylabscom/mvm" target="_blank" rel="noopener">
+              <a href="#request-access">
                 <Button size="lg" variant="outline">
-                  View on GitHub
+                  Request access &rarr;
                 </Button>
               </a>
             </Reveal>

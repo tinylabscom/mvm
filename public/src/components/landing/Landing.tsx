@@ -1,36 +1,41 @@
 import { useEffect } from "react";
+import { Backends } from "./Backends";
 import { Hero } from "./Hero";
-import { CredibilityStrip } from "./CredibilityStrip";
 import { Quickstart } from "./Quickstart";
 import { DemoTeaser } from "./DemoTeaser";
+import { DeploymentTiers } from "./DeploymentTiers";
 import { Positioning } from "./Positioning";
+import { RequestAccess } from "./RequestAccess";
 import { WhyMicrovm } from "./WhyMicrovm";
-import { Boundary } from "./Boundary";
-import { Security } from "./Security";
 import { FAQ } from "./FAQ";
 import { CTABanner } from "./CTABanner";
 import { Footer } from "./Footer";
 
 // Section order is the argument, not a menu:
 //   1. Hero            — the claim, and the diagram that backs it.
-//   2. Credibility      — "is this real?" answered in one glance.
+//   2. Demo teaser      — browser sandbox, straight after the claim so a
+//                         visitor can see governance behavior immediately,
+//                         before installing anything.
 //   3. Quickstart       — the shortest path from install to a running microVM.
-//   4. Demo teaser      — browser sandbox, for visitors who want to see
-//                         governance behavior before installing anything.
 //   5. Positioning      — "one project, three ways to drive it": CLI,
 //                         Declare, Runtime, each given its own row.
 //   6. Why a microVM      — the positive case for the boundary, made once.
-//                         Placed right after Positioning, before the
-//                         boundary is quantified: the reader has just seen
-//                         how you *use* mvm, so this is where "here's what
-//                         you're actually getting" lands hardest — right
-//                         before the boundary panel backs it with a
-//                         backend-agnostic guarantee.
-//   7. Boundary panel   — the figure: one kernel per workload, regardless
-//                         of which of the three backends resolved.
-//   8. Trust            — named tests and CI jobs, not adjectives.
+//                         Placed right after Positioning: the reader has
+//                         just seen how you *use* mvm, so this is where
+//                         "here's what you're actually getting" lands
+//                         hardest.
+//   6a. Deployment tiers — "one contract, four places to run it": the
+//                         product-site tier grid (local / hosted / edge /
+//                         confidential), after the case for the boundary
+//                         is made.
+//   6b. Backends          — "the backend is an implementation detail": the
+//                         product-site backend/attestation grid, standing in
+//                         where the Boundary panel used to make the
+//                         backend-agnostic point.
 //   9. FAQ              — leads with the container question a second time,
 //                         for the reader who skimmed straight to the bottom.
+//   9b. Request access   — the product-site design-partner form (#request-access,
+//                         the hero's "Request access" button anchors here).
 //   10. Close + footer   — one quiet ask, one quiet line.
 // Do not reorder without re-reading reshape-brief.md and
 // layout-match-report.md.
@@ -45,14 +50,14 @@ export function Landing() {
   return (
     <div className="min-h-screen w-full bg-canvas">
       <Hero />
-      <CredibilityStrip />
-      <Quickstart />
       <DemoTeaser />
+      <Quickstart />
       <Positioning />
       <WhyMicrovm />
-      <Boundary />
-      <Security />
+      <DeploymentTiers />
+      <Backends />
       <FAQ />
+      <RequestAccess />
       <CTABanner />
       <Footer />
     </div>

@@ -1,5 +1,9 @@
 const worker = new Worker("./worker.js", { type: "module" });
 
+// Embed mode (?embed=1): the config pane is hidden, so launch immediately
+// with its default values once the worker reports ready.
+const EMBED = new URLSearchParams(location.search).has("embed");
+
 const $ = (id) => document.getElementById(id);
 const consoleEl = $("console");
 const inputLineEl = $("input-line");
@@ -39,6 +43,9 @@ worker.onmessage = (event) => {
   if (data.type === "ready") {
     ready = true;
     capabilityNoticeEl.textContent = data.capabilityNotice || "";
+    if (EMBED && !vmRunning) {
+      launchBtn.click();
+    }
     return;
   }
   if (data.type === "console") {

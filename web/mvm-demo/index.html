@@ -4,6 +4,14 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>mvm browser-tier microVM demo</title>
+<script>
+  // Embed mode (?embed=1): the docs landing page iframes this demo and wants
+  // only the console + audit chain — no heading, config pane, or footer.
+  // Applied on <html> before first paint so the hidden panes never flash.
+  if (new URLSearchParams(location.search).has("embed")) {
+    document.documentElement.classList.add("embed");
+  }
+</script>
 <style>
   :root {
     --term-bg: #0b0c0f;
@@ -187,6 +195,24 @@
     opacity: 0.7;
     color: #8b949e;
   }
+  /* Embed mode: console + audit chain only. The direct-child selector on the
+     lede keeps the audit card's own .lede explainer visible. */
+  html.embed body {
+    max-width: none;
+    padding: 0.75rem;
+  }
+  html.embed h1,
+  html.embed body > p.lede,
+  html.embed #config-card,
+  html.embed footer {
+    display: none;
+  }
+  html.embed .grid {
+    grid-template-columns: 1fr;
+  }
+  html.embed .console-wrap {
+    height: 22rem;
+  }
 </style>
 </head>
 <body>
@@ -199,7 +225,7 @@
 </p>
 
 <div class="grid">
-  <div class="card">
+  <div class="card" id="config-card">
     <h2>Launch config</h2>
     <label for="name">VM name</label>
     <input id="name" value="browser-vm" />

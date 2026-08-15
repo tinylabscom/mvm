@@ -36,9 +36,8 @@ const FAQ_ITEMS: Array<{ q: string; a: string }> = [
     q: "What is the security posture?",
     // Source: README.md ("Security claims, CI-enforced — 15+ numbered
     // claims...") and public/src/content/docs/security/threat-model.md
-    // (protected assets, trusted computing base, non-goals). The claims
-    // themselves are restated verbatim above, in "Trust the boundary".
-    a: "Fifteen-plus numbered claims, each backed by a named test or CI job — not adjectives in a doc. Four are above. The host itself is trusted; a malicious host, mutually distrusting guests in one VM, and hardware key attestation are explicitly out of scope.",
+    // (protected assets, trusted computing base, non-goals).
+    a: "Fifteen-plus numbered claims, each backed by a named test or CI job — not adjectives in a doc. The host itself is trusted; a malicious host, mutually distrusting guests in one VM, and hardware key attestation are explicitly out of scope.",
   },
 ];
 

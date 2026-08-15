@@ -1,0 +1,383 @@
+/*  MVM static site theme — ported from the mvm docs (Astro Starlight) design
+ *  system: gomicrovm.com / mvm/public/tailwind.css + src/styles/custom.css.
+ *
+ *  Two layers:
+ *    1. Base palette tokens — the only tokens that differ per scheme.
+ *       Dark (GitHub-dark heritage) is the default on :root;
+ *       [data-theme="light"] and the prefers-color-scheme fallback override
+ *       them with GitHub Primer light values.
+ *    2. Role tokens — semantic, scheme-invariant, resolved via var() chains.
+ *
+ *  Components only consume role tokens. No hardcoded hex below the palette
+ *  blocks (exception: the macOS terminal-dot colors, which are product
+ *  affordances, not theme colors).
+ */
+
+:root {
+  /* ── Base palette (dark, default) ── */
+  --color-page: #010409;
+  --color-surface: #0d1117;
+  --color-surface-2: #161b22;
+  --color-border: #30363d;
+  --color-heading: #e6edf3;
+  --color-muted: #8b949e;
+  --color-accent: #58a6ff;
+  --color-accent-hover: #79c0ff;
+  --color-accent-low: #0c2d6b;
+  --color-accent-high: #c8e1ff;
+  --color-accent-2: #39c5cf;
+  --color-accent-3: #a371f7;
+  --color-green: #3fb950;
+  --color-amber: #d29922;
+  --color-tooltip: #1c2128;
+  --color-dim: #484f58;
+  --glow-strength: 22%;
+
+  /* ── Fonts (scheme-invariant) ──
+     JetBrains Mono carries every heading — the single biggest lever in
+     reading as technical rather than generic-SaaS. Inter carries body
+     copy, because mono hurts readability at paragraph length. */
+  --font-display: "JetBrains Mono", ui-monospace, monospace;
+  --font-mono: "JetBrains Mono", ui-monospace, monospace;
+  --font-body: "Inter", ui-sans-serif, system-ui, sans-serif;
+
+  /* ── Role tokens ── */
+  --color-title: var(--color-heading);
+  --color-body: var(--color-muted);
+  --color-label: var(--color-muted);
+  --color-link: var(--color-accent);
+  --color-action: var(--color-accent);
+  --color-action-hover: var(--color-accent-hover);
+  --color-canvas: var(--color-page);
+  --color-raised: var(--color-surface);
+  --color-raised-2: var(--color-surface-2);
+  --color-edge: var(--color-border);
+  --color-glass-border: color-mix(in oklab, var(--color-border) 70%, var(--color-heading));
+  --color-glow-1: color-mix(in oklab, var(--color-accent) var(--glow-strength), transparent);
+  --color-glow-2: color-mix(in oklab, var(--color-accent-2) var(--glow-strength), transparent);
+  --color-glow-3: color-mix(in oklab, var(--color-accent-3) var(--glow-strength), transparent);
+
+  color-scheme: light dark;
+}
+
+/* ── Light palette (GitHub Primer light) ── */
+[data-theme="light"] {
+  --color-page: #ffffff;
+  --color-surface: #f6f8fa;
+  --color-surface-2: #eaeef2;
+  --color-border: #d0d7de;
+  --color-heading: #1f2328;
+  --color-muted: #656d76;
+  --color-accent: #0969da;
+  --color-accent-hover: #0550ae;
+  --color-accent-low: #ddf4ff;
+  --color-accent-high: #0a3069;
+  --color-accent-2: #1b7c83;
+  --color-accent-3: #8250df;
+  --color-green: #1a7f37;
+  --color-amber: #9a6700;
+  --color-tooltip: #f6f8fa;
+  --color-dim: #afb8c1;
+  --glow-strength: 7%;
+}
+
+/* Auto mode + OS prefers light → light palette. The :not([data-theme="dark"])
+   guard keeps an explicit Dark choice winning regardless of OS preference. */
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    --color-page: #ffffff;
+    --color-surface: #f6f8fa;
+    --color-surface-2: #eaeef2;
+    --color-border: #d0d7de;
+    --color-heading: #1f2328;
+    --color-muted: #656d76;
+    --color-accent: #0969da;
+    --color-accent-hover: #0550ae;
+    --color-accent-low: #ddf4ff;
+    --color-accent-high: #0a3069;
+    --color-accent-2: #1b7c83;
+    --color-accent-3: #8250df;
+    --color-green: #1a7f37;
+    --color-amber: #9a6700;
+    --color-tooltip: #f6f8fa;
+    --color-dim: #afb8c1;
+    --glow-strength: 7%;
+  }
+}
+
+[data-theme="light"] { color-scheme: light; }
+[data-theme="dark"] { color-scheme: dark; }
+
+/* ── Base ── */
+* { box-sizing: border-box; }
+html { font-size: 17px; }
+html, body { margin: 0; padding: 0; }
+body {
+  font-family: var(--font-body);
+  -webkit-font-smoothing: antialiased;
+  background: var(--color-canvas);
+  color: var(--color-body);
+  min-height: 100vh;
+}
+h1, h2, h3, h4, p { margin: 0; }
+h1, h2, h3, h4 {
+  font-family: var(--font-display);
+  letter-spacing: -0.015em;
+  color: var(--color-title);
+}
+a { color: inherit; }
+
+.container { max-width: 72rem; margin: 0 auto; padding: 0 1.5rem; }
+@media (min-width: 640px) { .container { padding: 0 2rem; } }
+
+/* Eyebrow — small mono caps, same treatment as the docs sidebar group
+   labels and homepage eyebrows. */
+.eyebrow {
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--color-label);
+}
+.eyebrow .n { color: var(--color-accent); }
+
+/* ── Header — glass bar ── */
+.hdr {
+  position: sticky; top: 0; z-index: 100;
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  background: color-mix(in oklab, var(--color-page) 80%, transparent);
+  border-bottom: 1px solid var(--color-glass-border);
+}
+.hdr-row {
+  max-width: 72rem; margin: 0 auto;
+  padding: 1rem 1.5rem;
+  display: flex; align-items: center; justify-content: space-between; gap: 1rem;
+}
+@media (min-width: 640px) { .hdr-row { padding-inline: 2rem; } }
+
+.brand { display: flex; align-items: baseline; gap: 0.6rem; text-decoration: none; }
+.brand .name {
+  font-family: var(--font-mono);
+  font-size: 1.5rem; font-weight: 700; letter-spacing: -0.02em; line-height: 1;
+  background: linear-gradient(135deg, var(--color-accent) 0%, var(--color-accent-hover) 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+.brand .rev {
+  font-family: var(--font-mono);
+  font-size: 0.65rem; letter-spacing: 0.1em; color: var(--color-dim);
+}
+
+.hdr-actions { display: flex; align-items: center; gap: 0.25rem; }
+.hdr-actions .hdr-link {
+  padding: 0.4rem 0.75rem;
+  border-radius: 0.5rem;
+  font-size: 0.875rem; font-weight: 500;
+  color: var(--color-body);
+  text-decoration: none;
+  transition: color 0.15s, background 0.15s;
+}
+.hdr-actions .hdr-link:hover { color: var(--color-title); background: var(--color-raised); }
+.hdr-actions .hdr-link.active { color: var(--color-accent); }
+
+.theme-toggle {
+  display: flex; align-items: center; justify-content: center;
+  width: 2rem; height: 2rem;
+  border: none; border-radius: 0.375rem;
+  background: transparent; color: var(--color-body); cursor: pointer;
+  transition: color 0.15s, background 0.15s;
+}
+.theme-toggle:hover { color: var(--color-title); background: var(--color-raised); }
+.theme-toggle .icon-sun { display: none; }
+.theme-toggle .icon-moon { display: block; }
+[data-theme="light"] .theme-toggle .icon-sun { display: block; }
+[data-theme="light"] .theme-toggle .icon-moon { display: none; }
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) .theme-toggle .icon-sun { display: block; }
+  :root:not([data-theme="dark"]) .theme-toggle .icon-moon { display: none; }
+}
+
+/* ── Buttons ── */
+.btn-primary, .btn-outline, .btn-hdr {
+  display: inline-block;
+  border-radius: 0.5rem;
+  font-family: var(--font-body);
+  font-size: 0.9rem; font-weight: 600;
+  text-decoration: none; cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+}
+.btn-primary {
+  padding: 0.7rem 1.3rem;
+  background: var(--color-action); color: var(--color-canvas); border: none;
+}
+.btn-primary:hover { background: var(--color-action-hover); color: var(--color-canvas); }
+.btn-outline {
+  padding: calc(0.7rem - 1px) calc(1.3rem - 1px);
+  border: 1px solid var(--color-glass-border);
+  color: var(--color-title); background: transparent;
+}
+.btn-outline:hover { border-color: var(--color-accent); color: var(--color-accent); background: var(--color-raised); }
+.btn-hdr {
+  padding: 0.45rem 0.9rem;
+  font-size: 0.82rem;
+  background: var(--color-action); color: var(--color-canvas); border: none;
+}
+.btn-hdr:hover { background: var(--color-action-hover); }
+
+/* ── Cards — glass hairline + 0.75rem radius, same surface family as the
+   docs GlowCard / tables. ── */
+.card {
+  border: 1px solid var(--color-glass-border);
+  border-radius: 0.75rem;
+  background: var(--color-raised);
+  transition: border-color 0.2s;
+}
+
+/* ── Sections ── */
+section.std { border-top: 1px solid var(--color-edge); padding: 3.25rem 0; }
+.sec-head { display: flex; flex-direction: column; gap: 0.8rem; margin-bottom: 1.9rem; }
+.sec-head h2 { font-size: 1.6rem; font-weight: 600; }
+
+/* ── FAQ ── */
+.faq-list { border-top: 1px solid var(--color-edge); }
+.faq-item { border-bottom: 1px solid var(--color-edge); }
+.faq-item > button {
+  width: 100%; text-align: left; padding: 1.15rem 0;
+  background: transparent; border: none; cursor: pointer;
+  display: flex; justify-content: space-between; align-items: center; gap: 1.4rem;
+  color: inherit;
+}
+.faq-q {
+  font-family: var(--font-body);
+  font-size: 1rem; font-weight: 600; letter-spacing: -0.01em;
+  color: var(--color-title);
+}
+.faq-toggle {
+  font-family: var(--font-mono); color: var(--color-accent);
+  font-size: 0.8rem; flex-shrink: 0;
+}
+.faq-toggle .open-mark { display: none; }
+.faq-toggle .closed-mark { display: inline; }
+.faq-item.open .faq-toggle .open-mark { display: inline; }
+.faq-item.open .faq-toggle .closed-mark { display: none; }
+.faq-a {
+  font-size: 0.9rem; line-height: 1.8; color: var(--color-body);
+  padding: 0 0 1.5rem; max-width: 46rem; display: none;
+}
+.faq-item.open .faq-a { display: block; }
+
+/* ── Forms ── */
+.form-card { padding: 1.5rem; }
+.form-head {
+  font-family: var(--font-mono); font-size: 0.66rem; font-weight: 600;
+  letter-spacing: 0.16em; text-transform: uppercase;
+  color: var(--color-label); margin-bottom: 1.1rem;
+}
+.field-label {
+  display: block;
+  font-family: var(--font-mono); font-size: 0.66rem; font-weight: 600;
+  letter-spacing: 0.12em; text-transform: uppercase;
+  color: var(--color-label); margin-bottom: 0.45rem;
+}
+input[type="email"] {
+  width: 100%;
+  background: var(--color-canvas);
+  border: 1px solid var(--color-edge);
+  border-radius: 0.5rem;
+  color: var(--color-title);
+  padding: 0.6rem 0.8rem; margin-bottom: 1.2rem;
+  outline: none;
+  font-family: var(--font-mono); font-size: 0.82rem;
+}
+input[type="email"]::placeholder { color: var(--color-dim); }
+input[type="email"]:focus {
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--color-accent) 25%, transparent);
+}
+.chips { display: flex; flex-wrap: wrap; gap: 0.45rem; margin: 0.2rem 0 1.4rem; }
+.chip { position: relative; }
+.chip input { position: absolute; opacity: 0; inset: 0; pointer-events: none; }
+.chip span {
+  display: block; padding: 0.35rem 0.7rem;
+  border: 1px solid var(--color-edge); border-radius: 999px;
+  font-size: 0.78rem; font-weight: 500;
+  color: var(--color-body); cursor: pointer; user-select: none;
+  transition: border-color 0.15s, color 0.15s, background 0.15s;
+}
+.chip span:hover { border-color: var(--color-glass-border); color: var(--color-title); }
+.chip input:checked + span {
+  background: var(--color-accent); border-color: var(--color-accent);
+  color: var(--color-canvas); font-weight: 600;
+}
+.chip input:focus-visible + span { outline: 2px solid var(--color-accent); outline-offset: 2px; }
+.form-foot { display: flex; align-items: center; justify-content: space-between; gap: 1rem; flex-wrap: wrap; }
+.form-foot .submit {
+  padding: 0.65rem 1.15rem;
+  background: var(--color-action); color: var(--color-canvas);
+  border: none; border-radius: 0.5rem; cursor: pointer;
+  font-family: var(--font-body); font-size: 0.85rem; font-weight: 600;
+  transition: background 0.15s;
+}
+.form-foot .submit:hover { background: var(--color-action-hover); }
+.form-foot .note {
+  font-family: var(--font-mono); font-size: 0.62rem; font-weight: 600;
+  letter-spacing: 0.12em; text-transform: uppercase; color: var(--color-dim);
+}
+
+/* ── Footer ── */
+.ftr { border-top: 1px solid var(--color-edge); }
+.ftr-row {
+  max-width: 72rem; margin: 0 auto; padding: 1.1rem 1.5rem;
+  display: flex; justify-content: space-between; gap: 0.7rem; flex-wrap: wrap;
+  font-family: var(--font-mono); font-size: 0.62rem;
+  letter-spacing: 0.09em; color: var(--color-dim);
+}
+@media (min-width: 640px) { .ftr-row { padding-inline: 2rem; } }
+
+/* ── Modal ── */
+.modal {
+  position: fixed; inset: 0; z-index: 200;
+  background: color-mix(in oklab, var(--color-page) 75%, transparent);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  display: grid; place-items: center; padding: 1.25rem;
+}
+.modal[hidden] { display: none; }
+.modal-card {
+  background: var(--color-raised);
+  border: 1px solid var(--color-glass-border);
+  border-radius: 0.75rem;
+  padding: 2rem;
+  max-width: 30rem; width: 100%; position: relative;
+  box-shadow: 0 24px 60px color-mix(in oklab, var(--color-page) 60%, transparent);
+}
+.modal-close {
+  position: absolute; top: 0.7rem; right: 0.8rem;
+  background: transparent; border: none; color: var(--color-body);
+  font-family: var(--font-mono); font-size: 0.85rem; cursor: pointer;
+  padding: 0.25rem; border-radius: 0.375rem;
+}
+.modal-close:hover { color: var(--color-accent); }
+.modal-card h3 { font-size: 1.3rem; font-weight: 600; margin: 0 0 0.4rem; line-height: 1.2; }
+.modal-card .intro, .modal-card .intro-line {
+  font-size: 0.85rem; line-height: 1.6; color: var(--color-body); margin: 0 0 1.3rem;
+}
+
+/* ── Background blooms — decorative glow, drifting slowly. Held still
+   under reduced motion: the tint is fine, the movement is what triggers
+   discomfort. ── */
+.site-bloom {
+  position: absolute; border-radius: 999px; pointer-events: none;
+  filter: blur(60px);
+  animation: site-bloom-drift 28s ease-in-out infinite alternate;
+}
+@keyframes site-bloom-drift {
+  from { transform: translate3d(0, 0, 0) scale(1); }
+  to { transform: translate3d(4rem, -2rem, 0) scale(1.12); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .site-bloom { animation: none; }
+}
