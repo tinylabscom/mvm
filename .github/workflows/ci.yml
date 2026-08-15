@@ -627,9 +627,14 @@ jobs:
             echo "BDD conformance did not match scope $SCOPE_BDD: $BDD_RESULT"
             exit 1
           fi
+          # The kernel lane runs on every event and gates its own steps, so
+          # that it ran says nothing about scope and `skipped` is no longer a
+          # reachable conclusion. What still has to hold is that it did not
+          # fail. That the lane actually built when its scope demanded it is
+          # asserted inside the job, against the artifacts, which is a stronger
+          # statement than a job conclusion could make.
           case "$KERNEL_SCOPE" in
-            true) kernel_required=success ;;
-            false) kernel_required=skipped ;;
+            true|false) kernel_required=success ;;
             *) echo "Invalid kernel scope: $KERNEL_SCOPE"; exit 1 ;;
           esac
           if [ "$KERNEL_RESULT" != "$kernel_required" ]; then
@@ -1029,6 +1034,23 @@ jobs:
         env:
           ARCH: ${{ matrix.arch }}
         run: bash scripts/build-kernel-artifacts.sh "$ARCH"
+
+      - name: Assert the lane built what its scope demanded
+        # Replaces what the `test` aggregate used to get from the job's own
+        # conclusion. Gating the steps rather than the job means a
+        # mis-gated step would leave the job green and empty, so the check
+        # has to look at the bytes.
+        if: needs.scope.outputs.kernel == 'true'
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          for f in "staging/vmlinux-${ARCH}-builder" "staging/vmlinux-${ARCH}-workload"; do
+            if [ ! -s "$f" ]; then
+              echo "::error::kernel scope is true but $f is missing or empty" >&2
+              exit 1
+            fi
+          done
 
       - name: Upload kernel artifacts
         if: ${{ always() && needs.scope.outputs.kernel == 'true' }}
