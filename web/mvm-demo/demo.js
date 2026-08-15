@@ -156,16 +156,19 @@ function renderEgressDomains(policy) {
 // prompt green (.hint) so instructions read apart from guest output.
 function printWelcome(policy) {
   const rules = (policy && policy.rules) || [];
-  const allowedHost = rules.length > 0 ? rules[0].host : null;
+  const allowedRule = rules.length > 0 ? rules[0] : null;
   appendConsole("");
   appendConsole(
     "You are in a shell in a policy-governed sandbox. Try the following:",
     "hint",
   );
-  if (allowedHost) {
-    appendConsole(`  fetch ${allowedHost}   → allowed by the launch policy`, "hint");
+  if (allowedRule) {
+    appendConsole(
+      `  fetch ${allowedRule.host} ${allowedRule.port}   → allowed by the launch policy`,
+      "hint",
+    );
   }
-  appendConsole("  fetch api.openai.com   → denied by policy; watch the audit chain", "hint");
+  appendConsole("  fetch api.openai.com 443   → denied by policy; watch the audit chain", "hint");
   appendConsole("  ls, cat, env, ps       → explore the guest", "hint");
   appendConsole("  help                   → the full command list", "hint");
   appendConsole("");
