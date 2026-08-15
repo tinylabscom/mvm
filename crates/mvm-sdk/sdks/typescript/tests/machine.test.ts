@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 import * as mvm from "../src/index.js";
 import {
   machineCheckArtifactArgv,
@@ -54,8 +55,18 @@ function readFixtureLog(): string[] {
   return fs.readFileSync(log, "utf-8").split("\n").filter((l) => l.length > 0);
 }
 
+// Repo root, resolved from this file rather than the process cwd:
+// tests/ -> typescript/ -> sdks/ -> mvm-sdk/ -> crates/ -> repo root.
+const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "..", "..");
+
+// The canonical golden argv corpus. The CLI anchors it against the real clap
+// parser and the Rust SDK asserts its builders reproduce it, which is what
+// makes a fixture mean "argv mvmctl actually accepts". Resolving anywhere else
+// silently opts this suite out of that contract.
+export const MACHINE_FIXTURES = path.join(REPO_ROOT, "tests", "machine-fixtures");
+
 function readArgvFixture(name: string): string[] {
-  return fs.readFileSync(path.join("..", "..", "..", "tests", "machine-fixtures", `${name}.argv`), "utf-8")
+  return fs.readFileSync(path.join(MACHINE_FIXTURES, `${name}.argv`), "utf-8")
     .split("\n")
     .filter((line) => line.length > 0);
 }
@@ -257,6 +268,40 @@ describe("Machine persistent lifecycle", () => {
     expect(machineShellArgv("web", { force: true })).toEqual(readArgvFixture("shell"));
     // Regression guard: `stop` takes a positional name, not `--name`.
     expect(machineStopArgv("web")).toEqual(readArgvFixture("stop"));
+  });
+
+  it("emits the shared start-image argv fixture", () => {
+    expect(machineStartArgv("web", { image: "nginx", cpus: 2, memory: "512M" }))
+      .toEqual(readArgvFixture("start-image"));
+  });
+
+  // Mirrors the Rust `fixture_coverage_is_accounted_for` tripwire: a fixture
+  // added without a TypeScript assertion is a silent coverage hole in one of
+  // the three languages the corpus is supposed to bind together.
+  it("asserts every fixture in the shared corpus", () => {
+    const onDisk = fs.readdirSync(MACHINE_FIXTURES)
+      .filter((name) => name.endsWith(".argv") && !name.startsWith("."))
+      .map((name) => name.slice(0, -".argv".length))
+      .sort();
+    expect(onDisk.length).toBeGreaterThan(0);
+    expect(onDisk).toEqual([
+      "check-artifact",
+      "create-image",
+      "create-manifest",
+      "exec",
+      "inspect",
+      "logs",
+      "ls",
+      "rm",
+      "rm-all",
+      "run-admission",
+      "run-allow-host-receipt",
+      "run-default",
+      "shell",
+      "start",
+      "start-image",
+      "stop",
+    ]);
   });
 
   it("emits the shared ls/logs/inspect/rm argv fixtures", () => {
