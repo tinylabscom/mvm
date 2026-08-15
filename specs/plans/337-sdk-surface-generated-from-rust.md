@@ -3,7 +3,7 @@
 Backing: preview
 Validation: none
 
-**Status: NOT STARTED**
+**Status: IN PROGRESS** — WS-1 complete (decision recorded below), WS-2 underway
 **Opened:** 2026-08-14
 **Follows:** Plan 336 WS-G4
 
@@ -157,23 +157,230 @@ more fragile. **W1 is a spike to choose, not a formality** — if neither is
 tractable, Tier A collapses to a hand-port and the plan's value drops sharply.
 Decide before committing to W2.
 
+> **Superseded by the WS-1 result below.** Both mechanisms were built. The
+> "more precise" claim about the attribute mechanism is empirically false — an
+> attribute macro sees one item at a time and recovered *less* than the `syn`
+> parse. More importantly, the requirement that the manifest be *extracted from*
+> the `ctor` fns is incompatible with this plan's own byte-compatibility
+> non-goal, because the information Python needs is not present in the Rust
+> source. The manifest is authored declaratively instead; see WS-1 § Decision.
+
 ## Workstreams
 
 ### WS-1 — spike: can the manifest be generated from Rust?
 
-- [ ] 1.1 Prototype the attribute/inventory mechanism over two `ctor` fns
-- [ ] 1.2 Prototype the `syn`-parse mechanism over the same two
-- [ ] 1.3 Compare on: fidelity of defaults, validation rules, and doc comments
-- [ ] 1.4 Decide, and write the decision into this plan with its reasoning
-- [ ] 1.5 **Gate:** if neither is tractable, stop and re-scope before WS-2
+- [x] 1.1 Prototype the attribute/inventory mechanism over two `ctor` fns
+- [x] 1.2 Prototype the `syn`-parse mechanism over the same two
+- [x] 1.3 Compare on: fidelity of defaults, validation rules, and doc comments
+- [x] 1.4 Decide, and write the decision into this plan with its reasoning
+- [x] 1.5 **Gate:** if neither is tractable, stop and re-scope before WS-2
+
+#### Pre-registered success criterion and prediction
+
+Written down *before* either prototype was built, so the spike is falsifiable
+rather than a formality.
+
+> **Criterion.** From the Rust source alone, reproduce the full Python
+> signature of `python_deps` and `dns_resolver` — including `tool="uv"`,
+> `port=53`, keyword-only calling, and the `"pip-tools"` alias.
+>
+> **Prediction.** Both mechanisms fail *identically*, because the information
+> is absent from the source rather than hard to parse. If so, the spike's
+> output is not "neither is tractable, stop" but "extraction is the wrong
+> question".
+
+The criterion is deliberately the *Python* signature, not the Rust one. A
+mechanism that faithfully reproduces Rust has proved nothing: this plan's own
+non-goal is that generated Python be byte-compatible with the hand-written
+Python it replaces, so Python's surface is the bar.
+
+#### Result
+
+Both prototypes were built and run against the real `crates/mvm-sdk/src/ctor/`
+sources. Both work. Neither meets the criterion.
+
+| axis | A: attribute + `inventory` | B: `syn` parse from xtask |
+| --- | --- | --- |
+| names, params, arity | recovered | recovered |
+| `impl Into<String>` → `string` | recovered | recovered |
+| `I: IntoIterator<Item = HostPort>` → `list<HostPort>` | recovered | recovered |
+| doc comments, verbatim | recovered | recovered |
+| constructed variant | recovered | recovered |
+| **`tool = PythonTool::Uv`** (delegated default) | **NOT recovered** | **recovered** |
+| `port = 53` | not recovered | not recovered |
+| keyword-only calling | not recovered | not recovered |
+| `1..=65535` constraint | not recovered | not recovered |
+| `"pip-tools"` alias | not recovered | not recovered |
+
+The prediction held on the last four rows and **failed on the fifth**, in a way
+worth recording because it reverses this plan's own assumption. The sketch above
+calls the attribute mechanism "more precise and more invasive". It is not more
+precise — it is strictly *less* precise, and structurally so:
+
+> An attribute macro is invoked **once per annotated item** and is handed only
+> that item's tokens. It therefore cannot see that `python_deps` delegates to
+> `python_deps_with(lockfile, PythonTool::Uv)` in a way it could resolve — the
+> sibling is simply not in scope. The whole-file `syn` parse *does* resolve it,
+> because it holds every fn in the file at once and can do a second pass.
+
+So on the single axis where recovery from Rust was possible at all, A lost to B.
+A's compile-time coupling buys precision about *one item*; the information we
+actually needed was *between* items.
+
+#### The four remaining failures are not parser failures
+
+This is the finding that decides the workstream. `port=53`, keyword-only,
+`1..=65535` and `"pip-tools"` are not hard to parse — they **are not in the Rust
+source at any level of effort**, because Rust does not need them:
+
+- `port: u16` *is* Python's range check.
+- `tool: PythonTool` *is* Python's enum-membership check.
+- The `"pip-tools"` alias never arises, because Rust never takes a string there.
+- Keyword-only has no Rust expression at all.
+
+Rust is not the impoverished surface here; it is the one that **discharges these
+constraints statically**. Python and TypeScript need runtime checks precisely
+*because* they lack the types. Extraction can only ever recover what was
+written down, and a range that was expressed as `u16` was never written down.
+
+That means the plan's two requirements — "generated Python must be
+byte-compatible with what it replaces" (Non-goals) and "the manifest must be
+generated from the Rust `ctor` functions" (Design sketch) — are **mutually
+unsatisfiable**. No mechanism can satisfy both. This is a specification
+failure, not a tooling failure, which is why 1.5 does not fire: the gate exists
+to catch "the tooling won't work", and the tooling works fine.
+
+#### Decision
+
+**Neither mechanism, as an extractor. Invert the direction.**
+
+1. **The manifest is the source of truth**, authored declaratively in Rust — for
+   each constructor: name, parameters with neutral types and defaults, the IR
+   type and variant discriminant it produces, its **constraints**, and its doc.
+   Crucially it records *constraints*, not validation code, and each emitter
+   then decides whether a given constraint is discharged by the target
+   language's type system or needs a runtime check. That is the piece neither
+   prototype could ever supply.
+2. **The Rust ctors stay hand-written.** Generating them would force
+   `-> Result<_, _>` to carry the constraints, which wrecks the composition the
+   prelude exists for — `network(mode).with_egress(egress([host_port("a",
+   443)]))` becomes a `?`-soup — and degrades rustdoc and go-to-definition, all
+   for a ~50-line payoff inside a crate that ships (`mvm-sdk` is in `mvmctl`'s
+   closure via `mvm-cli`).
+3. **`syn` is retained, re-scoped from extractor to fail-closed coverage gate**:
+   every constructor exported from `lib.rs` must have a manifest entry, and vice
+   versa. Note this gate must read **`lib.rs`'s `pub use ctor::…` lists, not
+   `pub fn` in `src/ctor/*.rs`** — `mod ctor` is private (`lib.rs:53`), so
+   `python_deps_with`, `node_deps_with` and the whole of `NetworkExt` are
+   `pub fn` without being public API. A gate over `pub fn` over-reports by
+   roughly 40% and fails on day one.
+4. **A coverage gate alone is not sufficient**, so pair it with a **golden-IR
+   behavioural gate**: each manifest entry carries example arguments; a Rust
+   test calls the hand-written ctor with them and asserts the serialised IR
+   equals a golden document, and the *same* golden document drives the generated
+   Python and TypeScript in the s27 BDD suite. Coverage proves a name is listed;
+   only this proves it still *behaves* as listed. WS-3.4 already asks for half
+   of this — it should be the primary binding mechanism, not a closing step.
+
+#### On "a hand-kept manifest is just a fourth copy with extra steps"
+
+That objection, from the design sketch above, is what pointed this plan at
+extraction in the first place, and it does not survive contact with the
+codebase's own conventions. A copy is dangerous when **nothing checks it**.
+This repo's entire method is *make drift detectable*, not *make repetition
+impossible*: `deny.toml`, `check-stubs`, `check_closure_budget`,
+`check_claim_catalog`. `surface_divergence.json` — introduced by Plan 336, one
+plan ago — is itself a hand-maintained list of names that nobody calls a fourth
+copy, because an s27 scenario fails the moment it lies. A manifest bound by
+(3) and (4) meets exactly that standard.
+
+#### Dependency cost, which independently rules out A
+
+- **A** needs a new workspace member (a proc-macro crate cannot live inside
+  `mvm-sdk`) plus `inventory` as a dependency of `mvm-sdk` itself. `inventory`
+  is currently in `Cargo.lock` only via `cucumber`, i.e. dev-only, so this moves
+  it into the shipped `mvmctl` closure and onto `check_closure_budget`. Worse,
+  `mvm-sdk` is `crate-type = ["lib", "cdylib"]` (`Cargo.toml:15`) and that
+  cdylib is `dlopen`ed by every language SDK; `inventory` registers via link
+  sections, and collection across a `dlopen`ed boundary is an unbudgeted risk in
+  the crate whose FFI shape is load-bearing.
+- **B** needs `syn` in `xtask` only. `xtask` is outside the shipped closure and
+  `syn` is already in `Cargo.lock` as a transitive proc-macro dependency, so the
+  shipped-closure delta is zero.
+
+Even had the fidelity comparison been a tie, this would have decided it.
+
+#### Defect surfaced by the spike
+
+Rust's `host_port` accepts port `0`; Python's rejects it (`_dsl.py:759`,
+`0 < port`). `u16` is not the same constraint as `1..=65535`. Nothing in the
+tree notices today, and no signature-level gate ever would — it is exactly the
+class of drift the golden-IR gate in (4) exists to catch. Filed as #2559; not
+fixed here, because changing `host_port`'s behaviour is not a WS-1 change.
+
+#### Consequence for the tiers
+
+Tier A is **not** descoped to a hand-port. It proceeds as generation, from a
+declarative manifest rather than an extracted one. Tiers B, D and E are
+unaffected in substance — E in particular is now the natural proving ground,
+since WS-2 demonstrates the whole manifest→two-languages pipeline using nothing
+but `macro_rules!`, no proc-macro and no `syn`, which is independent evidence
+for decision (2).
 
 ### WS-2 — Tier E as the proving ground (cheapest, closes both directions)
 
-- [ ] 2.1 Rust-owned env-name registry
-- [ ] 2.2 `emit_sdk_surface` bin emitting the constants
-- [ ] 2.3 Python + TypeScript emitters wired into `gen-stubs`
-- [ ] 2.4 `check-stubs` fails on drift
-- [ ] 2.5 TypeScript-only divergence reaches zero; divergence file updated
+- [x] 2.1 Rust-owned env-name registry
+- [x] 2.2 `emit_sdk_surface` bin emitting the constants
+- [x] 2.3 Python + TypeScript emitters wired into `gen-stubs`
+- [x] 2.4 `check-stubs` fails on drift
+- [x] 2.5 TypeScript-only divergence reaches zero; divergence file updated
+
+#### Result
+
+`crates/mvm-sdk/src/env.rs` declares each name once via `macro_rules!`,
+producing both a `pub const` and a row in `REGISTRY`. `emit_sdk_env` writes
+`schema/sdk-env-v0.json`; `xtask/src/gen_sdk_surface.rs` renders
+`mvm/_env/vars.py` and `src/_env/vars.ts`. `typescript_only_absent_from_python`
+is now `[]`.
+
+Five names, not the four this plan scoped. The fifth is `MVM_CLI_BIN_ENV`, and
+it is the one that best justifies the tier: it was written out **four** times —
+`mvm-sdk/src/machine.rs`, `mvm-sdk/src/facade.rs` (twice in one crate, the
+second commented "shared with `machine.rs`" when it was in fact a copy),
+`_cli.py`, `_cli.ts` — and because all four agreed, **no gate in the repo could
+see it**. Counting divergence entries would never have found it. Five
+`MVM_SDK_*` string literals in `mvm-cli` now reference the consts too.
+
+Two findings worth carrying forward:
+
+- **The pipeline cannot render a constant.** `json-schema-to-typescript` emits
+  `export type` only, and `tsc` erases a type — so a "generated" constant would
+  be absent from the built ESM namespace and invisible to the s27 check, which
+  reads `Object.keys(mvm)` at runtime. The drift gate would then certify a
+  binding that does not exist. Constants are therefore rendered by a small
+  hand-written emitter in xtask. This is not a shortcut around the pinned
+  generators; determinism is unaffected, because the output depends only on that
+  function.
+- **Emitting every name into every language would have been dishonest.** The two
+  `MVM_MACHINE_*` names are Python-only, and clearing them from the divergence
+  file was tempting because it costs one line. But TypeScript's `_machine.ts`
+  reads no environment at all, so those exports would be dead and the file would
+  claim a parity that does not exist. Each registry row therefore declares the
+  surfaces that *read* it, an s27 step checks that claim **in both directions**,
+  and a unit test pins the `MVM_MACHINE_*` pair as not-TypeScript. They stay in
+  `python_only_absent_from_typescript`, correctly, as a **behaviour** gap.
+
+That behaviour gap is real and tracked separately: `_machine.ts` calls
+`spawnSync` with no `timeout` and no `maxBuffer`, so it can wait forever and
+reports Node's 1 MiB `ENOBUFS` overflow as a spawn failure, where Python raises
+typed `TransportTimeout` / `TransportOutputOverflow`. Filed as #2558; fixing
+it is a behaviour change to a shipped SDK, not env-name codegen, so it is not
+bundled here.
+
+Note for WS-3: this tier demonstrates the whole manifest→two-languages pipeline
+using `macro_rules!` alone — no proc-macro, no `syn`, no new dependency —
+which is independent evidence for the WS-1 decision to author the manifest
+declaratively rather than extract it.
 
 ### WS-3 — Tier A: generate the constructors, delete the Python copies
 

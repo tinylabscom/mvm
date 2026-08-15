@@ -90,6 +90,13 @@ name = "emit_runtime_schema"
 path = "src/bin/emit_runtime_schema.rs"
 required-features = ["schema"]
 
+# The SDK env-var registry emitter. Deliberately carries no
+# `required-features`: it writes a JSON instance built from `serde_json`,
+# which is an unconditional dependency, and never touches `schemars`.
+[[bin]]
+name = "emit_sdk_env"
+path = "src/bin/emit_sdk_env.rs"
+
 [dev-dependencies]
 # `TestEnv` lives behind mvm-core's `test-support`, and the compile
 # pipeline's tests use it. Without this line the feature only arrives via
