@@ -85,7 +85,7 @@ jobs:
           # Anything that can change a compiled target, generated artifact, or
           # the commands used by a Rust lane keeps the full compiler/test
           # matrix. Prose, site assets, and process-only specs do not.
-          if grep -zE '^(crates/|src/|tests/|xtask/|scripts/|features/|schema/|model/|assets/|\.cargo/|\.config/|\.github/actions/|\.github/workflows/|nix/packaging/release/verify-release-assets[^/]*\.sh$|Cargo\.(toml|lock)$|rust-toolchain\.toml$|build\.rs$|install\.sh$|[Jj]ustfile$)' "$CHANGED_FILE" >/dev/null; then
+          if grep -zE '^(crates/|src/|tests/|xtask/|scripts/|features/|schema/|model/|assets/|\.cargo/|\.config/|\.github/actions/|\.github/workflows/|nix/packaging/release/[^/]*\.sh$|Cargo\.(toml|lock)$|rust-toolchain\.toml$|build\.rs$|install\.sh$|[Jj]ustfile$)' "$CHANGED_FILE" >/dev/null; then
             echo "code=true" >> "$GITHUB_OUTPUT"
           else
             echo "code=false" >> "$GITHUB_OUTPUT"
@@ -176,7 +176,8 @@ jobs:
           sudo apt-get install -y shellcheck
           shellcheck -S warning install.sh
           shellcheck nix/packaging/release/verify-release-assets.sh \
-                     nix/packaging/release/verify-release-assets.test.sh
+                     nix/packaging/release/verify-release-assets.test.sh \
+                     nix/packaging/release/assert-init-shebang.sh
 
       - name: Release-asset verifier gate tests
         run: bash nix/packaging/release/verify-release-assets.test.sh
