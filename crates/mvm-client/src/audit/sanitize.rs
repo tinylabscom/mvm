@@ -223,11 +223,11 @@ mod tests {
     /// loop over seeded random bytes, matching the repo's pattern.
     #[test]
     fn property_sanitized_output_is_always_display_safe() {
-        use rand::{Rng, SeedableRng, rngs::StdRng};
+        use rand::{RngExt, SeedableRng, rngs::StdRng};
         let mut rng = StdRng::seed_from_u64(0x5a17);
         for _ in 0..200 {
-            let len = rng.gen_range(0..1024);
-            let bytes: Vec<u8> = (0..len).map(|_| rng.r#gen::<u8>()).collect();
+            let len = rng.random_range(0..1024);
+            let bytes: Vec<u8> = (0..len).map(|_| rng.random::<u8>()).collect();
             let input = String::from_utf8_lossy(&bytes);
             let out = sanitize_free_text(&input, MAX_DETAIL_LEN);
             assert!(
@@ -241,11 +241,11 @@ mod tests {
     /// Property: sanitization is idempotent — cleaning clean text is a no-op.
     #[test]
     fn property_sanitization_is_idempotent() {
-        use rand::{Rng, SeedableRng, rngs::StdRng};
+        use rand::{RngExt, SeedableRng, rngs::StdRng};
         let mut rng = StdRng::seed_from_u64(0xf00d);
         for _ in 0..200 {
-            let len = rng.gen_range(0..600);
-            let bytes: Vec<u8> = (0..len).map(|_| rng.r#gen::<u8>()).collect();
+            let len = rng.random_range(0..600);
+            let bytes: Vec<u8> = (0..len).map(|_| rng.random::<u8>()).collect();
             let input = String::from_utf8_lossy(&bytes);
             let once = sanitize_free_text(&input, MAX_DETAIL_LEN);
             let twice = sanitize_free_text(&once, MAX_DETAIL_LEN);

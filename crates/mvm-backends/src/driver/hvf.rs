@@ -255,6 +255,15 @@ fn relay_supervisor_config_with_handoff(
         restore_ram: None,
         restore_frame: None,
         timeout_secs: paths.timeout_secs,
+        // The plan's wall-clock bound and the paths its kill is audited under.
+        // The supervisor owns the guest for its whole life, so it holds the
+        // only timer that can still fire once `mvmctl` is gone.
+        plan: spec.plan_binding.as_ref().map(|b| b.plan_json.clone()),
+        audit_dir: spec.plan_binding.as_ref().map(|b| b.audit_dir.clone()),
+        signing_key_path: spec
+            .plan_binding
+            .as_ref()
+            .map(|b| b.signing_key_path.clone()),
         // Re-derive the agent bridge from the state dir rather than trusting the
         // spec's backend-neutral agent hint (`agent.sock`): the detached
         // supervisor binds this exact path, and the host resolver probes the same
@@ -1073,7 +1082,53 @@ mod tests {
                 log_path: "/tmp/console.log".into(),
             },
             trusted_builder: false,
+            plan_binding: None,
         }
+    }
+
+    #[test]
+    fn a_plan_bound_spec_hands_the_hvf_supervisor_what_it_needs_to_enforce_the_bound() {
+        let mut spec = spec_with(KernelImage::Path("/k/Image".into()), vec![], vec![]);
+        spec.plan_binding = Some(mvm_vmm::driver::spec::PlanBinding {
+            plan_json: serde_json::json!({"resources": {"timeouts": {"exec_secs": 30}}}),
+            audit_dir: "/fixture/audit".into(),
+            signing_key_path: "/fixture/keys/host-signer.ed25519".into(),
+        });
+        let cfg = relay_supervisor_config(&spec, &sample_paths()).expect("config");
+
+        // HVF is the macOS 26+ auto-detect default, so an unenforced bound here
+        // is the default path. The supervisor arms its timer from `plan`.
+        assert_eq!(
+            cfg.plan
+                .as_ref()
+                .map(|p| p["resources"]["timeouts"]["exec_secs"].clone()),
+            Some(serde_json::json!(30))
+        );
+        assert_eq!(
+            cfg.audit_dir.as_deref(),
+            Some(std::path::Path::new("/fixture/audit"))
+        );
+        assert_eq!(
+            cfg.signing_key_path.as_deref(),
+            Some(std::path::Path::new("/fixture/keys/host-signer.ed25519"))
+        );
+    }
+
+    #[test]
+    fn the_plan_bound_is_not_the_unaudited_run_backstop() {
+        let mut spec = spec_with(KernelImage::Path("/k/Image".into()), vec![], vec![]);
+        spec.plan_binding = Some(mvm_vmm::driver::spec::PlanBinding {
+            plan_json: serde_json::json!({"resources": {"timeouts": {"exec_secs": 30}}}),
+            audit_dir: "/fixture/audit".into(),
+            signing_key_path: "/fixture/keys/host-signer.ed25519".into(),
+        });
+        let cfg = relay_supervisor_config(&spec, &sample_paths()).expect("config");
+
+        // `timeout_secs` comes from the MVM_HVF_TIMEOUT dev hook and is unset in
+        // normal use. A plan's bound must not be conflated with it: this one is
+        // audited and exits 124, that one is neither.
+        assert_eq!(cfg.timeout_secs, 0, "the dev backstop stays independent");
+        assert!(cfg.plan.is_some(), "the plan's own bound is what enforces");
     }
 
     fn sample_paths() -> SupervisorPaths {

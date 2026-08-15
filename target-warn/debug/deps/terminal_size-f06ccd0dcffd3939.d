@@ -1,0 +1,8 @@
+/Users/auser/work/tinylabs/mvmco/.worktrees/mvm-2507-wallclock/target-warn/debug/deps/terminal_size-f06ccd0dcffd3939.d: /Users/auser/work/tinylabs/mvmco/.worktrees/mvm-remove-docker/.mvm-test/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/terminal_size-0.4.4/src/lib.rs /Users/auser/work/tinylabs/mvmco/.worktrees/mvm-remove-docker/.mvm-test/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/terminal_size-0.4.4/src/unix.rs
+
+/Users/auser/work/tinylabs/mvmco/.worktrees/mvm-2507-wallclock/target-warn/debug/deps/libterminal_size-f06ccd0dcffd3939.rlib: /Users/auser/work/tinylabs/mvmco/.worktrees/mvm-remove-docker/.mvm-test/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/terminal_size-0.4.4/src/lib.rs /Users/auser/work/tinylabs/mvmco/.worktrees/mvm-remove-docker/.mvm-test/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/terminal_size-0.4.4/src/unix.rs
+
+/Users/auser/work/tinylabs/mvmco/.worktrees/mvm-2507-wallclock/target-warn/debug/deps/libterminal_size-f06ccd0dcffd3939.rmeta: /Users/auser/work/tinylabs/mvmco/.worktrees/mvm-remove-docker/.mvm-test/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/terminal_size-0.4.4/src/lib.rs /Users/auser/work/tinylabs/mvmco/.worktrees/mvm-remove-docker/.mvm-test/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/terminal_size-0.4.4/src/unix.rs
+
+/Users/auser/work/tinylabs/mvmco/.worktrees/mvm-remove-docker/.mvm-test/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/terminal_size-0.4.4/src/lib.rs:
+/Users/auser/work/tinylabs/mvmco/.worktrees/mvm-remove-docker/.mvm-test/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/terminal_size-0.4.4/src/unix.rs:

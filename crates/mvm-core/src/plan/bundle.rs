@@ -1106,6 +1106,7 @@ pub fn bundle_sha256(archive_bytes: &[u8]) -> String {
 mod tests {
     use super::*;
     use ed25519_dalek::SigningKey;
+    use rand::Rng;
     use std::collections::HashMap;
 
     /// In-memory trust store for tests. Production uses
@@ -1121,7 +1122,7 @@ mod tests {
     fn fresh_key() -> SigningKey {
         {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             SigningKey::from_bytes(&__ed_seed)
         }
     }

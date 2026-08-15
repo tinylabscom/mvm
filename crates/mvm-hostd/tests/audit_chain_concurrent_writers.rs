@@ -19,6 +19,7 @@
 //! whole assertion: it rejects a duplicated parent and equally rejects a line
 //! that two interleaved writes tore in half.
 
+use rand::Rng;
 use std::path::{Path, PathBuf};
 
 use ed25519_dalek::SigningKey;
@@ -48,7 +49,7 @@ fn concurrent_writer_processes_extend_one_chain_without_forking() {
     // way it would be in production, or the test proves nothing about forks.
     let key_path = dir.path().join("chain.key");
     let mut seed = [0u8; 32];
-    rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut seed);
+    rand::rng().fill_bytes(&mut seed);
     std::fs::write(&key_path, seed).expect("write key seed");
     let verifying = SigningKey::from_bytes(&seed).verifying_key();
 

@@ -53,14 +53,19 @@ def _records(path: Path) -> list[str]:
     return path.read_text().splitlines()
 
 
+#: Repo root, resolved from this file rather than the process cwd:
+#: tests/ -> python/ -> sdks/ -> mvm-sdk/ -> crates/ -> repo root.
+_REPO_ROOT = Path(__file__).parents[5]
+
+#: The canonical golden argv corpus. The CLI anchors it against the real clap
+#: parser and the Rust SDK asserts its builders reproduce it, which is what
+#: makes a fixture mean "argv mvmctl actually accepts". Resolving anywhere else
+#: silently opts this suite out of that contract.
+MACHINE_FIXTURES = _REPO_ROOT / "tests" / "machine-fixtures"
+
+
 def _fixture(name: str) -> list[str]:
-    return (
-        Path(__file__)
-        .parents[4]
-        .joinpath("tests", "machine-fixtures", f"{name}.argv")
-        .read_text()
-        .splitlines()
-    )
+    return (MACHINE_FIXTURES / f"{name}.argv").read_text().splitlines()
 
 
 def test_resolve_cli_bin_prefers_explicit_env_override(tmp_path: Path) -> None:
@@ -152,6 +157,54 @@ def test_machine_start_argv_matches_shared_fixture() -> None:
         json=True,
         dry_run=True,
     ) == _fixture("start")
+
+
+def test_machine_start_image_argv_matches_shared_fixture() -> None:
+    assert _machine_start_argv(
+        name="web",
+        image="nginx",
+        cpus=2,
+        memory="512M",
+    ) == _fixture("start-image")
+
+
+#: Every fixture in the shared corpus, mapped to the assertion above that
+#: covers it. Mirrors the Rust
+#: `machine_verb_conformance::fixture_coverage_is_accounted_for` tripwire: a
+#: fixture added without a Python assertion is a silent coverage hole in one
+#: of the three languages the corpus is supposed to bind together.
+_ASSERTED_FIXTURES = {
+    "check-artifact",
+    "create-image",
+    "create-manifest",
+    "exec",
+    "inspect",
+    "logs",
+    "ls",
+    "rm",
+    "rm-all",
+    "run-admission",
+    "run-allow-host-receipt",
+    "run-default",
+    "shell",
+    "start",
+    "start-image",
+    "stop",
+}
+
+
+def test_every_shared_fixture_has_a_python_assertion() -> None:
+    on_disk = {
+        path.stem
+        for path in MACHINE_FIXTURES.glob("*.argv")
+        if not path.name.startswith(".")
+    }
+    assert on_disk, f"no fixtures found under {MACHINE_FIXTURES}"
+    assert on_disk == _ASSERTED_FIXTURES, (
+        "shared machine-fixture corpus drifted from the Python assertion set; "
+        f"unasserted={sorted(on_disk - _ASSERTED_FIXTURES)} "
+        f"stale={sorted(_ASSERTED_FIXTURES - on_disk)}"
+    )
 
 
 def test_machine_exec_argv_matches_shared_fixture() -> None:

@@ -64,6 +64,26 @@ pub fn hardened_client_builder(timeout_secs: u64) -> mvm_http::ClientBuilder {
         .min_tls_version(MIN_TLS_VERSION)
 }
 
+/// [`hardened_client_builder`] plus an upstream proxy, when one is configured.
+///
+/// The proxy is a transport choice and changes nothing about which
+/// destinations are permitted — that decision is made by the egress gate before
+/// a request ever reaches this client. What it does change is who performs the
+/// destination's final address resolution: through a proxy that is the proxy,
+/// not [`SsrfFilteringResolver`]. The guard still governs every direct dial,
+/// and the proxy is operator configuration on this host rather than anything a
+/// guest supplies.
+pub fn hardened_client_builder_via(
+    timeout_secs: u64,
+    proxy: Option<&mvm_http::ProxyConfig>,
+) -> mvm_http::ClientBuilder {
+    let b = hardened_client_builder(timeout_secs);
+    match proxy {
+        Some(p) => b.proxy(p.clone()),
+        None => b,
+    }
+}
+
 /// Resolver that delegates to the system resolver and filters every returned
 /// IP through [`SsrfGuard::classify`]. Stateless — one instance per program is
 /// fine.

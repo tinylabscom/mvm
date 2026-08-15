@@ -314,6 +314,41 @@ fn main() -> anyhow::Result<()> {
         Duration::from_secs(cfg.timeout_secs)
     };
 
+    // The wall-clock bound the plan was admitted under, distinct from the
+    // backstop above. This process owns the guest for its whole life, so a
+    // timer here is the one that can still fire when `mvmctl` is long gone.
+    // Held to the end of the scope: dropping the guard stands the timer down.
+    // Mirrors `mvm-libkrun-supervisor`, including its refusal — a bounded
+    // workload whose kill could not be audited must not boot.
+    // The timer records its timeout exit code beside the pid file. A plan-
+    // bearing boot with nowhere to record it is refused rather than booted
+    // unbounded — same fail-closed posture as an unauditable kill.
+    let _wall_clock = match cfg.pid_file.parent() {
+        Some(vm_state_dir) => match mvm_hostd::supervisor::wall_clock::arm_for_supervisor(
+            mvm_hostd::supervisor::wall_clock::SupervisorTimerInputs {
+                plan_json: cfg.plan.as_ref(),
+                audit_dir: cfg.audit_dir.as_deref(),
+                signing_key_path: cfg.signing_key_path.as_deref(),
+                vm_state_dir,
+            },
+        ) {
+            Ok(guard) => guard,
+            Err(e) => {
+                eprintln!("supervisor: refusing to boot a bounded workload it cannot audit: {e}");
+                std::process::exit(7);
+            }
+        },
+        None if cfg.plan.is_some() => {
+            eprintln!(
+                "supervisor: refusing to boot a plan-bearing workload whose pid file {} has no \
+                 parent directory to record a wall-clock timeout in",
+                cfg.pid_file.display()
+            );
+            std::process::exit(7);
+        }
+        None => None,
+    };
+
     // Egress over vsock is a pure relay to the per-VM endpoint, which owns the
     // whole egress decision (claim-10 default-deny + secret substitution). The
     // supervisor only wires the relay socket paths through.
@@ -354,6 +389,11 @@ fn main() -> anyhow::Result<()> {
                     .iter()
                     .map(|share| (share.tag.clone(), share.path.clone()))
                     .collect(),
+                // Streamed as the guest emits it, so the log is readable while
+                // the VM is still running — which is when a boot that never
+                // reaches the agent has to be diagnosed. The authoritative
+                // rewrite after the run loop returns is unchanged.
+                console_log: Some(cfg.console_log.clone()),
                 pause_state: cfg.pause_state.clone(),
                 snapshot_request: cfg.snapshot_request.clone(),
                 snapshot_ram: cfg.snapshot_ram.clone(),

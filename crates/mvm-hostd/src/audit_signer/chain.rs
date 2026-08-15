@@ -7,6 +7,7 @@
 //! with the current `prev_hash`, JCS-canonicalizes, signs, appends,
 //! fsyncs, updates head, persists secondary, returns the new head.
 
+use rand::Rng;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
@@ -16,7 +17,6 @@ use anyhow::{Context, Result};
 use ed25519_dalek::{Signer, SigningKey};
 use mvm_core::protocol::audit_signer::AuditSignerErrorCode;
 use mvm_core::security::SIG_ALG_ED25519;
-use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -83,12 +83,9 @@ impl Chain {
                 SigningKey::from_bytes(&arr)
             }
             None => {
-                let mut rng = OsRng;
-                {
-                    let mut __ed_seed = [0u8; 32];
-                    rand::RngCore::fill_bytes(&mut rng, &mut __ed_seed);
-                    SigningKey::from_bytes(&__ed_seed)
-                }
+                let mut __ed_seed = [0u8; 32];
+                rand::rng().fill_bytes(&mut __ed_seed);
+                SigningKey::from_bytes(&__ed_seed)
             }
         };
         let pub_key_bytes = signing_key.verifying_key().to_bytes().to_vec();

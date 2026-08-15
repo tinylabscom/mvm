@@ -40,6 +40,7 @@
 //! leaving some records under the old master and others under the
 //! new.
 
+use rand::Rng;
 use std::fs;
 use std::io::Write;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
@@ -49,7 +50,6 @@ use std::process::{Command, Stdio};
 use crate::domain::volume::{MasterKeyRef, MasterKeyState, OrgId, WrapAlgorithm, WrappedKey};
 use anyhow::{Context, Result};
 use chrono::Utc;
-use rand::RngCore;
 use secrecy::{ExposeSecret, SecretBox};
 
 use crate::crypto::snapshot_crypto;
@@ -257,7 +257,7 @@ pub fn rotate_master_key(active_dir: &Path, org_id: &OrgId) -> Result<MasterKeyR
     // dangling v<N>.bin on disk, which is fine — the manifest
     // hasn't been updated yet, so nothing references it.
     let mut buf = [0u8; MASTER_KEY_BYTES];
-    rand::thread_rng().fill_bytes(&mut buf);
+    rand::rng().fill_bytes(&mut buf);
     let key_path = version_path(active_dir, new_version);
     {
         let mut f = fs::OpenOptions::new()
@@ -466,11 +466,11 @@ pub fn reseal_snapshot(
 mod tests {
     use super::*;
     use crate::domain::volume::OrgId;
-    use rand::Rng;
+    use rand::{Rng, RngExt};
 
     fn random_master_key() -> [u8; MASTER_KEY_BYTES] {
         let mut k = [0u8; MASTER_KEY_BYTES];
-        rand::thread_rng().fill_bytes(&mut k);
+        rand::rng().fill_bytes(&mut k);
         k
     }
 
@@ -580,9 +580,9 @@ mod tests {
     fn rewrap_dek_randomized_100_round_trips() {
         // Stand-in for a proptest: 100 random (dek, old_master,
         // new_master) triples must round-trip cleanly.
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         for _ in 0..100 {
-            let dek_len: usize = rng.gen_range(1..256);
+            let dek_len: usize = rng.random_range(1..256);
             let mut dek = vec![0u8; dek_len];
             rng.fill(&mut dek[..]);
             let m1 = random_master_key();

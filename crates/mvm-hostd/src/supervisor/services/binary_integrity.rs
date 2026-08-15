@@ -321,7 +321,7 @@ fn _unused_file_import() -> Option<File> {
 #[cfg(test)]
 mod tests {
     use ed25519_dalek::{Signer, SigningKey};
-    use rand::rngs::OsRng;
+    use rand::Rng;
     use tempfile::tempdir;
 
     use super::*;
@@ -329,10 +329,9 @@ mod tests {
     /// Build a fresh signing keypair + a signature over `binary_bytes`,
     /// + a [`ReleaseKeyBundle`] containing the verifying key.
     fn sign_fixture(binary_bytes: &[u8]) -> (BinarySignature, ReleaseKeyBundle) {
-        let mut rng = OsRng;
         let signing_key = {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             SigningKey::from_bytes(&__ed_seed)
         };
         let verifying_key = signing_key.verifying_key();
@@ -462,10 +461,9 @@ mod tests {
 
     #[test]
     fn signer_key_id_is_deterministic_for_a_given_key() {
-        let mut rng = OsRng;
         let sk = {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             SigningKey::from_bytes(&__ed_seed)
         };
         let vk = sk.verifying_key();
@@ -486,11 +484,9 @@ mod tests {
     fn release_key_bundle_size_and_lookup() {
         let mut bundle = ReleaseKeyBundle::new();
         assert!(bundle.is_empty());
-
-        let mut rng = OsRng;
         let sk = {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             SigningKey::from_bytes(&__ed_seed)
         };
         let id = bundle.add(sk.verifying_key());

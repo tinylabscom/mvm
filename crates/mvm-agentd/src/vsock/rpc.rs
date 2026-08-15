@@ -560,6 +560,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rand::Rng;
 
     /// A plain call: no streamed input, so the guest closes stdin as soon as
     /// the payload is written.
@@ -1143,7 +1144,7 @@ mod tests {
     /// return it for the guest side of the fixture to pin as its trust anchor.
     fn seeded_host_signer(home: &std::path::Path) -> SigningKey {
         let mut seed = [0u8; 32];
-        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut seed);
+        rand::rng().fill_bytes(&mut seed);
         let keys = mvm_core::config::mvm_keys_dir();
         assert!(
             keys.starts_with(home),
@@ -1203,7 +1204,7 @@ mod tests {
 
         let guest_thread = std::thread::spawn(move || {
             let mut guest_key_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut guest_key_seed);
+            rand::rng().fill_bytes(&mut guest_key_seed);
             let mut session = AuthenticatedSession::guest(
                 &mut guest,
                 SigningKey::from_bytes(&guest_key_seed),

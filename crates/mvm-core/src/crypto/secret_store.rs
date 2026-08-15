@@ -51,7 +51,7 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use rand::RngCore;
+use rand::Rng;
 use secrecy::{ExposeSecret, SecretBox};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
@@ -293,7 +293,7 @@ fn load_or_init_keyring_key(user: &str) -> Result<SecretBox<Vec<u8>>> {
         }
         Err(keyring::Error::NoEntry) => {
             let mut key = Zeroizing::new(vec![0u8; snapshot_crypto::KEY_SIZE]);
-            rand::thread_rng().fill_bytes(&mut key);
+            rand::rng().fill_bytes(&mut key);
             let encoded = hex_encode(&key);
             entry
                 .set_password(&encoded)
@@ -346,7 +346,7 @@ fn load_or_init_file_key(path: &Path) -> Result<SecretBox<Vec<u8>>> {
                     .with_context(|| format!("chmod 0700 {}", parent.display()))?;
             }
             let mut key = Zeroizing::new(vec![0u8; snapshot_crypto::KEY_SIZE]);
-            rand::thread_rng().fill_bytes(&mut key);
+            rand::rng().fill_bytes(&mut key);
             {
                 let mut f = fs::OpenOptions::new()
                     .write(true)

@@ -106,16 +106,18 @@ impl ResourceControls {
                 wall_clock: WallClockControl::None,
             },
             // macOS has no cgroup equivalent; thread QoS is priority, not quota.
-            // `mvm-hvf-supervisor` is a per-VM process and could host a timer,
-            // but it is not handed the admitted plan, so it has no bound to
-            // enforce and this stays honest until it is.
+            // `mvm-hvf-supervisor` is a per-VM process that outlives the
+            // launching `mvmctl`, and it is now handed the admitted plan, so it
+            // holds a timer that can actually fire. AppleContainer shares this
+            // arm because it *is* this tier: it runs an `HvfRunner` over the
+            // same driver and supervisor, substituting only the kernel image.
             BackendKind::Hvf | BackendKind::AppleContainer => Self {
                 cpu: if cfg!(target_os = "macos") {
                     CpuControl::HvfVcpuQuota
                 } else {
                     CpuControl::None
                 },
-                wall_clock: WallClockControl::None,
+                wall_clock: WallClockControl::SupervisorTimer,
             },
             // Fuel bounds instructions; epoch preempts a module parked in a
             // host call, which fuel alone would never stop.
@@ -249,21 +251,30 @@ mod tests {
     }
 
     /// Only a tier with a per-VM supervisor process of ours may claim a
-    /// supervisor timer. A timer needs a process that outlives the CLI, and on
-    /// every other VMM tier the VMM is a bare child of an `mvmctl` that has
-    /// already exited — so the answer there is `None`, not a bound that would
-    /// be admitted and never fire.
+    /// supervisor timer. A timer needs two things: a process that outlives the
+    /// CLI, and the admitted plan to read a bound from. On the remaining VMM
+    /// tiers the VMM is a bare child of an `mvmctl` that has already exited —
+    /// so the answer there is `None`, not a bound that would be admitted and
+    /// never fire.
     #[test]
     fn only_a_tier_with_a_live_supervisor_claims_a_supervisor_timer() {
-        assert_eq!(
-            ResourceControls::for_backend(BackendKind::Libkrun).wall_clock,
-            WallClockControl::SupervisorTimer
-        );
+        for kind in [
+            BackendKind::Libkrun,
+            // HVF gained its half of this when the supervisor started being
+            // handed the plan; AppleContainer runs the same driver and
+            // supervisor, so it is the same tier for this purpose.
+            BackendKind::Hvf,
+            BackendKind::AppleContainer,
+        ] {
+            assert_eq!(
+                ResourceControls::for_backend(kind).wall_clock,
+                WallClockControl::SupervisorTimer,
+                "{kind:?} has a per-VM supervisor holding the admitted plan"
+            );
+        }
         for kind in [
             BackendKind::Firecracker,
             BackendKind::Qemu,
-            BackendKind::Hvf,
-            BackendKind::AppleContainer,
             BackendKind::Mock,
         ] {
             assert_eq!(

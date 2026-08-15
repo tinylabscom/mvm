@@ -20,7 +20,6 @@ use ed25519_dalek::{SigningKey, VerifyingKey};
 use mvm_contract::protocol::network_flow::{
     Direction, FrameError, Opcode, SessionValidator, decode, encode_into,
 };
-use mvm_contract::protocol::network_flow::{HEADER_LEN, LENGTH_PREFIX_LEN, MAX_FRAME_LEN};
 use mvm_core::net::session::Session;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::{mpsc, oneshot, watch};
@@ -214,7 +213,7 @@ impl FlowMuxClient {
         .await
         .map_err(|e| FlowMuxError::Handshake(e.to_string()))?;
 
-        let (_session, _session_id, stream) = handshake?;
+        let (session, _session_id, stream) = handshake?;
 
         let (client_tx, client_rx) = mpsc::unbounded_channel();
         let (state_tx, state_rx) = watch::channel(SessionState::Ready);
@@ -222,6 +221,7 @@ impl FlowMuxClient {
         let next_stream_id = Arc::new(AtomicU32::new(FIRST_GUEST_STREAM_ID));
         let pump = SessionPump {
             stream: Box::pin(stream),
+            session,
             validator: SessionValidator::default(),
             client_rx,
             client_tx: client_tx.clone(),
@@ -324,6 +324,7 @@ impl FlowMuxClient {
 /// Background task that owns the FlowMux session.
 struct SessionPump<S> {
     stream: Pin<Box<S>>,
+    session: mvm_core::net::session::Session,
     validator: SessionValidator,
     client_rx: mpsc::UnboundedReceiver<ClientRequest>,
     client_tx: mpsc::UnboundedSender<ClientRequest>,
@@ -355,7 +356,7 @@ where
                         }
                     }
                 }
-                frame = read_frame_from(&mut self.stream) => {
+                frame = read_sealed_frame_from(&mut self.stream, &mut self.session) => {
                     match frame? {
                         Some((opcode, stream_id, _payload_len, payload)) => {
                             self.handle_frame(opcode, stream_id, payload).await?;
@@ -738,50 +739,63 @@ where
         stream_id: u32,
         payload: &[u8],
     ) -> Result<(), FlowMuxError> {
-        let mut wire = Vec::new();
-        encode_into(&mut wire, opcode, stream_id, payload)
+        let mut frame = Vec::new();
+        encode_into(&mut frame, opcode, stream_id, payload)
             .map_err(|e| FlowMuxError::Frame(e.to_string()))?;
-        self.stream.write_all(&wire).await?;
+        let sealed = self
+            .session
+            .seal(&frame)
+            .map_err(|e| FlowMuxError::Frame(e.to_string()))?;
+        let mut sealed_bytes = Vec::new();
+        sealed
+            .encode(&mut sealed_bytes)
+            .map_err(|e| FlowMuxError::Frame(e.to_string()))?;
+        let len = u32::try_from(sealed_bytes.len())
+            .map_err(|_| FlowMuxError::Frame("sealed frame too large".into()))?;
+        self.stream.write_all(&len.to_be_bytes()).await?;
+        self.stream.write_all(&sealed_bytes).await?;
         self.stream.flush().await?;
         Ok(())
     }
 
     async fn read_frame(&mut self) -> Result<Option<(Opcode, u32, u32, Vec<u8>)>, FlowMuxError> {
-        read_frame_from(&mut self.stream).await
+        read_sealed_frame_from(&mut self.stream, &mut self.session).await
     }
 }
 
-pub(crate) async fn read_frame_from<S>(
+pub(crate) async fn read_sealed_frame_from<S>(
     stream: &mut S,
+    session: &mut mvm_core::net::session::Session,
 ) -> Result<Option<(Opcode, u32, u32, Vec<u8>)>, FlowMuxError>
 where
     S: AsyncRead + Unpin,
 {
-    let mut len_buf = [0u8; LENGTH_PREFIX_LEN];
+    let mut len_buf = [0u8; 4];
     match stream.read_exact(&mut len_buf).await {
         Ok(_) => {}
         Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
         Err(e) => return Err(e.into()),
     }
-    let frame_len = u32::from_be_bytes(len_buf) as usize;
-    if frame_len == 0 {
+    let sealed_len = u32::from_be_bytes(len_buf) as usize;
+    if sealed_len == 0 {
         return Ok(None);
     }
-    if frame_len > MAX_FRAME_LEN {
+    const MAX_SEALED_LEN: usize = 1 << 20;
+    if sealed_len > MAX_SEALED_LEN {
         return Err(FlowMuxError::Frame(format!(
-            "frame length {frame_len} exceeds {MAX_FRAME_LEN}"
+            "sealed frame length {sealed_len} exceeds {MAX_SEALED_LEN}"
         )));
     }
-    if frame_len < HEADER_LEN {
-        return Err(FlowMuxError::Frame(format!(
-            "frame length {frame_len} is below {HEADER_LEN}-byte header"
-        )));
-    }
-    let mut buf = vec![0u8; LENGTH_PREFIX_LEN + frame_len];
-    buf[..LENGTH_PREFIX_LEN].copy_from_slice(&len_buf);
-    stream.read_exact(&mut buf[LENGTH_PREFIX_LEN..]).await?;
+    let mut sealed_buf = vec![0u8; sealed_len];
+    stream.read_exact(&mut sealed_buf).await?;
 
-    let parsed = decode(&buf)?;
+    let sealed = mvm_core::net::session::SealedFrame::decode(&sealed_buf)
+        .map_err(|e| FlowMuxError::Frame(e.to_string()))?;
+    let plaintext = session
+        .open(&sealed)
+        .map_err(|e| FlowMuxError::Frame(e.to_string()))?;
+
+    let parsed = decode(&plaintext)?;
     Ok(Some((
         parsed.header.opcode,
         parsed.header.stream_id,
@@ -1320,14 +1334,34 @@ mod tests {
         .unwrap()
     }
 
-    async fn send_frame<S>(stream: &mut S, opcode: Opcode, stream_id: u32, payload: &[u8])
-    where
+    async fn send_frame<S>(
+        stream: &mut S,
+        session: &mut mvm_core::net::session::Session,
+        opcode: Opcode,
+        stream_id: u32,
+        payload: &[u8],
+    ) where
         S: AsyncWrite + Unpin,
     {
         let mut wire = Vec::new();
         encode_into(&mut wire, opcode, stream_id, payload).unwrap();
-        stream.write_all(&wire).await.unwrap();
+        let sealed = session.seal(&wire).unwrap();
+        let mut sealed_bytes = Vec::new();
+        sealed.encode(&mut sealed_bytes).unwrap();
+        let len = u32::try_from(sealed_bytes.len()).unwrap();
+        stream.write_all(&len.to_be_bytes()).await.unwrap();
+        stream.write_all(&sealed_bytes).await.unwrap();
         stream.flush().await.unwrap();
+    }
+
+    async fn recv_frame<S>(
+        stream: &mut S,
+        session: &mut mvm_core::net::session::Session,
+    ) -> Option<(Opcode, u32, u32, Vec<u8>)>
+    where
+        S: AsyncRead + Unpin,
+    {
+        read_sealed_frame_from(stream, session).await.unwrap()
     }
 
     #[tokio::test]
@@ -1337,37 +1371,69 @@ mod tests {
         let (host_key, host_anchor) = generate_keypair();
 
         let host = tokio::spawn(async move {
-            let (mut host_stream, _session) = host_handshake(host_stream, host_key).await;
+            let (mut host_stream, mut host_session) = host_handshake(host_stream, host_key).await;
 
-            let (opcode, _sid, _len, payload) =
-                read_frame_from(&mut host_stream).await.unwrap().unwrap();
+            let (opcode, _sid, _len, payload) = recv_frame(&mut host_stream, &mut host_session)
+                .await
+                .unwrap();
             assert_eq!(opcode, Opcode::Hello);
             assert!(payload.is_empty());
 
-            send_frame(&mut host_stream, Opcode::HelloAck, 0, &[]).await;
+            send_frame(
+                &mut host_stream,
+                &mut host_session,
+                Opcode::HelloAck,
+                0,
+                &[],
+            )
+            .await;
 
-            let (opcode, sid, _len, payload) =
-                read_frame_from(&mut host_stream).await.unwrap().unwrap();
+            let (opcode, sid, _len, payload) = recv_frame(&mut host_stream, &mut host_session)
+                .await
+                .unwrap();
             assert_eq!(opcode, Opcode::OpenTcp);
             assert_eq!(sid, 1);
             assert_eq!(payload, b"example.com:80");
 
-            send_frame(&mut host_stream, Opcode::Opened, sid, &[]).await;
+            send_frame(
+                &mut host_stream,
+                &mut host_session,
+                Opcode::Opened,
+                sid,
+                &[],
+            )
+            .await;
 
-            let (opcode, data_sid, _len, payload) =
-                read_frame_from(&mut host_stream).await.unwrap().unwrap();
+            let (opcode, data_sid, _len, payload) = recv_frame(&mut host_stream, &mut host_session)
+                .await
+                .unwrap();
             assert_eq!(opcode, Opcode::Data);
             assert_eq!(data_sid, sid);
             assert_eq!(payload, b"ping");
 
-            send_frame(&mut host_stream, Opcode::Data, sid, b"pong").await;
+            send_frame(
+                &mut host_stream,
+                &mut host_session,
+                Opcode::Data,
+                sid,
+                b"pong",
+            )
+            .await;
 
-            let (opcode, hc_sid, _len, _payload) =
-                read_frame_from(&mut host_stream).await.unwrap().unwrap();
+            let (opcode, hc_sid, _len, _payload) = recv_frame(&mut host_stream, &mut host_session)
+                .await
+                .unwrap();
             assert_eq!(opcode, Opcode::HalfClose);
             assert_eq!(hc_sid, sid);
 
-            send_frame(&mut host_stream, Opcode::HalfClose, sid, &[]).await;
+            send_frame(
+                &mut host_stream,
+                &mut host_session,
+                Opcode::HalfClose,
+                sid,
+                &[],
+            )
+            .await;
         });
 
         let client = FlowMuxClient::connect(guest_stream, guest_key, host_anchor)
@@ -1394,17 +1460,33 @@ mod tests {
         let (host_key, host_anchor) = generate_keypair();
 
         let host = tokio::spawn(async move {
-            let (mut host_stream, _session) = host_handshake(host_stream, host_key).await;
+            let (mut host_stream, mut host_session) = host_handshake(host_stream, host_key).await;
 
-            let (opcode, _sid, _len, _payload) =
-                read_frame_from(&mut host_stream).await.unwrap().unwrap();
+            let (opcode, _sid, _len, _payload) = recv_frame(&mut host_stream, &mut host_session)
+                .await
+                .unwrap();
             assert_eq!(opcode, Opcode::Hello);
-            send_frame(&mut host_stream, Opcode::HelloAck, 0, &[]).await;
+            send_frame(
+                &mut host_stream,
+                &mut host_session,
+                Opcode::HelloAck,
+                0,
+                &[],
+            )
+            .await;
 
-            let (opcode, sid, _len, _payload) =
-                read_frame_from(&mut host_stream).await.unwrap().unwrap();
+            let (opcode, sid, _len, _payload) = recv_frame(&mut host_stream, &mut host_session)
+                .await
+                .unwrap();
             assert_eq!(opcode, Opcode::OpenTcp);
-            send_frame(&mut host_stream, Opcode::Refused, sid, b"denied").await;
+            send_frame(
+                &mut host_stream,
+                &mut host_session,
+                Opcode::Refused,
+                sid,
+                b"denied",
+            )
+            .await;
         });
 
         let client = FlowMuxClient::connect(guest_stream, guest_key, host_anchor)
@@ -1426,15 +1508,24 @@ mod tests {
         let (host_key, host_anchor) = generate_keypair();
 
         let host = tokio::spawn(async move {
-            let (mut host_stream, _session) = host_handshake(host_stream, host_key).await;
+            let (mut host_stream, mut host_session) = host_handshake(host_stream, host_key).await;
 
-            let (opcode, _sid, _len, _payload) =
-                read_frame_from(&mut host_stream).await.unwrap().unwrap();
+            let (opcode, _sid, _len, _payload) = recv_frame(&mut host_stream, &mut host_session)
+                .await
+                .unwrap();
             assert_eq!(opcode, Opcode::Hello);
-            send_frame(&mut host_stream, Opcode::HelloAck, 0, &[]).await;
+            send_frame(
+                &mut host_stream,
+                &mut host_session,
+                Opcode::HelloAck,
+                0,
+                &[],
+            )
+            .await;
 
-            let (opcode, sid, _len, payload) =
-                read_frame_from(&mut host_stream).await.unwrap().unwrap();
+            let (opcode, sid, _len, payload) = recv_frame(&mut host_stream, &mut host_session)
+                .await
+                .unwrap();
             assert_eq!(opcode, Opcode::Resolve);
             let question = mvm_contract::protocol::dns::decode_query(&payload).unwrap();
             assert_eq!(question.name, "example.com");
@@ -1444,7 +1535,14 @@ mod tests {
                 mvm_contract::protocol::dns::DnsRcode::NoError,
                 &["93.184.216.34".parse().unwrap()],
             );
-            send_frame(&mut host_stream, Opcode::Resolved, sid, &response).await;
+            send_frame(
+                &mut host_stream,
+                &mut host_session,
+                Opcode::Resolved,
+                sid,
+                &response,
+            )
+            .await;
         });
 
         let client = FlowMuxClient::connect(guest_stream, guest_key, host_anchor)
@@ -1463,17 +1561,33 @@ mod tests {
         let (host_key, host_anchor) = generate_keypair();
 
         let host = tokio::spawn(async move {
-            let (mut host_stream, _session) = host_handshake(host_stream, host_key).await;
+            let (mut host_stream, mut host_session) = host_handshake(host_stream, host_key).await;
 
-            let (opcode, _sid, _len, _payload) =
-                read_frame_from(&mut host_stream).await.unwrap().unwrap();
+            let (opcode, _sid, _len, _payload) = recv_frame(&mut host_stream, &mut host_session)
+                .await
+                .unwrap();
             assert_eq!(opcode, Opcode::Hello);
-            send_frame(&mut host_stream, Opcode::HelloAck, 0, &[]).await;
+            send_frame(
+                &mut host_stream,
+                &mut host_session,
+                Opcode::HelloAck,
+                0,
+                &[],
+            )
+            .await;
 
-            let (opcode, sid, _len, _payload) =
-                read_frame_from(&mut host_stream).await.unwrap().unwrap();
+            let (opcode, sid, _len, _payload) = recv_frame(&mut host_stream, &mut host_session)
+                .await
+                .unwrap();
             assert_eq!(opcode, Opcode::OpenTcp);
-            send_frame(&mut host_stream, Opcode::Opened, sid, &[]).await;
+            send_frame(
+                &mut host_stream,
+                &mut host_session,
+                Opcode::Opened,
+                sid,
+                &[],
+            )
+            .await;
             // Abruptly close the host transport.
         });
 

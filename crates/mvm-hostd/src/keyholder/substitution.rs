@@ -16,7 +16,7 @@ use mvm_contract::ir::{AuthType, SecretRef, host_is_bound};
 pub use mvm_contract::substitution::{
     Placeholder, PlaceholderMap, SECRET_PLACEHOLDER_PREFIX, find_placeholder, substitute_into,
 };
-use rand::RngCore;
+use rand::Rng;
 use zeroize::Zeroizing;
 
 use super::injector::{InjectError, Injector};
@@ -51,7 +51,7 @@ impl SubstitutionRegistry {
     /// split rather than moved whole.
     pub fn mint(&mut self, secret: SecretRef) -> Placeholder {
         let mut bytes = [0u8; 24];
-        rand::thread_rng().fill_bytes(&mut bytes);
+        rand::rng().fill_bytes(&mut bytes);
         let ph = Placeholder::new(format!("{SECRET_PLACEHOLDER_PREFIX}{}", hex::encode(bytes)));
         self.map.insert(ph.clone(), secret);
         ph

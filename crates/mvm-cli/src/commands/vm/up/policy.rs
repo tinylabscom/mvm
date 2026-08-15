@@ -234,6 +234,7 @@ pub(super) fn generated_policy_bundle_for_network_policy(
 #[cfg(test)]
 mod bundle_pin_tests {
     use super::*;
+    use rand::Rng;
 
     /// Build a signed `.mvmpkg` archive in-memory so the
     /// `--bundle-pin` test path doesn't need a real fetched bundle.
@@ -291,7 +292,7 @@ mod bundle_pin_tests {
     fn bundle_pin_from_archive_recovers_signature_and_sha() {
         let sk = {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             ed25519_dalek::SigningKey::from_bytes(&__ed_seed)
         };
         let (archive, key_id) = make_bundle_for_pin(&sk);
@@ -322,7 +323,7 @@ mod bundle_pin_tests {
         let archive = buf.into_inner();
         let sk = {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             ed25519_dalek::SigningKey::from_bytes(&__ed_seed)
         };
         let key_id = mvm_core::plan::bundle::key_id_from_pubkey(&sk.verifying_key());

@@ -159,9 +159,25 @@ pub struct HvfSupervisorConfig {
     #[serde(default)]
     pub restore_frame: Option<PathBuf>,
     /// Run budget in seconds — a booting kernel never exits on its own, so the
-    /// guest is forced out after this long. The backend sets it from the VM's
-    /// requested lifetime.
+    /// guest is forced out after this long. `0` means no backstop.
+    ///
+    /// This is **not** the plan's wall-clock bound and never has been: the
+    /// workload path sets it from the `MVM_HVF_TIMEOUT` dev env var, which is
+    /// unset in normal use. A plan's bound is enforced from [`Self::plan`],
+    /// which is audited and exits `124`; this is an unaudited backstop against
+    /// a guest that never reports its exit.
     pub timeout_secs: u64,
+    /// The admitted `ExecutionPlan` envelope, when the launch carries one. The
+    /// supervisor arms the plan's wall-clock bound from it, and refuses to boot
+    /// a bounded workload whose kill it could not audit.
+    #[serde(default)]
+    pub plan: Option<serde_json::Value>,
+    /// `~/.mvm/audit/` — where the chain-signed wall-clock kill entry lands.
+    #[serde(default)]
+    pub audit_dir: Option<PathBuf>,
+    /// `~/.mvm/keys/host-signer.ed25519` — the key that chain is signed under.
+    #[serde(default)]
+    pub signing_key_path: Option<PathBuf>,
     /// Per-VM host→guest agent RPC socket. The supervisor binds it so host clients
     /// (`machine invoke`) reach the guest agent over vsock. `None` ⇒ no agent
     /// listener (the supervisor falls back to the `MVM_HVF_AGENT_SOCKET` dev hook).
@@ -266,6 +282,9 @@ mod tests {
             restore_ram: None,
             restore_frame: None,
             timeout_secs: 30,
+            plan: None,
+            audit_dir: None,
+            signing_key_path: None,
             agent_socket: Some("/state/hvf-agent.sock".into()),
             substitution_socket: Some("/state/substitution-endpoint.sock".into()),
             egress_relay_socket: Some("/state/egress-bridge.sock".into()),
@@ -366,6 +385,9 @@ mod tests {
             restore_ram: None,
             restore_frame: None,
             timeout_secs: 30,
+            plan: None,
+            audit_dir: None,
+            signing_key_path: None,
             agent_socket: None,
             substitution_socket: None,
             egress_relay_socket: None,

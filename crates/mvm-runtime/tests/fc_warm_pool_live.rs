@@ -101,6 +101,9 @@ fn parent_boot_spec(name: &str, images: &LiveImages, state_dir: &Path) -> VmmSpe
         },
         shares: Vec::new(),
         trusted_builder: false,
+        // A warm-pool factory parent boots from no admitted plan — children
+        // claim under their own — so it carries no wall-clock bound.
+        plan_binding: None,
     }
 }
 

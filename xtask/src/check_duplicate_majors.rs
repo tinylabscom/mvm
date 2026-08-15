@@ -25,7 +25,21 @@ use std::process::Command;
 /// Remove an entry freely once the duplication is gone (the gate flags stale
 /// entries); adding one must be justified in the PR that does — it admits a
 /// new duplicate major into the build.
+///
+/// This list is measured over `cargo metadata --locked`: the full graph, all
+/// targets and features, dev-dependencies included. `deny.toml`'s `skip` list
+/// ratchets the same property over cargo-deny's *filtered* graph, which drops
+/// dev-only edges and unenabled optional deps — so this list is strictly the
+/// larger of the two. An entry here with no counterpart there is expected
+/// whenever the duplication is dev-only or sits behind an optional dep nobody
+/// enables; it is not evidence that either list has rotted.
 const ALLOWLIST: &[&str] = &[
+    // Both bitflags majors are transitive; mvm depends on neither directly.
+    // The 1.x side has two independent parents — smoltcp 0.13.1 (the mvm-hostd
+    // userspace datapath) and the vmm-sys-util pair below — whose latest
+    // releases both declare bitflags ^1.0 with no feature selecting 2.x.
+    // Migrating either upstream alone leaves the duplicate in place; it takes
+    // both. See deny.toml's matching entry for the full audit.
     "bitflags",
     // Neither defmt major is compiled: both are optional dependencies nobody
     // enables. smoltcp's `alloc` feature names `defmt?/alloc`, and that weak

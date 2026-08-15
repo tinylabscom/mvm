@@ -57,25 +57,23 @@ export * from "./runtime/runtime.js";
 
 // Sandbox SDK (Phase 7c + 7f + Plan 73 Followup H-live). Imperative
 // companion to the static `mvm.app({...})` decorator above.
+// `LiveTransport`, `SandboxCommands` and `SandboxFiles` are reached through a
+// `Sandbox`, never constructed directly; `currentRecording`,
+// `deriveAttachedBuildMode`, `flushRecordingToOutPath` and `parseUpEnvelope`
+// are internals the SDK calls on its own behalf. They were exported here by
+// accident and are not part of the public surface in any other language.
 export {
   DEFAULT_TTL_SECONDS,
-  LiveTransport,
   MVM_CLI_BIN_ENV,
   MVM_SDK_MODE_ENV,
   MVM_SDK_OUT_PATH_ENV,
   RecordingNotActiveError,
   Sandbox,
-  SandboxCommands,
   SandboxDevOnly,
-  SandboxFiles,
   ProcessHandle,
   SandboxLiveError,
   SandboxModeError,
-  currentRecording,
-  deriveAttachedBuildMode,
   emitRecordingJson,
-  flushRecordingToOutPath,
-  parseUpEnvelope,
   resetRecording,
 } from "./_sandbox.js";
 export type {

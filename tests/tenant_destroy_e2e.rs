@@ -33,6 +33,7 @@ use mvm_runtime::vm::overlay::{
     FsOverlayManager, OverlayManager, SignedDestructionReceipt, sign_destruction_receipt,
     verify_destruction_receipt,
 };
+use rand::Rng;
 use tempfile::tempdir;
 
 /// Build a fake operator host with a tenant having `workloads`
@@ -57,7 +58,7 @@ async fn operator_destroys_three_workloads_auditor_verifies_all_three() {
     let mgr = FsOverlayManager::with_root(dir.path()).unwrap();
     let signing_key = {
         let mut __ed_seed = [0u8; 32];
-        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+        rand::rng().fill_bytes(&mut __ed_seed);
         SigningKey::from_bytes(&__ed_seed)
     };
     let verifying_key = signing_key.verifying_key();
@@ -114,7 +115,7 @@ async fn auditor_refuses_certificate_with_tampered_tenant_field() {
     let mgr = FsOverlayManager::with_root(dir.path()).unwrap();
     let key = {
         let mut __ed_seed = [0u8; 32];
-        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+        rand::rng().fill_bytes(&mut __ed_seed);
         SigningKey::from_bytes(&__ed_seed)
     };
     let vk = key.verifying_key();
@@ -146,12 +147,12 @@ async fn auditor_refuses_certificate_signed_by_wrong_pubkey() {
     let mgr = FsOverlayManager::with_root(dir.path()).unwrap();
     let operator_key = {
         let mut __ed_seed = [0u8; 32];
-        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+        rand::rng().fill_bytes(&mut __ed_seed);
         SigningKey::from_bytes(&__ed_seed)
     };
     let attacker_key = {
         let mut __ed_seed = [0u8; 32];
-        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+        rand::rng().fill_bytes(&mut __ed_seed);
         SigningKey::from_bytes(&__ed_seed)
     };
 
@@ -179,7 +180,7 @@ async fn auditor_can_verify_against_certs_embedded_pubkey() {
     let mgr = FsOverlayManager::with_root(dir.path()).unwrap();
     let key = {
         let mut __ed_seed = [0u8; 32];
-        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+        rand::rng().fill_bytes(&mut __ed_seed);
         SigningKey::from_bytes(&__ed_seed)
     };
 

@@ -229,6 +229,15 @@ pub struct HostChannels {
     pub virtiofs_root: Option<PathBuf>,
     /// Read-only live host-directory shares as `(virtio-fs tag, host path)`.
     pub virtiofs_shares: Vec<(String, PathBuf)>,
+    /// Host console log to mirror guest output into as the guest emits it.
+    ///
+    /// The whole-run transcript comes back in [`KernelBootResult::console`]
+    /// either way; this is what makes it readable *before* the run loop
+    /// returns, so a guest that never finishes booting can be diagnosed while
+    /// it is still hung instead of only once it has been stopped. Opened
+    /// write-only: the console carries guest output to the host and never the
+    /// other way.
+    pub console_log: Option<PathBuf>,
     /// Optional host-visible marker acknowledged after the run loop enters its
     /// pause hold. It is removed when resume is observed.
     pub pause_state: Option<PathBuf>,
@@ -649,6 +658,7 @@ fn boot_kernel_impl(params: KernelBootUntilParams<'_>) -> Result<KernelBootResul
                 builder_control_sockets: channels.builder_control_sockets,
                 virtiofs_root: channels.virtiofs_root,
                 virtiofs_shares: channels.virtiofs_shares,
+                console_log: channels.console_log,
                 pause_state: channels.pause_state,
                 snapshot_request: channels.snapshot_request,
                 snapshot_ram: channels.snapshot_ram,
@@ -710,6 +720,8 @@ struct RunInputs {
     /// When set, serve this host dir to the guest as a read-only virtiofs root.
     virtiofs_root: Option<PathBuf>,
     virtiofs_shares: Vec<(String, PathBuf)>,
+    /// Host console log the PL011 mirrors guest output into as it arrives.
+    console_log: Option<PathBuf>,
     pause_state: Option<PathBuf>,
     snapshot_request: Option<PathBuf>,
     snapshot_ram: Option<PathBuf>,
@@ -748,6 +760,7 @@ unsafe fn run(
         builder_control_sockets,
         virtiofs_root,
         virtiofs_shares,
+        console_log,
         pause_state,
         snapshot_request,
         snapshot_ram,
@@ -900,6 +913,14 @@ unsafe fn run(
         });
 
         let mut uart = Pl011::new(UART_BASE);
+        // Mirror guest output to the host log as it arrives. Write-only, and
+        // best-effort: a console log that cannot be opened costs a diagnostic,
+        // never the boot. The full transcript still comes back in the result.
+        if let Some(path) = console_log.as_deref()
+            && let Ok(file) = mvm_vmm::host::console_capture::open_console_capture(path)
+        {
+            uart.stream_to(Box::new(file));
+        }
         // One virtio-blk per disk image (`/dev/vda`, `/dev/vdb`, …) at its window.
         let mut virtio_disks: Vec<VirtioBlk> = disks
             .into_iter()

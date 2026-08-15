@@ -46,6 +46,10 @@ pub mod destination;
 pub mod dns_audit;
 /// Policy-gated DNS service for NIC-less guests.
 pub mod dns_handler;
+/// Pure DNS resolution fallback used by the FlowMux and legacy DNS-over-vsock
+/// paths. Kept separate so the retired raw-egress module can be deleted once
+/// FlowMux actually carries production egress.
+pub mod dns_resolver;
 /// Host-side vsock egress telemetry (eBPF/procfs).
 pub mod ebpf_telemetry;
 pub mod egress;

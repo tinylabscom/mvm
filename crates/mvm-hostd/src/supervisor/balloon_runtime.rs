@@ -132,7 +132,7 @@ pub async fn run_balloon_loop<P>(
 ) where
     P: HostPressureSource,
 {
-    let mut rng = StdRng::from_entropy();
+    let mut rng = StdRng::try_from_rng(&mut rand::rngs::SysRng).expect("SysRng seeds StdRng");
     loop {
         let sleep_for = jittered_interval(&mut rng, config.base_interval, config.jitter);
         let sleep = tokio::time::sleep(sleep_for);
