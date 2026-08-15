@@ -5,6 +5,10 @@
 //! published checksum manifest" helpers that back hash-verified downloads;
 //! the dev-image and builder-VM download orchestration in
 //! `builder_vm.rs` calls them.
+//!
+//! The manifest is itself signature-verified before it is parsed, so the
+//! digests every artifact is held to come from the publisher rather than from
+//! whoever answered the request.
 
 use anyhow::{Context, Result};
 
@@ -47,35 +51,61 @@ pub(super) fn bump_verify_outcome(outcome: &str) {
     }
 }
 
-/// Download the per-release `sha256sum`-format checksum file and parse it
-/// into a `name -> hex-digest` map for the artifacts we plan to download.
+/// A published checksum manifest, named the way the signature rung needs it.
 ///
-/// The checksum file is the trust anchor for the hash-verified download.
-/// It is fetched from the same GitHub release URL as the artifacts, over
-/// TLS. Anyone
-/// who can swap the artifact can also swap the checksum file, so the
-/// real defence is end-to-end signing (cosign on the .tar.gz / SBOM
-/// today, on the checksum file itself in a future iteration). What we
-/// gain *now* is detection of mid-flight corruption and operator-error
-/// substitution at the URL level — both of which are ruled out by a
-/// matching hash.
+/// The verifier fetches the Sigstore bundle from `<base_url>/<asset>.bundle`
+/// and accepts only the identity bound to `version`'s tag, so a single joined
+/// URL is not enough — splitting one back apart would have to guess where the
+/// asset name starts. A params struct also stops three same-typed strings from
+/// being transposed silently.
+pub(super) struct ChecksumManifest<'a> {
+    /// Per-version release base URL, no trailing slash.
+    pub base_url: &'a str,
+    /// The manifest's published asset name, e.g. `kernel-aarch64-checksums-sha256.txt`.
+    pub asset: &'a str,
+    /// Release version whose signing identity is accepted for this manifest.
+    pub version: &'a str,
+}
+
+impl ChecksumManifest<'_> {
+    fn url(&self) -> String {
+        format!("{}/{}", self.base_url, self.asset)
+    }
+}
+
+/// Download the per-release `sha256sum`-format checksum file, prove it against
+/// the release's Sigstore bundle, and parse it into a `name -> hex-digest` map
+/// for the artifacts we plan to download.
+///
+/// The manifest is the trust anchor for every artifact digest beneath it, and
+/// TLS authenticates only the transport: whoever can swap an artifact can swap
+/// the digest published beside it. So the bytes are verified against the
+/// release signing identity *before* a line of them is parsed — an unsigned,
+/// mis-signed, or foreign-signed manifest is refused with nothing read out of
+/// it.
+///
+/// `MVM_SKIP_HASH_VERIFY` does not reach this rung. Bypassing the publisher
+/// check takes `MVM_SKIP_COSIGN_VERIFY`, a deliberately separate switch, since
+/// waiving *who* published is a bigger concession than waiving *what* the bytes
+/// hash to.
 ///
 /// Returns only entries for the artifacts in `wanted`; missing names
 /// short-circuit to a clear error.
 pub(super) fn fetch_expected_hashes(
-    checksums_url: &str,
+    manifest: &ChecksumManifest<'_>,
     wanted: &[&str],
 ) -> Result<std::collections::HashMap<String, String>> {
+    let checksums_url = manifest.url();
     let tmp = tempfile::NamedTempFile::new().context("Failed to create temp file")?;
     let tmp_path = tmp.path().to_string_lossy().to_string();
-    download_file(checksums_url, &tmp_path).with_context(|| {
+    download_file(&checksums_url, &tmp_path).with_context(|| {
         format!(
             "Failed to download checksum manifest from {checksums_url}.\n\
              ADR-002 §W5.1 requires a hash-verified download; refusing to\n\
-             proceed without the checksum file. To bypass for an emergency\n\
-             rotation, set MVM_SKIP_HASH_VERIFY=1."
+             proceed without the checksum file."
         )
     })?;
+    verify_manifest_signature(manifest, tmp.path())?;
     let body = std::fs::read_to_string(&tmp_path)
         .with_context(|| format!("Failed to read checksum file at {tmp_path}"))?;
 
@@ -103,6 +133,34 @@ pub(super) fn fetch_expected_hashes(
         }
     }
     Ok(map)
+}
+
+/// Verify the downloaded manifest at `staged` against the release signing
+/// identity, using the one shared release verifier.
+///
+/// A refusal here is attack-shaped, so it feeds the same counter and audit
+/// line as a bad artifact signature rather than looking like a network blip.
+pub(super) fn verify_manifest_signature(
+    manifest: &ChecksumManifest<'_>,
+    staged: &std::path::Path,
+) -> Result<()> {
+    mvm_build::release_signature::verify_release_archive_signature(
+        &mvm_build::release_signature::ReleaseSignatureRequest {
+            base_url: manifest.base_url,
+            asset: manifest.asset,
+            archive_path: staged,
+            version: manifest.version,
+        },
+    )
+    .map_err(|error| {
+        bump_verify_outcome("sig_invalid");
+        anyhow::Error::new(error).context(format!(
+            "Refusing to parse an unauthenticated checksum manifest \
+             ({}). Every artifact digest below it would inherit the \
+             manifest's trust. ADR-002 §W5.1.",
+            manifest.asset
+        ))
+    })
 }
 
 /// Stream `path` through SHA-256 and compare to `expected` (lowercase
@@ -223,7 +281,6 @@ mod tests {
     use super::*;
     use mvm_core::util::test_env::TestEnv;
     use sha2::{Digest, Sha256};
-    use std::io::Write;
 
     #[test]
     fn curl_download_args_request_resume() {
@@ -316,46 +373,135 @@ mod tests {
         assert!(result.is_ok(), "skip-env should bypass check: {result:?}");
     }
 
+    /// Stage a `sha256sum` manifest in its own dir and return the manifest
+    /// params pointing at it. `file://` keeps the download path real — curl
+    /// copies the bytes — without a network or a live release.
+    fn stage_manifest(body: &str) -> (tempfile::TempDir, String) {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(MANIFEST_ASSET), body).unwrap();
+        let base_url = format!("file://{}", dir.path().display());
+        (dir, base_url)
+    }
+
+    const MANIFEST_ASSET: &str = "checksums.txt";
+    const MANIFEST_VERSION: &str = "9.9.9";
+
+    fn manifest<'a>(base_url: &'a str) -> ChecksumManifest<'a> {
+        ChecksumManifest {
+            base_url,
+            asset: MANIFEST_ASSET,
+            version: MANIFEST_VERSION,
+        }
+    }
+
     #[test]
     fn fetch_expected_hashes_parses_sha256sum_format() {
-        // Run a tiny in-process HTTP server? Overkill — the function
-        // takes a URL and shells out to curl. Instead, we test the
-        // parser by exercising it directly via a file:// URL: curl
-        // accepts file:// and just copies the bytes.
-        let dir = tempfile::tempdir().unwrap();
-        let manifest_path = dir.path().join("checksums.txt");
-        let mut f = std::fs::File::create(&manifest_path).unwrap();
+        let mut env = TestEnv::new();
+        // This test is about the parser, so waive the publisher rung the way
+        // an operator would; the rung itself has its own witnesses below.
+        env.set("MVM_SKIP_COSIGN_VERIFY", "1");
         // Two-space gap is canonical sha256sum output. Mix in a leading
         // '*' on one line (binary mode) to confirm we strip it.
-        writeln!(f, "{}  dev-vmlinux-x86_64", "a".repeat(64)).unwrap();
-        writeln!(f, "{} *dev-rootfs-x86_64.ext4", "b".repeat(64)).unwrap();
-        writeln!(f, "garbage line that is not a hash").unwrap();
-        drop(f);
+        let body = format!(
+            "{}  dev-vmlinux-x86_64\n{} *dev-rootfs-x86_64.ext4\ngarbage line that is not a hash\n",
+            "a".repeat(64),
+            "b".repeat(64)
+        );
+        let (_dir, base_url) = stage_manifest(&body);
 
-        let url = format!("file://{}", manifest_path.display());
-        let map = fetch_expected_hashes(&url, &["dev-vmlinux-x86_64", "dev-rootfs-x86_64.ext4"])
-            .expect("manifest should parse");
+        let map = fetch_expected_hashes(
+            &manifest(&base_url),
+            &["dev-vmlinux-x86_64", "dev-rootfs-x86_64.ext4"],
+        )
+        .expect("manifest should parse");
         assert_eq!(map.get("dev-vmlinux-x86_64").unwrap(), &"a".repeat(64));
         assert_eq!(map.get("dev-rootfs-x86_64.ext4").unwrap(), &"b".repeat(64));
     }
 
     #[test]
     fn fetch_expected_hashes_errors_when_artifact_missing_from_manifest() {
-        let dir = tempfile::tempdir().unwrap();
-        let manifest_path = dir.path().join("checksums.txt");
-        std::fs::write(
-            &manifest_path,
-            format!("{}  some-other-file\n", "c".repeat(64)),
-        )
-        .unwrap();
+        let mut env = TestEnv::new();
+        env.set("MVM_SKIP_COSIGN_VERIFY", "1");
+        let (_dir, base_url) = stage_manifest(&format!("{}  some-other-file\n", "c".repeat(64)));
 
-        let url = format!("file://{}", manifest_path.display());
-        let err = fetch_expected_hashes(&url, &["dev-vmlinux-x86_64"])
+        let err = fetch_expected_hashes(&manifest(&base_url), &["dev-vmlinux-x86_64"])
             .unwrap_err()
             .to_string();
         assert!(
             err.contains("did not include") && err.contains("dev-vmlinux-x86_64"),
             "expected missing-entry error, got: {err}"
         );
+    }
+
+    /// The manifest is the trust anchor for every digest under it, so an
+    /// unsigned one must be refused with nothing read out of it. The staged
+    /// manifest is also missing the wanted entry: if the signature rung ever
+    /// moves after the parse, this fails with a "did not include" error and
+    /// says so.
+    #[test]
+    fn fetch_expected_hashes_refuses_an_unsigned_manifest_before_parsing() {
+        let mut env = TestEnv::new();
+        env.remove("MVM_SKIP_COSIGN_VERIFY");
+        let (_dir, base_url) = stage_manifest(&format!("{}  some-other-file\n", "d".repeat(64)));
+
+        let err = fetch_expected_hashes(&manifest(&base_url), &["dev-vmlinux-x86_64"])
+            .unwrap_err()
+            .to_string();
+
+        assert!(
+            !err.contains("did not include"),
+            "the signature rung must refuse before the manifest is parsed: {err}"
+        );
+        assert!(
+            err.contains("unauthenticated checksum manifest"),
+            "the refusal must name the reason: {err}"
+        );
+    }
+
+    /// The two hatches are independent by design: waiving the digest check is
+    /// a smaller concession than waiving the publisher check, so it must not
+    /// silently grant the larger one.
+    #[test]
+    fn skip_hash_verify_does_not_waive_the_manifest_signature() {
+        let mut env = TestEnv::new();
+        env.set("MVM_SKIP_HASH_VERIFY", "1");
+        env.remove("MVM_SKIP_COSIGN_VERIFY");
+        let (_dir, base_url) = stage_manifest(&format!("{}  dev-vmlinux-x86_64\n", "e".repeat(64)));
+
+        let err = fetch_expected_hashes(&manifest(&base_url), &["dev-vmlinux-x86_64"])
+            .expect_err("an unsigned manifest must be refused whatever the hash hatch says")
+            .to_string();
+
+        assert!(
+            err.contains("unauthenticated checksum manifest"),
+            "MVM_SKIP_HASH_VERIFY must not reach the signature rung: {err}"
+        );
+    }
+
+    /// The converse: waiving the publisher check admits the manifest but
+    /// leaves every digest in it binding.
+    #[test]
+    fn skip_cosign_verify_admits_the_manifest_but_keeps_the_hash_pin() {
+        let mut env = TestEnv::new();
+        env.set("MVM_SKIP_COSIGN_VERIFY", "1");
+        env.remove("MVM_SKIP_HASH_VERIFY");
+        let artifact_name = "dev-vmlinux-x86_64";
+        let pinned = hex_sha256(b"the published bytes");
+        let (_dir, base_url) = stage_manifest(&format!("{pinned}  {artifact_name}\n"));
+
+        let expected = fetch_expected_hashes(&manifest(&base_url), &[artifact_name])
+            .expect("the escape hatch must admit an unsigned manifest");
+
+        let local = tempfile::tempdir().unwrap();
+        let path = local.path().join(artifact_name);
+        std::fs::write(&path, b"substituted bytes").unwrap();
+        let err = verify_artifact_hash(
+            path.to_str().unwrap(),
+            artifact_name,
+            expected.get(artifact_name),
+        )
+        .expect_err("the digest pin must still bind")
+        .to_string();
+        assert!(err.contains("Integrity check failed"), "{err}");
     }
 }

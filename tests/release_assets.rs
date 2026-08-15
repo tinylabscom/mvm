@@ -141,8 +141,10 @@ fn the_release_consumes_its_own_artifacts_before_publishing_them() {
     let verify = workflow
         .find("- name: Verify the published artifacts survive the consumer path")
         .expect("release.yml must consume its artifacts before publishing them");
+    // Matched on a stable prefix: the step's name grows as blobs join the loop,
+    // and the ordering property this asserts does not depend on that wording.
     let sign = workflow
-        .find("- name: Sign release tarballs and SBOM")
+        .find("- name: Sign release tarballs")
         .expect("release.yml must sign the tarballs");
     let publish = workflow
         .find("- name: Create GitHub Release")
@@ -176,4 +178,68 @@ fn the_sdk_sidecar_job_builds_both_published_arches() {
             "the sdk-sidecar-image matrix must build {arch}"
         );
     }
+}
+
+fn kernel_build_workflow() -> String {
+    let path = Path::new(".github/workflows/kernel-build.yml");
+    fs::read_to_string(path)
+        .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()))
+}
+
+/// Every published checksum manifest must be signed, and its bundle published.
+///
+/// A manifest is what each downloader anchors on: it hashes the artifact and
+/// compares against the manifest, so an unsigned one lets whoever can swap an
+/// artifact swap its recorded digest too and the comparison still passes. The
+/// image blobs (kernel, rootfs, verity sidecar) are not tarballs and carry no
+/// signature of their own, so the manifest is their only anchor.
+///
+/// Dropping a manifest from the signing loop, or signing it and forgetting to
+/// attach the bundle, both fail the same way: the download still succeeds, still
+/// "verifies", and nothing surfaces it until a real release ships. Hence a gate.
+#[test]
+fn every_published_checksum_manifest_is_signed_and_its_bundle_attached() {
+    let workflow = release_workflow();
+    let sign_step = workflow
+        .split("- name: Sign release tarballs")
+        .nth(1)
+        .expect("release.yml must have a signing step");
+    let sign_loop = sign_step
+        .split("done")
+        .next()
+        .expect("the signing loop is non-empty");
+    let assets = workflow
+        .split("assets=(")
+        .nth(1)
+        .expect("release.yml must list release assets")
+        .split(')')
+        .next()
+        .expect("the asset list is non-empty");
+
+    for manifest in [
+        "artifacts/checksums-sha256.txt",
+        "artifacts/builder-vm-*-checksums-sha256.txt",
+        "artifacts/default-microvm-*-checksums-sha256.txt",
+    ] {
+        assert!(
+            sign_loop.contains(manifest),
+            "{manifest} must be cosign-signed; every artifact digest below it inherits its trust"
+        );
+        assert!(
+            assets.contains(&format!("{manifest}.bundle")),
+            "{manifest}.bundle must be attached to the release, or the verifier 404s"
+        );
+    }
+
+    // The kernel manifest ships from its own workflow and is just as load-bearing.
+    let kernel = kernel_build_workflow();
+    let manifest = "kernel-${ARCH}-checksums-sha256.txt";
+    assert!(
+        kernel.contains(&format!("--bundle \"{manifest}.bundle\"")),
+        "kernel-build.yml must cosign-sign {manifest}"
+    );
+    assert!(
+        kernel.contains(&format!("\"{manifest}.bundle\" \\")),
+        "kernel-build.yml must upload {manifest}.bundle beside the manifest"
+    );
 }
