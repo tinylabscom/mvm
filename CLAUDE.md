@@ -622,6 +622,24 @@ macOS / Linux Host
 - `public/src/content/docs/reference/cli-commands.md` -- complete CLI command reference
 - `specs/plans/` -- implementation specs and plans
 
+## Naming a new plan
+
+**Name it by slug, not by number**: `specs/plans/2026-08-15-sdk-surface-generated-from-rust.md`.
+A date prefix keeps plans sorting chronologically, which is the only thing the
+numbers were really giving.
+
+Numbers were a sequential id picked at authoring time, and this repo adds
+roughly three plans a day across concurrent branches — so two authors routinely
+picked the same next-free number, and neither could see the other's claim until
+its PR opened. 18 numbers ended up shared by two plans. Scanning open PRs before
+picking does not fix it: a branch that has claimed a number and not yet opened
+its PR is invisible to any scan.
+
+The plans that already carry numbers keep them — renaming them would invalidate
+hundreds of `Plan NNN` references for no benefit. `xtask check-plan-names`
+freezes that set and fails a *new* number-named plan. Refer to a plan by its
+path or title rather than a bare number.
+
 ## Sprint Management
 
 - Active sprint spec: `specs/SPRINT.md`

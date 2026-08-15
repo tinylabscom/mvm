@@ -284,6 +284,9 @@ jobs:
       - name: Sprint delivery log stays one-file-per-entry
         run: cargo run -p xtask -- check-sprint-append
 
+      - name: New plans are slug-named, not numbered
+        run: cargo run -p xtask -- check-plan-names
+
       - name: Claim mutation surface is pinned
         run: cargo run -p xtask -- check-mutation-witnesses
 
