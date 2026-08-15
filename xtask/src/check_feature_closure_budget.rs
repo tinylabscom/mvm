@@ -44,7 +44,12 @@ const BUDGET_TARGET: &str = "x86_64-unknown-linux-gnu";
 ///
 /// 476 (was 475): the same `sha1_smol` that entered the default closure with
 /// `uuid`'s `v5` feature — a nested set, so it counts once here too.
-const FEATURE_CLOSURE_BUDGET: usize = 476;
+///
+/// 477 (was 476): `mvm-observability`, split out of `mvm-core` to take the
+/// subscriber assembly off every crate that merely links `mvm-core`. It is a
+/// workspace crate carrying no new third-party code — `tracing-subscriber` was
+/// already reachable here — so this is the same +1 the default gate took.
+const FEATURE_CLOSURE_BUDGET: usize = 477;
 
 /// The two gates measure nested sets — everything in the default closure is
 /// reachable with all features on — so a feature budget at or below the default
