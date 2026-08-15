@@ -31,6 +31,10 @@ pub const CAP_KILL: u32 = 5;
 pub const CAP_NET_BIND_SERVICE: u32 = 10;
 /// Linux capability used by the guest agent to correct a restored wall clock.
 pub const CAP_SYS_TIME: u32 = 25;
+/// Linux capability `PR_CAPBSET_DROP` itself requires. Never retained — which
+/// is exactly why the bounding set has to be narrowed before the capability
+/// sets are, and not after.
+pub const CAP_SETPCAP: u32 = 8;
 /// Capabilities explicitly retained by the guest agent after boot setup.
 pub const RESTORE_AGENT_CAPABILITIES: u32 = (1u32 << CAP_KILL) | (1u32 << CAP_SYS_TIME);
 
@@ -540,11 +544,19 @@ pub fn drop_privilege_raw(uid: u32, gid: u32) -> std::io::Result<()> {
 
 /// Drop to the guest-agent identity while retaining only the fixed capabilities
 /// required for authenticated restore handling.
+///
+/// The bounding set is narrowed first, before the identity change, because
+/// `PR_CAPBSET_DROP` needs `CAP_SETPCAP` and [`set_capabilities`] below removes
+/// it: narrowing afterwards fails `EPERM`, and on the spawn path that errno
+/// leaves the `pre_exec` hook and kills the agent before it ever runs. The
+/// bounding set is inherited across fork and exec and can only shrink, so
+/// applying it here binds the agent and everything under it just as firmly.
 #[cfg(target_os = "linux")]
 pub fn drop_guest_agent_privilege_raw(uid: u32, gid: u32) -> std::io::Result<()> {
     if unsafe { libc::prctl(PR_SET_KEEPCAPS, 1, 0, 0, 0) } != 0 {
         return Err(std::io::Error::last_os_error());
     }
+    narrow_bounding_set_where_enforceable(RESTORE_AGENT_CAPABILITIES)?;
     if unsafe { libc::setgroups(0, std::ptr::null::<libc::gid_t>()) } != 0 {
         return Err(std::io::Error::last_os_error());
     }
@@ -556,7 +568,6 @@ pub fn drop_guest_agent_privilege_raw(uid: u32, gid: u32) -> std::io::Result<()>
     }
     set_capabilities(RESTORE_AGENT_CAPABILITIES)?;
     raise_ambient_capabilities(RESTORE_AGENT_CAPABILITIES)?;
-    drop_capability_bounding_set_to(RESTORE_AGENT_CAPABILITIES)?;
     set_no_new_privileges()?;
     if unsafe { libc::getuid() } == 0 {
         return Err(std::io::Error::from_raw_os_error(libc::EPERM));
@@ -690,7 +701,19 @@ pub fn harden_init_process() -> std::io::Result<()> {
 #[cfg(target_os = "linux")]
 pub fn drop_workload_capability_bounding_set() -> std::io::Result<()> {
     set_no_new_privileges()?;
-    match drop_capability_bounding_set_to(0) {
+    narrow_bounding_set_where_enforceable(0)
+}
+
+/// Narrow the bounding set to `keep`, skipping the drop when this caller could
+/// never have performed it.
+///
+/// Shared by the agent identity drop and the workload spawn, which need the
+/// same "enforce where possible, fail closed on a real error" rule with
+/// different masks. See [`bounding_drop_is_unenforceable`] for why `EPERM`
+/// alone is a skip.
+#[cfg(target_os = "linux")]
+fn narrow_bounding_set_where_enforceable(keep: u32) -> std::io::Result<()> {
+    match drop_capability_bounding_set_to(keep) {
         Err(err) if bounding_drop_is_unenforceable(&err) => Ok(()),
         result => result,
     }
@@ -1777,6 +1800,26 @@ mod privilege_tests {
         )));
     }
 
+    /// The ordering constraint the agent privilege drop is built around, as an
+    /// assertion rather than a comment.
+    ///
+    /// `PR_CAPBSET_DROP` requires `CAP_SETPCAP`, and the agent does not retain
+    /// it. So the bounding-set narrowing can only ever succeed *before*
+    /// `set_capabilities` runs — afterwards the syscall returns `EPERM`, and on
+    /// the spawn path that errno escapes the `pre_exec` hook and the agent
+    /// never starts. Anyone widening the retained mask to include
+    /// `CAP_SETPCAP`, or reordering the drop back after the capability sets,
+    /// should land here first.
+    #[test]
+    fn the_agent_never_retains_the_capability_its_bounding_drop_requires() {
+        assert!(
+            !bounding_set_retains(RESTORE_AGENT_CAPABILITIES, CAP_SETPCAP),
+            "the agent must not retain CAP_SETPCAP; if it ever does, the \
+             narrow-before-you-drop ordering stops being load-bearing and this \
+             test should be replaced rather than relaxed"
+        );
+    }
+
     /// Mirrors `CAPABILITY_SLOTS` so the test compiles off Linux, where the
     /// real constant is `cfg`-gated out along with the syscall loop.
     const CAPABILITY_SLOTS_FOR_TEST: std::ops::RangeInclusive<u32> = 0..=63;
@@ -1803,6 +1846,44 @@ mod privilege_tests {
         );
         // Narrowed to the agent's set, not emptied. The workload gets the
         // empty set separately, at spawn.
+        assert!(
+            status.contains("CapBnd:\t0000000002000020"),
+            "CapBnd must be exactly CAP_KILL|CAP_SYS_TIME; got:\n{status}"
+        );
+    }
+
+    /// Live witness for the agent identity drop itself.
+    ///
+    /// The regression this pins returned `EPERM` from the bounding-set drop,
+    /// which on the spawn path never reached a log — it surfaced only as
+    /// `spawn guest-agent: Operation not permitted` in the guest console and a
+    /// host-side 30s agent-readiness timeout. Asserting `Ok` here is the whole
+    /// point; the state assertions confirm it succeeded for the right reason.
+    ///
+    /// Irreversible: it drops the calling process to uid 901 for good. It needs
+    /// a process per test, which is what nextest gives it, and is gated behind
+    /// the same explicit env var and root check as the test above.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn drop_guest_agent_privilege_reaches_the_agent_identity_from_root() {
+        if std::env::var("MVM_GUEST_PRIVILEGED_TESTS").as_deref() != Ok("1") {
+            return;
+        }
+        if unsafe { libc::getuid() } != 0 {
+            return;
+        }
+        super::drop_guest_agent_privilege_raw(WORKLOAD_UID, WORKLOAD_GID)
+            .expect("the agent privilege drop must succeed as root");
+        assert_eq!(
+            unsafe { libc::getuid() },
+            WORKLOAD_UID,
+            "the drop must land on the workload uid"
+        );
+        let status = std::fs::read_to_string("/proc/self/status").expect("read status");
+        assert!(
+            status.contains("NoNewPrivs:\t1"),
+            "NoNewPrivs must be 1 after the drop; got:\n{status}"
+        );
         assert!(
             status.contains("CapBnd:\t0000000002000020"),
             "CapBnd must be exactly CAP_KILL|CAP_SYS_TIME; got:\n{status}"

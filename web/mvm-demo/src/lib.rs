@@ -94,7 +94,7 @@ fn decide_egress_core(policy_json: &str, url: &str) -> Result<bool, String> {
     let (host, port) = parse_url_host_port(url)?;
     let ip = lookup_host(host).ok_or_else(|| {
         format!(
-            "browser demo cannot resolve host '{host}' (only api.openai.com and api.github.com have pinned IPs in this demo)",
+            "browser demo cannot resolve host '{host}' (only api.openai.com, api.github.com, and echo.mvm.local have pinned IPs in this demo)",
         )
     })?;
     Ok(canonical.permits(&Proto::Tcp, ip, port))

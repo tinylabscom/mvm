@@ -1,6 +1,7 @@
 //! Length-prefixed JSON frame I/O and the authenticated, encrypted control
 //! session built on top of it.
 
+use rand::TryRng;
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 
@@ -199,9 +200,17 @@ pub fn handshake_as_host(
 ) -> Result<VerifyingKey> {
     let _span = tracing::info_span!("vsock_handshake").entered();
     let t = std::time::Instant::now();
-    let challenge: Vec<u8> = (0..32).map(|_| rand::random::<u8>()).collect();
+    let mut challenge = [0u8; 32];
+    rand::rngs::SysRng
+        .try_fill_bytes(&mut challenge)
+        .expect("SysRng entropy for handshake challenge");
+    let challenge: Vec<u8> = challenge.to_vec();
     let host_pubkey = host_signing_key.verifying_key().to_bytes().to_vec();
-    let host_ephemeral_secret = StaticSecret::from(rand::random::<[u8; 32]>());
+    let mut host_ephemeral_seed = [0u8; 32];
+    rand::rngs::SysRng
+        .try_fill_bytes(&mut host_ephemeral_seed)
+        .expect("SysRng entropy for host X25519 secret");
+    let host_ephemeral_secret = StaticSecret::from(host_ephemeral_seed);
 
     let hello = SessionHello {
         version: PROTOCOL_VERSION_AUTHENTICATED,
@@ -299,7 +308,11 @@ pub fn handshake_as_guest(
     // Sign the challenge to prove we hold the session key
     let challenge_sig = guest_signing_key.sign(&hello.challenge);
     let guest_pubkey = guest_signing_key.verifying_key().to_bytes().to_vec();
-    let guest_ephemeral_secret = StaticSecret::from(rand::random::<[u8; 32]>());
+    let mut guest_ephemeral_seed = [0u8; 32];
+    rand::rngs::SysRng
+        .try_fill_bytes(&mut guest_ephemeral_seed)
+        .expect("SysRng entropy for guest X25519 secret");
+    let guest_ephemeral_secret = StaticSecret::from(guest_ephemeral_seed);
 
     let ack = SessionHelloAck {
         version: hello.version,
@@ -407,6 +420,7 @@ impl From<AuthenticatedSession> for Session {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rand::Rng;
     use std::io::Cursor;
 
     // ========================================================================
@@ -416,7 +430,7 @@ mod tests {
     fn test_keypair() -> SigningKey {
         {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             SigningKey::from_bytes(&__ed_seed)
         }
     }

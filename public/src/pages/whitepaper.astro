@@ -1,0 +1,15 @@
+---
+// Serve the self-contained whitepaper page (brought over from the retired
+// mvm-static-site) at /whitepaper/, same pattern as demo.astro: a page
+// route rather than a public/ asset, so the dev server resolves the
+// trailing-slash URL instead of falling through to Starlight's 404.
+//
+// `?raw` import, not fs.readFileSync: the compiled page runs from
+// dist/chunks/ in the production build, so __dirname-relative paths that
+// work in dev break at build time. Vite inlines the file at bundle time.
+import html from "../assets/whitepaper.html?raw";
+
+return new Response(html, {
+  headers: { "Content-Type": "text/html" },
+});
+---

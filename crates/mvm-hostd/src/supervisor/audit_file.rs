@@ -1088,6 +1088,7 @@ fn usable_resume(checkpoint: Option<&ChainCheckpoint>, total_lines: usize) -> Op
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rand::Rng;
 
     use chrono::Utc;
     use ed25519_dalek::SigningKey;
@@ -1097,7 +1098,7 @@ mod tests {
     fn fresh_key() -> SigningKey {
         {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             SigningKey::from_bytes(&__ed_seed)
         }
     }

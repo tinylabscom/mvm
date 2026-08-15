@@ -320,6 +320,14 @@ for detailed scope and acceptance criteria.
         unprivileged spawn failed outright, and because it ran first the
         failure also skipped `NoNewPrivs` — the load-bearing control. The
         privileged init path still fails closed
+  - [x] Issue #2522 — the `EPERM` tolerance above covered the workload spawn
+        but not the agent's own drop, which ran the same bounding-set narrowing
+        *after* `set_capabilities` had already removed `CAP_SETPCAP`. Every
+        `machine run --image` failed: the errno left the `pre_exec` hook, the
+        agent never started, and the host timed out waiting for it. The
+        narrowing now runs before the identity change, while the caller still
+        holds the capability the syscall needs, and both call sites share one
+        helper. Bisected against the parent commit and witnessed live on HVF
   - [ ] Re-run the adversarial probe on HVF **and** Firecracker — the closure
         gate, not yet run; no Linux/KVM host available
   - [ ] Record the ADR-001 claims 1/2 scope decision (owner call; determines
@@ -895,6 +903,13 @@ for detailed scope and acceptance criteria.
         to sign real audit entries.
   - [ ] Does **not** retire `web/audit-verify/` (no Merkle inclusion) — B5 and
         `mvmctl audit pubkey` remain plan 301's
+- [ ] Plan 329 — Browser-tier microVM demo (`specs/plans/329-browser-wasm-backend-demo.md`)
+      — in progress on `feat/329-browser-wasm-backend`. Extends Plan 320 with a
+      `wasm32-wasip1` guest that boots, provides a shell, and delegates `fetch`
+      to a host `mvm:egress` import gated by `mvm-contract` `NetworkPolicy`.
+      Audit entries (`vm.start`, `egress.allow`, `egress.deny`, `vm.stop`) are
+      signed in the Worker and rendered live. E2E Playwright test passes; remote
+      node bridge (Slice 5) remains open.
 - [ ] Plan 321 — wasm as a workload format inside a real microVM
       (`specs/plans/321-wasm-in-microvm-workload-format.md`) — design, not
       started. ADR-024's sanctioned engine-in-guest path: a wasm workload

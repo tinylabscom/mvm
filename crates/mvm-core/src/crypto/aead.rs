@@ -10,6 +10,7 @@
 
 use aes_gcm::aead::{Aead, KeyInit};
 use aes_gcm::{Aes256Gcm, Nonce};
+use rand::Rng;
 use zeroize::Zeroize;
 
 /// Nonce size for AES-256-GCM: 96 bits / 12 bytes.
@@ -61,7 +62,7 @@ impl Key {
     /// Fresh random key drawn from the OS CSPRNG.
     pub fn random() -> Self {
         let mut bytes = [0u8; KEY_SIZE];
-        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut bytes);
+        rand::rng().fill_bytes(&mut bytes);
         Key(bytes)
     }
 
@@ -120,7 +121,7 @@ impl Drop for Key {
 pub fn seal(key: &Key, plaintext: &[u8]) -> Vec<u8> {
     let cipher = Aes256Gcm::new(&key.0.into());
     let mut nonce_arr = [0u8; NONCE_SIZE];
-    rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut nonce_arr);
+    rand::rng().fill_bytes(&mut nonce_arr);
     let nonce = Nonce::from(nonce_arr);
     let ciphertext = cipher
         .encrypt(&nonce, plaintext)

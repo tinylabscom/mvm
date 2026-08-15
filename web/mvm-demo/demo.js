@@ -1,5 +1,9 @@
 const worker = new Worker("./worker.js", { type: "module" });
 
+// Embed mode (?embed=1): the config pane is hidden, so launch immediately
+// with its default values once the worker reports ready.
+const EMBED = new URLSearchParams(location.search).has("embed");
+
 const $ = (id) => document.getElementById(id);
 const consoleEl = $("console");
 const inputLineEl = $("input-line");
@@ -9,6 +13,7 @@ const stopBtn = $("stop");
 const capabilityNoticeEl = $("capability-notice");
 const cliPreviewEl = $("cli-preview");
 const auditChainEl = $("audit-chain");
+const egressDomainsEl = $("egress-domains");
 
 let ready = false;
 let vmRunning = false;
@@ -39,6 +44,9 @@ worker.onmessage = (event) => {
   if (data.type === "ready") {
     ready = true;
     capabilityNoticeEl.textContent = data.capabilityNotice || "";
+    if (EMBED && !vmRunning) {
+      launchBtn.click();
+    }
     return;
   }
   if (data.type === "console") {
@@ -57,7 +65,7 @@ worker.onmessage = (event) => {
   else handlers.reject(new Error(error));
 };
 
-function appendConsole(text) {
+function appendConsole(text, cls) {
   // A form-feed from the guest is a clear-screen request.
   if (text === "\x0c") {
     clearConsole();
@@ -66,6 +74,7 @@ function appendConsole(text) {
   const line = document.createElement("div");
   line.className = "console-line";
   const span = document.createElement("span");
+  if (cls) span.className = cls;
   span.textContent = text;
   line.appendChild(span);
   consoleEl.insertBefore(line, inputLineEl);
@@ -97,14 +106,72 @@ function setInput(enabled) {
   }
 }
 
+// Newest entry first, so the latest allow/deny is visible without
+// scrolling; entries the panel hasn't shown before get a highlight flash.
 function renderAuditChain(chain) {
   if (!chain || chain.length === 0) {
     auditChainEl.textContent = "—";
+    auditChainEl.dataset.count = "0";
     return;
   }
-  auditChainEl.textContent = chain
-    .map((line) => JSON.stringify(JSON.parse(line), null, 2))
-    .join("\n---\n");
+  const known = parseInt(auditChainEl.dataset.count || "0", 10);
+  auditChainEl.textContent = "";
+  chain
+    .slice()
+    .reverse()
+    .forEach((line, i) => {
+      const originalIndex = chain.length - 1 - i;
+      const entry = document.createElement("div");
+      entry.className = "audit-entry";
+      if (originalIndex >= known) entry.classList.add("audit-new");
+      entry.textContent = JSON.stringify(JSON.parse(line), null, 2);
+      auditChainEl.appendChild(entry);
+    });
+  auditChainEl.dataset.count = String(chain.length);
+  auditChainEl.scrollTop = 0;
+}
+
+// Surface the launched policy's reachable destinations next to the console,
+// so the demo says up front which hosts `fetch` can reach.
+function renderEgressDomains(policy) {
+  if (!policy || policy.type === "deny_all") {
+    egressDomainsEl.textContent = "egress: deny all";
+    return;
+  }
+  if (policy.type === "unrestricted") {
+    egressDomainsEl.textContent = "egress: unrestricted";
+    return;
+  }
+  const rules = (policy.rules || [])
+    .map((r) => `${r.host}:${r.port}`)
+    .join(" · ");
+  egressDomainsEl.textContent = rules
+    ? `allowed egress: ${rules}`
+    : "egress: deny all";
+}
+
+// A short guided intro printed into the console at boot, so a first-time
+// visitor knows what this is and what to type. The allowed-fetch example is
+// derived from the launched policy rather than hardcoded. Rendered in the
+// prompt green (.hint) so instructions read apart from guest output.
+function printWelcome(policy) {
+  const rules = (policy && policy.rules) || [];
+  const allowedRule = rules.length > 0 ? rules[0] : null;
+  appendConsole("");
+  appendConsole(
+    "You are in a shell in a policy-governed sandbox. Try the following:",
+    "hint",
+  );
+  if (allowedRule) {
+    appendConsole(
+      `  fetch ${allowedRule.host} ${allowedRule.port}   → allowed by the launch policy`,
+      "hint",
+    );
+  }
+  appendConsole("  fetch api.openai.com 443   → denied by policy; watch the audit chain", "hint");
+  appendConsole("  ls, cat, env, ps       → explore the guest", "hint");
+  appendConsole("  help                   → the full command list", "hint");
+  appendConsole("");
 }
 
 function updateCliPreview() {
@@ -177,6 +244,7 @@ launchBtn.addEventListener("click", async () => {
   }
   try {
     clearConsole();
+    auditChainEl.dataset.count = "0";
     launchBtn.disabled = true;
 
     const policy = $("policy").value;
@@ -197,7 +265,9 @@ launchBtn.addEventListener("click", async () => {
     stopBtn.disabled = false;
     setInput(true);
     appendConsole(`MicroVM ${result.vmId} is ${result.status}.`);
+    renderEgressDomains(config.network_policy);
     renderAuditChain(result.auditChain);
+    printWelcome(config.network_policy);
   } catch (err) {
     appendConsole(`Launch failed: ${err.message}`);
     launchBtn.disabled = false;
@@ -212,6 +282,7 @@ stopBtn.addEventListener("click", async () => {
     stopBtn.disabled = true;
     setInput(false);
     appendConsole("MicroVM stopped.");
+    egressDomainsEl.textContent = "egress: —";
     renderAuditChain(result.auditChain);
   } catch (err) {
     appendConsole(`Stop failed: ${err.message}`);

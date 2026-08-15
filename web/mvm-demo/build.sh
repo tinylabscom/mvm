@@ -39,7 +39,7 @@ echo "wasm bundle gzipped size: $GZIPPED_SIZE bytes (budget $BUDGET_BYTES bytes)
 
 # Plain size budget for the guest wasm (uncompressed). The guest grows as the
 # simulated shell grows; pin a ceiling so additions are deliberate.
-GUEST_WASM="$ROOT_DIR/web/mvm-demo/guest/mvm-demo-guest.wasm"
+GUEST_WASM="$SCRIPT_DIR/guest/mvm-demo-guest.wasm"
 GUEST_SIZE=$(wc -c < "$GUEST_WASM")
 GUEST_BUDGET=200000  # 200 KiB
 if [ "$GUEST_SIZE" -gt "$GUEST_BUDGET" ]; then

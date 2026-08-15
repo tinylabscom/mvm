@@ -100,7 +100,7 @@ pub async fn serve_raw_egress(
 /// the gate, and (only on `Allow`) connect + splice. Any refusal or malformed
 /// target closes the connection without connecting — fail closed.
 async fn handle_raw_conn<S>(
-    mut guest: S,
+    guest: S,
     gate: &EgressGate,
     recorder: Option<Arc<Recorder>>,
     rate_guard: Arc<egress_rate::EgressRateGuard>,
@@ -108,6 +108,29 @@ async fn handle_raw_conn<S>(
 ) -> std::io::Result<()>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    handle_raw_conn_with_resolver(guest, gate, recorder, rate_guard, timeout, |host| {
+        resolve_hostname_ips_pure(host, timeout)
+    })
+    .await
+}
+
+/// [`handle_raw_conn`] with the hostname resolver injected, so a test can assert
+/// what the handler did *not* do — the tunnel-limit refusal has the same
+/// one-byte nack on the wire as a policy refusal, and "the target was never
+/// resolved" is the only hermetic way to tell the two apart. Mirrors the
+/// `serve_dns` / `serve_dns_with_resolver` split next door.
+async fn handle_raw_conn_with_resolver<S, F>(
+    mut guest: S,
+    gate: &EgressGate,
+    recorder: Option<Arc<Recorder>>,
+    rate_guard: Arc<egress_rate::EgressRateGuard>,
+    timeout: Duration,
+    resolve: F,
+) -> std::io::Result<()>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    F: Fn(&str) -> std::io::Result<Vec<IpAddr>>,
 {
     let Some((target, leftover)) = read_target_line(&mut guest).await? else {
         // No `\n` within the cap → fail closed, close without connecting.
@@ -133,7 +156,16 @@ where
         )
         .await;
     }
-    match gate.decide_request_with(&target, |host| resolve_hostname_ips_pure(host, timeout)) {
+    // Every verb above answers one request and releases its slot; a raw tunnel
+    // holds one until the guest closes it. Take that slot before resolving the
+    // target so a connect flood is bounded at the door rather than after the
+    // host has already done the DNS work for it.
+    let Some(_tunnel) = rate_guard.try_admit_tunnel() else {
+        eprintln!("raw-egress: refusing target {target}: tunnel limit reached");
+        write_connect_ack_async(&mut guest, ConnectAck::Fail).await?;
+        return Ok(());
+    };
+    match gate.decide_request_with(&target, &resolve) {
         EgressVerdict::Allow { ips, port } => {
             splice(guest, &target, &ips, port, leftover, timeout).await
         }
@@ -392,6 +424,13 @@ fn handle_raw_conn_blocking(
     if target == socks5_udp::FRAME_LINE {
         return socks5_udp::serve_blocking(guest, gate, timeout);
     }
+    // Same bound as the async path: a tunnel's slot is held for the whole
+    // splice, so take it before the target is resolved.
+    let Some(_tunnel) = rate_guard.try_admit_tunnel() else {
+        eprintln!("raw-egress: refusing target {target}: tunnel limit reached");
+        write_connect_ack_blocking(&mut guest, ConnectAck::Fail)?;
+        return Ok(());
+    };
     let (ips, port) =
         match gate.decide_request_with(&target, |host| resolve_hostname_ips_pure(host, timeout)) {
             EgressVerdict::Allow { ips, port } => (ips, port),
@@ -860,8 +899,10 @@ mod tests {
     use std::os::fd::IntoRawFd;
     #[cfg(target_os = "linux")]
     use std::os::unix::net::UnixStream;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     #[cfg(target_os = "linux")]
     use tempfile::tempdir;
+
     use tokio::io::AsyncWriteExt;
 
     /// A default-deny gate + a well-formed target ⇒ the host nacks the connect and
@@ -1199,6 +1240,128 @@ mod tests {
         client.read_to_end(&mut rest).await.unwrap();
         assert!(rest.is_empty());
         splicer.await.unwrap().unwrap();
+    }
+
+    /// Build an unrestricted gate: the refusal under test must be the limiter's,
+    /// not policy's.
+    fn unrestricted_gate() -> EgressGate {
+        EgressGate::from_network_policy(
+            &NetworkPolicy::unrestricted(),
+            &mvm_core::policy::dns_pin::DnsPinRegistry::new(),
+            "2026-01-01T00:00:00Z",
+        )
+    }
+
+    /// With the tunnel pool full the handler nacks *before* resolving the
+    /// target. The nack byte alone proves nothing here — an admitted target
+    /// whose connect fails sends the same `Fail` — so the witness is that the
+    /// resolver was never reached.
+    #[tokio::test]
+    async fn an_exhausted_tunnel_pool_refuses_before_resolving_the_target() {
+        let lookups = Arc::new(AtomicUsize::new(0));
+        let probe = Arc::clone(&lookups);
+        let (mut client, server) = tokio::io::duplex(1024);
+        let guard = Arc::new(
+            egress_rate::EgressRateGuard::builder()
+                .max_tunnels(0)
+                .build(),
+        );
+        let h = tokio::spawn(async move {
+            handle_raw_conn_with_resolver(
+                server,
+                &unrestricted_gate(),
+                None,
+                guard,
+                Duration::from_secs(1),
+                move |_host| {
+                    probe.fetch_add(1, Ordering::Relaxed);
+                    Ok(Vec::new())
+                },
+            )
+            .await
+        });
+        client.write_all(b"blocked.test:80\n").await.unwrap();
+
+        let mut ack = [0u8; 1];
+        client.read_exact(&mut ack).await.unwrap();
+        assert_eq!(ack[0], ConnectAck::Fail.as_byte());
+        let mut rest = Vec::new();
+        client.read_to_end(&mut rest).await.unwrap();
+        assert!(rest.is_empty(), "no tunnel bytes after a Fail ack");
+        h.await.unwrap().unwrap();
+
+        assert_eq!(
+            lookups.load(Ordering::Relaxed),
+            0,
+            "a full tunnel pool must refuse before the host does any DNS work"
+        );
+    }
+
+    /// The companion to the test above: with a slot free the same input *does*
+    /// reach the resolver, so the assertion there is about the limiter and not
+    /// about the fixture never resolving anything.
+    #[tokio::test]
+    async fn an_available_tunnel_slot_reaches_the_resolver() {
+        let lookups = Arc::new(AtomicUsize::new(0));
+        let probe = Arc::clone(&lookups);
+        let (mut client, server) = tokio::io::duplex(1024);
+        let guard = Arc::new(
+            egress_rate::EgressRateGuard::builder()
+                .max_tunnels(1)
+                .build(),
+        );
+        let h = tokio::spawn(async move {
+            handle_raw_conn_with_resolver(
+                server,
+                &unrestricted_gate(),
+                None,
+                guard,
+                Duration::from_secs(1),
+                move |_host| {
+                    probe.fetch_add(1, Ordering::Relaxed);
+                    Ok(Vec::new())
+                },
+            )
+            .await
+        });
+        client.write_all(b"blocked.test:80\n").await.unwrap();
+        let mut ack = [0u8; 1];
+        client.read_exact(&mut ack).await.unwrap();
+        assert_eq!(ack[0], ConnectAck::Fail.as_byte());
+        h.await.unwrap().unwrap();
+
+        assert_eq!(
+            lookups.load(Ordering::Relaxed),
+            1,
+            "an admitted tunnel resolves its target"
+        );
+    }
+
+    /// A connection the gate refuses must hand its tunnel slot back, or a guest
+    /// that trips the policy repeatedly would exhaust the pool by itself.
+    #[tokio::test]
+    async fn a_gate_refusal_returns_the_tunnel_slot() {
+        let guard = Arc::new(
+            egress_rate::EgressRateGuard::builder()
+                .max_tunnels(1)
+                .build(),
+        );
+        let gate = EgressGate::default_deny();
+        let (mut client, server) = tokio::io::duplex(1024);
+        let handler_guard = Arc::clone(&guard);
+        let h = tokio::spawn(async move {
+            handle_raw_conn(server, &gate, None, handler_guard, Duration::from_secs(1)).await
+        });
+        client.write_all(b"93.184.216.34:80\n").await.unwrap();
+        let mut ack = [0u8; 1];
+        client.read_exact(&mut ack).await.unwrap();
+        assert_eq!(ack[0], ConnectAck::Fail.as_byte());
+        h.await.unwrap().unwrap();
+
+        assert!(
+            guard.try_admit_tunnel().is_some(),
+            "the refused connection must have released its tunnel slot"
+        );
     }
 
     #[cfg(target_os = "linux")]

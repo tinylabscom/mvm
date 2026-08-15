@@ -4,6 +4,14 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>mvm browser-tier microVM demo</title>
+<script>
+  // Embed mode (?embed=1): the docs landing page iframes this demo and wants
+  // only the console + audit chain — no heading, config pane, or footer.
+  // Applied on <html> before first paint so the hidden panes never flash.
+  if (new URLSearchParams(location.search).has("embed")) {
+    document.documentElement.classList.add("embed");
+  }
+</script>
 <style>
   :root {
     --term-bg: #0b0c0f;
@@ -168,6 +176,24 @@
     color: #8b949e;
     font-family: var(--term-font);
   }
+  /* Guided-intro lines printed by demo.js at boot. */
+  .console .hint { color: var(--term-prompt); }
+  /* Audit chain renders newest-first as one block per entry; a fresh entry
+     flashes green as it arrives. */
+  #audit-chain .audit-entry {
+    padding: 0.45rem 0.25rem;
+    border-bottom: 1px dashed var(--term-border);
+    white-space: pre-wrap;
+    border-radius: 4px;
+  }
+  #audit-chain .audit-entry:last-child { border-bottom: none; }
+  #audit-chain .audit-entry.audit-new {
+    animation: audit-flash 1.6s ease-out;
+  }
+  @keyframes audit-flash {
+    from { background: rgba(63, 185, 80, 0.25); }
+    to { background: transparent; }
+  }
   .notice {
     margin-top: 1rem;
     padding: 0.75rem;
@@ -187,6 +213,51 @@
     opacity: 0.7;
     color: #8b949e;
   }
+  /* Embed mode: console + audit chain only, side by side. The direct-child
+     selector on the lede keeps the audit card's own .lede explainer
+     visible. */
+  html.embed body {
+    max-width: none;
+    padding: 0.75rem;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1rem;
+    align-items: stretch;
+  }
+  html.embed h1,
+  html.embed body > p.lede,
+  html.embed #config-card,
+  html.embed footer {
+    display: none;
+  }
+  html.embed .grid {
+    grid-template-columns: 1fr;
+  }
+  html.embed .console-wrap {
+    height: 24rem;
+  }
+  /* The audit card's inline margin-top made sense stacked; in the embed
+     grid the two cards share a row. */
+  html.embed body > .card {
+    margin-top: 0 !important;
+  }
+  html.embed #audit-chain {
+    max-height: 24rem !important;
+  }
+  /* The capability notice is an always-rendered box that reads as a stray
+     bar when it has no text; span the row when it does. */
+  html.embed #capability-notice {
+    grid-column: 1 / -1;
+    margin-top: 0;
+  }
+  html.embed #capability-notice:empty {
+    display: none;
+  }
+  @media (max-width: 800px) {
+    html.embed body {
+      grid-template-columns: 1fr;
+    }
+  }
 </style>
 </head>
 <body>
@@ -199,7 +270,7 @@
 </p>
 
 <div class="grid">
-  <div class="card">
+  <div class="card" id="config-card">
     <h2>Launch config</h2>
     <label for="name">VM name</label>
     <input id="name" value="browser-vm" />
@@ -241,6 +312,9 @@
           <span class="prompt">root@mvm:~#</span>
           <input id="command" type="text" autocomplete="off" spellcheck="false" />
         </div>
+      </div>
+      <div class="console-status">
+        <span id="egress-domains">egress: —</span>
       </div>
       <div class="console-status">
         <span>Tip: click the console to type. ↑/↓ history, Tab completion, Ctrl+C interrupt, Ctrl+L clear.</span>

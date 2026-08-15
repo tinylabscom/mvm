@@ -301,6 +301,13 @@ jobs:
       - name: Run E2E tests
         # Keep this lane on end-to-end smoke targets that compile
         # without live microVM host state.
+        #
+        # `runtime_boot_bench` is a COMPILE check here and nothing more. It
+        # self-skips unless `MVM_RUNTIME_BOOT_BENCH=1`, which this lane
+        # deliberately does not set, so it asserts nothing about boot latency.
+        # That assertion lives in ci.yml's `boot-latency` lane, which supplies
+        # a real image and /dev/kvm. Said plainly because the bare target name
+        # reads like latency coverage and is not.
         run: cargo test --test smoke_run_json_receipt --test runtime_boot_bench
 
   sdk-release-dry-run:

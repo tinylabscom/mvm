@@ -3,6 +3,7 @@
 //! verification-refusal matrix, scope checks, ordering, pagination,
 //! filters, and untrusted-input robustness.
 
+use rand::Rng;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -17,7 +18,7 @@ use super::*;
 
 fn fresh_key() -> SigningKey {
     let mut seed = [0u8; 32];
-    rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut seed);
+    rand::rng().fill_bytes(&mut seed);
     SigningKey::from_bytes(&seed)
 }
 
@@ -372,12 +373,12 @@ fn garbage_file_is_a_malformed_refusal_not_a_panic() {
 /// matching the repo's property-test pattern.
 #[test]
 fn property_untrusted_audit_input_never_yields_events() {
-    use rand::{Rng, SeedableRng, rngs::StdRng};
+    use rand::{RngExt, SeedableRng, rngs::StdRng};
     let mut rng = StdRng::seed_from_u64(0xa0d17);
     for i in 0..50 {
         let fx = Fixture::new();
-        let len = rng.gen_range(1..2048);
-        let bytes: Vec<u8> = (0..len).map(|_| rng.r#gen::<u8>()).collect();
+        let len = rng.random_range(1..2048);
+        let bytes: Vec<u8> = (0..len).map(|_| rng.random::<u8>()).collect();
         let name = if i % 2 == 0 {
             "local.jsonl".to_string()
         } else {

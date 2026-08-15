@@ -1,0 +1,16 @@
+---
+// Serve the pricing page (brought over from the retired mvm-static-site)
+// at /pricing/, same pattern as whitepaper.astro / demo.astro. Its
+// stylesheet is the static site's theme.css (served from /theme.css),
+// which was itself ported from this site's design tokens, so the page
+// matches the docs look in both light and dark.
+//
+// `?raw` import, not fs.readFileSync: the compiled page runs from
+// dist/chunks/ in the production build, so __dirname-relative paths that
+// work in dev break at build time. Vite inlines the file at bundle time.
+import html from "../assets/pricing.html?raw";
+
+return new Response(html, {
+  headers: { "Content-Type": "text/html" },
+});
+---

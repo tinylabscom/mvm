@@ -228,6 +228,7 @@ fn hex_lower(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
     use mvm_core::crypto::attestation::SCHEMA_VERSION;
+    use rand::Rng;
 
     #[test]
     fn export_then_verify_self_round_trips_through_disk() {
@@ -277,7 +278,7 @@ mod tests {
 
         let other = {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             ed25519_dalek::SigningKey::from_bytes(&__ed_seed)
         }
         .verifying_key();

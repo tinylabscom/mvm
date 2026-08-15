@@ -6,7 +6,7 @@
 //! buffered in device state, so pause/resume and snapshot restoration cannot
 //! replay an earlier entropy block.
 
-use rand::RngCore;
+use rand::TryRng;
 use virtio_queue::desc::split::Descriptor;
 use virtio_queue::{QueueOwnedT, QueueT};
 
@@ -59,7 +59,7 @@ struct OsEntropy;
 
 impl EntropySource for OsEntropy {
     fn fill(&mut self, bytes: &mut [u8]) -> bool {
-        rand::rngs::OsRng.try_fill_bytes(bytes).is_ok()
+        rand::rngs::SysRng.try_fill_bytes(bytes).is_ok()
     }
 }
 

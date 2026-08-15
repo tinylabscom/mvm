@@ -6,7 +6,7 @@
 //! the public key the supervisor should use to verify.
 //!
 //! Today this is the software in-memory key path. The key is generated
-//! at subprocess boot from `OsRng` and held in memory (mlock-pinning is
+//! at subprocess boot from a CSPRNG and held in memory (mlock-pinning is
 //! a supervisor-side resource cap; the crate itself stays free of
 //! platform-specific syscalls). A later pass swaps the in-memory path
 //! for an HW enclave handle (Apple Secure Enclave / Linux TPM 2.0).
