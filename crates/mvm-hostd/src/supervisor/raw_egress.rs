@@ -394,6 +394,27 @@ fn handle_raw_conn_blocking(
     rate_guard: Arc<egress_rate::EgressRateGuard>,
     timeout: Duration,
 ) -> std::io::Result<()> {
+    handle_raw_conn_blocking_with_resolver(conn_fd, gate, recorder, rate_guard, timeout, |host| {
+        resolve_hostname_ips_pure(host, timeout)
+    })
+}
+
+/// [`handle_raw_conn_blocking`] with the hostname resolver injected, for the same
+/// reason as [`handle_raw_conn_with_resolver`]: the tunnel-limit refusal is a
+/// one-byte nack indistinguishable on the wire from a policy refusal, so "the
+/// target was never resolved" is the only hermetic way to witness the bound.
+#[cfg(target_os = "linux")]
+fn handle_raw_conn_blocking_with_resolver<F>(
+    conn_fd: std::os::fd::RawFd,
+    gate: &EgressGate,
+    recorder: Option<Arc<Recorder>>,
+    rate_guard: Arc<egress_rate::EgressRateGuard>,
+    timeout: Duration,
+    resolve: F,
+) -> std::io::Result<()>
+where
+    F: Fn(&str) -> std::io::Result<Vec<IpAddr>>,
+{
     let owned = unsafe { OwnedFd::from_raw_fd(conn_fd) };
     let mut guest = std::fs::File::from(owned);
 
@@ -431,22 +452,21 @@ fn handle_raw_conn_blocking(
         write_connect_ack_blocking(&mut guest, ConnectAck::Fail)?;
         return Ok(());
     };
-    let (ips, port) =
-        match gate.decide_request_with(&target, |host| resolve_hostname_ips_pure(host, timeout)) {
-            EgressVerdict::Allow { ips, port } => (ips, port),
-            // As on the async path: a raw tunnel answers with a one-byte nack,
-            // so the reason is logged host-side rather than discarded.
-            verdict @ (EgressVerdict::Deny(_) | EgressVerdict::Malformed) => {
-                match verdict {
-                    EgressVerdict::Deny(reason) => {
-                        eprintln!("raw-egress: refusing target {target}: {reason}")
-                    }
-                    _ => eprintln!("raw-egress: refusing malformed target {target}"),
+    let (ips, port) = match gate.decide_request_with(&target, &resolve) {
+        EgressVerdict::Allow { ips, port } => (ips, port),
+        // As on the async path: a raw tunnel answers with a one-byte nack,
+        // so the reason is logged host-side rather than discarded.
+        verdict @ (EgressVerdict::Deny(_) | EgressVerdict::Malformed) => {
+            match verdict {
+                EgressVerdict::Deny(reason) => {
+                    eprintln!("raw-egress: refusing target {target}: {reason}")
                 }
-                write_connect_ack_blocking(&mut guest, ConnectAck::Fail)?;
-                return Ok(());
+                _ => eprintln!("raw-egress: refusing malformed target {target}"),
             }
-        };
+            write_connect_ack_blocking(&mut guest, ConnectAck::Fail)?;
+            return Ok(());
+        }
+    };
 
     let upstream = match connect_first_admitted_blocking(&ips, port, timeout) {
         Some(stream) => stream,
@@ -1361,6 +1381,91 @@ mod tests {
         assert!(
             guard.try_admit_tunnel().is_some(),
             "the refused connection must have released its tunnel slot"
+        );
+    }
+
+    /// The vsock leg of the same bound. Identical trap: the nack byte is also
+    /// what a policy refusal and a failed upstream connect send, so the witness
+    /// is that a full pool never reached the resolver.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_exhausted_tunnel_pool_refuses_before_resolving_on_the_vsock_leg() {
+        let lookups = Arc::new(AtomicUsize::new(0));
+        let probe = Arc::clone(&lookups);
+        let (mut client, server) = UnixStream::pair().unwrap();
+        let guard = Arc::new(
+            egress_rate::EgressRateGuard::builder()
+                .max_tunnels(0)
+                .build(),
+        );
+        let handler = std::thread::spawn(move || {
+            handle_raw_conn_blocking_with_resolver(
+                server.into_raw_fd(),
+                &unrestricted_gate(),
+                None,
+                guard,
+                Duration::from_secs(1),
+                move |_host| {
+                    probe.fetch_add(1, Ordering::Relaxed);
+                    Ok(Vec::new())
+                },
+            )
+        });
+        client.write_all(b"blocked.test:80\n").unwrap();
+
+        let mut ack = [0_u8; 1];
+        client.read_exact(&mut ack).unwrap();
+        assert_eq!(ack[0], ConnectAck::Fail.as_byte());
+        handler.join().unwrap().unwrap();
+        let mut rest = Vec::new();
+        client.read_to_end(&mut rest).unwrap();
+        assert!(rest.is_empty(), "no tunnel bytes after a Fail ack");
+
+        assert_eq!(
+            lookups.load(Ordering::Relaxed),
+            0,
+            "a full tunnel pool must refuse before the host does any DNS work"
+        );
+    }
+
+    /// Companion to the test above: with a slot free the same input does reach
+    /// the resolver, so the zero there is the limiter and not a fixture that
+    /// never resolves anything.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_available_tunnel_slot_reaches_the_resolver_on_the_vsock_leg() {
+        let lookups = Arc::new(AtomicUsize::new(0));
+        let probe = Arc::clone(&lookups);
+        let (mut client, server) = UnixStream::pair().unwrap();
+        let guard = Arc::new(
+            egress_rate::EgressRateGuard::builder()
+                .max_tunnels(1)
+                .build(),
+        );
+        let handler = std::thread::spawn(move || {
+            handle_raw_conn_blocking_with_resolver(
+                server.into_raw_fd(),
+                &unrestricted_gate(),
+                None,
+                guard,
+                Duration::from_secs(1),
+                move |_host| {
+                    probe.fetch_add(1, Ordering::Relaxed);
+                    Ok(Vec::new())
+                },
+            )
+        });
+        client.write_all(b"blocked.test:80\n").unwrap();
+
+        let mut ack = [0_u8; 1];
+        client.read_exact(&mut ack).unwrap();
+        assert_eq!(ack[0], ConnectAck::Fail.as_byte());
+        handler.join().unwrap().unwrap();
+
+        assert_eq!(
+            lookups.load(Ordering::Relaxed),
+            1,
+            "an admitted tunnel resolves its target"
         );
     }
 

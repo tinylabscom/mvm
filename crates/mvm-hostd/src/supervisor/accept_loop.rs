@@ -51,9 +51,29 @@ pub fn classify_accept_error(err: &io::Error, consecutive: u32) -> AcceptAction 
         | io::ErrorKind::OutOfMemory => true,
         // EMFILE/ENFILE/ENOBUFS have no stable `ErrorKind`, so they only ever
         // arrive as a raw errno.
+        //
+        // The second group is what `accept(2)` reports about the *pending
+        // connection* rather than about the listener. Linux passes errors
+        // already pending on the new socket back through the accept call, and
+        // the man page is explicit that an application should treat them like
+        // EAGAIN and retry. Omitting them is not neutral: the terminator loop
+        // is bound to a real TcpListener, so a single EPROTO there would end
+        // transparent egress for that VM permanently — the exact failure this
+        // module exists to prevent, arriving through a different errno.
         _ => matches!(
             err.raw_os_error(),
-            Some(libc::EMFILE) | Some(libc::ENFILE) | Some(libc::ENOBUFS) | Some(libc::ENOMEM)
+            Some(libc::EMFILE)
+                | Some(libc::ENFILE)
+                | Some(libc::ENOBUFS)
+                | Some(libc::ENOMEM)
+                | Some(libc::EPROTO)
+                | Some(libc::EPERM)
+                | Some(libc::ENOSR)
+                | Some(libc::ETIMEDOUT)
+                | Some(libc::ENETDOWN)
+                | Some(libc::ENETUNREACH)
+                | Some(libc::EHOSTUNREACH)
+                | Some(libc::EOPNOTSUPP)
         ),
     };
     if transient {
@@ -145,9 +165,42 @@ mod tests {
     }
 
     #[test]
+    fn a_pending_connections_network_error_retries_rather_than_ending_the_terminator() {
+        // Linux `accept()` reports errors already pending on the *new* socket
+        // through the accept call. The man page is explicit that these should be
+        // treated like EAGAIN and retried — they describe one dead connection
+        // attempt, never the listener. This matters for `serve_terminator`,
+        // which is the one loop bound to a real TcpListener: without this, a
+        // single EPROTO permanently ends transparent egress for that VM.
+        for code in [
+            libc::EPROTO,
+            libc::EPERM,
+            libc::ENETDOWN,
+            libc::ENETUNREACH,
+            libc::EHOSTUNREACH,
+            libc::ETIMEDOUT,
+            libc::EOPNOTSUPP,
+        ] {
+            assert!(
+                matches!(
+                    classify_accept_error(&errno(code), 0),
+                    AcceptAction::Retry(_)
+                ),
+                "errno {code} is a pending connection's error, not the listener's"
+            );
+        }
+    }
+
+    #[test]
     fn unrecognised_errors_are_fatal_rather_than_spinning() {
+        // Pinned to an errno `accept(2)` can genuinely produce but that says
+        // nothing characterised about the listener. The earlier pin was `EDOM`,
+        // which `accept` cannot return at all — so the assertion held for every
+        // errno that mattered and the missing pending-connection family went
+        // unnoticed. A fatal-by-default policy is only honest if its test uses
+        // an error the syscall can actually raise.
         assert_eq!(
-            classify_accept_error(&errno(libc::EDOM), 0),
+            classify_accept_error(&errno(libc::EFAULT), 0),
             AcceptAction::Fatal
         );
     }

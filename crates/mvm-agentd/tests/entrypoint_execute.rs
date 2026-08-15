@@ -49,6 +49,25 @@ fn make_wrapper() -> (tempfile::TempDir, ValidatedEntrypoint) {
 /// timeout path set their own short deadlines and are left alone.
 const RESULT_TEST_DEADLINE: Duration = Duration::from_secs(60);
 
+/// Execution deadline for the tests that assert on output a *still-running*
+/// wrapper produced — where the deadline is the thing that ends the call, but
+/// the assertion is about bytes captured before it fired.
+///
+/// Those tests race fork/exec: the wrapper has to be scheduled, write, and be
+/// polled once, all inside the deadline. At 300 ms that race is lost often
+/// enough to matter under a loaded machine, and it fails as an empty capture —
+/// `gaps=0 stdout_len=0` — which reads like the retention logic broke rather
+/// than like the child never ran. It is the same mistake the result-oriented
+/// tests above already corrected: a spawn deadline used as an assertion.
+///
+/// Three seconds makes spawn negligible without slowing the suite: these
+/// wrappers never exit, so the deadline *is* the test's runtime, and this
+/// crate's slowest test already sits above it. The retention property itself
+/// is pinned hermetically by
+/// `stream_pump::tests::a_cap_breach_prunes_and_marks_a_gap_without_killing_the_child`,
+/// which needs no child at all.
+const RUNNING_WRAPPER_DEADLINE: Duration = Duration::from_secs(3);
+
 fn caps_with_timeout(stdout_max: usize, stderr_max: usize) -> CallCaps {
     CallCaps {
         stdin_max: 1024 * 1024,
@@ -331,7 +350,7 @@ fn test_execute_stdout_cap_prunes_and_marks_a_gap_without_killing_the_wrapper() 
         &entry,
         tmp.path(),
         b"UNBOUNDED_STDOUT\n\n",
-        Duration::from_millis(300),
+        RUNNING_WRAPPER_DEADLINE,
         caps,
         Vec::new(),
     );
@@ -374,7 +393,7 @@ fn test_execute_wrapper_cannot_forge_an_agent_gap_record_on_fd3() {
         b"FD3_HEX 4d0000007b226b696e64223a226d766d2e73747265616d2e676170222c2261667465725f736571223a39392c2264726f707065645f6368756e6b73223a312c2264726f707065645f6279746573223a317d00000000\n\
           FD3_HEX 120000007b226b696e64223a226170702e6c6f67227d00000000\n\
           UNBOUNDED_STDOUT\n\n",
-        Duration::from_millis(300),
+        RUNNING_WRAPPER_DEADLINE,
         caps,
         Vec::new(),
     );

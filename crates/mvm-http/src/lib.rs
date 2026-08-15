@@ -20,11 +20,13 @@ mod client;
 mod conn;
 mod error;
 pub mod parse;
+pub mod proxy;
 pub mod resolve;
 mod response;
 
 pub use client::{Client, ClientBuilder, RequestBuilder, TlsVersion};
 pub use error::{Error, Result};
+pub use proxy::{NoProxy, Proxy, ProxyConfig, ProxyError, ProxyKind};
 pub use resolve::{PinnedResolver, Resolve, SystemResolver};
 pub use response::Response;
 

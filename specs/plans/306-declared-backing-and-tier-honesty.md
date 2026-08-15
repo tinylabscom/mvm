@@ -134,6 +134,41 @@ What we already have, and therefore what this plan does **not** redo:
       the point is that the vocabulary admits the case the product will need
       without shipping an env var that turns enforcement off.
 
+      **Partially landed, and the premise needs correcting.** Three findings
+      from auditing this against the tree:
+
+      1. **There is no escape hatch to replace.**
+         `MVM_ACK_UNRESTRICTED_NETWORK` is read nowhere in the workspace; its
+         only occurrence is a doc comment in `mvm-contract::stream::edge`
+         saying another mechanism is "shaped after" it. Neither is there the
+         unrestricted warning CLAUDE.md claimed — `mvmctl up` is not a
+         dispatched verb (`up::Args` is not a `Commands` variant, so its
+         `--network-preset` and `--network-allow` are unreachable CLI
+         surface). Nothing is bypassing enforcement, but nothing warns
+         either. CLAUDE.md's claim 10 is corrected.
+      2. **`specs/plans/296` E7 rests on that fiction**, citing
+         "unrestricted egress requires `MVM_ACK_UNRESTRICTED_NETWORK=1`" as
+         prior art for the stream-edge redaction opt-out. The design may
+         still be right; the precedent it names is not there.
+      3. **The predicate algebra has no grammar to pin.** `NetworkPolicy` is
+         `Preset | AllowList` with no negation and no multi-grant
+         composition, and `policy::resolver`'s own docs say deny-wins "comes
+         online once the sub-policy types grow allow/deny pairs". Deny-wins
+         and union cannot be tested into existence.
+
+      Landed: `crates/mvm-contract/tests/egress_predicate_algebra.rs` pins the
+      part that is real and was untested — an unrecognised preset **refuses**
+      rather than falling through to `Unrestricted` (the first-declared
+      variant, and what a careless `Default` derive would select), at the CLI
+      and through serde alike; names are case-sensitive; an empty allow-list
+      admits nothing rather than reading as an absent constraint; and
+      `trusted_build_egress` stays a separately named constructor so a
+      broad-egress grant remains greppable.
+
+      Remaining before WS5 closes: build the enumerated deny-loud verdict
+      (not replace one), and either grow the allow/deny grammar or record that
+      deny-wins/union are not applicable to the current policy shape.
+
 - [x] **WS6 — Replay vectors for the audit chain's signed bytes.**
       `address_vectors.rs` covers `ir_hash` and Merkle; the audit chain's
       `CanonicalEntry` JCS bytes — the thing a third party verifies — has no

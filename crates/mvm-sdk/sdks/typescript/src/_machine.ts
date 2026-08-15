@@ -8,6 +8,12 @@
 
 import { cliResolutionHint, resolveCliBin } from "./_cli.js";
 
+// This package is ESM ("type": "module"), so `require` does not exist at
+// runtime. These node builtins are imported statically; a lazy `require` here
+// throws `ReferenceError: require is not defined` for every consumer of the
+// built artifact.
+import * as child from "node:child_process";
+
 export interface MachineResult {
   exitCode: number;
   stdout: string;
@@ -51,6 +57,11 @@ export interface MachineCheckArtifactOptions {
 }
 
 export interface MachineStartOptions {
+  /** Describe the machine to create when the named spec does not exist yet;
+   *  `machine start` auto-creates from these. */
+  image?: string;
+  cpus?: number;
+  memory?: string;
   receipt?: string;
   json?: boolean;
   dryRun?: boolean;
@@ -135,7 +146,6 @@ function runMachine(argv: string[]): MachineResult {
   }
   const full = [bin, "machine", ...argv];
   // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const child = require("node:child_process") as typeof import("node:child_process");
   let result;
   try {
     result = child.spawnSync(bin, ["machine", ...argv], { encoding: "utf-8" });
@@ -215,6 +225,9 @@ export function machineCheckArtifactArgv(options: MachineCheckArtifactOptions): 
 export function machineStartArgv(name: string, options: MachineStartOptions = {}): string[] {
   // `machine start` takes a positional name, not `--name`.
   const argv = ["start", requireString(name, "name")];
+  if (options.image !== undefined) argv.push("--image", requireString(options.image, "image"));
+  if (options.cpus !== undefined) argv.push("--cpus", String(options.cpus));
+  if (options.memory !== undefined) argv.push("--memory", requireString(options.memory, "memory"));
   if (options.receipt !== undefined) argv.push("--receipt", requireString(options.receipt, "receipt"));
   if (options.json) argv.push("--json");
   if (options.dryRun) argv.push("--dry-run");

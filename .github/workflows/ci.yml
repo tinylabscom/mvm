@@ -36,6 +36,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       code: ${{ steps.validate.outputs.code }}
+      bdd: ${{ steps.validate.outputs.bdd }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -54,6 +55,7 @@ jobs:
 
           set_all() {
             echo "code=true" >> "$GITHUB_OUTPUT"
+            echo "bdd=true" >> "$GITHUB_OUTPUT"
           }
 
           if [ "$EVENT" = "workflow_dispatch" ]; then
@@ -85,15 +87,35 @@ jobs:
             echo "code=false" >> "$GITHUB_OUTPUT"
           fi
 
+          # The Gherkin scenarios drive the real `mvmctl` binary and the built
+          # language SDKs, so the drift they catch lives in four places: the SDK
+          # sources, the CLI surface those SDKs shell to, the scenarios and
+          # their fixtures, and the golden argv corpus binding the two.
+          #
+          # Deliberately narrower than the full suite's reach: scenarios over
+          # egress, snapshots and verified boot are driven by crates outside
+          # this filter and remain covered only by the release-tag `bdd` lane.
+          # Widening that is a separate call about PR latency, not an oversight.
+          if grep -zE '^(crates/mvm-sdk/|crates/mvm-cli/|crates/mvm-conformance/|features/|tests/machine-fixtures/|\.github/workflows/(ci|bdd)\.yml$|[Jj]ustfile$)' "$CHANGED_FILE" >/dev/null; then
+            echo "bdd=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "bdd=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Validate classification
         id: validate
         env:
           CODE: ${{ steps.decide.outputs.code }}
+          BDD: ${{ steps.decide.outputs.bdd }}
         run: |
           set -euo pipefail
           case "$CODE" in
             true|false) echo "code=$CODE" >> "$GITHUB_OUTPUT" ;;
             *) echo "::error::invalid or missing code scope: $CODE" >&2; exit 1 ;;
+          esac
+          case "$BDD" in
+            true|false) echo "bdd=$BDD" >> "$GITHUB_OUTPUT" ;;
+            *) echo "::error::invalid or missing bdd scope: $BDD" >&2; exit 1 ;;
           esac
 
   lint-core:
@@ -506,10 +528,19 @@ jobs:
             fi
           done
 
+  # The Gherkin scenarios previously ran only from release-tag workflows, so a
+  # PR could break a scenario and merge green. Same reusable workflow the
+  # release path calls, gated on the narrower `bdd` scope.
+  bdd-conformance:
+    name: BDD conformance
+    needs: [scope]
+    if: needs.scope.outputs.bdd == 'true'
+    uses: ./.github/workflows/bdd.yml
+
   test:
     name: Test
     if: ${{ always() }}
-    needs: [scope, test-workspace, test-linux, test-release-witness, test-ebpf-telemetry]
+    needs: [scope, test-workspace, test-linux, test-release-witness, test-ebpf-telemetry, bdd-conformance]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -521,6 +552,8 @@ jobs:
           LINUX_RESULT: ${{ needs.test-linux.result }}
           RELEASE_WITNESS_RESULT: ${{ needs.test-release-witness.result }}
           EBPF_RESULT: ${{ needs.test-ebpf-telemetry.result }}
+          SCOPE_BDD: ${{ needs.scope.outputs.bdd }}
+          BDD_RESULT: ${{ needs.bdd-conformance.result }}
         run: |
           set -euo pipefail
           if [ "$SCOPE_RESULT" != success ]; then
@@ -538,6 +571,17 @@ jobs:
               exit 1
             fi
           done
+          # The BDD lane keys off its own narrower scope, so it is matched
+          # separately rather than folded into the loop above.
+          case "$SCOPE_BDD" in
+            true) bdd_required=success ;;
+            false) bdd_required=skipped ;;
+            *) echo "Invalid bdd scope: $SCOPE_BDD"; exit 1 ;;
+          esac
+          if [ "$BDD_RESULT" != "$bdd_required" ]; then
+            echo "BDD conformance did not match scope $SCOPE_BDD: $BDD_RESULT"
+            exit 1
+          fi
 
   test-workspace:
     name: Test workspace

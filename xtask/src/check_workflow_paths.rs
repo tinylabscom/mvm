@@ -469,17 +469,22 @@ mod tests {
         let test = job_block(&workflow, "test");
         assert!(test.contains("name: Test"));
         assert!(test.contains(
-            "needs: [scope, test-workspace, test-linux, test-release-witness, test-ebpf-telemetry]"
+            "needs: [scope, test-workspace, test-linux, test-release-witness, \
+             test-ebpf-telemetry, bdd-conformance]"
         ));
 
         // Every lane the aggregate names must also be read back in the loop that
         // compares results against the scope decision. A lane in `needs` but not
         // in the loop is gated on nothing but its own scheduling.
+        // `bdd-conformance` keys off its own narrower scope, so it is matched
+        // against `$SCOPE_BDD` outside the loop rather than folded into it —
+        // but it still has to be read back somewhere, which is what this pins.
         for expected in [
             "\"$WORKSPACE_RESULT\"",
             "\"$LINUX_RESULT\"",
             "\"$RELEASE_WITNESS_RESULT\"",
             "\"$EBPF_RESULT\"",
+            "\"$BDD_RESULT\"",
         ] {
             assert!(
                 test.contains(expected),

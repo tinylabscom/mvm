@@ -40,6 +40,9 @@ toolchain-embed:
 build:
     cargo build --workspace
 
+# `--all-targets` is narrower than it sounds: it skips any target behind
+# `required-features`, and on macOS it cannot compile `cfg(target_os = "linux")`
+# files at all. `check-gated` covers both.
 # Type-check without codegen
 check:
     cargo check --workspace --all-targets
@@ -51,10 +54,36 @@ check:
 # `cargo install cargo-zigbuild`, a `zig` on PATH, and
 # `rustup target add x86_64-unknown-linux-gnu`. musl is intentionally not the
 # default — libc's ioctl request arg is c_int there vs c_ulong on glibc, so the
-
 # COW FICLONE path (mvm-runtime) only type-checks against glibc.
+# Cross-compile every crate's lib for Linux via zig
 check-linux TARGET="x86_64-unknown-linux-gnu":
     cargo zigbuild --target {{ TARGET }} --workspace --lib --all-features
+
+# Type-check the targets `just check` cannot see. Two blind spots, both of which
+# have shipped a red CI run that named neither:
+#
+#   1. `cfg(target_os = "linux")` *test* files. `check-linux` above is --lib
+#      only, so a Linux-gated test target is checked by nothing local. This
+#      surfaces in CI as `check-nextest-groups` failing with "cargo nextest list
+#      failed" — a message that never names the file or the field.
+#   2. Targets behind `required-features` (mvm-conformance's cucumber runner).
+#      `--all-targets` skips them silently: without `--features bdd` the same
+#      broken tree reports zero errors.
+#
+# `check` rather than a build, so nothing links — that is the constraint that
+# forces `check-linux` to stay lib-only. Same prerequisites as `check-linux`
+# (cargo-zigbuild, zig on PATH, the rustup target). Note the binary is invoked
+# as `cargo-zigbuild check`: `cargo zigbuild check` is a different subcommand
+# and errors on the argument.
+#
+# Not folded into `ci`: it needs a zig toolchain that not every contributor has
+# (the same reason `check-linux` is opt-in), and a cold run costs ~8 min because
+# it type-checks the whole workspace for a second target. Run it before pushing
+# anything that changes a shared type's shape; a warm run is far cheaper.
+# Type-check the linux-gated and feature-gated targets `just check` cannot see
+check-gated TARGET="x86_64-unknown-linux-gnu":
+    cargo-zigbuild check --target {{ TARGET }} --workspace --all-targets
+    cargo check -p mvm-conformance --all-targets --features bdd
 
 # Bare-metal no_std proof for the embeddable foundation crate (mvm-contract).
 # A `-none-elf` target exposes only core + alloc with no std to leak into, so
@@ -161,12 +190,24 @@ test:
 test-doc:
     cargo test --workspace --doc
 
-# Run tests with sccache wrapping rustc — caches compilation across
-# worktrees/branches (a content cache, not a build lock, so parallel
-# sessions don't serialize on it). Incremental is OFF because sccache and
-# incremental compilation are mutually exclusive: this trades inner-loop
-
-# incremental for cross-worktree cache hits. Needs `cargo install sccache`.
+# Run tests with sccache also caching the workspace crates.
+#
+# The wrapper itself is not what this recipe adds. `RUSTC_WRAPPER = "sccache"`
+# belongs in a contributor's own `~/.cargo/config.toml` (a fact about a host
+# that runs many worktrees, not about the project), and there it already caches
+# every third-party dependency, because cargo compiles dependencies
+# non-incrementally regardless of this setting.
+#
+# What `CARGO_INCREMENTAL=0` adds is the *workspace* crates, which are the ones
+# incremental compilation otherwise keeps out of the cache. That is a good
+# trade for a full-suite run — incremental buys nothing when everything is
+# being compiled anyway — and a bad one for the inner loop, which is why it is
+# scoped to this recipe instead of being set globally.
+#
+# A content cache, not a build lock, so parallel sessions don't serialize on it.
+# Needs `cargo install sccache`. For cross-worktree hits the host config also
+# needs `basedirs`; without it every worktree is a private cache and the
+# measured hit rate is 0%.
 test-cached:
     @command -v sccache >/dev/null || { echo "sccache not found — install with: cargo install sccache"; exit 1; }
     RUSTC_WRAPPER=sccache CARGO_INCREMENTAL=0 cargo nextest run --workspace

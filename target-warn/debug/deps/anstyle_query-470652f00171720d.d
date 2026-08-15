@@ -1,0 +1,8 @@
+/Users/auser/work/tinylabs/mvmco/.worktrees/mvm-2507-wallclock/target-warn/debug/deps/anstyle_query-470652f00171720d.d: /Users/auser/work/tinylabs/mvmco/.worktrees/mvm-remove-docker/.mvm-test/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/anstyle-query-1.1.5/src/lib.rs /Users/auser/work/tinylabs/mvmco/.worktrees/mvm-remove-docker/.mvm-test/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/anstyle-query-1.1.5/src/windows.rs
+
+/Users/auser/work/tinylabs/mvmco/.worktrees/mvm-2507-wallclock/target-warn/debug/deps/libanstyle_query-470652f00171720d.rlib: /Users/auser/work/tinylabs/mvmco/.worktrees/mvm-remove-docker/.mvm-test/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/anstyle-query-1.1.5/src/lib.rs /Users/auser/work/tinylabs/mvmco/.worktrees/mvm-remove-docker/.mvm-test/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/anstyle-query-1.1.5/src/windows.rs
+
+/Users/auser/work/tinylabs/mvmco/.worktrees/mvm-2507-wallclock/target-warn/debug/deps/libanstyle_query-470652f00171720d.rmeta: /Users/auser/work/tinylabs/mvmco/.worktrees/mvm-remove-docker/.mvm-test/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/anstyle-query-1.1.5/src/lib.rs /Users/auser/work/tinylabs/mvmco/.worktrees/mvm-remove-docker/.mvm-test/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/anstyle-query-1.1.5/src/windows.rs
+
+/Users/auser/work/tinylabs/mvmco/.worktrees/mvm-remove-docker/.mvm-test/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/anstyle-query-1.1.5/src/lib.rs:
+/Users/auser/work/tinylabs/mvmco/.worktrees/mvm-remove-docker/.mvm-test/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/anstyle-query-1.1.5/src/windows.rs:

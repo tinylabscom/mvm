@@ -1,0 +1,23 @@
+[package]
+name = "mvm-observability"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Tracing subscriber assembly for mvm host-side binaries"
+
+# Installing a global tracing subscriber is a *binary* concern, not a library
+# one, so it lives here rather than in the foundation crate every consumer
+# links. Keeping `tracing-subscriber` (and, later, any OTLP exporter) out of
+# `mvm-core` keeps it off the sealed guest agent and off the embedded musl
+# host binaries, which emit through the `tracing` facade and never install a
+# subscriber.
+[dependencies]
+mvm-core = { workspace = true }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+# The span-timing report is serde-round-tripped in tests only.
+serde_json.workspace = true

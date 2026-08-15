@@ -185,6 +185,20 @@ pub struct EndpointConfig {
     /// Forward-leg (host → destination) timeout, seconds.
     #[serde(default = "default_forward_timeout_secs")]
     pub forward_timeout_secs: u64,
+    /// Upstream proxy for the forward leg, as the spawner resolved it from
+    /// host configuration. Carried here rather than read from this process's
+    /// environment because the endpoint self-confines before serving and is
+    /// not the component that owns host configuration.
+    ///
+    /// Strings rather than a parsed type so the wire format stays inert; the
+    /// endpoint parses and reports a bad value instead of silently dialling
+    /// direct.
+    #[serde(default)]
+    pub proxy_https: Option<String>,
+    #[serde(default)]
+    pub proxy_http: Option<String>,
+    #[serde(default)]
+    pub no_proxy: Option<String>,
     /// Override the value-store base dir. Default: the host's
     /// `~/.mvm/secrets` (honors `MVM_HOME`).
     #[serde(default)]
@@ -315,6 +329,13 @@ pub fn assemble(
     // the redaction / reversible-replacement / TLS / recorder wiring; passing
     // `resolver` in means it no longer hardcodes a `LocalResolver`, so a
     // `Remote` backend actually reaches its `RemoteResolver`.
+    // Resolve the operator's proxy before building the service so a bad value
+    // is reported here rather than as an unexplained egress failure later.
+    let proxy = cfg.resolve_proxy()?;
+    if let Some(p) = proxy.as_ref() {
+        tracing::info!(proxy = %p.summary(), "forward leg routed through an upstream proxy");
+    }
+
     let (service, handed) = SubstitutionService::from_plan(
         crate::supervisor::network_endpoint_proxy::FromPlanInputs {
             plan_secrets: &cfg.secrets,
@@ -322,6 +343,7 @@ pub fn assemble(
             bindings: &bindings,
             resolver,
             forward_timeout_secs: cfg.forward_timeout_secs,
+            proxy,
             redaction: cfg.redaction.clone(),
             reversible_replacement: cfg.reversible_replacement.clone(),
             tls_intermediate,
@@ -464,6 +486,9 @@ mod tests {
             redaction: mvm_core::policy::RedactionPolicy::default(),
             reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
             forward_timeout_secs: 30,
+            proxy_https: None,
+            proxy_http: None,
+            no_proxy: None,
             secret_store_dir: Some(dir.join("secrets")),
             binding_store_dir: Some(dir.join("bindings")),
             terminator_listen: None,
@@ -1007,5 +1032,88 @@ mod tests {
         };
         let resolved = service.resolver().resolve(&secret_ref).unwrap();
         assert_eq!(resolved.expose_secret().as_slice(), b"sk-live-from-vault");
+    }
+}
+
+impl EndpointConfig {
+    /// Parse the carried proxy strings into a client configuration.
+    ///
+    /// `Ok(None)` means "dial direct"; an `Err` means the operator configured
+    /// something unusable and is reported rather than downgraded to a direct
+    /// dial. A host that force-tunnels its egress cannot reach anything
+    /// directly, so silently ignoring a typo would turn a fixable
+    /// misconfiguration into an unexplained total egress failure.
+    pub fn resolve_proxy(&self) -> Result<Option<mvm_http::ProxyConfig>, mvm_http::ProxyError> {
+        if self.proxy_https.is_none() && self.proxy_http.is_none() {
+            return Ok(None);
+        }
+        let parse = |s: &Option<String>| -> Result<Option<mvm_http::Proxy>, mvm_http::ProxyError> {
+            s.as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .map(mvm_http::Proxy::parse)
+                .transpose()
+        };
+        let cfg = mvm_http::ProxyConfig {
+            https: parse(&self.proxy_https)?,
+            http: parse(&self.proxy_http)?,
+            no_proxy: self
+                .no_proxy
+                .as_deref()
+                .map(mvm_http::NoProxy::parse)
+                .unwrap_or_default(),
+        };
+        Ok((!cfg.is_empty()).then_some(cfg))
+    }
+}
+
+#[cfg(test)]
+mod proxy_config_tests {
+    use super::*;
+
+    fn cfg_with(https: Option<&str>, http: Option<&str>, no_proxy: Option<&str>) -> EndpointConfig {
+        let mut cfg: EndpointConfig = serde_json::from_str(
+            r#"{"tenant_id":"t","secrets":[],"transport":{"kind":"uds","path":"/tmp/x.sock"}}"#,
+        )
+        .expect("minimal endpoint config parses");
+        cfg.proxy_https = https.map(str::to_string);
+        cfg.proxy_http = http.map(str::to_string);
+        cfg.no_proxy = no_proxy.map(str::to_string);
+        cfg
+    }
+
+    #[test]
+    fn no_proxy_fields_means_direct() {
+        assert!(
+            cfg_with(None, None, None)
+                .resolve_proxy()
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn each_scheme_resolves_independently() {
+        let cfg = cfg_with(
+            Some("http://secure.corp:3128"),
+            Some("socks5://plain.corp:1080"),
+            Some("internal.example"),
+        );
+        let resolved = cfg.resolve_proxy().unwrap().expect("configured");
+        assert_eq!(resolved.select("api.example", true).unwrap().port, 3128);
+        assert_eq!(
+            resolved.select("api.example", false).unwrap().kind,
+            mvm_http::ProxyKind::Socks5
+        );
+        assert!(
+            resolved.select("internal.example", true).is_none(),
+            "no_proxy still bypasses"
+        );
+    }
+
+    #[test]
+    fn a_malformed_proxy_is_an_error_not_a_silent_direct_dial() {
+        let cfg = cfg_with(Some("ftp://nope"), None, None);
+        assert!(cfg.resolve_proxy().is_err());
     }
 }

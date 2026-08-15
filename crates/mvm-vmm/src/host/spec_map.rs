@@ -11,7 +11,8 @@ use mvm_core::vm_backend::{VmStartConfig, VmVolumeKind};
 use mvm_net::channel::GuestService;
 
 use crate::driver::spec::{
-    BlockDev, ConsoleCapture, KernelImage, VirtioFsShare, VmmSpec, VsockDirection, VsockPort,
+    BlockDev, ConsoleCapture, KernelImage, PlanBinding, VirtioFsShare, VmmSpec, VsockDirection,
+    VsockPort,
 };
 
 /// The ordered virtio-blk list for a sealed workload: the read-only rootfs at
@@ -366,8 +367,30 @@ pub fn workload_device_spec(config: &VmStartConfig, cmdline: &str, console_log: 
         },
         shares: workload_shares(config),
         trusted_builder: false,
+        plan_binding: workload_plan_binding(config),
     }
 }
+
+/// The plan plus the audit paths a supervisor needs to enforce that plan's
+/// wall-clock bound and record the kill, or `None` when the launch carries no
+/// admitted plan.
+///
+/// Malformed `plan_json` yields `None` rather than an error: this mapping is
+/// infallible by construction, and a plan the supervisor cannot parse would
+/// fail its own re-verification regardless. Whether a bound actually exists is
+/// the supervisor's read of `resources.timeouts.exec_secs`; this only makes one
+/// enforceable.
+fn workload_plan_binding(config: &VmStartConfig) -> Option<PlanBinding> {
+    let plan_json = serde_json::from_str(config.plan_json.as_deref()?).ok()?;
+    Some(PlanBinding {
+        plan_json,
+        audit_dir: mvm_core::config::mvm_audit_dir(),
+        signing_key_path: mvm_core::config::mvm_keys_dir().join(HOST_SIGNER_KEY_FILE),
+    })
+}
+
+/// File name of the host signing key inside [`mvm_core::config::mvm_keys_dir`].
+const HOST_SIGNER_KEY_FILE: &str = "host-signer.ed25519";
 
 /// virtio-fs host directory shares derived from the launch config.
 ///
@@ -426,6 +449,54 @@ mod tests {
             rootfs_path: "/img/rootfs.ext4".into(),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn a_launch_carrying_an_admitted_plan_gets_a_plan_binding() {
+        let cfg = VmStartConfig {
+            plan_json: Some(r#"{"resources":{"timeouts":{"exec_secs":30}}}"#.into()),
+            ..base()
+        };
+        let spec = workload_device_spec(&cfg, "console=ttyS0", Path::new("/state/console.log"));
+        let binding = spec
+            .plan_binding
+            .expect("a launch with an admitted plan must carry the bound the supervisor enforces");
+        assert_eq!(binding.plan_json["resources"]["timeouts"]["exec_secs"], 30);
+        assert_eq!(
+            binding
+                .signing_key_path
+                .file_name()
+                .and_then(|n| n.to_str()),
+            Some("host-signer.ed25519"),
+            "the kill is signed under the host signer"
+        );
+        assert_eq!(
+            binding.audit_dir.file_name().and_then(|n| n.to_str()),
+            Some("audit"),
+            "the kill lands in the audit chain dir"
+        );
+    }
+
+    #[test]
+    fn a_launch_without_a_plan_has_no_binding() {
+        let spec = workload_device_spec(&base(), "console=ttyS0", Path::new("/state/console.log"));
+        assert!(
+            spec.plan_binding.is_none(),
+            "Stage 0 and the builder VM carry no plan, so they have no bound to enforce"
+        );
+    }
+
+    #[test]
+    fn an_unparseable_plan_yields_no_binding_rather_than_panicking() {
+        let cfg = VmStartConfig {
+            plan_json: Some("{not json".into()),
+            ..base()
+        };
+        let spec = workload_device_spec(&cfg, "console=ttyS0", Path::new("/state/console.log"));
+        assert!(
+            spec.plan_binding.is_none(),
+            "the mapping is infallible; a plan the supervisor cannot parse fails its own verify"
+        );
     }
 
     fn nodes(blocks: &[BlockDev]) -> Vec<String> {
