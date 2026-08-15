@@ -52,6 +52,7 @@
 mod builder;
 mod ctor;
 mod emit;
+pub mod env;
 mod error;
 #[cfg(feature = "client-facade")]
 pub mod facade;

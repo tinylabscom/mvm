@@ -12,7 +12,13 @@ import * as mvm from "../../../../crates/mvm-sdk/sdks/typescript/dist/index.js";
 
 const sandbox = mvm.Sandbox.create("python-3.12", { workloadId: "bdd-live" });
 const process_ = sandbox.commands.start(["python", "-c", "print('ok')"]);
-process_.wait();
+// `wait()` returns a Promise and spawns its child asynchronously, whereas
+// every other verb here is spawnSync. Left unawaited it races the next
+// synchronous call, so the recorded argv non-deterministically showed
+// `fs write` landing before `proc wait` — a ~50% flake against the golden
+// session. Awaiting it restores the sequential semantics the Python twin
+// has by construction, which is what this scenario compares.
+await process_.wait();
 sandbox.files.write("/app/hello.txt", "hello");
 sandbox.files.read("/app/hello.txt");
 sandbox.files.list("/app");

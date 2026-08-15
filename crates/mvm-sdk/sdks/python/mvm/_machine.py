@@ -21,8 +21,9 @@ from mvm._subprocess import (
     run_capped,
 )
 
-MVM_MACHINE_TIMEOUT_ENV = "MVM_MACHINE_TIMEOUT_SEC"
-MVM_MACHINE_MAX_OUTPUT_ENV = "MVM_MACHINE_MAX_OUTPUT_BYTES"
+# Owned by the Rust registry (crates/mvm-sdk/src/env.rs), generated into
+# `_env/vars.py`. Re-exported from this module for existing importers.
+from mvm._env.vars import MVM_MACHINE_MAX_OUTPUT_ENV, MVM_MACHINE_TIMEOUT_ENV
 
 
 @dataclass(frozen=True)

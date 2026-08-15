@@ -3,7 +3,15 @@
     "Reviewed divergence between the Python and TypeScript public surfaces.",
     "The BDD scenario fails when the real divergence stops matching this file,",
     "so a name can only appear or disappear here deliberately.",
-    "Regenerate intentionally; do not paste over a failure."
+    "Regenerate intentionally; do not paste over a failure.",
+    "",
+    "`typescript_only_absent_from_python` is empty and should stay that way:",
+    "every name TypeScript exports is now either shared or Rust-owned.",
+    "The two MVM_MACHINE_* names below are a *behaviour* gap, not a naming",
+    "one — the TypeScript machine wrapper does not bound its subprocess at",
+    "all, so it has nothing to read them with. They are deliberately not",
+    "emitted into TypeScript (see crates/mvm-sdk/src/env.rs), because a",
+    "constant nothing reads would clear this list while changing nothing."
   ],
   "python_only_type_erased_in_typescript": [
     "ExecResult",
@@ -50,8 +58,5 @@
     "warm_process",
     "workload_ref"
   ],
-  "typescript_only_absent_from_python": [
-    "MVM_SDK_MODE_ENV",
-    "MVM_SDK_OUT_PATH_ENV"
-  ]
+  "typescript_only_absent_from_python": []
 }
