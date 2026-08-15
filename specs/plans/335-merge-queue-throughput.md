@@ -1,5 +1,8 @@
 # Plan 335 — Merge-queue throughput
 
+Backing: preview
+Validation: none
+
 **Status:** IN PROGRESS
 
 ## Goal
