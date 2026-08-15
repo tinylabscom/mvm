@@ -40,10 +40,12 @@ build_valid_fixture() {
     printf 'bundle\n' > "$dir/mvmctl-$t.tar.gz.bundle"
     echo "$(sha256_of "$dir/mvmctl-$t.tar.gz")  mvmctl-$t.tar.gz" >> "$dir/checksums-sha256.txt"
   done
+  printf 'bundle\n' > "$dir/checksums-sha256.txt.bundle"
   for arch in $KERNEL_ARCHES; do
     printf 'kernel-%s-workload\n' "$arch" > "$dir/vmlinux-$arch-workload"
     : > "$dir/kernel-$arch-checksums-sha256.txt"
     echo "$(sha256_of "$dir/vmlinux-$arch-workload")  vmlinux-$arch-workload" >> "$dir/kernel-$arch-checksums-sha256.txt"
+    printf 'bundle\n' > "$dir/kernel-$arch-checksums-sha256.txt.bundle"
   done
   printf '{"sbom":true}\n' > "$dir/sbom.cdx.json"
   printf 'bundle\n' > "$dir/sbom.cdx.json.bundle"
@@ -55,6 +57,7 @@ build_valid_fixture() {
     for f in "builder-vm-$arch.pack-manifest.json" "builder-vm-$arch.pack-manifest.json.bundle" "builder-vm-$arch.sbom.txt"; do
       echo "$(sha256_of "$dir/$f")  $f" >> "$dir/builder-vm-$arch-checksums-sha256.txt"
     done
+    printf 'bundle\n' > "$dir/builder-vm-$arch-checksums-sha256.txt.bundle"
   done
   for arch in $RUNTIME_ARCHES; do
     printf '{"pack":"runtime-%s"}\n' "$arch" > "$dir/default-microvm-$arch.pack-manifest.json"
@@ -64,6 +67,7 @@ build_valid_fixture() {
     for f in "default-microvm-$arch.pack-manifest.json" "default-microvm-$arch.pack-manifest.json.bundle" "default-microvm-$arch.sbom.txt"; do
       echo "$(sha256_of "$dir/$f")  $f" >> "$dir/default-microvm-$arch-checksums-sha256.txt"
     done
+    printf 'bundle\n' > "$dir/default-microvm-$arch-checksums-sha256.txt.bundle"
   done
   echo "$dir"
 }
@@ -128,6 +132,22 @@ d="$(build_valid_fixture)"
 rm -f "$d/kernel-aarch64-checksums-sha256.txt"
 if run "$d"; then bad "missing kernel checksums manifest must fail"; else ok "missing kernel checksums manifest fails closed"; fi
 rm -rf "$d"
+
+# 9b. A checksum manifest without its signature bundle → fail closed.
+#
+# The manifest is what every downloader anchors on, so an unsigned one lets
+# whoever can swap an artifact swap its recorded digest too. Each of these
+# deletes only the bundle, leaving a manifest that still parses and still
+# matches its artifacts — the failure mode that is otherwise invisible until a
+# release ships.
+for manifest in checksums-sha256.txt kernel-aarch64-checksums-sha256.txt \
+                builder-vm-aarch64-checksums-sha256.txt \
+                default-microvm-aarch64-checksums-sha256.txt; do
+  d="$(build_valid_fixture)"
+  rm -f "$d/$manifest.bundle"
+  if run "$d"; then bad "unsigned $manifest must fail"; else ok "unsigned $manifest fails closed"; fi
+  rm -rf "$d"
+done
 
 # 10. Workload kernel present but absent from per-arch kernel manifest → fail.
 d="$(build_valid_fixture)"
