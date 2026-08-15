@@ -47,6 +47,95 @@ pub struct MvmRuntimeBinaries {
     pub verity_init: PathBuf,
 }
 
+/// Version tag on the digest encoding itself. Bump only when the *framing*
+/// below changes (field order, separators), which would otherwise make two
+/// different encodings collide. Not a content epoch — content is covered by
+/// the bytes.
+const CONTENT_DIGEST_FRAMING: &str = "mvm-runtime-id-v1";
+
+impl MvmRuntimeBinaries {
+    /// The six artifacts in a fixed order, tagged with the name each is
+    /// digested under.
+    ///
+    /// One place defines the set, so [`content_digest`](Self::content_digest)
+    /// and any caller that wants to stat the same files cannot disagree about
+    /// what "the injected runtime" is.
+    pub fn artifacts(&self) -> [(&'static str, &Path); 6] {
+        [
+            ("oci_init", self.oci_init.as_path()),
+            ("agent", self.agent.as_path()),
+            ("netinit", self.netinit.as_path()),
+            ("egress_client", self.egress_client.as_path()),
+            ("entrypoint_runner", self.entrypoint_runner.as_path()),
+            ("verity_init", self.verity_init.as_path()),
+        ]
+    }
+
+    /// Digest over the bytes of every artifact injected into a rootfs, plus
+    /// the injection layout that is not itself a file.
+    ///
+    /// This is the rootfs cache identity. It is derived from the artifacts
+    /// that actually get copied in, so a rebuilt `/init` or egress shim
+    /// invalidates every cached rootfs without anyone remembering to say so.
+    /// The layout component ([`INJECT_DIRS`] + [`INJECT_DESTS`]) covers the
+    /// part of the injection a byte digest cannot see: a mountpoint added or a
+    /// destination moved changes what a sealed image can do at boot.
+    pub fn content_digest(&self) -> Result<String, io::Error> {
+        self.content_digest_with_shape(&inject_shape_bytes())
+    }
+
+    /// [`Self::content_digest`] with the layout component supplied, so a test
+    /// can vary it without re-deriving the artifact encoding.
+    fn content_digest_with_shape(&self, shape: &[u8]) -> Result<String, io::Error> {
+        use sha2::{Digest, Sha256};
+
+        let mut h = Sha256::new();
+        h.update(CONTENT_DIGEST_FRAMING.as_bytes());
+        h.update([0u8]);
+
+        for (name, path) in self.artifacts() {
+            let bytes = std::fs::read(path).map_err(|e| {
+                io::Error::new(
+                    e.kind(),
+                    format!("read runtime artifact {name} at {}: {e}", path.display()),
+                )
+            })?;
+            h.update(name.as_bytes());
+            h.update([0u8]);
+            // Framing hygiene, not load-bearing today: the field set is fixed
+            // in order, count and tag, so no artifact's content can forge a
+            // neighbouring field's framing and there is no mutation of this
+            // line a test can catch. It keeps the encoding unambiguous if the
+            // set ever becomes variable-length.
+            h.update((bytes.len() as u64).to_le_bytes());
+            h.update(&bytes);
+            h.update([0u8]);
+        }
+
+        h.update(shape);
+
+        Ok(hex::encode(h.finalize()))
+    }
+}
+
+/// The injection layout, serialized. Split from [`MvmRuntimeBinaries::
+/// content_digest`] so the layout's contribution is independently testable —
+/// a test that re-derived the whole encoding inline would pass no matter what
+/// the production digest folded in.
+fn inject_shape_bytes() -> Vec<u8> {
+    let mut out = b"inject-shape\0".to_vec();
+    for (rel, mode) in INJECT_DIRS {
+        out.extend_from_slice(rel.as_bytes());
+        out.push(0);
+        out.extend_from_slice(&mode.to_le_bytes());
+    }
+    for dest in INJECT_DESTS {
+        out.extend_from_slice(dest.as_bytes());
+        out.push(0);
+    }
+    out
+}
+
 /// Shell-free runtime config for an OCI image's declared Entrypoint/Cmd.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct OciEntrypointConfig {
@@ -64,6 +153,43 @@ const ENTRYPOINT_RUNNER_DEST: &str = "usr/lib/mvm/wrappers/oci-entrypoint";
 const ENTRYPOINT_MARKER_DEST: &str = "etc/mvm/entrypoint";
 const OCI_ENTRYPOINT_CONFIG_DEST: &str = "etc/mvm/oci-entrypoint.json";
 const VERB_TRUST_DEST: &str = "etc/mvm/verb-trust.json";
+
+/// Directories `inject_mvm_runtime` creates in the target rootfs, with their
+/// modes. Named rather than inline so [`MvmRuntimeBinaries::content_digest`]
+/// can fold the layout into the identity: a rootfs sealed before a mountpoint
+/// was added cannot create it at boot, so changing this table must invalidate
+/// already-materialized images.
+const INJECT_DIRS: &[(&str, u32)] = &[
+    ("proc", 0o755),
+    ("sys", 0o755),
+    ("dev", 0o755),
+    ("dev/pts", 0o755),
+    ("dev/shm", 0o1777),
+    ("run", 0o755),
+    ("tmp", 0o1777),
+    ("mnt", 0o755),
+    ("data", 0o755),
+    ("work", 0o755),
+    ("mvm/runtime", 0o755),
+    ("mvm/sdk", 0o755),
+    ("usr/lib/mvm/wrappers", 0o755),
+];
+
+/// Every destination path `inject_mvm_runtime` writes, in a fixed order.
+/// Folded into the content digest alongside [`INJECT_DIRS`] so a moved
+/// destination re-materializes stale images.
+const INJECT_DESTS: &[&str] = &[
+    AGENT_DEST,
+    NETINIT_DEST,
+    EGRESS_CLIENT_DEST,
+    ENTRYPOINT_RUNNER_DEST,
+    ENTRYPOINT_MARKER_DEST,
+    OCI_ENTRYPOINT_CONFIG_DEST,
+    VERB_TRUST_DEST,
+    "init",
+    "etc/mvm/variant",
+    "etc/mvm/name",
+];
 
 /// Which runtime shape to inject into an OCI-prepared rootfs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -98,22 +224,8 @@ pub fn inject_mvm_runtime(
         ));
     }
 
-    for (rel, mode) in [
-        ("proc", 0o755),
-        ("sys", 0o755),
-        ("dev", 0o755),
-        ("dev/pts", 0o755),
-        ("dev/shm", 0o1777),
-        ("run", 0o755),
-        ("tmp", 0o1777),
-        ("mnt", 0o755),
-        ("data", 0o755),
-        ("work", 0o755),
-        ("mvm/runtime", 0o755),
-        ("mvm/sdk", 0o755),
-        ("usr/lib/mvm/wrappers", 0o755),
-    ] {
-        ensure_dir(rootfs_dir, rel, mode)?;
+    for (rel, mode) in INJECT_DIRS {
+        ensure_dir(rootfs_dir, rel, *mode)?;
     }
     let runtime_dir = rootfs_dir.join("mvm").join("runtime");
 
@@ -233,6 +345,198 @@ fn set_mode(_path: &Path, _mode: u32) -> Result<(), io::Error> {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    /// The identity must come from the artifacts' bytes, not their paths.
+    /// A rebuilt binary at an unchanged path is exactly the case the old
+    /// hand-bumped epoch constant existed to catch by hand.
+    #[test]
+    fn content_digest_tracks_bytes_not_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let bins = fake_bins(dir.path());
+        let before = bins.content_digest().unwrap();
+
+        // Same length, different bytes: the length prefix must not be what
+        // carries this assertion, or a path-only digest would still pass.
+        std::fs::write(&bins.agent, b"\x7fELF-AGENT").unwrap();
+        let after = bins.content_digest().unwrap();
+        assert_eq!(
+            std::fs::metadata(&bins.agent).unwrap().len(),
+            b"\x7fELF-agent".len() as u64,
+            "the perturbation must not change the artifact's length"
+        );
+
+        assert_ne!(
+            before, after,
+            "a rebuilt artifact at the same path must not keep the old identity"
+        );
+    }
+
+    #[test]
+    fn content_digest_is_stable_for_unchanged_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let bins = fake_bins(dir.path());
+        assert_eq!(
+            bins.content_digest().unwrap(),
+            bins.content_digest().unwrap(),
+            "identical bytes must reuse the cached rootfs, not re-materialize it"
+        );
+    }
+
+    /// Every artifact in the set must be covered.
+    ///
+    /// The field list here is written out deliberately rather than taken from
+    /// [`MvmRuntimeBinaries::artifacts`]: driving the test from the same
+    /// function it is checking would let a dropped artifact pass, because the
+    /// test would simply stop looking at it too. Adding a seventh injected
+    /// binary fails to compile here until it is added to both.
+    #[test]
+    fn content_digest_covers_every_injected_artifact() {
+        let dir = tempfile::tempdir().unwrap();
+        let bins = fake_bins(dir.path());
+        let baseline = bins.content_digest().unwrap();
+
+        let MvmRuntimeBinaries {
+            oci_init,
+            agent,
+            netinit,
+            egress_client,
+            entrypoint_runner,
+            verity_init,
+        } = &bins;
+        let every_field = [
+            ("oci_init", oci_init),
+            ("agent", agent),
+            ("netinit", netinit),
+            ("egress_client", egress_client),
+            ("entrypoint_runner", entrypoint_runner),
+            ("verity_init", verity_init),
+        ];
+
+        for (name, path) in every_field {
+            let original = std::fs::read(path).unwrap();
+            // Flip a byte in place. Appending would change the length, and the
+            // length prefix alone would then satisfy the assertion without the
+            // artifact's content ever being covered.
+            let mut perturbed = original.clone();
+            let last = perturbed.len() - 1;
+            perturbed[last] ^= 0xFF;
+            std::fs::write(path, &perturbed).unwrap();
+
+            assert_ne!(
+                baseline,
+                bins.content_digest().unwrap(),
+                "changing {name} must change the runtime identity"
+            );
+
+            std::fs::write(path, &original).unwrap();
+        }
+
+        assert_eq!(
+            baseline,
+            bins.content_digest().unwrap(),
+            "restoring every artifact must restore the identity"
+        );
+    }
+
+    /// Length is covered separately, now that every content test holds it
+    /// constant on purpose.
+    #[test]
+    fn content_digest_tracks_artifact_length() {
+        let dir = tempfile::tempdir().unwrap();
+        let bins = fake_bins(dir.path());
+        let before = bins.content_digest().unwrap();
+
+        let mut longer = std::fs::read(&bins.agent).unwrap();
+        longer.push(b'!');
+        std::fs::write(&bins.agent, &longer).unwrap();
+
+        assert_ne!(before, bins.content_digest().unwrap());
+    }
+
+    /// A length prefix per artifact stops content sliding between adjacent
+    /// fields from colliding.
+    #[test]
+    fn content_digest_distinguishes_shifted_content_between_artifacts() {
+        let dir_a = tempfile::tempdir().unwrap();
+        let a = fake_bins(dir_a.path());
+        std::fs::write(&a.agent, b"AB").unwrap();
+        std::fs::write(&a.netinit, b"CD").unwrap();
+
+        let dir_b = tempfile::tempdir().unwrap();
+        let b = fake_bins(dir_b.path());
+        std::fs::write(&b.agent, b"CD").unwrap();
+        std::fs::write(&b.netinit, b"AB").unwrap();
+
+        assert_ne!(
+            a.content_digest().unwrap(),
+            b.content_digest().unwrap(),
+            "the same bytes split differently across artifacts must not collide"
+        );
+    }
+
+    /// A missing artifact must name itself; this runs on the cache-gate path
+    /// where the alternative is an opaque "No such file or directory".
+    #[test]
+    fn content_digest_names_a_missing_artifact() {
+        let dir = tempfile::tempdir().unwrap();
+        let bins = fake_bins(dir.path());
+        std::fs::remove_file(&bins.egress_client).unwrap();
+
+        let err = bins
+            .content_digest()
+            .expect_err("a missing artifact must not digest");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("egress_client") && msg.contains("mvm-egress-client")
+                || msg.contains("egress_client") && msg.contains("egress-client"),
+            "error should name the artifact and its path: {msg}"
+        );
+    }
+
+    /// The injection layout is not a file, so the byte digest cannot see it.
+    /// A sealed rootfs built before a mountpoint existed cannot create it at
+    /// boot, so the layout has to be part of the identity.
+    ///
+    /// Checked through the same seam production uses, so dropping the fold
+    /// from `content_digest` fails here. An earlier version of this test
+    /// re-derived the whole encoding inline and passed under exactly that bug.
+    #[test]
+    fn content_digest_covers_the_injection_layout() {
+        let dir = tempfile::tempdir().unwrap();
+        let bins = fake_bins(dir.path());
+
+        assert_eq!(
+            bins.content_digest().unwrap(),
+            bins.content_digest_with_shape(&inject_shape_bytes())
+                .unwrap(),
+            "content_digest must fold in the real injection layout"
+        );
+        assert_ne!(
+            bins.content_digest().unwrap(),
+            bins.content_digest_with_shape(b"a-different-layout")
+                .unwrap(),
+            "a changed injection layout must change the identity"
+        );
+    }
+
+    /// The serialized layout must actually mention every table entry, or the
+    /// seam above would be satisfied by a constant.
+    #[test]
+    fn inject_shape_bytes_mentions_every_dir_and_dest() {
+        let shape = inject_shape_bytes();
+        for (rel, _) in INJECT_DIRS {
+            assert!(
+                shape.windows(rel.len()).any(|w| w == rel.as_bytes()),
+                "layout digest omits directory {rel}"
+            );
+        }
+        for dest in INJECT_DESTS {
+            assert!(
+                shape.windows(dest.len()).any(|w| w == dest.as_bytes()),
+                "layout digest omits destination {dest}"
+            );
+        }
+    }
 
     fn fake_bins(dir: &Path) -> MvmRuntimeBinaries {
         let oci_init = dir.join("oci-init.bin");

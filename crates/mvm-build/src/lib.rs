@@ -68,6 +68,7 @@ pub mod rootfs_inject;
 /// Shared run-path rootfs orchestration (inject runtime + materialize ext4),
 /// used by the CLI's `run --image` and the `mvm-client` local backend.
 pub mod run_image;
+pub mod runtime_identity;
 pub mod stage0;
 pub mod template_reuse;
 pub mod verity_initrd;
