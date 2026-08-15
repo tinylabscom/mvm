@@ -134,6 +134,27 @@ function renderEgressDomains(policy) {
     : "egress: deny all";
 }
 
+// A short guided intro printed into the console at boot, so a first-time
+// visitor knows what this is and what to type. The allowed-fetch example is
+// derived from the launched policy rather than hardcoded.
+function printWelcome(policy) {
+  const rules = (policy && policy.rules) || [];
+  const allowedHost = rules.length > 0 ? rules[0].host : null;
+  appendConsole("");
+  appendConsole("This is a shell inside a policy-governed microVM sandbox —");
+  appendConsole("network egress is deny-by-default and every decision is");
+  appendConsole("signed into the tamper-evident audit chain shown in the");
+  appendConsole("Audit chain panel. Things to try:");
+  if (allowedHost) {
+    appendConsole(`  fetch ${allowedHost}   → allowed by the launch policy`);
+  }
+  appendConsole("  fetch api.openai.com   → denied: not in the policy;");
+  appendConsole("                           watch the audit chain record it");
+  appendConsole("  ls, cat, env, ps       → explore the guest");
+  appendConsole("  help                   → the full command list");
+  appendConsole("");
+}
+
 function updateCliPreview() {
   const name = $("name").value || "browser-vm";
   const image = $("image").value || "mvm-demo-guest:latest";
@@ -226,6 +247,7 @@ launchBtn.addEventListener("click", async () => {
     appendConsole(`MicroVM ${result.vmId} is ${result.status}.`);
     renderEgressDomains(config.network_policy);
     renderAuditChain(result.auditChain);
+    printWelcome(config.network_policy);
   } catch (err) {
     appendConsole(`Launch failed: ${err.message}`);
     launchBtn.disabled = false;
