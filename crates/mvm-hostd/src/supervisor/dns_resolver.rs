@@ -16,9 +16,9 @@ use hickory_proto::rr::{Name, RData, RecordType};
 #[cfg(target_os = "linux")]
 use hickory_proto::serialize::binary::{BinDecodable, BinEncodable, BinEncoder};
 
-/// Per-address connect budget when trying an admitted set: small so an
-/// unreachable address (e.g. an AAAA with no host IPv6 egress) fails over to the
-/// next candidate quickly instead of stalling the request on the first.
+/// Ceiling on the blocking `getaddrinfo` fallback used off Linux, so a
+/// wedged system resolver cannot stall the caller past its own budget.
+#[cfg(not(target_os = "linux"))]
 const PER_IP_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 #[cfg(target_os = "linux")]
 const DNS_QUERY_TIMEOUT: Duration = Duration::from_secs(2);
