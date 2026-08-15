@@ -195,11 +195,16 @@
     opacity: 0.7;
     color: #8b949e;
   }
-  /* Embed mode: console + audit chain only. The direct-child selector on the
-     lede keeps the audit card's own .lede explainer visible. */
+  /* Embed mode: console + audit chain only, side by side. The direct-child
+     selector on the lede keeps the audit card's own .lede explainer
+     visible. */
   html.embed body {
     max-width: none;
     padding: 0.75rem;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1rem;
+    align-items: stretch;
   }
   html.embed h1,
   html.embed body > p.lede,
@@ -211,7 +216,29 @@
     grid-template-columns: 1fr;
   }
   html.embed .console-wrap {
-    height: 22rem;
+    height: 24rem;
+  }
+  /* The audit card's inline margin-top made sense stacked; in the embed
+     grid the two cards share a row. */
+  html.embed body > .card {
+    margin-top: 0 !important;
+  }
+  html.embed #audit-chain {
+    max-height: 24rem !important;
+  }
+  /* The capability notice is an always-rendered box that reads as a stray
+     bar when it has no text; span the row when it does. */
+  html.embed #capability-notice {
+    grid-column: 1 / -1;
+    margin-top: 0;
+  }
+  html.embed #capability-notice:empty {
+    display: none;
+  }
+  @media (max-width: 800px) {
+    html.embed body {
+      grid-template-columns: 1fr;
+    }
   }
 </style>
 </head>

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Eyebrow } from "./primitives/Eyebrow";
 import { GlowCard } from "./primitives/GlowCard";
@@ -8,11 +8,25 @@ import { Section } from "./primitives/Section";
 export function DemoTeaser() {
   const rawBase = import.meta.env.BASE_URL;
   const base = rawBase.endsWith("/") ? rawBase.slice(0, -1) : rawBase;
-  // The iframe is only mounted after the click so landing-page visitors
-  // don't pay for the wasm worker unless they ask for it. Embed mode
-  // (?embed=1) hides the demo's config pane and auto-launches, leaving
-  // just the console and the audit chain.
+  // The dialog (and its iframe) is only mounted after the click so
+  // landing-page visitors don't pay for the wasm worker unless they ask
+  // for it. Embed mode (?embed=1) hides the demo's config pane and
+  // auto-launches, showing the console and audit chain side by side.
   const [open, setOpen] = useState(false);
+
+  useEffect(() => {
+    if (!open) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("keydown", onKeyDown);
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.removeEventListener("keydown", onKeyDown);
+      document.body.style.overflow = prevOverflow;
+    };
+  }, [open]);
 
   return (
     <Section id="demo-teaser" rule space="tight">
@@ -27,9 +41,7 @@ export function DemoTeaser() {
             verification run from the same wasm core the host uses — no install
             required.
           </p>
-          <Button onClick={() => setOpen((v) => !v)}>
-            {open ? "Close the demo" : "Run demo"}
-          </Button>
+          <Button onClick={() => setOpen(true)}>Run demo</Button>
         </Reveal>
 
         <Reveal delay={80}>
@@ -44,12 +56,35 @@ export function DemoTeaser() {
       </div>
 
       {open && (
-        <div className="mt-8 overflow-hidden rounded-xl border border-code-border bg-code-canvas shadow-2xl shadow-black/30">
-          <iframe
-            src={`${base}/demo/?embed=1`}
-            title="mvm browser-tier microVM demo"
-            className="block h-176 w-full border-0"
-          />
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm sm:p-8"
+          role="dialog"
+          aria-modal="true"
+          aria-label="mvm browser-tier microVM demo"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setOpen(false);
+          }}
+        >
+          <div className="relative w-full max-w-6xl overflow-hidden rounded-xl border border-code-border bg-code-canvas shadow-2xl shadow-black/50">
+            <div className="flex items-center justify-between border-b border-code-border px-4 py-2.5">
+              <p className="font-mono text-xs tracking-[0.14em] uppercase text-label">
+                mvm · browser-tier microVM
+              </p>
+              <button
+                type="button"
+                onClick={() => setOpen(false)}
+                aria-label="Close demo"
+                className="rounded px-2 py-0.5 font-mono text-sm text-label transition-colors hover:text-emphasis focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+              >
+                [ × ]
+              </button>
+            </div>
+            <iframe
+              src={`${base}/demo/?embed=1`}
+              title="mvm browser-tier microVM demo"
+              className="block h-128 w-full border-0"
+            />
+          </div>
         </div>
       )}
     </Section>
