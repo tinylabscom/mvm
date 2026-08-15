@@ -49,6 +49,18 @@ const ALLOWED_CALLERS: &[&str] = &[
 /// in the sense this gate polices.
 const DEFINING_FILE: &str = "crates/mvm-contract/src/policy/network_policy.rs";
 
+/// Tests that assert properties *of* the constructor, from outside the
+/// defining file. Same reasoning as [`DEFINING_FILE`]: naming the symbol in
+/// order to pin its behaviour is the opposite of routing a workload through
+/// it, and a gate that forbids testing the thing it polices would push the
+/// property out of the suite entirely.
+const PROPERTY_TEST_FILES: &[&str] = &[
+    // Pins that `trusted_build_egress` stays a *separately named* constructor
+    // rather than an alias of `unrestricted()` — the distinction this gate
+    // exists to keep greppable.
+    "crates/mvm-contract/tests/egress_predicate_algebra.rs",
+];
+
 pub fn run(workspace: &Path) -> Result<()> {
     let mut offenders: Vec<String> = Vec::new();
     let mut allowed_hits = 0usize;
@@ -66,7 +78,7 @@ pub fn run(workspace: &Path) -> Result<()> {
     })?;
 
     for (rel, text) in files {
-        if rel == DEFINING_FILE {
+        if rel == DEFINING_FILE || PROPERTY_TEST_FILES.contains(&rel.as_str()) {
             continue;
         }
         if ALLOWED_CALLERS.contains(&rel.as_str()) {
