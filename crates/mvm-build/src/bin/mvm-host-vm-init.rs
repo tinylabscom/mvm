@@ -1482,6 +1482,13 @@ mod linux {
             .args(["ip", "link", "set", "lo", "up"])
             .status();
 
+        // The client loads both keys before it binds, so provision the
+        // identity first; otherwise a missing drive shows up as a proxy that
+        // never came up, with nothing naming the drive.
+        if let Err(e) = mvm_agentd::flowmux_drive::provision_identity_from_drive() {
+            refuse_boot(EgressProbe::IdentityMissing(e.to_string()));
+        }
+
         let mut cmd = Command::new(&egress_client);
         if let Some(port) = crate::vsock_egress_port_from_cmdline(cmdline) {
             cmd.env(crate::VSOCK_EGRESS_PORT_ENV, port.to_string());

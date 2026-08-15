@@ -30,6 +30,9 @@ pub enum EgressProbe {
     TimedOut,
     /// No egress client could be started at all.
     ClientMissing(String),
+    /// The guest has no FlowMux identity, so the egress client cannot
+    /// authenticate its session and will refuse to bind.
+    IdentityMissing(String),
     /// The compiled-in listen address does not parse.
     BadListenAddr(String),
 }
@@ -55,6 +58,10 @@ pub fn egress_readiness_outcome(probe: EgressProbe) -> Result<(), String> {
         EgressProbe::ClientMissing(where_looked) => Err(format!(
             "no mvm-egress-client to bind the local egress proxy at \
              {EGRESS_PROXY_LISTEN_ADDR} (looked at {where_looked}); {no_nic}"
+        )),
+        EgressProbe::IdentityMissing(why) => Err(format!(
+            "no FlowMux identity for this boot ({why}), so mvm-egress-client \
+             cannot authenticate its session to the host endpoint; {no_nic}"
         )),
         EgressProbe::BadListenAddr(addr) => {
             Err(format!("invalid local egress proxy address {addr}"))
@@ -98,6 +105,16 @@ mod tests {
     }
 
     #[test]
+    fn a_boot_without_an_identity_names_the_identity_and_not_the_network() {
+        let err = egress_readiness_outcome(EgressProbe::IdentityMissing(
+            "no attached disk carries the ext4 label mvm-identity".into(),
+        ))
+        .expect_err("a guest with no identity must abort the build");
+        assert!(err.contains("FlowMux identity"), "{err}");
+        assert!(err.contains("mvm-identity"), "{err}");
+    }
+
+    #[test]
     fn an_unparseable_listen_addr_aborts_rather_than_skipping_the_wait() {
         let err = egress_readiness_outcome(EgressProbe::BadListenAddr("not-an-addr".into()))
             .expect_err("a bad listen addr must abort the build");
@@ -110,6 +127,7 @@ mod tests {
             EgressProbe::ClientExited("signal 9".into()),
             EgressProbe::TimedOut,
             EgressProbe::ClientMissing("/x".into()),
+            EgressProbe::IdentityMissing("no drive".into()),
         ] {
             let err = egress_readiness_outcome(probe.clone()).expect_err("must refuse");
             assert!(

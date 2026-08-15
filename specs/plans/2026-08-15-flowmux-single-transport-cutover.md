@@ -118,7 +118,7 @@ socket accepts into its backlog while the listener is open, so a connect-only as
 passes against the broken version and proves nothing. The first draft of this test did
 exactly that and had to be rewritten.
 
-### WS2 — Per-boot identity, delivered off the cmdline
+### WS2 — Per-boot identity, delivered off the cmdline — **complete**
 
 - [ ] `mint_flowmux_identity(session_id) -> (FlowMuxIdentity, [u8; 32])` — one helper, so the
       private half and the published `guest_verifying_key_base64` cannot drift. Host key is
@@ -143,6 +143,41 @@ log under `loglevel=8` on the builder paths, and visible in host `ps` as `-appen
 QEMU path. `crates/mvm-vmm/src/host/network_endpoint_spawn.rs:123-137` states the invariant:
 "the intermediate key never enters the guest secrets drive — the same claim-13 'no key on the
 guest' invariant".
+
+**As built.** Two modules. `mvm_agentd::flowmux_drive` is the reading side, deliberately
+*not* behind the `addons` feature — `flowmux_keys` is, because it pulls tokio, and the guest
+inits must reach the drive without putting tokio in the sealed agent's closure. It owns the
+label, the filenames, the ext4 superblock probe and the Linux mount/copy, using raw
+`libc::mount` to match `guest_mount.rs` rather than enabling `nix`'s `mount` feature.
+`mvm_vmm::host::flowmux_identity` is the writing side: it mints the keypair, assembles the
+image **in memory** so the signing key never lands in a host temp file, writes it 0600, and
+carries a hand-written redacted `Debug`. Both sides reference one set of constants, declared
+on the reading side.
+
+`stage0-init`'s duplicate superblock-label helpers were deleted in favour of the shared ones,
+with their eight tests moved to where the code now lives.
+
+The guest-side scan lives in `mvm-egress-client` itself rather than in each init: the
+Nix-built `/init` is shell, and putting it there would mean a second copy of the label probe
+written against busybox applets (`blkid`) this image does not otherwise use. Stage 0 and the
+builder VM *also* provision early so they can refuse with a named cause rather than surfacing
+a proxy that never bound; the helper is idempotent. `mk-guest.nix` keeps only the fix it
+genuinely needed: the host-signer anchor is provisioned unconditionally instead of nested
+inside the verb-grant check, which had left a grant-less run with no anchor.
+
+The drive costs **373µs to build and 32KiB on disk** (measured, 20 runs, release), so putting
+it on every boot does not weigh on the launch path — worth checking, since warm-start work
+targets a p50 in the tens of milliseconds.
+
+The device scan enumerates `/sys/class/block` rather than probing a fixed candidate list. A
+fixed list is not safe: `mvm_vmm::host::spec_map::workload_blocks` assigns slots dynamically
+after the fixed rootfs/verity/overlay four, so user volumes can push the identity drive past
+the end of any list short enough to write down. Enumerating is independent of both position
+and count — the same reasoning that puts a label on the drive at all.
+
+Verified: 17 `flowmux_drive` + 9 `flowmux_identity` tests, `mvm-agentd` 668, `mvm-vmm` 532,
+`mvm-build` 791 lib tests, and a clean `--workspace --all-targets --all-features` cross-check
+for `x86_64-unknown-linux-gnu`.
 
 ### WS3 — Thread the identity to every spawn site
 

@@ -11,6 +11,13 @@ use ed25519_dalek::{SigningKey, VerifyingKey};
 /// Default path to the guest's ephemeral FlowMux signing key.
 pub const DEFAULT_GUEST_SIGNING_KEY_PATH: &str = "/run/mvm/flowmux-guest-signing-key";
 
+// The identity drive's own names live in `crate::flowmux_drive`, which is not
+// gated behind `addons` — the guest inits that mount the drive must reach them
+// without pulling this module's tokio-backed loader in.
+pub use crate::flowmux_drive::{
+    GUEST_SIGNING_KEY_FILE, HOST_SIGNER_PUB_FILE, IDENTITY_DRIVE_LABEL,
+};
+
 /// Default path to the boot-pinned host-signer Ed25519 public key.
 pub const DEFAULT_HOST_SIGNER_PUBKEY_PATH: &str = "/run/mvm/host-signer.pub";
 
