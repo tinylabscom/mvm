@@ -249,6 +249,43 @@ to move the host-keypair module down into `mvm-core`, where crypto already lives
 one creator reachable by every layer — worth doing, but it is a security-sensitive 421-line
 move that does not belong in this change.
 
+## Live run, 2026-08-15 — what it proved and what it found
+
+Ran `machine run --image python:3.12 -- python -c "print(2 + 2)"` against a fresh
+`MVM_HOME` on macOS/libkrun. It does not yet print `4`, but it moved three failures forward
+and each step is evidence for a workstream.
+
+**Proven live:**
+
+- **WS0.** The build now fails in ~2s with `mvm-egress-client did not bind the local egress
+  proxy at 127.0.0.1:1080 ... this guest has no NIC`, instead of minutes of nix download
+  errors blaming the network.
+- **WS1 + WS2 + WS3.** The host endpoint logs `FlowMux handshake complete` with the session
+  id. That single line means: the identity was minted, the drive was built and attached, the
+  guest found it by label, mounted it, loaded both keys, dialled the endpoint, and both sides
+  completed the authenticated handshake pinned to the minted key. The guest then binds
+  `127.0.0.1:1080` and the DNS stub on `:53`, and `stage0-init` reports
+  `local vsock egress proxy ready`.
+
+**Found, still open — a real bug in the #2480 adapter that only a live run reaches.** With
+the proxy up, `nix` fails with `proxy handshake error (97) Received invalid version in
+initial SOCKS5 response`, and the guest logs `egress client connection failed
+error=socks: not version 5` for every connection (plus one `early eof` first). The sniffer in
+`egress_client::read_route` is correct — first byte `0x05` routes to SOCKS — so the failure is
+*inside* `negotiate_request`, after the version byte was already accepted. Nothing had ever
+exercised this path end to end, which is why it shipped.
+
+**Two environment traps worth knowing**, both of which cost a run:
+
+1. `mvm-network-endpoint` is resolved from `CARGO_TARGET_DIR`, so a stale target dir runs a
+   stale endpoint. The first attempt failed with the exact `EAGAIN` bug WS1 fixed because it
+   executed a pre-WS1 binary out of a *deleted* worktree's target dir. Set
+   `MVM_SUBSTITUTION_ENDPOINT_PATH` or a clean `CARGO_TARGET_DIR`.
+2. `WORK_TREE_EXCLUDE_DIRS` excludes hardcoded *names* (`.mvm-test`, `.mvm`, ...), not the
+   resolved `MVM_HOME`. An `MVM_HOME` inside the checkout under any other name makes the Stage
+   0 work-tree copy recurse into itself and die on `File name too long` after several minutes.
+   Worth fixing: exclude the resolved home, not a name list.
+
 ### WS4 — Fold substitution onto `OpenHttp`
 
 - [ ] Guest `forward_proxy` keeps its loopback listener and `parse_proxied_request` but relays
