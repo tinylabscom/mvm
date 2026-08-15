@@ -5,7 +5,7 @@
 //! - `host-signer.ed25519` — 32-byte Ed25519 secret key, mode `0600`
 //! - `host-signer.pub`     — 32-byte Ed25519 public key, mode `0644`
 //!
-//! Generated on first use with `OsRng`. Idempotent on repeat calls:
+//! Generated on first use with `SysRng`. Idempotent on repeat calls:
 //! re-reads the existing files, verifies the mode is tight enough,
 //! and refuses to use a secret key that's world- or group-readable.
 //! The supervisor only trusts plans signed by this key when the
@@ -33,6 +33,7 @@
 
 use anyhow::{Context, Result, bail};
 use ed25519_dalek::{SigningKey, VerifyingKey};
+use rand::Rng;
 use std::fs::OpenOptions;
 use std::io::{Read, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
@@ -152,7 +153,7 @@ impl HostSigner {
 fn generate_new(secret_path: &Path, public_path: &Path) -> Result<HostSigner> {
     let signing = {
         let mut __ed_seed = [0u8; 32];
-        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+        rand::rng().fill_bytes(&mut __ed_seed);
         SigningKey::from_bytes(&__ed_seed)
     };
     let verifying = signing.verifying_key();
@@ -375,7 +376,7 @@ mod tests {
         // Swap the public-half bytes for a fresh unrelated key's bytes.
         let other = {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             SigningKey::from_bytes(&__ed_seed)
         }
         .verifying_key();

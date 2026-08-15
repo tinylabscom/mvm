@@ -158,6 +158,7 @@ pub fn verify_workload_chain_entries(
 #[cfg(test)]
 mod tests {
     use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
+    use rand::Rng;
     use tempfile::tempdir;
 
     use super::*;
@@ -182,7 +183,7 @@ mod tests {
     fn build(dir: &tempfile::TempDir, n: usize) -> (std::path::PathBuf, SigningKey) {
         let sk = {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             SigningKey::from_bytes(&__ed_seed)
         };
         let key_path = dir.path().join("chain.key");
@@ -260,7 +261,7 @@ mod tests {
         let (path, _sk) = build(&dir, 1);
         let other = {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             SigningKey::from_bytes(&__ed_seed)
         };
         let err = verify_workload_chain(&path, &vk(&other)).expect_err("wrong key must fail");

@@ -60,9 +60,9 @@ pub fn kernel_sha256_hex(kernel: &Path) -> Result<String> {
 
 /// 32 random bytes as lowercase hex — the per-spawn binding nonce.
 pub fn fresh_binding_nonce() -> String {
-    use rand::RngCore;
+    use rand::Rng;
     let mut buf = [0u8; 32];
-    rand::rngs::OsRng.fill_bytes(&mut buf);
+    rand::rng().fill_bytes(&mut buf);
     hex_lower(&buf)
 }
 

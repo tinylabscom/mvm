@@ -672,8 +672,7 @@ mod tests {
 
     fn test_keypair() -> SigningKey {
         {
-            let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            let __ed_seed = rand::random::<[u8; 32]>();
             SigningKey::from_bytes(&__ed_seed)
         }
     }

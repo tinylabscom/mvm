@@ -767,6 +767,7 @@ fn wipe_file(path: &Path) -> Result<u64, OverlayError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rand::Rng;
     use tempfile::tempdir;
 
     fn manager() -> (FsOverlayManager, tempfile::TempDir) {
@@ -1073,7 +1074,7 @@ mod tests {
     fn sign_then_verify_round_trip() {
         let key = {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             SigningKey::from_bytes(&__ed_seed)
         };
         let receipt = sample_receipt();
@@ -1090,7 +1091,7 @@ mod tests {
     fn verify_with_expected_pubkey_succeeds_on_match() {
         let key = {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             SigningKey::from_bytes(&__ed_seed)
         };
         let signed = sign_destruction_receipt(&sample_receipt(), &key);
@@ -1102,12 +1103,12 @@ mod tests {
     fn verify_with_expected_pubkey_rejects_on_mismatch() {
         let signer = {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             SigningKey::from_bytes(&__ed_seed)
         };
         let other = {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             SigningKey::from_bytes(&__ed_seed)
         };
         let signed = sign_destruction_receipt(&sample_receipt(), &signer);
@@ -1119,7 +1120,7 @@ mod tests {
     fn verify_rejects_tampered_tenant() {
         let key = {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             SigningKey::from_bytes(&__ed_seed)
         };
         let mut signed = sign_destruction_receipt(&sample_receipt(), &key);
@@ -1135,7 +1136,7 @@ mod tests {
         // breaks verification.
         let key = {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             SigningKey::from_bytes(&__ed_seed)
         };
         let mut signed = sign_destruction_receipt(&sample_receipt(), &key);
@@ -1148,7 +1149,7 @@ mod tests {
     fn verify_rejects_tampered_timestamp() {
         let key = {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             SigningKey::from_bytes(&__ed_seed)
         };
         let mut signed = sign_destruction_receipt(&sample_receipt(), &key);
@@ -1161,7 +1162,7 @@ mod tests {
     fn verify_rejects_unsupported_version() {
         let key = {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             SigningKey::from_bytes(&__ed_seed)
         };
         let mut signed = sign_destruction_receipt(&sample_receipt(), &key);
@@ -1177,7 +1178,7 @@ mod tests {
     fn verify_rejects_malformed_signature_base64() {
         let key = {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             SigningKey::from_bytes(&__ed_seed)
         };
         let mut signed = sign_destruction_receipt(&sample_receipt(), &key);
@@ -1198,7 +1199,7 @@ mod tests {
         // reorders fields trips a regression.
         let key = {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             SigningKey::from_bytes(&__ed_seed)
         };
         let signed = sign_destruction_receipt(&sample_receipt(), &key);
@@ -1213,7 +1214,7 @@ mod tests {
     fn signed_receipt_rejects_unknown_json_field() {
         let key = {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             SigningKey::from_bytes(&__ed_seed)
         };
         let signed = sign_destruction_receipt(&sample_receipt(), &key);
@@ -1231,7 +1232,7 @@ mod tests {
     fn cert_fingerprint_is_stable_for_same_cert() {
         let key = {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             SigningKey::from_bytes(&__ed_seed)
         };
         let signed = sign_destruction_receipt(&sample_receipt(), &key);
@@ -1250,7 +1251,7 @@ mod tests {
     fn cert_fingerprint_changes_when_receipt_tamper() {
         let key = {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             SigningKey::from_bytes(&__ed_seed)
         };
         let mut signed = sign_destruction_receipt(&sample_receipt(), &key);
@@ -1270,7 +1271,7 @@ mod tests {
         // the bytes that get hashed.
         let key = {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             SigningKey::from_bytes(&__ed_seed)
         };
         let signed = sign_destruction_receipt(&sample_receipt(), &key);
@@ -1298,7 +1299,7 @@ mod tests {
 
         let key = {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             SigningKey::from_bytes(&__ed_seed)
         };
         let signed = sign_destruction_receipt(&receipt, &key);

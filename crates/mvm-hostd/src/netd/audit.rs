@@ -547,6 +547,7 @@ fn clamp(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use rand::Rng;
     use std::net::IpAddr;
     use std::path::Path;
 
@@ -575,7 +576,7 @@ mod tests {
     fn auditor_in(dir: &Path) -> (NetdAuditor, VerifyingKey) {
         let key = {
             let mut seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut seed);
+            rand::rng().fill_bytes(&mut seed);
             SigningKey::from_bytes(&seed)
         };
         let verifying = key.verifying_key();

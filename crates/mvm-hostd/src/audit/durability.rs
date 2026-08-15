@@ -131,10 +131,11 @@ fn admission_decision_record(plan: &ExecutionPlan, signer_id: &str) -> DecisionR
 mod tests {
     use super::*;
     use ed25519_dalek::SigningKey;
+    use rand::Rng;
 
     fn fresh_emitter(dir: &std::path::Path) -> AuditEmitter {
         let mut seed = [0u8; 32];
-        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut seed);
+        rand::rng().fill_bytes(&mut seed);
         AuditEmitter::with_dir(SigningKey::from_bytes(&seed), dir).expect("emitter")
     }
 

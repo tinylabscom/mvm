@@ -22,7 +22,7 @@ use mvm_runtime::vm::volume_registry::{
     LocalVolumeCatalog, LocalVolumeEncryption, LocalVolumeEntry, LocalVolumeKind, LocalVolumeState,
     MvmManagedVolumeEncryption,
 };
-use rand::RngCore;
+use rand::Rng;
 use secrecy::ExposeSecret;
 
 use super::lease::ensure_volume_not_attached;
@@ -472,7 +472,7 @@ pub(crate) fn generate_wrapped_volume_key() -> Result<(WrappedKey, secrecy::Secr
     };
     let master = key_rotation::load_master_key(&active_dir, version)?;
     let mut dek = vec![0u8; mvm_core::crypto::snapshot_encryption::KEY_SIZE];
-    rand::thread_rng().fill_bytes(&mut dek);
+    rand::rng().fill_bytes(&mut dek);
     let wrapped = mvm_core::crypto::snapshot_crypto::encrypt(&dek, master.expose_secret())
         .context("wrapping volume data key")?;
     Ok((

@@ -1304,6 +1304,7 @@ fn write_atomic_inner(path: &Path, bytes: &[u8], sync: bool) -> Result<()> {
 mod tests {
     use super::*;
     use crate::supervisor::verify_audit_chain;
+    use rand::Rng;
 
     fn fixture_plan(tenant: &str, plan_id: &str) -> ExecutionPlan {
         mvm_core::plan::test_support::PlanFixture::new()
@@ -1319,7 +1320,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let key = {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             SigningKey::from_bytes(&__ed_seed)
         };
         let emitter = AuditEmitter::with_dir(key, dir.path()).unwrap();
@@ -1353,7 +1354,7 @@ mod tests {
         ] {
             let dir = tempfile::tempdir().unwrap();
             let mut seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut seed);
+            rand::rng().fill_bytes(&mut seed);
             let emitter =
                 AuditEmitter::with_dir(SigningKey::from_bytes(&seed), dir.path()).expect("emitter");
             let plan = mvm_core::plan::test_support::PlanFixture::new()
@@ -1382,7 +1383,7 @@ mod tests {
     fn stream_audit_entries_carry_the_binding_and_no_payload_bytes() {
         let dir = tempfile::tempdir().unwrap();
         let mut seed = [0u8; 32];
-        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut seed);
+        rand::rng().fill_bytes(&mut seed);
         let key = SigningKey::from_bytes(&seed);
         let vk = key.verifying_key();
         let emitter = AuditEmitter::with_dir(key, dir.path()).expect("emitter");
@@ -1479,7 +1480,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let key = {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             SigningKey::from_bytes(&__ed_seed)
         };
         let vk = key.verifying_key();
@@ -1513,7 +1514,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let key = {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             SigningKey::from_bytes(&__ed_seed)
         };
         let vk = key.verifying_key();
@@ -1557,7 +1558,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let key = {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             SigningKey::from_bytes(&__ed_seed)
         };
         let vk = key.verifying_key();
@@ -1575,7 +1576,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let key = {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             SigningKey::from_bytes(&__ed_seed)
         };
         let vk = key.verifying_key();
@@ -1634,7 +1635,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let key = {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             SigningKey::from_bytes(&__ed_seed)
         };
         let vk = key.verifying_key();
@@ -1670,7 +1671,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let key = {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             SigningKey::from_bytes(&__ed_seed)
         };
         let vk = key.verifying_key();
@@ -1707,7 +1708,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let key = {
             let mut seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut seed);
+            rand::rng().fill_bytes(&mut seed);
             SigningKey::from_bytes(&seed)
         };
         let vk = key.verifying_key();
@@ -1748,7 +1749,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let key = {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             SigningKey::from_bytes(&__ed_seed)
         };
         let vk = key.verifying_key();
@@ -1780,7 +1781,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let key = {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             SigningKey::from_bytes(&__ed_seed)
         };
         let vk = key.verifying_key();
@@ -1806,7 +1807,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let key = {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             SigningKey::from_bytes(&__ed_seed)
         };
         let vk = key.verifying_key();
@@ -1842,7 +1843,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let key = {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             SigningKey::from_bytes(&__ed_seed)
         };
         let vk = key.verifying_key();
@@ -1864,7 +1865,7 @@ mod tests {
         let target = dir.path().join("audit-fresh");
         let key = {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             SigningKey::from_bytes(&__ed_seed)
         };
         let _emitter = AuditEmitter::with_dir(key, &target).unwrap();
@@ -1883,7 +1884,7 @@ mod tests {
         let replica = dir.path().join("replica.jsonl");
         let key = {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             SigningKey::from_bytes(&__ed_seed)
         };
         let vk = key.verifying_key();
@@ -1908,7 +1909,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let key = {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             SigningKey::from_bytes(&__ed_seed)
         };
         let policy = mvm_core::policy::AuditPolicy {
@@ -1927,7 +1928,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let key = {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             SigningKey::from_bytes(&__ed_seed)
         };
         let policy = mvm_core::policy::AuditPolicy {
@@ -1946,7 +1947,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let key = {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             SigningKey::from_bytes(&__ed_seed)
         };
         let policy = mvm_core::policy::AuditPolicy {
@@ -1965,7 +1966,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let key = {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             SigningKey::from_bytes(&__ed_seed)
         };
         let vk = key.verifying_key();
@@ -2017,7 +2018,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let key = {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             SigningKey::from_bytes(&__ed_seed)
         };
         let vk = key.verifying_key();
@@ -2042,7 +2043,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let key = {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             SigningKey::from_bytes(&__ed_seed)
         };
         let vk = key.verifying_key();
@@ -2081,7 +2082,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let key = {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             SigningKey::from_bytes(&__ed_seed)
         };
         let vk = key.verifying_key();
@@ -2151,7 +2152,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let key = {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             SigningKey::from_bytes(&__ed_seed)
         };
         let vk = key.verifying_key();
@@ -2181,7 +2182,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let key = {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             SigningKey::from_bytes(&__ed_seed)
         };
         let vk = key.verifying_key();
@@ -2210,7 +2211,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let key = {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             SigningKey::from_bytes(&__ed_seed)
         };
         let vk = key.verifying_key();
@@ -2248,7 +2249,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let key = {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             SigningKey::from_bytes(&__ed_seed)
         };
         let emitter = AuditEmitter::with_dir(key, dir.path()).unwrap();
@@ -2269,7 +2270,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let key = {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             SigningKey::from_bytes(&__ed_seed)
         };
         let emitter = AuditEmitter::with_dir(key, dir.path()).unwrap();
@@ -2284,7 +2285,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let key = {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             SigningKey::from_bytes(&__ed_seed)
         };
         let emitter = AuditEmitter::with_dir(key, dir.path())
@@ -2319,7 +2320,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let key = {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             SigningKey::from_bytes(&__ed_seed)
         };
         let emitter = AuditEmitter::with_dir(key, dir.path())
@@ -2364,7 +2365,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let key = {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             SigningKey::from_bytes(&__ed_seed)
         };
         let emitter = AuditEmitter::with_dir(key, dir.path())
@@ -2404,7 +2405,7 @@ mod tests {
         let decisions_dir = tempfile::tempdir().unwrap();
         let key = {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             SigningKey::from_bytes(&__ed_seed)
         };
         let vk = key.verifying_key();

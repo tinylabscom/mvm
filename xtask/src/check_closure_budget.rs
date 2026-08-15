@@ -172,7 +172,7 @@ const MACOS_CLOSURE_BUDGET: usize = 232;
 /// SHA-1, so it cannot reuse the workspace's `sha2`; the feature pulls exactly
 /// one crate, `sha1_smol`, which is a leaf with no dependencies of its own.
 /// Measured net +1.
-pub(crate) const CLOSURE_BUDGET: usize = 243;
+pub(crate) const CLOSURE_BUDGET: usize = 238;
 
 pub fn run(workspace: &Path) -> Result<()> {
     for budget in BUDGETS {

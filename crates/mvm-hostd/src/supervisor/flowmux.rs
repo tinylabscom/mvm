@@ -1313,7 +1313,7 @@ mod tests {
     use ed25519_dalek::SigningKey;
     use mvm_contract::protocol::network_flow::{Opcode, encode_into};
     use mvm_core::net::session::Session;
-    use rand::RngCore;
+    use rand::Rng;
     use std::net::SocketAddr;
     use std::time::Duration;
 
@@ -1321,7 +1321,7 @@ mod tests {
 
     fn fresh_keys() -> (SigningKey, VerifyingKey) {
         let mut seed = [0u8; 32];
-        RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut seed);
+        rand::rng().fill_bytes(&mut seed);
         let key = SigningKey::from_bytes(&seed);
         let verify = key.verifying_key();
         (key, verify)
