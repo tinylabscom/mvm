@@ -13,7 +13,7 @@
 use std::process::ExitCode;
 
 #[cfg(target_os = "linux")]
-use mvm_agentd::vsock::EGRESS_PORT;
+use mvm_agentd::vsock::EGRESS_PORT as EGRESS_VSOCK_PORT;
 
 fn main() -> ExitCode {
     tracing_subscriber::fmt()
@@ -73,7 +73,7 @@ fn run(addr: std::net::SocketAddr) -> ExitCode {
 
     let client = match rt.block_on(FlowMuxReconnectClient::connect(
         || async {
-            connect_host_vsock(EGRESS_PORT)
+            connect_host_vsock(EGRESS_VSOCK_PORT)
                 .await
                 .map_err(FlowMuxError::Transport)
         },

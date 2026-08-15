@@ -414,21 +414,36 @@ pub mod dns_stub {
             (signing, verifying)
         }
 
-        async fn send_frame<S>(stream: &mut S, opcode: Opcode, stream_id: u32, payload: &[u8])
-        where
+        async fn send_frame<S>(
+            stream: &mut S,
+            session: &mut mvm_core::net::session::Session,
+            opcode: Opcode,
+            stream_id: u32,
+            payload: &[u8],
+        ) where
             S: AsyncWrite + Unpin,
         {
             let mut wire = Vec::new();
             encode_into(&mut wire, opcode, stream_id, payload).unwrap();
-            stream.write_all(&wire).await.unwrap();
+            let sealed = session.seal(&wire).unwrap();
+            let mut sealed_bytes = Vec::new();
+            sealed.encode(&mut sealed_bytes).unwrap();
+            let len = u32::try_from(sealed_bytes.len()).unwrap();
+            stream.write_all(&len.to_be_bytes()).await.unwrap();
+            stream.write_all(&sealed_bytes).await.unwrap();
             stream.flush().await.unwrap();
         }
 
-        async fn read_frame<S>(stream: &mut S) -> Option<(Opcode, u32, u32, Vec<u8>)>
+        async fn read_frame<S>(
+            stream: &mut S,
+            session: &mut mvm_core::net::session::Session,
+        ) -> Option<(Opcode, u32, u32, Vec<u8>)>
         where
             S: AsyncRead + Unpin,
         {
-            crate::flowmux::read_frame_from(stream).await.unwrap()
+            crate::flowmux::read_sealed_frame_from(stream, session)
+                .await
+                .unwrap()
         }
 
         #[tokio::test]
@@ -439,7 +454,7 @@ pub mod dns_stub {
 
             let host = tokio::spawn(async move {
                 let handle = tokio::runtime::Handle::try_current().unwrap();
-                let (mut host_stream, _session) = tokio::task::spawn_blocking(move || {
+                let (mut host_stream, mut host_session) = tokio::task::spawn_blocking(move || {
                     let mut adapter =
                         crate::flowmux::AsyncStreamSyncAdapter::new(host_stream, handle);
                     let result = mvm_core::net::session::Session::host(
@@ -455,11 +470,22 @@ pub mod dns_stub {
                 .unwrap();
 
                 let (_opcode, _sid, _payload_len, _payload) =
-                    read_frame(&mut host_stream).await.unwrap();
-                send_frame(&mut host_stream, Opcode::HelloAck, 0, &[]).await;
+                    read_frame(&mut host_stream, &mut host_session)
+                        .await
+                        .unwrap();
+                send_frame(
+                    &mut host_stream,
+                    &mut host_session,
+                    Opcode::HelloAck,
+                    0,
+                    &[],
+                )
+                .await;
 
                 let (opcode, sid, _payload_len, payload) =
-                    read_frame(&mut host_stream).await.unwrap();
+                    read_frame(&mut host_stream, &mut host_session)
+                        .await
+                        .unwrap();
                 assert_eq!(opcode, Opcode::Resolve);
                 let question = decode_query(&payload).unwrap();
                 assert_eq!(question.name, "example.com");
@@ -469,7 +495,14 @@ pub mod dns_stub {
                 response[2..4].copy_from_slice(&0x8180_u16.to_be_bytes());
                 response[4..6].copy_from_slice(&0_u16.to_be_bytes());
                 response[6..12].copy_from_slice(&[0; 6]);
-                send_frame(&mut host_stream, Opcode::Resolved, sid, &response).await;
+                send_frame(
+                    &mut host_stream,
+                    &mut host_session,
+                    Opcode::Resolved,
+                    sid,
+                    &response,
+                )
+                .await;
             });
 
             let client =

@@ -363,6 +363,214 @@ impl Session {
     }
 }
 
+impl SealedFrame {
+    /// Encode this sealed frame into a compact binary representation.
+    ///
+    /// Layout:
+    ///   version (u8), sig_alg (u8),
+    ///   session_id_len (u8), session_id (bytes),
+    ///   sequence (u64 BE),
+    ///   timestamp_len (u8), timestamp (bytes),
+    ///   signer_id_len (u8), signer_id (bytes),
+    ///   signature_len (u16 BE), signature (bytes),
+    ///   ciphertext_len (u32 BE), ciphertext (bytes).
+    pub fn encode(&self, dst: &mut Vec<u8>) -> Result<(), SessionError> {
+        let session_id_len = u8::try_from(self.session_id.len())
+            .map_err(|_| SessionError::InvalidHandshake("session_id too long".into()))?;
+        let timestamp_len = u8::try_from(self.timestamp.len())
+            .map_err(|_| SessionError::InvalidHandshake("timestamp too long".into()))?;
+        let signer_id_len = u8::try_from(self.signer_id.len())
+            .map_err(|_| SessionError::InvalidHandshake("signer_id too long".into()))?;
+        let signature_len = u16::try_from(self.signature.len())
+            .map_err(|_| SessionError::InvalidHandshake("signature too long".into()))?;
+        let ciphertext_len = u32::try_from(self.ciphertext.len())
+            .map_err(|_| SessionError::InvalidHandshake("ciphertext too long".into()))?;
+
+        dst.reserve(
+            1 + 1
+                + 1
+                + self.session_id.len()
+                + 8
+                + 1
+                + self.timestamp.len()
+                + 1
+                + self.signer_id.len()
+                + 2
+                + self.signature.len()
+                + 4
+                + self.ciphertext.len(),
+        );
+
+        dst.push(self.version);
+        dst.push(self.sig_alg);
+        dst.push(session_id_len);
+        dst.extend_from_slice(self.session_id.as_bytes());
+        dst.extend_from_slice(&self.sequence.to_be_bytes());
+        dst.push(timestamp_len);
+        dst.extend_from_slice(self.timestamp.as_bytes());
+        dst.push(signer_id_len);
+        dst.extend_from_slice(self.signer_id.as_bytes());
+        dst.extend_from_slice(&signature_len.to_be_bytes());
+        dst.extend_from_slice(&self.signature);
+        dst.extend_from_slice(&ciphertext_len.to_be_bytes());
+        dst.extend_from_slice(&self.ciphertext);
+        Ok(())
+    }
+
+    /// Decode a sealed frame from its compact binary representation.
+    pub fn decode(src: &[u8]) -> Result<Self, SessionError> {
+        if src.len() < 1 + 1 + 1 + 8 + 1 + 1 + 1 + 2 + 4 {
+            return Err(SessionError::InvalidHandshake(
+                "sealed frame too short".into(),
+            ));
+        }
+        let mut pos = 0_usize;
+
+        let version = src[pos];
+        pos += 1;
+        let sig_alg = src[pos];
+        pos += 1;
+
+        let session_id_len = src[pos] as usize;
+        pos += 1;
+        if src.len() < pos + session_id_len {
+            return Err(SessionError::InvalidHandshake(
+                "session_id truncated".into(),
+            ));
+        }
+        let session_id = String::from_utf8(src[pos..pos + session_id_len].to_vec())
+            .map_err(|_| SessionError::InvalidHandshake("session_id not utf-8".into()))?;
+        pos += session_id_len;
+
+        if src.len() < pos + 8 {
+            return Err(SessionError::InvalidHandshake("sequence truncated".into()));
+        }
+        let sequence = u64::from_be_bytes([
+            src[pos],
+            src[pos + 1],
+            src[pos + 2],
+            src[pos + 3],
+            src[pos + 4],
+            src[pos + 5],
+            src[pos + 6],
+            src[pos + 7],
+        ]);
+        pos += 8;
+
+        if src.len() < pos + 1 {
+            return Err(SessionError::InvalidHandshake(
+                "timestamp length truncated".into(),
+            ));
+        }
+        let timestamp_len = src[pos] as usize;
+        pos += 1;
+        if src.len() < pos + timestamp_len {
+            return Err(SessionError::InvalidHandshake("timestamp truncated".into()));
+        }
+        let timestamp = String::from_utf8(src[pos..pos + timestamp_len].to_vec())
+            .map_err(|_| SessionError::InvalidHandshake("timestamp not utf-8".into()))?;
+        pos += timestamp_len;
+
+        if src.len() < pos + 1 {
+            return Err(SessionError::InvalidHandshake(
+                "signer_id length truncated".into(),
+            ));
+        }
+        let signer_id_len = src[pos] as usize;
+        pos += 1;
+        if src.len() < pos + signer_id_len {
+            return Err(SessionError::InvalidHandshake("signer_id truncated".into()));
+        }
+        let signer_id = String::from_utf8(src[pos..pos + signer_id_len].to_vec())
+            .map_err(|_| SessionError::InvalidHandshake("signer_id not utf-8".into()))?;
+        pos += signer_id_len;
+
+        if src.len() < pos + 2 {
+            return Err(SessionError::InvalidHandshake(
+                "signature length truncated".into(),
+            ));
+        }
+        let signature_len = u16::from_be_bytes([src[pos], src[pos + 1]]) as usize;
+        pos += 2;
+        if src.len() < pos + signature_len {
+            return Err(SessionError::InvalidHandshake("signature truncated".into()));
+        }
+        let signature = src[pos..pos + signature_len].to_vec();
+        pos += signature_len;
+
+        if src.len() < pos + 4 {
+            return Err(SessionError::InvalidHandshake(
+                "ciphertext length truncated".into(),
+            ));
+        }
+        let ciphertext_len =
+            u32::from_be_bytes([src[pos], src[pos + 1], src[pos + 2], src[pos + 3]]) as usize;
+        pos += 4;
+        if src.len() < pos + ciphertext_len {
+            return Err(SessionError::InvalidHandshake(
+                "ciphertext truncated".into(),
+            ));
+        }
+        let ciphertext = src[pos..pos + ciphertext_len].to_vec();
+        pos += ciphertext_len;
+
+        if pos != src.len() {
+            return Err(SessionError::InvalidHandshake(
+                "trailing bytes after sealed frame".into(),
+            ));
+        }
+
+        Ok(Self {
+            version,
+            sig_alg,
+            session_id,
+            sequence,
+            timestamp,
+            signature,
+            signer_id,
+            ciphertext,
+        })
+    }
+}
+
+/// Read a length-prefixed sealed frame from a stream.
+///
+/// The length prefix is a 4-byte big-endian integer. `max_len` bounds the
+/// accepted sealed frame size.
+pub fn read_sealed_frame<R: Read>(
+    stream: &mut R,
+    max_len: usize,
+) -> Result<SealedFrame, SessionError> {
+    let mut len_buf = [0u8; 4];
+    stream.read_exact(&mut len_buf)?;
+    let frame_len =
+        usize::try_from(u32::from_be_bytes(len_buf)).expect("u32 frame length fits usize");
+    if frame_len > max_len {
+        return Err(SessionError::InvalidHandshake(format!(
+            "sealed frame length {frame_len} exceeds maximum {max_len}"
+        )));
+    }
+    let mut buf = vec![0u8; frame_len];
+    stream.read_exact(&mut buf)?;
+    SealedFrame::decode(&buf)
+}
+
+/// Write a sealed frame to a stream with a 4-byte big-endian length prefix.
+pub fn write_sealed_frame<W: Write>(
+    stream: &mut W,
+    frame: &SealedFrame,
+) -> Result<(), SessionError> {
+    let mut buf = Vec::new();
+    frame.encode(&mut buf)?;
+    let len = u32::try_from(buf.len())
+        .expect("bounded sealed frame length fits u32")
+        .to_be_bytes();
+    stream.write_all(&len)?;
+    stream.write_all(&buf)?;
+    stream.flush()?;
+    Ok(())
+}
+
 fn new_cipher(key: &[u8]) -> Result<Aes256Gcm, SessionError> {
     Aes256Gcm::new_from_slice(key).map_err(|_| SessionError::EncryptionFailed)
 }
@@ -710,6 +918,38 @@ mod tests {
         let sealed2 = guest.seal(response).unwrap();
         let opened2 = host.open(&sealed2).unwrap();
         assert_eq!(opened2, response);
+    }
+
+    #[test]
+    fn sealed_frame_encode_decode_roundtrip() {
+        let (mut host, _guest) = paired_sessions();
+        let sealed = host.seal(b"hello flowmux").unwrap();
+
+        let mut buf = Vec::new();
+        sealed.encode(&mut buf).unwrap();
+        let decoded = SealedFrame::decode(&buf).unwrap();
+
+        assert_eq!(decoded.version, sealed.version);
+        assert_eq!(decoded.sig_alg, sealed.sig_alg);
+        assert_eq!(decoded.session_id, sealed.session_id);
+        assert_eq!(decoded.sequence, sealed.sequence);
+        assert_eq!(decoded.timestamp, sealed.timestamp);
+        assert_eq!(decoded.signer_id, sealed.signer_id);
+        assert_eq!(decoded.signature, sealed.signature);
+        assert_eq!(decoded.ciphertext, sealed.ciphertext);
+    }
+
+    #[test]
+    fn sealed_frame_length_prefixed_roundtrip() {
+        let (mut host, mut guest) = paired_sessions();
+        let plaintext = b"length-prefixed secret";
+        let sealed = host.seal(plaintext).unwrap();
+
+        let mut buf = Vec::new();
+        write_sealed_frame(&mut buf, &sealed).unwrap();
+        let decoded = read_sealed_frame(&mut buf.as_slice(), 1 << 20).unwrap();
+        let opened = guest.open(&decoded).unwrap();
+        assert_eq!(opened, plaintext.to_vec());
     }
 
     #[test]
