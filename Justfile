@@ -74,7 +74,7 @@ run *ARGS:
 
 # Run mvmctl with the dev env set (worktree-local MVM_HOME).
 dev *ARGS:
-    sh ./bin/dev {{ ARGS }}
+    sh ./scripts/dev {{ ARGS }}
 
 # Run cargo with the dev env set (worktree-local MVM_HOME /
 
