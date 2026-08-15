@@ -1,4 +1,7 @@
-# Plan 338: refresh the CLI grammar doctrine and gate the surface mechanically
+# Refresh the CLI grammar doctrine and gate the surface mechanically
+
+Backing: preview
+Validation: none
 
 **Date:** 2026-08-15
 **Status:** Proposed
