@@ -899,9 +899,9 @@ pub(super) fn promote_builder_vm_stage0_cache(
 /// `builder-vm-image` release-workflow job into the local cache dir,
 /// SHA-256-verified.
 ///
-/// Mirrors `download_dev_image_inner` for the interactive image, minus
-/// cosign signing (the signed-manifest path extends to builder-vm
-/// artifacts as a follow-up). The required artifacts are `vmlinux`,
+/// Mirrors `download_dev_image_inner` for the interactive image: the checksum
+/// manifest is signature-verified before it is parsed, and every artifact is
+/// then held to the digest it pins. The required artifacts are `vmlinux`,
 /// `rootfs.ext4`, `cmdline.txt`, and `manifest.json`; the runtime
 /// builder-image loader rejects caches that do not carry the full
 /// contract.
@@ -920,13 +920,16 @@ pub(super) fn download_builder_vm_image(arch: &str, cache_dir: &str) -> Result<(
     let rootfs_url = format!("{base_url}/{}", names.rootfs);
     let cmdline_url = format!("{base_url}/{}", names.cmdline);
     let manifest_url = format!("{base_url}/{}", names.manifest);
-    let checksums_url = format!("{base_url}/{}", names.checksums);
 
     // The builder-image cache contract is fail-closed: every artifact
     // the runtime loader consumes must be listed in checksums and
     // downloaded here before the cache is considered usable.
     let expected = fetch_expected_hashes(
-        &checksums_url,
+        &ChecksumManifest {
+            base_url: &base_url,
+            asset: &names.checksums,
+            version,
+        },
         &[
             &names.kernel,
             &names.rootfs,
