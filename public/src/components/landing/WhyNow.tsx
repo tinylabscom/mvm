@@ -60,14 +60,9 @@ export function WhyNow() {
           className="font-display text-lg font-bold leading-snug text-title sm:text-2xl"
           style={{ marginTop: "2.5rem" }}
         >
-          <span className="block">
-            MVM assumes the worst —{" "}
-            <span className="text-accent-2">
-              Security first isn&rsquo;t a tier, it&rsquo;s the default.
-            </span>
-          </span>
-          <span className="mt-2 block">
-            As easy as a container, without the shared kernel.
+          MVM assumes the worst —{" "}
+          <span className="text-accent-2">
+            Security first isn&rsquo;t a tier, it&rsquo;s the default.
           </span>
         </p>
         <div
