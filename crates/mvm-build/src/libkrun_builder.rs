@@ -6437,7 +6437,7 @@ mod tests {
 
     #[test]
     fn a_setup_refusal_is_reported_as_a_refusal_not_as_an_unclean_halt() {
-        // This is the console shape of the #2543 regression: the egress client
+        // This is the console shape of the guest-egress regression: the client
         // dies, stage0-init refuses before nix runs, and the guest powers off.
         // Read as NoCleanHalt it would say "did not reach a clean halt"; read
         // as BuildFailed it would blame a build that never started.
