@@ -89,12 +89,34 @@ is a later simplification, not a prerequisite.
 - [ ] `cmdline_overflow` (`crates/mvm-vmm/src/host/cmdline.rs:30-52`) enforced on both
       builder paths — `libkrun_builder.rs:204` and `qemu_builder.rs:231` validate nothing today
 
-### WS1 — Host accepts sessions properly
+### WS1 — Host accepts sessions properly — **complete**
 
-- [ ] `serve_flowmux` (`crates/mvm-hostd/src/bin/mvm-network-endpoint.rs:398-447`) becomes an
-      accept loop that re-arms the listener; `accept_one_sync` no longer consumes it
-- [ ] Concurrent sessions per VM, each via `FlowMuxSession::accept_with_recorder`
-- [ ] `RegistryLimits::default()` TODO (`:403-405`) resolved or explicitly recorded
+- [x] `serve_flowmux` is an accept loop; the listener is adopted once and re-armed per
+      connection rather than consumed by the first accept
+- [x] Concurrent sessions per VM, each via `FlowMuxSession::accept_with_recorder`; a session
+      that ends is logged and the loop continues, and a run of consecutive accept failures
+      (16) fails the endpoint rather than spinning
+- [x] `RegistryLimits::default()` recorded explicitly: still defaults, still because the
+      spawner does not thread the admitted plan's `NetworkLimits` through. Built per session
+      so one session's accounting cannot be spent by another
+
+**FlowMux mode had never worked at all.** `bind_transport` sets the UDS listener
+non-blocking so the Wire and raw loops can adopt it into tokio; the FlowMux path accepted it
+on a blocking thread, where it returns `EAGAIN` immediately and forever. The first
+connection failed with `Broken pipe` before any handshake. So the missing guest identity was
+not the only thing standing between `main` and a working cutover — this was too, and it was
+invisible because nothing exercised the path. The listener is now adopted per transport:
+tokio for UDS, `spawn_blocking` for the blocking vsock listener, with each accepted
+connection handed on as a blocking `UnixStream` for the session thread.
+
+Witness: `a_flowmux_endpoint_keeps_serving_sessions_after_one_ends`
+(`crates/mvm-hostd/tests/network_endpoint_bin.rs`) drives three real authenticated handshakes
+against the real binary — one, then one after it ends, then one concurrent with that.
+Confirmed red on the pre-fix binary (`Broken pipe` on the first handshake) and green after.
+It deliberately asserts a *completed handshake* rather than a successful `connect()`: a unix
+socket accepts into its backlog while the listener is open, so a connect-only assertion
+passes against the broken version and proves nothing. The first draft of this test did
+exactly that and had to be rewritten.
 
 ### WS2 — Per-boot identity, delivered off the cmdline
 
