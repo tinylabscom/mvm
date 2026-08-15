@@ -272,7 +272,7 @@
     </div>
 
     <label for="policy">Network policy (JSON)</label>
-    <textarea id="policy">{"type":"allowlist","rules":[{"host":"echo.mvm.local","port":443}]}</textarea>
+    <textarea id="policy">{"type":"allowlist","rules":[{"host":"echo.mvm.local","port":443},{"host":"api.openai.com","port":443}]}</textarea>
 
     <label for="authority">Authority verifying key (hex, optional)</label>
     <input id="authority" placeholder="64 hex chars" />
@@ -294,6 +294,9 @@
           <span class="prompt">root@mvm:~#</span>
           <input id="command" type="text" autocomplete="off" spellcheck="false" />
         </div>
+      </div>
+      <div class="console-status">
+        <span id="egress-domains">egress: —</span>
       </div>
       <div class="console-status">
         <span>Tip: click the console to type. ↑/↓ history, Tab completion, Ctrl+C interrupt, Ctrl+L clear.</span>

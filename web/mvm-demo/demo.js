@@ -13,6 +13,7 @@ const stopBtn = $("stop");
 const capabilityNoticeEl = $("capability-notice");
 const cliPreviewEl = $("cli-preview");
 const auditChainEl = $("audit-chain");
+const egressDomainsEl = $("egress-domains");
 
 let ready = false;
 let vmRunning = false;
@@ -114,6 +115,25 @@ function renderAuditChain(chain) {
     .join("\n---\n");
 }
 
+// Surface the launched policy's reachable destinations next to the console,
+// so the demo says up front which hosts `fetch` can reach.
+function renderEgressDomains(policy) {
+  if (!policy || policy.type === "deny_all") {
+    egressDomainsEl.textContent = "egress: deny all";
+    return;
+  }
+  if (policy.type === "unrestricted") {
+    egressDomainsEl.textContent = "egress: unrestricted";
+    return;
+  }
+  const rules = (policy.rules || [])
+    .map((r) => `${r.host}:${r.port}`)
+    .join(" · ");
+  egressDomainsEl.textContent = rules
+    ? `allowed egress: ${rules}`
+    : "egress: deny all";
+}
+
 function updateCliPreview() {
   const name = $("name").value || "browser-vm";
   const image = $("image").value || "mvm-demo-guest:latest";
@@ -204,6 +224,7 @@ launchBtn.addEventListener("click", async () => {
     stopBtn.disabled = false;
     setInput(true);
     appendConsole(`MicroVM ${result.vmId} is ${result.status}.`);
+    renderEgressDomains(config.network_policy);
     renderAuditChain(result.auditChain);
   } catch (err) {
     appendConsole(`Launch failed: ${err.message}`);
@@ -219,6 +240,7 @@ stopBtn.addEventListener("click", async () => {
     stopBtn.disabled = true;
     setInput(false);
     appendConsole("MicroVM stopped.");
+    egressDomainsEl.textContent = "egress: —";
     renderAuditChain(result.auditChain);
   } catch (err) {
     appendConsole(`Stop failed: ${err.message}`);
