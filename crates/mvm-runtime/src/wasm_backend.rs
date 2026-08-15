@@ -445,6 +445,7 @@ fn wasm_network_endpoint_spawn_params<'a>(
             path: plan.socket_path.clone(),
         },
         terminator_listen: None,
+        egress_proxy: None,
         tls_intermediate: None,
         network_policy: Some(network_policy),
         raw_egress: false,

@@ -41,7 +41,7 @@ use crate::supervisor::secret_audit::{
     emit_rewrite_proof, emit_secret_placeholder_dropped, emit_secret_redacted,
     emit_secret_substituted,
 };
-use crate::supervisor::tools::http_hardening::hardened_client_builder;
+use crate::supervisor::tools::http_hardening::hardened_client_builder_via;
 pub use mvm_contract::substitution::{
     PrepareError, PreparedRequest, ProxyRequest, SubstitutionDriver,
     prepare_request as prepare_request_core,
@@ -526,6 +526,9 @@ pub struct FromPlanInputs<'a> {
     /// [`crate::keyholder::RemoteResolver`] dialing a fleet-secrets daemon UDS.
     pub resolver: Arc<dyn SecretResolver>,
     pub forward_timeout_secs: u64,
+    /// Operator-configured upstream proxy for the forward leg, if the host
+    /// force-tunnels its egress. `None` dials destinations directly.
+    pub proxy: Option<mvm_http::ProxyConfig>,
     pub redaction: mvm_core::policy::RedactionPolicy,
     pub reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy,
     pub tls_intermediate: Option<mvm_core::crypto::egress_ca::VmIntermediate>,
@@ -566,11 +569,22 @@ fn err_chain(e: &dyn std::error::Error) -> String {
 /// shared resolver handles it and the hand-rolled path is gone.
 pub struct HardenedForwarder {
     timeout_secs: u64,
+    proxy: Option<mvm_http::ProxyConfig>,
 }
 
 impl HardenedForwarder {
     pub fn new(timeout_secs: u64) -> Result<Self, ForwardError> {
-        Ok(Self { timeout_secs })
+        Ok(Self {
+            timeout_secs,
+            proxy: None,
+        })
+    }
+
+    /// Route the forward leg through an operator-configured upstream proxy.
+    #[must_use]
+    pub fn with_proxy(mut self, proxy: Option<mvm_http::ProxyConfig>) -> Self {
+        self.proxy = proxy;
+        self
     }
 }
 
@@ -579,7 +593,7 @@ impl Forwarder for HardenedForwarder {
     async fn forward(&self, req: PreparedRequest) -> Result<ForwardResponse, ForwardError> {
         let method = mvm_http::Method::from_bytes(req.method.as_bytes())
             .map_err(|e| ForwardError::Failed(format!("bad method: {e}")))?;
-        let client = hardened_client_builder(self.timeout_secs)
+        let client = hardened_client_builder_via(self.timeout_secs, self.proxy.as_ref())
             .max_response_bytes(MAX_FORWARD_RESPONSE_BYTES as u64)
             .build()
             .map_err(|e| ForwardError::Failed(e.to_string()))?;
@@ -758,13 +772,15 @@ impl SubstitutionService {
             bindings,
             resolver,
             forward_timeout_secs,
+            proxy,
             redaction,
             reversible_replacement,
             tls_intermediate,
             recorder,
         } = inputs;
         let (registry, handed) = assemble_registry(plan_secrets, tenant, bindings)?;
-        let forwarder: Arc<dyn Forwarder> = Arc::new(HardenedForwarder::new(forward_timeout_secs)?);
+        let forwarder: Arc<dyn Forwarder> =
+            Arc::new(HardenedForwarder::new(forward_timeout_secs)?.with_proxy(proxy));
         let mut service = Self::new(Arc::new(registry), resolver, forwarder).with_tenant(tenant);
         service = service.with_redaction_policy(redaction);
         service = service.with_reversible_replacement_policy(reversible_replacement);
@@ -2713,6 +2729,7 @@ mod server_tests {
             bindings: &bindings,
             resolver,
             forward_timeout_secs: 30,
+            proxy: None,
             redaction: mvm_core::policy::RedactionPolicy::default(),
             reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
             tls_intermediate: None,
@@ -2783,6 +2800,7 @@ mod server_tests {
             bindings: &bindings,
             resolver,
             forward_timeout_secs: 30,
+            proxy: None,
             redaction: policy,
             reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
             tls_intermediate: None,

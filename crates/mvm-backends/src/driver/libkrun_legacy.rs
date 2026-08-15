@@ -78,6 +78,7 @@ pub fn spawn_libkrun_egress_endpoint_if_needed(
             path: mvm_core::config::vm_vsock_port_socket(vm_name, mvm_agentd::vsock::EGRESS_PORT),
         },
         terminator_listen: None,
+        egress_proxy: None,
         tls_intermediate: None,
         network_policy: Some(network_policy),
         raw_egress: secrets.is_empty(),

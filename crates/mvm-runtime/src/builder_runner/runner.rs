@@ -150,6 +150,7 @@ impl<D: VmmDriver + 'static> BuilderRunner<D> {
                 path: egress_socket,
             },
             terminator_listen: None,
+            egress_proxy: None,
             tls_intermediate: None,
             network_policy: Some(&builder_policy),
             raw_egress: true,

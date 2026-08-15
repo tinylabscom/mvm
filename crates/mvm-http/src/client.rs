@@ -45,6 +45,7 @@ struct Inner {
     default_headers: HeaderMap,
     max_response_bytes: Option<u64>,
     user_agent: HeaderValue,
+    proxy: Option<crate::proxy::ProxyConfig>,
 }
 
 /// An HTTP/1.1 client.
@@ -119,6 +120,7 @@ pub struct ClientBuilder {
     max_response_bytes: Option<u64>,
     user_agent: String,
     roots: Option<rustls::RootCertStore>,
+    proxy: Option<crate::proxy::ProxyConfig>,
 }
 
 impl Default for ClientBuilder {
@@ -135,6 +137,7 @@ impl Default for ClientBuilder {
             max_response_bytes: None,
             user_agent: concat!("mvm/", env!("CARGO_PKG_VERSION")).to_string(),
             roots: None,
+            proxy: None,
         }
     }
 }
@@ -194,6 +197,18 @@ impl ClientBuilder {
         self
     }
 
+    /// Route requests through an upstream proxy.
+    ///
+    /// The proxy is a transport choice, not a policy one: it does not decide
+    /// which destinations are reachable, and a destination this client would
+    /// otherwise refuse is still refused. See [`crate::proxy`] for what
+    /// proxying does to the resolver's SSRF guarantee.
+    #[must_use]
+    pub fn proxy(mut self, proxy: crate::proxy::ProxyConfig) -> Self {
+        self.proxy = Some(proxy);
+        self
+    }
+
     pub fn build(self) -> Result<Client> {
         let user_agent = HeaderValue::from_str(&self.user_agent)
             .map_err(|_| Error::Header(format!("user agent {:?}", self.user_agent)))?;
@@ -211,6 +226,7 @@ impl ClientBuilder {
                 default_headers: self.default_headers,
                 max_response_bytes: self.max_response_bytes,
                 user_agent,
+                proxy: self.proxy.filter(|p| !p.is_empty()),
             }),
         })
     }
@@ -416,22 +432,47 @@ async fn send_once(
         .port_or_known_default()
         .unwrap_or(if tls_wanted { 443 } else { 80 });
 
-    let addrs = inner
-        .resolver
-        .resolve(host.clone(), port)
-        .await
-        .map_err(|source| Error::Dns {
-            host: host.clone(),
-            source,
-        })?;
-    if addrs.is_empty() {
-        return Err(Error::NoPermittedAddress(host));
-    }
+    let via = inner
+        .proxy
+        .as_ref()
+        .and_then(|c| c.select(&host, tls_wanted))
+        .cloned();
 
-    let stream = connect(&inner, &addrs, &host, tls_wanted).await?;
-    let mut stream = stream;
+    // An absolute-URI request line is required only for plaintext HTTP through
+    // an HTTP proxy: that is the one case where the proxy reads the request
+    // line to learn the destination. A CONNECT tunnel and SOCKS5 both carry the
+    // destination out of band, so the request inside them is origin-form.
+    let absolute_uri = matches!(
+        via.as_ref().map(|p| p.kind),
+        Some(crate::proxy::ProxyKind::Http)
+    ) && !tls_wanted;
 
-    let head = serialize_request(&inner, &method, &url, &extra_headers, body.as_deref())?;
+    let mut stream = match &via {
+        Some(proxy) => connect_via_proxy(&inner, proxy, &host, port, tls_wanted).await?,
+        None => {
+            let addrs = inner
+                .resolver
+                .resolve(host.clone(), port)
+                .await
+                .map_err(|source| Error::Dns {
+                    host: host.clone(),
+                    source,
+                })?;
+            if addrs.is_empty() {
+                return Err(Error::NoPermittedAddress(host));
+            }
+            connect(&inner, &addrs, &host, tls_wanted).await?
+        }
+    };
+
+    let head = serialize_request(
+        &inner,
+        &method,
+        &url,
+        &extra_headers,
+        body.as_deref(),
+        absolute_uri,
+    )?;
     stream.write_all(&head).await?;
     if let Some(b) = &body {
         stream.write_all(b).await?;
@@ -502,6 +543,267 @@ async fn connect(
     })
 }
 
+/// Dial the proxy itself.
+///
+/// Deliberately **not** through `inner.resolver`. That resolver is the SSRF
+/// guard for guest-influenced destinations, and it rejects RFC1918 — which is
+/// where a corporate proxy almost always lives. The proxy address comes from
+/// operator configuration on this host, never from a guest, so it is resolved
+/// the way any other operator-supplied endpoint would be.
+async fn dial_proxy(inner: &Inner, proxy: &crate::proxy::Proxy) -> Result<TcpStream> {
+    let addrs = crate::resolve::SystemResolver
+        .resolve(proxy.host.clone(), proxy.port)
+        .await
+        .map_err(|source| Error::Dns {
+            host: proxy.host.clone(),
+            source,
+        })?;
+    let mut last: Option<std::io::Error> = None;
+    for addr in &addrs {
+        let attempt = TcpStream::connect(addr);
+        let tcp = match inner.connect_timeout {
+            Some(d) => match tokio::time::timeout(d, attempt).await {
+                Ok(r) => r,
+                Err(_) => {
+                    last = Some(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "proxy connect timed out",
+                    ));
+                    continue;
+                }
+            },
+            None => attempt.await,
+        };
+        match tcp {
+            Ok(tcp) => {
+                tcp.set_nodelay(true).ok();
+                return Ok(tcp);
+            }
+            Err(e) => last = Some(e),
+        }
+    }
+    Err(Error::Connect {
+        addr: proxy.endpoint(),
+        source: last.unwrap_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::AddrNotAvailable, "no address")
+        }),
+    })
+}
+
+/// Establish a stream to `host:port` through `proxy`, wrapping it in TLS when
+/// the destination is `https`.
+async fn connect_via_proxy(
+    inner: &Inner,
+    proxy: &crate::proxy::Proxy,
+    host: &str,
+    port: u16,
+    tls_wanted: bool,
+) -> Result<Stream> {
+    let tcp = dial_proxy(inner, proxy).await?;
+    let tcp = match proxy.kind {
+        crate::proxy::ProxyKind::Http => {
+            if tls_wanted {
+                http_connect_tunnel(tcp, proxy, host, port).await?
+            } else {
+                // Plaintext through an HTTP proxy needs no tunnel; the
+                // absolute-URI request line carries the destination.
+                tcp
+            }
+        }
+        crate::proxy::ProxyKind::Socks5 => socks5_connect(tcp, proxy, host, port).await?,
+    };
+    if !tls_wanted {
+        return Ok(Stream::Plain(tcp));
+    }
+    // TLS terminates at the destination, not the proxy: the SNI and the
+    // certificate checked are the destination's, so an HTTP proxy carrying this
+    // tunnel cannot read or alter the body.
+    let server_name = rustls_pki_types::ServerName::try_from(host.to_string())
+        .map_err(|_| Error::Url(format!("invalid dns name {host}")))?;
+    let connector = tokio_rustls::TlsConnector::from(inner.tls()?);
+    let tls = connector
+        .connect(server_name, tcp)
+        .await
+        .map_err(|source| Error::Tls {
+            host: host.to_string(),
+            source,
+        })?;
+    Ok(Stream::Tls(Box::new(tls)))
+}
+
+fn proxy_auth_header(proxy: &crate::proxy::Proxy) -> Option<String> {
+    use base64::Engine as _;
+    let auth = proxy.auth.as_ref()?;
+    let raw = format!("{}:{}", auth.username, auth.password);
+    let encoded = base64::engine::general_purpose::STANDARD.encode(raw);
+    Some(format!("Proxy-Authorization: Basic {encoded}\r\n"))
+}
+
+/// `CONNECT host:port` against an HTTP proxy, leaving the socket ready for a
+/// TLS handshake with the destination.
+async fn http_connect_tunnel(
+    mut tcp: TcpStream,
+    proxy: &crate::proxy::Proxy,
+    host: &str,
+    port: u16,
+) -> Result<TcpStream> {
+    use tokio::io::AsyncReadExt as _;
+    let target = format!("{host}:{port}");
+    let mut req = format!("CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n");
+    if let Some(h) = proxy_auth_header(proxy) {
+        req.push_str(&h);
+    }
+    req.push_str("\r\n");
+    tcp.write_all(req.as_bytes()).await?;
+    tcp.flush().await?;
+
+    // Bounded by the same head limit the response parser uses, so a proxy that
+    // never terminates its head cannot grow this without limit.
+    let mut buf = Vec::with_capacity(256);
+    let mut byte = [0u8; 1];
+    loop {
+        let n = tcp.read(&mut byte).await?;
+        if n == 0 {
+            return Err(Error::Proxy {
+                proxy: proxy.endpoint(),
+                target,
+                reason: "proxy closed the connection before answering CONNECT".into(),
+            });
+        }
+        buf.push(byte[0]);
+        if buf.ends_with(b"\r\n\r\n") {
+            break;
+        }
+        if buf.len() > crate::parse::MAX_HEAD_BYTES {
+            return Err(Error::Proxy {
+                proxy: proxy.endpoint(),
+                target,
+                reason: "CONNECT response head exceeded the size limit".into(),
+            });
+        }
+    }
+    let head = String::from_utf8_lossy(&buf);
+    let status = head
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse::<u16>().ok())
+        .ok_or_else(|| Error::Proxy {
+            proxy: proxy.endpoint(),
+            target: target.clone(),
+            reason: "CONNECT response had no status code".into(),
+        })?;
+    if !(200..300).contains(&status) {
+        return Err(Error::Proxy {
+            proxy: proxy.endpoint(),
+            target,
+            reason: format!("CONNECT returned HTTP {status}"),
+        });
+    }
+    Ok(tcp)
+}
+
+/// SOCKS5 CONNECT, sending the destination as a domain name so the proxy
+/// resolves it. Resolving locally would defeat the purpose on a host that
+/// cannot resolve external names itself.
+async fn socks5_connect(
+    mut tcp: TcpStream,
+    proxy: &crate::proxy::Proxy,
+    host: &str,
+    port: u16,
+) -> Result<TcpStream> {
+    use tokio::io::AsyncReadExt as _;
+    let target = format!("{host}:{port}");
+    let fail = |reason: String| Error::Proxy {
+        proxy: proxy.endpoint(),
+        target: target.clone(),
+        reason,
+    };
+    let host_bytes = host.as_bytes();
+    if host_bytes.len() > 255 {
+        return Err(fail("destination host is too long for SOCKS5".into()));
+    }
+
+    // Greeting: offer no-auth, plus username/password when credentials exist.
+    let mut greet: Vec<u8> = vec![0x05];
+    if proxy.auth.is_some() {
+        greet.extend_from_slice(&[2, 0x00, 0x02]);
+    } else {
+        greet.extend_from_slice(&[1, 0x00]);
+    }
+    tcp.write_all(&greet).await?;
+    tcp.flush().await?;
+    let mut sel = [0u8; 2];
+    tcp.read_exact(&mut sel).await?;
+    if sel[0] != 0x05 {
+        return Err(fail(format!("unexpected SOCKS version {}", sel[0])));
+    }
+    match sel[1] {
+        0x00 => {}
+        0x02 => {
+            let auth = proxy
+                .auth
+                .as_ref()
+                .ok_or_else(|| fail("proxy demanded credentials none were configured".into()))?;
+            let (u, p) = (auth.username.as_bytes(), auth.password.as_bytes());
+            if u.len() > 255 || p.len() > 255 {
+                return Err(fail("SOCKS5 credentials exceed the field length".into()));
+            }
+            let mut msg: Vec<u8> = vec![0x01, u.len() as u8];
+            msg.extend_from_slice(u);
+            msg.push(p.len() as u8);
+            msg.extend_from_slice(p);
+            tcp.write_all(&msg).await?;
+            tcp.flush().await?;
+            let mut ok = [0u8; 2];
+            tcp.read_exact(&mut ok).await?;
+            if ok[1] != 0x00 {
+                return Err(fail("proxy rejected the configured credentials".into()));
+            }
+        }
+        0xFF => return Err(fail("proxy offered no acceptable auth method".into())),
+        other => return Err(fail(format!("proxy chose unsupported auth method {other}"))),
+    }
+
+    // CONNECT by domain name.
+    let mut req: Vec<u8> = vec![0x05, 0x01, 0x00, 0x03, host_bytes.len() as u8];
+    req.extend_from_slice(host_bytes);
+    req.extend_from_slice(&port.to_be_bytes());
+    tcp.write_all(&req).await?;
+    tcp.flush().await?;
+
+    let mut head = [0u8; 4];
+    tcp.read_exact(&mut head).await?;
+    if head[1] != 0x00 {
+        return Err(fail(format!(
+            "SOCKS5 CONNECT failed with reply {}",
+            head[1]
+        )));
+    }
+    // Drain the bound address so the socket is positioned at the payload.
+    match head[3] {
+        0x01 => {
+            let mut skip = [0u8; 6];
+            tcp.read_exact(&mut skip).await?;
+        }
+        0x04 => {
+            let mut skip = [0u8; 18];
+            tcp.read_exact(&mut skip).await?;
+        }
+        0x03 => {
+            let mut len = [0u8; 1];
+            tcp.read_exact(&mut len).await?;
+            let mut skip = vec![0u8; len[0] as usize + 2];
+            tcp.read_exact(&mut skip).await?;
+        }
+        other => {
+            return Err(fail(format!(
+                "SOCKS5 reply had unknown address type {other}"
+            )));
+        }
+    }
+    Ok(tcp)
+}
+
 /// Build the request head. `Host` and `Connection: close` are always set here:
 /// without a connection pool, asking the server to close is what keeps framing
 /// unambiguous.
@@ -511,14 +813,26 @@ fn serialize_request(
     url: &Url,
     extra: &HeaderMap,
     body: Option<&[u8]>,
+    absolute_uri: bool,
 ) -> Result<Vec<u8>> {
-    let mut path = url.path().to_string();
+    // Absolute-form is how a plaintext request tells an HTTP proxy where it is
+    // going; origin-form would make the proxy treat the proxy itself as the
+    // destination.
+    let mut path = if absolute_uri {
+        let mut u = url.clone();
+        u.set_fragment(None);
+        u.to_string()
+    } else {
+        url.path().to_string()
+    };
     if path.is_empty() {
         path.push('/');
     }
-    if let Some(q) = url.query() {
-        path.push('?');
-        path.push_str(q);
+    if !absolute_uri {
+        if let Some(q) = url.query() {
+            path.push('?');
+            path.push_str(q);
+        }
     }
 
     let mut headers = inner.default_headers.clone();
@@ -619,12 +933,13 @@ mod tests {
             default_headers: HeaderMap::new(),
             max_response_bytes: None,
             user_agent: HeaderValue::from_static("mvm-test"),
+            proxy: None,
         }
     }
 
     fn serialize(url: &str, extra: HeaderMap, body: Option<&[u8]>) -> String {
         let u = Url::parse(url).unwrap();
-        let out = serialize_request(&inner(), &Method::GET, &u, &extra, body).unwrap();
+        let out = serialize_request(&inner(), &Method::GET, &u, &extra, body, false).unwrap();
         String::from_utf8(out).unwrap()
     }
 

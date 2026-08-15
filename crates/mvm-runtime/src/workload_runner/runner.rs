@@ -60,55 +60,14 @@ use mvm_vmm::post_restore::PostRestoreOutcome;
 mod backend;
 mod refusal;
 mod sockets;
+mod spawner;
 mod warm_claim;
 
 use refusal::{map_lineage_refusal, refuse, require_fresh_child_identity};
 use sockets::standing_sockets;
-
-/// What the workload runner needs to stand up the per-VM gating endpoint.
-pub struct NetworkEndpointSpawnRequest<'a> {
-    pub vm_name: &'a str,
-    pub state_dir: &'a Path,
-    pub tenant: &'a str,
-    pub secrets: &'a [SecretBinding],
-    pub redaction: &'a RedactionPolicy,
-    pub network_policy: &'a NetworkPolicy,
-    /// Raw TCP egress (no secrets) vs the WireRequest substitution protocol.
-    pub raw_egress: bool,
-}
-
-/// Stand up the per-VM gating endpoint; return the host UDS the guest's
-/// EGRESS_PORT relays to. The one host-side egress bridge (claim-10 gate +
-/// claims 12/13 substitution).
-pub trait NetworkEndpointSpawner: Send + Sync {
-    fn spawn(&self, req: &NetworkEndpointSpawnRequest<'_>) -> Result<PathBuf>;
-}
-
-/// The production `NetworkEndpointSpawner`: spawns the real `mvm-network-endpoint`
-/// over the in-process-VMM UDS transport.
-pub struct RealNetworkEndpointSpawner;
-
-impl NetworkEndpointSpawner for RealNetworkEndpointSpawner {
-    fn spawn(&self, req: &NetworkEndpointSpawnRequest<'_>) -> Result<PathBuf> {
-        let uds = vm_network_endpoint_socket(req.vm_name);
-        spawn_network_endpoint(SubstitutionSpawnParams {
-            vm_name: req.vm_name,
-            state_dir: req.state_dir,
-            tenant: req.tenant,
-            secrets: req.secrets,
-            redaction: req.redaction,
-            transport: EndpointTransport::Uds { path: uds.clone() },
-            terminator_listen: None,
-            tls_intermediate: None,
-            network_policy: Some(req.network_policy),
-            raw_egress: req.raw_egress,
-            resolver_remote: None,
-            binding_store_dir: None,
-            flowmux_identity: None,
-        })?;
-        Ok(uds)
-    }
-}
+pub use spawner::{
+    NetworkEndpointSpawnRequest, NetworkEndpointSpawner, RealNetworkEndpointSpawner,
+};
 
 /// What the runner needs to register the per-VM host-services broker after boot.
 pub struct BrokerRegisterRequest<'a> {
