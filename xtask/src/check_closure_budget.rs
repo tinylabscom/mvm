@@ -53,7 +53,11 @@ const BUDGETS: &[ClosureBudget] = &[
 /// Lower than the Linux budget because the Firecracker/KVM stack
 /// (`kvm-bindings`, `kvm-ioctls`, `vmm-sys-util`, `landlock`, `seccompiler`,
 /// the netlink family) does not enter the macOS graph.
-const MACOS_CLOSURE_BUDGET: usize = 232;
+///
+/// 233 (was 232): `mvm-observability`, the same +1 the Linux budget took —
+/// a workspace crate holding subscriber assembly that `mvm-core` used to
+/// own, carrying no new third-party code on either target.
+const MACOS_CLOSURE_BUDGET: usize = 233;
 
 /// Max distinct crates allowed in `mvmctl`'s default no-dev closure on
 /// `x86_64-unknown-linux-gnu`. Baseline measured 2026-06-17 against the audited default
