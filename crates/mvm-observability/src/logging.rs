@@ -4,7 +4,9 @@ use tracing_subscriber::fmt;
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::registry::LookupSpan;
 
-use super::span_timing::{self, SpanTimingLayer};
+use mvm_core::observability::span_timing;
+
+use crate::span_timing_layer::SpanTimingLayer;
 
 /// Log output format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

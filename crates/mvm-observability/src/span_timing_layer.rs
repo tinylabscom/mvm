@@ -7,7 +7,7 @@ use tracing::span::{Attributes, Id};
 use tracing_subscriber::layer::{Context, Layer};
 use tracing_subscriber::registry::LookupSpan;
 
-use super::registry::{SpanKey, SpanSample, SpanTimings};
+use mvm_core::observability::span_timing::{SpanKey, SpanSample, SpanTimings};
 
 /// Per-span state held in the registry's span extensions.
 struct Timings {
@@ -45,7 +45,7 @@ impl SpanTimingLayer {
     /// A layer writing into the process-wide registry.
     pub fn new() -> Self {
         Self {
-            timings: super::registry::global(),
+            timings: mvm_core::observability::span_timing::global(),
         }
     }
 
