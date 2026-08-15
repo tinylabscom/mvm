@@ -100,6 +100,30 @@ fn strip_v_prefix(tag: &str) -> &str {
     tag.strip_prefix('v').unwrap_or(tag)
 }
 
+/// Download a release checksum manifest and prove the publisher signed it
+/// before any of its bytes are read.
+///
+/// The manifest decides which artifact bytes are acceptable, so whoever can
+/// serve one picks the artifact; TLS says nothing about who wrote it. Refuses
+/// on a missing, unparseable, or foreign-signed bundle — the shared release
+/// verifier does the deciding.
+fn fetch_signed_checksum_manifest(base_url: &str, asset: &str, version: &str) -> Result<String> {
+    let staged = tempfile::NamedTempFile::new()
+        .with_context(|| format!("creating staging file for {asset}"))?;
+    http::download_file(&format!("{base_url}/{asset}"), staged.path())
+        .with_context(|| format!("downloading {asset} — cannot verify integrity"))?;
+    mvm_build::release_signature::verify_release_archive_signature(
+        &mvm_build::release_signature::ReleaseSignatureRequest {
+            base_url,
+            asset,
+            archive_path: staged.path(),
+            version,
+        },
+    )
+    .with_context(|| format!("refusing to parse an unauthenticated checksum manifest ({asset})"))?;
+    std::fs::read_to_string(staged.path()).with_context(|| format!("reading {asset}"))
+}
+
 /// Parse a hex-encoded SHA256 digest from a `checksums-sha256.txt` entry.
 ///
 /// Each line is: `<64 hex chars>  <filename>`  (two spaces, shasum format).
@@ -206,11 +230,16 @@ fn download_release(version: &str, target: &str, tmp_dir: &Path) -> Result<()> {
 /// release's `kernel-<arch>-checksums-sha256.txt`, and write it to
 /// `dest`. The `--source download` arm of `mvmctl kernel build`.
 ///
+/// That manifest is itself signature-verified against the release identity
+/// before it is read, so the digest the kernel is held to comes from the
+/// publisher rather than from whoever answered the request.
+///
 /// Keyed by the mvmctl release tag: a given mvmctl can only ever fetch
 /// the kernel that shipped with it — never a substitute for an in-tree
 /// config edit (a source checkout compiles instead).
-/// `MVM_SKIP_HASH_VERIFY` is the documented emergency escape — never
-/// set it in CI.
+/// `MVM_SKIP_HASH_VERIFY` is the documented emergency escape for the digest
+/// comparison — never set it in CI. It does not waive the manifest signature;
+/// `MVM_SKIP_COSIGN_VERIFY` is that separate, larger concession.
 ///
 /// Available without `builder-vm`: lean clients cannot compile kernels
 /// locally, so downloading the release-matched kernel is their supported
@@ -226,7 +255,8 @@ pub(crate) fn download_kernel(arch: &str, variant: &str, dest: &Path) -> Result<
             .with_context(|| format!("creating kernel cache dir {}", parent.display()))?;
     }
 
-    let asset_url = format!("{base}/{GITHUB_REPO}/releases/download/{tag}/{asset}");
+    let release_base = format!("{base}/{GITHUB_REPO}/releases/download/{tag}");
+    let asset_url = format!("{release_base}/{asset}");
     let parent = dest
         .parent()
         .with_context(|| format!("kernel destination has no parent: {}", dest.display()))?;
@@ -248,15 +278,19 @@ pub(crate) fn download_kernel(arch: &str, variant: &str, dest: &Path) -> Result<
         )
     })?;
 
+    // The signature rung runs even under MVM_SKIP_HASH_VERIFY: that hatch
+    // waives comparing the digest, not the question of who published the
+    // manifest the digest comes from. Waiving the publisher takes the separate
+    // MVM_SKIP_COSIGN_VERIFY.
+    let manifest = fetch_signed_checksum_manifest(&release_base, &checksums, current_version())?;
+
     if std::env::var("MVM_SKIP_HASH_VERIFY").is_ok() {
         ui::warn("MVM_SKIP_HASH_VERIFY set — skipping kernel checksum verification (never in CI).");
         publish_downloaded_kernel(download, dest)?;
         return Ok(());
     }
 
-    let checksum_url = format!("{base}/{GITHUB_REPO}/releases/download/{tag}/{checksums}");
-    let expected = http::fetch_text(&checksum_url)
-        .context("downloading kernel checksums — cannot verify integrity")?
+    let expected = manifest
         .lines()
         .find(|l| l.contains(&asset))
         .with_context(|| format!("{asset} not found in {checksums}"))

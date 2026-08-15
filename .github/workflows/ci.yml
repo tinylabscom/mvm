@@ -993,7 +993,12 @@ jobs:
   kernel:
     name: Build kernels (${{ matrix.arch }})
     needs: [scope]
-    if: needs.scope.outputs.kernel == 'true'
+    # No job-level `if:`. A skipped matrix job cannot expand `matrix.arch`, so
+    # it reports one check literally named `Build kernels (${{ matrix.arch }})`
+    # — which matches neither required context, leaving every PR that does not
+    # touch kernel paths permanently unmergeable. Every step below carries the
+    # scope condition instead, so an out-of-scope run costs a few seconds and
+    # still reports both names.
     strategy:
       fail-fast: false
       matrix:
