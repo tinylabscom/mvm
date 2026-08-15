@@ -1,5 +1,8 @@
 # One transport: finish the FlowMux cutover and restore guest egress
 
+Backing: preview
+Validation: none
+
 **Issue:** [#2543](https://github.com/tinylabscom/mvm/issues/2543).
 **Supersedes the production-path decisions in** `specs/plans/316-single-flow-vsock-networking.md`
 Phases 2–4. Plan 316's phase issues (#2368, #2371, #2372, #2373) are all closed while the
@@ -115,7 +118,7 @@ against the real binary — one, then one after it ends, then one concurrent wit
 Confirmed red on the pre-fix binary (`Broken pipe` on the first handshake) and green after.
 It deliberately asserts a *completed handshake* rather than a successful `connect()`: a unix
 socket accepts into its backlog while the listener is open, so a connect-only assertion
-passes against the broken version and proves nothing. The first draft of this test did
+passes against the broken version and is worth nothing. The first draft of this test did
 exactly that and had to be rewritten.
 
 ### WS2 — Per-boot identity, delivered off the cmdline — **complete**
