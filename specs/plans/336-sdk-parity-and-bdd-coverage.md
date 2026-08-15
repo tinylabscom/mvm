@@ -219,7 +219,8 @@ That leaves two decidable problems and one that is a feature port:
 - [x] G3. Gate it. `surface_divergence.json` records the reviewed difference and
       a BDD scenario fails when reality stops matching it — confirmed to go red
       when a single internal is re-exported.
-- [x] G4. Scoped out into `specs/plans/337-sdk-surface-generated-from-rust.md`.
+- [x] G4. Scoped out into Plan 337, "Generate the SDK surface from Rust
+      instead of porting it".
       Investigating it changed the shape of the answer: `egress`, `host_port`,
       the `dns_*` trio and the `*_deps` trio already exist in
       `mvm_sdk::ctor` and are hand-copied into Python, so porting them to

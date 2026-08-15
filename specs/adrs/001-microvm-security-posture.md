@@ -1,5 +1,8 @@
 # ADR-001: microVM security posture — guarantees and threat model
 
+Backing: shipped-source
+Validation: check-claim-catalog
+
 ## Status
 
 Accepted.

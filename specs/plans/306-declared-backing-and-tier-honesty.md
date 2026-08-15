@@ -34,7 +34,7 @@ What we already have, and therefore what this plan does **not** redo:
 
 ## Workstreams
 
-- [ ] **WS1 — Declared backing on claim-bearing contributor prose.**
+- [x] **WS1 — Declared backing on claim-bearing contributor prose.**
       `check-doc-claims` deliberately scans only `public/` and the root
       `README.md`: "`specs/`, `CLAUDE.md`, `AGENTS.md`, and crate-level
       `*.md` are contributor-facing, not user-facing. We don't lint them."
@@ -62,6 +62,18 @@ What we already have, and therefore what this plan does **not** redo:
       Ship the gate with a `--self-test` that copies the tree, seeds one
       violation, and asserts a nonzero exit. A gate nobody has watched fail
       is a gate nobody knows works.
+
+      **Landed.** `xtask check-declared-backing`, wired into the CI Lint policy
+      lane, which runs `--self-test` before the real check. All four rules are
+      implemented and each is proved to reject its own seeded violation.
+
+      Four files are assessed and declared; the remaining 147 are enumerated in
+      a `PENDING` list that **only shrinks** — a file leaves by gaining a real
+      header, nothing may be added, and a stale entry naming a deleted file is
+      itself an error so the list cannot rot into names that permit nothing.
+      Annotating all 151 in one pass would have meant judging them at a rate
+      that produces rubber stamps, which is the dishonesty this gate exists to
+      prevent.
 
 - [ ] **WS2 — Derive the ADR-001 per-backend tier matrix from code.** The
       matrix is prose asserted *about* the backends. #2248 gives every

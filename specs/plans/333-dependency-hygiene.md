@@ -1,5 +1,8 @@
 # Plan 333: Dependency hygiene — four defects and a ratchet, not a cut
 
+Backing: shipped-source
+Validation: check-workspace-dep-inheritance
+
 ## Status
 
 **Phase 5 and Phase 5.5 COMPLETE** (2026-08-14). macOS closure **238 → 232**;

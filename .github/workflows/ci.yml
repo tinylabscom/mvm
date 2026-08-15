@@ -289,6 +289,14 @@ jobs:
       - name: Gated doc claims
         run: cargo run -p xtask -- check-doc-claims
 
+      # Runs its own self-test first: a gate nobody has watched fail is a gate
+      # nobody knows works, and this one is the relief valve for the exclusion
+      # that let fabricated witness names live in specs/ for months.
+      - name: Claim-bearing prose declares what backs it
+        run: |
+          cargo run -p xtask -- check-declared-backing --self-test
+          cargo run -p xtask -- check-declared-backing
+
       - name: Machine docs guards
         run: cargo run -p xtask -- check-machine-doc-guards
 
