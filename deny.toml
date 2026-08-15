@@ -105,6 +105,14 @@ highlight = "all"
 # regress. Entries are grouped by why they duplicate; shrink the list
 # as upstream majors converge or a dep is replaced — never grow it
 # without a recorded reason.
+#
+# This list describes cargo-deny's *filtered* graph: dev-only edges and
+# unenabled optional deps are not in it. `xtask check-duplicate-majors`
+# ratchets the same property over `cargo metadata --locked`, which is the
+# full graph — all targets, all features, dev-dependencies included — so its
+# ALLOWLIST is strictly larger and the two are expected to differ. A crate
+# there and absent here is not drift; it is a duplication only the wider
+# graph can see. Compare them by that rule, not entry for entry.
 skip = [
     # Windows host-target shim umbrellas. `windows-sys` and `windows-core`
     # still coexist at two majors across the graph; they are host/build only
