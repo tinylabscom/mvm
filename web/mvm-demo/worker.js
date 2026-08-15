@@ -550,16 +550,27 @@ HOME_URL="https://mvm.dev/"
 
     const decision = JSON.parse(decide_egress(policyJson, url));
     if (!decision.ok) {
-      // Decision failed before policy allow/deny (e.g. unknown host). Write
-      // a human-readable message into the response buffer and return a
+      // Decision failed before policy allow/deny (e.g. unknown host). Still
+      // record the refused egress in the audit chain — every attempt that
+      // doesn't leave the sandbox shows up as a deny — then write a
+      // human-readable message into the response buffer and return a
       // generic error so the guest prints "fetch: error <msg>" instead of
       // "fetch: allowed".
       const msg = decision.error;
+      signAuditEntry("egress.deny", vm.imageName, {
+        host,
+        port: port.toString(),
+        reason: msg,
+      });
       writeString(outPtr, outCap, msg);
       return -1;
     }
     if (!decision.allowed) {
-        signAuditEntry("egress.deny", vm.imageName, { host, port: port.toString() });
+      signAuditEntry("egress.deny", vm.imageName, {
+        host,
+        port: port.toString(),
+        reason: "policy",
+      });
       return -13; // EACCES
     }
     signAuditEntry("egress.allow", vm.imageName, { host, port: port.toString() });

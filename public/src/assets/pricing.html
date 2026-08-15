@@ -1,0 +1,459 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MVM — Pricing</title>
+<script>
+  // Apply the stored theme before first paint to avoid a flash. No stored
+  // value → auto (the CSS prefers-color-scheme fallback decides).
+  (function () {
+    try {
+      var t = localStorage.getItem('starlight-theme');
+      if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t;
+    } catch (e) {}
+  })();
+</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/theme.css">
+<style>
+  /* ── Page intro ── */
+  .intro { position: relative; overflow: hidden; border-bottom: 1px solid var(--color-edge); }
+  .intro .site-bloom.b1 {
+    width: 30rem; height: 30rem; top: -12rem; right: -6rem;
+    background: radial-gradient(circle, var(--color-glow-1), transparent 70%);
+  }
+  .intro-inner {
+    position: relative;
+    max-width: 72rem; margin: 0 auto; padding: 4rem 1.5rem 3.2rem;
+  }
+  @media (min-width: 640px) { .intro-inner { padding-inline: 2rem; } }
+  .intro .kicker { margin-bottom: 1.5rem; }
+  .intro h1 {
+    font-weight: 600;
+    font-size: clamp(2.1rem, 4vw, 3rem);
+    line-height: 1.1; letter-spacing: -0.025em;
+    max-width: 54rem; text-wrap: balance;
+  }
+  .intro .sub {
+    font-size: 1.05rem; line-height: 1.7; color: var(--color-body);
+    max-width: 38rem; margin-top: 1.2rem;
+  }
+  .intro .sub .ink { color: var(--color-title); }
+
+  /* ── Pricing grid ── */
+  .price-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+  .price-card {
+    border: 1px solid var(--color-glass-border); border-radius: 0.75rem;
+    background: var(--color-raised);
+    padding: 1.7rem;
+    display: flex; flex-direction: column;
+    transition: border-color 0.2s;
+  }
+  .price-card:hover { border-color: color-mix(in oklab, var(--color-accent) 45%, var(--color-glass-border)); }
+  /* Featured plan — accent hairline + low accent tint, the docs' glow-card
+     hover treatment made resting-state. */
+  .price-card.featured {
+    border-color: color-mix(in oklab, var(--color-accent) 60%, var(--color-glass-border));
+    background: color-mix(in oklab, var(--color-accent) 5%, var(--color-raised));
+    box-shadow: 0 0 40px color-mix(in oklab, var(--color-accent) calc(var(--glow-strength) / 2), transparent);
+  }
+  .price-card .head {
+    font-family: var(--font-mono); font-size: 0.6rem; font-weight: 600;
+    letter-spacing: 0.14em; text-transform: uppercase;
+    color: var(--color-label); margin-bottom: 1rem;
+  }
+  .price-card.featured .head { color: var(--color-accent); }
+  .price-card h3 { font-size: 1.6rem; font-weight: 600; margin-bottom: 0.3rem; }
+  .price-card .tagline { font-size: 0.85rem; color: var(--color-body); margin-bottom: 1.5rem; }
+  .price-tag { display: flex; align-items: baseline; gap: 0.6rem; margin-bottom: 0.6rem; }
+  .price-tag .amount {
+    font-family: var(--font-mono); font-size: 2.2rem; font-weight: 600;
+    color: var(--color-title); letter-spacing: -0.02em;
+  }
+  .price-tag .unit {
+    font-family: var(--font-mono); font-size: 0.72rem;
+    color: var(--color-body); letter-spacing: 0.1em;
+  }
+  .price-meta {
+    font-family: var(--font-mono); font-size: 0.66rem; font-weight: 600;
+    letter-spacing: 0.05em; color: var(--color-body);
+    padding-bottom: 1.3rem; margin-bottom: 1.3rem;
+    border-bottom: 1px solid var(--color-edge);
+  }
+  .price-card.featured .price-meta {
+    color: var(--color-accent);
+    border-bottom-color: color-mix(in oklab, var(--color-accent) 30%, transparent);
+  }
+
+  .spec-block { margin-bottom: 1.4rem; }
+  .spec-block .spec-head {
+    font-family: var(--font-mono); font-size: 0.6rem; font-weight: 600;
+    letter-spacing: 0.14em; text-transform: uppercase;
+    color: var(--color-label); margin-bottom: 0.8rem;
+  }
+  .price-card.featured .spec-head { color: var(--color-accent); }
+  .spec-list { list-style: none; padding: 0; margin: 0; display: grid; gap: 0.6rem; }
+  .spec-list li {
+    font-size: 0.85rem; line-height: 1.5; color: var(--color-title);
+    display: flex; gap: 0.6rem; align-items: baseline;
+  }
+  .spec-list li::before { content: "▸"; color: var(--color-accent); font-size: 0.6rem; flex-shrink: 0; }
+
+  .price-card .cta { margin-top: auto; padding-top: 1.4rem; }
+  .price-card .cta button {
+    width: 100%; padding: 0.8rem;
+    font-family: var(--font-body); font-size: 0.9rem; font-weight: 600;
+    border-radius: 0.5rem; cursor: pointer;
+    transition: background 0.15s, border-color 0.15s, color 0.15s;
+  }
+  .price-card .cta .basic-cta {
+    background: transparent; color: var(--color-title);
+    border: 1px solid var(--color-glass-border);
+  }
+  .price-card .cta .basic-cta:hover { border-color: var(--color-accent); color: var(--color-accent); }
+  .price-card .cta .pro-cta { background: var(--color-action); color: var(--color-canvas); border: none; }
+  .price-card .cta .pro-cta:hover { background: var(--color-action-hover); }
+
+  /* ── Enterprise strip ── */
+  .enterprise {
+    margin-top: 1rem;
+    border: 1px solid var(--color-glass-border); border-radius: 0.75rem;
+    background: var(--color-raised);
+    padding: 1.6rem 1.7rem;
+    display: grid; grid-template-columns: 1fr auto; gap: 2rem;
+    align-items: center;
+    transition: border-color 0.2s;
+  }
+  .enterprise:hover { border-color: color-mix(in oklab, var(--color-accent-3) 55%, var(--color-glass-border)); }
+  .enterprise .ent-head {
+    font-family: var(--font-mono); font-size: 0.6rem; font-weight: 600;
+    letter-spacing: 0.14em; text-transform: uppercase;
+    color: var(--color-accent-3); margin-bottom: 0.5rem;
+  }
+  .enterprise h3 { font-size: 1.5rem; font-weight: 600; margin-bottom: 0.5rem; }
+  .enterprise p { font-size: 0.85rem; color: var(--color-body); line-height: 1.65; max-width: 40rem; }
+  .enterprise button {
+    font-family: var(--font-body); font-size: 0.9rem; font-weight: 600;
+    background: transparent; color: var(--color-title);
+    border: 1px solid var(--color-glass-border); border-radius: 0.5rem;
+    padding: 0.8rem 1.3rem; cursor: pointer; white-space: nowrap;
+    transition: border-color 0.15s, color 0.15s;
+  }
+  .enterprise button:hover { border-color: var(--color-accent-3); color: var(--color-accent-3); }
+
+  /* ── In-practice block (inside Pro card) ── */
+  .practice-block .practice-intro { font-size: 0.8rem; line-height: 1.65; color: var(--color-body); margin-bottom: 1rem; }
+  .practice-block .practice-intro .ink { color: var(--color-title); }
+  .practice-list { list-style: none; padding: 0; margin: 0; display: grid; gap: 0.85rem; }
+  .practice-list li { display: grid; grid-template-columns: 6.5rem 1fr; gap: 1rem; align-items: baseline; }
+  .practice-meta { display: flex; flex-direction: column; gap: 0.25rem; }
+  .practice-num {
+    font-family: var(--font-mono); font-size: 1.15rem; font-weight: 600;
+    color: var(--color-accent); letter-spacing: -0.02em; line-height: 1;
+  }
+  .practice-lab {
+    font-family: var(--font-mono); font-size: 0.56rem; font-weight: 600;
+    color: var(--color-label); letter-spacing: 0.12em; text-transform: uppercase;
+  }
+  .practice-list p { font-size: 0.8rem; line-height: 1.6; color: var(--color-title); margin: 0; }
+
+  /* ── Billing note ── */
+  .billing-note {
+    margin-top: 2rem;
+    border-top: 1px dashed var(--color-edge);
+    padding-top: 1.4rem;
+    display: grid; grid-template-columns: repeat(3, 1fr); gap: 1.4rem;
+  }
+  .billing-note .item {
+    font-family: var(--font-mono); font-size: 0.66rem; line-height: 1.7;
+    color: var(--color-body); letter-spacing: 0.04em;
+  }
+  .billing-note .item .k {
+    color: var(--color-accent); display: block; margin-bottom: 0.35rem;
+    font-weight: 600; letter-spacing: 0.11em; text-transform: uppercase;
+  }
+
+  /* ── Responsive ── */
+  @media (max-width: 980px) {
+    .hdr-actions .hdr-link { display: none; }
+    .hdr-actions a.active { display: inline-block; }
+    .price-grid { grid-template-columns: 1fr; }
+    .enterprise { grid-template-columns: 1fr; }
+    .practice-list li { grid-template-columns: 1fr; gap: 0.35rem; }
+    .billing-note { grid-template-columns: 1fr; }
+    .intro-inner { padding: 2.75rem 1.5rem 2.25rem; }
+  }
+</style>
+</head>
+<body>
+
+<header class="hdr">
+  <div class="hdr-row">
+    <a class="brand" href="/">
+      <span class="name">mvm</span>
+      <span class="rev">REV-2026.04</span>
+    </a>
+    <div class="hdr-actions">
+      <a class="hdr-link active" href="/pricing/">Pricing</a>
+      <a class="hdr-link" href="/whitepaper/">Whitepaper</a>
+      <button class="theme-toggle" type="button" aria-label="Toggle color theme" title="Toggle color theme">
+        <svg class="icon-sun" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/>
+        </svg>
+        <svg class="icon-moon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M20.99 12.79A9 9 0 1 1 11.21 3.01 7 7 0 0 0 20.99 12.79Z"/>
+        </svg>
+      </button>
+      <button class="btn-hdr" data-open-form>Request access →</button>
+    </div>
+  </div>
+</header>
+
+<section class="intro">
+  <div class="site-bloom b1" aria-hidden="true"></div>
+  <div class="intro-inner">
+    <div class="kicker eyebrow"><span class="n">// 001</span>&nbsp; Pricing · Monthly subscription</div>
+    <h1>Start free. Ship on Pro.</h1>
+    <p class="sub">Fixed sandbox shapes. Monthly subscription with included sandbox-hours. <span class="ink">No vCPU dials. No RAM dials.</span> Pick a tier, ship the workload.</p>
+  </div>
+</section>
+
+<section class="std" style="border-top:none">
+  <div class="container">
+    <div class="sec-head">
+      <span class="eyebrow"><span class="n">// 002</span>&nbsp; Plans</span>
+      <h2>Pick a shape. Run sandboxes. Predictable monthly bill.</h2>
+    </div>
+
+    <div class="price-grid">
+      <div class="price-card">
+        <div class="head">Plan.free</div>
+        <h3>Free</h3>
+        <div class="tagline">Evaluate the runtime. Build a prototype. Run a demo.</div>
+        <div class="price-tag">
+          <span class="amount">Free</span>
+        </div>
+        <div class="price-meta">10 SANDBOX-HOURS / MONTH INCLUDED</div>
+        <div class="spec-block">
+          <div class="spec-head">Sandbox shape</div>
+          <ul class="spec-list">
+            <li>2 vCPU</li>
+            <li>4 GB RAM</li>
+            <li>10 GB ephemeral disk</li>
+            <li>Sub-150ms boot</li>
+            <li>Up to 2 concurrent sandboxes</li>
+          </ul>
+        </div>
+        <div class="spec-block">
+          <div class="spec-head">Included</div>
+          <ul class="spec-list">
+            <li>Hardened microVM isolation</li>
+            <li>Policy plane + egress filter</li>
+            <li>Audit chain</li>
+            <li>Community support</li>
+          </ul>
+        </div>
+        <div class="cta">
+          <button class="basic-cta" data-open-form>Start free →</button>
+        </div>
+      </div>
+
+      <div class="price-card featured">
+        <div class="head">Plan.pro</div>
+        <h3>Pro</h3>
+        <div class="tagline">Ship production workloads. Monthly subscription.</div>
+        <div class="price-tag">
+          <span class="amount">$200</span>
+          <span class="unit">/ MONTH</span>
+        </div>
+        <div class="price-meta">200 SANDBOX-HOURS INCLUDED · $1.00/HR AFTER</div>
+        <div class="spec-block">
+          <div class="spec-head">Sandbox shape</div>
+          <ul class="spec-list">
+            <li>4 vCPU</li>
+            <li>8 GB RAM</li>
+            <li>25 GB ephemeral disk</li>
+            <li>Sub-150ms boot</li>
+            <li>Up to 10 concurrent sandboxes</li>
+          </ul>
+        </div>
+        <div class="spec-block">
+          <div class="spec-head">Included</div>
+          <ul class="spec-list">
+            <li>Everything in Free</li>
+            <li>Extended audit log retention</li>
+            <li>Custom egress policy</li>
+            <li>Priority support</li>
+          </ul>
+        </div>
+        <div class="spec-block practice-block">
+          <div class="spec-head">200 hours — in practice</div>
+          <p class="practice-intro">Roughly <span class="ink">one developer's workday of sandbox time, every workday.</span> Three ways to spend the pool:</p>
+          <ul class="practice-list">
+            <li>
+              <div class="practice-meta">
+                <span class="practice-num">~9 hrs</span>
+                <span class="practice-lab">Per workday</span>
+              </div>
+              <p>Long-lived agent sessions — coding assistants, browser automation.</p>
+            </li>
+            <li>
+              <div class="practice-meta">
+                <span class="practice-num">~200</span>
+                <span class="practice-lab">1-hr sessions</span>
+              </div>
+              <p>Code-interpreter, ML notebooks, build pipelines.</p>
+            </li>
+            <li>
+              <div class="practice-meta">
+                <span class="practice-num">~12,000</span>
+                <span class="practice-lab">Short spins</span>
+              </div>
+              <p>One-minute tool calls — search, scrape, transform, return.</p>
+            </li>
+          </ul>
+        </div>
+        <div class="cta">
+          <button class="pro-cta" data-open-form>Upgrade to Pro →</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="enterprise">
+      <div>
+        <div class="ent-head">Plan.enterprise</div>
+        <h3>Enterprise</h3>
+        <p>Custom sandbox shapes, dedicated capacity, SEV-SNP / TDX attestation, on-prem &amp; air-gapped deployments, SSO, custom SLAs, and a named support contact. Volume pricing for sustained workloads.</p>
+      </div>
+      <button data-open-form>Contact sales →</button>
+    </div>
+
+    <div class="billing-note">
+      <div class="item">
+        <span class="k">// Bill.01</span>
+        Monthly subscription. Sandbox-hours pool against your billing cycle, metered to the second.
+      </div>
+      <div class="item">
+        <span class="k">// Bill.02</span>
+        Stop a sandbox, stop the meter. No idle charges between sessions.
+      </div>
+      <div class="item">
+        <span class="k">// Bill.03</span>
+        Pro overage at $1.00/sandbox-hour. No setup fees, no egress surcharges within policy.
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="std">
+  <div class="container">
+    <div class="sec-head">
+      <span class="eyebrow"><span class="n">// 003</span>&nbsp; Billing</span>
+      <h2 style="font-size:1.45rem">How billing works.</h2>
+    </div>
+    <div class="faq-list">
+      <div class="faq-item open">
+        <button>
+          <span class="faq-q">Why can't I configure RAM or vCPU?</span>
+          <span class="faq-toggle"><span class="open-mark">[ − ]</span><span class="closed-mark">[ + ]</span></span>
+        </button>
+        <p class="faq-a">Fixed shapes make the product legible and the bill predictable.</p>
+      </div>
+      <div class="faq-item">
+        <button>
+          <span class="faq-q">What happens when I use up my included hours?</span>
+          <span class="faq-toggle"><span class="open-mark">[ − ]</span><span class="closed-mark">[ + ]</span></span>
+        </button>
+        <p class="faq-a">On Free, sandboxes won't launch again until your hours reset next billing cycle — or until you upgrade to Pro. On Pro, sandboxes keep running and overage is billed at $1.00 per sandbox-hour above your 200-hour pool. No surprise throttling, no auto-suspend mid-workload.</p>
+      </div>
+      <div class="faq-item">
+        <button>
+          <span class="faq-q">When does the sandbox-hour meter start and stop?</span>
+          <span class="faq-toggle"><span class="open-mark">[ − ]</span><span class="closed-mark">[ + ]</span></span>
+        </button>
+        <p class="faq-a">The meter starts when the sandbox is admitted and ready to accept workload, and stops when it terminates. Metered to the second.</p>
+      </div>
+      <div class="faq-item">
+        <button>
+          <span class="faq-q">Do I pay for egress, storage, or attestation?</span>
+          <span class="faq-toggle"><span class="open-mark">[ − ]</span><span class="closed-mark">[ + ]</span></span>
+        </button>
+        <p class="faq-a">No separate line items on Free or Pro — the subscription covers ephemeral disk and policy-mediated egress within published limits. Confidential computing (SEV-SNP / TDX attestation) is an Enterprise feature; Enterprise contracts may also carve out custom egress and persistent storage terms.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<footer class="ftr">
+  <div class="ftr-row">
+    <span>© 2026 MVM · FIRECRACKER · LIMA · INCUS · CONTAINERD · SEV-SNP · TDX</span>
+    <span>REV-2026.04 · BUILD A1F3</span>
+  </div>
+</footer>
+
+<div class="modal" data-modal hidden>
+  <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+    <button class="modal-close" data-close-form aria-label="Close">[ × ]</button>
+    <div class="form-head">Form.access</div>
+    <h3 id="modal-title">Request access</h3>
+    <p class="intro-line">Tell us about the workload. We respond within 48 hours.</p>
+    <form action="https://formspree.io/f/xwvyllrp" method="POST">
+      <label class="field-label" for="modal-email">Email</label>
+      <input id="modal-email" type="email" name="email" required placeholder="you@yourcompany.com">
+      <div class="field-label">Workload class</div>
+      <div class="chips">
+        <label class="chip"><input type="radio" name="class" value="AI agents · tool use" checked><span>AI agents · tool use</span></label>
+        <label class="chip"><input type="radio" name="class" value="Code interpreter"><span>Code interpreter</span></label>
+        <label class="chip"><input type="radio" name="class" value="Multi-tenant platform"><span>Multi-tenant platform</span></label>
+        <label class="chip"><input type="radio" name="class" value="Workflow runtime"><span>Workflow runtime</span></label>
+        <label class="chip"><input type="radio" name="class" value="Other"><span>Other</span></label>
+      </div>
+      <div class="form-foot">
+        <button class="submit" type="submit">Request access →</button>
+        <span class="note">Response within 48h</span>
+      </div>
+    </form>
+  </div>
+</div>
+
+<script>
+  // Theme toggle — explicit light/dark stored in localStorage; no stored
+  // value means auto (OS preference).
+  (function () {
+    var toggle = document.querySelector('.theme-toggle');
+    function effectiveTheme() {
+      var t = document.documentElement.dataset.theme;
+      if (t === 'light' || t === 'dark') return t;
+      return matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+    }
+    toggle.addEventListener('click', function () {
+      var next = effectiveTheme() === 'light' ? 'dark' : 'light';
+      document.documentElement.dataset.theme = next;
+      try { localStorage.setItem('starlight-theme', next); } catch (e) {}
+    });
+  })();
+
+  // FAQ accordion (one open at a time)
+  document.querySelectorAll('.faq-item').forEach(item => {
+    item.querySelector('button').addEventListener('click', () => {
+      const wasOpen = item.classList.contains('open');
+      document.querySelectorAll('.faq-item').forEach(x => x.classList.remove('open'));
+      if (!wasOpen) item.classList.add('open');
+    });
+  });
+
+  // Modal
+  const modal = document.querySelector('[data-modal]');
+  function openModal() { modal.hidden = false; document.body.style.overflow = 'hidden'; }
+  function closeModal() { modal.hidden = true; document.body.style.overflow = ''; }
+  document.querySelectorAll('[data-open-form]').forEach(b => b.addEventListener('click', openModal));
+  document.querySelectorAll('[data-close-form]').forEach(b => b.addEventListener('click', closeModal));
+  modal.addEventListener('click', e => { if (e.target === modal) closeModal(); });
+  document.addEventListener('keydown', e => { if (e.key === 'Escape' && !modal.hidden) closeModal(); });
+</script>
+
+</body>
+</html>

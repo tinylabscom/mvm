@@ -74,7 +74,7 @@ run *ARGS:
 
 # Run mvmctl with the dev env set (worktree-local MVM_HOME).
 dev *ARGS:
-    sh ./bin/dev {{ ARGS }}
+    sh ./scripts/dev {{ ARGS }}
 
 # Run cargo with the dev env set (worktree-local MVM_HOME /
 
@@ -430,17 +430,21 @@ tag:
 docs-install:
     cd public && pnpm install
 
-# Start docs dev server
-docs-dev:
+# Start docs dev server (stages the /demo wasm assets first if missing)
+docs-dev: demo-assets
     cd public && pnpm dev
 
-# Build docs site
-docs-build:
+# Build docs site (stages the /demo wasm assets first if missing)
+docs-build: demo-assets
     cd public && pnpm build
 
 # Build the browser-tier microVM demo assets (wasm core + guest + fixtures)
 demo-build:
     ./web/mvm-demo/build.sh
+
+# Stage the /demo assets only if they're missing; `just demo-build` forces a rebuild
+demo-assets:
+    [ -d public/public/demo ] || just demo-build
 
 # ── VMM setup ────────────────────────────────────────────────────────────
 

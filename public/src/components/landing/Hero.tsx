@@ -46,13 +46,13 @@ function InstallRow({ command }: { command: string }) {
       aria-label="Copy install command"
     >
       <span className="text-accent/60 text-sm">$</span>
-      {/* basis-full pushes the Copy badge onto its own line on narrow
-          viewports instead of squeezing the command into a slim leftover
-          column — the command gets the row's full width to wrap into. */}
-      <code className="order-1 min-w-0 flex-1 basis-full text-sm leading-relaxed break-normal font-mono text-emphasis/90 sm:basis-auto">
+      {/* The command shares the line with the $ at every width; long
+          commands wrap inside the code element (at slash boundaries) rather
+          than dropping to their own row. */}
+      <code className="min-w-0 flex-1 text-sm leading-relaxed break-normal font-mono text-emphasis/90">
         {withSlashBreaks(command)}
       </code>
-      <span className="order-2 shrink-0 rounded border border-edge/50 px-2 py-0.5 text-[11px] text-label transition-colors group-hover:border-accent/30 group-hover:text-accent sm:ml-auto">
+      <span className="ml-auto shrink-0 self-center rounded border border-edge/50 px-2 py-0.5 text-[11px] text-label transition-colors group-hover:border-accent/30 group-hover:text-accent">
         {copied ? "Copied!" : "Copy"}
       </span>
     </button>
@@ -119,10 +119,13 @@ export function Hero() {
               </h1>
             </Reveal>
 
-            <Reveal delay={160}>
-              <p className="max-w-[46ch] text-base leading-relaxed text-body">
-                One command boots it in a microVM with its own kernel. No
-                daemon, no SSH, and no network until policy admits it.
+            <Reveal delay={120}>
+              <p className="font-display text-xl font-semibold leading-snug text-title sm:text-2xl">
+                Infra for the next‑gen AI stack.
+              </p>
+              <p className="mt-2 max-w-[46ch] text-base leading-relaxed text-body">
+                Hardened microVMs. Sub-150&nbsp;ms boot. Configurable to the
+                kernel.
               </p>
             </Reveal>
 
@@ -160,12 +163,12 @@ export function Hero() {
             </Reveal>
 
             <Reveal delay={320} className="flex flex-wrap items-center gap-4">
-              <a href={`${base}getting-started/installation/`}>
+              <a href={`${base}getting-started/quickstart/`}>
                 <Button size="lg">Get Started</Button>
               </a>
-              <a href="https://github.com/tinylabscom/mvm" target="_blank" rel="noopener">
+              <a href="#request-access">
                 <Button size="lg" variant="outline">
-                  View on GitHub
+                  Request access &rarr;
                 </Button>
               </a>
             </Reveal>
