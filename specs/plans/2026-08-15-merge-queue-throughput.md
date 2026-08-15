@@ -1,4 +1,4 @@
-# Plan 335 — Merge-queue throughput
+# Merge-queue throughput
 
 Backing: preview
 Validation: none

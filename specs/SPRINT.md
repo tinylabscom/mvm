@@ -2371,7 +2371,7 @@ Cross-sprint work tracked in `specs/plans/330-decision-provenance-layer.md`.
 
 ## Plan 335 — Merge-queue throughput
 
-Cross-sprint work tracked in `specs/plans/335-merge-queue-throughput.md`.
+Cross-sprint work tracked in `specs/plans/2026-08-15-merge-queue-throughput.md`.
 
 - [x] Consolidate automatic architecture and kernel validation into the main
       CI graph behind one shared scope job.
