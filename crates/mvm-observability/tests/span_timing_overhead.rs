@@ -17,7 +17,8 @@
 use std::thread;
 use std::time::Instant;
 
-use mvm_core::observability::span_timing::{SpanTimingLayer, SpanTimings};
+use mvm_core::observability::span_timing::SpanTimings;
+use mvm_observability::SpanTimingLayer;
 use tracing::dispatcher::{self, Dispatch};
 use tracing::instrument;
 use tracing_subscriber::EnvFilter;

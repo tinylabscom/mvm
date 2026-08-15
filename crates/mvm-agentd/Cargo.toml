@@ -177,7 +177,12 @@ schema = ["dep:schemars", "mvm-core/schema"]
 # async runtime. The helper bins are separate processes launched by
 # `/init`, never linked into `mvm-guest-agent`, so gating them here costs
 # the sealed agent nothing.
-addons = ["dep:tokio", "dep:hickory-proto", "dep:tokio-vsock"]
+addons = [
+    "dep:tokio",
+    "dep:hickory-proto",
+    "dep:tokio-vsock",
+    "dep:tracing-subscriber",
+]
 
 [dependencies]
 mvm-core.workspace = true
@@ -203,7 +208,10 @@ zeroize.workspace = true
 # typed error variants (ReadinessError, ShutdownError).
 thiserror.workspace = true
 tracing.workspace = true
-tracing-subscriber.workspace = true
+# Only the addon/egress helper bins install a subscriber; the sealed guest
+# agent emits through the `tracing` facade and never does. Optional for the
+# same reason tokio is: keep it out of the sealed agent's default closure.
+tracing-subscriber = { workspace = true, optional = true }
 # mvm-addon-dns's in-guest resolver parses/answers DNS over loopback.
 # Optional: only the `addons` feature's helper bins use it.
 hickory-proto = { workspace = true, optional = true }
