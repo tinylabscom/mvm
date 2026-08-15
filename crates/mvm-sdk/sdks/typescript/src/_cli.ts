@@ -1,7 +1,10 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 
-export const MVM_CLI_BIN_ENV = "MVM_CLI_BIN";
+// Owned by the Rust registry (crates/mvm-sdk/src/env.rs) and generated
+// into `_env/vars.ts`; re-exported so existing importers keep working.
+export { MVM_CLI_BIN_ENV } from "./_env/vars.js";
+import { MVM_CLI_BIN_ENV } from "./_env/vars.js";
 export const SDK_CLI_CANDIDATES = ["mvmctl"] as const;
 
 export function cliResolutionHint(): string {

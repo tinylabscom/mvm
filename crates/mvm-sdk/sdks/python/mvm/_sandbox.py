@@ -73,6 +73,9 @@ from typing import Any, Callable
 from mvm import _ir
 from mvm._cli import MVM_CLI_BIN_ENV, cli_resolution_hint, resolve_cli_bin
 from mvm._dsl import literal as _literal_value
+# Owned by the Rust registry (crates/mvm-sdk/src/env.rs), generated into
+# `_env/vars.py`. Re-exported from this module for existing importers.
+from mvm._env.vars import MVM_SDK_MODE_ENV, MVM_SDK_OUT_PATH_ENV
 from mvm._runtime.runtime import (
     RuntimeFsEntry,
     RuntimeFsStat,
@@ -171,14 +174,6 @@ class SandboxInfo:
     build_mode: str | None
     live: bool
 
-
-MVM_SDK_MODE_ENV = "MVM_SDK_MODE"
-
-#: When set in the environment, the SDK writes the wire-shape
-#: recording JSON to this path on process exit. The CLI's Phase 7e
-#: auto-exec path uses this to capture the recording without
-#: parsing stdout (which the user's own script may write to).
-MVM_SDK_OUT_PATH_ENV = "MVM_SDK_OUT_PATH"
 
 #: Plan ``Considerations to fold in or defer`` — every
 #: ``Sandbox.create()`` sets a default 30-minute TTL so the
