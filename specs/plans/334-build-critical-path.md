@@ -1,5 +1,8 @@
 # Plan 334 — Cut `mvm-cli`'s build script off the inner loop
 
+Backing: historical
+Validation: none
+
 **Status:** DELIVERED
 **Date:** 2026-08-14
 **Owner:** mvm
