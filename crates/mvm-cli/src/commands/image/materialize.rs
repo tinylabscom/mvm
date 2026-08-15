@@ -14,76 +14,32 @@ use mvm_build::rootfs::MaterializeExt4Input;
 use super::cache::safe_cache_path;
 use super::oci_types::OciImageConfig;
 
-/// Bump when the injected OCI runtime (guest agent, netinit, or `/init`
-/// script) changes such that already-materialized rootfs images must be
-/// re-sealed. Folded with the crate version into [`oci_runtime_tag`]; a
-/// stale rootfs then re-materializes instead of booting an outdated agent.
-/// Epoch 1 introduces the interactive exec handler in the OCI agent. Epoch 2 adds
-/// the detached-workload handler — a rootfs sealed with an older agent would
-/// reject the run-detached request, so it must re-materialize. Epoch 3 moves
-/// `mvm-egress-client` onto the runtime overlay contract: cached injected
-/// rootfs images that still bake the old helper path must be re-materialized so
-/// block-backed boots pick up the overlay-first layout. Epoch 4 rolls the
-/// required-overlay `/init` contract fix that initializes the vsock-egress
-/// flag safely under `set -u`; stale cached rootfs images otherwise keep
-/// booting the pre-fix PID-1 script and panic before the agent binds. Epoch 5
-/// teaches that same `/init` to skip re-mounting `/mvm/runtime` when
-/// `mvm-verity-init` already mounted the verity-protected overlay there; stale
-/// cached runtime-lean rootfs entries otherwise panic after the verity handoff.
-/// Epoch 7 adds the allowed top-level block-volume mount roots to sealed OCI
-/// images; an older read-only image cannot create those mountpoints at boot.
-/// Epoch 8 invalidates roots that may contain a stale cross-worktree `/init`.
-const OCI_RUNTIME_EPOCH: u32 = 8;
-
-/// Identity of the legacy guest runtime injected from the invoking source
-/// checkout. Cheap and build-free so it can gate the cache-hit path without
-/// forcing a guest build.
-pub(super) fn oci_runtime_tag() -> String {
-    oci_runtime_tag_with(source_runtime_fingerprint().as_deref())
-}
-
-/// The guest source fingerprint to fold into the runtime tag, or `None` when no
-/// source checkout is in reach.
-fn source_runtime_fingerprint() -> Option<String> {
-    let workspace = mvm_build::guest_agent_build::detect_source_workspace()?;
-    match mvm_build::guest_agent_build::guest_source_fingerprint(&workspace) {
-        Ok(fingerprint) => Some(fingerprint),
+/// Identity of the guest runtime injected into a rootfs, for cache keying.
+///
+/// Derived from the bytes of the artifacts that actually get injected, so a
+/// rebuilt `/init`, egress shim or verity initramfs invalidates every cached
+/// rootfs on its own. This replaced a hand-bumped epoch constant paired with a
+/// fingerprint over `mvm-agentd`'s sources — which could not see three of the
+/// six injected artifacts, and needed a human to notice each time.
+///
+/// Still cheap enough for the cache-hit gate: `resolve_guest_runtime_identity`
+/// reads a sidecar rather than the artifacts, and never triggers a build.
+pub(super) fn oci_runtime_tag(cache_root: &Path) -> String {
+    match mvm_build::run_image::resolve_guest_runtime_identity(cache_root) {
+        Ok(identity) => format!("{}-guest-{}", env!("CARGO_PKG_VERSION"), &identity[..16]),
         Err(err) => {
-            // Degrade to the packaging-epoch tag rather than fail the run, but
-            // leave a breadcrumb: a silent drop here can reuse a stale injected
+            // Degrade to a version-only tag rather than fail the run, but leave
+            // a breadcrumb: a silent drop here can reuse a stale injected
             // rootfs for this one invocation with no trace for a contributor
-            // debugging "my guest-source edit didn't take".
+            // debugging "my guest edit didn't take".
             tracing::warn!(
                 error = %err,
-                "could not fingerprint guest source for the OCI runtime tag; \
+                "could not identify the injected guest runtime; \
                  a cached rootfs may reuse a stale injected runtime"
             );
-            None
+            format!("{}-guest-unidentified", env!("CARGO_PKG_VERSION"))
         }
     }
-}
-
-/// Pure runtime-tag computation over the packaging epoch plus an optional guest
-/// source fingerprint. Split out from [`oci_runtime_tag`] so the
-/// source-checkout invalidation is unit-testable without a real workspace.
-fn oci_runtime_tag_with(source_fp: Option<&str>) -> String {
-    oci_runtime_tag_with_epoch(OCI_RUNTIME_EPOCH, source_fp)
-}
-
-fn oci_runtime_tag_with_epoch(epoch: u32, source_fp: Option<&str>) -> String {
-    use sha2::{Digest, Sha256};
-
-    let mut hasher = Sha256::new();
-    hasher.update(b"epoch=");
-    hasher.update(epoch.to_string().as_bytes());
-    hasher.update(b"\n");
-    if let Some(fp) = source_fp {
-        hasher.update(b"guest-source=");
-        hasher.update(fp.as_bytes());
-        hasher.update(b"\n");
-    }
-    let digest = hex::encode(hasher.finalize());
-    format!("{}-guest-{}", env!("CARGO_PKG_VERSION"), &digest[..16])
 }
 
 fn oci_tree_key(identity: &str) -> String {
@@ -279,7 +235,7 @@ pub(super) fn prepare_rootfs_only_tree(
     raw_unpacked_root: &Path,
     identity: &str,
 ) -> Result<PathBuf> {
-    let prepared_root = prepared_virtiofs_root(cache_root, identity, &oci_runtime_tag());
+    let prepared_root = prepared_virtiofs_root(cache_root, identity, &oci_runtime_tag(cache_root));
     if prepared_root.exists() {
         return Ok(prepared_root);
     }
@@ -445,9 +401,29 @@ mod tests {
         assert_eq!(roothash.trim().len(), 64);
     }
 
+    /// Seed a cache root with a complete, distinguishable guest-artifact set.
+    fn seed_guest_artifacts(cache_root: &std::path::Path, flavour: &[u8]) -> std::path::PathBuf {
+        let source = mvm_build::guest_agent_build::guest_binary_source()
+            .expect("resolve the guest-binary cache key");
+        let layout = mvm_build::guest_agent_build::GuestAgentLayout::under(
+            cache_root,
+            source.cache_key(),
+            mvm_core::arch::GuestArch::host(),
+        );
+        std::fs::create_dir_all(&layout.dir).unwrap();
+        for (name, path) in layout.binaries().artifacts() {
+            let mut bytes = name.as_bytes().to_vec();
+            bytes.extend_from_slice(flavour);
+            std::fs::write(path, &bytes).unwrap();
+        }
+        layout.dir.clone()
+    }
+
     #[test]
-    fn runtime_tag_includes_packaging_digest() {
-        let tag = oci_runtime_tag();
+    fn runtime_tag_is_well_formed() {
+        let tmp = tempfile::tempdir().unwrap();
+        seed_guest_artifacts(tmp.path(), b"v1");
+        let tag = oci_runtime_tag(tmp.path());
         assert!(
             tag.starts_with(concat!(env!("CARGO_PKG_VERSION"), "-guest-")),
             "unexpected runtime tag: {tag}"
@@ -459,103 +435,118 @@ mod tests {
         );
     }
 
+    /// The behaviour the hand-bumped epoch constant used to stand in for: a
+    /// rebuilt injected artifact must change the tag on its own. `/init` is the
+    /// case the old source fingerprint structurally could not see, and which
+    /// needed epochs 4, 5 and 8 bumped by hand.
     #[test]
-    fn source_checkout_runtime_tag_folds_the_guest_fingerprint() {
-        assert!(
-            source_runtime_fingerprint().is_some(),
-            "a detected source workspace must contribute a guest source fingerprint"
-        );
-    }
-
-    #[test]
-    fn guest_source_fingerprint_feeds_the_runtime_tag() {
-        // The source-checkout invalidation: when this mvmctl injects a runtime
-        // built from `crates/mvm-agentd/src`, a guest-source edit (a changed source
-        // fingerprint) must change the runtime tag so the stale injected
-        // rootfs/prepared-roots caches miss. A tag that ignored the fingerprint
-        // (the old behaviour) is exactly the cache-correctness bug.
-        let no_source = oci_runtime_tag_with(None);
-        let fp_a = oci_runtime_tag_with(Some("aaaa1111"));
-        let fp_b = oci_runtime_tag_with(Some("bbbb2222"));
-
-        assert_ne!(
-            fp_a, fp_b,
-            "a changed guest source fingerprint must change the runtime tag"
-        );
-        assert_ne!(
-            no_source, fp_a,
-            "folding a source fingerprint in must diverge from the packaging-epoch tag"
-        );
-        // Still a well-formed tag regardless of the fingerprint input.
-        for tag in [&no_source, &fp_a, &fp_b] {
-            assert!(tag.starts_with(concat!(env!("CARGO_PKG_VERSION"), "-guest-")));
-            assert_eq!(tag.rsplit_once("-guest-").unwrap().1.len(), 16);
-        }
-    }
-
-    #[test]
-    fn injection_epoch_change_invalidates_cached_oci_rootfs() {
-        let old_tag = oci_runtime_tag_with_epoch(OCI_RUNTIME_EPOCH - 1, Some("same-source"));
-        let current_tag = oci_runtime_tag_with_epoch(OCI_RUNTIME_EPOCH, Some("same-source"));
-        assert_ne!(old_tag, current_tag);
-
-        let mut cached = sample_image("docker.io/library/alpine:3.20", "sha256:dead", "blobs/a");
-        cached.rootfs_path = Some(format!("rootfs/{old_tag}/rootfs.ext4"));
-        cached.runtime_tag = Some(old_tag);
-        assert!(!cached_rootfs_is_current(&cached, &current_tag));
-    }
-
-    #[test]
-    fn guest_source_edit_invalidates_cached_oci_rootfs() {
-        // End-to-end regression: editing a guest source file must
-        // change the OCI prepared-roots/rootfs cache key so a previously
-        // materialized rootfs is treated as stale, rather than reusing an
-        // injected runtime that no longer matches the source tree.
+    fn a_rebuilt_injected_artifact_changes_the_runtime_tag() {
         let tmp = tempfile::tempdir().unwrap();
-        let crate_dir = tmp.path().join("crates").join("mvm-agentd");
-        let bin_dir = crate_dir.join("src").join("bin");
-        std::fs::create_dir_all(&bin_dir).unwrap();
-        std::fs::write(tmp.path().join("Cargo.toml"), "[workspace]\n").unwrap();
-        std::fs::write(
-            crate_dir.join("Cargo.toml"),
-            "[package]\nname = 'mvm-agentd'\n",
-        )
-        .unwrap();
-        let init_src = bin_dir.join("mvm-oci-init.rs");
-        std::fs::write(&init_src, "fn main() { let _x = 1; }\n").unwrap();
+        seed_guest_artifacts(tmp.path(), b"v1");
+        let before = oci_runtime_tag(tmp.path());
 
-        let fp_v1 = mvm_build::guest_agent_build::guest_source_fingerprint(tmp.path()).unwrap();
-        let tag_v1 = oci_runtime_tag_with(Some(&fp_v1));
-
-        std::fs::write(&init_src, "fn main() { let _x = 2; }\n").unwrap();
-
-        let fp_v2 = mvm_build::guest_agent_build::guest_source_fingerprint(tmp.path()).unwrap();
-        let tag_v2 = oci_runtime_tag_with(Some(&fp_v2));
+        seed_guest_artifacts(tmp.path(), b"v2");
+        let after = oci_runtime_tag(tmp.path());
 
         assert_ne!(
-            fp_v1, fp_v2,
-            "guest source edit must change source fingerprint"
-        );
-        assert_ne!(
-            tag_v1, tag_v2,
-            "changed fingerprint must change OCI runtime tag"
+            before, after,
+            "a rebuilt guest artifact must invalidate the cached rootfs"
         );
 
-        // A cached image carrying the old tag must be considered stale.
         let mut cached = sample_image("docker.io/library/alpine:3.20", "sha256:dead", "blobs/a");
-        cached.rootfs_path = Some(format!("rootfs/{tag_v1}/rootfs.ext4"));
-        cached.runtime_tag = Some(tag_v1.clone());
+        cached.rootfs_path = Some(format!("rootfs/{before}/rootfs.ext4"));
+        cached.runtime_tag = Some(before);
         assert!(
-            !cached_rootfs_is_current(&cached, &tag_v2),
-            "cached rootfs with old guest-source tag must be rematerialized"
+            !cached_rootfs_is_current(&cached, &after),
+            "a rootfs carrying the old runtime tag must be re-materialized"
+        );
+    }
+
+    #[test]
+    fn an_unchanged_runtime_keeps_the_tag_so_the_cache_hits() {
+        let tmp = tempfile::tempdir().unwrap();
+        seed_guest_artifacts(tmp.path(), b"v1");
+        assert_eq!(
+            oci_runtime_tag(tmp.path()),
+            oci_runtime_tag(tmp.path()),
+            "an unchanged runtime must keep hitting the cache"
+        );
+    }
+
+    /// The tag gate runs before anything decides a materialization is needed,
+    /// so a cold guest cache must not be answered by cross-compiling. It gets a
+    /// marked placeholder that cannot collide with a real digest.
+    #[test]
+    fn a_cold_guest_cache_yields_a_marked_tag_without_building() {
+        let tmp = tempfile::tempdir().unwrap();
+        let identity = mvm_build::run_image::resolve_guest_runtime_identity(tmp.path()).unwrap();
+        assert!(
+            identity.starts_with("pending-"),
+            "a cold cache must report a pending identity, not build: {identity}"
         );
 
-        // Sanity: identical source reproduces the same tag (cache hits remain
-        // possible when the source is unchanged).
+        seed_guest_artifacts(tmp.path(), b"v1");
+        let resolved = mvm_build::run_image::resolve_guest_runtime_identity(tmp.path()).unwrap();
+        assert!(
+            !resolved.starts_with("pending-"),
+            "a warm cache must report the artifact digest"
+        );
+        assert_ne!(identity, resolved);
+    }
+
+    /// The tag gate runs on every invocation, so its steady-state cost is part
+    /// of the dispatch budget. Recorded as a measurement, asserted only against
+    /// a ceiling far above the observed cost so runner noise cannot flake it.
+    #[test]
+    fn the_runtime_tag_is_cheap_enough_for_the_dispatch_budget() {
+        let tmp = tempfile::tempdir().unwrap();
+        seed_guest_artifacts(tmp.path(), b"v1");
+        oci_runtime_tag(tmp.path()); // prime the sidecar
+
+        let started = std::time::Instant::now();
+        let rounds = 50;
+        for _ in 0..rounds {
+            std::hint::black_box(oci_runtime_tag(tmp.path()));
+        }
+        let per_call = started.elapsed() / rounds;
+
+        println!("steady-state runtime tag: {per_call:?} per call");
+        assert!(
+            per_call < std::time::Duration::from_millis(20),
+            "the tag gate must stay negligible against a 200ms dispatch budget, \
+             but took {per_call:?} per call"
+        );
+    }
+
+    /// The steady-state gate must not read the artifacts either. Proven by
+    /// making them unreadable after the sidecar exists.
+    #[test]
+    fn the_runtime_tag_reads_the_sidecar_not_the_artifact_bytes() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = seed_guest_artifacts(tmp.path(), b"v1");
+        let expected = oci_runtime_tag(tmp.path());
+
+        let mut artifacts: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.file_name().and_then(|n| n.to_str()) != Some("runtime-id"))
+            .collect();
+        artifacts.sort();
+        assert_eq!(artifacts.len(), 6, "expected the full artifact set");
+        for path in &artifacts {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        }
+
+        let tag = oci_runtime_tag(tmp.path());
+
+        for path in &artifacts {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
         assert_eq!(
-            oci_runtime_tag_with(Some(&fp_v1)),
-            tag_v1,
-            "fingerprint-to-tag mapping must be stable"
+            tag, expected,
+            "the tag gate must be answerable from the sidecar alone"
         );
     }
 
@@ -563,7 +554,7 @@ mod tests {
     fn stale_runtime_tag_marks_rootfs_not_current() {
         let mut image = sample_image("docker.io/library/alpine:3.20", "sha256:dead", "blobs/a");
         image.rootfs_path = Some("rootfs/alpine/rootfs.ext4".to_string());
-        let current = oci_runtime_tag();
+        let current = oci_runtime_tag(tempfile::tempdir().unwrap().path());
 
         // Pre-tag entry (None): the baked agent predates the tag, so stale.
         assert!(!cached_rootfs_is_current(&image, &current));

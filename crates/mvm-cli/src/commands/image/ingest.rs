@@ -167,7 +167,10 @@ fn ingest_archive_streamed<R: Read + std::io::Seek>(
         )
     })?;
 
-    let rootfs_rel = format!("rootfs/{manifest_hex}-{}/rootfs.ext4", oci_runtime_tag());
+    let rootfs_rel = format!(
+        "rootfs/{manifest_hex}-{}/rootfs.ext4",
+        oci_runtime_tag(cache_root)
+    );
     let rootfs_abs = cache_root.join(&rootfs_rel);
     let rootfs_only_tree =
         prepare_rootfs_only_tree(cache_root, &unpacked_root, &metadata.manifest_digest)?;
@@ -245,7 +248,10 @@ pub(super) fn ingest_archive_from_reader<R: Read>(
         deferred_nodes.extend(report.deferred_nodes);
     }
 
-    let rootfs_rel = format!("rootfs/{manifest_hex}-{}/rootfs.ext4", oci_runtime_tag());
+    let rootfs_rel = format!(
+        "rootfs/{manifest_hex}-{}/rootfs.ext4",
+        oci_runtime_tag(cache_root)
+    );
     let rootfs_abs = cache_root.join(&rootfs_rel);
     let rootfs_only_tree =
         prepare_rootfs_only_tree(cache_root, &unpacked_root, &image.manifest_digest)?;
