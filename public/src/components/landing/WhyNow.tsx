@@ -9,15 +9,15 @@ import { Section } from "./primitives/Section";
 const SHIFTS = [
   {
     label: "generated",
-    body: "Assistants and agents author a growing share of new code — and ship it faster than any human review cycle can keep up with.",
+    body: "Agents ship code faster than any review cycle.",
   },
   {
     label: "unreviewed",
-    body: "Hallucinated packages, unvetted transitive deps, and copy-pasted configs ride along with every generated feature.",
+    body: "Hallucinated packages and unvetted deps ride along.",
   },
   {
     label: "exploitable",
-    body: "A prompt-injected agent with network access and ambient credentials isn't a bug — it's an exfiltration path.",
+    body: "A prompt-injected agent with network access is an exfiltration path.",
   },
 ];
 
@@ -34,11 +34,9 @@ export function WhyNow() {
           <span className="text-accent-2">so are exploits.</span>
         </h2>
         <p className="max-w-2xl text-base leading-relaxed text-body">
-          AI writes more of the code you run every day — and agents don&rsquo;t
-          just write it, they execute it: installing dependencies, calling
-          tools, touching real data. Most of it is fine. Some of it is slop. A
-          little of it is hostile. At that volume you can&rsquo;t review your
-          way to safety — the runtime has to assume the worst.
+          AI writes the code, then runs it — deps, tools, real data. Most of
+          it is fine. Some is slop. A little is hostile. You can&rsquo;t
+          review it all.
         </p>
       </Reveal>
 
@@ -57,15 +55,12 @@ export function WhyNow() {
 
       <Reveal delay={160}>
         <p className="mt-10 max-w-2xl text-base leading-relaxed text-body">
-          That&rsquo;s the assumption mvm is built on. Every workload is
-          untrusted by default: it boots its own kernel under a real
-          hypervisor, gets no network device, and reaches out only through one
-          policy-governed channel — with every decision signed into a
-          tamper-evident audit chain. As simple to run as a container, with a
-          hardware boundary where a container has a shared kernel.{" "}
+          So mvm assumes the worst: every workload gets its own kernel, no
+          network device, one policy-governed channel, and a signed audit
+          chain. As easy as a container, without the shared kernel.{" "}
           <span className="text-emphasis">
-            Security first isn&rsquo;t a tier — it&rsquo;s the default,
-            enforced by 15+ CI-gated claims.
+            Security first isn&rsquo;t a tier — it&rsquo;s the default. 15+
+            CI-gated claims.
           </span>
         </p>
         <div className="mt-6 flex flex-wrap gap-x-6 gap-y-2">
