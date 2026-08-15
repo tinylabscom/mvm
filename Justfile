@@ -161,12 +161,24 @@ test:
 test-doc:
     cargo test --workspace --doc
 
-# Run tests with sccache wrapping rustc — caches compilation across
-# worktrees/branches (a content cache, not a build lock, so parallel
-# sessions don't serialize on it). Incremental is OFF because sccache and
-# incremental compilation are mutually exclusive: this trades inner-loop
-
-# incremental for cross-worktree cache hits. Needs `cargo install sccache`.
+# Run tests with sccache also caching the workspace crates.
+#
+# The wrapper itself is not what this recipe adds. `RUSTC_WRAPPER = "sccache"`
+# belongs in a contributor's own `~/.cargo/config.toml` (a fact about a host
+# that runs many worktrees, not about the project), and there it already caches
+# every third-party dependency, because cargo compiles dependencies
+# non-incrementally regardless of this setting.
+#
+# What `CARGO_INCREMENTAL=0` adds is the *workspace* crates, which are the ones
+# incremental compilation otherwise keeps out of the cache. That is a good
+# trade for a full-suite run — incremental buys nothing when everything is
+# being compiled anyway — and a bad one for the inner loop, which is why it is
+# scoped to this recipe instead of being set globally.
+#
+# A content cache, not a build lock, so parallel sessions don't serialize on it.
+# Needs `cargo install sccache`. For cross-worktree hits the host config also
+# needs `basedirs`; without it every worktree is a private cache and the
+# measured hit rate is 0%.
 test-cached:
     @command -v sccache >/dev/null || { echo "sccache not found — install with: cargo install sccache"; exit 1; }
     RUSTC_WRAPPER=sccache CARGO_INCREMENTAL=0 cargo nextest run --workspace
