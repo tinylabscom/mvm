@@ -10,7 +10,7 @@ const GITHUB_REPO: &str = "tinylabscom/mvm";
 const RELEASE_HOST_BINS: &[&str] = &[
     "mvm-hvf-supervisor",
     "mvm-libkrun-supervisor",
-    "mvm-substitution-endpoint",
+    "mvm-network-endpoint",
 ];
 
 /// Current version compiled into the binary (from Cargo.toml).
@@ -782,9 +782,9 @@ mod tests {
     }
 
     #[test]
-    fn release_host_bins_include_hvf_and_substitution_endpoint() {
+    fn release_host_bins_include_hvf_and_network_endpoint() {
         assert!(RELEASE_HOST_BINS.contains(&"mvm-hvf-supervisor"));
-        assert!(RELEASE_HOST_BINS.contains(&"mvm-substitution-endpoint"));
+        assert!(RELEASE_HOST_BINS.contains(&"mvm-network-endpoint"));
     }
 
     #[test]
@@ -795,7 +795,7 @@ mod tests {
         std::fs::create_dir_all(&extracted).unwrap();
         std::fs::create_dir_all(&install_dir).unwrap();
         std::fs::write(extracted.join("mvm-hvf-supervisor"), b"hvf").unwrap();
-        std::fs::write(extracted.join("mvm-substitution-endpoint"), b"endpoint").unwrap();
+        std::fs::write(extracted.join("mvm-network-endpoint"), b"endpoint").unwrap();
 
         install_release_host_binaries(&extracted, &install_dir, false).unwrap();
 
@@ -804,7 +804,7 @@ mod tests {
             b"hvf"
         );
         assert_eq!(
-            std::fs::read(install_dir.join("mvm-substitution-endpoint")).unwrap(),
+            std::fs::read(install_dir.join("mvm-network-endpoint")).unwrap(),
             b"endpoint"
         );
     }

@@ -140,6 +140,12 @@ pub(in crate::commands) enum MachineAction {
     /// Restore a full-VM checkpoint into a fresh child VM
     #[command(name = "warm-restore", display_order = 18)]
     WarmRestore(MachineWarmRestoreArgs),
+    /// Fork a running machine into a fresh child VM with a new identity.
+    #[command(display_order = 19)]
+    Fork(MachineForkArgs),
+    /// Restore a vm_full checkpoint into a fresh child VM with a new identity.
+    #[command(display_order = 20)]
+    Restore(MachineRestoreArgs),
     /// Advanced single-VM operations (pause, snapshot, cp, fs, …). Hidden; use `machine <verb>` directly.
     #[command(flatten)]
     Vm(VmCmd),
@@ -174,6 +180,8 @@ impl MachineAction {
             MachineAction::Rewind(_) => "rewind",
             MachineAction::Advance(_) => "advance",
             MachineAction::WarmRestore(_) => "warm-restore",
+            MachineAction::Fork(_) => "fork",
+            MachineAction::Restore(_) => "restore",
         }
     }
 }
@@ -875,11 +883,55 @@ pub(in crate::commands) struct MachineRemoveArgs {
     pub json: bool,
 }
 
+/// Optional source/config flags for `machine start`. When a persistent machine
+/// does not already exist, these flags are used to create it on demand.
+#[derive(ClapArgs, Debug, Clone, Default)]
+pub(in crate::commands) struct MachineStartCreateFlags {
+    /// OCI image reference to boot when creating the machine.
+    #[arg(long, value_name = "REF", conflicts_with = "manifest")]
+    pub image: Option<String>,
+    /// Image-backed machine manifest to source defaults from.
+    #[arg(long, value_name = "PATH", conflicts_with = "image")]
+    pub manifest: Option<String>,
+    /// Enable dev-tier outbound networking for the created machine.
+    #[arg(long)]
+    pub net: bool,
+    /// Allow egress only to these hosts: `HOST[:PORT]` (repeatable).
+    #[arg(long = "allow-host", value_name = "HOST[:PORT]")]
+    pub allow_host: Vec<String>,
+    /// vCPU cores the guest sees on lifecycle starts (not a host CPU share).
+    #[arg(long)]
+    pub cpus: Option<u32>,
+    /// Cap host CPU time in millicores (1500 = 1.5 cores); not `--cpus`.
+    #[arg(long = "cpu-limit", value_name = "MILLICORES")]
+    pub cpu_limit: Option<u32>,
+    /// Bound each start's wall-clock runtime in seconds.
+    #[arg(long, value_name = "SECS")]
+    pub timeout: Option<u64>,
+    /// Read grants (CPU, wall clock, egress) from a JSON file.
+    #[arg(long = "grants-file", value_name = "PATH")]
+    pub grants_file: Option<PathBuf>,
+    /// Memory for lifecycle starts (supports human-readable: 512M, 1G, ...).
+    #[arg(long)]
+    pub memory: Option<String>,
+    /// Optional initial host memory commitment for lifecycle starts.
+    #[arg(long, value_name = "SIZE")]
+    pub mem_initial: Option<String>,
+    /// Security profile for lifecycle starts.
+    #[arg(long, value_enum)]
+    pub profile: Option<RunProfile>,
+    /// Overwrite an existing machine spec if the config changed.
+    #[arg(long)]
+    pub force: bool,
+}
+
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct MachineStartArgs {
     /// Persistent machine name.
     #[arg(value_name = "NAME")]
     pub name: String,
+    #[command(flatten)]
+    pub create_flags: MachineStartCreateFlags,
     /// Write a signed machine-start receipt to this path.
     #[arg(long, value_name = "PATH")]
     pub receipt: Option<PathBuf>,
@@ -925,6 +977,8 @@ pub(in crate::commands) struct MachineStartCmd {
     /// Persistent machine name(s) to boot.
     #[arg(value_name = "NAME", required = true)]
     pub names: Vec<String>,
+    #[command(flatten)]
+    pub create_flags: MachineStartCreateFlags,
     /// Write a signed machine-start receipt to this path (single machine only).
     #[arg(long, value_name = "PATH")]
     pub receipt: Option<PathBuf>,
@@ -958,6 +1012,7 @@ impl MachineStartCmd {
     fn start_args_for(&self, name: &str) -> MachineStartArgs {
         MachineStartArgs {
             name: name.to_string(),
+            create_flags: self.create_flags.clone(),
             receipt: self.receipt.clone(),
             json: self.json,
             dry_run: self.dry_run,
@@ -1072,6 +1127,38 @@ pub(in crate::commands) struct MachineWarmRestoreArgs {
     pub json: bool,
 }
 
+#[derive(ClapArgs, Debug, Clone)]
+pub(in crate::commands) struct MachineForkArgs {
+    /// Running machine to fork.
+    #[arg(value_name = "PARENT")]
+    pub parent: String,
+    /// Name for the fresh child VM.
+    #[arg(long = "as", value_name = "NAME", conflicts_with = "branch")]
+    pub child_name: Option<String>,
+    /// Auto-name the child as `<parent>-<branch>-<timestamp>`.
+    #[arg(long, value_name = "BRANCH", conflicts_with = "child_name")]
+    pub branch: Option<String>,
+    /// Output the result as JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(ClapArgs, Debug, Clone)]
+pub(in crate::commands) struct MachineRestoreArgs {
+    /// vm_full checkpoint id to restore.
+    #[arg(value_name = "CHECKPOINT_ID")]
+    pub checkpoint: String,
+    /// Name for the fresh child VM.
+    #[arg(long = "as", value_name = "NAME", conflicts_with = "branch")]
+    pub child_name: Option<String>,
+    /// Auto-name the child as `<checkpoint>-<branch>-<timestamp>`.
+    #[arg(long, value_name = "BRANCH", conflicts_with = "child_name")]
+    pub branch: Option<String>,
+    /// Output the result as JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
 #[derive(Debug, Serialize)]
 struct MachineRemoveSummary {
     name: String,
@@ -1082,6 +1169,107 @@ struct MachineRemoveSummary {
 struct MachineManifestSource {
     workflow: ManifestMachineWorkflow,
     base_dir: PathBuf,
+}
+
+/// Inputs required to build a persistent [`MachineSpec`]. Extracted so both
+/// `machine create` and `machine start --image ...` share one
+/// validation/construction path.
+struct MachineSpecInputs<'a> {
+    name: &'a str,
+    image: Option<&'a str>,
+    net: bool,
+    allow_host: &'a [String],
+    cpus: Option<u32>,
+    cpu_limit: Option<u32>,
+    timeout: Option<u64>,
+    grants_file: Option<&'a Path>,
+    memory: Option<&'a str>,
+    mem_initial: Option<&'a str>,
+    profile: Option<RunProfile>,
+    workflow: Option<&'a ManifestMachineWorkflow>,
+    volumes: &'a [String],
+    init: &'a [String],
+}
+
+fn build_machine_spec(inputs: MachineSpecInputs<'_>) -> Result<MachineSpec> {
+    validate_machine_name(inputs.name)?;
+    let workflow = inputs.workflow;
+    let image = match (inputs.image, workflow) {
+        (Some(image), _) => image.to_string(),
+        (None, Some(workflow)) => workflow.image.clone(),
+        (None, None) => {
+            bail!(
+                "machine {} requires either --image <ref> or --manifest <path>",
+                inputs.name
+            )
+        }
+    };
+    let net = inputs.net || workflow.is_some_and(|workflow| workflow.net);
+    let allow_host = if inputs.allow_host.is_empty() {
+        workflow
+            .map(|workflow| workflow.allow_hosts.clone())
+            .unwrap_or_default()
+    } else {
+        inputs.allow_host.to_vec()
+    };
+    // Resolving grants also settles the egress policy, so validating it
+    // here validates the same policy the machine will actually boot under.
+    let config = mvm_core::user_config::load(None);
+    let resolved = super::shared::resolve_run_grants(super::shared::GrantInputs {
+        cpu_limit_millicores: inputs.cpu_limit,
+        timeout_secs: inputs.timeout,
+        allow_host: &allow_host,
+        net,
+        grants_file: inputs.grants_file,
+        manifest: workflow.map(|workflow| &workflow.grants),
+        config: &config,
+    })?;
+    let cpus = inputs
+        .cpus
+        .or_else(|| workflow.map(|workflow| workflow.cpus))
+        .unwrap_or(2);
+    if cpus == 0 {
+        bail!("machine CPUs must be >= 1");
+    }
+    let memory = inputs
+        .memory
+        .map(String::from)
+        .or_else(|| workflow.map(|workflow| workflow.mem.clone()))
+        .unwrap_or_else(|| "512M".to_string());
+    let mem_initial = inputs
+        .mem_initial
+        .map(String::from)
+        .or_else(|| workflow.and_then(|workflow| workflow.mem_initial.clone()));
+    let _ = validate_machine_memory(&memory, mem_initial.as_deref())?;
+    // CLI-created machines are development workloads unless the caller
+    // explicitly opts into a stricter profile. The daemon is the only
+    // producer that should supply a non-dev production profile by policy.
+    let profile = inputs.profile.unwrap_or(RunProfile::Dev);
+    let profile_name = run_profile_name(profile).to_string();
+    enforce_dev_init_profile(&profile_name, inputs.init)?;
+    Ok(MachineSpec {
+        schema_version: MACHINE_SPEC_SCHEMA_VERSION,
+        name: inputs.name.to_string(),
+        image: Some(image),
+        manifest: None,
+        deployment: None,
+        resolved_digest: None,
+        runtime_pack: false,
+        net,
+        allow_host,
+        ports: Vec::new(),
+        cpus,
+        memory,
+        mem_initial,
+        profile: profile_name,
+        volumes: inputs.volumes.to_vec(),
+        init: inputs.init.to_vec(),
+        agent_verb: Vec::new(),
+        created_at: Some(mvm_core::time::utc_now()),
+        last_started_at: None,
+        health_check: None,
+        grants: resolved.plan_grants,
+    })
 }
 
 impl MachineCreateArgs {
@@ -1105,59 +1293,8 @@ impl MachineCreateArgs {
             (false, None) => None,
         };
         let workflow = manifest_source.as_ref().map(|source| &source.workflow);
-        let image = match (self.image, workflow) {
-            (Some(image), _) => image,
-            (None, Some(workflow)) => workflow.image.clone(),
-            (None, None) => {
-                bail!("machine create requires either --image <ref> or --manifest <path>")
-            }
-        };
-        let net = self.net || workflow.is_some_and(|workflow| workflow.net);
-        let allow_host = if self.allow_host.is_empty() {
-            workflow
-                .map(|workflow| workflow.allow_hosts.clone())
-                .unwrap_or_default()
-        } else {
-            self.allow_host
-        };
-        // Resolving grants also settles the egress policy, so validating it
-        // here validates the same policy the machine will actually boot under.
-        let config = mvm_core::user_config::load(None);
-        let resolved = super::shared::resolve_run_grants(super::shared::GrantInputs {
-            cpu_limit_millicores: self.cpu_limit,
-            timeout_secs: self.timeout,
-            allow_host: &allow_host,
-            net,
-            grants_file: self.grants_file.as_deref(),
-            manifest: workflow.map(|workflow| &workflow.grants),
-            config: &config,
-        })?;
-        let cpus = self
-            .cpus
-            .or_else(|| workflow.map(|workflow| workflow.cpus))
-            .unwrap_or(2);
-        if cpus == 0 {
-            bail!("machine CPUs must be >= 1");
-        }
-        let memory = self
-            .memory
-            .or_else(|| workflow.map(|workflow| workflow.mem.clone()))
-            .unwrap_or_else(|| "512M".to_string());
-        let mem_initial = self
-            .mem_initial
-            .or_else(|| workflow.and_then(|workflow| workflow.mem_initial.clone()));
-        let _ = validate_machine_memory(&memory, mem_initial.as_deref())?;
-        // CLI-created machines are development workloads unless the caller
-        // explicitly opts into a stricter profile. The daemon is the only
-        // producer that should supply a non-dev production profile by policy.
-        let profile = self.profile.unwrap_or(RunProfile::Dev);
-        let profile_name = run_profile_name(profile).to_string();
         let init = workflow
             .map(|workflow| workflow.init.clone())
-            .unwrap_or_default();
-        enforce_dev_init_profile(&profile_name, &init)?;
-        let volumes = workflow
-            .map(|workflow| workflow.volumes.clone())
             .unwrap_or_default();
         let volumes = match manifest_source.as_ref() {
             Some(source) => source
@@ -1166,30 +1303,23 @@ impl MachineCreateArgs {
                 .iter()
                 .map(|spec| absolutize_manifest_volume_spec(spec, &source.base_dir))
                 .collect::<Result<Vec<_>>>()?,
-            None => volumes,
+            None => Vec::new(),
         };
-        Ok(MachineSpec {
-            schema_version: MACHINE_SPEC_SCHEMA_VERSION,
-            name,
-            image: Some(image),
-            manifest: None,
-            deployment: None,
-            resolved_digest: None,
-            runtime_pack: false,
-            net,
-            allow_host,
-            ports: Vec::new(),
-            cpus,
-            memory,
-            mem_initial,
-            profile: profile_name,
-            volumes,
-            init,
-            agent_verb: Vec::new(),
-            created_at: Some(mvm_core::time::utc_now()),
-            last_started_at: None,
-            health_check: None,
-            grants: resolved.plan_grants,
+        build_machine_spec(MachineSpecInputs {
+            name: &name,
+            image: self.image.as_deref(),
+            net: self.net,
+            allow_host: &self.allow_host,
+            cpus: self.cpus,
+            cpu_limit: self.cpu_limit,
+            timeout: self.timeout,
+            grants_file: self.grants_file.as_deref(),
+            memory: self.memory.as_deref(),
+            mem_initial: self.mem_initial.as_deref(),
+            profile: self.profile,
+            workflow,
+            volumes: &volumes,
+            init: &init,
         })
     }
 }
@@ -1383,12 +1513,6 @@ fn rm_running_refusal(running: &[String]) -> Option<String> {
     ))
 }
 
-fn ensure_machine_spec_exists(name: &str) -> Result<MachineSpec> {
-    // `load_machine_spec` already emits an actionable "does not exist" message
-    // for a missing spec, so no extra context wrapper is needed here.
-    load_machine_spec(name)
-}
-
 fn mark_machine_started(spec: &mut MachineSpec, resolved_digest: String) {
     spec.resolved_digest = Some(resolved_digest);
     spec.last_started_at = Some(mvm_core::time::utc_now());
@@ -1496,6 +1620,8 @@ pub(in crate::commands) fn run(cli: &Cli, args: Args, cfg: &MvmConfig) -> Result
             complete_revert(cli, cfg, super::vm::checkpoint::run_advance(a)?)
         }
         MachineAction::WarmRestore(args) => run_warm_restore(args),
+        MachineAction::Fork(args) => run_fork(args),
+        MachineAction::Restore(args) => run_restore(args),
         MachineAction::Vm(cmd) => {
             super::vm::group::run(cli, super::vm::group::Args { action: cmd }, cfg)
         }
@@ -1510,6 +1636,26 @@ fn run_warm_restore(args: MachineWarmRestoreArgs) -> Result<()> {
         json: args.json,
     })?;
     Ok(())
+}
+
+/// Run `machine fork`: capture and branch a running machine into a fresh child VM.
+fn run_fork(args: MachineForkArgs) -> Result<()> {
+    checkpoint::fork_machine(checkpoint::ForkMachineInput {
+        parent_name: args.parent,
+        child_name: args.child_name,
+        branch: args.branch,
+        json: args.json,
+    })
+}
+
+/// Run `machine restore`: branch a vm_full checkpoint into a fresh child VM.
+fn run_restore(args: MachineRestoreArgs) -> Result<()> {
+    checkpoint::restore_machine(checkpoint::RestoreMachineInput {
+        checkpoint_id: args.checkpoint,
+        child_name: args.child_name,
+        branch: args.branch,
+        json: args.json,
+    })
 }
 
 /// Finish a restore. A checkpoint restore completes inside the engine (the fork

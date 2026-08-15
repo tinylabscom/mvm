@@ -17,3 +17,6 @@ pub mod plan_persist;
 pub mod receipt_export;
 /// Persistent store for runtime-emitted signed ExecutionReceipts.
 pub mod receipt_store;
+
+/// Content-addressed derived store for decision records.
+pub mod decisions;

@@ -1,6 +1,6 @@
 //! Reconstruct a `ProxyRequest` (the substitution stack's input) from a raw
 //! origin-form HTTP/1.1 request the terminator read off a redirected socket.
-use crate::supervisor::substitution_proxy::ProxyRequest;
+use crate::supervisor::network_endpoint_proxy::ProxyRequest;
 use anyhow::{Context, Result, bail};
 use std::net::SocketAddr;
 

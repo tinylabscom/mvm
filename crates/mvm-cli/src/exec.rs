@@ -393,6 +393,7 @@ pub(crate) fn select_exec_backend(
         network_policy,
         "OCI --image runs with outbound egress enabled",
     )?;
+    AnyBackend::require_hypervisor_selectable(&backend_name)?;
     Ok(AnyBackend::from_hypervisor(&backend_name))
 }
 

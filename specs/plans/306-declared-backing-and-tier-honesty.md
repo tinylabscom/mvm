@@ -97,7 +97,7 @@ What we already have, and therefore what this plan does **not** redo:
       host whether it took. Add the probe to the shared spawn seam so one
       site covers all three workload backends.
 
-- [ ] **WS4 — Write the check-time law into ADR-001.** One sentence, which we
+- [x] **WS4 — Write the check-time law into ADR-001.** One sentence, which we
       obey in two places without ever having stated it: *an effect may be
       checked no later than its last undo point.* A reversible effect can be
       checked at commit; an irreversible one — network egress, a published
@@ -122,7 +122,7 @@ What we already have, and therefore what this plan does **not** redo:
       the point is that the vocabulary admits the case the product will need
       without shipping an env var that turns enforcement off.
 
-- [ ] **WS6 — Replay vectors for the audit chain's signed bytes.**
+- [x] **WS6 — Replay vectors for the audit chain's signed bytes.**
       `address_vectors.rs` covers `ir_hash` and Merkle; the audit chain's
       `CanonicalEntry` JCS bytes — the thing a third party verifies — has no
       frozen vector. Add them, including the three cases where independent
@@ -136,6 +136,20 @@ What we already have, and therefore what this plan does **not** redo:
       prefixes `commons.canonical.v1\n`), so a future profile change cannot
       collide with digests already published. Wire-breaking, so it lands as a
       hard change under the no-back-compat rule or not at all.
+
+      **Landed** as `crates/mvm-contract/tests/audit_canonical_vectors.rs`.
+      Non-ASCII round-trips byte for byte and is asserted to emit raw UTF-8
+      rather than `\u` escapes; an integer past 2^53 is refused rather than
+      rounded; a float is refused in an integer field **including `1.0`**,
+      because accepting it would decide that two distinct byte sequences are
+      the same entry. Label ordering is pinned too — a verifier re-serializing
+      from a hash map emits a different order per run.
+
+      One honest gap recorded in the test: `plan_version` is a `u32`, so the
+      2^53 case is refused for a narrower reason than precision, and **a future
+      `u64`/`i64` field in the signed entry would not inherit that protection**
+      and needs its own vector. The version-tag prefix is **not** taken — it is
+      wire-breaking and no second verifier exists yet to collide with.
 
 - [ ] **WS7 — Double-key the stale-name relief valves.** `check-no-vz` and
       the oblique-naming rule are binary: a path is exempt or it is not.

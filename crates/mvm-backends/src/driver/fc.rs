@@ -20,6 +20,7 @@ use mvm_agentd::vsock::{
     WORKLOAD_EXIT_PORT, connect_to_port, dev_console_data_ports, send_request_stream,
 };
 use mvm_core::config::vm_state_dir;
+use mvm_core::launch_trace::LaunchTraceRecorder;
 use mvm_core::vm_backend::{
     BackendKind, BackendSecurityProfile, ClaimStatus, GuestChannelInfo, LayerCoverage,
     ResourceControls, SnapshotCapability, StandbyError, StandbyHandle, StandbyState,
@@ -819,6 +820,7 @@ impl VmmDriver for FcDriver {
         let state_dir = vm_state_dir(&spec.name);
         std::fs::create_dir_all(&state_dir)
             .map_err(|e| anyhow!("create state dir {}: {e}", state_dir.display()))?;
+        let mut trace = LaunchTraceRecorder::new("fc");
         let pid_file = fc_pid_path(&spec.name)
             .ok_or_else(|| anyhow!("resolve Firecracker pid path for '{}'", spec.name))?;
         // Clear only a marker proven stale. Removing a live process's marker
@@ -884,6 +886,8 @@ impl VmmDriver for FcDriver {
         crate::fc::secure_vsock_socket_for_caller(&vsock_uds)
             .context("restrict Firecracker vsock socket to the invoking user")?;
 
+        trace.mark("vmm_start");
+
         // Wire the guest-dial egress/broker bridges and bind the workload-exit
         // capture — the whole host channel set must be in place before the guest
         // boots and dials out.
@@ -946,6 +950,9 @@ impl VmmDriver for FcDriver {
             ms = started_at.elapsed().as_secs_f64() * 1000.0,
             "fc boot: guest boot to serving agent"
         );
+
+        trace.mark("guest_boot");
+        trace.write_to(&state_dir);
 
         let vm = Box::new(FcRunningVm {
             id: VmId(spec.name.clone()),
@@ -1165,10 +1172,27 @@ mod tests {
     fn workload_channels() -> Vec<VsockPort> {
         vec![
             host_dials(GuestService::MachineControl, "/run/agent.sock"),
-            guest_dials(GuestService::Substitution, "/run/egress.sock"),
+            guest_dials(GuestService::NetworkFlow, "/run/egress.sock"),
             guest_dials(GuestService::Broker, "/run/broker.sock"),
             guest_dials(GuestService::WorkloadExit, "/state/w/workload.exit"),
         ]
+    }
+
+    #[test]
+    fn workload_channels_carry_exactly_one_network_flow_and_no_l3() {
+        let ports = workload_channels();
+        let mut services: Vec<_> = ports.iter().map(|p| p.service).collect();
+        services.sort();
+        let expected = [
+            GuestService::MachineControl,
+            GuestService::WorkloadExit,
+            GuestService::Broker,
+            GuestService::NetworkFlow,
+        ];
+        assert_eq!(
+            services, expected,
+            "workload channels must contain exactly one NetworkFlow and no retired L3 services"
+        );
     }
 
     fn spec_with(kernel: KernelImage, vsock: Vec<VsockPort>, blocks: Vec<BlockDev>) -> VmmSpec {
@@ -1403,7 +1427,7 @@ mod tests {
     fn config_threads_cmdline_verbatim_and_configures_no_nic() {
         let mut spec = spec_with(
             KernelImage::Path("/img/vmlinux".into()),
-            vec![guest_dials(GuestService::Substitution, "/run/egress.sock")],
+            vec![guest_dials(GuestService::NetworkFlow, "/run/egress.sock")],
             vec![ro_block("/img/rootfs.ext4", 0)],
         );
         spec.cmdline = "  console=ttyS0 root=/dev/vda mvm.roothash=abc mvm.vsock_egress=1  ".into();

@@ -403,6 +403,7 @@ fn internal_subprocess_commands_are_hidden_from_help() {
         "persistent-builder",
         "__builder-vm-bootstrap",
         "__builder-egress-supervisor",
+        "__builder-shell-job",
         "__qemu-vsock-bridge",
     ] {
         assert!(
@@ -424,10 +425,18 @@ fn internal_builder_egress_supervisor_command_is_hidden_but_parseable() {
         "mvmctl",
         "__builder-egress-supervisor",
         "--endpoint",
-        "/tmp/mvm-substitution-endpoint",
+        "/tmp/mvm-network-endpoint",
     ])
     .unwrap();
     assert!(matches!(cli.command, Commands::BuilderEgressSupervisor(_)));
+}
+
+#[test]
+#[cfg(feature = "builder-vm")]
+fn internal_builder_shell_job_command_is_hidden_but_parseable() {
+    let cli = Cli::try_parse_from(["mvmctl", "__builder-shell-job", "--script", "/tmp/dummy.sh"])
+        .unwrap();
+    assert!(matches!(cli.command, Commands::BuilderShellJob(_)));
 }
 
 #[test]
@@ -443,6 +452,7 @@ fn test_cleanup_defaults() {
             cache,
             state,
             nuclear,
+            keep_identity,
             dry_run,
             yes,
             force,
@@ -452,9 +462,32 @@ fn test_cleanup_defaults() {
             assert!(!cache);
             assert!(!state);
             assert!(!nuclear);
+            assert!(!keep_identity);
             assert!(!dry_run);
             assert!(!yes);
             assert!(!force);
+        }
+        _ => panic!("Expected Cleanup command"),
+    }
+}
+
+#[test]
+fn test_cleanup_keep_identity_requires_nuclear() {
+    // `--keep-identity` alone would silently do nothing, so clap
+    // rejects it rather than letting a caller believe it took effect.
+    assert!(
+        Cli::try_parse_from(["mvmctl", "env", "cleanup", "--keep-identity"]).is_err(),
+        "--keep-identity must require --nuclear",
+    );
+    let cli =
+        Cli::try_parse_from(["mvmctl", "env", "cleanup", "--nuclear", "--keep-identity"]).unwrap();
+    let Commands::Env(eg) = cli.command else {
+        panic!("expected env group")
+    };
+    match eg.action {
+        env_group::EnvCmd::Cleanup(args) => {
+            assert!(args.nuclear);
+            assert!(args.keep_identity);
         }
         _ => panic!("Expected Cleanup command"),
     }
@@ -2675,13 +2708,21 @@ fn test_vm_save_json_parses() {
 }
 
 #[test]
-fn test_vm_restore_json_parses() {
-    let cli = Cli::try_parse_from(["mvmctl", "machine", "restore", "ckpt-abc", "--json"]).unwrap();
+fn test_machine_restore_json_parses() {
+    let cli = Cli::try_parse_from([
+        "mvmctl", "machine", "restore", "ckpt-abc", "--as", "child", "--json",
+    ])
+    .unwrap();
     assert!(matches!(
         cli.command,
         Commands::Machine(machine::Args {
-            action: machine::MachineAction::Vm(group::VmCmd::Restore(checkpoint::RestoreArgs { id, json: true }))
-        }) if id == "ckpt-abc"
+            action: machine::MachineAction::Restore(machine::MachineRestoreArgs {
+                checkpoint,
+                child_name,
+                json: true,
+                ..
+            })
+        }) if checkpoint == "ckpt-abc" && child_name.as_deref() == Some("child")
     ));
 }
 
@@ -4606,7 +4647,7 @@ fn state_touching_commands_trigger_entry_convergence() {
     assert!(touches(&["mvmctl", "machine", "console", "myvm"]));
     assert!(touches(&["mvmctl", "machine", "pause", "myvm"]));
     assert!(touches(&["mvmctl", "machine", "save", "myvm"]));
-    assert!(touches(&["mvmctl", "machine", "restore", "ckpt-myvm"]));
+    assert!(touches(&["mvmctl", "machine", "resume", "myvm"]));
     assert!(touches(&["mvmctl", "machine", "ls"]));
 }
 

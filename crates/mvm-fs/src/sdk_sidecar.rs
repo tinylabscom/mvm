@@ -367,7 +367,7 @@ mod tests {
             },
             payload,
         ];
-        crate::ext4::build_image(&nodes).expect("build sidecar ext4 fixture")
+        crate::ext4::build_image(nodes).expect("build sidecar ext4 fixture")
     }
 
     fn sha256_hex(bytes: &[u8]) -> String {

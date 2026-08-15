@@ -633,6 +633,40 @@ of the original and rewritten bytes) rather than the value itself. This
 reinforces claims 12 and 13 on the egress-delivery path; it does not
 replace either.
 
+## The check-time law
+
+*An effect may be checked no later than its last undo point.*
+
+We have obeyed this in two places without ever having stated it, which made it
+a judgement call each time instead of a lookup. A reversible effect can be
+checked at commit, because there is still something to undo. An irreversible
+one — a packet on the wire, a published artifact, a released secret — must be
+checked before it happens, because after it happens there is no state to
+restore.
+
+This is why `EgressGate` sits before the connection is opened rather than after
+the first byte, and why the audit chain records after the fact: the connection
+cannot be un-opened, and the record is not the effect.
+
+The value is prospective. When a new governed effect appears, "where does its
+gate go?" stops being a design discussion and becomes a question about whether
+the effect has an undo point.
+
+| Governed effect | Checked | Why |
+| --- | --- | --- |
+| Outbound connection (claim 10) | before | A packet on the wire cannot be recalled. |
+| Secret substitution (claims 12, 13) | before | A credential that reached the guest is disclosed, whatever happens next. |
+| Workload admission (claim 8) | before | Admission authorizes a boot; the boot is the effect. |
+| Rootfs integrity (claim 3) | before | A tampered image that executes has already run. |
+| Capability/`no_new_privs` drop | before | Both are one-way and inherited across exec; after exec there is nothing to drop. |
+| Ingress listener bind (Plan 316 phase 5) | before | A bound port is reachable from the moment it binds. |
+| Audit chain append (claim 8) | at commit | The record is evidence of an effect, not the effect. |
+| Execution receipt | at commit | A record, not a control — a failed emit is logged and does not block admission. |
+| Resource-usage accounting (preview 18) | at commit | Charges an effect that already occurred; the ceiling is the before-check. |
+
+A row that says *before* and a mechanism that runs after is a defect, not a
+tuning decision.
+
 ## Consequences
 
 ### Positive
@@ -719,7 +753,7 @@ tracked separately as a follow-up audit (see "deferred follow-ups").
 | 13 | No raw secret value crosses the broker channel | fn:encode_secret_env_cmdline_round_trips_pairs_as_single_token, fn:substitute | destination-bound signed credentials (ADR-023) | Shipped |
 | 14 | OCI image provenance is recorded in the chain-signed audit log | fn:prod_pull_requires_digest_pin_before_network, fn:prod_run_image_requires_digest_pin_before_network | cosign + OCI digest (specs/claims/claim-10-oci-image-provenance.md). Unchanged in substance by Plan 319, but a `plan.oci_provenance` entry may now sit in a retired segment, so the claim holds over the tenant's segment *set* rather than over `<tenant>.jsonl` alone — `mvmctl trust audit verify` walks the set | Shipped |
 | 15 | A sealed production microVM has no shell, no DevOnly guest-agent verbs, and no PTY | fn:console_refused_on_sealed_image, ci:guest-agent-runtime-boundary, fn:following_the_console_never_writes_to_it | runtime profile + signed VerbGrant + host accessible-gate + console policy (ADR-001 §W4.3 extension). The host→guest input plane is deliberately *not* claimed here: its properties are policy, not absence, and are witnessed at row 17 | Shipped |
-| 16 | Egress substitution keeps a raw secret off the guest, bound-only, no value in audit | fn:handed_placeholders_never_contain_the_secret_value, fn:substitution_endpoint_refuses_unbound_destination, fn:audit_chain_carries_no_secret_value | egress substitution leak-gate; reinforces claims 12+13 on the egress delivery (ADR-023, specs/claims/claim-egress-no-secret-to-guest.md) | Preview |
+| 16 | Egress substitution keeps a raw secret off the guest, bound-only, no value in audit | fn:handed_placeholders_never_contain_the_secret_value, fn:network_endpoint_refuses_unbound_destination, fn:audit_chain_carries_no_secret_value | egress substitution leak-gate; reinforces claims 12+13 on the egress delivery (ADR-023, specs/claims/claim-egress-no-secret-to-guest.md) | Preview |
 | 17 | Workload stdin is grant-gated, single-writer, secret-scanned across frames, and every refusal is audited | fn:input_is_refused_without_a_plan_grant, fn:a_second_writer_is_refused_while_the_lease_is_held, fn:secret_material_split_across_frames_is_still_refused, fn:every_refusal_is_audited, fn:a_shell_entrypoint_with_the_grant_is_refused_and_names_the_reason, fn:the_endpoint_fingerprints_what_it_resolved_and_reports_no_value, fn:the_handshakes_two_halves_go_to_two_different_places, fn:a_secret_split_across_two_frames_does_not_reassemble_in_the_workload, fn:a_fingerprint_refusal_does_not_claim_the_bytes_are_the_secret | input grant token in a signed ExecutionPlan.services + per-VM lease with TTL + fingerprint-matching sliding-window secret scan + chain-signed payload-free refusal audit + sealed-tier shell-entrypoint refusal. Read the limits note below before treating this as enforced | Preview |
 | 18 | A workload's resource consumption is bounded at admission — per workload and across the host — and CPU-bound at spawn where the host has a mechanism | fn:a_boot_past_the_headroom_is_refused, fn:budget_ignores_dead_machines, fn:budget_counts_the_configured_maximum_not_current_usage, fn:an_empty_host_admits_a_boot_within_headroom, fn:an_unreadable_charge_record_is_skipped_rather_than_fatal, fn:admission_refuses_a_grant_over_the_ceiling, fn:the_ceiling_bounds_memory_even_though_no_one_granted_it, fn:prod_refuses_a_cpu_grant_on_a_backend_that_cannot_bound_cpu, fn:the_libkrun_tier_cannot_bound_cpu_off_linux, fn:host_cpu_mechanism_gap_honors_hvf_quota_range, fn:relay_config_threads_cpu_share_to_quota_scheduler, fn:apply_grants_reads_quota_record_from_state_dir, fn:a_share_grant_binds_the_spawn_when_the_mechanism_is_present, fn:a_vm_with_no_recorded_scope_reads_back_as_declared_not_as_an_error, fn:an_admitted_boot_writes_the_achieved_tier_to_the_audit_chain, fn:a_wall_clock_bound_needs_a_clock_that_can_stop_the_workload, fn:a_granted_cpu_share_binds_a_real_spawn_to_its_quota, fn:a_restored_child_is_cpu_bounded_by_its_admitted_grant, fn:a_claimed_child_over_the_host_ceiling_is_refused, fn:a_claimed_child_within_the_ceiling_is_admitted, fn:the_refusal_names_the_ceiling_and_the_request, fn:pool_matching_is_unchanged_by_the_bound | operator-configured per-workload ceiling + host-wide budget summed over live machines only (pid-marker probe, configured maximum not current usage) + cgroup v2 `cpu.max` on a systemd transient scope on Linux, or an in-process HVF run-loop scheduler on macOS, read back and written to the chain-signed audit log. CPU is declared-only for libkrun, wall clock is enforced on libkrun only, wasm bounds via fuel and epoch, a forked child is re-bound at spawn, and a warm-claimed child is bounded by the host ceiling at admission but spawn-bound on only one of its three claim paths — read the "Preview 18 limits" note below before treating this as enforced | Preview |
 

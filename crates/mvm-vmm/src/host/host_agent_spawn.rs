@@ -21,6 +21,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
+use mvm_contract::builder::BuilderError;
 use mvm_core::protocol::broker_control::{
     self, ControlRequest, ControlResponse, DeregisterVm, RegisterVm,
 };
@@ -235,6 +236,115 @@ pub struct HostAgentServicesParams<'a> {
     pub broker_listen_socket: &'a Path,
     /// Exact host-service bindings from the admitted execution plan.
     pub services: &'a [mvm_core::protocol::broker::ServiceId],
+}
+
+impl<'a> HostAgentServicesParams<'a> {
+    /// Start building a [`HostAgentServicesParams`]. Every value is set by name, so a
+    /// call site cannot transpose two fields that share a type.
+    #[must_use]
+    pub fn builder() -> HostAgentServicesParamsBuilder<'a> {
+        HostAgentServicesParamsBuilder::new()
+    }
+}
+
+/// Builder for [`HostAgentServicesParams`]. Required fields are checked by
+/// [`HostAgentServicesParamsBuilder::build`] rather than defaulted, so an unset one is a
+/// reported error and never a silently empty value.
+pub struct HostAgentServicesParamsBuilder<'a> {
+    workload_id: Option<&'a str>,
+    tenant_id: Option<&'a str>,
+    vm_name: Option<&'a str>,
+    state_dir: Option<&'a Path>,
+    broker_listen_socket: Option<&'a Path>,
+    services: Option<&'a [mvm_core::protocol::broker::ServiceId]>,
+}
+
+impl<'a> HostAgentServicesParamsBuilder<'a> {
+    /// An empty builder: nothing set yet.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            workload_id: None,
+            tenant_id: None,
+            vm_name: None,
+            state_dir: None,
+            broker_listen_socket: None,
+            services: None,
+        }
+    }
+
+    /// Set `workload_id`.
+    #[must_use]
+    pub fn workload_id(mut self, workload_id: &'a str) -> Self {
+        self.workload_id = Some(workload_id);
+        self
+    }
+
+    /// Set `tenant_id`. Takes a value or an `Option`; unset means `None`.
+    #[must_use]
+    pub fn tenant_id(mut self, tenant_id: impl Into<Option<&'a str>>) -> Self {
+        self.tenant_id = tenant_id.into();
+        self
+    }
+
+    /// Set `vm_name`.
+    #[must_use]
+    pub fn vm_name(mut self, vm_name: &'a str) -> Self {
+        self.vm_name = Some(vm_name);
+        self
+    }
+
+    /// Set `state_dir`.
+    #[must_use]
+    pub fn state_dir(mut self, state_dir: &'a Path) -> Self {
+        self.state_dir = Some(state_dir);
+        self
+    }
+
+    /// Set `broker_listen_socket`.
+    #[must_use]
+    pub fn broker_listen_socket(mut self, broker_listen_socket: &'a Path) -> Self {
+        self.broker_listen_socket = Some(broker_listen_socket);
+        self
+    }
+
+    /// Set `services`.
+    #[must_use]
+    pub fn services(mut self, services: &'a [mvm_core::protocol::broker::ServiceId]) -> Self {
+        self.services = Some(services);
+        self
+    }
+
+    /// Finish, or name the first required field left unset.
+    pub fn build(self) -> Result<HostAgentServicesParams<'a>, BuilderError> {
+        Ok(HostAgentServicesParams {
+            workload_id: self.workload_id.ok_or(BuilderError::missing(
+                "HostAgentServicesParams",
+                "workload_id",
+            ))?,
+            tenant_id: self.tenant_id,
+            vm_name: self
+                .vm_name
+                .ok_or(BuilderError::missing("HostAgentServicesParams", "vm_name"))?,
+            state_dir: self.state_dir.ok_or(BuilderError::missing(
+                "HostAgentServicesParams",
+                "state_dir",
+            ))?,
+            broker_listen_socket: self.broker_listen_socket.ok_or(BuilderError::missing(
+                "HostAgentServicesParams",
+                "broker_listen_socket",
+            ))?,
+            services: self
+                .services
+                .ok_or(BuilderError::missing("HostAgentServicesParams", "services"))?,
+        })
+    }
+}
+
+impl<'a> Default for HostAgentServicesParamsBuilder<'a> {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Daemon-path equivalent of `spawn_broker_services_if_admitted`: ensure the
@@ -854,5 +964,23 @@ mod retry_policy_tests {
     #[test]
     fn an_unregistered_guard_reports_itself_as_degraded() {
         assert!(!ServicesGuard::None.is_registered());
+    }
+}
+
+#[cfg(test)]
+mod host_agent_services_params_builder_tests {
+    use super::*;
+
+    /// An empty builder must refuse to finish, naming the first
+    /// required field it is missing — never substituting a default.
+    #[test]
+    fn an_empty_builder_names_the_first_missing_field() {
+        let Err(err) = HostAgentServicesParams::builder().build() else {
+            panic!("an empty HostAgentServicesParams builder must not build");
+        };
+        assert_eq!(
+            err,
+            BuilderError::missing("HostAgentServicesParams", "workload_id")
+        );
     }
 }

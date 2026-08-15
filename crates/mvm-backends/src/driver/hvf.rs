@@ -157,7 +157,7 @@ fn relay_supervisor_config_with_handoff(
     // vsock relay so every backend uses one egress path. A channel-less factory
     // parent is the one intentional exception: it has no guest-facing host
     // channel at all, so there is no egress path to wire or authorize.
-    let egress_relay_socket = match spec.host_socket_for_service(GuestService::Substitution) {
+    let egress_relay_socket = match spec.host_socket_for_service(GuestService::NetworkFlow) {
         Some(socket) => Some(socket),
         None if spec.vsock.is_empty() => None,
         // A sealed workload with no EGRESS_PORT has an explicit deny-all,
@@ -167,7 +167,7 @@ fn relay_supervisor_config_with_handoff(
         None if !spec
             .vsock
             .iter()
-            .any(|port| port.service == GuestService::Substitution) =>
+            .any(|port| port.service == GuestService::NetworkFlow) =>
         {
             None
         }
@@ -571,7 +571,7 @@ impl VmmDriver for HvfDriver {
         let channel_mask = req.channels.iter().fold(0_u8, |mask, channel| {
             if channel.service == GuestService::MachineControl {
                 mask | 1
-            } else if channel.service == GuestService::Substitution {
+            } else if channel.service == GuestService::NetworkFlow {
                 mask | 2
             } else if channel.service == GuestService::Broker {
                 mask | 4
@@ -1034,7 +1034,7 @@ mod tests {
 
     fn egress_port(uds: &str) -> VsockPort {
         VsockPort {
-            service: GuestService::Substitution,
+            service: GuestService::NetworkFlow,
             host_uds: uds.into(),
             direction: VsockDirection::GuestDials,
         }
@@ -1626,5 +1626,25 @@ mod tests {
         assert_eq!(argv[0], "systemd-run");
         assert!(argv.contains(&"CPUQuota=50%".to_string()), "{argv:?}");
         assert_eq!(argv.last().expect("payload"), "/usr/bin/mvm-hvf-supervisor");
+    }
+
+    #[test]
+    fn hvf_spec_carries_exactly_one_network_flow_and_no_l3() {
+        let spec = spec_with(
+            KernelImage::Path("/img/Image".into()),
+            vec![
+                egress_port("/run/egress.sock"),
+                agent_port("/run/agent.sock"),
+            ],
+            vec![],
+        );
+        let ports = &spec.vsock;
+        let mut services: Vec<_> = ports.iter().map(|p| p.service).collect();
+        services.sort();
+        let expected = [GuestService::MachineControl, GuestService::NetworkFlow];
+        assert_eq!(
+            services, expected,
+            "HVF spec vsock must contain exactly one NetworkFlow and no retired L3 services"
+        );
     }
 }

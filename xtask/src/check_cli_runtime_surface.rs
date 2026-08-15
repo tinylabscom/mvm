@@ -89,6 +89,11 @@ const EXEMPTIONS: &[(&str, &[Rule], &str)] = &[
         "pool build substrate: backend selection",
     ),
     (
+        "commands/machine/lifecycle.rs",
+        &[Rule::AnyBackend],
+        "backend selection: validates the requested hypervisor name is available before          handing the machine off to the runtime",
+    ),
+    (
         "commands/pool.rs",
         &[Rule::NameRegistry],
         "registry-lock handoff: hands the runtime the registry's location so \

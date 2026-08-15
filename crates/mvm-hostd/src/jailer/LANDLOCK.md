@@ -1,6 +1,6 @@
 # Jailer Landlock ruleset
 
-`ConfinementSpec::substitution_endpoint()` permits:
+`ConfinementSpec::network_endpoint()` permits:
 
 - **Read** on an allowlisted helper binary (`Execute | ReadFile |
   ReadDir`, the `from_read(ABI::V2)` bit-set).
@@ -33,9 +33,9 @@ Everything else returns EACCES at the kernel level. Sockets are
 inherited fds or opened by the endpoint itself, not opened by name from
 the ruleset, so no network paths appear in it.
 
-## `mvm-substitution-endpoint` — resolver UDS (M3)
+## `mvm-network-endpoint` — resolver UDS (M3)
 
-`ConfinementSpec::substitution_endpoint(..., resolver_uds)` additionally
+`ConfinementSpec::network_endpoint(..., resolver_uds)` additionally
 grants `read_write_paths` on the fleet-secrets daemon's UDS path when
 the endpoint's `ResolverBackend` is `Remote { uds_path, .. }` — `Local`
 (`resolver_uds: None`) leaves the ruleset unchanged. Unlike every other

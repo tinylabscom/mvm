@@ -45,6 +45,14 @@ mod linux {
         if cmdline_has_flag(mvm_contract::l3::GUEST_CMDLINE_FLAG) {
             start_l3_tunnel();
         }
+        // The init has finished every root-only step. Lock down the process
+        // before any workload-facing child is spawned: no new privileges and an
+        // empty capability bounding set are inherited by the agent and every
+        // workload process it spawns.
+        if let Err(error) = mvm_agentd::guest_mount::harden_init_process() {
+            eprintln!("mvm-oci-init: failed to harden init process: {error}");
+            std::process::exit(1);
+        }
         // The guest agent is the mvm vsock control plane — the whole reason this
         // init exists (scratch/distroless/Alpine all get it from the overlay).
         // Fail closed if it can't be resolved: idling on agent-less would leave

@@ -195,7 +195,7 @@ impl VsockHandlerRegistry {
             .set_activity(counter);
     }
 
-    pub(crate) fn set_substitution_endpoint(&mut self, path: &Path) {
+    pub(crate) fn set_network_endpoint(&mut self, path: &Path) {
         self.guest_handler_mut::<StreamRelayHandler>(mvm_agentd::vsock::EGRESS_PORT)
             .expect("egress handler present")
             .bridge

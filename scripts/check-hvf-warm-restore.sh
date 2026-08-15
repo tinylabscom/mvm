@@ -85,7 +85,7 @@ cd "${ROOT}"
 
 MVMCTL_BIN="${MVM_HVF_WARM_MVMCTL:-${TARGET_DIR}/${PROFILE}/mvmctl}"
 SUPERVISOR_BIN="${MVM_HVF_WARM_SUPERVISOR:-${TARGET_DIR}/${PROFILE}/mvm-hvf-supervisor}"
-SUBSTITUTION_ENDPOINT_BIN="${MVM_HVF_WARM_SUBSTITUTION_ENDPOINT:-${TARGET_DIR}/${PROFILE}/mvm-substitution-endpoint}"
+SUBSTITUTION_ENDPOINT_BIN="${MVM_HVF_WARM_SUBSTITUTION_ENDPOINT:-${TARGET_DIR}/${PROFILE}/mvm-network-endpoint}"
 HOST_AGENT_BIN="${MVM_HVF_WARM_HOST_AGENT:-${TARGET_DIR}/${PROFILE}/mvm-host-agent}"
 SIGNER_HELPER_BIN="${MVM_HVF_WARM_SIGNER_HELPER:-${TARGET_DIR}/${PROFILE}/mvm-signer-helper}"
 
@@ -93,7 +93,7 @@ if [[ "${SKIP_BUILD}" != "1" ]]; then
   CARGO_TARGET_DIR="${TARGET_DIR}" cargo build -p mvmctl --features hvf-live-validation "${PROFILE_ARGS[@]}"
   CARGO_TARGET_DIR="${TARGET_DIR}" cargo build -p mvm-hostd --bin mvm-hvf-supervisor \
     --features hvf-live-validation "${PROFILE_ARGS[@]}"
-  CARGO_TARGET_DIR="${TARGET_DIR}" cargo build -p mvm-hostd --bin mvm-substitution-endpoint \
+  CARGO_TARGET_DIR="${TARGET_DIR}" cargo build -p mvm-hostd --bin mvm-network-endpoint \
     --features hvf-live-validation "${PROFILE_ARGS[@]}"
   CARGO_TARGET_DIR="${TARGET_DIR}" cargo build -p mvm-hostd --bin mvm-host-agent \
     --bin mvm-signer-helper --features hvf-live-validation "${PROFILE_ARGS[@]}"

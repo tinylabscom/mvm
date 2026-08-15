@@ -265,6 +265,28 @@ impl SessionValidator {
         self.session
     }
 
+    /// Mark the session as established after the host has sent `HelloAck`.
+    ///
+    /// The validator only observes inbound frames, so the host-side driver
+    /// must advance its own state machine when it completes the handshake by
+    /// sending `HelloAck`. This is a no-op if the session is already
+    /// established and an error if it is not waiting for the ack.
+    pub fn mark_hello_ack_sent(&mut self) -> Result<(), StateError> {
+        match self.session {
+            SessionState::AwaitingHelloAck => {
+                self.session = SessionState::Established;
+                Ok(())
+            }
+            SessionState::Established => Ok(()),
+            SessionState::AwaitingHello => Err(StateError::SessionNotEstablished {
+                opcode: Opcode::HelloAck.as_u8(),
+            }),
+            SessionState::Closed => Err(StateError::SessionClosed {
+                opcode: Opcode::HelloAck.as_u8(),
+            }),
+        }
+    }
+
     /// How many streams are live.
     #[must_use]
     pub fn live_streams(&self) -> usize {

@@ -111,7 +111,7 @@ mod linux {
             // hang; the absence of /out artifacts is the failure signal.
             return power_off();
         }
-        match build_and_copy() {
+        match build_and_copy().and_then(|()| finalize_persistent_nix_store()) {
             Ok(()) => {
                 eprintln!("stage0-init: done; halting");
                 power_off()
@@ -600,6 +600,45 @@ mod linux {
         eprintln!("stage0-init: seeded persistent store: {n_src} -> {n_dst} entries");
         bind_mount(STAGE0_NIX_STORE_MOUNT, NIX_TARGET)?;
         Ok(())
+    }
+
+    /// Flush and cleanly unmount the persistent store before reporting Stage 0
+    /// success. `reboot(RB_POWER_OFF)` alone can surface delayed ext4 failures
+    /// only after the success marker has reached the console, which makes the
+    /// host accept a corrupt cache. The explicit unmount moves all filesystem
+    /// writeback ahead of that marker and makes kernel error accounting part of
+    /// the guest result.
+    fn finalize_persistent_nix_store() -> Result<(), String> {
+        if is_qemu() {
+            return Ok(());
+        }
+
+        // SAFETY: sync() takes no arguments and only flushes filesystem state.
+        unsafe {
+            libc::sync();
+        }
+        reject_ext4_errors(Path::new("/sys/fs/ext4/vda/errors_count"))?;
+        unmount(NIX_TARGET)?;
+        unmount(STAGE0_NIX_STORE_MOUNT)?;
+        Ok(())
+    }
+
+    fn reject_ext4_errors(errors_count_path: &Path) -> Result<(), String> {
+        let raw = std::fs::read_to_string(errors_count_path)
+            .map_err(|e| format!("read {}: {e}", errors_count_path.display()))?;
+        let count = raw.trim().parse::<u64>().map_err(|e| {
+            format!(
+                "parse {} value {raw:?} as an ext4 error count: {e}",
+                errors_count_path.display()
+            )
+        })?;
+        if count == 0 {
+            Ok(())
+        } else {
+            Err(format!(
+                "persistent Stage 0 ext4 store reported {count} filesystem error(s)"
+            ))
+        }
     }
 
     fn mount_stage0_nix_store(device: &str) -> Result<(), String> {
@@ -1176,6 +1215,10 @@ mod linux {
         .map_err(|e| format!("bind {source} -> {target}: {e}"))
     }
 
+    fn unmount(target: &str) -> Result<(), String> {
+        nix::mount::umount(target).map_err(|e| format!("unmount {target}: {e}"))
+    }
+
     fn is_mountpoint(target: &str) -> bool {
         // A path is a mountpoint when its st_dev differs from its parent's.
         let (Ok(here), Some(parent)) = (std::fs::metadata(target), Path::new(target).parent())
@@ -1380,7 +1423,7 @@ mod linux {
             }];
             let options = mvm_fs::ext4::BuildOptions::default().with_volume_name(b"mvm-work");
             let image =
-                mvm_fs::ext4::build_image_with_options(&nodes, &options).expect("build image");
+                mvm_fs::ext4::build_image_with_options(nodes, &options).expect("build image");
             assert_eq!(
                 ext4_volume_label_from_superblock(&image),
                 Some("mvm-work".to_string())
@@ -1436,6 +1479,18 @@ mod linux {
             std::fs::write(home.join(".cargo/config"), b"stale").expect("seed leftover file");
             super::purge_stale_nix_builder_home(root.path()).expect("removes leftover");
             assert!(!home.exists(), "stale nix builder home must be gone");
+        }
+
+        #[test]
+        fn ext4_error_count_must_be_zero_before_success() {
+            let root = tempfile::tempdir().expect("tempdir");
+            let errors = root.path().join("errors_count");
+            std::fs::write(&errors, "0\n").expect("write zero count");
+            super::reject_ext4_errors(&errors).expect("zero errors are clean");
+
+            std::fs::write(&errors, "7\n").expect("write nonzero count");
+            let error = super::reject_ext4_errors(&errors).expect_err("errors must fail");
+            assert!(error.contains("7 filesystem error(s)"), "{error}");
         }
 
         #[test]

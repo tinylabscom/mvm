@@ -82,6 +82,7 @@ pub mod memory_budget;
 pub mod metering;
 pub mod migration;
 pub mod naming;
+pub mod net;
 pub mod observability;
 pub mod pack_cache;
 pub mod pack_revocation;
@@ -124,6 +125,8 @@ pub mod plan;
 pub mod platform;
 pub mod policy;
 pub mod protocol;
+#[cfg(feature = "provenance")]
+pub mod provenance;
 pub mod rate_limit;
 pub mod receipt;
 pub mod residency;

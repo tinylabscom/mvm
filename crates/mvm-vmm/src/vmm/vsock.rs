@@ -50,7 +50,7 @@ pub struct VsockHostBindings {
     /// Host agent RPC listener path.
     pub agent_socket: Option<PathBuf>,
     /// Host egress endpoint path.
-    pub substitution_endpoint: Option<PathBuf>,
+    pub network_endpoint: Option<PathBuf>,
     /// Host broker endpoint path.
     pub broker_endpoint: Option<PathBuf>,
     /// Dev-only console listeners keyed by guest port.
@@ -62,7 +62,7 @@ impl VsockHostBindings {
         self.agent_socket
             .iter()
             .map(PathBuf::as_path)
-            .chain(self.substitution_endpoint.iter().map(PathBuf::as_path))
+            .chain(self.network_endpoint.iter().map(PathBuf::as_path))
             .chain(self.broker_endpoint.iter().map(PathBuf::as_path))
             .chain(self.console_sockets.iter().map(|(_, path)| path.as_path()))
             .collect()
@@ -90,8 +90,8 @@ fn canonical_child_bindings(
 ) -> std::io::Result<VsockHostBindings> {
     let agent_socket =
         (mask & HANDOFF_AGENT != 0).then(|| mvm_core::config::vm_hvf_agent_socket_at(state_dir));
-    let substitution_endpoint = (mask & HANDOFF_EGRESS != 0)
-        .then(|| mvm_core::config::vm_substitution_endpoint_socket(name));
+    let network_endpoint =
+        (mask & HANDOFF_EGRESS != 0).then(|| mvm_core::config::vm_network_endpoint_socket(name));
     let broker_path =
         mvm_core::config::vm_vsock_port_socket_at(state_dir, mvm_agentd::vsock::BROKER_PORT);
     let broker_endpoint = (mask & HANDOFF_BROKER != 0).then_some(broker_path);
@@ -109,7 +109,7 @@ fn canonical_child_bindings(
     };
     Ok(VsockHostBindings {
         agent_socket,
-        substitution_endpoint,
+        network_endpoint,
         broker_endpoint,
         console_sockets,
     })
@@ -203,8 +203,8 @@ impl VsockShared {
         self.handlers.set_agent_activity(counter);
     }
 
-    pub fn set_substitution_endpoint(&mut self, path: &std::path::Path) {
-        self.handlers.set_substitution_endpoint(path);
+    pub fn set_network_endpoint(&mut self, path: &std::path::Path) {
+        self.handlers.set_network_endpoint(path);
     }
 
     pub fn set_trusted_builder_egress(&mut self) {
@@ -374,8 +374,8 @@ impl VirtioVsock {
         self.notify_io();
     }
 
-    pub fn set_substitution_endpoint(&mut self, path: &std::path::Path) {
-        self.lock().set_substitution_endpoint(path);
+    pub fn set_network_endpoint(&mut self, path: &std::path::Path) {
+        self.lock().set_network_endpoint(path);
         self.notify_io();
     }
 
@@ -434,8 +434,8 @@ impl VirtioVsock {
             if let Some(path) = &bindings.agent_socket {
                 self.set_agent_socket(path)?;
             }
-            if let Some(path) = &bindings.substitution_endpoint {
-                self.set_substitution_endpoint(path);
+            if let Some(path) = &bindings.network_endpoint {
+                self.set_network_endpoint(path);
             }
             if let Some(path) = &bindings.broker_endpoint {
                 self.set_broker_endpoint(path);
@@ -1069,7 +1069,7 @@ mod tests {
         let source = virtio_dev();
         source
             .lock()
-            .set_substitution_endpoint(&dir.path().join("egress.sock"));
+            .set_network_endpoint(&dir.path().join("egress.sock"));
         assert!(matches!(
             source.snapshot_state(),
             Err(DeviceStateError::InvalidValue {
@@ -1204,7 +1204,7 @@ mod tests {
         });
 
         let mut d = dev();
-        d.set_substitution_endpoint(&sock);
+        d.set_network_endpoint(&sock);
 
         let raw = b"1.2.3.4:80\n".to_vec();
         let rw = VsockHdr {
@@ -1472,7 +1472,7 @@ mod tests {
         });
 
         let mut d = dev();
-        d.set_substitution_endpoint(&sock);
+        d.set_network_endpoint(&sock);
         let rw = VsockHdr {
             src_cid: GUEST_CID,
             dst_cid: HOST_CID,
@@ -1523,7 +1523,7 @@ mod tests {
         });
 
         let mut device = dev();
-        device.set_substitution_endpoint(&sock);
+        device.set_network_endpoint(&sock);
         let target = b"files.pythonhosted.org:443\n";
         device.handle_packet(
             VsockHdr {
@@ -1627,7 +1627,7 @@ mod tests {
         });
 
         let mut device = dev();
-        device.set_substitution_endpoint(&sock);
+        device.set_network_endpoint(&sock);
         let target = b"files.pythonhosted.org:443\n";
         device.handle_packet(
             VsockHdr {

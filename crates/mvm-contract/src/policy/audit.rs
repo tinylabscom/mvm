@@ -609,6 +609,15 @@ pub struct AuditEntry {
     /// Vsock frame sequence number.
     #[serde(default)]
     pub frame_sequence: Option<u64>,
+    /// Principal that authorized the action (human, on-call rotation, or automated system).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authorizer_principal: Option<String>,
+    /// Free-form rationale for the authorization decision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authorization_reason: Option<String>,
+    /// Optional ticket / incident / change-request reference.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authorization_ticket_ref: Option<String>,
 }
 
 #[cfg(test)]
@@ -649,6 +658,9 @@ mod tests {
             threats: vec![],
             gate_decision: None,
             frame_sequence: None,
+            authorizer_principal: None,
+            authorization_reason: None,
+            authorization_ticket_ref: None,
         };
 
         let json = serde_json::to_string(&entry).unwrap();
@@ -668,6 +680,9 @@ mod tests {
             threats: vec![],
             gate_decision: None,
             frame_sequence: None,
+            authorizer_principal: None,
+            authorization_reason: None,
+            authorization_ticket_ref: None,
         };
 
         let json = serde_json::to_string(&entry).unwrap();
@@ -739,6 +754,62 @@ mod tests {
         assert!(entry.gate_decision.is_none());
         assert!(entry.frame_sequence.is_none());
     }
+    #[test]
+    fn test_audit_entry_authorizer_fields() {
+        let entry = AuditEntry {
+            timestamp: "2025-01-01T00:00:00Z".to_string(),
+            tenant_id: "acme".to_string(),
+            pool_id: None,
+            instance_id: None,
+            action: AuditAction::InstanceStarted,
+            detail: Some("booted".to_string()),
+            threats: vec![],
+            gate_decision: None,
+            frame_sequence: None,
+            authorizer_principal: Some("ops-alice".to_string()),
+            authorization_reason: Some("scheduled rollout".to_string()),
+            authorization_ticket_ref: Some("CHG-12345".to_string()),
+        };
+
+        let json = serde_json::to_string(&entry).unwrap();
+        assert!(json.contains("authorizer_principal"));
+        assert!(json.contains("ops-alice"));
+        assert!(json.contains("CHG-12345"));
+
+        let parsed: AuditEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.authorizer_principal, Some("ops-alice".to_string()));
+        assert_eq!(
+            parsed.authorization_reason,
+            Some("scheduled rollout".to_string())
+        );
+        assert_eq!(
+            parsed.authorization_ticket_ref,
+            Some("CHG-12345".to_string())
+        );
+    }
+
+    #[test]
+    fn test_audit_entry_authorizer_fields_omitted_by_default() {
+        let entry = AuditEntry {
+            timestamp: "2025-01-01T00:00:00Z".to_string(),
+            tenant_id: "acme".to_string(),
+            pool_id: None,
+            instance_id: None,
+            action: AuditAction::TenantCreated,
+            detail: None,
+            threats: vec![],
+            gate_decision: None,
+            frame_sequence: None,
+            authorizer_principal: None,
+            authorization_reason: None,
+            authorization_ticket_ref: None,
+        };
+
+        let json = serde_json::to_string(&entry).unwrap();
+        assert!(!json.contains("authorizer_principal"));
+        assert!(!json.contains("authorization_reason"));
+        assert!(!json.contains("authorization_ticket_ref"));
+    }
 
     #[test]
     fn test_audit_entry_with_security_fields() {
@@ -763,6 +834,9 @@ mod tests {
                 reason: "destructive".to_string(),
             }),
             frame_sequence: Some(42),
+            authorizer_principal: None,
+            authorization_reason: None,
+            authorization_ticket_ref: None,
         };
 
         let json = serde_json::to_string(&entry).unwrap();

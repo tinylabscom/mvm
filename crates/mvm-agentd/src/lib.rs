@@ -26,14 +26,23 @@ pub mod child_wait;
 /// PTY-over-vsock console support. Access is enforced by the guest agent's
 /// runtime profile and signed verb grant before a request reaches this module.
 pub mod console;
-/// Loopback SOCKS5 → host-vsock egress proxy (`mvm-egress-client`).
+/// Shared SOCKS5/HTTP parsing helpers for the FlowMux egress adapter.
 #[cfg(feature = "addons")]
-pub mod egress_client;
+pub(crate) mod egress_client;
 pub mod entrypoint;
 /// Runs one entrypoint call with its pump and its consumer on separate
 /// threads, so a consumer that blocks — a host that stopped reading — cannot
 /// defer the child's deadline or grow the pump's queue without bound.
 pub mod entrypoint_stream;
+/// Guest-side FlowMux client for the converged single networking path.
+#[cfg(feature = "addons")]
+pub mod flowmux;
+/// Loopback SOCKS5/HTTP-proxy → FlowMux egress bridge (`mvm-egress-client`).
+#[cfg(feature = "addons")]
+pub mod flowmux_egress;
+/// Load the per-boot FlowMux identity material used by the guest-side adapters.
+#[cfg(feature = "addons")]
+pub mod flowmux_keys;
 /// In-guest forward-proxy front: parses a workload's proxied request into a
 /// `WireRequest` for the substitution client.
 pub mod forward_proxy;
@@ -53,7 +62,7 @@ pub mod guest_mount;
 pub mod guest_net;
 /// Shared in-guest vsock session helper for the addon/egress helper bins.
 #[cfg(feature = "addons")]
-mod guest_vsock_session;
+pub mod guest_vsock_session;
 /// In-guest `host.audit.v1` typed methods: `emit` / `emit_batch` over the
 /// broker transport, letting a workload append to the chain-signed audit log.
 pub mod host_audit;

@@ -102,6 +102,10 @@ struct Geometry {
 /// The reserved inodes (1..=10) are all marked used; root is inode 2 among
 /// them. We create no `lost+found` — the kernel mounts and writes without it.
 const RESERVED_INODES: u32 = 10;
+/// The inode tables written by this formatter are fully zeroed. Advertising
+/// that fact prevents the kernel's lazy inode-table initializer from rewriting
+/// group descriptors behind a busy, unjournaled filesystem.
+const BG_INODE_ZEROED: u16 = 0x0004;
 
 impl Geometry {
     fn plan(size_bytes: u64) -> Result<Self, MkfsError> {
@@ -322,6 +326,7 @@ fn build_gdt(geom: &Geometry) -> Vec<u8> {
         };
         put_u16(&mut gdt, d + 0x0E, free_inodes as u16); // bg_free_inodes_count_lo
         put_u16(&mut gdt, d + 0x10, if g == 0 { 1 } else { 0 }); // bg_used_dirs_count_lo (root)
+        put_u16(&mut gdt, d + 0x12, BG_INODE_ZEROED); // bg_flags
     }
     gdt
 }
@@ -457,6 +462,17 @@ mod tests {
         let geom = Geometry::plan(160 * 1024 * 1024).unwrap();
         let per_group: u32 = (0..geom.groups).map(|g| geom.group_free_blocks(g)).sum();
         assert_eq!(per_group, s.free_blocks);
+    }
+
+    #[test]
+    fn every_group_descriptor_marks_its_inode_table_zeroed() {
+        let (img, summary) = format_buf(160 * 1024 * 1024);
+        let descriptor_table = BLOCK_SIZE as usize;
+        for group in 0..summary.groups as usize {
+            let flags_offset = descriptor_table + group * 32 + 0x12;
+            let flags = u16::from_le_bytes([img[flags_offset], img[flags_offset + 1]]);
+            assert_eq!(flags, BG_INODE_ZEROED, "group {group}");
+        }
     }
 
     #[test]

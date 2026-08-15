@@ -64,7 +64,7 @@ Treating the VM as the sandbox gives us a few rules:
 - **One workload per boundary.** This is a sandbox, not a shared server for tenants who distrust each other.
 - **No host access by default.** The guest gets its own process tree, its own network, and a filesystem that stops at the share you declared.
 - **Guest RPC, not a shell.** Anything host-facing goes through a controlled protocol, never a raw shell.
-- **Honest backend tiers.** When a backend genuinely can't offer the same isolation, we say so. Firecracker on Linux KVM and a Docker fallback are not the same wall, and labeling them as if they were would be dishonest.
+- **Honest backend tiers.** When a backend genuinely can't offer the same isolation, we say so. Firecracker on Linux KVM and a shared-kernel container are not the same wall, and labeling them as if they were would be dishonest. mvm does not offer a container fallback on any runtime path.
 
 None of this means the microVM "solves" security. It gives you a hardware-backed boundary worth building the rest of the system around.
 
@@ -141,7 +141,7 @@ The reason to split it up this way is partly security and partly just operations
 We try to be honest about the edges, too:
 
 - **It doesn't protect you from a malicious host.** The host holds the hypervisor, the local keys, and the control plane. If the host itself is compromised, the sandbox can't save you from it. That's the trust boundary, and pretending otherwise would be marketing.
-- **It doesn't treat every backend as interchangeable.** Firecracker on Linux KVM, the macOS virtualization backends, and a Docker fallback have genuinely different verified-boot and isolation properties, and the product names those differences instead of papering over them.
+- **It doesn't treat every backend as interchangeable.** Firecracker on Linux KVM, the macOS virtualization backends, and a shared-kernel container have genuinely different verified-boot and isolation properties, and the product names those differences instead of papering over them. mvm does not ship a container backend; the runtime path is microVM-only.
 - **Nix isn't a magic supply-chain shield.** Pinning makes builds reproducible and reviewable, which is a lot, but you still have to pick dependencies you trust and update them on purpose.
 
 ## So, the short version

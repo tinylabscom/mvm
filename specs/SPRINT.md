@@ -54,6 +54,12 @@
       scenarios pass. A KVM-backed ARM64 acceptance run completed cold
       bootstrap and kernel publication, then ran Alpine twice from a fully warm
       cache without launching Stage 0.
+      Store reuse additionally requires a clean ext4 superblock alongside the
+      external seed marker; the in-process formatter prevents lazy inode-table
+      races, and Stage 0 flushes, checks, and unmounts the store before
+      reporting success. A live ARM64 cold repair and warm-cache rerun both
+      completed without ext4 errors. The Linux all-target Clippy rerun for this
+      change remains for CI or a supported builder-VM entry point.
 
 - [x] HVF large-response integrity — **plan 315**. Restored bounded
       virtio-vsock host-to-guest credit accounting that had been removed while
@@ -68,11 +74,11 @@
       reply; a simulated continuous 4 GiB transfer proves the refillable rate
       budget is not a lifetime quota. A live BDD scenario pins the documented
       `python:3.12` pandas
-      install through PyPI. All 446 `mvm-vmm` tests, workspace check, macOS
-      workspace all-target Clippy, the serial aggregate workspace suite, and
-      the focused x86_64 Linux cross-build are green. The CI test-linux and lint-core lanes passed on PR #2324, and a
-      local x86_64 Linux cross-build passes on current main; the platform
-      gates are complete.
+      install through PyPI. All 503 `mvm-vmm` tests on the macOS host,
+      workspace check, macOS workspace all-target Clippy, the serial aggregate
+      workspace suite, and the focused x86_64 and aarch64 Linux cross-builds
+      are green. The CI test-linux and lint-core lanes passed on PR #2324;
+      local Linux-native builder-VM gates are tracked in Plan 316.
 - [x] Issue-closeout batch — **#2165, #2321, #2323**. Closed 2026-08-13.
       #2165 closed as
       completed by PR #2330: workload-runner root bootargs now agree with
@@ -212,15 +218,33 @@
       `features/suites/s11_snapshot/hvf_save_restore.feature`; workspace
       nextest 10600 passed / 24 skipped.
 
-- [~] Open issue reconciliation — **plan 300**. The 31 issues open at the
-      2026-08-13 snapshot are inventoried against `origin/main` `dd528f981`
-      with an explicit disposition, closure gate, and dependency-ordered
-      execution phase. Eight issues were closed on 2026-08-13: #2165, #2289,
-      #2333, and #2423 as completed by merged PRs; #2180, #2181, #2305, and
-      #2413 as not planned / superseded by Plan 316 or Plan 313. The
-      remaining 31 issues retain concrete implementation, security, rollout,
-      live-validation, performance, governance, or cross-repository acceptance
-      work.
+- [~] Open issue reconciliation — **plan 300**. Every open issue is inventoried
+      against `origin/main` with an explicit disposition, closure gate, and
+      dependency-ordered execution phase. The count has moved 39 → 31 → 28 → 23.
+      Closed 2026-08-13: #2165, #2289, #2333, #2423 as completed by merged PRs;
+      #2180, #2181, #2305, #2413 as not planned / superseded by Plan 316 or Plan
+      313. Then #2292 (PR #2463 — driver_boot split, no sudo bash launch,
+      in-process API client), #2307, and #2318 (PR #2465 — the receipt is a
+      record not a control, the redundant head `sync_all` is removed, torn-head
+      recovery is under test, KVM `emit: receipt` re-measure p50 ~45.4 ms).
+      The 2026-08-14 pass closed five more, all combinations rather than
+      completions: #2347 into #2299 (both say the launch numbers are
+      untrustworthy — one because the test host is 7200rpm, one because
+      `guest_kernel_entry_ms` is 0.038 ms and the backends are not measured at
+      the same boundaries); #2281 into #2280 (two axes of one substrate, one
+      harness, one blocked-on-native-hosts prerequisite); #2199 into #2198 (a
+      contract and its enforcement gate, neither meaningful alone); #2193 into
+      #2194/#2196 (the prewarm substrate is merged; the residual per-backend
+      factory is only testable through each backend's live matrix); and the
+      #2166 epic into #2169 (three of four workstreams closed). Every
+      transferred criterion is recorded in the surviving issue. Two discrepancies
+      surfaced: Plan 316 Phase 2 was marked COMPLETE with six of seven boxes
+      unchecked and two verifiably undone, and Plan 316's phase ordering has
+      already slipped — Phase 3 is ahead of Phase 2. Both are corrected in the
+      plan. **23 issues remain open**, three of them blocked outside this
+      repository: #2299 and #2280 need an NVMe `/dev/kvm` host, #2083 needs
+      `mvm-studio#18`. #2135 has PR #2472 open with Security run 31817896244
+      pending.
 - [~] Runtime hardening for production — **plan 303**. Closes gaps between the
       binary CI witnesses and the binary that ships. Landed: trapping integer
       overflow in `[profile.release]` plus a `release-witness` CI lane over the
@@ -291,35 +315,13 @@
       unreachable pull-request guards, and aligned the claim descriptions with
       the workflows that actually run them.
 
-- [~] Security mutation-witness repair — **issue #2135**. Restored executable
-      witnesses for the security-sensitive boot admission, kernel-digest,
-      host-signer/grant, lease-expiry, and substitution-endpoint cleanup
-      invariants. The current Security failure is also reconciled: direct tests
-      catch the actionable snapshot-I/O, no-op stage-name, torn-tail, and grant
-      parser mutants; the static gate rejects accepted misses outside the
-      pinned surface; 26 moved libkrun identities name their current file; and
-      15 obsolete misses were removed, reducing the accepted baseline from 83
-      to 68 without adding a waiver. The first exact rerun exposed six further
-      survivors: the contract's omitted resource-control default plus hostd's
-      exact broker byte limit, admitted digest equality, host CPU mechanism
-      truth table, explicit deferred-audit flush, and drop-time flush. Direct
-      witnesses now catch all six; the complete contract mutation shard and a
-      focused five-mutant hostd proof are green. Workspace all-target Clippy,
-      formatting, and the static surface gate are also green. The workspace
-      suite passed every repaired area but hit one unrelated host-agent
-      socket-bind timeout; its isolated integration rerun passed 4/4. Exact
-      Security run 31516221103 passed every mutation and security job, then
-      twice hit Linux `ETXTBSY` while spawning freshly published shutdown-hook
-      fixtures. The lifecycle runner now retries that transient error with a
-      bounded delay, witnessed for recovery and retry exhaustion; workspace
-      all-target Clippy passes. The workspace suite passed the repaired area but
-      one parallel CLI test observed another test's temporary host CPU ceiling;
-      its exact isolated rerun passed. The next exact run exposed guest-console
-      tests sharing process-global session state; the stateful tests now share
-      one lock and join their completion thread, with 20/20 parallel stress
-      passes. A clean exact Linux Security workflow rerun remains the final
-      merge gate; a subsequent scheduled or release run is still required
-      before issue closure.
+- [~] Security mutation-witness repair — **issue #2135**. PR #2448 merged
+      witnesses for the `mvm-core` and `mvm-contract` survivors. The remaining
+      backend and runtime survivors are accepted in the mutation-witness
+      baseline with reasons pointing to live backend integration tests and BDD
+      scenarios. PR #2472 (`fix/2135-security-lane-mutants`) is open and the
+      pin-only surface gate passes; Security workflow run 31817896244 is the
+      final verification gate before merge and issue closure.
 
 - [x] `mvmctl deps capture` — **plan 291 WS3**. Reseals a sandbox-captured
       dependency tree with fresh audit sidecars, updates the lockfile index,
@@ -2059,7 +2061,7 @@ WS4/WS5/WS6 can proceed in parallel with WS1 sub-steps. WS3 depends on `mvm-net`
 
 ### Workstream: universal initramfs + vsock-activated boot (Plan 270) — COMPLETE
 
-Shipped in #1914 (core), #1931 (QEMU unified runner), #1933 (Docker dev-tier), #1936 (Wasm activation), #1968 (Apple Container kernel on HVF), #1985 (activation agent-readiness retry), and #1996 (deterministic cargo initramfs, which replaced the Nix initramfs build described below). Tracked in `specs/plans/270-universal-initramfs-vsock-activated-boot.md`. This workstream replaces the per-rootfs init paths (`mvm-verity-init`, `mvm-oci-init`, busybox `/init`) with one content-addressed initramfs in which `mvm-agentd` is PID 1 and receives a signed `ActivateEnvironment` command over vsock.
+Shipped in #1914 (core), #1931 (QEMU unified runner), #1933 (Docker dev-tier, subsequently removed by Plan 329), #1936 (Wasm activation), #1968 (Apple Container kernel on HVF), #1985 (activation agent-readiness retry), and #1996 (deterministic cargo initramfs, which replaced the Nix initramfs build described below). Tracked in `specs/plans/270-universal-initramfs-vsock-activated-boot.md`. This workstream replaces the per-rootfs init paths (`mvm-verity-init`, `mvm-oci-init`, busybox `/init`) with one content-addressed initramfs in which `mvm-agentd` is PID 1 and receives a signed `ActivateEnvironment` command over vsock.
 
 **Prerequisites:** satisfied. `feat/vsock-control-conformance` and `feat/firecracker-vsock-only-final` are already merged to `main`; `feat/hvf-converge-vsock` cleanup is in PR #1905.
 
@@ -2355,6 +2357,17 @@ change.
 - SDK usage (decorator + runtime) unchanged; ADRs consolidated but intact; website docs current; only #1637 open.
 
 ---
+
+## Plan 330 — Decision provenance layer
+
+Cross-sprint work tracked in `specs/plans/330-decision-provenance-layer.md`.
+
+- [x] Phase 0 — RFC/plan drafted and opened as PR #2455.
+- [x] Phase 1 — PROV-O export of existing audit events (`mvm-contract::provenance`, `mvm-core::provenance`, `mvmctl audit provenance export`). Implementation PR #2461.
+- [x] Phase 2 — Enrich audit events with authorizer/rationale. Implementation PR #2461.
+- [x] Phase 3 — `DecisionRecord` API and content-addressed store (PR #2461).
+- [x] Phase 4 — Query API and causal chains: `trace`, `impact`, and `similar` queries over the cached decision store, exposed through `mvmctl trust audit decisions {trace,impact,similar}`.
+- [ ] Phase 5 — Optional standards interoperability.
 
 ## Appendix A — ADR consolidation clusters (~91 → ~15)
 

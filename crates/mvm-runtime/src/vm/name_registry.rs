@@ -1,4 +1,5 @@
 use anyhow::{Context, Result, bail};
+use mvm_contract::builder::BuilderError;
 use mvm_core::domain::instance::InstanceReadiness;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
@@ -297,6 +298,134 @@ pub struct RegisterParams<'a> {
     pub tags: BTreeMap<String, String>,
     pub expires_at: Option<String>,
     pub auto_resume: bool,
+}
+
+impl<'a> RegisterParams<'a> {
+    /// Start building a [`RegisterParams`]. Every value is set by name, so a
+    /// call site cannot transpose two fields that share a type.
+    #[must_use]
+    pub fn builder() -> RegisterParamsBuilder<'a> {
+        RegisterParamsBuilder::new()
+    }
+}
+
+/// Builder for [`RegisterParams`]. Required fields are checked by
+/// [`RegisterParamsBuilder::build`] rather than defaulted, so an unset one is a
+/// reported error and never a silently empty value.
+pub struct RegisterParamsBuilder<'a> {
+    name: Option<&'a str>,
+    vm_dir: Option<&'a str>,
+    network: Option<&'a str>,
+    guest_ip: Option<&'a str>,
+    slot_index: Option<u8>,
+    tags: Option<BTreeMap<String, String>>,
+    expires_at: Option<String>,
+    auto_resume: Option<bool>,
+}
+
+impl<'a> RegisterParamsBuilder<'a> {
+    /// An empty builder: nothing set yet.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            name: None,
+            vm_dir: None,
+            network: None,
+            guest_ip: None,
+            slot_index: None,
+            tags: None,
+            expires_at: None,
+            auto_resume: None,
+        }
+    }
+
+    /// Set `name`.
+    #[must_use]
+    pub fn name(mut self, name: &'a str) -> Self {
+        self.name = Some(name);
+        self
+    }
+
+    /// Set `vm_dir`.
+    #[must_use]
+    pub fn vm_dir(mut self, vm_dir: &'a str) -> Self {
+        self.vm_dir = Some(vm_dir);
+        self
+    }
+
+    /// Set `network`.
+    #[must_use]
+    pub fn network(mut self, network: &'a str) -> Self {
+        self.network = Some(network);
+        self
+    }
+
+    /// Set `guest_ip`. Takes a value or an `Option`; unset means `None`.
+    #[must_use]
+    pub fn guest_ip(mut self, guest_ip: impl Into<Option<&'a str>>) -> Self {
+        self.guest_ip = guest_ip.into();
+        self
+    }
+
+    /// Set `slot_index`.
+    #[must_use]
+    pub fn slot_index(mut self, slot_index: u8) -> Self {
+        self.slot_index = Some(slot_index);
+        self
+    }
+
+    /// Set `tags`.
+    #[must_use]
+    pub fn tags(mut self, tags: BTreeMap<String, String>) -> Self {
+        self.tags = Some(tags);
+        self
+    }
+
+    /// Set `expires_at`. Takes a value or an `Option`; unset means `None`.
+    #[must_use]
+    pub fn expires_at(mut self, expires_at: impl Into<Option<String>>) -> Self {
+        self.expires_at = expires_at.into();
+        self
+    }
+
+    /// Set `auto_resume`.
+    #[must_use]
+    pub fn auto_resume(mut self, auto_resume: bool) -> Self {
+        self.auto_resume = Some(auto_resume);
+        self
+    }
+
+    /// Finish, or name the first required field left unset.
+    pub fn build(self) -> Result<RegisterParams<'a>, BuilderError> {
+        Ok(RegisterParams {
+            name: self
+                .name
+                .ok_or(BuilderError::missing("RegisterParams", "name"))?,
+            vm_dir: self
+                .vm_dir
+                .ok_or(BuilderError::missing("RegisterParams", "vm_dir"))?,
+            network: self
+                .network
+                .ok_or(BuilderError::missing("RegisterParams", "network"))?,
+            guest_ip: self.guest_ip,
+            slot_index: self
+                .slot_index
+                .ok_or(BuilderError::missing("RegisterParams", "slot_index"))?,
+            tags: self
+                .tags
+                .ok_or(BuilderError::missing("RegisterParams", "tags"))?,
+            expires_at: self.expires_at,
+            auto_resume: self
+                .auto_resume
+                .ok_or(BuilderError::missing("RegisterParams", "auto_resume"))?,
+        })
+    }
+}
+
+impl<'a> Default for RegisterParamsBuilder<'a> {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl<'a> RegisterParams<'a> {
@@ -903,5 +1032,20 @@ mod tests {
 
         let reloaded = VmNameRegistry::load(&registry_path()).unwrap();
         assert!(reloaded.lookup("ghost").is_none());
+    }
+}
+
+#[cfg(test)]
+mod register_params_builder_tests {
+    use super::*;
+
+    /// An empty builder must refuse to finish, naming the first
+    /// required field it is missing — never substituting a default.
+    #[test]
+    fn an_empty_builder_names_the_first_missing_field() {
+        let Err(err) = RegisterParams::builder().build() else {
+            panic!("an empty RegisterParams builder must not build");
+        };
+        assert_eq!(err, BuilderError::missing("RegisterParams", "name"));
     }
 }

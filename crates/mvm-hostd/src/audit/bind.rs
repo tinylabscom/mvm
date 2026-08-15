@@ -3,6 +3,11 @@
 // emit. Error policy (best-effort vs fatal) belongs to the caller.
 
 use anyhow::Result;
+use chrono::Utc;
+use mvm_contract::provenance::{
+    ActorRef, AttestationBinding, DecisionActorRole, DecisionCategory, DecisionOutcome,
+    DecisionRecord, DecisionRecordBuilder,
+};
 use mvm_core::checkpoint::{CheckpointClass, CheckpointId, CheckpointMeta};
 use mvm_core::plan::ExecutionPlan;
 
@@ -30,7 +35,41 @@ pub fn bind_checkpoint_created(
         class_str(meta.class),
         meta.meta_digest.as_str(),
         &meta.vm_name,
-    )
+    )?;
+
+    if emitter.decisions_enabled() {
+        let record = checkpoint_decision_record(plan, meta);
+        let _ = emitter.emit_decision_record(plan, record);
+    }
+    Ok(())
+}
+
+fn checkpoint_decision_record(plan: &ExecutionPlan, meta: &CheckpointMeta) -> DecisionRecord {
+    DecisionRecordBuilder::new()
+        .version(1)
+        .category(DecisionCategory::Checkpoint)
+        .actor(ActorRef {
+            principal: crate::audit::host_keypair::host_signer_id(),
+            key_id: crate::audit::host_keypair::host_signer_id(),
+            key_role: Some(DecisionActorRole::Orchestrator),
+        })
+        .scenario(mvm_contract::provenance::DecisionScenario {
+            plan_id: Some(plan.plan_id.0.clone()),
+            ..Default::default()
+        })
+        .reasoning(format!(
+            "checkpoint {} captured (class: {})",
+            meta.id.as_str(),
+            class_str(meta.class)
+        ))
+        .outcome(DecisionOutcome::Approved)
+        .timestamp(Utc::now().to_rfc3339())
+        .attestation(AttestationBinding {
+            plan_id: Some(plan.plan_id.0.clone()),
+            ..AttestationBinding::default()
+        })
+        .build()
+        .expect("checkpoint decision record is well-formed")
 }
 
 /// Emit `checkpoint.restored` binding a restore to the plan it launched under.

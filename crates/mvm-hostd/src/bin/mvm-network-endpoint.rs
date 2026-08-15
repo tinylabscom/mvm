@@ -1,4 +1,4 @@
-//! `mvm-substitution-endpoint` — the per-VM secret-substitution moat.
+//! `mvm-network-endpoint` — the per-VM secret-substitution moat.
 //! Spawned per-VM by the backend, it is the one process that holds
 //! the workload's secrets in the clear: it opens the host's encrypted secret +
 //! binding stores, builds the per-VM `SubstitutionService`, and serves the
@@ -30,7 +30,8 @@ use anyhow::{Context, Result};
 use tracing::info;
 
 use mvm_hostd::keyholder::secret_placeholder_env;
-use mvm_hostd::supervisor::substitution_endpoint::{
+use mvm_hostd::supervisor::flowmux::{FlowMuxSession, registry::RegistryLimits};
+use mvm_hostd::supervisor::network_endpoint::{
     EgressMode, EndpointConfig, EndpointHandshake, EndpointTransport, ResolverBackend, assemble,
     build_audit_recorder, build_egress_gate, fingerprint_bound_secrets, parse,
 };
@@ -40,7 +41,7 @@ fn read_stdin_blocking() -> Result<Vec<u8>> {
     std::io::stdin()
         .lock()
         .read_to_end(&mut buf)
-        .context("mvm-substitution-endpoint stdin read failed")?;
+        .context("mvm-network-endpoint stdin read failed")?;
     Ok(buf)
 }
 
@@ -65,11 +66,11 @@ fn main() -> Result<()> {
         .init();
 
     let raw = read_stdin_blocking()?;
-    let cfg = parse(&raw).context("mvm-substitution-endpoint config parse failed")?;
+    let cfg = parse(&raw).context("mvm-network-endpoint config parse failed")?;
     info!(
         tenant_id = %cfg.tenant_id,
         secrets = cfg.secrets.len(),
-        "mvm-substitution-endpoint config loaded"
+        "mvm-network-endpoint config loaded"
     );
 
     // Bind BEFORE the handshake so the backend knows the endpoint is reachable
@@ -169,7 +170,7 @@ fn raw_egress_gate(cfg: &EndpointConfig) -> mvm_runtime::vmm::egress_gate::Egres
 /// a standalone, non-platform-gated function (rather than inlined into
 /// `confine_endpoint`, whose real body is Linux-only) so the `Remote ⇒
 /// Some(uds)` decision is unit-testable on every contributor host, not just
-/// Linux CI — see `ConfinementSpec::substitution_endpoint`'s doc for what this
+/// Linux CI — see `ConfinementSpec::network_endpoint`'s doc for what this
 /// grants once it reaches the confinement builder.
 fn resolver_uds_path(cfg: &EndpointConfig) -> Option<&std::path::Path> {
     match &cfg.resolver {
@@ -189,7 +190,7 @@ fn resolver_uds_path(cfg: &EndpointConfig) -> Option<&std::path::Path> {
 #[cfg(target_os = "linux")]
 fn confine_endpoint(cfg: &EndpointConfig) -> Result<()> {
     use mvm_hostd::jailer::{ConfinementSpec, confine_self};
-    use mvm_hostd::supervisor::substitution_endpoint::resolve_store_dirs;
+    use mvm_hostd::supervisor::network_endpoint::resolve_store_dirs;
 
     let (secret_dir, binding_dir) =
         resolve_store_dirs(cfg).context("resolve substitution-endpoint store dirs")?;
@@ -198,7 +199,7 @@ fn confine_endpoint(cfg: &EndpointConfig) -> Result<()> {
     // endpoint can chain-sign substitution events. `resolver_uds_path` widens
     // the grant with the ONE resolver socket when (and only when) `cfg.resolver`
     // is `Remote` — `Local` leaves the confinement unchanged.
-    let spec = ConfinementSpec::substitution_endpoint(
+    let spec = ConfinementSpec::network_endpoint(
         secret_dir,
         binding_dir,
         mvm_core::config::mvm_audit_dir(),
@@ -230,7 +231,7 @@ fn confine_endpoint(cfg: &EndpointConfig) -> Result<()> {
 enum Bound {
     Uds(std::os::unix::net::UnixListener),
     #[cfg(target_os = "linux")]
-    Vsock(mvm_hostd::supervisor::substitution_proxy::vsock::VsockListener),
+    Vsock(mvm_hostd::supervisor::network_endpoint_proxy::vsock::VsockListener),
 }
 
 fn bind_transport(transport: &EndpointTransport) -> Result<Bound> {
@@ -249,7 +250,7 @@ fn bind_transport(transport: &EndpointTransport) -> Result<Bound> {
         EndpointTransport::Vsock { port } => {
             #[cfg(target_os = "linux")]
             {
-                use mvm_hostd::supervisor::substitution_proxy::vsock::VsockListener;
+                use mvm_hostd::supervisor::network_endpoint_proxy::vsock::VsockListener;
                 let listener = VsockListener::bind(*port)
                     .with_context(|| format!("AF_VSOCK bind on port {port} failed"))?;
                 info!(port = *port, "substitution endpoint bound (vsock)");
@@ -284,7 +285,9 @@ fn bind_terminator(addr: Option<std::net::SocketAddr>) -> Result<Option<std::net
 /// (placeholder-bearing requests) AND the redirected terminator path.
 async fn serve(
     cfg: &EndpointConfig,
-    service: Option<std::sync::Arc<mvm_hostd::supervisor::substitution_proxy::SubstitutionService>>,
+    service: Option<
+        std::sync::Arc<mvm_hostd::supervisor::network_endpoint_proxy::SubstitutionService>,
+    >,
     bound: Bound,
     terminator: Option<std::net::TcpListener>,
     forward_timeout: std::time::Duration,
@@ -314,6 +317,8 @@ async fn serve(
         }
         // No secrets: the relayed stream is raw TCP, gated then spliced.
         EgressMode::Raw => serve_raw(cfg, bound, forward_timeout).await?,
+        // Authenticated FlowMux session: the converged single networking path.
+        EgressMode::FlowMux => serve_flowmux(cfg, bound).await?,
     }
 
     if let Some(task) = terminator_task {
@@ -327,11 +332,12 @@ fn can_skip_substitution_assembly(cfg: &EndpointConfig) -> bool {
         && cfg.secrets.is_empty()
         && cfg.terminator_listen.is_none()
         && cfg.tls_intermediate.is_none()
+        && cfg.flowmux_identity.is_none()
 }
 
 /// The WireRequest substitution serve loop over the adopted listener.
 async fn serve_wire(
-    service: std::sync::Arc<mvm_hostd::supervisor::substitution_proxy::SubstitutionService>,
+    service: std::sync::Arc<mvm_hostd::supervisor::network_endpoint_proxy::SubstitutionService>,
     bound: Bound,
     _forward_timeout: std::time::Duration,
 ) -> Result<()> {
@@ -371,6 +377,98 @@ async fn serve_raw(
     Ok(())
 }
 
+/// The authenticated FlowMux serve loop over the adopted listener. Accepts one
+/// guest connection, completes the shared authenticated handshake pinned to the
+/// plan's guest verifying key, and runs the FlowMux session until it closes.
+async fn serve_flowmux(cfg: &EndpointConfig, bound: Bound) -> Result<()> {
+    let identity = cfg
+        .flowmux_identity
+        .as_ref()
+        .context("flowmux egress configured without identity")?;
+
+    let host_key = decode_signing_key(&identity.host_signing_key_base64)
+        .context("decode FlowMux host signing key")?;
+    let guest_anchor = decode_verifying_key(&identity.guest_verifying_key_base64)
+        .context("decode FlowMux guest verifying key")?;
+
+    // Accept is synchronous I/O; run it in spawn_blocking so the tokio worker
+    // thread stays free. Both UDS and vsock arrive as a std UnixStream (vsock
+    // accepts an AF_VSOCK fd that UnixStream wraps by fd number, matching the
+    // existing WireRequest vsock path).
+    let stream = tokio::task::spawn_blocking(move || accept_one_sync(bound))
+        .await
+        .context("FlowMux accept task")?
+        .context("accept FlowMux connection")?;
+
+    // RegistryLimits uses defaults here because the spawner does not yet
+    // thread the admitted plan's limits through cfg.network_policy / NetworkLimits.
+    let limits = RegistryLimits::default();
+    let gate = cfg
+        .network_policy
+        .as_ref()
+        .map(mvm_hostd::supervisor::network_endpoint::build_egress_gate)
+        .unwrap_or_else(mvm_runtime::vmm::egress_gate::EgressGate::default_deny);
+    let session_id = identity.session_id.clone();
+    let recorder = build_audit_recorder(&cfg.tenant_id).map(std::sync::Arc::new);
+    tokio::task::spawn_blocking(move || {
+        let mut session = FlowMuxSession::accept_with_recorder(
+            stream,
+            &session_id,
+            host_key,
+            &guest_anchor,
+            limits,
+            gate,
+            recorder,
+        )
+        .context("accept FlowMux session")?;
+        session.serve().context("serve FlowMux session")
+    })
+    .await
+    .context("FlowMux session task")?
+}
+
+fn accept_one_sync(bound: Bound) -> std::io::Result<std::os::unix::net::UnixStream> {
+    match bound {
+        Bound::Uds(listener) => {
+            let (stream, _) = listener.accept()?;
+            Ok(stream)
+        }
+        #[cfg(target_os = "linux")]
+        Bound::Vsock(listener) => {
+            use std::os::fd::FromRawFd;
+            let fd =
+                mvm_hostd::supervisor::network_endpoint_proxy::vsock::accept(listener.raw_fd())?;
+            // SAFETY: `fd` is an owned connected stream socket from accept(2);
+            // wrapping it in UnixStream is the same fd-wrapping technique the
+            // WireRequest vsock path uses.
+            Ok(unsafe { std::os::unix::net::UnixStream::from_raw_fd(fd) })
+        }
+    }
+}
+
+fn decode_signing_key(base64: &str) -> Result<ed25519_dalek::SigningKey> {
+    use base64::Engine as _;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(base64)
+        .context("base64-decode signing key")?;
+    let seed: [u8; 32] = bytes
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("signing key must be 32 bytes"))?;
+    Ok(ed25519_dalek::SigningKey::from_bytes(&seed))
+}
+
+fn decode_verifying_key(base64: &str) -> Result<ed25519_dalek::VerifyingKey> {
+    use base64::Engine as _;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(base64)
+        .context("base64-decode verifying key")?;
+    let key: [u8; 32] = bytes
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("verifying key must be 32 bytes"))?;
+    ed25519_dalek::VerifyingKey::from_bytes(&key)
+        .map_err(|e| anyhow::anyhow!("invalid verifying key: {e}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -382,7 +480,7 @@ mod tests {
             tenant_id: "local".into(),
             secrets: Vec::new(),
             transport: EndpointTransport::Uds {
-                path: "/tmp/mvm-substitution-endpoint-test.sock".into(),
+                path: "/tmp/mvm-network-endpoint-test.sock".into(),
             },
             redaction: mvm_core::policy::RedactionPolicy::default(),
             reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
@@ -399,6 +497,7 @@ mod tests {
             )),
             egress_mode: EgressMode::Raw,
             resolver: ResolverBackend::default(),
+            flowmux_identity: None,
         }
     }
 
@@ -410,7 +509,7 @@ mod tests {
             tenant_id: "acme".into(),
             secrets: vec![],
             transport: EndpointTransport::Uds {
-                path: PathBuf::from("/tmp/mvm-substitution-endpoint-test.sock"),
+                path: PathBuf::from("/tmp/mvm-network-endpoint-test.sock"),
             },
             redaction: mvm_core::policy::RedactionPolicy::default(),
             reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
@@ -422,6 +521,7 @@ mod tests {
             network_policy: None,
             egress_mode: EgressMode::Wire,
             resolver,
+            flowmux_identity: None,
         }
     }
 
@@ -457,5 +557,53 @@ mod tests {
             timeout_secs: 5,
         });
         assert_eq!(resolver_uds_path(&cfg), Some(uds.as_path()));
+    }
+
+    #[test]
+    fn flowmux_config_round_trips_through_json() {
+        use base64::Engine as _;
+        let host_key = [1u8; 32];
+        let guest_key = [2u8; 32];
+        let cfg = EndpointConfig {
+            tenant_id: "tenant".into(),
+            secrets: Vec::new(),
+            transport: EndpointTransport::Uds {
+                path: PathBuf::from("/tmp/mvm-flowmux-test.sock"),
+            },
+            redaction: mvm_core::policy::RedactionPolicy::default(),
+            reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
+            forward_timeout_secs: 30,
+            secret_store_dir: None,
+            binding_store_dir: None,
+            terminator_listen: None,
+            tls_intermediate: None,
+            network_policy: None,
+            egress_mode: EgressMode::FlowMux,
+            resolver: ResolverBackend::default(),
+            flowmux_identity: Some(mvm_hostd::supervisor::network_endpoint::FlowMuxIdentity {
+                session_id: "s".into(),
+                host_signing_key_base64: base64::engine::general_purpose::STANDARD.encode(host_key),
+                guest_verifying_key_base64: base64::engine::general_purpose::STANDARD
+                    .encode(guest_key),
+            }),
+        };
+
+        let json = serde_json::to_string(&cfg).unwrap();
+        let parsed: EndpointConfig = parse(json.as_bytes()).unwrap();
+        assert_eq!(parsed.egress_mode, EgressMode::FlowMux);
+        let id = parsed.flowmux_identity.unwrap();
+        assert_eq!(id.session_id, "s");
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(id.host_signing_key_base64)
+                .unwrap(),
+            host_key
+        );
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(id.guest_verifying_key_base64)
+                .unwrap(),
+            guest_key
+        );
     }
 }

@@ -2,7 +2,7 @@
 //! per-VM host-side gating endpoint, maps the admitted config onto a `VmmSpec`,
 //! and boots it through the `VmmDriver` seam — once, over the seam, instead of
 //! copied into each backend's `start`. The endpoint spawn is itself behind the
-//! `EndpointSpawner` trait so the runner is unit-testable with no real VM and no
+//! `NetworkEndpointSpawner` trait so the runner is unit-testable with no real VM and no
 //! real endpoint process.
 
 use std::path::{Path, PathBuf};
@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 
 use mvm_core::checkpoint::{CheckpointId, CheckpointMeta};
-use mvm_core::config::{vm_state_dir, vm_substitution_endpoint_socket, vms_dir};
+use mvm_core::config::{vm_network_endpoint_socket, vm_state_dir, vms_dir};
 use mvm_core::crypto::vmgenid::fresh_generation_token;
 use mvm_core::plan::{ExecutionPlan, SecretBinding, StreamRetention};
 use mvm_core::policy::RedactionPolicy;
@@ -49,12 +49,11 @@ use crate::workload_runner::claim::{
 use crate::workload_runner::standby_boot::{factory_parent_config, factory_parent_spec};
 use mvm_vmm::host::cmdline;
 use mvm_vmm::host::egress_shared::{decode_plan_secrets_from_state, plan_stream_retention};
+use mvm_vmm::host::network_endpoint_spawn::{
+    EndpointTransport, SubstitutionSpawnParams, reap_network_endpoint, spawn_network_endpoint,
+};
 use mvm_vmm::host::spec_map::{
     WorkloadSpecInputs, ensure_dir_share_support, workload_spec, workload_vsock_ports,
-};
-use mvm_vmm::host::substitution_spawn::{
-    EndpointTransport, SubstitutionSpawnParams, reap_substitution_endpoint,
-    spawn_substitution_endpoint,
 };
 use mvm_vmm::post_restore::PostRestoreOutcome;
 
@@ -67,7 +66,7 @@ use refusal::{map_lineage_refusal, refuse, require_fresh_child_identity};
 use sockets::standing_sockets;
 
 /// What the workload runner needs to stand up the per-VM gating endpoint.
-pub struct EndpointSpawnRequest<'a> {
+pub struct NetworkEndpointSpawnRequest<'a> {
     pub vm_name: &'a str,
     pub state_dir: &'a Path,
     pub tenant: &'a str,
@@ -81,18 +80,18 @@ pub struct EndpointSpawnRequest<'a> {
 /// Stand up the per-VM gating endpoint; return the host UDS the guest's
 /// EGRESS_PORT relays to. The one host-side egress bridge (claim-10 gate +
 /// claims 12/13 substitution).
-pub trait EndpointSpawner: Send + Sync {
-    fn spawn(&self, req: &EndpointSpawnRequest<'_>) -> Result<PathBuf>;
+pub trait NetworkEndpointSpawner: Send + Sync {
+    fn spawn(&self, req: &NetworkEndpointSpawnRequest<'_>) -> Result<PathBuf>;
 }
 
-/// The production `EndpointSpawner`: spawns the real `mvm-substitution-endpoint`
+/// The production `NetworkEndpointSpawner`: spawns the real `mvm-network-endpoint`
 /// over the in-process-VMM UDS transport.
-pub struct RealEndpointSpawner;
+pub struct RealNetworkEndpointSpawner;
 
-impl EndpointSpawner for RealEndpointSpawner {
-    fn spawn(&self, req: &EndpointSpawnRequest<'_>) -> Result<PathBuf> {
-        let uds = vm_substitution_endpoint_socket(req.vm_name);
-        spawn_substitution_endpoint(SubstitutionSpawnParams {
+impl NetworkEndpointSpawner for RealNetworkEndpointSpawner {
+    fn spawn(&self, req: &NetworkEndpointSpawnRequest<'_>) -> Result<PathBuf> {
+        let uds = vm_network_endpoint_socket(req.vm_name);
+        spawn_network_endpoint(SubstitutionSpawnParams {
             vm_name: req.vm_name,
             state_dir: req.state_dir,
             tenant: req.tenant,
@@ -105,6 +104,7 @@ impl EndpointSpawner for RealEndpointSpawner {
             raw_egress: req.raw_egress,
             resolver_remote: None,
             binding_store_dir: None,
+            flowmux_identity: None,
         })?;
         Ok(uds)
     }
@@ -211,7 +211,7 @@ impl BrokerRegistrar for RealBrokerRegistrar {
 /// the resident per-tenant daemon, which sits *above* this crate in the
 /// dependency graph (the daemon depends on the runtime, never the other way
 /// around), so this crate cannot name that broker's type. Same shape as
-/// [`EndpointSpawner`] and [`BrokerRegistrar`] just above — both exist to
+/// [`NetworkEndpointSpawner`] and [`BrokerRegistrar`] just above — both exist to
 /// solve exactly this "the runtime needs the resident daemon to do
 /// something" problem — and, like the ordinary `VmBackend` methods this
 /// trait's two calls sit beside, `start`/`stop` are independent entry points
@@ -341,7 +341,7 @@ pub struct PreloadContext<'a> {
 
 /// Starts workloads over the `VmmDriver` seam: spawn the per-VM gating endpoint,
 /// map the config to a `VmmSpec`, boot via the driver.
-pub struct WorkloadRunner<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> {
+pub struct WorkloadRunner<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> {
     driver: D,
     spawner: S,
     broker: B,
@@ -366,7 +366,7 @@ pub struct StopTiming {
     pub driver_detail: Option<RunningVmStopTiming>,
 }
 
-impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, B> {
+impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, B> {
     /// Build a runner over the process's registered console-streaming hook.
     ///
     /// Every production construction site goes through here and none of them
@@ -1512,7 +1512,7 @@ mod tests {
     use crate::backends::hvf::HvfDriver;
     use crate::driver::MockDriver;
 
-    /// An `EndpointSpawner` test double: records the request it was handed and
+    /// An `NetworkEndpointSpawner` test double: records the request it was handed and
     /// returns a canned UDS without spawning any process. `Mutex` (not `RefCell`)
     /// so it satisfies the `Send + Sync` a `VmBackend` spawner must be.
     struct RecordingSpawner {
@@ -1536,8 +1536,8 @@ mod tests {
         }
     }
 
-    impl EndpointSpawner for RecordingSpawner {
-        fn spawn(&self, req: &EndpointSpawnRequest<'_>) -> Result<PathBuf> {
+    impl NetworkEndpointSpawner for RecordingSpawner {
+        fn spawn(&self, req: &NetworkEndpointSpawnRequest<'_>) -> Result<PathBuf> {
             *self.seen.lock().unwrap() = Some(Recorded {
                 raw_egress: req.raw_egress,
                 tenant: req.tenant.to_string(),
@@ -3317,8 +3317,8 @@ mod tests {
         }
     }
 
-    /// An `EndpointSpawner` double that keys its returned socket on the vm name it
-    /// is handed — mirroring `RealEndpointSpawner` — and records that name, so a
+    /// An `NetworkEndpointSpawner` double that keys its returned socket on the vm name it
+    /// is handed — mirroring `RealNetworkEndpointSpawner` — and records that name, so a
     /// test can prove the child endpoint is keyed on the child's own id and the
     /// parent got none, with no real endpoint process.
     #[derive(Default)]
@@ -3326,10 +3326,10 @@ mod tests {
         seen_vm: Mutex<Option<String>>,
     }
 
-    impl EndpointSpawner for KeyingSpawner {
-        fn spawn(&self, req: &EndpointSpawnRequest<'_>) -> Result<PathBuf> {
+    impl NetworkEndpointSpawner for KeyingSpawner {
+        fn spawn(&self, req: &NetworkEndpointSpawnRequest<'_>) -> Result<PathBuf> {
             *self.seen_vm.lock().unwrap() = Some(req.vm_name.to_string());
-            Ok(vm_substitution_endpoint_socket(req.vm_name))
+            Ok(vm_network_endpoint_socket(req.vm_name))
         }
     }
 

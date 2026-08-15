@@ -980,7 +980,7 @@ unsafe fn run(
             // no bound secrets, which spawns no endpoint and has no egress path.
             if let Some(relay) = egress_relay.as_ref().or(substitution_socket.as_ref()) {
                 v.set_substitution_activity(egress_active.clone());
-                v.set_substitution_endpoint(relay);
+                v.set_network_endpoint(relay);
             }
             if trusted_builder_egress {
                 v.set_trusted_builder_egress();
@@ -1080,9 +1080,7 @@ unsafe fn run(
                 v.set_host_dial_activity(egress_active.clone());
                 let bindings = crate::vmm::vsock::VsockHostBindings {
                     agent_socket: agent_socket.clone(),
-                    substitution_endpoint: egress_relay
-                        .clone()
-                        .or_else(|| substitution_socket.clone()),
+                    network_endpoint: egress_relay.clone().or_else(|| substitution_socket.clone()),
                     broker_endpoint: broker_socket.clone(),
                     console_sockets: console_data_sockets.clone(),
                 };

@@ -11,6 +11,12 @@ use mvm_fs::trusted_snapshot::TrustedSnapshotBackend;
 
 use crate::lineage::{LineageAnchor, LineageGraph, LineageRecord};
 
+mod params;
+pub use params::{
+    CaptureFsQuickParams, CaptureFsQuickParamsBuilder, CaptureVmFullParams,
+    CaptureVmFullParamsBuilder, ForkParams, ForkParamsBuilder,
+};
+
 pub use mvm_core::checkpoint::SUPERVISOR_CONFIG_BLOB as SUPERVISOR_CONFIG_FILE_NAME;
 
 /// Filesystem-backed registry over `config::checkpoints_dir()` (or any root,
@@ -117,50 +123,6 @@ impl CheckpointStore {
     pub fn root(&self) -> &Path {
         &self.root
     }
-}
-
-/// Inputs for an `fs_quick` capture. Grouped into a struct so the call site
-/// reads clearly and we never thread a long positional argument list.
-pub struct CaptureFsQuickParams {
-    pub id: CheckpointId,
-    pub vm_name: String,
-    /// Absolute path to the VM's live rootfs image to clone.
-    pub rootfs: PathBuf,
-    pub supervisor_config_digest: String,
-    pub runtime_source_policy: Option<mvm_core::vm_backend::RuntimeSourcePolicy>,
-    pub runtime_overlay_version: Option<String>,
-    pub tag: Option<String>,
-    pub created_unix: u64,
-    /// The caller asserts the VM is stopped or paused-and-synced. A non-quiesced
-    /// capture is refused: an fs_quick checkpoint has no memory, so the rootfs
-    /// must be in a clean, deterministic state.
-    pub quiesced: bool,
-    /// The permission set the captured VM was admitted under, sealed into the
-    /// checkpoint's content-address so a restore has something to bound its
-    /// child against. `None` records no bound and therefore permits any child
-    /// CPU or wall clock — but still no egress, since an absent egress grant is
-    /// deny-all.
-    pub grants: Option<mvm_contract::grants::Grants>,
-}
-
-/// Inputs for forking a child instance from a checkpoint.
-pub struct ForkParams {
-    pub checkpoint: CheckpointId,
-    /// New checkpoint-id recording this fork's lineage.
-    pub child_id: CheckpointId,
-    pub child_vm_name: String,
-    /// Where to materialize the child's rootfs (the new VM's state dir).
-    pub dest_dir: PathBuf,
-    pub created_unix: u64,
-    /// Serialized `SignedExecutionPlan` JSON for the child's own claim-8
-    /// admission. When `Some`, the spawner injects it into the child's
-    /// `SupervisorConfig.plan` so the supervisor re-verifies it at start.
-    /// `None` is accepted for fs_quick materialization and test-only paths;
-    /// vm_full restore refuses it before starting the child VMM.
-    pub child_plan_json: Option<String>,
-    /// Tenant id for the admitted child plan (mirrors `child_plan_json`).
-    /// The supervisor uses this to derive the audit-substrate paths.
-    pub child_tenant_id: Option<String>,
 }
 
 /// Verify every blob named in `meta.content` exists in the checkpoint's content
@@ -653,32 +615,6 @@ pub fn vm_is_running(vm_name: &str) -> bool {
 
 pub use mvm_core::checkpoint::DeviceAnchors;
 pub use mvm_vmm::checkpoint::VmFullControl;
-
-pub struct CaptureVmFullParams {
-    pub id: CheckpointId,
-    pub vm_name: String,
-    pub supervisor_config_digest: String,
-    pub runtime_source_policy: Option<mvm_core::vm_backend::RuntimeSourcePolicy>,
-    pub runtime_overlay_version: Option<String>,
-    /// The live VM's persisted supervisor config, copied into the checkpoint so
-    /// restore can rebuild the state dir (every stop reaps the live one).
-    /// `None` for backends that do not persist a supervisor config (the
-    /// blob is omitted from the checkpoint manifest and restore is handled
-    /// differently by those backends).
-    pub supervisor_config_src: Option<PathBuf>,
-    pub tag: Option<String>,
-    pub created_unix: u64,
-    /// Whether the caller wants the source VM left paused after a successful
-    /// capture. Only the warm pool does: for it the paused parent *is* the
-    /// claim resource, and the checkpoint is an integrity witness beside it. A
-    /// user checkpointing their own running VM wants it running afterwards, so
-    /// this is `false` on the CLI path. Retention still requires the backend to
-    /// support it — the two must agree.
-    pub retain_paused: bool,
-    /// The permission set the captured VM was admitted under. See
-    /// [`CaptureFsQuickParams::grants`].
-    pub grants: Option<mvm_contract::grants::Grants>,
-}
 
 /// Capture a running VM's consistent {rootfs, memory, machine-id} triple in one
 /// pause window. The disk clone happens while paused so memory and disk match.

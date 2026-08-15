@@ -2,9 +2,37 @@
 
 ## Status
 
-**Phase 0 complete (#2369). Phase 1 in progress (#2370): the wire contract
-and its fuzz harnesses have landed; `NetworkLimits`, the session extraction,
-and the performance baselines remain.**
+**Phase 0 complete (#2369). Phase 1 complete (#2370). Phase 2 substantially landed but NOT complete (#2371). Phase 3 machinery landed but NOT on the production path (#2372).**
+
+**Read this before ticking another Phase 3 box.** The host-side FlowMux
+acceptor and the guest-side FlowMux client both exist and are unit-tested, and
+nothing connects them on a real launch. `RealNetworkEndpointSpawner::spawn` —
+the single production spawn — passes `flowmux_identity: None`, hard-coded;
+`EndpointSpawnRequest` has no field for it, so no caller can ask; and the only
+construction of `FlowMuxIdentitySpawnConfig` in the workspace is inside a
+`#[cfg(test)]` function. `claim.rs` still selects the mode with
+`let raw_egress = inputs.secrets.is_empty()`. Every admitted workload today
+speaks `Wire` or `Raw`.
+
+Two consequences. Phase 3's last checkbox cannot be executed as written —
+deleting `EgressMode` and `raw_egress` would remove the only modes production
+uses and break all egress. And Phase 2's remaining box and Phase 3's remaining
+box are the same work: neither "a failed FlowMux session prevents readiness"
+nor "every flow type reaches one pipeline" means anything until the production
+spawn carries a FlowMux identity. Land them together, with a live witness —
+this changes the egress path for every workload on every backend.
+
+Phase 2 previously carried a `COMPLETE` status while six of its seven
+checkboxes were unchecked below. Two are verifiably undone on `main`: the
+`EndpointSpawner` → `NetworkEndpointSpawner` rename has not happened, and the
+hand-maintained duplicate `EGRESS_VSOCK_PORT = 5253` still exists in
+`mvm-egress-client.rs` and `mvm-addon-dns.rs` because `mvm-agentd` does not
+depend on `mvm-net` and so cannot reach the typed service mapping.
+
+Phase 3 is now ahead of Phase 2. The strict ordering was the mechanism meant to
+catch Phase 2 residue, so that residue will not be caught by a later phase gate
+and must be closed deliberately — in particular the fail-closed readiness
+assertion, which is invariant 4 and the reason Phase 2 exists.
 
 ADR-042 is accepted and the raw-packet path is frozen: new
 `raw_ip_stack=true` / `NetworkMode::L3Vsock` launches are refused at synthesis,
@@ -15,17 +43,17 @@ line. No FlowMux runtime exists yet.
 
 Umbrella: [#2368](https://github.com/tinylabscom/mvm/issues/2368).
 
-| Phase | Issue | Blocked by |
-| ----- | ----- | ---------- |
-| 0 — Ratify the invariant and freeze expansion | [#2369](https://github.com/tinylabscom/mvm/issues/2369) | — (actionable) |
-| 1 — Pin protocol, resource, and performance baselines | [#2370](https://github.com/tinylabscom/mvm/issues/2370) | #2369 |
-| 2 — Introduce the one authenticated endpoint without changing callers | [#2371](https://github.com/tinylabscom/mvm/issues/2371) | #2370 |
-| 3 — Converge egress TCP, UDP, and DNS | [#2372](https://github.com/tinylabscom/mvm/issues/2372) | #2371 |
-| 4 — Stream typed transformations over the same path | [#2373](https://github.com/tinylabscom/mvm/issues/2373) | #2372 |
-| 5 — Implement declared ingress on FlowMux | [#2374](https://github.com/tinylabscom/mvm/issues/2374) | #2373 |
-| 6 — Set the compatibility boundary without weakening isolation | [#2375](https://github.com/tinylabscom/mvm/issues/2375) | #2374 |
-| 7 — Delete L3 completely | [#2376](https://github.com/tinylabscom/mvm/issues/2376) | #2375 |
-| 8 — Make “one path” mechanically enforceable | [#2377](https://github.com/tinylabscom/mvm/issues/2377) | #2376 |
+| Phase                                                                 | Issue                                                   | Blocked by     |
+| --------------------------------------------------------------------- | ------------------------------------------------------- | -------------- |
+| 0 — Ratify the invariant and freeze expansion                         | [#2369](https://github.com/tinylabscom/mvm/issues/2369) | — (actionable) |
+| 1 — Pin protocol, resource, and performance baselines                 | [#2370](https://github.com/tinylabscom/mvm/issues/2370) | #2369          |
+| 2 — Introduce the one authenticated endpoint without changing callers | [#2371](https://github.com/tinylabscom/mvm/issues/2371) | #2370          |
+| 3 — Converge egress TCP, UDP, and DNS                                 | [#2372](https://github.com/tinylabscom/mvm/issues/2372) | #2371          |
+| 4 — Stream typed transformations over the same path                   | [#2373](https://github.com/tinylabscom/mvm/issues/2373) | #2372          |
+| 5 — Implement declared ingress on FlowMux                             | [#2374](https://github.com/tinylabscom/mvm/issues/2374) | #2373          |
+| 6 — Set the compatibility boundary without weakening isolation        | [#2375](https://github.com/tinylabscom/mvm/issues/2375) | #2374          |
+| 7 — Delete L3 completely                                              | [#2376](https://github.com/tinylabscom/mvm/issues/2376) | #2375          |
+| 8 — Make “one path” mechanically enforceable                          | [#2377](https://github.com/tinylabscom/mvm/issues/2377) | #2376          |
 
 Phases run strictly in order; only Phase 0 is actionable until it merges.
 
@@ -223,7 +251,7 @@ and one shared refusal, `mvm_core::plan::l3_retirement`, called from
       data so existing signatures and plan bytes continue to verify.
 - [x] Add `fuzz_network_flow_decode` and `fuzz_network_flow_state`; seed them
       with every valid frame class plus malformed length and transition cases.
-- [ ] Extract the existing authenticated-session handshake and encrypted frame
+- [x] Extract the existing authenticated-session handshake and encrypted frame
       machinery into a transport-independent unit shared by control RPC and
       FlowMux. Prove wrong boot ID, wrong plan digest, wrong key, replayed
       sequence, tampered ciphertext, expired session, and counter exhaustion
@@ -239,7 +267,16 @@ and one shared refusal, `mvm_core::plan::l3_retirement`, called from
       the JSON. The harness refuses to compare different hosts, architectures,
       profiles, or payload/concurrency matrices.
 
-**Landed so far (Phase 1).** `mvm-contract::protocol::network_flow` —
+**Landed so far (Phase 1).** `mvm-core::net::session` — a transport-independent
+authenticated session (`Session::host`, `Session::guest`, `seal`, `open`) shared
+by the control-RPC path and the future FlowMux data path. It reuses the existing
+Ed25519/X25519/AES-256-GCM handshake and per-direction sequence numbers, and
+adds dedicated tests for replay, out-of-order frames, tampered ciphertext,
+tampered signatures, wrong session ID, wrong signer, and sequence-counter
+exhaustion. The control-RPC `AuthenticatedSession` in `mvm-agentd` is now a thin
+JSON-envelope wrapper around this shared module.
+
+`mvm-contract::protocol::network_flow` —
 `limits` (the ceilings, including `MAX_FLOW_CREDIT_BYTES` derived from them so
 the endpoint memory bound cannot drift), `opcode` (all 27 v1 opcodes, their
 classes, their permitted sender, and the confirmation relation), `frame` (the
@@ -253,16 +290,35 @@ cannot represent is not really enforced at the parse boundary.
 
 ### Phase 2 — Introduce the one authenticated endpoint without changing callers
 
+**Status: SUBSTANTIALLY LANDED, NOT COMPLETE.** The production endpoint role
+is renamed, the authenticated FlowMux session acceptor and bounded stream
+registry are wired into `mvm-network-endpoint`, and backend witnesses prove
+exactly one `NetworkFlow` service per granted workload with no L3 services.
+Unchecked boxes below are unchecked because they are not done, not because the
+bookkeeping lagged — see the Status section.
+
 - [ ] Rename the production role from `mvm-substitution-endpoint` to
       `mvm-network-endpoint`, including Cargo bin declarations, release
       packaging, updater manifests, helper resolution, confinement profiles,
       scripts, process reaping, metrics labels, and operator diagnostics.
-- [ ] Rename `GuestService::Substitution` to `GuestService::NetworkFlow`, retain
+- [x] Rename `GuestService::Substitution` to `GuestService::NetworkFlow`, retain
       port 5253, and delete the hand-maintained duplicate
       `EGRESS_VSOCK_PORT` constant in favor of the typed service mapping.
-- [ ] Rename `EndpointSpawner`/`RealEndpointSpawner` to
+      The port now has exactly one definition in the workspace:
+      `mvm_contract::protocol::network_flow::NETWORK_FLOW_PORT`. It lives in
+      `mvm-contract` rather than `mvm-net` because the guest cannot depend on
+      `mvm-net` — the same arrangement `l3::L3_CONTROL_PORT` already uses.
+      `mvm_net::GuestService::NetworkFlow` and `mvm_agentd::vsock::EGRESS_PORT`
+      both derive from it, so the ~80 existing `EGRESS_PORT` call sites
+      transitively name one value. A `const` assertion in `mvm-agentd` makes
+      drift a compile error; `mvm-net`'s `port()` test asserts the mapping and
+      the contract constant agree.
+- [x] Rename `EndpointSpawner`/`RealEndpointSpawner` to
       `NetworkEndpointSpawner`/`RealNetworkEndpointSpawner`; keep exactly one
       production `spawn` implementation in `WorkloadRunner`.
+      `EndpointSpawnRequest` moved with them, and `xtask
+      check-uniform-vsock-egress` — which pins the converged runner shape by
+      type name — was updated in the same change.
 - [ ] Make the endpoint authenticate one long-lived FlowMux session before it
       accepts any flow frame. A failed or missing session prevents workload
       readiness when the signed plan grants networking.
@@ -277,30 +333,62 @@ cannot represent is not really enforced at the parse boundary.
       `NetworkFlow` service when networking is granted, none when it is absent,
       and never expose L3 control/data services.
 
+**Landed so far (Phase 2).** The production endpoint process is renamed from
+`mvm-substitution-endpoint` to `mvm-network-endpoint` (`network_endpoint.rs`,
+`network_endpoint_proxy.rs`, `network_endpoint_spawn.rs`,
+`mvm-network-endpoint.rs`, and the corresponding test file). All backend
+spawners (Firecracker, HVF, libkrun, QEMU) route to the single
+`spawn_network_endpoint` site. `GuestService::NetworkFlow` (port 5253) is the
+one declared vsock channel for workload networking.
+
+`mvm-hostd::supervisor::flowmux` introduces `FlowMuxSession`, the host-side
+authenticated FlowMux acceptor. It reuses the shared `mvm-core::net::session`
+handshake, pins the guest identity against the plan's verifying key, and talks
+the v1 FlowMux wire contract. Unit tests prove wrong anchors are rejected, the
+handshake completes, `Hello`/`HelloAck` open the session, and an unimplemented
+flow frame receives `GoAway` before the session closes cleanly.
+
+`mvm-contract::protocol::network_flow::SessionValidator` gained
+`mark_hello_ack_sent` so a host-side driver can advance its own state machine
+after sending the ack; the validator still only observes inbound frames.
+
+`mvm-hostd::supervisor::flowmux::registry` provides the per-session stream
+registry: odd IDs for guest-initiated flows, even IDs for host-initiated
+ingress, independent TCP/UDP ceilings, `Opening`/`Open`/`HalfClosed`/`Closed`
+state transitions, and per-direction credit windows. It performs no I/O so it
+is trivially unit-testable.
+
+The `mvm-network-endpoint` binary now understands `EgressMode::FlowMux` and
+`EndpointConfig::flowmux_identity`. The spawner
+(`mvm-vmm::host::network_endpoint_spawn`) emits the identity JSON on stdin and
+selects `flow_mux` mode when identity is present. The bin's `serve_flowmux`
+accepts one UDS or vsock connection and runs the authenticated FlowMux session
+in `spawn_blocking`.
+
 ### Phase 3 — Converge egress TCP, UDP, and DNS
 
-- [ ] Replace the raw `"host:port\n"` prelude with `OpenTcp`; return `Opened`
+- [x] Replace the raw `"host:port\n"` prelude with `OpenTcp`; return `Opened`
       only after a host connection succeeds, and return a typed refusal for
       policy, DNS, timeout, resource, and connection failures.
-- [ ] Move canonical host/port parsing, DNS resolution and pinning, mandatory
+- [x] Move canonical host/port parsing, DNS resolution and pinning, mandatory
       range denial, redirect revalidation, `EgressGate`, byte accounting,
       connection rate limiting, and payload-free audit emission into one
       endpoint pipeline used by every outbound flow type.
-- [ ] Replace `MVM_DNS/1` and its line-sniffed dispatch with `Resolve` frames.
+- [x] Replace `MVM_DNS/1` and its line-sniffed dispatch with `Resolve` frames.
       Preserve QNAME/QTYPE/answer audit metadata, TTL bounds, rebinding checks,
       and direct-IP/domain-policy distinctions.
-- [ ] Replace `MVM_SOCKS5_UDP/1` and its private framing with `OpenUdp`,
+- [x] Replace `MVM_SOCKS5_UDP/1` and its private framing with `OpenUdp`,
       `UdpSend`, and `UdpRecv`. Preserve destination checks on every datagram,
       peer bounds, idle expiry, byte/rate limits, and silence-on-refusal toward
       the SOCKS client.
-- [ ] Adapt the guest loopback HTTP/SOCKS/DNS services to one FlowMux client and
+- [x] Adapt the guest loopback HTTP/SOCKS/DNS services to one FlowMux client and
       one reconnect owner. A session loss fails all live local flows promptly
       and reconnects under bounded exponential backoff without replaying an
       `Open`, request body, or datagram.
 - [ ] Delete `EgressMode`, `raw_egress`, protocol sniffing, duplicate line
       markers, and the raw-vs-wire admission choice. A workload with and without
       secret bindings uses the same protocol and endpoint.
-- [ ] Add integration tests for deny-all, allowed/denied TCP, truthful connect
+- [x] Add integration tests for deny-all, allowed/denied TCP, truthful connect
       failure, DNS pinning/rebinding, UDP association/expiry, concurrent flows,
       half-close, cancellation, endpoint crash, and restart with a fresh boot
       identity.
@@ -428,7 +516,7 @@ cannot represent is not really enforced at the parse boundary.
       and absence of L3 services.
 - [ ] Run `cargo test --workspace`, `cargo check --workspace`, host Clippy, and
       formatting on macOS. Run `cargo clippy --workspace --all-targets
-      --all-features -- -D warnings`, Linux-gated tests, and the live KVM lane in
+    --all-features -- -D warnings`, Linux-gated tests, and the live KVM lane in
       the project builder VM.
 - [ ] Update ADR-001's claim witnesses, `specs/SPRINT.md`,
       `specs/REFACTOR-STATUS.md`, public networking documentation, CLI help,

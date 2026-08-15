@@ -11,7 +11,7 @@
 //!
 //! This module is the bin's library half: the stdin config contract
 //! (`EndpointConfig`) and `assemble` (open stores + build the service).
-//! The `mvm-substitution-endpoint` bin is the thin process wrapper that parses
+//! The `mvm-network-endpoint` bin is the thin process wrapper that parses
 //! the config, reports the minted placeholders, and runs the serve loop.
 
 use std::path::PathBuf;
@@ -29,13 +29,13 @@ use mvm_core::plan::SecretBinding;
 use crate::keyholder::{
     FileBindingStore, HandedPlaceholders, LocalResolver, RemoteResolver, SecretResolver,
 };
-use crate::supervisor::substitution_proxy::SubstitutionService;
+use crate::supervisor::network_endpoint_proxy::SubstitutionService;
 
 /// The endpoint's ready-handshake line. Defined next to
-/// [`spawn_substitution_endpoint`](mvm_runtime::spawn_substitution_endpoint)'s
+/// [`spawn_network_endpoint`](mvm_runtime::spawn_network_endpoint)'s
 /// reader and re-exported here so the bin, its tests and the spawner share one
 /// wire definition without a dependency cycle.
-pub use mvm_vmm::host::substitution_spawn::EndpointHandshake;
+pub use mvm_vmm::host::network_endpoint_spawn::EndpointHandshake;
 
 /// Default forward-leg timeout (host → real destination) in seconds.
 fn default_forward_timeout_secs() -> u64 {
@@ -96,10 +96,10 @@ pub enum ResolverBackend {
 }
 
 /// How the guest reaches this endpoint. Defined in `mvm-backend` (next to the
-/// `spawn_substitution_endpoint` writer) and re-exported here so the bin, its
+/// `spawn_network_endpoint` writer) and re-exported here so the bin, its
 /// tests, and `EndpointConfig` share one wire definition without a dependency
 /// cycle (mvm-hostd → mvm-backend, never the reverse).
-pub use mvm_vmm::host::substitution_spawn::EndpointTransport;
+pub use mvm_vmm::host::network_endpoint_spawn::EndpointTransport;
 
 /// Which egress protocol the guest speaks on the relayed EGRESS_PORT stream.
 /// A VM uses exactly one, fixed at admission (secrets ⇒ WireRequest, else raw),
@@ -112,6 +112,10 @@ pub enum EgressMode {
     Wire,
     /// Raw TCP: first line `host:port`, then a byte splice. No secrets.
     Raw,
+    /// Authenticated FlowMux session on `GuestService::NetworkFlow`. This is
+    /// the converged single networking path; it replaces `Wire` and `Raw` for
+    /// admitted workloads.
+    FlowMux,
 }
 
 /// The per-VM name-constrained intermediate the terminator
@@ -137,7 +141,24 @@ impl std::fmt::Debug for TlsIntermediate {
     }
 }
 
-/// Config the backend hands the `mvm-substitution-endpoint` subprocess on
+/// Identity material for one authenticated FlowMux session.
+///
+/// The host signing key authenticates the endpoint to the guest; the guest
+/// verifying key is the pinned anchor the endpoint accepts. Both are carried
+/// as base64 on the stdin wire so no raw bytes escape the spawn boundary in
+/// shell-unsafe form.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FlowMuxIdentity {
+    /// Unique session identifier, distinct per VM boot.
+    pub session_id: String,
+    /// Base64-encoded 32-byte Ed25519 host signing key.
+    pub host_signing_key_base64: String,
+    /// Base64-encoded 32-byte Ed25519 guest verifying key.
+    pub guest_verifying_key_base64: String,
+}
+
+/// Config the backend hands the `mvm-network-endpoint` subprocess on
 /// stdin at spawn. Carries the workload's secret bindings (NOT values — the
 /// endpoint resolves values itself from the host store) plus where to listen.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -202,6 +223,10 @@ pub struct EndpointConfig {
     /// [`ResolverBackend`].
     #[serde(default)]
     pub resolver: ResolverBackend,
+    /// Identity material for the authenticated FlowMux session. Required when
+    /// `egress_mode` is `FlowMux`; ignored for `Wire` and `Raw`.
+    #[serde(default)]
+    pub flowmux_identity: Option<FlowMuxIdentity>,
 }
 
 /// Parse an [`EndpointConfig`] from the JSON the backend writes on stdin.
@@ -290,8 +315,8 @@ pub fn assemble(
     // the redaction / reversible-replacement / TLS / recorder wiring; passing
     // `resolver` in means it no longer hardcodes a `LocalResolver`, so a
     // `Remote` backend actually reaches its `RemoteResolver`.
-    let (service, handed) =
-        SubstitutionService::from_plan(crate::supervisor::substitution_proxy::FromPlanInputs {
+    let (service, handed) = SubstitutionService::from_plan(
+        crate::supervisor::network_endpoint_proxy::FromPlanInputs {
             plan_secrets: &cfg.secrets,
             tenant: &cfg.tenant_id,
             bindings: &bindings,
@@ -301,7 +326,8 @@ pub fn assemble(
             reversible_replacement: cfg.reversible_replacement.clone(),
             tls_intermediate,
             recorder,
-        })?;
+        },
+    )?;
 
     // Claim-10: when the backend threaded the VM's resolved network policy, this
     // endpoint becomes the egress gate. Resolve host-allowlist pins once (fails
@@ -381,7 +407,7 @@ pub fn fingerprint_bound_secrets(cfg: &EndpointConfig) -> anyhow::Result<Vec<Sec
 /// (`<keys>/host-signer.ed25519` + `<audit>/`), or `None` if the signer key
 /// isn't present (the endpoint then serves un-audited, matching the prior
 /// optional-recorder posture). The audit dir + the key are inside the
-/// endpoint's Landlock grants (see `ConfinementSpec::substitution_endpoint`).
+/// endpoint's Landlock grants (see `ConfinementSpec::network_endpoint`).
 pub fn build_audit_recorder(tenant: &str) -> Option<crate::supervisor::audit_recorder::Recorder> {
     use crate::supervisor::audit_file::FileAuditSigner;
     use crate::supervisor::audit_recorder::Recorder;
@@ -445,6 +471,7 @@ mod tests {
             network_policy: None,
             egress_mode: EgressMode::Wire,
             resolver: ResolverBackend::default(),
+            flowmux_identity: None,
         }
     }
 

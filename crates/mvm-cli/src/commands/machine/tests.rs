@@ -56,6 +56,20 @@ fn parse_owned_run(argv: &[String]) -> Result<MachineRunArgs, clap::Error> {
     })
 }
 
+fn parse_fork(argv: &[&str]) -> Result<MachineForkArgs, clap::Error> {
+    parse(argv).map(|action| match action {
+        MachineAction::Fork(f) => f,
+        other => panic!("expected fork action, got {other:?}"),
+    })
+}
+
+fn parse_restore(argv: &[&str]) -> Result<MachineRestoreArgs, clap::Error> {
+    parse(argv).map(|action| match action {
+        MachineAction::Restore(r) => r,
+        other => panic!("expected restore action, got {other:?}"),
+    })
+}
+
 const SDK_RUN_EGRESS_BACKEND: &str = "libkrun";
 const SDK_RUN_EGRESS_ENFORCEMENT: &str = "libkrun:l4-host-port";
 
@@ -96,6 +110,8 @@ fn machine_subcommand(action: &MachineAction) -> &'static str {
         MachineAction::Rewind(_) => "rewind",
         MachineAction::Advance(_) => "advance",
         MachineAction::WarmRestore(_) => "warm-restore",
+        MachineAction::Fork(_) => "fork",
+        MachineAction::Restore(_) => "restore",
         MachineAction::Vm(_) => "vm",
     }
 }
@@ -105,6 +121,59 @@ fn machine_subcommand(action: &MachineAction) -> &'static str {
 /// CLI parser actually accepts, and must map to the verb its first line
 /// names. This is what catches an SDK emitting a flag the CLI rejects (e.g.
 /// `stop --name X` when `stop` takes a positional name).
+#[test]
+fn fork_parses_with_as() {
+    let args = parse_fork(&["fork", "parent", "--as", "child"]).unwrap();
+    assert_eq!(args.parent, "parent");
+    assert_eq!(args.child_name, Some("child".to_string()));
+    assert!(args.branch.is_none());
+}
+
+#[test]
+fn fork_parses_with_branch() {
+    let args = parse_fork(&["fork", "parent", "--branch", "feature-x"]).unwrap();
+    assert_eq!(args.parent, "parent");
+    assert!(args.child_name.is_none());
+    assert_eq!(args.branch, Some("feature-x".to_string()));
+}
+
+#[test]
+fn fork_rejects_as_and_branch_together() {
+    assert!(parse_fork(&["fork", "parent", "--as", "child", "--branch", "feature-x"]).is_err());
+}
+
+#[test]
+fn fork_allows_no_name() {
+    let args = parse_fork(&["fork", "parent"]).unwrap();
+    assert_eq!(args.parent, "parent");
+    assert!(args.child_name.is_none());
+    assert!(args.branch.is_none());
+}
+
+#[test]
+fn restore_auto_names_when_as_and_branch_are_omitted() {
+    let args = parse_restore(&["restore", "ckpt-abc"]).unwrap();
+    assert_eq!(args.checkpoint, "ckpt-abc");
+    assert!(args.child_name.is_none());
+    assert!(args.branch.is_none());
+}
+
+#[test]
+fn restore_parses_with_as() {
+    let args = parse_restore(&["restore", "ckpt-abc", "--as", "child"]).unwrap();
+    assert_eq!(args.checkpoint, "ckpt-abc");
+    assert_eq!(args.child_name, Some("child".to_string()));
+    assert!(args.branch.is_none());
+}
+
+#[test]
+fn restore_parses_with_branch() {
+    let args = parse_restore(&["restore", "ckpt-abc", "--branch", "feature-x"]).unwrap();
+    assert_eq!(args.checkpoint, "ckpt-abc");
+    assert!(args.child_name.is_none());
+    assert_eq!(args.branch, Some("feature-x".to_string()));
+}
+
 #[test]
 fn every_shared_machine_fixture_parses_to_its_verb() {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/machine-fixtures");
@@ -2179,7 +2248,7 @@ fn resolve_remove_targets_dedupes_named_and_enumerates_all() {
 #[test]
 fn running_vm_wrappers_require_a_persisted_machine_spec() {
     let _state = IsolatedMachineState::new();
-    let err = ensure_machine_spec_exists("web").expect_err("missing spec rejected");
+    let err = load_machine_spec("web").expect_err("missing spec rejected");
     let msg = format!("{err:#}");
     // Actionable not-found: names the machine and points at the recovery verbs.
     assert!(msg.contains("machine \"web\" does not exist"), "msg: {msg}");
@@ -3138,4 +3207,129 @@ fn machine_inspect_marks_an_unenforced_tier_as_not_bounded() {
 #[test]
 fn machine_inspect_says_nothing_when_no_boot_recorded_a_tier() {
     assert_eq!(super::spec_ops::enforced_cpu_line(None), None);
+}
+
+// ---------------------------------------------------------------------------
+// `machine start` auto-create / reconcile tests
+// ---------------------------------------------------------------------------
+
+fn start_args_with_create_flags(
+    name: &str,
+    create_flags: MachineStartCreateFlags,
+) -> MachineStartArgs {
+    MachineStartArgs {
+        name: name.to_string(),
+        create_flags,
+        receipt: None,
+        json: false,
+        dry_run: false,
+        quiet: false,
+        hypervisor: None,
+        no_supervisor: false,
+        kernel_pin: None,
+        has_ad_hoc_argv: false,
+    }
+}
+
+#[test]
+fn start_parser_accepts_source_and_config_flags() {
+    let action = parse(&[
+        "start", "web", "--image", "nginx", "--cpus", "2", "--memory", "512M",
+    ])
+    .expect("parse start with flags");
+    let MachineAction::Start(cmd) = action else {
+        panic!("expected start action");
+    };
+    assert_eq!(cmd.names, vec!["web"]);
+    assert_eq!(cmd.create_flags.image.as_deref(), Some("nginx"));
+    assert_eq!(cmd.create_flags.cpus, Some(2));
+    assert_eq!(cmd.create_flags.memory.as_deref(), Some("512M"));
+}
+
+#[test]
+fn start_parser_rejects_image_and_manifest_together() {
+    let err = parse(&["start", "web", "--image", "nginx", "--manifest", "mvm.toml"])
+        .expect_err("image and manifest must conflict");
+    assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+}
+
+#[test]
+fn start_resolver_creates_missing_machine_when_source_given() {
+    let _state = IsolatedMachineState::new();
+    let args = start_args_with_create_flags(
+        "web",
+        MachineStartCreateFlags {
+            image: Some("nginx".to_string()),
+            cpus: Some(2),
+            memory: Some("512M".to_string()),
+            ..MachineStartCreateFlags::default()
+        },
+    );
+    let (spec, action) = super::lifecycle::resolve_start_spec(&args).expect("create on start");
+    assert_eq!(action, super::SpecReconcile::Create);
+    assert_eq!(spec.name, "web");
+    assert_eq!(spec.image.as_deref(), Some("nginx"));
+    assert_eq!(spec.cpus, 2);
+    assert_eq!(spec.memory, "512M");
+}
+
+#[test]
+fn start_resolver_reuses_existing_machine_without_source_flags() {
+    let _state = IsolatedMachineState::new();
+    let existing = spec_fixture("web");
+    save_machine_spec(&existing, false).expect("save existing");
+    let args = start_args_with_create_flags("web", MachineStartCreateFlags::default());
+    let (spec, action) = super::lifecycle::resolve_start_spec(&args).expect("reuse existing");
+    assert_eq!(action, super::SpecReconcile::Reuse);
+    assert_eq!(spec, existing);
+}
+
+#[test]
+fn start_resolver_errors_when_missing_and_no_source() {
+    let _state = IsolatedMachineState::new();
+    let args = start_args_with_create_flags("web", MachineStartCreateFlags::default());
+    let err = super::lifecycle::resolve_start_spec(&args).expect_err("missing machine errors");
+    let msg = err.to_string();
+    assert!(msg.contains("does not exist"), "msg: {msg}");
+    assert!(msg.contains("--image"), "msg: {msg}");
+}
+
+#[test]
+fn start_resolver_errors_on_changed_config_without_force() {
+    let _state = IsolatedMachineState::new();
+    let existing = spec_fixture("web");
+    save_machine_spec(&existing, false).expect("save existing");
+    let args = start_args_with_create_flags(
+        "web",
+        MachineStartCreateFlags {
+            image: Some("ubuntu:24.04".to_string()),
+            ..MachineStartCreateFlags::default()
+        },
+    );
+    let err = super::lifecycle::resolve_start_spec(&args)
+        .expect_err("changed config without force errors");
+    assert!(err.to_string().contains("different config"), "msg: {err}");
+}
+
+#[test]
+fn start_resolver_recreates_with_force() {
+    let _state = IsolatedMachineState::new();
+    let existing = spec_fixture("web");
+    save_machine_spec(&existing, false).expect("save existing");
+    let args = start_args_with_create_flags(
+        "web",
+        MachineStartCreateFlags {
+            image: Some("ubuntu:24.04".to_string()),
+            force: true,
+            ..MachineStartCreateFlags::default()
+        },
+    );
+    let (spec, action) = super::lifecycle::resolve_start_spec(&args).expect("force recreate");
+    match action {
+        super::SpecReconcile::Recreate { changed } => {
+            assert!(changed.contains("source"), "changed: {changed}");
+        }
+        other => panic!("expected Recreate, got {other:?}"),
+    }
+    assert_eq!(spec.image.as_deref(), Some("ubuntu:24.04"));
 }

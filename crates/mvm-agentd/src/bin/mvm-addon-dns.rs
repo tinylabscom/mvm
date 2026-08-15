@@ -1,7 +1,9 @@
 //! In-guest DNS resolver binary for local addons.
 //!
 //! Listens on `127.0.0.1:53` and `::1:53`, serves exact configured
-//! hostnames from a config-disk zone, forwards everything else upstream.
+//! hostnames from a config-disk zone, and forwards everything else either
+//! through the shared FlowMux resolver (when `MVM_ADDON_DNS_FLOWMUX_RESOLVER`
+//! is set) or to configured UDP upstreams.
 //!
 //! SIGHUP reloads `/run/mvm/addon_dns_zone.json` (or the env-overridden
 //! path) into the shared zone without re-binding sockets, so in-flight
@@ -13,6 +15,8 @@ use mvm_agentd::addon_dns::{
     DnsServerConfig, SharedZone, Zone, load_upstreams_from_resolv_conf, load_zone,
     reload_zone_from_path, run_udp_server, shared_zone,
 };
+use mvm_agentd::flowmux::FlowMuxReconnectClient;
+use mvm_agentd::flowmux_keys;
 use std::env;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -70,11 +74,38 @@ async fn main() -> Result<()> {
             })?;
     }
 
+    if env::var_os("MVM_ADDON_DNS_FLOWMUX_RESOLVER").is_some() {
+        config.resolver = Some(
+            build_flowmux_resolver()
+                .await
+                .context("failed to initialize FlowMux resolver for addon DNS")?,
+        );
+    }
+
     spawn_sighup_reloader(zone.clone(), zone_path.clone())?;
 
     run_udp_server(zone, config)
         .await
         .context("addon DNS UDP server failed")
+}
+
+async fn build_flowmux_resolver() -> Result<FlowMuxReconnectClient> {
+    let guest_signing_key = flowmux_keys::load_guest_signing_key().await?;
+    let host_anchor = flowmux_keys::load_host_signer_verifying_key(Path::new(
+        flowmux_keys::DEFAULT_HOST_SIGNER_PUBKEY_PATH,
+    ))?
+    .context("host-signer trust anchor not provisioned")?;
+    FlowMuxReconnectClient::connect(
+        || async {
+            mvm_agentd::guest_vsock_session::connect_host_vsock(mvm_agentd::vsock::EGRESS_PORT)
+                .await
+                .map_err(mvm_agentd::flowmux::FlowMuxError::Transport)
+        },
+        guest_signing_key,
+        host_anchor,
+    )
+    .await
+    .context("FlowMux resolver connect failed")
 }
 
 fn spawn_sighup_reloader(zone: SharedZone, zone_path: PathBuf) -> Result<()> {

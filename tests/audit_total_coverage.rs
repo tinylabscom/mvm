@@ -235,11 +235,20 @@ const MACHINE_SUB: &[(&str, AuditPosture)] = &[
         "advance",
         AuditPosture::Emits("CheckpointRestored+image.reverted"),
     ),
-    // Warm fork/restore of a vm_full checkpoint into a fresh child VM. The
-    // fork emits `checkpoint.forked` against the parent plan and the restored
-    // child follows the normal admitted launch trail (`plan.launched`).
+    // Agent-facing fork/restore of a vm_full checkpoint into a fresh child VM.
+    // Both capture (fork only) and branch admit a new plan, so the child
+    // follows the normal admitted launch trail (`plan.launched`) and the
+    // checkpoint operation emits `checkpoint.forked`.
+    (
+        "fork",
+        AuditPosture::Emits("CheckpointForked+plan.launched"),
+    ),
     (
         "warm-restore",
+        AuditPosture::Emits("CheckpointForked+plan.launched"),
+    ),
+    (
+        "restore",
         AuditPosture::Emits("CheckpointForked+plan.launched"),
     ),
     // Advanced single-VM verbs folded under `machine` (hidden from default help).
@@ -248,7 +257,6 @@ const MACHINE_SUB: &[(&str, AuditPosture)] = &[
     ("resume", AuditPosture::Emits("VmStart")),
     ("snapshot", AuditPosture::DelegatesToSub(SNAPSHOT_SUB)),
     ("save", AuditPosture::Emits("CheckpointCreated")),
-    ("restore", AuditPosture::Emits("CheckpointRestored")),
     ("checkpoint", AuditPosture::DelegatesToSub(CHECKPOINT_SUB)),
     ("cp", AuditPosture::Emits("VmFileCopy")),
     ("fs", AuditPosture::Emits("VmFsMutate")),
@@ -398,6 +406,21 @@ const TRANSCRIPT_SUB: &[(&str, AuditPosture)] = &[
 // the same audit posture as `verify-cert`.
 const RECEIPTS_SUB: &[(&str, AuditPosture)] = &[("export", AuditPosture::ReadOnly)];
 
+// `trust audit provenance <sub>` — read-only PROV-O/Turtle export of the
+// chain-signed audit log. Does not emit new audit events.
+const PROVENANCE_SUB: &[(&str, AuditPosture)] = &[("export", AuditPosture::ReadOnly)];
+
+// `trust audit decisions <sub>` — read-only queries against the cached
+// decision-store derived from the chain-signed audit log.
+const DECISIONS_SUB: &[(&str, AuditPosture)] = &[
+    ("list", AuditPosture::ReadOnly),
+    ("show", AuditPosture::ReadOnly),
+    ("export", AuditPosture::ReadOnly),
+    ("trace", AuditPosture::ReadOnly),
+    ("impact", AuditPosture::ReadOnly),
+    ("similar", AuditPosture::ReadOnly),
+];
+
 const AUDIT_SUB: &[(&str, AuditPosture)] = &[
     ("tail", AuditPosture::ReadOnly),
     ("verify", AuditPosture::ReadOnly),
@@ -413,6 +436,8 @@ const AUDIT_SUB: &[(&str, AuditPosture)] = &[
     // behind it is indistinguishable from tampering.
     ("prune", AuditPosture::Emits("chain.pruned")),
     ("receipts", AuditPosture::DelegatesToSub(RECEIPTS_SUB)),
+    ("provenance", AuditPosture::DelegatesToSub(PROVENANCE_SUB)),
+    ("decisions", AuditPosture::DelegatesToSub(DECISIONS_SUB)),
     ("transcript", AuditPosture::DelegatesToSub(TRANSCRIPT_SUB)),
 ];
 
@@ -454,6 +479,8 @@ const AUDIT_POSTURE: &[(&str, AuditPosture)] = &[
     // and `init`.
     ("bootstrap", AuditPosture::InteractiveOrControl),
     ("doctor", AuditPosture::ReadOnly),
+    // Resolves and validates the Studio install; spawns nothing today.
+    ("dashboard", AuditPosture::ReadOnly),
     // Deploy mutates the local sealed-artifact store and is wrapped by the
     // top-level cmd.* audit envelope even when no remote is configured.
     ("deploy", AuditPosture::Emits("cmd.deploy")),
@@ -474,6 +501,7 @@ const AUDIT_POSTURE: &[(&str, AuditPosture)] = &[
     ("run", AuditPosture::InteractiveOrControl),
     ("__sdk-no-vm", AuditPosture::InteractiveOrControl),
     ("__builder-vm-bootstrap", AuditPosture::InteractiveOrControl),
+    ("__builder-shell-job", AuditPosture::InteractiveOrControl),
     (
         "__builder-egress-supervisor",
         AuditPosture::InteractiveOrControl,

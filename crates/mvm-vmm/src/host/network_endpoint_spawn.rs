@@ -2,7 +2,7 @@
 //!
 //! One implementation behind the workload backends that need it, so the
 //! endpoint-spawn logic cannot drift between copies. The endpoint is
-//! `mvm-substitution-endpoint` (an `mvm-hostd` bin):
+//! `mvm-network-endpoint` (an `mvm-hostd` bin):
 //! when the admitted plan carries secret bindings it runs as a per-VM host
 //! process that resolves placeholders for the guest's egress so the real
 //! secret never enters the guest. The converged Firecracker, libkrun, and HVF
@@ -10,6 +10,7 @@
 
 use crate::host::drive_file::DriveFile;
 use anyhow::{Result, anyhow, bail};
+use mvm_contract::builder::BuilderError;
 use mvm_contract::stream::secret_fingerprint::SecretFingerprint;
 use mvm_core::crypto::egress_ca::EgressCa;
 use mvm_core::plan::SecretBinding;
@@ -26,7 +27,7 @@ use std::time::Duration;
 /// AF_VSOCK listener; Firecracker/libkrun route guest→host through a per-port
 /// UDS the in-process VMM proxies, so the host binds that UDS.
 ///
-/// This is the wire contract the `mvm-substitution-endpoint` bin parses on
+/// This is the wire contract the `mvm-network-endpoint` bin parses on
 /// stdin; mvm-hostd re-exports it so the bin and its tests keep one definition.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -173,7 +174,7 @@ pub fn build_egress_tls_delivery(bound_hosts: &[&str], ca_dir: &Path) -> Result<
     })
 }
 
-/// PID of the per-VM `mvm-substitution-endpoint` moat, and the JSON
+/// PID of the per-VM `mvm-network-endpoint` moat, and the JSON
 /// file holding the `(guest var, placeholder)` env pairs it minted (the invoke
 /// path reads this to inject `HTTP_PROXY` + placeholder vars). Spawned only when
 /// the admitted plan carries secret bindings.
@@ -182,11 +183,11 @@ pub const SUBST_PID_FILE: &str = "substitution.pid";
 /// line before the caller declares the spawn failed.
 pub const SUBST_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Locate the `mvm-substitution-endpoint` binary. Compiled by mvmctl's build
+/// Locate the `mvm-network-endpoint` binary. Compiled by mvmctl's build
 /// script; see [`mvm_vmm::host::aux_bin`] for the search order.
-fn resolve_substitution_endpoint_path() -> Result<PathBuf> {
+fn resolve_network_endpoint_path() -> Result<PathBuf> {
     crate::host::aux_bin::resolve(&crate::host::aux_bin::AuxBin {
-        bin: "mvm-substitution-endpoint",
+        bin: "mvm-network-endpoint",
         env_var: "MVM_SUBSTITUTION_ENDPOINT_PATH",
     })
 }
@@ -194,7 +195,7 @@ fn resolve_substitution_endpoint_path() -> Result<PathBuf> {
 /// `resolver_remote` config for [`SubstitutionSpawnParams`]: resolve secret
 /// *values* over a UDS to a remote fleet-secrets daemon (mvmd's tenant
 /// vault) instead of the endpoint's local encrypted secret store. Mirrors
-/// `mvm_hostd::supervisor::substitution_endpoint::ResolverBackend::Remote`'s
+/// `mvm_hostd::supervisor::network_endpoint::ResolverBackend::Remote`'s
 /// two fields exactly — but is defined here (not imported from `mvm-hostd`)
 /// because `mvm-hostd` depends on `mvm-vmm`, never the reverse; a shared
 /// field-shape (not a shared type) is how the two stay in sync without a
@@ -208,7 +209,22 @@ pub struct RemoteResolverSpawnConfig<'a> {
     pub timeout_secs: u64,
 }
 
-/// Inputs to [`spawn_substitution_endpoint`]. Grouped into a struct (rather
+/// Identity material for an authenticated FlowMux session.
+///
+/// Mirrors `mvm_hostd::supervisor::network_endpoint::FlowMuxIdentity` field-for-
+/// field so the JSON on stdin is identical, without creating a dependency cycle
+/// (mvm-hostd depends on mvm-vmm, never the reverse).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FlowMuxIdentitySpawnConfig {
+    /// Unique session identifier, distinct per VM boot.
+    pub session_id: String,
+    /// Base64-encoded 32-byte Ed25519 host signing key.
+    pub host_signing_key_base64: String,
+    /// Base64-encoded 32-byte Ed25519 guest verifying key.
+    pub guest_verifying_key_base64: String,
+}
+
+/// Inputs to [`spawn_network_endpoint`]. Grouped into a struct (rather
 /// than threading bare positional args) so the backend-shaped fields —
 /// `transport` (vsock vs UDS), `terminator_listen`, `tls_intermediate` — read
 /// at the callsite and stay under the argument-count lint.
@@ -248,6 +264,205 @@ pub struct SubstitutionSpawnParams<'a> {
     /// `auth_type` per secret name are read from at `assemble()` time).
     /// `None` preserves today's host-default dir.
     pub binding_store_dir: Option<&'a Path>,
+    /// Identity material for the authenticated FlowMux session. `Some` selects
+    /// the converged FlowMux path; `None` keeps the legacy Wire/Raw path.
+    pub flowmux_identity: Option<FlowMuxIdentitySpawnConfig>,
+}
+
+impl<'a> SubstitutionSpawnParams<'a> {
+    /// Start building a [`SubstitutionSpawnParams`]. Every value is set by name, so a
+    /// call site cannot transpose two fields that share a type.
+    #[must_use]
+    pub fn builder() -> SubstitutionSpawnParamsBuilder<'a> {
+        SubstitutionSpawnParamsBuilder::new()
+    }
+}
+
+/// Builder for [`SubstitutionSpawnParams`]. Required fields are checked by
+/// [`SubstitutionSpawnParamsBuilder::build`] rather than defaulted, so an unset one is a
+/// reported error and never a silently empty value.
+pub struct SubstitutionSpawnParamsBuilder<'a> {
+    vm_name: Option<&'a str>,
+    state_dir: Option<&'a Path>,
+    tenant: Option<&'a str>,
+    secrets: Option<&'a [SecretBinding]>,
+    redaction: Option<&'a mvm_core::policy::RedactionPolicy>,
+    transport: Option<EndpointTransport>,
+    terminator_listen: Option<SocketAddr>,
+    tls_intermediate: Option<(String, String)>,
+    network_policy: Option<&'a mvm_core::policy::network_policy::NetworkPolicy>,
+    raw_egress: Option<bool>,
+    resolver_remote: Option<RemoteResolverSpawnConfig<'a>>,
+    binding_store_dir: Option<&'a Path>,
+    flowmux_identity: Option<FlowMuxIdentitySpawnConfig>,
+}
+
+impl<'a> SubstitutionSpawnParamsBuilder<'a> {
+    /// An empty builder: nothing set yet.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            vm_name: None,
+            state_dir: None,
+            tenant: None,
+            secrets: None,
+            redaction: None,
+            transport: None,
+            terminator_listen: None,
+            tls_intermediate: None,
+            network_policy: None,
+            raw_egress: None,
+            resolver_remote: None,
+            binding_store_dir: None,
+            flowmux_identity: None,
+        }
+    }
+
+    /// Set `vm_name`.
+    #[must_use]
+    pub fn vm_name(mut self, vm_name: &'a str) -> Self {
+        self.vm_name = Some(vm_name);
+        self
+    }
+
+    /// Set `state_dir`.
+    #[must_use]
+    pub fn state_dir(mut self, state_dir: &'a Path) -> Self {
+        self.state_dir = Some(state_dir);
+        self
+    }
+
+    /// Set `tenant`.
+    #[must_use]
+    pub fn tenant(mut self, tenant: &'a str) -> Self {
+        self.tenant = Some(tenant);
+        self
+    }
+
+    /// Set `secrets`.
+    #[must_use]
+    pub fn secrets(mut self, secrets: &'a [SecretBinding]) -> Self {
+        self.secrets = Some(secrets);
+        self
+    }
+
+    /// Set `redaction`.
+    #[must_use]
+    pub fn redaction(mut self, redaction: &'a mvm_core::policy::RedactionPolicy) -> Self {
+        self.redaction = Some(redaction);
+        self
+    }
+
+    /// Set `transport`.
+    #[must_use]
+    pub fn transport(mut self, transport: EndpointTransport) -> Self {
+        self.transport = Some(transport);
+        self
+    }
+
+    /// Set `terminator_listen`. Takes a value or an `Option`; unset means `None`.
+    #[must_use]
+    pub fn terminator_listen(mut self, terminator_listen: impl Into<Option<SocketAddr>>) -> Self {
+        self.terminator_listen = terminator_listen.into();
+        self
+    }
+
+    /// Set `tls_intermediate`. Takes a value or an `Option`; unset means `None`.
+    #[must_use]
+    pub fn tls_intermediate(
+        mut self,
+        tls_intermediate: impl Into<Option<(String, String)>>,
+    ) -> Self {
+        self.tls_intermediate = tls_intermediate.into();
+        self
+    }
+
+    /// Set `network_policy`. Takes a value or an `Option`; unset means `None`.
+    #[must_use]
+    pub fn network_policy(
+        mut self,
+        network_policy: impl Into<Option<&'a mvm_core::policy::network_policy::NetworkPolicy>>,
+    ) -> Self {
+        self.network_policy = network_policy.into();
+        self
+    }
+
+    /// Set `raw_egress`.
+    #[must_use]
+    pub fn raw_egress(mut self, raw_egress: bool) -> Self {
+        self.raw_egress = Some(raw_egress);
+        self
+    }
+
+    /// Set `resolver_remote`. Takes a value or an `Option`; unset means `None`.
+    #[must_use]
+    pub fn resolver_remote(
+        mut self,
+        resolver_remote: impl Into<Option<RemoteResolverSpawnConfig<'a>>>,
+    ) -> Self {
+        self.resolver_remote = resolver_remote.into();
+        self
+    }
+
+    /// Set `binding_store_dir`. Takes a value or an `Option`; unset means `None`.
+    #[must_use]
+    pub fn binding_store_dir(mut self, binding_store_dir: impl Into<Option<&'a Path>>) -> Self {
+        self.binding_store_dir = binding_store_dir.into();
+        self
+    }
+
+    /// Set `flowmux_identity`. Takes a value or an `Option`; unset means `None`.
+    #[must_use]
+    pub fn flowmux_identity(
+        mut self,
+        flowmux_identity: impl Into<Option<FlowMuxIdentitySpawnConfig>>,
+    ) -> Self {
+        self.flowmux_identity = flowmux_identity.into();
+        self
+    }
+
+    /// Finish, or name the first required field left unset.
+    pub fn build(self) -> Result<SubstitutionSpawnParams<'a>, BuilderError> {
+        Ok(SubstitutionSpawnParams {
+            vm_name: self
+                .vm_name
+                .ok_or(BuilderError::missing("SubstitutionSpawnParams", "vm_name"))?,
+            state_dir: self.state_dir.ok_or(BuilderError::missing(
+                "SubstitutionSpawnParams",
+                "state_dir",
+            ))?,
+            tenant: self
+                .tenant
+                .ok_or(BuilderError::missing("SubstitutionSpawnParams", "tenant"))?,
+            secrets: self
+                .secrets
+                .ok_or(BuilderError::missing("SubstitutionSpawnParams", "secrets"))?,
+            redaction: self.redaction.ok_or(BuilderError::missing(
+                "SubstitutionSpawnParams",
+                "redaction",
+            ))?,
+            transport: self.transport.ok_or(BuilderError::missing(
+                "SubstitutionSpawnParams",
+                "transport",
+            ))?,
+            terminator_listen: self.terminator_listen,
+            tls_intermediate: self.tls_intermediate,
+            network_policy: self.network_policy,
+            raw_egress: self.raw_egress.ok_or(BuilderError::missing(
+                "SubstitutionSpawnParams",
+                "raw_egress",
+            ))?,
+            resolver_remote: self.resolver_remote,
+            binding_store_dir: self.binding_store_dir,
+            flowmux_identity: self.flowmux_identity,
+        })
+    }
+}
+
+impl<'a> Default for SubstitutionSpawnParamsBuilder<'a> {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Build the EndpointConfig JSON the endpoint reads on stdin. Pure (no spawn)
@@ -267,7 +482,13 @@ fn build_endpoint_config_json(params: &SubstitutionSpawnParams<'_>) -> serde_jso
         // Which egress protocol the relayed stream carries. Always emit: an
         // explicit "wire" is identical to the endpoint's default, so legacy
         // callers stay backward compatible.
-        "egress_mode": if params.raw_egress { "raw" } else { "wire" },
+        "egress_mode": if params.flowmux_identity.is_some() {
+            "flow_mux"
+        } else if params.raw_egress {
+            "raw"
+        } else {
+            "wire"
+        },
     });
     if let Some(addr) = params.terminator_listen {
         // `EndpointConfig.terminator_listen: Option<SocketAddr>`:
@@ -314,10 +535,17 @@ fn build_endpoint_config_json(params: &SubstitutionSpawnParams<'_>) -> serde_jso
     if let Some(dir) = params.binding_store_dir {
         cfg["binding_store_dir"] = serde_json::json!(dir);
     }
+    if let Some(id) = &params.flowmux_identity {
+        cfg["flowmux_identity"] = serde_json::json!({
+            "session_id": id.session_id,
+            "host_signing_key_base64": id.host_signing_key_base64,
+            "guest_verifying_key_base64": id.guest_verifying_key_base64,
+        });
+    }
     cfg
 }
 
-/// Spawn the per-VM `mvm-substitution-endpoint` moat. Hands it the
+/// Spawn the per-VM `mvm-network-endpoint` moat. Hands it the
 /// plan's secret bindings on stdin, reads back the minted `(guest var,
 /// placeholder)` handshake line, and persists it to the per-VM substitution env
 /// file for the invoke path to inject (`HTTP_PROXY` + placeholder vars). The
@@ -327,19 +555,19 @@ fn build_endpoint_config_json(params: &SubstitutionSpawnParams<'_>) -> serde_jso
 /// `mvmctl up`; the stop path reaps
 /// it via [`SUBST_PID_FILE`]. The real secret values never leave the endpoint's
 /// address space — only the opaque placeholders are persisted/handed out.
-pub fn spawn_substitution_endpoint(params: SubstitutionSpawnParams<'_>) -> Result<()> {
+pub fn spawn_network_endpoint(params: SubstitutionSpawnParams<'_>) -> Result<()> {
     use std::io::Write;
     let cfg = build_endpoint_config_json(&params);
     let SubstitutionSpawnParams {
         vm_name, state_dir, ..
     } = params;
 
-    let bin = resolve_substitution_endpoint_path()?;
+    let bin = resolve_network_endpoint_path()?;
 
     // Capture endpoint diagnostics to /tmp so hangs/refusals are observable.
     // The file is per-VM and truncated each run; stderr was previously /dev/null.
     let stderr_log =
-        std::path::PathBuf::from("/tmp").join(format!("mvm-substitution-endpoint-{vm_name}.log"));
+        std::path::PathBuf::from("/tmp").join(format!("mvm-network-endpoint-{vm_name}.log"));
     let log_file = std::fs::OpenOptions::new()
         .create(true)
         .truncate(true)
@@ -525,7 +753,7 @@ impl Drop for EndpointGuard {
     fn drop(&mut self) {
         if let Some(ref name) = self.vm_name {
             tracing::warn!(vm = %name, "EndpointGuard: reaping orphaned substitution endpoint");
-            reap_substitution_endpoint(&mvm_core::config::vm_state_dir(name), name);
+            reap_network_endpoint(&mvm_core::config::vm_state_dir(name), name);
         }
     }
 }
@@ -534,7 +762,7 @@ impl Drop for EndpointGuard {
 /// decrypted secrets don't outlive the guest, and drop the pid + env sidecars.
 /// Best-effort + idempotent: a VM with no endpoint (no secrets) is a no-op. The
 /// liveness guard prevents signalling a recycled PID from a stale pidfile.
-pub fn reap_substitution_endpoint(state_dir: &Path, vm_name: &str) {
+pub fn reap_network_endpoint(state_dir: &Path, vm_name: &str) {
     if let Some(spid) = read_pid(&state_dir.join(SUBST_PID_FILE))
         && pid_alive(spid)
     {
@@ -583,9 +811,9 @@ mod tests {
     fn reap_is_noop_when_nothing_exists() {
         let dir = std::env::temp_dir().join(format!("mvm-reap-noop-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        reap_substitution_endpoint(&dir, "nonexistent-vm");
+        reap_network_endpoint(&dir, "nonexistent-vm");
         // Idempotent: a second call on the same empty dir is still clean.
-        reap_substitution_endpoint(&dir, "nonexistent-vm");
+        reap_network_endpoint(&dir, "nonexistent-vm");
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -703,13 +931,13 @@ mod tests {
         let _ = child.wait();
     }
 
-    // The libkrun/HVF transport: `spawn_substitution_endpoint` must serialize the
+    // The libkrun/HVF transport: `spawn_network_endpoint` must serialize the
     // `Uds` variant into the config JSON the endpoint bin parses
     // (`{"kind":"uds","path":...}`). Drive it with a stub bin (via
     // `MVM_SUBSTITUTION_ENDPOINT_PATH`) that copies its stdin config to a file
     // for inspection and prints a one-line ready handshake.
     #[test]
-    fn spawn_substitution_endpoint_emits_uds_transport() {
+    fn spawn_network_endpoint_emits_uds_transport() {
         let _g = HOME_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let mut env = TestEnv::new();
         let dir = std::env::temp_dir().join(format!("mvm-subst-uds-{}", std::process::id()));
@@ -745,7 +973,7 @@ mod tests {
 
         let sock = dir.join("vsock-5253.sock");
         let redaction = mvm_core::policy::RedactionPolicy::default();
-        let res = spawn_substitution_endpoint(SubstitutionSpawnParams {
+        let res = spawn_network_endpoint(SubstitutionSpawnParams {
             vm_name: "uds-xport-vm",
             state_dir: &dir,
             tenant: "tenant-x",
@@ -758,6 +986,7 @@ mod tests {
             raw_egress: false,
             resolver_remote: None,
             binding_store_dir: None,
+            flowmux_identity: None,
         });
 
         res.expect("spawn with stub endpoint should succeed");
@@ -802,7 +1031,7 @@ mod tests {
             std::fs::create_dir_all(parent).unwrap();
         }
         let redaction = mvm_core::policy::RedactionPolicy::default();
-        spawn_substitution_endpoint(SubstitutionSpawnParams {
+        spawn_network_endpoint(SubstitutionSpawnParams {
             vm_name: vm,
             state_dir: &dir,
             tenant: "tenant-x",
@@ -817,6 +1046,7 @@ mod tests {
             raw_egress: false,
             resolver_remote: None,
             binding_store_dir: None,
+            flowmux_identity: None,
         })
         .expect("spawn with stub endpoint should succeed");
 
@@ -839,7 +1069,7 @@ mod tests {
 
         // And the reap that ends the endpoint ends the set with it, so a
         // recycled VM name cannot inherit a dead workload's shapes.
-        reap_substitution_endpoint(&dir, vm);
+        reap_network_endpoint(&dir, vm);
         assert!(recorded_secret_fingerprints(vm).is_empty());
 
         std::fs::remove_dir_all(&dir).ok();
@@ -866,7 +1096,7 @@ mod tests {
 
         let vm = "handshake-garbage-vm";
         let redaction = mvm_core::policy::RedactionPolicy::default();
-        let err = spawn_substitution_endpoint(SubstitutionSpawnParams {
+        let err = spawn_network_endpoint(SubstitutionSpawnParams {
             vm_name: vm,
             state_dir: &dir,
             tenant: "tenant-x",
@@ -881,6 +1111,7 @@ mod tests {
             raw_egress: false,
             resolver_remote: None,
             binding_store_dir: None,
+            flowmux_identity: None,
         })
         .expect_err("an unparseable handshake is not a ready endpoint");
         assert!(
@@ -931,7 +1162,7 @@ mod tests {
         env.set("MVM_SUBSTITUTION_ENDPOINT_PATH", &stub);
 
         let redaction = mvm_core::policy::RedactionPolicy::default();
-        let result = spawn_substitution_endpoint(SubstitutionSpawnParams {
+        let result = spawn_network_endpoint(SubstitutionSpawnParams {
             vm_name: "rollback-vm",
             state_dir: &state_dir,
             tenant: "tenant-x",
@@ -946,6 +1177,7 @@ mod tests {
             raw_egress: false,
             resolver_remote: None,
             binding_store_dir: None,
+            flowmux_identity: None,
         });
 
         assert!(result.is_err(), "invalid MVM_HOME must fail sidecar setup");
@@ -1005,6 +1237,7 @@ mod tests {
             raw_egress,
             resolver_remote: None,
             binding_store_dir: None,
+            flowmux_identity: None,
         }
     }
 
@@ -1038,7 +1271,7 @@ mod tests {
     // values over a UDS to its per-VM resolver daemon, and to read
     // allowed_hosts/auth_type bindings from a per-VM binding-store dir — not the
     // host defaults. Assert both land in the JSON exactly as
-    // `mvm_hostd::supervisor::substitution_endpoint::EndpointConfig`'s
+    // `mvm_hostd::supervisor::network_endpoint::EndpointConfig`'s
     // `#[serde(tag = "backend", rename_all = "snake_case")]` `ResolverBackend`
     // and `binding_store_dir` fields expect them shaped. Pure (no subprocess).
     #[test]
@@ -1082,6 +1315,30 @@ mod tests {
         let round: NetworkPolicy = serde_json::from_value(cfg["network_policy"].clone())
             .expect("network_policy deserializes back");
         assert_eq!(round, policy);
+    }
+
+    // The converged FlowMux path: identity material must land in the stdin
+    // config so the endpoint can authenticate the guest and bind the session to
+    // the plan's verifying key.
+    #[test]
+    fn endpoint_config_json_emits_flowmux_identity() {
+        let redaction = mvm_core::policy::RedactionPolicy::default();
+        let sock = Path::new("/tmp/vsock-5253.sock");
+        let mut params = minimal_params(&redaction, sock, None, false);
+        params.flowmux_identity = Some(FlowMuxIdentitySpawnConfig {
+            session_id: "vm-123-boot-456".to_string(),
+            host_signing_key_base64: "aG9zdC1rZXktYnl0ZXM".to_string(),
+            guest_verifying_key_base64: "Z3Vlc3Qta2V5LWJ5dGVz".to_string(),
+        });
+        let cfg = build_endpoint_config_json(&params);
+
+        assert_eq!(cfg["egress_mode"], "flow_mux");
+        let id = cfg["flowmux_identity"]
+            .as_object()
+            .expect("flowmux_identity object");
+        assert_eq!(id["session_id"], "vm-123-boot-456");
+        assert_eq!(id["host_signing_key_base64"], "aG9zdC1rZXktYnl0ZXM");
+        assert_eq!(id["guest_verifying_key_base64"], "Z3Vlc3Qta2V5LWJ5dGVz");
     }
 
     // ── the cert-to-guest / key-to-endpoint split ──
@@ -1131,5 +1388,23 @@ mod tests {
             "key bytes leaked via Debug: {dbg}"
         );
         std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
+#[cfg(test)]
+mod substitution_spawn_params_builder_tests {
+    use super::*;
+
+    /// An empty builder must refuse to finish, naming the first
+    /// required field it is missing — never substituting a default.
+    #[test]
+    fn an_empty_builder_names_the_first_missing_field() {
+        let Err(err) = SubstitutionSpawnParams::builder().build() else {
+            panic!("an empty SubstitutionSpawnParams builder must not build");
+        };
+        assert_eq!(
+            err,
+            BuilderError::missing("SubstitutionSpawnParams", "vm_name")
+        );
     }
 }

@@ -17,6 +17,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow};
+use mvm_contract::builder::BuilderError;
 use mvm_core::vm_backend::BackendKind;
 
 /// Per-VM pid file, under the VM state directory.
@@ -49,6 +50,78 @@ pub struct NetdSpawnParams<'a> {
     pub config_json: &'a str,
     /// Machine name, for the diagnostics log path.
     pub vm_name: &'a str,
+}
+
+impl<'a> NetdSpawnParams<'a> {
+    /// Start building a [`NetdSpawnParams`]. Every value is set by name, so a
+    /// call site cannot transpose two fields that share a type.
+    #[must_use]
+    pub fn builder() -> NetdSpawnParamsBuilder<'a> {
+        NetdSpawnParamsBuilder::new()
+    }
+}
+
+/// Builder for [`NetdSpawnParams`]. Required fields are checked by
+/// [`NetdSpawnParamsBuilder::build`] rather than defaulted, so an unset one is a
+/// reported error and never a silently empty value.
+pub struct NetdSpawnParamsBuilder<'a> {
+    state_dir: Option<&'a Path>,
+    config_json: Option<&'a str>,
+    vm_name: Option<&'a str>,
+}
+
+impl<'a> NetdSpawnParamsBuilder<'a> {
+    /// An empty builder: nothing set yet.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            state_dir: None,
+            config_json: None,
+            vm_name: None,
+        }
+    }
+
+    /// Set `state_dir`.
+    #[must_use]
+    pub fn state_dir(mut self, state_dir: &'a Path) -> Self {
+        self.state_dir = Some(state_dir);
+        self
+    }
+
+    /// Set `config_json`.
+    #[must_use]
+    pub fn config_json(mut self, config_json: &'a str) -> Self {
+        self.config_json = Some(config_json);
+        self
+    }
+
+    /// Set `vm_name`.
+    #[must_use]
+    pub fn vm_name(mut self, vm_name: &'a str) -> Self {
+        self.vm_name = Some(vm_name);
+        self
+    }
+
+    /// Finish, or name the first required field left unset.
+    pub fn build(self) -> Result<NetdSpawnParams<'a>, BuilderError> {
+        Ok(NetdSpawnParams {
+            state_dir: self
+                .state_dir
+                .ok_or(BuilderError::missing("NetdSpawnParams", "state_dir"))?,
+            config_json: self
+                .config_json
+                .ok_or(BuilderError::missing("NetdSpawnParams", "config_json"))?,
+            vm_name: self
+                .vm_name
+                .ok_or(BuilderError::missing("NetdSpawnParams", "vm_name"))?,
+        })
+    }
+}
+
+impl<'a> Default for NetdSpawnParamsBuilder<'a> {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Start the gateway and wait until it is serving.
@@ -617,5 +690,20 @@ mod wiring_tests {
                  gateway reads, or it binds somewhere nothing dials"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod netd_spawn_params_builder_tests {
+    use super::*;
+
+    /// An empty builder must refuse to finish, naming the first
+    /// required field it is missing — never substituting a default.
+    #[test]
+    fn an_empty_builder_names_the_first_missing_field() {
+        let Err(err) = NetdSpawnParams::builder().build() else {
+            panic!("an empty NetdSpawnParams builder must not build");
+        };
+        assert_eq!(err, BuilderError::missing("NetdSpawnParams", "state_dir"));
     }
 }

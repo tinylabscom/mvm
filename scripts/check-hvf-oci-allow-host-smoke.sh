@@ -62,13 +62,13 @@ cd "${ROOT}"
 
 if [[ "${SKIP_BUILD}" != "1" ]]; then
   cargo build -p mvmctl --bin mvmctl
-  cargo build -p mvm-hostd --bin mvm-substitution-endpoint
+  cargo build -p mvm-hostd --bin mvm-network-endpoint
   cargo build -p mvm-vm-host --bin mvm-hvf-supervisor
 fi
 
 MVMCTL_BIN="${MVM_HVF_ALLOW_HOST_MVMCTL:-${ROOT}/target/debug/mvmctl}"
 SUPERVISOR_BIN="${MVM_HVF_SUPERVISOR_PATH:-${ROOT}/target/debug/mvm-hvf-supervisor}"
-ENDPOINT_BIN="${MVM_SUBSTITUTION_ENDPOINT_PATH:-${ROOT}/target/debug/mvm-substitution-endpoint}"
+ENDPOINT_BIN="${MVM_SUBSTITUTION_ENDPOINT_PATH:-${ROOT}/target/debug/mvm-network-endpoint}"
 
 if [[ ! -x "${MVMCTL_BIN}" ]]; then
   echo "refusing: mvmctl not executable at ${MVMCTL_BIN}" >&2
@@ -79,7 +79,7 @@ if [[ ! -x "${SUPERVISOR_BIN}" ]]; then
   exit 66
 fi
 if [[ ! -x "${ENDPOINT_BIN}" ]]; then
-  echo "refusing: mvm-substitution-endpoint not executable at ${ENDPOINT_BIN}" >&2
+  echo "refusing: mvm-network-endpoint not executable at ${ENDPOINT_BIN}" >&2
   exit 67
 fi
 

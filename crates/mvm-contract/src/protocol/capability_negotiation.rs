@@ -47,10 +47,10 @@ pub enum CapabilityAlternative {
     ColdStartFromSignedPlan,
     /// Reach the per-VM substitution endpoint over a Unix socket instead of
     /// a vsock device. Same endpoint, same policy and audit path.
-    SubstitutionEndpointOverUds,
+    NetworkEndpointOverUds,
     /// Reach the per-VM substitution endpoint through the wasm tier's
     /// `mvm:egress` host import. Same endpoint, same policy and audit path.
-    SubstitutionEndpointOverWasmImport,
+    NetworkEndpointOverWasmImport,
     /// Send bytes on the workload's stdin route rather than opening an
     /// interactive terminal. Not a terminal: no program selection, no argv
     /// or environment change.
@@ -79,10 +79,10 @@ impl CapabilityAlternative {
             Self::ColdStartFromSignedPlan => {
                 "cold start and replay the signed execution plan instead of restoring saved state"
             }
-            Self::SubstitutionEndpointOverUds => {
+            Self::NetworkEndpointOverUds => {
                 "reach the per-VM substitution endpoint over a Unix socket instead of vsock"
             }
-            Self::SubstitutionEndpointOverWasmImport => {
+            Self::NetworkEndpointOverWasmImport => {
                 "reach the per-VM substitution endpoint through the `mvm:egress` host import"
             }
             Self::WorkloadStdinRoute => {
@@ -142,8 +142,8 @@ fn alternative_for(capability: &'static str, backend: BackendKind) -> Capability
         // substitution endpoint, so the substitute changes how the workload
         // reaches the seam, never whether policy and audit apply to it.
         "vsock" | "host_vsock_proxy" | "l3_vsock" => match backend {
-            BackendKind::Wasm => CapabilityAlternative::SubstitutionEndpointOverWasmImport,
-            _ => CapabilityAlternative::SubstitutionEndpointOverUds,
+            BackendKind::Wasm => CapabilityAlternative::NetworkEndpointOverWasmImport,
+            _ => CapabilityAlternative::NetworkEndpointOverUds,
         },
 
         // Interactive access. The stdin route carries bytes to an already
@@ -341,7 +341,7 @@ mod tests {
             gaps,
             vec![CapabilityGap {
                 capability: "vsock",
-                alternative: CapabilityAlternative::SubstitutionEndpointOverUds,
+                alternative: CapabilityAlternative::NetworkEndpointOverUds,
             }]
         );
         assert!(gaps[0].is_actionable());
@@ -355,7 +355,7 @@ mod tests {
             .expect_err("the wasm tier has no vsock device");
         assert_eq!(
             gaps[0].alternative,
-            CapabilityAlternative::SubstitutionEndpointOverWasmImport
+            CapabilityAlternative::NetworkEndpointOverWasmImport
         );
     }
 
@@ -404,8 +404,8 @@ mod tests {
     fn a_guest_nic_gap_has_no_alternative_and_says_why() {
         let required = require(|r| r.no_routable_guest_nic = true);
         let gaps = barren()
-            .negotiate(&required, BackendKind::Docker)
-            .expect_err("a shared-kernel tier cannot promise a NIC-less guest");
+            .negotiate(&required, BackendKind::Wasm)
+            .expect_err("a claim-free tier cannot promise a NIC-less guest");
         assert!(
             !gaps[0].is_actionable(),
             "a security boundary must not resolve to a workaround"
@@ -496,6 +496,19 @@ mod tests {
             ..Grants::default()
         };
         assert_eq!(negotiate_grants(&grants, BackendKind::Wasm), Ok(()));
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_share_grant_on_a_cgroup_backend_produces_no_gap() {
+        // A CpuGrant::Share is the native unit for cgroup-backed microVM
+        // tiers. The negotiation must not invent a gap for a grant the
+        // mechanism can serve.
+        let grants = Grants {
+            cpu: Some(CpuGrant::Share { millicores: 1500 }),
+            ..Grants::default()
+        };
+        assert_eq!(negotiate_grants(&grants, BackendKind::Firecracker), Ok(()));
     }
 
     #[test]
@@ -608,7 +621,7 @@ mod report_tests {
             gaps,
             vec![CapabilityGap {
                 capability: "vsock",
-                alternative: CapabilityAlternative::SubstitutionEndpointOverWasmImport,
+                alternative: CapabilityAlternative::NetworkEndpointOverWasmImport,
             }],
             "the report must resolve the same alternative the backend would"
         );

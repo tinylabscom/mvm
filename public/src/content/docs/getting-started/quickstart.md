@@ -35,8 +35,13 @@ capability, read [Machine limitations](/guides/machine-limitations/).
 For a named machine that survives across starts:
 
 ```bash
+# Create the spec, then start it
 mvmctl machine create alpine-dev --image alpine
 mvmctl machine start alpine-dev
+
+# Or create and start in one command
+mvmctl machine start alpine-dev --image alpine
+
 mvmctl machine exec alpine-dev -- uname -a
 mvmctl machine stop alpine-dev
 ```

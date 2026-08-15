@@ -217,6 +217,17 @@ pub fn mvm_state_dir() -> String {
     format!("{}/state", mvm_home())
 }
 
+/// Managed-binary directory: `<mvm_home>/bin`.
+///
+/// The second and last place `mvmctl dashboard` will look for the Studio
+/// server artifact, after a sibling beside `mvmctl` itself. Deliberately not
+/// on `PATH` and deliberately not user-supplied: a launcher that resolves an
+/// executable by name through the environment inherits whatever the
+/// environment says, which is the shape this directory exists to avoid.
+pub fn mvm_bin_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from(mvm_home()).join("bin")
+}
+
 /// Share directory for templates, network definitions, and registries:
 /// `<mvm_home>/share`.
 pub fn mvm_share_dir() -> String {
@@ -653,7 +664,7 @@ pub fn vm_vsock_egress_marker_path(name: &str) -> std::path::PathBuf {
     vm_state_dir(name).join("vsock-egress-enabled")
 }
 
-/// Per-VM Unix socket the `mvm-substitution-endpoint` binds and the hvf VMM's
+/// Per-VM Unix socket the `mvm-network-endpoint` binds and the hvf VMM's
 /// substitution bridge connects to: `<socket-dir>/substitution-endpoint.sock`.
 /// Unlike the per-port `vsock/`-nested convention (see
 /// [`vm_hvf_vsock_dir_at`]), the hvf VMM's device bridges `EGRESS_PORT`
@@ -663,7 +674,7 @@ pub fn vm_vsock_egress_marker_path(name: &str) -> std::path::PathBuf {
 /// Unix-socket limit. Single source of truth: the backend spawn (which binds
 /// it) and the supervisor config (which hands it to the device) both resolve it
 /// here.
-pub fn vm_substitution_endpoint_socket(name: &str) -> std::path::PathBuf {
+pub fn vm_network_endpoint_socket(name: &str) -> std::path::PathBuf {
     vm_socket_dir(name).join("substitution-endpoint.sock")
 }
 
@@ -1491,7 +1502,7 @@ mod tests {
         // The hvf VMM's substitution-endpoint socket sits at the state-dir
         // root (the device bridges to it directly) and honors MVM_HOME.
         assert_eq!(
-            vm_substitution_endpoint_socket("foo"),
+            vm_network_endpoint_socket("foo"),
             std::path::PathBuf::from("/custom/data/vms/foo/substitution-endpoint.sock")
         );
         // Same shape for the hvf VMM's per-VM BROKER_PORT socket.
@@ -1531,7 +1542,7 @@ mod tests {
             socket_dir.display()
         );
 
-        let substitution = vm_substitution_endpoint_socket("sunny-badger-e546");
+        let substitution = vm_network_endpoint_socket("sunny-badger-e546");
         let agent = vm_inhouse_agent_socket_at(&state_dir);
         let hvf_agent = vm_hvf_agent_socket("sunny-badger-e546");
         let broker = vm_hvf_broker_socket("sunny-badger-e546");

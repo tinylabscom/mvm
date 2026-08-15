@@ -407,9 +407,15 @@ pub struct ApprovalResponse {
     pub operator_id: OperatorId,
     pub outcome: ApprovalOutcome,
     pub response_nonce: u64,
+    /// Free-form rationale for the decision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// Optional ticket / incident / change-request reference.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ticket_ref: Option<String>,
 }
 
-/// Terminal operator outcome. Reasons remain outside durable metadata.
+/// Terminal operator outcome. Rationale is now carried in `ApprovalResponse.reason`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -443,6 +449,12 @@ pub enum AgentApprovalEvent {
         operator_id: OperatorId,
         outcome: ApprovalOutcome,
         response_nonce: u64,
+        /// Rationale recorded by the operator.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+        /// Optional ticket / incident / change-request reference.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ticket_ref: Option<String>,
     },
     Expired {
         approval_id: ApprovalRequestId,
@@ -620,6 +632,8 @@ impl ApprovalLedger {
                     operator_id: response.operator_id,
                     outcome: response.outcome,
                     response_nonce: response.response_nonce,
+                    reason: response.reason.clone(),
+                    ticket_ref: response.ticket_ref.clone(),
                 },
                 now_unix_ms,
             )
@@ -999,6 +1013,8 @@ mod tests {
                 operator_id: operator("ops-b"),
                 outcome: ApprovalOutcome::Approved,
                 response_nonce: 1,
+                reason: None,
+                ticket_ref: None,
             },
             1_001,
         );
@@ -1015,6 +1031,8 @@ mod tests {
                         operator_id: operator("ops-a"),
                         outcome: ApprovalOutcome::Approved,
                         response_nonce: 2,
+                        reason: None,
+                        ticket_ref: None,
                     },
                     1_002,
                 )
@@ -1063,6 +1081,8 @@ mod tests {
                         operator_id: operator("ops-a"),
                         outcome: ApprovalOutcome::Approved,
                         response_nonce: 1,
+                        reason: None,
+                        ticket_ref: None,
                     },
                     2_001,
                 )
@@ -1090,6 +1110,8 @@ mod tests {
                         operator_id: operator("ops-a"),
                         outcome: ApprovalOutcome::Approved,
                         response_nonce: 2,
+                        reason: None,
+                        ticket_ref: None,
                     },
                     2_003,
                 )

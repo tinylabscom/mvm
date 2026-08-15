@@ -3,7 +3,7 @@
 use super::*;
 use std::time::Instant;
 
-impl<D: VmmDriver + 'static, S: EndpointSpawner + 'static, B: BrokerRegistrar + 'static>
+impl<D: VmmDriver + 'static, S: NetworkEndpointSpawner + 'static, B: BrokerRegistrar + 'static>
     WorkloadRunner<D, S, B>
 {
     /// Stop a VM and expose timings for each runner-owned teardown phase.
@@ -21,7 +21,7 @@ impl<D: VmmDriver + 'static, S: EndpointSpawner + 'static, B: BrokerRegistrar + 
 
         let endpoint_started = Instant::now();
         let state_dir = vm_state_dir(&id.0);
-        reap_substitution_endpoint(&state_dir, &id.0);
+        reap_network_endpoint(&state_dir, &id.0);
         mvm_vmm::host::netd_spawn::reap_netd(&state_dir);
         mvm_vmm::host::broker_services_spawn::reap_broker_services(&state_dir);
         mvm_vmm::host::host_agent_spawn::reap_host_agent_services_from_state(&state_dir, &id.0);
@@ -55,8 +55,8 @@ impl<D: VmmDriver + 'static, S: EndpointSpawner + 'static, B: BrokerRegistrar + 
 /// `VmmDriver` seam rather than being copied into each backend. State is
 /// disk-backed under the per-VM `vm_state_dir`, so a stateless CLI invocation
 /// reconstructs a handle by id.
-impl<D: VmmDriver + 'static, S: EndpointSpawner + 'static, B: BrokerRegistrar + 'static> VmBackend
-    for WorkloadRunner<D, S, B>
+impl<D: VmmDriver + 'static, S: NetworkEndpointSpawner + 'static, B: BrokerRegistrar + 'static>
+    VmBackend for WorkloadRunner<D, S, B>
 {
     fn name(&self) -> &str {
         self.driver.name()
@@ -250,7 +250,7 @@ impl<D: VmmDriver + 'static, S: EndpointSpawner + 'static, B: BrokerRegistrar + 
     }
 }
 
-impl<D: VmmDriver + 'static, S: EndpointSpawner + 'static, B: BrokerRegistrar + 'static>
+impl<D: VmmDriver + 'static, S: NetworkEndpointSpawner + 'static, B: BrokerRegistrar + 'static>
     WorkloadBackend for WorkloadRunner<D, S, B>
 {
     fn egress_substitution_transport(&self) -> EgressSubstitutionTransport {

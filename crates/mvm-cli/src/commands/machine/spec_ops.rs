@@ -201,6 +201,7 @@ pub(super) fn run_reconfigure(args: MachineReconfigureArgs) -> Result<()> {
         lifecycle::stop_running_machine(&args.name);
         lifecycle::start_machine(MachineStartArgs {
             name: args.name.clone(),
+            create_flags: MachineStartCreateFlags::default(),
             receipt: None,
             json: false,
             dry_run: false,

@@ -409,6 +409,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "borsh"
+version = "1.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a88b7ea17d208c4193f2c1e6de3c35fe71f98c96982d5ced308bdcc749ff6e1f"
+dependencies = [
+ "bytes",
+ "cfg_aliases",
+]
+
+[[package]]
 name = "bs58"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -454,6 +464,15 @@ name = "bytes"
 version = "1.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ae3f5d315924270530207e2a68396c3cc547f6dca3fbdca317cfb1a51edb593"
+
+[[package]]
+name = "camino"
+version = "1.2.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bb1307f12aa967b5a58416e87b3653360e0fd614a016b6e970db08fecbb1b80d"
+dependencies = [
+ "serde_core",
+]
 
 [[package]]
 name = "cap-fs-ext"
@@ -548,6 +567,16 @@ dependencies = [
  "jobserver",
  "libc",
  "shlex",
+]
+
+[[package]]
+name = "cfg-expr"
+version = "0.20.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fb693542bcafa528e198be0ebd9d3632ca5b7c93dbe7237460e199910835997c"
+dependencies = [
+ "smallvec",
+ "target-lexicon",
 ]
 
 [[package]]
@@ -1922,6 +1951,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "guppy-workspace-hack"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "92620684d99f750bae383ecb3be3748142d6095760afd5cbcf2261e9a279d780"
+
+[[package]]
 name = "h2"
 version = "0.4.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2736,7 +2771,6 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tracing",
- "which",
 ]
 
 [[package]]
@@ -2977,6 +3011,7 @@ dependencies = [
  "libkrun-sys",
  "lzma-rs",
  "mvm-agentd",
+ "mvm-contract",
  "mvm-core",
  "mvm-fs",
  "mvm-http",
@@ -3173,6 +3208,7 @@ dependencies = [
  "tracing-subscriber",
  "unicode-normalization",
  "uuid",
+ "x25519-dalek",
  "x509-parser",
  "zeroize",
 ]
@@ -3341,7 +3377,6 @@ dependencies = [
  "vm-memory",
  "wasmtime",
  "wasmtime-wasi",
- "which",
  "zeroize",
 ]
 
@@ -3437,6 +3472,26 @@ name = "ndk-context"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "27b02d87554356db9e9a873add8782d4ea6e3e58ea071a9adb9a2e8ddb884a8b"
+
+[[package]]
+name = "nextest-metadata"
+version = "0.14.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bd0ba8403357e9701d6322b7ffb9dedc32e3843d0914d791c4c7a03867381615"
+dependencies = [
+ "camino",
+ "nextest-workspace-hack",
+ "serde",
+ "serde_json",
+ "smol_str",
+ "target-spec",
+]
+
+[[package]]
+name = "nextest-workspace-hack"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d906846a98739ed9d73d66e62c2641eef8321f1734b7a1156ab045a0248fb2b3"
 
 [[package]]
 name = "nix"
@@ -4735,9 +4790,9 @@ dependencies = [
 
 [[package]]
 name = "serde_json"
-version = "1.0.150"
+version = "1.0.151"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e8014e44b4736ed0538adeecded0fce2a272f22dc9578a7eb6b2d9993c74cfb9"
+checksum = "c841b55ecdae098c80dcae9cf767f6f8a0c2cdb3416bbef72181df4d0fe73f14"
 dependencies = [
  "indexmap",
  "itoa",
@@ -4798,6 +4853,12 @@ dependencies = [
  "cpufeatures 0.2.17",
  "digest 0.10.7",
 ]
+
+[[package]]
+name = "sha1_smol"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bbfa15b3dddfee50a0fff136974b3e1bde555604ba463834a7eb7deb6417705d"
 
 [[package]]
 name = "sha2"
@@ -5077,6 +5138,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e8e2fb0f499abb4d162f2bedad68f5ef91a1682b5a03596ddb67efd37768d100"
 
 [[package]]
+name = "smol_str"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9676b89cd56310a87b93dec47b11af744f34d5fc9f367b829474eec0a891350d"
+dependencies = [
+ "borsh",
+ "serde",
+]
+
+[[package]]
 name = "smoltcp"
 version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5261,6 +5332,19 @@ name = "target-lexicon"
 version = "0.13.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "adb6935a6f5c20170eeceb1a3835a49e12e19d792f6dd344ccc76a985ca5a6ca"
+
+[[package]]
+name = "target-spec"
+version = "3.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b00e973676af5497c2a69cc9787e2205c00f3b6f4f70e7d7b0112e28aa84b501"
+dependencies = [
+ "cfg-expr",
+ "guppy-workspace-hack",
+ "serde",
+ "serde_json",
+ "target-lexicon",
+]
 
 [[package]]
 name = "tempfile"
@@ -5895,6 +5979,7 @@ dependencies = [
  "getrandom 0.4.1",
  "js-sys",
  "serde_core",
+ "sha1_smol",
  "wasm-bindgen",
 ]
 
@@ -7114,6 +7199,7 @@ dependencies = [
  "mvm-cli",
  "mvm-core",
  "mvm-fs",
+ "nextest-metadata",
  "regex",
  "serde",
  "serde_json",

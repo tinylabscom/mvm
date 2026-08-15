@@ -64,6 +64,10 @@ tar.workspace = true
 # materialization stays self-contained on every contributor host.
 lzma-rs = "0.3"
 
+# `BuilderError`, the one error every generated input-struct builder
+# returns. Already in the closure via mvm-core, so this edge costs
+# nothing beyond naming it directly.
+mvm-contract.workspace = true
 mvm-core.workspace = true
 mvm-http.workspace = true
 mvm-fs.workspace = true

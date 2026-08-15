@@ -35,5 +35,23 @@ Feature: mvmctl top-level CLI surface
   Scenario: every CLI help item is one line shorter than 80 columns
     Then every mvmctl command and subcommand help item is one line shorter than 80 columns
 
+  Scenario: machine help advertises the fork and restore verbs
+    When I run mvmctl with "machine --help"
+    Then the command exits with code 0
+    And the help output contains "fork"
+    And the help output contains "restore"
+
+  Scenario: machine fork help documents the child naming options
+    When I run mvmctl with "machine fork --help"
+    Then the command exits with code 0
+    And the help output contains "--as"
+    And the help output contains "--branch"
+
+  Scenario: machine restore help documents the child naming options
+    When I run mvmctl with "machine restore --help"
+    Then the command exits with code 0
+    And the help output contains "--as"
+    And the help output contains "--branch"
+
   Scenario: every alternative CLI help entry point obeys the one-line limit
     Then every alternative CLI help item is one line shorter than 80 columns

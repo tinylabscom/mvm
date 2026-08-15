@@ -27,7 +27,7 @@ fuzz_target!(|data: &[u8]| {
     let Ok(nodes) = gen_nodes(&mut u) else {
         return;
     };
-    if let Ok(img) = build_image(&nodes) {
+    if let Ok(img) = build_image(nodes) {
         let bs = BLOCK_SIZE as usize;
         // A real ext4 image is a whole number of blocks, has room for at least
         // the superblock block plus one more, and carries the 0xEF53 magic

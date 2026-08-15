@@ -14,7 +14,6 @@
 
 use crate::apple_container_backend::AppleContainerBackend;
 use crate::backend::{AnyBackend, BackendTier};
-use crate::docker_backend::DockerBackend;
 #[cfg(feature = "test-support")]
 use crate::mock::MockBackend;
 use crate::wasm_backend::WasmBackend;
@@ -259,23 +258,6 @@ backend_catalog![
         needs_plan_json: false,
         is_workload: true
     },
-    {
-        kind: Docker,
-        selector: "docker",
-        aliases: [],
-        constructor: AnyBackend::Docker(DockerBackend::new()),
-        tier: Tier3,
-        // Container state lives in the Docker daemon; there is no mvm-side
-        // pid file to probe.
-        marker_file: None,
-        started_vm_probe_order: None,
-        list_all: true,
-        balloon_support: false,
-        warm_start_support: false,
-        bundled_kernel: false,
-        needs_plan_json: false,
-        is_workload: false
-    }
 ];
 
 /// Every registered backend descriptor, in declaration order.
@@ -401,8 +383,7 @@ mod tests {
                 "qemu",
                 "hvf",
                 "wasm",
-                "apple-container",
-                "docker"
+                "apple-container"
             ]
         );
         // Started-VM probe is sorted by probe order, not declaration order.

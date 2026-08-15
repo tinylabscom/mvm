@@ -269,8 +269,8 @@ pub struct VmNetworkInfo {
 
 /// Describes how to connect to the guest agent for a given VM.
 ///
-/// Firecracker and Apple Containers use vsock; Docker uses a unix socket
-/// mounted as a volume.
+/// Firecracker and Apple Containers use vsock.
+/// No other channel shape is supported today.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum GuestChannelInfo {
     /// Vsock connection (Firecracker, Apple Container).
@@ -279,11 +279,6 @@ pub enum GuestChannelInfo {
         cid: u32,
         /// Port the guest agent listens on.
         port: u32,
-    },
-    /// Unix socket path (Docker — mounted as a volume in the container).
-    UnixSocket {
-        /// Path to the socket on the host.
-        path: String,
     },
 }
 
@@ -442,7 +437,7 @@ pub struct VmCapabilities {
     /// Supports a virtio-balloon device with runtime inflate/deflate.
     /// When `true`, `VmBackend::balloon_set_target` is wired and the
     /// host-side reclaim controller can adjust guest commitment
-    /// without rebooting the VM. cgroup-style memory limiting (Docker)
+    /// without rebooting the VM.
     /// is **not** a balloon and stays `false`.
     pub balloon: bool,
     /// Can freeze a quiesced rootfs into an fs-quick checkpoint via filesystem
@@ -1137,7 +1132,7 @@ pub enum ClaimStatus {
 ///
 /// `true` means the layer is enforced by hardware/software isolation under
 /// this backend; `false` means the layer collapses into the host kernel
-/// or another preceding layer (e.g. Docker has L1–L3 = false because it
+/// or another preceding layer.
 /// shares the host kernel with the workload).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct LayerCoverage {
@@ -1285,13 +1280,6 @@ pub enum BackendKind {
     /// portability/demo backend: opt-in only, never returned by auto-detect,
     /// no hardware isolation boundary.
     Wasm,
-    /// Shared-kernel container dev tier: the workload runs in a Docker
-    /// container with `mvm-guest-agent` as PID 1, receiving activation over
-    /// a host bind-mounted Unix socket instead of vsock. Opt-in only, never
-    /// returned by auto-detect, refused by production admission; none of
-    /// the hardware-isolation claims hold (the guest shares the host
-    /// kernel).
-    Docker,
     /// Apple Container tier: workloads boot Apple's prebuilt container
     /// kernel (a fetched binary artifact) with the same universal initramfs
     /// and `ActivateEnvironment` flow as every other runner backend, on the
@@ -1315,7 +1303,6 @@ impl BackendKind {
             Self::Mock => "mock",
             Self::Hvf => "hvf",
             Self::Wasm => "wasm",
-            Self::Docker => "docker",
             Self::AppleContainer => "apple-container",
         }
     }
@@ -1341,7 +1328,6 @@ impl BackendKind {
             "mock" => Self::Mock,
             "hvf" => Self::Hvf,
             "wasm" => Self::Wasm,
-            "docker" => Self::Docker,
             "apple-container" => Self::AppleContainer,
             _ => return None,
         };
@@ -1379,7 +1365,6 @@ mod tests {
             BackendKind::Mock,
             BackendKind::Hvf,
             BackendKind::Wasm,
-            BackendKind::Docker,
             BackendKind::AppleContainer,
         ] {
             assert_eq!(
@@ -1408,7 +1393,6 @@ mod tests {
             BackendKind::Mock,
             BackendKind::Hvf,
             BackendKind::Wasm,
-            BackendKind::Docker,
             BackendKind::AppleContainer,
         ];
         // Pin the labels a report is read against.
@@ -2152,21 +2136,6 @@ mod tests {
     }
 
     #[test]
-    fn test_guest_channel_info_unix_socket_serde_roundtrip() {
-        let info = GuestChannelInfo::UnixSocket {
-            path: "/tmp/guest.sock".to_string(),
-        };
-        let json = serde_json::to_string(&info).unwrap();
-        let parsed: GuestChannelInfo = serde_json::from_str(&json).unwrap();
-        match parsed {
-            GuestChannelInfo::UnixSocket { path } => {
-                assert_eq!(path, "/tmp/guest.sock");
-            }
-            _ => panic!("Expected UnixSocket variant"),
-        }
-    }
-
-    #[test]
     fn test_layer_coverage_all_layers_is_microvm() {
         let cov = LayerCoverage::all_layers();
         assert!(cov.is_microvm());
@@ -2180,18 +2149,6 @@ mod tests {
     #[test]
     fn test_layer_coverage_default_is_not_microvm() {
         let cov = LayerCoverage::default();
-        assert!(!cov.is_microvm());
-    }
-
-    #[test]
-    fn test_layer_coverage_docker_shape_is_not_microvm() {
-        let cov = LayerCoverage {
-            l1_host_hypervisor: false,
-            l2_vmm: false,
-            l3_guest_kernel: false,
-            l4_guest_agent: true,
-            l5_workload: true,
-        };
         assert!(!cov.is_microvm());
     }
 

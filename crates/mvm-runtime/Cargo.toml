@@ -19,7 +19,7 @@ mvm-contract = { workspace = true, features = ["local", "volume"] }
 # backends can depend on it without circular references to mvm-runtime.
 mvm-vmm = { workspace = true }
 mvm-backends = { workspace = true }
-# `egress-ca`: `substitution_spawn::build_egress_tls_delivery`
+# `egress-ca`: `network_endpoint_spawn::build_egress_tls_delivery`
 # mints the per-VM name-constrained intermediate (`crypto::egress_ca`) so the
 # guest can trust host-terminated bound-host TLS. Sync (rcgen/ring), no tokio.
 mvm-core = { workspace = true, features = ["egress-ca"] }
@@ -78,11 +78,8 @@ sha2.workspace = true
 blake3.workspace = true
 uuid.workspace = true
 # `libc` for `kill(pid, 0)` liveness probes + SIGTERM/SIGKILL signaling
-# in `LibkrunBackend::{stop, status, list}`. `which` for the
-# supervisor-binary path resolver fallback (after env override + adjacent
-# to current exe, fall back to PATH lookup).
+# in `LibkrunBackend::{stop, status, list}`.
 libc.workspace = true
-which.workspace = true
 ext4-view.workspace = true
 tempfile.workspace = true
 toml.workspace = true

@@ -9,9 +9,9 @@ use std::net::SocketAddr;
 
 use super::error::TerminatorError;
 use super::request::proxy_request_from_origin_form;
-use crate::keyholder::substitution::SubstitutionEndpoint;
+use crate::keyholder::substitution::NetworkEndpoint;
 use crate::supervisor::network::stages::{RedactingSubstitution, RedactionHits};
-use crate::supervisor::substitution_proxy::{
+use crate::supervisor::network_endpoint_proxy::{
     PreparedRequest, fail_closed_reason, prepare_request, redact_request,
 };
 use mvm_core::policy::RedactionAction;
@@ -30,7 +30,7 @@ use mvm_core::policy::RedactionAction;
 pub fn handle_request<F>(
     raw: &[u8],
     orig_dst: SocketAddr,
-    endpoint: &SubstitutionEndpoint<'_>,
+    endpoint: &NetworkEndpoint<'_>,
     redactor: &RedactingSubstitution,
     action: &RedactionAction,
     forward: F,
@@ -112,7 +112,7 @@ mod tests {
     #[test]
     fn substitutes_placeholder_and_returns_forward_response() {
         let (reg, resolver, ph, _dir) = setup("openai", "REALTOKEN", &["api.openai.com"]);
-        let endpoint = SubstitutionEndpoint::new(&reg, &resolver);
+        let endpoint = NetworkEndpoint::new(&reg, &resolver);
 
         let raw = format!(
             "GET /v1/x HTTP/1.1\r\nhost: api.openai.com\r\nauthorization: Bearer {ph}\r\n\r\n"
@@ -159,7 +159,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let store: Arc<dyn SecretStore> = Arc::new(FileSecretStore::with_dir(dir.path()));
         let resolver = LocalResolver::new("local", store);
-        let endpoint = SubstitutionEndpoint::new(&reg, &resolver);
+        let endpoint = NetworkEndpoint::new(&reg, &resolver);
 
         // Embed a made-up placeholder token the registry never minted.
         let raw = b"GET /v1/x HTTP/1.1\r\nhost: api.openai.com\r\nauthorization: Bearer mvm-secret-deadbeefdeadbeefdeadbeef\r\n\r\n";
@@ -196,7 +196,7 @@ mod tests {
     fn unbound_destination_errors_before_forwarding() {
         // A valid placeholder, but the request goes to a host NOT in allowed_hosts.
         let (reg, resolver, ph, _dir) = setup("openai", "REALTOKEN", &["api.openai.com"]);
-        let endpoint = SubstitutionEndpoint::new(&reg, &resolver);
+        let endpoint = NetworkEndpoint::new(&reg, &resolver);
 
         let raw = format!(
             "GET /x HTTP/1.1\r\nhost: evil.example.com\r\nauthorization: Bearer {ph}\r\n\r\n"
@@ -233,7 +233,7 @@ mod tests {
     #[test]
     fn malformed_request_errors_before_forwarding() {
         let (reg, resolver, _ph, _dir) = setup("openai", "REALTOKEN", &["api.openai.com"]);
-        let endpoint = SubstitutionEndpoint::new(&reg, &resolver);
+        let endpoint = NetworkEndpoint::new(&reg, &resolver);
         // Not a parseable HTTP request line.
         let raw = b"this is not http\r\n\r\n";
         let orig_dst = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(203, 0, 113, 7), 80));
@@ -267,7 +267,7 @@ mod tests {
     #[test]
     fn compressed_body_to_redaction_destination_fails_closed_before_forwarding() {
         let (reg, resolver, ph, _dir) = setup("openai", "REALTOKEN", &["api.openai.com"]);
-        let endpoint = SubstitutionEndpoint::new(&reg, &resolver);
+        let endpoint = NetworkEndpoint::new(&reg, &resolver);
         // The default action protects curated secrets and PII, so a compressed
         // body the host cannot scan must fail closed.
         // The gate triggers on the content-encoding header, not the body bytes,
@@ -310,7 +310,7 @@ mod tests {
     #[test]
     fn over_cap_body_to_redaction_destination_fails_closed_before_forwarding() {
         let (reg, resolver, ph, _dir) = setup("openai", "REALTOKEN", &["api.openai.com"]);
-        let endpoint = SubstitutionEndpoint::new(&reg, &resolver);
+        let endpoint = NetworkEndpoint::new(&reg, &resolver);
         // The default action protects curated secrets and PII, so a body one
         // byte over the cap is refused rather than forwarded unscanned.
         let over = mvm_core::policy::DEFAULT_BODY_CAP_BYTES as usize + 1;
@@ -354,7 +354,7 @@ mod tests {
     #[test]
     fn undeclared_secret_in_body_is_masked_before_the_forward_sees_it() {
         let (reg, resolver, ph, _dir) = setup("openai", "REALTOKEN", &["api.openai.com"]);
-        let endpoint = SubstitutionEndpoint::new(&reg, &resolver);
+        let endpoint = NetworkEndpoint::new(&reg, &resolver);
         // A declared placeholder in the header (substituted) plus an UNDECLARED
         // secret-shaped token in the body (must be masked before egress).
         let leaked = "sk-".to_owned() + &"z".repeat(48);

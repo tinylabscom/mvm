@@ -24,6 +24,7 @@ chrono.workspace = true
 # is consumed by every subprocess crate at parse time; mvm-core is
 # the natural home since it already owns the wire-format types.
 ed25519-dalek.workspace = true
+x25519-dalek.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 hex.workspace = true
@@ -94,6 +95,10 @@ libc.workspace = true
 
 [features]
 default = []
+# Read-only PROV-O/Turtle export of chain-signed audit logs. Kept off by
+# default so lean builder-VM binaries (e.g. mvm-host-vm-init) do not pay
+# for the serializer or its extra dependencies.
+provenance = []
 # The per-VM name-constrained egress CA
 # (`crypto::egress_ca`). Pulls `rcgen` (sync — ring/yasna, no tokio), so the
 # runtime-free default build is unaffected. Enabled by mvm-runtime (cert

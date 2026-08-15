@@ -5,6 +5,10 @@
 //! holds already-signed [`ExecutionReceipt`]s so they can be re-exported or
 //! verified offline without recomputing them from the audit chain.
 //!
+//! Receipts are records, not controls. A failure to write a receipt is logged
+//! and does not block the workload that produced it; the audit chain is the
+//! only durability boundary that can refuse admission.
+//!
 //! Layout under the audit directory:
 //!
 //! ```text
@@ -467,6 +471,42 @@ mod tests {
         let recovered = store.head().unwrap();
         assert_eq!(recovered.sequence, 3, "the receipts win over a stale head");
         assert_eq!(recovered.last_receipt_id, tip.last_receipt_id);
+    }
+
+    /// A head left truncated or unparseable by a partial write must not
+    /// default to sequence 0. Recovery from the receipt files keeps the chain
+    /// intact and the next append from overwriting an existing receipt.
+    #[test]
+    fn a_torn_head_is_recovered_from_the_receipts_on_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ReceiptStore::open(dir.path(), "t1").unwrap();
+        for i in 1..=3 {
+            store
+                .append_chained(|prev| Ok(sample_receipt(prev, i)))
+                .unwrap();
+        }
+        let tip = store.head().unwrap();
+
+        // Simulate a torn head write: a partial JSON payload.
+        std::fs::write(
+            dir.path().join("receipts/t1/head.json"),
+            br#"{"last_receipt_id":"sha"#,
+        )
+        .unwrap();
+        let recovered = store.head().unwrap();
+        assert_eq!(
+            recovered.sequence, 3,
+            "the receipts win over a truncated head"
+        );
+        assert_eq!(recovered.last_receipt_id, tip.last_receipt_id);
+
+        // Same for a syntactically valid but schema-unrelated value.
+        std::fs::write(dir.path().join("receipts/t1/head.json"), b"not json").unwrap();
+        let recovered = store.head().unwrap();
+        assert_eq!(
+            recovered.sequence, 3,
+            "the receipts win over an unparseable head"
+        );
     }
 
     /// The scan reads receipts, not whatever else shares the directory. A

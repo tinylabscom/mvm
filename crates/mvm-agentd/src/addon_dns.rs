@@ -16,6 +16,8 @@ use hickory_proto::rr::rdata::A;
 use hickory_proto::rr::{DNSClass, RData, Record, RecordType};
 use hickory_proto::serialize::binary::{BinDecodable, BinEncodable, BinEncoder};
 use serde::{Deserialize, Serialize};
+
+use crate::flowmux::FlowMuxReconnectClient;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::Path;
 use std::str::FromStr;
@@ -182,7 +184,7 @@ fn normalize_hostname(hostname: &str) -> &str {
 }
 
 /// Runtime configuration for the in-guest DNS server.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct DnsServerConfig {
     /// Loopback addresses the DNS server binds.
     pub bind_addrs: Vec<SocketAddr>,
@@ -192,6 +194,9 @@ pub struct DnsServerConfig {
     pub upstream_addrs: Vec<SocketAddr>,
     /// Timeout for each upstream forwarding attempt.
     pub upstream_timeout: Duration,
+    /// Optional FlowMux resolver for non-configured names. When present,
+    /// it takes precedence over `upstream_addrs`.
+    pub resolver: Option<FlowMuxReconnectClient>,
 }
 
 impl DnsServerConfig {
@@ -205,7 +210,13 @@ impl DnsServerConfig {
             ],
             upstream_addrs: vec![],
             upstream_timeout: Duration::from_secs(2),
+            resolver: None,
         }
+    }
+
+    /// Whether the server has any recursive path (upstream UDP or FlowMux).
+    fn has_recursive_path(&self) -> bool {
+        !self.upstream_addrs.is_empty() || self.resolver.is_some()
     }
 
     /// Validate the security-sensitive network shape before binding.
@@ -303,6 +314,10 @@ pub async fn handle_dns_packet(
         return encode_response(local_response(&request, record, config)).ok();
     }
 
+    if let Some(resolver) = &config.resolver {
+        return resolve_via_flowmux(&request, resolver).await;
+    }
+
     forward_upstream(packet, config).await
 }
 
@@ -332,7 +347,7 @@ fn local_response(
     zone_record: &ZoneRecord,
     config: &DnsServerConfig,
 ) -> Message {
-    let mut response = response_base(request, !config.upstream_addrs.is_empty());
+    let mut response = response_base(request, config.has_recursive_path());
     response.metadata.authoritative = true;
 
     let query = &request.queries[0];
@@ -349,9 +364,31 @@ fn local_response(
 }
 
 fn error_response(request: &Message, code: ResponseCode, config: &DnsServerConfig) -> Message {
-    let mut response = response_base(request, !config.upstream_addrs.is_empty());
+    let mut response = response_base(request, config.has_recursive_path());
     response.metadata.response_code = code;
     response
+}
+
+async fn resolve_via_flowmux(
+    request: &Message,
+    resolver: &FlowMuxReconnectClient,
+) -> Option<Vec<u8>> {
+    let question = &request.queries[0];
+    let name = question.name().to_ascii();
+    let qtype = match question.query_type() {
+        RecordType::A => 1,
+        RecordType::AAAA => 28,
+        _ => return None,
+    };
+    let mut response = resolver.resolve(&name, qtype).await.ok()?;
+    rewrite_dns_response_id(&mut response, request.metadata.id);
+    Some(response)
+}
+
+fn rewrite_dns_response_id(response: &mut [u8], id: u16) {
+    if response.len() >= 2 {
+        response[..2].copy_from_slice(&id.to_be_bytes());
+    }
 }
 
 async fn forward_upstream(packet: &[u8], config: &DnsServerConfig) -> Option<Vec<u8>> {
@@ -399,6 +436,7 @@ async fn forward_to_upstream(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::flowmux::{FlowMuxClient, FlowMuxReconnectClient};
     use hickory_proto::op::{OpCode, Query};
     use hickory_proto::rr::Name;
     use std::io;
@@ -504,6 +542,7 @@ mod tests {
             bind_addrs: vec!["0.0.0.0:5353".parse().unwrap()],
             upstream_addrs: vec![],
             upstream_timeout: Duration::from_millis(50),
+            resolver: None,
         };
         assert!(config.validate().is_err());
     }
@@ -514,6 +553,7 @@ mod tests {
             bind_addrs: vec!["127.0.0.1:5353".parse().unwrap()],
             upstream_addrs: vec!["127.0.0.1:5353".parse().unwrap()],
             upstream_timeout: Duration::from_millis(50),
+            resolver: None,
         };
         assert!(config.validate().is_err());
     }
@@ -627,6 +667,7 @@ mod tests {
             bind_addrs: vec!["127.0.0.1:5353".parse().unwrap()],
             upstream_addrs: vec![upstream_addr],
             upstream_timeout: Duration::from_millis(100),
+            resolver: None,
         };
         let response =
             handle_dns_packet(&query_packet("example.com.", RecordType::A), &zone, &config)
@@ -757,6 +798,7 @@ mod tests {
             bind_addrs: vec![server_addr],
             upstream_addrs: vec![],
             upstream_timeout: Duration::from_millis(100),
+            resolver: None,
         };
         let server_zone = Arc::clone(&zone);
         let server = tokio::spawn(async move {
@@ -864,11 +906,108 @@ mod tests {
         assert!(!message.metadata.recursion_available);
     }
 
+    #[tokio::test]
+    async fn non_authoritative_query_uses_flowmux_resolver_and_rewrites_id() {
+        let resolver = build_mock_flowmux_resolver().await;
+        let zone = Zone::new(vec![]);
+        let config = DnsServerConfig {
+            bind_addrs: vec!["127.0.0.1:5353".parse().unwrap()],
+            upstream_addrs: vec![],
+            upstream_timeout: Duration::from_secs(1),
+            resolver: Some(resolver),
+        };
+
+        let response =
+            handle_dns_packet(&query_packet("example.com.", RecordType::A), &zone, &config)
+                .await
+                .unwrap();
+        let message = decode_message(&response).unwrap();
+        assert_eq!(message.metadata.response_code, ResponseCode::NoError);
+        assert!(message.metadata.recursion_available);
+        assert_eq!(message.metadata.id, 0x1234);
+        // The mock host returns a header-only response, so there are no answers.
+        assert!(message.answers.is_empty());
+    }
+
+    async fn build_mock_flowmux_resolver() -> FlowMuxReconnectClient {
+        use ed25519_dalek::{SigningKey, VerifyingKey};
+        use mvm_contract::protocol::network_flow::{Opcode, encode_into};
+        use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
+
+        fn generate_keypair() -> (SigningKey, VerifyingKey) {
+            let bytes: [u8; 32] = rand::random();
+            let signing = SigningKey::from_bytes(&bytes);
+            let verifying = signing.verifying_key();
+            (signing, verifying)
+        }
+
+        async fn send_frame<S>(stream: &mut S, opcode: Opcode, stream_id: u32, payload: &[u8])
+        where
+            S: AsyncWrite + Unpin,
+        {
+            let mut wire = Vec::new();
+            encode_into(&mut wire, opcode, stream_id, payload).unwrap();
+            stream.write_all(&wire).await.unwrap();
+            stream.flush().await.unwrap();
+        }
+
+        async fn read_frame<S>(stream: &mut S) -> Option<(Opcode, u32, u32, Vec<u8>)>
+        where
+            S: AsyncRead + Unpin,
+        {
+            crate::flowmux::read_frame_from(stream).await.unwrap()
+        }
+
+        let (guest_stream, host_stream) = tokio::io::duplex(4096);
+        let (guest_key, _guest_anchor) = generate_keypair();
+        let (host_key, host_anchor) = generate_keypair();
+
+        tokio::spawn(async move {
+            let handle = tokio::runtime::Handle::try_current().unwrap();
+            let (mut host_stream, _session) = tokio::task::spawn_blocking(move || {
+                let mut adapter = crate::flowmux::AsyncStreamSyncAdapter::new(host_stream, handle);
+                let result =
+                    mvm_core::net::session::Session::host(&mut adapter, "test-session", host_key);
+                let stream = adapter.into_inner();
+                result.map(|(session, _peer)| (stream, session))
+            })
+            .await
+            .unwrap()
+            .unwrap();
+
+            let (_opcode, _sid, _payload_len, _payload) =
+                read_frame(&mut host_stream).await.unwrap();
+            send_frame(&mut host_stream, Opcode::HelloAck, 0, &[]).await;
+
+            let (opcode, sid, _payload_len, payload) = read_frame(&mut host_stream).await.unwrap();
+            assert_eq!(opcode, Opcode::Resolve);
+            let question = mvm_contract::protocol::dns::decode_query(&payload).unwrap();
+            assert_eq!(question.name, "example.com");
+
+            // Minimal positive response; the resolver rewrites the ID to the
+            // original query ID before returning it to the caller.
+            let mut response = vec![0u8; 12];
+            response[2..4].copy_from_slice(&0x8180_u16.to_be_bytes());
+            response[4..6].copy_from_slice(&0_u16.to_be_bytes());
+            response[6..12].copy_from_slice(&[0; 6]);
+            send_frame(&mut host_stream, Opcode::Resolved, sid, &response).await;
+        });
+
+        let client = FlowMuxClient::connect(guest_stream, guest_key, host_anchor)
+            .await
+            .unwrap();
+        let (tx, rx) = tokio::sync::watch::channel(Some(std::sync::Arc::new(client)));
+        // Hold the sender so the watch channel stays open for the test.
+        let _tx = tx;
+        FlowMuxReconnectClient::from_receiver(rx)
+    }
+
     fn test_config(upstream_addrs: Vec<SocketAddr>) -> DnsServerConfig {
         DnsServerConfig {
             bind_addrs: vec!["127.0.0.1:5353".parse().unwrap()],
             upstream_addrs,
             upstream_timeout: Duration::from_secs(1),
+            resolver: None,
         }
     }
 

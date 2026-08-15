@@ -45,11 +45,16 @@
 //! Production callers use `SystemClock` + the host's nonce store.
 
 use anyhow::{Context, Result};
+use chrono::Utc;
 use ed25519_dalek::VerifyingKey;
 use mvm_contract::grants::ceiling::GrantCeiling;
 use mvm_contract::grants::{CpuGrant, Grants};
 use mvm_contract::protocol::capability_negotiation::negotiate_grants;
 use mvm_contract::protocol::resource_controls::{EnforcedGrants, ResourceControls};
+use mvm_contract::provenance::{
+    ActorRef, AttestationBinding, DecisionActorRole, DecisionCategory, DecisionOutcome,
+    DecisionRecord, DecisionRecordBuilder,
+};
 use mvm_core::plan::bundle::{BundleResolver, TrustStore};
 use mvm_core::plan::{
     ExecutionPlan, NonceStore, PlanId, PlanValidityError, SignedExecutionPlan, Variant,
@@ -61,6 +66,7 @@ use mvm_vmm::quota::QuotaConfig;
 use std::sync::Mutex;
 
 use crate::audit::host_keypair::host_signer_id;
+use mvm_contract::builder::BuilderError;
 use mvm_core::plan::{SynthesisInput, synthesize_plan};
 use mvm_core::vm_backend::{VmId, VmStartConfig};
 use mvm_runtime::AnyBackend;
@@ -207,31 +213,33 @@ pub struct BundleAdmissionContext<'a> {
 /// sealed production launch or a developer's boot, and which backend will
 /// actually boot it. See [`RunPosture`].
 #[tracing::instrument(skip_all)]
-pub fn admit_for_run(
-    input: &SynthesisInput<'_>,
+/// Admission decision over an already-synthesized plan.
+///
+/// This is the inner admission routine that [`admit_for_run`] uses after
+/// synthesizing a plan. Keeping it separate lets callers emit a structured
+/// refusal audit entry when admission fails, binding the refusal to the
+/// plan that was refused.
+pub fn admit_plan_for_run(
+    plan: &ExecutionPlan,
     clock: &dyn Clock,
     ledger: &InMemoryNonceLedger,
     host_signer_keys_dir: Option<&std::path::Path>,
     bundle_ctx: Option<&BundleAdmissionContext<'_>>,
     posture: RunPosture,
 ) -> Result<AdmittedPlan> {
-    // Build the unsigned plan first. Synthesis failures are caught
-    // before we touch the keystore — keeps "signed bad plan" from
-    // being an outcome.
-    let plan = synthesize_plan(input).context("synthesizing plan")?;
-
-    // Grants are checked in that same pre-keystore window, and for the same
-    // reason: a plan we would refuse must never leave here with a signature on
-    // it. A signed refused plan is indistinguishable from a signed admitted one
-    // to anything downstream that only checks the signature.
-    admit_grants(&plan, &host_grant_ceiling(), posture)?;
+    // Grants are checked in the pre-keystore window, and for the same
+    // reason as synthesis: a plan we would refuse must never leave here with a
+    // signature on it. A signed refused plan is indistinguishable from a
+    // signed admitted one to anything downstream that only checks the
+    // signature.
+    admit_grants(plan, &host_grant_ceiling(), posture)?;
 
     // The ceiling above bounds this one workload; the budget bounds the sum of
     // every live one. Both sit in the pre-keystore window for the same reason,
     // and both read host config rather than the plan. The total is measured
     // over live machines only — counting records instead would turn a single
     // crashed VM into a permanent refusal of every later boot.
-    admit_within_host_budget(&plan)?;
+    admit_within_host_budget(plan)?;
 
     // Load or generate the host signer. load_or_init refuses
     // loose perms; that error propagates verbatim.
@@ -244,7 +252,7 @@ pub fn admit_for_run(
     // Sign + verify roundtrip. Verifying our own signature catches
     // wire-format bugs that would otherwise surface at a real
     // verifier (mvmd's supervisor, an upstream consumer's mvm).
-    let signed = sign_plan(&plan, &signer.signing, &signer_id);
+    let signed = sign_plan(plan, &signer.signing, &signer_id);
     let trusted: [(&str, &VerifyingKey); 1] = [(&signer_id, &signer.verifying)];
     let verified = verify_plan(&signed, &trusted).context("verifying just-signed plan")?;
 
@@ -303,6 +311,35 @@ pub fn admit_for_run(
         plan: verified,
         signed,
     })
+}
+
+/// Synthesize a plan and admit it for execution.
+///
+/// This is the high-level admission entry point. It first synthesizes the
+/// plan, then delegates to [`admit_plan_for_run`]. Callers that need to emit
+/// a structured refusal audit entry should synthesize first and call
+/// [`admit_plan_for_run`] directly.
+#[tracing::instrument(skip_all)]
+pub fn admit_for_run(
+    input: &SynthesisInput<'_>,
+    clock: &dyn Clock,
+    ledger: &InMemoryNonceLedger,
+    host_signer_keys_dir: Option<&std::path::Path>,
+    bundle_ctx: Option<&BundleAdmissionContext<'_>>,
+    posture: RunPosture,
+) -> Result<AdmittedPlan> {
+    // Build the unsigned plan first. Synthesis failures are caught
+    // before we touch the keystore — keeps "signed bad plan" from
+    // being an outcome.
+    let plan = synthesize_plan(input).context("synthesizing plan")?;
+    admit_plan_for_run(
+        &plan,
+        clock,
+        ledger,
+        host_signer_keys_dir,
+        bundle_ctx,
+        posture,
+    )
 }
 
 /// The bound this host puts on what any workload may be granted.
@@ -1003,6 +1040,167 @@ pub struct AdmitAndStartParams<'a> {
     pub audit_durability: crate::audit::durability::AuditDurability,
 }
 
+impl<'a> AdmitAndStartParams<'a> {
+    /// Start building a [`AdmitAndStartParams`]. Every value is set by name, so a
+    /// call site cannot transpose two fields that share a type.
+    #[must_use]
+    pub fn builder() -> AdmitAndStartParamsBuilder<'a> {
+        AdmitAndStartParamsBuilder::new()
+    }
+}
+
+/// Builder for [`AdmitAndStartParams`]. Required fields are checked by
+/// [`AdmitAndStartParamsBuilder::build`] rather than defaulted, so an unset one is a
+/// reported error and never a silently empty value.
+pub struct AdmitAndStartParamsBuilder<'a> {
+    synthesis: Option<&'a SynthesisInput<'a>>,
+    config: Option<VmStartConfig>,
+    clock: Option<&'a dyn Clock>,
+    ledger: Option<&'a InMemoryNonceLedger>,
+    host_signer_keys_dir: Option<&'a std::path::Path>,
+    bundle_ctx: Option<&'a BundleAdmissionContext<'a>>,
+    variant: Option<Variant>,
+    policy_bundle: Option<&'a PolicyBundle>,
+    emitter: Option<&'a crate::audit::emitter::AuditEmitter>,
+    audit_durability: Option<crate::audit::durability::AuditDurability>,
+}
+
+impl<'a> AdmitAndStartParamsBuilder<'a> {
+    /// An empty builder: nothing set yet.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            synthesis: None,
+            config: None,
+            clock: None,
+            ledger: None,
+            host_signer_keys_dir: None,
+            bundle_ctx: None,
+            variant: None,
+            policy_bundle: None,
+            emitter: None,
+            audit_durability: None,
+        }
+    }
+
+    /// Set `synthesis`.
+    #[must_use]
+    pub fn synthesis(mut self, synthesis: &'a SynthesisInput<'a>) -> Self {
+        self.synthesis = Some(synthesis);
+        self
+    }
+
+    /// Set `config`.
+    #[must_use]
+    pub fn config(mut self, config: VmStartConfig) -> Self {
+        self.config = Some(config);
+        self
+    }
+
+    /// Set `clock`.
+    #[must_use]
+    pub fn clock(mut self, clock: &'a dyn Clock) -> Self {
+        self.clock = Some(clock);
+        self
+    }
+
+    /// Set `ledger`.
+    #[must_use]
+    pub fn ledger(mut self, ledger: &'a InMemoryNonceLedger) -> Self {
+        self.ledger = Some(ledger);
+        self
+    }
+
+    /// Set `host_signer_keys_dir`. Takes a value or an `Option`; unset means `None`.
+    #[must_use]
+    pub fn host_signer_keys_dir(
+        mut self,
+        host_signer_keys_dir: impl Into<Option<&'a std::path::Path>>,
+    ) -> Self {
+        self.host_signer_keys_dir = host_signer_keys_dir.into();
+        self
+    }
+
+    /// Set `bundle_ctx`. Takes a value or an `Option`; unset means `None`.
+    #[must_use]
+    pub fn bundle_ctx(
+        mut self,
+        bundle_ctx: impl Into<Option<&'a BundleAdmissionContext<'a>>>,
+    ) -> Self {
+        self.bundle_ctx = bundle_ctx.into();
+        self
+    }
+
+    /// Set `variant`.
+    #[must_use]
+    pub fn variant(mut self, variant: Variant) -> Self {
+        self.variant = Some(variant);
+        self
+    }
+
+    /// Set `policy_bundle`. Takes a value or an `Option`; unset means `None`.
+    #[must_use]
+    pub fn policy_bundle(mut self, policy_bundle: impl Into<Option<&'a PolicyBundle>>) -> Self {
+        self.policy_bundle = policy_bundle.into();
+        self
+    }
+
+    /// Set `emitter`. Takes a value or an `Option`; unset means `None`.
+    #[must_use]
+    pub fn emitter(
+        mut self,
+        emitter: impl Into<Option<&'a crate::audit::emitter::AuditEmitter>>,
+    ) -> Self {
+        self.emitter = emitter.into();
+        self
+    }
+
+    /// Set `audit_durability`.
+    #[must_use]
+    pub fn audit_durability(
+        mut self,
+        audit_durability: crate::audit::durability::AuditDurability,
+    ) -> Self {
+        self.audit_durability = Some(audit_durability);
+        self
+    }
+
+    /// Finish, or name the first required field left unset.
+    pub fn build(self) -> Result<AdmitAndStartParams<'a>, BuilderError> {
+        Ok(AdmitAndStartParams {
+            synthesis: self
+                .synthesis
+                .ok_or(BuilderError::missing("AdmitAndStartParams", "synthesis"))?,
+            config: self
+                .config
+                .ok_or(BuilderError::missing("AdmitAndStartParams", "config"))?,
+            clock: self
+                .clock
+                .ok_or(BuilderError::missing("AdmitAndStartParams", "clock"))?,
+            ledger: self
+                .ledger
+                .ok_or(BuilderError::missing("AdmitAndStartParams", "ledger"))?,
+            host_signer_keys_dir: self.host_signer_keys_dir,
+            bundle_ctx: self.bundle_ctx,
+            variant: self
+                .variant
+                .ok_or(BuilderError::missing("AdmitAndStartParams", "variant"))?,
+            policy_bundle: self.policy_bundle,
+            emitter: self.emitter,
+            audit_durability: self.audit_durability.ok_or(BuilderError::missing(
+                "AdmitAndStartParams",
+                "audit_durability",
+            ))?,
+        })
+    }
+}
+
+impl<'a> Default for AdmitAndStartParamsBuilder<'a> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Refuse a boot whose kernel is not the one the plan pinned.
 ///
 /// The image digest says what the workload *is*; it says nothing about what
@@ -1117,6 +1315,30 @@ fn run_post_admission_gates(
     Ok(config)
 }
 
+fn launch_decision_record(plan: &ExecutionPlan, backend_name: &str) -> DecisionRecord {
+    DecisionRecordBuilder::new()
+        .version(1)
+        .category(DecisionCategory::Launch)
+        .actor(ActorRef {
+            principal: crate::audit::host_keypair::host_signer_id(),
+            key_id: crate::audit::host_keypair::host_signer_id(),
+            key_role: Some(DecisionActorRole::Orchestrator),
+        })
+        .scenario(mvm_contract::provenance::DecisionScenario {
+            plan_id: Some(plan.plan_id.0.clone()),
+            ..Default::default()
+        })
+        .reasoning(format!("workload launched on backend {backend_name}"))
+        .outcome(DecisionOutcome::Approved)
+        .timestamp(Utc::now().to_rfc3339())
+        .attestation(AttestationBinding {
+            plan_id: Some(plan.plan_id.0.clone()),
+            ..AttestationBinding::default()
+        })
+        .build()
+        .expect("launch decision record is well-formed")
+}
+
 /// What rolling a launch back needs to know. A struct rather than seven
 /// positional arguments, so a caller cannot silently swap the stage label for
 /// the reason.
@@ -1168,14 +1390,33 @@ pub fn admit_and_start(
     // name: the grant gate decides which resource controls a run is measured
     // against, and deciding that from a string is how a plan ends up measured
     // against a tier it is not running on.
-    let admitted = admit_for_run(
-        params.synthesis,
+    let posture = RunPosture::on_backend(params.variant, backend.kind());
+
+    // Synthesize the plan up-front so a refusal can be recorded with the
+    // plan context if admission fails. Synthesis failures have no plan to
+    // anchor to; they propagate without a chain entry.
+    let plan = synthesize_plan(params.synthesis).context("synthesizing plan")?;
+
+    let admitted = match admit_plan_for_run(
+        &plan,
         params.clock,
         params.ledger,
         params.host_signer_keys_dir,
         params.bundle_ctx,
-        RunPosture::on_backend(params.variant, backend.kind()),
-    )?;
+        posture,
+    ) {
+        Ok(admitted) => admitted,
+        Err(err) => {
+            if let Some(emitter) = params.emitter
+                && let Err(e) =
+                    emitter.emit_refused(&plan, "admit_plan_for_run", &format!("{err:#}"))
+            {
+                tracing::warn!(error = %e, "audit emit_refused failed (non-fatal)");
+            }
+            return Err(err);
+        }
+    };
+
     crate::audit::durability::record_admission(
         params.emitter,
         admitted.plan(),
@@ -1248,6 +1489,10 @@ pub fn admit_and_start(
             if let Some(emitter) = params.emitter {
                 if let Err(e) = emitter.emit_launched(admitted.plan(), &backend_name) {
                     tracing::warn!(error = %e, "audit emit_launched failed (non-fatal)");
+                }
+                let record = launch_decision_record(admitted.plan(), &backend_name);
+                if let Err(e) = emitter.emit_decision_record(admitted.plan(), record) {
+                    tracing::warn!(error = %e, "audit emit_decision_record for launch failed (non-fatal)");
                 }
                 if let Err(e) = emitter.emit_grants_enforced(admitted.plan(), &enforced_grants) {
                     tracing::warn!(error = %e, "audit emit_grants_enforced failed (non-fatal)");
@@ -3455,5 +3700,23 @@ mod tests {
         let clean = tmp.path().join("clean-state");
         std::fs::create_dir_all(&clean).unwrap();
         assert!(mint_verb_grant_sidecar("{}", "vm-fresh", &clean).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod admit_and_start_params_builder_tests {
+    use super::*;
+
+    /// An empty builder must refuse to finish, naming the first
+    /// required field it is missing — never substituting a default.
+    #[test]
+    fn an_empty_builder_names_the_first_missing_field() {
+        let Err(err) = AdmitAndStartParams::builder().build() else {
+            panic!("an empty AdmitAndStartParams builder must not build");
+        };
+        assert_eq!(
+            err,
+            BuilderError::missing("AdmitAndStartParams", "synthesis")
+        );
     }
 }

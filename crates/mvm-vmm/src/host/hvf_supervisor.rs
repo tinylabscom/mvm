@@ -169,7 +169,7 @@ pub struct HvfSupervisorConfig {
     #[serde(default)]
     pub agent_socket: Option<PathBuf>,
     /// Per-VM substitution-endpoint socket. When set, the supervisor
-    /// routes `EGRESS_PORT` to the `mvm-substitution-endpoint` bound here
+    /// routes `EGRESS_PORT` to the `mvm-network-endpoint` bound here
     /// (WireRequest substitution; claims 10/12/13). `None` ⇒ the legacy raw-TCP
     /// egress path (no secret-bearing egress). The backend spawns the endpoint and
     /// sets this only when the admitted plan carries egress secrets.

@@ -19,10 +19,13 @@ impl TopLevelCommand for Commands {
             Commands::BuilderEgressSupervisor(a) => {
                 bootstrap::run_builder_egress_supervisor(cli, a, cfg)
             }
+            #[cfg(feature = "builder-vm")]
+            Commands::BuilderShellJob(a) => builder_shell_job::run(cli, a, cfg),
             Commands::Explain(a) => vm::explain::run(a),
             Commands::Run(a) => vm::exec::run_secure(cli, a, cfg),
             Commands::SdkNoVm(a) => vm::sdk_no_vm::run(&a),
             Commands::Doctor(a) => env::doctor::run(cli, a, cfg),
+            Commands::Dashboard(a) => dashboard::run(a),
             Commands::Prepare(a) => vm::prepare::run(a),
             Commands::Build(a) => build::group::run(cli, a, cfg),
             Commands::Deploy(a) => deploy::run(cli, a, cfg),

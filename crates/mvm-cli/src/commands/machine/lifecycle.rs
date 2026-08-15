@@ -54,8 +54,68 @@ pub(super) fn run_restart(cmd: MachineStartCmd) -> Result<()> {
     Ok(())
 }
 
+/// Resolve the spec for `machine start`. If the machine does not exist and a
+/// source is provided (`--image` or `--manifest`), the spec is created on
+/// demand. If it exists and flags are provided, the configs are reconciled.
+pub(super) fn resolve_start_spec(args: &MachineStartArgs) -> Result<(MachineSpec, SpecReconcile)> {
+    let existing = load_machine_spec(&args.name).ok();
+    let has_source = args.create_flags.image.is_some() || args.create_flags.manifest.is_some();
+    if !has_source {
+        return match existing {
+            Some(spec) => Ok((spec, SpecReconcile::Reuse)),
+            None => anyhow::bail!(
+                "machine {name:?} does not exist.
+                 Run `mvmctl machine ls` to list machines,
+                 or `mvmctl machine start {name} --image <ref>` to create and start one.",
+                name = args.name
+            ),
+        };
+    }
+    let manifest_source = args
+        .create_flags
+        .manifest
+        .as_deref()
+        .map(|arg| load_machine_manifest_source(Path::new(arg)))
+        .transpose()?;
+    let workflow = manifest_source.as_ref().map(|source| &source.workflow);
+    let init = workflow
+        .map(|workflow| workflow.init.clone())
+        .unwrap_or_default();
+    let volumes = match manifest_source.as_ref() {
+        Some(source) => source
+            .workflow
+            .volumes
+            .iter()
+            .map(|spec| absolutize_manifest_volume_spec(spec, &source.base_dir))
+            .collect::<Result<Vec<_>>>()?,
+        None => Vec::new(),
+    };
+    let desired = build_machine_spec(MachineSpecInputs {
+        name: &args.name,
+        image: args.create_flags.image.as_deref(),
+        net: args.create_flags.net,
+        allow_host: &args.create_flags.allow_host,
+        cpus: args.create_flags.cpus,
+        cpu_limit: args.create_flags.cpu_limit,
+        timeout: args.create_flags.timeout,
+        grants_file: args.create_flags.grants_file.as_deref(),
+        memory: args.create_flags.memory.as_deref(),
+        mem_initial: args.create_flags.mem_initial.as_deref(),
+        profile: args.create_flags.profile,
+        workflow,
+        volumes: &volumes,
+        init: &init,
+    })?;
+    let action = reconcile_machine_spec(existing.as_ref(), &desired, args.create_flags.force)?;
+    let spec = match action {
+        SpecReconcile::Reuse => existing.expect("reuse implies an existing spec"),
+        SpecReconcile::Create | SpecReconcile::Recreate { .. } => desired,
+    };
+    Ok((spec, action))
+}
+
 pub(super) fn start_machine(args: MachineStartArgs) -> Result<()> {
-    let mut spec = ensure_machine_spec_exists(&args.name)?;
+    let (mut spec, action) = resolve_start_spec(&args)?;
     if args.dry_run {
         let summary = machine_start_preflight_summary(
             &spec,
@@ -70,8 +130,27 @@ pub(super) fn start_machine(args: MachineStartArgs) -> Result<()> {
         return Ok(());
     }
     if machine_is_running(&args.name) {
-        println!("{}", already_running_notice(&args.name, args.json));
-        return Ok(());
+        match action {
+            SpecReconcile::Reuse => {
+                println!("{}", already_running_notice(&args.name, args.json));
+                return Ok(());
+            }
+            SpecReconcile::Recreate { ref changed } => {
+                eprintln!(
+                    "machine {:?}: config changed ({changed}) — stopping the old instance and recreating it",
+                    args.name
+                );
+                stop_running_machine(&args.name);
+            }
+            SpecReconcile::Create => {
+                // A freshly-created spec cannot already be running; proceed to save and boot.
+            }
+        }
+    }
+    match action {
+        SpecReconcile::Create => save_machine_spec(&spec, false)?,
+        SpecReconcile::Recreate { .. } => overwrite_machine_spec(&spec)?,
+        SpecReconcile::Reuse => {}
     }
     enforce_dev_init_profile(&spec.profile, &spec.init)?;
     let effective_hypervisor = args
@@ -79,6 +158,7 @@ pub(super) fn start_machine(args: MachineStartArgs) -> Result<()> {
         .as_deref()
         .map(String::from)
         .unwrap_or_else(|| shared::resolve_effective_hypervisor("firecracker"));
+    mvm_runtime::backend::AnyBackend::require_hypervisor_selectable(&effective_hypervisor)?;
     let receipt_input = machine_start_receipt_input(&spec, &effective_hypervisor)?;
     // A granted allow-list is what the gate enforces; the legacy
     // `net`/`allow_host` fields decide the policy only for a spec that granted
@@ -217,7 +297,7 @@ pub(super) fn start_machine(args: MachineStartArgs) -> Result<()> {
 }
 
 pub(super) fn exec_machine(cli: &Cli, args: MachineExecArgs, cfg: &MvmConfig) -> Result<()> {
-    ensure_machine_spec_exists(&args.name)?;
+    let _ = load_machine_spec(&args.name)?;
     let command = if args.argv.is_empty() {
         None
     } else {
@@ -248,7 +328,7 @@ pub(super) fn exec_machine(cli: &Cli, args: MachineExecArgs, cfg: &MvmConfig) ->
 }
 
 pub(super) fn shell_machine(cli: &Cli, args: MachineShellArgs, cfg: &MvmConfig) -> Result<()> {
-    ensure_machine_spec_exists(&args.name)?;
+    let _ = load_machine_spec(&args.name)?;
     console::run(
         cli,
         console::Args {

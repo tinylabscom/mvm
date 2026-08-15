@@ -1,6 +1,6 @@
 //! Prove claim-10 egress on the Linux/KVM hvf path with the gate in the
 //! **host endpoint**, not the run loop. The guest's vsock egress port is a pure
-//! relay to a per-VM `mvm-substitution-endpoint` carrying the resolved
+//! relay to a per-VM `mvm-network-endpoint` carrying the resolved
 //! `NetworkPolicy`; the endpoint gates + proxies, the run loop only pipes bytes.
 //!
 //! Runs the same raw-egress guest as `kvm-backend-egress` (it dials the egress
@@ -12,7 +12,7 @@
 //! ```sh
 //! MVM_KVM_KERNEL=/root/bzImage-thin MVM_KVM_INITRD=/root/guest/initramfs.cpio \
 //! MVM_KVM_EGRESS_TARGET=88.99.197.234:9099 \
-//! MVM_SUBSTITUTION_ENDPOINT_PATH=target/debug/mvm-substitution-endpoint \
+//! MVM_SUBSTITUTION_ENDPOINT_PATH=target/debug/mvm-network-endpoint \
 //! cargo run -p mvm-runtime --example kvm-relay-egress
 //! ```
 
@@ -41,7 +41,7 @@ fn main() {
 
     fn endpoint_bin() -> PathBuf {
         std::env::var("MVM_SUBSTITUTION_ENDPOINT_PATH")
-            .unwrap_or_else(|_| "target/debug/mvm-substitution-endpoint".into())
+            .unwrap_or_else(|_| "target/debug/mvm-network-endpoint".into())
             .into()
     }
 
@@ -60,7 +60,7 @@ fn main() {
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
-            .expect("spawn mvm-substitution-endpoint");
+            .expect("spawn mvm-network-endpoint");
         child
             .stdin
             .take()

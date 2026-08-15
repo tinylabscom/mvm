@@ -42,6 +42,7 @@ mod check_l3_expansion_freeze;
 mod check_machine_doc_guards;
 mod check_mutation_witnesses;
 mod check_mvm_host_binaries_sync;
+mod check_nextest_groups;
 mod check_no_display_on_secret_types;
 mod check_no_gateway_names;
 mod check_no_host_nix;
@@ -280,6 +281,10 @@ fn main() -> Result<()> {
                 .map(String::as_str);
             check_mutation_witnesses::run(&workspace, mode, package)
         }
+        Some("check-nextest-groups") => {
+            let workspace = workspace_root();
+            check_nextest_groups::run(&workspace)
+        }
         Some("check-conformance") => {
             let workspace = workspace_root();
             let write = args.iter().any(|a| a == "--write");
@@ -361,7 +366,7 @@ fn main() -> Result<()> {
             ir_parity::check(&workspace)
         }
         Some(other) => anyhow::bail!(
-            "Unknown xtask: {:?}. Available: gen-man, check-adr-coverage, check-no-display-on-secret-types, check-audit-positional, check-doc-claims, check-machine-doc-guards, check-forbidden-deps, check-core-runtime-free, check-content-address-determinism, check-deferrals, check-honesty, check-closure-budget, check-duplicate-majors, check-binary-size, check-kernel-config-budget, check-kernel-pin-freshness, check-builder-shell-job-sites, check-guest-entropy-seed, check-guest-agent-runtime-free, check-guest-agent-in-all-images, check-guest-images-no-builder-tools, check-guest-binary-lists, check-no-overclaim, check-two-surfaces, check-no-spec-refs-in-comments, check-no-string-backend-dispatch, check-single-home, check-test-home-isolation, check-no-network-literals, check-cli-runtime-surface, check-claim-catalog, check-sprint-append, sprint, check-dormant-controls, check-witness-citations, check-claim-witness-freshness, check-abi-layout, check-mutation-witnesses, check-conformance, check-trust-gradient, check-vsock-only-egress, check-no-gateway-names, check-uniform-vsock-egress, check-l3-expansion-freeze, check-build-egress-callers, check-verified-kernel-reads, check-stream-redaction-seam, check-guest-init-parity, check-require-grant-token-allowlist, check-mvm-host-binaries-sync, check-workflow-paths, check-runtime-overlay-version, check-single-grants-projection, check-single-exec-secs-writer, check-backend-resource-controls, perf, build-dev-image, gen-stubs, check-stubs, gen-ir-parity, check-ir-parity",
+            "Unknown xtask: {:?}. Available: gen-man, check-adr-coverage, check-no-display-on-secret-types, check-audit-positional, check-doc-claims, check-machine-doc-guards, check-forbidden-deps, check-core-runtime-free, check-content-address-determinism, check-deferrals, check-honesty, check-closure-budget, check-duplicate-majors, check-binary-size, check-kernel-config-budget, check-kernel-pin-freshness, check-builder-shell-job-sites, check-guest-entropy-seed, check-guest-agent-runtime-free, check-guest-agent-in-all-images, check-guest-images-no-builder-tools, check-guest-binary-lists, check-no-overclaim, check-two-surfaces, check-no-spec-refs-in-comments, check-no-string-backend-dispatch, check-single-home, check-test-home-isolation, check-no-network-literals, check-cli-runtime-surface, check-claim-catalog, check-sprint-append, sprint, check-dormant-controls, check-witness-citations, check-claim-witness-freshness, check-abi-layout, check-mutation-witnesses, check-nextest-groups, check-conformance, check-trust-gradient, check-vsock-only-egress, check-no-gateway-names, check-uniform-vsock-egress, check-l3-expansion-freeze, check-build-egress-callers, check-verified-kernel-reads, check-stream-redaction-seam, check-guest-init-parity, check-require-grant-token-allowlist, check-mvm-host-binaries-sync, check-workflow-paths, check-runtime-overlay-version, check-single-grants-projection, check-single-exec-secs-writer, check-backend-resource-controls, perf, build-dev-image, gen-stubs, check-stubs, gen-ir-parity, check-ir-parity",
             other
         ),
         None => {
@@ -471,6 +476,9 @@ fn main() -> Result<()> {
             );
             println!(
                 "  check-mutation-witnesses               Pin the mutation surface derived from the claims ledger; --run mutates it and ratchets survivors; --write-baseline re-pins (add --run to also re-record misses)"
+            );
+            println!(
+                "  check-nextest-groups                   Verify every cargo-nextest test-group override still matches at least one test"
             );
             eprintln!(
                 "  check-conformance                      Verify model/*.toml is the single source and CONFORMANCE.md is up to date"

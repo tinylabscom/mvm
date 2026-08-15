@@ -216,10 +216,6 @@ pub(in crate::commands) fn run_save(_cli: &Cli, args: SaveArgs) -> Result<()> {
     create_vm_full(&args.name, args.tag, args.json)
 }
 
-pub(in crate::commands) fn run_restore(_cli: &Cli, args: RestoreArgs) -> Result<()> {
-    restore(&args.id, args.json)
-}
-
 #[derive(Serialize)]
 struct CheckpointRemoveJson<'a> {
     schema_version: u8,
@@ -546,6 +542,38 @@ fn create_vm_full(name: &str, tag: Option<String>, json: bool) -> Result<()> {
     Ok(())
 }
 
+/// Capture a vm_full checkpoint of a running machine and return its id, without
+/// emitting human output. Used by `mvmctl machine fork` so the intermediate
+/// checkpoint can be created, branched, and (optionally) cleaned up by the caller.
+pub(in crate::commands) fn capture_vm_full_for_machine(
+    name: &str,
+    tag: Option<String>,
+) -> Result<CheckpointId> {
+    let backend = backend_for_vm(name);
+    ensure_save_restore_supported("fork", &backend)?;
+    if !vm_is_running(name) {
+        bail!("machine fork requires a running VM; start '{name}' first");
+    }
+    let state_dir = vm_state_dir(name);
+    let store = CheckpointStore::open();
+    let now = now_unix();
+    let id = CheckpointId::new(format!("ckpt-{name}-{now}"));
+
+    let meta = capture_vm_full_for_running_vm(CaptureVmFullArgs {
+        name,
+        state_dir: &state_dir,
+        store: &store,
+        backend: &backend,
+        id: id.clone(),
+        tag,
+        created_unix: now,
+    })
+    .with_context(|| format!("capturing vm_full checkpoint of {name:?}"))?;
+
+    bind_checkpoint_created(name, &meta);
+    Ok(id)
+}
+
 /// The permission set `name` was admitted under, read off its persisted plan so
 /// the checkpoint can seal it and a later restore can bound a child against it.
 ///
@@ -590,9 +618,11 @@ pub(crate) fn bind_checkpoint_created(name: &str, meta: &mvm_core::checkpoint::C
             return;
         }
     };
-    let emitter = match super::audit_chain::AuditEmitter::new(signer.signing) {
-        Ok(e) => e.with_receipts(),
-        Err(e) => {
+    let emitter = match super::audit_chain::AuditEmitter::new(signer.signing)
+        .map(|e| e.with_receipts().with_decisions())
+    {
+        Ok(Ok(e)) => e,
+        Ok(Err(e)) | Err(e) => {
             tracing::warn!(error = %e, "audit emitter unavailable; chain entry skipped");
             return;
         }
@@ -943,6 +973,7 @@ fn boot_forked_child(p: BootForkedChildParams<'_>) -> Result<()> {
     use mvm_runtime::backend::AnyBackend;
 
     let effective_hypervisor = super::super::shared::resolve_effective_hypervisor(p.hypervisor);
+    AnyBackend::require_hypervisor_selectable(&effective_hypervisor)?;
     let parent_agent_verbs = parent_agent_verb_override(p.parent_checkpoint, p.store);
     let parent_meta = p.store.read_meta(p.parent_checkpoint)?;
 

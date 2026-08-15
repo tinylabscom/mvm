@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use mvm_core::vm_backend::BackendKind;
 use serde::{Deserialize, Serialize};
 
-use crate::host::{egress_shared, netd_spawn, substitution_spawn};
+use crate::host::{egress_shared, netd_spawn, network_endpoint_spawn};
 
 /// Identifies a process that an observability probe may attach to.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -20,7 +20,7 @@ pub struct ProcessTarget {
     /// "audit-signer", "qemu-vsock-bridge".
     pub role: String,
 
-    /// Executable base name, e.g. "firecracker" or "mvm-substitution-endpoint".
+    /// Executable base name, e.g. "firecracker" or "mvm-network-endpoint".
     pub process_name: String,
 
     /// Path to the PID file written by the spawner.
@@ -163,12 +163,10 @@ pub fn build_from_start_config(
             ("mvm-hvf-supervisor", state_dir.join("hvf.pid"), false)
         }
         BackendKind::Qemu => ("qemu-system-", state_dir.join("qemu.pid"), false),
-        BackendKind::Mock | BackendKind::Wasm | BackendKind::Docker => {
-            ("", state_dir.join("noop.pid"), false)
-        }
+        BackendKind::Mock | BackendKind::Wasm => ("", state_dir.join("noop.pid"), false),
     };
 
-    let substitution_socket = mvm_core::config::vm_substitution_endpoint_socket(name);
+    let substitution_socket = mvm_core::config::vm_network_endpoint_socket(name);
 
     let plan_id = start_config
         .plan_json
@@ -178,8 +176,8 @@ pub fn build_from_start_config(
 
     let mut helpers = vec![ProcessTarget {
         role: "substitution".to_string(),
-        process_name: "mvm-substitution-endpoint".to_string(),
-        pid_file: state_dir.join(substitution_spawn::SUBST_PID_FILE),
+        process_name: "mvm-network-endpoint".to_string(),
+        pid_file: state_dir.join(network_endpoint_spawn::SUBST_PID_FILE),
         pid: None,
     }];
 

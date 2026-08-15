@@ -2138,6 +2138,9 @@ mod tests {
                 threats: vec![],
                 gate_decision: None,
                 frame_sequence: None,
+                authorizer_principal: None,
+                authorization_reason: None,
+                authorization_ticket_ref: None,
             }],
             total_count: 1,
         };

@@ -37,7 +37,7 @@ fn rw_bridge_access() -> BitFlags<AccessFs> {
 }
 
 /// Minimal `AccessFs` bit-set for a non-directory `read_write_paths` entry —
-/// today, only the M3 resolver-UDS grant (`ConfinementSpec::substitution_endpoint`'s
+/// today, only the M3 resolver-UDS grant (`ConfinementSpec::network_endpoint`'s
 /// `resolver_uds`, a socket special file, not a directory).
 ///
 /// `rw_bridge_access()` above is tuned for the audit-dir's append +
