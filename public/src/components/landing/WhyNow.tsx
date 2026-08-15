@@ -50,13 +50,11 @@ export function WhyNow() {
 
       <Reveal delay={160}>
         <p className="mt-10 max-w-2xl text-base leading-relaxed text-body">
-          So mvm assumes the worst: every workload gets its own kernel, no
-          network device, one policy-governed channel, and a signed audit
-          chain. As easy as a container, without the shared kernel.{" "}
+          MVM assumes the worst —{" "}
           <span className="text-emphasis">
-            Security first isn&rsquo;t a tier — it&rsquo;s the default. 15+
-            CI-gated claims.
-          </span>
+            Security first isn&rsquo;t a tier, it&rsquo;s the default.
+          </span>{" "}
+          As easy as a container, without the shared kernel.
         </p>
         <div className="mt-6 flex flex-wrap gap-x-6 gap-y-2">
           <a
