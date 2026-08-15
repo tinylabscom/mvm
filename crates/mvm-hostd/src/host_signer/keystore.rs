@@ -1,7 +1,7 @@
 //! Software-fallback in-memory keystore.
 //!
 //! Holds an Ed25519 signing key + its public form. Generated at
-//! subprocess boot via `OsRng` (or loaded from a file when the
+//! subprocess boot via `SysRng` (or loaded from a file when the
 //! `software_key_path` config is set for dev workflows). Wrapped in
 //! `zeroize::Zeroizing` so a drop wipes the key bytes from memory.
 //!
@@ -9,6 +9,7 @@
 //! with the inner sign call delegating to Apple Secure Enclave (P-256)
 //! on macOS or `tpm2-tss` (Ed25519 or P-256 depending on TPM) on Linux.
 
+use rand::Rng;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -16,7 +17,6 @@ use anyhow::{Context, Result};
 use ed25519_dalek::{Signer, SigningKey};
 use mvm_core::protocol::host_signer::HostSignerErrorCode;
 use mvm_core::security::SIG_ALG_ED25519;
-use rand::rngs::OsRng;
 
 /// A software-only host signer. Threaded into the server via `Arc`;
 /// safe to share across the tokio spawn boundary.
@@ -34,12 +34,11 @@ pub struct Keystore {
 }
 
 impl Keystore {
-    /// Generate a fresh in-memory key from `OsRng`.
+    /// Generate a fresh in-memory key from `SysRng`.
     pub fn generate() -> Self {
-        let mut rng = OsRng;
         let signing_key = {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             SigningKey::from_bytes(&__ed_seed)
         };
         let pub_key_bytes = signing_key.verifying_key().to_bytes().to_vec();

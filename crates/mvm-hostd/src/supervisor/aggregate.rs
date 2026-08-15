@@ -1161,6 +1161,7 @@ mod tests {
     use chrono::{DateTime, TimeZone, Utc};
     use ed25519_dalek::SigningKey;
     use mvm_core::plan::*;
+    use rand::Rng;
     use std::collections::BTreeMap;
     use std::sync::Mutex;
 
@@ -1389,7 +1390,7 @@ mod tests {
     fn sign_sample(plan: &ExecutionPlan) -> (SignedExecutionPlan, SigningKey, VerifyingKey) {
         let sk = {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             SigningKey::from_bytes(&__ed_seed)
         };
         let vk = sk.verifying_key();
@@ -1679,7 +1680,7 @@ mod tests {
         let (_other_sk, other_vk) = {
             let sk = {
                 let mut __ed_seed = [0u8; 32];
-                rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+                rand::rng().fill_bytes(&mut __ed_seed);
                 SigningKey::from_bytes(&__ed_seed)
             };
             let vk = sk.verifying_key();
@@ -1925,7 +1926,7 @@ mod tests {
 
         let sk_a = {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             SigningKey::from_bytes(&__ed_seed)
         };
         let vk_a = sk_a.verifying_key();
@@ -1933,7 +1934,7 @@ mod tests {
 
         let sk_b = {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             SigningKey::from_bytes(&__ed_seed)
         };
         let vk_b = sk_b.verifying_key();

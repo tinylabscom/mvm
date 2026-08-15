@@ -16,7 +16,7 @@
 //! and vice versa.
 //!
 //! The lifecycle mirrors `mvm_cli::commands::vm::host_signer`
-//! verbatim — generate-on-first-use with `OsRng`, refuse to load if
+//! verbatim — generate-on-first-use with `SysRng`, refuse to load if
 //! the secret-half's permissions are looser than `0600`, refuse if
 //! the public-half doesn't match what the secret derives. The
 //! divergence is the directory + filenames so the two identities
@@ -35,6 +35,7 @@
 
 use anyhow::{Context, Result, bail};
 use ed25519_dalek::{SigningKey, VerifyingKey};
+use rand::Rng;
 use std::fs::OpenOptions;
 use std::io::{Read, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
@@ -148,7 +149,7 @@ impl IdentityKey {
 
 fn generate_new(secret_path: &Path, public_path: &Path) -> Result<IdentityKey> {
     let mut __ed_seed = [0u8; 32];
-    rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+    rand::rng().fill_bytes(&mut __ed_seed);
     let signing = SigningKey::from_bytes(&__ed_seed);
     let verifying = signing.verifying_key();
 
@@ -332,7 +333,7 @@ mod tests {
         load_or_init_at(dir.path()).expect("init");
 
         let mut __ed_seed2 = [0u8; 32];
-        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed2);
+        rand::rng().fill_bytes(&mut __ed_seed2);
         let other = SigningKey::from_bytes(&__ed_seed2).verifying_key();
         let public = dir.path().join(PUBLIC_FILENAME);
         std::fs::write(&public, other.to_bytes()).unwrap();

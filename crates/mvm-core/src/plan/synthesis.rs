@@ -38,7 +38,7 @@
 //! | `resources` | `--cpus`, `--memory`, `--ttl` |
 //! | `*_policy` / `fs_policy` | `"local-default"` (resolver maps to Noops) |
 //! | `valid_from`/`valid_until` | now + 10 min window |
-//! | `nonce` | fresh 128 bits from `OsRng` per invocation |
+//! | `nonce` | fresh 128 bits from `SysRng` per invocation |
 //! | `stream_retention` | caller-supplied; `Persist` unless a driver opts the run out of a durable transcript |
 //! | everything else | conservative defaults (no attestation, destroy-on-exit, etc.) |
 
@@ -52,7 +52,7 @@ use crate::plan::{
 use anyhow::Result;
 use chrono::{Duration, Utc};
 use mvm_contract::builder::BuilderError;
-use rand::RngCore;
+use rand::Rng;
 use std::collections::BTreeMap;
 
 /// Default tenant for single-host runs. The "one guest = one
@@ -802,12 +802,12 @@ pub fn synthesize_plan(input: &SynthesisInput<'_>) -> Result<ExecutionPlan> {
     Ok(plan)
 }
 
-/// Generate a fresh 128-bit nonce from `OsRng`. `crate::plan::Nonce`
+/// Generate a fresh 128-bit nonce from `SysRng`. `crate::plan::Nonce`
 /// wraps a 32-character lowercase hex string (i.e., 16 bytes = 128
 /// bits) — match that here so the wire format roundtrips.
 fn fresh_nonce() -> Nonce {
     let mut bytes = [0u8; 16];
-    rand::thread_rng().fill_bytes(&mut bytes);
+    rand::rng().fill_bytes(&mut bytes);
     Nonce::from_bytes(bytes)
 }
 

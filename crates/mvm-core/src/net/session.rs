@@ -621,13 +621,14 @@ fn secure_guest_handshake<S: Read + Write>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rand::Rng;
     use serde::Deserialize;
     use std::io::Cursor;
     use std::time::Duration;
 
     fn test_keypair() -> SigningKey {
         let mut seed = [0u8; 32];
-        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut seed);
+        rand::rng().fill_bytes(&mut seed);
         SigningKey::from_bytes(&seed)
     }
 

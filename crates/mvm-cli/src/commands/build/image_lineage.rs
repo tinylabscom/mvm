@@ -842,6 +842,7 @@ mod tests {
     use mvm_core::util::test_env::TestEnv;
     use mvm_hostd::supervisor::verify_audit_chain;
     use mvm_runtime::image_lineage::verify_image_lineage;
+    use rand::Rng;
 
     /// A test anchor that agrees with every node's recomputed digest — models a
     /// signed chain that recorded every node's creation, isolating the store-side
@@ -908,7 +909,7 @@ mod tests {
 
     fn keypair() -> (SigningKey, VerifyingKey) {
         let mut seed = [0u8; 32];
-        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut seed);
+        rand::rng().fill_bytes(&mut seed);
         let signing = SigningKey::from_bytes(&seed);
         let verifying = signing.verifying_key();
         (signing, verifying)

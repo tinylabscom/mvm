@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use hmac::{Hmac, KeyInit, Mac};
-use rand::RngCore;
+use rand::Rng;
 use sha2::Sha256;
 
 use mvm_core::policy::{
@@ -33,7 +33,7 @@ impl Default for ReplacementEngine {
 impl ReplacementEngine {
     pub fn new() -> Self {
         let mut proof_key = [0u8; 32];
-        rand::thread_rng().fill_bytes(&mut proof_key);
+        rand::rng().fill_bytes(&mut proof_key);
         Self { proof_key }
     }
 
@@ -43,7 +43,7 @@ impl ReplacementEngine {
         action: &ReversibleReplacementAction,
     ) -> ReplacementFlow {
         let mut flow_bytes = [0u8; 16];
-        rand::thread_rng().fill_bytes(&mut flow_bytes);
+        rand::rng().fill_bytes(&mut flow_bytes);
         ReplacementFlow {
             tenant: tenant.to_string(),
             action: action.clone(),
@@ -325,7 +325,7 @@ impl ReplacementFlow {
         }
         self.next_token_index += 1;
         let mut random_bytes = [0u8; 12];
-        rand::thread_rng().fill_bytes(&mut random_bytes);
+        rand::rng().fill_bytes(&mut random_bytes);
         let mut mac = HmacSha256::new_from_slice(&self.proof_key).expect("fixed proof key");
         mac.update(self.tenant.as_bytes());
         mac.update(self.flow_id.0.as_bytes());

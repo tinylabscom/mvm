@@ -14,8 +14,7 @@
 //! performs the reseed itself (the I/O side effect is kept out of here so the
 //! change-detection stays pure and unit-testable).
 
-use rand::RngCore;
-use rand::rngs::OsRng;
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 
 /// Generation-token width, in bytes. Mirrors the ACPI VMGenID's 128 bits.
@@ -49,7 +48,7 @@ impl std::fmt::Debug for GenerationToken {
 /// a distinct token, which is what forces the clones' CSPRNGs to diverge.
 pub fn fresh_generation_token(content_hash: impl Into<String>) -> GenerationToken {
     let mut token = [0u8; GENID_BYTES];
-    OsRng.fill_bytes(&mut token);
+    rand::rng().fill_bytes(&mut token);
     GenerationToken {
         token,
         content_hash: content_hash.into(),

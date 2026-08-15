@@ -1328,6 +1328,7 @@ mod verify_cert_tests {
     use mvm_runtime::vm::overlay::{
         DestructionReceipt, SignedDestructionReceipt, sign_destruction_receipt,
     };
+    use rand::Rng;
     use tempfile::tempdir;
 
     fn sample_receipt() -> DestructionReceipt {
@@ -1344,7 +1345,7 @@ mod verify_cert_tests {
     fn sign(receipt: &DestructionReceipt) -> (SignedDestructionReceipt, SigningKey) {
         let key = {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             SigningKey::from_bytes(&__ed_seed)
         };
         let signed = sign_destruction_receipt(receipt, &key);
@@ -1433,7 +1434,7 @@ mod verify_cert_tests {
         // Plant a DIFFERENT pubkey on disk.
         let other = {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             SigningKey::from_bytes(&__ed_seed)
         };
         let pubkey_path = write_pubkey_file(&other, dir.path());
@@ -1508,7 +1509,7 @@ mod verify_cert_tests {
         std::fs::create_dir_all(&chain_dir).unwrap();
         let signing_key = {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             ed25519_dalek::SigningKey::from_bytes(&__ed_seed)
         };
         let signer = FileAuditSigner::open(signing_key, &chain_dir).unwrap();
@@ -1635,7 +1636,7 @@ mod verify_cert_tests {
         std::fs::create_dir_all(&chain_dir).unwrap();
         let signing_key = {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             ed25519_dalek::SigningKey::from_bytes(&__ed_seed)
         };
         let signer = FileAuditSigner::open(signing_key, &chain_dir).unwrap();
@@ -1701,10 +1702,11 @@ mod merkle_verb_tests {
     use base64::Engine;
     use ed25519_dalek::{Signer, SigningKey};
     use mvm_contract::merkle::{build_inclusion_proof, merkle_root, root_signing_bytes};
+    use rand::Rng;
 
     fn fresh_key() -> SigningKey {
         let mut seed = [0u8; 32];
-        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut seed);
+        rand::rng().fill_bytes(&mut seed);
         SigningKey::from_bytes(&seed)
     }
 

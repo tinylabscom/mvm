@@ -9,7 +9,7 @@
 use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
 use mvm_core::protocol::signed_config::{encode_envelope, key_id_for, wrap_payload};
 use mvm_core::security::SIG_ALG_ED25519;
-use rand::rngs::OsRng;
+use rand::Rng;
 
 /// Per-instance config signer. The signing key lives in memory only —
 /// it's generated at supervisor startup and zeroed on drop (Ed25519's
@@ -25,15 +25,14 @@ pub struct ConfigSigner {
 }
 
 impl ConfigSigner {
-    /// Generate a fresh signing key from `OsRng`. Each supervisor
+    /// Generate a fresh signing key from `SysRng`. Each supervisor
     /// instance gets its own key, bound to the supervisor process
     /// lifetime.
     pub fn generate() -> Self {
-        let mut rng = OsRng;
         Self {
             signing_key: {
                 let mut __ed_seed = [0u8; 32];
-                rand::RngCore::fill_bytes(&mut rng, &mut __ed_seed);
+                rand::rng().fill_bytes(&mut __ed_seed);
                 SigningKey::from_bytes(&__ed_seed)
             },
         }
@@ -101,10 +100,9 @@ mod tests {
     fn sign_is_deterministic_for_a_given_key_and_payload() {
         // Ed25519 is deterministic-from-key — same SigningKey + same
         // payload always produces the same signature bytes.
-        let mut rng = rand::rngs::OsRng;
         let sk = {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             SigningKey::from_bytes(&__ed_seed)
         };
         let signer_a = ConfigSigner::from_signing_key(sk.clone());
