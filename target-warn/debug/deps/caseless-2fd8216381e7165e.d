@@ -1,0 +1,8 @@
+/Users/auser/work/tinylabs/mvmco/.worktrees/mvm-2507-wallclock/target-warn/debug/deps/caseless-2fd8216381e7165e.d: /Users/auser/work/tinylabs/mvmco/.worktrees/mvm-remove-docker/.mvm-test/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/caseless-0.2.2/src/lib.rs /Users/auser/work/tinylabs/mvmco/.worktrees/mvm-remove-docker/.mvm-test/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/caseless-0.2.2/src/case_folding_data.rs
+
+/Users/auser/work/tinylabs/mvmco/.worktrees/mvm-2507-wallclock/target-warn/debug/deps/libcaseless-2fd8216381e7165e.rlib: /Users/auser/work/tinylabs/mvmco/.worktrees/mvm-remove-docker/.mvm-test/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/caseless-0.2.2/src/lib.rs /Users/auser/work/tinylabs/mvmco/.worktrees/mvm-remove-docker/.mvm-test/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/caseless-0.2.2/src/case_folding_data.rs
+
+/Users/auser/work/tinylabs/mvmco/.worktrees/mvm-2507-wallclock/target-warn/debug/deps/libcaseless-2fd8216381e7165e.rmeta: /Users/auser/work/tinylabs/mvmco/.worktrees/mvm-remove-docker/.mvm-test/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/caseless-0.2.2/src/lib.rs /Users/auser/work/tinylabs/mvmco/.worktrees/mvm-remove-docker/.mvm-test/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/caseless-0.2.2/src/case_folding_data.rs
+
+/Users/auser/work/tinylabs/mvmco/.worktrees/mvm-remove-docker/.mvm-test/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/caseless-0.2.2/src/lib.rs:
+/Users/auser/work/tinylabs/mvmco/.worktrees/mvm-remove-docker/.mvm-test/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/caseless-0.2.2/src/case_folding_data.rs:

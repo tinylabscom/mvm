@@ -636,6 +636,7 @@ mod tests {
                 log_path: "/state/w/console.log".into(),
             },
             trusted_builder: false,
+            plan_binding: None,
         }
     }
 

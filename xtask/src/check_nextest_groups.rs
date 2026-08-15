@@ -88,8 +88,12 @@ fn check_override(
             ov.profile, ov.test_group, ov.filter
         )),
         Ok(_) => None,
+        // `{e:#}` and not `{e}`: the interesting part of a list failure is
+        // always the cause chain — the compiler diagnostic or the binary that
+        // refused to enumerate — and the outer context alone names only the
+        // filter, which is the one thing the reader already has.
         Err(e) => Some(format!(
-            "profile '{}' override for test-group '{}' failed to list tests: {e}",
+            "profile '{}' override for test-group '{}' failed to list tests: {e:#}",
             ov.profile, ov.test_group
         )),
     }
