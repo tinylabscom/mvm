@@ -2,14 +2,14 @@
 //!
 //! Assert no *new* `specs/plans/` number is used by two plans (a ratchet).
 //!
-//! A plan number is how one document refers to another — "Plan 336 WS-G4", the
-//! rollup entries in `specs/REFACTOR-STATUS.md`, the delivery notes under
+//! A plan number is how one document refers to another — a workstream
+//! citation, the rollup in `specs/REFACTOR-STATUS.md`, the delivery notes under
 //! `specs/sprint/delivery/`. When two plans share a number those references
 //! stop resolving to one document, and the reader cannot tell which was meant.
 //!
 //! This is not hypothetical and not rare: 18 numbers were already doubled when
-//! this gate was written, and `REFACTOR-STATUS.md` carries two entries titled
-//! "Plan 322". So the gate stops the set from *growing* and ratchets down as
+//! this gate was written, and `REFACTOR-STATUS.md` carries two entries under
+//! one number. So the gate stops the set from *growing* and ratchets down as
 //! the existing collisions are resolved, rather than demanding uniqueness the
 //! tree does not have today.
 //!
