@@ -450,6 +450,8 @@ mod tests {
         let lint_core = job_block(&workflow, "lint-core");
         assert!(lint_core.contains("cargo clippy --all-targets -- -D warnings"));
         let lint_policy = job_block(&workflow, "lint-policy");
+        assert!(lint_policy.contains("name: Invariant"));
+        assert!(lint_policy.contains("bash scripts/check-no-orchestration-server.sh"));
         assert!(lint_policy.contains("cargo run -p xtask -- check-conformance"));
         let lint_features = job_block(&workflow, "lint-features");
         for expected in [
@@ -465,26 +467,35 @@ mod tests {
                 "CI feature lane must contain {expected:?}"
             );
         }
+        assert_eq!(
+            lint_features
+                .matches("cargo nextest run -p mvm-backends --features test-support --lib")
+                .count(),
+            1,
+            "feature coverage must not repeat the same mvm-backends test command"
+        );
 
         let test = job_block(&workflow, "test");
         assert!(test.contains("name: Test"));
         assert!(test.contains(
             "needs: [scope, test-workspace, test-linux, test-release-witness, \
-             test-ebpf-telemetry, bdd-conformance]"
+             test-ebpf-telemetry, bdd-conformance, kernel]"
         ));
 
         // Every lane the aggregate names must also be read back in the loop that
         // compares results against the scope decision. A lane in `needs` but not
         // in the loop is gated on nothing but its own scheduling.
-        // `bdd-conformance` keys off its own narrower scope, so it is matched
-        // against `$SCOPE_BDD` outside the loop rather than folded into it —
-        // but it still has to be read back somewhere, which is what this pins.
+        // `bdd-conformance` and `kernel` key off their own narrower scopes, so
+        // they are matched against `$SCOPE_BDD` / `$KERNEL_SCOPE` outside the
+        // loop rather than folded into it — but they still have to be read back
+        // somewhere, which is what this pins.
         for expected in [
             "\"$WORKSPACE_RESULT\"",
             "\"$LINUX_RESULT\"",
             "\"$RELEASE_WITNESS_RESULT\"",
             "\"$EBPF_RESULT\"",
             "\"$BDD_RESULT\"",
+            "\"$KERNEL_RESULT\"",
         ] {
             assert!(
                 test.contains(expected),
@@ -547,8 +558,11 @@ mod tests {
             "git diff --name-only -z",
             "grep -zE",
             "could not diff $BASE..$HEAD — running every lane to stay safe",
-            "invalid or missing code scope",
+            "invalid or missing ${name} scope",
             "code=true",
+            "nix=true",
+            "architecture=true",
+            "kernel=true",
         ] {
             assert!(
                 scope.contains(expected),
@@ -589,6 +603,17 @@ mod tests {
         let policy = job_block(&workflow, "lint-policy");
         assert!(policy.contains("needs: [scope]"));
         assert!(!policy.contains("needs.scope.outputs.code == 'true'"));
+        assert!(policy.contains("needs.scope.outputs.architecture == 'true'"));
+
+        let nix = job_block(&workflow, "nix-flake-check");
+        assert!(nix.contains("needs: [scope]"));
+        assert!(nix.contains("needs.scope.outputs.nix == 'true'"));
+
+        let kernel = job_block(&workflow, "kernel");
+        assert!(kernel.contains("needs: [scope]"));
+        assert!(kernel.contains("if: needs.scope.outputs.kernel == 'true'"));
+        assert!(kernel.contains("name: Build kernels (${{ matrix.arch }})"));
+        assert!(kernel.contains("needs.scope.outputs.kernel == 'true'"));
 
         for aggregate in ["lint", "test"] {
             let block = job_block(&workflow, aggregate);
@@ -643,35 +668,70 @@ mod tests {
         let expected_group = "group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}";
         let expected_cancel = "cancel-in-progress: ${{ github.event_name == 'pull_request' }}";
 
-        for name in ["ci.yml", "architecture.yml"] {
-            let source = workflow(name);
-            assert!(
-                source.contains("merge_group:\n    types: [checks_requested]"),
-                "{name} must handle merge-queue check requests explicitly"
-            );
-            assert!(
-                source.contains(expected_group),
-                "{name} concurrency key drifted"
-            );
-            assert!(
-                source.contains(expected_cancel),
-                "{name} must cancel only superseded pull-request runs"
-            );
-            assert!(!source.contains("cancel-in-progress: true"));
-        }
-
         let ci = ci_workflow();
+        assert!(ci.contains("merge_group:\n    types: [checks_requested]"));
+        assert!(ci.contains(expected_group));
+        assert!(ci.contains(expected_cancel));
+        assert!(!ci.contains("cancel-in-progress: true"));
         assert!(ci.contains("permissions:\n  contents: read"));
         for required_name in [
             "name: Lint (fmt + clippy + policy)",
             "name: Test",
+            "name: Invariant",
             "name: Nix flake check (Linux eval)",
+            "name: Build kernels (${{ matrix.arch }})",
         ] {
             assert!(ci.contains(required_name), "required check name drifted");
         }
 
         let architecture = workflow("architecture.yml");
-        assert!(architecture.contains("name: Invariant #1"));
+        assert!(!architecture.contains("pull_request:"));
+        assert!(!architecture.contains("merge_group:"));
+        assert!(architecture.contains("workflow_dispatch:"));
+
+        let kernel = workflow("kernel-build.yml");
+        assert!(!kernel.contains("pull_request:"));
+        assert!(!kernel.contains("merge_group:"));
+        assert!(kernel.contains("workflow_dispatch:"));
+        assert!(kernel.contains("push:"));
+    }
+
+    #[test]
+    fn trusted_main_warms_workspace_and_nix_outputs_for_validation() {
+        let cache_action = workflow("../actions/rust-cache/action.yml");
+        assert!(cache_action.contains("prefix-key: v1-rust"));
+        assert!(cache_action.contains("cache-workspace-crates: \"true\""));
+        assert!(cache_action.contains("save-if: ${{ inputs.save }}"));
+
+        let warm = workflow("cache-warm.yml");
+        assert!(warm.contains("DeterminateSystems/magic-nix-cache-action@v14"));
+        assert!(warm.contains("Build Nix outputs to populate the binary cache"));
+        assert!(warm.contains("save: \"true\""));
+
+        let ci = ci_workflow();
+        let nix = job_block(&ci, "nix-flake-check");
+        assert!(nix.contains("DeterminateSystems/magic-nix-cache-action@v14"));
+        assert!(nix.contains("use-flakehub: false"));
+        assert!(nix.contains("diagnostic-endpoint: \"\""));
+    }
+
+    #[test]
+    fn kernel_validation_and_release_reuse_one_builder_script() {
+        let ci = ci_workflow();
+        let ci_kernel = job_block(&ci, "kernel");
+        let release = workflow("kernel-build.yml");
+        let expected = "bash scripts/build-kernel-artifacts.sh \"$ARCH\"";
+        assert!(ci_kernel.contains(expected));
+        assert!(release.contains(expected));
+
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let status = std::process::Command::new("bash")
+            .arg("scripts/build-kernel-artifacts.sh")
+            .arg("not-an-architecture")
+            .current_dir(workspace)
+            .status()
+            .expect("kernel builder input validation must execute");
+        assert_eq!(status.code(), Some(2));
     }
 
     #[test]

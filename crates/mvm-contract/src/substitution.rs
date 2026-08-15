@@ -118,6 +118,27 @@ mod tests {
         assert_eq!(find_placeholder("mvm-managed:OPENAI_API_KEY"), None);
     }
 
+    /// `is_empty` is session bookkeeping, but it is bookkeeping the keyholder
+    /// reads to decide whether a session has any substitution to do at all. A
+    /// constant-`true` version makes a populated session look empty; a
+    /// constant-`false` one makes an empty session look populated. Neither
+    /// direction had a test, so both survived mutation.
+    #[test]
+    fn is_empty_tracks_whether_the_session_holds_any_placeholder() {
+        let mut map = PlaceholderMap::new();
+        assert!(map.is_empty(), "a fresh map holds nothing");
+        assert_eq!(map.len(), 0);
+
+        let ph = Placeholder::new(format!("{SECRET_PLACEHOLDER_PREFIX}deadbeef"));
+        map.insert(ph, secret_ref("token", &["api.example.com"]));
+
+        assert!(
+            !map.is_empty(),
+            "a map holding a placeholder must not report empty"
+        );
+        assert_eq!(map.len(), 1);
+    }
+
     fn secret_ref(name: &str, hosts: &[&str]) -> SecretRef {
         use crate::ir::{AuthType, SecretMount};
         use alloc::string::ToString;

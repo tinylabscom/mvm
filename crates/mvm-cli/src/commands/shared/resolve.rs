@@ -131,12 +131,10 @@ pub fn resolve_manifest_arg(arg: &str) -> Result<ManifestArgRef> {
                 });
             }
         }
-        if !module_path.is_file() {
-            anyhow::bail!(
-                "Manifest wasm module '{}' does not exist",
-                module_path.display()
-            );
-        }
+        // No existence check here. `Manifest::read_file` already refuses a
+        // manifest whose `wasm` field does not point to an existing file, so
+        // by this line the module is known to exist — a second check was
+        // unreachable, which is why mutating it away changed no test.
         return Ok(ManifestArgRef::WasmModule {
             manifest_path: canonical,
             module_path: module_path.to_path_buf(),
@@ -357,6 +355,32 @@ mod tests {
         // manifest. The point is that it was not silently taken for a name.
         if let Ok(ManifestArgRef::Name(n)) = resolved {
             panic!("a directory was misclassified as the registry name {n:?}");
+        }
+    }
+
+    /// A relative wasm module resolves against the manifest's own directory.
+    ///
+    /// The guard is `if !module_path.is_absolute()`. Deleting the `!` inverts
+    /// it: a relative path skips the join and is then looked up against the
+    /// process working directory instead of the manifest's, which resolves to
+    /// a different file or to nothing at all depending on where mvmctl was
+    /// invoked from.
+    #[test]
+    fn a_relative_wasm_module_resolves_against_the_manifest_directory() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let manifest = dir.path().join("mvm.toml");
+        std::fs::write(dir.path().join("app.wasm"), b"\0asm").expect("write module");
+        std::fs::write(&manifest, "wasm = \"app.wasm\"\n").expect("write manifest");
+
+        let resolved = resolve_manifest_arg(manifest.to_str().expect("utf8 path"))
+            .expect("a manifest naming a module beside it must resolve");
+        match resolved {
+            ManifestArgRef::WasmModule { module_path, .. } => assert_eq!(
+                module_path.canonicalize().ok(),
+                dir.path().join("app.wasm").canonicalize().ok(),
+                "the module must resolve beside the manifest, not against the cwd"
+            ),
+            other => panic!("expected a WasmModule, got {other:?}"),
         }
     }
 

@@ -37,6 +37,9 @@ jobs:
     outputs:
       code: ${{ steps.validate.outputs.code }}
       bdd: ${{ steps.validate.outputs.bdd }}
+      nix: ${{ steps.validate.outputs.nix }}
+      architecture: ${{ steps.validate.outputs.architecture }}
+      kernel: ${{ steps.validate.outputs.kernel }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -54,8 +57,9 @@ jobs:
           set -euo pipefail
 
           set_all() {
-            echo "code=true" >> "$GITHUB_OUTPUT"
-            echo "bdd=true" >> "$GITHUB_OUTPUT"
+            for output in code bdd nix architecture kernel; do
+              echo "${output}=true" >> "$GITHUB_OUTPUT"
+            done
           }
 
           if [ "$EVENT" = "workflow_dispatch" ]; then
@@ -87,6 +91,24 @@ jobs:
             echo "code=false" >> "$GITHUB_OUTPUT"
           fi
 
+          if grep -zE '^(nix/|flake\.(nix|lock)$|Cargo\.(toml|lock)$|rust-toolchain\.toml$|crates/|src/|\.github/workflows/(ci|cache-warm)\.yml$)' "$CHANGED_FILE" >/dev/null; then
+            echo "nix=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "nix=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          if grep -zE '^(crates/|src/|tests/|Cargo\.|\.cargo/|rust-toolchain|scripts/check-no-orchestration-server\.sh$|\.github/workflows/(ci|architecture)\.yml$)' "$CHANGED_FILE" >/dev/null; then
+            echo "architecture=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "architecture=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          if grep -zE '^(nix/images/kernel/|nix/images/builder-vm/flake\.(nix|lock)$|xtask/src/check_kernel_config_budget\.rs$|\.github/workflows/(ci|kernel-build)\.yml$)' "$CHANGED_FILE" >/dev/null; then
+            echo "kernel=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "kernel=false" >> "$GITHUB_OUTPUT"
+          fi
+
           # The Gherkin scenarios drive the real `mvmctl` binary and the built
           # language SDKs, so the drift they catch lives in four places: the SDK
           # sources, the CLI surface those SDKs shell to, the scenarios and
@@ -107,16 +129,23 @@ jobs:
         env:
           CODE: ${{ steps.decide.outputs.code }}
           BDD: ${{ steps.decide.outputs.bdd }}
+          NIX: ${{ steps.decide.outputs.nix }}
+          ARCHITECTURE: ${{ steps.decide.outputs.architecture }}
+          KERNEL: ${{ steps.decide.outputs.kernel }}
         run: |
           set -euo pipefail
-          case "$CODE" in
-            true|false) echo "code=$CODE" >> "$GITHUB_OUTPUT" ;;
-            *) echo "::error::invalid or missing code scope: $CODE" >&2; exit 1 ;;
-          esac
-          case "$BDD" in
-            true|false) echo "bdd=$BDD" >> "$GITHUB_OUTPUT" ;;
-            *) echo "::error::invalid or missing bdd scope: $BDD" >&2; exit 1 ;;
-          esac
+          validate() {
+            local name="$1" value="$2"
+            case "$value" in
+              true|false) echo "${name}=${value}" >> "$GITHUB_OUTPUT" ;;
+              *) echo "::error::invalid or missing ${name} scope: ${value}" >&2; exit 1 ;;
+            esac
+          }
+          validate code "$CODE"
+          validate bdd "$BDD"
+          validate nix "$NIX"
+          validate architecture "$ARCHITECTURE"
+          validate kernel "$KERNEL"
 
   lint-core:
     name: Lint core (fmt + clippy)
@@ -166,7 +195,11 @@ jobs:
         run: cargo clippy -p mvm-conformance --tests --features bdd -- -D warnings
 
   lint-policy:
-    name: Lint policy
+    # This real policy lane publishes the existing required `Invariant`
+    # context. The architecture scan used to occupy a separate workflow plus
+    # an aggregate runner; keeping it here preserves the gate without that
+    # merge-group fan-out.
+    name: Invariant
     needs: [scope]
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -180,7 +213,7 @@ jobs:
       # pinned Python and TypeScript generators. They are independent of the
       # compiler lint lane, so start them on their own runner.
       - name: Install system build deps
-        run: sudo rm -f /etc/apt/sources.list.d/microsoft*.list /etc/apt/sources.list.d/azure*.list; sudo apt-get update && sudo apt-get install -y libcap-ng-dev lld shellcheck
+        run: sudo rm -f /etc/apt/sources.list.d/microsoft*.list /etc/apt/sources.list.d/azure*.list; sudo apt-get update && sudo apt-get install -y libcap-ng-dev lld ripgrep shellcheck
 
       # Nothing else validates the workflow files. A wrong `if:`, a typo'd
       # `needs:` job name, or a bad `${{ }}` reference does not fail a PR — it
@@ -219,6 +252,14 @@ jobs:
       - uses: ./.github/actions/install-zigbuild
 
       - uses: ./.github/actions/rust-cache
+
+      - name: No orchestration server outside declared substrate categories
+        if: needs.scope.outputs.architecture == 'true'
+        run: bash scripts/check-no-orchestration-server.sh
+
+      - name: Architecture scan not required for this diff
+        if: needs.scope.outputs.architecture == 'false'
+        run: echo "No architecture-relevant paths changed."
 
       - name: ADR coverage (informational)
         continue-on-error: true
@@ -291,6 +332,9 @@ jobs:
 
       - name: Sprint delivery log stays one-file-per-entry
         run: cargo run -p xtask -- check-sprint-append
+
+      - name: New plans are slug-named, not numbered
+        run: cargo run -p xtask -- check-plan-names
 
       - name: Claim mutation surface is pinned
         run: cargo run -p xtask -- check-mutation-witnesses
@@ -492,7 +536,6 @@ jobs:
           cargo nextest run -p mvm-client --features test-support --lib
           cargo nextest run -p mvm-cli --features test-support --lib
           cargo nextest run -p mvmctl --features test-support --test audit_emissions_live
-          cargo nextest run -p mvm-backends --features test-support --lib
           cargo nextest run -p mvm-vmm --features test-support --lib
           cargo check -p mvm-cli --features test-support --example verification_loop
 
@@ -540,7 +583,7 @@ jobs:
   test:
     name: Test
     if: ${{ always() }}
-    needs: [scope, test-workspace, test-linux, test-release-witness, test-ebpf-telemetry, bdd-conformance]
+    needs: [scope, test-workspace, test-linux, test-release-witness, test-ebpf-telemetry, bdd-conformance, kernel]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -554,6 +597,8 @@ jobs:
           EBPF_RESULT: ${{ needs.test-ebpf-telemetry.result }}
           SCOPE_BDD: ${{ needs.scope.outputs.bdd }}
           BDD_RESULT: ${{ needs.bdd-conformance.result }}
+          KERNEL_SCOPE: ${{ needs.scope.outputs.kernel }}
+          KERNEL_RESULT: ${{ needs.kernel.result }}
         run: |
           set -euo pipefail
           if [ "$SCOPE_RESULT" != success ]; then
@@ -571,8 +616,8 @@ jobs:
               exit 1
             fi
           done
-          # The BDD lane keys off its own narrower scope, so it is matched
-          # separately rather than folded into the loop above.
+          # The BDD and kernel lanes key off their own narrower scopes, so they
+          # are matched separately rather than folded into the loop above.
           case "$SCOPE_BDD" in
             true) bdd_required=success ;;
             false) bdd_required=skipped ;;
@@ -580,6 +625,15 @@ jobs:
           esac
           if [ "$BDD_RESULT" != "$bdd_required" ]; then
             echo "BDD conformance did not match scope $SCOPE_BDD: $BDD_RESULT"
+            exit 1
+          fi
+          case "$KERNEL_SCOPE" in
+            true) kernel_required=success ;;
+            false) kernel_required=skipped ;;
+            *) echo "Invalid kernel scope: $KERNEL_SCOPE"; exit 1 ;;
+          esac
+          if [ "$KERNEL_RESULT" != "$kernel_required" ]; then
+            echo "Kernel validation did not match scope $KERNEL_SCOPE: $KERNEL_RESULT"
             exit 1
           fi
 
@@ -801,10 +855,20 @@ jobs:
   # this one, because one threshold cannot do both jobs: loose enough to
   # survive shared-runner noise is too loose to catch drift, and tight enough
   # to catch drift will flake here and get switched off.
+  #
+  # Manual dispatch only, and not by choice. Every published image from
+  # v0.17.0 onward carries a /init whose `#!/bin/sh` sits one column right of
+  # byte 0, so the kernel cannot exec it and the guest panics with ENOEXEC
+  # before userspace starts. The generator bug is fixed in
+  # nix/lib/mk-guest.nix, but this lane boots a *published release*, so it
+  # cannot pass until a release is cut from a tree carrying that fix. Running
+  # it on every pull request and merge-group entry spent ~12 minutes of a
+  # constrained runner pool to re-derive a known answer. Bump IMAGE_TAG to the
+  # first release built after the fix and restore
+  # `needs: [scope]` / `if: needs.scope.outputs.code == 'true'`.
   boot-latency:
     name: Boot latency ceiling
-    needs: [scope]
-    if: needs.scope.outputs.code == 'true'
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -923,72 +987,86 @@ jobs:
               fi
             done
           done
+  # Publish the existing required kernel contexts from the shared scope graph.
+  # The dedicated workflow remains responsible for release/manual artifact
+  # builds, but no longer allocates its own scope runner on every queue entry.
+  kernel:
+    name: Build kernels (${{ matrix.arch }})
+    needs: [scope]
+    if: needs.scope.outputs.kernel == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+          - arch: x86_64
+            runner: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Report scope
+        run: |
+          if [ "${{ needs.scope.outputs.kernel }}" = "true" ]; then
+            echo "Kernel inputs changed — building and enforcing the symbol budget."
+          else
+            echo "No kernel-relevant paths changed."
+          fi
+
+      - uses: actions/checkout@v6
+        if: needs.scope.outputs.kernel == 'true'
+
+      - name: Install Nix
+        if: needs.scope.outputs.kernel == 'true'
+        uses: DeterminateSystems/nix-installer-action@main
+
+      - name: Build builder and workload kernels
+        if: needs.scope.outputs.kernel == 'true'
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: bash scripts/build-kernel-artifacts.sh "$ARCH"
+
+      - name: Upload kernel artifacts
+        if: ${{ always() && needs.scope.outputs.kernel == 'true' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: kernels-${{ matrix.arch }}
+          if-no-files-found: ignore
+          path: |
+            staging/vmlinux-${{ matrix.arch }}-builder
+            staging/vmlinux-${{ matrix.arch }}-workload
+            staging/kernel-${{ matrix.arch }}-checksums-sha256.txt
+            staging/kernel-${{ matrix.arch }}.json
+            staging/kernel-metrics-${{ matrix.arch }}.json
+            staging/workload-config-${{ matrix.arch }}
 
   nix-flake-check:
     name: Nix flake check (Linux eval)
     # Nix eval/build is heavy; run it in the merge queue and on manual dispatch,
     # not on every PR update.
+    needs: [scope]
     if: github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-        with:
-          # The scope decision below needs both ends of the range.
-          fetch-depth: 0
-
-      # This lane costs ~30 minutes and, being merge_group-only, spends all of
-      # it on the queue's critical path where nobody sees it during review.
-      # Three merges in four change nothing it evaluates, so those three spent
-      # half an hour re-deriving an unchanged answer while the queue waited.
-      #
-      # Gating the steps rather than the job keeps the required check reporting
-      # on every entry — a check that can be absent cannot stay required.
-      - name: Decide whether anything Nix evaluates changed
-        id: scope
-        env:
-          # `merge_group` carries its own base/head, and neither is a ref the
-          # runner has checked out, so both come from the event payload.
-          EVENT: ${{ github.event_name }}
-          MG_BASE: ${{ github.event.merge_group.base_sha }}
-          MG_HEAD: ${{ github.event.merge_group.head_sha }}
-        run: |
-          set -euo pipefail
-          # An explicit dispatch is an explicit ask, not a diff.
-          if [ "$EVENT" = "workflow_dispatch" ]; then
-            echo "relevant=true" >> "$GITHUB_OUTPUT"
-            echo "manual dispatch — evaluating"
-            exit 0
-          fi
-
-          # Fail closed: an unresolvable range evaluates rather than assumes
-          # the change was irrelevant.
-          if ! CHANGED=$(git diff --name-only "$MG_BASE" "$MG_HEAD" 2>/dev/null); then
-            echo "relevant=true" >> "$GITHUB_OUTPUT"
-            echo "could not diff $MG_BASE..$MG_HEAD — evaluating to stay safe"
-            exit 0
-          fi
-
-          # Everything the flakes read. Deliberately wider than `nix/`: the
-          # runtime overlay builds guest binaries out of the Rust workspace, so
-          # a crate or lockfile change can move what these checks produce.
-          if printf '%s\n' "$CHANGED" | grep -qE '^(nix/|flake\.(nix|lock)$|Cargo\.(toml|lock)$|rust-toolchain\.toml$|crates/|src/|\.github/workflows/ci\.yml$)'; then
-            echo "relevant=true" >> "$GITHUB_OUTPUT"
-            echo "Nix inputs changed — evaluating"
-          else
-            echo "relevant=false" >> "$GITHUB_OUTPUT"
-            echo "nothing Nix evaluates changed — skipping the eval"
-          fi
 
       - name: Install Nix
-        if: steps.scope.outputs.relevant == 'true'
+        if: needs.scope.outputs.nix == 'true'
         uses: DeterminateSystems/nix-installer-action@main
 
+      - name: Restore Nix binary cache
+        if: needs.scope.outputs.nix == 'true'
+        uses: DeterminateSystems/magic-nix-cache-action@v14
+        with:
+          use-gha-cache: true
+          use-flakehub: false
+          diagnostic-endpoint: ""
+
       - name: Install Rust toolchain
-        if: steps.scope.outputs.relevant == 'true'
+        if: needs.scope.outputs.nix == 'true'
         uses: dtolnay/rust-toolchain@stable
 
       - name: Eval-check every flake
-        if: steps.scope.outputs.relevant == 'true'
+        if: needs.scope.outputs.nix == 'true'
         run: |
           set -euo pipefail
           find nix -name flake.nix -type f -print0 | sort -z | while IFS= read -r -d '' flake; do
@@ -1001,7 +1079,7 @@ jobs:
       # here; the aarch64-linux variant stays defined for parity and for a
       # future arm64 runner.
       - name: Baked guest rootfs closure stays lean and glibc-free
-        if: steps.scope.outputs.relevant == 'true'
+        if: needs.scope.outputs.nix == 'true'
         run: |
           set -euo pipefail
           nix build --print-build-logs \
@@ -1009,7 +1087,7 @@ jobs:
             ./nix#checks.x86_64-linux.guest-rootfs-package-budget
 
       - name: Runtime overlay uses static-musl guest binaries
-        if: steps.scope.outputs.relevant == 'true'
+        if: needs.scope.outputs.nix == 'true'
         run: |
           set -euo pipefail
           nix build --print-build-logs \
@@ -1031,7 +1109,7 @@ jobs:
       # change that deleted the SDK cdylib outright would satisfy every
       # no-glibc assertion and read as a footprint win.
       - name: Runtime overlay is glibc-free and the SDK closure moved to the sidecar
-        if: steps.scope.outputs.relevant == 'true'
+        if: needs.scope.outputs.nix == 'true'
         run: |
           set -euo pipefail
           overlay=./nix/images/runtime-overlay
@@ -1066,7 +1144,7 @@ jobs:
 
 
       - name: Nix-built guest artifacts fit the 50 MB footprint
-        if: steps.scope.outputs.relevant == 'true'
+        if: needs.scope.outputs.nix == 'true'
         run: |
           set -euo pipefail
           nix build --print-build-logs --impure --no-link --print-out-paths \
