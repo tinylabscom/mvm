@@ -117,27 +117,19 @@ pub fn resolve_manifest_arg(arg: &str) -> Result<ManifestArgRef> {
 
     // A manifest that selects a wasm module bypasses the build/slot system
     // entirely: the module exists at the declared path and is run directly.
+    //
+    // Neither half of that is re-derived here. `read_file` resolves a relative
+    // `wasm` against the manifest's own directory before it returns, and
+    // `canonical` is absolute, so what arrives is always an absolute path;
+    // and its `validate` refuses a manifest whose module is not an existing
+    // file, on that same resolved path. A second copy of either rule would be
+    // free to drift from the one that ran.
     let manifest = mvm_core::domain::manifest::Manifest::read_file(&canonical)
         .with_context(|| format!("Reading manifest {} for wasm source", canonical.display()))?;
     if let Some(wasm) = manifest.wasm.as_deref() {
-        let module_path = std::path::Path::new(wasm);
-        if !module_path.is_absolute() {
-            let base = canonical.parent().expect("manifest has a parent directory");
-            let joined = base.join(module_path);
-            if joined.is_file() {
-                return Ok(ManifestArgRef::WasmModule {
-                    manifest_path: canonical,
-                    module_path: joined,
-                });
-            }
-        }
-        // No existence check here. `Manifest::read_file` already refuses a
-        // manifest whose `wasm` field does not point to an existing file, so
-        // by this line the module is known to exist — a second check was
-        // unreachable, which is why mutating it away changed no test.
         return Ok(ManifestArgRef::WasmModule {
             manifest_path: canonical,
-            module_path: module_path.to_path_buf(),
+            module_path: std::path::PathBuf::from(wasm),
         });
     }
 
@@ -360,11 +352,11 @@ mod tests {
 
     /// A relative wasm module resolves against the manifest's own directory.
     ///
-    /// The guard is `if !module_path.is_absolute()`. Deleting the `!` inverts
-    /// it: a relative path skips the join and is then looked up against the
-    /// process working directory instead of the manifest's, which resolves to
-    /// a different file or to nothing at all depending on where mvmctl was
-    /// invoked from.
+    /// `Manifest::read_file` is what does that, before this function sees the
+    /// path. The `if !module_path.is_absolute()` join that used to sit here
+    /// re-derived the same rule and could not change the outcome either way,
+    /// which is why deleting its `!` left every test passing; it is gone, and
+    /// this asserts the resolution the caller actually depends on.
     #[test]
     fn a_relative_wasm_module_resolves_against_the_manifest_directory() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -520,6 +512,81 @@ mod tests {
         env.remove("MVM_HYPERVISOR");
         env.remove("MVM_BACKEND");
         assert_eq!(resolve_effective_hypervisor("firecracker"), "hvf");
+    }
+
+    /// The module path handed on is absolute either way the manifest names it,
+    /// and the manifest may be given as its directory rather than its file.
+    ///
+    /// The absolute form is the arm the deleted `is_absolute` join used to
+    /// skip, so nothing covered it; the relative form re-confirms through the
+    /// directory entry point that `Manifest::read_file` is doing the
+    /// resolution. Absoluteness is asserted because callers hand this straight
+    /// to the wasm backend, which never sees the manifest's directory.
+    #[test]
+    fn a_wasm_manifest_resolves_to_the_absolute_module_path() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let module = tmp.path().join("app.wasm");
+        std::fs::write(&module, b"\0asm").expect("write module");
+        let canonical_module = std::fs::canonicalize(&module).expect("canonicalize module");
+
+        // The relative form: resolved against the manifest's directory.
+        let relative_dir = tmp.path().join("relative");
+        std::fs::create_dir(&relative_dir).expect("create dir");
+        std::fs::write(
+            relative_dir.join("mvm.toml"),
+            b"name = \"wasm-app\"\nwasm = \"../app.wasm\"\n",
+        )
+        .expect("write manifest");
+
+        // The absolute form: taken as written.
+        let absolute_dir = tmp.path().join("absolute");
+        std::fs::create_dir(&absolute_dir).expect("create dir");
+        std::fs::write(
+            absolute_dir.join("mvm.toml"),
+            format!("name = \"wasm-app\"\nwasm = \"{}\"\n", module.display()).as_bytes(),
+        )
+        .expect("write manifest");
+
+        for dir in [&relative_dir, &absolute_dir] {
+            match resolve_manifest_arg(&dir.to_string_lossy()).unwrap_or_else(|e| {
+                panic!("a wasm manifest in {} must resolve: {e}", dir.display())
+            }) {
+                ManifestArgRef::WasmModule { module_path, .. } => {
+                    assert!(
+                        module_path.is_absolute(),
+                        "the module path handed on must be absolute: {}",
+                        module_path.display()
+                    );
+                    assert_eq!(
+                        std::fs::canonicalize(&module_path).expect("canonicalize resolved module"),
+                        canonical_module,
+                        "resolved to a different module than the manifest named"
+                    );
+                }
+                other => panic!("a wasm manifest must resolve to WasmModule, got {other:?}"),
+            }
+        }
+    }
+
+    /// A manifest whose wasm module is missing is refused, not booted.
+    #[test]
+    fn a_wasm_manifest_naming_a_missing_module_is_refused() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            tmp.path().join("mvm.toml"),
+            b"name = \"wasm-app\"\nwasm = \"absent.wasm\"\n",
+        )
+        .expect("write manifest");
+
+        let err = resolve_manifest_arg(&tmp.path().to_string_lossy())
+            .expect_err("a manifest naming a module that is not there must not resolve");
+        // The refusal comes from the manifest read, which validates the module
+        // exists before this function sees the path -- the reason there is no
+        // second existence check here.
+        assert!(
+            format!("{err:#}").contains("existing file"),
+            "refusal must name the missing module; got: {err:#}"
+        );
     }
 
     /// `looks_like_path` is a five-way disjunction deciding whether a
