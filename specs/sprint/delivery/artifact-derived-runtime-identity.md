@@ -44,8 +44,10 @@ implementation turns an every-invocation question into a cross-compile;
 `guest_agent_build.rs` records what that costs, at three `pull_core` tests that
 "came to spend fifty-five seconds each building the guest agent".
 
-Hence the sidecar. Measured **2.6ms per call** steady-state against a 200ms
-dispatch budget, and a cold guest cache returns a marked `pending-` identity
+Hence the sidecar. Measured **2.6ms per call** steady-state. For scale: the
+budgeted window is `dispatch_window_ms` (`backend_start_ms + vsock_wait_ms`) at
+a 200ms p50 (`PREPARED_COLD_P50_BUDGET_MS`), and this gate runs upstream of it,
+inside `resolve_ms`, which carries no budget. and a cold guest cache returns a marked `pending-` identity
 rather than building. Both are asserted rather than asserted-about: one test
 chmods every artifact to 0000 and still requires the tag to resolve, another
 requires the cold path to answer without building, and a third pins the

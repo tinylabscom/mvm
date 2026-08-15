@@ -14,15 +14,34 @@ window: …")` pairs bolted onto it. Its own comment concedes the problem:
 `admit_ms` is "a window, not a call", whose remainder "needs naming before any
 of it can be acted on".
 
-Two things follow from that shape. The dispatch budget is ~822ms against a
-200ms target and the largest span in it is unattributed, so there is nothing to
-aim at. And several of the steps are independent filesystem probes and cache
-lookups that are serialized only because they each mutate `start_config` in
-turn.
+Two things follow from that shape. Several of the steps are independent
+filesystem probes and cache lookups, serialized only because they each mutate
+`start_config` in turn. And the largest span in the function is unattributed,
+so there is nothing to aim at.
 
-Declaring the path as stages with an execution mode makes both fall out of one
-change: every stage reports its own span, and the independent ones stop waiting
-on each other.
+### What this does *not* move — read before scoping
+
+The 200ms figure is real but it is **not on this code**:
+
+- `PREPARED_COLD_P50_BUDGET_MS = 200.0` (`crates/mvm-cli/src/bench/cold_launch.rs`),
+  with p95 250ms and p99 300ms.
+- `require_budget` applies those to `report.stats.dispatch_window_ms` **only**.
+- `RunPhaseTimings::dispatch_window_ms()` is `backend_start_ms + vsock_wait_ms`.
+
+`resolve_launch` produces `resolve_ms`, `drives_ms` and `admit_ms`. Those are
+sampled and reported, and no budget is applied to any of them. So this
+workstream is entirely outside the budgeted window: it cannot regress the 200ms
+number and it cannot improve it either. It reduces end-to-end wall clock
+(`total_ms`), which is what a user experiences as start-up time, and that is the
+only ground it should be justified on.
+
+Note also that the `Boot latency ceiling` job in `.github/workflows/ci.yml` is
+`if: github.event_name == 'workflow_dispatch'`, so the 200ms budget does not
+gate a PR. It runs on manual dispatch.
+
+**WS0 exists because of this.** Attribute the cost before restructuring for it:
+a restructuring justified by a number it cannot move is the wrong change, even
+if the restructuring is independently worth having for testability.
 
 ## Design
 
@@ -71,6 +90,11 @@ stage runner bracket each, replacing the five ad-hoc timing pairs.
 
 ## Workstreams
 
+- [ ] **WS0** — attribute the cost first. Record `resolve_ms` / `drives_ms` /
+      `admit_ms` / `dispatch_window_ms` / `total_ms` for a prepared-cold launch
+      on one host and image. If `resolve_launch` is a small share of `total_ms`,
+      stop: the remaining workstreams are then a testability change, not a
+      latency one, and should be scoped and justified as such.
 - [ ] **WS1** — split `attach_runtime_overlay_if_cached` and
       `attach_universal_initramfs_if_cached` into `lookup_*` + `attach_*`, with
       a unit test each over a temp cache root (hit, miss, malformed).
@@ -79,8 +103,9 @@ stage runner bracket each, replacing the five ad-hoc timing pairs.
 - [ ] **WS3** — add the `SubPhase` variants and bracket each stage. Add
       `every_launch_stage_is_timed`, so a future stage cannot be added untimed.
 - [ ] **WS4** — golden-compare the resolved `VmStartConfig` against `main` for
-      the same inputs, and record `dispatch_window_ms()` before/after on one
-      host and image.
+      the same inputs. Record `total_ms` before/after, and `dispatch_window_ms`
+      as a no-change control: this workstream must leave the budgeted window
+      untouched.
 
 ## Files
 
