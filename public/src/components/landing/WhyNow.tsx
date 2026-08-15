@@ -49,9 +49,9 @@ export function WhyNow() {
       </div>
 
       <Reveal delay={160}>
-        <p className="mt-10 max-w-2xl text-base leading-relaxed text-body">
+        <p className="mt-10 max-w-3xl font-display text-xl font-bold leading-snug text-title sm:text-2xl">
           MVM assumes the worst —{" "}
-          <span className="text-emphasis">
+          <span className="text-accent-2">
             Security first isn&rsquo;t a tier, it&rsquo;s the default.
           </span>{" "}
           As easy as a container, without the shared kernel.
