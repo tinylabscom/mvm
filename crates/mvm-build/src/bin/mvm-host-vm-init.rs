@@ -1446,9 +1446,16 @@ mod linux {
     }
 
     /// Start the guest-side SOCKS5 -> vsock egress shim when the host requested
-    /// vsock-only egress on the kernel cmdline. Best-effort: a missing binary or
-    /// spawn failure logs and returns so offline builds still boot.
+    /// vsock-only egress on the kernel cmdline, and refuse the boot if it never
+    /// binds.
+    ///
+    /// This used to be best-effort. It cannot be: the builder VM has no NIC, so
+    /// a guest that boots without this proxy has no network at all and every
+    /// job it accepts fails on its first fetch, blaming the network rather than
+    /// the missing proxy. Refusing here is the same posture as the
+    /// required-overlay arm below, for the same reason.
     fn fork_vsock_egress_client_if_requested(cmdline: &str) {
+        use mvm_build::egress_readiness::{EgressProbe, egress_readiness_outcome};
         use std::os::unix::process::CommandExt;
 
         if !crate::vsock_egress_requested_from_cmdline(cmdline) {
@@ -1465,11 +1472,10 @@ mod linux {
                 );
                 std::process::exit(1);
             }
-            eprintln!(
-                "mvm-host-vm-init: mvm.vsock_egress=1 requested but no egress client was found at {:?}; continuing without builder egress client",
+            refuse_boot(EgressProbe::ClientMissing(format!(
+                "{:?}",
                 crate::EGRESS_CLIENT_BIN_CANDIDATES
-            );
-            return;
+            )));
         };
 
         let _ = Command::new("/bin/busybox")
@@ -1486,17 +1492,70 @@ mod linux {
                 Ok(())
             });
         }
-        match cmd.spawn() {
-            Ok(child) => eprintln!(
-                "mvm-host-vm-init: forked mvm-egress-client pid={} from {}",
-                child.id(),
-                egress_client.display()
+        let mut child = match cmd.spawn() {
+            Ok(child) => {
+                eprintln!(
+                    "mvm-host-vm-init: forked mvm-egress-client pid={} from {}",
+                    child.id(),
+                    egress_client.display()
+                );
+                child
+            }
+            Err(e) => refuse_boot(EgressProbe::ClientExited(format!("spawn failed: {e}"))),
+        };
+
+        match egress_readiness_outcome(probe_vsock_egress_proxy(&mut child)) {
+            Ok(()) => eprintln!(
+                "mvm-host-vm-init: local vsock egress proxy ready at {}",
+                mvm_build::egress_readiness::EGRESS_PROXY_LISTEN_ADDR
             ),
-            Err(e) => eprintln!(
-                "mvm-host-vm-init: failed to fork mvm-egress-client from {}: {e}",
-                egress_client.display()
-            ),
+            Err(why) => {
+                eprintln!("mvm-host-vm-init: {why}; refusing boot");
+                std::process::exit(1);
+            }
         }
+    }
+
+    /// Report an egress refusal and stop. Never returns — a builder guest with
+    /// no proxy has nothing useful left to do.
+    fn refuse_boot(probe: mvm_build::egress_readiness::EgressProbe) -> ! {
+        let why = mvm_build::egress_readiness::egress_readiness_outcome(probe)
+            .expect_err("refuse_boot is only called with a refusing probe");
+        eprintln!("mvm-host-vm-init: {why}; refusing boot");
+        std::process::exit(1);
+    }
+
+    /// Poll the guest-local proxy address until it accepts, the client dies, or
+    /// the deadline passes.
+    fn probe_vsock_egress_proxy(
+        child: &mut std::process::Child,
+    ) -> mvm_build::egress_readiness::EgressProbe {
+        use mvm_build::egress_readiness::{
+            EGRESS_PROXY_LISTEN_ADDR, EGRESS_PROXY_READY_TIMEOUT, EgressProbe,
+        };
+        use std::net::{SocketAddr, TcpStream};
+        use std::time::{Duration, Instant};
+
+        let Ok(proxy_addr) = EGRESS_PROXY_LISTEN_ADDR.parse::<SocketAddr>() else {
+            return EgressProbe::BadListenAddr(EGRESS_PROXY_LISTEN_ADDR.to_string());
+        };
+        let deadline = Instant::now() + EGRESS_PROXY_READY_TIMEOUT;
+        while Instant::now() < deadline {
+            if TcpStream::connect_timeout(&proxy_addr, Duration::from_millis(200)).is_ok() {
+                return EgressProbe::Ready;
+            }
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    return EgressProbe::ClientExited(format!("{status}"));
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    eprintln!("mvm-host-vm-init: could not poll mvm-egress-client readiness: {e}")
+                }
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        EgressProbe::TimedOut
     }
 
     /// `[ -x <path> ]` — exists and is executable. Picks the agent binary

@@ -299,17 +299,15 @@ mod linux {
         }
     }
 
-    fn fork_vsock_egress_client_if_requested(cmdline: &str) -> Option<Child> {
-        if !should_enable_vsock_egress(is_qemu(), cmdline) {
-            return None;
-        }
+    /// Fork the guest-local egress proxy. `Err` carries the probe the readiness
+    /// decision will refuse on, so a client that never started and one that
+    /// started and died reach the same single decision point.
+    fn fork_vsock_egress_client(cmdline: &str) -> Result<Child, EgressProbe> {
         let egress_client = Path::new("/mvm-bins/mvm-egress-client");
         if !egress_client.is_file() {
-            eprintln!(
-                "stage0-init: mvm.vsock_egress=1 requested but {} is missing; continuing without egress client",
-                egress_client.display()
-            );
-            return None;
+            return Err(EgressProbe::ClientMissing(
+                egress_client.display().to_string(),
+            ));
         }
         if is_qemu() {
             best_effort_load_qemu_vsock_modules();
@@ -326,15 +324,9 @@ mod linux {
                     child.id(),
                     egress_client.display()
                 );
-                Some(child)
+                Ok(child)
             }
-            Err(e) => {
-                eprintln!(
-                    "stage0-init: failed to fork mvm-egress-client from {}: {e}",
-                    egress_client.display()
-                );
-                None
-            }
+            Err(e) => Err(EgressProbe::ClientExited(format!("spawn failed: {e}"))),
         }
     }
 
@@ -352,34 +344,21 @@ mod linux {
         "unknown termination".to_string()
     }
 
-    fn wait_for_vsock_egress_proxy_if_requested(cmdline: &str, mut child: Option<&mut Child>) {
-        if !should_enable_vsock_egress(is_qemu(), cmdline) {
-            return;
-        }
+    use mvm_build::egress_readiness::{EgressProbe, egress_readiness_outcome};
+
+    fn probe_vsock_egress_proxy(mut child: Option<&mut Child>) -> EgressProbe {
         let Ok(proxy_addr) = VSOCK_EGRESS_PROXY_LISTEN_ADDR.parse::<SocketAddr>() else {
-            eprintln!(
-                "stage0-init: invalid local vsock egress proxy addr {}; continuing without readiness wait",
-                VSOCK_EGRESS_PROXY_LISTEN_ADDR
-            );
-            return;
+            return EgressProbe::BadListenAddr(VSOCK_EGRESS_PROXY_LISTEN_ADDR.to_string());
         };
         let deadline = Instant::now() + VSOCK_EGRESS_PROXY_READY_TIMEOUT;
         while Instant::now() < deadline {
             if TcpStream::connect_timeout(&proxy_addr, Duration::from_millis(200)).is_ok() {
-                eprintln!(
-                    "stage0-init: local vsock egress proxy ready at {}",
-                    VSOCK_EGRESS_PROXY_LISTEN_ADDR
-                );
-                return;
+                return EgressProbe::Ready;
             }
             if let Some(child) = child.as_deref_mut() {
                 match child.try_wait() {
                     Ok(Some(status)) => {
-                        eprintln!(
-                            "stage0-init: mvm-egress-client exited before proxy became ready ({})",
-                            egress_child_exit_message(status)
-                        );
-                        return;
+                        return EgressProbe::ClientExited(egress_child_exit_message(status));
                     }
                     Ok(None) => {}
                     Err(e) => {
@@ -389,12 +368,36 @@ mod linux {
             }
             std::thread::sleep(Duration::from_millis(100));
         }
-        eprintln!(
-            "stage0-init: local vsock egress proxy at {} did not become ready within {}s; continuing anyway",
-            VSOCK_EGRESS_PROXY_LISTEN_ADDR,
-            VSOCK_EGRESS_PROXY_READY_TIMEOUT.as_secs()
-        );
-        dump_vsock_egress_diagnostics();
+        EgressProbe::TimedOut
+    }
+
+    /// Start the egress proxy and refuse to build without it. The returned
+    /// child is kept alive by the caller for the rest of the boot.
+    fn start_vsock_egress_if_requested(cmdline: &str) -> Result<Option<Child>, String> {
+        if !should_enable_vsock_egress(is_qemu(), cmdline) {
+            return Ok(None);
+        }
+        let (child, probe) = match fork_vsock_egress_client(cmdline) {
+            Ok(mut child) => {
+                let probe = probe_vsock_egress_proxy(Some(&mut child));
+                (Some(child), probe)
+            }
+            Err(probe) => (None, probe),
+        };
+        match egress_readiness_outcome(probe) {
+            Ok(()) => {
+                eprintln!(
+                    "stage0-init: local vsock egress proxy ready at {}",
+                    VSOCK_EGRESS_PROXY_LISTEN_ADDR
+                );
+                Ok(child)
+            }
+            Err(why) => {
+                eprintln!("stage0-init: {why}");
+                dump_vsock_egress_diagnostics();
+                Err(why)
+            }
+        }
     }
 
     /// Mounts the pseudo-filesystems + the host shares, then makes `/nix` a
@@ -446,8 +449,9 @@ mod linux {
             mvm_agentd::guest_net::seed_loopback_resolver()
                 .map_err(|e| format!("seed loopback DNS resolver: {e}"))?;
         }
-        let mut egress_child = fork_vsock_egress_client_if_requested(&cmdline);
-        wait_for_vsock_egress_proxy_if_requested(&cmdline, egress_child.as_mut());
+        // Held for the rest of the boot: dropping the handle would not kill the
+        // proxy, but keeping it lets a later reaper see the same child.
+        let _egress_child = start_vsock_egress_if_requested(&cmdline)?;
         configure_nix_runtime()?;
         Ok(())
     }

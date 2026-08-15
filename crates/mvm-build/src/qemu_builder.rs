@@ -251,7 +251,10 @@ fn run_stage0_qemu(
     }
     cmd.arg("-kernel").arg(&kernel);
     cmd.arg("-initrd").arg(&initrd);
-    cmd.arg("-append").arg(&append);
+    cmd.arg("-append").arg(
+        crate::builder_cmdline::checked_builder_cmdline(append)
+            .map_err(BuilderVmError::NixBuildFailed)?,
+    );
     for disk in [&vda, &vdb, &vdc, &vdd] {
         cmd.arg("-drive")
             .arg(format!("file={},if=virtio,format=raw", disk.display()));
@@ -875,7 +878,10 @@ fn run_shell_script_qemu(job: &BuilderShellJob) -> Result<BuilderShellResult, Bu
         cmd.args(["-cpu", "max"]);
     }
     cmd.arg("-kernel").arg(&kernel);
-    cmd.arg("-append").arg(&cmdline);
+    cmd.arg("-append").arg(
+        crate::builder_cmdline::checked_builder_cmdline(cmdline.clone())
+            .map_err(BuilderVmError::NixBuildFailed)?,
+    );
     cmd.arg("-drive")
         .arg(format!("file={},if=virtio,format=raw", rootfs.display()));
     cmd.arg("-drive").arg(format!(
@@ -1145,7 +1151,10 @@ fn run_build_qemu(
         cmd.args(["-cpu", "max"]);
     }
     cmd.arg("-kernel").arg(&kernel);
-    cmd.arg("-append").arg(&cmdline);
+    cmd.arg("-append").arg(
+        crate::builder_cmdline::checked_builder_cmdline(cmdline.clone())
+            .map_err(BuilderVmError::NixBuildFailed)?,
+    );
     // Root disk (vda) + persistent nix store (vdb). The guest mounts vda
     // `ro`, so the cached `rootfs.ext4` stays pristine across builds even
     // though the block device is attached writable (mirrors libkrun). vdb
