@@ -2369,6 +2369,21 @@ Cross-sprint work tracked in `specs/plans/330-decision-provenance-layer.md`.
 - [x] Phase 4 — Query API and causal chains: `trace`, `impact`, and `similar` queries over the cached decision store, exposed through `mvmctl trust audit decisions {trace,impact,similar}`.
 - [ ] Phase 5 — Optional standards interoperability.
 
+## Plan 335 — Merge-queue throughput
+
+Cross-sprint work tracked in `specs/plans/2026-08-15-merge-queue-throughput.md`.
+
+- [x] Consolidate automatic architecture and kernel validation into the main
+      CI graph behind one shared scope job.
+- [x] Preserve the required `Invariant` and per-architecture kernel check
+      names while removing duplicate runner allocations and feature tests.
+- [x] Add trusted default-branch Rust workspace and Nix cache warming.
+- [x] Pass actionlint, shellcheck, formatting, workspace check, focused
+      workflow tests, host all-target Clippy, and the affected crate's complete
+      serial test suite.
+- [ ] Land the workflow change, pass Linux all-target Clippy, and apply and
+      verify the live merge-queue and required-check settings.
+
 ## Appendix A — ADR consolidation clusters (~91 → ~15)
 
 | Canonical ADR (theme)                       | Merge these                                                                            |

@@ -129,6 +129,13 @@ for detailed scope and acceptance criteria.
 
 ## In-flight plans
 
+- [~] **Plan 335 — merge-queue throughput.** Automatic architecture and kernel
+      checks now share the main CI scope gate, required check names are
+      preserved transitively, duplicate runner allocations are removed, and
+      trusted default-branch Rust/Nix cache warming is added. Repository and
+      host validation are green; landing, Linux CI, and verified live queue
+      settings remain open.
+
 - [~] Plan 330 — Decision provenance layer
   (`specs/plans/330-decision-provenance-layer.md`)
   - [ ] Phase 0 — RFC and ADR approved

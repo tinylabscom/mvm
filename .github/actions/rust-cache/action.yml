@@ -37,12 +37,19 @@ runs:
     - name: Restore Rust build cache
       uses: Swatinem/rust-cache@v2
       with:
+        # Bumped when workspace-crate caching was enabled so an immutable
+        # dependency-only entry cannot masquerade as the new warm cache.
+        prefix-key: v1-rust
         shared-key: ${{ inputs.key }}
         # The toolchain and lockfile are already part of the key that
         # rust-cache computes, so nightly and stable jobs never collide.
         save-if: ${{ inputs.save }}
-        # Dependencies only — rust-cache already drops this workspace's own
-        # crates from the saved tree, which is what keeps the entry small
-        # enough to stay under the repo cache cap. `cache-bin` stays on so the
-        # eBPF lane's `cargo install bpf-linker` is not rebuilt every run.
+        # The only writer is trusted main, so preserve workspace artifacts as
+        # well as dependencies. Queue and pull-request refs restore this entry
+        # read-only and let Cargo's fingerprints rebuild changed crates. This
+        # avoids recompiling every unchanged workspace crate in every sibling
+        # lane while keeping untrusted refs out of the shared write boundary.
         cache-all-crates: "false"
+        cache-workspace-crates: "true"
+        # The eBPF lane's pinned bpf-linker install also benefits from this.
+        cache-bin: "true"
