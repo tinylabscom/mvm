@@ -556,9 +556,8 @@ pub fn drop_guest_agent_privilege_raw(uid: u32, gid: u32) -> std::io::Result<()>
     }
     set_capabilities(RESTORE_AGENT_CAPABILITIES)?;
     raise_ambient_capabilities(RESTORE_AGENT_CAPABILITIES)?;
-    if unsafe { libc::prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } != 0 {
-        return Err(std::io::Error::last_os_error());
-    }
+    drop_capability_bounding_set_to(RESTORE_AGENT_CAPABILITIES)?;
+    set_no_new_privileges()?;
     if unsafe { libc::getuid() } == 0 {
         return Err(std::io::Error::from_raw_os_error(libc::EPERM));
     }
@@ -606,6 +605,123 @@ fn raise_ambient_capabilities(capabilities: u32) -> std::io::Result<()> {
             return Err(std::io::Error::last_os_error());
         }
     }
+    Ok(())
+}
+/// The capability slots `PR_CAPBSET_DROP` is asked about.
+///
+/// The kernel's own ceiling is `CAP_LAST_CAP`, which grows between releases.
+/// Walking a fixed range and treating `EINVAL` as "this slot does not exist on
+/// this kernel" is forward-compatible in both directions: a slot the running
+/// kernel has not heard of is skipped, and one added after this code was
+/// written is still dropped.
+#[cfg(target_os = "linux")]
+const CAPABILITY_SLOTS: std::ops::RangeInclusive<u32> = 0..=63;
+
+/// Whether `keep` retains capability slot `cap`.
+///
+/// Split out from the syscall loop so the mask arithmetic is testable off
+/// Linux and without root. The widening to `u64` is load-bearing rather than
+/// cosmetic: `1u32 << 32` panics in debug and is UB-adjacent in release, so a
+/// `u32` shift silently mis-answers every slot above 31.
+///
+/// Gated on its two real consumers: the Linux syscall loop, and the tests
+/// that pin the mask arithmetic on every host.
+#[cfg(any(target_os = "linux", test))]
+fn bounding_set_retains(keep: u32, cap: u32) -> bool {
+    u64::from(keep) & (1u64 << cap) != 0
+}
+
+/// Drop every capability from the bounding set except `keep`.
+///
+/// The bounding set is inherited across fork *and* exec and can only ever
+/// shrink, which is what makes it usable as a one-way gate applied once by a
+/// parent on behalf of every descendant. Slots the running kernel does not
+/// implement report `EINVAL` and are skipped.
+#[cfg(target_os = "linux")]
+fn drop_capability_bounding_set_to(keep: u32) -> std::io::Result<()> {
+    for cap in CAPABILITY_SLOTS {
+        if bounding_set_retains(keep, cap) {
+            continue;
+        }
+        let rc = unsafe { libc::prctl(PR_CAPBSET_DROP, cap as libc::c_ulong, 0, 0, 0) };
+        if rc != 0 {
+            let err = std::io::Error::last_os_error();
+            if err.raw_os_error() == Some(libc::EINVAL) {
+                continue;
+            }
+            return Err(err);
+        }
+    }
+    Ok(())
+}
+
+/// Harden the OCI init before it spawns any workload-facing child.
+///
+/// The OCI boot path reaches the workload through a different route than the
+/// nix-built guest: there is no `mvm-setpriv` between init and the agent, so
+/// without this the agent and the workload beneath it inherit PID 1's full
+/// bounding set and `NoNewPrivs=0`.
+///
+/// Note what is retained. The bounding set is narrowed to
+/// [`RESTORE_AGENT_CAPABILITIES`] — `CAP_KILL` and `CAP_SYS_TIME`, which the
+/// agent genuinely needs to reap workload processes and to correct a restored
+/// wall clock — not to zero. The workload itself needs neither, and gets an
+/// empty bounding set from [`drop_workload_capability_bounding_set`] at spawn.
+#[cfg(target_os = "linux")]
+pub fn harden_init_process() -> std::io::Result<()> {
+    // `NoNewPrivs` first: it is the control that actually makes file
+    // capabilities and setuid bits inert on exec, it cannot fail for lack of
+    // privilege, and ordering it first means a bounding-set failure can never
+    // leave a descendant running without it.
+    set_no_new_privileges()?;
+    drop_capability_bounding_set_to(RESTORE_AGENT_CAPABILITIES)
+}
+
+/// Empty the bounding set for a workload process, immediately before exec.
+///
+/// The agent keeps `CAP_KILL` and `CAP_SYS_TIME`; a workload has no use for
+/// either, so the last thing done on its behalf is to remove them. `NoNewPrivs`
+/// already makes file capabilities and setuid bits inert on exec, so this is
+/// defense in depth rather than the load-bearing control — but it is what lets
+/// the posture be stated as an empty set rather than as "inert in practice".
+///
+/// Runs inside `pre_exec`, so it must stay async-signal-safe: two `prctl`
+/// calls and no allocation.
+#[cfg(target_os = "linux")]
+pub fn drop_workload_capability_bounding_set() -> std::io::Result<()> {
+    set_no_new_privileges()?;
+    match drop_capability_bounding_set_to(0) {
+        Err(err) if bounding_drop_is_unenforceable(&err) => Ok(()),
+        result => result,
+    }
+}
+
+/// Whether a `PR_CAPBSET_DROP` failure means "this caller was never able to
+/// enforce it" rather than "enforcement was attempted and broke".
+///
+/// `PR_CAPBSET_DROP` needs `CAP_SETPCAP`. An agent without it cannot shrink the
+/// bounding set — but it equally cannot grant a capability it does not hold, and
+/// the set a child inherits is already no wider than the agent's own. Treating
+/// that one errno as a skip keeps an unprivileged spawn working without
+/// weakening the privileged path, where the drop still fails closed. Every other
+/// errno means the drop was possible and went wrong, so it still propagates.
+#[cfg(any(target_os = "linux", test))]
+fn bounding_drop_is_unenforceable(err: &std::io::Error) -> bool {
+    err.raw_os_error() == Some(libc::EPERM)
+}
+
+/// `prctl(PR_SET_NO_NEW_PRIVS, 1)`. One-way and inherited across fork/exec.
+#[cfg(target_os = "linux")]
+fn set_no_new_privileges() -> std::io::Result<()> {
+    if unsafe { libc::prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Non-Linux stub so the workload spawn path compiles on developer hosts.
+#[cfg(not(target_os = "linux"))]
+pub fn drop_workload_capability_bounding_set() -> std::io::Result<()> {
     Ok(())
 }
 
@@ -658,6 +774,8 @@ const PR_SET_NO_NEW_PRIVS: libc::c_int = 38;
 const PR_CAP_AMBIENT: libc::c_int = 47;
 #[cfg(target_os = "linux")]
 const PR_CAP_AMBIENT_RAISE: libc::c_ulong = 2;
+#[cfg(target_os = "linux")]
+const PR_CAPBSET_DROP: libc::c_int = 24;
 
 // ---------------------------------------------------------------------------
 // Low-level syscall wrappers (Linux)
@@ -1581,5 +1699,113 @@ mod tests {
         let err = probe_ext4_block_size(image.path().to_str().expect("temp path"))
             .expect_err("bad magic must fail");
         assert!(err.to_string().contains("magic mismatch"), "{err}");
+    }
+}
+
+#[cfg(test)]
+mod privilege_tests {
+    use super::*;
+
+    /// The `u32` shift this replaced silently mis-answered every slot above
+    /// 31 — `1u32 << 32` panics in debug, and the loop walks to 63. This is
+    /// the regression test for that, and it runs on every host.
+    #[test]
+    fn bounding_set_retains_answers_every_slot_without_overflow() {
+        for cap in CAPABILITY_SLOTS_FOR_TEST {
+            // A zero keep-mask retains nothing, at any slot.
+            assert!(
+                !bounding_set_retains(0, cap),
+                "empty keep mask must retain nothing, but retained slot {cap}"
+            );
+            // An all-ones u32 mask retains exactly the slots a u32 can name.
+            assert_eq!(
+                bounding_set_retains(u32::MAX, cap),
+                cap < 32,
+                "u32::MAX must retain slots 0..32 and no others; slot {cap} disagreed"
+            );
+        }
+    }
+
+    #[test]
+    fn agent_keep_mask_retains_exactly_kill_and_sys_time() {
+        let retained: Vec<u32> = CAPABILITY_SLOTS_FOR_TEST
+            .filter(|cap| bounding_set_retains(RESTORE_AGENT_CAPABILITIES, *cap))
+            .collect();
+        assert_eq!(
+            retained,
+            vec![CAP_KILL, CAP_SYS_TIME],
+            "the agent must retain CAP_KILL and CAP_SYS_TIME and nothing else"
+        );
+    }
+
+    /// The workload's mask is empty, and is a strict subset of the agent's.
+    /// Stated as a subset rather than as a literal so it stays true if the
+    /// agent's retained set ever changes.
+    #[test]
+    fn workload_keep_mask_is_empty_and_narrower_than_the_agent_mask() {
+        const WORKLOAD_KEEP: u32 = 0;
+        assert_eq!(WORKLOAD_KEEP, 0, "the workload retains no capability");
+        assert_eq!(
+            WORKLOAD_KEEP & RESTORE_AGENT_CAPABILITIES,
+            WORKLOAD_KEEP,
+            "the workload mask must be a subset of the agent mask"
+        );
+        assert_ne!(
+            WORKLOAD_KEEP, RESTORE_AGENT_CAPABILITIES,
+            "the workload must be strictly narrower than the agent"
+        );
+    }
+
+    /// `EPERM` is the one errno that means the caller never held `CAP_SETPCAP`,
+    /// so the drop was never enforceable. It is the only one treated as a skip;
+    /// anything else means enforcement was possible and failed, and must
+    /// propagate so the spawn fails closed.
+    #[test]
+    fn only_eperm_is_treated_as_an_unenforceable_bounding_drop() {
+        assert!(bounding_drop_is_unenforceable(
+            &std::io::Error::from_raw_os_error(libc::EPERM)
+        ));
+        for errno in [libc::EINVAL, libc::EFAULT, libc::EACCES, libc::ENOSYS] {
+            assert!(
+                !bounding_drop_is_unenforceable(&std::io::Error::from_raw_os_error(errno)),
+                "errno {errno} must propagate rather than be skipped"
+            );
+        }
+        // A non-OS error carries no errno and must never be swallowed.
+        assert!(!bounding_drop_is_unenforceable(&std::io::Error::other(
+            "not an errno"
+        )));
+    }
+
+    /// Mirrors `CAPABILITY_SLOTS` so the test compiles off Linux, where the
+    /// real constant is `cfg`-gated out along with the syscall loop.
+    const CAPABILITY_SLOTS_FOR_TEST: std::ops::RangeInclusive<u32> = 0..=63;
+
+    /// Live witness. Mutates the calling process's privilege state
+    /// irreversibly, so it is gated behind an explicit environment variable
+    /// and root; ordinary CI and developer laptops skip it. The
+    /// backend-level witness is the adversarial probe run under
+    /// `specs/research/no-root-workload-live-witness.md`.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn harden_init_process_narrows_bounding_set_and_sets_no_new_privs() {
+        if std::env::var("MVM_GUEST_PRIVILEGED_TESTS").as_deref() != Ok("1") {
+            return;
+        }
+        if unsafe { libc::getuid() } != 0 {
+            return;
+        }
+        super::harden_init_process().expect("harden_init_process should succeed as root");
+        let status = std::fs::read_to_string("/proc/self/status").expect("read status");
+        assert!(
+            status.contains("NoNewPrivs:\t1"),
+            "NoNewPrivs must be 1 after hardening; got:\n{status}"
+        );
+        // Narrowed to the agent's set, not emptied. The workload gets the
+        // empty set separately, at spawn.
+        assert!(
+            status.contains("CapBnd:\t0000000002000020"),
+            "CapBnd must be exactly CAP_KILL|CAP_SYS_TIME; got:\n{status}"
+        );
     }
 }

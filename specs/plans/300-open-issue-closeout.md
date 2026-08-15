@@ -1,31 +1,26 @@
 # Plan 300 — Open issue reconciliation and closeout
 
-**Status:** IN PROGRESS — 2026-08-13 reconciliation executed; 8 issues closed, 31 remain
-**Snapshot date:** 2026-08-13
+**Status:** IN PROGRESS — second reconciliation pass executed 2026-08-14; **23 issues remain**
+**Snapshot date:** 2026-08-14, against `origin/main` `2bc7dc2bc`
 
 ## Objective
 
-Reconcile the 31 issues currently open against merged code, current product
-intent, tests, live evidence, and the owning plans. Close work that is
-demonstrably complete, combine or supersede duplicates, preserve active defects
-and security gaps, and execute the remainder in dependency order until every
-issue is either completed or deliberately declined with its remaining
-requirements transferred.
+Reconcile every open issue against merged code, current product intent, tests,
+live evidence, and the owning plans. Close work that is demonstrably complete,
+combine issues that describe one piece of work, preserve active defects and
+security gaps, and execute the remainder in dependency order until every issue
+is either completed or deliberately declined with its remaining requirements
+transferred to a named owner.
 
-The snapshot contains one issue whose implementation is complete but whose
-GitHub state is stale (#2293). The other 29 issues retain material acceptance
-criteria. Closing an umbrella, research issue, or partially implemented issue
-does not count as progress unless its remaining criteria move to an explicit
-owner in the same change.
+The count has moved 39 → 31 → 28 → 23. The remaining 23 all retain material
+acceptance criteria; **none is complete-but-stale**. Closing an umbrella, a
+research issue, or a partially implemented issue does not count as progress
+unless its remaining criteria move to an explicit owner in the same change.
 
-## Execution update — first concrete-fix batch
-
-The first implementation batch addresses two user-visible correctness/security
-defects before the larger dependency graphs: #2165 makes every workload-runner
-root command line agree with the read-only root block, and #2321 bounds the
-credential-bearing forward response before it can be accumulated. #2323 uses
-the shared bounded poll backoff for Firecracker teardown. These changes stay
-open until their PRs are merged and the required live witnesses are recorded.
+Three of the 23 are blocked on something outside this repository — two need a
+Linux host with `/dev/kvm` and NVMe that does not exist yet, and one needs
+`mvm-studio#18` to freeze a handshake. Those are stated per phase rather than
+left to be rediscovered mid-execution.
 
 ## Closure rules
 
@@ -46,336 +41,576 @@ Generated trackers close only after the generating workflow is green. An issue
 is not closed because adjacent code exists, its title was superseded, or a plan
 mentions it.
 
-## 2026-08-13 reconciliation update
+## Reconciliation history
 
-**Current open issue count: 31.** Eight issues were closed on 2026-08-13:
-#2165, #2289, #2333, #2423, #2180, #2181, #2305, and #2413.
+### 2026-08-13 — first pass, 39 → 31
 
-### Closed on 2026-08-13
+Eight issues closed: #2165, #2289, #2333, #2423 as completed by merged pull
+requests; #2180, #2181, #2305, #2413 as not planned or superseded.
 
-| Issue | Closed as | Reason |
-|---|---|---|
-| #2165 | completed | PR #2330 merged; workload block-root bootargs agree with read-only root attachment |
-| #2289 | completed | Kernel/libkrunfw pins now at 6.12.103 via PR #2301 |
-| #2333 | completed | PR #2335 merged; `pool warm --image <ref>` fills the pool |
-| #2423 | completed | PR #2428 merged; RFC 6962 consistency proofs landed |
-| #2180 | not planned | Superseded by Plan 316 L3 deletion |
-| #2181 | not planned | Superseded by Plan 316 L3 deletion |
-| #2305 | not planned | Superseded by Plan 313 egress token accounting |
-| #2413 | not planned | 0.10.4 bpf-linker pin remains stable; 0.11.0 not worth system LLVM cost |
+| Issue | Closed as   | Reason                                                                             |
+| ----- | ----------- | ---------------------------------------------------------------------------------- |
+| #2165 | completed   | PR #2330 merged; workload block-root bootargs agree with read-only root attachment |
+| #2289 | completed   | Kernel/libkrunfw pins now at 6.12.103 via PR #2301                                 |
+| #2333 | completed   | PR #2335 merged; `pool warm --image <ref>` fills the pool                          |
+| #2423 | completed   | PR #2428 merged; RFC 6962 consistency proofs landed                                |
+| #2180 | not planned | Superseded by Plan 316 L3 deletion                                                 |
+| #2181 | not planned | Superseded by Plan 316 L3 deletion                                                 |
+| #2305 | not planned | Superseded by Plan 313 egress token accounting                                     |
+| #2413 | not planned | 0.10.4 bpf-linker pin stable; 0.11.0 not worth the system LLVM cost                |
 
-### Plan 316 note
+### 2026-08-13/14 — interim, 31 → 28
 
-- #2370 (Phase 1) is closed; #2368 umbrella should be updated to mark Phase 1
-  complete and Phase 2 (#2371) actionable.
+| Issue | Closed as | Reason                                                                     |
+| ----- | --------- | -------------------------------------------------------------------------- |
+| #2292 | completed | PR #2463; `driver_boot` split, in-process API client, no sudo bash launch  |
+| #2307 | completed | `xtask check-nextest-groups` implemented and wired into CI                 |
+| #2318 | completed | PR #2465; receipt is a record not a control; KVM re-measure p50 ~45.4 ms   |
 
-## Snapshot disposition
+### 2026-08-14 — second reconciliation pass, 28 → 23
 
-| Issue | Disposition at 2026-08-13 | Closure owner |
-|---|---|---|
-| #2083 | Open; Studio server contract external dependency | Agent/Studio phase |
-| #2101 | Kernel defect fixed; OCI privilege posture remains | Security phase |
-| #2107 | Open; audit mirror absent | Audit/observability phase |
-| #2135 | Open; Security lane red | Evidence-repair phase |
-| #2166 | Parent epic; #2169 and #2083 remain | Agent/Studio phase |
-| #2169 | Open; bounded inspector contract/APIs remain | Agent/Studio phase |
-| #2193 | Partial artifact-prewarm substrate; backend factories remain | Warm-launch phase |
-| #2194 | Partial HVF paused-parent handoff; final live contract remains | Warm-launch phase |
-| #2195 | Open; fixed read-only share binding remains | Warm-launch phase |
-| #2196 | Partial Firecracker standby path; #2336 blocks KVM matrix | Warm-launch phase |
-| #2197 | Open; resident-process hardening remains | Warm-launch phase |
-| #2198 | Partial typed timing; refusal/cold contract remains | Warm-launch phase |
-| #2199 | Partial benchmark substrate; 1,000-claim matrix remains | Warm-launch phase |
-| #2211 | Partial eBPF spike; bytes/latency/scope decision remains | Observability phase |
-| #2256 | Open; Plan 306 not started | Governance phase |
-| #2280 | Partial measurement substrate; native host matrix remains | Performance phase |
-| #2281 | Partial ext4 baseline; candidate comparison/decision remains | Performance phase |
-| #2292 | Code landed (driver_boot split, no sudo bash launch); ColdLaunchBench pending | Performance phase |
-| #2299 | Open; cross-backend phase accounting not comparable | Performance phase |
-| #2307 | `xtask check-nextest-groups` implemented; CI wiring remains | CI phase |
-| #2318 | Decision/tests landed; KVM re-measure queued | Audit/performance phase |
-| #2336 | Open; Firecracker post-restore handshake failure | Warm-launch phase |
-| #2347 | Open; NVMe baseline for launch contract | Performance phase |
-| #2368 | Plan 316 umbrella; Phase 1 complete, Phase 2+ open | Networking rewrite phase |
-| #2371 | Plan 316 Phase 2 — authenticated endpoint | Networking rewrite phase |
-| #2372 | Plan 316 Phase 3 — converge egress TCP/UDP/DNS | Networking rewrite phase |
-| #2373 | Plan 316 Phase 4 — stream typed transformations | Networking rewrite phase |
-| #2374 | Plan 316 Phase 5 — declared ingress on FlowMux | Networking rewrite phase |
-| #2375 | Plan 316 Phase 6 — compatibility boundary | Networking rewrite phase |
-| #2376 | Plan 316 Phase 7 — delete L3 completely | Networking rewrite phase |
-| #2377 | Plan 316 Phase 8 — mechanically enforce one path | Networking rewrite phase |
+Every remaining issue was re-read and verified against `origin/main` `2bc7dc2bc`.
+**No issue was found complete-but-stale.** The five closures below are all
+combinations: in each case two issues described one piece of work, and holding
+them apart was creating a risk the combination removes. Every acceptance
+criterion was transferred to the surviving issue in the same action, and each
+closure comment names what moved.
 
-## Phase 0 — Close completed work and restore evidence quality
+| Issue | Closed as   | Absorbed into | Why they are one piece of work                                                                                                                                        |
+| ----- | ----------- | ------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| #2347 | not planned | #2299         | Both say the launch numbers are untrustworthy. #2347: the test host is 7200rpm, so ~350 ms is storage tax. #2299: `guest_kernel_entry_ms` is 0.038 ms, so its own headline comparison is not measured at the same boundaries on both backends. Optimising against either alone is the failure. |
+| #2281 | not planned | #2280         | Same measurement harness, same 20-sample/two-warmup gate, same blocked-on-native-hosts prerequisite, same "publish one canonical table and record an adopt/decline decision in Plan 299" shape. Two axes of one substrate; running the matrix twice risks two decisions taken against different fixtures. |
+| #2199 | not planned | #2198         | A contract and its enforcement gate. #2199 gates on fields #2198 defines, so it cannot land first; #2198's "never report warm after a cold fallback" is unfalsifiable without #2199's 1,000 claims. Neither should be able to merge alone. |
+| #2193 | completed   | #2194, #2196  | The prewarm substrate is merged on `main`. The one residual — per-backend disposable-VM factories — is not independently testable; it can only be exercised through each backend's own live validation matrix, which both issues already gate on. |
+| #2166 | completed   | #2169         | Pure umbrella. Workstreams #2167, #2168, #2170 and related #2163 are closed; #2169 and #2083 are separately tracked. Its one residual criterion (end-to-end session reconnect through shared contracts) moved to #2169. |
 
-- [x] **#2293 — close the completed audit-chain fsync issue.** PR #2302
-      removed the duplicate synthetic `plan.admitted` and bound OCI provenance
-      to the plan that boots. PR #2317 made `plan.admitted` the durability
-      barrier, deferred post-hoc records, preserved ordering and torn-tail
-      detection, and recorded KVM timings. Add the evidence comment, close as
-      completed, and synchronize this plan, the sprint, and the rollup. Closed
-      as completed on 2026-08-10 after posting the merged implementation and
-      KVM evidence; receipt-store latency remains independently tracked by
-      #2318.
-- [ ] **#2135 — restore the Security lane.** Triage every current failure in
-      run 31359464384 against `origin/main`; repair actionable mutation
-      witnesses without weakening the baseline; run the affected shards and
-      then the whole Security workflow. Let the watcher close the issue only
-      after a clean scheduled or release run. The failed run is now reconciled:
-      direct witnesses catch the actionable `mvm-vmm`, `mvm-hostd`, and
-      `mvm-agentd` mutants; accepted misses fail closed when their files leave
-      the pinned surface; moved libkrun identities now name their current file;
-      and obsolete accepted misses were removed, reducing the baseline from 83
-      to 68 without adding a waiver. The first exact rerun exposed one
-      default-equivalent contract survivor and five hostd survivors; direct
-      witnesses now cover omitted fail-closed resource controls, exact broker
-      byte limits, admitted digest equality, the host CPU mechanism truth
-      table, explicit deferred-audit flushing, and drop-time flushing. Focused
-      mutation proofs, workspace all-target Clippy, formatting, and the static
-      surface gate pass on the fix branch. The workspace suite passed every
-      repaired area but hit one unrelated host-agent socket-bind timeout; its
-      isolated integration rerun passed 4/4. Exact Security run 31516221103
-      passed every mutation and security job, then twice exposed a Linux
-      `ETXTBSY` race while spawning freshly published shutdown-hook fixtures.
-      The lifecycle runner now retries that transient spawn error with a
-      bounded delay, with success-after-retry and retry-exhaustion witnesses;
-      workspace all-target Clippy passes. The workspace suite passed the
-      repaired area but one parallel CLI test observed another test's temporary
-      host CPU ceiling; its exact isolated rerun passed. The next exact run
-      exposed the guest-console tests sharing process-global session state;
-      those stateful tests now share one lock and join their completion thread,
-      with 20/20 parallel stress passes. A clean exact Linux Security workflow
-      and subsequent scheduled or release run remain the merge-and-close gates.
-- [x] **#2289 — closed by PR #2301.** Kernel and libkrunfw pins are now at
-      6.12.103; normal release artifact refresh follows.
-- [ ] **#2292 — finish the Firecracker host-overhead closeout.** Retain #2298's
-      in-process API client, backoff, and split spans. Remove or explicitly
-      justify the two remaining privileged operations, then run
-      `ColdLaunchBench` with 20 samples after two warmups for both `alpine` and
-      `python:3.12` on KVM and publish p50/p95/p99. Close only after the issue's
-      checklist reflects the residual #2299 guest-boot work.
+Deliberately **not** combined, and why:
 
-## Phase 1 — Fix safety and boot-correctness defects
+- **Plan 316's eight phases (#2368, #2371–#2377).** The phase split is a
+  designed sequence with per-phase invariants and acceptance gates, not
+  accidental fragmentation. Collapsing it would discard the ordering that is
+  the plan's main safety property.
+- **The warm-pool workstreams (#2194–#2197).** Backend parents, share slots,
+  and process hardening are genuinely different work with different reviewers
+  and different live-validation surfaces.
+- **#2135.** A generated tracker. It closes when the generating workflow is
+  green, not by judgement.
 
-- [ ] **#2101 — finish OCI privilege hardening.** Narrow the issue body to the
-      remaining `NoNewPrivs` and capability-bounding-set decision now that
-      #2102 fixed kernel selection. Define the minimal capability set required
-      for authenticated activation/restore, apply it before workload exec, and
-      test setuid/file-capability attempts, user namespaces, wrong kernels,
-      and syscall failures. Re-run the adversarial probe on HVF and
-      Firecracker before closure.
-- [x] **#2318 — define receipt durability and remove the redundant sync.**
-      - [x] Record the decision: execution receipts are records, not controls.
-        A failed receipt emit is logged and does not block admission; the
-        audit chain is the only durability boundary that can refuse a run.
-      - [x] Remove the redundant head fsync. `write_head` now uses
-        `write_atomic_unsynced`; the head is a recoverable cache and the
-        receipt body is the durable object.
-      - [x] Rebuild a missing/stale/torn head under the tenant lock.
-        `read_head` takes the later of the stored head and `scan_tip()`, with
-        tests for removed, rewound, truncated, and unparseable heads.
-      - [x] Prove concurrent append ordering. `concurrent_writers_extend_one
-        _chain_without_forking` already covers this.
-      - [ ] Re-measure the KVM `emit: receipt` span against 100.7 ms on a
-        Linux/KVM host. This is queued; the current host cannot run KVM.
-- [x] **#2307 — gate nextest override filters.** Add
-      `xtask check-nextest-groups` using `cargo nextest list -E` for each
-      configured override, reject nonexistent workspace packages and empty
-      filter matches, register it in xtask help/available commands and CI, and
-      add a self-test that moves a module and observes a nonzero exit.
+## Findings from the 2026-08-14 pass
 
-## Phase 2 — Audit mirror and host observability
+Two discrepancies surfaced that are worth recording because neither was
+visible from issue state alone.
 
-- [ ] **#2107 — mirror audit appends into tracing without coupling.** Emit one
-      sanitized event at a dedicated target only after a successful signed
-      append. Share the verified-reader projection so field selection cannot
-      drift. Prove exact event parity, secret/path/policy exclusion, signed-
-      chain byte identity, and that absent or hostile subscribers cannot alter
-      append success, ordering, or latency.
-- [ ] **#2211 — choose and finish the eBPF spike contract.** Either narrow the
-      issue to the landed Linux connection-observation spike and refile byte,
-      latency, and IPv6 attribution, or complete the original tuple. For the
-      latter, attribute bytes and latency to the same plan/VM/destination
-      binding, validate the real substitution endpoint on Linux, declare the
-      macOS/no-target behavior, and keep sealed guest kernels BPF-free.
+**Plan 316 Phase 2 is marked complete and is not.**
+`specs/plans/316-single-flow-vsock-networking.md` carried
+`**Status: COMPLETE**` on Phase 2 while six of that phase's seven checkboxes
+were unchecked in the same document, and two are verifiably undone in the tree:
+the `EndpointSpawner` → `NetworkEndpointSpawner` rename has not happened
+(`crates/mvm-hostd/tests/workload_stream_plane.rs` still imports
+`EndpointSpawner`; the new names appear nowhere in the workspace), and the
+hand-maintained duplicate `EGRESS_VSOCK_PORT = 5253` survives in
+`crates/mvm-agentd/src/bin/mvm-egress-client.rs:16` and
+`crates/mvm-agentd/src/bin/mvm-addon-dns.rs:93`. The second has a real cause —
+`mvm-agentd` does not depend on `mvm-net`, so the guest cannot reach the typed
+service mapping — which makes it a design question the phase owes an answer
+to rather than a completed box. The plan status is corrected here; the issue
+stays open.
 
-## Phase 3 — Establish comparable performance evidence
+**Plan 316's phase ordering has already been broken.** Phase 3 (#2372) is six
+of seven boxes merged, ahead of Phase 2's completion. This matters because the
+strict ordering was the mechanism meant to catch Phase 2 residue, so that
+residue will not be caught by any later phase gate and has to be closed
+deliberately.
 
-- [ ] **#2299 — make guest-boot measurements comparable before optimizing.**
+**FlowMux is not on the production path at all.** This is the more serious
+finding and it was only visible by reading the call sites rather than the
+checkboxes. The host-side acceptor (`mvm-hostd::supervisor::flowmux`) and the
+guest-side client (`mvm-agentd::flowmux`, wired to the loopback adapters by
+#2468) both exist and are unit-tested. Nothing connects them on a real launch:
+
+- `RealNetworkEndpointSpawner::spawn` — the single production spawn — passes
+  `flowmux_identity: None`, hard-coded.
+- `EndpointSpawnRequest` has **no** `flowmux_identity` field, so no caller can
+  ask for it.
+- The only construction of `FlowMuxIdentitySpawnConfig` in the workspace is
+  inside `#[cfg(test)] fn endpoint_config_json_emits_flowmux_identity()`.
+- `claim.rs` still computes `let raw_egress = inputs.secrets.is_empty();` —
+  the raw-vs-wire admission choice Phase 3 is supposed to delete is the live
+  selector.
+
+So every admitted workload today speaks `Wire` or `Raw`, and the converged path
+is unreachable machinery. Two consequences that change the plan:
+
+1. **Phase 3's last checkbox cannot be executed as written.** Deleting
+   `EgressMode`, `raw_egress`, and the raw-vs-wire choice would remove the only
+   modes production uses and break all egress. The real remaining work is
+   *switch production onto FlowMux*, and only then delete the legacy modes.
+2. **Phase 2's and Phase 3's remaining boxes are one piece of work.** Phase 2
+   owes "a failed FlowMux session prevents workload readiness"; Phase 3 owes
+   "every flow type reaches one pipeline". Neither is meaningful until the
+   production spawn carries a FlowMux identity. They should land together.
+
+That work changes the egress path for every workload on every backend, so it
+needs a live witness before merge, not just unit tests. It belongs with the
+hardware-blocked set rather than the free-running set.
+
+## Current disposition — 23 open
+
+| Issue | Owning plan | Disposition                                                              | Phase |
+| ----- | ----------- | ------------------------------------------------------------------------ | ----- |
+| #2135 | —           | Security lane red; PR #2472 open, run 31817896244 pending                | 0     |
+| #2101 | ADR-001     | Kernel defect fixed by #2102; OCI `NoNewPrivs` + capability bound remain | 1     |
+| #2107 | —           | Audit tracing mirror absent from `main`                                  | 2     |
+| #2211 | research    | eBPF spike on branch only; scope decision required                        | 2     |
+| #2299 | 299         | Launch baseline not trustworthy; absorbs #2347                            | 3     |
+| #2280 | 299         | Substrate evidence matrix; absorbs #2281; blocked by #2299                | 3     |
+| #2336 | 298         | Firecracker post-restore handshake; blocks the whole warm chain           | 4     |
+| #2194 | 298         | Apple Silicon parent contract; absorbs #2193 residual                     | 4     |
+| #2196 | 298         | Firecracker warm backend; absorbs #2193 residual; blocked by #2336        | 4     |
+| #2195 | 298         | Fixed read-only share slots                                               | 4     |
+| #2197 | 298         | Resident-process hardening                                                | 4     |
+| #2198 | 298         | Warm contract + 1,000-claim gate; absorbs #2199                           | 4     |
+| #2256 | 306         | Plan 306 not started; seven workstreams                                   | 5     |
+| #2368 | 316         | Umbrella; Phases 0–1 done, 2–8 open                                       | 6     |
+| #2371 | 316         | Phase 2 — two verified gaps plus the fail-closed assertion                | 6     |
+| #2372 | 316         | Phase 3 — 6 of 7 boxes merged                                             | 6     |
+| #2373 | 316         | Phase 4 — typed transformations                                           | 6     |
+| #2374 | 316         | Phase 5 — declared ingress                                                | 6     |
+| #2375 | 316         | Phase 6 — compatibility boundary; gated on a release, not just on code    | 6     |
+| #2376 | 316         | Phase 7 — delete L3                                                       | 6     |
+| #2377 | 316         | Phase 8 — permanent gate; should land with #2376                          | 6     |
+| #2169 | —           | Bounded inspector contract; absorbs #2166 residual                        | 7     |
+| #2083 | —           | Studio launcher; external dependency on `mvm-studio#18`                   | 7     |
+
+Three of the 23 are blocked on things this repository does not control: #2299
+and #2280 need a Linux host with `/dev/kvm` **and** NVMe that does not exist
+yet, and #2083 needs `mvm-studio#18` to freeze a handshake. Those are called
+out per phase below rather than left to be rediscovered.
+
+## Phase 0 — Restore evidence quality
+
+While the Security lane is red, several numbered ADR-001 claims have no live
+evidence behind them. Nothing else in this plan is worth more than that.
+
+- [ ] **#2135 — restore the Security lane.** PR #2472 accepts the remaining
+      backend and runtime mutation survivors in the pinned baseline with reasons
+      pointing at live backend integration tests and BDD scenarios; the
+      pin-only surface gate passes. The prior repair reduced the accepted
+      baseline from 83 to 68 without adding a waiver, added direct witnesses for
+      the contract's omitted resource-control default and for hostd's exact
+      broker byte limit, admitted-digest equality, host CPU mechanism truth
+      table, explicit deferred-audit flush and drop-time flush, and fixed three
+      test-infrastructure races found by successive exact runs (Linux `ETXTBSY`
+      on freshly published shutdown-hook fixtures, a parallel CLI test observing
+      another test's host CPU ceiling, and guest-console tests sharing
+      process-global session state). Merge gate: a clean exact Linux Security
+      workflow run. Close gate: a subsequent **scheduled or release** run green.
+      Do not close on a `workflow_dispatch` run.
+
+## Phase 1 — Close the remaining privilege gap
+
+- [ ] **#2101 — finish OCI privilege hardening.** The kernel-selection defect is
+      fixed on `main` by PR #2102 (`343eccce1`): the workload path accepts only
+      the dedicated workload kernel, a default-microVM kernel is no longer a
+      fallback, and regression tests cover dev and prod cache layouts. What
+      remains is the second finding, which was always independent of the kernel
+      question and is unchanged by the correction:
+      `crates/mvm-agentd/src/bin/mvm-oci-init.rs` contains no `no_new_privs` or
+      bounding-set call, so the OCI workload process runs with `NoNewPrivs: 0`
+      and a full `CapBnd` of `000001ffffffffff` on **both** priority backends.
+      - [ ] Narrow the issue body to this remaining decision; the `NAMESPACES`
+            and HVF-property claims in the original report are withdrawn and
+            should not survive in the issue text.
+      - [ ] Decide and record whether ADR-001 claims 1 and 2 scope to mkGuest
+            *services* only, where W2.3 already applies, or extend to the OCI
+            workload process. This is an owner call and blocks the fix shape.
+      - [ ] Define the minimal capability set the authenticated activation and
+            restore paths actually require, then apply `no_new_privs` and the
+            bounding set before workload exec.
+      - [ ] Test setuid binaries, file capabilities, user-namespace attempts,
+            wrong kernels, and syscall failure paths.
+      - [ ] Re-run the adversarial probe from
+            `specs/research/no-root-workload-live-witness.md` on HVF **and**
+            Firecracker before closure. The outcome today holds by circumstance
+            — the image ships zero setuid binaries and the rootfs is read-only —
+            not by the named mechanism, so a probe that merely reports the
+            starting uid does not close this.
+
+## Phase 2 — Observability, without coupling it to evidence
+
+Both items must not be able to weaken the audit chain or the sealed guest.
+
+- [ ] **#2107 — mirror audit appends into tracing.** Emit one sanitized event at
+      a dedicated target after each **successful** signed append, carrying only
+      the fields the verified reader would expose: event kind, tenant, machine,
+      plan id, timestamp, sequence. Share the verified-reader projection so
+      field selection cannot drift between the two. Prove exact event parity,
+      the secret/env/credential/key/host-path/policy-payload exclusions,
+      byte-identical chain output with the mirror enabled and disabled, and that
+      a panicking or blocking subscriber cannot alter append success, ordering,
+      or latency. mvm emits only; no subscriber machinery ships here.
+- [ ] **#2211 — settle the eBPF spike's contract.** The spike is on
+      `feat/ebpf-vsock-egress-telemetry` and **not on `main`**: there is no
+      `crates/mvm-ebpf-egress` in the tree. Decide one of two outcomes and
+      execute it rather than leaving the issue to accrete:
+      - Narrow to the landed Linux connection-observation spike, merge that, and
+        refile byte accounting, latency attribution, and IPv6 as separate work;
+        **or**
+      - complete the original `(plan_id, vm_id, destination, bytes, latency)`
+        tuple, attributing bytes and latency to the same plan/VM/destination
+        binding, validated against the real `mvm-network-endpoint` on Linux.
+
+      Either way: declare the macOS and no-target behavior explicitly, keep
+      `BPF_SYSCALL` disabled in sealed workload kernels, add no guest-NIC or
+      eBPF data plane for egress, and note that the spike's own text still says
+      `mvm-substitution-endpoint` — that role is renamed on `main` and the
+      issue needs updating with it.
+
+## Phase 3 — Make performance evidence trustworthy before optimising against it
+
+**Externally blocked.** Both items need a Linux host with `/dev/kvm` and NVMe.
+Provisioning that host is the first action in this phase and nothing else here
+starts without it.
+
+- [ ] **#2299 — establish one trustworthy launch baseline.** Absorbs #2347.
       Define a backend-neutral interval from vCPU start to authenticated agent
-      readiness, instrument both HVF and Firecracker at the same boundaries,
-      and publish side-by-side kernel timestamps and initcall/agent-start
-      attribution. Name the dominant contributor with evidence; reach <150 ms
-      on Firecracker or record the architectural reason and revised contract.
-- [ ] **#2280 — finish the kernel/boot-substrate matrix.** Run the landed
-      20-sample/two-warmup report gate on native HVF and Firecracker without
-      degraded host services. Publish artifact sizes, kernel symbols, readiness,
-      whole-VMM working set, first-command fault deltas, and warm-restore cost
-      for matching shapes. Every removed feature needs boot and security
-      witnesses, and the canonical table must feed Plan 299 release gates.
-- [ ] **#2281 — make the filesystem adopt/decline decision.** Compare the
-      existing ext4/overlay/verity path and one guest-local immutable lower
-      candidate on the same fixture and security tier. Measure preparation,
-      readiness, first access, working set, and multi-claim density; test
-      xattrs, whiteouts, verity failure, read-only enforcement, CoW cleanliness,
-      and tenant isolation. Record the decision without creating another cache
-      graph.
-- [ ] **#2347 — re-baseline the launch contract on NVMe.** Provision or identify
-      a Linux `/dev/kvm` host with NVMe, re-run the launch baseline, publish it
-      beside the current rotational numbers, and re-scope fsync-bound work
-      against the NVMe baseline. Define the storage class for the ≤200 ms
-      contract.
+      readiness and instrument HVF and Firecracker at identical boundaries, so
+      the two numbers are subtractable — today `guest_kernel_entry_ms` reads
+      0.038 ms on every Firecracker sample, which means the guest was already
+      serving when the first readiness poll ran. Provision the NVMe `/dev/kvm`
+      host, re-run the baseline, and publish it beside the rotational numbers
+      from the 7200rpm host. State in Plan 299 which storage class the ≤200 ms
+      contract is defined against; an SLO without one is not checkable. Re-scope
+      the fsync-bound work against the NVMe result. Then publish side-by-side
+      kernel timestamps with initcall and agent-start attribution, name the
+      dominant contributor with evidence rather than from a console gap, and
+      either reach <150 ms guest boot on Firecracker or record the architectural
+      reason the backends cannot converge plus the revised contract. Do not
+      retry virtio-rng (0 ms delta) or the i8042 probes (~8 ms, inside noise)
+      without new evidence.
+- [ ] **#2280 — publish the substrate evidence matrix.** Absorbs #2281. Blocked
+      by #2299 — measured before the baseline is trustworthy, this matrix
+      inherits the same storage tax and the same non-subtractable boot interval.
+      Run the landed 20-sample/two-warmup gate on native HVF and native
+      Firecracker with no degraded host services, and publish **one** canonical
+      table: artifact sizes raw and compressed, initramfs size, built-in driver
+      and boot-probe set with symbol counts, time to first guest instruction,
+      time to authenticated readiness, whole-VMM working set, first-command
+      fault deltas, and cold plus warm-restore fault cost. Compare the existing
+      ext4/overlay/verity path against one guest-local immutable lower-layer
+      candidate on the same fixture and the same security tier, with
+      negative-path tests for xattrs, whiteouts, verity failure, read-only
+      enforcement, CoW cleanliness, and tenant isolation. Record both
+      adopt/decline decisions in Plan 299; neither may introduce a second cache
+      graph. Every removed kernel feature needs a boot/readiness witness and a
+      security witness, and the table feeds the release performance gates.
 
-## Phase 4 — Make the warm pool usable, then prove it
+## Phase 4 — Make the warm pool work, then prove it
 
-The executable dependency order is:
+Strict order. Each step's live validation is the next step's precondition.
 
 ```text
 #2336 Firecracker post-restore identity handshake
-    -> #2193 verified artifact prewarm
-    -> #2194 HVF parent / #2196 Firecracker parent
-    -> #2195 fixed read-only shares
-    -> #2197 resident-process hardening
-    -> #2198 CLI timing and refusal contract
-    -> #2199 1,000-claim release matrix
+    -> #2194 HVF parent  |  #2196 Firecracker parent   (parallel)
+        -> #2195 fixed read-only shares
+            -> #2197 resident-process hardening
+                -> #2198 CLI contract + 1,000-claim release gate
 ```
 
-- [ ] **#2336 — diagnose and fix the Firecracker post-restore identity
-      handshake.** Capture the full `signal.post_restore` error chain, determine
-      whether the failure is in the vsock connection state after snapshot
-      restore, the child's CID/port mapping after fork, or the authenticated
-      session itself, then fix it. This is the single point of failure blocking
-      the whole Firecracker warm-claim chain.
-- [ ] **#2193 — connect asynchronous prewarm to real factories.** Feed the
-      bootless prepared shape through the existing content-addressed jobs and
-      authenticated readiness verifier. Test hit, miss, corruption,
-      invalidation, concurrency, restart recovery, and source mismatch before
-      either backend advertises capacity.
+- [ ] **#2336 — diagnose, then fix, the post-restore identity handshake.** The
+      single point of failure blocking every Firecracker warm claim. **Diagnosis
+      first — the recorded cause is known-wrong.** The console line
+      `authenticated control handshake failed: Failed to read frame length` is a
+      red herring: `probe_ready` in `crates/mvm-vmm/src/post_restore.rs` connects
+      and drops without a handshake, and the guest speaks second, so every 50 ms
+      readiness probe produces that line during any restore. It also proves the
+      host key *did* reach the guest, because `handle_client` would otherwise
+      have returned the earlier `rejecting control connection without a pinned
+      host key`. Plan 255 BUG-2's diagnosis therefore does not describe this
+      failure.
+      - [ ] Re-run the claim capturing complete stderr (`2>&1 | tail -60`, no
+            grep) to obtain the full `Caused by:` chain under
+            `signaling post-restore`. `probe_ready` succeeded, so the failure is
+            inside `signal.post_restore(vm_name)`.
+      - [ ] Candidates once that is in hand: the host-side
+            `AuthenticatedSession::host` handshake over a vsock connection whose
+            state did not survive snapshot restore, or the child's vsock CID/port
+            mapping after fork.
+      - [ ] Check `factory_parent_config`'s standing caveat as part of the fix: a
+            factory parent holds no plan, so it emits no `mvm.verb_grant=`,
+            `mvm.require_grant=` or `mvm.host_signer_pub=` cmdline tokens, and a
+            child inherits its parent's cmdline out of restored memory rather
+            than deriving its own. That divergence reaches every child by
+            construction whether or not it causes this failure.
+      - [ ] Keep the fail-closed posture. Refusing a child that cannot prove it
+            reseeded is correct — that is the twin-CSPRNG case the fresh-identity
+            guarantee exists to prevent. The defect is that the handshake cannot
+            succeed at all, not that it refuses.
+      - [ ] Reproduce and verify on a KVM host: `mvmctl pool warm 1 --image
+            alpine`, then `MVM_RESIDENCY=warm MVM_HVF_WARM_REQUIRE_CLAIM=1
+            mvmctl machine run --image alpine -- /bin/true`. Publish the claimed
+            launch against the cold baseline of 549.8 / 564.7 / 554.4 ms
+            `backend_start`.
 - [ ] **#2194 — finalize the Apple Silicon parent contract.** Decide and record
-      whether the supported path is signed paused-parent handoff or a true CoW
-      child restore. Prove fresh identity/authority/channels, failure
-      quarantine, restart recovery, live readiness, and honest capability bits
-      on a release Apple Silicon build.
-- [ ] **#2196 — finish Firecracker warm claims on KVM.** Validate factory
-      capture, paused-child materialization, identity and grant delivery,
-      device/network restrictions, cleanup, quarantine, and restart recovery
-      on the exact merged source. Production admission must refuse until the
-      full live matrix passes.
-- [ ] **#2195 — bind fixed read-only share slots at claim time.** Use opened
-      directory handles rather than path re-resolution, reject symlink/race/
-      disappearance and writable expansion, keep host paths and contents out
-      of pool keys and saved state, and make unsupported backends refuse warm
-      mode rather than report a cold fallback as warm.
-- [ ] **#2197 — harden resident workers by platform.** On Linux apply
-      no-new-privileges, capability drop, seccomp/Landlock or the documented
-      equivalent, resource limits, and inherited-FD allowlists. On macOS use
-      process separation, restrictive entitlements, handle-scoped access, and
-      explicit ownership. Test unauthorized file/socket/signal access,
-      privilege retention, cleanup, and compromise boundaries.
-- [ ] **#2198 — make warm outcomes user-visible and exact.** Surface stable
-      pool-wait, claim, share-bind, restore, and warm-window fields; distinguish
-      warm success, cold success, refusal, and failure in text and JSON; add
-      explicit `--cold` and warm-required behavior; test exactly 300 ms and
-      prove command/teardown time cannot relabel a cold run as warm.
-- [ ] **#2199 — run and gate the 1,000-claim matrix.** Cover every advertised
-      backend, representative CPU/memory and image shapes, no-share and
-      supported read-only shares, cache state, and explicit cold comparison.
-      Retain all outliers and publish p50/p95/p99/max/refusal rate; CI fails at
-      `>=300 ms`, p50 >30 ms, p99 >50 ms, or any mislabeled fallback.
+      whether the supported path is a signed paused-parent handoff or a true CoW
+      child restore; the substrate for both is landed (snapshot frame encoder,
+      AArch64 register codec, device-state container with PL011/virtio-blk/
+      virtio-fs/virtio-rng codecs, vsock control-state codec that fails closed on
+      bound host endpoints or live sessions, acknowledged pause boundary, exact-
+      size private COW remap, `VsockHostBindings` rebind). Prove fresh identity,
+      authority and channels, failure quarantine, restart recovery, and live
+      readiness on a **release** Apple Silicon build. Wire the disposable-VM
+      factory to the shared golden-VM readiness verifier (from #2193) and assert
+      warm claims are lookup-only. Capability bits stay honest: do not advertise
+      standby until in-kernel interrupt-controller state is proven safe across
+      restore and a sub-300 ms measurement is recorded.
+- [ ] **#2196 — finish Firecracker warm claims on KVM.** Blocked by #2336.
+      Validate factory capture, paused-child materialization, identity and grant
+      delivery, snapshot device/network restrictions, cleanup, quarantine, and
+      restart recovery on the exact merged source. Wire the backend factory to
+      the readiness verifier and assert lookup-only claims. Production admission
+      refuses until the full live matrix passes; no claim may silently become
+      cold. Directory-share warm eligibility stays separate — Firecracker has no
+      equivalent of the macOS share solution.
+- [ ] **#2195 — bind fixed read-only share slots at claim time.** Fixed
+      share-slot topology in golden VMs; typed guest tag/path/read-only shape;
+      claim-time validation and binding through **opened directory handles**
+      rather than path re-resolution; child VMM built with an identical device
+      layout and a newly bound directory. Reject symlink, race, non-directory,
+      disappeared-directory, and writable-expansion cases fail-closed. Host paths
+      and directory contents stay out of pool keys, compatibility records, and
+      snapshots. A backend that cannot bind before resume refuses warm mode
+      rather than reporting a cold launch as warm.
+- [ ] **#2197 — harden the resident workers by platform.** Linux: seccomp,
+      Landlock where applicable, namespaces and cgroups, no-new-privileges,
+      dropped capabilities, resource limits, inherited-FD and socket allowlists.
+      macOS: process separation, restrictive entitlements, handle-scoped
+      directory access, no ambient unrelated host paths, explicit share-worker
+      ownership and lifecycle. Document the two platforms' guarantees
+      separately — they are not the same guarantee. Test unauthorized file,
+      socket and signal access, privilege retention, inherited-resource cleanup,
+      and the worker-compromise boundary. A granted share must not expand into
+      arbitrary host access.
+- [ ] **#2198 — make warm outcomes exact, then gate them.** Absorbs #2199.
+      Surface `pool_wait_ms`, `claim_ms`, `share_bind_ms`, `backend_restore_ms`,
+      `warm_window_ms` as stable fields; distinguish warm success, cold success,
+      warm refusal and warm failure in text and JSON; add explicit `--cold` and
+      warm-required behavior; separate launch readiness from command execution
+      and teardown so neither can relabel the result; test the exact 300 ms
+      boundary. Then run ≥1,000 claims per advertised backend/share/shape/cache
+      combination with **no outliers discarded**, publish p50/p95/p99/max/refusal
+      rate and the cold comparison, and fail CI on a mislabeled warm claim, on
+      max reaching 300 ms, or on p50 >30 ms / p99 >50 ms per Plan 297. Keep the
+      workload benchmark (e.g. Python dependency installation) separate.
 
 ## Phase 5 — Governance and tier honesty
 
-- [ ] **#2256 — execute Plan 306 in its recorded order.** Land declared-backing
-      headers and a failing self-test; derive the ADR-001 backend matrix from
-      `capabilities()`; refuse unfaithful egress and add the pre-run probe;
-      state and classify the check-time law; pin deny-wins/default-deny
-      predicate algebra and deny-loud escalation; freeze audit JCS replay
-      vectors including non-ASCII, >2^53 integer, and float refusal; then
-      double-key stale-name exemptions. Each workstream updates its plan box,
-      sprint, and rollup only after its tests pass.
+- [ ] **#2256 — execute Plan 306 in its recorded order.** Seven workstreams;
+      WS1 and WS3 first because WS1 closes a defect this repository has already
+      been bitten by and WS3 converts two known silent degradations into loud
+      refusals.
+      - [ ] **WS1** — declared-backing headers on claim-bearing contributor
+            prose. `check-doc-claims` scans only `public/` and the root README
+            by design, which is exactly why fabricated witness names lived in
+            `specs/`, `CLAUDE.md` and `AGENTS.md` for months. Add a
+            `Backing:`/`Validation:` header with an enum, a one-way citation
+            rule (a `shipped-source` file may not rest on a `preview` one), and
+            a `--self-test` that seeds a violation and asserts nonzero exit.
+      - [ ] **WS3** — refuse what cannot be enforced exactly. Transient-lifecycle
+            egress resolves to `AllowAll` on libkrun and HVF, and
+            `up --network-allow` on libkrun enforces nothing. Convert both to
+            typed refusals and add a fail-closed probe **before** the workload
+            runs; today the gate is asserted wired by construction but the
+            running host is never asked whether it took.
+      - [ ] **WS4** — state the check-time law in ADR-001: *an effect may be
+            checked no later than its last undo point*, with a column
+            classifying each governed effect as checked-before or
+            checked-at-commit.
+      - [ ] **WS2** — derive the ADR-001 per-backend tier matrix from
+            `capabilities()` rather than maintaining it by hand. Unblocked:
+            #2248 made it computable.
+      - [ ] **WS5** — pin the egress predicate algebra: deny-wins within a
+            grant, union across grants, default-deny absent any admitting grant,
+            and an unrecognised operator raises rather than falling through to
+            allow. Replaces the env-var escape hatch with a verdict that denies.
+      - [ ] **WS6** — freeze JCS replay vectors for `CanonicalEntry`'s signed
+            bytes, covering the three cases where independent implementations
+            diverge and today's vectors cover none: non-ASCII, integers above
+            2^53, and float rejection. `mvm-contract` is meant to reach the
+            browser, so a second verifier is coming.
+      - [ ] **WS7** — double-key the stale-name relief valves so an exemption
+            needs both a marker and an enumerated reason, and the list is
+            visibly shrinking.
+
+      Not in scope, per the issue: the grant riding the function parameter does
+      not transfer here — the grant must stay detached so a supervisor that
+      never sees the source can sign and verify it.
 
 ## Phase 6 — Complete the single FlowMux networking path (Plan 316)
 
-Plan 316 Phases run strictly in order. Phase 0 (#2369) and Phase 1 (#2370) are
-already complete. Update the umbrella issue #2368 to mark Phase 1 done and
-Phase 2 actionable, then execute the remaining phases in order:
+Ordering was the plan's main safety property and it has already slipped: Phase 3
+is six of seven boxes merged while Phase 2 has verified gaps. Close Phase 2's
+residue before starting anything after Phase 3.
 
 ```text
-#2368 umbrella
-    -> #2371 Phase 2 — authenticated endpoint
-        -> #2372 Phase 3 — converge egress TCP/UDP/DNS
-            -> #2373 Phase 4 — stream typed transformations
-                -> #2374 Phase 5 — declared ingress on FlowMux
-                    -> #2375 Phase 6 — compatibility boundary
-                        -> #2376 Phase 7 — delete L3 completely
-                            -> #2377 Phase 8 — mechanically enforce one path
+#2371 Phase 2 residue  ->  #2372 Phase 3 (finish)
+    -> #2373 Phase 4 -> #2374 Phase 5 -> #2375 Phase 6 -> #2376+#2377 Phases 7+8
 ```
 
-- [ ] **#2371 — Phase 2: introduce the one authenticated endpoint.** Rename the
-      production role to `mvm-network-endpoint`, rename `GuestService::Substitution`
-      to `NetworkFlow`, authenticate one long-lived FlowMux session before
-      accepting frames, add bounded per-stream registries and graceful shutdown,
-      and keep legacy dispatch behind a transition adapter that calls the new
-      endpoint's canonical functions.
-- [ ] **#2372 — Phase 3: converge egress TCP, UDP, and DNS.** Replace raw
-      preludes with typed frames, move parsing/DNS/rate/audit into one pipeline,
-      delete `EgressMode` and protocol sniffing, and add integration tests for
-      deny-all, pinning, concurrent flows, and endpoint crash.
-- [ ] **#2373 — Phase 4: stream typed transformations over the same path.**
-      Replace whole-body JSON exchange with bounded streaming frames, route
-      typed connectors through the endpoint, apply substitution/redaction as an
-      explicit admitted flow class, and prove split-frame secret detection.
-- [ ] **#2374 — Phase 5: implement declared ingress on FlowMux.** Move
-      `L3IngressMapping` to a transport-neutral signed plan, bind listeners only
-      after admission, implement TCP/UDP and HTTP/TLS ingress with host-owned
-      certificates, and remove the second listener process/policy type.
-- [ ] **#2375 — Phase 6: set the compatibility boundary.** Keep loopback proxy,
-      SOCKS5h, SOCKS5 UDP, DNS stub, ping helper, and typed connectors as the
-      supported surfaces; reject `raw_ip_stack` and close Plan 278; document that
-      unsupported traffic has no route.
-- [ ] **#2376 — Phase 7: delete L3 completely.** Remove `mvm-contract::l3`,
-      `mvm-net/src/l3/`, `mvm-agentd/src/l3/`, `mvm-hostd/src/netd/`, smoltcp,
-      `CONFIG_TUN`, and the L3-only tests and suites. This closes #2180 and
-      #2181 by making them obsolete.
-- [ ] **#2377 — Phase 8: make one path mechanically enforceable.** Replace the
-      temporary Phase-0 ratchet with `check-single-network-path`, add a socket-
-      owner gate, prove all network shapes reach the same policy/audit sink, run
-      the final `xtask network-perf` matrix, and live-witness every backend.
+- [ ] **#2371 — Phase 2 residue (rename portion landed in PR #2481).**
+      Rename `EndpointSpawner`/`RealEndpointSpawner`
+      to `NetworkEndpointSpawner`/`RealNetworkEndpointSpawner` and confirm one
+      production `spawn` in `WorkloadRunner`. Resolve the duplicate
+      `EGRESS_VSOCK_PORT = 5253` in `mvm-egress-client.rs` and `mvm-addon-dns.rs`
+      — either give the guest the typed service mapping or record why it is
+      pinned twice and gate the two values equal. Then the three assertions this
+      phase exists for: a workload whose signed plan grants networking **does not
+      reach ready** when the FlowMux session fails to authenticate; the
+      transition adapter holds no independent connect, bind, DNS, rate or audit
+      implementation, proved by test rather than convention; and no lock guard
+      crosses an `.await`. Tick each plan checkbox in the change that makes it
+      true.
+- [ ] **#2371 + #2372 — put FlowMux on the production path.** These are one
+      piece of work; see the findings section. Do this before deleting anything.
+      - [ ] Add `flowmux_identity` to `EndpointSpawnRequest` and populate it in
+            `RealNetworkEndpointSpawner::spawn` from the admitted plan's
+            session identity and verifying key. Today it is hard-coded `None`
+            and the request type has no field for it, so the converged path is
+            unreachable outside tests.
+      - [ ] Make a failed or missing FlowMux session prevent workload readiness
+            when the signed plan grants networking — fail closed, not degrade.
+            This is invariant 4 and Phase 2's central acceptance criterion.
+      - [ ] Only then delete `EgressMode` (the `mvm-hostd` one — the
+            `mvm-contract` enum of the same name is the L3 enforcement layer and
+            belongs to Phase 7), `raw_egress`, protocol sniffing, duplicate line
+            markers, and the `let raw_egress = inputs.secrets.is_empty()`
+            admission choice in `claim.rs`.
+      - [ ] Add the endpoint crash/restart integration tests.
+      - [ ] Live-witness on at least one backend before merge. This changes the
+            egress path for every workload; unit tests do not cover a
+            regression that only appears against a real guest.
+- [ ] **#2373 — Phase 4: stream typed transformations.** Replace
+      `WireRequest`/`WireResponse` whole-body JSON/base64 with `OpenHttp` plus
+      bounded streaming head/body frames, folding in Plan 313 Phase 1 so long
+      responses no longer buffer wholly or die at a 30-second total-request
+      deadline. Route typed connector execution through the endpoint; broker
+      dispatch must not be able to call `TcpStream::connect`, an HTTP client, or
+      a resolver, asserted by test. Apply substitution only after final
+      DNS/redirect admission and immediately before host TLS emission, and
+      redaction before each chunk crosses to the guest. Carry transformation as
+      an explicit admitted flow class and refuse an opaque flow when the plan
+      requires substitution — never downgrade silently. Preserve a bounded
+      overlap window at least as long as the longest configured fingerprint so a
+      split-frame secret is still caught.
+- [ ] **#2374 — Phase 5: declared ingress on FlowMux.** Move `L3IngressMapping`
+      to a transport-neutral signed-plan type, moving Rust, Python and TypeScript
+      fixtures and schemas together. Bind listeners only after admission and
+      before reporting ready; refuse duplicate binds, unsigned wildcard binds,
+      unsupported protocols and unavailable transform material. TCP ingress on
+      even stream IDs with redacted peer metadata; UDP ingress with one bounded
+      peer table per mapping, replies only to a peer that previously sent to that
+      mapping. Host-owned HTTP/TLS termination resolving certificate keys by
+      plan-bound secret reference **inside** the endpoint, never serialized to
+      the guest — a dedicated non-disclosure test. Opaque TCP ingress supported
+      but explicitly marked non-transforming, refused at admission whenever the
+      mapping requires transformation. Remove `mvm_core::ingress_broker` and
+      `ingress_handler`; exactly one listener owner survives and teardown
+      releases every socket.
+- [ ] **#2375 — Phase 6: compatibility boundary.** Keep the loopback HTTP proxy,
+      SOCKS5h, SOCKS5 UDP, controlled DNS stub, mediated ping helper and typed
+      SDK connectors as the supported surfaces, all terminating in the same
+      FlowMux client. **Release-gated, not code-gated:** hold the Phase-0
+      `raw_ip_stack=true` rejection through the migration release and only then
+      remove the flag from the Rust IR, both SDKs, schemas, examples, docs and
+      fixtures — never a silent reinterpretation. Close Plan 278 as rejected,
+      recording that no compatibility concession sets `DUMPABLE=1`, adds
+      `CAP_SYS_PTRACE`, reads workload memory, or installs seccomp
+      user-notification. Document plainly that unsupported traffic shapes have
+      **no route**, not a second stack. BDD: proxy-aware app works, typed
+      connector transforms, non-cooperative direct socket fails closed.
+- [ ] **#2376 + #2377 — Phases 7 and 8, landed together.** Phase 8 replaces the
+      temporary Phase-0 ratchet (`xtask check-l3-expansion-freeze`) with the
+      permanent `check-single-network-path`, and Phase 7 deletes the tree that
+      ratchet watches. Merged separately they leave a window with no gate over
+      the invariant, so land them as one change or land the permanent gate first
+      in shadow mode.
+      - Phase 7: delete `mvm-contract::l3`, `NetworkMode`, `L3NetworkSpec`,
+        `L3IngressMapping`, `mvm-net/src/l3/`, `mvm-agentd/src/l3/`,
+        `mvm-net-agent`, guest `mvm0` setup, `mvm-hostd/src/netd/`, the
+        `mvm-netd` bin, host TUN/netns/nftables setup, the smoltcp datapath,
+        `mvm-vmm::host::netd_spawn`, and smoltcp itself. Update `Cargo.lock`,
+        `deny.toml`, closure-budget baselines, release packaging, Nix
+        derivations, kernel configs (drop the `CONFIG_TUN` requirement), scripts
+        and CI path filters. Rewrite protocol-independent security scenarios
+        from `s25_l3_vsock` against FlowMux; delete only those whose asserted
+        capability is intentionally unsupported. `cargo machete`, `cargo deny
+        check`, `cargo audit`, the duplicate-major gate and the closure-budget
+        gate must pass with no L3-only dependency or binary left.
+      - Phase 8: `check-single-network-path` asserts exactly one production
+        network endpoint bin, exactly one production spawn implementation, every
+        workload backend binding `NetworkFlow`, and no forbidden
+        raw-packet/NIC/gateway symbols outside historical specs. Add a
+        socket-owner gate permitting outbound `connect` and workload listener
+        `bind` only in the endpoint plus enumerated non-workload host
+        infrastructure, testing a forbidden synthetic call and every exemption.
+        Add a signed-plan projection test proving TCP, UDP, DNS, ingress and
+        typed connectors reach the same policy object and audit sink. Run the
+        final `xtask network-perf` matrix against the Phase-1 baselines: opaque
+        TCP/UDP p50 and p95 may regress ≤5%, throughput ≥95%, peak RSS ≤+10%;
+        typed transformed HTTP may regress ≤10% while gaining bounded streaming.
+        Any exception needs a measured root cause and owner approval recorded in
+        Plan 316 before merge. Live-witness Firecracker on Linux/KVM and HVF on
+        macOS, and libkrun on every supported host OS, each covering deny-all,
+        admitted TCP, DNS, UDP, typed substitution, declared ingress, endpoint
+        crash, no guest NIC, and absence of L3 services.
+- [ ] **#2368 — close the umbrella last**, once Phases 2–8 are complete and the
+      definition of done holds: no production L3/raw-packet workload networking
+      code and no second ingress or egress socket owner; an admitted workload has
+      either no `NetworkFlow` capability or exactly one authenticated FlowMux
+      endpoint with no transport selector; every shape shares one policy
+      projection, resource budget, session identity, audit sink and endpoint
+      lifecycle; claims 5, 8, 10, 12, 13 remain `Shipped` and preview claim 16
+      retains positive, negative, split-frame, wrong-destination and audit-leak
+      witnesses.
 
-## Phase 7 — Complete the agent and Studio surface
+## Phase 7 — Agent and Studio surface
 
-The durable session (#2167), runtime approval (#2168), typed bindings (#2170),
-and SDK parity (#2163) are already closed. Remaining order:
+**Externally blocked** on `mvm-studio#18` for the handshake contract.
 
-```text
-#2169 bounded inspector -> #2083 versioned launcher -> #2166 epic closeout
-```
-
-- [ ] **#2169 — expose the bounded inspector through shared contracts.** Add
-      live/history cursors, bounded/redacted output, process state, capability
-      discovery, posture-authorized filesystem and stop actions, and consistent
-      local/gateway errors. Test reconnect, stale cursor, replay prevention,
-      denied and failed mutations, audit emission, teardown, and secret
-      exclusion.
-- [ ] **#2083 — coordinate and implement the versioned Studio launcher.**
-      Freeze the matching server handshake with `mvm-studio#18`; locate only a
-      sibling or managed artifact; reject symlinks and unsafe ownership/mode;
-      use a private inherited readiness channel; keep credentials out of argv,
-      logs, errors, and state; refuse production/fleet/unknown posture; and
-      prove version mismatch, timeout, child failure, Ctrl-C, reaping, package
-      pairing, and an authenticated loopback inventory page.
-- [ ] **#2166 — close the parent epic last.** Update its child ledger to show
-      #2167, #2168, and #2170 complete, then close only after #2169 and #2083
-      merge and an end-to-end agent session reconnects through the shared
-      contracts without weakening admission, audit, or production-shell
-      restrictions.
+- [ ] **#2169 — expose the bounded inspector through shared contracts.** Live and
+      history cursors with durable-event recovery; bounded, redacted output;
+      process tree, output tails, exit state; posture-authorized filesystem and
+      stop/kill actions; capability discovery and versioned negotiation so Studio
+      renders only what the target backend and posture support; consistent local
+      and gateway errors. Test reconnect, stale cursor, replay prevention, denied
+      and failed mutations, audit emission, teardown, and secret exclusion.
+      Inspector access never implies production shell or exec; a stale or
+      disconnected inspector cannot silently repeat a destructive action; both
+      backends fail closed when they cannot enforce the requested operation.
+      Carries #2166's transferred criterion: an end-to-end agent session
+      reconnects through these contracts without weakening admission, audit, or
+      the production-shell restriction, and Studio adds no private API.
+- [ ] **#2083 — the versioned Studio launcher.** Freeze the matching server
+      handshake with `mvm-studio#18` first. Locate only a sibling artifact beside
+      `mvmctl` or the managed artifact under `MVM_HOME/bin`; never a
+      user-supplied path, never through a shell, never via PATH discovery.
+      Reject symlinks and unsafe ownership or mode. Handshake before opening a
+      browser; open only after Studio reports readiness over a private inherited
+      channel. Keep credentials out of argv, logs, errors and persisted state.
+      Refuse production, fleet, or unknown posture. Forward Ctrl-C, reap the
+      child, surface typed startup failures. Tests: help, missing artifact,
+      incompatible version, invalid permissions/symlink, readiness timeout, child
+      failure, production refusal, clean shutdown, and an end-to-end dev launch
+      reaching an authenticated loopback inventory page without orphaning the
+      server. Document deterministic version-paired packaging.
 
 ## Final reconciliation gate
 
-- [ ] Every issue from the current 31-issue set has a final disposition and
-      linked evidence.
-- [ ] Every active requirement has exactly one issue and one owning plan; no
-      acceptance criterion exists only in a comment or in this rollup.
-- [ ] Host workspace tests are green; Linux-only clippy, Nix, Firecracker,
-      KVM, kernel, and privilege witnesses ran in the project builder VM.
+- [ ] Every issue from the 23-issue set has a final disposition with linked
+      evidence.
+- [ ] Every active requirement has exactly one issue and one owning plan. No
+      acceptance criterion exists only in a comment or only in this rollup.
+- [ ] Host workspace tests green; Linux-only Clippy, Nix, Firecracker, KVM,
+      kernel and privilege witnesses run in the project builder VM.
 - [ ] `specs/SPRINT.md`, this plan, and `specs/REFACTOR-STATUS.md` agree.
 - [ ] A fresh GitHub query contains no completed or superseded open issue.

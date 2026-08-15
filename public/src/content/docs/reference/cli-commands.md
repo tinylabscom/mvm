@@ -123,6 +123,15 @@ guest-RPC surface, fleet-shaped workflows).
 | `mvmctl env cleanup --keep <N>` | Keep the N newest build revisions |
 | `mvmctl env cleanup --verbose` | Print each cached build path that gets removed |
 | `mvmctl env cleanup --cache` | Remove the regenerable `~/.mvm/cache` |
+| `mvmctl env cleanup --state` | `--cache` plus the regenerable subdirs `dev`, `vms`, `log`, `dev-cluster`, `mock-vms`, `tool-staging`. Preserves identity, templates, and everything not named here |
+| `mvmctl env cleanup --nuclear` | Remove **every** entry under `~/.mvm`, leaving the (0700) root directory itself in place. Defined by subtraction, so a state directory added by a future subsystem is covered without editing a list. Always requires typing `DELETE-EVERYTHING` at an interactive prompt; `--yes` does not bypass it |
+| `mvmctl env cleanup --nuclear --keep-identity` | As above, but spares the material a rebuild cannot regenerate: `keys`, `audit`, `attestation`, `secrets`, `secret-bindings`, `egress-ca`, `.secret-store.key`, `snapshot.key`, `config.toml`. Past audit logs stay verifiable. Templates, images, machines, checkpoints and snapshots still go |
+| `mvmctl env cleanup --<tier> --dry-run` | Print the paths a tier sweep would remove, with sizes, and remove nothing |
+| `mvmctl env cleanup --<tier> --force` | Let the sweep proceed even when a VM appears to be running. Wiping live VM state corrupts the running guest — use only when the PID file is known stale |
+
+To reclaim disk without losing anything unrecoverable, `--nuclear --keep-identity`
+is the command. `mvmctl env uninstall --all` also wipes `~/.mvm`, but it removes
+`/var/lib/mvm` and the `mvmctl` binary too, and needs `sudo`.
 
 ## Manifests
 
@@ -184,6 +193,13 @@ guest-RPC surface, fleet-shaped workflows).
 | `mvmctl trust audit publish-root [--tenant <t>]` | Build, sign, and publish a Merkle transparency-log root over the tenant's chain-signed audit log to `~/.mvm/audit/<tenant>.root.json`. Only builds over a chain that verifies clean |
 | `mvmctl trust audit prove <selector> [--tenant <t>] [--json]` | Emit an inclusion proof that one audit line is in the log, paired with the current signed root. `<selector>` is a numeric line index, a `plan_id`, or `sha256:<hex>` of the exact line; an ambiguous selector is refused |
 | `mvmctl trust audit verify-inclusion --proof <file\|-> [--root <file>] [--pubkey <file>] [--tenant <t>]` | Verify an inclusion proof against a host-signed root: verifies the signed root under the trusted host key, checks its tenant, verifies the proof, and binds root_hash + tree_size. Nonzero exit naming the failed check |
+| `mvmctl trust audit provenance export [--tenant <t>] [--local] [-o <path>]` | Export the chain-signed audit log as W3C PROV-O/Turtle for compliance reporting |
+| `mvmctl trust audit decisions export [--tenant <t>] [--format json\|tibet] [-o <path>]` | Export cached decision records for a tenant; default format is JSON |
+| `mvmctl trust audit decisions list [--tenant <t>] [--json]` | List cached decision records for a tenant |
+| `mvmctl trust audit decisions show <decision-id> [--tenant <t>] [--json]` | Show a single decision record by its content address |
+| `mvmctl trust audit decisions trace <decision-id> [--tenant <t>] [--json]` | Trace the causal chain that led to a decision |
+| `mvmctl trust audit decisions impact <decision-id> [--tenant <t>] [--json]` | Show decisions that depend on or were caused by a decision |
+| `mvmctl trust audit decisions similar <decision-id> [--tenant <t>] [--json]` | Find cached decisions similar to the given decision |
 
 ## Local Secrets
 
@@ -448,6 +464,11 @@ guest, on any tier.
 | `mvmctl machine start <name> --dry-run --json` | Print the machine-start preflight summary as redacted JSON |
 | `mvmctl machine start <name> --json` | Print a redacted JSON start summary instead of plain text |
 | `mvmctl machine start <name> --receipt <path>` | Write a signed machine-start receipt with effective policy plus the resolved digest and start timestamp |
+| `mvmctl machine start <name> --image <ref>` | Start a persisted machine, creating its spec on demand if it does not exist. Combines `machine create <name> --image <ref>` and `machine start <name>` into one command |
+| `mvmctl machine start <name> --manifest <path>` | When auto-creating, source defaults (image, sizing, network, volumes, dev-init) from an image-backed `mvm.toml` / `Mvmfile.toml` |
+| `mvmctl machine start <name> --image <ref> --cpus N --memory SIZE` | Size the machine when auto-creating it (same defaults as `machine create`) |
+| `mvmctl machine start <name> --image <ref> --net --allow-host <host[:port]>` | Set egress policy when auto-creating the machine |
+| `mvmctl machine start <name> --image <ref> --force` | If the machine exists with a different config, stop the old instance, overwrite the spec, and start. Without `--force` a config mismatch errors |
 | `mvmctl machine restart <name>...` | Restart one or more named machines: stop if running, then start (same stop→start as a config-change recreate). This is also how a running machine picks up a newer version-matched runtime overlay. |
 | `mvmctl machine ls` (alias `ps`) | List persisted named machine specs |
 | `mvmctl machine ls --json` | Print persisted named machine specs as JSON |

@@ -70,7 +70,7 @@ impl GuestService {
         match self {
             Self::WorkloadExit => 5251,
             Self::MachineControl => 5252,
-            Self::NetworkFlow => 5253,
+            Self::NetworkFlow => mvm_contract::protocol::network_flow::NETWORK_FLOW_PORT,
             Self::NetworkControl => mvm_contract::l3::L3_CONTROL_PORT,
             Self::NetworkData { queue } => mvm_contract::l3::data_port(queue),
             Self::Broker => 5300,
@@ -317,7 +317,16 @@ mod tests {
     fn services_map_to_the_ports_both_ends_agree_on() {
         assert_eq!(GuestService::MachineControl.port(), 5252);
         assert_eq!(GuestService::WorkloadExit.port(), 5251);
+        // Pins the wire value. The constant it derives from lives in
+        // `mvm-contract` so the guest — which cannot depend on this crate —
+        // names the same number; this asserts the derivation still lands on
+        // the port deployed guests actually dial.
         assert_eq!(GuestService::NetworkFlow.port(), 5253);
+        assert_eq!(
+            GuestService::NetworkFlow.port(),
+            mvm_contract::protocol::network_flow::NETWORK_FLOW_PORT,
+            "the service mapping and the shared contract constant must not drift"
+        );
         assert_eq!(GuestService::Broker.port(), 5300);
         // Both ends of the builder control plane pin these literals: the guest
         // side in `mvm_agentd::builder_agent`, which this crate sits below.

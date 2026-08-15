@@ -61,7 +61,7 @@ mvm-build = { workspace = true, default-features = false, features = [
 # `admit_plan_for_boot` does in production.
 ed25519-dalek.workspace = true
 # Result type for the warm-claim scenario's `CheckpointChainAnchor` /
-# `EndpointSpawner` test doubles, matching the runner's own error convention.
+# `NetworkEndpointSpawner` test doubles, matching the runner's own error convention.
 anyhow.workspace = true
 tar.workspace = true
 tempfile.workspace = true

@@ -40,7 +40,7 @@ fn main() {
         },
     ];
 
-    let image = build_image(&nodes).expect("build multi-group ext4 image");
+    let image = build_image(nodes).expect("build multi-group ext4 image");
     let one_group = 32768usize * mvm_fs::ext4::BLOCK_SIZE as usize;
     assert!(
         image.len() > one_group,

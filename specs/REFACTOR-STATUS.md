@@ -1,6 +1,6 @@
 # Refactor status
 
-Last updated: 2026-08-14
+Last updated: 2026-08-13
 
 This is the cross-plan progress index. The owning plan remains authoritative
 for detailed scope and acceptance criteria.
@@ -66,7 +66,7 @@ for detailed scope and acceptance criteria.
       plan that boots. PR #2317 made admission the pre-action sync barrier,
       deferred post-hoc records without changing chain content or ordering,
       retained fail-safe sync for unknown events, and preserved torn-tail
-      detection. PR #2328 removed the redundant head fsync and added head recovery; the follow-up in this branch records the record-vs-control decision and adds torn-head coverage. The KVM `emit: receipt` re-measurement remains queued on a Linux/KVM host.
+      detection. PR #2328 removed the redundant head fsync and added head recovery. PR #2465 records the record-vs-control decision, adds torn-head coverage, and closes the issue; the KVM `emit: receipt` re-measure showed p50 ~45.4 ms on a Linux/KVM host.
 - [x] **Issue #2289 — kernel pin freshness follow-up.** Closed as completed
       by PR #2301. The libkrunfw and custom guest kernel inputs now
       synchronize on the verified Linux 6.12.103 LTS source pin, and
@@ -118,7 +118,7 @@ for detailed scope and acceptance criteria.
   - [x] Phase 2 — Enrich existing audit events with authorizer/rationale
   - [x] Phase 3 — DecisionRecord API and content-addressed store
   - [x] Phase 4 — Query API and causal chains
-  - [ ] Phase 5 — Optional standards interoperability
+  - [x] Phase 5 — Optional standards interoperability (TIBET-JSON export; C2PA/in-toto/SPDX evaluated, not adopted)
 
 - [~] Plan 325 — SDK sidecar reserved mount
   (`specs/plans/325-sdk-sidecar-reserved-mount.md`)
@@ -223,7 +223,7 @@ for detailed scope and acceptance criteria.
         lint-core passed on PR #2324; local x86_64 and aarch64 Linux
         cross-builds (`cargo zigbuild --target x86_64-unknown-linux-gnu`
         and `--target aarch64-unknown-linux-gnu -p mvm-vmm --lib
-        --all-features`) pass on current `main`. Local Linux-native
+--all-features`) pass on current `main`. Local Linux-native
         builder-VM gates are tracked in Plan 316.
 
 - [ ] Plan 316 — Local Linux builder-VM gates via `mvmctl __builder-shell-job`
@@ -297,16 +297,48 @@ for detailed scope and acceptance criteria.
   - [x] Serialize the guest-console tests that share process-global session
         state after the next exact run exposed their race; join the completion
         thread and pass 20/20 parallel stress runs
-  - [ ] Run the exact Linux Security workflow, merge the fix, and observe a
-        clean scheduled or release run before closing the issue
-- [~] Plan 300 — 31-issue reconciliation and closeout
+  - [~] PR #2472 (`fix/2135-security-lane-mutants`) accepts the remaining
+    backend/runtime survivors in the mutation-witness baseline; Security
+    workflow run 31817896244 is the final verification gate before merge
+    and issue closure
+- [~] Issue #2101 — OCI workload privilege hardening
+  - [x] `harden_init_process()` in `mvm-oci-init` narrows the bounding set to
+        `RESTORE_AGENT_CAPABILITIES` and sets `no_new_privs` before the agent
+        is spawned; `drop_workload_capability_bounding_set()` empties it in the
+        entrypoint `pre_exec`; `drop_guest_agent_privilege_raw` matches, so the
+        initramfs and OCI paths reach the same posture
+  - [x] Fixed a real bug in the drop loop: it walks slots 0..=63 but tested the
+        keep mask with `1u32 << cap`, panicking at slot 32 in debug and
+        mis-answering every slot above 31. Mask arithmetic split out and tested
+        on every host; reverting the widening turns two of three tests red
+  - [x] Ordered `NoNewPrivs` before the bounding-set drop and made the
+        workload drop tolerate `EPERM`. The drop needs `CAP_SETPCAP`, so an
+        unprivileged spawn failed outright, and because it ran first the
+        failure also skipped `NoNewPrivs` — the load-bearing control. The
+        privileged init path still fails closed
+  - [ ] Re-run the adversarial probe on HVF **and** Firecracker — the closure
+        gate, not yet run; no Linux/KVM host available
+  - [ ] Record the ADR-001 claims 1/2 scope decision (owner call; determines
+        whether this is claim-bearing or defense-in-depth)
+- [~] Plan 300 — open-issue reconciliation and closeout
   (`specs/plans/300-open-issue-closeout.md`)
   - [x] Inventory all 39 issues open at the 2026-08-13 snapshot against
         current `origin/main`, issue comments, owning plans, and workflow state
   - [x] Close eight issues on 2026-08-13: #2165, #2289, #2333, #2423 as
         completed by merged PRs; #2180, #2181, #2305, #2413 as not planned /
         superseded
-  - [ ] Execute the remaining 31 closure paths in the plan's dependency order
+  - [x] Close #2292, #2307, #2318 as completed by merged PRs
+  - [x] Second reconciliation pass 2026-08-14 against `2bc7dc2bc`: re-read all
+        28 and verified each against the tree. No issue was complete-but-stale.
+        Closed five combinations — #2347→#2299, #2281→#2280, #2199→#2198,
+        #2193→#2194/#2196, #2166→#2169 — each transferring its acceptance
+        criteria to the surviving issue in the same action. Deliberately not
+        combined: Plan 316's eight phases (the ordering is the safety property),
+        the warm-pool workstreams #2194–#2197 (different live-validation
+        surfaces), and #2135 (a generated tracker, closed by workflow state)
+  - [x] Correct Plan 316's Phase 2 status: it was marked COMPLETE with six of
+        seven boxes unchecked and two verifiably undone on `main`
+  - [ ] Execute the remaining 23 closure paths in the plan's dependency order
   - [ ] Reconcile a fresh GitHub query after every phase and at final closeout
 - [~] Runtime hardening for production — plan 303, branch
   `feat/plan-303-runtime-hardening`
@@ -396,7 +428,7 @@ for detailed scope and acceptance criteria.
     `c866611af` as Phase 5 asked: `driver_boot` is 630.5 ms, unmoved from
     623.6 ms, so the cost is real rather than a poll artifact and can be
     decomposed. It is a shell `sleep 0.1` socket poll plus ~9 curl/sudo
-    subprocesses (**#2292**). On HVF there is little left — `vmm_create`
+    subprocesses (**#2292**, closed by PR #2463). On HVF there is little left — `vmm_create`
     11.6 ms, `driver_boot` 7.8 ms — the remaining cold cost there is guest
     boot at 58.6 ms.
   - [ ] Phase 4 — parallelize independent host work
@@ -463,8 +495,9 @@ for detailed scope and acceptance criteria.
     claim-14 digests unchanged, chain still verifies. Firecracker/KVM
     repeated: the fixes hold there (both counters zero) but that backend
     misses the contract for reasons this plan does not own — residual
-    Firecracker boot work (**#2292**, **#2299**) and receipt durability on
-    the admission path (**#2318**). Audit-chain batching and duplicate
+    Firecracker boot work (**#2299**; **#2292** is closed by PR #2463) and
+    receipt durability on the admission path (**#2318** is closed by PR #2465).
+    Audit-chain batching and duplicate
     admission are closed under #2293. Outstanding: the warm-lane
     comparison, blocked because no standby pool can be filled today.
 
@@ -1244,7 +1277,16 @@ check-l3-expansion-freeze` added as a temporary shrink-only ratchet
         extracts the authenticated session so it is shared by control RPC and
         FlowMux, with tests for replay, tampering, wrong identity, and counter
         exhaustion. Remaining: the perf harness + baselines.
-  - [x] Phase 2 — the one authenticated endpoint (#2371). `GuestService::NetworkFlow`
+  - [~] Phase 2 — the one authenticated endpoint (#2371). Substantially landed,
+        **not complete**: the `EndpointSpawner` → `NetworkEndpointSpawner` rename
+        has not happened (`crates/mvm-hostd/tests/workload_stream_plane.rs` still
+        imports `EndpointSpawner`), the duplicate `EGRESS_VSOCK_PORT = 5253`
+        survives in `mvm-egress-client.rs` and `mvm-addon-dns.rs` because
+        `mvm-agentd` does not depend on `mvm-net`, and the fail-closed readiness
+        assertion — a networking-granted workload must not reach ready when the
+        FlowMux session fails to authenticate — is unwitnessed. Phase 3 is
+        already ahead of this, so the phase gate will not catch the residue.
+        Landed: `GuestService::NetworkFlow`
         now names the port-5253 channel; the endpoint binary, proxy, spawner, and
         test files are renamed to `mvm-network-endpoint`/`network_endpoint_*`;
         `mvm-hostd::supervisor::flowmux` landed the authenticated FlowMux session
@@ -1257,25 +1299,33 @@ check-l3-expansion-freeze` added as a temporary shrink-only ratchet
         the identity on stdin. Backend witness tests in `mvm-vmm::host::spec_map`
         and the Firecracker/HVF/libkrun driver modules prove exactly one
         `NetworkFlow` service and no L3 services per granted workload.
-  - [~] Phase 3 — converge egress TCP, UDP, and DNS (#2372). Landed:
-        guest-initiated `OpenTcp` with typed `Opened`/`Refused` replies,
-        `OpenUdp`/`UdpSend`/`UdpRecv` associations, `Resolve`/`Resolved` DNS
-        frames, per-direction host credit accounting, UDP idle expiry, per-
-        association peer bounds, per-class connection-rate limiting, payload-
-        free audit emission for TCP/UDP allows/denies and DNS resolves/refusals,
-        and host-side integration tests for allowed/denied TCP, UDP round-trip,
-        DNS pinning, UDP idle expiry, peer bounds, half-close, reset, and rate-
-        limit overflow. Guest-side `FlowMuxClient` / `FlowMuxReconnectClient`,
-        `FlowMuxStream`, `FlowMuxUdpSocket`, async frame pump, and unit tests
-        are implemented in `crates/mvm-agentd/src/flowmux.rs`. Guest-side
-        adapters are now wired: `mvm-egress-client` uses
-        `flowmux_egress::run` with a single `FlowMuxReconnectClient`,
-        `mvm-addon-dns` optionally forwards through `FlowMuxClient::resolve`,
-        and the legacy line-prelude symbols (`HTTP_FORWARD_FRAME`,
-        `MVM_DNS/1`, `MVM_SOCKS5_UDP/1`) are removed from the guest modules.
-        Unit tests cover the new DNS and SOCKS5/HTTP parsing paths.
-        Remaining: delete the host-side raw-egress dispatcher and add endpoint
-        crash/restart integration tests.
+  - [~] Phase 3 — converge egress TCP, UDP, and DNS (#2372). **The machinery
+    below is landed and unit-tested but is NOT on the production path:**
+    `RealNetworkEndpointSpawner::spawn` hard-codes `flowmux_identity: None`,
+    `EndpointSpawnRequest` has no field for it, and the only
+    `FlowMuxIdentitySpawnConfig` construction in the workspace is inside a
+    `#[cfg(test)]` function. `claim.rs` still selects the mode with
+    `let raw_egress = inputs.secrets.is_empty()`, so every admitted workload
+    speaks `Wire` or `Raw`. The last checkbox (delete `EgressMode`/`raw_egress`)
+    therefore cannot be executed as written — it would break all egress. Landed:
+    guest-initiated `OpenTcp` with typed `Opened`/`Refused` replies,
+    `OpenUdp`/`UdpSend`/`UdpRecv` associations, `Resolve`/`Resolved` DNS
+    frames, per-direction host credit accounting, UDP idle expiry, per-
+    association peer bounds, per-class connection-rate limiting, payload-
+    free audit emission for TCP/UDP allows/denies and DNS resolves/refusals,
+    and host-side integration tests for allowed/denied TCP, UDP round-trip,
+    DNS pinning, UDP idle expiry, peer bounds, half-close, reset, and rate-
+    limit overflow. Guest-side `FlowMuxClient` / `FlowMuxReconnectClient`,
+    `FlowMuxStream`, `FlowMuxUdpSocket`, async frame pump, and unit tests
+    are implemented in `crates/mvm-agentd/src/flowmux.rs`. Guest-side
+    adapters are now wired: `mvm-egress-client` uses
+    `flowmux_egress::run` with a single `FlowMuxReconnectClient`,
+    `mvm-addon-dns` optionally forwards through `FlowMuxClient::resolve`,
+    and the legacy line-prelude symbols (`HTTP_FORWARD_FRAME`,
+    `MVM_DNS/1`, `MVM_SOCKS5_UDP/1`) are removed from the guest modules.
+    Unit tests cover the new DNS and SOCKS5/HTTP parsing paths.
+    Remaining: delete the host-side raw-egress dispatcher and add endpoint
+    crash/restart integration tests.
   - [~] Phase 4 — stream typed transformations (#2373)
   - [ ] Phase 5 — declared ingress on FlowMux (#2374)
   - [ ] Phase 6 — compatibility boundary (#2375)

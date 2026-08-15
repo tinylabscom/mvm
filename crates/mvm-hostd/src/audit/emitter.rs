@@ -42,7 +42,7 @@ use crate::audit::decisions::DecisionStore;
 use crate::audit::receipt_export::audit_entry_to_receipt;
 use crate::audit::receipt_store::ReceiptStore;
 use crate::supervisor::{
-    AuditSigner, FileAuditSigner, PlanAuditEntry, for_plan, transcript_sealed,
+    AuditSigner, FileAuditSigner, PlanAuditEntry, audit_mirror, for_plan, transcript_sealed,
 };
 use anyhow::{Context, Result};
 use base64::Engine;
@@ -1156,6 +1156,7 @@ impl AuditEmitter {
                 "emit: signer"
             );
         }
+        audit_mirror::emit_mirror_event(entry);
         let t_r = std::time::Instant::now();
         self.emit_receipt_for_entry(entry);
         tracing::debug!(ms = t_r.elapsed().as_secs_f64() * 1000.0, "emit: receipt");

@@ -5,6 +5,7 @@
 //! read-only, additive layer: it does not modify the source log or
 //! make authorization decisions.
 
+pub mod tibet;
 use std::io::{BufRead, Write};
 
 use anyhow::{Context, Result};

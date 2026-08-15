@@ -665,13 +665,21 @@ pub fn execute_streaming(
     // a known raw fd, then `dup2` it onto fd 3 and clear FD_CLOEXEC so
     // it survives `execve(2)`. Both raw fds are then closed in the
     // child's address space; the parent retains its own copies.
+    //
+    // The same closure empties the workload's capability bounding set. The
+    // agent retains CAP_KILL and CAP_SYS_TIME to reap children and fix a
+    // restored clock; the workload needs neither, and this is the last point
+    // at which anything runs on its behalf.
     use std::os::fd::AsRawFd;
     let write_raw = fd3_write_for_child.as_raw_fd();
     // SAFETY: closure runs in the post-fork pre-exec child. Only async-
-    // signal-safe libc calls are used (dup2, fcntl, close). No Rust
+    // signal-safe libc calls are used (dup2, fcntl, close, prctl). No Rust
     // allocator calls.
     unsafe {
-        cmd.pre_exec(move || install_fd3_in_child(write_raw));
+        cmd.pre_exec(move || {
+            install_fd3_in_child(write_raw)?;
+            crate::guest_mount::drop_workload_capability_bounding_set()
+        });
     }
 
     let mut child = match cmd.spawn() {

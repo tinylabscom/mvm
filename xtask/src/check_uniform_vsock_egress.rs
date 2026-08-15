@@ -2,9 +2,9 @@
 //!
 //! Uniform vsock egress: the Firecracker, libkrun, and HVF CLI workload backends
 //! are converged onto **one** launch seam — `WorkloadRunner<Driver,
-//! RealEndpointSpawner, RealBrokerRegistrar>`. The per-VM substitution endpoint
+//! RealNetworkEndpointSpawner, RealBrokerRegistrar>`. The per-VM substitution endpoint
 //! (the sole claim-10 egress gate) is spawned in exactly one place,
-//! `RealEndpointSpawner::spawn` (`workload_runner/runner.rs`), over vsock/uds; a
+//! `RealNetworkEndpointSpawner::spawn` (`workload_runner/runner.rs`), over vsock/uds; a
 //! `VmmDriver` only wires the guest port through and spawns nothing itself. This
 //! gate is that claim in executable form: it fails closed if a future edit
 //! reverts a converged variant to a raw backend, swaps the endpoint spawner off
@@ -14,8 +14,8 @@
 //!
 //! - **A — the converged CLI workload variants ARE runners.** `backend.rs` keeps
 //!   the `FcRunner`/`LibkrunRunner`/`HvfRunner` aliases at the full
-//!   `WorkloadRunner<Driver, RealEndpointSpawner, RealBrokerRegistrar>` shape
-//!   (matching the `RealEndpointSpawner, RealBrokerRegistrar` tail, so a spawner
+//!   `WorkloadRunner<Driver, RealNetworkEndpointSpawner, RealBrokerRegistrar>` shape
+//!   (matching the `RealNetworkEndpointSpawner, RealBrokerRegistrar` tail, so a spawner
 //!   swap trips the gate), and `pub enum AnyBackend` binds the runner arms
 //!   `Firecracker(FcRunner)` + `Libkrun(LibkrunRunner)` + `Hvf(HvfRunner)` —
 //!   never a raw `Firecracker(FirecrackerBackend)` / `Libkrun(LibkrunBackend)` /
@@ -62,7 +62,7 @@ const BACKEND_RS: &str = "crates/mvm-runtime/src/backend.rs";
 const APPLE_CONTAINER_RS: &str = "crates/mvm-runtime/src/apple_container_backend.rs";
 
 /// A converged runner alias and the driver it must wrap. The alias must stay at
-/// the `WorkloadRunner<Driver, RealEndpointSpawner, RealBrokerRegistrar>` shape;
+/// the `WorkloadRunner<Driver, RealNetworkEndpointSpawner, RealBrokerRegistrar>` shape;
 /// swapping the spawner or broker registrar off the tail trips Assertion A.
 struct RunnerAlias {
     alias: &'static str,
@@ -106,7 +106,7 @@ const FORBIDDEN_ENUM_ARMS: &[&str] = &[
 ///
 /// Deliberately NOT guarded (they legitimately construct or hold endpoints and
 /// sit outside the converged CLI scope): `workload_runner/runner.rs` (the one
-/// `RealEndpointSpawner`), the builder role, the raw `libkrun.rs` +
+/// `RealNetworkEndpointSpawner`), the builder role, the raw `libkrun.rs` +
 /// `microvm/egress_bridge.rs` + `egress_redirect.rs` (held live by the hostd
 /// supervisor + Firecracker standby fleet path), the endpoint definition
 /// (`network_endpoint_spawn.rs`) + the `mvm-hostd` supervisor + the substitution
@@ -114,7 +114,7 @@ const FORBIDDEN_ENUM_ARMS: &[&str] = &[
 const GUARDED_PATHS: &[&str] = &["crates/mvm-runtime/src/driver", APPLE_CONTAINER_RS];
 
 /// Raw egress-spawn tokens. Any of these on the guarded driver surface means a
-/// per-VM endpoint is being spawned outside `RealEndpointSpawner`.
+/// per-VM endpoint is being spawned outside `RealNetworkEndpointSpawner`.
 const FORBIDDEN: &[&str] = &[
     "spawn_network_endpoint",
     "EndpointTransport::Uds",
@@ -150,7 +150,7 @@ fn check_converged_runner_shape(workspace: &Path) -> Result<()> {
         if !alias_regex(alias).is_match(&text) {
             bail!(
                 "check-uniform-vsock-egress: {alias} lost its converged runner shape. \
-                 Expected `type {alias} = WorkloadRunner<{driver}, RealEndpointSpawner, \
+                 Expected `type {alias} = WorkloadRunner<{driver}, RealNetworkEndpointSpawner, \
                  RealBrokerRegistrar>`. Swapping the endpoint spawner or broker registrar \
                  off this seam breaks the uniform vsock-egress convergence — including \
                  for apple-container, which reaches the endpoint through `HvfRunner`.",
@@ -237,7 +237,7 @@ fn check_apple_container_delegates_to_runner(workspace: &Path) -> Result<()> {
         bail!(
             "check-uniform-vsock-egress: {APPLE_CONTAINER_RS}: `AppleContainerBackend` no \
              longer holds a `runner: HvfRunner`. Its claim-10 coverage is transitive — it \
-             reaches the one `RealEndpointSpawner` through the HVF runner. Holding anything \
+             reaches the one `RealNetworkEndpointSpawner` through the HVF runner. Holding anything \
              else means this workload tier needs its own egress seam, which is the \
              convergence this gate exists to prevent."
         );
@@ -298,7 +298,7 @@ fn check_no_driver_egress_spawn(workspace: &Path) -> Result<usize> {
         bail!(
             "check-uniform-vsock-egress: a per-VM egress endpoint is spawned on the \
              guarded surface. The only legal spawn site is \
-             `RealEndpointSpawner::spawn` in workload_runner/runner.rs; a driver wires \
+             `RealNetworkEndpointSpawner::spawn` in workload_runner/runner.rs; a driver wires \
              the guest port through and spawns nothing, and the apple-container backend \
              delegates rather than spawning:\n{}",
             hits.join("\n")
@@ -309,7 +309,7 @@ fn check_no_driver_egress_spawn(workspace: &Path) -> Result<usize> {
 
 fn alias_regex(alias: &RunnerAlias) -> Regex {
     let pattern = format!(
-        r"type\s+{}\s*=\s*WorkloadRunner\s*<\s*{}\s*,\s*RealEndpointSpawner\s*,\s*RealBrokerRegistrar\s*>",
+        r"type\s+{}\s*=\s*WorkloadRunner\s*<\s*{}\s*,\s*RealNetworkEndpointSpawner\s*,\s*RealBrokerRegistrar\s*>",
         alias.alias, alias.driver
     );
     Regex::new(&pattern).expect("static alias regex")
@@ -442,7 +442,7 @@ mod tests {
     fn alias_regex_requires_the_real_endpoint_spawner_tail() {
         let re = alias_regex(&REQUIRED_ALIASES[0]);
         assert!(re.is_match(
-            "type FcRunner = WorkloadRunner<FcDriver, RealEndpointSpawner, RealBrokerRegistrar>;"
+            "type FcRunner = WorkloadRunner<FcDriver, RealNetworkEndpointSpawner, RealBrokerRegistrar>;"
         ));
         // A spawner swap must not match — that is the regression the tail guards.
         assert!(!re.is_match(
@@ -457,9 +457,9 @@ mod tests {
         std::fs::create_dir_all(backend.parent().expect("parent")).expect("create dirs");
         std::fs::write(
             &backend,
-            "type FcRunner = WorkloadRunner<FcDriver, RealEndpointSpawner, RealBrokerRegistrar>;\n\
-             type LibkrunRunner = WorkloadRunner<LibkrunDriver, RealEndpointSpawner, RealBrokerRegistrar>;\n\
-             type HvfRunner = WorkloadRunner<HvfDriver, RealEndpointSpawner, RealBrokerRegistrar>;\n\
+            "type FcRunner = WorkloadRunner<FcDriver, RealNetworkEndpointSpawner, RealBrokerRegistrar>;\n\
+             type LibkrunRunner = WorkloadRunner<LibkrunDriver, RealNetworkEndpointSpawner, RealBrokerRegistrar>;\n\
+             type HvfRunner = WorkloadRunner<HvfDriver, RealNetworkEndpointSpawner, RealBrokerRegistrar>;\n\
              pub enum AnyBackend {\n    Firecracker(FirecrackerBackend),\n    Libkrun(LibkrunRunner),\n}\n",
         )
         .expect("write backend fixture");
@@ -650,9 +650,9 @@ mod tests {
         std::fs::create_dir_all(backend.parent().expect("parent")).expect("create dirs");
         std::fs::write(
             &backend,
-            "type FcRunner = WorkloadRunner<FcDriver, RealEndpointSpawner, RealBrokerRegistrar>;\n\
-             type LibkrunRunner = WorkloadRunner<LibkrunDriver, RealEndpointSpawner, RealBrokerRegistrar>;\n\
-             type HvfRunner = WorkloadRunner<HvfDriver, RealEndpointSpawner, RealBrokerRegistrar>;\n\
+            "type FcRunner = WorkloadRunner<FcDriver, RealNetworkEndpointSpawner, RealBrokerRegistrar>;\n\
+             type LibkrunRunner = WorkloadRunner<LibkrunDriver, RealNetworkEndpointSpawner, RealBrokerRegistrar>;\n\
+             type HvfRunner = WorkloadRunner<HvfDriver, RealNetworkEndpointSpawner, RealBrokerRegistrar>;\n\
              pub enum AnyBackend {\n    Firecracker(FcRunner),\n    Libkrun(LibkrunRunner),\n    Hvf(HvfBackend),\n}\n",
         )
         .expect("write backend fixture");

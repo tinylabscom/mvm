@@ -31,6 +31,9 @@ use hickory_proto::rr::{Name, RData, RecordType};
 use hickory_proto::serialize::binary::{BinDecodable, BinEncodable, BinEncoder};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+use crate::supervisor::accept_loop::{
+    AcceptAction, classify_accept_error, record_listener_stopped,
+};
 use crate::supervisor::audit_recorder::Recorder;
 use crate::supervisor::{
     dns_handler, egress_rate, http_forward, icmp_echo, icmp_handler, socks5_udp,
@@ -51,7 +54,8 @@ const DNS_QUERY_TIMEOUT: Duration = Duration::from_secs(2);
 const RESOLV_CONF_PATH: &str = "/etc/resolv.conf";
 
 /// Serve raw-TCP egress over a bound UDS listener: one tokio task per guest
-/// connection, each gated then spliced. Runs until the listener errors.
+/// connection, each gated then spliced. Runs until the listener fails in a way it cannot recover from;
+/// transient accept errors are retried.
 pub async fn serve_raw_egress(
     listener: tokio::net::UnixListener,
     gate: Arc<EgressGate>,
@@ -59,9 +63,11 @@ pub async fn serve_raw_egress(
     timeout: Duration,
 ) {
     let rate_guard = Arc::new(egress_rate::EgressRateGuard::default());
+    let mut transient = 0u32;
     loop {
         match listener.accept().await {
             Ok((stream, _)) => {
+                transient = 0;
                 let gate = Arc::clone(&gate);
                 let recorder = recorder.clone();
                 let rate_guard = Arc::clone(&rate_guard);
@@ -73,10 +79,19 @@ pub async fn serve_raw_egress(
                     }
                 });
             }
-            Err(e) => {
-                tracing::warn!(error = %e, "raw egress accept failed; stopping");
-                return;
-            }
+            Err(e) => match classify_accept_error(&e, transient) {
+                AcceptAction::Retry(delay) => {
+                    tracing::warn!(error = %e, "raw egress accept failed; retrying");
+                    transient = transient.saturating_add(1);
+                    tokio::time::sleep(delay).await;
+                }
+                AcceptAction::Fatal => {
+                    tracing::error!(error = %e, "raw egress accept failed; stopping");
+                    record_listener_stopped(recorder.as_deref(), "raw-egress-uds", &e.to_string())
+                        .await;
+                    return;
+                }
+            },
         }
     }
 }
@@ -271,14 +286,32 @@ pub async fn serve_raw_egress_vsock(
 ) {
     use crate::supervisor::network_endpoint_proxy::vsock;
     let rate_guard = Arc::new(egress_rate::EgressRateGuard::default());
+    let mut transient = 0u32;
     loop {
         let listen_fd = listener.raw_fd();
         let conn_fd = match vsock::accept(listen_fd) {
-            Ok(fd) => fd,
-            Err(e) => {
-                tracing::warn!(error = %e, "raw egress vsock accept failed; stopping");
-                return;
+            Ok(fd) => {
+                transient = 0;
+                fd
             }
+            Err(e) => match classify_accept_error(&e, transient) {
+                AcceptAction::Retry(delay) => {
+                    tracing::warn!(error = %e, "raw egress vsock accept failed; retrying");
+                    transient = transient.saturating_add(1);
+                    tokio::time::sleep(delay).await;
+                    continue;
+                }
+                AcceptAction::Fatal => {
+                    tracing::error!(error = %e, "raw egress vsock accept failed; stopping");
+                    record_listener_stopped(
+                        recorder.as_deref(),
+                        "raw-egress-vsock",
+                        &e.to_string(),
+                    )
+                    .await;
+                    return;
+                }
+            },
         };
         let gate = Arc::clone(&gate);
         let recorder = recorder.clone();

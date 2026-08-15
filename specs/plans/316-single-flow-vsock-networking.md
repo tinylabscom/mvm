@@ -2,7 +2,37 @@
 
 ## Status
 
-**Phase 0 complete (#2369). Phase 1 complete (#2370). Phase 2 complete (#2371). Phase 3 in progress (#2372): converge egress TCP, UDP, and DNS over FlowMux `OpenTcp`/`OpenUdp`/`Resolve` frames.**
+**Phase 0 complete (#2369). Phase 1 complete (#2370). Phase 2 substantially landed but NOT complete (#2371). Phase 3 machinery landed but NOT on the production path (#2372).**
+
+**Read this before ticking another Phase 3 box.** The host-side FlowMux
+acceptor and the guest-side FlowMux client both exist and are unit-tested, and
+nothing connects them on a real launch. `RealNetworkEndpointSpawner::spawn` —
+the single production spawn — passes `flowmux_identity: None`, hard-coded;
+`EndpointSpawnRequest` has no field for it, so no caller can ask; and the only
+construction of `FlowMuxIdentitySpawnConfig` in the workspace is inside a
+`#[cfg(test)]` function. `claim.rs` still selects the mode with
+`let raw_egress = inputs.secrets.is_empty()`. Every admitted workload today
+speaks `Wire` or `Raw`.
+
+Two consequences. Phase 3's last checkbox cannot be executed as written —
+deleting `EgressMode` and `raw_egress` would remove the only modes production
+uses and break all egress. And Phase 2's remaining box and Phase 3's remaining
+box are the same work: neither "a failed FlowMux session prevents readiness"
+nor "every flow type reaches one pipeline" means anything until the production
+spawn carries a FlowMux identity. Land them together, with a live witness —
+this changes the egress path for every workload on every backend.
+
+Phase 2 previously carried a `COMPLETE` status while six of its seven
+checkboxes were unchecked below. Two are verifiably undone on `main`: the
+`EndpointSpawner` → `NetworkEndpointSpawner` rename has not happened, and the
+hand-maintained duplicate `EGRESS_VSOCK_PORT = 5253` still exists in
+`mvm-egress-client.rs` and `mvm-addon-dns.rs` because `mvm-agentd` does not
+depend on `mvm-net` and so cannot reach the typed service mapping.
+
+Phase 3 is now ahead of Phase 2. The strict ordering was the mechanism meant to
+catch Phase 2 residue, so that residue will not be caught by a later phase gate
+and must be closed deliberately — in particular the fail-closed readiness
+assertion, which is invariant 4 and the reason Phase 2 exists.
 
 ADR-042 is accepted and the raw-packet path is frozen: new
 `raw_ip_stack=true` / `NetworkMode::L3Vsock` launches are refused at synthesis,
@@ -260,10 +290,12 @@ cannot represent is not really enforced at the parse boundary.
 
 ### Phase 2 — Introduce the one authenticated endpoint without changing callers
 
-**Status: COMPLETE.** The production endpoint role is renamed, the
-authenticated FlowMux session acceptor and bounded stream registry are wired
-into `mvm-network-endpoint`, and backend witnesses prove exactly one
-`NetworkFlow` service per granted workload with no L3 services.
+**Status: SUBSTANTIALLY LANDED, NOT COMPLETE.** The production endpoint role
+is renamed, the authenticated FlowMux session acceptor and bounded stream
+registry are wired into `mvm-network-endpoint`, and backend witnesses prove
+exactly one `NetworkFlow` service per granted workload with no L3 services.
+Unchecked boxes below are unchecked because they are not done, not because the
+bookkeeping lagged — see the Status section.
 
 - [ ] Rename the production role from `mvm-substitution-endpoint` to
       `mvm-network-endpoint`, including Cargo bin declarations, release
@@ -272,9 +304,21 @@ into `mvm-network-endpoint`, and backend witnesses prove exactly one
 - [x] Rename `GuestService::Substitution` to `GuestService::NetworkFlow`, retain
       port 5253, and delete the hand-maintained duplicate
       `EGRESS_VSOCK_PORT` constant in favor of the typed service mapping.
-- [ ] Rename `EndpointSpawner`/`RealEndpointSpawner` to
+      The port now has exactly one definition in the workspace:
+      `mvm_contract::protocol::network_flow::NETWORK_FLOW_PORT`. It lives in
+      `mvm-contract` rather than `mvm-net` because the guest cannot depend on
+      `mvm-net` — the same arrangement `l3::L3_CONTROL_PORT` already uses.
+      `mvm_net::GuestService::NetworkFlow` and `mvm_agentd::vsock::EGRESS_PORT`
+      both derive from it, so the ~80 existing `EGRESS_PORT` call sites
+      transitively name one value. A `const` assertion in `mvm-agentd` makes
+      drift a compile error; `mvm-net`'s `port()` test asserts the mapping and
+      the contract constant agree.
+- [x] Rename `EndpointSpawner`/`RealEndpointSpawner` to
       `NetworkEndpointSpawner`/`RealNetworkEndpointSpawner`; keep exactly one
       production `spawn` implementation in `WorkloadRunner`.
+      `EndpointSpawnRequest` moved with them, and `xtask
+      check-uniform-vsock-egress` — which pins the converged runner shape by
+      type name — was updated in the same change.
 - [ ] Make the endpoint authenticate one long-lived FlowMux session before it
       accepts any flow frame. A failed or missing session prevents workload
       readiness when the signed plan grants networking.

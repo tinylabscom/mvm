@@ -452,6 +452,7 @@ fn test_cleanup_defaults() {
             cache,
             state,
             nuclear,
+            keep_identity,
             dry_run,
             yes,
             force,
@@ -461,9 +462,32 @@ fn test_cleanup_defaults() {
             assert!(!cache);
             assert!(!state);
             assert!(!nuclear);
+            assert!(!keep_identity);
             assert!(!dry_run);
             assert!(!yes);
             assert!(!force);
+        }
+        _ => panic!("Expected Cleanup command"),
+    }
+}
+
+#[test]
+fn test_cleanup_keep_identity_requires_nuclear() {
+    // `--keep-identity` alone would silently do nothing, so clap
+    // rejects it rather than letting a caller believe it took effect.
+    assert!(
+        Cli::try_parse_from(["mvmctl", "env", "cleanup", "--keep-identity"]).is_err(),
+        "--keep-identity must require --nuclear",
+    );
+    let cli =
+        Cli::try_parse_from(["mvmctl", "env", "cleanup", "--nuclear", "--keep-identity"]).unwrap();
+    let Commands::Env(eg) = cli.command else {
+        panic!("expected env group")
+    };
+    match eg.action {
+        env_group::EnvCmd::Cleanup(args) => {
+            assert!(args.nuclear);
+            assert!(args.keep_identity);
         }
         _ => panic!("Expected Cleanup command"),
     }
