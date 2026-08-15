@@ -558,6 +558,16 @@ For fast inner-loop iteration across worktrees, `just test-cached` wraps rustc
 in sccache to share compilation across branches (needs `cargo install
 sccache`).
 
+**`--all-targets` has two blind spots**, and a change to a shared type's shape
+(a new struct field, trait method, or enum variant) walks into both. It skips
+any target behind `required-features` — `mvm-conformance`'s cucumber runner
+needs `--features bdd`, and without it the same broken tree reports zero
+errors — and on macOS it cannot compile `cfg(target_os = "linux")` files at
+all, including Linux-gated *test* files, which `just check-linux` misses too
+because that recipe is `--lib` only. `just check-gated` covers both. Skipping
+it surfaces in CI as `check-nextest-groups` failing with "cargo nextest list
+failed", a message that names neither the file nor the field.
+
 **Always pass `--all` to `cargo fmt`.** Without it, fmt only checks the
 manifest crate (whichever one the manifest points at), silently missing
 drift in every other workspace member. CI runs `cargo fmt --all --

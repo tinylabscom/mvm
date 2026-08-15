@@ -40,6 +40,9 @@ toolchain-embed:
 build:
     cargo build --workspace
 
+# `--all-targets` is narrower than it sounds: it skips any target behind
+# `required-features`, and on macOS it cannot compile `cfg(target_os = "linux")`
+# files at all. `check-gated` covers both.
 # Type-check without codegen
 check:
     cargo check --workspace --all-targets
@@ -51,10 +54,36 @@ check:
 # `cargo install cargo-zigbuild`, a `zig` on PATH, and
 # `rustup target add x86_64-unknown-linux-gnu`. musl is intentionally not the
 # default — libc's ioctl request arg is c_int there vs c_ulong on glibc, so the
-
 # COW FICLONE path (mvm-runtime) only type-checks against glibc.
+# Cross-compile every crate's lib for Linux via zig
 check-linux TARGET="x86_64-unknown-linux-gnu":
     cargo zigbuild --target {{ TARGET }} --workspace --lib --all-features
+
+# Type-check the targets `just check` cannot see. Two blind spots, both of which
+# have shipped a red CI run that named neither:
+#
+#   1. `cfg(target_os = "linux")` *test* files. `check-linux` above is --lib
+#      only, so a Linux-gated test target is checked by nothing local. This
+#      surfaces in CI as `check-nextest-groups` failing with "cargo nextest list
+#      failed" — a message that never names the file or the field.
+#   2. Targets behind `required-features` (mvm-conformance's cucumber runner).
+#      `--all-targets` skips them silently: without `--features bdd` the same
+#      broken tree reports zero errors.
+#
+# `check` rather than a build, so nothing links — that is the constraint that
+# forces `check-linux` to stay lib-only. Same prerequisites as `check-linux`
+# (cargo-zigbuild, zig on PATH, the rustup target). Note the binary is invoked
+# as `cargo-zigbuild check`: `cargo zigbuild check` is a different subcommand
+# and errors on the argument.
+#
+# Not folded into `ci`: it needs a zig toolchain that not every contributor has
+# (the same reason `check-linux` is opt-in), and a cold run costs ~8 min because
+# it type-checks the whole workspace for a second target. Run it before pushing
+# anything that changes a shared type's shape; a warm run is far cheaper.
+# Type-check the linux-gated and feature-gated targets `just check` cannot see
+check-gated TARGET="x86_64-unknown-linux-gnu":
+    cargo-zigbuild check --target {{ TARGET }} --workspace --all-targets
+    cargo check -p mvm-conformance --all-targets --features bdd
 
 # Bare-metal no_std proof for the embeddable foundation crate (mvm-contract).
 # A `-none-elf` target exposes only core + alloc with no std to leak into, so
