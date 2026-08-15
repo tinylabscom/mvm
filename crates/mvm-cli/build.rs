@@ -79,8 +79,49 @@ fn main() {
     // plain-`cargo build` fast-path was once tried on the false premise that
     // the bins are C-free; it broke CI, which has no musl-gcc.)
 
+    // The musl cross-compile is ~93% of this build script's wall time (measured:
+    // 105s for one binary, ~163s for the set, against 13s for the whole native
+    // aux-helper leg). Every one of these binaries links `mvm-build` ->
+    // `mvm-core`, so any edit under `mvm-core/src` invalidates all six and a
+    // one-line change costs ~176s before a single test runs.
+    //
+    // Outside `--release`, reuse an already-cross-compiled binary instead of
+    // rebuilding it. The embedded set still exists and still hashes, so the
+    // extraction tests and the manifest gate keep passing on their real bytes;
+    // they assert the *name set*, the *SHA match* and *idempotency*, none of
+    // which require the bytes to be freshly compiled. A release build never
+    // takes this path, so shipped binaries are always rebuilt from source.
+    //
+    // The native per-VM helpers deliberately do NOT get this treatment: they
+    // are the supervisors where a stale binary silently produces a running
+    // guest that ignores your edit, and rebuilding them costs 13s.
+    // Explicitly opt IN only the plain debug profile. Cargo reports PROFILE as
+    // "debug"/"release"; keying on `!= "release"` would silently take the reuse
+    // path for any custom profile (e.g. `release-witness`) that reports
+    // something else, which is exactly the case where fresh bytes matter.
+    let reuse_prebuilt_embedded = std::env::var("PROFILE").unwrap_or_default() == "debug";
+    let mut reused_any = false;
+
     for binary in &manifest {
         let out_file = bins_out.join(&binary.name);
+        let prebuilt = host_target_dir
+            .join(strip_glibc(&pin.target))
+            .join("release")
+            .join(&binary.name);
+        if reuse_prebuilt_embedded && prebuilt.is_file() {
+            eprintln!(
+                "[build.rs] reusing prebuilt {} (dev profile; `cargo build --release` \
+                 or `just embed-refresh` rebuilds it)",
+                binary.name
+            );
+            std::fs::copy(&prebuilt, &out_file).unwrap_or_else(|e| {
+                panic!("copy {} -> {}: {e}", prebuilt.display(), out_file.display())
+            });
+            reused_any = true;
+            let sha = sha256_hex(&out_file);
+            entries.push((binary.name.clone(), out_file.clone(), sha));
+            continue;
+        }
         run_cargo_zigbuild(
             ZigbuildRequest::default()
                 .with_root(&workspace_root)
@@ -100,6 +141,14 @@ fn main() {
             workspace_root.join("crates/mvm-build/src/bin").display()
         );
     }
+
+    // Loud, not silent: the runtime can tell the user their embedded set was
+    // reused rather than rebuilt, which is the difference between a confusing
+    // "my edit did nothing" boot and an actionable message.
+    println!(
+        "cargo:rustc-env=MVM_EMBEDDED_BINS_REUSED={}",
+        if reused_any { "1" } else { "0" }
+    );
 
     build_native_aux_helpers(&workspace_root, &nested_target_dir);
 

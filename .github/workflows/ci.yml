@@ -36,6 +36,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       code: ${{ steps.validate.outputs.code }}
+      bdd: ${{ steps.validate.outputs.bdd }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -54,6 +55,7 @@ jobs:
 
           set_all() {
             echo "code=true" >> "$GITHUB_OUTPUT"
+            echo "bdd=true" >> "$GITHUB_OUTPUT"
           }
 
           if [ "$EVENT" = "workflow_dispatch" ]; then
@@ -85,15 +87,35 @@ jobs:
             echo "code=false" >> "$GITHUB_OUTPUT"
           fi
 
+          # The Gherkin scenarios drive the real `mvmctl` binary and the built
+          # language SDKs, so the drift they catch lives in four places: the SDK
+          # sources, the CLI surface those SDKs shell to, the scenarios and
+          # their fixtures, and the golden argv corpus binding the two.
+          #
+          # Deliberately narrower than the full suite's reach: scenarios over
+          # egress, snapshots and verified boot are driven by crates outside
+          # this filter and remain covered only by the release-tag `bdd` lane.
+          # Widening that is a separate call about PR latency, not an oversight.
+          if grep -zE '^(crates/mvm-sdk/|crates/mvm-cli/|crates/mvm-conformance/|features/|tests/machine-fixtures/|\.github/workflows/(ci|bdd)\.yml$|[Jj]ustfile$)' "$CHANGED_FILE" >/dev/null; then
+            echo "bdd=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "bdd=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Validate classification
         id: validate
         env:
           CODE: ${{ steps.decide.outputs.code }}
+          BDD: ${{ steps.decide.outputs.bdd }}
         run: |
           set -euo pipefail
           case "$CODE" in
             true|false) echo "code=$CODE" >> "$GITHUB_OUTPUT" ;;
             *) echo "::error::invalid or missing code scope: $CODE" >&2; exit 1 ;;
+          esac
+          case "$BDD" in
+            true|false) echo "bdd=$BDD" >> "$GITHUB_OUTPUT" ;;
+            *) echo "::error::invalid or missing bdd scope: $BDD" >&2; exit 1 ;;
           esac
 
   lint-core:
@@ -501,10 +523,19 @@ jobs:
             fi
           done
 
+  # The Gherkin scenarios previously ran only from release-tag workflows, so a
+  # PR could break a scenario and merge green. Same reusable workflow the
+  # release path calls, gated on the narrower `bdd` scope.
+  bdd-conformance:
+    name: BDD conformance
+    needs: [scope]
+    if: needs.scope.outputs.bdd == 'true'
+    uses: ./.github/workflows/bdd.yml
+
   test:
     name: Test
     if: ${{ always() }}
-    needs: [scope, test-workspace, test-linux, test-release-witness, test-ebpf-telemetry]
+    needs: [scope, test-workspace, test-linux, test-release-witness, test-ebpf-telemetry, bdd-conformance]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -516,6 +547,8 @@ jobs:
           LINUX_RESULT: ${{ needs.test-linux.result }}
           RELEASE_WITNESS_RESULT: ${{ needs.test-release-witness.result }}
           EBPF_RESULT: ${{ needs.test-ebpf-telemetry.result }}
+          SCOPE_BDD: ${{ needs.scope.outputs.bdd }}
+          BDD_RESULT: ${{ needs.bdd-conformance.result }}
         run: |
           set -euo pipefail
           if [ "$SCOPE_RESULT" != success ]; then
@@ -533,6 +566,17 @@ jobs:
               exit 1
             fi
           done
+          # The BDD lane keys off its own narrower scope, so it is matched
+          # separately rather than folded into the loop above.
+          case "$SCOPE_BDD" in
+            true) bdd_required=success ;;
+            false) bdd_required=skipped ;;
+            *) echo "Invalid bdd scope: $SCOPE_BDD"; exit 1 ;;
+          esac
+          if [ "$BDD_RESULT" != "$bdd_required" ]; then
+            echo "BDD conformance did not match scope $SCOPE_BDD: $BDD_RESULT"
+            exit 1
+          fi
 
   test-workspace:
     name: Test workspace
@@ -737,6 +781,143 @@ jobs:
 
       - name: Run mvm-hostd eBPF telemetry load/attach test
         run: cargo test -p mvm-hostd --features ebpf-telemetry --lib
+
+  # ── Lane: cold-boot latency ceiling ──────────────────────────────
+  # A launch-latency regression is otherwise found by hand, months late:
+  # Firecracker guest boot drifted to 447ms against 58.6ms on the same image
+  # and was noticed only when someone profiled a launch for another reason.
+  #
+  # This is the coarse half of the gate deliberately. A shared runner's
+  # variance is large, so the budget is loose enough to be immune to it and
+  # therefore too loose to catch a 20% drift. It catches the multiple-x class,
+  # which is the class that has actually happened. The precise, tight-tolerance
+  # comparison belongs on a dedicated host where run-to-run spread is small
+  # enough for a percentage to mean something — that is a separate lane, not
+  # this one, because one threshold cannot do both jobs: loose enough to
+  # survive shared-runner noise is too loose to catch drift, and tight enough
+  # to catch drift will flake here and get switched off.
+  boot-latency:
+    name: Boot latency ceiling
+    needs: [scope]
+    if: needs.scope.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # Pinned, not `latest`. Auto-tracking a moving release is how this lane
+      # would surprise-break on an unrelated image cut, and it would look like
+      # a latency regression when it is not.
+      IMAGE_TAG: v0.17.0
+      # Must track `crates/mvm-core/src/config.rs::FC_VERSION_DEFAULT`. The
+      # launch path passes `--enable-pci`, which older Firecracker rejects
+      # outright: it exits before creating its API socket, and the only symptom
+      # is a socket-wait timeout that says nothing about the cause.
+      FC_VERSION: v1.14.1
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: ./.github/actions/free-disk
+
+      - name: Install stable Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install system build deps
+        run: |
+          sudo rm -f /etc/apt/sources.list.d/microsoft*.list /etc/apt/sources.list.d/azure*.list; sudo apt-get update
+          sudo apt-get install -y libcap-ng-dev lld
+
+      # Building the root package runs `crates/mvm-cli/build.rs`, which
+      # cross-compiles the embedded host binaries and needs the pinned zig.
+      # Without it the lane fails before it ever boots anything.
+      - uses: ./.github/actions/install-zigbuild
+
+      - uses: ./.github/actions/rust-cache
+        with:
+          key: boot-latency
+
+      - name: Install firecracker
+        run: |
+          set -euo pipefail
+          curl -fL -o firecracker.tgz \
+            "https://github.com/firecracker-microvm/firecracker/releases/download/${FC_VERSION}/firecracker-${FC_VERSION}-x86_64.tgz"
+          tar -xzf firecracker.tgz
+          sudo install -m 0755 "release-${FC_VERSION}-x86_64/firecracker-${FC_VERSION}-x86_64" /usr/bin/firecracker
+          /usr/bin/firecracker --version
+
+      - name: Grant /dev/kvm access for the job
+        # ubuntu-latest's /dev/kvm is root:kvm 0660 and the runner user is not
+        # in the kvm group. The runner is ephemeral, so the looser mode is
+        # confined to this job.
+        run: |
+          set -euo pipefail
+          if [ ! -e /dev/kvm ]; then
+            echo "::error::/dev/kvm missing on this runner — the boot gate cannot run." >&2
+            exit 1
+          fi
+          sudo chmod 666 /dev/kvm
+          ls -la /dev/kvm
+
+      - name: Fetch and verify the pinned bootable image
+        # Hash-verified against the release's own checksum manifest — the same
+        # posture every other artifact fetch in this repo uses. A corrupted
+        # download must fail here rather than surface as a boot-time mystery.
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/boot-image && cd /tmp/boot-image
+          base="https://github.com/tinylabscom/mvm/releases/download/${IMAGE_TAG}"
+          for f in default-microvm-vmlinux-x86_64 default-microvm-rootfs-x86_64.ext4 \
+                   default-microvm-meta-x86_64.json; do
+            curl -fL --retry 3 -o "$f" "$base/$f"
+          done
+          curl -fL --retry 3 -o checksums.txt \
+            "$base/default-microvm-x86_64-checksums-sha256.txt"
+          grep -E ' (default-microvm-vmlinux-x86_64|default-microvm-rootfs-x86_64\.ext4|default-microvm-meta-x86_64\.json)$' \
+            checksums.txt > expected.txt
+          test -s expected.txt
+          sha256sum -c expected.txt
+          # The runtime-overlay admission gate reads `mvm-meta.json` from the
+          # rootfs's own directory and refuses to boot without it. The release
+          # publishes that sidecar under an arch-qualified asset name, so it has
+          # to be put back under the name the gate looks for. Verified above
+          # under its asset name before being renamed.
+          cp default-microvm-meta-x86_64.json mvm-meta.json
+          ls -la
+
+      - name: Boot within the ceiling
+        # The budget is a ceiling, not a target. A dedicated KVM host measures
+        # this image cold-boot-to-agent-ready at a median of ~2.1s, so 6s
+        # leaves roughly 3x headroom for a shared runner while still failing
+        # the multiple-x regressions this lane exists to catch. p50/p95/max are
+        # printed on every run, so tightening it later is a reading exercise
+        # rather than a guess.
+        env:
+          MVM_RUNTIME_BOOT_BENCH: "1"
+          MVM_RUNTIME_BOOT_BACKEND: firecracker
+          MVM_RUNTIME_BOOT_KERNEL: /tmp/boot-image/default-microvm-vmlinux-x86_64
+          MVM_RUNTIME_BOOT_ROOTFS: /tmp/boot-image/default-microvm-rootfs-x86_64.ext4
+          MVM_RUNTIME_BOOT_READY: guest-agent
+          MVM_RUNTIME_BOOT_RUNS: "5"
+          MVM_RUNTIME_BOOT_CONCURRENT: "3"
+          MVM_RUNTIME_BOOT_BUDGET_MS: "6000"
+        run: |
+          cargo test --test runtime_boot_bench \
+            prebuilt_runtime_image_boots_within_budget -- --exact --nocapture
+
+      - name: Dump VMM diagnostics on failure
+        if: failure()
+        # Firecracker's stderr goes to `firecracker.log` in the per-VM state
+        # dir and its console to `console.log`; neither reaches the job output.
+        # Without this a launch failure surfaces only as "API socket did not
+        # appear", which is a symptom and never the cause.
+        run: |
+          for d in "$HOME"/.mvm/vms/*/; do
+            echo "===== $d ====="
+            ls -la "$d" || true
+            for f in firecracker.log console.log; do
+              if [ -s "$d$f" ]; then
+                echo "--- $f ---"; tail -50 "$d$f"
+              fi
+            done
+          done
 
   nix-flake-check:
     name: Nix flake check (Linux eval)

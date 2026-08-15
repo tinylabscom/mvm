@@ -13,6 +13,7 @@
 //! into one coherent, tamper-evident spine: each verifier accepts its valid
 //! chain and each rejects a tampered variant.
 
+use rand::Rng;
 use std::collections::BTreeMap;
 
 use chrono::Utc;
@@ -30,7 +31,7 @@ use mvm_hostd::supervisor::audit_file::{FileAuditSigner, VerifyError, verify_aud
 /// Fresh host key, following the workspace's explicit seed-fill idiom.
 fn host_key() -> SigningKey {
     let mut seed = [0u8; 32];
-    rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut seed);
+    rand::rng().fill_bytes(&mut seed);
     SigningKey::from_bytes(&seed)
 }
 

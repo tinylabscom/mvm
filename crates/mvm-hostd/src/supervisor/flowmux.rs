@@ -32,7 +32,7 @@ use tracing::{info, warn};
 use self::registry::{RegistryLimits, StreamRegistry, class_for_open};
 
 use crate::supervisor::audit_recorder::{EventCategory, Recorder};
-use crate::supervisor::raw_egress::resolve_hostname_ips_pure;
+use crate::supervisor::dns_resolver::resolve_hostname_ips;
 use mvm_core::rate_limit::TokenBucket;
 
 /// Per-address connect budget when trying an admitted set: small so an
@@ -101,7 +101,10 @@ pub struct FlowMuxSession {
     /// The write half, shared with per-stream relay threads so they can send
     /// `Data`/`HalfClose`/`Reset` frames back to the guest.
     writer: Arc<Mutex<UnixStream>>,
-    session: Session,
+    /// The authenticated session is shared between the main thread (for
+    /// opening inbound frames) and relay threads (for sealing outbound frames).
+    /// Both directions use independent sequence counters inside one session.
+    session: Arc<Mutex<Session>>,
     validator: SessionValidator,
     registry: Arc<Mutex<StreamRegistry>>,
     /// Active guest-initiated TCP streams and their upstream sockets. The host
@@ -163,8 +166,8 @@ struct UdpAssociationHandle {
 
 impl FlowMuxSession {
     /// Return the session identifier for logging and correlation.
-    pub fn session_id(&self) -> &str {
-        self.session.session_id()
+    pub fn session_id(&self) -> String {
+        lock_session(&self.session).session_id().to_string()
     }
 
     /// Accept one authenticated FlowMux session on `stream`.
@@ -224,7 +227,7 @@ impl FlowMuxSession {
         Ok(Self {
             reader: stream,
             writer: Arc::new(Mutex::new(writer)),
-            session,
+            session: Arc::new(Mutex::new(session)),
             validator: SessionValidator::default(),
             registry: Arc::new(Mutex::new(StreamRegistry::new(limits))),
             streams: BTreeMap::new(),
@@ -587,7 +590,7 @@ impl FlowMuxSession {
         let verdict = self
             .gate
             .dns_verdict(&question.name, question.qtype, |name| {
-                resolve_hostname_ips_pure(name, timeout)
+                resolve_hostname_ips(name, timeout)
             });
 
         let response = match verdict {
@@ -670,20 +673,22 @@ impl FlowMuxSession {
         let max_peers = self.limits.max_udp_peers;
 
         let (tx, rx) = std::sync::mpsc::channel();
+        let session = Arc::clone(&self.session);
         let writer = Arc::clone(&self.writer);
         let registry_arc = Arc::clone(&self.registry);
         std::thread::Builder::new()
             .name(format!("flowmux-udp-{stream_id}"))
             .spawn(move || {
-                run_udp_relay(
+                run_udp_relay(UdpRelayParams {
                     stream_id,
                     socket,
+                    session,
                     writer,
                     idle_timeout,
                     max_peers,
                     rx,
-                    registry_arc,
-                )
+                    registry: registry_arc,
+                })
             })
             .map_err(FlowMuxError::Transport)?;
 
@@ -767,6 +772,7 @@ impl FlowMuxSession {
         let relay_flag = Arc::clone(&host_half_closed);
         let retired = Arc::new(AtomicBool::new(false));
         let retired_flag = Arc::clone(&retired);
+        let session = Arc::clone(&self.session);
         let writer = Arc::clone(&self.writer);
         let registry = Arc::clone(&self.registry);
 
@@ -776,6 +782,7 @@ impl FlowMuxSession {
                 run_tcp_relay(
                     stream_id,
                     upstream_read,
+                    session,
                     writer,
                     registry,
                     relay_flag,
@@ -971,16 +978,14 @@ impl FlowMuxSession {
         stream_id: u32,
         payload: &[u8],
     ) -> Result<(), FlowMuxError> {
-        write_frame_to(&self.writer, opcode, stream_id, payload)
+        write_frame_to(&self.session, &self.writer, opcode, stream_id, payload)
     }
 
     /// Read one decrypted FlowMux frame from the peer, returning the opcode,
     /// stream id, and payload length, or `None` on clean close.
     ///
     /// The session layer encrypts each frame; this helper reads the encrypted
-    /// envelope, opens it, and decodes the inner FlowMux header. The skeleton
-    /// currently sends plaintext FlowMux frames, so this reads the length
-    /// prefix that `encode_into` produces and decodes the frame directly.
+    /// envelope, opens it, and decodes the inner FlowMux header.
     fn read_frame(&mut self) -> Result<Option<(Opcode, u32, u32)>, FlowMuxError> {
         let mut len_buf = [0u8; 4];
         match self.reader.read_exact(&mut len_buf) {
@@ -989,26 +994,31 @@ impl FlowMuxSession {
             Err(e) if is_peer_disconnect(&e) => return Ok(None),
             Err(e) => return Err(e.into()),
         }
-        let frame_len = u32::from_be_bytes(len_buf) as usize;
-        if frame_len == 0 {
+        let sealed_len = u32::from_be_bytes(len_buf) as usize;
+        if sealed_len == 0 {
             return Ok(None);
         }
-        if frame_len > 1 << 20 {
+        if sealed_len > 1 << 20 {
             return Err(FlowMuxError::FrameRefused(format!(
-                "FlowMux frame length {frame_len} exceeds 1 MiB"
+                "FlowMux sealed frame length {sealed_len} exceeds 1 MiB"
             )));
         }
-        self.read_buf.resize(4 + frame_len, 0);
-        self.read_buf[..4].copy_from_slice(&len_buf);
-        if let Err(e) = self.reader.read_exact(&mut self.read_buf[4..]) {
+        let mut sealed_buf = vec![0u8; sealed_len];
+        if let Err(e) = self.reader.read_exact(&mut sealed_buf) {
             if is_peer_disconnect(&e) {
                 return Ok(None);
             }
             return Err(e.into());
         }
 
-        // The payload is currently passed through unencrypted because the
-        // encrypted wire format for `SealedFrame` is not yet defined.
+        let sealed = mvm_core::net::session::SealedFrame::decode(&sealed_buf)
+            .map_err(|e| FlowMuxError::FrameRefused(e.to_string()))?;
+        self.read_buf = {
+            let mut session = lock_session(&self.session);
+            session
+                .open(&sealed)
+                .map_err(|e| FlowMuxError::FrameRefused(e.to_string()))?
+        };
 
         let frame = match decode(&self.read_buf) {
             Ok(frame) => frame,
@@ -1041,24 +1051,47 @@ fn lock_writer(writer: &Mutex<UnixStream>) -> std::sync::MutexGuard<'_, UnixStre
     writer.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// Lock the shared session, recovering from poison.
+fn lock_session(session: &Mutex<Session>) -> std::sync::MutexGuard<'_, Session> {
+    session.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// Lock the shared registry, recovering from poison.
 fn lock_registry(registry: &Mutex<StreamRegistry>) -> std::sync::MutexGuard<'_, StreamRegistry> {
     registry.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// Serialize and send one frame through a shared writer.
+/// Serialize and send one encrypted frame through a shared writer.
+///
+/// Locks the session first, then the writer, so sequence numbers are assigned
+/// in the same order the bytes are emitted. The paired locks are released
+/// once the frame is flushed.
 fn write_frame_to(
+    session: &Mutex<Session>,
     writer: &Mutex<UnixStream>,
     opcode: Opcode,
     stream_id: u32,
     payload: &[u8],
 ) -> Result<(), FlowMuxError> {
-    let mut wire = Vec::new();
-    mvm_contract::protocol::network_flow::encode_into(&mut wire, opcode, stream_id, payload)
+    let mut frame = Vec::new();
+    mvm_contract::protocol::network_flow::encode_into(&mut frame, opcode, stream_id, payload)
         .map_err(|e| FlowMuxError::FrameRefused(e.to_string()))?;
-    let mut w = lock_writer(writer);
-    w.write_all(&wire)?;
-    w.flush()?;
+
+    let mut session = lock_session(session);
+    let sealed = session
+        .seal(&frame)
+        .map_err(|e| FlowMuxError::FrameRefused(e.to_string()))?;
+    let mut sealed_bytes = Vec::new();
+    sealed
+        .encode(&mut sealed_bytes)
+        .map_err(|e| FlowMuxError::FrameRefused(e.to_string()))?;
+    let len = u32::try_from(sealed_bytes.len())
+        .map_err(|_| FlowMuxError::FrameRefused("sealed frame too large".into()))?;
+
+    let mut writer = lock_writer(writer);
+    writer.write_all(&len.to_be_bytes())?;
+    writer.write_all(&sealed_bytes)?;
+    writer.flush()?;
     Ok(())
 }
 
@@ -1092,6 +1125,7 @@ fn connect_first_admitted(
 fn run_tcp_relay(
     stream_id: u32,
     mut upstream: TcpStream,
+    session: Arc<Mutex<Session>>,
     writer: Arc<Mutex<UnixStream>>,
     registry: Arc<Mutex<StreamRegistry>>,
     host_half_closed: Arc<AtomicBool>,
@@ -1103,7 +1137,7 @@ fn run_tcp_relay(
             Ok(0) => {
                 host_half_closed.store(true, Ordering::Relaxed);
                 if !retired.load(Ordering::Relaxed)
-                    && write_frame_to(&writer, Opcode::HalfClose, stream_id, &[]).is_err()
+                    && write_frame_to(&session, &writer, Opcode::HalfClose, stream_id, &[]).is_err()
                 {
                     warn!(stream_id, "FlowMux relay failed to send HalfClose");
                 }
@@ -1112,12 +1146,17 @@ fn run_tcp_relay(
             Ok(n) => {
                 if let Err(e) = lock_registry(&registry).consume_host_credit(stream_id, n as u32) {
                     warn!(stream_id, error = %e, "FlowMux host credit exhausted");
-                    let _ =
-                        write_frame_to(&writer, Opcode::Reset, stream_id, b"host credit exhausted");
+                    let _ = write_frame_to(
+                        &session,
+                        &writer,
+                        Opcode::Reset,
+                        stream_id,
+                        b"host credit exhausted",
+                    );
                     host_half_closed.store(true, Ordering::Relaxed);
                     break;
                 }
-                if write_frame_to(&writer, Opcode::Data, stream_id, &buf[..n]).is_err() {
+                if write_frame_to(&session, &writer, Opcode::Data, stream_id, &buf[..n]).is_err() {
                     warn!(stream_id, "FlowMux relay failed to send Data");
                     break;
                 }
@@ -1126,7 +1165,13 @@ fn run_tcp_relay(
                 warn!(stream_id, error = %e, "FlowMux upstream read failed");
                 if !retired.load(Ordering::Relaxed) {
                     let reason = format!("upstream error: {e}");
-                    let _ = write_frame_to(&writer, Opcode::Reset, stream_id, reason.as_bytes());
+                    let _ = write_frame_to(
+                        &session,
+                        &writer,
+                        Opcode::Reset,
+                        stream_id,
+                        reason.as_bytes(),
+                    );
                 }
                 host_half_closed.store(true, Ordering::Relaxed);
                 break;
@@ -1139,6 +1184,19 @@ fn run_tcp_relay(
     let _ = registry;
 }
 
+/// Parameters for the per-association UDP relay thread.
+#[derive(Debug)]
+struct UdpRelayParams {
+    stream_id: u32,
+    socket: std::net::UdpSocket,
+    session: Arc<Mutex<Session>>,
+    writer: Arc<Mutex<UnixStream>>,
+    idle_timeout: Duration,
+    max_peers: usize,
+    rx: std::sync::mpsc::Receiver<UdpSendMsg>,
+    registry: Arc<Mutex<StreamRegistry>>,
+}
+
 /// Per-association UDP relay thread: read datagrams from the upstream socket
 /// and forward them to the guest as `UdpRecv` frames. Guest `UdpSend`
 /// requests arrive through a channel so the socket stays owned by one thread.
@@ -1146,15 +1204,17 @@ fn run_tcp_relay(
 /// The relay enforces two association bounds: a limit on distinct peers and
 /// an idle timeout that closes the association when no bytes flow in either
 /// direction for too long.
-fn run_udp_relay(
-    stream_id: u32,
-    socket: std::net::UdpSocket,
-    writer: Arc<Mutex<UnixStream>>,
-    idle_timeout: Duration,
-    max_peers: usize,
-    rx: std::sync::mpsc::Receiver<UdpSendMsg>,
-    registry: Arc<Mutex<StreamRegistry>>,
-) {
+fn run_udp_relay(params: UdpRelayParams) {
+    let UdpRelayParams {
+        stream_id,
+        socket,
+        session,
+        writer,
+        idle_timeout,
+        max_peers,
+        rx,
+        registry,
+    } = params;
     const MAX_POLL: Duration = Duration::from_secs(1);
 
     let mut buf = vec![0_u8; MAX_UDP_DATAGRAM_LEN];
@@ -1191,6 +1251,7 @@ fn run_udp_relay(
                     {
                         warn!(stream_id, error = %e, "FlowMux UDP host credit exhausted");
                         let _ = write_frame_to(
+                            &session,
                             &writer,
                             Opcode::Reset,
                             stream_id,
@@ -1198,7 +1259,9 @@ fn run_udp_relay(
                         );
                         break;
                     }
-                    if write_frame_to(&writer, Opcode::UdpRecv, stream_id, &payload).is_err() {
+                    if write_frame_to(&session, &writer, Opcode::UdpRecv, stream_id, &payload)
+                        .is_err()
+                    {
                         break;
                     }
                     activity_this_iter = true;
@@ -1234,9 +1297,21 @@ fn run_udp_relay(
 
     let _ = lock_registry(&registry).retire(stream_id);
     if idle_expired {
-        let _ = write_frame_to(&writer, Opcode::CloseUdp, stream_id, b"idle timeout");
+        let _ = write_frame_to(
+            &session,
+            &writer,
+            Opcode::CloseUdp,
+            stream_id,
+            b"idle timeout",
+        );
     } else {
-        let _ = write_frame_to(&writer, Opcode::Reset, stream_id, b"UDP relay error");
+        let _ = write_frame_to(
+            &session,
+            &writer,
+            Opcode::Reset,
+            stream_id,
+            b"UDP relay error",
+        );
     }
 }
 
@@ -1313,7 +1388,7 @@ mod tests {
     use ed25519_dalek::SigningKey;
     use mvm_contract::protocol::network_flow::{Opcode, encode_into};
     use mvm_core::net::session::Session;
-    use rand::RngCore;
+    use rand::Rng;
     use std::net::SocketAddr;
     use std::time::Duration;
 
@@ -1321,7 +1396,7 @@ mod tests {
 
     fn fresh_keys() -> (SigningKey, VerifyingKey) {
         let mut seed = [0u8; 32];
-        RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut seed);
+        rand::rng().fill_bytes(&mut seed);
         let key = SigningKey::from_bytes(&seed);
         let verify = key.verifying_key();
         (key, verify)
@@ -1353,6 +1428,9 @@ mod tests {
         let (_guest_session, _session_id) =
             Session::guest(&mut guest_stream, guest_key, &host_verify).unwrap();
 
+        // The handshake itself is the test; no frames are exchanged.
+        let _ = guest_stream;
+
         let result = host_handle.join().unwrap();
         assert!(
             matches!(result, Err(FlowMuxError::Handshake(_))),
@@ -1360,18 +1438,13 @@ mod tests {
         );
     }
 
-    fn read_flowmux_frame(stream: &mut UnixStream) -> (Opcode, u32, Vec<u8>) {
-        let mut len_buf = [0u8; 4];
-        match stream.read_exact(&mut len_buf) {
-            Ok(()) => {}
-            Err(e) => panic!("read len failed: {e:?}"),
-        }
-        let len = u32::from_be_bytes(len_buf) as usize;
-        let mut buf = Vec::with_capacity(4 + len);
-        buf.extend_from_slice(&len_buf);
-        buf.resize(4 + len, 0);
-        stream.read_exact(&mut buf[4..]).unwrap();
-        let parsed = mvm_contract::protocol::network_flow::decode(&buf).unwrap();
+    fn read_flowmux_frame(
+        stream: &mut UnixStream,
+        session: &mut Session,
+    ) -> (Opcode, u32, Vec<u8>) {
+        let sealed = mvm_core::net::session::read_sealed_frame(stream, 1 << 20).unwrap();
+        let plaintext = session.open(&sealed).unwrap();
+        let parsed = mvm_contract::protocol::network_flow::decode(&plaintext).unwrap();
         (
             parsed.header.opcode,
             parsed.header.stream_id,
@@ -1400,26 +1473,28 @@ mod tests {
             session.serve()
         });
 
-        let (_guest_session, _session_id) =
+        let (mut guest_session, _session_id) =
             Session::guest(&mut guest_stream, guest_key, &host_verify).unwrap();
 
         // The guest must send Hello to open the FlowMux session.
-        let mut hello = Vec::new();
-        encode_into(&mut hello, Opcode::Hello, 0, b"").unwrap();
-        guest_stream.write_all(&hello).unwrap();
-        guest_stream.flush().unwrap();
+        write_frame(&mut guest_stream, &mut guest_session, Opcode::Hello, 0, b"");
 
         // Read the HelloAck from the host.
-        let (opcode, _stream_id, _payload) = read_flowmux_frame(&mut guest_stream);
+        let (opcode, _stream_id, _payload) =
+            read_flowmux_frame(&mut guest_stream, &mut guest_session);
         assert_eq!(opcode, Opcode::HelloAck);
 
         // Send a flow frame on an unknown stream and expect a GoAway.
-        let mut payload = Vec::new();
-        encode_into(&mut payload, Opcode::Data, 1, b"hello").unwrap();
-        guest_stream.write_all(&payload).unwrap();
-        guest_stream.flush().unwrap();
+        write_frame(
+            &mut guest_stream,
+            &mut guest_session,
+            Opcode::Data,
+            1,
+            b"hello",
+        );
 
-        let (opcode, _stream_id, goaway_payload) = read_flowmux_frame(&mut guest_stream);
+        let (opcode, _stream_id, goaway_payload) =
+            read_flowmux_frame(&mut guest_stream, &mut guest_session);
         assert_eq!(opcode, Opcode::GoAway);
         assert!(!goaway_payload.is_empty());
 
@@ -1449,34 +1524,34 @@ mod tests {
             session.serve()
         });
 
-        let (_guest_session, _session_id) =
+        let (mut guest_session, _session_id) =
             Session::guest(&mut guest_stream, guest_key, &host_verify).unwrap();
 
-        let mut hello = Vec::new();
-        encode_into(&mut hello, Opcode::Hello, 0, b"").unwrap();
-        guest_stream.write_all(&hello).unwrap();
-        guest_stream.flush().unwrap();
+        write_frame(&mut guest_stream, &mut guest_session, Opcode::Hello, 0, b"");
 
-        let (opcode, _stream_id, _payload) = read_flowmux_frame(&mut guest_stream);
+        let (opcode, _stream_id, _payload) =
+            read_flowmux_frame(&mut guest_stream, &mut guest_session);
         assert_eq!(opcode, Opcode::HelloAck);
 
-        let mut open = Vec::new();
-        encode_into(&mut open, Opcode::OpenTcp, 1, b"example.com:443").unwrap();
-        guest_stream.write_all(&open).unwrap();
-        guest_stream.flush().unwrap();
+        write_frame(
+            &mut guest_stream,
+            &mut guest_session,
+            Opcode::OpenTcp,
+            1,
+            b"example.com:443",
+        );
 
-        let (opcode, _stream_id, payload) = read_flowmux_frame(&mut guest_stream);
+        let (opcode, _stream_id, payload) =
+            read_flowmux_frame(&mut guest_stream, &mut guest_session);
         assert_eq!(opcode, Opcode::Refused);
         assert!(!payload.is_empty());
 
         // The session stays alive; an unknown-stream frame afterward still
         // receives a GoAway rather than dropping the connection.
-        let mut data = Vec::new();
-        encode_into(&mut data, Opcode::Data, 3, b"?").unwrap();
-        guest_stream.write_all(&data).unwrap();
-        guest_stream.flush().unwrap();
+        write_frame(&mut guest_stream, &mut guest_session, Opcode::Data, 3, b"?");
 
-        let (opcode, _stream_id, _payload) = read_flowmux_frame(&mut guest_stream);
+        let (opcode, _stream_id, _payload) =
+            read_flowmux_frame(&mut guest_stream, &mut guest_session);
         assert_eq!(opcode, Opcode::GoAway);
 
         drop(guest_stream);
@@ -1536,38 +1611,41 @@ mod tests {
             session.serve()
         });
 
-        let (_guest_session, _session_id) =
+        let (mut guest_session, _session_id) =
             Session::guest(&mut guest_stream, guest_key, &host_verify).unwrap();
 
-        let mut hello = Vec::new();
-        encode_into(&mut hello, Opcode::Hello, 0, b"").unwrap();
-        guest_stream.write_all(&hello).unwrap();
-        guest_stream.flush().unwrap();
+        write_frame(&mut guest_stream, &mut guest_session, Opcode::Hello, 0, b"");
 
-        let (opcode, _stream_id, _payload) = read_flowmux_frame(&mut guest_stream);
+        let (opcode, _stream_id, _payload) =
+            read_flowmux_frame(&mut guest_stream, &mut guest_session);
         assert_eq!(opcode, Opcode::HelloAck);
 
-        let mut open = Vec::new();
-        encode_into(&mut open, Opcode::OpenUdp, 1, b"").unwrap();
-        guest_stream.write_all(&open).unwrap();
-        guest_stream.flush().unwrap();
+        write_frame(
+            &mut guest_stream,
+            &mut guest_session,
+            Opcode::OpenUdp,
+            1,
+            b"",
+        );
 
-        let (opcode, _stream_id, _payload) = read_flowmux_frame(&mut guest_stream);
+        let (opcode, _stream_id, _payload) =
+            read_flowmux_frame(&mut guest_stream, &mut guest_session);
         assert_eq!(opcode, Opcode::UdpOpened);
 
         // Close the association cleanly.
-        let mut close = Vec::new();
-        encode_into(&mut close, Opcode::CloseUdp, 1, b"").unwrap();
-        guest_stream.write_all(&close).unwrap();
-        guest_stream.flush().unwrap();
+        write_frame(
+            &mut guest_stream,
+            &mut guest_session,
+            Opcode::CloseUdp,
+            1,
+            b"",
+        );
 
         // The session is still alive.
-        let mut data = Vec::new();
-        encode_into(&mut data, Opcode::Data, 3, b"?").unwrap();
-        guest_stream.write_all(&data).unwrap();
-        guest_stream.flush().unwrap();
+        write_frame(&mut guest_stream, &mut guest_session, Opcode::Data, 3, b"?");
 
-        let (opcode, _stream_id, _payload) = read_flowmux_frame(&mut guest_stream);
+        let (opcode, _stream_id, _payload) =
+            read_flowmux_frame(&mut guest_stream, &mut guest_session);
         assert_eq!(opcode, Opcode::GoAway);
 
         drop(guest_stream);
@@ -1612,24 +1690,26 @@ mod tests {
             session.serve()
         });
 
-        let (_guest_session, _session_id) =
+        let (mut guest_session, _session_id) =
             Session::guest(&mut guest_stream, guest_key, &host_verify).unwrap();
 
-        let mut hello = Vec::new();
-        encode_into(&mut hello, Opcode::Hello, 0, b"").unwrap();
-        guest_stream.write_all(&hello).unwrap();
-        guest_stream.flush().unwrap();
+        write_frame(&mut guest_stream, &mut guest_session, Opcode::Hello, 0, b"");
 
-        let (opcode, _stream_id, _payload) = read_flowmux_frame(&mut guest_stream);
+        let (opcode, _stream_id, _payload) =
+            read_flowmux_frame(&mut guest_stream, &mut guest_session);
         assert_eq!(opcode, Opcode::HelloAck);
 
         let query = build_dns_query("example.com", 1, 0x1234);
-        let mut resolve = Vec::new();
-        encode_into(&mut resolve, Opcode::Resolve, 1, &query).unwrap();
-        guest_stream.write_all(&resolve).unwrap();
-        guest_stream.flush().unwrap();
+        write_frame(
+            &mut guest_stream,
+            &mut guest_session,
+            Opcode::Resolve,
+            1,
+            &query,
+        );
 
-        let (opcode, _stream_id, payload) = read_flowmux_frame(&mut guest_stream);
+        let (opcode, _stream_id, payload) =
+            read_flowmux_frame(&mut guest_stream, &mut guest_session);
         assert_eq!(opcode, Opcode::ResolveRefused);
         assert!(!payload.is_empty());
 
@@ -1721,14 +1801,24 @@ mod tests {
         EgressGate::from_network_policy(&policy, &pins, &now.to_rfc3339())
     }
 
-    fn run_session(gate: EgressGate) -> (UnixStream, thread::JoinHandle<Result<(), FlowMuxError>>) {
+    fn run_session(
+        gate: EgressGate,
+    ) -> (
+        UnixStream,
+        Session,
+        thread::JoinHandle<Result<(), FlowMuxError>>,
+    ) {
         run_session_with(gate, RegistryLimits::default())
     }
 
     fn run_session_with(
         gate: EgressGate,
         limits: RegistryLimits,
-    ) -> (UnixStream, thread::JoinHandle<Result<(), FlowMuxError>>) {
+    ) -> (
+        UnixStream,
+        Session,
+        thread::JoinHandle<Result<(), FlowMuxError>>,
+    ) {
         let (host_key, host_verify) = fresh_keys();
         let (guest_key, guest_verify) = fresh_keys();
         let (host_stream, mut guest_stream) = UnixStream::pair().unwrap();
@@ -1744,23 +1834,32 @@ mod tests {
             .unwrap();
             session.serve()
         });
-        let (_guest_session, _session_id) =
+        let (mut guest_session, _session_id) =
             Session::guest(&mut guest_stream, guest_key, &host_verify).unwrap();
 
-        let mut hello = Vec::new();
-        encode_into(&mut hello, Opcode::Hello, 0, b"").unwrap();
-        guest_stream.write_all(&hello).unwrap();
-        guest_stream.flush().unwrap();
+        write_frame(&mut guest_stream, &mut guest_session, Opcode::Hello, 0, b"");
 
-        let (opcode, _stream_id, _payload) = read_flowmux_frame(&mut guest_stream);
+        let (opcode, _stream_id, _payload) =
+            read_flowmux_frame(&mut guest_stream, &mut guest_session);
         assert_eq!(opcode, Opcode::HelloAck);
-        (guest_stream, host_handle)
+        (guest_stream, guest_session, host_handle)
     }
 
-    fn write_frame(stream: &mut UnixStream, opcode: Opcode, stream_id: u32, payload: &[u8]) {
+    fn write_frame(
+        stream: &mut UnixStream,
+        session: &mut Session,
+        opcode: Opcode,
+        stream_id: u32,
+        payload: &[u8],
+    ) {
         let mut buf = Vec::new();
         encode_into(&mut buf, opcode, stream_id, payload).unwrap();
-        stream.write_all(&buf).unwrap();
+        let sealed = session.seal(&buf).unwrap();
+        let mut sealed_bytes = Vec::new();
+        sealed.encode(&mut sealed_bytes).unwrap();
+        let len = u32::try_from(sealed_bytes.len()).unwrap();
+        stream.write_all(&len.to_be_bytes()).unwrap();
+        stream.write_all(&sealed_bytes).unwrap();
         stream.flush().unwrap();
     }
 
@@ -1819,20 +1918,22 @@ mod tests {
     #[test]
     fn open_tcp_to_allowed_local_addr_roundtrips_data() {
         let addr = tcp_echo_server();
-        let (mut guest, host) = run_session(gate_allowing_addr(addr.ip(), addr.port(), None));
+        let (mut guest, mut guest_session, host) =
+            run_session(gate_allowing_addr(addr.ip(), addr.port(), None));
         write_frame(
             &mut guest,
+            &mut guest_session,
             Opcode::OpenTcp,
             1,
             format!("{}:{}", addr.ip(), addr.port()).as_bytes(),
         );
-        let (opcode, _stream_id, _payload) = read_flowmux_frame(&mut guest);
+        let (opcode, _stream_id, _payload) = read_flowmux_frame(&mut guest, &mut guest_session);
         assert_eq!(opcode, Opcode::Opened);
 
         let payload = b"ping";
-        write_frame(&mut guest, Opcode::Data, 1, payload);
+        write_frame(&mut guest, &mut guest_session, Opcode::Data, 1, payload);
         let data = loop {
-            let (opcode, _stream_id, frame) = read_flowmux_frame(&mut guest);
+            let (opcode, _stream_id, frame) = read_flowmux_frame(&mut guest, &mut guest_session);
             if opcode == Opcode::Data {
                 break frame;
             }
@@ -1841,9 +1942,9 @@ mod tests {
         };
         assert_eq!(&data[..], payload);
 
-        write_frame(&mut guest, Opcode::HalfClose, 1, b"");
+        write_frame(&mut guest, &mut guest_session, Opcode::HalfClose, 1, b"");
         let opcode = loop {
-            let (op, _stream_id, _payload) = read_flowmux_frame(&mut guest);
+            let (op, _stream_id, _payload) = read_flowmux_frame(&mut guest, &mut guest_session);
             if op == Opcode::HalfClose {
                 break op;
             }
@@ -1859,15 +1960,17 @@ mod tests {
     #[test]
     fn open_tcp_to_denied_local_addr_is_refused() {
         let addr = tcp_echo_server();
-        let (mut guest, host) = run_session(gate_allowing_addr(addr.ip(), addr.port(), None));
+        let (mut guest, mut guest_session, host) =
+            run_session(gate_allowing_addr(addr.ip(), addr.port(), None));
         let denied_port = addr.port().wrapping_add(1);
         write_frame(
             &mut guest,
+            &mut guest_session,
             Opcode::OpenTcp,
             1,
             format!("{}:{}", addr.ip(), denied_port).as_bytes(),
         );
-        let (opcode, _stream_id, payload) = read_flowmux_frame(&mut guest);
+        let (opcode, _stream_id, payload) = read_flowmux_frame(&mut guest, &mut guest_session);
         assert_eq!(opcode, Opcode::Refused);
         assert!(!payload.is_empty());
 
@@ -1886,14 +1989,16 @@ mod tests {
             .unwrap()
             .port();
 
-        let (mut guest, host) = run_session(gate_allowing_addr(ip, free_port, None));
+        let (mut guest, mut guest_session, host) =
+            run_session(gate_allowing_addr(ip, free_port, None));
         write_frame(
             &mut guest,
+            &mut guest_session,
             Opcode::OpenTcp,
             1,
             format!("{}:{}", ip, free_port).as_bytes(),
         );
-        let (opcode, _stream_id, payload) = read_flowmux_frame(&mut guest);
+        let (opcode, _stream_id, payload) = read_flowmux_frame(&mut guest, &mut guest_session);
         assert_eq!(opcode, Opcode::Refused);
         assert!(!payload.is_empty());
 
@@ -1904,19 +2009,19 @@ mod tests {
     #[test]
     fn udp_send_recv_to_allowed_local_addr() {
         let addr = udp_echo_server();
-        let (mut guest, host) = run_session_with(
+        let (mut guest, mut guest_session, host) = run_session_with(
             gate_allowing_addr(addr.ip(), 0, Some(addr.port())),
             RegistryLimits::default(),
         );
-        write_frame(&mut guest, Opcode::OpenUdp, 1, b"");
-        let (opcode, _stream_id, _payload) = read_flowmux_frame(&mut guest);
+        write_frame(&mut guest, &mut guest_session, Opcode::OpenUdp, 1, b"");
+        let (opcode, _stream_id, _payload) = read_flowmux_frame(&mut guest, &mut guest_session);
         assert_eq!(opcode, Opcode::UdpOpened);
 
         let mut payload = encode_udp_addr(addr.ip(), addr.port());
         payload.extend_from_slice(b"hello");
-        write_frame(&mut guest, Opcode::UdpSend, 1, &payload);
+        write_frame(&mut guest, &mut guest_session, Opcode::UdpSend, 1, &payload);
 
-        let (opcode, _stream_id, recv) = read_flowmux_frame(&mut guest);
+        let (opcode, _stream_id, recv) = read_flowmux_frame(&mut guest, &mut guest_session);
         assert_eq!(opcode, Opcode::UdpRecv);
         let (source_ip, source_port, body) = decode_udp_addr(&recv).unwrap();
         assert_eq!(SocketAddr::new(source_ip, source_port), addr);
@@ -1934,14 +2039,14 @@ mod tests {
             ..Default::default()
         };
         let addr = udp_echo_server();
-        let (mut guest, host) =
+        let (mut guest, mut guest_session, host) =
             run_session_with(gate_allowing_addr(addr.ip(), 0, Some(addr.port())), limits);
-        write_frame(&mut guest, Opcode::OpenUdp, 1, b"");
-        let (opcode, _stream_id, _payload) = read_flowmux_frame(&mut guest);
+        write_frame(&mut guest, &mut guest_session, Opcode::OpenUdp, 1, b"");
+        let (opcode, _stream_id, _payload) = read_flowmux_frame(&mut guest, &mut guest_session);
         assert_eq!(opcode, Opcode::UdpOpened);
 
         thread::sleep(Duration::from_millis(250));
-        let (opcode, _stream_id, _payload) = read_flowmux_frame(&mut guest);
+        let (opcode, _stream_id, _payload) = read_flowmux_frame(&mut guest, &mut guest_session);
         assert_eq!(opcode, Opcode::CloseUdp);
 
         drop(guest);
@@ -1954,12 +2059,12 @@ mod tests {
             max_udp_peers: 2,
             ..Default::default()
         };
-        let (mut guest, host) = run_session_with(
+        let (mut guest, mut guest_session, host) = run_session_with(
             EgressGate::new(mvm_contract::policy::projection::CanonicalEgress::Unrestricted),
             limits,
         );
-        write_frame(&mut guest, Opcode::OpenUdp, 1, b"");
-        let (opcode, _stream_id, _payload) = read_flowmux_frame(&mut guest);
+        write_frame(&mut guest, &mut guest_session, Opcode::OpenUdp, 1, b"");
+        let (opcode, _stream_id, _payload) = read_flowmux_frame(&mut guest, &mut guest_session);
         assert_eq!(opcode, Opcode::UdpOpened);
 
         let ip = local_test_ip();
@@ -1975,7 +2080,7 @@ mod tests {
         for dest in &dests {
             let mut payload = encode_udp_addr(dest.ip(), dest.port());
             payload.extend_from_slice(b"x");
-            write_frame(&mut guest, Opcode::UdpSend, 1, &payload);
+            write_frame(&mut guest, &mut guest_session, Opcode::UdpSend, 1, &payload);
         }
 
         thread::sleep(Duration::from_millis(200));
@@ -1998,11 +2103,11 @@ mod tests {
 
     #[test]
     fn resolve_to_pinned_localhost_returns_address() {
-        let (mut guest, host) = run_session(gate_with_pinned_localhost());
+        let (mut guest, mut guest_session, host) = run_session(gate_with_pinned_localhost());
         let query = build_dns_query("localhost", 1, 0x1234);
-        write_frame(&mut guest, Opcode::Resolve, 1, &query);
+        write_frame(&mut guest, &mut guest_session, Opcode::Resolve, 1, &query);
 
-        let (opcode, _stream_id, response) = read_flowmux_frame(&mut guest);
+        let (opcode, _stream_id, response) = read_flowmux_frame(&mut guest, &mut guest_session);
         assert_eq!(opcode, Opcode::Resolved);
         assert!(!response.is_empty());
         assert_eq!(&response[..2], &[0x12, 0x34]);
@@ -2015,7 +2120,7 @@ mod tests {
     fn concurrent_tcp_flows_are_independent() {
         let addr1 = tcp_echo_server();
         let addr2 = tcp_echo_server();
-        let (mut guest, host) = run_session(gate_allowing_ports(
+        let (mut guest, mut guest_session, host) = run_session(gate_allowing_ports(
             addr1.ip(),
             &[addr1.port(), addr2.port()],
             &[],
@@ -2023,29 +2128,31 @@ mod tests {
 
         write_frame(
             &mut guest,
+            &mut guest_session,
             Opcode::OpenTcp,
             1,
             format!("{}:{}", addr1.ip(), addr1.port()).as_bytes(),
         );
-        let (opcode, _, _) = read_flowmux_frame(&mut guest);
+        let (opcode, _, _) = read_flowmux_frame(&mut guest, &mut guest_session);
         assert_eq!(opcode, Opcode::Opened);
 
         write_frame(
             &mut guest,
+            &mut guest_session,
             Opcode::OpenTcp,
             3,
             format!("{}:{}", addr2.ip(), addr2.port()).as_bytes(),
         );
-        let (opcode, _, _) = read_flowmux_frame(&mut guest);
+        let (opcode, _, _) = read_flowmux_frame(&mut guest, &mut guest_session);
         assert_eq!(opcode, Opcode::Opened);
 
-        write_frame(&mut guest, Opcode::Data, 1, b"alpha");
-        write_frame(&mut guest, Opcode::Data, 3, b"beta");
+        write_frame(&mut guest, &mut guest_session, Opcode::Data, 1, b"alpha");
+        write_frame(&mut guest, &mut guest_session, Opcode::Data, 3, b"beta");
 
         let mut got1: Option<Vec<u8>> = None;
         let mut got3: Option<Vec<u8>> = None;
         while got1.is_none() || got3.is_none() {
-            let (opcode, stream_id, payload) = read_flowmux_frame(&mut guest);
+            let (opcode, stream_id, payload) = read_flowmux_frame(&mut guest, &mut guest_session);
             match opcode {
                 Opcode::Data if stream_id == 1 => got1 = Some(payload),
                 Opcode::Data if stream_id == 3 => got3 = Some(payload),
@@ -2064,7 +2171,7 @@ mod tests {
     fn tcp_and_udp_flows_are_concurrent() {
         let tcp_addr = tcp_echo_server();
         let udp_addr = udp_echo_server();
-        let (mut guest, host) = run_session(gate_allowing_ports(
+        let (mut guest, mut guest_session, host) = run_session(gate_allowing_ports(
             tcp_addr.ip(),
             &[tcp_addr.port()],
             &[udp_addr.port()],
@@ -2072,26 +2179,33 @@ mod tests {
 
         write_frame(
             &mut guest,
+            &mut guest_session,
             Opcode::OpenTcp,
             1,
             format!("{}:{}", tcp_addr.ip(), tcp_addr.port()).as_bytes(),
         );
-        let (opcode, _, _) = read_flowmux_frame(&mut guest);
+        let (opcode, _, _) = read_flowmux_frame(&mut guest, &mut guest_session);
         assert_eq!(opcode, Opcode::Opened);
 
-        write_frame(&mut guest, Opcode::OpenUdp, 3, b"");
-        let (opcode, _, _) = read_flowmux_frame(&mut guest);
+        write_frame(&mut guest, &mut guest_session, Opcode::OpenUdp, 3, b"");
+        let (opcode, _, _) = read_flowmux_frame(&mut guest, &mut guest_session);
         assert_eq!(opcode, Opcode::UdpOpened);
 
-        write_frame(&mut guest, Opcode::Data, 1, b"tcp-ping");
+        write_frame(&mut guest, &mut guest_session, Opcode::Data, 1, b"tcp-ping");
         let mut udp_payload = encode_udp_addr(udp_addr.ip(), udp_addr.port());
         udp_payload.extend_from_slice(b"udp-ping");
-        write_frame(&mut guest, Opcode::UdpSend, 3, &udp_payload);
+        write_frame(
+            &mut guest,
+            &mut guest_session,
+            Opcode::UdpSend,
+            3,
+            &udp_payload,
+        );
 
         let mut tcp_reply: Option<Vec<u8>> = None;
         let mut udp_reply: Option<Vec<u8>> = None;
         while tcp_reply.is_none() || udp_reply.is_none() {
-            let (opcode, stream_id, payload) = read_flowmux_frame(&mut guest);
+            let (opcode, stream_id, payload) = read_flowmux_frame(&mut guest, &mut guest_session);
             match opcode {
                 Opcode::Data if stream_id == 1 => tcp_reply = Some(payload),
                 Opcode::UdpRecv if stream_id == 3 => udp_reply = Some(payload),
@@ -2112,20 +2226,22 @@ mod tests {
     #[test]
     fn guest_half_close_is_replied_with_host_half_close() {
         let addr = tcp_echo_server();
-        let (mut guest, host) = run_session(gate_allowing_addr(addr.ip(), addr.port(), None));
+        let (mut guest, mut guest_session, host) =
+            run_session(gate_allowing_addr(addr.ip(), addr.port(), None));
 
         write_frame(
             &mut guest,
+            &mut guest_session,
             Opcode::OpenTcp,
             1,
             format!("{}:{}", addr.ip(), addr.port()).as_bytes(),
         );
-        let (opcode, _, _) = read_flowmux_frame(&mut guest);
+        let (opcode, _, _) = read_flowmux_frame(&mut guest, &mut guest_session);
         assert_eq!(opcode, Opcode::Opened);
 
-        write_frame(&mut guest, Opcode::Data, 1, b"hello");
+        write_frame(&mut guest, &mut guest_session, Opcode::Data, 1, b"hello");
         let (opcode, _, payload) = loop {
-            let (op, sid, frame) = read_flowmux_frame(&mut guest);
+            let (op, sid, frame) = read_flowmux_frame(&mut guest, &mut guest_session);
             if op == Opcode::Data {
                 break (op, sid, frame);
             }
@@ -2134,9 +2250,9 @@ mod tests {
         assert_eq!(opcode, Opcode::Data);
         assert_eq!(payload.as_slice(), b"hello");
 
-        write_frame(&mut guest, Opcode::HalfClose, 1, b"");
+        write_frame(&mut guest, &mut guest_session, Opcode::HalfClose, 1, b"");
         let opcode = loop {
-            let (op, _stream_id, _payload) = read_flowmux_frame(&mut guest);
+            let (op, _stream_id, _payload) = read_flowmux_frame(&mut guest, &mut guest_session);
             if op == Opcode::HalfClose {
                 break op;
             }
@@ -2151,23 +2267,25 @@ mod tests {
     #[test]
     fn guest_reset_retires_stream() {
         let addr = tcp_echo_server();
-        let (mut guest, host) = run_session(gate_allowing_addr(addr.ip(), addr.port(), None));
+        let (mut guest, mut guest_session, host) =
+            run_session(gate_allowing_addr(addr.ip(), addr.port(), None));
 
         write_frame(
             &mut guest,
+            &mut guest_session,
             Opcode::OpenTcp,
             1,
             format!("{}:{}", addr.ip(), addr.port()).as_bytes(),
         );
-        let (opcode, _, _) = read_flowmux_frame(&mut guest);
+        let (opcode, _, _) = read_flowmux_frame(&mut guest, &mut guest_session);
         assert_eq!(opcode, Opcode::Opened);
 
-        write_frame(&mut guest, Opcode::Reset, 1, b"bye");
-        let (opcode, _, _) = read_flowmux_frame(&mut guest);
+        write_frame(&mut guest, &mut guest_session, Opcode::Reset, 1, b"bye");
+        let (opcode, _, _) = read_flowmux_frame(&mut guest, &mut guest_session);
         assert_eq!(opcode, Opcode::Reset);
 
-        write_frame(&mut guest, Opcode::Data, 1, b"?");
-        let (opcode, _, payload) = read_flowmux_frame(&mut guest);
+        write_frame(&mut guest, &mut guest_session, Opcode::Data, 1, b"?");
+        let (opcode, _, payload) = read_flowmux_frame(&mut guest, &mut guest_session);
         assert_eq!(opcode, Opcode::GoAway);
         assert!(!payload.is_empty());
 
@@ -2182,25 +2300,27 @@ mod tests {
             tcp_connect_rate: 1,
             ..Default::default()
         };
-        let (mut guest, host) =
+        let (mut guest, mut guest_session, host) =
             run_session_with(gate_allowing_addr(addr.ip(), addr.port(), None), limits);
 
         write_frame(
             &mut guest,
+            &mut guest_session,
             Opcode::OpenTcp,
             1,
             format!("{}:{}", addr.ip(), addr.port()).as_bytes(),
         );
-        let (opcode, _, _) = read_flowmux_frame(&mut guest);
+        let (opcode, _, _) = read_flowmux_frame(&mut guest, &mut guest_session);
         assert_eq!(opcode, Opcode::Opened);
 
         write_frame(
             &mut guest,
+            &mut guest_session,
             Opcode::OpenTcp,
             3,
             format!("{}:{}", addr.ip(), addr.port()).as_bytes(),
         );
-        let (opcode, _, payload) = read_flowmux_frame(&mut guest);
+        let (opcode, _, payload) = read_flowmux_frame(&mut guest, &mut guest_session);
         assert_eq!(opcode, Opcode::Refused);
         assert!(std::str::from_utf8(&payload).unwrap().contains("rate"));
 
@@ -2214,16 +2334,17 @@ mod tests {
             dns_resolve_rate: 1,
             ..Default::default()
         };
-        let (mut guest, host) = run_session_with(gate_with_pinned_localhost(), limits);
+        let (mut guest, mut guest_session, host) =
+            run_session_with(gate_with_pinned_localhost(), limits);
 
         let query1 = build_dns_query("localhost", 1, 0x1234);
-        write_frame(&mut guest, Opcode::Resolve, 1, &query1);
-        let (opcode, _, _) = read_flowmux_frame(&mut guest);
+        write_frame(&mut guest, &mut guest_session, Opcode::Resolve, 1, &query1);
+        let (opcode, _, _) = read_flowmux_frame(&mut guest, &mut guest_session);
         assert_eq!(opcode, Opcode::Resolved);
 
         let query3 = build_dns_query("localhost", 1, 0x1235);
-        write_frame(&mut guest, Opcode::Resolve, 3, &query3);
-        let (opcode, _, payload) = read_flowmux_frame(&mut guest);
+        write_frame(&mut guest, &mut guest_session, Opcode::Resolve, 3, &query3);
+        let (opcode, _, payload) = read_flowmux_frame(&mut guest, &mut guest_session);
         assert_eq!(opcode, Opcode::ResolveRefused);
         assert!(std::str::from_utf8(&payload).unwrap().contains("rate"));
 
@@ -2238,19 +2359,20 @@ mod tests {
             initial_credit: 0,
             ..Default::default()
         };
-        let (mut guest, host) =
+        let (mut guest, mut guest_session, host) =
             run_session_with(gate_allowing_addr(addr.ip(), addr.port(), None), limits);
 
         write_frame(
             &mut guest,
+            &mut guest_session,
             Opcode::OpenTcp,
             1,
             format!("{}:{}", addr.ip(), addr.port()).as_bytes(),
         );
-        let (opcode, _, _) = read_flowmux_frame(&mut guest);
+        let (opcode, _, _) = read_flowmux_frame(&mut guest, &mut guest_session);
         assert_eq!(opcode, Opcode::Opened);
 
-        let (opcode, _, payload) = read_flowmux_frame(&mut guest);
+        let (opcode, _, payload) = read_flowmux_frame(&mut guest, &mut guest_session);
         assert_eq!(opcode, Opcode::Reset);
         assert!(!payload.is_empty());
 

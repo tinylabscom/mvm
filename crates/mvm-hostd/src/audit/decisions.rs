@@ -325,6 +325,7 @@ mod tests {
         ActorRef, AttestationBinding, DecisionCategory, DecisionOutcome, DecisionRecordBuilder,
         DecisionScenario,
     };
+    use rand::Rng;
 
     fn sample_record(plan_id: &str) -> DecisionRecord {
         DecisionRecordBuilder::new()
@@ -420,7 +421,7 @@ mod tests {
         let audit_dir = tempfile::tempdir().unwrap();
         let key = {
             let mut seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut seed);
+            rand::rng().fill_bytes(&mut seed);
             SigningKey::from_bytes(&seed)
         };
         let vk = key.verifying_key();

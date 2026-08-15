@@ -121,6 +121,29 @@ pub struct VmmSpec {
     /// without an egress relay. Workload launches leave this false so a
     /// missing relay fails closed rather than booting ungated.
     pub trusted_builder: bool,
+    /// What a supervisor needs to enforce the plan's wall-clock bound and
+    /// record the kill. `None` on the boot paths that carry no plan — Stage 0
+    /// and the builder VM — which therefore have no bound to enforce.
+    pub plan_binding: Option<PlanBinding>,
+}
+
+/// The admitted plan plus the two paths a supervisor needs to audit a kill
+/// under it.
+///
+/// Deliberately narrower than [`AuditSubstrate`](crate::host::audit_substrate::AuditSubstrate):
+/// it carries no `tenant_id` and no gateway sockets. Those select the
+/// supervisor's admission route, and a wall-clock bound has to be enforceable
+/// without changing which route a workload takes. Nothing is lost by omitting
+/// the tenant — the audit entry takes it from the plan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlanBinding {
+    /// The admitted `ExecutionPlan` envelope, as the supervisor re-verifies it.
+    /// Untyped here so the spec does not couple to `mvm_core::plan`.
+    pub plan_json: serde_json::Value,
+    /// `~/.mvm/audit/` — where the chain-signed kill entry lands.
+    pub audit_dir: PathBuf,
+    /// `~/.mvm/keys/host-signer.ed25519` — the key the chain is signed under.
+    pub signing_key_path: PathBuf,
 }
 
 impl VmmSpec {

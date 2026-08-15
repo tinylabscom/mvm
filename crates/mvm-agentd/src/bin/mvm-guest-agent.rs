@@ -17,6 +17,7 @@
 //!   --help, -h                 Print usage
 //! ```
 
+use rand::TryRng;
 #[path = "mvm-guest-agent/boot.rs"]
 mod boot;
 #[path = "mvm-guest-agent/config.rs"]
@@ -631,7 +632,11 @@ fn main() {
         }
     }
     let boot_state = Arc::new(boot_state_val);
-    let guest_signing_key = Arc::new(SigningKey::from_bytes(&rand::random::<[u8; 32]>()));
+    let mut guest_seed = [0u8; 32];
+    rand::rngs::SysRng
+        .try_fill_bytes(&mut guest_seed)
+        .expect("SysRng entropy for guest signing key");
+    let guest_signing_key = Arc::new(SigningKey::from_bytes(&guest_seed));
     boot_state.mark_vsock_bound();
     eprintln!(
         "mvm-guest-agent: control plane ready ({}ms)",

@@ -15,8 +15,6 @@ type Row = {
   /** Single sample, or a language-tabbed set for surfaces with more than one voice. */
   sampleId?: string;
   langs?: LangPane[];
-  /** Which side the code panel renders on for this row. */
-  panelSide: "left" | "right";
 };
 
 const ROWS: Row[] = [
@@ -27,7 +25,6 @@ const ROWS: Row[] = [
     linkLabel: "CLI reference",
     linkHref: "reference/cli-commands/",
     sampleId: "cli-run",
-    panelSide: "left",
   },
   {
     label: "Source",
@@ -39,7 +36,6 @@ const ROWS: Row[] = [
       { tab: "python", trigger: "Python", sampleId: "python-hello" },
       { tab: "typescript", trigger: "TypeScript", sampleId: "declare-typescript" },
     ],
-    panelSide: "right",
   },
   {
     label: "Process",
@@ -52,7 +48,6 @@ const ROWS: Row[] = [
       { tab: "node", trigger: "Node.js", sampleId: "sdk-node" },
       { tab: "rust", trigger: "Rust", sampleId: "sdk-rust" },
     ],
-    panelSide: "left",
   },
 ];
 
@@ -103,26 +98,38 @@ export function Positioning() {
         </h2>
       </Reveal>
 
-      <div className="mt-20 flex flex-col gap-16 lg:mt-24 lg:gap-24">
+      {/* Three panels side by side across the section, each with its text
+          directly underneath. Collapses to a single column on small
+          screens. */}
+      {/* Inline margin, not a Tailwind mt-* utility: Starlight's unlayered
+          stylesheet beats layered utilities on this page (see Hero.tsx's
+          centering comment), and this gap is load-bearing for the section's
+          rhythm. */}
+      <div
+        className="grid gap-12 lg:grid-cols-3 lg:gap-8"
+        style={{ marginTop: "5rem" }}
+      >
         {ROWS.map((row, i) => (
-          <Reveal key={row.heading} delay={i * 60}>
-            <div className="grid gap-8 lg:grid-cols-2 lg:items-center lg:gap-16">
-              <div className={row.panelSide === "left" ? "lg:order-2" : "lg:order-1"}>
-                <p className="mb-2 font-mono text-xs tracking-[0.2em] uppercase text-accent">
-                  {row.label}
-                </p>
-                <h3 className="mb-4 lowercase font-display text-xl font-bold text-title sm:text-2xl">
-                  {row.heading}
-                </h3>
-                <p className="mb-4 max-w-md text-base leading-relaxed text-body">{row.body}</p>
-                <a
-                  href={`${base}${row.linkHref}`}
-                  className="text-sm text-accent underline underline-offset-2 hover:text-accent/80"
-                >
-                  {row.linkLabel}
-                </a>
-              </div>
-              <div className={row.panelSide === "left" ? "min-w-0 lg:order-1" : "min-w-0 lg:order-2"}>
+          <Reveal key={row.heading} delay={i * 80}>
+            {/* Text on top, panel anchored to the card's bottom edge: the
+                cards stretch to equal height, so the panels' bottoms sit on
+                one shared line even though the text blocks and code samples
+                differ in length. */}
+            <div className="flex h-full flex-col">
+              <p className="mb-1.5 font-mono text-xs tracking-[0.2em] uppercase text-accent">
+                {row.label}
+              </p>
+              <h3 className="mb-2 lowercase font-display text-lg font-bold text-title">
+                {row.heading}
+              </h3>
+              <p className="text-sm leading-relaxed text-body">{row.body}</p>
+              <a
+                href={`${base}${row.linkHref}`}
+                className="mt-3 self-start text-sm text-accent underline underline-offset-2 hover:text-accent/80"
+              >
+                {row.linkLabel}
+              </a>
+              <div className="mt-auto min-w-0 pt-5">
                 <RowPanel row={row} />
               </div>
             </div>

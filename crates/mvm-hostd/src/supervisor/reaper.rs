@@ -30,7 +30,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use mvm_runtime::vm::name_registry::{VmNameRegistry, VmRegistration};
-use rand::Rng;
+use rand::RngExt;
 
 /// Default tick interval — ticks fire every `INTERVAL ± JITTER`.
 pub const DEFAULT_INTERVAL: Duration = Duration::from_secs(30);
@@ -268,13 +268,13 @@ fn sweep(
 
 /// Compute the next jittered tick interval. Public so tests can
 /// drive it deterministically with a seeded RNG.
-pub fn jittered_interval<R: Rng>(rng: &mut R, base: Duration, jitter: Duration) -> Duration {
+pub fn jittered_interval<R: RngExt>(rng: &mut R, base: Duration, jitter: Duration) -> Duration {
     if jitter.is_zero() {
         return base;
     }
     // Pick a signed offset in `[-jitter, +jitter]`.
     let span = jitter.as_millis() as i64;
-    let offset = rng.gen_range(-span..=span);
+    let offset = rng.random_range(-span..=span);
     let base_ms = base.as_millis() as i64;
     let total = (base_ms + offset).max(MIN_INTERVAL.as_millis() as i64);
     Duration::from_millis(total as u64)

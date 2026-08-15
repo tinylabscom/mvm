@@ -322,9 +322,22 @@ ADR-001 §"Appendix: Cardoso minimum-viable-policy checklist".
 10. **No untrusted workload reaches the network unless explicitly
     admitted by policy.** Sprint 52 W3. `policy_default_is_deny_all`
     and `run_net_default_is_deny_all` (the ADR-001 row's witnesses)
-    assert the default-deny posture; `mvmctl up` emits an opt-in warning when
-    the resolved policy is `unrestricted` (escape hatch is
-    `MVM_ACK_UNRESTRICTED_NETWORK=1`, never set in CI). Cardoso-flavoured
+    assert the default-deny posture. An unrecognised preset name refuses
+    rather than falling through to a permissive default, at the CLI and on
+    the wire alike (`crates/mvm-contract/tests/egress_predicate_algebra.rs`).
+
+    This bullet used to claim that "`mvmctl up` emits an opt-in warning when
+    the resolved policy is `unrestricted`", with an escape hatch of
+    `MVM_ACK_UNRESTRICTED_NETWORK=1`. **None of that exists.** `up` is not a
+    dispatched verb — `up::Args` is not a `Commands` variant, so its
+    `--network-preset` and `--network-allow` fields are unreachable CLI
+    surface. `MVM_ACK_UNRESTRICTED_NETWORK` is read nowhere in the workspace;
+    its only occurrence is a doc comment in `mvm-contract::stream::edge`
+    saying another mechanism is "shaped after" it. There is no unrestricted
+    acknowledgement, so nothing is being bypassed — but nothing warns either,
+    and `specs/plans/296` cites the non-existent hatch as prior art for its
+    E7 redaction opt-out. Building the acknowledgement is Plan 306 WS5.
+    Cardoso-flavoured
     audit of DNS / vsock control-plane carve-out / Plan 104 broker
     channels as covert egress is tracked in Plan 111 Workstream A.
 11. **Every application-dep volume is hash-locked, attestation-checked,
@@ -491,11 +504,17 @@ systemd transient scope on Linux and the achieved tier is read back off
 primitive, so the run loop enforces the share in-process using the vCPU
 thread's Mach CPU time; the achieved tier is read back from the scheduler's
 measured record and audited. libkrun has no in-process vCPU control, so a CPU
-grant there stays `declared` and `--prod` refuses it. Wall clock is claimed by
-nothing: it is authored, ceiling-checked, admitted and audited as a tier
-label, and no code in this tree stops a workload at its deadline. wasm
-fuel/epoch is likewise declared and unwired, and a restored or warm-claimed
-child is admission-bounded without its host-side CPU control being re-armed.
+grant there stays `declared` and `--prod` refuses it. Wall clock is enforced
+by the per-VM supervisor on libkrun and HVF: the process that owns the guest
+for its whole life arms a timer from the admitted plan, and a workload that
+outruns its bound is killed with exit `124` and a chain-signed entry. A bound
+whose kill could not be audited refuses to boot rather than running unbounded.
+Firecracker has no such supervisor process and is not covered. wasm
+fuel/epoch is declared and unwired, and a restored or warm-claimed child is
+admission-bounded without its host-side CPU control **or its wall-clock
+timer** being re-armed — a restore deliberately does not inherit the parent's
+plan, since auditing a child's kill under its parent's identity would write a
+wrong entry rather than a missing one.
 ADR-001's ledger carries the "Preview 18 limits" note; do not paraphrase
 this row as enforced without it.
 

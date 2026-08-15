@@ -238,6 +238,7 @@ pub fn spawn_hvf_gating_endpoint_if_needed(
         // The hvf VMM has no transparent :80/:443 terminator — all egress is
         // the proxy-aware WireRequest path, so no terminator + no per-VM TLS.
         terminator_listen: None,
+        egress_proxy: None,
         tls_intermediate: None,
         network_policy: Some(network_policy),
         raw_egress: secrets.is_empty(),

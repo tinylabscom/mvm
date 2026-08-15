@@ -86,6 +86,7 @@ mod tests {
     use crate::policy::bundle::{PolicyId, TenantOverlay};
     use crate::policy::policies::*;
     use ed25519_dalek::SigningKey;
+    use rand::Rng;
     use std::collections::BTreeMap;
 
     fn sample_bundle() -> PolicyBundle {
@@ -136,7 +137,7 @@ mod tests {
     fn fresh_key() -> (SigningKey, VerifyingKey) {
         let sk = {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             SigningKey::from_bytes(&__ed_seed)
         };
         let vk = sk.verifying_key();

@@ -138,6 +138,9 @@ pub fn builder_spec(inputs: &BuilderSpecInputs<'_>) -> VmmSpec {
         },
         shares: Vec::new(),
         trusted_builder: true,
+        // The builder VM boots from no admitted plan, so it carries no
+        // wall-clock bound to enforce.
+        plan_binding: None,
     }
 }
 
@@ -262,6 +265,9 @@ pub fn persistent_builder_spec(inputs: &PersistentBuilderSpecInputs<'_>) -> VmmS
         },
         shares,
         trusted_builder: true,
+        // The builder VM boots from no admitted plan, so it carries no
+        // wall-clock bound to enforce.
+        plan_binding: None,
     }
 }
 

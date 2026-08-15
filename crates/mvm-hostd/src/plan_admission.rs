@@ -1605,6 +1605,7 @@ mod tests {
     use super::*;
     use chrono::{DateTime, TimeZone, Utc};
     use mvm_core::plan::{PlanSeccompTier, SecretReleasePolicy};
+    use rand::Rng;
 
     const FIXTURE_SHA: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
@@ -2704,7 +2705,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let sk = {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             ed25519_dalek::SigningKey::from_bytes(&__ed_seed)
         };
         let (archive, pin) = make_test_bundle(&sk, b"kernel-bytes", b"rootfs-bytes");
@@ -2739,7 +2740,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let sk = {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             ed25519_dalek::SigningKey::from_bytes(&__ed_seed)
         };
         let (_archive, pin) = make_test_bundle(&sk, b"k", b"r");
@@ -2762,7 +2763,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let sk = {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             ed25519_dalek::SigningKey::from_bytes(&__ed_seed)
         };
         let (archive, pin) = make_test_bundle(&sk, b"k", b"r");
@@ -2800,7 +2801,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let sk = {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             ed25519_dalek::SigningKey::from_bytes(&__ed_seed)
         };
         let (_archive_a, pin_a) = make_test_bundle(&sk, b"kA", b"rA");
@@ -3415,7 +3416,7 @@ mod tests {
         };
         let audit_dir = dir.path().join("audit");
         let mut seed = [0u8; 32];
-        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut seed);
+        rand::rng().fill_bytes(&mut seed);
         let emitter = crate::audit::emitter::AuditEmitter::with_dir(
             ed25519_dalek::SigningKey::from_bytes(&seed),
             &audit_dir,
@@ -3524,7 +3525,7 @@ mod tests {
         std::fs::create_dir_all(&audit_dir).unwrap();
         std::fs::create_dir(audit_dir.join("local.jsonl")).unwrap();
         let mut seed = [0u8; 32];
-        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut seed);
+        rand::rng().fill_bytes(&mut seed);
         let emitter = crate::audit::emitter::AuditEmitter::with_dir(
             ed25519_dalek::SigningKey::from_bytes(&seed),
             &audit_dir,
@@ -3577,7 +3578,7 @@ mod tests {
         std::fs::create_dir_all(&audit_dir).unwrap();
         std::fs::create_dir(audit_dir.join("local.jsonl")).unwrap();
         let mut seed = [0u8; 32];
-        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut seed);
+        rand::rng().fill_bytes(&mut seed);
         let emitter = crate::audit::emitter::AuditEmitter::with_dir(
             ed25519_dalek::SigningKey::from_bytes(&seed),
             &audit_dir,

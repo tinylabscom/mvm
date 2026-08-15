@@ -74,7 +74,7 @@ run *ARGS:
 
 # Run mvmctl with the dev env set (worktree-local MVM_HOME).
 dev *ARGS:
-    sh ./bin/dev {{ ARGS }}
+    sh ./scripts/dev {{ ARGS }}
 
 # Run cargo with the dev env set (worktree-local MVM_HOME /
 
@@ -161,12 +161,24 @@ test:
 test-doc:
     cargo test --workspace --doc
 
-# Run tests with sccache wrapping rustc — caches compilation across
-# worktrees/branches (a content cache, not a build lock, so parallel
-# sessions don't serialize on it). Incremental is OFF because sccache and
-# incremental compilation are mutually exclusive: this trades inner-loop
-
-# incremental for cross-worktree cache hits. Needs `cargo install sccache`.
+# Run tests with sccache also caching the workspace crates.
+#
+# The wrapper itself is not what this recipe adds. `RUSTC_WRAPPER = "sccache"`
+# belongs in a contributor's own `~/.cargo/config.toml` (a fact about a host
+# that runs many worktrees, not about the project), and there it already caches
+# every third-party dependency, because cargo compiles dependencies
+# non-incrementally regardless of this setting.
+#
+# What `CARGO_INCREMENTAL=0` adds is the *workspace* crates, which are the ones
+# incremental compilation otherwise keeps out of the cache. That is a good
+# trade for a full-suite run — incremental buys nothing when everything is
+# being compiled anyway — and a bad one for the inner loop, which is why it is
+# scoped to this recipe instead of being set globally.
+#
+# A content cache, not a build lock, so parallel sessions don't serialize on it.
+# Needs `cargo install sccache`. For cross-worktree hits the host config also
+# needs `basedirs`; without it every worktree is a private cache and the
+# measured hit rate is 0%.
 test-cached:
     @command -v sccache >/dev/null || { echo "sccache not found — install with: cargo install sccache"; exit 1; }
     RUSTC_WRAPPER=sccache CARGO_INCREMENTAL=0 cargo nextest run --workspace
@@ -210,6 +222,14 @@ bdd:
 build-supervisors:
     cargo build -p mvm-hostd --bin mvm-network-endpoint --bin mvm-hvf-supervisor
     cargo build -p mvm-hostd --bin mvm-libkrun-supervisor --features libkrun-sys
+
+# Drop the cached cross-compiled host binaries so the next build rebuilds them.
+# Dev builds reuse these instead of re-running cargo-zigbuild, which is ~93% of
+# mvm-cli's build-script wall time. Run this after editing anything they link
+# (mvm-build, mvm-core, ...) when you are about to boot a real VM; ordinary
+# check/test/clippy runs never need it. Release builds always rebuild.
+embed-refresh:
+    rm -rf target/*/build/mvm-cli-nested-target/host-vm-target
 
 # Build the dm-verity-capable workload kernel into the local mvm cache.
 # Set MVM_KERNEL_SOURCE=download to use the hash-verified release artifact, or
@@ -430,17 +450,21 @@ tag:
 docs-install:
     cd public && pnpm install
 
-# Start docs dev server
-docs-dev:
+# Start docs dev server (stages the /demo wasm assets first if missing)
+docs-dev: demo-assets
     cd public && pnpm dev
 
-# Build docs site
-docs-build:
+# Build docs site (stages the /demo wasm assets first if missing)
+docs-build: demo-assets
     cd public && pnpm build
 
 # Build the browser-tier microVM demo assets (wasm core + guest + fixtures)
 demo-build:
     ./web/mvm-demo/build.sh
+
+# Stage the /demo assets only if they're missing; `just demo-build` forces a rebuild
+demo-assets:
+    [ -d public/public/demo ] || just demo-build
 
 # ── VMM setup ────────────────────────────────────────────────────────────
 

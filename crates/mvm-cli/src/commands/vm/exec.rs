@@ -1453,6 +1453,7 @@ mod host_service_flag_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rand::Rng;
 
     #[test]
     fn dry_run_posture_reflects_resolved_policy() {
@@ -1859,7 +1860,7 @@ mod tests {
         let pubkey_path = dir.path().join("host.pub");
         let signing = {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             ed25519_dalek::SigningKey::from_bytes(&__ed_seed)
         };
         std::fs::write(&pubkey_path, signing.verifying_key().to_bytes()).expect("pubkey");
@@ -1907,7 +1908,7 @@ mod tests {
         let pubkey_path = dir.path().join("host.pub");
         let signing = {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             ed25519_dalek::SigningKey::from_bytes(&__ed_seed)
         };
         std::fs::write(&pubkey_path, signing.verifying_key().to_bytes()).expect("pubkey");

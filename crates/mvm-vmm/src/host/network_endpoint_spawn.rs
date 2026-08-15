@@ -245,6 +245,15 @@ pub struct SubstitutionSpawnParams<'a> {
     /// `Some(addr)` ⇒ also run the transparent HTTP terminator on that host TCP
     /// addr (FC nft REDIRECT feeds it). `None` on slirp / in-process VMMs.
     pub terminator_listen: Option<SocketAddr>,
+    /// The operator's upstream proxy for the endpoint's forward leg, on a host
+    /// whose only route out is a proxy.
+    ///
+    /// `None` means "inherit this host's proxy environment", which
+    /// [`spawn_network_endpoint`] resolves once for every backend. Resolving it
+    /// there rather than at each call site is deliberate: a backend that forgot
+    /// to read the environment would be an egress outage on a force-tunnelled
+    /// host, and the forgetting would be invisible.
+    pub egress_proxy: Option<EgressProxySpawnConfig>,
     /// `(cert_pem, key_pem)` of the per-VM intermediate for the `https`
     /// terminator; the key never reaches the guest. `None` ⇒ `http`-only.
     pub tls_intermediate: Option<(String, String)>,
@@ -295,6 +304,7 @@ pub struct SubstitutionSpawnParamsBuilder<'a> {
     resolver_remote: Option<RemoteResolverSpawnConfig<'a>>,
     binding_store_dir: Option<&'a Path>,
     flowmux_identity: Option<FlowMuxIdentitySpawnConfig>,
+    egress_proxy: Option<EgressProxySpawnConfig>,
 }
 
 impl<'a> SubstitutionSpawnParamsBuilder<'a> {
@@ -315,6 +325,7 @@ impl<'a> SubstitutionSpawnParamsBuilder<'a> {
             resolver_remote: None,
             binding_store_dir: None,
             flowmux_identity: None,
+            egress_proxy: None,
         }
     }
 
@@ -421,6 +432,14 @@ impl<'a> SubstitutionSpawnParamsBuilder<'a> {
         self
     }
 
+    /// Set `egress_proxy`. Takes a value or an `Option`; unset means `None`,
+    /// which is the endpoint's "dial direct".
+    #[must_use]
+    pub fn egress_proxy(mut self, egress_proxy: impl Into<Option<EgressProxySpawnConfig>>) -> Self {
+        self.egress_proxy = egress_proxy.into();
+        self
+    }
+
     /// Finish, or name the first required field left unset.
     pub fn build(self) -> Result<SubstitutionSpawnParams<'a>, BuilderError> {
         Ok(SubstitutionSpawnParams {
@@ -455,6 +474,7 @@ impl<'a> SubstitutionSpawnParamsBuilder<'a> {
             resolver_remote: self.resolver_remote,
             binding_store_dir: self.binding_store_dir,
             flowmux_identity: self.flowmux_identity,
+            egress_proxy: self.egress_proxy,
         })
     }
 }
@@ -462,6 +482,43 @@ impl<'a> SubstitutionSpawnParamsBuilder<'a> {
 impl<'a> Default for SubstitutionSpawnParamsBuilder<'a> {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// The upstream proxy, as strings the endpoint parses.
+///
+/// Strings rather than a parsed type because this only carries a value from
+/// host configuration to the endpoint's stdin; the endpoint is where a bad
+/// value has to be reported, since it is the process that would otherwise fail
+/// to reach anything.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EgressProxySpawnConfig {
+    pub https: Option<String>,
+    pub http: Option<String>,
+    pub no_proxy: Option<String>,
+}
+
+impl EgressProxySpawnConfig {
+    /// Read the conventional proxy environment of the host process.
+    ///
+    /// Returns `None` when nothing is configured, so the common case emits no
+    /// keys at all and the endpoint's defaults keep meaning "dial direct".
+    #[must_use]
+    pub fn from_host_env() -> Option<Self> {
+        let pick = |names: &[&str]| -> Option<String> {
+            names
+                .iter()
+                .find_map(|n| std::env::var(n).ok())
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty())
+        };
+        let all = pick(&["all_proxy", "ALL_PROXY"]);
+        let cfg = Self {
+            https: pick(&["https_proxy", "HTTPS_PROXY"]).or_else(|| all.clone()),
+            http: pick(&["http_proxy", "HTTP_PROXY"]).or(all),
+            no_proxy: pick(&["no_proxy", "NO_PROXY"]),
+        };
+        (cfg.https.is_some() || cfg.http.is_some()).then_some(cfg)
     }
 }
 
@@ -490,6 +547,22 @@ fn build_endpoint_config_json(params: &SubstitutionSpawnParams<'_>) -> serde_jso
             "wire"
         },
     });
+    if let Some(proxy) = params.egress_proxy.as_ref() {
+        // `EndpointConfig.proxy_*`: the operator's upstream proxy for the
+        // forward leg. Resolved on the host, where configuration lives, rather
+        // than in the endpoint, which self-confines before it serves. Keys are
+        // emitted only when set so the endpoint's `#[serde(default)]` fields
+        // keep meaning "dial direct".
+        if let Some(v) = proxy.https.as_deref() {
+            cfg["proxy_https"] = serde_json::Value::String(v.to_string());
+        }
+        if let Some(v) = proxy.http.as_deref() {
+            cfg["proxy_http"] = serde_json::Value::String(v.to_string());
+        }
+        if let Some(v) = proxy.no_proxy.as_deref() {
+            cfg["no_proxy"] = serde_json::Value::String(v.to_string());
+        }
+    }
     if let Some(addr) = params.terminator_listen {
         // `EndpointConfig.terminator_listen: Option<SocketAddr>`:
         // present ⇒ the endpoint runs the host TCP terminator concurrently with
@@ -555,8 +628,13 @@ fn build_endpoint_config_json(params: &SubstitutionSpawnParams<'_>) -> serde_jso
 /// `mvmctl up`; the stop path reaps
 /// it via [`SUBST_PID_FILE`]. The real secret values never leave the endpoint's
 /// address space — only the opaque placeholders are persisted/handed out.
-pub fn spawn_network_endpoint(params: SubstitutionSpawnParams<'_>) -> Result<()> {
+pub fn spawn_network_endpoint(mut params: SubstitutionSpawnParams<'_>) -> Result<()> {
     use std::io::Write;
+    // One resolution point for every backend. A caller that supplied a proxy
+    // explicitly keeps it; everyone else inherits the host's environment.
+    if params.egress_proxy.is_none() {
+        params.egress_proxy = EgressProxySpawnConfig::from_host_env();
+    }
     let cfg = build_endpoint_config_json(&params);
     let SubstitutionSpawnParams {
         vm_name, state_dir, ..
@@ -981,6 +1059,7 @@ mod tests {
             redaction: &redaction,
             transport: EndpointTransport::Uds { path: sock.clone() },
             terminator_listen: None,
+            egress_proxy: None,
             tls_intermediate: None,
             network_policy: None,
             raw_egress: false,
@@ -1041,6 +1120,7 @@ mod tests {
                 path: dir.join("vsock-5253.sock"),
             },
             terminator_listen: None,
+            egress_proxy: None,
             tls_intermediate: None,
             network_policy: None,
             raw_egress: false,
@@ -1106,6 +1186,7 @@ mod tests {
                 path: dir.join("vsock-5253.sock"),
             },
             terminator_listen: None,
+            egress_proxy: None,
             tls_intermediate: None,
             network_policy: None,
             raw_egress: false,
@@ -1172,6 +1253,7 @@ mod tests {
                 path: dir.join("vsock-5253.sock"),
             },
             terminator_listen: None,
+            egress_proxy: None,
             tls_intermediate: None,
             network_policy: None,
             raw_egress: false,
@@ -1232,6 +1314,7 @@ mod tests {
                 path: sock.to_path_buf(),
             },
             terminator_listen: None,
+            egress_proxy: None,
             tls_intermediate: None,
             network_policy,
             raw_egress,
@@ -1265,6 +1348,53 @@ mod tests {
         // two fields existed.
         assert!(cfg.get("resolver").is_none());
         assert!(cfg.get("binding_store_dir").is_none());
+    }
+
+    // A host that force-tunnels its egress reaches nothing without these keys,
+    // and the endpoint's `#[serde(default)]` fields mean an omission is
+    // indistinguishable from "dial direct" — so assert both directions.
+    #[test]
+    fn endpoint_config_json_omits_proxy_keys_when_none_is_configured() {
+        let redaction = mvm_core::policy::RedactionPolicy::default();
+        let sock = Path::new("/tmp/vsock-5253.sock");
+        let cfg = build_endpoint_config_json(&minimal_params(&redaction, sock, None, false));
+        for key in ["proxy_https", "proxy_http", "no_proxy"] {
+            assert!(
+                cfg.get(key).is_none(),
+                "{key} must be absent, not null, so the endpoint default applies"
+            );
+        }
+    }
+
+    #[test]
+    fn endpoint_config_json_carries_each_configured_proxy_leg() {
+        let redaction = mvm_core::policy::RedactionPolicy::default();
+        let sock = Path::new("/tmp/vsock-5253.sock");
+        let mut params = minimal_params(&redaction, sock, None, false);
+        params.egress_proxy = Some(EgressProxySpawnConfig {
+            https: Some("http://secure.corp:3128".into()),
+            http: Some("socks5://plain.corp:1080".into()),
+            no_proxy: Some("internal.example".into()),
+        });
+        let cfg = build_endpoint_config_json(&params);
+        assert_eq!(cfg["proxy_https"], "http://secure.corp:3128");
+        assert_eq!(cfg["proxy_http"], "socks5://plain.corp:1080");
+        assert_eq!(cfg["no_proxy"], "internal.example");
+    }
+
+    #[test]
+    fn a_partially_configured_proxy_emits_only_the_leg_that_is_set() {
+        let redaction = mvm_core::policy::RedactionPolicy::default();
+        let sock = Path::new("/tmp/vsock-5253.sock");
+        let mut params = minimal_params(&redaction, sock, None, false);
+        params.egress_proxy = Some(EgressProxySpawnConfig {
+            https: Some("http://secure.corp:3128".into()),
+            ..Default::default()
+        });
+        let cfg = build_endpoint_config_json(&params);
+        assert_eq!(cfg["proxy_https"], "http://secure.corp:3128");
+        assert!(cfg.get("proxy_http").is_none());
+        assert!(cfg.get("no_proxy").is_none());
     }
 
     // mvmd's tenant-secrets vault (D8 wiring) needs the endpoint to resolve

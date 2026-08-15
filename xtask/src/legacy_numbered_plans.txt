@@ -106,3 +106,6 @@
 331-unblocked-closeout-batch.md
 332-open-work-register.md
 333-dependency-hygiene.md
+334-build-critical-path.md
+336-sdk-parity-and-bdd-coverage.md
+337-sdk-surface-generated-from-rust.md

@@ -12,6 +12,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as mvm from "../src/index.js";
+import { deriveAttachedBuildMode, parseUpEnvelope } from "../src/_sandbox.js";
 
 let tmpDir: string;
 
@@ -149,7 +150,7 @@ afterEach(() => {
 
 describe("parseUpEnvelope", () => {
   it("accepts a dev payload", () => {
-    const parsed = mvm.parseUpEnvelope(
+    const parsed = parseUpEnvelope(
       '{"schema_version": 1, "vm_id": "sb-xyz", "build_mode": "dev"}\n',
       ["mvmctl", "up"],
     );
@@ -158,7 +159,7 @@ describe("parseUpEnvelope", () => {
 
   it("rejects unknown schema", () => {
     expect(() =>
-      mvm.parseUpEnvelope('{"schema_version": 99, "vm_id": "x", "build_mode": "dev"}', [
+      parseUpEnvelope('{"schema_version": 99, "vm_id": "x", "build_mode": "dev"}', [
         "mvmctl",
         "up",
       ]),
@@ -167,13 +168,13 @@ describe("parseUpEnvelope", () => {
 
   it("rejects missing vm_id", () => {
     expect(() =>
-      mvm.parseUpEnvelope('{"schema_version": 1, "build_mode": "dev"}', ["mvmctl", "up"]),
+      parseUpEnvelope('{"schema_version": 1, "build_mode": "dev"}', ["mvmctl", "up"]),
     ).toThrow(/vm_id/);
   });
 
   it("rejects unknown build_mode", () => {
     expect(() =>
-      mvm.parseUpEnvelope(
+      parseUpEnvelope(
         '{"schema_version": 1, "vm_id": "x", "build_mode": "staging"}',
         ["mvmctl", "up"],
       ),
@@ -181,11 +182,11 @@ describe("parseUpEnvelope", () => {
   });
 
   it("rejects empty stdout", () => {
-    expect(() => mvm.parseUpEnvelope("", ["mvmctl", "up"])).toThrow(/empty stdout/);
+    expect(() => parseUpEnvelope("", ["mvmctl", "up"])).toThrow(/empty stdout/);
   });
 
   it("rejects invalid JSON", () => {
-    expect(() => mvm.parseUpEnvelope("not json", ["mvmctl", "up"])).toThrow(
+    expect(() => parseUpEnvelope("not json", ["mvmctl", "up"])).toThrow(
       /not valid JSON/,
     );
   });
@@ -201,23 +202,23 @@ describe("deriveAttachedBuildMode", () => {
       { name: "a", build_mode: "prod", status: "running" },
       { name: "b", build_mode: "dev", status: "running" },
     ]);
-    expect(mvm.deriveAttachedBuildMode(stdout, "b", argv)).toBe("dev");
-    expect(mvm.deriveAttachedBuildMode(stdout, "a", argv)).toBe("prod");
+    expect(deriveAttachedBuildMode(stdout, "b", argv)).toBe("dev");
+    expect(deriveAttachedBuildMode(stdout, "a", argv)).toBe("prod");
   });
 
   it("fails closed on a missing build_mode", () => {
     const stdout = JSON.stringify([{ name: "a", status: "running" }]);
-    expect(mvm.deriveAttachedBuildMode(stdout, "a", argv)).toBe("prod");
+    expect(deriveAttachedBuildMode(stdout, "a", argv)).toBe("prod");
   });
 
   it("fails closed on an unknown build_mode", () => {
     const stdout = JSON.stringify([{ name: "a", build_mode: "staging" }]);
-    expect(mvm.deriveAttachedBuildMode(stdout, "a", argv)).toBe("prod");
+    expect(deriveAttachedBuildMode(stdout, "a", argv)).toBe("prod");
   });
 
   it("throws when the machine is absent", () => {
     const stdout = JSON.stringify([{ name: "other", build_mode: "dev" }]);
-    expect(() => mvm.deriveAttachedBuildMode(stdout, "ghost", argv)).toThrow(
+    expect(() => deriveAttachedBuildMode(stdout, "ghost", argv)).toThrow(
       /no machine named/,
     );
   });

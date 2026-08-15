@@ -116,11 +116,12 @@ mod tests {
     use ed25519_dalek::SigningKey;
     use mvm_contract::merkle::{verify_inclusion, verify_signed_root};
     use mvm_core::plan::{PlanId, TenantId};
+    use rand::Rng;
     use std::collections::BTreeMap;
 
     fn fresh_key() -> SigningKey {
         let mut seed = [0u8; 32];
-        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut seed);
+        rand::rng().fill_bytes(&mut seed);
         SigningKey::from_bytes(&seed)
     }
 
