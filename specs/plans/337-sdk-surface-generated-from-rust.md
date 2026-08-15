@@ -1,8 +1,8 @@
-# Plan 333 — Generate the SDK surface from Rust instead of porting it
+# Plan 337 — Generate the SDK surface from Rust instead of porting it
 
 **Status: NOT STARTED**
 **Opened:** 2026-08-14
-**Follows:** Plan 332 WS-G4
+**Follows:** Plan 336 WS-G4
 
 ## The finding that reframes this
 
@@ -191,7 +191,7 @@ Decide before committing to W2.
 - [ ] 5.1 Lift the code → type mapping into Rust, `_hostsvc`'s pattern as the
       model
 - [ ] 5.2 Generate the hierarchy in both languages
-- [ ] 5.3 Assert the taxonomy is catchable in both — the bug Plan 332 fixed by
+- [ ] 5.3 Assert the taxonomy is catchable in both — the bug Plan 336 fixed by
       hand for the host-service errors
 
 ### WS-6 — Tier C: the remote-function surface (the expensive one)
@@ -202,7 +202,7 @@ Decide before committing to W2.
 - [ ] 6.3 `Session` + `session` + `current_session_id`
 - [ ] 6.4 `WorkloadRef` + `workload_ref`
 - [ ] 6.5 BDD coverage against the recording CLI double, both languages, in the
-      s27 pattern Plan 332 established
+      s27 pattern Plan 336 established
 - [ ] 6.6 Error taxonomy from WS-5 wired through
 
 ### WS-7 — Tier F decision
@@ -232,5 +232,5 @@ Tiers A, B, D, E are perhaps a third of the names and most of the durable value:
 they delete triplication and make the remaining parity mechanical. Tier C is the
 larger half of the effort for seven names, and is a straight port with no
 generation available. If the budget only covers one, **do A/B/D/E and leave
-Tier C explicitly unported** — the gate from Plan 332 keeps that honest rather
+Tier C explicitly unported** — the gate from Plan 336 keeps that honest rather
 than letting it read as an oversight.

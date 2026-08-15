@@ -1,4 +1,4 @@
-# 332 — Runtime SDK parity repair + live-transport BDD
+# 336 — Runtime SDK parity repair + live-transport BDD
 
 ## What shipped
 
@@ -174,5 +174,5 @@ taxonomy) plus the declarative network/deps helpers (`egress`, the `dns_*`
 trio, the `*_deps` trio, `addon_use`, `host_port`).
 
 That needs product intent, so it is tracked as WS-G4 in
-`specs/plans/332-sdk-parity-and-bdd-coverage.md`. The gate pins the current
+`specs/plans/336-sdk-parity-and-bdd-coverage.md`. The gate pins the current
 divergence in the meantime, so it cannot widen unnoticed.

@@ -1,4 +1,4 @@
-# Plan 332 — Runtime SDK parity repair + BDD coverage
+# Plan 336 — Runtime SDK parity repair + BDD coverage
 
 **Status: IN PROGRESS**
 **Opened:** 2026-08-14
@@ -216,11 +216,11 @@ That leaves two decidable problems and one that is a feature port:
 - [x] G3. Gate it. `surface_divergence.json` records the reviewed difference and
       a BDD scenario fails when reality stops matching it — confirmed to go red
       when a single internal is re-exported.
-- [x] G4. Scoped out into `specs/plans/333-sdk-surface-generated-from-rust.md`.
+- [x] G4. Scoped out into `specs/plans/337-sdk-surface-generated-from-rust.md`.
       Investigating it changed the shape of the answer: `egress`, `host_port`,
       the `dns_*` trio and the `*_deps` trio already exist in
       `mvm_sdk::ctor` and are hand-copied into Python, so porting them to
-      TypeScript would make three copies rather than two. Plan 333 generates
+      TypeScript would make three copies rather than two. Plan 337 generates
       that layer from Rust instead, which also deletes the Python copies.
 - [x] G5. Fix the parity gate's normalization. Folding case collapsed the class
       `Session` onto the function `session` — both SDKs export both — hiding one

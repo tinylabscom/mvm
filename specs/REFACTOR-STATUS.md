@@ -7,7 +7,7 @@ for detailed scope and acceptance criteria.
 
 ## Completed issue closeouts
 
-- [x] **Plan 332 — runtime SDK parity + live-transport BDD.** The golden
+- [x] **Plan 336 — runtime SDK parity + live-transport BDD.** The golden
       `tests/machine-fixtures` corpus was shadowed by an unanchored copy under
       `crates/`, which is what the Python and TypeScript suites resolved to;
       both were red on main and blind to `machine start --image`. Corpus
