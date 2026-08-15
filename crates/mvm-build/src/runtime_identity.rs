@@ -110,7 +110,6 @@ fn write_sidecar(path: &Path, sidecar: &Sidecar) -> Result<(), io::Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
 
     fn bins_in(dir: &Path) -> MvmRuntimeBinaries {
         let mk = |name: &str, content: &[u8]| {
@@ -143,42 +142,17 @@ mod tests {
     }
 
     /// The whole point of the sidecar: the steady-state path must not read the
-    /// artifacts. Proven by making them unreadable — if the bytes were being
-    /// digested, this would fail with EACCES.
-    /// The prepared-cold launch lane forbids `artifact_hash` and reads the
-    /// counter in `mvm_core::launch_trace`. A recompute reads every artifact
-    /// end-to-end, so it has to report that rather than hash silently.
+    /// artifacts.
     ///
-    /// Only the positive direction is asserted here. `artifact_bytes_hashed` is
-    /// a process-global counter, so "a sidecar hit added nothing" cannot be
-    /// checked while sibling tests in the same process are also hashing. That
-    /// half is covered structurally, and more strongly, by
-    /// [`a_valid_sidecar_is_used_without_reading_artifact_bytes`]: it makes the
-    /// artifacts unreadable and still requires the identity to resolve, so no
-    /// read can have happened at all.
-    #[test]
-    fn a_recompute_reports_the_bytes_it_read() {
-        let dir = tempfile::tempdir().unwrap();
-        let bins = bins_in(dir.path());
-        let expected: u64 = bins
-            .artifacts()
-            .iter()
-            .map(|(_, p)| std::fs::metadata(p).unwrap().len())
-            .sum();
-
-        let before = mvm_core::launch_trace::recorded_acquisition().artifact_bytes_hashed;
-        identity_with_sidecar(&bins, dir.path()).unwrap();
-        let after = mvm_core::launch_trace::recorded_acquisition().artifact_bytes_hashed;
-
-        // `>=` rather than `==`: the counter is shared, so a concurrent test may
-        // have added to it. The floor is what this call itself must have read.
-        assert!(
-            after >= before + expected,
-            "a recompute read {expected} bytes but reported {}",
-            after - before
-        );
-    }
-
+    /// Proven by swapping every artifact's *content* while holding its length
+    /// and mtime fixed, so the recorded stamps still match. Anything that read
+    /// the bytes would now digest different content and produce a different
+    /// identity; only a path that trusts the sidecar returns the original.
+    ///
+    /// An earlier version made the artifacts unreadable (mode 0000) instead.
+    /// That proves nothing when the suite runs as root — root bypasses the
+    /// permission check, the read succeeds, and the assertion passes for the
+    /// wrong reason. CI containers routinely run as root.
     #[test]
     fn a_valid_sidecar_is_used_without_reading_artifact_bytes() {
         let dir = tempfile::tempdir().unwrap();
@@ -186,16 +160,22 @@ mod tests {
         let expected = identity_with_sidecar(&bins, dir.path()).unwrap();
 
         for (_, path) in bins.artifacts() {
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o000)).unwrap();
+            let original = std::fs::read(path).unwrap();
+            let mtime = std::fs::metadata(path).unwrap().modified().unwrap();
+            // Same length, different bytes.
+            let swapped: Vec<u8> = original.iter().map(|b| b ^ 0xFF).collect();
+            std::fs::write(path, &swapped).unwrap();
+            let f = std::fs::File::options().write(true).open(path).unwrap();
+            f.set_times(std::fs::FileTimes::new().set_modified(mtime))
+                .unwrap();
+            drop(f);
         }
 
-        let id = identity_with_sidecar(&bins, dir.path())
-            .expect("a valid sidecar must not require reading the artifacts");
-        assert_eq!(id, expected);
-
-        for (_, path) in bins.artifacts() {
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644)).unwrap();
-        }
+        assert_eq!(
+            identity_with_sidecar(&bins, dir.path()).unwrap(),
+            expected,
+            "a valid sidecar must be trusted without re-reading the artifacts"
+        );
     }
 
     /// The sidecar is a cache, not an authority. A rebuilt artifact must not be

@@ -494,58 +494,56 @@ mod tests {
         assert_ne!(identity, resolved);
     }
 
-    /// The tag gate runs on every invocation, so its steady-state cost is part
-    /// of the dispatch budget. Recorded as a measurement, asserted only against
-    /// a ceiling far above the observed cost so runner noise cannot flake it.
-    #[test]
-    fn the_runtime_tag_is_cheap_enough_for_the_dispatch_budget() {
-        let tmp = tempfile::tempdir().unwrap();
-        seed_guest_artifacts(tmp.path(), b"v1");
-        oci_runtime_tag(tmp.path()); // prime the sidecar
+    // The tag gate runs on every invocation, so its steady-state cost matters —
+    // but there is deliberately no wall-clock assertion for it here.
+    // `.config/nextest.toml` records that fixed time budgets are missed at full
+    // workspace parallelism while passing alone, and that retries are off
+    // because a test which passes on the second attempt carries no
+    // information. A 20ms ceiling across a 77s local run and a 26m CI lane is a
+    // flake generator, not a gate.
+    //
+    // The property that makes the cost small is asserted structurally instead,
+    // by the test below: the gate resolves without reading the artifacts at
+    // all. The measured figure is recorded in
+    // `specs/sprint/delivery/artifact-derived-runtime-identity.md`.
 
-        let started = std::time::Instant::now();
-        let rounds = 50;
-        for _ in 0..rounds {
-            std::hint::black_box(oci_runtime_tag(tmp.path()));
-        }
-        let per_call = started.elapsed() / rounds;
-
-        println!("steady-state runtime tag: {per_call:?} per call");
-        assert!(
-            per_call < std::time::Duration::from_millis(20),
-            "the tag gate must stay negligible against a 200ms dispatch budget, \
-             but took {per_call:?} per call"
-        );
-    }
-
-    /// The steady-state gate must not read the artifacts either. Proven by
-    /// making them unreadable after the sidecar exists.
+    /// The steady-state gate must not read the artifacts either.
+    ///
+    /// Proven by swapping each artifact's content while holding its length and
+    /// mtime fixed: the sidecar's stamps still match, so a path that trusts it
+    /// returns the original tag, while anything that re-read the bytes would
+    /// digest different content and return a different one.
+    ///
+    /// Deliberately not done by making the files unreadable — root ignores
+    /// mode bits, and CI containers routinely run as root, so a permissions
+    /// trick would pass there for the wrong reason.
     #[test]
     fn the_runtime_tag_reads_the_sidecar_not_the_artifact_bytes() {
-        use std::os::unix::fs::PermissionsExt;
-
         let tmp = tempfile::tempdir().unwrap();
         let dir = seed_guest_artifacts(tmp.path(), b"v1");
         let expected = oci_runtime_tag(tmp.path());
 
-        let mut artifacts: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
-            .unwrap()
-            .filter_map(|e| e.ok().map(|e| e.path()))
-            .filter(|p| p.file_name().and_then(|n| n.to_str()) != Some("runtime-id"))
-            .collect();
-        artifacts.sort();
-        assert_eq!(artifacts.len(), 6, "expected the full artifact set");
-        for path in &artifacts {
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let mut swapped = 0;
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.file_name().and_then(|n| n.to_str()) == Some("runtime-id") {
+                continue;
+            }
+            let original = std::fs::read(&path).unwrap();
+            let mtime = std::fs::metadata(&path).unwrap().modified().unwrap();
+            let flipped: Vec<u8> = original.iter().map(|b| b ^ 0xFF).collect();
+            std::fs::write(&path, &flipped).unwrap();
+            let f = std::fs::File::options().write(true).open(&path).unwrap();
+            f.set_times(std::fs::FileTimes::new().set_modified(mtime))
+                .unwrap();
+            drop(f);
+            swapped += 1;
         }
+        assert_eq!(swapped, 6, "expected the full artifact set");
 
-        let tag = oci_runtime_tag(tmp.path());
-
-        for path in &artifacts {
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644)).unwrap();
-        }
         assert_eq!(
-            tag, expected,
+            oci_runtime_tag(tmp.path()),
+            expected,
             "the tag gate must be answerable from the sidecar alone"
         );
     }

@@ -1251,7 +1251,12 @@ mod tests {
         let egress_client_src = tmp.path().join("e");
         let entrypoint_runner_src = tmp.path().join("r");
         let verity_init_src = tmp.path().join("v");
-        let elf_arch = GuestArch::host();
+        // Must match the arch this test installs under, not the build host:
+        // `install_into_cache` validates each artifact against the arch it is
+        // cached for. Using `GuestArch::host()` here passed on an arm64 macOS
+        // developer machine and failed on x86_64 Linux CI, where the fixtures
+        // were x86_64 but the install arch is aarch64.
+        let elf_arch = GuestArch::Aarch64;
         for (path, tag) in [
             (&oci_init_src, b"INIT".as_slice()),
             (&agent_src, b"AGENT".as_slice()),

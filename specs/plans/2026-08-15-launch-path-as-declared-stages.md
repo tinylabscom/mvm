@@ -3,8 +3,9 @@
 Backing: preview
 Validation: none
 
-**Status:** OPEN — no workstream started
+**Status:** OPEN — WS0 done; WS1-WS3 rescoped as testability work
 **Opened:** 2026-08-15
+**WS0 measured:** 2026-08-15
 
 ## Why this plan exists
 
@@ -90,11 +91,8 @@ stage runner bracket each, replacing the five ad-hoc timing pairs.
 
 ## Workstreams
 
-- [ ] **WS0** — attribute the cost first. Record `resolve_ms` / `drives_ms` /
-      `admit_ms` / `dispatch_window_ms` / `total_ms` for a prepared-cold launch
-      on one host and image. If `resolve_launch` is a small share of `total_ms`,
-      stop: the remaining workstreams are then a testability change, not a
-      latency one, and should be scoped and justified as such.
+- [x] **WS0** — attribute the cost first. **Done 2026-08-15. Result: this is
+      not a latency change.** See "WS0 result" below.
 - [ ] **WS1** — split `attach_runtime_overlay_if_cached` and
       `attach_universal_initramfs_if_cached` into `lookup_*` + `attach_*`, with
       a unit test each over a temp cache root (hit, miss, malformed).
@@ -106,6 +104,53 @@ stage runner bracket each, replacing the five ad-hoc timing pairs.
       the same inputs. Record `total_ms` before/after, and `dispatch_window_ms`
       as a no-change control: this workstream must leave the budgeted window
       untouched.
+
+## WS0 result — measured 2026-08-15
+
+`resolve_launch` driven through the existing no-boot harness
+(`resolve_launch_yields_a_bootable_config_without_starting_a_vm`'s fixture:
+prebuilt image, `mock` backend, deny-all policy), 30 rounds after 3 warm-up
+rounds, macOS 26.5.2 / arm64:
+
+```
+p50 = 6.694 ms   p95 = 7.615 ms   max = 7.638 ms
+```
+
+Against the budgeted window (`dispatch_window_ms` p50 budget 200ms) the whole
+of `resolve_launch` is ~3%, and it is not inside that window in the first place.
+
+### Why this settles it, despite the measurement's limits
+
+The probe understates the real path in two ways, and neither changes the
+conclusion:
+
+- It resolves a **prebuilt** image, so it never enters the OCI path or calls
+  `oci_runtime_tag` (separately measured at 2.6ms steady-state).
+- It passes `admit = None`, so **admission is not exercised at all**. The
+  in-code comment on `resolve_launch` suggests admission is roughly half the
+  `admit_ms` window, so the real figure is larger — possibly much larger.
+
+That second gap would matter if admission were parallelisable. It is not:
+admission is stage 3, and the security constraint above requires it to stay
+sequential and single-threaded, with the `attach_*` application after it. The
+only work this plan makes concurrent is stage 2 — the boot-strategy probe and
+the two cache lookups — all of which sit inside the ~6.7ms envelope measured
+here.
+
+So the parallelism ceiling for the whole restructuring is a few milliseconds,
+whatever admission costs. **Perfect execution of WS1–WS3 cannot produce a
+user-visible latency improvement.**
+
+### What follows
+
+- WS1–WS3 remain worth doing, on **testability and observability** grounds:
+  `resolve_launch` is a single branchy function that cannot be unit-tested
+  piecewise, and its largest span is unattributed. Both are real defects
+  against the repo's own "compose small, testable units" rule. They are not a
+  latency fix and must not be justified as one.
+- If launch latency is the actual goal, the budgeted window is
+  `backend_start_ms + vsock_wait_ms`. That is where the 200ms lives and where
+  attribution should go next. Nothing in this plan touches it.
 
 ## Files
 
