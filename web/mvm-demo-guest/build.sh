@@ -12,7 +12,8 @@ cargo build --target wasm32-wasip1 --release
 mkdir -p "$DEST_DIR"
 wasm-opt \
   -Oz \
-  --enable-bulk-memory-opt \
+  --enable-bulk-memory \
+  --enable-sign-ext \
   "$SCRIPT_DIR/target/wasm32-wasip1/release/mvm-demo-guest.wasm" \
   -o "$DEST_DIR/mvm-demo-guest.wasm"
 
