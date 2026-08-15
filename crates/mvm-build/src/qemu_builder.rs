@@ -232,9 +232,14 @@ fn run_stage0_qemu(
         "console={serial_console} root=/dev/vda rw init={entry_path} mvm.backend=qemu {QEMU_BUILDER_VSOCK_EGRESS_TOKEN} {QEMU_BUILDER_VSOCK_EGRESS_PORT_TOKEN_PREFIX}{egress_port} {hostepoch} panic=-1"
     );
     let guest_cid = allocate_qemu_builder_guest_cid();
+    // Both statements sit behind the same feature: the endpoint type only
+    // exists with `builder-vm`, and so does the identity it needs. Gating only
+    // one of them compiles on a dev host and fails on the feature-gated
+    // target, which is exactly what happened the first time.
     #[cfg(feature = "builder-vm")]
     let (identity_material, identity_drive) =
         crate::libkrun_builder::stage_builder_flowmux_identity(&work)?;
+    #[cfg(feature = "builder-vm")]
     let egress_endpoint = BuilderVsockEgressEndpoint::spawn_with_transport(
         &work,
         BuilderEndpointTransport::Vsock { port: egress_port },
@@ -258,9 +263,16 @@ fn run_stage0_qemu(
         crate::builder_cmdline::checked_builder_cmdline(append)
             .map_err(BuilderVmError::NixBuildFailed)?,
     );
-    for disk in [&vda, &vdb, &vdc, &vdd, &identity_drive] {
+    for disk in [&vda, &vdb, &vdc, &vdd] {
         cmd.arg("-drive")
             .arg(format!("file={},if=virtio,format=raw", disk.display()));
+    }
+    #[cfg(feature = "builder-vm")]
+    {
+        cmd.arg("-drive").arg(format!(
+            "file={},if=virtio,format=raw,readonly=on",
+            identity_drive.display()
+        ));
     }
     #[cfg(feature = "builder-vm")]
     cmd.arg("-drive").arg(format!(
