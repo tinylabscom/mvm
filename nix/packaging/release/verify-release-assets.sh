@@ -74,9 +74,12 @@ sha256_of() {
 require_signed_manifest() {
   manifest="$1"; label="$2"
   bundle="$manifest.bundle"
-  [ -f "$bundle" ] || { fail "$label signature bundle missing: $(basename "$bundle")"; return; }
-  [ "$DO_COSIGN" = 1 ] || return
-  command -v cosign >/dev/null 2>&1 || { fail "--cosign given but cosign not on PATH"; return; }
+  # Every return is explicit: the script runs under `set -e`, so a bare `return`
+  # after a failed test propagates that failure and aborts the whole run instead
+  # of recording one problem and carrying on.
+  [ -f "$bundle" ] || { fail "$label signature bundle missing: $(basename "$bundle")"; return 0; }
+  [ "$DO_COSIGN" = 1 ] || return 0
+  command -v cosign >/dev/null 2>&1 || { fail "--cosign given but cosign not on PATH"; return 0; }
   cosign verify-blob --bundle "$bundle" \
     ${COSIGN_IDENTITY_REGEXP:+--certificate-identity-regexp "$COSIGN_IDENTITY_REGEXP"} \
     ${COSIGN_IDENTITY:+--certificate-identity "$COSIGN_IDENTITY"} \
