@@ -43,6 +43,7 @@ pub mod egress_proxy;
 pub mod egress_readiness;
 /// Extract an FC-loadable ELF `vmlinux` from a published x86_64 bzImage.
 pub mod firecracker;
+pub mod guest_elf;
 /// Config contract for the `mvm-hvf-supervisor` per-VM host process (raw HVF
 /// macOS backend, raw HVF backend). Shared by `mvm_runtime::backends::hvf` (writer) + the bin.
 /// Universal initramfs build + cache resolution.
@@ -70,6 +71,7 @@ pub mod rootfs_inject;
 /// Shared run-path rootfs orchestration (inject runtime + materialize ext4),
 /// used by the CLI's `run --image` and the `mvm-client` local backend.
 pub mod run_image;
+pub mod runtime_identity;
 pub mod stage0;
 pub mod template_reuse;
 pub mod verity_initrd;
