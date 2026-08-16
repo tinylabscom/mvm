@@ -183,7 +183,7 @@ pub struct Miss {
 /// diff still run over the *whole* ledger in every job, so a claim
 /// dropping out of coverage fails every shard rather than only the one
 /// that happens to own it.
-pub fn run(workspace: &Path, mode: Mode, package: Option<&str>) -> Result<()> {
+pub fn run(workspace: &Path, mode: Mode, shard: Option<&ShardSpec>) -> Result<()> {
     let Surface {
         files: resolved,
         uncovered,
@@ -204,10 +204,7 @@ pub fn run(workspace: &Path, mode: Mode, package: Option<&str>) -> Result<()> {
         let previous = read_baseline(&baseline_path).ok();
         let accepted_misses = if mode == Mode::RewriteBaseline {
             let scoped = carry_scopes_forward(resolved.clone(), previous.as_ref());
-            seed_accepted(&run_mutants_over(
-                workspace,
-                &for_package(&scoped, package),
-            )?)
+            seed_accepted(&run_mutants_over(workspace, &for_shard(&scoped, shard))?)
         } else {
             previous
                 .as_ref()
@@ -255,17 +252,17 @@ pub fn run(workspace: &Path, mode: Mode, package: Option<&str>) -> Result<()> {
         // The committed surface, not the freshly resolved one: resolution
         // cannot know about scopes, and running the unscoped surface would
         // report every out-of-claim mutant as a new miss.
-        let surface = for_package(&baseline.surface, package);
+        let surface = for_shard(&baseline.surface, shard);
         if surface.is_empty() {
             bail!(
                 "check-mutation-witnesses: --package {} matches no surface file. A shard that \
                  measures nothing must fail rather than pass silently.",
-                package.unwrap_or("<none>")
+                shard.map_or("<none>".to_string(), ToString::to_string)
             );
         }
-        if let Some(pkg) = package {
+        if let Some(spec) = shard {
             eprintln!(
-                "check-mutation-witnesses: shard for package {pkg} ({} of {} surface files)",
+                "check-mutation-witnesses: shard {spec} ({} of {} surface files)",
                 surface.len(),
                 baseline.surface.len()
             );
@@ -500,24 +497,39 @@ pub fn check_shard_matrix(workspace: &Path, surface: &[SurfaceFile]) -> Vec<Stri
             "cannot read {SECURITY_WORKFLOW_REL} to verify the mutation shard matrix"
         )];
     };
-    let declared = shard_packages(&text);
-    if declared.is_empty() {
+    let entries = shard_entries(&text);
+    if entries.is_empty() {
         return vec![format!(
             "{SECURITY_WORKFLOW_REL} declares no mutation shard matrix; the nightly lane would \
              measure nothing"
         )];
     }
-    let wanted: BTreeSet<&str> = surface.iter().map(|s| s.package.as_str()).collect();
     let mut errors = Vec::new();
+    let mut declared: BTreeMap<String, Vec<(usize, usize)>> = BTreeMap::new();
+    for raw in &entries {
+        match parse_shard_spec(raw) {
+            Ok(spec) => {
+                let slot = declared.entry(spec.package).or_default();
+                if let Some(pair) = spec.shard {
+                    slot.push(pair);
+                }
+            }
+            Err(err) => errors.push(format!(
+                "{SECURITY_WORKFLOW_REL} declares an unparseable mutation shard {raw:?}: {err}"
+            )),
+        }
+    }
+
+    let wanted: BTreeSet<&str> = surface.iter().map(|s| s.package.as_str()).collect();
     for pkg in &wanted {
-        if !declared.contains(*pkg) {
+        if !declared.contains_key(*pkg) {
             errors.push(format!(
                 "package {pkg} is on the mutation surface but has no shard in \
                  {SECURITY_WORKFLOW_REL}, so nothing ever mutates it"
             ));
         }
     }
-    for pkg in &declared {
+    for pkg in declared.keys() {
         if !wanted.contains(pkg.as_str()) {
             errors.push(format!(
                 "{SECURITY_WORKFLOW_REL} declares a mutation shard for {pkg}, which owns no \
@@ -525,15 +537,52 @@ pub fn check_shard_matrix(workspace: &Path, surface: &[SurfaceFile]) -> Vec<Stri
             ));
         }
     }
+
+    // A package cut into shards must be cut completely. A missing or repeated
+    // index is the same silent loss the package check above exists to catch —
+    // the files that shard owned are simply never mutated, and every remaining
+    // shard still goes green.
+    for (pkg, shards) in &declared {
+        if shards.is_empty() {
+            continue;
+        }
+        let count = entries
+            .iter()
+            .filter(|raw| parse_shard_spec(raw).is_ok_and(|s| &s.package == pkg))
+            .count();
+        if count != shards.len() {
+            errors.push(format!(
+                "{SECURITY_WORKFLOW_REL} mixes sharded and unsharded entries for {pkg}; the \
+                 unsharded one re-runs work a shard already owns"
+            ));
+            continue;
+        }
+        let total = shards[0].1;
+        if shards.iter().any(|(_, t)| *t != total) {
+            errors.push(format!(
+                "{SECURITY_WORKFLOW_REL} declares shards of {pkg} with disagreeing totals; the \
+                 surface would be split more than one way at once"
+            ));
+            continue;
+        }
+        let seen: BTreeSet<usize> = shards.iter().map(|(i, _)| *i).collect();
+        let expected: BTreeSet<usize> = (1..=total).collect();
+        if seen != expected {
+            errors.push(format!(
+                "{SECURITY_WORKFLOW_REL} declares shards {seen:?} of {total} for {pkg}; the \
+                 missing ones own surface files nothing would mutate"
+            ));
+        }
+    }
     errors
 }
 
-/// The `package:` list under the mutation job's matrix.
+/// The raw `package:` entries under the mutation job's matrix.
 ///
 /// Text-scanned rather than YAML-parsed, matching the sibling gates and
 /// the workspace's deliberate dependency floor.
-pub fn shard_packages(workflow: &str) -> BTreeSet<String> {
-    let mut out = BTreeSet::new();
+pub fn shard_entries(workflow: &str) -> Vec<String> {
+    let mut out = Vec::new();
     let mut in_job = false;
     let mut in_list = false;
     for line in workflow.lines() {
@@ -554,8 +603,11 @@ pub fn shard_packages(workflow: &str) -> BTreeSet<String> {
         }
         if in_list {
             if let Some(name) = t.strip_prefix("- ") {
-                out.insert(name.trim().to_string());
-            } else if !t.is_empty() {
+                out.push(name.trim().to_string());
+            } else if !t.is_empty() && !t.starts_with('#') {
+                // A comment between entries is not the end of the list.
+                // Treating it as one truncates the matrix silently, and
+                // every package below the comment reads as unsharded.
                 in_list = false;
             }
         }
@@ -563,16 +615,90 @@ pub fn shard_packages(workflow: &str) -> BTreeSet<String> {
     out
 }
 
-/// The surface files owned by `package`, or all of them when unfiltered.
-pub fn for_package(surface: &[SurfaceFile], package: Option<&str>) -> Vec<SurfaceFile> {
-    match package {
-        None => surface.to_vec(),
-        Some(pkg) => surface
-            .iter()
-            .filter(|s| s.package == pkg)
-            .cloned()
-            .collect(),
+/// Which slice of the surface one CI job is responsible for.
+///
+/// A package is the coarsest useful unit and was the only one for a long
+/// time, but `mvm-hostd` alone outgrew the six-hour cap: it owns the most
+/// surface files, and a job that dies mid-run reports nothing about the
+/// files it never reached. So a package may additionally be cut into
+/// numbered shards, spelled `mvm-hostd/1of2` wherever a package name is
+/// accepted.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ShardSpec {
+    pub package: String,
+    /// `(index, total)`, one-based, or `None` for the whole package.
+    pub shard: Option<(usize, usize)>,
+}
+
+impl std::fmt::Display for ShardSpec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.shard {
+            None => write!(f, "{}", self.package),
+            Some((i, n)) => write!(f, "{}/{i}of{n}", self.package),
+        }
     }
+}
+
+/// Parse `mvm-hostd` or `mvm-hostd/1of2`.
+///
+/// Rejects rather than rounds: a typo that silently selected the whole
+/// package would double the work and hide the shard that vanished, and a
+/// zero or out-of-range index would quietly measure nothing.
+pub fn parse_shard_spec(raw: &str) -> Result<ShardSpec> {
+    let raw = raw.trim();
+    let Some((package, shard)) = raw.split_once('/') else {
+        return Ok(ShardSpec {
+            package: raw.to_string(),
+            shard: None,
+        });
+    };
+    let Some((index, total)) = shard.split_once("of") else {
+        bail!("malformed shard {raw:?}: expected <package>/<index>of<total>, e.g. mvm-hostd/1of2");
+    };
+    let index: usize = index
+        .parse()
+        .with_context(|| format!("malformed shard index in {raw:?}"))?;
+    let total: usize = total
+        .parse()
+        .with_context(|| format!("malformed shard total in {raw:?}"))?;
+    if total == 0 || index == 0 || index > total {
+        bail!("malformed shard {raw:?}: index must be within 1..={total}");
+    }
+    Ok(ShardSpec {
+        package: package.to_string(),
+        shard: Some((index, total)),
+    })
+}
+
+/// The surface files this shard owns, or all of them when unfiltered.
+///
+/// Files are ordered by path before slicing, so which shard owns a file
+/// is a property of the committed surface rather than of resolution
+/// order — otherwise a file could migrate between shards without the
+/// baseline changing, and a survivor would appear and vanish by shard.
+///
+/// The slice is by stride, not by contiguous block: adjacent surface
+/// files tend to be siblings of similar cost, so a block split loads one
+/// shard with the expensive half.
+pub fn for_shard(surface: &[SurfaceFile], spec: Option<&ShardSpec>) -> Vec<SurfaceFile> {
+    let Some(spec) = spec else {
+        return surface.to_vec();
+    };
+    let mut owned: Vec<SurfaceFile> = surface
+        .iter()
+        .filter(|s| s.package == spec.package)
+        .cloned()
+        .collect();
+    owned.sort_by(|a, b| a.path.cmp(&b.path));
+    let Some((index, total)) = spec.shard else {
+        return owned;
+    };
+    owned
+        .into_iter()
+        .enumerate()
+        .filter(|(i, _)| i % total == index - 1)
+        .map(|(_, f)| f)
+        .collect()
 }
 
 /// Copy each committed file's `scope` onto the freshly resolved surface.
@@ -1379,21 +1505,44 @@ jobs:
 ";
 
     #[test]
-    fn shard_packages_reads_only_the_mutation_jobs_matrix() {
-        let got = shard_packages(SHARD_WORKFLOW);
+    fn a_comment_between_entries_does_not_truncate_the_matrix() {
+        let workflow = "\
+jobs:
+  mutation-witnesses:
+    strategy:
+      matrix:
+        package:
+          - mvm-cli
+          # why this one is split
+          - mvm-hostd/1of2
+          - mvm-hostd/2of2
+  later-job:
+    name: after
+";
+        assert_eq!(
+            shard_entries(workflow),
+            vec![
+                "mvm-cli".to_string(),
+                "mvm-hostd/1of2".to_string(),
+                "mvm-hostd/2of2".to_string(),
+            ],
+            "a comment must not end the list and silently unshard everything below it"
+        );
+    }
+
+    #[test]
+    fn shard_entries_read_only_the_mutation_jobs_matrix() {
+        let got = shard_entries(SHARD_WORKFLOW);
         assert_eq!(
             got,
-            ["mvm-cli", "mvm-hostd"]
-                .iter()
-                .map(|s| s.to_string())
-                .collect::<BTreeSet<_>>(),
+            vec!["mvm-cli".to_string(), "mvm-hostd".to_string()],
             "a sibling job's matrix must not leak into the mutation shard list"
         );
     }
 
     #[test]
     fn a_surface_package_with_no_shard_is_reported() {
-        let declared = shard_packages(SHARD_WORKFLOW);
+        let declared: BTreeSet<String> = shard_entries(SHARD_WORKFLOW).into_iter().collect();
         // mvm-core is on the surface but absent from the matrix above.
         let surface = [
             surface("crates/mvm-cli/src/a.rs", vec![1]),
@@ -1413,7 +1562,7 @@ jobs:
 
     #[test]
     fn a_shard_for_a_package_with_no_surface_file_is_reported() {
-        let declared = shard_packages(SHARD_WORKFLOW);
+        let declared: BTreeSet<String> = shard_entries(SHARD_WORKFLOW).into_iter().collect();
         let surface = [surface("crates/mvm-cli/src/a.rs", vec![1])];
         let wanted: BTreeSet<&str> = surface.iter().map(|s| s.package.as_str()).collect();
         let extra: Vec<&String> = declared
@@ -1434,17 +1583,42 @@ jobs:
             surface("crates/mvm-cli/src/b.rs", vec![2]),
             surface("crates/mvm-hostd/src/c.rs", vec![3]),
         ];
-        let cli = for_package(&surface, Some("mvm-cli"));
+        let cli = for_shard(
+            &surface,
+            Some(&ShardSpec {
+                package: "mvm-cli".to_string(),
+                shard: None,
+            }),
+        );
         assert_eq!(cli.len(), 2);
         assert!(cli.iter().all(|s| s.package == "mvm-cli"));
 
-        assert_eq!(for_package(&surface, Some("mvm-hostd")).len(), 1);
+        assert_eq!(
+            for_shard(
+                &surface,
+                Some(&ShardSpec {
+                    package: "mvm-hostd".to_string(),
+                    shard: None,
+                })
+            )
+            .len(),
+            1
+        );
         // Unfiltered is the whole surface, so a non-sharded run is
         // unchanged.
-        assert_eq!(for_package(&surface, None).len(), 3);
+        assert_eq!(for_shard(&surface, None).len(), 3);
         // A package with no surface files yields nothing, which the caller
         // turns into a failure rather than a silent pass.
-        assert!(for_package(&surface, Some("mvm-sdk")).is_empty());
+        assert!(
+            for_shard(
+                &surface,
+                Some(&ShardSpec {
+                    package: "mvm-sdk".to_string(),
+                    shard: None,
+                })
+            )
+            .is_empty()
+        );
     }
 
     /// Every shard together must cover the surface exactly once. A package
@@ -1460,7 +1634,11 @@ jobs:
         let packages: BTreeSet<&str> = surface.iter().map(|s| s.package.as_str()).collect();
         let mut seen: Vec<String> = Vec::new();
         for p in &packages {
-            for f in for_package(&surface, Some(p)) {
+            let spec = ShardSpec {
+                package: (*p).to_string(),
+                shard: None,
+            };
+            for f in for_shard(&surface, Some(&spec)) {
                 seen.push(f.path);
             }
         }
@@ -1468,6 +1646,115 @@ jobs:
         let mut all: Vec<String> = surface.iter().map(|s| s.path.clone()).collect();
         all.sort();
         assert_eq!(seen, all, "the shards must cover every file exactly once");
+    }
+
+    #[test]
+    fn a_shard_spec_round_trips_and_rejects_nonsense() {
+        assert_eq!(
+            parse_shard_spec("mvm-hostd").unwrap(),
+            ShardSpec {
+                package: "mvm-hostd".to_string(),
+                shard: None
+            }
+        );
+        let sharded = parse_shard_spec("mvm-hostd/2of3").unwrap();
+        assert_eq!(sharded.package, "mvm-hostd");
+        assert_eq!(sharded.shard, Some((2, 3)));
+        // Display is what the matrix and the log line both print, so it has
+        // to be the form the parser accepts back.
+        assert_eq!(sharded.to_string(), "mvm-hostd/2of3");
+        assert_eq!(parse_shard_spec(&sharded.to_string()).unwrap(), sharded);
+
+        // A shard that names no valid slice must fail rather than quietly
+        // widening to the whole package and doubling the run.
+        for bad in [
+            "mvm-hostd/",
+            "mvm-hostd/0of2",
+            "mvm-hostd/3of2",
+            "mvm-hostd/xofy",
+        ] {
+            assert!(
+                parse_shard_spec(bad).is_err(),
+                "{bad} must not parse as a shard"
+            );
+        }
+    }
+
+    /// The whole point of splitting a package: every file it owns is still
+    /// mutated exactly once, across the shards rather than within one job.
+    #[test]
+    fn the_shards_of_one_package_partition_its_files() {
+        let surface: Vec<SurfaceFile> = ["e", "a", "d", "b", "c"]
+            .iter()
+            .map(|n| surface(&format!("crates/mvm-hostd/src/{n}.rs"), vec![8]))
+            .collect();
+
+        let one = for_shard(&surface, Some(&parse_shard_spec("mvm-hostd/1of2").unwrap()));
+        let two = for_shard(&surface, Some(&parse_shard_spec("mvm-hostd/2of2").unwrap()));
+
+        // Disjoint.
+        let a: BTreeSet<&str> = one.iter().map(|f| f.path.as_str()).collect();
+        let b: BTreeSet<&str> = two.iter().map(|f| f.path.as_str()).collect();
+        assert!(
+            a.is_disjoint(&b),
+            "no file may be mutated twice: {a:?} overlaps {b:?}"
+        );
+
+        // Complete.
+        let mut seen: Vec<&str> = a.union(&b).copied().collect();
+        seen.sort_unstable();
+        let mut all: Vec<&str> = surface.iter().map(|f| f.path.as_str()).collect();
+        all.sort_unstable();
+        assert_eq!(seen, all, "every file must land in exactly one shard");
+
+        // Balanced to within one file, or the split has not bought anything.
+        assert!(one.len().abs_diff(two.len()) <= 1);
+    }
+
+    /// Which shard owns a file must not depend on the order resolution
+    /// happened to emit, or a survivor would move between shards without
+    /// the baseline changing.
+    #[test]
+    fn shard_membership_follows_the_path_not_the_input_order() {
+        let names = ["c", "a", "b", "d"];
+        let forward: Vec<SurfaceFile> = names
+            .iter()
+            .map(|n| surface(&format!("crates/mvm-hostd/src/{n}.rs"), vec![8]))
+            .collect();
+        let mut backward = forward.clone();
+        backward.reverse();
+
+        let spec = parse_shard_spec("mvm-hostd/1of2").unwrap();
+        let a: Vec<String> = for_shard(&forward, Some(&spec))
+            .into_iter()
+            .map(|f| f.path)
+            .collect();
+        let b: Vec<String> = for_shard(&backward, Some(&spec))
+            .into_iter()
+            .map(|f| f.path)
+            .collect();
+        assert_eq!(a, b, "shard membership must be a property of the surface");
+    }
+
+    /// A package cut into shards must be cut completely. Dropping `2of2`
+    /// leaves its files unmutated while `1of2` still reports success — the
+    /// silent loss this gate exists to prevent, one level in.
+    #[test]
+    fn an_incomplete_shard_set_is_reported() {
+        let entries = ["mvm-hostd/1of2".to_string()];
+        let mut shards: Vec<(usize, usize)> = Vec::new();
+        for raw in &entries {
+            if let Some(pair) = parse_shard_spec(raw).unwrap().shard {
+                shards.push(pair);
+            }
+        }
+        let total = shards[0].1;
+        let seen: BTreeSet<usize> = shards.iter().map(|(i, _)| *i).collect();
+        let expected: BTreeSet<usize> = (1..=total).collect();
+        assert_ne!(
+            seen, expected,
+            "a half-declared split must not look complete"
+        );
     }
 
     #[test]

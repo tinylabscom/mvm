@@ -15,9 +15,12 @@ name: Security lane watch
 #      20-entry `needs:` list to keep in sync with the job graph.
 #   2. It reads each job's real conclusion from the API rather than the
 #      workflow's aggregate status. A job marked `continue-on-error: true`
-#      — the mutation-witness lane is one — never fails the workflow, so an
-#      `if: failure()` guard would not fire for it. The API still reports
-#      that job as failed, and this reports it too.
+#      never fails the workflow, so an `if: failure()` guard would not fire
+#      for it. The API still reports that job as failed, and this reports it
+#      too. No job in security.yml carries that marking today — the
+#      mutation-witness lane used to and this comment went on naming it for
+#      months after it stopped — but the API-reading approach costs nothing
+#      and does not have to be revisited when one does.
 #
 # Failure opens or updates one tracking issue; a clean run closes it. The
 # issue is the enforcement surface, not a merge block: these lanes do not
