@@ -21,12 +21,12 @@ use std::path::{Path, PathBuf};
 use async_trait::async_trait;
 use flate2::read::GzDecoder;
 use mvm_core::protocol::vm_backend::{BackendKind, VmId, VmInfo, VmStatus};
+use mvm_core::rootfs_source::RootfsSource;
 use mvm_fs::oci::{
     ImageReference, LayerDescriptor, LayerFetchOptions, OciLayerFetcher, OciManifestFetcher,
     UnpackOptions, UnpackReport, current_linux_platform, unpack_layer_with_prior_paths,
 };
 use mvm_runtime::AnyBackend;
-use mvm_runtime::artifacts::spec::RootfsSource;
 
 use mvm_core::client::BackendCapabilityReport;
 use mvm_core::client::dto::{
@@ -399,21 +399,12 @@ enum RootfsPlan {
     Pull(ImageReference),
 }
 
-/// Turn a caller-declared `spec.image` into the work it implies.
+/// Turn a caller-declared rootfs source into the work it implies.
 ///
-/// The declaration is parsed before anything is looked up, so a mistyped path
-/// stops here instead of falling through to the registry arm: the arms
-/// differ in how the bytes they produce are verified, and which one runs must
-/// not depend on the caller's working directory.
-fn plan_rootfs(image: &str) -> Result<RootfsPlan> {
-    let source: RootfsSource = image.parse().map_err(|e| MvmError::InvalidSpec {
-        reason: format!("{e}"),
-    })?;
-    plan_rootfs_source(source)
-}
-
-/// The declaration-to-work half of [`plan_rootfs`], split out so each arm is
-/// reachable in a test without going through the string grammar.
+/// The declaration arrives parsed, so a mistyped path stops here instead of
+/// falling through to the registry arm: the arms differ in how the bytes they
+/// produce are verified, and which one runs must not depend on the caller's
+/// working directory.
 fn plan_rootfs_source(source: RootfsSource) -> Result<RootfsPlan> {
     match source {
         // The filesystem is consulted only to tell a blob from a tree, and
@@ -461,8 +452,8 @@ fn path_collision_hint(image_ref: &str) -> String {
 /// Resolve `spec.image` to a host `rootfs.ext4` path, materializing in-process
 /// as needed (no subprocess, no CLI). Registry pulls are async; the dir +
 /// pre-materialized cases are synchronous.
-pub(crate) async fn resolve_local_rootfs(image: &str, name: &str) -> Result<PathBuf> {
-    match plan_rootfs(image)? {
+pub(crate) async fn resolve_local_rootfs(image: &RootfsSource, name: &str) -> Result<PathBuf> {
+    match plan_rootfs_source(image.clone())? {
         RootfsPlan::Materialized(path) => Ok(path),
         // An already-unpacked tree carries no unpack report, so there is
         // nothing the host filesystem deferred to merge back in.
@@ -1094,6 +1085,16 @@ mod tests {
         s.parse().expect("parses as an OCI reference")
     }
 
+    /// Both steps a caller takes with a declaration string — parse it, then
+    /// plan the work — so these tests keep exercising the grammar rather than
+    /// hand-building the parsed value.
+    fn plan_rootfs(image: &str) -> Result<RootfsPlan> {
+        let source: RootfsSource = image.parse().map_err(|e| MvmError::InvalidSpec {
+            reason: format!("{e}"),
+        })?;
+        plan_rootfs_source(source)
+    }
+
     #[test]
     fn plan_rootfs_routes_file_dir_and_registry() {
         let dir = tempfile::tempdir().unwrap();
@@ -1147,7 +1148,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let typo = dir.path().join("rootfs.ext5");
 
-        let err = crate::local::resolve_local_rootfs(&typo.to_string_lossy(), "m")
+        let declared: RootfsSource = typo.to_string_lossy().parse().expect("a path parses");
+        let err = crate::local::resolve_local_rootfs(&declared, "m")
             .await
             .expect_err("an absent declared path is an error");
 
@@ -1212,7 +1214,7 @@ mod tests {
         let be = LocalBackend::with_hypervisor("mock");
         let spec = MachineSpec {
             name: "local-boot-from-image-path".into(),
-            image: rootfs.to_string_lossy().into_owned(),
+            image: rootfs.to_string_lossy().parse().expect("a path parses"),
             cpus: 1,
             memory_mib: 128,
             env: vec![],
@@ -1243,7 +1245,7 @@ mod tests {
         let be = LocalBackend::with_hypervisor("mock");
         let spec = MachineSpec {
             name: "local-remove-target".into(),
-            image: rootfs.to_string_lossy().into_owned(),
+            image: rootfs.to_string_lossy().parse().expect("a path parses"),
             cpus: 1,
             memory_mib: 128,
             env: vec![],
@@ -1292,7 +1294,7 @@ mod tests {
         let be = LocalBackend::with_hypervisor("mock");
         let spec = MachineSpec {
             name: "local-stop-target".into(),
-            image: rootfs.to_string_lossy().into_owned(),
+            image: rootfs.to_string_lossy().parse().expect("a path parses"),
             cpus: 1,
             memory_mib: 128,
             env: vec![],

@@ -26,6 +26,7 @@ use mvm_core::config::{machine_spec_path, machine_state_dir, machine_state_root,
 use mvm_core::domain::instance::InstanceReadiness;
 use mvm_core::plan::ExecutionPlan;
 use mvm_core::protocol::vm_backend::{VmId, VmStatus};
+use mvm_core::rootfs_source::RootfsSource;
 use mvm_hostd::audit::emitter::AuditEmitter;
 use mvm_hostd::plan_admission::{InMemoryNonceLedger, StartedMachine, SystemClock};
 use mvm_hostd::run::{LocalRunContext, LocalRunRequest, admit_and_boot_local};
@@ -176,7 +177,7 @@ impl std::ops::Deref for BackendHandle<'_> {
 /// lifecycle modes (and the trait's `run_machine`) reach.
 pub(crate) struct BootParams {
     pub(crate) name: String,
-    pub(crate) image: String,
+    pub(crate) image: RootfsSource,
     pub(crate) cpus: u32,
     pub(crate) memory_mib: u32,
     pub(crate) backend_override: Option<String>,
@@ -376,7 +377,7 @@ impl LocalBackend {
 /// `start_persistent` so that is checkable without booting a VM.
 fn start_request_from_spec(
     name: &str,
-    image: String,
+    image: RootfsSource,
     memory_mib: u32,
     spec: &mp::MachineSpec,
 ) -> Result<LaunchRequest> {
@@ -396,7 +397,9 @@ fn persisted_spec_from_request(request: &LaunchRequest, name: &str) -> mp::Machi
     mp::MachineSpec {
         schema_version: mp::MACHINE_SPEC_SCHEMA_VERSION,
         name: name.to_string(),
-        image: Some(request.image.clone()),
+        // The persisted record carries the written form — the same token the
+        // caller declared, so a spec read back reconstructs the same value.
+        image: Some(request.image.to_string()),
         manifest: None,
         deployment: None,
         resolved_digest: None,
@@ -705,7 +708,7 @@ impl LocalBackend {
 
 /// Refusals for persisted-spec shapes the in-process backend cannot honor
 /// (fail closed, never silently ignore a persisted field).
-fn ensure_spec_bootable_in_process(spec: &mp::MachineSpec) -> Result<String> {
+fn ensure_spec_bootable_in_process(spec: &mp::MachineSpec) -> Result<RootfsSource> {
     let unsupported = |what: &str| MvmError::InvalidSpec {
         reason: format!(
             "machine {:?} declares {what}, which the in-process local backend cannot \
@@ -733,8 +736,16 @@ fn ensure_spec_bootable_in_process(spec: &mp::MachineSpec) -> Result<String> {
     if !spec.init.is_empty() {
         return Err(unsupported("init commands"));
     }
-    spec.image.clone().ok_or_else(|| MvmError::InvalidSpec {
+    let image = spec.image.as_deref().ok_or_else(|| MvmError::InvalidSpec {
         reason: format!("machine {:?} has no image source", spec.name),
+    })?;
+    // The on-disk record stores the written form; a start reconstructs the
+    // declaration from it rather than passing the bytes on unread.
+    image.parse().map_err(|e| MvmError::InvalidSpec {
+        reason: format!(
+            "machine {:?} declares an unusable image source: {e}",
+            spec.name
+        ),
     })
 }
 
