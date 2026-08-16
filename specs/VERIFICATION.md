@@ -138,10 +138,32 @@ The lane is **sharded per package**, because it has to be: the whole
 surface takes ~6.9 hours end to end and a GitHub-hosted job is killed at
 six. One job could not reliably finish, so it would go red nightly for a
 reason unrelated to any claim and be ignored — the same failure this lane
-exists to prevent, arrived at from the other side. Split per package the
-slowest shard is ~2.5 hours. That makes the matrix a second place the
-surface is written down, so `check-mutation-witnesses` pins it against the
-baseline on every PR; the row above records the planted defect.
+exists to prevent, arrived at from the other side. That makes the matrix a
+second place the surface is written down, so `check-mutation-witnesses`
+pins it against the baseline on every PR; the row above records the
+planted defect.
+
+Per package was not enough for long. On 2026-08-15 the `mvm-hostd` shard
+died on the platform cap having reached six of its ten files in 3h17m, and
+because the cap kills the runner rather than the job, the only trace was
+`The runner has received a shutdown signal` — naming no package, no file
+and no claim. A package may therefore be split further, spelled
+`mvm-hostd/1of2` in the matrix and passed through the same `--package`
+flag. Files are ordered by path and assigned by stride, so membership is a
+property of the committed surface rather than of resolution order, and
+adjacent siblings of similar cost land in different shards. The gate
+checks the split is total: a missing index, a repeated one, disagreeing
+totals, or a bare entry alongside sharded ones all fail, because each
+leaves files nothing mutates while every remaining shard stays green.
+
+The job also carries `timeout-minutes: 330`, under the cap, so a shard
+that outgrows its budget fails as itself rather than as infrastructure,
+and uploads its partial cargo-mutants output either way.
+
+**The split is by file count, not by cost** — five files each. The two
+most expensive files measured so far both land in `2of2`, so the shards
+are not expected to be equal; they are expected to fit. Re-measure rather
+than assume.
 
 These are **accepted rather than scoped out** on purpose. Scoping would
 stop the lane measuring those files at all; accepting keeps the ratchet
