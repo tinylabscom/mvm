@@ -36,6 +36,13 @@ pub struct SecretBindingMeta {
     /// the forward-path signer can name the credential scope. `None` otherwise.
     #[serde(default)]
     pub sigv4: Option<Sigv4Params>,
+    /// The catalog entry this binding was authored from, when it was authored
+    /// with `--provider`. Display and audit only — enforcement reads
+    /// `allowed_hosts`, which was resolved once at `set` time. Recording the
+    /// name rather than consulting it later is what keeps a catalog edit from
+    /// silently widening a binding that already exists.
+    #[serde(default)]
+    pub provider: Option<String>,
 }
 
 /// Storage for [`SecretBindingMeta`], keyed by (tenant, name). Parallel
@@ -135,6 +142,7 @@ mod tests {
             auth_type: AuthType::Bearer,
             allowed_hosts: vec!["api.openai.com".into()],
             sigv4: None,
+            provider: None,
         }
     }
 
@@ -150,6 +158,7 @@ mod tests {
                 region: "us-east-1".into(),
                 service: "s3".into(),
             }),
+            provider: None,
         };
         store.put("local", "aws", &m).unwrap();
         assert_eq!(store.get("local", "aws").unwrap(), Some(m));
