@@ -154,7 +154,6 @@ exempt_paths:
   - "CHANGELOG.md"
   - ".github/**"
   - "memory/**"
-  - "crates/mvm-core/src/egress_substitution.rs"
   - "crates/mvm-core/src/lib.rs"
   - "crates/mvm-hostd/**"
   - "public/src/content/docs/contributing/adr/**"

@@ -13,19 +13,17 @@
 //! avoids, so [`Placeholder::new`] takes the token as given and the caller
 //! decides where the bytes came from.
 //!
-//! # Three prefixes, none interchangeable
+//! # Two notations, not interchangeable
 //!
-//! Be precise about which notation you mean:
+//! Be precise about which one you mean:
 //!
 //! | Notation | Where | What it is |
 //! |---|---|---|
 //! | `mvm-secret-<hex>` | here | the runtime wire token a guest actually holds |
-//! | `mvm-managed:<var>` | [`crate::policy::secret_binding`] | a CLI binding's display form |
 //! | `${NAME}` | the Workload IR | an authoring notation; nothing resolves it at runtime |
 //!
-//! The constant here is [`SECRET_PLACEHOLDER_PREFIX`] rather than a third
-//! `PLACEHOLDER_PREFIX` precisely so the first two cannot be confused at a
-//! glance in this crate.
+//! The constant here is [`SECRET_PLACEHOLDER_PREFIX`] rather than a bare
+//! `PLACEHOLDER_PREFIX` so it reads unambiguously at its use sites.
 
 use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
@@ -106,16 +104,6 @@ mod tests {
         // No token, and the bare prefix with no hex run, both yield None.
         assert_eq!(find_placeholder("Bearer ya29.real-token"), None);
         assert_eq!(find_placeholder("mvm-secret-"), None);
-    }
-
-    #[test]
-    fn the_two_reserved_prefixes_do_not_collide() {
-        // `mvm-managed:` is the CLI binding's display form and must never be
-        // mistaken for a runtime token. Asserted rather than assumed, because
-        // both now live in this crate.
-        let managed = crate::policy::secret_binding::PLACEHOLDER_PREFIX;
-        assert_ne!(managed, SECRET_PLACEHOLDER_PREFIX);
-        assert_eq!(find_placeholder("mvm-managed:OPENAI_API_KEY"), None);
     }
 
     /// `is_empty` is session bookkeeping, but it is bookkeeping the keyholder
