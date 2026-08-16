@@ -22,6 +22,8 @@ TARGETS="aarch64-apple-darwin x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu
 BUILDER_ARCHES="aarch64 x86_64"
 KERNEL_ARCHES="aarch64 x86_64"
 RUNTIME_ARCHES="aarch64 x86_64"
+# Keep in lockstep with the release.yml `default-microvm` matrix.
+BOOT_ARCHES="aarch64 x86_64"
 DO_COSIGN=0
 EXPECT_VERSION=""
 
@@ -32,6 +34,9 @@ while [ $# -gt 0 ]; do
     --builder-arches) BUILDER_ARCHES="$2"; shift 2 ;;
     --kernel-arches)  KERNEL_ARCHES="$2"; shift 2 ;;
     --runtime-arches) RUNTIME_ARCHES="$2"; shift 2 ;;
+    # Empty disables the boot-asset checks. Only for a host without
+    # e2fsprogs, where /init cannot be read out of the rootfs at all.
+    --boot-arches)    BOOT_ARCHES="$2"; shift 2 ;;
     --cosign)         DO_COSIGN=1; shift ;;
     # Assert the packaged binary reports this version. Only the target that
     # matches the host can be executed; cross-arch targets are skipped (their
@@ -86,6 +91,15 @@ require_signed_manifest() {
     ${COSIGN_OIDC_ISSUER:+--certificate-oidc-issuer "$COSIGN_OIDC_ISSUER"} \
     "$manifest" >/dev/null 2>&1 \
     || fail "$label cosign verify-blob failed"
+}
+
+# Whether a rootfs can be exec'd by the kernel is asserted by one script, used
+# both here (published artifact, re-downloaded) and by release.yml before the
+# staged image is ever uploaded. It prints its own ::error:: diagnosis.
+INIT_SHEBANG_CHECK="$(dirname "$0")/assert-init-shebang.sh"
+assert_init_shebang() {
+  "$INIT_SHEBANG_CHECK" "$1" "$2" >/dev/null || FAILED=1
+  return 0
 }
 
 required_bins_for_target() {
@@ -182,6 +196,53 @@ for arch in $KERNEL_ARCHES; do
   fi
   got=$(sha256_of "$workload_kernel")
   [ "$want" = "$got" ] || fail "[$arch] workload kernel sha256 mismatch: recorded=$want actual=$got"
+done
+
+# The rootfs, kernel and metadata sidecar under `default-microvm-*` are the
+# artifacts mvmctl actually boots, and nothing here used to open them: the
+# runtime-pack loop below checks only the pack sidecars. v0.17.0 shipped a
+# rootfs whose /init carries its `#!` at byte 1, and every checksum in this file
+# still verified, because a faithful copy of a broken image is still faithful.
+#
+# Same COMPLETE-or-ABSENT contract as the packs, and for the same reason: the
+# `release` job publishes under `!cancelled()`, so an image job that failed
+# leaves these absent on purpose and that is not an error here. A partial set,
+# or a rootfs whose /init the kernel cannot exec, is.
+for arch in $BOOT_ARCHES; do
+  boot_rootfs="default-microvm-rootfs-${arch}.ext4"
+  boot_kernel="default-microvm-vmlinux-${arch}"
+  boot_meta="default-microvm-meta-${arch}.json"
+  boot_checks="$ASSETS_DIR/default-microvm-${arch}-checksums-sha256.txt"
+
+  present=0
+  for f in "$boot_rootfs" "$boot_kernel" "$boot_meta"; do
+    [ -f "$ASSETS_DIR/$f" ] && present=$((present + 1))
+  done
+
+  if [ "$present" -eq 0 ]; then
+    echo "note: [$arch] no default-microvm boot assets published (image job did not ship) — ok"
+    continue
+  fi
+  if [ "$present" -ne 3 ]; then
+    fail "[$arch] partial default-microvm boot assets: rootfs=$([ -f "$ASSETS_DIR/$boot_rootfs" ] && echo y || echo n) kernel=$([ -f "$ASSETS_DIR/$boot_kernel" ] && echo y || echo n) meta=$([ -f "$ASSETS_DIR/$boot_meta" ] && echo y || echo n)"
+    continue
+  fi
+
+  [ -f "$boot_checks" ] || { fail "[$arch] default-microvm checksums manifest missing: default-microvm-${arch}-checksums-sha256.txt"; continue; }
+  require_signed_manifest "$boot_checks" "[$arch] default-microvm checksums manifest"
+  for f in "$boot_rootfs" "$boot_kernel" "$boot_meta"; do
+    want=$(awk -v n="$f" '$2 == n { print $1 }' "$boot_checks" | head -1)
+    if [ -z "$want" ]; then
+      fail "[$arch] $f not listed in default-microvm-${arch}-checksums-sha256.txt"
+      continue
+    fi
+    got=$(sha256_of "$ASSETS_DIR/$f")
+    [ "$want" = "$got" ] || fail "[$arch] $f sha256 mismatch: recorded=$want actual=$got"
+  done
+
+  # The checksums above prove the bytes are the ones we published. This proves
+  # the ones we published can boot.
+  assert_init_shebang "$ASSETS_DIR/$boot_rootfs" "$arch"
 done
 
 # The SBOM ships signed alongside the binaries on every release.

@@ -582,6 +582,24 @@ jobs:
           cp -L "$STORE_PATH/rootfs.roothash" "staging/default-microvm-rootfs-${ARCH}.roothash"
           cp -L "$STORE_PATH/mvm-meta.json"   "staging/default-microvm-meta-${ARCH}.json"
 
+      - name: Assert the staged rootfs has an exec'able /init
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          # The publish path is checksums all the way down, and a checksum
+          # cannot tell a good image from a faithfully-copied broken one. This
+          # is the only step that opens the rootfs and reads the bytes the
+          # kernel will exec. Runs before the image is uploaded, so a rootfs
+          # that cannot boot never becomes a release asset.
+          # debugfs ships in e2fsprogs, preinstalled on both runner images.
+          # Install only if that ever stops being true: an apt round-trip on
+          # the release critical path is a flake that fails the publish for a
+          # reason having nothing to do with the image.
+          command -v debugfs >/dev/null 2>&1 \
+            || { sudo apt-get update && sudo apt-get install -y e2fsprogs; }
+          bash nix/packaging/release/assert-init-shebang.sh \
+            "staging/default-microvm-rootfs-${ARCH}.ext4" "staged ${ARCH}"
+
       - name: Generate default microVM SBOM
         env:
           ARCH: ${{ matrix.arch }}
