@@ -865,3 +865,91 @@ fn network_raw_ip_stack_defaults_off_and_round_trips() {
          silently loses its transport"
     );
 }
+
+// ────────────────────────────────────────────────────────────────────
+// Shared network-constructor verdict corpus.
+//
+// `features/suites/s27_sdk/fixtures/network_constraints.json` states, once,
+// whether each `host_port` / `dns_resolver` argument pair may survive into a
+// valid workload document. This asserts the Rust surface agrees; the s27
+// scenario asserts Python does, against the same file. Neither language owns
+// the answer, so neither can drift without failing a gate.
+// ────────────────────────────────────────────────────────────────────
+
+/// One golden case: constructor, its two arguments, and the verdict every
+/// surface must reach.
+#[derive(Debug, serde::Deserialize)]
+struct ConstraintCase {
+    id: String,
+    ctor: String,
+    host: String,
+    port: u32,
+    verdict: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct ConstraintCorpus {
+    cases: Vec<ConstraintCase>,
+}
+
+/// Repo root, resolved from this crate rather than the process cwd:
+/// mvm-sdk/ -> crates/ -> repo root.
+fn constraint_corpus_path() -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("features/suites/s27_sdk/fixtures/network_constraints.json")
+}
+
+/// Build the case's workload the way a user would — through the public
+/// constructors, not by hand-filling the IR structs. A constraint enforced
+/// only on a hand-built document would not be the one users meet.
+fn workload_for_constraint_case(case: &ConstraintCase) -> Workload {
+    use mvm_sdk::{NetworkExt, dns_resolver, egress, host_port, network};
+
+    // A corpus port outside `u16` clamps rather than panics, so adding one
+    // yields a meaningful (still invalid) case instead of aborting the run.
+    let port = u16::try_from(case.port).unwrap_or(u16::MAX);
+    let net = match case.ctor.as_str() {
+        "host_port" => {
+            network(NetworkMode::Bridge).with_egress(egress([host_port(&case.host, port)]))
+        }
+        "dns_resolver" => network(NetworkMode::Bridge).with_dns(dns_resolver(&case.host, port)),
+        other => panic!("corpus names constructor {other:?}, which this test cannot build"),
+    };
+    let mut workload = base_workload();
+    workload.apps[0].network = Some(net);
+    workload
+}
+
+#[test]
+fn rust_network_constructors_match_the_shared_verdict_corpus() {
+    let path = constraint_corpus_path();
+    let bytes =
+        std::fs::read(&path).unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+    let corpus: ConstraintCorpus =
+        serde_json::from_slice(&bytes).expect("network_constraints.json is not the expected shape");
+    assert!(!corpus.cases.is_empty(), "the verdict corpus is empty");
+
+    let mut disagreements = Vec::new();
+    for case in &corpus.cases {
+        let result = validate(&workload_for_constraint_case(case));
+        let actual = if result.is_ok() { "valid" } else { "invalid" };
+        if actual != case.verdict {
+            disagreements.push(format!(
+                "{}: corpus says {}, `validate` says {} ({:?})",
+                case.id,
+                case.verdict,
+                actual,
+                result.err().unwrap_or_default()
+            ));
+        }
+    }
+    assert!(
+        disagreements.is_empty(),
+        "the Rust surface disagrees with {} on {} case(s):\n  {}",
+        path.display(),
+        disagreements.len(),
+        disagreements.join("\n  ")
+    );
+}

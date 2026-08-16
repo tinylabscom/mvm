@@ -318,6 +318,19 @@ tree notices today, and no signature-level gate ever would — it is exactly the
 class of drift the golden-IR gate in (4) exists to catch. Filed as #2559; not
 fixed here, because changing `host_port`'s behaviour is not a WS-1 change.
 
+**Fixed 2026-08-16 (#2559), and it brought (4) forward.** The constraint moved
+to `mvm_contract::ir::validate`, the one seam every language's document passes
+through, rather than into either constructor's signature — which is what
+decision (2) requires. `dns_resolver` turned out to have the wider version of
+the same hole (no host *or* port check on the Rust side at all) and is covered
+by the same helper. The durable half is
+`features/suites/s27_sdk/fixtures/network_constraints.json`: one file of golden
+verdicts, read by a Rust test and by an s27 scenario driving the Python DSL, so
+neither surface can move without the other failing. That is the first slice of
+the golden-document gate WS-3.4 asks for, built ahead of WS-3 because the defect
+needed it; when WS-3 generates these constructors into TypeScript, the third
+surface checks against the same file.
+
 #### Consequence for the tiers
 
 Tier A is **not** descoped to a hand-port. It proceeds as generation, from a
