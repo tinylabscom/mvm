@@ -7,11 +7,11 @@
     "",
     "`typescript_only_absent_from_python` is empty and should stay that way:",
     "every name TypeScript exports is now either shared or Rust-owned.",
-    "The two MVM_MACHINE_* names below are a *behaviour* gap, not a naming",
-    "one — the TypeScript machine wrapper does not bound its subprocess at",
-    "all, so it has nothing to read them with. They are deliberately not",
-    "emitted into TypeScript (see crates/mvm-sdk/src/env.rs), because a",
-    "constant nothing reads would clear this list while changing nothing."
+    "The two MVM_MACHINE_* names used to sit below as a *behaviour* gap: the",
+    "TypeScript machine wrapper bounded nothing, so it had nothing to read",
+    "them with, and emitting the constants would have cleared this list while",
+    "changing nothing. They left it the only way they could — the wrapper now",
+    "bounds its subprocess and reads both, so the registry exports them."
   ],
   "python_only_type_erased_in_typescript": [
     "ExecResult",
@@ -29,8 +29,6 @@
   ],
   "python_only_absent_from_typescript": [
     "EmittingContextError",
-    "MVM_MACHINE_MAX_OUTPUT_ENV",
-    "MVM_MACHINE_TIMEOUT_ENV",
     "MsgpackUnavailable",
     "MvmTransportError",
     "NoVmIntrospectionError",
