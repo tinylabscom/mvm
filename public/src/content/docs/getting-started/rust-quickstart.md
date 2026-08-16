@@ -45,7 +45,7 @@ use mvm_client_local::LocalBackend;
 // inside an async context:
 let client = LocalBackend::new();
 
-let spec = MachineSpec::builder("web", "nginx")
+let spec = MachineSpec::builder("web", "nginx")?
     .cpus(2)
     .memory_mib(512)
     .env("PORT", "8080")

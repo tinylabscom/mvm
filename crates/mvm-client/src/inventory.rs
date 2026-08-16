@@ -627,7 +627,9 @@ mod tests {
     async fn mock_backend_inventory_lists_its_machines_as_transients() {
         let _home = IsolatedHome::new();
         let mock = MockBackend::default();
-        let spec = mvm_core::client::dto::MachineSpec::builder("adhoc", "img").build();
+        let spec = mvm_core::client::dto::MachineSpec::builder("adhoc", "img")
+            .expect("declared image parses")
+            .build();
         mock.run_machine(spec).await.unwrap();
 
         let records = inventory_with_specs(&mock, vec![]).await.unwrap();
@@ -645,7 +647,9 @@ mod tests {
     async fn mock_backend_inventory_joins_persisted_specs() {
         let _home = IsolatedHome::new();
         let mock = MockBackend::default();
-        let boot = mvm_core::client::dto::MachineSpec::builder("web", "img").build();
+        let boot = mvm_core::client::dto::MachineSpec::builder("web", "img")
+            .expect("declared image parses")
+            .build();
         mock.run_machine(boot).await.unwrap();
 
         let records = inventory_with_specs(&mock, vec![spec("web"), spec("db")])

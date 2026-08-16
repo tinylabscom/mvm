@@ -47,7 +47,13 @@ REST. Both speak the same `MachineSpec` intent type.
 
 Build a `MachineSpec` fluently with `MachineSpec::builder(name, image)` — the two
 required fields are supplied up front, so `build()` is infallible; `cpus`
-(default 1), `memory_mib` (default 512), and `env` (accumulates) are optional:
+(default 1), `memory_mib` (default 512), and `env` (accumulates) are optional.
+
+`builder` itself returns a `Result`: `image` is parsed into a `RootfsSource` (an
+absolute / `./` / `~/` path or `path:<p>` is a local rootfs, `flake:<ref>#<attr>`
+is a flake output, anything else or `oci:<ref>` is a registry reference), so a
+declaration that names nothing is refused here rather than at boot. The spec
+carries the parsed value and serializes it back as that same string.
 
 ```rust
 use mvm_client::{MvmClient, MachineSpec};
@@ -56,7 +62,7 @@ use mvm_client_local::LocalBackend;
 // inside an async context:
 let client = LocalBackend::new();
 
-let spec = MachineSpec::builder("web", "nginx")
+let spec = MachineSpec::builder("web", "nginx")?
     .cpus(2)
     .memory_mib(512)
     .env("PORT", "8080")

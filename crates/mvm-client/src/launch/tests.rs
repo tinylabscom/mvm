@@ -99,12 +99,17 @@ fn seeded_secret_ref(service: &SecretService) -> MachineSecretRef {
     }
 }
 
+/// A parsed declaration from the string form these tests spell inline.
+fn declared(image: &str) -> mvm_core::rootfs_source::RootfsSource {
+    image.parse().expect("test image parses")
+}
+
 fn transient_request(image: &str) -> LaunchRequestBuilder {
-    LaunchRequest::builder(LifecycleMode::Transient, image)
+    LaunchRequest::builder(LifecycleMode::Transient, declared(image))
 }
 
 fn persistent_request(image: &str, name: &str) -> LaunchRequestBuilder {
-    LaunchRequest::builder(LifecycleMode::Persistent, image).name(name)
+    LaunchRequest::builder(LifecycleMode::Persistent, declared(image)).name(name)
 }
 
 async fn listed_names(client: &LocalBackend) -> Vec<String> {
@@ -932,6 +937,7 @@ async fn create_machine_persists_the_callers_grants() {
     let rootfs = home.rootfs();
 
     let spec = mvm_core::client::dto::MachineSpec::builder("p-granted", rootfs)
+        .expect("declared image parses")
         .cpus(2)
         .memory_mib(256)
         .cpu_millicores(1500)
@@ -986,7 +992,7 @@ fn a_restart_re_admits_under_the_persisted_grants_not_deny_all() {
     };
 
     let request =
-        super::start_request_from_spec("p-restart", "alpine:latest".to_string(), 256, &spec)
+        super::start_request_from_spec("p-restart", declared("alpine:latest"), 256, &spec)
             .expect("the start request builds");
     let carried = request
         .grants
@@ -1015,7 +1021,7 @@ fn a_restart_re_admits_under_the_persisted_grants_not_deny_all() {
     // baseline is unchanged.
     spec.grants = None;
     let ungranted =
-        super::start_request_from_spec("p-restart", "alpine:latest".to_string(), 256, &spec)
+        super::start_request_from_spec("p-restart", declared("alpine:latest"), 256, &spec)
             .expect("the start request builds");
     assert_eq!(ungranted.grants, None);
 }

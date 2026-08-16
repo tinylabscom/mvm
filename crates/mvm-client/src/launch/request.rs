@@ -14,6 +14,7 @@
 //! gate reads.
 
 use mvm_core::client::{MvmError, Result};
+use mvm_core::rootfs_source::RootfsSource;
 
 pub use crate::secret::MachineSecretRef;
 pub use crate::volume::AccessMode;
@@ -67,7 +68,7 @@ pub struct LaunchVolumeSpec {
 pub struct LaunchRequest {
     pub(crate) name: Option<String>,
     pub(crate) mode: LifecycleMode,
-    pub(crate) image: String,
+    pub(crate) image: RootfsSource,
     pub(crate) cpus: u32,
     pub(crate) memory_mib: u32,
     pub(crate) backend: Option<String>,
@@ -85,13 +86,15 @@ pub struct LaunchRequest {
 }
 
 impl LaunchRequest {
-    /// Start building a request for `mode` from OCI image source `image`
-    /// (a registry reference, an unpacked rootfs directory, or a
-    /// pre-materialized `rootfs.ext4` path).
-    pub fn builder(mode: LifecycleMode, image: impl Into<String>) -> LaunchRequestBuilder {
+    /// Start building a request for `mode` from the already-parsed rootfs
+    /// declaration `image` — a registry reference, an unpacked rootfs
+    /// directory, or a pre-materialized `rootfs.ext4` path. Taking the parsed
+    /// value rather than a string is what keeps a request that names nothing
+    /// unbuildable rather than merely refused.
+    pub fn builder(mode: LifecycleMode, image: RootfsSource) -> LaunchRequestBuilder {
         LaunchRequestBuilder {
             mode,
-            image: image.into(),
+            image,
             name: None,
             command: Vec::new(),
             env: Vec::new(),
@@ -124,7 +127,7 @@ impl LaunchRequest {
 #[derive(Debug, Clone)]
 pub struct LaunchRequestBuilder {
     mode: LifecycleMode,
-    image: String,
+    image: RootfsSource,
     name: Option<String>,
     command: Vec<String>,
     env: Vec<(String, String)>,
@@ -282,9 +285,6 @@ impl LaunchRequestBuilder {
     pub fn build(self) -> Result<LaunchRequest> {
         let invalid = |reason: String| MvmError::InvalidSpec { reason };
 
-        if self.image.trim().is_empty() {
-            return Err(invalid("image source must not be empty".into()));
-        }
         if let Some(name) = self.name.as_deref() {
             mvm_core::naming::validate_vm_name(name)
                 .map_err(|e| invalid(format!("invalid machine name {name:?}: {e}")))?;
@@ -364,13 +364,19 @@ impl LaunchRequestBuilder {
 mod tests {
     use super::*;
 
+    /// A parsed registry declaration — the shape a caller now has to arrive
+    /// with, since the request type no longer accepts an uninterpreted string.
+    fn oci(image_ref: &str) -> RootfsSource {
+        image_ref.parse().expect("test image parses")
+    }
+
     fn base(mode: LifecycleMode) -> LaunchRequestBuilder {
-        LaunchRequest::builder(mode, "alpine:3.20").name("web")
+        LaunchRequest::builder(mode, oci("alpine:3.20")).name("web")
     }
 
     #[test]
     fn minimal_transient_request_builds_with_defaults() {
-        let req = LaunchRequest::builder(LifecycleMode::Transient, "alpine:3.20")
+        let req = LaunchRequest::builder(LifecycleMode::Transient, oci("alpine:3.20"))
             .build()
             .expect("minimal transient request");
         assert_eq!(req.mode(), LifecycleMode::Transient);
@@ -383,7 +389,7 @@ mod tests {
 
     #[test]
     fn persistent_request_requires_a_name() {
-        let err = LaunchRequest::builder(LifecycleMode::Persistent, "alpine:3.20")
+        let err = LaunchRequest::builder(LifecycleMode::Persistent, oci("alpine:3.20"))
             .build()
             .unwrap_err();
         assert!(err.to_string().contains("requires a name"), "got: {err}");
@@ -393,13 +399,19 @@ mod tests {
     }
 
     #[test]
-    fn empty_image_and_invalid_name_are_refused() {
-        let err = LaunchRequest::builder(LifecycleMode::Transient, "  ")
-            .build()
-            .unwrap_err();
-        assert!(err.to_string().contains("image source"), "got: {err}");
+    fn an_empty_image_cannot_reach_a_request_at_all() {
+        // This used to be a `build()` refusal on a `String` field. It is now
+        // unrepresentable: the request names a parsed source, so the only way
+        // to express an empty one is to fail the parse first.
+        assert_eq!(
+            "  ".parse::<RootfsSource>().unwrap_err(),
+            mvm_core::rootfs_source::RootfsSourceParseError::Empty
+        );
+    }
 
-        let err = LaunchRequest::builder(LifecycleMode::Transient, "img")
+    #[test]
+    fn an_invalid_name_is_refused() {
+        let err = LaunchRequest::builder(LifecycleMode::Transient, oci("img"))
             .name("Bad Name!")
             .build()
             .unwrap_err();
