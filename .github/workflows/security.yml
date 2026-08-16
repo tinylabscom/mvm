@@ -535,6 +535,12 @@ jobs:
   mutation-witnesses:
     name: Claim witnesses — mutation-tested (${{ matrix.package }})
     runs-on: ubuntu-latest
+    # Under the six-hour platform cap, so a shard that outgrows its budget
+    # fails as itself. Reaching the cap instead kills the runner, and the
+    # only trace is "The runner has received a shutdown signal" — which
+    # names no package, no file, and no claim, and reads identically to
+    # infrastructure having a bad night.
+    timeout-minutes: 330
     # BLOCKING, and sharded per package.
     #
     # Sharding is structural, not a response to a particular runtime: a
@@ -572,7 +578,10 @@ jobs:
           - mvm-build
           - mvm-cli
           - mvm-core
-          - mvm-hostd
+          # mvm-hostd owns the most surface files of any package and stopped
+          # finishing inside the cap on its own — see the timeout note below.
+          - mvm-hostd/1of2
+          - mvm-hostd/2of2
           - mvm-contract
           - mvm-runtime
           - mvm-sdk
@@ -623,12 +632,30 @@ jobs:
           export RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
           export MVM_HOME="$RUNNER_TEMP/mutants-mvm-home"
           export HOME="$MVM_HOME"
+          # The gate writes cargo-mutants output under the system temp dir.
+          # Pin that dir so the upload step below has a path it knows rather
+          # than one it guesses at.
+          export TMPDIR="$RUNNER_TEMP/mutants-out"
+          mkdir -p "$TMPDIR"
           mkdir -p "$HOME"
           if [ -e "$HOME/.mvm/keys" ]; then
             echo "::error::refusing to mutate against a reachable keystore at $HOME/.mvm/keys" >&2
             exit 1
           fi
           cargo run -p xtask -- check-mutation-witnesses --run --package '${{ matrix.package }}'
+
+      - name: Keep the mutation output of a shard that did not finish
+        # A shard killed by the timeout above has still measured most of its
+        # files, and that work is the only evidence of where it went. Without
+        # this the directory dies with the runner and the next person starts
+        # from the same blank page.
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: mutants-${{ strategy.job-index }}
+          path: ${{ runner.temp }}/mutants-out/mvm-mutation-witnesses/
+          if-no-files-found: ignore
+          retention-days: 7
 
   # ── Lane 5: Hash-verify regression ─────────────────────────────────
   # ADR-001 §W5.1 — the unit tests that exercise the
