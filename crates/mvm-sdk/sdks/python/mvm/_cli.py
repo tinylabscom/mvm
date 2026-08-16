@@ -5,7 +5,11 @@ from __future__ import annotations
 import os
 import shutil
 
-MVM_CLI_BIN_ENV = "MVM_CLI_BIN"
+# Owned by the Rust registry (crates/mvm-sdk/src/env.rs), generated into
+# `_env/vars.py`. Re-exported here so existing importers of
+# `mvm._cli.MVM_CLI_BIN_ENV` keep working.
+from mvm._env.vars import MVM_CLI_BIN_ENV
+
 MVM_LEGACY_CLI_BIN_ENV = "MVM_MVM_BIN"
 SDK_CLI_CANDIDATES = ("mvmctl",)
 
