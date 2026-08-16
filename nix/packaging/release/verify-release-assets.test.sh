@@ -256,7 +256,7 @@ if [ "$BOOT_TOOLS" = 1 ]; then
   printf 'tampered-rootfs\n' > "$d/default-microvm-rootfs-aarch64.ext4"
   if run "$d"; then bad "checksum-mismatched rootfs must fail"; else ok "checksum-mismatched rootfs fails closed"; fi
   rm -rf "$d"
-  # 17. THE #2594 REGRESSION. A bzImage published under the name `vmlinux`.
+  # 17. THE REGRESSION. A bzImage published under the name `vmlinux`.
   # Every checksum still matches — it is a faithful copy of the wrong format —
   # so only reading the magic catches it. Firecracker's x86_64 loader refuses
   # it before any guest code runs.
