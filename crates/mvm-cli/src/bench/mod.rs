@@ -16,6 +16,7 @@
 
 pub mod cold_launch;
 pub mod cold_launch_runner;
+pub mod doc_table;
 pub mod harness;
 pub mod interaction;
 pub mod probe;
