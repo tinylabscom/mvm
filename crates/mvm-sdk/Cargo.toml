@@ -97,6 +97,12 @@ required-features = ["schema"]
 name = "emit_sdk_env"
 path = "src/bin/emit_sdk_env.rs"
 
+# The SDK error-taxonomy emitter. Same reasoning as `emit_sdk_env`:
+# serde_json only, so no `required-features`.
+[[bin]]
+name = "emit_sdk_errors"
+path = "src/bin/emit_sdk_errors.rs"
+
 [dev-dependencies]
 # `TestEnv` lives behind mvm-core's `test-support`, and the compile
 # pipeline's tests use it. Without this line the feature only arrives via
