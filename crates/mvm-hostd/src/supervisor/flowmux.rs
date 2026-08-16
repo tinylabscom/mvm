@@ -8,8 +8,9 @@
 //! Everything else fails closed with `GoAway`.
 
 pub mod registry;
+mod udp_relay;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::net::{IpAddr, SocketAddr, TcpStream};
 use std::os::unix::net::UnixStream;
@@ -22,14 +23,17 @@ use std::time::{Duration, Instant};
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use mvm_contract::protocol::dns::{MAX_DNS_MESSAGE, decode_query, encode_response};
 use mvm_contract::protocol::network_flow::{
-    Direction, FrameError, HEADER_LEN, LENGTH_PREFIX_LEN, MAX_UDP_DATAGRAM_LEN, Opcode,
-    SessionValidator, UDP_ADDR_PREFIX_LEN, decode,
+    Direction, FrameError, HEADER_LEN, LENGTH_PREFIX_LEN, Opcode, SessionValidator,
+    UDP_ADDR_PREFIX_LEN, decode,
 };
 use mvm_core::net::session::Session;
 use mvm_vmm::vsock_egress_bridge::egress_gate::{DnsVerdict, EgressGate, EgressVerdict};
 use tracing::{info, warn};
 
 use self::registry::{RegistryError, RegistryLimits, StreamRegistry, class_for_open};
+use self::udp_relay::{
+    UdpAssociationHandle, UdpRelayParams, UdpSendMsg, decode_udp_addr, run_udp_relay,
+};
 
 use crate::supervisor::audit_recorder::{EventCategory, Recorder};
 use crate::supervisor::dns_resolver::resolve_hostname_ips;
@@ -153,20 +157,6 @@ struct TcpStreamHandle {
     /// thread does not emit a stale `HalfClose` or `Reset` after an explicit
     /// reset or full close.
     retired: Arc<AtomicBool>,
-}
-
-/// A request from the main session thread to a UDP relay thread to send one
-/// datagram to an admitted destination.
-struct UdpSendMsg {
-    destination: SocketAddr,
-    payload: Vec<u8>,
-}
-
-/// The host-side handle for one active UDP association. The relay thread owns
-/// the socket; the main thread forwards guest `UdpSend` frames through a
-/// channel.
-struct UdpAssociationHandle {
-    tx: std::sync::mpsc::Sender<UdpSendMsg>,
 }
 
 impl FlowMuxSession {
@@ -1311,189 +1301,6 @@ fn run_tcp_relay(params: TcpRelayParams) {
     let _ = registry;
 }
 
-/// Parameters for the per-association UDP relay thread.
-#[derive(Debug)]
-struct UdpRelayParams {
-    stream_id: u32,
-    socket: std::net::UdpSocket,
-    session: Arc<Mutex<Session>>,
-    writer: Arc<Mutex<UnixStream>>,
-    idle_timeout: Duration,
-    max_peers: usize,
-    rx: std::sync::mpsc::Receiver<UdpSendMsg>,
-    registry: Arc<Mutex<StreamRegistry>>,
-}
-
-/// Per-association UDP relay thread: read datagrams from the upstream socket
-/// and forward them to the guest as `UdpRecv` frames. Guest `UdpSend`
-/// requests arrive through a channel so the socket stays owned by one thread.
-///
-/// The relay enforces two association bounds: a limit on distinct peers and
-/// an idle timeout that closes the association when no bytes flow in either
-/// direction for too long.
-fn run_udp_relay(params: UdpRelayParams) {
-    let UdpRelayParams {
-        stream_id,
-        socket,
-        session,
-        writer,
-        idle_timeout,
-        max_peers,
-        rx,
-        registry,
-    } = params;
-    const MAX_POLL: Duration = Duration::from_secs(1);
-
-    let mut buf = vec![0_u8; MAX_UDP_DATAGRAM_LEN];
-    let mut peers: BTreeSet<SocketAddr> = BTreeSet::new();
-    let mut last_activity = std::time::Instant::now();
-    let mut idle_expired = false;
-
-    loop {
-        let remaining = idle_timeout.saturating_sub(last_activity.elapsed());
-        if remaining.is_zero() {
-            idle_expired = true;
-            break;
-        }
-        let budget = remaining.min(MAX_POLL);
-        if socket.set_read_timeout(Some(budget)).is_err() {
-            warn!(stream_id, "FlowMux UDP relay failed to set read timeout");
-            break;
-        }
-
-        let mut activity_this_iter = false;
-        match socket.recv_from(&mut buf) {
-            Ok((len, source)) => {
-                let already_peer = peers.contains(&source);
-                if !already_peer && peers.len() >= max_peers {
-                    // Peer bound would be exceeded; drop silently.
-                    activity_this_iter = true;
-                } else {
-                    peers.insert(source);
-                    let mut payload = encode_udp_addr(source.ip(), source.port());
-                    payload.extend_from_slice(&buf[..len]);
-                    let frame_len = u32::try_from(payload.len()).unwrap_or(u32::MAX);
-                    if let Err(e) =
-                        lock_registry(&registry).consume_host_credit(stream_id, frame_len)
-                    {
-                        warn!(stream_id, error = %e, "FlowMux UDP host credit exhausted");
-                        let _ = write_frame_to(
-                            &session,
-                            &writer,
-                            Opcode::Reset,
-                            stream_id,
-                            b"host credit exhausted",
-                        );
-                        break;
-                    }
-                    if write_frame_to(&session, &writer, Opcode::UdpRecv, stream_id, &payload)
-                        .is_err()
-                    {
-                        break;
-                    }
-                    activity_this_iter = true;
-                }
-            }
-            Err(e)
-                if e.kind() == std::io::ErrorKind::TimedOut
-                    || e.kind() == std::io::ErrorKind::WouldBlock => {}
-            Err(e) => {
-                warn!(stream_id, error = %e, "FlowMux UDP recv failed");
-                break;
-            }
-        }
-
-        // Drain any guest-send requests without blocking.
-        while let Ok(msg) = rx.try_recv() {
-            activity_this_iter = true;
-            let already_peer = peers.contains(&msg.destination);
-            if !already_peer && peers.len() >= max_peers {
-                // Peer bound would be exceeded; drop silently.
-                continue;
-            }
-            peers.insert(msg.destination);
-            if socket.send_to(&msg.payload, msg.destination).is_err() {
-                break;
-            }
-        }
-
-        if activity_this_iter {
-            last_activity = std::time::Instant::now();
-        }
-    }
-
-    let _ = lock_registry(&registry).retire(stream_id);
-    if idle_expired {
-        let _ = write_frame_to(
-            &session,
-            &writer,
-            Opcode::CloseUdp,
-            stream_id,
-            b"idle timeout",
-        );
-    } else {
-        let _ = write_frame_to(
-            &session,
-            &writer,
-            Opcode::Reset,
-            stream_id,
-            b"UDP relay error",
-        );
-    }
-}
-
-/// Encode a UDP address prefix: one family tag, a 16-byte address slot, and a
-/// big-endian port. IPv4 is carried as an IPv4-mapped IPv6 address under tag
-/// `0x01`; IPv6 uses tag `0x04`.
-fn encode_udp_addr(ip: IpAddr, port: u16) -> Vec<u8> {
-    let mut out = Vec::with_capacity(UDP_ADDR_PREFIX_LEN);
-    match ip {
-        IpAddr::V4(v4) => {
-            out.push(0x01);
-            out.extend_from_slice(&[0; 10]);
-            out.extend_from_slice(&[0xff, 0xff]);
-            out.extend_from_slice(&v4.octets());
-        }
-        IpAddr::V6(v6) => {
-            out.push(0x04);
-            out.extend_from_slice(&v6.octets());
-        }
-    }
-    out.extend_from_slice(&port.to_be_bytes());
-    out
-}
-
-/// Decode a UDP address prefix. Returns the address, port, and the remaining
-/// payload bytes (the datagram body).
-fn decode_udp_addr(bytes: &[u8]) -> Result<(IpAddr, u16, &[u8]), String> {
-    if bytes.len() < UDP_ADDR_PREFIX_LEN {
-        return Err(format!(
-            "UdpSend prefix too short: {} < {}",
-            bytes.len(),
-            UDP_ADDR_PREFIX_LEN
-        ));
-    }
-    let tag = bytes[0];
-    let addr_bytes: [u8; 16] = bytes[1..17]
-        .try_into()
-        .map_err(|_| "address slot truncated".to_string())?;
-    let port = u16::from_be_bytes([bytes[17], bytes[18]]);
-
-    let ip = match tag {
-        0x01 => match IpAddr::from(addr_bytes) {
-            IpAddr::V6(v6) => IpAddr::from(
-                v6.to_ipv4_mapped()
-                    .ok_or_else(|| "IPv4-mapped address expected".to_string())?,
-            ),
-            IpAddr::V4(_) => return Err("IPv4-mapped address expected".to_string()),
-        },
-        0x04 => IpAddr::from(addr_bytes),
-        _ => return Err(format!("unknown UDP address family tag: {tag}")),
-    };
-
-    Ok((ip, port, &bytes[UDP_ADDR_PREFIX_LEN..]))
-}
-
 fn parse_host_port(target: &str) -> Result<(&str, u16), String> {
     let (host, port_str) = target
         .rsplit_once(':')
@@ -1509,6 +1316,7 @@ fn parse_host_port(target: &str) -> Result<(&str, u16), String> {
 
 #[cfg(test)]
 mod tests {
+    use super::udp_relay::encode_udp_addr;
     use std::os::unix::net::UnixStream;
     use std::thread;
 
@@ -1777,23 +1585,6 @@ mod tests {
 
         drop(guest_stream);
         host_handle.join().unwrap().unwrap();
-    }
-
-    #[test]
-    fn udp_addr_roundtrips_ipv4_and_ipv6() {
-        let (ip4, port4) = ("192.0.2.10".parse::<std::net::IpAddr>().unwrap(), 5353);
-        let encoded4 = encode_udp_addr(ip4, port4);
-        let (decoded4_ip, decoded4_port, rest4) = decode_udp_addr(&encoded4).unwrap();
-        assert_eq!(decoded4_ip, ip4);
-        assert_eq!(decoded4_port, port4);
-        assert!(rest4.is_empty());
-
-        let (ip6, port6) = ("2001:db8::1".parse::<std::net::IpAddr>().unwrap(), 443);
-        let encoded6 = encode_udp_addr(ip6, port6);
-        let (decoded6_ip, decoded6_port, rest6) = decode_udp_addr(&encoded6).unwrap();
-        assert_eq!(decoded6_ip, ip6);
-        assert_eq!(decoded6_port, port6);
-        assert!(rest6.is_empty());
     }
 
     #[test]
