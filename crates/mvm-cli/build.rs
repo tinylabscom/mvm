@@ -175,6 +175,42 @@ fn main() {
     // Same file-by-file watch for the `mvm-build` lib the host bins link (a
     // content edit there must re-cross-compile the embedded host bins).
     emit_rerun_for_tree(&workspace_root.join("crates/mvm-build/src"));
+    // ...and every other workspace crate, because that is what these binaries
+    // actually link. Naming individual trees is what left the gap this
+    // replaces: the watch listed `mvm-build` only, while `mvm-egress-client`
+    // — the guest's entire egress path — lives in `mvm-agentd` and reaches
+    // `mvm-core` and `mvm-contract` beneath it. An edit to any of them
+    // embedded the previous binary, so the guest ran code the contributor did
+    // not write and nothing said so. A list cannot be kept correct against a
+    // dependency graph; watching the workspace can.
+    emit_rerun_for_workspace_crates(&workspace_root);
+}
+
+/// Watch every workspace crate's `src` tree.
+///
+/// Deliberately not a curated list — see the call site. Emitting paths is
+/// cheap; embedding a stale binary is not.
+fn emit_rerun_for_workspace_crates(workspace_root: &Path) {
+    let crates_dir = workspace_root.join("crates");
+    let Ok(entries) = std::fs::read_dir(&crates_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        // `crates/deps/` holds vendored FFI crates one level deeper.
+        if path.file_name().is_some_and(|name| name == "deps") {
+            if let Ok(nested) = std::fs::read_dir(&path) {
+                for dep in nested.flatten() {
+                    emit_rerun_for_tree(&dep.path().join("src"));
+                }
+            }
+            continue;
+        }
+        emit_rerun_for_tree(&path.join("src"));
+    }
 }
 
 /// Emit one `cargo:rerun-if-changed` per file under `root`, recursively. Unlike

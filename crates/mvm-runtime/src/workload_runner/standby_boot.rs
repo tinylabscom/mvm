@@ -374,6 +374,9 @@ mod tests {
 
     fn workload_boot(launch: &VmStartConfig, state_dir: &Path) -> VmmSpec {
         workload_spec(&WorkloadSpecInputs {
+            // A warm parent's own boot mints and attaches its drive through the
+            // cold path; this factory spec carries none of its own.
+            identity_drive: None,
             config: launch,
             sockets: WorkloadSockets {
                 agent: Path::new("/run/agent.sock"),

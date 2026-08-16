@@ -232,10 +232,18 @@ fn run_stage0_qemu(
         "console={serial_console} root=/dev/vda rw init={entry_path} mvm.backend=qemu {QEMU_BUILDER_VSOCK_EGRESS_TOKEN} {QEMU_BUILDER_VSOCK_EGRESS_PORT_TOKEN_PREFIX}{egress_port} {hostepoch} panic=-1"
     );
     let guest_cid = allocate_qemu_builder_guest_cid();
+    // Both statements sit behind the same feature: the endpoint type only
+    // exists with `builder-vm`, and so does the identity it needs. Gating only
+    // one of them compiles on a dev host and fails on the feature-gated
+    // target, which is exactly what happened the first time.
+    #[cfg(feature = "builder-vm")]
+    let (identity_material, identity_drive) =
+        crate::libkrun_builder::stage_builder_flowmux_identity(&work)?;
     #[cfg(feature = "builder-vm")]
     let egress_endpoint = BuilderVsockEgressEndpoint::spawn_with_transport(
         &work,
         BuilderEndpointTransport::Vsock { port: egress_port },
+        identity_material.spawn_config(),
     )?;
     let mut cmd = Command::new("timeout");
     cmd.arg(STAGE0_TIMEOUT_SECS.to_string()).arg(&qemu_bin);
@@ -251,10 +259,26 @@ fn run_stage0_qemu(
     }
     cmd.arg("-kernel").arg(&kernel);
     cmd.arg("-initrd").arg(&initrd);
-    cmd.arg("-append").arg(&append);
+    cmd.arg("-append").arg(
+        crate::builder_cmdline::checked_builder_cmdline(append)
+            .map_err(BuilderVmError::NixBuildFailed)?,
+    );
     for disk in [&vda, &vdb, &vdc, &vdd] {
         cmd.arg("-drive")
             .arg(format!("file={},if=virtio,format=raw", disk.display()));
+    }
+    // Read-only, matching how the shell-job and build paths attach it.
+    #[cfg(feature = "builder-vm")]
+    cmd.arg("-drive").arg(format!(
+        "file={},if=virtio,format=raw,readonly=on",
+        identity_drive.display()
+    ));
+    #[cfg(feature = "builder-vm")]
+    {
+        cmd.arg("-drive").arg(format!(
+            "file={},if=virtio,format=raw,readonly=on",
+            identity_drive.display()
+        ));
     }
     #[cfg(feature = "builder-vm")]
     cmd.arg("-drive").arg(format!(
@@ -875,7 +899,10 @@ fn run_shell_script_qemu(job: &BuilderShellJob) -> Result<BuilderShellResult, Bu
         cmd.args(["-cpu", "max"]);
     }
     cmd.arg("-kernel").arg(&kernel);
-    cmd.arg("-append").arg(&cmdline);
+    cmd.arg("-append").arg(
+        crate::builder_cmdline::checked_builder_cmdline(cmdline.clone())
+            .map_err(BuilderVmError::NixBuildFailed)?,
+    );
     cmd.arg("-drive")
         .arg(format!("file={},if=virtio,format=raw", rootfs.display()));
     cmd.arg("-drive").arg(format!(
@@ -907,10 +934,17 @@ fn run_shell_script_qemu(job: &BuilderShellJob) -> Result<BuilderShellResult, Bu
             "vhost-user-fs-pci,queue-size=1024,chardev=vfs-{tag},tag={tag}"
         ));
     }
+    let (identity_material, identity_drive) =
+        crate::libkrun_builder::stage_builder_flowmux_identity(&vm_state_dir)?;
     let egress_endpoint = BuilderVsockEgressEndpoint::spawn_with_transport(
         &vm_state_dir,
         BuilderEndpointTransport::Vsock { port: egress_port },
+        identity_material.spawn_config(),
     )?;
+    cmd.arg("-drive").arg(format!(
+        "file={},if=virtio,format=raw,readonly=on",
+        identity_drive.display()
+    ));
     cmd.arg("-device")
         .arg(format!("vhost-vsock-pci,guest-cid={guest_cid}"));
     cmd.args(["-display", "none"]);
@@ -1145,7 +1179,10 @@ fn run_build_qemu(
         cmd.args(["-cpu", "max"]);
     }
     cmd.arg("-kernel").arg(&kernel);
-    cmd.arg("-append").arg(&cmdline);
+    cmd.arg("-append").arg(
+        crate::builder_cmdline::checked_builder_cmdline(cmdline.clone())
+            .map_err(BuilderVmError::NixBuildFailed)?,
+    );
     // Root disk (vda) + persistent nix store (vdb). The guest mounts vda
     // `ro`, so the cached `rootfs.ext4` stays pristine across builds even
     // though the block device is attached writable (mirrors libkrun). vdb
@@ -1176,10 +1213,17 @@ fn run_build_qemu(
             "vhost-user-fs-pci,queue-size=1024,chardev=vfs-{tag},tag={tag}"
         ));
     }
+    let (identity_material, identity_drive) =
+        crate::libkrun_builder::stage_builder_flowmux_identity(&vm_state_dir)?;
     let egress_endpoint = BuilderVsockEgressEndpoint::spawn_with_transport(
         &vm_state_dir,
         BuilderEndpointTransport::Vsock { port: egress_port },
+        identity_material.spawn_config(),
     )?;
+    cmd.arg("-drive").arg(format!(
+        "file={},if=virtio,format=raw,readonly=on",
+        identity_drive.display()
+    ));
     cmd.arg("-device")
         .arg(format!("vhost-vsock-pci,guest-cid={guest_cid}"));
     cmd.args(["-display", "none"]);

@@ -8,8 +8,9 @@
 //! Everything else fails closed with `GoAway`.
 
 pub mod registry;
+mod udp_relay;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::net::{IpAddr, SocketAddr, TcpStream};
 use std::os::unix::net::UnixStream;
@@ -17,19 +18,22 @@ use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, Ordering},
 };
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use mvm_contract::protocol::dns::{MAX_DNS_MESSAGE, decode_query, encode_response};
 use mvm_contract::protocol::network_flow::{
-    Direction, FrameError, HEADER_LEN, LENGTH_PREFIX_LEN, MAX_UDP_DATAGRAM_LEN, Opcode,
-    SessionValidator, UDP_ADDR_PREFIX_LEN, decode,
+    Direction, FrameError, HEADER_LEN, LENGTH_PREFIX_LEN, Opcode, SessionValidator,
+    UDP_ADDR_PREFIX_LEN, decode,
 };
 use mvm_core::net::session::Session;
 use mvm_vmm::vsock_egress_bridge::egress_gate::{DnsVerdict, EgressGate, EgressVerdict};
 use tracing::{info, warn};
 
-use self::registry::{RegistryLimits, StreamRegistry, class_for_open};
+use self::registry::{RegistryError, RegistryLimits, StreamRegistry, class_for_open};
+use self::udp_relay::{
+    UdpAssociationHandle, UdpRelayParams, UdpSendMsg, decode_udp_addr, run_udp_relay,
+};
 
 use crate::supervisor::audit_recorder::{EventCategory, Recorder};
 use crate::supervisor::dns_resolver::resolve_hostname_ips;
@@ -105,7 +109,12 @@ pub struct FlowMuxSession {
     /// opening inbound frames) and relay threads (for sealing outbound frames).
     /// Both directions use independent sequence counters inside one session.
     session: Arc<Mutex<Session>>,
-    validator: SessionValidator,
+    /// Shared with the per-stream relay threads.
+    ///
+    /// The relay writes the host's own `Data` frames, and those have to be
+    /// admitted here or this side's credit counter is credited by every guest
+    /// grant and debited by nothing.
+    validator: Arc<Mutex<SessionValidator>>,
     registry: Arc<Mutex<StreamRegistry>>,
     /// Active guest-initiated TCP streams and their upstream sockets. The host
     /// half of each stream lives in a dedicated thread.
@@ -148,20 +157,6 @@ struct TcpStreamHandle {
     /// thread does not emit a stale `HalfClose` or `Reset` after an explicit
     /// reset or full close.
     retired: Arc<AtomicBool>,
-}
-
-/// A request from the main session thread to a UDP relay thread to send one
-/// datagram to an admitted destination.
-struct UdpSendMsg {
-    destination: SocketAddr,
-    payload: Vec<u8>,
-}
-
-/// The host-side handle for one active UDP association. The relay thread owns
-/// the socket; the main thread forwards guest `UdpSend` frames through a
-/// channel.
-struct UdpAssociationHandle {
-    tx: std::sync::mpsc::Sender<UdpSendMsg>,
 }
 
 impl FlowMuxSession {
@@ -228,7 +223,7 @@ impl FlowMuxSession {
             reader: stream,
             writer: Arc::new(Mutex::new(writer)),
             session: Arc::new(Mutex::new(session)),
-            validator: SessionValidator::default(),
+            validator: Arc::new(Mutex::new(SessionValidator::default())),
             registry: Arc::new(Mutex::new(StreamRegistry::new(limits))),
             streams: BTreeMap::new(),
             udp_associations: BTreeMap::new(),
@@ -307,7 +302,7 @@ impl FlowMuxSession {
             }
         }
 
-        self.validator
+        lock_validator(&self.validator)
             .admit(&mvm_contract::protocol::network_flow::FrameFacts::new(
                 Direction::GuestToHost,
                 Opcode::Hello,
@@ -316,7 +311,7 @@ impl FlowMuxSession {
             .map_err(|e| FlowMuxError::FrameRefused(e.to_string()))?;
 
         self.send_hello_ack()?;
-        self.validator
+        lock_validator(&self.validator)
             .mark_hello_ack_sent()
             .map_err(|e| FlowMuxError::FrameRefused(e.to_string()))?;
 
@@ -329,14 +324,12 @@ impl FlowMuxSession {
                 }
             };
 
-            if let Err(e) = self.validator.admit(
-                &mvm_contract::protocol::network_flow::FrameFacts::new(
-                    Direction::GuestToHost,
-                    opcode,
-                    stream_id,
-                )
-                .with_payload(payload_len),
-            ) {
+            if let Err(e) = lock_validator(&self.validator).admit(&Self::inbound_frame_facts(
+                &self.read_buf,
+                opcode,
+                stream_id,
+                payload_len,
+            )) {
                 warn!(error = %e, "FlowMux frame refused by session validator");
                 self.send_goaway(&e.to_string())?;
                 return Ok(());
@@ -775,19 +768,23 @@ impl FlowMuxSession {
         let session = Arc::clone(&self.session);
         let writer = Arc::clone(&self.writer);
         let registry = Arc::clone(&self.registry);
+        let validator = Arc::clone(&self.validator);
+        let credit_wait = self.limits.credit_wait;
 
         std::thread::Builder::new()
             .name(format!("flowmux-tcp-{stream_id}"))
             .spawn(move || {
-                run_tcp_relay(
+                run_tcp_relay(TcpRelayParams {
                     stream_id,
-                    upstream_read,
+                    upstream: upstream_read,
                     session,
                     writer,
                     registry,
-                    relay_flag,
-                    retired_flag,
-                )
+                    validator,
+                    host_half_closed: relay_flag,
+                    retired: retired_flag,
+                    credit_wait,
+                })
             })
             .map_err(FlowMuxError::Transport)?;
 
@@ -845,11 +842,18 @@ impl FlowMuxSession {
         }
 
         // Replenish the consumed credit so the guest can keep sending.
-        {
-            let mut reg = lock_registry(&self.registry);
-            let _ = reg.grant_guest_credit(stream_id, payload_len);
+        //
+        // A zero-length DATA frame consumes no credit, and the protocol treats
+        // a zero-delta window update as a frame error. Sending one anyway kills
+        // the session the frame was meant to keep flowing — and it dies on the
+        // *guest's* validator, so the host log shows nothing wrong.
+        if payload_len > 0 {
+            {
+                let mut reg = lock_registry(&self.registry);
+                let _ = reg.grant_guest_credit(stream_id, payload_len);
+            }
+            self.send_window_update(stream_id, payload_len)?;
         }
-        self.send_window_update(stream_id, payload_len)?;
         Ok(())
     }
 
@@ -922,17 +926,50 @@ impl FlowMuxSession {
         self.write_frame(Opcode::GoAway, 0, reason.as_bytes())
     }
 
+    /// Facts for a frame arriving from the guest.
+    ///
+    /// A `WindowUpdate`'s payload *is* its credit, and the validator refuses an
+    /// update that carries none. Describing one by length alone therefore
+    /// refuses every window update the guest sends, and the host answers a
+    /// perfectly good frame with `GoAway` — killing the session on the first
+    /// credit the guest returns. The guest-side reader has the same shape for
+    /// the same reason.
+    fn inbound_frame_facts(
+        read_buf: &[u8],
+        opcode: Opcode,
+        stream_id: u32,
+        payload_len: u32,
+    ) -> mvm_contract::protocol::network_flow::FrameFacts {
+        let facts = mvm_contract::protocol::network_flow::FrameFacts::new(
+            Direction::GuestToHost,
+            opcode,
+            stream_id,
+        )
+        .with_payload(payload_len);
+        if opcode != Opcode::WindowUpdate {
+            return facts;
+        }
+        let start = LENGTH_PREFIX_LEN + HEADER_LEN;
+        match read_buf.get(start..start + 4) {
+            // A malformed or truncated update keeps no credit, so the
+            // validator still refuses it — this reads the field, it does not
+            // wave frames through.
+            Some([a, b, c, d]) => facts.with_credit(u32::from_be_bytes([*a, *b, *c, *d])),
+            _ => facts,
+        }
+    }
+
     /// Advance the local state machine for a frame the host is about to send.
     /// Each side validates the frames it reads, but a confirming or terminal
     /// frame sent by the host still moves the host-side view of the stream.
     fn mark_sent(&mut self, opcode: Opcode, stream_id: u32) {
-        let _ = self
-            .validator
-            .admit(&mvm_contract::protocol::network_flow::FrameFacts::new(
+        let _ = lock_validator(&self.validator).admit(
+            &mvm_contract::protocol::network_flow::FrameFacts::new(
                 Direction::HostToGuest,
                 opcode,
                 stream_id,
-            ));
+            ),
+        );
     }
 
     fn send_opened(&mut self, stream_id: u32) -> Result<(), FlowMuxError> {
@@ -1057,8 +1094,52 @@ fn lock_session(session: &Mutex<Session>) -> std::sync::MutexGuard<'_, Session> 
 }
 
 /// Lock the shared registry, recovering from poison.
+fn lock_validator(
+    validator: &Mutex<SessionValidator>,
+) -> std::sync::MutexGuard<'_, SessionValidator> {
+    validator.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 fn lock_registry(registry: &Mutex<StreamRegistry>) -> std::sync::MutexGuard<'_, StreamRegistry> {
     registry.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// How often the wait re-checks. The relay thread is blocked either way, so
+/// this trades a little latency for not needing a condvar in the registry.
+const HOST_CREDIT_POLL: Duration = Duration::from_millis(2);
+
+/// Reserve `len` bytes of host credit on `stream_id`, waiting for the guest to
+/// replenish if the window is currently full.
+///
+/// An exhausted window is **backpressure, not an error**. The guest returns
+/// credit as it consumes, so a full window means "slow down" — resetting the
+/// stream instead truncates a transfer that was working, which surfaces to the
+/// caller as a corrupt download rather than as flow control. Only two things
+/// end the wait: the stream going away, or a peer that has stopped reading for
+/// `wait`, which comes from `RegistryLimits::credit_wait`.
+fn await_host_credit(
+    registry: &Mutex<StreamRegistry>,
+    stream_id: u32,
+    len: u32,
+    retired: &AtomicBool,
+    wait: Duration,
+) -> Result<(), RegistryError> {
+    let deadline = Instant::now() + wait;
+    loop {
+        let err = match lock_registry(registry).consume_host_credit(stream_id, len) {
+            Ok(()) => return Ok(()),
+            Err(e) => e,
+        };
+        // `NotLive` means the stream is gone — waiting cannot fix that, and
+        // only `IllegalState` is the window-full case worth retrying.
+        if !matches!(err, RegistryError::IllegalState { .. })
+            || retired.load(Ordering::Relaxed)
+            || Instant::now() >= deadline
+        {
+            return Err(err);
+        }
+        std::thread::sleep(HOST_CREDIT_POLL);
+    }
 }
 
 /// Serialize and send one encrypted frame through a shared writer.
@@ -1122,15 +1203,32 @@ fn connect_first_admitted(
 /// Per-stream relay thread: read from the upstream TCP socket and forward
 /// each chunk to the guest as a `Data` frame. EOF becomes a `HalfClose`;
 /// errors become a `Reset`.
-fn run_tcp_relay(
+/// Parameters for the per-stream TCP relay thread.
+struct TcpRelayParams {
     stream_id: u32,
-    mut upstream: TcpStream,
+    upstream: TcpStream,
     session: Arc<Mutex<Session>>,
     writer: Arc<Mutex<UnixStream>>,
     registry: Arc<Mutex<StreamRegistry>>,
+    validator: Arc<Mutex<SessionValidator>>,
     host_half_closed: Arc<AtomicBool>,
     retired: Arc<AtomicBool>,
-) {
+    /// How long to wait for the guest to return credit before giving up.
+    credit_wait: Duration,
+}
+
+fn run_tcp_relay(params: TcpRelayParams) {
+    let TcpRelayParams {
+        stream_id,
+        mut upstream,
+        session,
+        writer,
+        registry,
+        validator,
+        host_half_closed,
+        retired,
+        credit_wait,
+    } = params;
     let mut buf = [0u8; 16 * 1024];
     loop {
         match upstream.read(&mut buf) {
@@ -1144,7 +1242,9 @@ fn run_tcp_relay(
                 break;
             }
             Ok(n) => {
-                if let Err(e) = lock_registry(&registry).consume_host_credit(stream_id, n as u32) {
+                if let Err(e) =
+                    await_host_credit(&registry, stream_id, n as u32, &retired, credit_wait)
+                {
                     warn!(stream_id, error = %e, "FlowMux host credit exhausted");
                     let _ = write_frame_to(
                         &session,
@@ -1154,6 +1254,23 @@ fn run_tcp_relay(
                         b"host credit exhausted",
                     );
                     host_half_closed.store(true, Ordering::Relaxed);
+                    break;
+                }
+                // Spend the window on this side's validator too. It is
+                // credited by every guest `WindowUpdate` it admits, so a send
+                // that never debits it leaves the counter climbing until a
+                // legitimate grant overflows the cap and the session goes
+                // away — a few megabytes in, which is why only a large
+                // transfer finds it.
+                if let Err(e) = lock_validator(&validator).admit(
+                    &mvm_contract::protocol::network_flow::FrameFacts::new(
+                        Direction::HostToGuest,
+                        Opcode::Data,
+                        stream_id,
+                    )
+                    .with_payload(n as u32),
+                ) {
+                    warn!(stream_id, error = %e, "FlowMux relay data refused by validator");
                     break;
                 }
                 if write_frame_to(&session, &writer, Opcode::Data, stream_id, &buf[..n]).is_err() {
@@ -1184,189 +1301,6 @@ fn run_tcp_relay(
     let _ = registry;
 }
 
-/// Parameters for the per-association UDP relay thread.
-#[derive(Debug)]
-struct UdpRelayParams {
-    stream_id: u32,
-    socket: std::net::UdpSocket,
-    session: Arc<Mutex<Session>>,
-    writer: Arc<Mutex<UnixStream>>,
-    idle_timeout: Duration,
-    max_peers: usize,
-    rx: std::sync::mpsc::Receiver<UdpSendMsg>,
-    registry: Arc<Mutex<StreamRegistry>>,
-}
-
-/// Per-association UDP relay thread: read datagrams from the upstream socket
-/// and forward them to the guest as `UdpRecv` frames. Guest `UdpSend`
-/// requests arrive through a channel so the socket stays owned by one thread.
-///
-/// The relay enforces two association bounds: a limit on distinct peers and
-/// an idle timeout that closes the association when no bytes flow in either
-/// direction for too long.
-fn run_udp_relay(params: UdpRelayParams) {
-    let UdpRelayParams {
-        stream_id,
-        socket,
-        session,
-        writer,
-        idle_timeout,
-        max_peers,
-        rx,
-        registry,
-    } = params;
-    const MAX_POLL: Duration = Duration::from_secs(1);
-
-    let mut buf = vec![0_u8; MAX_UDP_DATAGRAM_LEN];
-    let mut peers: BTreeSet<SocketAddr> = BTreeSet::new();
-    let mut last_activity = std::time::Instant::now();
-    let mut idle_expired = false;
-
-    loop {
-        let remaining = idle_timeout.saturating_sub(last_activity.elapsed());
-        if remaining.is_zero() {
-            idle_expired = true;
-            break;
-        }
-        let budget = remaining.min(MAX_POLL);
-        if socket.set_read_timeout(Some(budget)).is_err() {
-            warn!(stream_id, "FlowMux UDP relay failed to set read timeout");
-            break;
-        }
-
-        let mut activity_this_iter = false;
-        match socket.recv_from(&mut buf) {
-            Ok((len, source)) => {
-                let already_peer = peers.contains(&source);
-                if !already_peer && peers.len() >= max_peers {
-                    // Peer bound would be exceeded; drop silently.
-                    activity_this_iter = true;
-                } else {
-                    peers.insert(source);
-                    let mut payload = encode_udp_addr(source.ip(), source.port());
-                    payload.extend_from_slice(&buf[..len]);
-                    let frame_len = u32::try_from(payload.len()).unwrap_or(u32::MAX);
-                    if let Err(e) =
-                        lock_registry(&registry).consume_host_credit(stream_id, frame_len)
-                    {
-                        warn!(stream_id, error = %e, "FlowMux UDP host credit exhausted");
-                        let _ = write_frame_to(
-                            &session,
-                            &writer,
-                            Opcode::Reset,
-                            stream_id,
-                            b"host credit exhausted",
-                        );
-                        break;
-                    }
-                    if write_frame_to(&session, &writer, Opcode::UdpRecv, stream_id, &payload)
-                        .is_err()
-                    {
-                        break;
-                    }
-                    activity_this_iter = true;
-                }
-            }
-            Err(e)
-                if e.kind() == std::io::ErrorKind::TimedOut
-                    || e.kind() == std::io::ErrorKind::WouldBlock => {}
-            Err(e) => {
-                warn!(stream_id, error = %e, "FlowMux UDP recv failed");
-                break;
-            }
-        }
-
-        // Drain any guest-send requests without blocking.
-        while let Ok(msg) = rx.try_recv() {
-            activity_this_iter = true;
-            let already_peer = peers.contains(&msg.destination);
-            if !already_peer && peers.len() >= max_peers {
-                // Peer bound would be exceeded; drop silently.
-                continue;
-            }
-            peers.insert(msg.destination);
-            if socket.send_to(&msg.payload, msg.destination).is_err() {
-                break;
-            }
-        }
-
-        if activity_this_iter {
-            last_activity = std::time::Instant::now();
-        }
-    }
-
-    let _ = lock_registry(&registry).retire(stream_id);
-    if idle_expired {
-        let _ = write_frame_to(
-            &session,
-            &writer,
-            Opcode::CloseUdp,
-            stream_id,
-            b"idle timeout",
-        );
-    } else {
-        let _ = write_frame_to(
-            &session,
-            &writer,
-            Opcode::Reset,
-            stream_id,
-            b"UDP relay error",
-        );
-    }
-}
-
-/// Encode a UDP address prefix: one family tag, a 16-byte address slot, and a
-/// big-endian port. IPv4 is carried as an IPv4-mapped IPv6 address under tag
-/// `0x01`; IPv6 uses tag `0x04`.
-fn encode_udp_addr(ip: IpAddr, port: u16) -> Vec<u8> {
-    let mut out = Vec::with_capacity(UDP_ADDR_PREFIX_LEN);
-    match ip {
-        IpAddr::V4(v4) => {
-            out.push(0x01);
-            out.extend_from_slice(&[0; 10]);
-            out.extend_from_slice(&[0xff, 0xff]);
-            out.extend_from_slice(&v4.octets());
-        }
-        IpAddr::V6(v6) => {
-            out.push(0x04);
-            out.extend_from_slice(&v6.octets());
-        }
-    }
-    out.extend_from_slice(&port.to_be_bytes());
-    out
-}
-
-/// Decode a UDP address prefix. Returns the address, port, and the remaining
-/// payload bytes (the datagram body).
-fn decode_udp_addr(bytes: &[u8]) -> Result<(IpAddr, u16, &[u8]), String> {
-    if bytes.len() < UDP_ADDR_PREFIX_LEN {
-        return Err(format!(
-            "UdpSend prefix too short: {} < {}",
-            bytes.len(),
-            UDP_ADDR_PREFIX_LEN
-        ));
-    }
-    let tag = bytes[0];
-    let addr_bytes: [u8; 16] = bytes[1..17]
-        .try_into()
-        .map_err(|_| "address slot truncated".to_string())?;
-    let port = u16::from_be_bytes([bytes[17], bytes[18]]);
-
-    let ip = match tag {
-        0x01 => match IpAddr::from(addr_bytes) {
-            IpAddr::V6(v6) => IpAddr::from(
-                v6.to_ipv4_mapped()
-                    .ok_or_else(|| "IPv4-mapped address expected".to_string())?,
-            ),
-            IpAddr::V4(_) => return Err("IPv4-mapped address expected".to_string()),
-        },
-        0x04 => IpAddr::from(addr_bytes),
-        _ => return Err(format!("unknown UDP address family tag: {tag}")),
-    };
-
-    Ok((ip, port, &bytes[UDP_ADDR_PREFIX_LEN..]))
-}
-
 fn parse_host_port(target: &str) -> Result<(&str, u16), String> {
     let (host, port_str) = target
         .rsplit_once(':')
@@ -1382,6 +1316,7 @@ fn parse_host_port(target: &str) -> Result<(&str, u16), String> {
 
 #[cfg(test)]
 mod tests {
+    use super::udp_relay::encode_udp_addr;
     use std::os::unix::net::UnixStream;
     use std::thread;
 
@@ -1653,23 +1588,6 @@ mod tests {
     }
 
     #[test]
-    fn udp_addr_roundtrips_ipv4_and_ipv6() {
-        let (ip4, port4) = ("192.0.2.10".parse::<std::net::IpAddr>().unwrap(), 5353);
-        let encoded4 = encode_udp_addr(ip4, port4);
-        let (decoded4_ip, decoded4_port, rest4) = decode_udp_addr(&encoded4).unwrap();
-        assert_eq!(decoded4_ip, ip4);
-        assert_eq!(decoded4_port, port4);
-        assert!(rest4.is_empty());
-
-        let (ip6, port6) = ("2001:db8::1".parse::<std::net::IpAddr>().unwrap(), 443);
-        let encoded6 = encode_udp_addr(ip6, port6);
-        let (decoded6_ip, decoded6_port, rest6) = decode_udp_addr(&encoded6).unwrap();
-        assert_eq!(decoded6_ip, ip6);
-        assert_eq!(decoded6_port, port6);
-        assert!(rest6.is_empty());
-    }
-
-    #[test]
     fn resolve_to_unknown_host_is_refused_by_default_deny_gate() {
         let (host_key, host_verify) = fresh_keys();
         let (guest_key, guest_verify) = fresh_keys();
@@ -1861,6 +1779,82 @@ mod tests {
         stream.write_all(&len.to_be_bytes()).unwrap();
         stream.write_all(&sealed_bytes).unwrap();
         stream.flush().unwrap();
+    }
+
+    /// A download larger than `MAX_STREAM_CREDIT` must complete.
+    ///
+    /// The relay writes through `write_frame_to`, which does not hold the
+    /// validator, so the validator never sees the host's own outbound `Data`.
+    /// Its host-side counter is credited by every guest `WindowUpdate` it
+    /// admits and debited by nothing, so it climbs until a legitimate grant
+    /// pushes it past the cap and the session is torn down with a `GoAway`.
+    /// Only a transfer past the cap reaches it: below that the counter simply
+    /// climbs unnoticed.
+    #[test]
+    fn a_download_past_the_credit_cap_is_not_torn_down() {
+        let total = mvm_contract::protocol::network_flow::MAX_STREAM_CREDIT as usize + 512 * 1024;
+        let addr = tcp_source_server(total);
+        let (mut guest, mut guest_session, host) =
+            run_session(gate_allowing_addr(addr.ip(), addr.port(), None));
+        write_frame(
+            &mut guest,
+            &mut guest_session,
+            Opcode::OpenTcp,
+            1,
+            format!("{}:{}", addr.ip(), addr.port()).as_bytes(),
+        );
+        let (opcode, _stream_id, _payload) = read_flowmux_frame(&mut guest, &mut guest_session);
+        assert_eq!(opcode, Opcode::Opened);
+
+        let mut got = 0usize;
+        loop {
+            let (opcode, _stream_id, payload) = read_flowmux_frame(&mut guest, &mut guest_session);
+            match opcode {
+                Opcode::Data => {
+                    got += payload.len();
+                    // Return the credit, as the real guest client does.
+                    let delta = u32::try_from(payload.len()).unwrap();
+                    write_frame(
+                        &mut guest,
+                        &mut guest_session,
+                        Opcode::WindowUpdate,
+                        1,
+                        &delta.to_be_bytes(),
+                    );
+                }
+                Opcode::HalfClose => break,
+                Opcode::WindowUpdate => {}
+                other => panic!(
+                    "unexpected {other:?} after {got} of {total} bytes: {}",
+                    String::from_utf8_lossy(&payload)
+                ),
+            }
+        }
+        assert_eq!(got, total, "the whole body must arrive");
+
+        drop(guest);
+        host.join().unwrap().unwrap();
+    }
+
+    /// An upstream that writes `total` bytes and then closes.
+    fn tcp_source_server(total: usize) -> SocketAddr {
+        let listener =
+            std::net::TcpListener::bind(std::net::SocketAddr::new(local_test_ip(), 0)).unwrap();
+        let addr = listener.local_addr().unwrap();
+        thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let chunk = vec![b'd'; 8 * 1024];
+            let mut sent = 0usize;
+            while sent < total {
+                let n = chunk.len().min(total - sent);
+                if stream.write_all(&chunk[..n]).is_err() {
+                    return;
+                }
+                sent += n;
+            }
+            let _ = stream.shutdown(std::net::Shutdown::Write);
+        });
+        addr
     }
 
     fn tcp_echo_server() -> SocketAddr {
@@ -2357,6 +2351,10 @@ mod tests {
         let addr = tcp_banner_server();
         let limits = RegistryLimits {
             initial_credit: 0,
+            // A guest that never grants credit is exactly what the wait exists
+            // to tolerate, so shrink it here rather than spending the whole
+            // production bound proving the give-up path still fires.
+            credit_wait: Duration::from_millis(200),
             ..Default::default()
         };
         let (mut guest, mut guest_session, host) =

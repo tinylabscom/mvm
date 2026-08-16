@@ -28,6 +28,7 @@ pub fn provision_guest_environment() -> Result<(), EgressClientMissing> {
     mount_mediated_tools();
     provision_egress_ca();
     provision_verb_grant();
+    provision_flowmux_identity();
     run_one(resolve_exec([NETINIT_OVERLAY, NETINIT_FALLBACK]), "netinit");
     if cmdline_has_flag("mvm.vsock_egress=1") {
         start_vsock_egress()?;
@@ -367,6 +368,22 @@ pub fn provision_egress_ca() {
     bundle.extend_from_slice(&cert);
     if let Err(e) = fs::write("/run/mvm/ca-bundle.crt", bundle) {
         eprintln!("mvm-guest-init: write CA bundle: {e}");
+    }
+}
+
+/// Copy this boot's FlowMux identity out of the host-attached drive into
+/// `/run/mvm`, so the egress client can authenticate its session.
+///
+/// Best-effort here, deliberately: this runs on every guest boot, including
+/// ones whose policy admits no egress and which therefore get no identity
+/// drive. The refusal belongs where egress is actually required — the egress
+/// client itself will not bind without the keys, and the builder inits turn
+/// that into a named refusal. Making it fatal here would refuse boots that
+/// never wanted networking.
+pub fn provision_flowmux_identity() {
+    #[cfg(target_os = "linux")]
+    if let Err(e) = crate::flowmux_drive::provision_identity_from_drive() {
+        eprintln!("mvm-init: FlowMux identity not provisioned: {e}");
     }
 }
 

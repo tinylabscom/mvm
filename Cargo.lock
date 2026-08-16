@@ -3424,6 +3424,7 @@ name = "mvm-vmm"
 version = "0.18.0"
 dependencies = [
  "anyhow",
+ "base64",
  "ed25519-dalek",
  "flate2",
  "hex",
@@ -3432,6 +3433,7 @@ dependencies = [
  "mvm-agentd",
  "mvm-contract",
  "mvm-core",
+ "mvm-fs",
  "mvm-net",
  "rand 0.10.2",
  "serde",

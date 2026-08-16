@@ -2,7 +2,17 @@
 
 ## Status
 
+**Phases 2-4 are superseded by
+`specs/plans/2026-08-15-flowmux-single-transport-cutover.md` (issue #2543). Track the
+remaining work there, not here.**
+
 **Phase 0 complete (#2369). Phase 1 complete (#2370). Phase 2 substantially landed but NOT complete (#2371). Phase 3 machinery landed but NOT on the production path (#2372).**
+
+Worse than "not on the production path": #2480 shipped the guest half anyway, so
+`mvm-egress-client` is FlowMux-only while every host spawn site still serves Raw/Wire.
+Guest egress is dead on `main` — builder VM, Stage 0, and every workload. The four
+tracking issues below (#2368, #2371, #2372, #2373) are all closed despite this; do not
+read a closed issue here as landed work.
 
 **Read this before ticking another Phase 3 box.** The host-side FlowMux
 acceptor and the guest-side FlowMux client both exist and are unit-tested, and

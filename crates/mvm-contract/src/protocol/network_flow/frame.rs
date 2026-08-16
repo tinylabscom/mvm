@@ -765,6 +765,9 @@ mod tests {
             (Opcode::HttpResponseHead, 0x53),
             (Opcode::HttpResponseBody, 0x54),
             (Opcode::HttpComplete, 0x55),
+            (Opcode::IcmpEcho, 0x60),
+            (Opcode::IcmpReply, 0x61),
+            (Opcode::IcmpRefused, 0x62),
         ];
         assert_eq!(pinned.len(), Opcode::ALL.len());
         for (op, want) in pinned {
