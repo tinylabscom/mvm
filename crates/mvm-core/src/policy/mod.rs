@@ -9,7 +9,6 @@ pub mod dns_guard;
 /// tests, no resolver / no enforcement / no audit emission).
 pub mod dns_pin;
 pub mod network_policy;
-pub mod secret_binding;
 pub mod security_profile;
 
 // Tenant policy bundles — authoring, resolution, signing, TOML loading.
