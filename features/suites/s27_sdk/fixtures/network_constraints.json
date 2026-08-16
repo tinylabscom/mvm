@@ -1,0 +1,91 @@
+{
+  "_comment": [
+    "Golden verdicts for the network constructors' value constraints, shared by",
+    "every language surface.",
+    "",
+    "The contract is stated over the *workload document*, not over one language's",
+    "constructor: a `host:port` with an empty host or port 0 is not a usable",
+    "authorization, so it must not survive into a valid document in any language.",
+    "Where a surface enforces that is a language-idiom detail — Python's runtime",
+    "check fires at construction, Rust discharges what it can in the type and the",
+    "rest in `mvm_contract::ir::validate`. What has to agree, and what this file",
+    "pins, is the verdict.",
+    "",
+    "Two things read this file:",
+    "  * crates/mvm-sdk/tests/network_constraints.rs builds each case through",
+    "    `mvm_sdk::ctor` and validates it;",
+    "  * the s27 scenario runs features/suites/s27_sdk/fixtures/python_constraints.py,",
+    "    which builds each case through `mvm._dsl`, and validates whatever it",
+    "    manages to emit.",
+    "Both compare against `verdict` here, so a surface that starts accepting a",
+    "value the other rejects fails a gate instead of reaching a user.",
+    "",
+    "`ctor` names the constructor under test. `verdict` is `valid` when the case",
+    "must produce a document `validate` accepts, `invalid` when it must not."
+  ],
+  "cases": [
+    {
+      "id": "host_port/concrete-host-and-port",
+      "ctor": "host_port",
+      "host": "api.example.com",
+      "port": 443,
+      "verdict": "valid"
+    },
+    {
+      "id": "host_port/highest-port",
+      "ctor": "host_port",
+      "host": "api.example.com",
+      "port": 65535,
+      "verdict": "valid"
+    },
+    {
+      "id": "host_port/zero-port",
+      "ctor": "host_port",
+      "host": "api.example.com",
+      "port": 0,
+      "verdict": "invalid"
+    },
+    {
+      "id": "host_port/empty-host",
+      "ctor": "host_port",
+      "host": "",
+      "port": 443,
+      "verdict": "invalid"
+    },
+    {
+      "id": "host_port/blank-host",
+      "ctor": "host_port",
+      "host": "   ",
+      "port": 443,
+      "verdict": "invalid"
+    },
+    {
+      "id": "dns_resolver/concrete-resolver",
+      "ctor": "dns_resolver",
+      "host": "10.0.1.53",
+      "port": 53,
+      "verdict": "valid"
+    },
+    {
+      "id": "dns_resolver/zero-port",
+      "ctor": "dns_resolver",
+      "host": "10.0.1.53",
+      "port": 0,
+      "verdict": "invalid"
+    },
+    {
+      "id": "dns_resolver/empty-host",
+      "ctor": "dns_resolver",
+      "host": "",
+      "port": 53,
+      "verdict": "invalid"
+    },
+    {
+      "id": "dns_resolver/blank-host",
+      "ctor": "dns_resolver",
+      "host": "\t",
+      "port": 53,
+      "verdict": "invalid"
+    }
+  ]
+}

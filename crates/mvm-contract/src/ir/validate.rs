@@ -3,8 +3,8 @@ use crate::ir::data::parse_lines;
 use crate::ir::error_codes::ErrorCode;
 use crate::ir::version::{VersionError, validate_schema_version};
 use crate::ir::workload::{
-    Concurrency, Entrypoint, EnvValue, InProcessMode, JsonSchemaShape, NetworkMode, Resources,
-    Source, WarmProcessConfig, Workload,
+    Concurrency, Entrypoint, EnvValue, InProcessMode, JsonSchemaShape, NetworkDns, NetworkMode,
+    Resources, Source, WarmProcessConfig, Workload,
 };
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::format;
@@ -45,6 +45,49 @@ fn is_wildcard_host(host: &str) -> bool {
         host.trim(),
         "*" | "0.0.0.0" | "::" | "0.0.0.0/0" | "::/0" | "[::]" | ""
     ) || host.contains("/0")
+}
+
+/// Check one place the host will originate a connection to on the guest's
+/// behalf — an egress allowlist entry or a pinned DNS resolver.
+///
+/// Both name a destination, so both are meaningless with a wildcard or empty
+/// host, and both are meaningless on port 0: the OS reads 0 as "any port", so
+/// it authorizes nothing while looking like an authorization. `u16` is the
+/// closest a Rust signature gets to `1..=65535`, which leaves the zero to this
+/// layer — the one layer every language surface's document passes through, so
+/// the answer cannot depend on which SDK built it.
+fn validate_dialable_destination(
+    host: &str,
+    port: u16,
+    what: &str,
+    base: &str,
+    errors: &mut Vec<ValidationError>,
+) {
+    if is_wildcard_host(host) {
+        errors.push(ValidationError {
+            code: ErrorCode::NetworkWildcard,
+            path: format!("{base}.host"),
+            detail: format!(
+                "{what} host {host:?} is empty or a wildcard; name one concrete host. \
+                 Hint: replace with an explicit FQDN or single IP (e.g. \
+                 \"api.example.com\", \"10.0.1.5\"). Wildcards / CIDRs \
+                 like \"0.0.0.0/0\", \"*\", \"::/0\" are rejected for \
+                 deny-default safety (ADR-0004 §Phase 5)."
+            ),
+        });
+    }
+    if port == 0 {
+        errors.push(ValidationError {
+            code: ErrorCode::NetworkInvalidPort,
+            path: format!("{base}.port"),
+            detail: format!(
+                "{what} port must be in 1..=65535, got 0. Hint: port 0 means \
+                 \"any port\" to the operating system, so it authorizes nothing \
+                 while reading as an authorization. Name the port the workload \
+                 actually dials (e.g. 443)."
+            ),
+        });
+    }
 }
 
 fn is_secret_field_name(name: &str) -> bool {
@@ -303,26 +346,29 @@ pub fn validate(workload: &Workload) -> Result<(), Vec<ValidationError>> {
                         .to_string(),
                 });
             }
-            // Reject wildcard hosts in granular egress allowlist.
             // The allowlist must enumerate concrete host:port pairs; CIDRs and
             // sentinel "any" hosts get rejected with E_NETWORK_WILDCARD.
             if let Some(egress) = &network.egress {
                 for (j, hp) in egress.allowlist.iter().enumerate() {
-                    if is_wildcard_host(&hp.host) {
-                        errors.push(ValidationError {
-                            code: ErrorCode::NetworkWildcard,
-                            path: format!("{base}.network.egress.allowlist[{j}].host"),
-                            detail: format!(
-                                "egress allowlist host {:?} is a wildcard; enumerate concrete hosts. \
-                                 Hint: replace with explicit FQDNs or single IPs (e.g. \
-                                 \"api.example.com\", \"10.0.1.5\"). Wildcards / CIDRs \
-                                 like \"0.0.0.0/0\", \"*\", \"::/0\" are rejected for \
-                                 deny-default safety (ADR-0004 §Phase 5).",
-                                hp.host
-                            ),
-                        });
-                    }
+                    validate_dialable_destination(
+                        &hp.host,
+                        hp.port,
+                        "egress allowlist",
+                        &format!("{base}.network.egress.allowlist[{j}]"),
+                        &mut errors,
+                    );
                 }
+            }
+            // A pinned resolver is a destination like any other: the same
+            // rule, at the same layer, so the two cannot drift apart.
+            if let Some(NetworkDns::Resolver { host, port }) = &network.dns {
+                validate_dialable_destination(
+                    host,
+                    *port,
+                    "dns resolver",
+                    &format!("{base}.network.dns"),
+                    &mut errors,
+                );
             }
             // Validate peer IDs against the workload-id pattern.
             for (j, peer) in network.peers.iter().enumerate() {
