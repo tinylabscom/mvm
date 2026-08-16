@@ -454,11 +454,13 @@ mod tests {
         assert!(lint_policy.contains("bash scripts/check-no-orchestration-server.sh"));
         assert!(lint_policy.contains("cargo run -p xtask -- check-conformance"));
         let lint_features = job_block(&workflow, "lint-features");
+        // One invocation covering the whole test-support subtree. Selecting a
+        // package at a time made cargo resolve features once per package and
+        // rebuild most of the same graph each time; the packages are listed
+        // together so a single resolution serves all of them.
         for expected in [
-            "cargo nextest run -p mvm-backends --features test-support --lib",
-            "cargo nextest run -p mvm-runtime --features test-support --lib",
-            "cargo nextest run -p mvm-client --features test-support --lib",
-            "cargo nextest run -p mvm-cli --features test-support --lib",
+            "cargo nextest run --features test-support --lib",
+            "-p mvm-backends -p mvm-runtime -p mvm-client -p mvm-cli -p mvm-vmm",
             "cargo nextest run -p mvmctl --features test-support --test audit_emissions_live",
             "cargo check -p mvm-cli --features test-support --example verification_loop",
         ] {
@@ -469,11 +471,22 @@ mod tests {
         }
         assert_eq!(
             lint_features
-                .matches("cargo nextest run -p mvm-backends --features test-support --lib")
+                .matches("cargo nextest run --features test-support --lib")
                 .count(),
             1,
-            "feature coverage must not repeat the same mvm-backends test command"
+            "feature coverage must not repeat the test-support run"
         );
+        // The per-package shape is what made this lane the critical path, so
+        // its return is an error rather than a silent regression.
+        for regressed in [
+            "cargo nextest run -p mvm-backends --features test-support --lib",
+            "cargo nextest run -p mvm-runtime --features test-support --lib",
+        ] {
+            assert!(
+                !lint_features.contains(regressed),
+                "feature coverage must not go back to one invocation per package: {regressed:?}"
+            );
+        }
 
         let test = job_block(&workflow, "test");
         assert!(test.contains("name: Test"));

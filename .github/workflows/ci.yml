@@ -537,13 +537,17 @@ jobs:
         run: cargo test -p mvm-build --features pure-mkfs --lib rootfs::tests::pure
 
       - name: test-support feature tests (mock backend)
+        # One invocation, not one per package. Cargo resolves features per
+        # invocation, so selecting a different package each time produced
+        # different fingerprints and rebuilt most of the same graph seven
+        # times over — 28 of this job's 35 minutes, and the critical path for
+        # every pull request. These packages form one feature subtree
+        # (mvm-cli -> mvm-runtime -> mvm-backends, mvm-vmm -> mvm-core), so a
+        # single resolution covers all of them and compiles once.
         run: |
-          cargo nextest run -p mvm-backends --features test-support --lib
-          cargo nextest run -p mvm-runtime --features test-support --lib
-          cargo nextest run -p mvm-client --features test-support --lib
-          cargo nextest run -p mvm-cli --features test-support --lib
+          cargo nextest run --features test-support --lib \
+            -p mvm-backends -p mvm-runtime -p mvm-client -p mvm-cli -p mvm-vmm
           cargo nextest run -p mvmctl --features test-support --test audit_emissions_live
-          cargo nextest run -p mvm-vmm --features test-support --lib
           cargo check -p mvm-cli --features test-support --example verification_loop
 
   lint:
