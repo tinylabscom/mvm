@@ -290,8 +290,9 @@ mod tests {
         v
     }
 
-    /// The #2601 regression: replacing `vmlinux` used to leave the previous
-    /// `.elf` in place, and every later boot ran the superseded kernel.
+    /// The regression this binding exists for: replacing `vmlinux` used to
+    /// leave the previous `.elf` in place, and every later boot ran the
+    /// superseded kernel.
     #[test]
     fn a_replaced_vmlinux_is_not_served_from_the_previous_extraction() {
         let dir = tempfile::tempdir().unwrap();
