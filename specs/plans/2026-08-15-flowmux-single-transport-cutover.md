@@ -255,7 +255,7 @@ Ran `machine run --image python:3.12 -- python -c "print(2 + 2)"` against a fres
 `MVM_HOME` on macOS/libkrun. It does not yet print `4`, but it moved three failures forward
 and each step is evidence for a workstream.
 
-**Proven live:**
+**Observed live:**
 
 - **WS0.** The build now fails in ~2s with `mvm-egress-client did not bind the local egress
   proxy at 127.0.0.1:1080 ... this guest has no NIC`, instead of minutes of nix download
