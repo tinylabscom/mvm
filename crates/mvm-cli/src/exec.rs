@@ -1980,6 +1980,15 @@ fn run_in_guest(
         emit_guest_console_diagnostic(vm_name);
         anyhow::bail!("guest agent did not become reachable within 30s");
     }
+    // The guest is up, so a session on its endpoint is now possible — and its
+    // absence means something. Checked here rather than at spawn time on
+    // purpose: the endpoint binds and reports ready before the guest boots, so
+    // waiting for a session there would block on an event the wait itself
+    // prevents.
+    mvm_runtime::network_endpoint_spawn::refuse_launch_without_endpoint_session(
+        vm_name,
+        &mvm_core::config::vm_state_dir(vm_name),
+    )?;
     // Agent reachable over vsock: the command is about to be dispatched.
     let vsock_ready = timing.then(std::time::Instant::now);
     let wrapper = build_guest_wrapper(req);

@@ -107,14 +107,19 @@ pub use mvm_vmm::host::network_endpoint_spawn::EndpointTransport;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum EgressMode {
-    /// Framed WireRequest substitution (claims 12/13) — the default, secret-bearing path.
+    /// Framed `WireRequest` substitution over an already-open stream.
+    ///
+    /// **Not a guest→host transport.** Its one remaining consumer is the wasm
+    /// tier, whose `mvm:egress` host import runs on the host and connects to
+    /// this endpoint's Unix socket — host-internal IPC between two host
+    /// processes. No guest selects it or can speak it.
     #[default]
     Wire,
-    /// Raw TCP: first line `host:port`, then a byte splice. No secrets.
-    Raw,
     /// Authenticated FlowMux session on `GuestService::NetworkFlow`. This is
-    /// the converged single networking path; it replaces `Wire` and `Raw` for
-    /// admitted workloads.
+    /// the converged single networking path, and the only one a guest speaks.
+    ///
+    /// `Raw` is gone: an unauthenticated `host:port` line followed by a byte
+    /// splice, selected by nothing and speakable by no guest.
     FlowMux,
 }
 
@@ -232,6 +237,15 @@ pub struct EndpointConfig {
     /// selects the raw-TCP splice serve loop. Fixed at admission — never sniffed.
     #[serde(default)]
     pub egress_mode: EgressMode,
+    /// Where to record that a guest completed an authenticated session.
+    ///
+    /// The endpoint binds and prints its handshake line before the guest has
+    /// booted, so "ready" at that point means "the placeholders are minted",
+    /// not "a guest reached me". This file is the second fact, written when
+    /// the first session authenticates, so the launch can tell the difference
+    /// between an endpoint that is serving and one that merely started.
+    #[serde(default)]
+    pub session_marker: Option<std::path::PathBuf>,
     /// How to resolve a bound secret's raw value: this host's local encrypted
     /// store (default), or a remote fleet-secrets daemon over a UDS. See
     /// [`ResolverBackend`].
@@ -447,6 +461,32 @@ pub fn build_audit_recorder(tenant: &str) -> Option<crate::supervisor::audit_rec
     ))
 }
 
+/// Refuse to boot a workload that will be handed placeholders nothing can
+/// resolve.
+///
+/// A placeholder is minted per secret and injected into the guest's
+/// environment. Substituting it back is the whole point: the guest holds
+/// `mvm-secret-<hex>` and the host swaps in the real credential when it
+/// originates the request. If the endpoint carries secrets but assembled no
+/// substitution service, the guest gets the placeholder and sends *that* to a
+/// real upstream.
+///
+/// Fails the launch rather than warning, because the failure is otherwise
+/// silent and lands at a third party.
+pub fn refuse_secrets_without_substitution(
+    cfg: &EndpointConfig,
+    assembled: bool,
+) -> anyhow::Result<()> {
+    if cfg.secrets.is_empty() || assembled {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "endpoint carries {} secret(s) but assembled no substitution service: \
+         the guest would be handed placeholders with nothing to resolve them",
+        cfg.secrets.len()
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -497,6 +537,7 @@ mod tests {
             egress_mode: EgressMode::Wire,
             resolver: ResolverBackend::default(),
             flowmux_identity: None,
+            session_marker: None,
         }
     }
 
@@ -705,18 +746,6 @@ mod tests {
         });
         let cfg = parse(&serde_json::to_vec(&json).unwrap()).unwrap();
         assert!(cfg.network_policy.is_none());
-    }
-
-    #[test]
-    fn config_roundtrips_egress_mode_raw() {
-        // The raw-egress mode selection must survive the stdin wire form so the
-        // bin picks the raw splice loop for exactly the VMs admitted without secrets.
-        let mut cfg = vsock_cfg(vec![], std::path::Path::new("/tmp/x"));
-        cfg.egress_mode = EgressMode::Raw;
-        let bytes = serde_json::to_vec(&cfg).unwrap();
-        assert_eq!(parse(&bytes).unwrap(), cfg);
-        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(v["egress_mode"], serde_json::json!("raw"));
     }
 
     #[test]

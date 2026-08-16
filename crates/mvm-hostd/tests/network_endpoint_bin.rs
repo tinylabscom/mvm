@@ -96,6 +96,7 @@ fn endpoint_bin_serves_substitution_and_refuses_unbound_destination() {
         network_policy: None,
         egress_mode: EgressMode::Wire,
         resolver: ResolverBackend::default(),
+        session_marker: None,
         flowmux_identity: None,
     };
 
@@ -203,6 +204,7 @@ fn endpoint_bin_claim10_gate_refuses_a_bound_but_unadmitted_destination() {
         network_policy: Some(mvm_core::policy::network_policy::NetworkPolicy::deny_all()),
         egress_mode: mvm_hostd::supervisor::network_endpoint::EgressMode::Wire,
         resolver: ResolverBackend::default(),
+        session_marker: None,
         flowmux_identity: None,
     };
 
@@ -251,74 +253,6 @@ fn endpoint_bin_claim10_gate_refuses_a_bound_but_unadmitted_destination() {
 }
 
 #[test]
-fn endpoint_bin_raw_no_secret_mode_handshakes_without_placeholders() {
-    let dir = tempfile::tempdir().unwrap();
-    let sock = dir.path().join("raw-egress.sock");
-
-    let cfg = EndpointConfig {
-        tenant_id: "local".into(),
-        secrets: Vec::new(),
-        transport: EndpointTransport::Uds { path: sock.clone() },
-        redaction: mvm_core::policy::RedactionPolicy::default(),
-        reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
-        forward_timeout_secs: 30,
-        proxy_https: None,
-        proxy_http: None,
-        no_proxy: None,
-        secret_store_dir: None,
-        binding_store_dir: None,
-        terminator_listen: None,
-        tls_intermediate: None,
-        network_policy: Some(mvm_core::policy::network_policy::NetworkPolicy::allow_list(
-            vec![mvm_core::policy::network_policy::HostPort::new(
-                "142.250.72.14",
-                443,
-            )],
-        )),
-        egress_mode: EgressMode::Raw,
-        resolver: ResolverBackend::default(),
-        flowmux_identity: None,
-    };
-
-    let mut child = Command::new(BIN)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("spawn endpoint bin");
-    let mut stdin = child.stdin.take().unwrap();
-    stdin.write_all(&serde_json::to_vec(&cfg).unwrap()).unwrap();
-    drop(stdin);
-    let mut stdout = BufReader::new(child.stdout.take().unwrap());
-    let guard = Kill(child);
-
-    let mut line = String::new();
-    stdout.read_line(&mut line).expect("read handshake line");
-    let handshake: mvm_runtime::EndpointHandshake =
-        serde_json::from_str(line.trim()).expect("handshake json");
-    let handed = handshake.env.clone();
-    assert!(
-        handed.is_empty(),
-        "raw no-secret endpoint should hand out no placeholders"
-    );
-
-    UnixStream::connect(&sock).expect("raw endpoint UDS is bound before handshake");
-    drop(guard);
-}
-
-/// A FlowMux endpoint keeps serving sessions after one ends.
-///
-/// The guest's `FlowMuxReconnectClient` re-dials whenever a session dies, and a
-/// guest runs more than one FlowMux client (the egress shim and the addon DNS
-/// resolver each own one). An endpoint that accepted once and exited turned any
-/// dropped session into permanent loss of networking, and starved whichever
-/// client lost the race to connect first.
-///
-/// The assertion is a *completed authenticated handshake* on the second and
-/// third connections, not a successful `connect()`. A unix socket accepts into
-/// its backlog while the listener is open, so `connect()` alone succeeds even
-/// against the single-accept version — it proves nothing.
-#[test]
 fn a_flowmux_endpoint_keeps_serving_sessions_after_one_ends() {
     use base64::Engine as _;
     use mvm_core::net::session::Session;
@@ -349,6 +283,7 @@ fn a_flowmux_endpoint_keeps_serving_sessions_after_one_ends() {
         network_policy: None,
         egress_mode: EgressMode::FlowMux,
         resolver: ResolverBackend::default(),
+        session_marker: None,
         flowmux_identity: Some(FlowMuxIdentity {
             session_id: "keeps-serving".into(),
             host_signing_key_base64: b64.encode(host_key.to_bytes()),

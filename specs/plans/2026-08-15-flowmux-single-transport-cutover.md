@@ -288,16 +288,16 @@ exercised this path end to end, which is why it shipped.
 
 ### WS4 — Fold substitution onto `OpenHttp`
 
-- [ ] Guest `forward_proxy` keeps its loopback listener and `parse_proxied_request` but relays
+- [x] Guest `forward_proxy` keeps its loopback listener and `parse_proxied_request` but relays
       over FlowMux as `OpenHttp` → `HttpRequestHead` → `HttpRequestBody`*;
       `substitution_client` deleted
-- [ ] Host `FlowMuxSession` dispatch (`crates/mvm-hostd/src/supervisor/flowmux.rs:346-415`)
+- [x] Host `FlowMuxSession` dispatch (`crates/mvm-hostd/src/supervisor/flowmux.rs:346-415`)
       gains the `Http` arm; `flowmux/registry.rs:398` gains
       `Opcode::OpenHttp => FlowClass::Http`. The arm adapts onto the existing
       `SubstitutionService` — substitution, redaction, the claim-10 gate and payload-free
       audit are called, not reimplemented
-- [ ] Bodies stream as bounded chunks instead of whole-body base64 JSON (the Phase 4 win)
-- [ ] Hard gate: `can_skip_substitution_assembly` (`mvm-network-endpoint.rs:330-336`) keys on
+- [x] Bodies stream as bounded chunks instead of whole-body base64 JSON (the Phase 4 win)
+- [x] Hard gate: `can_skip_substitution_assembly` (`mvm-network-endpoint.rs:330-336`) keys on
       the substituting flow being available, and the failure is a launch failure
 
 **Design, from reading the seams (not yet implemented).**
@@ -330,34 +330,34 @@ change.
 
 ### WS5 — Fold ICMP in
 
-- [ ] `IcmpEcho`/`IcmpReply`/`IcmpRefused` (`0x60`–`0x62`) with `FlowClass::Icmp` added to
+- [x] `IcmpEcho`/`IcmpReply`/`IcmpRefused` (`0x60`–`0x62`) with `FlowClass::Icmp` added to
       `crates/mvm-contract/src/protocol/network_flow/opcode.rs`, wired through the state
       machine and `Sender` tables
-- [ ] Golden byte fixtures + fuzz seeds alongside the existing ones
-- [ ] Guest `icmp_client` (`crates/mvm-agentd/src/icmp_client.rs:85,101`) drops the
+- [x] Golden byte fixtures + fuzz seeds alongside the existing ones
+- [x] Guest `icmp_client` (`crates/mvm-agentd/src/icmp_client.rs:85,101`) drops the
       `MVM_ICMP/1` prelude; host dispatch arm reuses the existing handler and gate
 
 ### WS6 — Delete the alternatives
 
-- [ ] `EgressMode`, `serve_wire`, `serve_raw` (`mvm-network-endpoint.rs:344-378`),
+- [x] `EgressMode`, `serve_wire`, `serve_raw` (`mvm-network-endpoint.rs:344-378`),
       `raw_egress.rs`'s guest-facing dispatcher, `WireRequest`/`WireResponse`, and every line
       marker (`MVM_ICMP/1`, `MVM_DNS/1`, `MVM_SOCKS5_UDP/1`, `MVM_HTTP_FORWARD/1`) removed.
       **Keep** `resolve_hostname_ips_pure` and the helpers
       `crates/mvm-hostd/src/supervisor/dns_handler.rs:41` and `socks5_udp.rs:46` still use
-- [ ] `crates/mvm-hostd/fuzz/fuzz_targets/fuzz_datapath_ingress.rs` and
+- [x] `crates/mvm-hostd/fuzz/fuzz_targets/fuzz_datapath_ingress.rs` and
       `xtask/src/check_build_egress_callers.rs` checked for references
-- [ ] An xtask gate asserts the guest→host channel has exactly one protocol — no
+- [x] An xtask gate asserts the guest→host channel has exactly one protocol — no
       `connect_host_vsock` caller that is not a FlowMux client, no line-marker constants.
       This is Plan 316 Phase 8's "one path, mechanically enforceable", and it is what would
       have caught #2480
 
 ### WS7 — Readiness fails closed
 
-- [ ] `EndpointHandshake` (or a second line) reports the first authenticated session
+- [x] `EndpointHandshake` (or a second line) reports the first authenticated session
       (`crates/mvm-hostd/src/bin/mvm-network-endpoint.rs:88-121`)
-- [ ] The spawner treats endpoint-exit-before-session as a launch failure rather than
+- [x] The spawner treats endpoint-exit-before-session as a launch failure rather than
       detaching and forgetting (`network_endpoint_spawn.rs:707-709`)
-- [ ] A session that fails to authenticate fails the launch — Plan 316 invariant 4, and
+- [x] A session that fails to authenticate fails the launch — Plan 316 invariant 4, and
       Phase 2's remaining unchecked box. Nothing asserts this today
 
 ## Tests

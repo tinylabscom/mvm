@@ -1361,7 +1361,13 @@ for detailed scope and acceptance criteria.
   `specs/plans/2026-08-15-flowmux-single-transport-cutover.md` (#2543): #2480 shipped the
   FlowMux guest adapter without host identity provisioning, so guest egress is dead on
   `main`. The cutover completes there, on one transport, folding `Wire` and `MVM_ICMP/1`
-  into FlowMux rather than leaving three protocols behind a sniff.**
+  into FlowMux rather than leaving three protocols behind a sniff.
+  WS0-WS7 are complete: substitution rides `OpenHttp`, `ping` rides `IcmpEcho`,
+  the raw dispatcher and `EgressMode::Raw` are deleted, readiness fails closed
+  on a launch whose endpoint carried no session, and
+  `xtask check-one-guest-protocol` fails the build if a second guest->host
+  protocol returns. `EgressMode::Wire` survives for the wasm tier's host-side
+  `mvm:egress` import, which is host-internal IPC rather than a guest channel.**
   (`specs/plans/316-single-flow-vsock-networking.md`, ADR-042, umbrella #2368)
   Collapses the two production workload networking paths to one authenticated
   FlowMux session on `GuestService::NetworkFlow` through one
