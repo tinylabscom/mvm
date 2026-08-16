@@ -1,6 +1,6 @@
 # Refactor status
 
-Last updated: 2026-08-15
+Last updated: 2026-08-16
 
 This is the cross-plan progress index. The owning plan remains authoritative
 for detailed scope and acceptance criteria.
@@ -18,16 +18,25 @@ for detailed scope and acceptance criteria.
       extraction is the wrong direction; the manifest is authored
       declaratively and records *constraints*, with `syn` re-scoped to a
       coverage gate plus a golden-IR behavioural gate. Surfaced a live defect
-      (#2559): Rust's `host_port` accepts port `0` where Python rejects it. WS-2 built
+      (#2559): Rust's `host_port` accepts port `0` where Python rejects it —
+      fixed 2026-08-16 by moving the constraint to `mvm_contract::ir::validate`
+      (`dns_resolver` had the wider version of it) behind a shared golden
+      verdict corpus both languages are checked against, which is the first
+      slice of that behavioural gate. WS-2 built
       the pipeline end-to-end on Tier E — a `macro_rules!` registry in
       `mvm-sdk/src/env.rs`, `emit_sdk_env`, and a hand-written xtask emitter
       (necessary: `json-schema-to-typescript` emits only `export type`, which
       `tsc` erases, so a generated constant would be invisible to the s27
       runtime surface check). `MVM_CLI_BIN` was quadruplicated and invisible to
       every gate because all four copies agreed. TypeScript-only divergence is
-      now zero; the two `MVM_MACHINE_*` names are deliberately *not* emitted
-      into TypeScript, since nothing there reads them, and remain recorded as a
-      behaviour gap. Also fixed a ~50% pre-existing flake in the s27
+      now zero; the two `MVM_MACHINE_*` names were deliberately *not* emitted
+      into TypeScript, since nothing there read them, and were recorded as a
+      behaviour gap until #2558 supplied the behaviour — the wrapper now bounds
+      its subprocess with both, so the registry exports them and the divergence
+      file is down to the type-erased set plus the unported names. That work
+      also found that neither SDK's unit suite ran in CI at all (212 pytest,
+      138 vitest, no cargo target and no workflow step); `just sdk-test` on the
+      BDD lane closes it. Also fixed a ~50% pre-existing flake in the s27
       TypeScript live fixture (unawaited `wait()` racing `spawnSync`): base
       9/20, now 30/30. WS-3–WS-5, WS-7, WS-8 open; WS-6 (Tier C) untouched.
 
