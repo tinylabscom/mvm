@@ -7,6 +7,29 @@ for detailed scope and acceptance criteria.
 
 ## Completed issue closeouts
 
+- [x] **Plan 337 WS-5 + WS-6.1 — error taxonomy generated; Tier C sized.**
+      The host-services error hierarchy and its `MVM_HSVC_*` status codes were
+      triplicated: Rust constants plus a hand mirror in each SDK, under a
+      comment asking a human to keep them matching — and the prose had already
+      drifted ("audit cap" vs "e.g. the 4 KiB audit cap"). Now one
+      `macro_rules!` registry in `mvm-sdk/src/error_taxonomy.rs`, emitted and
+      rendered into both languages, with both mirrors deleted and `STATUS_OK`
+      generated so none of the mirror survives. `ErrorBase` models the
+      hierarchy rather than per-language literals, and refuses to emit a
+      Python-only `Warning` into TypeScript. **Scope correction:** Tier D's
+      eight named types are *not* generated here — all eight are raised only by
+      Tier C's `_remote.py`, so emitting them into TypeScript would export
+      classes nothing can throw and clear eight divergence entries while
+      closing nothing; they land with WS-6. **WS-6.1 sizing found Tier C is two
+      dispatch paths, not one**: `MVM_NO_VM=1` derives argv from Python
+      function introspection (`__module__`, `inspect.getfile`) and has no
+      JavaScript equivalent at all; session scoping forces a choice between
+      correct async isolation and Python-like ergonomics; and the
+      `weakref.finalize` abandonment net degrades to a best-effort
+      `FinalizationRegistry`. Recommendation recorded: ship TypeScript Tier C
+      as a declared subset. Ten further env vars found unregistered.
+      WS-3, WS-4, WS-6.2-6.6, WS-7, WS-8 open.
+
 - [x] **Plan 337 WS-1 + WS-2 — SDK surface generated from Rust.** WS-1 spiked
       both mechanisms for extracting a constructor manifest from
       `mvm_sdk::ctor` and re-scoped the plan rather than stopping it: the

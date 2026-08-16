@@ -157,6 +157,8 @@ fn artifacts() -> &'static [StubArtifact] {
 /// descriptor to cover both would put an `Option<Generator>` in the middle of
 /// the loop every future artifact then has to reason about.
 struct ConstArtifact {
+    /// Which renderer pair this artifact uses.
+    kind: ConstKind,
     /// Human label for progress output.
     label: &'static str,
     /// `cargo` args emitting the JSON manifest to stdout.
@@ -171,22 +173,66 @@ struct ConstArtifact {
     stem: &'static str,
 }
 
+/// Which renderer pair a [`ConstArtifact`] uses. The manifests differ in
+/// shape — a flat list of name/value pairs versus a class hierarchy with a
+/// status mapping — so the descriptor names its renderer rather than
+/// pretending one function can read both.
+#[derive(Clone, Copy)]
+enum ConstKind {
+    /// `schema/sdk-env-v0.json` — environment-variable names.
+    EnvVars,
+    /// `schema/sdk-errors-v0.json` — the error taxonomy.
+    Errors,
+}
+
 /// Constant-bearing artifacts, regenerated and drift-checked alongside
 /// the schema-backed ones.
 fn const_artifacts() -> &'static [ConstArtifact] {
-    &[ConstArtifact {
-        label: "SDK env-var registry",
-        emit_args: &["run", "-q", "-p", "mvm-sdk", "--bin", "emit_sdk_env"],
-        manifest_path: "schema/sdk-env-v0.json",
-        python_path: "crates/mvm-sdk/sdks/python/mvm/_env/vars.py",
-        // `_env`, not `env`: a bare `env/` is a virtualenv pattern that
-        // commonly appears in a global gitignore, which would silently
-        // drop this generated file and surface as a phantom drift
-        // failure. The underscore also matches the sibling
-        // `_sandbox.ts` / `_cli.ts` convention and Python's `_env/`.
-        ts_path: "crates/mvm-sdk/sdks/typescript/src/_env/vars.ts",
-        stem: "sdk-env-v0",
-    }]
+    &[
+        ConstArtifact {
+            kind: ConstKind::EnvVars,
+            label: "SDK env-var registry",
+            emit_args: &["run", "-q", "-p", "mvm-sdk", "--bin", "emit_sdk_env"],
+            manifest_path: "schema/sdk-env-v0.json",
+            python_path: "crates/mvm-sdk/sdks/python/mvm/_env/vars.py",
+            // `_env`, not `env`: a bare `env/` is a virtualenv pattern that
+            // commonly appears in a global gitignore, which would silently
+            // drop this generated file and surface as a phantom drift
+            // failure. The underscore also matches the sibling
+            // `_sandbox.ts` / `_cli.ts` convention and Python's `_env/`.
+            ts_path: "crates/mvm-sdk/sdks/typescript/src/_env/vars.ts",
+            stem: "sdk-env-v0",
+        },
+        ConstArtifact {
+            kind: ConstKind::Errors,
+            label: "SDK error taxonomy",
+            emit_args: &["run", "-q", "-p", "mvm-sdk", "--bin", "emit_sdk_errors"],
+            manifest_path: "schema/sdk-errors-v0.json",
+            python_path: "crates/mvm-sdk/sdks/python/mvm/_errors/types.py",
+            ts_path: "crates/mvm-sdk/sdks/typescript/src/_errors/types.ts",
+            stem: "sdk-errors-v0",
+        },
+    ]
+}
+
+/// Render one const artifact's manifest into its two language bindings.
+fn render_const(kind: ConstKind, manifest: &[u8]) -> Result<(String, String)> {
+    Ok(match kind {
+        ConstKind::EnvVars => {
+            let m = crate::gen_sdk_surface::EnvManifest::parse(manifest)?;
+            (
+                crate::gen_sdk_surface::render_python(&m),
+                crate::gen_sdk_surface::render_typescript(&m),
+            )
+        }
+        ConstKind::Errors => {
+            let m = crate::gen_sdk_surface::ErrorManifest::parse(manifest)?;
+            (
+                crate::gen_sdk_surface::render_python_errors(&m),
+                crate::gen_sdk_surface::render_typescript_errors(&m),
+            )
+        }
+    })
 }
 
 /// Generate every artifact's schema + Python + TypeScript types in place.
@@ -228,12 +274,10 @@ pub fn generate(workspace: &Path) -> Result<()> {
             .with_context(|| format!("writing {}", manifest_path.display()))?;
         println!("    wrote {}", manifest_path.display());
 
-        let parsed = crate::gen_sdk_surface::EnvManifest::parse(&manifest)?;
-        std::fs::write(&py_path, crate::gen_sdk_surface::render_python(&parsed))
-            .with_context(|| format!("writing {}", py_path.display()))?;
+        let (py, ts) = render_const(art.kind, &manifest)?;
+        std::fs::write(&py_path, py).with_context(|| format!("writing {}", py_path.display()))?;
         println!("    wrote {}", py_path.display());
-        std::fs::write(&ts_path, crate::gen_sdk_surface::render_typescript(&parsed))
-            .with_context(|| format!("writing {}", ts_path.display()))?;
+        std::fs::write(&ts_path, ts).with_context(|| format!("writing {}", ts_path.display()))?;
         println!("    wrote {}", ts_path.display());
     }
 
@@ -271,14 +315,9 @@ pub fn check(workspace: &Path) -> Result<()> {
         let manifest = run_emit(workspace, art.label, art.emit_args)?;
         std::fs::write(&fresh_manifest, &manifest)
             .with_context(|| format!("writing {}", fresh_manifest.display()))?;
-        let parsed = crate::gen_sdk_surface::EnvManifest::parse(&manifest)?;
-        std::fs::write(&fresh_py, crate::gen_sdk_surface::render_python(&parsed))
-            .with_context(|| format!("writing {}", fresh_py.display()))?;
-        std::fs::write(
-            &fresh_ts,
-            crate::gen_sdk_surface::render_typescript(&parsed),
-        )
-        .with_context(|| format!("writing {}", fresh_ts.display()))?;
+        let (py, ts) = render_const(art.kind, &manifest)?;
+        std::fs::write(&fresh_py, py).with_context(|| format!("writing {}", fresh_py.display()))?;
+        std::fs::write(&fresh_ts, ts).with_context(|| format!("writing {}", fresh_ts.display()))?;
 
         drift |= diff_or_report(&fresh_manifest, &workspace.join(art.manifest_path))?;
         drift |= diff_or_report(&fresh_py, &workspace.join(art.python_path))?;
