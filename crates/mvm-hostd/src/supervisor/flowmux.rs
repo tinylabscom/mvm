@@ -779,6 +779,7 @@ impl FlowMuxSession {
         let writer = Arc::clone(&self.writer);
         let registry = Arc::clone(&self.registry);
         let validator = Arc::clone(&self.validator);
+        let credit_wait = self.limits.credit_wait;
 
         std::thread::Builder::new()
             .name(format!("flowmux-tcp-{stream_id}"))
@@ -792,6 +793,7 @@ impl FlowMuxSession {
                     validator,
                     host_half_closed: relay_flag,
                     retired: retired_flag,
+                    credit_wait,
                 })
             })
             .map_err(FlowMuxError::Transport)?;
@@ -1112,10 +1114,6 @@ fn lock_registry(registry: &Mutex<StreamRegistry>) -> std::sync::MutexGuard<'_, 
     registry.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// How long a relay waits for the guest to return credit before giving up on
-/// the stream. Generous: a slow guest is still a working guest, and the only
-/// thing this bounds is a stream whose peer has stopped reading entirely.
-const HOST_CREDIT_WAIT: Duration = Duration::from_secs(30);
 /// How often the wait re-checks. The relay thread is blocked either way, so
 /// this trades a little latency for not needing a condvar in the registry.
 const HOST_CREDIT_POLL: Duration = Duration::from_millis(2);
@@ -1128,14 +1126,15 @@ const HOST_CREDIT_POLL: Duration = Duration::from_millis(2);
 /// stream instead truncates a transfer that was working, which surfaces to the
 /// caller as a corrupt download rather than as flow control. Only two things
 /// end the wait: the stream going away, or a peer that has stopped reading for
-/// [`HOST_CREDIT_WAIT`].
+/// `wait`, which comes from `RegistryLimits::credit_wait`.
 fn await_host_credit(
     registry: &Mutex<StreamRegistry>,
     stream_id: u32,
     len: u32,
     retired: &AtomicBool,
+    wait: Duration,
 ) -> Result<(), RegistryError> {
-    let deadline = Instant::now() + HOST_CREDIT_WAIT;
+    let deadline = Instant::now() + wait;
     loop {
         let err = match lock_registry(registry).consume_host_credit(stream_id, len) {
             Ok(()) => return Ok(()),
@@ -1224,6 +1223,8 @@ struct TcpRelayParams {
     validator: Arc<Mutex<SessionValidator>>,
     host_half_closed: Arc<AtomicBool>,
     retired: Arc<AtomicBool>,
+    /// How long to wait for the guest to return credit before giving up.
+    credit_wait: Duration,
 }
 
 fn run_tcp_relay(params: TcpRelayParams) {
@@ -1236,6 +1237,7 @@ fn run_tcp_relay(params: TcpRelayParams) {
         validator,
         host_half_closed,
         retired,
+        credit_wait,
     } = params;
     let mut buf = [0u8; 16 * 1024];
     loop {
@@ -1250,7 +1252,9 @@ fn run_tcp_relay(params: TcpRelayParams) {
                 break;
             }
             Ok(n) => {
-                if let Err(e) = await_host_credit(&registry, stream_id, n as u32, &retired) {
+                if let Err(e) =
+                    await_host_credit(&registry, stream_id, n as u32, &retired, credit_wait)
+                {
                     warn!(stream_id, error = %e, "FlowMux host credit exhausted");
                     let _ = write_frame_to(
                         &session,
@@ -2556,6 +2560,10 @@ mod tests {
         let addr = tcp_banner_server();
         let limits = RegistryLimits {
             initial_credit: 0,
+            // A guest that never grants credit is exactly what the wait exists
+            // to tolerate, so shrink it here rather than spending the whole
+            // production bound proving the give-up path still fires.
+            credit_wait: Duration::from_millis(200),
             ..Default::default()
         };
         let (mut guest, mut guest_session, host) =
