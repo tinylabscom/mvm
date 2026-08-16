@@ -610,7 +610,7 @@ pub(in crate::commands) fn run_secure_with_source(
 /// supersedes any flag-only override so a wrapper script can pin a
 /// mode without the user retyping `--mode`.
 pub(in crate::commands) fn resolve_run_mode(args: &RunArgs) -> Result<Option<RunMode>> {
-    if let Ok(env_mode) = std::env::var("MVM_SDK_MODE") {
+    if let Ok(env_mode) = std::env::var(mvm_sdk::env::MVM_SDK_MODE_ENV) {
         return Ok(Some(parse_env_run_mode(&env_mode)?));
     }
     if args.dev {
