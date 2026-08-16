@@ -84,6 +84,13 @@ from mvm._hostsvc import (
     VerbNotImplementedError,
 )
 from mvm._helpers import BrowserSandbox, CodeError, CodeSandbox
+
+# Rust-owned env-var names (crates/mvm-sdk/src/env.rs), generated into
+# `_env/vars.py`. MVM_SDK_MODE_ENV / MVM_SDK_OUT_PATH_ENV were already
+# defined and read by `_sandbox`, but never re-exported here — which is
+# the whole of the 'absent from Python' divergence the TypeScript SDK
+# recorded against them.
+from mvm._env import MVM_SDK_MODE_ENV, MVM_SDK_OUT_PATH_ENV
 from mvm._machine import (
     MVM_MACHINE_MAX_OUTPUT_ENV,
     MVM_MACHINE_TIMEOUT_ENV,
@@ -132,6 +139,8 @@ __all__ = [
     "MVM_CLI_BIN_ENV",
     "MVM_MACHINE_MAX_OUTPUT_ENV",
     "MVM_MACHINE_TIMEOUT_ENV",
+    "MVM_SDK_MODE_ENV",
+    "MVM_SDK_OUT_PATH_ENV",
     "SCHEMA_VERSION",
     "BadRequestError",
     "BrowserSandbox",
