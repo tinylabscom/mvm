@@ -275,6 +275,13 @@
       ]
     },
     {
+      "path": "crates/mvm-hostd/src/supervisor/wall_clock.rs",
+      "package": "mvm-hostd",
+      "claims": [
+        18
+      ]
+    },
+    {
       "path": "crates/mvm-runtime/src/vm/instance_snapshot.rs",
       "package": "mvm-runtime",
       "claims": [
@@ -314,11 +321,11 @@
   "uncovered_claims": [
     {
       "number": 5,
-      "why": "no fn: witness \u2014 witnessed by CI lanes only, nothing to mutate"
+      "why": "no fn: witness — witnessed by CI lanes only, nothing to mutate"
     },
     {
       "number": 7,
-      "why": "no fn: witness \u2014 witnessed by CI lanes only, nothing to mutate"
+      "why": "no fn: witness — witnessed by CI lanes only, nothing to mutate"
     },
     {
       "number": 16,
