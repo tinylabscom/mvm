@@ -17,7 +17,7 @@ use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, Ordering},
 };
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use mvm_contract::protocol::dns::{MAX_DNS_MESSAGE, decode_query, encode_response};
@@ -29,7 +29,7 @@ use mvm_core::net::session::Session;
 use mvm_vmm::vsock_egress_bridge::egress_gate::{DnsVerdict, EgressGate, EgressVerdict};
 use tracing::{info, warn};
 
-use self::registry::{RegistryLimits, StreamRegistry, class_for_open};
+use self::registry::{RegistryError, RegistryLimits, StreamRegistry, class_for_open};
 
 use crate::supervisor::audit_recorder::{EventCategory, Recorder};
 use crate::supervisor::dns_resolver::resolve_hostname_ips;
@@ -329,14 +329,12 @@ impl FlowMuxSession {
                 }
             };
 
-            if let Err(e) = self.validator.admit(
-                &mvm_contract::protocol::network_flow::FrameFacts::new(
-                    Direction::GuestToHost,
-                    opcode,
-                    stream_id,
-                )
-                .with_payload(payload_len),
-            ) {
+            if let Err(e) = self.validator.admit(&Self::inbound_frame_facts(
+                &self.read_buf,
+                opcode,
+                stream_id,
+                payload_len,
+            )) {
                 warn!(error = %e, "FlowMux frame refused by session validator");
                 self.send_goaway(&e.to_string())?;
                 return Ok(());
@@ -929,6 +927,39 @@ impl FlowMuxSession {
         self.write_frame(Opcode::GoAway, 0, reason.as_bytes())
     }
 
+    /// Facts for a frame arriving from the guest.
+    ///
+    /// A `WindowUpdate`'s payload *is* its credit, and the validator refuses an
+    /// update that carries none. Describing one by length alone therefore
+    /// refuses every window update the guest sends, and the host answers a
+    /// perfectly good frame with `GoAway` — killing the session on the first
+    /// credit the guest returns. The guest-side reader has the same shape for
+    /// the same reason.
+    fn inbound_frame_facts(
+        read_buf: &[u8],
+        opcode: Opcode,
+        stream_id: u32,
+        payload_len: u32,
+    ) -> mvm_contract::protocol::network_flow::FrameFacts {
+        let facts = mvm_contract::protocol::network_flow::FrameFacts::new(
+            Direction::GuestToHost,
+            opcode,
+            stream_id,
+        )
+        .with_payload(payload_len);
+        if opcode != Opcode::WindowUpdate {
+            return facts;
+        }
+        let start = LENGTH_PREFIX_LEN + HEADER_LEN;
+        match read_buf.get(start..start + 4) {
+            // A malformed or truncated update keeps no credit, so the
+            // validator still refuses it — this reads the field, it does not
+            // wave frames through.
+            Some([a, b, c, d]) => facts.with_credit(u32::from_be_bytes([*a, *b, *c, *d])),
+            _ => facts,
+        }
+    }
+
     /// Advance the local state machine for a frame the host is about to send.
     /// Each side validates the frames it reads, but a confirming or terminal
     /// frame sent by the host still moves the host-side view of the stream.
@@ -1068,6 +1099,47 @@ fn lock_registry(registry: &Mutex<StreamRegistry>) -> std::sync::MutexGuard<'_, 
     registry.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// How long a relay waits for the guest to return credit before giving up on
+/// the stream. Generous: a slow guest is still a working guest, and the only
+/// thing this bounds is a stream whose peer has stopped reading entirely.
+const HOST_CREDIT_WAIT: Duration = Duration::from_secs(30);
+/// How often the wait re-checks. The relay thread is blocked either way, so
+/// this trades a little latency for not needing a condvar in the registry.
+const HOST_CREDIT_POLL: Duration = Duration::from_millis(2);
+
+/// Reserve `len` bytes of host credit on `stream_id`, waiting for the guest to
+/// replenish if the window is currently full.
+///
+/// An exhausted window is **backpressure, not an error**. The guest returns
+/// credit as it consumes, so a full window means "slow down" — resetting the
+/// stream instead truncates a transfer that was working, which surfaces to the
+/// caller as a corrupt download rather than as flow control. Only two things
+/// end the wait: the stream going away, or a peer that has stopped reading for
+/// [`HOST_CREDIT_WAIT`].
+fn await_host_credit(
+    registry: &Mutex<StreamRegistry>,
+    stream_id: u32,
+    len: u32,
+    retired: &AtomicBool,
+) -> Result<(), RegistryError> {
+    let deadline = Instant::now() + HOST_CREDIT_WAIT;
+    loop {
+        let err = match lock_registry(registry).consume_host_credit(stream_id, len) {
+            Ok(()) => return Ok(()),
+            Err(e) => e,
+        };
+        // `NotLive` means the stream is gone — waiting cannot fix that, and
+        // only `IllegalState` is the window-full case worth retrying.
+        if !matches!(err, RegistryError::IllegalState { .. })
+            || retired.load(Ordering::Relaxed)
+            || Instant::now() >= deadline
+        {
+            return Err(err);
+        }
+        std::thread::sleep(HOST_CREDIT_POLL);
+    }
+}
+
 /// Serialize and send one encrypted frame through a shared writer.
 ///
 /// Locks the session first, then the writer, so sequence numbers are assigned
@@ -1151,7 +1223,7 @@ fn run_tcp_relay(
                 break;
             }
             Ok(n) => {
-                if let Err(e) = lock_registry(&registry).consume_host_credit(stream_id, n as u32) {
+                if let Err(e) = await_host_credit(&registry, stream_id, n as u32, &retired) {
                     warn!(stream_id, error = %e, "FlowMux host credit exhausted");
                     let _ = write_frame_to(
                         &session,
