@@ -163,6 +163,20 @@ sdk-install-typescript:
 sdk-build-typescript:
     npm --prefix crates/mvm-sdk/sdks/typescript run build
 
+# Run the language SDKs' own unit suites. Neither is a cargo target, so
+# `cargo nextest run --workspace` does not touch them and a Rust-only gate
+# leaves the hand-written half of each SDK — the subprocess wrappers, the
+# argv builders, the refusal paths — unproven.
+sdk-test: sdk-test-python sdk-test-typescript
+
+# `--extra schema` installs pydantic; without it the eight
+# `derive_schema` tests fail on an ImportError rather than being skipped.
+sdk-test-python:
+    uv run --directory crates/mvm-sdk/sdks/python --group dev --extra schema pytest -q
+
+sdk-test-typescript: sdk-install-typescript
+    npm --prefix crates/mvm-sdk/sdks/typescript run test
+
 # ── Testing (nextest) ────────────────────────────────────────────────────
 # Run all tests, keeping the full output at target/nextest/last-run.log.
 #

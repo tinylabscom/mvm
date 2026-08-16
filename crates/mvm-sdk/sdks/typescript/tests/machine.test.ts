@@ -327,3 +327,61 @@ describe("Machine persistent lifecycle", () => {
     );
   });
 });
+
+// A `mvmctl` that misbehaves in the two ways the wrapper has to survive:
+// it can hang, and it can talk more than the caller can hold.
+function writeMisbehavingMvmctl(opts: { sleepSeconds?: number; stdoutKib?: number }): string {
+  const script = path.join(tmpDir, "slow-mvmctl");
+  fs.writeFileSync(
+    script,
+    `#!/usr/bin/env bash
+set -u
+${opts.stdoutKib ? `dd if=/dev/zero bs=1024 count=${opts.stdoutKib} 2>/dev/null | tr '\\0' 'A'` : ""}
+${opts.sleepSeconds ? `sleep ${opts.sleepSeconds}` : ""}
+exit 0
+`,
+    { mode: 0o755 },
+  );
+  return script;
+}
+
+describe("Machine subprocess bounds", () => {
+  afterEach(() => {
+    delete process.env[mvm.MVM_MACHINE_TIMEOUT_ENV];
+    delete process.env[mvm.MVM_MACHINE_MAX_OUTPUT_ENV];
+  });
+
+  it("stops waiting at the configured timeout and says so", () => {
+    process.env.MVM_CLI_BIN = writeMisbehavingMvmctl({ sleepSeconds: 3 });
+    process.env[mvm.MVM_MACHINE_TIMEOUT_ENV] = "0.3";
+
+    // Naming the cause is the whole point: an unbounded wait that eventually
+    // returns, or a timeout reported as a spawn failure, both send the reader
+    // to the wrong place.
+    expect(() => mvm.Machine.ls()).toThrow(/did not exit within 0\.3s/);
+  });
+
+  it("reports an output overflow as an overflow, not a spawn failure", () => {
+    process.env.MVM_CLI_BIN = writeMisbehavingMvmctl({ stdoutKib: 2048 });
+    process.env[mvm.MVM_MACHINE_MAX_OUTPUT_ENV] = "1024";
+
+    let caught: unknown;
+    try {
+      mvm.Machine.ls();
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(mvm.MachineError);
+    const message = (caught as Error).message;
+    expect(message).toMatch(/exceeded 1024 bytes/);
+    // The bug this pins: `spawnSync` reports the overflow through
+    // `result.error`, and treating any `result.error` as "could not start the
+    // process" blames the machine for something the machine did fine.
+    expect(message).not.toMatch(/failed to spawn/);
+  });
+
+  it("honours the defaults when the env vars are absent", () => {
+    process.env.MVM_CLI_BIN = writeFixtureMvmctl(0, "ok\n");
+    expect(mvm.Machine.run({ image: "alpine", command: ["true"] }).stdout).toBe("ok\n");
+  });
+});

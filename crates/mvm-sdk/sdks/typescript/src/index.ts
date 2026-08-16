@@ -93,7 +93,12 @@ export type {
 
 // Machine-oriented host SDK wrappers. These shell to `mvmctl machine ...` so
 // admission/audit/policy stay in the CLI path.
-export { Machine, MachineError } from "./_machine.js";
+export {
+  MVM_MACHINE_MAX_OUTPUT_ENV,
+  MVM_MACHINE_TIMEOUT_ENV,
+  Machine,
+  MachineError,
+} from "./_machine.js";
 export type {
   MachineCheckArtifactOptions,
   MachineCreateOptions,

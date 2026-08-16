@@ -54,3 +54,10 @@ jobs:
 
       - name: Run BDD conformance suite
         run: just bdd
+
+      # The Python and TypeScript SDKs each carry a unit suite that no cargo
+      # target reaches, so until now nothing in CI ran either. They belong on
+      # this lane: it is the one already scoped to `crates/mvm-sdk/`, and it
+      # already installs uv, Node and the TypeScript dependencies.
+      - name: Run the language SDK unit suites
+        run: just sdk-test
