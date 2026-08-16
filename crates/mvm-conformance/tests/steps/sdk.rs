@@ -484,6 +484,51 @@ fn partition_surfaces(world: &CliWorld) -> (Vec<String>, Vec<String>, usize) {
     (python_only, typescript_only, shared)
 }
 
+#[then("every Rust-owned env-var name reaches the surfaces it claims")]
+fn env_registry_reaches_its_declared_surfaces(world: &mut CliWorld) {
+    // `schema/sdk-env-v0.json` is generated from crates/mvm-sdk/src/env.rs,
+    // and each row names the surfaces that export it. Checking both
+    // directions is the point: "declared and present" catches a binding that
+    // never got generated, and "undeclared and absent" catches the tempting
+    // failure where a name is emitted into a language that has no code
+    // reading it, clearing the divergence list without closing the gap.
+    let path = repo_root().join("schema").join("sdk-env-v0.json");
+    let manifest: Value = serde_json::from_str(
+        &std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("read {}: {error}", path.display())),
+    )
+    .expect("sdk-env manifest is not JSON");
+
+    let python = &recorded(world, "python-surface")[0];
+    let typescript = &recorded(world, "typescript-surface")[0];
+    let rows = manifest["vars"]
+        .as_array()
+        .expect("sdk-env manifest has no `vars` array");
+    assert!(!rows.is_empty(), "sdk-env manifest is empty");
+
+    for row in rows {
+        let ident = row["ident"].as_str().expect("row ident is not a string");
+        let surfaces: Vec<&str> = row["surfaces"]
+            .as_array()
+            .expect("row surfaces is not an array")
+            .iter()
+            .map(|value| value.as_str().expect("surface is not a string"))
+            .collect();
+
+        for (surface, names) in [("python", python), ("typescript", typescript)] {
+            let declared = surfaces.contains(&surface);
+            let present = names.iter().any(|name| name == ident);
+            assert_eq!(
+                declared, present,
+                "{ident}: the registry says exported-to-{surface}={declared}, but the \
+                 built {surface} surface says {present} — regenerate with \
+                 `cargo xtask gen-stubs`, or correct the `surfaces` list in \
+                 crates/mvm-sdk/src/env.rs"
+            );
+        }
+    }
+}
+
 #[then("the shared surface agrees between the two languages")]
 fn shared_surface_agrees(world: &mut CliWorld) {
     let (_, _, shared) = partition_surfaces(world);

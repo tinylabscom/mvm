@@ -138,8 +138,8 @@ fn run_live_mode(args: &RunArgs) -> Result<()> {
     }
     let status = cmd
         .arg(&script)
-        .env("MVM_SDK_MODE", "live")
-        .env("MVM_CLI_BIN", &mvmctl_bin)
+        .env(mvm_sdk::env::MVM_SDK_MODE_ENV, "live")
+        .env(mvm_sdk::env::MVM_CLI_BIN_ENV, &mvmctl_bin)
         .status()
         .with_context(|| {
             format!(
