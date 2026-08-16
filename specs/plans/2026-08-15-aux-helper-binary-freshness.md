@@ -12,6 +12,13 @@ Deferred out of the builder-egress handshake fix. Neither item caused that
 failure — the handshake timeout did — but both were found while diagnosing it,
 and both make a future occurrence harder to diagnose than it needs to be.
 
+**Since written:** section 2's watch-list gaps were closed by
+`fix(net): let the host validator see its own sends, and the embed watch see the
+guest`. Section 1 is closed by the change carrying this edit. Both cost real
+debugging time in between: a guest-egress fix appeared to do nothing three times
+running, because the embedded binary was never rebuilt and the builder preferred
+a stale copy.
+
 ## 1. Two resolvers for `mvm-network-endpoint`, with opposite precedence
 
 `mvm_vmm::host::aux_bin::resolve` (`crates/mvm-vmm/src/host/aux_bin.rs`) is the
@@ -26,12 +33,13 @@ picks exactly the copy the canonical resolver exists to avoid. `mvm-build`
 already depends on `mvm-vmm` (`crates/mvm-build/Cargo.toml`), so it can call
 `aux_bin::resolve` directly.
 
-- [ ] Delete `resolve_network_endpoint_path` and call `aux_bin::resolve`.
-- [ ] Note that this also drops the run-time `cargo build -p mvm-hostd`
+- [x] Delete `resolve_network_endpoint_path` and call `aux_bin::resolve`.
+- [x] Note that this also drops the run-time `cargo build -p mvm-hostd`
       fallback, which is the intended behaviour: `aux_bin::resolve`
       deliberately never builds and errors with a `just build-supervisors` hint.
-- [ ] Test: the builder path prefers `$MVM_AUX_BIN_DIR` over a decoy copy
-      beside the exe.
+- [x] Test: not duplicated. The builder now delegates, and the ordering it was
+      missing is already pinned by `candidate_order_is_aux_then_exe_then_targets`
+      in `aux_bin`. A second copy of that assertion would drift, not protect.
 
 ## 2. The build script's watch list has two holes
 
@@ -49,9 +57,9 @@ Observed consequence: two `mvm-network-endpoint` binaries coexisting under one
 shared target dir, built from different commits — one linking `rand 0.10` and
 `crates/mvm-http/src/proxy.rs`, the other `rand 0.8` with no `proxy.rs`.
 
-- [ ] Switch the `mvm-hostd/src` and `mvm-core/src` entries to
+- [x] Switch the `mvm-hostd/src` and `mvm-core/src` entries to
       `emit_rerun_for_tree`.
-- [ ] Add `crates/mvm-vmm/src`.
+- [x] Add `crates/mvm-vmm/src`.
 - [ ] Extend the existing freshness guard rather than adding a second one:
       `supervisor_needs_rebuild` / `LIBKRUN_SUPERVISOR_INPUT_ROOTS` in
       `crates/mvm-build/src/libkrun_builder.rs` today covers only

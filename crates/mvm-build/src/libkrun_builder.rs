@@ -471,91 +471,14 @@ impl Drop for BuilderVsockEgressEndpoint {
     }
 }
 
+/// Locate the endpoint binary through the canonical resolver.
+///
+/// Delegates rather than re-deriving the search order: this path used to have
+/// its own copy that skipped `$MVM_AUX_BIN_DIR`, so a stale binary beside the
+/// dev exe shadowed the freshly built one and edits appeared to do nothing.
 fn resolve_network_endpoint_path() -> Result<PathBuf, BuilderVmError> {
-    if let Some(path) = std::env::var_os("MVM_SUBSTITUTION_ENDPOINT_PATH").map(PathBuf::from) {
-        if path.is_file() {
-            return Ok(path);
-        }
-        return Err(BuilderVmError::ExtractionFailed(format!(
-            "MVM_SUBSTITUTION_ENDPOINT_PATH points at {} which is not a file",
-            path.display()
-        )));
-    }
-
-    if let Ok(current_exe) = std::env::current_exe()
-        && let Some(dir) = current_exe.parent()
-    {
-        let candidate = dir.join("mvm-network-endpoint");
-        if candidate.is_file() {
-            return Ok(candidate);
-        }
-    }
-
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let Some(workspace_root) = manifest_dir.parent().and_then(|p| p.parent()) else {
-        return Err(BuilderVmError::ExtractionFailed(
-            "resolve workspace root for mvm-network-endpoint".to_string(),
-        ));
-    };
-
-    let mut target_roots = vec![workspace_root.join("target")];
-    if let Some(target_dir) = std::env::var_os("CARGO_TARGET_DIR")
-        && !target_dir.is_empty()
-    {
-        let candidate = PathBuf::from(target_dir);
-        let normalized = if candidate.is_absolute() {
-            candidate
-        } else {
-            workspace_root.join(candidate)
-        };
-        if !target_roots.iter().any(|root| root == &normalized) {
-            target_roots.push(normalized);
-        }
-    }
-
-    for root in &target_roots {
-        for variant in ["release", "debug"] {
-            let candidate = root.join(variant).join("mvm-network-endpoint");
-            if candidate.is_file() {
-                return Ok(candidate);
-            }
-        }
-    }
-
-    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-    let mut build = Command::new(cargo);
-    build.current_dir(workspace_root).args([
-        "build",
-        "-p",
-        "mvm-hostd",
-        "--bin",
-        "mvm-network-endpoint",
-    ]);
-    if !build
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false)
-    {
-        return Err(BuilderVmError::ExtractionFailed(
-            "build mvm-network-endpoint".to_string(),
-        ));
-    }
-
-    for root in &target_roots {
-        let built = root.join("debug").join("mvm-network-endpoint");
-        if built.is_file() {
-            return Ok(built);
-        }
-    }
-    Err(BuilderVmError::ExtractionFailed(format!(
-        "mvm-network-endpoint not found after build (searched: {})",
-        target_roots
-            .iter()
-            .map(|root| root.join("debug").join("mvm-network-endpoint"))
-            .map(|path| path.display().to_string())
-            .collect::<Vec<_>>()
-            .join(", ")
-    )))
+    mvm_vmm::host::network_endpoint_spawn::resolve_network_endpoint_path()
+        .map_err(|e| BuilderVmError::ExtractionFailed(format!("{e:#}")))
 }
 
 fn reap_builder_vsock_egress_endpoint(state_dir: &Path) {

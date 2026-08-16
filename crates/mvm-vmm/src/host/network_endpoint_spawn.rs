@@ -254,8 +254,14 @@ fn stderr_tail(path: &Path, max_bytes: usize) -> Option<String> {
 }
 
 /// Locate the `mvm-network-endpoint` binary. Compiled by mvmctl's build
-/// script; see [`mvm_vmm::host::aux_bin`] for the search order.
-fn resolve_network_endpoint_path() -> Result<PathBuf> {
+/// script; see [`crate::host::aux_bin`] for the search order.
+///
+/// The one definition of this binary's name and override variable. The builder
+/// path carried its own copy that omitted `$MVM_AUX_BIN_DIR` — the build
+/// script's output dir, and the first candidate the canonical resolver checks —
+/// so it silently preferred whatever stale copy sat next to a dev `cargo run`
+/// exe. That is the exact shadowing `aux_bin`'s ordering exists to prevent.
+pub fn resolve_network_endpoint_path() -> Result<PathBuf> {
     crate::host::aux_bin::resolve(&crate::host::aux_bin::AuxBin {
         bin: "mvm-network-endpoint",
         env_var: "MVM_SUBSTITUTION_ENDPOINT_PATH",
