@@ -54,6 +54,32 @@ pub const WARM_CLAIM_P50_BUDGET_MS: f64 = 30.0;
 /// Warm-claim dispatch-window p99 budget, in milliseconds.
 pub const WARM_CLAIM_P99_BUDGET_MS: f64 = 50.0;
 
+/// The dispatch-window budgets one lane publishes, by percentile.
+///
+/// `None` is "this lane deliberately publishes no budget at this percentile",
+/// never "zero". The acquisition lanes measure work whose cost is dominated by
+/// a registry and a disk, so holding them to a latency ceiling would gate mvm
+/// on someone else's network.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LaneBudgets {
+    pub p50_ms: Option<f64>,
+    pub p95_ms: Option<f64>,
+    pub p99_ms: Option<f64>,
+}
+
+impl LaneBudgets {
+    /// The published budgets in contract order, paired with the percentile
+    /// label the violation and the doc table both use.
+    #[must_use]
+    pub const fn by_percentile(self) -> [(&'static str, Option<f64>); 3] {
+        [
+            ("p50", self.p50_ms),
+            ("p95", self.p95_ms),
+            ("p99", self.p99_ms),
+        ]
+    }
+}
+
 /// The measurement lanes the cold-launch contract reports independently.
 ///
 /// They are reported separately rather than averaged because they measure
@@ -94,6 +120,51 @@ impl LaunchLane {
             Self::MountMiss => "mount_miss",
             Self::ArtifactMiss => "artifact_miss",
             Self::WarmClaim => "warm_claim",
+        }
+    }
+
+    /// What this lane measures, in one sentence, for a reader who has not read
+    /// the enum. The published table and the gate name the same thing because
+    /// they read the same string.
+    #[must_use]
+    pub const fn description(self) -> &'static str {
+        match self {
+            Self::PreparedCold => {
+                "Cached artifacts, no mount image, new VMM and new guest identity."
+            }
+            Self::PreparedColdMountHit => {
+                "The same launch with an unchanged cached read-only mount image."
+            }
+            Self::MountMiss => "Directory fingerprint plus first mount-image materialization.",
+            Self::ArtifactMiss => "Image acquisition, unpack, verification, and preparation.",
+            Self::WarmClaim => {
+                "A claimed warm standby — a comparison point, never folded into a cold number."
+            }
+        }
+    }
+
+    /// The dispatch-window budgets this lane is published and gated against.
+    ///
+    /// [`validate_matrix_report`] and the published budget table both read
+    /// this, so a budget cannot be changed in one and stale in the other.
+    #[must_use]
+    pub const fn budgets(self) -> LaneBudgets {
+        match self {
+            Self::PreparedCold | Self::PreparedColdMountHit => LaneBudgets {
+                p50_ms: Some(PREPARED_COLD_P50_BUDGET_MS),
+                p95_ms: Some(PREPARED_COLD_P95_BUDGET_MS),
+                p99_ms: Some(PREPARED_COLD_P99_BUDGET_MS),
+            },
+            Self::WarmClaim => LaneBudgets {
+                p50_ms: Some(WARM_CLAIM_P50_BUDGET_MS),
+                p95_ms: None,
+                p99_ms: Some(WARM_CLAIM_P99_BUDGET_MS),
+            },
+            Self::MountMiss | Self::ArtifactMiss => LaneBudgets {
+                p50_ms: None,
+                p95_ms: None,
+                p99_ms: None,
+            },
         }
     }
 }
@@ -263,42 +334,17 @@ pub fn validate_matrix_report(report: &ColdLaunchReport) -> Result<(), LaneViola
     if report.stats != canonical.stats {
         return Err(LaneViolation::NonCanonicalSummary);
     }
-    match report.lane {
-        LaunchLane::PreparedCold | LaunchLane::PreparedColdMountHit => {
-            require_budget(
-                report.lane,
-                "p50",
-                report.stats.dispatch_window_ms.p50,
-                PREPARED_COLD_P50_BUDGET_MS,
-            )?;
-            require_budget(
-                report.lane,
-                "p95",
-                report.stats.dispatch_window_ms.p95,
-                PREPARED_COLD_P95_BUDGET_MS,
-            )?;
-            require_budget(
-                report.lane,
-                "p99",
-                report.stats.dispatch_window_ms.p99,
-                PREPARED_COLD_P99_BUDGET_MS,
-            )?;
+    let measured = report.stats.dispatch_window_ms.by_percentile();
+    for ((percentile, budget_ms), (_, found)) in report
+        .lane
+        .budgets()
+        .by_percentile()
+        .into_iter()
+        .zip(measured)
+    {
+        if let Some(budget_ms) = budget_ms {
+            require_budget(report.lane, percentile, found, budget_ms)?;
         }
-        LaunchLane::WarmClaim => {
-            require_budget(
-                report.lane,
-                "p50",
-                report.stats.dispatch_window_ms.p50,
-                WARM_CLAIM_P50_BUDGET_MS,
-            )?;
-            require_budget(
-                report.lane,
-                "p99",
-                report.stats.dispatch_window_ms.p99,
-                WARM_CLAIM_P99_BUDGET_MS,
-            )?;
-        }
-        LaunchLane::MountMiss | LaunchLane::ArtifactMiss => {}
     }
     Ok(())
 }
@@ -612,6 +658,14 @@ pub struct SpanStats {
 }
 
 impl SpanStats {
+    /// The measured percentiles in the same order and with the same labels as
+    /// [`LaneBudgets::by_percentile`], so a budget and its measurement can be
+    /// zipped without either side naming a percentile as a string.
+    #[must_use]
+    pub const fn by_percentile(self) -> [(&'static str, Option<f64>); 3] {
+        [("p50", self.p50), ("p95", self.p95), ("p99", self.p99)]
+    }
+
     #[must_use]
     pub fn from_samples(samples: &[f64]) -> Self {
         if samples.is_empty() {
