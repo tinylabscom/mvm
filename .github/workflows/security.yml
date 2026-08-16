@@ -540,6 +540,11 @@ jobs:
     # only trace is "The runner has received a shutdown signal" — which
     # names no package, no file, and no claim, and reads identically to
     # infrastructure having a bad night.
+    #
+    # This has already earned itself: mvm-hostd/2of2 hit it on 2026-08-16 and
+    # was reported as a bounded, attributable stop with its partial output
+    # kept, which is what said the split was uneven and by how much. Note
+    # that GitHub records a timeout kill as `cancelled`, not `failure`.
     timeout-minutes: 330
     # BLOCKING, and sharded per package.
     #
@@ -578,10 +583,18 @@ jobs:
           - mvm-build
           - mvm-cli
           - mvm-core
-          # mvm-hostd owns the most surface files of any package and stopped
-          # finishing inside the cap on its own — see the timeout note below.
-          - mvm-hostd/1of2
-          - mvm-hostd/2of2
+          # Four, not two, and the number is measured rather than chosen.
+          # Two shards ran on 2026-08-16: 1of2 finished five files in 100
+          # minutes while 2of2 drew plan_admission (93 mutants), audit_file
+          # (107) and network/stages (108), spent the full 330 and never
+          # reached its fifth file. Splitting by file count does not split by
+          # cost, and this package's files differ by roughly 4x. Four shards
+          # put the two most expensive in different jobs and cut the worst
+          # known load from 335 mutants to 201.
+          - mvm-hostd/1of4
+          - mvm-hostd/2of4
+          - mvm-hostd/3of4
+          - mvm-hostd/4of4
           - mvm-contract
           - mvm-runtime
           - mvm-sdk
