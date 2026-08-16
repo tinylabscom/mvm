@@ -41,13 +41,11 @@ pub(in crate::commands) enum CacheAction {
         /// processes.
         #[arg(long)]
         no_reap_orphans: bool,
-        /// Also remove unrecognized top-level entries in the cache root —
-        /// directories left behind by a subsystem that has since been removed
-        /// (their disk is never reclaimed otherwise). Without this flag prune
-        /// only *reports* them; with it they are deleted. The set of recognized
-        /// entries is the hand-maintained [`RECOGNIZED_CACHE_ENTRIES`] list, so
-        /// removal is opt-in: a genuinely-current dir missing from that list
-        /// would otherwise be misread as orphan cruft.
+        /// Also remove top-level cache entries left behind by a subsystem mvm
+        /// no longer has (their disk is never reclaimed otherwise). Without
+        /// this flag prune only *reports* them. Only the names on the
+        /// [`RETIRED_CACHE_ENTRIES`] deny-list are ever removed, so a cache
+        /// that is still in use is never a candidate.
         #[arg(long)]
         orphan_dirs: bool,
         /// Reclaim regenerable caches too — the Stage 0 vendored blobs
@@ -117,8 +115,9 @@ struct CacheInfo {
 struct CacheDirEntry {
     name: String,
     bytes: u64,
-    /// `false` for an entry no current subsystem owns (orphan cruft).
-    recognized: bool,
+    /// `true` for an entry belonging to a subsystem mvm no longer has —
+    /// what `cache prune --orphan-dirs` reclaims.
+    retired: bool,
 }
 
 /// Structured output for `cache status --json`: one row per cached pack plus
@@ -163,11 +162,11 @@ fn collect_cache_info() -> Result<CacheInfo> {
     let entries = cache_dir_breakdown(path)
         .into_iter()
         .map(|(name, bytes)| {
-            let recognized = RECOGNIZED_CACHE_ENTRIES.contains(&name.as_str());
+            let retired = RETIRED_CACHE_ENTRIES.contains(&name.as_str());
             CacheDirEntry {
                 name,
                 bytes,
-                recognized,
+                retired,
             }
         })
         .collect();
@@ -206,12 +205,13 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
                 human_bytes(info.disk_usage_bytes.unwrap_or(0))
             );
             // Per-entry breakdown (largest first) so the operator can see what
-            // is actually consuming the cache before reclaiming. An unrecognized
-            // entry is orphan cruft — `cache prune --orphan-dirs` reclaims it.
+            // is actually consuming the cache before reclaiming. A retired
+            // entry belongs to a subsystem mvm no longer has — `cache prune
+            // --orphan-dirs` reclaims it.
             if !info.entries.is_empty() {
                 println!("By entry:");
                 for e in &info.entries {
-                    let tag = if e.recognized { "" } else { "  (unrecognized)" };
+                    let tag = if e.retired { "  (retired)" } else { "" };
                     println!("  {:<22} {}{tag}", e.name, human_bytes(e.bytes));
                 }
             }
@@ -584,42 +584,39 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
                 if let Some(name) = entry_path.file_name().and_then(|n| n.to_str())
                     && (name.starts_with("mvm-lima-") || name.ends_with(".tmp"))
                 {
-                    let size = entry_path.metadata().map(|m| m.len()).unwrap_or(0);
+                    let size = dir_size(&entry_path);
                     if dry_run {
                         println!(
                             "Would remove: {} ({})",
                             entry_path.display(),
                             human_bytes(size)
                         );
-                    } else if entry_path.is_dir() {
-                        let _ = std::fs::remove_dir_all(entry_path);
                     } else {
-                        let _ = std::fs::remove_file(entry_path);
+                        let _ = remove_cache_path(&entry_path);
                     }
                     removed += 1;
                     freed += size;
                 }
             }
 
-            // Orphan top-level dirs (e.g. a removed subsystem's leftovers).
-            // Reported by default; removed only with `--orphan-dirs`/`--deep`
-            // so an allowlist gap can never auto-delete a live cache.
-            let orphans = classify_orphan_entries(path);
-            if !orphans.is_empty() {
+            // Leftovers from a subsystem mvm no longer has. Reported by
+            // default; removed only with `--orphan-dirs`/`--deep`.
+            let retired = classify_retired_entries(path);
+            if !retired.is_empty() {
                 if orphan_dirs {
-                    let (n, b) = reclaim_entries(&orphans, "unrecognized cache entry", dry_run);
+                    let (n, b) = reclaim_entries(&retired, "retired cache entry", dry_run);
                     removed += n;
                     freed += b;
                 } else {
-                    let total: u64 = orphans.iter().map(|e| e.bytes).sum();
+                    let total: u64 = retired.iter().map(|e| e.bytes).sum();
                     ui::info(&format!(
-                        "{} unrecognized cache entr{} ({} total) not removed — \
+                        "{} retired cache entr{} ({} total) not removed — \
                          re-run with `--orphan-dirs` to reclaim:",
-                        orphans.len(),
-                        if orphans.len() == 1 { "y" } else { "ies" },
+                        retired.len(),
+                        if retired.len() == 1 { "y" } else { "ies" },
                         human_bytes(total),
                     ));
-                    for e in &orphans {
+                    for e in &retired {
                         ui::info(&format!(
                             "  {} ({})",
                             e.path.display(),
@@ -685,28 +682,23 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
     }
 }
 
-/// Top-level entries any current mvm subsystem creates under
-/// `mvm_cache_dir()`. The orphan-dir sweep (`prune --orphan-dirs`) treats
-/// anything *not* on this list as cruft left by a removed subsystem.
+/// Top-level entries under `mvm_cache_dir()` that belonged to a subsystem mvm
+/// no longer has. `prune --orphan-dirs` removes these and nothing else.
 ///
-/// CONTRACT: when you add a new top-level cache dir or file anywhere in the
-/// workspace, add its name here in the same change — otherwise `cache prune`
-/// will report (and, with `--orphan-dirs`, delete) a live cache as orphaned.
-/// `recognized_cache_entries_cover_known_dirs` guards the obvious set.
-const RECOGNIZED_CACHE_ENTRIES: &[&str] = &[
-    "builder-vm",        // builder VM store, per-arch artifacts, per-VM scratch
-    "builder-store",     // dev_build host-side staging store
-    "stage0",            // vendored Stage 0 bootstrap blobs
-    "oci",               // pulled OCI layers / blobs / manifests
-    "default-microvm",   // prebuilt default microVM image (kernel + rootfs)
-    "libkrunfw",         // kernel extracted from the libkrunfw dylib
-    "host-bins",         // cross-compiled embedded host-vm binaries
-    "guest-agent",       // built guest-agent staging
-    "docker-nix-store",  // legacy Stage 0 store mount point
-    "builder-nix-store", // legacy builder store mount point
-    "dev",               // host-backed dev Nix-store overlay (dev down --reset)
-    "runtime",           // runtime scratch
-    "linux-builder.log", // host-side build log
+/// This is deliberately a deny-list. The inverse — an allow-list of every
+/// live cache dir, deleting whatever is missing from it — has to be extended
+/// every time any subsystem anywhere in the workspace grows a cache, and the
+/// price of forgetting is that prune deletes a cache that is still in use.
+/// Naming the dead names instead inverts the failure: forgetting to retire a
+/// name leaks disk, which an operator can see and we can fix later.
+///
+/// CONTRACT: when you delete a subsystem, add the cache entry it owned here in
+/// the same change.
+const RETIRED_CACHE_ENTRIES: &[&str] = &[
+    // Stage 0's store mount point from the container-era bootstrap.
+    "docker-nix-store",
+    // Builder store mount point superseded by the persistent store image.
+    "builder-nix-store",
 ];
 
 /// Regenerable caches reclaimed by `prune --deep`: expensive to refetch or
@@ -730,11 +722,10 @@ struct CacheEntry {
     bytes: u64,
 }
 
-/// Top-level entries under `cache_root` that aren't in
-/// [`RECOGNIZED_CACHE_ENTRIES`] — orphan cruft from removed subsystems.
+/// Top-level entries under `cache_root` named in [`RETIRED_CACHE_ENTRIES`].
 /// Side-effect-free (stats only) so it's hermetically testable. Sorted by
 /// descending footprint so the biggest reclaim shows first.
-fn classify_orphan_entries(cache_root: &std::path::Path) -> Vec<CacheEntry> {
+fn classify_retired_entries(cache_root: &std::path::Path) -> Vec<CacheEntry> {
     let Ok(entries) = std::fs::read_dir(cache_root) else {
         return Vec::new();
     };
@@ -743,19 +734,15 @@ fn classify_orphan_entries(cache_root: &std::path::Path) -> Vec<CacheEntry> {
         .filter(|e| {
             e.file_name()
                 .to_str()
-                .map(|n| !RECOGNIZED_CACHE_ENTRIES.contains(&n))
+                .map(|n| RETIRED_CACHE_ENTRIES.contains(&n))
                 .unwrap_or(false)
         })
         .map(|e| {
             let path = e.path();
-            let bytes = if path.is_dir() {
-                dir_size(&path)
-            } else {
-                path.metadata()
-                    .map(|m| file_allocated_bytes(&m))
-                    .unwrap_or(0)
-            };
-            CacheEntry { path, bytes }
+            CacheEntry {
+                bytes: dir_size(&path),
+                path,
+            }
         })
         .collect();
     out.sort_by_key(|e| std::cmp::Reverse(e.bytes));
@@ -793,16 +780,8 @@ fn cache_dir_breakdown(cache_root: &std::path::Path) -> Vec<(String, u64)> {
     let mut rows: Vec<(String, u64)> = entries
         .flatten()
         .map(|e| {
-            let path = e.path();
             let name = e.file_name().to_string_lossy().into_owned();
-            let bytes = if path.is_dir() {
-                dir_size(&path)
-            } else {
-                path.metadata()
-                    .map(|m| file_allocated_bytes(&m))
-                    .unwrap_or(0)
-            };
-            (name, bytes)
+            (name, dir_size(&e.path()))
         })
         .collect();
     rows.sort_by_key(|(_, bytes)| std::cmp::Reverse(*bytes));
@@ -823,12 +802,7 @@ fn reclaim_entries(entries: &[CacheEntry], kind: &str, dry_run: bool) -> (u64, u
                 human_bytes(e.bytes)
             );
         } else {
-            let res = if e.path.is_dir() {
-                std::fs::remove_dir_all(&e.path)
-            } else {
-                std::fs::remove_file(&e.path)
-            };
-            match res {
+            match remove_cache_path(&e.path) {
                 Ok(()) => println!(
                     "Removed {kind}: {} ({})",
                     e.path.display(),
@@ -1082,37 +1056,47 @@ fn file_allocated_bytes(meta: &std::fs::Metadata) -> u64 {
     meta.len()
 }
 
-/// Recursively calculate directory size in bytes — by *allocated* blocks,
-/// so sparse images count their real footprint, not their logical cap.
+/// Recursive on-disk footprint of a cache entry. One line, because every
+/// counter in this file must agree with `du` and with each other.
 fn dir_size(path: &std::path::Path) -> u64 {
-    walkdir(path)
-        .unwrap_or_default()
-        .iter()
-        .filter(|e| e.path().is_file())
-        .map(|e| {
-            e.path()
-                .metadata()
-                .map(|m| file_allocated_bytes(&m))
-                .unwrap_or(0)
-        })
-        .sum()
+    mvm_core::disk_usage::tree_bytes(path)
 }
 
-/// Simple recursive directory walker.
+/// Recursive directory walker that never descends through a symlink.
+///
+/// The temp-file sweep deletes what this yields, so following a link would
+/// let a `foo.tmp` symlink inside the cache reach files outside it.
 fn walkdir(path: &std::path::Path) -> Result<Vec<std::fs::DirEntry>> {
     let mut entries = Vec::new();
-    if path.is_dir() {
-        for entry in std::fs::read_dir(path)? {
+    if !path.is_dir() {
+        return Ok(entries);
+    }
+    let mut pending = vec![path.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        for entry in std::fs::read_dir(&dir)? {
             let entry = entry?;
-            let epath = entry.path();
-            let is_dir = epath.is_dir();
-            entries.push(entry);
-            if is_dir && let Ok(sub) = walkdir(&epath) {
-                entries.extend(sub);
+            // `DirEntry::file_type` reports the link itself, not its target.
+            let descend = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+            if descend {
+                pending.push(entry.path());
             }
+            entries.push(entry);
         }
     }
     Ok(entries)
+}
+
+/// Remove a cache path, whatever kind of thing it is.
+///
+/// Decided from `symlink_metadata`: a symlink pointing at a directory must be
+/// unlinked, never `remove_dir_all`'d, or the sweep empties the target.
+fn remove_cache_path(path: &std::path::Path) -> std::io::Result<()> {
+    let meta = std::fs::symlink_metadata(path)?;
+    if meta.is_dir() {
+        std::fs::remove_dir_all(path)
+    } else {
+        std::fs::remove_file(path)
+    }
 }
 
 #[cfg(test)]
@@ -1282,61 +1266,117 @@ mod tests {
         assert!(!joined.contains("rootfs.ext4"));
     }
 
-    /// The on-disk dirs we know mvm creates must all be recognized, so the
-    /// orphan sweep never deletes a live cache. Guards the allowlist contract.
+    /// A cache dir mvm writes today must never be a removal candidate, and a
+    /// regenerable target must not also be retired (`--deep` would reclaim it
+    /// twice and double-count the bytes).
     #[test]
-    fn recognized_cache_entries_cover_known_dirs() {
-        for known in [
+    fn live_cache_dirs_are_never_removal_candidates() {
+        // Every top-level entry a current subsystem writes under the cache
+        // root. Each name is resolved by a helper in the crate that owns it.
+        for live in [
             "builder-vm",
             "stage0",
             "oci",
             "default-microvm",
-            "builder-store",
-            "libkrunfw",
             "host-bins",
-            "guest-agent",
+            "packs",
+            "initramfs",
+            "runtime-overlay",
+            "runtime-overlay-bins",
+            "guest-agent-build",
+            "verity-initrd",
+            "sdk-sidecar",
+            "warm-artifacts",
+            "audit-verify",
+            "builder-health",
+            "local-run",
         ] {
             assert!(
-                RECOGNIZED_CACHE_ENTRIES.contains(&known),
-                "{known} is created by a current subsystem but is not in the allowlist"
+                !RETIRED_CACHE_ENTRIES.contains(&live),
+                "{live} is written by a current subsystem and must never be pruned"
             );
         }
-        // Every regenerable target must itself be recognized (else `prune`
-        // would both reclaim it under `--deep` and flag it as orphan).
         for (name, _) in REGENERABLE_CACHE_ENTRIES {
             assert!(
-                RECOGNIZED_CACHE_ENTRIES.contains(name),
-                "{name} not recognized"
+                !RETIRED_CACHE_ENTRIES.contains(name),
+                "{name} is reclaimed by --deep and must not also be retired"
             );
         }
     }
 
-    /// Orphan classification flags only unrecognized entries and sorts the
-    /// result largest-first.
+    /// The sweep selects retired names only. A live cache dir that nothing in
+    /// this file knows about — the shape every new subsystem starts in — must
+    /// survive, and a retired one must be selected.
     #[test]
-    fn classify_orphan_entries_flags_unrecognized_largest_first() {
+    fn retired_classification_selects_only_retired_names() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
-        // Recognized dirs — must be skipped.
-        std::fs::create_dir_all(root.join("stage0")).unwrap();
-        std::fs::create_dir_all(root.join("builder-vm")).unwrap();
-        // Orphans: a small one and a bigger one.
-        std::fs::create_dir_all(root.join("ur-seed")).unwrap();
-        std::fs::write(root.join("ur-seed/big.bin"), vec![0u8; 8192]).unwrap();
-        std::fs::create_dir_all(root.join("old-subsystem")).unwrap();
-        std::fs::write(root.join("old-subsystem/small.bin"), b"hi").unwrap();
+        // Live caches, including ones this module has never heard of.
+        for live in ["stage0", "builder-vm", "guest-agent-build", "packs"] {
+            std::fs::create_dir_all(root.join(live)).unwrap();
+            std::fs::write(root.join(live).join("blob.bin"), vec![0u8; 8192]).unwrap();
+        }
+        // Retired: a small one and a bigger one.
+        std::fs::create_dir_all(root.join("docker-nix-store")).unwrap();
+        std::fs::write(root.join("docker-nix-store/big.bin"), vec![0u8; 64 * 1024]).unwrap();
+        std::fs::create_dir_all(root.join("builder-nix-store")).unwrap();
+        std::fs::write(root.join("builder-nix-store/small.bin"), b"hi").unwrap();
 
-        let orphans = classify_orphan_entries(root);
-        let names: Vec<String> = orphans
+        let retired = classify_retired_entries(root);
+        let names: Vec<String> = retired
             .iter()
             .map(|e| e.path.file_name().unwrap().to_string_lossy().into_owned())
             .collect();
         assert_eq!(
             names,
-            vec!["ur-seed", "old-subsystem"],
-            "largest first; recognized skipped"
+            vec!["docker-nix-store", "builder-nix-store"],
+            "largest first; live caches skipped"
         );
-        assert!(orphans[0].bytes >= orphans[1].bytes);
+        assert!(retired[0].bytes >= retired[1].bytes);
+    }
+
+    /// End-to-end on the sweep the flag drives: the live caches survive and
+    /// the retired one is gone. A fix that simply stopped deleting would fail
+    /// the second half.
+    #[test]
+    fn orphan_dir_sweep_removes_the_retired_entry_and_spares_live_caches() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let live = [
+            "guest-agent-build",
+            "runtime-overlay-bins",
+            "runtime-overlay",
+            "sdk-sidecar",
+            "verity-initrd",
+            "audit-verify",
+            "initramfs",
+            "packs",
+            "builder-health",
+        ];
+        for name in live {
+            std::fs::create_dir_all(root.join(name)).unwrap();
+            std::fs::write(root.join(name).join("blob.bin"), vec![0u8; 4096]).unwrap();
+        }
+        std::fs::create_dir_all(root.join("docker-nix-store")).unwrap();
+        std::fs::write(root.join("docker-nix-store/blob.bin"), vec![0u8; 4096]).unwrap();
+
+        let (removed, _) = reclaim_entries(
+            &classify_retired_entries(root),
+            "retired cache entry",
+            /* dry_run = */ false,
+        );
+
+        assert_eq!(removed, 1, "only the retired entry is a candidate");
+        assert!(
+            !root.join("docker-nix-store").exists(),
+            "the retired entry must be reclaimed"
+        );
+        for name in live {
+            assert!(
+                root.join(name).join("blob.bin").exists(),
+                "{name} is a live cache and must survive the sweep"
+            );
+        }
     }
 
     /// `--deep` targets resolve only to regenerable dirs that actually exist.
@@ -1381,8 +1421,8 @@ mod tests {
         assert!(!d.exists(), "live run must remove the entry");
     }
 
-    /// `cache info`'s breakdown is sorted largest-first and tags unrecognized
-    /// entries.
+    /// `cache info`'s breakdown is sorted largest-first and lists every
+    /// entry.
     #[test]
     fn cache_dir_breakdown_sorted_and_includes_all_entries() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1395,6 +1435,63 @@ mod tests {
         let rows = cache_dir_breakdown(root);
         assert_eq!(rows[0].0, "ur-seed", "largest entry first");
         assert!(rows.iter().any(|(n, _)| n == "stage0"));
+    }
+
+    /// The reclaim estimate must be the disk a delete actually returns.
+    /// A materialized OCI rootfs is mostly symlinks: a walker that follows
+    /// them re-walks whole subtrees and charges a link its target's blocks,
+    /// which is how the dry run came to promise several times the disk that
+    /// exists.
+    #[cfg(unix)]
+    #[test]
+    fn dir_size_does_not_inflate_a_tree_full_of_symlinks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let payload = root.join("layer");
+        std::fs::create_dir_all(payload.join("bin")).unwrap();
+        std::fs::write(payload.join("bin/busybox"), vec![0u8; 256 * 1024]).unwrap();
+
+        let real_bytes = dir_size(root);
+
+        // The links an unpacked image carries: applets pointing at one binary,
+        // and the `/usr/bin -> /bin` style directory alias beside them.
+        for applet in ["sh", "ls", "cat", "cp", "mv", "rm", "sed", "awk"] {
+            std::os::unix::fs::symlink(
+                payload.join("bin/busybox"),
+                payload.join("bin").join(applet),
+            )
+            .unwrap();
+        }
+        std::os::unix::fs::symlink(payload.join("bin"), root.join("usr-bin")).unwrap();
+
+        let with_links = dir_size(root);
+        assert!(
+            with_links < real_bytes + 256 * 1024,
+            "symlinks must not multiply the estimate: {real_bytes} bytes of \
+             payload measured {with_links} once linked"
+        );
+    }
+
+    /// The temp-file sweep deletes what the walker yields, so the walker must
+    /// not reach through a link into a tree the operator did not ask to prune.
+    #[cfg(unix)]
+    #[test]
+    fn walkdir_does_not_descend_through_a_symlinked_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("precious.tmp"), b"keep me").unwrap();
+
+        let cache = tmp.path().join("cache");
+        std::fs::create_dir_all(&cache).unwrap();
+        std::os::unix::fs::symlink(&outside, cache.join("link")).unwrap();
+
+        let reached: Vec<String> = walkdir(&cache)
+            .unwrap()
+            .iter()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(reached, vec!["link"], "the link is yielded, not followed");
     }
 
     /// The version-aware pack prune step reports what it removed (or would
