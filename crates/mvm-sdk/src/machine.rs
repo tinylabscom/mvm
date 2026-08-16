@@ -11,8 +11,9 @@ use std::{
     process::Command,
 };
 
-/// Environment variable used to override the `mvmctl` binary path.
-pub const MVM_CLI_BIN_ENV: &str = "MVM_CLI_BIN";
+// Re-exported so `machine::MVM_CLI_BIN_ENV` keeps resolving for existing
+// callers; the name itself is owned by the generated-from registry.
+pub use crate::env::MVM_CLI_BIN_ENV;
 
 /// Captured result from a successful `mvmctl machine` subprocess.
 #[derive(Debug, Clone, PartialEq, Eq)]
