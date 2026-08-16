@@ -904,7 +904,7 @@ jobs:
       # Pinned, not `latest`. Auto-tracking a moving release is how this lane
       # would surprise-break on an unrelated image cut, and it would look like
       # a latency regression when it is not.
-      IMAGE_TAG: v0.17.1
+      IMAGE_TAG: v0.18.0
       # Must track `crates/mvm-core/src/config.rs::FC_VERSION_DEFAULT`. The
       # launch path passes `--enable-pci`, which older Firecracker rejects
       # outright: it exits before creating its API socket, and the only symptom
