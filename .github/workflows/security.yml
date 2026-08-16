@@ -255,11 +255,29 @@ jobs:
   # ADR-001 §W4.2 + Plan 85 §R1 — cargo-fuzz harnesses for
   # GuestRequest, the authenticated-frame envelope, the libkrun
   # SupervisorConfig parser, and the OCI layer-unpack ingress.
-  # Run for 5 minutes per tag-push / dispatch; the nightly cron
-  # extends to 30 minutes.
+  # Per-target durations are the `FUZZ_SECS_*` budget below, deliberately
+  # not quoted here: they move as targets are added, and a duration named
+  # in two places goes stale in one of them.
   fuzz:
     name: Fuzz — parsers (vsock + OCI)
     runs-on: ubuntu-latest
+    # Under the six-hour platform cap, so a lane that outgrows its budget
+    # is stopped as this job rather than killed as the runner mid-target.
+    timeout-minutes: 300
+    env:
+      # Per-target fuzzing seconds. Literals at job scope rather than inside
+      # the script below because `xtask check-workflow-paths` reads them: it
+      # multiplies them by the number of targets in this job and refuses a
+      # budget that cannot finish inside `timeout-minutes`.
+      #
+      # 1800 was chosen when this lane had four targets. It has seventeen,
+      # and seventeen half-hours do not fit in six. Every nightly run was
+      # stopped partway down the list — most recently after eleven targets —
+      # so the last six, `fuzz_datapath_ingress` among them, had never
+      # executed on a cron run at all. The job's conclusion was `cancelled`,
+      # which the lane watcher did not count, so nothing said so.
+      FUZZ_SECS_SCHEDULE: 720
+      FUZZ_SECS_DISPATCH: 300
     steps:
       - uses: actions/checkout@v6
 
@@ -284,9 +302,9 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
         run: |
           if [ "$EVENT_NAME" = "schedule" ]; then
-            echo "secs=1800" >> "$GITHUB_OUTPUT"
+            echo "secs=$FUZZ_SECS_SCHEDULE" >> "$GITHUB_OUTPUT"
           else
-            echo "secs=300" >> "$GITHUB_OUTPUT"
+            echo "secs=$FUZZ_SECS_DISPATCH" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Fuzz GuestRequest (fuzz_guest_request)
@@ -544,7 +562,10 @@ jobs:
     # This has already earned itself: mvm-hostd/2of2 hit it on 2026-08-16 and
     # was reported as a bounded, attributable stop with its partial output
     # kept, which is what said the split was uneven and by how much. Note
-    # that GitHub records a timeout kill as `cancelled`, not `failure`.
+    # that GitHub records a timeout kill as `cancelled`, not `failure` —
+    # `security-lane-watch.yml` counts `cancelled` for that reason, and
+    # before it did, a shard that never finished was the one kind of red
+    # this whole lane could not report.
     timeout-minutes: 330
     # BLOCKING, and sharded per package.
     #
