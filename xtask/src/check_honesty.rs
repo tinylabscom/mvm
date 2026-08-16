@@ -104,7 +104,10 @@ pub fn run(workspace: &Path) -> Result<()> {
                 if !line.contains(id) {
                     continue;
                 }
-                if let Some(word) = ASSERTIVE.iter().find(|w| lower.contains(*w)) {
+                if let Some(word) = ASSERTIVE
+                    .iter()
+                    .find(|w| crate::check_declared_backing::contains_word(&lower, w))
+                {
                     violations.push(format!(
                         "R2: {rel}:{}: `{id}` is an `open` claim --- measured and reported, \
                          never asserted --- but this line says `{word}`.\n    {}",
@@ -117,7 +120,10 @@ pub fn run(workspace: &Path) -> Result<()> {
                 if !line.contains(id) {
                     continue;
                 }
-                if let Some(word) = ASSERTIVE.iter().find(|w| lower.contains(*w)) {
+                if let Some(word) = ASSERTIVE
+                    .iter()
+                    .find(|w| crate::check_declared_backing::contains_word(&lower, w))
+                {
                     violations.push(format!(
                         "R2: {rel}:{}: `{id}` is cited, not established here, but this line \
                          says `{word}`.\n    {}",
