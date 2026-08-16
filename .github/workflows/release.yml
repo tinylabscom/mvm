@@ -591,7 +591,12 @@ jobs:
           # is the only step that opens the rootfs and reads the bytes the
           # kernel will exec. Runs before the image is uploaded, so a rootfs
           # that cannot boot never becomes a release asset.
-          sudo apt-get update && sudo apt-get install -y e2fsprogs
+          # debugfs ships in e2fsprogs, preinstalled on both runner images.
+          # Install only if that ever stops being true: an apt round-trip on
+          # the release critical path is a flake that fails the publish for a
+          # reason having nothing to do with the image.
+          command -v debugfs >/dev/null 2>&1 \
+            || { sudo apt-get update && sudo apt-get install -y e2fsprogs; }
           bash nix/packaging/release/assert-init-shebang.sh \
             "staging/default-microvm-rootfs-${ARCH}.ext4" "staged ${ARCH}"
 
