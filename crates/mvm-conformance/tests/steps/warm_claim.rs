@@ -10,7 +10,6 @@
 //! caller and guest init) and are out of scope here; this scenario only
 //! drives the steps the runner itself owns.
 
-use std::path::PathBuf;
 use std::sync::Mutex;
 
 use cucumber::{given, then, when};
