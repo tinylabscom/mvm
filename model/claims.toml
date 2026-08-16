@@ -340,6 +340,7 @@ witnesses = [
     "fn:a_vm_with_no_recorded_scope_reads_back_as_declared_not_as_an_error",
     "fn:an_admitted_boot_writes_the_achieved_tier_to_the_audit_chain",
     "fn:a_wall_clock_bound_needs_a_clock_that_can_stop_the_workload",
+    "fn:a_bounded_admitted_plan_arms_the_timer",
     "fn:a_granted_cpu_share_binds_a_real_spawn_to_its_quota",
     "fn:a_restored_child_is_cpu_bounded_by_its_admitted_grant",
     "fn:a_claimed_child_over_the_host_ceiling_is_refused",

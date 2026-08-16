@@ -205,7 +205,10 @@ fn relay_libkrun_supervisor_config(spec: &VmmSpec, state_dir: &Path) -> Result<S
         // and it arms that timer from `plan`. Leaving these `None` is what left
         // every wall-clock bound unenforced. They select no admission route;
         // the audit entry takes its tenant from the plan itself.
-        plan: spec.plan_binding.as_ref().map(|b| b.plan_json.clone()),
+        plan: spec
+            .plan_binding
+            .as_ref()
+            .map(mvm_vmm::driver::spec::PlanBinding::plan_carrier),
         audit_dir: spec.plan_binding.as_ref().map(|b| b.audit_dir.clone()),
         signing_key_path: spec
             .plan_binding
@@ -656,7 +659,9 @@ mod tests {
 
     fn binding() -> mvm_vmm::driver::spec::PlanBinding {
         mvm_vmm::driver::spec::PlanBinding {
-            plan_json: serde_json::json!({"resources": {"timeouts": {"exec_secs": 30}}}),
+            plan: mvm_core::plan::test_support::PlanFixture::new()
+                .exec_secs(30)
+                .build_signed(),
             audit_dir: "/fixture/audit".into(),
             signing_key_path: "/fixture/keys/host-signer.ed25519".into(),
         }
@@ -668,11 +673,20 @@ mod tests {
         spec.plan_binding = Some(binding());
         let cfg = relay(&spec);
 
+        // `plan` carries the signed envelope, which the supervisor decodes and
+        // then reads the bound out of the payload. Asserting through that same
+        // two-step is what pins the two sides to one shape.
+        let envelope: mvm_core::plan::SignedExecutionPlan =
+            serde_json::from_value(cfg.plan.clone().expect("the relay carries the plan"))
+                .expect("the relay must emit a signed envelope, not a bare plan");
         assert_eq!(
-            cfg.plan
-                .as_ref()
-                .map(|p| p["resources"]["timeouts"]["exec_secs"].clone()),
-            Some(serde_json::json!(30)),
+            envelope
+                .payload_plan()
+                .expect("the envelope carries the plan")
+                .resources
+                .timeouts
+                .exec_secs,
+            30,
             "the supervisor arms its wall-clock timer from `plan`; without it every bound is inert"
         );
         assert_eq!(cfg.audit_dir.as_deref(), Some(Path::new("/fixture/audit")));

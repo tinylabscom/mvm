@@ -258,7 +258,10 @@ fn relay_supervisor_config_with_handoff(
         // The plan's wall-clock bound and the paths its kill is audited under.
         // The supervisor owns the guest for its whole life, so it holds the
         // only timer that can still fire once `mvmctl` is gone.
-        plan: spec.plan_binding.as_ref().map(|b| b.plan_json.clone()),
+        plan: spec
+            .plan_binding
+            .as_ref()
+            .map(mvm_vmm::driver::spec::PlanBinding::plan_carrier),
         audit_dir: spec.plan_binding.as_ref().map(|b| b.audit_dir.clone()),
         signing_key_path: spec
             .plan_binding
@@ -1090,7 +1093,9 @@ mod tests {
     fn a_plan_bound_spec_hands_the_hvf_supervisor_what_it_needs_to_enforce_the_bound() {
         let mut spec = spec_with(KernelImage::Path("/k/Image".into()), vec![], vec![]);
         spec.plan_binding = Some(mvm_vmm::driver::spec::PlanBinding {
-            plan_json: serde_json::json!({"resources": {"timeouts": {"exec_secs": 30}}}),
+            plan: mvm_core::plan::test_support::PlanFixture::new()
+                .exec_secs(30)
+                .build_signed(),
             audit_dir: "/fixture/audit".into(),
             signing_key_path: "/fixture/keys/host-signer.ed25519".into(),
         });
@@ -1098,11 +1103,17 @@ mod tests {
 
         // HVF is the macOS 26+ auto-detect default, so an unenforced bound here
         // is the default path. The supervisor arms its timer from `plan`.
+        let envelope: mvm_core::plan::SignedExecutionPlan =
+            serde_json::from_value(cfg.plan.clone().expect("the relay carries the plan"))
+                .expect("the relay must emit a signed envelope, not a bare plan");
         assert_eq!(
-            cfg.plan
-                .as_ref()
-                .map(|p| p["resources"]["timeouts"]["exec_secs"].clone()),
-            Some(serde_json::json!(30))
+            envelope
+                .payload_plan()
+                .expect("the envelope carries the plan")
+                .resources
+                .timeouts
+                .exec_secs,
+            30
         );
         assert_eq!(
             cfg.audit_dir.as_deref(),
@@ -1118,7 +1129,9 @@ mod tests {
     fn the_plan_bound_is_not_the_unaudited_run_backstop() {
         let mut spec = spec_with(KernelImage::Path("/k/Image".into()), vec![], vec![]);
         spec.plan_binding = Some(mvm_vmm::driver::spec::PlanBinding {
-            plan_json: serde_json::json!({"resources": {"timeouts": {"exec_secs": 30}}}),
+            plan: mvm_core::plan::test_support::PlanFixture::new()
+                .exec_secs(30)
+                .build_signed(),
             audit_dir: "/fixture/audit".into(),
             signing_key_path: "/fixture/keys/host-signer.ed25519".into(),
         });

@@ -37,6 +37,7 @@ pub struct PlanFixture {
     stream_retention: StreamRetention,
     audit_labels: BTreeMap<String, String>,
     grants: Option<mvm_contract::grants::Grants>,
+    exec_secs: u32,
 }
 
 impl Default for PlanFixture {
@@ -55,6 +56,7 @@ impl Default for PlanFixture {
             stream_retention: StreamRetention::default(),
             audit_labels: BTreeMap::new(),
             grants: None,
+            exec_secs: 0,
         }
     }
 }
@@ -133,6 +135,35 @@ impl PlanFixture {
         self
     }
 
+    /// The plan's wall-clock bound, in seconds. `0` (the default) is
+    /// unbounded and arms no supervisor timer.
+    #[must_use]
+    pub fn exec_secs(mut self, secs: u32) -> Self {
+        self.exec_secs = secs;
+        self
+    }
+
+    /// The signer id the [`PlanFixture::build_signed`] envelope carries.
+    pub const TEST_SIGNER_ID: &'static str = "host:plan-fixture";
+
+    /// The fixture plan wrapped in the signed envelope every launch path
+    /// actually puts on the wire.
+    ///
+    /// Anything that consumes an admitted plan across a process boundary —
+    /// `VmStartConfig.plan_json`, the driver's `PlanBinding`, the per-VM
+    /// supervisor's JSON config — receives this shape, never the bare plan
+    /// [`PlanFixture::build`] returns. A fixture that hands one of those a bare
+    /// plan is testing a shape no producer emits, which is exactly how the
+    /// supervisor's wall-clock decode shipped broken.
+    pub fn build_signed(self) -> crate::plan::SignedExecutionPlan {
+        let plan = self.build();
+        crate::plan::sign_plan(
+            &plan,
+            &ed25519_dalek::SigningKey::from_bytes(&[9u8; 32]),
+            Self::TEST_SIGNER_ID,
+        )
+    }
+
     pub fn build(self) -> ExecutionPlan {
         let now = Utc::now();
         ExecutionPlan {
@@ -161,7 +192,7 @@ impl PlanFixture {
                 disk_mib: 0,
                 timeouts: TimeoutSpec {
                     boot_secs: 30,
-                    exec_secs: 0,
+                    exec_secs: self.exec_secs,
                 },
             },
             admission_profile: AdmissionProfile::local_default(

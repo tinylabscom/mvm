@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 /// A signed payload: the raw bytes of the canonical JSON, the Ed25519
 /// signature, and an identifier for which key produced the signature.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SignedPayload {
     pub payload: Vec<u8>,
     pub signature: Vec<u8>,

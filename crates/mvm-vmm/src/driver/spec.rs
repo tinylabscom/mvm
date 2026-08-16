@@ -8,6 +8,7 @@
 
 use std::path::PathBuf;
 
+use mvm_core::plan::SignedExecutionPlan;
 use mvm_net::channel::GuestService;
 
 /// Where a VM's kernel comes from.
@@ -137,13 +138,29 @@ pub struct VmmSpec {
 /// the tenant — the audit entry takes it from the plan.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlanBinding {
-    /// The admitted `ExecutionPlan` envelope, as the supervisor re-verifies it.
-    /// Untyped here so the spec does not couple to `mvm_core::plan`.
-    pub plan_json: serde_json::Value,
+    /// The admitted plan, as the signed envelope the launch path put on the
+    /// wire. Typed rather than `serde_json::Value` because the envelope and the
+    /// bare plan are disjoint JSON shapes and a reader that guessed wrong got a
+    /// decode error at boot instead of a compile error here.
+    pub plan: SignedExecutionPlan,
     /// `~/.mvm/audit/` — where the chain-signed kill entry lands.
     pub audit_dir: PathBuf,
     /// `~/.mvm/keys/host-signer.ed25519` — the key the chain is signed under.
     pub signing_key_path: PathBuf,
+}
+
+impl PlanBinding {
+    /// The envelope in the untyped carrier shape the per-VM supervisor's JSON
+    /// config uses. That layer stays a serde boundary on purpose, so this is
+    /// the one hop where the type is erased — and the supervisor reconstitutes
+    /// it as a `SignedExecutionPlan`, never as a bare plan.
+    ///
+    /// Infallible: an envelope is two byte strings and a signer id, which
+    /// always encode.
+    #[must_use]
+    pub fn plan_carrier(&self) -> serde_json::Value {
+        serde_json::to_value(&self.plan).expect("a signed plan envelope always encodes as JSON")
+    }
 }
 
 impl VmmSpec {

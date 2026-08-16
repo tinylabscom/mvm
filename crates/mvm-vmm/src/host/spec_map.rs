@@ -375,15 +375,17 @@ pub fn workload_device_spec(config: &VmStartConfig, cmdline: &str, console_log: 
 /// wall-clock bound and record the kill, or `None` when the launch carries no
 /// admitted plan.
 ///
-/// Malformed `plan_json` yields `None` rather than an error: this mapping is
-/// infallible by construction, and a plan the supervisor cannot parse would
-/// fail its own re-verification regardless. Whether a bound actually exists is
-/// the supervisor's read of `resources.timeouts.exec_secs`; this only makes one
-/// enforceable.
+/// `VmStartConfig.plan_json` carries the signed envelope — the admission path
+/// serialises `admitted.signed()` onto it — so it is decoded as one here.
+/// Anything that is not an envelope yields `None` rather than an error: this
+/// mapping is infallible by construction, and a plan the supervisor cannot
+/// parse would fail its own re-verification regardless. Whether a bound
+/// actually exists is the supervisor's read of `resources.timeouts.exec_secs`;
+/// this only makes one enforceable.
 fn workload_plan_binding(config: &VmStartConfig) -> Option<PlanBinding> {
-    let plan_json = serde_json::from_str(config.plan_json.as_deref()?).ok()?;
+    let plan = serde_json::from_str(config.plan_json.as_deref()?).ok()?;
     Some(PlanBinding {
-        plan_json,
+        plan,
         audit_dir: mvm_core::config::mvm_audit_dir(),
         signing_key_path: mvm_core::config::mvm_keys_dir().join(HOST_SIGNER_KEY_FILE),
     })
@@ -451,17 +453,36 @@ mod tests {
         }
     }
 
+    /// The admission path serialises `admitted.signed()` onto `plan_json`, so a
+    /// fixture holding a bare plan would exercise a shape no launch emits.
+    fn admitted_plan_json(exec_secs: u32) -> String {
+        let signed = mvm_core::plan::test_support::PlanFixture::new()
+            .exec_secs(exec_secs)
+            .build_signed();
+        serde_json::to_string(&signed).expect("the envelope serialises")
+    }
+
     #[test]
     fn a_launch_carrying_an_admitted_plan_gets_a_plan_binding() {
         let cfg = VmStartConfig {
-            plan_json: Some(r#"{"resources":{"timeouts":{"exec_secs":30}}}"#.into()),
+            plan_json: Some(admitted_plan_json(30)),
             ..base()
         };
         let spec = workload_device_spec(&cfg, "console=ttyS0", Path::new("/state/console.log"));
         let binding = spec
             .plan_binding
             .expect("a launch with an admitted plan must carry the bound the supervisor enforces");
-        assert_eq!(binding.plan_json["resources"]["timeouts"]["exec_secs"], 30);
+        assert_eq!(
+            binding
+                .plan
+                .payload_plan()
+                .expect("the envelope carries the plan")
+                .resources
+                .timeouts
+                .exec_secs,
+            30,
+            "the binding must carry the bound the supervisor arms its timer from"
+        );
         assert_eq!(
             binding
                 .signing_key_path
@@ -496,6 +517,21 @@ mod tests {
         assert!(
             spec.plan_binding.is_none(),
             "the mapping is infallible; a plan the supervisor cannot parse fails its own verify"
+        );
+    }
+
+    #[test]
+    fn a_bare_plan_on_the_wire_yields_no_binding() {
+        // Only the signed envelope is a plan here. A bare plan is not a weaker
+        // form of one — it is a different shape the supervisor cannot verify.
+        let cfg = VmStartConfig {
+            plan_json: Some(r#"{"resources":{"timeouts":{"exec_secs":30}}}"#.into()),
+            ..base()
+        };
+        let spec = workload_device_spec(&cfg, "console=ttyS0", Path::new("/state/console.log"));
+        assert!(
+            spec.plan_binding.is_none(),
+            "an unsigned plan body is not an admitted plan"
         );
     }
 

@@ -29,7 +29,7 @@ use std::sync::Arc;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::time::{Duration, Instant};
 
-use mvm_core::plan::ExecutionPlan;
+use mvm_core::plan::{ExecutionPlan, SignedExecutionPlan};
 
 use crate::audit::emitter::AuditEmitter;
 
@@ -182,10 +182,16 @@ impl WallClockGuard {
 /// optional paths of the same shape, and a caller swapping two of them would
 /// produce a timer that audits into the wrong place.
 pub struct SupervisorTimerInputs<'a> {
-    /// The admitted `ExecutionPlan`, as the supervisor received it. `None` on
-    /// the legacy non-plan boot paths (Stage 0, the builder VM), which carry no
-    /// grant and therefore no bound.
-    pub plan_json: Option<&'a serde_json::Value>,
+    /// The admitted plan's **signed envelope**, in the untyped carrier shape
+    /// the supervisor's JSON config uses. `None` on the legacy non-plan boot
+    /// paths (Stage 0, the builder VM), which carry no grant and therefore no
+    /// bound.
+    ///
+    /// Named for the envelope because that is what every producer sends: the
+    /// admission path serialises `admitted.signed()`. Reading it as a bare
+    /// plan parses nothing — the two shapes share no field — which is why the
+    /// name carries the shape.
+    pub signed_plan_json: Option<&'a serde_json::Value>,
     /// `~/.mvm/audit/` — where the chain-signed entry lands.
     pub audit_dir: Option<&'a std::path::Path>,
     /// `~/.mvm/keys/host-signer.ed25519` — the key the chain is signed under.
@@ -207,11 +213,14 @@ pub fn arm_for_supervisor(
 ) -> anyhow::Result<Option<WallClockGuard>> {
     use anyhow::Context;
 
-    let Some(value) = inputs.plan_json else {
+    let Some(value) = inputs.signed_plan_json else {
         return Ok(None);
     };
-    let plan: ExecutionPlan = serde_json::from_value(value.clone())
-        .context("decoding the admitted plan for the wall-clock timer")?;
+    let signed: SignedExecutionPlan = serde_json::from_value(value.clone())
+        .context("decoding the admitted plan envelope for the wall-clock timer")?;
+    let plan = signed
+        .payload_plan()
+        .context("decoding the plan inside the admitted envelope for the wall-clock timer")?;
     if plan.resources.timeouts.exec_secs == 0 {
         return Ok(None);
     }
@@ -407,6 +416,66 @@ mod tests {
         )
         .expect("timer");
         assert_eq!(timer.bound(), Duration::from_secs(42));
+    }
+
+    /// Exactly what the launch path puts on the wire: `plan_admission` writes
+    /// `serde_json::to_string(admitted.signed())` onto `VmStartConfig.plan_json`,
+    /// the spec map re-parses that string into the `PlanBinding`, and the
+    /// libkrun/HVF relays hand it to the supervisor verbatim. A fixture that
+    /// hands the timer a bare plan tests a shape no producer emits.
+    fn admitted_plan_on_the_wire(exec_secs: u32) -> serde_json::Value {
+        let signed = mvm_core::plan::test_support::PlanFixture::new()
+            .exec_secs(exec_secs)
+            .build_signed();
+        serde_json::to_value(&signed).expect("the envelope serialises")
+    }
+
+    #[test]
+    fn a_bounded_admitted_plan_arms_the_timer() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let audit_dir = home.path().join("audit");
+        let keys_dir = home.path().join("keys");
+        std::fs::create_dir_all(&audit_dir).expect("audit dir");
+        std::fs::create_dir_all(&keys_dir).expect("keys dir");
+        let wire = admitted_plan_on_the_wire(900);
+
+        let guard = arm_for_supervisor(SupervisorTimerInputs {
+            signed_plan_json: Some(&wire),
+            audit_dir: Some(&audit_dir),
+            signing_key_path: Some(&keys_dir.join("host-signer.ed25519")),
+            vm_state_dir: home.path(),
+        })
+        .expect("the supervisor must be able to read the plan it was admitted under");
+
+        assert!(
+            guard.is_some(),
+            "a plan admitted with a 900s bound must arm a timer; None here means the \
+             bound is inert"
+        );
+    }
+
+    #[test]
+    fn an_unbounded_admitted_plan_boots_without_a_timer() {
+        // The regression this pairs with: the decode used to run before the
+        // `exec_secs == 0` early return, so an unbounded plan — the common
+        // case — was refused too. Asserting `Ok(None)` and not merely "no
+        // error" pins both halves.
+        let home = tempfile::tempdir().expect("tempdir");
+        let wire = admitted_plan_on_the_wire(0);
+
+        let guard = arm_for_supervisor(SupervisorTimerInputs {
+            signed_plan_json: Some(&wire),
+            audit_dir: None,
+            signing_key_path: None,
+            vm_state_dir: home.path(),
+        })
+        .expect("an unbounded workload must boot");
+
+        assert!(
+            guard.is_none(),
+            "exec_secs 0 is unbounded; arming a timer for it would kill a workload \
+             that was never bounded"
+        );
     }
 
     #[test]

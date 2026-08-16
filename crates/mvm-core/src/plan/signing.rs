@@ -28,9 +28,26 @@ use crate::plan::types::SecretBinding;
 /// wrapper keeps the type system honest: a `SignedPayload` is
 /// generic, a `SignedExecutionPlan` is specifically the wrapper for
 /// `ExecutionPlan` and nothing else.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct SignedExecutionPlan(pub SignedPayload);
+
+impl SignedExecutionPlan {
+    /// The `ExecutionPlan` the envelope carries, decoded from the signed
+    /// payload bytes without re-verifying the signature.
+    ///
+    /// The one place that knows an envelope is two levels deep. Every host-side
+    /// reader of an admitted plan goes through here, so a caller cannot spell
+    /// the decode as a single `from_value::<ExecutionPlan>` — which parses
+    /// nothing, because an envelope carries none of the plan's fields.
+    ///
+    /// Signature-checking belongs to [`verify_plan`], which the host ran at
+    /// admission; a supervisor reading its own admitted plan back off the wire
+    /// is inside the TCB and re-reads it for the fields, not for the trust.
+    pub fn payload_plan(&self) -> Result<ExecutionPlan, serde_json::Error> {
+        serde_json::from_slice(&self.0.payload)
+    }
+}
 
 #[derive(Debug, Error)]
 pub enum PlanVerifyError {
@@ -83,8 +100,7 @@ pub fn sign_plan(plan: &ExecutionPlan, key: &SigningKey, signer_id: &str) -> Sig
 /// host is in the TCB.
 pub fn secrets_from_signed_json(plan_json: &str) -> Result<Vec<SecretBinding>, serde_json::Error> {
     let signed: SignedExecutionPlan = serde_json::from_str(plan_json)?;
-    let plan: ExecutionPlan = serde_json::from_slice(&signed.0.payload)?;
-    Ok(plan.secrets)
+    Ok(signed.payload_plan()?.secrets)
 }
 
 /// Extract the per-destination redaction policy from a signed plan's payload,
@@ -94,8 +110,7 @@ pub fn redaction_from_signed_json(
     plan_json: &str,
 ) -> Result<crate::policy::RedactionPolicy, serde_json::Error> {
     let signed: SignedExecutionPlan = serde_json::from_str(plan_json)?;
-    let plan: ExecutionPlan = serde_json::from_slice(&signed.0.payload)?;
-    Ok(plan.redaction)
+    Ok(signed.payload_plan()?.redaction)
 }
 
 /// Extract the reversible replacement policy from a signed plan's payload,
@@ -105,8 +120,7 @@ pub fn reversible_replacement_from_signed_json(
     plan_json: &str,
 ) -> Result<crate::policy::ReversibleReplacementPolicy, serde_json::Error> {
     let signed: SignedExecutionPlan = serde_json::from_str(plan_json)?;
-    let plan: ExecutionPlan = serde_json::from_slice(&signed.0.payload)?;
-    Ok(plan.reversible_replacement)
+    Ok(signed.payload_plan()?.reversible_replacement)
 }
 
 /// Extract the `tenant` id from a serialised `SignedExecutionPlan` envelope.
@@ -118,8 +132,7 @@ pub fn reversible_replacement_from_signed_json(
 /// the signature was checked at admission; the host is in the TCB.
 pub fn tenant_from_signed_json(plan_json: &str) -> Result<String, serde_json::Error> {
     let signed: SignedExecutionPlan = serde_json::from_str(plan_json)?;
-    let plan: ExecutionPlan = serde_json::from_slice(&signed.0.payload)?;
-    Ok(plan.tenant.0)
+    Ok(signed.payload_plan()?.tenant.0)
 }
 
 /// Decode an admitted plan from the per-VM `plan.json`, accepting both
@@ -137,7 +150,7 @@ pub fn plan_from_admitted_json(plan_json: &str) -> Result<ExecutionPlan, serde_j
     match serde_json::from_str::<ExecutionPlan>(plan_json) {
         Ok(plan) => Ok(plan),
         Err(bare_err) => match serde_json::from_str::<SignedExecutionPlan>(plan_json) {
-            Ok(signed) => serde_json::from_slice(&signed.0.payload),
+            Ok(signed) => signed.payload_plan(),
             Err(_) => Err(bare_err),
         },
     }

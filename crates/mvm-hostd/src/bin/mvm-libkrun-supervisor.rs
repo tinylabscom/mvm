@@ -274,7 +274,7 @@ fn dispatch_config(mut cfg: SupervisorConfig) -> ExitCode {
     // scope: dropping the guard stands the timer down.
     let _wall_clock = match mvm_hostd::supervisor::wall_clock::arm_for_supervisor(
         mvm_hostd::supervisor::wall_clock::SupervisorTimerInputs {
-            plan_json: cfg.plan.as_ref(),
+            signed_plan_json: cfg.plan.as_ref(),
             audit_dir: cfg.audit_dir.as_deref(),
             signing_key_path: cfg.signing_key_path.as_deref(),
             vm_state_dir: std::path::Path::new(&cfg.vm_state_dir),

@@ -103,10 +103,11 @@ pub struct SupervisorConfig {
     // `mvm_core::policy` structs at this layer; the bridge stays a
     // serde boundary. The leaf bin crate `mvm-libkrun-supervisor` can freely
     // depend on both and deserializes the Values on the bridge side.
-    /// JSON-encoded [`mvm_core::plan::ExecutionPlan`] for this admission.
-    /// The bin deserializes into the typed value when building
-    /// `BridgeConfig.plan`. `None` ⇒ legacy non-bridge path
-    /// (`tenant_id` will also be `None` and
+    /// JSON-encoded `mvm_core::plan::SignedExecutionPlan` envelope for this
+    /// admission — the signed wrapper, **not** the bare plan: every producer
+    /// serialises `admitted.signed()` onto it. The bin deserializes the
+    /// envelope and reads the plan out of its payload. `None` ⇒ legacy
+    /// non-bridge path (`tenant_id` will also be `None` and
     /// `validate_audit_substrate` will refuse).
     #[serde(default)]
     pub plan: Option<serde_json::Value>,
