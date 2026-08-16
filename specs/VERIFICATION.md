@@ -157,13 +157,30 @@ totals, or a bare entry alongside sharded ones all fail, because each
 leaves files nothing mutates while every remaining shard stays green.
 
 The job also carries `timeout-minutes: 330`, under the cap, so a shard
-that outgrows its budget fails as itself rather than as infrastructure,
+that outgrows its budget is stopped as this job rather than as the runner,
 and uploads its partial cargo-mutants output either way.
 
-**The split is by file count, not by cost** — five files each. The two
-most expensive files measured so far both land in `2of2`, so the shards
-are not expected to be equal; they are expected to fit. Re-measure rather
-than assume.
+**A shard stopped that way does not report as failed.** Actions gives a
+job killed by `timeout-minutes` the conclusion `cancelled`, not
+`timed_out`, so `security-lane-watch.yml` counts `cancelled` as failing and
+skips only when the run as a whole was cancelled. Before it did, a shard
+that never finished contributed no failing job — and on a night where it
+was the only casualty, the empty failing set read as green and closed the
+tracking issue.
+
+**The split is by file count, and file count is not cost.** The first run
+of the two-shard split, on 2026-08-16, measured the gap: `1of2` finished
+five files in 100 minutes, while `2of2` drew `plan_admission` (93
+mutants), `supervisor/audit_file` (107) and `supervisor/network/stages`
+(108), spent its full 330 and never reached its fifth file. This
+package's files differ by roughly 4x, so an even count is an uneven job.
+
+`mvm-hostd` is therefore cut four ways, which puts the two most expensive
+files in different shards and drops the worst known load from 335 mutants
+to 201 — about 200 minutes at the ~1 min/mutant that run measured. That
+is a bound with a measurement behind it, not a guess, but it is still a
+stride over a path-sorted list: if a shard breaches again, the next step
+is assignment by measured cost rather than more shards.
 
 These are **accepted rather than scoped out** on purpose. Scoping would
 stop the lane measuring those files at all; accepting keeps the ratchet

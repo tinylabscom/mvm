@@ -1073,13 +1073,18 @@ updates only its own entry below.
       halfway. Fixed independently and first in #1958, which corrected the
       fourteen `working-directory` values in place; this branch's matrix
       rebuild was dropped in favour of it.
-      **Residual:** the targets remain sequential steps in one job at the
-      nightly `secs=1800` budget, and the job sets no `timeout-minutes`, so
-      14 x 1800s is 7 hours of fuzzing against GitHub's 6-hour default
-      ceiling — before per-target sanitizer builds. The lane should be
-      expected to time out rather than pass, and a matrix (one cell per
-      target, `fail-fast: false`) is the shape that both fits the ceiling
-      and stops one stale entry skipping every target after it.
+      **Residual, since closed:** the targets remain sequential steps in
+      one job, but the nightly budget was `secs=1800` with no
+      `timeout-minutes`, so 14 x 1800s was 7 hours of fuzzing against
+      GitHub's 6-hour ceiling — before per-target sanitizer builds. That is
+      exactly what happened: by 2026-08-16 the lane had grown to seventeen
+      targets and every cron run was killed partway down the list. The
+      budget is now 720s per target under `timeout-minutes: 300`, and
+      `xtask check-workflow-paths` multiplies the two so target eighteen
+      fails a PR rather than silently pushing the lane back over the
+      ceiling. A matrix (one cell per target, `fail-fast: false`) remains
+      the shape that would also stop one stale entry skipping every target
+      after it.
 
       **MVM-SEC-07's two witnesses failed for unrelated reasons.**
       `cargo-audit`: `quick-xml 0.37.5` carried RUSTSEC-2026-0194/0195 (both

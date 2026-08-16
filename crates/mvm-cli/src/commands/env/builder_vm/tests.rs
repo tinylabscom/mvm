@@ -365,6 +365,98 @@ mod reap_orphans_tests {
         let _ = child.wait();
     }
 
+    /// A supervisor owned by another uid — Firecracker under the jailer runs as
+    /// root — must read as alive. `kill(pid, 0)` returns `EPERM` for it, which
+    /// a bare `== 0` check reads as dead, and the reaper would then treat the
+    /// guest's dir as unowned. Skipped where the probe cannot be exercised:
+    /// as root nothing returns `EPERM`, and a host with no other-uid process
+    /// has nothing to point it at.
+    #[test]
+    fn liveness_reports_a_process_owned_by_another_uid_as_alive() {
+        // SAFETY: `getuid` reads the calling process's real uid and cannot fail.
+        if unsafe { libc::getuid() } == 0 {
+            return;
+        }
+        let Some(pid) = first_process_owned_by_another_uid() else {
+            return;
+        };
+        assert!(
+            pid_is_alive(pid),
+            "pid {pid} is running under another uid and must read as alive"
+        );
+    }
+
+    /// A live PID this process may not signal, or `None` if the host has none.
+    fn first_process_owned_by_another_uid() -> Option<i32> {
+        // SAFETY: `getuid` reads the calling process's real uid and cannot fail.
+        let me = unsafe { libc::getuid() };
+        let out = std::process::Command::new("ps")
+            .args(["-axo", "pid=,uid="])
+            .output()
+            .ok()?;
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .find_map(|line| {
+                let mut fields = line.split_whitespace();
+                let pid: i32 = fields.next()?.parse().ok()?;
+                let uid: u32 = fields.next()?.parse().ok()?;
+                (pid > 1 && uid != me).then_some(pid)
+            })
+    }
+
+    #[test]
+    fn reap_spares_live_qemu_workload_under_launchd() {
+        // A workload dir's marker set has to be the same one every other
+        // liveness probe reads. `qemu.pid` was missing from it, so a live QEMU
+        // guest whose supervisor had been reparented to launchd read as having
+        // no owner, and the argv-scanned helper on the same dir was reaped.
+        let mut supervisor = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn stand-in QEMU supervisor");
+        let supervisor_pid = supervisor.id() as i32;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let vms_root = dir.path().join("vms");
+        let vm = vms_root.join("mvm-workload-livetest-qemu-running");
+        std::fs::create_dir_all(&vm).expect("mkdir");
+        let helper_cmd = format!("sleep 30 # {}", vm.file_name().unwrap().to_string_lossy());
+        let mut helper = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(&helper_cmd)
+            .spawn()
+            .expect("spawn stand-in helper");
+        let helper_pid = helper.id() as i32;
+        let snapshot = ProcSnapshot::from_parts(
+            [(supervisor_pid, 1), (helper_pid, 1)].into_iter().collect(),
+            vec![(helper_pid, helper_cmd)],
+        );
+        std::fs::write(vm.join("qemu.pid"), format!("{supervisor_pid}\n")).expect("write pid");
+
+        let out = reap_orphaned_vm_helpers_at_with_snapshot(
+            &vms_root,
+            WORKLOAD_SIDECARS,
+            false,
+            true,
+            false,
+            &snapshot,
+        )
+        .expect("reap");
+
+        assert_eq!(
+            out.killed, 0,
+            "a live QEMU supervisor must protect its helper"
+        );
+        assert!(
+            pid_is_alive(helper_pid),
+            "helper of live QEMU was wrongly killed"
+        );
+
+        let _ = supervisor.kill();
+        let _ = supervisor.wait();
+        let _ = helper.kill();
+        let _ = helper.wait();
+    }
+
     #[test]
     fn reap_spares_live_firecracker_workload_under_launchd() {
         let mut supervisor = std::process::Command::new("sleep")

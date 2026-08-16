@@ -129,6 +129,14 @@ fn visit(
             continue;
         }
 
+        // A changelog records what a commit message said, not what exists
+        // now. It is generated from git history, so a subject naming an ADR
+        // that was renumbered or never landed reappears on the next release
+        // however many times the line is edited out.
+        if path.file_name().and_then(|n| n.to_str()) == Some("CHANGELOG.md") {
+            continue;
+        }
+
         // Cheap pre-filter on extension. Binary files (images,
         // lockfiles, etc.) can't carry meaningful ADR refs even if
         // they happen to contain the byte sequence.
@@ -415,6 +423,42 @@ mod tests {
 
         let result = run(root);
         assert!(result.is_err(), "broken ref must surface as Err");
+    }
+
+    /// A changelog is generated from commit subjects. One naming an ADR that
+    /// was renumbered or never landed is a fact about the commit, not a claim
+    /// the ADR exists — and editing the line out only holds until the next
+    /// release regenerates it.
+    #[test]
+    fn a_changelog_reference_to_a_missing_adr_is_not_a_broken_ref() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("specs/adrs")).unwrap();
+        let adr1 = adr_token(1);
+        std::fs::write(
+            root.join("specs/adrs/001-fixture.md"),
+            format!("# {adr1} — fixture\n"),
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/a.rs"), format!("// see {adr1}\n")).unwrap();
+
+        let adr_missing = adr_token(998);
+        std::fs::write(
+            root.join("CHANGELOG.md"),
+            format!("- **adr**: {adr_missing} something that never landed\n"),
+        )
+        .unwrap();
+
+        run(root).expect("a changelog citing a missing ADR must not fail the gate");
+
+        // The exemption is the changelog, not the number: the same reference
+        // from source is still a broken ref.
+        std::fs::write(root.join("src/b.rs"), format!("// see {adr_missing}\n")).unwrap();
+        assert!(
+            run(root).is_err(),
+            "the same missing ADR cited from source must still fail"
+        );
     }
 
     #[test]

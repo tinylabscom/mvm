@@ -684,9 +684,13 @@ impl MvmClient for GatewayBackend {
             });
         }
         let url = self.endpoint("/api/v1/sandboxes")?;
+        // The remote sandbox API names an image with a string. Written form,
+        // not a tagged enum: the token the caller declared is the token the
+        // remote sees, so the two ends describe one image the same way.
+        let image = spec.image.to_string();
         let body = CreateSandboxBody {
             name: &spec.name,
-            image: &spec.image,
+            image: &image,
             memory_mib: spec.memory_mib,
             vcpus: spec.cpus,
         };
@@ -1020,7 +1024,7 @@ mod tests {
         let be = GatewayBackend::new(cfg("https://fleet.example.com")).unwrap();
         let spec = MachineSpec {
             name: "w".into(),
-            image: "i".into(),
+            image: "i".parse().unwrap(),
             cpus: 1,
             memory_mib: 64,
             env: vec![("A".into(), "B".into())],

@@ -580,3 +580,109 @@ fn divergence_matches_reviewed_list(world: &mut CliWorld) {
         path.display()
     );
 }
+
+// ────────────────────────────────────────────────────────────────────
+// Cross-language constructor verdicts.
+//
+// The surface comparison above reads names. It cannot see that two surfaces
+// exporting the same name disagree about which arguments that name accepts —
+// which is how `host_port` came to admit port 0 in one language and refuse it
+// in the other for as long as it did. This reads the shared verdict corpus and
+// checks the Python surface against it; the Rust surface is checked against the
+// same file by `crates/mvm-sdk/tests/validate.rs`.
+// ────────────────────────────────────────────────────────────────────
+
+/// One golden case: constructor, its two arguments, and the verdict every
+/// surface must reach.
+#[derive(Debug, serde::Deserialize)]
+struct ConstraintCase {
+    id: String,
+    verdict: String,
+}
+
+/// What one language surface did with a case.
+#[derive(Debug, serde::Deserialize)]
+struct ConstraintOutcome {
+    /// The constructor rejected the arguments outright.
+    refused: bool,
+    /// The document it emitted when it did not.
+    #[serde(default)]
+    document: Option<Value>,
+}
+
+fn constraint_corpus() -> Vec<ConstraintCase> {
+    let path = sdk_fixture_dir().join("network_constraints.json");
+    let corpus: Value = serde_json::from_str(
+        &std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("read {}: {error}", path.display())),
+    )
+    .expect("the verdict corpus is not JSON");
+    serde_json::from_value(corpus["cases"].clone()).expect("the verdict corpus has no `cases`")
+}
+
+#[when("I run the Python SDK network-constraint fixture")]
+fn run_constraint_fixture(world: &mut CliWorld) {
+    let fixture = sdk_fixture_dir().join("python_constraints.py");
+    world.sdk_output = Some(
+        Command::new("python3")
+            .current_dir(repo_root())
+            .env("PYTHONPATH", repo_root().join("crates/mvm-sdk/sdks/python"))
+            .arg(&fixture)
+            .output()
+            .unwrap_or_else(|error| panic!("spawn python3 for {}: {error}", fixture.display())),
+    );
+}
+
+#[then("every constructor case reaches the verdict the shared corpus states")]
+fn constructor_cases_match_the_corpus(world: &mut CliWorld) {
+    let reported: std::collections::BTreeMap<String, ConstraintOutcome> =
+        serde_json::from_value(sdk_json(world))
+            .expect("constraint fixture emitted an unknown shape");
+
+    let mut disagreements = Vec::new();
+    for case in constraint_corpus() {
+        let outcome = reported
+            .get(&case.id)
+            .unwrap_or_else(|| panic!("the Python fixture skipped corpus case {}", case.id));
+        // Refusing at the constructor and emitting a document validation then
+        // rejects are the same verdict: the value never reaches a workload.
+        // Which seam catches it is a language-idiom detail; that both catch it
+        // is the contract.
+        let (actual, detail) = if outcome.refused {
+            (
+                "invalid".to_string(),
+                "refused by the constructor".to_string(),
+            )
+        } else {
+            let document = outcome
+                .document
+                .as_ref()
+                .unwrap_or_else(|| panic!("case {} neither refused nor emitted", case.id));
+            let workload: mvm_contract::ir::Workload = serde_json::from_value(document.clone())
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "case {} emitted a document the IR rejects: {error}",
+                        case.id
+                    )
+                });
+            match mvm_contract::ir::validate(&workload) {
+                Ok(()) => ("valid".to_string(), "accepted by validate".to_string()),
+                Err(errors) => ("invalid".to_string(), format!("{errors:?}")),
+            }
+        };
+        if actual != case.verdict {
+            disagreements.push(format!(
+                "{}: corpus says {}, Python reached {} ({detail})",
+                case.id, case.verdict, actual
+            ));
+        }
+    }
+    assert!(
+        disagreements.is_empty(),
+        "the Python surface disagrees with the shared verdict corpus on {} case(s) — \
+         a constructor that admits what another language refuses is the drift \
+         network_constraints.json exists to catch:\n  {}",
+        disagreements.len(),
+        disagreements.join("\n  ")
+    );
+}

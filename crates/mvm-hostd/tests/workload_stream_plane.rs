@@ -33,7 +33,7 @@ use mvm_hostd::stream::StreamPlane;
 use mvm_runtime::driver::MockDriver;
 use mvm_runtime::workload_runner::{
     ConsoleStreamer, NetworkEndpointSpawnRequest, NetworkEndpointSpawner, RealBrokerRegistrar,
-    WorkloadLaunchInputs, WorkloadRunner, console_streamer_installed,
+    SpawnedEndpoint, WorkloadLaunchInputs, WorkloadRunner, console_streamer_installed,
 };
 
 /// How long a record may take to cross the console follower's poll interval
@@ -50,8 +50,11 @@ const ACCEPT_SETTLE: Duration = Duration::from_millis(250);
 struct StubNetworkEndpointSpawner;
 
 impl NetworkEndpointSpawner for StubNetworkEndpointSpawner {
-    fn spawn(&self, _req: &NetworkEndpointSpawnRequest<'_>) -> Result<PathBuf> {
-        Ok(PathBuf::from("/run/mvm-test-endpoint.sock"))
+    fn spawn(&self, _req: &NetworkEndpointSpawnRequest<'_>) -> Result<SpawnedEndpoint> {
+        Ok(SpawnedEndpoint {
+            egress_uds: PathBuf::from("/run/mvm-test-endpoint.sock"),
+            identity_drive: None,
+        })
     }
 }
 

@@ -33,6 +33,9 @@ pub mod did_key;
 /// The single `sha256:<64 lowercase hex>` shape check every prefixed
 /// content-address newtype in this crate shares (crate-private).
 pub(crate) mod digest_shape;
+/// Real on-disk footprint of a path — the one measurement behind every
+/// "how much would this reclaim" counter in the CLI.
+pub mod disk_usage;
 /// Host egress-broker decision logic (closed-by-default allow/deny per request).
 pub mod egress_broker;
 /// Egress-broker handler: compose decision + trace into an audit record.
@@ -129,6 +132,9 @@ pub mod provenance;
 pub mod rate_limit;
 pub mod receipt;
 pub mod residency;
+/// What a caller declared a machine should boot from — the one type both the
+/// declaration boundary and the build side name.
+pub mod rootfs_source;
 /// Hardened snapshot frame v0: cap-bounded, fail-closed parsing of the
 /// snapshot container mvm controls (eager-CoW / raw-hypervisor path).
 pub mod snapshot_frame;

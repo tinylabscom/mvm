@@ -15,6 +15,7 @@ pub mod egress_bridge;
 pub mod egress_redirect;
 pub mod egress_shared;
 pub mod fc_kernel;
+pub mod flowmux_identity;
 pub mod host_agent_spawn;
 pub mod hvf_supervisor;
 pub mod linux_env;

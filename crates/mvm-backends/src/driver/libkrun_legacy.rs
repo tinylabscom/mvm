@@ -31,61 +31,6 @@ use mvm_core::vm_backend::{StandbyClaim, StandbyError, StandbySpec, VmStartConfi
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use mvm_vmm::host::network_endpoint_spawn::EndpointGuard;
-
-/// Spawn the per-VM egress endpoint for libkrun workloads. Secret-bound runs
-/// get the WireRequest substitution path; secret-free runs can opt into the
-/// raw vsock relay when the resolved policy allows egress. Deny-all,
-/// secret-free runs keep the endpoint defused because the guest will not be
-/// told to start the egress client.
-pub fn spawn_libkrun_egress_endpoint_if_needed(
-    vm_name: &str,
-    state_dir: &Path,
-    config_tenant: &str,
-    network_policy: &mvm_core::network_policy::NetworkPolicy,
-) -> Result<EndpointGuard> {
-    use mvm_vmm::host::network_endpoint_spawn::{
-        EndpointTransport, SubstitutionSpawnParams, spawn_network_endpoint,
-    };
-    let default_redaction = mvm_core::policy::RedactionPolicy::default();
-    let decoded = mvm_vmm::host::egress_shared::decode_plan_secrets_from_state(state_dir)?;
-    let (secrets, redaction, tenant): (&[_], &mvm_core::policy::RedactionPolicy, &str) =
-        match &decoded {
-            Some((secrets, redaction, tenant)) => (secrets.as_slice(), redaction, tenant.as_str()),
-            None => (
-                &[],
-                &default_redaction,
-                if config_tenant.is_empty() {
-                    "local"
-                } else {
-                    config_tenant
-                },
-            ),
-        };
-    if secrets.is_empty() && !network_policy.allows_egress() {
-        return Ok(EndpointGuard::defused());
-    }
-    spawn_network_endpoint(SubstitutionSpawnParams {
-        vm_name,
-        state_dir,
-        tenant,
-        secrets,
-        redaction,
-        transport: EndpointTransport::Uds {
-            path: mvm_core::config::vm_vsock_port_socket(vm_name, mvm_agentd::vsock::EGRESS_PORT),
-        },
-        terminator_listen: None,
-        egress_proxy: None,
-        tls_intermediate: None,
-        network_policy: Some(network_policy),
-        raw_egress: secrets.is_empty(),
-        resolver_remote: None,
-        binding_store_dir: None,
-        flowmux_identity: None,
-    })?;
-    Ok(EndpointGuard::new(vm_name))
-}
-
 /// Kernel cmdline token that turns on the in-guest vsock egress client.
 /// Emitted only when outbound egress is allowed and the workload carries no
 /// bound secrets, so the raw SOCKS path never contends with the

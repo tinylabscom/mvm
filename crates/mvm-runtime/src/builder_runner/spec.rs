@@ -61,6 +61,10 @@ pub struct BuilderSpecInputs<'a> {
     pub agent_socket: Option<PathBuf>,
     /// Host-side egress relay UDS wired to `EGRESS_PORT`.
     pub egress_socket: PathBuf,
+    /// This boot's FlowMux identity drive (read-only). The guest reads its
+    /// signing key and the host anchor off it before starting the egress
+    /// client, which will not bind without them.
+    pub identity_drive: &'a Path,
     pub vcpus: u32,
     pub memory_mib: u32,
 }
@@ -119,6 +123,10 @@ pub fn builder_spec(inputs: &BuilderSpecInputs<'_>) -> VmmSpec {
     if let Some(runtime_overlay) = inputs.runtime_overlay {
         blocks.push(block(runtime_overlay, 4, true)); // vde: runtime overlay, RO
     }
+    // Appended last, and found in the guest by ext4 label rather than by slot,
+    // so the optional overlay above cannot shift it out from under the guest.
+    let identity_slot = blocks.len() as u8;
+    blocks.push(block(inputs.identity_drive, identity_slot, true));
 
     VmmSpec {
         name: inputs.name.to_string(),
@@ -373,6 +381,7 @@ mod tests {
 
     fn inputs() -> BuilderSpecInputs<'static> {
         BuilderSpecInputs {
+            identity_drive: Path::new("/state/flowmux-identity.ext4"),
             name: "bld",
             kernel: Path::new("/img/Image"),
             rootfs: Path::new("/img/builder-rootfs.ext4"),
@@ -391,7 +400,9 @@ mod tests {
     #[test]
     fn builder_spec_lays_out_four_disks_in_vda_vdd_order() {
         let spec = builder_spec(&inputs());
-        assert_eq!(spec.blocks.len(), 4);
+        // Four job disks plus this boot's FlowMux identity drive, appended
+        // last so the optional overlay cannot shift it.
+        assert_eq!(spec.blocks.len(), 5);
         // vda rootfs RO (file-served, not ephemeral).
         assert_eq!(spec.blocks[0].device_node(), "/dev/vda");
         assert_eq!(
@@ -407,6 +418,13 @@ mod tests {
         assert!(spec.blocks[2].read_only);
         assert_eq!(spec.blocks[3].device_node(), "/dev/vdd");
         assert!(!spec.blocks[3].read_only);
+        // The identity drive: read-only, and last.
+        assert_eq!(spec.blocks[4].device_node(), "/dev/vde");
+        assert_eq!(
+            spec.blocks[4].source,
+            PathBuf::from("/state/flowmux-identity.ext4")
+        );
+        assert!(spec.blocks[4].read_only);
         assert!(spec.blocks.iter().all(|b| !b.ephemeral));
     }
 
@@ -441,13 +459,21 @@ mod tests {
         let mut i = inputs();
         i.runtime_overlay = Some(Path::new("/cache/runtime-overlay.ext4"));
         let spec = builder_spec(&i);
-        assert_eq!(spec.blocks.len(), 5);
+        assert_eq!(spec.blocks.len(), 6);
         assert_eq!(spec.blocks[4].device_node(), "/dev/vde");
         assert_eq!(
             spec.blocks[4].source,
             PathBuf::from("/cache/runtime-overlay.ext4")
         );
         assert!(spec.blocks[4].read_only);
+        // The identity drive still lands after the overlay, and the guest
+        // finds it by label rather than by this position.
+        assert_eq!(spec.blocks[5].device_node(), "/dev/vdf");
+        assert_eq!(
+            spec.blocks[5].source,
+            PathBuf::from("/state/flowmux-identity.ext4")
+        );
+        assert!(spec.blocks[5].read_only);
         assert!(
             spec.cmdline
                 .contains("mvm.runtime_source_policy=required_overlay")

@@ -89,6 +89,11 @@ pub struct RegistryLimits {
     pub udp_open_rate: u32,
     /// DNS resolve requests per second (burst == rate). Zero disables.
     pub dns_resolve_rate: u32,
+    /// How long a relay waits for the guest to return credit before giving up
+    /// on the stream. Sits beside `initial_credit` because it is the other half
+    /// of the same window: one says how much room the guest starts with, this
+    /// says how long the host will wait to get it back.
+    pub credit_wait: Duration,
 }
 
 impl Default for RegistryLimits {
@@ -103,6 +108,7 @@ impl Default for RegistryLimits {
             tcp_connect_rate: 0,
             udp_open_rate: 0,
             dns_resolve_rate: 0,
+            credit_wait: Duration::from_secs(30),
         }
     }
 }

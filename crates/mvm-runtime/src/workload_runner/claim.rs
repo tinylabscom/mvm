@@ -18,6 +18,7 @@ use mvm_core::policy::network_policy::NetworkPolicy;
 use mvm_core::vm_backend::VmId;
 
 use crate::network_endpoint_spawn::EndpointGuard;
+use crate::workload_runner::runner::FlowMuxIdentitySource;
 use crate::workload_runner::runner::{NetworkEndpointSpawnRequest, NetworkEndpointSpawner};
 
 #[derive(Debug, thiserror::Error)]
@@ -151,15 +152,19 @@ pub fn bind_plan_to_parent(
 /// The per-VM substitution-endpoint spawn inputs a warm claim and a cold boot
 /// both thread, minus the VM identity: the id is supplied to
 /// [`ClaimGuards::spawn_endpoint`] separately so the socket is always keyed on
-/// the child's own [`VmId`], never a sibling's. `raw_egress` is derived here,
-/// not passed — a secret-free workload speaks raw TCP, a secret-bearing one the
-/// substitution protocol.
+/// the child's own [`VmId`], never a sibling's. The identity source is passed
+/// in rather than derived: a cold boot mints, a warm claim inherits, and only
+/// the caller knows which it is.
 pub struct EndpointSpawnInputs<'a> {
     pub state_dir: &'a Path,
     pub tenant: &'a str,
     pub secrets: &'a [SecretBinding],
     pub redaction: &'a RedactionPolicy,
     pub network_policy: &'a NetworkPolicy,
+    /// Where this boot's FlowMux identity comes from. A cold boot mints one; a
+    /// warm claim inherits its parent's, because the restored child already
+    /// holds the parent's signing key in memory.
+    pub identity: FlowMuxIdentitySource<'a>,
 }
 
 /// A spawned per-VM substitution endpoint: the host UDS the guest's `EGRESS_PORT`
@@ -169,6 +174,7 @@ pub struct EndpointSpawnInputs<'a> {
 /// `None`; the guest-side connect then fails closed without starting a process.
 pub struct EndpointHandle {
     egress_uds: Option<PathBuf>,
+    identity_drive: Option<PathBuf>,
     guard: EndpointGuard,
 }
 
@@ -177,6 +183,12 @@ impl EndpointHandle {
     /// `None` means the workload has no admitted egress capability.
     pub fn egress_uds(&self) -> Option<&Path> {
         self.egress_uds.as_deref()
+    }
+
+    /// The identity drive to attach to this guest, when this boot minted one.
+    /// `None` for a warm claim, whose guest already holds its key.
+    pub fn identity_drive(&self) -> Option<&Path> {
+        self.identity_drive.as_deref()
     }
 
     /// Disarm the reaper: the VM is up and the `stop` path now owns teardown.
@@ -241,21 +253,27 @@ impl<'a> ClaimGuards<'a> {
         if inputs.secrets.is_empty() && !inputs.network_policy.allows_egress() {
             return Ok(EndpointHandle {
                 egress_uds: None,
+                identity_drive: None,
                 guard: EndpointGuard::defused(),
             });
         }
-        let raw_egress = inputs.secrets.is_empty();
-        let egress_uds = self.spawner.spawn(&NetworkEndpointSpawnRequest {
+        // No protocol choice is made here any more. Whether a workload carries
+        // secrets decides what the endpoint *does* with a flow, not which
+        // protocol the guest speaks: there is one authenticated session either
+        // way. The old `raw_egress = secrets.is_empty()` fork is what let the
+        // guest and the host disagree.
+        let spawned = self.spawner.spawn(&NetworkEndpointSpawnRequest {
             vm_name: &vm.0,
             state_dir: inputs.state_dir,
             tenant: inputs.tenant,
             secrets: inputs.secrets,
             redaction: inputs.redaction,
             network_policy: inputs.network_policy,
-            raw_egress,
+            identity: inputs.identity,
         })?;
         Ok(EndpointHandle {
-            egress_uds: Some(egress_uds),
+            egress_uds: Some(spawned.egress_uds),
+            identity_drive: spawned.identity_drive,
             guard: EndpointGuard::new(&vm.0),
         })
     }
@@ -325,10 +343,10 @@ mod tests {
 
     // ---- ClaimGuards: the runner-side shared host steps ----
 
+    use crate::workload_runner::runner::SpawnedEndpoint;
     use crate::workload_runner::runner::{NetworkEndpointSpawnRequest, NetworkEndpointSpawner};
     use mvm_core::policy::RedactionPolicy;
     use mvm_core::policy::network_policy::NetworkPolicy;
-    use std::path::PathBuf;
     use std::sync::Mutex;
 
     /// An `NetworkEndpointSpawner` double: records the `vm_name` it was handed and,
@@ -341,9 +359,12 @@ mod tests {
     }
 
     impl NetworkEndpointSpawner for FakeSpawner {
-        fn spawn(&self, req: &NetworkEndpointSpawnRequest<'_>) -> anyhow::Result<PathBuf> {
+        fn spawn(&self, req: &NetworkEndpointSpawnRequest<'_>) -> anyhow::Result<SpawnedEndpoint> {
             *self.seen_vm.lock().unwrap() = Some(req.vm_name.to_string());
-            Ok(mvm_core::config::vm_network_endpoint_socket(req.vm_name))
+            Ok(SpawnedEndpoint {
+                egress_uds: mvm_core::config::vm_network_endpoint_socket(req.vm_name),
+                identity_drive: None,
+            })
         }
     }
 
@@ -353,6 +374,7 @@ mod tests {
         policy: &'a NetworkPolicy,
     ) -> EndpointSpawnInputs<'a> {
         EndpointSpawnInputs {
+            identity: FlowMuxIdentitySource::Mint,
             state_dir,
             tenant: "tenant-x",
             secrets: &[],

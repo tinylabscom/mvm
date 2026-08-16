@@ -15,3 +15,17 @@ export const MVM_SDK_MODE_ENV = "MVM_SDK_MODE";
  * path on exit, so a caller need not parse stdout.
  */
 export const MVM_SDK_OUT_PATH_ENV = "MVM_SDK_OUT_PATH";
+
+/**
+ * Overrides the per-call timeout, in seconds, applied to a `mvmctl
+ * machine` subprocess. Both language wrappers read it and give up at
+ * the deadline rather than waiting forever.
+ */
+export const MVM_MACHINE_TIMEOUT_ENV = "MVM_MACHINE_TIMEOUT_SEC";
+
+/**
+ * Overrides the cap, in bytes, on captured output from a `mvmctl
+ * machine` subprocess. Both language wrappers read it and report an
+ * overflow as an overflow.
+ */
+export const MVM_MACHINE_MAX_OUTPUT_ENV = "MVM_MACHINE_MAX_OUTPUT_BYTES";

@@ -478,7 +478,9 @@ use mvm_client::{MvmClient, MachineSpec, LocalBackend};
 let client = LocalBackend::new();
 
 // Fluent builder — name + image are required; cpus/memory/env default + override.
-let spec = MachineSpec::builder("web", "alpine")
+// The image is parsed here, so a declaration that names nothing is refused at
+// construction rather than at boot.
+let spec = MachineSpec::builder("web", "alpine")?
     .cpus(2)
     .memory_mib(512)
     .env("PORT", "8080")

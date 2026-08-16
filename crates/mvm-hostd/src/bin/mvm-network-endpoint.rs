@@ -27,7 +27,7 @@
 use std::io::{Read, Write};
 
 use anyhow::{Context, Result};
-use tracing::info;
+use tracing::{info, warn};
 
 use mvm_hostd::keyholder::secret_placeholder_env;
 use mvm_hostd::supervisor::flowmux::{FlowMuxSession, registry::RegistryLimits};
@@ -377,71 +377,156 @@ async fn serve_raw(
     Ok(())
 }
 
-/// The authenticated FlowMux serve loop over the adopted listener. Accepts one
-/// guest connection, completes the shared authenticated handshake pinned to the
-/// plan's guest verifying key, and runs the FlowMux session until it closes.
+/// The authenticated FlowMux serve loop over the adopted listener.
+///
+/// Accepts for the life of the VM, like the Wire and raw loops beside it, and
+/// runs each accepted connection as its own authenticated session. Two reasons
+/// it cannot accept just once. The guest's `FlowMuxReconnectClient` re-dials
+/// after a session dies, so a listener that is gone after the first accept
+/// turns one dropped session into permanent, unrecoverable loss of networking.
+/// And a guest runs more than one FlowMux client — `mvm-egress-client` and the
+/// addon DNS resolver each own a session — so a single accept would starve
+/// whichever lost the race.
+///
+/// Concurrent sessions all authenticate against the same pinned guest key, so
+/// accepting several does not widen who may connect; it only stops the endpoint
+/// from being a single-shot.
+///
+/// The UDS listener is bound non-blocking (`bind_transport`, so the Wire and
+/// raw loops can adopt it into tokio), which means it must be adopted here too
+/// rather than accepted on a blocking thread — a blocking accept on it returns
+/// `EAGAIN` immediately and forever.
 async fn serve_flowmux(cfg: &EndpointConfig, bound: Bound) -> Result<()> {
     let identity = cfg
         .flowmux_identity
         .as_ref()
         .context("flowmux egress configured without identity")?;
 
+    // Decode once, up front: bad key material is a config error that should
+    // fail the endpoint immediately, not surface as a puzzling handshake
+    // failure on whichever session happens to connect first.
     let host_key = decode_signing_key(&identity.host_signing_key_base64)
         .context("decode FlowMux host signing key")?;
     let guest_anchor = decode_verifying_key(&identity.guest_verifying_key_base64)
         .context("decode FlowMux guest verifying key")?;
-
-    // Accept is synchronous I/O; run it in spawn_blocking so the tokio worker
-    // thread stays free. Both UDS and vsock arrive as a std UnixStream (vsock
-    // accepts an AF_VSOCK fd that UnixStream wraps by fd number, matching the
-    // existing WireRequest vsock path).
-    let stream = tokio::task::spawn_blocking(move || accept_one_sync(bound))
-        .await
-        .context("FlowMux accept task")?
-        .context("accept FlowMux connection")?;
-
-    // RegistryLimits uses defaults here because the spawner does not yet
-    // thread the admitted plan's limits through cfg.network_policy / NetworkLimits.
-    let limits = RegistryLimits::default();
-    let gate = cfg
-        .network_policy
-        .as_ref()
-        .map(mvm_hostd::supervisor::network_endpoint::build_egress_gate)
-        .unwrap_or_else(mvm_runtime::vmm::egress_gate::EgressGate::default_deny);
     let session_id = identity.session_id.clone();
     let recorder = build_audit_recorder(&cfg.tenant_id).map(std::sync::Arc::new);
-    tokio::task::spawn_blocking(move || {
-        let mut session = FlowMuxSession::accept_with_recorder(
-            stream,
-            &session_id,
-            host_key,
-            &guest_anchor,
-            limits,
-            gate,
-            recorder,
-        )
-        .context("accept FlowMux session")?;
-        session.serve().context("serve FlowMux session")
-    })
-    .await
-    .context("FlowMux session task")?
+
+    let listener = FlowMuxListener::adopt(bound)?;
+    let mut consecutive_accept_errors = 0_u32;
+    loop {
+        let stream = match listener.accept().await {
+            Ok(stream) => {
+                consecutive_accept_errors = 0;
+                stream
+            }
+            Err(e) => {
+                // A single failed accept is not a reason to take the VM's
+                // networking down; a listener that fails every time is, and
+                // spinning on it would burn a core silently.
+                consecutive_accept_errors += 1;
+                warn!(
+                    error = %e,
+                    consecutive = consecutive_accept_errors,
+                    "FlowMux accept failed"
+                );
+                if consecutive_accept_errors >= MAX_CONSECUTIVE_ACCEPT_ERRORS {
+                    return Err(anyhow::Error::new(e).context(format!(
+                        "FlowMux listener failed {MAX_CONSECUTIVE_ACCEPT_ERRORS} times in a row"
+                    )));
+                }
+                continue;
+            }
+        };
+
+        // RegistryLimits uses defaults here because the spawner does not yet
+        // thread the admitted plan's limits through cfg.network_policy /
+        // NetworkLimits. Built per session so one session's accounting cannot
+        // be spent by another.
+        let limits = RegistryLimits::default();
+        let gate = cfg
+            .network_policy
+            .as_ref()
+            .map(mvm_hostd::supervisor::network_endpoint::build_egress_gate)
+            .unwrap_or_else(mvm_runtime::vmm::egress_gate::EgressGate::default_deny);
+        let host_key = host_key.clone();
+        let session_id = session_id.clone();
+        let recorder = recorder.clone();
+        tokio::task::spawn_blocking(move || {
+            let served = FlowMuxSession::accept_with_recorder(
+                stream,
+                &session_id,
+                host_key,
+                &guest_anchor,
+                limits,
+                gate,
+                recorder,
+            )
+            .context("accept FlowMux session")
+            .and_then(|mut session| session.serve().context("serve FlowMux session"));
+            // One session ending is ordinary — the guest reconnects. Log it
+            // and keep accepting rather than taking the endpoint down with it.
+            if let Err(e) = served {
+                warn!(error = %format!("{e:#}"), "FlowMux session ended");
+            }
+        });
+    }
 }
 
-fn accept_one_sync(bound: Bound) -> std::io::Result<std::os::unix::net::UnixStream> {
-    match bound {
-        Bound::Uds(listener) => {
-            let (stream, _) = listener.accept()?;
-            Ok(stream)
+/// How many back-to-back accept failures mean the listener itself is broken
+/// rather than one connection being unlucky.
+const MAX_CONSECUTIVE_ACCEPT_ERRORS: u32 = 16;
+
+/// The FlowMux accept side of a [`Bound`].
+///
+/// Exists because the two transports need opposite treatment: the UDS listener
+/// is non-blocking and must be driven by the reactor, while the vsock listener
+/// is blocking and must be kept off the reactor. Each accepted connection is
+/// handed on as a **blocking** `std::os::unix::net::UnixStream`, which is what
+/// `FlowMuxSession` reads and writes on its `spawn_blocking` thread.
+enum FlowMuxListener {
+    Uds(tokio::net::UnixListener),
+    #[cfg(target_os = "linux")]
+    Vsock(std::sync::Arc<mvm_hostd::supervisor::network_endpoint_proxy::vsock::VsockListener>),
+}
+
+impl FlowMuxListener {
+    fn adopt(bound: Bound) -> Result<Self> {
+        match bound {
+            Bound::Uds(listener) => Ok(Self::Uds(
+                tokio::net::UnixListener::from_std(listener)
+                    .context("adopting the FlowMux UDS listener into the tokio runtime")?,
+            )),
+            #[cfg(target_os = "linux")]
+            Bound::Vsock(listener) => Ok(Self::Vsock(std::sync::Arc::new(listener))),
         }
-        #[cfg(target_os = "linux")]
-        Bound::Vsock(listener) => {
-            use std::os::fd::FromRawFd;
-            let fd =
-                mvm_hostd::supervisor::network_endpoint_proxy::vsock::accept(listener.raw_fd())?;
-            // SAFETY: `fd` is an owned connected stream socket from accept(2);
-            // wrapping it in UnixStream is the same fd-wrapping technique the
-            // WireRequest vsock path uses.
-            Ok(unsafe { std::os::unix::net::UnixStream::from_raw_fd(fd) })
+    }
+
+    async fn accept(&self) -> std::io::Result<std::os::unix::net::UnixStream> {
+        match self {
+            Self::Uds(listener) => {
+                let (stream, _) = listener.accept().await?;
+                // Back to blocking for the session thread: the accepted end
+                // inherits the listener's non-blocking flag on some platforms,
+                // and a non-blocking read there surfaces as a spurious
+                // handshake failure rather than as a wait.
+                let stream = stream.into_std()?;
+                stream.set_nonblocking(false)?;
+                Ok(stream)
+            }
+            #[cfg(target_os = "linux")]
+            Self::Vsock(listener) => {
+                use mvm_hostd::supervisor::network_endpoint_proxy::vsock;
+                use std::os::fd::FromRawFd;
+                let listener = std::sync::Arc::clone(listener);
+                let fd = tokio::task::spawn_blocking(move || vsock::accept(listener.raw_fd()))
+                    .await
+                    .map_err(std::io::Error::other)??;
+                // SAFETY: `fd` is an owned connected stream socket from
+                // accept(2); wrapping it in UnixStream is the same fd-wrapping
+                // technique the WireRequest vsock path uses.
+                Ok(unsafe { std::os::unix::net::UnixStream::from_raw_fd(fd) })
+            }
         }
     }
 }

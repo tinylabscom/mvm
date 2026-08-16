@@ -26,3 +26,8 @@ Feature: Cross-language SDK contract
   Scenario: generated SDK artifacts are current
     When I run the SDK codegen drift check
     Then the SDK codegen drift check passes
+
+  Scenario: the network constructors reach one verdict in every language
+    When I run the Python SDK network-constraint fixture
+    Then the SDK fixture exits successfully
+    And every constructor case reaches the verdict the shared corpus states

@@ -5,6 +5,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::rootfs_source::{RootfsSource, RootfsSourceParseError};
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct MachineId(pub String);
 
@@ -43,26 +45,31 @@ impl MachineStatus {
 /// ```
 /// use mvm_core::client::dto::MachineSpec;
 ///
-/// let spec = MachineSpec::builder("web", "nginx")
+/// let spec = MachineSpec::builder("web", "nginx")?
 ///     .cpus(2)
 ///     .memory_mib(512)
 ///     .env("PORT", "8080")
 ///     .build();
 /// assert_eq!(spec.name, "web");
+/// assert_eq!(spec.image.to_string(), "nginx");
+/// # Ok::<(), mvm_core::rootfs_source::RootfsSourceParseError>(())
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MachineSpec {
     pub name: String,
-    /// What to boot, as a declaration rather than something to be guessed at:
-    /// an absolute, `./`-relative or `~/`-relative path (or an explicit
-    /// `path:<p>`) is a local rootfs — a materialized `rootfs.ext4` or an
-    /// unpacked tree — and anything else (or an explicit `oci:<ref>`) is an
-    /// OCI reference. A declared path that is absent is refused by name; it is
-    /// never retried as a registry pull, because the two take different
-    /// verification routes and which one runs must not depend on the caller's
-    /// working directory.
-    pub image: String,
+    /// What to boot — the parsed declaration, not a string still waiting to be
+    /// interpreted: an absolute, `./`-relative or `~/`-relative path (or an
+    /// explicit `path:<p>`) is a local rootfs, a `flake:<ref>#<attr>` is a
+    /// flake output, and anything else (or an explicit `oci:<ref>`) is an OCI
+    /// reference. Serialized as that same string, so a spec on a wire carries
+    /// the token a user typed.
+    ///
+    /// Typed here because the alternative was a boundary that accepted every
+    /// string and found out at boot. A declared path that is absent is still a
+    /// boot-time refusal — no filesystem is consulted at this layer — but a
+    /// string that names nothing at all no longer reaches one.
+    pub image: RootfsSource,
     pub cpus: u32,
     pub memory_mib: u32,
     pub env: Vec<(String, String)>,
@@ -83,15 +90,25 @@ impl MachineSpec {
     /// Start building a spec. `name` and `image` are the two required fields;
     /// everything else defaults (1 vCPU, 512 MiB, no env, no grants) and is
     /// overridable on the returned [`MachineSpecBuilder`].
-    pub fn builder(name: impl Into<String>, image: impl Into<String>) -> MachineSpecBuilder {
-        MachineSpecBuilder {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RootfsSourceParseError`] when `image` names no rootfs source —
+    /// an empty declaration, or a scheme with nothing after it. The refusal
+    /// lands here rather than at boot because that is where the caller can
+    /// still see which value they passed.
+    pub fn builder(
+        name: impl Into<String>,
+        image: impl AsRef<str>,
+    ) -> Result<MachineSpecBuilder, RootfsSourceParseError> {
+        Ok(MachineSpecBuilder {
             name: name.into(),
-            image: image.into(),
+            image: image.as_ref().parse()?,
             cpus: 1,
             memory_mib: 512,
             env: Vec::new(),
             grants: mvm_contract::grants::Grants::default(),
-        }
+        })
     }
 }
 
@@ -105,7 +122,7 @@ impl MachineSpec {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MachineSpecBuilder {
     name: String,
-    image: String,
+    image: RootfsSource,
     cpus: u32,
     memory_mib: u32,
     env: Vec<(String, String)>,
@@ -445,7 +462,7 @@ mod tests {
     fn machine_spec_serde_round_trips() {
         let spec = MachineSpec {
             name: "web".into(),
-            image: "docker.io/lib/nginx:1".into(),
+            image: "docker.io/lib/nginx:1".parse().unwrap(),
             cpus: 2,
             memory_mib: 512,
             env: vec![("PORT".into(), "8080".into())],
@@ -473,6 +490,7 @@ mod tests {
         // The library surface's reason to exist: before this, a caller could
         // not ask for outbound access at all without shelling out to the CLI.
         let spec = MachineSpec::builder("web", "nginx")
+            .expect("declared image parses")
             .cpu_millicores(1500)
             .allow_egress("api.example.com", 443)
             .allow_egress("db.internal", 5432)
@@ -495,6 +513,7 @@ mod tests {
         // vCPU count and host CPU share are different questions; setting one
         // must not move the other.
         let spec = MachineSpec::builder("web", "nginx")
+            .expect("declared image parses")
             .cpus(4)
             .cpu_millicores(500)
             .build();
@@ -507,12 +526,14 @@ mod tests {
 
     #[test]
     fn builder_applies_defaults_and_overrides() {
-        let spec = MachineSpec::builder("web", "nginx").build();
+        let spec = MachineSpec::builder("web", "nginx")
+            .expect("declared image parses")
+            .build();
         assert_eq!(
             spec,
             MachineSpec {
                 name: "web".into(),
-                image: "nginx".into(),
+                image: "nginx".parse().unwrap(),
                 cpus: 1,
                 memory_mib: 512,
                 env: vec![],
@@ -521,6 +542,7 @@ mod tests {
         );
 
         let spec = MachineSpec::builder("web", "nginx")
+            .expect("declared image parses")
             .cpus(4)
             .memory_mib(1024)
             .env("A", "1")
@@ -542,19 +564,101 @@ mod tests {
     #[test]
     fn builder_equals_struct_literal() {
         let built = MachineSpec::builder("web", "docker.io/lib/nginx:1")
+            .expect("declared image parses")
             .cpus(2)
             .memory_mib(512)
             .env("PORT", "8080")
             .build();
         let literal = MachineSpec {
             name: "web".into(),
-            image: "docker.io/lib/nginx:1".into(),
+            image: "docker.io/lib/nginx:1".parse().unwrap(),
             cpus: 2,
             memory_mib: 512,
             env: vec![("PORT".into(), "8080".into())],
             grants: None,
         };
         assert_eq!(built, literal);
+    }
+
+    #[test]
+    fn a_declaration_that_names_nothing_is_refused_at_construction() {
+        // The property typing this field exists to add. A `String` here took
+        // every one of these and handed the caller a spec that could not boot,
+        // deferring the refusal to whichever backend eventually parsed it —
+        // which for the mock backend was never.
+        assert_eq!(
+            MachineSpec::builder("web", "").unwrap_err(),
+            RootfsSourceParseError::Empty
+        );
+        assert_eq!(
+            MachineSpec::builder("web", "  \n ").unwrap_err(),
+            RootfsSourceParseError::Empty
+        );
+        assert_eq!(
+            MachineSpec::builder("web", "path:").unwrap_err(),
+            RootfsSourceParseError::EmptyPayload { scheme: "path:" }
+        );
+        assert_eq!(
+            MachineSpec::builder("web", "oci:").unwrap_err(),
+            RootfsSourceParseError::EmptyPayload { scheme: "oci:" }
+        );
+    }
+
+    #[test]
+    fn a_declaration_that_names_nothing_is_refused_at_deserialization() {
+        // Same refusal on the way in from a wire, where the caller is not a
+        // Rust one and the builder cannot speak for them. `deny_unknown_fields`
+        // already fails closed on a field nobody declared; this fails closed on
+        // a declared field that says nothing.
+        for image in ["", "   ", "path:", "oci:", "flake:"] {
+            let json = format!(
+                r#"{{"name":"web","image":{},"cpus":1,"memory_mib":512,"env":[]}}"#,
+                serde_json::to_string(image).unwrap()
+            );
+            let err = serde_json::from_str::<MachineSpec>(&json)
+                .expect_err("a declaration naming nothing must not deserialize");
+            assert!(
+                err.to_string().contains("rootfs source")
+                    || err.to_string().contains("prefix with no value"),
+                "{image:?} was refused for the wrong reason: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_declaration_is_stored_as_the_value_it_names_not_the_bytes_that_carried_it() {
+        // A pasted or command-substituted image arrives with whitespace around
+        // it. With a `String` field the spec kept those bytes, so the value a
+        // listing showed and the value that booted were different strings.
+        let spec = MachineSpec::builder("web", "  alpine:3.20\n")
+            .expect("declared image parses")
+            .build();
+        assert_eq!(
+            spec.image,
+            RootfsSource::Oci {
+                image_ref: "alpine:3.20".to_string()
+            }
+        );
+        // And it leaves as the same token a user would have typed, which is
+        // what the SDKs forward as `--image`.
+        assert_eq!(spec.image.to_string(), "alpine:3.20");
+    }
+
+    #[test]
+    fn a_local_path_declaration_survives_the_wire_as_a_path() {
+        // Typing the field must not quietly reclassify a path as a reference on
+        // the way through serde — the two take different verification routes.
+        let spec = MachineSpec::builder("web", "/var/lib/mvm/rootfs.ext4")
+            .expect("declared image parses")
+            .build();
+        let json = serde_json::to_string(&spec).unwrap();
+        assert!(
+            json.contains(r#""image":"/var/lib/mvm/rootfs.ext4""#),
+            "path lost its plain form: {json}"
+        );
+        let back: MachineSpec = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.image, spec.image);
+        assert!(matches!(back.image, RootfsSource::LocalPath(_)));
     }
 
     #[test]

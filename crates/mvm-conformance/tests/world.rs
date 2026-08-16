@@ -395,6 +395,18 @@ pub struct CliWorld {
     pub approval_state: Option<mvm_contract::policy::approval::ApprovalState>,
     /// Approval state reconstructed after a simulated restart.
     pub approval_restarted_state: Option<mvm_contract::policy::approval::ApprovalState>,
+    /// Scratch dir for the one-transport scenarios' identity drives.
+    pub one_transport_dir: Option<tempfile::TempDir>,
+    /// Identity drives minted during a one-transport scenario, in order.
+    pub one_transport_drives: Vec<std::path::PathBuf>,
+    /// The material behind each of those drives.
+    pub one_transport_material: Vec<mvm_vmm::host::flowmux_identity::FlowMuxIdentityMaterial>,
+    /// Raw bytes of the drive the guest reader last inspected.
+    pub one_transport_image: Option<Vec<u8>>,
+    /// Raw bytes of the inheritable identity the host last persisted.
+    pub one_transport_persisted: Option<Vec<u8>>,
+    /// `(egress_mode, carries_guest_key)` for each endpoint config built.
+    pub one_transport_modes: Vec<(String, bool)>,
 }
 
 /// What a warm-claim `When` step observed from a `WorkloadRunner::claim_standby`

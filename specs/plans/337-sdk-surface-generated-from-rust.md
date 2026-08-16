@@ -318,6 +318,19 @@ tree notices today, and no signature-level gate ever would — it is exactly the
 class of drift the golden-IR gate in (4) exists to catch. Filed as #2559; not
 fixed here, because changing `host_port`'s behaviour is not a WS-1 change.
 
+**Fixed 2026-08-16 (#2559), and it brought (4) forward.** The constraint moved
+to `mvm_contract::ir::validate`, the one seam every language's document passes
+through, rather than into either constructor's signature — which is what
+decision (2) requires. `dns_resolver` turned out to have the wider version of
+the same hole (no host *or* port check on the Rust side at all) and is covered
+by the same helper. The durable half is
+`features/suites/s27_sdk/fixtures/network_constraints.json`: one file of golden
+verdicts, read by a Rust test and by an s27 scenario driving the Python DSL, so
+neither surface can move without the other failing. That is the first slice of
+the golden-document gate WS-3.4 asks for, built ahead of WS-3 because the defect
+needed it; when WS-3 generates these constructors into TypeScript, the third
+surface checks against the same file.
+
 #### Consequence for the tiers
 
 Tier A is **not** descoped to a hand-port. It proceeds as generation, from a
@@ -376,6 +389,24 @@ reports Node's 1 MiB `ENOBUFS` overflow as a spawn failure, where Python raises
 typed `TransportTimeout` / `TransportOutputOverflow`. Filed as #2558; fixing
 it is a behaviour change to a shipped SDK, not env-name codegen, so it is not
 bundled here.
+
+**Closed 2026-08-16 (#2558).** `_machine.ts` now passes both bounds and
+classifies `result.error` by code — `ETIMEDOUT` as a timeout, `ENOBUFS` as an
+overflow, everything else as the spawn failure it actually is. With the
+behaviour in place the codegen followed mechanically, exactly as this tier
+predicted: both rows gained `TypeScript`, `gen-stubs` emitted the constants, the
+divergence file lost its last two behaviour entries, and
+`machine_vars_are_not_claimed_for_typescript` inverted into
+`machine_vars_are_claimed_for_typescript` — so the honesty property survives and
+now fails if the behaviour is removed and the claim left behind.
+
+That work also surfaced something this plan had not accounted for: **neither
+SDK's unit suite ran in CI at all.** 212 pytest tests and 138 vitest tests are
+not cargo targets, so `cargo nextest run --workspace` never reached them and no
+workflow invoked either runner. Any regression witness written in those suites —
+including every one WS-3 will need for the generated constructors — was
+ungated. `just sdk-test` plus a step on the BDD lane fixes that; WS-3.4's
+two-language fixtures now have somewhere to run.
 
 Note for WS-3: this tier demonstrates the whole manifest→two-languages pipeline
 using `macro_rules!` alone — no proc-macro, no `syn`, no new dependency —
