@@ -2,19 +2,597 @@
 
 All notable changes to mvm are documented in this file.
 
-## [0.18.0] — Unreleased
+## [0.18.0] — 2026-08-16
 
 ### Added
 - **runtime**: Roll out the readonly guest-runtime overlay as a first-class
   release surface. Guest-executed runtime binaries are now published as a
   version-matched artifact under `~/.cache/mvm/runtime-overlay/<version>/<arch>/`
   and consumed read-only by admitted overlay-backed backends.
+- **mvm-cli**: Fetch + apply the signed pack revocation list (Plan 213 §I)
+- **release**: Publish + verify a signed pack revocation list
+- **mvm-build**: Runtime pack carries verity-sealed rootfs (kernel+rootfs+verity+roothash)
+- **mvm-cli**: Boot a workload from a verified runtime pack (§E E1b, claims intact)
+- **backend**: Delete the Vz backend — HVF is the sole macOS backend (Plan 226 R1P1)
+- **mvm-cli**: Default machine run auto-prefers a verified runtime pack
+- **mvm-cli**: Boot persistent machines from a verified runtime pack
+- **mvm-cli**: Explain why instant launch is unavailable + add `mvm prepare`
+- **mvm-cli**: Mvm cache status + pack cache index + expired-pack prune
+- Enterprise pack mirror + fetch-policy modes
+- **mvm-cli**: `mvm explain <run-id>` renders a run's attestation from the audit chain
+- **guest**: Deliver host-signer verb-grant anchor to vsock-only guests
+- **hvf**: Gate egress endpoint on admitted policy
+- **oci**: Verity-seal foundation — fail-closed initrd guard + seal capability
+- **oci**: Assemble the verity initramfs in-process (Slice 2a)
+- **oci**: Wire --prod to a bootable verity-sealed image (Slice 2b)
+- **net-tunnel**: Raw-L3 host-forwarded egress data plane (Plan 236 Phase 2A)
+- **net-tunnel**: MacOS userspace smoltcp TCP egress forwarder (Plan 236 Phase 2A)
+- **net-tunnel**: Macos smoltcp UDP egress forwarder (ICMP deferred)
+- **oci**: Bake verb-trust.json into the sealed image (Plan 236 §1.4)
+- **net-tunnel**: Macos smoltcp ICMP echo relay
+- Roll out readonly guest runtime overlay
+- **net-tunnel**: Unify host egress on smoltcp, retire host-TUN + kernel NAT
+- **oci-run**: Log workload-kernel provenance on resolution
+- **deps**: RustCrypto 0.10→0.11 + aws-lc-rs removal (Plan 126 B4/C1)
+- **net**: Wire the smoltcp egress tunnel into the transient run path
+- **overlay**: Overlay-only runtime — make the runtime overlay the sole guest-binary source, delete mkGuest baking
+- **net**: Wire the smoltcp egress tunnel into the HVF workload backend
+- **net**: Ship mvm-guest-netd in the runtime overlay (OCI tunnel pump)
+- **builder**: Enable the steady-state libkrun builder on Linux
+- **xtask**: Gate file production size at 1500 lines (check-file-size)
+- **runtime**: Dispatch backend metadata through the VmmDriver seam
+- **runtime**: Share the workload kernel-cmdline assembler with WorkloadRunner
+- **runtime**: Lift the host-services broker into WorkloadRunner
+- **runtime**: Carry user-volume disks + mvm.uvols token through WorkloadRunner
+- **cli**: Mvmctl build address + workload semantic-identity conformance lock + BDD
+- **runtime**: Make the workload base bootargs driver-provided
+- **runtime**: Add LibkrunDriver (VmmDriver mechanics, dormant)
+- **libkrun-sys**: Allow an explicit host UDS for a host-listen egress port
+- **runtime**: Route libkrun workloads through WorkloadRunner
+- Hash-linked, chain-anchored checkpoint lineage
+- **net**: Add policy-gated in-seam DNS resolver
+- **fs**: Add portable snapshot store
+- **runtime**: Converge Firecracker onto the WorkloadRunner (FcDriver)
+- **runtime**: Gate the uniform vsock-egress convergence + drop dead start_firecracker
+- **runtime**: Converge HVF onto the vsock runner + fail-closed egress
+- **sdk**: Sandbox.connect() inherits the dev-only exec guard
+- **bdd**: Live transient sandbox boot, ping egress, and cleanup
+- **mvm-core**: Content-address plan_id
+- **mvm-core**: Image-lineage node model, store, and verification (B1 of #1808)
+- **mvm-cli**: Create audited image-lineage nodes on build
+- **lineage**: Read-only machine timeline over checkpoint and image DAGs
+- **lineage**: Time-travel revert/rewind/advance restore verbs (C2, closes #1809)
+- **lineage**: Restore exact flake image revisions
+- **mvm-protocol**: No_std Merkle transparency-log module (#1811 slice 1)
+- **audit**: Host Merkle root builder + trust-audit verbs, tenant-bound
+- **plan-255**: Vsock-first snapshot storage — Phase 0 + Phase 1
+- Plan 265 fast-start foundation — no-NIC restore guard, page-merge policy, SLO helper
+- Add mvm.toml examples and manifest parser fixture tests
+- **light-guest**: Static-musl setpriv drops glibc from the guest rootfs, gated in CI
+- **mvm-runtime**: Plan 265 warm restore — no-NIC guard on pause/resume + fork un-bail + live @live harness + positioning docs
+- **plan-255**: Warm-pool claim substrate — Phase 2 slice one
+- **mvm-runtime**: Adopt vm-memory behind the GuestMem seam
+- **mvm-cli**: Instant-loop interaction-latency gate; retire the ops bench verb
+- **mvm-runtime**: Adopt virtio-queue for the in-house VMM's vsock TX ring walk
+- **mvm-runtime**: Adopt virtio-queue for the in-house VMM's vsock RX delivery
+- **mvm-runtime**: Adopt virtio-vsock's typed packet for the vsock header parse/format
+- **mvm-runtime**: Adopt virtio-queue for the in-house VMM's block and fs rings
+- Complete vsock-first warm-pool adoption
+- **plan-255**: Live Firecracker warm-claim substrate (capability disarmed)
+- **mvm-cli**: Add a machine warm-restore verb for vm_full checkpoints
+- **runtime**: Converge HVF onto the vsock workload runner + fail-closed egress
+- **conformance**: Model-driven claim register and R1-R4 gates
+- **standby**: Give a claimed child the host channels a cold boot gets
+- **270**: Universal initramfs with vsock-activated boot
+- **apple-container**: Stage-1 backend skeleton + plan 271
+- **qemu**: Converge onto the unified workload runner + vsock activation
+- **pool**: Let egress-allowing launches use the warm pool
+- **docker**: Opt-in dev-tier container backend with agent-as-PID-1 activation (ADR-034)
+- **xtask**: Mutation-test the claim witnesses, not just their presence
+- **test**: Give nextest the ci profile the Justfile has always named
+- **abi**: Pin every repr(C) layout to its authoritative header and gate it
+- **apple-container**: Boot Apple's container stack on the in-house HVF VMM + vminitd gRPC client + no-VZ gate
+- **egress**: Make a refusal say why
+- **wasm**: Deliver the activation contract to WASI modules via preopens + activation file
+- **sdk-sidecar**: Publish and hash-verify the sidecar so a downloaded mvmctl can boot an SDK workload
+- **release**: Cosign-verify the downloaded runtime overlay and SDK sidecar
+- **ci**: Notice when a claim-bearing lane stops running, not just when it fails
+- **core**: DesiredMount schema + MountVolume/UnmountVolume hostd verbs (mvmd plan 59 stage 0)
+- **egress**: Host-mediated ICMP echo over vsock, so ping works in the guest
+- **audit**: Bind transcripts to signed manifest roots
+- **cli**: One listing — machine ls shows transient and persistent microVMs
+- **core**: Volume-bridge wire protocol for FUSE-over-vsock mounts (mvmd plan 59 stage 0)
+- **apple-container**: Admit the backend into the workload funnel
+- **xtask**: Let a surface file name the features the mutation build needs
+- **build-cache**: Content-addressed dev build cache with verify-on-read (plan 276 WS6)
+- **l3**: Opt-in L3 TUN-over-vsock networking for workloads that need a real IP stack
+- **guest**: Substitute mediated tools by absolute path on a sealed rootfs
+- Add HVF virtio rng
+- **xtask**: Stop a workload path reaching the unrestricted-egress constructor
+- **plan-276**: Claim evidence pinning, replay vectors, σ/κ types, and one shared verifier corpus
+- **mvm-client**: Expose the canonical unified machine inventory
+- **plan**: Pin the execution environment, starting with the kernel
+- **cli**: Derive agent verb tier from run shape
+- **mvm-client**: Add the write-only secret lifecycle service
+- **mvm-client**: Expose normalized verified audit events for UI consumers
+- **plan291**: Add local workload deploy attestation
+- **plan291**: Capture dependencies from development sandboxes
+- **core**: Carry attested deployment references
+- **machine**: Boot local attested deployments
+- **client**: Complete persistent and transient launch lifecycle through LocalBackend
+- Add native HVF warm handoff
+- **hostd,runtime**: Host-side eBPF vsock egress telemetry
+- **netd**: Rebase IPv6 backend onto main
+- **conformance**: Rebase BDD witnesses onto main
+- **cli**: Mvmctl seccomp-audit command and shared syscall table
+- **core**: ExecutionReceipt, ConformanceBadge, and did:key codec
+- **cli**: Add generate command and template registry
+- **hostd,cli,client**: Runtime emission of ExecutionReceipts (WS4)
+- **client**: Give MvmClient a capability surface
+- **secrets**: Mvm-side primitives for the tenant-secrets egress broker (RemoteResolver + pluggable backend)
+- **backend**: Uniform capability negotiation that names an alternative
+- **hvf**: Complete save/restore so checkpoint and fork work on macOS
+- **audit**: A sealed run that cannot record its admission does not boot
+- **core**: Egress-secrets payload on the agent instance-start wire
+- Add typed agent capability bindings
+- **dx**: Add `just worktrees-prune` to remove worktrees that are finished
+- **wasm**: Enforce fuel, epoch, and store limits on the wasm tier
+- **cli**: Forward ports from machine run
+- **web**: Redesign hero diagram into clean 3-step execution pipeline
+- **contract**: RFC 6962 consistency proofs for audit merkle trees
+- **hvf**: TCP port forwarding over authenticated vsock
+- **site**: Apply 316 design review polish
+- Enforce CpuGrant::Share on HVF via in-process vCPU quota scheduler
+- **demo**: Finish Plan 320 hardening — Worker, parity tests, CI lane, landing teaser
+- **mvm-build**: Wire before_build lifecycle hook in builder VM
+- **net**: Extract shared authenticated session and rename to NetworkFlow
+- **runtime**: Remove DockerBackend and make MVM microVM-only
+- **cli**: Machine fork/restore with --as and --branch
+- **audit**: Phase 4 decision query API and causal chains
+- **cli**: Auto-create persistent machines on mvmctl machine start
+- **audit**: Mirror chain-signed audit appends to tracing
+- **provenance**: Optional TIBET-JSON export for decision records
+- **adr,contract**: The check-time law and frozen audit JCS vectors (Plan 306 WS4, WS6)
+- **cli**: Dashboard launcher — artifact resolution, validation, posture gate
+- **site**: Integrate product site into docs landing
+- **http**: Route the workload egress forward leg through an upstream proxy
+- **xtask**: Name new plans by slug, not by number
+- **xtask**: Claim-bearing prose must declare what backs it (Plan 306 WS1)
+- **sec**: Sign the checksum manifests that gate boot bytes
 
 ### Changed
 - **runtime**: Document the runtime-overlay operational contract explicitly for
   release verification and operator rollout: running VMs do not hot-remount,
   stopped VMs pick up the new version on restart, and Linux rootfs-backed
   libkrun builder use remains fail-closed.
+- Ignore transfer directory
+- Ignore local dev dir and document PR metadata rule
+- Finish Vz removal — scrub docs + drop the dead vz-drainer bridge endpoint
+- Prune plan 236 cleanup scaffolding
+- Simplify just runtime overlay commands
+- **conformance**: Renumber OCI unpack suite s9 → s10
+- Remove the MCP server
+- **mvm-client**: Reserve service-module seams for the mvm-studio wave
+- Remove the retired macOS backend from the working tree
+- Ignore local Python environments
+- **build**: Drop mvm-build's unused tokio dependency
+- **justfile**: Correct what test-cached actually adds over a global sccache
+- **just**: Add check-gated for the targets --all-targets cannot see
+
+### Documentation
+- Plan HVF density memory reductions
+- Add Plan 238 streamed ext4 follow-up
+- Add Plan 239 kernel config follow-up
+- **plan-236**: Phase 1 scoping — host-authority boundary and 2A runway
+- **plan-236**: Record Phase 2A egress data plane landing (Linux + macOS)
+- **adr**: ADR-110 uniform userspace vsock egress
+- **adr-110**: Record measured smoltcp vs kernel egress benchmark
+- **plan-236**: Phase 2B production host-forwarder unification plan
+- Keep scratch/temp files in /tmp, never the repo tree
+- Define runtime overlay control-plane boundary
+- Record Rust best-practices in the agent working agreement
+- Decide non-prod OCI verity-boot (incident follow-up #3)
+- Libkrun steady-state builder is enabled on Linux (Plan 250 complete)
+- Refresh README for the post-consolidation layout + current CLI
+- Drop removed Apple-Vz backend refs + fix CLAUDE.md crate-path drift
+- **website**: Refresh guides/reference for the post-consolidation crates + CLI
+- **research**: Backlog analysis notes (planes/provable-chains, veilid, complexity, unsafe/no_std, external-sandbox, serde_jcs)
+- **bdd**: README accuracy pass + s8 README-contract suite
+- **research**: Add UOR Framework integration exploration
+- **research**: Add UOR Framework integration exploration
+- **plan**: Uniform vsock-egress convergence + followups (258)
+- **sprint**: Mark #1786/#1785/#1791 issues closed and WS10 kernel task done
+- **mvm-hostd**: Document the two audit-chain canonicalizations + add a spine test
+- **cli**: Document machine timeline/revert/rewind/advance verbs
+- **vsock**: Record vsock production-hardening track (WS1-WS4)
+- **vsock**: Virtio-vsock device audit findings + staged hardening plan
+- **contributing**: Use pinned just toolchain-embed; note cross-target re-add after a toolchain pin
+- **adr-033**: Adopt audited rust-vmm primitives for the in-house VMM virtio devices
+- Close vsock overload hardening track
+- Plan the non-nested aarch64 machine-run witness
+- **plans**: Commit the backend shim-removal plan as 269 with its known gaps
+- **plans**: Add universal initramfs + vsock-activated boot plan (270)
+- **notes**: Check in the universal-initramfs kickoff note as superseded
+- Design note for an `ai` command — deferred draft, no implementation
+- **plans**: Witness rigor — ABI layout contracts, a real nextest profile, and what mutation testing cannot reach
+- **research,plans**: UOR × Hologram recon + content-addressing conformance/defense plan
+- **plan-255**: Record the fifth live run — the claim executes and fails closed
+- **verification**: Record the planted defects for the three CI-lane witnesses
+- **research**: Vsock-chokepoint data-plane provability + Lean-4 reference-spec note
+- **plan-278**: Transparent connect interception, without a NIC
+- **posture**: Say plainly that workload microVMs have no NIC
+- Assess BrewFS volume integration
+- **plan-279**: Build action identity and a real artifact manifest
+- **research**: Identity & permissions in the packet (recon §7.7)
+- **research**: Fast attestable content-addressed builds and Lean 4 verification
+- **plan-278**: Measure W0, which refutes the plan's own framing
+- **specs**: Reconcile the plan-270/271 bookkeeping with what shipped
+- **research**: Reconcile the deterministic-builds proposal with an adversarial audit
+- **warm-pool**: Record audited parent live validation
+- **plan-276**: Reconcile with main, and fold in the recon revision that reverses its premise
+- Complete open-issue reconciliation
+- **claude.md**: Trim the --help-derivable command dump from Build and Run
+- Collapse the duplicate plan-270 rollup entry and correct dead dev-VM prose
+- **plan-288**: Scope the kernel cache verify-on-read work
+- **audit**: Check the security claims against the tree, not the specs
+- **adr-001**: Say how claim 10 is actually enforced, and drop a dead CI step
+- **witness**: First live evidence on Firecracker and HVF
+- **plan-291**: The develop → build → deploy path to an attested image
+- **plan291**: Record merged workstreams
+- **ci**: Correct claim witness workflow references
+- **plan291**: Record console posture hardening
+- Describe run-shaped agent authority
+- **plan291**: Record attested boot acceptance
+- Mark Plan 287 as landed in SPRINT.md
+- Mark eBPF live Linux validation complete
+- Add open issue closeout plan
+- **plan-301**: Design of record for finishing WS11 — WasmBackend + browser slice
+- **plan-306**: Declared backing, tier honesty, and the check-time law
+- Plan 311 — launch critical-path waste on real-sized images
+- Measure both backends at p50/p95/p99 and decompose the Firecracker gap
+- **research**: Assess a funded agent-execution-layer entrant
+- Evaluate Reticulum for mvm and mvmd networking
+- **plan 307**: Record WS2 as applied and close the plan
+- **plan 313**: Record Phase 0 findings — the substitution path cannot stream
+- **plan 313**: Phase 1 is standalone — the 2314 window closed
+- The warm-claim blocker is not BUG-2; the console line was probe noise
+- Design a live wasm sandbox demo, and plan wasm-in-microVM
+- **adr**: Correct claim 18's limits to what main actually enforces
+- Complete Plan 323 persistent-builder docs
+- **plans**: Mark Plan 324 complete and resolve Plan 326 WS-D
+- **plan-326**: Point status section at the merged regression test
+- **plan-326**: Clean up status section wording
+- **316**: Add website redesign design review note and update status
+- **315**: Mark HVF vsock credit regression complete with Linux gate evidence
+- **status**: Mark Plan 316 website redesign sign-off complete
+- **320**: Mark plan shipped and update status/checkboxes post-#2429
+- **300**: Reconcile 39 open issues, close 8, update disposition and phases
+- **sprint**: Mark issue-closeout batch #2165 #2321 #2323 complete
+- **plan**: Mark Plan 323 fully complete
+- **plan-315**: Refresh verification evidence and clarify builder-VM gate blocker
+- **plan-315,316**: Spin out local builder-VM gates into Plan 316
+- **AGENTS**: Allow wasm backend to run on macOS host
+- **300**: Update #2135, #2292, #2318 disposition and progress
+- **300**: Second reconciliation pass — 28 → 23 open issues
+- Machine start auto-create follow-up
+- **316**: FlowMux is not on the production path
+- **332**: Move the tracker into the plans and open the work register
+- **deps**: Say which graph each duplicate-major list measures
+- Plan 338 — refresh the CLI grammar doctrine and gate the surface
+- **bench**: Publish the launch budgets, and gate the page against them
+
+### Fixed
+- **hvf/oci**: Guest BROKER_PORT bridge + OCI rootfs self-heal
+- **machine**: Make `run -d -- <cmd>` detach instead of foreground-blocking
+- **machine**: Gate persistent OCI egress backends
+- Accept OCI manifests without digest header
+- Build source-checkout kernels and host binaries locally on cache miss
+- Harden agent reconnect restart races
+- Unblock in-process HVF boots through the MvmClient facade
+- Use Docker Hub registry API host
+- **guest**: Use libc::Ioctl in mvm-oci-init
+- **guest**: Verify PostRestore verb-grant re-pin against the host anchor
+- **guest**: Accept agent control connections only from the host CID
+- **release**: Verify published workload kernel manifests
+- **build**: Resolve guest-build workspace from the invoking checkout
+- **cli**: Make builder and doctor transport truth explicit
+- Restore dev-env wrappers for just recipes
+- **build**: Scope host-binary manifest parse to HOST_BINARIES
+- **oci-run**: Boot the dm-verity workload kernel, never the builder kernel
+- **builder**: Deliver libkrun Stage 0 /work as an ext4 disk to avoid virtio-fs handle exhaustion
+- **oci-run**: Guard verity kernel host-side + clarify sealed-agent verb denials
+- **builder**: Scope the Linux/KVM steady-state guard to the libkrun backend
+- **builder**: Seed the builder VM clock from the host (cold-store HTTPS)
+- **kernel**: Enable x86 KVM paravirt-clock so the builder kernel boots under libkrun on KVM
+- **builder**: Seed the HVF builder VM clock from the host too
+- **kernel**: Enable VIRTIO_MMIO_CMDLINE_DEVICES (x86) so the builder kernel boots under libkrun/KVM
+- **cli**: Make workload kernel creation explicit
+- **net**: Enforce --allow-host on the --entrypoint path
+- **overlay**: Fail closed on a missing guest agent in both guest inits
+- **builder**: Defer single-shot build result to the on-disk finalize on a guest halt
+- **builder**: Make cold nix builds resilient to a flaky substituter link
+- **net**: Reconcile Firecracker tunnel vs iptables egress
+- **pack**: Unbreak the --all-features build of the release-pack download path
+- **net**: Stop double-wiring the L3 tunnel on host-vsock-proxy backends
+- **net**: Resolve the OCI egress client overlay-first and fail closed
+- **hostd**: Allow lseek in the substitution-endpoint seccomp allowlist
+- **net**: Complete admitted egress — honest CONNECT ack + happy-eyeballs connect
+- **cli**: Honor --hypervisor on a transient machine run
+- **cli**: Legible first-run OCI launches + transient VM state cleanup
+- **dns**: Reject IPv4-mapped IPv6 SSRF + audit malformed DNS queries
+- **mvm-fs**: Ext4 fast-symlink threshold off-by-one truncated 60-byte targets
+- **net**: Fall over to a pinned host's IPv4 when the guest dials its unreachable IPv6
+- **oci**: Invalidate the run-image rootfs cache on a guest-source change
+- **hvf,egress**: Ring crypto provider, /tmp endpoint log, 3 s DNS timeout on macOS
+- **fc/fork**: Kernel path, inherited agent verbs, and verity sidecars for fork boot
+- **cli**: Clean both requested and effective warm-pool transient state dirs
+- **runtime**: De-flake substitution endpoint rollback test
+- **kernel**: Pin guest kernels to 6.12.97 and decouple from the nixpkgs channel
+- **mvm-fs**: OCI multi-layer unpack replaces prior-layer paths
+- **cli**: Transient teardown cleanup and live BDD validation
+- **mvm-cli**: Image-lineage node creation save-then-emit + ancestor self-heal
+- **kernel**: Bump guest pins to 6.12.98
+- **hostd**: Key firewall state by workload identity
+- **vsock**: Strict Firecracker CONNECT/OK ack parser
+- **vmm**: Validate virtqueue geometry so a hostile QueueNum can't panic the host
+- **vsock**: Bound guest-selected connection state
+- **vmm-vsock**: Harden RX/descriptor paths against a hostile guest
+- **vsock**: Bound egress budgets and teardown
+- **mvm-runtime**: HVF builder mirrors artifacts to the caller's artifact_out
+- **mvm-build**: Pass ARM64 Image kernels through to Firecracker
+- **mk-guest**: Read the host-signer pubkey from the cmdline when no config drive
+- **bundle**: Carry the guest sidecar so exported bundles can boot
+- **mvm-runtime**: Refuse a workload boot whose kernel cmdline would be truncated
+- **vmm**: Make the virtqueue used index device-owned across drains
+- **mvm-runtime**: Frame Firecracker API responses on Content-Length, not EOF
+- **runtime**: Pin the host-signer anchor even when no verb grant is minted
+- **pool**: Stop the CLI and the runner both reserving the same warm parent
+- **cache**: Verify the initramfs at admission and share one cross-root seed
+- **cache**: Verify the builder image at admission and keep its sidecars
+- **boot**: Give the legacy initramfs its cmdline back, and prove agent readiness
+- **guest**: Create the early mount points before mounting them
+- **deps**: Collapse the duplicate curve25519-dalek out of the guest agent
+- **test**: Actually commit the nextest profile, which a global gitignore ate
+- **ci**: Point the fuzz lane at the crates it was renamed to, and isolate the mutation lane
+- **guest**: Mount devtmpfs unconditionally so dm-verity has a control node
+- **guest**: Give PID 1 the host-signer anchor it refuses to serve without
+- **virtio-fs**: Stop a guest-chosen read size from sizing a host allocation
+- **xtask**: A mutation run that tested nothing must not read as clean
+- **xtask**: Resolve a ci: witness to a real job, not any mention of its name
+- **activation**: Wait for guest agent readiness before ActivateEnvironment
+- **cache**: Let the universal-initramfs cache see guest source changes
+- **ci**: Restore the claim witnesses that had been red for ten nights
+- **runtime**: Stop auto-detect selecting the opt-in apple-container tier
+- **fuzz**: Repair the two targets that have not compiled since the consolidation
+- **agentd**: Drain the child's pipes before reporting a terminal state
+- **runtime**: List one row per VM, from the backend that owns it
+- **pool**: Audit a captured standby parent so a claim can verify it
+- **xtask**: Catch tests that seed from the real $HOME without moving MVM_HOME
+- **cli**: Skip the legacy verity-initrd resolution when the universal initramfs is warm
+- **warm-claim**: Deliver child verb grant after restore
+- **oci**: Make `machine run --image` work on a case-insensitive host
+- **witnesses**: Make the claim surface measurable, and close what measuring it found
+- **runtime**: Fail closed when stopping Firecracker machines
+- **guest-agent**: Stop PID-1 reaping from destroying workload exit codes
+- **guest**: Run the guest environment setup on the universal-initramfs path
+- **guest**: Deliver mediated tools on a sealed rootfs via PATH
+- **apple-container**: Require a digest sidecar for the fetched kernel; complete stage-2 live validation
+- **build**: Rebuild the per-VM supervisors when mvm-runtime changes
+- **vmm**: Seed the guest CSPRNG at boot, cutting machine run 5.4s to 1.35s
+- **agentd**: No workload runs as root — OCI init privilege drop + fail-closed gate
+- **cli**: Only the dedicated workload kernel may boot a workload
+- **vmm**: Enforce virtio-vsock transmit credit on HVF egress
+- **agentd**: Give UID 901 a writable HOME
+- **hostd**: Real IPv4 destination extraction for eBPF egress probe
+- **audit**: Serialize chain-head reads so concurrent writers cannot fork a chain
+- **ci**: Make the kernel budget check able to block a merge
+- **ci**: Stop paying a full validation cycle for a flake or a stuck requeue
+- **audit**: Report an unverifiable chain as unverifiable, not as a missing entry
+- Refresh Linux kernel pin
+- **test**: Size lease-TTL tests from a measured stall, not a 20ms guess
+- **kernel**: Restore the x86_64 symbol budget and gate edits to it
+- Restore security mutation witnesses
+- **audit**: Store the bytes a chain line's signature covers
+- **dx**: Make `just clean` remove the dev state root, and classify worktrees
+- **test**: Stop the builder-runner tests leaking a shell process per run
+- Refresh synchronized kernel pins
+- **audit**: Bind OCI provenance to the plan that boots, not a synthetic one
+- **ci**: Re-point the process-handshake test group at the package that has the tests
+- **plan**: Record the transport a launch gives the guest, not None
+- Automate macOS VM entitlement signing
+- **receipt**: A lost or corrupt chain head silently forks the receipt store
+- Align workload root modes and bound forward responses
+- **cli**: Clarify workload-kernel artifact recovery
+- Restore security mutation witnesses
+- **pool**: A failed claim must stop advertising the child it destroyed
+- **kernel**: Two boot paths routed around the verified kernel seam
+- Retry transient busy lifecycle hooks
+- Filter HVF builder work inputs
+- **ci**: Guarantee merge queue forward progress
+- **oci**: Normalize image repository capitalization
+- **public**: Constrain landing diagrams and space positioning heading
+- **web**: Build and deploy the wasm demo at /demo
+- **web**: Ignore generated demo tree and add Astro demo route
+- **fc**: Split driver_boot, remove sudo bash launch, read pid in-process
+- **xtask**: Add check-nextest-groups lint
+- **hostd**: Record receipt-as-record decision and torn-head recovery
+- **hostd**: Treat FlowMux peer reset as graceful close
+- **agentd**: No_new_privs and a bounded capability set on the OCI workload path
+- **hostd**: Survive transient accept errors on every egress listener
+- **cleanup**: Make --nuclear mean every entry under ~/.mvm
+- **stage0**: Gate persistent-store reuse on a clean ext4 superblock
+- **release**: Stop requiring mvm-bridge, a binary Plan 305 deleted
+- **seccomp-audit**: Follow clones and track syscall state per tracee
+- **333**: Dependency hygiene — target-gate hickory-proto, prune dead dep config, gate both closures
+- **egress**: Bound simultaneous raw TCP tunnels per workload
+- The guest agent could not spawn itself — capability bounding set, wrong order
+- **hostd**: Make wall-clock bounds actually enforceable, on libkrun and HVF
+- **fc**: Take the pid marker from the process that becomes Firecracker
+- **docs,contract**: Correct claim 10 and pin the egress refusal direction (Plan 306 WS5)
+- **hostd**: Retry the accept errors that describe a pending connection
+- **sdk**: Repair runtime SDK parity and cover live mode with BDD
+- **nix**: Put the /init shebang back on byte 0
+- **sec**: Delete the dead wasm branch, witness the launch plan binding, baseline three equivalences
+- **ci**: Report both kernel contexts when the kernel lane is out of scope
+- **ci**: The Test aggregate must accept a succeeding out-of-scope kernel lane
+- **build**: Stop reporting a slow endpoint exec as an unresponsive builder
+- **ci**: Stop the test aggregate asserting a conclusion the kernel lane no longer has
+- **sec**: Let a mutation shard finish, and say so when it does not
+- **hostd**: Accept the signed plan the launch path actually sends
+- **client**: Type the rootfs declaration instead of probing for it
+- **release**: Read the bytes the kernel execs, not just their checksum
+
+### Performance
+- **verb-grant**: Base64 the cmdline envelope instead of hex
+- **verb-grant**: Serialize the signature as base64 instead of a number array
+- **mvm-runtime**: Talk to the Firecracker API directly instead of spawning curl
+- **build**: Narrow the nix workspace filter to what cargo can actually read
+- In-memory builds and streamed OCI layer unpack
+- **launch**: Take image-size-dependent work off the prepared launch path
+- **hvf**: Measure demand-faulted RAM and restore mapping cost
+- **fc**: Take the shell and its subprocesses off the Firecracker boot path
+- **bench**: Capture guest-agent RSS in density reports
+- **bench**: Add unprivileged warm resident/fault evidence
+- **audit**: Fsync where a record authorizes an action, not on every entry
+- **core**: Fdatasync the atomic write, not fsync
+- **stream**: Wake the console follower on stop — 174ms of a 407ms teardown
+- **hooks**: Scope the pre-commit clippy run to leaf crates
+- **fs**: Stop copying every file's bytes into the ext4 plan
+- **build**: Reuse prebuilt musl host binaries in dev builds
+- **ci**: Resolve the test-support features once instead of five times
+
+### Re-land
+- Remove PackBackend::Vz + --builder vz (orphaned by #1620 early-merge)
+
+### Refactored
+- Typed PackBuilder authority, --sbom-uri, protected signing env, runtime-pack producer
+- Split oversized CLI command modules
+- **backend**: Rename no_guest_nic to no_routable_guest_nic
+- **guest**: Remove dead HostBoundRequest surface; record Phase 1 progress
+- **cli**: Rename the misnamed `dev_vz` module to `builder_vm`
+- **ws8**: Split guest-agent handle_client dispatch into per-verb handlers
+- **ws8**: Split OCI unpack_layer into per-entry-type handlers
+- **ws8**: Split libkrun build_supervisor_config into cmdline + config assembly helpers
+- **ws8**: Split configure_flake_microvm_with_drives_dir into per-section Firecracker config helpers
+- **ws8**: Split exec.rs run_inner into phase helpers
+- Rename the dev-shell Cargo feature to interactive
+- **fs**: Decompose oci/unpack.rs into an unpack/ module tree
+- **cli**: Decompose doctor.rs into a doctor/ module tree
+- **cli**: Decompose image/mod.rs shared OCI core into submodules
+- **cli**: Decompose ops/bench.rs into a bench/ module tree
+- **runtime**: Decompose template/lifecycle.rs into a lifecycle/ module tree
+- **cli**: Decompose vm/up.rs admission path into an up/ module tree
+- **hostd**: Decompose supervisor/gateway_bridge.rs into a gateway_bridge/ module tree
+- **runtime**: Decompose microvm.rs Firecracker backend into a microvm/ module tree
+- **libkrun-sys**: Split the safe wrapper lib.rs into submodules
+- **agentd**: Decompose vsock.rs into a vsock/ module tree
+- **agentd**: Decompose the mvm-guest-agent binary into bin submodules
+- **runtime**: Delegate reflink CoW to mvm-fs, drop the cow.rs duplicate
+- Remove the dead smoltcp L3 egress path
+- **mvm-agentd**: Native tokio-vsock dial for guest host-vsock session
+- **mvm-agentd**: Consolidate guest AF_VSOCK sites onto a nix leaf
+- **mvm-runtime**: Put the fork load behind SnapshotIO so the guard is testable
+- **apple-container**: Drop vminitd — Apple's container kernel on the HVF runner with the universal initramfs
+- **initramfs**: Build the universal initramfs as a deterministic cargo artifact, not a Nix build
+- **build**: Delete the shell-env dev build path production never takes
+- Consolidate protocol and volume contracts
+- **agent**: Enforce DevOnly verbs at runtime
+- **sdk**: Fold mvm-host-services-ffi into mvm-sdk
+- **runtime**: Backend crate separation, HVF DAX, and QEMU virtio-fs
+- **backends**: Extract VmmDriver seam and scaffold mvm-backends crate
+- **backends**: Move HVF, libkrun, QEMU, and Mock drivers into mvm-backends
+- Remove the retired backend's name from the tree, and gate it
+- **backends**: Complete the Firecracker extraction into mvm-backends
+- **oci**: Extract the no_std OCI decoders into mvm-contract (plan 301 B1)
+- **net**: Delete the dead guest-NIC gateway stack
+- **runtime,backends**: Invert driver/backend relationship
+- **316**: Rename the endpoint spawner and give the FlowMux port one home
+- Builders for every input-parameter struct
+- **deps**: Move subscriber assembly out of mvm-core and the sealed agent
+- **sec**: One host-binding predicate, and delete the dead one
+
+### Testing
+- **mvm-cli**: Lock in runtime-pack warm-standby eligibility
+- **net-tunnel**: Fuzz the raw-L3 egress gate packet parser (claim 5)
+- **bdd**: Implement the uniform vsock-egress claim scenarios
+- **sdk**: Enforce cross-language IR address parity
+- Pin UOR-ADDR conformance vectors
+- **cli**: Regression test for guest-source invalidation of OCI rootfs cache
+- **egress**: Cover literal fallback edge cases
+- **mvm-build**: Fix runtime-overlay build witnesses
+- **mvm-conformance**: Capability-gate firecracker BDD scenarios
+- **mvm-runtime**: Fuzz virtio-vsock virtqueue geometry + descriptor walk
+- **mvm-conformance**: Signed-bundle boot scenario + gate the BDD target on PRs
+- **runtime**: Assert a grant-less launch still pins the host anchor
+- **mvm-build**: Isolate HOME so the builder-image refusals are hermetic
+- Close the non-hermetic $HOME class and gate it in CI
+- **bundle**: Make claim 9's witnesses discriminate on path safety and signature bytes
+- Make two clock-sensitive test failures diagnose themselves
+- **raw-egress**: Stop two connect fixtures depending on the ambient network
+- **entrypoint**: Stop using a spawn deadline as if it were an assertion
+- **bdd**: Move the decidable-without-a-VM contracts into the hermetic lane
+- **release**: Consume the published artifacts through the real download path
+- Close the subprocess half of the MVM_HOME isolation gate
+- **worker-pool**: Replace the warm-pool's fixed sleeps with the conditions they stood for
+- **hostd**: Stop racing a clock for a spawned process
+- **worker-pool**: Stop sizing call timeouts as a multiple of the expected call
+- **guest**: Gate guest-init parity and cover the egress path in BDD
+- Classify bounding-set syscall results
+- **agent**: Prove prod-safe grants refuse interactive verbs
+- **agent**: Cover sealed profile dev-only refusals
+- **broker**: Wait for the chain lock instead of assuming abort released it
+- **agentd**: Assert eviction complexity by work done, not by a clock
+- Close remaining mutation witness gaps
+- **mvm-build**: Regression test for store-image lock survival
+- **sec**: Cover surviving Security-lane mutants
+- **sec**: Accept remaining Security-lane mutants in mvm-backends and mvm-runtime
+- **audit**: Pin the two mirror properties #2475 left unwitnessed
+- **sec**: Direct witnesses for the four surviving Security-lane mutants
+- **egress**: Witness the blocking vsock leg's raw tunnel bound
+- **sdk**: Make the fake-mvm double match the CLI it stands in for
+- **sec**: Kill two substitution mutants; delete an unreachable wasm guard
+
+### WS8
+- Remove dead egress_proxy/HttpRegistry stubs + MVM_HVF_DUMP_DTB gate
+- Gate the mock VM backend behind test-support (keep it out of the prod closure)
+
+### Cli
+- Hidden __builder-shell-job command for Linux builder-VM gates
+
+### Harden
+- **runtime**: Trap release overflow, durable audit appends, bounded OCI reads, panic redaction
+
+### Hostd/flowmux
+- Fix reset race, rate limiting, and audit pipeline
+
+### Kernel
+- Document workload BPF invariant
+- Stop workload guest boot-probing 9pnet/btrfs/gnss/vlan
+
+### Mvm-agentd
+- Wire guest egress/DNS adapters to FlowMux reconnect client
+
+### Mvm-runtime
+- FC vm_full fork path remapping and resume-from-snapshot
+
+### Plan
+- Run-first CLI ergonomics and upstream-sandbox adoption
+
+### Release
+- Prep 0.18.0 runtime overlay rollout surface
+
+### Research
+- Add Semantica decision-provenance assessment with UOR/mvm bindings
+
+### Scripts
+- Add plan 236 go checker
+
+### Security
+- Verify precomputed rootfs digests before admission
+
+### Specs
+- ADR-043 — frame the client-interface conformance decision
+- Plan the SDK binding fan-out, and correct what it would cost
 
 ## [0.17.0] — 2026-07-08
 
