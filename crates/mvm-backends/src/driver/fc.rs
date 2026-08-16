@@ -952,7 +952,7 @@ impl VmmDriver for FcDriver {
         );
 
         trace.mark("guest_boot");
-        trace.write_to(&state_dir);
+        trace.write_driver_to(&state_dir);
 
         let vm = Box::new(FcRunningVm {
             id: VmId(spec.name.clone()),
