@@ -54,6 +54,7 @@ mod ctor;
 mod emit;
 pub mod env;
 mod error;
+pub mod error_taxonomy;
 #[cfg(feature = "client-facade")]
 pub mod facade;
 pub mod machine;
