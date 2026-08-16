@@ -84,7 +84,7 @@ impl GuestAgentLayout {
         }
     }
 
-    fn is_complete(&self) -> bool {
+    pub fn is_complete(&self) -> bool {
         self.oci_init.is_file()
             && self.agent.is_file()
             && self.netinit.is_file()
@@ -93,7 +93,7 @@ impl GuestAgentLayout {
             && self.verity_init.is_file()
     }
 
-    fn binaries(&self) -> MvmRuntimeBinaries {
+    pub fn binaries(&self) -> MvmRuntimeBinaries {
         MvmRuntimeBinaries {
             oci_init: self.oci_init.clone(),
             agent: self.agent.clone(),
@@ -497,7 +497,21 @@ pub fn install_into_cache(
     install_one(src.egress_client, &layout.egress_client)?;
     install_one(src.entrypoint_runner, &layout.entrypoint_runner)?;
     install_one(src.verity_init, &layout.verity_init)?;
-    Ok(layout.binaries())
+
+    // Validate on the way into the cache — once per build, rather than on every
+    // invocation. A wrong-architecture or dynamically linked artifact cached
+    // here would otherwise be injected into a rootfs that has no dynamic
+    // loader, and surface as a guest that boots to a silent PID 1.
+    let binaries = layout.binaries();
+    for (name, path) in binaries.artifacts() {
+        let bytes = std::fs::read(path)?;
+        crate::guest_elf::validate_static_guest_elf(&bytes, path, arch).map_err(|e| {
+            GuestAgentBuildError::BuildFailed {
+                reason: format!("{name}: {e}"),
+            }
+        })?;
+    }
+    Ok(binaries)
 }
 
 /// The cached guest binaries if a complete set is already present, else `None`.
@@ -880,6 +894,27 @@ fn set_exec(_path: &Path) -> Result<(), GuestAgentBuildError> {
 
 #[cfg(test)]
 mod tests {
+
+    /// A minimal static ELF64-LE for `arch` that `validate_static_guest_elf`
+    /// accepts, tagged so each artifact's bytes stay distinguishable.
+    ///
+    /// The install path validates what it caches, so these fixtures have to be
+    /// loadable-looking rather than arbitrary strings.
+    fn fake_static_elf(arch: GuestArch, tag: &[u8]) -> Vec<u8> {
+        let machine: u16 = match arch {
+            GuestArch::X86_64 => 0x3E,
+            GuestArch::Aarch64 => 0xB7,
+        };
+        let mut b = vec![0u8; 64];
+        b[..4].copy_from_slice(&[0x7f, b'E', b'L', b'F']);
+        b[4] = 2; // ELFCLASS64
+        b[5] = 1; // ELFDATA2LSB
+        b[18..20].copy_from_slice(&machine.to_le_bytes());
+        // e_phoff / e_phnum stay zero: no program headers, so no PT_INTERP.
+        b[54..56].copy_from_slice(&56u16.to_le_bytes()); // e_phentsize
+        b.extend_from_slice(tag);
+        b
+    }
     use super::*;
     use mvm_core::util::test_env::TestEnv;
 
@@ -923,6 +958,72 @@ mod tests {
         assert!(!source_build_pending_for(cache.path(), arch, &ws));
     }
 
+    /// The cache must not accept an artifact the guest could not execute.
+    /// Without this, a wrong-architecture cross-compile is cached under a
+    /// key that looks valid and surfaces as a guest that never reaches the
+    /// agent.
+    #[test]
+    fn install_refuses_an_artifact_the_guest_could_not_run() {
+        let cache = tempfile::tempdir().unwrap();
+        let source = tempfile::tempdir().unwrap();
+        let arch = GuestArch::Aarch64;
+
+        let paths: Vec<std::path::PathBuf> = [
+            "mvm-oci-init",
+            "mvm-guest-agent",
+            "mvm-guest-netinit",
+            "mvm-egress-client",
+            "mvm-oci-entrypoint",
+            "mvm-verity-init",
+        ]
+        .iter()
+        .map(|n| {
+            let p = source.path().join(n);
+            std::fs::write(&p, fake_static_elf(arch, n.as_bytes())).unwrap();
+            p
+        })
+        .collect();
+
+        let install = |cache_root: &Path| {
+            install_into_cache(
+                GuestRuntimeBinaryPaths {
+                    oci_init: &paths[0],
+                    agent: &paths[1],
+                    netinit: &paths[2],
+                    egress_client: &paths[3],
+                    entrypoint_runner: &paths[4],
+                    verity_init: &paths[5],
+                },
+                cache_root,
+                "test-key",
+                arch,
+            )
+        };
+
+        install(cache.path()).expect("a valid static set must install");
+
+        // Now make one artifact the wrong architecture.
+        std::fs::write(
+            &paths[1],
+            fake_static_elf(GuestArch::X86_64, b"mvm-guest-agent"),
+        )
+        .unwrap();
+        let cache2 = tempfile::tempdir().unwrap();
+        let err = install(cache2.path()).expect_err("a wrong-arch artifact must be refused");
+        assert!(
+            err.to_string().contains("agent"),
+            "the refusal should name the artifact: {err}"
+        );
+
+        // And a plain script is not an ELF at all.
+        std::fs::write(&paths[1], b"#!/bin/sh\necho hi\n").unwrap();
+        let cache3 = tempfile::tempdir().unwrap();
+        assert!(
+            install(cache3.path()).is_err(),
+            "a non-ELF artifact must be refused"
+        );
+    }
+
     #[test]
     fn install_paths_then_cached_round_trips() {
         let cache = tempfile::tempdir().unwrap();
@@ -939,15 +1040,15 @@ mod tests {
         let egress_client = source.path().join("mvm-egress-client");
         let entrypoint_runner = source.path().join("mvm-oci-entrypoint");
         let verity_init = source.path().join("mvm-verity-init");
-        for (path, bytes) in [
-            (&oci_init, b"fake-oci-init-elf".as_slice()),
-            (&agent, b"fake-agent-elf".as_slice()),
-            (&netinit, b"fake-netinit-elf".as_slice()),
-            (&egress_client, b"fake-egress-client-elf".as_slice()),
-            (&entrypoint_runner, b"fake-entrypoint-runner-elf".as_slice()),
-            (&verity_init, b"fake-verity-init-elf".as_slice()),
+        for (path, tag) in [
+            (&oci_init, b"oci-init".as_slice()),
+            (&agent, b"agent".as_slice()),
+            (&netinit, b"netinit".as_slice()),
+            (&egress_client, b"egress-client".as_slice()),
+            (&entrypoint_runner, b"entrypoint-runner".as_slice()),
+            (&verity_init, b"verity-init".as_slice()),
         ] {
-            std::fs::write(path, bytes).unwrap();
+            std::fs::write(path, fake_static_elf(arch, tag)).unwrap();
         }
 
         // Install artifact paths, then the cache lookup finds them.
@@ -973,16 +1074,19 @@ mod tests {
         assert!(layout.entrypoint_runner.is_file());
         assert_eq!(
             std::fs::read(&layout.oci_init).unwrap(),
-            b"fake-oci-init-elf"
+            fake_static_elf(arch, b"oci-init")
         );
-        assert_eq!(std::fs::read(&bins.agent).unwrap(), b"fake-agent-elf");
+        assert_eq!(
+            std::fs::read(&bins.agent).unwrap(),
+            fake_static_elf(arch, b"agent")
+        );
         assert_eq!(
             std::fs::read(&bins.egress_client).unwrap(),
-            b"fake-egress-client-elf"
+            fake_static_elf(arch, b"egress-client")
         );
         assert_eq!(
             std::fs::read(&layout.entrypoint_runner).unwrap(),
-            b"fake-entrypoint-runner-elf"
+            fake_static_elf(arch, b"entrypoint-runner")
         );
 
         let cached = cached_guest_binaries(cache.path(), version, arch).expect("now cached");
@@ -1147,12 +1251,22 @@ mod tests {
         let egress_client_src = tmp.path().join("e");
         let entrypoint_runner_src = tmp.path().join("r");
         let verity_init_src = tmp.path().join("v");
-        std::fs::write(&oci_init_src, b"INIT").unwrap();
-        std::fs::write(&agent_src, b"AGENT").unwrap();
-        std::fs::write(&netinit_src, b"NETINIT").unwrap();
-        std::fs::write(&egress_client_src, b"EGRESS").unwrap();
-        std::fs::write(&entrypoint_runner_src, b"RUNNER").unwrap();
-        std::fs::write(&verity_init_src, b"VERITY").unwrap();
+        // Must match the arch this test installs under, not the build host:
+        // `install_into_cache` validates each artifact against the arch it is
+        // cached for. Using `GuestArch::host()` here passed on an arm64 macOS
+        // developer machine and failed on x86_64 Linux CI, where the fixtures
+        // were x86_64 but the install arch is aarch64.
+        let elf_arch = GuestArch::Aarch64;
+        for (path, tag) in [
+            (&oci_init_src, b"INIT".as_slice()),
+            (&agent_src, b"AGENT".as_slice()),
+            (&netinit_src, b"NETINIT".as_slice()),
+            (&egress_client_src, b"EGRESS".as_slice()),
+            (&entrypoint_runner_src, b"RUNNER".as_slice()),
+            (&verity_init_src, b"VERITY".as_slice()),
+        ] {
+            std::fs::write(path, fake_static_elf(elf_arch, tag)).unwrap();
+        }
         let cache = tmp.path().join("cache");
 
         let installed = install_into_cache(
@@ -1169,11 +1283,23 @@ mod tests {
             GuestArch::Aarch64,
         )
         .expect("install");
-        assert_eq!(std::fs::read(&installed.agent).unwrap(), b"AGENT");
-        assert_eq!(std::fs::read(&installed.egress_client).unwrap(), b"EGRESS");
+        assert_eq!(
+            std::fs::read(&installed.agent).unwrap(),
+            fake_static_elf(elf_arch, b"AGENT")
+        );
+        assert_eq!(
+            std::fs::read(&installed.egress_client).unwrap(),
+            fake_static_elf(elf_arch, b"EGRESS")
+        );
         let layout = GuestAgentLayout::under(&cache, version, GuestArch::Aarch64);
-        assert_eq!(std::fs::read(&layout.oci_init).unwrap(), b"INIT");
-        assert_eq!(std::fs::read(&layout.entrypoint_runner).unwrap(), b"RUNNER");
+        assert_eq!(
+            std::fs::read(&layout.oci_init).unwrap(),
+            fake_static_elf(elf_arch, b"INIT")
+        );
+        assert_eq!(
+            std::fs::read(&layout.entrypoint_runner).unwrap(),
+            fake_static_elf(elf_arch, b"RUNNER")
+        );
 
         // A subsequent resolve hits the cache and never builds (the
         // workspace path is bogus; if it built it would fail).
