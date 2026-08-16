@@ -278,8 +278,8 @@ to catch "the tooling won't work", and the tooling works fine.
    behavioural gate**: each manifest entry carries example arguments; a Rust
    test calls the hand-written ctor with them and asserts the serialised IR
    equals a golden document, and the *same* golden document drives the generated
-   Python and TypeScript in the s27 BDD suite. Coverage proves a name is listed;
-   only this proves it still *behaves* as listed. WS-3.4 already asks for half
+   Python and TypeScript in the s27 BDD suite. Coverage checks that a name is
+   listed; only this would catch a change in how it *behaves*. WS-3.4 asks for half
    of this — it should be the primary binding mechanism, not a closing step.
 
 #### On "a hand-kept manifest is just a fourth copy with extra steps"
