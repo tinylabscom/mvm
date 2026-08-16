@@ -187,13 +187,11 @@ export class ProcessHandle {
  *  "orphan microVM cleanup" consideration). */
 export const DEFAULT_TTL_SECONDS = 1800;
 
-export const MVM_SDK_MODE_ENV = "MVM_SDK_MODE";
+// Owned by the Rust registry (crates/mvm-sdk/src/env.rs) and generated
+// into `_env/vars.ts`.
+export { MVM_SDK_MODE_ENV, MVM_SDK_OUT_PATH_ENV } from "./_env/vars.js";
+import { MVM_SDK_MODE_ENV, MVM_SDK_OUT_PATH_ENV } from "./_env/vars.js";
 
-/** When set in the environment, the SDK writes the wire-shape
- *  recording JSON to this path on process exit. The CLI's Phase 7f
- *  auto-exec path uses this to capture the recording without
- *  parsing stdout (which the user's own script may write to). */
-export const MVM_SDK_OUT_PATH_ENV = "MVM_SDK_OUT_PATH";
 
 let recording: RuntimeRecordingWire | null = null;
 

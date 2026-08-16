@@ -73,6 +73,7 @@ mod check_workflow_paths;
 mod check_workspace_dep_inheritance;
 mod claims_ledger;
 mod fs_walk;
+mod gen_sdk_surface;
 mod gen_stubs;
 mod ir_parity;
 mod perf;

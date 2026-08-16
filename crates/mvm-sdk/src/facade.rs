@@ -21,8 +21,9 @@ use mvm_core::client::{BackendCapabilityReport, MvmClient, MvmError, Result};
 
 use crate::machine::{Machine, MachineCreate, MachineError, MachineLs};
 
-/// Env var overriding the `mvmctl` binary path (shared with `machine.rs`).
-const MVM_CLI_BIN_ENV: &str = "MVM_CLI_BIN";
+// The name is owned by `crate::env`; this used to be a second copy that
+// happened to agree, which is precisely why nothing could detect drift.
+use crate::env::MVM_CLI_BIN_ENV;
 
 /// Surface a `machine.rs` builder error (empty name, etc.) as a backend error.
 fn machine_err(e: MachineError) -> MvmError {

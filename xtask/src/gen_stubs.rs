@@ -148,6 +148,47 @@ fn artifacts() -> &'static [StubArtifact] {
     ]
 }
 
+/// One constant-bearing artifact: a Rust-owned JSON **instance** rendered
+/// into Python and TypeScript value bindings by [`crate::gen_sdk_surface`].
+///
+/// Deliberately a separate descriptor from [`StubArtifact`] rather than an
+/// extra variant on it: `StubArtifact`'s pipeline is hardcoded around the two
+/// pinned schema generators, and neither of them can emit a value. Bending one
+/// descriptor to cover both would put an `Option<Generator>` in the middle of
+/// the loop every future artifact then has to reason about.
+struct ConstArtifact {
+    /// Human label for progress output.
+    label: &'static str,
+    /// `cargo` args emitting the JSON manifest to stdout.
+    emit_args: &'static [&'static str],
+    /// Workspace-relative committed manifest path.
+    manifest_path: &'static str,
+    /// Workspace-relative committed Python binding module.
+    python_path: &'static str,
+    /// Workspace-relative committed TypeScript binding module.
+    ts_path: &'static str,
+    /// Basename for the fresh tempdir copies in `check`.
+    stem: &'static str,
+}
+
+/// Constant-bearing artifacts, regenerated and drift-checked alongside
+/// the schema-backed ones.
+fn const_artifacts() -> &'static [ConstArtifact] {
+    &[ConstArtifact {
+        label: "SDK env-var registry",
+        emit_args: &["run", "-q", "-p", "mvm-sdk", "--bin", "emit_sdk_env"],
+        manifest_path: "schema/sdk-env-v0.json",
+        python_path: "crates/mvm-sdk/sdks/python/mvm/_env/vars.py",
+        // `_env`, not `env`: a bare `env/` is a virtualenv pattern that
+        // commonly appears in a global gitignore, which would silently
+        // drop this generated file and surface as a phantom drift
+        // failure. The underscore also matches the sibling
+        // `_sandbox.ts` / `_cli.ts` convention and Python's `_env/`.
+        ts_path: "crates/mvm-sdk/sdks/typescript/src/_env/vars.ts",
+        stem: "sdk-env-v0",
+    }]
+}
+
 /// Generate every artifact's schema + Python + TypeScript types in place.
 pub fn generate(workspace: &Path) -> Result<()> {
     for art in artifacts() {
@@ -169,6 +210,30 @@ pub fn generate(workspace: &Path) -> Result<()> {
         println!("    wrote {}", py_path.display());
 
         run_ts_codegen(workspace, &schema_path, &ts_path)?;
+        println!("    wrote {}", ts_path.display());
+    }
+
+    for art in const_artifacts() {
+        println!("==> {} bindings", art.label);
+        let manifest_path = workspace.join(art.manifest_path);
+        let py_path = workspace.join(art.python_path);
+        let ts_path = workspace.join(art.ts_path);
+
+        ensure_parent_dir(&manifest_path)?;
+        ensure_parent_dir(&py_path)?;
+        ensure_parent_dir(&ts_path)?;
+
+        let manifest = run_emit(workspace, art.label, art.emit_args)?;
+        std::fs::write(&manifest_path, &manifest)
+            .with_context(|| format!("writing {}", manifest_path.display()))?;
+        println!("    wrote {}", manifest_path.display());
+
+        let parsed = crate::gen_sdk_surface::EnvManifest::parse(&manifest)?;
+        std::fs::write(&py_path, crate::gen_sdk_surface::render_python(&parsed))
+            .with_context(|| format!("writing {}", py_path.display()))?;
+        println!("    wrote {}", py_path.display());
+        std::fs::write(&ts_path, crate::gen_sdk_surface::render_typescript(&parsed))
+            .with_context(|| format!("writing {}", ts_path.display()))?;
         println!("    wrote {}", ts_path.display());
     }
 
@@ -198,6 +263,28 @@ pub fn check(workspace: &Path) -> Result<()> {
         drift |= diff_or_report(&fresh_ts, &workspace.join(art.ts_path))?;
     }
 
+    for art in const_artifacts() {
+        let fresh_manifest = tmp.path().join(format!("{}.json", art.stem));
+        let fresh_py = tmp.path().join(format!("{}.py", art.stem));
+        let fresh_ts = tmp.path().join(format!("{}.ts", art.stem));
+
+        let manifest = run_emit(workspace, art.label, art.emit_args)?;
+        std::fs::write(&fresh_manifest, &manifest)
+            .with_context(|| format!("writing {}", fresh_manifest.display()))?;
+        let parsed = crate::gen_sdk_surface::EnvManifest::parse(&manifest)?;
+        std::fs::write(&fresh_py, crate::gen_sdk_surface::render_python(&parsed))
+            .with_context(|| format!("writing {}", fresh_py.display()))?;
+        std::fs::write(
+            &fresh_ts,
+            crate::gen_sdk_surface::render_typescript(&parsed),
+        )
+        .with_context(|| format!("writing {}", fresh_ts.display()))?;
+
+        drift |= diff_or_report(&fresh_manifest, &workspace.join(art.manifest_path))?;
+        drift |= diff_or_report(&fresh_py, &workspace.join(art.python_path))?;
+        drift |= diff_or_report(&fresh_ts, &workspace.join(art.ts_path))?;
+    }
+
     if drift {
         bail!("generated stubs are stale — run `cargo xtask gen-stubs` and commit the result");
     }
@@ -206,15 +293,21 @@ pub fn check(workspace: &Path) -> Result<()> {
 }
 
 fn emit_schema(workspace: &Path, art: &StubArtifact) -> Result<Vec<u8>> {
+    run_emit(workspace, art.label, art.emit_args)
+}
+
+/// Run a `cargo run` emitter and capture its stdout, failing loudly on a
+/// nonzero exit. Shared by both descriptor kinds.
+fn run_emit(workspace: &Path, label: &str, args: &[&str]) -> Result<Vec<u8>> {
     let output = Command::new("cargo")
-        .args(art.emit_args)
+        .args(args)
         .current_dir(workspace)
         .output()
-        .with_context(|| format!("spawning cargo {}", art.emit_args.join(" ")))?;
+        .with_context(|| format!("spawning cargo {}", args.join(" ")))?;
     if !output.status.success() {
         bail!(
             "schema emit for {} exited {}: {}",
-            art.label,
+            label,
             output.status,
             String::from_utf8_lossy(&output.stderr)
         );
