@@ -57,16 +57,36 @@ jobs:
           RUN_ID: ${{ github.event.workflow_run.id }}
           RUN_URL: ${{ github.event.workflow_run.html_url }}
           RUN_EVENT: ${{ github.event.workflow_run.event }}
+          RUN_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
           HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
           TITLE: "Security lane is red"
         run: |
           set -euo pipefail
 
+          # A run cancelled as a whole collected no verdict: every job reads
+          # `cancelled` whether it was about to pass or about to fail. The
+          # empty failing set below would then be reported as "green again"
+          # and close the tracking issue on evidence nobody gathered.
+          if [ "$RUN_CONCLUSION" = "cancelled" ]; then
+            echo "Security run $RUN_ID was cancelled; no per-job verdict to report."
+            exit 0
+          fi
+
           # Per-job conclusions, not the run's aggregate: a
           # continue-on-error job leaves the run green while reporting its
           # own failure here.
+          #
+          # `cancelled` is in the set deliberately. Actions reports a job
+          # killed by its own `timeout-minutes` as cancelled, not timed_out
+          # — the `timed_out` conclusion is in the schema and does not
+          # arrive in practice. Selecting on failure alone therefore read a
+          # mutation shard that never finished, and a fuzz lane killed at
+          # the six-hour platform cap, as jobs with nothing to say. Both had
+          # been happening nightly; both back numbered claims. The run-level
+          # guard above is what keeps an operator's cancellation out.
           gh api --paginate "repos/$REPO/actions/runs/$RUN_ID/jobs" \
-            --jq '.jobs[] | select(.conclusion == "failure" or .conclusion == "timed_out")
+            --jq '.jobs[] | select(.conclusion == "failure" or .conclusion == "timed_out"
+                                   or .conclusion == "cancelled")
                   | "- \(.name) — [log](\(.html_url))"' > failing.md
 
           EXISTING=$(gh issue list --repo "$REPO" --state open \
@@ -90,7 +110,7 @@ jobs:
             # shellcheck disable=SC2016
             printf 'The `Security` workflow (%s) failed on `%s`.\n\n' "$RUN_EVENT" "$HEAD_SHA"
             printf 'Run: %s\n\n' "$RUN_URL"
-            printf 'Failing jobs:\n\n'
+            printf 'Failing or unfinished jobs:\n\n'
             cat failing.md
             printf '\nThese lanes do not run on pull requests, so a failure here is\n'
             printf 'invisible until someone reads run history. Several of them are the\n'
