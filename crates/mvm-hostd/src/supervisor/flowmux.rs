@@ -105,7 +105,12 @@ pub struct FlowMuxSession {
     /// opening inbound frames) and relay threads (for sealing outbound frames).
     /// Both directions use independent sequence counters inside one session.
     session: Arc<Mutex<Session>>,
-    validator: SessionValidator,
+    /// Shared with the per-stream relay threads.
+    ///
+    /// The relay writes the host's own `Data` frames, and those have to be
+    /// admitted here or this side's credit counter is credited by every guest
+    /// grant and debited by nothing.
+    validator: Arc<Mutex<SessionValidator>>,
     registry: Arc<Mutex<StreamRegistry>>,
     /// Active guest-initiated TCP streams and their upstream sockets. The host
     /// half of each stream lives in a dedicated thread.
@@ -228,7 +233,7 @@ impl FlowMuxSession {
             reader: stream,
             writer: Arc::new(Mutex::new(writer)),
             session: Arc::new(Mutex::new(session)),
-            validator: SessionValidator::default(),
+            validator: Arc::new(Mutex::new(SessionValidator::default())),
             registry: Arc::new(Mutex::new(StreamRegistry::new(limits))),
             streams: BTreeMap::new(),
             udp_associations: BTreeMap::new(),
@@ -307,7 +312,7 @@ impl FlowMuxSession {
             }
         }
 
-        self.validator
+        lock_validator(&self.validator)
             .admit(&mvm_contract::protocol::network_flow::FrameFacts::new(
                 Direction::GuestToHost,
                 Opcode::Hello,
@@ -316,7 +321,7 @@ impl FlowMuxSession {
             .map_err(|e| FlowMuxError::FrameRefused(e.to_string()))?;
 
         self.send_hello_ack()?;
-        self.validator
+        lock_validator(&self.validator)
             .mark_hello_ack_sent()
             .map_err(|e| FlowMuxError::FrameRefused(e.to_string()))?;
 
@@ -329,7 +334,7 @@ impl FlowMuxSession {
                 }
             };
 
-            if let Err(e) = self.validator.admit(&Self::inbound_frame_facts(
+            if let Err(e) = lock_validator(&self.validator).admit(&Self::inbound_frame_facts(
                 &self.read_buf,
                 opcode,
                 stream_id,
@@ -773,19 +778,21 @@ impl FlowMuxSession {
         let session = Arc::clone(&self.session);
         let writer = Arc::clone(&self.writer);
         let registry = Arc::clone(&self.registry);
+        let validator = Arc::clone(&self.validator);
 
         std::thread::Builder::new()
             .name(format!("flowmux-tcp-{stream_id}"))
             .spawn(move || {
-                run_tcp_relay(
+                run_tcp_relay(TcpRelayParams {
                     stream_id,
-                    upstream_read,
+                    upstream: upstream_read,
                     session,
                     writer,
                     registry,
-                    relay_flag,
-                    retired_flag,
-                )
+                    validator,
+                    host_half_closed: relay_flag,
+                    retired: retired_flag,
+                })
             })
             .map_err(FlowMuxError::Transport)?;
 
@@ -964,13 +971,13 @@ impl FlowMuxSession {
     /// Each side validates the frames it reads, but a confirming or terminal
     /// frame sent by the host still moves the host-side view of the stream.
     fn mark_sent(&mut self, opcode: Opcode, stream_id: u32) {
-        let _ = self
-            .validator
-            .admit(&mvm_contract::protocol::network_flow::FrameFacts::new(
+        let _ = lock_validator(&self.validator).admit(
+            &mvm_contract::protocol::network_flow::FrameFacts::new(
                 Direction::HostToGuest,
                 opcode,
                 stream_id,
-            ));
+            ),
+        );
     }
 
     fn send_opened(&mut self, stream_id: u32) -> Result<(), FlowMuxError> {
@@ -1095,6 +1102,12 @@ fn lock_session(session: &Mutex<Session>) -> std::sync::MutexGuard<'_, Session> 
 }
 
 /// Lock the shared registry, recovering from poison.
+fn lock_validator(
+    validator: &Mutex<SessionValidator>,
+) -> std::sync::MutexGuard<'_, SessionValidator> {
+    validator.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 fn lock_registry(registry: &Mutex<StreamRegistry>) -> std::sync::MutexGuard<'_, StreamRegistry> {
     registry.lock().unwrap_or_else(|e| e.into_inner())
 }
@@ -1201,15 +1214,29 @@ fn connect_first_admitted(
 /// Per-stream relay thread: read from the upstream TCP socket and forward
 /// each chunk to the guest as a `Data` frame. EOF becomes a `HalfClose`;
 /// errors become a `Reset`.
-fn run_tcp_relay(
+/// Parameters for the per-stream TCP relay thread.
+struct TcpRelayParams {
     stream_id: u32,
-    mut upstream: TcpStream,
+    upstream: TcpStream,
     session: Arc<Mutex<Session>>,
     writer: Arc<Mutex<UnixStream>>,
     registry: Arc<Mutex<StreamRegistry>>,
+    validator: Arc<Mutex<SessionValidator>>,
     host_half_closed: Arc<AtomicBool>,
     retired: Arc<AtomicBool>,
-) {
+}
+
+fn run_tcp_relay(params: TcpRelayParams) {
+    let TcpRelayParams {
+        stream_id,
+        mut upstream,
+        session,
+        writer,
+        registry,
+        validator,
+        host_half_closed,
+        retired,
+    } = params;
     let mut buf = [0u8; 16 * 1024];
     loop {
         match upstream.read(&mut buf) {
@@ -1233,6 +1260,23 @@ fn run_tcp_relay(
                         b"host credit exhausted",
                     );
                     host_half_closed.store(true, Ordering::Relaxed);
+                    break;
+                }
+                // Spend the window on this side's validator too. It is
+                // credited by every guest `WindowUpdate` it admits, so a send
+                // that never debits it leaves the counter climbing until a
+                // legitimate grant overflows the cap and the session goes
+                // away — a few megabytes in, which is why only a large
+                // transfer finds it.
+                if let Err(e) = lock_validator(&validator).admit(
+                    &mvm_contract::protocol::network_flow::FrameFacts::new(
+                        Direction::HostToGuest,
+                        Opcode::Data,
+                        stream_id,
+                    )
+                    .with_payload(n as u32),
+                ) {
+                    warn!(stream_id, error = %e, "FlowMux relay data refused by validator");
                     break;
                 }
                 if write_frame_to(&session, &writer, Opcode::Data, stream_id, &buf[..n]).is_err() {
@@ -1940,6 +1984,82 @@ mod tests {
         stream.write_all(&len.to_be_bytes()).unwrap();
         stream.write_all(&sealed_bytes).unwrap();
         stream.flush().unwrap();
+    }
+
+    /// A download larger than `MAX_STREAM_CREDIT` must complete.
+    ///
+    /// The relay writes through `write_frame_to`, which does not hold the
+    /// validator, so the validator never sees the host's own outbound `Data`.
+    /// Its host-side counter is credited by every guest `WindowUpdate` it
+    /// admits and debited by nothing, so it climbs until a legitimate grant
+    /// pushes it past the cap and the session is torn down with a `GoAway`.
+    /// Only a transfer past the cap reaches it: below that the counter simply
+    /// climbs unnoticed.
+    #[test]
+    fn a_download_past_the_credit_cap_is_not_torn_down() {
+        let total = mvm_contract::protocol::network_flow::MAX_STREAM_CREDIT as usize + 512 * 1024;
+        let addr = tcp_source_server(total);
+        let (mut guest, mut guest_session, host) =
+            run_session(gate_allowing_addr(addr.ip(), addr.port(), None));
+        write_frame(
+            &mut guest,
+            &mut guest_session,
+            Opcode::OpenTcp,
+            1,
+            format!("{}:{}", addr.ip(), addr.port()).as_bytes(),
+        );
+        let (opcode, _stream_id, _payload) = read_flowmux_frame(&mut guest, &mut guest_session);
+        assert_eq!(opcode, Opcode::Opened);
+
+        let mut got = 0usize;
+        loop {
+            let (opcode, _stream_id, payload) = read_flowmux_frame(&mut guest, &mut guest_session);
+            match opcode {
+                Opcode::Data => {
+                    got += payload.len();
+                    // Return the credit, as the real guest client does.
+                    let delta = u32::try_from(payload.len()).unwrap();
+                    write_frame(
+                        &mut guest,
+                        &mut guest_session,
+                        Opcode::WindowUpdate,
+                        1,
+                        &delta.to_be_bytes(),
+                    );
+                }
+                Opcode::HalfClose => break,
+                Opcode::WindowUpdate => {}
+                other => panic!(
+                    "unexpected {other:?} after {got} of {total} bytes: {}",
+                    String::from_utf8_lossy(&payload)
+                ),
+            }
+        }
+        assert_eq!(got, total, "the whole body must arrive");
+
+        drop(guest);
+        host.join().unwrap().unwrap();
+    }
+
+    /// An upstream that writes `total` bytes and then closes.
+    fn tcp_source_server(total: usize) -> SocketAddr {
+        let listener =
+            std::net::TcpListener::bind(std::net::SocketAddr::new(local_test_ip(), 0)).unwrap();
+        let addr = listener.local_addr().unwrap();
+        thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let chunk = vec![b'd'; 8 * 1024];
+            let mut sent = 0usize;
+            while sent < total {
+                let n = chunk.len().min(total - sent);
+                if stream.write_all(&chunk[..n]).is_err() {
+                    return;
+                }
+                sent += n;
+            }
+            let _ = stream.shutdown(std::net::Shutdown::Write);
+        });
+        addr
     }
 
     fn tcp_echo_server() -> SocketAddr {
