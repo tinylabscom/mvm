@@ -85,6 +85,7 @@ fn main() -> Result<()> {
     } else {
         Some(assemble(&cfg).context("assembling substitution service")?)
     };
+    refuse_secrets_without_substitution(&cfg, assembled.is_some())?;
 
     // Ready handshake: report the minted (guest var → placeholder) pairs on
     // stdout so the backend can set them in the guest launch env, then boot.
@@ -318,7 +319,7 @@ async fn serve(
         // No secrets: the relayed stream is raw TCP, gated then spliced.
         EgressMode::Raw => serve_raw(cfg, bound, forward_timeout).await?,
         // Authenticated FlowMux session: the converged single networking path.
-        EgressMode::FlowMux => serve_flowmux(cfg, bound).await?,
+        EgressMode::FlowMux => serve_flowmux(cfg, service, bound).await?,
     }
 
     if let Some(task) = terminator_task {
@@ -333,6 +334,29 @@ fn can_skip_substitution_assembly(cfg: &EndpointConfig) -> bool {
         && cfg.terminator_listen.is_none()
         && cfg.tls_intermediate.is_none()
         && cfg.flowmux_identity.is_none()
+}
+
+/// Refuse to boot a workload that will be handed placeholders nothing can
+/// resolve.
+///
+/// A placeholder is minted per secret and injected into the guest's
+/// environment. Substituting it back is the whole point: the guest holds
+/// `mvm-secret-<hex>` and the host swaps in the real credential when it
+/// originates the request. If the endpoint carries secrets but assembled no
+/// substitution service, the guest gets the placeholder and sends *that* to a
+/// real upstream.
+///
+/// Fails the launch rather than warning, because the failure is otherwise
+/// silent and lands at a third party.
+fn refuse_secrets_without_substitution(cfg: &EndpointConfig, assembled: bool) -> Result<()> {
+    if cfg.secrets.is_empty() || assembled {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "endpoint carries {} secret(s) but assembled no substitution service: \
+         the guest would be handed placeholders with nothing to resolve them",
+        cfg.secrets.len()
+    )
 }
 
 /// The WireRequest substitution serve loop over the adopted listener.
@@ -396,7 +420,13 @@ async fn serve_raw(
 /// raw loops can adopt it into tokio), which means it must be adopted here too
 /// rather than accepted on a blocking thread — a blocking accept on it returns
 /// `EAGAIN` immediately and forever.
-async fn serve_flowmux(cfg: &EndpointConfig, bound: Bound) -> Result<()> {
+async fn serve_flowmux(
+    cfg: &EndpointConfig,
+    service: Option<
+        std::sync::Arc<mvm_hostd::supervisor::network_endpoint_proxy::SubstitutionService>,
+    >,
+    bound: Bound,
+) -> Result<()> {
     let identity = cfg
         .flowmux_identity
         .as_ref()
@@ -452,15 +482,19 @@ async fn serve_flowmux(cfg: &EndpointConfig, bound: Bound) -> Result<()> {
         let host_key = host_key.clone();
         let session_id = session_id.clone();
         let recorder = recorder.clone();
+        let substitution = service.clone();
         tokio::task::spawn_blocking(move || {
-            let served = FlowMuxSession::accept_with_recorder(
+            let served = FlowMuxSession::accept_with(
                 stream,
-                &session_id,
-                host_key,
-                &guest_anchor,
-                limits,
-                gate,
-                recorder,
+                mvm_hostd::supervisor::flowmux::FlowMuxAccept::new(
+                    &session_id,
+                    host_key,
+                    guest_anchor,
+                    limits,
+                    gate,
+                )
+                .with_recorder(recorder)
+                .with_substitution(substitution),
             )
             .context("accept FlowMux session")
             .and_then(|mut session| session.serve().context("serve FlowMux session"));
@@ -632,6 +666,49 @@ mod tests {
             },
         });
         assert!(!can_skip_substitution_assembly(&cfg));
+    }
+
+    /// A workload with secrets and no substitution service must not boot.
+    ///
+    /// The placeholders are minted and injected regardless; substituting them
+    /// back is what makes them safe. Without the service the guest holds
+    /// `mvm-secret-<hex>` and sends it to a real upstream, which is a leak to a
+    /// third party rather than a local failure — so this refuses the launch
+    /// instead of warning.
+    #[test]
+    fn secrets_without_a_substitution_service_refuse_the_launch() {
+        let mut cfg = uds_cfg();
+        cfg.secrets.push(SecretBinding {
+            name: "OPENAI_API_KEY".into(),
+            source: SecretSource::Keystore {
+                address: "openai".into(),
+            },
+        });
+        let err = refuse_secrets_without_substitution(&cfg, false)
+            .expect_err("a secret-bearing endpoint with no substitution must refuse");
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("nothing to resolve them"),
+            "got: {message}"
+        );
+    }
+
+    #[test]
+    fn secrets_with_a_substitution_service_are_admitted() {
+        let mut cfg = uds_cfg();
+        cfg.secrets.push(SecretBinding {
+            name: "OPENAI_API_KEY".into(),
+            source: SecretSource::Keystore {
+                address: "openai".into(),
+            },
+        });
+        assert!(refuse_secrets_without_substitution(&cfg, true).is_ok());
+    }
+
+    #[test]
+    fn a_secretless_endpoint_needs_no_substitution_service() {
+        let cfg = uds_cfg();
+        assert!(refuse_secrets_without_substitution(&cfg, false).is_ok());
     }
 
     #[test]

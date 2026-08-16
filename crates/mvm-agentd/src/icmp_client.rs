@@ -2,8 +2,8 @@
 //!
 //! A NIC-less guest cannot originate ICMP: there is no route and no raw socket,
 //! so `ping` fails at `socket()` before a packet exists. This asks the host to
-//! echo on the guest's behalf over the shared egress vsock stream, behind the
-//! [`ICMP_FRAME_LINE`] marker.
+//! echo on the guest's behalf, as one `IcmpEcho` flow on the same authenticated
+//! FlowMux session every other byte between this guest and its host crosses.
 //!
 //! The round trip this measures is the *guest's*, not the host's. The timer
 //! starts before the vsock write and stops when the reply line lands, so it
@@ -11,14 +11,13 @@
 //! is the whole path any request from this workload takes. The host also reports
 //! its own leg, so the two can be compared rather than conflated.
 
-use std::io::{BufRead, BufReader, Write};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
-use mvm_core::guest_netd::ICMP_FRAME_LINE;
+use mvm_contract::protocol::network_flow::Opcode;
 use mvm_core::icmp_wire::{IcmpEchoReply, IcmpEchoRequest};
 
-use crate::vsock::{EGRESS_PORT, connect_host_vsock};
+use crate::flowmux_sync::SyncFlowMux;
 
 /// One echo's outcome as the guest saw it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -74,47 +73,38 @@ fn echo_once(
     seq: u16,
     connect_timeout_secs: u64,
 ) -> Result<EchoOutcome> {
-    // One echo per request line; the sequence the guest reports is its own.
+    // One echo per flow; the sequence the guest reports is its own.
     let single = IcmpEchoRequest {
         host: request.host.clone(),
         count: 1,
         payload_len: request.payload_len,
         timeout_ms: request.timeout_ms,
     };
+    let encoded = serde_json::to_vec(&single).context("encode the echo request")?;
 
-    let stream = connect_host_vsock(EGRESS_PORT, connect_timeout_secs)
-        .context("connect to the host egress port for ICMP echo")?;
+    let mut flowmux = SyncFlowMux::connect().context("open a FlowMux session for the echo")?;
     // Outlast the host's own wait, or the guest reports a timeout for a reply
     // the host is still legitimately waiting on.
     let budget = Duration::from_millis(u64::from(request.timeout_ms))
         .saturating_add(Duration::from_secs(connect_timeout_secs));
-    stream.set_read_timeout(Some(budget)).ok();
+    flowmux.set_read_timeout(budget)?;
 
-    let mut writer = stream.try_clone().context("clone the egress stream")?;
-    let mut line = serde_json::to_vec(&single).context("encode the echo request")?;
-    line.push(b'\n');
-
-    // The timer spans exactly the request: the connection is already open, so
-    // what it measures is the echo, not the dial.
+    let stream_id = flowmux.next_stream_id();
+    // The timer spans exactly the request: the session is already up, so what
+    // it measures is the echo, not the dial.
     let started = Instant::now();
-    writer
-        .write_all(format!("{ICMP_FRAME_LINE}\n").as_bytes())
-        .context("write the ICMP frame marker")?;
-    writer.write_all(&line).context("write the echo request")?;
-    writer.flush().context("flush the echo request")?;
-
-    let mut reply_line = String::new();
-    BufReader::new(stream)
-        .read_line(&mut reply_line)
-        .context("read the echo reply")?;
+    flowmux.send(Opcode::IcmpEcho, stream_id, &encoded)?;
+    let (opcode, _stream_id, payload) = flowmux.recv()?;
     let rtt = started.elapsed();
 
-    if reply_line.trim().is_empty() {
-        bail!("host closed the echo stream without answering");
-    }
-    match serde_json::from_str::<IcmpEchoReply>(reply_line.trim())
-        .context("decode the echo reply")?
-    {
+    let reply: IcmpEchoReply = match opcode {
+        Opcode::IcmpReply | Opcode::IcmpRefused => {
+            serde_json::from_slice(&payload).context("decode the echo reply")?
+        }
+        other => bail!("expected an echo reply, got {other:?}"),
+    };
+
+    match reply {
         IcmpEchoReply::Reply {
             ip,
             host_leg_us,

@@ -1203,7 +1203,13 @@ impl SubstitutionService {
             .map_err(std::io::Error::other)?
     }
 
-    async fn process(&self, wire: WireRequest) -> WireResponse {
+    /// Substitute, gate, forward, and audit one request.
+    ///
+    /// `pub(crate)` so the FlowMux `Http` arm can call it. That arm frames the
+    /// request and the reply; everything this does — placeholder resolution,
+    /// destination binding, the claim-10 gate, payload-free audit — happens
+    /// here and only here, on every transport.
+    pub(crate) async fn process(&self, wire: WireRequest) -> WireResponse {
         let body = match B64.decode(wire.body_b64.as_bytes()) {
             Ok(b) => b,
             Err(e) => {
