@@ -2849,7 +2849,7 @@ mod tests {
                     headers: vec![],
                     body_b64: B64.encode(b"pong"),
                 };
-                let server = spawn_stub_substitution_endpoint(socket_path.clone(), canned_response);
+                let server = spawn_stub_network_endpoint(socket_path.clone(), canned_response);
                 let wat = r#"(module
   (import "mvm" "egress" (func $mvm_egress (param i32 i32 i32 i32 i32 i32 i32) (result i32)))
   (memory (export "memory") 2)
