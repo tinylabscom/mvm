@@ -878,8 +878,9 @@ for detailed scope and acceptance criteria.
   - [x] E2.1 — the placeholder leaf relocated as
         `mvm_contract::substitution`; the constant hard-renamed to
         `SECRET_PLACEHOLDER_PREFIX` to avoid colliding with
-        `policy::secret_binding`'s existing `PLACEHOLDER_PREFIX`
-        (`"mvm-managed:"`). Minting stays host-side to keep `getrandom` out
+        `policy::secret_binding`'s then-existing
+        `PLACEHOLDER_PREFIX` (`"mvm-managed:"`, since deleted with that
+        module). Minting stays host-side to keep `getrandom` out
         of the browser bundle.
   - [x] E1 — `projection.rs` relocated to `mvm-contract` verbatim; the
         `mvm_core::policy::projection` module re-export kept all ~20 call sites

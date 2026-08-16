@@ -381,6 +381,13 @@ jobs:
       - name: one writer of exec_secs (the wall-clock grant's projection)
         run: cargo run -p xtask -- check-single-exec-secs-writer
 
+      # Whether a destination is bound by a secret's `allowed_hosts` is decided
+      # by `host_is_bound` and nowhere else. A second copy is a second decision,
+      # and the disagreement surfaces as a credential reaching a destination it
+      # should not.
+      - name: one host-binding predicate (allowed_hosts is quantified in one place)
+        run: cargo run -p xtask -- check-single-host-predicate
+
       - name: one stream redaction seam (every StreamBroker is built over the curated ruleset)
         run: cargo run -p xtask -- check-stream-redaction-seam
 

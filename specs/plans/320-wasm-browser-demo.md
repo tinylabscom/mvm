@@ -172,8 +172,9 @@ Workload IR and in `wasm_backend.rs`'s doc comment; nothing resolves it at
 runtime. The oracle pins this — `wasm_egress_witness.rs` asserts the
 destination sees neither the placeholder *nor* a literal `${`.
 
-There is a third, unrelated prefix: `mvm-managed:` in
-`mvm_contract::policy::secret_binding`. Three notations, none
+There was a third, unrelated prefix: `mvm-managed:` in
+`mvm_contract::policy::secret_binding`, deleted along with that module
+(it belonged to a binding model with no callers). Two notations, none
 interchangeable. Name the one you mean.
 
 **This is a demo-honesty issue, not only a naming one.** Pane 2 ("Module
@@ -229,11 +230,12 @@ into `mvm-contract` to preserve a signature.
 - [x] E2.1 — the placeholder leaf →P. Landed as
       `mvm_contract::substitution`. The constant moved as
       **`SECRET_PLACEHOLDER_PREFIX`**, not `PLACEHOLDER_PREFIX`: that name was
-      already taken in `mvm-contract` by `policy::secret_binding`'s
-      `"mvm-managed:"`, and a second same-named reserved prefix would have
+      at the time also taken in `mvm-contract` by `policy::secret_binding`'s
+      `"mvm-managed:"` (since deleted), and a second same-named prefix would have
       recreated the very collision E3 is untangling. Hard rename, four call
       sites, no alias. A test asserts the two constants differ and that
-      `find_placeholder` returns `None` on an `mvm-managed:` string.
+      `find_placeholder` returns `None` on a non-token string. (The
+      `mvm-managed:` case this originally named went away with that prefix.)
       `Placeholder::new` takes the token as given so the RNG stays host-side.
 - [x] E2.2 — de-duplicate the bind check into one fn, **before it crosses a
       crate boundary**, so the claim-12 predicate has exactly one definition

@@ -17,5 +17,4 @@ pub mod projection;
 pub mod redaction;
 pub mod resolver;
 pub mod reversible_replacement;
-pub mod secret_binding;
 pub mod security;
