@@ -599,6 +599,8 @@ jobs:
             || { sudo apt-get update && sudo apt-get install -y e2fsprogs; }
           bash nix/packaging/release/assert-init-shebang.sh \
             "staging/default-microvm-rootfs-${ARCH}.ext4" "staged ${ARCH}"
+          bash nix/packaging/release/assert-kernel-format.sh \
+            "staging/default-microvm-vmlinux-${ARCH}" "${ARCH}" "staged ${ARCH} kernel"
 
       - name: Generate default microVM SBOM
         env:
