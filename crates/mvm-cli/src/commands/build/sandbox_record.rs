@@ -109,8 +109,8 @@ pub(in crate::commands) fn auto_exec_record_script(
     }
     let status = cmd
         .arg(script)
-        .env("MVM_SDK_MODE", "record")
-        .env("MVM_SDK_OUT_PATH", &out_path)
+        .env(mvm_sdk::env::MVM_SDK_MODE_ENV, "record")
+        .env(mvm_sdk::env::MVM_SDK_OUT_PATH_ENV, &out_path)
         .status()
         .with_context(|| {
             format!(
