@@ -1147,6 +1147,106 @@ mod tests {
         let _ = child.wait();
     }
 
+    /// Clear every proxy name this reads, so a contributor whose own shell
+    /// exports one does not get a different answer from CI.
+    fn proxy_env() -> mvm_core::util::test_env::TestEnv {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        for k in [
+            "https_proxy",
+            "HTTPS_PROXY",
+            "http_proxy",
+            "HTTP_PROXY",
+            "all_proxy",
+            "ALL_PROXY",
+            "no_proxy",
+            "NO_PROXY",
+        ] {
+            env.remove(k);
+        }
+        env
+    }
+
+    /// Nothing configured is the common case, and it has to stay
+    /// distinguishable from "configured with empty values" — the endpoint's
+    /// default for absent keys is "dial direct", so a `Some` of all-`None`
+    /// would emit keys that say nothing and mean something.
+    #[test]
+    fn an_unconfigured_host_carries_no_proxy_config() {
+        let _env = proxy_env();
+        assert_eq!(EgressProxySpawnConfig::from_host_env(), None);
+    }
+
+    /// The value has to survive the trip. A `Some` whose fields are all `None`
+    /// looks configured and forwards nothing.
+    #[test]
+    fn a_configured_https_proxy_reaches_the_endpoint_config() {
+        let mut env = proxy_env();
+        env.set("https_proxy", "http://proxy.internal:3128");
+
+        let cfg = EgressProxySpawnConfig::from_host_env()
+            .expect("a host with https_proxy set is proxy-configured");
+        assert_eq!(cfg.https.as_deref(), Some("http://proxy.internal:3128"));
+        assert_eq!(cfg.http, None);
+    }
+
+    /// Either leg alone is a configured host. Requiring both would silently
+    /// dial direct on a host that set only one, which is the shape most
+    /// http-only and https-only environments actually have.
+    #[test]
+    fn either_proxy_leg_alone_configures_egress() {
+        let mut env = proxy_env();
+        env.set("http_proxy", "http://only-http:3128");
+        let cfg = EgressProxySpawnConfig::from_host_env()
+            .expect("http_proxy alone must configure egress");
+        assert_eq!(cfg.http.as_deref(), Some("http://only-http:3128"));
+        assert_eq!(cfg.https, None);
+        drop(env);
+
+        let mut env = proxy_env();
+        env.set("HTTPS_PROXY", "http://only-https:3128");
+        let cfg = EgressProxySpawnConfig::from_host_env()
+            .expect("HTTPS_PROXY alone must configure egress");
+        assert_eq!(cfg.https.as_deref(), Some("http://only-https:3128"));
+        assert_eq!(cfg.http, None);
+    }
+
+    /// An exported-but-empty proxy var is how a shell spells "unset". Taking
+    /// it literally hands the endpoint an empty upstream and every request
+    /// fails to reach anything.
+    #[test]
+    fn an_empty_or_whitespace_proxy_var_reads_as_unset() {
+        let mut env = proxy_env();
+        env.set("https_proxy", "");
+        env.set("http_proxy", "   ");
+        assert_eq!(
+            EgressProxySpawnConfig::from_host_env(),
+            None,
+            "an empty proxy value must not count as configured"
+        );
+    }
+
+    /// `no_proxy` is an exception list, not a proxy. On its own it configures
+    /// nothing, or every unproxied host would start emitting proxy keys.
+    #[test]
+    fn no_proxy_alone_does_not_configure_a_proxy() {
+        let mut env = proxy_env();
+        env.set("no_proxy", "localhost,127.0.0.1");
+        assert_eq!(EgressProxySpawnConfig::from_host_env(), None);
+    }
+
+    /// all_proxy is the fallback for both legs, and must not override a
+    /// specific one.
+    #[test]
+    fn all_proxy_fills_both_legs_but_yields_to_a_specific_one() {
+        let mut env = proxy_env();
+        env.set("all_proxy", "socks5://fallback:1080");
+        env.set("https_proxy", "http://specific:3128");
+
+        let cfg = EgressProxySpawnConfig::from_host_env().expect("configured");
+        assert_eq!(cfg.https.as_deref(), Some("http://specific:3128"));
+        assert_eq!(cfg.http.as_deref(), Some("socks5://fallback:1080"));
+    }
+
     #[test]
     fn a_silent_endpoint_is_reported_as_silent_not_quoted_empty() {
         let dir = tempfile::tempdir().unwrap();
