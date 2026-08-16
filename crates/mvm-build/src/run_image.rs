@@ -535,6 +535,38 @@ pub fn select_root_strategy(s: RootStrategySelection) -> RootStrategy {
     }
 }
 
+/// Identity of the guest runtime that [`resolve_guest_binaries`] would inject,
+/// without building it.
+///
+/// This is the rootfs cache key. It is consulted on the cache-hit gate — before
+/// anything has decided a materialization is needed — so it must never trigger
+/// the cross-compile that `resolve_guest_binaries` performs on a cold cache.
+///
+/// When the artifacts are present, the identity is their content digest, read
+/// through [`crate::runtime_identity`]'s sidecar so the steady-state cost is a
+/// small read plus one stat per artifact.
+///
+/// When they are absent there are no bytes to digest and building them here
+/// would cost a minute to answer a question asked on every invocation. The
+/// cache generation is returned instead, marked so it can never collide with a
+/// real digest. That case implies a build is imminent anyway (materialization
+/// needs the artifacts), after which the identity becomes the artifact digest
+/// and the rootfs re-materializes once.
+pub fn resolve_guest_runtime_identity(cache_root: &Path) -> Result<String> {
+    let arch = mvm_core::arch::GuestArch::host();
+    let source = crate::guest_agent_build::guest_binary_source()
+        .context("resolve the guest-binary cache key for this host")?;
+    let layout =
+        crate::guest_agent_build::GuestAgentLayout::under(cache_root, source.cache_key(), arch);
+
+    if !layout.is_complete() {
+        return Ok(format!("pending-{}", source.cache_key()));
+    }
+
+    crate::runtime_identity::identity_with_sidecar(&layout.binaries(), &layout.dir)
+        .with_context(|| format!("identify the guest runtime in {}", layout.dir.display()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
