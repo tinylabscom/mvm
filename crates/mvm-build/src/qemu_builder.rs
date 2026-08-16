@@ -267,6 +267,12 @@ fn run_stage0_qemu(
         cmd.arg("-drive")
             .arg(format!("file={},if=virtio,format=raw", disk.display()));
     }
+    // Read-only, matching how the shell-job and build paths attach it.
+    #[cfg(feature = "builder-vm")]
+    cmd.arg("-drive").arg(format!(
+        "file={},if=virtio,format=raw,readonly=on",
+        identity_drive.display()
+    ));
     #[cfg(feature = "builder-vm")]
     {
         cmd.arg("-drive").arg(format!(

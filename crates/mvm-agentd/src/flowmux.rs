@@ -571,12 +571,7 @@ where
         payload: Vec<u8>,
     ) -> Result<(), FlowMuxError> {
         self.validator
-            .admit(&frame_facts(
-                Direction::HostToGuest,
-                opcode,
-                stream_id,
-                payload.len() as u32,
-            ))
+            .admit(&inbound_frame_facts(opcode, stream_id, &payload))
             .map_err(|e| FlowMuxError::Frame(e.to_string()))?;
 
         match opcode {
@@ -995,6 +990,35 @@ fn frame_facts(
         .with_payload(payload_len)
 }
 
+/// Facts for a frame arriving from the host.
+///
+/// A `WindowUpdate`'s payload *is* its credit, and the validator rejects an
+/// update that carries none. Describing one by length alone therefore fails
+/// every single window update — reported as the host sending a credit-less
+/// frame, when the host sent a perfectly good one and the guest simply never
+/// looked at it. The session dies on the first replenish, which is the first
+/// byte of real traffic.
+fn inbound_frame_facts(
+    opcode: Opcode,
+    stream_id: u32,
+    payload: &[u8],
+) -> mvm_contract::protocol::network_flow::FrameFacts {
+    let facts = frame_facts(
+        Direction::HostToGuest,
+        opcode,
+        stream_id,
+        payload.len() as u32,
+    );
+    match (opcode, payload) {
+        (Opcode::WindowUpdate, [a, b, c, d]) => {
+            facts.with_credit(u32::from_be_bytes([*a, *b, *c, *d]))
+        }
+        // A malformed update keeps no credit, so the validator still refuses
+        // it — the decode is a faithful read, not a way to wave frames through.
+        _ => facts,
+    }
+}
+
 fn build_dns_query(name: &str, qtype: u16, id: u16) -> Result<Vec<u8>, FlowMuxError> {
     let mut query = Vec::with_capacity(64);
 
@@ -1234,8 +1258,13 @@ async fn reconnect_loop<S, F, Fut>(
                 break;
             }
             if state_rx.changed().await.is_err() {
-                let _ = current_tx.send(None);
-                return;
+                // The session task dropped its state sender. That is the
+                // strongest evidence the session is gone, not a signal to stop
+                // watching — a session can end without ever publishing `Dead`.
+                // Returning here drops `current_tx`, so every waiter fails with
+                // "reconnect owner gone" and the guest never gets a second
+                // session, which is indistinguishable from having no network.
+                break;
             }
         }
 
