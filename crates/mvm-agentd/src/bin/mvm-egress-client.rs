@@ -49,6 +49,19 @@ fn run(addr: std::net::SocketAddr) -> ExitCode {
         }
     };
 
+    // Provision this boot's identity from the host-attached drive before
+    // loading it. Doing it here rather than in each guest init means one
+    // implementation covers every tier -- including the Nix-built `/init`,
+    // which is shell and would otherwise need a second copy of the
+    // superblock-label probe. Idempotent, so an init that already provisioned
+    // (Stage 0 and the builder VM do, to get a named refusal earlier) is
+    // unaffected.
+    if !std::path::Path::new(flowmux_keys::DEFAULT_GUEST_SIGNING_KEY_PATH).exists()
+        && let Err(e) = mvm_agentd::flowmux_drive::provision_identity_from_drive()
+    {
+        eprintln!("mvm-egress-client: FlowMux identity not provisioned: {e}");
+    }
+
     let guest_signing_key = match rt.block_on(flowmux_keys::load_guest_signing_key()) {
         Ok(key) => key,
         Err(e) => {

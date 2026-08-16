@@ -21,6 +21,8 @@ mvm-net = { workspace = true }
 mvm-agentd = { workspace = true }
 # Egress-substitution plan decode shared by backends.
 mvm-contract = { workspace = true }
+# In-memory ext4 writer for the per-boot FlowMux identity drive.
+mvm-fs = { workspace = true }
 # Structured logging used by host helpers.
 tracing = { workspace = true }
 # JSON serialization for host-service configs.
@@ -42,6 +44,7 @@ rand.workspace = true
 libc.workspace = true
 ed25519-dalek.workspace = true
 hex.workspace = true
+base64.workspace = true
 # Binary lookup for host-side helpers (virtiofsd).
 flate2.workspace = true
 which.workspace = true

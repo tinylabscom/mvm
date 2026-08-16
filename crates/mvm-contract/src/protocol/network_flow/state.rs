@@ -216,9 +216,12 @@ struct Stream {
 /// The class ceiling a stream counts against.
 fn ceiling_for(class: FlowClass) -> Option<usize> {
     match class {
-        // TCP and typed HTTP share one aggregate ceiling, matching the
-        // signed plan's single `max_flows` bound.
-        FlowClass::Tcp | FlowClass::Http | FlowClass::Dns => Some(MAX_TCP_FLOWS),
+        // TCP, typed HTTP, DNS and ICMP share one aggregate ceiling, matching
+        // the signed plan's single `max_flows` bound. ICMP counts against it
+        // rather than getting a ceiling of its own: an echo is a host-
+        // originated socket like any other flow, so a guest must not be able
+        // to open more total sockets by choosing a different flow type.
+        FlowClass::Tcp | FlowClass::Http | FlowClass::Dns | FlowClass::Icmp => Some(MAX_TCP_FLOWS),
         FlowClass::Udp => Some(MAX_UDP_ASSOCIATIONS),
         FlowClass::Ingress => Some(MAX_INGRESS_LISTENERS),
         FlowClass::Session | FlowClass::Common => None,

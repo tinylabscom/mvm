@@ -292,8 +292,43 @@ pub(crate) struct BuilderVsockEgressEndpoint {
     state_dir: PathBuf,
 }
 
+/// Mint this builder boot's FlowMux identity and write the drive its guest
+/// reads the keys off. Returned so the caller can attach the drive to the VM.
+///
+/// The session id is the per-VM state dir's own name, which is unique per boot
+/// and in scope at every builder spawn site — the alternative was threading a
+/// name through call sites that variously have one, have a differently-named
+/// one, or have none.
+pub(crate) fn stage_builder_flowmux_identity(
+    state_dir: &Path,
+) -> Result<
+    (
+        mvm_vmm::host::flowmux_identity::FlowMuxIdentityMaterial,
+        PathBuf,
+    ),
+    BuilderVmError,
+> {
+    let vm_name = state_dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("builder");
+    let material =
+        mvm_vmm::host::flowmux_identity::FlowMuxIdentityMaterial::mint_from_host_signer(vm_name)
+            .map_err(|e| {
+                BuilderVmError::ExtractionFailed(format!("mint the builder FlowMux identity: {e}"))
+            })?;
+    let drive = state_dir.join(mvm_vmm::host::flowmux_identity::IDENTITY_DRIVE_FILE);
+    material.write_drive(&drive).map_err(|e| {
+        BuilderVmError::ExtractionFailed(format!("write the builder FlowMux identity drive: {e}"))
+    })?;
+    Ok((material, drive))
+}
+
 impl BuilderVsockEgressEndpoint {
-    fn spawn(state_dir: &Path) -> Result<Self, BuilderVmError> {
+    fn spawn(
+        state_dir: &Path,
+        identity: &mvm_vmm::host::network_endpoint_spawn::FlowMuxIdentitySpawnConfig,
+    ) -> Result<Self, BuilderVmError> {
         let socket_dir = builder_vsock_socket_dir(state_dir)?;
         let transport_path = socket_dir.join(mvm_core::config::vsock_socket_filename(
             mvm_agentd::vsock::EGRESS_PORT,
@@ -303,12 +338,14 @@ impl BuilderVsockEgressEndpoint {
             BuilderEndpointTransport::Uds {
                 path: transport_path,
             },
+            identity,
         )
     }
 
     pub(crate) fn spawn_with_transport(
         state_dir: &Path,
         transport: BuilderEndpointTransport,
+        identity: &mvm_vmm::host::network_endpoint_spawn::FlowMuxIdentitySpawnConfig,
     ) -> Result<Self, BuilderVmError> {
         let endpoint_path = resolve_network_endpoint_path()?;
         let config = serde_json::json!({
@@ -317,7 +354,14 @@ impl BuilderVsockEgressEndpoint {
             "transport": transport,
             "redaction": mvm_core::policy::RedactionPolicy::default(),
             "network_policy": mvm_core::policy::network_policy::NetworkPolicy::trusted_build_egress(),
-            "egress_mode": "raw",
+            // One authenticated session, same as every other tier. The guest's
+            // egress client speaks nothing else.
+            "egress_mode": "flow_mux",
+            "flowmux_identity": {
+                "session_id": identity.session_id,
+                "host_signing_key_base64": identity.host_signing_key_base64,
+                "guest_verifying_key_base64": identity.guest_verifying_key_base64,
+            },
         });
 
         let mvmctl_path = std::env::current_exe().map_err(|e| {
@@ -907,8 +951,15 @@ impl LibkrunBuilderVm {
                 path_to_str(&share_dir, "closure_seed_dir")?,
             );
         }
+        let (identity_material, identity_drive) = stage_builder_flowmux_identity(&vm_state_dir)?;
+        krun = krun.add_disk(
+            "mvm-identity",
+            path_to_str(&identity_drive, "identity_drive")?,
+            true,
+        );
         krun = apply_builder_vsock_egress(krun);
-        let _egress_endpoint = BuilderVsockEgressEndpoint::spawn(&vm_state_dir)?;
+        let _egress_endpoint =
+            BuilderVsockEgressEndpoint::spawn(&vm_state_dir, identity_material.spawn_config())?;
 
         let cfg = SupervisorConfig {
             krun,
@@ -1085,10 +1136,18 @@ impl LibkrunBuilderVm {
         // set by `builder_runtime_overlay_attachment` — there is no
         // overlay-absent degraded boot.
         let egress_endpoint = if builder_uses_vsock_egress(&image) {
+            let (identity_material, identity_drive) =
+                stage_builder_flowmux_identity(&vm_state_dir)?;
             krun = krun
                 .with_vsock_direct()
-                .add_host_listen_port(mvm_agentd::vsock::EGRESS_PORT);
-            BuilderVsockEgressEndpoint::spawn(&vm_state_dir).map(Some)?
+                .add_host_listen_port(mvm_agentd::vsock::EGRESS_PORT)
+                .add_disk(
+                    "mvm-identity",
+                    path_to_str(&identity_drive, "identity_drive")?,
+                    true,
+                );
+            BuilderVsockEgressEndpoint::spawn(&vm_state_dir, identity_material.spawn_config())
+                .map(Some)?
         } else {
             krun = krun.with_vsock_direct();
             None
@@ -1594,10 +1653,18 @@ impl BuilderVm for LibkrunBuilderVm {
         // set by `builder_runtime_overlay_attachment` — there is no
         // overlay-absent degraded boot.
         let egress_endpoint = if builder_uses_vsock_egress(&image) {
+            let (identity_material, identity_drive) =
+                stage_builder_flowmux_identity(&vm_state_dir)?;
             krun = krun
                 .with_vsock_direct()
-                .add_host_listen_port(mvm_agentd::vsock::EGRESS_PORT);
-            BuilderVsockEgressEndpoint::spawn(&vm_state_dir).map(Some)?
+                .add_host_listen_port(mvm_agentd::vsock::EGRESS_PORT)
+                .add_disk(
+                    "mvm-identity",
+                    path_to_str(&identity_drive, "identity_drive")?,
+                    true,
+                );
+            BuilderVsockEgressEndpoint::spawn(&vm_state_dir, identity_material.spawn_config())
+                .map(Some)?
         } else {
             krun = krun.with_vsock_direct();
             None
@@ -1837,12 +1904,28 @@ impl VmBackendForBuilder for LibkrunBuilderBackend {
             && let BuilderVmImage::Rootfs { cmdline, .. } = &self.image
         {
             krun = krun
-                .with_cmdline(builder_vsock_egress_cmdline(cmdline))
+                .with_cmdline(
+                    crate::builder_cmdline::checked_builder_cmdline(builder_vsock_egress_cmdline(
+                        cmdline,
+                    ))
+                    .map_err(BuilderVmError::NixBuildFailed)?,
+                )
                 .with_vsock_direct()
                 .add_host_listen_port(mvm_agentd::vsock::EGRESS_PORT);
         }
         let egress_endpoint = if builder_uses_vsock_egress(&self.image) {
-            BuilderVsockEgressEndpoint::spawn(&config.vm_state_dir).map(Some)?
+            let (identity_material, identity_drive) =
+                stage_builder_flowmux_identity(&config.vm_state_dir)?;
+            krun = krun.add_disk(
+                "mvm-identity",
+                path_to_str(&identity_drive, "identity_drive")?,
+                true,
+            );
+            BuilderVsockEgressEndpoint::spawn(
+                &config.vm_state_dir,
+                identity_material.spawn_config(),
+            )
+            .map(Some)?
         } else {
             krun = krun.with_vsock_direct();
             None
@@ -2139,7 +2222,10 @@ fn krun_context_for_image(
                 path_to_str(&kernel, "kernel_path")?,
                 path_to_str(rootfs_path, "rootfs_path")?,
             )
-            .with_cmdline(cmdline.as_str())
+            .with_cmdline(
+                crate::builder_cmdline::checked_builder_cmdline(cmdline.clone())
+                    .map_err(BuilderVmError::NixBuildFailed)?,
+            )
             .with_kernel_format(kernel_format))
         }
         BuilderVmImage::RootDir {
@@ -4171,6 +4257,10 @@ enum Stage0HaltOutcome {
     CleanHalt,
     /// `nix build` (or a copy step) failed; the guest powered off anyway.
     BuildFailed,
+    /// The guest refused before starting the build — no egress proxy, no
+    /// clock, a share that would not mount. Carries the refusal, because it
+    /// names a cause the nix output never will.
+    SetupFailed(String),
     /// No terminal marker at all — a panic, kill, or truncated console.
     NoCleanHalt,
 }
@@ -4183,6 +4273,15 @@ enum Stage0HaltOutcome {
 /// `stage0-init` prints one stable terminal line, so match on it (the QEMU
 /// Stage 0 path keys on the same markers).
 fn stage0_console_halt_outcome(log: &str) -> Stage0HaltOutcome {
+    // Setup refusals are checked first and win over everything else: the
+    // guest stops before `nix build` runs, so any later marker would be
+    // describing a build that never started.
+    if let Some(why) = log
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("stage0-init: FATAL: "))
+    {
+        return Stage0HaltOutcome::SetupFailed(why.trim().to_string());
+    }
     if log.contains("stage0-init: build failed") {
         Stage0HaltOutcome::BuildFailed
     } else if log.contains("stage0-init: done; halting") {
@@ -4203,6 +4302,9 @@ fn stage0_run_result(console: &str, console_log_path: &str) -> Result<(), Builde
         Stage0HaltOutcome::BuildFailed => Err(BuilderVmError::NixBuildFailed(format!(
             "nix build failed inside the Stage 0 guest; console log at {console_log_path}\n{}",
             read_console_tail(console_log_path, 20)
+        ))),
+        Stage0HaltOutcome::SetupFailed(why) => Err(BuilderVmError::NixBuildFailed(format!(
+            "Stage 0 guest refused to start the build: {why}; console log at {console_log_path}"
         ))),
         Stage0HaltOutcome::NoCleanHalt => Err(BuilderVmError::ExtractionFailed(format!(
             "Stage 0 guest did not reach a clean halt; console log at {console_log_path}\n{}",
@@ -4429,10 +4531,18 @@ impl LibkrunPersistentHostVm {
         // `builder_runtime_overlay_attachment` — there is no overlay-absent
         // degraded boot.
         let egress_endpoint = if builder_uses_vsock_egress(&image) {
+            let (identity_material, identity_drive) =
+                stage_builder_flowmux_identity(&vm_state_dir)?;
             krun = krun
                 .with_vsock_direct()
-                .add_host_listen_port(mvm_agentd::vsock::EGRESS_PORT);
-            BuilderVsockEgressEndpoint::spawn(&vm_state_dir).map(Some)?
+                .add_host_listen_port(mvm_agentd::vsock::EGRESS_PORT)
+                .add_disk(
+                    "mvm-identity",
+                    path_to_str(&identity_drive, "identity_drive")?,
+                    true,
+                );
+            BuilderVsockEgressEndpoint::spawn(&vm_state_dir, identity_material.spawn_config())
+                .map(Some)?
         } else {
             krun = krun.with_vsock_direct();
             None
@@ -6387,6 +6497,57 @@ mod tests {
         assert_eq!(
             stage0_console_halt_outcome("kernel panic - not syncing\n"),
             Stage0HaltOutcome::NoCleanHalt
+        );
+    }
+
+    #[test]
+    fn a_setup_refusal_is_reported_as_a_refusal_not_as_an_unclean_halt() {
+        // This is the console shape of the guest-egress regression: the client
+        // dies, stage0-init refuses before nix runs, and the guest powers off.
+        // Read as NoCleanHalt it would say "did not reach a clean halt"; read
+        // as BuildFailed it would blame a build that never started.
+        let console = "stage0-init: forked mvm-egress-client pid=227\n\
+             mvm-egress-client: failed to load guest signing key\n\
+             stage0-init: FATAL: mvm-egress-client exited before binding the \
+             local egress proxy at 127.0.0.1:1080 (exit code 1)\n\
+             [    9.3] reboot: Power down\n";
+        assert_eq!(
+            stage0_console_halt_outcome(console),
+            Stage0HaltOutcome::SetupFailed(
+                "mvm-egress-client exited before binding the local egress proxy at \
+                 127.0.0.1:1080 (exit code 1)"
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn a_setup_refusal_outranks_a_later_build_marker() {
+        // The guest stops before the build, so a build marker in the same
+        // console can only be stale output from an earlier run.
+        assert_eq!(
+            stage0_console_halt_outcome(
+                "stage0-init: FATAL: no egress\nstage0-init: build failed: x\n"
+            ),
+            Stage0HaltOutcome::SetupFailed("no egress".to_string())
+        );
+    }
+
+    #[test]
+    fn stage0_run_result_surfaces_the_refusal_rather_than_the_nix_noise() {
+        let err = stage0_run_result(
+            "warning: unable to download 'https://github.com/NixOS/nixpkgs'\n\
+             stage0-init: FATAL: mvm-egress-client exited before binding the local \
+             egress proxy at 127.0.0.1:1080 (exit code 1)\n",
+            "/tmp/mvm-stage0-test/console.log",
+        )
+        .expect_err("a setup refusal must fail the run");
+        let msg = err.to_string();
+        assert!(msg.contains("refused to start the build"), "{msg}");
+        assert!(msg.contains("mvm-egress-client"), "{msg}");
+        assert!(
+            msg.contains("console log at /tmp/mvm-stage0-test/console.log"),
+            "{msg}"
         );
     }
 

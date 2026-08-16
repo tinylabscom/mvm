@@ -37,10 +37,11 @@ pub mod entrypoint_stream;
 /// Guest-side FlowMux client for the converged single networking path.
 #[cfg(feature = "addons")]
 pub mod flowmux;
+/// Load the per-boot FlowMux identity material used by the guest-side adapters.
+pub mod flowmux_drive;
 /// Loopback SOCKS5/HTTP-proxy → FlowMux egress bridge (`mvm-egress-client`).
 #[cfg(feature = "addons")]
 pub mod flowmux_egress;
-/// Load the per-boot FlowMux identity material used by the guest-side adapters.
 #[cfg(feature = "addons")]
 pub mod flowmux_keys;
 /// In-guest forward-proxy front: parses a workload's proxied request into a

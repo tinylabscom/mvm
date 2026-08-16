@@ -428,7 +428,7 @@ fn wasm_endpoint_plan(
 /// no VMM to proxy a per-port vsock socket), no terminator (no TAP/nft
 /// REDIRECT to feed), no TLS intermediate (http-only POC; HTTPS termination
 /// is a later phase), and — unlike libkrun/hvf, which serve raw pass-through
-/// when a run carries no secrets — `raw_egress` is unconditionally `false`:
+/// when a run carries no secrets — the wasm tier mints no FlowMux identity:
 /// the `mvm:egress` host-import always speaks the `WireRequest` wire
 /// protocol, never a raw byte relay.
 fn wasm_network_endpoint_spawn_params<'a>(
@@ -448,7 +448,6 @@ fn wasm_network_endpoint_spawn_params<'a>(
         egress_proxy: None,
         tls_intermediate: None,
         network_policy: Some(network_policy),
-        raw_egress: false,
         resolver_remote: None,
         binding_store_dir: None,
         flowmux_identity: None,
@@ -2005,7 +2004,7 @@ mod tests {
     // since the endpoint itself gates per-destination) must produce a spawn
     // plan whose params mirror libkrun/hvf except for the wasm-only
     // deviations: always `Uds`, no terminator, no TLS, and — the one field
-    // that must NOT mirror libkrun — `raw_egress` is always `false`.
+    // that must NOT mirror libkrun — the wasm tier never carries an identity.
     #[test]
     fn wasm_endpoint_plan_params_mirror_libkrun_with_wasm_deviations() {
         let dir = tempfile::tempdir().unwrap();
@@ -2063,7 +2062,7 @@ mod tests {
             "the endpoint must gate the destination itself"
         );
         assert!(
-            !params.raw_egress,
+            params.flowmux_identity.is_none(),
             "wasm always speaks WireRequest wire mode, never libkrun's raw pass-through"
         );
     }

@@ -323,6 +323,10 @@ pub fn builder_control_sockets(state_dir: &Path, builder_tier: bool) -> Vec<(u32
 /// kernel cmdline, and the write-only console capture path.
 pub struct WorkloadSpecInputs<'a> {
     pub config: &'a VmStartConfig,
+    /// This boot's FlowMux identity drive, when it minted one. Appended after
+    /// every other block and found in the guest by ext4 label, so the volumes
+    /// above cannot shift it out from under the guest.
+    pub identity_drive: Option<&'a Path>,
     pub sockets: WorkloadSockets<'a>,
     /// The kernel cmdline the role assembled (roothash, overlay args, console).
     pub cmdline: String,
@@ -430,10 +434,20 @@ pub fn workload_shares(config: &VmStartConfig) -> Vec<VirtioFsShare> {
 /// No NIC, no policy (those live in the role above and the bridge it spawns,
 /// never in the spec the driver boots).
 pub fn workload_spec(inputs: &WorkloadSpecInputs) -> VmmSpec {
-    VmmSpec {
+    let mut spec = VmmSpec {
         vsock: workload_vsock_ports(&inputs.sockets),
         ..workload_device_spec(inputs.config, &inputs.cmdline, &inputs.console_log)
+    };
+    if let Some(drive) = inputs.identity_drive {
+        let slot = spec.blocks.len() as u8;
+        spec.blocks.push(BlockDev {
+            source: drive.to_path_buf(),
+            read_only: true,
+            ephemeral: false,
+            slot,
+        });
     }
+    spec
 }
 
 #[cfg(test)]
@@ -1062,6 +1076,7 @@ mod tests {
             ..base()
         };
         let spec = workload_spec(&WorkloadSpecInputs {
+            identity_drive: None,
             config: &cfg,
             sockets: sample_sockets(),
             cmdline: "console=ttyAMA0 root=/dev/vda".into(),
@@ -1083,6 +1098,7 @@ mod tests {
             ..base()
         };
         let spec = workload_spec(&WorkloadSpecInputs {
+            identity_drive: None,
             config: &cfg,
             sockets: sample_sockets(),
             cmdline: String::new(),
@@ -1094,6 +1110,7 @@ mod tests {
     #[test]
     fn workload_spec_without_initrd_has_no_initramfs() {
         let spec = workload_spec(&WorkloadSpecInputs {
+            identity_drive: None,
             config: &base(),
             sockets: sample_sockets(),
             cmdline: String::new(),
@@ -1105,6 +1122,7 @@ mod tests {
     #[test]
     fn workload_spec_falls_back_to_bundled_kernel_without_a_path() {
         let spec = workload_spec(&WorkloadSpecInputs {
+            identity_drive: None,
             config: &base(),
             sockets: sample_sockets(),
             cmdline: String::new(),
@@ -1259,6 +1277,7 @@ mod tests {
             ..base()
         };
         let spec = workload_spec(&WorkloadSpecInputs {
+            identity_drive: None,
             config: &cfg,
             sockets: WorkloadSockets {
                 agent: Path::new("/run/agent.sock"),
@@ -1279,6 +1298,7 @@ mod tests {
     #[test]
     fn workload_spec_without_dev_console_carries_three_vsock_entries() {
         let spec = workload_spec(&WorkloadSpecInputs {
+            identity_drive: None,
             config: &base(),
             sockets: sample_sockets(),
             cmdline: String::new(),

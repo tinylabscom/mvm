@@ -1325,6 +1325,11 @@ for detailed scope and acceptance criteria.
         (recon §7.7 → #2019)
 
 - [~] Plan 316 — Single flow-aware vsock networking path
+  **Phases 2-4 superseded by
+  `specs/plans/2026-08-15-flowmux-single-transport-cutover.md` (#2543): #2480 shipped the
+  FlowMux guest adapter without host identity provisioning, so guest egress is dead on
+  `main`. The cutover completes there, on one transport, folding `Wire` and `MVM_ICMP/1`
+  into FlowMux rather than leaving three protocols behind a sniff.**
   (`specs/plans/316-single-flow-vsock-networking.md`, ADR-042, umbrella #2368)
   Collapses the two production workload networking paths to one authenticated
   FlowMux session on `GuestService::NetworkFlow` through one

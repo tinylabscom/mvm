@@ -124,6 +124,17 @@ impl<D: VmmDriver + 'static> BuilderRunner<D> {
         )?;
         create_output_disk(&output_disk, b.output_size)?;
 
+        // This boot's FlowMux identity. The builder guest reads it off a small
+        // read-only drive before starting its egress client, which will not
+        // bind without it -- and the builder has no NIC, so no egress means no
+        // build.
+        let builder_identity =
+            mvm_vmm::host::flowmux_identity::FlowMuxIdentityMaterial::mint_from_host_signer(
+                b.name,
+            )?;
+        let identity_drive = state_dir.join(mvm_vmm::host::flowmux_identity::IDENTITY_DRIVE_FILE);
+        builder_identity.write_drive(&identity_drive)?;
+
         let spec = builder_spec(&BuilderSpecInputs {
             name: b.name,
             kernel: b.kernel,
@@ -135,6 +146,7 @@ impl<D: VmmDriver + 'static> BuilderRunner<D> {
             console_log: state_dir.join("console.log"),
             agent_socket: Some(state_dir.join("agent.sock")),
             egress_socket: egress_socket.clone(),
+            identity_drive: &identity_drive,
             vcpus: b.vcpus,
             memory_mib: b.memory_mib,
         });
@@ -153,10 +165,9 @@ impl<D: VmmDriver + 'static> BuilderRunner<D> {
             egress_proxy: None,
             tls_intermediate: None,
             network_policy: Some(&builder_policy),
-            raw_egress: true,
             resolver_remote: None,
             binding_store_dir: None,
-            flowmux_identity: None,
+            flowmux_identity: Some(builder_identity.spawn_config().clone()),
         })?;
         let mut endpoint_guard = EndpointGuard::new(b.name);
 
@@ -214,6 +225,15 @@ mod tests {
     fn builder_fixture(env: &mut TestEnv) -> BuilderFixture {
         let tmp = tempfile::tempdir().unwrap();
         env.set("MVM_HOME", tmp.path());
+
+        // The builder mints this boot's FlowMux identity under the host
+        // signer, so the signer has to exist. In production `mvmctl` creates
+        // it on first use before any build starts; these tests drive
+        // `BuilderRunner` directly, so they seed it themselves rather than
+        // reaching for the creator, which lives a layer above this crate.
+        let keys = mvm_core::config::mvm_keys_dir();
+        std::fs::create_dir_all(&keys).unwrap();
+        std::fs::write(keys.join("host-signer.ed25519"), [5u8; 32]).unwrap();
 
         let job = tmp.path().join("job");
         let work = tmp.path().join("work");
@@ -303,10 +323,19 @@ mod tests {
             .expect("build orchestrates against the mock driver");
 
         assert!(outcome.stopped);
-        // A single builder spec was booted: 4 disks and the builder cmdline.
+        // A single builder spec was booted: the four job disks plus this
+        // boot's FlowMux identity drive, and the builder cmdline.
         let specs = runner.driver.booted_specs();
         assert_eq!(specs.len(), 1);
-        assert_eq!(specs[0].blocks.len(), 4);
+        assert_eq!(specs[0].blocks.len(), 5);
+        assert!(
+            specs[0]
+                .blocks
+                .last()
+                .is_some_and(|b| b.read_only && b.source.ends_with("flowmux-identity.ext4")),
+            "the builder guest cannot start its egress client without the \
+             identity drive, and it must be attached read-only"
+        );
         assert!(specs[0].cmdline.contains("init=/sbin/mvm-host-vm-init"));
         // The input disk was packed and the output extracted (empty tar from the
         // mock guest, which writes nothing).
@@ -363,7 +392,9 @@ mod tests {
             .expect("build orchestrates against the mock driver");
 
         assert!(outcome.stopped);
-        assert_eq!(runner.driver.booted_specs()[0].blocks.len(), 4);
+        // Four job disks + the FlowMux identity drive: riding the closure NAR
+        // on the input disk must not add one.
+        assert_eq!(runner.driver.booted_specs()[0].blocks.len(), 5);
 
         // Extract the packed input disk directly to confirm the closure NAR
         // landed under closure-seed/ alongside job/work/mvm-bins.

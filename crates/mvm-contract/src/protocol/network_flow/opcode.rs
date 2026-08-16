@@ -75,6 +75,14 @@ pub enum Opcode {
     HttpResponseBody = 0x54,
     /// host→guest: the exchange finished cleanly.
     HttpComplete = 0x55,
+
+    // ── ICMP echo ────────────────────────────────────────────────────
+    /// guest→host: one echo request to a destination.
+    IcmpEcho = 0x60,
+    /// host→guest: the matching echo reply.
+    IcmpReply = 0x61,
+    /// host→guest: the echo was refused by policy.
+    IcmpRefused = 0x62,
 }
 
 /// What kind of flow an opcode belongs to. Used by the state machine to
@@ -93,6 +101,9 @@ pub enum FlowClass {
     Ingress,
     /// A typed HTTP flow eligible for transformation.
     Http,
+    /// A one-shot ICMP echo exchange. Mediated like every other flow: the
+    /// host originates the socket, so the guest never holds a raw one.
+    Icmp,
     /// Shared by every byte-carrying flow: `Data`, credit, and teardown.
     Common,
 }
@@ -146,6 +157,9 @@ impl Opcode {
             0x53 => Self::HttpResponseHead,
             0x54 => Self::HttpResponseBody,
             0x55 => Self::HttpComplete,
+            0x60 => Self::IcmpEcho,
+            0x61 => Self::IcmpReply,
+            0x62 => Self::IcmpRefused,
             _ => return None,
         })
     }
@@ -180,6 +194,9 @@ impl Opcode {
         Self::HttpResponseHead,
         Self::HttpResponseBody,
         Self::HttpComplete,
+        Self::IcmpEcho,
+        Self::IcmpReply,
+        Self::IcmpRefused,
     ];
 
     /// The class this opcode belongs to.
@@ -199,6 +216,7 @@ impl Opcode {
             | Self::HttpResponseHead
             | Self::HttpResponseBody
             | Self::HttpComplete => FlowClass::Http,
+            Self::IcmpEcho | Self::IcmpReply | Self::IcmpRefused => FlowClass::Icmp,
             Self::Opened
             | Self::Refused
             | Self::Data
@@ -280,7 +298,8 @@ impl Opcode {
             | Self::InboundRefused
             | Self::OpenHttp
             | Self::HttpRequestHead
-            | Self::HttpRequestBody => Sender::GuestOnly,
+            | Self::HttpRequestBody
+            | Self::IcmpEcho => Sender::GuestOnly,
             Self::HelloAck
             | Self::Opened
             | Self::Refused
@@ -291,7 +310,9 @@ impl Opcode {
             | Self::InboundOpen
             | Self::HttpResponseHead
             | Self::HttpResponseBody
-            | Self::HttpComplete => Sender::HostOnly,
+            | Self::HttpComplete
+            | Self::IcmpReply
+            | Self::IcmpRefused => Sender::HostOnly,
             Self::GoAway
             | Self::Data
             | Self::WindowUpdate
@@ -323,6 +344,35 @@ mod tests {
             .filter(|v| Opcode::from_u8(*v).is_some())
             .collect();
         assert_eq!(listed, decodable);
+    }
+
+    #[test]
+    fn icmp_is_a_guest_request_answered_only_by_the_host() {
+        // The guest asks; the host originates the socket and answers. A guest
+        // that could send a reply or a refusal would be speaking for the host.
+        assert_eq!(Opcode::IcmpEcho.sender(), Sender::GuestOnly);
+        assert_eq!(Opcode::IcmpReply.sender(), Sender::HostOnly);
+        assert_eq!(Opcode::IcmpRefused.sender(), Sender::HostOnly);
+    }
+
+    #[test]
+    fn icmp_opcodes_share_one_flow_class() {
+        for op in [Opcode::IcmpEcho, Opcode::IcmpReply, Opcode::IcmpRefused] {
+            assert_eq!(op.class(), FlowClass::Icmp, "{op:?}");
+        }
+    }
+
+    #[test]
+    fn icmp_discriminants_are_the_bytes_the_wire_carries() {
+        // Pinned rather than derived: these are a wire contract, so a
+        // reordering of the enum must fail here instead of silently changing
+        // what a peer sees.
+        assert_eq!(Opcode::IcmpEcho.as_u8(), 0x60);
+        assert_eq!(Opcode::IcmpReply.as_u8(), 0x61);
+        assert_eq!(Opcode::IcmpRefused.as_u8(), 0x62);
+        assert_eq!(Opcode::from_u8(0x60), Some(Opcode::IcmpEcho));
+        assert_eq!(Opcode::from_u8(0x61), Some(Opcode::IcmpReply));
+        assert_eq!(Opcode::from_u8(0x62), Some(Opcode::IcmpRefused));
     }
 
     #[test]

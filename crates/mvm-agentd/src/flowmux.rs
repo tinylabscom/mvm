@@ -571,12 +571,7 @@ where
         payload: Vec<u8>,
     ) -> Result<(), FlowMuxError> {
         self.validator
-            .admit(&frame_facts(
-                Direction::HostToGuest,
-                opcode,
-                stream_id,
-                payload.len() as u32,
-            ))
+            .admit(&inbound_frame_facts(opcode, stream_id, &payload))
             .map_err(|e| FlowMuxError::Frame(e.to_string()))?;
 
         match opcode {
@@ -640,8 +635,25 @@ where
                 }
             }
             Opcode::Data => {
-                if let Some(state) = self.tcp_streams.get_mut(&stream_id) {
-                    let _ = state.tx.send(StreamEvent::Data(payload));
+                let consumed = u32::try_from(payload.len()).unwrap_or(u32::MAX);
+                let delivered = match self.tcp_streams.get_mut(&stream_id) {
+                    Some(state) => {
+                        let _ = state.tx.send(StreamEvent::Data(payload));
+                        true
+                    }
+                    None => false,
+                };
+                // Return the credit those bytes consumed.
+                //
+                // The host replenishes the guest's window on every DATA it
+                // relays, but nothing replenished the host's — so the host→guest
+                // window drained and the host reset the stream the moment it hit
+                // zero. That caps every download at one window (~48 KiB here) and
+                // surfaces as a truncated archive rather than as a flow-control
+                // failure. Only for a stream we still hold: replenishing one we
+                // have already retired would name a stream the host has closed.
+                if delivered && consumed > 0 {
+                    self.send_window_update(stream_id, consumed).await?;
                 }
             }
             Opcode::HalfClose => {
@@ -711,6 +723,31 @@ where
 
     async fn send_half_close(&mut self, stream_id: u32) -> Result<(), FlowMuxError> {
         self.write_frame(Opcode::HalfClose, stream_id, &[]).await
+    }
+
+    /// Grant the host `delta` more bytes of room on this stream.
+    ///
+    /// The mirror of the host's replenish. A zero delta is a frame error by
+    /// the protocol, so callers only reach here with bytes actually consumed.
+    async fn send_window_update(&mut self, stream_id: u32, delta: u32) -> Result<(), FlowMuxError> {
+        self.write_frame(Opcode::WindowUpdate, stream_id, &delta.to_be_bytes())
+            .await?;
+        // Advance our own view of the host's allowance to match what we just
+        // told it. The validator only learns of credit it admits, so a grant
+        // that goes out on the wire without this leaves the local window
+        // shrinking while the host's grows — and the guest then refuses the
+        // host's data as over-credit, on a window it granted itself.
+        // The host keeps its own view in step the same way, via `mark_sent`.
+        let _ = self.validator.admit(
+            &mvm_contract::protocol::network_flow::FrameFacts::new(
+                Direction::GuestToHost,
+                Opcode::WindowUpdate,
+                stream_id,
+            )
+            .with_payload(4)
+            .with_credit(delta),
+        );
+        Ok(())
     }
 
     async fn send_reset(&mut self, stream_id: u32, reason: &str) -> Result<(), FlowMuxError> {
@@ -995,6 +1032,35 @@ fn frame_facts(
         .with_payload(payload_len)
 }
 
+/// Facts for a frame arriving from the host.
+///
+/// A `WindowUpdate`'s payload *is* its credit, and the validator rejects an
+/// update that carries none. Describing one by length alone therefore fails
+/// every single window update — reported as the host sending a credit-less
+/// frame, when the host sent a perfectly good one and the guest simply never
+/// looked at it. The session dies on the first replenish, which is the first
+/// byte of real traffic.
+fn inbound_frame_facts(
+    opcode: Opcode,
+    stream_id: u32,
+    payload: &[u8],
+) -> mvm_contract::protocol::network_flow::FrameFacts {
+    let facts = frame_facts(
+        Direction::HostToGuest,
+        opcode,
+        stream_id,
+        payload.len() as u32,
+    );
+    match (opcode, payload) {
+        (Opcode::WindowUpdate, [a, b, c, d]) => {
+            facts.with_credit(u32::from_be_bytes([*a, *b, *c, *d]))
+        }
+        // A malformed update keeps no credit, so the validator still refuses
+        // it — the decode is a faithful read, not a way to wave frames through.
+        _ => facts,
+    }
+}
+
 fn build_dns_query(name: &str, qtype: u16, id: u16) -> Result<Vec<u8>, FlowMuxError> {
     let mut query = Vec::with_capacity(64);
 
@@ -1234,8 +1300,13 @@ async fn reconnect_loop<S, F, Fut>(
                 break;
             }
             if state_rx.changed().await.is_err() {
-                let _ = current_tx.send(None);
-                return;
+                // The session task dropped its state sender. That is the
+                // strongest evidence the session is gone, not a signal to stop
+                // watching — a session can end without ever publishing `Dead`.
+                // Returning here drops `current_tx`, so every waiter fails with
+                // "reconnect owner gone" and the guest never gets a second
+                // session, which is indistinguishable from having no network.
+                break;
             }
         }
 
@@ -1419,6 +1490,21 @@ mod tests {
                 b"pong",
             )
             .await;
+
+            // The guest returns the credit it just consumed before anything
+            // else. A real host depends on this — without it the host's window
+            // drains and it resets the stream — so the double asserts it
+            // rather than tolerating it.
+            let (opcode, wu_sid, _len, payload) = recv_frame(&mut host_stream, &mut host_session)
+                .await
+                .unwrap();
+            assert_eq!(opcode, Opcode::WindowUpdate);
+            assert_eq!(wu_sid, sid);
+            assert_eq!(
+                payload,
+                (b"pong".len() as u32).to_be_bytes(),
+                "the grant must be exactly the bytes delivered"
+            );
 
             let (opcode, hc_sid, _len, _payload) = recv_frame(&mut host_stream, &mut host_session)
                 .await

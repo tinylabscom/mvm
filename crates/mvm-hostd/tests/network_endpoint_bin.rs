@@ -305,3 +305,97 @@ fn endpoint_bin_raw_no_secret_mode_handshakes_without_placeholders() {
     UnixStream::connect(&sock).expect("raw endpoint UDS is bound before handshake");
     drop(guard);
 }
+
+/// A FlowMux endpoint keeps serving sessions after one ends.
+///
+/// The guest's `FlowMuxReconnectClient` re-dials whenever a session dies, and a
+/// guest runs more than one FlowMux client (the egress shim and the addon DNS
+/// resolver each own one). An endpoint that accepted once and exited turned any
+/// dropped session into permanent loss of networking, and starved whichever
+/// client lost the race to connect first.
+///
+/// The assertion is a *completed authenticated handshake* on the second and
+/// third connections, not a successful `connect()`. A unix socket accepts into
+/// its backlog while the listener is open, so `connect()` alone succeeds even
+/// against the single-accept version — it proves nothing.
+#[test]
+fn a_flowmux_endpoint_keeps_serving_sessions_after_one_ends() {
+    use base64::Engine as _;
+    use mvm_core::net::session::Session;
+    use mvm_hostd::supervisor::network_endpoint::FlowMuxIdentity;
+
+    let dir = tempfile::tempdir().unwrap();
+    let sock = dir.path().join("network.sock");
+
+    let host_key = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+    let host_verify = host_key.verifying_key();
+    let guest_key = ed25519_dalek::SigningKey::from_bytes(&[9u8; 32]);
+    let b64 = base64::engine::general_purpose::STANDARD;
+
+    let cfg = EndpointConfig {
+        tenant_id: "local".into(),
+        secrets: vec![],
+        transport: EndpointTransport::Uds { path: sock.clone() },
+        redaction: mvm_core::policy::RedactionPolicy::default(),
+        reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
+        forward_timeout_secs: 30,
+        proxy_https: None,
+        proxy_http: None,
+        no_proxy: None,
+        secret_store_dir: None,
+        binding_store_dir: None,
+        terminator_listen: None,
+        tls_intermediate: None,
+        network_policy: None,
+        egress_mode: EgressMode::FlowMux,
+        resolver: ResolverBackend::default(),
+        flowmux_identity: Some(FlowMuxIdentity {
+            session_id: "keeps-serving".into(),
+            host_signing_key_base64: b64.encode(host_key.to_bytes()),
+            guest_verifying_key_base64: b64.encode(guest_key.verifying_key().to_bytes()),
+        }),
+    };
+
+    let mut child = Command::new(BIN)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn endpoint bin");
+    let mut stdin = child.stdin.take().unwrap();
+    stdin.write_all(&serde_json::to_vec(&cfg).unwrap()).unwrap();
+    drop(stdin);
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+    let guard = Kill(child);
+
+    let mut line = String::new();
+    stdout.read_line(&mut line).expect("read handshake line");
+
+    // A guest session: connect, complete the authenticated handshake, drop.
+    // The read timeout turns "the host never answered" into a failure rather
+    // than a hung test.
+    let handshake_once = |what: &str| {
+        let mut conn = UnixStream::connect(&sock).unwrap_or_else(|e| {
+            panic!("{what}: endpoint stopped accepting: {e}");
+        });
+        conn.set_read_timeout(Some(std::time::Duration::from_secs(10)))
+            .unwrap();
+        Session::guest(&mut conn, guest_key.clone(), &host_verify)
+            .unwrap_or_else(|e| panic!("{what}: handshake did not complete: {e}"));
+        conn
+    };
+
+    // First session, then let it end the way a real one does.
+    drop(handshake_once("first session"));
+
+    // The assertion: a fresh session still authenticates after the first ended.
+    let second = handshake_once("second session (after the first ended)");
+
+    // And a third while the second is still open — two guest processes each
+    // own a session, so the endpoint must hold more than one at a time.
+    let third = handshake_once("third session (concurrent with the second)");
+
+    drop(third);
+    drop(second);
+    drop(guard);
+}
