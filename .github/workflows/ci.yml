@@ -85,7 +85,7 @@ jobs:
           # Anything that can change a compiled target, generated artifact, or
           # the commands used by a Rust lane keeps the full compiler/test
           # matrix. Prose, site assets, and process-only specs do not.
-          if grep -zE '^(crates/|src/|tests/|xtask/|scripts/|features/|schema/|model/|assets/|\.cargo/|\.config/|\.github/actions/|\.github/workflows/|nix/packaging/release/verify-release-assets[^/]*\.sh$|Cargo\.(toml|lock)$|rust-toolchain\.toml$|build\.rs$|install\.sh$|[Jj]ustfile$)' "$CHANGED_FILE" >/dev/null; then
+          if grep -zE '^(crates/|src/|tests/|xtask/|scripts/|features/|schema/|model/|assets/|\.cargo/|\.config/|\.github/actions/|\.github/workflows/|nix/packaging/release/[^/]*\.sh$|Cargo\.(toml|lock)$|rust-toolchain\.toml$|build\.rs$|install\.sh$|[Jj]ustfile$)' "$CHANGED_FILE" >/dev/null; then
             echo "code=true" >> "$GITHUB_OUTPUT"
           else
             echo "code=false" >> "$GITHUB_OUTPUT"
@@ -176,7 +176,8 @@ jobs:
           sudo apt-get install -y shellcheck
           shellcheck -S warning install.sh
           shellcheck nix/packaging/release/verify-release-assets.sh \
-                     nix/packaging/release/verify-release-assets.test.sh
+                     nix/packaging/release/verify-release-assets.test.sh \
+                     nix/packaging/release/assert-init-shebang.sh
 
       - name: Release-asset verifier gate tests
         run: bash nix/packaging/release/verify-release-assets.test.sh
@@ -537,13 +538,17 @@ jobs:
         run: cargo test -p mvm-build --features pure-mkfs --lib rootfs::tests::pure
 
       - name: test-support feature tests (mock backend)
+        # One invocation, not one per package. Cargo resolves features per
+        # invocation, so selecting a different package each time produced
+        # different fingerprints and rebuilt most of the same graph seven
+        # times over — 28 of this job's 35 minutes, and the critical path for
+        # every pull request. These packages form one feature subtree
+        # (mvm-cli -> mvm-runtime -> mvm-backends, mvm-vmm -> mvm-core), so a
+        # single resolution covers all of them and compiles once.
         run: |
-          cargo nextest run -p mvm-backends --features test-support --lib
-          cargo nextest run -p mvm-runtime --features test-support --lib
-          cargo nextest run -p mvm-client --features test-support --lib
-          cargo nextest run -p mvm-cli --features test-support --lib
+          cargo nextest run --features test-support --lib \
+            -p mvm-backends -p mvm-runtime -p mvm-client -p mvm-cli -p mvm-vmm
           cargo nextest run -p mvmctl --features test-support --test audit_emissions_live
-          cargo nextest run -p mvm-vmm --features test-support --lib
           cargo check -p mvm-cli --features test-support --example verification_loop
 
   lint:

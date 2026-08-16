@@ -19,6 +19,26 @@ sha256_of() {
   else shasum -a 256 "$1" | awk '{print $1}'; fi
 }
 
+# The boot-asset gate reads /init out of the rootfs with debugfs, so a
+# placeholder file cannot exercise it — these fixtures need a real ext4.
+# `mkfs.ext4 -d` builds one from a directory with no root and no loop device.
+# Absent that tooling (macOS), the boot checks are switched off via
+# --boot-arches and their scenarios are skipped rather than faked green.
+BOOT_TOOLS=0
+if command -v mkfs.ext4 >/dev/null 2>&1 && command -v debugfs >/dev/null 2>&1; then
+  BOOT_TOOLS=1
+fi
+BOOT_ARCHES="aarch64 x86_64"
+
+# Write an ext4 at $1 whose /init has $2 as its first line.
+make_rootfs() {
+  root="$(mktemp -d)"
+  printf '%s\n# mvm /init fixture\nexit 0\n' "$2" > "$root/init"
+  chmod 0500 "$root/init"
+  mkfs.ext4 -F -q -d "$root" "$1" 2M >/dev/null 2>&1
+  rm -rf "$root"
+}
+
 bins_for() {
   case "$1" in
     *apple-darwin) echo "mvmctl mvm-hvf-supervisor mvm-libkrun-supervisor mvm-network-endpoint" ;;
@@ -69,10 +89,28 @@ build_valid_fixture() {
     done
     printf 'bundle\n' > "$dir/default-microvm-$arch-checksums-sha256.txt.bundle"
   done
+  if [ "$BOOT_TOOLS" = 1 ]; then
+    for arch in $BOOT_ARCHES; do
+      make_rootfs "$dir/default-microvm-rootfs-$arch.ext4" '#!/bin/sh'
+      printf 'vmlinux-%s\n' "$arch"   > "$dir/default-microvm-vmlinux-$arch"
+      printf '{"meta":"%s"}\n' "$arch" > "$dir/default-microvm-meta-$arch.json"
+      for f in "default-microvm-rootfs-$arch.ext4" "default-microvm-vmlinux-$arch" \
+               "default-microvm-meta-$arch.json"; do
+        echo "$(sha256_of "$dir/$f")  $f" >> "$dir/default-microvm-$arch-checksums-sha256.txt"
+      done
+    done
+  fi
   echo "$dir"
 }
 
-run() { bash "$SCRIPT" --assets-dir "$1" >/dev/null 2>&1; }  # returns the script's exit code
+# Returns the script's exit code.
+run() {
+  if [ "$BOOT_TOOLS" = 1 ]; then
+    bash "$SCRIPT" --assets-dir "$1" >/dev/null 2>&1
+  else
+    bash "$SCRIPT" --assets-dir "$1" --boot-arches "" >/dev/null 2>&1
+  fi
+}
 
 PASS=0; FAILN=0
 ok()   { PASS=$((PASS+1)); echo "  ok: $1"; }
@@ -115,9 +153,14 @@ if run "$d"; then bad "partial runtime pack (missing bundle) must fail"; else ok
 rm -rf "$d"
 
 # 7. Absent runtime pack (all three gone) → pass (accelerator absent).
+# The per-arch manifest covers the boot assets too, and the job that writes it
+# writes both, so "no manifest" only ever means "the whole image job shipped
+# nothing" — drop the boot assets with it rather than fixture an impossible state.
 d="$(build_valid_fixture)"
 rm -f "$d/default-microvm-x86_64.pack-manifest.json" "$d/default-microvm-x86_64.pack-manifest.json.bundle" \
-      "$d/default-microvm-x86_64.sbom.txt" "$d/default-microvm-x86_64-checksums-sha256.txt"
+      "$d/default-microvm-x86_64.sbom.txt" "$d/default-microvm-x86_64-checksums-sha256.txt" \
+      "$d/default-microvm-rootfs-x86_64.ext4" "$d/default-microvm-vmlinux-x86_64" \
+      "$d/default-microvm-meta-x86_64.json"
 if run "$d"; then ok "absent runtime pack is accepted"; else bad "absent runtime pack should be accepted"; fi
 rm -rf "$d"
 
@@ -160,6 +203,48 @@ d="$(build_valid_fixture)"
 printf 'tampered-kernel\n' > "$d/vmlinux-aarch64-workload"
 if run "$d"; then bad "checksum-mismatched workload kernel must fail"; else ok "checksum-mismatched workload kernel fails closed"; fi
 rm -rf "$d"
+
+# 13-16. The boot-asset gate. These need a real ext4 (see make_rootfs), so they
+# are skipped where e2fsprogs is absent — which is also where `run` switches the
+# gate off, so the suite stays honest rather than reporting checks it never ran.
+if [ "$BOOT_TOOLS" = 1 ]; then
+  # 13. THE REGRESSION. A rootfs whose /init has its `#!` one column right of
+  # byte 0 — byte-for-byte what v0.17.0 published. Every checksum still matches;
+  # only reading /init catches it.
+  d="$(build_valid_fixture)"
+  make_rootfs "$d/default-microvm-rootfs-aarch64.ext4" ' #!/bin/sh'
+  # Re-record the hash, so the image is a *faithful* copy of a broken build and
+  # the checksum layer has nothing to say about it.
+  grep -v ' default-microvm-rootfs-aarch64.ext4$' \
+    "$d/default-microvm-aarch64-checksums-sha256.txt" > "$d/.checks.tmp"
+  mv "$d/.checks.tmp" "$d/default-microvm-aarch64-checksums-sha256.txt"
+  echo "$(sha256_of "$d/default-microvm-rootfs-aarch64.ext4")  default-microvm-rootfs-aarch64.ext4" \
+    >> "$d/default-microvm-aarch64-checksums-sha256.txt"
+  if run "$d"; then bad "a /init shebang off byte 0 must fail"; else ok "/init shebang off byte 0 fails closed"; fi
+  rm -rf "$d"
+
+  # 14. Partial boot assets (rootfs gone, kernel + meta still there) → fail.
+  d="$(build_valid_fixture)"
+  rm -f "$d/default-microvm-rootfs-aarch64.ext4"
+  if run "$d"; then bad "partial boot assets must fail"; else ok "partial boot assets fail closed"; fi
+  rm -rf "$d"
+
+  # 15. Boot assets entirely absent → pass (image job did not ship; `release`
+  # publishes the binary download regardless).
+  d="$(build_valid_fixture)"
+  rm -f "$d/default-microvm-rootfs-x86_64.ext4" "$d/default-microvm-vmlinux-x86_64" \
+        "$d/default-microvm-meta-x86_64.json"
+  if run "$d"; then ok "absent boot assets are accepted"; else bad "absent boot assets should be accepted"; fi
+  rm -rf "$d"
+
+  # 16. Rootfs bytes do not match the recorded hash → fail closed.
+  d="$(build_valid_fixture)"
+  printf 'tampered-rootfs\n' > "$d/default-microvm-rootfs-aarch64.ext4"
+  if run "$d"; then bad "checksum-mismatched rootfs must fail"; else ok "checksum-mismatched rootfs fails closed"; fi
+  rm -rf "$d"
+else
+  echo "  skip: boot-asset gate (mkfs.ext4/debugfs not on PATH)"
+fi
 
 # 12. Every binary the verifier REQUIRES must be one release.yml actually
 # bundles. The fixtures above cannot catch a stale name: build_valid_fixture
