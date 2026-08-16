@@ -256,7 +256,8 @@ async fn transient_failed_launch_rolls_back_session_state() {
         .expect("request");
     let err = client.launch(request).await.unwrap_err();
     assert!(
-        err.to_string().contains("parse image reference"),
+        matches!(err, mvm_core::client::MvmError::InvalidSpec { .. })
+            && err.to_string().contains("not a usable OCI reference"),
         "got: {err}"
     );
 
