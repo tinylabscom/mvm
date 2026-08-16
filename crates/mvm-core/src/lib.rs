@@ -40,7 +40,6 @@ pub mod egress_handler;
 /// Host-side egress secret substitution (destination-bound; closed by default).
 /// Secrets are substituted into outbound requests host-side and never enter the
 /// guest.
-pub mod egress_substitution;
 pub mod exit_capture;
 /// Per-dimension resolution of a workload's grants across the CLI, a JSON
 /// grants file, the project manifest, and the operator's host config.
@@ -162,6 +161,6 @@ pub mod util;
 
 pub use domain::{agent, instance, manifest, node, pool, session, template, tenant, volume};
 pub use platform::linux_env;
-pub use policy::{audit, network_policy, secret_binding, security};
+pub use policy::{audit, network_policy, security};
 pub use protocol::{routing, signing, vm_backend};
 pub use util::{atomic_io, idle_metrics, retry, time};
