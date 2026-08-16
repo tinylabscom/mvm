@@ -119,6 +119,7 @@ mod tests {
                     auth_type: AuthType::Bearer,
                     allowed_hosts: vec!["api.openai.com".into()],
                     sigv4: None,
+                    provider: None,
                 },
             )
             .unwrap();
@@ -163,6 +164,7 @@ mod tests {
                         region: "us-east-1".into(),
                         service: "s3".into(),
                     }),
+                    provider: None,
                 },
             )
             .unwrap();

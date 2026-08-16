@@ -527,6 +527,7 @@ mod tests {
             auth_type: AuthType::Bearer,
             allowed_hosts: hosts.iter().map(|h| h.to_string()).collect(),
             sigv4: None,
+            provider: None,
         }
     }
 
@@ -1008,6 +1009,7 @@ mod tests {
             auth_type: AuthType::Sigv4,
             allowed_hosts: vec!["s3.amazonaws.com".into()],
             sigv4: None,
+            provider: None,
         };
         assert!(validate_binding_meta("local", "aws", &missing).is_err());
         // SigV4 with scope → accepted.
@@ -1015,6 +1017,7 @@ mod tests {
             auth_type: AuthType::Sigv4,
             allowed_hosts: vec!["s3.amazonaws.com".into()],
             sigv4: Some(sigv4.clone()),
+            provider: None,
         };
         validate_binding_meta("local", "aws", &good).unwrap();
         // Non-SigV4 carrying scope → refused (would be silently ignored).
@@ -1022,6 +1025,7 @@ mod tests {
             auth_type: AuthType::Bearer,
             allowed_hosts: vec!["api.example.com".into()],
             sigv4: Some(sigv4),
+            provider: None,
         };
         assert!(validate_binding_meta("local", "k", &stray).is_err());
     }
