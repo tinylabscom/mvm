@@ -25,66 +25,26 @@ from typing import Any, Callable, Optional, Tuple
 LIB_PATH_ENV = "MVM_HOST_SERVICES_LIB"
 DEFAULT_LIB_PATH = "/mvm/sdk/lib/libmvm_host_services.so"
 
-# Must match the MVM_HSVC_* status codes in the Rust cdylib.
-_OK = 0
-_BAD_REQUEST = 1
-_RATE_LIMITED = 2
-_UNAVAILABLE = 3
-_NOT_BOUND = 4
-_NOT_IMPLEMENTED = 5
-_SERVICE = 6
-_TRANSPORT = 7
-_INVALID_INPUT = 8
+# Status codes and the typed hierarchy are generated from the Rust
+# registry (crates/mvm-sdk/src/error_taxonomy.rs); they used to be
+# re-declared here under a comment asking a human to keep them matching.
+from mvm._errors.types import (  # noqa: E402
+    STATUS_ERRORS,
+    STATUS_OK as _OK,
+    BadRequestError,
+    HostServiceError,
+    InvalidInputError,
+    NotBoundError,
+    RateLimitedError,
+    ServiceError,
+    TransportError,
+    UnavailableError,
+    VerbNotImplementedError,
+)
 
 _DEFAULT_TIMEOUT_SECS = 5.0
 
 
-class HostServiceError(Exception):
-    """Base of every typed host-services failure."""
-
-
-class BadRequestError(HostServiceError):
-    """The host rejected the record shape or size (e.g. the 4 KiB audit cap)."""
-
-
-class RateLimitedError(HostServiceError):
-    """The per-workload audit emit rate limit is exhausted."""
-
-
-class UnavailableError(HostServiceError):
-    """The host could not answer (handler down, broker not ready)."""
-
-
-class NotBoundError(HostServiceError):
-    """The workload's ``ExecutionPlan.services`` did not bind the service."""
-
-
-class VerbNotImplementedError(HostServiceError):
-    """The verb is not implemented in this build (e.g. ``host.cost.tenant``)."""
-
-
-class ServiceError(HostServiceError):
-    """Any other typed broker error code."""
-
-
-class TransportError(HostServiceError):
-    """Connect, framing, or (de)serialization failure on the vsock path."""
-
-
-class InvalidInputError(HostServiceError):
-    """The request was malformed: unknown method or a body the verb rejects."""
-
-
-_STATUS_EXCEPTIONS = {
-    _BAD_REQUEST: BadRequestError,
-    _RATE_LIMITED: RateLimitedError,
-    _UNAVAILABLE: UnavailableError,
-    _NOT_BOUND: NotBoundError,
-    _NOT_IMPLEMENTED: VerbNotImplementedError,
-    _SERVICE: ServiceError,
-    _TRANSPORT: TransportError,
-    _INVALID_INPUT: InvalidInputError,
-}
 
 
 class _MvmHsvcBuf(ctypes.Structure):
@@ -158,5 +118,5 @@ def call(
     if status == _OK:
         return parsed
     message = parsed.get("message", "") if isinstance(parsed, dict) else ""
-    exc = _STATUS_EXCEPTIONS.get(status, ServiceError)
+    exc = STATUS_ERRORS.get(status, ServiceError)
     raise exc(message or f"host service call `{method}` failed (status {status})")
