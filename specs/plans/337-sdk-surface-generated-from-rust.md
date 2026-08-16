@@ -415,11 +415,60 @@ declaratively rather than extract it.
 
 ### WS-3 — Tier A: generate the constructors, delete the Python copies
 
-- [ ] 3.1 Generate all 8 into TypeScript
-- [ ] 3.2 Replace the Python hand-copies with generated code
-- [ ] 3.3 Prove byte-compatibility: the existing Python suite passes unchanged
-- [ ] 3.4 Extend the s27 BDD fixtures to exercise each constructor in both
+- [x] 3.1 Generate all 8 into TypeScript
+- [x] 3.2 Replace the Python hand-copies with generated code
+- [x] 3.3 Prove byte-compatibility: the existing Python suite passes unchanged
+- [x] 3.4 Extend the s27 BDD fixtures to exercise each constructor in both
       languages against one golden IR document
+
+#### Result — the WS-1 decision holds
+
+`crates/mvm-sdk/src/ctor_registry.rs` declares all eight constructors
+declaratively: parameters with types and defaults, **constraints**, and what
+each builds. `emit_sdk_ctors` serialises it; `xtask/src/gen_sdk_surface.rs`
+renders `mvm/_ctors/generated.py` and `src/_ctors/generated.ts`. The eight
+Python hand-copies are deleted and `_dsl` re-exports the generated ones.
+
+The constraint vocabulary needed to cover Tier A turned out to be **three**
+cases — `NonEmpty`, `IntExclusiveRange`, `EnumMember` (with aliases) — which is
+small enough to be worth the machinery and large enough that no parser could
+have inferred it.
+
+**Generation removed a fragility rather than just relocating code.** The
+hand-written Python named the numbered variant class directly (`_ir.NetworkDns3`,
+`_ir.Dependencies1`), and `datamodel-codegen` renumbers those classes — *and*
+their `KindN` enums — whenever the schema changes. The generated code resolves
+the variant by discriminant instead, so neither number is written down anywhere.
+That is a class of breakage the hand-written surface carried and the generated
+one cannot.
+
+**Constraint messages are stored verbatim, not derived.** The two enum messages
+disagree in shape — `'uv' or 'pip-tools'` versus `'pnpm' / 'npm' / 'yarn'` — and
+inventing a rule that produces both would be fiction. Storing them keeps the
+generated Python byte-identical and makes the inconsistency visible.
+
+**`kw_only` is Python-only**, recorded the way `ErrorBase::Warning` is:
+TypeScript has no keyword-only parameters, so its emitter renders those
+positionally rather than dropping the fact silently.
+
+#### Evidence
+
+Byte-compatibility was checked *differentially*, not by inference: a harness
+called each hand-written constructor and its generated twin over 26 cases —
+every valid path, both alias spellings, and every refusal — comparing the
+constructed value structurally and the exception type and message verbatim.
+**Zero differences.** The Python suite then passed unchanged (212 passed, no
+test edits) with the hand-copies actually removed.
+
+3.4 is the golden-IR behavioural gate the WS-1 decision asked for, now real: one
+`ctor_golden.json`, both languages, built values *and* refusal messages. It
+earned its keep immediately — it caught that Python's `{tool!r}` renders
+`'poetry'` where the first TypeScript emitter used `JSON.stringify` and rendered
+`"poetry"`. Python is the reference, so the emitter now renders a repr-alike and
+the two languages agree byte-for-byte.
+
+Divergence: `python_only_absent_from_typescript` drops from 27 names to 19.
+What remains is Tier C's machinery and the names that cannot be generated.
 
 ### WS-4 — Tier B: complete the Rust surface first
 

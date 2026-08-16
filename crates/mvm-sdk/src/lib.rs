@@ -51,6 +51,7 @@
 
 mod builder;
 mod ctor;
+pub mod ctor_registry;
 mod emit;
 pub mod env;
 mod error;

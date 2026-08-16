@@ -1,0 +1,109 @@
+{
+  "built": {
+    "dns_none": {
+      "kind": "none"
+    },
+    "dns_resolver_default_port": {
+      "host": "1.1.1.1",
+      "kind": "resolver",
+      "port": 53
+    },
+    "dns_resolver_explicit_port": {
+      "host": "1.1.1.1",
+      "kind": "resolver",
+      "port": 5353
+    },
+    "dns_system": {
+      "kind": "system"
+    },
+    "egress": {
+      "allowlist": [
+        {
+          "host": "a.example",
+          "port": 443
+        },
+        {
+          "host": "b.example",
+          "port": 80
+        }
+      ]
+    },
+    "egress_empty": {
+      "allowlist": []
+    },
+    "host_port": {
+      "host": "example.com",
+      "port": 443
+    },
+    "host_port_high": {
+      "host": "example.com",
+      "port": 65535
+    },
+    "host_port_low": {
+      "host": "example.com",
+      "port": 1
+    },
+    "no_deps": {
+      "kind": "none"
+    },
+    "node_deps_default_tool": {
+      "kind": "node",
+      "lockfile": "pnpm-lock.yaml",
+      "tool": "pnpm"
+    },
+    "node_deps_npm": {
+      "kind": "node",
+      "lockfile": "package-lock.json",
+      "tool": "npm"
+    },
+    "python_deps_alias": {
+      "kind": "python",
+      "lockfile": "r.txt",
+      "tool": "pip_tools"
+    },
+    "python_deps_canonical": {
+      "kind": "python",
+      "lockfile": "r.txt",
+      "tool": "pip_tools"
+    },
+    "python_deps_default_tool": {
+      "kind": "python",
+      "lockfile": "uv.lock",
+      "tool": "uv"
+    }
+  },
+  "refusals": {
+    "dns_resolver_empty_host": {
+      "error": "ValueError",
+      "message": "dns_resolver host must be a non-empty string"
+    },
+    "host_port_empty_host": {
+      "error": "ValueError",
+      "message": "host_port host must be a non-empty string"
+    },
+    "host_port_port_too_high": {
+      "error": "ValueError",
+      "message": "host_port port must be in 1..65535, got 65536"
+    },
+    "host_port_port_zero": {
+      "error": "ValueError",
+      "message": "host_port port must be in 1..65535, got 0"
+    },
+    "node_deps_empty_lockfile": {
+      "error": "ValueError",
+      "message": "node_deps lockfile must be a non-empty string"
+    },
+    "node_deps_unknown_tool": {
+      "error": "ValueError",
+      "message": "node_deps tool must be 'pnpm' / 'npm' / 'yarn', got 'bun'"
+    },
+    "python_deps_empty_lockfile": {
+      "error": "ValueError",
+      "message": "python_deps lockfile must be a non-empty string"
+    },
+    "python_deps_unknown_tool": {
+      "error": "ValueError",
+      "message": "python_deps tool must be 'uv' or 'pip-tools', got 'poetry'"
+    }
+  }
+}

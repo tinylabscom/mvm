@@ -7,6 +7,27 @@ for detailed scope and acceptance criteria.
 
 ## Completed issue closeouts
 
+- [x] **Plan 337 WS-3 — Tier A constructors generated from a declarative
+      registry.** The workstream the WS-1 spike existed to enable, and the
+      first real test of its decision: all eight constructors now come from
+      `mvm-sdk/src/ctor_registry.rs` — parameters, defaults and *constraints* —
+      rendered into both languages, with the Python hand-copies deleted and
+      TypeScript gaining all eight for the first time. The constraint
+      vocabulary needed is three cases, small enough to be worth the machinery
+      and large enough that no parser could have inferred it. Generation also
+      removed a fragility rather than relocating it: the hand-written Python
+      named numbered variant classes (`_ir.NetworkDns3`) that
+      `datamodel-codegen` renumbers along with their `KindN` enums, and the
+      generated code resolves by discriminant so neither number exists
+      anywhere. Byte-compatibility established differentially over 26 cases
+      (every valid path, both alias spellings, the port boundaries, every
+      refusal) with zero differences, then the Python suite passed unchanged.
+      The new golden-IR scenario caught a real cross-language divergence on
+      first run — Python's `{tool!r}` renders `'poetry'` where `JSON.stringify`
+      rendered `"poetry"` — now fixed so both agree byte-for-byte.
+      `python_only_absent_from_typescript`: 27 -> 19. WS-4, WS-6.2-6.6, WS-7,
+      WS-8 open.
+
 - [x] **Plan 337 WS-5 + WS-6.1 — error taxonomy generated; Tier C sized.**
       The host-services error hierarchy and its `MVM_HSVC_*` status codes were
       triplicated: Rust constants plus a hand mirror in each SDK, under a

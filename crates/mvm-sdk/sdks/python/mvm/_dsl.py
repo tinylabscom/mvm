@@ -21,6 +21,19 @@ from enum import Enum
 from typing import Any, Callable
 
 from mvm._ir import workload as _ir
+# Tier A constructors are generated from the Rust registry
+# (crates/mvm-sdk/src/ctor_registry.rs) into `_ctors/generated.py`.
+# Re-exported here so `mvm._dsl.<name>` keeps resolving.
+from mvm._ctors.generated import (  # noqa: F401
+    dns_none,
+    dns_resolver,
+    dns_system,
+    egress,
+    host_port,
+    no_deps,
+    node_deps,
+    python_deps,
+)
 
 
 def _kind_value(dataclass_cls: type, value: str) -> Any:
@@ -587,63 +600,7 @@ def resources(*, cpu_cores: int, memory_mb: int, rootfs_size_mb: int) -> _ir.Res
     )
 
 
-def python_deps(*, lockfile: str, tool: str = "uv") -> _ir.Dependencies:
-    """Declare Python runtime dependencies (plan-0008 / ADR-0009).
 
-    ``lockfile`` is interpreted relative to ``app.source.path``. ``tool``
-    must be ``"uv"`` (uv.lock) or ``"pip-tools"`` (requirements.txt with
-    ``--generate-hashes``). The host validates that the lockfile exists
-    and that every entry carries integrity hashes; failure raises
-    ``E_UNPINNED_DEPS``.
-    """
-    if not lockfile:
-        raise ValueError("python_deps lockfile must be a non-empty string")
-    canonical = "pip_tools" if tool in ("pip-tools", "pip_tools") else tool
-    if canonical not in ("uv", "pip_tools"):
-        raise ValueError(
-            f"python_deps tool must be 'uv' or 'pip-tools', got {tool!r}"
-        )
-    return _ir.Dependencies1(
-        kind=_kind_value(_ir.Dependencies1, "python"),
-        lockfile=lockfile,
-        tool=_resolve_union_member(_ir.PythonTool, canonical),
-    )
-
-
-def node_deps(*, lockfile: str, tool: str = "pnpm") -> _ir.Dependencies:
-    """Declare Node runtime dependencies (plan-0008 / ADR-0009).
-
-    ``lockfile`` is interpreted relative to ``app.source.path``. ``tool``
-    must be ``"pnpm"`` (pnpm-lock.yaml) or ``"npm"`` (package-lock.json
-    v3). The host validates the lockfile carries an `integrity` field
-    on every dep; failure raises ``E_UNPINNED_DEPS``.
-    """
-    if not lockfile:
-        raise ValueError("node_deps lockfile must be a non-empty string")
-    if tool not in ("pnpm", "npm", "yarn"):
-        raise ValueError(
-            f"node_deps tool must be 'pnpm' / 'npm' / 'yarn', got {tool!r}"
-        )
-    return _ir.Dependencies2(
-        kind=_kind_value(_ir.Dependencies2, "node"),
-        lockfile=lockfile,
-        tool=_resolve_union_member(_ir.NodeTool, tool),
-    )
-
-
-def no_deps() -> _ir.Dependencies:
-    """Declare that the function workload has no runtime dependencies
-    beyond the language stdlib. Bypasses the host's lockfile check
-    (plan-0008)."""
-    return _ir.Dependencies3(kind=_kind_value(_ir.Dependencies3, "none"))
-
-
-# Sentinel sha256 used until `mvm addon lock` resolves the real
-# value. The IR validator accepts any 64 lowercase-hex string, so this
-# placeholder round-trips through `mvm canonicalize` cleanly.
-# `addon::resolve_and_validate` (mvm crate) replaces it with the
-# locked sha256 from `mvm.lock` at compile time per ADR-0018.
-_UNRESOLVED_SHA256 = "0" * 64
 
 
 def addon_use(
@@ -751,45 +708,9 @@ def warm_process(
     )
 
 
-def host_port(host: str, port: int) -> _ir.HostPort:
-    """A concrete host:port destination for an egress allowlist entry."""
-    if not host:
-        raise ValueError("host_port host must be a non-empty string")
-    if not (0 < port < 65536):
-        raise ValueError(f"host_port port must be in 1..65535, got {port}")
-    return _ir.HostPort(host=host, port=port)
 
 
-def egress(allowlist: list[_ir.HostPort]) -> _ir.NetworkEgress:
-    """Declare an egress allowlist (plan-0004 §Phase 5).
 
-    Each entry is a concrete `host:port` the guest may dial. Wildcard
-    hosts (`0.0.0.0`, `*`, CIDRs) are rejected at validation with
-    `E_NETWORK_WILDCARD`. Empty list = no egress (use this when you
-    want bridge-mode for ingress only).
-    """
-    return _ir.NetworkEgress(allowlist=list(allowlist))
-
-
-def dns_none() -> _ir.NetworkDns:
-    """No DNS resolver. Use when contacts are by IP literal only."""
-    return _ir.NetworkDns1(kind=_kind_value(_ir.NetworkDns1, "none"))
-
-
-def dns_system() -> _ir.NetworkDns:
-    """Inherit the substrate's default resolver (mvm-side decision)."""
-    return _ir.NetworkDns2(kind=_kind_value(_ir.NetworkDns2, "system"))
-
-
-def dns_resolver(host: str, port: int = 53) -> _ir.NetworkDns:
-    """Pin DNS resolution to a specific resolver host:port."""
-    if not host:
-        raise ValueError("dns_resolver host must be a non-empty string")
-    return _ir.NetworkDns3(
-        kind=_kind_value(_ir.NetworkDns3, "resolver"),
-        host=host,
-        port=port,
-    )
 
 
 def derive_schema(
