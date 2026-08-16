@@ -685,8 +685,15 @@ optimization backend-local and the benchmark backend-neutral.
       records physical footprint and explicitly leaves Linux-only fault counters
       unavailable. Launch-sample schema v4 and cold-launch schema v5 carry the
       evidence, and the warm-lane gate rejects a sample that omits it. The
-      real-host backend matrix and canonical budget table remain before #2280
-      can close.
+      real-host backend matrix remains before #2280 can close.
+- [x] Publish the canonical budget table. `LaunchLane::budgets()` is now the one
+      accessor both `validate_matrix_report` and the published table read, so a
+      budget cannot change in the gate and stay stale on the page.
+      `public/src/content/docs/reference/performance.md` carries the generated
+      table plus the lane and disqualification rules, and
+      `tests/perf_doc_sync.rs` fails when either side drifts. The page publishes
+      ceilings only — measured percentiles wait on a seeded real-host lane
+      report, which is the remaining half of #2280.
 - [x] Add the report-level matrix gate. A publishable lane now requires 20
       measured samples after exactly two discarded warm-ups, re-validates every
       raw sample, and enforces the prepared-cold dispatch budgets of
