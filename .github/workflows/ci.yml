@@ -627,13 +627,20 @@ jobs:
             echo "BDD conformance did not match scope $SCOPE_BDD: $BDD_RESULT"
             exit 1
           fi
+          # The kernel lane is matched on result alone, not against its scope.
+          # It carries no job-level `if:` — a skipped matrix job cannot expand
+          # its matrix arch, so it would report one check whose name still
+          # contains the unexpanded matrix expression — neither required
+          # context. It therefore always runs, doing nothing when out of scope,
+          # and always reports `success`. Requiring `skipped` when
+          # `KERNEL_SCOPE` was false made every pull request that touches no
+          # kernel path unmergeable with an otherwise green board.
           case "$KERNEL_SCOPE" in
-            true) kernel_required=success ;;
-            false) kernel_required=skipped ;;
+            true | false) ;;
             *) echo "Invalid kernel scope: $KERNEL_SCOPE"; exit 1 ;;
           esac
-          if [ "$KERNEL_RESULT" != "$kernel_required" ]; then
-            echo "Kernel validation did not match scope $KERNEL_SCOPE: $KERNEL_RESULT"
+          if [ "$KERNEL_RESULT" != success ]; then
+            echo "Kernel validation did not pass (scope $KERNEL_SCOPE): $KERNEL_RESULT"
             exit 1
           fi
 
