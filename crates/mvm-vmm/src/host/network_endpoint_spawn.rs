@@ -179,9 +179,79 @@ pub fn build_egress_tls_delivery(bound_hosts: &[&str], ca_dir: &Path) -> Result<
 /// path reads this to inject `HTTP_PROXY` + placeholder vars). Spawned only when
 /// the admitted plan carries secret bindings.
 pub const SUBST_PID_FILE: &str = "substitution.pid";
-/// How long the endpoint gets to bind its listener + write the ready handshake
-/// line before the caller declares the spawn failed.
-pub const SUBST_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+/// Default bound on the endpoint's ready handshake.
+///
+/// This is not a budget for the endpoint's work — binding a listener and
+/// writing one line is microseconds. It is a budget for the process *starting*,
+/// and the callers put a lot in front of that: the Stage 0 builder packs a
+/// multi-gigabyte, non-sparse `work.ext4` immediately before spawning, so a
+/// cold helper binary competes with that flush for I/O and can take tens of
+/// seconds to reach `main`. A tight bound turns a slow exec into a spurious
+/// "endpoint unresponsive" and sends the operator hunting a hang that is really
+/// a queue. Nothing is lost by being generous: an endpoint that dies closes
+/// stdout, and that is reported the moment it happens rather than at this bound.
+const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Env var overriding [`DEFAULT_HANDSHAKE_TIMEOUT`], in whole seconds.
+pub const HANDSHAKE_TIMEOUT_ENV: &str = "MVM_ENDPOINT_HANDSHAKE_TIMEOUT_SECS";
+
+/// The handshake bound in force, honouring [`HANDSHAKE_TIMEOUT_ENV`].
+pub fn handshake_timeout() -> Duration {
+    std::env::var(HANDSHAKE_TIMEOUT_ENV)
+        .ok()
+        .and_then(|raw| parse_handshake_timeout(&raw))
+        .unwrap_or(DEFAULT_HANDSHAKE_TIMEOUT)
+}
+
+/// Parse an override. Split out so "junk and zero fall back to the default"
+/// is testable without mutating the environment. Zero is rejected rather than
+/// honoured: a zero bound fails every spawn before the endpoint can answer.
+fn parse_handshake_timeout(raw: &str) -> Option<Duration> {
+    let secs: u64 = raw.trim().parse().ok()?;
+    (secs > 0).then(|| Duration::from_secs(secs))
+}
+
+/// How much of the endpoint's stderr a failed handshake quotes back.
+const STDERR_TAIL_BYTES: usize = 2048;
+
+/// What a failed handshake names, so the failure is actionable from the error
+/// text alone. Without it the caller reports a bare duration while the
+/// endpoint's own stderr — which says exactly what went wrong — sits unread in
+/// a file the operator has no reason to know exists.
+pub struct HandshakeContext<'a> {
+    /// The endpoint binary that was spawned.
+    pub endpoint: &'a Path,
+    /// Where that process's stderr was redirected, when the caller redirected it.
+    pub stderr_log: Option<&'a Path>,
+}
+
+impl HandshakeContext<'_> {
+    /// Append which binary was run and what it said before it stopped talking.
+    fn describe(&self, what: &str) -> String {
+        let mut msg = format!("{what} (endpoint {})", self.endpoint.display());
+        let Some(log) = self.stderr_log else {
+            return msg;
+        };
+        match stderr_tail(log, STDERR_TAIL_BYTES) {
+            Some(tail) => msg.push_str(&format!("; its stderr said: {tail}")),
+            None => msg.push_str(&format!("; it wrote nothing to {}", log.display())),
+        }
+        msg
+    }
+}
+
+/// Last `max_bytes` of `path`, collapsed onto one line so it survives an error
+/// chain. `None` when the file is missing or empty — a silent endpoint is
+/// itself a finding, so the caller reports that rather than an empty quote.
+fn stderr_tail(path: &Path, max_bytes: usize) -> Option<String> {
+    let raw = std::fs::read(path).ok()?;
+    let start = raw.len().saturating_sub(max_bytes);
+    let collapsed = String::from_utf8_lossy(&raw[start..])
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    (!collapsed.is_empty()).then_some(collapsed)
+}
 
 /// Locate the `mvm-network-endpoint` binary. Compiled by mvmctl's build
 /// script; see [`mvm_vmm::host::aux_bin`] for the search order.
@@ -701,7 +771,15 @@ pub fn spawn_network_endpoint(mut params: SubstitutionSpawnParams<'_>) -> Result
         .stdout
         .take()
         .ok_or_else(|| anyhow!("substitution endpoint stdout was not piped"))?;
-    let handshake = read_handshake_line(stdout, child.id(), SUBST_HANDSHAKE_TIMEOUT)?;
+    let handshake = read_handshake_line(
+        stdout,
+        child.id(),
+        handshake_timeout(),
+        &HandshakeContext {
+            endpoint: &bin,
+            stderr_log: Some(&stderr_log),
+        },
+    )?;
 
     std::fs::write(&pid_file, child.id().to_string())
         .map_err(|e| anyhow!("write {}: {e}", pid_file.display()))?;
@@ -780,10 +858,15 @@ impl Drop for SpawnedEndpointGuard {
 /// a helper thread and bound the wait; on timeout / EOF-without-line / a line
 /// that is not a handshake, SIGKILL the endpoint and fail (the caller rolls
 /// back the VM — fail closed).
-fn read_handshake_line(
+///
+/// Shared by every spawner of this binary. The builder path used to carry its
+/// own copy that accepted *any* non-empty line as a handshake, so stray chrome
+/// on a shared stdout read as success there and as a parse failure here.
+pub fn read_handshake_line(
     stdout: std::process::ChildStdout,
     pid: u32,
     timeout: Duration,
+    ctx: &HandshakeContext<'_>,
 ) -> Result<EndpointHandshake> {
     use std::io::{BufRead, BufReader};
     let (tx, rx) = std::sync::mpsc::channel();
@@ -795,19 +878,34 @@ fn read_handshake_line(
     match rx.recv_timeout(timeout) {
         Ok(Ok(line)) if !line.trim().is_empty() => serde_json::from_str(line.trim()).map_err(|e| {
             kill(pid as libc::pid_t, libc::SIGKILL);
-            anyhow!("parse substitution endpoint handshake: {e}")
+            anyhow!(
+                "{}",
+                ctx.describe(&format!("parse substitution endpoint handshake: {e}"))
+            )
         }),
         Ok(Ok(_)) => {
             kill(pid as libc::pid_t, libc::SIGKILL);
-            bail!("substitution endpoint closed stdout without a ready handshake")
+            bail!(
+                "{}",
+                ctx.describe("substitution endpoint closed stdout without a ready handshake")
+            )
         }
         Ok(Err(e)) => {
             kill(pid as libc::pid_t, libc::SIGKILL);
-            bail!("read substitution endpoint handshake: {e}")
+            bail!(
+                "{}",
+                ctx.describe(&format!("read substitution endpoint handshake: {e}"))
+            )
         }
         Err(_) => {
             kill(pid as libc::pid_t, libc::SIGKILL);
-            bail!("substitution endpoint handshake timed out after {timeout:?}")
+            bail!(
+                "{}",
+                ctx.describe(&format!(
+                    "substitution endpoint handshake timed out after {timeout:?} \
+                     (override with {HANDSHAKE_TIMEOUT_ENV})"
+                ))
+            )
         }
     }
 }
@@ -949,12 +1047,195 @@ mod tests {
             .spawn()
             .unwrap();
         let stdout = child.stdout.take().expect("child stdout is piped");
-        let err = read_handshake_line(stdout, child.id(), Duration::from_secs(1))
-            .expect_err("an empty handshake line must fail");
+        let err = read_handshake_line(
+            stdout,
+            child.id(),
+            Duration::from_secs(1),
+            &HandshakeContext {
+                endpoint: std::path::Path::new("/bin/sh"),
+                stderr_log: None,
+            },
+        )
+        .expect_err("an empty handshake line must fail");
         assert!(
             err.to_string()
                 .contains("closed stdout without a ready handshake")
         );
+        let _ = child.wait();
+    }
+
+    #[test]
+    fn handshake_timeout_override_rejects_zero_and_junk() {
+        assert_eq!(parse_handshake_timeout("90"), Some(Duration::from_secs(90)));
+        assert_eq!(
+            parse_handshake_timeout("  90 "),
+            Some(Duration::from_secs(90))
+        );
+        // Zero would fail every spawn before the endpoint could answer.
+        assert_eq!(parse_handshake_timeout("0"), None);
+        assert_eq!(parse_handshake_timeout("soon"), None);
+        assert_eq!(parse_handshake_timeout(""), None);
+        assert_eq!(parse_handshake_timeout("-5"), None);
+    }
+
+    #[test]
+    fn handshake_timeout_defaults_well_clear_of_a_cold_exec() {
+        // The bound this replaced was 10s, which a cold helper exec behind a
+        // multi-gigabyte disk write does not reliably meet.
+        assert!(DEFAULT_HANDSHAKE_TIMEOUT >= Duration::from_secs(30));
+    }
+
+    #[test]
+    fn stderr_tail_reports_none_for_missing_and_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("nope.log");
+        assert_eq!(stderr_tail(&missing, 512), None);
+
+        let empty = dir.path().join("empty.log");
+        std::fs::write(&empty, b"").unwrap();
+        assert_eq!(stderr_tail(&empty, 512), None);
+
+        // Whitespace only is "wrote nothing" too — quoting it back is noise.
+        let blank = dir.path().join("blank.log");
+        std::fs::write(&blank, b"\n\n   \n").unwrap();
+        assert_eq!(stderr_tail(&blank, 512), None);
+    }
+
+    #[test]
+    fn stderr_tail_keeps_the_end_and_collapses_onto_one_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("e.log");
+        std::fs::write(&log, b"first line\nsecond line\n").unwrap();
+        assert_eq!(
+            stderr_tail(&log, 4096).as_deref(),
+            Some("first line second line")
+        );
+        // Bounded: the tail is what matters, the head is dropped. `"second
+        // line\n"` is the last 12 bytes of the file.
+        let tail = stderr_tail(&log, 12).expect("a bounded read still yields the tail");
+        assert_eq!(tail, "second line");
+    }
+
+    #[test]
+    fn timed_out_handshake_names_the_endpoint_and_quotes_its_stderr() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("endpoint.stderr.log");
+        std::fs::write(&log, b"bind failed: Address already in use\n").unwrap();
+
+        let mut child = Command::new("sh")
+            .args(["-c", "exec sleep 30"])
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let stdout = child.stdout.take().expect("child stdout is piped");
+        let err = read_handshake_line(
+            stdout,
+            child.id(),
+            Duration::from_millis(200),
+            &HandshakeContext {
+                endpoint: Path::new("/opt/mvm/mvm-network-endpoint"),
+                stderr_log: Some(&log),
+            },
+        )
+        .expect_err("a silent endpoint must time out");
+        let msg = err.to_string();
+        assert!(msg.contains("timed out"), "{msg}");
+        // The three things the operator needs and used to have to guess.
+        assert!(msg.contains("/opt/mvm/mvm-network-endpoint"), "{msg}");
+        assert!(msg.contains("Address already in use"), "{msg}");
+        assert!(msg.contains(HANDSHAKE_TIMEOUT_ENV), "{msg}");
+        let _ = child.wait();
+    }
+
+    #[test]
+    fn a_silent_endpoint_is_reported_as_silent_not_quoted_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("endpoint.stderr.log");
+        std::fs::write(&log, b"").unwrap();
+
+        let mut child = Command::new("sh")
+            .args(["-c", "exec sleep 30"])
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let stdout = child.stdout.take().expect("child stdout is piped");
+        let err = read_handshake_line(
+            stdout,
+            child.id(),
+            Duration::from_millis(200),
+            &HandshakeContext {
+                endpoint: Path::new("/opt/mvm/mvm-network-endpoint"),
+                stderr_log: Some(&log),
+            },
+        )
+        .expect_err("a silent endpoint must time out");
+        let msg = err.to_string();
+        assert!(msg.contains("wrote nothing to"), "{msg}");
+        assert!(msg.contains(&log.display().to_string()), "{msg}");
+        let _ = child.wait();
+    }
+
+    #[test]
+    fn a_non_handshake_line_is_refused() {
+        // The builder path used to accept any non-empty line, so stray chrome
+        // on a shared stdout read as a successful handshake there.
+        let mut child = Command::new("sh")
+            .args([
+                "-c",
+                "printf 'Preparing the builder VM...\\n'; exec sleep 30",
+            ])
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let stdout = child.stdout.take().expect("child stdout is piped");
+        let err = read_handshake_line(
+            stdout,
+            child.id(),
+            Duration::from_secs(5),
+            &HandshakeContext {
+                endpoint: Path::new("/opt/mvm/mvm-network-endpoint"),
+                stderr_log: None,
+            },
+        )
+        .expect_err("chrome is not a handshake");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("parse substitution endpoint handshake"),
+            "{msg}"
+        );
+        assert!(msg.contains("/opt/mvm/mvm-network-endpoint"), "{msg}");
+        // `read_handshake_line` already SIGKILLed it; reap so nextest sees no leak.
+        let _ = child.wait();
+    }
+
+    #[test]
+    fn a_well_formed_handshake_line_is_accepted() {
+        let mut child = Command::new("sh")
+            .args([
+                "-c",
+                &format!("printf '%s\\n' '{READY_HANDSHAKE}'; exec sleep 30"),
+            ])
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let stdout = child.stdout.take().expect("child stdout is piped");
+        let handshake = read_handshake_line(
+            stdout,
+            child.id(),
+            Duration::from_secs(5),
+            &HandshakeContext {
+                endpoint: Path::new("/opt/mvm/mvm-network-endpoint"),
+                stderr_log: None,
+            },
+        )
+        .expect("a well-formed handshake must parse");
+        assert_eq!(handshake.env.len(), 1);
+        assert_eq!(handshake.input_fingerprints.len(), 1);
+        assert_eq!(
+            handshake.input_fingerprints[0].category(),
+            SecretCategory::HostSecret
+        );
+        let _ = child.kill();
         let _ = child.wait();
     }
 

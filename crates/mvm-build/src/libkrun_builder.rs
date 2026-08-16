@@ -64,6 +64,9 @@ use std::time::{Duration, Instant};
 use std::{fs, io};
 
 use libkrun_sys::{KernelFormat, KrunContext, SupervisorConfig};
+use mvm_vmm::host::network_endpoint_spawn::{
+    HandshakeContext, handshake_timeout, read_handshake_line,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -412,7 +415,20 @@ impl BuilderVsockEgressEndpoint {
                 "builder egress endpoint stdout was not piped".to_string(),
             )
         })?;
-        read_builder_endpoint_handshake(stdout, child.id(), Duration::from_secs(10))?;
+        // The shared reader, not a local copy: the builder's own version
+        // accepted any non-empty line as a handshake and reported a bare
+        // duration on timeout, which is not enough to tell a slow endpoint from
+        // a dead one.
+        read_handshake_line(
+            stdout,
+            child.id(),
+            handshake_timeout(),
+            &HandshakeContext {
+                endpoint: &endpoint_path,
+                stderr_log: Some(&stderr_log_path),
+            },
+        )
+        .map_err(|e| BuilderVmError::ExtractionFailed(format!("{e:#}")))?;
 
         let pid_file = state_dir.join(BUILDER_SUBST_PID_FILE);
         std::fs::write(&pid_file, child.id().to_string()).map_err(|e| {
@@ -540,43 +556,6 @@ fn resolve_network_endpoint_path() -> Result<PathBuf, BuilderVmError> {
             .collect::<Vec<_>>()
             .join(", ")
     )))
-}
-
-fn read_builder_endpoint_handshake(
-    stdout: std::process::ChildStdout,
-    pid: u32,
-    timeout: Duration,
-) -> Result<(), BuilderVmError> {
-    use std::io::{BufRead, BufReader};
-
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let mut line = String::new();
-        let res = BufReader::new(stdout).read_line(&mut line).map(|_| line);
-        let _ = tx.send(res);
-    });
-
-    match rx.recv_timeout(timeout) {
-        Ok(Ok(line)) if !line.trim().is_empty() => Ok(()),
-        Ok(Ok(_)) => {
-            kill_pid(pid as libc::pid_t, libc::SIGKILL);
-            Err(BuilderVmError::ExtractionFailed(
-                "builder egress endpoint closed stdout without a ready handshake".to_string(),
-            ))
-        }
-        Ok(Err(e)) => {
-            kill_pid(pid as libc::pid_t, libc::SIGKILL);
-            Err(BuilderVmError::ExtractionFailed(format!(
-                "read builder egress endpoint handshake: {e}"
-            )))
-        }
-        Err(_) => {
-            kill_pid(pid as libc::pid_t, libc::SIGKILL);
-            Err(BuilderVmError::ExtractionFailed(format!(
-                "builder egress endpoint handshake timed out after {timeout:?}"
-            )))
-        }
-    }
 }
 
 fn reap_builder_vsock_egress_endpoint(state_dir: &Path) {
