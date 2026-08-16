@@ -627,13 +627,18 @@ jobs:
             echo "BDD conformance did not match scope $SCOPE_BDD: $BDD_RESULT"
             exit 1
           fi
-          case "$KERNEL_SCOPE" in
-            true) kernel_required=success ;;
-            false) kernel_required=skipped ;;
-            *) echo "Invalid kernel scope: $KERNEL_SCOPE"; exit 1 ;;
-          esac
-          if [ "$KERNEL_RESULT" != "$kernel_required" ]; then
-            echo "Kernel validation did not match scope $KERNEL_SCOPE: $KERNEL_RESULT"
+          # The kernel job carries no job-level `if:` — a skipped matrix job
+          # cannot expand its arch, so it would report a single check still
+          # carrying the un-expanded matrix placeholder in its name, matching
+          # neither required context and leaving every PR unmergeable. It
+          # therefore always runs and always reports `success`,
+          # skipping its steps individually when out of scope. So `success` is
+          # the required result in both scopes: an out-of-scope run skips its
+          # steps and succeeds, an in-scope run actually builds. Requiring
+          # `skipped` when out of scope — as this did before the job-level `if:`
+          # was removed — failed every PR that does not touch a kernel path.
+          if [ "$KERNEL_RESULT" != success ]; then
+            echo "Kernel validation did not succeed (scope $KERNEL_SCOPE): $KERNEL_RESULT"
             exit 1
           fi
 
