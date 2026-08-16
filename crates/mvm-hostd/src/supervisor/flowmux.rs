@@ -845,11 +845,18 @@ impl FlowMuxSession {
         }
 
         // Replenish the consumed credit so the guest can keep sending.
-        {
-            let mut reg = lock_registry(&self.registry);
-            let _ = reg.grant_guest_credit(stream_id, payload_len);
+        //
+        // A zero-length DATA frame consumes no credit, and the protocol treats
+        // a zero-delta window update as a frame error. Sending one anyway kills
+        // the session the frame was meant to keep flowing — and it dies on the
+        // *guest's* validator, so the host log shows nothing wrong.
+        if payload_len > 0 {
+            {
+                let mut reg = lock_registry(&self.registry);
+                let _ = reg.grant_guest_credit(stream_id, payload_len);
+            }
+            self.send_window_update(stream_id, payload_len)?;
         }
-        self.send_window_update(stream_id, payload_len)?;
         Ok(())
     }
 
