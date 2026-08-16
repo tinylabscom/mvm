@@ -202,7 +202,7 @@ mod tests {
 
         let spec = MachineSpec {
             name: "web".into(),
-            image: "img".into(),
+            image: "img".parse().unwrap(),
             cpus: 1,
             memory_mib: 128,
             env: vec![],
@@ -225,7 +225,7 @@ mod tests {
         let mock = MockBackend::default();
         let spec = MachineSpec {
             name: "db".into(),
-            image: "img".into(),
+            image: "img".parse().unwrap(),
             cpus: 1,
             memory_mib: 128,
             env: vec![],
@@ -278,7 +278,7 @@ mod tests {
         let started = mock
             .run_machine(MachineSpec {
                 name: "web".into(),
-                image: "i".into(),
+                image: "i".parse().unwrap(),
                 cpus: 1,
                 memory_mib: 64,
                 env: vec![],
@@ -332,7 +332,7 @@ mod tests {
         let started = mock
             .run_machine(MachineSpec {
                 name: "web".into(),
-                image: "i".into(),
+                image: "i".parse().unwrap(),
                 cpus: 1,
                 memory_mib: 64,
                 env: vec![],
@@ -358,7 +358,7 @@ mod tests {
         let started = mock
             .run_machine(MachineSpec {
                 name: "web".into(),
-                image: "i".into(),
+                image: "i".parse().unwrap(),
                 cpus: 1,
                 memory_mib: 64,
                 env: vec![],

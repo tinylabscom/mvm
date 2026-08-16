@@ -204,15 +204,12 @@ fn run_args(spec: &MachineSpec) -> Result<GrantArgv> {
             reason: "name must not be empty".into(),
         });
     }
-    if spec.image.is_empty() {
-        return Err(MvmError::InvalidSpec {
-            reason: "image must not be empty".into(),
-        });
-    }
     let mut args = vec![
         "run".to_string(),
         "--image".to_string(),
-        spec.image.clone(),
+        // The written form of the declaration — the same token a user would
+        // have typed, so the argv the CLI sees matches what the caller wrote.
+        spec.image.to_string(),
         "--name".to_string(),
         spec.name.clone(),
         "--cpus".to_string(),
@@ -241,13 +238,8 @@ fn create_args(spec: &MachineSpec) -> Result<GrantArgv> {
             reason: "name must not be empty".into(),
         });
     }
-    if spec.image.is_empty() {
-        return Err(MvmError::InvalidSpec {
-            reason: "image must not be empty".into(),
-        });
-    }
     let mut args = MachineCreate::builder(&spec.name)
-        .image(&spec.image)
+        .image(spec.image.to_string())
         .cpus(spec.cpus as u16)
         .memory(format!("{}M", spec.memory_mib))
         .machine_args()
@@ -614,7 +606,7 @@ mod tests {
     fn run_args_builds_persistent_up_json_invocation() {
         let spec = MachineSpec {
             name: "web".into(),
-            image: "alpine:latest".into(),
+            image: "alpine:latest".parse().unwrap(),
             cpus: 2,
             memory_mib: 512,
             env: vec![("MODE".into(), "test".into())],
@@ -645,7 +637,7 @@ mod tests {
         // client's create argv is drift-locked against the CLI + every SDK.
         let spec = MachineSpec {
             name: "web".into(),
-            image: "alpine:3.20".into(),
+            image: "alpine:3.20".parse().unwrap(),
             cpus: 2,
             memory_mib: 512,
             env: vec![],
@@ -675,10 +667,12 @@ mod tests {
     }
 
     #[test]
-    fn create_args_reject_empty_name_and_image() {
+    fn create_args_rejects_an_empty_name() {
+        // The companion empty-image guard is gone: the spec's image is a parsed
+        // declaration, so an empty one never gets this far to be checked.
         let bad = MachineSpec {
             name: String::new(),
-            image: "img".into(),
+            image: "img".parse().unwrap(),
             cpus: 1,
             memory_mib: 64,
             env: vec![],
@@ -688,10 +682,10 @@ mod tests {
     }
 
     #[test]
-    fn run_args_rejects_empty_name_and_image() {
+    fn run_args_rejects_an_empty_name() {
         let base = MachineSpec {
             name: "web".into(),
-            image: "alpine".into(),
+            image: "alpine".parse().unwrap(),
             cpus: 1,
             memory_mib: 64,
             env: vec![],
@@ -704,13 +698,13 @@ mod tests {
             }),
             Err(MvmError::InvalidSpec { .. })
         ));
-        assert!(matches!(
-            run_args(&MachineSpec {
-                image: String::new(),
-                ..base
-            }),
-            Err(MvmError::InvalidSpec { .. })
-        ));
+        // An empty image has no `MachineSpec` to be checked in: it is refused
+        // where the declaration is parsed, not where the argv is assembled.
+        assert!(
+            "".parse::<mvm_core::rootfs_source::RootfsSource>().is_err(),
+            "an empty declaration must not parse"
+        );
+        drop(base);
     }
 
     // ── Grants on the argv ────────────────────────────────────────────
@@ -721,6 +715,7 @@ mod tests {
     #[test]
     fn a_cpu_and_egress_grant_reach_the_run_argv() {
         let spec = MachineSpec::builder("web", "alpine:latest")
+            .expect("declared image parses")
             .cpus(2)
             .memory_mib(512)
             .cpu_millicores(1500)
@@ -761,6 +756,7 @@ mod tests {
     #[test]
     fn a_cpu_and_egress_grant_reach_the_create_argv() {
         let spec = MachineSpec::builder("web", "alpine:3.20")
+            .expect("declared image parses")
             .cpus(2)
             .memory_mib(512)
             .cpu_millicores(1500)
@@ -790,6 +786,7 @@ mod tests {
         // The pre-grant baseline: no flags appear for a spec with no grants,
         // so the conformance-pinned argv is unchanged.
         let spec = MachineSpec::builder("web", "alpine:3.20")
+            .expect("declared image parses")
             .cpus(2)
             .memory_mib(512)
             .build();
@@ -812,6 +809,7 @@ mod tests {
         // CLI's own spellings: `--cpu-limit` is millicores, `--timeout` is
         // seconds, and `--allow-host HOST:PORT` is the egress grant.
         let spec = MachineSpec::builder("web", "alpine:latest")
+            .expect("declared image parses")
             .cpu_millicores(1500)
             .wall_clock_secs(std::num::NonZeroU32::new(600).unwrap())
             .allow_egress("api.example.com", 443)
@@ -847,6 +845,7 @@ mod tests {
         // is no conversion, so flattening one into the other would be a
         // different grant. The file carries it unchanged.
         let spec = MachineSpec::builder("web", "alpine:latest")
+            .expect("declared image parses")
             .cpu_fuel(100_000)
             .allow_egress("api.example.com", 443)
             .build();
@@ -882,6 +881,7 @@ mod tests {
         // wall-clock ceiling admits; an explicit `Unbounded` is refused by that
         // same ceiling. Dropping it would turn a refusal into a boot.
         let spec = MachineSpec::builder("web", "alpine:latest")
+            .expect("declared image parses")
             .grants(mvm_contract::grants::Grants {
                 wall_clock: Some(mvm_contract::grants::WallClockGrant::Unbounded),
                 ..Default::default()
@@ -897,6 +897,7 @@ mod tests {
         // Both deny every destination, so nothing opens either way — but only
         // one of them is what the caller declared, and the plan records which.
         let spec = MachineSpec::builder("web", "alpine:latest")
+            .expect("declared image parses")
             .grants(mvm_contract::grants::Grants {
                 egress: Some(mvm_contract::grants::EgressGrant { allow: vec![] }),
                 ..Default::default()
@@ -914,6 +915,7 @@ mod tests {
         // `--allow-host` splits on the last colon, so this would come back as a
         // different host and port than it went in as.
         let spec = MachineSpec::builder("web", "alpine:latest")
+            .expect("declared image parses")
             .allow_egress("::1", 443)
             .build();
         let invocation = run_args(&spec).unwrap();
@@ -957,7 +959,7 @@ mod tests {
         let state = be
             .run_machine(MachineSpec {
                 name: "web".into(),
-                image: "alpine:latest".into(),
+                image: "alpine:latest".parse().unwrap(),
                 cpus: 1,
                 memory_mib: 128,
                 env: vec![],

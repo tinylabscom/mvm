@@ -12,9 +12,10 @@
 
 use mvm_client::{LaunchRequest, LifecycleMode, LocalBackend, MvmClient, RemoveOptions};
 use mvm_core::client::dto::{MachineId, MachineStatus};
+use mvm_core::rootfs_source::RootfsSource;
 
 /// Resolve the live-lane prerequisites, or explain the clean skip.
-fn live_env() -> Option<(String, String)> {
+fn live_env() -> Option<(String, RootfsSource)> {
     if !std::path::Path::new("/dev/kvm").exists() {
         eprintln!("skipping: /dev/kvm not present");
         return None;
@@ -25,7 +26,12 @@ fn live_env() -> Option<(String, String)> {
         eprintln!("skipping: MVM_E2E_KERNEL / MVM_E2E_ROOTFS do not name existing files");
         return None;
     }
-    Some((kernel, rootfs))
+    // Declared as a path outright: the env var may hold a relative one, which
+    // the string grammar would (correctly) read as a registry reference.
+    Some((
+        kernel,
+        RootfsSource::LocalPath(std::path::PathBuf::from(rootfs)),
+    ))
 }
 
 /// Make the lane self-contained: seed the supplied workload kernel into the
