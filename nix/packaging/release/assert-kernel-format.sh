@@ -16,8 +16,10 @@ set -euo pipefail
 
 kernel="${1:-}"
 arch="${2:-}"
-[ -n "$kernel" ] && [ -n "$arch" ] || {
-  echo "usage: assert-kernel-format.sh KERNEL_FILE ARCH [LABEL]" >&2; exit 2; }
+if [ -z "$kernel" ] || [ -z "$arch" ]; then
+  echo "usage: assert-kernel-format.sh KERNEL_FILE ARCH [LABEL]" >&2
+  exit 2
+fi
 label="${3:-$(basename "$kernel")}"
 
 [ -f "$kernel" ] || { echo "::error::[$label] kernel not found: $kernel" >&2; exit 1; }
