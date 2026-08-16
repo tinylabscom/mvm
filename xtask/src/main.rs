@@ -300,15 +300,16 @@ fn main() -> Result<()> {
                 (false, true) => check_mutation_witnesses::Mode::Run,
                 (false, false) => check_mutation_witnesses::Mode::PinOnly,
             };
-            // `--package <name>` shards a `--run` by cargo package so each
-            // CI job finishes inside the six-hour job cap; unset means the
-            // whole surface.
-            let package = args
+            // `--package <name>` shards a `--run` so each CI job finishes
+            // inside the six-hour job cap; unset means the whole surface. A
+            // package that outgrew one job takes the `<name>/<i>of<n>` form.
+            let shard = args
                 .iter()
                 .position(|a| a == "--package")
                 .and_then(|i| args.get(i + 1))
-                .map(String::as_str);
-            check_mutation_witnesses::run(&workspace, mode, package)
+                .map(|raw| check_mutation_witnesses::parse_shard_spec(raw))
+                .transpose()?;
+            check_mutation_witnesses::run(&workspace, mode, shard.as_ref())
         }
         Some("check-nextest-groups") => {
             let workspace = workspace_root();
