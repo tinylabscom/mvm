@@ -54,6 +54,14 @@ impl MachineStatus {
 #[serde(deny_unknown_fields)]
 pub struct MachineSpec {
     pub name: String,
+    /// What to boot, as a declaration rather than something to be guessed at:
+    /// an absolute, `./`-relative or `~/`-relative path (or an explicit
+    /// `path:<p>`) is a local rootfs — a materialized `rootfs.ext4` or an
+    /// unpacked tree — and anything else (or an explicit `oci:<ref>`) is an
+    /// OCI reference. A declared path that is absent is refused by name; it is
+    /// never retried as a registry pull, because the two take different
+    /// verification routes and which one runs must not depend on the caller's
+    /// working directory.
     pub image: String,
     pub cpus: u32,
     pub memory_mib: u32,
