@@ -103,14 +103,14 @@ sdk_env_vars! {
     MVM_SDK_OUT_PATH_ENV = "MVM_SDK_OUT_PATH", [Rust, Python, TypeScript];
 
     /// Overrides the per-call timeout, in seconds, applied to a
-    /// `mvmctl machine` subprocess. Python-only: the TypeScript machine
-    /// wrapper does not yet bound its subprocess at all.
-    MVM_MACHINE_TIMEOUT_ENV = "MVM_MACHINE_TIMEOUT_SEC", [Rust, Python];
+    /// `mvmctl machine` subprocess. Both language wrappers read it and
+    /// give up at the deadline rather than waiting forever.
+    MVM_MACHINE_TIMEOUT_ENV = "MVM_MACHINE_TIMEOUT_SEC", [Rust, Python, TypeScript];
 
     /// Overrides the cap, in bytes, on captured output from a `mvmctl
-    /// machine` subprocess. Python-only, for the same reason as the
-    /// timeout above.
-    MVM_MACHINE_MAX_OUTPUT_ENV = "MVM_MACHINE_MAX_OUTPUT_BYTES", [Rust, Python];
+    /// machine` subprocess. Both language wrappers read it and report an
+    /// overflow as an overflow.
+    MVM_MACHINE_MAX_OUTPUT_ENV = "MVM_MACHINE_MAX_OUTPUT_BYTES", [Rust, Python, TypeScript];
 }
 
 /// The registry rows that `surface` exports, in declaration order.
@@ -167,15 +167,17 @@ mod tests {
     }
 
     #[test]
-    fn machine_vars_are_not_claimed_for_typescript() {
-        // Pins the honesty property: the TypeScript machine wrapper does
-        // not read these, so it must not export them. If TypeScript
-        // later honours them, this test is the place that says so.
+    fn machine_vars_are_claimed_for_typescript() {
+        // The honesty property, now pointing the other way: the TypeScript
+        // machine wrapper bounds its subprocess with these two, so it must
+        // export them. A row is listed for a surface only when that surface
+        // reads it — so this fails if the behaviour is ever removed and the
+        // claim is left behind.
         for ident in ["MVM_MACHINE_TIMEOUT_ENV", "MVM_MACHINE_MAX_OUTPUT_ENV"] {
             let v = REGISTRY.iter().find(|v| v.ident == ident).unwrap();
             assert!(
-                !v.exports_to(Surface::TypeScript),
-                "{ident} claims a TypeScript export that does not exist"
+                v.exports_to(Surface::TypeScript),
+                "{ident} is read by the TypeScript machine wrapper but not exported to it"
             );
         }
     }
@@ -188,7 +190,9 @@ mod tests {
             [
                 "MVM_CLI_BIN_ENV",
                 "MVM_SDK_MODE_ENV",
-                "MVM_SDK_OUT_PATH_ENV"
+                "MVM_SDK_OUT_PATH_ENV",
+                "MVM_MACHINE_TIMEOUT_ENV",
+                "MVM_MACHINE_MAX_OUTPUT_ENV"
             ]
         );
         assert_eq!(exported_to(Surface::Python).count(), 5);

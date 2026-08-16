@@ -39,21 +39,23 @@
       ]
     },
     {
-      "doc": "Overrides the per-call timeout, in seconds, applied to a `mvmctl machine` subprocess. Python-only: the TypeScript machine wrapper does not yet bound its subprocess at all.",
+      "doc": "Overrides the per-call timeout, in seconds, applied to a `mvmctl machine` subprocess. Both language wrappers read it and give up at the deadline rather than waiting forever.",
       "ident": "MVM_MACHINE_TIMEOUT_ENV",
       "name": "MVM_MACHINE_TIMEOUT_SEC",
       "surfaces": [
         "rust",
-        "python"
+        "python",
+        "typescript"
       ]
     },
     {
-      "doc": "Overrides the cap, in bytes, on captured output from a `mvmctl machine` subprocess. Python-only, for the same reason as the timeout above.",
+      "doc": "Overrides the cap, in bytes, on captured output from a `mvmctl machine` subprocess. Both language wrappers read it and report an overflow as an overflow.",
       "ident": "MVM_MACHINE_MAX_OUTPUT_ENV",
       "name": "MVM_MACHINE_MAX_OUTPUT_BYTES",
       "surfaces": [
         "rust",
-        "python"
+        "python",
+        "typescript"
       ]
     }
   ],

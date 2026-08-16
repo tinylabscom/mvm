@@ -13,13 +13,13 @@ MVM_SDK_MODE_ENV = "MVM_SDK_MODE"
 MVM_SDK_OUT_PATH_ENV = "MVM_SDK_OUT_PATH"
 
 #: Overrides the per-call timeout, in seconds, applied to a `mvmctl
-#: machine` subprocess. Python-only: the TypeScript machine wrapper
-#: does not yet bound its subprocess at all.
+#: machine` subprocess. Both language wrappers read it and give up at
+#: the deadline rather than waiting forever.
 MVM_MACHINE_TIMEOUT_ENV = "MVM_MACHINE_TIMEOUT_SEC"
 
 #: Overrides the cap, in bytes, on captured output from a `mvmctl
-#: machine` subprocess. Python-only, for the same reason as the
-#: timeout above.
+#: machine` subprocess. Both language wrappers read it and report an
+#: overflow as an overflow.
 MVM_MACHINE_MAX_OUTPUT_ENV = "MVM_MACHINE_MAX_OUTPUT_BYTES"
 
 __all__ = [
