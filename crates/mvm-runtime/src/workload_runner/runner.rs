@@ -110,6 +110,19 @@ impl BrokerGuard {
     pub fn defuse(&mut self) {
         self.0.defuse();
     }
+
+    /// Whether the launch came up with the host services it asked for.
+    ///
+    /// The guard alone cannot answer this. It records only whether anything was
+    /// registered, which is the same `false` for a workload that bound no
+    /// service as for one whose registration was skipped — `requested` is what
+    /// separates them. Judging on the guard alone marks every workload that
+    /// binds no host service as degraded, and a degraded launch is refused as a
+    /// sample of a healthy one.
+    #[must_use]
+    pub fn services_healthy(&self, requested: &[ServiceId]) -> bool {
+        requested.is_empty() || self.0.is_registered()
+    }
 }
 
 /// The production `BrokerRegistrar`: delegates to the existing per-tenant
@@ -451,7 +464,7 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         endpoint.defuse();
         broker_guard.defuse();
         trace.mark("broker_register");
-        trace.degrade_unless("host_services", broker_guard.0.is_registered());
+        trace.degrade_unless("host_services", broker_guard.services_healthy(&services));
         trace.write_to(&state_dir);
         Ok(vm)
     }
@@ -1539,6 +1552,33 @@ mod tests {
             });
             Ok(BrokerGuard::defused())
         }
+    }
+
+    fn service(id: &str) -> ServiceId {
+        ServiceId::parse(id.to_string()).unwrap()
+    }
+
+    /// A guard that did register — the only inner variant a test can build
+    /// without a live daemon, and its Drop is a no-op.
+    fn registered_guard() -> BrokerGuard {
+        BrokerGuard(mvm_vmm::host::host_agent_spawn::ServicesGuard::Agent(
+            mvm_vmm::host::host_agent_spawn::HostAgentServicesGuard::defused(),
+        ))
+    }
+
+    #[test]
+    fn a_workload_that_bound_no_host_service_is_not_degraded() {
+        assert!(BrokerGuard::defused().services_healthy(&[]));
+    }
+
+    #[test]
+    fn a_bound_host_service_that_never_registered_is_degraded() {
+        assert!(!BrokerGuard::defused().services_healthy(&[service("host.audit.v1")]));
+    }
+
+    #[test]
+    fn a_bound_host_service_that_registered_is_not_degraded() {
+        assert!(registered_guard().services_healthy(&[service("host.audit.v1")]));
     }
 
     /// A `ConsoleStreamer` double proving the *wiring*, not re-proving the
