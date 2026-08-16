@@ -7,6 +7,30 @@ for detailed scope and acceptance criteria.
 
 ## Completed issue closeouts
 
+- [x] **Plan 337 WS-1 + WS-2 — SDK surface generated from Rust.** WS-1 spiked
+      both mechanisms for extracting a constructor manifest from
+      `mvm_sdk::ctor` and re-scoped the plan rather than stopping it: the
+      attribute/`inventory` mechanism recovered *less* than the `syn` parse
+      (an attribute sees one item, so it cannot resolve a default living in a
+      sibling fn), and both failed identically on the facts that are simply
+      absent from Rust — `port=53`, keyword-only calling, `1..=65535`, the
+      `"pip-tools"` alias. Rust discharges those constraints statically, so
+      extraction is the wrong direction; the manifest is authored
+      declaratively and records *constraints*, with `syn` re-scoped to a
+      coverage gate plus a golden-IR behavioural gate. Surfaced a live defect
+      (#2559): Rust's `host_port` accepts port `0` where Python rejects it. WS-2 built
+      the pipeline end-to-end on Tier E — a `macro_rules!` registry in
+      `mvm-sdk/src/env.rs`, `emit_sdk_env`, and a hand-written xtask emitter
+      (necessary: `json-schema-to-typescript` emits only `export type`, which
+      `tsc` erases, so a generated constant would be invisible to the s27
+      runtime surface check). `MVM_CLI_BIN` was quadruplicated and invisible to
+      every gate because all four copies agreed. TypeScript-only divergence is
+      now zero; the two `MVM_MACHINE_*` names are deliberately *not* emitted
+      into TypeScript, since nothing there reads them, and remain recorded as a
+      behaviour gap. Also fixed a ~50% pre-existing flake in the s27
+      TypeScript live fixture (unawaited `wait()` racing `spawnSync`): base
+      9/20, now 30/30. WS-3–WS-5, WS-7, WS-8 open; WS-6 (Tier C) untouched.
+
 - [x] **Plan 336 — runtime SDK parity + live-transport BDD.** The golden
       `tests/machine-fixtures` corpus was shadowed by an unanchored copy under
       `crates/`, which is what the Python and TypeScript suites resolved to;
@@ -128,6 +152,16 @@ for detailed scope and acceptance criteria.
       zero; the later workload boot stopped at a separate readiness timeout.
 
 ## In-flight plans
+
+- [~] **Launch path as declared stages**
+      (`specs/plans/2026-08-15-launch-path-as-declared-stages.md`). Opened
+      2026-08-15; no workstream started. Split out of the artifact-derived
+      runtime identity work, which landed first so its cache-staleness class
+      would not muddy these timing measurements.
+  - [ ] WS1 — split the two `attach_*` calls into `lookup_*` + `attach_*`
+  - [ ] WS2 — stage `resolve_launch`, parallel probes in stage 2
+  - [ ] WS3 — `SubPhase` per stage + `every_launch_stage_is_timed`
+  - [ ] WS4 — golden-compare `VmStartConfig`, record `dispatch_window_ms()`
 
 - [~] **Plan 335 — merge-queue throughput.** Automatic architecture and kernel
       checks now share the main CI scope gate, required check names are
