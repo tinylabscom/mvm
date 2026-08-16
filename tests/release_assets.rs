@@ -243,3 +243,56 @@ fn every_published_checksum_manifest_is_signed_and_its_bundle_attached() {
         "kernel-build.yml must upload {manifest}.bundle beside the manifest"
     );
 }
+
+/// The staged image must be booted, and booted *before* it is uploaded.
+///
+/// Every other gate in the `default-microvm` job is a checksum, a signature, or
+/// a byte-level read, and none of them can answer the only question asked of a
+/// boot image: does it boot. A release shipped for five weeks whose guest
+/// panicked before userspace while every checksum verified clean.
+///
+/// The ordering is the whole value. These are steps in one job, so a failed
+/// boot aborts before the upload — but only while it stays above it. Reorder
+/// the two and the gate silently becomes a post-mortem on an artifact the world
+/// already has.
+#[test]
+fn the_staged_microvm_image_is_booted_before_it_is_uploaded() {
+    let workflow = release_workflow();
+    let job = workflow
+        .split("  default-microvm:")
+        .nth(1)
+        .expect("release.yml must define the default-microvm job");
+    let job = job
+        .split("\n  # ")
+        .next()
+        .expect("the job block is non-empty");
+
+    let boot = job
+        .find("- name: Boot the staged image before it becomes a release asset")
+        .expect("the default-microvm job must boot the image it is about to publish");
+    let upload = job
+        .find("- name: Upload default microVM image artifacts")
+        .expect("the default-microvm job must upload its artifacts");
+    assert!(
+        boot < upload,
+        "the boot gate must run before the upload, or it cannot refuse the publish"
+    );
+
+    // It must boot the staged bytes. Booting a published asset would be the
+    // `boot-latency` lane's job and would prove nothing about this release.
+    // Scoped to the boot step alone — the span up to the upload also covers the
+    // SBOM and pack-manifest steps, which legitimately name release URLs.
+    let rest = &job[boot..upload];
+    let step_end = rest[1..]
+        .find("\n      - name:")
+        .map_or(rest.len(), |offset| offset + 1);
+    let step = &rest[..step_end];
+    assert!(
+        step.contains("MVM_RUNTIME_BOOT_ROOTFS: staging/"),
+        "the boot gate must boot the staged rootfs, not a published one"
+    );
+    assert!(
+        !step.contains("releases/download"),
+        "the boot gate must not fetch a published artifact"
+    );
+}
