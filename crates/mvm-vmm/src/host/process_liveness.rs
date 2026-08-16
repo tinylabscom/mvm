@@ -5,7 +5,11 @@ use std::path::{Path, PathBuf};
 /// Supervisor PID markers, one per workload backend plus the generic `pid`
 /// fallback. This is the single list every liveness probe reads — a backend
 /// missing here reads as stopped everywhere at once.
-const PID_FILE_NAMES: &[&str] = &["libkrun.pid", "hvf.pid", "fc.pid", "qemu.pid", "pid"];
+///
+/// Public because the orphan-helper reaper in the CLI has to answer the same
+/// "is this VM still alive" question before it kills anything, and a second
+/// copy of the list there would drift into reaping a live guest.
+pub const PID_FILE_NAMES: &[&str] = &["libkrun.pid", "hvf.pid", "fc.pid", "qemu.pid", "pid"];
 
 /// `kill(pid, 0)` existence probe — delivers no signal, just checks the
 /// process is alive. `EPERM` is a positive existence result for a supervisor
@@ -56,7 +60,10 @@ fn macos_process_is_zombie(pid: i32) -> bool {
     unsafe { info.assume_init().pbi_status == libc::SZOMB }
 }
 
-fn read_pid_file(path: &Path) -> Option<i32> {
+/// Parse a supervisor PID marker. `None` when the file is absent, unparseable,
+/// or names a PID no supervisor can have — `0` addresses the caller's whole
+/// process group and `1` is init, so neither may reach a `kill`.
+pub fn read_pid_file(path: &Path) -> Option<i32> {
     std::fs::read_to_string(path)
         .ok()?
         .trim()

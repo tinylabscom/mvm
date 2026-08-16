@@ -33,6 +33,9 @@ pub mod did_key;
 /// The single `sha256:<64 lowercase hex>` shape check every prefixed
 /// content-address newtype in this crate shares (crate-private).
 pub(crate) mod digest_shape;
+/// Real on-disk footprint of a path — the one measurement behind every
+/// "how much would this reclaim" counter in the CLI.
+pub mod disk_usage;
 /// Host egress-broker decision logic (closed-by-default allow/deny per request).
 pub mod egress_broker;
 /// Egress-broker handler: compose decision + trace into an audit record.

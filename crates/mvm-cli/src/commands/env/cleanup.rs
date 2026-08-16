@@ -485,26 +485,10 @@ fn execute_plan(plan: &CleanupPlan) -> Result<ExecutionReport> {
     Ok(report)
 }
 
+/// Disk a delete of `path` would return. Shared with `cache prune` so the two
+/// verbs never quote different numbers for the same tree.
 fn dir_size(path: &Path) -> u64 {
-    if path.is_file() {
-        return path.metadata().map(|m| m.len()).unwrap_or(0);
-    }
-    let mut total = 0u64;
-    let mut stack = vec![path.to_path_buf()];
-    while let Some(p) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&p) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let entry_path = entry.path();
-            if entry_path.is_dir() {
-                stack.push(entry_path);
-            } else if let Ok(meta) = entry_path.metadata() {
-                total += meta.len();
-            }
-        }
-    }
-    total
+    mvm_core::disk_usage::tree_bytes(path)
 }
 
 /// Read the dev VM root filesystem usage percentage.
@@ -766,13 +750,15 @@ mod tests {
         }
     }
 
+    /// The estimate must cover every file in the tree. It measures allocated
+    /// blocks rather than apparent length, so the floor is the payload.
     #[test]
     fn dir_size_sums_recursive_file_bytes() {
         let dir = tempdir().unwrap();
         touch(&dir.path().join("a/b/c.bin"), 100);
         touch(&dir.path().join("a/d.bin"), 50);
         touch(&dir.path().join("e.bin"), 25);
-        assert_eq!(dir_size(dir.path()), 175);
+        assert!(dir_size(dir.path()) >= 175, "{}", dir_size(dir.path()));
     }
 
     #[test]
@@ -780,7 +766,28 @@ mod tests {
         let dir = tempdir().unwrap();
         let f = dir.path().join("just-one.bin");
         touch(&f, 42);
-        assert_eq!(dir_size(&f), 42);
+        assert!(dir_size(&f) >= 42, "{}", dir_size(&f));
+    }
+
+    /// A `cleanup` estimate is quoted to an operator deciding whether to run
+    /// it, so it must not promise disk that a delete cannot return. A tree of
+    /// links to one payload frees the payload once.
+    #[cfg(unix)]
+    #[test]
+    fn dir_size_is_not_inflated_by_links_to_one_payload() {
+        let dir = tempdir().unwrap();
+        let payload = dir.path().join("payload.bin");
+        touch(&payload, 128 * 1024);
+        let baseline = dir_size(dir.path());
+
+        std::os::unix::fs::symlink(&payload, dir.path().join("soft")).unwrap();
+        std::fs::hard_link(&payload, dir.path().join("hard")).unwrap();
+
+        let with_links = dir_size(dir.path());
+        assert!(
+            with_links < baseline + 128 * 1024,
+            "links must not multiply the estimate: {baseline} became {with_links}"
+        );
     }
 
     /// A reaped child's PID: guaranteed to name no live process.
