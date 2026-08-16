@@ -194,6 +194,40 @@ pub struct SupervisorTimerInputs<'a> {
     pub vm_state_dir: &'a std::path::Path,
 }
 
+/// Decode what the launch path actually put on `plan_json`.
+///
+/// It is the **signed** plan: `vm/exec.rs`, `session.rs` and `invoke.rs` all
+/// build it from `admitted.signed()`, and `SignedExecutionPlan` is a newtype
+/// over `SignedPayload`, so the plan's own fields sit inside `payload` rather
+/// than at the top level. Decoding the envelope directly as an `ExecutionPlan`
+/// can never succeed, and since the caller refuses to boot a bound it cannot
+/// read, that failure took every admitted workload down with it.
+///
+/// The bare form is still accepted. Not every producer goes through the
+/// admission path — the checkpoint restore path and the attach path build this
+/// value themselves — and a decoder that understands only one shape would just
+/// move the failure rather than remove it. Anything that is neither still
+/// errors, so an unreadable bound keeps failing closed.
+fn decode_admitted_plan(value: &serde_json::Value) -> anyhow::Result<ExecutionPlan> {
+    use anyhow::anyhow;
+
+    let signed_err =
+        match serde_json::from_value::<mvm_core::plan::SignedExecutionPlan>(value.clone()) {
+            Ok(signed) => match serde_json::from_slice::<ExecutionPlan>(&signed.0.payload) {
+                Ok(plan) => return Ok(plan),
+                Err(e) => anyhow!("signed envelope carried an undecodable payload: {e}"),
+            },
+            Err(e) => anyhow!("not a signed plan: {e}"),
+        };
+
+    match serde_json::from_value::<ExecutionPlan>(value.clone()) {
+        Ok(plan) => Ok(plan),
+        // Both causes, because "not a signed plan" alone sends a reader looking
+        // at the wrong half of the problem.
+        Err(bare_err) => Err(anyhow!("{signed_err}; and not a bare plan: {bare_err}")),
+    }
+}
+
 /// Arm the wall-clock timer for a supervisor that is about to enter its VMM
 /// run loop, or return `None` when the plan declares no bound.
 ///
@@ -210,7 +244,7 @@ pub fn arm_for_supervisor(
     let Some(value) = inputs.plan_json else {
         return Ok(None);
     };
-    let plan: ExecutionPlan = serde_json::from_value(value.clone())
+    let plan = decode_admitted_plan(value)
         .context("decoding the admitted plan for the wall-clock timer")?;
     if plan.resources.timeouts.exec_secs == 0 {
         return Ok(None);
@@ -263,6 +297,82 @@ mod tests {
         let mut plan = mvm_core::plan::test_support::PlanFixture::new().build();
         plan.resources.timeouts.exec_secs = exec_secs;
         Arc::new(plan)
+    }
+
+    /// The launch path sends a **signed** plan: `vm/exec.rs` builds
+    /// `plan_json` from `admitted.signed()`, and `session.rs` / `invoke.rs` do
+    /// the same. `arm_for_supervisor` has to accept exactly that.
+    ///
+    /// It did not, and because the caller fails closed on an un-decodable
+    /// bound, every admitted workload refused to boot on libkrun and HVF with
+    /// "refusing to boot a bounded workload it cannot audit".
+    #[test]
+    fn a_signed_plan_from_the_launch_path_arms_the_timer() {
+        let dir = tempfile::tempdir().unwrap();
+        let audit_dir = dir.path().join("audit");
+        std::fs::create_dir_all(&audit_dir).unwrap();
+        let keys_dir = dir.path().join("keys");
+        std::fs::create_dir_all(&keys_dir).unwrap();
+
+        let mut plan = mvm_core::plan::test_support::PlanFixture::new().build();
+        plan.resources.timeouts.exec_secs = 5;
+        let key = SigningKey::from_bytes(&[9u8; 32]);
+        let signed = mvm_core::plan::sign_plan(&plan, &key, "host-signer");
+        // Byte-for-byte what the launch path puts on the wire.
+        let wire: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&signed).unwrap()).unwrap();
+
+        let guard = arm_for_supervisor(SupervisorTimerInputs {
+            plan_json: Some(&wire),
+            audit_dir: Some(audit_dir.as_path()),
+            signing_key_path: Some(keys_dir.join("host-signer.ed25519").as_path()),
+            vm_state_dir: dir.path(),
+        })
+        .expect("a signed plan carrying a bound must arm, not refuse the boot");
+
+        assert!(
+            guard.is_some(),
+            "a nonzero exec_secs must produce an armed timer"
+        );
+    }
+
+    /// A signed plan with no bound is not an error — it simply arms nothing.
+    #[test]
+    fn a_signed_plan_without_a_bound_arms_no_timer() {
+        let dir = tempfile::tempdir().unwrap();
+        let plan = mvm_core::plan::test_support::PlanFixture::new().build();
+        assert_eq!(plan.resources.timeouts.exec_secs, 0);
+        let key = SigningKey::from_bytes(&[9u8; 32]);
+        let signed = mvm_core::plan::sign_plan(&plan, &key, "host-signer");
+        let wire = serde_json::to_value(&signed).unwrap();
+
+        let guard = arm_for_supervisor(SupervisorTimerInputs {
+            plan_json: Some(&wire),
+            audit_dir: None,
+            signing_key_path: None,
+            vm_state_dir: dir.path(),
+        })
+        .expect("an unbounded signed plan is not an error");
+        assert!(guard.is_none());
+    }
+
+    /// Garbage must still fail closed: the caller turns an error here into a
+    /// refusal to boot, which is the right posture for a bound that could not
+    /// be read.
+    #[test]
+    fn an_undecodable_plan_still_fails_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let wire = serde_json::json!({"not": "a plan"});
+        assert!(
+            arm_for_supervisor(SupervisorTimerInputs {
+                plan_json: Some(&wire),
+                audit_dir: None,
+                signing_key_path: None,
+                vm_state_dir: dir.path(),
+            })
+            .is_err(),
+            "an unreadable bound must refuse, not silently run unbounded"
+        );
     }
 
     fn emitter(dir: &std::path::Path) -> Arc<AuditEmitter> {
