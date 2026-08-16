@@ -677,22 +677,10 @@ pub fn clear_builder_store_at(
     })
 }
 
-/// Recursive on-disk size in bytes (best-effort: unreadable entries are
-/// skipped). Follows no symlinks — counts the link, not its target.
+/// Disk clearing the builder store would return. Shared with the CLI's cache
+/// counters so repair and prune quote the same number for the same tree.
 fn dir_size_bytes(dir: &std::path::Path) -> u64 {
-    let mut total = 0u64;
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return 0;
-    };
-    for entry in entries.flatten() {
-        let Ok(meta) = entry.metadata() else { continue };
-        if meta.is_dir() {
-            total = total.saturating_add(dir_size_bytes(&entry.path()));
-        } else {
-            total = total.saturating_add(meta.len());
-        }
-    }
-    total
+    mvm_core::disk_usage::tree_bytes(dir)
 }
 
 /// Stub implementation. Every method returns
@@ -1192,16 +1180,18 @@ mod tests {
         std::fs::write(store.join("nix-store.img"), vec![0u8; 4096]).unwrap();
         std::fs::write(store.join("vms/x/console.log"), vec![0u8; 100]).unwrap();
 
-        // dry-run: reports freed bytes, removes nothing.
+        // dry-run: reports freed bytes, removes nothing. The figure is the
+        // disk a delete returns — allocated blocks, not the 4196 bytes the
+        // two files hold.
         let dry = clear_builder_store_at(&store, true).unwrap();
         assert!(dry.existed && dry.dry_run);
-        assert_eq!(dry.bytes_freed, 4196);
+        assert!(dry.bytes_freed >= 4196, "{}", dry.bytes_freed);
         assert!(store.exists(), "dry-run must not delete");
 
         // real: removes the dir, reports the same bytes.
         let done = clear_builder_store_at(&store, false).unwrap();
         assert!(done.existed && !done.dry_run);
-        assert_eq!(done.bytes_freed, 4196);
+        assert_eq!(done.bytes_freed, dry.bytes_freed);
         assert!(!store.exists(), "repair must remove the store dir");
     }
 

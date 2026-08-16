@@ -120,10 +120,11 @@ pub(in crate::commands) fn sweep_orphaned_vm_helpers_before_spawn() {
 pub(super) const BUILDER_SIDECARS: &[&str] = &["builder.pid", "stage0.pid"];
 
 /// Sidecar PID file names a workload VM dir under `~/.mvm/vms/<name>/`.
-/// Keep this aligned with the workload supervisor markers in mvm-runtime's
-/// reconciliation pass so every live backend protects its associated helper
-/// processes.
-pub(super) const WORKLOAD_SIDECARS: &[&str] = &["libkrun.pid", "hvf.pid", "fc.pid"];
+///
+/// The shared liveness markers, not a copy of them: this list decides whether
+/// a VM dir has a live owner, and a backend missing from it reads as dead —
+/// so the reaper would SIGTERM the helpers of a guest that is still running.
+pub(super) const WORKLOAD_SIDECARS: &[&str] = mvm_vmm::host::process_liveness::PID_FILE_NAMES;
 
 /// Dir-name prefix of the persistent dev builder VM.
 const PERSISTENT_BUILDER_DIR_PREFIX: &str = "mvm-persistent-builder-";
@@ -347,11 +348,12 @@ fn reap_or_track(
     }
 }
 
+/// Whether a sidecar name identifies the process that owns the VM, as opposed
+/// to a helper attached to it. An owner marker protects the dir; a helper one
+/// does not. Both marker sets are read from where they are defined.
 fn is_supervisor_sidecar(name: &str) -> bool {
-    matches!(
-        name,
-        "builder.pid" | "stage0.pid" | "libkrun.pid" | "hvf.pid" | "fc.pid"
-    )
+    BUILDER_SIDECARS.contains(&name)
+        || mvm_vmm::host::process_liveness::PID_FILE_NAMES.contains(&name)
 }
 
 pub(super) struct ProcSnapshot {
@@ -421,31 +423,14 @@ impl ProcSnapshot {
     }
 }
 
-fn read_pid_file(path: &std::path::Path) -> Option<i32> {
-    std::fs::read_to_string(path)
-        .ok()?
-        .trim()
-        .parse::<i32>()
-        .ok()
-        .filter(|&p| p > 1)
-}
+// The reaper's notion of "still alive" is the shared one. Its own copy read a
+// bare `kill(pid, 0) == 0`, which reports a supervisor owned by another uid —
+// a root-owned Firecracker under the jailer — as dead, and would then reap the
+// helpers of a running guest.
+pub(super) use mvm_vmm::host::process_liveness::{pid_is_alive, read_pid_file};
 
-pub(super) fn pid_is_alive(pid: i32) -> bool {
-    unsafe { libc::kill(pid, 0) == 0 }
-}
-
+/// Disk the reaper would return by dropping a per-VM dir. Shared with the
+/// rest of `cache prune` so one command never quotes two different numbers.
 fn dir_size_bytes(path: &std::path::Path) -> u64 {
-    let mut total = 0u64;
-    let Ok(entries) = std::fs::read_dir(path) else {
-        return total;
-    };
-    for entry in entries.flatten() {
-        let p = entry.path();
-        if p.is_file() {
-            total += p.metadata().map(|m| m.len()).unwrap_or(0);
-        } else if p.is_dir() {
-            total += dir_size_bytes(&p);
-        }
-    }
-    total
+    mvm_core::disk_usage::tree_bytes(path)
 }

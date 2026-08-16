@@ -403,30 +403,10 @@ pub(super) fn is_orphan_stage0_staging_dir_name(name: &str) -> bool {
     false
 }
 
-/// Total byte size of a directory tree. Best-effort — failures stat-ing
-/// individual entries are skipped silently because the caller only uses
-/// this for the "bytes freed" UI counter, never for correctness.
+/// Disk clearing the staging tree would return. Shared with `cache prune` so
+/// the repair and prune paths quote the same number for the same tree.
 fn stage0_dir_size_bytes(path: &std::path::Path) -> u64 {
-    let mut total = 0u64;
-    let mut stack = vec![path.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let entry_path = entry.path();
-            match entry.file_type() {
-                Ok(ft) if ft.is_dir() => stack.push(entry_path),
-                Ok(_) => {
-                    if let Ok(meta) = entry_path.metadata() {
-                        total = total.saturating_add(meta.len());
-                    }
-                }
-                Err(_) => {}
-            }
-        }
-    }
-    total
+    mvm_core::disk_usage::tree_bytes(path)
 }
 
 /// Fingerprint the full set of source inputs that determine the
