@@ -218,20 +218,36 @@ argument surface.
 
 ### Phase 2 — Runtime auto-detection
 
-- [ ] Define a small, auditable runtime catalog mapping command names and
-      project files to OCI image refs (e.g. `python3` / `requirements.txt` →
-      `python:3.12-alpine`, `cargo` / `Cargo.toml` → `rust:1.85-alpine`).
-- [ ] Implement detection order: explicit `--image`, then argv[0], then
-      project files in the working directory, then the bundled default image.
-- [ ] Add `--no-detect` to force the default image, and `--image` to override.
-- [ ] Add `--template` to pick a built-in template by name.
-- [ ] Ensure auto-detected runs still produce a signed `ExecutionPlan` with
-      default-deny egress.
-- [ ] Add unit tests for each detection rule and BDD scenarios for at least
-      Python, Node, Rust, and Go.
+- [x] Define a small, auditable runtime catalog mapping command names and
+      project files to OCI image refs. `mvm_core::runtime_catalog`, modelled on
+      the existing `Catalog`/`CatalogEntry` — same `search`/`find` shape, same
+      `schema_version`. In-tree, never fetched at runtime.
+- [x] Implement detection order: explicit source, `--runtime`, `--no-detect`,
+      `mvm.toml` walk-up, argv[0], project files, bundled default. **Reuses
+      `mvm_core::domain::manifest::discover_manifest_from_dir`** rather than
+      adding a second project-config idiom (Corrections 3).
+- [x] Add `--no-detect` to force the default image; `--image` already overrode.
+      Also `--runtime <name>` as the explicit selector.
+- [ ] Add `--template` to pick a built-in template by name. *(Deferred to
+      Phase 4, which is where templates are built.)*
+- [x] Ensure auto-detected runs still produce a signed `ExecutionPlan` with
+      default-deny egress. Detection settles a *source* and touches no policy
+      field; witnessed by `a_detected_run_is_still_deny_all_and_standard_profile`
+      and a BDD scenario asserting `profile: standard` / `network: deny-all`.
+- [x] Add unit tests for each detection rule (12 in `mvm-core`, 12 in the CLI
+      resolver) and BDD scenarios. Ordering and refusal rules mutation-checked
+      red before being believed.
 
 **Acceptance:** `mvmctl run python3 -c "print('ok')"` boots the right image
 without a manifest; detection is deterministic and tested.
+
+**Scope correction made while building it:** inference is `mvmctl run` only.
+`machine run` creates a named, possibly persistent machine, and picking its base
+image from the working directory is a footgun there — before the split,
+`machine run` inside any Rust checkout silently chose `rust:1-alpine`. It keeps
+its error naming every way to supply a source. `--runtime` works on both, since
+that is the user naming one. The seam is one `Inference` enum passed to one
+resolver, so the two verbs cannot drift apart on anything else.
 
 ### Phase 3 — Security profile presets
 
