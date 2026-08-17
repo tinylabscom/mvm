@@ -42,15 +42,23 @@ jobs:
         with:
           tool: just
 
-      - name: Cache cargo
-        uses: actions/cache@v5
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-bdd-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-bdd-
+      # Restore-only, through the shared action, for the reason its own
+      # comment gives: the repo cache is capped at 10 GB with LRU eviction, so
+      # a lane that writes a whole `target` directory from every pull-request
+      # and merge-queue ref evicts the entry every other lane restores.
+      #
+      # This job used to do exactly that with a raw `actions/cache` over
+      # `target` — four surviving entries at ~1.5 GB each, 6.2 GB of a 9.7 GB
+      # total. Writing nothing here costs this lane the workspace half of its
+      # cache and gives every other lane back the dependency half of theirs.
+      #
+      # It shares the default `workspace` key rather than taking one of its
+      # own: the warm job already builds on nightly, which is this lane's
+      # toolchain, so the dependency graph and every unchanged workspace crate
+      # come back warm. `--features bdd` adds a handful of crates on top. A
+      # `bdd`-keyed entry would need its own writer, and that means a second
+      # full build on every merge to save the smaller half of one lane.
+      - uses: ./.github/actions/rust-cache
 
       - name: Run BDD conformance suite
         run: just bdd
