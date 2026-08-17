@@ -169,11 +169,22 @@ const CHECKPOINT_SUB: &[(&str, AuditPosture)] = &[
     ("verify", AuditPosture::ReadOnly),
 ];
 
+// `mvmctl image boot` — the cached default boot image's own lifecycle.
+// `status` reads the cache, `check` adds a read-only releases query, and
+// `update` replaces the cached bytes, which is the same acquisition the
+// `pull` leaf records.
+const IMAGE_BOOT_SUB: &[(&str, AuditPosture)] = &[
+    ("status", AuditPosture::ReadOnly),
+    ("check", AuditPosture::ReadOnly),
+    ("update", AuditPosture::Emits("ImageFetch")),
+];
+
 const IMAGE_SUB: &[(&str, AuditPosture)] = &[
     ("pull", AuditPosture::Emits("ImageFetch")),
     ("ls", AuditPosture::ReadOnly),
     ("inspect", AuditPosture::ReadOnly),
     ("rm", AuditPosture::Emits("CachePrune")),
+    ("boot", AuditPosture::DelegatesToSub(IMAGE_BOOT_SUB)),
 ];
 
 // `mvmctl pack` — the versioned attested-pack cache lifecycle

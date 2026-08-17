@@ -58,7 +58,7 @@ pub(super) fn bump_verify_outcome(outcome: &str) {
 /// URL is not enough — splitting one back apart would have to guess where the
 /// asset name starts. A params struct also stops three same-typed strings from
 /// being transposed silently.
-pub(super) struct ChecksumManifest<'a> {
+pub(crate) struct ChecksumManifest<'a> {
     /// Per-version release base URL, no trailing slash.
     pub base_url: &'a str,
     /// The manifest's published asset name, e.g. `kernel-aarch64-checksums-sha256.txt`.
@@ -91,7 +91,7 @@ impl ChecksumManifest<'_> {
 ///
 /// Returns only entries for the artifacts in `wanted`; missing names
 /// short-circuit to a clear error.
-pub(super) fn fetch_expected_hashes(
+pub(crate) fn fetch_expected_hashes(
     manifest: &ChecksumManifest<'_>,
     wanted: &[&str],
 ) -> Result<std::collections::HashMap<String, String>> {
@@ -167,7 +167,7 @@ pub(super) fn verify_manifest_signature(
 /// hex). On mismatch, delete the file and bail with a clear message.
 /// On `MVM_SKIP_HASH_VERIFY=1`, log a warning and accept — the env-var
 /// is the documented escape hatch for emergency-rotation scenarios.
-pub(super) fn verify_artifact_hash(
+pub(crate) fn verify_artifact_hash(
     path: &str,
     name: &str,
     expected: Option<&String>,
@@ -257,7 +257,7 @@ fn download_failure_message() -> String {
 }
 
 /// Download a file from a URL using curl, resuming a partial `dest`.
-pub(super) fn download_file(url: &str, dest: &str) -> Result<()> {
+pub(crate) fn download_file(url: &str, dest: &str) -> Result<()> {
     let status = std::process::Command::new("curl")
         .args(curl_download_args(dest, url))
         .stdin(std::process::Stdio::inherit())

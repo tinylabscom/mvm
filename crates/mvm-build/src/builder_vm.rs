@@ -250,6 +250,35 @@ pub struct GuestSidecar {
     /// therefore depends on the runtime overlay contract for those binaries.
     #[serde(default)]
     pub runtime_lean: bool,
+    /// Release line and version this image came from, e.g.
+    /// `boot-image/v0.1.0`. Empty means the producer recorded none — an image
+    /// built before the field existed, or a local build of a working tree that
+    /// belongs to no published line.
+    #[serde(default)]
+    pub image_tag: String,
+    /// How the bytes on disk were acquired: `built-local` or `fetched`.
+    ///
+    /// Written by whoever put the image in the cache, not by whoever built it
+    /// originally — a published image is built by a Nix build somewhere, but
+    /// from this host's point of view it arrived over the network, and that is
+    /// the fact a misfiring build/fetch split needs to be readable from.
+    /// Empty means unrecorded; never read it as either arm.
+    #[serde(default)]
+    pub source: String,
+    /// RFC 3339 timestamp for when this cache entry was produced or acquired.
+    /// Orders two otherwise-identical local builds. Empty when the producer
+    /// had no clock — a hermetic Nix build deliberately has none.
+    #[serde(default)]
+    pub built_at: String,
+    /// Host↔guest contract version this rootfs speaks. Zero means unrecorded,
+    /// which is distinct from any real version and must not be read as one.
+    #[serde(default)]
+    pub protocol_version: u8,
+    /// Commit whose `mk-guest.nix` produced this rootfs. Empty when the build
+    /// ran from a source tree with no resolvable revision (a dirty or
+    /// non-git flake input), which a Nix build cannot invent.
+    #[serde(default)]
+    pub generator_rev: String,
 }
 
 impl GuestSidecar {
@@ -330,6 +359,14 @@ impl GuestSidecar {
             hypervisor: "oci".to_string(),
             overlay_aware: true,
             runtime_lean,
+            // An arbitrary OCI image belongs to no mvm image line and carries
+            // no mvm build provenance. Leave every provenance field
+            // unrecorded rather than inventing one.
+            image_tag: String::new(),
+            source: String::new(),
+            built_at: String::new(),
+            protocol_version: 0,
+            generator_rev: String::new(),
         }
     }
 
@@ -1365,6 +1402,11 @@ mod tests {
             hypervisor: "libkrun".to_string(),
             overlay_aware: true,
             runtime_lean: false,
+            image_tag: String::new(),
+            source: String::new(),
+            built_at: String::new(),
+            protocol_version: 0,
+            generator_rev: String::new(),
         }
     }
 
@@ -1378,6 +1420,38 @@ mod tests {
             .expect("read")
             .expect("present");
         assert_eq!(read, sidecar);
+    }
+
+    /// A sidecar written before the provenance fields existed must keep
+    /// deserializing. Asserted against a literal blob rather than a round-trip
+    /// of the current struct: a round-trip serializes the new fields, so it
+    /// would still pass with `#[serde(default)]` missing and prove nothing.
+    #[test]
+    fn an_old_sidecar_without_provenance_fields_still_deserializes() {
+        let old = r#"{
+            "name": "mvm-default-microvm",
+            "accessible": false,
+            "sealed": true,
+            "entrypointKind": "command",
+            "initSystem": "busybox",
+            "expectedBootMs": 300,
+            "agentBinary": "real",
+            "rootlessEntrypoint": true,
+            "hypervisor": "libkrun",
+            "overlayAware": true
+        }"#;
+
+        let sidecar: GuestSidecar = serde_json::from_str(old).expect(
+            "a sidecar predating the provenance fields must still deserialize; \
+             every new field carries #[serde(default)]",
+        );
+
+        assert_eq!(sidecar.name, "mvm-default-microvm");
+        assert_eq!(sidecar.image_tag, "");
+        assert_eq!(sidecar.source, "");
+        assert_eq!(sidecar.built_at, "");
+        assert_eq!(sidecar.protocol_version, 0);
+        assert_eq!(sidecar.generator_rev, "");
     }
 
     #[test]
