@@ -62,7 +62,16 @@ pub fn extract_vmlinux(image: &[u8]) -> Result<Vec<u8>> {
 /// Ensure the kernel file at `path` is an FC-loadable ELF `vmlinux`. Returns
 /// `path` unchanged when it already is; otherwise extracts the ELF to a cached
 /// sibling `<path>.elf` (once — reused on later boots) and returns that path.
-/// Idempotent: a valid cached sibling short-circuits the re-extract.
+/// Idempotent: a cached sibling that still belongs to `path` short-circuits
+/// the re-extract.
+///
+/// "Still belongs to" is the whole point. The short-circuit used to test only
+/// that the sibling began with the ELF magic, which every previously extracted
+/// kernel does forever. Replacing `vmlinux` — a kernel rebuild, a re-fetch —
+/// therefore left the *old* `.elf` in place and every later boot silently ran
+/// the superseded kernel. The caller digest-verifies `vmlinux` before calling
+/// here, so that substitution also handed the guest bytes the verified-kernel
+/// seam never vouched for.
 pub fn ensure_fc_loadable_kernel(path: &Path) -> Result<PathBuf> {
     if file_starts_with_elf(path)? {
         return Ok(path.to_path_buf());
@@ -74,8 +83,12 @@ pub fn ensure_fc_loadable_kernel(path: &Path) -> Result<PathBuf> {
     }
 
     let elf_path = sibling_elf(path);
-    if file_starts_with_elf(&elf_path).unwrap_or(false) {
-        return Ok(elf_path); // already extracted on a prior boot
+    let stamp_path = sibling(path, ".elf.src");
+    let source = source_stamp(path)?;
+    if file_starts_with_elf(&elf_path).unwrap_or(false)
+        && std::fs::read_to_string(&stamp_path).ok().as_deref() == Some(source.as_str())
+    {
+        return Ok(elf_path); // extracted from *this* vmlinux on a prior boot
     }
 
     let image = std::fs::read(path).with_context(|| format!("read kernel {}", path.display()))?;
@@ -83,12 +96,41 @@ pub fn ensure_fc_loadable_kernel(path: &Path) -> Result<PathBuf> {
         .with_context(|| format!("extract FC-loadable vmlinux from {}", path.display()))?;
 
     // Write atomically (tmp + rename) so a concurrent/partial boot never sees a
-    // half-written kernel.
+    // half-written kernel. The stamp is cleared first and written last: a crash
+    // mid-swap then leaves no stamp, which re-extracts, rather than a stamp
+    // vouching for an ELF that was never finished.
+    let _ = std::fs::remove_file(&stamp_path);
     let tmp = sibling(path, ".elf.tmp");
     std::fs::write(&tmp, &vmlinux).with_context(|| format!("write {}", tmp.display()))?;
     std::fs::rename(&tmp, &elf_path)
         .with_context(|| format!("rename {} -> {}", tmp.display(), elf_path.display()))?;
+    std::fs::write(&stamp_path, &source)
+        .with_context(|| format!("write {}", stamp_path.display()))?;
     Ok(elf_path)
+}
+
+/// Identifies the `vmlinux` an extracted ELF came from, as `<len>:<mtime_nanos>`.
+///
+/// A cache-coherence check, not an integrity control: it answers "was this
+/// sibling derived from the file sitting here now?", and that answer only has
+/// to change when the file does. Integrity belongs to the caller — `vmlinux` is
+/// verified against its recorded digest before this function is reached, and
+/// the ELF is extracted from those verified bytes.
+///
+/// Length and mtime rather than a content hash because this runs on every boot:
+/// hashing a multi-megabyte kernel to answer a cache question would put
+/// milliseconds on the launch path to re-derive what the caller already
+/// established.
+fn source_stamp(path: &Path) -> Result<String> {
+    let meta =
+        std::fs::metadata(path).with_context(|| format!("stat kernel {}", path.display()))?;
+    let mtime = meta
+        .modified()
+        .with_context(|| format!("read mtime of {}", path.display()))?
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    Ok(format!("{}:{mtime}", meta.len()))
 }
 
 /// Read just the first 4 bytes and test the ELF magic — avoids slurping a
@@ -237,6 +279,113 @@ mod tests {
         let junk = vec![0x42u8; 4096]; // no ELF, no gzip member
         let err = extract_vmlinux(&junk).unwrap_err();
         assert!(format!("{err}").contains("vmlinux"), "got: {err}");
+    }
+
+    /// Distinguishable payloads so a stale sibling is detectable by content.
+    fn fake_vmlinux_tagged(tag: u8) -> Vec<u8> {
+        let mut v = Vec::new();
+        v.extend_from_slice(ELF_MAGIC);
+        v.extend_from_slice(&[tag; 64]);
+        v.extend(b"the rest of the kernel image");
+        v
+    }
+
+    /// The regression this binding exists for: replacing `vmlinux` used to
+    /// leave the previous `.elf` in place, and every later boot ran the
+    /// superseded kernel.
+    #[test]
+    fn a_replaced_vmlinux_is_not_served_from_the_previous_extraction() {
+        let dir = tempfile::tempdir().unwrap();
+        let kpath = dir.path().join("vmlinux");
+
+        let old = fake_vmlinux_tagged(0x11);
+        std::fs::write(&kpath, fake_bzimage(&old)).unwrap();
+        let first = ensure_fc_loadable_kernel(&kpath).unwrap();
+        assert_eq!(std::fs::read(&first).unwrap(), old);
+
+        // A rebuild replaces the kernel in place with different contents.
+        let new = fake_vmlinux_tagged(0x22);
+        std::fs::write(&kpath, fake_bzimage(&new)).unwrap();
+        let second = ensure_fc_loadable_kernel(&kpath).unwrap();
+
+        assert_eq!(
+            std::fs::read(&second).unwrap(),
+            new,
+            "a rebuilt kernel must not boot the previously extracted ELF"
+        );
+    }
+
+    /// The cache must still be a cache: an unchanged kernel does not re-extract.
+    #[test]
+    fn an_unchanged_vmlinux_reuses_the_cached_sibling() {
+        let dir = tempfile::tempdir().unwrap();
+        let kpath = dir.path().join("vmlinux");
+        std::fs::write(&kpath, fake_bzimage(&fake_vmlinux_tagged(0x33))).unwrap();
+
+        let first = ensure_fc_loadable_kernel(&kpath).unwrap();
+        let stamp = std::fs::read_to_string(sibling(&kpath, ".elf.src")).unwrap();
+        // Mark the extracted ELF so a re-extract would overwrite the marker.
+        let marked = {
+            let mut b = std::fs::read(&first).unwrap();
+            b.extend(b"SENTINEL");
+            b
+        };
+        std::fs::write(&first, &marked).unwrap();
+
+        let second = ensure_fc_loadable_kernel(&kpath).unwrap();
+        assert_eq!(first, second);
+        assert_eq!(
+            std::fs::read(&second).unwrap(),
+            marked,
+            "an unchanged kernel must not pay the extraction again"
+        );
+        assert_eq!(
+            std::fs::read_to_string(sibling(&kpath, ".elf.src")).unwrap(),
+            stamp
+        );
+    }
+
+    /// A sibling with no stamp is from before this binding existed, or from a
+    /// crashed swap. Either way it is unattributable and must be re-derived.
+    #[test]
+    fn an_unstamped_sibling_is_re_extracted_rather_than_trusted() {
+        let dir = tempfile::tempdir().unwrap();
+        let kpath = dir.path().join("vmlinux");
+        let real = fake_vmlinux_tagged(0x44);
+        std::fs::write(&kpath, fake_bzimage(&real)).unwrap();
+
+        // A leftover ELF from some other kernel, with no stamp beside it.
+        std::fs::write(sibling_elf(&kpath), fake_vmlinux_tagged(0x55)).unwrap();
+
+        let got = ensure_fc_loadable_kernel(&kpath).unwrap();
+        assert_eq!(std::fs::read(&got).unwrap(), real);
+    }
+
+    /// A stamp naming a different kernel must not vouch for the sibling.
+    #[test]
+    fn a_stamp_that_does_not_match_the_kernel_forces_a_re_extract() {
+        let dir = tempfile::tempdir().unwrap();
+        let kpath = dir.path().join("vmlinux");
+        let real = fake_vmlinux_tagged(0x66);
+        std::fs::write(&kpath, fake_bzimage(&real)).unwrap();
+        std::fs::write(sibling_elf(&kpath), fake_vmlinux_tagged(0x77)).unwrap();
+        std::fs::write(sibling(&kpath, ".elf.src"), "999:1").unwrap();
+
+        let got = ensure_fc_loadable_kernel(&kpath).unwrap();
+        assert_eq!(std::fs::read(&got).unwrap(), real);
+    }
+
+    #[test]
+    fn an_extraction_records_a_stamp_matching_the_kernel_on_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let kpath = dir.path().join("vmlinux");
+        std::fs::write(&kpath, fake_bzimage(&fake_vmlinux_tagged(0x88))).unwrap();
+        ensure_fc_loadable_kernel(&kpath).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(sibling(&kpath, ".elf.src")).unwrap(),
+            source_stamp(&kpath).unwrap()
+        );
     }
 
     #[test]
