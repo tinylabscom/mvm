@@ -129,13 +129,6 @@ skip = [
     # finished migrating. Not collapsible without forking those deps.
     "getrandom",
 
-    # rand 0.8 (workspace direct) vs rand 0.10 (hickory-proto 0.26), and
-    # rand_core likewise. Linux-only as of the raw-egress target gating --
-    # hickory-proto no longer enters the macOS graph, so this pair is a
-    # duplicate on `*-linux-*` targets alone.
-    "rand",
-    "rand_core",
-
     # vmm-sys-util 0.12.1 (Linux KVM: kvm-bindings 0.11 / kvm-ioctls 0.21)
     # vs 0.15.0 (the rust-vmm virtio primitives vm-memory / virtio-queue on the
     # in-house VMM path). The two rust-vmm families track different vmm-sys-util
