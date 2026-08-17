@@ -439,6 +439,7 @@ mod tests {
     use crate::flowmux::{FlowMuxClient, FlowMuxReconnectClient};
     use hickory_proto::op::{OpCode, Query};
     use hickory_proto::rr::Name;
+    use mvm_contract::protocol::network_flow::hello::Handshake;
     use std::io;
     use tempfile::tempdir;
 
@@ -908,7 +909,7 @@ mod tests {
 
     #[tokio::test]
     async fn non_authoritative_query_uses_flowmux_resolver_and_rewrites_id() {
-        let resolver = build_mock_flowmux_resolver().await;
+        let (resolver, _owner) = build_mock_flowmux_resolver().await;
         let zone = Zone::new(vec![]);
         let config = DnsServerConfig {
             bind_addrs: vec!["127.0.0.1:5353".parse().unwrap()],
@@ -929,7 +930,13 @@ mod tests {
         assert!(message.answers.is_empty());
     }
 
-    async fn build_mock_flowmux_resolver() -> FlowMuxReconnectClient {
+    /// The sender comes back with the client: in production `reconnect_loop`
+    /// owns it for as long as the session lives, and a caller that drops it
+    /// makes every wait fail with "reconnect owner gone".
+    async fn build_mock_flowmux_resolver() -> (
+        FlowMuxReconnectClient,
+        tokio::sync::watch::Sender<Option<std::sync::Arc<FlowMuxClient>>>,
+    ) {
         use ed25519_dalek::{SigningKey, VerifyingKey};
         use mvm_contract::protocol::network_flow::{Opcode, encode_into};
         use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
@@ -999,7 +1006,7 @@ mod tests {
                 &mut host_session,
                 Opcode::HelloAck,
                 0,
-                &[],
+                &Handshake::local("test-host").encode(),
             )
             .await;
 
@@ -1031,9 +1038,7 @@ mod tests {
             .await
             .unwrap();
         let (tx, rx) = tokio::sync::watch::channel(Some(std::sync::Arc::new(client)));
-        // Hold the sender so the watch channel stays open for the test.
-        let _tx = tx;
-        FlowMuxReconnectClient::from_receiver(rx)
+        (FlowMuxReconnectClient::from_receiver(rx), tx)
     }
 
     fn test_config(upstream_addrs: Vec<SocketAddr>) -> DnsServerConfig {
