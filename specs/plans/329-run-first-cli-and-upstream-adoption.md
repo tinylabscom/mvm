@@ -1,9 +1,8 @@
 # Plan 329 — Run-first CLI ergonomics and upstream-sandbox adoption
 
-**Status:** Active. Phase A (below) landed the ADR-027 amendment, the verb
-visibility triage, and `xtask check-cli-help-matches-docs`. `mvmctl run` and
-`mvmctl machine run` are both visible top-level commands; consolidating them
-onto one argument struct is Phase 1 and has not landed yet.
+**Status:** Active. Phase A landed the ADR-027 amendment, the verb visibility
+triage, and `xtask check-cli-help-matches-docs`. Phase 1 landed the shared
+argument core: `RunArgs` is declared once and flattened into both verbs.
 
 **Bound by:** [ADR-027](../adrs/027-cli-surface-consolidation.md) (amended
 2026-08-17),
@@ -193,17 +192,23 @@ complete; no unresolved capability gap.
 
 ### Phase 1 — Consolidate the `run` argument surface
 
-- [ ] Merge `vm::exec::Args`, `vm::exec::RunArgs`, and
-      `machine::MachineRunArgs` into a single `RunArgs` source of truth in
-      `mvm-cli`.
+- [x] Merge the shared surface into a single `RunArgs` source of truth in
+      `mvm-cli`, flattened into both verbs. **Deviation from the wording
+      above, deliberate:** a literal single struct would give `mvmctl run`
+      `--name`/`-d`/`--port`/`--ttl`/`--entrypoint` and make it a complete
+      synonym for `machine run`, contradicting "flagship one-shot" in the
+      decision record above and re-creating the second-name-for-one-operation
+      that ADR-027 forbids. The 26 shared execution flags are declared once in
+      `RunArgs`; `run` adds `SdkTransportArgs`, `machine run` adds the
+      lifecycle flags.
 - [ ] Ensure the consolidated args can drive both the direct execution path
       and the `mvm-client::MvmClient::run_machine` facade method.
-- [ ] Ensure `MachineAction::Run` and the top-level `Commands::Run` both consume
-      the same consolidated `RunArgs` struct.
+- [x] Ensure `MachineAction::Run` and the top-level `Commands::Run` both consume
+      the same consolidated `RunArgs` struct (flattened into each).
 - [x] Promote `Commands::Run` from `hide = true` to a documented, ordered
       top-level subcommand while keeping `machine run` visible. *(Phase A)*
 - [ ] Update clap completions generation to include the visible `run` surface.
-- [ ] Adjust tests and BDD fixtures that assumed `run` was hidden or that
+- [x] Adjust tests and BDD fixtures that assumed `run` was hidden or that
       `machine run` had a divergent argument surface.
 
 **Acceptance:** `cargo nextest run --workspace` and `cargo clippy --workspace
@@ -231,11 +236,14 @@ without a manifest; detection is deterministic and tested.
 ### Phase 3 — Security profile presets
 
 - [ ] Add `--profile {restrictive,standard,dev,permissive}` to `mvmctl run`.
-- [ ] Map each preset unambiguously to existing policy flags (env passthrough,
-      host mounts, network allowlist, seccomp posture).
+- [x] Reconcile the default: both verbs now default to `standard`. `machine
+      run` defaulted to `dev`, which on the persistent machine-spec path
+      admitted a writable (`:rw`) host share without the user asking. It now
+      refuses at spec time naming `--profile dev`, so the share fails closed
+      and loudly rather than being silently downgraded to read-only.
 - [ ] Surface the effective profile in execution receipts and `mvmctl doctor`.
-- [ ] Reject `--profile permissive` unless `MVM_ACK_PERMISSIVE_RUN=1` is set,
-      matching the current escape-hatch behavior.
+- [x] Reject `--profile permissive` unless `MVM_ACK_PERMISSIVE_RUN=1` is set
+      (already shipped before this plan — see Corrections 1).
 - [ ] Add tests for preset-to-policy mapping and receipt contents.
 
 **Acceptance:** Presets work, are documented, and do not create new privileged

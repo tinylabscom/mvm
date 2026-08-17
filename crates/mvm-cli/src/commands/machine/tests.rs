@@ -315,8 +315,8 @@ fn assert_manifest_fixture_reaches_unknown_key_gate(mut sdk_args: Vec<String>) {
 #[test]
 fn run_parses_image_and_trailing_argv() {
     let args = parse_run(&["run", "--image", "alpine", "--", "echo", "hello"]).expect("parse");
-    assert_eq!(args.image.as_deref(), Some("alpine"));
-    assert_eq!(args.argv, vec!["echo", "hello"]);
+    assert_eq!(args.run.image.as_deref(), Some("alpine"));
+    assert_eq!(args.run.argv, vec!["echo", "hello"]);
 }
 
 #[test]
@@ -348,7 +348,7 @@ fn exec_rejects_an_unknown_flag_before_the_argv_separator() {
 fn run_keeps_hyphenated_argv_after_the_separator() {
     let args = parse_run(&["run", "--image", "alpine", "--", "uname", "-a", "--all"])
         .expect("hyphenated argv after `--` stays argv");
-    assert_eq!(args.argv, vec!["uname", "-a", "--all"]);
+    assert_eq!(args.run.argv, vec!["uname", "-a", "--all"]);
 }
 
 #[test]
@@ -364,7 +364,7 @@ fn run_parses_hypervisor_flag_and_forwards_to_run_args() {
         "hello",
     ])
     .expect("parse");
-    assert_eq!(args.hypervisor.as_deref(), Some("libkrun"));
+    assert_eq!(args.run.hypervisor.as_deref(), Some("libkrun"));
 
     let run = args.into_run_args();
     assert_eq!(run.hypervisor.as_deref(), Some("libkrun"));
@@ -373,7 +373,7 @@ fn run_parses_hypervisor_flag_and_forwards_to_run_args() {
 #[test]
 fn run_without_hypervisor_flag_forwards_none() {
     let args = parse_run(&["run", "--image", "alpine", "--", "echo", "hello"]).expect("parse");
-    assert!(args.hypervisor.is_none());
+    assert!(args.run.hypervisor.is_none());
 
     let run = args.into_run_args();
     assert!(run.hypervisor.is_none());
@@ -382,7 +382,7 @@ fn run_without_hypervisor_flag_forwards_none() {
 #[test]
 fn run_parses_runtime_pack_flag_and_forwards_to_run_args() {
     let args = parse_run(&["run", "--runtime-pack", "--", "true"]).expect("parse");
-    assert!(args.runtime_pack);
+    assert!(args.run.runtime_pack);
 
     let run = args.into_run_args();
     assert!(run.runtime_pack);
@@ -409,7 +409,7 @@ fn run_runtime_pack_conflicts_with_image_manifest_and_flake() {
 fn run_parses_deployment_source_and_conflicts_with_other_sources() {
     let args = parse_run(&["run", "--deployment", "/tmp/deployment", "--", "true"])
         .expect("deployment source parses");
-    assert_eq!(args.deployment, Some(PathBuf::from("/tmp/deployment")));
+    assert_eq!(args.run.deployment, Some(PathBuf::from("/tmp/deployment")));
 
     let err = parse_run(&[
         "run",
@@ -439,8 +439,8 @@ fn run_parses_and_forwards_net_flags() {
         "true",
     ])
     .expect("parse");
-    assert!(args.net);
-    assert_eq!(args.allow_host, vec!["a.com", "b.com:8443"]);
+    assert!(args.run.net);
+    assert_eq!(args.run.allow_host, vec!["a.com", "b.com:8443"]);
     // The flags ride through into the canonical run args unchanged.
     let run = args.into_run_args();
     assert!(run.net);
@@ -450,8 +450,8 @@ fn run_parses_and_forwards_net_flags() {
 #[test]
 fn run_net_flags_default_off() {
     let args = parse_run(&["run", "--image", "alpine", "--", "true"]).expect("parse");
-    assert!(!args.net);
-    assert!(args.allow_host.is_empty());
+    assert!(!args.run.net);
+    assert!(args.run.allow_host.is_empty());
 }
 
 #[test]
@@ -482,13 +482,17 @@ fn transient_run_without_argv_is_rejected_at_dispatch() {
 #[test]
 fn run_defaults_match_the_lower_level_runner() {
     let args = parse_run(&["run", "--image", "alpine", "--", "true"]).expect("parse");
-    assert_eq!(args.cpus, 2);
-    assert_eq!(args.memory, "512M");
-    assert_eq!(args.profile, RunProfile::Dev);
-    assert!(!args.json);
-    assert!(!args.dry_run);
-    assert!(args.volume.is_empty());
-    assert!(args.env.is_empty());
+    assert_eq!(args.run.cpus, 2);
+    assert_eq!(args.run.memory, "512M");
+    assert_eq!(
+        args.run.profile,
+        RunProfile::Standard,
+        "`machine run` and `mvmctl run` share one default"
+    );
+    assert!(!args.run.json);
+    assert!(!args.run.dry_run);
+    assert!(args.run.mounts.is_empty());
+    assert!(args.run.env.is_empty());
     assert!(args.name.is_none());
     assert!(!args.detach);
     assert!(!args.tty);
@@ -520,15 +524,15 @@ fn run_accepts_passthrough_flags() {
         "-a",
     ])
     .expect("parse");
-    assert_eq!(args.cpus, 4);
-    assert_eq!(args.memory, "1G");
-    assert_eq!(args.profile, RunProfile::Dev);
-    assert_eq!(args.volume, vec!["/host:/work:rw"]);
-    assert_eq!(args.env, vec!["FOO=bar"]);
-    assert_eq!(args.timeout, Some(30));
-    assert!(args.json);
-    assert!(args.dry_run);
-    assert_eq!(args.argv, vec!["uname", "-a"]);
+    assert_eq!(args.run.cpus, 4);
+    assert_eq!(args.run.memory, "1G");
+    assert_eq!(args.run.profile, RunProfile::Dev);
+    assert_eq!(args.run.mounts, vec!["/host:/work:rw"]);
+    assert_eq!(args.run.env, vec!["FOO=bar"]);
+    assert_eq!(args.run.timeout, Some(30));
+    assert!(args.run.json);
+    assert!(args.run.dry_run);
+    assert_eq!(args.run.argv, vec!["uname", "-a"]);
 }
 
 #[test]
@@ -543,14 +547,14 @@ fn volume_flag_carries_live_mount_and_d_is_detach() {
         "true",
     ])
     .expect("parse");
-    assert_eq!(args.volume, vec!["/host:/work:rw"]);
+    assert_eq!(args.run.mounts, vec!["/host:/work:rw"]);
     let forwarded = args.clone().into_run_args_for_test();
     assert_eq!(forwarded.mounts, vec!["/host:/work:rw"]);
     // `-d` now means --detach, so it must NOT consume the following value as
     // a dir share.
     let detached = parse_run(&["run", "--image", "alpine", "-d"]).expect("parse");
     assert!(detached.detach);
-    assert!(detached.volume.is_empty());
+    assert!(detached.run.mounts.is_empty());
 }
 
 #[test]
@@ -711,9 +715,9 @@ fn resolve_mode_wasm_allows_empty_argv() {
 #[test]
 fn resolve_mode_accepts_materialized_flake_slot_after_build() {
     let mut args = parse_run(&["run", "--flake", ".", "--", "cmd"]).expect("parse");
-    let flake = args.flake.take().expect("flake source present");
+    let flake = args.run.flake.take().expect("flake source present");
     assert_eq!(flake, ".");
-    args.manifest = Some("materialized-slot".to_string());
+    args.run.manifest = Some("materialized-slot".to_string());
 
     let mode = args.resolve_mode().expect("materialized flake is a source");
 
@@ -959,8 +963,10 @@ fn run_volume_is_threaded_into_managed_spec_with_absolute_host() {
 fn run_rw_volume_requires_dev_profile() {
     let dir = tempfile::tempdir().expect("tmpdir");
     let host = dir.path().to_string_lossy().into_owned();
-    // CLI runs default to `dev`, so a writable share works without repeating
-    // the profile flag.
+    // The default is `standard`, so a writable share is refused unless the user
+    // asks for `dev` explicitly. It refuses at spec time with the flag to pass,
+    // rather than quietly handing the guest a read-only mount it will fail to
+    // write to later.
     let default_args = parse_run(&[
         "run",
         "--image",
@@ -971,9 +977,12 @@ fn run_rw_volume_requires_dev_profile() {
         &format!("{host}:/work:rw"),
     ])
     .expect("parse");
-    let default_spec = machine_run_spec(&default_args, "web".to_string(), None)
-        .expect("default dev profile allows :rw");
-    assert!(default_spec.volumes[0].ends_with(":/work:rw"));
+    let default_err = machine_run_spec(&default_args, "web".to_string(), None)
+        .expect_err(":rw is not in the default profile");
+    assert!(
+        default_err.to_string().contains("profile dev"),
+        "the refusal must name the flag that grants it: {default_err}"
+    );
 
     // An explicitly stricter profile still refuses the writable share.
     let std_args = parse_run(&[
@@ -2265,8 +2274,8 @@ fn top_level_cli_routes_machine_run() {
     match cli.command {
         Commands::Machine(args) => match args.action {
             MachineAction::Run(run) => {
-                assert_eq!(run.image.as_deref(), Some("alpine"));
-                assert_eq!(run.argv, vec!["echo", "hi"]);
+                assert_eq!(run.run.image.as_deref(), Some("alpine"));
+                assert_eq!(run.run.argv, vec!["echo", "hi"]);
             }
             other => panic!("expected run action, got {other:?}"),
         },
@@ -2900,7 +2909,7 @@ fn an_allow_host_rule_does_not_influence_the_transport() {
         "api.example.com:443",
     ])
     .unwrap();
-    assert_eq!(args.allow_host, vec!["api.example.com:443"]);
+    assert_eq!(args.run.allow_host, vec!["api.example.com:443"]);
     assert_eq!(
         super::derive_network_mode(false),
         mvm_contract::plan::NetworkMode::HostVsockProxy
@@ -2925,18 +2934,21 @@ fn cpus_and_cpu_limit_are_independent_controls() {
         "500",
     ])
     .expect("both flags parse together");
-    assert_eq!(args.cpus, 4);
-    assert_eq!(args.cpu_limit, Some(500));
+    assert_eq!(args.run.cpus, 4);
+    assert_eq!(args.run.cpu_limit, Some(500));
 
     let only_cpus = parse_run(&["run", "--image", "alpine", "--cpus", "4"]).expect("parses");
-    assert_eq!(only_cpus.cpus, 4);
-    assert_eq!(only_cpus.cpu_limit, None, "--cpus must not imply a share");
+    assert_eq!(only_cpus.run.cpus, 4);
+    assert_eq!(
+        only_cpus.run.cpu_limit, None,
+        "--cpus must not imply a share"
+    );
 
     let only_limit =
         parse_run(&["run", "--image", "alpine", "--cpu-limit", "500"]).expect("parses");
-    assert_eq!(only_limit.cpu_limit, Some(500));
+    assert_eq!(only_limit.run.cpu_limit, Some(500));
     assert_eq!(
-        only_limit.cpus, 2,
+        only_limit.run.cpus, 2,
         "--cpu-limit must not move the vCPU count off its default"
     );
 }
@@ -2969,7 +2981,10 @@ fn the_cpu_flags_help_text_tells_them_apart() {
 fn a_grants_file_is_accepted_on_run_and_create() {
     let run = parse_run(&["run", "--image", "alpine", "--grants-file", "/tmp/g.json"])
         .expect("run accepts --grants-file");
-    assert_eq!(run.grants_file.as_deref(), Some(Path::new("/tmp/g.json")));
+    assert_eq!(
+        run.run.grants_file.as_deref(),
+        Some(Path::new("/tmp/g.json"))
+    );
 
     let create = match parse(&[
         "create",
@@ -3118,11 +3133,11 @@ fn the_argv_the_sdk_facade_emits_parses_back_into_the_grant_it_encoded() {
     let config = mvm_core::user_config::MvmConfig::default();
     let resolved =
         crate::commands::shared::resolve_run_grants(crate::commands::shared::GrantInputs {
-            cpu_limit_millicores: args.cpu_limit,
-            timeout_secs: args.timeout,
-            allow_host: &args.allow_host,
-            net: args.net,
-            grants_file: args.grants_file.as_deref(),
+            cpu_limit_millicores: args.run.cpu_limit,
+            timeout_secs: args.run.timeout,
+            allow_host: &args.run.allow_host,
+            net: args.run.net,
+            grants_file: args.run.grants_file.as_deref(),
             manifest: None,
             config: &config,
         })
