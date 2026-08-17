@@ -15,6 +15,17 @@ pub const NO_PROXY_LOOPBACK: &str = "localhost,127.0.0.1,::1";
 /// the in-guest proxy daemon binds it. Callers that must name a scheme dial
 /// [`DEFAULT_EGRESS_PROXY_URL`] instead.
 pub const DEFAULT_EGRESS_PROXY_LISTEN: &str = "127.0.0.1:1080";
+
+/// How long a guest init waits for [`DEFAULT_EGRESS_PROXY_LISTEN`] to be bound
+/// before declaring the guest networkless.
+///
+/// Lives here because two crates need the same number and must not drift: the
+/// guest init that *waits* for the proxy, and the egress client that retries
+/// its connect to the host endpoint before it can bind. A client permitted to
+/// retry for longer than its supervisor will wait would be killed mid-retry
+/// and diagnosed as having exited, which is how a lost startup race reads as a
+/// broken client.
+pub const EGRESS_PROXY_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 /// SOCKS5h URL form of [`DEFAULT_EGRESS_PROXY_LISTEN`], used where a workload's
 /// `ALL_PROXY` / `HTTP_PROXY` must carry a scheme.
 pub const DEFAULT_EGRESS_PROXY_URL: &str = "socks5h://127.0.0.1:1080";
