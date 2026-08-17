@@ -429,15 +429,56 @@ declaratively rather than extract it.
 
 ### WS-5 — Tier D: error taxonomy from a Rust registry
 
-- [ ] 5.1 Lift the code → type mapping into Rust, `_hostsvc`'s pattern as the
+- [x] 5.1 Lift the code → type mapping into Rust, `_hostsvc`'s pattern as the
       model
-- [ ] 5.2 Generate the hierarchy in both languages
-- [ ] 5.3 Assert the taxonomy is catchable in both — the bug Plan 336 fixed by
+- [x] 5.2 Generate the hierarchy in both languages
+- [x] 5.3 Assert the taxonomy is catchable in both — the bug Plan 336 fixed by
       hand for the host-service errors
+- [ ] 5.4 The eight Tier D types themselves — **deferred into WS-6**, see below
+
+#### Result, and a scope correction
+
+`crates/mvm-sdk/src/error_taxonomy.rs` declares each error type once —
+name, base, doc, and the `MVM_HSVC_*` status it is raised for —
+producing the registry that `emit_sdk_errors` serialises and
+`xtask/src/gen_sdk_surface.rs` renders into `mvm/_errors/types.py` and
+`src/_errors/types.ts`. Both hand-written mirrors are deleted.
+
+The status codes are the part worth having done. They lived in
+`crate::host_services_ffi` and were re-declared as literals in *both* SDKs
+under a comment reading "Must match the `MVM_HSVC_*` status codes in the Rust
+cdylib" — a mirror maintained by asking a human. The prose had already drifted
+(Rust's `MVM_HSVC_BAD_REQUEST` doc says "audit cap", the TypeScript copy said
+"e.g. the 4 KiB audit cap"); harmless in a comment, and the same failure in a
+number would have mis-routed a broker error. `STATUS_OK` is generated too, so
+nothing of the mirror survives.
+
+**The scope correction.** Tier D's eight named types — `RemoteError`,
+`MvmTransportError`, `MsgpackUnavailable`, `PayloadTooLarge`,
+`NoVmIntrospectionError`, `SecretInArgError`, `SecretInArgWarning`,
+`EmittingContextError` — are **not** generated here, and the sequencing in this
+plan's own workstream list is wrong about them.
+
+All eight are raised exclusively by Tier C's machinery in `_remote.py`.
+TypeScript has no Tier C, so generating them now would export eight classes
+that nothing in TypeScript can throw. That is precisely the dead-export
+dishonesty WS-2 refused for the `MVM_MACHINE_*` constants, and it would clear
+eight entries from `surface_divergence.json` while closing nothing. They
+therefore land **with WS-6**, when TypeScript acquires the code that raises
+them — which also makes 6.6 ("error taxonomy from WS-5 wired through") a real
+step rather than a retrofit.
+
+The registry is built to absorb them: `ErrorBase` already distinguishes
+`Root` / `Runtime` / `Warning` / `Named`, so the hierarchy
+(`PayloadTooLarge` extending `MvmTransportError`) and the Python-only
+`SecretInArgWarning` are expressible today. `SecretInArgWarning` is the
+interesting one — JavaScript has no warning type at all, so it is
+permanently Python-only, and `SdkErrorType::exports_to` refuses to emit a
+`Warning` into TypeScript rather than trusting the declaration.
 
 ### WS-6 — Tier C: the remote-function surface (the expensive one)
 
-- [ ] 6.1 Size it properly against `_remote.py` and `_session.py` before
+- [x] 6.1 Size it properly against `_remote.py` and `_session.py` before
       writing code
 - [ ] 6.2 `RemoteFunction` + `func` over generated protocol frames
 - [ ] 6.3 `Session` + `session` + `current_session_id`
@@ -445,6 +486,82 @@ declaratively rather than extract it.
 - [ ] 6.5 BDD coverage against the recording CLI double, both languages, in the
       s27 pattern Plan 336 established
 - [ ] 6.6 Error taxonomy from WS-5 wired through
+
+#### 6.1 result — Tier C is two surfaces, and one of them cannot be ported
+
+The plan sizes Tier C as "~1,165 lines of dispatch and lifecycle". The line
+count is exact (`_remote.py` 816, `_session.py` 349). The characterisation is
+not: what those lines contain is **two dispatch paths**, and the second one has
+no faithful TypeScript form at all.
+
+**1. The `MVM_NO_VM=1` path is unportable.** `_prepare_invoke` branches on it
+and calls `mvmctl __sdk-no-vm` instead of `mvmctl invoke`, deriving the argv
+from the *local Python function object* via `_no_vm_flags_for`: `fn.__module__`,
+`fn.__name__`, and `inspect.getfile(fn)` for the source directory. JavaScript
+has no equivalent. `fn.name` exists but is destroyed by minification;
+there is no way to ask a function object which module defined it
+(`import.meta.url` is per-module, not per-function); and a source path is
+recoverable only by parsing `new Error().stack`, which fails for any function
+received rather than defined locally. The Rust side already takes
+`--language`, so the *substrate* is multi-language — the blocker is the
+introspection, and it is not a matter of effort.
+
+**2. Session scoping forces an API-shape choice, not a translation.**
+`_session.py` holds the active session in a `contextvars.ContextVar` and stores
+the `Token` on the object, resetting it in `__exit__` — with a comment noting
+the Token must be reset in the task that set it. TypeScript's nearest
+equivalent, `AsyncLocalStorage`, does not work that way: it scopes a value to a
+*callback* (`als.run(store, cb)`), with no token to hand back later. So either
+
+  * `session(id, async () => { … })` — faithful async-context isolation, but a
+    different call shape from Python's `with mvm.session(id):`; or
+  * `using s = session(id)` with `Symbol.dispose` over a module-level variable
+    — faithful ergonomics, but concurrent sessions in different async tasks
+    clobber each other.
+
+There is no option that is both. This should be decided deliberately, and the
+first is the safer default: a wrong answer here is a cross-session data leak,
+not an awkward call site.
+
+**3. The abandonment safety net gets strictly weaker.** `Session` registers a
+`weakref.finalize` that best-effort stops a session the caller never closed.
+JavaScript's `FinalizationRegistry` is the structural analogue, but the
+specification permits it to never run at all — and notably it is not run at
+exit, where Python's finalizers are. A
+TypeScript session that is dropped without disposal will leak the VM until its
+TTL reaps it. That is tolerable only because the TTL exists; it must be stated,
+not implied.
+
+**4 and 5** are the ones already anticipated: `WorkloadRef.__getattr__` needs a
+`Proxy`, and the dual sync/async surface (`__call__` returning an awaitable
+alongside a blocking `.sync()`) has no clean JS form, since a promise cannot be
+awaited synchronously.
+
+#### The Tier E tail nobody counted
+
+`_remote.py` and `_session.py` read **ten** further environment variables, none
+of them in the Rust registry WS-2 built: `MVM_EMITTING`, `MVM_ENVELOPE`,
+`MVM_INVOKE_KILL_GRACE_SEC`, `MVM_INVOKE_TIMEOUT_SEC`, `MVM_MAX_OUTPUT_BYTES`,
+`MVM_MAX_PAYLOAD_BYTES`, `MVM_NO_VM`, `MVM_SESSION_START_TIMEOUT_SEC`,
+`MVM_SESSION_STOP_TIMEOUT_SEC`, `MVM_STRICT_SECRETS`. They belong in the
+registry, and they can only be declared for TypeScript once TypeScript reads
+them — the same rule WS-2 established. Budget them with WS-6, not as a
+separate tier.
+
+#### Recommendation
+
+Ship TypeScript Tier C as a **declared subset**, and record the subset in
+`surface_divergence.json` as permanent-by-design rather than as a gap — the
+treatment WS-7 gives `derive_schema`, for the same reason:
+
+* remote invocation against a real VM: portable, port it;
+* `MVM_NO_VM=1` local dispatch: **not portable**, do not pretend;
+* sessions: callback-scoped, accepting the different call shape;
+* abandonment finalizer: best-effort only, and documented as best-effort.
+
+On that basis Tier C is worth doing and remains the largest single piece of the
+plan. What it is *not* is a mechanical port, and a plan that budgets it as one
+will produce a TypeScript surface that looks complete and quietly is not.
 
 ### WS-7 — Tier F decision
 

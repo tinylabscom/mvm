@@ -54,6 +54,7 @@ pub mod protocol;
 #[cfg(feature = "protocol")]
 pub mod provenance;
 #[cfg(feature = "protocol")]
+pub mod service_catalog;
 pub mod stream;
 /// The guest-side placeholder token a secret-bearing request carries: its
 /// reserved namespace, its opaque newtype, and the header scan. Minting and

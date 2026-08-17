@@ -25,46 +25,22 @@ const DEFAULT_LIB_PATH = "/mvm/sdk/lib/libmvm_host_services.so";
 
 const DEFAULT_TIMEOUT_SECS = 5;
 
-// Must match the MVM_HSVC_* status codes in the Rust cdylib.
-const OK = 0;
-const BAD_REQUEST = 1;
-const RATE_LIMITED = 2;
-const UNAVAILABLE = 3;
-const NOT_BOUND = 4;
-const NOT_IMPLEMENTED = 5;
-const SERVICE = 6;
-const TRANSPORT = 7;
-const INVALID_INPUT = 8;
+// Status codes and the typed hierarchy are generated from the Rust
+// registry (crates/mvm-sdk/src/error_taxonomy.rs); they used to be
+// re-declared here under a comment asking a human to keep them matching.
+import { STATUS_ERRORS, STATUS_OK as OK, ServiceError } from "./_errors/types.js";
+export {
+  HostServiceError,
+  BadRequestError,
+  RateLimitedError,
+  UnavailableError,
+  NotBoundError,
+  VerbNotImplementedError,
+  ServiceError,
+  TransportError,
+  InvalidInputError,
+} from "./_errors/types.js";
 
-/** Base of every typed host-services failure. */
-export class HostServiceError extends Error {}
-/** The host rejected the record shape or size (e.g. the 4 KiB audit cap). */
-export class BadRequestError extends HostServiceError {}
-/** The per-workload audit emit rate limit is exhausted. */
-export class RateLimitedError extends HostServiceError {}
-/** The host could not answer (handler down, broker not ready). */
-export class UnavailableError extends HostServiceError {}
-/** The workload's `ExecutionPlan.services` did not bind the service. */
-export class NotBoundError extends HostServiceError {}
-/** The verb is not implemented in this build (e.g. `host.cost.tenant`). */
-export class VerbNotImplementedError extends HostServiceError {}
-/** Any other typed broker error code. */
-export class ServiceError extends HostServiceError {}
-/** Connect, framing, or (de)serialization failure on the vsock path. */
-export class TransportError extends HostServiceError {}
-/** The request was malformed: unknown method or a body the verb rejects. */
-export class InvalidInputError extends HostServiceError {}
-
-const STATUS_ERRORS: Record<number, new (msg: string) => HostServiceError> = {
-  [BAD_REQUEST]: BadRequestError,
-  [RATE_LIMITED]: RateLimitedError,
-  [UNAVAILABLE]: UnavailableError,
-  [NOT_BOUND]: NotBoundError,
-  [NOT_IMPLEMENTED]: VerbNotImplementedError,
-  [SERVICE]: ServiceError,
-  [TRANSPORT]: TransportError,
-  [INVALID_INPUT]: InvalidInputError,
-};
 
 /** The C-call seam: `(method, requestJson, timeoutSecs) -> [status, body]`. */
 export type InvokeFn = (
