@@ -6,6 +6,25 @@ pub const FC_VERSION_DEFAULT: &str = match option_env!("MVM_FC_VERSION") {
     None => "v1.14.1",
 };
 
+/// The boot image release the CLI expects, overridable at build time via
+/// `MVM_BOOT_IMAGE_TAG`.
+///
+/// The boot image ships on its own counter (`boot-image/vN`) so a rootfs or
+/// kernel fix does not have to wait for a CLI release. This is the whole tag
+/// rather than a bare version, because it is spliced straight into a release
+/// download URL: `https://github.com/<repo>/releases/download/<tag>/<asset>`.
+///
+/// **Nothing reads this yet.** `download_default_microvm_image` and the
+/// workload kernel fetch still build their URLs from the CLI's own version and
+/// must keep doing so until a `boot-image/v0.1.0` release actually exists —
+/// repointing them at a tag nobody has published turns every fresh install's
+/// first boot into a 404. Publishing that tag is the condition that unblocks
+/// the switch.
+pub const DEFAULT_BOOT_IMAGE_TAG: &str = match option_env!("MVM_BOOT_IMAGE_TAG") {
+    Some(t) => t,
+    None => "boot-image/v0.1.0",
+};
+
 /// Host CPU architecture for arch-tagged downloads (the Firecracker release
 /// binary, firecracker-ci kernel/rootfs). `std::env::consts::ARCH` is the arch
 /// mvmctl was compiled for == the arch it runs on, so the downloaded binaries
