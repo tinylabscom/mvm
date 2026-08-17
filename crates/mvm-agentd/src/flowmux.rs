@@ -56,7 +56,45 @@ pub enum FlowMuxError {
     ChannelClosed,
 }
 
+/// Ceiling for the initial-connect backoff.
+pub const CONNECT_RETRY_MAX_MS: u64 = 250;
+
+/// How long the egress client may spend retrying its initial connect.
+///
+/// The guest init waits exactly this long for the proxy to bind, so the client
+/// must not retry past it.
+pub const CONNECT_RETRY_BUDGET: std::time::Duration =
+    mvm_core::guest_netd::EGRESS_PROXY_READY_TIMEOUT;
+
+/// Backoff before re-attempting the initial connect, doubling per attempt.
+///
+/// Starts at 2 ms deliberately. The gap being waited out is a process start,
+/// usually a few milliseconds; a coarser first sleep would spend more time
+/// waiting than the race it is recovering from.
+#[must_use]
+pub fn connect_retry_delay(attempt: u32) -> std::time::Duration {
+    let scaled = 1u64.saturating_mul(1u64 << attempt.min(16));
+    std::time::Duration::from_millis(scaled.min(CONNECT_RETRY_MAX_MS))
+}
+
 impl FlowMuxError {
+    /// Whether a *first* connect that failed this way is worth retrying.
+    ///
+    /// A guest routinely reaches its dial before the host endpoint is
+    /// listening — the guest boots in tens of milliseconds and the endpoint is
+    /// a separate process the host is still starting — so the dial is reset
+    /// and the connection is refused by nothing more than timing. That is a
+    /// race, and races are waited out.
+    ///
+    /// Everything else is a decision: a failed handshake, a refusal, or a
+    /// protocol violation means the host considered this guest and said no.
+    /// Retrying a decision only delays an accurate error and can look like a
+    /// guest hammering an endpoint that already rejected it.
+    #[must_use]
+    pub fn connect_is_retryable(&self) -> bool {
+        matches!(self, Self::Transport(_))
+    }
+
     fn refused(reason: impl Into<String>) -> Self {
         Self::Refused(reason.into())
     }
@@ -2139,5 +2177,64 @@ mod tests {
         .await;
 
         assert!(client.is_err());
+    }
+}
+
+#[cfg(test)]
+mod connect_retry_tests {
+    use super::*;
+
+    /// The failure this exists for: the host endpoint is not listening yet and
+    /// the guest's dial is reset.
+    #[test]
+    fn a_transport_error_is_retryable() {
+        let reset = io::Error::new(io::ErrorKind::ConnectionReset, "reset by peer");
+        assert!(FlowMuxError::Transport(reset).connect_is_retryable());
+
+        let refused = io::Error::new(io::ErrorKind::ConnectionRefused, "nothing listening");
+        assert!(FlowMuxError::Transport(refused).connect_is_retryable());
+    }
+
+    /// A decision must not be retried: the host looked at this guest and said
+    /// no, and retrying only delays an accurate diagnosis.
+    #[test]
+    fn a_rejection_is_never_retryable() {
+        for err in [
+            FlowMuxError::Handshake("bad signature".into()),
+            FlowMuxError::Refused("not admitted".into()),
+            FlowMuxError::Frame("bad length prefix".into()),
+            FlowMuxError::SessionClosed("go away".into()),
+            FlowMuxError::ChannelClosed,
+        ] {
+            assert!(
+                !err.connect_is_retryable(),
+                "{err} must not be retried on connect"
+            );
+        }
+    }
+
+    /// The retry budget must stay inside the window the guest init is willing
+    /// to wait, or the client is killed mid-retry and diagnosed as having
+    /// exited rather than as having lost a race.
+    #[test]
+    fn the_retry_budget_fits_inside_the_readiness_timeout() {
+        assert!(
+            CONNECT_RETRY_BUDGET <= mvm_core::guest_netd::EGRESS_PROXY_READY_TIMEOUT,
+            "retry budget {CONNECT_RETRY_BUDGET:?} exceeds the supervisor's wait"
+        );
+    }
+
+    #[test]
+    fn the_connect_backoff_starts_small_and_saturates() {
+        let ms = |a| connect_retry_delay(a).as_millis() as u64;
+        assert_eq!(ms(1), 2, "a lost race must not cost more than the race did");
+        assert_eq!(ms(2), 4);
+        assert_eq!(ms(3), 8);
+        assert!(ms(1) < ms(2) && ms(2) < ms(3), "must be monotonic");
+        assert_eq!(
+            ms(u32::MAX),
+            CONNECT_RETRY_MAX_MS,
+            "must saturate, not overflow"
+        );
     }
 }
