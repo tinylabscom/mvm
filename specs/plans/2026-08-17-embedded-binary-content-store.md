@@ -1,5 +1,8 @@
 # Content-addressed store for mvm-cli's nested build artifacts
 
+Backing: historical
+Validation: none
+
 **Status: Phase 1–2 COMPLETE (2026-08-17). Phases 3–5 open.**
 
 ## Why
