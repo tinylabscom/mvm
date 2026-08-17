@@ -655,6 +655,22 @@ for detailed scope and acceptance criteria.
     supervisor PID disappearance. Follow-up: give pool maintenance to the
     resident per-tenant daemon and continue reducing supervisor shutdown
     latency.
+    The "real cleanup" remainder was then decomposed and was mostly not:
+    `stop_console_cleanup` was the largest span in a transient teardown and
+    57.0 ms of it was two more instances of the cadence bug — the stream
+    accept loop polling a nonblocking listener on a 25 ms tick, and
+    `DurableSink::seal` polling `is_finished()` every 20 ms for a writer that
+    exits in microseconds. Backoff could not fix the first (it idles at the
+    ceiling for the VM's whole life), so the listener now blocks and shutdown
+    wakes it by connecting to its own socket, bounded and with a detach path;
+    the second waits on a channel the writer thread's sender closes on exit.
+    Measured 57.0 ms -> 7-11 ms. Admission's three pre-boot chain barriers now
+    share one flush, closing #2293's open acceptance item without changing
+    `sync_policy_for`'s fail-closed default, and the chain cursor reads a
+    bounded tail instead of the whole 4 MiB segment on every append. **Open
+    and newly named:** the receipt write, not the chain, is the dominant admit
+    cost at ~36 ms of ~45 ms — a structure the code calls a derived cache,
+    doing an `F_FULLFSYNC` synchronously before boot.
   - [ ] Phase 7 — live validation and regression gates
   - [x] Cross-plan fast-machine-substrate contract documented in
         `specs/notes/2026-08-10-fast-machine-substrate.md` (issue #2279)

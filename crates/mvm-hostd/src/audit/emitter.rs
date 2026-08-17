@@ -58,6 +58,7 @@ use mvm_contract::verify::hash_line;
 use mvm_core::plan::ExecutionPlan;
 use std::collections::HashMap;
 use std::sync::Mutex;
+use std::sync::OnceLock;
 
 /// Wire-stable event name and label keys for the wall-clock enforcement entry.
 /// Shared so the supervisor that emits it and any reader asserting on it cannot
@@ -347,6 +348,14 @@ pub struct AuditEmitter {
     decisions_enabled: bool,
     decisions_dir: Option<PathBuf>,
     decision_stores: Mutex<HashMap<String, DecisionStore>>,
+    /// Built once on first emit and reused.
+    ///
+    /// The signer interface is async and the callers are not, so each emit has
+    /// to block on a runtime. Building a fresh one per entry meant paying that
+    /// construction ~6 times for the handful of entries one launch writes, on
+    /// the admission path, for a runtime that only ever drives a blocking file
+    /// append.
+    runtime: OnceLock<tokio::runtime::Runtime>,
 }
 
 impl AuditEmitter {
@@ -388,6 +397,7 @@ impl AuditEmitter {
             decisions_enabled: false,
             decisions_dir: None,
             decision_stores: Mutex::new(HashMap::new()),
+            runtime: OnceLock::new(),
         })
     }
 
@@ -1135,12 +1145,58 @@ impl AuditEmitter {
         self.emit_entry_blocking(entry)
     }
 
-    fn emit_entry_blocking(&self, entry: &PlanAuditEntry) -> Result<()> {
-        let t0 = std::time::Instant::now();
-        let rt = tokio::runtime::Builder::new_current_thread()
+    /// Run `f` with every barrier fsync on this emitter's chains held back,
+    /// then sync them all once.
+    ///
+    /// For a burst of entries that all have to be durable before the same
+    /// action — an admission writing `plan.admitted`, its decision record and
+    /// its grant requirement before anything boots — this costs one fsync
+    /// rather than one per entry. `sync_data` is file-wide, so the single
+    /// flush carries every record the batch wrote.
+    ///
+    /// Fails closed: if the flush fails, this returns the error and `f`'s
+    /// result is discarded, so a caller that boots on `Ok` cannot boot on
+    /// records that never reached the disk. The scope must therefore close
+    /// before the action the entries authorize — not at process exit.
+    pub fn batched<T>(&self, f: impl FnOnce() -> Result<T>) -> Result<T> {
+        for signer in &self.signers {
+            signer.begin_batch();
+        }
+        let out = f();
+        // End every batch even if `f` failed, so a later emit is not left
+        // silently deferring its barriers.
+        let mut flush = Ok(());
+        for signer in &self.signers {
+            if let Err(e) = signer.end_batch() {
+                flush = Err(e);
+            }
+        }
+        let out = out?;
+        flush.context("syncing batched audit entries before the action they authorize")?;
+        Ok(out)
+    }
+
+    /// The shared blocking runtime, built on first use.
+    fn runtime(&self) -> Result<&tokio::runtime::Runtime> {
+        if let Some(rt) = self.runtime.get() {
+            return Ok(rt);
+        }
+        let built = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .context("building tokio runtime for audit emit")?;
+        // A concurrent caller may have won the race; either runtime is usable
+        // and the loser's is dropped here.
+        let _ = self.runtime.set(built);
+        Ok(self
+            .runtime
+            .get()
+            .expect("runtime is set on the line above or by the caller that raced us"))
+    }
+
+    fn emit_entry_blocking(&self, entry: &PlanAuditEntry) -> Result<()> {
+        let t0 = std::time::Instant::now();
+        let rt = self.runtime()?;
         let t_rt = std::time::Instant::now();
         tracing::debug!(
             ms = (t_rt - t0).as_secs_f64() * 1000.0,

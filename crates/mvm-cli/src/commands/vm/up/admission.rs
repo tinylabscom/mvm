@@ -545,28 +545,38 @@ pub(in crate::commands::vm) fn admit_plan_for_boot(
         ms = (t_emitter - t_signer).as_secs_f64() * 1000.0,
         "admit: policy + emitter build"
     );
-    mvm_hostd::audit::durability::record_admission(
-        Some(&emitter),
-        admitted.plan(),
-        admitted.signer_id(),
-        mvm_hostd::audit::durability::AuditDurability::for_sealed_production(
-            p.restrict_agent_verbs,
-        ),
-    )?;
+    // One batch, one fsync. These entries all have to be durable before the
+    // same thing — this plan booting — and nothing between them acts on the
+    // one before it, so syncing each separately bought no ordering. It cost
+    // one `F_FULLFSYNC` each, which is 7.4ms on an Apple-silicon host and
+    // ~42ms on the KVM box's array. The batch closes here, before the caller
+    // gets an `AdmissionContext` to boot from, and a failed flush is an error
+    // rather than a warning.
+    emitter.batched(|| {
+        mvm_hostd::audit::durability::record_admission(
+            Some(&emitter),
+            admitted.plan(),
+            admitted.signer_id(),
+            mvm_hostd::audit::durability::AuditDurability::for_sealed_production(
+                p.restrict_agent_verbs,
+            ),
+        )?;
+        if let Some(verbs) = admitted.plan().agent_verbs.as_ref()
+            && let Err(e) = emitter.emit_grant_required(admitted.plan(), verbs)
+        {
+            tracing::warn!(error = %e, "audit emit_grant_required failed (non-fatal)");
+        }
+        // Claim 1 / claim 8 — record the admitted host-fs grants in the
+        // chain-signed log (no-op when there are none).
+        if let Err(e) = emitter.emit_shares_admitted(admitted.plan()) {
+            tracing::warn!(error = %e, "audit emit_shares_admitted failed (non-fatal)");
+        }
+        Ok(())
+    })?;
     tracing::debug!(
         ms = t_emitter.elapsed().as_secs_f64() * 1000.0,
-        "admit: record_admission (fsync)"
+        "admit: record_admission (batched fsync)"
     );
-    if let Some(verbs) = admitted.plan().agent_verbs.as_ref()
-        && let Err(e) = emitter.emit_grant_required(admitted.plan(), verbs)
-    {
-        tracing::warn!(error = %e, "audit emit_grant_required failed (non-fatal)");
-    }
-    // Claim 1 / claim 8 — record the admitted host-fs grants in the
-    // chain-signed log (no-op when there are none).
-    if let Err(e) = emitter.emit_shares_admitted(admitted.plan()) {
-        tracing::warn!(error = %e, "audit emit_shares_admitted failed (non-fatal)");
-    }
 
     // Resolve the plan's four policy refs into concrete supervisor
     // component slots. Today the slots are constructed-and-dropped —

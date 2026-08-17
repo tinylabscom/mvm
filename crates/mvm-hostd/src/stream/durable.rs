@@ -25,10 +25,10 @@
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, TrySendError, sync_channel};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use mvm_contract::stream::{StreamKind, StreamRecord};
 use mvm_core::transcript::{Direction, TranscriptManifest, TranscriptWriter, sealed_root_hex};
@@ -138,7 +138,7 @@ pub(in crate::stream) struct DurableSink {
     /// stopped taking work. Either way `push` sheds rather than falling back
     /// to an inline write — see the module docs.
     jobs: Option<SyncSender<PersistJob>>,
-    worker: Option<JoinHandle<()>>,
+    worker: Option<WriterHandle>,
     counters: Arc<PersistCounters>,
     /// The journal the writer thread mirrors landed chunks into, so a process
     /// that did not open this capture can still seal it. Held here only to
@@ -345,12 +345,20 @@ impl Drop for DurableSink {
 /// rather shed than couple the workload to that same disk.
 const SEAL_JOIN_TIMEOUT: Duration = Duration::from_secs(3);
 
-/// How often [`wait_for_writer`] checks whether the writer thread has exited.
-const SEAL_JOIN_POLL_INTERVAL: Duration = Duration::from_millis(20);
+/// A writer thread, plus a channel that reports its exit without polling.
+///
+/// `std` has no timed join, and this module cannot add a dependency to get
+/// one. The stand-in is a channel whose [`Sender`] lives in the thread: it is
+/// never sent on, so the only event a receiver can observe is the disconnect
+/// that happens when the thread drops it — on a normal return or while
+/// unwinding a panic. A timed `recv` on it is therefore a timed join.
+struct WriterHandle {
+    join: JoinHandle<()>,
+    /// Disconnects when the writer thread exits. Never carries a value.
+    exited: Receiver<()>,
+}
 
-/// Wait for `worker` to exit, but not past `timeout`. Polls rather than
-/// joining directly because a plain `join` has no timeout in `std`, and this
-/// module cannot add a dependency to get one.
+/// Wait for `worker` to exit, but not past `timeout`.
 ///
 /// A worker still running once the deadline passes is detached here: dropping
 /// a [`JoinHandle`] without joining does not stop the thread, but nothing in
@@ -358,17 +366,19 @@ const SEAL_JOIN_POLL_INTERVAL: Duration = Duration::from_millis(20);
 /// syscall blocked in the kernel — is not something a timeout in this
 /// function can do anything about; the thread finishes, if it ever does, on
 /// its own.
-fn wait_for_writer(worker: JoinHandle<()>, timeout: Duration) -> bool {
-    let deadline = Instant::now() + timeout;
-    while !worker.is_finished() {
-        if Instant::now() >= deadline {
-            drop(worker);
-            return false;
+fn wait_for_writer(worker: WriterHandle, timeout: Duration) -> bool {
+    match worker.exited.recv_timeout(timeout) {
+        // Disconnected is the writer dropping its sender as it exits. `Ok` is
+        // unreachable because nothing sends, but it means the same thing.
+        Ok(()) | Err(RecvTimeoutError::Disconnected) => {
+            let _ = worker.join.join();
+            true
         }
-        std::thread::sleep(SEAL_JOIN_POLL_INTERVAL);
+        Err(RecvTimeoutError::Timeout) => {
+            drop(worker.join);
+            false
+        }
     }
-    let _ = worker.join();
-    true
 }
 
 /// Drop one record at the hand-off, and account for it.
@@ -421,11 +431,18 @@ fn spawn_writer(
     vm: &str,
     mut owned_state: WriterThread,
     inbox: Receiver<PersistJob>,
-) -> Option<JoinHandle<()>> {
+) -> Option<WriterHandle> {
     let owned = vm.to_string();
+    let (exit_tx, exited) = std::sync::mpsc::channel::<()>();
     std::thread::Builder::new()
         .name(format!("mvm-transcript-{vm}"))
-        .spawn(move || run_writer(&owned, &mut owned_state, &inbox))
+        .spawn(move || {
+            // Owned by the thread purely so its drop reports the exit. Held
+            // across the whole body, including a panic unwind.
+            let _exit = exit_tx;
+            run_writer(&owned, &mut owned_state, &inbox);
+        })
+        .map(|join| WriterHandle { join, exited })
         .inspect_err(|error| {
             tracing::warn!(
                 vm = %vm,
