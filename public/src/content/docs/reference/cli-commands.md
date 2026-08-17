@@ -357,7 +357,8 @@ shell).
 | `mvmctl run --manifest <name-or-path> -- <cmd>...` | Boot a registered manifest/template instead of the default |
 | `mvmctl run --image <ref> -- <cmd>...` | Pull or reuse a cached OCI image, emit signed audit-chain provenance for the resolved image, boot its prepared OCI rootfs (read-only virtiofs-root on capable dev-tier backends, otherwise block `rootfs.ext4`), run `<cmd>`, exit |
 | `mvmctl run --image <ref> --prod -- <cmd>...` | Production OCI-image policy: require `<ref>` to be digest-pinned and cosign-verified by the OCI policy before cache use or boot |
-| `mvmctl run --profile standard -- <cmd>` | Default profile: explicit env is allowed; host shares must be read-only |
+| `mvmctl run --profile standard -- <cmd>` | Default profile on both `run` and `machine run`: explicit env is allowed; host shares must be read-only |
+| `mvmctl run --profile dev -- <cmd>` | Dev tier: as standard, plus a writable (`:rw`) host share on a persistent machine and the dev guest profile for a sealed-image entrypoint run |
 | `mvmctl run --profile restrictive -- <cmd>` | No env injection and no host directory shares |
 | `mvmctl run --mount .:/work:ro -- <cmd>` | Attach a live read-only host-directory share |
 | `mvmctl run --profile permissive -- <cmd>` | Escape hatch; requires `MVM_ACK_PERMISSIVE_RUN=1` |

@@ -74,9 +74,13 @@ use super::exec::{RunArgs, RunMode};
 /// Dispatch an SDK-mode `mvmctl run` invocation. Plan and Live both
 /// reach this entry now; `Record` is still refused at the
 /// `resolve_run_mode` layer.
-pub(in crate::commands) fn dispatch_sdk_mode(mode: RunMode, args: &RunArgs) -> Result<()> {
+pub(in crate::commands) fn dispatch_sdk_mode(
+    mode: RunMode,
+    args: &RunArgs,
+    sdk: &super::exec::SdkTransportArgs,
+) -> Result<()> {
     match mode {
-        RunMode::Plan => run_plan_mode(args),
+        RunMode::Plan => run_plan_mode(args, sdk),
         RunMode::Live => run_live_mode(args),
         RunMode::Record => unreachable!(
             "exec::resolve_run_mode refuses RunMode::Record before reaching dispatch; this is a \
@@ -161,7 +165,7 @@ fn run_live_mode(args: &RunArgs) -> Result<()> {
     Ok(())
 }
 
-fn run_plan_mode(args: &RunArgs) -> Result<()> {
+fn run_plan_mode(args: &RunArgs, sdk: &super::exec::SdkTransportArgs) -> Result<()> {
     let script = extract_script_arg(args)?;
     let lang = script_language_from_path(&script).ok_or_else(|| {
         anyhow::anyhow!(
@@ -185,7 +189,7 @@ fn run_plan_mode(args: &RunArgs) -> Result<()> {
 
     eprintln!("recording sha256: {digest_hex}");
     refuse_embedded_secrets(&secret_findings)?;
-    require_acknowledged(&findings, &args.ack_divergence)?;
+    require_acknowledged(&findings, &sdk.ack_divergence)?;
 
     if workload.apps.is_empty() {
         bail!(
@@ -419,7 +423,7 @@ fn placeholder_image_sha(workload_id: &str, app_name: &str) -> String {
 mod tests {
     use super::*;
     use crate::commands::build::trace_secret_scan::scan_recording_for_secrets;
-    use crate::commands::vm::exec::{RunMode, RunProfile};
+    use crate::commands::vm::exec::RunProfile;
     use base64::Engine;
     use mvm_hostd::supervisor::secrets_scanner::SecretsScanner;
     use mvm_sdk::runtime::{Divergence, RecordedOp, RuntimeRecording, SandboxCreate};
@@ -555,7 +559,6 @@ mod tests {
         RunArgs {
             profile: RunProfile::Standard,
             timeout: Some(60),
-            mode: Some(RunMode::Plan),
             ..Default::default()
         }
     }

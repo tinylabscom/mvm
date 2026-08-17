@@ -156,7 +156,7 @@ pub(in crate::commands) enum Commands {
     /// The argument surface still differs from `machine run` in both
     /// directions; consolidating the two into one struct is the next step.
     #[command(display_order = 2)]
-    Run(vm::exec::RunArgs),
+    Run(vm::exec::TransientRunArgs),
     /// Internal SDK host-dispatch transport for `MVM_NO_VM=1`.
     #[command(name = "__sdk-no-vm", hide = true)]
     SdkNoVm(vm::sdk_no_vm::Args),

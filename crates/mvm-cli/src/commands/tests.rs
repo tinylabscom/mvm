@@ -1169,7 +1169,10 @@ fn test_up_manifest_flag() {
     match cli.command {
         Commands::Machine(mg) => match mg.action {
             machine::MachineAction::Run(machine::MachineRunArgs {
-                manifest, flake, ..
+                run: exec::RunArgs {
+                    manifest, flake, ..
+                },
+                ..
             }) => {
                 assert!(flake.is_none());
                 assert_eq!(manifest, Some("openclaw".to_string()));
@@ -1195,7 +1198,10 @@ fn test_up_manifest_short_flag() {
     .unwrap();
     match cli.command {
         Commands::Machine(mg) => match mg.action {
-            machine::MachineAction::Run(machine::MachineRunArgs { manifest, .. }) => {
+            machine::MachineAction::Run(machine::MachineRunArgs {
+                run: exec::RunArgs { manifest, .. },
+                ..
+            }) => {
                 assert_eq!(manifest, Some("openclaw".to_string()));
             }
             _ => panic!("Expected machine run"),
@@ -1294,13 +1300,13 @@ fn machine_run_flake_resolves_to_persistent_lifecycle() {
         Commands::Machine(machine::Args {
             action: machine::MachineAction::Run(ref run_args),
         }) => {
-            assert_eq!(run_args.flake.as_deref(), Some("."));
+            assert_eq!(run_args.run.flake.as_deref(), Some("."));
             assert!(
-                run_args.image.is_none(),
+                run_args.run.image.is_none(),
                 "image must be absent when --flake set"
             );
             assert!(
-                run_args.manifest.is_none(),
+                run_args.run.manifest.is_none(),
                 "manifest must be absent when --flake set"
             );
             // -d selects Persistent lifecycle
@@ -1332,8 +1338,8 @@ fn machine_run_entrypoint_flag_parses() {
     // stdin at dispatch — there is no `--stdin` flag.
     let args = parse_machine_run(&["--manifest", "tmpl", "--entrypoint"]).unwrap();
     assert!(args.entrypoint);
-    assert_eq!(args.manifest.as_deref(), Some("tmpl"));
-    assert!(args.argv.is_empty());
+    assert_eq!(args.run.manifest.as_deref(), Some("tmpl"));
+    assert!(args.run.argv.is_empty());
 }
 
 #[test]
@@ -1402,7 +1408,7 @@ fn machine_run_entrypoint_agent_verbs_parse() {
     ])
     .unwrap();
     assert!(args.entrypoint);
-    assert_eq!(args.agent_verb, vec!["run-entrypoint", "ping"]);
+    assert_eq!(args.run.agent_verb, vec!["run-entrypoint", "ping"]);
 }
 
 #[test]
@@ -1498,7 +1504,10 @@ fn test_run_volume_dir_inject() {
     .unwrap();
     match cli.command {
         Commands::Machine(mg) => match mg.action {
-            machine::MachineAction::Run(machine::MachineRunArgs { volume, .. }) => {
+            machine::MachineAction::Run(machine::MachineRunArgs {
+                run: exec::RunArgs { mounts: volume, .. },
+                ..
+            }) => {
                 assert_eq!(volume.len(), 2);
                 assert_eq!(volume[0], "/tmp/config:/mnt/config");
                 assert_eq!(volume[1], "/tmp/secrets:/mnt/secrets");
@@ -1525,7 +1534,10 @@ fn test_run_volume_persistent() {
     .unwrap();
     match cli.command {
         Commands::Machine(mg) => match mg.action {
-            machine::MachineAction::Run(machine::MachineRunArgs { volume, .. }) => {
+            machine::MachineAction::Run(machine::MachineRunArgs {
+                run: exec::RunArgs { mounts: volume, .. },
+                ..
+            }) => {
                 assert_eq!(volume.len(), 1);
                 assert_eq!(volume[0], "/data:/mnt/data:4G");
             }
@@ -1610,7 +1622,10 @@ fn test_run_port_and_env_flags() {
     .unwrap();
     match cli.command {
         Commands::Machine(mg) => match mg.action {
-            machine::MachineAction::Run(machine::MachineRunArgs { env, .. }) => {
+            machine::MachineAction::Run(machine::MachineRunArgs {
+                run: exec::RunArgs { env, .. },
+                ..
+            }) => {
                 assert_eq!(env, vec!["NODE_ENV=production", "DEBUG=true"]);
             }
             _ => panic!("Expected machine run"),
@@ -1633,7 +1648,10 @@ fn test_run_port_and_env_default_empty() {
     .unwrap();
     match cli.command {
         Commands::Machine(mg) => match mg.action {
-            machine::MachineAction::Run(machine::MachineRunArgs { env, .. }) => {
+            machine::MachineAction::Run(machine::MachineRunArgs {
+                run: exec::RunArgs { env, .. },
+                ..
+            }) => {
                 assert!(env.is_empty());
             }
             _ => panic!("Expected machine run"),
@@ -1909,8 +1927,11 @@ fn test_run_command_is_recognized() {
     .unwrap();
     match cli.command {
         Commands::Machine(mg) => match mg.action {
-            machine::MachineAction::Run(machine::MachineRunArgs { profile, argv, .. }) => {
-                assert_eq!(profile, exec::RunProfile::Dev);
+            machine::MachineAction::Run(machine::MachineRunArgs {
+                run: exec::RunArgs { profile, argv, .. },
+                ..
+            }) => {
+                assert_eq!(profile, exec::RunProfile::Standard);
                 assert_eq!(argv, vec!["/bin/true".to_string()]);
             }
             _ => panic!("Expected machine run"),
@@ -3164,13 +3185,17 @@ fn run_transient_default_manifest_argv_only() {
     match cli.command {
         Commands::Machine(mg) => match mg.action {
             machine::MachineAction::Run(machine::MachineRunArgs {
-                manifest,
-                cpus,
-                memory,
-                volume,
-                env,
-                timeout,
-                argv,
+                run:
+                    exec::RunArgs {
+                        manifest,
+                        cpus,
+                        memory,
+                        mounts: volume,
+                        env,
+                        timeout,
+                        argv,
+                        ..
+                    },
                 ..
             }) => {
                 assert!(manifest.is_none());
@@ -3204,7 +3229,10 @@ fn run_transient_timeout_parses_to_some() {
     .expect("parse");
     match cli.command {
         Commands::Machine(mg) => match mg.action {
-            machine::MachineAction::Run(machine::MachineRunArgs { timeout, .. }) => {
+            machine::MachineAction::Run(machine::MachineRunArgs {
+                run: exec::RunArgs { timeout, .. },
+                ..
+            }) => {
                 assert_eq!(timeout, Some(5), "--timeout 5 ⇒ Some(5)");
             }
             _ => panic!("Expected machine run"),
@@ -3230,20 +3258,24 @@ fn run_default_profile_argv_only() {
     match cli.command {
         Commands::Machine(mg) => match mg.action {
             machine::MachineAction::Run(machine::MachineRunArgs {
-                manifest,
-                image,
-                net,
-                allow_host,
-                cpus,
-                memory,
-                profile,
-                volume,
-                env,
-                timeout,
-                receipt,
-                json,
-                dry_run,
-                argv,
+                run:
+                    exec::RunArgs {
+                        manifest,
+                        image,
+                        net,
+                        allow_host,
+                        cpus,
+                        memory,
+                        profile,
+                        mounts: volume,
+                        env,
+                        timeout,
+                        receipt,
+                        json,
+                        dry_run,
+                        argv,
+                        ..
+                    },
                 ..
             }) => {
                 assert!(manifest.is_none());
@@ -3252,7 +3284,7 @@ fn run_default_profile_argv_only() {
                 assert!(allow_host.is_empty());
                 assert_eq!(cpus, 2);
                 assert_eq!(memory, "512M");
-                assert_eq!(profile, exec::RunProfile::Dev);
+                assert_eq!(profile, exec::RunProfile::Standard);
                 assert!(volume.is_empty());
                 assert!(env.is_empty());
                 assert_eq!(timeout, None);
@@ -3284,7 +3316,10 @@ fn run_timeout_parses_to_some() {
     .expect("parse");
     match cli.command {
         Commands::Machine(mg) => match mg.action {
-            machine::MachineAction::Run(machine::MachineRunArgs { timeout, .. }) => {
+            machine::MachineAction::Run(machine::MachineRunArgs {
+                run: exec::RunArgs { timeout, .. },
+                ..
+            }) => {
                 assert_eq!(timeout, Some(5), "--timeout 5 ⇒ Some(5)");
             }
             _ => panic!("Expected machine run"),
@@ -3297,11 +3332,11 @@ fn run_timeout_parses_to_some() {
 fn machine_run_interactive_image_shell_dx_parses() {
     let args = parse_machine_run(&["--net", "-it", "--image", "alpine", "--", "/bin/sh"])
         .expect("parse Docker-style interactive shell run");
-    assert!(args.net);
+    assert!(args.run.net);
     assert!(args.tty);
     assert!(args.interactive);
-    assert_eq!(args.image.as_deref(), Some("alpine"));
-    assert_eq!(args.argv, vec!["/bin/sh".to_string()]);
+    assert_eq!(args.run.image.as_deref(), Some("alpine"));
+    assert_eq!(args.run.argv, vec!["/bin/sh".to_string()]);
 }
 
 #[test]
@@ -3320,7 +3355,10 @@ fn run_image_flag_parses() {
     .expect("parse");
     match cli.command {
         Commands::Machine(mg) => match mg.action {
-            machine::MachineAction::Run(machine::MachineRunArgs { image, argv, .. }) => {
+            machine::MachineAction::Run(machine::MachineRunArgs {
+                run: exec::RunArgs { image, argv, .. },
+                ..
+            }) => {
                 assert_eq!(image.as_deref(), Some("docker.io/library/alpine:3.20"));
                 assert_eq!(
                     argv,
@@ -3353,12 +3391,10 @@ fn run_image_prod_flag_parses_as_image_policy() {
     ])
     .expect("parse");
     match cli.command {
-        Commands::Run(exec::RunArgs {
-            image, prod, mode, ..
-        }) => {
-            assert_eq!(image.as_deref(), Some(pinned));
-            assert!(prod);
-            assert!(mode.is_none());
+        Commands::Run(exec::TransientRunArgs { run, sdk }) => {
+            assert_eq!(run.image.as_deref(), Some(pinned));
+            assert!(run.prod);
+            assert!(sdk.mode.is_none());
         }
         _ => panic!("Expected Run command"),
     }
@@ -3397,7 +3433,10 @@ fn run_accepts_restrictive_profile() {
     .expect("parse");
     match cli.command {
         Commands::Machine(mg) => match mg.action {
-            machine::MachineAction::Run(machine::MachineRunArgs { profile, argv, .. }) => {
+            machine::MachineAction::Run(machine::MachineRunArgs {
+                run: exec::RunArgs { profile, argv, .. },
+                ..
+            }) => {
                 assert_eq!(profile, exec::RunProfile::Restrictive);
                 assert_eq!(argv, vec!["/bin/true".to_string()]);
             }
@@ -3439,7 +3478,10 @@ fn run_receipt_flag_parses() {
     .expect("parse");
     match cli.command {
         Commands::Machine(mg) => match mg.action {
-            machine::MachineAction::Run(machine::MachineRunArgs { receipt, .. }) => {
+            machine::MachineAction::Run(machine::MachineRunArgs {
+                run: exec::RunArgs { receipt, .. },
+                ..
+            }) => {
                 assert_eq!(
                     receipt.as_deref(),
                     Some(std::path::Path::new("/tmp/mvm-run-receipt.json"))
@@ -3466,7 +3508,10 @@ fn run_json_flag_parses() {
     .expect("parse");
     match cli.command {
         Commands::Machine(mg) => match mg.action {
-            machine::MachineAction::Run(machine::MachineRunArgs { json, argv, .. }) => {
+            machine::MachineAction::Run(machine::MachineRunArgs {
+                run: exec::RunArgs { json, argv, .. },
+                ..
+            }) => {
                 assert!(json);
                 assert_eq!(argv, vec!["/bin/true".to_string()]);
             }
@@ -3493,9 +3538,13 @@ fn run_dry_run_json_flags_parse() {
     match cli.command {
         Commands::Machine(mg) => match mg.action {
             machine::MachineAction::Run(machine::MachineRunArgs {
-                dry_run,
-                json,
-                argv,
+                run:
+                    exec::RunArgs {
+                        dry_run,
+                        json,
+                        argv,
+                        ..
+                    },
                 ..
             }) => {
                 assert!(dry_run);
@@ -3736,11 +3785,9 @@ fn run_transient_with_launch_plan_no_argv() {
     let cli =
         Cli::try_parse_from(["mvmctl", "run", "--launch-plan", "./plan.json"]).expect("parse");
     match cli.command {
-        Commands::Run(exec::RunArgs {
-            launch_plan, argv, ..
-        }) => {
-            assert_eq!(launch_plan.as_deref(), Some("./plan.json"));
-            assert!(argv.is_empty());
+        Commands::Run(exec::TransientRunArgs { run, .. }) => {
+            assert_eq!(run.launch_plan.as_deref(), Some("./plan.json"));
+            assert!(run.argv.is_empty());
         }
         _ => panic!("Expected Run command"),
     }
@@ -3782,10 +3829,14 @@ fn run_transient_with_manifest_and_resources() {
     match cli.command {
         Commands::Machine(mg) => match mg.action {
             machine::MachineAction::Run(machine::MachineRunArgs {
-                manifest,
-                cpus,
-                memory,
-                argv,
+                run:
+                    exec::RunArgs {
+                        manifest,
+                        cpus,
+                        memory,
+                        argv,
+                        ..
+                    },
                 ..
             }) => {
                 assert_eq!(manifest.as_deref(), Some("my-tpl"));
@@ -3825,7 +3876,14 @@ fn run_transient_with_mount_and_env() {
     match cli.command {
         Commands::Machine(mg) => match mg.action {
             machine::MachineAction::Run(machine::MachineRunArgs {
-                volume, env, argv, ..
+                run:
+                    exec::RunArgs {
+                        mounts: volume,
+                        env,
+                        argv,
+                        ..
+                    },
+                ..
             }) => {
                 assert_eq!(
                     volume,
@@ -3853,9 +3911,9 @@ fn direct_run_accepts_a_read_only_mount() {
     ])
     .expect("parse");
     match cli.command {
-        Commands::Run(exec::RunArgs { mounts, argv, .. }) => {
-            assert_eq!(mounts, vec!["/tmp:/work:ro"]);
-            assert_eq!(argv, vec!["ls", "/work"]);
+        Commands::Run(exec::TransientRunArgs { run, .. }) => {
+            assert_eq!(run.mounts, vec!["/tmp:/work:ro"]);
+            assert_eq!(run.argv, vec!["ls", "/work"]);
         }
         _ => panic!("Expected Run command"),
     }
@@ -3863,9 +3921,23 @@ fn direct_run_accepts_a_read_only_mount() {
 
 #[test]
 fn run_transient_requires_argv() {
-    // Without trailing argv, Clap should reject because `argv` is required.
-    let cli = Cli::try_parse_from(["mvmctl", "run"]);
-    assert!(cli.is_err());
+    // `argv` is shared with `machine run`, which legitimately boots with no
+    // command (`-d`), so the requirement moved off the clap attribute and onto
+    // `run_transient`. It parses; running it is what refuses.
+    let cli = Cli::try_parse_from(["mvmctl", "run"]).expect("parses");
+    let Commands::Run(args) = cli.command else {
+        panic!("expected Commands::Run");
+    };
+    let err = exec::run_transient(
+        &Cli::parse_from(["mvmctl", "doctor"]),
+        args,
+        &mvm_core::user_config::MvmConfig::default(),
+    )
+    .expect_err("a bare `run` must refuse");
+    assert!(
+        err.to_string().contains("needs a command"),
+        "unexpected error: {err}"
+    );
 }
 
 // --- Init CLI tests (pure project-scaffold; DIR is required) ---
@@ -4835,8 +4907,8 @@ fn machine_run_verbose_after_options_is_not_guest_argv() {
     let machine::MachineAction::Run(args) = machine_args.action else {
         panic!("expected machine run")
     };
-    assert_eq!(args.allow_host, vec!["google.com"]);
-    assert_eq!(args.argv, vec!["ps", "aux"]);
+    assert_eq!(args.run.allow_host, vec!["google.com"]);
+    assert_eq!(args.run.argv, vec!["ps", "aux"]);
 }
 
 #[test]
@@ -4867,7 +4939,7 @@ fn debug_alias_parses_before_and_after_machine_run() {
     let machine::MachineAction::Run(args) = machine_args.action else {
         panic!("expected machine run")
     };
-    assert_eq!(args.argv, vec!["true"]);
+    assert_eq!(args.run.argv, vec!["true"]);
 }
 
 #[test]
@@ -5030,7 +5102,7 @@ fn machine_run_up_json_and_ttl_parse() {
     let args = parse_machine_run(&["--up-json", "--manifest", "x", "--ttl", "60s"]).unwrap();
     assert!(args.up_json);
     assert_eq!(args.ttl.as_deref(), Some("60s"));
-    assert_eq!(args.manifest.as_deref(), Some("x"));
+    assert_eq!(args.run.manifest.as_deref(), Some("x"));
 }
 
 #[test]
@@ -5042,7 +5114,7 @@ fn machine_run_up_json_implies_persistent_mode() {
     let args = parse_machine_run(&["--up-json", "--manifest", "x"]).unwrap();
     assert!(args.up_json, "up_json field must be set");
     // The manifest source must survive parsing.
-    assert_eq!(args.manifest.as_deref(), Some("x"));
+    assert_eq!(args.run.manifest.as_deref(), Some("x"));
     // No detach flag needed — up_json alone implies persistence.
     assert!(!args.detach, "detach is not required when up_json is set");
 }

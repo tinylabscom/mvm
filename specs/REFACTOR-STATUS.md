@@ -1103,8 +1103,11 @@ for detailed scope and acceptance criteria.
       reference rows written, and `xtask check-cli-help-matches-docs` added to
       the Lint job so `mvmctl --help` and the published CLI reference cannot
       drift apart again. Phase 5 (snapshot/fork DX) was already complete.
-      Phases 1–4 and 6–8 remain: consolidating the two run-argument structs is
-      next and blocks the rest.
+      Phase 1 then landed the shared argument core: the 26 shared execution
+      flags are declared once in `RunArgs` and flattened into both verbs, with
+      `run` adding the SDK transport and `machine run` the lifecycle flags. Both
+      verbs now default to `--profile standard`. Phases 2–4 and 6–8 remain;
+      runtime auto-detection is next.
 - [ ] Plan 329 — Browser-tier microVM demo (`specs/plans/329-browser-wasm-backend-demo.md`)
       — in progress on `feat/329-browser-wasm-backend`. Extends Plan 320 with a
       `wasm32-wasip1` guest that boots, provides a shell, and delegates `fetch`
