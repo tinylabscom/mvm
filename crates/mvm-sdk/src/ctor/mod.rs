@@ -3,6 +3,8 @@
 //! wrappers that pre-fill IR struct/variant fields with sensible
 //! defaults so the prelude stays readable at the call site.
 
+pub mod addon;
+pub mod concurrency;
 pub mod deps;
 pub mod entrypoint;
 pub mod image;
