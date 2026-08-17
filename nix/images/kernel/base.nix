@@ -380,6 +380,26 @@ let
     "DEBUG_INFO_DWARF5"
     "DEBUG_INFO_DWARF4"
     "DEBUG_INFO_BTF"
+
+    # Kernel debug instrumentation a sealed workload guest has no reader for:
+    # nothing collects a stack-depth report out of it, and a W+X finding there
+    # would be a fact about the image we built rather than about anything the
+    # guest did.
+    #
+    # This buys size, NOT boot time, and the distinction is recorded here
+    # because the console log makes it look otherwise. Their messages sit on
+    # the two largest inter-timestamp gaps of an x86_64 guest boot — `x86/mm:
+    # Checked W+X mappings` twice for ~71 ms, `used greatest stack depth` for
+    # ~43 ms — which reads as a third of guest boot waiting to be reclaimed.
+    # It is not. Measured on the Linux/Firecracker host, 12 launches per arm:
+    # dispatch window 495.5 ms with them on and 504.0 ms with them off,
+    # `driver_boot` 435.7 ms against 436.8 ms. No change beyond noise.
+    #
+    # The gap before a console line is not the cost of the work that line
+    # names; on a serial console it is dominated by emitting the output before
+    # it. Do not size a kernel change from those gaps — measure the launch.
+    "DEBUG_WX"
+    "DEBUG_STACK_USAGE"
   ]
   ++ pkgs.lib.optionals (kernelArch == "x86_64") [
     # x86 defconfig carries physical-PC, laptop, and foreign-hypervisor
