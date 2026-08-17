@@ -5,28 +5,17 @@
     "so a name can only appear or disappear here deliberately.",
     "Regenerate intentionally; do not paste over a failure.",
     "",
-    "`typescript_only_absent_from_python` is empty and should stay that way.",
+    "Both directional backlogs are now empty. What remains is the two",
+    "categories that describe differences rather than debt.",
     "",
-    "`python_only_permanent_by_design` is not a backlog. `derive_schema`",
-    "builds a JSON Schema from a Python function's type hints. TypeScript",
-    "erases types before the program runs, so at the moment a decorator would",
-    "inspect the function the annotations are already gone. No amount of work",
-    "closes this. TypeScript callers pass `args_schema` / `return_schema` to",
-    "`entrypoint_function` explicitly instead, which that function now",
-    "accepts.",
+    "`python_only_permanent_by_design` cannot close. `derive_schema` needs",
+    "runtime type information TypeScript erases before the program runs, and",
+    "`SecretInArgWarning` is a warning type JavaScript does not have. Both are",
+    "properties of the languages, not gaps in the SDK.",
     "",
-    "`python_only_type_erased_in_typescript` is the related but distinct case:",
-    "those names exist in TypeScript as `export type`, which tsc erases, so a",
-    "runtime surface check cannot see them.",
-    "",
-    "`python_only_absent_from_typescript` is the real backlog. What remains is",
-    "Tier C's remote-function machinery and the error types only Tier C",
-    "raises; they land together, because generating the errors first would",
-    "export classes nothing in TypeScript can throw.",
-    "",
-    "The two MVM_MACHINE_* names are a behaviour gap, not a naming one: the",
-    "TypeScript machine wrapper does not bound its subprocess, so it has",
-    "nothing to read them with."
+    "`python_only_type_erased_in_typescript` exists in TypeScript as",
+    "`export type`, which tsc erases, so a runtime surface check cannot see",
+    "it."
   ],
   "python_only_type_erased_in_typescript": [
     "ExecResult",
@@ -47,11 +36,6 @@
     "SecretInArgWarning",
     "derive_schema"
   ],
-  "python_only_absent_from_typescript": [
-    "Session",
-    "current_recording_dict",
-    "current_session_id",
-    "session"
-  ],
+  "python_only_absent_from_typescript": [],
   "typescript_only_absent_from_python": []
 }

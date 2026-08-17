@@ -1,11 +1,32 @@
 # Refactor status
 
-Last updated: 2026-08-16
+Last updated: 2026-08-17
 
 This is the cross-plan progress index. The owning plan remains authoritative
 for detailed scope and acceptance criteria.
 
 ## Completed issue closeouts
+
+- [x] **Plan 337 COMPLETE — the SDK surface is generated from Rust.** Sessions
+      finished Tier C. Python's `contextvars` + `Token` has no
+      `AsyncLocalStorage` equivalent, so the shape was a choice, not a
+      translation: `session(id, body)` was taken over `using s = session(id)`
+      because the latter lets concurrent sessions in different async tasks
+      clobber one another — a correctness bug rather than an ergonomic one. A
+      test runs two overlapping async bodies and checks each sees only its own
+      id. The abandonment net is weaker than Python's by necessity
+      (`FinalizationRegistry` may never run and is not run at exit), so the
+      callback shape carries a `try/finally`, which is the stronger guard and
+      another reason for the shape. `_remote.ts` now attaches `--session`;
+      `workload_ref` opts out, since a session belongs to one workload. Last
+      divergence name closed by renaming `current_recording_dict` to
+      `current_recording` — the `_dict` suffix encoded a Python-only return
+      type — and exporting the TypeScript counterpart. **Both directional
+      backlogs are empty: python-only 30 -> 0, typescript-only 2 -> 0.** What
+      remains in `surface_divergence.json` is difference, not debt: two names
+      that cannot close (`derive_schema`, `SecretInArgWarning`) and the
+      type-erased set. #2558 and #2559 were verified already fixed on main by
+      other sessions.
 
 - [x] **Plan 337 WS-6 increment 1 — Tier C transport and the error taxonomy,
       as a declared subset.** The eight Tier D error types and the code that

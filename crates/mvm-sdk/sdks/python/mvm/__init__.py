@@ -113,7 +113,7 @@ from mvm._sandbox import (
     SandboxInfo,
     SandboxLiveError,
     SandboxModeError,
-    current_recording_dict,
+    current_recording,
     emit_recording_json,
     reset_recording,
 )
@@ -188,7 +188,7 @@ __all__ = [
     "addon_use",
     "app",
     "audit",
-    "current_recording_dict",
+    "current_recording",
     "current_session_id",
     "derive_schema",
     "dns_none",

@@ -16,8 +16,9 @@
  *   stack trace — which fails for any function received rather than
  *   defined locally. Setting `MVM_NO_VM=1` here raises
  *   `NoVmIntrospectionError` rather than silently doing something else.
- * * **Sessions** — not in this increment; an active session is simply
- *   not consulted yet.
+ * * **Sessions** — an active `session(...)` body attaches its warm VM.
+ *   Cross-workload dispatch through `workload_ref` opts out, since a
+ *   session belongs to one workload.
  *
  * The error types come from the Rust registry via `_errors/types.js`;
  * this module is what raises them, which is why they are emitted into
@@ -27,6 +28,7 @@
 import * as child from "node:child_process";
 
 import { resolveCliBin } from "./_cli.js";
+import { currentSessionId } from "./_session.js";
 import {
   EmittingContextError,
   MsgpackUnavailable,
@@ -112,6 +114,8 @@ function parseErrorEnvelope(stderr: string): RemoteError | null {
 interface InvokeOptions {
   callSite: string;
   fnSelector?: string;
+  /** Defaults to true; `workload_ref` opts out. */
+  useActiveSession?: boolean;
 }
 
 /** Invoke `functionName` in `workloadId` and return its decoded result. */
@@ -147,6 +151,13 @@ export function invokeSync(
 
   const bin = resolveCliBin("remote invocation");
   const argv = ["invoke"];
+  // An active `session(...)` body attaches its warm VM, matching Python's
+  // `_prepare_invoke`. Cross-workload dispatch opts out: a session is
+  // scoped to one workload and must not leak into a call against another.
+  if (options.useActiveSession !== false) {
+    const sessionId = currentSessionId();
+    if (sessionId !== null) argv.push("--session", sessionId);
+  }
   if (options.fnSelector !== undefined) argv.push("--fn", options.fnSelector);
   argv.push("--stdin", "-", "--", workloadId);
 
@@ -257,6 +268,7 @@ export function workload_ref(workloadId: string, format: string = "json"): Workl
         invokeSync(workloadId, format, args, {}, {
           callSite: `workload_ref(${workloadId}).${property}(...)`,
           fnSelector: property,
+          useActiveSession: false,
         });
     },
   }) as WorkloadRef;

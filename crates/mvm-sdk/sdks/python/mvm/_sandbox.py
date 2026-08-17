@@ -95,7 +95,7 @@ __all__ = [
     "SandboxDevOnly",
     "SandboxLiveError",
     "SandboxModeError",
-    "current_recording_dict",
+    "current_recording",
     "emit_recording_json",
     "reset_recording",
 ]
@@ -272,7 +272,7 @@ def reset_recording() -> None:
     _live_sandbox = None
 
 
-def current_recording_dict() -> dict[str, Any] | None:
+def current_recording() -> dict[str, Any] | None:
     """Return the wire-shape dict for the currently-active recording,
     or ``None`` if no ``Sandbox.create()`` has run."""
     return _recording

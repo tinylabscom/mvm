@@ -3,8 +3,9 @@
 Backing: preview
 Validation: none
 
-**Status: IN PROGRESS** — WS-1 to WS-5, WS-6.1/6.2/6.4/6.6, WS-7 and WS-8
-(except 8.1) complete. Remaining: WS-6.3 + 6.5 (sessions), which gate WS-8.1.
+**Status: COMPLETE** — every workstream delivered. Both directional
+divergence backlogs are empty; what remains in the divergence file is
+difference, not debt.
 **Opened:** 2026-08-14
 **Follows:** Plan 336 WS-G4
 
@@ -572,10 +573,10 @@ permanently Python-only, and `SdkErrorType::exports_to` refuses to emit a
 - [x] 6.1 Size it properly against `_remote.py` and `_session.py` before
       writing code
 - [x] 6.2 `RemoteFunction` + `func` over generated protocol frames
-- [ ] 6.3 `Session` + `session` + `current_session_id` — next increment
+- [x] 6.3 `Session` + `session` + `current_session_id`
 - [x] 6.4 `WorkloadRef` + `workload_ref`
-- [ ] 6.5 BDD coverage against the recording CLI double, both languages, in the
-      s27 pattern Plan 336 established — lands with 6.3
+- [x] 6.5 BDD coverage against the recording CLI double, both languages, in the
+      s27 pattern Plan 336 established
 - [x] 6.6 Error taxonomy from WS-5 wired through
 
 #### Increment 1 — the transport, the errors, and the refusal
@@ -620,6 +621,41 @@ says so.
 Divergence after this increment: `python_only_absent_from_typescript` is down
 to four names — `Session`, `session`, `current_session_id`, and
 `current_recording_dict`.
+
+#### Increment 2 — sessions, and the choice made explicit
+
+`sdks/typescript/src/_session.ts` completes Tier C. The sizing pass found that
+Python's `contextvars` + `Token` pattern has no equivalent in
+`AsyncLocalStorage`, which scopes to a *callback* rather than handing back a
+token, and that the two available shapes are not interchangeable:
+
+* `session(id, body)` — chosen. The session is visible for exactly the dynamic
+  extent of `body`, including across `await`, and concurrent sessions in
+  different async tasks cannot see each other's.
+* `using s = session(id)` over a module-level variable — closer to Python's
+  call shape, but concurrent sessions clobber one another.
+
+The first was taken because the second's failure mode is one session's context
+leaking into another: a correctness bug, not an ergonomic one. A test asserts
+exactly that property, running two overlapping async bodies and checking each
+observes only its own id.
+
+The abandonment net is weaker than Python's by necessity — `FinalizationRegistry`
+may never run and is not run at exit — so the callback shape carries a
+`try/finally` instead, which is the stronger guard available and another reason
+the shape was chosen. Teardown swallows its own failure so it cannot mask a body
+exception, matching Python's `_teardown`.
+
+`_remote.ts` now consults the active session and attaches `--session`, matching
+Python's `_prepare_invoke`. Cross-workload dispatch through `workload_ref` opts
+out, because a session belongs to one workload and must not leak into a call
+against another.
+
+**`current_recording_dict` was renamed to `current_recording`.** The `_dict`
+suffix encoded a Python-specific return type; the TypeScript counterpart
+(`currentRecording`) returns a typed object and was internal only because
+nothing had needed it from outside. Both surfaces now expose the same
+capability under names that agree.
 
 #### 6.1 result — Tier C is two surfaces, and one of them cannot be ported
 
@@ -732,8 +768,7 @@ case of names that *do* exist in TypeScript but only as `export type`.
 
 ### WS-8 — close out
 
-- [ ] 8.1 `surface_divergence.json` reduced to Tier F plus the type-erased set
-      — **blocked on Tier C**, see below
+- [x] 8.1 `surface_divergence.json` reduced to Tier F plus the type-erased set
 - [x] 8.2 `xtask check-stubs` covers every generated artifact
 - [x] 8.3 Full gates: fmt, clippy, workspace nextest, doctests, Python, TypeScript
 - [x] 8.4 `specs/REFACTOR-STATUS.md` and a delivery note
@@ -746,15 +781,14 @@ byte-compared by `check-stubs`, which runs in `lint-policy` and again inside
 the BDD suite. Each new artifact was also shown to fail the gate on a
 hand-edit rather than assumed to.
 
-**8.1 cannot complete here, and saying otherwise would be false.** The target
-is a divergence file holding only Tier F plus the type-erased set. It currently
-also holds 16 names: Tier C's remote-function machinery and the eight error
-types only Tier C raises. Those close when WS-6 lands — the error taxonomy
-deliberately waits for it, because generating the types first would export
-classes nothing in TypeScript can throw. Everything WS-8.1 can close without
-Tier C is closed.
+**8.1 is now met.** Both directional backlogs are empty. What remains in
+`surface_divergence.json` describes differences rather than debt: two names that
+cannot close (`derive_schema` needs runtime types TypeScript erases;
+`SecretInArgWarning` is a warning type JavaScript does not have) and the
+type-erased set, which exists in TypeScript as `export type` and so cannot be
+seen by a runtime surface check.
 
-Progress across the plan: `python_only_absent_from_typescript` went 30 → 16,
+Progress across the plan: `python_only_absent_from_typescript` went **30 → 0**,
 and `typescript_only_absent_from_python` went 2 → 0 and has stayed there.
 
 ## Sequencing
