@@ -471,6 +471,30 @@ impl Drop for BuilderVsockEgressEndpoint {
     }
 }
 
+/// Whether `candidate` predates the running executable.
+///
+/// The endpoint is a separate binary that `machine run` does not build, so a
+/// copy left by an older checkout sits on disk and is picked up in preference
+/// to building a current one. A guest and a host from different builds then
+/// speak different protocols, and the only symptom is a framing error whose
+/// length field decodes to ASCII from the wrong wire format.
+///
+/// Modification time is the cheap comparison that catches it: both binaries
+/// come out of the same workspace, so an endpoint older than the `mvmctl`
+/// running it cannot have been built from this source. Unknowable times mean
+/// no opinion — rebuild rather than refuse, since a false stale reading costs
+/// a build and a false fresh one costs a mystery.
+fn endpoint_predates_running_exe(candidate: &std::path::Path) -> bool {
+    let modified = |p: &std::path::Path| p.metadata().and_then(|m| m.modified()).ok();
+    let Some(exe) = std::env::current_exe().ok().as_deref().and_then(modified) else {
+        return false;
+    };
+    let Some(cand) = modified(candidate) else {
+        return true;
+    };
+    cand < exe
+}
+
 fn resolve_network_endpoint_path() -> Result<PathBuf, BuilderVmError> {
     if let Some(path) = std::env::var_os("MVM_SUBSTITUTION_ENDPOINT_PATH").map(PathBuf::from) {
         if path.is_file() {
@@ -486,7 +510,7 @@ fn resolve_network_endpoint_path() -> Result<PathBuf, BuilderVmError> {
         && let Some(dir) = current_exe.parent()
     {
         let candidate = dir.join("mvm-network-endpoint");
-        if candidate.is_file() {
+        if candidate.is_file() && !endpoint_predates_running_exe(&candidate) {
             return Ok(candidate);
         }
     }
@@ -516,7 +540,7 @@ fn resolve_network_endpoint_path() -> Result<PathBuf, BuilderVmError> {
     for root in &target_roots {
         for variant in ["release", "debug"] {
             let candidate = root.join(variant).join("mvm-network-endpoint");
-            if candidate.is_file() {
+            if candidate.is_file() && !endpoint_predates_running_exe(&candidate) {
                 return Ok(candidate);
             }
         }
@@ -544,6 +568,17 @@ fn resolve_network_endpoint_path() -> Result<PathBuf, BuilderVmError> {
     for root in &target_roots {
         let built = root.join("debug").join("mvm-network-endpoint");
         if built.is_file() {
+            if endpoint_predates_running_exe(&built) {
+                return Err(BuilderVmError::ExtractionFailed(format!(
+                    "mvm-network-endpoint at {} is older than the running {} even after \
+                     rebuilding it; running them together would pair a guest and a host \
+                     from different builds",
+                    built.display(),
+                    std::env::current_exe()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|_| "mvmctl".to_string()),
+                )));
+            }
             return Ok(built);
         }
     }
@@ -7608,5 +7643,59 @@ fi
         assert!(summary.contains("vsock_exit_code=7"));
         assert!(summary.contains("file_exit_code=9"));
         assert!(summary.contains("build_ms=2"));
+    }
+
+    /// The regression this exists for. `machine run` does not build the
+    /// endpoint, so a copy from an older checkout is found first and used
+    /// silently; the guest and host then speak different protocols and the
+    /// only symptom is a frame-length field that decodes to ASCII.
+    #[test]
+    fn an_endpoint_older_than_the_running_exe_is_stale() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let old = dir.path().join("mvm-network-endpoint");
+        std::fs::write(&old, b"pre-cutover").expect("write");
+        // Backdate well past any plausible clock skew between the two files.
+        let long_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(7 * 86_400);
+        std::fs::File::options()
+            .write(true)
+            .open(&old)
+            .expect("open")
+            .set_modified(long_ago)
+            .expect("backdate");
+
+        assert!(
+            endpoint_predates_running_exe(&old),
+            "an endpoint a week older than the running binary must read as stale"
+        );
+    }
+
+    /// The companion, so the check cannot pass by calling everything stale:
+    /// a binary newer than the running one is used as-is.
+    #[test]
+    fn an_endpoint_newer_than_the_running_exe_is_not_stale() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let fresh = dir.path().join("mvm-network-endpoint");
+        std::fs::write(&fresh, b"current").expect("write");
+        let soon = std::time::SystemTime::now() + std::time::Duration::from_secs(600);
+        std::fs::File::options()
+            .write(true)
+            .open(&fresh)
+            .expect("open")
+            .set_modified(soon)
+            .expect("postdate");
+
+        assert!(
+            !endpoint_predates_running_exe(&fresh),
+            "an endpoint newer than the running binary must be used as-is"
+        );
+    }
+
+    /// A path that cannot be stat'd has no usable time. Reading that as stale
+    /// costs a rebuild; reading it as fresh costs a protocol mismatch nobody
+    /// can diagnose, so it fails towards the rebuild.
+    #[test]
+    fn an_unstattable_endpoint_reads_as_stale() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert!(endpoint_predates_running_exe(&dir.path().join("absent")));
     }
 }
