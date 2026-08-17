@@ -9,7 +9,7 @@
 use anyhow::Result;
 use clap::Subcommand;
 
-mod cache;
+pub(crate) mod cache;
 mod check;
 mod status;
 mod update;
