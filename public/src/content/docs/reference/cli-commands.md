@@ -106,6 +106,7 @@ guest-RPC surface, fleet-shaped workflows).
 
 | Command | Description |
 |---------|-------------|
+| `mvmctl kernel build` | Build the custom microVM kernels (builder and workload) |
 | `mvmctl build image <path>` | Build from Mvmfile.toml in the given directory |
 | `mvmctl build image --flake <ref>` | Build from a Nix flake (local or remote) |
 | `mvmctl build image --flake <ref> --profile <variant>` | Build a specific flake package variant |
@@ -959,6 +960,44 @@ flow and the distinction between build time and runtime boot time.
 | `mvmctl cache prune --deep` | Reclaim regenerable caches too — Stage 0 blobs, the prebuilt default microVM image, pulled OCI layers (each costs a re-fetch/rebuild next time). Implies `--orphan-dirs` |
 | `mvmctl cache repair` | Clear a degraded builder VM store so the next build cold-rebuilds it. Refuses while a Stage 0 bootstrap is in flight; auto-stops a running builder VM first |
 | `mvmctl cache repair --force` | Clear the store even while a Stage 0 bootstrap lock is held (use only if the lock is stale, e.g. after a crash) |
+
+## Workload Authoring and Inspection
+
+These verbs operate on a workload before and after it runs, rather than on a
+running microVM.
+
+| Command | Description |
+|---------|-------------|
+| `mvmctl init` | Scaffold a new project (`mvm.toml` alongside your `flake.nix`) |
+| `mvmctl generate sdk <script>` | Generate a runnable project from an SDK-decorated `.py`/`.ts` source: parses the decorator, emits `flake.nix` + `launch.json`, bundles the source tree into `--out <dir>` |
+| `mvmctl template list` | List available templates (bundled plus cached remote) |
+| `mvmctl template search <query>` | Search the remote registry for matching templates |
+| `mvmctl template show <name>` | Show details for one bundled or remote template |
+| `mvmctl deploy <ir.json>` | Build, seal, and record a workload into a local deployment directory (`image.tar.gz`, `rootfs.ext4`, `deploy.json`); optionally ship it to mvmd |
+| `mvmctl deploy --from-ir <path>` | Read the Workload IR from a file instead of a positional path or stdin |
+| `mvmctl prepare` | Report whether a verified runtime pack is ready for instant launch |
+| `mvmctl explain <run>` | Explain a run after the fact from the chain-signed audit log |
+| `mvmctl watch <ir.json>` | Rebuild a workload when its local inputs change |
+
+## Packs, Bundles, and Dependencies
+
+| Command | Description |
+|---------|-------------|
+| `mvmctl pack list` | List every recorded pack version, marking each key's active one |
+| `mvmctl pack rollback` | Point a pack class's active version at an already-cached one |
+| `mvmctl pack prune` | Reclaim non-active pack versions beyond the newest N per key |
+| `mvmctl pack download` | Fetch a pack version into the cache without changing the active one |
+| `mvmctl pack update` | Fetch the latest pack version and activate it |
+| `mvmctl bundle export` | Seal a built template into a signed `.mvmpkg`, signed by the host signer at `~/.mvm/keys/host-signer.ed25519` — the same key that signs `ExecutionPlan` envelopes |
+| `mvmctl bundle fetch` | Verify a `.mvmpkg` against the local trust store, reporting the parsed manifest |
+| `mvmctl bundle install` | Verify and atomically install a `.mvmpkg` into `~/.mvm/bundles/<sha>/` |
+| `mvmctl bundle gc` | Prune installed bundles — a specific `<SHA>` or `--all` |
+| `mvmctl artifact pack` / `verify` / `inspect` / `extract` | Pack or verify signed `.mvm` artifacts |
+| `mvmctl deps inspect` | Show a sealed application-dep volume's SBOM, CVE, and hash-chained metadata without spawning a VM |
+| `mvmctl deps audit` | Re-verify a sealed dep volume against its recorded chain |
+| `mvmctl deps capture` / `install` | Capture or install application dependencies into a sealed volume |
+| `mvmctl pool warm [COUNT]` | Pre-spawn standby microVMs so the next run claims a warm one |
+| `mvmctl pool status [--json]` | Report standby pool occupancy |
 
 ## Security
 
