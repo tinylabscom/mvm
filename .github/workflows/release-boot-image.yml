@@ -426,6 +426,13 @@ jobs:
       # static /init read above, which catches the defect class that actually
       # shipped and is a stated compromise rather than a claim of equivalence —
       # an aarch64-only regression that is not a shebang defect still gets past.
+      # The boot gate runs `cargo test`, which builds mvmctl, whose build.rs
+      # cross-compiles the embedded host binaries as static musl and needs the
+      # pinned zig. Without it the gate fails before it ever starts a guest —
+      # which reads as "the image does not boot" and is nothing of the kind.
+      - uses: ./.github/actions/install-zigbuild
+        if: matrix.arch == 'x86_64'
+
       - name: Install firecracker for the boot gate
         if: matrix.arch == 'x86_64'
         env:

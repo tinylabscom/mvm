@@ -549,3 +549,33 @@ fn a_release_with_no_boot_image_assets_refuses_to_publish() {
         "the missing-boot-image path must not warn-and-continue:\n{step}"
     );
 }
+
+/// The boot gate must carry the toolchain its own test needs.
+///
+/// The gate runs `cargo test`, which builds mvmctl, whose `build.rs`
+/// cross-compiles the embedded host binaries as static musl and requires the
+/// pinned zig. The first real image release failed here: the gate aborted
+/// before starting a guest, which reads in the log as "the image does not
+/// boot" and is nothing of the kind. A gate that cannot run is worse than no
+/// gate, because it blocks a release for a reason that has nothing to do with
+/// the artifact.
+#[test]
+fn the_boot_gate_installs_the_toolchain_its_test_needs() {
+    let workflow = boot_image_workflow();
+    let job = workflow
+        .split("  default-microvm:")
+        .nth(1)
+        .expect("the boot image workflow must define default-microvm");
+    let boot = job
+        .find("- name: Boot the staged image before it becomes a release asset")
+        .expect("the job must boot the staged image");
+
+    // The toolchain has to be installed *before* the boot step, not merely
+    // present somewhere in the file.
+    let before = &job[..boot];
+    assert!(
+        before.contains("./.github/actions/install-zigbuild"),
+        "the boot gate must install the pinned zig before it runs cargo test; \
+         without it the gate fails before reaching a guest"
+    );
+}
