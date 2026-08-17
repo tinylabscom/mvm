@@ -449,7 +449,7 @@ mechanics on the artifact where a mistake is cheapest to correct.
 
 ## Workstreams
 
-- [ ] WS1 — boot the staged image before publish (x86_64 boot, aarch64 header check)
+- [x] WS1 — boot the staged image before publish (x86_64 boot, aarch64 header check)
 - [ ] WS2 — `boot-image/v*` release train (semver from `v0.1.0`), dual-publish window, `DEFAULT_BOOT_IMAGE_TAG`
 - [ ] WS3 — sidecar provenance fields + `mvmctl image boot status｜check｜update`
 - [ ] WS4 — `MVM_BOOT_IMAGE` escape hatch + doctor readout
