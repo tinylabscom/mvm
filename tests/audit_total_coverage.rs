@@ -292,6 +292,9 @@ const SECRET_SUB: &[(&str, AuditPosture)] = &[
     ("set", AuditPosture::Emits("SecretSet")),
     ("get", AuditPosture::Emits("SecretGet")),
     ("ls", AuditPosture::ReadOnly),
+    // Reads the catalog compiled into this binary. No store access, no
+    // network, no tenant scope — nothing to audit.
+    ("providers", AuditPosture::ReadOnly),
     ("rm", AuditPosture::Emits("SecretRm")),
 ];
 
