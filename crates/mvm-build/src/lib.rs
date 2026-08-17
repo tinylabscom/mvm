@@ -4,6 +4,7 @@ pub mod artifacts;
 pub mod backend;
 /// Disk-only job/artifact transport for the hvf-VMM builder (tar-over-raw-
 /// disk, so the host never formats or reads a guest filesystem).
+pub mod boot_image_select;
 pub mod builder_cmdline;
 pub mod builder_disk_transport;
 /// Reusable producer that turns real builder artifacts (`vmlinux` + `rootfs.ext4`)
