@@ -60,8 +60,6 @@ const ALLOWLIST: &[&str] = &[
     // feature took the whole ASN.1 stack with it, so the shipped closure now
     // carries no nom at all and this entry covers the fuzz tooling alone.
     "nom",
-    "rand",
-    "rand_core",
     // The in-house VMM's rust-vmm virtio stack (virtio-queue) resolves
     // vmm-sys-util 0.15 while the Linux KVM stack (kvm-bindings/kvm-ioctls)
     // pins 0.12.1; the two rust-vmm families track different vmm-sys-util

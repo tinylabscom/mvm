@@ -249,16 +249,11 @@ fn verify_cosign_bundle(
         .require_identity(expected_identity)
         .require_issuer(expected_issuer);
 
-    let result = verify(artifact, &bundle, &policy, &trusted_root).map_err(|e| {
+    verify(artifact, &bundle, &policy, &trusted_root).map_err(|e| {
         VerifyError::SignatureInvalid {
             reason: format!("signature verification failed: {e}"),
         }
     })?;
-    if !result.success {
-        return Err(VerifyError::SignatureInvalid {
-            reason: "sigstore verification returned an unsuccessful result".to_string(),
-        });
-    }
     Ok(())
 }
 

@@ -60,9 +60,9 @@ rand.workspace = true
 # sigstore-verify stack checks bundles offline against an embedded trust root
 # — no rsa, no OIDC client, no async TUF fetch — so the default mvm-core build
 # stays runtime-free and `manifest-verify` pulls no tokio.
-sigstore-verify = { version = "0.9", default-features = false, optional = true }
-sigstore-trust-root = { version = "0.9", default-features = false, optional = true }
-sigstore-types = { version = "0.9", optional = true }
+sigstore-verify = { version = "0.11", default-features = false, features = ["rustls"], optional = true }
+sigstore-trust-root = { version = "0.11", default-features = false, optional = true }
+sigstore-types = { version = "0.11", optional = true }
 # Only under the `schema` feature (protocol-schema codegen);
 # 0.8 matches the version mvm-sdk already pins, so no new lockfile entry.
 schemars = { version = "0.8", features = ["chrono"], optional = true }

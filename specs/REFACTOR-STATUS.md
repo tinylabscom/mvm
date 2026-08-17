@@ -1,6 +1,6 @@
 # Refactor status
 
-Last updated: 2026-08-16
+Last updated: 2026-08-17
 
 This is the cross-plan progress index. The owning plan remains authoritative
 for detailed scope and acceptance criteria.
@@ -1728,6 +1728,12 @@ check-l3-expansion-freeze` added as a temporary shrink-only ratchet
         closure at 468, so the ~62 `wasmtime`-family packages behind an
         off-by-default feature stay observed. Not a lockfile count: measured,
         that number does not move when a dependency is removed (~120 orphans)
+  - [x] Sigstore 0.9→0.11 (`specs/plans/2026-08-17-sigstore-0-11-upgrade.md`):
+        sigstore-verify stack bumped, rustls feature selected (ring backend,
+        not aws-lc-rs), dead `VerificationResult.success` API usage removed.
+        Stale `rand`/`rand_core` ALLOWLIST entries ratcheted down in both
+        `xtask/src/check_duplicate_majors.rs` and `deny.toml` (workspace
+        unified on rand 0.10 in a prior change; the allowlist never followed).
 
 - [ ] Plan 313 — egress token accounting, streaming, and compaction
       (`specs/plans/313-egress-token-accounting-and-compaction.md`)
