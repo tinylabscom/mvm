@@ -25,6 +25,7 @@
 //! belong to the endpoint that carries it.
 
 pub mod frame;
+pub mod hello;
 pub mod limits;
 pub mod opcode;
 pub mod state;
