@@ -80,8 +80,9 @@
           # `vmlinux`, so the manifest recorded a bzImage's digest under the
           # name `vmlinux` — and since the kernel package now carries both, it
           # picked the wrong one of two present files. The download then
-          # verifies green and boots nothing, which is #2594 again: a hash
-          # proves provenance and says nothing about format.
+          # verifies green and boots nothing. A hash proves provenance and says
+          # nothing about format — the same way an unloadable image once
+          # shipped under a name the loader is documented against.
           manifestKernelFile = if pkgs.stdenv.hostPlatform.isAarch64 then "Image" else "vmlinux";
           manifestFor =
             kpkg: cfg:
