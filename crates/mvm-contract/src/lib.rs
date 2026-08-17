@@ -66,6 +66,7 @@ pub mod verify;
 
 #[cfg(feature = "volume")]
 pub mod volume;
+pub mod workload_identity;
 #[cfg(feature = "local")]
 pub use volume::LocalBackend;
 #[cfg(feature = "volume")]
