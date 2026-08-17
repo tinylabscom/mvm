@@ -7,6 +7,24 @@ for detailed scope and acceptance criteria.
 
 ## Completed issue closeouts
 
+- [x] **Plan 337 WS-6 increment 1 — Tier C transport and the error taxonomy,
+      as a declared subset.** The eight Tier D error types and the code that
+      raises them landed together on purpose: generating the classes while
+      TypeScript had nothing to throw them would have exported eight dead types
+      and cleared eight divergence entries while closing nothing.
+      `_remote.ts` implements real-VM invocation, the stderr envelope scan, and
+      `RemoteFunction` / `func` / `workload_ref` / `WorkloadRef` (a `Proxy`
+      where Python uses `__getattr__`). `MVM_NO_VM=1` is *refused* with
+      `NoVmIntrospectionError` naming the reason rather than falling through to
+      a real VM — the caller asked for local dispatch and would otherwise have
+      got a microVM. `RemoteError` needed one registry extension (structured
+      fields plus a message format). Two language differences recorded rather
+      than smoothed: `SecretInArgWarning` is permanently Python-only (no JS
+      warning type), and `RemoteError.message` holds the composed string in
+      JavaScript where Python exposes the raw one. Sessions deferred to their
+      own change — they force the AsyncLocalStorage-versus-ergonomics choice.
+      Divergence 16 -> 4; across the plan 30 -> 4, typescript-only still 0.
+
 - [x] **Plan 337 WS-7 + WS-8 — Tier F decided, plan closed out except what
       Tier C gates.** Option 2 for `derive_schema` confirmed (callers pass
       `args_schema` / `return_schema`), but the plan's claim that it needed "no

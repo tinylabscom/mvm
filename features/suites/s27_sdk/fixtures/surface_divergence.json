@@ -40,28 +40,18 @@
     "RuntimeFsStat",
     "RuntimeProcessEvent",
     "RuntimeProcessResult",
-    "SandboxInfo"
+    "SandboxInfo",
+    "WorkloadRef"
   ],
   "python_only_permanent_by_design": [
+    "SecretInArgWarning",
     "derive_schema"
   ],
   "python_only_absent_from_typescript": [
-    "EmittingContextError",
-    "MsgpackUnavailable",
-    "MvmTransportError",
-    "NoVmIntrospectionError",
-    "PayloadTooLarge",
-    "RemoteError",
-    "RemoteFunction",
-    "SecretInArgError",
-    "SecretInArgWarning",
     "Session",
-    "WorkloadRef",
     "current_recording_dict",
     "current_session_id",
-    "func",
-    "session",
-    "workload_ref"
+    "session"
   ],
   "typescript_only_absent_from_python": []
 }

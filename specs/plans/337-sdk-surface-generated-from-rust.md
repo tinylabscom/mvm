@@ -3,8 +3,8 @@
 Backing: preview
 Validation: none
 
-**Status: IN PROGRESS** — WS-1 to WS-5, WS-6.1, WS-7 and WS-8 (except 8.1)
-complete. Remaining: WS-6.2–6.6 (Tier C), which gates WS-8.1.
+**Status: IN PROGRESS** — WS-1 to WS-5, WS-6.1/6.2/6.4/6.6, WS-7 and WS-8
+(except 8.1) complete. Remaining: WS-6.3 + 6.5 (sessions), which gate WS-8.1.
 **Opened:** 2026-08-14
 **Follows:** Plan 336 WS-G4
 
@@ -571,12 +571,55 @@ permanently Python-only, and `SdkErrorType::exports_to` refuses to emit a
 
 - [x] 6.1 Size it properly against `_remote.py` and `_session.py` before
       writing code
-- [ ] 6.2 `RemoteFunction` + `func` over generated protocol frames
-- [ ] 6.3 `Session` + `session` + `current_session_id`
-- [ ] 6.4 `WorkloadRef` + `workload_ref`
+- [x] 6.2 `RemoteFunction` + `func` over generated protocol frames
+- [ ] 6.3 `Session` + `session` + `current_session_id` — next increment
+- [x] 6.4 `WorkloadRef` + `workload_ref`
 - [ ] 6.5 BDD coverage against the recording CLI double, both languages, in the
-      s27 pattern Plan 336 established
-- [ ] 6.6 Error taxonomy from WS-5 wired through
+      s27 pattern Plan 336 established — lands with 6.3
+- [x] 6.6 Error taxonomy from WS-5 wired through
+
+#### Increment 1 — the transport, the errors, and the refusal
+
+Delivered as the declared subset WS-6.1 recommended, since the ordering matters:
+the eight Tier D error types and the code that raises them had to land
+together. Generating the classes first would have exported types nothing in
+TypeScript could throw — the objection WS-2 and WS-5 both refused.
+
+* **6.2 / 6.4** — `crates/mvm-sdk/sdks/typescript/src/_remote.ts` implements
+  real-VM invocation: encode `[args, kwargs]`, feed `mvmctl invoke` over
+  stdin, decode stdout, and scan stderr for the `MVM_ENVELOPE:` marker with
+  the same primary-plus-fallback shape Python uses. `RemoteFunction`, `func`,
+  `workload_ref` and `WorkloadRef` ship; the last uses a `Proxy` where Python
+  uses `__getattr__`.
+* **6.6** — the eight error types are now in the Rust registry and generated
+  into both languages. Python's `_remote.py` no longer defines them.
+  `RemoteError` needed one registry extension — structured fields plus a
+  message format — since it carries `kind` / `error_id` / `message` rather
+  than being a plain subclass.
+* **`MVM_NO_VM=1` is refused, not missing.** Setting it raises
+  `NoVmIntrospectionError` naming the reason. Silently falling through to the
+  real-VM path would have been the worse failure: the caller asked for local
+  dispatch and would have got a microVM.
+
+Two language differences worth stating rather than smoothing over:
+
+* `SecretInArgWarning` moves to `python_only_permanent_by_design`. JavaScript
+  has no warning type, and `exports_to` refuses to emit a `Warning` into
+  TypeScript, so this can never close.
+* `RemoteError.message` differs by necessity. Python sets `str(e)` to the
+  composed message and `.message` to the raw one; JavaScript has only
+  `.message`, which holds the composed string. The generated TypeScript
+  therefore does not redeclare `message` as a property.
+
+**Not in this increment: sessions.** `Session`, `session` and
+`current_session_id` are the piece whose semantics force the
+`AsyncLocalStorage`-versus-ergonomics choice from 6.1, and they are worth
+their own change. `_remote.ts` does not consult an active session yet, and
+says so.
+
+Divergence after this increment: `python_only_absent_from_typescript` is down
+to four names — `Session`, `session`, `current_session_id`, and
+`current_recording_dict`.
 
 #### 6.1 result — Tier C is two surfaces, and one of them cannot be ported
 
