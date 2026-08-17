@@ -40,6 +40,11 @@ Feature: Runtime SDK live transport
       | Python     |
       | TypeScript |
 
+  Scenario: the Tier A constructors agree with the golden IR document
+    When I run the "Python" Tier A constructor fixture
+    And I run the "TypeScript" Tier A constructor fixture
+    Then both Tier A constructor surfaces match the golden IR document
+
   Scenario: the two SDK surfaces diverge only where a human signed off
     When I collect the Python and TypeScript public surfaces
     Then the shared surface agrees between the two languages
