@@ -33,6 +33,7 @@ from mvm._ctors.generated import (  # noqa: F401
     no_deps,
     node_deps,
     python_deps,
+    warm_process,
 )
 
 
@@ -603,6 +604,13 @@ def resources(*, cpu_cores: int, memory_mb: int, rootfs_size_mb: int) -> _ir.Res
 
 
 
+# The placeholder `sha256` an unlocked addon use carries until
+# `mvm addon lock` resolves it. Mirrored by `UNRESOLVED_SHA256` in the
+# Rust ctor and the TypeScript `_addon.ts`; the s27 golden IR document
+# pins all three against each other.
+_UNRESOLVED_SHA256 = "0" * 64
+
+
 def addon_use(
     name: str,
     *,
@@ -652,64 +660,6 @@ def addon_use(
         sha256=sha256 if sha256 is not None else _UNRESOLVED_SHA256,
         params=dict(params) if params else None,
     )
-
-
-def warm_process(
-    *,
-    max_calls_per_worker: int,
-    max_rss_mb: int,
-    pool_size: int = 1,
-    in_process: str = "serial",
-    max_queue_depth: int | None = None,
-) -> _ir.Concurrency:
-    """Opt a function-entrypoint into the warm-process tier (ADR-0011).
-
-    Cold tier (default for ``mv.func``) is the safest: a fresh wrapper
-    process per call, no state leakage. Warm-process keeps the wrapper
-    alive across calls — per-call latency drops to "just the dispatch",
-    but **cross-call state is the user's responsibility**. Python globals,
-    /tmp contents, file descriptors, etc. persist between calls. A bad
-    call can taint the next one.
-
-    Pass the result as ``concurrency=`` to ``mv.func(...)`` /
-    ``mv.entrypoint_function(...)``::
-
-        @mv.func(
-            name="adder",
-            concurrency=mv.warm_process(
-                max_calls_per_worker=1000,
-                max_rss_mb=256,
-            ),
-        )
-        def add(a: int, b: int) -> int:
-            return a + b
-
-    Validation (host-side, mvm ``compile``):
-    - ``pool_size`` ∈ [1, 64]
-    - ``max_calls_per_worker`` >= 100
-    - ``max_rss_mb`` <= ``resources.memory_mb``
-    - ``in_process`` must be ``"serial"`` (``"concurrent"`` reserved for
-      a follow-up ADR)
-    - ``language`` must be ``"python"`` or ``"node"`` — wasm rejected
-      with ``E_UNSUPPORTED_CONCURRENCY_FOR_LANGUAGE``.
-    """
-    if in_process not in ("serial", "concurrent"):
-        raise ValueError(
-            f"warm_process in_process must be 'serial' or 'concurrent', "
-            f"got {in_process!r}"
-        )
-    return _ir.Concurrency1(
-        kind=_kind_value(_ir.Concurrency1, "warm_process"),
-        max_calls_per_worker=max_calls_per_worker,
-        max_rss_mb=max_rss_mb,
-        pool_size=pool_size,
-        in_process=_resolve_union_member(_ir.InProcessMode, in_process),
-        max_queue_depth=max_queue_depth,
-    )
-
-
-
-
 
 
 
