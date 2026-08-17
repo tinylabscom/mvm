@@ -75,13 +75,42 @@
           };
         });
 
+      # Host<->guest contract this rootfs speaks. MUST stay in lockstep with
+      # `PROTOCOL_VERSION_AUTHENTICATED` in
+      # crates/mvm-contract/src/policy/security.rs — a rootfs that claims a
+      # version it does not speak is worse than one that claims none.
+      guestProtocolVersion = 2;
+
+      # Which published image line these bytes belong to. Supplied by the
+      # release build; empty for a local build of a working tree, which
+      # genuinely belongs to no published line. Deliberately not a constant in
+      # this file: a hardcoded tag would keep reading as truth after the line
+      # moved past it.
+      bootImageTag = builtins.getEnv "MVM_BOOT_IMAGE_TAG";
+
+      # The commit whose mk-guest.nix produced this rootfs. Resolves for a git
+      # flake ref; a `path:` flake has no revision to resolve and leaves this
+      # empty rather than inventing one. A Nix build has no ambient git.
+      generatorRev = self.rev or self.dirtyRev or "";
+
       # Serialize mkGuest's `passthru.mvm` into the GuestSidecar wire shape
-      # (crates/mvm-base/src/runtime_meta.rs, #[serde(rename_all="camelCase")]).
+      # (crates/mvm-build/src/builder_vm.rs, #[serde(rename_all="camelCase")]).
+      #
+      # `source` and `builtAt` describe how the bytes reached a cache, which is
+      # a fact about the installing host, not about this build. A Nix build has
+      # no clock, so `builtAt` stays empty here and is stamped by whoever puts
+      # the image on disk; `source` starts as the truth this build knows and is
+      # overwritten by the fetch path, for which it is no longer true.
       sidecarJson = mvm:
         builtins.toJSON {
           inherit (mvm)
             name accessible sealed entrypointKind initSystem
             expectedBootMs agentBinary rootlessEntrypoint hypervisor overlayAware;
+          imageTag = bootImageTag;
+          source = "built-local";
+          builtAt = "";
+          protocolVersion = guestProtocolVersion;
+          inherit generatorRev;
         };
 
       # One variant. `sealed = true` → prod (verity-sealed, rootless, no
