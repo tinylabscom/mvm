@@ -429,15 +429,7 @@ impl MachineRunArgs {
 
     fn into_run_args(self) -> RunArgs {
         RunArgs {
-            // Placeholder; `run_dispatch` overwrites it with the mode
-            // `preflight_network` actually settled on for this launch, which is
-            // the value that reaches the signed plan.
-            network_mode: mvm_contract::plan::NetworkMode::default(),
             manifest: self.manifest,
-            // Default off; `run_dispatch` sets it for the warm-claim-eligible
-            // transient mode.
-            warm_pool_size: 0,
-            pty: false,
             vm_name: self.name,
             image: self.image,
             runtime_pack: self.runtime_pack,
@@ -455,16 +447,7 @@ impl MachineRunArgs {
             receipt: self.receipt,
             json: self.json,
             dry_run: self.dry_run,
-            launch_plan: None,
-            prod: false,
-            // SDK-transport surface (`--mode`/`--dev`/`--ack-divergence`) stays
-            // off — `machine run` is the beginner contract; that transport lives
-            // on the hidden `run` verb the SDKs shell to.
-            mode: None,
-            dev: false,
-            ack_divergence: Vec::new(),
             argv: self.argv,
-            stdin: Vec::new(),
             healthcheck: crate::exec::build_healthcheck(
                 self.healthcheck.as_deref(),
                 self.health_interval,
@@ -474,6 +457,12 @@ impl MachineRunArgs {
             ),
             hypervisor: self.hypervisor,
             host_service: self.host_service,
+            // Everything else is a clap default: `network_mode` and
+            // `warm_pool_size` are overwritten by `run_dispatch` once it knows
+            // the mode this launch settled on, and the SDK transport surface
+            // (`--mode`/`--dev`/`--prod`/`--launch-plan`/`--ack-divergence`)
+            // stays off — `machine run` is the beginner contract.
+            ..Default::default()
         }
     }
 

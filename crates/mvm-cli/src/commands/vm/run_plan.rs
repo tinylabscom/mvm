@@ -553,37 +553,10 @@ mod tests {
 
     fn base_run_args() -> RunArgs {
         RunArgs {
-            network_mode: mvm_contract::plan::NetworkMode::default(),
-            manifest: None,
-            warm_pool_size: 0,
-            pty: false,
-            vm_name: None,
-            image: None,
-            runtime_pack: false,
-            net: false,
-            allow_host: Vec::new(),
-            cpus: 2,
-            cpu_limit: None,
-            grants_file: None,
-            memory: "512M".to_string(),
             profile: RunProfile::Standard,
-            agent_verb: Vec::new(),
-            mounts: Vec::new(),
-            env: Vec::new(),
             timeout: Some(60),
-            receipt: None,
-            json: false,
-            launch_plan: None,
             mode: Some(RunMode::Plan),
-            dev: false,
-            prod: false,
-            dry_run: false,
-            argv: Vec::new(),
-            ack_divergence: Vec::new(),
-            stdin: Vec::new(),
-            healthcheck: None,
-            hypervisor: None,
-            host_service: Vec::new(),
+            ..Default::default()
         }
     }
 

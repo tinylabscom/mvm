@@ -257,6 +257,55 @@ pub(in crate::commands) struct RunArgs {
     pub hypervisor: Option<String>,
 }
 
+/// The same values clap fills in when a flag is absent.
+///
+/// Two consumers want a `RunArgs` without spelling thirty fields: the
+/// `machine` dispatch sites that build one programmatically, and the tests.
+/// Writing them out by hand meant every new field edited every one of those
+/// sites, so they drifted toward whatever the author happened to type rather
+/// than toward what the CLI actually does.
+///
+/// The risk this introduces is that these values and the `#[arg(default_value)]`
+/// attributes above disagree. `parsed_defaults_match_the_default_impl` is the
+/// witness: it parses a bare `run -- x` and compares the result field by field.
+impl Default for RunArgs {
+    fn default() -> Self {
+        Self {
+            network_mode: mvm_contract::plan::NetworkMode::default(),
+            manifest: None,
+            image: None,
+            warm_pool_size: 0,
+            pty: false,
+            vm_name: None,
+            runtime_pack: false,
+            net: false,
+            allow_host: Vec::new(),
+            cpus: 2,
+            cpu_limit: None,
+            grants_file: None,
+            memory: "512M".to_string(),
+            profile: RunProfile::Standard,
+            mounts: Vec::new(),
+            env: Vec::new(),
+            timeout: None,
+            receipt: None,
+            json: false,
+            dry_run: false,
+            launch_plan: None,
+            mode: None,
+            dev: false,
+            prod: false,
+            argv: Vec::new(),
+            ack_divergence: Vec::new(),
+            agent_verb: Vec::new(),
+            host_service: Vec::new(),
+            stdin: Vec::new(),
+            healthcheck: None,
+            hypervisor: None,
+        }
+    }
+}
+
 /// SDK transport modes for `mvmctl run`. Mirrors the `Mode` enum on
 /// `mvmctl compile` but specialises the rejection messages to point
 /// users at the right verb when they pick the wrong default.
@@ -1624,38 +1673,47 @@ mod tests {
 
     fn run_args(profile: RunProfile) -> RunArgs {
         RunArgs {
-            network_mode: mvm_contract::plan::NetworkMode::default(),
-            warm_pool_size: 0,
-            pty: false,
-            vm_name: None,
-            manifest: None,
-            image: None,
-            runtime_pack: false,
-            net: false,
-            allow_host: Vec::new(),
-            cpus: 2,
-            cpu_limit: None,
-            grants_file: None,
-            memory: "512M".to_string(),
             profile,
-            agent_verb: Vec::new(),
-            mounts: Vec::new(),
-            env: Vec::new(),
             timeout: Some(60),
-            receipt: None,
-            json: false,
-            dry_run: false,
-            launch_plan: None,
-            mode: None,
-            dev: false,
-            prod: false,
             argv: vec!["/bin/true".to_string()],
-            ack_divergence: Vec::new(),
-            stdin: Vec::new(),
-            healthcheck: None,
-            hypervisor: None,
-            host_service: Vec::new(),
+            ..Default::default()
         }
+    }
+
+    /// `Default` is hand-written, so it can drift from the `default_value`
+    /// attributes clap actually applies. Parse a bare invocation and compare.
+    #[test]
+    fn parsed_defaults_match_the_default_impl() {
+        use clap::Parser;
+
+        let parsed = crate::commands::Cli::try_parse_from(["mvmctl", "run", "--", "x"])
+            .expect("bare `run -- x` parses");
+        let crate::commands::Commands::Run(parsed) = parsed.command else {
+            panic!("expected Commands::Run");
+        };
+        let expected = RunArgs {
+            argv: vec!["x".to_string()],
+            ..Default::default()
+        };
+
+        assert_eq!(parsed.cpus, expected.cpus, "--cpus default");
+        assert_eq!(parsed.memory, expected.memory, "--memory default");
+        assert_eq!(parsed.profile, expected.profile, "--profile default");
+        assert_eq!(parsed.net, expected.net, "--net default");
+        assert_eq!(parsed.json, expected.json, "--json default");
+        assert_eq!(parsed.dry_run, expected.dry_run, "--dry-run default");
+        assert_eq!(parsed.dev, expected.dev, "--dev default");
+        assert_eq!(parsed.prod, expected.prod, "--prod default");
+        assert_eq!(parsed.timeout, expected.timeout, "--timeout default");
+        assert_eq!(parsed.cpu_limit, expected.cpu_limit, "--cpu-limit default");
+        assert_eq!(parsed.mode, expected.mode, "--mode default");
+        assert_eq!(
+            parsed.allow_host, expected.allow_host,
+            "--allow-host default"
+        );
+        assert_eq!(parsed.mounts, expected.mounts, "--mount default");
+        assert_eq!(parsed.env, expected.env, "--env default");
+        assert_eq!(parsed.argv, expected.argv, "trailing argv");
     }
 
     #[test]
