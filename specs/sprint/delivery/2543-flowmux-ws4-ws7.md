@@ -93,13 +93,26 @@ gate enforces, and the secret-bearing one calls the real
 `refuse_secrets_without_substitution` rather than a copy of it (which is why that function
 moved from the endpoint binary into the library).
 
-## Still not printing `4`
+## It prints `4`
 
-The live `machine run --image python:3.12` reaches the workload boot — the nixpkgs closure and
-the workload kernel come down the FlowMux datapath cleanly — and then fails in the per-VM
-supervisor: `refusing to boot a bounded workload it cannot audit: decoding the admitted plan
-for the wall-clock timer`. That is `Preview` claim 18's fail-closed path and is unrelated to
-egress; a separate worktree (`fix/wall-clock-signed-plan-decode`) is on it.
+    $ mvmctl machine run --image python:3.12 -- python -c 'print(2 + 2)'
+    4
 
-WS4/WS5 are proven hermetically rather than live, per the scope decision taken when this work
-started.
+Exit 0, macOS/libkrun, warm kernel cache. Zero resets, truncations, SOCKS
+failures, credit exhaustion or supervisor refusals in the run — the datapath
+that used to truncate every transfer at 48 KiB now carries a full nixpkgs
+closure and a kernel build without a frame error.
+
+The last blocker was outside this plan: the supervisor's wall-clock timer
+decoded the admitted plan as a bare `ExecutionPlan` when every producer emits
+the signed envelope, so it refused every plan-bearing boot on the macOS
+backends. That is #2564 / #2555, already in main; #2579 was a parallel diagnosis
+of the same bug, closed as superseded.
+
+## Scope note
+
+WS4 and WS5 are proven hermetically rather than by a dedicated live run — a
+secret-bearing workload and a `ping` each have in-process round-trip coverage
+instead. That was the scope decision taken when the work started; the live
+`python:3.12` run above exercises the transport they ride on, not those two
+verbs specifically.

@@ -10,7 +10,21 @@ work is demonstrably incomplete on `main`; this plan is where the remaining work
 
 ## Status
 
-**WS0–WS7 not started.** Guest egress is dead on `main`.
+**WS0–WS7 complete, and the reported command works.**
+
+    $ mvmctl machine run --image python:3.12 -- python -c 'print(2 + 2)'
+    4
+
+Exit 0, on macOS/libkrun, with no reset, truncation, SOCKS failure, credit
+exhaustion or supervisor refusal anywhere in the run. The whole nixpkgs closure
+and the workload kernel come down the FlowMux datapath; substitution and `ping`
+ride the same session; nothing speaks a second protocol, and
+`xtask check-one-guest-protocol` fails the build if anything starts to.
+
+The last blocker was not in this plan: the supervisor decoded the admitted plan
+as a bare `ExecutionPlan` when every producer emits the signed envelope, so it
+refused every plan-bearing boot on the two macOS backends. Fixed in #2564
+(issue #2555).
 
 ## Why
 
