@@ -103,6 +103,11 @@ path = "src/bin/emit_sdk_env.rs"
 name = "emit_sdk_errors"
 path = "src/bin/emit_sdk_errors.rs"
 
+# The SDK constructor registry emitter. serde_json only.
+[[bin]]
+name = "emit_sdk_ctors"
+path = "src/bin/emit_sdk_ctors.rs"
+
 [dev-dependencies]
 # `TestEnv` lives behind mvm-core's `test-support`, and the compile
 # pipeline's tests use it. Without this line the feature only arrives via

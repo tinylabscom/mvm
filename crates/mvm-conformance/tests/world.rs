@@ -120,6 +120,10 @@ pub struct CliWorld {
     /// `mvmctl` argv the recording double captured, one entry per invocation,
     /// keyed by the language whose fixture produced it.
     pub sdk_recorded_argv: BTreeMap<String, Vec<Vec<String>>>,
+
+    /// Per-language JSON emitted by the Tier A constructor fixtures,
+    /// keyed by language, for comparison against the golden document.
+    pub sdk_ctor_docs: BTreeMap<String, String>,
     /// Scenario-local directory holding the recording double's argv logs.
     pub sdk_argv_log_dir: Option<tempfile::TempDir>,
     /// Result of exercising the signed-plan share gate with an attachment the
