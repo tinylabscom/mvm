@@ -27,6 +27,46 @@ strip_cfg_test_modules() {
   ' "$1"
 }
 
+# True when the file is a module the tree only compiles under `cfg(test)`.
+#
+# `strip_cfg_test_modules` handles the inline form — `#[cfg(test)] mod tests {
+# .. }` — by scanning the file itself. It cannot see the out-of-line form,
+# where `#[cfg(test)] mod tests;` sits in the parent and the body lives in its
+# own file: that file carries no marker of its own, so every line in it read as
+# production code. A test binding an ephemeral loopback port then looks exactly
+# like a new orchestration server.
+#
+# Resolving the declaration keeps the gate's meaning ("is this compiled into a
+# shipped binary?") rather than trusting a filename, so a real server in a file
+# called `tests.rs` is still caught unless its parent gates it out of the build.
+file_is_out_of_line_cfg_test_module() {
+  local file="$1"
+  local dir base parent name
+  dir=$(dirname "$file")
+  base=$(basename "$file" .rs)
+
+  if [[ "$base" == "mod" ]]; then
+    # `foo/mod.rs` is declared as `mod foo;` one level up.
+    name=$(basename "$dir")
+    dir=$(dirname "$dir")
+  else
+    name="$base"
+  fi
+
+  for parent in "$dir.rs" "$dir/mod.rs" "$dir/lib.rs" "$dir/main.rs"; do
+    [[ -f "$parent" ]] || continue
+    if awk -v want="$name" '
+      /^[[:space:]]*#\[cfg\(test\)\][[:space:]]*$/ { pending = 1; next }
+      pending == 1 && $0 ~ "^[[:space:]]*(pub[[:space:]]+)?mod[[:space:]]+" want "[[:space:]]*;" { found = 1; exit }
+      { pending = 0 }
+      END { exit !found }
+    ' "$parent"; then
+      return 0
+    fi
+  done
+  return 1
+}
+
 crate_allows_server_patterns() {
   local file="$1"
   local crate_dir cargo_toml
@@ -69,6 +109,9 @@ matches=""
 while IFS= read -r file; do
   [[ -z "$file" ]] && continue
   if crate_allows_server_patterns "$file"; then
+    continue
+  fi
+  if file_is_out_of_line_cfg_test_module "$file"; then
     continue
   fi
   hits=$(strip_cfg_test_modules "$file" | grep -nE "$patterns" || true)
