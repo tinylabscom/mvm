@@ -44,6 +44,8 @@ pub mod flowmux_drive;
 pub mod flowmux_egress;
 #[cfg(feature = "addons")]
 pub mod flowmux_keys;
+/// Blocking one-shot FlowMux client for the guest's tokio-free callers.
+pub mod flowmux_sync;
 /// In-guest forward-proxy front: parses a workload's proxied request into a
 /// `WireRequest` for the substitution client.
 pub mod forward_proxy;

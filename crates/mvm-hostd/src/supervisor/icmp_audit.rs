@@ -67,13 +67,17 @@ pub async fn emit_icmp_echo(recorder: &Recorder, audit: &EchoAudit) {
     }
 }
 
-/// Record an echo decision from the blocking vsock transport.
-#[cfg(target_os = "linux")]
+/// Record an echo decision from a blocking transport.
+///
+/// Not Linux-gated. It was, because the blocking vsock transport was the only
+/// caller and that transport is Linux-only. The FlowMux session thread is the
+/// second caller and runs on every host, so gating this would have left an
+/// echo served on macOS unaudited — a hole in the chain rather than a missing
+/// feature.
 pub fn emit_icmp_echo_blocking(recorder: &Recorder, audit: &EchoAudit) {
     emit_blocking(emit_icmp_echo(recorder, audit));
 }
 
-#[cfg(target_os = "linux")]
 fn emit_blocking(emit: impl Future<Output = ()>) {
     let Ok(handle) = tokio::runtime::Handle::try_current() else {
         tracing::warn!("ICMP audit runtime unavailable");

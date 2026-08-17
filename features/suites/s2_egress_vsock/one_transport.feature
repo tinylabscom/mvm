@@ -48,3 +48,40 @@ Feature: One transport between a guest and its host endpoint
     When the host builds an endpoint config with a FlowMux identity
     And the host builds an endpoint config without a FlowMux identity
     Then no endpoint config selects "raw"
+
+  # The regression that started this: a guest made FlowMux-only while every
+  # host spawn site still selected the old protocol. Both halves were
+  # internally consistent, so nothing failed until someone booted a VM. This
+  # compares the two sides instead of each side against itself.
+  Scenario: There is exactly one guest→host protocol
+    When the one-protocol gate inspects the tree
+    Then it finds no retired line-marker protocol
+    And every guest dialer of the egress port is a FlowMux client
+
+  # `ping` and secret substitution used to dial the same port and speak
+  # something else. Both are typed flows on the session now, so the opcodes
+  # they need must be part of the contract rather than an extension.
+  Scenario: The session carries every guest verb
+    When the wire contract is enumerated
+    Then a typed HTTP flow is part of it
+    And a one-shot ICMP echo is part of it
+
+  # A placeholder with nothing to resolve it is worse than no network: the
+  # guest sends `mvm-secret-<hex>` to a real upstream.
+  Scenario: A secret-bearing workload boots only when substitution is live
+    Given an endpoint config carrying a secret
+    Then it refuses to serve without a substitution service
+    And it is admitted with one
+
+  # An endpoint reports ready before the guest boots, so "ready" alone never
+  # meant a guest had reached it.
+  Scenario: A launch whose endpoint carried no session is refused
+    Given a per-VM state dir whose endpoint is running
+    Then a launch is refused because no guest authenticated
+    But a launch is admitted once a session is recorded
+
+  # A boot with nothing to mediate has no endpoint at all, and must not be
+  # caught by the check above.
+  Scenario: A launch with no endpoint at all is not refused
+    Given a per-VM state dir with no endpoint
+    Then the launch is admitted

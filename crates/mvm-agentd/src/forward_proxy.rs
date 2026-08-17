@@ -4,7 +4,7 @@
 //! this guest-local proxy and makes ordinary requests carrying an opaque
 //! placeholder (from `mvm.secret()`) where a credential goes. The proxy parses
 //! the proxied request into a `WireRequest` and relays it to the host
-//! substitution endpoint ([`crate::substitution_client`]); the host substitutes
+//! substitution endpoint over FlowMux ([`crate::flowmux_sync`]); the host substitutes
 //! the real credential and makes the **real TLS** upstream (model ii — no
 //! in-guest TLS MITM). This module is the request parser; the listen/relay loop
 //! sits on top.
@@ -20,8 +20,6 @@ use anyhow::{Context, Result, bail};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
 use mvm_core::substitution_wire::{WireRequest, WireResponse};
-
-use crate::substitution_client;
 
 /// Guest-local TCP port the forward proxy listens on; the workload's
 /// `HTTP_PROXY`/`HTTPS_PROXY` points here. Loopback-only — never exposed off the
@@ -184,24 +182,20 @@ pub fn egress_endpoint_socket() -> Option<std::path::PathBuf> {
 /// bind-mounted endpoint Unix socket on the shared-kernel container tier.
 /// Blocks; the guest init runs it on its own
 /// thread. This is the production entry point — `serve` +
-/// `substitution_client::substitute` are the unit-tested parts it composes.
+/// `flowmux_sync::SyncFlowMux::exchange_http` are the unit-tested parts it
+/// composes.
 pub fn start_forward_proxy(relay_timeout_secs: u64) -> Result<()> {
     let listener = TcpListener::bind(("127.0.0.1", FORWARD_PROXY_PORT))
         .with_context(|| format!("binding forward proxy on 127.0.0.1:{FORWARD_PROXY_PORT}"))?;
-    if let Some(endpoint_sock) = egress_endpoint_socket() {
-        return serve(&listener, move |req| {
-            let mut stream =
-                std::os::unix::net::UnixStream::connect(&endpoint_sock).with_context(|| {
-                    format!(
-                        "connect to substitution endpoint {}",
-                        endpoint_sock.display()
-                    )
-                })?;
-            substitution_client::relay(&mut stream, req)
-        });
-    }
+    let timeout = std::time::Duration::from_secs(relay_timeout_secs.max(1));
     serve(&listener, move |req| {
-        substitution_client::substitute(req, relay_timeout_secs)
+        // One session per request, torn down after it. A workload's proxied
+        // requests are independent and infrequent, so the handshake cost buys
+        // a simpler failure model than a shared session that has to be
+        // re-established under the proxy's feet.
+        let mut flowmux = crate::flowmux_sync::SyncFlowMux::connect()?;
+        flowmux.set_read_timeout(timeout)?;
+        flowmux.exchange_http(req)
     })
 }
 
@@ -209,7 +203,7 @@ pub fn start_forward_proxy(relay_timeout_secs: u64) -> Result<()> {
 /// one proxied request, relay it to the host substitution endpoint via `relay`,
 /// and write the response back (`connection: close`, one request per
 /// connection). `relay` is injected — production passes a closure over
-/// [`crate::substitution_client::substitute`]; tests pass a mock host.
+/// [`crate::flowmux_sync::SyncFlowMux::exchange_http`]; tests pass a mock host.
 ///
 /// A bad request or a relay error becomes a `502` to the workload, never a
 /// panic; the accept loop keeps running.
@@ -327,36 +321,6 @@ mod tests {
                 "/run/mvm/substitution-endpoint.sock"
             ))
         );
-    }
-
-    #[test]
-    fn relay_over_a_unix_stream_round_trips_like_the_vsock_path() {
-        // The container tier's upstream: `substitution_client::relay` speaks
-        // the identical framed wire protocol over a plain UnixStream, so a
-        // bind-mounted endpoint socket behaves exactly like the vsock leg.
-        use mvm_core::substitution_wire::WireResponse;
-
-        let (mut host_side, mut endpoint_side) = std::os::unix::net::UnixStream::pair().unwrap();
-        let server = std::thread::spawn(move || {
-            let req: WireRequest = crate::vsock::read_frame(&mut endpoint_side).unwrap();
-            let resp = WireResponse::Ok {
-                status: 200,
-                headers: vec![],
-                body_b64: String::new(),
-            };
-            crate::vsock::write_frame(&mut endpoint_side, &resp).unwrap();
-            req
-        });
-
-        let req = WireRequest {
-            method: "GET".into(),
-            url: "https://example.test/".into(),
-            headers: vec![],
-            body_b64: String::new(),
-        };
-        let resp = substitution_client::relay(&mut host_side, &req).unwrap();
-        assert!(matches!(resp, WireResponse::Ok { status: 200, .. }));
-        assert_eq!(server.join().unwrap(), req);
     }
 
     #[test]

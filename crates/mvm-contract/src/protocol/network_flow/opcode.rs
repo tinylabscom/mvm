@@ -247,6 +247,10 @@ impl Opcode {
             ],
             Self::UdpOpened => &[FlowClass::Udp],
             Self::Resolved | Self::ResolveRefused => &[FlowClass::Dns],
+            // Like a DNS answer: the reply both confirms the one-shot flow and
+            // ends it, so it must be admitted while the stream is still
+            // Opening rather than requiring a separate confirmation first.
+            Self::IcmpReply | Self::IcmpRefused => &[FlowClass::Icmp],
             Self::InboundReady | Self::InboundRefused => &[FlowClass::Ingress],
             _ => return None,
         })
@@ -257,7 +261,12 @@ impl Opcode {
     pub const fn is_open(self) -> bool {
         matches!(
             self,
-            Self::OpenTcp | Self::OpenUdp | Self::Resolve | Self::InboundOpen | Self::OpenHttp
+            Self::OpenTcp
+                | Self::OpenUdp
+                | Self::Resolve
+                | Self::InboundOpen
+                | Self::OpenHttp
+                | Self::IcmpEcho
         )
     }
 
@@ -273,6 +282,8 @@ impl Opcode {
                 | Self::ResolveRefused
                 | Self::InboundRefused
                 | Self::HttpComplete
+                | Self::IcmpReply
+                | Self::IcmpRefused
         )
     }
 
