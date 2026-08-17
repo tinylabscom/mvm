@@ -22,6 +22,7 @@ use std::time::{Duration, Instant};
 
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use mvm_contract::protocol::dns::{MAX_DNS_MESSAGE, decode_query, encode_response};
+use mvm_contract::protocol::network_flow::hello::{Handshake, agree};
 use mvm_contract::protocol::network_flow::{
     Direction, FrameError, HEADER_LEN, LENGTH_PREFIX_LEN, Opcode, SessionValidator,
     UDP_ADDR_PREFIX_LEN, decode,
@@ -38,6 +39,10 @@ use self::udp_relay::{
 use crate::supervisor::audit_recorder::{EventCategory, Recorder};
 use crate::supervisor::dns_resolver::resolve_hostname_ips;
 use mvm_core::rate_limit::TokenBucket;
+
+/// How this side names itself in a handshake refusal. Only ever read by a
+/// human reading the error.
+const HOST_BUILD: &str = concat!("mvm-hostd ", env!("CARGO_PKG_VERSION"));
 
 /// Per-address connect budget when trying an admitted set: small so an
 /// unreachable address (e.g. an AAAA with no host IPv6 egress) fails over to
@@ -288,8 +293,8 @@ impl FlowMuxSession {
     pub fn serve(&mut self) -> Result<(), FlowMuxError> {
         // Wait for the guest's Hello, then acknowledge. The authenticated
         // session is already established; this is the FlowMux session opening.
-        match self.read_frame()? {
-            Some((Opcode::Hello, 0, 0)) => {}
+        let guest_payload_len = match self.read_frame()? {
+            Some((Opcode::Hello, 0, payload_len)) => payload_len,
             Some((opcode, _, _)) => {
                 return Err(FlowMuxError::FrameRefused(format!(
                     "expected Hello as first FlowMux frame, got {opcode:?}"
@@ -300,6 +305,20 @@ impl FlowMuxSession {
                     "peer closed before Hello".to_string(),
                 ));
             }
+        };
+
+        // Refuse a guest built against a different revision before serving it
+        // anything. A GoAway first, so the guest reports the same mismatch
+        // rather than a bare disconnect it cannot explain.
+        let local = Handshake::local(HOST_BUILD);
+        let payload_start = LENGTH_PREFIX_LEN + HEADER_LEN;
+        let guest = Handshake::decode(
+            &self.read_buf[payload_start..payload_start + guest_payload_len as usize],
+        )
+        .map_err(|e| FlowMuxError::FrameRefused(e.to_string()))?;
+        if let Err(e) = agree(&local, &guest) {
+            self.send_goaway(&e.to_string())?;
+            return Err(FlowMuxError::FrameRefused(e.to_string()));
         }
 
         lock_validator(&self.validator)
@@ -928,7 +947,7 @@ impl FlowMuxSession {
     }
 
     fn send_hello_ack(&self) -> Result<(), FlowMuxError> {
-        self.write_frame(Opcode::HelloAck, 0, b"")
+        self.write_frame(Opcode::HelloAck, 0, &Handshake::local(HOST_BUILD).encode())
     }
 
     fn send_goaway(&self, reason: &str) -> Result<(), FlowMuxError> {
@@ -1327,6 +1346,7 @@ fn parse_host_port(target: &str) -> Result<(&str, u16), String> {
 #[cfg(test)]
 mod tests {
     use super::udp_relay::encode_udp_addr;
+    use mvm_contract::protocol::network_flow::hello::BEHAVIOR_REVISION;
     use std::os::unix::net::UnixStream;
     use std::thread;
 
@@ -1397,6 +1417,132 @@ mod tests {
         )
     }
 
+    /// The guest's HelloAck must carry the host's handshake, or a guest built
+    /// against a different revision has nothing to compare against.
+    #[test]
+    fn the_hello_ack_carries_the_host_handshake() {
+        let (host_key, host_verify) = fresh_keys();
+        let (guest_key, guest_verify) = fresh_keys();
+        let (host_stream, mut guest_stream) = UnixStream::pair().unwrap();
+
+        let host_handle = thread::spawn(move || {
+            FlowMuxSession::accept(
+                host_stream,
+                "test-session",
+                host_key,
+                &guest_verify,
+                RegistryLimits::default(),
+                EgressGate::default_deny(),
+            )
+            .unwrap()
+            .serve()
+        });
+
+        let (mut guest_session, _id) =
+            Session::guest(&mut guest_stream, guest_key, &host_verify).unwrap();
+        write_frame(
+            &mut guest_stream,
+            &mut guest_session,
+            Opcode::Hello,
+            0,
+            &Handshake::local("test-guest").encode(),
+        );
+
+        let (opcode, _sid, payload) = read_flowmux_frame(&mut guest_stream, &mut guest_session);
+        assert_eq!(opcode, Opcode::HelloAck);
+        let host = Handshake::decode(&payload).expect("HelloAck carries a handshake");
+        assert_eq!(host.behavior_revision, BEHAVIOR_REVISION);
+        assert_eq!(host.build, HOST_BUILD);
+
+        drop(guest_stream);
+        let _ = host_handle.join().unwrap();
+    }
+
+    /// The failure this whole handshake exists for: two halves built against
+    /// different revisions. The host must refuse, and must say GoAway first so
+    /// the guest reports the same mismatch rather than a bare disconnect.
+    #[test]
+    fn a_guest_from_another_revision_is_refused_by_name() {
+        let (host_key, host_verify) = fresh_keys();
+        let (guest_key, guest_verify) = fresh_keys();
+        let (host_stream, mut guest_stream) = UnixStream::pair().unwrap();
+
+        let host_handle = thread::spawn(move || {
+            FlowMuxSession::accept(
+                host_stream,
+                "test-session",
+                host_key,
+                &guest_verify,
+                RegistryLimits::default(),
+                EgressGate::default_deny(),
+            )
+            .unwrap()
+            .serve()
+        });
+
+        let (mut guest_session, _id) =
+            Session::guest(&mut guest_stream, guest_key, &host_verify).unwrap();
+        let stale = Handshake {
+            behavior_revision: BEHAVIOR_REVISION.wrapping_add(1),
+            build: "mvm-agentd from-a-stale-tree".to_string(),
+        };
+        write_frame(
+            &mut guest_stream,
+            &mut guest_session,
+            Opcode::Hello,
+            0,
+            &stale.encode(),
+        );
+
+        let (opcode, _sid, payload) = read_flowmux_frame(&mut guest_stream, &mut guest_session);
+        assert_eq!(
+            opcode,
+            Opcode::GoAway,
+            "a mismatch must say why, not hang up"
+        );
+        let reason = String::from_utf8(payload).expect("GoAway reason is text");
+        assert!(reason.contains("mvm-agentd from-a-stale-tree"), "{reason}");
+        assert!(reason.contains(HOST_BUILD), "{reason}");
+
+        let err = host_handle
+            .join()
+            .unwrap()
+            .expect_err("the session must not be served");
+        assert!(err.to_string().contains("revision"), "{err}");
+    }
+
+    /// A peer that predates the handshake sends an empty Hello payload. That
+    /// is the stale-binary case, so it must be refused rather than defaulted.
+    #[test]
+    fn a_guest_with_no_handshake_at_all_is_refused() {
+        let (host_key, host_verify) = fresh_keys();
+        let (guest_key, guest_verify) = fresh_keys();
+        let (host_stream, mut guest_stream) = UnixStream::pair().unwrap();
+
+        let host_handle = thread::spawn(move || {
+            FlowMuxSession::accept(
+                host_stream,
+                "test-session",
+                host_key,
+                &guest_verify,
+                RegistryLimits::default(),
+                EgressGate::default_deny(),
+            )
+            .unwrap()
+            .serve()
+        });
+
+        let (mut guest_session, _id) =
+            Session::guest(&mut guest_stream, guest_key, &host_verify).unwrap();
+        write_frame(&mut guest_stream, &mut guest_session, Opcode::Hello, 0, b"");
+
+        let err = host_handle
+            .join()
+            .unwrap()
+            .expect_err("an empty Hello must not open a session");
+        assert!(err.to_string().contains("handshake"), "{err}");
+    }
+
     #[test]
     fn accept_succeeds_and_sends_hello_ack() {
         let (host_key, host_verify) = fresh_keys();
@@ -1422,7 +1568,13 @@ mod tests {
             Session::guest(&mut guest_stream, guest_key, &host_verify).unwrap();
 
         // The guest must send Hello to open the FlowMux session.
-        write_frame(&mut guest_stream, &mut guest_session, Opcode::Hello, 0, b"");
+        write_frame(
+            &mut guest_stream,
+            &mut guest_session,
+            Opcode::Hello,
+            0,
+            &Handshake::local("test-guest").encode(),
+        );
 
         // Read the HelloAck from the host.
         let (opcode, _stream_id, _payload) =
@@ -1472,7 +1624,13 @@ mod tests {
         let (mut guest_session, _session_id) =
             Session::guest(&mut guest_stream, guest_key, &host_verify).unwrap();
 
-        write_frame(&mut guest_stream, &mut guest_session, Opcode::Hello, 0, b"");
+        write_frame(
+            &mut guest_stream,
+            &mut guest_session,
+            Opcode::Hello,
+            0,
+            &Handshake::local("test-guest").encode(),
+        );
 
         let (opcode, _stream_id, _payload) =
             read_flowmux_frame(&mut guest_stream, &mut guest_session);
@@ -1559,7 +1717,13 @@ mod tests {
         let (mut guest_session, _session_id) =
             Session::guest(&mut guest_stream, guest_key, &host_verify).unwrap();
 
-        write_frame(&mut guest_stream, &mut guest_session, Opcode::Hello, 0, b"");
+        write_frame(
+            &mut guest_stream,
+            &mut guest_session,
+            Opcode::Hello,
+            0,
+            &Handshake::local("test-guest").encode(),
+        );
 
         let (opcode, _stream_id, _payload) =
             read_flowmux_frame(&mut guest_stream, &mut guest_session);
@@ -1621,7 +1785,13 @@ mod tests {
         let (mut guest_session, _session_id) =
             Session::guest(&mut guest_stream, guest_key, &host_verify).unwrap();
 
-        write_frame(&mut guest_stream, &mut guest_session, Opcode::Hello, 0, b"");
+        write_frame(
+            &mut guest_stream,
+            &mut guest_session,
+            Opcode::Hello,
+            0,
+            &Handshake::local("test-guest").encode(),
+        );
 
         let (opcode, _stream_id, _payload) =
             read_flowmux_frame(&mut guest_stream, &mut guest_session);
@@ -1765,7 +1935,13 @@ mod tests {
         let (mut guest_session, _session_id) =
             Session::guest(&mut guest_stream, guest_key, &host_verify).unwrap();
 
-        write_frame(&mut guest_stream, &mut guest_session, Opcode::Hello, 0, b"");
+        write_frame(
+            &mut guest_stream,
+            &mut guest_session,
+            Opcode::Hello,
+            0,
+            &Handshake::local("test-guest").encode(),
+        );
 
         let (opcode, _stream_id, _payload) =
             read_flowmux_frame(&mut guest_stream, &mut guest_session);
