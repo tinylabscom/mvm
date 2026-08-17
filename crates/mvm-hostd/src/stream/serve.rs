@@ -24,6 +24,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -41,8 +42,24 @@ use super::fanout::{DrainedWindow, ReaderHandle};
 /// a spin loop.
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
-/// How often the accept loop wakes to notice a stop request.
-const ACCEPT_INTERVAL: Duration = Duration::from_millis(25);
+/// How long the accept loop pauses after a genuine accept failure, so a
+/// persistently failing listener cannot spin.
+///
+/// This is not a stop-polling cadence. The loop blocks in `accept` and is woken
+/// by [`StreamServerHandle::shutdown`] connecting to its own socket. It used to
+/// poll a nonblocking listener on a 25 ms tick, which put a mean 12.5 ms on
+/// every transient teardown — and unlike the other polls of its kind, backoff
+/// could not help it: the loop idles for the whole life of the VM, so it was
+/// always already sitting at the ceiling when the stop arrived.
+const ACCEPT_RETRY_INTERVAL: Duration = Duration::from_millis(25);
+
+/// How long [`StreamServerHandle::shutdown`] waits for the accept thread after
+/// waking it, before detaching it and moving on.
+///
+/// Reached only when the wake-up could not be delivered, which needs the socket
+/// to have been unlinked behind the server's back. Generous, because expiring
+/// it early would detach a thread that was about to return.
+const ACCEPT_JOIN_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// How long one write to a follower may block before the server re-checks
 /// its stop flag.
@@ -66,6 +83,10 @@ pub struct StreamServerHandle {
     path: PathBuf,
     stop: Arc<AtomicBool>,
     accept: Option<JoinHandle<()>>,
+    /// Disconnects when the accept thread exits. Never carries a value; it
+    /// exists so shutdown can wait on that exit with a bound, which `std`
+    /// offers no way to do on a [`JoinHandle`] directly.
+    exited: Receiver<()>,
 }
 
 impl StreamServerHandle {
@@ -82,9 +103,31 @@ impl StreamServerHandle {
     fn shutdown(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
         if let Some(accept) = self.accept.take() {
-            // A panicked accept thread has already stopped accepting, which
-            // is what this call is for; the socket cleanup below still runs.
-            let _ = accept.join();
+            // Wake the blocked `accept` so it observes the stop flag now
+            // rather than whenever a follower happens to connect. The accept
+            // loop re-checks the flag immediately after accepting and drops
+            // this connection without serving it.
+            let _ = UnixStream::connect(&self.path);
+            // Bounded, because the wake-up is not guaranteed to land: if
+            // something already unlinked the socket, nothing can connect to it
+            // and the blocking accept has no other way to return. That case
+            // detaches the thread rather than hanging teardown on it — the
+            // process is on its way out and the socket is gone either way.
+            //
+            // A panicked accept thread has already stopped accepting, which is
+            // what this call is for; the socket cleanup below still runs.
+            match self.exited.recv_timeout(ACCEPT_JOIN_TIMEOUT) {
+                Ok(()) | Err(RecvTimeoutError::Disconnected) => {
+                    let _ = accept.join();
+                }
+                Err(RecvTimeoutError::Timeout) => {
+                    warn!(
+                        path = %self.path.display(),
+                        "stream accept thread did not return; detaching it",
+                    );
+                    drop(accept);
+                }
+            }
         }
         let _ = std::fs::remove_file(&self.path);
     }
@@ -108,15 +151,16 @@ pub fn serve_stream(path: &Path, broker: SharedBroker) -> io::Result<StreamServe
     }
     reclaim_stale_socket(path)?;
     let listener = UnixListener::bind(path)?;
-    listener.set_nonblocking(true)?;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(SOCKET_MODE))?;
 
     let stop = Arc::new(AtomicBool::new(false));
-    let accept = spawn_accept_loop(listener, broker, Arc::clone(&stop))?;
+    let (exit_tx, exited) = std::sync::mpsc::channel::<()>();
+    let accept = spawn_accept_loop(listener, broker, Arc::clone(&stop), exit_tx)?;
     Ok(StreamServerHandle {
         path: path.to_path_buf(),
         stop,
         accept: Some(accept),
+        exited,
     })
 }
 
@@ -124,10 +168,16 @@ fn spawn_accept_loop(
     listener: UnixListener,
     broker: SharedBroker,
     stop: Arc<AtomicBool>,
+    exit_tx: Sender<()>,
 ) -> io::Result<JoinHandle<()>> {
     thread::Builder::new()
         .name("mvm-stream-serve".to_string())
-        .spawn(move || accept_loop(&listener, &broker, &stop))
+        .spawn(move || {
+            // Owned by the thread so its drop reports the exit, including on
+            // a panic unwind. Never sent on.
+            let _exit = exit_tx;
+            accept_loop(&listener, &broker, &stop);
+        })
         .inspect_err(|error| {
             // Thread exhaustion is the realistic cause, and it is exactly the
             // state an operator needs the stream for. Report it rather than
@@ -166,6 +216,13 @@ fn accept_loop(listener: &UnixListener, broker: &SharedBroker, stop: &Arc<Atomic
     while !stop.load(Ordering::SeqCst) {
         match listener.accept() {
             Ok((socket, _addr)) => {
+                // The shutdown wake-up connects only to unblock this accept.
+                // Checking here — not just at the top of the loop — is what
+                // keeps it from being served as a real follower.
+                if stop.load(Ordering::SeqCst) {
+                    drop(socket);
+                    break;
+                }
                 connections.retain(|handle| !handle.is_finished());
                 // Subscribe here, on the accepting thread, not inside the
                 // follower it spawns. The broker attaches a reader at the
@@ -179,10 +236,12 @@ fn accept_loop(listener: &UnixListener, broker: &SharedBroker, stop: &Arc<Atomic
                     Err(error) => warn!(%error, "stream follower thread could not start"),
                 }
             }
-            Err(e) if e.kind() == io::ErrorKind::WouldBlock => thread::sleep(ACCEPT_INTERVAL),
+            // A signal can interrupt a blocking accept; that is not a failure
+            // and must not be reported or backed off as one.
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
             Err(error) => {
                 warn!(%error, "stream socket accept failed");
-                thread::sleep(ACCEPT_INTERVAL);
+                thread::sleep(ACCEPT_RETRY_INTERVAL);
             }
         }
     }
@@ -969,5 +1028,45 @@ mod tests {
         finished
             .recv_timeout(Duration::from_secs(20))
             .expect("shutdown must not wait on a consumer that stopped reading");
+    }
+
+    #[test]
+    fn shutdown_returns_even_when_the_socket_was_unlinked_behind_it() {
+        // The hazard the blocking accept introduces. Shutdown wakes the accept
+        // by connecting to the socket; if something already removed it, no
+        // connection can be made and the accept has no other way to return.
+        // Detaching is the required behaviour — hanging teardown is not.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("stream.sock");
+        let handle = serve_stream(&path, broker_in(dir.path())).expect("serve");
+
+        std::fs::remove_file(&path).expect("unlink the socket out from under the server");
+
+        let (done, waited) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            handle.stop();
+            let _ = done.send(());
+        });
+        waited
+            .recv_timeout(ACCEPT_JOIN_TIMEOUT + Duration::from_secs(5))
+            .expect("stop must return within its bound when the wake-up cannot be delivered");
+    }
+
+    #[test]
+    fn the_shutdown_wakeup_is_not_served_as_a_follower() {
+        // The wake-up is a real connection. If the accept loop treated it as a
+        // follower it would subscribe a reader at the live head and then be
+        // joined at once, which is a subscribe/teardown race rather than a
+        // clean stop.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("stream.sock");
+        let broker = broker_in(dir.path());
+        let handle = serve_stream(&path, Arc::clone(&broker)).expect("serve");
+        handle.stop();
+        assert_eq!(
+            broker.lock().expect("broker lock").reader_count(),
+            0,
+            "the shutdown wake-up subscribed a reader",
+        );
     }
 }
