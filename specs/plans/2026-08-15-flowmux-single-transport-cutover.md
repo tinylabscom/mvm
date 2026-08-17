@@ -10,7 +10,14 @@ work is demonstrably incomplete on `main`; this plan is where the remaining work
 
 ## Status
 
-**WS0–WS7 not started.** Guest egress is dead on `main`.
+**WS0–WS3 landed; WS4–WS7 open.** Guest egress works on `main`: Stage 0 fails
+fast with the true cause (WS0), the host serves sessions (WS1), identity is
+delivered per boot off the cmdline (WS2), and every spawn site threads it
+(WS3) — `mvmctl machine run --image python:3.12 -- python -c "print(2 + 2)"`
+prints `4`. What remains is the consolidation the plan is named for:
+substitution folded onto `OpenHttp` (WS4), ICMP dispatch (WS5), deleting
+`EgressMode`/`serve_wire`/`serve_raw` behind a one-protocol gate (WS6), and
+readiness failing closed (WS7).
 
 ## Why
 
@@ -79,17 +86,17 @@ is a later simplification, not a prerequisite.
 
 ## Workstreams
 
-### WS0 — Stage 0 fails fast with the true cause
+### WS0 — Stage 0 fails fast with the true cause — **complete**
 
-- [ ] `wait_for_vsock_egress_proxy_if_requested` (`crates/mvm-build/src/bin/stage0-init.rs:355-398`)
+- [x] `wait_for_vsock_egress_proxy_if_requested` (`crates/mvm-build/src/bin/stage0-init.rs:355-398`)
       returns a `Result` and aborts before `nix build` when the egress client exits or never
       binds, naming `mvm-egress-client` and its exit status; `dump_vsock_egress_diagnostics()`
       still runs
-- [ ] Decision extracted as a pure `egress_readiness_outcome(...) -> Result<(), String>`,
+- [x] Decision extracted as a pure `egress_readiness_outcome(...) -> Result<(), String>`,
       unit-tested without a VM, matching the `egress_child_exit_message` shape (`:341`)
-- [ ] Mirrored in `crates/mvm-build/src/bin/mvm-host-vm-init.rs`
-- [ ] The CLI surfaces the `stage0-init:` line instead of the downstream nix noise
-- [ ] `cmdline_overflow` (`crates/mvm-vmm/src/host/cmdline.rs:30-52`) enforced on both
+- [x] Mirrored in `crates/mvm-build/src/bin/mvm-host-vm-init.rs`
+- [x] The CLI surfaces the `stage0-init:` line instead of the downstream nix noise
+- [x] `cmdline_overflow` (`crates/mvm-vmm/src/host/cmdline.rs:30-52`) enforced on both
       builder paths — `libkrun_builder.rs:204` and `qemu_builder.rs:231` validate nothing today
 
 ### WS1 — Host accepts sessions properly — **complete**
