@@ -15,13 +15,6 @@
       ]
     },
     {
-      "path": "crates/mvm-agentd/src/substitution_client.rs",
-      "package": "mvm-agentd",
-      "claims": [
-        13
-      ]
-    },
-    {
       "path": "crates/mvm-agentd/src/vsock/verb_grant.rs",
       "package": "mvm-agentd",
       "claims": [

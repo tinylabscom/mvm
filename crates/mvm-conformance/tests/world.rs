@@ -411,6 +411,8 @@ pub struct CliWorld {
     pub one_transport_persisted: Option<Vec<u8>>,
     /// `(egress_mode, carries_guest_key)` for each endpoint config built.
     pub one_transport_modes: Vec<(String, bool)>,
+    /// Per-VM state dir for the readiness scenarios.
+    pub one_transport_state: Option<tempfile::TempDir>,
 }
 
 /// What a warm-claim `When` step observed from a `WorkloadRunner::claim_standby`

@@ -179,6 +179,56 @@ pub fn build_egress_tls_delivery(bound_hosts: &[&str], ca_dir: &Path) -> Result<
 /// path reads this to inject `HTTP_PROXY` + placeholder vars). Spawned only when
 /// the admitted plan carries secret bindings.
 pub const SUBST_PID_FILE: &str = "substitution.pid";
+
+/// Per-VM file the endpoint writes when a guest completes an authenticated
+/// session on it.
+pub const SUBST_SESSION_FILE: &str = "substitution.session";
+
+/// Whether a guest has authenticated against this VM's endpoint.
+#[must_use]
+pub fn endpoint_session_established(state_dir: &std::path::Path) -> bool {
+    state_dir.join(SUBST_SESSION_FILE).exists()
+}
+
+/// Fail a launch whose endpoint never carried a session.
+///
+/// Two distinct failures reach the same place. The endpoint may have exited —
+/// the pid is gone, so nothing is serving and nothing will. Or it may still be
+/// running while no guest ever authenticated against it, which is what a
+/// mismatched identity or a guest that cannot find its drive looks like: the
+/// endpoint is healthy and the workload has no network.
+///
+/// **Call this after the guest is activated, never before.** The endpoint binds
+/// and prints its handshake line before boot, but a session cannot exist until
+/// a guest is running to open one — waiting for it pre-boot deadlocks on an
+/// event the wait itself is preventing.
+pub fn refuse_launch_without_endpoint_session(
+    vm_name: &str,
+    state_dir: &std::path::Path,
+) -> anyhow::Result<()> {
+    if endpoint_session_established(state_dir) {
+        return Ok(());
+    }
+    // No pid file means no endpoint was ever spawned for this VM — a boot with
+    // no secrets and a deny-egress policy has nothing to mediate, and has no
+    // network by design rather than by failure. Checking those would refuse
+    // every one of them.
+    let pid_file = state_dir.join(SUBST_PID_FILE);
+    let Some(pid) = read_pid(&pid_file) else {
+        return Ok(());
+    };
+    if pid_alive(pid) {
+        anyhow::bail!(
+            "VM {vm_name}: the network endpoint is running but no guest ever \
+             authenticated against it — the workload has no network. Check that the \
+             guest found its FlowMux identity drive."
+        );
+    }
+    anyhow::bail!(
+        "VM {vm_name}: the network endpoint exited before any guest authenticated \
+         against it — the workload has no network."
+    )
+}
 /// Default bound on the endpoint's ready handshake.
 ///
 /// This is not a budget for the endpoint's work — binding a listener and
@@ -324,6 +374,9 @@ pub struct SubstitutionSpawnParams<'a> {
     /// to read the environment would be an egress outage on a force-tunnelled
     /// host, and the forgetting would be invisible.
     pub egress_proxy: Option<EgressProxySpawnConfig>,
+    /// Where the endpoint records its first authenticated session. Set by the
+    /// spawner; callers leave it `None`.
+    pub session_marker: Option<std::path::PathBuf>,
     /// `(cert_pem, key_pem)` of the per-VM intermediate for the `https`
     /// terminator; the key never reaches the guest. `None` ⇒ `http`-only.
     pub tls_intermediate: Option<(String, String)>,
@@ -528,6 +581,7 @@ impl<'a> SubstitutionSpawnParamsBuilder<'a> {
             binding_store_dir: self.binding_store_dir,
             flowmux_identity: self.flowmux_identity,
             egress_proxy: self.egress_proxy,
+            session_marker: None,
         })
     }
 }
@@ -596,6 +650,7 @@ pub fn endpoint_config_for_identity(
         },
         terminator_listen: None,
         egress_proxy: None,
+        session_marker: None,
         tls_intermediate: None,
         network_policy: None,
         resolver_remote: None,
@@ -628,6 +683,9 @@ fn build_endpoint_config_json(params: &SubstitutionSpawnParams<'_>) -> serde_jso
             "wire"
         },
     });
+    if let Some(marker) = params.session_marker.as_ref() {
+        cfg["session_marker"] = serde_json::json!(marker);
+    }
     if let Some(proxy) = params.egress_proxy.as_ref() {
         // `EndpointConfig.proxy_*`: the operator's upstream proxy for the
         // forward leg. Resolved on the host, where configuration lives, rather
@@ -716,6 +774,12 @@ pub fn spawn_network_endpoint(mut params: SubstitutionSpawnParams<'_>) -> Result
     if params.egress_proxy.is_none() {
         params.egress_proxy = EgressProxySpawnConfig::from_host_env();
     }
+    let session_marker = params.state_dir.join(SUBST_SESSION_FILE);
+    // A stale marker from a previous boot would make this launch look ready
+    // before any guest had connected, which is the exact failure the check
+    // exists to catch.
+    let _ = std::fs::remove_file(&session_marker);
+    params.session_marker = Some(session_marker);
     let cfg = build_endpoint_config_json(&params);
     let SubstitutionSpawnParams {
         vm_name, state_dir, ..
@@ -980,6 +1044,83 @@ fn kill(pid: libc::pid_t, sig: libc::c_int) {
 
 #[cfg(test)]
 mod tests {
+
+    /// A launch whose endpoint never carried a session must fail, and say
+    /// which of the two ways it failed.
+    #[test]
+    fn a_launch_with_no_endpoint_session_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        // No pid file at all: no endpoint was spawned, so there is nothing to
+        // be missing. A boot with nothing to mediate must not be refused.
+        assert!(refuse_launch_without_endpoint_session("vm-1", dir.path()).is_ok());
+
+        // A pid that is not running: the endpoint died. Pid 1 is never this
+        // endpoint, and a pid that cannot exist reads as dead.
+        std::fs::write(dir.path().join(SUBST_PID_FILE), "2147483646").unwrap();
+        let err = refuse_launch_without_endpoint_session("vm-1", dir.path()).unwrap_err();
+        assert!(
+            err.to_string().contains("exited before any guest"),
+            "unexpected: {err}"
+        );
+
+        // A live pid and still no session: the endpoint is up, the guest never
+        // reached it. Our own pid stands in for a live endpoint.
+        std::fs::write(
+            dir.path().join(SUBST_PID_FILE),
+            std::process::id().to_string(),
+        )
+        .unwrap();
+        let err = refuse_launch_without_endpoint_session("vm-1", dir.path()).unwrap_err();
+        assert!(
+            err.to_string().contains("no guest ever authenticated"),
+            "unexpected: {err}"
+        );
+    }
+
+    #[test]
+    fn a_launch_whose_endpoint_carried_a_session_is_admitted() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(SUBST_SESSION_FILE), b"1").unwrap();
+        assert!(endpoint_session_established(dir.path()));
+        assert!(refuse_launch_without_endpoint_session("vm-1", dir.path()).is_ok());
+    }
+
+    /// The marker is per-boot. A file left by a previous run would make the
+    /// next launch look ready before any guest had connected — the exact
+    /// failure this check exists to catch, reintroduced by staleness.
+    #[test]
+    fn the_session_marker_is_cleared_before_a_new_endpoint_starts() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join(SUBST_SESSION_FILE);
+        std::fs::write(&marker, b"1").unwrap();
+        // Mirrors what `spawn_network_endpoint` does before handing the path
+        // to a fresh endpoint.
+        let _ = std::fs::remove_file(&marker);
+        assert!(!endpoint_session_established(dir.path()));
+    }
+
+    /// The marker path reaches the endpoint's config, or the endpoint has
+    /// nothing to write and every launch refuses.
+    #[test]
+    fn the_config_carries_the_session_marker_when_set() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join(SUBST_SESSION_FILE);
+        let redaction = mvm_core::policy::RedactionPolicy::default();
+        let mut params = SubstitutionSpawnParamsBuilder::new()
+            .vm_name("vm-1")
+            .state_dir(dir.path())
+            .tenant("local")
+            .secrets(&[])
+            .redaction(&redaction)
+            .transport(EndpointTransport::Uds {
+                path: dir.path().join("sub.sock"),
+            })
+            .build()
+            .expect("builder");
+        params.session_marker = Some(marker.clone());
+        let cfg = build_endpoint_config_json(&params);
+        assert_eq!(cfg["session_marker"], serde_json::json!(marker));
+    }
     use super::*;
     use mvm_contract::stream::secret_fingerprint::SecretCategory;
     use mvm_core::util::test_env::TestEnv;
@@ -1452,6 +1593,7 @@ mod tests {
             transport: EndpointTransport::Uds { path: sock.clone() },
             terminator_listen: None,
             egress_proxy: None,
+            session_marker: None,
             tls_intermediate: None,
             network_policy: None,
             resolver_remote: None,
@@ -1512,6 +1654,7 @@ mod tests {
             },
             terminator_listen: None,
             egress_proxy: None,
+            session_marker: None,
             tls_intermediate: None,
             network_policy: None,
             resolver_remote: None,
@@ -1577,6 +1720,7 @@ mod tests {
             },
             terminator_listen: None,
             egress_proxy: None,
+            session_marker: None,
             tls_intermediate: None,
             network_policy: None,
             resolver_remote: None,
@@ -1643,6 +1787,7 @@ mod tests {
             },
             terminator_listen: None,
             egress_proxy: None,
+            session_marker: None,
             tls_intermediate: None,
             network_policy: None,
             resolver_remote: None,
@@ -1702,6 +1847,7 @@ mod tests {
             },
             terminator_listen: None,
             egress_proxy: None,
+            session_marker: None,
             tls_intermediate: None,
             network_policy,
             resolver_remote: None,

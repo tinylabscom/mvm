@@ -104,6 +104,7 @@ impl NetworkEndpointSpawner for RealNetworkEndpointSpawner {
             // None ⇒ inherit the host's proxy environment, resolved once inside
             // `spawn_network_endpoint` for every backend.
             egress_proxy: None,
+            session_marker: None,
             tls_intermediate: None,
             network_policy: Some(req.network_policy),
             resolver_remote: None,

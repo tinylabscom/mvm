@@ -362,6 +362,13 @@ jobs:
       - name: vsock-only egress (no guest NIC on the vmm/HVF path, ADR-100)
         run: cargo run -p xtask -- check-vsock-only-egress
 
+      # The other half of the same rule. The gate above says a guest has only
+      # the vsock channel; this one says it speaks exactly one protocol over
+      # it. A guest made FlowMux-only while the host still served the old
+      # protocol is what killed egress on main with every test green.
+      - name: one guest→host protocol
+        run: cargo run -p xtask -- check-one-guest-protocol
+
       # Tree-wide companion to the check above. The userspace network gateways
       # went with the guest-NIC path; a reference coming back is how a second
       # egress model grows back alongside the real one.

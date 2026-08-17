@@ -7,7 +7,10 @@
 //! relay for guest-initiated `OpenTcp`, `Resolve`, and `OpenUdp` flows.
 //! Everything else fails closed with `GoAway`.
 
+mod http_flow;
 pub mod registry;
+mod tcp_relay;
+use tcp_relay::{TcpRelayParams, connect_first_admitted, run_tcp_relay};
 mod udp_relay;
 
 use std::collections::BTreeMap;
@@ -18,7 +21,7 @@ use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, Ordering},
 };
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use mvm_contract::protocol::dns::{MAX_DNS_MESSAGE, decode_query, encode_response};
@@ -31,7 +34,7 @@ use mvm_core::net::session::Session;
 use mvm_vmm::vsock_egress_bridge::egress_gate::{DnsVerdict, EgressGate, EgressVerdict};
 use tracing::{info, warn};
 
-use self::registry::{RegistryError, RegistryLimits, StreamRegistry, class_for_open};
+use self::registry::{RegistryLimits, StreamRegistry, class_for_open};
 use self::udp_relay::{
     UdpAssociationHandle, UdpRelayParams, UdpSendMsg, decode_udp_addr, run_udp_relay,
 };
@@ -59,6 +62,7 @@ pub struct ConnectionRateLimiter {
     tcp: Mutex<TokenBucket>,
     udp: Mutex<TokenBucket>,
     dns: Mutex<TokenBucket>,
+    icmp: Mutex<TokenBucket>,
 }
 
 impl ConnectionRateLimiter {
@@ -68,6 +72,7 @@ impl ConnectionRateLimiter {
             tcp: Mutex::new(TokenBucket::new(limits.tcp_connect_rate)),
             udp: Mutex::new(TokenBucket::new(limits.udp_open_rate)),
             dns: Mutex::new(TokenBucket::new(limits.dns_resolve_rate)),
+            icmp: Mutex::new(TokenBucket::new(limits.icmp_echo_rate)),
         }
     }
 
@@ -75,9 +80,13 @@ impl ConnectionRateLimiter {
     /// when the limiter for this class is disabled.
     pub fn try_open(&self, class: registry::FlowClass) -> bool {
         let bucket = match class {
-            registry::FlowClass::Tcp => &self.tcp,
+            // A typed HTTP flow ends in a host-originated TCP connection, so
+            // it spends the same budget rather than getting a private one to
+            // route around it.
+            registry::FlowClass::Tcp | registry::FlowClass::Http => &self.tcp,
             registry::FlowClass::Udp => &self.udp,
             registry::FlowClass::Dns => &self.dns,
+            registry::FlowClass::Icmp => &self.icmp,
         };
         let mut guard = bucket.lock().expect("rate limiter bucket poisoned");
         // A zero-capacity bucket means "unlimited" for this class.
@@ -124,6 +133,20 @@ pub struct FlowMuxSession {
     /// Active guest-initiated TCP streams and their upstream sockets. The host
     /// half of each stream lives in a dedicated thread.
     streams: BTreeMap<u32, TcpStreamHandle>,
+    /// The rate/inflight guard the ICMP verb admits against.
+    ///
+    /// Per session, like the registry: one guest's echoes cannot spend
+    /// another's budget.
+    icmp_rate: Arc<crate::supervisor::egress_rate::EgressRateGuard>,
+    /// Typed HTTP flows still being assembled, by stream id.
+    http_flows: http_flow::HttpFlows,
+    /// The substitution service typed HTTP flows are forwarded through.
+    ///
+    /// `None` on an endpoint that assembled no substitution service, where an
+    /// `OpenHttp` is refused rather than silently forwarded unsubstituted —
+    /// forwarding it would send a `mvm-secret-<hex>` placeholder to a real
+    /// upstream.
+    substitution: Option<Arc<crate::supervisor::network_endpoint_proxy::SubstitutionService>>,
     /// Active guest-initiated UDP associations. Each association runs in its
     /// own relay thread.
     udp_associations: BTreeMap<u32, UdpAssociationHandle>,
@@ -164,6 +187,66 @@ struct TcpStreamHandle {
     retired: Arc<AtomicBool>,
 }
 
+/// What one accepted FlowMux session needs to serve.
+///
+/// A struct with a builder rather than a longer argument list: the optional
+/// halves — the audit recorder and the substitution service — are exactly the
+/// ones a caller is most likely to pass in the wrong order.
+pub struct FlowMuxAccept {
+    session_id: String,
+    host_key: SigningKey,
+    guest_anchor: VerifyingKey,
+    limits: RegistryLimits,
+    gate: EgressGate,
+    recorder: Option<Arc<Recorder>>,
+    substitution: Option<Arc<crate::supervisor::network_endpoint_proxy::SubstitutionService>>,
+}
+
+impl FlowMuxAccept {
+    /// The required half: who this session is, whose key signs it, and which
+    /// single guest identity it will accept.
+    #[must_use]
+    pub fn new(
+        session_id: &str,
+        host_key: SigningKey,
+        guest_anchor: VerifyingKey,
+        limits: RegistryLimits,
+        gate: EgressGate,
+    ) -> Self {
+        Self {
+            session_id: session_id.to_string(),
+            host_key,
+            guest_anchor,
+            limits,
+            gate,
+            recorder: None,
+            substitution: None,
+        }
+    }
+
+    /// Attach the chain-signed audit recorder.
+    #[must_use]
+    pub fn with_recorder(mut self, recorder: Option<Arc<Recorder>>) -> Self {
+        self.recorder = recorder;
+        self
+    }
+
+    /// Attach the substitution service typed HTTP flows forward through.
+    ///
+    /// Without it an `OpenHttp` is refused: a flow that may name a
+    /// `mvm-secret-<hex>` placeholder has nothing to resolve it, and
+    /// forwarding it anyway would put the placeholder on the wire to a real
+    /// upstream.
+    #[must_use]
+    pub fn with_substitution(
+        mut self,
+        substitution: Option<Arc<crate::supervisor::network_endpoint_proxy::SubstitutionService>>,
+    ) -> Self {
+        self.substitution = substitution;
+        self
+    }
+}
+
 impl FlowMuxSession {
     /// Return the session identifier for logging and correlation.
     pub fn session_id(&self) -> String {
@@ -183,14 +266,9 @@ impl FlowMuxSession {
         limits: RegistryLimits,
         gate: EgressGate,
     ) -> Result<Self, FlowMuxError> {
-        Self::accept_with_recorder(
+        Self::accept_with(
             stream,
-            session_id,
-            host_key,
-            guest_anchor,
-            limits,
-            gate,
-            None,
+            FlowMuxAccept::new(session_id, host_key, guest_anchor.to_owned(), limits, gate),
         )
     }
 
@@ -200,15 +278,20 @@ impl FlowMuxSession {
     /// `session_id` must be unique per VM boot. `host_key` signs the
     /// handshake; `guest_anchor` is the only guest identity this endpoint
     /// will accept. A mismatch fails closed.
-    pub fn accept_with_recorder(
+    pub fn accept_with(
         mut stream: UnixStream,
-        session_id: &str,
-        host_key: SigningKey,
-        guest_anchor: &VerifyingKey,
-        limits: RegistryLimits,
-        gate: EgressGate,
-        recorder: Option<Arc<Recorder>>,
+        params: FlowMuxAccept,
     ) -> Result<Self, FlowMuxError> {
+        let FlowMuxAccept {
+            session_id,
+            host_key,
+            guest_anchor,
+            limits,
+            gate,
+            recorder,
+            substitution,
+        } = params;
+        let session_id = session_id.as_str();
         // Split the socket into independent read/write descriptors so the
         // main thread can block on guest frames while relay threads emit
         // upstream data back to the guest.
@@ -216,7 +299,7 @@ impl FlowMuxSession {
         let (session, _peer_key) = Session::host(&mut stream, session_id, host_key)
             .map_err(|e| FlowMuxError::Handshake(e.to_string()))?;
 
-        if session.peer_verifying_key() != guest_anchor {
+        if session.peer_verifying_key() != &guest_anchor {
             return Err(FlowMuxError::Handshake(
                 "guest identity does not match pinned anchor".to_string(),
             ));
@@ -231,6 +314,9 @@ impl FlowMuxSession {
             validator: Arc::new(Mutex::new(SessionValidator::default())),
             registry: Arc::new(Mutex::new(StreamRegistry::new(limits))),
             streams: BTreeMap::new(),
+            icmp_rate: Arc::new(crate::supervisor::egress_rate::EgressRateGuard::builder().build()),
+            http_flows: BTreeMap::new(),
+            substitution,
             udp_associations: BTreeMap::new(),
             gate,
             read_buf: Vec::with_capacity(4096),
@@ -413,6 +499,29 @@ impl FlowMuxSession {
                         self.remove_stream(stream_id);
                     }
                 }
+                Opcode::IcmpEcho => {
+                    if let Err(e) = self.handle_icmp_echo(stream_id, payload_len) {
+                        warn!(error = %e, stream_id, "FlowMux ICMP echo failed");
+                        self.send_icmp_refused(stream_id, "icmp echo failed")?;
+                        self.remove_stream(stream_id);
+                    }
+                }
+                Opcode::OpenHttp => {
+                    if let Err(e) = self.handle_open_http(stream_id) {
+                        warn!(error = %e, stream_id, "FlowMux HTTP open failed");
+                        self.send_refused(stream_id, "http open refused")?;
+                        self.http_flows.remove(&stream_id);
+                        self.remove_stream(stream_id);
+                    }
+                }
+                Opcode::HttpRequestHead | Opcode::HttpRequestBody => {
+                    if let Err(e) = self.handle_http_request_frame(opcode, stream_id, payload_len) {
+                        warn!(error = %e, stream_id, "FlowMux HTTP request refused");
+                        self.send_reset(stream_id, "http request refused")?;
+                        self.http_flows.remove(&stream_id);
+                        self.remove_stream(stream_id);
+                    }
+                }
                 Opcode::CloseUdp => {
                     self.remove_udp_association(stream_id);
                 }
@@ -436,9 +545,7 @@ impl FlowMuxSession {
             return Ok(());
         }
 
-        let payload_start = LENGTH_PREFIX_LEN + HEADER_LEN;
-        let payload_end = payload_start + payload_len as usize;
-        let target = match std::str::from_utf8(&self.read_buf[payload_start..payload_end]) {
+        let target = match std::str::from_utf8(self.frame_payload(payload_len)) {
             Ok(s) => s,
             Err(_) => {
                 self.send_refused(stream_id, "OpenTcp target is not UTF-8")?;
@@ -569,9 +676,7 @@ impl FlowMuxSession {
             return Ok(());
         }
 
-        let payload_start = LENGTH_PREFIX_LEN + HEADER_LEN;
-        let payload_end = payload_start + payload_len as usize;
-        let query = &self.read_buf[payload_start..payload_end];
+        let query = self.frame_payload(payload_len);
 
         let question = match decode_query(query) {
             Ok(q) => q,
@@ -728,9 +833,7 @@ impl FlowMuxSession {
             }
         };
 
-        let payload_start = LENGTH_PREFIX_LEN + HEADER_LEN;
-        let payload_end = payload_start + payload_len as usize;
-        let payload = &self.read_buf[payload_start..payload_end];
+        let payload = self.frame_payload(payload_len);
         if payload.len() < UDP_ADDR_PREFIX_LEN {
             return Err(FlowMuxError::FrameRefused(
                 "UdpSend payload too short".to_string(),
@@ -819,9 +922,7 @@ impl FlowMuxSession {
     }
 
     fn handle_guest_data(&mut self, stream_id: u32, payload_len: u32) -> Result<(), FlowMuxError> {
-        let payload_start = LENGTH_PREFIX_LEN + HEADER_LEN;
-        let payload_end = payload_start + payload_len as usize;
-        let payload = &self.read_buf[payload_start..payload_end];
+        let payload = self.frame_payload(payload_len).to_vec();
 
         let handle = match self.streams.get_mut(&stream_id) {
             Some(h) => h,
@@ -851,7 +952,7 @@ impl FlowMuxSession {
 
         if let Err(e) = handle
             .upstream
-            .write_all(payload)
+            .write_all(&payload)
             .and_then(|_| handle.upstream.flush())
         {
             warn!(error = %e, stream_id, "write to upstream failed");
@@ -899,6 +1000,140 @@ impl FlowMuxSession {
         Ok(())
     }
 
+    /// Serve one host-mediated ICMP echo.
+    ///
+    /// A NIC-less guest has no raw socket, so the host echoes on its behalf.
+    /// The decision — parse, bounds, admission, rate — is
+    /// [`icmp_handler::serve_request`], shared with every other transport that
+    /// has ever carried this verb, so they cannot drift on what is allowed.
+    fn handle_icmp_echo(&mut self, stream_id: u32, payload_len: u32) -> Result<(), FlowMuxError> {
+        use crate::supervisor::{icmp_audit, icmp_echo, icmp_handler};
+
+        if !self.check_connection_rate(registry::FlowClass::Icmp) {
+            return Err(FlowMuxError::FrameRefused("icmp rate limit".to_string()));
+        }
+        lock_registry(&self.registry)
+            .open_guest(stream_id, registry::FlowClass::Icmp)
+            .map_err(|e| FlowMuxError::FrameRefused(e.to_string()))?;
+
+        let line = String::from_utf8_lossy(self.frame_payload(payload_len)).into_owned();
+        let (replies, audit) = icmp_handler::serve_request(
+            &line,
+            &self.gate,
+            &self.icmp_rate,
+            &icmp_echo::PingSocketEcho,
+        );
+        if let Some(recorder) = self.recorder.as_deref() {
+            icmp_audit::emit_icmp_echo_blocking(recorder, &audit);
+        }
+
+        // One echo per flow, so the last reply ends it. A refusal is an answer
+        // too — the guest gets the reason rather than a closed stream.
+        let last = replies.len().saturating_sub(1);
+        for (index, reply) in replies.into_iter().enumerate() {
+            let encoded = serde_json::to_vec(&reply)
+                .map_err(|e| FlowMuxError::FrameRefused(e.to_string()))?;
+            let opcode = match reply {
+                mvm_core::icmp_wire::IcmpEchoReply::Refused { .. } => Opcode::IcmpRefused,
+                _ => Opcode::IcmpReply,
+            };
+            self.write_frame(opcode, stream_id, &encoded)?;
+            if index == last {
+                self.mark_sent(opcode, stream_id);
+            }
+        }
+        self.remove_stream(stream_id);
+        Ok(())
+    }
+
+    fn send_icmp_refused(&mut self, stream_id: u32, reason: &str) -> Result<(), FlowMuxError> {
+        let reply = mvm_core::icmp_wire::IcmpEchoReply::Refused {
+            message: reason.to_string(),
+        };
+        let encoded =
+            serde_json::to_vec(&reply).map_err(|e| FlowMuxError::FrameRefused(e.to_string()))?;
+        self.write_frame(Opcode::IcmpRefused, stream_id, &encoded)?;
+        self.mark_sent(Opcode::IcmpRefused, stream_id);
+        Ok(())
+    }
+
+    /// Open a typed HTTP flow.
+    ///
+    /// Refused outright when this endpoint assembled no substitution service:
+    /// the flow exists to carry a request that may name a placeholder, and
+    /// there would be nothing here to resolve it. Failing the open is the
+    /// difference between a workload that cannot reach the network and one
+    /// that sends `mvm-secret-<hex>` to a real upstream.
+    fn handle_open_http(&mut self, stream_id: u32) -> Result<(), FlowMuxError> {
+        if self.substitution.is_none() {
+            return Err(FlowMuxError::FrameRefused(
+                "no substitution service on this endpoint".to_string(),
+            ));
+        }
+        if !self.check_connection_rate(registry::FlowClass::Http) {
+            return Err(FlowMuxError::FrameRefused(
+                "http open rate limit".to_string(),
+            ));
+        }
+        lock_registry(&self.registry)
+            .open_guest(stream_id, registry::FlowClass::Http)
+            .map_err(|e| FlowMuxError::FrameRefused(e.to_string()))?;
+        self.http_flows
+            .insert(stream_id, http_flow::HttpFlow::new());
+        self.send_opened(stream_id)
+    }
+
+    /// Take one head or body frame, and forward as soon as the declared body
+    /// has arrived in full.
+    fn handle_http_request_frame(
+        &mut self,
+        opcode: Opcode,
+        stream_id: u32,
+        payload_len: u32,
+    ) -> Result<(), FlowMuxError> {
+        let payload = self.frame_payload(payload_len).to_vec();
+        let flow = self.http_flows.get_mut(&stream_id).ok_or_else(|| {
+            FlowMuxError::FrameRefused(format!("http frame on unopened flow {stream_id}"))
+        })?;
+        match opcode {
+            Opcode::HttpRequestHead => flow.accept_head(&payload),
+            _ => flow.accept_body(&payload),
+        }
+        .map_err(|e| FlowMuxError::FrameRefused(e.to_string()))?;
+
+        let Some(request) = flow.take_when_complete() else {
+            return Ok(());
+        };
+        self.http_flows.remove(&stream_id);
+        let (Some(service), Some(handle)) = (&self.substitution, &self.runtime_handle) else {
+            return Err(FlowMuxError::FrameRefused(
+                "no runtime to forward the http flow on".to_string(),
+            ));
+        };
+        http_flow::spawn_forward(
+            handle,
+            Arc::clone(service),
+            Arc::clone(&self.session),
+            Arc::clone(&self.writer),
+            stream_id,
+            request,
+        );
+        Ok(())
+    }
+
+    /// The payload of the frame currently in `read_buf`.
+    ///
+    /// The frame is decoded in place, so the payload is readable without a
+    /// copy. One accessor rather than the same two-line slice at each call
+    /// site: those indexed unchecked, so a frame shorter than its header
+    /// claimed would have panicked the session thread rather than refusing a
+    /// frame.
+    fn frame_payload(&self, payload_len: u32) -> &[u8] {
+        let start = LENGTH_PREFIX_LEN + HEADER_LEN;
+        let end = start.saturating_add(payload_len as usize);
+        self.read_buf.get(start..end).unwrap_or(&[])
+    }
+
     fn handle_window_update(
         &mut self,
         stream_id: u32,
@@ -909,9 +1144,7 @@ impl FlowMuxSession {
                 "WindowUpdate payload must be 4 bytes".to_string(),
             ));
         }
-        let payload_start = LENGTH_PREFIX_LEN + HEADER_LEN;
-        let payload_end = payload_start + payload_len as usize;
-        let payload = &self.read_buf[payload_start..payload_end];
+        let payload = self.frame_payload(payload_len);
         let delta = u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]);
         lock_registry(&self.registry)
             .grant_host_credit(stream_id, delta)
@@ -1133,44 +1366,6 @@ fn lock_registry(registry: &Mutex<StreamRegistry>) -> std::sync::MutexGuard<'_, 
     registry.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// How often the wait re-checks. The relay thread is blocked either way, so
-/// this trades a little latency for not needing a condvar in the registry.
-const HOST_CREDIT_POLL: Duration = Duration::from_millis(2);
-
-/// Reserve `len` bytes of host credit on `stream_id`, waiting for the guest to
-/// replenish if the window is currently full.
-///
-/// An exhausted window is **backpressure, not an error**. The guest returns
-/// credit as it consumes, so a full window means "slow down" — resetting the
-/// stream instead truncates a transfer that was working, which surfaces to the
-/// caller as a corrupt download rather than as flow control. Only two things
-/// end the wait: the stream going away, or a peer that has stopped reading for
-/// `wait`, which comes from `RegistryLimits::credit_wait`.
-fn await_host_credit(
-    registry: &Mutex<StreamRegistry>,
-    stream_id: u32,
-    len: u32,
-    retired: &AtomicBool,
-    wait: Duration,
-) -> Result<(), RegistryError> {
-    let deadline = Instant::now() + wait;
-    loop {
-        let err = match lock_registry(registry).consume_host_credit(stream_id, len) {
-            Ok(()) => return Ok(()),
-            Err(e) => e,
-        };
-        // `NotLive` means the stream is gone — waiting cannot fix that, and
-        // only `IllegalState` is the window-full case worth retrying.
-        if !matches!(err, RegistryError::IllegalState { .. })
-            || retired.load(Ordering::Relaxed)
-            || Instant::now() >= deadline
-        {
-            return Err(err);
-        }
-        std::thread::sleep(HOST_CREDIT_POLL);
-    }
-}
-
 /// Serialize and send one encrypted frame through a shared writer.
 ///
 /// Locks the session first, then the writer, so sequence numbers are assigned
@@ -1205,131 +1400,7 @@ fn write_frame_to(
     Ok(())
 }
 
-/// Try each admitted address in order, first success wins, bounded overall by
-/// `overall_timeout` and per-address by [`PER_IP_CONNECT_TIMEOUT`]. This is
-/// the happy-eyeballs fallover used by the raw egress path, expressed
-/// synchronously because the FlowMux session runs in `spawn_blocking`.
-fn connect_first_admitted(
-    ips: &[IpAddr],
-    port: u16,
-    overall_timeout: Duration,
-) -> Option<TcpStream> {
-    let deadline = std::time::Instant::now() + overall_timeout;
-    for ip in ips {
-        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-        if remaining.is_zero() {
-            break;
-        }
-        let budget = remaining.min(PER_IP_CONNECT_TIMEOUT);
-        match TcpStream::connect_timeout(&std::net::SocketAddr::new(*ip, port), budget) {
-            Ok(stream) => return Some(stream),
-            Err(e) => warn!(%ip, %port, error = %e, "FlowMux TCP connect attempt failed"),
-        }
-    }
-    None
-}
-
-/// Per-stream relay thread: read from the upstream TCP socket and forward
-/// each chunk to the guest as a `Data` frame. EOF becomes a `HalfClose`;
-/// errors become a `Reset`.
-/// Parameters for the per-stream TCP relay thread.
-struct TcpRelayParams {
-    stream_id: u32,
-    upstream: TcpStream,
-    session: Arc<Mutex<Session>>,
-    writer: Arc<Mutex<UnixStream>>,
-    registry: Arc<Mutex<StreamRegistry>>,
-    validator: Arc<Mutex<SessionValidator>>,
-    host_half_closed: Arc<AtomicBool>,
-    retired: Arc<AtomicBool>,
-    /// How long to wait for the guest to return credit before giving up.
-    credit_wait: Duration,
-}
-
-fn run_tcp_relay(params: TcpRelayParams) {
-    let TcpRelayParams {
-        stream_id,
-        mut upstream,
-        session,
-        writer,
-        registry,
-        validator,
-        host_half_closed,
-        retired,
-        credit_wait,
-    } = params;
-    let mut buf = [0u8; 16 * 1024];
-    loop {
-        match upstream.read(&mut buf) {
-            Ok(0) => {
-                host_half_closed.store(true, Ordering::Relaxed);
-                if !retired.load(Ordering::Relaxed)
-                    && write_frame_to(&session, &writer, Opcode::HalfClose, stream_id, &[]).is_err()
-                {
-                    warn!(stream_id, "FlowMux relay failed to send HalfClose");
-                }
-                break;
-            }
-            Ok(n) => {
-                if let Err(e) =
-                    await_host_credit(&registry, stream_id, n as u32, &retired, credit_wait)
-                {
-                    warn!(stream_id, error = %e, "FlowMux host credit exhausted");
-                    let _ = write_frame_to(
-                        &session,
-                        &writer,
-                        Opcode::Reset,
-                        stream_id,
-                        b"host credit exhausted",
-                    );
-                    host_half_closed.store(true, Ordering::Relaxed);
-                    break;
-                }
-                // Spend the window on this side's validator too. It is
-                // credited by every guest `WindowUpdate` it admits, so a send
-                // that never debits it leaves the counter climbing until a
-                // legitimate grant overflows the cap and the session goes
-                // away — a few megabytes in, which is why only a large
-                // transfer finds it.
-                if let Err(e) = lock_validator(&validator).admit(
-                    &mvm_contract::protocol::network_flow::FrameFacts::new(
-                        Direction::HostToGuest,
-                        Opcode::Data,
-                        stream_id,
-                    )
-                    .with_payload(n as u32),
-                ) {
-                    warn!(stream_id, error = %e, "FlowMux relay data refused by validator");
-                    break;
-                }
-                if write_frame_to(&session, &writer, Opcode::Data, stream_id, &buf[..n]).is_err() {
-                    warn!(stream_id, "FlowMux relay failed to send Data");
-                    break;
-                }
-            }
-            Err(e) => {
-                warn!(stream_id, error = %e, "FlowMux upstream read failed");
-                if !retired.load(Ordering::Relaxed) {
-                    let reason = format!("upstream error: {e}");
-                    let _ = write_frame_to(
-                        &session,
-                        &writer,
-                        Opcode::Reset,
-                        stream_id,
-                        reason.as_bytes(),
-                    );
-                }
-                host_half_closed.store(true, Ordering::Relaxed);
-                break;
-            }
-        }
-    }
-    // The stream remains in the registry until the main thread observes the
-    // half-close/reset and retires it, so we do not race with in-flight guest
-    // frames here.
-    let _ = registry;
-}
-
+/// Split `host:port`, rejecting an empty host or an unparseable port.
 fn parse_host_port(target: &str) -> Result<(&str, u16), String> {
     let (host, port_str) = target
         .rsplit_once(':')
@@ -2017,6 +2088,85 @@ mod tests {
             }
         }
         assert_eq!(got, total, "the whole body must arrive");
+
+        drop(guest);
+        host.join().unwrap().unwrap();
+    }
+
+    /// A session with no substitution service refuses to open an HTTP flow.
+    ///
+    /// The flow exists to carry a request that may name a `mvm-secret-<hex>`
+    /// placeholder. With nothing to resolve it, forwarding the request anyway
+    /// would put the placeholder on the wire to a real upstream, so the open
+    /// fails instead.
+    #[test]
+    fn an_http_flow_without_a_substitution_service_is_refused() {
+        let (mut guest, mut guest_session, host) =
+            run_session(mvm_runtime::vmm::egress_gate::EgressGate::default_deny());
+        write_frame(&mut guest, &mut guest_session, Opcode::OpenHttp, 1, b"");
+        let (opcode, stream_id, payload) = read_flowmux_frame(&mut guest, &mut guest_session);
+        assert_eq!(opcode, Opcode::Refused);
+        assert_eq!(stream_id, 1);
+        assert!(
+            !payload.is_empty(),
+            "a refusal must say why, not close silently"
+        );
+
+        drop(guest);
+        host.join().unwrap().unwrap();
+    }
+
+    /// A guest echo request reaches the shared decision and comes back as a
+    /// reply on the same flow.
+    ///
+    /// The gate here denies everything, so what this pins is that the refusal
+    /// is *answered* rather than dropped: a `ping` against a denied host must
+    /// say why, and the flow must retire either way.
+    #[test]
+    fn an_icmp_echo_is_answered_on_its_own_flow() {
+        let (mut guest, mut guest_session, host) =
+            run_session(mvm_runtime::vmm::egress_gate::EgressGate::default_deny());
+        let request = mvm_core::icmp_wire::IcmpEchoRequest {
+            host: "example.com".into(),
+            count: 1,
+            payload_len: 56,
+            timeout_ms: 500,
+        };
+        let encoded = serde_json::to_vec(&request).unwrap();
+        write_frame(
+            &mut guest,
+            &mut guest_session,
+            Opcode::IcmpEcho,
+            1,
+            &encoded,
+        );
+
+        let (opcode, stream_id, payload) = read_flowmux_frame(&mut guest, &mut guest_session);
+        assert_eq!(
+            opcode,
+            Opcode::IcmpRefused,
+            "a denied destination must be answered, not dropped"
+        );
+        assert_eq!(stream_id, 1);
+        let reply: mvm_core::icmp_wire::IcmpEchoReply = serde_json::from_slice(&payload).unwrap();
+        assert!(
+            matches!(reply, mvm_core::icmp_wire::IcmpEchoReply::Refused { .. }),
+            "unexpected reply: {reply:?}"
+        );
+
+        drop(guest);
+        host.join().unwrap().unwrap();
+    }
+
+    /// A malformed echo request is refused rather than parsed loosely — the
+    /// same fail-closed shape every other verb on this session has.
+    #[test]
+    fn a_malformed_icmp_echo_is_refused() {
+        let (mut guest, mut guest_session, host) =
+            run_session(mvm_runtime::vmm::egress_gate::EgressGate::default_deny());
+        write_frame(&mut guest, &mut guest_session, Opcode::IcmpEcho, 1, b"{{{{");
+        let (opcode, _stream_id, _payload) = read_flowmux_frame(&mut guest, &mut guest_session);
+        assert_eq!(opcode, Opcode::IcmpRefused);
 
         drop(guest);
         host.join().unwrap().unwrap();

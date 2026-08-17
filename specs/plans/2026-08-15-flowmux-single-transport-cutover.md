@@ -10,14 +10,29 @@ work is demonstrably incomplete on `main`; this plan is where the remaining work
 
 ## Status
 
-**WS0–WS3 landed; WS4–WS7 open.** Guest egress works on `main`: Stage 0 fails
-fast with the true cause (WS0), the host serves sessions (WS1), identity is
-delivered per boot off the cmdline (WS2), and every spawn site threads it
-(WS3) — `mvmctl machine run --image python:3.12 -- python -c "print(2 + 2)"`
-prints `4`. What remains is the consolidation the plan is named for:
-substitution folded onto `OpenHttp` (WS4), ICMP dispatch (WS5), deleting
-`EgressMode`/`serve_wire`/`serve_raw` behind a one-protocol gate (WS6), and
-readiness failing closed (WS7).
+**WS0–WS7 complete.**
+
+Guest egress came back with WS0–WS3: Stage 0 fails fast with the true cause
+(WS0), the host serves sessions (WS1), identity is delivered per boot off the
+cmdline (WS2), and every spawn site threads it (WS3). From that point
+`mvmctl machine run --image python:3.12 -- python -c 'print(2 + 2)'` prints `4`
+— so the working command is WS0–WS3's, not WS4–WS7's.
+
+WS4–WS7 are the consolidation the plan is named for, and they are now in:
+substitution folded onto `OpenHttp` (WS4), ICMP onto `IcmpEcho` (WS5),
+`EgressMode`/`serve_raw` and the raw dispatcher deleted behind
+`xtask check-one-guest-protocol` (WS6), and readiness failing closed on a launch
+whose endpoint carried no session (WS7). A guest now speaks exactly one
+protocol to its host, and the build fails if a second one appears.
+
+Re-confirmed live after WS4–WS7, on macOS/libkrun: exit 0, `4`, and no reset,
+truncation, SOCKS failure, credit exhaustion or supervisor refusal anywhere in
+the run.
+
+The blocker that held the live run up between those two milestones was not in
+this plan: the supervisor decoded the admitted plan as a bare `ExecutionPlan`
+when every producer emits the signed envelope, so it refused every plan-bearing
+boot on the two macOS backends. Fixed in #2564 (issue #2555).
 
 ## Why
 
@@ -295,16 +310,16 @@ exercised this path end to end, which is why it shipped.
 
 ### WS4 — Fold substitution onto `OpenHttp`
 
-- [ ] Guest `forward_proxy` keeps its loopback listener and `parse_proxied_request` but relays
+- [x] Guest `forward_proxy` keeps its loopback listener and `parse_proxied_request` but relays
       over FlowMux as `OpenHttp` → `HttpRequestHead` → `HttpRequestBody`*;
       `substitution_client` deleted
-- [ ] Host `FlowMuxSession` dispatch (`crates/mvm-hostd/src/supervisor/flowmux.rs:346-415`)
+- [x] Host `FlowMuxSession` dispatch (`crates/mvm-hostd/src/supervisor/flowmux.rs:346-415`)
       gains the `Http` arm; `flowmux/registry.rs:398` gains
       `Opcode::OpenHttp => FlowClass::Http`. The arm adapts onto the existing
       `SubstitutionService` — substitution, redaction, the claim-10 gate and payload-free
       audit are called, not reimplemented
-- [ ] Bodies stream as bounded chunks instead of whole-body base64 JSON (the Phase 4 win)
-- [ ] Hard gate: `can_skip_substitution_assembly` (`mvm-network-endpoint.rs:330-336`) keys on
+- [x] Bodies stream as bounded chunks instead of whole-body base64 JSON (the Phase 4 win)
+- [x] Hard gate: `can_skip_substitution_assembly` (`mvm-network-endpoint.rs:330-336`) keys on
       the substituting flow being available, and the failure is a launch failure
 
 **Design, from reading the seams (not yet implemented).**
@@ -337,34 +352,34 @@ change.
 
 ### WS5 — Fold ICMP in
 
-- [ ] `IcmpEcho`/`IcmpReply`/`IcmpRefused` (`0x60`–`0x62`) with `FlowClass::Icmp` added to
+- [x] `IcmpEcho`/`IcmpReply`/`IcmpRefused` (`0x60`–`0x62`) with `FlowClass::Icmp` added to
       `crates/mvm-contract/src/protocol/network_flow/opcode.rs`, wired through the state
       machine and `Sender` tables
-- [ ] Golden byte fixtures + fuzz seeds alongside the existing ones
-- [ ] Guest `icmp_client` (`crates/mvm-agentd/src/icmp_client.rs:85,101`) drops the
+- [x] Golden byte fixtures + fuzz seeds alongside the existing ones
+- [x] Guest `icmp_client` (`crates/mvm-agentd/src/icmp_client.rs:85,101`) drops the
       `MVM_ICMP/1` prelude; host dispatch arm reuses the existing handler and gate
 
 ### WS6 — Delete the alternatives
 
-- [ ] `EgressMode`, `serve_wire`, `serve_raw` (`mvm-network-endpoint.rs:344-378`),
+- [x] `EgressMode`, `serve_wire`, `serve_raw` (`mvm-network-endpoint.rs:344-378`),
       `raw_egress.rs`'s guest-facing dispatcher, `WireRequest`/`WireResponse`, and every line
       marker (`MVM_ICMP/1`, `MVM_DNS/1`, `MVM_SOCKS5_UDP/1`, `MVM_HTTP_FORWARD/1`) removed.
       **Keep** `resolve_hostname_ips_pure` and the helpers
       `crates/mvm-hostd/src/supervisor/dns_handler.rs:41` and `socks5_udp.rs:46` still use
-- [ ] `crates/mvm-hostd/fuzz/fuzz_targets/fuzz_datapath_ingress.rs` and
+- [x] `crates/mvm-hostd/fuzz/fuzz_targets/fuzz_datapath_ingress.rs` and
       `xtask/src/check_build_egress_callers.rs` checked for references
-- [ ] An xtask gate asserts the guest→host channel has exactly one protocol — no
+- [x] An xtask gate asserts the guest→host channel has exactly one protocol — no
       `connect_host_vsock` caller that is not a FlowMux client, no line-marker constants.
       This is Plan 316 Phase 8's "one path, mechanically enforceable", and it is what would
       have caught #2480
 
 ### WS7 — Readiness fails closed
 
-- [ ] `EndpointHandshake` (or a second line) reports the first authenticated session
+- [x] `EndpointHandshake` (or a second line) reports the first authenticated session
       (`crates/mvm-hostd/src/bin/mvm-network-endpoint.rs:88-121`)
-- [ ] The spawner treats endpoint-exit-before-session as a launch failure rather than
+- [x] The spawner treats endpoint-exit-before-session as a launch failure rather than
       detaching and forgetting (`network_endpoint_spawn.rs:707-709`)
-- [ ] A session that fails to authenticate fails the launch — Plan 316 invariant 4, and
+- [x] A session that fails to authenticate fails the launch — Plan 316 invariant 4, and
       Phase 2's remaining unchecked box. Nothing asserts this today
 
 ## Tests

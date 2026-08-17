@@ -505,7 +505,9 @@ impl SessionValidator {
             | Opcode::CloseUdp
             | Opcode::Resolved
             | Opcode::ResolveRefused
-            | Opcode::HttpComplete => {
+            | Opcode::HttpComplete
+            | Opcode::IcmpReply
+            | Opcode::IcmpRefused => {
                 self.retire(stream_id);
                 Ok(())
             }
@@ -1201,6 +1203,43 @@ mod tests {
         v.admit(&FrameFacts::new(H, Opcode::Resolved, 1))
             .expect("resolved");
         assert_eq!(v.live_streams(), 0);
+    }
+
+    /// An ICMP echo is one exchange on its own flow, like a DNS lookup: the
+    /// guest asks once and the host answers once, and the flow is done.
+    #[test]
+    fn an_icmp_echo_is_one_shot() {
+        let mut v = established();
+        v.admit(&FrameFacts::new(G, Opcode::IcmpEcho, 1).with_payload(64))
+            .expect("echo");
+        v.admit(&FrameFacts::new(H, Opcode::IcmpReply, 1).with_payload(64))
+            .expect("reply");
+        assert_eq!(v.live_streams(), 0);
+    }
+
+    #[test]
+    fn a_refused_icmp_echo_retires_the_flow() {
+        let mut v = established();
+        v.admit(&FrameFacts::new(G, Opcode::IcmpEcho, 1).with_payload(64))
+            .expect("echo");
+        v.admit(&FrameFacts::new(H, Opcode::IcmpRefused, 1).with_payload(32))
+            .expect("refused");
+        assert_eq!(v.live_streams(), 0);
+    }
+
+    /// Direction is part of the contract: a guest claiming to be the host's
+    /// echo reply is refused.
+    #[test]
+    fn a_guest_sent_icmp_reply_is_refused() {
+        let mut v = established();
+        v.admit(&FrameFacts::new(G, Opcode::IcmpEcho, 1).with_payload(64))
+            .expect("echo");
+        assert_eq!(
+            v.admit(&FrameFacts::new(G, Opcode::IcmpReply, 1)),
+            Err(StateError::WrongSender {
+                opcode: Opcode::IcmpReply.as_u8()
+            })
+        );
     }
 
     #[test]
