@@ -2,6 +2,7 @@ use super::*;
 use crate::commands::runtime_overlay::{
     RuntimeOverlayAcquireMode, runtime_overlay_acquire_mode, runtime_overlay_source_checkout_root,
 };
+use mvm_build::boot_image_select::{self, BootImageAcquisition};
 
 pub(crate) fn ensure_default_microvm_image(
     mode: mvm_build::pipeline::BuildMode,
@@ -293,24 +294,64 @@ fn ensure_default_microvm_prod_image(cache_dir: &str) -> Result<(String, String)
     if required.iter().all(|p| std::path::Path::new(p).exists()) {
         return Ok((kernel_path, rootfs_path));
     }
-    if let Some(built) = try_build_prod_default_locally(cache_dir)? {
-        return Ok(built);
+    // Which arm produces the image is a policy decision with an operator
+    // override, not a bare "is there a flake here" test. Auto-detect still
+    // answers exactly as before — a checkout builds, an installed binary
+    // fetches — so an operator who sets nothing sees no change.
+    let resolved = boot_image_select::resolve(None, source_checkout_available());
+    match resolved.choice {
+        BootImageAcquisition::Build => build_prod_default_locally(cache_dir),
+        BootImageAcquisition::Fetch => {
+            download_default_microvm_image(cache_dir, &kernel_path, &rootfs_path)
+        }
     }
-    download_default_microvm_image(cache_dir, &kernel_path, &rootfs_path)
 }
 
+/// Whether this binary can build an image from an in-repo flake.
+///
+/// The same predicate the acquisition path has always used, named so the
+/// selector reads as policy applied to a fact rather than re-deriving the fact.
 #[cfg(feature = "builder-vm")]
-fn try_build_prod_default_locally(cache_dir: &str) -> Result<Option<(String, String)>> {
-    if find_builder_vm_flake().is_err() {
-        return Ok(None);
-    }
-    ui::info("Building the prod default microVM image locally (source checkout)...");
-    build_default_microvm_via_libkrun(cache_dir, DefaultMicrovmVariant::Prod).map(Some)
+fn source_checkout_available() -> bool {
+    find_builder_vm_flake().is_ok()
 }
 
 #[cfg(not(feature = "builder-vm"))]
-fn try_build_prod_default_locally(_cache_dir: &str) -> Result<Option<(String, String)>> {
-    Ok(None)
+fn source_checkout_available() -> bool {
+    false
+}
+
+/// A forced local build with nothing to build from is refused, not quietly
+/// downgraded to a fetch.
+///
+/// `MVM_BOOT_IMAGE=build` on an installed binary is a request the host cannot
+/// satisfy. Falling back to a fetch would hand back exactly the image the
+/// operator asked not to have, and it would look like the knob had worked.
+fn refuse_build_without_a_flake() -> Result<()> {
+    if source_checkout_available() {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "{env}=build asks for a locally built boot image, but this mvmctl has no \
+         in-repo image flake to build from — it is an installed binary, not a \
+         source checkout. Unset {env} to fetch the published image, or run from \
+         a checkout.",
+        env = boot_image_select::MVM_BOOT_IMAGE_ENV
+    )
+}
+
+#[cfg(feature = "builder-vm")]
+fn build_prod_default_locally(cache_dir: &str) -> Result<(String, String)> {
+    refuse_build_without_a_flake()?;
+    ui::info("Building the prod default microVM image locally (source checkout)...");
+    build_default_microvm_via_libkrun(cache_dir, DefaultMicrovmVariant::Prod)
+}
+
+#[cfg(not(feature = "builder-vm"))]
+fn build_prod_default_locally(_cache_dir: &str) -> Result<(String, String)> {
+    // Without the feature there is never a flake, so the refusal always fires.
+    refuse_build_without_a_flake()?;
+    anyhow::bail!("this build of mvmctl cannot build a boot image locally")
 }
 
 #[cfg(feature = "builder-vm")]
