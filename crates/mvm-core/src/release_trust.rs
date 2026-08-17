@@ -8,6 +8,37 @@ pub const RELEASE_OIDC_ISSUER: &str = "https://token.actions.githubusercontent.c
 const RELEASE_IDENTITY_TEMPLATES: &[&str] =
     &["https://github.com/tinylabscom/mvm/.github/workflows/release.yml@refs/tags/v{version}"];
 
+/// Identity template for the workflow that signs boot image releases.
+///
+/// Deliberately a **separate** list from [`RELEASE_IDENTITY_TEMPLATES`] rather
+/// than another entry in it. The two trains sign different artifact classes
+/// under different refs, and folding them together would mean a signature
+/// minted over a boot image could validate a CLI tarball and the reverse. Two
+/// lists keeps each class verifiable only by the workflow that actually
+/// produces it.
+///
+/// `{version}` is the bare semver of the image line — `0.1.0` for the
+/// `boot-image/v0.1.0` tag — so the interpolation matches the ref exactly.
+const BOOT_IMAGE_IDENTITY_TEMPLATES: &[&str] = &[
+    "https://github.com/tinylabscom/mvm/.github/workflows/release-boot-image.yml@refs/tags/boot-image/v{version}",
+];
+
+/// Interpolate an image-line version into every boot image identity template.
+pub fn accepted_boot_image_identities(version: &str) -> Vec<String> {
+    BOOT_IMAGE_IDENTITY_TEMPLATES
+        .iter()
+        .map(|template| template.replace("{version}", version))
+        .collect()
+}
+
+/// Keyless trust root for artifacts fetched from a boot image release.
+pub fn boot_image_keyless_trust(version: &str) -> KeylessTrust {
+    KeylessTrust {
+        accepted_identities: accepted_boot_image_identities(version),
+        issuer: RELEASE_OIDC_ISSUER.to_string(),
+    }
+}
+
 /// Channel the release pipeline signs builder and runtime packs on. A stock
 /// binary's local policy must allow this channel for its own release packs to
 /// verify, alongside whatever channels the operator's ed25519 trust config
@@ -113,5 +144,47 @@ mod tests {
                 .iter()
                 .all(|i| !i.contains("{version}"))
         );
+    }
+}
+
+#[cfg(test)]
+mod boot_image_trust_tests {
+    use super::*;
+
+    /// The two trains must not be able to vouch for each other's artifacts.
+    /// One shared list would mean a signature over a boot image also validates
+    /// a CLI tarball, which is a strictly larger grant than either train needs.
+    #[test]
+    fn the_boot_image_and_cli_identity_sets_are_disjoint() {
+        let cli = accepted_release_identities("0.18.0");
+        let image = accepted_boot_image_identities("0.1.0");
+        assert!(!cli.is_empty() && !image.is_empty());
+        for identity in &image {
+            assert!(
+                !cli.contains(identity),
+                "boot image identity {identity} must not be accepted for CLI artifacts"
+            );
+        }
+    }
+
+    /// The interpolated identity has to match the ref the workflow actually
+    /// runs under, or every verification fails closed at first use.
+    #[test]
+    fn the_boot_image_identity_matches_the_published_tag_ref() {
+        let identities = accepted_boot_image_identities("0.1.0");
+        assert_eq!(
+            identities,
+            vec![
+                "https://github.com/tinylabscom/mvm/.github/workflows/release-boot-image.yml@refs/tags/boot-image/v0.1.0"
+                    .to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn the_boot_image_trust_root_uses_the_release_issuer() {
+        let trust = boot_image_keyless_trust("0.1.0");
+        assert_eq!(trust.issuer, RELEASE_OIDC_ISSUER);
+        assert_eq!(trust.accepted_identities.len(), 1);
     }
 }
