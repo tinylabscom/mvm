@@ -664,13 +664,23 @@ for detailed scope and acceptance criteria.
     ceiling for the VM's whole life), so the listener now blocks and shutdown
     wakes it by connecting to its own socket, bounded and with a detach path;
     the second waits on a channel the writer thread's sender closes on exit.
-    Measured 57.0 ms -> 7-11 ms. Admission's three pre-boot chain barriers now
+    Measured on release, HVF/macOS, against an unchanged control span in the
+    same runs: `stop_console_cleanup` 57.0 -> 7.0-7.7 ms while
+    `stop_pid_disappearance` held at 33.4-35.5 ms against a 33.7 ms baseline.
+    Foreground teardown 91.4 -> 41-45 ms, total 287.2 -> ~233 ms.
+    Admission's three pre-boot chain barriers now
     share one flush, closing #2293's open acceptance item without changing
     `sync_policy_for`'s fail-closed default, and the chain cursor reads a
-    bounded tail instead of the whole 4 MiB segment on every append. **Open
-    and newly named:** the receipt write, not the chain, is the dominant admit
+    bounded tail instead of the whole 4 MiB segment on every append. **Two things are open
+    and newly named.** The receipt write, not the chain, is the dominant admit
     cost at ~36 ms of ~45 ms — a structure the code calls a derived cache,
-    doing an `F_FULLFSYNC` synchronously before boot.
+    doing an `F_FULLFSYNC` synchronously before boot. And
+    `stop_pid_disappearance` is guest-RAM teardown: `shutdown-timing.json`
+    accounts for only 2.9 ms of it, because the host waits on kqueue process
+    exit while the record stops before the process exits. It is linear in guest
+    memory at ~48 ms/GB (33 ms at 512M, 194 ms at 4G), so the watchdog
+    self-pipe is not worth building and a large workload pays teardown no
+    `alpine`-sized benchmark can see.
   - [ ] Phase 7 — live validation and regression gates
   - [x] Cross-plan fast-machine-substrate contract documented in
         `specs/notes/2026-08-10-fast-machine-substrate.md` (issue #2279)

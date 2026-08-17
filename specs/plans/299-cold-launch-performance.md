@@ -505,6 +505,71 @@ a launch appends ~6 entries, so admission cost up to 24 MiB of reads per launch
 a sawtooth in `admit` that no sample would explain. It now reads a bounded tail
 window and widens only if a record spans it.
 
+### `stop_pid_disappearance` is guest-RAM teardown, ~48 ms/GB — open
+
+The remaining teardown span. Two candidates were on the table: the 5 ms
+watchdog tick observing the SIGTERM flag, and the supervisor's console
+rewrite. `shutdown-timing.json` was supposed to settle it. It does, by
+excluding both.
+
+One release HVF shutdown, 512 MiB guest, from `<state_dir>/shutdown-timing.json`:
+
+| span | µs |
+|---|---:|
+| `watchdog_to_vcpu_exit` | 1,582 |
+| `vm_destroy` | 346 |
+| `console_write` | 869 |
+| `io_thread_join` | 70 |
+| `vcpu_destroy` | 34 |
+| `watchdog_join` | 23 |
+| **sum** | **2,924** |
+
+The host measured `stop_pid_disappearance` at **33–37 ms** for the same
+configuration. **The record accounts for 2.9 ms of it — under 9%.**
+
+The gap is structural, not noise. `pid_disappearance` waits on kqueue
+`EVFILT_PROC` — actual *process exit* — while the record stops being written
+just before `remove_file(pid_file)`. Everything after that point is inside the
+host's measurement and outside the file: the supervisor process still has to
+exit, and its address space still has to be reclaimed.
+
+That it is the address space is measurable directly. Varying only guest memory
+on the transient path, release, two samples each:
+
+| `--memory` | `stop_pid_disappearance` |
+|---|---:|
+| 512M (default) | 33.1, 37.1 ms |
+| 1G | 76.1, 55.8 ms |
+| 2G | 92.0, 92.7 ms |
+| 4G | 193.0, 195.6 ms |
+
+Linear in guest RAM at roughly **48 ms/GB**, and `hv_vm_destroy` is already
+accounted for at 346 µs, so this is the guest allocation being reclaimed at
+process exit rather than any Hypervisor.framework call.
+
+Consequences:
+
+- **The watchdog self-pipe is not worth building.** Its whole prize is the
+  0–5 ms tick, which is at most 15% of this span at the default size and
+  proportionally less at every larger one.
+- **This span is a function of workload size, not of teardown code.** A 4 GiB
+  workload pays ~195 ms of foreground teardown for no reason the user can see,
+  and it will not show up in any `alpine`-sized benchmark — the same blind spot
+  Plan 311 opened for artifact size, now on the stop path.
+- The lever is the wait, not the unmap: the kernel reclaims the address space
+  either way, but the host currently blocks the user's command until it has.
+  `remove_file(pid_file)` already happens *before* exit, so a liveness signal
+  that fires there would return earlier — at the cost of the state directory
+  being removable while the supervisor still holds descriptors into it, which
+  is exactly the ownership rule this phase is not allowed to break. Phase 6's
+  detached-cleanup design is the honest place to resolve it.
+
+Two instrumentation gaps found while doing this, both worth closing before the
+next person trusts this file: `stop_observed_at` is stamped when the watchdog
+*observes* the flag after its sleep, so the tick latency the record exists to
+expose is the one thing it cannot see; and the record is written before process
+exit, so it structurally cannot cover the span that dominates.
+
 ### The dominant admit cost is the receipt, not the chain — open
 
 Batching the chain barriers did not move `admit` much, and the emit trace says
