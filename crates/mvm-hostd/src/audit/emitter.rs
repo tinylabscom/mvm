@@ -358,6 +358,29 @@ pub struct AuditEmitter {
     runtime: OnceLock<tokio::runtime::Runtime>,
 }
 
+impl Drop for AuditEmitter {
+    /// Shut the cached runtime down without blocking.
+    ///
+    /// Caching the runtime removed a per-entry construction, but it also moved
+    /// where the runtime is *dropped*: it used to die inside the synchronous
+    /// emit that built it, and now it dies with the emitter. An emitter
+    /// constructed from inside someone else's async context therefore drops
+    /// its runtime there, and a blocking drop from async is a tokio panic by
+    /// design —
+    ///
+    ///   Cannot drop a runtime in a context where blocking is not allowed.
+    ///
+    /// `shutdown_background` returns immediately and leaves the worker threads
+    /// to exit on their own, which is what this runtime wants anyway: it only
+    /// ever drives a blocking file append that has already completed by the
+    /// time the emitter is being dropped.
+    fn drop(&mut self) {
+        if let Some(rt) = self.runtime.take() {
+            rt.shutdown_background();
+        }
+    }
+}
+
 impl AuditEmitter {
     /// Construct with the default `~/.mvm/audit/` directory.
     pub fn new(signing_key: SigningKey) -> Result<Self> {
@@ -1367,6 +1390,38 @@ mod tests {
             .tenant(tenant)
             .plan_id(plan_id)
             .build()
+    }
+
+    /// Construct, use and drop an emitter from inside an async context.
+    ///
+    /// This is the shape the cached runtime made hazardous and that no unit
+    /// test covered: the runtime now dies with the emitter rather than inside
+    /// the emit that built it, so an emitter dropped in async drops a runtime
+    /// in async — which tokio panics on. The conformance suite caught it by
+    /// accident because its steps run under cucumber's runtime; this catches
+    /// it on purpose.
+    #[tokio::test]
+    async fn an_emitter_dropped_inside_an_async_context_does_not_panic() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = {
+            let mut __ed_seed = [0u8; 32];
+            rand::rng().fill_bytes(&mut __ed_seed);
+            SigningKey::from_bytes(&__ed_seed)
+        };
+
+        let emitter = AuditEmitter::with_dir(key, dir.path()).unwrap();
+        // Emit first: the runtime is built lazily, so an emitter that never
+        // emitted would drop a `OnceLock` that was never filled and pass
+        // whatever `Drop` did.
+        emitter
+            .emit_admitted(&fixture_plan("local", "plan-async-drop"), "host:test")
+            .unwrap();
+
+        drop(emitter);
+
+        // Reached only if the drop above did not panic.
+        let content = std::fs::read_to_string(dir.path().join("local.jsonl")).unwrap();
+        assert!(content.contains("plan-async-drop"));
     }
 
     #[test]
