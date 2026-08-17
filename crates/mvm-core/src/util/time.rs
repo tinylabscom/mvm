@@ -24,6 +24,15 @@ pub fn utc_now() -> String {
     Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string()
 }
 
+/// Render a `SystemTime` as the same ISO 8601 / RFC 3339 shape [`utc_now`]
+/// emits, so a filesystem timestamp and a recorded one are comparable by eye
+/// and by `parse_iso8601`.
+pub fn rfc3339_from_system_time(at: std::time::SystemTime) -> String {
+    DateTime::<Utc>::from(at)
+        .format("%Y-%m-%dT%H:%M:%SZ")
+        .to_string()
+}
+
 /// Return the UTC timestamp `dur` seconds from now in ISO 8601 format.
 /// Saturates at `chrono::DateTime::MAX_UTC` rather than panicking on
 /// overflow — callers downstream of `crate::crypto::policy::parse_ttl`

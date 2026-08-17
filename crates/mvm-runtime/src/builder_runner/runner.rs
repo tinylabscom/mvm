@@ -168,6 +168,7 @@ impl<D: VmmDriver + 'static> BuilderRunner<D> {
             resolver_remote: None,
             binding_store_dir: None,
             flowmux_identity: Some(builder_identity.spawn_config().clone()),
+            session_marker: None,
         })?;
         let mut endpoint_guard = EndpointGuard::new(b.name);
 

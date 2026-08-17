@@ -649,7 +649,15 @@ chmod 0644 /out/rootfs.ext4 2>/dev/null || true
 # rootfs (the builder-vm `dev`/`default` attrs are a runCommand around
 # it) surfaces it one level down under `passthru.rootfs`. Try the direct
 # attr first, then the wrapped one.
-if nix eval --json "${{FLAKE_REF}}#${{ATTR_PATH}}.passthru.mvm" --impure{override_flag} \
+#
+# An image that published a sidecar of its own wins over both. A wrapping
+# derivation knows things the inner mkGuest attrs cannot — which release line
+# the bytes belong to, which revision generated them — and re-deriving the
+# sidecar from `passthru` here would silently drop exactly those fields.
+if [ -f "$NIX_OUT/mvm-meta.json" ]; then
+    cp -L "$NIX_OUT/mvm-meta.json" /out/mvm-meta.json
+    echo "mvm-builder-vm: wrote /out/mvm-meta.json (image-published sidecar)" >&2
+elif nix eval --json "${{FLAKE_REF}}#${{ATTR_PATH}}.passthru.mvm" --impure{override_flag} \
       > /out/mvm-meta.json 2> /job/sidecar-direct.log; then
     echo "mvm-builder-vm: wrote /out/mvm-meta.json (passthru.mvm)" >&2
 elif nix eval --json "${{FLAKE_REF}}#${{ATTR_PATH}}.passthru.rootfs.passthru.mvm" --impure{override_flag} \

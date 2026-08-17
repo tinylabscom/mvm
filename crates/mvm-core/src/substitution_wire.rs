@@ -49,6 +49,45 @@ pub enum WireResponse {
     },
 }
 
+/// The head of a typed HTTP flow on the FlowMux `Http` class: everything about
+/// the request except its body, which follows as `HttpRequestBody` frames.
+///
+/// `body_len` is what terminates the request. The alternative — treating a
+/// half-close as the end — would make "the guest finished sending" and "the
+/// guest went away mid-body" the same event on the host, and the host would
+/// forward a truncated request rather than refusing it.
+///
+/// `deny_unknown_fields` fails closed on an unexpected field, like every other
+/// host-guest type here.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HttpFlowHead {
+    pub method: String,
+    /// The real destination URL. May carry `mvm-secret-<hex>` placeholders,
+    /// which the host resolves; the guest never holds the real credential.
+    pub url: String,
+    pub headers: Vec<(String, String)>,
+    /// Exact body length to expect across the following body frames.
+    pub body_len: u64,
+}
+
+/// The head of the response on a typed HTTP flow. The body follows as
+/// `HttpResponseBody` frames and the exchange ends with `HttpComplete`.
+///
+/// A refusal never carries a secret, matching [`WireResponse::Refused`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "result", rename_all = "snake_case", deny_unknown_fields)]
+pub enum HttpFlowResponseHead {
+    Ok {
+        status: u16,
+        headers: Vec<(String, String)>,
+        body_len: u64,
+    },
+    Refused {
+        message: String,
+    },
+}
+
 /// A `SecretResolver` request over the fleet secret-resolution socket
 /// (mvmd's tenant vault, or the standalone `mvm-network-endpoint`'s
 /// local fallback): resolve `name` to its raw credential value, bound to

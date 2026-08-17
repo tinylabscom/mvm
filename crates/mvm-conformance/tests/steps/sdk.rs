@@ -624,6 +624,10 @@ fn divergence_matches_reviewed_list(world: &mut CliWorld) {
             .collect()
     };
     let mut expected_python_only = names("python_only_type_erased_in_typescript");
+    // Permanent-by-design names are Python-only forever — `derive_schema`
+    // needs runtime type information TypeScript has already erased — so they
+    // are tracked apart from the backlog rather than mixed into it.
+    expected_python_only.extend(names("python_only_permanent_by_design"));
     expected_python_only.extend(names("python_only_absent_from_typescript"));
     expected_python_only.sort();
     let expected_typescript_only = names("typescript_only_absent_from_python");

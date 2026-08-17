@@ -1,19 +1,22 @@
-//! In-guest substitution client (the relay half).
+//! Framed `WireRequest`/`WireResponse` relay over an open stream.
 //!
-//! The guest-local forward proxy relays a workload's secret-bearing request to
-//! the host substitution endpoint over vsock, carrying an opaque placeholder.
-//! The host resolves the placeholder, binding-checks the destination, injects
-//! the real credential, and makes the real TLS — the guest only ever held the
-//! placeholder. This module is the relay: send a `WireRequest`, get a
-//! `WireResponse`. The HTTP-proxy front (parsing the workload's proxied
-//! request, the `HTTP_PROXY` wiring) sits on top.
+//! **Not a guest→host transport.** The in-guest forward proxy moved to the
+//! authenticated FlowMux session (`crate::flowmux_sync`), and the vsock dial
+//! that used to live here went with it — a guest reaches its host endpoint one
+//! way now, and `xtask check-one-guest-protocol` enforces that.
+//!
+//! What survives is the relay over an already-open stream, whose one caller is
+//! the wasm tier: `mvm-runtime`'s `mvm:egress` host import, running on the
+//! *host*, connecting to the endpoint's Unix socket. That is host-internal IPC
+//! between two host processes, not a guest speaking to its host, so it is not
+//! on the channel the one-transport rule governs.
 
 use std::os::unix::net::UnixStream;
 
 use anyhow::Result;
 use mvm_core::substitution_wire::{WireRequest, WireResponse};
 
-use crate::vsock::{EGRESS_PORT, connect_host_vsock, read_frame, write_frame};
+use crate::vsock::{read_frame, write_frame};
 
 /// Relay one request to the host substitution endpoint over an already-open
 /// stream, returning its reply. One framed `WireRequest` out, one framed
@@ -21,15 +24,6 @@ use crate::vsock::{EGRESS_PORT, connect_host_vsock, read_frame, write_frame};
 pub fn relay(stream: &mut UnixStream, req: &WireRequest) -> Result<WireResponse> {
     write_frame(stream, req)?;
     read_frame(stream)
-}
-
-/// Open a **guest→host** vsock stream to the host substitution endpoint
-/// ([`EGRESS_PORT`]) and relay one request. Uses an AF_VSOCK connect to
-/// the host (CID 2) — backend-agnostic on the guest side — not the host→guest
-/// UDS-multiplexer path.
-pub fn substitute(req: &WireRequest, timeout_secs: u64) -> Result<WireResponse> {
-    let mut stream = connect_host_vsock(EGRESS_PORT, timeout_secs)?;
-    relay(&mut stream, req)
 }
 
 #[cfg(test)]

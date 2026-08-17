@@ -15,6 +15,8 @@
       "base_python": "Exception",
       "base_typescript": "Error",
       "doc": "Base of every typed host-services failure.",
+      "fields": [],
+      "message_format": null,
       "name": "HostServiceError",
       "status": null,
       "surfaces": [
@@ -27,6 +29,8 @@
       "base_python": "HostServiceError",
       "base_typescript": "HostServiceError",
       "doc": "The host rejected the record shape or size (audit cap).",
+      "fields": [],
+      "message_format": null,
       "name": "BadRequestError",
       "status": 1,
       "surfaces": [
@@ -39,6 +43,8 @@
       "base_python": "HostServiceError",
       "base_typescript": "HostServiceError",
       "doc": "The per-workload audit emit rate limit is exhausted.",
+      "fields": [],
+      "message_format": null,
       "name": "RateLimitedError",
       "status": 2,
       "surfaces": [
@@ -51,6 +57,8 @@
       "base_python": "HostServiceError",
       "base_typescript": "HostServiceError",
       "doc": "The host could not answer (handler down, broker not ready).",
+      "fields": [],
+      "message_format": null,
       "name": "UnavailableError",
       "status": 3,
       "surfaces": [
@@ -63,6 +71,8 @@
       "base_python": "HostServiceError",
       "base_typescript": "HostServiceError",
       "doc": "The workload's `ExecutionPlan.services` did not bind the service.",
+      "fields": [],
+      "message_format": null,
       "name": "NotBoundError",
       "status": 4,
       "surfaces": [
@@ -75,6 +85,8 @@
       "base_python": "HostServiceError",
       "base_typescript": "HostServiceError",
       "doc": "The verb is not implemented in this build.",
+      "fields": [],
+      "message_format": null,
       "name": "VerbNotImplementedError",
       "status": 5,
       "surfaces": [
@@ -87,6 +99,8 @@
       "base_python": "HostServiceError",
       "base_typescript": "HostServiceError",
       "doc": "Any other typed broker error code.",
+      "fields": [],
+      "message_format": null,
       "name": "ServiceError",
       "status": 6,
       "surfaces": [
@@ -99,6 +113,8 @@
       "base_python": "HostServiceError",
       "base_typescript": "HostServiceError",
       "doc": "Connect, framing, or (de)serialization failure on the vsock path.",
+      "fields": [],
+      "message_format": null,
       "name": "TransportError",
       "status": 7,
       "surfaces": [
@@ -111,8 +127,134 @@
       "base_python": "HostServiceError",
       "base_typescript": "HostServiceError",
       "doc": "The request was malformed: unknown method or a body the verb rejects.",
+      "fields": [],
+      "message_format": null,
       "name": "InvalidInputError",
       "status": 8,
+      "surfaces": [
+        "rust",
+        "python",
+        "typescript"
+      ]
+    },
+    {
+      "base_python": "Exception",
+      "base_typescript": "Error",
+      "doc": "User code inside the VM raised; a structured envelope was parsed.",
+      "fields": [
+        {
+          "doc": "Error class the guest reported.",
+          "name": "kind"
+        },
+        {
+          "doc": "Correlation id for the failing call.",
+          "name": "error_id"
+        },
+        {
+          "doc": "Message the guest reported.",
+          "name": "message"
+        }
+      ],
+      "message_format": "{kind}: {message} (error_id={error_id})",
+      "name": "RemoteError",
+      "status": null,
+      "surfaces": [
+        "rust",
+        "python",
+        "typescript"
+      ]
+    },
+    {
+      "base_python": "RuntimeError",
+      "base_typescript": "Error",
+      "doc": "Could not reach the substrate, or got an unparseable response.",
+      "fields": [],
+      "message_format": null,
+      "name": "MvmTransportError",
+      "status": null,
+      "surfaces": [
+        "rust",
+        "python",
+        "typescript"
+      ]
+    },
+    {
+      "base_python": "RuntimeError",
+      "base_typescript": "Error",
+      "doc": "The workload declared msgpack but the SDK has no msgpack support.",
+      "fields": [],
+      "message_format": null,
+      "name": "MsgpackUnavailable",
+      "status": null,
+      "surfaces": [
+        "rust",
+        "python",
+        "typescript"
+      ]
+    },
+    {
+      "base_python": "MvmTransportError",
+      "base_typescript": "MvmTransportError",
+      "doc": "The encoded request exceeded the payload cap, refused before any               subprocess spawned.",
+      "fields": [],
+      "message_format": null,
+      "name": "PayloadTooLarge",
+      "status": null,
+      "surfaces": [
+        "rust",
+        "python",
+        "typescript"
+      ]
+    },
+    {
+      "base_python": "MvmTransportError",
+      "base_typescript": "MvmTransportError",
+      "doc": "No-VM dispatch was requested without a local function to               introspect. Python-only in practice: the mode itself has no               TypeScript form.",
+      "fields": [],
+      "message_format": null,
+      "name": "NoVmIntrospectionError",
+      "status": null,
+      "surfaces": [
+        "rust",
+        "python",
+        "typescript"
+      ]
+    },
+    {
+      "base_python": "RuntimeError",
+      "base_typescript": "Error",
+      "doc": "A secret-shaped value was passed as a call argument under strict               mode.",
+      "fields": [],
+      "message_format": null,
+      "name": "SecretInArgError",
+      "status": null,
+      "surfaces": [
+        "rust",
+        "python",
+        "typescript"
+      ]
+    },
+    {
+      "base_python": "UserWarning",
+      "base_typescript": "Error",
+      "doc": "Heuristic flagged a secret-shaped value passed as a call               argument.",
+      "fields": [],
+      "message_format": null,
+      "name": "SecretInArgWarning",
+      "status": null,
+      "surfaces": [
+        "rust",
+        "python"
+      ]
+    },
+    {
+      "base_python": "RuntimeError",
+      "base_typescript": "Error",
+      "doc": "A transport call fired inside an emit subprocess, where no live               microVM exists.",
+      "fields": [],
+      "message_format": null,
+      "name": "EmittingContextError",
+      "status": null,
       "surfaces": [
         "rust",
         "python",

@@ -714,6 +714,97 @@ fn verify_signature(version: &str, archive_name: &str, archive_path: &Path) -> R
 }
 
 /// Main entry point: check for updates and optionally install.
+/// Tag prefix for the boot-image release line. Images version on their own
+/// counter, so `v0.18.0` (binaries) and `boot-image/v0.1.0` (images) name
+/// different things and neither ordering means anything to the other.
+pub(crate) const BOOT_IMAGE_TAG_PREFIX: &str = "boot-image/v";
+
+/// A `major.minor.patch` triple, parsed so two tags can be ordered.
+///
+/// Ordering tags as strings puts `v0.10.0` before `v0.9.0`, which would report
+/// a newer image as older — the one wrong answer this whole comparison exists
+/// to avoid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct BootImageVersion {
+    major: u64,
+    minor: u64,
+    patch: u64,
+}
+
+impl BootImageVersion {
+    /// Parse the version out of a full `boot-image/vX.Y.Z` tag. Anything that
+    /// is not that shape returns `None` rather than a guess — a tag we cannot
+    /// order is one we must not claim to have ordered.
+    pub(crate) fn from_tag(tag: &str) -> Option<Self> {
+        Self::parse(tag.strip_prefix(BOOT_IMAGE_TAG_PREFIX)?)
+    }
+
+    fn parse(version: &str) -> Option<Self> {
+        // A pre-release or build suffix does not participate in the ordering
+        // this command needs; drop it rather than refuse the whole tag.
+        let core = version
+            .split(['-', '+'])
+            .next()
+            .unwrap_or(version)
+            .trim_end();
+        let mut parts = core.split('.');
+        let mut next = || parts.next()?.parse::<u64>().ok();
+        let major = next()?;
+        let minor = next()?;
+        let patch = next()?;
+        if parts.next().is_some() {
+            return None;
+        }
+        Some(Self {
+            major,
+            minor,
+            patch,
+        })
+    }
+}
+
+/// The highest published `boot-image/v*` tag, or `None` when the line has
+/// published nothing yet.
+///
+/// `/releases/latest` is the wrong endpoint here: it answers with the newest
+/// release across *every* tag namespace, which for a repo whose binaries
+/// release far more often is almost never a boot image. The full listing is
+/// filtered instead, and an empty result is a clean answer — "no published
+/// image line" is a real state, not a failure and not "behind".
+pub(crate) fn fetch_latest_boot_image_tag() -> Result<Option<String>> {
+    let url = format!("{}/repos/{}/releases", github_api_base(), GITHUB_REPO);
+    let json = http::fetch_json(&url)
+        .context("Failed to list GitHub releases. Check your network connection.")?;
+    let releases = json
+        .as_array()
+        .context("GitHub releases listing was not a JSON array")?;
+    Ok(highest_boot_image_tag(
+        releases.iter().filter_map(|r| r["tag_name"].as_str()),
+    ))
+}
+
+/// Pick the highest `boot-image/v*` tag from a set of tag names.
+///
+/// Split from the fetch so the ordering can be tested without a server.
+pub(crate) fn highest_boot_image_tag<'a>(tags: impl Iterator<Item = &'a str>) -> Option<String> {
+    tags.filter_map(|tag| BootImageVersion::from_tag(tag).map(|v| (v, tag)))
+        .max_by_key(|(v, _)| *v)
+        .map(|(_, tag)| tag.to_string())
+}
+
+/// Release-asset base URL for one boot-image tag.
+///
+/// Shares `MVM_UPDATE_DOWNLOAD_URL` with the binary updater so the network leg
+/// is redirectable in a test without a second override to remember.
+pub(crate) fn boot_image_asset_base_url(tag: &str) -> String {
+    format!(
+        "{}/{}/releases/download/{}",
+        github_download_base(),
+        GITHUB_REPO,
+        tag
+    )
+}
+
 pub fn update(check_only: bool, force: bool, skip_verify: bool) -> Result<()> {
     let current = current_version();
     ui::info(&format!("Current version: {}", current));

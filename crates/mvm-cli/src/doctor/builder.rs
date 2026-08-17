@@ -348,6 +348,50 @@ pub(super) fn builder_backend_check(plat: Platform) -> Check {
     }
 }
 
+/// Which arm will produce the default boot image, and why.
+///
+/// A source checkout builds its own images and an installed binary fetches one.
+/// That is usually invisible, which is fine until the two disagree with what an
+/// operator expected — at which point "which arm ran" is the first question and
+/// there has been nowhere to read the answer. Reported in the same
+/// `<choice> — <source> — <availability>` shape as the builder backend line, so
+/// the override path is observable rather than folklore.
+pub(super) fn boot_image_acquisition_check() -> Check {
+    use mvm_build::boot_image_select::{BootImageAcquisition, resolve};
+
+    let is_checkout = crate::commands::env::builder_vm::find_builder_vm_flake_is_source_checkout();
+    let resolved = resolve(None, is_checkout);
+
+    // The arm can be chosen and still be unsatisfiable: `build` on an installed
+    // binary has no flake to build from. Say so here rather than letting the
+    // first image acquisition be where the operator finds out.
+    let availability = match resolved.choice {
+        BootImageAcquisition::Build if is_checkout => "in-repo image flake present".to_string(),
+        BootImageAcquisition::Build => {
+            "NO in-repo image flake — a forced local build will refuse".to_string()
+        }
+        BootImageAcquisition::Fetch if is_checkout => {
+            "fetching a prebuilt from a source checkout; the image will record itself as fetched"
+                .to_string()
+        }
+        BootImageAcquisition::Fetch => "published image".to_string(),
+    };
+
+    Check {
+        name: "boot image",
+        category: "platform",
+        // Informational: every combination is a legitimate operator choice.
+        // The forced-build-without-a-flake case is named in the text and
+        // refuses at acquisition time, which is where it can say what to do.
+        ok: true,
+        info: format!(
+            "{} — {} — {availability}",
+            resolved.choice.name(),
+            resolved.source.describe()
+        ),
+    }
+}
+
 /// Stub when `builder-vm` feature is off (CLI built without the
 /// builder support — e.g. dependency-light packaging).
 #[cfg(not(feature = "builder-vm"))]
@@ -708,6 +752,57 @@ mod tests {
         assert!(
             c.info.contains("QEMU available") || c.info.contains("QEMU NOT available"),
             "expected per-VMM availability segment; got: {}",
+            c.info
+        );
+    }
+
+    /// The knob is only useful if its answer is readable. A resolution that
+    /// never reaches `doctor` leaves "which arm ran" as folklore, which is the
+    /// complaint this check exists to answer.
+    #[test]
+    fn the_boot_image_check_reports_the_resolved_arm_and_its_source() {
+        let mut env = TestEnv::new();
+        env.set(mvm_build::boot_image_select::MVM_BOOT_IMAGE_ENV, "fetch");
+
+        let c = boot_image_acquisition_check();
+
+        assert!(c.ok);
+        assert_eq!(c.name, "boot image");
+        assert!(
+            c.info.starts_with("fetch — "),
+            "the resolved arm must lead the line; got: {}",
+            c.info
+        );
+        assert!(
+            c.info.contains("override via $MVM_BOOT_IMAGE"),
+            "the line must name where the answer came from; got: {}",
+            c.info
+        );
+        // Same three-segment shape as the builder backend line.
+        assert_eq!(
+            c.info.matches(" — ").count(),
+            2,
+            "expected `<choice> — <source> — <availability>`; got: {}",
+            c.info
+        );
+    }
+
+    /// Unset must read as auto-detected, not as an override nobody set.
+    #[test]
+    fn the_boot_image_check_reports_auto_detection_when_the_knob_is_unset() {
+        let mut env = TestEnv::new();
+        env.remove(mvm_build::boot_image_select::MVM_BOOT_IMAGE_ENV);
+
+        let c = boot_image_acquisition_check();
+
+        assert!(
+            c.info.contains("auto-detected"),
+            "an unset knob must not read as an override; got: {}",
+            c.info
+        );
+        assert!(
+            !c.info.contains("override via"),
+            "an unset knob must not claim an override; got: {}",
             c.info
         );
     }

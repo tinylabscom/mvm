@@ -12,14 +12,13 @@
 //! registry that defines it.
 
 use mvm_sdk::env::Surface;
-use mvm_sdk::error_taxonomy::REGISTRY;
+use mvm_sdk::error_taxonomy::all;
 use serde_json::{Map, Value, json};
 
 const SURFACES: [Surface; 3] = [Surface::Rust, Surface::Python, Surface::TypeScript];
 
 fn main() {
-    let errors: Vec<Value> = REGISTRY
-        .iter()
+    let errors: Vec<Value> = all()
         .map(|e| {
             let surfaces: Vec<Value> = SURFACES
                 .iter()
@@ -33,6 +32,10 @@ fn main() {
                 "doc": e.doc.trim(),
                 "status": e.status,
                 "surfaces": surfaces,
+                "fields": e.fields.iter().map(|f| json!({
+                    "name": f.name, "doc": f.doc,
+                })).collect::<Vec<_>>(),
+                "message_format": e.message_format,
             })
         })
         .collect();

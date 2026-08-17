@@ -7,6 +7,43 @@ for detailed scope and acceptance criteria.
 
 ## Completed issue closeouts
 
+- [x] **Plan 337 WS-6 increment 1 — Tier C transport and the error taxonomy,
+      as a declared subset.** The eight Tier D error types and the code that
+      raises them landed together on purpose: generating the classes while
+      TypeScript had nothing to throw them would have exported eight dead types
+      and cleared eight divergence entries while closing nothing.
+      `_remote.ts` implements real-VM invocation, the stderr envelope scan, and
+      `RemoteFunction` / `func` / `workload_ref` / `WorkloadRef` (a `Proxy`
+      where Python uses `__getattr__`). `MVM_NO_VM=1` is *refused* with
+      `NoVmIntrospectionError` naming the reason rather than falling through to
+      a real VM — the caller asked for local dispatch and would otherwise have
+      got a microVM. `RemoteError` needed one registry extension (structured
+      fields plus a message format). Two language differences recorded rather
+      than smoothed: `SecretInArgWarning` is permanently Python-only (no JS
+      warning type), and `RemoteError.message` holds the composed string in
+      JavaScript where Python exposes the raw one. Sessions deferred to their
+      own change — they force the AsyncLocalStorage-versus-ergonomics choice.
+      Divergence 16 -> 4; across the plan 30 -> 4, typescript-only still 0.
+
+- [x] **Plan 337 WS-7 + WS-8 — Tier F decided, plan closed out except what
+      Tier C gates.** Option 2 for `derive_schema` confirmed (callers pass
+      `args_schema` / `return_schema`), but the plan's claim that it needed "no
+      new machinery" was wrong: TypeScript's `entrypoint_function` accepted no
+      schema arguments at all, so the recommended option was impossible rather
+      than merely less ergonomic. The IR had carried both fields all along;
+      only the constructor omitted them, and it now accepts them. Documented in
+      the TypeScript README where someone reaching for `derive_schema` looks,
+      with the reason (types are erased before the program runs) rather than
+      the absence. `surface_divergence.json` gains a
+      `python_only_permanent_by_design` bucket so a never-closing difference is
+      not counted as backlog. WS-8.2/8.3/8.4 done — all seven generated
+      artifacts drift-gated, each shown to fail on a hand-edit. **WS-8.1 is
+      left open on purpose:** the divergence file still carries Tier C's
+      machinery and the eight error types only Tier C raises, and those close
+      with WS-6. Across the plan, python-only divergence went 30 -> 16 and
+      typescript-only 2 -> 0. WS-6.2-6.6 remain, and want a scoping decision
+      (declared subset) before implementation.
+
 - [x] **Plan 337 WS-4 — Tier B, and the split is the finding.** `warm_process`
       generates cleanly (one registry extension: a nullable default), verified
       differentially before its hand-copy was deleted. `addon_use` deliberately
@@ -1403,7 +1440,13 @@ for detailed scope and acceptance criteria.
   `specs/plans/2026-08-15-flowmux-single-transport-cutover.md` (#2543): #2480 shipped the
   FlowMux guest adapter without host identity provisioning, so guest egress is dead on
   `main`. The cutover completes there, on one transport, folding `Wire` and `MVM_ICMP/1`
-  into FlowMux rather than leaving three protocols behind a sniff.**
+  into FlowMux rather than leaving three protocols behind a sniff.
+  WS0-WS7 are complete: substitution rides `OpenHttp`, `ping` rides `IcmpEcho`,
+  the raw dispatcher and `EgressMode::Raw` are deleted, readiness fails closed
+  on a launch whose endpoint carried no session, and
+  `xtask check-one-guest-protocol` fails the build if a second guest->host
+  protocol returns. `EgressMode::Wire` survives for the wasm tier's host-side
+  `mvm:egress` import, which is host-internal IPC rather than a guest channel.**
   (`specs/plans/316-single-flow-vsock-networking.md`, ADR-042, umbrella #2368)
   Collapses the two production workload networking paths to one authenticated
   FlowMux session on `GuestService::NetworkFlow` through one

@@ -14,6 +14,7 @@ use mvm_core::user_config::MvmConfig;
 
 use super::Cli;
 
+pub(crate) mod boot;
 mod cache;
 mod ingest;
 mod inspect;
@@ -75,6 +76,11 @@ pub(in crate::commands) enum ImageAction {
         /// Image reference or resolved digest
         reference: String,
     },
+    /// Inspect, compare, and update the cached default boot image
+    Boot {
+        #[command(subcommand)]
+        action: boot::BootAction,
+    },
 }
 
 pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Result<()> {
@@ -84,6 +90,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
         ImageAction::Ls { registry, json } => ls::run(&cache_root, registry.as_deref(), json),
         ImageAction::Inspect { reference, json } => inspect::run(&cache_root, &reference, json),
         ImageAction::Rm { reference } => rm::run(&cache_root, &reference),
+        ImageAction::Boot { action } => boot::run(action),
     }
 }
 

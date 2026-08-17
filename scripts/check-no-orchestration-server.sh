@@ -6,6 +6,10 @@ set -euo pipefail
 # search error cannot be told from "nothing matched". Without `rg` installed
 # the script therefore reports success having examined nothing — a gate that
 # passes vacuously, which is worse than no gate because it reads as evidence.
+#
+# CI proved this is not hypothetical: the gate runs in Invariant, which installs
+# ripgrep, and a test step briefly placed in lint-core, which does not — where
+# every probe was accepted.
 if ! command -v rg >/dev/null 2>&1; then
   echo "::error::ripgrep (rg) is not installed; this gate cannot examine anything." >&2
   echo "Install it in the job that runs this script rather than letting the check pass unexamined." >&2
@@ -38,40 +42,26 @@ strip_cfg_test_modules() {
   ' "$1"
 }
 
-# True when the file is a module the tree only compiles under `cfg(test)`.
+# True when `file` is a module the parent declares under `#[cfg(test)]`.
 #
-# `strip_cfg_test_modules` handles the inline form — `#[cfg(test)] mod tests {
-# .. }` — by scanning the file itself. It cannot see the out-of-line form,
-# where `#[cfg(test)] mod tests;` sits in the parent and the body lives in its
-# own file: that file carries no marker of its own, so every line in it read as
-# production code. A test binding an ephemeral loopback port then looks exactly
-# like a new orchestration server.
-#
-# Resolving the declaration keeps the gate's meaning ("is this compiled into a
-# shipped binary?") rather than trusting a filename, so a real server in a file
-# called `tests.rs` is still caught unless its parent gates it out of the build.
-file_is_out_of_line_cfg_test_module() {
+# `strip_cfg_test_modules` already exempts an inline `#[cfg(test)] mod x { .. }`,
+# so the same test code was exempt written inline and flagged written as its own
+# file. That is an inconsistency in this check, not a policy: a test that binds a
+# loopback socket to stand in for an HTTP API is not an orchestration server, and
+# where the compiler is told to put it does not change that. This closes the hole
+# from the other side by asking the parent module how the file is gated.
+declared_cfg_test() {
   local file="$1"
-  local dir base parent name
+  local dir base parent
   dir=$(dirname "$file")
   base=$(basename "$file" .rs)
 
-  if [[ "$base" == "mod" ]]; then
-    # `foo/mod.rs` is declared as `mod foo;` one level up.
-    name=$(basename "$dir")
-    dir=$(dirname "$dir")
-  else
-    name="$base"
-  fi
-
-  for parent in "$dir.rs" "$dir/mod.rs" "$dir/lib.rs" "$dir/main.rs"; do
+  # `foo/tests.rs` is declared by `foo/mod.rs`, or by the sibling `foo.rs`.
+  for parent in "$dir/mod.rs" "$(dirname "$dir")/$(basename "$dir").rs"; do
     [[ -f "$parent" ]] || continue
-    if awk -v want="$name" '
-      /^[[:space:]]*#\[cfg\(test\)\][[:space:]]*$/ { pending = 1; next }
-      pending == 1 && $0 ~ "^[[:space:]]*(pub[[:space:]]+)?mod[[:space:]]+" want "[[:space:]]*;" { found = 1; exit }
-      { pending = 0 }
-      END { exit !found }
-    ' "$parent"; then
+    # The declaration and its attribute are adjacent lines; -B1 pairs them.
+    if grep -B1 -E "^[[:space:]]*(pub[[:space:]]+)?mod[[:space:]]+${base}[[:space:]]*;" "$parent" 2>/dev/null \
+        | grep -q '#\[cfg(test)\]'; then
       return 0
     fi
   done
@@ -122,7 +112,7 @@ while IFS= read -r file; do
   if crate_allows_server_patterns "$file"; then
     continue
   fi
-  if file_is_out_of_line_cfg_test_module "$file"; then
+  if declared_cfg_test "$file"; then
     continue
   fi
   hits=$(strip_cfg_test_modules "$file" | grep -nE "$patterns" || true)

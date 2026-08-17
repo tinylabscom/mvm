@@ -1228,6 +1228,11 @@ mod tests {
             hypervisor: "firecracker".to_string(),
             overlay_aware: true,
             runtime_lean: true,
+            image_tag: String::new(),
+            source: String::new(),
+            built_at: String::new(),
+            protocol_version: 0,
+            generator_rev: String::new(),
         };
         sidecar.write_to_dir(tmp.path()).unwrap();
 

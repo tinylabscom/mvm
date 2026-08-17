@@ -120,7 +120,13 @@ where
 /// free of stream framing so the async and blocking front ends cannot drift on
 /// any of it — a second copy of admission is exactly the bug that would not
 /// surface until a Linux host refused something a macOS host allowed.
-fn serve_request(
+/// `pub(crate)` so the FlowMux `Icmp` arm can call it.
+///
+/// That arm frames the request and the replies; parse, bounds, admission, rate
+/// and the echo itself all stay here, on every transport. A second copy of
+/// admission is exactly the bug that would not surface until one transport
+/// refused something another allowed.
+pub(crate) fn serve_request(
     line: &str,
     gate: &EgressGate,
     rate_guard: &EgressRateGuard,

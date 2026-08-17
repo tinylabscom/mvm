@@ -209,3 +209,236 @@ fn endpoint_mode(with_identity: bool) -> (String, bool) {
 fn contains_window(haystack: &[u8], needle: &[u8]) -> bool {
     haystack.windows(needle.len()).any(|w| w == needle)
 }
+
+// ── one protocol, mechanically ───────────────────────────────────────────
+
+#[when("the one-protocol gate inspects the tree")]
+fn when_gate_runs(_world: &mut CliWorld) {
+    // The gate itself runs in CI as `xtask check-one-guest-protocol`; what
+    // this scenario asserts is the property it enforces, against the same
+    // sources, so the feature file states the rule rather than the tool.
+}
+
+#[then("it finds no retired line-marker protocol")]
+fn then_no_line_markers(_world: &mut CliWorld) {
+    let root = workspace_root();
+    let markers = [
+        "MVM_DNS/1",
+        "MVM_ICMP/1",
+        "MVM_SOCKS5_UDP/1",
+        "MVM_HTTP_FORWARD/1",
+    ];
+    for file in rust_files(&root.join("crates/mvm-agentd/src")) {
+        let text = std::fs::read_to_string(&file).expect("read guest source");
+        for line in text.lines().filter(|l| !is_comment(l)) {
+            for marker in markers {
+                assert!(
+                    !line.contains(marker),
+                    "{} still speaks the retired marker {marker}",
+                    file.display()
+                );
+            }
+        }
+    }
+}
+
+#[then("every guest dialer of the egress port is a FlowMux client")]
+fn then_every_dialer_is_flowmux(_world: &mut CliWorld) {
+    let root = workspace_root();
+    let clients = ["SyncFlowMux", "FlowMuxClient", "FlowMuxReconnectClient"];
+    for file in rust_files(&root.join("crates/mvm-agentd/src")) {
+        if file.starts_with(root.join("crates/mvm-agentd/src/vsock")) {
+            continue;
+        }
+        let text = std::fs::read_to_string(&file).expect("read guest source");
+        let dials = text.lines().any(|l| {
+            !is_comment(l) && (l.contains("EGRESS_PORT") || l.contains("EGRESS_VSOCK_PORT"))
+        });
+        if !dials {
+            continue;
+        }
+        assert!(
+            clients.iter().any(|c| text.contains(c)),
+            "{} opens the egress port without a FlowMux client",
+            file.display()
+        );
+    }
+}
+
+#[when("the wire contract is enumerated")]
+fn when_contract_enumerated(_world: &mut CliWorld) {}
+
+#[then("a typed HTTP flow is part of it")]
+fn then_http_flow_in_contract(_world: &mut CliWorld) {
+    use mvm_contract::protocol::network_flow::{FlowClass, Opcode};
+    assert_eq!(Opcode::OpenHttp.class(), FlowClass::Http);
+    assert!(Opcode::OpenHttp.is_open(), "OpenHttp must open a flow");
+    assert!(
+        Opcode::HttpComplete.is_terminal(),
+        "an HTTP exchange must end"
+    );
+}
+
+#[then("a one-shot ICMP echo is part of it")]
+fn then_icmp_in_contract(_world: &mut CliWorld) {
+    use mvm_contract::protocol::network_flow::{FlowClass, Opcode};
+    assert_eq!(Opcode::IcmpEcho.class(), FlowClass::Icmp);
+    assert!(Opcode::IcmpEcho.is_open(), "IcmpEcho must open a flow");
+    assert!(
+        Opcode::IcmpReply.is_terminal() && Opcode::IcmpRefused.is_terminal(),
+        "an echo is answered once and done"
+    );
+}
+
+// ── substitution must be live before a placeholder is handed out ─────────
+
+#[given("an endpoint config carrying a secret")]
+fn given_secret_bearing_config(world: &mut CliWorld) {
+    world.one_transport_state = Some(tempfile::tempdir().expect("tempdir"));
+}
+
+#[then("it refuses to serve without a substitution service")]
+fn then_refuses_without_substitution(_world: &mut CliWorld) {
+    // The endpoint binary owns the refusal; the property is that a config with
+    // secrets and no assembled service is not servable.
+    assert!(
+        secrets_without_substitution_is_refused(),
+        "a secret-bearing endpoint with no substitution service must refuse"
+    );
+}
+
+#[then("it is admitted with one")]
+fn then_admitted_with_substitution(_world: &mut CliWorld) {
+    assert!(secrets_with_substitution_is_admitted());
+}
+
+// ── readiness fails closed ───────────────────────────────────────────────
+
+#[given("a per-VM state dir whose endpoint is running")]
+fn given_live_endpoint(world: &mut CliWorld) {
+    use mvm_vmm::host::network_endpoint_spawn::SUBST_PID_FILE;
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        dir.path().join(SUBST_PID_FILE),
+        std::process::id().to_string(),
+    )
+    .expect("write pid");
+    world.one_transport_state = Some(dir);
+}
+
+#[given("a per-VM state dir with no endpoint")]
+fn given_no_endpoint(world: &mut CliWorld) {
+    world.one_transport_state = Some(tempfile::tempdir().expect("tempdir"));
+}
+
+#[then("a launch is refused because no guest authenticated")]
+fn then_launch_refused(world: &mut CliWorld) {
+    use mvm_vmm::host::network_endpoint_spawn::refuse_launch_without_endpoint_session;
+    let dir = world.one_transport_state.as_ref().expect("state dir");
+    let err = refuse_launch_without_endpoint_session("vm-bdd", dir.path())
+        .expect_err("a launch with no session must be refused");
+    assert!(
+        err.to_string().contains("no guest ever authenticated"),
+        "unexpected: {err}"
+    );
+}
+
+#[then("a launch is admitted once a session is recorded")]
+fn then_launch_admitted_after_session(world: &mut CliWorld) {
+    use mvm_vmm::host::network_endpoint_spawn::{
+        SUBST_SESSION_FILE, refuse_launch_without_endpoint_session,
+    };
+    let dir = world.one_transport_state.as_ref().expect("state dir");
+    std::fs::write(dir.path().join(SUBST_SESSION_FILE), b"1").expect("record session");
+    refuse_launch_without_endpoint_session("vm-bdd", dir.path()).expect("admitted");
+}
+
+#[then("the launch is admitted")]
+fn then_launch_admitted(world: &mut CliWorld) {
+    use mvm_vmm::host::network_endpoint_spawn::refuse_launch_without_endpoint_session;
+    let dir = world.one_transport_state.as_ref().expect("state dir");
+    refuse_launch_without_endpoint_session("vm-bdd", dir.path())
+        .expect("a boot with nothing to mediate must not be refused");
+}
+
+/// A config carrying one bound secret, as the spawner would hand it over.
+fn secret_bearing_config() -> mvm_hostd::supervisor::network_endpoint::EndpointConfig {
+    use mvm_core::plan::{SecretBinding, SecretSource};
+    use mvm_hostd::supervisor::network_endpoint::{EndpointConfig, EndpointTransport};
+
+    EndpointConfig {
+        tenant_id: "local".into(),
+        secrets: vec![SecretBinding {
+            name: "OPENAI_API_KEY".into(),
+            source: SecretSource::Keystore {
+                address: "openai".into(),
+            },
+        }],
+        transport: EndpointTransport::Uds {
+            path: "/tmp/mvm-one-transport-bdd.sock".into(),
+        },
+        redaction: mvm_core::policy::RedactionPolicy::default(),
+        reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
+        forward_timeout_secs: 30,
+        proxy_https: None,
+        proxy_http: None,
+        no_proxy: None,
+        secret_store_dir: None,
+        binding_store_dir: None,
+        terminator_listen: None,
+        tls_intermediate: None,
+        network_policy: None,
+        egress_mode: Default::default(),
+        session_marker: None,
+        resolver: Default::default(),
+        flowmux_identity: None,
+    }
+}
+
+fn secrets_without_substitution_is_refused() -> bool {
+    mvm_hostd::supervisor::network_endpoint::refuse_secrets_without_substitution(
+        &secret_bearing_config(),
+        false,
+    )
+    .is_err()
+}
+
+fn secrets_with_substitution_is_admitted() -> bool {
+    mvm_hostd::supervisor::network_endpoint::refuse_secrets_without_substitution(
+        &secret_bearing_config(),
+        true,
+    )
+    .is_ok()
+}
+
+fn workspace_root() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .expect("workspace root")
+        .to_path_buf()
+}
+
+fn is_comment(line: &str) -> bool {
+    let t = line.trim_start();
+    t.starts_with("//") || t.starts_with("/*") || t.starts_with('*')
+}
+
+fn rust_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(current) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&current) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                out.push(path);
+            }
+        }
+    }
+    out
+}

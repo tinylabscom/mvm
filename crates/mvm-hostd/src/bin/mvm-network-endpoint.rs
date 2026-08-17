@@ -33,7 +33,7 @@ use mvm_hostd::keyholder::secret_placeholder_env;
 use mvm_hostd::supervisor::flowmux::{FlowMuxSession, registry::RegistryLimits};
 use mvm_hostd::supervisor::network_endpoint::{
     EgressMode, EndpointConfig, EndpointHandshake, EndpointTransport, ResolverBackend, assemble,
-    build_audit_recorder, build_egress_gate, fingerprint_bound_secrets, parse,
+    build_audit_recorder, fingerprint_bound_secrets, parse,
 };
 
 fn read_stdin_blocking() -> Result<Vec<u8>> {
@@ -79,12 +79,15 @@ fn main() -> Result<()> {
     // target is live before the guest boots.
     let bound = bind_transport(&cfg.transport)?;
     let terminator = bind_terminator(cfg.terminator_listen)?;
-    let raw_only = can_skip_substitution_assembly(&cfg);
-    let assembled = if raw_only {
-        None
-    } else {
-        Some(assemble(&cfg).context("assembling substitution service")?)
-    };
+    // Always assembled. The one mode that skipped it was `raw`, which is gone:
+    // a FlowMux guest can open a typed HTTP flow at any point in its life, and
+    // deciding at boot that it will not is the kind of guess that leaves a
+    // placeholder with nothing to resolve it.
+    let assembled = Some(assemble(&cfg).context("assembling substitution service")?);
+    mvm_hostd::supervisor::network_endpoint::refuse_secrets_without_substitution(
+        &cfg,
+        assembled.is_some(),
+    )?;
 
     // Ready handshake: report the minted (guest var → placeholder) pairs on
     // stdout so the backend can set them in the guest launch env, then boot.
@@ -105,11 +108,8 @@ fn main() -> Result<()> {
             .as_ref()
             .map(|(_, handed)| secret_placeholder_env(handed))
             .unwrap_or_default(),
-        input_fingerprints: if raw_only {
-            Vec::new()
-        } else {
-            fingerprint_bound_secrets(&cfg).context("fingerprinting the endpoint\'s secrets")?
-        },
+        input_fingerprints: fingerprint_bound_secrets(&cfg)
+            .context("fingerprinting the endpoint's secrets")?,
     };
     let fingerprinted = handshake.input_fingerprints.len();
     let line = serde_json::to_string(&handshake).context("serializing the ready handshake")?;
@@ -153,16 +153,6 @@ fn main() -> Result<()> {
         )
         .await
     })
-}
-
-/// Build the raw-egress claim-10 gate for a config: use the threaded network
-/// policy when present, else fail closed with default-deny. Raw mode carries no
-/// secrets, so this gate is the entire egress admission decision.
-fn raw_egress_gate(cfg: &EndpointConfig) -> mvm_runtime::vmm::egress_gate::EgressGate {
-    match &cfg.network_policy {
-        Some(policy) => build_egress_gate(policy),
-        None => mvm_runtime::vmm::egress_gate::EgressGate::default_deny(),
-    }
 }
 
 /// The one extra Landlock/seccomp grant `Remote` needs beyond `Local`: the
@@ -315,24 +305,14 @@ async fn serve(
                 service.context("wire egress configured without a substitution service")?;
             serve_wire(service, bound, forward_timeout).await?;
         }
-        // No secrets: the relayed stream is raw TCP, gated then spliced.
-        EgressMode::Raw => serve_raw(cfg, bound, forward_timeout).await?,
         // Authenticated FlowMux session: the converged single networking path.
-        EgressMode::FlowMux => serve_flowmux(cfg, bound).await?,
+        EgressMode::FlowMux => serve_flowmux(cfg, service, bound).await?,
     }
 
     if let Some(task) = terminator_task {
         task.abort();
     }
     Ok(())
-}
-
-fn can_skip_substitution_assembly(cfg: &EndpointConfig) -> bool {
-    cfg.egress_mode == EgressMode::Raw
-        && cfg.secrets.is_empty()
-        && cfg.terminator_listen.is_none()
-        && cfg.tls_intermediate.is_none()
-        && cfg.flowmux_identity.is_none()
 }
 
 /// The WireRequest substitution serve loop over the adopted listener.
@@ -349,30 +329,6 @@ async fn serve_wire(
         }
         #[cfg(target_os = "linux")]
         Bound::Vsock(listener) => service.serve_vsock(listener).await,
-    }
-    Ok(())
-}
-
-/// The raw-TCP egress serve loop over the adopted listener, gated by the config's
-/// network policy (default-deny when absent — fail closed).
-async fn serve_raw(
-    cfg: &EndpointConfig,
-    bound: Bound,
-    forward_timeout: std::time::Duration,
-) -> Result<()> {
-    use mvm_hostd::supervisor::raw_egress;
-    let gate = std::sync::Arc::new(raw_egress_gate(cfg));
-    let recorder = build_audit_recorder(&cfg.tenant_id).map(std::sync::Arc::new);
-    match bound {
-        Bound::Uds(std_listener) => {
-            let listener = tokio::net::UnixListener::from_std(std_listener)
-                .context("adopting UDS listener into the tokio runtime")?;
-            raw_egress::serve_raw_egress(listener, gate, recorder, forward_timeout).await;
-        }
-        #[cfg(target_os = "linux")]
-        Bound::Vsock(listener) => {
-            raw_egress::serve_raw_egress_vsock(listener, gate, recorder, forward_timeout).await;
-        }
     }
     Ok(())
 }
@@ -396,7 +352,13 @@ async fn serve_raw(
 /// raw loops can adopt it into tokio), which means it must be adopted here too
 /// rather than accepted on a blocking thread — a blocking accept on it returns
 /// `EAGAIN` immediately and forever.
-async fn serve_flowmux(cfg: &EndpointConfig, bound: Bound) -> Result<()> {
+async fn serve_flowmux(
+    cfg: &EndpointConfig,
+    service: Option<
+        std::sync::Arc<mvm_hostd::supervisor::network_endpoint_proxy::SubstitutionService>,
+    >,
+    bound: Bound,
+) -> Result<()> {
     let identity = cfg
         .flowmux_identity
         .as_ref()
@@ -452,24 +414,57 @@ async fn serve_flowmux(cfg: &EndpointConfig, bound: Bound) -> Result<()> {
         let host_key = host_key.clone();
         let session_id = session_id.clone();
         let recorder = recorder.clone();
+        let substitution = service.clone();
+        let marker = cfg.session_marker.clone();
         tokio::task::spawn_blocking(move || {
-            let served = FlowMuxSession::accept_with_recorder(
+            let served = FlowMuxSession::accept_with(
                 stream,
-                &session_id,
-                host_key,
-                &guest_anchor,
-                limits,
-                gate,
-                recorder,
+                mvm_hostd::supervisor::flowmux::FlowMuxAccept::new(
+                    &session_id,
+                    host_key,
+                    guest_anchor,
+                    limits,
+                    gate,
+                )
+                .with_recorder(recorder)
+                .with_substitution(substitution),
             )
             .context("accept FlowMux session")
-            .and_then(|mut session| session.serve().context("serve FlowMux session"));
+            .and_then(|mut session| {
+                // A session that authenticated is the first evidence a guest
+                // actually reached this endpoint. Recorded before serving, so
+                // a session that dies mid-life does not retract the fact that
+                // one was established.
+                record_session_established(marker.as_deref());
+                session.serve().context("serve FlowMux session")
+            });
             // One session ending is ordinary — the guest reconnects. Log it
             // and keep accepting rather than taking the endpoint down with it.
             if let Err(e) = served {
                 warn!(error = %format!("{e:#}"), "FlowMux session ended");
             }
         });
+    }
+}
+
+/// Record that a guest completed an authenticated session.
+///
+/// Best-effort by design. The marker is a launch-time readiness signal, not an
+/// authorization input: a guest is already authenticated by the time this runs,
+/// so failing to write it must not tear down a working session. A write that
+/// does not land shows up as a launch that refuses, which is the safe way round.
+fn record_session_established(marker: Option<&std::path::Path>) {
+    let Some(path) = marker else {
+        return;
+    };
+    if let Some(parent) = path.parent()
+        && let Err(e) = std::fs::create_dir_all(parent)
+    {
+        warn!(path = %parent.display(), error = %e, "could not create the session marker dir");
+        return;
+    }
+    if let Err(e) = std::fs::write(path, b"1") {
+        warn!(path = %path.display(), error = %e, "could not record the FlowMux session");
     }
 }
 
@@ -583,8 +578,9 @@ mod tests {
                     443,
                 )],
             )),
-            egress_mode: EgressMode::Raw,
+            egress_mode: EgressMode::Wire,
             resolver: ResolverBackend::default(),
+            session_marker: None,
             flowmux_identity: None,
         }
     }
@@ -613,17 +609,12 @@ mod tests {
             egress_mode: EgressMode::Wire,
             resolver,
             flowmux_identity: None,
+            session_marker: None,
         }
     }
 
     #[test]
-    fn raw_no_secret_endpoint_skips_substitution_assembly() {
-        let cfg = uds_cfg();
-        assert!(can_skip_substitution_assembly(&cfg));
-    }
-
-    #[test]
-    fn raw_endpoint_uses_substitution_assembly_when_secrets_are_present() {
+    fn secrets_without_a_substitution_service_refuse_the_launch() {
         let mut cfg = uds_cfg();
         cfg.secrets.push(SecretBinding {
             name: "OPENAI_API_KEY".into(),
@@ -631,7 +622,43 @@ mod tests {
                 address: "openai".into(),
             },
         });
-        assert!(!can_skip_substitution_assembly(&cfg));
+        let err = mvm_hostd::supervisor::network_endpoint::refuse_secrets_without_substitution(
+            &cfg, false,
+        )
+        .expect_err("a secret-bearing endpoint with no substitution must refuse");
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("nothing to resolve them"),
+            "got: {message}"
+        );
+    }
+
+    #[test]
+    fn secrets_with_a_substitution_service_are_admitted() {
+        let mut cfg = uds_cfg();
+        cfg.secrets.push(SecretBinding {
+            name: "OPENAI_API_KEY".into(),
+            source: SecretSource::Keystore {
+                address: "openai".into(),
+            },
+        });
+        assert!(
+            mvm_hostd::supervisor::network_endpoint::refuse_secrets_without_substitution(
+                &cfg, true
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn a_secretless_endpoint_needs_no_substitution_service() {
+        let cfg = uds_cfg();
+        assert!(
+            mvm_hostd::supervisor::network_endpoint::refuse_secrets_without_substitution(
+                &cfg, false
+            )
+            .is_ok()
+        );
     }
 
     #[test]
@@ -674,6 +701,7 @@ mod tests {
             network_policy: None,
             egress_mode: EgressMode::FlowMux,
             resolver: ResolverBackend::default(),
+            session_marker: None,
             flowmux_identity: Some(mvm_hostd::supervisor::network_endpoint::FlowMuxIdentity {
                 session_id: "s".into(),
                 host_signing_key_base64: base64::engine::general_purpose::STANDARD.encode(host_key),

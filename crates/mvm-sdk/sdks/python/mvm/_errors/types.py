@@ -45,6 +45,59 @@ class InvalidInputError(HostServiceError):
     """
 
 
+class RemoteError(Exception):
+    """User code inside the VM raised; a structured envelope was
+    parsed.
+    """
+
+    def __init__(self, *, kind: str, error_id: str, message: str):
+        super().__init__(f"{kind}: {message} (error_id={error_id})")
+        self.kind = kind
+        self.error_id = error_id
+        self.message = message
+
+
+class MvmTransportError(RuntimeError):
+    """Could not reach the substrate, or got an unparseable response."""
+
+
+class MsgpackUnavailable(RuntimeError):
+    """The workload declared msgpack but the SDK has no msgpack
+    support.
+    """
+
+
+class PayloadTooLarge(MvmTransportError):
+    """The encoded request exceeded the payload cap, refused before any
+    subprocess spawned.
+    """
+
+
+class NoVmIntrospectionError(MvmTransportError):
+    """No-VM dispatch was requested without a local function to
+    introspect. Python-only in practice: the mode itself has no
+    TypeScript form.
+    """
+
+
+class SecretInArgError(RuntimeError):
+    """A secret-shaped value was passed as a call argument under strict
+    mode.
+    """
+
+
+class SecretInArgWarning(UserWarning):
+    """Heuristic flagged a secret-shaped value passed as a call
+    argument.
+    """
+
+
+class EmittingContextError(RuntimeError):
+    """A transport call fired inside an emit subprocess, where no live
+    microVM exists.
+    """
+
+
 #: The success status; any other value is a failure.
 STATUS_OK = 0
 
@@ -71,6 +124,14 @@ __all__ = [
     "ServiceError",
     "TransportError",
     "InvalidInputError",
+    "RemoteError",
+    "MvmTransportError",
+    "MsgpackUnavailable",
+    "PayloadTooLarge",
+    "NoVmIntrospectionError",
+    "SecretInArgError",
+    "SecretInArgWarning",
+    "EmittingContextError",
     "STATUS_OK",
     "STATUS_ERRORS",
 ]

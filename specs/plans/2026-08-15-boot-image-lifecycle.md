@@ -450,9 +450,17 @@ mechanics on the artifact where a mistake is cheapest to correct.
 ## Workstreams
 
 - [x] WS1 — boot the staged image before publish (x86_64 boot, aarch64 header check)
-- [ ] WS2 — `boot-image/v*` release train (semver from `v0.1.0`), dual-publish window, `DEFAULT_BOOT_IMAGE_TAG`
-- [ ] WS3 — sidecar provenance fields + `mvmctl image boot status｜check｜update`
-- [ ] WS4 — `MVM_BOOT_IMAGE` escape hatch + doctor readout
+- [x] WS2 — `boot-image/v*` release train (semver from `v0.1.0`), dual-publish window, `DEFAULT_BOOT_IMAGE_TAG`
+- [x] WS3 — sidecar provenance fields + `mvmctl image boot status｜check｜update`
+- [x] WS4 — `MVM_BOOT_IMAGE` escape hatch + doctor readout
+
+**One piece of WS2 deliberately did not ship.** `DEFAULT_BOOT_IMAGE_TAG` exists but
+no consumer reads it. Repointing `download_default_microvm_image` /
+`download_workload_kernel` at `boot-image/v0.1.0` before that tag is published
+would 404 every fresh install on merge — the failure this plan exists to close.
+The switch is unblocked by publishing a first `boot-image/v*` release, which the
+new workflow now makes possible. Until then a CLI release refuses to publish
+without image assets rather than shipping a broken one.
 
 ## Open questions for whoever picks this up
 
