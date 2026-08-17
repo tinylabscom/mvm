@@ -919,12 +919,22 @@ impl FlowMuxSession {
     }
 
     fn reset_stream(&mut self, stream_id: u32) -> Result<(), FlowMuxError> {
-        if let Some(handle) = self.streams.remove(&stream_id) {
+        let was_live = self.streams.remove(&stream_id);
+        let live = was_live.is_some();
+        if let Some(handle) = was_live {
             handle.retired.store(true, Ordering::Relaxed);
             let _ = handle.upstream.shutdown(std::net::Shutdown::Both);
         }
         let _ = lock_registry(&self.registry).retire(stream_id);
-        self.send_reset(stream_id, "reset by peer")?;
+        // Only announce a teardown we are actually performing. A relay thread
+        // that already reset this stream has told the guest once; telling it
+        // again names a stream the guest has retired, which is a protocol error
+        // on its validator and kills the whole session — taking every other
+        // live stream with it. The guest is right to refuse the second one, so
+        // the fix belongs here.
+        if live {
+            self.send_reset(stream_id, "reset by peer")?;
+        }
         Ok(())
     }
 
