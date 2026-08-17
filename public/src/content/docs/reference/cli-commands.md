@@ -209,10 +209,29 @@ is the command. `mvmctl env uninstall --all` also wipes `~/.mvm`, but it removes
 | `mvmctl secret put <name> --value -` | Store or replace a local secret from stdin |
 | `mvmctl secret put <name> --value-file <path>` | Store or replace a local secret from a file |
 | `mvmctl secret put <name> --value <value>` | Store or replace a local secret from an inline value. Avoid in interactive shells because the value may be saved in shell history |
+| `mvmctl secret set <name> --provider <provider>` | Store a secret and bind it to a catalogued provider's destinations and auth type |
+| `mvmctl secret set <name> --host <host> --type <auth>` | Store a secret and bind it to explicit destinations. Repeat `--host`; `*.` subdomain wildcards supported |
+| `mvmctl secret providers` | List the built-in service providers `--provider` accepts |
+| `mvmctl secret providers --search <query>` | Filter providers by name, description, or tag |
 | `mvmctl secret get <name>` | Verify that a local secret exists without printing the value |
-| `mvmctl secret ls` | List stored secret names only |
+| `mvmctl secret ls` | List stored secret names, and for bound secrets their auth type, destinations, and authoring provider |
 | `mvmctl secret rm <name>` | Remove a local secret |
-| `mvmctl secret <put|get|ls|rm> --tenant <tenant>` | Use a non-default local tenant namespace. Default: `local` |
+| `mvmctl secret <put|get|set|ls|rm> --tenant <tenant>` | Use a non-default local tenant namespace. Default: `local` |
+
+`secret set` is `put` plus an egress binding: it records where the substituted
+credential may go and how it authenticates. `--provider` takes those from the
+built-in catalog so the destination is not hand-typed, which matters because a
+mistyped host does not fail loudly — it withholds the credential, surfacing as an
+unrelated upstream auth error. `--provider` and `--host`/`--type` are mutually
+exclusive, and an unrecognised provider name is refused rather than falling back
+to a default.
+
+The catalog is expanded once, when `secret set` runs, and the resulting literal
+hosts are what get stored and enforced; it is never consulted again for that
+binding. A later change to a catalog entry therefore cannot widen a binding that
+already exists. For a SigV4 provider the credential-scope service comes from the
+entry, while `--region` and `--aws-access-key-id` stay yours to supply — they
+belong to your account, not to the provider.
 
 Secret values are write-only through the CLI after storage: `get` is a presence
 check and never emits the raw value. Replace a secret by running `secret put`

@@ -40,6 +40,7 @@ fn given_bound_secret(world: &mut CliWorld, name: String, value: String, tenant:
         auth_type: AuthType::Bearer,
         allowed_hosts: vec!["example.com".to_string()],
         sigv4: None,
+        provider: None,
     };
     service
         .bind(&tenant, &name, binding)
