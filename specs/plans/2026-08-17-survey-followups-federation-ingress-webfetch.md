@@ -82,10 +82,24 @@ until it is answered.
   already in the tree, avoiding a `jsonwebtoken`/`jose` dependency. The real
   expense is not crypto: it is operating a stable issuer with a reachable
   JWKS, which only mvmd can be.
-- **B1 — identity claims DTO.** The claim set (`iss`, `sub` = `(tenant,
-  workload)`, `aud`, `exp`, plus `plan_id` for audit) in `mvm-contract`, with
-  serde round-trip and validity-window tests. No issuer, no network.
-- **B2 — the issuer lives in mvmd.** A stable issuer with a reachable JWKS is
+- **B1 — identity claims DTO. DONE.** `mvm_contract::workload_identity`:
+  `WorkloadSubject` (`(tenant, workload)`, with the one pinned rendering an
+  operator pastes into a trust policy) and `WorkloadIdentityClaims` over the
+  registered claim names, `no_std` + alloc and building on
+  `wasm32-unknown-unknown`. Structural `validate()` is deliberately separate
+  from `is_current_at()`, so "well-formed" cannot be satisfied by consulting
+  the clock. `MAX_LIFETIME_SECS` (600) caps the window — a long-lived
+  assertion is a standing credential in a new format, which is what
+  federation exists to remove. Eleven tests; four mutations confirmed red
+  (cap removed, expiry made inclusive, unscoped assertion allowed, subject
+  rendering changed).
+- **B2 — the issuer lives in mvmd.** *(Recon done: mvmd-gateway is axum and
+  already serves an unauthenticated public route at
+  `/.well-known/acme-challenge/{token}` via a `public_get` helper, so a JWKS
+  endpoint fits the existing pattern. `ring` 0.17 is already in mvmd's
+  lockfile and `rcgen::KeyPair::generate()` already defaults to ECDSA P-256,
+  so B0's estimate of a new `p256` dependency looks **too pessimistic on the
+  mvmd side** — verify against the actual signing API before relying on it.)* A stable issuer with a reachable JWKS is
   the whole premise, and a local CLI cannot be one: every developer's host
   signer is a different issuer, and nobody will add a per-laptop trust
   relationship to a cloud account. mvmd already has `mvmd-iam`, but its surface
