@@ -1,5 +1,8 @@
 # Upgrade sigstore-verify stack 0.9 → 0.11
 
+Backing: shipped-source
+Validation: none
+
 **Status:** COMPLETE
 
 ## Background
