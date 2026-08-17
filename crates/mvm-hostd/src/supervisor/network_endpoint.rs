@@ -658,6 +658,7 @@ mod tests {
                     auth_type: AuthType::Bearer,
                     allowed_hosts: vec!["api.openai.com".into()],
                     sigv4: None,
+                    provider: None,
                 },
             )
             .unwrap();
@@ -803,6 +804,7 @@ mod tests {
                     auth_type: AuthType::Bearer,
                     allowed_hosts: vec!["api.openai.com".into()],
                     sigv4: None,
+                    provider: None,
                 },
             )
             .unwrap();
@@ -858,6 +860,7 @@ mod tests {
                     auth_type: AuthType::Bearer,
                     allowed_hosts: vec!["api.openai.com".into()],
                     sigv4: None,
+                    provider: None,
                 },
             )
             .unwrap();
@@ -885,6 +888,7 @@ mod tests {
                     auth_type: AuthType::Bearer,
                     allowed_hosts: vec!["api.openai.com".into()],
                     sigv4: None,
+                    provider: None,
                 },
             )
             .unwrap();
