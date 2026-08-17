@@ -230,6 +230,7 @@ impl FlowMuxClient {
             udp_associations: BTreeMap::new(),
             pending_opens: BTreeMap::new(),
             pending_resolves: BTreeMap::new(),
+            frame_reader: FrameReader::default(),
         };
 
         tokio::spawn(async move {
@@ -333,6 +334,8 @@ struct SessionPump<S> {
     udp_associations: BTreeMap<u32, UdpAssociationState>,
     pending_opens: BTreeMap<u32, PendingOpen>,
     pending_resolves: BTreeMap<u32, oneshot::Sender<Result<Vec<u8>, FlowMuxError>>>,
+    /// Survives a `select!` cancellation so a half-read frame resumes.
+    frame_reader: FrameReader,
 }
 
 impl<S> SessionPump<S>
@@ -356,7 +359,9 @@ where
                         }
                     }
                 }
-                frame = read_sealed_frame_from(&mut self.stream, &mut self.session) => {
+                frame = self
+                    .frame_reader
+                    .read(&mut self.stream, &mut self.session) => {
                     match frame? {
                         Some((opcode, stream_id, _payload_len, payload)) => {
                             self.handle_frame(opcode, stream_id, payload).await?;
@@ -800,33 +805,122 @@ where
     }
 }
 
+/// Largest sealed frame the guest will accept off the wire.
+const MAX_SEALED_LEN: usize = 1 << 20;
+
+/// One decoded frame: opcode, stream id, payload length, payload bytes.
+pub(crate) type DecodedFrame = (Opcode, u32, u32, Vec<u8>);
+
+/// The outcome of reading one frame. `Ok(None)` is a clean close on a frame
+/// boundary, never a truncated frame.
+pub(crate) type FrameRead = Result<Option<DecodedFrame>, FlowMuxError>;
+
+/// A resumable read of one sealed frame.
+///
+/// The pump reads inside `tokio::select!`, which drops the losing branch's
+/// future. A read that keeps its partial buffer in locals loses whatever it had
+/// already taken off the socket, and the next read then takes body bytes for a
+/// length prefix — the stream desyncs and every later frame is garbage. Holding
+/// the partial state here instead means a cancelled read *resumes* rather than
+/// restarts.
+///
+/// It only bites under load, because it needs a client request to be ready
+/// while a frame is still arriving. A quiet session reads whole frames between
+/// requests and looks perfectly correct.
+#[derive(Default)]
+pub(crate) struct FrameReader {
+    /// The 4-byte length prefix, filled incrementally.
+    len_buf: [u8; 4],
+    /// How much of `len_buf` is populated.
+    len_filled: usize,
+    /// The body buffer, allocated once the prefix is known.
+    body: Option<Vec<u8>>,
+    /// How much of `body` is populated.
+    body_filled: usize,
+}
+
+impl FrameReader {
+    /// Read the next frame, resuming any partially-read one.
+    ///
+    /// Cancel-safe: every `.await` sits between reads, and the byte counts are
+    /// updated before the next one, so dropping the future loses nothing.
+    pub(crate) async fn read<S>(
+        &mut self,
+        stream: &mut S,
+        session: &mut mvm_core::net::session::Session,
+    ) -> FrameRead
+    where
+        S: AsyncRead + Unpin,
+    {
+        while self.len_filled < self.len_buf.len() {
+            let n = stream.read(&mut self.len_buf[self.len_filled..]).await?;
+            if n == 0 {
+                // Clean close only on a frame boundary; mid-prefix EOF is a
+                // truncated frame and must not read as "peer went away".
+                return if self.len_filled == 0 {
+                    Ok(None)
+                } else {
+                    Err(FlowMuxError::Frame(
+                        "peer closed mid length prefix".to_string(),
+                    ))
+                };
+            }
+            self.len_filled += n;
+        }
+
+        if self.body.is_none() {
+            let sealed_len = u32::from_be_bytes(self.len_buf) as usize;
+            if sealed_len == 0 {
+                self.reset();
+                return Ok(None);
+            }
+            if sealed_len > MAX_SEALED_LEN {
+                return Err(FlowMuxError::Frame(format!(
+                    "sealed frame length {sealed_len} exceeds {MAX_SEALED_LEN}"
+                )));
+            }
+            self.body = Some(vec![0u8; sealed_len]);
+        }
+        let body = self.body.as_mut().expect("body allocated above");
+        while self.body_filled < body.len() {
+            let n = stream.read(&mut body[self.body_filled..]).await?;
+            if n == 0 {
+                return Err(FlowMuxError::Frame("peer closed mid frame".to_string()));
+            }
+            self.body_filled += n;
+        }
+
+        let sealed_buf = self.body.take().expect("body allocated above");
+        self.reset();
+        decode_sealed(&sealed_buf, session)
+    }
+
+    /// Drop the partial state so the next call starts a fresh frame.
+    fn reset(&mut self) {
+        self.len_filled = 0;
+        self.body = None;
+        self.body_filled = 0;
+    }
+}
+
+/// Read exactly one sealed frame, start to finish.
+///
+/// For callers that await the read directly. A caller that races this against
+/// another future in `select!` must use [`FrameReader`] instead — see its docs
+/// for what a dropped read costs.
 pub(crate) async fn read_sealed_frame_from<S>(
     stream: &mut S,
     session: &mut mvm_core::net::session::Session,
-) -> Result<Option<(Opcode, u32, u32, Vec<u8>)>, FlowMuxError>
+) -> FrameRead
 where
     S: AsyncRead + Unpin,
 {
-    let mut len_buf = [0u8; 4];
-    match stream.read_exact(&mut len_buf).await {
-        Ok(_) => {}
-        Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
-        Err(e) => return Err(e.into()),
-    }
-    let sealed_len = u32::from_be_bytes(len_buf) as usize;
-    if sealed_len == 0 {
-        return Ok(None);
-    }
-    const MAX_SEALED_LEN: usize = 1 << 20;
-    if sealed_len > MAX_SEALED_LEN {
-        return Err(FlowMuxError::Frame(format!(
-            "sealed frame length {sealed_len} exceeds {MAX_SEALED_LEN}"
-        )));
-    }
-    let mut sealed_buf = vec![0u8; sealed_len];
-    stream.read_exact(&mut sealed_buf).await?;
+    FrameReader::default().read(stream, session).await
+}
 
-    let sealed = mvm_core::net::session::SealedFrame::decode(&sealed_buf)
+/// Open and decode one sealed frame's bytes.
+fn decode_sealed(sealed_buf: &[u8], session: &mut mvm_core::net::session::Session) -> FrameRead {
+    let sealed = mvm_core::net::session::SealedFrame::decode(sealed_buf)
         .map_err(|e| FlowMuxError::Frame(e.to_string()))?;
     let plaintext = session
         .open(&sealed)
@@ -1423,6 +1517,142 @@ mod tests {
         stream.write_all(&len.to_be_bytes()).await.unwrap();
         stream.write_all(&sealed_bytes).await.unwrap();
         stream.flush().await.unwrap();
+    }
+
+    /// Seal a frame and hand back its exact wire bytes, so a test can deliver
+    /// it in pieces.
+    fn frame_bytes(
+        session: &mut mvm_core::net::session::Session,
+        opcode: Opcode,
+        stream_id: u32,
+        payload: &[u8],
+    ) -> Vec<u8> {
+        let mut wire = Vec::new();
+        encode_into(&mut wire, opcode, stream_id, payload).unwrap();
+        let sealed = session.seal(&wire).unwrap();
+        let mut sealed_bytes = Vec::new();
+        sealed.encode(&mut sealed_bytes).unwrap();
+        let len = u32::try_from(sealed_bytes.len()).unwrap();
+        let mut out = len.to_be_bytes().to_vec();
+        out.extend_from_slice(&sealed_bytes);
+        out
+    }
+
+    /// A handshaken guest/host session pair over a duplex.
+    async fn session_pair() -> (
+        tokio::io::DuplexStream,
+        mvm_core::net::session::Session,
+        tokio::io::DuplexStream,
+        mvm_core::net::session::Session,
+    ) {
+        let (host_key, host_anchor) = generate_keypair();
+        let (guest_key, _) = generate_keypair();
+        let (guest_stream, host_stream) = tokio::io::duplex(64 * 1024);
+        let host = tokio::spawn(host_handshake(host_stream, host_key));
+        let handle = tokio::runtime::Handle::try_current().unwrap();
+        let (guest_stream, guest_session) = tokio::task::spawn_blocking(move || {
+            let mut adapter = AsyncStreamSyncAdapter::new(guest_stream, handle);
+            let result =
+                mvm_core::net::session::Session::guest(&mut adapter, guest_key, &host_anchor);
+            let stream = adapter.into_inner();
+            result.map(|(session, _id)| (stream, session))
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        let (host_stream, host_session) = host.await.unwrap();
+        (guest_stream, guest_session, host_stream, host_session)
+    }
+
+    /// The pump reads inside `select!`, so a read that loses the race is
+    /// dropped part-way through a frame. It has to resume, not restart:
+    /// restarting re-reads body bytes as a length prefix and every later frame
+    /// on the session is garbage.
+    ///
+    /// Confirmed red before the `FrameReader` change, with the same
+    /// `sealed frame length ... exceeds 1048576` a builder VM produced once a
+    /// download was large enough to keep a request ready mid-frame.
+    #[tokio::test]
+    async fn a_cancelled_read_resumes_the_frame_it_was_part_way_through() {
+        let (mut guest_stream, mut guest_session, mut host_stream, mut host_session) =
+            session_pair().await;
+        let wire = frame_bytes(&mut host_session, Opcode::Data, 1, b"payload-after-cancel");
+        let mut reader = FrameReader::default();
+
+        // Deliver a partial length prefix and let the read be cancelled on it.
+        host_stream.write_all(&wire[..2]).await.unwrap();
+        host_stream.flush().await.unwrap();
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(50),
+                reader.read(&mut guest_stream, &mut guest_session),
+            )
+            .await
+            .is_err(),
+            "the read must still be pending, so the timeout cancels it"
+        );
+
+        // Deliver the rest of the prefix plus part of the body, cancel again.
+        let mid = wire.len() - 4;
+        host_stream.write_all(&wire[2..mid]).await.unwrap();
+        host_stream.flush().await.unwrap();
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(50),
+                reader.read(&mut guest_stream, &mut guest_session),
+            )
+            .await
+            .is_err(),
+            "a body-truncated read must also stay pending"
+        );
+
+        // The remainder completes the frame the two cancellations were inside.
+        host_stream.write_all(&wire[mid..]).await.unwrap();
+        host_stream.flush().await.unwrap();
+        let (opcode, stream_id, _len, payload) = reader
+            .read(&mut guest_stream, &mut guest_session)
+            .await
+            .expect("the resumed read must succeed")
+            .expect("a frame, not a clean close");
+        assert_eq!(opcode, Opcode::Data);
+        assert_eq!(stream_id, 1);
+        assert_eq!(payload, b"payload-after-cancel");
+    }
+
+    /// Cancellation must not cost frame *ordering* either: a session that was
+    /// interrupted keeps decrypting subsequent frames, which it cannot do if
+    /// the byte stream slipped by even one.
+    #[tokio::test]
+    async fn frames_after_a_cancelled_read_still_decrypt_in_order() {
+        let (mut guest_stream, mut guest_session, mut host_stream, mut host_session) =
+            session_pair().await;
+        let first = frame_bytes(&mut host_session, Opcode::Data, 1, b"first");
+        let second = frame_bytes(&mut host_session, Opcode::Data, 1, b"second");
+        let mut reader = FrameReader::default();
+
+        host_stream.write_all(&first[..3]).await.unwrap();
+        host_stream.flush().await.unwrap();
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(50),
+                reader.read(&mut guest_stream, &mut guest_session),
+            )
+            .await
+            .is_err()
+        );
+
+        host_stream.write_all(&first[3..]).await.unwrap();
+        host_stream.write_all(&second).await.unwrap();
+        host_stream.flush().await.unwrap();
+
+        for expected in [b"first".as_slice(), b"second".as_slice()] {
+            let (_, _, _, payload) = reader
+                .read(&mut guest_stream, &mut guest_session)
+                .await
+                .expect("decrypts in order")
+                .expect("a frame");
+            assert_eq!(payload, expected);
+        }
     }
 
     async fn recv_frame<S>(
