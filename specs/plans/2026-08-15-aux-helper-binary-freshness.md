@@ -1,5 +1,14 @@
 # Aux helper binaries drift from `mvmctl`, and two resolvers disagree about which one to run
 
+> **Partly superseded (2026-08-17)** by
+> `specs/plans/2026-08-17-embedded-binary-content-store.md`. The freshness
+> item below — widening the build script's `rerun-if-changed` coverage so a
+> stale aux helper cannot be embedded — is now handled by keying the artifact
+> on its dependency closure, which cannot match unless the bytes are the ones
+> this tree produces. The two divergent `mvm-network-endpoint` resolvers and
+> the non-sparse `pack_stage0_work_disk` write are untouched and still stand.
+
+
 Backing: shipped-source
 Validation: none
 

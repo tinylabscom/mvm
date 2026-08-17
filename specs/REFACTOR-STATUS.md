@@ -285,6 +285,21 @@ for detailed scope and acceptance criteria.
 
 ## In-flight plans
 
+- [~] **Embedded-binary content store** — `specs/plans/2026-08-17-embedded-binary-content-store.md`.
+      Phases 1–2 landed: both nested legs of `crates/mvm-cli/build.rs` are keyed
+      on their real dependency closure rather than on `PROFILE == "debug"` plus
+      "the file exists", and the store lives outside `target/` so worktrees,
+      profiles and target triples share it. Cold build **359s → 45.5s**; the
+      build script within it **332.7s → 0.4s**; an `mvm-cli` edit no longer
+      re-runs either leg. The dev profile keeps its stale-embedded-binary trade
+      deliberately, but a miss now knows it is stale and says so via
+      `cargo:warning=`. Supersedes the freshness half of
+      `specs/plans/2026-08-15-aux-helper-binary-freshness.md`.
+      STILL OPEN: Phase 3 (phantom build.rs tests, `MVM_LIBKRUN_HEADER`
+      rerun-if-env-changed), Phase 4 (dead crate edges; `deps_audit` and the
+      tree-sitter grammars off the serial path; the `mvm-hostd` audit cluster),
+      Phase 5 (sccache 4.2% Rust hit rate, worktree hygiene)
+
 - [~] **Launch path as declared stages**
       (`specs/plans/2026-08-15-launch-path-as-declared-stages.md`). Opened
       2026-08-15; no workstream started. Split out of the artifact-derived
