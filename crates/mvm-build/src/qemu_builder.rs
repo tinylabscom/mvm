@@ -418,6 +418,7 @@ pub(crate) fn copy_tree_filtered(
 #[cfg(test)]
 mod copy_barrier_tests {
     use super::{WORK_TREE_EXCLUDE_DIRS, copy_tree_filtered};
+    use mvm_core::util::test_env::TestEnv;
 
     /// The reported failure: a staging destination inside the tree being
     /// copied. Name-matched filtering walked into it and kept going until the
@@ -465,18 +466,15 @@ mod copy_barrier_tests {
         std::fs::create_dir_all(home.join("cache/builder-vm")).expect("mkdir");
         std::fs::write(home.join("cache/builder-vm/huge.img"), b"x").expect("write");
 
-        // SAFETY: single-threaded test process; restored before returning.
-        let previous = std::env::var_os("MVM_HOME");
-        unsafe { std::env::set_var("MVM_HOME", &home) };
+        // `isolate_mvm_home` moves HOME with MVM_HOME and restores both on
+        // drop. Setting MVM_HOME alone leaves the test able to read the
+        // developer's real home, which `xtask check-test-home-isolation`
+        // refuses — it caught this exact pair.
+        let mut env = TestEnv::new();
+        env.isolate_mvm_home(&home);
 
         let dst = root.path().join("out");
-        let result = copy_tree_filtered(&src, &dst, WORK_TREE_EXCLUDE_DIRS);
-
-        match previous {
-            Some(v) => unsafe { std::env::set_var("MVM_HOME", v) },
-            None => unsafe { std::env::remove_var("MVM_HOME") },
-        }
-        result.expect("copy");
+        copy_tree_filtered(&src, &dst, WORK_TREE_EXCLUDE_DIRS).expect("copy");
 
         assert!(
             dst.join("crates/lib.rs").is_file(),
@@ -497,18 +495,11 @@ mod copy_barrier_tests {
         std::fs::create_dir_all(src.join(".mvm-verify")).expect("mkdir");
         std::fs::write(src.join(".mvm-verify/notes.md"), b"not a home").expect("write");
 
-        let previous = std::env::var_os("MVM_HOME");
-        // SAFETY: single-threaded test process; restored before returning.
-        unsafe { std::env::set_var("MVM_HOME", root.path().join("elsewhere")) };
+        let mut env = TestEnv::new();
+        env.isolate_mvm_home(root.path().join("elsewhere"));
 
         let dst = root.path().join("out");
-        let result = copy_tree_filtered(&src, &dst, WORK_TREE_EXCLUDE_DIRS);
-
-        match previous {
-            Some(v) => unsafe { std::env::set_var("MVM_HOME", v) },
-            None => unsafe { std::env::remove_var("MVM_HOME") },
-        }
-        result.expect("copy");
+        copy_tree_filtered(&src, &dst, WORK_TREE_EXCLUDE_DIRS).expect("copy");
 
         assert!(
             dst.join(".mvm-verify/notes.md").is_file(),
