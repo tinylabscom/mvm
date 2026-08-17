@@ -63,6 +63,9 @@ export * from "./_addon.js";
 // _remote.ts for what is deliberately absent and why.
 export { RemoteFunction, func, workload_ref } from "./_remote.js";
 export type { WorkloadRef } from "./_remote.js";
+// Sessions — callback-scoped; see the note in _session.ts for why the
+// shape differs from Python's context manager.
+export { Session, currentSessionId, session } from "./_session.js";
 export {
   EmittingContextError,
   MsgpackUnavailable,
@@ -83,6 +86,10 @@ export * from "./runtime/runtime.js";
 // are internals the SDK calls on its own behalf. They were exported here by
 // accident and are not part of the public surface in any other language.
 export {
+  // The record-mode introspection Python exposes as `current_recording`.
+  // It was internal here only because nothing had needed it from outside;
+  // the capability is the same, and the surfaces now agree.
+  currentRecording,
   DEFAULT_TTL_SECONDS,
   MVM_CLI_BIN_ENV,
   MVM_SDK_MODE_ENV,
