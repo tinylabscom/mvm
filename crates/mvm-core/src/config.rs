@@ -205,6 +205,16 @@ pub fn default_mvm_cache_dir() -> String {
     format!("{}/.mvm/cache", home_dir())
 }
 
+/// Cache root for the bundled default microVM boot image, one directory per
+/// variant (`dev`, `prod`): `<mvm_home>/cache/default-microvm`.
+///
+/// Both the acquisition path and the `image boot` inspection surface resolve
+/// the cache through here, so neither can look at a directory the other does
+/// not write.
+pub fn default_microvm_cache_dir() -> String {
+    format!("{}/default-microvm", mvm_cache_dir())
+}
+
 /// Config directory for user configuration files: `<mvm_home>/config`.
 pub fn mvm_config_dir() -> String {
     format!("{}/config", mvm_home())

@@ -11,7 +11,7 @@ pub(in crate::commands) mod bootstrap;
 mod bootstrap_tests;
 #[cfg(test)]
 mod builder_vm_bootstrap_tests;
-mod default_microvm;
+pub(in crate::commands) mod default_microvm;
 mod image_ops;
 mod kernel;
 mod stage0_cache;

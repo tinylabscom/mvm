@@ -27,6 +27,32 @@ strip_cfg_test_modules() {
   ' "$1"
 }
 
+# True when `file` is a module the parent declares under `#[cfg(test)]`.
+#
+# `strip_cfg_test_modules` already exempts an inline `#[cfg(test)] mod x { .. }`,
+# so the same test code was exempt written inline and flagged written as its own
+# file. That is an inconsistency in this check, not a policy: a test that binds a
+# loopback socket to stand in for an HTTP API is not an orchestration server, and
+# where the compiler is told to put it does not change that. This closes the hole
+# from the other side by asking the parent module how the file is gated.
+declared_cfg_test() {
+  local file="$1"
+  local dir base parent
+  dir=$(dirname "$file")
+  base=$(basename "$file" .rs)
+
+  # `foo/tests.rs` is declared by `foo/mod.rs`, or by the sibling `foo.rs`.
+  for parent in "$dir/mod.rs" "$(dirname "$dir")/$(basename "$dir").rs"; do
+    [[ -f "$parent" ]] || continue
+    # The declaration and its attribute are adjacent lines; -B1 pairs them.
+    if grep -B1 -E "^[[:space:]]*(pub[[:space:]]+)?mod[[:space:]]+${base}[[:space:]]*;" "$parent" 2>/dev/null \
+        | grep -q '#\[cfg(test)\]'; then
+      return 0
+    fi
+  done
+  return 1
+}
+
 crate_allows_server_patterns() {
   local file="$1"
   local crate_dir cargo_toml
@@ -69,6 +95,9 @@ matches=""
 while IFS= read -r file; do
   [[ -z "$file" ]] && continue
   if crate_allows_server_patterns "$file"; then
+    continue
+  fi
+  if declared_cfg_test "$file"; then
     continue
   fi
   hits=$(strip_cfg_test_modules "$file" | grep -nE "$patterns" || true)

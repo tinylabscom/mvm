@@ -303,6 +303,9 @@ admission until their transports are wired.
 | `mvmctl image ls [--registry <host>] [--json]` | List cached OCI images by reference, resolved digest, fetched timestamp, and size |
 | `mvmctl image inspect <ref-or-digest> [--json]` | Print cached OCI manifest/config metadata, layer digests, and any claims/provenance sidecar |
 | `mvmctl image rm <ref-or-digest>` | Remove a cached OCI image and garbage-collect unreferenced layer files |
+| `mvmctl image boot status [--json]` | Report each cached default boot image variant (`dev`, `prod`): tag, source (`built-local` / `fetched`), acquisition time, protocol version, on-disk size, and whether the next run would use it. Cache only, no network |
+| `mvmctl image boot check [--json]` | Compare the cached boot image tag against the latest published `boot-image/v*` release. Read-only; exits nonzero only when behind, so a script can gate on the exit code |
+| `mvmctl image boot update [--tag <t>] [--force]` | Fetch and hash-verify a published boot image into a staging directory, then atomically swap it into the cache. `--tag` pins a release; `--force` is required in a source checkout, where the local build is authoritative |
 
 Production OCI policy reads `MVM_OCI_POLICY` when set, otherwise
 `$MVM_HOME/oci-policy.toml`. The policy allow-lists registries and trusted

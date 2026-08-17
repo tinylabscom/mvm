@@ -7,14 +7,16 @@ use mvm_build::boot_image_select::{self, BootImageAcquisition};
 pub(crate) fn ensure_default_microvm_image(
     mode: mvm_build::pipeline::BuildMode,
 ) -> Result<(String, String)> {
-    let base = format!("{}/default-microvm", mvm_core::config::mvm_cache_dir());
+    let base = mvm_core::config::default_microvm_cache_dir();
     match mode {
-        mvm_build::pipeline::BuildMode::Prod => {
-            ensure_default_microvm_prod_image(&format!("{base}/prod"))
-        }
-        mvm_build::pipeline::BuildMode::Dev => {
-            ensure_default_microvm_dev_image(&format!("{base}/dev"))
-        }
+        mvm_build::pipeline::BuildMode::Prod => ensure_default_microvm_prod_image(&format!(
+            "{base}/{}",
+            DefaultMicrovmVariant::Prod.cache_subdir()
+        )),
+        mvm_build::pipeline::BuildMode::Dev => ensure_default_microvm_dev_image(&format!(
+            "{base}/{}",
+            DefaultMicrovmVariant::Dev.cache_subdir()
+        )),
     }
 }
 
@@ -370,15 +372,27 @@ fn ensure_default_microvm_dev_image(cache_dir: &str) -> Result<(String, String)>
     build_default_microvm_via_libkrun(cache_dir, DefaultMicrovmVariant::Dev)
 }
 
-#[cfg(feature = "builder-vm")]
-#[derive(Clone, Copy)]
-pub(super) enum DefaultMicrovmVariant {
+/// The two boot-image variants the cache can hold.
+///
+/// Deliberately not gated on the `builder-vm` feature: a binary that cannot
+/// *build* an image still has to read, fetch, and report on one, and the
+/// variant's required output set is the same either way.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(in crate::commands) enum DefaultMicrovmVariant {
     Dev,
     Prod,
 }
 
-#[cfg(feature = "builder-vm")]
 impl DefaultMicrovmVariant {
+    /// Cache subdirectory holding this variant's artifacts.
+    pub(in crate::commands) fn cache_subdir(self) -> &'static str {
+        match self {
+            DefaultMicrovmVariant::Dev => "dev",
+            DefaultMicrovmVariant::Prod => "prod",
+        }
+    }
+
+    #[cfg(feature = "builder-vm")]
     pub(super) fn attr(self) -> &'static str {
         match self {
             DefaultMicrovmVariant::Dev => "dev",
@@ -386,7 +400,8 @@ impl DefaultMicrovmVariant {
         }
     }
 
-    pub(super) fn required_outputs(self) -> &'static [&'static str] {
+    /// Files that must all be present for the cache entry to be usable.
+    pub(in crate::commands) fn required_outputs(self) -> &'static [&'static str] {
         match self {
             DefaultMicrovmVariant::Dev => &["vmlinux", "rootfs.ext4", "mvm-meta.json"],
             DefaultMicrovmVariant::Prod => &[
@@ -497,7 +512,10 @@ fn build_default_microvm_via_libkrun(
     Ok((kernel, rootfs))
 }
 
-pub(super) fn default_microvm_assets(cache_dir: &str, arch: &str) -> [(String, String); 5] {
+pub(in crate::commands) fn default_microvm_assets(
+    cache_dir: &str,
+    arch: &str,
+) -> [(String, String); 5] {
     [
         (
             format!("default-microvm-vmlinux-{arch}"),
