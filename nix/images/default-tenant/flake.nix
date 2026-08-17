@@ -120,7 +120,11 @@
           pkgs = import nixpkgs { inherit system; };
           lib = libFor system;
           kernelPkg = mkWorkloadKernel pkgs;
-          kernelFile = if pkgs.stdenv.hostPlatform.isAarch64 then "Image" else "bzImage";
+          # What the consumer's loader takes, not what the build happens to
+          # leave lying around: arm64 loaders want `Image`, Firecracker's
+          # x86_64 loader wants an uncompressed ELF `vmlinux`. base.nix emits
+          # the ELF beside the bzImage for exactly this.
+          kernelFile = if pkgs.stdenv.hostPlatform.isAarch64 then "Image" else "vmlinux";
           imageName = if sealed then "mvm-default-microvm" else "mvm-default-microvm-dev";
           rootfsPkg = lib.mkGuest {
             name = imageName;
@@ -154,12 +158,51 @@
             set -euo pipefail
             mkdir -p $out
 
-            # Kernel → vmlinux (same probe order as builder-vm).
-            if   [ -f ${kernelPkg}/${kernelFile} ]; then cp ${kernelPkg}/${kernelFile} $out/vmlinux
-            elif [ -f ${kernelPkg}/Image ];        then cp ${kernelPkg}/Image        $out/vmlinux
-            elif [ -f ${kernelPkg}/bzImage ];      then cp ${kernelPkg}/bzImage      $out/vmlinux
-            else echo "kernel ${kernelPkg} produced no Image/bzImage" >&2; ls -la ${kernelPkg} >&2; exit 1
+            # Kernel → vmlinux.
+            #
+            # The asset is named `vmlinux`, but that name has never carried a
+            # format. On aarch64 it is an arm64 `Image`, and that is correct:
+            # arm64 loaders take `Image`. On x86_64 Firecracker loads an
+            # uncompressed ELF and nothing else, so a bzImage published under
+            # this name dies in the loader — before init, before userspace —
+            # with "Kernel Loader: Invalid Elf magic number". v0.17.0 shipped
+            # exactly that, and the only lane that would have caught it boots
+            # the same asset and had never produced a result.
+            #
+            # So pick by what the consumer's loader needs, and then assert the
+            # bytes. A probe chain that accepts whichever file happens to exist
+            # is how the format stopped being checked at all.
+            if [ -f ${kernelPkg}/${kernelFile} ]; then
+              cp ${kernelPkg}/${kernelFile} $out/vmlinux
+            else
+              echo "kernel ${kernelPkg} produced no ${kernelFile}" >&2
+              ls -la ${kernelPkg} >&2
+              exit 1
             fi
+
+            # Assert the emitted format. Reading the first bytes is the whole
+            # check: ELF is "\x7fELF" at 0, an arm64 Image carries "ARMd" at
+            # offset 56 (Documentation/arm64/booting.rst).
+            magic0=$(${pkgs.coreutils}/bin/od -An -tx1 -N4 "$out/vmlinux" | tr -d ' \n')
+            magic56=$(${pkgs.coreutils}/bin/od -An -c -j56 -N4 "$out/vmlinux" | tr -d ' \n')
+            ${
+              if pkgs.stdenv.hostPlatform.isAarch64 then ''
+              if [ "$magic56" != "ARMd" ]; then
+                echo "ERROR: $out/vmlinux is not an arm64 Image (magic@56='$magic56', want 'ARMd')." >&2
+                exit 1
+              fi
+              '' else ''
+              if [ "$magic0" != "7f454c46" ]; then
+                echo "ERROR: $out/vmlinux is not an ELF kernel (magic@0=0x$magic0, want 0x7f454c46)." >&2
+                echo "Firecracker's x86_64 loader takes an uncompressed ELF vmlinux only. A" >&2
+                echo "bzImage here boots nothing: it fails in the loader with 'Invalid Elf" >&2
+                echo "magic number', before init runs, so the guest console says nothing." >&2
+                echo "Emit the ELF the kernel build produces alongside its bzImage, or" >&2
+                echo "decompress the bzImage with the kernel tree's scripts/extract-vmlinux." >&2
+                exit 1
+              fi
+              ''
+            }
 
             # Rootfs → rootfs.ext4 (mkGuest emits a single ext4).
             if [ -f ${rootfsPkg} ]; then
