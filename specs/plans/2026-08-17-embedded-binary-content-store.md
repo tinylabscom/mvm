@@ -142,14 +142,28 @@ populated it. Steady state after that is unchanged.
 - [ ] **Phase 4a** — dead edges: `mvm-runtime → libkrun-sys` has zero use
       sites; `mvm-cli → mvm-net` is used only from `#[cfg(test)]`;
       `mvm-hostd → mvm-fs` is used from one bin, not the lib.
-- [ ] **Phase 4b** — `mvm-build` pulls all of `mvm-sdk` (13k LOC, 5
-      tree-sitter grammars, ~24 MB of generated C at `opt-level = 3`) for one
-      item used 8 times, `compile::deps_audit` (691 lines). `mvm-hostd` uses
-      that plus `mvm_sdk::ir`, which is a pure re-export of `mvm_contract::ir`
-      it already depends on. Moving `deps_audit` to a leaf and gating the
-      grammars behind an `analyze` feature takes them off the serial path —
-      and out of the aux-helper leg's nested rebuild, where they are currently
-      compiled a second time.
+- [~] **Phase 4b — measured and DECLINED.** The shape is real: `mvm-build`
+      pulls all of `mvm-sdk` (13k LOC, 5 tree-sitter grammars, ~24 MB of
+      generated C at `opt-level = 3`) to use one item 8 times,
+      `compile::deps_audit` (691 lines); `mvm-hostd` uses that plus
+      `mvm_sdk::ir`, which is a pure re-export of `mvm_contract::ir` it already
+      depends on. The payoff is not.
+
+      From the cold timing data, `mvm-sdk` sits on the critical path between
+      `mvm-agentd` (ends 25.5s) and `mvm-build` (starts 28.3s) and contributes
+      **~2.8s of a 45.5s post-store cold build (~6%)**. It does not reduce the
+      closure: the grammars stay via `mvm-cli`, which genuinely parses
+      decorators. Its larger prize — skipping the grammars in the nested
+      aux-helper build, where `mvm-hostd`'s closure is compiled a second time —
+      was already taken by the Phase 1–2 content store, which turns that build
+      into a cache hit.
+
+      Against ~6%: relocating `verify_sealed_volume`, the claim-11 sealed-volume
+      verifier, and a closure-budget bump (linux sits at 239 of 239). Declined
+      on the same basis Plan 334 declined crate splitting, and under this
+      plan's own pre-committed rule to stop below ~10%. Re-open only with a new
+      argument, not a re-reading of these numbers.
+
 - [ ] **Phase 4c** (gate on cold evidence) — `mvm-cli → mvm-hostd` (173 sites)
       and `mvm-client → mvm-hostd` (29) are the same narrow cluster:
       `audit::*`, `supervisor::{tools,verify_audit_chain}`, `plan_admission`,
@@ -174,8 +188,13 @@ populated it. Steady state after that is unchanged.
       cargo already caches deps. The Justfile comment claiming cross-worktree
       hits has been corrected. Whether to keep the wrapper at all is now a
       decision with numbers behind it rather than an assumption.
-- [ ] **Phase 5** — worktree hygiene: 36 worktrees, 87 GB. Plan 334 named this
-      the largest remaining lever and left it out of scope.
+- [~] **Phase 5 — worktree hygiene, partly done.** 49 worktrees / 261 GB at the
+      time of measurement. `just worktrees-prune APPLY=1` reclaimed 5 clean
+      checkouts. Five more sit on branches already merged into main — including
+      one at 48 GB — but every one of them carries uncommitted source edits,
+      and two are open in an editor (`lsof` shows `zed` holding 43 and 5 files).
+      A merged branch does not mean a disposable working tree. Left alone
+      deliberately; reclaiming that ~50 GB needs their owner, not a sweeper.
 
 `scripts/dev-env.sh` (Phase 5, done) exported `MVM_HOME`, `CARGO_TARGET_DIR`
 and `CARGO_HOME` with `${VAR:-default}`, so a value inherited from another
