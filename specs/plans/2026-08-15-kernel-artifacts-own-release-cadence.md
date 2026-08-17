@@ -10,13 +10,22 @@ Validation: none
 Should the guest kernel build move out of this repository into its own, so it can
 be patched on a CVE cadence independent of `mvmctl` releases?
 
-Today `nix/images/kernel/flake.nix` is already a standalone publishable flake —
-it emits per-arch `vmlinux`, `configfile`, `metrics`, `resolved-configs`, and an
-`artifact-manifest` carrying `kernel_version` / `config_hash` / `artifact_hash` —
-and `.github/workflows/kernel-build.yml` publishes it on `v*` tags. So the kernel
-is *already* a separately-built artifact. What it is not is separately
-*versioned*: a kernel CVE fix can only reach users attached to an `mvmctl`
-release tag.
+**The premise this was written on has since moved, and it weakens the case
+rather than strengthening it.** When this was recorded, the kernel was already a
+separately *built* artifact but not a separately *versioned* one: a CVE fix
+could only reach users bolted onto an `mvmctl` release tag. That was the whole
+gain a repo split would have bought.
+
+The image release train closed that without a split. Images now publish under
+their own `boot-image/v*` tag namespace on their own semver counter, fired by
+`.github/workflows/release-boot-image.yml`, while the flakes stay in
+`nix/images/`. A kernel CVE fix can be cut as `boot-image/v0.3.0` without
+touching the CLI version or waiting on a CLI release.
+
+So the question is no longer "how do we decouple the cadence" — that is done.
+What remains is only whether a *separate repository* adds anything on top of a
+separate tag namespace, and the honest answer is: very little, against costs
+that have not changed.
 
 ## The shape it would take
 
@@ -35,7 +44,9 @@ ELF file.
 
 ## Why it is deferred
 
-The gain is CVE cadence alone, and it is bought with real cost:
+The gain was CVE cadence alone, and that is now already banked by the tag
+namespace. What is left over is bought with real cost that the split does not
+reduce:
 
 - Every contributor build gains a cross-repo flake reference, against the
   standing invariant that a source checkout builds every image locally from
@@ -49,21 +60,23 @@ The gain is CVE cadence alone, and it is bought with real cost:
   the kernel in the same run as its consumer. Splitting means either duplicating
   them or letting the pin drift between repos.
 
-The cadence problem is also not yet biting: we have not had a kernel CVE that
-needed to ship faster than the next release.
+And the cadence problem is no longer the argument: a kernel CVE that needs to
+ship faster than the next CLI release is now shippable today, from this
+repository, by tagging the image line.
 
 ## What would change the answer
 
-- [ ] A kernel CVE we need to ship out-of-band, i.e. the cadence cost becomes
-      concrete rather than hypothetical.
+- [ ] ~~A kernel CVE we need to ship out-of-band.~~ **Retired** — the
+      `boot-image/v*` train ships one today without a split.
 - [ ] The kernel gaining consumers outside this repository.
 - [ ] Kernel build time becoming a large enough share of release wall-clock that
       decoupling pays for itself on that alone.
 
 ## Adjacent work that landed instead
 
-Signing the checksum manifests (this branch) closes the more urgent half of the
-same supply-chain question: the artifacts were hash-pinned but the hash manifest
+The image release train (`boot-image/v*`) took the cadence argument off the
+table, as described above. Separately, signing the checksum manifests closed the
+more urgent half of the same supply-chain question: the artifacts were hash-pinned but the hash manifest
 itself was unsigned, so whoever could swap an artifact could swap its checksum
 file. That gap did not need a repo split to fix, and fixing it does not depend on
 one.
