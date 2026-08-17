@@ -109,6 +109,18 @@ impl EmbedCache {
         build_embed_cache::install(root, key, binary, source);
     }
 
+    /// Keep the store inside its ceiling. Runs after both legs, so a build
+    /// that published several artifacts prunes once rather than per binary.
+    fn prune(&self) {
+        let Some(root) = self.root.as_ref() else {
+            return;
+        };
+        build_embed_cache::prune(
+            root,
+            build_embed_cache::max_bytes_from(std::env::var_os("MVM_EMBED_CACHE_MAX_BYTES")),
+        );
+    }
+
     /// Watch exactly the crates the cached binaries are built from.
     ///
     /// The blanket walk this replaces covered every workspace crate including
@@ -350,6 +362,7 @@ fn main() {
     // graph rather than named here. Both legs have contributed their roots by
     // now, so this covers the embedded set and the per-VM helpers alike.
     cache.emit_rerun();
+    cache.prune();
 }
 
 /// Emit one `cargo:rerun-if-changed` per file under `root`, recursively. Unlike

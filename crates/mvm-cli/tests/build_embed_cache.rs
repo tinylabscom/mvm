@@ -11,9 +11,9 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use build_embed_cache::{
-    KeyInputs, WorkspaceGraph, artifact_key, artifact_path, cache_root_from, hash_file,
-    hash_member, hash_tree, install, lookup, parse_manifest_deps, parse_package_name,
-    workspace_closure,
+    DEFAULT_MAX_BYTES, KeyInputs, StoredKey, WorkspaceGraph, artifact_key, artifact_path,
+    cache_root_from, hash_file, hash_member, hash_tree, install, lookup, max_bytes_from,
+    parse_manifest_deps, parse_package_name, prune, select_victims, stored_keys, workspace_closure,
 };
 
 fn graph(edges: &[(&str, &[&str])]) -> WorkspaceGraph {
@@ -519,4 +519,163 @@ fn a_member_without_a_manifest_still_hashes_its_sources() {
     std::fs::create_dir_all(member.join("src")).expect("mkdir");
     std::fs::write(member.join("src/lib.rs"), b"x").expect("write");
     assert_eq!(hash_member(root.path(), &member).len(), 1);
+}
+
+fn stored(key: &str, bytes: u64, used: u64) -> StoredKey {
+    StoredKey {
+        key: key.into(),
+        bytes,
+        used,
+    }
+}
+
+#[test]
+fn nothing_is_evicted_while_the_store_fits() {
+    let entries = vec![stored("a", 10, 1), stored("b", 10, 2)];
+    assert!(select_victims(&entries, 100).is_empty());
+}
+
+#[test]
+fn eviction_drops_the_least_recently_used_first() {
+    let entries = vec![
+        stored("new", 10, 300),
+        stored("old", 10, 100),
+        stored("mid", 10, 200),
+    ];
+    // Ceiling of 20 means one entry has to go, and it must be the oldest.
+    assert_eq!(select_victims(&entries, 20), vec!["old".to_string()]);
+}
+
+#[test]
+fn eviction_stops_as_soon_as_the_store_fits() {
+    let entries = vec![
+        stored("a", 10, 1),
+        stored("b", 10, 2),
+        stored("c", 10, 3),
+        stored("d", 10, 4),
+    ];
+    // 40 bytes, ceiling 25 -> drop two, not everything.
+    assert_eq!(
+        select_victims(&entries, 25),
+        vec!["a".to_string(), "b".to_string()]
+    );
+}
+
+#[test]
+fn eviction_is_deterministic_when_timestamps_tie() {
+    // Two runs on the same store must not disagree about what to delete.
+    let entries = vec![stored("b", 10, 5), stored("a", 10, 5), stored("c", 10, 5)];
+    assert_eq!(
+        select_victims(&entries, 10),
+        vec!["a".to_string(), "b".to_string()]
+    );
+}
+
+#[test]
+fn an_oversized_single_entry_is_still_evicted() {
+    let entries = vec![stored("huge", 500, 1)];
+    assert_eq!(select_victims(&entries, 10), vec!["huge".to_string()]);
+}
+
+#[test]
+fn the_ceiling_comes_from_the_env_var_when_it_parses() {
+    assert_eq!(max_bytes_from(Some(OsString::from("1234"))), 1234);
+    assert_eq!(max_bytes_from(Some(OsString::from("  99  "))), 99);
+}
+
+#[test]
+fn a_junk_or_zero_ceiling_falls_back_to_the_default() {
+    // A zero ceiling would evict the entry the current build just published.
+    for raw in ["0", "not-a-number", ""] {
+        assert_eq!(max_bytes_from(Some(OsString::from(raw))), DEFAULT_MAX_BYTES);
+    }
+    assert_eq!(max_bytes_from(None), DEFAULT_MAX_BYTES);
+}
+
+#[test]
+fn stored_keys_reports_each_keys_size() {
+    let store = tempfile::tempdir().expect("tempdir");
+    let work = tempfile::tempdir().expect("tempdir");
+    let built = work.path().join("bin");
+    std::fs::write(&built, vec![0u8; 2048]).expect("write");
+    install(store.path(), "k1", "bin", &built);
+
+    let keys = stored_keys(store.path());
+    assert_eq!(keys.len(), 1);
+    assert_eq!(keys[0].key, "k1");
+    assert_eq!(keys[0].bytes, 2048);
+}
+
+#[test]
+fn pruning_evicts_from_a_real_store_and_leaves_the_rest_usable() {
+    let store = tempfile::tempdir().expect("tempdir");
+    let work = tempfile::tempdir().expect("tempdir");
+    let built = work.path().join("bin");
+    std::fs::write(&built, vec![0u8; 1024]).expect("write");
+
+    for key in ["k1", "k2", "k3"] {
+        install(store.path(), key, "bin", &built);
+        // Distinct mtimes so "least recently used" is well defined.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+
+    prune(store.path(), 2048);
+
+    let remaining: Vec<_> = stored_keys(store.path())
+        .into_iter()
+        .map(|k| k.key)
+        .collect();
+    assert!(
+        !remaining.contains(&"k1".to_string()),
+        "oldest should be gone: {remaining:?}"
+    );
+    assert!(
+        remaining.contains(&"k3".to_string()),
+        "newest should survive: {remaining:?}"
+    );
+    // A surviving entry is still a usable cache entry, not just a directory.
+    assert!(lookup(
+        store.path(),
+        "k3",
+        "bin",
+        &work.path().join("out/bin")
+    ));
+}
+
+#[test]
+fn pruning_an_absent_store_is_a_no_op() {
+    let store = tempfile::tempdir().expect("tempdir");
+    prune(&store.path().join("never-created"), 1);
+}
+
+#[test]
+fn restoring_an_entry_marks_it_recently_used() {
+    // Otherwise eviction means "least recently built", and the entry a dozen
+    // worktrees keep restoring is exactly the one that gets deleted.
+    let store = tempfile::tempdir().expect("tempdir");
+    let work = tempfile::tempdir().expect("tempdir");
+    let built = work.path().join("bin");
+    std::fs::write(&built, b"bytes").expect("write");
+
+    install(store.path(), "old", "bin", &built);
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    install(store.path(), "new", "bin", &built);
+
+    let before = stored_keys(store.path());
+    let old_before = before.iter().find(|k| k.key == "old").expect("old").used;
+
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    assert!(lookup(
+        store.path(),
+        "old",
+        "bin",
+        &work.path().join("out/bin")
+    ));
+
+    let after = stored_keys(store.path());
+    let old_after = after.iter().find(|k| k.key == "old").expect("old").used;
+    assert!(
+        old_after > old_before,
+        "a restore must refresh the entry: {old_before} -> {old_after}"
+    );
 }

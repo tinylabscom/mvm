@@ -124,16 +124,14 @@ populated it. Steady state after that is unchanged.
 
 ## Open work
 
-- [ ] **The store is unbounded and nothing sweeps it.** Every distinct content
-      key keeps its artifacts forever: 48 entries / 424 MB after a single
-      day's work on one branch, and each key holds a multi-MB static binary.
-      `cargo clean`, `just clean-dev-state` and `mvmctl cache prune` all miss
-      it because it deliberately lives outside both `target/` and `MVM_HOME`.
-      Needs an LRU bound or a prune verb before this ships widely — the
-      failure mode is a slowly filling disk with no command that reports it,
-      which is the same shape as the 282 GB of unswept `.mvm-test` roots that
-      `just clean-dev-state` was added for.
-
+- [x] **Bound the store.** Was unbounded — 48 entries / 424 MB after a single
+      day on one branch, and `cargo clean`, `just clean-dev-state` and
+      `mvmctl cache prune` all miss it because it deliberately lives outside
+      both `target/` and `MVM_HOME`. Now LRU-evicted to a 4 GiB ceiling
+      (`MVM_EMBED_CACHE_MAX_BYTES` overrides) after each build. Eviction keys
+      on mtime rather than atime, since `noatime` mounts would make every
+      entry look equally stale, and a restore touches its entry so the one a
+      dozen worktrees keep reusing is not the one deleted.
 - [ ] **Phase 3** — delete the ~120 lines of phantom `#[cfg(test)]` tests in
       `build.rs` (cargo never builds a build script as a test target, and they
       call `configured_embed_tools_from`, which is not in scope).

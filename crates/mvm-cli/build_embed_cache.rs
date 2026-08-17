@@ -301,6 +301,13 @@ pub(crate) fn cache_root() -> Option<PathBuf> {
     )
 }
 
+/// The store's byte ceiling, from `MVM_EMBED_CACHE_MAX_BYTES` if set.
+pub(crate) fn max_bytes_from(raw: Option<OsString>) -> u64 {
+    raw.and_then(|v| v.to_str().and_then(|v| v.trim().parse::<u64>().ok()))
+        .filter(|v| *v > 0)
+        .unwrap_or(DEFAULT_MAX_BYTES)
+}
+
 /// Where one artifact lives inside the store.
 pub(crate) fn artifact_path(root: &Path, key: &str, binary: &str) -> PathBuf {
     root.join(key).join(binary)
@@ -315,7 +322,106 @@ pub(crate) fn lookup(root: &Path, key: &str, binary: &str, dest: &Path) -> bool 
     if let Some(parent) = dest.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    std::fs::copy(&cached, dest).is_ok()
+    if std::fs::copy(&cached, dest).is_err() {
+        return false;
+    }
+    // Touch on read so eviction sees "least recently *used*", not "least
+    // recently built" — the entry a dozen worktrees keep restoring is
+    // precisely the one worth keeping.
+    let _ = filetime_now(&cached);
+    true
+}
+
+/// Best-effort mtime bump, used to record a cache read.
+fn filetime_now(path: &Path) -> std::io::Result<()> {
+    let file = std::fs::OpenOptions::new().append(true).open(path)?;
+    file.set_modified(std::time::SystemTime::now())
+}
+
+/// Default ceiling for the store. Each entry holds a multi-MB static binary
+/// and every distinct content key makes a new one, so an unbounded store
+/// grows for as long as the branch does — with no command that reports it,
+/// because it deliberately lives outside both `target/` and `MVM_HOME`.
+pub(crate) const DEFAULT_MAX_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+
+/// One stored key: its total size and when it was last used.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StoredKey {
+    pub key: String,
+    pub bytes: u64,
+    /// Seconds since the epoch; larger is more recently used.
+    pub used: u64,
+}
+
+/// Which keys to evict to bring `entries` under `max_bytes`, least recently
+/// used first.
+///
+/// Ties break on the key name so the choice is deterministic — two runs on
+/// the same store must not disagree about what to delete.
+pub(crate) fn select_victims(entries: &[StoredKey], max_bytes: u64) -> Vec<String> {
+    let mut total: u64 = entries.iter().map(|e| e.bytes).sum();
+    if total <= max_bytes {
+        return Vec::new();
+    }
+
+    let mut ordered = entries.to_vec();
+    ordered.sort_by(|a, b| a.used.cmp(&b.used).then_with(|| a.key.cmp(&b.key)));
+
+    let mut victims = Vec::new();
+    for entry in ordered {
+        if total <= max_bytes {
+            break;
+        }
+        total = total.saturating_sub(entry.bytes);
+        victims.push(entry.key);
+    }
+    victims
+}
+
+/// Read the store's current contents.
+pub(crate) fn stored_keys(root: &Path) -> Vec<StoredKey> {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let Some(key) = path.file_name().map(|n| n.to_string_lossy().into_owned()) else {
+            continue;
+        };
+        let (mut bytes, mut used) = (0u64, 0u64);
+        if let Ok(files) = std::fs::read_dir(&path) {
+            for file in files.flatten() {
+                let Ok(meta) = file.metadata() else { continue };
+                bytes = bytes.saturating_add(meta.len());
+                // `mtime`, not `atime`: many filesystems mount `noatime`, so
+                // access time silently never updates and every entry would
+                // look equally stale. A restore refreshes mtime explicitly.
+                if let Ok(modified) = meta.modified()
+                    && let Ok(age) = modified.duration_since(std::time::UNIX_EPOCH)
+                {
+                    used = used.max(age.as_secs());
+                }
+            }
+        }
+        out.push(StoredKey { key, bytes, used });
+    }
+    out
+}
+
+/// Evict least-recently-used keys until the store fits in `max_bytes`.
+///
+/// Deleting a whole key directory is safe against a concurrent build: on Unix
+/// a reader that already opened the file keeps reading it, and one that has
+/// not yet looked simply misses and rebuilds. The failure mode is a slower
+/// build, never a wrong one.
+pub(crate) fn prune(root: &Path, max_bytes: u64) {
+    for key in select_victims(&stored_keys(root), max_bytes) {
+        let _ = std::fs::remove_dir_all(root.join(key));
+    }
 }
 
 /// Publish a freshly built artifact into the store.
