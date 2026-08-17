@@ -10,21 +10,29 @@ work is demonstrably incomplete on `main`; this plan is where the remaining work
 
 ## Status
 
-**WS0–WS7 complete, and the reported command works.**
+**WS0–WS7 complete.**
 
-    $ mvmctl machine run --image python:3.12 -- python -c 'print(2 + 2)'
-    4
+Guest egress came back with WS0–WS3: Stage 0 fails fast with the true cause
+(WS0), the host serves sessions (WS1), identity is delivered per boot off the
+cmdline (WS2), and every spawn site threads it (WS3). From that point
+`mvmctl machine run --image python:3.12 -- python -c 'print(2 + 2)'` prints `4`
+— so the working command is WS0–WS3's, not WS4–WS7's.
 
-Exit 0, on macOS/libkrun, with no reset, truncation, SOCKS failure, credit
-exhaustion or supervisor refusal anywhere in the run. The whole nixpkgs closure
-and the workload kernel come down the FlowMux datapath; substitution and `ping`
-ride the same session; nothing speaks a second protocol, and
-`xtask check-one-guest-protocol` fails the build if anything starts to.
+WS4–WS7 are the consolidation the plan is named for, and they are now in:
+substitution folded onto `OpenHttp` (WS4), ICMP onto `IcmpEcho` (WS5),
+`EgressMode`/`serve_raw` and the raw dispatcher deleted behind
+`xtask check-one-guest-protocol` (WS6), and readiness failing closed on a launch
+whose endpoint carried no session (WS7). A guest now speaks exactly one
+protocol to its host, and the build fails if a second one appears.
 
-The last blocker was not in this plan: the supervisor decoded the admitted plan
-as a bare `ExecutionPlan` when every producer emits the signed envelope, so it
-refused every plan-bearing boot on the two macOS backends. Fixed in #2564
-(issue #2555).
+Re-confirmed live after WS4–WS7, on macOS/libkrun: exit 0, `4`, and no reset,
+truncation, SOCKS failure, credit exhaustion or supervisor refusal anywhere in
+the run.
+
+The blocker that held the live run up between those two milestones was not in
+this plan: the supervisor decoded the admitted plan as a bare `ExecutionPlan`
+when every producer emits the signed envelope, so it refused every plan-bearing
+boot on the two macOS backends. Fixed in #2564 (issue #2555).
 
 ## Why
 
@@ -93,17 +101,17 @@ is a later simplification, not a prerequisite.
 
 ## Workstreams
 
-### WS0 — Stage 0 fails fast with the true cause
+### WS0 — Stage 0 fails fast with the true cause — **complete**
 
-- [ ] `wait_for_vsock_egress_proxy_if_requested` (`crates/mvm-build/src/bin/stage0-init.rs:355-398`)
+- [x] `wait_for_vsock_egress_proxy_if_requested` (`crates/mvm-build/src/bin/stage0-init.rs:355-398`)
       returns a `Result` and aborts before `nix build` when the egress client exits or never
       binds, naming `mvm-egress-client` and its exit status; `dump_vsock_egress_diagnostics()`
       still runs
-- [ ] Decision extracted as a pure `egress_readiness_outcome(...) -> Result<(), String>`,
+- [x] Decision extracted as a pure `egress_readiness_outcome(...) -> Result<(), String>`,
       unit-tested without a VM, matching the `egress_child_exit_message` shape (`:341`)
-- [ ] Mirrored in `crates/mvm-build/src/bin/mvm-host-vm-init.rs`
-- [ ] The CLI surfaces the `stage0-init:` line instead of the downstream nix noise
-- [ ] `cmdline_overflow` (`crates/mvm-vmm/src/host/cmdline.rs:30-52`) enforced on both
+- [x] Mirrored in `crates/mvm-build/src/bin/mvm-host-vm-init.rs`
+- [x] The CLI surfaces the `stage0-init:` line instead of the downstream nix noise
+- [x] `cmdline_overflow` (`crates/mvm-vmm/src/host/cmdline.rs:30-52`) enforced on both
       builder paths — `libkrun_builder.rs:204` and `qemu_builder.rs:231` validate nothing today
 
 ### WS1 — Host accepts sessions properly — **complete**

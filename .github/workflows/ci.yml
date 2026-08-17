@@ -177,7 +177,8 @@ jobs:
           shellcheck -S warning install.sh
           shellcheck nix/packaging/release/verify-release-assets.sh \
                      nix/packaging/release/verify-release-assets.test.sh \
-                     nix/packaging/release/assert-init-shebang.sh
+                     nix/packaging/release/assert-init-shebang.sh \
+                     nix/packaging/release/assert-kernel-format.sh
 
       - name: Release-asset verifier gate tests
         run: bash nix/packaging/release/verify-release-assets.test.sh

@@ -30,6 +30,20 @@ if command -v mkfs.ext4 >/dev/null 2>&1 && command -v debugfs >/dev/null 2>&1; t
 fi
 BOOT_ARCHES="aarch64 x86_64"
 
+# Write a kernel fixture at $1 carrying $2's real magic, because the boot-asset
+# gate reads the format rather than trusting the file name — which is the whole
+# point of it. `bad` writes a bzImage, the format that actually shipped.
+make_kernel() {
+  case "$2" in
+    aarch64) # arm64 Image: "ARM\x64" at offset 56.
+      { head -c 56 /dev/zero; printf 'ARMd'; head -c 4 /dev/zero; } > "$1" ;;
+    x86_64)  # ELF magic at 0.
+      { printf '\177ELF'; head -c 60 /dev/zero; } > "$1" ;;
+    bad)     # bzImage: 0xAA55 boot signature at 510, "HdrS" at 514.
+      { head -c 510 /dev/zero; printf '\125\252HdrS'; } > "$1" ;;
+  esac
+}
+
 # Write an ext4 at $1 whose /init has $2 as its first line.
 make_rootfs() {
   root="$(mktemp -d)"
@@ -92,7 +106,7 @@ build_valid_fixture() {
   if [ "$BOOT_TOOLS" = 1 ]; then
     for arch in $BOOT_ARCHES; do
       make_rootfs "$dir/default-microvm-rootfs-$arch.ext4" '#!/bin/sh'
-      printf 'vmlinux-%s\n' "$arch"   > "$dir/default-microvm-vmlinux-$arch"
+      make_kernel "$dir/default-microvm-vmlinux-$arch" "$arch"
       printf '{"meta":"%s"}\n' "$arch" > "$dir/default-microvm-meta-$arch.json"
       for f in "default-microvm-rootfs-$arch.ext4" "default-microvm-vmlinux-$arch" \
                "default-microvm-meta-$arch.json"; do
@@ -242,6 +256,20 @@ if [ "$BOOT_TOOLS" = 1 ]; then
   printf 'tampered-rootfs\n' > "$d/default-microvm-rootfs-aarch64.ext4"
   if run "$d"; then bad "checksum-mismatched rootfs must fail"; else ok "checksum-mismatched rootfs fails closed"; fi
   rm -rf "$d"
+  # 17. THE REGRESSION. A bzImage published under the name `vmlinux`.
+  # Every checksum still matches — it is a faithful copy of the wrong format —
+  # so only reading the magic catches it. Firecracker's x86_64 loader refuses
+  # it before any guest code runs.
+  d="$(build_valid_fixture)"
+  make_kernel "$d/default-microvm-vmlinux-x86_64" bad
+  grep -v ' default-microvm-vmlinux-x86_64$' \
+    "$d/default-microvm-x86_64-checksums-sha256.txt" > "$d/.k.tmp"
+  mv "$d/.k.tmp" "$d/default-microvm-x86_64-checksums-sha256.txt"
+  echo "$(sha256_of "$d/default-microvm-vmlinux-x86_64")  default-microvm-vmlinux-x86_64" \
+    >> "$d/default-microvm-x86_64-checksums-sha256.txt"
+  if run "$d"; then bad "a bzImage named vmlinux must fail"; else ok "a bzImage named vmlinux fails closed"; fi
+  rm -rf "$d"
+
 else
   echo "  skip: boot-asset gate (mkfs.ext4/debugfs not on PATH)"
 fi
