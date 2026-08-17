@@ -83,18 +83,30 @@ rm -rf "$PROBE"
 # the failure this suite exists to catch in general form: a check that cannot
 # run must not report success, because a green tick is read as evidence the
 # thing was looked at. Reproduced by running with a PATH that has no `rg`.
-# PATH must stay otherwise intact: emptying it removes coreutils too, and the
-# gate then fails for the wrong reason — which looks like a pass for this
-# assertion while proving nothing about ripgrep. So drop only the directory
-# ripgrep lives in.
-rg_dir=$(dirname "$(command -v rg)")
-path_without_rg=$(printf '%s' "$PATH" | tr ':' '\n' | grep -vxF "$rg_dir" | paste -sd: -)
-if PATH="$path_without_rg" bash "$GATE" >/dev/null 2>&1; then
+# Build a PATH holding every tool the gate needs except ripgrep.
+#
+# Two simpler harnesses both look green while proving nothing. Emptying PATH
+# removes coreutils, so the gate dies for an unrelated reason. Dropping the
+# directory ripgrep lives in does not remove it on a distro that symlinks
+# /bin to /usr/bin — PATH still resolves it through the other name, which is
+# how this assertion passed in CI while the gate it was testing had no such
+# protection.
+shim=$(mktemp -d)
+for tool in awk basename dirname grep; do
+  ln -s "$(command -v "$tool")" "$shim/$tool"
+done
+# Resolve the interpreter before restricting PATH — a bare `bash` would not be
+# found under the shim, and the harness would score the resulting 127 as the
+# gate refusing. That is the same false pass as the two drafts above, arrived
+# at from a third direction.
+bash_bin=$(command -v bash)
+if PATH="$shim" "$bash_bin" "$GATE" >/dev/null 2>&1; then
   echo "FAIL — the gate reports success when ripgrep is unavailable"
   failures=$((failures + 1))
 else
   echo "ok   — the gate refuses to pass when ripgrep is unavailable"
 fi
+rm -rf "$shim"
 
 # And the tree as it stands must pass, or the gate is red for everyone.
 if bash "$GATE" >/dev/null 2>&1; then
