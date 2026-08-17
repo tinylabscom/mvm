@@ -808,7 +808,7 @@ let
       extraDisables ? [ ],
       requiredExtraDisables ? [ ],
     }:
-    pkgs.linuxManualConfig {
+    (pkgs.linuxManualConfig {
       src = kernelSourceTree;
       version = kernelVersion;
       modDirVersion = kernelVersion;
@@ -816,7 +816,37 @@ let
         inherit extraEnables extraDisables requiredExtraDisables;
       };
       allowImportFromDerivation = false;
-    };
+    }).overrideAttrs
+      (old: pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isx86_64 {
+        # nixpkgs installs only the compressed image: on x86_64 that is
+        # `bzImage`, and nothing here ever emitted an ELF. Every consumer then
+        # copied the bzImage to a file named `vmlinux`, which is the name
+        # Firecracker's loader is documented against — and its x86_64 loader
+        # takes an uncompressed ELF and nothing else. A release built this way
+        # publishes a kernel that fails with "Invalid Elf magic number" before
+        # init runs, which is what v0.17.0 shipped.
+        #
+        # The ELF is not lost, only compressed inside the bzImage, and the
+        # kernel tree ships the extractor for exactly this. Emit it beside the
+        # bzImage so the format is available rather than inferred from a name.
+        nativeBuildInputs = (old.nativeBuildInputs or [ ]) ++ [
+          pkgs.gzip
+          pkgs.xz
+          pkgs.lz4
+          pkgs.zstd
+          pkgs.lzop
+          pkgs.binutils
+        ];
+        postInstall = (old.postInstall or "") + ''
+          bash ${kernelSourceTree}/scripts/extract-vmlinux "$out/bzImage" > "$out/vmlinux"
+          magic=$(od -An -tx1 -N4 "$out/vmlinux" | tr -d ' \n')
+          if [ "$magic" != "7f454c46" ]; then
+            echo "ERROR: extract-vmlinux did not yield an ELF (magic=0x$magic)." >&2
+            echo "Firecracker's x86_64 loader takes an uncompressed ELF vmlinux only." >&2
+            exit 1
+          fi
+        '';
+      });
 
 in
 {

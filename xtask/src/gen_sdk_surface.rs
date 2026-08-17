@@ -173,6 +173,562 @@ pub fn render_typescript(manifest: &EnvManifest) -> String {
     out
 }
 
+/// A parameter's language-neutral type.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CtorParamType {
+    /// A string.
+    Str,
+    /// An integer.
+    Int,
+    /// A list of the named IR type.
+    List {
+        /// Element type name.
+        item: String,
+    },
+}
+
+/// A literal default.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CtorLiteral {
+    /// Integer literal.
+    Int {
+        /// The value.
+        value: i64,
+    },
+    /// String literal.
+    Str {
+        /// The value.
+        value: String,
+    },
+    /// The absent value; the parameter is optional.
+    Null,
+}
+
+/// An alias rewrite applied before an enum-membership check.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct CtorAlias {
+    /// Accepted spelling.
+    pub from: String,
+    /// Canonical spelling it rewrites to.
+    pub to: String,
+}
+
+/// A runtime check the dynamic SDKs perform.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CtorConstraint {
+    /// Value must be non-empty.
+    NonEmpty {
+        /// Verbatim message.
+        message: String,
+    },
+    /// `min < value < max`.
+    IntExclusiveRange {
+        /// Exclusive lower bound.
+        min: i64,
+        /// Exclusive upper bound.
+        max: i64,
+        /// Message with a `{value}` placeholder.
+        message: String,
+    },
+    /// Value must be a canonical member, after aliases.
+    EnumMember {
+        /// Canonical values.
+        canonical: Vec<String>,
+        /// Alias rewrites.
+        aliases: Vec<CtorAlias>,
+        /// Message with a `{value}` placeholder.
+        message: String,
+    },
+}
+
+/// One constructor parameter.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct CtorParam {
+    /// Parameter name.
+    pub name: String,
+    /// Language-neutral type.
+    #[serde(rename = "type")]
+    pub ty: CtorParamType,
+    /// Default, if optional.
+    pub default: Option<CtorLiteral>,
+    /// Whether Python takes this keyword-only.
+    pub kw_only: bool,
+    /// Runtime checks, in application order.
+    pub constraints: Vec<CtorConstraint>,
+}
+
+/// How a constructed field is produced.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CtorFieldValue {
+    /// The parameter, passed through.
+    Param {
+        /// Source parameter.
+        param: String,
+    },
+    /// A list copy of the parameter.
+    ParamList {
+        /// Source parameter.
+        param: String,
+    },
+    /// The parameter resolved into an IR enum union member.
+    ParamEnum {
+        /// Source parameter.
+        param: String,
+        /// IR union alias.
+        enum_type: String,
+    },
+}
+
+/// One constructed field.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct CtorField {
+    /// Field name.
+    pub name: String,
+    /// How to produce it.
+    pub value: CtorFieldValue,
+}
+
+/// What a constructor builds.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CtorTarget {
+    /// A plain IR struct.
+    Struct {
+        /// IR type name.
+        name: String,
+    },
+    /// A tagged-union variant.
+    Variant {
+        /// IR union alias.
+        union: String,
+        /// Discriminant value.
+        discriminant: String,
+    },
+}
+
+/// One constructor.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct CtorDef {
+    /// Function name.
+    pub name: String,
+    /// Doc comment body.
+    pub doc: String,
+    /// Parameters, positional order.
+    pub params: Vec<CtorParam>,
+    /// What it builds.
+    pub target: CtorTarget,
+    /// Field production.
+    pub fields: Vec<CtorField>,
+    /// Surfaces carrying it.
+    pub surfaces: Vec<String>,
+}
+
+/// The constructor manifest.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CtorManifest {
+    /// Constructors, in declaration order.
+    pub ctors: Vec<CtorDef>,
+}
+
+impl CtorManifest {
+    /// Parse a manifest emitted by `mvm-sdk`'s `emit_sdk_ctors` bin.
+    pub fn parse(bytes: &[u8]) -> Result<Self> {
+        serde_json::from_slice(bytes).context("parsing sdk-ctors manifest")
+    }
+
+    /// Constructors carried by `surface`, in declaration order.
+    pub fn exported_to(&self, surface: &str) -> Vec<&CtorDef> {
+        self.ctors
+            .iter()
+            .filter(|c| c.surfaces.iter().any(|s| s == surface))
+            .collect()
+    }
+}
+
+/// Python source for a literal.
+fn py_literal(v: &CtorLiteral) -> String {
+    match v {
+        CtorLiteral::Int { value } => value.to_string(),
+        CtorLiteral::Str { value } => format!("{value:?}"),
+        CtorLiteral::Null => "None".into(),
+    }
+}
+
+/// Python type annotation for a parameter.
+fn py_type(ty: &CtorParamType) -> String {
+    match ty {
+        CtorParamType::Str => "str".into(),
+        CtorParamType::Int => "int".into(),
+        CtorParamType::List { item } => format!("list[_ir.{item}]"),
+    }
+}
+
+/// TypeScript type annotation for a parameter.
+fn ts_type(ty: &CtorParamType) -> String {
+    match ty {
+        CtorParamType::Str => "string".into(),
+        CtorParamType::Int => "number".into(),
+        CtorParamType::List { item } => format!("{item}[]"),
+    }
+}
+
+/// Render the Python constructor module.
+pub fn render_python_ctors(manifest: &CtorManifest) -> String {
+    let mut out = String::new();
+    out.push_str(
+        "# Generated by `cargo xtask gen-stubs` from crates/mvm-sdk/src/ctor_registry.rs.\n",
+    );
+    out.push_str("# DO NOT EDIT BY HAND — `cargo xtask check-stubs` fails on drift.\n");
+    out.push_str("\"\"\"SDK constructors, owned by the Rust registry.\"\"\"\n\n");
+    out.push_str("from __future__ import annotations\n\n");
+    out.push_str("import typing\nfrom typing import Any\n\n");
+    out.push_str("from mvm._ir import workload as _ir\n\n\n");
+
+    // Variant resolution by discriminant. The hand-written DSL named the
+    // numbered dataclass directly (`_ir.NetworkDns3`), which datamodel-codegen
+    // renumbers on every regeneration — as it does the `KindN` enums.
+    // Resolving by discriminant removes both hardcoded numbers.
+    out.push_str(
+        "def _variant(union_alias: Any, discriminant: str) -> Any:\n\
+         \x20   \"\"\"The dataclass in ``union_alias`` whose ``kind`` accepts ``discriminant``.\n\n\
+         \x20   ``datamodel-codegen`` renumbers both the variant dataclasses and their\n\
+         \x20   ``KindN`` enums whenever the schema changes, so neither number can be\n\
+         \x20   written down. Resolving by discriminant is stable across regeneration.\n\
+         \x20   \"\"\"\n\
+         \x20   # A single-variant union collapses to the bare class — `Union[X]`\n\
+         \x20   # is `X` — so fall back to the alias itself rather than iterating\n\
+         \x20   # an empty tuple and reporting the variant as missing.\n\
+         \x20   for member in typing.get_args(union_alias) or (union_alias,):\n\
+         \x20       try:\n\
+         \x20           kind_type = typing.get_type_hints(member).get(\"kind\")\n\
+         \x20       except Exception:  # pragma: no cover - defensive\n\
+         \x20           continue\n\
+         \x20       if kind_type is None:\n\
+         \x20           continue\n\
+         \x20       try:\n\
+         \x20           kind_type(discriminant)\n\
+         \x20       except (ValueError, KeyError):\n\
+         \x20           continue\n\
+         \x20       return member\n\
+         \x20   raise ValueError(\n\
+         \x20       f\"no variant of {union_alias!r} carries kind {discriminant!r}\"\n\
+         \x20   )\n\n\n",
+    );
+    out.push_str(
+        "def _enum_member(union_alias: Any, value: str) -> Any:\n\
+         \x20   \"\"\"Construct the member of a closed-enum union that accepts ``value``.\"\"\"\n\
+         \x20   for member in typing.get_args(union_alias) or (union_alias,):\n\
+         \x20       try:\n\
+         \x20           return member(value)\n\
+         \x20       except (ValueError, KeyError):\n\
+         \x20           continue\n\
+         \x20   raise ValueError(f\"value {value!r} did not match any member of {union_alias!r}\")\n",
+    );
+
+    for c in manifest.exported_to("python") {
+        out.push_str("\n\n");
+        // Signature.
+        let mut parts: Vec<String> = Vec::new();
+        let mut emitted_star = false;
+        for p in &c.params {
+            if p.kw_only && !emitted_star {
+                parts.push("*".into());
+                emitted_star = true;
+            }
+            let optional = matches!(p.default, Some(CtorLiteral::Null));
+            let annotated = if optional {
+                format!("{}: {} | None", p.name, py_type(&p.ty))
+            } else {
+                format!("{}: {}", p.name, py_type(&p.ty))
+            };
+            parts.push(match &p.default {
+                Some(d) => format!("{annotated} = {}", py_literal(d)),
+                None => annotated,
+            });
+        }
+        let ret = match &c.target {
+            CtorTarget::Struct { name } => format!("_ir.{name}"),
+            CtorTarget::Variant { union, .. } => format!("_ir.{union}"),
+        };
+        out.push_str(&format!("def {}({}) -> {ret}:\n", c.name, parts.join(", ")));
+        let doc = wrap(&c.doc, 66);
+        if doc.len() == 1 {
+            out.push_str(&format!("    \"\"\"{}\"\"\"\n", doc[0]));
+        } else {
+            out.push_str("    \"\"\"");
+            for (i, line) in doc.iter().enumerate() {
+                if i == 0 {
+                    out.push_str(&format!("{line}\n"));
+                } else {
+                    out.push_str(&format!("    {line}\n"));
+                }
+            }
+            out.push_str("    \"\"\"\n");
+        }
+
+        // Constraints, in declaration order.
+        for p in &c.params {
+            for constraint in &p.constraints {
+                match constraint {
+                    CtorConstraint::NonEmpty { message } => {
+                        out.push_str(&format!("    if not {}:\n", p.name));
+                        out.push_str(&format!("        raise ValueError({message:?})\n"));
+                    }
+                    CtorConstraint::IntExclusiveRange { min, max, message } => {
+                        out.push_str(&format!("    if not ({min} < {} < {max}):\n", p.name));
+                        let msg = message.replace("{value}", &format!("{{{}}}", p.name));
+                        out.push_str(&format!("        raise ValueError(f{msg:?})\n"));
+                    }
+                    CtorConstraint::EnumMember {
+                        canonical,
+                        aliases,
+                        message,
+                    } => {
+                        if aliases.is_empty() {
+                            out.push_str(&format!("    canonical = {}\n", p.name));
+                        } else {
+                            let pairs: Vec<String> = aliases
+                                .iter()
+                                .map(|a| format!("{:?}: {:?}", a.from, a.to))
+                                .collect();
+                            out.push_str(&format!(
+                                "    canonical = {{{}}}.get({}, {})\n",
+                                pairs.join(", "),
+                                p.name,
+                                p.name
+                            ));
+                        }
+                        let members: Vec<String> =
+                            canonical.iter().map(|v| format!("{v:?}")).collect();
+                        let tuple = if members.len() == 1 {
+                            format!("({},)", members[0])
+                        } else {
+                            format!("({})", members.join(", "))
+                        };
+                        out.push_str(&format!("    if canonical not in {tuple}:\n"));
+                        let msg = message.replace("{value}", &format!("{{{}!r}}", p.name));
+                        out.push_str(&format!("        raise ValueError(f{msg:?})\n"));
+                    }
+                }
+            }
+        }
+
+        // Construction.
+        let mut kwargs: Vec<String> = Vec::new();
+        if let CtorTarget::Variant { discriminant, .. } = &c.target {
+            out.push_str(&format!(
+                "    _cls = _variant(_ir.{}, {discriminant:?})\n",
+                match &c.target {
+                    CtorTarget::Variant { union, .. } => union,
+                    CtorTarget::Struct { name } => name,
+                }
+            ));
+            kwargs.push(format!(
+                "kind=typing.get_type_hints(_cls)[\"kind\"]({discriminant:?})"
+            ));
+        }
+        for f in &c.fields {
+            let expr = match &f.value {
+                CtorFieldValue::Param { param } => {
+                    // An aliased enum parameter is consumed through
+                    // `canonical`; a plain one passes straight through.
+                    param.clone()
+                }
+                CtorFieldValue::ParamList { param } => format!("list({param})"),
+                CtorFieldValue::ParamEnum { enum_type, .. } => {
+                    format!("_enum_member(_ir.{enum_type}, canonical)")
+                }
+            };
+            kwargs.push(format!("{}={}", f.name, expr));
+        }
+        let ctor_expr = match &c.target {
+            CtorTarget::Struct { name } => format!("_ir.{name}"),
+            CtorTarget::Variant { .. } => "_cls".into(),
+        };
+        if kwargs.is_empty() {
+            out.push_str(&format!("    return {ctor_expr}()\n"));
+        } else {
+            out.push_str(&format!("    return {ctor_expr}(\n"));
+            for kw in &kwargs {
+                out.push_str(&format!("        {kw},\n"));
+            }
+            out.push_str("    )\n");
+        }
+    }
+
+    out.push_str("\n\n__all__ = [\n");
+    for c in manifest.exported_to("python") {
+        out.push_str(&format!("    {:?},\n", c.name));
+    }
+    out.push_str("]\n");
+    out
+}
+
+/// Render the TypeScript constructor module.
+pub fn render_typescript_ctors(manifest: &CtorManifest) -> String {
+    let mut out = String::new();
+    out.push_str("/* eslint-disable */\n/**\n");
+    out.push_str(
+        " * Generated by `cargo xtask gen-stubs` from crates/mvm-sdk/src/ctor_registry.rs.\n",
+    );
+    out.push_str(" * DO NOT EDIT BY HAND — `cargo xtask check-stubs` fails on drift.\n */\n");
+
+    let rows = manifest.exported_to("typescript");
+    let mut imports: Vec<String> = Vec::new();
+    for c in &rows {
+        match &c.target {
+            CtorTarget::Struct { name } => imports.push(name.clone()),
+            CtorTarget::Variant { union, .. } => imports.push(union.clone()),
+        }
+        for p in &c.params {
+            if let CtorParamType::List { item } = &p.ty {
+                imports.push(item.clone());
+            }
+        }
+    }
+    imports.sort();
+    imports.dedup();
+    out.push_str(&format!(
+        "\nimport type {{ {} }} from \"../ir/workload.js\";\n",
+        imports.join(", ")
+    ));
+
+    // Refusal messages are compared byte-for-byte against Python's in the
+    // s27 golden document, and Python interpolates the offending value with
+    // `!r`. `JSON.stringify` double-quotes where `repr` single-quotes, so
+    // emit a repr-alike rather than let the two languages disagree.
+    // Matches CPython for values without an embedded single quote, which
+    // covers every constrained value in the registry.
+    out.push_str("\nfunction _repr(value: string): string {\n");
+    out.push_str(
+        "  return \"'\" + value.replace(/\\\\/g, \"\\\\\\\\\").replace(/'/g, \"\\\\'\") + \"'\";\n",
+    );
+    out.push_str("}\n");
+
+    for c in &rows {
+        out.push('\n');
+        let doc = wrap(&c.doc, 66);
+        if doc.len() == 1 {
+            out.push_str(&format!("/** {} */\n", doc[0]));
+        } else {
+            out.push_str("/**\n");
+            for line in &doc {
+                out.push_str(&format!(" * {line}\n"));
+            }
+            out.push_str(" */\n");
+        }
+
+        let params: Vec<String> = c
+            .params
+            .iter()
+            .map(|p| {
+                match &p.default {
+                    Some(CtorLiteral::Int { value }) => {
+                        format!("{}: {} = {value}", p.name, ts_type(&p.ty))
+                    }
+                    Some(CtorLiteral::Str { value }) => {
+                        format!("{}: {} = {value:?}", p.name, ts_type(&p.ty))
+                    }
+                    // An optional parameter is spelled `?:` rather than
+                    // `= undefined`, which is what a TypeScript caller expects
+                    // and what `exactOptionalPropertyTypes` wants.
+                    Some(CtorLiteral::Null) => {
+                        format!("{}?: {}", p.name, ts_type(&p.ty))
+                    }
+                    None => format!("{}: {}", p.name, ts_type(&p.ty)),
+                }
+            })
+            .collect();
+        let ret = match &c.target {
+            CtorTarget::Struct { name } => name.clone(),
+            CtorTarget::Variant { union, .. } => union.clone(),
+        };
+        out.push_str(&format!(
+            "export function {}({}): {ret} {{\n",
+            c.name,
+            params.join(", ")
+        ));
+
+        for p in &c.params {
+            for constraint in &p.constraints {
+                match constraint {
+                    CtorConstraint::NonEmpty { message } => {
+                        out.push_str(&format!("  if (!{}) {{\n", p.name));
+                        out.push_str(&format!("    throw new Error({message:?});\n  }}\n"));
+                    }
+                    CtorConstraint::IntExclusiveRange { min, max, message } => {
+                        out.push_str(&format!(
+                            "  if (!({min} < {} && {} < {max})) {{\n",
+                            p.name, p.name
+                        ));
+                        let msg = message.replace("{value}", &format!("${{{}}}", p.name));
+                        out.push_str(&format!("    throw new Error(`{msg}`);\n  }}\n"));
+                    }
+                    CtorConstraint::EnumMember {
+                        canonical,
+                        aliases,
+                        message,
+                    } => {
+                        if aliases.is_empty() {
+                            out.push_str(&format!("  const canonical = {};\n", p.name));
+                        } else {
+                            let pairs: Vec<String> = aliases
+                                .iter()
+                                .map(|a| format!("{:?}: {:?}", a.from, a.to))
+                                .collect();
+                            out.push_str(&format!(
+                                "  const canonical = ({{{}}} as Record<string, string>)[{}] ?? {};\n",
+                                pairs.join(", "),
+                                p.name,
+                                p.name
+                            ));
+                        }
+                        let members: Vec<String> =
+                            canonical.iter().map(|v| format!("{v:?}")).collect();
+                        out.push_str(&format!(
+                            "  if (![{}].includes(canonical)) {{\n",
+                            members.join(", ")
+                        ));
+                        let msg = message.replace("{value}", &format!("${{_repr({})}}", p.name));
+                        out.push_str(&format!("    throw new Error(`{msg}`);\n  }}\n"));
+                    }
+                }
+            }
+        }
+
+        let mut fields: Vec<String> = Vec::new();
+        if let CtorTarget::Variant { discriminant, .. } = &c.target {
+            fields.push(format!("kind: {discriminant:?}"));
+        }
+        for f in &c.fields {
+            let expr = match &f.value {
+                CtorFieldValue::Param { param } => param.clone(),
+                CtorFieldValue::ParamList { param } => format!("[...{param}]"),
+                CtorFieldValue::ParamEnum { .. } => "canonical".into(),
+            };
+            fields.push(if expr == f.name {
+                f.name.clone()
+            } else {
+                format!("{}: {expr}", f.name)
+            });
+        }
+        if fields.is_empty() {
+            out.push_str("  return {} as ".to_string().as_str());
+            out.push_str(&format!("{ret};\n}}\n"));
+        } else {
+            out.push_str(&format!(
+                "  return {{ {} }} as {ret};\n}}\n",
+                fields.join(", ")
+            ));
+        }
+    }
+    out
+}
+
 /// Render the Python error-taxonomy module.
 pub fn render_python_errors(manifest: &ErrorManifest) -> String {
     let rows = manifest.exported_to("python");

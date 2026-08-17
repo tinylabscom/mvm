@@ -183,6 +183,8 @@ enum ConstKind {
     EnvVars,
     /// `schema/sdk-errors-v0.json` — the error taxonomy.
     Errors,
+    /// `schema/sdk-ctors-v0.json` — the constructor surface.
+    Ctors,
 }
 
 /// Constant-bearing artifacts, regenerated and drift-checked alongside
@@ -212,6 +214,15 @@ fn const_artifacts() -> &'static [ConstArtifact] {
             ts_path: "crates/mvm-sdk/sdks/typescript/src/_errors/types.ts",
             stem: "sdk-errors-v0",
         },
+        ConstArtifact {
+            kind: ConstKind::Ctors,
+            label: "SDK constructor surface",
+            emit_args: &["run", "-q", "-p", "mvm-sdk", "--bin", "emit_sdk_ctors"],
+            manifest_path: "schema/sdk-ctors-v0.json",
+            python_path: "crates/mvm-sdk/sdks/python/mvm/_ctors/generated.py",
+            ts_path: "crates/mvm-sdk/sdks/typescript/src/_ctors/generated.ts",
+            stem: "sdk-ctors-v0",
+        },
     ]
 }
 
@@ -230,6 +241,13 @@ fn render_const(kind: ConstKind, manifest: &[u8]) -> Result<(String, String)> {
             (
                 crate::gen_sdk_surface::render_python_errors(&m),
                 crate::gen_sdk_surface::render_typescript_errors(&m),
+            )
+        }
+        ConstKind::Ctors => {
+            let m = crate::gen_sdk_surface::CtorManifest::parse(manifest)?;
+            (
+                crate::gen_sdk_surface::render_python_ctors(&m),
+                crate::gen_sdk_surface::render_typescript_ctors(&m),
             )
         }
     })

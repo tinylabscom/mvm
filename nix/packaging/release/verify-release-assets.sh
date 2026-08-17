@@ -102,6 +102,16 @@ assert_init_shebang() {
   return 0
 }
 
+# The rootfs check above proves the guest has an exec'able /init. It says
+# nothing about whether the kernel that would exec it can be loaded at all —
+# and on x86_64 the published kernel was a bzImage, which Firecracker refuses
+# before init ever runs. Two assets, two formats, two checks.
+KERNEL_FORMAT_CHECK="$(dirname "$0")/assert-kernel-format.sh"
+assert_kernel_format() {
+  "$KERNEL_FORMAT_CHECK" "$1" "$2" "$3" >/dev/null || FAILED=1
+  return 0
+}
+
 required_bins_for_target() {
   case "$1" in
     *apple-darwin)
@@ -240,8 +250,10 @@ for arch in $BOOT_ARCHES; do
     [ "$want" = "$got" ] || fail "[$arch] $f sha256 mismatch: recorded=$want actual=$got"
   done
 
-  # The checksums above prove the bytes are the ones we published. This proves
-  # the ones we published can boot.
+  # The checksums above prove the bytes are the ones we published. These prove
+  # the ones we published can boot: a loadable kernel, and a guest init it can
+  # exec once it is running.
+  assert_kernel_format "$ASSETS_DIR/$boot_kernel" "$arch" "$arch kernel"
   assert_init_shebang "$ASSETS_DIR/$boot_rootfs" "$arch"
 done
 
