@@ -364,9 +364,12 @@ pub const ALLOWLIST_ENV_VAR: &str = "MVM_WEB_FETCH_ALLOWLIST";
 /// hosts.
 pub struct WebFetchTool {
     /// Hosts the tool is permitted to fetch from. Empty = nothing
-    /// allowed (fail-closed). Match is exact on `url.host_str()`;
-    /// wildcards (e.g. `*.example.com`) live in a follow-up slice
-    /// once we have a use case for them.
+    /// allowed (fail-closed). Match is exact on `url.host_str()` but
+    /// case-insensitive: DNS hostnames are case-insensitive and this list is
+    /// typed by an operator, so a mixed-case entry must still match. Stored
+    /// already lowercased, so the comparison is a plain set lookup.
+    /// Wildcards (e.g. `*.example.com`) live in a follow-up slice once we
+    /// have a use case for them.
     allowed_hosts: BTreeSet<String>,
     /// Pluggable HTTP impl. Defaults to [`NoopHttpFetcher`].
     fetcher: Arc<dyn HttpFetcher>,
@@ -388,7 +391,14 @@ impl WebFetchTool {
     /// future `tool_policy` field that carries per-tool config).
     pub fn with_allowlist(hosts: impl IntoIterator<Item = String>) -> Self {
         Self {
-            allowed_hosts: hosts.into_iter().collect(),
+            // Normalised once, here, so every later lookup is a plain set
+            // membership test rather than a comparison that has to remember
+            // to fold case at each call site.
+            allowed_hosts: hosts
+                .into_iter()
+                .map(|h| h.trim().to_ascii_lowercase())
+                .filter(|h| !h.is_empty())
+                .collect(),
             fetcher: Arc::new(NoopHttpFetcher),
         }
     }
@@ -476,7 +486,10 @@ impl HostMediatedTool for WebFetchTool {
                 message: "url missing host".to_string(),
             })?;
 
-        if !self.allowed_hosts.contains(host) {
+        // `Url` already lowercases a domain host, but fold again rather than
+        // depend on that: the check must not be one parser change away from
+        // silently denying everything.
+        if !self.allowed_hosts.contains(&host.to_ascii_lowercase()) {
             return Err(ToolInvokeError::Upstream {
                 tool: TOOL_NAME.to_string(),
                 message: format!(
@@ -560,6 +573,55 @@ mod tests {
     // ──────────────────────────────────────────────────────────────
     // Policy: allowlist
     // ──────────────────────────────────────────────────────────────
+
+    /// DNS hostnames are case-insensitive, and the allowlist is typed by an
+    /// operator into `MVM_WEB_FETCH_ALLOWLIST`. A mixed-case entry must still
+    /// match the lowercase host the URL parser produces, or the tool denies
+    /// every fetch to a host the operator plainly allowed.
+    #[tokio::test]
+    async fn allowlist_matching_is_case_insensitive() {
+        let tool = WebFetchTool::with_allowlist(["API.Allowed.Example".to_string()]);
+        let err = tool
+            .invoke(serde_json::json!({ "url": "https://api.allowed.example/x" }))
+            .await
+            .unwrap_err();
+        // The host IS allowed, so this must not be an allowlist refusal. It
+        // fails later (the default fetcher is a Noop), which is fine — what
+        // matters is that it got past the gate.
+        match err {
+            ToolInvokeError::Upstream { message, .. } => {
+                assert!(
+                    !message.contains("not on per-tenant allowlist"),
+                    "a mixed-case allowlist entry must still match: {message}"
+                );
+            }
+            other => panic!("expected Upstream, got {other:?}"),
+        }
+    }
+
+    /// The mirror case: an uppercase URL host against a lowercase allowlist
+    /// entry. This already held before the allowlist was normalised, because
+    /// `Url` lowercases a domain host while parsing — so it is a
+    /// characterisation pin on that parser behaviour, not a regression this
+    /// fix repaired. It earns its place by failing loudly if that behaviour
+    /// ever changes underneath us.
+    #[tokio::test]
+    async fn an_uppercase_url_host_matches_a_lowercase_allowlist_entry() {
+        let tool = WebFetchTool::with_allowlist(["api.allowed.example".to_string()]);
+        let err = tool
+            .invoke(serde_json::json!({ "url": "https://API.Allowed.Example/x" }))
+            .await
+            .unwrap_err();
+        match err {
+            ToolInvokeError::Upstream { message, .. } => {
+                assert!(
+                    !message.contains("not on per-tenant allowlist"),
+                    "an uppercase URL host must still match: {message}"
+                );
+            }
+            other => panic!("expected Upstream, got {other:?}"),
+        }
+    }
 
     #[tokio::test]
     async fn denies_unallowlisted_host() {
