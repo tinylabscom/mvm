@@ -85,7 +85,19 @@ jobs:
           # Anything that can change a compiled target, generated artifact, or
           # the commands used by a Rust lane keeps the full compiler/test
           # matrix. Prose, site assets, and process-only specs do not.
-          if grep -zE '^(crates/|src/|tests/|xtask/|scripts/|features/|schema/|model/|assets/|\.cargo/|\.config/|\.github/actions/|\.github/workflows/|nix/packaging/release/[^/]*\.sh$|Cargo\.(toml|lock)$|rust-toolchain\.toml$|build\.rs$|install\.sh$|[Jj]ustfile$)' "$CHANGED_FILE" >/dev/null; then
+          #
+          # `nix/` is here whole, replacing a narrow
+          # `nix/packaging/release/*.sh` entry, because the guest image
+          # generator has Rust guards that only run under this flag and
+          # tests/nix_flake_structure.rs reads across lib/, images/,
+          # packages/ and profiles/. `mk_guest_init_shebang_lands_at_byte_zero`
+          # renders `initText` out of nix/lib/mk-guest.nix and asserts the
+          # shebang lands on byte 0 — no Nix needed, well under a second. It
+          # was written for the defect that shipped a rootfs the kernel could
+          # not exec, and a PR touching only mk-guest.nix used to resolve
+          # code=false, so the one test that would have caught that change
+          # never ran on it.
+          if grep -zE '^(crates/|src/|tests/|xtask/|scripts/|features/|schema/|model/|assets/|\.cargo/|\.config/|\.github/actions/|\.github/workflows/|nix/|Cargo\.(toml|lock)$|rust-toolchain\.toml$|build\.rs$|install\.sh$|[Jj]ustfile$)' "$CHANGED_FILE" >/dev/null; then
             echo "code=true" >> "$GITHUB_OUTPUT"
           else
             echo "code=false" >> "$GITHUB_OUTPUT"
@@ -103,7 +115,11 @@ jobs:
             echo "architecture=false" >> "$GITHUB_OUTPUT"
           fi
 
-          if grep -zE '^(nix/images/kernel/|nix/images/builder-vm/flake\.(nix|lock)$|xtask/src/check_kernel_config_budget\.rs$|\.github/workflows/(ci|kernel-build)\.yml$)' "$CHANGED_FILE" >/dev/null; then
+          # default-tenant and nix/lib/ join the kernel paths because the
+          # image flake imports both — nix/images/kernel/{base,workload}.nix
+          # for the vmlinux and lib.mkGuest for the rootfs — so a change to
+          # either alters what this lane builds.
+          if grep -zE '^(nix/images/kernel/|nix/images/default-tenant/|nix/lib/|nix/images/builder-vm/flake\.(nix|lock)$|xtask/src/check_kernel_config_budget\.rs$|\.github/workflows/(ci|kernel-build)\.yml$)' "$CHANGED_FILE" >/dev/null; then
             echo "kernel=true" >> "$GITHUB_OUTPUT"
           else
             echo "kernel=false" >> "$GITHUB_OUTPUT"
