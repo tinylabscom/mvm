@@ -529,6 +529,68 @@ fn env_registry_reaches_its_declared_surfaces(world: &mut CliWorld) {
     }
 }
 
+#[when(regex = r#"^I run the "(Python|TypeScript)" Tier A constructor fixture$"#)]
+fn run_ctor_fixture(world: &mut CliWorld, language: String) {
+    let fixture = sdk_fixture_dir().join(match language.as_str() {
+        "Python" => "python_ctors.py",
+        _ => "typescript_ctors.mjs",
+    });
+    let mut command = match language.as_str() {
+        "Python" => {
+            let mut c = Command::new("python3");
+            c.env("PYTHONPATH", repo_root().join("crates/mvm-sdk/sdks/python"));
+            c
+        }
+        _ => Command::new("node"),
+    };
+    let output = command
+        .arg(&fixture)
+        .current_dir(repo_root())
+        .output()
+        .unwrap_or_else(|error| panic!("spawn {}: {error}", fixture.display()));
+    assert!(
+        output.status.success(),
+        "{} exited {}: {}",
+        fixture.display(),
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    world.sdk_ctor_docs.insert(
+        format!("{}-ctors", language.to_ascii_lowercase()),
+        String::from_utf8_lossy(&output.stdout).to_string(),
+    );
+}
+
+#[then("both Tier A constructor surfaces match the golden IR document")]
+fn ctor_surfaces_match_golden(world: &mut CliWorld) {
+    // The golden document is the behavioural gate the constructor registry
+    // needs and a name-level comparison cannot provide: it pins the built
+    // values *and* the refusal messages, in both languages, against one
+    // file. A generator that drifted in either language — or between them —
+    // fails here rather than shipping.
+    let path = sdk_fixture_dir().join("ctor_golden.json");
+    let golden: Value = serde_json::from_str(
+        &std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("read {}: {error}", path.display())),
+    )
+    .expect("ctor golden document is not JSON");
+
+    for language in ["python", "typescript"] {
+        let raw = world
+            .sdk_ctor_docs
+            .get(&format!("{language}-ctors"))
+            .unwrap_or_else(|| panic!("{language} constructor fixture did not run"));
+        let actual: Value =
+            serde_json::from_str(raw).expect("constructor fixture did not emit JSON");
+        assert_eq!(
+            actual,
+            golden,
+            "{language} Tier A constructors diverged from {}",
+            path.display()
+        );
+    }
+}
+
 #[then("the shared surface agrees between the two languages")]
 fn shared_surface_agrees(world: &mut CliWorld) {
     let (_, _, shared) = partition_surfaces(world);
