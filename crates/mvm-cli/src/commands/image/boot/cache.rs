@@ -142,14 +142,14 @@ fn sidecar_mtime(dir: &Path) -> Option<String> {
 /// and "how did this reach this host" is not a fact about the build at all —
 /// a published image is built locally *somewhere*, and calling that
 /// `built-local` here is exactly the misreading `source` exists to prevent.
-pub(super) struct AcquiredProvenance {
-    pub(super) image_tag: String,
-    pub(super) source: &'static str,
-    pub(super) acquired_at: String,
+pub(crate) struct AcquiredProvenance {
+    pub(crate) image_tag: String,
+    pub(crate) source: &'static str,
+    pub(crate) acquired_at: String,
 }
 
 impl AcquiredProvenance {
-    pub(super) fn fetched(tag: &str) -> Self {
+    pub(crate) fn fetched(tag: &str) -> Self {
         Self {
             image_tag: tag.to_string(),
             source: "fetched",
@@ -160,7 +160,7 @@ impl AcquiredProvenance {
 
 /// Rewrite `dir`'s sidecar with the acquisition facts, leaving every build
 /// fact the producer recorded untouched.
-pub(super) fn stamp_provenance(dir: &Path, provenance: &AcquiredProvenance) -> Result<()> {
+pub(crate) fn stamp_provenance(dir: &Path, provenance: &AcquiredProvenance) -> Result<()> {
     let mut sidecar = GuestSidecar::read_from_dir(dir)
         .with_context(|| format!("read the sidecar in {}", dir.display()))?
         .with_context(|| {

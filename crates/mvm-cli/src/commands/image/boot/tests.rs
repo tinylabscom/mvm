@@ -294,3 +294,62 @@ fn a_tag_that_cannot_be_ordered_is_not_reported_as_behind() {
         CheckVerdict::NoPublishedLine
     );
 }
+
+/// A fetched image must say so, even when it landed in a source checkout.
+///
+/// `MVM_BOOT_IMAGE=fetch` is the one case that weakens "a source checkout never
+/// depends on a published artifact". The weakening is acceptable only because
+/// the result is labelled: without this stamp a prebuilt sitting in a checkout
+/// is indistinguishable from a build of the working tree, and the next person
+/// to wonder why their flake edit had no effect has nothing to read.
+#[test]
+fn stamping_marks_an_acquired_image_as_fetched_without_losing_build_facts() {
+    let _env = TestEnv::new();
+    let dir = tempfile::tempdir().unwrap();
+
+    // A sidecar as a producer would emit it: build facts present, acquisition
+    // facts absent, because the build cannot know them.
+    let produced = r#"{
+        "name": "mvm-default-microvm",
+        "accessible": false,
+        "sealed": true,
+        "entrypointKind": "command",
+        "initSystem": "busybox",
+        "expectedBootMs": 300,
+        "agentBinary": "real",
+        "rootlessEntrypoint": true,
+        "hypervisor": "libkrun",
+        "protocolVersion": 2,
+        "generatorRev": "abc123",
+        "source": "built-local"
+    }"#;
+    std::fs::write(
+        dir.path().join(mvm_build::builder_vm::SIDECAR_FILENAME),
+        produced,
+    )
+    .unwrap();
+
+    super::cache::stamp_provenance(
+        dir.path(),
+        &super::cache::AcquiredProvenance::fetched("v0.18.0"),
+    )
+    .expect("stamping a well-formed sidecar must succeed");
+
+    let after = mvm_build::builder_vm::GuestSidecar::read_from_dir(dir.path())
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        after.source, "fetched",
+        "the acquisition arm must be recorded"
+    );
+    assert_eq!(after.image_tag, "v0.18.0");
+    assert!(
+        !after.built_at.is_empty(),
+        "the host stamps a time the build could not"
+    );
+    // Build facts the producer recorded survive: stamping adds provenance, it
+    // does not rewrite what the image is.
+    assert_eq!(after.protocol_version, 2);
+    assert_eq!(after.generator_rev, "abc123");
+    assert_eq!(after.name, "mvm-default-microvm");
+}

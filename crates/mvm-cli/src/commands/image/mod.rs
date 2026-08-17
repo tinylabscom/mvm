@@ -14,7 +14,7 @@ use mvm_core::user_config::MvmConfig;
 
 use super::Cli;
 
-mod boot;
+pub(crate) mod boot;
 mod cache;
 mod ingest;
 mod inspect;

@@ -304,7 +304,18 @@ fn ensure_default_microvm_prod_image(cache_dir: &str) -> Result<(String, String)
     match resolved.choice {
         BootImageAcquisition::Build => build_prod_default_locally(cache_dir),
         BootImageAcquisition::Fetch => {
-            download_default_microvm_image(cache_dir, &kernel_path, &rootfs_path)
+            let acquired = download_default_microvm_image(cache_dir, &kernel_path, &rootfs_path)?;
+            // Record that these bytes were fetched, not built here. Without it a
+            // prebuilt pulled into a source checkout is indistinguishable from a
+            // build of the working tree, and the next person to wonder why their
+            // flake edit had no effect has nothing to read. The producer's own
+            // build facts are left untouched.
+            let tag = format!("v{}", env!("CARGO_PKG_VERSION"));
+            crate::commands::image::boot::cache::stamp_provenance(
+                std::path::Path::new(cache_dir),
+                &crate::commands::image::boot::cache::AcquiredProvenance::fetched(&tag),
+            )?;
+            Ok(acquired)
         }
     }
 }
