@@ -154,11 +154,26 @@ populated it. Steady state after that is unchanged.
       and `mvm-client → mvm-hostd` (29) are the same narrow cluster:
       `audit::*`, `supervisor::{tools,verify_audit_chain}`, `plan_admission`,
       `keyholder`. Extracting ~7k LOC frees both from 49k LOC of `mvm-hostd`.
-- [ ] **Phase 5** — re-measure sccache. `basedirs` is correctly set and the
-      cache is 12 GiB of a 60 GiB ceiling, so it is neither misconfigured nor
-      evicting, yet the live Rust hit rate is 4.20% (257 hits / 5,861 misses)
-      against the ~84% its own config documents as measured. Find the gap
-      before changing anything.
+- [x] **Phase 5 — sccache measured; the documented cross-worktree win does not
+      exist.** `basedirs` is correctly set and the cache is well under its
+      ceiling, yet the machine-wide Rust hit rate is ~2.5% across ~35k
+      compiles. Controlled experiment, one crate, same source and `CARGO_HOME`,
+      varying only the target directory:
+
+      | Run | Result |
+      | --- | --- |
+      | cold, target dir A | 2 hits / 100 misses |
+      | target dir A wiped, rebuilt | **70 hits / 79 misses** |
+      | identical source, target dir B | **0 hits / 152 misses** |
+
+      The target directory's full path is part of the key, and every worktree
+      has its own, so cross-worktree dedup cannot happen — `basedirs` is
+      necessary but not sufficient, and the config's "same target-directory
+      *name*" condition understates it. What sccache actually buys here is
+      re-populating one checkout after `cargo clean`; within a live target dir
+      cargo already caches deps. The Justfile comment claiming cross-worktree
+      hits has been corrected. Whether to keep the wrapper at all is now a
+      decision with numbers behind it rather than an assumption.
 - [ ] **Phase 5** — worktree hygiene: 36 worktrees, 87 GB. Plan 334 named this
       the largest remaining lever and left it out of scope.
 
