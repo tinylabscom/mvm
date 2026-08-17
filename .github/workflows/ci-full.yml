@@ -816,7 +816,11 @@ jobs:
         with:
           filters: |
             spawn:
-              - 'crates/mvm-host-vm-init/**'
+              # Same absorbed-path bug the builder VM lane above already
+              # fixed: mvm-host-vm-init is a [[bin]] of mvm-build, so the
+              # standalone crate directory this named cannot exist and the
+              # filter never matched.
+              - 'crates/mvm-build/src/bin/mvm-host-vm-init/**'
 
       - name: Install Rust toolchain
         if: steps.filter.outputs.spawn == 'true' || github.ref == 'refs/heads/main'
