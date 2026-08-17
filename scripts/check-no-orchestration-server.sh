@@ -1,6 +1,21 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# The whole gate is one `rg` invocation whose miss is indistinguishable from a
+# clean tree, and the call site swallows a failure with `|| true` so a genuine
+# search error cannot be told from "nothing matched". Without `rg` installed
+# the script therefore reports success having examined nothing — a gate that
+# passes vacuously, which is worse than no gate because it reads as evidence.
+#
+# CI proved this is not hypothetical: the gate runs in Invariant, which installs
+# ripgrep, and a test step briefly placed in lint-core, which does not — where
+# every probe was accepted.
+if ! command -v rg >/dev/null 2>&1; then
+  echo "::error::ripgrep (rg) is not installed; this gate cannot examine anything." >&2
+  echo "Install it in the job that runs this script rather than letting the check pass unexamined." >&2
+  exit 1
+fi
+
 patterns='\b(axum::Router|axum::serve|axum::Server|hyper::Server|hyper::server::conn|tonic::transport::Server|TcpListener::bind|UnixListener::bind|NamedPipeServer)\b'
 
 strip_cfg_test_modules() {
