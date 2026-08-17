@@ -7,16 +7,26 @@
     "",
     "`typescript_only_absent_from_python` is empty and should stay that way.",
     "",
-    "Tier A's eight constructors left this list when they became generated",
-    "from the Rust registry (crates/mvm-sdk/src/ctor_registry.rs) rather than",
-    "hand-written per language. What remains is Tier C's remote-function",
-    "machinery and the names that cannot be generated.",
+    "`python_only_permanent_by_design` is not a backlog. `derive_schema`",
+    "builds a JSON Schema from a Python function's type hints. TypeScript",
+    "erases types before the program runs, so at the moment a decorator would",
+    "inspect the function the annotations are already gone. No amount of work",
+    "closes this. TypeScript callers pass `args_schema` / `return_schema` to",
+    "`entrypoint_function` explicitly instead, which that function now",
+    "accepts.",
     "",
-    "The two MVM_MACHINE_* names are a *behaviour* gap, not a naming one:",
-    "the TypeScript machine wrapper does not bound its subprocess, so it has",
-    "nothing to read them with. They are deliberately not emitted into",
-    "TypeScript, because a constant nothing reads would clear this list",
-    "while changing nothing."
+    "`python_only_type_erased_in_typescript` is the related but distinct case:",
+    "those names exist in TypeScript as `export type`, which tsc erases, so a",
+    "runtime surface check cannot see them.",
+    "",
+    "`python_only_absent_from_typescript` is the real backlog. What remains is",
+    "Tier C's remote-function machinery and the error types only Tier C",
+    "raises; they land together, because generating the errors first would",
+    "export classes nothing in TypeScript can throw.",
+    "",
+    "The two MVM_MACHINE_* names are a behaviour gap, not a naming one: the",
+    "TypeScript machine wrapper does not bound its subprocess, so it has",
+    "nothing to read them with."
   ],
   "python_only_type_erased_in_typescript": [
     "ExecResult",
@@ -32,6 +42,9 @@
     "RuntimeProcessResult",
     "SandboxInfo"
   ],
+  "python_only_permanent_by_design": [
+    "derive_schema"
+  ],
   "python_only_absent_from_typescript": [
     "EmittingContextError",
     "MsgpackUnavailable",
@@ -46,7 +59,6 @@
     "WorkloadRef",
     "current_recording_dict",
     "current_session_id",
-    "derive_schema",
     "func",
     "session",
     "workload_ref"

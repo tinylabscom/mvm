@@ -3,7 +3,8 @@
 Backing: preview
 Validation: none
 
-**Status: IN PROGRESS** — WS-1 complete (decision recorded below), WS-2 underway
+**Status: IN PROGRESS** — WS-1 to WS-5, WS-6.1, WS-7 and WS-8 (except 8.1)
+complete. Remaining: WS-6.2–6.6 (Tier C), which gates WS-8.1.
 **Opened:** 2026-08-14
 **Follows:** Plan 336 WS-G4
 
@@ -655,16 +656,63 @@ will produce a TypeScript surface that looks complete and quietly is not.
 
 ### WS-7 — Tier F decision
 
-- [ ] 7.1 Confirm option 2 for the first release, or overrule with reasoning
-- [ ] 7.2 Document the language difference where a user meets it, not only here
-- [ ] 7.3 Record it in the divergence file as permanent-by-design, not a gap
+- [x] 7.1 Confirm option 2 for the first release, or overrule with reasoning
+- [x] 7.2 Document the language difference where a user meets it, not only here
+- [x] 7.3 Record it in the divergence file as permanent-by-design, not a gap
+
+#### Result — option 2 confirmed, but it was not free
+
+Option 2 stands: TypeScript callers pass `args_schema` / `return_schema`
+explicitly. Compile-time generation (option 1) would put a build step into
+every consumer's project, and a validator library (option 3) adds a dependency
+and a second way to spell a type — both are speculative until a real TypeScript
+`@mvm.func` user exists, which is Tier C's problem.
+
+**One correction to this plan's own text.** Option 2 was described as "No new
+machinery". That was wrong: TypeScript's `entrypoint_function` accepted no
+schema arguments at all, so the recommended option was not merely worse
+ergonomics — it was impossible. The IR has carried `args_schema` and
+`return_schema` all along; only the constructor omitted them. Both are now
+accepted, which is what makes the decision exercisable rather than notional.
+
+7.2 is the TypeScript SDK's own README, under "Call schemas", where someone
+reaching for `derive_schema` will actually look. It states the reason rather
+than the absence: types are erased before the program runs, so
+`(name: string) => string` and `(name: any) => any` are the same value by the
+time a decorator could inspect them.
+
+7.3 adds `python_only_permanent_by_design` to the divergence file. The two
+existing buckets both mean "not done yet" in some form; this one never will be,
+and mixing it into the backlog would misreport the backlog's size. It is
+distinct from `python_only_type_erased_in_typescript`, which is the related
+case of names that *do* exist in TypeScript but only as `export type`.
 
 ### WS-8 — close out
 
 - [ ] 8.1 `surface_divergence.json` reduced to Tier F plus the type-erased set
-- [ ] 8.2 `xtask check-stubs` covers every generated artifact
-- [ ] 8.3 Full gates: fmt, clippy, workspace nextest, doctests, Python, TypeScript
-- [ ] 8.4 `specs/REFACTOR-STATUS.md` and a delivery note
+      — **blocked on Tier C**, see below
+- [x] 8.2 `xtask check-stubs` covers every generated artifact
+- [x] 8.3 Full gates: fmt, clippy, workspace nextest, doctests, Python, TypeScript
+- [x] 8.4 `specs/REFACTOR-STATUS.md` and a delivery note
+
+#### Status
+
+8.2 holds: every generated artifact — the four schema-backed stub sets plus
+`sdk-env-v0`, `sdk-errors-v0` and `sdk-ctors-v0` — is regenerated and
+byte-compared by `check-stubs`, which runs in `lint-policy` and again inside
+the BDD suite. Each new artifact was also shown to fail the gate on a
+hand-edit rather than assumed to.
+
+**8.1 cannot complete here, and saying otherwise would be false.** The target
+is a divergence file holding only Tier F plus the type-erased set. It currently
+also holds 16 names: Tier C's remote-function machinery and the eight error
+types only Tier C raises. Those close when WS-6 lands — the error taxonomy
+deliberately waits for it, because generating the types first would export
+classes nothing in TypeScript can throw. Everything WS-8.1 can close without
+Tier C is closed.
+
+Progress across the plan: `python_only_absent_from_typescript` went 30 → 16,
+and `typescript_only_absent_from_python` went 2 → 0 and has stayed there.
 
 ## Sequencing
 

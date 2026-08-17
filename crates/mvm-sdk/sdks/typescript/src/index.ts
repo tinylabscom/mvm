@@ -40,6 +40,7 @@ import type {
   HookCmd,
   Hooks,
   Image,
+  JsonSchemaShape,
   Mount,
   Network,
   PortForward,
@@ -401,6 +402,19 @@ export function entrypoint_function(opts: {
   working_dir?: string;
   env?: Record<string, EnvValue>;
   primary?: boolean;
+  /**
+   * JSON Schema for the call arguments.
+   *
+   * The Python SDK can derive this from a function's type hints
+   * (`mvm.derive_schema`). TypeScript has no equivalent and cannot get
+   * one: types are erased before the program runs, so at the moment a
+   * decorator would inspect the function, the annotations no longer
+   * exist. This is a property of the language, not a missing feature —
+   * pass the schema explicitly instead.
+   */
+  args_schema?: JsonSchemaShape;
+  /** JSON Schema for the return value. See {@link args_schema}. */
+  return_schema?: JsonSchemaShape;
 }): Entrypoint {
   return {
     kind: "function",
@@ -412,6 +426,8 @@ export function entrypoint_function(opts: {
     env: opts.env ?? {},
     primary: opts.primary ?? false,
     extra_imports: [],
+    ...(opts.args_schema !== undefined ? { args_schema: opts.args_schema } : {}),
+    ...(opts.return_schema !== undefined ? { return_schema: opts.return_schema } : {}),
   };
 }
 
