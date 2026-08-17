@@ -1163,6 +1163,12 @@ pub(in crate::commands) struct MachineRestoreArgs {
 struct MachineRemoveSummary {
     name: String,
     removed: bool,
+    /// Whether the runtime state under `vms/<name>/` went with the spec.
+    ///
+    /// Reported rather than assumed: a directory a live process still owns is
+    /// kept, and a caller parsing this needs to be able to tell that apart from
+    /// a complete removal.
+    runtime_state_removed: bool,
 }
 
 #[derive(Debug)]
@@ -1429,6 +1435,32 @@ fn validate_machine_name(name: &str) -> Result<()> {
     naming::validate_id(name, "machine name")
 }
 
+/// Remove a machine's runtime state directory, reporting whether it went.
+///
+/// `machines/<name>/` is the declarative spec and `vms/<name>/` is the state a
+/// boot leaves behind — console log, sockets, pid file. They are separate
+/// namespaces, and `machine rm` used to delete only the first, so a removed
+/// machine kept the second forever and `machine ls`, which reads `vms/`, went
+/// on reporting it.
+///
+/// Returns `false` when a live process still owns the directory rather than
+/// deleting it. `--force` stops the machine first but only warns if that stop
+/// failed, so "we asked it to stop" is not "nothing is using this any more";
+/// removing a live supervisor's pid file and sockets would strand it and hide
+/// it from every later `machine ls` at the same time. Uses the same liveness
+/// probe `env cleanup` and the reconciler make this decision with.
+fn remove_machine_runtime_state(name: &str) -> Result<bool> {
+    let dir = config::vm_state_dir(name);
+    if !dir.exists() {
+        return Ok(true);
+    }
+    if mvm_vmm::host::process_liveness::state_dir_has_live_process(&dir) {
+        return Ok(false);
+    }
+    fs::remove_dir_all(&dir).with_context(|| format!("removing {}", dir.display()))?;
+    Ok(true)
+}
+
 fn remove_machine_spec(name: &str, yes: bool) -> Result<MachineRemoveSummary> {
     validate_machine_name(name)?;
     if !yes {
@@ -1439,9 +1471,11 @@ fn remove_machine_spec(name: &str, yes: bool) -> Result<MachineRemoveSummary> {
         bail!("machine {:?} does not exist", name);
     }
     fs::remove_dir_all(&dir).with_context(|| format!("removing {}", dir.display()))?;
+    let runtime_state_removed = remove_machine_runtime_state(name)?;
     Ok(MachineRemoveSummary {
         name: name.to_string(),
         removed: true,
+        runtime_state_removed,
     })
 }
 
