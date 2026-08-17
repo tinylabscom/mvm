@@ -7,6 +7,27 @@ for detailed scope and acceptance criteria.
 
 ## Completed issue closeouts
 
+- [x] **Plan 337 WS-4 — Tier B, and the split is the finding.** `warm_process`
+      generates cleanly (one registry extension: a nullable default), verified
+      differentially before its hand-copy was deleted. `addon_use` deliberately
+      does not: expressing it declaratively needs a cross-parameter XOR, a
+      branching target, a derived string field and default-if-absent — four
+      capabilities no other constructor uses, i.e. a mini-language for one
+      function. It stays hand-written in both languages but pinned by the s27
+      golden IR document, meeting the WS-1 standard that a copy is dangerous
+      only when nothing checks it. Rust has no XOR at all —
+      `addon_use_registry` / `addon_use_local` are two functions, so the
+      invalid combination cannot be written, which is the WS-1 thesis a third
+      time. **Two defects found by the new coverage:** WS-3's deletion of
+      `node_deps` had also removed the module-level `_UNRESOLVED_SHA256`,
+      leaving `addon_use` raising `NameError` while all 212 Python tests still
+      passed — because none of them called it; `tests/test_ctors.py` now closes
+      that gap and was confirmed to fail without the fix. And the first
+      `_addon.ts` exported `UNRESOLVED_SHA256` where Python's is private,
+      caught immediately by the two-way divergence gate. Divergence 19 -> 17;
+      everything left is Tier C, its error taxonomy, or Tier F. WS-6.2-6.6,
+      WS-7, WS-8 open.
+
 - [x] **Plan 337 WS-3 — Tier A constructors generated from a declarative
       registry.** The workstream the WS-1 spike existed to enable, and the
       first real test of its decision: all eight constructors now come from

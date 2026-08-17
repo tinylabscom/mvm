@@ -116,6 +116,8 @@ pub mod stream;
 // Prelude — every previously-public item lives here so
 // `use mvm_sdk::*;` resolves identically across the split.
 pub use builder::{AppBuilder, WorkloadBuilder, app, workload};
+pub use ctor::addon::{AddonUseExt, UNRESOLVED_SHA256, addon_use_local, addon_use_registry};
+pub use ctor::concurrency::{ConcurrencyExt, warm_process};
 pub use ctor::deps::{no_deps, node_deps, node_deps_with, python_deps, python_deps_with};
 pub use ctor::entrypoint::{EntrypointExt, entrypoint_command, entrypoint_function};
 pub use ctor::image::{nix_packages, oci_base};

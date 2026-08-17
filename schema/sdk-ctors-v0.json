@@ -355,6 +355,123 @@
         "kind": "variant",
         "union": "Dependencies"
       }
+    },
+    {
+      "doc": "Opt a function entrypoint into the warm-process tier: the wrapper stays alive across calls, so per-call latency drops to the dispatch cost but cross-call state becomes the caller's problem.",
+      "fields": [
+        {
+          "name": "max_calls_per_worker",
+          "value": {
+            "kind": "param",
+            "param": "max_calls_per_worker"
+          }
+        },
+        {
+          "name": "max_rss_mb",
+          "value": {
+            "kind": "param",
+            "param": "max_rss_mb"
+          }
+        },
+        {
+          "name": "pool_size",
+          "value": {
+            "kind": "param",
+            "param": "pool_size"
+          }
+        },
+        {
+          "name": "in_process",
+          "value": {
+            "enum_type": "InProcessMode",
+            "kind": "param_enum",
+            "param": "in_process"
+          }
+        },
+        {
+          "name": "max_queue_depth",
+          "value": {
+            "kind": "param",
+            "param": "max_queue_depth"
+          }
+        }
+      ],
+      "name": "warm_process",
+      "params": [
+        {
+          "constraints": [],
+          "default": null,
+          "kw_only": true,
+          "name": "max_calls_per_worker",
+          "type": {
+            "kind": "int"
+          }
+        },
+        {
+          "constraints": [],
+          "default": null,
+          "kw_only": true,
+          "name": "max_rss_mb",
+          "type": {
+            "kind": "int"
+          }
+        },
+        {
+          "constraints": [],
+          "default": {
+            "kind": "int",
+            "value": 1
+          },
+          "kw_only": true,
+          "name": "pool_size",
+          "type": {
+            "kind": "int"
+          }
+        },
+        {
+          "constraints": [
+            {
+              "aliases": [],
+              "canonical": [
+                "serial",
+                "concurrent"
+              ],
+              "kind": "enum_member",
+              "message": "warm_process in_process must be 'serial' or 'concurrent', got {value}"
+            }
+          ],
+          "default": {
+            "kind": "str",
+            "value": "serial"
+          },
+          "kw_only": true,
+          "name": "in_process",
+          "type": {
+            "kind": "str"
+          }
+        },
+        {
+          "constraints": [],
+          "default": {
+            "kind": "null"
+          },
+          "kw_only": true,
+          "name": "max_queue_depth",
+          "type": {
+            "kind": "int"
+          }
+        }
+      ],
+      "surfaces": [
+        "rust",
+        "python",
+        "typescript"
+      ],
+      "target": {
+        "discriminant": "warm_process",
+        "kind": "variant",
+        "union": "Concurrency"
+      }
     }
   ],
   "version": 0

@@ -15,6 +15,7 @@ from mvm._ctors.generated import (
     no_deps,
     node_deps,
     python_deps,
+    warm_process,
 )
 
 __all__ = [
@@ -26,4 +27,5 @@ __all__ = [
     "no_deps",
     "node_deps",
     "python_deps",
+    "warm_process",
 ]

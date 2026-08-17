@@ -23,6 +23,7 @@ fn literal(value: Literal) -> Value {
     match value {
         Literal::Int(v) => json!({"kind": "int", "value": v}),
         Literal::Str(v) => json!({"kind": "str", "value": v}),
+        Literal::Null => json!({"kind": "null"}),
     }
 }
 

@@ -44,13 +44,11 @@
     "SecretInArgWarning",
     "Session",
     "WorkloadRef",
-    "addon_use",
     "current_recording_dict",
     "current_session_id",
     "derive_schema",
     "func",
     "session",
-    "warm_process",
     "workload_ref"
   ],
   "typescript_only_absent_from_python": []

@@ -202,6 +202,8 @@ pub enum CtorLiteral {
         /// The value.
         value: String,
     },
+    /// The absent value; the parameter is optional.
+    Null,
 }
 
 /// An alias rewrite applied before an enum-membership check.
@@ -352,6 +354,7 @@ fn py_literal(v: &CtorLiteral) -> String {
     match v {
         CtorLiteral::Int { value } => value.to_string(),
         CtorLiteral::Str { value } => format!("{value:?}"),
+        CtorLiteral::Null => "None".into(),
     }
 }
 
@@ -396,7 +399,10 @@ pub fn render_python_ctors(manifest: &CtorManifest) -> String {
          \x20   ``KindN`` enums whenever the schema changes, so neither number can be\n\
          \x20   written down. Resolving by discriminant is stable across regeneration.\n\
          \x20   \"\"\"\n\
-         \x20   for member in typing.get_args(union_alias):\n\
+         \x20   # A single-variant union collapses to the bare class — `Union[X]`\n\
+         \x20   # is `X` — so fall back to the alias itself rather than iterating\n\
+         \x20   # an empty tuple and reporting the variant as missing.\n\
+         \x20   for member in typing.get_args(union_alias) or (union_alias,):\n\
          \x20       try:\n\
          \x20           kind_type = typing.get_type_hints(member).get(\"kind\")\n\
          \x20       except Exception:  # pragma: no cover - defensive\n\
@@ -415,7 +421,7 @@ pub fn render_python_ctors(manifest: &CtorManifest) -> String {
     out.push_str(
         "def _enum_member(union_alias: Any, value: str) -> Any:\n\
          \x20   \"\"\"Construct the member of a closed-enum union that accepts ``value``.\"\"\"\n\
-         \x20   for member in typing.get_args(union_alias):\n\
+         \x20   for member in typing.get_args(union_alias) or (union_alias,):\n\
          \x20       try:\n\
          \x20           return member(value)\n\
          \x20       except (ValueError, KeyError):\n\
@@ -433,7 +439,12 @@ pub fn render_python_ctors(manifest: &CtorManifest) -> String {
                 parts.push("*".into());
                 emitted_star = true;
             }
-            let annotated = format!("{}: {}", p.name, py_type(&p.ty));
+            let optional = matches!(p.default, Some(CtorLiteral::Null));
+            let annotated = if optional {
+                format!("{}: {} | None", p.name, py_type(&p.ty))
+            } else {
+                format!("{}: {}", p.name, py_type(&p.ty))
+            };
             parts.push(match &p.default {
                 Some(d) => format!("{annotated} = {}", py_literal(d)),
                 None => annotated,
@@ -615,11 +626,20 @@ pub fn render_typescript_ctors(manifest: &CtorManifest) -> String {
             .params
             .iter()
             .map(|p| {
-                let annotated = format!("{}: {}", p.name, ts_type(&p.ty));
                 match &p.default {
-                    Some(CtorLiteral::Int { value }) => format!("{annotated} = {value}"),
-                    Some(CtorLiteral::Str { value }) => format!("{annotated} = {value:?}"),
-                    None => annotated,
+                    Some(CtorLiteral::Int { value }) => {
+                        format!("{}: {} = {value}", p.name, ts_type(&p.ty))
+                    }
+                    Some(CtorLiteral::Str { value }) => {
+                        format!("{}: {} = {value:?}", p.name, ts_type(&p.ty))
+                    }
+                    // An optional parameter is spelled `?:` rather than
+                    // `= undefined`, which is what a TypeScript caller expects
+                    // and what `exactOptionalPropertyTypes` wants.
+                    Some(CtorLiteral::Null) => {
+                        format!("{}?: {}", p.name, ts_type(&p.ty))
+                    }
+                    None => format!("{}: {}", p.name, ts_type(&p.ty)),
                 }
             })
             .collect();

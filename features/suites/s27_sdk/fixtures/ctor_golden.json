@@ -1,5 +1,25 @@
 {
   "built": {
+    "addon_use_local": {
+      "name": "my-db",
+      "ref": {
+        "kind": "local",
+        "path": "./addons/my-db"
+      },
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "tier": "separate"
+    },
+    "addon_use_registry": {
+      "alias": "db",
+      "name": "postgres",
+      "ref": {
+        "kind": "registry",
+        "url": "addons.mvm.io/postgres",
+        "version": "16"
+      },
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "tier": "separate"
+    },
     "dns_none": {
       "kind": "none"
     },
@@ -70,9 +90,32 @@
       "kind": "python",
       "lockfile": "uv.lock",
       "tool": "uv"
+    },
+    "warm_process_defaults": {
+      "in_process": "serial",
+      "kind": "warm_process",
+      "max_calls_per_worker": 1000,
+      "max_rss_mb": 256,
+      "pool_size": 1
+    },
+    "warm_process_tuned": {
+      "in_process": "concurrent",
+      "kind": "warm_process",
+      "max_calls_per_worker": 500,
+      "max_queue_depth": 32,
+      "max_rss_mb": 128,
+      "pool_size": 4
     }
   },
   "refusals": {
+    "addon_use_both_refs": {
+      "error": "ValueError",
+      "message": "mv.addon_use(): pass exactly one of `version=` (registry) or `path=` (local-path)"
+    },
+    "addon_use_neither_ref": {
+      "error": "ValueError",
+      "message": "mv.addon_use(): pass exactly one of `version=` (registry) or `path=` (local-path)"
+    },
     "dns_resolver_empty_host": {
       "error": "ValueError",
       "message": "dns_resolver host must be a non-empty string"
@@ -104,6 +147,10 @@
     "python_deps_unknown_tool": {
       "error": "ValueError",
       "message": "python_deps tool must be 'uv' or 'pip-tools', got 'poetry'"
+    },
+    "warm_process_bad_mode": {
+      "error": "ValueError",
+      "message": "warm_process in_process must be 'serial' or 'concurrent', got 'parallel'"
     }
   }
 }

@@ -472,9 +472,50 @@ What remains is Tier C's machinery and the names that cannot be generated.
 
 ### WS-4 — Tier B: complete the Rust surface first
 
-- [ ] 4.1 `addon_use` and `warm_process` added to `mvm_sdk::ctor`
-- [ ] 4.2 Generated into both languages
-- [ ] 4.3 Python hand-copies deleted
+- [x] 4.1 `addon_use` and `warm_process` added to `mvm_sdk::ctor`
+- [x] 4.2 Generated into both languages — `warm_process` generated;
+      `addon_use` hand-written in both, see below
+- [x] 4.3 Python hand-copies deleted — `warm_process` only, for the same reason
+
+#### Result — one of the two generates, and the split is the finding
+
+**`warm_process` is generated.** It needed one registry extension, a nullable
+default (`max_queue_depth`), and otherwise fits the existing vocabulary.
+Verified differentially against the hand-written twin over six cases before the
+hand-copy was deleted.
+
+**`addon_use` is not, deliberately.** Expressing it declaratively needs four
+capabilities no other constructor uses: a cross-parameter XOR constraint, a
+*branching* target (a different `AddonRef` variant depending on which argument
+was passed), a derived string field (`addons.mvm.io/{name}`), and
+default-if-absent. Building a mini-language for one function is the
+over-abstraction the project guidelines warn against, so it stays hand-written
+in each language — but pinned by the s27 golden IR document, which is the
+standard WS-1 set: a copy is dangerous when nothing checks it, and this one is
+checked.
+
+**Rust does not have the XOR at all.** `addon_use_registry` and
+`addon_use_local` are two functions, so "both or neither" cannot be written.
+That is the WS-1 thesis appearing a third time: the dynamic surfaces need a
+runtime check precisely where Rust makes the state unrepresentable.
+
+#### Two defects the new coverage found
+
+**A regression WS-3 introduced and 212 tests missed.** Deleting the
+hand-written `node_deps` also removed the module-level `_UNRESOLVED_SHA256`
+that followed it, leaving `addon_use` raising `NameError`. The whole Python
+suite still passed, because **nothing in it called `addon_use`**. The
+cross-language golden fixture caught it. `tests/test_ctors.py` now covers both
+Tier B constructors and spot-checks Tier A, and was confirmed to fail without
+the fix — a Python break should fail the Python suite, not only the BDD layer.
+
+**An accidental public-API widening.** The first `_addon.ts` exported
+`UNRESOLVED_SHA256`, where Python's is `_`-prefixed and private. The
+surface-divergence gate reported a new TypeScript-only name; it is now
+module-private, matching its twin.
+
+Divergence: `python_only_absent_from_typescript` drops 19 → 17. Everything
+remaining is Tier C machinery, its error taxonomy, or Tier F's `derive_schema`.
 
 ### WS-5 — Tier D: error taxonomy from a Rust registry
 

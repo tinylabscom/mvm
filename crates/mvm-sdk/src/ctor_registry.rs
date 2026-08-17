@@ -41,6 +41,10 @@ pub enum Literal {
     Int(i64),
     /// String literal.
     Str(&'static str),
+    /// The absent value — Python `None`, TypeScript `undefined`. A
+    /// parameter defaulting to this is optional, and each emitter widens
+    /// its type accordingly.
+    Null,
 }
 
 /// A runtime check the dynamic SDKs must perform. Rust discharges each
@@ -367,6 +371,77 @@ pub const REGISTRY: &[Ctor] = &[
         ],
         surfaces: ALL,
     },
+    Ctor {
+        name: "warm_process",
+        doc: "Opt a function entrypoint into the warm-process tier: the wrapper stays \
+              alive across calls, so per-call latency drops to the dispatch cost but \
+              cross-call state becomes the caller's problem.",
+        params: &[
+            Param {
+                name: "max_calls_per_worker",
+                ty: ParamType::Int,
+                default: None,
+                kw_only: true,
+                constraints: &[],
+            },
+            Param {
+                name: "max_rss_mb",
+                ty: ParamType::Int,
+                default: None,
+                kw_only: true,
+                constraints: &[],
+            },
+            Param {
+                name: "pool_size",
+                ty: ParamType::Int,
+                default: Some(Literal::Int(1)),
+                kw_only: true,
+                constraints: &[],
+            },
+            Param {
+                name: "in_process",
+                ty: ParamType::Str,
+                default: Some(Literal::Str("serial")),
+                kw_only: true,
+                // Rust takes `InProcessMode`, so this check cannot exist
+                // there and cannot be recovered from it — the WS-1 finding
+                // in miniature.
+                constraints: &[Constraint::EnumMember {
+                    canonical: &["serial", "concurrent"],
+                    aliases: &[],
+                    message: "warm_process in_process must be 'serial' or 'concurrent', got {value}",
+                }],
+            },
+            Param {
+                name: "max_queue_depth",
+                ty: ParamType::Int,
+                default: Some(Literal::Null),
+                kw_only: true,
+                constraints: &[],
+            },
+        ],
+        target: Target::Variant {
+            union: "Concurrency",
+            discriminant: "warm_process",
+        },
+        fields: &[
+            (
+                "max_calls_per_worker",
+                FieldValue::Param("max_calls_per_worker"),
+            ),
+            ("max_rss_mb", FieldValue::Param("max_rss_mb")),
+            ("pool_size", FieldValue::Param("pool_size")),
+            (
+                "in_process",
+                FieldValue::ParamEnum {
+                    param: "in_process",
+                    enum_type: "InProcessMode",
+                },
+            ),
+            ("max_queue_depth", FieldValue::Param("max_queue_depth")),
+        ],
+        surfaces: ALL,
+    },
 ];
 
 /// The registry rows `surface` carries, in declaration order.
@@ -487,6 +562,24 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn tier_b_warm_process_is_present() {
+        // `addon_use` is deliberately absent — see the module note on
+        // what the declarative vocabulary does and does not cover.
+        assert!(REGISTRY.iter().any(|c| c.name == "warm_process"));
+    }
+
+    #[test]
+    fn a_null_default_marks_an_optional_parameter() {
+        let warm = REGISTRY.iter().find(|c| c.name == "warm_process").unwrap();
+        let depth = warm
+            .params
+            .iter()
+            .find(|p| p.name == "max_queue_depth")
+            .unwrap();
+        assert!(matches!(depth.default, Some(Literal::Null)));
     }
 
     #[test]

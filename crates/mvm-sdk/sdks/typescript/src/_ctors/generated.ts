@@ -4,7 +4,7 @@
  * DO NOT EDIT BY HAND — `cargo xtask check-stubs` fails on drift.
  */
 
-import type { Dependencies, HostPort, NetworkDns, NetworkEgress } from "../ir/workload.js";
+import type { Concurrency, Dependencies, HostPort, NetworkDns, NetworkEgress } from "../ir/workload.js";
 
 function _repr(value: string): string {
   return "'" + value.replace(/\\/g, "\\\\").replace(/'/g, "\\'") + "'";
@@ -83,4 +83,17 @@ export function node_deps(lockfile: string, tool: string = "pnpm"): Dependencies
     throw new Error(`node_deps tool must be 'pnpm' / 'npm' / 'yarn', got ${_repr(tool)}`);
   }
   return { kind: "node", lockfile, tool: canonical } as Dependencies;
+}
+
+/**
+ * Opt a function entrypoint into the warm-process tier: the wrapper
+ * stays alive across calls, so per-call latency drops to the
+ * dispatch cost but cross-call state becomes the caller's problem.
+ */
+export function warm_process(max_calls_per_worker: number, max_rss_mb: number, pool_size: number = 1, in_process: string = "serial", max_queue_depth?: number): Concurrency {
+  const canonical = in_process;
+  if (!["serial", "concurrent"].includes(canonical)) {
+    throw new Error(`warm_process in_process must be 'serial' or 'concurrent', got ${_repr(in_process)}`);
+  }
+  return { kind: "warm_process", max_calls_per_worker, max_rss_mb, pool_size, in_process: canonical, max_queue_depth } as Concurrency;
 }

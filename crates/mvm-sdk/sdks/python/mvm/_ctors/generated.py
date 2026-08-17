@@ -17,7 +17,10 @@ def _variant(union_alias: Any, discriminant: str) -> Any:
     ``KindN`` enums whenever the schema changes, so neither number can be
     written down. Resolving by discriminant is stable across regeneration.
     """
-    for member in typing.get_args(union_alias):
+    # A single-variant union collapses to the bare class — `Union[X]`
+    # is `X` — so fall back to the alias itself rather than iterating
+    # an empty tuple and reporting the variant as missing.
+    for member in typing.get_args(union_alias) or (union_alias,):
         try:
             kind_type = typing.get_type_hints(member).get("kind")
         except Exception:  # pragma: no cover - defensive
@@ -36,7 +39,7 @@ def _variant(union_alias: Any, discriminant: str) -> Any:
 
 def _enum_member(union_alias: Any, value: str) -> Any:
     """Construct the member of a closed-enum union that accepts ``value``."""
-    for member in typing.get_args(union_alias):
+    for member in typing.get_args(union_alias) or (union_alias,):
         try:
             return member(value)
         except (ValueError, KeyError):
@@ -137,6 +140,25 @@ def node_deps(*, lockfile: str, tool: str = "pnpm") -> _ir.Dependencies:
     )
 
 
+def warm_process(*, max_calls_per_worker: int, max_rss_mb: int, pool_size: int = 1, in_process: str = "serial", max_queue_depth: int | None = None) -> _ir.Concurrency:
+    """Opt a function entrypoint into the warm-process tier: the wrapper
+    stays alive across calls, so per-call latency drops to the
+    dispatch cost but cross-call state becomes the caller's problem.
+    """
+    canonical = in_process
+    if canonical not in ("serial", "concurrent"):
+        raise ValueError(f"warm_process in_process must be 'serial' or 'concurrent', got {in_process!r}")
+    _cls = _variant(_ir.Concurrency, "warm_process")
+    return _cls(
+        kind=typing.get_type_hints(_cls)["kind"]("warm_process"),
+        max_calls_per_worker=max_calls_per_worker,
+        max_rss_mb=max_rss_mb,
+        pool_size=pool_size,
+        in_process=_enum_member(_ir.InProcessMode, canonical),
+        max_queue_depth=max_queue_depth,
+    )
+
+
 __all__ = [
     "host_port",
     "egress",
@@ -146,4 +168,5 @@ __all__ = [
     "no_deps",
     "python_deps",
     "node_deps",
+    "warm_process",
 ]
