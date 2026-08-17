@@ -415,17 +415,107 @@ declaratively rather than extract it.
 
 ### WS-3 — Tier A: generate the constructors, delete the Python copies
 
-- [ ] 3.1 Generate all 8 into TypeScript
-- [ ] 3.2 Replace the Python hand-copies with generated code
-- [ ] 3.3 Prove byte-compatibility: the existing Python suite passes unchanged
-- [ ] 3.4 Extend the s27 BDD fixtures to exercise each constructor in both
+- [x] 3.1 Generate all 8 into TypeScript
+- [x] 3.2 Replace the Python hand-copies with generated code
+- [x] 3.3 Prove byte-compatibility: the existing Python suite passes unchanged
+- [x] 3.4 Extend the s27 BDD fixtures to exercise each constructor in both
       languages against one golden IR document
+
+#### Result — the WS-1 decision holds
+
+`crates/mvm-sdk/src/ctor_registry.rs` declares all eight constructors
+declaratively: parameters with types and defaults, **constraints**, and what
+each builds. `emit_sdk_ctors` serialises it; `xtask/src/gen_sdk_surface.rs`
+renders `mvm/_ctors/generated.py` and `src/_ctors/generated.ts`. The eight
+Python hand-copies are deleted and `_dsl` re-exports the generated ones.
+
+The constraint vocabulary needed to cover Tier A turned out to be **three**
+cases — `NonEmpty`, `IntExclusiveRange`, `EnumMember` (with aliases) — which is
+small enough to be worth the machinery and large enough that no parser could
+have inferred it.
+
+**Generation removed a fragility rather than just relocating code.** The
+hand-written Python named the numbered variant class directly (`_ir.NetworkDns3`,
+`_ir.Dependencies1`), and `datamodel-codegen` renumbers those classes — *and*
+their `KindN` enums — whenever the schema changes. The generated code resolves
+the variant by discriminant instead, so neither number is written down anywhere.
+That is a class of breakage the hand-written surface carried and the generated
+one cannot.
+
+**Constraint messages are stored verbatim, not derived.** The two enum messages
+disagree in shape — `'uv' or 'pip-tools'` versus `'pnpm' / 'npm' / 'yarn'` — and
+inventing a rule that produces both would be fiction. Storing them keeps the
+generated Python byte-identical and makes the inconsistency visible.
+
+**`kw_only` is Python-only**, recorded the way `ErrorBase::Warning` is:
+TypeScript has no keyword-only parameters, so its emitter renders those
+positionally rather than dropping the fact silently.
+
+#### Evidence
+
+Byte-compatibility was checked *differentially*, not by inference: a harness
+called each hand-written constructor and its generated twin over 26 cases —
+every valid path, both alias spellings, and every refusal — comparing the
+constructed value structurally and the exception type and message verbatim.
+**Zero differences.** The Python suite then passed unchanged (212 passed, no
+test edits) with the hand-copies actually removed.
+
+3.4 is the golden-IR behavioural gate the WS-1 decision asked for, now real: one
+`ctor_golden.json`, both languages, built values *and* refusal messages. It
+earned its keep immediately — it caught that Python's `{tool!r}` renders
+`'poetry'` where the first TypeScript emitter used `JSON.stringify` and rendered
+`"poetry"`. Python is the reference, so the emitter now renders a repr-alike and
+the two languages agree byte-for-byte.
+
+Divergence: `python_only_absent_from_typescript` drops from 27 names to 19.
+What remains is Tier C's machinery and the names that cannot be generated.
 
 ### WS-4 — Tier B: complete the Rust surface first
 
-- [ ] 4.1 `addon_use` and `warm_process` added to `mvm_sdk::ctor`
-- [ ] 4.2 Generated into both languages
-- [ ] 4.3 Python hand-copies deleted
+- [x] 4.1 `addon_use` and `warm_process` added to `mvm_sdk::ctor`
+- [x] 4.2 Generated into both languages — `warm_process` generated;
+      `addon_use` hand-written in both, see below
+- [x] 4.3 Python hand-copies deleted — `warm_process` only, for the same reason
+
+#### Result — one of the two generates, and the split is the finding
+
+**`warm_process` is generated.** It needed one registry extension, a nullable
+default (`max_queue_depth`), and otherwise fits the existing vocabulary.
+Verified differentially against the hand-written twin over six cases before the
+hand-copy was deleted.
+
+**`addon_use` is not, deliberately.** Expressing it declaratively needs four
+capabilities no other constructor uses: a cross-parameter XOR constraint, a
+*branching* target (a different `AddonRef` variant depending on which argument
+was passed), a derived string field (`addons.mvm.io/{name}`), and
+default-if-absent. Building a mini-language for one function is the
+over-abstraction the project guidelines warn against, so it stays hand-written
+in each language — but pinned by the s27 golden IR document, which is the
+standard WS-1 set: a copy is dangerous when nothing checks it, and this one is
+checked.
+
+**Rust does not have the XOR at all.** `addon_use_registry` and
+`addon_use_local` are two functions, so "both or neither" cannot be written.
+That is the WS-1 thesis appearing a third time: the dynamic surfaces need a
+runtime check precisely where Rust makes the state unrepresentable.
+
+#### Two defects the new coverage found
+
+**A regression WS-3 introduced and 212 tests missed.** Deleting the
+hand-written `node_deps` also removed the module-level `_UNRESOLVED_SHA256`
+that followed it, leaving `addon_use` raising `NameError`. The whole Python
+suite still passed, because **nothing in it called `addon_use`**. The
+cross-language golden fixture caught it. `tests/test_ctors.py` now covers both
+Tier B constructors and spot-checks Tier A, and was confirmed to fail without
+the fix — a Python break should fail the Python suite, not only the BDD layer.
+
+**An accidental public-API widening.** The first `_addon.ts` exported
+`UNRESOLVED_SHA256`, where Python's is `_`-prefixed and private. The
+surface-divergence gate reported a new TypeScript-only name; it is now
+module-private, matching its twin.
+
+Divergence: `python_only_absent_from_typescript` drops 19 → 17. Everything
+remaining is Tier C machinery, its error taxonomy, or Tier F's `derive_schema`.
 
 ### WS-5 — Tier D: error taxonomy from a Rust registry
 
