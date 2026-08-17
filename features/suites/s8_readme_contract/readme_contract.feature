@@ -21,6 +21,19 @@ Feature: README CLI contract
     And the help output lists the "kernel" verb
     And the help output lists the "doctor" verb
     And the help output lists the "bootstrap" verb
+    And the help output lists the "run" verb
+
+  Scenario: the subsystems the reference documents are discoverable from --help
+    # Each of these was documented in the CLI reference while `hide = true`, so
+    # the tool could not tell you the subsystem had a CLI at all. `secret` is the
+    # entry point to host-side credential substitution and `trust` owns
+    # `trust receipt verify`.
+    When I run mvmctl with "--help"
+    Then the command exits with code 0
+    And the help output lists the "secret" verb
+    And the help output lists the "trust" verb
+    And the help output lists the "image" verb
+    And the help output lists the "cache" verb
 
   Scenario: the SDK transport survives `run` becoming a listed verb
     # `run` is no longer hidden and its summary now describes the transient-run
