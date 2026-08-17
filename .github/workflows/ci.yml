@@ -348,6 +348,9 @@ jobs:
       - name: mvm-cli drives machines through the mvm-client facade
         run: cargo run -p xtask -- check-cli-runtime-surface
 
+      - name: "`mvmctl --help` and the CLI reference describe one surface"
+        run: cargo run -p xtask -- check-cli-help-matches-docs
+
       - name: repr(C) types carry a layout contract (check-abi-layout)
         run: cargo run -p xtask -- check-abi-layout
 

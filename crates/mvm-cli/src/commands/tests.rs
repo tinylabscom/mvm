@@ -389,18 +389,25 @@ fn machine_run_option_summaries_stay_short() {
 }
 
 #[test]
-fn internal_subprocess_commands_are_hidden_from_help() {
-    // Subprocess/internal commands must not clutter the user-facing
-    // surface. They stay dispatchable but `hide = true`.
+fn dev_tooling_and_internal_transports_are_hidden_from_help() {
+    // Two of the three visibility buckets. Dev tooling is a real command a
+    // user is not expected to reach for; an internal transport is subprocess
+    // plumbing, `__`-prefixed so it cannot be typed by accident. Both stay
+    // dispatchable but `hide = true`. The third bucket — everything a user is
+    // expected to invoke — is asserted by
+    // `top_level_help_shows_user_facing_groups_and_hides_dev_tooling`.
     let visible: Vec<String> = cli_command()
         .get_subcommands()
         .filter(|cmd| !cmd.is_hide_set())
         .map(|cmd| cmd.get_name().to_string())
         .collect();
     for hidden in [
-        "shell-init",
         "reconcile",
+        "storage",
+        "seccomp-audit",
+        "dashboard",
         "persistent-builder",
+        "__sdk-no-vm",
         "__builder-vm-bootstrap",
         "__builder-egress-supervisor",
         "__builder-shell-job",
@@ -1081,23 +1088,22 @@ fn up_removed() {
 }
 
 #[test]
-fn run_kept_hidden_as_sdk_transport() {
-    // The user-facing transient-run role folded into `machine run`, but `run`
-    // survives hidden as the SDK Sandbox launcher (`run --mode live/plan`) the
-    // Python/TS SDKs shell to — so it must still parse.
+fn run_is_visible_and_still_carries_the_sdk_transport() {
+    // `run` is the one-shot flagship and appears in `--help`. It had been
+    // hidden while the published CLI reference documented it as the flagship,
+    // so a user could not discover from the tool the command the docs told
+    // them to type.
     let cli = Cli::try_parse_from(["mvmctl", "run", "--mode", "live", "script.py"]).unwrap();
     assert!(matches!(cli.command, Commands::Run(_)));
-    // …but it is hidden from top-level help.
-    let help = {
-        use clap::CommandFactory;
-        let mut cmd = Cli::command();
-        let mut buf = Vec::new();
-        cmd.write_long_help(&mut buf).unwrap();
-        String::from_utf8(buf).unwrap()
-    };
+
+    let visible: Vec<String> = cli_command()
+        .get_subcommands()
+        .filter(|cmd| !cmd.is_hide_set())
+        .map(|cmd| cmd.get_name().to_string())
+        .collect();
     assert!(
-        !help.contains("\n  run "),
-        "`run` must be hidden from top-level help"
+        visible.iter().any(|n| n == "run"),
+        "`run` must be visible in top-level help; visible = {visible:?}"
     );
 }
 
@@ -1868,8 +1874,9 @@ fn test_parse_port_spec_invalid() {
 // `completions`, and `security` were dropped — `ls`/`validate`/
 // `catalog`/`doctor` cover the cleaned surface. `up` and `invoke` were
 // consolidated into `machine run` (argv lifecycle + `--entrypoint` action);
-// `up_removed`/`invoke_removed` pin they no longer parse. `run` survives
-// hidden as the SDK Sandbox transport (`run_kept_hidden_as_sdk_transport`).
+// `up_removed`/`invoke_removed` pin they no longer parse. `run` is a visible
+// top-level verb and also carries the SDK Sandbox transport
+// (`run_is_visible_and_still_carries_the_sdk_transport`).
 // -------------------------------------------------------------------------
 
 /// Listing is `machine ls` alone. A top-level `ls` (and the `ps` it once
@@ -4740,27 +4747,56 @@ fn internal_helper_commands_short_circuit_before_startup_side_effects() {
 // --- Top-level help surface tests ---
 
 #[test]
-fn top_level_help_hides_infra() {
-    let help = cli_command().render_help().to_string();
-    // Daily-driver commands must appear.
-    assert!(
-        help.contains("machine"),
-        "machine must appear in top-level help"
-    );
-    assert!(
-        help.contains("build"),
-        "build must appear in top-level help"
-    );
-    assert!(help.contains("init"), "init must appear in top-level help");
-    assert!(
-        help.contains("doctor"),
-        "doctor must appear in top-level help"
-    );
-    // Infrastructure commands must NOT appear in the default help.
-    for hidden in &[
-        "pool", "cache", "storage", "manifest", "catalog", "image", "bundle", "trust", "deps",
-        "artifact", "secret", "network", "ops", "env",
+fn top_level_help_shows_user_facing_groups_and_hides_dev_tooling() {
+    let visible: Vec<String> = cli_command()
+        .get_subcommands()
+        .filter(|cmd| !cmd.is_hide_set())
+        .map(|cmd| cmd.get_name().to_string())
+        .collect();
+
+    // Anything a user is expected to invoke. `secret` owns the entry point to
+    // host-side credential substitution and `trust` owns `trust receipt
+    // verify`; both were hidden while the CLI reference documented them, which
+    // meant the tool could not tell you those subsystems had a CLI at all.
+    for shown in &[
+        "machine",
+        "run",
+        "build",
+        "kernel",
+        "deploy",
+        "generate",
+        "template",
+        "init",
+        "doctor",
+        "bootstrap",
+        "explain",
+        "prepare",
+        "watch",
+        "pack",
+        "env",
+        "manifest",
+        "image",
+        "catalog",
+        "cache",
+        "network",
+        "pool",
+        "secret",
+        "trust",
+        "bundle",
+        "artifact",
+        "deps",
+        "ops",
+        "shell-init",
     ] {
+        assert!(
+            visible.iter().any(|n| n == shown),
+            "user-facing command `{shown}` must appear in top-level help; visible = {visible:?}"
+        );
+    }
+
+    let help = cli_command().render_help().to_string();
+    // Dev tooling stays out of the way. It still works when typed.
+    for hidden in &["storage", "reconcile", "seccomp-audit", "dashboard"] {
         // Commands are listed one per line; a hidden command's name should
         // not appear as a standalone word at the start of a help line.
         let visible_as_subcommand = help.lines().any(|line| {
@@ -4770,7 +4806,7 @@ fn top_level_help_hides_infra() {
         });
         assert!(
             !visible_as_subcommand,
-            "infra command `{hidden}` must be hidden from top-level help but was found"
+            "dev-tooling command `{hidden}` must be hidden from top-level help but was found"
         );
     }
 }

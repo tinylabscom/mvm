@@ -21,14 +21,28 @@ Feature: README CLI contract
     And the help output lists the "kernel" verb
     And the help output lists the "doctor" verb
     And the help output lists the "bootstrap" verb
+    And the help output lists the "run" verb
 
-  Scenario: the SDK-transport `run` verb resolves even though it is hidden
-    # `run --mode live/plan` is documented in the SDK section but hidden from the
-    # top-level verb list, so it is checked by resolving its own help.
+  Scenario: the subsystems the reference documents are discoverable from --help
+    # Each of these was documented in the CLI reference while `hide = true`, so
+    # the tool could not tell you the subsystem had a CLI at all. `secret` is the
+    # entry point to host-side credential substitution and `trust` owns
+    # `trust receipt verify`.
+    When I run mvmctl with "--help"
+    Then the command exits with code 0
+    And the help output lists the "secret" verb
+    And the help output lists the "trust" verb
+    And the help output lists the "image" verb
+    And the help output lists the "cache" verb
+
+  Scenario: the SDK transport survives `run` becoming a listed verb
+    # `run` is no longer hidden and its summary now describes the transient-run
+    # verb a user sees. What this scenario protects is the transport underneath:
+    # the Python and TS SDKs shell to `run --mode live/plan`, so the flag and
+    # its meaning must survive any rewording of the verb itself.
     When I run mvmctl with "run --help"
     Then the command exits with code 0
     And the help output contains "--mode"
-    And the help output contains "run --mode live/plan"
     And the help output contains "SDK transport mode"
 
   Scenario: `trust audit verify` is a real command

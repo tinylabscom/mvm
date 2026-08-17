@@ -1095,6 +1095,16 @@ for detailed scope and acceptance criteria.
         to sign real audit entries.
   - [ ] Does **not** retire `web/audit-verify/` (no Merkle inclusion) — B5 and
         `mvmctl audit pubkey` remain plan 301's
+- [ ] Run-first CLI ergonomics
+      (`specs/plans/329-run-first-cli-and-upstream-adoption.md` — note three
+      plans share the number 329; refer to this one by path) — Phase A landed:
+      ADR-027 amended so `run` is a first-class visible verb, the fifteen
+      user-facing verb groups promoted out of `hide = true`, twelve missing
+      reference rows written, and `xtask check-cli-help-matches-docs` added to
+      the Lint job so `mvmctl --help` and the published CLI reference cannot
+      drift apart again. Phase 5 (snapshot/fork DX) was already complete.
+      Phases 1–4 and 6–8 remain: consolidating the two run-argument structs is
+      next and blocks the rest.
 - [ ] Plan 329 — Browser-tier microVM demo (`specs/plans/329-browser-wasm-backend-demo.md`)
       — in progress on `feat/329-browser-wasm-backend`. Extends Plan 320 with a
       `wasm32-wasip1` guest that boots, provides a shell, and delegates `fetch`
