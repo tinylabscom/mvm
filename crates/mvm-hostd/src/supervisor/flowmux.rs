@@ -9,6 +9,8 @@
 
 mod http_flow;
 pub mod registry;
+mod tcp_relay;
+use tcp_relay::{TcpRelayParams, connect_first_admitted, run_tcp_relay};
 mod udp_relay;
 
 use std::collections::BTreeMap;
@@ -19,7 +21,7 @@ use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, Ordering},
 };
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use mvm_contract::protocol::dns::{MAX_DNS_MESSAGE, decode_query, encode_response};
@@ -31,7 +33,7 @@ use mvm_core::net::session::Session;
 use mvm_vmm::vsock_egress_bridge::egress_gate::{DnsVerdict, EgressGate, EgressVerdict};
 use tracing::{info, warn};
 
-use self::registry::{RegistryError, RegistryLimits, StreamRegistry, class_for_open};
+use self::registry::{RegistryLimits, StreamRegistry, class_for_open};
 use self::udp_relay::{
     UdpAssociationHandle, UdpRelayParams, UdpSendMsg, decode_udp_addr, run_udp_relay,
 };
@@ -1345,44 +1347,6 @@ fn lock_registry(registry: &Mutex<StreamRegistry>) -> std::sync::MutexGuard<'_, 
     registry.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// How often the wait re-checks. The relay thread is blocked either way, so
-/// this trades a little latency for not needing a condvar in the registry.
-const HOST_CREDIT_POLL: Duration = Duration::from_millis(2);
-
-/// Reserve `len` bytes of host credit on `stream_id`, waiting for the guest to
-/// replenish if the window is currently full.
-///
-/// An exhausted window is **backpressure, not an error**. The guest returns
-/// credit as it consumes, so a full window means "slow down" — resetting the
-/// stream instead truncates a transfer that was working, which surfaces to the
-/// caller as a corrupt download rather than as flow control. Only two things
-/// end the wait: the stream going away, or a peer that has stopped reading for
-/// `wait`, which comes from `RegistryLimits::credit_wait`.
-fn await_host_credit(
-    registry: &Mutex<StreamRegistry>,
-    stream_id: u32,
-    len: u32,
-    retired: &AtomicBool,
-    wait: Duration,
-) -> Result<(), RegistryError> {
-    let deadline = Instant::now() + wait;
-    loop {
-        let err = match lock_registry(registry).consume_host_credit(stream_id, len) {
-            Ok(()) => return Ok(()),
-            Err(e) => e,
-        };
-        // `NotLive` means the stream is gone — waiting cannot fix that, and
-        // only `IllegalState` is the window-full case worth retrying.
-        if !matches!(err, RegistryError::IllegalState { .. })
-            || retired.load(Ordering::Relaxed)
-            || Instant::now() >= deadline
-        {
-            return Err(err);
-        }
-        std::thread::sleep(HOST_CREDIT_POLL);
-    }
-}
-
 /// Serialize and send one encrypted frame through a shared writer.
 ///
 /// Locks the session first, then the writer, so sequence numbers are assigned
@@ -1417,131 +1381,7 @@ fn write_frame_to(
     Ok(())
 }
 
-/// Try each admitted address in order, first success wins, bounded overall by
-/// `overall_timeout` and per-address by [`PER_IP_CONNECT_TIMEOUT`]. This is
-/// the happy-eyeballs fallover used by the raw egress path, expressed
-/// synchronously because the FlowMux session runs in `spawn_blocking`.
-fn connect_first_admitted(
-    ips: &[IpAddr],
-    port: u16,
-    overall_timeout: Duration,
-) -> Option<TcpStream> {
-    let deadline = std::time::Instant::now() + overall_timeout;
-    for ip in ips {
-        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-        if remaining.is_zero() {
-            break;
-        }
-        let budget = remaining.min(PER_IP_CONNECT_TIMEOUT);
-        match TcpStream::connect_timeout(&std::net::SocketAddr::new(*ip, port), budget) {
-            Ok(stream) => return Some(stream),
-            Err(e) => warn!(%ip, %port, error = %e, "FlowMux TCP connect attempt failed"),
-        }
-    }
-    None
-}
-
-/// Per-stream relay thread: read from the upstream TCP socket and forward
-/// each chunk to the guest as a `Data` frame. EOF becomes a `HalfClose`;
-/// errors become a `Reset`.
-/// Parameters for the per-stream TCP relay thread.
-struct TcpRelayParams {
-    stream_id: u32,
-    upstream: TcpStream,
-    session: Arc<Mutex<Session>>,
-    writer: Arc<Mutex<UnixStream>>,
-    registry: Arc<Mutex<StreamRegistry>>,
-    validator: Arc<Mutex<SessionValidator>>,
-    host_half_closed: Arc<AtomicBool>,
-    retired: Arc<AtomicBool>,
-    /// How long to wait for the guest to return credit before giving up.
-    credit_wait: Duration,
-}
-
-fn run_tcp_relay(params: TcpRelayParams) {
-    let TcpRelayParams {
-        stream_id,
-        mut upstream,
-        session,
-        writer,
-        registry,
-        validator,
-        host_half_closed,
-        retired,
-        credit_wait,
-    } = params;
-    let mut buf = [0u8; 16 * 1024];
-    loop {
-        match upstream.read(&mut buf) {
-            Ok(0) => {
-                host_half_closed.store(true, Ordering::Relaxed);
-                if !retired.load(Ordering::Relaxed)
-                    && write_frame_to(&session, &writer, Opcode::HalfClose, stream_id, &[]).is_err()
-                {
-                    warn!(stream_id, "FlowMux relay failed to send HalfClose");
-                }
-                break;
-            }
-            Ok(n) => {
-                if let Err(e) =
-                    await_host_credit(&registry, stream_id, n as u32, &retired, credit_wait)
-                {
-                    warn!(stream_id, error = %e, "FlowMux host credit exhausted");
-                    let _ = write_frame_to(
-                        &session,
-                        &writer,
-                        Opcode::Reset,
-                        stream_id,
-                        b"host credit exhausted",
-                    );
-                    host_half_closed.store(true, Ordering::Relaxed);
-                    break;
-                }
-                // Spend the window on this side's validator too. It is
-                // credited by every guest `WindowUpdate` it admits, so a send
-                // that never debits it leaves the counter climbing until a
-                // legitimate grant overflows the cap and the session goes
-                // away — a few megabytes in, which is why only a large
-                // transfer finds it.
-                if let Err(e) = lock_validator(&validator).admit(
-                    &mvm_contract::protocol::network_flow::FrameFacts::new(
-                        Direction::HostToGuest,
-                        Opcode::Data,
-                        stream_id,
-                    )
-                    .with_payload(n as u32),
-                ) {
-                    warn!(stream_id, error = %e, "FlowMux relay data refused by validator");
-                    break;
-                }
-                if write_frame_to(&session, &writer, Opcode::Data, stream_id, &buf[..n]).is_err() {
-                    warn!(stream_id, "FlowMux relay failed to send Data");
-                    break;
-                }
-            }
-            Err(e) => {
-                warn!(stream_id, error = %e, "FlowMux upstream read failed");
-                if !retired.load(Ordering::Relaxed) {
-                    let reason = format!("upstream error: {e}");
-                    let _ = write_frame_to(
-                        &session,
-                        &writer,
-                        Opcode::Reset,
-                        stream_id,
-                        reason.as_bytes(),
-                    );
-                }
-                host_half_closed.store(true, Ordering::Relaxed);
-                break;
-            }
-        }
-    }
-    // The stream remains in the registry until the main thread observes the
-    // half-close/reset and retires it, so we do not race with in-flight guest
-    // frames here.
-    let _ = registry;
-}
-
+/// Split `host:port`, rejecting an empty host or an unparseable port.
 fn parse_host_port(target: &str) -> Result<(&str, u16), String> {
     let (host, port_str) = target
         .rsplit_once(':')
