@@ -17,7 +17,6 @@ use std::time::{Duration, Instant};
 /// (was `MAX_EXEC_OUTPUT` in the agent bin).
 pub const MAX_EXEC_OUTPUT: usize = 1024 * 1024;
 const DRAIN_BUF: usize = 4096;
-const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 fn spawn_drain<R: Read + Send + 'static>(
     mut reader: R,
@@ -143,10 +142,18 @@ pub fn stream_exec<F: FnMut(ExecEvent)>(
     let mut sent_out = 0usize;
     let mut sent_err = 0usize;
     let deadline = timeout_secs.map(|s| Instant::now() + Duration::from_secs(s));
+    // Consecutive polls that found neither output nor an exit. Reset on any
+    // progress so a chatty command keeps draining at the fast end of the
+    // backoff instead of decaying to the ceiling and staying there.
+    let mut idle_polls = 0u32;
 
     loop {
+        let before = (sent_out, sent_err);
         let capped = drain_into(&out_buf, &mut sent_out, true, &mut emit)
             | drain_into(&err_buf, &mut sent_err, false, &mut emit);
+        if (sent_out, sent_err) != before {
+            idle_polls = 0;
+        }
         if capped {
             kill_pgroup(&child);
             let _ = crate::child_wait::wait(&mut child);
@@ -188,7 +195,21 @@ pub fn stream_exec<F: FnMut(ExecEvent)>(
                     code: status.code().unwrap_or(-1),
                 };
             }
-            Ok(None) => std::thread::sleep(POLL_INTERVAL),
+            Ok(None) => {
+                // Backoff, not a flat tick. `/bin/true` has not been reaped by
+                // the time the first `try_wait` runs, so a fixed interval here
+                // was a floor under *every* exec: the second check found the
+                // child already gone, having waited the whole gap to look. It
+                // put 50ms on a command that takes microseconds.
+                //
+                // The same shared backoff the readiness and pid-exit waits
+                // use, so a quick command is noticed in ~1ms while a long one
+                // still settles to a ceiling rather than spinning. The ceiling
+                // is also what bounds output-streaming latency, since this
+                // loop drains stdout/stderr on each pass.
+                std::thread::sleep(mvm_core::poll_backoff::poll_delay(idle_polls));
+                idle_polls = idle_polls.saturating_add(1);
+            }
             Err(e) => {
                 emit(ExecEvent::Stderr {
                     chunk: format!("wait failed: {e}").into_bytes(),
