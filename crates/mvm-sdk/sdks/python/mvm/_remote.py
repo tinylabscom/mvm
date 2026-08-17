@@ -48,6 +48,19 @@ import warnings
 from typing import Any, Awaitable, Callable
 
 from mvm._cli import resolve_cli_bin
+# The error taxonomy is owned by the Rust registry
+# (crates/mvm-sdk/src/error_taxonomy.rs) and generated into
+# `_errors/types.py`. Re-exported here for existing importers.
+from mvm._errors.types import (  # noqa: F401
+    EmittingContextError,
+    MsgpackUnavailable,
+    MvmTransportError,
+    NoVmIntrospectionError,
+    PayloadTooLarge,
+    RemoteError,
+    SecretInArgError,
+    SecretInArgWarning,
+)
 
 # Mirror of the IR-side `is_valid_id` rule. Defense-in-depth: even if a
 # caller bypassed the host validator (constructed IR by hand, etc.), the
@@ -138,14 +151,6 @@ EMITTING_ENV_VAR = "MVM_EMITTING"
 NO_VM_ENV_VAR = "MVM_NO_VM"
 
 
-class EmittingContextError(RuntimeError):
-    """Raised when a Layer-3 SDK call fires inside an `mvm emit`
-    subprocess. ADR-0010 prohibits host-side runtime interaction with
-    the VM during build/emit; a misconfigured entry module that calls
-    `.remote(...)` at import time will trigger this. Production code
-    must not import the runtime SDK's transport surface at all; this
-    guard is a build-time backstop, not a production-mode gate."""
-
 
 def _check_emitting_context(call_site: str) -> None:
     if os.environ.get(EMITTING_ENV_VAR) == "1":
@@ -158,61 +163,11 @@ def _check_emitting_context(call_site: str) -> None:
         )
 
 
-class SecretInArgWarning(UserWarning):
-    """Heuristic flagged a secret-shaped value passed to ``f.remote(...)``.
-
-    Function args flow through ``mvmctl invoke`` argv → VM stdin →
-    application memory. Secrets should use the secrets subsystem
-    (``/run/mvm-secrets/<svc>/`` per ADR-0009), not be passed as
-    ordinary args. This warning is the heuristic catch; a future
-    schema-bound check (plan-0009) will replace it with a hard
-    validation gate at the IR level.
-    """
 
 
-class SecretInArgError(RuntimeError):
-    """Strict-mode counterpart to :class:`SecretInArgWarning`.
-
-    Raised instead of warning when ``MVM_STRICT_SECRETS=1``.
-    """
 
 
-class RemoteError(Exception):
-    """User code inside the VM raised; structured envelope was parsed."""
 
-    def __init__(self, *, kind: str, error_id: str, message: str):
-        super().__init__(f"{kind}: {message} (error_id={error_id})")
-        self.kind = kind
-        self.error_id = error_id
-        self.message = message
-
-
-class MvmTransportError(RuntimeError):
-    """Couldn't reach the substrate or got an unparseable response."""
-
-
-class MsgpackUnavailable(RuntimeError):
-    """The workload declared msgpack but the SDK has no msgpack dependency.
-
-    Install ``msgpack`` (``pip install msgpack``) to use this format. JSON
-    requires no extra dependency.
-    """
-
-
-class PayloadTooLarge(MvmTransportError):
-    """Encoded request payload exceeded ``MVM_MAX_PAYLOAD_BYTES`` (W6).
-
-    Raised before the subprocess spawns — no orphan ``mvmctl`` process,
-    no partial pipe write. Default cap is 16 MiB; override via env. Hint:
-    if your function genuinely needs to receive a large blob, prefer a
-    mounted volume or the secrets subsystem over the args channel.
-    """
-
-
-class NoVmIntrospectionError(MvmTransportError):
-    """``MVM_NO_VM=1`` was set but the call has no in-process Python
-    function to introspect (e.g. cross-workload :class:`WorkloadRef`
-    dispatch). Cross-workload calls require a real VM."""
 
 
 def _no_vm_flags_for(fn: Callable[..., Any], format: str) -> list[str]:
