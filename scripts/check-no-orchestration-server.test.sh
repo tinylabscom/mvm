@@ -79,6 +79,23 @@ else
 fi
 rm -rf "$PROBE"
 
+# Without ripgrep the gate examined nothing and said so with exit 0. That is
+# the failure this suite exists to catch in general form: a check that cannot
+# run must not report success, because a green tick is read as evidence the
+# thing was looked at. Reproduced by running with a PATH that has no `rg`.
+# PATH must stay otherwise intact: emptying it removes coreutils too, and the
+# gate then fails for the wrong reason — which looks like a pass for this
+# assertion while proving nothing about ripgrep. So drop only the directory
+# ripgrep lives in.
+rg_dir=$(dirname "$(command -v rg)")
+path_without_rg=$(printf '%s' "$PATH" | tr ':' '\n' | grep -vxF "$rg_dir" | paste -sd: -)
+if PATH="$path_without_rg" bash "$GATE" >/dev/null 2>&1; then
+  echo "FAIL — the gate reports success when ripgrep is unavailable"
+  failures=$((failures + 1))
+else
+  echo "ok   — the gate refuses to pass when ripgrep is unavailable"
+fi
+
 # And the tree as it stands must pass, or the gate is red for everyone.
 if bash "$GATE" >/dev/null 2>&1; then
   echo "ok   — the working tree passes the gate"

@@ -185,8 +185,6 @@ jobs:
       - name: Release-asset verifier gate tests
         run: bash nix/packaging/release/verify-release-assets.test.sh
 
-      - name: Orchestration-server gate tests
-        run: bash scripts/check-no-orchestration-server.test.sh
 
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
@@ -263,6 +261,9 @@ jobs:
       - name: No orchestration server outside declared substrate categories
         if: needs.scope.outputs.architecture == 'true'
         run: bash scripts/check-no-orchestration-server.sh
+
+      - name: Orchestration-server gate tests
+        run: bash scripts/check-no-orchestration-server.test.sh
 
       - name: Architecture scan not required for this diff
         if: needs.scope.outputs.architecture == 'false'
