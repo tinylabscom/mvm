@@ -177,7 +177,8 @@ jobs:
           shellcheck -S warning install.sh
           shellcheck nix/packaging/release/verify-release-assets.sh \
                      nix/packaging/release/verify-release-assets.test.sh \
-                     nix/packaging/release/assert-init-shebang.sh
+                     nix/packaging/release/assert-init-shebang.sh \
+                     nix/packaging/release/assert-kernel-format.sh
 
       - name: Release-asset verifier gate tests
         run: bash nix/packaging/release/verify-release-assets.test.sh
@@ -528,6 +529,20 @@ jobs:
         run: |
           cargo nextest run -p mvm-sdk --features schema
           cargo check -p mvm-sdk --features schema --bins
+
+      # `addons` is off by default so the sealed agent's request path stays
+      # synchronous and tokio-free (`check-guest-agent-runtime-free` enforces
+      # that, so this must stay a feature rather than move into default). But
+      # the feature also gates the entire guest egress data path — `flowmux`,
+      # `flowmux_egress`, `egress_client` — which every builder VM's networking
+      # runs through. Nothing in the default lane compiles it, and a run of
+      # defects shipped inside it as a result, each one only reachable by
+      # booting a real VM. `--bins` because the loopback proxy is a `[[bin]]`
+      # and a lib-only run would not build its entrypoint.
+      - name: addons feature tests (guest egress data path)
+        run: |
+          cargo nextest run -p mvm-agentd --features addons
+          cargo check -p mvm-agentd --features addons --bins
 
       - name: Assert auto-detect still picks libkrun off Linux/HVF
         run: |

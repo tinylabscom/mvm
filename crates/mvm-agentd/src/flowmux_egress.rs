@@ -404,6 +404,7 @@ pub mod dns_stub {
     mod tests {
         use super::*;
         use ed25519_dalek::{SigningKey, VerifyingKey};
+        use mvm_contract::protocol::network_flow::hello::Handshake;
         use mvm_contract::protocol::network_flow::{Opcode, encode_into};
         use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 
@@ -478,7 +479,7 @@ pub mod dns_stub {
                     &mut host_session,
                     Opcode::HelloAck,
                     0,
-                    &[],
+                    &Handshake::local("test-host").encode(),
                 )
                 .await;
 

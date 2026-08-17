@@ -17,6 +17,7 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use ed25519_dalek::{SigningKey, VerifyingKey};
+use mvm_contract::protocol::network_flow::hello::{Handshake, agree};
 use mvm_contract::protocol::network_flow::{
     Direction, FrameError, Opcode, SessionValidator, decode, encode_into,
 };
@@ -24,6 +25,10 @@ use mvm_core::net::session::Session;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::{mpsc, oneshot, watch};
 use tracing::{info, warn};
+
+/// How this side names itself in a handshake refusal. Only ever read by a
+/// human reading the error.
+const GUEST_BUILD: &str = concat!("mvm-agentd ", env!("CARGO_PKG_VERSION"));
 
 /// Initial stream ID for guest-initiated flows. Guest IDs are odd.
 const FIRST_GUEST_STREAM_ID: u32 = 1;
@@ -144,14 +149,20 @@ enum ClientRequest {
 }
 
 /// Snapshot of session health observed by client handles.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionState {
+    /// The FlowMux handshake has not completed. No flow may be opened yet —
+    /// publishing `Ready` before the two peers have agreed is what let a
+    /// mismatched host look healthy until the first flow failed.
+    Connecting,
     /// Handshake complete and flows may be opened.
     Ready,
     /// Reconnecting after a transport failure.
     Reconnecting,
-    /// Reconnect attempts exhausted; the client is dead.
-    Dead,
+    /// The session will not come back. Carries why: for a handshake refusal
+    /// the reason names both builds, and it is the only thing that tells an
+    /// operator which of the two halves to rebuild.
+    Dead(Arc<str>),
 }
 
 /// An open request that is waiting for the host to confirm or refuse.
@@ -216,7 +227,7 @@ impl FlowMuxClient {
         let (session, _session_id, stream) = handshake?;
 
         let (client_tx, client_rx) = mpsc::unbounded_channel();
-        let (state_tx, state_rx) = watch::channel(SessionState::Ready);
+        let (state_tx, state_rx) = watch::channel(SessionState::Connecting);
 
         let next_stream_id = Arc::new(AtomicU32::new(FIRST_GUEST_STREAM_ID));
         let pump = SessionPump {
@@ -230,6 +241,7 @@ impl FlowMuxClient {
             udp_associations: BTreeMap::new(),
             pending_opens: BTreeMap::new(),
             pending_resolves: BTreeMap::new(),
+            frame_reader: FrameReader::default(),
         };
 
         tokio::spawn(async move {
@@ -249,11 +261,13 @@ impl FlowMuxClient {
     async fn await_ready(&self) -> Result<(), FlowMuxError> {
         let mut state = self.state.clone();
         loop {
-            let snapshot = *state.borrow();
+            let snapshot = state.borrow().clone();
             match snapshot {
                 SessionState::Ready => return Ok(()),
-                SessionState::Dead => return Err(FlowMuxError::SessionClosed("dead".into())),
-                SessionState::Reconnecting => {
+                SessionState::Dead(reason) => {
+                    return Err(FlowMuxError::SessionClosed(reason.to_string()));
+                }
+                SessionState::Connecting | SessionState::Reconnecting => {
                     if state.changed().await.is_err() {
                         return Err(FlowMuxError::SessionClosed("state watch closed".into()));
                     }
@@ -333,6 +347,8 @@ struct SessionPump<S> {
     udp_associations: BTreeMap<u32, UdpAssociationState>,
     pending_opens: BTreeMap<u32, PendingOpen>,
     pending_resolves: BTreeMap<u32, oneshot::Sender<Result<Vec<u8>, FlowMuxError>>>,
+    /// Survives a `select!` cancellation so a half-read frame resumes.
+    frame_reader: FrameReader,
 }
 
 impl<S> SessionPump<S>
@@ -340,6 +356,17 @@ where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     async fn run(mut self) -> Result<(), FlowMuxError> {
+        let outcome = self.run_until_closed().await;
+        self.fail_all("session closed");
+        let reason: Arc<str> = match &outcome {
+            Ok(()) => Arc::from("session closed"),
+            Err(e) => Arc::from(e.to_string().as_str()),
+        };
+        let _ = self.state_tx.send(SessionState::Dead(reason));
+        outcome
+    }
+
+    async fn run_until_closed(&mut self) -> Result<(), FlowMuxError> {
         self.send_hello().await?;
         self.read_hello_ack().await?;
         let _ = self.state_tx.send(SessionState::Ready);
@@ -356,7 +383,9 @@ where
                         }
                     }
                 }
-                frame = read_sealed_frame_from(&mut self.stream, &mut self.session) => {
+                frame = self
+                    .frame_reader
+                    .read(&mut self.stream, &mut self.session) => {
                     match frame? {
                         Some((opcode, stream_id, _payload_len, payload)) => {
                             self.handle_frame(opcode, stream_id, payload).await?;
@@ -369,8 +398,6 @@ where
                 }
             }
         }
-        self.fail_all("session closed");
-        let _ = self.state_tx.send(SessionState::Dead);
         Ok(())
     }
 
@@ -391,28 +418,44 @@ where
     }
 
     async fn send_hello(&mut self) -> Result<(), FlowMuxError> {
+        let payload = Handshake::local(GUEST_BUILD).encode();
         self.validator
-            .admit(&frame_facts(Direction::GuestToHost, Opcode::Hello, 0, 0))
+            .admit(&frame_facts(
+                Direction::GuestToHost,
+                Opcode::Hello,
+                0,
+                payload.len() as u32,
+            ))
             .map_err(|e| FlowMuxError::Frame(e.to_string()))?;
-        self.write_frame(Opcode::Hello, 0, &[]).await
+        self.write_frame(Opcode::Hello, 0, &payload).await
     }
 
     async fn read_hello_ack(&mut self) -> Result<(), FlowMuxError> {
-        let (opcode, stream_id, _payload_len, payload) = self
-            .read_frame()
-            .await?
-            .ok_or_else(|| FlowMuxError::SessionClosed("peer closed before HelloAck".into()))?;
-        if opcode != Opcode::HelloAck || stream_id != 0 || !payload.is_empty() {
+        let (opcode, stream_id, payload_len, payload) =
+            self.read_frame().await?.ok_or_else(|| {
+                // The host closing here is the shape of a host that is not
+                // speaking FlowMux at all, so say so rather than reporting a
+                // bare disconnect the operator has to guess at.
+                FlowMuxError::SessionClosed(format!(
+                    "host closed the connection before answering the FlowMux handshake; \
+                     this guest is {GUEST_BUILD} — the host endpoint is either stale or \
+                     serving a different egress protocol"
+                ))
+            })?;
+        if opcode != Opcode::HelloAck || stream_id != 0 {
             return Err(FlowMuxError::Frame(format!(
                 "expected HelloAck, got {opcode:?} on stream {stream_id}"
             )));
         }
+        let host = Handshake::decode(&payload).map_err(|e| FlowMuxError::Frame(e.to_string()))?;
+        agree(&Handshake::local(GUEST_BUILD), &host)
+            .map_err(|e| FlowMuxError::Frame(e.to_string()))?;
         self.validator
             .admit(&frame_facts(
                 Direction::HostToGuest,
                 Opcode::HelloAck,
                 stream_id,
-                0,
+                payload_len,
             ))
             .map_err(|e| FlowMuxError::Frame(e.to_string()))?;
         Ok(())
@@ -800,33 +843,122 @@ where
     }
 }
 
+/// Largest sealed frame the guest will accept off the wire.
+const MAX_SEALED_LEN: usize = 1 << 20;
+
+/// One decoded frame: opcode, stream id, payload length, payload bytes.
+pub(crate) type DecodedFrame = (Opcode, u32, u32, Vec<u8>);
+
+/// The outcome of reading one frame. `Ok(None)` is a clean close on a frame
+/// boundary, never a truncated frame.
+pub(crate) type FrameRead = Result<Option<DecodedFrame>, FlowMuxError>;
+
+/// A resumable read of one sealed frame.
+///
+/// The pump reads inside `tokio::select!`, which drops the losing branch's
+/// future. A read that keeps its partial buffer in locals loses whatever it had
+/// already taken off the socket, and the next read then takes body bytes for a
+/// length prefix — the stream desyncs and every later frame is garbage. Holding
+/// the partial state here instead means a cancelled read *resumes* rather than
+/// restarts.
+///
+/// It only bites under load, because it needs a client request to be ready
+/// while a frame is still arriving. A quiet session reads whole frames between
+/// requests and looks perfectly correct.
+#[derive(Default)]
+pub(crate) struct FrameReader {
+    /// The 4-byte length prefix, filled incrementally.
+    len_buf: [u8; 4],
+    /// How much of `len_buf` is populated.
+    len_filled: usize,
+    /// The body buffer, allocated once the prefix is known.
+    body: Option<Vec<u8>>,
+    /// How much of `body` is populated.
+    body_filled: usize,
+}
+
+impl FrameReader {
+    /// Read the next frame, resuming any partially-read one.
+    ///
+    /// Cancel-safe: every `.await` sits between reads, and the byte counts are
+    /// updated before the next one, so dropping the future loses nothing.
+    pub(crate) async fn read<S>(
+        &mut self,
+        stream: &mut S,
+        session: &mut mvm_core::net::session::Session,
+    ) -> FrameRead
+    where
+        S: AsyncRead + Unpin,
+    {
+        while self.len_filled < self.len_buf.len() {
+            let n = stream.read(&mut self.len_buf[self.len_filled..]).await?;
+            if n == 0 {
+                // Clean close only on a frame boundary; mid-prefix EOF is a
+                // truncated frame and must not read as "peer went away".
+                return if self.len_filled == 0 {
+                    Ok(None)
+                } else {
+                    Err(FlowMuxError::Frame(
+                        "peer closed mid length prefix".to_string(),
+                    ))
+                };
+            }
+            self.len_filled += n;
+        }
+
+        if self.body.is_none() {
+            let sealed_len = u32::from_be_bytes(self.len_buf) as usize;
+            if sealed_len == 0 {
+                self.reset();
+                return Ok(None);
+            }
+            if sealed_len > MAX_SEALED_LEN {
+                return Err(FlowMuxError::Frame(format!(
+                    "sealed frame length {sealed_len} exceeds {MAX_SEALED_LEN}"
+                )));
+            }
+            self.body = Some(vec![0u8; sealed_len]);
+        }
+        let body = self.body.as_mut().expect("body allocated above");
+        while self.body_filled < body.len() {
+            let n = stream.read(&mut body[self.body_filled..]).await?;
+            if n == 0 {
+                return Err(FlowMuxError::Frame("peer closed mid frame".to_string()));
+            }
+            self.body_filled += n;
+        }
+
+        let sealed_buf = self.body.take().expect("body allocated above");
+        self.reset();
+        decode_sealed(&sealed_buf, session)
+    }
+
+    /// Drop the partial state so the next call starts a fresh frame.
+    fn reset(&mut self) {
+        self.len_filled = 0;
+        self.body = None;
+        self.body_filled = 0;
+    }
+}
+
+/// Read exactly one sealed frame, start to finish.
+///
+/// For callers that await the read directly. A caller that races this against
+/// another future in `select!` must use [`FrameReader`] instead — see its docs
+/// for what a dropped read costs.
 pub(crate) async fn read_sealed_frame_from<S>(
     stream: &mut S,
     session: &mut mvm_core::net::session::Session,
-) -> Result<Option<(Opcode, u32, u32, Vec<u8>)>, FlowMuxError>
+) -> FrameRead
 where
     S: AsyncRead + Unpin,
 {
-    let mut len_buf = [0u8; 4];
-    match stream.read_exact(&mut len_buf).await {
-        Ok(_) => {}
-        Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
-        Err(e) => return Err(e.into()),
-    }
-    let sealed_len = u32::from_be_bytes(len_buf) as usize;
-    if sealed_len == 0 {
-        return Ok(None);
-    }
-    const MAX_SEALED_LEN: usize = 1 << 20;
-    if sealed_len > MAX_SEALED_LEN {
-        return Err(FlowMuxError::Frame(format!(
-            "sealed frame length {sealed_len} exceeds {MAX_SEALED_LEN}"
-        )));
-    }
-    let mut sealed_buf = vec![0u8; sealed_len];
-    stream.read_exact(&mut sealed_buf).await?;
+    FrameReader::default().read(stream, session).await
+}
 
-    let sealed = mvm_core::net::session::SealedFrame::decode(&sealed_buf)
+/// Open and decode one sealed frame's bytes.
+fn decode_sealed(sealed_buf: &[u8], session: &mut mvm_core::net::session::Session) -> FrameRead {
+    let sealed = mvm_core::net::session::SealedFrame::decode(sealed_buf)
         .map_err(|e| FlowMuxError::Frame(e.to_string()))?;
     let plaintext = session
         .open(&sealed)
@@ -1225,18 +1357,50 @@ impl FlowMuxReconnectClient {
     }
 
     /// Wait until there is a ready session and return a clone of it.
+    ///
+    /// Two watches move independently here: `current` names which client the
+    /// reconnect loop owns, and the client's own state says whether that one
+    /// has finished its handshake. Waiting on only the first parks forever on
+    /// a client that is still connecting, since nothing replaces it.
     async fn active_client(&self) -> Result<Arc<FlowMuxClient>, FlowMuxError> {
         let mut current = self.current.clone();
         loop {
             let snapshot = current.borrow().clone();
-            if let Some(client) = snapshot {
-                let ready = {
-                    let state = client.state();
-                    *state.borrow() == SessionState::Ready
-                };
-                if ready {
-                    return Ok(client);
+            let Some(client) = snapshot else {
+                if current.changed().await.is_err() {
+                    return Err(FlowMuxError::SessionClosed("reconnect owner gone".into()));
                 }
+                continue;
+            };
+
+            let mut state = client.state();
+            let settled = loop {
+                match state.borrow().clone() {
+                    SessionState::Ready => break Some(client),
+                    // Dead is the reconnect loop's cue; wait for the client it
+                    // puts in place rather than re-reading this one.
+                    SessionState::Dead(_) => break None,
+                    SessionState::Connecting | SessionState::Reconnecting => {}
+                }
+                tokio::select! {
+                    changed = state.changed() => {
+                        if changed.is_err() {
+                            break None;
+                        }
+                    }
+                    changed = current.changed() => {
+                        if changed.is_err() {
+                            return Err(FlowMuxError::SessionClosed("reconnect owner gone".into()));
+                        }
+                        break None;
+                    }
+                }
+            };
+            if let Some(client) = settled {
+                return Ok(client);
+            }
+            if current.has_changed().unwrap_or(false) {
+                continue;
             }
             if current.changed().await.is_err() {
                 return Err(FlowMuxError::SessionClosed("reconnect owner gone".into()));
@@ -1296,7 +1460,7 @@ async fn reconnect_loop<S, F, Fut>(
     loop {
         // Wait for the current session to die.
         loop {
-            if *state_rx.borrow() == SessionState::Dead {
+            if matches!(*state_rx.borrow(), SessionState::Dead(_)) {
                 break;
             }
             if state_rx.changed().await.is_err() {
@@ -1349,6 +1513,7 @@ async fn reconnect_loop<S, F, Fut>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mvm_contract::protocol::network_flow::hello::BEHAVIOR_REVISION;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     #[test]
@@ -1425,6 +1590,142 @@ mod tests {
         stream.flush().await.unwrap();
     }
 
+    /// Seal a frame and hand back its exact wire bytes, so a test can deliver
+    /// it in pieces.
+    fn frame_bytes(
+        session: &mut mvm_core::net::session::Session,
+        opcode: Opcode,
+        stream_id: u32,
+        payload: &[u8],
+    ) -> Vec<u8> {
+        let mut wire = Vec::new();
+        encode_into(&mut wire, opcode, stream_id, payload).unwrap();
+        let sealed = session.seal(&wire).unwrap();
+        let mut sealed_bytes = Vec::new();
+        sealed.encode(&mut sealed_bytes).unwrap();
+        let len = u32::try_from(sealed_bytes.len()).unwrap();
+        let mut out = len.to_be_bytes().to_vec();
+        out.extend_from_slice(&sealed_bytes);
+        out
+    }
+
+    /// A handshaken guest/host session pair over a duplex.
+    async fn session_pair() -> (
+        tokio::io::DuplexStream,
+        mvm_core::net::session::Session,
+        tokio::io::DuplexStream,
+        mvm_core::net::session::Session,
+    ) {
+        let (host_key, host_anchor) = generate_keypair();
+        let (guest_key, _) = generate_keypair();
+        let (guest_stream, host_stream) = tokio::io::duplex(64 * 1024);
+        let host = tokio::spawn(host_handshake(host_stream, host_key));
+        let handle = tokio::runtime::Handle::try_current().unwrap();
+        let (guest_stream, guest_session) = tokio::task::spawn_blocking(move || {
+            let mut adapter = AsyncStreamSyncAdapter::new(guest_stream, handle);
+            let result =
+                mvm_core::net::session::Session::guest(&mut adapter, guest_key, &host_anchor);
+            let stream = adapter.into_inner();
+            result.map(|(session, _id)| (stream, session))
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        let (host_stream, host_session) = host.await.unwrap();
+        (guest_stream, guest_session, host_stream, host_session)
+    }
+
+    /// The pump reads inside `select!`, so a read that loses the race is
+    /// dropped part-way through a frame. It has to resume, not restart:
+    /// restarting re-reads body bytes as a length prefix and every later frame
+    /// on the session is garbage.
+    ///
+    /// Confirmed red before the `FrameReader` change, with the same
+    /// `sealed frame length ... exceeds 1048576` a builder VM produced once a
+    /// download was large enough to keep a request ready mid-frame.
+    #[tokio::test]
+    async fn a_cancelled_read_resumes_the_frame_it_was_part_way_through() {
+        let (mut guest_stream, mut guest_session, mut host_stream, mut host_session) =
+            session_pair().await;
+        let wire = frame_bytes(&mut host_session, Opcode::Data, 1, b"payload-after-cancel");
+        let mut reader = FrameReader::default();
+
+        // Deliver a partial length prefix and let the read be cancelled on it.
+        host_stream.write_all(&wire[..2]).await.unwrap();
+        host_stream.flush().await.unwrap();
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(50),
+                reader.read(&mut guest_stream, &mut guest_session),
+            )
+            .await
+            .is_err(),
+            "the read must still be pending, so the timeout cancels it"
+        );
+
+        // Deliver the rest of the prefix plus part of the body, cancel again.
+        let mid = wire.len() - 4;
+        host_stream.write_all(&wire[2..mid]).await.unwrap();
+        host_stream.flush().await.unwrap();
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(50),
+                reader.read(&mut guest_stream, &mut guest_session),
+            )
+            .await
+            .is_err(),
+            "a body-truncated read must also stay pending"
+        );
+
+        // The remainder completes the frame the two cancellations were inside.
+        host_stream.write_all(&wire[mid..]).await.unwrap();
+        host_stream.flush().await.unwrap();
+        let (opcode, stream_id, _len, payload) = reader
+            .read(&mut guest_stream, &mut guest_session)
+            .await
+            .expect("the resumed read must succeed")
+            .expect("a frame, not a clean close");
+        assert_eq!(opcode, Opcode::Data);
+        assert_eq!(stream_id, 1);
+        assert_eq!(payload, b"payload-after-cancel");
+    }
+
+    /// Cancellation must not cost frame *ordering* either: a session that was
+    /// interrupted keeps decrypting subsequent frames, which it cannot do if
+    /// the byte stream slipped by even one.
+    #[tokio::test]
+    async fn frames_after_a_cancelled_read_still_decrypt_in_order() {
+        let (mut guest_stream, mut guest_session, mut host_stream, mut host_session) =
+            session_pair().await;
+        let first = frame_bytes(&mut host_session, Opcode::Data, 1, b"first");
+        let second = frame_bytes(&mut host_session, Opcode::Data, 1, b"second");
+        let mut reader = FrameReader::default();
+
+        host_stream.write_all(&first[..3]).await.unwrap();
+        host_stream.flush().await.unwrap();
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(50),
+                reader.read(&mut guest_stream, &mut guest_session),
+            )
+            .await
+            .is_err()
+        );
+
+        host_stream.write_all(&first[3..]).await.unwrap();
+        host_stream.write_all(&second).await.unwrap();
+        host_stream.flush().await.unwrap();
+
+        for expected in [b"first".as_slice(), b"second".as_slice()] {
+            let (_, _, _, payload) = reader
+                .read(&mut guest_stream, &mut guest_session)
+                .await
+                .expect("decrypts in order")
+                .expect("a frame");
+            assert_eq!(payload, expected);
+        }
+    }
+
     async fn recv_frame<S>(
         stream: &mut S,
         session: &mut mvm_core::net::session::Session,
@@ -1448,14 +1749,14 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(opcode, Opcode::Hello);
-            assert!(payload.is_empty());
+            Handshake::decode(&payload).expect("Hello carries the guest's handshake");
 
             send_frame(
                 &mut host_stream,
                 &mut host_session,
                 Opcode::HelloAck,
                 0,
-                &[],
+                &Handshake::local("test-host").encode(),
             )
             .await;
 
@@ -1557,7 +1858,7 @@ mod tests {
                 &mut host_session,
                 Opcode::HelloAck,
                 0,
-                &[],
+                &Handshake::local("test-host").encode(),
             )
             .await;
 
@@ -1587,6 +1888,132 @@ mod tests {
         host.await.unwrap();
     }
 
+    /// A fresh client has not handshaken yet. Publishing `Ready` at
+    /// construction let a caller open a flow into a session that had agreed
+    /// nothing, so a mismatched host looked healthy until the flow failed.
+    #[tokio::test]
+    async fn a_fresh_client_is_connecting_until_the_host_answers() {
+        let (guest_stream, host_stream) = tokio::io::duplex(4096);
+        let (guest_key, _guest_anchor) = generate_keypair();
+        let (host_key, host_anchor) = generate_keypair();
+
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let (finish_tx, finish_rx) = tokio::sync::oneshot::channel();
+        let host = tokio::spawn(async move {
+            let (mut host_stream, mut host_session) = host_handshake(host_stream, host_key).await;
+            let (opcode, _sid, _len, _payload) = recv_frame(&mut host_stream, &mut host_session)
+                .await
+                .unwrap();
+            assert_eq!(opcode, Opcode::Hello);
+            started_tx.send(()).unwrap();
+            // Hold the HelloAck back so the client is observed mid-handshake.
+            release_rx.await.unwrap();
+            send_frame(
+                &mut host_stream,
+                &mut host_session,
+                Opcode::HelloAck,
+                0,
+                &Handshake::local("test-host").encode(),
+            )
+            .await;
+            // Stay up: dropping the stream here would end the pump and the
+            // client would go Dead before the test could observe Ready.
+            finish_rx.await.unwrap();
+        });
+
+        let client = FlowMuxClient::connect(guest_stream, guest_key, host_anchor)
+            .await
+            .expect("transport session");
+        started_rx.await.unwrap();
+        assert_eq!(*client.state().borrow(), SessionState::Connecting);
+
+        release_tx.send(()).unwrap();
+        let mut state = client.state();
+        while *state.borrow() != SessionState::Ready {
+            state.changed().await.expect("state watch stays open");
+        }
+
+        finish_tx.send(()).unwrap();
+        host.await.unwrap();
+    }
+
+    /// A host built against a different revision must be named, not silently
+    /// tolerated: the guest is the side whose logs an operator reads first.
+    #[tokio::test]
+    async fn a_host_from_another_revision_is_refused_by_name() {
+        let (guest_stream, host_stream) = tokio::io::duplex(4096);
+        let (guest_key, _guest_anchor) = generate_keypair();
+        let (host_key, host_anchor) = generate_keypair();
+
+        let host = tokio::spawn(async move {
+            let (mut host_stream, mut host_session) = host_handshake(host_stream, host_key).await;
+            let (opcode, _sid, _len, _payload) = recv_frame(&mut host_stream, &mut host_session)
+                .await
+                .unwrap();
+            assert_eq!(opcode, Opcode::Hello);
+            let stale = Handshake {
+                behavior_revision: BEHAVIOR_REVISION.wrapping_add(1),
+                build: "mvm-hostd from-a-stale-tree".to_string(),
+            };
+            send_frame(
+                &mut host_stream,
+                &mut host_session,
+                Opcode::HelloAck,
+                0,
+                &stale.encode(),
+            )
+            .await;
+        });
+
+        // `connect` returns once the transport session is up; the FlowMux
+        // handshake runs in the pump, so the refusal surfaces on the first
+        // flow — which is the call an operator sees fail.
+        let client = FlowMuxClient::connect(guest_stream, guest_key, host_anchor)
+            .await
+            .expect("transport session");
+        let err = client
+            .open_tcp("example.com:80")
+            .await
+            .expect_err("a mismatched host must not serve a flow");
+        let msg = err.to_string();
+        assert!(msg.contains("mvm-hostd from-a-stale-tree"), "{msg}");
+        assert!(msg.contains(GUEST_BUILD), "{msg}");
+
+        host.await.unwrap();
+    }
+
+    /// A host that hangs up without answering is the shape of a host serving
+    /// some other protocol. Say that, rather than reporting a bare close.
+    #[tokio::test]
+    async fn a_host_that_never_answers_the_handshake_says_so() {
+        let (guest_stream, host_stream) = tokio::io::duplex(4096);
+        let (guest_key, _guest_anchor) = generate_keypair();
+        let (host_key, host_anchor) = generate_keypair();
+
+        let host = tokio::spawn(async move {
+            let (mut host_stream, mut host_session) = host_handshake(host_stream, host_key).await;
+            let (opcode, _sid, _len, _payload) = recv_frame(&mut host_stream, &mut host_session)
+                .await
+                .unwrap();
+            assert_eq!(opcode, Opcode::Hello);
+            drop(host_stream);
+        });
+
+        let client = FlowMuxClient::connect(guest_stream, guest_key, host_anchor)
+            .await
+            .expect("transport session");
+        let err = client
+            .open_tcp("example.com:80")
+            .await
+            .expect_err("a silent host must not serve a flow");
+        let msg = err.to_string();
+        assert!(msg.contains("FlowMux handshake"), "{msg}");
+        assert!(msg.contains(GUEST_BUILD), "{msg}");
+
+        host.await.unwrap();
+    }
+
     #[tokio::test]
     async fn guest_client_resolves_dns_name() {
         let (guest_stream, host_stream) = tokio::io::duplex(4096);
@@ -1605,7 +2032,7 @@ mod tests {
                 &mut host_session,
                 Opcode::HelloAck,
                 0,
-                &[],
+                &Handshake::local("test-host").encode(),
             )
             .await;
 
@@ -1658,7 +2085,7 @@ mod tests {
                 &mut host_session,
                 Opcode::HelloAck,
                 0,
-                &[],
+                &Handshake::local("test-host").encode(),
             )
             .await;
 

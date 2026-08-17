@@ -599,6 +599,94 @@ jobs:
             || { sudo apt-get update && sudo apt-get install -y e2fsprogs; }
           bash nix/packaging/release/assert-init-shebang.sh \
             "staging/default-microvm-rootfs-${ARCH}.ext4" "staged ${ARCH}"
+          bash nix/packaging/release/assert-kernel-format.sh \
+            "staging/default-microvm-vmlinux-${ARCH}" "${ARCH}" "staged ${ARCH} kernel"
+
+      # Nothing in this job ever started the image. Every gate below the build
+      # is a checksum, a signature or a byte-level read, and none of those can
+      # answer the only question a user asks of a boot image: does it boot. A
+      # release shipped for five weeks whose guest panicked before userspace,
+      # with every checksum verifying clean the whole time.
+      #
+      # x86_64 only: the aarch64 leg runs on ubuntu-24.04-arm, which has no
+      # nested KVM and cannot boot a guest at all. That leg's coverage is the
+      # static /init read above, which catches the defect class that actually
+      # shipped and is a stated compromise rather than a claim of equivalence —
+      # an aarch64-only regression that is not a shebang defect still gets past.
+      - name: Install firecracker for the boot gate
+        if: matrix.arch == 'x86_64'
+        env:
+          # Tracks `crates/mvm-core/src/config.rs::FC_VERSION_DEFAULT`. The
+          # launch path passes `--enable-pci`, which older Firecracker rejects
+          # before it creates its API socket.
+          FC_VERSION: v1.14.1
+        run: |
+          set -euo pipefail
+          curl -fL -o firecracker.tgz \
+            "https://github.com/firecracker-microvm/firecracker/releases/download/${FC_VERSION}/firecracker-${FC_VERSION}-x86_64.tgz"
+          tar -xzf firecracker.tgz
+          sudo install -m 0755 "release-${FC_VERSION}-x86_64/firecracker-${FC_VERSION}-x86_64" /usr/bin/firecracker
+          /usr/bin/firecracker --version
+
+      - name: Grant /dev/kvm access for the boot gate
+        if: matrix.arch == 'x86_64'
+        # ubuntu-latest's /dev/kvm is root:kvm 0660 and the runner user is not
+        # in the kvm group. The runner is ephemeral, so the looser mode is
+        # confined to this job.
+        run: |
+          set -euo pipefail
+          if [ ! -e /dev/kvm ]; then
+            echo "::error::/dev/kvm missing on this runner — the boot gate cannot run." >&2
+            exit 1
+          fi
+          sudo chmod 666 /dev/kvm
+          ls -la /dev/kvm
+
+      - name: Boot the staged image before it becomes a release asset
+        if: matrix.arch == 'x86_64'
+        # Boots the artifact in `staging/`, never a published one — the whole
+        # point is to refuse the upload rather than diagnose it afterwards.
+        #
+        # This is not a latency assertion. The budget is an order of magnitude
+        # above the observed median and RUNS/CONCURRENT are 1, because the
+        # question here is "does it reach userspace". Latency belongs to the
+        # `boot-latency` lane, which has its own threshold and its own argument.
+        env:
+          ARCH: ${{ matrix.arch }}
+          MVM_RUNTIME_BOOT_BENCH: "1"
+          MVM_RUNTIME_BOOT_BACKEND: firecracker
+          MVM_RUNTIME_BOOT_KERNEL: staging/default-microvm-vmlinux-x86_64
+          MVM_RUNTIME_BOOT_ROOTFS: staging/default-microvm-rootfs-x86_64.ext4
+          MVM_RUNTIME_BOOT_READY: guest-agent
+          MVM_RUNTIME_BOOT_RUNS: "1"
+          MVM_RUNTIME_BOOT_CONCURRENT: "1"
+          MVM_RUNTIME_BOOT_BUDGET_MS: "60000"
+        run: |
+          set -euo pipefail
+          # The runtime-overlay admission gate reads `mvm-meta.json` from the
+          # rootfs's own directory and refuses to boot without it. The build
+          # stages that sidecar under its arch-qualified asset name, so put a
+          # copy back under the name the gate looks for.
+          cp "staging/default-microvm-meta-${ARCH}.json" staging/mvm-meta.json
+          cargo test --test runtime_boot_bench \
+            prebuilt_runtime_image_boots_within_budget -- --exact --nocapture
+
+      - name: Dump VMM diagnostics on failure
+        if: ${{ failure() && matrix.arch == 'x86_64' }}
+        # Firecracker's stderr goes to `firecracker.log` in the per-VM state dir
+        # and its console to `console.log`; neither reaches the job output.
+        # Without this a refused publish surfaces only as "API socket did not
+        # appear", which is a symptom and never the cause.
+        run: |
+          for d in "$HOME"/.mvm/vms/*/; do
+            echo "===== $d ====="
+            ls -la "$d" || true
+            for f in firecracker.log console.log; do
+              if [ -s "$d$f" ]; then
+                echo "--- $f ---"; tail -50 "$d$f"
+              fi
+            done
+          done
 
       - name: Generate default microVM SBOM
         env:
