@@ -73,6 +73,19 @@ pub struct SdkError {
     pub status: Option<i32>,
     /// Surfaces that carry this type.
     pub surfaces: Vec<String>,
+    /// Structured fields the type carries.
+    pub fields: Vec<SdkErrorFieldDef>,
+    /// How the message is composed from those fields.
+    pub message_format: Option<String>,
+}
+
+/// A structured field on an error type.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct SdkErrorFieldDef {
+    /// Attribute name.
+    pub name: String,
+    /// One-line description.
+    pub doc: String,
 }
 
 /// The error-taxonomy manifest.
@@ -754,6 +767,21 @@ pub fn render_python_errors(manifest: &ErrorManifest) -> String {
             }
             out.push_str("    \"\"\"\n");
         }
+        if let Some(format) = &e.message_format {
+            let params: Vec<String> = e
+                .fields
+                .iter()
+                .map(|f| format!("{}: str", f.name))
+                .collect();
+            out.push_str(&format!(
+                "\n    def __init__(self, *, {}):\n",
+                params.join(", ")
+            ));
+            out.push_str(&format!("        super().__init__(f{format:?})\n"));
+            for f in &e.fields {
+                out.push_str(&format!("        self.{} = {}\n", f.name, f.name));
+            }
+        }
     }
 
     // The status map is the piece both SDKs previously hand-maintained
@@ -805,10 +833,47 @@ pub fn render_typescript_errors(manifest: &ErrorManifest) -> String {
             }
             out.push_str(" */\n");
         }
+        if e.message_format.is_none() {
+            out.push_str(&format!(
+                "export class {} extends {} {{}}\n",
+                e.name, e.base_typescript
+            ));
+            continue;
+        }
+        // `message` is owned by `Error`, so it is not re-declared as a
+        // property. Note the resulting difference from Python, which is
+        // real: there `str(e)` is the composed message and `.message` is
+        // the raw one, while JavaScript has only `.message`, holding the
+        // composed string.
+        let format = e.message_format.as_deref().unwrap_or_default();
+        let opts: Vec<String> = e
+            .fields
+            .iter()
+            .map(|f| format!("{}: string", f.name))
+            .collect();
         out.push_str(&format!(
-            "export class {} extends {} {{}}\n",
+            "export class {} extends {} {{\n",
             e.name, e.base_typescript
         ));
+        for f in e.fields.iter().filter(|f| f.name != "message") {
+            out.push_str(&format!("  /** {} */\n", f.doc));
+            out.push_str(&format!("  readonly {}: string;\n", f.name));
+        }
+        out.push_str(&format!(
+            "  constructor(opts: {{ {} }}) {{\n",
+            opts.join("; ")
+        ));
+        let mut interpolated = format.to_string();
+        for f in &e.fields {
+            interpolated =
+                interpolated.replace(&format!("{{{}}}", f.name), &format!("${{opts.{}}}", f.name));
+        }
+        out.push_str(&format!("    super(`{interpolated}`);\n"));
+        out.push_str(&format!("    this.name = {:?};\n", e.name));
+        for f in e.fields.iter().filter(|f| f.name != "message") {
+            out.push_str(&format!("    this.{} = opts.{};\n", f.name, f.name));
+        }
+        out.push_str("  }\n}\n");
     }
 
     out.push_str(&format!(

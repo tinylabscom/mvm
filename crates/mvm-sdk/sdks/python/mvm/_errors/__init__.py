@@ -7,6 +7,14 @@ run `cargo xtask gen-stubs` from the workspace root.
 """
 
 from mvm._errors.types import (
+    EmittingContextError,
+    MsgpackUnavailable,
+    MvmTransportError,
+    NoVmIntrospectionError,
+    PayloadTooLarge,
+    RemoteError,
+    SecretInArgError,
+    SecretInArgWarning,
     STATUS_ERRORS,
     STATUS_OK,
     BadRequestError,
@@ -21,6 +29,14 @@ from mvm._errors.types import (
 )
 
 __all__ = [
+    "EmittingContextError",
+    "MsgpackUnavailable",
+    "MvmTransportError",
+    "NoVmIntrospectionError",
+    "PayloadTooLarge",
+    "RemoteError",
+    "SecretInArgError",
+    "SecretInArgWarning",
     "STATUS_ERRORS",
     "STATUS_OK",
     "BadRequestError",

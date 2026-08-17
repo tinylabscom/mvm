@@ -59,6 +59,15 @@ impl ErrorBase {
     }
 }
 
+/// A structured field an error carries alongside its message.
+#[derive(Debug, Clone, Copy)]
+pub struct ErrorField {
+    /// Attribute name, identical in every language.
+    pub name: &'static str,
+    /// One-line description.
+    pub doc: &'static str,
+}
+
 /// One error type in the SDK contract.
 #[derive(Debug, Clone, Copy)]
 pub struct SdkErrorType {
@@ -72,6 +81,11 @@ pub struct SdkErrorType {
     pub status: Option<i32>,
     /// Surfaces that carry this type.
     pub surfaces: &'static [Surface],
+    /// Structured fields the type carries. Empty for a plain subclass.
+    pub fields: &'static [ErrorField],
+    /// How the human-readable message is composed from those fields,
+    /// with `{field}` placeholders. Required when `fields` is non-empty.
+    pub message_format: Option<&'static str>,
 }
 
 impl SdkErrorType {
@@ -109,6 +123,8 @@ macro_rules! sdk_errors {
                     doc: concat!($($doc),+),
                     status: sdk_errors!(@status $($status)?),
                     surfaces: &[$(Surface::$surface),+],
+                    fields: &[],
+                    message_format: None,
                 },
             )+
         ];
@@ -154,6 +170,103 @@ sdk_errors! {
         status = crate::host_services_ffi::MVM_HSVC_INVALID_INPUT; [Rust, Python, TypeScript]
 }
 
+/// The errors Tier C's remote-invocation machinery raises.
+///
+/// Declared separately from the `sdk_errors!` block because
+/// `RemoteError` carries structured fields, which that macro does not
+/// express. They are emitted for TypeScript only because Tier C's
+/// transport exists there to raise them — generating them earlier would
+/// have exported classes nothing could throw.
+const TIER_C: &[SdkErrorType] = &[
+    SdkErrorType {
+        name: "RemoteError",
+        base: ErrorBase::Root,
+        doc: "User code inside the VM raised; a structured envelope was parsed.",
+        status: None,
+        surfaces: &[Surface::Rust, Surface::Python, Surface::TypeScript],
+        fields: &[
+            ErrorField {
+                name: "kind",
+                doc: "Error class the guest reported.",
+            },
+            ErrorField {
+                name: "error_id",
+                doc: "Correlation id for the failing call.",
+            },
+            ErrorField {
+                name: "message",
+                doc: "Message the guest reported.",
+            },
+        ],
+        message_format: Some("{kind}: {message} (error_id={error_id})"),
+    },
+    SdkErrorType {
+        name: "MvmTransportError",
+        base: ErrorBase::Runtime,
+        doc: "Could not reach the substrate, or got an unparseable response.",
+        status: None,
+        surfaces: &[Surface::Rust, Surface::Python, Surface::TypeScript],
+        fields: &[],
+        message_format: None,
+    },
+    SdkErrorType {
+        name: "MsgpackUnavailable",
+        base: ErrorBase::Runtime,
+        doc: "The workload declared msgpack but the SDK has no msgpack support.",
+        status: None,
+        surfaces: &[Surface::Rust, Surface::Python, Surface::TypeScript],
+        fields: &[],
+        message_format: None,
+    },
+    SdkErrorType {
+        name: "PayloadTooLarge",
+        base: ErrorBase::Named("MvmTransportError"),
+        doc: "The encoded request exceeded the payload cap, refused before any               subprocess spawned.",
+        status: None,
+        surfaces: &[Surface::Rust, Surface::Python, Surface::TypeScript],
+        fields: &[],
+        message_format: None,
+    },
+    SdkErrorType {
+        name: "NoVmIntrospectionError",
+        base: ErrorBase::Named("MvmTransportError"),
+        doc: "No-VM dispatch was requested without a local function to               introspect. Python-only in practice: the mode itself has no               TypeScript form.",
+        status: None,
+        surfaces: &[Surface::Rust, Surface::Python, Surface::TypeScript],
+        fields: &[],
+        message_format: None,
+    },
+    SdkErrorType {
+        name: "SecretInArgError",
+        base: ErrorBase::Runtime,
+        doc: "A secret-shaped value was passed as a call argument under strict               mode.",
+        status: None,
+        surfaces: &[Surface::Rust, Surface::Python, Surface::TypeScript],
+        fields: &[],
+        message_format: None,
+    },
+    SdkErrorType {
+        name: "SecretInArgWarning",
+        base: ErrorBase::Warning,
+        doc: "Heuristic flagged a secret-shaped value passed as a call               argument.",
+        status: None,
+        // Python-only, permanently: JavaScript has no warning type, and
+        // `exports_to` refuses to emit a `Warning` into TypeScript.
+        surfaces: &[Surface::Rust, Surface::Python],
+        fields: &[],
+        message_format: None,
+    },
+    SdkErrorType {
+        name: "EmittingContextError",
+        base: ErrorBase::Runtime,
+        doc: "A transport call fired inside an emit subprocess, where no live               microVM exists.",
+        status: None,
+        surfaces: &[Surface::Rust, Surface::Python, Surface::TypeScript],
+        fields: &[],
+        message_format: None,
+    },
+];
+
 /// The success status. Not an error, so it has no registry row — but it
 /// belongs to the same `MVM_HSVC_*` family the SDKs mirrored by hand, and
 /// generating the map while leaving this behind would leave the mirror
@@ -168,9 +281,14 @@ pub fn status_mapping() -> impl Iterator<Item = (i32, &'static str)> {
         .filter_map(|e| e.status.map(|status| (status, e.name)))
 }
 
-/// The registry rows `surface` carries, in declaration order.
+/// Every error type: the host-services family followed by Tier C's.
+pub fn all() -> impl Iterator<Item = &'static SdkErrorType> {
+    REGISTRY.iter().chain(TIER_C.iter())
+}
+
+/// The rows `surface` carries, in declaration order.
 pub fn exported_to(surface: Surface) -> impl Iterator<Item = &'static SdkErrorType> {
-    REGISTRY.iter().filter(move |e| e.exports_to(surface))
+    all().filter(move |e| e.exports_to(surface))
 }
 
 #[cfg(test)]
@@ -202,9 +320,51 @@ mod tests {
     }
 
     #[test]
+    fn a_structured_error_declares_how_its_message_is_built() {
+        for e in all() {
+            if e.fields.is_empty() {
+                assert!(
+                    e.message_format.is_none(),
+                    "{}: message_format without fields",
+                    e.name
+                );
+            } else {
+                let format = e
+                    .message_format
+                    .unwrap_or_else(|| panic!("{}: fields without a message_format", e.name));
+                for f in e.fields {
+                    assert!(
+                        format.contains(&format!("{{{}}}", f.name)),
+                        "{}: field {} is never interpolated",
+                        e.name,
+                        f.name
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn tier_c_errors_are_registered() {
+        let names: BTreeSet<&str> = all().map(|e| e.name).collect();
+        for expected in [
+            "RemoteError",
+            "MvmTransportError",
+            "MsgpackUnavailable",
+            "PayloadTooLarge",
+            "NoVmIntrospectionError",
+            "SecretInArgError",
+            "SecretInArgWarning",
+            "EmittingContextError",
+        ] {
+            assert!(names.contains(expected), "Tier C is missing {expected}");
+        }
+    }
+
+    #[test]
     fn named_bases_resolve_within_the_registry() {
-        let names: BTreeSet<&str> = REGISTRY.iter().map(|e| e.name).collect();
-        for e in REGISTRY {
+        let names: BTreeSet<&str> = all().map(|e| e.name).collect();
+        for e in all() {
             if let ErrorBase::Named(base) = e.base {
                 assert!(
                     names.contains(base),
@@ -220,7 +380,7 @@ mod tests {
         // Both emitters render in registry order, so a subclass appearing
         // first would produce source that does not evaluate.
         let mut seen: BTreeSet<&str> = BTreeSet::new();
-        for e in REGISTRY {
+        for e in all() {
             if let ErrorBase::Named(base) = e.base {
                 assert!(seen.contains(base), "{} precedes its base {base}", e.name);
             }
@@ -231,7 +391,7 @@ mod tests {
     #[test]
     fn names_are_unique() {
         let mut names = BTreeSet::new();
-        for e in REGISTRY {
+        for e in all() {
             assert!(names.insert(e.name), "duplicate error name {}", e.name);
         }
     }
@@ -240,7 +400,7 @@ mod tests {
     fn a_warning_is_never_emitted_into_typescript() {
         // JavaScript has no warning type; claiming one would be the same
         // dishonesty as exporting a constant nothing reads.
-        for e in REGISTRY {
+        for e in all() {
             if matches!(e.base, ErrorBase::Warning) {
                 assert!(
                     !e.exports_to(Surface::TypeScript),

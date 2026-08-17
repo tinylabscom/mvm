@@ -40,6 +40,57 @@ export class TransportError extends HostServiceError {}
  */
 export class InvalidInputError extends HostServiceError {}
 
+/**
+ * User code inside the VM raised; a structured envelope was
+ * parsed.
+ */
+export class RemoteError extends Error {
+  /** Error class the guest reported. */
+  readonly kind: string;
+  /** Correlation id for the failing call. */
+  readonly error_id: string;
+  constructor(opts: { kind: string; error_id: string; message: string }) {
+    super(`${opts.kind}: ${opts.message} (error_id=${opts.error_id})`);
+    this.name = "RemoteError";
+    this.kind = opts.kind;
+    this.error_id = opts.error_id;
+  }
+}
+
+/** Could not reach the substrate, or got an unparseable response. */
+export class MvmTransportError extends Error {}
+
+/**
+ * The workload declared msgpack but the SDK has no msgpack
+ * support.
+ */
+export class MsgpackUnavailable extends Error {}
+
+/**
+ * The encoded request exceeded the payload cap, refused before any
+ * subprocess spawned.
+ */
+export class PayloadTooLarge extends MvmTransportError {}
+
+/**
+ * No-VM dispatch was requested without a local function to
+ * introspect. Python-only in practice: the mode itself has no
+ * TypeScript form.
+ */
+export class NoVmIntrospectionError extends MvmTransportError {}
+
+/**
+ * A secret-shaped value was passed as a call argument under strict
+ * mode.
+ */
+export class SecretInArgError extends Error {}
+
+/**
+ * A transport call fired inside an emit subprocess, where no live
+ * microVM exists.
+ */
+export class EmittingContextError extends Error {}
+
 /** The success status; any other value is a failure. */
 export const STATUS_OK = 0;
 
