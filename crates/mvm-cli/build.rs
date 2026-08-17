@@ -1,5 +1,7 @@
 #[path = "build_aux_helpers.rs"]
 mod build_aux_helpers;
+#[path = "build_embed_cache.rs"]
+mod build_embed_cache;
 #[path = "src/host_binaries/toolchain.rs"]
 mod host_binaries_toolchain;
 
@@ -16,6 +18,117 @@ struct EmbeddedSourceBinary {
     package: String,
     name: String,
     features: String,
+}
+
+/// What identifies one cacheable artifact.
+struct KeyRequest<'a> {
+    package: &'a str,
+    binary: &'a str,
+    features: &'a str,
+    target: &'a str,
+    toolchain: &'a str,
+    flavor: &'a str,
+}
+
+/// The content store, plus the per-package source hashes its keys are built
+/// from. Hashing a closure is the expensive part, so it is memoised: the six
+/// embedded binaries share two root packages between them, and the aux
+/// helpers all share one.
+struct EmbedCache {
+    workspace_root: PathBuf,
+    graph: build_embed_cache::WorkspaceGraph,
+    lockfile: String,
+    toolchain_file: String,
+    root: Option<PathBuf>,
+    sources: std::collections::BTreeMap<String, Vec<(String, String)>>,
+    watched: std::collections::BTreeSet<String>,
+}
+
+impl EmbedCache {
+    fn discover(workspace_root: &Path) -> Self {
+        Self {
+            workspace_root: workspace_root.to_path_buf(),
+            graph: build_embed_cache::read_workspace_graph(workspace_root),
+            lockfile: build_embed_cache::hash_file(&workspace_root.join("Cargo.lock")),
+            toolchain_file: build_embed_cache::hash_file(
+                &workspace_root.join("rust-toolchain.toml"),
+            ),
+            root: build_embed_cache::cache_root(),
+            sources: std::collections::BTreeMap::new(),
+            watched: std::collections::BTreeSet::new(),
+        }
+    }
+
+    /// Source hashes for everything `package` can reach inside the workspace.
+    fn closure_sources(&mut self, package: &str) -> Vec<(String, String)> {
+        if let Some(hit) = self.sources.get(package) {
+            return hit.clone();
+        }
+        let mut hashes = Vec::new();
+        for member in build_embed_cache::workspace_closure(&self.graph, &[package]) {
+            let Some(dir) = self.graph.dirs.get(&member) else {
+                continue;
+            };
+            self.watched.insert(member.clone());
+            hashes.extend(build_embed_cache::hash_member(&self.workspace_root, dir));
+        }
+        hashes.sort();
+        self.sources.insert(package.to_string(), hashes.clone());
+        hashes
+    }
+
+    /// `None` when caching is off or unavailable — callers then build.
+    fn key_for(&mut self, request: &KeyRequest<'_>) -> Option<String> {
+        self.root.as_ref()?;
+        let sources = self.closure_sources(request.package);
+        Some(build_embed_cache::artifact_key(
+            &build_embed_cache::KeyInputs {
+                package: request.package.to_string(),
+                binary: request.binary.to_string(),
+                features: request.features.to_string(),
+                target: request.target.to_string(),
+                toolchain: format!("{} rust={}", request.toolchain, self.toolchain_file),
+                flavor: request.flavor.to_string(),
+                lockfile: self.lockfile.clone(),
+                sources,
+            },
+        ))
+    }
+
+    fn restore(&self, key: Option<&str>, binary: &str, dest: &Path) -> bool {
+        let (Some(root), Some(key)) = (self.root.as_ref(), key) else {
+            return false;
+        };
+        build_embed_cache::lookup(root, key, binary, dest)
+    }
+
+    fn publish(&self, key: Option<&str>, binary: &str, source: &Path) {
+        let (Some(root), Some(key)) = (self.root.as_ref(), key) else {
+            return;
+        };
+        build_embed_cache::install(root, key, binary, source);
+    }
+
+    /// Watch exactly the crates the cached binaries are built from.
+    ///
+    /// The blanket walk this replaces covered every workspace crate including
+    /// `mvm-cli`'s own 251 files — which are downstream of these binaries and
+    /// cannot affect them, yet re-ran the whole script on every edit to the
+    /// crate under active development. Anything reachable is still watched,
+    /// because the set is taken from the manifest graph rather than named by
+    /// hand.
+    fn emit_rerun(&self) {
+        for member in &self.watched {
+            let Some(dir) = self.graph.dirs.get(member) else {
+                continue;
+            };
+            emit_rerun_for_tree(&dir.join("src"));
+            println!(
+                "cargo:rerun-if-changed={}",
+                dir.join("Cargo.toml").display()
+            );
+        }
+    }
 }
 
 fn main() {
@@ -85,22 +198,30 @@ fn main() {
     // `mvm-core`, so any edit under `mvm-core/src` invalidates all six and a
     // one-line change costs ~176s before a single test runs.
     //
-    // Outside `--release`, reuse an already-cross-compiled binary instead of
-    // rebuilding it. The embedded set still exists and still hashes, so the
-    // extraction tests and the manifest gate keep passing on their real bytes;
-    // they assert the *name set*, the *SHA match* and *idempotency*, none of
-    // which require the bytes to be freshly compiled. A release build never
-    // takes this path, so shipped binaries are always rebuilt from source.
+    // Reuse is decided by content, not by profile. The key covers each
+    // binary's real dependency closure, `Cargo.lock` and the pinned
+    // toolchain, so a hit proves the bytes are the ones this source tree
+    // produces — which is what makes reuse safe under `--release` and
+    // `release-witness` too, and safe to share across worktrees. The previous
+    // rule (`PROFILE == "debug"` plus "the file exists") could prove neither,
+    // so it had to refuse every other profile and still risked embedding a
+    // stale binary within the one it allowed.
     //
-    // The native per-VM helpers deliberately do NOT get this treatment: they
-    // are the supervisors where a stale binary silently produces a running
-    // guest that ignores your edit, and rebuilding them costs 13s.
-    // Explicitly opt IN only the plain debug profile. Cargo reports PROFILE as
-    // "debug"/"release"; keying on `!= "release"` would silently take the reuse
-    // path for any custom profile (e.g. `release-witness`) that reports
-    // something else, which is exactly the case where fresh bytes matter.
-    let reuse_prebuilt_embedded = std::env::var("PROFILE").unwrap_or_default() == "debug";
+    // A key *miss* is a different question from a key hit, and the answer
+    // differs by profile. Rebuilding the musl set costs ~163s, which is why
+    // the dev profile has always been allowed to boot a stale embedded binary
+    // rather than pay that on every edit. That trade is kept below — but the
+    // key now knows the artifact is stale, so the warning can say so instead
+    // of describing a reuse that may or may not have been current.
+    //
+    // `MVM_EMBED_NO_CACHE=1` opts out of both the store and the stale
+    // fallback, for release engineering that wants the bytes provably
+    // compiled in this run.
+    let force_rebuild = std::env::var_os("MVM_EMBED_NO_CACHE").is_some_and(|v| !v.is_empty());
+    let dev_profile = std::env::var("PROFILE").unwrap_or_default() == "debug" && !force_rebuild;
+    let mut cache = EmbedCache::discover(&workspace_root);
     let mut reused_any = false;
+    let mut stale_any = false;
 
     for binary in &manifest {
         let out_file = bins_out.join(&binary.name);
@@ -108,20 +229,57 @@ fn main() {
             .join(strip_glibc(&pin.target))
             .join("release")
             .join(&binary.name);
-        if reuse_prebuilt_embedded && prebuilt.is_file() {
+        let key = cache.key_for(&KeyRequest {
+            package: &binary.package,
+            binary: &binary.name,
+            features: &binary.features,
+            target: &pin.target,
+            toolchain: &format!("zig={} zigbuild={}", pin.zig, pin.cargo_zigbuild),
+            flavor: "musl-static",
+        });
+
+        if cache.restore(key.as_deref(), &binary.name, &out_file) {
             eprintln!(
-                "[build.rs] reusing prebuilt {} (dev profile; `cargo build --release` \
-                 or `just embed-refresh` rebuilds it)",
+                "[build.rs] embedded {} restored from the content store \
+                 (set MVM_EMBED_NO_CACHE=1 to rebuild)",
+                binary.name
+            );
+            reused_any = true;
+            // Seed the nested target dir the dev stale-fallback reads from.
+            // A worktree whose binaries all came from the store has never
+            // populated it, so without this the *first* source edit there
+            // falls through to a full ~163s cross-compile — moving the cost
+            // the store just removed rather than removing it.
+            seed_prebuilt(&out_file, &prebuilt);
+            let sha = sha256_hex(&out_file);
+            entries.push((binary.name.clone(), out_file.clone(), sha));
+            continue;
+        }
+
+        // Miss: the closure really did change. Under `--release` or
+        // `release-witness` that always means a rebuild. Under dev, fall back
+        // to whatever the nested target dir last produced, exactly as before
+        // the store existed — the difference is that we now know it is stale
+        // and can name the consequence.
+        if dev_profile && prebuilt.is_file() {
+            eprintln!(
+                "[build.rs] embedded {} is STALE — this build's changes are \
+                 NOT in it. Dev profile reuses it rather than pay a ~163s \
+                 cross-compile per edit; run `just embed-refresh` or build \
+                 with MVM_EMBED_NO_CACHE=1 before booting a VM that must \
+                 carry the change.",
                 binary.name
             );
             std::fs::copy(&prebuilt, &out_file).unwrap_or_else(|e| {
                 panic!("copy {} -> {}: {e}", prebuilt.display(), out_file.display())
             });
             reused_any = true;
+            stale_any = true;
             let sha = sha256_hex(&out_file);
             entries.push((binary.name.clone(), out_file.clone(), sha));
             continue;
         }
+
         run_cargo_zigbuild(
             ZigbuildRequest::default()
                 .with_root(&workspace_root)
@@ -134,12 +292,9 @@ fn main() {
                 .with_output(&out_file)
                 .build(),
         );
+        cache.publish(key.as_deref(), &binary.name, &out_file);
         let sha = sha256_hex(&out_file);
         entries.push((binary.name.clone(), out_file.clone(), sha));
-        println!(
-            "cargo:rerun-if-changed={}",
-            workspace_root.join("crates/mvm-build/src/bin").display()
-        );
     }
 
     // Loud, not silent: the runtime can tell the user their embedded set was
@@ -149,8 +304,23 @@ fn main() {
         "cargo:rustc-env=MVM_EMBEDDED_BINS_REUSED={}",
         if reused_any { "1" } else { "0" }
     );
+    // Reused-and-proven-fresh is not the same as reused-and-stale, and only
+    // the second one can make a guest ignore your edit. Cargo captures build
+    // script stderr unless you pass `-vv`, so the eprintln above is invisible
+    // in a normal build; `cargo:warning=` is the one channel it does surface.
+    // A developer whose edit will not reach the guest has to be told without
+    // having to know to look.
+    if stale_any {
+        println!(
+            "cargo:warning=embedded host binaries are STALE (this build's \
+             changes to their sources are not in them). Dev builds reuse them \
+             instead of a ~163s cross-compile. Run `just embed-refresh`, or \
+             set MVM_EMBED_NO_CACHE=1, before booting a VM that must carry \
+             the change."
+        );
+    }
 
-    build_native_aux_helpers(&workspace_root, &nested_target_dir);
+    build_native_aux_helpers(&workspace_root, &nested_target_dir, &mut cache);
 
     let embedded_rs = render_embedded_rs(&entries);
     std::fs::write(out_dir.join("embedded.rs"), embedded_rs).unwrap();
@@ -166,51 +336,20 @@ fn main() {
     );
     // The embedded binaries' bytes are the authoritative builder-VM
     // fingerprint input, so they must rebuild when their real inputs change —
-    // not just their `src/bin/` entrypoints. Watch the workspace lockfile (a
-    // dep bump in their closure) and the whole `mvm-build` lib they link.
+    // not just their `src/bin/` entrypoints. The lockfile covers a dep bump in
+    // their closure.
     println!(
         "cargo:rerun-if-changed={}",
         workspace_root.join("Cargo.lock").display()
     );
-    // Same file-by-file watch for the `mvm-build` lib the host bins link (a
-    // content edit there must re-cross-compile the embedded host bins).
-    emit_rerun_for_tree(&workspace_root.join("crates/mvm-build/src"));
-    // ...and every other workspace crate, because that is what these binaries
-    // actually link. Naming individual trees is what left the gap this
-    // replaces: the watch listed `mvm-build` only, while `mvm-egress-client`
-    // — the guest's entire egress path — lives in `mvm-agentd` and reaches
-    // `mvm-core` and `mvm-contract` beneath it. An edit to any of them
-    // embedded the previous binary, so the guest ran code the contributor did
-    // not write and nothing said so. A list cannot be kept correct against a
-    // dependency graph; watching the workspace can.
-    emit_rerun_for_workspace_crates(&workspace_root);
-}
-
-/// Watch every workspace crate's `src` tree.
-///
-/// Deliberately not a curated list — see the call site. Emitting paths is
-/// cheap; embedding a stale binary is not.
-fn emit_rerun_for_workspace_crates(workspace_root: &Path) {
-    let crates_dir = workspace_root.join("crates");
-    let Ok(entries) = std::fs::read_dir(&crates_dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
-        }
-        // `crates/deps/` holds vendored FFI crates one level deeper.
-        if path.file_name().is_some_and(|name| name == "deps") {
-            if let Ok(nested) = std::fs::read_dir(&path) {
-                for dep in nested.flatten() {
-                    emit_rerun_for_tree(&dep.path().join("src"));
-                }
-            }
-            continue;
-        }
-        emit_rerun_for_tree(&path.join("src"));
-    }
+    println!(
+        "cargo:rerun-if-changed={}",
+        workspace_root.join("rust-toolchain.toml").display()
+    );
+    // Every crate the cached binaries actually link, taken from the manifest
+    // graph rather than named here. Both legs have contributed their roots by
+    // now, so this covers the embedded set and the per-VM helpers alike.
+    cache.emit_rerun();
 }
 
 /// Emit one `cargo:rerun-if-changed` per file under `root`, recursively. Unlike
@@ -238,9 +377,14 @@ fn emit_rerun_for_tree(root: &Path) {
 /// them during its build phase rather than mvmctl shelling out to `cargo` at
 /// run time. The dedicated target dir avoids the outer build-lock deadlock the
 /// same way the embedded-bins path does (see the note in `main`).
-fn build_native_aux_helpers(workspace_root: &Path, nested_target_dir: &Path) {
+fn build_native_aux_helpers(
+    workspace_root: &Path,
+    nested_target_dir: &Path,
+    cache: &mut EmbedCache,
+) {
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     let target_arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
+    let host_target = std::env::var("TARGET").unwrap_or_default();
     let profile = std::env::var("PROFILE").unwrap_or_else(|_| "debug".to_string());
     let aux_target = nested_target_dir.join("aux-helper-target");
     let bin_dir = aux_target.join(&profile);
@@ -249,33 +393,38 @@ fn build_native_aux_helpers(workspace_root: &Path, nested_target_dir: &Path) {
     // `env!("MVM_AUX_BIN_DIR")` compiles in mvm-cli; resolution `is_file`-checks
     // each candidate, so a dir with missing bins is harmless.
     println!("cargo:rustc-env=MVM_AUX_BIN_DIR={}", bin_dir.display());
-    println!(
-        "cargo:rerun-if-changed={}",
-        workspace_root.join("crates/mvm-hostd/src").display()
-    );
-    println!(
-        "cargo:rerun-if-changed={}",
-        workspace_root.join("Cargo.lock").display()
-    );
-    println!(
-        "cargo:rerun-if-changed={}",
-        workspace_root.join("crates/mvm-core/src").display()
-    );
-    println!(
-        "cargo:rerun-if-changed={}",
-        workspace_root.join("crates/deps/libkrun-sys/src").display()
-    );
-    // The per-VM supervisors link `mvm-runtime` — it owns the VMM, the device
-    // model, and the FDT the guest boots on. Without this watch an edit there
-    // rebuilds `mvmctl` but leaves the supervisor binaries stale, so the change
-    // never reaches a running guest and the edit appears to do nothing. Use the
-    // file-by-file walk rather than a directory entry, for the same reason the
-    // `mvm-build` watch does.
-    emit_rerun_for_tree(&workspace_root.join("crates/mvm-runtime/src"));
 
+    // These are the supervisors, where a stale binary silently produces a
+    // running guest that ignores your edit — so they were rebuilt
+    // unconditionally, on every `cargo check` and `clippy` too. The content
+    // key is what makes skipping them safe: it cannot match unless the bytes
+    // are the ones this tree produces. Note the profile is part of the
+    // flavour, because unlike the musl leg these follow the outer profile.
     let libkrun_present = libkrun_header_present();
     for spec in build_aux_helpers::aux_helper_specs(&target_os, &target_arch, libkrun_present) {
+        let features = spec.features.join(",");
+        let key = cache.key_for(&KeyRequest {
+            package: spec.package,
+            binary: spec.bin,
+            features: &features,
+            target: &host_target,
+            toolchain: "native",
+            flavor: &format!("native-host-{profile}"),
+        });
+        let installed = bin_dir.join(spec.bin);
+
+        if cache.restore(key.as_deref(), spec.bin, &installed) {
+            eprintln!(
+                "[build.rs] per-VM host helper {} restored from the content store",
+                spec.bin
+            );
+            continue;
+        }
+
         run_cargo_native_build(workspace_root, &aux_target, &profile, &spec);
+        if installed.is_file() {
+            cache.publish(key.as_deref(), spec.bin, &installed);
+        }
     }
 }
 
@@ -591,6 +740,21 @@ fn scoped_tool_cache_dir(tool: &str, target_dir: &Path) -> PathBuf {
         .unwrap_or(target_dir)
         .join("tool-cache")
         .join(tool)
+}
+
+/// Place a restored artifact where the dev stale-fallback expects to find it.
+///
+/// Best-effort: failing to seed costs a slower next build, never a wrong one.
+fn seed_prebuilt(source: &Path, prebuilt: &Path) {
+    if prebuilt.is_file() {
+        return;
+    }
+    let Some(parent) = prebuilt.parent() else {
+        return;
+    };
+    if std::fs::create_dir_all(parent).is_ok() {
+        let _ = std::fs::copy(source, prebuilt);
+    }
 }
 
 fn sha256_hex(p: &Path) -> String {
