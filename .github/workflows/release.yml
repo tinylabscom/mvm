@@ -589,6 +589,24 @@ jobs:
             -f tag="${TAG_NAME}" \
             -f dry_run=false
 
+      # Same rule, same fix, for the kernels. `kernel-build.yml` declares
+      # `on.push.tags: v*` and has never once run from it: whatever creates the
+      # tag does so under GITHUB_TOKEN, which emits no `push` event, so the
+      # publish arm has never fired on a release. The result is releases whose
+      # `mvmctl kernel build --source download` 404s — the only supported
+      # acquisition path for a host that cannot compile kernels. Chain it
+      # explicitly rather than relying on an event that demonstrably does not
+      # arrive.
+      - name: Trigger kernel build + publish workflow
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          # No `-f` inputs: kernel-build.yml declares `workflow_dispatch: {}`,
+          # and `--ref <tag>` already gives it the `refs/tags/v*` github.ref its
+          # publish steps gate on.
+          gh workflow run kernel-build.yml --ref "${TAG_NAME}"
+
   # Plan 199 B2: post-publish gate. Download the just-created release and assert
   # every binary target has a tarball + matching SHA256 + cosign signature bundle
   # + an entry in the combined checksums manifest, and that the SBOM is signed.
