@@ -25,6 +25,11 @@ import { Footer } from "./Footer";
 //                         reader has just *seen* the governance the story
 //                         argues for.
 //   3. Quickstart       — the shortest path from install to a running microVM.
+//   4b. Execution contract — the composition argument: isolation is table
+//                         stakes, the six-layer contract around the box is
+//                         the differentiator. Placed before Positioning so
+//                         the reader knows what they're buying before the
+//                         tour of how to drive it.
 //   5. Positioning      — "one project, three ways to drive it": CLI,
 //                         Declare, Runtime, each given its own row.
 //   6. Why a microVM      — the positive case for the boundary, made once.
@@ -32,10 +37,6 @@ import { Footer } from "./Footer";
 //                         just seen how you *use* mvm, so this is where
 //                         "here's what you're actually getting" lands
 //                         hardest.
-//   6c. Execution contract — the composition argument: isolation is table
-//                         stakes, the six-layer contract around the box is
-//                         the differentiator. Directly after the boundary
-//                         section so it reads as the escalation of it.
 //   6a. Deployment tiers — "one contract, four places to run it": the
 //                         product-site tier grid (local / hosted / edge /
 //                         confidential), after the case for the boundary
@@ -65,9 +66,9 @@ export function Landing() {
       <DemoTeaser />
       <WhyNow />
       <Quickstart />
+      <ExecutionContract />
       <Positioning />
       <WhyMicrovm />
-      <ExecutionContract />
       <DeploymentTiers />
       <Backends />
       <FAQ />

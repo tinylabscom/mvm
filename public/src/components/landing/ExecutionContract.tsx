@@ -58,7 +58,9 @@ export function ExecutionContract() {
   const base = rawBase.endsWith("/") ? rawBase : `${rawBase}/`;
 
   return (
-    <Section id="execution-contract" rule className="bg-raised">
+    // No bg-raised: this section now sits directly above Positioning, which
+    // is raised — keeping this one on the canvas preserves the alternation.
+    <Section id="execution-contract" rule>
       <Reveal>
         <Eyebrow>The contract</Eyebrow>
         <h2 className="mb-4 lowercase font-display text-2xl font-bold leading-tight text-title sm:text-3xl">
@@ -82,7 +84,7 @@ export function ExecutionContract() {
       >
         {LAYERS.map((layer, i) => (
           <Reveal key={layer.num} delay={i * 60}>
-            <div className="flex h-full gap-4 rounded-xl border border-glass-border/60 bg-canvas p-5">
+            <div className="flex h-full gap-4 rounded-xl border border-glass-border/60 bg-raised p-5">
               <p className="font-mono text-lg font-semibold leading-none text-accent">
                 {layer.num}
               </p>
