@@ -279,17 +279,18 @@ This design consumes those contracts rather than defining new ones. Before
 implementation, the new documents should name them, so a second session and
 approval model is not built alongside the first.
 
-Numbering was reconciled while carrying these documents onto this branch:
+Numbering was reconciled before these documents landed on main (PR #2691):
 
 - Both new ADRs carried `# ADR-043` as their H1, a number already held by
   `specs/adrs/043-client-interface-conformance.md`. Retitled to ADR-045 and
   ADR-046 so the titles match their filenames.
 - Both new plans were number-named, which `check-plan-names` refuses, and
   their H1s claimed "Plan 329" and "Plan 338" — 329 is already held by three
-  files. Renamed to date-prefixed slugs, with the bare numbers dropped from
-  their titles.
+  files. They now carry date-prefixed slugs with the bare numbers dropped:
+  `specs/plans/2026-08-18-capability-secure-intelligent-workflows.md` and
+  `specs/plans/2026-08-18-secure-message-fabric.md`.
 - ADR-046 read "Implemented by: Plan 338", which agreed with the
-  message-fabric plan title but not its filename. It now names the path.
+  message-fabric plan title but not its filename.
 - Left alone: ADR-045 cites "Plan 329" in its Related list, and three legacy
   files claim that number. Disambiguating it needs the author intent.
 
@@ -319,7 +320,7 @@ Numbering was reconciled while carrying these documents onto this branch:
 - Group quiesce and consistent cuts across multiple sandboxes (follow-on spec;
   the record is shaped for it).
 - The agent-to-agent message fabric itself (ADR-046 and
-  `specs/plans/2026-08-15-secure-message-fabric.md`).
+  `specs/plans/2026-08-18-secure-message-fabric.md`).
 - Fleet placement, cross-host resume, replicated session storage (`mvmd`).
 - Changing archive-before-purge or cryptographic erasure (ADR-046 §7, §13).
 
