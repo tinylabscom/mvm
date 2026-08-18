@@ -225,6 +225,51 @@ fn download_release(version: &str, target: &str, tmp_dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Whether a release with this tag exists at all.
+///
+/// Only ever called on the error path, so the extra request costs nothing in
+/// the success case. An unreachable or rate-limited API answers `true`: the
+/// point of the probe is to *sharpen* a message, and guessing "no release"
+/// from a failed lookup would state something false with more confidence than
+/// the vaguer wording it replaced.
+fn release_exists(tag: &str) -> bool {
+    let url = format!(
+        "{}/repos/{}/releases/tags/{}",
+        github_api_base(),
+        GITHUB_REPO,
+        tag
+    );
+    match http::fetch_json(&url) {
+        Ok(v) => v.get("tag_name").is_some(),
+        // Distinguishing "404, no such release" from "the network is down"
+        // would need a status code this helper does not get. Both land here,
+        // and both are better served by the asset-missing wording.
+        Err(_) => true,
+    }
+}
+
+/// The advice to print when a kernel download 404s.
+///
+/// A missing asset and a missing release are the same HTTP status and
+/// different problems. An in-development build always hits the second — the
+/// crate version runs ahead of the last tag, by construction — and telling
+/// that user to "cut a release that publishes kernels" points them at
+/// something that is not broken, when what they want is to compile.
+fn kernel_fetch_hint(tag: &str, asset: &str, release_exists: bool) -> String {
+    if release_exists {
+        format!(
+            "release {tag} exists but publishes no kernel asset {asset}. Build it \
+             locally with `--source compile`, or cut a release that publishes kernels."
+        )
+    } else {
+        format!(
+            "there is no release {tag} to download {asset} from. This mvmctl was \
+             built from a version that has not been released — a source checkout \
+             compiles instead: `--source compile`."
+        )
+    }
+}
+
 /// Download a published kernel (`vmlinux-<arch>-<variant>`) from the
 /// release matching this mvmctl's version, SHA-256-verify it against the
 /// release's `kernel-<arch>-checksums-sha256.txt`, and write it to
@@ -271,12 +316,7 @@ pub(crate) fn download_kernel(arch: &str, variant: &str, dest: &Path) -> Result<
     let sp = ui::spinner(&format!("Downloading {asset} ({tag})..."));
     let dl = http::download_file(&asset_url, &download);
     sp.finish_and_clear();
-    dl.with_context(|| {
-        format!(
-            "no kernel asset {asset} in release {tag}. Build it locally with \
-             `--source compile`, or cut a release that publishes kernels."
-        )
-    })?;
+    dl.with_context(|| kernel_fetch_hint(&tag, &asset, release_exists(&tag)))?;
 
     // The signature rung runs even under MVM_SKIP_HASH_VERIFY: that hatch
     // waives comparing the digest, not the question of who published the
@@ -1073,5 +1113,44 @@ mod tests {
             recorded.trim(),
             mvm_fs::overlay::compute_file_sha256(&dest).unwrap()
         );
+    }
+
+    /// The two 404s are different problems and must not read the same. A
+    /// missing release means "this build was never released, compile"; a
+    /// missing asset means "this release ships no kernels". Sending a
+    /// developer to cut a release, or a user to compile on a host with no
+    /// toolchain, is the failure this split exists to prevent.
+    #[test]
+    fn a_missing_release_and_a_missing_asset_give_different_advice() {
+        let no_release = kernel_fetch_hint("v0.18.0", "vmlinux-aarch64-workload", false);
+        let no_asset = kernel_fetch_hint("v0.17.0", "vmlinux-aarch64-workload", true);
+        assert_ne!(no_release, no_asset);
+
+        assert!(
+            no_release.contains("no release v0.18.0"),
+            "must name the absent release: {no_release}"
+        );
+        assert!(
+            !no_release.contains("cut a release"),
+            "a build that predates its own release is not fixed by cutting one: {no_release}"
+        );
+
+        assert!(
+            no_asset.contains("exists but publishes no kernel asset"),
+            "must say the release is present and the asset is not: {no_asset}"
+        );
+    }
+
+    /// Both arms name the asset and offer `--source compile`, since that is
+    /// the way forward either way.
+    #[test]
+    fn both_hints_name_the_asset_and_the_compile_escape() {
+        for hint in [
+            kernel_fetch_hint("v0.18.0", "vmlinux-x86_64-builder", false),
+            kernel_fetch_hint("v0.18.0", "vmlinux-x86_64-builder", true),
+        ] {
+            assert!(hint.contains("vmlinux-x86_64-builder"), "{hint}");
+            assert!(hint.contains("--source compile"), "{hint}");
+        }
     }
 }
