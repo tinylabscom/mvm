@@ -7,6 +7,40 @@
  */
 
 import { cliResolutionHint, resolveCliBin } from "./_cli.js";
+import { envFloat, envInt } from "./_env/read.js";
+
+// Owned by the Rust registry (crates/mvm-sdk/src/env.rs), generated into
+// `_env/vars.ts`. Re-exported from this module so importers reach them where
+// the Python SDK puts them too.
+export { MVM_MACHINE_MAX_OUTPUT_ENV, MVM_MACHINE_TIMEOUT_ENV } from "./_env/vars.js";
+import { MVM_MACHINE_MAX_OUTPUT_ENV, MVM_MACHINE_TIMEOUT_ENV } from "./_env/vars.js";
+
+// This package is ESM ("type": "module"), so `require` does not exist at
+// runtime. These node builtins are imported statically; a lazy `require` here
+// throws `ReferenceError: require is not defined` for every consumer of the
+// built artifact.
+import * as child from "node:child_process";
+
+/** Wall-clock budget for one `mvmctl machine` call, in seconds. */
+const DEFAULT_MACHINE_TIMEOUT_SEC = 60;
+
+/** Cap on captured output, per stream, in bytes. */
+const DEFAULT_MACHINE_MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
+
+function machineTimeoutMs(): number {
+  const seconds = envFloat(MVM_MACHINE_TIMEOUT_ENV, DEFAULT_MACHINE_TIMEOUT_SEC);
+  const ms = Math.round(seconds * 1000);
+  // `spawnSync` treats 0 (and anything non-positive) as "no timeout", which
+  // inverts the meaning of a zero budget from "give up at once" — what the
+  // Python SDK does with the same value — into the unbounded wait this bound
+  // exists to remove. Floor it instead.
+  return Number.isFinite(ms) && ms > 0 ? ms : 1;
+}
+
+function machineMaxOutputBytes(): number {
+  const bytes = envInt(MVM_MACHINE_MAX_OUTPUT_ENV, DEFAULT_MACHINE_MAX_OUTPUT_BYTES);
+  return bytes > 0 ? bytes : DEFAULT_MACHINE_MAX_OUTPUT_BYTES;
+}
 
 export interface MachineResult {
   exitCode: number;
@@ -51,6 +85,11 @@ export interface MachineCheckArtifactOptions {
 }
 
 export interface MachineStartOptions {
+  /** Describe the machine to create when the named spec does not exist yet;
+   *  `machine start` auto-creates from these. */
+  image?: string;
+  cpus?: number;
+  memory?: string;
   receipt?: string;
   json?: boolean;
   dryRun?: boolean;
@@ -134,23 +173,52 @@ function runMachine(argv: string[]): MachineResult {
     throw new MachineError(String(err instanceof Error ? err.message : err));
   }
   const full = [bin, "machine", ...argv];
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const child = require("node:child_process") as typeof import("node:child_process");
+  const timeoutMs = machineTimeoutMs();
+  const maxBuffer = machineMaxOutputBytes();
   let result;
   try {
-    result = child.spawnSync(bin, ["machine", ...argv], { encoding: "utf-8" });
+    // The substrate may hang or return gigabytes. Bounding both here is what
+    // keeps a misbehaving machine from taking the caller down with it; the
+    // Python SDK bounds the same two things with the same two variables.
+    // Unlike Python's `run_capped`, `spawnSync` signals only the child, not
+    // its process group, so a grandchild that outlives the kill can still hold
+    // the pipes — the wait is bounded either way, the reap is best-effort.
+    result = child.spawnSync(bin, ["machine", ...argv], {
+      encoding: "utf-8",
+      timeout: timeoutMs,
+      maxBuffer,
+    });
   } catch (err) {
     throw new MachineError(`\`${bin}\` not found on disk; ${cliResolutionHint()}: ${String(err)}`, {
       argv: full,
     });
   }
   if (result.error) {
+    // `spawnSync` reports "could not start it", "it ran too long" and "it said
+    // too much" through the same field. Reading all three as a spawn failure
+    // sends the reader to look for a missing binary when the binary ran fine.
+    const code = (result.error as NodeJS.ErrnoException).code;
+    if (code === "ETIMEDOUT") {
+      throw new MachineError(`\`${bin}\` did not exit within ${timeoutMs / 1000}s`, { argv: full });
+    }
+    if (code === "ENOBUFS") {
+      // Node does not say which stream overflowed, so — unlike Python, which
+      // caps each one itself and names it — this names the cap, not the side.
+      throw new MachineError(`\`${bin}\` exceeded ${maxBuffer} bytes on stdout or stderr`, {
+        argv: full,
+      });
+    }
     throw new MachineError(`failed to spawn \`${bin}\`: ${result.error.message}`, {
       argv: full,
     });
   }
   if (result.status !== 0) {
-    throw new MachineError(`\`mvmctl machine\` failed with exit code ${result.status}`, {
+    // A signalled child has no exit code, and "exit code null" names nothing.
+    const cause =
+      result.status === null && result.signal
+        ? `was killed by ${result.signal}`
+        : `failed with exit code ${result.status}`;
+    throw new MachineError(`\`mvmctl machine\` ${cause}`, {
       argv: full,
       exitCode: result.status,
       stderr: result.stderr ?? "",
@@ -215,6 +283,9 @@ export function machineCheckArtifactArgv(options: MachineCheckArtifactOptions): 
 export function machineStartArgv(name: string, options: MachineStartOptions = {}): string[] {
   // `machine start` takes a positional name, not `--name`.
   const argv = ["start", requireString(name, "name")];
+  if (options.image !== undefined) argv.push("--image", requireString(options.image, "image"));
+  if (options.cpus !== undefined) argv.push("--cpus", String(options.cpus));
+  if (options.memory !== undefined) argv.push("--memory", requireString(options.memory, "memory"));
   if (options.receipt !== undefined) argv.push("--receipt", requireString(options.receipt, "receipt"));
   if (options.json) argv.push("--json");
   if (options.dryRun) argv.push("--dry-run");

@@ -157,15 +157,14 @@ fn hex_encode(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use ed25519_dalek::{Signer, SigningKey};
-    use rand::rngs::OsRng;
+    use rand::Rng;
 
     use super::*;
 
     fn fresh_keys() -> (SigningKey, VerifyingKey) {
-        let mut rng = OsRng;
         let sk = {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             SigningKey::from_bytes(&__ed_seed)
         };
         let vk = sk.verifying_key();

@@ -7,11 +7,17 @@
 //! It does not boot a microVM and does not install a seccomp filter, so
 //! the workload runs normally while being observed.
 //!
-//! The current implementation traces the main process only; forked children
-//! and spawned threads are not audited. That is enough to discover the
-//! baseline syscall surface of most single-process build scripts and CLI
-//! tools. Multi-threaded/multi-process workloads may need to be audited
-//! piecemeal or inside a guest VM with `mvm-seccomp-apply`.
+//! The tracer follows clones, forks and vforks, so a multi-threaded or
+//! multi-process workload is audited whole. This matters for deriving a real
+//! allowlist: every host role that would consume one builds a multi-threaded
+//! tokio runtime, and an allowlist derived from the main thread alone is
+//! incomplete by construction — the failure mode being SIGSYS under load,
+//! after the filter is already installed.
+//!
+//! Syscall entry/exit state is tracked per tracee. It cannot be one flag for
+//! the session: entry and exit are separate stops, sibling threads interleave
+//! them freely, and a shared flag would pair one thread's entry with
+//! another's exit and record the wrong half.
 //!
 //! Linux-only: ptrace is not available on macOS, and the seccomp tiers
 //! are defined for Linux guests.
@@ -81,13 +87,30 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args) -> Result<()> {
     }
 }
 
+/// Whether a stop is a new tracee halting at birth rather than a signal the
+/// workload sent itself.
+///
+/// Asking to follow clones means every new thread stops with `SIGSTOP` the
+/// moment it exists. That stop is an artefact of attachment; forwarding it with
+/// `ptrace::syscall(pid, Some(sig))` would deliver a stop the workload never
+/// raised and can wedge a thread before it runs its first instruction. A
+/// genuine `SIGSTOP` to an already-known tracee still has to be delivered.
+/// Takes the raw signal number rather than `nix`'s `Signal` so it stays
+/// testable on hosts where `nix` is not linked; `nix` is a Linux-only
+/// dependency here but this decision is worth a witness anywhere.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn is_new_tracee_birth_stop(first_sighting: bool, signal: i32) -> bool {
+    first_sighting && signal == libc::SIGSTOP
+}
+
 #[cfg(target_os = "linux")]
 fn run_linux(args: Args) -> Result<()> {
     use anyhow::Context;
     use nix::sys::ptrace::{self, Options};
     use nix::sys::signal::Signal;
-    use nix::sys::wait::{WaitStatus, waitpid};
-    use std::collections::HashSet;
+    use nix::sys::wait::{WaitPidFlag, WaitStatus, waitpid};
+    use nix::unistd::Pid;
+    use std::collections::{HashMap, HashSet};
 
     use mvm_core::crypto::seccomp::syscall_table;
 
@@ -143,45 +166,101 @@ fn run_linux(args: Args) -> Result<()> {
         other => bail!("unexpected initial wait status: {other:?}"),
     }
 
-    let options = Options::PTRACE_O_TRACESYSGOOD | Options::PTRACE_O_TRACEEXEC;
+    // TRACECLONE/FORK/VFORK make every new thread and child a tracee of ours,
+    // stopped at birth, so none of them runs a syscall we fail to see.
+    let options = Options::PTRACE_O_TRACESYSGOOD
+        | Options::PTRACE_O_TRACEEXEC
+        | Options::PTRACE_O_TRACECLONE
+        | Options::PTRACE_O_TRACEFORK
+        | Options::PTRACE_O_TRACEVFORK;
     ptrace::setoptions(main_pid, options).context("failed to set ptrace options")?;
 
     // Start the tracee; from here on we use PTRACE_SYSCALL to stop at every entry/exit.
     ptrace::syscall(main_pid, None).context("failed to resume tracee")?;
 
     let mut observed = HashSet::new();
-    // Tracks whether the tracee is currently inside a syscall, so we only record on entry.
-    let mut in_syscall = false;
+    // Per-tracee syscall-entry state. A tracee alternates entry/exit stops, but
+    // siblings interleave, so this cannot collapse to one flag for the session.
+    let mut in_syscall: HashMap<Pid, bool> = HashMap::new();
+    // Tracees we have seen. A clone event and the new child's own SIGSTOP race,
+    // so whichever arrives first registers it and the other is a no-op.
+    let mut live: HashSet<Pid> = HashSet::new();
+    live.insert(main_pid);
 
-    let main_exit_code = loop {
-        let status = waitpid(main_pid, None)?;
+    let mut main_exit_code = None;
+
+    // __WALL: without it waitpid ignores clone()d threads, which is most of
+    // what we are here to observe.
+    let wait_flags = Some(WaitPidFlag::__WALL);
+
+    while !live.is_empty() {
+        let status = match waitpid(Pid::from_raw(-1), wait_flags) {
+            Ok(status) => status,
+            // No children left to reap.
+            Err(nix::errno::Errno::ECHILD) => break,
+            Err(e) => return Err(e).context("waitpid failed"),
+        };
+
+        let pid = match status.pid() {
+            Some(pid) => pid,
+            None => continue,
+        };
 
         match status {
-            WaitStatus::Exited(_, code) => break Some(code),
+            WaitStatus::Exited(_, code) => {
+                live.remove(&pid);
+                in_syscall.remove(&pid);
+                if pid == main_pid {
+                    main_exit_code = Some(code);
+                }
+                continue;
+            }
             WaitStatus::Signaled(_, sig, _) => {
-                bail!("audited command killed by signal {sig:?}");
+                live.remove(&pid);
+                in_syscall.remove(&pid);
+                // Only the main process dying by signal invalidates the audit;
+                // a worker thread killed by design does not.
+                if pid == main_pid {
+                    bail!("audited command killed by signal {sig:?}");
+                }
+                continue;
             }
             WaitStatus::PtraceSyscall(_) => {
-                let regs = ptrace::getregs(main_pid).context("failed to read tracee registers")?;
+                let regs = ptrace::getregs(pid).context("failed to read tracee registers")?;
                 let nr = extract_syscall_number(&regs);
 
-                in_syscall = !in_syscall;
-                if in_syscall {
+                let entering = in_syscall.entry(pid).or_insert(false);
+                *entering = !*entering;
+                if *entering {
                     observed.insert(nr);
                 }
 
-                ptrace::syscall(main_pid, None).context("failed to resume after syscall")?;
+                ptrace::syscall(pid, None).context("failed to resume after syscall")?;
             }
             WaitStatus::PtraceEvent(_, _, _) => {
-                ptrace::syscall(main_pid, None).context("failed to resume after ptrace event")?;
+                // A clone/fork/vfork event carries the new tracee's pid. Register
+                // it here; it is already stopped and gets resumed on its own stop.
+                if let Ok(new) = ptrace::getevent(pid) {
+                    let new_pid = Pid::from_raw(new as i32);
+                    if new > 0 {
+                        live.insert(new_pid);
+                    }
+                }
+                ptrace::syscall(pid, None).context("failed to resume after ptrace event")?;
             }
             WaitStatus::Stopped(_, sig) => {
-                // A genuine signal stop (not a syscall stop). Deliver it.
-                ptrace::syscall(main_pid, Some(sig)).context("failed to deliver signal")?;
+                // A tracee we have not seen yet is a new thread stopping at
+                // birth; its SIGSTOP is an artefact of attachment, not a signal
+                // the workload sent, so it must not be delivered onward.
+                if is_new_tracee_birth_stop(live.insert(pid), sig as i32) {
+                    ptrace::syscall(pid, None).context("failed to resume new tracee")?;
+                } else {
+                    ptrace::syscall(pid, Some(sig)).context("failed to deliver signal")?;
+                }
             }
             _ => {}
         }
-    };
+    }
 
     // The main child has already been reaped by the waitpid loop above.
     let _child_pid = main_pid;
@@ -329,5 +408,30 @@ mod tests {
         assert_eq!(next_tier(&SeccompTier::Standard), "network");
         assert_eq!(next_tier(&SeccompTier::Network), "unrestricted");
         assert_eq!(next_tier(&SeccompTier::Unrestricted), "unrestricted");
+    }
+}
+
+#[cfg(test)]
+mod traceclone_tests {
+    use super::is_new_tracee_birth_stop;
+
+    #[test]
+    fn a_new_tracees_birth_sigstop_is_not_forwarded() {
+        assert!(is_new_tracee_birth_stop(true, libc::SIGSTOP));
+    }
+
+    #[test]
+    fn a_known_tracees_sigstop_is_still_delivered() {
+        // The workload really did stop itself; swallowing this would change
+        // the behaviour of the program under audit.
+        assert!(!is_new_tracee_birth_stop(false, libc::SIGSTOP));
+    }
+
+    #[test]
+    fn a_new_tracees_other_signal_is_still_delivered() {
+        // Only SIGSTOP is the attachment artefact. A first-sighting SIGSEGV is
+        // real and must reach the tracee.
+        assert!(!is_new_tracee_birth_stop(true, libc::SIGSEGV));
+        assert!(!is_new_tracee_birth_stop(true, libc::SIGTERM));
     }
 }

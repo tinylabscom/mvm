@@ -8,25 +8,10 @@ name: Kernel build
 # the hash-verified `vmlinux` artifacts that `mvmctl kernel build
 # --source download` fetches.
 #
-# Triggers:
-#   - pull_request touching the kernel config → build + verify, no publish.
-#   - workflow_dispatch → build (manual), no publish.
-#   - push tag v* → build + publish to the release ("no prebuilt until
-#     release" — PRs never publish).
-
-# Deliberately unfiltered at the trigger, with the scope decision moved into
-# the `scope` job below. A `paths:` filter here means the check simply does
-# not appear on an unrelated PR, and a check that never appears cannot be a
-# required one — which is how a kernel budget lowered below the real symbol
-# count reached main and stayed there. `merge_group` additionally accepts no
-# `paths:` filter at all, so filtering at the trigger cannot block a bad merge
-# even in principle.
+# Pull-request and merge-group validation lives in ci.yml, behind its shared
+# fail-closed scope job. This workflow owns explicit diagnostic builds and
+# release publication, avoiding a second scope runner for every queue entry.
 on:
-  pull_request:
-  # Required for the merge queue: the check must run against the merge_group
-  # event to be able to stop a merge.
-  merge_group:
-    types: [checks_requested]
   workflow_dispatch: {}
   push:
     tags:
@@ -40,71 +25,10 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     uses: ./.github/workflows/bdd.yml
 
-  # Does this change touch anything that can move the resolved kernel config?
-  # Cheap (a checkout and a diff), and it runs on every event so the kernel
-  # check is always reported and can therefore be marked required.
-  scope:
-    name: Kernel scope
-    runs-on: ubuntu-latest
-    outputs:
-      relevant: ${{ steps.decide.outputs.relevant }}
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-
-      - name: Decide whether the kernel needs rebuilding
-        id: decide
-        env:
-          # `merge_group` carries its own base/head; `pull_request` does not
-          # expose them as refs the runner has, so they are read from the event.
-          EVENT: ${{ github.event_name }}
-          MG_BASE: ${{ github.event.merge_group.base_sha }}
-          MG_HEAD: ${{ github.event.merge_group.head_sha }}
-          PR_BASE: ${{ github.event.pull_request.base.sha }}
-          PR_HEAD: ${{ github.event.pull_request.head.sha }}
-        run: |
-          set -euo pipefail
-          # A tag build publishes release assets and a manual dispatch is an
-          # explicit ask; neither is a diff, so both always build.
-          if [ "$EVENT" = "push" ] || [ "$EVENT" = "workflow_dispatch" ]; then
-            echo "relevant=true" >> "$GITHUB_OUTPUT"
-            echo "event=$EVENT — always builds"
-            exit 0
-          fi
-
-          case "$EVENT" in
-            merge_group)   BASE="$MG_BASE"; HEAD="$MG_HEAD" ;;
-            pull_request)  BASE="$PR_BASE"; HEAD="$PR_HEAD" ;;
-            *) echo "::error::unhandled event $EVENT" >&2; exit 1 ;;
-          esac
-
-          # Fail closed: if the range cannot be resolved, build rather than
-          # assume the change is irrelevant.
-          if ! CHANGED=$(git diff --name-only "$BASE" "$HEAD" 2>/dev/null); then
-            echo "relevant=true" >> "$GITHUB_OUTPUT"
-            echo "could not diff $BASE..$HEAD — building to stay safe"
-            exit 0
-          fi
-
-          # The inputs that can move the resolved config. Kept here rather than
-          # in a trigger `paths:` so the same list governs pull_request and
-          # merge_group, which cannot express one.
-          if printf '%s\n' "$CHANGED" | grep -Eq \
-            '^(nix/images/kernel/|nix/images/builder-vm/flake\.(nix|lock)$|xtask/src/check_kernel_config_budget\.rs$|\.github/workflows/kernel-build\.yml$)'; then
-            echo "relevant=true" >> "$GITHUB_OUTPUT"
-            echo "kernel-relevant paths changed:"
-            printf '%s\n' "$CHANGED" | grep -E \
-              '^(nix/images/kernel/|nix/images/builder-vm/flake\.(nix|lock)$|xtask/src/check_kernel_config_budget\.rs$|\.github/workflows/kernel-build\.yml$)'
-          else
-            echo "relevant=false" >> "$GITHUB_OUTPUT"
-            echo "no kernel-relevant paths in $BASE..$HEAD"
-          fi
-
   kernel:
     name: Build kernels (${{ matrix.arch }})
-    needs: [bdd, scope]
-    if: ${{ always() && (needs.bdd.result == 'success' || needs.bdd.result == 'skipped') && needs.scope.result == 'success' }}
+    needs: [bdd]
+    if: ${{ always() && (needs.bdd.result == 'success' || needs.bdd.result == 'skipped') }}
     strategy:
       fail-fast: false
       matrix:
@@ -114,87 +38,23 @@ jobs:
           - arch: x86_64
             runner: ubuntu-latest
     runs-on: ${{ matrix.runner }}
+    # Narrowed to this job rather than the workflow, so the reusable bdd call
+    # above does not also inherit an OIDC token it has no use for. A job-level
+    # block replaces the inherited set outright, hence contents: write is
+    # repeated here for the release upload.
+    permissions:
+      contents: write
+      id-token: write
     steps:
-      - name: Report scope
-        run: |
-          if [ "${{ needs.scope.outputs.relevant }}" = "true" ]; then
-            echo "kernel inputs changed — building and enforcing the symbol budget"
-          else
-            echo "no kernel-relevant change; nothing to rebuild, so the budget"
-            echo "cannot have moved. Reporting success so this check stays"
-            echo "required rather than absent."
-          fi
-
       - uses: actions/checkout@v6
-        if: needs.scope.outputs.relevant == 'true'
 
       - name: Install Nix
-        if: needs.scope.outputs.relevant == 'true'
         uses: DeterminateSystems/nix-installer-action@main
 
       - name: Build builder + workload kernels
-        if: needs.scope.outputs.relevant == 'true'
         env:
           ARCH: ${{ matrix.arch }}
-        # `--impure` lets the builder-vm flake read MVM_WORKSPACE_PATH via
-        # getEnv (unset here → it falls back to the in-tree path, same as
-        # the `default` image lane). The kernel attrs don't touch the
-        # rootfs, so no MVM_HOST_BIN_DIR is needed. aarch64 emits `Image`,
-        # x86_64 emits `bzImage`; normalise both to `vmlinux-<arch>-<variant>`.
-        run: |
-          set -euo pipefail
-          SYSTEM="${ARCH}-linux"
-          mkdir -p staging
-          for variant in builder workload; do
-            STORE=$(nix build \
-              "./nix/images/builder-vm#packages.${SYSTEM}.${variant}-kernel" \
-              --impure --no-link --print-out-paths | head -1)
-            if   [ -f "$STORE/Image" ];   then SRC="$STORE/Image"
-            elif [ -f "$STORE/bzImage" ]; then SRC="$STORE/bzImage"
-            else
-              echo "::error::no kernel image (Image/bzImage) in $STORE" >&2
-              ls -la "$STORE" >&2
-              exit 1
-            fi
-            cp "$SRC" "staging/vmlinux-${ARCH}-${variant}"
-          done
-          # KernelArtifactId for the workload kernel — the identity the host
-          # resolves a kernel pin against (field names match the Rust type).
-          CFG=$(nix build \
-            "./nix/images/builder-vm#packages.${SYSTEM}.workload-kernel-configfile" \
-            --impure --no-link --print-out-paths | head -1)
-          KVER=$(basename "$STORE" | sed -E 's/^linux-//')
-          CONFIG_HASH=$(sha256sum "$CFG" | cut -d' ' -f1)
-          ARTIFACT_HASH=$(sha256sum "staging/vmlinux-${ARCH}-workload" | cut -d' ' -f1)
-          printf '{"kernel_version":"%s","config_hash":"%s","artifact_hash":"%s"}\n' \
-            "$KVER" "$CONFIG_HASH" "$ARTIFACT_HASH" > "staging/kernel-${ARCH}.json"
-          # Resolved workload .config + size/symbol metrics — the inputs to
-          # the shrink audit + the check-kernel-config-budget gate.
-          cp "$CFG" "staging/workload-config-${ARCH}"
-          Y_COUNT=$(grep -c '=y$' "$CFG")
-          # Per-arch symbol-budget ratchet: fail if this arch's workload kernel
-          # grew a new built-in past its committed ceiling. The budgets live in
-          # the xtask (single source of truth) — read the arch-specific one out
-          # rather than duplicate it, so this can't drift from
-          # `cargo run -p xtask -- check-kernel-config-budget`.
-          BUDGET=$(grep -oP "BUDGET_${ARCH^^}: usize = \K[0-9]+" \
-            xtask/src/check_kernel_config_budget.rs)
-          echo "workload kernel ${ARCH}: ${Y_COUNT} =y symbols (budget ${BUDGET})"
-          if [ "$Y_COUNT" -gt "$BUDGET" ]; then
-            echo "::error::workload kernel ${ARCH} has ${Y_COUNT} built-in (=y) symbols, \
-              over the ${BUDGET} budget — a new subsystem was compiled in. Drop it, or bump \
-              BUDGET_${ARCH^^} in xtask/src/check_kernel_config_budget.rs with justification."
-            exit 1
-          fi
-          RAW_BYTES=$(stat -c%s "staging/vmlinux-${ARCH}-workload")
-          GZ_BYTES=$(gzip -c "staging/vmlinux-${ARCH}-workload" | wc -c)
-          printf '{"arch":"%s","y_symbol_count":%d,"vmlinux_bytes":%d,"vmlinux_gz_bytes":%d}\n' \
-            "$ARCH" "$Y_COUNT" "$RAW_BYTES" "$GZ_BYTES" > "staging/kernel-metrics-${ARCH}.json"
-          cd staging
-          sha256sum vmlinux-${ARCH}-* > "kernel-${ARCH}-checksums-sha256.txt"
-          echo "=== kernel artifacts (${ARCH}) ==="
-          cat "kernel-${ARCH}-checksums-sha256.txt" "kernel-${ARCH}.json" "kernel-metrics-${ARCH}.json"
-          du -h vmlinux-${ARCH}-*
+        run: bash scripts/build-kernel-artifacts.sh "$ARCH"
 
       - name: Upload kernel artifacts (CI visibility)
         # `always()` because the budget gate above exits non-zero on a
@@ -203,7 +63,7 @@ jobs:
         # failure reports a count and discards the only evidence that explains
         # it. Scoped to a run that actually built, since a skipped run has
         # nothing to upload. Partial output is fine: the glob takes what exists.
-        if: ${{ always() && needs.scope.outputs.relevant == 'true' }}
+        if: ${{ always() }}
         uses: actions/upload-artifact@v7
         with:
           name: kernels-${{ matrix.arch }}
@@ -216,6 +76,13 @@ jobs:
             staging/kernel-metrics-${{ matrix.arch }}.json
             staging/workload-config-${{ matrix.arch }}
 
+      # Only on the publish path: a non-tag diagnostic run has nothing to sign,
+      # and keyless signing would write that run into the public transparency
+      # log for no reason.
+      - name: Install cosign
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: sigstore/cosign-installer@v3
+
       - name: Publish to release
         if: startsWith(github.ref, 'refs/tags/v')
         env:
@@ -225,12 +92,28 @@ jobs:
         # `mvmctl kernel build --source download` resolves these by the
         # mvmctl release tag + arch + variant, then SHA-256-verifies each
         # against the checksums manifest before admitting it to the cache.
+        #
+        # That makes the manifest, not the vmlinux blobs, the thing an attacker
+        # has to beat: swap a kernel and its recorded hash together and the
+        # download-side check still passes. So the manifest is cosign-signed
+        # here and its bundle published beside it, giving the verifier
+        # something to anchor on that is not itself swappable.
+        #
+        # --new-bundle-format is not optional: it is the one Sigstore bundle
+        # shape the in-binary Rust verifier parses, and every other signed blob
+        # in this project's releases uses it.
         run: |
           set -euo pipefail
           cd staging
+          cosign sign-blob \
+            --yes \
+            --new-bundle-format \
+            --bundle "kernel-${ARCH}-checksums-sha256.txt.bundle" \
+            "kernel-${ARCH}-checksums-sha256.txt"
           gh release upload "$TAG" \
             "vmlinux-${ARCH}-builder" \
             "vmlinux-${ARCH}-workload" \
             "kernel-${ARCH}-checksums-sha256.txt" \
+            "kernel-${ARCH}-checksums-sha256.txt.bundle" \
             "kernel-${ARCH}.json" \
             --clobber

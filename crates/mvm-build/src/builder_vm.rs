@@ -250,6 +250,35 @@ pub struct GuestSidecar {
     /// therefore depends on the runtime overlay contract for those binaries.
     #[serde(default)]
     pub runtime_lean: bool,
+    /// Release line and version this image came from, e.g.
+    /// `boot-image/v0.1.0`. Empty means the producer recorded none — an image
+    /// built before the field existed, or a local build of a working tree that
+    /// belongs to no published line.
+    #[serde(default)]
+    pub image_tag: String,
+    /// How the bytes on disk were acquired: `built-local` or `fetched`.
+    ///
+    /// Written by whoever put the image in the cache, not by whoever built it
+    /// originally — a published image is built by a Nix build somewhere, but
+    /// from this host's point of view it arrived over the network, and that is
+    /// the fact a misfiring build/fetch split needs to be readable from.
+    /// Empty means unrecorded; never read it as either arm.
+    #[serde(default)]
+    pub source: String,
+    /// RFC 3339 timestamp for when this cache entry was produced or acquired.
+    /// Orders two otherwise-identical local builds. Empty when the producer
+    /// had no clock — a hermetic Nix build deliberately has none.
+    #[serde(default)]
+    pub built_at: String,
+    /// Host↔guest contract version this rootfs speaks. Zero means unrecorded,
+    /// which is distinct from any real version and must not be read as one.
+    #[serde(default)]
+    pub protocol_version: u8,
+    /// Commit whose `mk-guest.nix` produced this rootfs. Empty when the build
+    /// ran from a source tree with no resolvable revision (a dirty or
+    /// non-git flake input), which a Nix build cannot invent.
+    #[serde(default)]
+    pub generator_rev: String,
 }
 
 impl GuestSidecar {
@@ -330,6 +359,14 @@ impl GuestSidecar {
             hypervisor: "oci".to_string(),
             overlay_aware: true,
             runtime_lean,
+            // An arbitrary OCI image belongs to no mvm image line and carries
+            // no mvm build provenance. Leave every provenance field
+            // unrecorded rather than inventing one.
+            image_tag: String::new(),
+            source: String::new(),
+            built_at: String::new(),
+            protocol_version: 0,
+            generator_rev: String::new(),
         }
     }
 
@@ -677,22 +714,10 @@ pub fn clear_builder_store_at(
     })
 }
 
-/// Recursive on-disk size in bytes (best-effort: unreadable entries are
-/// skipped). Follows no symlinks — counts the link, not its target.
+/// Disk clearing the builder store would return. Shared with the CLI's cache
+/// counters so repair and prune quote the same number for the same tree.
 fn dir_size_bytes(dir: &std::path::Path) -> u64 {
-    let mut total = 0u64;
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return 0;
-    };
-    for entry in entries.flatten() {
-        let Ok(meta) = entry.metadata() else { continue };
-        if meta.is_dir() {
-            total = total.saturating_add(dir_size_bytes(&entry.path()));
-        } else {
-            total = total.saturating_add(meta.len());
-        }
-    }
-    total
+    mvm_core::disk_usage::tree_bytes(dir)
 }
 
 /// Stub implementation. Every method returns
@@ -1192,16 +1217,18 @@ mod tests {
         std::fs::write(store.join("nix-store.img"), vec![0u8; 4096]).unwrap();
         std::fs::write(store.join("vms/x/console.log"), vec![0u8; 100]).unwrap();
 
-        // dry-run: reports freed bytes, removes nothing.
+        // dry-run: reports freed bytes, removes nothing. The figure is the
+        // disk a delete returns — allocated blocks, not the 4196 bytes the
+        // two files hold.
         let dry = clear_builder_store_at(&store, true).unwrap();
         assert!(dry.existed && dry.dry_run);
-        assert_eq!(dry.bytes_freed, 4196);
+        assert!(dry.bytes_freed >= 4196, "{}", dry.bytes_freed);
         assert!(store.exists(), "dry-run must not delete");
 
         // real: removes the dir, reports the same bytes.
         let done = clear_builder_store_at(&store, false).unwrap();
         assert!(done.existed && !done.dry_run);
-        assert_eq!(done.bytes_freed, 4196);
+        assert_eq!(done.bytes_freed, dry.bytes_freed);
         assert!(!store.exists(), "repair must remove the store dir");
     }
 
@@ -1375,6 +1402,11 @@ mod tests {
             hypervisor: "libkrun".to_string(),
             overlay_aware: true,
             runtime_lean: false,
+            image_tag: String::new(),
+            source: String::new(),
+            built_at: String::new(),
+            protocol_version: 0,
+            generator_rev: String::new(),
         }
     }
 
@@ -1388,6 +1420,38 @@ mod tests {
             .expect("read")
             .expect("present");
         assert_eq!(read, sidecar);
+    }
+
+    /// A sidecar written before the provenance fields existed must keep
+    /// deserializing. Asserted against a literal blob rather than a round-trip
+    /// of the current struct: a round-trip serializes the new fields, so it
+    /// would still pass with `#[serde(default)]` missing and prove nothing.
+    #[test]
+    fn an_old_sidecar_without_provenance_fields_still_deserializes() {
+        let old = r#"{
+            "name": "mvm-default-microvm",
+            "accessible": false,
+            "sealed": true,
+            "entrypointKind": "command",
+            "initSystem": "busybox",
+            "expectedBootMs": 300,
+            "agentBinary": "real",
+            "rootlessEntrypoint": true,
+            "hypervisor": "libkrun",
+            "overlayAware": true
+        }"#;
+
+        let sidecar: GuestSidecar = serde_json::from_str(old).expect(
+            "a sidecar predating the provenance fields must still deserialize; \
+             every new field carries #[serde(default)]",
+        );
+
+        assert_eq!(sidecar.name, "mvm-default-microvm");
+        assert_eq!(sidecar.image_tag, "");
+        assert_eq!(sidecar.source, "");
+        assert_eq!(sidecar.built_at, "");
+        assert_eq!(sidecar.protocol_version, 0);
+        assert_eq!(sidecar.generator_rev, "");
     }
 
     #[test]

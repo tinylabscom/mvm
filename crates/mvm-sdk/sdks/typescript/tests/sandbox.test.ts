@@ -5,6 +5,7 @@
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import * as mvm from "../src/index.js";
+import { currentRecording, flushRecordingToOutPath } from "../src/_sandbox.js";
 
 beforeEach(() => {
   mvm.resetRecording();
@@ -21,7 +22,7 @@ afterEach(() => {
 describe("Sandbox.create", () => {
   it("records the template and default TTL", () => {
     mvm.Sandbox.create("python-3.12");
-    const rec = mvm.currentRecording()!;
+    const rec = currentRecording()!;
     expect(rec.create.template).toBe("python-3.12");
     expect(rec.create.ttl_seconds).toBe(mvm.DEFAULT_TTL_SECONDS);
     expect(rec.ops).toEqual([]);
@@ -35,7 +36,7 @@ describe("Sandbox.create", () => {
   it("respects workloadId override", () => {
     const sb = mvm.Sandbox.create("python-3.12", { workloadId: "etl-job" });
     expect(sb.workloadId).toBe("etl-job");
-    expect(mvm.currentRecording()!.workload_id).toBe("etl-job");
+    expect(currentRecording()!.workload_id).toBe("etl-job");
   });
 
   it("rejects empty template", () => {
@@ -54,7 +55,7 @@ describe("Sandbox.commands.start", () => {
   it("appends a command_start op", () => {
     const sb = mvm.Sandbox.create("python-3.12");
     sb.commands.start(["python", "run.py"]);
-    expect(mvm.currentRecording()!.ops).toEqual([
+    expect(currentRecording()!.ops).toEqual([
       { kind: "command_start", argv: ["python", "run.py"], env: {} },
     ]);
   });
@@ -67,7 +68,7 @@ describe("Sandbox.commands.start", () => {
         API_KEY: mvm.secret("api-key", { type: "bearer", hosts: ["api.example.com"] }),
       },
     });
-    const op = mvm.currentRecording()!.ops[0] as Extract<
+    const op = currentRecording()!.ops[0] as Extract<
       mvm.RecordedOpWire,
       { kind: "command_start" }
     >;
@@ -92,7 +93,7 @@ describe("Sandbox.files.write", () => {
   it("base64-encodes bytes", () => {
     const sb = mvm.Sandbox.create("python-3.12");
     sb.files.write("/app/config.json", new TextEncoder().encode('{"x":1}'));
-    const op = mvm.currentRecording()!.ops[0] as Extract<
+    const op = currentRecording()!.ops[0] as Extract<
       mvm.RecordedOpWire,
       { kind: "files_write" }
     >;
@@ -103,7 +104,7 @@ describe("Sandbox.files.write", () => {
   it("utf-8 encodes string content", () => {
     const sb = mvm.Sandbox.create("python-3.12");
     sb.files.write("/app/note.txt", "héllo");
-    const op = mvm.currentRecording()!.ops[0] as Extract<
+    const op = currentRecording()!.ops[0] as Extract<
       mvm.RecordedOpWire,
       { kind: "files_write" }
     >;
@@ -127,13 +128,13 @@ describe("Sandbox.kill / dispose", () => {
   it("kill appends a kill op", () => {
     const sb = mvm.Sandbox.create("python-3.12");
     sb.kill();
-    expect(mvm.currentRecording()!.ops).toEqual([{ kind: "kill" }]);
+    expect(currentRecording()!.ops).toEqual([{ kind: "kill" }]);
   });
 
   it("Symbol.dispose appends a kill op", () => {
     const sb = mvm.Sandbox.create("python-3.12");
     sb[Symbol.dispose]();
-    expect(mvm.currentRecording()!.ops).toEqual([{ kind: "kill" }]);
+    expect(currentRecording()!.ops).toEqual([{ kind: "kill" }]);
   });
 });
 
@@ -163,22 +164,22 @@ describe("MVM_SDK_MODE", () => {
 describe("ttl parsing", () => {
   it("accepts integer seconds", () => {
     mvm.Sandbox.create("python-3.12", { ttl: 120 });
-    expect(mvm.currentRecording()!.create.ttl_seconds).toBe(120);
+    expect(currentRecording()!.create.ttl_seconds).toBe(120);
   });
 
   it("accepts 30m", () => {
     mvm.Sandbox.create("python-3.12", { ttl: "30m" });
-    expect(mvm.currentRecording()!.create.ttl_seconds).toBe(1800);
+    expect(currentRecording()!.create.ttl_seconds).toBe(1800);
   });
 
   it("accepts 1h", () => {
     mvm.Sandbox.create("python-3.12", { ttl: "1h" });
-    expect(mvm.currentRecording()!.create.ttl_seconds).toBe(3600);
+    expect(currentRecording()!.create.ttl_seconds).toBe(3600);
   });
 
   it("accepts bare integer string", () => {
     mvm.Sandbox.create("python-3.12", { ttl: "3600" });
-    expect(mvm.currentRecording()!.create.ttl_seconds).toBe(3600);
+    expect(currentRecording()!.create.ttl_seconds).toBe(3600);
   });
 
   it("rejects unparseable", () => {
@@ -197,7 +198,7 @@ describe("create kwargs", () => {
     mvm.Sandbox.create("python-3.12", {
       resources: mvm.resources({ cpu_cores: 2, memory_mb: 512, rootfs_size_mb: 1024 }),
     });
-    const rsr = mvm.currentRecording()!.create.resources!;
+    const rsr = currentRecording()!.create.resources!;
     expect(rsr.cpu_cores).toBe(2);
     expect(rsr.memory_mb).toBe(512);
     expect(rsr.rootfs_size_mb).toBe(1024);
@@ -205,7 +206,7 @@ describe("create kwargs", () => {
 
   it("includes flow through", () => {
     mvm.Sandbox.create("python-3.12", { include: ["src", "lib"] });
-    expect(mvm.currentRecording()!.create.include).toEqual(["src", "lib"]);
+    expect(currentRecording()!.create.include).toEqual(["src", "lib"]);
   });
 });
 
@@ -230,9 +231,9 @@ describe("emitRecordingJson", () => {
 
   it("resetRecording clears state", () => {
     mvm.Sandbox.create("python-3.12");
-    expect(mvm.currentRecording()).not.toBeNull();
+    expect(currentRecording()).not.toBeNull();
     mvm.resetRecording();
-    expect(mvm.currentRecording()).toBeNull();
+    expect(currentRecording()).toBeNull();
   });
 });
 
@@ -268,7 +269,7 @@ describe("flushRecordingToOutPath", () => {
     process.env.MVM_SDK_OUT_PATH = out;
     const sb = mvm.Sandbox.create("python-3.12");
     sb.commands.start(["python", "run.py"]);
-    mvm.flushRecordingToOutPath();
+    flushRecordingToOutPath();
     const fs = require("node:fs");
     expect(fs.existsSync(out)).toBe(true);
     const parsed = JSON.parse(fs.readFileSync(out, "utf-8"));
@@ -280,7 +281,7 @@ describe("flushRecordingToOutPath", () => {
     const out = tmpFile();
     // Don't set the env var.
     mvm.Sandbox.create("python-3.12");
-    mvm.flushRecordingToOutPath();
+    flushRecordingToOutPath();
     const fs = require("node:fs");
     expect(fs.existsSync(out)).toBe(false);
   });
@@ -290,7 +291,7 @@ describe("flushRecordingToOutPath", () => {
     process.env.MVM_SDK_OUT_PATH = out;
     // Don't call Sandbox.create — the CLI's existence check uses
     // file-missing as the "no Sandbox" signal.
-    mvm.flushRecordingToOutPath();
+    flushRecordingToOutPath();
     const fs = require("node:fs");
     expect(fs.existsSync(out)).toBe(false);
   });

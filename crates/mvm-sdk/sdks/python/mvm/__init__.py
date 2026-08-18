@@ -68,7 +68,29 @@ from mvm._dsl import (
 # microVM; on the host they raise a clear transport error. Imported here so
 # `mvm.audit` / `mvm.host` resolve as attributes (no connection at import).
 from mvm import audit, host
+
+# The typed failures `mvm.audit.emit(...)` / `mvm.host.time()` raise. They live
+# in a private module, but a caller has to be able to name what it catches, so
+# they belong on the public surface — as they already are in TypeScript.
+from mvm._hostsvc import (
+    BadRequestError,
+    HostServiceError,
+    InvalidInputError,
+    NotBoundError,
+    RateLimitedError,
+    ServiceError,
+    TransportError,
+    UnavailableError,
+    VerbNotImplementedError,
+)
 from mvm._helpers import BrowserSandbox, CodeError, CodeSandbox
+
+# Rust-owned env-var names (crates/mvm-sdk/src/env.rs), generated into
+# `_env/vars.py`. MVM_SDK_MODE_ENV / MVM_SDK_OUT_PATH_ENV were already
+# defined and read by `_sandbox`, but never re-exported here — which is
+# the whole of the 'absent from Python' divergence the TypeScript SDK
+# recorded against them.
+from mvm._env import MVM_SDK_MODE_ENV, MVM_SDK_OUT_PATH_ENV
 from mvm._machine import (
     MVM_MACHINE_MAX_OUTPUT_ENV,
     MVM_MACHINE_TIMEOUT_ENV,
@@ -91,7 +113,7 @@ from mvm._sandbox import (
     SandboxInfo,
     SandboxLiveError,
     SandboxModeError,
-    current_recording_dict,
+    current_recording,
     emit_recording_json,
     reset_recording,
 )
@@ -117,10 +139,21 @@ __all__ = [
     "MVM_CLI_BIN_ENV",
     "MVM_MACHINE_MAX_OUTPUT_ENV",
     "MVM_MACHINE_TIMEOUT_ENV",
+    "MVM_SDK_MODE_ENV",
+    "MVM_SDK_OUT_PATH_ENV",
     "SCHEMA_VERSION",
+    "BadRequestError",
     "BrowserSandbox",
     "CodeError",
     "CodeSandbox",
+    "HostServiceError",
+    "InvalidInputError",
+    "NotBoundError",
+    "RateLimitedError",
+    "ServiceError",
+    "TransportError",
+    "UnavailableError",
+    "VerbNotImplementedError",
     "EmittingContextError",
     "ExecResult",
     "FsEntry",
@@ -155,7 +188,7 @@ __all__ = [
     "addon_use",
     "app",
     "audit",
-    "current_recording_dict",
+    "current_recording",
     "current_session_id",
     "derive_schema",
     "dns_none",

@@ -1,8 +1,11 @@
-# ADR-027: `machine` is the sole CLI surface for workload microVMs
+# ADR-027: `machine` is the workload-microVM noun, and `run` is its one-shot
 
 ## Status
 
-Accepted
+Accepted. Amended 2026-08-17: `run` is a first-class visible top-level
+verb, and the hidden/visible split is restated as three buckets with a
+gate. See "`run` is a first-class transient verb" and "Three visibility
+buckets, and the cost of hiding".
 
 ## Context
 
@@ -26,14 +29,13 @@ Every workload lifecycle and operate-on-running-VM verb hangs off
 operation (pause, resume, snapshot, cp, fs, proc, session, volume,
 sandbox, and the rest) flattened directly into the same subcommand list.
 There is no separate `vm` noun; its verbs are `machine`'s verbs. There is
-no `up`, `down`, `run` (as a top-level verb), `console`, or `invoke`
-command — those names do not exist at the top level.
+no `up`, `down`, `console`, or `invoke` command — those names do not
+exist at the top level.
 
-Two other top-level surfaces exist deliberately alongside `machine`,
-because they are different objects: `dev` (host build substrate, not a
-workload) and the SDK-only `run` transport, kept but hidden from
-`--help`, retained solely because the Python/TS SDKs shell to it as their
-launch mechanism — not a user-facing command.
+`run` is the exception, and it is a deliberate one: see
+"`run` is a first-class transient verb" below. `dev` (host build
+substrate, not a workload) is the other top-level surface that exists
+alongside `machine` because it is a different object.
 
 ### One listing, over every store
 
@@ -92,17 +94,56 @@ command, not separate verbs:
   function-call path) instead of running an argv command, and can target
   an already-running named machine instead of booting a fresh one.
 
-### Hidden internals, visible daily drivers
+### `run` is a first-class transient verb (amendment)
 
-`machine`, `build`, `kernel`, `init`, `doctor`, plus a handful of
-reporting verbs (`explain`, `prepare`, `pack`, `bootstrap`) are the
-visible top-level surface. Every other historical top-level command —
-`env`, `manifest`, `image`, `storage`, `ops`, `network`, `catalog`,
-`cache`, `pool`, `reconcile`, `secret`, `bundle`, `trust`, `deps`,
-`artifact`, and internal subprocess transports (`shell-init`,
-`persistent-builder`, the QEMU vsock bridge) — is
-marked hidden. They still work; they simply do not compete for attention
-in `--help`.
+`mvmctl run <command>` is a visible top-level verb: the lowest-friction
+path to "run this once in a fresh microVM." `mvmctl machine run` remains
+visible as its noun-grouped sibling. They are not two implementations and
+not an alias pair — the intent is one argument struct consumed by both,
+so there is no second name for a second behaviour.
+
+This does not reopen the wall of verbs. `run` earns its place by being
+the single most common thing anyone asks the tool to do, and by having
+been documented as the flagship in the CLI reference for long enough that
+hiding it was the drift, not the discipline. Every other lifecycle verb
+stays under `machine`.
+
+### Three visibility buckets, and the cost of hiding
+
+The original rule — daily drivers visible, everything else hidden — was
+applied until `--help` no longer described the product. `secret`,
+`trust`, `image`, `catalog`, `cache`, `network`, `bundle`, `deps`,
+`artifact`, `pool`, `env` and `manifest` were all hidden while the
+published CLI reference documented them; a user could not discover
+`mvmctl secret set` (the entry point to the whole substitution subsystem)
+or `mvmctl trust receipt verify` (the verification half of the receipt
+feature) from the tool itself. A verb a user cannot discover is a verb
+they do not have.
+
+Verbs sort into three buckets:
+
+- **Visible.** Anything a user is expected to invoke: `machine`, `run`,
+  `build`, `kernel`, `deploy`, `generate`, `template`, `init`, `doctor`,
+  `bootstrap`, the reporting verbs (`explain`, `prepare`, `watch`,
+  `pack`), and the object groups `env`, `manifest`, `image`, `catalog`,
+  `cache`, `network`, `pool`, `secret`, `trust`, `bundle`, `artifact`,
+  `deps`, `ops`, `shell-init`. Grouped by `display_order` so `--help`
+  reads in tiers rather than alphabetically.
+- **Dev tooling.** Real commands that a user is not expected to reach
+  for, and whose absence from `--help` costs them nothing:
+  `seccomp-audit`, `storage`, `reconcile`, `dashboard`,
+  `persistent-builder`.
+- **Internal transports.** Subprocess plumbing, named with a `__` prefix
+  so it cannot be typed by accident: `__sdk-no-vm`,
+  `__builder-vm-bootstrap`, `__builder-egress-supervisor`,
+  `__builder-shell-job`, `__qemu-vsock-bridge`.
+
+`xtask check-cli-help-matches-docs` holds the visible bucket and
+`public/src/content/docs/reference/cli-commands.md` to each other in both
+directions: a documented verb must be visible, and a visible verb must be
+documented. Hiding a verb to avoid writing its reference row therefore
+also deletes it from `--help` — the escape has a price, which is what
+stops this drift from returning silently.
 
 ### Hard removal, no aliases
 

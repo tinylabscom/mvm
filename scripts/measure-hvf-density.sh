@@ -196,7 +196,7 @@ seed_workload_kernel
 if [[ "${SKIP_BUILD}" != "1" ]]; then
   "${run_env[@]}" cargo build -p mvmctl --bin mvmctl
   "${run_env[@]}" cargo build -p mvm-hostd --bin mvm-network-endpoint
-  "${run_env[@]}" cargo build -p mvm-vm-host --bin mvm-hvf-supervisor
+  "${run_env[@]}" cargo build -p mvm-hostd --bin mvm-hvf-supervisor
 fi
 
 MVMCTL_BIN="${MVM_HVF_DENSITY_MVMCTL:-${TARGET_DIR}/debug/mvmctl}"

@@ -25,7 +25,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use mvm_agentd::vsock::{GuestRequest, GuestResponse};
-use mvm_core::vm_backend::VmStartConfig;
+use mvm_core::vm_backend::{RuntimeSourcePolicy, VmStartConfig};
 use mvm_runtime::backend::AnyBackend;
 use mvm_runtime::vsock_transport::VsockTransport as _;
 use serde::Deserialize;
@@ -41,6 +41,15 @@ const BUDGET_VAR: &str = "MVM_RUNTIME_BOOT_BUDGET_MS";
 const READY_VAR: &str = "MVM_RUNTIME_BOOT_READY";
 const CPUS_VAR: &str = "MVM_RUNTIME_BOOT_CPUS";
 const MEMORY_MIB_VAR: &str = "MVM_RUNTIME_BOOT_MEMORY_MIB";
+/// The prod guest rootfs carries no baked agent: `/init` resolves it from
+/// `/mvm/runtime`, which is the runtime overlay attached as a second
+/// virtio-blk drive. Booting one without the overlay panics the guest at
+/// `Attempted to kill init!` before the agent can bind vsock, so a harness that
+/// cannot attach an overlay cannot boot a prod image at all. All three are
+/// required together, matching what the backend demands.
+const OVERLAY_VAR: &str = "MVM_RUNTIME_BOOT_OVERLAY";
+const OVERLAY_VERITY_VAR: &str = "MVM_RUNTIME_BOOT_OVERLAY_VERITY";
+const OVERLAY_ROOTHASH_VAR: &str = "MVM_RUNTIME_BOOT_OVERLAY_ROOTHASH";
 
 const DEFAULT_BACKEND: &str = "firecracker";
 const DEFAULT_RUNS: usize = 5;
@@ -99,6 +108,17 @@ struct BenchSpec {
     ready: ReadySignal,
     cpus: u32,
     memory_mib: u32,
+    overlay: Option<OverlaySpec>,
+}
+
+/// All three or none. The backend attaches the overlay only when the path, the
+/// verity sidecar and the roothash are all present, so accepting a partial set
+/// here would boot without an overlay and fail as though none was configured.
+#[derive(Debug, Clone)]
+struct OverlaySpec {
+    path: PathBuf,
+    verity: PathBuf,
+    roothash: String,
 }
 
 impl BenchSpec {
@@ -109,6 +129,7 @@ impl BenchSpec {
         }
         let config = config.unwrap_or_default();
 
+        let overlay = overlay_spec(&config)?;
         let kernel = required_path(KERNEL_VAR, config.kernel)?;
         let rootfs = required_path(ROOTFS_VAR, config.rootfs)?;
         let ready =
@@ -130,6 +151,7 @@ impl BenchSpec {
             ready,
             cpus: env_u32(CPUS_VAR, config.cpus, 1)?,
             memory_mib: env_u32(MEMORY_MIB_VAR, config.memory_mib, 256)?,
+            overlay,
         }))
     }
 }
@@ -148,6 +170,11 @@ struct RawBenchConfig {
     cpus: Option<u32>,
     #[serde(alias = "memory_mib")]
     memory_mib: Option<u32>,
+    overlay: Option<PathBuf>,
+    #[serde(alias = "overlay_verity")]
+    overlay_verity: Option<PathBuf>,
+    #[serde(alias = "overlay_roothash")]
+    overlay_roothash: Option<String>,
 }
 
 impl RawBenchConfig {
@@ -232,18 +259,54 @@ fn measure_concurrent(spec: &BenchSpec) -> Result<Vec<BootMeasurement>> {
     Ok(measurements)
 }
 
-fn measure_one(spec: &BenchSpec, name: String) -> Result<BootMeasurement> {
-    let backend = AnyBackend::from_hypervisor(&spec.backend);
-    let config = VmStartConfig {
-        name: name.clone(),
+/// The runtime-source policy this boot must declare.
+///
+/// The default, `RootfsOnly`, is right for a fat image whose agent is baked
+/// into the rootfs — and it is also what silently suppresses the
+/// `mvm.runtime_data=` kernel-cmdline token. The host attaches the overlay
+/// drive on the strength of the triple alone, but the cmdline assembler names
+/// the device only for a policy other than `RootfsOnly`. A lean prod image
+/// booted under the default therefore receives the disk and no way to find it,
+/// and panics on a missing agent exactly as if no overlay had been passed.
+///
+/// `RequiredOverlay` rather than `PreferOverlay` because a prod rootfs has no
+/// baked agent to fall back to: if the overlay is unusable the boot should say
+/// so, not fail later as a missing binary.
+fn runtime_source_policy(overlay: Option<&OverlaySpec>) -> RuntimeSourcePolicy {
+    match overlay {
+        Some(_) => RuntimeSourcePolicy::RequiredOverlay,
+        None => RuntimeSourcePolicy::RootfsOnly,
+    }
+}
+
+/// The launch config for one measured boot. Split out from [`measure_one`] so
+/// the cmdline it produces can be asserted without a hypervisor.
+fn start_config(spec: &BenchSpec, name: String) -> VmStartConfig {
+    VmStartConfig {
+        name,
         rootfs_path: spec.rootfs.to_string_lossy().into_owned(),
         kernel_path: Some(spec.kernel.to_string_lossy().into_owned()),
         cpus: spec.cpus,
         memory_mib: spec.memory_mib,
         revision_hash: "runtime-boot-bench".to_string(),
         flake_ref: "prebuilt-runtime-image".to_string(),
+        runtime_overlay_path: spec
+            .overlay
+            .as_ref()
+            .map(|o| o.path.to_string_lossy().into_owned()),
+        runtime_overlay_verity_path: spec
+            .overlay
+            .as_ref()
+            .map(|o| o.verity.to_string_lossy().into_owned()),
+        runtime_overlay_roothash: spec.overlay.as_ref().map(|o| o.roothash.clone()),
+        runtime_source_policy: runtime_source_policy(spec.overlay.as_ref()),
         ..Default::default()
-    };
+    }
+}
+
+fn measure_one(spec: &BenchSpec, name: String) -> Result<BootMeasurement> {
+    let backend = AnyBackend::from_hypervisor(&spec.backend);
+    let config = start_config(spec, name.clone());
 
     let started = Instant::now();
     let id = backend
@@ -396,6 +459,53 @@ fn assert_within_budget(label: &str, actual: Duration, budget: Duration) {
     );
 }
 
+/// Resolve the overlay triple, refusing a partial one. A silently-dropped
+/// overlay is indistinguishable at the console from an image with no agent, so
+/// name the missing piece here rather than let the guest panic explain it.
+fn overlay_spec(config: &RawBenchConfig) -> Result<Option<OverlaySpec>> {
+    let path = env_path_opt(OVERLAY_VAR, config.overlay.clone());
+    let verity = env_path_opt(OVERLAY_VERITY_VAR, config.overlay_verity.clone());
+    let roothash = env_string_opt(OVERLAY_ROOTHASH_VAR, config.overlay_roothash.clone());
+    match (path, verity, roothash) {
+        (None, None, None) => Ok(None),
+        (Some(path), Some(verity), Some(roothash)) => {
+            let roothash = roothash.trim().to_string();
+            if roothash.is_empty() {
+                anyhow::bail!("{OVERLAY_ROOTHASH_VAR} is set but empty");
+            }
+            Ok(Some(OverlaySpec {
+                path,
+                verity,
+                roothash,
+            }))
+        }
+        (path, verity, roothash) => {
+            let mut missing = Vec::new();
+            if path.is_none() {
+                missing.push(OVERLAY_VAR);
+            }
+            if verity.is_none() {
+                missing.push(OVERLAY_VERITY_VAR);
+            }
+            if roothash.is_none() {
+                missing.push(OVERLAY_ROOTHASH_VAR);
+            }
+            anyhow::bail!(
+                "runtime overlay is half-configured; the backend attaches it only \
+                 when all three are set. Missing: {}",
+                missing.join(", ")
+            )
+        }
+    }
+}
+
+fn env_path_opt(var: &str, configured: Option<PathBuf>) -> Option<PathBuf> {
+    std::env::var_os(var)
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .or(configured)
+}
+
 fn required_path(var: &str, configured: Option<PathBuf>) -> Result<PathBuf> {
     let path = std::env::var_os(var)
         .map(PathBuf::from)
@@ -520,4 +630,165 @@ fn live_bench_is_disabled_by_default() -> Result<()> {
     }
     assert!(BenchSpec::from_env()?.is_none());
     Ok(())
+}
+
+/// The overlay is what carries the guest agent for a prod image. A half-set
+/// triple used to be indistinguishable from an unset one, and the backend
+/// silently declined to attach it — the first visible symptom was a kernel
+/// panic that blamed the image.
+#[test]
+fn overlay_spec_is_absent_when_nothing_is_configured() {
+    let config = RawBenchConfig::default();
+    assert!(
+        overlay_spec(&config)
+            .expect("no overlay is valid")
+            .is_none()
+    );
+}
+
+#[test]
+fn overlay_spec_accepts_the_complete_triple() {
+    let config = RawBenchConfig {
+        overlay: Some(PathBuf::from("/tmp/overlay.ext4")),
+        overlay_verity: Some(PathBuf::from("/tmp/overlay.verity")),
+        overlay_roothash: Some("  deadbeef\n".to_string()),
+        ..RawBenchConfig::default()
+    };
+    let spec = overlay_spec(&config)
+        .expect("complete triple is valid")
+        .expect("complete triple yields an overlay");
+    assert_eq!(spec.path, PathBuf::from("/tmp/overlay.ext4"));
+    assert_eq!(spec.verity, PathBuf::from("/tmp/overlay.verity"));
+    // Trimmed: the roothash is read from a file that ends in a newline.
+    assert_eq!(spec.roothash, "deadbeef");
+}
+
+#[test]
+fn overlay_spec_refuses_a_half_configured_overlay_and_names_what_is_missing() {
+    let config = RawBenchConfig {
+        overlay: Some(PathBuf::from("/tmp/overlay.ext4")),
+        ..RawBenchConfig::default()
+    };
+    let err = overlay_spec(&config)
+        .expect_err("a partial overlay must not silently boot without one")
+        .to_string();
+    // Compare the missing list exactly. `contains(OVERLAY_VAR)` would always
+    // hold — it is a prefix of the other two names — so a substring check here
+    // would pass no matter which variables the message actually named.
+    let listed = err
+        .split_once("Missing: ")
+        .map(|(_, rest)| rest.trim().to_string())
+        .unwrap_or_else(|| panic!("error should name what is missing: {err}"));
+    assert_eq!(
+        listed,
+        format!("{OVERLAY_VERITY_VAR}, {OVERLAY_ROOTHASH_VAR}")
+    );
+}
+
+#[test]
+fn overlay_spec_refuses_a_blank_roothash() {
+    let config = RawBenchConfig {
+        overlay: Some(PathBuf::from("/tmp/overlay.ext4")),
+        overlay_verity: Some(PathBuf::from("/tmp/overlay.verity")),
+        overlay_roothash: Some("   \n".to_string()),
+        ..RawBenchConfig::default()
+    };
+    let err = overlay_spec(&config)
+        .expect_err("a blank roothash is not a roothash")
+        .to_string();
+    assert!(err.contains(OVERLAY_ROOTHASH_VAR), "{err}");
+}
+
+/// A spec shaped like the released prod artifact set: kernel + lean rootfs +
+/// the overlay triple, and no rootfs verity (the gate boots the rootfs
+/// directly, since no release publishes the initramfs a sealed boot needs).
+#[cfg(test)]
+fn prod_shaped_spec(overlay: Option<OverlaySpec>) -> BenchSpec {
+    BenchSpec {
+        backend: "firecracker".to_string(),
+        kernel: PathBuf::from("/img/vmlinux"),
+        rootfs: PathBuf::from("/img/rootfs.ext4"),
+        runs: 1,
+        concurrent: 1,
+        budget: Duration::from_millis(200),
+        ready: ReadySignal::GuestAgent,
+        cpus: 1,
+        memory_mib: 256,
+        overlay,
+    }
+}
+
+#[cfg(test)]
+fn overlay_fixture() -> OverlaySpec {
+    OverlaySpec {
+        path: PathBuf::from("/img/overlay.ext4"),
+        verity: PathBuf::from("/img/overlay.verity"),
+        roothash: "b".repeat(64),
+    }
+}
+
+#[test]
+fn a_configured_overlay_declares_required_overlay() {
+    assert_eq!(
+        runtime_source_policy(Some(&overlay_fixture())),
+        RuntimeSourcePolicy::RequiredOverlay
+    );
+}
+
+#[test]
+fn no_overlay_stays_rootfs_only() {
+    assert_eq!(runtime_source_policy(None), RuntimeSourcePolicy::RootfsOnly);
+}
+
+/// The regression this file exists to prevent, asserted where it actually
+/// bites: on the kernel cmdline. Attaching the overlay drive is not the same as
+/// telling the guest where it is — the host attaches on the triple alone, but
+/// `/init` mounts `/mvm/runtime` from whatever `mvm.runtime_data=` names, and
+/// under `RootfsOnly` that token is never emitted. A boot missing it panics
+/// with `no guest agent resolved from /mvm/runtime and no baked fallback`,
+/// which is indistinguishable at the console from passing no overlay at all.
+///
+/// `/dev/vdb` is the overlay's device node for this shape: with no rootfs
+/// verity the block slots are 0, 2 and 3, and Firecracker names drives in
+/// slot-sorted attach order, so the second drive is `vdb`.
+#[test]
+fn the_cmdline_names_the_overlay_device_the_guest_init_mounts() {
+    let spec = prod_shaped_spec(Some(overlay_fixture()));
+    let config = start_config(&spec, "bench".to_string());
+
+    let cmdline = mvm_vmm::host::cmdline::workload_cmdline(
+        &config,
+        Path::new("/tmp/mvm-bench-state"),
+        |_virtiofs_root, _has_disk| "console=ttyS0".to_string(),
+    )
+    .expect("a boot declaring a runtime-source policy carries a cmdline");
+
+    assert!(
+        cmdline.contains("mvm.runtime_data=/dev/vdb"),
+        "the guest is never told where the overlay is: {cmdline}"
+    );
+}
+
+/// The other half of the discrimination: the same spec under the default
+/// policy emits no device token, which is precisely the bug. Without this the
+/// test above would still pass if the token became unconditional, and the
+/// policy field could be dropped unnoticed.
+#[test]
+fn the_default_policy_emits_no_overlay_device_token() {
+    let spec = prod_shaped_spec(Some(overlay_fixture()));
+    let config = VmStartConfig {
+        runtime_source_policy: RuntimeSourcePolicy::RootfsOnly,
+        ..start_config(&spec, "bench".to_string())
+    };
+
+    let cmdline = mvm_vmm::host::cmdline::workload_cmdline(
+        &config,
+        Path::new("/tmp/mvm-bench-state"),
+        |_virtiofs_root, _has_disk| "console=ttyS0".to_string(),
+    );
+
+    assert!(
+        !cmdline.unwrap_or_default().contains("mvm.runtime_data="),
+        "RootfsOnly must not name an overlay device; the bug was that it names none"
+    );
 }

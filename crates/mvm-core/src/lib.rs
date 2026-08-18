@@ -14,6 +14,7 @@ pub mod at_rest;
 pub mod build_env;
 pub mod catalog;
 pub mod checkpoint;
+pub mod runtime_catalog;
 // The `MvmClient` machine-driving facade (trait + DTOs + mock + remote gateway).
 // Off by default so the runtime-free closure never pulls `async-trait`; enabled
 // by `mvm-client` (which adds the in-process `LocalBackend`) and by `mvm-sdk`'s
@@ -33,6 +34,9 @@ pub mod did_key;
 /// The single `sha256:<64 lowercase hex>` shape check every prefixed
 /// content-address newtype in this crate shares (crate-private).
 pub(crate) mod digest_shape;
+/// Real on-disk footprint of a path — the one measurement behind every
+/// "how much would this reclaim" counter in the CLI.
+pub mod disk_usage;
 /// Host egress-broker decision logic (closed-by-default allow/deny per request).
 pub mod egress_broker;
 /// Egress-broker handler: compose decision + trace into an audit record.
@@ -40,7 +44,6 @@ pub mod egress_handler;
 /// Host-side egress secret substitution (destination-bound; closed by default).
 /// Secrets are substituted into outbound requests host-side and never enter the
 /// guest.
-pub mod egress_substitution;
 pub mod exit_capture;
 /// Per-dimension resolution of a workload's grants across the CLI, a JSON
 /// grants file, the project manifest, and the operator's host config.
@@ -130,6 +133,9 @@ pub mod provenance;
 pub mod rate_limit;
 pub mod receipt;
 pub mod residency;
+/// What a caller declared a machine should boot from — the one type both the
+/// declaration boundary and the build side name.
+pub mod rootfs_source;
 /// Hardened snapshot frame v0: cap-bounded, fail-closed parsing of the
 /// snapshot container mvm controls (eager-CoW / raw-hypervisor path).
 pub mod snapshot_frame;
@@ -162,6 +168,6 @@ pub mod util;
 
 pub use domain::{agent, instance, manifest, node, pool, session, template, tenant, volume};
 pub use platform::linux_env;
-pub use policy::{audit, network_policy, secret_binding, security};
+pub use policy::{audit, network_policy, security};
 pub use protocol::{routing, signing, vm_backend};
 pub use util::{atomic_io, idle_metrics, retry, time};

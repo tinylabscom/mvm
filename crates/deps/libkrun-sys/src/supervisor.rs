@@ -103,7 +103,14 @@ pub struct SupervisorConfig {
     // `mvm_core::policy` structs at this layer; the bridge stays a
     // serde boundary. The leaf bin crate `mvm-libkrun-supervisor` can freely
     // depend on both and deserializes the Values on the bridge side.
-    /// JSON-encoded [`mvm_core::plan::ExecutionPlan`] for this admission.
+    /// JSON-encoded admitted plan. Normally a
+    /// [`mvm_core::plan::SignedExecutionPlan`] — the admission path
+    /// (`vm/exec.rs`, `session.rs`, `invoke.rs`) serializes
+    /// `admitted.signed()` into this field, so the plan's own fields sit
+    /// inside the envelope's `payload` rather than at the top level. A bare
+    /// [`mvm_core::plan::ExecutionPlan`] also appears here from producers that
+    /// do not go through admission, so readers must accept both; this comment
+    /// claimed only the bare form, and the wall-clock timer believed it.
     /// The bin deserializes into the typed value when building
     /// `BridgeConfig.plan`. `None` ⇒ legacy non-bridge path
     /// (`tenant_id` will also be `None` and

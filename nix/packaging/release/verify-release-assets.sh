@@ -22,6 +22,8 @@ TARGETS="aarch64-apple-darwin x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu
 BUILDER_ARCHES="aarch64 x86_64"
 KERNEL_ARCHES="aarch64 x86_64"
 RUNTIME_ARCHES="aarch64 x86_64"
+# Keep in lockstep with the release.yml `default-microvm` matrix.
+BOOT_ARCHES="aarch64 x86_64"
 DO_COSIGN=0
 EXPECT_VERSION=""
 
@@ -32,6 +34,9 @@ while [ $# -gt 0 ]; do
     --builder-arches) BUILDER_ARCHES="$2"; shift 2 ;;
     --kernel-arches)  KERNEL_ARCHES="$2"; shift 2 ;;
     --runtime-arches) RUNTIME_ARCHES="$2"; shift 2 ;;
+    # Empty disables the boot-asset checks. Only for a host without
+    # e2fsprogs, where /init cannot be read out of the rootfs at all.
+    --boot-arches)    BOOT_ARCHES="$2"; shift 2 ;;
     --cosign)         DO_COSIGN=1; shift ;;
     # Assert the packaged binary reports this version. Only the target that
     # matches the host can be executed; cross-arch targets are skipped (their
@@ -64,19 +69,63 @@ sha256_of() {
   else shasum -a 256 "$1" | awk '{print $1}'; fi
 }
 
+# Every downloader anchors on a checksum manifest: it hashes the artifact and
+# compares against this file. That makes an unsigned manifest the weak link —
+# whoever can swap an artifact can swap its recorded hash too, and the
+# comparison still passes. So each manifest ships a cosign bundle beside it,
+# and a release that skipped signing one is a packaging bug worth failing on
+# here: the download would still succeed and still "verify", which is precisely
+# the silent failure this catches.
+require_signed_manifest() {
+  manifest="$1"; label="$2"
+  bundle="$manifest.bundle"
+  # Every return is explicit: the script runs under `set -e`, so a bare `return`
+  # after a failed test propagates that failure and aborts the whole run instead
+  # of recording one problem and carrying on.
+  [ -f "$bundle" ] || { fail "$label signature bundle missing: $(basename "$bundle")"; return 0; }
+  [ "$DO_COSIGN" = 1 ] || return 0
+  command -v cosign >/dev/null 2>&1 || { fail "--cosign given but cosign not on PATH"; return 0; }
+  cosign verify-blob --bundle "$bundle" \
+    ${COSIGN_IDENTITY_REGEXP:+--certificate-identity-regexp "$COSIGN_IDENTITY_REGEXP"} \
+    ${COSIGN_IDENTITY:+--certificate-identity "$COSIGN_IDENTITY"} \
+    ${COSIGN_OIDC_ISSUER:+--certificate-oidc-issuer "$COSIGN_OIDC_ISSUER"} \
+    "$manifest" >/dev/null 2>&1 \
+    || fail "$label cosign verify-blob failed"
+}
+
+# Whether a rootfs can be exec'd by the kernel is asserted by one script, used
+# both here (published artifact, re-downloaded) and by release.yml before the
+# staged image is ever uploaded. It prints its own ::error:: diagnosis.
+INIT_SHEBANG_CHECK="$(dirname "$0")/assert-init-shebang.sh"
+assert_init_shebang() {
+  "$INIT_SHEBANG_CHECK" "$1" "$2" >/dev/null || FAILED=1
+  return 0
+}
+
+# The rootfs check above proves the guest has an exec'able /init. It says
+# nothing about whether the kernel that would exec it can be loaded at all —
+# and on x86_64 the published kernel was a bzImage, which Firecracker refuses
+# before init ever runs. Two assets, two formats, two checks.
+KERNEL_FORMAT_CHECK="$(dirname "$0")/assert-kernel-format.sh"
+assert_kernel_format() {
+  "$KERNEL_FORMAT_CHECK" "$1" "$2" "$3" >/dev/null || FAILED=1
+  return 0
+}
+
 required_bins_for_target() {
   case "$1" in
     *apple-darwin)
-      echo "mvmctl mvm-bridge mvm-hvf-supervisor mvm-libkrun-supervisor mvm-network-endpoint"
+      echo "mvmctl mvm-hvf-supervisor mvm-libkrun-supervisor mvm-network-endpoint"
       ;;
     *)
-      echo "mvmctl mvm-bridge mvm-network-endpoint"
+      echo "mvmctl mvm-network-endpoint"
       ;;
   esac
 }
 
 COMBINED="$ASSETS_DIR/checksums-sha256.txt"
 [ -f "$COMBINED" ] || fail "combined checksums manifest missing: checksums-sha256.txt"
+require_signed_manifest "$COMBINED" "combined checksums manifest"
 
 for target in $TARGETS; do
   tarball="$ASSETS_DIR/mvmctl-${target}.tar.gz"
@@ -148,6 +197,7 @@ for arch in $KERNEL_ARCHES; do
 
   [ -f "$workload_kernel" ] || { fail "[$arch] workload kernel missing: vmlinux-${arch}-workload"; continue; }
   [ -f "$kernel_checks" ] || { fail "[$arch] kernel checksums manifest missing: kernel-${arch}-checksums-sha256.txt"; continue; }
+  require_signed_manifest "$kernel_checks" "[$arch] kernel checksums manifest"
 
   want=$(awk -v n="vmlinux-${arch}-workload" '$2 == n { print $1 }' "$kernel_checks" | head -1)
   if [ -z "$want" ]; then
@@ -156,6 +206,55 @@ for arch in $KERNEL_ARCHES; do
   fi
   got=$(sha256_of "$workload_kernel")
   [ "$want" = "$got" ] || fail "[$arch] workload kernel sha256 mismatch: recorded=$want actual=$got"
+done
+
+# The rootfs, kernel and metadata sidecar under `default-microvm-*` are the
+# artifacts mvmctl actually boots, and nothing here used to open them: the
+# runtime-pack loop below checks only the pack sidecars. v0.17.0 shipped a
+# rootfs whose /init carries its `#!` at byte 1, and every checksum in this file
+# still verified, because a faithful copy of a broken image is still faithful.
+#
+# Same COMPLETE-or-ABSENT contract as the packs, and for the same reason: the
+# `release` job publishes under `!cancelled()`, so an image job that failed
+# leaves these absent on purpose and that is not an error here. A partial set,
+# or a rootfs whose /init the kernel cannot exec, is.
+for arch in $BOOT_ARCHES; do
+  boot_rootfs="default-microvm-rootfs-${arch}.ext4"
+  boot_kernel="default-microvm-vmlinux-${arch}"
+  boot_meta="default-microvm-meta-${arch}.json"
+  boot_checks="$ASSETS_DIR/default-microvm-${arch}-checksums-sha256.txt"
+
+  present=0
+  for f in "$boot_rootfs" "$boot_kernel" "$boot_meta"; do
+    [ -f "$ASSETS_DIR/$f" ] && present=$((present + 1))
+  done
+
+  if [ "$present" -eq 0 ]; then
+    echo "note: [$arch] no default-microvm boot assets published (image job did not ship) — ok"
+    continue
+  fi
+  if [ "$present" -ne 3 ]; then
+    fail "[$arch] partial default-microvm boot assets: rootfs=$([ -f "$ASSETS_DIR/$boot_rootfs" ] && echo y || echo n) kernel=$([ -f "$ASSETS_DIR/$boot_kernel" ] && echo y || echo n) meta=$([ -f "$ASSETS_DIR/$boot_meta" ] && echo y || echo n)"
+    continue
+  fi
+
+  [ -f "$boot_checks" ] || { fail "[$arch] default-microvm checksums manifest missing: default-microvm-${arch}-checksums-sha256.txt"; continue; }
+  require_signed_manifest "$boot_checks" "[$arch] default-microvm checksums manifest"
+  for f in "$boot_rootfs" "$boot_kernel" "$boot_meta"; do
+    want=$(awk -v n="$f" '$2 == n { print $1 }' "$boot_checks" | head -1)
+    if [ -z "$want" ]; then
+      fail "[$arch] $f not listed in default-microvm-${arch}-checksums-sha256.txt"
+      continue
+    fi
+    got=$(sha256_of "$ASSETS_DIR/$f")
+    [ "$want" = "$got" ] || fail "[$arch] $f sha256 mismatch: recorded=$want actual=$got"
+  done
+
+  # The checksums above prove the bytes are the ones we published. These prove
+  # the ones we published can boot: a loadable kernel, and a guest init it can
+  # exec once it is running.
+  assert_kernel_format "$ASSETS_DIR/$boot_kernel" "$arch" "$arch kernel"
+  assert_init_shebang "$ASSETS_DIR/$boot_rootfs" "$arch"
 done
 
 # The SBOM ships signed alongside the binaries on every release.
@@ -189,6 +288,7 @@ for arch in $BUILDER_ARCHES; do
   fi
 
   [ -f "$bp_checks" ] || { fail "[$arch] builder checksums manifest missing: builder-vm-${arch}-checksums-sha256.txt"; continue; }
+  require_signed_manifest "$bp_checks" "[$arch] builder checksums manifest"
   for f in "$bp_manifest" "$bp_bundle" "$bp_sbom"; do
     want=$(awk -v n="$f" '$2 == n { print $1 }' "$bp_checks" | head -1)
     if [ -z "$want" ]; then
@@ -227,6 +327,7 @@ for arch in $RUNTIME_ARCHES; do
   fi
 
   [ -f "$rp_checks" ] || { fail "[$arch] default-microvm checksums manifest missing: default-microvm-${arch}-checksums-sha256.txt"; continue; }
+  require_signed_manifest "$rp_checks" "[$arch] default-microvm checksums manifest"
   for f in "$rp_manifest" "$rp_bundle" "$rp_sbom"; do
     want=$(awk -v n="$f" '$2 == n { print $1 }' "$rp_checks" | head -1)
     if [ -z "$want" ]; then

@@ -1,0 +1,8 @@
+/Users/auser/work/tinylabs/mvmco/.worktrees/mvm-2507-wallclock/target-warn/debug/deps/tracing_log-3c0388de317f2ccf.d: /Users/auser/work/tinylabs/mvmco/.worktrees/mvm-remove-docker/.mvm-test/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tracing-log-0.2.0/src/lib.rs /Users/auser/work/tinylabs/mvmco/.worktrees/mvm-remove-docker/.mvm-test/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tracing-log-0.2.0/src/log_tracer.rs
+
+/Users/auser/work/tinylabs/mvmco/.worktrees/mvm-2507-wallclock/target-warn/debug/deps/libtracing_log-3c0388de317f2ccf.rlib: /Users/auser/work/tinylabs/mvmco/.worktrees/mvm-remove-docker/.mvm-test/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tracing-log-0.2.0/src/lib.rs /Users/auser/work/tinylabs/mvmco/.worktrees/mvm-remove-docker/.mvm-test/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tracing-log-0.2.0/src/log_tracer.rs
+
+/Users/auser/work/tinylabs/mvmco/.worktrees/mvm-2507-wallclock/target-warn/debug/deps/libtracing_log-3c0388de317f2ccf.rmeta: /Users/auser/work/tinylabs/mvmco/.worktrees/mvm-remove-docker/.mvm-test/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tracing-log-0.2.0/src/lib.rs /Users/auser/work/tinylabs/mvmco/.worktrees/mvm-remove-docker/.mvm-test/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tracing-log-0.2.0/src/log_tracer.rs
+
+/Users/auser/work/tinylabs/mvmco/.worktrees/mvm-remove-docker/.mvm-test/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tracing-log-0.2.0/src/lib.rs:
+/Users/auser/work/tinylabs/mvmco/.worktrees/mvm-remove-docker/.mvm-test/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tracing-log-0.2.0/src/log_tracer.rs:

@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 import * as mvm from "../src/index.js";
 import {
   machineCheckArtifactArgv,
@@ -54,8 +55,18 @@ function readFixtureLog(): string[] {
   return fs.readFileSync(log, "utf-8").split("\n").filter((l) => l.length > 0);
 }
 
+// Repo root, resolved from this file rather than the process cwd:
+// tests/ -> typescript/ -> sdks/ -> mvm-sdk/ -> crates/ -> repo root.
+const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "..", "..");
+
+// The canonical golden argv corpus. The CLI anchors it against the real clap
+// parser and the Rust SDK asserts its builders reproduce it, which is what
+// makes a fixture mean "argv mvmctl actually accepts". Resolving anywhere else
+// silently opts this suite out of that contract.
+export const MACHINE_FIXTURES = path.join(REPO_ROOT, "tests", "machine-fixtures");
+
 function readArgvFixture(name: string): string[] {
-  return fs.readFileSync(path.join("..", "..", "..", "tests", "machine-fixtures", `${name}.argv`), "utf-8")
+  return fs.readFileSync(path.join(MACHINE_FIXTURES, `${name}.argv`), "utf-8")
     .split("\n")
     .filter((line) => line.length > 0);
 }
@@ -259,6 +270,40 @@ describe("Machine persistent lifecycle", () => {
     expect(machineStopArgv("web")).toEqual(readArgvFixture("stop"));
   });
 
+  it("emits the shared start-image argv fixture", () => {
+    expect(machineStartArgv("web", { image: "nginx", cpus: 2, memory: "512M" }))
+      .toEqual(readArgvFixture("start-image"));
+  });
+
+  // Mirrors the Rust `fixture_coverage_is_accounted_for` tripwire: a fixture
+  // added without a TypeScript assertion is a silent coverage hole in one of
+  // the three languages the corpus is supposed to bind together.
+  it("asserts every fixture in the shared corpus", () => {
+    const onDisk = fs.readdirSync(MACHINE_FIXTURES)
+      .filter((name) => name.endsWith(".argv") && !name.startsWith("."))
+      .map((name) => name.slice(0, -".argv".length))
+      .sort();
+    expect(onDisk.length).toBeGreaterThan(0);
+    expect(onDisk).toEqual([
+      "check-artifact",
+      "create-image",
+      "create-manifest",
+      "exec",
+      "inspect",
+      "logs",
+      "ls",
+      "rm",
+      "rm-all",
+      "run-admission",
+      "run-allow-host-receipt",
+      "run-default",
+      "shell",
+      "start",
+      "start-image",
+      "stop",
+    ]);
+  });
+
   it("emits the shared ls/logs/inspect/rm argv fixtures", () => {
     expect(machineLsArgv({ json: true })).toEqual(readArgvFixture("ls"));
     expect(machineLogsArgv("web", { follow: true, lines: 100 })).toEqual(readArgvFixture("logs"));
@@ -280,5 +325,63 @@ describe("Machine persistent lifecycle", () => {
     expect(() => mvm.Machine.run({ image: "alpine", command: ["true"] })).toThrow(
       mvm.MachineError,
     );
+  });
+});
+
+// A `mvmctl` that misbehaves in the two ways the wrapper has to survive:
+// it can hang, and it can talk more than the caller can hold.
+function writeMisbehavingMvmctl(opts: { sleepSeconds?: number; stdoutKib?: number }): string {
+  const script = path.join(tmpDir, "slow-mvmctl");
+  fs.writeFileSync(
+    script,
+    `#!/usr/bin/env bash
+set -u
+${opts.stdoutKib ? `dd if=/dev/zero bs=1024 count=${opts.stdoutKib} 2>/dev/null | tr '\\0' 'A'` : ""}
+${opts.sleepSeconds ? `sleep ${opts.sleepSeconds}` : ""}
+exit 0
+`,
+    { mode: 0o755 },
+  );
+  return script;
+}
+
+describe("Machine subprocess bounds", () => {
+  afterEach(() => {
+    delete process.env[mvm.MVM_MACHINE_TIMEOUT_ENV];
+    delete process.env[mvm.MVM_MACHINE_MAX_OUTPUT_ENV];
+  });
+
+  it("stops waiting at the configured timeout and says so", () => {
+    process.env.MVM_CLI_BIN = writeMisbehavingMvmctl({ sleepSeconds: 3 });
+    process.env[mvm.MVM_MACHINE_TIMEOUT_ENV] = "0.3";
+
+    // Naming the cause is the whole point: an unbounded wait that eventually
+    // returns, or a timeout reported as a spawn failure, both send the reader
+    // to the wrong place.
+    expect(() => mvm.Machine.ls()).toThrow(/did not exit within 0\.3s/);
+  });
+
+  it("reports an output overflow as an overflow, not a spawn failure", () => {
+    process.env.MVM_CLI_BIN = writeMisbehavingMvmctl({ stdoutKib: 2048 });
+    process.env[mvm.MVM_MACHINE_MAX_OUTPUT_ENV] = "1024";
+
+    let caught: unknown;
+    try {
+      mvm.Machine.ls();
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(mvm.MachineError);
+    const message = (caught as Error).message;
+    expect(message).toMatch(/exceeded 1024 bytes/);
+    // The bug this pins: `spawnSync` reports the overflow through
+    // `result.error`, and treating any `result.error` as "could not start the
+    // process" blames the machine for something the machine did fine.
+    expect(message).not.toMatch(/failed to spawn/);
+  });
+
+  it("honours the defaults when the env vars are absent", () => {
+    process.env.MVM_CLI_BIN = writeFixtureMvmctl(0, "ok\n");
+    expect(mvm.Machine.run({ image: "alpine", command: ["true"] }).stdout).toBe("ok\n");
   });
 });

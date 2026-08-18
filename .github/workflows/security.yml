@@ -255,11 +255,29 @@ jobs:
   # ADR-001 §W4.2 + Plan 85 §R1 — cargo-fuzz harnesses for
   # GuestRequest, the authenticated-frame envelope, the libkrun
   # SupervisorConfig parser, and the OCI layer-unpack ingress.
-  # Run for 5 minutes per tag-push / dispatch; the nightly cron
-  # extends to 30 minutes.
+  # Per-target durations are the `FUZZ_SECS_*` budget below, deliberately
+  # not quoted here: they move as targets are added, and a duration named
+  # in two places goes stale in one of them.
   fuzz:
     name: Fuzz — parsers (vsock + OCI)
     runs-on: ubuntu-latest
+    # Under the six-hour platform cap, so a lane that outgrows its budget
+    # is stopped as this job rather than killed as the runner mid-target.
+    timeout-minutes: 300
+    env:
+      # Per-target fuzzing seconds. Literals at job scope rather than inside
+      # the script below because `xtask check-workflow-paths` reads them: it
+      # multiplies them by the number of targets in this job and refuses a
+      # budget that cannot finish inside `timeout-minutes`.
+      #
+      # 1800 was chosen when this lane had four targets. It has seventeen,
+      # and seventeen half-hours do not fit in six. Every nightly run was
+      # stopped partway down the list — most recently after eleven targets —
+      # so the last six, `fuzz_datapath_ingress` among them, had never
+      # executed on a cron run at all. The job's conclusion was `cancelled`,
+      # which the lane watcher did not count, so nothing said so.
+      FUZZ_SECS_SCHEDULE: 720
+      FUZZ_SECS_DISPATCH: 300
     steps:
       - uses: actions/checkout@v6
 
@@ -284,9 +302,9 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
         run: |
           if [ "$EVENT_NAME" = "schedule" ]; then
-            echo "secs=1800" >> "$GITHUB_OUTPUT"
+            echo "secs=$FUZZ_SECS_SCHEDULE" >> "$GITHUB_OUTPUT"
           else
-            echo "secs=300" >> "$GITHUB_OUTPUT"
+            echo "secs=$FUZZ_SECS_DISPATCH" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Fuzz GuestRequest (fuzz_guest_request)
@@ -535,6 +553,20 @@ jobs:
   mutation-witnesses:
     name: Claim witnesses — mutation-tested (${{ matrix.package }})
     runs-on: ubuntu-latest
+    # Under the six-hour platform cap, so a shard that outgrows its budget
+    # fails as itself. Reaching the cap instead kills the runner, and the
+    # only trace is "The runner has received a shutdown signal" — which
+    # names no package, no file, and no claim, and reads identically to
+    # infrastructure having a bad night.
+    #
+    # This has already earned itself: mvm-hostd/2of2 hit it on 2026-08-16 and
+    # was reported as a bounded, attributable stop with its partial output
+    # kept, which is what said the split was uneven and by how much. Note
+    # that GitHub records a timeout kill as `cancelled`, not `failure` —
+    # `security-lane-watch.yml` counts `cancelled` for that reason, and
+    # before it did, a shard that never finished was the one kind of red
+    # this whole lane could not report.
+    timeout-minutes: 330
     # BLOCKING, and sharded per package.
     #
     # Sharding is structural, not a response to a particular runtime: a
@@ -572,7 +604,18 @@ jobs:
           - mvm-build
           - mvm-cli
           - mvm-core
-          - mvm-hostd
+          # Four, not two, and the number is measured rather than chosen.
+          # Two shards ran on 2026-08-16: 1of2 finished five files in 100
+          # minutes while 2of2 drew plan_admission (93 mutants), audit_file
+          # (107) and network/stages (108), spent the full 330 and never
+          # reached its fifth file. Splitting by file count does not split by
+          # cost, and this package's files differ by roughly 4x. Four shards
+          # put the two most expensive in different jobs and cut the worst
+          # known load from 335 mutants to 201.
+          - mvm-hostd/1of4
+          - mvm-hostd/2of4
+          - mvm-hostd/3of4
+          - mvm-hostd/4of4
           - mvm-contract
           - mvm-runtime
           - mvm-sdk
@@ -623,12 +666,30 @@ jobs:
           export RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
           export MVM_HOME="$RUNNER_TEMP/mutants-mvm-home"
           export HOME="$MVM_HOME"
+          # The gate writes cargo-mutants output under the system temp dir.
+          # Pin that dir so the upload step below has a path it knows rather
+          # than one it guesses at.
+          export TMPDIR="$RUNNER_TEMP/mutants-out"
+          mkdir -p "$TMPDIR"
           mkdir -p "$HOME"
           if [ -e "$HOME/.mvm/keys" ]; then
             echo "::error::refusing to mutate against a reachable keystore at $HOME/.mvm/keys" >&2
             exit 1
           fi
           cargo run -p xtask -- check-mutation-witnesses --run --package '${{ matrix.package }}'
+
+      - name: Keep the mutation output of a shard that did not finish
+        # A shard killed by the timeout above has still measured most of its
+        # files, and that work is the only evidence of where it went. Without
+        # this the directory dies with the runner and the next person starts
+        # from the same blank page.
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: mutants-${{ strategy.job-index }}
+          path: ${{ runner.temp }}/mutants-out/mvm-mutation-witnesses/
+          if-no-files-found: ignore
+          retention-days: 7
 
   # ── Lane 5: Hash-verify regression ─────────────────────────────────
   # ADR-001 §W5.1 — the unit tests that exercise the

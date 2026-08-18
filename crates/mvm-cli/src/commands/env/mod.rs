@@ -4,7 +4,7 @@
 //! environment (builder VM image, Firecracker binary, shell init,
 //! default network).
 
-pub(super) mod artifact_verify;
+pub(crate) mod artifact_verify;
 pub(super) mod bootstrap;
 pub(crate) mod builder_vm;
 pub(super) mod cleanup;

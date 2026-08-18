@@ -10,9 +10,16 @@
 //!   - `cargo fuzz run [--fuzz-dir <d>] <target>` must resolve to a
 //!     `<working-directory>/<d>/fuzz_targets/<target>.rs`.
 //!
-//! This is a file-existence check, so it is cheap enough for the PR lint
-//! lane — which matters, because the workflows it guards mostly run on
-//! tags and cron, where a break is invisible for days.
+//! It also checks one number, for the same reason: the fuzz lane's
+//! per-target duration multiplied by its target count must fit inside the
+//! job's own timeout. A target is added in one place and the duration is
+//! set in another, so the product grew past six hours without either edit
+//! looking wrong — and the lane was killed partway down the list every
+//! night, with the targets below the cut never running.
+//!
+//! This is a file-existence check plus arithmetic, so it is cheap enough
+//! for the PR lint lane — which matters, because the workflows it guards
+//! mostly run on tags and cron, where a break is invisible for days.
 
 use anyhow::{Context, Result, bail};
 use std::path::Path;
@@ -25,10 +32,43 @@ struct FuzzInvocation {
     target: String,
 }
 
+/// Wall clock one fuzz target costs on top of its own fuzzing time: a
+/// sanitizer build of that crate's fuzz harness.
+///
+/// An allowance, not an average. Measured across a nightly run, the builds
+/// cost between a few seconds and five minutes each, so budgeting the mean
+/// would put the lane over its timeout on the day several slow ones land
+/// together.
+const FUZZ_BUILD_ALLOWANCE_SECS: u64 = 120;
+
+/// What the fuzz job says about how long it may take.
+#[derive(Debug, PartialEq, Eq)]
+struct FuzzBudget {
+    /// Seconds of fuzzing per target on the nightly cron — the longest of
+    /// the lane's two settings, so the one that has to fit.
+    per_target_secs: u64,
+    /// The job's own `timeout-minutes`.
+    timeout_minutes: u64,
+    /// How many targets the job runs.
+    targets: usize,
+}
+
+impl FuzzBudget {
+    /// Wall clock the declared budget implies, in seconds.
+    fn projected_secs(&self) -> u64 {
+        self.targets as u64 * (self.per_target_secs + FUZZ_BUILD_ALLOWANCE_SECS)
+    }
+
+    fn fits(&self) -> bool {
+        self.projected_secs() <= self.timeout_minutes * 60
+    }
+}
+
 pub fn run(workspace: &Path) -> Result<()> {
     let workflows = workflow_files(workspace)?;
     let members = workspace_package_names(workspace)?;
     let mut problems = Vec::new();
+    let mut budgets = Vec::new();
     let mut checked_dirs = 0usize;
     let mut checked_targets = 0usize;
     let mut checked_packages = 0usize;
@@ -79,6 +119,10 @@ pub fn run(workspace: &Path) -> Result<()> {
                 ));
             }
         }
+
+        if let Some(budget) = fuzz_budget(&src) {
+            budgets.push((name.clone(), budget));
+        }
     }
 
     if !problems.is_empty() {
@@ -89,6 +133,32 @@ pub fn run(workspace: &Path) -> Result<()> {
              that moves or renames the directory.",
             problems.len(),
             problems.join("\n  ")
+        );
+    }
+
+    let overrun: Vec<&(String, FuzzBudget)> = budgets.iter().filter(|(_, b)| !b.fits()).collect();
+    if !overrun.is_empty() {
+        let detail: Vec<String> = overrun
+            .iter()
+            .map(|(name, b)| {
+                format!(
+                    "{name}: fuzz job budgets {} target(s) × ({}s fuzzing + {FUZZ_BUILD_ALLOWANCE_SECS}s build) \
+                     = {} min, past its own timeout-minutes: {}",
+                    b.targets,
+                    b.per_target_secs,
+                    b.projected_secs() / 60,
+                    b.timeout_minutes
+                )
+            })
+            .collect();
+        bail!(
+            "check-workflow-paths: {} fuzz lane(s) cannot finish inside their timeout:\n  {}\n\n\
+             The job is killed partway down the target list, and every target below \
+             the cut never runs — including ones that witness a numbered claim. \
+             Lower the per-target seconds, or raise the timeout if it still fits \
+             under the six-hour platform cap.",
+            overrun.len(),
+            detail.join("\n  ")
         );
     }
 
@@ -240,6 +310,57 @@ fn workflow_files(root: &Path) -> Result<Vec<std::path::PathBuf>> {
     Ok(out)
 }
 
+/// The body of one top-level job, by name.
+///
+/// Text-scanned rather than parsed as YAML for the same reason the rest of
+/// this gate is: it has to stay a dependency-free file read that the PR
+/// lint lane can afford. Jobs sit at two-space indent, so the block ends
+/// at the next line with exactly that shape.
+fn job_body<'a>(src: &'a str, job: &str) -> Option<&'a str> {
+    let header = format!("\n  {job}:\n");
+    let start = src.find(&header)? + header.len();
+    let rest = &src[start..];
+    let end = rest
+        .lines()
+        .scan(0usize, |offset, line| {
+            let at = *offset;
+            *offset += line.len() + 1;
+            Some((at, line))
+        })
+        .find(|(_, line)| {
+            line.starts_with("  ")
+                && !line.starts_with("   ")
+                && !line.trim_start().starts_with('#')
+                && line.trim_end().ends_with(':')
+        })
+        .map_or(rest.len(), |(at, _)| at);
+    Some(&rest[..end])
+}
+
+/// A `key: <integer>` at any indent inside a block.
+fn scalar_u64(block: &str, key: &str) -> Option<u64> {
+    block.lines().find_map(|line| {
+        line.trim()
+            .strip_prefix(key)?
+            .strip_prefix(':')?
+            .split('#')
+            .next()?
+            .trim()
+            .parse()
+            .ok()
+    })
+}
+
+/// The fuzz job's declared budget, if the workflow has one.
+fn fuzz_budget(src: &str) -> Option<FuzzBudget> {
+    let block = job_body(src, "fuzz")?;
+    Some(FuzzBudget {
+        per_target_secs: scalar_u64(block, "FUZZ_SECS_SCHEDULE")?,
+        timeout_minutes: scalar_u64(block, "timeout-minutes")?,
+        targets: fuzz_invocations(block).len(),
+    })
+}
+
 /// Every `working-directory:` value in a workflow, unquoted.
 fn working_directories(src: &str) -> Vec<String> {
     src.lines()
@@ -356,21 +477,10 @@ mod tests {
         .unwrap_or_else(|error| panic!("{name} must be readable: {error}"))
     }
 
+    /// One job's body, panicking rather than returning `None` — the tests
+    /// name jobs that exist, and a rename should say so by name.
     fn job_block<'a>(workflow: &'a str, job: &str) -> &'a str {
-        let marker = format!("  {job}:\n");
-        let start = workflow
-            .find(&marker)
-            .unwrap_or_else(|| panic!("workflow is missing the {job} job"));
-        let rest_start = start + marker.len();
-        let rest = &workflow[rest_start..];
-        let end = rest
-            .match_indices("\n  ")
-            .find_map(|(offset, _)| {
-                let line = rest[offset + 1..].lines().next()?;
-                (!line.starts_with("    ") && line.ends_with(':')).then_some(rest_start + offset)
-            })
-            .unwrap_or(workflow.len());
-        &workflow[start..end]
+        job_body(workflow, job).unwrap_or_else(|| panic!("workflow is missing the {job} job"))
     }
 
     #[test]
@@ -450,13 +560,17 @@ mod tests {
         let lint_core = job_block(&workflow, "lint-core");
         assert!(lint_core.contains("cargo clippy --all-targets -- -D warnings"));
         let lint_policy = job_block(&workflow, "lint-policy");
+        assert!(lint_policy.contains("name: Invariant"));
+        assert!(lint_policy.contains("bash scripts/check-no-orchestration-server.sh"));
         assert!(lint_policy.contains("cargo run -p xtask -- check-conformance"));
         let lint_features = job_block(&workflow, "lint-features");
+        // One invocation covering the whole test-support subtree. Selecting a
+        // package at a time made cargo resolve features once per package and
+        // rebuild most of the same graph each time; the packages are listed
+        // together so a single resolution serves all of them.
         for expected in [
-            "cargo nextest run -p mvm-backends --features test-support --lib",
-            "cargo nextest run -p mvm-runtime --features test-support --lib",
-            "cargo nextest run -p mvm-client --features test-support --lib",
-            "cargo nextest run -p mvm-cli --features test-support --lib",
+            "cargo nextest run --features test-support --lib",
+            "-p mvm-backends -p mvm-runtime -p mvm-client -p mvm-cli -p mvm-vmm",
             "cargo nextest run -p mvmctl --features test-support --test audit_emissions_live",
             "cargo check -p mvm-cli --features test-support --example verification_loop",
         ] {
@@ -465,21 +579,46 @@ mod tests {
                 "CI feature lane must contain {expected:?}"
             );
         }
+        assert_eq!(
+            lint_features
+                .matches("cargo nextest run --features test-support --lib")
+                .count(),
+            1,
+            "feature coverage must not repeat the test-support run"
+        );
+        // The per-package shape is what made this lane the critical path, so
+        // its return is an error rather than a silent regression.
+        for regressed in [
+            "cargo nextest run -p mvm-backends --features test-support --lib",
+            "cargo nextest run -p mvm-runtime --features test-support --lib",
+        ] {
+            assert!(
+                !lint_features.contains(regressed),
+                "feature coverage must not go back to one invocation per package: {regressed:?}"
+            );
+        }
 
         let test = job_block(&workflow, "test");
         assert!(test.contains("name: Test"));
         assert!(test.contains(
-            "needs: [scope, test-workspace, test-linux, test-release-witness, test-ebpf-telemetry]"
+            "needs: [scope, test-workspace, test-linux, test-release-witness, \
+             test-ebpf-telemetry, bdd-conformance, kernel]"
         ));
 
         // Every lane the aggregate names must also be read back in the loop that
         // compares results against the scope decision. A lane in `needs` but not
         // in the loop is gated on nothing but its own scheduling.
+        // `bdd-conformance` and `kernel` key off their own narrower scopes, so
+        // they are matched against `$SCOPE_BDD` / `$KERNEL_SCOPE` outside the
+        // loop rather than folded into it — but they still have to be read back
+        // somewhere, which is what this pins.
         for expected in [
             "\"$WORKSPACE_RESULT\"",
             "\"$LINUX_RESULT\"",
             "\"$RELEASE_WITNESS_RESULT\"",
             "\"$EBPF_RESULT\"",
+            "\"$BDD_RESULT\"",
+            "\"$KERNEL_RESULT\"",
         ] {
             assert!(
                 test.contains(expected),
@@ -542,8 +681,11 @@ mod tests {
             "git diff --name-only -z",
             "grep -zE",
             "could not diff $BASE..$HEAD — running every lane to stay safe",
-            "invalid or missing code scope",
+            "invalid or missing ${name} scope",
             "code=true",
+            "nix=true",
+            "architecture=true",
+            "kernel=true",
         ] {
             assert!(
                 scope.contains(expected),
@@ -584,6 +726,17 @@ mod tests {
         let policy = job_block(&workflow, "lint-policy");
         assert!(policy.contains("needs: [scope]"));
         assert!(!policy.contains("needs.scope.outputs.code == 'true'"));
+        assert!(policy.contains("needs.scope.outputs.architecture == 'true'"));
+
+        let nix = job_block(&workflow, "nix-flake-check");
+        assert!(nix.contains("needs: [scope]"));
+        assert!(nix.contains("needs.scope.outputs.nix == 'true'"));
+
+        let kernel = job_block(&workflow, "kernel");
+        assert!(kernel.contains("needs: [scope]"));
+        assert!(kernel.contains("if: needs.scope.outputs.kernel == 'true'"));
+        assert!(kernel.contains("name: Build kernels (${{ matrix.arch }})"));
+        assert!(kernel.contains("needs.scope.outputs.kernel == 'true'"));
 
         for aggregate in ["lint", "test"] {
             let block = job_block(&workflow, aggregate);
@@ -638,35 +791,70 @@ mod tests {
         let expected_group = "group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}";
         let expected_cancel = "cancel-in-progress: ${{ github.event_name == 'pull_request' }}";
 
-        for name in ["ci.yml", "architecture.yml"] {
-            let source = workflow(name);
-            assert!(
-                source.contains("merge_group:\n    types: [checks_requested]"),
-                "{name} must handle merge-queue check requests explicitly"
-            );
-            assert!(
-                source.contains(expected_group),
-                "{name} concurrency key drifted"
-            );
-            assert!(
-                source.contains(expected_cancel),
-                "{name} must cancel only superseded pull-request runs"
-            );
-            assert!(!source.contains("cancel-in-progress: true"));
-        }
-
         let ci = ci_workflow();
+        assert!(ci.contains("merge_group:\n    types: [checks_requested]"));
+        assert!(ci.contains(expected_group));
+        assert!(ci.contains(expected_cancel));
+        assert!(!ci.contains("cancel-in-progress: true"));
         assert!(ci.contains("permissions:\n  contents: read"));
         for required_name in [
             "name: Lint (fmt + clippy + policy)",
             "name: Test",
+            "name: Invariant",
             "name: Nix flake check (Linux eval)",
+            "name: Build kernels (${{ matrix.arch }})",
         ] {
             assert!(ci.contains(required_name), "required check name drifted");
         }
 
         let architecture = workflow("architecture.yml");
-        assert!(architecture.contains("name: Invariant #1"));
+        assert!(!architecture.contains("pull_request:"));
+        assert!(!architecture.contains("merge_group:"));
+        assert!(architecture.contains("workflow_dispatch:"));
+
+        let kernel = workflow("kernel-build.yml");
+        assert!(!kernel.contains("pull_request:"));
+        assert!(!kernel.contains("merge_group:"));
+        assert!(kernel.contains("workflow_dispatch:"));
+        assert!(kernel.contains("push:"));
+    }
+
+    #[test]
+    fn trusted_main_warms_workspace_and_nix_outputs_for_validation() {
+        let cache_action = workflow("../actions/rust-cache/action.yml");
+        assert!(cache_action.contains("prefix-key: v1-rust"));
+        assert!(cache_action.contains("cache-workspace-crates: \"true\""));
+        assert!(cache_action.contains("save-if: ${{ inputs.save }}"));
+
+        let warm = workflow("cache-warm.yml");
+        assert!(warm.contains("DeterminateSystems/magic-nix-cache-action@v14"));
+        assert!(warm.contains("Build Nix outputs to populate the binary cache"));
+        assert!(warm.contains("save: \"true\""));
+
+        let ci = ci_workflow();
+        let nix = job_block(&ci, "nix-flake-check");
+        assert!(nix.contains("DeterminateSystems/magic-nix-cache-action@v14"));
+        assert!(nix.contains("use-flakehub: false"));
+        assert!(nix.contains("diagnostic-endpoint: \"\""));
+    }
+
+    #[test]
+    fn kernel_validation_and_release_reuse_one_builder_script() {
+        let ci = ci_workflow();
+        let ci_kernel = job_block(&ci, "kernel");
+        let release = workflow("kernel-build.yml");
+        let expected = "bash scripts/build-kernel-artifacts.sh \"$ARCH\"";
+        assert!(ci_kernel.contains(expected));
+        assert!(release.contains(expected));
+
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let status = std::process::Command::new("bash")
+            .arg("scripts/build-kernel-artifacts.sh")
+            .arg("not-an-architecture")
+            .current_dir(workspace)
+            .status()
+            .expect("kernel builder input validation must execute");
+        assert_eq!(status.code(), Some(2));
     }
 
     #[test]
@@ -762,6 +950,84 @@ mod tests {
         // GitHub's `${{ }}` or shell `${}` spelling.
         assert!(cargo_package_flags("        run: cargo test -p ${{ matrix.crate }}").is_empty());
         assert!(cargo_package_flags("          cargo publish -p ${CRATE}").is_empty());
+    }
+
+    /// A job's body stops where the next job starts, or the fuzz budget
+    /// would be read out of whatever job happened to follow.
+    #[test]
+    fn a_job_body_stops_at_the_next_job() {
+        let src = "jobs:\n  first:\n    timeout-minutes: 10\n  # a comment: not a job\n    env:\n      X: 1\n  second:\n    timeout-minutes: 99\n";
+        let first = job_body(src, "first").expect("first job");
+        assert!(first.contains("timeout-minutes: 10"));
+        assert!(
+            !first.contains("99"),
+            "the next job's settings leaked into this one: {first:?}"
+        );
+        // A comment at job indent is prose, not a boundary.
+        assert!(first.contains("X: 1"));
+        assert_eq!(job_body(src, "third"), None);
+    }
+
+    #[test]
+    fn a_scalar_is_read_without_its_trailing_comment() {
+        assert_eq!(
+            scalar_u64("    timeout-minutes: 300\n", "timeout-minutes"),
+            Some(300)
+        );
+        assert_eq!(
+            scalar_u64(
+                "      FUZZ_SECS_SCHEDULE: 720 # why\n",
+                "FUZZ_SECS_SCHEDULE"
+            ),
+            Some(720)
+        );
+        assert_eq!(
+            scalar_u64("    timeout-minutes: soon\n", "timeout-minutes"),
+            None
+        );
+        assert_eq!(scalar_u64("    other: 1\n", "timeout-minutes"), None);
+    }
+
+    /// The live assertion. Seventeen targets at half an hour each is nine
+    /// hours in a six-hour job, which is what the nightly lane was actually
+    /// running: killed partway down the list, every target below the cut
+    /// silently never fuzzed.
+    #[test]
+    fn the_fuzz_lane_fits_inside_its_own_timeout() {
+        let budget =
+            fuzz_budget(&workflow("security.yml")).expect("security.yml declares a fuzz budget");
+        assert!(
+            budget.targets >= 15,
+            "the target count did not resolve: {budget:?}"
+        );
+        assert!(
+            budget.fits(),
+            "{} targets × {}s + build does not fit in {} min",
+            budget.targets,
+            budget.per_target_secs,
+            budget.timeout_minutes
+        );
+    }
+
+    /// And it has to be able to say no, or it is decoration.
+    #[test]
+    fn a_lane_that_cannot_finish_is_rejected() {
+        let over = FuzzBudget {
+            per_target_secs: 1800,
+            timeout_minutes: 300,
+            targets: 17,
+        };
+        assert!(!over.fits());
+        // Halving the per-target time is the fix that brings it back.
+        assert!(
+            FuzzBudget {
+                per_target_secs: 720,
+                ..over
+            }
+            .fits()
+        );
+        // So is dropping targets.
+        assert!(FuzzBudget { targets: 4, ..over }.fits());
     }
 
     /// Every `cargo -p` across the real workflow tree resolves today. This is

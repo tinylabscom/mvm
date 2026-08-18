@@ -64,6 +64,9 @@ use std::time::{Duration, Instant};
 use std::{fs, io};
 
 use libkrun_sys::{KernelFormat, KrunContext, SupervisorConfig};
+use mvm_vmm::host::network_endpoint_spawn::{
+    HandshakeContext, handshake_timeout, read_handshake_line,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -289,8 +292,43 @@ pub(crate) struct BuilderVsockEgressEndpoint {
     state_dir: PathBuf,
 }
 
+/// Mint this builder boot's FlowMux identity and write the drive its guest
+/// reads the keys off. Returned so the caller can attach the drive to the VM.
+///
+/// The session id is the per-VM state dir's own name, which is unique per boot
+/// and in scope at every builder spawn site — the alternative was threading a
+/// name through call sites that variously have one, have a differently-named
+/// one, or have none.
+pub(crate) fn stage_builder_flowmux_identity(
+    state_dir: &Path,
+) -> Result<
+    (
+        mvm_vmm::host::flowmux_identity::FlowMuxIdentityMaterial,
+        PathBuf,
+    ),
+    BuilderVmError,
+> {
+    let vm_name = state_dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("builder");
+    let material =
+        mvm_vmm::host::flowmux_identity::FlowMuxIdentityMaterial::mint_from_host_signer(vm_name)
+            .map_err(|e| {
+                BuilderVmError::ExtractionFailed(format!("mint the builder FlowMux identity: {e}"))
+            })?;
+    let drive = state_dir.join(mvm_vmm::host::flowmux_identity::IDENTITY_DRIVE_FILE);
+    material.write_drive(&drive).map_err(|e| {
+        BuilderVmError::ExtractionFailed(format!("write the builder FlowMux identity drive: {e}"))
+    })?;
+    Ok((material, drive))
+}
+
 impl BuilderVsockEgressEndpoint {
-    fn spawn(state_dir: &Path) -> Result<Self, BuilderVmError> {
+    fn spawn(
+        state_dir: &Path,
+        identity: &mvm_vmm::host::network_endpoint_spawn::FlowMuxIdentitySpawnConfig,
+    ) -> Result<Self, BuilderVmError> {
         let socket_dir = builder_vsock_socket_dir(state_dir)?;
         let transport_path = socket_dir.join(mvm_core::config::vsock_socket_filename(
             mvm_agentd::vsock::EGRESS_PORT,
@@ -300,12 +338,14 @@ impl BuilderVsockEgressEndpoint {
             BuilderEndpointTransport::Uds {
                 path: transport_path,
             },
+            identity,
         )
     }
 
     pub(crate) fn spawn_with_transport(
         state_dir: &Path,
         transport: BuilderEndpointTransport,
+        identity: &mvm_vmm::host::network_endpoint_spawn::FlowMuxIdentitySpawnConfig,
     ) -> Result<Self, BuilderVmError> {
         let endpoint_path = resolve_network_endpoint_path()?;
         let config = serde_json::json!({
@@ -314,7 +354,14 @@ impl BuilderVsockEgressEndpoint {
             "transport": transport,
             "redaction": mvm_core::policy::RedactionPolicy::default(),
             "network_policy": mvm_core::policy::network_policy::NetworkPolicy::trusted_build_egress(),
-            "egress_mode": "raw",
+            // One authenticated session, same as every other tier. The guest's
+            // egress client speaks nothing else.
+            "egress_mode": "flow_mux",
+            "flowmux_identity": {
+                "session_id": identity.session_id,
+                "host_signing_key_base64": identity.host_signing_key_base64,
+                "guest_verifying_key_base64": identity.guest_verifying_key_base64,
+            },
         });
 
         let mvmctl_path = std::env::current_exe().map_err(|e| {
@@ -368,7 +415,20 @@ impl BuilderVsockEgressEndpoint {
                 "builder egress endpoint stdout was not piped".to_string(),
             )
         })?;
-        read_builder_endpoint_handshake(stdout, child.id(), Duration::from_secs(10))?;
+        // The shared reader, not a local copy: the builder's own version
+        // accepted any non-empty line as a handshake and reported a bare
+        // duration on timeout, which is not enough to tell a slow endpoint from
+        // a dead one.
+        read_handshake_line(
+            stdout,
+            child.id(),
+            handshake_timeout(),
+            &HandshakeContext {
+                endpoint: &endpoint_path,
+                stderr_log: Some(&stderr_log_path),
+            },
+        )
+        .map_err(|e| BuilderVmError::ExtractionFailed(format!("{e:#}")))?;
 
         let pid_file = state_dir.join(BUILDER_SUBST_PID_FILE);
         std::fs::write(&pid_file, child.id().to_string()).map_err(|e| {
@@ -411,6 +471,30 @@ impl Drop for BuilderVsockEgressEndpoint {
     }
 }
 
+/// Whether `candidate` predates the running executable.
+///
+/// The endpoint is a separate binary that `machine run` does not build, so a
+/// copy left by an older checkout sits on disk and is picked up in preference
+/// to building a current one. A guest and a host from different builds then
+/// speak different protocols, and the only symptom is a framing error whose
+/// length field decodes to ASCII from the wrong wire format.
+///
+/// Modification time is the cheap comparison that catches it: both binaries
+/// come out of the same workspace, so an endpoint older than the `mvmctl`
+/// running it cannot have been built from this source. Unknowable times mean
+/// no opinion — rebuild rather than refuse, since a false stale reading costs
+/// a build and a false fresh one costs a mystery.
+fn endpoint_predates_running_exe(candidate: &std::path::Path) -> bool {
+    let modified = |p: &std::path::Path| p.metadata().and_then(|m| m.modified()).ok();
+    let Some(exe) = std::env::current_exe().ok().as_deref().and_then(modified) else {
+        return false;
+    };
+    let Some(cand) = modified(candidate) else {
+        return true;
+    };
+    cand < exe
+}
+
 fn resolve_network_endpoint_path() -> Result<PathBuf, BuilderVmError> {
     if let Some(path) = std::env::var_os("MVM_SUBSTITUTION_ENDPOINT_PATH").map(PathBuf::from) {
         if path.is_file() {
@@ -426,7 +510,7 @@ fn resolve_network_endpoint_path() -> Result<PathBuf, BuilderVmError> {
         && let Some(dir) = current_exe.parent()
     {
         let candidate = dir.join("mvm-network-endpoint");
-        if candidate.is_file() {
+        if candidate.is_file() && !endpoint_predates_running_exe(&candidate) {
             return Ok(candidate);
         }
     }
@@ -456,7 +540,7 @@ fn resolve_network_endpoint_path() -> Result<PathBuf, BuilderVmError> {
     for root in &target_roots {
         for variant in ["release", "debug"] {
             let candidate = root.join(variant).join("mvm-network-endpoint");
-            if candidate.is_file() {
+            if candidate.is_file() && !endpoint_predates_running_exe(&candidate) {
                 return Ok(candidate);
             }
         }
@@ -484,6 +568,17 @@ fn resolve_network_endpoint_path() -> Result<PathBuf, BuilderVmError> {
     for root in &target_roots {
         let built = root.join("debug").join("mvm-network-endpoint");
         if built.is_file() {
+            if endpoint_predates_running_exe(&built) {
+                return Err(BuilderVmError::ExtractionFailed(format!(
+                    "mvm-network-endpoint at {} is older than the running {} even after \
+                     rebuilding it; running them together would pair a guest and a host \
+                     from different builds",
+                    built.display(),
+                    std::env::current_exe()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|_| "mvmctl".to_string()),
+                )));
+            }
             return Ok(built);
         }
     }
@@ -496,43 +591,6 @@ fn resolve_network_endpoint_path() -> Result<PathBuf, BuilderVmError> {
             .collect::<Vec<_>>()
             .join(", ")
     )))
-}
-
-fn read_builder_endpoint_handshake(
-    stdout: std::process::ChildStdout,
-    pid: u32,
-    timeout: Duration,
-) -> Result<(), BuilderVmError> {
-    use std::io::{BufRead, BufReader};
-
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let mut line = String::new();
-        let res = BufReader::new(stdout).read_line(&mut line).map(|_| line);
-        let _ = tx.send(res);
-    });
-
-    match rx.recv_timeout(timeout) {
-        Ok(Ok(line)) if !line.trim().is_empty() => Ok(()),
-        Ok(Ok(_)) => {
-            kill_pid(pid as libc::pid_t, libc::SIGKILL);
-            Err(BuilderVmError::ExtractionFailed(
-                "builder egress endpoint closed stdout without a ready handshake".to_string(),
-            ))
-        }
-        Ok(Err(e)) => {
-            kill_pid(pid as libc::pid_t, libc::SIGKILL);
-            Err(BuilderVmError::ExtractionFailed(format!(
-                "read builder egress endpoint handshake: {e}"
-            )))
-        }
-        Err(_) => {
-            kill_pid(pid as libc::pid_t, libc::SIGKILL);
-            Err(BuilderVmError::ExtractionFailed(format!(
-                "builder egress endpoint handshake timed out after {timeout:?}"
-            )))
-        }
-    }
 }
 
 fn reap_builder_vsock_egress_endpoint(state_dir: &Path) {
@@ -928,8 +986,15 @@ impl LibkrunBuilderVm {
                 path_to_str(&share_dir, "closure_seed_dir")?,
             );
         }
+        let (identity_material, identity_drive) = stage_builder_flowmux_identity(&vm_state_dir)?;
+        krun = krun.add_disk(
+            "mvm-identity",
+            path_to_str(&identity_drive, "identity_drive")?,
+            true,
+        );
         krun = apply_builder_vsock_egress(krun);
-        let _egress_endpoint = BuilderVsockEgressEndpoint::spawn(&vm_state_dir)?;
+        let _egress_endpoint =
+            BuilderVsockEgressEndpoint::spawn(&vm_state_dir, identity_material.spawn_config())?;
 
         let cfg = SupervisorConfig {
             krun,
@@ -1106,10 +1171,18 @@ impl LibkrunBuilderVm {
         // set by `builder_runtime_overlay_attachment` — there is no
         // overlay-absent degraded boot.
         let egress_endpoint = if builder_uses_vsock_egress(&image) {
+            let (identity_material, identity_drive) =
+                stage_builder_flowmux_identity(&vm_state_dir)?;
             krun = krun
                 .with_vsock_direct()
-                .add_host_listen_port(mvm_agentd::vsock::EGRESS_PORT);
-            BuilderVsockEgressEndpoint::spawn(&vm_state_dir).map(Some)?
+                .add_host_listen_port(mvm_agentd::vsock::EGRESS_PORT)
+                .add_disk(
+                    "mvm-identity",
+                    path_to_str(&identity_drive, "identity_drive")?,
+                    true,
+                );
+            BuilderVsockEgressEndpoint::spawn(&vm_state_dir, identity_material.spawn_config())
+                .map(Some)?
         } else {
             krun = krun.with_vsock_direct();
             None
@@ -1615,10 +1688,18 @@ impl BuilderVm for LibkrunBuilderVm {
         // set by `builder_runtime_overlay_attachment` — there is no
         // overlay-absent degraded boot.
         let egress_endpoint = if builder_uses_vsock_egress(&image) {
+            let (identity_material, identity_drive) =
+                stage_builder_flowmux_identity(&vm_state_dir)?;
             krun = krun
                 .with_vsock_direct()
-                .add_host_listen_port(mvm_agentd::vsock::EGRESS_PORT);
-            BuilderVsockEgressEndpoint::spawn(&vm_state_dir).map(Some)?
+                .add_host_listen_port(mvm_agentd::vsock::EGRESS_PORT)
+                .add_disk(
+                    "mvm-identity",
+                    path_to_str(&identity_drive, "identity_drive")?,
+                    true,
+                );
+            BuilderVsockEgressEndpoint::spawn(&vm_state_dir, identity_material.spawn_config())
+                .map(Some)?
         } else {
             krun = krun.with_vsock_direct();
             None
@@ -1858,12 +1939,28 @@ impl VmBackendForBuilder for LibkrunBuilderBackend {
             && let BuilderVmImage::Rootfs { cmdline, .. } = &self.image
         {
             krun = krun
-                .with_cmdline(builder_vsock_egress_cmdline(cmdline))
+                .with_cmdline(
+                    crate::builder_cmdline::checked_builder_cmdline(builder_vsock_egress_cmdline(
+                        cmdline,
+                    ))
+                    .map_err(BuilderVmError::NixBuildFailed)?,
+                )
                 .with_vsock_direct()
                 .add_host_listen_port(mvm_agentd::vsock::EGRESS_PORT);
         }
         let egress_endpoint = if builder_uses_vsock_egress(&self.image) {
-            BuilderVsockEgressEndpoint::spawn(&config.vm_state_dir).map(Some)?
+            let (identity_material, identity_drive) =
+                stage_builder_flowmux_identity(&config.vm_state_dir)?;
+            krun = krun.add_disk(
+                "mvm-identity",
+                path_to_str(&identity_drive, "identity_drive")?,
+                true,
+            );
+            BuilderVsockEgressEndpoint::spawn(
+                &config.vm_state_dir,
+                identity_material.spawn_config(),
+            )
+            .map(Some)?
         } else {
             krun = krun.with_vsock_direct();
             None
@@ -2160,7 +2257,10 @@ fn krun_context_for_image(
                 path_to_str(&kernel, "kernel_path")?,
                 path_to_str(rootfs_path, "rootfs_path")?,
             )
-            .with_cmdline(cmdline.as_str())
+            .with_cmdline(
+                crate::builder_cmdline::checked_builder_cmdline(cmdline.clone())
+                    .map_err(BuilderVmError::NixBuildFailed)?,
+            )
             .with_kernel_format(kernel_format))
         }
         BuilderVmImage::RootDir {
@@ -2677,7 +2777,11 @@ pub(crate) fn prepopulate_stage0_nix_store_image(
         "prepopulating Stage 0 Nix store image with host mkfs.ext4"
     );
     let status = Command::new(&mkfs)
-        .args(["-F", "-q", "-b", "4096", "-d"])
+        // `-L` so the guest can find this disk by label instead of by device
+        // letter, which shifts whenever a backend attaches another drive.
+        .args(["-F", "-q", "-b", "4096", "-L"])
+        .arg(crate::rootfs::STAGE0_NIX_STORE_EXT4_LABEL)
+        .args(["-d"])
         .arg(&seed_nix)
         .arg(store_image)
         .arg(blocks_4k.to_string())
@@ -2730,7 +2834,12 @@ fn format_stage0_store_empty_in_process(store_image: &Path) -> Result<(), Builde
     file.set_len(device_size).map_err(|e| {
         BuilderVmError::ExtractionFailed(format!("resize {}: {e}", store_image.display()))
     })?;
-    let summary = mvm_fs::ext4::mkfs::format_empty_ext4(&mut file, size_bytes).map_err(|e| {
+    let summary = mvm_fs::ext4::mkfs::format_empty_ext4_labeled(
+        &mut file,
+        size_bytes,
+        crate::rootfs::STAGE0_NIX_STORE_EXT4_LABEL.as_bytes(),
+    )
+    .map_err(|e| {
         BuilderVmError::ExtractionFailed(format!(
             "pure-Rust ext4 format of {}: {e}",
             store_image.display()
@@ -4192,6 +4301,10 @@ enum Stage0HaltOutcome {
     CleanHalt,
     /// `nix build` (or a copy step) failed; the guest powered off anyway.
     BuildFailed,
+    /// The guest refused before starting the build — no egress proxy, no
+    /// clock, a share that would not mount. Carries the refusal, because it
+    /// names a cause the nix output never will.
+    SetupFailed(String),
     /// No terminal marker at all — a panic, kill, or truncated console.
     NoCleanHalt,
 }
@@ -4204,6 +4317,15 @@ enum Stage0HaltOutcome {
 /// `stage0-init` prints one stable terminal line, so match on it (the QEMU
 /// Stage 0 path keys on the same markers).
 fn stage0_console_halt_outcome(log: &str) -> Stage0HaltOutcome {
+    // Setup refusals are checked first and win over everything else: the
+    // guest stops before `nix build` runs, so any later marker would be
+    // describing a build that never started.
+    if let Some(why) = log
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("stage0-init: FATAL: "))
+    {
+        return Stage0HaltOutcome::SetupFailed(why.trim().to_string());
+    }
     if log.contains("stage0-init: build failed") {
         Stage0HaltOutcome::BuildFailed
     } else if log.contains("stage0-init: done; halting") {
@@ -4224,6 +4346,9 @@ fn stage0_run_result(console: &str, console_log_path: &str) -> Result<(), Builde
         Stage0HaltOutcome::BuildFailed => Err(BuilderVmError::NixBuildFailed(format!(
             "nix build failed inside the Stage 0 guest; console log at {console_log_path}\n{}",
             read_console_tail(console_log_path, 20)
+        ))),
+        Stage0HaltOutcome::SetupFailed(why) => Err(BuilderVmError::NixBuildFailed(format!(
+            "Stage 0 guest refused to start the build: {why}; console log at {console_log_path}"
         ))),
         Stage0HaltOutcome::NoCleanHalt => Err(BuilderVmError::ExtractionFailed(format!(
             "Stage 0 guest did not reach a clean halt; console log at {console_log_path}\n{}",
@@ -4450,10 +4575,18 @@ impl LibkrunPersistentHostVm {
         // `builder_runtime_overlay_attachment` — there is no overlay-absent
         // degraded boot.
         let egress_endpoint = if builder_uses_vsock_egress(&image) {
+            let (identity_material, identity_drive) =
+                stage_builder_flowmux_identity(&vm_state_dir)?;
             krun = krun
                 .with_vsock_direct()
-                .add_host_listen_port(mvm_agentd::vsock::EGRESS_PORT);
-            BuilderVsockEgressEndpoint::spawn(&vm_state_dir).map(Some)?
+                .add_host_listen_port(mvm_agentd::vsock::EGRESS_PORT)
+                .add_disk(
+                    "mvm-identity",
+                    path_to_str(&identity_drive, "identity_drive")?,
+                    true,
+                );
+            BuilderVsockEgressEndpoint::spawn(&vm_state_dir, identity_material.spawn_config())
+                .map(Some)?
         } else {
             krun = krun.with_vsock_direct();
             None
@@ -6412,6 +6545,57 @@ mod tests {
     }
 
     #[test]
+    fn a_setup_refusal_is_reported_as_a_refusal_not_as_an_unclean_halt() {
+        // This is the console shape of the guest-egress regression: the client
+        // dies, stage0-init refuses before nix runs, and the guest powers off.
+        // Read as NoCleanHalt it would say "did not reach a clean halt"; read
+        // as BuildFailed it would blame a build that never started.
+        let console = "stage0-init: forked mvm-egress-client pid=227\n\
+             mvm-egress-client: failed to load guest signing key\n\
+             stage0-init: FATAL: mvm-egress-client exited before binding the \
+             local egress proxy at 127.0.0.1:1080 (exit code 1)\n\
+             [    9.3] reboot: Power down\n";
+        assert_eq!(
+            stage0_console_halt_outcome(console),
+            Stage0HaltOutcome::SetupFailed(
+                "mvm-egress-client exited before binding the local egress proxy at \
+                 127.0.0.1:1080 (exit code 1)"
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn a_setup_refusal_outranks_a_later_build_marker() {
+        // The guest stops before the build, so a build marker in the same
+        // console can only be stale output from an earlier run.
+        assert_eq!(
+            stage0_console_halt_outcome(
+                "stage0-init: FATAL: no egress\nstage0-init: build failed: x\n"
+            ),
+            Stage0HaltOutcome::SetupFailed("no egress".to_string())
+        );
+    }
+
+    #[test]
+    fn stage0_run_result_surfaces_the_refusal_rather_than_the_nix_noise() {
+        let err = stage0_run_result(
+            "warning: unable to download 'https://github.com/NixOS/nixpkgs'\n\
+             stage0-init: FATAL: mvm-egress-client exited before binding the local \
+             egress proxy at 127.0.0.1:1080 (exit code 1)\n",
+            "/tmp/mvm-stage0-test/console.log",
+        )
+        .expect_err("a setup refusal must fail the run");
+        let msg = err.to_string();
+        assert!(msg.contains("refused to start the build"), "{msg}");
+        assert!(msg.contains("mvm-egress-client"), "{msg}");
+        assert!(
+            msg.contains("console log at /tmp/mvm-stage0-test/console.log"),
+            "{msg}"
+        );
+    }
+
+    #[test]
     fn stage0_run_result_build_failure_names_the_console_log_path() {
         // Drive the same path a real Stage 0 build failure takes: the guest
         // powered off cleanly but printed the build-failed marker, so the
@@ -7468,5 +7652,59 @@ fi
         assert!(summary.contains("vsock_exit_code=7"));
         assert!(summary.contains("file_exit_code=9"));
         assert!(summary.contains("build_ms=2"));
+    }
+
+    /// The regression this exists for. `machine run` does not build the
+    /// endpoint, so a copy from an older checkout is found first and used
+    /// silently; the guest and host then speak different protocols and the
+    /// only symptom is a frame-length field that decodes to ASCII.
+    #[test]
+    fn an_endpoint_older_than_the_running_exe_is_stale() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let old = dir.path().join("mvm-network-endpoint");
+        std::fs::write(&old, b"pre-cutover").expect("write");
+        // Backdate well past any plausible clock skew between the two files.
+        let long_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(7 * 86_400);
+        std::fs::File::options()
+            .write(true)
+            .open(&old)
+            .expect("open")
+            .set_modified(long_ago)
+            .expect("backdate");
+
+        assert!(
+            endpoint_predates_running_exe(&old),
+            "an endpoint a week older than the running binary must read as stale"
+        );
+    }
+
+    /// The companion, so the check cannot pass by calling everything stale:
+    /// a binary newer than the running one is used as-is.
+    #[test]
+    fn an_endpoint_newer_than_the_running_exe_is_not_stale() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let fresh = dir.path().join("mvm-network-endpoint");
+        std::fs::write(&fresh, b"current").expect("write");
+        let soon = std::time::SystemTime::now() + std::time::Duration::from_secs(600);
+        std::fs::File::options()
+            .write(true)
+            .open(&fresh)
+            .expect("open")
+            .set_modified(soon)
+            .expect("postdate");
+
+        assert!(
+            !endpoint_predates_running_exe(&fresh),
+            "an endpoint newer than the running binary must be used as-is"
+        );
+    }
+
+    /// A path that cannot be stat'd has no usable time. Reading that as stale
+    /// costs a rebuild; reading it as fresh costs a protocol mismatch nobody
+    /// can diagnose, so it fails towards the rebuild.
+    #[test]
+    fn an_unstattable_endpoint_reads_as_stale() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert!(endpoint_predates_running_exe(&dir.path().join("absent")));
     }
 }

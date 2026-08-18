@@ -7,6 +7,8 @@ pub mod addon_dns;
 /// Loopback TCP ↔ host-vsock bridge (`mvm-addon-vsock-bridge`).
 #[cfg(feature = "addons")]
 pub mod addon_vsock_bridge;
+/// The workload-facing assurance campaign API.
+pub mod assurance;
 /// In-guest host-services broker client: dials the supervisor's guest-facing
 /// broker port over vsock and exchanges a framed `ServiceCall` for a framed
 /// `ServiceResponse`. The workload→host call half of the broker path.
@@ -37,12 +39,15 @@ pub mod entrypoint_stream;
 /// Guest-side FlowMux client for the converged single networking path.
 #[cfg(feature = "addons")]
 pub mod flowmux;
+/// Load the per-boot FlowMux identity material used by the guest-side adapters.
+pub mod flowmux_drive;
 /// Loopback SOCKS5/HTTP-proxy → FlowMux egress bridge (`mvm-egress-client`).
 #[cfg(feature = "addons")]
 pub mod flowmux_egress;
-/// Load the per-boot FlowMux identity material used by the guest-side adapters.
 #[cfg(feature = "addons")]
 pub mod flowmux_keys;
+/// Blocking one-shot FlowMux client for the guest's tokio-free callers.
+pub mod flowmux_sync;
 /// In-guest forward-proxy front: parses a workload's proxied request into a
 /// `WireRequest` for the substitution client.
 pub mod forward_proxy;

@@ -28,16 +28,31 @@ fn release_workflow() -> String {
         .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()))
 }
 
+/// The boot image train's workflow. The four image jobs live here, not in
+/// `release.yml`: images ship on their own `boot-image/vN` counter so a rootfs
+/// fix does not need a CLI release.
+fn boot_image_workflow() -> String {
+    let path = Path::new(".github/workflows/release-boot-image.yml");
+    fs::read_to_string(path)
+        .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()))
+}
+
+fn pages_workflow() -> String {
+    let path = Path::new(".github/workflows/pages.yml");
+    fs::read_to_string(path)
+        .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()))
+}
+
 fn assert_publishes(workflow: &str, asset: &str) {
     assert!(
         workflow.contains(asset),
-        "release.yml must publish {asset:?} — the downloader requests exactly this name"
+        "the image workflow must publish {asset:?} — the downloader requests exactly this name"
     );
 }
 
 #[test]
 fn release_publishes_every_sdk_sidecar_asset_the_downloader_requests() {
-    let workflow = release_workflow();
+    let workflow = boot_image_workflow();
     for token in [SHELL_ARCH_TOKEN, MATRIX_ARCH_TOKEN] {
         let names = mvmctl::build::sdk_sidecar::SdkSidecarArtifactNames::for_arch(token);
         assert_publishes(&workflow, &names.archive);
@@ -47,7 +62,7 @@ fn release_publishes_every_sdk_sidecar_asset_the_downloader_requests() {
 
 #[test]
 fn release_publishes_every_runtime_overlay_asset_the_downloader_requests() {
-    let workflow = release_workflow();
+    let workflow = boot_image_workflow();
     for token in [SHELL_ARCH_TOKEN, MATRIX_ARCH_TOKEN] {
         let names = mvmctl::build::runtime_overlay::RuntimeOverlayArtifactNames::for_arch(token);
         assert_publishes(&workflow, &names.archive);
@@ -60,23 +75,28 @@ fn release_publishes_every_runtime_overlay_asset_the_downloader_requests() {
 /// the downloader with a 404 exactly as a rename would.
 #[test]
 fn the_release_job_attaches_the_sdk_sidecar_assets() {
-    let workflow = release_workflow();
+    let boot_image = boot_image_workflow();
     assert!(
-        workflow.contains("  sdk-sidecar-image:"),
-        "release.yml must define the sdk-sidecar-image job"
+        boot_image.contains("  sdk-sidecar-image:"),
+        "release-boot-image.yml must define the sdk-sidecar-image job"
     );
     assert!(
-        workflow.contains("sdk-sidecar-image, default-microvm]"),
-        "the release job must declare the sdk-sidecar-image job in its needs"
+        boot_image.contains("sdk-sidecar-image, default-microvm]"),
+        "the boot image publish job must declare the sdk-sidecar-image job in its needs"
     );
-    for pattern in [
-        "artifacts/sdk-sidecar-*.tar.gz",
-        "artifacts/sdk-sidecar-*.tar.gz.sha256",
-    ] {
-        assert!(
-            workflow.contains(pattern),
-            "the release job's asset list must include {pattern:?}"
-        );
+    // Both releases attach it for now: the download side still composes its URL
+    // from the CLI version, so dropping it from the `vN` release would 404 every
+    // fresh install before the boot image tag is ever consulted.
+    for workflow in [&boot_image, &release_workflow()] {
+        for pattern in [
+            "artifacts/sdk-sidecar-*.tar.gz",
+            "artifacts/sdk-sidecar-*.tar.gz.sha256",
+        ] {
+            assert!(
+                workflow.contains(pattern),
+                "the publishing job's asset list must include {pattern:?}"
+            );
+        }
     }
 }
 
@@ -106,7 +126,7 @@ fn release_attaches_the_signature_bundle_the_verifier_fetches() {
 /// verifier cannot read, and nothing surfaces that until a real release ships.
 #[test]
 fn every_signed_release_blob_uses_the_one_bundle_format() {
-    let workflow = release_workflow();
+    let workflow = format!("{}\n{}", release_workflow(), boot_image_workflow());
     let mut checked = 0usize;
     for (offset, _) in workflow.match_indices("cosign sign-blob") {
         // The invocation is a line-continued shell command; its flags run up to
@@ -141,8 +161,10 @@ fn the_release_consumes_its_own_artifacts_before_publishing_them() {
     let verify = workflow
         .find("- name: Verify the published artifacts survive the consumer path")
         .expect("release.yml must consume its artifacts before publishing them");
+    // Matched on a stable prefix: the step's name grows as blobs join the loop,
+    // and the ordering property this asserts does not depend on that wording.
     let sign = workflow
-        .find("- name: Sign release tarballs and SBOM")
+        .find("- name: Sign release tarballs")
         .expect("release.yml must sign the tarballs");
     let publish = workflow
         .find("- name: Create GitHub Release")
@@ -161,11 +183,11 @@ fn the_release_consumes_its_own_artifacts_before_publishing_them() {
 /// the fail-closed refusal this artifact exists to prevent.
 #[test]
 fn the_sdk_sidecar_job_builds_both_published_arches() {
-    let workflow = release_workflow();
+    let workflow = boot_image_workflow();
     let job = workflow
         .split("  sdk-sidecar-image:")
         .nth(1)
-        .expect("release.yml must define the sdk-sidecar-image job");
+        .expect("release-boot-image.yml must define the sdk-sidecar-image job");
     let job = job
         .split("\n  # ")
         .next()
@@ -176,4 +198,467 @@ fn the_sdk_sidecar_job_builds_both_published_arches() {
             "the sdk-sidecar-image matrix must build {arch}"
         );
     }
+}
+
+fn kernel_build_workflow() -> String {
+    let path = Path::new(".github/workflows/kernel-build.yml");
+    fs::read_to_string(path)
+        .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()))
+}
+
+/// Every published checksum manifest must be signed, and its bundle published.
+///
+/// A manifest is what each downloader anchors on: it hashes the artifact and
+/// compares against the manifest, so an unsigned one lets whoever can swap an
+/// artifact swap its recorded digest too and the comparison still passes. The
+/// image blobs (kernel, rootfs, verity sidecar) are not tarballs and carry no
+/// signature of their own, so the manifest is their only anchor.
+///
+/// Dropping a manifest from the signing loop, or signing it and forgetting to
+/// attach the bundle, both fail the same way: the download still succeeds, still
+/// "verifies", and nothing surfaces it until a real release ships. Hence a gate.
+#[test]
+fn every_published_checksum_manifest_is_signed_and_its_bundle_attached() {
+    let workflow = release_workflow();
+    let sign_step = workflow
+        .split("- name: Sign release tarballs")
+        .nth(1)
+        .expect("release.yml must have a signing step");
+    let sign_loop = sign_step
+        .split("done")
+        .next()
+        .expect("the signing loop is non-empty");
+    let assets = workflow
+        .split("assets=(")
+        .nth(1)
+        .expect("release.yml must list release assets")
+        .split(')')
+        .next()
+        .expect("the asset list is non-empty");
+
+    for manifest in [
+        "artifacts/checksums-sha256.txt",
+        "artifacts/builder-vm-*-checksums-sha256.txt",
+        "artifacts/default-microvm-*-checksums-sha256.txt",
+    ] {
+        assert!(
+            sign_loop.contains(manifest),
+            "{manifest} must be cosign-signed; every artifact digest below it inherits its trust"
+        );
+        assert!(
+            assets.contains(&format!("{manifest}.bundle")),
+            "{manifest}.bundle must be attached to the release, or the verifier 404s"
+        );
+    }
+
+    // The kernel manifest ships from its own workflow and is just as load-bearing.
+    let kernel = kernel_build_workflow();
+    let manifest = "kernel-${ARCH}-checksums-sha256.txt";
+    assert!(
+        kernel.contains(&format!("--bundle \"{manifest}.bundle\"")),
+        "kernel-build.yml must cosign-sign {manifest}"
+    );
+    assert!(
+        kernel.contains(&format!("\"{manifest}.bundle\" \\")),
+        "kernel-build.yml must upload {manifest}.bundle beside the manifest"
+    );
+}
+
+/// The staged image must be booted, and booted *before* it is uploaded.
+///
+/// Every other gate in the `default-microvm` job is a checksum, a signature, or
+/// a byte-level read, and none of them can answer the only question asked of a
+/// boot image: does it boot. A release shipped for five weeks whose guest
+/// panicked before userspace while every checksum verified clean.
+///
+/// The ordering is the whole value. These are steps in one job, so a failed
+/// boot aborts before the upload — but only while it stays above it. Reorder
+/// the two and the gate silently becomes a post-mortem on an artifact the world
+/// already has.
+#[test]
+fn the_staged_microvm_image_is_booted_before_it_is_uploaded() {
+    let workflow = boot_image_workflow();
+    let job = workflow
+        .split("  default-microvm:")
+        .nth(1)
+        .expect("release-boot-image.yml must define the default-microvm job");
+    let job = job
+        .split("\n  # ")
+        .next()
+        .expect("the job block is non-empty");
+
+    let boot = job
+        .find("- name: Boot the staged image before it becomes a release asset")
+        .expect("the default-microvm job must boot the image it is about to publish");
+    let upload = job
+        .find("- name: Upload default microVM image artifacts")
+        .expect("the default-microvm job must upload its artifacts");
+    assert!(
+        boot < upload,
+        "the boot gate must run before the upload, or it cannot refuse the publish"
+    );
+
+    // It must boot the staged bytes. Booting a published asset would be the
+    // `boot-latency` lane's job and would prove nothing about this release.
+    // Scoped to the boot step alone — the span up to the upload also covers the
+    // SBOM and pack-manifest steps, which legitimately name release URLs.
+    let rest = &job[boot..upload];
+    let step_end = rest[1..]
+        .find("\n      - name:")
+        .map_or(rest.len(), |offset| offset + 1);
+    let step = &rest[..step_end];
+    assert!(
+        step.contains("MVM_RUNTIME_BOOT_ROOTFS: staging/"),
+        "the boot gate must boot the staged rootfs, not a published one"
+    );
+    assert!(
+        !step.contains("releases/download"),
+        "the boot gate must not fetch a published artifact"
+    );
+}
+
+/// The four jobs that build a boot image. They move as a set: splitting them
+/// across two release trains would mean a `boot-image/vN` release that is
+/// missing a piece the same tag is supposed to carry.
+const IMAGE_JOBS: [&str; 4] = [
+    "builder-vm-image",
+    "runtime-overlay-image",
+    "sdk-sidecar-image",
+    "default-microvm",
+];
+
+/// Slice one job's block out of a workflow — from its key to the next line at
+/// job indentation.
+///
+/// A comment sitting between two jobs documents the one below it, so this
+/// over-reads a trailing comment at worst. It never truncates a job's own
+/// steps, which is the direction that would make an assertion pass by looking
+/// at nothing.
+fn job_block<'a>(workflow: &'a str, job: &str) -> &'a str {
+    let key = format!("\n  {job}:\n");
+    let start = workflow
+        .find(&key)
+        .unwrap_or_else(|| panic!("no job named {job:?} in this workflow"))
+        + key.len();
+    let rest = &workflow[start..];
+    let mut end = rest.len();
+    let mut offset = 0usize;
+    for line in rest.split_inclusive('\n') {
+        if let Some(tail) = line.strip_prefix("  ")
+            && !tail.starts_with([' ', '#', '\n'])
+        {
+            end = offset;
+            break;
+        }
+        offset += line.len();
+    }
+    &rest[..end]
+}
+
+/// The tag patterns a workflow's `push` trigger fires on.
+fn push_tag_patterns(workflow: &str) -> Vec<String> {
+    let tags = workflow
+        .split("    tags:\n")
+        .nth(1)
+        .expect("the workflow must have a push tag trigger");
+    tags.lines()
+        .map_while(|line| line.strip_prefix("      - "))
+        .map(|pattern| pattern.trim().trim_matches('"').to_string())
+        .collect()
+}
+
+/// The image jobs belong to the boot image train, and to it alone.
+///
+/// A copy left behind in `release.yml` would not fail anything — it would
+/// quietly rebuild the same image on the CLI's schedule, which is the coupling
+/// the split exists to remove, and publish a second set of bytes under a
+/// second identity.
+#[test]
+fn the_image_jobs_live_in_the_boot_image_workflow_and_nowhere_else() {
+    let release = release_workflow();
+    let boot_image = boot_image_workflow();
+    for job in IMAGE_JOBS {
+        assert!(
+            boot_image.contains(&format!("\n  {job}:\n")),
+            "release-boot-image.yml must define the {job} job"
+        );
+        assert!(
+            !release.contains(&format!("\n  {job}:\n")),
+            "{job} moved to release-boot-image.yml; release.yml must not define it too"
+        );
+        assert!(
+            !release.contains(&format!("needs.{job}.")),
+            "release.yml refers to {job}, which is now a job in another workflow — \
+             a cross-workflow `needs` edge is a hard error at parse time"
+        );
+    }
+    let release_needs = release
+        .split("\n  release:\n")
+        .nth(1)
+        .and_then(|job| {
+            job.lines()
+                .find(|line| line.trim_start().starts_with("needs:"))
+        })
+        .expect("release.yml must define the release job with a needs list");
+    for job in IMAGE_JOBS {
+        assert!(
+            !release_needs.contains(job),
+            "the release job still needs {job}, which no longer exists in this workflow"
+        );
+    }
+}
+
+/// Neither train can fire the other.
+///
+/// GitHub tag globs anchor at the start and do not cross `/`, so the two
+/// patterns are disjoint — but that is a claim about someone else's matcher,
+/// so what is asserted here is the thing we control: the patterns themselves,
+/// and that each train's example tag fails the other's literal prefix. If the
+/// matching rule ever changed, disjoint prefixes would still keep them apart.
+#[test]
+fn the_two_release_trains_cannot_fire_each_other() {
+    assert_eq!(
+        push_tag_patterns(&release_workflow()),
+        vec!["v*".to_string()],
+        "release.yml must fire on the CLI version tag and nothing else"
+    );
+    assert_eq!(
+        push_tag_patterns(&boot_image_workflow()),
+        vec!["boot-image/v*".to_string()],
+        "release-boot-image.yml must fire on the boot image tag and nothing else"
+    );
+
+    let cli_tag = "v0.18.0";
+    let boot_tag = mvmctl::core::config::DEFAULT_BOOT_IMAGE_TAG;
+    let prefix = |pattern: &str| pattern.split('*').next().unwrap_or_default().to_string();
+    assert!(
+        !boot_tag.starts_with(&prefix("v*")),
+        "{boot_tag} must not match the CLI train's pattern"
+    );
+    assert!(
+        !cli_tag.starts_with(&prefix("boot-image/v*")),
+        "{cli_tag} must not match the boot image train's pattern"
+    );
+}
+
+/// The protected environment survives the move, and it is the boot image
+/// train's own.
+///
+/// It is what constrains which ref can mint a keyless signing identity. Losing
+/// it does not fail the job: the signing step is `continue-on-error: true`, so
+/// a broken identity means the pack quietly stops shipping and everything else
+/// looks green. Nothing else would notice.
+///
+/// Naming the *wrong* environment fails far louder but just as opaquely. This
+/// workflow fires on `boot-image/v*` and asked for `release-signing`, whose
+/// policy admits `v*` and nothing else — GitHub tag globs anchor at the start
+/// and do not cross `/`. Every gated job was refused one second in, with no
+/// steps run and nothing in the log to read.
+#[test]
+fn the_moved_jobs_keep_the_boot_image_signing_environment() {
+    let boot_image = boot_image_workflow();
+    // The two jobs that cosign-sign a pack manifest inside the job itself.
+    for job in ["builder-vm-image", "default-microvm"] {
+        let block = job_block(&boot_image, job);
+        assert!(
+            block.contains("cosign sign-blob"),
+            "{job} is listed here because it signs; if it no longer does, move it \
+             out of this list rather than dropping the assertion"
+        );
+        assert!(
+            block.contains("    environment: boot-image-signing\n"),
+            "{job} must keep `environment: boot-image-signing`, or its keyless \
+             signing identity silently stops being mintable. It must be that \
+             environment and not `release-signing`: this workflow's tags are \
+             `boot-image/v*`, which a `v*` policy refuses outright"
+        );
+    }
+    // The publish job signs the checksum manifests every downloader anchors on.
+    assert!(
+        job_block(&boot_image, "publish-boot-image")
+            .contains("    environment: boot-image-signing\n"),
+        "the boot image publish job signs, so it needs the same environment"
+    );
+    assert!(
+        boot_image.contains("id-token: write"),
+        "keyless OIDC signing needs id-token: write at the workflow level"
+    );
+    assert!(
+        boot_image.contains("contents: write"),
+        "creating a release and uploading assets needs contents: write"
+    );
+}
+
+#[test]
+fn pages_workflow_installs_every_wasm_target_used_by_the_demo() {
+    let workflow = pages_workflow();
+    assert!(
+        workflow.contains("targets: wasm32-unknown-unknown, wasm32-wasip1"),
+        "pages.yml must install both the browser and guest WASM targets"
+    );
+}
+
+/// The compiled-in boot image tag must name the release the workflow creates.
+///
+/// The tag is spliced straight into a download URL, so a drift between the two
+/// is not a type error or a failed test anywhere else — it is a 404 on a fresh
+/// install's first boot, which is the worst place to discover it.
+#[test]
+fn the_boot_image_tag_composes_the_url_the_workflow_uploads_to() {
+    let tag = mvmctl::core::config::DEFAULT_BOOT_IMAGE_TAG;
+    let workflow = boot_image_workflow();
+
+    // The tag the workflow publishes under is its own ref name, so a tag push
+    // that fires this workflow is exactly the release the URL below resolves.
+    assert!(
+        push_tag_patterns(&workflow)
+            .iter()
+            .any(|pattern| tag.starts_with(pattern.trim_end_matches('*'))),
+        "{tag} would not fire release-boot-image.yml, so no release by that name \
+         is ever created"
+    );
+    assert!(
+        workflow.contains("TAG_NAME: ${{ github.ref_name }}")
+            && workflow.contains("gh release create \"${TAG_NAME}\""),
+        "the publish job must create the release under the pushed tag verbatim"
+    );
+
+    for asset in [
+        "default-microvm-vmlinux-x86_64",
+        "default-microvm-rootfs-x86_64.ext4",
+        "default-microvm-x86_64-checksums-sha256.txt",
+    ] {
+        let url = format!("https://github.com/tinylabscom/mvm/releases/download/{tag}/{asset}");
+        assert!(
+            url.contains("/releases/download/boot-image/v"),
+            "the composed URL must sit under the boot image tag: {url}"
+        );
+        let staged = asset.replace("x86_64", "${ARCH}");
+        assert!(
+            workflow.contains(&staged),
+            "the workflow must stage {staged:?}, or {url} 404s"
+        );
+    }
+}
+
+/// A CLI release with no boot image assets must not publish.
+///
+/// The image train and the CLI train are now separate, so it is possible to cut
+/// a `vN` release when no `boot-image/v*` release exists. The result is not a
+/// degraded release, it is a broken one: `download_default_microvm_image`
+/// resolves its assets off the CLI release, so every fresh install 404s on
+/// first boot. Warning past that ships the failure and discovers it later,
+/// which is the exact pattern this gate family exists to end.
+#[test]
+fn a_release_with_no_boot_image_assets_refuses_to_publish() {
+    let workflow = release_workflow();
+    let step = workflow
+        .split("- name: Attach the boot image release assets to this release")
+        .nth(1)
+        .expect("release.yml must attach boot image assets");
+    let step = step
+        .split("\n      - name:")
+        .next()
+        .expect("the step body is non-empty");
+
+    assert!(
+        step.contains("::error::"),
+        "a missing boot image release must be an error, not a warning:\n{step}"
+    );
+    assert!(
+        step.contains("exit 1"),
+        "a missing boot image release must fail the publish:\n{step}"
+    );
+    assert!(
+        !step.contains("::warning::") && !step.contains("exit 0"),
+        "the missing-boot-image path must not warn-and-continue:\n{step}"
+    );
+}
+
+/// The boot gate must carry the toolchain its own test needs.
+///
+/// The gate runs `cargo test`, which builds mvmctl, whose `build.rs`
+/// cross-compiles the embedded host binaries as static musl and requires the
+/// pinned zig. The first real image release failed here: the gate aborted
+/// before starting a guest, which reads in the log as "the image does not
+/// boot" and is nothing of the kind. A gate that cannot run is worse than no
+/// gate, because it blocks a release for a reason that has nothing to do with
+/// the artifact.
+#[test]
+fn the_boot_gate_installs_the_toolchain_its_test_needs() {
+    let workflow = boot_image_workflow();
+    let job = workflow
+        .split("  default-microvm:")
+        .nth(1)
+        .expect("the boot image workflow must define default-microvm");
+    let boot = job
+        .find("- name: Boot the staged image before it becomes a release asset")
+        .expect("the job must boot the staged image");
+
+    // The toolchain has to be installed *before* the boot step, not merely
+    // present somewhere in the file.
+    let before = &job[..boot];
+    assert!(
+        before.contains("./.github/actions/install-zigbuild"),
+        "the boot gate must install the pinned zig before it runs cargo test; \
+         without it the gate fails before reaching a guest"
+    );
+}
+
+/// Every workflow that can mint an identity a shipped binary trusts must be
+/// gated on a protected environment, so the ref allowed to produce a valid
+/// signature is constrained by that environment's tag policy rather than by
+/// whoever can trigger the workflow.
+///
+/// This is not theoretical. `release-boot-image.yml` asked for an environment
+/// scoped to `v*` while firing on `boot-image/v*`; the mismatch blocked every
+/// gated job one second in, with no steps and nothing in the log to read. And
+/// `release.yml` — which mints the one identity `RELEASE_IDENTITY_TEMPLATES`
+/// names, the identity every installed mvmctl verifies against — declared no
+/// environment at all.
+///
+/// The environments' tag policies live in repository settings and cannot be
+/// asserted from here. What is assertable, and what regressed, is that the
+/// declaration exists at all.
+#[test]
+fn workflows_minting_trusted_identities_are_gated_on_an_environment() {
+    for (path, expected_env) in [
+        (".github/workflows/release.yml", "release-signing"),
+        (
+            ".github/workflows/release-boot-image.yml",
+            "boot-image-signing",
+        ),
+        (".github/workflows/revocations.yml", "revocations-signing"),
+    ] {
+        let body = fs::read_to_string(Path::new(path))
+            .unwrap_or_else(|e| panic!("{path} must be readable: {e}"));
+        assert!(
+            body.contains(&format!("environment: {expected_env}")),
+            "{path} mints an identity in mvm_core::release_trust, so it must \
+             declare `environment: {expected_env}`. Without it any ref that can \
+             trigger the workflow can mint a signature the shipped verifier \
+             accepts."
+        );
+    }
+}
+
+/// The two signing environments are deliberately distinct. Sharing one would
+/// let a boot image signature validate a CLI tarball and the reverse, which is
+/// the exact confusion `BOOT_IMAGE_IDENTITY_TEMPLATES` is kept separate from
+/// `RELEASE_IDENTITY_TEMPLATES` to prevent.
+#[test]
+fn the_two_release_trains_do_not_share_a_signing_environment() {
+    let cli = fs::read_to_string(Path::new(".github/workflows/release.yml"))
+        .expect("release.yml must be readable");
+    let boot = fs::read_to_string(Path::new(".github/workflows/release-boot-image.yml"))
+        .expect("release-boot-image.yml must be readable");
+    assert!(
+        !cli.contains("environment: boot-image-signing"),
+        "the CLI train must not sign under the boot image train's environment"
+    );
+    assert!(
+        !boot.contains("environment: release-signing"),
+        "the boot image train must not sign under the CLI train's environment; \
+         its tags are boot-image/v*, which a v*-scoped policy refuses outright"
+    );
 }

@@ -4,6 +4,8 @@ pub mod artifacts;
 pub mod backend;
 /// Disk-only job/artifact transport for the hvf-VMM builder (tar-over-raw-
 /// disk, so the host never formats or reads a guest filesystem).
+pub mod boot_image_select;
+pub mod builder_cmdline;
 pub mod builder_disk_transport;
 /// Reusable producer that turns real builder artifacts (`vmlinux` + `rootfs.ext4`)
 /// into a signed, cache-promotable Builder pack — the produce half of the
@@ -39,8 +41,10 @@ pub mod cache_install;
 /// its pub API is dead-code-clean on non-Linux and its tests run
 /// cross-platform.
 pub mod egress_proxy;
+pub mod egress_readiness;
 /// Extract an FC-loadable ELF `vmlinux` from a published x86_64 bzImage.
 pub mod firecracker;
+pub mod guest_elf;
 /// Config contract for the `mvm-hvf-supervisor` per-VM host process (raw HVF
 /// macOS backend, raw HVF backend). Shared by `mvm_runtime::backends::hvf` (writer) + the bin.
 /// Universal initramfs build + cache resolution.
@@ -68,7 +72,10 @@ pub mod rootfs_inject;
 /// Shared run-path rootfs orchestration (inject runtime + materialize ext4),
 /// used by the CLI's `run --image` and the `mvm-client` local backend.
 pub mod run_image;
+pub mod runtime_identity;
 pub mod stage0;
+/// Whether a builder guest may fall back to a tmpfs Nix store, or must stop.
+pub mod store_readiness;
 pub mod template_reuse;
 pub mod verity_initrd;
 /// Persistent ext4 image materialization for user-attached block volumes.

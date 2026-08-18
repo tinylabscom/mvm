@@ -168,6 +168,36 @@ pub(super) fn network_backend_check(plat: Platform) -> Check {
     }
 }
 
+/// The upstream proxy the per-VM egress endpoint will inherit for its forward
+/// leg, so the override path is observable before a workload is launched.
+///
+/// Never fails. A host with no proxy configured is the normal case, and a
+/// malformed value is reported as not-ok here rather than surfacing later as an
+/// unexplained total egress failure — which is exactly what it would look like
+/// on a host whose only route out is the proxy.
+pub(super) fn egress_proxy_check() -> Check {
+    match mvm_http::ProxyConfig::from_env() {
+        Ok(None) => Check {
+            name: "egress proxy",
+            category: "platform",
+            ok: true,
+            info: "none configured — the forward leg dials destinations directly".to_string(),
+        },
+        Ok(Some(cfg)) => Check {
+            name: "egress proxy",
+            category: "platform",
+            ok: true,
+            info: format!("{} (from environment)", cfg.summary()),
+        },
+        Err(e) => Check {
+            name: "egress proxy",
+            category: "platform",
+            ok: false,
+            info: format!("proxy environment is unusable: {e}"),
+        },
+    }
+}
+
 /// Windows stub — keeps the call site cfg-free.
 #[cfg(not(target_family = "unix"))]
 pub(super) fn network_backend_check(_plat: Platform) -> Check {

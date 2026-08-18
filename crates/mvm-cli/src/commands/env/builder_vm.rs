@@ -11,7 +11,7 @@ pub(in crate::commands) mod bootstrap;
 mod bootstrap_tests;
 #[cfg(test)]
 mod builder_vm_bootstrap_tests;
-mod default_microvm;
+pub(in crate::commands) mod default_microvm;
 mod image_ops;
 mod kernel;
 mod stage0_cache;
@@ -24,7 +24,9 @@ use sha2::{Digest, Sha256};
 
 #[cfg(feature = "release-artifact-bootstrap")]
 use super::artifact_verify::bump_verify_outcome;
-use super::artifact_verify::{download_file, fetch_expected_hashes, verify_artifact_hash};
+use super::artifact_verify::{
+    ChecksumManifest, download_file, fetch_expected_hashes, verify_artifact_hash,
+};
 use crate::ui;
 #[cfg(all(test, feature = "builder-vm"))]
 use bootstrap::BuildHeartbeat;
@@ -185,6 +187,6 @@ fn find_builder_vm_flake() -> Result<String> {
 /// (the in-repo builder-VM flake is present). The local-build invariant
 /// applies when this is true: source checkouts must build kernels
 /// locally and never fetch pre-built artifacts.
-pub(in crate::commands) fn find_builder_vm_flake_is_source_checkout() -> bool {
+pub(crate) fn find_builder_vm_flake_is_source_checkout() -> bool {
     find_builder_vm_flake().is_ok()
 }

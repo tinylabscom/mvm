@@ -42,8 +42,9 @@ const BUDGET_TARGET: &str = "x86_64-unknown-linux-gnu";
 /// Lower it freely as deps drop; raising it must be justified in the change
 /// that does.
 ///
-/// 476 (was 475): the same `sha1_smol` that entered the default closure with
-/// `uuid`'s `v5` feature — a nested set, so it counts once here too.
+/// 476 (was 475): `sigstore-tuf` enters with the sigstore-verify 0.9→0.11
+/// upgrade; it was absent from 0.9's dependency graph and is reachable only
+/// behind the `manifest-verify` optional feature.
 const FEATURE_CLOSURE_BUDGET: usize = 476;
 
 /// The two gates measure nested sets — everything in the default closure is

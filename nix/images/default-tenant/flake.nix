@@ -75,13 +75,42 @@
           };
         });
 
+      # Host<->guest contract this rootfs speaks. MUST stay in lockstep with
+      # `PROTOCOL_VERSION_AUTHENTICATED` in
+      # crates/mvm-contract/src/policy/security.rs — a rootfs that claims a
+      # version it does not speak is worse than one that claims none.
+      guestProtocolVersion = 2;
+
+      # Which published image line these bytes belong to. Supplied by the
+      # release build; empty for a local build of a working tree, which
+      # genuinely belongs to no published line. Deliberately not a constant in
+      # this file: a hardcoded tag would keep reading as truth after the line
+      # moved past it.
+      bootImageTag = builtins.getEnv "MVM_BOOT_IMAGE_TAG";
+
+      # The commit whose mk-guest.nix produced this rootfs. Resolves for a git
+      # flake ref; a `path:` flake has no revision to resolve and leaves this
+      # empty rather than inventing one. A Nix build has no ambient git.
+      generatorRev = self.rev or self.dirtyRev or "";
+
       # Serialize mkGuest's `passthru.mvm` into the GuestSidecar wire shape
-      # (crates/mvm-base/src/runtime_meta.rs, #[serde(rename_all="camelCase")]).
+      # (crates/mvm-build/src/builder_vm.rs, #[serde(rename_all="camelCase")]).
+      #
+      # `source` and `builtAt` describe how the bytes reached a cache, which is
+      # a fact about the installing host, not about this build. A Nix build has
+      # no clock, so `builtAt` stays empty here and is stamped by whoever puts
+      # the image on disk; `source` starts as the truth this build knows and is
+      # overwritten by the fetch path, for which it is no longer true.
       sidecarJson = mvm:
         builtins.toJSON {
           inherit (mvm)
             name accessible sealed entrypointKind initSystem
             expectedBootMs agentBinary rootlessEntrypoint hypervisor overlayAware;
+          imageTag = bootImageTag;
+          source = "built-local";
+          builtAt = "";
+          protocolVersion = guestProtocolVersion;
+          inherit generatorRev;
         };
 
       # One variant. `sealed = true` → prod (verity-sealed, rootless, no
@@ -91,7 +120,11 @@
           pkgs = import nixpkgs { inherit system; };
           lib = libFor system;
           kernelPkg = mkWorkloadKernel pkgs;
-          kernelFile = if pkgs.stdenv.hostPlatform.isAarch64 then "Image" else "bzImage";
+          # What the consumer's loader takes, not what the build happens to
+          # leave lying around: arm64 loaders want `Image`, Firecracker's
+          # x86_64 loader wants an uncompressed ELF `vmlinux`. base.nix emits
+          # the ELF beside the bzImage for exactly this.
+          kernelFile = if pkgs.stdenv.hostPlatform.isAarch64 then "Image" else "vmlinux";
           imageName = if sealed then "mvm-default-microvm" else "mvm-default-microvm-dev";
           rootfsPkg = lib.mkGuest {
             name = imageName;
@@ -125,12 +158,51 @@
             set -euo pipefail
             mkdir -p $out
 
-            # Kernel → vmlinux (same probe order as builder-vm).
-            if   [ -f ${kernelPkg}/${kernelFile} ]; then cp ${kernelPkg}/${kernelFile} $out/vmlinux
-            elif [ -f ${kernelPkg}/Image ];        then cp ${kernelPkg}/Image        $out/vmlinux
-            elif [ -f ${kernelPkg}/bzImage ];      then cp ${kernelPkg}/bzImage      $out/vmlinux
-            else echo "kernel ${kernelPkg} produced no Image/bzImage" >&2; ls -la ${kernelPkg} >&2; exit 1
+            # Kernel → vmlinux.
+            #
+            # The asset is named `vmlinux`, but that name has never carried a
+            # format. On aarch64 it is an arm64 `Image`, and that is correct:
+            # arm64 loaders take `Image`. On x86_64 Firecracker loads an
+            # uncompressed ELF and nothing else, so a bzImage published under
+            # this name dies in the loader — before init, before userspace —
+            # with "Kernel Loader: Invalid Elf magic number". v0.17.0 shipped
+            # exactly that, and the only lane that would have caught it boots
+            # the same asset and had never produced a result.
+            #
+            # So pick by what the consumer's loader needs, and then assert the
+            # bytes. A probe chain that accepts whichever file happens to exist
+            # is how the format stopped being checked at all.
+            if [ -f ${kernelPkg}/${kernelFile} ]; then
+              cp ${kernelPkg}/${kernelFile} $out/vmlinux
+            else
+              echo "kernel ${kernelPkg} produced no ${kernelFile}" >&2
+              ls -la ${kernelPkg} >&2
+              exit 1
             fi
+
+            # Assert the emitted format. Reading the first bytes is the whole
+            # check: ELF is "\x7fELF" at 0, an arm64 Image carries "ARMd" at
+            # offset 56 (Documentation/arm64/booting.rst).
+            magic0=$(${pkgs.coreutils}/bin/od -An -tx1 -N4 "$out/vmlinux" | tr -d ' \n')
+            magic56=$(${pkgs.coreutils}/bin/od -An -c -j56 -N4 "$out/vmlinux" | tr -d ' \n')
+            ${
+              if pkgs.stdenv.hostPlatform.isAarch64 then ''
+              if [ "$magic56" != "ARMd" ]; then
+                echo "ERROR: $out/vmlinux is not an arm64 Image (magic@56='$magic56', want 'ARMd')." >&2
+                exit 1
+              fi
+              '' else ''
+              if [ "$magic0" != "7f454c46" ]; then
+                echo "ERROR: $out/vmlinux is not an ELF kernel (magic@0=0x$magic0, want 0x7f454c46)." >&2
+                echo "Firecracker's x86_64 loader takes an uncompressed ELF vmlinux only. A" >&2
+                echo "bzImage here boots nothing: it fails in the loader with 'Invalid Elf" >&2
+                echo "magic number', before init runs, so the guest console says nothing." >&2
+                echo "Emit the ELF the kernel build produces alongside its bzImage, or" >&2
+                echo "decompress the bzImage with the kernel tree's scripts/extract-vmlinux." >&2
+                exit 1
+              fi
+              ''
+            }
 
             # Rootfs → rootfs.ext4 (mkGuest emits a single ext4).
             if [ -f ${rootfsPkg} ]; then

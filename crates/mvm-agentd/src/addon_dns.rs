@@ -439,6 +439,7 @@ mod tests {
     use crate::flowmux::{FlowMuxClient, FlowMuxReconnectClient};
     use hickory_proto::op::{OpCode, Query};
     use hickory_proto::rr::Name;
+    use mvm_contract::protocol::network_flow::hello::Handshake;
     use std::io;
     use tempfile::tempdir;
 
@@ -908,7 +909,7 @@ mod tests {
 
     #[tokio::test]
     async fn non_authoritative_query_uses_flowmux_resolver_and_rewrites_id() {
-        let resolver = build_mock_flowmux_resolver().await;
+        let (resolver, _owner) = build_mock_flowmux_resolver().await;
         let zone = Zone::new(vec![]);
         let config = DnsServerConfig {
             bind_addrs: vec!["127.0.0.1:5353".parse().unwrap()],
@@ -929,7 +930,13 @@ mod tests {
         assert!(message.answers.is_empty());
     }
 
-    async fn build_mock_flowmux_resolver() -> FlowMuxReconnectClient {
+    /// The sender comes back with the client: in production `reconnect_loop`
+    /// owns it for as long as the session lives, and a caller that drops it
+    /// makes every wait fail with "reconnect owner gone".
+    async fn build_mock_flowmux_resolver() -> (
+        FlowMuxReconnectClient,
+        tokio::sync::watch::Sender<Option<std::sync::Arc<FlowMuxClient>>>,
+    ) {
         use ed25519_dalek::{SigningKey, VerifyingKey};
         use mvm_contract::protocol::network_flow::{Opcode, encode_into};
         use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
@@ -941,21 +948,36 @@ mod tests {
             (signing, verifying)
         }
 
-        async fn send_frame<S>(stream: &mut S, opcode: Opcode, stream_id: u32, payload: &[u8])
-        where
+        async fn send_frame<S>(
+            stream: &mut S,
+            session: &mut mvm_core::net::session::Session,
+            opcode: Opcode,
+            stream_id: u32,
+            payload: &[u8],
+        ) where
             S: AsyncWrite + Unpin,
         {
             let mut wire = Vec::new();
             encode_into(&mut wire, opcode, stream_id, payload).unwrap();
-            stream.write_all(&wire).await.unwrap();
+            let sealed = session.seal(&wire).unwrap();
+            let mut sealed_bytes = Vec::new();
+            sealed.encode(&mut sealed_bytes).unwrap();
+            let len = u32::try_from(sealed_bytes.len()).unwrap();
+            stream.write_all(&len.to_be_bytes()).await.unwrap();
+            stream.write_all(&sealed_bytes).await.unwrap();
             stream.flush().await.unwrap();
         }
 
-        async fn read_frame<S>(stream: &mut S) -> Option<(Opcode, u32, u32, Vec<u8>)>
+        async fn read_frame<S>(
+            stream: &mut S,
+            session: &mut mvm_core::net::session::Session,
+        ) -> Option<(Opcode, u32, u32, Vec<u8>)>
         where
             S: AsyncRead + Unpin,
         {
-            crate::flowmux::read_frame_from(stream).await.unwrap()
+            crate::flowmux::read_sealed_frame_from(stream, session)
+                .await
+                .unwrap()
         }
 
         let (guest_stream, host_stream) = tokio::io::duplex(4096);
@@ -964,7 +986,7 @@ mod tests {
 
         tokio::spawn(async move {
             let handle = tokio::runtime::Handle::try_current().unwrap();
-            let (mut host_stream, _session) = tokio::task::spawn_blocking(move || {
+            let (mut host_stream, mut host_session) = tokio::task::spawn_blocking(move || {
                 let mut adapter = crate::flowmux::AsyncStreamSyncAdapter::new(host_stream, handle);
                 let result =
                     mvm_core::net::session::Session::host(&mut adapter, "test-session", host_key);
@@ -976,10 +998,22 @@ mod tests {
             .unwrap();
 
             let (_opcode, _sid, _payload_len, _payload) =
-                read_frame(&mut host_stream).await.unwrap();
-            send_frame(&mut host_stream, Opcode::HelloAck, 0, &[]).await;
+                read_frame(&mut host_stream, &mut host_session)
+                    .await
+                    .unwrap();
+            send_frame(
+                &mut host_stream,
+                &mut host_session,
+                Opcode::HelloAck,
+                0,
+                &Handshake::local("test-host").encode(),
+            )
+            .await;
 
-            let (opcode, sid, _payload_len, payload) = read_frame(&mut host_stream).await.unwrap();
+            let (opcode, sid, _payload_len, payload) =
+                read_frame(&mut host_stream, &mut host_session)
+                    .await
+                    .unwrap();
             assert_eq!(opcode, Opcode::Resolve);
             let question = mvm_contract::protocol::dns::decode_query(&payload).unwrap();
             assert_eq!(question.name, "example.com");
@@ -990,16 +1024,21 @@ mod tests {
             response[2..4].copy_from_slice(&0x8180_u16.to_be_bytes());
             response[4..6].copy_from_slice(&0_u16.to_be_bytes());
             response[6..12].copy_from_slice(&[0; 6]);
-            send_frame(&mut host_stream, Opcode::Resolved, sid, &response).await;
+            send_frame(
+                &mut host_stream,
+                &mut host_session,
+                Opcode::Resolved,
+                sid,
+                &response,
+            )
+            .await;
         });
 
         let client = FlowMuxClient::connect(guest_stream, guest_key, host_anchor)
             .await
             .unwrap();
         let (tx, rx) = tokio::sync::watch::channel(Some(std::sync::Arc::new(client)));
-        // Hold the sender so the watch channel stays open for the test.
-        let _tx = tx;
-        FlowMuxReconnectClient::from_receiver(rx)
+        (FlowMuxReconnectClient::from_receiver(rx), tx)
     }
 
     fn test_config(upstream_addrs: Vec<SocketAddr>) -> DnsServerConfig {

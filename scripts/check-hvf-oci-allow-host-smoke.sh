@@ -63,7 +63,7 @@ cd "${ROOT}"
 if [[ "${SKIP_BUILD}" != "1" ]]; then
   cargo build -p mvmctl --bin mvmctl
   cargo build -p mvm-hostd --bin mvm-network-endpoint
-  cargo build -p mvm-vm-host --bin mvm-hvf-supervisor
+  cargo build -p mvm-hostd --bin mvm-hvf-supervisor
 fi
 
 MVMCTL_BIN="${MVM_HVF_ALLOW_HOST_MVMCTL:-${ROOT}/target/debug/mvmctl}"

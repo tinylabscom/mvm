@@ -13,19 +13,17 @@
 //! avoids, so [`Placeholder::new`] takes the token as given and the caller
 //! decides where the bytes came from.
 //!
-//! # Three prefixes, none interchangeable
+//! # Two notations, not interchangeable
 //!
-//! Be precise about which notation you mean:
+//! Be precise about which one you mean:
 //!
 //! | Notation | Where | What it is |
 //! |---|---|---|
 //! | `mvm-secret-<hex>` | here | the runtime wire token a guest actually holds |
-//! | `mvm-managed:<var>` | [`crate::policy::secret_binding`] | a CLI binding's display form |
 //! | `${NAME}` | the Workload IR | an authoring notation; nothing resolves it at runtime |
 //!
-//! The constant here is [`SECRET_PLACEHOLDER_PREFIX`] rather than a third
-//! `PLACEHOLDER_PREFIX` precisely so the first two cannot be confused at a
-//! glance in this crate.
+//! The constant here is [`SECRET_PLACEHOLDER_PREFIX`] rather than a bare
+//! `PLACEHOLDER_PREFIX` so it reads unambiguously at its use sites.
 
 use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
@@ -108,14 +106,25 @@ mod tests {
         assert_eq!(find_placeholder("mvm-secret-"), None);
     }
 
+    /// `is_empty` is session bookkeeping, but it is bookkeeping the keyholder
+    /// reads to decide whether a session has any substitution to do at all. A
+    /// constant-`true` version makes a populated session look empty; a
+    /// constant-`false` one makes an empty session look populated. Neither
+    /// direction had a test, so both survived mutation.
     #[test]
-    fn the_two_reserved_prefixes_do_not_collide() {
-        // `mvm-managed:` is the CLI binding's display form and must never be
-        // mistaken for a runtime token. Asserted rather than assumed, because
-        // both now live in this crate.
-        let managed = crate::policy::secret_binding::PLACEHOLDER_PREFIX;
-        assert_ne!(managed, SECRET_PLACEHOLDER_PREFIX);
-        assert_eq!(find_placeholder("mvm-managed:OPENAI_API_KEY"), None);
+    fn is_empty_tracks_whether_the_session_holds_any_placeholder() {
+        let mut map = PlaceholderMap::new();
+        assert!(map.is_empty(), "a fresh map holds nothing");
+        assert_eq!(map.len(), 0);
+
+        let ph = Placeholder::new(format!("{SECRET_PLACEHOLDER_PREFIX}deadbeef"));
+        map.insert(ph, secret_ref("token", &["api.example.com"]));
+
+        assert!(
+            !map.is_empty(),
+            "a map holding a placeholder must not report empty"
+        );
+        assert_eq!(map.len(), 1);
     }
 
     fn secret_ref(name: &str, hosts: &[&str]) -> SecretRef {

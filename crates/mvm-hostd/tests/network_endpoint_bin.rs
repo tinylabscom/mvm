@@ -63,6 +63,7 @@ fn endpoint_bin_serves_substitution_and_refuses_unbound_destination() {
                 auth_type: AuthType::Bearer,
                 allowed_hosts: vec!["api.openai.com".into()],
                 sigv4: None,
+                provider: None,
             },
         )
         .unwrap();
@@ -86,6 +87,9 @@ fn endpoint_bin_serves_substitution_and_refuses_unbound_destination() {
         redaction: mvm_core::policy::RedactionPolicy::default(),
         reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
         forward_timeout_secs: 30,
+        proxy_https: None,
+        proxy_http: None,
+        no_proxy: None,
         secret_store_dir: Some(dir.path().join("secrets")),
         binding_store_dir: Some(dir.path().join("bindings")),
         terminator_listen: None,
@@ -93,6 +97,7 @@ fn endpoint_bin_serves_substitution_and_refuses_unbound_destination() {
         network_policy: None,
         egress_mode: EgressMode::Wire,
         resolver: ResolverBackend::default(),
+        session_marker: None,
         flowmux_identity: None,
     };
 
@@ -166,6 +171,7 @@ fn endpoint_bin_claim10_gate_refuses_a_bound_but_unadmitted_destination() {
                 auth_type: AuthType::Bearer,
                 allowed_hosts: vec!["api.openai.com".into()],
                 sigv4: None,
+                provider: None,
             },
         )
         .unwrap();
@@ -189,6 +195,9 @@ fn endpoint_bin_claim10_gate_refuses_a_bound_but_unadmitted_destination() {
         redaction: mvm_core::policy::RedactionPolicy::default(),
         reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
         forward_timeout_secs: 30,
+        proxy_https: None,
+        proxy_http: None,
+        no_proxy: None,
         secret_store_dir: Some(dir.path().join("secrets")),
         binding_store_dir: Some(dir.path().join("bindings")),
         terminator_listen: None,
@@ -197,6 +206,7 @@ fn endpoint_bin_claim10_gate_refuses_a_bound_but_unadmitted_destination() {
         network_policy: Some(mvm_core::policy::network_policy::NetworkPolicy::deny_all()),
         egress_mode: mvm_hostd::supervisor::network_endpoint::EgressMode::Wire,
         resolver: ResolverBackend::default(),
+        session_marker: None,
         flowmux_identity: None,
     };
 
@@ -245,30 +255,42 @@ fn endpoint_bin_claim10_gate_refuses_a_bound_but_unadmitted_destination() {
 }
 
 #[test]
-fn endpoint_bin_raw_no_secret_mode_handshakes_without_placeholders() {
+fn a_flowmux_endpoint_keeps_serving_sessions_after_one_ends() {
+    use base64::Engine as _;
+    use mvm_core::net::session::Session;
+    use mvm_hostd::supervisor::network_endpoint::FlowMuxIdentity;
+
     let dir = tempfile::tempdir().unwrap();
-    let sock = dir.path().join("raw-egress.sock");
+    let sock = dir.path().join("network.sock");
+
+    let host_key = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+    let host_verify = host_key.verifying_key();
+    let guest_key = ed25519_dalek::SigningKey::from_bytes(&[9u8; 32]);
+    let b64 = base64::engine::general_purpose::STANDARD;
 
     let cfg = EndpointConfig {
         tenant_id: "local".into(),
-        secrets: Vec::new(),
+        secrets: vec![],
         transport: EndpointTransport::Uds { path: sock.clone() },
         redaction: mvm_core::policy::RedactionPolicy::default(),
         reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
         forward_timeout_secs: 30,
+        proxy_https: None,
+        proxy_http: None,
+        no_proxy: None,
         secret_store_dir: None,
         binding_store_dir: None,
         terminator_listen: None,
         tls_intermediate: None,
-        network_policy: Some(mvm_core::policy::network_policy::NetworkPolicy::allow_list(
-            vec![mvm_core::policy::network_policy::HostPort::new(
-                "142.250.72.14",
-                443,
-            )],
-        )),
-        egress_mode: EgressMode::Raw,
+        network_policy: None,
+        egress_mode: EgressMode::FlowMux,
         resolver: ResolverBackend::default(),
-        flowmux_identity: None,
+        session_marker: None,
+        flowmux_identity: Some(FlowMuxIdentity {
+            session_id: "keeps-serving".into(),
+            host_signing_key_base64: b64.encode(host_key.to_bytes()),
+            guest_verifying_key_base64: b64.encode(guest_key.verifying_key().to_bytes()),
+        }),
     };
 
     let mut child = Command::new(BIN)
@@ -285,14 +307,32 @@ fn endpoint_bin_raw_no_secret_mode_handshakes_without_placeholders() {
 
     let mut line = String::new();
     stdout.read_line(&mut line).expect("read handshake line");
-    let handshake: mvm_runtime::EndpointHandshake =
-        serde_json::from_str(line.trim()).expect("handshake json");
-    let handed = handshake.env.clone();
-    assert!(
-        handed.is_empty(),
-        "raw no-secret endpoint should hand out no placeholders"
-    );
 
-    UnixStream::connect(&sock).expect("raw endpoint UDS is bound before handshake");
+    // A guest session: connect, complete the authenticated handshake, drop.
+    // The read timeout turns "the host never answered" into a failure rather
+    // than a hung test.
+    let handshake_once = |what: &str| {
+        let mut conn = UnixStream::connect(&sock).unwrap_or_else(|e| {
+            panic!("{what}: endpoint stopped accepting: {e}");
+        });
+        conn.set_read_timeout(Some(std::time::Duration::from_secs(10)))
+            .unwrap();
+        Session::guest(&mut conn, guest_key.clone(), &host_verify)
+            .unwrap_or_else(|e| panic!("{what}: handshake did not complete: {e}"));
+        conn
+    };
+
+    // First session, then let it end the way a real one does.
+    drop(handshake_once("first session"));
+
+    // The assertion: a fresh session still authenticates after the first ended.
+    let second = handshake_once("second session (after the first ended)");
+
+    // And a third while the second is still open — two guest processes each
+    // own a session, so the endpoint must hold more than one at a time.
+    let third = handshake_once("third session (concurrent with the second)");
+
+    drop(third);
+    drop(second);
     drop(guard);
 }

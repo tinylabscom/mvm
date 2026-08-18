@@ -8,20 +8,59 @@
 //! accretion.
 //!
 //! The closure is platform-sensitive (macOS pulls libkrun/objc2; Linux pulls
-//! firecracker), so the gate pins the primary release/CI target
-//! (`x86_64-unknown-linux-gnu`) for a deterministic count regardless of the
-//! host running it — `cargo tree --target` resolves without building.
+//! firecracker), so the gate pins explicit targets for a deterministic count
+//! regardless of the host running it — `cargo tree --target` resolves without
+//! building.
+//!
+//! **Both** shipped targets are budgeted. Measuring only Linux left the macOS
+//! closure unobserved, and that is not a hypothetical gap: `mvm-hostd`
+//! declared `hickory-proto` unconditionally while every consumer in
+//! `supervisor/raw_egress.rs` was `cfg(target_os = "linux")`, so a macOS
+//! `mvmctl` linked it — plus `rand` 0.10, `chacha20` and `data-encoding` —
+//! with no consumer at all. A Linux-only gate cannot see that class of defect,
+//! and macOS is the primary contributor and HVF-workload platform.
 
 use anyhow::{Context, Result, bail};
 use std::path::Path;
 use std::process::Command;
 
-/// Deployment/CI target the budget is measured against (deterministic across
-/// hosts).
-const BUDGET_TARGET: &str = "x86_64-unknown-linux-gnu";
+/// One budgeted target: the triple `cargo tree` resolves against, and the max
+/// distinct crates allowed in `mvmctl`'s default no-dev closure there.
+struct ClosureBudget {
+    target: &'static str,
+    max: usize,
+}
+
+/// Both shipped targets. Lower a budget freely as deps drop; raising one must
+/// be justified in the change that does.
+const BUDGETS: &[ClosureBudget] = &[
+    ClosureBudget {
+        target: "x86_64-unknown-linux-gnu",
+        max: CLOSURE_BUDGET,
+    },
+    ClosureBudget {
+        target: "aarch64-apple-darwin",
+        max: MACOS_CLOSURE_BUDGET,
+    },
+];
+
+/// Max distinct crates in the default no-dev closure on
+/// `aarch64-apple-darwin`. Baseline measured 2026-08-14 after target-gating
+/// `hickory-proto` to Linux, which took the macOS closure 238 -> 232 by
+/// dropping `hickory-proto`, `rand` 0.10, `rand_core` 0.10's `rand` edge,
+/// `chacha20` and `data-encoding`.
+///
+/// Lower than the Linux budget because the Firecracker/KVM stack
+/// (`kvm-bindings`, `kvm-ioctls`, `vmm-sys-util`, `landlock`, `seccompiler`,
+/// the netlink family) does not enter the macOS graph.
+///
+/// 233 (was 232): `mvm-observability`, the same +1 the Linux budget took —
+/// a workspace crate holding subscriber assembly that `mvm-core` used to
+/// own, carrying no new third-party code on either target.
+const MACOS_CLOSURE_BUDGET: usize = 233;
 
 /// Max distinct crates allowed in `mvmctl`'s default no-dev closure on
-/// [`BUDGET_TARGET`]. Baseline measured 2026-06-17 against the audited default
+/// `x86_64-unknown-linux-gnu`. Baseline measured 2026-06-17 against the audited default
 /// closure. The Linux KVM backend adds one audited ioctl-wrapper crate to the
 /// default Linux release path. Lower it freely as deps drop; raising it must be
 /// justified in the change that does.
@@ -137,45 +176,55 @@ const BUDGET_TARGET: &str = "x86_64-unknown-linux-gnu";
 /// SHA-1, so it cannot reuse the workspace's `sha2`; the feature pulls exactly
 /// one crate, `sha1_smol`, which is a leaf with no dependencies of its own.
 /// Measured net +1.
-pub(crate) const CLOSURE_BUDGET: usize = 243;
+/// 244 (was 243): the new first-party `mvm-observability` crate, which takes
+/// the subscriber-assembly half of `mvm-core::observability` (`logging` +
+/// the span-timing `Layer`). It carries no new third-party code —
+/// `tracing-subscriber` was already in this closure via `mvm-core`, and is
+/// now reached via `mvm-observability` instead. The point of the split is
+/// the crates that do NOT install a subscriber: `mvm-core` 110 -> 101, and
+/// the sealed guest agent `mvm-agentd` 111 -> 102 (its `tracing-subscriber`
+/// is now gated behind `addons`, since only the helper bins install one).
+/// Measured +1 here, -9 on the guest agent and the embedded musl bins.
+pub(crate) const CLOSURE_BUDGET: usize = 239;
 
 pub fn run(workspace: &Path) -> Result<()> {
-    let count = default_closure_crate_count(workspace)?;
-    if count > CLOSURE_BUDGET {
-        bail!(
-            "check-closure-budget: mvmctl's default {BUDGET_TARGET} closure is {count} crates, \
-             over the budget of {CLOSURE_BUDGET} — a new dependency entered the default binary. \
-             Drop it, gate it behind an off-by-default feature, or, if it is genuinely required, \
-             bump CLOSURE_BUDGET in xtask/src/check_closure_budget.rs with a one-line \
-             justification in the PR."
-        );
-    }
-    if count < CLOSURE_BUDGET {
-        eprintln!(
-            "check-closure-budget: {count} crates (budget {CLOSURE_BUDGET}); deps dropped — \
-             ratchet CLOSURE_BUDGET down to {count}."
-        );
-    } else {
-        eprintln!("check-closure-budget: {count} crates (at budget {CLOSURE_BUDGET})");
+    for budget in BUDGETS {
+        check_one(workspace, budget)?;
     }
     Ok(())
 }
 
-fn default_closure_crate_count(workspace: &Path) -> Result<usize> {
+fn check_one(workspace: &Path, budget: &ClosureBudget) -> Result<()> {
+    let ClosureBudget { target, max } = *budget;
+    let count = default_closure_crate_count(workspace, target)?;
+    if count > max {
+        bail!(
+            "check-closure-budget: mvmctl's default {target} closure is {count} crates, \
+             over the budget of {max} — a new dependency entered the default binary. \
+             Drop it, gate it behind an off-by-default feature (or a \
+             `[target.'cfg(...)'.dependencies]` table if it is platform-specific), or, if it \
+             is genuinely required, bump the budget in xtask/src/check_closure_budget.rs with \
+             a one-line justification in the PR."
+        );
+    }
+    if count < max {
+        eprintln!(
+            "check-closure-budget: {target} {count} crates (budget {max}); deps dropped — \
+             ratchet the budget down to {count}."
+        );
+    } else {
+        eprintln!("check-closure-budget: {target} {count} crates (at budget {max})");
+    }
+    Ok(())
+}
+
+fn default_closure_crate_count(workspace: &Path, target: &str) -> Result<usize> {
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
     let output = Command::new(&cargo)
         .current_dir(workspace)
         .args([
-            "tree",
-            "-p",
-            "mvmctl",
-            "-e",
-            "no-dev",
-            "--prefix",
-            "none",
-            "--locked",
-            "--target",
-            BUDGET_TARGET,
+            "tree", "-p", "mvmctl", "-e", "no-dev", "--prefix", "none", "--locked", "--target",
+            target,
         ])
         .output()
         .context("running `cargo tree -p mvmctl -e no-dev --target ...`")?;

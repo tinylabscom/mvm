@@ -1,6 +1,0 @@
-start
-web
---receipt
-/tmp/mvm-sdk-machine.receipt.json
---json
---dry-run

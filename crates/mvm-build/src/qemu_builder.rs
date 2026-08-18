@@ -232,10 +232,18 @@ fn run_stage0_qemu(
         "console={serial_console} root=/dev/vda rw init={entry_path} mvm.backend=qemu {QEMU_BUILDER_VSOCK_EGRESS_TOKEN} {QEMU_BUILDER_VSOCK_EGRESS_PORT_TOKEN_PREFIX}{egress_port} {hostepoch} panic=-1"
     );
     let guest_cid = allocate_qemu_builder_guest_cid();
+    // Both statements sit behind the same feature: the endpoint type only
+    // exists with `builder-vm`, and so does the identity it needs. Gating only
+    // one of them compiles on a dev host and fails on the feature-gated
+    // target, which is exactly what happened the first time.
+    #[cfg(feature = "builder-vm")]
+    let (identity_material, identity_drive) =
+        crate::libkrun_builder::stage_builder_flowmux_identity(&work)?;
     #[cfg(feature = "builder-vm")]
     let egress_endpoint = BuilderVsockEgressEndpoint::spawn_with_transport(
         &work,
         BuilderEndpointTransport::Vsock { port: egress_port },
+        identity_material.spawn_config(),
     )?;
     let mut cmd = Command::new("timeout");
     cmd.arg(STAGE0_TIMEOUT_SECS.to_string()).arg(&qemu_bin);
@@ -251,10 +259,26 @@ fn run_stage0_qemu(
     }
     cmd.arg("-kernel").arg(&kernel);
     cmd.arg("-initrd").arg(&initrd);
-    cmd.arg("-append").arg(&append);
+    cmd.arg("-append").arg(
+        crate::builder_cmdline::checked_builder_cmdline(append)
+            .map_err(BuilderVmError::NixBuildFailed)?,
+    );
     for disk in [&vda, &vdb, &vdc, &vdd] {
         cmd.arg("-drive")
             .arg(format!("file={},if=virtio,format=raw", disk.display()));
+    }
+    // Read-only, matching how the shell-job and build paths attach it.
+    #[cfg(feature = "builder-vm")]
+    cmd.arg("-drive").arg(format!(
+        "file={},if=virtio,format=raw,readonly=on",
+        identity_drive.display()
+    ));
+    #[cfg(feature = "builder-vm")]
+    {
+        cmd.arg("-drive").arg(format!(
+            "file={},if=virtio,format=raw,readonly=on",
+            identity_drive.display()
+        ));
     }
     #[cfg(feature = "builder-vm")]
     cmd.arg("-drive").arg(format!(
@@ -315,12 +339,46 @@ fn run_stage0_qemu(
 /// `/work` tree without the heavy `target/`/`.git` dirs before packing it.
 /// `pub(crate)` so the libkrun Stage 0 path can stage its own filtered
 /// `/work` copy with the same walk instead of a second implementation.
+/// Directories this copy must never descend into, resolved to real paths
+/// rather than matched by name.
+///
+/// `exclude` is a list of *names*, which is fine for `target/` and `.git` —
+/// they are named by convention. It is not fine for two cases that are
+/// defined by where they are, not what they are called:
+///
+/// - **The destination.** When `dst` lives under `src`, a name-matched filter
+///   walks the copy into its own output and keeps going until the path
+///   exceeds `PATH_MAX`. That is always a bug, whatever the directory is
+///   called.
+/// - **`MVM_HOME`.** The default name is on the exclude list, but the
+///   variable can point anywhere. Pointed inside the checkout under any other
+///   name — `.mvm-verify`, say — it was copied, and since Stage 0 stages into
+///   `MVM_HOME/cache/builder-vm/vms/...` that is the first case again.
+fn resolved_copy_barriers(src: &Path, dst: &Path) -> Vec<PathBuf> {
+    let mut barriers = Vec::new();
+    let real = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let src_real = real(src);
+
+    let dst_real = real(dst);
+    if dst_real.starts_with(&src_real) {
+        barriers.push(dst_real);
+    }
+
+    let home = PathBuf::from(mvm_core::config::mvm_home());
+    let home_real = real(&home);
+    if home_real.starts_with(&src_real) {
+        barriers.push(home_real);
+    }
+    barriers
+}
+
 pub(crate) fn copy_tree_filtered(
     src: &Path,
     dst: &Path,
     exclude: &[&str],
 ) -> Result<(), BuilderVmError> {
     std::fs::create_dir_all(dst).map_err(|e| io_err("creating staging dir", dst, e))?;
+    let barriers = resolved_copy_barriers(src, dst);
     let mut stack = vec![(src.to_path_buf(), dst.to_path_buf())];
     while let Some((from, to)) = stack.pop() {
         for entry in std::fs::read_dir(&from).map_err(|e| io_err("reading", &from, e))? {
@@ -334,6 +392,12 @@ pub(crate) fn copy_tree_filtered(
             if ft.is_dir() {
                 if exclude.contains(&name.to_string_lossy().as_ref()) {
                     continue;
+                }
+                if !barriers.is_empty() {
+                    let real = std::fs::canonicalize(&src_p).unwrap_or_else(|_| src_p.clone());
+                    if barriers.iter().any(|b| real.starts_with(b)) {
+                        continue;
+                    }
                 }
                 std::fs::create_dir_all(&dst_p).map_err(|e| io_err("mkdir", &dst_p, e))?;
                 stack.push((src_p, dst_p));
@@ -349,6 +413,99 @@ pub(crate) fn copy_tree_filtered(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod copy_barrier_tests {
+    use super::{WORK_TREE_EXCLUDE_DIRS, copy_tree_filtered};
+    use mvm_core::util::test_env::TestEnv;
+
+    /// The reported failure: a staging destination inside the tree being
+    /// copied. Name-matched filtering walked into it and kept going until the
+    /// path outgrew `PATH_MAX` (ENAMETOOLONG), roughly ten levels deep.
+    #[test]
+    fn a_destination_inside_the_source_is_not_copied_into_itself() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let src = root.path().join("checkout");
+        std::fs::create_dir_all(src.join("crates")).expect("mkdir");
+        std::fs::write(src.join("crates/lib.rs"), b"fn main() {}").expect("write");
+
+        // The destination lives under the source, named nothing special.
+        let dst = src.join("stage0-work/work-src");
+        copy_tree_filtered(&src, &dst, WORK_TREE_EXCLUDE_DIRS).expect("copy");
+
+        assert!(
+            dst.join("crates/lib.rs").is_file(),
+            "real content is copied"
+        );
+        // The defect was unbounded recursion, not the empty parent directory
+        // the walk leaves behind on its way past the destination. What must
+        // not exist is a *copy of the destination inside the destination* —
+        // the first turn of the loop that ran until ENAMETOOLONG.
+        assert!(
+            !dst.join("stage0-work/work-src").exists(),
+            "the copy must not descend into its own destination"
+        );
+        assert!(
+            !dst.join("stage0-work/work-src/crates").exists(),
+            "and must not carry content around that loop"
+        );
+    }
+
+    /// `MVM_HOME` under a name the exclude list does not know. Stage 0 stages
+    /// into `MVM_HOME/cache/...`, so copying it is the recursion above by
+    /// another route — and the name list cannot see it coming.
+    #[test]
+    fn an_mvm_home_inside_the_source_is_skipped_whatever_it_is_called() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let src = root.path().join("checkout");
+        std::fs::create_dir_all(src.join("crates")).expect("mkdir");
+        std::fs::write(src.join("crates/lib.rs"), b"fn main() {}").expect("write");
+
+        let home = src.join(".mvm-verify");
+        std::fs::create_dir_all(home.join("cache/builder-vm")).expect("mkdir");
+        std::fs::write(home.join("cache/builder-vm/huge.img"), b"x").expect("write");
+
+        // `isolate_mvm_home` moves HOME with MVM_HOME and restores both on
+        // drop. Setting MVM_HOME alone leaves the test able to read the
+        // developer's real home, which `xtask check-test-home-isolation`
+        // refuses — it caught this exact pair.
+        let mut env = TestEnv::new();
+        env.isolate_mvm_home(&home);
+
+        let dst = root.path().join("out");
+        copy_tree_filtered(&src, &dst, WORK_TREE_EXCLUDE_DIRS).expect("copy");
+
+        assert!(
+            dst.join("crates/lib.rs").is_file(),
+            "real content is copied"
+        );
+        assert!(
+            !dst.join(".mvm-verify").exists(),
+            "the resolved MVM_HOME must be skipped even under an unknown name"
+        );
+    }
+
+    /// The barrier is about location, not name: an `.mvm-verify` that is *not*
+    /// the active `MVM_HOME` is ordinary content and must still be copied.
+    #[test]
+    fn a_directory_that_merely_shares_the_name_is_still_copied() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let src = root.path().join("checkout");
+        std::fs::create_dir_all(src.join(".mvm-verify")).expect("mkdir");
+        std::fs::write(src.join(".mvm-verify/notes.md"), b"not a home").expect("write");
+
+        let mut env = TestEnv::new();
+        env.isolate_mvm_home(root.path().join("elsewhere"));
+
+        let dst = root.path().join("out");
+        copy_tree_filtered(&src, &dst, WORK_TREE_EXCLUDE_DIRS).expect("copy");
+
+        assert!(
+            dst.join(".mvm-verify/notes.md").is_file(),
+            "a same-named directory that is not the active home is content"
+        );
+    }
 }
 
 fn stage_qemu_vsock_guest_modules(host_bins_dir: &Path) -> Result<(), BuilderVmError> {
@@ -875,7 +1032,10 @@ fn run_shell_script_qemu(job: &BuilderShellJob) -> Result<BuilderShellResult, Bu
         cmd.args(["-cpu", "max"]);
     }
     cmd.arg("-kernel").arg(&kernel);
-    cmd.arg("-append").arg(&cmdline);
+    cmd.arg("-append").arg(
+        crate::builder_cmdline::checked_builder_cmdline(cmdline.clone())
+            .map_err(BuilderVmError::NixBuildFailed)?,
+    );
     cmd.arg("-drive")
         .arg(format!("file={},if=virtio,format=raw", rootfs.display()));
     cmd.arg("-drive").arg(format!(
@@ -907,10 +1067,17 @@ fn run_shell_script_qemu(job: &BuilderShellJob) -> Result<BuilderShellResult, Bu
             "vhost-user-fs-pci,queue-size=1024,chardev=vfs-{tag},tag={tag}"
         ));
     }
+    let (identity_material, identity_drive) =
+        crate::libkrun_builder::stage_builder_flowmux_identity(&vm_state_dir)?;
     let egress_endpoint = BuilderVsockEgressEndpoint::spawn_with_transport(
         &vm_state_dir,
         BuilderEndpointTransport::Vsock { port: egress_port },
+        identity_material.spawn_config(),
     )?;
+    cmd.arg("-drive").arg(format!(
+        "file={},if=virtio,format=raw,readonly=on",
+        identity_drive.display()
+    ));
     cmd.arg("-device")
         .arg(format!("vhost-vsock-pci,guest-cid={guest_cid}"));
     cmd.args(["-display", "none"]);
@@ -1145,7 +1312,10 @@ fn run_build_qemu(
         cmd.args(["-cpu", "max"]);
     }
     cmd.arg("-kernel").arg(&kernel);
-    cmd.arg("-append").arg(&cmdline);
+    cmd.arg("-append").arg(
+        crate::builder_cmdline::checked_builder_cmdline(cmdline.clone())
+            .map_err(BuilderVmError::NixBuildFailed)?,
+    );
     // Root disk (vda) + persistent nix store (vdb). The guest mounts vda
     // `ro`, so the cached `rootfs.ext4` stays pristine across builds even
     // though the block device is attached writable (mirrors libkrun). vdb
@@ -1176,10 +1346,17 @@ fn run_build_qemu(
             "vhost-user-fs-pci,queue-size=1024,chardev=vfs-{tag},tag={tag}"
         ));
     }
+    let (identity_material, identity_drive) =
+        crate::libkrun_builder::stage_builder_flowmux_identity(&vm_state_dir)?;
     let egress_endpoint = BuilderVsockEgressEndpoint::spawn_with_transport(
         &vm_state_dir,
         BuilderEndpointTransport::Vsock { port: egress_port },
+        identity_material.spawn_config(),
     )?;
+    cmd.arg("-drive").arg(format!(
+        "file={},if=virtio,format=raw,readonly=on",
+        identity_drive.display()
+    ));
     cmd.arg("-device")
         .arg(format!("vhost-vsock-pci,guest-cid={guest_cid}"));
     cmd.args(["-display", "none"]);

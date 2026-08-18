@@ -18,11 +18,11 @@ mvm-build = { workspace = true, default-features = false }
 libkrun-sys.workspace = true
 mvm-fs.workspace = true
 mvm-http.workspace = true
+mvm-observability.workspace = true
 mvm-hostd.workspace = true
 # The networking-mode compatibility gate: a plan that needs host-side
 # substitution must not be able to select the L3 tunnel, where the host
 # sees only ciphertext.
-mvm-net.workspace = true
 # The `MvmClient` facade: read-only listing/inspect commands route through
 # `mvm_client::LocalBackend` instead of reaching `mvm_runtime` internals.
 mvm-client.workspace = true
@@ -52,7 +52,7 @@ serde.workspace = true
 serde_json.workspace = true
 serde_jcs = "0.1"
 sha2.workspace = true
-tar = "0.4"
+tar.workspace = true
 flate2.workspace = true
 hex.workspace = true
 tempfile.workspace = true
@@ -80,6 +80,8 @@ sha2.workspace = true
 
 [dev-dependencies]
 mvm-core = { workspace = true, features = ["test-support"] }
+# Reached only from `#[cfg(test)] mod tests` in commands/machine.
+mvm-net.workspace = true
 assert_cmd.workspace = true
 ed25519-dalek.workspace = true
 rand.workspace = true

@@ -247,9 +247,9 @@ impl Registry {
 }
 
 fn fresh_token() -> String {
-    use rand::RngCore;
+    use rand::Rng;
     let mut buf = [0u8; 16];
-    rand::thread_rng().fill_bytes(&mut buf);
+    rand::rng().fill_bytes(&mut buf);
     let hex: String = buf.iter().map(|b| format!("{:02x}", b)).collect();
     format!("ptok-{}", hex)
 }

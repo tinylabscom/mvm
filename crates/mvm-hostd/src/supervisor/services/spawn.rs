@@ -527,6 +527,7 @@ pub mod probe {
 
 #[cfg(test)]
 mod tests {
+    use rand::Rng;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -744,7 +745,6 @@ mod tests {
         use std::sync::Arc;
 
         use ed25519_dalek::{Signer, SigningKey};
-        use rand::rngs::OsRng;
 
         use crate::supervisor::services::binary_integrity::{
             BinarySignature, IntegrityError, ReleaseKeyBundle, SignedBinaryChecker,
@@ -754,11 +754,9 @@ mod tests {
         let binary_path = dir.path().join("fake-bin");
         let original = b"#!/bin/sh\nsleep 5\n";
         std::fs::write(&binary_path, original).unwrap();
-
-        let mut rng = OsRng;
         let signing_key = {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             SigningKey::from_bytes(&__ed_seed)
         };
         let verifying_key = signing_key.verifying_key();

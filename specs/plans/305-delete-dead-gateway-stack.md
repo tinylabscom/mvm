@@ -168,6 +168,14 @@ a cycle would not terminate.
 - [x] An orphaned doc comment in `mvm-hostd/src/lib.rs` described the deleted
       bridge module while sitting on `pub mod broker;`
 
+- [x] The packaging and install layer kept naming the deleted binary after
+      WS3 corrected the prose. `verify-release-assets.sh` required `mvm-bridge`
+      on every target while `release.yml` never builds it, so the next tagged
+      release would have failed asset verification; the test carried the same
+      stale list, so the fixture manufactured the file and the gate stayed
+      green. Fixed with a drift gate deriving the shipped set from the
+      workflow (#2497).
+
 ### WS4 — Then confine the signer roles
 
 The original plan-305 scope, deferred behind the deletion because it is a
@@ -180,7 +188,13 @@ roles build `tokio::runtime::Builder::new_multi_thread()`, so any allowlist it
 produces today is incomplete by construction and the failure mode is SIGSYS
 under load. Extend the tracer with `PTRACE_O_TRACECLONE` first.
 
-- [ ] Extend `seccomp-audit` to follow clones/threads
+- [x] Extend `seccomp-audit` to follow clones/threads. Two defects, not one:
+      the tracer set neither `PTRACE_O_TRACECLONE`/`FORK`/`VFORK` nor `__WALL`
+      and waited only on the main pid, and its syscall entry/exit state was a
+      single flag for the whole session — which pairs one thread's entry with
+      another's exit once siblings interleave. Fixing the option without the
+      per-tracee state would have produced a plausible but wrong allowlist,
+      which is worse than the honest limitation it replaced.
 - [ ] Derive the four allowlists on the live Linux box
 - [ ] One PR per role
 

@@ -27,8 +27,68 @@ use serde::{Deserialize, Serialize};
 /// Sidecar filename inside the VM state directory.
 pub const LAUNCH_TRACE_FILE: &str = "launch-trace.json";
 
-/// Set to `1`/`true` to print a per-phase launch breakdown to stderr.
+/// Names the sidecar a *driver* writes its own sub-phases to.
+///
+/// Deliberately a second file. The driver and the runner that calls it both
+/// trace the same launch, and both used to write [`LAUNCH_TRACE_FILE`] — the
+/// driver from inside `boot`, the runner immediately after `boot` returned.
+/// `write_to` truncates, so the runner's write always won and the driver's
+/// decomposition of its own boot never reached any reader. Two files means
+/// neither writer has to know the other exists and neither ordering loses data.
+pub const LAUNCH_TRACE_DRIVER_FILE: &str = "launch-trace-driver.json";
+
+/// Joins a driver sub-phase to the runner phase that contains it.
+///
+/// A driver's phases decompose one of the runner's, so a flat merge would let
+/// a consumer sum both and double-count the launch. Qualifying them keeps the
+/// unqualified names a partition of the launch and makes the containment
+/// visible in the name itself.
+pub const DRIVER_PHASE_SEPARATOR: &str = ".";
+
+/// Set to `1`/`true` to print a per-phase launch breakdown to stderr, or to
+/// `tree` for the same breakdown rendered as a nested, aligned report.
 pub const PHASE_TIMING_ENV: &str = "MVM_PHASE_TIMING";
+
+/// How a launch should render its phase breakdown.
+///
+/// The variants are a rendering choice, not a verbosity ladder: `Line` and
+/// `Tree` carry the same spans and differ only in shape. Anything the parse
+/// does not recognise is [`Off`](PhaseTimingMode::Off), so a typo silently
+/// disables the report rather than half-enabling it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PhaseTimingMode {
+    /// No breakdown printed.
+    Off,
+    /// One greppable `key=value` line per report. The stable machine contract.
+    Line,
+    /// A nested, aligned report grouped by containment.
+    Tree,
+}
+
+impl PhaseTimingMode {
+    /// Whether any breakdown should be printed.
+    #[must_use]
+    pub const fn is_on(self) -> bool {
+        !matches!(self, Self::Off)
+    }
+}
+
+/// Parse [`PHASE_TIMING_ENV`], pure over the raw value so the gate is testable
+/// without mutating process env.
+#[must_use]
+pub fn phase_timing_mode_from(value: Option<&str>) -> PhaseTimingMode {
+    match value.map(str::trim) {
+        Some(v) if v == "1" || v.eq_ignore_ascii_case("true") => PhaseTimingMode::Line,
+        Some(v) if v.eq_ignore_ascii_case("tree") => PhaseTimingMode::Tree,
+        _ => PhaseTimingMode::Off,
+    }
+}
+
+/// Read the environment and decide how to render.
+#[must_use]
+pub fn phase_timing_mode() -> PhaseTimingMode {
+    phase_timing_mode_from(std::env::var(PHASE_TIMING_ENV).ok().as_deref())
+}
 
 /// Names the file a launch writes its machine-readable sample to.
 pub const LAUNCH_SAMPLE_ENV: &str = "MVM_LAUNCH_SAMPLE_JSON";
@@ -80,9 +140,11 @@ impl BackendLaunchTrace {
 /// values so the gate is testable without mutating process env.
 #[must_use]
 pub fn tracing_enabled_from(phase_timing: Option<&str>, sample_path: Option<&str>) -> bool {
-    let truthy = matches!(phase_timing, Some(v) if v == "1" || v.eq_ignore_ascii_case("true"));
+    // Every rendering mode needs the same marks, so this asks only whether the
+    // report is on at all. A mode that recorded nothing would render a report
+    // full of absent spans and read as "the launch did no work".
     let sampling = matches!(sample_path, Some(v) if !v.trim().is_empty());
-    truthy || sampling
+    phase_timing_mode_from(phase_timing).is_on() || sampling
 }
 
 /// Read the environment and decide whether to record.
@@ -166,11 +228,24 @@ impl LaunchTraceRecorder {
     /// Write the trace into `state_dir`. Best-effort: a launch must never fail
     /// because its diagnostic could not be written.
     pub fn write_to(self, state_dir: &Path) {
+        self.write_file(trace_path(state_dir));
+    }
+
+    /// Write the trace as the *driver* sidecar.
+    ///
+    /// A driver calls this instead of [`write_to`](Self::write_to) so its
+    /// phases survive the runner's own write. [`read_trace`] folds the two
+    /// back together.
+    pub fn write_driver_to(self, state_dir: &Path) {
+        self.write_file(driver_trace_path(state_dir));
+    }
+
+    fn write_file(self, path: PathBuf) {
         let Some(trace) = self.finish() else {
             return;
         };
         if let Ok(json) = serde_json::to_string_pretty(&trace) {
-            let _ = std::fs::write(trace_path(state_dir), json);
+            let _ = std::fs::write(path, json);
         }
     }
 }
@@ -262,12 +337,44 @@ pub fn trace_path(state_dir: &Path) -> PathBuf {
     state_dir.join(LAUNCH_TRACE_FILE)
 }
 
-/// Read a launch trace a backend wrote. A missing or unparsable sidecar reads
-/// as `None` — the launch still happened, it just was not traced.
+/// Where a driver's own sub-phase sidecar lives.
+#[must_use]
+pub fn driver_trace_path(state_dir: &Path) -> PathBuf {
+    state_dir.join(LAUNCH_TRACE_DRIVER_FILE)
+}
+
+fn read_one(path: PathBuf) -> Option<BackendLaunchTrace> {
+    serde_json::from_slice(&std::fs::read(path).ok()?).ok()
+}
+
+/// Read a launch trace a backend wrote, with any driver sub-phases folded in.
+///
+/// A missing or unparsable sidecar reads as `None` — the launch still
+/// happened, it just was not traced. Driver phases are appended under their
+/// containing phase's name (`driver_boot.vmm_start`), so the unqualified
+/// phases stay a partition of the launch and a consumer that sums them is
+/// still correct.
 #[must_use]
 pub fn read_trace(state_dir: &Path) -> Option<BackendLaunchTrace> {
-    let bytes = std::fs::read(trace_path(state_dir)).ok()?;
-    serde_json::from_slice(&bytes).ok()
+    let driver = read_one(driver_trace_path(state_dir));
+    let Some(mut trace) = read_one(trace_path(state_dir)) else {
+        // A driver sidecar with no runner trace is still a real trace: the
+        // runner may have failed before writing. Report it rather than
+        // discarding the only evidence of what the driver did.
+        return driver;
+    };
+    if let Some(driver) = driver {
+        trace.phases.extend(driver.phases.into_iter().map(|phase| {
+            let name = format!("driver_boot{DRIVER_PHASE_SEPARATOR}{}", phase.name);
+            TracePhase { name, ms: phase.ms }
+        }));
+        for missing in driver.degraded {
+            if !trace.degraded.contains(&missing) {
+                trace.degraded.push(missing);
+            }
+        }
+    }
+    Some(trace)
 }
 
 #[cfg(test)]
@@ -425,5 +532,139 @@ mod tests {
         assert!(!tracing_enabled_from(None, None));
         assert!(!tracing_enabled_from(Some("0"), None));
         assert!(!tracing_enabled_from(Some(""), Some("  ")));
+    }
+
+    #[test]
+    fn tree_mode_still_records_backend_phases() {
+        // The trap this pins: a rendering mode that does not arm recording
+        // renders an empty report and reads as a launch that did no work.
+        assert!(tracing_enabled_from(Some("tree"), None));
+        assert_eq!(phase_timing_mode_from(Some("tree")), PhaseTimingMode::Tree);
+    }
+
+    #[test]
+    fn phase_timing_mode_parses_every_accepted_spelling() {
+        for on in ["1", "true", "TRUE", " true "] {
+            assert_eq!(
+                phase_timing_mode_from(Some(on)),
+                PhaseTimingMode::Line,
+                "{on}"
+            );
+        }
+        for tree in ["tree", "TREE", " Tree "] {
+            assert_eq!(
+                phase_timing_mode_from(Some(tree)),
+                PhaseTimingMode::Tree,
+                "{tree}"
+            );
+        }
+        for off in ["0", "", "  ", "yes", "2", "line"] {
+            assert_eq!(
+                phase_timing_mode_from(Some(off)),
+                PhaseTimingMode::Off,
+                "{off}"
+            );
+        }
+        assert_eq!(phase_timing_mode_from(None), PhaseTimingMode::Off);
+    }
+
+    #[test]
+    fn only_off_is_off() {
+        assert!(!PhaseTimingMode::Off.is_on());
+        assert!(PhaseTimingMode::Line.is_on());
+        assert!(PhaseTimingMode::Tree.is_on());
+    }
+}
+
+#[cfg(test)]
+mod driver_sidecar_tests {
+    use super::*;
+
+    fn rec(backend: &str, phases: &[&'static str]) -> LaunchTraceRecorder {
+        let mut r = LaunchTraceRecorder::with_enabled(backend, true);
+        for p in phases {
+            r.mark(p);
+        }
+        r
+    }
+
+    /// The regression this file exists for: the driver wrote its own phases
+    /// and the runner's later write truncated the same path, so the driver's
+    /// decomposition of its own boot never reached a reader.
+    #[test]
+    fn a_runner_write_after_a_driver_write_does_not_lose_the_driver_phases() {
+        let dir = tempfile::tempdir().unwrap();
+
+        rec("fc", &["vmm_start", "guest_boot"]).write_driver_to(dir.path());
+        rec("fc", &["spec_assembly", "driver_boot"]).write_to(dir.path());
+
+        let trace = read_trace(dir.path()).expect("a trace");
+        let names: Vec<&str> = trace.phases.iter().map(|p| p.name.as_str()).collect();
+        assert!(names.contains(&"driver_boot"), "runner phases: {names:?}");
+        assert!(
+            names.contains(&"driver_boot.vmm_start") && names.contains(&"driver_boot.guest_boot"),
+            "driver phases must survive the runner's write: {names:?}"
+        );
+    }
+
+    /// Driver phases decompose `driver_boot`, so they must not appear as peers
+    /// of it — a consumer summing unqualified phases would double-count.
+    #[test]
+    fn driver_phases_are_qualified_so_a_sum_of_top_level_phases_is_not_doubled() {
+        let dir = tempfile::tempdir().unwrap();
+        rec("fc", &["vmm_start", "guest_boot"]).write_driver_to(dir.path());
+        rec("fc", &["driver_boot"]).write_to(dir.path());
+
+        let trace = read_trace(dir.path()).unwrap();
+        let unqualified: Vec<&str> = trace
+            .phases
+            .iter()
+            .map(|p| p.name.as_str())
+            .filter(|n| !n.contains(DRIVER_PHASE_SEPARATOR))
+            .collect();
+        assert_eq!(unqualified, vec!["driver_boot"]);
+    }
+
+    /// A driver sidecar alone is the only evidence of what happened when the
+    /// runner died before writing; discarding it would hide the failure.
+    #[test]
+    fn a_driver_sidecar_alone_still_reads_as_a_trace() {
+        let dir = tempfile::tempdir().unwrap();
+        rec("fc", &["vmm_start"]).write_driver_to(dir.path());
+
+        let trace = read_trace(dir.path()).expect("driver-only trace");
+        assert_eq!(trace.phases.len(), 1);
+        assert_eq!(trace.phases[0].name, "vmm_start");
+    }
+
+    #[test]
+    fn degraded_capabilities_from_both_writers_survive_without_duplicating() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let mut driver = LaunchTraceRecorder::with_enabled("fc", true);
+        driver.degrade_unless("host_services", false);
+        driver.degrade_unless("console", false);
+        driver.write_driver_to(dir.path());
+
+        let mut runner = LaunchTraceRecorder::with_enabled("fc", true);
+        runner.degrade_unless("host_services", false);
+        runner.write_to(dir.path());
+
+        let mut degraded = read_trace(dir.path()).unwrap().degraded;
+        degraded.sort();
+        assert_eq!(degraded, vec!["console", "host_services"]);
+    }
+
+    #[test]
+    fn no_sidecar_of_either_kind_still_reads_as_untraced() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(read_trace(dir.path()).is_none());
+    }
+
+    #[test]
+    fn a_disabled_driver_recorder_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        LaunchTraceRecorder::with_enabled("fc", false).write_driver_to(dir.path());
+        assert!(!driver_trace_path(dir.path()).exists());
     }
 }

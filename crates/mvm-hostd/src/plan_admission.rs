@@ -301,8 +301,18 @@ pub fn admit_plan_for_run(
                 bundle = pin.bundle_sha256
             )
         })?;
-        verify_plan_bundle(pin, ctx.resolver, ctx.trust)
+        let verified_bundle = verify_plan_bundle(pin, ctx.resolver, ctx.trust)
             .with_context(|| format!("bundle re-verify for pin {}", pin.bundle_sha256))?;
+        // The signature-verified manifest is the only trustworthy statement of
+        // the bundle's architecture — the boot-time resolver reads an unsigned
+        // registry copy. Refuse here so a foreign-arch pin never reaches a
+        // backend, where it surfaces as an unrelated-looking boot failure.
+        mvm_core::arch::GuestArch::require_host(&verified_bundle.manifest.arch).map_err(|e| {
+            anyhow::anyhow!(
+                "plan pins bundle {bundle} which {e} — refuse",
+                bundle = pin.bundle_sha256
+            )
+        })?;
     }
 
     Ok(AdmittedPlan {
@@ -1038,6 +1048,11 @@ pub struct AdmitAndStartParams<'a> {
     /// it is the record that the run was allowed, and it is written before the
     /// backend starts, so refusing on it actually stops the unaudited run.
     pub audit_durability: crate::audit::durability::AuditDurability,
+    /// An assurance campaign to open against this boot, when the operator
+    /// declared one. `None` — the default — is every ordinary run: extension
+    /// discovery must not sit on the launch critical path, so a run that
+    /// declares no campaign does no assurance work at all.
+    pub assurance: Option<&'a crate::assurance_session::CampaignRequest<'a>>,
 }
 
 impl<'a> AdmitAndStartParams<'a> {
@@ -1063,6 +1078,7 @@ pub struct AdmitAndStartParamsBuilder<'a> {
     policy_bundle: Option<&'a PolicyBundle>,
     emitter: Option<&'a crate::audit::emitter::AuditEmitter>,
     audit_durability: Option<crate::audit::durability::AuditDurability>,
+    assurance: Option<&'a crate::assurance_session::CampaignRequest<'a>>,
 }
 
 impl<'a> AdmitAndStartParamsBuilder<'a> {
@@ -1080,6 +1096,7 @@ impl<'a> AdmitAndStartParamsBuilder<'a> {
             policy_bundle: None,
             emitter: None,
             audit_durability: None,
+            assurance: None,
         }
     }
 
@@ -1155,6 +1172,15 @@ impl<'a> AdmitAndStartParamsBuilder<'a> {
         self
     }
 
+    /// Declare an assurance campaign for this boot.
+    pub fn assurance(
+        mut self,
+        assurance: impl Into<Option<&'a crate::assurance_session::CampaignRequest<'a>>>,
+    ) -> Self {
+        self.assurance = assurance.into();
+        self
+    }
+
     /// Set `audit_durability`.
     #[must_use]
     pub fn audit_durability(
@@ -1191,6 +1217,7 @@ impl<'a> AdmitAndStartParamsBuilder<'a> {
                 "AdmitAndStartParams",
                 "audit_durability",
             ))?,
+            assurance: self.assurance,
         })
     }
 }
@@ -1498,6 +1525,15 @@ pub fn admit_and_start(
                     tracing::warn!(error = %e, "audit emit_grants_enforced failed (non-fatal)");
                 }
             }
+            // After the VM is running, so a failed boot leaves no session, and
+            // after `plan.launched`, so the campaign's own records follow the
+            // launch they belong to. A refusal here fails the boot: a campaign
+            // the operator declared and that silently did not open would be
+            // reported as a trial that observed nothing.
+            if let Some(campaign) = params.assurance {
+                crate::assurance_session::open_for_boot(campaign, &vm_id.0, &admitted)
+                    .context("opening the declared assurance session")?;
+            }
             Ok(StartedMachine {
                 vm_id,
                 admitted,
@@ -1605,6 +1641,7 @@ mod tests {
     use super::*;
     use chrono::{DateTime, TimeZone, Utc};
     use mvm_core::plan::{PlanSeccompTier, SecretReleasePolicy};
+    use rand::Rng;
 
     const FIXTURE_SHA: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
@@ -2635,6 +2672,22 @@ mod tests {
         kernel: &[u8],
         rootfs: &[u8],
     ) -> (Vec<u8>, PlanArtifact) {
+        make_test_bundle_for_arch(
+            sk,
+            kernel,
+            rootfs,
+            &mvm_core::arch::GuestArch::host().to_string(),
+        )
+    }
+
+    /// [`make_test_bundle`] with an explicit declared architecture, so the
+    /// cross-arch refusal can be exercised from either host.
+    fn make_test_bundle_for_arch(
+        sk: &ed25519_dalek::SigningKey,
+        kernel: &[u8],
+        rootfs: &[u8],
+        arch: &str,
+    ) -> (Vec<u8>, PlanArtifact) {
         use mvm_core::plan::bundle::{
             ARTIFACTS_DIR, ArtifactRole, BUNDLE_SCHEMA_VERSION, BundleArtifact, BundleManifest,
             sha256_hex,
@@ -2651,7 +2704,7 @@ mod tests {
             schema_version: BUNDLE_SCHEMA_VERSION,
             publisher: "test".to_string(),
             key_id: key_id.clone(),
-            arch: "aarch64".to_string(),
+            arch: arch.to_string(),
             kernel_version: None,
             profile: None,
             workload_label: None,
@@ -2704,7 +2757,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let sk = {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             ed25519_dalek::SigningKey::from_bytes(&__ed_seed)
         };
         let (archive, pin) = make_test_bundle(&sk, b"kernel-bytes", b"rootfs-bytes");
@@ -2739,7 +2792,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let sk = {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             ed25519_dalek::SigningKey::from_bytes(&__ed_seed)
         };
         let (_archive, pin) = make_test_bundle(&sk, b"k", b"r");
@@ -2756,13 +2809,53 @@ mod tests {
         assert!(msg.contains("BundleAdmissionContext"), "got: {msg}");
     }
 
+    /// A pinned bundle built for the other architecture is refused at the trust
+    /// boundary, before any backend sees it. Without this the plan admits and
+    /// fails deep in boot with an unrelated-looking kernel error.
+    #[test]
+    fn admit_with_cross_arch_pinned_bundle_refuses() {
+        let other = match mvm_core::arch::GuestArch::host() {
+            mvm_core::arch::GuestArch::X86_64 => "aarch64",
+            mvm_core::arch::GuestArch::Aarch64 => "x86_64",
+        };
+        let (_env, _home) = host_with_ceiling(Default::default());
+        let dir = tempfile::tempdir().unwrap();
+        let sk = {
+            let mut __ed_seed = [0u8; 32];
+            rand::rng().fill_bytes(&mut __ed_seed);
+            ed25519_dalek::SigningKey::from_bytes(&__ed_seed)
+        };
+        let (archive, pin) =
+            make_test_bundle_for_arch(&sk, b"kernel-bytes", b"rootfs-bytes", other);
+        let mut map = HashMap::new();
+        map.insert(key_id_from_pubkey(&sk.verifying_key()), sk.verifying_key());
+        let trust = MapTrust(map);
+        let resolver = FixedResolver(archive);
+        let ctx = BundleAdmissionContext {
+            resolver: &resolver,
+            trust: &trust,
+        };
+        let err = admit_for_run(
+            &input_with_pin("vm-cross-arch", &pin),
+            &SystemClock,
+            &InMemoryNonceLedger::new(),
+            Some(dir.path()),
+            Some(&ctx),
+            RunPosture::without_backend(Variant::Dev),
+        )
+        .expect_err("a foreign-arch bundle must not be admitted");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("but this host is"), "{msg}");
+        assert!(msg.contains(other), "{msg}");
+    }
+
     #[test]
     fn admit_with_unknown_publisher_in_trust_store_refuses() {
         let (_env, _home) = host_with_ceiling(Default::default());
         let dir = tempfile::tempdir().unwrap();
         let sk = {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             ed25519_dalek::SigningKey::from_bytes(&__ed_seed)
         };
         let (archive, pin) = make_test_bundle(&sk, b"k", b"r");
@@ -2800,7 +2893,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let sk = {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             ed25519_dalek::SigningKey::from_bytes(&__ed_seed)
         };
         let (_archive_a, pin_a) = make_test_bundle(&sk, b"kA", b"rA");
@@ -3284,6 +3377,7 @@ mod tests {
                 policy_bundle: None,
                 emitter: None,
                 audit_durability: crate::audit::durability::AuditDurability::BestEffort,
+                assurance: None,
             },
         )
         .expect("admit + boot");
@@ -3297,6 +3391,118 @@ mod tests {
             backend.status(&started.vm_id).unwrap(),
             mvm_core::vm_backend::VmStatus::Running
         ));
+    }
+
+    #[test]
+    fn a_declared_campaign_opens_its_session_on_the_boot_path() {
+        // The production seam: `admit_and_start` is what a run goes through,
+        // and a declared campaign has to become a live session there rather
+        // than in a test that hand-built one. The broker-handler tests may
+        // already have installed the process-global plane, so this test uses
+        // that legitimate instance when running in parallel.
+        use std::sync::Arc;
+
+        use mvm_contract::assurance::{
+            ApprovalSet, AssuranceId, ObservationScope, RequestedAuthority, Sha256Digest, ToolId,
+        };
+
+        use crate::assurance_session::{
+            CampaignDeclaration, CampaignRequest, DeclaredEdge, default_policy_ceiling,
+            host_assurance_plane, install_host_assurance_plane,
+        };
+        use crate::broker::handlers::host_assurance_v1::HostAssuranceV1Handler;
+
+        let (_env, _home) = host_with_ceiling(Default::default());
+        let dir = tempfile::tempdir().unwrap();
+        let audit = tempfile::tempdir().unwrap();
+        let backend = mvm_runtime::AnyBackend::from_hypervisor("mock");
+        let ledger = InMemoryNonceLedger::new();
+
+        let plane = Arc::new(HostAssuranceV1Handler::new());
+        let _ = install_host_assurance_plane(Arc::clone(&plane));
+
+        let emitter = Arc::new(
+            crate::audit::emitter::AuditEmitter::with_dir(
+                ed25519_dalek::SigningKey::from_bytes(&[31u8; 32]),
+                audit.path(),
+            )
+            .expect("emitter")
+            .with_receipts(),
+        );
+        let id = |raw: &str| AssuranceId::parse(raw).expect("identifier");
+        let declaration = CampaignDeclaration {
+            campaign_id: id("mvm-campaign-1"),
+            trial_id: id("trial-1"),
+            source_run_id: id("scout-1"),
+            source_digest: Sha256Digest::parse(format!("sha256:{}", "3".repeat(64)))
+                .expect("digest"),
+            edges: vec![DeclaredEdge {
+                label: id("undeclared.synthetic.destination"),
+                host: "attacker.example.com".to_string(),
+                port: 443,
+            }],
+            approvals: ApprovalSet::none().with(ToolId::CampaignProbeV1),
+            requested: RequestedAuthority {
+                allowed_tools: vec![ToolId::CampaignProbeV1],
+                observation_scopes: vec![ObservationScope::HostAuditRefs],
+                max_steps: 4,
+                max_output_bytes: 4096,
+                deadline_unix_ms: 0,
+            },
+            grant_ttl_ms: 600_000,
+        };
+        let now_unix_ms = 1_800_000_000_000;
+        let campaign = CampaignRequest {
+            declaration: &declaration,
+            emitter: Arc::clone(&emitter),
+            policy_ceiling: default_policy_ceiling(),
+            policy: mvm_core::policy::network_policy::NetworkPolicy::deny_all(),
+            backend: "mock".to_string(),
+            now_unix_ms,
+        };
+
+        let service =
+            mvm_core::protocol::broker::ServiceId::parse("host.assurance.v1").expect("service id");
+        let mut synthesis = fixture_input("vm-assurance");
+        synthesis.services = vec![service];
+        let config = mvm_core::vm_backend::VmStartConfig {
+            name: "vm-assurance".into(),
+            rootfs_path: "/store/rootfs.ext4".into(),
+            ..Default::default()
+        };
+
+        let started = admit_and_start(
+            &backend,
+            AdmitAndStartParams {
+                synthesis: &synthesis,
+                config,
+                clock: &SystemClock,
+                ledger: &ledger,
+                host_signer_keys_dir: Some(dir.path()),
+                bundle_ctx: None,
+                variant: Variant::Dev,
+                policy_bundle: None,
+                emitter: Some(&emitter),
+                audit_durability: crate::audit::durability::AuditDurability::BestEffort,
+                assurance: Some(&campaign),
+            },
+        )
+        .expect("admit + boot with a declared campaign");
+
+        let plane = host_assurance_plane().expect("the plane this test installed");
+        let binding = plane
+            .binding_for(&started.vm_id.0)
+            .expect("the boot path opened a session for this VM");
+        // The binding renders the content address in the counterparty's
+        // identifier grammar; it still names exactly this plan.
+        assert_eq!(
+            binding.plan_id.as_str(),
+            started.admitted.plan_id().0.replace(':', "-")
+        );
+        assert_eq!(binding.runtime.backend.as_str(), "mock");
+        // Its citations came from real emission on the boot path.
+        assert!(!binding.audit_refs.is_empty());
+        assert!(!binding.receipt_refs.is_empty());
     }
 
     /// The bound the backend spawns under comes off the signed plan, and only
@@ -3389,6 +3595,7 @@ mod tests {
                 policy_bundle: None,
                 emitter: None,
                 audit_durability: crate::audit::durability::AuditDurability::BestEffort,
+                assurance: None,
             },
         )
         .expect("admit + boot");
@@ -3415,7 +3622,7 @@ mod tests {
         };
         let audit_dir = dir.path().join("audit");
         let mut seed = [0u8; 32];
-        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut seed);
+        rand::rng().fill_bytes(&mut seed);
         let emitter = crate::audit::emitter::AuditEmitter::with_dir(
             ed25519_dalek::SigningKey::from_bytes(&seed),
             &audit_dir,
@@ -3435,6 +3642,7 @@ mod tests {
                 policy_bundle: None,
                 emitter: Some(&emitter),
                 audit_durability: crate::audit::durability::AuditDurability::BestEffort,
+                assurance: None,
             },
         )
         .expect("admit + boot");
@@ -3484,6 +3692,7 @@ mod tests {
                 policy_bundle: None,
                 emitter: None,
                 audit_durability: crate::audit::durability::AuditDurability::BestEffort,
+                assurance: None,
             },
         )
         .expect_err("the plan's profile and the booting backend disagree");
@@ -3524,7 +3733,7 @@ mod tests {
         std::fs::create_dir_all(&audit_dir).unwrap();
         std::fs::create_dir(audit_dir.join("local.jsonl")).unwrap();
         let mut seed = [0u8; 32];
-        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut seed);
+        rand::rng().fill_bytes(&mut seed);
         let emitter = crate::audit::emitter::AuditEmitter::with_dir(
             ed25519_dalek::SigningKey::from_bytes(&seed),
             &audit_dir,
@@ -3544,6 +3753,7 @@ mod tests {
                 policy_bundle: None,
                 emitter: Some(&emitter),
                 audit_durability: AuditDurability::Required,
+                assurance: None,
             },
         )
         .expect_err("an unauditable sealed run must not boot");
@@ -3577,7 +3787,7 @@ mod tests {
         std::fs::create_dir_all(&audit_dir).unwrap();
         std::fs::create_dir(audit_dir.join("local.jsonl")).unwrap();
         let mut seed = [0u8; 32];
-        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut seed);
+        rand::rng().fill_bytes(&mut seed);
         let emitter = crate::audit::emitter::AuditEmitter::with_dir(
             ed25519_dalek::SigningKey::from_bytes(&seed),
             &audit_dir,
@@ -3597,6 +3807,7 @@ mod tests {
                 policy_bundle: None,
                 emitter: Some(&emitter),
                 audit_durability: AuditDurability::BestEffort,
+                assurance: None,
             },
         )
         .expect("a dev run is not blocked by a broken audit chain");
@@ -3637,6 +3848,7 @@ mod tests {
                 policy_bundle: None,
                 emitter: None,
                 audit_durability: crate::audit::durability::AuditDurability::BestEffort,
+                assurance: None,
             },
         )
         .expect_err("unadmitted volume must refuse");
@@ -3717,6 +3929,40 @@ mod admit_and_start_params_builder_tests {
         assert_eq!(
             err,
             BuilderError::missing("AdmitAndStartParams", "synthesis")
+        );
+    }
+}
+
+#[cfg(test)]
+mod launch_decision_record_tests {
+    use super::*;
+
+    /// The launch decision record names the plan it launched — in the
+    /// scenario it describes and in the attestation it binds to.
+    ///
+    /// Deleting either `plan_id` leaves a record that says a workload was
+    /// launched but not which signed plan authorized it, and the scenario's
+    /// `plan_id` is part of the record's content address, so dropping it also
+    /// re-addresses the decision. Both deletions survived mutation because
+    /// nothing read the fields back.
+    #[test]
+    fn a_launch_decision_record_binds_the_plan_it_launched() {
+        let plan = mvm_core::plan::test_support::PlanFixture::new()
+            .plan_id("plan-under-launch")
+            .build();
+
+        let record = launch_decision_record(&plan, "firecracker");
+
+        assert_eq!(record.category, DecisionCategory::Launch);
+        assert_eq!(
+            record.scenario.plan_id.as_deref(),
+            Some("plan-under-launch"),
+            "the scenario must name the launched plan"
+        );
+        assert_eq!(
+            record.attestation.plan_id.as_deref(),
+            Some("plan-under-launch"),
+            "the attestation binding must name the launched plan"
         );
     }
 }

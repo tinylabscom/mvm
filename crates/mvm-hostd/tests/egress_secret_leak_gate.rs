@@ -93,6 +93,7 @@ fn handed_placeholders_never_contain_the_secret_value() {
                 auth_type: AuthType::Bearer,
                 allowed_hosts: vec!["api.openai.com".into()],
                 sigv4: None,
+                provider: None,
             },
         )
         .unwrap();
@@ -119,6 +120,7 @@ fn handed_placeholders_never_contain_the_secret_value() {
         bindings: &bindings,
         resolver,
         forward_timeout_secs: 30,
+        proxy: None,
         redaction: mvm_core::policy::RedactionPolicy::default(),
         reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
         tls_intermediate: None,

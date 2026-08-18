@@ -371,7 +371,7 @@ impl HostAgentDaemon {
         registry
             .admit_capabilities(r.capability_bindings.clone())
             .context("load host-signed capability bindings")?;
-        register_bound_handlers(&mut registry, &r.services_bindings);
+        let _bound = register_bound_handlers(&mut registry, &r.services_bindings);
         let host_audit = mvm_core::protocol::broker::ServiceId::parse("host.audit.v1")
             .expect("host.audit.v1 is a valid ServiceId");
         if r.services_bindings.contains(&host_audit)

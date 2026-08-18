@@ -189,7 +189,7 @@ fn warn_node_deps(workload: &Workload, manifest_dir: &Path) {
 }
 
 fn resolve_mode(args: &Args) -> Result<Mode> {
-    if let Ok(env_mode) = std::env::var("MVM_SDK_MODE") {
+    if let Ok(env_mode) = std::env::var(mvm_sdk::env::MVM_SDK_MODE_ENV) {
         return parse_env_mode(&env_mode);
     }
     if args.dev {

@@ -74,9 +74,13 @@ use super::exec::{RunArgs, RunMode};
 /// Dispatch an SDK-mode `mvmctl run` invocation. Plan and Live both
 /// reach this entry now; `Record` is still refused at the
 /// `resolve_run_mode` layer.
-pub(in crate::commands) fn dispatch_sdk_mode(mode: RunMode, args: &RunArgs) -> Result<()> {
+pub(in crate::commands) fn dispatch_sdk_mode(
+    mode: RunMode,
+    args: &RunArgs,
+    sdk: &super::exec::SdkTransportArgs,
+) -> Result<()> {
     match mode {
-        RunMode::Plan => run_plan_mode(args),
+        RunMode::Plan => run_plan_mode(args, sdk),
         RunMode::Live => run_live_mode(args),
         RunMode::Record => unreachable!(
             "exec::resolve_run_mode refuses RunMode::Record before reaching dispatch; this is a \
@@ -138,8 +142,8 @@ fn run_live_mode(args: &RunArgs) -> Result<()> {
     }
     let status = cmd
         .arg(&script)
-        .env("MVM_SDK_MODE", "live")
-        .env("MVM_CLI_BIN", &mvmctl_bin)
+        .env(mvm_sdk::env::MVM_SDK_MODE_ENV, "live")
+        .env(mvm_sdk::env::MVM_CLI_BIN_ENV, &mvmctl_bin)
         .status()
         .with_context(|| {
             format!(
@@ -161,7 +165,7 @@ fn run_live_mode(args: &RunArgs) -> Result<()> {
     Ok(())
 }
 
-fn run_plan_mode(args: &RunArgs) -> Result<()> {
+fn run_plan_mode(args: &RunArgs, sdk: &super::exec::SdkTransportArgs) -> Result<()> {
     let script = extract_script_arg(args)?;
     let lang = script_language_from_path(&script).ok_or_else(|| {
         anyhow::anyhow!(
@@ -185,7 +189,7 @@ fn run_plan_mode(args: &RunArgs) -> Result<()> {
 
     eprintln!("recording sha256: {digest_hex}");
     refuse_embedded_secrets(&secret_findings)?;
-    require_acknowledged(&findings, &args.ack_divergence)?;
+    require_acknowledged(&findings, &sdk.ack_divergence)?;
 
     if workload.apps.is_empty() {
         bail!(
@@ -419,7 +423,7 @@ fn placeholder_image_sha(workload_id: &str, app_name: &str) -> String {
 mod tests {
     use super::*;
     use crate::commands::build::trace_secret_scan::scan_recording_for_secrets;
-    use crate::commands::vm::exec::{RunMode, RunProfile};
+    use crate::commands::vm::exec::RunProfile;
     use base64::Engine;
     use mvm_hostd::supervisor::secrets_scanner::SecretsScanner;
     use mvm_sdk::runtime::{Divergence, RecordedOp, RuntimeRecording, SandboxCreate};
@@ -553,37 +557,9 @@ mod tests {
 
     fn base_run_args() -> RunArgs {
         RunArgs {
-            network_mode: mvm_contract::plan::NetworkMode::default(),
-            manifest: None,
-            warm_pool_size: 0,
-            pty: false,
-            vm_name: None,
-            image: None,
-            runtime_pack: false,
-            net: false,
-            allow_host: Vec::new(),
-            cpus: 2,
-            cpu_limit: None,
-            grants_file: None,
-            memory: "512M".to_string(),
             profile: RunProfile::Standard,
-            agent_verb: Vec::new(),
-            mounts: Vec::new(),
-            env: Vec::new(),
             timeout: Some(60),
-            receipt: None,
-            json: false,
-            launch_plan: None,
-            mode: Some(RunMode::Plan),
-            dev: false,
-            prod: false,
-            dry_run: false,
-            argv: Vec::new(),
-            ack_divergence: Vec::new(),
-            stdin: Vec::new(),
-            healthcheck: None,
-            hypervisor: None,
-            host_service: Vec::new(),
+            ..Default::default()
         }
     }
 

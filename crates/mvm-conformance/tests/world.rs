@@ -117,6 +117,15 @@ pub struct CliWorld {
     pub sdk_output: Option<Output>,
     /// SDK fixture surface most recently exercised (`decorator` or `runtime`).
     pub sdk_surface: Option<String>,
+    /// `mvmctl` argv the recording double captured, one entry per invocation,
+    /// keyed by the language whose fixture produced it.
+    pub sdk_recorded_argv: BTreeMap<String, Vec<Vec<String>>>,
+
+    /// Per-language JSON emitted by the Tier A constructor fixtures,
+    /// keyed by language, for comparison against the golden document.
+    pub sdk_ctor_docs: BTreeMap<String, String>,
+    /// Scenario-local directory holding the recording double's argv logs.
+    pub sdk_argv_log_dir: Option<tempfile::TempDir>,
     /// Result of exercising the signed-plan share gate with an attachment the
     /// plan did not authorize.
     pub volume_admission_result: Option<Result<(), String>>,
@@ -390,6 +399,20 @@ pub struct CliWorld {
     pub approval_state: Option<mvm_contract::policy::approval::ApprovalState>,
     /// Approval state reconstructed after a simulated restart.
     pub approval_restarted_state: Option<mvm_contract::policy::approval::ApprovalState>,
+    /// Scratch dir for the one-transport scenarios' identity drives.
+    pub one_transport_dir: Option<tempfile::TempDir>,
+    /// Identity drives minted during a one-transport scenario, in order.
+    pub one_transport_drives: Vec<std::path::PathBuf>,
+    /// The material behind each of those drives.
+    pub one_transport_material: Vec<mvm_vmm::host::flowmux_identity::FlowMuxIdentityMaterial>,
+    /// Raw bytes of the drive the guest reader last inspected.
+    pub one_transport_image: Option<Vec<u8>>,
+    /// Raw bytes of the inheritable identity the host last persisted.
+    pub one_transport_persisted: Option<Vec<u8>>,
+    /// `(egress_mode, carries_guest_key)` for each endpoint config built.
+    pub one_transport_modes: Vec<(String, bool)>,
+    /// Per-VM state dir for the readiness scenarios.
+    pub one_transport_state: Option<tempfile::TempDir>,
 }
 
 /// What a warm-claim `When` step observed from a `WorkloadRunner::claim_standby`

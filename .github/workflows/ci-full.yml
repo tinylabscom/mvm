@@ -152,6 +152,9 @@ jobs:
       - name: host-binaries manifest parity (Plan 115 / ADR-065)
         run: cargo run -p xtask -- check-mvm-host-binaries-sync
 
+      - name: release ships every spawnable per-VM binary
+        run: cargo run -p xtask -- check-per-vm-host-binaries-sync
+
       # security.yml runs on tags + cron, so a step pointing at a renamed
       # crate is invisible on a PR and dead until someone reads a nightly.
       # This resolves those paths here, where the rename happens.
@@ -301,6 +304,13 @@ jobs:
       - name: Run E2E tests
         # Keep this lane on end-to-end smoke targets that compile
         # without live microVM host state.
+        #
+        # `runtime_boot_bench` is a COMPILE check here and nothing more. It
+        # self-skips unless `MVM_RUNTIME_BOOT_BENCH=1`, which this lane
+        # deliberately does not set, so it asserts nothing about boot latency.
+        # That assertion lives in ci.yml's `boot-latency` lane, which supplies
+        # a real image and /dev/kvm. Said plainly because the bare target name
+        # reads like latency coverage and is not.
         run: cargo test --test smoke_run_json_receipt --test runtime_boot_bench
 
   sdk-release-dry-run:
@@ -673,7 +683,7 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: macos-latest
     # `cargo build --all-targets` builds the Rust-native per-VM host bins
-    # (workspace `[[bin]]`s in mvm-vm-host) — no Swift build step.
+    # (workspace `[[bin]]`s in mvm-hostd) — no Swift build step.
     steps:
       - uses: actions/checkout@v6
 
@@ -809,7 +819,11 @@ jobs:
         with:
           filters: |
             spawn:
-              - 'crates/mvm-host-vm-init/**'
+              # Same absorbed-path bug the builder VM lane above already
+              # fixed: mvm-host-vm-init is a [[bin]] of mvm-build, so the
+              # standalone crate directory this named cannot exist and the
+              # filter never matched.
+              - 'crates/mvm-build/src/bin/mvm-host-vm-init/**'
 
       - name: Install Rust toolchain
         if: steps.filter.outputs.spawn == 'true' || github.ref == 'refs/heads/main'

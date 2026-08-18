@@ -77,19 +77,25 @@ enum SocksRequest {
     UdpAssociate,
 }
 
+/// Finish a SOCKS5 negotiation whose version byte the caller has already
+/// consumed and matched. Only [`read_route`] may call this, and only on that
+/// branch — the stream position is the contract between them.
 async fn negotiate_request<S>(stream: &mut S) -> std::io::Result<SocksRequest>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     let invalid = |m: &str| std::io::Error::new(std::io::ErrorKind::InvalidData, m.to_string());
 
-    // Greeting: VER, NMETHODS, METHODS...
-    let mut head = [0u8; 2];
-    stream.read_exact(&mut head).await?;
-    if head[0] != SOCKS5 {
-        return Err(invalid("socks: not version 5"));
-    }
-    let mut methods = vec![0u8; head[1] as usize];
+    // Greeting, resumed *after* the VER byte: NMETHODS, METHODS...
+    //
+    // `read_route` has already read and matched VER to dispatch here, so
+    // re-reading two bytes would take NMETHODS as the version and the first
+    // method as the count. For curl's `05 01 00` that reads as version 1 and
+    // rejects a perfectly good greeting — while the client, still waiting on a
+    // method reply, sees whatever comes next as a malformed SOCKS5 response.
+    let mut nmethods = [0u8; 1];
+    stream.read_exact(&mut nmethods).await?;
+    let mut methods = vec![0u8; nmethods[0] as usize];
     stream.read_exact(&mut methods).await?;
     let method = select_method(&methods);
     stream.write_all(&[SOCKS5, method]).await?;
@@ -395,6 +401,82 @@ where
 mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    /// The exact bytes curl puts on the wire for `socks5h://…`: a greeting of
+    /// VER=5, NMETHODS=1, METHOD=no-auth, then a CONNECT for a domain.
+    ///
+    /// Nothing drove `read_route` with a real greeting before, which is how a
+    /// double-read of the version byte reached a builder VM: the guest logged
+    /// `socks: not version 5` and curl logged `Received invalid version in
+    /// initial SOCKS5 response`, neither of which names the offset.
+    #[tokio::test]
+    async fn read_route_accepts_a_real_socks5_connect_greeting() {
+        let (mut client, mut server) = tokio::io::duplex(256);
+        let writer = tokio::spawn(async move {
+            client
+                .write_all(&[SOCKS5, 1, METHOD_NO_AUTH])
+                .await
+                .unwrap();
+            let host = b"cache.nixos.org";
+            let mut req = vec![SOCKS5, CMD_CONNECT, 0, ATYP_DOMAIN, host.len() as u8];
+            req.extend_from_slice(host);
+            req.extend_from_slice(&443u16.to_be_bytes());
+            client.write_all(&req).await.unwrap();
+            // Read back the method reply the server owes us, so the assertion
+            // below is about a completed negotiation rather than half of one.
+            let mut method_reply = [0u8; 2];
+            client.read_exact(&mut method_reply).await.unwrap();
+            method_reply
+        });
+
+        let route = read_route(&mut server).await.expect("a valid greeting");
+        assert!(
+            matches!(&route, ProxyRoute::Socks { target } if target == "cache.nixos.org:443"),
+            "unexpected route: {route:?}"
+        );
+        assert_eq!(writer.await.unwrap(), [SOCKS5, METHOD_NO_AUTH]);
+    }
+
+    #[tokio::test]
+    async fn read_route_accepts_a_socks5_udp_associate() {
+        let (mut client, mut server) = tokio::io::duplex(256);
+        tokio::spawn(async move {
+            client
+                .write_all(&[SOCKS5, 1, METHOD_NO_AUTH])
+                .await
+                .unwrap();
+            let mut req = vec![SOCKS5, CMD_UDP_ASSOCIATE, 0, ATYP_IPV4];
+            req.extend_from_slice(&[0, 0, 0, 0]);
+            req.extend_from_slice(&0u16.to_be_bytes());
+            client.write_all(&req).await.unwrap();
+            let mut method_reply = [0u8; 2];
+            client.read_exact(&mut method_reply).await.unwrap();
+        });
+
+        let route = read_route(&mut server).await.expect("a valid greeting");
+        assert!(matches!(route, ProxyRoute::SocksUdpAssociate), "{route:?}");
+    }
+
+    /// An HTTP proxy client on the same port must still route as HTTP — the
+    /// version-byte read is a dispatch, not a filter.
+    #[tokio::test]
+    async fn read_route_still_routes_http_connect() {
+        let (mut client, mut server) = tokio::io::duplex(512);
+        tokio::spawn(async move {
+            client
+                .write_all(
+                    b"CONNECT cache.nixos.org:443 HTTP/1.1\r\nHost: cache.nixos.org:443\r\n\r\n",
+                )
+                .await
+                .unwrap();
+        });
+
+        let route = read_route(&mut server).await.expect("a valid CONNECT");
+        assert!(
+            matches!(&route, ProxyRoute::HttpConnect { target } if target == "cache.nixos.org:443"),
+            "unexpected route: {route:?}"
+        );
+    }
 
     #[test]
     fn select_method_prefers_no_auth() {

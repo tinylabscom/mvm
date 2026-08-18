@@ -22,7 +22,10 @@ impl TopLevelCommand for Commands {
             #[cfg(feature = "builder-vm")]
             Commands::BuilderShellJob(a) => builder_shell_job::run(cli, a, cfg),
             Commands::Explain(a) => vm::explain::run(a),
-            Commands::Run(a) => vm::exec::run_secure(cli, a, cfg),
+            Commands::Run(a) => vm::exec::run_transient(cli, a, cfg),
+            Commands::Bench(a) => bench::run(a),
+            Commands::Plugin(a) => plugin::run(a),
+            Commands::Completions(a) => completions::run(a),
             Commands::SdkNoVm(a) => vm::sdk_no_vm::run(&a),
             Commands::Doctor(a) => env::doctor::run(cli, a, cfg),
             Commands::Dashboard(a) => dashboard::run(a),

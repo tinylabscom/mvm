@@ -83,6 +83,28 @@ mvm.app({
 The IR types (`Workload`, `App`, `Resources`, …) are re-exported, so
 `import { Workload } from "@runmvm/mvm"` works directly.
 
+### Call schemas
+
+`entrypoint_function` takes optional `args_schema` and `return_schema`:
+
+```ts
+mvm.entrypoint_function({
+  module: "./handlers.js",
+  function: "greet",
+  args_schema: { type: "object", properties: { name: { type: "string" } } },
+  return_schema: { type: "string" },
+});
+```
+
+If you have used the Python SDK you may be looking for `derive_schema`,
+which builds these from a function's type hints. **TypeScript has no
+equivalent, and cannot.** Types are erased before the program runs, so by
+the time a decorator could inspect your function the annotations no
+longer exist — `(name: string) => string` and `(name: any) => any` are
+the same value at runtime. This is a property of the language rather
+than a gap in the SDK, so pass the schema explicitly. Both fields are
+optional; omit them and the host derives what it can at compile time.
+
 ## Runtime SDK
 
 `Sandbox` has explicit `record` and `live` modes. In live mode it uses

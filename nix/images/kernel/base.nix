@@ -380,6 +380,26 @@ let
     "DEBUG_INFO_DWARF5"
     "DEBUG_INFO_DWARF4"
     "DEBUG_INFO_BTF"
+
+    # Kernel debug instrumentation a sealed workload guest has no reader for:
+    # nothing collects a stack-depth report out of it, and a W+X finding there
+    # would be a fact about the image we built rather than about anything the
+    # guest did.
+    #
+    # This buys size, NOT boot time, and the distinction is recorded here
+    # because the console log makes it look otherwise. Their messages sit on
+    # the two largest inter-timestamp gaps of an x86_64 guest boot — `x86/mm:
+    # Checked W+X mappings` twice for ~71 ms, `used greatest stack depth` for
+    # ~43 ms — which reads as a third of guest boot waiting to be reclaimed.
+    # It is not. Measured on the Linux/Firecracker host, 12 launches per arm:
+    # dispatch window 495.5 ms with them on and 504.0 ms with them off,
+    # `driver_boot` 435.7 ms against 436.8 ms. No change beyond noise.
+    #
+    # The gap before a console line is not the cost of the work that line
+    # names; on a serial console it is dominated by emitting the output before
+    # it. Do not size a kernel change from those gaps — measure the launch.
+    "DEBUG_WX"
+    "DEBUG_STACK_USAGE"
   ]
   ++ pkgs.lib.optionals (kernelArch == "x86_64") [
     # x86 defconfig carries physical-PC, laptop, and foreign-hypervisor
@@ -788,7 +808,7 @@ let
       extraDisables ? [ ],
       requiredExtraDisables ? [ ],
     }:
-    pkgs.linuxManualConfig {
+    (pkgs.linuxManualConfig {
       src = kernelSourceTree;
       version = kernelVersion;
       modDirVersion = kernelVersion;
@@ -796,7 +816,37 @@ let
         inherit extraEnables extraDisables requiredExtraDisables;
       };
       allowImportFromDerivation = false;
-    };
+    }).overrideAttrs
+      (old: pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isx86_64 {
+        # nixpkgs installs only the compressed image: on x86_64 that is
+        # `bzImage`, and nothing here ever emitted an ELF. Every consumer then
+        # copied the bzImage to a file named `vmlinux`, which is the name
+        # Firecracker's loader is documented against — and its x86_64 loader
+        # takes an uncompressed ELF and nothing else. A release built this way
+        # publishes a kernel that fails with "Invalid Elf magic number" before
+        # init runs, which is what v0.17.0 shipped.
+        #
+        # The ELF is not lost, only compressed inside the bzImage, and the
+        # kernel tree ships the extractor for exactly this. Emit it beside the
+        # bzImage so the format is available rather than inferred from a name.
+        nativeBuildInputs = (old.nativeBuildInputs or [ ]) ++ [
+          pkgs.gzip
+          pkgs.xz
+          pkgs.lz4
+          pkgs.zstd
+          pkgs.lzop
+          pkgs.binutils
+        ];
+        postInstall = (old.postInstall or "") + ''
+          bash ${kernelSourceTree}/scripts/extract-vmlinux "$out/bzImage" > "$out/vmlinux"
+          magic=$(od -An -tx1 -N4 "$out/vmlinux" | tr -d ' \n')
+          if [ "$magic" != "7f454c46" ]; then
+            echo "ERROR: extract-vmlinux did not yield an ELF (magic=0x$magic)." >&2
+            echo "Firecracker's x86_64 loader takes an uncompressed ELF vmlinux only." >&2
+            exit 1
+          fi
+        '';
+      });
 
 in
 {

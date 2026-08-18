@@ -109,7 +109,6 @@ tempfile.workspace = true
 thiserror.workspace = true
 toml.workspace = true
 tracing.workspace = true
-tokio = { workspace = true, features = ["rt-multi-thread", "sync"] }
 # `builder_protocol::{HostVmRequest,HostVmResponse}`
 # carry a `JobId(Uuid)` to disambiguate concurrent dispatches over
 # the persistent VM channel. Existing mvm-core / mvm-cli call sites
@@ -160,7 +159,7 @@ base64.workspace = true
 # keypairs for round-trip tests. ed25519-dalek's
 # `SigningKey::generate` takes any `CryptoRng + RngCore`; the
 # concrete `OsRng` lives in `rand`.
-rand = "0.8"
+rand.workspace = true
 # Builder-daemon readiness-probe tests bind a real UnixListener under a
 # temp dir to drive `serve_connection` end-to-end.
 tempfile.workspace = true

@@ -168,15 +168,11 @@ fn build_manifest(
         )
     })?;
 
-    // An `image`-source manifest selects an OCI image, not a flake. The
-    // image build path is not wired yet, so fail closed rather than
-    // silently building the default "." flake for an image manifest.
-    if manifest.is_image_source() {
-        anyhow::bail!(
-            "manifest selects an `image` source ({:?}); `build` only handles \
-             flake sources today — image-backed builds are not wired yet",
-            manifest.image.as_deref().unwrap_or_default()
-        );
+    // An `image`-source manifest selects an OCI image, not a flake, and takes
+    // the other arm — it does not fall through to building the default "."
+    // flake.
+    if let Some(image_ref) = manifest.image.clone() {
+        return build_manifest_from_image(&manifest, &canonical, &image_ref, json, mode);
     }
 
     // Resolve flake "." relative to the manifest's parent directory so a
@@ -287,6 +283,109 @@ fn build_manifest(
         ui::info(&format!("  Slot:     {}", persisted.manifest_hash));
         ui::info(&format!("  Revision: {}", revision.revision_hash));
         ui::info(&format!("\nRun with: mvmctl up {}", canonical.display()));
+    }
+
+    Ok(())
+}
+
+/// Build a slot from an `image`-source manifest.
+///
+/// Materializes the OCI reference through the same path a `run --image` boots
+/// through, then installs the result as a slot revision with the same layout
+/// the flake arm produces. What the two arms share is deliberate: after this
+/// returns, `--manifest <path>` cannot tell which one built the slot.
+fn build_manifest_from_image(
+    manifest: &Manifest,
+    canonical: &std::path::Path,
+    image_ref: &str,
+    json: bool,
+    mode: mvm_build::pipeline::BuildMode,
+) -> Result<()> {
+    if json {
+        PhaseEvent::new("build", "manifest", "started")
+            .with_message(&format!(
+                "manifest={} image={}",
+                canonical.display(),
+                image_ref
+            ))
+            .emit();
+    } else {
+        ui::step(
+            1,
+            2,
+            &format!(
+                "Building manifest {} (image={})",
+                canonical.display(),
+                image_ref
+            ),
+        );
+    }
+
+    let backend = mvm_runtime::backend::AnyBackend::auto_select()
+        .name()
+        .to_string();
+    let persisted =
+        PersistedManifest::from_manifest(manifest, canonical, &backend, Provenance::current())?;
+
+    let kernel = super::super::env::builder_vm::ensure_workload_kernel()
+        .context("resolving the workload kernel for an image-backed build")?;
+
+    // Keyed by the slot, not by a machine name: the artifact belongs to the
+    // manifest, and two machines booting the same slot must not each
+    // re-materialize it.
+    let cache_key = format!("slot-{}", persisted.manifest_hash);
+    let rootfs = tokio::runtime::Runtime::new()
+        .context("starting the runtime for the image pull")?
+        .block_on(mvm_client::local::materialize_image_rootfs(
+            image_ref, &cache_key,
+        ))
+        .with_context(|| format!("materializing {image_ref}"))?;
+
+    let revision = match mvm_runtime::vm::template::lifecycle::template_build_from_image(
+        &persisted,
+        &mvm_runtime::vm::template::lifecycle::ImageBuildSources {
+            rootfs,
+            kernel: std::path::PathBuf::from(&kernel),
+            image_ref: image_ref.to_string(),
+        },
+        mode,
+    ) {
+        Ok(r) => r,
+        Err(e) => {
+            if json {
+                PhaseEvent::new("build", "manifest", "failed")
+                    .with_error(&format!("{e:#}"))
+                    .emit();
+            }
+            audit_build_error("manifest", &persisted.manifest_path, &e);
+            return Err(e);
+        }
+    };
+
+    audit_build_ok(
+        "manifest",
+        &persisted.manifest_path,
+        &persisted.manifest_hash,
+        &revision.revision_hash,
+    );
+
+    if json {
+        PhaseEvent::new("build", "manifest", "completed")
+            .with_message(&format!(
+                "manifest={} slot={} revision={}",
+                canonical.display(),
+                persisted.manifest_hash,
+                revision.revision_hash
+            ))
+            .emit();
+    } else {
+        ui::step(2, 2, "Build complete");
+        ui::info(&format!("  Slot:     {}", persisted.manifest_hash));
+        ui::info(&format!("  Revision: {}", revision.revision_hash));
+        ui::info(&format!(
+            "\nRun with: mvmctl machine run --manifest {}",
+            canonical.display()
+        ));
     }
 
     Ok(())

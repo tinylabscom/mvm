@@ -1,5 +1,8 @@
 # Plan 331 — Unblocked closeout batch
 
+Backing: preview
+Validation: none
+
 **Status:** IN PROGRESS — opened 2026-08-14
 **Tracks:** #2256 (#2107 closed by PR #2475)
 **Parent:** `specs/plans/300-open-issue-closeout.md` Phases 2 and 5

@@ -1,5 +1,56 @@
 # Non-Nested aarch64 `machine run` Witness Plan
 
+> **SUPERSEDED (2026-08-18) for everything except the hardware witness itself.**
+> The hermetic half of this plan has shipped; what remains is one run on real
+> hardware, and the recipe below is still the recipe. Read this section first,
+> then the original plan unchanged beneath it.
+>
+> **Hardware is no longer the blocker.** A Raspberry Pi 4 Model B (8 GB, Debian
+> 13, kernel 6.18) is available at `rpi1.local` and is a genuine non-nested
+> aarch64 KVM host: `CPU(s) started at EL2`, `Hyp nVHE mode initialized
+> successfully`, `KVM_CREATE_VM` returns a live fd, and `/dev/kvm` is already
+> read-write for the login user. Firecracker v1.14.1 boots a guest to userspace
+> there in **0.28 s** and powers down cleanly.
+>
+> **Settled on that hardware, first time non-nested:**
+>
+> - `console=ttyS0` is correct for Firecracker on aarch64. G1 was previously
+>   confirmed only under nested Lima; it now holds on real silicon.
+> - **GICv2 is a non-issue.** The Pi 4 carries a GIC-400, not a GICv3. It was
+>   an open risk; it is not a blocker.
+> - `PF_VSOCK registered` in the guest — the transport the nested attempt died
+>   on is present.
+> - `mvmctl doctor` on the Pi reports platform OK (Linux with KVM), kvm OK, and
+>   resolves the workload backend to Firecracker.
+> - The cross-build recipe works: `cargo zigbuild --release --target
+>   aarch64-unknown-linux-gnu` for `mvmctl`, and `-p mvm-hostd` for the
+>   `PER_VM_HOST_BINARIES` set.
+>
+> **What now blocks the witness is not hardware — it is two supply problems,
+> both filed:**
+>
+> - **#2675** — the published-kernel fetch derives its release tag from the
+>   crate version, so it points at `v0.18.0`, which has never been released.
+>   `kernel-build.yml` has also never run on a tag push, so only `v0.16.0`
+>   carries `vmlinux-aarch64-workload` at all. A Pi user following
+>   `machine run --image` gets a hard 404.
+> - **#2676** — the macOS HVF builder fails with an undiagnosable `BadKernel`,
+>   so a signed `.mvmpkg` cannot be built locally. Aux-binary staleness was
+>   checked and **ruled out**; the supervisor was fresh and no source was newer.
+>
+> **Shipped since this plan was written**, all of which this witness depends on:
+> #2658 (the release tarball now carries every per-VM binary `mvmctl` spawns —
+> the gap this plan hit as "the guest needs the full aarch64 host-side runtime"),
+> #2664 (`machine run --image` no longer panics on a fresh `MVM_HOME`), #2679
+> (a foreign-arch bundle is refused at boot and at admission), and #2682 (the
+> workspace suite runs natively on aarch64 in CI).
+>
+> One correction to the observability assumption: the Pi has **no USB-TTL serial
+> adapter and no HDMI attached**, so a bare-metal or console-only test there is
+> blind. `machine run` over SSH is fine; anything that talks only to a UART is
+> not.
+
+
 > **For agentic workers:** Steps use checkbox (`- [ ]`) syntax for tracking. This
 > is a short execution plan, not a build-out — the code is already shipped; what
 > is missing is one run on hardware the dev Mac cannot provide.

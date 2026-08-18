@@ -24,69 +24,12 @@
 //! - `list` walks `~/.mvm/vms/*/libkrun.pid`.
 
 use anyhow::{Context, Result, anyhow, bail};
-use libkrun_sys::{
-    BridgeRestartPolicy, KrunContext, SupervisorAttachConfig, SupervisorBaseConfig,
-    SupervisorConfig,
-};
+use libkrun_sys::{BridgeRestartPolicy, KrunContext, SupervisorAttachConfig, SupervisorBaseConfig};
 use mvm_core::config::vm_console_log;
 use mvm_core::kernel_format::KernelFormat;
 use mvm_core::vm_backend::{StandbyClaim, StandbyError, StandbySpec, VmStartConfig};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
-
-use mvm_vmm::host::network_endpoint_spawn::EndpointGuard;
-
-/// Spawn the per-VM egress endpoint for libkrun workloads. Secret-bound runs
-/// get the WireRequest substitution path; secret-free runs can opt into the
-/// raw vsock relay when the resolved policy allows egress. Deny-all,
-/// secret-free runs keep the endpoint defused because the guest will not be
-/// told to start the egress client.
-pub fn spawn_libkrun_egress_endpoint_if_needed(
-    vm_name: &str,
-    state_dir: &Path,
-    config_tenant: &str,
-    network_policy: &mvm_core::network_policy::NetworkPolicy,
-) -> Result<EndpointGuard> {
-    use mvm_vmm::host::network_endpoint_spawn::{
-        EndpointTransport, SubstitutionSpawnParams, spawn_network_endpoint,
-    };
-    let default_redaction = mvm_core::policy::RedactionPolicy::default();
-    let decoded = mvm_vmm::host::egress_shared::decode_plan_secrets_from_state(state_dir)?;
-    let (secrets, redaction, tenant): (&[_], &mvm_core::policy::RedactionPolicy, &str) =
-        match &decoded {
-            Some((secrets, redaction, tenant)) => (secrets.as_slice(), redaction, tenant.as_str()),
-            None => (
-                &[],
-                &default_redaction,
-                if config_tenant.is_empty() {
-                    "local"
-                } else {
-                    config_tenant
-                },
-            ),
-        };
-    if secrets.is_empty() && !network_policy.allows_egress() {
-        return Ok(EndpointGuard::defused());
-    }
-    spawn_network_endpoint(SubstitutionSpawnParams {
-        vm_name,
-        state_dir,
-        tenant,
-        secrets,
-        redaction,
-        transport: EndpointTransport::Uds {
-            path: mvm_core::config::vm_vsock_port_socket(vm_name, mvm_agentd::vsock::EGRESS_PORT),
-        },
-        terminator_listen: None,
-        tls_intermediate: None,
-        network_policy: Some(network_policy),
-        raw_egress: secrets.is_empty(),
-        resolver_remote: None,
-        binding_store_dir: None,
-        flowmux_identity: None,
-    })?;
-    Ok(EndpointGuard::new(vm_name))
-}
 
 /// Kernel cmdline token that turns on the in-guest vsock egress client.
 /// Emitted only when outbound egress is allowed and the workload carries no
@@ -569,54 +512,6 @@ pub fn parse_plan_and_bundle(
         None => None,
     };
     Ok((plan, bundle))
-}
-
-pub fn build_supervisor_config(
-    config: &VmStartConfig,
-    state_dir: &Path,
-) -> Result<SupervisorConfig> {
-    let kernel = config
-        .kernel_path
-        .as_deref()
-        .ok_or_else(|| anyhow!("libkrun backend requires a kernel path"))?;
-    let (kernel, kernel_format) = libkrun_kernel_for_host(kernel)?;
-    let vcpus = u8::try_from(config.cpus.clamp(1, u32::from(u8::MAX))).unwrap_or(u8::MAX);
-    let cmdline = build_guest_cmdline(config, state_dir);
-    let krun =
-        build_workload_krun_context(config, &kernel, kernel_format, vcpus, &cmdline, state_dir)?;
-    let substrate = resolve_audit_substrate(config)?;
-    let (plan, bundle) = parse_plan_and_bundle(config)?;
-
-    Ok(SupervisorConfig {
-        krun,
-        exclusive_image_lock: None,
-        vm_state_dir: state_dir.to_string_lossy().into_owned(),
-        pid_file_name: None,
-        tenant_id: substrate.tenant_id,
-        audit_dir: substrate.audit_dir,
-        gateway_audit_socket: substrate.gateway_audit_socket,
-        gateway_events_socket: substrate.gateway_events_socket,
-        signing_key_path: substrate.signing_key_path,
-        plan,
-        bundle,
-        // Always carry the resolved egress policy so the bridge enforces it
-        // on the no-bundle path (deny-all included — that's the enforced
-        // default). Inert for the legacy non-bridge path (it only spawns the
-        // bridge when admitted), and superseded by `bundle` when one resolves.
-        network_policy: Some(
-            serde_json::to_value(&config.network_policy)
-                .map_err(|e| anyhow!("serialize VmStartConfig.network_policy: {e}"))?,
-        ),
-        // Only `HardFail` is
-        // implemented today. Defaulting here keeps the producer site
-        // explicit while a future change can introduce policy-driven
-        // selection.
-        bridge_restart_policy: libkrun_sys::BridgeRestartPolicy::HardFail,
-        transparent_terminator_port: Some(
-            mvm_vmm::host::egress_redirect::terminator_port_for_vm_name(&config.name),
-        ),
-        egress_relay_socket: None,
-    })
 }
 
 pub fn supervisor_config_dump_path(state_dir: &Path) -> PathBuf {

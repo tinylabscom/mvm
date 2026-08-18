@@ -30,7 +30,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use hmac::{Hmac, KeyInit, Mac};
-use rand::RngCore;
+use rand::Rng;
 use secrecy::SecretBox;
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
@@ -171,7 +171,7 @@ pub fn load_or_init_key(path: &Path) -> Result<SecretBox<[u8; HMAC_KEY_BYTES]>> 
 
     if !path.exists() {
         let mut buf = [0u8; HMAC_KEY_BYTES];
-        rand::thread_rng().fill_bytes(&mut buf);
+        rand::rng().fill_bytes(&mut buf);
         let mut f = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -613,7 +613,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("snapshot.key");
         let mut data = [0u8; HMAC_KEY_BYTES];
-        rand::thread_rng().fill_bytes(&mut data);
+        rand::rng().fill_bytes(&mut data);
         std::fs::write(&path, data).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
         let _ = load_or_init_key(&path).unwrap();

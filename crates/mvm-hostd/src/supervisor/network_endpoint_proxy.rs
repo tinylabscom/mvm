@@ -41,7 +41,7 @@ use crate::supervisor::secret_audit::{
     emit_rewrite_proof, emit_secret_placeholder_dropped, emit_secret_redacted,
     emit_secret_substituted,
 };
-use crate::supervisor::tools::http_hardening::hardened_client_builder;
+use crate::supervisor::tools::http_hardening::hardened_client_builder_via;
 pub use mvm_contract::substitution::{
     PrepareError, PreparedRequest, ProxyRequest, SubstitutionDriver,
     prepare_request as prepare_request_core,
@@ -424,6 +424,74 @@ pub(crate) fn redaction_active(action: &mvm_core::policy::RedactionAction) -> bo
 }
 
 #[cfg(test)]
+mod redaction_category_tests {
+    use super::redaction_categories;
+    use crate::supervisor::network::stages::RedactionHits;
+
+    /// A counted channel that did not fire must not be named.
+    ///
+    /// Each of `entropy`, `names` and `detector_failures` is a `> 0` guard.
+    /// Against `>= 0` every entry would name every channel, and a
+    /// `secret.redacted` line that always says the same thing carries no
+    /// information about the request that produced it.
+    #[test]
+    fn a_zero_count_names_no_category() {
+        let hits = RedactionHits {
+            secrets: vec!["aws_key"],
+            ..Default::default()
+        };
+        assert_eq!(redaction_categories(&hits), vec!["aws_key".to_string()]);
+    }
+
+    #[test]
+    fn entropy_is_named_only_when_it_fired() {
+        let mut hits = RedactionHits::default();
+        assert!(!redaction_categories(&hits).contains(&"entropy".to_string()));
+        hits.entropy = 1;
+        assert!(redaction_categories(&hits).contains(&"entropy".to_string()));
+    }
+
+    #[test]
+    fn names_is_named_only_when_it_fired() {
+        let mut hits = RedactionHits::default();
+        assert!(!redaction_categories(&hits).contains(&"name".to_string()));
+        hits.names = 3;
+        assert!(redaction_categories(&hits).contains(&"name".to_string()));
+    }
+
+    #[test]
+    fn a_detector_failure_is_named_only_when_it_fired() {
+        let mut hits = RedactionHits::default();
+        assert!(!redaction_categories(&hits).contains(&"detector_failure".to_string()));
+        hits.detector_failures = 1;
+        assert!(redaction_categories(&hits).contains(&"detector_failure".to_string()));
+    }
+
+    /// Sorted and de-duplicated, so the joined label is stable for a reader
+    /// diffing two entries rather than dependent on detector order.
+    #[test]
+    fn categories_are_sorted_and_deduplicated() {
+        let hits = RedactionHits {
+            secrets: vec!["zeta", "alpha", "alpha"],
+            pii: vec!["email"],
+            entropy: 2,
+            names: 1,
+            detector_failures: 0,
+        };
+        assert_eq!(
+            redaction_categories(&hits),
+            vec![
+                "alpha".to_string(),
+                "email".to_string(),
+                "entropy".to_string(),
+                "name".to_string(),
+                "zeta".to_string(),
+            ]
+        );
+    }
+}
+
+#[cfg(test)]
 mod redaction_gate_tests {
     use super::redaction_active;
     use mvm_core::policy::{PiiPolicy, RedactionAction, SecretAction};
@@ -444,6 +512,68 @@ mod redaction_gate_tests {
             ..Default::default()
         };
         assert!(!redaction_active(&action));
+    }
+
+    /// The all-off action the single-channel cases start from.
+    fn all_channels_off() -> RedactionAction {
+        RedactionAction {
+            pii: PiiPolicy {
+                mode: Some("disabled".into()),
+                categories: Vec::new(),
+            },
+            secrets: SecretAction::Audit,
+            ..Default::default()
+        }
+    }
+
+    // `redaction_active` is a four-way OR, and the two cases above are
+    // all-on and all-off — which an AND satisfies identically. So neither
+    // test could tell the gate from its own inversion, and a mutation to
+    // `&&` survived: a request protected by exactly one channel would have
+    // been reported as carrying no protection at all, and the fail-closed
+    // scan gate above skipped.
+    //
+    // Any single channel has to arm it, because that is the fail-safe
+    // direction — the gate asks "is anything being redacted", not "is
+    // everything".
+
+    #[test]
+    fn secrets_alone_arms_the_gate() {
+        let mut action = all_channels_off();
+        action.secrets = SecretAction::Redact;
+        assert!(redaction_active(&action));
+    }
+
+    #[test]
+    fn pii_alone_arms_the_gate() {
+        let mut action = all_channels_off();
+        action.pii.mode = Some("curated".into());
+        assert!(redaction_active(&action));
+    }
+
+    #[test]
+    fn entropy_alone_arms_the_gate() {
+        let mut action = all_channels_off();
+        action.entropy = mvm_core::policy::EntropyMode::Audit {
+            min_bits_per_char: 3.5,
+            min_run_len: 20,
+        };
+        assert!(redaction_active(&action));
+    }
+
+    #[test]
+    fn names_alone_arms_the_gate() {
+        let mut action = all_channels_off();
+        action.names = mvm_core::policy::NameMode::Audit;
+        assert!(redaction_active(&action));
+    }
+
+    #[test]
+    fn an_absent_pii_mode_arms_the_gate() {
+        // `None` is not `Some("disabled")`, so it counts as protection.
+        let mut action = all_channels_off();
+        action.pii.mode = None;
+        assert!(redaction_active(&action));
     }
 }
 
@@ -470,6 +600,75 @@ pub(crate) fn fail_closed_reason(
         Some("fail_closed_oversize")
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod fail_closed_gate_tests {
+    use super::fail_closed_reason;
+    use mvm_core::policy::{DEFAULT_BODY_CAP_BYTES, PiiPolicy, RedactionAction, SecretAction};
+
+    /// Redaction on, so the gate is reached at all.
+    fn armed() -> RedactionAction {
+        RedactionAction::default()
+    }
+
+    /// Redaction fully off — the gate returns early whatever the body is.
+    fn disarmed() -> RedactionAction {
+        RedactionAction {
+            pii: PiiPolicy {
+                mode: Some("disabled".into()),
+                categories: Vec::new(),
+            },
+            secrets: SecretAction::Audit,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn an_unredacted_destination_is_never_refused() {
+        let huge = DEFAULT_BODY_CAP_BYTES as usize + 1;
+        assert_eq!(fail_closed_reason(&[], huge, &disarmed()), None);
+    }
+
+    // The cap is a `>` comparison, so exactly-at-cap and one-over are the
+    // only inputs that tell it from `>=`. Without both, a body of precisely
+    // `DEFAULT_BODY_CAP_BYTES` could start being refused — or, in the other
+    // direction, one byte over could start being forwarded unscanned —
+    // without a single test noticing.
+
+    #[test]
+    fn a_body_exactly_at_the_cap_is_scannable() {
+        let at_cap = DEFAULT_BODY_CAP_BYTES as usize;
+        assert_eq!(fail_closed_reason(&[], at_cap, &armed()), None);
+    }
+
+    #[test]
+    fn a_body_one_byte_over_the_cap_is_refused() {
+        let over = DEFAULT_BODY_CAP_BYTES as usize + 1;
+        assert_eq!(
+            fail_closed_reason(&[], over, &armed()),
+            Some("fail_closed_oversize")
+        );
+    }
+
+    #[test]
+    fn a_compressed_body_is_refused_whatever_its_size() {
+        let headers = vec![("Content-Encoding".to_string(), "gzip".to_string())];
+        assert_eq!(
+            fail_closed_reason(&headers, 1, &armed()),
+            Some("fail_closed_compressed")
+        );
+    }
+
+    #[test]
+    fn compression_outranks_size_because_it_is_the_harder_bypass() {
+        let headers = vec![("content-encoding".to_string(), "br".to_string())];
+        let over = DEFAULT_BODY_CAP_BYTES as usize + 1;
+        assert_eq!(
+            fail_closed_reason(&headers, over, &armed()),
+            Some("fail_closed_compressed")
+        );
     }
 }
 
@@ -526,6 +725,9 @@ pub struct FromPlanInputs<'a> {
     /// [`crate::keyholder::RemoteResolver`] dialing a fleet-secrets daemon UDS.
     pub resolver: Arc<dyn SecretResolver>,
     pub forward_timeout_secs: u64,
+    /// Operator-configured upstream proxy for the forward leg, if the host
+    /// force-tunnels its egress. `None` dials destinations directly.
+    pub proxy: Option<mvm_http::ProxyConfig>,
     pub redaction: mvm_core::policy::RedactionPolicy,
     pub reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy,
     pub tls_intermediate: Option<mvm_core::crypto::egress_ca::VmIntermediate>,
@@ -566,11 +768,22 @@ fn err_chain(e: &dyn std::error::Error) -> String {
 /// shared resolver handles it and the hand-rolled path is gone.
 pub struct HardenedForwarder {
     timeout_secs: u64,
+    proxy: Option<mvm_http::ProxyConfig>,
 }
 
 impl HardenedForwarder {
     pub fn new(timeout_secs: u64) -> Result<Self, ForwardError> {
-        Ok(Self { timeout_secs })
+        Ok(Self {
+            timeout_secs,
+            proxy: None,
+        })
+    }
+
+    /// Route the forward leg through an operator-configured upstream proxy.
+    #[must_use]
+    pub fn with_proxy(mut self, proxy: Option<mvm_http::ProxyConfig>) -> Self {
+        self.proxy = proxy;
+        self
     }
 }
 
@@ -579,7 +792,7 @@ impl Forwarder for HardenedForwarder {
     async fn forward(&self, req: PreparedRequest) -> Result<ForwardResponse, ForwardError> {
         let method = mvm_http::Method::from_bytes(req.method.as_bytes())
             .map_err(|e| ForwardError::Failed(format!("bad method: {e}")))?;
-        let client = hardened_client_builder(self.timeout_secs)
+        let client = hardened_client_builder_via(self.timeout_secs, self.proxy.as_ref())
             .max_response_bytes(MAX_FORWARD_RESPONSE_BYTES as u64)
             .build()
             .map_err(|e| ForwardError::Failed(e.to_string()))?;
@@ -758,13 +971,15 @@ impl SubstitutionService {
             bindings,
             resolver,
             forward_timeout_secs,
+            proxy,
             redaction,
             reversible_replacement,
             tls_intermediate,
             recorder,
         } = inputs;
         let (registry, handed) = assemble_registry(plan_secrets, tenant, bindings)?;
-        let forwarder: Arc<dyn Forwarder> = Arc::new(HardenedForwarder::new(forward_timeout_secs)?);
+        let forwarder: Arc<dyn Forwarder> =
+            Arc::new(HardenedForwarder::new(forward_timeout_secs)?.with_proxy(proxy));
         let mut service = Self::new(Arc::new(registry), resolver, forwarder).with_tenant(tenant);
         service = service.with_redaction_policy(redaction);
         service = service.with_reversible_replacement_policy(reversible_replacement);
@@ -1187,7 +1402,13 @@ impl SubstitutionService {
             .map_err(std::io::Error::other)?
     }
 
-    async fn process(&self, wire: WireRequest) -> WireResponse {
+    /// Substitute, gate, forward, and audit one request.
+    ///
+    /// `pub(crate)` so the FlowMux `Http` arm can call it. That arm frames the
+    /// request and the reply; everything this does — placeholder resolution,
+    /// destination binding, the claim-10 gate, payload-free audit — happens
+    /// here and only here, on every transport.
+    pub(crate) async fn process(&self, wire: WireRequest) -> WireResponse {
         let body = match B64.decode(wire.body_b64.as_bytes()) {
             Ok(b) => b,
             Err(e) => {
@@ -1374,28 +1595,42 @@ impl SubstitutionService {
         let (Some(recorder), Some(dest)) = (&self.recorder, destination) else {
             return;
         };
-        let mut categories: Vec<String> = hits
-            .secrets
-            .iter()
-            .chain(hits.pii.iter())
-            .map(|s| s.to_string())
-            .collect();
-        if hits.entropy > 0 {
-            categories.push("entropy".into());
-        }
-        if hits.names > 0 {
-            categories.push("name".into());
-        }
-        if hits.detector_failures > 0 {
-            categories.push("detector_failure".into());
-        }
-        categories.sort_unstable();
-        categories.dedup();
+        let categories = redaction_categories(hits);
         if let Err(e) = emit_secret_redacted(recorder, dest, &categories.join(",")).await {
             tracing::warn!(error = %e, "secret.redacted audit emit failed");
         }
     }
+}
 
+/// The sorted, de-duplicated category list a `secret.redacted` entry carries.
+///
+/// Split out of `audit_redactions` so the counted channels can be asserted
+/// without a recorder or a service: each is a `> 0` guard, and `> 0` against
+/// `>= 0` is the difference between naming a channel that fired and naming
+/// every channel on every entry — which would make the audit line useless
+/// precisely when it matters.
+pub(crate) fn redaction_categories(hits: &RedactionHits) -> Vec<String> {
+    let mut categories: Vec<String> = hits
+        .secrets
+        .iter()
+        .chain(hits.pii.iter())
+        .map(|s| s.to_string())
+        .collect();
+    if hits.entropy > 0 {
+        categories.push("entropy".into());
+    }
+    if hits.names > 0 {
+        categories.push("name".into());
+    }
+    if hits.detector_failures > 0 {
+        categories.push("detector_failure".into());
+    }
+    categories.sort_unstable();
+    categories.dedup();
+    categories
+}
+
+impl SubstitutionService {
     /// Emit one `secret.substituted` audit entry per substituted secret (claim
     /// 13 — metadata only). Best-effort: an audit failure is logged, never
     /// fails the request. No-op when no recorder is wired.
@@ -2687,6 +2922,7 @@ mod server_tests {
                     auth_type: AuthType::Bearer,
                     allowed_hosts: vec!["api.openai.com".into()],
                     sigv4: None,
+                    provider: None,
                 },
             )
             .unwrap();
@@ -2713,6 +2949,7 @@ mod server_tests {
             bindings: &bindings,
             resolver,
             forward_timeout_secs: 30,
+            proxy: None,
             redaction: mvm_core::policy::RedactionPolicy::default(),
             reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
             tls_intermediate: None,
@@ -2740,6 +2977,7 @@ mod server_tests {
                     auth_type: AuthType::Bearer,
                     allowed_hosts: vec!["api.openai.com".into()],
                     sigv4: None,
+                    provider: None,
                 },
             )
             .unwrap();
@@ -2783,6 +3021,7 @@ mod server_tests {
             bindings: &bindings,
             resolver,
             forward_timeout_secs: 30,
+            proxy: None,
             redaction: policy,
             reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
             tls_intermediate: None,

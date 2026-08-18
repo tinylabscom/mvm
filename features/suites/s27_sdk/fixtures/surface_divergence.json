@@ -1,0 +1,41 @@
+{
+  "_comment": [
+    "Reviewed divergence between the Python and TypeScript public surfaces.",
+    "The BDD scenario fails when the real divergence stops matching this file,",
+    "so a name can only appear or disappear here deliberately.",
+    "Regenerate intentionally; do not paste over a failure.",
+    "",
+    "Both directional backlogs are now empty. What remains is the two",
+    "categories that describe differences rather than debt.",
+    "",
+    "`python_only_permanent_by_design` cannot close. `derive_schema` needs",
+    "runtime type information TypeScript erases before the program runs, and",
+    "`SecretInArgWarning` is a warning type JavaScript does not have. Both are",
+    "properties of the languages, not gaps in the SDK.",
+    "",
+    "`python_only_type_erased_in_typescript` exists in TypeScript as",
+    "`export type`, which tsc erases, so a runtime surface check cannot see",
+    "it."
+  ],
+  "python_only_type_erased_in_typescript": [
+    "ExecResult",
+    "FsEntry",
+    "FsStat",
+    "MachineResult",
+    "ProcessResult",
+    "ProcessStreamEvent",
+    "Runtime",
+    "RuntimeFsEntry",
+    "RuntimeFsStat",
+    "RuntimeProcessEvent",
+    "RuntimeProcessResult",
+    "SandboxInfo",
+    "WorkloadRef"
+  ],
+  "python_only_permanent_by_design": [
+    "SecretInArgWarning",
+    "derive_schema"
+  ],
+  "python_only_absent_from_typescript": [],
+  "typescript_only_absent_from_python": []
+}

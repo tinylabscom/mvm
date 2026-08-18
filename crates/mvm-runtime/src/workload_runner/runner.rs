@@ -60,55 +60,15 @@ use mvm_vmm::post_restore::PostRestoreOutcome;
 mod backend;
 mod refusal;
 mod sockets;
+mod spawner;
 mod warm_claim;
 
 use refusal::{map_lineage_refusal, refuse, require_fresh_child_identity};
 use sockets::standing_sockets;
-
-/// What the workload runner needs to stand up the per-VM gating endpoint.
-pub struct NetworkEndpointSpawnRequest<'a> {
-    pub vm_name: &'a str,
-    pub state_dir: &'a Path,
-    pub tenant: &'a str,
-    pub secrets: &'a [SecretBinding],
-    pub redaction: &'a RedactionPolicy,
-    pub network_policy: &'a NetworkPolicy,
-    /// Raw TCP egress (no secrets) vs the WireRequest substitution protocol.
-    pub raw_egress: bool,
-}
-
-/// Stand up the per-VM gating endpoint; return the host UDS the guest's
-/// EGRESS_PORT relays to. The one host-side egress bridge (claim-10 gate +
-/// claims 12/13 substitution).
-pub trait NetworkEndpointSpawner: Send + Sync {
-    fn spawn(&self, req: &NetworkEndpointSpawnRequest<'_>) -> Result<PathBuf>;
-}
-
-/// The production `NetworkEndpointSpawner`: spawns the real `mvm-network-endpoint`
-/// over the in-process-VMM UDS transport.
-pub struct RealNetworkEndpointSpawner;
-
-impl NetworkEndpointSpawner for RealNetworkEndpointSpawner {
-    fn spawn(&self, req: &NetworkEndpointSpawnRequest<'_>) -> Result<PathBuf> {
-        let uds = vm_network_endpoint_socket(req.vm_name);
-        spawn_network_endpoint(SubstitutionSpawnParams {
-            vm_name: req.vm_name,
-            state_dir: req.state_dir,
-            tenant: req.tenant,
-            secrets: req.secrets,
-            redaction: req.redaction,
-            transport: EndpointTransport::Uds { path: uds.clone() },
-            terminator_listen: None,
-            tls_intermediate: None,
-            network_policy: Some(req.network_policy),
-            raw_egress: req.raw_egress,
-            resolver_remote: None,
-            binding_store_dir: None,
-            flowmux_identity: None,
-        })?;
-        Ok(uds)
-    }
-}
+pub use spawner::{
+    FlowMuxIdentitySource, NetworkEndpointSpawnRequest, NetworkEndpointSpawner,
+    RealNetworkEndpointSpawner, SpawnedEndpoint,
+};
 
 /// What the runner needs to register the per-VM host-services broker after boot.
 pub struct BrokerRegisterRequest<'a> {
@@ -150,6 +110,19 @@ impl BrokerGuard {
     /// Disarm: the VM is up; the `stop` path now owns teardown.
     pub fn defuse(&mut self) {
         self.0.defuse();
+    }
+
+    /// Whether the launch came up with the host services it asked for.
+    ///
+    /// The guard alone cannot answer this. It records only whether anything was
+    /// registered, which is the same `false` for a workload that bound no
+    /// service as for one whose registration was skipped — `requested` is what
+    /// separates them. Judging on the guard alone marks every workload that
+    /// binds no host service as degraded, and a degraded launch is refused as a
+    /// sample of a healthy one.
+    #[must_use]
+    pub fn services_healthy(&self, requested: &[ServiceId]) -> bool {
+        requested.is_empty() || self.0.is_registered()
     }
 }
 
@@ -439,6 +412,8 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
                 secrets: inputs.secrets,
                 redaction: inputs.redaction,
                 network_policy: inputs.network_policy,
+                // A cold boot mints this guest's identity and hands it a drive.
+                identity: FlowMuxIdentitySource::Mint,
             },
         )?;
         trace.mark("endpoint_spawn");
@@ -446,6 +421,7 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         let socks = standing_sockets(&state_dir, inputs.config);
         let spec = workload_spec(&WorkloadSpecInputs {
             config: inputs.config,
+            identity_drive: endpoint.identity_drive(),
             sockets: socks.with_egress(endpoint.egress_uds()),
             cmdline: inputs.cmdline.clone(),
             console_log: socks.console_log.clone(),
@@ -492,7 +468,7 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         endpoint.defuse();
         broker_guard.defuse();
         trace.mark("broker_register");
-        trace.degrade_unless("host_services", broker_guard.0.is_registered());
+        trace.degrade_unless("host_services", broker_guard.services_healthy(&services));
         trace.write_to(&state_dir);
         Ok(vm)
     }
@@ -691,6 +667,7 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
                 secrets.len()
             );
         }
+        let parent_state_dir = vm_state_dir(handle.id.as_str());
         let mut endpoint = guards
             .spawn_endpoint(
                 &child,
@@ -700,6 +677,11 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
                     secrets: &secrets,
                     redaction: &redaction,
                     network_policy: &claim.network_policy,
+                    // A restored child already holds its parent's signing key
+                    // in the memory image it woke from, and there is no way to
+                    // put a different one there. Its endpoint pins what the
+                    // guest actually has.
+                    identity: FlowMuxIdentitySource::InheritFrom(&parent_state_dir),
                 },
             )
             .map_err(|e| StandbyError::ClaimFailed(format!("spawn child endpoint: {e}")))?;
@@ -1521,7 +1503,7 @@ mod tests {
     }
 
     struct Recorded {
-        raw_egress: bool,
+        mints_identity: bool,
         tenant: String,
         secrets_len: usize,
         policy: NetworkPolicy,
@@ -1537,14 +1519,17 @@ mod tests {
     }
 
     impl NetworkEndpointSpawner for RecordingSpawner {
-        fn spawn(&self, req: &NetworkEndpointSpawnRequest<'_>) -> Result<PathBuf> {
+        fn spawn(&self, req: &NetworkEndpointSpawnRequest<'_>) -> Result<SpawnedEndpoint> {
             *self.seen.lock().unwrap() = Some(Recorded {
-                raw_egress: req.raw_egress,
+                mints_identity: matches!(req.identity, FlowMuxIdentitySource::Mint),
                 tenant: req.tenant.to_string(),
                 secrets_len: req.secrets.len(),
                 policy: req.network_policy.clone(),
             });
-            Ok(self.uds.clone())
+            Ok(SpawnedEndpoint {
+                egress_uds: self.uds.clone(),
+                identity_drive: None,
+            })
         }
     }
 
@@ -1580,6 +1565,33 @@ mod tests {
             });
             Ok(BrokerGuard::defused())
         }
+    }
+
+    fn service(id: &str) -> ServiceId {
+        ServiceId::parse(id.to_string()).unwrap()
+    }
+
+    /// A guard that did register — the only inner variant a test can build
+    /// without a live daemon, and its Drop is a no-op.
+    fn registered_guard() -> BrokerGuard {
+        BrokerGuard(mvm_vmm::host::host_agent_spawn::ServicesGuard::Agent(
+            mvm_vmm::host::host_agent_spawn::HostAgentServicesGuard::defused(),
+        ))
+    }
+
+    #[test]
+    fn a_workload_that_bound_no_host_service_is_not_degraded() {
+        assert!(BrokerGuard::defused().services_healthy(&[]));
+    }
+
+    #[test]
+    fn a_bound_host_service_that_never_registered_is_degraded() {
+        assert!(!BrokerGuard::defused().services_healthy(&[service("host.audit.v1")]));
+    }
+
+    #[test]
+    fn a_bound_host_service_that_registered_is_not_degraded() {
+        assert!(registered_guard().services_healthy(&[service("host.audit.v1")]));
     }
 
     /// A `ConsoleStreamer` double proving the *wiring*, not re-proving the
@@ -1852,11 +1864,14 @@ mod tests {
     }
 
     #[test]
-    fn start_workload_uses_raw_egress_when_no_secrets_and_wire_when_secrets() {
+    fn every_cold_boot_mints_an_identity_whether_or_not_it_carries_secrets() {
         let policy = egress_allowing_policy();
         let redaction = RedactionPolicy::default();
 
-        // No secrets ⇒ raw TCP egress.
+        // This used to be the fork that broke everything: no secrets picked
+        // raw TCP, secrets picked WireRequest, and the guest was never told
+        // which. There is one transport now, so carrying secrets changes what
+        // the endpoint does with a flow -- not which protocol the guest speaks.
         let raw_runner = WorkloadRunner::new(
             MockDriver::default(),
             RecordingSpawner::new("/run/ep.sock"),
@@ -1881,10 +1896,10 @@ mod tests {
                 .unwrap()
                 .as_ref()
                 .unwrap()
-                .raw_egress
+                .mints_identity
         );
 
-        // One secret ⇒ WireRequest substitution (raw_egress false).
+        // A secret-bearing workload mints exactly the same way.
         let wire_runner = WorkloadRunner::new(
             MockDriver::default(),
             RecordingSpawner::new("/run/ep.sock"),
@@ -1904,7 +1919,11 @@ mod tests {
             .unwrap();
         let recorded = wire_runner.spawner.seen.lock().unwrap();
         let recorded = recorded.as_ref().unwrap();
-        assert!(!recorded.raw_egress);
+        assert!(
+            recorded.mints_identity,
+            "a secret-bearing cold boot mints an identity too -- the protocol \
+             does not fork on whether secrets are present"
+        );
         assert_eq!(recorded.secrets_len, 1);
     }
 
@@ -3327,9 +3346,12 @@ mod tests {
     }
 
     impl NetworkEndpointSpawner for KeyingSpawner {
-        fn spawn(&self, req: &NetworkEndpointSpawnRequest<'_>) -> Result<PathBuf> {
+        fn spawn(&self, req: &NetworkEndpointSpawnRequest<'_>) -> Result<SpawnedEndpoint> {
             *self.seen_vm.lock().unwrap() = Some(req.vm_name.to_string());
-            Ok(vm_network_endpoint_socket(req.vm_name))
+            Ok(SpawnedEndpoint {
+                egress_uds: vm_network_endpoint_socket(req.vm_name),
+                identity_drive: None,
+            })
         }
     }
 

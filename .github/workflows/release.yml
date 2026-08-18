@@ -121,22 +121,20 @@ jobs:
       # guest). They are SEPARATE bin targets in `mvm-hostd` — the root
       # `cargo build` above only produces `mvmctl` — so they are built here and
       # ship next to `mvmctl` in the tarball, where the backend's
-      # adjacent-to-exe resolver finds them on a downloaded install.
-      #   - mvm-network-endpoint: the per-VM egress gate. Every VM spawns
-      #     one, on both the FC (Linux) and HVF (macOS) paths, so it ships on
-      #     every target.
-      #   - mvm-hvf-supervisor (macOS only): the raw-HVF VMM supervisor.
-      #   - mvm-libkrun-supervisor (macOS only, and INTENTIONALLY so — not a
-      #     follow-up): it has `required-features = ["libkrun-sys"]`, and the
-      #     released Linux mvmctl deliberately does NOT link libkrun — the
-      #     `libkrun-sys` feature is a macOS-only target dep (see the rationale
-      #     at the top-level Cargo.toml, `[target.'cfg(target_os="macos")']`:
-      #     "Linux CI/runtimes use Firecracker … no libkrun-dev package exists").
-      #     So on Linux the supervisor can't be built here (no libkrun to link)
-      #     and isn't needed at runtime: workloads use Firecracker and the
-      #     builder VM uses libkrun-if-genuinely-available-else-QEMU (ADR-093),
-      #     with libkrun's FFI stubbed out in a no-feature build so it never
-      #     spawns this supervisor.
+      # adjacent-to-exe resolver finds them on a downloaded install. On a
+      # downloaded install that resolver has no `target/` dir to fall back to,
+      # so a binary missing here is a spawn failure at run time.
+      #
+      # This list is the `PerVmScope::Always` half of `PER_VM_HOST_BINARIES` in
+      # crates/mvm-cli/src/host_binaries/manifest.rs, and
+      # `xtask check-per-vm-host-binaries-sync` fails the build if the two
+      # drift. Add a binary there, not here.
+      #
+      # macOS additionally gets the two supervisors. mvm-libkrun-supervisor is
+      # macOS-only INTENTIONALLY — it has `required-features = ["libkrun-sys"]`
+      # and the released Linux mvmctl deliberately does not link libkrun (see
+      # the rationale in the top-level Cargo.toml): Linux workloads use
+      # Firecracker, so the supervisor is neither buildable nor needed there.
       - name: Build per-VM host binaries
         env:
           TARGET: ${{ matrix.target }}
@@ -146,12 +144,18 @@ jobs:
         run: |
           if [[ "${TARGET}" == *apple-darwin ]]; then
             cargo build --release --target "${TARGET}" -p mvm-hostd \
-              --bin mvm-hvf-supervisor \
+              --bin mvm-hvf-supervisor
+            cargo build --release --target "${TARGET}" -p mvm-hostd \
               --bin mvm-libkrun-supervisor --features libkrun-sys
           fi
           # Ships on every target — see the note above.
           cargo build --release --target "${TARGET}" -p mvm-hostd \
-            --bin mvm-network-endpoint
+            --bin mvm-host-agent \
+            --bin mvm-signer-helper \
+            --bin mvm-network-endpoint \
+            --bin mvm-netd \
+            --bin mvm-broker \
+            --bin mvm-audit-signer
 
       - name: Smoke test binary (native targets only)
         if: matrix.target == 'x86_64-unknown-linux-gnu' || matrix.target == 'aarch64-apple-darwin'
@@ -204,12 +208,24 @@ jobs:
           cp "target/${TARGET}/release/${BIN_NAME}" "staging/${ARCHIVE_NAME}/"
           # Per-VM host processes (built in the prior step), shipped next to
           # mvmctl so the backend's adjacent-to-exe resolver finds them on a
-          # downloaded install. copy-if-exists: the set differs by OS (macOS also
-          # gets the hvf/libkrun supervisors), but the substitution endpoint
-          # ships on every target.
-          for hostbin in mvm-hvf-supervisor mvm-libkrun-supervisor mvm-network-endpoint; do
+          # downloaded install. Kept in step with PER_VM_HOST_BINARIES by
+          # `xtask check-per-vm-host-binaries-sync`.
+          #
+          # Fail closed rather than copy-if-exists: a binary that failed to
+          # build would otherwise be silently dropped from the tarball and
+          # surface much later as a spawn failure on a user's machine.
+          REQUIRED_HOSTBINS="mvm-host-agent mvm-signer-helper mvm-network-endpoint mvm-netd mvm-broker mvm-audit-signer"
+          if [[ "${TARGET}" == *apple-darwin ]]; then
+            REQUIRED_HOSTBINS="${REQUIRED_HOSTBINS} mvm-hvf-supervisor mvm-libkrun-supervisor"
+          fi
+          for hostbin in ${REQUIRED_HOSTBINS}; do
             src="target/${TARGET}/release/${hostbin}"
-            [ -f "$src" ] && cp "$src" "staging/${ARCHIVE_NAME}/" && echo "bundled ${hostbin}"
+            if [ ! -f "$src" ]; then
+              echo "::error::${hostbin} was not built for ${TARGET}; mvmctl spawns it at run time and the adjacent-to-exe resolver has no fallback on a downloaded install" >&2
+              exit 1
+            fi
+            cp "$src" "staging/${ARCHIVE_NAME}/"
+            echo "bundled ${hostbin}"
           done
           cp -r assets "staging/${ARCHIVE_NAME}/" 2>/dev/null || true
           cp README.md "staging/${ARCHIVE_NAME}/" 2>/dev/null || true
@@ -232,460 +248,28 @@ jobs:
             staging/*.tar.gz
             staging/*.sha256
 
-  # Plan 72 W5 / ADR-046: the Layer-1 builder VM image that
-  # `LibkrunBuilderVm::run_build` boots into to run `nix build` on
-  # behalf of mvmctl. Plan 72 W2 ships the flake at
-  # `nix/images/builder-vm/`; this job publishes the per-arch
-  # artifacts so installed-binary users (no source checkout) can
-  # download them via `download_builder_vm_image`.
-  #
-  # This is the development-time builder VM that runs `nix build`
-  # against the user's dev-shell flake. (Plan 115 / ADR-064 folded the
-  # old separate dev-shell + sealed-builder images — `nix/images/builder`
-  # — into this one; the sealed runtime builder for mvmd's pool-build
-  # pipeline, if still needed, is sourced from mvmd, not built here.)
-  builder-vm-image:
-    # Skipped on a dry-run dispatch — Nix image builds are slow and unchanged by
-    # the binary-packaging path a dry-run validates. Runs on tag push / dry_run=false.
-    if: ${{ github.event_name == 'push' || github.event.inputs.dry_run == 'false' }}
-    # This job mints a keyless (OIDC/Fulcio) signature over the attested
-    # builder pack manifest, and the resulting certificate's SAN is derived
-    # from the workflow ref that ran it. Gating the job on a protected
-    # environment means the ref that can produce a valid signing identity is
-    # constrained by the environment's deployment branch/tag rule (restricted
-    # to version tags in repo settings), with an optional required-reviewer
-    # gate on top of the tag-push trigger already enforced above — so the
-    # identity a released binary trusts can't be minted from an arbitrary
-    # branch or workflow_dispatch run.
-    environment: release-signing
-    strategy:
-      matrix:
-        include:
-          - arch: aarch64
-            runner: ubuntu-24.04-arm
-          - arch: x86_64
-            runner: ubuntu-latest
-    runs-on: ${{ matrix.runner }}
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Install Nix
-        uses: DeterminateSystems/nix-installer-action@main
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.96.0
-
-      - name: Install cosign
-        uses: sigstore/cosign-installer@v3
-
-      - name: Build builder VM image
-        env:
-          ARCH: ${{ matrix.arch }}
-        run: |
-          SYSTEM="${ARCH}-linux"
-          nix build "./nix/images/builder-vm#packages.${SYSTEM}.default" \
-            --no-link --print-out-paths > /tmp/store-path.txt
-          STORE_PATH=$(head -1 /tmp/store-path.txt)
-          echo "STORE_PATH=${STORE_PATH}" >> "$GITHUB_ENV"
-          mkdir -p staging
-          cp "$STORE_PATH/vmlinux"       "staging/builder-vm-vmlinux-${ARCH}"
-          cp "$STORE_PATH/rootfs.ext4"   "staging/builder-vm-rootfs-${ARCH}.ext4"
-          # Optional sidecars the flake emits. `cp -L` so symlinks
-          # resolve; ignore-missing so older flake snapshots that
-          # predate these outputs still produce a valid release.
-          if [ -f "$STORE_PATH/cmdline.txt" ]; then
-            cp -L "$STORE_PATH/cmdline.txt" "staging/builder-vm-${ARCH}.cmdline.txt"
-          fi
-          if [ -f "$STORE_PATH/manifest.json" ]; then
-            cp -L "$STORE_PATH/manifest.json" "staging/builder-vm-${ARCH}.manifest.json"
-          fi
-
-      - name: Generate builder image SBOM
-        env:
-          ARCH: ${{ matrix.arch }}
-        run: |
-          # Real store-path bill of materials for the builder image closure —
-          # not a stub. The attested pack manifest's SBOM reference hashes
-          # this file's bytes.
-          nix-store --query --requisites "$STORE_PATH" > "staging/builder-vm-${ARCH}.sbom.txt"
-
-      - name: Produce and keyless-sign attested builder pack manifest
-        # The pack is an accelerator, never a hard dependency. A Fulcio/Rekor/OIDC
-        # hiccup must not block the plain vmlinux/rootfs publish below, so a
-        # signing failure here is tolerated: the job continues, no pack ships, and
-        # installed binaries fall back to the plain checksum download.
-        continue-on-error: true
-        env:
-          ARCH: ${{ matrix.arch }}
-          REPOSITORY: ${{ github.repository }}
-          REF: ${{ github.ref }}
-        run: |
-          set -euo pipefail
-          # On a tag push, REF is refs/tags/vX.Y.Z — exactly the SAN cosign
-          # embeds in the certificate and exactly what a released mvmctl
-          # (version X.Y.Z) reconstructs when verifying the pack. Skip pack
-          # production unless the ref is a version tag whose version equals the
-          # crate version; anything else yields an identity no installed binary
-          # can reconstruct, so it would silently fail-open to the plain download.
-          # Skipping keeps that outcome explicit and still ships the plain image.
-          if [[ "${REF}" != refs/tags/v* ]]; then
-            echo "::notice::${REF} is not a version tag; skipping attested builder pack."
-            exit 0
-          fi
-          TAG_VERSION="${REF#refs/tags/v}"
-          CRATE_VERSION="$(cargo metadata --no-deps --format-version 1 \
-            | jq -r '.packages[] | select(.name=="mvm-cli") | .version')"
-          if [[ "${TAG_VERSION}" != "${CRATE_VERSION}" ]]; then
-            echo "::warning::tag ${REF} does not match crate version v${CRATE_VERSION}; installed binaries could not verify this pack — skipping attested builder pack."
-            exit 0
-          fi
-          IDENTITY="https://github.com/${REPOSITORY}/.github/workflows/release.yml@${REF}"
-          REVOCATION_CHANNEL="https://github.com/${REPOSITORY}/releases/download/revocations/builder-vm-revocations.json"
-          # The published location of the SBOM this release ships, so the
-          # manifest's SBOM reference points at a real download instead of a
-          # path that only exists on the runner that built it.
-          SBOM_URI="https://github.com/${REPOSITORY}/releases/download/${REF#refs/tags/}/builder-vm-${ARCH}.sbom.txt"
-          cargo run --release -p mvm-build --example mvm-builder-pack-tool -- \
-            --vmlinux "$STORE_PATH/vmlinux" --rootfs "$STORE_PATH/rootfs.ext4" \
-            --arch "$ARCH" --channel stable --keyless \
-            --identity "$IDENTITY" \
-            --out-dir staging \
-            --sbom "staging/builder-vm-${ARCH}.sbom.txt" \
-            --sbom-uri "$SBOM_URI" \
-            --revocation-channel "$REVOCATION_CHANNEL"
-          mv staging/manifest.json "staging/builder-vm-${ARCH}.pack-manifest.json"
-
-          # Keyless OIDC sign — no secret key needed. --new-bundle-format emits
-          # the Sigstore bundle (with verificationMaterial) that the installed
-          # binary's Rust verifier parses; the legacy --bundle format is not
-          # accepted by that stack. The bundle carries the signature, the
-          # short-lived cert, and the transparency-log inclusion proof.
-          cosign sign-blob \
-            --yes \
-            --new-bundle-format \
-            --bundle "staging/builder-vm-${ARCH}.pack-manifest.json.bundle" \
-            "staging/builder-vm-${ARCH}.pack-manifest.json"
-
-      - name: Generate builder VM checksums
-        env:
-          ARCH: ${{ matrix.arch }}
-        run: |
-          cd staging
-          # Build the checksums list dynamically — sidecars are
-          # optional, so only include what's actually present.
-          FILES="builder-vm-vmlinux-${ARCH} builder-vm-rootfs-${ARCH}.ext4"
-          [ -f "builder-vm-${ARCH}.cmdline.txt" ]   && FILES="$FILES builder-vm-${ARCH}.cmdline.txt"
-          [ -f "builder-vm-${ARCH}.manifest.json" ] && FILES="$FILES builder-vm-${ARCH}.manifest.json"
-          # The attested pack is optional (signing may be skipped or fail); only
-          # checksum its files when they are actually present.
-          if [ -f "builder-vm-${ARCH}.pack-manifest.json.bundle" ]; then
-            FILES="$FILES builder-vm-${ARCH}.pack-manifest.json builder-vm-${ARCH}.pack-manifest.json.bundle builder-vm-${ARCH}.sbom.txt"
-          fi
-          sha256sum $FILES > "builder-vm-${ARCH}-checksums-sha256.txt"
-
-      - name: Upload builder VM image artifacts
-        uses: actions/upload-artifact@v7
-        with:
-          name: builder-vm-image-${{ matrix.arch }}
-          path: |
-            staging/builder-vm-vmlinux-${{ matrix.arch }}
-            staging/builder-vm-rootfs-${{ matrix.arch }}.ext4
-            staging/builder-vm-${{ matrix.arch }}.cmdline.txt
-            staging/builder-vm-${{ matrix.arch }}.manifest.json
-            staging/builder-vm-${{ matrix.arch }}.pack-manifest.json
-            staging/builder-vm-${{ matrix.arch }}.pack-manifest.json.bundle
-            staging/builder-vm-${{ matrix.arch }}.sbom.txt
-            staging/builder-vm-${{ matrix.arch }}-checksums-sha256.txt
-
-  # Plan 74 W1.4b / ADR-018: the verity-sealed mvm runtime overlay
-  # disk. Attached as `/dev/vdc` at every microVM boot;
-  # `mvm-verity-init` mounts it at `/mvm/runtime` so the guest agent,
-  # seccomp shim, and per-language SDK runtime libraries live in a
-  # single mvm-controlled blob instead of being baked into every
-  # per-image rootfs. Built per-arch from `nix/images/runtime-overlay/`.
-  #
-  # The host-side `RuntimeOverlayResolver`
-  # (`crates/mvm-build/src/runtime_overlay.rs`) downloads one
-  # arch-qualified tarball plus a tarball sha256 sidecar, then
-  # installs the extracted canonical names (`overlay.ext4`,
-  # `overlay.verity`, `overlay.roothash`, `VERSION`,
-  # `checksums-sha256.txt`) into
-  # `~/.mvm/cache/runtime-overlay/<mvmctl-version>/<arch>/`.
-  runtime-overlay-image:
-    # Skipped on a dry-run dispatch (see builder-vm-image).
-    if: ${{ github.event_name == 'push' || github.event.inputs.dry_run == 'false' }}
-    strategy:
-      matrix:
-        include:
-          - arch: aarch64
-            runner: ubuntu-24.04-arm
-          - arch: x86_64
-            runner: ubuntu-latest
-    runs-on: ${{ matrix.runner }}
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Install Nix
-        uses: DeterminateSystems/nix-installer-action@main
-
-      - name: Build runtime overlay image
-        env:
-          ARCH: ${{ matrix.arch }}
-        run: |
-          SYSTEM="${ARCH}-linux"
-          nix build "./nix/images/runtime-overlay#packages.${SYSTEM}.default" \
-            --no-link --print-out-paths > /tmp/store-path.txt
-          STORE_PATH=$(head -1 /tmp/store-path.txt)
-          mkdir -p "staging/runtime-overlay-${ARCH}"
-          # cp -L so `overlay.*` resolve through nix-store symlinks
-          # into the actual blobs; the artifact uploader doesn't
-          # follow symlinks.
-          cp -L "$STORE_PATH/overlay.ext4"     "staging/runtime-overlay-${ARCH}/overlay.ext4"
-          cp -L "$STORE_PATH/overlay.verity"   "staging/runtime-overlay-${ARCH}/overlay.verity"
-          cp -L "$STORE_PATH/overlay.roothash" "staging/runtime-overlay-${ARCH}/overlay.roothash"
-          cp -L "$STORE_PATH/VERSION"          "staging/runtime-overlay-${ARCH}/VERSION"
-          (
-            cd "staging/runtime-overlay-${ARCH}"
-            sha256sum overlay.ext4 overlay.verity overlay.roothash VERSION \
-              > checksums-sha256.txt
-          )
-          tar -C "staging/runtime-overlay-${ARCH}" \
-            -czf "staging/runtime-overlay-${ARCH}.tar.gz" \
-            overlay.ext4 overlay.verity overlay.roothash VERSION checksums-sha256.txt
-          (
-            cd staging
-            sha256sum "runtime-overlay-${ARCH}.tar.gz" \
-              > "runtime-overlay-${ARCH}.tar.gz.sha256"
-          )
-
-      - name: Upload runtime overlay image artifacts
-        uses: actions/upload-artifact@v7
-        with:
-          name: runtime-overlay-image-${{ matrix.arch }}
-          path: |
-            staging/runtime-overlay-${{ matrix.arch }}.tar.gz
-            staging/runtime-overlay-${{ matrix.arch }}.tar.gz.sha256
-
-  # ADR-018: the optional glibc SDK-sidecar disk. Mounted read-only at
-  # /mvm/sdk, and only for workloads whose signed plan binds an SDK-served
-  # host service — so a workload that never calls one never pays for the glibc
-  # closure. Built per-arch from the same `nix/images/runtime-overlay/` flake
-  # as the overlay.
-  #
-  # The host-side downloader (`mvm_build::sdk_sidecar::download_sdk_sidecar`)
-  # fetches one arch-qualified tarball plus its sha256 sidecar, and installs the
-  # extracted canonical names (`sdk.ext4`, `VERSION`, `checksums-sha256.txt`)
-  # into `~/.mvm/cache/sdk-sidecar/<mvmctl-version>/<arch>/`. The asset names
-  # here are pinned against that Rust constructor by `tests/release_assets.rs`.
-  #
-  # Unlike the overlay job this does NOT regenerate the manifest: the
-  # `sdk-sidecar-image` derivation writes its own `checksums-sha256.txt`, so
-  # copying it through keeps the bytes the resolver verifies byte-identical to
-  # the bytes Nix produced.
-  sdk-sidecar-image:
-    # Skipped on a dry-run dispatch (see builder-vm-image).
-    if: ${{ github.event_name == 'push' || github.event.inputs.dry_run == 'false' }}
-    strategy:
-      matrix:
-        include:
-          - arch: aarch64
-            runner: ubuntu-24.04-arm
-          - arch: x86_64
-            runner: ubuntu-latest
-    runs-on: ${{ matrix.runner }}
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Install Nix
-        uses: DeterminateSystems/nix-installer-action@main
-
-      - name: Build SDK sidecar image
-        env:
-          ARCH: ${{ matrix.arch }}
-        run: |
-          SYSTEM="${ARCH}-linux"
-          nix build "./nix/images/runtime-overlay#packages.${SYSTEM}.sdk-sidecar-image" \
-            --no-link --print-out-paths > /tmp/store-path.txt
-          STORE_PATH=$(head -1 /tmp/store-path.txt)
-          mkdir -p "staging/sdk-sidecar-${ARCH}"
-          # cp -L so the payload resolves through nix-store symlinks into the
-          # actual blobs; the artifact uploader doesn't follow symlinks.
-          cp -L "$STORE_PATH/sdk.ext4"             "staging/sdk-sidecar-${ARCH}/sdk.ext4"
-          cp -L "$STORE_PATH/VERSION"              "staging/sdk-sidecar-${ARCH}/VERSION"
-          cp -L "$STORE_PATH/checksums-sha256.txt" "staging/sdk-sidecar-${ARCH}/checksums-sha256.txt"
-          tar -C "staging/sdk-sidecar-${ARCH}" \
-            -czf "staging/sdk-sidecar-${ARCH}.tar.gz" \
-            sdk.ext4 VERSION checksums-sha256.txt
-          (
-            cd staging
-            sha256sum "sdk-sidecar-${ARCH}.tar.gz" \
-              > "sdk-sidecar-${ARCH}.tar.gz.sha256"
-          )
-
-      - name: Upload SDK sidecar image artifacts
-        uses: actions/upload-artifact@v7
-        with:
-          name: sdk-sidecar-image-${{ matrix.arch }}
-          path: |
-            staging/sdk-sidecar-${{ matrix.arch }}.tar.gz
-            staging/sdk-sidecar-${{ matrix.arch }}.tar.gz.sha256
-
-  # Plan 158: the bundled default microVM image `mvmctl up`/`exec` boots when
-  # no --flake/--template/--image is given. Ships the PROD variant only
-  # (sealed + verity-sealed rootfs); the dev variant is built locally in dev
-  # mode, never published. `download_default_microvm_image` fetches these five
-  # assets + the checksums.
-  default-microvm:
-    # Skipped on a dry-run dispatch (see builder-vm-image).
-    if: ${{ github.event_name == 'push' || github.event.inputs.dry_run == 'false' }}
-    # This job mints a keyless (OIDC/Fulcio) signature over the attested
-    # runtime pack manifest under the same release.yml@<tag> identity class as
-    # builder-vm-image — gating it behind the same protected environment
-    # constrains which ref can mint a valid signing identity.
-    environment: release-signing
-    strategy:
-      matrix:
-        include:
-          - arch: aarch64
-            runner: ubuntu-24.04-arm
-          - arch: x86_64
-            runner: ubuntu-latest
-    runs-on: ${{ matrix.runner }}
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Install Nix
-        uses: DeterminateSystems/nix-installer-action@main
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.96.0
-
-      - name: Install cosign
-        uses: sigstore/cosign-installer@v3
-
-      - name: Build default microVM image (prod variant)
-        env:
-          ARCH: ${{ matrix.arch }}
-        run: |
-          SYSTEM="${ARCH}-linux"
-          nix build "./nix/images/default-tenant#packages.${SYSTEM}.default" \
-            --impure --no-link --print-out-paths > /tmp/store-path.txt
-          STORE_PATH=$(head -1 /tmp/store-path.txt)
-          echo "STORE_PATH=${STORE_PATH}" >> "$GITHUB_ENV"
-          mkdir -p staging
-          cp -L "$STORE_PATH/vmlinux"         "staging/default-microvm-vmlinux-${ARCH}"
-          cp -L "$STORE_PATH/rootfs.ext4"     "staging/default-microvm-rootfs-${ARCH}.ext4"
-          cp -L "$STORE_PATH/rootfs.verity"   "staging/default-microvm-rootfs-${ARCH}.verity"
-          cp -L "$STORE_PATH/rootfs.roothash" "staging/default-microvm-rootfs-${ARCH}.roothash"
-          cp -L "$STORE_PATH/mvm-meta.json"   "staging/default-microvm-meta-${ARCH}.json"
-
-      - name: Generate default microVM SBOM
-        env:
-          ARCH: ${{ matrix.arch }}
-        run: |
-          # Real store-path bill of materials for the default microVM closure —
-          # the attested runtime pack manifest's SBOM reference hashes this
-          # file's bytes.
-          nix-store --query --requisites "$STORE_PATH" > "staging/default-microvm-${ARCH}.sbom.txt"
-
-      - name: Produce and keyless-sign attested runtime pack manifest
-        # The runtime pack is an instant-launch accelerator, never a hard
-        # dependency. A Fulcio/Rekor/OIDC hiccup must not block the plain
-        # vmlinux/rootfs/verity publish above, so a signing failure here is
-        # tolerated: the job continues, no pack ships, and installed binaries
-        # fall back to the plain hash-verified download + verity-sealed boot.
-        continue-on-error: true
-        env:
-          ARCH: ${{ matrix.arch }}
-          REPOSITORY: ${{ github.repository }}
-          REF: ${{ github.ref }}
-        run: |
-          set -euo pipefail
-          # A runtime pack's keyless identity is the version tag ref cosign
-          # embeds in the certificate SAN and a released mvmctl reconstructs
-          # when verifying. Skip production unless the ref is a version tag
-          # whose version equals the crate version; anything else yields an
-          # identity no installed binary can reconstruct, so it would fail-open
-          # to the plain download. Skipping keeps that explicit.
-          if [[ "${REF}" != refs/tags/v* ]]; then
-            echo "::notice::${REF} is not a version tag; skipping attested runtime pack."
-            exit 0
-          fi
-          TAG_VERSION="${REF#refs/tags/v}"
-          CRATE_VERSION="$(cargo metadata --no-deps --format-version 1 \
-            | jq -r '.packages[] | select(.name=="mvm-cli") | .version')"
-          if [[ "${TAG_VERSION}" != "${CRATE_VERSION}" ]]; then
-            echo "::warning::tag ${REF} does not match crate version v${CRATE_VERSION}; installed binaries could not verify this pack — skipping attested runtime pack."
-            exit 0
-          fi
-          IDENTITY="https://github.com/${REPOSITORY}/.github/workflows/release.yml@${REF}"
-          REVOCATION_CHANNEL="https://github.com/${REPOSITORY}/releases/download/revocations/runtime-pack-revocations.json"
-          SBOM_URI="https://github.com/${REPOSITORY}/releases/download/${REF#refs/tags/}/default-microvm-${ARCH}.sbom.txt"
-          cargo run --release -p mvm-build --example mvm-builder-pack-tool -- \
-            --kind runtime \
-            --vmlinux "$STORE_PATH/vmlinux" --rootfs "$STORE_PATH/rootfs.ext4" \
-            --verity "$STORE_PATH/rootfs.verity" --roothash "$STORE_PATH/rootfs.roothash" \
-            --arch "$ARCH" --channel stable --keyless \
-            --identity "$IDENTITY" \
-            --out-dir staging \
-            --sbom "staging/default-microvm-${ARCH}.sbom.txt" \
-            --sbom-uri "$SBOM_URI" \
-            --revocation-channel "$REVOCATION_CHANNEL"
-          mv staging/manifest.json "staging/default-microvm-${ARCH}.pack-manifest.json"
-
-          # Keyless OIDC sign — --new-bundle-format emits the Sigstore bundle
-          # (with verificationMaterial) the installed binary's Rust verifier
-          # parses; the legacy --bundle format is not accepted by that stack.
-          cosign sign-blob \
-            --yes \
-            --new-bundle-format \
-            --bundle "staging/default-microvm-${ARCH}.pack-manifest.json.bundle" \
-            "staging/default-microvm-${ARCH}.pack-manifest.json"
-
-      - name: Generate default microVM checksums
-        env:
-          ARCH: ${{ matrix.arch }}
-        run: |
-          cd staging
-          FILES="default-microvm-vmlinux-${ARCH} \
-                 default-microvm-rootfs-${ARCH}.ext4 \
-                 default-microvm-rootfs-${ARCH}.verity \
-                 default-microvm-rootfs-${ARCH}.roothash \
-                 default-microvm-meta-${ARCH}.json"
-          # The attested pack is optional (signing may be skipped or fail); only
-          # checksum its files when they are actually present.
-          if [ -f "default-microvm-${ARCH}.pack-manifest.json.bundle" ]; then
-            FILES="$FILES default-microvm-${ARCH}.pack-manifest.json default-microvm-${ARCH}.pack-manifest.json.bundle default-microvm-${ARCH}.sbom.txt"
-          fi
-          sha256sum $FILES > "default-microvm-${ARCH}-checksums-sha256.txt"
-
-      - name: Upload default microVM image artifacts
-        uses: actions/upload-artifact@v7
-        with:
-          name: default-microvm-${{ matrix.arch }}
-          path: |
-            staging/default-microvm-vmlinux-${{ matrix.arch }}
-            staging/default-microvm-rootfs-${{ matrix.arch }}.ext4
-            staging/default-microvm-rootfs-${{ matrix.arch }}.verity
-            staging/default-microvm-rootfs-${{ matrix.arch }}.roothash
-            staging/default-microvm-meta-${{ matrix.arch }}.json
-            staging/default-microvm-${{ matrix.arch }}.pack-manifest.json
-            staging/default-microvm-${{ matrix.arch }}.pack-manifest.json.bundle
-            staging/default-microvm-${{ matrix.arch }}.sbom.txt
-            staging/default-microvm-${{ matrix.arch }}-checksums-sha256.txt
-
   release:
-    needs: [bdd, build, builder-vm-image, runtime-overlay-image, sdk-sidecar-image, default-microvm]
-    # Gate the published release on the mvmctl binary build ONLY. The Nix
-    # image jobs still run and their artifacts are attached when present,
-    # but an image-build failure must not block the binary download
-    # (mvmctl tarballs + checksums) that install.sh / `mvmctl update` /
-    # the Homebrew tap consume. `!cancelled()` lets this run after image
-    # jobs fail; the result check keeps the binary build a hard requirement.
+    needs: [bdd, build]
+    # Gate the published release on the mvmctl binary build ONLY. The boot
+    # image artifacts are attached when the boot image train has published
+    # them (see the dual-publish step below), but their absence must not
+    # block the binary download (mvmctl tarballs + checksums) that
+    # install.sh / `mvmctl update` / the Homebrew tap consume. `!cancelled()`
+    # keeps that posture; the result check keeps the binary build a hard
+    # requirement.
     # Dry-run guard: a `workflow_dispatch` with dry_run=true builds + packages
     # (the `build` job) but never reaches this publish job — only a tag push or
     # an explicit dry_run=false dispatch publishes.
     if: ${{ !cancelled() && needs.bdd.result == 'success' && needs.build.result == 'success' && (github.event_name == 'push' || github.event.inputs.dry_run == 'false') }}
+    # This job mints the one keyless identity every installed mvmctl trusts:
+    # `release.yml@refs/tags/v{version}`, the sole entry in
+    # RELEASE_IDENTITY_TEMPLATES. The environment's policy admits `v*` tags and
+    # nothing else, so a branch push or a workflow_dispatch from an arbitrary
+    # ref cannot produce a signature the shipped verifier accepts. The boot
+    # image train is gated the same way against `boot-image/v*`, and
+    # revocations against its own tag; this was the last of the three trusted
+    # identities that anything could mint.
+    environment: release-signing
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -708,16 +292,102 @@ jobs:
           path: artifacts
           merge-multiple: true
 
+      # Dual-publish: attach the newest boot image train's assets to this CLI
+      # release too. It re-uploads bytes, never rebuilds them — the images are
+      # built exactly once, by release-boot-image.yml.
+      #
+      # This direction, rather than having that workflow push into the CLI
+      # release, because of who signs. An installed mvmctl trusts one keyless
+      # identity, this workflow's at a `v*` tag, so the bundles it verifies
+      # have to be minted here. Pulling the raw bytes in before the signing
+      # step below means they are re-signed under that identity and the
+      # consumer-path check a few steps down exercises them for real; the
+      # boot-image release's own bundles are provenance for that train and are
+      # simply overwritten here.
+      #
+      # The window closes when the download side reads DEFAULT_BOOT_IMAGE_TAG
+      # instead of the CLI version. Until then this step is the only reason a
+      # fresh install still finds its boot image. A CLI release with no image
+      # assets is therefore not a degraded release, it is a broken one: every
+      # fresh install 404s on first boot. So a missing boot image release stops
+      # the publish rather than warning past it — the whole point of this gate
+      # family is that nothing ships that can only be validated afterwards.
+      - name: Attach the boot image release assets to this release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # Highest version, not most recently created. `gh release list`
+          # orders by creation date, so `.[0]` picks whichever release was cut
+          # last — and the two disagree the moment one is re-cut out of order.
+          # That is not hypothetical: v0.1.1 published, then v0.1.0 was re-cut
+          # after a fix landed, leaving the newer release at the lower version.
+          # Sorting by parsed semver makes which image a CLI release ships a
+          # property of the version, not of the order someone happened to push.
+          # The strict N.N.N match also drops anything that is not a plain
+          # release tag rather than trying to order it.
+          BOOT_TAG="$(gh release list --repo "${GITHUB_REPOSITORY}" --limit 100 \
+            --json tagName --jq -r '
+              [ .[].tagName
+                | select(test("^boot-image/v[0-9]+\\.[0-9]+\\.[0-9]+$"))
+                | {tag: ., v: (ltrimstr("boot-image/v") | split(".") | map(tonumber))} ]
+              | sort_by(.v) | last | .tag // empty')"
+          if [ -z "${BOOT_TAG}" ]; then
+            echo "::error::no boot-image/v* release exists, so this release would ship with no boot image assets and every fresh install would 404 on first boot. Publish a boot-image/v* tag first, then re-run this release." >&2
+            exit 1
+          fi
+          echo "Attaching boot image assets from ${BOOT_TAG}"
+          mkdir -p artifacts
+          gh release download "${BOOT_TAG}" --repo "${GITHUB_REPOSITORY}" --dir artifacts --clobber
+
+          # Existence is not usability. The producing side refuses to publish an
+          # incomplete set, but it cannot retract one published before that gate
+          # existed, and this step would attach it without comment. A CLI release
+          # missing these is green and unusable: no x86_64 image means every
+          # x86_64 fresh install 404s on first boot, and no builder-vm assets
+          # means download_builder_vm_image 404s for everyone. The consumer-path
+          # check further down covers only runtime-overlay and sdk-sidecar, and
+          # skips whatever is absent, so nothing else in this job would notice.
+          missing=()
+          for arch in aarch64 x86_64; do
+            for f in \
+              "default-microvm-vmlinux-${arch}" \
+              "default-microvm-rootfs-${arch}.ext4" \
+              "default-microvm-meta-${arch}.json" \
+              "default-microvm-${arch}-checksums-sha256.txt" \
+              "builder-vm-vmlinux-${arch}" \
+              "builder-vm-rootfs-${arch}.ext4" \
+              "builder-vm-${arch}-checksums-sha256.txt"; do
+              [ -s "artifacts/${f}" ] || missing+=("${f}")
+            done
+          done
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "::error::${BOOT_TAG} is incomplete — refusing to ship a CLI release whose boot image would 404 on first boot. Missing: ${missing[*]}" >&2
+            exit 1
+          fi
+          # Drop the bundles this job re-mints. The signing step below writes
+          # its bundle with create-new semantics, so leaving the boot image
+          # train's copy in place would fail that step outright rather than be
+          # overwritten. The pack-manifest bundles are not re-signed here and
+          # stay.
+          rm -f artifacts/runtime-overlay-*.tar.gz.bundle \
+                artifacts/sdk-sidecar-*.tar.gz.bundle \
+                artifacts/builder-vm-*-checksums-sha256.txt.bundle \
+                artifacts/default-microvm-*-checksums-sha256.txt.bundle
+          ls -la artifacts/
+
       - name: Generate combined checksum file
         shell: bash
         run: |
           cd artifacts
           # Combine per-platform checksums into one file
-          cat *.sha256 > checksums-sha256.txt
+          # ./ prefix: a file named like an option must stay a filename.
+          cat ./*.sha256 > checksums-sha256.txt
           echo "Combined checksums:"
           cat checksums-sha256.txt
 
-      - name: Sign release tarballs and SBOM
+      - name: Sign release tarballs, checksum manifests, and SBOM
         shell: bash
         run: |
           set -euo pipefail
@@ -733,7 +403,27 @@ jobs:
           #
           # Requires cosign >= v2.4 on any host that verifies by hand; that is
           # the floor this project targets and there is no legacy fallback.
-          for blob in artifacts/*.tar.gz sbom.cdx.json; do
+          #
+          # The checksum manifests are in this list because they are what
+          # actually gates boot bytes: every downloader hashes the artifact and
+          # compares it against the manifest, so an unsigned manifest lets
+          # whoever can swap an artifact swap its recorded hash too and the
+          # comparison still passes. Signing the tarball alone does not close
+          # that — the image blobs (kernel, rootfs, verity sidecar) are not
+          # tarballs and carry no per-file signature of their own; the manifest
+          # is their only integrity anchor.
+          #
+          # The two image manifests are globs, so nullglob drops them when the
+          # image job that would have produced them failed — image signing stays
+          # best-effort exactly as image publication is. The combined binary
+          # manifest is a literal because the preceding step always writes it
+          # and this job hard-gates on the binary build.
+          for blob in \
+            artifacts/*.tar.gz \
+            artifacts/builder-vm-*-checksums-sha256.txt \
+            artifacts/default-microvm-*-checksums-sha256.txt \
+            artifacts/checksums-sha256.txt \
+            sbom.cdx.json; do
             cosign sign-blob \
               --yes \
               --new-bundle-format \
@@ -851,6 +541,7 @@ jobs:
             artifacts/*.tar.gz
             artifacts/*.tar.gz.bundle
             artifacts/checksums-sha256.txt
+            artifacts/checksums-sha256.txt.bundle
             artifacts/builder-vm-vmlinux-*
             artifacts/builder-vm-rootfs-*
             artifacts/builder-vm-*.cmdline.txt
@@ -859,6 +550,7 @@ jobs:
             artifacts/builder-vm-*.pack-manifest.json.bundle
             artifacts/builder-vm-*.sbom.txt
             artifacts/builder-vm-*-checksums-sha256.txt
+            artifacts/builder-vm-*-checksums-sha256.txt.bundle
             artifacts/runtime-overlay-*.tar.gz
             artifacts/runtime-overlay-*.tar.gz.sha256
             artifacts/sdk-sidecar-*.tar.gz
@@ -872,6 +564,7 @@ jobs:
             artifacts/default-microvm-*.pack-manifest.json.bundle
             artifacts/default-microvm-*.sbom.txt
             artifacts/default-microvm-*-checksums-sha256.txt
+            artifacts/default-microvm-*-checksums-sha256.txt.bundle
             sbom.cdx.json
             sbom.cdx.json.bundle
           )

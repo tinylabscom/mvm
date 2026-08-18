@@ -123,16 +123,50 @@ fn start_vm_firecracker_inner(
 ///
 /// Privilege justification: Firecracker is launched through `sudo` because, on
 /// the reference builder-VM host, the invoking user does not have direct access
-/// to `/dev/kvm` and the TAP/vsock network plumbing it configures. The launch
-/// no longer uses an intermediate `bash -c`: `sudo` execs `setsid` directly,
-/// which then execs Firecracker, so the only extra process is the one required
-/// for elevation.
+/// to `/dev/kvm` and the TAP/vsock network plumbing it configures.
+///
+/// The pid marker is written by the launched process itself (`echo $$`) and not
+/// by the caller (`echo $!`), because `$!` does not reliably name Firecracker.
+/// `sudo` with `use_pty` — the default since sudo 1.9.14, which is what Ubuntu
+/// 24.04 ships — forks a monitor and runs the command as its child rather than
+/// exec'ing it, so `$!` names a process whose `comm` is `sudo`. Liveness is
+/// probed by comparing `/proc/<pid>/comm` against `firecracker`, so on such a
+/// host every boot read as "the VMM exited" on the first poll while the guest
+/// was in fact booting normally. Writing `$$` from inside is correct whichever
+/// of `sudo`/`setsid` forks, since the `exec` makes that same pid Firecracker.
+/// The `sh -c` costs no surviving process for the same reason.
+/// The `sudo ` prefix a launch needs, or empty when the caller is already root.
+///
+/// `sudo` is on this path because the invoking user usually cannot open
+/// `/dev/kvm`. When mvmctl already runs as root it buys nothing and costs a
+/// process exec — measured at ~7 ms on the reference builder host, twice per
+/// launch, against a dispatch budget in the low hundreds.
+///
+/// Pure over the effective uid so the decision is testable without running the
+/// suite as root, which is the only way this branch could otherwise be covered.
+pub(crate) fn sudo_prefix_for_euid(euid: u32) -> &'static str {
+    if euid == 0 { "" } else { "sudo " }
+}
+
 fn firecracker_launch_script(
     abs_dir: &str,
     abs_socket: &str,
     clean_vsock: bool,
     cpu_scope: &str,
 ) -> String {
+    firecracker_launch_script_as(abs_dir, abs_socket, clean_vsock, cpu_scope, unsafe {
+        libc::geteuid()
+    })
+}
+
+fn firecracker_launch_script_as(
+    abs_dir: &str,
+    abs_socket: &str,
+    clean_vsock: bool,
+    cpu_scope: &str,
+    euid: u32,
+) -> String {
+    let sudo = sudo_prefix_for_euid(euid);
     let vsock = firecracker_vsock_uds_path(abs_dir);
     let vsock_cleanup = if clean_vsock {
         format!(
@@ -145,20 +179,22 @@ fn firecracker_launch_script(
     };
     let q_dir = shell_quote(abs_dir);
     let q_socket = shell_quote(abs_socket);
+    let q_pid = shell_quote(&format!("{abs_dir}/fc.pid"));
     format!(
         r#"
         mkdir -p {q_dir}
-        sudo rm -f {q_socket}
+        {sudo}rm -f {q_socket}
         {vsock_cleanup}
         touch {q_dir}/console.log {q_dir}/firecracker.log
-        {cpu_scope}sudo setsid nohup firecracker --api-sock {q_socket} --enable-pci \
+        {cpu_scope}{sudo}setsid nohup sh -c 'echo $$ > "$0"; exec firecracker --api-sock "$1" --enable-pci' {q_pid} {q_socket} \
             </dev/null >{q_dir}/console.log 2>{q_dir}/firecracker.log &
-        echo $! > {q_dir}/fc.pid
         "#,
         q_dir = q_dir,
+        q_pid = q_pid,
         q_socket = q_socket,
         vsock_cleanup = vsock_cleanup,
         cpu_scope = cpu_scope,
+        sudo = sudo,
     )
 }
 
@@ -375,7 +411,8 @@ mod tests {
             scratch.path(),
             Some(&mvm_contract::grants::CpuGrant::Share { millicores: 1500 }),
         );
-        let script = firecracker_launch_script("/tmp/vm", "/tmp/vm/fc.socket", true, &prefix);
+        let script =
+            firecracker_launch_script_as("/tmp/vm", "/tmp/vm/fc.socket", true, &prefix, 1000);
 
         assert!(script.contains("CPUQuota=150%"), "{script}");
         // The unit carries a per-boot suffix, so match the stem rather than a
@@ -390,20 +427,48 @@ mod tests {
         );
         let scope_at = script.find("systemd-run").expect("prefix present");
         let launch_at = script
-            .find("sudo setsid nohup firecracker")
+            .find("sudo setsid nohup sh -c")
             .expect("launch present");
         assert!(scope_at < launch_at, "{script}");
     }
 
     #[test]
     fn an_ungranted_launch_line_carries_no_scope() {
-        let script = firecracker_launch_script("/tmp/vm", "/tmp/vm/fc.socket", true, "");
+        let script = firecracker_launch_script_as("/tmp/vm", "/tmp/vm/fc.socket", true, "", 1000);
         assert!(!script.contains("systemd-run"), "{script}");
-        assert!(script.contains("sudo setsid nohup firecracker"), "{script}");
+        assert!(script.contains("sudo setsid nohup sh -c"), "{script}");
         assert!(
-            !script.contains("bash -c"),
-            "launch must not spawn an intermediate bash: {script}"
+            script.contains("exec firecracker"),
+            "the shell must exec Firecracker, never leave one behind: {script}"
         );
+    }
+
+    /// The regression this exists for: `$!` names Firecracker only when every
+    /// wrapper in the launch chain execs. `sudo` with `use_pty` (the default
+    /// since 1.9.14, and what Ubuntu 24.04 ships) forks a monitor instead, so
+    /// `$!` was the `sudo` pid and the `/proc/<pid>/comm == firecracker`
+    /// liveness probe read every boot as an immediate VMM exit.
+    #[test]
+    fn the_pid_marker_is_written_by_the_launched_process_not_the_caller() {
+        let script = firecracker_launch_script_as("/tmp/vm", "/tmp/vm/fc.socket", true, "", 1000);
+
+        assert!(
+            !script.contains("echo $!"),
+            "$! does not survive a forking sudo/setsid: {script}"
+        );
+        assert!(
+            script.contains(r#"echo $$ > "$0""#),
+            "the pid must come from the process that becomes Firecracker: {script}"
+        );
+
+        // Written before the exec, so the marker is in place by the time the
+        // API socket exists and the caller starts probing liveness.
+        let write_at = script.find("echo $$").expect("pid write present");
+        let exec_at = script.find("exec firecracker").expect("exec present");
+        assert!(write_at < exec_at, "{script}");
+
+        // And it names the path the rest of the tree reads.
+        assert!(script.contains("/tmp/vm/fc.pid"), "{script}");
     }
 
     #[test]
@@ -412,5 +477,71 @@ mod tests {
         // way the boot proceeds unbounded rather than failing.
         let scratch = tempfile::tempdir().expect("scratch");
         assert_eq!(cpu_scope_prefix("vm-x", scratch.path(), None), "");
+    }
+}
+
+#[cfg(test)]
+mod sudo_elision_tests {
+    use super::*;
+
+    /// A non-root caller cannot open /dev/kvm, so the elevation must stay.
+    #[test]
+    fn a_non_root_launch_still_elevates() {
+        assert_eq!(sudo_prefix_for_euid(1000), "sudo ");
+        let script = firecracker_launch_script_as("/tmp/vm", "/tmp/vm/fc.socket", true, "", 1000);
+        assert!(script.contains("sudo setsid nohup sh -c"), "{script}");
+        assert!(script.contains("sudo rm -f"), "{script}");
+    }
+
+    /// Already root: sudo buys no privilege and costs a process exec on a path
+    /// measured in milliseconds.
+    #[test]
+    fn a_root_launch_skips_sudo_entirely() {
+        assert_eq!(sudo_prefix_for_euid(0), "");
+        let script = firecracker_launch_script_as("/tmp/vm", "/tmp/vm/fc.socket", true, "", 0);
+        assert!(
+            !script.contains("sudo"),
+            "root launch must not shell out to sudo: {script}"
+        );
+    }
+
+    /// The pid marker is the part that broke before: `$!` names sudo's monitor
+    /// under use_pty, so the pid is written from inside and made correct by the
+    /// `exec`. That has to hold whether or not sudo is in the line.
+    #[test]
+    fn both_shapes_write_the_pid_from_inside_and_exec_firecracker() {
+        for euid in [0, 1000] {
+            let script =
+                firecracker_launch_script_as("/tmp/vm", "/tmp/vm/fc.socket", true, "", euid);
+            assert!(
+                script.contains(r#"echo $$ > "$0""#),
+                "euid {euid} must write the pid from inside: {script}"
+            );
+            assert!(
+                script.contains("exec firecracker"),
+                "euid {euid} must exec so the pid names Firecracker: {script}"
+            );
+            assert!(
+                script.contains("setsid nohup sh -c"),
+                "euid {euid}: {script}"
+            );
+        }
+    }
+
+    /// A CPU grant's scope must still precede the launch in both shapes.
+    #[test]
+    fn the_cpu_scope_precedes_the_launch_with_and_without_sudo() {
+        for euid in [0, 1000] {
+            let script = firecracker_launch_script_as(
+                "/tmp/vm",
+                "/tmp/vm/fc.socket",
+                true,
+                "systemd-run --scope ",
+                euid,
+            );
+            let scope_at = script.find("systemd-run").expect("scope present");
+            let launch_at = script.find("setsid nohup sh -c").expect("launch present");
+            assert!(scope_at < launch_at, "euid {euid}: {script}");
+        }
     }
 }

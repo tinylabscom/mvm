@@ -182,6 +182,7 @@ fn main() {
                 log_path: state_dir.join("console.log"),
             },
             trusted_builder: false,
+            plan_binding: None,
         };
 
         let driver = HvfDriver::new();

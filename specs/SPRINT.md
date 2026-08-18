@@ -1073,13 +1073,18 @@ updates only its own entry below.
       halfway. Fixed independently and first in #1958, which corrected the
       fourteen `working-directory` values in place; this branch's matrix
       rebuild was dropped in favour of it.
-      **Residual:** the targets remain sequential steps in one job at the
-      nightly `secs=1800` budget, and the job sets no `timeout-minutes`, so
-      14 x 1800s is 7 hours of fuzzing against GitHub's 6-hour default
-      ceiling — before per-target sanitizer builds. The lane should be
-      expected to time out rather than pass, and a matrix (one cell per
-      target, `fail-fast: false`) is the shape that both fits the ceiling
-      and stops one stale entry skipping every target after it.
+      **Residual, since closed:** the targets remain sequential steps in
+      one job, but the nightly budget was `secs=1800` with no
+      `timeout-minutes`, so 14 x 1800s was 7 hours of fuzzing against
+      GitHub's 6-hour ceiling — before per-target sanitizer builds. That is
+      exactly what happened: by 2026-08-16 the lane had grown to seventeen
+      targets and every cron run was killed partway down the list. The
+      budget is now 720s per target under `timeout-minutes: 300`, and
+      `xtask check-workflow-paths` multiplies the two so target eighteen
+      fails a PR rather than silently pushing the lane back over the
+      ceiling. A matrix (one cell per target, `fail-fast: false`) remains
+      the shape that would also stop one stale entry skipping every target
+      after it.
 
       **MVM-SEC-07's two witnesses failed for unrelated reasons.**
       `cargo-audit`: `quick-xml 0.37.5` carried RUSTSEC-2026-0194/0195 (both
@@ -1237,6 +1242,17 @@ updates only its own entry below.
       Firecracker build. One run on non-nested aarch64 hardware closes it;
       tracked in
       `specs/plans/268-nonnested-aarch64-machine-run-witness.md`.
+      **Update 2026-08-18:** hardware is no longer the blocker — a Pi 4 (8 GB,
+      real non-nested KVM, EL2, nVHE) is available and boots a Firecracker
+      guest to userspace in 0.28 s, settling `console=ttyS0` and GICv2 on real
+      silicon. The hermetic half shipped: #2658 (the release tarball carries
+      every per-VM binary `mvmctl` spawns — the "needs the full aarch64
+      host-side runtime" gap), #2664 (no panic on a fresh `MVM_HOME`), #2679
+      (foreign-arch bundle refused at boot and admission), #2682 (workspace
+      suite runs natively on aarch64). What blocks the witness now is artifact
+      supply, not hardware: #2675 (no published aarch64 workload kernel for the
+      current version) and #2676 (the macOS HVF builder fails `BadKernel`, so no
+      signed bundle can be built locally).
 
 - [x] **Backend shim removal — invert the driver/backend relationship.**
       `FcDriver`, `HvfDriver`, `LibkrunDriver`, and `QemuDriver` now own their
@@ -2368,6 +2384,21 @@ Cross-sprint work tracked in `specs/plans/330-decision-provenance-layer.md`.
 - [x] Phase 3 — `DecisionRecord` API and content-addressed store (PR #2461).
 - [x] Phase 4 — Query API and causal chains: `trace`, `impact`, and `similar` queries over the cached decision store, exposed through `mvmctl trust audit decisions {trace,impact,similar}`.
 - [ ] Phase 5 — Optional standards interoperability.
+
+## Plan 335 — Merge-queue throughput
+
+Cross-sprint work tracked in `specs/plans/2026-08-15-merge-queue-throughput.md`.
+
+- [x] Consolidate automatic architecture and kernel validation into the main
+      CI graph behind one shared scope job.
+- [x] Preserve the required `Invariant` and per-architecture kernel check
+      names while removing duplicate runner allocations and feature tests.
+- [x] Add trusted default-branch Rust workspace and Nix cache warming.
+- [x] Pass actionlint, shellcheck, formatting, workspace check, focused
+      workflow tests, host all-target Clippy, and the affected crate's complete
+      serial test suite.
+- [ ] Land the workflow change, pass Linux all-target Clippy, and apply and
+      verify the live merge-queue and required-check settings.
 
 ## Appendix A — ADR consolidation clusters (~91 → ~15)
 

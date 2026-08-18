@@ -35,6 +35,14 @@ import type {
   RuntimeFsStat,
 } from "./runtime/runtime.js";
 import { cliResolutionHint, resolveCliBin } from "./_cli.js";
+
+// This package is ESM ("type": "module"), so `require` does not exist at
+// runtime. These node builtins are imported statically; a lazy `require` here
+// throws `ReferenceError: require is not defined` for every consumer of the
+// built artifact.
+import * as child from "node:child_process";
+import * as crypto from "node:crypto";
+import * as fs from "node:fs";
 export { MVM_CLI_BIN_ENV } from "./_cli.js";
 
 // ────────────────────────────────────────────────────────────────────
@@ -179,13 +187,11 @@ export class ProcessHandle {
  *  "orphan microVM cleanup" consideration). */
 export const DEFAULT_TTL_SECONDS = 1800;
 
-export const MVM_SDK_MODE_ENV = "MVM_SDK_MODE";
+// Owned by the Rust registry (crates/mvm-sdk/src/env.rs) and generated
+// into `_env/vars.ts`.
+export { MVM_SDK_MODE_ENV, MVM_SDK_OUT_PATH_ENV } from "./_env/vars.js";
+import { MVM_SDK_MODE_ENV, MVM_SDK_OUT_PATH_ENV } from "./_env/vars.js";
 
-/** When set in the environment, the SDK writes the wire-shape
- *  recording JSON to this path on process exit. The CLI's Phase 7f
- *  auto-exec path uses this to capture the recording without
- *  parsing stdout (which the user's own script may write to). */
-export const MVM_SDK_OUT_PATH_ENV = "MVM_SDK_OUT_PATH";
 
 let recording: RuntimeRecordingWire | null = null;
 
@@ -246,7 +252,6 @@ export function flushRecordingToOutPath(): void {
     // Node only — the auto-exec path runs in Node, so we can
     // safely require it dynamically without bundling a polyfill.
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const fs: typeof import("node:fs") = require("node:fs");
     fs.writeFileSync(outPath, JSON.stringify(recording));
   } catch (err) {
     // eslint-disable-next-line no-console
@@ -469,7 +474,6 @@ export class LiveTransport {
       `${opts.ttlSeconds}s`,
     ];
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const child = require("node:child_process") as typeof import("node:child_process");
     let result;
     try {
       result = child.spawnSync(mvmCliBin, argv, {
@@ -520,7 +524,6 @@ export class LiveTransport {
     }
     const argv = ["machine", "ls", "--json"];
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const child = require("node:child_process") as typeof import("node:child_process");
     let result;
     try {
       result = child.spawnSync(mvmCliBin, argv, { encoding: "utf-8" });
@@ -574,7 +577,6 @@ export class LiveTransport {
 
   private startProcess(shell: string[]): ProcessHandle {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const child = require("node:child_process") as typeof import("node:child_process");
     let result;
     try {
       result = child.spawnSync(shell[0], shell.slice(1), { encoding: "utf-8" });
@@ -607,7 +609,6 @@ export class LiveTransport {
   ): Promise<ProcessResult> {
     this.requireDev("process wait", ["machine", "proc", "wait", this.vmId, token]);
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const child = require("node:child_process") as typeof import("node:child_process");
     const shell = [this.mvmCliBin, "machine", "proc", "wait", this.vmId, token];
     if (options.timeout !== undefined) shell.push("--timeout", String(Math.trunc(options.timeout)));
     return new Promise((resolve, reject) => {
@@ -702,7 +703,6 @@ export class LiveTransport {
       );
     }
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const child = require("node:child_process") as typeof import("node:child_process");
 
     // 1) `machine proc start` → pid_token on stdout.
     const startShell = [this.mvmCliBin, "machine", "proc", "start", this.vmId];
@@ -779,7 +779,6 @@ export class LiveTransport {
 
   private runBytes(shell: string[], data: Uint8Array): void {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const child = require("node:child_process") as typeof import("node:child_process");
     const result = child.spawnSync(shell[0], shell.slice(1), { input: Buffer.from(data) });
     if (result.error) throw new SandboxLiveError(`failed to spawn: ${result.error.message}`, { argv: shell });
     if (result.status !== 0) {
@@ -793,7 +792,6 @@ export class LiveTransport {
 
   private runJson(shell: string[]): unknown {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const child = require("node:child_process") as typeof import("node:child_process");
     const result = child.spawnSync(shell[0], shell.slice(1), { encoding: "utf-8" });
     if (result.error) throw new SandboxLiveError(`failed to spawn: ${result.error.message}`, { argv: shell });
     if (result.status !== 0) {
@@ -830,7 +828,6 @@ export class LiveTransport {
     this.requireDev("files.read", ["machine", "fs", "read", this.vmId, path]);
     const shell = [this.mvmCliBin, "machine", "fs", "read", this.vmId, path, "--offset", String(offset), "--length", String(length)];
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const child = require("node:child_process") as typeof import("node:child_process");
     let result;
     try {
       result = child.spawnSync(shell[0], shell.slice(1));
@@ -897,7 +894,6 @@ export class LiveTransport {
     this.requireDev("copy", ["machine", "cp", source, destination]);
     const shell = [this.mvmCliBin, "machine", "cp", source, destination];
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const child = require("node:child_process") as typeof import("node:child_process");
     let result;
     try {
       result = child.spawnSync(shell[0], shell.slice(1));
@@ -927,7 +923,6 @@ export class LiveTransport {
     this.requireDev("forward", ["machine", "forward", this.vmId, "--port", spec]);
     const shell = [this.mvmCliBin, "machine", "forward", this.vmId, "--port", spec];
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const child = require("node:child_process") as typeof import("node:child_process");
     // `mvmctl machine forward` blocks (runs the proxy until signalled), so spawn
     // it detached + tracked; `kill()` terminates it.
     let proc;
@@ -958,7 +953,6 @@ export class LiveTransport {
     // non-interactively.
     const shell = [this.mvmCliBin, "machine", "stop", this.vmId, "--yes"];
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const child = require("node:child_process") as typeof import("node:child_process");
     try {
       const result = child.spawnSync(shell[0], shell.slice(1), {
         encoding: "utf-8",
@@ -980,7 +974,6 @@ export class LiveTransport {
 
   private runShell(shell: string[]): void {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const child = require("node:child_process") as typeof import("node:child_process");
     let result;
     try {
       result = child.spawnSync(shell[0], shell.slice(1), { encoding: "utf-8" });
@@ -1113,7 +1106,6 @@ export function deriveAttachedBuildMode(
 
 function randomHex(byteCount: number): string {
   // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const crypto = require("node:crypto") as typeof import("node:crypto");
   return crypto.randomBytes(byteCount).toString("hex");
 }
 

@@ -45,23 +45,12 @@ fn main() -> ExitCode {
 #[cfg(target_os = "linux")]
 mod linux {
     use sha2::{Digest, Sha256};
-    use std::io::Read as _;
     use std::net::{SocketAddr, TcpStream};
     use std::os::fd::AsRawFd;
     use std::path::{Path, PathBuf};
     use std::process::{Child, Command, ExitCode, ExitStatus, Stdio};
     use std::time::{Duration, Instant};
 
-    /// Byte offset of the ext4 superblock from the start of a filesystem
-    /// image (the boot-sector region ext4 always skips).
-    const EXT4_SUPERBLOCK_OFFSET: usize = 1024;
-    /// `s_magic`, little-endian `0xEF53`, at superblock offset 0x38.
-    const EXT4_MAGIC_OFFSET_IN_SUPERBLOCK: usize = 0x38;
-    const EXT4_MAGIC_LE: [u8; 2] = [0x53, 0xEF];
-    /// `s_volume_name`: 16 raw, NUL-padded bytes at superblock offset 0x78 —
-    /// what `mvm-ext4`'s writer stamps via `BuildOptions::with_volume_name`.
-    const EXT4_VOLUME_NAME_OFFSET_IN_SUPERBLOCK: usize = 0x78;
-    const EXT4_VOLUME_NAME_LEN: usize = 16;
     /// Fixed set of virtio-blk candidates Stage 0 ever attaches. Small and
     /// explicit rather than a `/sys/class/block` walk — a RootDir guest never
     /// has more than a handful of disks, and a missing candidate is just a
@@ -73,6 +62,8 @@ mod linux {
     const VSOCK_EGRESS_PROXY_LISTEN_ADDR: &str = mvm_core::guest_netd::DEFAULT_EGRESS_PROXY_LISTEN;
     const VSOCK_EGRESS_PROXY_READY_TIMEOUT: Duration = Duration::from_secs(5);
     const VSOCK_EGRESS_PORT_ENV: &str = "MVM_EGRESS_VSOCK_PORT";
+    /// Marks a store error the tmpfs fallback must not swallow.
+    const FATAL_STORE_PREFIX: &str = "FATAL-STORE: ";
     const VSOCK_EGRESS_PORT_TOKEN_PREFIX: &str = "mvm.vsock_egress_port=";
     const QEMU_STAGE0_VSOCK_MODULES: &[&str] = &[
         "/mvm-bins/vsock-modules/vsock.ko",
@@ -299,17 +290,15 @@ mod linux {
         }
     }
 
-    fn fork_vsock_egress_client_if_requested(cmdline: &str) -> Option<Child> {
-        if !should_enable_vsock_egress(is_qemu(), cmdline) {
-            return None;
-        }
+    /// Fork the guest-local egress proxy. `Err` carries the probe the readiness
+    /// decision will refuse on, so a client that never started and one that
+    /// started and died reach the same single decision point.
+    fn fork_vsock_egress_client(cmdline: &str) -> Result<Child, EgressProbe> {
         let egress_client = Path::new("/mvm-bins/mvm-egress-client");
         if !egress_client.is_file() {
-            eprintln!(
-                "stage0-init: mvm.vsock_egress=1 requested but {} is missing; continuing without egress client",
-                egress_client.display()
-            );
-            return None;
+            return Err(EgressProbe::ClientMissing(
+                egress_client.display().to_string(),
+            ));
         }
         if is_qemu() {
             best_effort_load_qemu_vsock_modules();
@@ -326,15 +315,9 @@ mod linux {
                     child.id(),
                     egress_client.display()
                 );
-                Some(child)
+                Ok(child)
             }
-            Err(e) => {
-                eprintln!(
-                    "stage0-init: failed to fork mvm-egress-client from {}: {e}",
-                    egress_client.display()
-                );
-                None
-            }
+            Err(e) => Err(EgressProbe::ClientExited(format!("spawn failed: {e}"))),
         }
     }
 
@@ -352,34 +335,21 @@ mod linux {
         "unknown termination".to_string()
     }
 
-    fn wait_for_vsock_egress_proxy_if_requested(cmdline: &str, mut child: Option<&mut Child>) {
-        if !should_enable_vsock_egress(is_qemu(), cmdline) {
-            return;
-        }
+    use mvm_build::egress_readiness::{EgressProbe, egress_readiness_outcome};
+
+    fn probe_vsock_egress_proxy(mut child: Option<&mut Child>) -> EgressProbe {
         let Ok(proxy_addr) = VSOCK_EGRESS_PROXY_LISTEN_ADDR.parse::<SocketAddr>() else {
-            eprintln!(
-                "stage0-init: invalid local vsock egress proxy addr {}; continuing without readiness wait",
-                VSOCK_EGRESS_PROXY_LISTEN_ADDR
-            );
-            return;
+            return EgressProbe::BadListenAddr(VSOCK_EGRESS_PROXY_LISTEN_ADDR.to_string());
         };
         let deadline = Instant::now() + VSOCK_EGRESS_PROXY_READY_TIMEOUT;
         while Instant::now() < deadline {
             if TcpStream::connect_timeout(&proxy_addr, Duration::from_millis(200)).is_ok() {
-                eprintln!(
-                    "stage0-init: local vsock egress proxy ready at {}",
-                    VSOCK_EGRESS_PROXY_LISTEN_ADDR
-                );
-                return;
+                return EgressProbe::Ready;
             }
             if let Some(child) = child.as_deref_mut() {
                 match child.try_wait() {
                     Ok(Some(status)) => {
-                        eprintln!(
-                            "stage0-init: mvm-egress-client exited before proxy became ready ({})",
-                            egress_child_exit_message(status)
-                        );
-                        return;
+                        return EgressProbe::ClientExited(egress_child_exit_message(status));
                     }
                     Ok(None) => {}
                     Err(e) => {
@@ -389,12 +359,45 @@ mod linux {
             }
             std::thread::sleep(Duration::from_millis(100));
         }
-        eprintln!(
-            "stage0-init: local vsock egress proxy at {} did not become ready within {}s; continuing anyway",
-            VSOCK_EGRESS_PROXY_LISTEN_ADDR,
-            VSOCK_EGRESS_PROXY_READY_TIMEOUT.as_secs()
-        );
-        dump_vsock_egress_diagnostics();
+        EgressProbe::TimedOut
+    }
+
+    /// Start the egress proxy and refuse to build without it. The returned
+    /// child is kept alive by the caller for the rest of the boot.
+    fn start_vsock_egress_if_requested(cmdline: &str) -> Result<Option<Child>, String> {
+        if !should_enable_vsock_egress(is_qemu(), cmdline) {
+            return Ok(None);
+        }
+        // The identity must be in /run/mvm before the client starts: it loads
+        // both keys before it binds, so a missing drive surfaces as a proxy
+        // that never came up rather than as anything naming the drive.
+        if let Err(e) = mvm_agentd::flowmux_drive::provision_identity_from_drive() {
+            let why = egress_readiness_outcome(EgressProbe::IdentityMissing(e.to_string()))
+                .expect_err("IdentityMissing is a refusing probe");
+            eprintln!("stage0-init: {why}");
+            return Err(why);
+        }
+        let (child, probe) = match fork_vsock_egress_client(cmdline) {
+            Ok(mut child) => {
+                let probe = probe_vsock_egress_proxy(Some(&mut child));
+                (Some(child), probe)
+            }
+            Err(probe) => (None, probe),
+        };
+        match egress_readiness_outcome(probe) {
+            Ok(()) => {
+                eprintln!(
+                    "stage0-init: local vsock egress proxy ready at {}",
+                    VSOCK_EGRESS_PROXY_LISTEN_ADDR
+                );
+                Ok(child)
+            }
+            Err(why) => {
+                eprintln!("stage0-init: {why}");
+                dump_vsock_egress_diagnostics();
+                Err(why)
+            }
+        }
     }
 
     /// Mounts the pseudo-filesystems + the host shares, then makes `/nix` a
@@ -446,8 +449,9 @@ mod linux {
             mvm_agentd::guest_net::seed_loopback_resolver()
                 .map_err(|e| format!("seed loopback DNS resolver: {e}"))?;
         }
-        let mut egress_child = fork_vsock_egress_client_if_requested(&cmdline);
-        wait_for_vsock_egress_proxy_if_requested(&cmdline, egress_child.as_mut());
+        // Held for the rest of the boot: dropping the handle would not kill the
+        // proxy, but keeping it lets a later reaper see the same child.
+        let _egress_child = start_vsock_egress_if_requested(&cmdline)?;
         configure_nix_runtime()?;
         Ok(())
     }
@@ -520,6 +524,12 @@ mod linux {
     fn setup_nix_store(qemu: bool) -> Result<(), String> {
         match setup_persistent_nix_store(qemu) {
             Ok(()) => return Ok(()),
+            // A fatal store fault is not something to degrade around: the tmpfs
+            // is sized by guest RAM, so continuing turns a nameable disk problem
+            // into an out-of-space error far from its cause.
+            Err(e) if e.starts_with(FATAL_STORE_PREFIX) => {
+                return Err(e.trim_start_matches(FATAL_STORE_PREFIX).to_string());
+            }
             Err(e) => eprintln!(
                 "stage0-init: persistent Stage 0 /nix store unavailable ({e}); falling back to tmpfs seed copy"
             ),
@@ -556,10 +566,61 @@ mod linux {
         }
     }
 
+    /// Size of a block device in bytes, via its sysfs 512-byte block count.
+    ///
+    /// Read from sysfs rather than by seeking the device: a seek would need the
+    /// device open, and the point of this check is to refuse it before trusting
+    /// it enough to mount.
+    fn block_device_bytes(device: &str) -> Option<u64> {
+        let name = Path::new(device).file_name()?.to_str()?;
+        let raw = std::fs::read_to_string(format!("/sys/class/block/{name}/size")).ok()?;
+        raw.trim().parse::<u64>().ok().map(|blocks| blocks * 512)
+    }
+
     fn setup_persistent_nix_store(qemu: bool) -> Result<(), String> {
-        let device = stage0_nix_store_device(qemu);
+        // Prefer the ext4 label. The device letter is a function of how many
+        // block devices the backend attached ahead of this one, so adding a
+        // drive silently re-letters every disk behind it — which is how this
+        // guest came to mount a 32 KiB identity image as its Nix store, fail,
+        // and fall back to a tmpfs too small for a kernel source tree. The
+        // letter stays as a fallback for a store image formatted before it
+        // carried a label.
+        let label = mvm_build::rootfs::STAGE0_NIX_STORE_EXT4_LABEL;
+        let by_label = find_labeled_ext4_disk(STAGE0_DISK_CANDIDATES, label)
+            .map(|d| d.to_string_lossy().into_owned());
+        let device: &str = match by_label.as_deref() {
+            Some(dev) => {
+                eprintln!("stage0-init: Stage 0 Nix store is {dev} (label {label:?})");
+                dev
+            }
+            None => {
+                let dev = stage0_nix_store_device(qemu);
+                eprintln!(
+                    "stage0-init: no disk carries the ext4 label {label:?}; \
+                     falling back to {dev} by enumeration order"
+                );
+                dev
+            }
+        };
         if !Path::new(device).exists() {
             return Err(format!("{device} is not present"));
+        }
+
+        // A device that is present but far too small is a misidentified disk,
+        // not an empty store. Refuse it here rather than letting the caller
+        // degrade to a RAM-sized tmpfs whose exhaustion surfaces thousands of
+        // lines later as an unrelated-looking build error.
+        if let Some(bytes) = block_device_bytes(device)
+            && bytes < mvm_build::store_readiness::MIN_PLAUSIBLE_STORE_BYTES
+        {
+            return Err(FATAL_STORE_PREFIX.to_string()
+                + &mvm_build::store_readiness::store_readiness_outcome(
+                    mvm_build::store_readiness::StoreProbe::ImplausiblySmall {
+                        device: device.to_string(),
+                        bytes,
+                    },
+                )
+                .expect_err("an undersized store device must refuse"));
         }
 
         std::fs::create_dir_all(STAGE0_NIX_STORE_MOUNT)
@@ -1098,53 +1159,11 @@ mod linux {
         .map_err(|e| format!("mount {source} -> {target} ({fstype}) read-only: {e}"))
     }
 
-    /// Decode the ext4 volume label (`s_volume_name`) from the first
-    /// superblock in `buf`, matching the layout `mvm-ext4`'s writer stamps
-    /// (`BuildOptions::with_volume_name`). `None` when `buf` is too short,
-    /// the ext4 magic doesn't match (not ext4, or a zeroed/absent device),
-    /// or the label is empty or not valid UTF-8.
-    fn ext4_volume_label_from_superblock(buf: &[u8]) -> Option<String> {
-        let magic_off = EXT4_SUPERBLOCK_OFFSET + EXT4_MAGIC_OFFSET_IN_SUPERBLOCK;
-        let label_off = EXT4_SUPERBLOCK_OFFSET + EXT4_VOLUME_NAME_OFFSET_IN_SUPERBLOCK;
-        if buf.len() < label_off + EXT4_VOLUME_NAME_LEN {
-            return None;
-        }
-        if buf[magic_off..magic_off + EXT4_MAGIC_LE.len()] != EXT4_MAGIC_LE {
-            return None;
-        }
-        let raw = &buf[label_off..label_off + EXT4_VOLUME_NAME_LEN];
-        let end = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
-        if end == 0 {
-            return None;
-        }
-        std::str::from_utf8(&raw[..end]).ok().map(str::to_string)
-    }
-
-    /// Read just enough of `path` to decode an ext4 volume label. `None` on
-    /// any I/O error — missing device, device shorter than a superblock, or
-    /// (via [`ext4_volume_label_from_superblock`]) not ext4 at all.
-    fn read_ext4_volume_label(path: &Path) -> Option<String> {
-        let probe_len =
-            EXT4_SUPERBLOCK_OFFSET + EXT4_VOLUME_NAME_OFFSET_IN_SUPERBLOCK + EXT4_VOLUME_NAME_LEN;
-        let mut buf = vec![0u8; probe_len];
-        std::fs::File::open(path).ok()?.read_exact(&mut buf).ok()?;
-        ext4_volume_label_from_superblock(&buf)
-    }
-
-    /// Probe `candidates` in order for the first whose ext4 superblock
-    /// carries `label`. Content-addressed rather than position-addressed:
-    /// correct regardless of which candidate the host actually attached the
-    /// labeled disk as (see `libkrun_builder::pack_stage0_work_disk` on the
-    /// host side).
-    fn find_labeled_ext4_disk(candidates: &[&str], label: &str) -> Option<PathBuf> {
-        for candidate in candidates.iter().copied() {
-            let path = Path::new(candidate);
-            if read_ext4_volume_label(path).as_deref() == Some(label) {
-                return Some(path.to_path_buf());
-            }
-        }
-        None
-    }
+    // The ext4 label probe is shared with every other guest init through
+    // `mvm_agentd::flowmux_drive`: Stage 0 mounts `/work` by label and the
+    // identity drive by label, and a second copy of the superblock layout is
+    // exactly the kind of duplicate that drifts.
+    use mvm_agentd::flowmux_drive::find_labeled_ext4_disk;
 
     /// Mounts `/work` for the libkrun backend. Prefers the ext4 disk
     /// carrying [`mvm_build::rootfs::STAGE0_WORK_EXT4_LABEL`] — the host
@@ -1348,8 +1367,7 @@ mod linux {
     #[cfg(test)]
     mod tests {
         use super::{
-            VSOCK_EGRESS_NO_PROXY, VSOCK_EGRESS_PROXY_URL, copy_artifacts_into,
-            ext4_volume_label_from_superblock, find_labeled_ext4_disk, run_streaming,
+            VSOCK_EGRESS_NO_PROXY, VSOCK_EGRESS_PROXY_URL, copy_artifacts_into, run_streaming,
             stage0_nix_store_device,
         };
         use std::os::unix::fs::symlink;
@@ -1359,112 +1377,6 @@ mod linux {
         fn stage0_nix_store_device_matches_backend_disk_order() {
             assert_eq!(stage0_nix_store_device(false), "/dev/vda");
             assert_eq!(stage0_nix_store_device(true), "/dev/vde");
-        }
-
-        #[test]
-        fn ext4_volume_label_from_superblock_rejects_too_short_buffers() {
-            assert_eq!(ext4_volume_label_from_superblock(&[]), None);
-            assert_eq!(ext4_volume_label_from_superblock(&[0u8; 1024]), None);
-        }
-
-        #[test]
-        fn ext4_volume_label_from_superblock_rejects_wrong_magic() {
-            let mut buf = vec![0u8; 1024 + 0x78 + 16];
-            buf[1024 + 0x38] = 0xAA;
-            buf[1024 + 0x38 + 1] = 0xBB;
-            buf[1024 + 0x78..1024 + 0x78 + 8].copy_from_slice(b"mvm-work");
-            assert_eq!(ext4_volume_label_from_superblock(&buf), None);
-        }
-
-        #[test]
-        fn ext4_volume_label_from_superblock_rejects_empty_label() {
-            let mut buf = vec![0u8; 1024 + 0x78 + 16];
-            buf[1024 + 0x38] = 0x53;
-            buf[1024 + 0x38 + 1] = 0xEF;
-            // Label bytes left all-zero.
-            assert_eq!(ext4_volume_label_from_superblock(&buf), None);
-        }
-
-        #[test]
-        fn ext4_volume_label_from_superblock_decodes_a_nul_padded_label() {
-            let mut buf = vec![0u8; 1024 + 0x78 + 16];
-            buf[1024 + 0x38] = 0x53;
-            buf[1024 + 0x38 + 1] = 0xEF;
-            buf[1024 + 0x78..1024 + 0x78 + 8].copy_from_slice(b"mvm-work");
-            assert_eq!(
-                ext4_volume_label_from_superblock(&buf),
-                Some("mvm-work".to_string())
-            );
-        }
-
-        #[test]
-        fn ext4_volume_label_from_superblock_decodes_a_full_16_byte_label() {
-            // No trailing NUL at all — the full field is label content.
-            let mut buf = vec![0u8; 1024 + 0x78 + 16];
-            buf[1024 + 0x38] = 0x53;
-            buf[1024 + 0x38 + 1] = 0xEF;
-            buf[1024 + 0x78..1024 + 0x78 + 16].copy_from_slice(b"0123456789abcdef");
-            assert_eq!(
-                ext4_volume_label_from_superblock(&buf),
-                Some("0123456789abcdef".to_string())
-            );
-        }
-
-        #[test]
-        fn ext4_volume_label_round_trips_through_the_real_writer() {
-            // Validate against `mvm-ext4`'s actual writer (not just a synthetic
-            // byte layout assumption) so a future change to the on-disk
-            // superblock format fails this test instead of silently
-            // desynchronizing the host writer and the guest reader.
-            let nodes = vec![mvm_fs::ext4::Node::Dir {
-                path: "/a".to_string(),
-                mode: 0o755,
-                xattrs: vec![],
-            }];
-            let options = mvm_fs::ext4::BuildOptions::default().with_volume_name(b"mvm-work");
-            let image =
-                mvm_fs::ext4::build_image_with_options(nodes, &options).expect("build image");
-            assert_eq!(
-                ext4_volume_label_from_superblock(&image),
-                Some("mvm-work".to_string())
-            );
-        }
-
-        #[test]
-        fn find_labeled_ext4_disk_picks_the_matching_candidate_regardless_of_position() {
-            let dir = tempfile::tempdir().expect("tempdir");
-            let mut labeled = vec![0u8; 1024 + 0x78 + 16];
-            labeled[1024 + 0x38] = 0x53;
-            labeled[1024 + 0x38 + 1] = 0xEF;
-            labeled[1024 + 0x78..1024 + 0x78 + 8].copy_from_slice(b"mvm-work");
-            let other = vec![0u8; 1024 + 0x78 + 16]; // no magic at all — e.g. an empty/unformatted disk
-
-            // The labeled device is the SECOND candidate — the scan must not
-            // assume it's always first (content-addressed, not position-addressed).
-            let first = dir.path().join("first");
-            let second = dir.path().join("second");
-            std::fs::write(&first, &other).expect("write first");
-            std::fs::write(&second, &labeled).expect("write second");
-
-            let first_str = first.to_str().expect("utf8 path");
-            let second_str = second.to_str().expect("utf8 path");
-            let found = find_labeled_ext4_disk(&[first_str, second_str], "mvm-work");
-            assert_eq!(found, Some(second));
-        }
-
-        #[test]
-        fn find_labeled_ext4_disk_returns_none_when_nothing_matches() {
-            let dir = tempfile::tempdir().expect("tempdir");
-            let unformatted = dir.path().join("unformatted");
-            std::fs::write(&unformatted, vec![0u8; 1024 + 0x78 + 16]).expect("write");
-            let missing = dir.path().join("does-not-exist");
-
-            let unformatted_str = unformatted.to_str().expect("utf8 path");
-            let missing_str = missing.to_str().expect("utf8 path");
-            assert_eq!(
-                find_labeled_ext4_disk(&[missing_str, unformatted_str], "mvm-work"),
-                None
-            );
         }
 
         #[test]

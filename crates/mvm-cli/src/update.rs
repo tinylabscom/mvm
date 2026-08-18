@@ -100,6 +100,30 @@ fn strip_v_prefix(tag: &str) -> &str {
     tag.strip_prefix('v').unwrap_or(tag)
 }
 
+/// Download a release checksum manifest and prove the publisher signed it
+/// before any of its bytes are read.
+///
+/// The manifest decides which artifact bytes are acceptable, so whoever can
+/// serve one picks the artifact; TLS says nothing about who wrote it. Refuses
+/// on a missing, unparseable, or foreign-signed bundle — the shared release
+/// verifier does the deciding.
+fn fetch_signed_checksum_manifest(base_url: &str, asset: &str, version: &str) -> Result<String> {
+    let staged = tempfile::NamedTempFile::new()
+        .with_context(|| format!("creating staging file for {asset}"))?;
+    http::download_file(&format!("{base_url}/{asset}"), staged.path())
+        .with_context(|| format!("downloading {asset} — cannot verify integrity"))?;
+    mvm_build::release_signature::verify_release_archive_signature(
+        &mvm_build::release_signature::ReleaseSignatureRequest {
+            base_url,
+            asset,
+            archive_path: staged.path(),
+            version,
+        },
+    )
+    .with_context(|| format!("refusing to parse an unauthenticated checksum manifest ({asset})"))?;
+    std::fs::read_to_string(staged.path()).with_context(|| format!("reading {asset}"))
+}
+
 /// Parse a hex-encoded SHA256 digest from a `checksums-sha256.txt` entry.
 ///
 /// Each line is: `<64 hex chars>  <filename>`  (two spaces, shasum format).
@@ -206,11 +230,16 @@ fn download_release(version: &str, target: &str, tmp_dir: &Path) -> Result<()> {
 /// release's `kernel-<arch>-checksums-sha256.txt`, and write it to
 /// `dest`. The `--source download` arm of `mvmctl kernel build`.
 ///
+/// That manifest is itself signature-verified against the release identity
+/// before it is read, so the digest the kernel is held to comes from the
+/// publisher rather than from whoever answered the request.
+///
 /// Keyed by the mvmctl release tag: a given mvmctl can only ever fetch
 /// the kernel that shipped with it — never a substitute for an in-tree
 /// config edit (a source checkout compiles instead).
-/// `MVM_SKIP_HASH_VERIFY` is the documented emergency escape — never
-/// set it in CI.
+/// `MVM_SKIP_HASH_VERIFY` is the documented emergency escape for the digest
+/// comparison — never set it in CI. It does not waive the manifest signature;
+/// `MVM_SKIP_COSIGN_VERIFY` is that separate, larger concession.
 ///
 /// Available without `builder-vm`: lean clients cannot compile kernels
 /// locally, so downloading the release-matched kernel is their supported
@@ -226,7 +255,8 @@ pub(crate) fn download_kernel(arch: &str, variant: &str, dest: &Path) -> Result<
             .with_context(|| format!("creating kernel cache dir {}", parent.display()))?;
     }
 
-    let asset_url = format!("{base}/{GITHUB_REPO}/releases/download/{tag}/{asset}");
+    let release_base = format!("{base}/{GITHUB_REPO}/releases/download/{tag}");
+    let asset_url = format!("{release_base}/{asset}");
     let parent = dest
         .parent()
         .with_context(|| format!("kernel destination has no parent: {}", dest.display()))?;
@@ -248,15 +278,19 @@ pub(crate) fn download_kernel(arch: &str, variant: &str, dest: &Path) -> Result<
         )
     })?;
 
+    // The signature rung runs even under MVM_SKIP_HASH_VERIFY: that hatch
+    // waives comparing the digest, not the question of who published the
+    // manifest the digest comes from. Waiving the publisher takes the separate
+    // MVM_SKIP_COSIGN_VERIFY.
+    let manifest = fetch_signed_checksum_manifest(&release_base, &checksums, current_version())?;
+
     if std::env::var("MVM_SKIP_HASH_VERIFY").is_ok() {
         ui::warn("MVM_SKIP_HASH_VERIFY set — skipping kernel checksum verification (never in CI).");
         publish_downloaded_kernel(download, dest)?;
         return Ok(());
     }
 
-    let checksum_url = format!("{base}/{GITHUB_REPO}/releases/download/{tag}/{checksums}");
-    let expected = http::fetch_text(&checksum_url)
-        .context("downloading kernel checksums — cannot verify integrity")?
+    let expected = manifest
         .lines()
         .find(|l| l.contains(&asset))
         .with_context(|| format!("{asset} not found in {checksums}"))
@@ -680,6 +714,97 @@ fn verify_signature(version: &str, archive_name: &str, archive_path: &Path) -> R
 }
 
 /// Main entry point: check for updates and optionally install.
+/// Tag prefix for the boot-image release line. Images version on their own
+/// counter, so `v0.18.0` (binaries) and `boot-image/v0.1.0` (images) name
+/// different things and neither ordering means anything to the other.
+pub(crate) const BOOT_IMAGE_TAG_PREFIX: &str = "boot-image/v";
+
+/// A `major.minor.patch` triple, parsed so two tags can be ordered.
+///
+/// Ordering tags as strings puts `v0.10.0` before `v0.9.0`, which would report
+/// a newer image as older — the one wrong answer this whole comparison exists
+/// to avoid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct BootImageVersion {
+    major: u64,
+    minor: u64,
+    patch: u64,
+}
+
+impl BootImageVersion {
+    /// Parse the version out of a full `boot-image/vX.Y.Z` tag. Anything that
+    /// is not that shape returns `None` rather than a guess — a tag we cannot
+    /// order is one we must not claim to have ordered.
+    pub(crate) fn from_tag(tag: &str) -> Option<Self> {
+        Self::parse(tag.strip_prefix(BOOT_IMAGE_TAG_PREFIX)?)
+    }
+
+    fn parse(version: &str) -> Option<Self> {
+        // A pre-release or build suffix does not participate in the ordering
+        // this command needs; drop it rather than refuse the whole tag.
+        let core = version
+            .split(['-', '+'])
+            .next()
+            .unwrap_or(version)
+            .trim_end();
+        let mut parts = core.split('.');
+        let mut next = || parts.next()?.parse::<u64>().ok();
+        let major = next()?;
+        let minor = next()?;
+        let patch = next()?;
+        if parts.next().is_some() {
+            return None;
+        }
+        Some(Self {
+            major,
+            minor,
+            patch,
+        })
+    }
+}
+
+/// The highest published `boot-image/v*` tag, or `None` when the line has
+/// published nothing yet.
+///
+/// `/releases/latest` is the wrong endpoint here: it answers with the newest
+/// release across *every* tag namespace, which for a repo whose binaries
+/// release far more often is almost never a boot image. The full listing is
+/// filtered instead, and an empty result is a clean answer — "no published
+/// image line" is a real state, not a failure and not "behind".
+pub(crate) fn fetch_latest_boot_image_tag() -> Result<Option<String>> {
+    let url = format!("{}/repos/{}/releases", github_api_base(), GITHUB_REPO);
+    let json = http::fetch_json(&url)
+        .context("Failed to list GitHub releases. Check your network connection.")?;
+    let releases = json
+        .as_array()
+        .context("GitHub releases listing was not a JSON array")?;
+    Ok(highest_boot_image_tag(
+        releases.iter().filter_map(|r| r["tag_name"].as_str()),
+    ))
+}
+
+/// Pick the highest `boot-image/v*` tag from a set of tag names.
+///
+/// Split from the fetch so the ordering can be tested without a server.
+pub(crate) fn highest_boot_image_tag<'a>(tags: impl Iterator<Item = &'a str>) -> Option<String> {
+    tags.filter_map(|tag| BootImageVersion::from_tag(tag).map(|v| (v, tag)))
+        .max_by_key(|(v, _)| *v)
+        .map(|(_, tag)| tag.to_string())
+}
+
+/// Release-asset base URL for one boot-image tag.
+///
+/// Shares `MVM_UPDATE_DOWNLOAD_URL` with the binary updater so the network leg
+/// is redirectable in a test without a second override to remember.
+pub(crate) fn boot_image_asset_base_url(tag: &str) -> String {
+    format!(
+        "{}/{}/releases/download/{}",
+        github_download_base(),
+        GITHUB_REPO,
+        tag
+    )
+}
+
 pub fn update(check_only: bool, force: bool, skip_verify: bool) -> Result<()> {
     let current = current_version();
     ui::info(&format!("Current version: {}", current));

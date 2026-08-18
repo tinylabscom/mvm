@@ -107,14 +107,19 @@ pub use mvm_vmm::host::network_endpoint_spawn::EndpointTransport;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum EgressMode {
-    /// Framed WireRequest substitution (claims 12/13) — the default, secret-bearing path.
+    /// Framed `WireRequest` substitution over an already-open stream.
+    ///
+    /// **Not a guest→host transport.** Its one remaining consumer is the wasm
+    /// tier, whose `mvm:egress` host import runs on the host and connects to
+    /// this endpoint's Unix socket — host-internal IPC between two host
+    /// processes. No guest selects it or can speak it.
     #[default]
     Wire,
-    /// Raw TCP: first line `host:port`, then a byte splice. No secrets.
-    Raw,
     /// Authenticated FlowMux session on `GuestService::NetworkFlow`. This is
-    /// the converged single networking path; it replaces `Wire` and `Raw` for
-    /// admitted workloads.
+    /// the converged single networking path, and the only one a guest speaks.
+    ///
+    /// `Raw` is gone: an unauthenticated `host:port` line followed by a byte
+    /// splice, selected by nothing and speakable by no guest.
     FlowMux,
 }
 
@@ -185,6 +190,20 @@ pub struct EndpointConfig {
     /// Forward-leg (host → destination) timeout, seconds.
     #[serde(default = "default_forward_timeout_secs")]
     pub forward_timeout_secs: u64,
+    /// Upstream proxy for the forward leg, as the spawner resolved it from
+    /// host configuration. Carried here rather than read from this process's
+    /// environment because the endpoint self-confines before serving and is
+    /// not the component that owns host configuration.
+    ///
+    /// Strings rather than a parsed type so the wire format stays inert; the
+    /// endpoint parses and reports a bad value instead of silently dialling
+    /// direct.
+    #[serde(default)]
+    pub proxy_https: Option<String>,
+    #[serde(default)]
+    pub proxy_http: Option<String>,
+    #[serde(default)]
+    pub no_proxy: Option<String>,
     /// Override the value-store base dir. Default: the host's
     /// `~/.mvm/secrets` (honors `MVM_HOME`).
     #[serde(default)]
@@ -218,6 +237,15 @@ pub struct EndpointConfig {
     /// selects the raw-TCP splice serve loop. Fixed at admission — never sniffed.
     #[serde(default)]
     pub egress_mode: EgressMode,
+    /// Where to record that a guest completed an authenticated session.
+    ///
+    /// The endpoint binds and prints its handshake line before the guest has
+    /// booted, so "ready" at that point means "the placeholders are minted",
+    /// not "a guest reached me". This file is the second fact, written when
+    /// the first session authenticates, so the launch can tell the difference
+    /// between an endpoint that is serving and one that merely started.
+    #[serde(default)]
+    pub session_marker: Option<std::path::PathBuf>,
     /// How to resolve a bound secret's raw value: this host's local encrypted
     /// store (default), or a remote fleet-secrets daemon over a UDS. See
     /// [`ResolverBackend`].
@@ -315,6 +343,13 @@ pub fn assemble(
     // the redaction / reversible-replacement / TLS / recorder wiring; passing
     // `resolver` in means it no longer hardcodes a `LocalResolver`, so a
     // `Remote` backend actually reaches its `RemoteResolver`.
+    // Resolve the operator's proxy before building the service so a bad value
+    // is reported here rather than as an unexplained egress failure later.
+    let proxy = cfg.resolve_proxy()?;
+    if let Some(p) = proxy.as_ref() {
+        tracing::info!(proxy = %p.summary(), "forward leg routed through an upstream proxy");
+    }
+
     let (service, handed) = SubstitutionService::from_plan(
         crate::supervisor::network_endpoint_proxy::FromPlanInputs {
             plan_secrets: &cfg.secrets,
@@ -322,6 +357,7 @@ pub fn assemble(
             bindings: &bindings,
             resolver,
             forward_timeout_secs: cfg.forward_timeout_secs,
+            proxy,
             redaction: cfg.redaction.clone(),
             reversible_replacement: cfg.reversible_replacement.clone(),
             tls_intermediate,
@@ -425,6 +461,32 @@ pub fn build_audit_recorder(tenant: &str) -> Option<crate::supervisor::audit_rec
     ))
 }
 
+/// Refuse to boot a workload that will be handed placeholders nothing can
+/// resolve.
+///
+/// A placeholder is minted per secret and injected into the guest's
+/// environment. Substituting it back is the whole point: the guest holds
+/// `mvm-secret-<hex>` and the host swaps in the real credential when it
+/// originates the request. If the endpoint carries secrets but assembled no
+/// substitution service, the guest gets the placeholder and sends *that* to a
+/// real upstream.
+///
+/// Fails the launch rather than warning, because the failure is otherwise
+/// silent and lands at a third party.
+pub fn refuse_secrets_without_substitution(
+    cfg: &EndpointConfig,
+    assembled: bool,
+) -> anyhow::Result<()> {
+    if cfg.secrets.is_empty() || assembled {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "endpoint carries {} secret(s) but assembled no substitution service: \
+         the guest would be handed placeholders with nothing to resolve them",
+        cfg.secrets.len()
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -464,6 +526,9 @@ mod tests {
             redaction: mvm_core::policy::RedactionPolicy::default(),
             reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
             forward_timeout_secs: 30,
+            proxy_https: None,
+            proxy_http: None,
+            no_proxy: None,
             secret_store_dir: Some(dir.join("secrets")),
             binding_store_dir: Some(dir.join("bindings")),
             terminator_listen: None,
@@ -472,6 +537,7 @@ mod tests {
             egress_mode: EgressMode::Wire,
             resolver: ResolverBackend::default(),
             flowmux_identity: None,
+            session_marker: None,
         }
     }
 
@@ -592,6 +658,7 @@ mod tests {
                     auth_type: AuthType::Bearer,
                     allowed_hosts: vec!["api.openai.com".into()],
                     sigv4: None,
+                    provider: None,
                 },
             )
             .unwrap();
@@ -683,18 +750,6 @@ mod tests {
     }
 
     #[test]
-    fn config_roundtrips_egress_mode_raw() {
-        // The raw-egress mode selection must survive the stdin wire form so the
-        // bin picks the raw splice loop for exactly the VMs admitted without secrets.
-        let mut cfg = vsock_cfg(vec![], std::path::Path::new("/tmp/x"));
-        cfg.egress_mode = EgressMode::Raw;
-        let bytes = serde_json::to_vec(&cfg).unwrap();
-        assert_eq!(parse(&bytes).unwrap(), cfg);
-        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(v["egress_mode"], serde_json::json!("raw"));
-    }
-
-    #[test]
     fn config_defaults_egress_mode_to_wire() {
         // A config without `egress_mode` parses (field is `#[serde(default)]`) and
         // defaults to the secret-bearing WireRequest path — byte-identical to before.
@@ -749,6 +804,7 @@ mod tests {
                     auth_type: AuthType::Bearer,
                     allowed_hosts: vec!["api.openai.com".into()],
                     sigv4: None,
+                    provider: None,
                 },
             )
             .unwrap();
@@ -804,6 +860,7 @@ mod tests {
                     auth_type: AuthType::Bearer,
                     allowed_hosts: vec!["api.openai.com".into()],
                     sigv4: None,
+                    provider: None,
                 },
             )
             .unwrap();
@@ -831,6 +888,7 @@ mod tests {
                     auth_type: AuthType::Bearer,
                     allowed_hosts: vec!["api.openai.com".into()],
                     sigv4: None,
+                    provider: None,
                 },
             )
             .unwrap();
@@ -1007,5 +1065,88 @@ mod tests {
         };
         let resolved = service.resolver().resolve(&secret_ref).unwrap();
         assert_eq!(resolved.expose_secret().as_slice(), b"sk-live-from-vault");
+    }
+}
+
+impl EndpointConfig {
+    /// Parse the carried proxy strings into a client configuration.
+    ///
+    /// `Ok(None)` means "dial direct"; an `Err` means the operator configured
+    /// something unusable and is reported rather than downgraded to a direct
+    /// dial. A host that force-tunnels its egress cannot reach anything
+    /// directly, so silently ignoring a typo would turn a fixable
+    /// misconfiguration into an unexplained total egress failure.
+    pub fn resolve_proxy(&self) -> Result<Option<mvm_http::ProxyConfig>, mvm_http::ProxyError> {
+        if self.proxy_https.is_none() && self.proxy_http.is_none() {
+            return Ok(None);
+        }
+        let parse = |s: &Option<String>| -> Result<Option<mvm_http::Proxy>, mvm_http::ProxyError> {
+            s.as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .map(mvm_http::Proxy::parse)
+                .transpose()
+        };
+        let cfg = mvm_http::ProxyConfig {
+            https: parse(&self.proxy_https)?,
+            http: parse(&self.proxy_http)?,
+            no_proxy: self
+                .no_proxy
+                .as_deref()
+                .map(mvm_http::NoProxy::parse)
+                .unwrap_or_default(),
+        };
+        Ok((!cfg.is_empty()).then_some(cfg))
+    }
+}
+
+#[cfg(test)]
+mod proxy_config_tests {
+    use super::*;
+
+    fn cfg_with(https: Option<&str>, http: Option<&str>, no_proxy: Option<&str>) -> EndpointConfig {
+        let mut cfg: EndpointConfig = serde_json::from_str(
+            r#"{"tenant_id":"t","secrets":[],"transport":{"kind":"uds","path":"/tmp/x.sock"}}"#,
+        )
+        .expect("minimal endpoint config parses");
+        cfg.proxy_https = https.map(str::to_string);
+        cfg.proxy_http = http.map(str::to_string);
+        cfg.no_proxy = no_proxy.map(str::to_string);
+        cfg
+    }
+
+    #[test]
+    fn no_proxy_fields_means_direct() {
+        assert!(
+            cfg_with(None, None, None)
+                .resolve_proxy()
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn each_scheme_resolves_independently() {
+        let cfg = cfg_with(
+            Some("http://secure.corp:3128"),
+            Some("socks5://plain.corp:1080"),
+            Some("internal.example"),
+        );
+        let resolved = cfg.resolve_proxy().unwrap().expect("configured");
+        assert_eq!(resolved.select("api.example", true).unwrap().port, 3128);
+        assert_eq!(
+            resolved.select("api.example", false).unwrap().kind,
+            mvm_http::ProxyKind::Socks5
+        );
+        assert!(
+            resolved.select("internal.example", true).is_none(),
+            "no_proxy still bypasses"
+        );
+    }
+
+    #[test]
+    fn a_malformed_proxy_is_an_error_not_a_silent_direct_dial() {
+        let cfg = cfg_with(Some("ftp://nope"), None, None);
+        assert!(cfg.resolve_proxy().is_err());
     }
 }

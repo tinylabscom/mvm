@@ -180,9 +180,9 @@ pub const RNG_SEED_LEN: usize = 32;
 /// Fresh seed from the host OS CSPRNG. Call once per boot — reusing a seed
 /// across guests would hand them a shared starting state.
 pub fn fresh_rng_seed() -> [u8; RNG_SEED_LEN] {
-    use rand::RngCore;
+    use rand::Rng;
     let mut seed = [0u8; RNG_SEED_LEN];
-    rand::rngs::OsRng.fill_bytes(&mut seed);
+    rand::rng().fill_bytes(&mut seed);
     seed
 }
 

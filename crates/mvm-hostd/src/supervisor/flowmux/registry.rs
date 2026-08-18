@@ -36,6 +36,10 @@ pub enum FlowClass {
     Tcp,
     Udp,
     Dns,
+    /// A typed HTTP flow the host may transform before forwarding.
+    Http,
+    /// A one-shot ICMP echo exchange.
+    Icmp,
 }
 
 impl std::fmt::Display for FlowClass {
@@ -44,6 +48,8 @@ impl std::fmt::Display for FlowClass {
             FlowClass::Tcp => write!(f, "tcp"),
             FlowClass::Udp => write!(f, "udp"),
             FlowClass::Dns => write!(f, "dns"),
+            FlowClass::Http => write!(f, "http"),
+            FlowClass::Icmp => write!(f, "icmp"),
         }
     }
 }
@@ -77,6 +83,10 @@ pub struct RegistryLimits {
     pub max_tcp: usize,
     pub max_udp: usize,
     pub max_dns: usize,
+    /// Concurrent typed HTTP flows.
+    pub max_http: usize,
+    /// Concurrent in-flight ICMP echoes.
+    pub max_icmp: usize,
     pub initial_credit: u32,
     /// How long a UDP association may sit idle before the host closes it.
     pub udp_idle_timeout: Duration,
@@ -89,6 +99,13 @@ pub struct RegistryLimits {
     pub udp_open_rate: u32,
     /// DNS resolve requests per second (burst == rate). Zero disables.
     pub dns_resolve_rate: u32,
+    /// ICMP echoes per second (burst == rate). Zero disables.
+    pub icmp_echo_rate: u32,
+    /// How long a relay waits for the guest to return credit before giving up
+    /// on the stream. Sits beside `initial_credit` because it is the other half
+    /// of the same window: one says how much room the guest starts with, this
+    /// says how long the host will wait to get it back.
+    pub credit_wait: Duration,
 }
 
 impl Default for RegistryLimits {
@@ -97,12 +114,16 @@ impl Default for RegistryLimits {
             max_tcp: 4096,
             max_udp: 256,
             max_dns: 256,
+            max_http: 256,
+            max_icmp: 64,
             initial_credit: 64 * 1024,
             udp_idle_timeout: Duration::from_secs(60),
             max_udp_peers: 16,
             tcp_connect_rate: 0,
             udp_open_rate: 0,
             dns_resolve_rate: 0,
+            icmp_echo_rate: 0,
+            credit_wait: Duration::from_secs(30),
         }
     }
 }
@@ -128,31 +149,41 @@ impl StreamRegistry {
         }
     }
 
+    /// How many live streams of `class` exist.
+    ///
+    /// One filter for every class: the per-class wrappers below differed only
+    /// in the variant they named, so a new class had to remember to add a
+    /// fourth copy or be silently uncounted against its own ceiling.
+    #[must_use]
+    pub fn live_in_class(&self, class: FlowClass) -> usize {
+        self.streams
+            .values()
+            .filter(|e| e.class == class && e.state != StreamState::Closed)
+            .count()
+    }
+
     /// How many live TCP streams exist.
     #[must_use]
     pub fn live_tcp(&self) -> usize {
-        self.streams
-            .values()
-            .filter(|e| e.class == FlowClass::Tcp && e.state != StreamState::Closed)
-            .count()
+        self.live_in_class(FlowClass::Tcp)
     }
 
     /// How many live UDP associations exist.
     #[must_use]
     pub fn live_udp(&self) -> usize {
-        self.streams
-            .values()
-            .filter(|e| e.class == FlowClass::Udp && e.state != StreamState::Closed)
-            .count()
+        self.live_in_class(FlowClass::Udp)
     }
 
     /// How many live DNS resolution streams exist.
     #[must_use]
     pub fn live_dns(&self) -> usize {
-        self.streams
-            .values()
-            .filter(|e| e.class == FlowClass::Dns && e.state != StreamState::Closed)
-            .count()
+        self.live_in_class(FlowClass::Dns)
+    }
+
+    /// How many live typed HTTP flows exist.
+    #[must_use]
+    pub fn live_http(&self) -> usize {
+        self.live_in_class(FlowClass::Http)
     }
 
     /// Return the entry for a live stream, if any.
@@ -238,6 +269,8 @@ impl StreamRegistry {
             FlowClass::Tcp => self.limits.max_tcp,
             FlowClass::Udp => self.limits.max_udp,
             FlowClass::Dns => self.limits.max_dns,
+            FlowClass::Http => self.limits.max_http,
+            FlowClass::Icmp => self.limits.max_icmp,
         }
     }
 
@@ -368,11 +401,7 @@ impl StreamRegistry {
     }
 
     fn live_count(&self, class: FlowClass) -> usize {
-        match class {
-            FlowClass::Tcp => self.live_tcp(),
-            FlowClass::Udp => self.live_udp(),
-            FlowClass::Dns => self.live_dns(),
-        }
+        self.live_in_class(class)
     }
 
     fn insert(&mut self, stream_id: u32, class: FlowClass) {
@@ -398,6 +427,8 @@ pub fn class_for_open(opcode: mvm_contract::protocol::network_flow::Opcode) -> O
         Opcode::OpenTcp | Opcode::InboundOpen => Some(FlowClass::Tcp),
         Opcode::OpenUdp => Some(FlowClass::Udp),
         Opcode::Resolve => Some(FlowClass::Dns),
+        Opcode::OpenHttp => Some(FlowClass::Http),
+        Opcode::IcmpEcho => Some(FlowClass::Icmp),
         _ => None,
     }
 }

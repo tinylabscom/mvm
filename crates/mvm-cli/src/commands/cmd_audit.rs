@@ -135,7 +135,7 @@ impl Commands {
     /// reserve that channel before reconcile-on-entry or other startup chrome.
     pub(super) fn emits_machine_readable_stdout(&self) -> bool {
         match self {
-            Commands::Run(a) => a.json,
+            Commands::Run(a) => a.run.json,
             Commands::SdkNoVm(_) => true,
             Commands::Machine(a) => match &a.action {
                 // Folded advanced ops delegate to their own check.
@@ -143,7 +143,7 @@ impl Commands {
                 // `machine run --json` streams a structured MachineRunSummary;
                 // `machine run --up-json` emits the SDK boot envelope;
                 // reserve stdout so reconcile chrome can't interleave.
-                machine::MachineAction::Run(r) => r.json || r.up_json,
+                machine::MachineAction::Run(r) => r.run.json || r.up_json,
                 // `machine timeline --json` prints a structured lineage.
                 machine::MachineAction::Timeline(t) => t.json,
                 // A `--json` restore reuses the fork path's structured output.
@@ -209,6 +209,9 @@ impl Commands {
             #[cfg(feature = "builder-vm")]
             Commands::BuilderShellJob(_) => "__builder-shell-job",
             Commands::Explain(_) => "explain",
+            Commands::Bench(_) => "bench",
+            Commands::Plugin(_) => "plugin",
+            Commands::Completions(_) => "completions",
             Commands::Run(_) => "run",
             Commands::SdkNoVm(_) => "__sdk-no-vm",
             Commands::Doctor(_) => "doctor",

@@ -169,11 +169,22 @@ const CHECKPOINT_SUB: &[(&str, AuditPosture)] = &[
     ("verify", AuditPosture::ReadOnly),
 ];
 
+// `mvmctl image boot` — the cached default boot image's own lifecycle.
+// `status` reads the cache, `check` adds a read-only releases query, and
+// `update` replaces the cached bytes, which is the same acquisition the
+// `pull` leaf records.
+const IMAGE_BOOT_SUB: &[(&str, AuditPosture)] = &[
+    ("status", AuditPosture::ReadOnly),
+    ("check", AuditPosture::ReadOnly),
+    ("update", AuditPosture::Emits("ImageFetch")),
+];
+
 const IMAGE_SUB: &[(&str, AuditPosture)] = &[
     ("pull", AuditPosture::Emits("ImageFetch")),
     ("ls", AuditPosture::ReadOnly),
     ("inspect", AuditPosture::ReadOnly),
     ("rm", AuditPosture::Emits("CachePrune")),
+    ("boot", AuditPosture::DelegatesToSub(IMAGE_BOOT_SUB)),
 ];
 
 // `mvmctl pack` — the versioned attested-pack cache lifecycle
@@ -292,6 +303,9 @@ const SECRET_SUB: &[(&str, AuditPosture)] = &[
     ("set", AuditPosture::Emits("SecretSet")),
     ("get", AuditPosture::Emits("SecretGet")),
     ("ls", AuditPosture::ReadOnly),
+    // Reads the catalog compiled into this binary. No store access, no
+    // network, no tenant scope — nothing to audit.
+    ("providers", AuditPosture::ReadOnly),
     ("rm", AuditPosture::Emits("SecretRm")),
 ];
 
@@ -479,6 +493,22 @@ const AUDIT_POSTURE: &[(&str, AuditPosture)] = &[
     // and `init`.
     ("bootstrap", AuditPosture::InteractiveOrControl),
     ("doctor", AuditPosture::ReadOnly),
+    // `bench` emits nothing itself: it spawns `mvmctl run` once per sample,
+    // and each of those launches carries its own `cmd.run` envelope and its
+    // own signed-plan admission. Auditing the harness on top would double-count
+    // the launches it exists to measure.
+    ("bench", AuditPosture::InteractiveOrControl),
+    // Renders a completion script to stdout and touches nothing.
+    ("completions", AuditPosture::ReadOnly),
+    // `plugin` writes integration files into the project directory and starts
+    // nothing. Its subcommands are leaves, not a delegating group.
+    (
+        "plugin",
+        AuditPosture::DelegatesToSub(&[
+            ("list", AuditPosture::ReadOnly),
+            ("install", AuditPosture::InteractiveOrControl),
+        ]),
+    ),
     // Resolves and validates the Studio install; spawns nothing today.
     ("dashboard", AuditPosture::ReadOnly),
     // Deploy mutates the local sealed-artifact store and is wrapped by the

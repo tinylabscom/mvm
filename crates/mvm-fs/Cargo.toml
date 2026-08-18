@@ -13,7 +13,7 @@ description = "Image → mountable rootfs for mvm: OCI distribution client (regi
 substrate_server_category = "per-workload immutable snapshot helper (privileged APFS sealing and materialization)"
 
 [dependencies]
-async-trait = "0.1"
+async-trait.workspace = true
 ed25519-dalek.workspace = true
 ext4-view.workspace = true
 flate2.workspace = true

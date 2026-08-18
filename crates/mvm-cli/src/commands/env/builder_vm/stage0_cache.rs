@@ -403,30 +403,10 @@ pub(super) fn is_orphan_stage0_staging_dir_name(name: &str) -> bool {
     false
 }
 
-/// Total byte size of a directory tree. Best-effort — failures stat-ing
-/// individual entries are skipped silently because the caller only uses
-/// this for the "bytes freed" UI counter, never for correctness.
+/// Disk clearing the staging tree would return. Shared with `cache prune` so
+/// the repair and prune paths quote the same number for the same tree.
 fn stage0_dir_size_bytes(path: &std::path::Path) -> u64 {
-    let mut total = 0u64;
-    let mut stack = vec![path.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let entry_path = entry.path();
-            match entry.file_type() {
-                Ok(ft) if ft.is_dir() => stack.push(entry_path),
-                Ok(_) => {
-                    if let Ok(meta) = entry_path.metadata() {
-                        total = total.saturating_add(meta.len());
-                    }
-                }
-                Err(_) => {}
-            }
-        }
-    }
-    total
+    mvm_core::disk_usage::tree_bytes(path)
 }
 
 /// Fingerprint the full set of source inputs that determine the
@@ -899,9 +879,9 @@ pub(super) fn promote_builder_vm_stage0_cache(
 /// `builder-vm-image` release-workflow job into the local cache dir,
 /// SHA-256-verified.
 ///
-/// Mirrors `download_dev_image_inner` for the interactive image, minus
-/// cosign signing (the signed-manifest path extends to builder-vm
-/// artifacts as a follow-up). The required artifacts are `vmlinux`,
+/// Mirrors `download_dev_image_inner` for the interactive image: the checksum
+/// manifest is signature-verified before it is parsed, and every artifact is
+/// then held to the digest it pins. The required artifacts are `vmlinux`,
 /// `rootfs.ext4`, `cmdline.txt`, and `manifest.json`; the runtime
 /// builder-image loader rejects caches that do not carry the full
 /// contract.
@@ -920,13 +900,16 @@ pub(super) fn download_builder_vm_image(arch: &str, cache_dir: &str) -> Result<(
     let rootfs_url = format!("{base_url}/{}", names.rootfs);
     let cmdline_url = format!("{base_url}/{}", names.cmdline);
     let manifest_url = format!("{base_url}/{}", names.manifest);
-    let checksums_url = format!("{base_url}/{}", names.checksums);
 
     // The builder-image cache contract is fail-closed: every artifact
     // the runtime loader consumes must be listed in checksums and
     // downloaded here before the cache is considered usable.
     let expected = fetch_expected_hashes(
-        &checksums_url,
+        &ChecksumManifest {
+            base_url: &base_url,
+            asset: &names.checksums,
+            version,
+        },
         &[
             &names.kernel,
             &names.rootfs,

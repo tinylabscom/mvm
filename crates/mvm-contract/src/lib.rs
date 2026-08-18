@@ -22,6 +22,11 @@
 
 extern crate alloc;
 
+/// Admission-bound AI assurance sessions: the input envelope an AI
+/// workload receives after admission, the authority it runs under, and
+/// the host-derived outcome of a trial.
+#[cfg(feature = "protocol")]
+pub mod assurance;
 /// The one error a generated builder returns: a required field was
 /// never set. Shared so every input struct reports it identically.
 pub mod builder;
@@ -54,6 +59,7 @@ pub mod protocol;
 #[cfg(feature = "protocol")]
 pub mod provenance;
 #[cfg(feature = "protocol")]
+pub mod service_catalog;
 pub mod stream;
 /// The guest-side placeholder token a secret-bearing request carries: its
 /// reserved namespace, its opaque newtype, and the header scan. Minting and
@@ -65,6 +71,7 @@ pub mod verify;
 
 #[cfg(feature = "volume")]
 pub mod volume;
+pub mod workload_identity;
 #[cfg(feature = "local")]
 pub use volume::LocalBackend;
 #[cfg(feature = "volume")]

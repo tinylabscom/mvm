@@ -24,6 +24,9 @@ on:
       - "crates/**"
       - "src/**"
       - "xtask/**"
+      - "nix/**"
+      - "flake.nix"
+      - "flake.lock"
       - "Cargo.toml"
       - "Cargo.lock"
       - "rust-toolchain.toml"
@@ -45,11 +48,34 @@ jobs:
   warm:
     name: Warm
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v6
 
       - uses: ./.github/actions/free-disk
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@main
+
+      - name: Restore and publish the trusted Nix binary cache
+        uses: DeterminateSystems/magic-nix-cache-action@v14
+        with:
+          use-gha-cache: true
+          use-flakehub: false
+          diagnostic-endpoint: ""
+
+      - name: Build Nix outputs to populate the binary cache
+        run: |
+          set -euo pipefail
+          nix build --print-build-logs --no-link \
+            ./nix#checks.x86_64-linux.guest-rootfs-no-glibc \
+            ./nix#checks.x86_64-linux.guest-rootfs-package-budget
+          nix build --print-build-logs --no-link \
+            ./nix/images/runtime-overlay#packages.x86_64-linux.default \
+            ./nix/images/runtime-overlay#packages.x86_64-linux.sdk-sidecar \
+            ./nix/images/runtime-overlay#packages.x86_64-linux.sdk-sidecar-image
+          nix build --print-build-logs --impure --no-link \
+            ./nix/images/default-tenant#packages.x86_64-linux.default
 
       # Nightly is what the heavy lanes (lint-core, lint-features,
       # test-workspace) use, so it is the toolchain worth warming. Stable lanes

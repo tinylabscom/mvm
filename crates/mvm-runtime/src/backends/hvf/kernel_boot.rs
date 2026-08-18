@@ -30,7 +30,7 @@ use super::hv_impl::{HvfHandle, HvfVcpu};
 use super::snapshot::HVF_SNAPSHOT_BACKEND_KIND;
 use super::sys::*;
 use super::vcpu::esr_ec;
-use super::{default_bootargs, default_virtiofs_bootargs};
+use super::{BootFault, default_bootargs, default_virtiofs_bootargs};
 use crate::vmm::device::Pl011;
 use crate::vmm::device_state::capture_device_states;
 use crate::vmm::hv::{CoreReg, HypervisorVcpu, SysReg, VcpuHandle};
@@ -229,6 +229,15 @@ pub struct HostChannels {
     pub virtiofs_root: Option<PathBuf>,
     /// Read-only live host-directory shares as `(virtio-fs tag, host path)`.
     pub virtiofs_shares: Vec<(String, PathBuf)>,
+    /// Host console log to mirror guest output into as the guest emits it.
+    ///
+    /// The whole-run transcript comes back in [`KernelBootResult::console`]
+    /// either way; this is what makes it readable *before* the run loop
+    /// returns, so a guest that never finishes booting can be diagnosed while
+    /// it is still hung instead of only once it has been stopped. Opened
+    /// write-only: the console carries guest output to the host and never the
+    /// other way.
+    pub console_log: Option<PathBuf>,
     /// Optional host-visible marker acknowledged after the run loop enters its
     /// pause hold. It is removed when resume is observed.
     pub pause_state: Option<PathBuf>,
@@ -417,7 +426,7 @@ enum KernelImageSource<'a> {
     File(&'a Path),
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct KernelImageMeta {
     file_len: usize,
     reserved_len: usize,
@@ -425,7 +434,8 @@ struct KernelImageMeta {
 
 impl KernelImageMeta {
     fn new(file_len: usize, image_size: u64, file_backed: bool) -> Result<Self, HvfError> {
-        let image_size = usize::try_from(image_size).map_err(|_| HvfError::BadKernel)?;
+        let image_size =
+            usize::try_from(image_size).map_err(|_| HvfError::BadBoot(BootFault::Overflow))?;
         let mapped_len = if file_backed {
             page_rounded_len(file_len)?
         } else {
@@ -442,21 +452,24 @@ impl KernelImageSource<'_> {
     fn metadata(self) -> Result<KernelImageMeta, HvfError> {
         match self {
             Self::Bytes(image) => {
-                let hdr = kernel_image::parse(image).map_err(|_| HvfError::BadKernel)?;
+                let hdr = kernel_image::parse(image)
+                    .map_err(|_| HvfError::BadBoot(BootFault::KernelNotArm64Image))?;
                 KernelImageMeta::new(image.len(), hdr.image_size, false)
             }
             Self::File(path) => {
-                let mut file = File::open(path).map_err(|_| HvfError::BadKernel)?;
+                let mut file = File::open(path)
+                    .map_err(|e| HvfError::BadBoot(BootFault::KernelOpen(e.kind())))?;
                 let mut header = [0_u8; 64];
                 file.read_exact(&mut header)
-                    .map_err(|_| HvfError::BadKernel)?;
-                let hdr = kernel_image::parse(&header).map_err(|_| HvfError::BadKernel)?;
+                    .map_err(|e| HvfError::BadBoot(BootFault::KernelRead(e.kind())))?;
+                let hdr = kernel_image::parse(&header)
+                    .map_err(|_| HvfError::BadBoot(BootFault::KernelNotArm64Image))?;
                 let len = file
                     .metadata()
-                    .map_err(|_| HvfError::BadKernel)?
+                    .map_err(|e| HvfError::BadBoot(BootFault::KernelOpen(e.kind())))?
                     .len()
                     .try_into()
-                    .map_err(|_| HvfError::BadKernel)?;
+                    .map_err(|_| HvfError::BadBoot(BootFault::Overflow))?;
                 KernelImageMeta::new(len, hdr.image_size, true)
             }
         }
@@ -490,14 +503,18 @@ fn initrd_load_offset(
     let fallback = kernel_end
         .checked_add(INITRD_ALIGNMENT - 1)
         .map(|value| value / INITRD_ALIGNMENT * INITRD_ALIGNMENT)
-        .ok_or(HvfError::BadKernel)?;
+        .ok_or(HvfError::BadBoot(BootFault::Overflow))?;
     if fallback
         .checked_add(initrd_len)
         .is_some_and(|end| end <= dtb_offset)
     {
         Ok(fallback)
     } else {
-        Err(HvfError::BadKernel)
+        Err(HvfError::BadBoot(BootFault::InitrdNoRoom {
+            kernel_end,
+            initrd_len,
+            dtb_offset,
+        }))
     }
 }
 
@@ -515,7 +532,10 @@ fn boot_kernel_impl(params: KernelBootUntilParams<'_>) -> Result<KernelBootResul
         quota_record,
     } = params;
     if disks.len() > MAX_DISKS {
-        return Err(HvfError::BadKernel);
+        return Err(HvfError::BadBoot(BootFault::TooManyDisks {
+            given: disks.len(),
+            max: MAX_DISKS,
+        }));
     }
     // Validate it's an arm64 Image; we load at the fixed boot-protocol offset.
     let kernel_meta = kernel.metadata()?;
@@ -523,12 +543,18 @@ fn boot_kernel_impl(params: KernelBootUntilParams<'_>) -> Result<KernelBootResul
     let load_off = KERNEL_LOAD_OFFSET as usize;
     let dtb_off = ram_size
         .checked_sub(FDT_MAX_SIZE as usize)
-        .ok_or(HvfError::BadKernel)?; // DTB window at top of RAM
+        .ok_or(HvfError::BadBoot(BootFault::GuestRamTooSmall {
+            ram: ram_size,
+            needed: FDT_MAX_SIZE as usize,
+        }))?; // DTB window at top of RAM
     let kernel_end = load_off
         .checked_add(kernel_meta.reserved_len)
-        .ok_or(HvfError::BadKernel)?;
+        .ok_or(HvfError::BadBoot(BootFault::Overflow))?;
     if kernel_end > dtb_off {
-        return Err(HvfError::BadKernel);
+        return Err(HvfError::BadBoot(BootFault::KernelTooLarge {
+            needed: kernel_end,
+            available: dtb_off,
+        }));
     }
     // Keep the stable 256 MiB placement when it fits, but support constrained
     // guests by placing the initramfs immediately after the kernel.
@@ -588,7 +614,10 @@ fn boot_kernel_impl(params: KernelBootUntilParams<'_>) -> Result<KernelBootResul
     let has_virtiofs_root = channels.virtiofs_root.is_some();
     let fs_count = usize::from(has_virtiofs_root) + channels.virtiofs_shares.len();
     if fs_count > MAX_VIRTIOFS_SHARES + 1 {
-        return Err(HvfError::BadKernel);
+        return Err(HvfError::BadBoot(BootFault::TooManyFilesystems {
+            given: fs_count,
+            max: MAX_VIRTIOFS_SHARES + 1,
+        }));
     }
     for index in 0..fs_count {
         virtio_nodes.push((
@@ -609,7 +638,10 @@ fn boot_kernel_impl(params: KernelBootUntilParams<'_>) -> Result<KernelBootResul
         Some(&rng_seed),
     );
     if dtb.len() > FDT_MAX_SIZE as usize {
-        return Err(HvfError::BadKernel);
+        return Err(HvfError::BadBoot(BootFault::DtbTooLarge {
+            needed: dtb.len(),
+            max: FDT_MAX_SIZE as usize,
+        }));
     }
 
     if channels.restore_frame.is_none() {
@@ -649,6 +681,7 @@ fn boot_kernel_impl(params: KernelBootUntilParams<'_>) -> Result<KernelBootResul
                 builder_control_sockets: channels.builder_control_sockets,
                 virtiofs_root: channels.virtiofs_root,
                 virtiofs_shares: channels.virtiofs_shares,
+                console_log: channels.console_log,
                 pause_state: channels.pause_state,
                 snapshot_request: channels.snapshot_request,
                 snapshot_ram: channels.snapshot_ram,
@@ -710,6 +743,8 @@ struct RunInputs {
     /// When set, serve this host dir to the guest as a read-only virtiofs root.
     virtiofs_root: Option<PathBuf>,
     virtiofs_shares: Vec<(String, PathBuf)>,
+    /// Host console log the PL011 mirrors guest output into as it arrives.
+    console_log: Option<PathBuf>,
     pause_state: Option<PathBuf>,
     snapshot_request: Option<PathBuf>,
     snapshot_ram: Option<PathBuf>,
@@ -748,6 +783,7 @@ unsafe fn run(
         builder_control_sockets,
         virtiofs_root,
         virtiofs_shares,
+        console_log,
         pause_state,
         snapshot_request,
         snapshot_ram,
@@ -900,6 +936,14 @@ unsafe fn run(
         });
 
         let mut uart = Pl011::new(UART_BASE);
+        // Mirror guest output to the host log as it arrives. Write-only, and
+        // best-effort: a console log that cannot be opened costs a diagnostic,
+        // never the boot. The full transcript still comes back in the result.
+        if let Some(path) = console_log.as_deref()
+            && let Ok(file) = mvm_vmm::host::console_capture::open_console_capture(path)
+        {
+            uart.stream_to(Box::new(file));
+        }
         // One virtio-blk per disk image (`/dev/vda`, `/dev/vdb`, …) at its window.
         let mut virtio_disks: Vec<VirtioBlk> = disks
             .into_iter()
@@ -1417,5 +1461,75 @@ mod tests {
         assert_eq!(std::fs::read(&kernel).unwrap(), b"abcdefgh");
         let mapped = unsafe { std::slice::from_raw_parts(ram.as_ptr().add(HVF_PAGE_SIZE), 8) };
         assert_eq!(mapped, b"Zbcdefgh");
+    }
+
+    /// The point of the split: the four things an operator can actually do
+    /// something about must not print the same. Before this, a missing kernel,
+    /// an empty one, a truncated one and one that is not an arm64 image were
+    /// all `BadKernel` — the operator had to read the source and guess.
+    #[test]
+    fn each_kernel_failure_names_itself() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        let missing = dir.path().join("not-here");
+        assert_eq!(
+            KernelImageSource::File(&missing).metadata(),
+            Err(HvfError::BadBoot(BootFault::KernelOpen(
+                std::io::ErrorKind::NotFound
+            )))
+        );
+
+        // Zero bytes: the header read cannot be satisfied.
+        let empty = dir.path().join("empty");
+        std::fs::write(&empty, b"").expect("write empty");
+        assert!(matches!(
+            KernelImageSource::File(&empty).metadata(),
+            Err(HvfError::BadBoot(BootFault::KernelRead(_)))
+        ));
+
+        // A full header's worth of bytes that is not an arm64 Image.
+        let garbage = dir.path().join("garbage");
+        std::fs::write(&garbage, [0x5a_u8; 128]).expect("write garbage");
+        assert_eq!(
+            KernelImageSource::File(&garbage).metadata(),
+            Err(HvfError::BadBoot(BootFault::KernelNotArm64Image))
+        );
+
+        // In-memory bytes take the same header check.
+        assert_eq!(
+            KernelImageSource::Bytes(&[0x5a_u8; 128]).metadata(),
+            Err(HvfError::BadBoot(BootFault::KernelNotArm64Image))
+        );
+    }
+
+    /// A zero-length mapping and an overflowing one are different faults, and
+    /// `page_rounded_len` is where both are decided.
+    #[test]
+    fn page_rounding_separates_an_empty_image_from_an_overflowing_one() {
+        assert_eq!(
+            page_rounded_len(0),
+            Err(HvfError::BadBoot(BootFault::KernelEmpty))
+        );
+        assert_eq!(
+            page_rounded_len(usize::MAX),
+            Err(HvfError::BadBoot(BootFault::Overflow))
+        );
+        assert_eq!(page_rounded_len(1), Ok(HVF_PAGE_SIZE));
+    }
+
+    /// The initramfs placement failure carries the three numbers needed to see
+    /// why it did not fit, instead of asserting that the kernel is bad.
+    #[test]
+    fn no_room_for_the_initramfs_reports_the_window_it_could_not_fit() {
+        // Kernel ends past where the DTB window starts: nothing can fit.
+        let err = initrd_load_offset(4096, 1 << 20, 8192).expect_err("cannot fit");
+        assert_eq!(
+            err,
+            HvfError::BadBoot(BootFault::InitrdNoRoom {
+                kernel_end: 4096,
+                initrd_len: 1 << 20,
+                dtb_offset: 8192,
+            })
+        );
     }
 }

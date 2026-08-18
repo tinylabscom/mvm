@@ -15,13 +15,6 @@
       ]
     },
     {
-      "path": "crates/mvm-agentd/src/substitution_client.rs",
-      "package": "mvm-agentd",
-      "claims": [
-        13
-      ]
-    },
-    {
       "path": "crates/mvm-agentd/src/vsock/verb_grant.rs",
       "package": "mvm-agentd",
       "claims": [
@@ -272,6 +265,13 @@
       "package": "mvm-hostd",
       "claims": [
         13
+      ]
+    },
+    {
+      "path": "crates/mvm-hostd/src/supervisor/wall_clock.rs",
+      "package": "mvm-hostd",
+      "claims": [
+        18
       ]
     },
     {
@@ -1007,6 +1007,11 @@
       "reason": "the discriminating input is a bare relative name that exists as a file or directory in the process's current directory. A test cannot create one without writing into the repo working tree or mutating process-global CWD shared by parallel tests under the documented cargo test fallback."
     },
     {
+      "file": "crates/mvm-core/src/plan/synthesis.rs",
+      "mutant": "replace SynthesisInput<'a>::builder -> SynthesisInputBuilder<'a> with Default::default()",
+      "reason": "provably equivalent: `SynthesisInput::builder` is a one-line alias for `SynthesisInputBuilder::new()`, and this file's `impl Default for SynthesisInputBuilder` returns `Self::new()`, so `Default::default()` evaluates the identical expression. No test can distinguish the two, and the builder's own required-field refusal is asserted directly by the empty-builder test beside it."
+    },
+    {
       "file": "crates/mvm-hostd/src/admission_budget.rs",
       "mutant": "replace committed -> MachineCharge with Default::default()",
       "reason": "committed aggregates persisted MachineCharge records from disk; the aggregation logic is covered by integration tests that write and read back real records."
@@ -1030,6 +1035,21 @@
       "file": "crates/mvm-hostd/src/plan_admission.rs",
       "mutant": "replace * with + in admit_within_host_budget",
       "reason": "The BUNDLE_JSON_MAX_BYTES cap is fail-closed; shrinking it refuses strictly more input. Catching the mutation needs a fixture between the two sizes, which the existing boundary test deliberately avoids as a tautology."
+    },
+    {
+      "file": "crates/mvm-hostd/src/plan_admission.rs",
+      "mutant": "replace AdmitAndStartParams<'a>::builder -> AdmitAndStartParamsBuilder<'a> with Default::default()",
+      "reason": "provably equivalent: `AdmitAndStartParams::builder` is a one-line alias for `AdmitAndStartParamsBuilder::new()`, and this file's `impl Default for AdmitAndStartParamsBuilder` returns `Self::new()`, so `Default::default()` evaluates the identical expression. No test can distinguish the two, and the builder's own required-field refusal is asserted directly by the empty-builder test beside it."
+    },
+    {
+      "file": "crates/mvm-hostd/src/supervisor/audit_file.rs",
+      "mutant": "replace > with == in highest_sealed_segment",
+      "reason": "observable only through `read_dir` ordering, which is unspecified. Under `==` the scan keeps whatever entry the directory yields first; whether that differs from the maximum depends on the filesystem, so a test asserting the difference would pass or fail on the host rather than on the code. `the_highest_sequence_wins_not_the_lowest` covers the sign flip, which is the mutation that is deterministically wrong."
+    },
+    {
+      "file": "crates/mvm-hostd/src/supervisor/audit_file.rs",
+      "mutant": "replace > with >= in highest_sealed_segment",
+      "reason": "equivalent. Segment file names are unique per sequence, so two entries never compare equal and `>` and `>=` select the same maximum on every input. No test can distinguish them because no input distinguishes them."
     },
     {
       "file": "crates/mvm-hostd/src/supervisor/audit_file.rs",
@@ -1180,6 +1200,11 @@
       "file": "crates/mvm-sdk/src/compile/deps_audit.rs",
       "mutant": "replace * with + in hash_file_raw",
       "reason": "equivalent: the mutated expression is the read-buffer size (64 * 1024 versus 64 + 1024). It changes how many bytes are read per iteration and nothing else; the resulting SHA-256 is identical, so no assertion on behaviour can separate them."
+    },
+    {
+      "file": "crates/mvm-vmm/src/host/network_endpoint_spawn.rs",
+      "mutant": "replace SubstitutionSpawnParams<'a>::builder -> SubstitutionSpawnParamsBuilder<'a> with Default::default()",
+      "reason": "provably equivalent: `SubstitutionSpawnParams::builder` is a one-line alias for `SubstitutionSpawnParamsBuilder::new()`, and this file's `impl Default for SubstitutionSpawnParamsBuilder` returns `Self::new()`, so `Default::default()` evaluates the identical expression. No test can distinguish the two, and the builder's own required-field refusal is asserted directly by the empty-builder test beside it."
     }
   ]
 }

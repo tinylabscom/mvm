@@ -2,18 +2,21 @@ use super::*;
 use crate::commands::runtime_overlay::{
     RuntimeOverlayAcquireMode, runtime_overlay_acquire_mode, runtime_overlay_source_checkout_root,
 };
+use mvm_build::boot_image_select::{self, BootImageAcquisition};
 
 pub(crate) fn ensure_default_microvm_image(
     mode: mvm_build::pipeline::BuildMode,
 ) -> Result<(String, String)> {
-    let base = format!("{}/default-microvm", mvm_core::config::mvm_cache_dir());
+    let base = mvm_core::config::default_microvm_cache_dir();
     match mode {
-        mvm_build::pipeline::BuildMode::Prod => {
-            ensure_default_microvm_prod_image(&format!("{base}/prod"))
-        }
-        mvm_build::pipeline::BuildMode::Dev => {
-            ensure_default_microvm_dev_image(&format!("{base}/dev"))
-        }
+        mvm_build::pipeline::BuildMode::Prod => ensure_default_microvm_prod_image(&format!(
+            "{base}/{}",
+            DefaultMicrovmVariant::Prod.cache_subdir()
+        )),
+        mvm_build::pipeline::BuildMode::Dev => ensure_default_microvm_dev_image(&format!(
+            "{base}/{}",
+            DefaultMicrovmVariant::Dev.cache_subdir()
+        )),
     }
 }
 
@@ -293,24 +296,75 @@ fn ensure_default_microvm_prod_image(cache_dir: &str) -> Result<(String, String)
     if required.iter().all(|p| std::path::Path::new(p).exists()) {
         return Ok((kernel_path, rootfs_path));
     }
-    if let Some(built) = try_build_prod_default_locally(cache_dir)? {
-        return Ok(built);
+    // Which arm produces the image is a policy decision with an operator
+    // override, not a bare "is there a flake here" test. Auto-detect still
+    // answers exactly as before — a checkout builds, an installed binary
+    // fetches — so an operator who sets nothing sees no change.
+    let resolved = boot_image_select::resolve(None, source_checkout_available());
+    match resolved.choice {
+        BootImageAcquisition::Build => build_prod_default_locally(cache_dir),
+        BootImageAcquisition::Fetch => {
+            let acquired = download_default_microvm_image(cache_dir, &kernel_path, &rootfs_path)?;
+            // Record that these bytes were fetched, not built here. Without it a
+            // prebuilt pulled into a source checkout is indistinguishable from a
+            // build of the working tree, and the next person to wonder why their
+            // flake edit had no effect has nothing to read. The producer's own
+            // build facts are left untouched.
+            let tag = format!("v{}", env!("CARGO_PKG_VERSION"));
+            crate::commands::image::boot::cache::stamp_provenance(
+                std::path::Path::new(cache_dir),
+                &crate::commands::image::boot::cache::AcquiredProvenance::fetched(&tag),
+            )?;
+            Ok(acquired)
+        }
     }
-    download_default_microvm_image(cache_dir, &kernel_path, &rootfs_path)
 }
 
+/// Whether this binary can build an image from an in-repo flake.
+///
+/// The same predicate the acquisition path has always used, named so the
+/// selector reads as policy applied to a fact rather than re-deriving the fact.
 #[cfg(feature = "builder-vm")]
-fn try_build_prod_default_locally(cache_dir: &str) -> Result<Option<(String, String)>> {
-    if find_builder_vm_flake().is_err() {
-        return Ok(None);
-    }
-    ui::info("Building the prod default microVM image locally (source checkout)...");
-    build_default_microvm_via_libkrun(cache_dir, DefaultMicrovmVariant::Prod).map(Some)
+fn source_checkout_available() -> bool {
+    find_builder_vm_flake().is_ok()
 }
 
 #[cfg(not(feature = "builder-vm"))]
-fn try_build_prod_default_locally(_cache_dir: &str) -> Result<Option<(String, String)>> {
-    Ok(None)
+fn source_checkout_available() -> bool {
+    false
+}
+
+/// A forced local build with nothing to build from is refused, not quietly
+/// downgraded to a fetch.
+///
+/// `MVM_BOOT_IMAGE=build` on an installed binary is a request the host cannot
+/// satisfy. Falling back to a fetch would hand back exactly the image the
+/// operator asked not to have, and it would look like the knob had worked.
+fn refuse_build_without_a_flake() -> Result<()> {
+    if source_checkout_available() {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "{env}=build asks for a locally built boot image, but this mvmctl has no \
+         in-repo image flake to build from — it is an installed binary, not a \
+         source checkout. Unset {env} to fetch the published image, or run from \
+         a checkout.",
+        env = boot_image_select::MVM_BOOT_IMAGE_ENV
+    )
+}
+
+#[cfg(feature = "builder-vm")]
+fn build_prod_default_locally(cache_dir: &str) -> Result<(String, String)> {
+    refuse_build_without_a_flake()?;
+    ui::info("Building the prod default microVM image locally (source checkout)...");
+    build_default_microvm_via_libkrun(cache_dir, DefaultMicrovmVariant::Prod)
+}
+
+#[cfg(not(feature = "builder-vm"))]
+fn build_prod_default_locally(_cache_dir: &str) -> Result<(String, String)> {
+    // Without the feature there is never a flake, so the refusal always fires.
+    refuse_build_without_a_flake()?;
+    anyhow::bail!("this build of mvmctl cannot build a boot image locally")
 }
 
 #[cfg(feature = "builder-vm")]
@@ -329,15 +383,27 @@ fn ensure_default_microvm_dev_image(cache_dir: &str) -> Result<(String, String)>
     build_default_microvm_via_libkrun(cache_dir, DefaultMicrovmVariant::Dev)
 }
 
-#[cfg(feature = "builder-vm")]
-#[derive(Clone, Copy)]
-pub(super) enum DefaultMicrovmVariant {
+/// The two boot-image variants the cache can hold.
+///
+/// Deliberately not gated on the `builder-vm` feature: a binary that cannot
+/// *build* an image still has to read, fetch, and report on one, and the
+/// variant's required output set is the same either way.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(in crate::commands) enum DefaultMicrovmVariant {
     Dev,
     Prod,
 }
 
-#[cfg(feature = "builder-vm")]
 impl DefaultMicrovmVariant {
+    /// Cache subdirectory holding this variant's artifacts.
+    pub(in crate::commands) fn cache_subdir(self) -> &'static str {
+        match self {
+            DefaultMicrovmVariant::Dev => "dev",
+            DefaultMicrovmVariant::Prod => "prod",
+        }
+    }
+
+    #[cfg(feature = "builder-vm")]
     pub(super) fn attr(self) -> &'static str {
         match self {
             DefaultMicrovmVariant::Dev => "dev",
@@ -345,7 +411,8 @@ impl DefaultMicrovmVariant {
         }
     }
 
-    pub(super) fn required_outputs(self) -> &'static [&'static str] {
+    /// Files that must all be present for the cache entry to be usable.
+    pub(in crate::commands) fn required_outputs(self) -> &'static [&'static str] {
         match self {
             DefaultMicrovmVariant::Dev => &["vmlinux", "rootfs.ext4", "mvm-meta.json"],
             DefaultMicrovmVariant::Prod => &[
@@ -456,7 +523,10 @@ fn build_default_microvm_via_libkrun(
     Ok((kernel, rootfs))
 }
 
-pub(super) fn default_microvm_assets(cache_dir: &str, arch: &str) -> [(String, String); 5] {
+pub(in crate::commands) fn default_microvm_assets(
+    cache_dir: &str,
+    arch: &str,
+) -> [(String, String); 5] {
     [
         (
             format!("default-microvm-vmlinux-{arch}"),
@@ -496,14 +566,20 @@ fn download_default_microvm_image(
 
     let assets = default_microvm_assets(cache_dir, arch);
     let checksums_name = format!("default-microvm-{arch}-checksums-sha256.txt");
-    let checksums_url = format!("{base_url}/{checksums_name}");
 
     ui::info(&format!(
         "Downloading default microVM image (v{version})..."
     ));
 
     let asset_names: Vec<&str> = assets.iter().map(|(n, _)| n.as_str()).collect();
-    let expected = fetch_expected_hashes(&checksums_url, &asset_names)?;
+    let expected = fetch_expected_hashes(
+        &ChecksumManifest {
+            base_url: &base_url,
+            asset: &checksums_name,
+            version,
+        },
+        &asset_names,
+    )?;
 
     for (name, dest) in &assets {
         ui::info(&format!("  Fetching {name}..."));

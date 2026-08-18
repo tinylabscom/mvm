@@ -37,6 +37,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -64,6 +65,9 @@ pub struct FileAuditSigner {
     /// `sync_data` is file-wide and carries every earlier write with it. What
     /// remains at drop is flushed there.
     pending_sync: Arc<Mutex<HashSet<PathBuf>>>,
+    /// While set, a barrier entry is written but its fsync is held for the
+    /// batch's single flush. See [`FileAuditSigner::begin_batch`].
+    batching: Arc<AtomicBool>,
 }
 
 /// When the active segment is sealed and a fresh one opened.
@@ -169,6 +173,69 @@ pub fn sync_policy_for(event: &str) -> SyncPolicy {
     }
 }
 
+/// How much of a chain file's tail one cursor restore reads before widening.
+///
+/// Comfortably larger than a signed audit record, so the common case is a
+/// single read; a record longer than this only costs extra reads, never a
+/// wrong answer.
+const CURSOR_TAIL_WINDOW: u64 = 64 * 1024;
+
+/// What a backwards scan found at the end of a chain file.
+enum TailScan<'a> {
+    /// The last non-empty line.
+    Line(&'a [u8]),
+    /// Nothing but terminators — the file holds no record.
+    Empty,
+    /// The file does not end at a record boundary.
+    Truncated,
+    /// The window did not reach the start of the last line.
+    NeedMore,
+}
+
+/// Read the last `window` bytes of `file`, which is `len` bytes long.
+fn read_tail(file: &mut std::fs::File, len: u64, window: u64) -> Result<Vec<u8>, AuditError> {
+    use std::io::{Read, Seek, SeekFrom};
+    let window = window.min(len);
+    file.seek(SeekFrom::Start(len - window))
+        .map_err(|e| AuditError::Io(e.to_string()))?;
+    let mut buf = vec![0u8; usize::try_from(window).unwrap_or(usize::MAX)];
+    file.read_exact(&mut buf)
+        .map_err(|e| AuditError::Io(e.to_string()))?;
+    Ok(buf)
+}
+
+/// Find the last non-empty line in `tail`, the trailing bytes of a chain file.
+///
+/// Byte-oriented on purpose: `\n` is ASCII and cannot occur inside a UTF-8
+/// multi-byte sequence, so a window that starts mid-character still yields a
+/// whole, correctly-delimited final line — and the hash is over bytes anyway.
+fn last_line(tail: &[u8], at_file_start: bool) -> TailScan<'_> {
+    // A file whose last byte is not a terminator ended mid-record: some
+    // previous append died between writing the record and its newline.
+    // Chaining onto a fragment would make a crash indistinguishable from
+    // tampering to every downstream verifier, so it is reported instead.
+    let Some(body) = tail.strip_suffix(b"\n") else {
+        return TailScan::Truncated;
+    };
+    // Skip any trailing blank lines the way `str::lines().rfind()` did.
+    let body = {
+        let mut end = body.len();
+        while end > 0 && body[end - 1] == b'\n' {
+            end -= 1;
+        }
+        &body[..end]
+    };
+    match body.iter().rposition(|b| *b == b'\n') {
+        Some(start) => TailScan::Line(&body[start + 1..]),
+        None if body.is_empty() => TailScan::Empty,
+        // No terminator before the final record. If the window reaches the
+        // start of the file this *is* the only record — the state every chain
+        // is in after its first append — and not a short read.
+        None if at_file_start => TailScan::Line(body),
+        None => TailScan::NeedMore,
+    }
+}
+
 impl FileAuditSigner {
     /// Create the signer rooted at `audit_dir`. The directory is
     /// created if missing (mode 0700-equivalent — `OpenOptions` later
@@ -184,6 +251,7 @@ impl FileAuditSigner {
             rotation: RotationPolicy::from_env(),
             cursors: Mutex::new(HashMap::new()),
             pending_sync: Arc::new(Mutex::new(HashSet::new())),
+            batching: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -218,6 +286,7 @@ impl FileAuditSigner {
             rotation: RotationPolicy::from_env(),
             cursors: Mutex::new(HashMap::new()),
             pending_sync: Arc::new(Mutex::new(HashSet::new())),
+            batching: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -248,16 +317,38 @@ impl FileAuditSigner {
         if !path.exists() {
             return Ok([0u8; 32]);
         }
-        let content = std::fs::read_to_string(path).map_err(|e| AuditError::Io(e.to_string()))?;
-        if !content.is_empty() && !content.ends_with('\n') {
-            return Err(AuditError::TruncatedTail {
-                path: path.display().to_string(),
-            });
+        let mut file = std::fs::File::open(path).map_err(|e| AuditError::Io(e.to_string()))?;
+        let len = file
+            .metadata()
+            .map_err(|e| AuditError::Io(e.to_string()))?
+            .len();
+        if len == 0 {
+            return Ok([0u8; 32]);
         }
-        let last = content.lines().rfind(|l| !l.is_empty());
-        match last {
-            None => Ok([0u8; 32]),
-            Some(line) => Ok(hash_line(line.as_bytes())),
+
+        // Read backwards from the end rather than reading the file.
+        //
+        // Only the final line is needed, but this runs on every append, and the
+        // active segment grows to `AUDIT_SEGMENT_DEFAULT_BYTES` before it
+        // rotates. Reading it whole made each append cost the size of the
+        // chain so far — so admission got steadily slower as the segment
+        // filled and abruptly cheap again at every rotation.
+        let mut window = CURSOR_TAIL_WINDOW.min(len);
+        loop {
+            let tail = read_tail(&mut file, len, window)?;
+            match last_line(&tail, window >= len) {
+                TailScan::Line(line) => return Ok(hash_line(line)),
+                TailScan::Empty => return Ok([0u8; 32]),
+                TailScan::Truncated => {
+                    return Err(AuditError::TruncatedTail {
+                        path: path.display().to_string(),
+                    });
+                }
+                // The window landed inside the final record. Widen and retry;
+                // a window covering the file reports `Line`, not `NeedMore`,
+                // so this cannot spin.
+                TailScan::NeedMore => window = (window * 4).min(len),
+            }
         }
     }
 }
@@ -272,6 +363,33 @@ impl FileAuditSigner {
     /// Best-effort by signature: a failure here cannot be reported to whoever
     /// emitted the entry, because they were told it succeeded when it was
     /// written. It is logged instead of swallowed.
+    /// Hold barrier fsyncs until [`end_batch`](Self::end_batch).
+    pub(crate) fn begin_batch(&self) {
+        self.batching.store(true, Ordering::SeqCst);
+    }
+
+    /// Stop holding barriers and sync everything the batch deferred.
+    ///
+    /// Unlike [`flush_deferred`](Self::flush_deferred) this reports failure,
+    /// and it has to: the entries it is syncing include barriers whose emitters
+    /// have not yet been told they succeeded. A caller that ignored this would
+    /// be strictly worse off than syncing each entry separately.
+    pub(crate) fn end_batch(&self) -> Result<(), AuditError> {
+        self.batching.store(false, Ordering::SeqCst);
+        let pending: Vec<PathBuf> = {
+            let mut guard = self.pending_sync.lock().expect("pending_sync poisoned");
+            guard.drain().collect()
+        };
+        for path in pending {
+            OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .and_then(|f| f.sync_data())
+                .map_err(|e| AuditError::Io(format!("{}: {e}", path.display())))?;
+        }
+        Ok(())
+    }
+
     pub fn flush_deferred(&self) {
         let pending: Vec<PathBuf> = {
             let mut guard = self.pending_sync.lock().expect("pending_sync poisoned");
@@ -394,6 +512,16 @@ impl FileAuditSigner {
         // disk, so syncing each one charged the launch for durability it did
         // not need at that instant. `sync_data` is file-wide, so a barrier
         // carries every deferred write on the same file with it.
+        // Inside a batch, a barrier is downgraded to deferred: the record is
+        // written now and the fsync is the batch's single flush. This does not
+        // relax the rule barriers exist for — an entry must be durable before
+        // the action it authorizes takes effect — because the batch is closed,
+        // and its flush checked, before that action. It relaxes only *how many
+        // times* the same file is synced to get there.
+        let sync = match sync {
+            SyncPolicy::Barrier if self.batching.load(Ordering::SeqCst) => SyncPolicy::Deferred,
+            other => other,
+        };
         match sync {
             SyncPolicy::Barrier => {
                 file.sync_data()
@@ -1089,6 +1217,107 @@ fn usable_resume(checkpoint: Option<&ChainCheckpoint>, total_lines: usize) -> Op
 mod tests {
     use super::*;
 
+    mod highest_sealed_segment_tests {
+        use super::super::highest_sealed_segment;
+        use mvm_core::config::audit_segment_file_name;
+
+        /// Write the named segments and return the directory holding them.
+        fn dir_with(base: &str, seqs: &[u64]) -> tempfile::TempDir {
+            let dir = tempfile::tempdir().expect("tempdir");
+            for seq in seqs {
+                std::fs::write(
+                    dir.path().join(audit_segment_file_name(base, *seq)),
+                    b"{}\n",
+                )
+                .expect("write segment");
+            }
+            dir
+        }
+
+        /// The point of the function: the *highest* sequence wins.
+        ///
+        /// This kills a sign flip (`>` becoming `<`) but deliberately does not
+        /// claim to kill `>` becoming `==`. Under `==` the function keeps
+        /// whatever `read_dir` yields first, and `read_dir` order is
+        /// unspecified — a test asserting otherwise would pass or fail on the
+        /// filesystem's whim, which is worse than not asserting it. That
+        /// mutant is declared an accepted miss with the reason spelled out.
+        #[test]
+        fn the_highest_sequence_wins_not_the_lowest() {
+            let dir = dir_with("local", &[3, 1, 7, 2]);
+            let (seq, path) = highest_sealed_segment(dir.path(), "local")
+                .expect("scan")
+                .expect("a segment exists");
+            assert_eq!(seq, 7);
+            assert!(path.ends_with(audit_segment_file_name("local", 7)));
+        }
+
+        /// One segment is the degenerate case the comparison never runs on.
+        #[test]
+        fn a_lone_segment_is_the_highest() {
+            let dir = dir_with("local", &[4]);
+            let (seq, _) = highest_sealed_segment(dir.path(), "local")
+                .expect("scan")
+                .expect("a segment exists");
+            assert_eq!(seq, 4);
+        }
+
+        /// A tenant whose name prefixes another must not adopt its segments —
+        /// `local` and `local-two` share a prefix but not a chain.
+        #[test]
+        fn segments_of_a_similarly_named_tenant_are_not_adopted() {
+            let dir = dir_with("local", &[2]);
+            std::fs::write(
+                dir.path().join(audit_segment_file_name("local-two", 9)),
+                b"{}\n",
+            )
+            .expect("write other tenant");
+
+            let (seq, _) = highest_sealed_segment(dir.path(), "local")
+                .expect("scan")
+                .expect("a segment exists");
+            assert_eq!(seq, 2, "9 belongs to local-two");
+        }
+
+        #[test]
+        fn an_empty_directory_has_no_sealed_segment() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            assert!(
+                highest_sealed_segment(dir.path(), "local")
+                    .expect("scan")
+                    .is_none()
+            );
+        }
+
+        /// A missing directory is not an error — a chain that never rotated
+        /// has no segment directory to read.
+        #[test]
+        fn a_missing_directory_reports_no_segment_rather_than_failing() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let gone = dir.path().join("never-created");
+            assert!(
+                highest_sealed_segment(&gone, "local")
+                    .expect("scan")
+                    .is_none()
+            );
+        }
+
+        /// Files that are not segments of this chain are skipped, including
+        /// the active chain file itself.
+        #[test]
+        fn non_segment_files_are_ignored() {
+            let dir = dir_with("local", &[1]);
+            for junk in ["local.jsonl", "local.seg-notanumber.jsonl", "README.md"] {
+                std::fs::write(dir.path().join(junk), b"x").expect("write junk");
+            }
+            let (seq, _) = highest_sealed_segment(dir.path(), "local")
+                .expect("scan")
+                .expect("a segment exists");
+            assert_eq!(seq, 1);
+        }
+    }
+    use rand::Rng;
+
     use chrono::Utc;
     use ed25519_dalek::SigningKey;
     use mvm_core::plan::{PlanId, TenantId};
@@ -1097,7 +1326,7 @@ mod tests {
     fn fresh_key() -> SigningKey {
         {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             SigningKey::from_bytes(&__ed_seed)
         }
     }
@@ -1966,5 +2195,181 @@ mod tests {
             .await
             .expect("an intact chain must still accept appends");
         assert_eq!(verify_audit_chain(&path, &verifying).unwrap(), 3);
+    }
+
+    /// Chain files are appended to on every admission, so the cursor restore
+    /// runs constantly. These pin the backwards scan against the whole-file
+    /// read it replaced: same answer, including on the cases where "read less"
+    /// is exactly how you get a wrong one.
+    mod cursor_tail {
+        use super::*;
+
+        fn cursor_of(bytes: &[u8]) -> Result<[u8; 32], AuditError> {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let path = dir.path().join("chain.jsonl");
+            std::fs::write(&path, bytes).expect("write chain");
+            FileAuditSigner::open(fresh_key(), dir.path())
+                .expect("signer")
+                .restore_cursor(&path)
+        }
+
+        #[test]
+        fn the_tail_scan_agrees_with_hashing_the_last_line() {
+            let body = b"{\"a\":1}\n{\"b\":2}\n{\"c\":3}\n";
+            assert_eq!(cursor_of(body).expect("cursor"), hash_line(b"{\"c\":3}"));
+        }
+
+        #[test]
+        fn a_record_longer_than_the_window_widens_instead_of_guessing() {
+            // The failure this guards: a window that lands inside the final
+            // record sees no terminator, and a scan that treated that as
+            // "first record in the file" would chain onto a fragment.
+            let huge = "x".repeat(usize::try_from(CURSOR_TAIL_WINDOW).unwrap() * 3);
+            let last = format!("{{\"big\":\"{huge}\"}}");
+            let body = format!("{{\"a\":1}}\n{last}\n");
+            assert_eq!(
+                cursor_of(body.as_bytes()).expect("cursor"),
+                hash_line(last.as_bytes()),
+            );
+        }
+
+        #[test]
+        fn a_single_record_shorter_than_the_window_is_still_found() {
+            let body = b"{\"only\":1}\n";
+            assert_eq!(cursor_of(body).expect("cursor"), hash_line(b"{\"only\":1}"));
+        }
+
+        #[test]
+        fn a_missing_terminator_is_truncation_not_a_shorter_chain() {
+            let err = cursor_of(b"{\"a\":1}\n{\"partial\":").expect_err("must refuse");
+            assert!(
+                matches!(err, AuditError::TruncatedTail { .. }),
+                "a crash mid-append must stay distinguishable from tampering, got {err:?}",
+            );
+        }
+
+        #[test]
+        fn an_empty_or_blank_file_restores_to_genesis() {
+            assert_eq!(cursor_of(b"").expect("cursor"), [0u8; 32]);
+            assert_eq!(cursor_of(b"\n\n").expect("cursor"), [0u8; 32]);
+        }
+
+        #[test]
+        fn trailing_blank_lines_do_not_hide_the_last_record() {
+            let body = b"{\"a\":1}\n{\"b\":2}\n\n\n";
+            assert_eq!(cursor_of(body).expect("cursor"), hash_line(b"{\"b\":2}"));
+        }
+
+        #[test]
+        fn a_multibyte_character_spanning_the_window_edge_is_not_corrupted() {
+            // The window starts at an arbitrary byte offset. `\n` is ASCII and
+            // cannot appear inside a UTF-8 sequence, so the extracted line is
+            // still whole — this pins that reasoning.
+            let pad = "é".repeat(usize::try_from(CURSOR_TAIL_WINDOW).unwrap());
+            let last = "{\"tail\":\"ünïcøde\"}";
+            let body = format!("{{\"pad\":\"{pad}\"}}\n{last}\n");
+            assert_eq!(
+                cursor_of(body.as_bytes()).expect("cursor"),
+                hash_line(last.as_bytes()),
+            );
+        }
+    }
+
+    /// Batching exists to cut fsyncs, not durability. These pin the parts that
+    /// would make it a weakening rather than an optimization.
+    mod barrier_batching {
+        use super::*;
+
+        #[test]
+        fn a_batch_writes_every_record_and_leaves_none_unsynced() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let signer = FileAuditSigner::open(fresh_key(), dir.path()).unwrap();
+            let path = dir.path().join("local.jsonl");
+
+            signer.begin_batch();
+            for event in ["plan.admitted", "decision_record", "plan.grant_required"] {
+                signer
+                    .append_locked(&path, &make_entry("local", event))
+                    .expect("append");
+            }
+            // Held, not skipped: every barrier is still owed a sync.
+            assert_eq!(
+                signer.pending_sync.lock().unwrap().len(),
+                1,
+                "the batch should owe exactly one file a sync",
+            );
+            signer.end_batch().expect("flush");
+            assert!(
+                signer.pending_sync.lock().unwrap().is_empty(),
+                "ending a batch must leave nothing owed",
+            );
+
+            let written = std::fs::read_to_string(&path).expect("read chain");
+            assert_eq!(
+                written.lines().filter(|l| !l.is_empty()).count(),
+                3,
+                "batching must not drop records",
+            );
+        }
+
+        #[test]
+        fn a_batch_chain_still_verifies_end_to_end() {
+            // The records are written the same way and chained the same way;
+            // only the fsync count changes. If batching perturbed the chain at
+            // all, the verifier is what would notice.
+            let dir = tempfile::tempdir().expect("tempdir");
+            let key = fresh_key();
+            let verifying = key.verifying_key();
+            let signer = FileAuditSigner::open(key, dir.path()).unwrap();
+            let path = dir.path().join("local.jsonl");
+
+            signer.begin_batch();
+            for event in ["plan.admitted", "decision_record", "plan.grant_required"] {
+                signer
+                    .append_locked(&path, &make_entry("local", event))
+                    .expect("append");
+            }
+            signer.end_batch().expect("flush");
+
+            verify_audit_chain(&path, &verifying).expect("a batched chain must verify");
+        }
+
+        #[test]
+        fn a_barrier_outside_a_batch_still_syncs_immediately() {
+            // The batch is a scope, not a mode switch. Once it closes, the
+            // default is back to syncing every barrier as it lands.
+            let dir = tempfile::tempdir().expect("tempdir");
+            let signer = FileAuditSigner::open(fresh_key(), dir.path()).unwrap();
+            let path = dir.path().join("local.jsonl");
+
+            signer.begin_batch();
+            signer
+                .append_locked(&path, &make_entry("local", "plan.admitted"))
+                .expect("append");
+            signer.end_batch().expect("flush");
+
+            signer
+                .append_locked(&path, &make_entry("local", "plan.admitted"))
+                .expect("append");
+            assert!(
+                signer.pending_sync.lock().unwrap().is_empty(),
+                "a barrier after the batch closed must have synced on the spot",
+            );
+        }
+
+        #[test]
+        fn a_deferrable_event_is_unaffected_by_batching() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let signer = FileAuditSigner::open(fresh_key(), dir.path()).unwrap();
+            let path = dir.path().join("local.jsonl");
+            signer
+                .append_locked(&path, &make_entry("local", "plan.launched"))
+                .expect("append");
+            assert_eq!(
+                signer.pending_sync.lock().unwrap().len(),
+                1,
+                "a deferrable event defers with or without a batch",
+            );
+        }
     }
 }

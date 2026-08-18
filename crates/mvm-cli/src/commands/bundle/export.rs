@@ -47,6 +47,16 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             )
         })?;
 
+    // Carry a re-exported bundle's own architecture through rather than
+    // re-stamping this host's. `template_artifacts_dispatched` resolves an
+    // installed bundle as happily as a local slot, so an aarch64 bundle
+    // re-exported from an x86_64 host would otherwise be relabelled x86_64
+    // while still containing an aarch64 rootfs — and the label is what the
+    // boot-time gate trusts. A slot built here has no manifest, so it takes
+    // the host arch, which is correct for that case.
+    let source_arch = tmpl::installed_bundle_arch_for_export(&args.template)
+        .unwrap_or_else(|| mvm_core::arch::GuestArch::host().to_string());
+
     // Verity sidecar lives next to the rootfs by convention; the
     // backend's probe is the source of truth.
     let (verity_path, roothash) = mvm_runtime::microvm::probe_verity_sidecar(&rootfs);
@@ -175,7 +185,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
         schema_version: BUNDLE_SCHEMA_VERSION,
         publisher: host_signer::host_signer_id(),
         key_id: key_id.clone(),
-        arch: std::env::consts::ARCH.to_string(),
+        arch: source_arch,
         kernel_version: None,
         profile: Some(spec.profile.clone()),
         workload_label: args.label,

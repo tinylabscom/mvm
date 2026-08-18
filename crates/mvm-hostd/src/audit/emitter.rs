@@ -39,6 +39,8 @@
 use std::path::{Path, PathBuf};
 
 use crate::audit::decisions::DecisionStore;
+pub use crate::audit::evidence::EmittedEvidence;
+use crate::audit::evidence::{EvidenceReceipt, audit_entry_digest_hex};
 use crate::audit::receipt_export::audit_entry_to_receipt;
 use crate::audit::receipt_store::ReceiptStore;
 use crate::supervisor::{
@@ -58,6 +60,7 @@ use mvm_contract::verify::hash_line;
 use mvm_core::plan::ExecutionPlan;
 use std::collections::HashMap;
 use std::sync::Mutex;
+use std::sync::OnceLock;
 
 /// Wire-stable event name and label keys for the wall-clock enforcement entry.
 /// Shared so the supervisor that emits it and any reader asserting on it cannot
@@ -347,6 +350,37 @@ pub struct AuditEmitter {
     decisions_enabled: bool,
     decisions_dir: Option<PathBuf>,
     decision_stores: Mutex<HashMap<String, DecisionStore>>,
+    /// Built once on first emit and reused.
+    ///
+    /// The signer interface is async and the callers are not, so each emit has
+    /// to block on a runtime. Building a fresh one per entry meant paying that
+    /// construction ~6 times for the handful of entries one launch writes, on
+    /// the admission path, for a runtime that only ever drives a blocking file
+    /// append.
+    runtime: OnceLock<tokio::runtime::Runtime>,
+}
+
+impl Drop for AuditEmitter {
+    /// Shut the cached runtime down without blocking.
+    ///
+    /// Caching the runtime removed a per-entry construction, but it also moved
+    /// where the runtime is *dropped*: it used to die inside the synchronous
+    /// emit that built it, and now it dies with the emitter. An emitter
+    /// constructed from inside someone else's async context therefore drops
+    /// its runtime there, and a blocking drop from async is a tokio panic by
+    /// design —
+    ///
+    ///   Cannot drop a runtime in a context where blocking is not allowed.
+    ///
+    /// `shutdown_background` returns immediately and leaves the worker threads
+    /// to exit on their own, which is what this runtime wants anyway: it only
+    /// ever drives a blocking file append that has already completed by the
+    /// time the emitter is being dropped.
+    fn drop(&mut self) {
+        if let Some(rt) = self.runtime.take() {
+            rt.shutdown_background();
+        }
+    }
 }
 
 impl AuditEmitter {
@@ -388,6 +422,7 @@ impl AuditEmitter {
             decisions_enabled: false,
             decisions_dir: None,
             decision_stores: Mutex::new(HashMap::new()),
+            runtime: OnceLock::new(),
         })
     }
 
@@ -1135,12 +1170,70 @@ impl AuditEmitter {
         self.emit_entry_blocking(entry)
     }
 
-    fn emit_entry_blocking(&self, entry: &PlanAuditEntry) -> Result<()> {
-        let t0 = std::time::Instant::now();
-        let rt = tokio::runtime::Builder::new_current_thread()
+    /// Run `f` with every barrier fsync on this emitter's chains held back,
+    /// then sync them all once.
+    ///
+    /// For a burst of entries that all have to be durable before the same
+    /// action — an admission writing `plan.admitted`, its decision record and
+    /// its grant requirement before anything boots — this costs one fsync
+    /// rather than one per entry. `sync_data` is file-wide, so the single
+    /// flush carries every record the batch wrote.
+    ///
+    /// Fails closed: if the flush fails, this returns the error and `f`'s
+    /// result is discarded, so a caller that boots on `Ok` cannot boot on
+    /// records that never reached the disk. The scope must therefore close
+    /// before the action the entries authorize — not at process exit.
+    pub fn batched<T>(&self, f: impl FnOnce() -> Result<T>) -> Result<T> {
+        for signer in &self.signers {
+            signer.begin_batch();
+        }
+        let out = f();
+        // End every batch even if `f` failed, so a later emit is not left
+        // silently deferring its barriers.
+        let mut flush = Ok(());
+        for signer in &self.signers {
+            if let Err(e) = signer.end_batch() {
+                flush = Err(e);
+            }
+        }
+        let out = out?;
+        flush.context("syncing batched audit entries before the action they authorize")?;
+        Ok(out)
+    }
+
+    /// The shared blocking runtime, built on first use.
+    fn runtime(&self) -> Result<&tokio::runtime::Runtime> {
+        if let Some(rt) = self.runtime.get() {
+            return Ok(rt);
+        }
+        let built = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .context("building tokio runtime for audit emit")?;
+        // A concurrent caller may have won the race; either runtime is usable
+        // and the loser's is dropped here.
+        let _ = self.runtime.set(built);
+        Ok(self
+            .runtime
+            .get()
+            .expect("runtime is set on the line above or by the caller that raced us"))
+    }
+
+    fn emit_entry_blocking(&self, entry: &PlanAuditEntry) -> Result<()> {
+        self.sign_entry_blocking(entry)?;
+        let t_r = std::time::Instant::now();
+        self.emit_receipt_for_entry(entry);
+        tracing::debug!(ms = t_r.elapsed().as_secs_f64() * 1000.0, "emit: receipt");
+        Ok(())
+    }
+
+    /// Sign and append one entry to every chain, without its receipt.
+    ///
+    /// Split out so an evidence-bearing caller can pair the same signing with
+    /// a fail-closed receipt rather than the best-effort one below.
+    fn sign_entry_blocking(&self, entry: &PlanAuditEntry) -> Result<()> {
+        let t0 = std::time::Instant::now();
+        let rt = self.runtime()?;
         let t_rt = std::time::Instant::now();
         tracing::debug!(
             ms = (t_rt - t0).as_secs_f64() * 1000.0,
@@ -1157,10 +1250,84 @@ impl AuditEmitter {
             );
         }
         audit_mirror::emit_mirror_event(entry);
-        let t_r = std::time::Instant::now();
-        self.emit_receipt_for_entry(entry);
-        tracing::debug!(ms = t_r.elapsed().as_secs_f64() * 1000.0, "emit: receipt");
         Ok(())
+    }
+
+    /// Emit one entry and its receipt, failing closed if either cannot be
+    /// written, and return references to both.
+    ///
+    /// The ordinary emit path treats receipts as a derived cache and swallows
+    /// their errors, which is right when nothing cites them. It is wrong for
+    /// evidence a later claim rests on: a citation to a receipt that was never
+    /// written is worse than no citation, because it reads as proof.
+    pub fn emit_entry_for_evidence(
+        &self,
+        entry: &PlanAuditEntry,
+        receipt: EvidenceReceipt,
+    ) -> Result<EmittedEvidence> {
+        if tokio::runtime::Handle::try_current().is_ok() {
+            return std::thread::scope(|scope| {
+                scope
+                    .spawn(|| self.emit_entry_for_evidence_blocking(entry, receipt))
+                    .join()
+                    .map_err(|_| anyhow::anyhow!("audit emit thread panicked"))?
+            });
+        }
+        self.emit_entry_for_evidence_blocking(entry, receipt)
+    }
+
+    fn emit_entry_for_evidence_blocking(
+        &self,
+        entry: &PlanAuditEntry,
+        receipt: EvidenceReceipt,
+    ) -> Result<EmittedEvidence> {
+        self.sign_entry_blocking(entry)?;
+        let receipt_id = match receipt {
+            EvidenceReceipt::Required => self.emit_receipt_for_entry_checked(entry)?,
+            EvidenceReceipt::Omitted => None,
+        };
+        Ok(EmittedEvidence {
+            audit_digest: audit_entry_digest_hex(entry)?,
+            receipt_id,
+        })
+    }
+
+    /// Append the receipt for `entry`, returning its content address.
+    ///
+    /// `Ok(None)` means receipts are switched off for this emitter, which is a
+    /// configuration answer rather than a failure. Every other unhappy path is
+    /// an error.
+    fn emit_receipt_for_entry_checked(&self, entry: &PlanAuditEntry) -> Result<Option<String>> {
+        if !self.receipts_enabled {
+            return Ok(None);
+        }
+        let tenant = entry.tenant.0.clone();
+        let store = self
+            .receipt_store_for_tenant(&tenant)
+            .ok_or_else(|| anyhow::anyhow!("no receipt store for tenant {tenant}"))?;
+        let host_did =
+            mvm_core::did_key::DidKey::from_verifying_key(self.signing_key.verifying_key())
+                .to_did_key();
+        let mut receipt = audit_entry_to_receipt(entry, &host_did).ok_or_else(|| {
+            anyhow::anyhow!(
+                "audit event {} has no receipt mapping; evidence cannot cite it",
+                entry.event
+            )
+        })?;
+        let mut emitted_id = None;
+        store.append_chained(|prev| {
+            receipt.prev_receipt_id = prev;
+            receipt.receipt_id = receipt.compute_id().context("computing receipt id")?;
+            emitted_id = Some(receipt.receipt_id.clone());
+            let signed_at = chrono::Utc::now().to_rfc3339();
+            mvm_core::receipt::SignedExecutionReceipt::sign(
+                receipt.clone(),
+                &self.signing_key,
+                signed_at,
+            )
+            .context("signing execution receipt")
+        })?;
+        Ok(emitted_id)
     }
 
     /// Best-effort emission of a signed [`ExecutionReceipt`] for an audit
@@ -1304,12 +1471,45 @@ fn write_atomic_inner(path: &Path, bytes: &[u8], sync: bool) -> Result<()> {
 mod tests {
     use super::*;
     use crate::supervisor::verify_audit_chain;
+    use rand::Rng;
 
     fn fixture_plan(tenant: &str, plan_id: &str) -> ExecutionPlan {
         mvm_core::plan::test_support::PlanFixture::new()
             .tenant(tenant)
             .plan_id(plan_id)
             .build()
+    }
+
+    /// Construct, use and drop an emitter from inside an async context.
+    ///
+    /// This is the shape the cached runtime made hazardous and that no unit
+    /// test covered: the runtime now dies with the emitter rather than inside
+    /// the emit that built it, so an emitter dropped in async drops a runtime
+    /// in async — which tokio panics on. The conformance suite caught it by
+    /// accident because its steps run under cucumber's runtime; this catches
+    /// it on purpose.
+    #[tokio::test]
+    async fn an_emitter_dropped_inside_an_async_context_does_not_panic() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = {
+            let mut __ed_seed = [0u8; 32];
+            rand::rng().fill_bytes(&mut __ed_seed);
+            SigningKey::from_bytes(&__ed_seed)
+        };
+
+        let emitter = AuditEmitter::with_dir(key, dir.path()).unwrap();
+        // Emit first: the runtime is built lazily, so an emitter that never
+        // emitted would drop a `OnceLock` that was never filled and pass
+        // whatever `Drop` did.
+        emitter
+            .emit_admitted(&fixture_plan("local", "plan-async-drop"), "host:test")
+            .unwrap();
+
+        drop(emitter);
+
+        // Reached only if the drop above did not panic.
+        let content = std::fs::read_to_string(dir.path().join("local.jsonl")).unwrap();
+        assert!(content.contains("plan-async-drop"));
     }
 
     #[test]
@@ -1319,7 +1519,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let key = {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             SigningKey::from_bytes(&__ed_seed)
         };
         let emitter = AuditEmitter::with_dir(key, dir.path()).unwrap();
@@ -1353,7 +1553,7 @@ mod tests {
         ] {
             let dir = tempfile::tempdir().unwrap();
             let mut seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut seed);
+            rand::rng().fill_bytes(&mut seed);
             let emitter =
                 AuditEmitter::with_dir(SigningKey::from_bytes(&seed), dir.path()).expect("emitter");
             let plan = mvm_core::plan::test_support::PlanFixture::new()
@@ -1382,7 +1582,7 @@ mod tests {
     fn stream_audit_entries_carry_the_binding_and_no_payload_bytes() {
         let dir = tempfile::tempdir().unwrap();
         let mut seed = [0u8; 32];
-        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut seed);
+        rand::rng().fill_bytes(&mut seed);
         let key = SigningKey::from_bytes(&seed);
         let vk = key.verifying_key();
         let emitter = AuditEmitter::with_dir(key, dir.path()).expect("emitter");
@@ -1479,7 +1679,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let key = {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             SigningKey::from_bytes(&__ed_seed)
         };
         let vk = key.verifying_key();
@@ -1513,7 +1713,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let key = {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             SigningKey::from_bytes(&__ed_seed)
         };
         let vk = key.verifying_key();
@@ -1557,7 +1757,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let key = {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             SigningKey::from_bytes(&__ed_seed)
         };
         let vk = key.verifying_key();
@@ -1575,7 +1775,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let key = {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             SigningKey::from_bytes(&__ed_seed)
         };
         let vk = key.verifying_key();
@@ -1634,7 +1834,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let key = {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             SigningKey::from_bytes(&__ed_seed)
         };
         let vk = key.verifying_key();
@@ -1670,7 +1870,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let key = {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             SigningKey::from_bytes(&__ed_seed)
         };
         let vk = key.verifying_key();
@@ -1707,7 +1907,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let key = {
             let mut seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut seed);
+            rand::rng().fill_bytes(&mut seed);
             SigningKey::from_bytes(&seed)
         };
         let vk = key.verifying_key();
@@ -1748,7 +1948,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let key = {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             SigningKey::from_bytes(&__ed_seed)
         };
         let vk = key.verifying_key();
@@ -1780,7 +1980,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let key = {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             SigningKey::from_bytes(&__ed_seed)
         };
         let vk = key.verifying_key();
@@ -1806,7 +2006,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let key = {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             SigningKey::from_bytes(&__ed_seed)
         };
         let vk = key.verifying_key();
@@ -1842,7 +2042,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let key = {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             SigningKey::from_bytes(&__ed_seed)
         };
         let vk = key.verifying_key();
@@ -1864,7 +2064,7 @@ mod tests {
         let target = dir.path().join("audit-fresh");
         let key = {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             SigningKey::from_bytes(&__ed_seed)
         };
         let _emitter = AuditEmitter::with_dir(key, &target).unwrap();
@@ -1883,7 +2083,7 @@ mod tests {
         let replica = dir.path().join("replica.jsonl");
         let key = {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             SigningKey::from_bytes(&__ed_seed)
         };
         let vk = key.verifying_key();
@@ -1908,7 +2108,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let key = {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             SigningKey::from_bytes(&__ed_seed)
         };
         let policy = mvm_core::policy::AuditPolicy {
@@ -1927,7 +2127,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let key = {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             SigningKey::from_bytes(&__ed_seed)
         };
         let policy = mvm_core::policy::AuditPolicy {
@@ -1946,7 +2146,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let key = {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             SigningKey::from_bytes(&__ed_seed)
         };
         let policy = mvm_core::policy::AuditPolicy {
@@ -1965,7 +2165,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let key = {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             SigningKey::from_bytes(&__ed_seed)
         };
         let vk = key.verifying_key();
@@ -2017,7 +2217,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let key = {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             SigningKey::from_bytes(&__ed_seed)
         };
         let vk = key.verifying_key();
@@ -2042,7 +2242,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let key = {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             SigningKey::from_bytes(&__ed_seed)
         };
         let vk = key.verifying_key();
@@ -2081,7 +2281,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let key = {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             SigningKey::from_bytes(&__ed_seed)
         };
         let vk = key.verifying_key();
@@ -2151,7 +2351,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let key = {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             SigningKey::from_bytes(&__ed_seed)
         };
         let vk = key.verifying_key();
@@ -2181,7 +2381,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let key = {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             SigningKey::from_bytes(&__ed_seed)
         };
         let vk = key.verifying_key();
@@ -2210,7 +2410,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let key = {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             SigningKey::from_bytes(&__ed_seed)
         };
         let vk = key.verifying_key();
@@ -2248,7 +2448,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let key = {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             SigningKey::from_bytes(&__ed_seed)
         };
         let emitter = AuditEmitter::with_dir(key, dir.path()).unwrap();
@@ -2269,7 +2469,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let key = {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             SigningKey::from_bytes(&__ed_seed)
         };
         let emitter = AuditEmitter::with_dir(key, dir.path()).unwrap();
@@ -2284,7 +2484,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let key = {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             SigningKey::from_bytes(&__ed_seed)
         };
         let emitter = AuditEmitter::with_dir(key, dir.path())
@@ -2319,7 +2519,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let key = {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             SigningKey::from_bytes(&__ed_seed)
         };
         let emitter = AuditEmitter::with_dir(key, dir.path())
@@ -2364,7 +2564,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let key = {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             SigningKey::from_bytes(&__ed_seed)
         };
         let emitter = AuditEmitter::with_dir(key, dir.path())
@@ -2404,7 +2604,7 @@ mod tests {
         let decisions_dir = tempfile::tempdir().unwrap();
         let key = {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             SigningKey::from_bytes(&__ed_seed)
         };
         let vk = key.verifying_key();

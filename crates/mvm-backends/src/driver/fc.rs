@@ -77,10 +77,47 @@ impl Default for FcDriver {
 /// UART), and carry NO `mvm.ip=` / `mvm.gw=` tokens — the converged path has no
 /// guest NIC. The root/init selection follows the boot shape; the shared cmdline
 /// assembler layers verity/grants/egress/uvols tokens on top of this.
+/// Set to `1`/`true` to restore full kernel console output on a Firecracker
+/// guest, at the cost documented on [`fc_console_verbosity`].
+pub const GUEST_CONSOLE_VERBOSE_ENV: &str = "MVM_GUEST_CONSOLE_VERBOSE";
+
+/// The console-verbosity token for a Firecracker boot, `" quiet"` by default.
+///
+/// Firecracker's `ttyS0` is an emulated 16550A: the guest takes a VM exit per
+/// byte written to it. Measured on a Linux/KVM host with speculative-execution
+/// mitigations active, a workload boot emits ~19 KB of kernel log that way and
+/// pays 148-176 ms for it — a third of the launch, spent narrating a boot
+/// nobody is reading. The other backends do not share the cost: libkrun and the
+/// mock boot `console=hvc0`, a virtio-console whose output rides a ring.
+///
+/// `quiet` raises the console loglevel so `KERN_INFO` chatter stops crossing
+/// the port. Warnings and errors still print, and the guest agent's own
+/// messages are userspace writes rather than printk, so they are unaffected —
+/// `console.log` keeps the lines an operator actually reads.
+///
+/// The escape hatch matters: kernel boot output is how a hung guest gets
+/// diagnosed. [`GUEST_CONSOLE_VERBOSE_ENV`] restores it in full.
+fn fc_console_verbosity() -> &'static str {
+    verbosity_token_for(std::env::var(GUEST_CONSOLE_VERBOSE_ENV).ok().as_deref())
+}
+
+/// The verbosity decision, pure over the raw env value so it is testable
+/// without mutating process state.
+fn verbosity_token_for(requested: Option<&str>) -> &'static str {
+    match requested {
+        Some(v) if v == "1" || v.eq_ignore_ascii_case("true") => "",
+        _ => " quiet",
+    }
+}
+
 fn fc_base_bootargs(virtiofs_root: bool, has_disk: bool) -> String {
     // Serial console + reboot/panic behavior + stable interface naming. The NIC
     // fields the raw Firecracker TAP path appends here are deliberately absent.
-    let console = "console=ttyS0 reboot=k panic=1 net.ifnames=0";
+    let console = format!(
+        "console=ttyS0{} reboot=k panic=1 net.ifnames=0",
+        fc_console_verbosity()
+    );
+    let console = console.as_str();
     if virtiofs_root {
         format!("{console} rootfstype=virtiofs root=mvmroot ro init=/init")
     } else if has_disk {
@@ -952,7 +989,7 @@ impl VmmDriver for FcDriver {
         );
 
         trace.mark("guest_boot");
-        trace.write_to(&state_dir);
+        trace.write_driver_to(&state_dir);
 
         let vm = Box::new(FcRunningVm {
             id: VmId(spec.name.clone()),
@@ -1212,6 +1249,7 @@ mod tests {
                 log_path: "/tmp/console.log".into(),
             },
             trusted_builder: false,
+            plan_binding: None,
         }
     }
 
@@ -1356,7 +1394,7 @@ mod tests {
 
         // Verity / initramfs base: serial console only, no root/init token.
         let verity = d.workload_base_bootargs(false, false);
-        assert_eq!(verity, "console=ttyS0 reboot=k panic=1 net.ifnames=0");
+        assert_eq!(verity, "console=ttyS0 quiet reboot=k panic=1 net.ifnames=0");
         assert!(!verity.contains("root="), "got: {verity}");
 
         // The virtiofs-root variant still uses ttyS0, not another VMM's console.
@@ -1502,7 +1540,7 @@ mod tests {
             "{boot}"
         );
         assert!(
-            boot.contains(r#""boot_args": "console=ttyS0 reboot=k panic=1 net.ifnames=0""#),
+            boot.contains(r#""boot_args": "console=ttyS0 quiet reboot=k panic=1 net.ifnames=0""#),
             "{boot}"
         );
     }
@@ -2119,5 +2157,51 @@ mod tests {
         // (rejected before any connect attempt).
         assert!(vm.vsock_connect(GUEST_AGENT_PORT + 1).is_err());
         assert!(vm.vsock_connect(9999).is_err());
+    }
+}
+
+#[cfg(test)]
+mod console_verbosity_tests {
+    use super::*;
+
+    /// Firecracker's ttyS0 costs a VM exit per byte, so the default boot must
+    /// not narrate itself across it.
+    #[test]
+    fn the_default_firecracker_cmdline_is_quiet() {
+        for (virtiofs_root, has_disk) in [(false, false), (false, true), (true, false)] {
+            let args = fc_base_bootargs(virtiofs_root, has_disk);
+            assert!(
+                args.contains("console=ttyS0 quiet"),
+                "boot shape ({virtiofs_root}, {has_disk}) lost the quiet token: {args}"
+            );
+        }
+    }
+
+    /// `quiet` raises the console loglevel; it must not disturb the rest of the
+    /// cmdline, whose tokens other code and the guest init both parse.
+    #[test]
+    fn quiet_is_additive_and_leaves_the_boot_shape_tokens_alone() {
+        assert_eq!(
+            fc_base_bootargs(false, true),
+            "console=ttyS0 quiet reboot=k panic=1 net.ifnames=0 rootwait init=/init"
+        );
+        assert_eq!(
+            fc_base_bootargs(true, false),
+            "console=ttyS0 quiet reboot=k panic=1 net.ifnames=0 \
+             rootfstype=virtiofs root=mvmroot ro init=/init"
+        );
+    }
+
+    /// A hung guest is diagnosed from kernel boot output, so the suppression
+    /// has to be reversible without a rebuild.
+    #[test]
+    fn the_verbose_escape_hatch_restores_full_kernel_output() {
+        // Pure over the env read so the test does not mutate process state.
+        assert_eq!(verbosity_token_for(None), " quiet");
+        assert_eq!(verbosity_token_for(Some("0")), " quiet");
+        assert_eq!(verbosity_token_for(Some("no")), " quiet");
+        assert_eq!(verbosity_token_for(Some("1")), "");
+        assert_eq!(verbosity_token_for(Some("true")), "");
+        assert_eq!(verbosity_token_for(Some("TRUE")), "");
     }
 }

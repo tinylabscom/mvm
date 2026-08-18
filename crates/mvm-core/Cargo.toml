@@ -31,7 +31,7 @@ hex.workspace = true
 sha2.workspace = true
 # Folded in with mvm-plan: `plan::bundle` reads/writes
 # tar bundle archives. Sync — adds no async/runtime dep to mvm-core.
-tar = "0.4"
+tar.workspace = true
 thiserror.workspace = true
 # Optional: the only default-build async surface left is
 # `protocol`'s hostd IPC transport, gated behind `hostd-transport`.
@@ -40,15 +40,9 @@ thiserror.workspace = true
 tokio = { workspace = true, optional = true }
 toml.workspace = true
 tracing.workspace = true
-tracing-subscriber.workspace = true
 uuid.workspace = true
 regex.workspace = true
 tempfile.workspace = true
-# `mandatory_deny_ranges` parses a small set of
-# IPv4/IPv6 CIDRs (cloud metadata endpoint, link-local, CGNAT,
-# host loopback). Workspace-pinned (already used by
-# `mvm-supervisor::proxy::l4`).
-ipnet = { workspace = true }
 
 # Folded in with the former mvm-security crate: the
 # `crypto` module's AEAD (aes-gcm), HMAC, OS keychain (keyring),
@@ -66,9 +60,9 @@ rand.workspace = true
 # sigstore-verify stack checks bundles offline against an embedded trust root
 # — no rsa, no OIDC client, no async TUF fetch — so the default mvm-core build
 # stays runtime-free and `manifest-verify` pulls no tokio.
-sigstore-verify = { version = "0.9", default-features = false, optional = true }
-sigstore-trust-root = { version = "0.9", default-features = false, optional = true }
-sigstore-types = { version = "0.9", optional = true }
+sigstore-verify = { version = "0.11", default-features = false, features = ["rustls"], optional = true }
+sigstore-trust-root = { version = "0.11", default-features = false, optional = true }
+sigstore-types = { version = "0.11", optional = true }
 # Only under the `schema` feature (protocol-schema codegen);
 # 0.8 matches the version mvm-sdk already pins, so no new lockfile entry.
 schemars = { version = "0.8", features = ["chrono"], optional = true }
@@ -173,6 +167,9 @@ name = "verify-pack-revocation-list"
 required-features = ["manifest-verify"]
 
 [dev-dependencies]
+# Test-only: the mandatory-deny range test parses CIDRs to cross-check the
+# generated iptables script. No production path in this crate uses it.
+ipnet = { workspace = true }
 # `OsRng` for generating fresh ed25519 keys in signed_config tests
 # without committing static fixtures. (Also a non-dev dep above for the
 # crypto module; kept here so a future dep-trim of the main `rand` does

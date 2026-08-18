@@ -41,6 +41,7 @@ use anyhow::{Context, Result};
 use clap::{Args as ClapArgs, Subcommand, ValueEnum};
 use mvm_client::secret::{PutOutcome, SecretBindingMeta, SecretService, SecretValueInput};
 use mvm_contract::ir::{AuthType, Sigv4Params};
+use mvm_contract::service_catalog;
 
 use mvm_core::user_config::MvmConfig;
 
@@ -95,13 +96,20 @@ pub(in crate::commands) enum SecretAction {
         /// Local namespace. Fleet tenant secrets are managed by mvmd.
         #[arg(long, default_value = "local")]
         tenant: String,
-        /// Destination the credential may reach. Repeatable;
-        /// at least one required. `*.` subdomain wildcards supported.
-        #[arg(long = "host", required = true)]
+        /// Named provider from the built-in catalog (`mvmctl secret
+        /// providers`). Supplies the destination hosts and auth type, so
+        /// neither is hand-typed. Mutually exclusive with `--host`/`--type`.
+        #[arg(long, conflicts_with_all = ["hosts", "auth_type"])]
+        provider: Option<String>,
+        /// Destination the credential may reach. Repeatable; at least one
+        /// required unless `--provider` supplies them. `*.` subdomain
+        /// wildcards supported.
+        #[arg(long = "host", required_unless_present = "provider")]
         hosts: Vec<String>,
-        /// How the credential authenticates outbound requests.
-        #[arg(long = "type", value_enum)]
-        auth_type: AuthTypeArg,
+        /// How the credential authenticates outbound requests. Required
+        /// unless `--provider` supplies it.
+        #[arg(long = "type", value_enum, required_unless_present = "provider")]
+        auth_type: Option<AuthTypeArg>,
         /// AWS access-key id (e.g. `AKIA…`). Required with `--type sigv4`,
         /// rejected otherwise. Public (it pairs with the secret-access-key
         /// value, which is the stored secret) — not the signing key.
@@ -112,8 +120,9 @@ pub(in crate::commands) enum SecretAction {
         #[arg(long)]
         region: Option<String>,
         /// AWS credential-scope service (e.g. `s3`, `execute-api`). Required
-        /// with `--type sigv4`, rejected otherwise.
-        #[arg(long)]
+        /// with `--type sigv4`, rejected otherwise. With `--provider` the
+        /// service comes from the catalog entry, so passing it is rejected.
+        #[arg(long, conflicts_with = "provider")]
         service: Option<String>,
         /// Inline value. Pass `-` to read from stdin (preferred when
         /// scripting; avoids shell-history exposure).
@@ -122,6 +131,14 @@ pub(in crate::commands) enum SecretAction {
         /// Read value from a file on disk.
         #[arg(long)]
         value_file: Option<PathBuf>,
+    },
+
+    /// List the built-in service providers `--provider` accepts. Static
+    /// data compiled into this binary — no store access, no network.
+    Providers {
+        /// Case-insensitive substring filter over name, description and tags.
+        #[arg(long)]
+        search: Option<String>,
     },
 
     /// List secret names stored for a tenant. Bound secrets (defined via
@@ -180,6 +197,7 @@ pub(in crate::commands) fn run_with_service(service: &SecretService, args: Args)
         SecretAction::Set {
             name,
             tenant,
+            provider,
             hosts,
             auth_type,
             aws_access_key_id,
@@ -192,8 +210,9 @@ pub(in crate::commands) fn run_with_service(service: &SecretService, args: Args)
             SetArgs {
                 tenant,
                 name,
+                provider,
                 hosts,
-                auth_type: auth_type.into(),
+                auth_type: auth_type.map(Into::into),
                 aws_access_key_id,
                 region,
                 service: aws_service,
@@ -202,6 +221,7 @@ pub(in crate::commands) fn run_with_service(service: &SecretService, args: Args)
             },
         ),
         SecretAction::Get { name, tenant } => cmd_get(service, tenant, name),
+        SecretAction::Providers { search } => cmd_providers(search.as_deref()),
         SecretAction::Ls { tenant } => cmd_ls(service, tenant),
         SecretAction::Rm { name, tenant } => cmd_rm(service, tenant, name),
     }
@@ -232,8 +252,9 @@ fn cmd_put(
 struct SetArgs {
     tenant: String,
     name: String,
+    provider: Option<String>,
     hosts: Vec<String>,
-    auth_type: AuthType,
+    auth_type: Option<AuthType>,
     aws_access_key_id: Option<String>,
     region: Option<String>,
     service: Option<String>,
@@ -245,6 +266,7 @@ fn cmd_set(service: &SecretService, set: SetArgs) -> Result<()> {
     let SetArgs {
         tenant,
         name,
+        provider,
         hosts,
         auth_type,
         aws_access_key_id,
@@ -253,10 +275,16 @@ fn cmd_set(service: &SecretService, set: SetArgs) -> Result<()> {
         value,
         value_file,
     } = set;
-    // Validate the SigV4 scope params against the auth-type BEFORE touching
-    // the store: `--type sigv4` requires all three; any of them is rejected
-    // for a non-sigv4 type (they'd be silently dropped otherwise).
-    let sigv4 = resolve_sigv4_params(auth_type, aws_access_key_id, region, aws_service)?;
+    // Resolve the destination + auth shape BEFORE touching the store, so a
+    // rejected provider or a bad SigV4 scope leaves nothing behind.
+    let resolved = resolve_binding_shape(BindingShapeInput {
+        provider,
+        hosts,
+        auth_type,
+        aws_access_key_id,
+        region,
+        aws_service,
+    })?;
     let raw = resolve_value(value, value_file, &name)?;
     service.put(&tenant, &name, SecretValueInput::new(raw))?;
     // Binding after value: the service refuses to bind a secret with no
@@ -265,12 +293,131 @@ fn cmd_set(service: &SecretService, set: SetArgs) -> Result<()> {
         &tenant,
         &name,
         SecretBindingMeta {
-            auth_type,
-            allowed_hosts: hosts,
-            sigv4,
+            auth_type: resolved.auth_type,
+            allowed_hosts: resolved.allowed_hosts,
+            sigv4: resolved.sigv4,
+            provider: resolved.provider,
         },
     )?;
     eprintln!("Defined secret '{name}' for tenant '{tenant}'.");
+    Ok(())
+}
+
+/// The destination-and-auth inputs to [`resolve_binding_shape`].
+struct BindingShapeInput {
+    provider: Option<String>,
+    hosts: Vec<String>,
+    auth_type: Option<AuthType>,
+    aws_access_key_id: Option<String>,
+    region: Option<String>,
+    aws_service: Option<String>,
+}
+
+/// What a binding will be recorded with, after a provider (if any) is expanded.
+///
+/// `Debug` is safe here: every field is operator-declared destination policy.
+/// The secret value is resolved separately and never reaches this struct — the
+/// SigV4 access-key id it can carry is public and pairs with the stored
+/// secret-access-key, which stays in the value store.
+#[derive(Debug)]
+struct ResolvedBindingShape {
+    allowed_hosts: Vec<String>,
+    auth_type: AuthType,
+    sigv4: Option<Sigv4Params>,
+    provider: Option<String>,
+}
+
+/// Expand `--provider` into literal hosts and an auth type, or take the
+/// explicit `--host`/`--type` form.
+///
+/// The expansion happens here, once, and the *literal* hosts are what get
+/// stored: the catalog is never consulted again for this binding. That is what
+/// keeps a later catalog edit from silently widening a binding that already
+/// exists, and keeps the egress path free of catalog lookups. The provider name
+/// travels alongside for display and audit and is not an input to any decision.
+///
+/// An unrecognised provider is refused. It must not fall through to the
+/// explicit form or to a default: a typo'd `--provider` that quietly became
+/// "no restriction" is exactly the failure this whole feature exists to remove.
+fn resolve_binding_shape(input: BindingShapeInput) -> Result<ResolvedBindingShape> {
+    let BindingShapeInput {
+        provider,
+        hosts,
+        auth_type,
+        aws_access_key_id,
+        region,
+        aws_service,
+    } = input;
+
+    let Some(provider_name) = provider else {
+        // Explicit form. clap guarantees both are present without --provider,
+        // but the type is still Option, so name the invariant rather than
+        // unwrapping it.
+        let auth_type = auth_type.context("--type is required when --provider is not given")?;
+        let sigv4 = resolve_sigv4_params(auth_type, aws_access_key_id, region, aws_service)?;
+        return Ok(ResolvedBindingShape {
+            allowed_hosts: hosts,
+            auth_type,
+            sigv4,
+            provider: None,
+        });
+    };
+
+    let catalog = service_catalog::builtin();
+    let entry = catalog.find(&provider_name).with_context(|| {
+        let known = catalog
+            .all()
+            .iter()
+            .map(|p| p.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(
+            "unknown provider {provider_name:?}; known providers: {known}. \
+             Use --host/--type for a destination the catalog does not carry."
+        )
+    })?;
+
+    // The entry supplies the service; the operator still supplies the
+    // account-scoped halves, which are theirs and not the provider's.
+    let sigv4 = resolve_sigv4_params(
+        entry.auth,
+        aws_access_key_id,
+        region,
+        entry.sigv4_service.clone(),
+    )?;
+
+    Ok(ResolvedBindingShape {
+        allowed_hosts: entry.hosts.clone(),
+        auth_type: entry.auth,
+        sigv4,
+        provider: Some(entry.name.clone()),
+    })
+}
+
+/// `mvmctl secret providers` — the catalog, with no store access.
+fn cmd_providers(search: Option<&str>) -> Result<()> {
+    let catalog = service_catalog::builtin();
+    let rows: Vec<_> = match search {
+        Some(q) => catalog.search(q),
+        None => catalog.all().iter().collect(),
+    };
+    if rows.is_empty() {
+        eprintln!("No providers match. Use --host/--type for an uncatalogued destination.");
+        return Ok(());
+    }
+    for p in rows {
+        let mut line = format!(
+            "{}\ttype={}\thosts={}",
+            p.name,
+            auth_type_label(p.auth),
+            p.hosts.join(",")
+        );
+        if let Some(svc) = &p.sigv4_service {
+            line.push_str(&format!("\tservice={svc}"));
+        }
+        line.push_str(&format!("\t{}", p.description));
+        println!("{line}");
+    }
     Ok(())
 }
 
@@ -359,6 +506,11 @@ fn ls_line(name: &str, binding: Option<&SecretBindingMeta>) -> String {
                     "\taccess_key_id={}\tregion={}\tservice={}",
                     s.access_key_id, s.region, s.service
                 ));
+            }
+            // Which catalog entry authored this, when one did. The hosts above
+            // remain the enforced set — this names their provenance.
+            if let Some(p) = &b.provider {
+                line.push_str(&format!("\tprovider={p}"));
             }
             line
         }
@@ -488,8 +640,9 @@ mod tests {
             SetArgs {
                 tenant: "local".into(),
                 name: name.into(),
+                provider: None,
                 hosts: hosts.iter().map(|h| h.to_string()).collect(),
-                auth_type,
+                auth_type: Some(auth_type),
                 aws_access_key_id: None,
                 region: None,
                 service: None,
@@ -601,6 +754,212 @@ mod tests {
         assert!(!audit_text(&f).contains("sk-live-zzz"));
     }
 
+    // ── Named service bindings (--provider) ──────────────────────────
+
+    /// A provider expands to exactly its catalog entry's hosts and auth type,
+    /// so the operator never types the destination.
+    #[test]
+    fn provider_resolves_to_its_catalog_hosts_and_auth_type() {
+        let entry = service_catalog::builtin()
+            .find("openai")
+            .expect("openai is a shipped provider")
+            .clone();
+        let r = resolve_binding_shape(BindingShapeInput {
+            provider: Some("openai".into()),
+            hosts: vec![],
+            auth_type: None,
+            aws_access_key_id: None,
+            region: None,
+            aws_service: None,
+        })
+        .unwrap();
+        assert_eq!(r.allowed_hosts, entry.hosts);
+        assert_eq!(r.auth_type, entry.auth);
+        assert_eq!(r.provider.as_deref(), Some("openai"));
+    }
+
+    /// An unrecognised name refuses. It must not fall through to the explicit
+    /// form, and must not become an empty (or permissive) host set.
+    #[test]
+    fn unknown_provider_refuses_rather_than_falling_through() {
+        let err = resolve_binding_shape(BindingShapeInput {
+            provider: Some("not-a-provider".into()),
+            hosts: vec![],
+            auth_type: None,
+            aws_access_key_id: None,
+            region: None,
+            aws_service: None,
+        })
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("unknown provider"), "got: {msg}");
+        // The refusal names the alternatives rather than stranding the operator.
+        assert!(msg.contains("openai"), "lists known providers: {msg}");
+        assert!(msg.contains("--host"), "names the escape hatch: {msg}");
+    }
+
+    /// The two authoring forms are mutually exclusive at the clap layer, so a
+    /// command carrying both is rejected before any resolution runs.
+    #[test]
+    fn provider_and_explicit_host_are_mutually_exclusive() {
+        use clap::Parser;
+        #[derive(Parser)]
+        struct Probe {
+            #[command(subcommand)]
+            action: SecretAction,
+        }
+        let both = Probe::try_parse_from([
+            "probe",
+            "set",
+            "k",
+            "--provider",
+            "openai",
+            "--host",
+            "evil.example",
+        ]);
+        assert!(both.is_err(), "--provider with --host must be refused");
+
+        let with_type = Probe::try_parse_from([
+            "probe",
+            "set",
+            "k",
+            "--provider",
+            "openai",
+            "--type",
+            "bearer",
+        ]);
+        assert!(with_type.is_err(), "--provider with --type must be refused");
+
+        // And neither form present is also a refusal — there is no default.
+        let neither = Probe::try_parse_from(["probe", "set", "k"]);
+        assert!(neither.is_err(), "one of the two forms is required");
+
+        // Each form alone parses.
+        assert!(Probe::try_parse_from(["probe", "set", "k", "--provider", "openai"]).is_ok());
+        assert!(
+            Probe::try_parse_from([
+                "probe",
+                "set",
+                "k",
+                "--host",
+                "h.example",
+                "--type",
+                "bearer"
+            ])
+            .is_ok()
+        );
+    }
+
+    /// The stored binding carries literal hosts, not the provider name. This is
+    /// what makes a later catalog edit unable to widen a binding that already
+    /// exists — enforcement reads `allowed_hosts`, which was fixed at set time.
+    #[test]
+    fn binding_records_resolved_hosts_not_the_provider_name() {
+        let f = fixture();
+        cmd_set(
+            &f.service,
+            SetArgs {
+                tenant: "local".into(),
+                name: "openai".into(),
+                provider: Some("openai".into()),
+                hosts: vec![],
+                auth_type: None,
+                aws_access_key_id: None,
+                region: None,
+                service: None,
+                value: Some("sk-live-zzz".into()),
+                value_file: None,
+            },
+        )
+        .unwrap();
+        let meta = f
+            .service
+            .metadata("local", "openai")
+            .unwrap()
+            .and_then(|m| m.binding)
+            .expect("set records a binding");
+        let entry = service_catalog::builtin().find("openai").unwrap().clone();
+        assert_eq!(
+            meta.allowed_hosts, entry.hosts,
+            "the enforced set is literal hosts"
+        );
+        assert!(
+            !meta.allowed_hosts.iter().any(|h| h == "openai"),
+            "the provider name is not a destination"
+        );
+        assert_eq!(meta.provider.as_deref(), Some("openai"));
+    }
+
+    /// A SigV4 provider supplies the scope service; the account-scoped halves
+    /// stay the operator's, and their absence is still refused.
+    #[test]
+    fn a_sigv4_provider_supplies_the_scope_service_but_not_the_account() {
+        let ok = resolve_binding_shape(BindingShapeInput {
+            provider: Some("aws-s3".into()),
+            hosts: vec![],
+            auth_type: None,
+            aws_access_key_id: Some("AKIAIOSFODNN7EXAMPLE".into()),
+            region: Some("us-east-1".into()),
+            aws_service: None,
+        })
+        .unwrap();
+        let sigv4 = ok.sigv4.expect("sigv4 provider yields scope params");
+        assert_eq!(sigv4.service, "s3", "service comes from the catalog");
+        assert_eq!(sigv4.region, "us-east-1", "region comes from the operator");
+
+        let missing_region = resolve_binding_shape(BindingShapeInput {
+            provider: Some("aws-s3".into()),
+            hosts: vec![],
+            auth_type: None,
+            aws_access_key_id: Some("AKIAIOSFODNN7EXAMPLE".into()),
+            region: None,
+            aws_service: None,
+        });
+        assert!(missing_region.is_err(), "region is not inferable");
+    }
+
+    /// The shipped catalog must be internally consistent: a malformed entry
+    /// would produce a binding nobody authored deliberately.
+    #[test]
+    fn catalog_entry_rejects_mismatched_auth_scope() {
+        service_catalog::builtin()
+            .validate()
+            .expect("shipped catalog validates");
+        // And the check has teeth: a sigv4 entry with no scope service fails.
+        let bad = mvm_contract::service_catalog::ServiceProvider {
+            name: "x".into(),
+            description: "d".into(),
+            hosts: vec!["h.example".into()],
+            auth: AuthType::Sigv4,
+            sigv4_service: None,
+            tags: vec![],
+        };
+        assert!(bad.validate().is_err());
+    }
+
+    /// `providers` reads only compiled-in data — no store, no network.
+    #[test]
+    fn cmd_providers_lists_the_catalog_and_filters() {
+        cmd_providers(None).unwrap();
+        cmd_providers(Some("llm")).unwrap();
+        cmd_providers(Some("zzz-no-match")).unwrap();
+    }
+
+    /// `ls` names the provider a binding came from, without changing what is
+    /// enforced.
+    #[test]
+    fn ls_line_shows_the_provider_when_one_authored_the_binding() {
+        let b = SecretBindingMeta {
+            auth_type: AuthType::Bearer,
+            allowed_hosts: vec!["api.openai.com".into()],
+            sigv4: None,
+            provider: Some("openai".into()),
+        };
+        let line = ls_line("openai", Some(&b));
+        assert!(line.contains("provider=openai"), "got: {line}");
+        assert!(line.contains("hosts=api.openai.com"), "got: {line}");
+    }
+
     #[test]
     fn cmd_set_sigv4_stores_params_in_binding_not_value_in_sidecar() {
         let f = fixture();
@@ -609,8 +968,9 @@ mod tests {
             SetArgs {
                 tenant: "local".into(),
                 name: "aws".into(),
+                provider: None,
                 hosts: vec!["s3.us-east-1.amazonaws.com".into()],
-                auth_type: AuthType::Sigv4,
+                auth_type: Some(AuthType::Sigv4),
                 aws_access_key_id: Some("AKIAIOSFODNN7EXAMPLE".into()),
                 region: Some("us-east-1".into()),
                 service: Some("s3".into()),
@@ -690,6 +1050,7 @@ mod tests {
                 region: "us-east-1".into(),
                 service: "s3".into(),
             }),
+            provider: None,
         };
         let line = ls_line("aws", Some(&b));
         assert!(line.contains("type=sigv4"), "got: {line}");
@@ -707,6 +1068,7 @@ mod tests {
             auth_type: AuthType::Bearer,
             allowed_hosts: vec!["api.openai.com".into(), "*.openai.com".into()],
             sigv4: None,
+            provider: None,
         };
         let line = ls_line("openai", Some(&b));
         assert!(line.starts_with("openai"));

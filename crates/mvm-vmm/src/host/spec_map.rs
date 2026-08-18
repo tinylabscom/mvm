@@ -11,7 +11,8 @@ use mvm_core::vm_backend::{VmStartConfig, VmVolumeKind};
 use mvm_net::channel::GuestService;
 
 use crate::driver::spec::{
-    BlockDev, ConsoleCapture, KernelImage, VirtioFsShare, VmmSpec, VsockDirection, VsockPort,
+    BlockDev, ConsoleCapture, KernelImage, PlanBinding, VirtioFsShare, VmmSpec, VsockDirection,
+    VsockPort,
 };
 
 /// The ordered virtio-blk list for a sealed workload: the read-only rootfs at
@@ -322,6 +323,10 @@ pub fn builder_control_sockets(state_dir: &Path, builder_tier: bool) -> Vec<(u32
 /// kernel cmdline, and the write-only console capture path.
 pub struct WorkloadSpecInputs<'a> {
     pub config: &'a VmStartConfig,
+    /// This boot's FlowMux identity drive, when it minted one. Appended after
+    /// every other block and found in the guest by ext4 label, so the volumes
+    /// above cannot shift it out from under the guest.
+    pub identity_drive: Option<&'a Path>,
     pub sockets: WorkloadSockets<'a>,
     /// The kernel cmdline the role assembled (roothash, overlay args, console).
     pub cmdline: String,
@@ -366,8 +371,30 @@ pub fn workload_device_spec(config: &VmStartConfig, cmdline: &str, console_log: 
         },
         shares: workload_shares(config),
         trusted_builder: false,
+        plan_binding: workload_plan_binding(config),
     }
 }
+
+/// The plan plus the audit paths a supervisor needs to enforce that plan's
+/// wall-clock bound and record the kill, or `None` when the launch carries no
+/// admitted plan.
+///
+/// Malformed `plan_json` yields `None` rather than an error: this mapping is
+/// infallible by construction, and a plan the supervisor cannot parse would
+/// fail its own re-verification regardless. Whether a bound actually exists is
+/// the supervisor's read of `resources.timeouts.exec_secs`; this only makes one
+/// enforceable.
+fn workload_plan_binding(config: &VmStartConfig) -> Option<PlanBinding> {
+    let plan_json = serde_json::from_str(config.plan_json.as_deref()?).ok()?;
+    Some(PlanBinding {
+        plan_json,
+        audit_dir: mvm_core::config::mvm_audit_dir(),
+        signing_key_path: mvm_core::config::mvm_keys_dir().join(HOST_SIGNER_KEY_FILE),
+    })
+}
+
+/// File name of the host signing key inside [`mvm_core::config::mvm_keys_dir`].
+const HOST_SIGNER_KEY_FILE: &str = "host-signer.ed25519";
 
 /// virtio-fs host directory shares derived from the launch config.
 ///
@@ -407,10 +434,20 @@ pub fn workload_shares(config: &VmStartConfig) -> Vec<VirtioFsShare> {
 /// No NIC, no policy (those live in the role above and the bridge it spawns,
 /// never in the spec the driver boots).
 pub fn workload_spec(inputs: &WorkloadSpecInputs) -> VmmSpec {
-    VmmSpec {
+    let mut spec = VmmSpec {
         vsock: workload_vsock_ports(&inputs.sockets),
         ..workload_device_spec(inputs.config, &inputs.cmdline, &inputs.console_log)
+    };
+    if let Some(drive) = inputs.identity_drive {
+        let slot = spec.blocks.len() as u8;
+        spec.blocks.push(BlockDev {
+            source: drive.to_path_buf(),
+            read_only: true,
+            ephemeral: false,
+            slot,
+        });
     }
+    spec
 }
 
 #[cfg(test)]
@@ -426,6 +463,54 @@ mod tests {
             rootfs_path: "/img/rootfs.ext4".into(),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn a_launch_carrying_an_admitted_plan_gets_a_plan_binding() {
+        let cfg = VmStartConfig {
+            plan_json: Some(r#"{"resources":{"timeouts":{"exec_secs":30}}}"#.into()),
+            ..base()
+        };
+        let spec = workload_device_spec(&cfg, "console=ttyS0", Path::new("/state/console.log"));
+        let binding = spec
+            .plan_binding
+            .expect("a launch with an admitted plan must carry the bound the supervisor enforces");
+        assert_eq!(binding.plan_json["resources"]["timeouts"]["exec_secs"], 30);
+        assert_eq!(
+            binding
+                .signing_key_path
+                .file_name()
+                .and_then(|n| n.to_str()),
+            Some("host-signer.ed25519"),
+            "the kill is signed under the host signer"
+        );
+        assert_eq!(
+            binding.audit_dir.file_name().and_then(|n| n.to_str()),
+            Some("audit"),
+            "the kill lands in the audit chain dir"
+        );
+    }
+
+    #[test]
+    fn a_launch_without_a_plan_has_no_binding() {
+        let spec = workload_device_spec(&base(), "console=ttyS0", Path::new("/state/console.log"));
+        assert!(
+            spec.plan_binding.is_none(),
+            "Stage 0 and the builder VM carry no plan, so they have no bound to enforce"
+        );
+    }
+
+    #[test]
+    fn an_unparseable_plan_yields_no_binding_rather_than_panicking() {
+        let cfg = VmStartConfig {
+            plan_json: Some("{not json".into()),
+            ..base()
+        };
+        let spec = workload_device_spec(&cfg, "console=ttyS0", Path::new("/state/console.log"));
+        assert!(
+            spec.plan_binding.is_none(),
+            "the mapping is infallible; a plan the supervisor cannot parse fails its own verify"
+        );
     }
 
     fn nodes(blocks: &[BlockDev]) -> Vec<String> {
@@ -991,6 +1076,7 @@ mod tests {
             ..base()
         };
         let spec = workload_spec(&WorkloadSpecInputs {
+            identity_drive: None,
             config: &cfg,
             sockets: sample_sockets(),
             cmdline: "console=ttyAMA0 root=/dev/vda".into(),
@@ -1012,6 +1098,7 @@ mod tests {
             ..base()
         };
         let spec = workload_spec(&WorkloadSpecInputs {
+            identity_drive: None,
             config: &cfg,
             sockets: sample_sockets(),
             cmdline: String::new(),
@@ -1023,6 +1110,7 @@ mod tests {
     #[test]
     fn workload_spec_without_initrd_has_no_initramfs() {
         let spec = workload_spec(&WorkloadSpecInputs {
+            identity_drive: None,
             config: &base(),
             sockets: sample_sockets(),
             cmdline: String::new(),
@@ -1034,6 +1122,7 @@ mod tests {
     #[test]
     fn workload_spec_falls_back_to_bundled_kernel_without_a_path() {
         let spec = workload_spec(&WorkloadSpecInputs {
+            identity_drive: None,
             config: &base(),
             sockets: sample_sockets(),
             cmdline: String::new(),
@@ -1188,6 +1277,7 @@ mod tests {
             ..base()
         };
         let spec = workload_spec(&WorkloadSpecInputs {
+            identity_drive: None,
             config: &cfg,
             sockets: WorkloadSockets {
                 agent: Path::new("/run/agent.sock"),
@@ -1208,6 +1298,7 @@ mod tests {
     #[test]
     fn workload_spec_without_dev_console_carries_three_vsock_entries() {
         let spec = workload_spec(&WorkloadSpecInputs {
+            identity_drive: None,
             config: &base(),
             sockets: sample_sockets(),
             cmdline: String::new(),

@@ -98,7 +98,7 @@ pub(super) fn resolve_or_pull_run_image_with(
     ensure_prod_digest_pin(reference, prod)?;
     let image_ref: ImageReference = reference.parse()?;
     let canonical = image_ref.canonical();
-    let runtime_tag = oci_runtime_tag();
+    let runtime_tag = oci_runtime_tag(cache_root);
     let (image, pulled, trust_from_pull, auth_source_from_pull) = match load_index(cache_root)
         .ok()
         .and_then(|index| find_image(&index, &canonical).cloned())
@@ -302,7 +302,7 @@ fn pull_image_ref(
         });
     }
 
-    let runtime_tag = oci_runtime_tag();
+    let runtime_tag = oci_runtime_tag(cache_root);
     let rootfs_path = format!("rootfs/{manifest_hex}-{runtime_tag}/rootfs.ext4");
     let rootfs_abs = cache_root.join(&rootfs_path);
     super::cache::write_deferred_nodes(cache_root, &manifest.digest, &deferred_nodes)?;
@@ -607,6 +607,10 @@ mod tests {
     #[test]
     fn prod_pull_requires_digest_pin_before_network() {
         let tmp = tempfile::tempdir().expect("tempdir");
+        // Seed before reading the tag: the runtime tag is derived from the
+        // guest artifacts, so a tag taken before seeding is the cold-cache
+        // placeholder and would not match the one the resolve path computes.
+        seed_guest_runtime_cache(tmp.path());
         let err = pull_image_with_trust(tmp.path(), "docker.io/library/alpine:3.20", true)
             .expect_err("mutable prod pull must fail before registry access");
         assert!(
@@ -616,9 +620,65 @@ mod tests {
         );
     }
 
+    /// The other half of the digest-pin rule, and the half nothing asserted.
+    ///
+    /// `prod && !pinned` has two operands, so a test that only drives
+    /// `prod=true, pinned=false` pins one cell of a four-cell truth table.
+    /// Flipping the `&&` to `||` still refuses the mutable prod pull above —
+    /// it just *also* refuses everything else, and no test noticed.
+    ///
+    /// A digest-pinned prod pull must get past this check. It will still fail,
+    /// because the test has no registry, but it must fail for a reason that is
+    /// not the pin rule.
+    #[test]
+    fn a_digest_pinned_prod_pull_is_not_refused_by_the_pin_rule() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        // Seed before reading the tag: the runtime tag is derived from the
+        // guest artifacts, so a tag taken before seeding is the cold-cache
+        // placeholder and would not match the one the resolve path computes.
+        seed_guest_runtime_cache(tmp.path());
+        // A closed local port: the pull fails on connect in milliseconds
+        // instead of reaching a real registry. Which check rejected it is the
+        // only thing under test, so the registry never needs to answer — and a
+        // unit test that pulls from the internet is a flake waiting to happen.
+        let pinned = concat!(
+            "127.0.0.1:1/library/alpine@sha256:",
+            "0000000000000000000000000000000000000000000000000000000000000000"
+        );
+        let err = pull_image_with_trust(tmp.path(), pinned, true)
+            .expect_err("no registry is listening on this port");
+        assert!(
+            !err.to_string()
+                .contains("requires a digest-pinned reference"),
+            "a digest-pinned reference must clear the pin rule; got: {err}"
+        );
+    }
+
+    /// The dev cell of the same truth table. A mutable tag outside `--prod` is
+    /// the ordinary case, and `||` would refuse it.
+    #[test]
+    fn a_mutable_tag_outside_prod_is_not_refused_by_the_pin_rule() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        // Seed before reading the tag: the runtime tag is derived from the
+        // guest artifacts, so a tag taken before seeding is the cold-cache
+        // placeholder and would not match the one the resolve path computes.
+        seed_guest_runtime_cache(tmp.path());
+        let err = pull_image_with_trust(tmp.path(), "127.0.0.1:1/library/alpine:3.20", false)
+            .expect_err("no registry is listening on this port");
+        assert!(
+            !err.to_string()
+                .contains("requires a digest-pinned reference"),
+            "the pin rule applies only under --prod; got: {err}"
+        );
+    }
+
     #[test]
     fn prod_run_image_requires_digest_pin_before_network() {
         let tmp = tempfile::tempdir().expect("tempdir");
+        // Seed before reading the tag: the runtime tag is derived from the
+        // guest artifacts, so a tag taken before seeding is the cold-cache
+        // placeholder and would not match the one the resolve path computes.
+        seed_guest_runtime_cache(tmp.path());
         let err = resolve_or_pull_run_image(tmp.path(), "docker.io/library/alpine:3.20", true)
             .expect_err("mutable prod run image must fail before registry access");
         assert!(
@@ -631,10 +691,14 @@ mod tests {
     #[test]
     fn resolve_run_image_uses_cached_rootfs() {
         let tmp = tempfile::tempdir().expect("tempdir");
+        // Seed before reading the tag: the runtime tag is derived from the
+        // guest artifacts, so a tag taken before seeding is the cold-cache
+        // placeholder and would not match the one the resolve path computes.
+        seed_guest_runtime_cache(tmp.path());
         let digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         let mut image = sample_image("docker.io/library/alpine:3.20", digest, "blobs/a");
         image.rootfs_path = Some("rootfs/alpine/rootfs.ext4".to_string());
-        image.runtime_tag = Some(oci_runtime_tag());
+        image.runtime_tag = Some(oci_runtime_tag(tmp.path()));
         write_index(
             tmp.path(),
             &OciCacheIndex {
@@ -673,6 +737,10 @@ mod tests {
     #[test]
     fn resolve_run_image_rematerializes_stale_record_without_rootfs_path() {
         let tmp = tempfile::tempdir().expect("tempdir");
+        // Seed before reading the tag: the runtime tag is derived from the
+        // guest artifacts, so a tag taken before seeding is the cold-cache
+        // placeholder and would not match the one the resolve path computes.
+        seed_guest_runtime_cache(tmp.path());
         let digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         let image = sample_image("docker.io/library/alpine:3.20", digest, "blobs/a");
         write_index(
@@ -684,7 +752,6 @@ mod tests {
         );
         write_minimal_config(tmp.path());
         create_unpacked_root(tmp.path(), digest);
-        seed_guest_runtime_cache(tmp.path());
 
         let resolved = resolve_or_pull_run_image_with(
             tmp.path(),
@@ -694,7 +761,7 @@ mod tests {
         )
         .expect("stale cached image should be repaired from unpacked layers");
 
-        let runtime_tag = oci_runtime_tag();
+        let runtime_tag = oci_runtime_tag(tmp.path());
         let expected = format!(
             "rootfs/{}-{runtime_tag}/rootfs.ext4",
             sha256_hex(digest).unwrap()
@@ -715,10 +782,14 @@ mod tests {
     #[test]
     fn resolve_run_image_rematerializes_missing_current_rootfs() {
         let tmp = tempfile::tempdir().expect("tempdir");
+        // Seed before reading the tag: the runtime tag is derived from the
+        // guest artifacts, so a tag taken before seeding is the cold-cache
+        // placeholder and would not match the one the resolve path computes.
+        seed_guest_runtime_cache(tmp.path());
         let digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         let mut image = sample_image("docker.io/library/alpine:3.20", digest, "blobs/a");
         image.rootfs_path = Some("rootfs/alpine/rootfs.ext4".to_string());
-        image.runtime_tag = Some(oci_runtime_tag());
+        image.runtime_tag = Some(oci_runtime_tag(tmp.path()));
         write_index(
             tmp.path(),
             &OciCacheIndex {
@@ -728,7 +799,6 @@ mod tests {
         );
         write_minimal_config(tmp.path());
         create_unpacked_root(tmp.path(), digest);
-        seed_guest_runtime_cache(tmp.path());
 
         let resolved = resolve_or_pull_run_image_with(
             tmp.path(),
@@ -757,10 +827,14 @@ mod tests {
         // rebuild has to read them back from the sidecar — otherwise the
         // repaired image is quietly less complete than the one it replaced.
         let tmp = tempfile::tempdir().expect("tempdir");
+        // Seed before reading the tag: the runtime tag is derived from the
+        // guest artifacts, so a tag taken before seeding is the cold-cache
+        // placeholder and would not match the one the resolve path computes.
+        seed_guest_runtime_cache(tmp.path());
         let digest = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
         let mut image = sample_image("docker.io/library/alpine:3.20", digest, "blobs/a");
         image.rootfs_path = Some("rootfs/alpine-deferred/rootfs.ext4".to_string());
-        image.runtime_tag = Some(oci_runtime_tag());
+        image.runtime_tag = Some(oci_runtime_tag(tmp.path()));
         write_index(
             tmp.path(),
             &OciCacheIndex {
@@ -770,7 +844,6 @@ mod tests {
         );
         write_minimal_config(tmp.path());
         create_unpacked_root(tmp.path(), digest);
-        seed_guest_runtime_cache(tmp.path());
 
         let deferred = vec![mvm_fs::ext4::Node::Symlink {
             path: "/usr/share/man/man7/pam.7.gz".to_string(),
@@ -808,10 +881,14 @@ mod tests {
         // fails with an actionable re-pull instruction, not the old bare
         // "rootfs is missing" bail.
         let tmp = tempfile::tempdir().expect("tempdir");
+        // Seed before reading the tag: the runtime tag is derived from the
+        // guest artifacts, so a tag taken before seeding is the cold-cache
+        // placeholder and would not match the one the resolve path computes.
+        seed_guest_runtime_cache(tmp.path());
         let digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         let mut image = sample_image("docker.io/library/alpine:3.20", digest, "blobs/a");
         image.rootfs_path = Some("rootfs/alpine/rootfs.ext4".to_string());
-        image.runtime_tag = Some(oci_runtime_tag());
+        image.runtime_tag = Some(oci_runtime_tag(tmp.path()));
         write_index(
             tmp.path(),
             &OciCacheIndex {
@@ -838,10 +915,14 @@ mod tests {
     #[test]
     fn resolve_run_image_reseals_cached_rootfs_when_verity_sidecars_are_missing() {
         let tmp = tempfile::tempdir().expect("tempdir");
+        // Seed before reading the tag: the runtime tag is derived from the
+        // guest artifacts, so a tag taken before seeding is the cold-cache
+        // placeholder and would not match the one the resolve path computes.
+        seed_guest_runtime_cache(tmp.path());
         let digest = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
         let mut image = sample_image("docker.io/library/alpine:3.20", digest, "blobs/a");
         image.rootfs_path = Some("rootfs/alpine/rootfs.ext4".to_string());
-        image.runtime_tag = Some(oci_runtime_tag());
+        image.runtime_tag = Some(oci_runtime_tag(tmp.path()));
         write_index(
             tmp.path(),
             &OciCacheIndex {
@@ -857,7 +938,6 @@ mod tests {
             .join(sha256_hex(digest).expect("hex digest key"));
         std::fs::create_dir_all(unpacked.join("etc")).expect("create unpacked tree");
         std::fs::write(unpacked.join("etc/hostname"), b"box\n").expect("write unpacked file");
-        seed_guest_runtime_cache(tmp.path());
 
         let resolved =
             resolve_or_pull_run_image(tmp.path(), "docker.io/library/alpine:3.20", false)

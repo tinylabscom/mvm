@@ -106,6 +106,8 @@ guest-RPC surface, fleet-shaped workflows).
 
 | Command | Description |
 |---------|-------------|
+| `mvmctl machine build <path>` | Build the slot for a manifest directory. A `flake =` manifest builds through Nix in the builder VM; an `image =` manifest materializes the OCI reference through the same path `run --image` boots, then installs it as a slot revision |
+| `mvmctl kernel build` | Build the custom microVM kernels (builder and workload) |
 | `mvmctl build image <path>` | Build from Mvmfile.toml in the given directory |
 | `mvmctl build image --flake <ref>` | Build from a Nix flake (local or remote) |
 | `mvmctl build image --flake <ref> --profile <variant>` | Build a specific flake package variant |
@@ -209,10 +211,29 @@ is the command. `mvmctl env uninstall --all` also wipes `~/.mvm`, but it removes
 | `mvmctl secret put <name> --value -` | Store or replace a local secret from stdin |
 | `mvmctl secret put <name> --value-file <path>` | Store or replace a local secret from a file |
 | `mvmctl secret put <name> --value <value>` | Store or replace a local secret from an inline value. Avoid in interactive shells because the value may be saved in shell history |
+| `mvmctl secret set <name> --provider <provider>` | Store a secret and bind it to a catalogued provider's destinations and auth type |
+| `mvmctl secret set <name> --host <host> --type <auth>` | Store a secret and bind it to explicit destinations. Repeat `--host`; `*.` subdomain wildcards supported |
+| `mvmctl secret providers` | List the built-in service providers `--provider` accepts |
+| `mvmctl secret providers --search <query>` | Filter providers by name, description, or tag |
 | `mvmctl secret get <name>` | Verify that a local secret exists without printing the value |
-| `mvmctl secret ls` | List stored secret names only |
+| `mvmctl secret ls` | List stored secret names, and for bound secrets their auth type, destinations, and authoring provider |
 | `mvmctl secret rm <name>` | Remove a local secret |
-| `mvmctl secret <put|get|ls|rm> --tenant <tenant>` | Use a non-default local tenant namespace. Default: `local` |
+| `mvmctl secret <put|get|set|ls|rm> --tenant <tenant>` | Use a non-default local tenant namespace. Default: `local` |
+
+`secret set` is `put` plus an egress binding: it records where the substituted
+credential may go and how it authenticates. `--provider` takes those from the
+built-in catalog so the destination is not hand-typed, which matters because a
+mistyped host does not fail loudly — it withholds the credential, surfacing as an
+unrelated upstream auth error. `--provider` and `--host`/`--type` are mutually
+exclusive, and an unrecognised provider name is refused rather than falling back
+to a default.
+
+The catalog is expanded once, when `secret set` runs, and the resulting literal
+hosts are what get stored and enforced; it is never consulted again for that
+binding. A later change to a catalog entry therefore cannot widen a binding that
+already exists. For a SigV4 provider the credential-scope service comes from the
+entry, while `--region` and `--aws-access-key-id` stay yours to supply — they
+belong to your account, not to the provider.
 
 Secret values are write-only through the CLI after storage: `get` is a presence
 check and never emits the raw value. Replace a secret by running `secret put`
@@ -284,6 +305,9 @@ admission until their transports are wired.
 | `mvmctl image ls [--registry <host>] [--json]` | List cached OCI images by reference, resolved digest, fetched timestamp, and size |
 | `mvmctl image inspect <ref-or-digest> [--json]` | Print cached OCI manifest/config metadata, layer digests, and any claims/provenance sidecar |
 | `mvmctl image rm <ref-or-digest>` | Remove a cached OCI image and garbage-collect unreferenced layer files |
+| `mvmctl image boot status [--json]` | Report each cached default boot image variant (`dev`, `prod`): tag, source (`built-local` / `fetched`), acquisition time, protocol version, on-disk size, and whether the next run would use it. Cache only, no network |
+| `mvmctl image boot check [--json]` | Compare the cached boot image tag against the latest published `boot-image/v*` release. Read-only; exits nonzero only when behind, so a script can gate on the exit code |
+| `mvmctl image boot update [--tag <t>] [--force]` | Fetch and hash-verify a published boot image into a staging directory, then atomically swap it into the cache. `--tag` pins a release; `--force` is required in a source checkout, where the local build is authoritative |
 
 Production OCI policy reads `MVM_OCI_POLICY` when set, otherwise
 `$MVM_HOME/oci-policy.toml`. The policy allow-lists registries and trusted
@@ -332,9 +356,13 @@ shell).
 |---------|-------------|
 | `mvmctl run -- <cmd>...` | Boot the bundled default microVM image, run `<cmd>`, exit |
 | `mvmctl run --manifest <name-or-path> -- <cmd>...` | Boot a registered manifest/template instead of the default |
+| `mvmctl run npm test` | Infer the runtime when no source flag is given (see **Runtime detection** below) |
+| `mvmctl run --runtime <name> -- <cmd>...` | Boot a named runtime from the built-in catalog; an unknown name is refused, never defaulted |
+| `mvmctl run --no-detect -- <cmd>...` | Skip inference and use the bundled default image |
 | `mvmctl run --image <ref> -- <cmd>...` | Pull or reuse a cached OCI image, emit signed audit-chain provenance for the resolved image, boot its prepared OCI rootfs (read-only virtiofs-root on capable dev-tier backends, otherwise block `rootfs.ext4`), run `<cmd>`, exit |
 | `mvmctl run --image <ref> --prod -- <cmd>...` | Production OCI-image policy: require `<ref>` to be digest-pinned and cosign-verified by the OCI policy before cache use or boot |
-| `mvmctl run --profile standard -- <cmd>` | Default profile: explicit env is allowed; host shares must be read-only |
+| `mvmctl run --profile standard -- <cmd>` | Default profile on both `run` and `machine run`: explicit env is allowed; host shares must be read-only |
+| `mvmctl run --profile dev -- <cmd>` | Dev tier: as standard, plus a writable (`:rw`) host share on a persistent machine and the dev guest profile for a sealed-image entrypoint run |
 | `mvmctl run --profile restrictive -- <cmd>` | No env injection and no host directory shares |
 | `mvmctl run --mount .:/work:ro -- <cmd>` | Attach a live read-only host-directory share |
 | `mvmctl run --profile permissive -- <cmd>` | Escape hatch; requires `MVM_ACK_PERMISSIVE_RUN=1` |
@@ -359,6 +387,53 @@ the default image, start a VM, execute the command, or write a receipt.
 `run --json` is intended for machine callers. It preserves the command's exit
 code, but the JSON does not include raw argv, env values, stdout, stderr, or host
 paths.
+
+### Runtime detection
+
+With no `--image` / `--manifest` / `--flake` / `--deployment` / `--runtime-pack`,
+`mvmctl run` settles the boot source in this order. The order is the contract:
+
+1. **An explicit source flag.** Nothing is inferred.
+2. **`--runtime <name>`** against the built-in catalog. An unknown name is
+   refused and lists the known ones — a typo never falls through to a default.
+3. **`--no-detect`** stops here, leaving the bundled default image.
+4. **An `mvm.toml` (or `Mvmfile.toml`)** in or above the working directory,
+   found by the same walk-up `mvmctl build` uses, stopping at a `.git` boundary.
+5. **The command, then a project file.** `npm` selects node; `Cargo.toml`
+   selects rust. The command wins over the directory — argv is what you just
+   typed, the directory is where you happened to be standing.
+6. **The bundled default image.**
+
+| Runtime | Image | Commands | Project files |
+|---------|-------|----------|---------------|
+| `python` | `python:3.12-alpine` | `python`, `python3`, `pip`, `pip3`, `pytest` | `pyproject.toml`, `requirements.txt`, `Pipfile`, `setup.py` |
+| `node` | `node:22-alpine` | `node`, `npm`, `npx`, `yarn`, `pnpm` | `package.json` |
+| `rust` | `rust:1-alpine` | `cargo`, `rustc` | `Cargo.toml` |
+| `go` | `golang:1-alpine` | `go`, `gofmt` | `go.mod` |
+| `ruby` | `ruby:3-alpine` | `ruby`, `bundle`, `rake`, `gem` | `Gemfile`, `Rakefile` |
+| `shell` | `alpine:3` | `sh`, `bash`, `ash` | — |
+
+An inferred source always announces itself on stderr before booting
+(`[mvm] detected node from the command `npm` — booting node:22-alpine`), so a
+run never boots an image you did not choose without saying so. `--json` stdout
+is unaffected.
+
+Detection picks a **source**, never a posture. An inferred run admits through
+the same signed `ExecutionPlan`, with the same `--profile standard` default and
+the same deny-all egress, as one that named its image.
+
+**`machine run` does not infer.** Steps 4 and 5 are skipped there: it creates a
+named, possibly persistent machine, and picking its base image from whatever
+directory you were standing in is a footgun — `machine run` inside any Rust
+checkout would quietly build a machine on `rust:1-alpine`. It keeps its error
+naming every way to supply a source. `--runtime <name>` works on both verbs,
+because that is you naming one.
+
+The catalog is curated, in-tree, and versioned with the code; it is never
+fetched at runtime. Its refs are **tags, not digests**, which is deliberate:
+they are a dev-tier convenience. `--prod` refuses a mutable reference before any
+network fetch, so a production run cannot inherit a detected tag — it has to
+name a digest.
 
 ## Machine (beginner UX)
 
@@ -929,14 +1004,59 @@ flow and the distinction between build time and runtime boot time.
 
 | Command | Description |
 |---------|-------------|
-| `mvmctl cache info` | Show cache directory path, disk usage, and a per-entry footprint breakdown (unrecognized entries are flagged) |
-| `mvmctl cache prune` | Remove stale temp files; report (but don't delete) unrecognized top-level cache dirs |
+| `mvmctl cache info` | Show cache directory path, disk usage, and a per-entry footprint breakdown (entries belonging to a removed subsystem are flagged `retired`). Sizes are allocated blocks with symlinks and repeated hardlinks counted once, so they match `du -sh` |
+| `mvmctl cache prune` | Remove stale temp files; report (but don't delete) retired top-level cache dirs |
 | `mvmctl cache prune --dry-run` | Show what would be removed without deleting |
 | `mvmctl cache prune --orphan-builds` | Also sweep orphaned builds — built artifacts whose source `mvm.toml` is gone (equivalent to `mvmctl manifest prune --orphans`) |
-| `mvmctl cache prune --orphan-dirs` | Also remove unrecognized top-level cache dirs (leftovers from a removed subsystem) |
+| `mvmctl cache prune --orphan-dirs` | Also remove retired top-level cache dirs — leftovers from a subsystem mvm no longer has. Only names on the built-in retired list are candidates; a cache still in use is never removed |
 | `mvmctl cache prune --deep` | Reclaim regenerable caches too — Stage 0 blobs, the prebuilt default microVM image, pulled OCI layers (each costs a re-fetch/rebuild next time). Implies `--orphan-dirs` |
 | `mvmctl cache repair` | Clear a degraded builder VM store so the next build cold-rebuilds it. Refuses while a Stage 0 bootstrap is in flight; auto-stops a running builder VM first |
 | `mvmctl cache repair --force` | Clear the store even while a Stage 0 bootstrap lock is held (use only if the lock is stale, e.g. after a crash) |
+
+## Workload Authoring and Inspection
+
+These verbs operate on a workload before and after it runs, rather than on a
+running microVM.
+
+| Command | Description |
+|---------|-------------|
+| `mvmctl init` | Scaffold a new project (`mvm.toml` alongside your `flake.nix`) |
+| `mvmctl generate sdk <script>` | Generate a runnable project from an SDK-decorated `.py`/`.ts` source: parses the decorator, emits `flake.nix` + `launch.json`, bundles the source tree into `--out <dir>` |
+| `mvmctl template list` | List available templates (bundled plus cached remote) |
+| `mvmctl template search <query>` | Search the remote registry for matching templates |
+| `mvmctl template show <name>` | Show details for one bundled or remote template |
+| `mvmctl deploy <ir.json>` | Build, seal, and record a workload into a local deployment directory (`image.tar.gz`, `rootfs.ext4`, `deploy.json`); optionally ship it to mvmd |
+| `mvmctl deploy --from-ir <path>` | Read the Workload IR from a file instead of a positional path or stdin |
+| `mvmctl prepare` | Report whether a verified runtime pack is ready for instant launch |
+| `mvmctl plugin list` | List the coding agents mvm can emit an integration for |
+| `mvmctl plugin install <agent>` | Write that agent's integration files into the project (`--dir`, `--dry-run`, `--force`). Emits config only — mvm runs no agent-facing server |
+| `mvmctl bench` | Measure this host's launch latency against the published budgets, printing each percentile beside the budget it is judged against |
+| `mvmctl bench --lane <lane>` | Pick the lane: `prepared-cold` (default), `prepared-cold-mount-hit`, `mount-miss`, `artifact-miss`, `warm-claim` |
+| `mvmctl bench --runs <n> --warmup <n>` | Sample counts. Below 20 measured runs the report is indicative only, not publication-grade |
+| `mvmctl bench --json` | Emit the versioned report JSON — the same shape the CI gate produces, so the two are comparable |
+| `mvmctl bench -- <launch>` | Measure a specific launch instead of the reproducible default (`run --no-detect -- /bin/true`) |
+| `mvmctl explain <run>` | Explain a run after the fact from the chain-signed audit log |
+| `mvmctl watch <ir.json>` | Rebuild a workload when its local inputs change |
+
+## Packs, Bundles, and Dependencies
+
+| Command | Description |
+|---------|-------------|
+| `mvmctl pack list` | List every recorded pack version, marking each key's active one |
+| `mvmctl pack rollback` | Point a pack class's active version at an already-cached one |
+| `mvmctl pack prune` | Reclaim non-active pack versions beyond the newest N per key |
+| `mvmctl pack download` | Fetch a pack version into the cache without changing the active one |
+| `mvmctl pack update` | Fetch the latest pack version and activate it |
+| `mvmctl bundle export` | Seal a built template into a signed `.mvmpkg`, signed by the host signer at `~/.mvm/keys/host-signer.ed25519` — the same key that signs `ExecutionPlan` envelopes |
+| `mvmctl bundle fetch` | Verify a `.mvmpkg` against the local trust store, reporting the parsed manifest |
+| `mvmctl bundle install` | Verify and atomically install a `.mvmpkg` into `~/.mvm/bundles/<sha>/` |
+| `mvmctl bundle gc` | Prune installed bundles — a specific `<SHA>` or `--all` |
+| `mvmctl artifact pack` / `verify` / `inspect` / `extract` | Pack or verify signed `.mvm` artifacts |
+| `mvmctl deps inspect` | Show a sealed application-dep volume's SBOM, CVE, and hash-chained metadata without spawning a VM |
+| `mvmctl deps audit` | Re-verify a sealed dep volume against its recorded chain |
+| `mvmctl deps capture` / `install` | Capture or install application dependencies into a sealed volume |
+| `mvmctl pool warm [COUNT]` | Pre-spawn standby microVMs so the next run claims a warm one |
+| `mvmctl pool status [--json]` | Report standby pool occupancy |
 
 ## Security
 
@@ -947,7 +1067,7 @@ flow and the distinction between build time and runtime boot time.
 | Command | Description |
 |---------|-------------|
 | `mvmctl shell-init` | Print shell configuration (completions + dev aliases) to stdout |
-| `mvmctl shell-init --emit-completions <shell>` | Emit just the shell-completion script (replaces the dropped `mvmctl completions <shell>`) |
+| `mvmctl completions <bash\|zsh>` | Print a completion script. `shell-init`'s eval block calls this; the hidden `--emit-completions` flag it used to carry is gone |
 | `mvmctl ops metrics` | Show runtime metrics (Prometheus text format) |
 | `mvmctl ops metrics --json` | Show runtime metrics as JSON |
 | `mvmctl env uninstall` | Remove Firecracker, the builder microVM image, and all mvm state (confirmation required) |
@@ -998,7 +1118,7 @@ All commands accept these global options:
 | `MVM_OCI_BEARER_TOKEN_<HOST>` | Bearer token for one OCI registry host (`ghcr.io` -> `MVM_OCI_BEARER_TOKEN_GHCR_IO`) | Unset |
 | `MVM_OCI_BEARER_TOKEN` | Global fallback bearer token for OCI registry pulls | Unset |
 | `RUST_LOG` | Logging level (e.g., `debug`, `mvm=trace`) | `info` |
-| `MVM_PHASE_TIMING` | Set to `1`/`true` to print a transient run's per-phase launch breakdown to stderr: `[mvm] phase-timing:` for the coarse buckets, plus `[mvm] phase-timing-detail:` for whichever sub-phases were measured | Unset |
+| `MVM_PHASE_TIMING` | Set to `1`/`true` to print a transient run's per-phase launch breakdown to stderr as two greppable lines: `[mvm] phase-timing:` for the coarse buckets, plus `[mvm] phase-timing-detail:` for whichever sub-phases were measured. Set to `tree` for the same spans rendered as one nested, aligned report grouped by containment — easier to read, but not a stable format to parse | Unset |
 | `MVM_LAUNCH_SAMPLE_JSON` | Path a transient run writes its machine-readable launch sample to — build profile, backend, guest sizing, artifact paths, the expensive work the launch performed, and every phase span. Read by the release-only cold-launch benchmark; setting it turns the measurement on without the stderr output. | Unset |
 | `MVM_DEV_FLAKE_URL` | Escape hatch for the dev-build's chained `--override-input mvm` target. When set, suppresses the default chained override. (Legacy from the previous iteration's dual-flake layout; today's same-flake-for-both-modes design rarely needs it.) | Unset |
 | `MVM_SRC` | Override the source repo path passed to `nix build` during dev builds | Workspace root |

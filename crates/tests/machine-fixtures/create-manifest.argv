@@ -1,8 +1,0 @@
-create
-web
---manifest
-mvm.toml
---profile
-dev
---force
---json

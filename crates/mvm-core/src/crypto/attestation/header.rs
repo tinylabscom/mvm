@@ -41,8 +41,7 @@ use crate::crypto::attestation::error::AttestationError;
 use crate::crypto::attestation::provider::HwMeasurement;
 use crate::protocol::signing::SignedPayload;
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
-use rand::RngCore;
-use rand::rngs::OsRng;
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 
 /// Latest schema version the verifier understands. Bumping this is a
@@ -87,7 +86,7 @@ impl AttestationBody {
         hw_measurement: Option<HwMeasurement>,
     ) -> Self {
         let mut nonce = [0u8; NONCE_BYTES];
-        OsRng.fill_bytes(&mut nonce);
+        rand::rng().fill_bytes(&mut nonce);
         Self {
             schema_version: SCHEMA_VERSION,
             boot_measurement: boot_measurement.into(),
@@ -198,7 +197,7 @@ mod tests {
     fn fresh_key() -> SigningKey {
         {
             let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            rand::rng().fill_bytes(&mut __ed_seed);
             SigningKey::from_bytes(&__ed_seed)
         }
     }

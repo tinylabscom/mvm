@@ -1,11 +1,185 @@
 # Refactor status
 
-Last updated: 2026-08-13
+Last updated: 2026-08-18
 
 This is the cross-plan progress index. The owning plan remains authoritative
 for detailed scope and acceptance criteria.
 
 ## Completed issue closeouts
+
+- [x] **Plan 337 COMPLETE — the SDK surface is generated from Rust.** Sessions
+      finished Tier C. Python's `contextvars` + `Token` has no
+      `AsyncLocalStorage` equivalent, so the shape was a choice, not a
+      translation: `session(id, body)` was taken over `using s = session(id)`
+      because the latter lets concurrent sessions in different async tasks
+      clobber one another — a correctness bug rather than an ergonomic one. A
+      test runs two overlapping async bodies and checks each sees only its own
+      id. The abandonment net is weaker than Python's by necessity
+      (`FinalizationRegistry` may never run and is not run at exit), so the
+      callback shape carries a `try/finally`, which is the stronger guard and
+      another reason for the shape. `_remote.ts` now attaches `--session`;
+      `workload_ref` opts out, since a session belongs to one workload. Last
+      divergence name closed by renaming `current_recording_dict` to
+      `current_recording` — the `_dict` suffix encoded a Python-only return
+      type — and exporting the TypeScript counterpart. **Both directional
+      backlogs are empty: python-only 30 -> 0, typescript-only 2 -> 0.** What
+      remains in `surface_divergence.json` is difference, not debt: two names
+      that cannot close (`derive_schema`, `SecretInArgWarning`) and the
+      type-erased set. #2558 and #2559 were verified already fixed on main by
+      other sessions.
+
+- [x] **Plan 337 WS-6 increment 1 — Tier C transport and the error taxonomy,
+      as a declared subset.** The eight Tier D error types and the code that
+      raises them landed together on purpose: generating the classes while
+      TypeScript had nothing to throw them would have exported eight dead types
+      and cleared eight divergence entries while closing nothing.
+      `_remote.ts` implements real-VM invocation, the stderr envelope scan, and
+      `RemoteFunction` / `func` / `workload_ref` / `WorkloadRef` (a `Proxy`
+      where Python uses `__getattr__`). `MVM_NO_VM=1` is *refused* with
+      `NoVmIntrospectionError` naming the reason rather than falling through to
+      a real VM — the caller asked for local dispatch and would otherwise have
+      got a microVM. `RemoteError` needed one registry extension (structured
+      fields plus a message format). Two language differences recorded rather
+      than smoothed: `SecretInArgWarning` is permanently Python-only (no JS
+      warning type), and `RemoteError.message` holds the composed string in
+      JavaScript where Python exposes the raw one. Sessions deferred to their
+      own change — they force the AsyncLocalStorage-versus-ergonomics choice.
+      Divergence 16 -> 4; across the plan 30 -> 4, typescript-only still 0.
+
+- [x] **Plan 337 WS-7 + WS-8 — Tier F decided, plan closed out except what
+      Tier C gates.** Option 2 for `derive_schema` confirmed (callers pass
+      `args_schema` / `return_schema`), but the plan's claim that it needed "no
+      new machinery" was wrong: TypeScript's `entrypoint_function` accepted no
+      schema arguments at all, so the recommended option was impossible rather
+      than merely less ergonomic. The IR had carried both fields all along;
+      only the constructor omitted them, and it now accepts them. Documented in
+      the TypeScript README where someone reaching for `derive_schema` looks,
+      with the reason (types are erased before the program runs) rather than
+      the absence. `surface_divergence.json` gains a
+      `python_only_permanent_by_design` bucket so a never-closing difference is
+      not counted as backlog. WS-8.2/8.3/8.4 done — all seven generated
+      artifacts drift-gated, each shown to fail on a hand-edit. **WS-8.1 is
+      left open on purpose:** the divergence file still carries Tier C's
+      machinery and the eight error types only Tier C raises, and those close
+      with WS-6. Across the plan, python-only divergence went 30 -> 16 and
+      typescript-only 2 -> 0. WS-6.2-6.6 remain, and want a scoping decision
+      (declared subset) before implementation.
+
+- [x] **Plan 337 WS-4 — Tier B, and the split is the finding.** `warm_process`
+      generates cleanly (one registry extension: a nullable default), verified
+      differentially before its hand-copy was deleted. `addon_use` deliberately
+      does not: expressing it declaratively needs a cross-parameter XOR, a
+      branching target, a derived string field and default-if-absent — four
+      capabilities no other constructor uses, i.e. a mini-language for one
+      function. It stays hand-written in both languages but pinned by the s27
+      golden IR document, meeting the WS-1 standard that a copy is dangerous
+      only when nothing checks it. Rust has no XOR at all —
+      `addon_use_registry` / `addon_use_local` are two functions, so the
+      invalid combination cannot be written, which is the WS-1 thesis a third
+      time. **Two defects found by the new coverage:** WS-3's deletion of
+      `node_deps` had also removed the module-level `_UNRESOLVED_SHA256`,
+      leaving `addon_use` raising `NameError` while all 212 Python tests still
+      passed — because none of them called it; `tests/test_ctors.py` now closes
+      that gap and was confirmed to fail without the fix. And the first
+      `_addon.ts` exported `UNRESOLVED_SHA256` where Python's is private,
+      caught immediately by the two-way divergence gate. Divergence 19 -> 17;
+      everything left is Tier C, its error taxonomy, or Tier F. WS-6.2-6.6,
+      WS-7, WS-8 open.
+
+- [x] **Plan 337 WS-3 — Tier A constructors generated from a declarative
+      registry.** The workstream the WS-1 spike existed to enable, and the
+      first real test of its decision: all eight constructors now come from
+      `mvm-sdk/src/ctor_registry.rs` — parameters, defaults and *constraints* —
+      rendered into both languages, with the Python hand-copies deleted and
+      TypeScript gaining all eight for the first time. The constraint
+      vocabulary needed is three cases, small enough to be worth the machinery
+      and large enough that no parser could have inferred it. Generation also
+      removed a fragility rather than relocating it: the hand-written Python
+      named numbered variant classes (`_ir.NetworkDns3`) that
+      `datamodel-codegen` renumbers along with their `KindN` enums, and the
+      generated code resolves by discriminant so neither number exists
+      anywhere. Byte-compatibility established differentially over 26 cases
+      (every valid path, both alias spellings, the port boundaries, every
+      refusal) with zero differences, then the Python suite passed unchanged.
+      The new golden-IR scenario caught a real cross-language divergence on
+      first run — Python's `{tool!r}` renders `'poetry'` where `JSON.stringify`
+      rendered `"poetry"` — now fixed so both agree byte-for-byte.
+      `python_only_absent_from_typescript`: 27 -> 19. WS-4, WS-6.2-6.6, WS-7,
+      WS-8 open.
+
+- [x] **Plan 337 WS-5 + WS-6.1 — error taxonomy generated; Tier C sized.**
+      The host-services error hierarchy and its `MVM_HSVC_*` status codes were
+      triplicated: Rust constants plus a hand mirror in each SDK, under a
+      comment asking a human to keep them matching — and the prose had already
+      drifted ("audit cap" vs "e.g. the 4 KiB audit cap"). Now one
+      `macro_rules!` registry in `mvm-sdk/src/error_taxonomy.rs`, emitted and
+      rendered into both languages, with both mirrors deleted and `STATUS_OK`
+      generated so none of the mirror survives. `ErrorBase` models the
+      hierarchy rather than per-language literals, and refuses to emit a
+      Python-only `Warning` into TypeScript. **Scope correction:** Tier D's
+      eight named types are *not* generated here — all eight are raised only by
+      Tier C's `_remote.py`, so emitting them into TypeScript would export
+      classes nothing can throw and clear eight divergence entries while
+      closing nothing; they land with WS-6. **WS-6.1 sizing found Tier C is two
+      dispatch paths, not one**: `MVM_NO_VM=1` derives argv from Python
+      function introspection (`__module__`, `inspect.getfile`) and has no
+      JavaScript equivalent at all; session scoping forces a choice between
+      correct async isolation and Python-like ergonomics; and the
+      `weakref.finalize` abandonment net degrades to a best-effort
+      `FinalizationRegistry`. Recommendation recorded: ship TypeScript Tier C
+      as a declared subset. Ten further env vars found unregistered.
+      WS-3, WS-4, WS-6.2-6.6, WS-7, WS-8 open.
+
+- [x] **Plan 337 WS-1 + WS-2 — SDK surface generated from Rust.** WS-1 spiked
+      both mechanisms for extracting a constructor manifest from
+      `mvm_sdk::ctor` and re-scoped the plan rather than stopping it: the
+      attribute/`inventory` mechanism recovered *less* than the `syn` parse
+      (an attribute sees one item, so it cannot resolve a default living in a
+      sibling fn), and both failed identically on the facts that are simply
+      absent from Rust — `port=53`, keyword-only calling, `1..=65535`, the
+      `"pip-tools"` alias. Rust discharges those constraints statically, so
+      extraction is the wrong direction; the manifest is authored
+      declaratively and records *constraints*, with `syn` re-scoped to a
+      coverage gate plus a golden-IR behavioural gate. Surfaced a live defect
+      (#2559): Rust's `host_port` accepts port `0` where Python rejects it —
+      fixed 2026-08-16 by moving the constraint to `mvm_contract::ir::validate`
+      (`dns_resolver` had the wider version of it) behind a shared golden
+      verdict corpus both languages are checked against, which is the first
+      slice of that behavioural gate. WS-2 built
+      the pipeline end-to-end on Tier E — a `macro_rules!` registry in
+      `mvm-sdk/src/env.rs`, `emit_sdk_env`, and a hand-written xtask emitter
+      (necessary: `json-schema-to-typescript` emits only `export type`, which
+      `tsc` erases, so a generated constant would be invisible to the s27
+      runtime surface check). `MVM_CLI_BIN` was quadruplicated and invisible to
+      every gate because all four copies agreed. TypeScript-only divergence is
+      now zero; the two `MVM_MACHINE_*` names were deliberately *not* emitted
+      into TypeScript, since nothing there read them, and were recorded as a
+      behaviour gap until #2558 supplied the behaviour — the wrapper now bounds
+      its subprocess with both, so the registry exports them and the divergence
+      file is down to the type-erased set plus the unported names. That work
+      also found that neither SDK's unit suite ran in CI at all (212 pytest,
+      138 vitest, no cargo target and no workflow step); `just sdk-test` on the
+      BDD lane closes it. Also fixed a ~50% pre-existing flake in the s27
+      TypeScript live fixture (unawaited `wait()` racing `spawnSync`): base
+      9/20, now 30/30. WS-3–WS-5, WS-7, WS-8 open; WS-6 (Tier C) untouched.
+
+- [x] **Plan 336 — runtime SDK parity + live-transport BDD.** The golden
+      `tests/machine-fixtures` corpus was shadowed by an unanchored copy under
+      `crates/`, which is what the Python and TypeScript suites resolved to;
+      both were red on main and blind to `machine start --image`. Corpus
+      collapsed to one, both languages repointed and given Rust-equivalent
+      coverage tripwires, `xtask check-single-fixture-corpus` added. Fixed a
+      packaging defect that made every host-side TypeScript entry point throw
+      `ReferenceError: require is not defined` in the published ESM artifact —
+      invisible to vitest, which supplies CJS interop. New
+      `s27_sdk/runtime_live_transport.feature` drives the built artifacts in
+      both languages against a shared recording CLI double, and the suite now
+      gates a PR at all — it previously ran only from release-tag workflows.
+      Cross-language surface divergence measured and mostly closed: TypeScript
+      stopped exporting 7 internals, Python gained the 9 host-service errors a
+      caller has to name, TS-only divergence 18 → 2, remainder pinned by a
+      reviewed list. WS-G4 (porting the 27 absent names — the `@mvm.func`
+      surface) deferred: a feature port needing product intent.
 
 - [x] **Plan 325 — lowercase OCI image names.** Registry and repository
       capitalization is normalized before validation across every shared OCI
@@ -110,6 +284,53 @@ for detailed scope and acceptance criteria.
       zero; the later workload boot stopped at a separate readiness timeout.
 
 ## In-flight plans
+
+- [~] **Admission-bound AI assurance sessions** —
+      `specs/plans/2026-08-17-admission-bound-ai-assurance-sessions.md`. W1–W4,
+      W6/W7 and W7b landed: the envelope, the authority intersection, the
+      fail-closed outcome ladder, `host.assurance.v1`, fail-closed audit and
+      receipt emission with resolvable citations, the workload-facing
+      `AssuranceCampaign`, and the boot-path session lifecycle behind
+      `AdmitAndStartParams.assurance` (opt-in; `None` on every existing call
+      site). Landing W7b exposed two bugs the fixtures had masked: the binding
+      rejected every real `sha256:`-prefixed plan id, and the probe handler
+      compared the guest's session identity against the supervisor's lookup key.
+      STILL OPEN: W5 observer/cleanup evidence, W8 the framed-stdio provider,
+      and a CLI surface for supplying a campaign declaration. Until those land
+      every live trial evaluates `INCONCLUSIVE` by design; no certifying
+      campaign can run.
+
+- [~] **Embedded-binary content store** — `specs/plans/2026-08-17-embedded-binary-content-store.md`.
+      Phases 1–2 landed: both nested legs of `crates/mvm-cli/build.rs` are keyed
+      on their real dependency closure rather than on `PROFILE == "debug"` plus
+      "the file exists", and the store lives outside `target/` so worktrees,
+      profiles and target triples share it. Cold build **359s → 45.5s**; the
+      build script within it **332.7s → 0.4s**; an `mvm-cli` edit no longer
+      re-runs either leg. The dev profile keeps its stale-embedded-binary trade
+      deliberately, but a miss now knows it is stale and says so via
+      `cargo:warning=`. Supersedes the freshness half of
+      `specs/plans/2026-08-15-aux-helper-binary-freshness.md`.
+      STILL OPEN: Phase 3 (phantom build.rs tests, `MVM_LIBKRUN_HEADER`
+      rerun-if-env-changed), Phase 4 (dead crate edges; `deps_audit` and the
+      tree-sitter grammars off the serial path; the `mvm-hostd` audit cluster),
+      Phase 5 (sccache 4.2% Rust hit rate, worktree hygiene)
+
+- [~] **Launch path as declared stages**
+      (`specs/plans/2026-08-15-launch-path-as-declared-stages.md`). Opened
+      2026-08-15; no workstream started. Split out of the artifact-derived
+      runtime identity work, which landed first so its cache-staleness class
+      would not muddy these timing measurements.
+  - [ ] WS1 — split the two `attach_*` calls into `lookup_*` + `attach_*`
+  - [ ] WS2 — stage `resolve_launch`, parallel probes in stage 2
+  - [ ] WS3 — `SubPhase` per stage + `every_launch_stage_is_timed`
+  - [ ] WS4 — golden-compare `VmStartConfig`, record `dispatch_window_ms()`
+
+- [~] **Plan 335 — merge-queue throughput.** Automatic architecture and kernel
+      checks now share the main CI scope gate, required check names are
+      preserved transitively, duplicate runner allocations are removed, and
+      trusted default-branch Rust/Nix cache warming is added. Repository and
+      host validation are green; landing, Linux CI, and verified live queue
+      settings remain open.
 
 - [~] Plan 330 — Decision provenance layer
   (`specs/plans/330-decision-provenance-layer.md`)
@@ -320,6 +541,14 @@ for detailed scope and acceptance criteria.
         unprivileged spawn failed outright, and because it ran first the
         failure also skipped `NoNewPrivs` — the load-bearing control. The
         privileged init path still fails closed
+  - [x] Issue #2522 — the `EPERM` tolerance above covered the workload spawn
+        but not the agent's own drop, which ran the same bounding-set narrowing
+        *after* `set_capabilities` had already removed `CAP_SETPCAP`. Every
+        `machine run --image` failed: the errno left the `pre_exec` hook, the
+        agent never started, and the host timed out waiting for it. The
+        narrowing now runs before the identity change, while the caller still
+        holds the capability the syscall needs, and both call sites share one
+        helper. Bisected against the parent commit and witnessed live on HVF
   - [ ] Re-run the adversarial probe on HVF **and** Firecracker — the closure
         gate, not yet run; no Linux/KVM host available
   - [ ] Record the ADR-001 claims 1/2 scope decision (owner call; determines
@@ -456,6 +685,37 @@ for detailed scope and acceptance criteria.
     supervisor PID disappearance. Follow-up: give pool maintenance to the
     resident per-tenant daemon and continue reducing supervisor shutdown
     latency.
+    The "real cleanup" remainder was then decomposed and was mostly not:
+    `stop_console_cleanup` was the largest span in a transient teardown and
+    57.0 ms of it was two more instances of the cadence bug — the stream
+    accept loop polling a nonblocking listener on a 25 ms tick, and
+    `DurableSink::seal` polling `is_finished()` every 20 ms for a writer that
+    exits in microseconds. Backoff could not fix the first (it idles at the
+    ceiling for the VM's whole life), so the listener now blocks and shutdown
+    wakes it by connecting to its own socket, bounded and with a detach path;
+    the second waits on a channel the writer thread's sender closes on exit.
+    Measured on release, HVF/macOS, against an unchanged control span in the
+    same runs: `stop_console_cleanup` 57.0 -> 7.0-7.7 ms while
+    `stop_pid_disappearance` held at 33.4-35.5 ms against a 33.7 ms baseline.
+    Foreground teardown 91.4 -> 41-45 ms. A fifth cadence site was then found
+    inside the guest agent — `exec_stream` slept a flat 50 ms before rechecking
+    a child that had already exited, a hard floor under every exec — taking
+    `command` 52.5 -> 4.6-5.4 ms. Total 287.2 -> p50 191.2 ms over 9 samples
+    (not the 20 a publishable lane needs; the host became too loaded to finish
+    the set, so there is no p95/p99 yet).
+    Admission's three pre-boot chain barriers now
+    share one flush, closing #2293's open acceptance item without changing
+    `sync_policy_for`'s fail-closed default, and the chain cursor reads a
+    bounded tail instead of the whole 4 MiB segment on every append. **Two things are open
+    and newly named.** The receipt write, not the chain, is the dominant admit
+    cost at ~36 ms of ~45 ms — a structure the code calls a derived cache,
+    doing an `F_FULLFSYNC` synchronously before boot. And
+    `stop_pid_disappearance` is guest-RAM teardown: `shutdown-timing.json`
+    accounts for only 2.9 ms of it, because the host waits on kqueue process
+    exit while the record stops before the process exits. It is linear in guest
+    memory at ~48 ms/GB (33 ms at 512M, 194 ms at 4G), so the watchdog
+    self-pipe is not worth building and a large workload pays teardown no
+    `alpine`-sized benchmark can see.
   - [ ] Phase 7 — live validation and regression gates
   - [x] Cross-plan fast-machine-substrate contract documented in
         `specs/notes/2026-08-10-fast-machine-substrate.md` (issue #2279)
@@ -845,8 +1105,9 @@ for detailed scope and acceptance criteria.
   - [x] E2.1 — the placeholder leaf relocated as
         `mvm_contract::substitution`; the constant hard-renamed to
         `SECRET_PLACEHOLDER_PREFIX` to avoid colliding with
-        `policy::secret_binding`'s existing `PLACEHOLDER_PREFIX`
-        (`"mvm-managed:"`). Minting stays host-side to keep `getrandom` out
+        `policy::secret_binding`'s then-existing
+        `PLACEHOLDER_PREFIX` (`"mvm-managed:"`, since deleted with that
+        module). Minting stays host-side to keep `getrandom` out
         of the browser bundle.
   - [x] E1 — `projection.rs` relocated to `mvm-contract` verbatim; the
         `mvm_core::policy::projection` module re-export kept all ~20 call sites
@@ -895,6 +1156,22 @@ for detailed scope and acceptance criteria.
         to sign real audit entries.
   - [ ] Does **not** retire `web/audit-verify/` (no Merkle inclusion) — B5 and
         `mvmctl audit pubkey` remain plan 301's
+- [ ] Run-first CLI ergonomics
+      (`specs/plans/329-run-first-cli-and-upstream-adoption.md` — note three
+      plans share the number 329; refer to this one by path) — Phase A landed:
+      ADR-027 amended so `run` is a first-class visible verb, the fifteen
+      user-facing verb groups promoted out of `hide = true`, twelve missing
+      reference rows written, and `xtask check-cli-help-matches-docs` added to
+      the Lint job so `mvmctl --help` and the published CLI reference cannot
+      drift apart again. Phase 5 (snapshot/fork DX) was already complete.
+      Phase 1 then landed the shared argument core: the 26 shared execution
+      flags are declared once in `RunArgs` and flattened into both verbs, with
+      `run` adding the SDK transport and `machine run` the lifecycle flags. Both
+      verbs now default to `--profile standard`. Phase 2 then landed runtime
+      detection: `mvm_core::runtime_catalog` plus one shared resolver whose
+      order is explicit source > `--runtime` > `mvm.toml` walk-up > argv[0] >
+      project file > bundled default. Inference is `run`-only; `machine run`
+      keeps its explicit-source contract. Phases 3–4 and 6–8 remain.
 - [ ] Plan 329 — Browser-tier microVM demo (`specs/plans/329-browser-wasm-backend-demo.md`)
       — in progress on `feat/329-browser-wasm-backend`. Extends Plan 320 with a
       `wasm32-wasip1` guest that boots, provides a shell, and delegates `fetch`
@@ -1257,6 +1534,17 @@ for detailed scope and acceptance criteria.
         (recon §7.7 → #2019)
 
 - [~] Plan 316 — Single flow-aware vsock networking path
+  **Phases 2-4 superseded by
+  `specs/plans/2026-08-15-flowmux-single-transport-cutover.md` (#2543): #2480 shipped the
+  FlowMux guest adapter without host identity provisioning, so guest egress is dead on
+  `main`. The cutover completes there, on one transport, folding `Wire` and `MVM_ICMP/1`
+  into FlowMux rather than leaving three protocols behind a sniff.
+  WS0-WS7 are complete: substitution rides `OpenHttp`, `ping` rides `IcmpEcho`,
+  the raw dispatcher and `EgressMode::Raw` are deleted, readiness fails closed
+  on a launch whose endpoint carried no session, and
+  `xtask check-one-guest-protocol` fails the build if a second guest->host
+  protocol returns. `EgressMode::Wire` survives for the wasm tier's host-side
+  `mvm:egress` import, which is host-internal IPC rather than a guest channel.**
   (`specs/plans/316-single-flow-vsock-networking.md`, ADR-042, umbrella #2368)
   Collapses the two production workload networking paths to one authenticated
   FlowMux session on `GuestService::NetworkFlow` through one
@@ -1497,6 +1785,29 @@ check-l3-expansion-freeze` added as a temporary shrink-only ratchet
   - [ ] Replay vectors for the audit chain's canonical signed bytes
   - [ ] Double-key the stale-name relief valves
 
+- [x] Plan 333 — dependency hygiene: four defects and a ratchet, not a cut
+      (`specs/plans/333-dependency-hygiene.md`)
+  - [x] Phase 5 — the four defects: `hickory-proto` declared unconditionally in
+        `mvm-hostd` while every consumer is `cfg(target_os = "linux")` (−6 on
+        macOS, retires the shipped duplicate `rand` major there; `rand_core`
+        0.10 stays, reached via aes-gcm/crypto-common, a P309 non-goal); the dead
+        `memchr` workspace entry and its false justification; 69 member-manifest
+        version pins that bypass `[workspace.dependencies]`; four stale
+        `deny.toml` skip entries `cargo deny` already warns on. Landed: macOS
+        closure 238 -> 232, Linux unchanged at 243; 18 of 25 deny skips were
+        stale, not 4; only 7 of the 69 pins were safely convertible (
+        `mvm-contract`'s 9 no_std narrowings must stay local or `std` leaks
+        into a wasm32 crate)
+  - [x] Phase 5.5 — the gate for the class: `xtask
+        check-workspace-dep-inheritance`, plus a second
+        `check-closure-budget` target for `aarch64-apple-darwin` (currently
+        ungated, which is why the `hickory-proto` edge survived). Each proven
+        red: re-pinning `thiserror = "1"`, re-adding `memchr`, and re-declaring
+        `hickory-proto` unconditionally all fail, the last on macOS while Linux
+        stays green
+  - Re-measured Plan 309 Phase 3 independently and reproduced it; its declines
+    stand and are not re-opened
+
 - [ ] Plan 309 — dependency reduction
       (`specs/plans/309-dependency-reduction.md`)
   - [x] Phase 0 — the three defects: `mvm-build`'s hardcoded `thiserror` 1,
@@ -1515,6 +1826,12 @@ check-l3-expansion-freeze` added as a temporary shrink-only ratchet
         closure at 468, so the ~62 `wasmtime`-family packages behind an
         off-by-default feature stay observed. Not a lockfile count: measured,
         that number does not move when a dependency is removed (~120 orphans)
+  - [x] Sigstore 0.9→0.11 (`specs/plans/2026-08-17-sigstore-0-11-upgrade.md`):
+        sigstore-verify stack bumped, rustls feature selected (ring backend,
+        not aws-lc-rs), dead `VerificationResult.success` API usage removed.
+        Stale `rand`/`rand_core` ALLOWLIST entries ratcheted down in both
+        `xtask/src/check_duplicate_majors.rs` and `deny.toml` (workspace
+        unified on rand 0.10 in a prior change; the allowlist never followed).
 
 - [ ] Plan 313 — egress token accounting, streaming, and compaction
       (`specs/plans/313-egress-token-accounting-and-compaction.md`)

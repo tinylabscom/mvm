@@ -185,10 +185,12 @@ pub fn run(json: bool, workflow: Option<DoctorWorkflow>) -> Result<()> {
     checks.push(platform_checks::nested_kvm_check(plat));
     checks.push(platform_checks::libkrun_check(plat));
     checks.push(builder::builder_backend_check(plat));
+    checks.push(builder::boot_image_acquisition_check());
     checks.push(runtime::runtime_backend_check(plat));
     checks.push(platform_checks::residency_check());
     checks.push(builder::builder_residency_check());
     checks.push(platform_checks::network_backend_check(plat));
+    checks.push(platform_checks::egress_proxy_check());
     checks.push(platform_checks::ts_runner_check());
     checks.push(builder::stage0_status_check());
     checks.push(builder::builder_store_check());

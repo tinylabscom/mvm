@@ -1,0 +1,7 @@
+["machine", "run", "-d", "--up-json", "--name", "<vm-name>", "--manifest", "python-3.12", "--ttl", "1800s"]
+["machine", "proc", "start", "sdk-bdd-vm", "--", "python", "-c", "print('ok')"]
+["machine", "proc", "wait", "sdk-bdd-vm", "ptok-bdd"]
+["machine", "fs", "write", "sdk-bdd-vm", "/app/hello.txt", "--mode", "420"]
+["machine", "fs", "read", "sdk-bdd-vm", "/app/hello.txt", "--offset", "0", "--length", "16777216"]
+["machine", "fs", "ls", "sdk-bdd-vm", "/app", "--json"]
+["machine", "stop", "sdk-bdd-vm", "--yes"]

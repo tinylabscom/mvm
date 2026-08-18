@@ -21,8 +21,9 @@ from mvm._subprocess import (
     run_capped,
 )
 
-MVM_MACHINE_TIMEOUT_ENV = "MVM_MACHINE_TIMEOUT_SEC"
-MVM_MACHINE_MAX_OUTPUT_ENV = "MVM_MACHINE_MAX_OUTPUT_BYTES"
+# Owned by the Rust registry (crates/mvm-sdk/src/env.rs), generated into
+# `_env/vars.py`. Re-exported from this module for existing importers.
+from mvm._env.vars import MVM_MACHINE_MAX_OUTPUT_ENV, MVM_MACHINE_TIMEOUT_ENV
 
 
 @dataclass(frozen=True)
@@ -219,12 +220,23 @@ def _machine_check_artifact_argv(
 def _machine_start_argv(
     *,
     name: str,
+    image: str | None = None,
+    cpus: int | None = None,
+    memory: str | None = None,
     receipt: str | None = None,
     json: bool = False,
     dry_run: bool = False,
 ) -> list[str]:
     # `machine start` takes a positional name, not `--name`.
     argv = ["start", _require_non_empty_str(name, "name")]
+    # `--image`/`--cpus`/`--memory` describe the machine to create when the
+    # named spec does not exist yet; `machine start` auto-creates from them.
+    if image is not None:
+        argv.extend(["--image", _require_non_empty_str(image, "image")])
+    if cpus is not None:
+        argv.extend(["--cpus", str(cpus)])
+    if memory is not None:
+        argv.extend(["--memory", _require_non_empty_str(memory, "memory")])
     if receipt is not None:
         argv.extend(["--receipt", _require_non_empty_str(receipt, "receipt")])
     if json:
@@ -407,12 +419,23 @@ class Machine:
     def start(
         self,
         *,
+        image: str | None = None,
+        cpus: int | None = None,
+        memory: str | None = None,
         receipt: str | None = None,
         json: bool = False,
         dry_run: bool = False,
     ) -> MachineResult:
         return _run_machine(
-            _machine_start_argv(name=self.name, receipt=receipt, json=json, dry_run=dry_run)
+            _machine_start_argv(
+                name=self.name,
+                image=image,
+                cpus=cpus,
+                memory=memory,
+                receipt=receipt,
+                json=json,
+                dry_run=dry_run,
+            )
         )
 
     def exec(self, command: list[str], *, force: bool = False) -> MachineResult:

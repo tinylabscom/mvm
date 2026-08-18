@@ -100,11 +100,6 @@ let
     in
     "${attrText} ${asString}";
 
-  deindent = text:
-    lib.concatStringsSep "\n" (
-      map (line: lib.removePrefix "    " line) (lib.splitString "\n" text)
-    );
-
 in
 { name
 , entrypoint
@@ -351,7 +346,7 @@ let
   #
   # PID 1 stays uid 0 (kernel mandate); both children run rootless
   # by default in production (see uids resolution above).
-  initScript = pkgs.writeScript "mvm-init" (deindent ''
+  initText = ''
     #!/bin/sh
     # mvm /init — busybox PID 1.
 
@@ -597,25 +592,39 @@ let
     # otherwise from the cmdline. A vsock-only guest has no config drive, so
     # there the cmdline is the only carrier — without this the agent finds no
     # key, refuses every control RPC, and the host's readiness probe times out.
+    # The host-signer anchor is provisioned UNCONDITIONALLY, not only when a
+    # verb grant is present. It is host *identity*, while a grant is workload
+    # *authority* -- the host ships it ungated for exactly this reason (see
+    # `host_signer_pub_cmdline_token`), and the egress client needs it to pin
+    # the host on a run that carries no grant at all. Nesting it inside the
+    # grant check meant a grant-less run had no anchor and no egress.
+    /bin/busybox mkdir -p /run/mvm
+    if [ -r /mnt/config/host-signer.pub ]; then
+      /bin/busybox cp /mnt/config/host-signer.pub /run/mvm/host-signer.pub
+      /bin/busybox chmod 0644 /run/mvm/host-signer.pub
+    else
+      # The agent accepts the raw 32 bytes or this 64-char hex form.
+      MVM_HOST_SIGNER_PUB_HEX=$(/bin/busybox sed -n 's/.*\bmvm\.host_signer_pub=\([^ ]*\).*/\1/p' /proc/cmdline)
+      if [ -n "$MVM_HOST_SIGNER_PUB_HEX" ]; then
+        printf '%s' "$MVM_HOST_SIGNER_PUB_HEX" > /run/mvm/host-signer.pub
+        /bin/busybox chmod 0644 /run/mvm/host-signer.pub
+      fi
+    fi
+
     MVM_VERB_GRANT_B64=$(/bin/busybox sed -n 's/.*\bmvm\.verb_grant=\([^ ]*\).*/\1/p' /proc/cmdline)
     if [ -n "$MVM_VERB_GRANT_B64" ]; then
-      /bin/busybox mkdir -p /run/mvm
-      if [ -r /mnt/config/host-signer.pub ]; then
-        /bin/busybox cp /mnt/config/host-signer.pub /run/mvm/host-signer.pub
-        /bin/busybox chmod 0644 /run/mvm/host-signer.pub
-      else
-        # The agent accepts the raw 32 bytes or this 64-char hex form.
-        MVM_HOST_SIGNER_PUB_HEX=$(/bin/busybox sed -n 's/.*\bmvm\.host_signer_pub=\([^ ]*\).*/\1/p' /proc/cmdline)
-        if [ -n "$MVM_HOST_SIGNER_PUB_HEX" ]; then
-          printf '%s' "$MVM_HOST_SIGNER_PUB_HEX" > /run/mvm/host-signer.pub
-          /bin/busybox chmod 0644 /run/mvm/host-signer.pub
-        fi
-      fi
       printf '%s' "$MVM_VERB_GRANT_B64" | /bin/busybox base64 -d \
         > /run/mvm/verb-grant.json
       /bin/busybox chmod 0644 /run/mvm/verb-grant.json
       echo "mvm-init: provisioned verb-grant"
     fi
+
+    # The per-boot FlowMux identity is NOT provisioned here. The host attaches
+    # it as a small read-only ext4 drive labelled `mvm-identity`, and
+    # `mvm-egress-client` mounts it itself before loading its keys -- one
+    # implementation, in Rust, shared by every guest tier. Doing it here too
+    # would mean a second copy of the superblock-label probe written in shell,
+    # against busybox applets this image does not otherwise use.
 
     # Stage 2.476 — declared runtime-source policy. The host carries
     # the per-boot runtime contract on the kernel cmdline; when
@@ -939,7 +948,7 @@ let
     # workload that reads stdin shortly after boot. /dev/null is the correct
     # stdin for a non-interactive sealed workload; stdout/stderr stay on the
     # console for capture, and the exit-code capture below is unaffected.
-   . "$MVM_BOOT" </dev/null
+    . "$MVM_BOOT" </dev/null
     MVM_CODE=$?
     # Report the exit code to the host (best-effort), then power off —
     # never reboot. The host reads it from the control vsock port.
@@ -968,7 +977,23 @@ let
     fi
     /bin/busybox sync
     /bin/busybox poweroff -f
-  '');
+  '';
+
+  # The kernel exec()s /init directly, so `#!` must be the first two bytes of
+  # the file: shift them by even one column and the boot dies with ENOEXEC
+  # before any userspace runs, leaving a kernel panic as the only symptom.
+  # Nix derives an indented string's baseline from its least-indented line, so
+  # one under-indented line anywhere in the block above silently moves every
+  # other line — including the shebang — one column right. Assert the rendered
+  # bytes instead of trusting the indentation to stay uniform.
+  initScript =
+    lib.throwIf (!lib.hasPrefix "#!/bin/sh\n" initText) ''
+      mkGuest: the rendered /init does not start with the "#!/bin/sh" shebang.
+      The kernel exec()s /init and will panic with ENOEXEC. This almost always
+      means a line inside the /init block of nix/lib/mk-guest.nix is indented
+      less than its neighbours, which moves the whole script one or more
+      columns right. Re-align that line.
+    '' (pkgs.writeScript "mvm-init" initText);
 
   # Render the entrypoint as a shell-sourced fragment. /init does
   # `. /etc/mvm/entrypoint`, so this is just a script.

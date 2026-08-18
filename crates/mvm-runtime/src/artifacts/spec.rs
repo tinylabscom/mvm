@@ -8,6 +8,9 @@ use std::path::PathBuf;
 
 use mvm_core::arch::GuestArch;
 use mvm_core::kernel_format::KernelFormat;
+// The rootfs declaration is named by callers that sit below this crate, so the
+// type lives in `mvm-core`; the build spec keeps naming it here.
+pub use mvm_core::rootfs_source::{RootfsSource, RootfsSourceParseError};
 use serde::{Deserialize, Serialize};
 
 use crate::compat::{MicrovmBackend, RootfsFormat};
@@ -22,18 +25,6 @@ pub enum KernelSource {
     LocalPath(PathBuf),
     /// Use the builder VM's bundled kernel (libkrun embedded kernel).
     Bundled,
-}
-
-/// Where the rootfs comes from.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RootfsSource {
-    /// Build from a Nix flake output at the given path/URL.
-    Flake { flake_ref: String, attr: String },
-    /// Use a pre-built rootfs image at the given local path.
-    LocalPath(PathBuf),
-    /// Import from an OCI image reference (pulled by the builder VM).
-    Oci { image_ref: String },
 }
 
 /// What kernel to produce (or consume).

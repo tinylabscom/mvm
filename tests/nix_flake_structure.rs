@@ -655,14 +655,6 @@ fn mk_guest_carries_overlay_aware_contract() {
          busybox /init path before entering mvm-host-vm-init."
     );
     assert!(
-        content.contains("initScript = pkgs.writeScript \"mvm-init\" (deindent ''\n    #!/bin/sh"),
-        "mk-guest.nix must still emit /init with the shebang at byte 0 after \
-         deindent strips the Nix-source indentation. A leading space before \
-         `#!/bin/sh` in the emitted script turns the built rootfs /init into \
-         an ENOEXEC script that panics the guest before chained init can run."
-    );
-
-    assert!(
         content.contains("runtimeLean = true;"),
         "mk-guest.nix must surface `passthru.mvm.runtimeLean = true` for every \
          image: mkGuest bakes no guest-runtime binaries, so the required-overlay \
@@ -691,6 +683,68 @@ fn mk_guest_carries_overlay_aware_contract() {
          (rootfstype=ext4 + rootwait + panic=-1 + loglevel=8 + chained \
          builder init) so every backend starts from the same disk-builder \
          boot contract."
+    );
+}
+
+/// Render the `initText = ''…''` block of `mk-guest.nix` the way Nix
+/// renders an indented string: strip the common indentation, which Nix
+/// derives from the *least*-indented line that carries content.
+fn rendered_init_text(content: &str) -> String {
+    let open = "  initText = ''\n";
+    let start = content
+        .find(open)
+        .expect("mk-guest.nix must bind the /init body to `initText`")
+        + open.len();
+    let rest = &content[start..];
+    let end = rest
+        .find("\n  '';\n")
+        .expect("the `initText` block must be closed by a `'';` at two-space indentation");
+
+    let body = &rest[..end];
+    let baseline = body
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| line.len() - line.trim_start_matches(' ').len())
+        .min()
+        .expect("the /init body is not empty");
+
+    body.lines()
+        .map(|line| {
+            if line.len() >= baseline {
+                &line[baseline..]
+            } else {
+                ""
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The kernel `exec()`s `/init` directly, so `#!` must be the first two
+/// bytes of the file. Nix takes an indented string's baseline from its
+/// least-indented line, so one line indented less than its neighbours
+/// shifts every other line — the shebang included — one column right, and
+/// the guest dies with `Kernel panic … Requested init /init failed (error
+/// -8)` before any userspace runs.
+///
+/// This asserts the rendered bytes rather than the source spelling. An
+/// earlier revision asserted a literal source substring instead, which
+/// stayed green while the emitted `/init` shipped a leading space for two
+/// releases.
+#[test]
+fn mk_guest_init_shebang_lands_at_byte_zero() {
+    let path = nix_dir().join("lib").join("mk-guest.nix");
+    let content = fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("nix/lib/mk-guest.nix must be present: {e}"));
+
+    let rendered = rendered_init_text(&content);
+    let first = rendered.lines().next().unwrap_or_default();
+    assert_eq!(
+        first, "#!/bin/sh",
+        "the rendered /init must open with the shebang at byte 0, got {first:?}. \
+         Some line in the `initText` block of nix/lib/mk-guest.nix is indented \
+         less than the rest, which moves the whole script right and makes the \
+         built rootfs unbootable (ENOEXEC)."
     );
 }
 

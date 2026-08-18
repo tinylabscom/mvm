@@ -413,13 +413,19 @@ mod tests {
 
     #[tokio::test]
     async fn rate_guard_denies_when_bucket_is_empty() {
-        let guard = EgressRateGuard::new(0, 1);
+        let guard = EgressRateGuard::builder()
+            .requests_per_sec(0)
+            .max_inflight(1)
+            .build();
         assert!(guard.admit().await.is_none());
     }
 
     #[tokio::test]
     async fn rate_guard_caps_concurrent_queries() {
-        let guard = EgressRateGuard::new(10, 1);
+        let guard = EgressRateGuard::builder()
+            .requests_per_sec(10)
+            .max_inflight(1)
+            .build();
         let first = guard.admit().await.expect("first query is admitted");
         assert!(guard.admit().await.is_none());
         drop(first);
@@ -439,7 +445,10 @@ mod tests {
                 server,
                 &gate,
                 Some(&recorder),
-                &EgressRateGuard::new(0, 1),
+                &EgressRateGuard::builder()
+                    .requests_per_sec(0)
+                    .max_inflight(1)
+                    .build(),
                 Duration::from_secs(1),
                 move |_name, _timeout| {
                     handler_lookups.fetch_add(1, Ordering::Relaxed);
