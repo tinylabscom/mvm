@@ -251,7 +251,7 @@ mod bundle_pin_tests {
             schema_version: BUNDLE_SCHEMA_VERSION,
             publisher: "test".to_string(),
             key_id: key_id.clone(),
-            arch: "aarch64".to_string(),
+            arch: mvm_core::arch::GuestArch::host().to_string(),
             kernel_version: None,
             profile: None,
             workload_label: None,
