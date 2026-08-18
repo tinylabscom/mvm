@@ -48,11 +48,16 @@ export function DeploymentTiers() {
     <Section id="deployment" rule>
       <Reveal>
         <Eyebrow>Deployment</Eyebrow>
-        <h2 className="mb-8 lowercase font-display text-2xl font-bold leading-tight text-title sm:text-3xl">
+        <h2 className="lowercase font-display text-2xl font-bold leading-tight text-title sm:text-3xl">
           one contract. four places to run it.
         </h2>
       </Reveal>
-      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+      {/* Inline margin, not mt-*: Starlight's unlayered stylesheet beats
+          layered utilities on this page (see Positioning.tsx). */}
+      <div
+        className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4"
+        style={{ marginTop: "3rem" }}
+      >
         {TIERS.map((tier, i) => (
           <Reveal key={tier.label} delay={i * 80}>
             <div

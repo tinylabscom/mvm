@@ -21,15 +21,24 @@ export function Backends() {
     <Section id="backends" rule>
       <Reveal>
         <Eyebrow>Backends</Eyebrow>
-        <h2 className="mb-4 lowercase font-display text-2xl font-bold leading-tight text-title sm:text-3xl">
+        {/* Inline margins, not margin utilities: Starlight's unlayered
+            stylesheet beats layered utilities on this page (see
+            Positioning.tsx). */}
+        <h2
+          className="lowercase font-display text-2xl font-bold leading-tight text-title sm:text-3xl"
+          style={{ marginBottom: "1.5rem" }}
+        >
           the backend is an implementation detail.
         </h2>
-        <p className="mb-8 max-w-3xl text-base leading-relaxed text-body">
+        <p className="max-w-3xl text-base leading-relaxed text-body">
           The same signed image, decorated execution plan, policy bundle, and
           audit chain runs across every backend MVM supports.
         </p>
       </Reveal>
-      <div className="grid grid-cols-2 gap-2.5 lg:grid-cols-4">
+      <div
+        className="grid grid-cols-2 gap-2.5 lg:grid-cols-4"
+        style={{ marginTop: "3rem" }}
+      >
         {BACKENDS.map((backend, i) => (
           <Reveal key={backend.name} delay={i * 60}>
             <div className="h-full rounded-xl border border-glass-border/60 bg-raised px-4 py-3.5 transition-colors hover:border-accent/50">
