@@ -66,10 +66,9 @@ export function ExecutionContract() {
           <span className="text-accent-2">the contract is the product.</span>
         </h2>
         <p className="mb-2 max-w-2xl text-base leading-relaxed text-body">
-          Plenty of runtimes can put an agent in a microVM. What a security
-          team approves is the contract around it: what may execute, with what
-          authority, and what evidence proves the controls operated. Six
-          layers, each one enforced and witnessed — not asserted.
+          Anyone can put an agent in a microVM. A security team approves the
+          contract: what may execute, with what authority, and what proves it.
+          Six layers, enforced and witnessed — not asserted.
         </p>
       </Reveal>
 
