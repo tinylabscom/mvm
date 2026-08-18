@@ -22,6 +22,76 @@ pub struct EgressClientMissing;
 ///
 /// Callers must invoke this after the rootfs is in place and while still
 /// privileged: the mounts, `/run/mvm` writes and interface changes all need root.
+/// Whether `/` is mounted read-only.
+///
+/// Read from `/proc/mounts` once rather than inferred from each failure,
+/// because it is a property of the image and not of any one step: a sealed prod
+/// rootfs takes no writes at all, and every optional provisioning step below
+/// fails against it identically. Probing the mount is also type-independent —
+/// these steps return `MountError`, `io::Error` and `String` between them, so
+/// classifying per-error would need every path to preserve an errno, and one
+/// that stopped doing so would silently go back to shouting.
+fn rootfs_is_read_only() -> bool {
+    let Ok(mounts) = std::fs::read_to_string("/proc/mounts") else {
+        // Unreadable /proc: assume writable, which keeps every failure loud.
+        // The wrong guess here costs noise, and the other one costs silence.
+        return false;
+    };
+    root_is_read_only_in(&mounts)
+}
+
+/// The `/proc/mounts` half of [`rootfs_is_read_only`], split out so it can be
+/// tested against real mount tables without a guest.
+fn root_is_read_only_in(mounts: &str) -> bool {
+    mounts.lines().any(|line| {
+        let mut fields = line.split_whitespace();
+        let (Some(_dev), Some(target), Some(_fstype), Some(opts)) =
+            (fields.next(), fields.next(), fields.next(), fields.next())
+        else {
+            return false;
+        };
+        // Exactly `ro`, never a prefix: `rootflags`, `rootcontext` and
+        // `relatime` all begin with the same two letters, and matching a
+        // substring would silence every failure on a writable rootfs.
+        target == "/" && opts.split(',').any(|o| o == "ro")
+    })
+}
+
+/// Steps that were skipped because the rootfs takes no writes.
+static READ_ONLY_SKIPS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// Report an optional provisioning step that did not run.
+///
+/// Every caller is optional by construction — see `provision_workload_identity`
+/// — and the workload runs without any of them. On a read-only rootfs none of
+/// them *can* run, so reporting each separately described a healthy sealed
+/// image as six distinct failures on every boot. Collect those and state the
+/// one fact behind them; anything else stays at full volume.
+fn note_optional_step(step: &str, detail: &dyn std::fmt::Display) {
+    if rootfs_is_read_only() {
+        if let Ok(mut skips) = READ_ONLY_SKIPS.lock() {
+            skips.push(step.to_string());
+        }
+        return;
+    }
+    eprintln!("mvm-guest-init: {step}: {detail}");
+}
+
+/// Say once what the collected steps have in common.
+fn report_read_only_skips() {
+    let Ok(skips) = READ_ONLY_SKIPS.lock() else {
+        return;
+    };
+    if skips.is_empty() {
+        return;
+    }
+    eprintln!(
+        "mvm-guest-init: rootfs is mounted read-only, so these optional steps were \
+         skipped: {}. The workload runs without them.",
+        skips.join(", ")
+    );
+}
+
 pub fn provision_guest_environment() -> Result<(), EgressClientMissing> {
     ensure_runtime_dirs();
     provision_workload_identity();
@@ -33,6 +103,7 @@ pub fn provision_guest_environment() -> Result<(), EgressClientMissing> {
     if cmdline_has_flag("mvm.vsock_egress=1") {
         start_vsock_egress()?;
     }
+    report_read_only_skips();
     Ok(())
 }
 
@@ -46,17 +117,22 @@ pub fn provision_guest_environment() -> Result<(), EgressClientMissing> {
 /// stepped past.
 fn provision_workload_identity() {
     if let Err(error) = crate::guest_mount::ensure_workload_home() {
-        eprintln!(
-            "mvm-guest-init: could not create the workload home ({}): {error}; falling back to {}",
-            crate::guest_mount::WORKLOAD_HOME,
-            crate::guest_mount::WORKLOAD_HOME_FALLBACK
+        note_optional_step(
+            &format!(
+                "workload home {} (falling back to {})",
+                crate::guest_mount::WORKLOAD_HOME,
+                crate::guest_mount::WORKLOAD_HOME_FALLBACK
+            ),
+            &error,
         );
     }
     if let Err(error) = crate::workload_identity::provision() {
-        eprintln!(
-            "mvm-guest-init: could not name uid {} in /etc/passwd: {error}; \
-             whoami and getpwuid will not resolve it",
-            crate::guest_mount::WORKLOAD_UID
+        note_optional_step(
+            &format!(
+                "naming uid {} in /etc/passwd (whoami and getpwuid will not resolve it)",
+                crate::guest_mount::WORKLOAD_UID
+            ),
+            &error,
         );
     }
 }
@@ -117,7 +193,7 @@ pub fn ensure_runtime_dirs() {
         "/mvm/runtime",
     ] {
         if let Err(e) = fs::create_dir_all(path) {
-            eprintln!("mvm-guest-init: mkdir {path}: {e}");
+            note_optional_step(&format!("mkdir {path}"), &e);
         }
     }
     // The workload runs unprivileged, so the two world-writable scratch
@@ -130,7 +206,7 @@ pub fn ensure_runtime_dirs() {
             path,
             std::os::unix::fs::PermissionsExt::from_mode(SCRATCH_DIR_MODE),
         ) {
-            eprintln!("mvm-guest-init: chmod 1777 {path}: {e}");
+            note_optional_step(&format!("chmod 1777 {path}"), &e);
         }
     }
 }
@@ -167,9 +243,9 @@ pub fn mount_mediated_tools() {
                     eprintln!("mvm-guest-init: {target} not substituted after overlay: {second}");
                 }
             }
-            Err(e) => eprintln!(
-                "mvm-guest-init: {target} left as the image shipped it ({first}); \
-                 directory overlay: {e}"
+            Err(e) => note_optional_step(
+                &format!("substituting {target}, left as the image shipped it ({first})"),
+                &e,
             ),
         }
     }
@@ -911,5 +987,63 @@ mod tests {
                 "{target} must name a binary for the PATH route"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod read_only_rootfs_tests {
+    use super::root_is_read_only_in;
+
+    /// A sealed prod guest: `/` carries `ro`, so the optional provisioning
+    /// steps below cannot run and should be reported once rather than six
+    /// times.
+    #[test]
+    fn a_read_only_root_is_recognised() {
+        let mounts = "\
+/dev/vda / ext4 ro,relatime 0 0
+proc /proc proc rw,nosuid,nodev,noexec,relatime 0 0
+tmpfs /tmp tmpfs rw,nosuid,nodev 0 0
+";
+        assert!(root_is_read_only_in(mounts));
+    }
+
+    /// A dev guest, and the case that must stay loud: every failure on a
+    /// writable rootfs is a real failure worth printing.
+    #[test]
+    fn a_writable_root_is_not() {
+        let mounts = "\
+/dev/vda / ext4 rw,relatime 0 0
+proc /proc proc rw,nosuid,nodev,noexec,relatime 0 0
+";
+        assert!(!root_is_read_only_in(mounts));
+    }
+
+    /// The substring trap. `rootflags`, `rootcontext` and `relatime` all start
+    /// with `r`, and `errors=remount-ro` ends with `ro`; matching anything but
+    /// the whole option would silence real failures on a writable image.
+    #[test]
+    fn an_option_that_merely_contains_ro_is_not_a_read_only_mount() {
+        let mounts = "/dev/vda / ext4 rw,relatime,errors=remount-ro 0 0\n";
+        assert!(
+            !root_is_read_only_in(mounts),
+            "`errors=remount-ro` is not `ro`"
+        );
+    }
+
+    /// Only `/` counts. A read-only mount somewhere else says nothing about
+    /// whether these steps can run.
+    #[test]
+    fn a_read_only_mount_elsewhere_does_not_count() {
+        let mounts = "\
+/dev/vda / ext4 rw,relatime 0 0
+/dev/vdb /mvm/runtime ext4 ro,relatime 0 0
+";
+        assert!(!root_is_read_only_in(mounts));
+    }
+
+    /// A short or blank line must not panic or match.
+    #[test]
+    fn malformed_lines_are_ignored() {
+        assert!(!root_is_read_only_in("\n/ ro\ngarbage\n"));
     }
 }
