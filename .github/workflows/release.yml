@@ -293,8 +293,21 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+          # Highest version, not most recently created. `gh release list`
+          # orders by creation date, so `.[0]` picks whichever release was cut
+          # last — and the two disagree the moment one is re-cut out of order.
+          # That is not hypothetical: v0.1.1 published, then v0.1.0 was re-cut
+          # after a fix landed, leaving the newer release at the lower version.
+          # Sorting by parsed semver makes which image a CLI release ships a
+          # property of the version, not of the order someone happened to push.
+          # The strict N.N.N match also drops anything that is not a plain
+          # release tag rather than trying to order it.
           BOOT_TAG="$(gh release list --repo "${GITHUB_REPOSITORY}" --limit 100 \
-            --json tagName --jq '[.[] | select(.tagName | startswith("boot-image/v"))] | .[0].tagName // empty')"
+            --json tagName --jq -r '
+              [ .[].tagName
+                | select(test("^boot-image/v[0-9]+\\.[0-9]+\\.[0-9]+$"))
+                | {tag: ., v: (ltrimstr("boot-image/v") | split(".") | map(tonumber))} ]
+              | sort_by(.v) | last | .tag // empty')"
           if [ -z "${BOOT_TAG}" ]; then
             echo "::error::no boot-image/v* release exists, so this release would ship with no boot image assets and every fresh install would 404 on first boot. Publish a boot-image/v* tag first, then re-run this release." >&2
             exit 1
@@ -302,6 +315,32 @@ jobs:
           echo "Attaching boot image assets from ${BOOT_TAG}"
           mkdir -p artifacts
           gh release download "${BOOT_TAG}" --repo "${GITHUB_REPOSITORY}" --dir artifacts --clobber
+
+          # Existence is not usability. The producing side refuses to publish an
+          # incomplete set, but it cannot retract one published before that gate
+          # existed, and this step would attach it without comment. A CLI release
+          # missing these is green and unusable: no x86_64 image means every
+          # x86_64 fresh install 404s on first boot, and no builder-vm assets
+          # means download_builder_vm_image 404s for everyone. The consumer-path
+          # check further down covers only runtime-overlay and sdk-sidecar, and
+          # skips whatever is absent, so nothing else in this job would notice.
+          missing=()
+          for arch in aarch64 x86_64; do
+            for f in \
+              "default-microvm-vmlinux-${arch}" \
+              "default-microvm-rootfs-${arch}.ext4" \
+              "default-microvm-meta-${arch}.json" \
+              "default-microvm-${arch}-checksums-sha256.txt" \
+              "builder-vm-vmlinux-${arch}" \
+              "builder-vm-rootfs-${arch}.ext4" \
+              "builder-vm-${arch}-checksums-sha256.txt"; do
+              [ -s "artifacts/${f}" ] || missing+=("${f}")
+            done
+          done
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "::error::${BOOT_TAG} is incomplete — refusing to ship a CLI release whose boot image would 404 on first boot. Missing: ${missing[*]}" >&2
+            exit 1
+          fi
           # Drop the bundles this job re-mints. The signing step below writes
           # its bundle with create-new semantics, so leaving the boot image
           # train's copy in place would fail that step outright rather than be

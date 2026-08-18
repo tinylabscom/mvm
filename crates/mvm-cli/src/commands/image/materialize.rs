@@ -14,6 +14,11 @@ use mvm_build::rootfs::MaterializeExt4Input;
 use super::cache::safe_cache_path;
 use super::oci_types::OciImageConfig;
 
+/// How much of a runtime identity goes into the cache tag. Long enough that
+/// two distinct guest runtimes cannot collide in practice, short enough to keep
+/// the on-disk directory name readable.
+const RUNTIME_TAG_PREFIX_LEN: usize = 16;
+
 /// Identity of the guest runtime injected into a rootfs, for cache keying.
 ///
 /// Derived from the bytes of the artifacts that actually get injected, so a
@@ -26,7 +31,11 @@ use super::oci_types::OciImageConfig;
 /// reads a sidecar rather than the artifacts, and never triggers a build.
 pub(super) fn oci_runtime_tag(cache_root: &Path) -> String {
     match mvm_build::run_image::resolve_guest_runtime_identity(cache_root) {
-        Ok(identity) => format!("{}-guest-{}", env!("CARGO_PKG_VERSION"), &identity[..16]),
+        Ok(identity) => format!(
+            "{}-guest-{}",
+            env!("CARGO_PKG_VERSION"),
+            runtime_tag_prefix(&identity)
+        ),
         Err(err) => {
             // Degrade to a version-only tag rather than fail the run, but leave
             // a breadcrumb: a silent drop here can reuse a stale injected
@@ -39,6 +48,21 @@ pub(super) fn oci_runtime_tag(cache_root: &Path) -> String {
             );
             format!("{}-guest-unidentified", env!("CARGO_PKG_VERSION"))
         }
+    }
+}
+
+/// The identity prefix used in a cache tag.
+///
+/// `resolve_guest_runtime_identity` does not always return a hash: when the
+/// guest-agent layout is not built yet it succeeds with a short
+/// `pending-<cache_key>` sentinel. Slicing that blindly panicked on any fresh
+/// `MVM_HOME` — the first `machine run --image` on a new host, before a guest
+/// build had ever run. Take at most the prefix, on a char boundary, so a
+/// shorter identity degrades to itself rather than aborting the run.
+fn runtime_tag_prefix(identity: &str) -> &str {
+    match identity.char_indices().nth(RUNTIME_TAG_PREFIX_LEN) {
+        Some((byte_idx, _)) => &identity[..byte_idx],
+        None => identity,
     }
 }
 
@@ -346,6 +370,45 @@ pub(in crate::commands) fn oci_guest_runtime_compile_pending(cache_root: &Path) 
 mod tests {
     use super::super::oci_types::{CachedOciImage, CachedOciLayer};
     use super::*;
+
+    /// The exact shape that panicked on a fresh `MVM_HOME`: before any guest
+    /// build has run, `resolve_guest_runtime_identity` succeeds with a short
+    /// `pending-<cache_key>` sentinel rather than a hash, and the tag builder
+    /// used to slice it at a fixed 16 bytes.
+    #[test]
+    fn a_pending_identity_shorter_than_the_prefix_does_not_panic() {
+        let identity = "pending-abc123";
+        assert!(identity.len() < RUNTIME_TAG_PREFIX_LEN);
+        assert_eq!(runtime_tag_prefix(identity), "pending-abc123");
+    }
+
+    #[test]
+    fn a_full_hash_identity_is_truncated_to_the_prefix() {
+        let identity = "0123456789abcdef0123456789abcdef";
+        assert_eq!(runtime_tag_prefix(identity), "0123456789abcdef");
+        assert_eq!(runtime_tag_prefix(identity).len(), RUNTIME_TAG_PREFIX_LEN);
+    }
+
+    #[test]
+    fn an_identity_exactly_the_prefix_length_is_returned_whole() {
+        let identity = "0123456789abcdef";
+        assert_eq!(runtime_tag_prefix(identity), identity);
+    }
+
+    #[test]
+    fn an_empty_identity_does_not_panic() {
+        assert_eq!(runtime_tag_prefix(""), "");
+    }
+
+    /// Truncation is on a char boundary. A byte-indexed slice would panic here
+    /// even for an identity that is long enough in bytes.
+    #[test]
+    fn a_multibyte_identity_truncates_on_a_char_boundary() {
+        let identity = "ééééééééééééééééééé";
+        let got = runtime_tag_prefix(identity);
+        assert_eq!(got.chars().count(), RUNTIME_TAG_PREFIX_LEN);
+        assert!(identity.starts_with(got));
+    }
 
     fn sample_image(reference: &str, digest: &str, layer_path: &str) -> CachedOciImage {
         CachedOciImage {

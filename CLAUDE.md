@@ -63,7 +63,7 @@ binaries are already embedded.
 
 ## Builder backend selection (Plan 98)
 
-The builder VM (the Linux guest that runs `nix build` inside `mvmctl build image` / `mvmctl up`) picks between three host VMMs:
+The builder VM (the Linux guest that runs `nix build` inside `mvmctl machine build` / `mvmctl machine run --flake`) picks between three host VMMs:
 
 - **hvf** — the HVF builder (Hypervisor.framework, no Homebrew deps). Default on macOS 26+ Apple Silicon. macOS-only.
 - **libkrun** — third-party in-process VMM via the `slp/krun/*` Homebrew trio. Default on Linux and macOS 13-25. Works everywhere mvm runs.
@@ -151,7 +151,7 @@ BuildEnvironment : ShellEnvironment (extends)
   record_revision()
 ```
 
-- **Dev mode** (`mvmctl build image`, `mvmctl template build`): uses `dev_build()` with `&dyn ShellEnvironment`
+- **Dev mode** (`mvmctl build`, `mvmctl machine build`): uses `dev_build()` with `&dyn ShellEnvironment`
 - **Fleet mode** (in mvmd): uses `pool_build()` with `&dyn BuildEnvironment`
 
 The `RuntimeBuildEnv` in mvm implements only `ShellEnvironment`. The full `BuildEnvironment` impl lives in mvmd-runtime.
@@ -162,11 +162,11 @@ The `RuntimeBuildEnv` in mvm implements only `ShellEnvironment`. The full `Build
 - **Workload microVMs have no NIC**: every workload *microVM* backend boots the guest with a virtio-vsock device and **no net device at all** — Firecracker's config sequence omits `/network-interfaces`, libkrun pins `NetworkingMode::VsockDirect` (which never calls a net attach), HVF's device model has no net device (and `apple-container` is that same device model with a different kernel image), and the QEMU workload driver emits no `-netdev`. The non-microVM tiers reach the same end differently: the Wasm tier mediates no networking at all. Egress leaves the guest only over vsock, to the host-side substitution endpoint. This is what makes claim 10 (default-deny), claim 13 (no raw secret to the guest), and the audit chain mechanically enforceable: the host _originates_ every outbound connection, so it can authorize, substitute, and log it. `xtask check-vsock-only-egress` fails closed if `virtio_net`, a tap, or a userspace gateway token appears on a workload path. The builder VM is the opposite tier and **does** have a NIC — see **Host dependencies**.
 - **No SSH in microVMs, ever**: microVMs are headless workloads. No sshd, no SSH keys, no SSH users in any rootfs. Guest communication uses Firecracker vsock only. The builder VM (where Nix builds run) is headless too — no interactive shell or console, just a build engine you debug through its logs. See **Security model** below for the full posture.
 - **Builder VM is headless**: there is no interactive shell into it. The builder VM exists solely to run `nix build` on behalf of `mvmctl build` / `mvmctl machine run`; `mvmctl bootstrap` optionally pre-fetches/builds its image ahead of time, but builds auto-bootstrap it on first use if you skip that step. On macOS 26+ Apple Silicon: a long-lived HVF builder VM with Nix + build tools. On other macOS: libkrun builder VM. On Linux with KVM: Firecracker directly. None of these start or SSH into a workload microVM — the builder VM and workload microVMs are always separate.
-- **Headless microVMs**: `mvmctl start` and `mvmctl run` boot Firecracker as a daemon. Interactive access via `mvmctl console` (PTY-over-vsock, dev-mode only).
+- **Headless microVMs**: `mvmctl run` and `mvmctl machine start` boot Firecracker as a daemon. Interactive access via `mvmctl machine console` (PTY-over-vsock, dev-mode only).
 - **Local-command isolation**: `mvmctl start/stop` use a completely separate code path from orchestration.
 - **Shell scripts inside run_in_vm**: complex ops are bash scripts handed to the active `LinuxEnv` backend (libkrun / HVF / Firecracker). Deliberate — they run inside the Linux VM, not on the macOS/Linux host.
 - **Idempotent setup**: every step checks if already done before acting.
-- **Templates use dev_build path**: `mvmctl template build` runs `nix build` locally inside the builder VM (no ephemeral FC builder VMs).
+- **Templates use dev_build path**: `mvmctl build` runs `nix build` locally inside the builder VM (no ephemeral FC builder VMs). The `mvmctl template *` mutation namespace was removed; `template` is a read-only registry browser (`list`/`search`/`info`).
 - **mvm-core stays whole**: orchestration types (tenant, pool, instance, agent, protocol) remain in mvm-core even though they're only used by mvmd. This avoids a third shared-types crate and keeps the facade dependency simple.
 - **No `clippy::too_many_arguments`**: `#[allow(clippy::too_many_arguments)]` is banned outright — no exceptions in hand-written code (the only legitimate use is bindgen-generated FFI like `crates/deps/libkrun-sys/src/sys.rs`). When a function trips the lint, introduce a dedicated struct with a builder (Rust best practice) carrying those arguments and pass the built value. See AGENTS.md §"Clippy: Zero Warnings, Always".
 - **Reuse first — never reimplement what exists**: before writing anything, search the workspace (`rg`, the facade re-exports, the owning module) for a helper, type, trait impl, or crate that already does the job, and call it. Duplicated logic drifts and is this repo's most common bug source. If an existing helper is _almost_ right, extend it — don't fork a second copy. Concrete standing rules: all `~/.mvm` paths go through `mvm-core::config` helpers (`mvm_home`, `vm_state_dir`, `mvm_keys_dir`, `mvm_cache_dir`, …) — never build them inline with `std::env::var("HOME")` + `.join(...)` (that ignores `MVM_HOME` and breaks worktree isolation); shell/VM ops go through the `ShellEnvironment`/`BuildEnvironment` traits.
@@ -285,7 +285,7 @@ ADR-001 §"Appendix: Cardoso minimum-viable-policy checklist".
    and `audit` jobs in CI (W5.2). Reproducibility double-build
    (W5.3) catches non-determinism that could mask injection.
 8. **Every workload runs from a signed, audited `ExecutionPlan`.**
-   `mvmctl up` synthesizes a typed `ExecutionPlan`, signs it under
+   `mvmctl machine run` synthesizes a typed `ExecutionPlan`, signs it under
    the host's Ed25519 keypair at `~/.mvm/keys/host-signer.ed25519`
    (mode 0600), verifies it through `mvm_core::plan::verify_plan`
    (`mvm_plan` is not a crate — `plan` is a module of `mvm-core`),
@@ -352,7 +352,7 @@ ADR-001 §"Appendix: Cardoso minimum-viable-policy checklist".
     `content/`, `sbom.cdx.json`, `fetch.log`, `cve.json`, and a
     hash-chained `meta.json`; `mvm-hostd`'s supervisor admission verifier
     calls `mvm_sdk::compile::deps_audit::verify_sealed_volume` before
-    launch and refuses tampered volumes; `mvmctl up --prod` fails
+    launch and refuses tampered volumes; `mvmctl machine run --prod` fails
     closed on high/critical CVE findings or stub SBOM/CVE
     (`mvm_build::app_deps_gate::apply_install_gate`); `mvmctl deps
    inspect` / `mvmctl deps audit` surface the sealed sidecars without
@@ -456,7 +456,7 @@ prod_pull_requires_digest_pin_before_network` and
     (`mvm_runtime::libkrun::open_console_capture` — `mvm_backend` is
     not a crate, this is a function in `mvm-runtime` — and
     `following_the_console_never_writes_to_it`); (4) the host
-    `enforce_accessible_gate` refuses `mvmctl console` on a sealed VM
+    `enforce_accessible_gate` refuses `mvmctl machine console` on a sealed VM
     (`console_refused_on_sealed_image`); (5) the agent console and DevOnly
     handlers are grant-gated. CI: the `guest-agent-runtime-boundary` job in
     `.github/workflows/security.yml` runs the runtime refusal suite.
