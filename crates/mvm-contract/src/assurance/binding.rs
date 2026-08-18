@@ -116,6 +116,17 @@ pub enum BindingError {
     EmptyGrant,
 }
 
+/// Render a plan's content address in the counterparty's identifier grammar.
+///
+/// A plan id is `sha256:<hex>`, and the `:` is not legal in an identifier the
+/// far end will accept — so a binding built from any real plan would be refused
+/// while the `fixture-plan` test id sailed through. The scheme separator
+/// becomes a `-`, which is unambiguous (hex carries no `-`) and reversible, so
+/// the value still names exactly one plan.
+fn identifier_safe_plan_id(plan_id: &str) -> String {
+    plan_id.replace(':', "-")
+}
+
 impl MvmBinding {
     /// Begin assembling a binding from an admitted plan.
     #[must_use]
@@ -168,8 +179,8 @@ impl MvmBindingBuilder {
     pub fn plan(mut self, plan: &ExecutionPlan) -> Result<Self, BindingError> {
         let workload_digest = Sha256Digest::parse(alloc::format!("sha256:{}", plan.image.sha256))
             .map_err(|_| BindingError::UnusableImageDigest)?;
-        let plan_id =
-            AssuranceId::parse(plan.plan_id.0.clone()).map_err(|_| BindingError::UnusablePlanId)?;
+        let plan_id = AssuranceId::parse(identifier_safe_plan_id(&plan.plan_id.0))
+            .map_err(|_| BindingError::UnusablePlanId)?;
         self.from_plan = Some(PlanDerived {
             plan_id,
             plan_version: plan.plan_version,
