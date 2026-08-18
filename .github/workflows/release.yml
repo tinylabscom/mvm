@@ -121,22 +121,20 @@ jobs:
       # guest). They are SEPARATE bin targets in `mvm-hostd` — the root
       # `cargo build` above only produces `mvmctl` — so they are built here and
       # ship next to `mvmctl` in the tarball, where the backend's
-      # adjacent-to-exe resolver finds them on a downloaded install.
-      #   - mvm-network-endpoint: the per-VM egress gate. Every VM spawns
-      #     one, on both the FC (Linux) and HVF (macOS) paths, so it ships on
-      #     every target.
-      #   - mvm-hvf-supervisor (macOS only): the raw-HVF VMM supervisor.
-      #   - mvm-libkrun-supervisor (macOS only, and INTENTIONALLY so — not a
-      #     follow-up): it has `required-features = ["libkrun-sys"]`, and the
-      #     released Linux mvmctl deliberately does NOT link libkrun — the
-      #     `libkrun-sys` feature is a macOS-only target dep (see the rationale
-      #     at the top-level Cargo.toml, `[target.'cfg(target_os="macos")']`:
-      #     "Linux CI/runtimes use Firecracker … no libkrun-dev package exists").
-      #     So on Linux the supervisor can't be built here (no libkrun to link)
-      #     and isn't needed at runtime: workloads use Firecracker and the
-      #     builder VM uses libkrun-if-genuinely-available-else-QEMU (ADR-093),
-      #     with libkrun's FFI stubbed out in a no-feature build so it never
-      #     spawns this supervisor.
+      # adjacent-to-exe resolver finds them on a downloaded install. On a
+      # downloaded install that resolver has no `target/` dir to fall back to,
+      # so a binary missing here is a spawn failure at run time.
+      #
+      # This list is the `PerVmScope::Always` half of `PER_VM_HOST_BINARIES` in
+      # crates/mvm-cli/src/host_binaries/manifest.rs, and
+      # `xtask check-per-vm-host-binaries-sync` fails the build if the two
+      # drift. Add a binary there, not here.
+      #
+      # macOS additionally gets the two supervisors. mvm-libkrun-supervisor is
+      # macOS-only INTENTIONALLY — it has `required-features = ["libkrun-sys"]`
+      # and the released Linux mvmctl deliberately does not link libkrun (see
+      # the rationale in the top-level Cargo.toml): Linux workloads use
+      # Firecracker, so the supervisor is neither buildable nor needed there.
       - name: Build per-VM host binaries
         env:
           TARGET: ${{ matrix.target }}
@@ -146,12 +144,18 @@ jobs:
         run: |
           if [[ "${TARGET}" == *apple-darwin ]]; then
             cargo build --release --target "${TARGET}" -p mvm-hostd \
-              --bin mvm-hvf-supervisor \
+              --bin mvm-hvf-supervisor
+            cargo build --release --target "${TARGET}" -p mvm-hostd \
               --bin mvm-libkrun-supervisor --features libkrun-sys
           fi
           # Ships on every target — see the note above.
           cargo build --release --target "${TARGET}" -p mvm-hostd \
-            --bin mvm-network-endpoint
+            --bin mvm-host-agent \
+            --bin mvm-signer-helper \
+            --bin mvm-network-endpoint \
+            --bin mvm-netd \
+            --bin mvm-broker \
+            --bin mvm-audit-signer
 
       - name: Smoke test binary (native targets only)
         if: matrix.target == 'x86_64-unknown-linux-gnu' || matrix.target == 'aarch64-apple-darwin'
@@ -204,12 +208,24 @@ jobs:
           cp "target/${TARGET}/release/${BIN_NAME}" "staging/${ARCHIVE_NAME}/"
           # Per-VM host processes (built in the prior step), shipped next to
           # mvmctl so the backend's adjacent-to-exe resolver finds them on a
-          # downloaded install. copy-if-exists: the set differs by OS (macOS also
-          # gets the hvf/libkrun supervisors), but the substitution endpoint
-          # ships on every target.
-          for hostbin in mvm-hvf-supervisor mvm-libkrun-supervisor mvm-network-endpoint; do
+          # downloaded install. Kept in step with PER_VM_HOST_BINARIES by
+          # `xtask check-per-vm-host-binaries-sync`.
+          #
+          # Fail closed rather than copy-if-exists: a binary that failed to
+          # build would otherwise be silently dropped from the tarball and
+          # surface much later as a spawn failure on a user's machine.
+          REQUIRED_HOSTBINS="mvm-host-agent mvm-signer-helper mvm-network-endpoint mvm-netd mvm-broker mvm-audit-signer"
+          if [[ "${TARGET}" == *apple-darwin ]]; then
+            REQUIRED_HOSTBINS="${REQUIRED_HOSTBINS} mvm-hvf-supervisor mvm-libkrun-supervisor"
+          fi
+          for hostbin in ${REQUIRED_HOSTBINS}; do
             src="target/${TARGET}/release/${hostbin}"
-            [ -f "$src" ] && cp "$src" "staging/${ARCHIVE_NAME}/" && echo "bundled ${hostbin}"
+            if [ ! -f "$src" ]; then
+              echo "::error::${hostbin} was not built for ${TARGET}; mvmctl spawns it at run time and the adjacent-to-exe resolver has no fallback on a downloaded install" >&2
+              exit 1
+            fi
+            cp "$src" "staging/${ARCHIVE_NAME}/"
+            echo "bundled ${hostbin}"
           done
           cp -r assets "staging/${ARCHIVE_NAME}/" 2>/dev/null || true
           cp README.md "staging/${ARCHIVE_NAME}/" 2>/dev/null || true

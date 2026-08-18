@@ -434,6 +434,12 @@ jobs:
       - name: host-binaries manifest parity
         run: cargo run -p xtask -- check-mvm-host-binaries-sync
 
+      # release.yml runs on tags, so a per-VM binary added to the registry but
+      # not to the release job is invisible until a user's downloaded mvmctl
+      # fails to spawn it. Resolve it here, on the PR that adds it.
+      - name: release ships every spawnable per-VM binary
+        run: cargo run -p xtask -- check-per-vm-host-binaries-sync
+
       - name: mvm-core default build is runtime-free
         run: cargo run -p xtask -- check-core-runtime-free
 

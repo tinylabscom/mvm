@@ -414,29 +414,39 @@ fn build_native_aux_helpers(
     // are the ones this tree produces. Note the profile is part of the
     // flavour, because unlike the musl leg these follow the outer profile.
     let libkrun_present = libkrun_header_present();
-    for spec in build_aux_helpers::aux_helper_specs(&target_os, &target_arch, libkrun_present) {
+    let aux_manifest_src = std::fs::read_to_string(
+        workspace_root.join("crates/mvm-cli/src/host_binaries/manifest.rs"),
+    )
+    .expect("read host-binaries manifest");
+    for spec in build_aux_helpers::aux_helper_specs_from(
+        &aux_manifest_src,
+        &target_os,
+        &target_arch,
+        libkrun_present,
+    ) {
         let features = spec.features.join(",");
+        let (spec_package, spec_bin) = (spec.package.as_str(), spec.bin.as_str());
         let key = cache.key_for(&KeyRequest {
-            package: spec.package,
-            binary: spec.bin,
+            package: spec_package,
+            binary: spec_bin,
             features: &features,
             target: &host_target,
             toolchain: "native",
             flavor: &format!("native-host-{profile}"),
         });
-        let installed = bin_dir.join(spec.bin);
+        let installed = bin_dir.join(spec_bin);
 
-        if cache.restore(key.as_deref(), spec.bin, &installed) {
+        if cache.restore(key.as_deref(), spec_bin, &installed) {
             eprintln!(
                 "[build.rs] per-VM host helper {} restored from the content store",
-                spec.bin
+                spec_bin
             );
             continue;
         }
 
         run_cargo_native_build(workspace_root, &aux_target, &profile, &spec);
         if installed.is_file() {
-            cache.publish(key.as_deref(), spec.bin, &installed);
+            cache.publish(key.as_deref(), spec_bin, &installed);
         }
     }
 }
@@ -456,7 +466,7 @@ fn run_cargo_native_build(
     );
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     let mut cmd = Command::new(cargo);
-    cmd.args(["build", "-p", spec.package, "--bin", spec.bin]);
+    cmd.args(["build", "-p", &spec.package, "--bin", &spec.bin]);
     if profile == "release" {
         cmd.arg("--release");
     }
