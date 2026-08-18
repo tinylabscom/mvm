@@ -106,6 +106,7 @@ guest-RPC surface, fleet-shaped workflows).
 
 | Command | Description |
 |---------|-------------|
+| `mvmctl machine build <path>` | Build the slot for a manifest directory. A `flake =` manifest builds through Nix in the builder VM; an `image =` manifest materializes the OCI reference through the same path `run --image` boots, then installs it as a slot revision |
 | `mvmctl kernel build` | Build the custom microVM kernels (builder and workload) |
 | `mvmctl build image <path>` | Build from Mvmfile.toml in the given directory |
 | `mvmctl build image --flake <ref>` | Build from a Nix flake (local or remote) |
