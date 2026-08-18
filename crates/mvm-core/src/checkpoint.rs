@@ -259,6 +259,12 @@ pub struct CheckpointMeta {
     /// parent held stops verifying before it can justify a wider child.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grants: Option<mvm_contract::grants::Grants>,
+    /// The durable agent session this checkpoint is a resume point for, when
+    /// it has one. Load-bearing so a resume cannot be redirected to a
+    /// different session or replayed at an earlier journal position: the
+    /// digest covers this field and the signed chain covers the digest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<SessionBinding>,
     /// Content-address of the load-bearing fields above. Required with no serde
     /// default: a record that carries no content-address cannot be
     /// lineage-verified, so a pre-lineage meta.json must fail closed rather than
@@ -286,6 +292,7 @@ impl CheckpointMeta {
             runtime_overlay_version: None,
             snapshot_id: None,
             grants: None,
+            session: None,
             audit_ref: None,
         }
     }
@@ -309,6 +316,7 @@ impl CheckpointMeta {
             runtime_overlay_version: &self.runtime_overlay_version,
             snapshot_id: &self.snapshot_id,
             grants: &self.grants,
+            session: &self.session,
         }
         .digest()
     }
@@ -334,6 +342,7 @@ impl CheckpointMeta {
             .runtime_overlay_version(self.runtime_overlay_version.clone())
             .snapshot_id(Some(snapshot_id.into()))
             .grants(self.grants.clone())
+            .session(self.session.clone())
             .audit_ref(self.audit_ref.clone())
             .build()
     }
@@ -380,6 +389,11 @@ struct CheckpointDigestInput<'a> {
     /// tamper over a field nobody touched.
     #[serde(skip_serializing_if = "Option::is_none")]
     grants: &'a Option<mvm_contract::grants::Grants>,
+    /// Skipped when absent for the same reason `grants` is: a record sealed
+    /// before this field existed must hash exactly as it did then, or lineage
+    /// verification reports drift on a record nobody edited.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    session: &'a Option<SessionBinding>,
 }
 
 impl CheckpointDigestInput<'_> {
@@ -430,6 +444,7 @@ pub struct CheckpointMetaBuilder {
     runtime_overlay_version: Option<String>,
     snapshot_id: Option<String>,
     grants: Option<mvm_contract::grants::Grants>,
+    session: Option<SessionBinding>,
     audit_ref: Option<String>,
 }
 
@@ -474,6 +489,10 @@ impl CheckpointMetaBuilder {
         self.grants = grants;
         self
     }
+    pub fn session(mut self, binding: Option<SessionBinding>) -> Self {
+        self.session = binding;
+        self
+    }
     pub fn audit_ref(mut self, r: Option<String>) -> Self {
         self.audit_ref = r;
         self
@@ -496,6 +515,7 @@ impl CheckpointMetaBuilder {
             runtime_overlay_version: &self.runtime_overlay_version,
             snapshot_id: &self.snapshot_id,
             grants: &self.grants,
+            session: &self.session,
         }
         .digest();
         CheckpointMeta {
@@ -511,6 +531,7 @@ impl CheckpointMetaBuilder {
             runtime_overlay_version: self.runtime_overlay_version,
             snapshot_id: self.snapshot_id,
             grants: self.grants,
+            session: self.session,
             meta_digest,
             audit_ref: self.audit_ref,
         }
@@ -783,6 +804,7 @@ mod tests {
             policy: Option<RuntimeSourcePolicy>,
             overlay: Option<String>,
             grants: Option<mvm_contract::grants::Grants>,
+            session: Option<SessionBinding>,
         }
         let build = |f: &Fields| {
             CheckpointMeta::builder(CheckpointId::new(f.id.clone()), f.class, f.vm.clone())
@@ -794,6 +816,7 @@ mod tests {
                 .runtime_source_policy(f.policy)
                 .runtime_overlay_version(f.overlay.clone())
                 .grants(f.grants.clone())
+                .session(f.session.clone())
                 .build()
                 .meta_digest
         };
@@ -809,6 +832,7 @@ mod tests {
             policy: Some(RuntimeSourcePolicy::PreferOverlay),
             overlay: Some("0.1.0".into()),
             grants: None,
+            session: None,
         };
         let baseline = build(&base);
 
@@ -848,6 +872,73 @@ mod tests {
             ..Default::default()
         });
         assert_ne!(baseline, build(&f), "grants");
+        let mut f = base.clone();
+        f.session = Some(test_binding());
+        assert_ne!(baseline, build(&f), "session");
+    }
+
+    #[test]
+    fn meta_digest_changes_when_the_session_binding_changes() {
+        let base =
+            CheckpointMeta::builder(CheckpointId::new("cp-1"), CheckpointClass::VmFull, "vm-1")
+                .session(Some(test_binding()))
+                .build();
+
+        let mut other_binding = test_binding();
+        other_binding.generation += 1;
+        let bumped =
+            CheckpointMeta::builder(CheckpointId::new("cp-1"), CheckpointClass::VmFull, "vm-1")
+                .session(Some(other_binding))
+                .build();
+
+        assert_ne!(base.meta_digest, bumped.meta_digest);
+        assert_eq!(base.meta_digest, base.compute_meta_digest());
+        assert_eq!(bumped.meta_digest, bumped.compute_meta_digest());
+    }
+
+    #[test]
+    fn a_sessionless_checkpoint_hashes_as_it_did_before_the_field_existed() {
+        // A record that binds no session must be byte-identical in the digest
+        // input to one built before `session` was added, or every checkpoint on
+        // disk reads as tampered.
+        let sessionless =
+            CheckpointMeta::builder(CheckpointId::new("cp-1"), CheckpointClass::VmFull, "vm-1")
+                .build();
+        assert!(sessionless.session.is_none());
+        assert_eq!(sessionless.meta_digest, sessionless.compute_meta_digest());
+
+        let input = CheckpointDigestInput {
+            id: &sessionless.id,
+            class: sessionless.class,
+            vm_name: &sessionless.vm_name,
+            tag: &sessionless.tag,
+            parent: &sessionless.parent,
+            created_unix: sessionless.created_unix,
+            content: sorted_content(&sessionless.content),
+            supervisor_config_digest: &sessionless.supervisor_config_digest,
+            runtime_source_policy: &sessionless.runtime_source_policy,
+            runtime_overlay_version: &sessionless.runtime_overlay_version,
+            snapshot_id: &sessionless.snapshot_id,
+            grants: &sessionless.grants,
+            session: &None,
+        };
+        let json = serde_json::to_string(&input).unwrap();
+        assert!(
+            !json.contains("session"),
+            "an absent session must not appear in the digest input: {json}"
+        );
+    }
+
+    #[test]
+    fn session_binding_survives_meta_json_roundtrip() {
+        let meta =
+            CheckpointMeta::builder(CheckpointId::new("cp-1"), CheckpointClass::VmFull, "vm-1")
+                .session(Some(test_binding()))
+                .build();
+        let json = serde_json::to_string(&meta).unwrap();
+        let back: CheckpointMeta = serde_json::from_str(&json).unwrap();
+        assert_eq!(meta, back);
+        assert_eq!(back.session.unwrap().journal_cursor, 118);
     }
 
     #[test]
