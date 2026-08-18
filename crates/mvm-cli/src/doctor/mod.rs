@@ -224,6 +224,7 @@ pub fn run(json: bool, workflow: Option<DoctorWorkflow>) -> Result<()> {
     checks.push(security_checks::security_deny_config_check());
     checks.push(security_checks::security_default_network_check());
     checks.push(security_checks::security_network_policy_default_check());
+    checks.push(security_checks::security_default_run_profile_check());
     checks.push(security_checks::security_snapshot_key_check());
     checks.push(security_checks::security_snapshot_dirs_check());
     checks.push(security_checks::security_signing_check());

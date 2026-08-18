@@ -679,6 +679,43 @@ pub(super) fn security_network_policy_default_check() -> Check {
     }
 }
 
+/// What security profile a run gets when the user names none, and what that
+/// grants.
+///
+/// The profile is per-run, so what `doctor` can usefully report is the
+/// default — the posture a `mvmctl run` or `machine run` lands in without an
+/// argument. It reads that default off `RunArgs::default()` and describes it
+/// from `RunProfile::grants()`, rather than restating either: a doctor line
+/// that repeats a policy in prose is one more copy to go stale, and this one
+/// would go stale silently in the direction of claiming a tighter posture than
+/// the tool has.
+///
+/// A `permissive` default would be a finding. It is the escape hatch, and
+/// reaching it without an argument would mean the acknowledgement gate is the
+/// only thing between a bare `run` and broad local execution.
+pub(super) fn security_default_run_profile_check() -> Check {
+    let profile = crate::commands::default_run_profile();
+    let ok = profile != crate::commands::RunProfile::Permissive;
+    Check {
+        name: "default run profile",
+        category: "security",
+        ok,
+        info: if ok {
+            format!(
+                "{} — {} (both `run` and `machine run`; override with --profile)",
+                profile.as_str(),
+                profile.summary()
+            )
+        } else {
+            format!(
+                "{} is the default — the escape hatch should never be reached without \
+                 an explicit --profile",
+                profile.as_str()
+            )
+        },
+    }
+}
+
 /// `~/.mvm/snapshot.key` should be mode 0600.
 ///
 /// Absence is informational — the file is created lazily on first
@@ -1248,6 +1285,30 @@ mod tests {
             c.info.contains("0700"),
             "info should report the data dir's mode, got: {}",
             c.info
+        );
+    }
+
+    #[test]
+    fn default_run_profile_check_reports_the_profile_the_cli_actually_applies() {
+        let c = security_default_run_profile_check();
+        let profile = crate::commands::default_run_profile();
+        assert!(c.ok, "a non-permissive default must pass");
+        assert!(
+            c.info.starts_with(profile.as_str()),
+            "the line must lead with the profile the CLI applies: {}",
+            c.info
+        );
+        assert!(
+            c.info.contains(&profile.summary()),
+            "and describe what it grants: {}",
+            c.info
+        );
+        // The line claims both verbs agree. That was true only after they were
+        // reconciled, so it is worth holding.
+        assert_eq!(
+            profile,
+            crate::commands::RunProfile::Standard,
+            "if the default moves, this line's claim about both verbs needs re-checking"
         );
     }
 
