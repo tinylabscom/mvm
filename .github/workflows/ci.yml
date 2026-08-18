@@ -177,8 +177,9 @@ jobs:
         with:
           components: rustfmt, clippy
 
-      - name: Install system build deps
-        run: sudo rm -f /etc/apt/sources.list.d/microsoft*.list /etc/apt/sources.list.d/azure*.list; sudo apt-get update && sudo apt-get install -y libcap-ng-dev lld
+      - uses: ./.github/actions/apt-deps
+        with:
+          packages: libcap-ng-dev lld
 
       - uses: ./.github/actions/install-zigbuild
 
@@ -233,8 +234,9 @@ jobs:
       # Policy checks invoke xtask, and the stub/parity checks invoke the
       # pinned Python and TypeScript generators. They are independent of the
       # compiler lint lane, so start them on their own runner.
-      - name: Install system build deps
-        run: sudo rm -f /etc/apt/sources.list.d/microsoft*.list /etc/apt/sources.list.d/azure*.list; sudo apt-get update && sudo apt-get install -y libcap-ng-dev lld ripgrep shellcheck
+      - uses: ./.github/actions/apt-deps
+        with:
+          packages: libcap-ng-dev lld ripgrep shellcheck
 
       # Nothing else validates the workflow files. A wrong `if:`, a typo'd
       # `needs:` job name, or a bad `${{ }}` reference does not fail a PR — it
@@ -434,6 +436,12 @@ jobs:
       - name: host-binaries manifest parity
         run: cargo run -p xtask -- check-mvm-host-binaries-sync
 
+      # release.yml runs on tags, so a per-VM binary added to the registry but
+      # not to the release job is invisible until a user's downloaded mvmctl
+      # fails to spawn it. Resolve it here, on the PR that adds it.
+      - name: release ships every spawnable per-VM binary
+        run: cargo run -p xtask -- check-per-vm-host-binaries-sync
+
       - name: mvm-core default build is runtime-free
         run: cargo run -p xtask -- check-core-runtime-free
 
@@ -534,8 +542,9 @@ jobs:
         with:
           components: clippy
 
-      - name: Install system build deps
-        run: sudo rm -f /etc/apt/sources.list.d/microsoft*.list /etc/apt/sources.list.d/azure*.list; sudo apt-get update && sudo apt-get install -y libcap-ng-dev lld
+      - uses: ./.github/actions/apt-deps
+        with:
+          packages: libcap-ng-dev lld
 
       - uses: ./.github/actions/install-zigbuild
 
@@ -715,10 +724,9 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@nightly
 
-      - name: Install system build deps
-        run: |
-          sudo rm -f /etc/apt/sources.list.d/microsoft*.list /etc/apt/sources.list.d/azure*.list; sudo apt-get update
-          sudo apt-get install -y attr cryptsetup-bin libcap-ng-dev lld
+      - uses: ./.github/actions/apt-deps
+        with:
+          packages: attr cryptsetup-bin libcap-ng-dev lld
 
       - uses: ./.github/actions/install-zigbuild
 
@@ -775,10 +783,9 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@nightly
 
-      - name: Install system build deps
-        run: |
-          sudo rm -f /etc/apt/sources.list.d/microsoft*.list /etc/apt/sources.list.d/azure*.list; sudo apt-get update
-          sudo apt-get install -y attr cryptsetup-bin libcap-ng-dev lld
+      - uses: ./.github/actions/apt-deps
+        with:
+          packages: attr cryptsetup-bin libcap-ng-dev lld
 
       - uses: ./.github/actions/install-zigbuild
 
@@ -832,10 +839,9 @@ jobs:
         with:
           targets: wasm32-wasip1
 
-      - name: Install system build deps
-        run: |
-          sudo rm -f /etc/apt/sources.list.d/microsoft*.list /etc/apt/sources.list.d/azure*.list; sudo apt-get update
-          sudo apt-get install -y attr cryptsetup-bin libcap-ng-dev lld
+      - uses: ./.github/actions/apt-deps
+        with:
+          packages: attr cryptsetup-bin libcap-ng-dev lld
 
       - uses: ./.github/actions/install-zigbuild
 
@@ -873,10 +879,9 @@ jobs:
         with:
           components: rust-src
 
-      - name: Install system build deps
-        run: |
-          sudo rm -f /etc/apt/sources.list.d/microsoft*.list /etc/apt/sources.list.d/azure*.list; sudo apt-get update
-          sudo apt-get install -y libcap-ng-dev lld
+      - uses: ./.github/actions/apt-deps
+        with:
+          packages: libcap-ng-dev lld
 
       # This lane compiles a different crate set from the shared workspace key
       # and builds bpf-linker from source, so it gets its own entry rather than
@@ -953,10 +958,9 @@ jobs:
       - name: Install stable Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Install system build deps
-        run: |
-          sudo rm -f /etc/apt/sources.list.d/microsoft*.list /etc/apt/sources.list.d/azure*.list; sudo apt-get update
-          sudo apt-get install -y libcap-ng-dev lld
+      - uses: ./.github/actions/apt-deps
+        with:
+          packages: libcap-ng-dev lld
 
       # Building the root package runs `crates/mvm-cli/build.rs`, which
       # cross-compiles the embedded host binaries and needs the pinned zig.
