@@ -703,6 +703,18 @@ impl ApprovalLedger {
     /// state it reached. Timestamps are deliberately excluded — two ledgers
     /// that made the same decisions hash alike however long ago they were
     /// asked, so a session cannot refuse itself for the passage of time.
+    ///
+    /// Not covered: `resource_digest`, `policy_digest`, `admission_plan_digest`,
+    /// and `authorized_operators` play no part in the hash. That is in spec —
+    /// the head names the decision, not every input that produced it — but is
+    /// worth stating plainly since this is a persistence contract the moment a
+    /// caller records one.
+    ///
+    /// The hash is order-dependent: records fold in `self.records`' iteration
+    /// order. That is safe today because records are append-only (`request`
+    /// pushes, nothing reorders or removes), but a future rebuild path that
+    /// reconstructed a ledger's records in a different order would move the
+    /// head even though the decisions were identical.
     #[must_use]
     pub fn head(&self) -> [u8; 32] {
         let mut hasher = Sha256::new();
@@ -1157,6 +1169,12 @@ mod tests {
 
     #[test]
     fn an_empty_ledger_has_a_stable_head() {
+        // On its own this would pass against a `head()` that returns a fixed
+        // constant — it only pins that two independently constructed empty
+        // ledgers agree, not that `head()` is a function of any real input.
+        // `a_decision_moves_the_head` is what rules out constancy; the
+        // `_do_not_collide` / `_differ` tests below are what rule out a hash
+        // that is a function of state alone.
         let a = ApprovalLedger::new(AgentSessionId::parse("sess-a").unwrap());
         let b = ApprovalLedger::new(AgentSessionId::parse("sess-a").unwrap());
         assert_eq!(a.head(), b.head());
@@ -1298,6 +1316,108 @@ mod tests {
             ledger_a.head(),
             ledger_b.head(),
             "an approved and a denied request over the same capability must not collide"
+        );
+    }
+
+    #[test]
+    fn a_different_approval_id_moves_the_head() {
+        // The fence's own motivating scenario: same record count, same
+        // capability, same (pending) state — only the identity of *which*
+        // approval is pending differs. Session parks with X pending over
+        // capability C; while parked X is canceled and a fresh Y is opened
+        // pending over the same C. If `head()` did not cover `approval_id`,
+        // those two ledgers would hash identically and a resume would not
+        // notice the swap.
+        let (request, evaluation) = ask_evaluation();
+
+        let mut journal_a = journal();
+        let mut ledger_a = ApprovalLedger::new(session());
+        let approval_a = approval_request(&request, &evaluation);
+        ledger_a
+            .request(&mut journal_a, &evaluation, approval_a.clone(), 1_000)
+            .expect("request approval a");
+
+        let mut journal_b = journal();
+        let mut ledger_b = ApprovalLedger::new(session());
+        let mut approval_b = approval_request(&request, &evaluation);
+        approval_b.approval_id = approval_id("approval-2");
+        approval_b.idempotency_key = IdempotencyKey::parse("approval-retry-2").expect("key");
+        ledger_b
+            .request(&mut journal_b, &evaluation, approval_b.clone(), 1_000)
+            .expect("request approval b");
+
+        assert_ne!(
+            ledger_a.head(),
+            ledger_b.head(),
+            "two different pending approval ids over the same capability must not collide"
+        );
+    }
+
+    #[test]
+    fn a_different_capability_moves_the_head() {
+        // Same approval id, same (pending) state — only the capability the
+        // approval was asked over differs.
+        let (request_a, evaluation_a) = ask_evaluation();
+        let approval_a = approval_request(&request_a, &evaluation_a);
+        let mut journal_a = journal();
+        let mut ledger_a = ApprovalLedger::new(session());
+        ledger_a
+            .request(&mut journal_a, &evaluation_a, approval_a.clone(), 1_000)
+            .expect("request approval a");
+
+        let request_b = request(PolicyCapability::NetworkConnect, [4; 32]);
+        let policy_b = PolicySet::new(vec![PolicyRule {
+            capability: PolicyCapability::NetworkConnect,
+            resource_digest: None,
+            priority: 10,
+            effect: PolicyEffect::Ask,
+        }])
+        .expect("policy");
+        let evaluation_b = policy_b.evaluate(&request_b);
+        assert!(matches!(evaluation_b.decision, PolicyDecision::Ask(_)));
+        let approval_b = approval_request(&request_b, &evaluation_b);
+        let mut journal_b = journal();
+        let mut ledger_b = ApprovalLedger::new(session());
+        ledger_b
+            .request(&mut journal_b, &evaluation_b, approval_b.clone(), 1_000)
+            .expect("request approval b");
+
+        assert_ne!(
+            ledger_a.head(),
+            ledger_b.head(),
+            "the same approval id over two different capabilities must not collide"
+        );
+    }
+
+    #[test]
+    fn a_different_session_id_moves_the_head() {
+        // Same approval id, same capability, same (pending) state — only the
+        // owning session differs.
+        let (request_shape, evaluation) = ask_evaluation();
+
+        let mut journal_a = journal();
+        let mut ledger_a = ApprovalLedger::new(session());
+        let approval_a = approval_request(&request_shape, &evaluation);
+        ledger_a
+            .request(&mut journal_a, &evaluation, approval_a.clone(), 1_000)
+            .expect("request approval a");
+
+        let session_b = AgentSessionId::parse("approval-session-b").expect("valid session");
+        let mut journal_b =
+            AgentSessionJournal::open(session_b.clone(), [1; 32], 1, RetentionPolicy::default())
+                .expect("open")
+                .0;
+        let mut ledger_b = ApprovalLedger::new(session_b.clone());
+        let mut approval_b = approval_request(&request_shape, &evaluation);
+        approval_b.session_id = session_b.clone();
+        ledger_b
+            .request(&mut journal_b, &evaluation, approval_b.clone(), 1_000)
+            .expect("request approval b");
+
+        assert_ne!(
+            ledger_a.head(),
+            ledger_b.head(),
+            "the same approval decision under two different sessions must not collide"
         );
     }
 }
