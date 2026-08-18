@@ -332,14 +332,42 @@ impl AgentSessionStore {
     /// superseded record, but the load-then-write pair is not a
     /// compare-and-swap, so it does not serialize two callers racing on the
     /// same on-disk generation. See `park`'s doc for the full explanation.
+    ///
+    /// `current_head` is also compared against the head recorded at park
+    /// time: a difference means the approval ledger moved while the session
+    /// was parked, so the grants this resume would run under are not the
+    /// ones it was admitted for, and it is refused rather than silently
+    /// inherited. A session parked with no recorded head (`None`) is not
+    /// fenced by this check — there is nothing to compare against. That is a
+    /// real gap, not an oversight: whoever records a head at park time closes
+    /// it, and until then such a session resumes on the generation fence
+    /// alone.
     pub fn resume(
         &self,
         id: &AgentSessionId,
         expected_generation: u64,
+        current_head: Option<&mvm_core::checkpoint::ApprovalHead>,
         now_unix: u64,
     ) -> Result<AgentSessionRecord> {
         let current = self.load(id)?;
         fence(&current, expected_generation)?;
+        // Refuse when the ledger moved while the session was parked: the grants
+        // it would resume under are not the ones it was admitted for, and the
+        // caller should re-admit deliberately rather than inherit silently.
+        //
+        // A session parked with no recorded head is not fenced here — there is
+        // nothing to compare against. That is a real gap, not an oversight:
+        // whoever records a head at park time closes it, and until then such a
+        // session resumes on the generation fence alone.
+        if let Some(recorded) = current.approval_head.as_ref() {
+            match current_head {
+                Some(now) if now == recorded => {}
+                _ => anyhow::bail!(
+                    "session {} was parked under a different approval head; re-admit before resuming",
+                    current.session_id.as_str()
+                ),
+            }
+        }
         let live = current.resume(now_unix)?;
         self.write(&live)?;
         Ok(live)
@@ -692,7 +720,9 @@ mod tests {
             )
             .unwrap();
 
-        let live = store.resume(&rec.session_id, 1, 1_755_000_200).unwrap();
+        let live = store
+            .resume(&rec.session_id, 1, None, 1_755_000_200)
+            .unwrap();
         assert_eq!(live.generation, 2);
         assert_eq!(store.load(&rec.session_id).unwrap().generation, 2);
     }
@@ -706,7 +736,7 @@ mod tests {
         store
             .park(&rec.session_id, 1, park_input(ParkReason::Idle), 100)
             .unwrap();
-        store.resume(&rec.session_id, 1, 200).unwrap(); // now generation 2
+        store.resume(&rec.session_id, 1, None, 200).unwrap(); // now generation 2
 
         // A caller still holding generation 1 must not be able to park it.
         let err = store
@@ -729,7 +759,7 @@ mod tests {
         store.write(&rec).unwrap();
 
         // Resuming an active session is refused; the record must be unchanged.
-        assert!(store.resume(&rec.session_id, 1, 400).is_err());
+        assert!(store.resume(&rec.session_id, 1, None, 400).is_err());
         let after = store.load(&rec.session_id).unwrap();
         assert_eq!(after.state, SandboxResidency::Active);
         assert_eq!(after.generation, 1);
@@ -830,5 +860,92 @@ mod tests {
         assert_eq!(resumed.parent_checkpoint, rec.parent_checkpoint);
         assert_eq!(resumed.journal_cursor, rec.journal_cursor);
         assert_eq!(resumed.approval_head, rec.approval_head);
+    }
+
+    fn head_of(byte: &str) -> mvm_core::checkpoint::ApprovalHead {
+        mvm_core::checkpoint::ApprovalHead::parse(format!("sha256:{}", byte.repeat(32))).unwrap()
+    }
+
+    #[test]
+    fn a_resume_under_the_recorded_head_is_allowed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = AgentSessionStore::at(tmp.path());
+        let rec = record("sess-alpha");
+        store.write(&rec).unwrap();
+        let head = head_of("ab");
+        store
+            .park(
+                &rec.session_id,
+                1,
+                ParkInput {
+                    reason: ParkReason::ApprovalWait,
+                    journal_cursor: 5,
+                    approval_head: Some(head.clone()),
+                },
+                100,
+            )
+            .unwrap();
+
+        let live = store.resume(&rec.session_id, 1, Some(&head), 200).unwrap();
+        assert_eq!(live.generation, 2);
+        assert_eq!(live.journal_cursor, 5, "the cursor survives the resume");
+    }
+
+    #[test]
+    fn a_resume_is_refused_when_the_ledger_moved_while_parked() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = AgentSessionStore::at(tmp.path());
+        let rec = record("sess-alpha");
+        store.write(&rec).unwrap();
+        store
+            .park(
+                &rec.session_id,
+                1,
+                ParkInput {
+                    reason: ParkReason::ApprovalWait,
+                    journal_cursor: 5,
+                    approval_head: Some(head_of("ab")),
+                },
+                100,
+            )
+            .unwrap();
+
+        let err = store
+            .resume(&rec.session_id, 1, Some(&head_of("cd")), 200)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("approval"), "unexpected error: {err}");
+        assert_eq!(
+            store.load(&rec.session_id).unwrap().state,
+            SandboxResidency::Hibernated,
+            "a refused resume must leave the session parked"
+        );
+    }
+
+    #[test]
+    fn a_session_parked_without_a_head_resumes_unfenced() {
+        // Documents the gap deliberately: nothing was recorded to compare
+        // against, so this resume is not fenced on approvals.
+        let tmp = tempfile::tempdir().unwrap();
+        let store = AgentSessionStore::at(tmp.path());
+        let rec = record("sess-alpha");
+        store.write(&rec).unwrap();
+        store
+            .park(
+                &rec.session_id,
+                1,
+                ParkInput {
+                    reason: ParkReason::Idle,
+                    journal_cursor: 0,
+                    approval_head: None,
+                },
+                100,
+            )
+            .unwrap();
+        assert!(
+            store
+                .resume(&rec.session_id, 1, Some(&head_of("cd")), 200)
+                .is_ok()
+        );
     }
 }
