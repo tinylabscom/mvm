@@ -133,8 +133,22 @@ Work items:
       and host-set refusal are already covered at the endpoint by
       `substitutes_real_credential_for_a_bound_destination` and
       `unbound_destination_is_refused_without_decrypting`.
-- [ ] A2 — surface it on the fork CLI. Test: CLI parsing + help text per the
-      repo's `tests/cli.rs` convention.
+- [x] A2 — `--secret VAR` / `--secret VAR=ADDRESS` on `vm checkpoint fork`,
+      repeatable. Wired to **both** fork arms: vm_full always admits a plan, and
+      fs_quick admits one under `--boot`, so the flag means the same thing
+      whichever class the parent is. Without `--boot` an fs_quick fork carries
+      no plan at all and the help text says so.
+
+      `fork()` moved to a params struct (`ForkCmdParams`) — it was already at
+      seven positional arguments. `revert` reuses `fork()` verbatim as its
+      anti-bypass guarantee and declares nothing, preserving its behaviour.
+
+      **Fixed a defect in A1 as committed:** `admit_forked_child` set `secrets`
+      while leaving `secret_release` at `SecretReleasePolicy::default()`, which
+      is `None` — "no secrets may be released". A child would have carried
+      bindings nothing could release. Both fork arms now derive it from the set
+      via the existing `secret_release_for_bindings` (empty → `None`, non-empty
+      → `PlanBound`) rather than defaulting.
 - [ ] A3 — cross-tenant declaration refused at admission (this falls out of
       `BindingStore` tenant scoping; assert it rather than assume it).
 - [ ] A4 — `checkpoint.forked` records the child's binding names + hosts, never

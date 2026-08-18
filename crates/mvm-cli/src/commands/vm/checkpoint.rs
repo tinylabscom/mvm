@@ -147,6 +147,22 @@ pub(in crate::commands) enum CheckpointCmd {
         /// Inherits from the parent plan when omitted.
         #[arg(long)]
         memory: Option<String>,
+        /// Declare a secret binding for the forked child (format: `VAR` or
+        /// `VAR=ADDRESS`). `VAR` is the name the workload sees; `ADDRESS` is the
+        /// keystore address it resolves from, defaulting to `VAR`.
+        ///
+        /// Declared, never inherited: a fork child carries only what is named
+        /// here, so its capability is readable from its own plan. The
+        /// destination allow-list lives in the operator's binding
+        /// (`mvmctl secret set`), so naming a secret the operator has not bound
+        /// grants nothing. Repeatable.
+        ///
+        /// A vm_full fork always admits a plan, so bindings always apply. An
+        /// fs_quick fork admits one only with `--boot`; without it the fork is
+        /// a rootfs clone carrying no plan, and there is nothing for a binding
+        /// to ride on.
+        #[arg(long = "secret")]
+        secret: Vec<String>,
         /// Output the fork result as JSON.
         #[arg(long)]
         json: bool,
@@ -197,16 +213,18 @@ pub(in crate::commands) fn run_checkpoint(_cli: &Cli, args: CheckpointArgs) -> R
             hypervisor,
             cpus,
             memory,
+            secret,
             json,
-        } => fork(
-            &id,
+        } => fork(ForkCmdParams {
+            id: &id,
             new_id,
             boot,
-            &hypervisor,
+            hypervisor: &hypervisor,
             cpus,
-            memory.as_deref(),
+            memory: memory.as_deref(),
+            declared_secrets: &parse_declared_secrets(&secret)?,
             json,
-        ),
+        }),
         CheckpointCmd::Diff { a, b, json } => diff(&a, &b, json),
         CheckpointCmd::Verify { id, json } => lineage::verify(&id, json),
     }
@@ -821,15 +839,58 @@ fn restore(id: &str, json: bool) -> Result<()> {
     Ok(())
 }
 
-fn fork(
-    id: &str,
+/// Inputs for [`fork`].
+struct ForkCmdParams<'a> {
+    id: &'a str,
     new_id: Option<String>,
     boot: bool,
-    hypervisor: &str,
+    hypervisor: &'a str,
     cpus: Option<u32>,
-    memory: Option<&str>,
+    memory: Option<&'a str>,
+    declared_secrets: &'a [mvm_core::plan::SecretBinding],
     json: bool,
-) -> Result<()> {
+}
+
+/// Parse `--secret` values into plan bindings.
+///
+/// `VAR` binds the workload-visible name to the keystore address of the same
+/// name; `VAR=ADDRESS` separates them. Nothing here contacts the keystore or
+/// resolves a value — a binding is a reference, and an address that names no
+/// secret simply fails to resolve later rather than granting anything.
+fn parse_declared_secrets(values: &[String]) -> Result<Vec<mvm_core::plan::SecretBinding>> {
+    values
+        .iter()
+        .map(|raw| {
+            let (var, address) = match raw.split_once('=') {
+                Some((var, address)) => (var.trim(), address.trim()),
+                None => (raw.trim(), raw.trim()),
+            };
+            if var.is_empty() || address.is_empty() {
+                anyhow::bail!(
+                    "invalid --secret {raw:?}: expected VAR or VAR=ADDRESS with both non-empty"
+                );
+            }
+            Ok(mvm_core::plan::SecretBinding {
+                name: var.to_string(),
+                source: mvm_core::plan::SecretSource::Keystore {
+                    address: address.to_string(),
+                },
+            })
+        })
+        .collect()
+}
+
+fn fork(p: ForkCmdParams<'_>) -> Result<()> {
+    let ForkCmdParams {
+        id,
+        new_id,
+        boot,
+        hypervisor,
+        cpus,
+        memory,
+        declared_secrets,
+        json,
+    } = p;
     let checkpoint = validated_checkpoint_id(id)?;
     let store = CheckpointStore::open();
     // Pick the fork arm by the parent's class: vm_full carries memory and must
@@ -847,7 +908,7 @@ fn fork(
                 json,
                 // No CLI surface declares bindings yet, so a fork declares
                 // none — exactly the prior behaviour.
-                declared_secrets: &[],
+                declared_secrets,
             })
         }
         CheckpointClass::FsQuick => fork_fs_quick_arm(ForkFsQuickArmParams {
@@ -858,6 +919,7 @@ fn fork(
             hypervisor,
             cpus_override: cpus,
             memory_override: memory,
+            declared_secrets,
             json,
         }),
     }
@@ -873,6 +935,9 @@ struct ForkFsQuickArmParams<'a> {
     hypervisor: &'a str,
     cpus_override: Option<u32>,
     memory_override: Option<&'a str>,
+    /// Declared for the child when `--boot` admits one. A fs_quick fork without
+    /// `--boot` admits no plan, so there is nothing for these to ride on.
+    declared_secrets: &'a [mvm_core::plan::SecretBinding],
     json: bool,
 }
 
@@ -923,6 +988,7 @@ fn fork_fs_quick_arm(p: ForkFsQuickArmParams<'_>) -> Result<()> {
             hypervisor: p.hypervisor,
             cpus_override: p.cpus_override,
             memory_override: p.memory_override,
+            declared_secrets: p.declared_secrets,
             emit_text: !p.json,
         })?;
     }
@@ -970,6 +1036,9 @@ struct BootForkedChildParams<'a> {
     hypervisor: &'a str,
     cpus_override: Option<u32>,
     memory_override: Option<&'a str>,
+    /// Declared for this child's plan. A fs_quick fork admits a plan only under
+    /// `--boot`, which is this function, so this is where they land.
+    declared_secrets: &'a [mvm_core::plan::SecretBinding],
     emit_text: bool,
 }
 
@@ -1026,8 +1095,10 @@ fn boot_forked_child(p: BootForkedChildParams<'_>) -> Result<()> {
         cpus,
         mem_mib,
         seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
-        secret_release: mvm_core::plan::SecretReleasePolicy::default(),
-        secrets: Vec::new(),
+        secret_release: crate::commands::vm::managed_secrets::secret_release_for_bindings(
+            p.declared_secrets,
+        ),
+        secrets: p.declared_secrets.to_vec(),
         no_supervisor: false,
         ledger: &ledger,
         keys_dir: None,
@@ -1393,6 +1464,66 @@ mod tests {
 
         let verbs = parent_agent_verb_override(&meta.id, &store);
         assert_eq!(verbs, vec!["ping", "run-entrypoint"]);
+    }
+
+    #[test]
+    fn bare_secret_name_binds_var_and_address_alike() {
+        let got = parse_declared_secrets(&["STRIPE_KEY".to_string()]).unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].name, "STRIPE_KEY");
+        assert_eq!(
+            got[0].source,
+            mvm_core::plan::SecretSource::Keystore {
+                address: "STRIPE_KEY".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn var_equals_address_separates_the_two() {
+        let got = parse_declared_secrets(&["DB_PASSWORD=prod/db/password".to_string()]).unwrap();
+        assert_eq!(got[0].name, "DB_PASSWORD");
+        assert_eq!(
+            got[0].source,
+            mvm_core::plan::SecretSource::Keystore {
+                address: "prod/db/password".to_string()
+            }
+        );
+    }
+
+    /// An empty half is a typo, not an empty binding: `=addr` names no variable
+    /// and `VAR=` names no address, and either would admit a binding that can
+    /// never resolve.
+    #[test]
+    fn an_empty_half_is_refused() {
+        for bad in ["", "=addr", "VAR=", "  =  "] {
+            assert!(
+                parse_declared_secrets(&[bad.to_string()]).is_err(),
+                "{bad:?} must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn declaring_nothing_parses_to_nothing() {
+        assert!(parse_declared_secrets(&[]).unwrap().is_empty());
+    }
+
+    /// The release policy is derived from the set, not defaulted. A plan that
+    /// listed bindings under the default `None` would declare capability it
+    /// could never release.
+    #[test]
+    fn declared_bindings_make_the_release_policy_plan_bound() {
+        use crate::commands::vm::managed_secrets::secret_release_for_bindings;
+
+        let none = secret_release_for_bindings(&[]);
+        assert_eq!(none, mvm_core::plan::SecretReleasePolicy::None);
+
+        let declared = parse_declared_secrets(&["TOKEN".to_string()]).unwrap();
+        assert_eq!(
+            secret_release_for_bindings(&declared),
+            mvm_core::plan::SecretReleasePolicy::PlanBound
+        );
     }
 
     #[test]

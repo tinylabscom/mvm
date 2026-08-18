@@ -80,12 +80,60 @@ trusting the recorded value, so a fork test needs a real blob on disk whose
 digest matches the checkpoint record. A `meta.json` edited to claim a different
 sha cannot redirect what gets admitted.
 
+## A2 — the CLI surface
+
+`--secret VAR` / `--secret VAR=ADDRESS` on `vm checkpoint fork`, repeatable.
+`parse_declared_secrets` refuses an empty half on either side; nothing contacts
+the keystore at parse time, because a binding is a reference and an unbound name
+simply fails to resolve later rather than granting anything.
+
+Wired to both fork arms. vm_full always admits a plan; fs_quick admits one only
+under `--boot`, and the help text states that asymmetry rather than leaving the
+flag silently inert for half its inputs. `revert`, which reuses `fork()`
+verbatim as its anti-bypass guarantee, declares nothing.
+
+`fork()` moved to `ForkCmdParams` — already at seven positional arguments, so an
+eighth would have tripped the banned `too_many_arguments`.
+
+**Fixed a defect in A1 as committed:** `secret_release` was left at
+`SecretReleasePolicy::default()` = `None`, "no secrets may be released", while
+`secrets` was populated. A child would have carried a binding list nothing could
+release. Both arms now derive the policy from the set via the existing
+`secret_release_for_bindings` helper.
+
+Tests: `bare_secret_name_binds_var_and_address_alike`,
+`var_equals_address_separates_the_two`, `an_empty_half_is_refused`,
+`declaring_nothing_parses_to_nothing`,
+`declared_bindings_make_the_release_policy_plan_bound`. Mutation-checked by
+disabling the refusal: `an_empty_half_is_refused` goes red and the other four
+stay green, since they do not exercise that path.
+
+**A mutation check that nearly passed for the wrong reason:** the first run
+filtered on `secret`, which does not match three of the five test names, so the
+test that should have caught the disabled refusal never ran and the mutant
+looked clean. Re-run with explicit filters. A filtered mutation check proves
+nothing unless the filter is confirmed to include the test that must fail.
+
 ## Not delivered
 
-A1 is delivered; A2–A6 are not. A2 (the CLI surface) is what makes the
-plumbing reachable — until it lands, every caller declares `&[]` and no user can
-declare a binding, so the capability gap is **not yet closed**. A6 (refuse an
-undeclared drop) is the W0 refusal arm and comes last.
+W0, A1 and A2 are delivered; A3-A6 are not.
+
+With A2 the gap is closed for the path it covers: a user can declare bindings on
+`vm checkpoint fork` and the child is admitted carrying them. What remains is
+narrower than it was, and worth naming precisely rather than implying the whole
+feature is done:
+
+- A3 — assert cross-tenant declaration is refused. This falls out of
+  `BindingStore` tenant scoping today, but it is assumed rather than tested.
+- A4 — record the child's binding names + hosts on `checkpoint.forked`.
+- A5 — the `machine warm-restore` entry point (`machine/checkpoint.rs`) still
+  passes `&[]`; only the `vm checkpoint fork` verb takes the flag.
+- A6 — refuse an undeclared drop (W0's refusal arm).
+
+**Not verified end-to-end.** No booted VM has resolved a declared binding
+through a live substitution endpoint. The tests here assert what reaches the
+signed plan; the endpoint's own suite covers resolution and host-set refusal
+separately. Nothing has yet exercised the two together.
 
 Option B (inherit from the checkpoint) remains designed and deliberately
 deferred.

@@ -361,7 +361,13 @@ fn admit_forked_child(p: &AdmitForkedChildParams<'_>) -> Result<AdmittedForkChil
             cpus: user_cfg.default_cpus,
             mem_mib: user_cfg.default_memory_mib as u64,
             seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
-            secret_release: mvm_core::plan::SecretReleasePolicy::default(),
+            // Derived from the set, never defaulted: `SecretReleasePolicy`
+            // defaults to `None` — "no secrets may be released" — so a child
+            // admitted with declared bindings under the default would carry a
+            // list nothing could ever release.
+            secret_release: crate::commands::vm::managed_secrets::secret_release_for_bindings(
+                p.declared_secrets,
+            ),
             secrets: p.declared_secrets.to_vec(),
             no_supervisor: false,
             ledger: &ledger,
