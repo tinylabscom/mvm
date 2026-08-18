@@ -63,11 +63,17 @@ export function ExecutionContract() {
     <Section id="execution-contract" rule>
       <Reveal>
         <Eyebrow>The contract</Eyebrow>
-        <h2 className="mb-4 lowercase font-display text-2xl font-bold leading-tight text-title sm:text-3xl">
+        {/* Inline margins, not margin utilities: Starlight's unlayered
+            stylesheet beats layered utilities on this page (see
+            Positioning.tsx). */}
+        <h2
+          className="lowercase font-display text-2xl font-bold leading-tight text-title sm:text-3xl"
+          style={{ marginBottom: "1.5rem" }}
+        >
           the box is table stakes.{" "}
           <span className="text-accent-2">the contract is the product.</span>
         </h2>
-        <p className="mb-2 max-w-2xl text-base leading-relaxed text-body">
+        <p className="max-w-2xl text-base leading-relaxed text-body">
           Anyone can put an agent in a microVM. A security team approves the
           contract: what may execute, with what authority, and what proves it.
           Six layers, enforced and witnessed — not asserted.
@@ -80,7 +86,7 @@ export function ExecutionContract() {
           Positioning.tsx). */}
       <div
         className="grid gap-x-8 gap-y-6 sm:grid-cols-2"
-        style={{ marginTop: "2.5rem" }}
+        style={{ marginTop: "3rem" }}
       >
         {LAYERS.map((layer, i) => (
           <Reveal key={layer.num} delay={i * 60}>

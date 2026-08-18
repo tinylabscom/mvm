@@ -80,14 +80,20 @@ export function Quickstart() {
               <br />
               running microVM out.
             </h2>
-            <p className="mt-4 max-w-sm text-base leading-relaxed text-body">
+            {/* Inline margins, not mt-*: Starlight's unlayered stylesheet
+                beats layered utilities on this page (see Positioning.tsx). */}
+            <p
+              className="max-w-sm text-base leading-relaxed text-body"
+              style={{ marginTop: "1.5rem" }}
+            >
               mvmctl reads the decorator statically, builds a rootfs inside a
               builder VM, and boots the workload in its own kernel &mdash;
               nothing you run here ever executes on your host.
             </p>
             <a
               href={`${base}getting-started/quickstart/`}
-              className="mt-4 inline-block text-sm text-accent underline underline-offset-2 hover:text-accent/80"
+              className="inline-block text-sm text-accent underline underline-offset-2 hover:text-accent/80"
+              style={{ marginTop: "2rem" }}
             >
               Read the full quickstart guide
             </a>
