@@ -51,8 +51,16 @@ pub struct AgentSessionRecord {
     pub state: SandboxResidency,
     #[serde(default)]
     pub members: Vec<String>,
+    /// Content-addressed resume point, not a mutable checkpoint name — the
+    /// same rule `CheckpointMeta.parent`'s doc states: a hash-link lets a
+    /// descendant detect any post-seal edit of the checkpoint it resumes
+    /// from, where a name would not. Typing this `CheckpointDigest` rather
+    /// than `CheckpointId` also gets deserialize-time shape validation for
+    /// free (`sha256:<64-hex>`), where `CheckpointId` derives plain
+    /// `Deserialize` and would let any unvalidated string off disk be joined
+    /// into a store root. `CheckpointStore::by_digest` resolves it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub parent_checkpoint: Option<mvm_core::checkpoint::CheckpointId>,
+    pub parent_checkpoint: Option<mvm_core::checkpoint::CheckpointDigest>,
     pub created_unix: u64,
     pub updated_unix: u64,
 }
@@ -65,8 +73,8 @@ pub struct AgentSessionStore {
 
 impl AgentSessionStore {
     /// Open the host-wide store.
-    pub fn open() -> Result<Self> {
-        Ok(Self::at(mvm_core::config::agent_sessions_dir()))
+    pub fn open() -> Self {
+        Self::at(mvm_core::config::agent_sessions_dir())
     }
 
     /// Open a store rooted anywhere. Tests use this; production uses `open`.
@@ -108,7 +116,10 @@ impl AgentSessionStore {
             .with_context(|| format!("parse session record {}", path.display()))
     }
 
-    /// Every readable record, sorted by session id for a stable listing.
+    /// Every record that parses cleanly, sorted by session id for a stable
+    /// listing. A read or IO error on the store root itself is returned, but
+    /// the first record that fails to parse aborts the whole listing rather
+    /// than being skipped — mirrors `CheckpointStore::list`.
     pub fn list(&self) -> Result<Vec<AgentSessionRecord>> {
         let mut out = Vec::new();
         let entries = match std::fs::read_dir(&self.root) {
@@ -219,5 +230,17 @@ mod tests {
             .map(|r| r.session_id.as_str().to_string())
             .collect();
         assert_eq!(ids, vec!["sess-alpha"]);
+    }
+
+    #[test]
+    fn a_record_with_a_malformed_parent_checkpoint_digest_fails_to_deserialize() {
+        // `CheckpointDigest` is `#[serde(try_from = "String")]` and validates
+        // the `sha256:<64-hex>` shape at deserialize time. A `CheckpointId`
+        // field would have let any string off disk through unchecked.
+        let rec = record("sess-alpha");
+        let mut value = serde_json::to_value(&rec).unwrap();
+        value["parent_checkpoint"] = serde_json::json!("not-a-checkpoint-digest");
+        let json = serde_json::to_string(&value).unwrap();
+        assert!(serde_json::from_str::<AgentSessionRecord>(&json).is_err());
     }
 }

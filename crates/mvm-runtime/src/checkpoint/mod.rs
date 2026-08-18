@@ -1197,7 +1197,7 @@ mod tests {
     use super::*;
     use chrono::{Duration, Utc};
     use mvm_core::checkpoint::{
-        CheckpointClass, CheckpointDigest, CheckpointId, CheckpointMeta, ContentBlob,
+        ApprovalHead, CheckpointClass, CheckpointDigest, CheckpointId, CheckpointMeta, ContentBlob,
         SessionBinding,
     };
 
@@ -1366,7 +1366,7 @@ mod tests {
             .unwrap(),
             generation: 2,
             journal_cursor: 40,
-            approval_head: CheckpointDigest::parse(format!("sha256:{}", "ab".repeat(32))).unwrap(),
+            approval_head: ApprovalHead::parse(format!("sha256:{}", "ab".repeat(32))).unwrap(),
         }
     }
 

@@ -205,6 +205,93 @@ pub struct DeviceAnchors {
     pub vsock: std::path::PathBuf,
 }
 
+/// The approval-ledger head a [`SessionBinding`] was admitted under.
+///
+/// Shares the `sha256:<64-hex>` wire shape with [`CheckpointDigest`] — both
+/// are heads of a hash chain — but an approval-ledger head is deliberately
+/// not a `CheckpointDigest`. `CheckpointDigest`'s own doc explains why the
+/// shape is shared with no conversion: so the boundary between unrelated
+/// hash-chain heads is a type-system property, not a string check. Without
+/// this newtype, `approval_head: CheckpointDigest` would let an approval head
+/// be assigned wherever a checkpoint content-address is expected (or the
+/// reverse) with the compiler saying nothing — and because `SessionBinding`
+/// sits inside `CheckpointMeta`'s digest input, whichever encoding shipped
+/// first would freeze into every sealed record's `meta_digest`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct ApprovalHead(String);
+
+impl ApprovalHead {
+    /// The fixed hash-axis prefix every approval head carries.
+    pub const PREFIX: &'static str = "sha256:";
+
+    /// Validates and wraps a `sha256:<64 lowercase hex>` string. Rejects any
+    /// other prefix, wrong length, or non-lowercase-hex content.
+    pub fn parse(value: impl Into<String>) -> Result<Self, ApprovalHeadParseError> {
+        use crate::digest_shape::Sha256PrefixedShape;
+        let value = value.into();
+        match crate::digest_shape::validate_sha256_prefixed(&value) {
+            Sha256PrefixedShape::Ok => Ok(Self(value)),
+            Sha256PrefixedShape::MissingPrefix => Err(ApprovalHeadParseError::MissingPrefix(value)),
+            Sha256PrefixedShape::WrongLength { len } => {
+                Err(ApprovalHeadParseError::WrongLength { len })
+            }
+            Sha256PrefixedShape::NonHex { ch } => Err(ApprovalHeadParseError::NonHex { ch }),
+        }
+    }
+
+    /// Wrap a raw 32-byte digest — the shape `PolicySet::digest` and the
+    /// approval ledger produce — as the `sha256:<64-hex>` wire form.
+    pub fn from_bytes(bytes: &[u8; 32]) -> Self {
+        Self(format!("{}{}", Self::PREFIX, hex::encode(bytes)))
+    }
+
+    /// The `sha256:<64-hex>` string view.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for ApprovalHead {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::str::FromStr for ApprovalHead {
+    type Err = ApprovalHeadParseError;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::parse(s)
+    }
+}
+
+impl TryFrom<String> for ApprovalHead {
+    type Error = ApprovalHeadParseError;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::parse(value)
+    }
+}
+
+impl From<ApprovalHead> for String {
+    fn from(head: ApprovalHead) -> Self {
+        head.0
+    }
+}
+
+/// [`ApprovalHead::parse`] / [`ApprovalHead::from_str`] failure.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum ApprovalHeadParseError {
+    /// The value did not start with `sha256:`.
+    #[error("approval head must start with \"sha256:\", got {0:?}")]
+    MissingPrefix(String),
+    /// The hex portion (after the prefix) was not exactly 64 characters.
+    #[error("approval head hex must be exactly 64 chars, got {len}")]
+    WrongLength { len: usize },
+    /// The hex portion contained a non-lowercase-hex character.
+    #[error("approval head hex must be lowercase 0-9a-f, found {ch:?}")]
+    NonHex { ch: char },
+}
+
 /// The durable agent session a checkpoint is a resume point for.
 ///
 /// `generation` fences a resume: reopening a parked session increments it, so a
@@ -219,7 +306,7 @@ pub struct SessionBinding {
     pub session_id: mvm_contract::protocol::agent_session::AgentSessionId,
     pub generation: u64,
     pub journal_cursor: u64,
-    pub approval_head: CheckpointDigest,
+    pub approval_head: ApprovalHead,
 }
 
 /// On-disk metadata for one checkpoint (`<checkpoints_dir>/<id>/meta.json`).
@@ -1015,7 +1102,7 @@ mod tests {
             .unwrap(),
             generation: 3,
             journal_cursor: 118,
-            approval_head: CheckpointDigest::parse(format!("sha256:{}", "cd".repeat(32))).unwrap(),
+            approval_head: ApprovalHead::parse(format!("sha256:{}", "cd".repeat(32))).unwrap(),
         }
     }
 
@@ -1028,5 +1115,57 @@ mod tests {
 
         let with_extra = json.replace('{', "{\"surprise\":1,");
         assert!(serde_json::from_str::<SessionBinding>(&with_extra).is_err());
+    }
+
+    #[test]
+    fn approval_head_parse_accepts_and_round_trips_serde() {
+        let s = format!("sha256:{}", "b".repeat(64));
+        let d = ApprovalHead::parse(s.clone()).unwrap();
+        assert_eq!(d.as_str(), s);
+        assert_eq!(d.to_string(), s);
+        let via_from_str: ApprovalHead = s.parse().unwrap();
+        assert_eq!(via_from_str, d);
+        let json = serde_json::to_string(&d).unwrap();
+        assert_eq!(json, format!("{:?}", s));
+        let back: ApprovalHead = serde_json::from_str(&json).unwrap();
+        assert_eq!(d, back);
+    }
+
+    #[test]
+    fn approval_head_parse_rejects_malformed() {
+        let wrong_prefix = format!("md5:{}", "a".repeat(64));
+        assert_eq!(
+            ApprovalHead::parse(wrong_prefix.clone()).unwrap_err(),
+            ApprovalHeadParseError::MissingPrefix(wrong_prefix)
+        );
+        assert_eq!(
+            ApprovalHead::parse(format!("sha256:{}", "a".repeat(63))).unwrap_err(),
+            ApprovalHeadParseError::WrongLength { len: 63 }
+        );
+        assert_eq!(
+            ApprovalHead::parse(format!("sha256:{}", "A".repeat(64))).unwrap_err(),
+            ApprovalHeadParseError::NonHex { ch: 'A' }
+        );
+        let bad = "\"not-an-approval-head\"";
+        assert!(serde_json::from_str::<ApprovalHead>(bad).is_err());
+    }
+
+    #[test]
+    fn approval_head_from_bytes_produces_expected_hex() {
+        let bytes = [0xabu8; 32];
+        let head = ApprovalHead::from_bytes(&bytes);
+        assert_eq!(head.as_str(), format!("sha256:{}", "ab".repeat(32)));
+    }
+
+    /// Same shape, independently re-validated as two distinct types — not a
+    /// conversion. There is no `From`/`TryFrom`/`Deref` between `ApprovalHead`
+    /// and `CheckpointDigest`, so a value of one is never accepted where the
+    /// other is expected; `SessionBinding.approval_head` typed as
+    /// `ApprovalHead` is what makes that a compile-time property.
+    #[test]
+    fn approval_head_shape_overlaps_checkpoint_digest_but_types_never_convert() {
+        let s = format!("sha256:{}", "c".repeat(64));
+        assert!(ApprovalHead::parse(s.clone()).is_ok());
+        assert!(CheckpointDigest::parse(s).is_ok());
     }
 }

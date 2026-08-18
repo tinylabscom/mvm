@@ -35,6 +35,9 @@ pub mod warm_artifact_builder;
 pub mod warm_artifacts;
 pub mod warm_readiness;
 
+/// Filesystem-backed store for durable agent sessions (see [`checkpoint`]
+/// for the analogous per-checkpoint store).
+pub mod agent_session;
 pub mod apple_container;
 pub mod apple_container_backend;
 pub mod artifacts;
@@ -60,9 +63,6 @@ pub mod driver;
 // Firecracker host mechanics moved to mvm-backends::fc; re-exported so
 // `mvm_runtime::firecracker::<name>` keeps resolving for mvm-cli.
 pub use mvm_backends::fc::host as firecracker;
-/// Filesystem-backed store for durable agent sessions (see [`checkpoint`]
-/// for the analogous per-checkpoint store).
-pub mod agent_session;
 pub mod handle_registry;
 /// The HVF end of the checkpoint restore seams (fork into a fresh identity,
 /// same-identity resume) — the counterpart of the capture control the HVF
