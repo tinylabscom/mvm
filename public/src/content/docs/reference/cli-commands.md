@@ -1028,6 +1028,8 @@ running microVM.
 | `mvmctl deploy <ir.json>` | Build, seal, and record a workload into a local deployment directory (`image.tar.gz`, `rootfs.ext4`, `deploy.json`); optionally ship it to mvmd |
 | `mvmctl deploy --from-ir <path>` | Read the Workload IR from a file instead of a positional path or stdin |
 | `mvmctl prepare` | Report whether a verified runtime pack is ready for instant launch |
+| `mvmctl plugin list` | List the coding agents mvm can emit an integration for |
+| `mvmctl plugin install <agent>` | Write that agent's integration files into the project (`--dir`, `--dry-run`, `--force`). Emits config only — mvm runs no agent-facing server |
 | `mvmctl bench` | Measure this host's launch latency against the published budgets, printing each percentile beside the budget it is judged against |
 | `mvmctl bench --lane <lane>` | Pick the lane: `prepared-cold` (default), `prepared-cold-mount-hit`, `mount-miss`, `artifact-miss`, `warm-claim` |
 | `mvmctl bench --runs <n> --warmup <n>` | Sample counts. Below 20 measured runs the report is indicative only, not publication-grade |
