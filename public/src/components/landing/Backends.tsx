@@ -2,13 +2,15 @@ import { Eyebrow } from "./primitives/Eyebrow";
 import { Reveal } from "./primitives/Reveal";
 import { Section } from "./primitives/Section";
 
+// Shipped backends only — this list must track what the CLI actually
+// selects, not the roadmap. Confidential-compute attestation (SEV-SNP/TDX)
+// is explicitly out of scope of the current runtime and must not appear
+// here until it ships.
 const BACKENDS = [
-  { tag: "Primary", name: "Firecracker", primary: true },
-  { tag: "Backend", name: "libkrun" },
-  { tag: "Backend", name: "Incus" },
-  { tag: "Backend", name: "containerd" },
-  { tag: "Attestation", name: "AMD SEV-SNP" },
-  { tag: "Attestation", name: "Intel TDX" },
+  { tag: "Linux / KVM", name: "Firecracker", primary: true },
+  { tag: "macOS 13–25", name: "libkrun" },
+  { tag: "macOS 26+", name: "HVF" },
+  { tag: "Dev / test", name: "QEMU" },
 ];
 
 export function Backends() {
@@ -24,7 +26,7 @@ export function Backends() {
           audit chain runs across every backend MVM supports.
         </p>
       </Reveal>
-      <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-3 lg:grid-cols-6">
+      <div className="grid grid-cols-2 gap-2.5 lg:grid-cols-4">
         {BACKENDS.map((backend, i) => (
           <Reveal key={backend.name} delay={i * 60}>
             <div className="h-full rounded-xl border border-glass-border/60 bg-raised px-4 py-3.5 transition-colors hover:border-accent/50">
