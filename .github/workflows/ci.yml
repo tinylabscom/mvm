@@ -769,6 +769,56 @@ jobs:
         # nextest does not run doctests; gate them separately.
         run: cargo test --workspace --doc
 
+  test-workspace-aarch64:
+    name: Test workspace (aarch64)
+    needs: [scope]
+    if: needs.scope.outputs.code == 'true'
+    # The only lane that executes mvm's aarch64 code paths. Everything else in
+    # this workflow runs on x86_64, so arch-gated code compiles here for the
+    # first time and its tests run for the first time. The sharpest example is
+    # `jailer::seccomp::CONFINED_ROLE_SYSCALLS`, which is a *separate table* per
+    # architecture: a wrong or missing entry in the aarch64 half SIGSYS-kills a
+    # confined role at the moment it starts working, and no x86_64 runner can
+    # see it. `GuestArch::host()`, the bundle arch gate, and the aarch64
+    # `mvm-seccomp-apply` arm are in the same position.
+    #
+    # SCOPE, honestly: this proves the suite passes natively on aarch64. It does
+    # NOT prove a guest boots — GitHub's arm64 runners expose no nested KVM, so
+    # `backend.start()` is unreachable here exactly as it is in every other lane.
+    # A green run here is not a Tier-1 boot witness; that still needs real
+    # hardware.
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: ./.github/actions/free-disk
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@nightly
+
+      - uses: ./.github/actions/apt-deps
+        with:
+          packages: attr cryptsetup-bin libcap-ng-dev lld
+
+      - uses: ./.github/actions/install-zigbuild
+
+      - uses: ./.github/actions/rust-cache
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+
+      - name: Build
+        run: cargo build --all-targets
+
+      - name: Run tests
+        # The workspace suite only. The arch-independent extras Test workspace
+        # also runs (man pages, the addons feature, doctests) are covered on
+        # x86_64 and would only duplicate cost here.
+        run: cargo nextest run --workspace --all-targets
+
   test-release-witness:
     name: Test release profile (overflow + no debug assertions)
     needs: [scope]
