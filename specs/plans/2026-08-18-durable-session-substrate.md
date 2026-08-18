@@ -80,6 +80,15 @@ impl AgentSessionStore {
 }
 ```
 
+> **Naming note.** The task bodies below are the text these tasks were
+> dispatched from, and they predate the rename that landed in the same branch
+> (`sessions_dir` -> `agent_sessions_dir`, module `session` -> `agent_session`,
+> `SessionRecord`/`SessionState`/`SessionStore` -> `AgentSessionRecord`/
+> `SandboxResidency`/`AgentSessionStore`, and `open()` losing its `Result`).
+> They are left as dispatched rather than rewritten, so this document records
+> what was actually asked for. Where they disagree with the interface block
+> above, the interface block is the one later plans consume.
+
 ---
 
 ### Task 1: `sessions_dir()` config helper

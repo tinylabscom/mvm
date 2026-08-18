@@ -109,7 +109,7 @@ needs its own type rather than borrowing one that means something else.
 Carried as `Option<SessionBinding>` on `CheckpointMeta`, and **inside the meta
 digest**. Admitted grants already sit inside that digest
 (`the_admitted_grant_is_inside_the_content_address`,
-`crates/mvm-core/src/checkpoint.rs:699`), so extending it makes the resume
+`crates/mvm-core/src/checkpoint.rs:786`), so extending it makes the resume
 point content-addressed and tamper-evident by the mechanism already in place.
 
 The payoff is that `materialize_child_from_parent`
