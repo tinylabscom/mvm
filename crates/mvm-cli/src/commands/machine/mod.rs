@@ -583,8 +583,8 @@ fn resolve_machine_run_name(args: &MachineRunArgs) -> Result<String> {
 
 /// A writable (`:rw`) host share needs a dev-capable profile, matching the
 /// transient-run gate and the `dev.init` rule.
-fn profile_allows_writable_volume(profile: &str) -> bool {
-    matches!(profile, "dev" | "permissive")
+fn profile_allows_writable_volume(profile: RunProfile) -> bool {
+    profile.grants().writable_shares_when_persistent
 }
 
 /// Validate `--mount`/`--volume` specs and normalise them for storage in a managed
@@ -596,7 +596,7 @@ fn profile_allows_writable_volume(profile: &str) -> bool {
 /// boot path re-validates via `build_machine_volume_cfg`, so this is the
 /// early, user-facing gate, not the only one.
 fn machine_run_volume_specs(args: &MachineRunArgs) -> Result<Vec<String>> {
-    let profile = run_profile_name(args.run.profile);
+    let profile = args.run.profile;
     let mut out = Vec::with_capacity(args.run.mounts.len());
     for raw in &args.run.mounts {
         let spec = super::shared::parse_volume_spec(raw)?;
@@ -1256,12 +1256,7 @@ impl MachineCreateArgs {
 }
 
 fn run_profile_name(profile: RunProfile) -> &'static str {
-    match profile {
-        RunProfile::Restrictive => "restrictive",
-        RunProfile::Standard => "standard",
-        RunProfile::Dev => "dev",
-        RunProfile::Permissive => "permissive",
-    }
+    profile.as_str()
 }
 
 fn load_machine_manifest_source(arg: &Path) -> Result<MachineManifestSource> {
@@ -1343,12 +1338,24 @@ fn sha256_hex(bytes: &[u8]) -> String {
     hex::encode(hasher.finalize())
 }
 
-fn profile_allows_dev_init(profile: &str) -> bool {
-    matches!(profile, "dev" | "permissive")
+fn profile_allows_dev_init(profile: RunProfile) -> bool {
+    profile.grants().dev_guest
 }
 
+/// `dev.init` runs commands in the guest before the workload, so it needs the
+/// dev guest profile.
+///
+/// Takes the persisted name because that is what a stored `MachineSpec`
+/// carries. An unrecognised name refuses: a spec whose profile nobody knows
+/// should stop the boot rather than be treated as whichever preset a string
+/// comparison happened to miss.
 fn enforce_dev_init_profile(profile: &str, init: &[String]) -> Result<()> {
-    if !init.is_empty() && !profile_allows_dev_init(profile) {
+    if init.is_empty() {
+        return Ok(());
+    }
+    let parsed = RunProfile::from_name(profile)
+        .ok_or_else(|| anyhow!("machine spec carries an unrecognised profile {profile:?}"))?;
+    if !profile_allows_dev_init(parsed) {
         bail!(
             "machine dev.init requires a dev-capable profile; use --profile dev or --profile permissive"
         );

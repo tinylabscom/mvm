@@ -46,6 +46,7 @@ pub mod warm_artifact_source {
 
 pub(in crate::commands) use build::ir_input::load_ir_json_workload;
 pub(crate) use shared::{DirShareSpec, parse_dir_share_spec};
+pub(crate) use vm::exec::RunProfile;
 
 #[cfg(test)]
 mod tests;
@@ -109,6 +110,14 @@ pub(in crate::commands) struct Cli {
 
     #[command(subcommand)]
     pub command: Commands,
+}
+
+/// The security profile a run lands in when the user names none.
+///
+/// Read from the parsed default rather than named again, so `doctor` cannot
+/// report a posture the CLI does not actually apply.
+pub(crate) fn default_run_profile() -> RunProfile {
+    vm::exec::RunArgs::default().profile
 }
 
 #[derive(Subcommand, Debug, Clone)]

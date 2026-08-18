@@ -1,8 +1,13 @@
 # Plan 329 — Run-first CLI ergonomics and upstream-sandbox adoption
 
-**Status:** Active. Phase A landed the ADR-027 amendment, the verb visibility
-triage, and `xtask check-cli-help-matches-docs`. Phase 1 landed the shared
-argument core: `RunArgs` is declared once and flattened into both verbs.
+**Status: COMPLETE** (2026-08-18). Every phase is landed or dispositioned with
+its reason recorded. Two were **refused** rather than built — the MCP server
+revival in Phase 6, and Phase 8's install.sh bullet whose premise (the Docker
+backend) no longer exists — and one, the Homebrew tap, is left open as a
+maintainer decision with the evaluation written down. Three phases were found
+to be partly shipped already, and two were specified against verbs that had
+been removed; those corrections are recorded below rather than quietly
+absorbed.
 
 **Bound by:** [ADR-027](../adrs/027-cli-surface-consolidation.md) (amended
 2026-08-17),
@@ -251,19 +256,34 @@ resolver, so the two verbs cannot drift apart on anything else.
 
 ### Phase 3 — Security profile presets
 
-- [ ] Add `--profile {restrictive,standard,dev,permissive}` to `mvmctl run`.
+- [x] Add `--profile {restrictive,standard,dev,permissive}` — already shipped
+      before this plan was written (Corrections 1), and now declared once:
+      `RunProfile::grants()` is the single statement of what each preset
+      permits.
 - [x] Reconcile the default: both verbs now default to `standard`. `machine
       run` defaulted to `dev`, which on the persistent machine-spec path
       admitted a writable (`:rw`) host share without the user asking. It now
       refuses at spec time naming `--profile dev`, so the share fails closed
       and loudly rather than being silently downgraded to read-only.
-- [ ] Surface the effective profile in execution receipts and `mvmctl doctor`.
+- [x] Surface the effective profile. The signed receipt already carried
+      `profile`; `mvmctl doctor` now reports the default a run lands in and
+      what it grants, read off `RunArgs::default()` and `grants()` rather than
+      restated — a doctor line that repeats a policy in prose is one more copy
+      to go stale, and it would go stale claiming a tighter posture than the
+      tool has.
 - [x] Reject `--profile permissive` unless `MVM_ACK_PERMISSIVE_RUN=1` is set
       (already shipped before this plan — see Corrections 1).
-- [ ] Add tests for preset-to-policy mapping and receipt contents.
+- [x] Add tests for preset-to-policy mapping and receipt contents. The
+      mapping is asserted as a table; a companion test pins that permissions
+      only widen as the presets loosen, so "stricter" stays a meaningful word.
+      Both mutation-checked red.
 
-**Acceptance:** Presets work, are documented, and do not create new privileged
-paths beyond the existing policy vocabulary.
+**Acceptance:** Presets work, are documented, and create no new privileged
+path — the vocabulary is unchanged; what changed is that it is now stated once
+instead of four times. Two of those four were stringly-typed
+(`matches!(profile, "dev" | "permissive")`), and one of them silently treated an
+unrecognised persisted profile as not-dev; that now refuses and names the
+value.
 
 ### Phase 4 — Templates and OCI-image bases
 
