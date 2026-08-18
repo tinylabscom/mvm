@@ -75,6 +75,34 @@ pub enum SessionError {
     Io(#[from] std::io::Error),
 }
 
+impl SessionError {
+    /// Whether the peer went away rather than failed to authenticate.
+    ///
+    /// These are different events and only one of them is security-relevant. A
+    /// peer that disconnects part-way through the handshake produced no bad
+    /// signature, no wrong identity and no replayed sequence — it produced
+    /// nothing, and the read hit end-of-stream. On the guest's control socket
+    /// that is the ordinary shape of the host's readiness poll, which connects
+    /// on a backoff while the guest boots and drops each probe it has finished
+    /// with.
+    ///
+    /// Callers use this to keep "someone tried to authenticate and failed"
+    /// meaning what it says. A failure that fires on every healthy boot trains
+    /// its audience to skip the line, and the next real one arrives to an
+    /// audience that already knows to.
+    pub fn is_peer_hangup(&self) -> bool {
+        let Self::Io(e) = self else {
+            return false;
+        };
+        matches!(
+            e.kind(),
+            std::io::ErrorKind::UnexpectedEof
+                | std::io::ErrorKind::BrokenPipe
+                | std::io::ErrorKind::ConnectionReset
+        )
+    }
+}
+
 impl From<anyhow::Error> for SessionError {
     fn from(value: anyhow::Error) -> Self {
         // Preserve the most common case as a generic variant; callers that
@@ -1146,5 +1174,51 @@ mod tests {
             },
             SessionRole::Host,
         )
+    }
+
+    /// The whole point of the predicate is what it refuses to classify. A
+    /// signature that did not verify, an identity that did not match, a
+    /// replayed sequence — those are the events the log line exists for, and
+    /// none of them may be quietly reclassified as "the peer went away".
+    #[test]
+    fn only_a_vanished_peer_counts_as_a_hangup() {
+        use std::io::ErrorKind;
+
+        for kind in [
+            ErrorKind::UnexpectedEof,
+            ErrorKind::BrokenPipe,
+            ErrorKind::ConnectionReset,
+        ] {
+            assert!(
+                SessionError::Io(std::io::Error::from(kind)).is_peer_hangup(),
+                "{kind:?} is a peer that went away"
+            );
+        }
+
+        // Other I/O failures are real failures: the peer is still there and
+        // something else broke.
+        for kind in [ErrorKind::PermissionDenied, ErrorKind::InvalidData] {
+            assert!(
+                !SessionError::Io(std::io::Error::from(kind)).is_peer_hangup(),
+                "{kind:?} is not a hangup"
+            );
+        }
+
+        // Every authentication failure stays an authentication failure.
+        for err in [
+            SessionError::PeerIdentityMismatch("wrong key".into()),
+            SessionError::SignatureVerificationFailed("bad sig".into()),
+            SessionError::Replay {
+                got: 1,
+                expected: 9,
+            },
+            SessionError::UnsupportedVersion { got: 9, want: 1 },
+            SessionError::InvalidHandshake("truncated".into()),
+        ] {
+            assert!(
+                !err.is_peer_hangup(),
+                "{err} must not be reclassified as a hangup"
+            );
+        }
     }
 }

@@ -8,7 +8,7 @@ use std::os::unix::net::UnixStream;
 use super::*;
 use anyhow::{Context, Result, bail};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
-use mvm_core::net::session::{SealedFrame, Session};
+use mvm_core::net::session::{SealedFrame, Session, SessionError};
 use mvm_core::security::{
     AuthenticatedFrame, PROTOCOL_VERSION_AUTHENTICATED, SIG_ALG_ED25519, SessionHello,
     SessionHelloAck,
@@ -351,13 +351,19 @@ impl AuthenticatedSession {
     }
 
     /// Establish a guest session and require the host identity to match `anchor`.
+    ///
+    /// The error is returned typed rather than flattened into `anyhow`, because
+    /// one of its cases is not a failure to authenticate: a peer that hangs up
+    /// mid-handshake produced no bad signature and no wrong identity, and on
+    /// the control socket that is the host's readiness poll. Callers separate
+    /// the two with [`SessionError::is_peer_hangup`]; flattening the type here
+    /// left the agent nothing to branch on but the message text.
     pub fn guest<S: Read + Write>(
         stream: &mut S,
         signing_key: SigningKey,
         anchor: &VerifyingKey,
-    ) -> Result<Self> {
-        let (inner, _session_id) = Session::guest(stream, signing_key, anchor)
-            .map_err(|error| anyhow::anyhow!("guest session handshake failed: {error}"))?;
+    ) -> std::result::Result<Self, SessionError> {
+        let (inner, _session_id) = Session::guest(stream, signing_key, anchor)?;
         Ok(Self { inner })
     }
 
@@ -837,5 +843,34 @@ mod tests {
         // This is correct: we verify the guest controls the key it claims.
         let result = host_handle.join().unwrap();
         assert!(result.is_ok());
+    }
+
+    /// The reported bug, reproduced at the seam it comes from.
+    ///
+    /// A peer that connects and goes away without sending anything is exactly
+    /// what `wait_for_agent` does while the guest boots — it probes on a
+    /// backoff and drops each stream. The guest must classify that as a
+    /// vanished peer, not as a failed authentication, or every healthy boot
+    /// logs a security-relevant failure.
+    #[test]
+    fn a_peer_that_sends_nothing_is_a_hangup_not_an_auth_failure() {
+        use std::io::Cursor;
+
+        let guest_key = SigningKey::from_bytes(&[7u8; 32]);
+        let host_anchor = SigningKey::from_bytes(&[9u8; 32]).verifying_key();
+
+        // Reads hit end-of-stream immediately: the peer is gone.
+        let mut vanished = Cursor::new(Vec::new());
+        // `AuthenticatedSession` holds key material and deliberately has no
+        // `Debug`, so unwrap the Result by hand rather than deriving one.
+        let err = match AuthenticatedSession::guest(&mut vanished, guest_key, &host_anchor) {
+            Ok(_) => panic!("no handshake can complete against a peer that sent nothing"),
+            Err(e) => e,
+        };
+
+        assert!(
+            err.is_peer_hangup(),
+            "an abandoned probe must not read as an authentication failure: {err}"
+        );
     }
 }
