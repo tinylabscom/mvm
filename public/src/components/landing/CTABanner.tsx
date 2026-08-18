@@ -29,12 +29,20 @@ export function CTABanner() {
               run something you don&rsquo;t trust.
             </h2>
             {/* No max-width cap: the sentence should sit on one line at
-                desktop sizes; it still wraps naturally on narrow screens. */}
-            <p className="mt-4 text-base leading-relaxed text-body">
+                desktop sizes; it still wraps naturally on narrow screens.
+                Inline margins, not mt-*: Starlight's unlayered stylesheet
+                beats layered utilities on this page (see Positioning.tsx). */}
+            <p
+              className="text-base leading-relaxed text-body"
+              style={{ marginTop: "1.5rem" }}
+            >
               One install command. No daemon, no SSH, and no network until
               policy admits it.
             </p>
-            <div className="mt-8 flex flex-wrap items-center justify-center gap-4">
+            <div
+              className="flex flex-wrap items-center justify-center gap-4"
+              style={{ marginTop: "3rem" }}
+            >
               <a href={`${base}getting-started/installation/`}>
                 <Button size="lg">Get Started</Button>
               </a>
