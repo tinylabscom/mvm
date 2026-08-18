@@ -105,6 +105,63 @@ pub fn template_artifacts_dispatched(
     }
 }
 
+/// Boot-path variant of [`template_artifacts_dispatched`].
+///
+/// Identical, plus one refusal: when the key resolves to an *installed bundle*,
+/// a bundle whose declared architecture is not this host's is refused here
+/// rather than deep in the backend, where it surfaces as an unrelated-looking
+/// kernel or boot failure.
+///
+/// This is a separate entry point rather than a check inside
+/// [`template_artifacts_dispatched`] on purpose. That resolver is shared with
+/// callers that legitimately resolve foreign-arch artifacts without booting
+/// them — `bundle export` and `manifest export-oci` both reach it — so gating
+/// it there breaks cross-arch export. Boot sites call this; everyone else keeps
+/// calling the un-suffixed function.
+#[instrument(skip_all, fields(id_or_slot = id_or_slot))]
+pub fn template_artifacts_for_boot(
+    id_or_slot: &str,
+) -> Result<(TemplateSpec, String, Option<String>, String, String)> {
+    if let Some(declared) = installed_bundle_arch(id_or_slot)? {
+        mvm_core::arch::GuestArch::require_host(&declared).map_err(|e| {
+            anyhow::anyhow!(
+                "bundle {id_or_slot} {e} — install a {} build of this workload                  (`mvmctl bundle fetch` / `mvmctl bundle install`), or run it on                  a {declared} host",
+                mvm_core::arch::GuestArch::host(),
+            )
+        })?;
+    }
+    template_artifacts_dispatched(id_or_slot)
+}
+
+/// The declared arch of an installed bundle, or `None` when `id_or_slot` is not
+/// one (a named template, or a slot — a slot wins over a same-named bundle, and
+/// carries no manifest to check).
+///
+/// Reuses the same slot-or-bundle decision `template_artifacts_dispatched`
+/// makes, so the gate cannot drift from what actually gets resolved.
+pub fn installed_bundle_arch(id_or_slot: &str) -> Result<Option<String>> {
+    if !is_slot_hash_dirname(id_or_slot) {
+        return Ok(None);
+    }
+    if std::path::Path::new(&slot_dir(id_or_slot)).exists() {
+        return Ok(None);
+    }
+    let registry = mvm_core::plan::bundle::BundleRegistry::default_path()?;
+    // A registry we cannot read must not silently skip the gate: propagate,
+    // so an unparseable manifest refuses the boot rather than admitting it
+    // unchecked.
+    Ok(registry
+        .find(id_or_slot)?
+        .map(|installed| installed.manifest.arch))
+}
+
+/// The declared arch of an installed bundle, for the *export* path, which
+/// prefers a best-effort answer over a refusal — a bundle it cannot read is
+/// simply not a bundle whose arch it can carry through.
+pub fn installed_bundle_arch_for_export(id_or_slot: &str) -> Option<String> {
+    installed_bundle_arch(id_or_slot).ok().flatten()
+}
+
 /// Dispatched variant of [`super::crud::template_load`] / [`super::slots::template_load_slot`].
 /// Returns a [`TemplateSpec`] regardless of which key shape was used.
 ///
@@ -233,5 +290,159 @@ mod tests {
 
         let loaded = template_load_dispatched(&slot_hash).expect("load slot hash");
         assert_eq!(loaded.template_id, slot_hash);
+    }
+
+    /// Write a minimal installed-bundle manifest so `BundleRegistry::find`
+    /// resolves it. Only `manifest.json` is read for the arch decision — no
+    /// signature, no install step.
+    fn install_bundle_manifest(sha: &str, arch: &str) {
+        let dir = std::path::PathBuf::from(mvm_core::config::mvm_home())
+            .join("bundles")
+            .join(sha);
+        std::fs::create_dir_all(&dir).expect("bundle dir");
+        let manifest = serde_json::json!({
+            "schema_version": mvm_core::plan::bundle::BUNDLE_SCHEMA_VERSION,
+            "publisher": "test",
+            "key_id": "test-key",
+            "arch": arch,
+            "created_at": "2026-01-01T00:00:00Z",
+            "artifacts": [],
+        });
+        std::fs::write(
+            dir.join("manifest.json"),
+            serde_json::to_vec(&manifest).expect("encode manifest"),
+        )
+        .expect("write manifest");
+    }
+
+    fn other_arch() -> &'static str {
+        match mvm_core::arch::GuestArch::host() {
+            mvm_core::arch::GuestArch::X86_64 => "aarch64",
+            mvm_core::arch::GuestArch::Aarch64 => "x86_64",
+        }
+    }
+
+    /// The G2 witness: a bundle built for the other architecture is refused at
+    /// the boot resolver, naming both sides.
+    #[test]
+    fn template_artifacts_for_boot_refuses_a_foreign_arch_bundle() {
+        let _lock = crate::vm::DATA_DIR_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut env = TestEnv::new();
+        env.set("MVM_HOME", tmp.path());
+
+        let sha = "abcdef0123456789".repeat(4);
+        install_bundle_manifest(&sha, other_arch());
+
+        let err = template_artifacts_for_boot(&sha)
+            .expect_err("a foreign-arch bundle must not resolve for boot");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("but this host is"), "{msg}");
+        assert!(msg.contains(other_arch()), "{msg}");
+    }
+
+    /// The same call on a host-arch bundle gets past the gate. It still fails —
+    /// the fixture has no artifacts — but *not* with an architecture refusal,
+    /// which is what distinguishes the gate from a blanket rejection.
+    #[test]
+    fn template_artifacts_for_boot_does_not_refuse_a_host_arch_bundle_on_arch() {
+        let _lock = crate::vm::DATA_DIR_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut env = TestEnv::new();
+        env.set("MVM_HOME", tmp.path());
+
+        let sha = "beefcafe01234567".repeat(4);
+        install_bundle_manifest(&sha, &mvm_core::arch::GuestArch::host().to_string());
+
+        let msg = match template_artifacts_for_boot(&sha) {
+            Ok(_) => String::new(),
+            Err(e) => format!("{e:#}"),
+        };
+        assert!(
+            !msg.contains("but this host is"),
+            "host-arch bundle must not be refused on architecture: {msg}"
+        );
+    }
+
+    /// A slot wins over an identically-named bundle, and a slot carries no
+    /// manifest — so the gate must not invent an architecture for it. Locks the
+    /// dispatch precedence into the gate's behaviour.
+    #[test]
+    fn template_artifacts_for_boot_ignores_arch_for_a_slot() {
+        let _lock = crate::vm::DATA_DIR_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut env = TestEnv::new();
+        env.set("MVM_HOME", tmp.path());
+
+        let sha = "0123456789abcdef".repeat(4);
+        // Both a slot and a foreign-arch bundle under the same name.
+        let slot = test_persisted_manifest(&sha);
+        slot.write_to_slot(std::path::Path::new(&slot_dir(&sha)))
+            .expect("write persisted slot");
+        install_bundle_manifest(&sha, other_arch());
+
+        assert_eq!(installed_bundle_arch_for_export(&sha), None);
+        let msg = match template_artifacts_for_boot(&sha) {
+            Ok(_) => String::new(),
+            Err(e) => format!("{e:#}"),
+        };
+        assert!(
+            !msg.contains("but this host is"),
+            "a slot must not be gated on a same-named bundle's arch: {msg}"
+        );
+    }
+
+    /// The regression the first attempt at this gate broke: `bundle export` and
+    /// `manifest export-oci` legitimately resolve foreign-arch artifacts
+    /// without booting them, and reach the registry through the *un-suffixed*
+    /// resolver. Placing the gate in the shared path blocked them.
+    #[test]
+    fn the_un_suffixed_resolver_still_admits_a_foreign_arch_bundle() {
+        let _lock = crate::vm::DATA_DIR_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut env = TestEnv::new();
+        env.set("MVM_HOME", tmp.path());
+
+        let sha = "feedface89abcdef".repeat(4);
+        install_bundle_manifest(&sha, other_arch());
+
+        let msg = match template_artifacts_dispatched(&sha) {
+            Ok(_) => String::new(),
+            Err(e) => format!("{e:#}"),
+        };
+        assert!(
+            !msg.contains("but this host is"),
+            "export paths must not be gated on architecture: {msg}"
+        );
+    }
+
+    /// `bundle export` re-stamping the exporting host's arch onto a re-exported
+    /// foreign-arch bundle would produce a mislabelled `.mvmpkg` — and the label
+    /// is exactly what the boot gate above trusts.
+    #[test]
+    fn a_re_exported_bundle_keeps_its_own_arch() {
+        let _lock = crate::vm::DATA_DIR_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut env = TestEnv::new();
+        env.set("MVM_HOME", tmp.path());
+
+        let sha = "0f0f0f0f89abcdef".repeat(4);
+        install_bundle_manifest(&sha, other_arch());
+
+        assert_eq!(
+            installed_bundle_arch_for_export(&sha).as_deref(),
+            Some(other_arch()),
+            "export must carry the source bundle's arch, not this host's"
+        );
     }
 }

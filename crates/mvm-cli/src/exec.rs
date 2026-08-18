@@ -1292,7 +1292,7 @@ fn resolve_image_artifacts(image: &ImageSource) -> Result<ResolvedImage> {
     match image {
         ImageSource::Template(name) => {
             let (spec, vmlinux, initrd, rootfs, rev) =
-                mvm_runtime::vm::template::lifecycle::template_artifacts_dispatched(name)
+                mvm_runtime::vm::template::lifecycle::template_artifacts_for_boot(name)
                     .with_context(|| format!("Loading template '{name}'"))?;
             let snap_info =
                 mvm_runtime::vm::template::lifecycle::template_snapshot_info_dispatched(name)
@@ -2215,7 +2215,7 @@ pub fn boot_session_vm(
     admit: Option<&SessionAdmit<'_>>,
 ) -> Result<SessionVm> {
     let (spec, vmlinux, initrd, rootfs, rev) =
-        mvm_runtime::vm::template::lifecycle::template_artifacts_dispatched(env)
+        mvm_runtime::vm::template::lifecycle::template_artifacts_for_boot(env)
             .with_context(|| format!("Loading template '{env}'"))?;
     let snap_info = mvm_runtime::vm::template::lifecycle::template_snapshot_info_dispatched(env)
         .ok()
