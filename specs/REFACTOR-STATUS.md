@@ -286,16 +286,19 @@ for detailed scope and acceptance criteria.
 ## In-flight plans
 
 - [~] **Admission-bound AI assurance sessions** —
-      `specs/plans/2026-08-17-admission-bound-ai-assurance-sessions.md`. W1–W4
-      and W6/W7 landed: the envelope, the five-way authority intersection, the
+      `specs/plans/2026-08-17-admission-bound-ai-assurance-sessions.md`. W1–W4,
+      W6/W7 and W7b landed: the envelope, the authority intersection, the
       fail-closed outcome ladder, `host.assurance.v1`, fail-closed audit and
-      receipt emission with citations that actually resolve, and the
-      workload-facing `AssuranceCampaign` whose surface offers no command,
-      path, host or port to pass. 84 tests.
-      STILL OPEN: W5 observer/cleanup evidence, W7b session lifecycle on the
-      admit path (`open_session` has no production caller yet), W8 the
-      framed-stdio provider binary. Until those land every live trial evaluates
-      `INCONCLUSIVE` by design; no certifying campaign can run.
+      receipt emission with resolvable citations, the workload-facing
+      `AssuranceCampaign`, and the boot-path session lifecycle behind
+      `AdmitAndStartParams.assurance` (opt-in; `None` on every existing call
+      site). Landing W7b exposed two bugs the fixtures had masked: the binding
+      rejected every real `sha256:`-prefixed plan id, and the probe handler
+      compared the guest's session identity against the supervisor's lookup key.
+      STILL OPEN: W5 observer/cleanup evidence, W8 the framed-stdio provider,
+      and a CLI surface for supplying a campaign declaration. Until those land
+      every live trial evaluates `INCONCLUSIVE` by design; no certifying
+      campaign can run.
 
 - [~] **Embedded-binary content store** — `specs/plans/2026-08-17-embedded-binary-content-store.md`.
       Phases 1–2 landed: both nested legs of `crates/mvm-cli/build.rs` are keyed

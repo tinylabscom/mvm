@@ -246,9 +246,13 @@ impl HostAssuranceV1Handler {
             .get_mut(&ctx.session_id)
             .ok_or(ProbeRefusal::NoSession)?;
 
-        // The supervisor's context is authoritative. The request's own
-        // session_id exists only so a disagreement is visible.
-        if request.session_id.as_str() != ctx.session_id {
+        // Two identifiers, deliberately: the supervisor's `ctx.session_id` is
+        // the authoritative *lookup* key and is never supplied by the guest,
+        // while `binding.session_id` is the assurance identity the guest was
+        // told in its envelope. The request claims the latter, so that is what
+        // it is checked against — comparing it to the lookup key instead only
+        // worked while a test used one string for both.
+        if request.session_id != session.binding.session_id {
             return Err(ProbeRefusal::SessionMismatch);
         }
         if request.trial_id != session.trial_id {
