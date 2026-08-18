@@ -590,7 +590,7 @@ nameserver 10.0.0.3
         assert_eq!(SIOCADDRT_REQUEST as u64, libc::SIOCADDRT as u64);
     }
 
-    /// The distinction #2634 is about, at the syscall that draws it.
+    /// The distinction this split exists for, at the syscall that draws it.
     ///
     /// A name no guest has yields ENODEV from SIOCGIFFLAGS — the same errno a
     /// NIC-less workload guest gets for `eth0` — and that must read as "there
