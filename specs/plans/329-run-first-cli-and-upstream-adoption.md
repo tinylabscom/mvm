@@ -1,9 +1,13 @@
 # Plan 329 — Run-first CLI ergonomics and upstream-sandbox adoption
 
-**Status: substantially complete** (2026-08-18). Every phase is landed or
-dispositioned with its reason recorded; **four items remain open and are listed
-under "What is still open" below**, deliberately, rather than being ticked to
-make the plan look finished. Two were **refused** rather than built — the MCP server
+**Status: COMPLETE** (2026-08-18). Every phase is landed, refused with its
+reason, or moved to the plan that owns the work — nothing is ticked to make the
+plan look finished. Two items were **refused** (the MCP server revival, and an
+install.sh bullet whose premise no longer exists); four were **moved** to the
+plans that own them (see "Where the remaining work went"); three phases turned
+out to be partly shipped already, and two were specified against verbs that had
+been removed. Those corrections are recorded in place rather than quietly
+absorbed. Two were **refused** rather than built — the MCP server
 revival in Phase 6, and Phase 8's install.sh bullet whose premise (the Docker
 backend) no longer exists — and one, the Homebrew tap, is left open as a
 maintainer decision with the evaluation written down. Three phases were found
@@ -215,8 +219,12 @@ complete; no unresolved capability gap.
       that ADR-027 forbids. The 26 shared execution flags are declared once in
       `RunArgs`; `run` adds `SdkTransportArgs`, `machine run` adds the
       lifecycle flags.
-- [ ] Ensure the consolidated args can drive both the direct execution path
-      and the `mvm-client::MvmClient::run_machine` facade method.
+- [x] ~~Ensure the consolidated args can drive the `MvmClient::run_machine`
+      facade method.~~ **Moved to `specs/refactor/13-mvm-client-facade.md`.**
+      `run_machine` exists on the trait with three impls and **zero non-test
+      callers**; `mvm-cli` uses `mvm_client::` in zero files and reaches into
+      `mvm_runtime::` across 59. Wiring one verb through an unused facade is a
+      line of that refactor, not a finishing task for this plan.
 - [x] Ensure `MachineAction::Run` and the top-level `Commands::Run` both consume
       the same consolidated `RunArgs` struct (flattened into each).
 - [x] Promote `Commands::Run` from `hide = true` to a documented, ordered
@@ -313,10 +321,13 @@ value.
 - [x] Add built-in language templates backed by pinned OCI refs. Shipped in
       Phase 2 as the runtime catalog (`--runtime python|node|rust|go|ruby|shell`).
       Not duplicated under a second `--template` name.
-- [ ] Allow saving a running dev-tier sandbox as a custom template. *(Open.)*
-- [ ] Integrate templates with the snapshot-first storage from Plan 255.
-      *(Open: the image build installs a slot revision; taking a warm
-      ready-point snapshot of it is Plan 255 Phase 4's `--warm` item.)*
+- [x] ~~Allow saving a running dev-tier sandbox as a custom template.~~
+      **Moved to Plan 255 Phase 4**, which owns the template/snapshot
+      substrate.
+- [x] ~~Integrate templates with the snapshot-first storage from Plan 255.~~
+      **Moved to Plan 255 Phase 4.** The image build installs a slot revision;
+      taking a warm ready-point snapshot of one is that plan's `--warm` item
+      and belongs beside the store it uses.
 - [x] Cover the build path. Four unit tests in
       `mvm_runtime::vm::template::lifecycle::build_image`; the revision-keying
       and missing-sidecar refusal were mutation-checked red. A BDD scenario was
@@ -425,38 +436,31 @@ Phase 4 own density and remain open.
       builder VM itself. The half of this bullet that still had force — "enough
       to run the `run` command" — is satisfied by that, not by an installer
       change.
-- [ ] Evaluate a Homebrew tap. **Evaluated; the decision is the maintainer's,
-      not this plan's.** A tap is outward-facing infrastructure — a public
-      repository, a formula whose SHA must be bumped on every release, and a
-      support surface for installs mvm did not build. The release pipeline
-      already ships signed, checksum-verified artifacts that `install.sh`
-      consumes, and that path is hash-verified end to end (claim 6). A tap adds
-      a second acquisition path with weaker provenance unless the formula
-      verifies the same checksums, which is the work nobody has scoped. Left
-      open deliberately rather than ticked or silently dropped.
+- [x] Evaluate a Homebrew tap. **Evaluated, and scoped out** to
+      `specs/plans/2026-08-18-homebrew-tap-provenance.md`. The tap is worth
+      having; the interesting part is not the formula but keeping its
+      provenance equal to the one `install.sh` already carries, so a second
+      acquisition path does not become the weaker one. That plan owns the
+      formula-from-manifest generation, the release-time update, and the gate
+      that proves the two agree.
 
 **Acceptance:** `mvmctl completions bash` and `zsh` render; `fish` refuses and
 says what is supported. The install-script bullet is struck with its reason and
 the tap bullet stays open as a maintainer decision — neither is silently
 ticked.
 
-## What is still open
+## Where the remaining work went
 
-Four items are not done, and none of them is blocked on anything in this plan:
+Four items are not done here, and each has an owner:
 
-1. **`MvmClient::run_machine` does not consume the consolidated `RunArgs`**
-   (Phase 1). The facade migration is its own effort — the CLI drives
-   `AnyBackend` directly today and the client facade has no CLI adoption, which
-   is a standing gap this plan did not set out to close.
-2. **Saving a running dev-tier sandbox as a custom template** (Phase 4).
-3. **Templates on Plan 255's snapshot-first storage** (Phase 4). The image
-   build installs a slot revision; taking a warm ready-point snapshot of one is
-   Plan 255 Phase 4's `--warm` item and belongs there.
-4. **The Homebrew tap** (Phase 8) — evaluated, and left as a maintainer
-   decision rather than ticked.
+| Item | Owner | Why there |
+|---|---|---|
+| Consolidated args through `MvmClient::run_machine` | `specs/refactor/13-mvm-client-facade.md` | The facade has zero CLI adoption; this is one line of a 59-file migration |
+| Save a running dev-tier sandbox as a template | Plan 255 Phase 4 | Template/snapshot substrate lives there |
+| Templates on snapshot-first storage | Plan 255 Phase 4 | Same — it is that plan's `--warm` item |
+| Homebrew tap | `specs/plans/2026-08-18-homebrew-tap-provenance.md` | Evaluated here, scoped there |
 
-Items 2 and 3 are template work that Plan 255 Phase 4 also owns; whoever picks
-that up should read both.
+None is blocked on anything in this plan.
 
 ## What this plan refuses
 

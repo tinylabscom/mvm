@@ -27,6 +27,16 @@ The `mvm_runtime::` reach, by submodule (call-site count):
 | `shell`, `shell_mock`, `base` (runtime_meta substrate, cow) | 19 | **stays direct** — the `ShellEnvironment` substrate re-exported as `mvmctl::runtime::*` |
 | `image`, `catalog`, `artifacts`, `codesign`, `builder_runner`, `qemu`, `firecracker`, `storage`, `config` | ~40 | **out of 1i scope** — image/build/artifact concerns (mvm-build/OCI surface), not "drive a sandbox" |
 
+## Inherited scope
+
+The run-first CLI plan asked that its consolidated `RunArgs` be able to drive
+`MvmClient::run_machine`. That is this refactor's work, not that plan's:
+`run_machine` has three impls and zero non-test callers, so wiring one verb
+through it in isolation would add a caller to an otherwise unused facade
+without moving the 59-file reach that is the actual problem. Do it as part of
+the machine-lifecycle slice, where the argument struct and the facade method
+land together.
+
 ## The scope boundary (the load-bearing decision)
 
 `MvmClient` covers **runtime machine-lifecycle operations only** — "drive a
