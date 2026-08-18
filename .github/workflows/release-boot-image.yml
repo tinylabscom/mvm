@@ -564,6 +564,15 @@ jobs:
           MVM_RUNTIME_BOOT_ROOTFS: staging/default-microvm-rootfs-x86_64.ext4
           MVM_RUNTIME_BOOT_OVERLAY: overlay-staging/overlay.ext4
           MVM_RUNTIME_BOOT_OVERLAY_VERITY: overlay-staging/overlay.verity
+          # A sealed image boots through its initramfs: mvm-verity-init mounts
+          # the rootfs by roothash and the overlay at /mvm/runtime before
+          # switch_root. Handing over kernel + rootfs alone execs the rootfs
+          # /init directly, which finds no agent and panics — so the image looks
+          # broken when it is not. The sidecar is staged above; the roothash is
+          # exported below because it is file contents, not a path; and the
+          # harness resolves the initramfs itself through the same function the
+          # CLI boot path uses, building one here since the runner is Linux.
+          MVM_RUNTIME_BOOT_VERITY: staging/default-microvm-rootfs-x86_64.verity
           MVM_RUNTIME_BOOT_READY: guest-agent
           MVM_RUNTIME_BOOT_RUNS: "1"
           MVM_RUNTIME_BOOT_CONCURRENT: "1"
@@ -575,6 +584,9 @@ jobs:
           # stages that sidecar under its arch-qualified asset name, so put a
           # copy back under the name the gate looks for.
           cp "staging/default-microvm-meta-${ARCH}.json" staging/mvm-meta.json
+          MVM_RUNTIME_BOOT_ROOTHASH="$(tr -d '[:space:]' \
+            < "staging/default-microvm-rootfs-${ARCH}.roothash")"
+          export MVM_RUNTIME_BOOT_ROOTHASH
           cargo test --test runtime_boot_bench \
             prebuilt_runtime_image_boots_within_budget -- --exact --nocapture
 

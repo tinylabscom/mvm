@@ -25,6 +25,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use mvm_agentd::vsock::{GuestRequest, GuestResponse};
+use mvm_core::vm_backend::RuntimeSourcePolicy;
 use mvm_core::vm_backend::VmStartConfig;
 use mvm_runtime::backend::AnyBackend;
 use mvm_runtime::vsock_transport::VsockTransport as _;
@@ -50,6 +51,19 @@ const MEMORY_MIB_VAR: &str = "MVM_RUNTIME_BOOT_MEMORY_MIB";
 const OVERLAY_VAR: &str = "MVM_RUNTIME_BOOT_OVERLAY";
 const OVERLAY_VERITY_VAR: &str = "MVM_RUNTIME_BOOT_OVERLAY_VERITY";
 const OVERLAY_ROOTHASH_VAR: &str = "MVM_RUNTIME_BOOT_OVERLAY_ROOTHASH";
+/// A sealed (dm-verity) image does not mount its own runtime overlay. Its
+/// `/init` never gets the chance: `mvm-verity-init` runs from an initramfs and
+/// mounts the overlay at `/mvm/runtime` before `switch_root`. Boot one without
+/// the initramfs and the kernel execs the rootfs `/init` directly, which finds
+/// no agent and panics with `Attempted to kill init!` — an image fault by
+/// appearance and a harness fault in fact.
+const VERITY_VAR: &str = "MVM_RUNTIME_BOOT_VERITY";
+const ROOTHASH_VAR: &str = "MVM_RUNTIME_BOOT_ROOTHASH";
+/// Overrides the initramfs the sealed path would otherwise resolve. Left unset
+/// the harness resolves it exactly as production does, through
+/// `mvm_build::initramfs::resolve_or_build_local_initramfs`, rather than
+/// growing a second acquisition path that could drift from it.
+const INITRD_VAR: &str = "MVM_RUNTIME_BOOT_INITRD";
 
 const DEFAULT_BACKEND: &str = "firecracker";
 const DEFAULT_RUNS: usize = 5;
@@ -109,6 +123,17 @@ struct BenchSpec {
     cpus: u32,
     memory_mib: u32,
     overlay: Option<OverlaySpec>,
+    sealed: Option<SealedSpec>,
+}
+
+/// Verity sidecar, roothash and the initramfs that mounts them. All or none,
+/// for the same reason the overlay triple is: a partial set boots a shape
+/// nothing ships and fails as though the image were broken.
+#[derive(Debug, Clone)]
+struct SealedSpec {
+    verity: PathBuf,
+    roothash: String,
+    initrd: PathBuf,
 }
 
 /// All three or none. The backend attaches the overlay only when the path, the
@@ -130,6 +155,7 @@ impl BenchSpec {
         let config = config.unwrap_or_default();
 
         let overlay = overlay_spec(&config)?;
+        let sealed = sealed_spec(&config)?;
         let kernel = required_path(KERNEL_VAR, config.kernel)?;
         let rootfs = required_path(ROOTFS_VAR, config.rootfs)?;
         let ready =
@@ -152,6 +178,7 @@ impl BenchSpec {
             cpus: env_u32(CPUS_VAR, config.cpus, 1)?,
             memory_mib: env_u32(MEMORY_MIB_VAR, config.memory_mib, 256)?,
             overlay,
+            sealed,
         }))
     }
 }
@@ -175,6 +202,9 @@ struct RawBenchConfig {
     overlay_verity: Option<PathBuf>,
     #[serde(alias = "overlay_roothash")]
     overlay_roothash: Option<String>,
+    verity: Option<PathBuf>,
+    roothash: Option<String>,
+    initrd: Option<PathBuf>,
 }
 
 impl RawBenchConfig {
@@ -278,6 +308,23 @@ fn measure_one(spec: &BenchSpec, name: String) -> Result<BootMeasurement> {
             .as_ref()
             .map(|o| o.verity.to_string_lossy().into_owned()),
         runtime_overlay_roothash: spec.overlay.as_ref().map(|o| o.roothash.clone()),
+        verity_path: spec
+            .sealed
+            .as_ref()
+            .map(|s| s.verity.to_string_lossy().into_owned()),
+        roothash: spec.sealed.as_ref().map(|s| s.roothash.clone()),
+        initrd_path: spec
+            .sealed
+            .as_ref()
+            .map(|s| s.initrd.to_string_lossy().into_owned()),
+        // A sealed image has no baked agent to fall back to, so a missing
+        // overlay must refuse the boot rather than drop into the ladder's
+        // rootfs branch and report the absence as a panic.
+        runtime_source_policy: if spec.sealed.is_some() {
+            RuntimeSourcePolicy::RequiredOverlay
+        } else {
+            RuntimeSourcePolicy::default()
+        },
         ..Default::default()
     };
 
@@ -470,6 +517,65 @@ fn overlay_spec(config: &RawBenchConfig) -> Result<Option<OverlaySpec>> {
             )
         }
     }
+}
+
+/// Resolve the sealed-boot set, refusing a partial one. The initramfs is
+/// resolved through the same function the CLI's boot path uses, so the gate
+/// cannot drift from what production actually attaches; an explicit
+/// `MVM_RUNTIME_BOOT_INITRD` overrides it for a host that cannot build one.
+fn sealed_spec(config: &RawBenchConfig) -> Result<Option<SealedSpec>> {
+    let verity = env_path_opt(VERITY_VAR, config.verity.clone());
+    let roothash = env_string_opt(ROOTHASH_VAR, config.roothash.clone());
+    let (verity, roothash) = match (verity, roothash) {
+        (None, None) => return Ok(None),
+        (Some(v), Some(h)) => (v, h),
+        (v, h) => {
+            let mut missing = Vec::new();
+            if v.is_none() {
+                missing.push(VERITY_VAR);
+            }
+            if h.is_none() {
+                missing.push(ROOTHASH_VAR);
+            }
+            anyhow::bail!(
+                "sealed boot is half-configured; a verity sidecar without its \
+                 roothash cannot be attached. Missing: {}",
+                missing.join(", ")
+            )
+        }
+    };
+    let roothash = roothash.trim().to_string();
+    if roothash.is_empty() {
+        anyhow::bail!("{ROOTHASH_VAR} is set but empty");
+    }
+    let initrd = match env_path_opt(INITRD_VAR, config.initrd.clone()) {
+        Some(p) => p,
+        None => resolve_initramfs()?,
+    };
+    Ok(Some(SealedSpec {
+        verity,
+        roothash,
+        initrd,
+    }))
+}
+
+/// The universal initramfs, via the production resolver. On Linux it builds one
+/// when the cache is cold; elsewhere it falls back to a published artifact.
+fn resolve_initramfs() -> Result<PathBuf> {
+    let cache_root = PathBuf::from(mvmctl::core::config::mvm_cache_dir()).join("initramfs");
+    let artifact = mvmctl::build::initramfs::resolve_or_build_local_initramfs(
+        &mvm_runtime::build_env::RuntimeBuildEnv,
+        &cache_root,
+        env!("CARGO_PKG_VERSION"),
+        mvmctl::core::arch::GuestArch::host(),
+    )
+    .map_err(|e| {
+        anyhow::anyhow!(
+            "sealed boot needs the universal initramfs and none could be resolved: {e}. \
+             Set {INITRD_VAR} to one built elsewhere."
+        )
+    })?;
+    Ok(artifact.image_path)
 }
 
 fn env_path_opt(var: &str, configured: Option<PathBuf>) -> Option<PathBuf> {
@@ -670,4 +776,64 @@ fn overlay_spec_refuses_a_blank_roothash() {
         .expect_err("a blank roothash is not a roothash")
         .to_string();
     assert!(err.contains(OVERLAY_ROOTHASH_VAR), "{err}");
+}
+
+/// An unsealed boot stays unsealed. Resolving an initramfs for an image that
+/// does not need one would make every dev-image bench depend on a build.
+#[test]
+fn sealed_spec_is_absent_when_nothing_is_configured() {
+    let config = RawBenchConfig::default();
+    assert!(
+        sealed_spec(&config)
+            .expect("no sealed set is valid")
+            .is_none()
+    );
+}
+
+#[test]
+fn sealed_spec_accepts_verity_roothash_and_an_explicit_initrd() {
+    let config = RawBenchConfig {
+        verity: Some(PathBuf::from("/tmp/rootfs.verity")),
+        roothash: Some("  cafebabe\n".to_string()),
+        initrd: Some(PathBuf::from("/tmp/initramfs.cpio.gz")),
+        ..RawBenchConfig::default()
+    };
+    let spec = sealed_spec(&config)
+        .expect("a complete sealed set is valid")
+        .expect("a complete sealed set yields a spec");
+    assert_eq!(spec.verity, PathBuf::from("/tmp/rootfs.verity"));
+    assert_eq!(spec.initrd, PathBuf::from("/tmp/initramfs.cpio.gz"));
+    // Trimmed: the roothash is read from a file that ends in a newline.
+    assert_eq!(spec.roothash, "cafebabe");
+}
+
+#[test]
+fn sealed_spec_refuses_a_verity_sidecar_without_its_roothash() {
+    let config = RawBenchConfig {
+        verity: Some(PathBuf::from("/tmp/rootfs.verity")),
+        initrd: Some(PathBuf::from("/tmp/initramfs.cpio.gz")),
+        ..RawBenchConfig::default()
+    };
+    let err = sealed_spec(&config)
+        .expect_err("a sidecar with no roothash cannot be attached")
+        .to_string();
+    let listed = err
+        .split_once("Missing: ")
+        .map(|(_, rest)| rest.trim().to_string())
+        .unwrap_or_else(|| panic!("error should name what is missing: {err}"));
+    assert_eq!(listed, ROOTHASH_VAR);
+}
+
+#[test]
+fn sealed_spec_refuses_a_blank_roothash() {
+    let config = RawBenchConfig {
+        verity: Some(PathBuf::from("/tmp/rootfs.verity")),
+        roothash: Some("  \n".to_string()),
+        initrd: Some(PathBuf::from("/tmp/initramfs.cpio.gz")),
+        ..RawBenchConfig::default()
+    };
+    let err = sealed_spec(&config)
+        .expect_err("a blank roothash is not a roothash")
+        .to_string();
+    assert!(err.contains(ROOTHASH_VAR), "{err}");
 }
