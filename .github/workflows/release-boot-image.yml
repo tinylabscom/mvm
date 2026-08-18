@@ -60,8 +60,15 @@ jobs:
     # gate on top of the tag-push trigger already enforced above — so the
     # identity a released binary trusts can't be minted from an arbitrary
     # branch or workflow_dispatch run.
-    environment: release-signing
+    environment: boot-image-signing
     strategy:
+      # One arch's build must not cancel the other's. The sibling is a separate
+      # artifact, and a transient failure on one runner used to take the other
+      # down before it produced anything — which then read as two broken arches.
+      # Publishing is still all-or-nothing: the completeness gate below refuses
+      # a partial set, so letting both finish costs nothing and tells the truth
+      # about which one actually failed.
+      fail-fast: false
       matrix:
         include:
           - arch: aarch64
@@ -254,6 +261,13 @@ jobs:
     # Skipped on a dry-run dispatch (see builder-vm-image).
     if: ${{ github.event_name == 'push' || github.event.inputs.dry_run == 'false' }}
     strategy:
+      # One arch's build must not cancel the other's. The sibling is a separate
+      # artifact, and a transient failure on one runner used to take the other
+      # down before it produced anything — which then read as two broken arches.
+      # Publishing is still all-or-nothing: the completeness gate below refuses
+      # a partial set, so letting both finish costs nothing and tells the truth
+      # about which one actually failed.
+      fail-fast: false
       matrix:
         include:
           - arch: aarch64
@@ -325,6 +339,13 @@ jobs:
     # Skipped on a dry-run dispatch (see builder-vm-image).
     if: ${{ github.event_name == 'push' || github.event.inputs.dry_run == 'false' }}
     strategy:
+      # One arch's build must not cancel the other's. The sibling is a separate
+      # artifact, and a transient failure on one runner used to take the other
+      # down before it produced anything — which then read as two broken arches.
+      # Publishing is still all-or-nothing: the completeness gate below refuses
+      # a partial set, so letting both finish costs nothing and tells the truth
+      # about which one actually failed.
+      fail-fast: false
       matrix:
         include:
           - arch: aarch64
@@ -381,8 +402,15 @@ jobs:
     # runtime pack manifest under the same release.yml@<tag> identity class as
     # builder-vm-image — gating it behind the same protected environment
     # constrains which ref can mint a valid signing identity.
-    environment: release-signing
+    environment: boot-image-signing
     strategy:
+      # One arch's build must not cancel the other's. The sibling is a separate
+      # artifact, and a transient failure on one runner used to take the other
+      # down before it produced anything — which then read as two broken arches.
+      # Publishing is still all-or-nothing: the completeness gate below refuses
+      # a partial set, so letting both finish costs nothing and tells the truth
+      # about which one actually failed.
+      fail-fast: false
       matrix:
         include:
           - arch: aarch64
@@ -673,7 +701,7 @@ jobs:
     # boot-image release went out carrying one arch and no builder VM, and
     # the CLI release next door then treated its existence as sufficient.
     if: ${{ !cancelled() && (github.event_name == 'push' || github.event.inputs.dry_run == 'false') }}
-    environment: release-signing
+    environment: boot-image-signing
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
