@@ -695,6 +695,28 @@ impl ApprovalLedger {
             .map(|index| self.records[index].state)
     }
 
+    /// Content-address the ledger's decision state.
+    ///
+    /// A session records this at park time and a resume compares against it, so
+    /// what it covers is what a resume treats as "the ledger has not moved":
+    /// every record's identity, the capability it was asked about, and the
+    /// state it reached. Timestamps are deliberately excluded — two ledgers
+    /// that made the same decisions hash alike however long ago they were
+    /// asked, so a session cannot refuse itself for the passage of time.
+    #[must_use]
+    pub fn head(&self) -> [u8; 32] {
+        let mut hasher = Sha256::new();
+        hasher.update(self.session_id.as_str().as_bytes());
+        hasher.update([0u8]); // terminator: ids cannot run together
+        for record in &self.records {
+            hasher.update(record.request.approval_id.as_str().as_bytes());
+            hasher.update([0u8]); // terminator: ids cannot run together
+            hasher.update([capability_tag(record.request.capability)]);
+            hasher.update([state_tag(record.state)]);
+        }
+        hasher.finalize().into()
+    }
+
     fn expire_record(
         &mut self,
         journal: &mut AgentSessionJournal,
@@ -844,6 +866,18 @@ fn effect_tag(effect: PolicyEffect) -> u8 {
         PolicyEffect::Deny => 1,
         PolicyEffect::Ask => 2,
         PolicyEffect::Allow => 3,
+    }
+}
+
+/// Stable tag per approval state. Written out rather than derived so renaming a
+/// variant cannot silently move every recorded head.
+fn state_tag(state: ApprovalState) -> u8 {
+    match state {
+        ApprovalState::Pending => 0,
+        ApprovalState::Approved => 1,
+        ApprovalState::Denied => 2,
+        ApprovalState::Expired => 3,
+        ApprovalState::Canceled => 4,
     }
 }
 
@@ -1118,6 +1152,152 @@ mod tests {
                 .expect_err("canceled response")
                 .to_string(),
             "approval response was duplicated or arrived after a terminal state"
+        );
+    }
+
+    #[test]
+    fn an_empty_ledger_has_a_stable_head() {
+        let a = ApprovalLedger::new(AgentSessionId::parse("sess-a").unwrap());
+        let b = ApprovalLedger::new(AgentSessionId::parse("sess-a").unwrap());
+        assert_eq!(a.head(), b.head());
+    }
+
+    #[test]
+    fn a_decision_moves_the_head() {
+        let (request, evaluation) = ask_evaluation();
+        let mut journal = journal();
+        let mut ledger = ApprovalLedger::new(session());
+        let approval = approval_request(&request, &evaluation);
+        ledger
+            .request(&mut journal, &evaluation, approval.clone(), 1_000)
+            .expect("request approval");
+        let pending_head = ledger.head();
+        ledger
+            .respond(
+                &mut journal,
+                ApprovalResponse {
+                    approval_id: approval.approval_id.clone(),
+                    operator_id: operator("ops-a"),
+                    outcome: ApprovalOutcome::Approved,
+                    response_nonce: 1,
+                    reason: None,
+                    ticket_ref: None,
+                },
+                1_001,
+            )
+            .expect("authorized response");
+        assert_ne!(
+            pending_head,
+            ledger.head(),
+            "an answered request must not hash the same as a pending one"
+        );
+    }
+
+    #[test]
+    fn the_head_ignores_when_a_decision_was_made() {
+        let (request, evaluation) = ask_evaluation();
+
+        let mut journal_a = journal();
+        let mut ledger_a = ApprovalLedger::new(session());
+        let mut approval_a = approval_request(&request, &evaluation);
+        approval_a.expires_at_unix_ms = 5_000;
+        ledger_a
+            .request(&mut journal_a, &evaluation, approval_a.clone(), 1_000)
+            .expect("request approval a");
+        ledger_a
+            .respond(
+                &mut journal_a,
+                ApprovalResponse {
+                    approval_id: approval_a.approval_id.clone(),
+                    operator_id: operator("ops-a"),
+                    outcome: ApprovalOutcome::Approved,
+                    response_nonce: 1,
+                    reason: None,
+                    ticket_ref: None,
+                },
+                1_001,
+            )
+            .expect("response a");
+
+        let mut journal_b = journal();
+        let mut ledger_b = ApprovalLedger::new(session());
+        let mut approval_b = approval_request(&request, &evaluation);
+        approval_b.expires_at_unix_ms = 50_000;
+        ledger_b
+            .request(&mut journal_b, &evaluation, approval_b.clone(), 1_000)
+            .expect("request approval b");
+        ledger_b
+            .respond(
+                &mut journal_b,
+                ApprovalResponse {
+                    approval_id: approval_b.approval_id.clone(),
+                    operator_id: operator("ops-a"),
+                    outcome: ApprovalOutcome::Approved,
+                    response_nonce: 1,
+                    reason: None,
+                    ticket_ref: None,
+                },
+                1_001,
+            )
+            .expect("response b");
+
+        assert_eq!(
+            ledger_a.head(),
+            ledger_b.head(),
+            "identical decisions at different expiry timestamps must hash alike"
+        );
+    }
+
+    #[test]
+    fn two_different_decisions_do_not_collide() {
+        let (request, evaluation) = ask_evaluation();
+
+        let mut journal_a = journal();
+        let mut ledger_a = ApprovalLedger::new(session());
+        let approval_a = approval_request(&request, &evaluation);
+        ledger_a
+            .request(&mut journal_a, &evaluation, approval_a.clone(), 1_000)
+            .expect("request approval a");
+        ledger_a
+            .respond(
+                &mut journal_a,
+                ApprovalResponse {
+                    approval_id: approval_a.approval_id.clone(),
+                    operator_id: operator("ops-a"),
+                    outcome: ApprovalOutcome::Approved,
+                    response_nonce: 1,
+                    reason: None,
+                    ticket_ref: None,
+                },
+                1_001,
+            )
+            .expect("response a");
+
+        let mut journal_b = journal();
+        let mut ledger_b = ApprovalLedger::new(session());
+        let approval_b = approval_request(&request, &evaluation);
+        ledger_b
+            .request(&mut journal_b, &evaluation, approval_b.clone(), 1_000)
+            .expect("request approval b");
+        ledger_b
+            .respond(
+                &mut journal_b,
+                ApprovalResponse {
+                    approval_id: approval_b.approval_id.clone(),
+                    operator_id: operator("ops-a"),
+                    outcome: ApprovalOutcome::Denied,
+                    response_nonce: 1,
+                    reason: None,
+                    ticket_ref: None,
+                },
+                1_001,
+            )
+            .expect("response b");
+
+        assert_ne!(
+            ledger_a.head(),
+            ledger_b.head(),
+            "an approved and a denied request over the same capability must not collide"
         );
     }
 }
