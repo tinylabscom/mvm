@@ -6,6 +6,7 @@ mod builder_shell_job;
 mod bundle;
 pub mod catalog;
 mod cmd_audit;
+mod completions;
 mod dashboard;
 mod deploy;
 mod deps;
@@ -153,6 +154,9 @@ pub(in crate::commands) enum Commands {
     /// Emit the integration files a coding agent needs to reach for mvm
     #[command(display_order = 8)]
     Plugin(plugin::Args),
+    /// Print a shell completion script
+    #[command(display_order = 8)]
+    Completions(completions::Args),
     /// Rebuild a workload when its local inputs change
     #[command(display_order = 8)]
     Watch(watch::Args),

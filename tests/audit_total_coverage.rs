@@ -498,6 +498,8 @@ const AUDIT_POSTURE: &[(&str, AuditPosture)] = &[
     // own signed-plan admission. Auditing the harness on top would double-count
     // the launches it exists to measure.
     ("bench", AuditPosture::InteractiveOrControl),
+    // Renders a completion script to stdout and touches nothing.
+    ("completions", AuditPosture::ReadOnly),
     // `plugin` writes integration files into the project directory and starts
     // nothing. Its subcommands are leaves, not a delegating group.
     (

@@ -211,6 +211,7 @@ impl Commands {
             Commands::Explain(_) => "explain",
             Commands::Bench(_) => "bench",
             Commands::Plugin(_) => "plugin",
+            Commands::Completions(_) => "completions",
             Commands::Run(_) => "run",
             Commands::SdkNoVm(_) => "__sdk-no-vm",
             Commands::Doctor(_) => "doctor",
