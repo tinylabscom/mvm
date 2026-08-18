@@ -1085,6 +1085,58 @@ fn the_emitted_record_matches_the_counterparty_field_set() {
 }
 
 #[test]
+fn the_envelope_the_host_writes_is_the_one_the_guest_reads() {
+    // The host half is serialize-only and the guest half is deserialize-only,
+    // so nothing but a test proves they describe the same document.
+    let envelope =
+        AiSessionInput::bind(request(), &binding(), &effective_for_envelope()).expect("envelope");
+    let json = envelope.to_json().expect("encode");
+
+    let delivered = wire::DeliveredSession::parse_json(json.as_bytes()).expect("guest parses");
+    assert_eq!(delivered.mvm_binding, *envelope.binding());
+    assert_eq!(delivered.authority, *envelope.authority());
+    assert_eq!(delivered.session.trial_id.as_str(), "trial-1");
+    assert_eq!(
+        delivered.mvm_binding.plan_id.as_str(),
+        minimal_plan().plan_id.0
+    );
+    assert!(delivered.permits_tool(ToolId::CampaignProbeV1));
+    assert!(delivered.declares_destination(&id("undeclared.synthetic.destination")));
+    assert!(!delivered.declares_destination(&id("some.other.label")));
+}
+
+#[test]
+fn the_guest_reader_fails_closed_on_a_foreign_or_oversized_envelope() {
+    let bad_schema = request_json().replace(
+        "mvm.assurance.ai-session-input/v1",
+        "mvm.assurance.ai-session-input/v9",
+    );
+    assert!(matches!(
+        wire::DeliveredSession::parse_json(bad_schema.as_bytes()),
+        // No `mvm_binding` key at all, so this fails as malformed before the
+        // schema check — either way it does not yield a session.
+        Err(wire::DeliveredSessionError::Malformed(_)
+            | wire::DeliveredSessionError::UnsupportedSchema(_))
+    ));
+
+    let oversized = vec![b'x'; input::MAX_SESSION_INPUT_BYTES + 1];
+    assert_eq!(
+        wire::DeliveredSession::parse_json(&oversized),
+        Err(wire::DeliveredSessionError::TooLarge)
+    );
+}
+
+#[test]
+fn a_provider_request_alone_is_not_a_deliverable_session() {
+    // The request half carries no binding, so a workload handed one directly
+    // — rather than one the host assembled — cannot read it as a session.
+    assert!(matches!(
+        wire::DeliveredSession::parse_json(request_json().as_bytes()),
+        Err(wire::DeliveredSessionError::Malformed(_))
+    ));
+}
+
+#[test]
 fn the_outcome_vocabulary_matches_the_counterparty_spelling() {
     for (outcome, spelling) in [
         (TrialOutcome::Prevented, "PREVENTED"),

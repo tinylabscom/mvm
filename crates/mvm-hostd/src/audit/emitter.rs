@@ -39,6 +39,8 @@
 use std::path::{Path, PathBuf};
 
 use crate::audit::decisions::DecisionStore;
+pub use crate::audit::evidence::EmittedEvidence;
+use crate::audit::evidence::{EvidenceReceipt, audit_entry_digest_hex};
 use crate::audit::receipt_export::audit_entry_to_receipt;
 use crate::audit::receipt_store::ReceiptStore;
 use crate::supervisor::{
@@ -1218,6 +1220,18 @@ impl AuditEmitter {
     }
 
     fn emit_entry_blocking(&self, entry: &PlanAuditEntry) -> Result<()> {
+        self.sign_entry_blocking(entry)?;
+        let t_r = std::time::Instant::now();
+        self.emit_receipt_for_entry(entry);
+        tracing::debug!(ms = t_r.elapsed().as_secs_f64() * 1000.0, "emit: receipt");
+        Ok(())
+    }
+
+    /// Sign and append one entry to every chain, without its receipt.
+    ///
+    /// Split out so an evidence-bearing caller can pair the same signing with
+    /// a fail-closed receipt rather than the best-effort one below.
+    fn sign_entry_blocking(&self, entry: &PlanAuditEntry) -> Result<()> {
         let t0 = std::time::Instant::now();
         let rt = self.runtime()?;
         let t_rt = std::time::Instant::now();
@@ -1236,10 +1250,84 @@ impl AuditEmitter {
             );
         }
         audit_mirror::emit_mirror_event(entry);
-        let t_r = std::time::Instant::now();
-        self.emit_receipt_for_entry(entry);
-        tracing::debug!(ms = t_r.elapsed().as_secs_f64() * 1000.0, "emit: receipt");
         Ok(())
+    }
+
+    /// Emit one entry and its receipt, failing closed if either cannot be
+    /// written, and return references to both.
+    ///
+    /// The ordinary emit path treats receipts as a derived cache and swallows
+    /// their errors, which is right when nothing cites them. It is wrong for
+    /// evidence a later claim rests on: a citation to a receipt that was never
+    /// written is worse than no citation, because it reads as proof.
+    pub fn emit_entry_for_evidence(
+        &self,
+        entry: &PlanAuditEntry,
+        receipt: EvidenceReceipt,
+    ) -> Result<EmittedEvidence> {
+        if tokio::runtime::Handle::try_current().is_ok() {
+            return std::thread::scope(|scope| {
+                scope
+                    .spawn(|| self.emit_entry_for_evidence_blocking(entry, receipt))
+                    .join()
+                    .map_err(|_| anyhow::anyhow!("audit emit thread panicked"))?
+            });
+        }
+        self.emit_entry_for_evidence_blocking(entry, receipt)
+    }
+
+    fn emit_entry_for_evidence_blocking(
+        &self,
+        entry: &PlanAuditEntry,
+        receipt: EvidenceReceipt,
+    ) -> Result<EmittedEvidence> {
+        self.sign_entry_blocking(entry)?;
+        let receipt_id = match receipt {
+            EvidenceReceipt::Required => self.emit_receipt_for_entry_checked(entry)?,
+            EvidenceReceipt::Omitted => None,
+        };
+        Ok(EmittedEvidence {
+            audit_digest: audit_entry_digest_hex(entry)?,
+            receipt_id,
+        })
+    }
+
+    /// Append the receipt for `entry`, returning its content address.
+    ///
+    /// `Ok(None)` means receipts are switched off for this emitter, which is a
+    /// configuration answer rather than a failure. Every other unhappy path is
+    /// an error.
+    fn emit_receipt_for_entry_checked(&self, entry: &PlanAuditEntry) -> Result<Option<String>> {
+        if !self.receipts_enabled {
+            return Ok(None);
+        }
+        let tenant = entry.tenant.0.clone();
+        let store = self
+            .receipt_store_for_tenant(&tenant)
+            .ok_or_else(|| anyhow::anyhow!("no receipt store for tenant {tenant}"))?;
+        let host_did =
+            mvm_core::did_key::DidKey::from_verifying_key(self.signing_key.verifying_key())
+                .to_did_key();
+        let mut receipt = audit_entry_to_receipt(entry, &host_did).ok_or_else(|| {
+            anyhow::anyhow!(
+                "audit event {} has no receipt mapping; evidence cannot cite it",
+                entry.event
+            )
+        })?;
+        let mut emitted_id = None;
+        store.append_chained(|prev| {
+            receipt.prev_receipt_id = prev;
+            receipt.receipt_id = receipt.compute_id().context("computing receipt id")?;
+            emitted_id = Some(receipt.receipt_id.clone());
+            let signed_at = chrono::Utc::now().to_rfc3339();
+            mvm_core::receipt::SignedExecutionReceipt::sign(
+                receipt.clone(),
+                &self.signing_key,
+                signed_at,
+            )
+            .context("signing execution receipt")
+        })?;
+        Ok(emitted_id)
     }
 
     /// Best-effort emission of a signed [`ExecutionReceipt`] for an audit

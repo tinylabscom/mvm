@@ -2,11 +2,13 @@
 //! keypair, plan persistence, and the checkpoint bind helpers. Library API so
 //! both the CLI and fleet consumers emit identical chain entries.
 
+pub mod assurance;
 pub mod bind;
 /// Whether a run's `plan.admitted` entry is a control or a note — the one
 /// place a failure to record an admission becomes a refused boot.
 pub mod durability;
 pub mod emitter;
+pub mod evidence;
 pub mod host_keypair;
 /// RFC 6962 Merkle transparency-log root + inclusion-proof builder over a
 /// tenant's chain-signed audit log.
