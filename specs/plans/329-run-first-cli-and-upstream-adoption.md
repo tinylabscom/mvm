@@ -308,15 +308,30 @@ audited like any other run.
 
 ### Phase 7 — Observability and performance
 
-- [ ] Add `mvmctl doctor --benchmark` (or a new `mvmctl benchmark` verb) that
-      measures cold start, warm claim, and density on the current host.
-- [ ] Emit structured JSON output for CI and regression tracking.
-- [ ] Define warm-start and density SLOs once Plan 298/Plan 255 measurements
-      are stable.
-- [ ] Publish the SLOs in the docs and add a CI gate that fails on regression.
+- [x] Add a benchmark verb: `mvmctl bench`, a separate verb rather than a
+      `doctor` flag — doctor reports posture without side effects, and this
+      boots VMs. Cold start and warm claim are selectable lanes
+      (`--lane prepared-cold|warm-claim|…`). **Density is not covered**; it is
+      Plan 265 WS3 and needs a different harness.
+- [x] Emit structured JSON output for CI and regression tracking — `--json`
+      prints, and every run writes, the same versioned report the CI gate
+      produces, so a user's report and a CI report are comparable artifacts.
+- [x] Warm-start budgets were already defined and published (200/250/300 ms
+      prepared-cold p50/p95/p99; 30/50 ms warm-claim p50/p99). `bench` now
+      prints each measured percentile beside the budget judging it. Density
+      SLOs remain undefined — Plan 265 WS3.
+- [x] Published and gated already (the launch-budget page and the
+      boot-latency lane). This adds the user-facing way to check a host
+      against them.
 
-**Acceptance:** `mvmctl doctor --benchmark --json` produces reproducible numbers;
-SLOs are documented.
+**Acceptance:** `mvmctl bench --json` produces a versioned report against
+documented budgets. Two deliberate refusals keep the numbers meaningful: a
+debug build refuses to measure (its percentiles are the build profile's, not
+the host's), and a run below 20 samples is labelled indicative rather than
+publication-grade.
+
+**Not done:** density. `mvmctl bench` measures latency only; Plan 265 WS3 and
+Phase 4 own density and remain open.
 
 ### Phase 8 — Distribution polish
 

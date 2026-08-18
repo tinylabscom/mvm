@@ -1,3 +1,4 @@
+mod bench;
 mod bootstrap;
 mod build;
 #[cfg(feature = "builder-vm")]
@@ -145,6 +146,9 @@ pub(in crate::commands) enum Commands {
     /// Explain a run after the fact from the chain-signed audit log
     #[command(display_order = 7)]
     Explain(vm::explain::Args),
+    /// Measure this host's launch latency against the published budgets
+    #[command(display_order = 7)]
+    Bench(bench::Args),
     /// Rebuild a workload when its local inputs change
     #[command(display_order = 8)]
     Watch(watch::Args),
