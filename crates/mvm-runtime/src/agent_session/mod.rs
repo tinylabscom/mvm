@@ -63,6 +63,76 @@ pub struct AgentSessionRecord {
     pub parent_checkpoint: Option<mvm_core::checkpoint::CheckpointDigest>,
     pub created_unix: u64,
     pub updated_unix: u64,
+    /// Session-journal position this record is consistent with. A resume that
+    /// replayed from an earlier cursor would re-run work the session already
+    /// committed.
+    #[serde(default)]
+    pub journal_cursor: u64,
+    /// Approval-ledger head the session was last admitted under. A resume
+    /// bounds its fresh grants against this rather than against whatever the
+    /// ledger holds later, so a park cannot silently widen what the session may
+    /// do while it waits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_head: Option<mvm_core::checkpoint::ApprovalHead>,
+    /// Where the parked state lives. `None` while the session is active.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier: Option<StorageTier>,
+    /// Why the session was parked. `None` while the session is active.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub park_reason: Option<ParkReason>,
+}
+
+/// Why a park or resume was refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum SessionTransitionError {
+    #[error("session is not active, so it cannot be parked")]
+    NotActive,
+    #[error("session is not hibernated, so it cannot be resumed")]
+    NotHibernated,
+    #[error("session is closed")]
+    Closed,
+}
+
+impl AgentSessionRecord {
+    /// Suspend a residency. Returns the parked record; does not write it.
+    ///
+    /// The generation is deliberately unchanged: it identifies one period of
+    /// sandbox residency, and a park suspends that period rather than ending
+    /// it. `resume` is what opens the next one.
+    pub fn park(&self, reason: ParkReason, now_unix: u64) -> Result<Self, SessionTransitionError> {
+        match self.state {
+            SandboxResidency::Closed => return Err(SessionTransitionError::Closed),
+            SandboxResidency::Hibernated => return Err(SessionTransitionError::NotActive),
+            SandboxResidency::Active => {}
+        }
+        Ok(Self {
+            state: SandboxResidency::Hibernated,
+            tier: Some(select_tier(reason)),
+            park_reason: Some(reason),
+            updated_unix: now_unix,
+            ..self.clone()
+        })
+    }
+
+    /// Open a new residency. Returns the resumed record; does not write it.
+    ///
+    /// Incrementing the generation is what lets a late frame addressed to the
+    /// prior residency be refused rather than delivered into its successor.
+    pub fn resume(&self, now_unix: u64) -> Result<Self, SessionTransitionError> {
+        match self.state {
+            SandboxResidency::Closed => return Err(SessionTransitionError::Closed),
+            SandboxResidency::Active => return Err(SessionTransitionError::NotHibernated),
+            SandboxResidency::Hibernated => {}
+        }
+        Ok(Self {
+            state: SandboxResidency::Active,
+            generation: self.generation + 1,
+            tier: None,
+            park_reason: None,
+            updated_unix: now_unix,
+            ..self.clone()
+        })
+    }
 }
 
 /// Why a sandbox was parked. The reason is not decoration: it selects the
@@ -231,6 +301,10 @@ mod tests {
             parent_checkpoint: None,
             created_unix: 1_755_000_000,
             updated_unix: 1_755_000_000,
+            journal_cursor: 0,
+            approval_head: None,
+            tier: None,
+            park_reason: None,
         }
     }
 
@@ -301,6 +375,88 @@ mod tests {
             .map(|r| r.session_id.as_str().to_string())
             .collect();
         assert_eq!(ids, vec!["sess-alpha"]);
+    }
+
+    #[test]
+    fn parking_keeps_the_generation_and_records_why() {
+        let rec = record("sess-alpha");
+        assert_eq!(rec.generation, 1);
+        let parked = rec.park(ParkReason::ApprovalWait, 1_755_000_100).unwrap();
+        assert_eq!(parked.state, SandboxResidency::Hibernated);
+        assert_eq!(
+            parked.generation, 1,
+            "a park suspends a residency, it does not end one"
+        );
+        assert_eq!(parked.park_reason, Some(ParkReason::ApprovalWait));
+        assert_eq!(parked.tier, Some(StorageTier::Parked));
+        assert_eq!(parked.updated_unix, 1_755_000_100);
+    }
+
+    #[test]
+    fn resuming_opens_a_new_generation_and_clears_the_park() {
+        let parked = record("sess-alpha")
+            .park(ParkReason::ApprovalWait, 1_755_000_100)
+            .unwrap();
+        let live = parked.resume(1_755_000_200).unwrap();
+        assert_eq!(live.state, SandboxResidency::Active);
+        assert_eq!(live.generation, 2, "a resume opens a new residency");
+        assert_eq!(live.park_reason, None);
+        assert_eq!(live.tier, None);
+        assert_eq!(live.updated_unix, 1_755_000_200);
+    }
+
+    #[test]
+    fn a_session_cannot_be_parked_twice() {
+        let parked = record("sess-alpha").park(ParkReason::Idle, 1).unwrap();
+        assert!(matches!(
+            parked.park(ParkReason::Idle, 2),
+            Err(SessionTransitionError::NotActive)
+        ));
+    }
+
+    #[test]
+    fn an_active_session_cannot_be_resumed() {
+        assert!(matches!(
+            record("sess-alpha").resume(2),
+            Err(SessionTransitionError::NotHibernated)
+        ));
+    }
+
+    #[test]
+    fn a_closed_session_neither_parks_nor_resumes() {
+        let mut closed = record("sess-alpha");
+        closed.state = SandboxResidency::Closed;
+        assert!(matches!(
+            closed.park(ParkReason::Idle, 2),
+            Err(SessionTransitionError::Closed)
+        ));
+        assert!(matches!(
+            closed.resume(2),
+            Err(SessionTransitionError::Closed)
+        ));
+    }
+
+    #[test]
+    fn the_new_fields_round_trip_and_default_when_absent() {
+        let mut rec = record("sess-alpha");
+        rec.journal_cursor = 118;
+        rec.approval_head = Some(
+            mvm_core::checkpoint::ApprovalHead::parse(format!("sha256:{}", "ab".repeat(32)))
+                .unwrap(),
+        );
+        let json = serde_json::to_string(&rec).unwrap();
+        assert_eq!(
+            serde_json::from_str::<AgentSessionRecord>(&json).unwrap(),
+            rec
+        );
+
+        // A record written before these fields existed still loads.
+        let old = r#"{"session_id":"sess-old","generation":1,"state":"active","created_unix":1,"updated_unix":1}"#;
+        let parsed: AgentSessionRecord = serde_json::from_str(old).unwrap();
+        assert_eq!(parsed.journal_cursor, 0);
+        assert_eq!(parsed.approval_head, None);
+        assert_eq!(parsed.tier, None);
+        assert_eq!(parsed.park_reason, None);
     }
 
     #[test]
