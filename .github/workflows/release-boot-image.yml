@@ -498,17 +498,30 @@ jobs:
         # Boots the artifact in `staging/`, never a published one — the whole
         # point is to refuse the upload rather than diagnose it afterwards.
         #
-        # This is not a latency assertion. The budget is an order of magnitude
-        # above the observed median and RUNS/CONCURRENT are 1, because the
-        # question here is "does it reach userspace". Latency belongs to the
-        # `boot-latency` lane, which has its own threshold and its own argument.
+        # `start-return`, not `guest-agent`, and the difference is the honest
+        # limit of this gate. The guest agent ships in the runtime overlay, a
+        # separate verity-sealed disk mounted at /mvm/runtime; a bare
+        # kernel+rootfs boot has no overlay, so /init finds no agent and exits
+        # by design. Asserting agent-readiness here would fail every correct
+        # image. Attaching the overlay — it is built in this same run — is the
+        # way to strengthen this, and is tracked separately.
+        #
+        # So what this proves is that Firecracker accepts the artifact and the
+        # kernel loads and starts. That is the class that shipped as a bzImage
+        # named vmlinux, which fails InstanceStart outright. What it does NOT
+        # prove is that userspace works: the /init defect that shipped
+        # alongside it is caught by the static shebang assert above, not here.
+        #
+        # Not a latency assertion either. The budget is an order of magnitude
+        # above the observed median and RUNS/CONCURRENT are 1. Latency belongs
+        # to the `boot-latency` lane, which has its own threshold and argument.
         env:
           ARCH: ${{ matrix.arch }}
           MVM_RUNTIME_BOOT_BENCH: "1"
           MVM_RUNTIME_BOOT_BACKEND: firecracker
           MVM_RUNTIME_BOOT_KERNEL: staging/default-microvm-vmlinux-x86_64
           MVM_RUNTIME_BOOT_ROOTFS: staging/default-microvm-rootfs-x86_64.ext4
-          MVM_RUNTIME_BOOT_READY: guest-agent
+          MVM_RUNTIME_BOOT_READY: start-return
           MVM_RUNTIME_BOOT_RUNS: "1"
           MVM_RUNTIME_BOOT_CONCURRENT: "1"
           MVM_RUNTIME_BOOT_BUDGET_MS: "60000"

@@ -579,3 +579,34 @@ fn the_boot_gate_installs_the_toolchain_its_test_needs() {
          without it the gate fails before reaching a guest"
     );
 }
+
+/// The boot gate must not assert a readiness signal the artifact cannot give.
+///
+/// The guest agent ships in the runtime overlay — a separate verity-sealed disk
+/// mounted at /mvm/runtime — so a bare kernel+rootfs boot has no agent and
+/// /init exits by design. `guest-agent` readiness here fails every *correct*
+/// image, which is the worst kind of gate: it blocks releases and teaches
+/// everyone to distrust it.
+///
+/// This is a real regression, not a hypothetical: the gate shipped asserting
+/// `guest-agent`, inherited from a lane that is dispatch-only and pinned to a
+/// release whose kernel could not load, so that assertion had never once been
+/// proven to hold.
+#[test]
+fn the_boot_gate_does_not_demand_an_agent_the_bare_image_cannot_have() {
+    let workflow = boot_image_workflow();
+    let job = workflow
+        .split("  default-microvm:")
+        .nth(1)
+        .expect("the boot image workflow must define default-microvm");
+
+    assert!(
+        job.contains("MVM_RUNTIME_BOOT_READY: start-return"),
+        "the gate must assert start-return while no overlay is attached"
+    );
+    assert!(
+        !job.contains("MVM_RUNTIME_BOOT_READY: guest-agent"),
+        "asserting guest-agent without attaching the runtime overlay fails every \
+         correct image; attach the overlay before strengthening this"
+    );
+}
