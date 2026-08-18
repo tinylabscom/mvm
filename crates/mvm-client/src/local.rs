@@ -1245,6 +1245,7 @@ mod tests {
             memory_mib: 128,
             env: vec![],
             grants: None,
+            assurance_campaign: None,
         };
         let state = be
             .run_machine(spec)
@@ -1276,6 +1277,7 @@ mod tests {
             memory_mib: 128,
             env: vec![],
             grants: None,
+            assurance_campaign: None,
         };
         let state = be.run_machine(spec).await.expect("boot");
         assert!(
@@ -1325,6 +1327,7 @@ mod tests {
             memory_mib: 128,
             env: vec![],
             grants: None,
+            assurance_campaign: None,
         };
         let state = be.run_machine(spec).await.expect("boot");
         assert!(
