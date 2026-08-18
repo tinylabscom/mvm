@@ -1574,3 +1574,41 @@ fn default_tenant_exports_and_ci_counts_the_rootfs_closure() {
         "the footprint CI gate must consume the exported closure inventory"
     );
 }
+
+/// The published boot image's sidecar must carry every field the boot gate
+/// reads, not just some of them.
+///
+/// `mvm-meta.json` for the default microVM is projected from `passthru.mvm` by
+/// an explicit `inherit` list in `nix/images/default-tenant/flake.nix`. A field
+/// missing from that list is absent from the JSON, and an absent field reads as
+/// `false` — so omitting one silently inverts its meaning rather than failing.
+///
+/// That is not hypothetical: the list once carried `overlayAware` without
+/// `runtimeLean`, so every published image claimed to require the runtime
+/// overlay while also claiming to carry a baked agent fallback. The
+/// required-overlay gate refused it, and `release-boot-image` failed on every
+/// tag push — the release could not be cut at all.
+#[test]
+fn default_microvm_sidecar_carries_every_field_the_boot_gate_reads() {
+    let flake = fs::read_to_string(nix_dir().join("images/default-tenant/flake.nix"))
+        .expect("read default-tenant flake");
+    let sidecar = flake
+        .split_once("sidecarJson = mvm:")
+        .expect("default-tenant flake defines sidecarJson")
+        .1
+        .split_once("};")
+        .expect("sidecarJson body is brace-terminated")
+        .0;
+
+    // The two fields the required-overlay admission gate reads
+    // (`mvm_vmm::host::runtime_meta`). They describe one decision — whether the
+    // rootfs omits the baked agent fallback — so they have to travel together.
+    for field in ["overlayAware", "runtimeLean"] {
+        assert!(
+            sidecar.contains(field),
+            "default-tenant sidecarJson omits `{field}`; an absent field reads as \
+             false, so the published image would misdescribe its own boot contract \
+             and the required-overlay gate would refuse to boot it"
+        );
+    }
+}

@@ -105,7 +105,8 @@
         builtins.toJSON {
           inherit (mvm)
             name accessible sealed entrypointKind initSystem
-            expectedBootMs agentBinary rootlessEntrypoint hypervisor overlayAware;
+            expectedBootMs agentBinary rootlessEntrypoint hypervisor overlayAware
+            runtimeLean;
           imageTag = bootImageTag;
           source = "built-local";
           builtAt = "";

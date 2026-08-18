@@ -196,6 +196,17 @@ in
   # before the boot regression surfaces, giving CI a tight signal
   # for the load-bearing invariant.
 
+  # A rootfs that claims `overlayAware` without `runtimeLean` is refused at
+  # boot: required-overlay boots must omit the baked agent fallback, so the
+  # contract cannot silently degrade. The two fields therefore have to travel
+  # together — the default-microvm sidecar once inherited only the first, and
+  # the boot gate rejected every published image as a result.
+  runtime_lean_travels_with_overlay_aware_on_shell =
+    (meta shellGuest).runtimeLean == (meta shellGuest).overlayAware;
+  runtime_lean_travels_with_overlay_aware_on_command =
+    (meta commandGuest).runtimeLean == (meta commandGuest).overlayAware;
+  runtime_lean_travels_with_overlay_aware_on_services =
+    (meta servicesGuest).runtimeLean == (meta servicesGuest).overlayAware;
   overlay_aware_metadata_set_on_shell = (meta shellGuest).overlayAware == true;
   overlay_aware_metadata_set_on_command = (meta commandGuest).overlayAware == true;
   overlay_aware_metadata_set_on_services = (meta servicesGuest).overlayAware == true;
