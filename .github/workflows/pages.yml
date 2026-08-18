@@ -44,7 +44,12 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.96.0
-          targets: wasm32-unknown-unknown
+          # Two targets, two crates: `wasm-pack` builds the browser shim for
+          # wasm32-unknown-unknown, and `web/mvm-demo-guest/build.sh` builds the
+          # demo guest for wasm32-wasip1. Installing only the first fails the
+          # second with `can't find crate for std`, which reads like a toolchain
+          # problem rather than a missing target.
+          targets: wasm32-unknown-unknown, wasm32-wasip1
 
       - name: Install wasm-pack
         run: cargo install wasm-pack --locked
