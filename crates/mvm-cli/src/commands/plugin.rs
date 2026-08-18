@@ -8,10 +8,10 @@
 //! This writes that file. It does **not** stand up a server. The tool an agent
 //! needs already exists and already audits every launch — `mvmctl run` — so a
 //! protocol layer in front of it would be a second way to say the same thing.
-//! That was tried: [ADR-002] shipped a local MCP server and withdrew it as "a
-//! surface nobody drove … duplicated authority that the CLI's JSON output and
-//! the SDKs already expose". The withdrawal reasoning still holds, so this
-//! deliberately stays on the near side of it.
+//! That was tried once and withdrawn: the server shipped behind an opt-in
+//! feature, had no consumer, and duplicated authority the CLI's JSON output
+//! and the SDKs already expose. That reasoning still holds, so this stays on
+//! the near side of it.
 //!
 //! Only targets whose file format can be verified are offered. Emitting a
 //! config for an agent whose schema was guessed at would produce a file that
