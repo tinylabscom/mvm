@@ -335,8 +335,10 @@ for detailed scope and acceptance criteria.
       or its model says) and ADR-047 defines the memory plane. Sequenced behind
       `specs/plans/2026-08-18-durable-agent-sessions.md` WS1, which owns the
       session identity memory keys on and is itself unmerged.
-  - [ ] WS1-WS4 — tool plane: catalog derivation, argument policy, host-side
-        dynamic-namespace adapter, refusal as a planning signal
+  - [x] WS1 — catalog derivation from the signed admission (PR #2705)
+  - [x] WS2 — per-capability argument policy inside the descriptor digest (#2705)
+  - [~] WS3 — the guest-side-client gate landed; the host-side adapter has not
+  - [x] WS4 — refusal names the surface, and repeated misses are rate-bounded (#2705)
   - [ ] WS5-WS9 — memory plane: store + record, `host.memory.v1`, write scan
         and ceilings, audit + retention, bounded recall
   - [ ] WS10 — `mvmctl memory` read-only surface, tests + BDD
