@@ -38,7 +38,6 @@ mvm-build = { workspace = true, default-features = false, features = [
 # Direct use of the pure in-process ext4 materializer
 # (`mvm_fs::rootfs`) for read-only host-directory share images.
 mvm-fs.workspace = true
-libkrun-sys.workspace = true
 mio.workspace = true
 anyhow.workspace = true
 # `OverlayManager` is an async trait carrying chrono timestamps +
@@ -108,6 +107,8 @@ virtio-queue = "0.18"
 virtio-vsock = "0.12"
 
 [dev-dependencies]
+# Used by tests/phase3c_supervisor_dispatch.rs only; the lib never names it.
+libkrun-sys.workspace = true
 mvm-core = { workspace = true, features = ["test-support"] }
 mvm-vmm = { workspace = true, features = ["test-support"] }
 
