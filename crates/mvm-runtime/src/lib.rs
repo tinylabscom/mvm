@@ -98,6 +98,9 @@ pub mod netinit_audit;
 pub mod resident_pool;
 /// Capability-aware backend selection (fail-closed, no silent downgrade).
 pub mod selection;
+/// Filesystem-backed store for durable agent sessions (see [`checkpoint`]
+/// for the analogous per-checkpoint store).
+pub mod session;
 /// Backend-agnostic supervisor standby pool registry (`~/.mvm/pool/`
 /// state-dir; record/select-idle-by-kernel/remove/reap).
 pub mod standby_pool;
