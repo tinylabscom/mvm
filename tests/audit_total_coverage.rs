@@ -493,6 +493,11 @@ const AUDIT_POSTURE: &[(&str, AuditPosture)] = &[
     // and `init`.
     ("bootstrap", AuditPosture::InteractiveOrControl),
     ("doctor", AuditPosture::ReadOnly),
+    // `bench` emits nothing itself: it spawns `mvmctl run` once per sample,
+    // and each of those launches carries its own `cmd.run` envelope and its
+    // own signed-plan admission. Auditing the harness on top would double-count
+    // the launches it exists to measure.
+    ("bench", AuditPosture::InteractiveOrControl),
     // Resolves and validates the Studio install; spawns nothing today.
     ("dashboard", AuditPosture::ReadOnly),
     // Deploy mutates the local sealed-artifact store and is wrapped by the
