@@ -1,5 +1,8 @@
 # Admission-bound AI assurance sessions
 
+Backing: shipped-source
+Validation: a_provider_cannot_smuggle_an_mvm_binding_through_the_request_parser
+
 Status: **W1–W3 landed. W4–W8 open.**
 
 An AI workload can drive a Scout-linked assurance campaign from inside an
