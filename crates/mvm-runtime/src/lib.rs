@@ -60,6 +60,9 @@ pub mod driver;
 // Firecracker host mechanics moved to mvm-backends::fc; re-exported so
 // `mvm_runtime::firecracker::<name>` keeps resolving for mvm-cli.
 pub use mvm_backends::fc::host as firecracker;
+/// Filesystem-backed store for durable agent sessions (see [`checkpoint`]
+/// for the analogous per-checkpoint store).
+pub mod agent_session;
 pub mod handle_registry;
 /// The HVF end of the checkpoint restore seams (fork into a fresh identity,
 /// same-identity resume) — the counterpart of the capture control the HVF
@@ -98,9 +101,6 @@ pub mod netinit_audit;
 pub mod resident_pool;
 /// Capability-aware backend selection (fail-closed, no silent downgrade).
 pub mod selection;
-/// Filesystem-backed store for durable agent sessions (see [`checkpoint`]
-/// for the analogous per-checkpoint store).
-pub mod session;
 /// Backend-agnostic supervisor standby pool registry (`~/.mvm/pool/`
 /// state-dir; record/select-idle-by-kernel/remove/reap).
 pub mod standby_pool;
