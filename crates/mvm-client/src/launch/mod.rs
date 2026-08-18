@@ -186,6 +186,10 @@ pub(crate) struct BootParams {
     /// The request's permission set, carried into the signed plan and — for
     /// its egress dimension — into the policy the gate enforces.
     pub(crate) grants: Option<mvm_contract::grants::Grants>,
+    /// Path to an operator-authored campaign declaration, when one was asked
+    /// for. Read and validated here, so a malformed declaration refuses the
+    /// launch instead of producing a boot with no campaign on it.
+    pub(crate) assurance_campaign: Option<std::path::PathBuf>,
 }
 
 impl LocalBackend {
@@ -253,7 +257,7 @@ impl LocalBackend {
             backend_name: backend.name().to_string(),
             volumes: params.volumes,
             destroy_on_exit: params.transient,
-            grants: params.grants,
+            grants: params.grants.clone(),
         };
 
         // A fresh per-launch ledger: local launches are one-shot from this
@@ -262,7 +266,26 @@ impl LocalBackend {
         // at the configured keys dir.
         let ledger = InMemoryNonceLedger::new();
         let clock = SystemClock;
-        let emitter = build_audit_emitter();
+        let emitter = build_audit_emitter().map(std::sync::Arc::new);
+
+        // Read the declaration before the boot: a campaign an operator asked
+        // for and that turns out to be malformed must refuse the launch, not
+        // produce a running workload with no campaign attached to it.
+        let campaign = match (&params.assurance_campaign, &emitter) {
+            (Some(path), Some(emitter)) => Some(
+                Self::build_campaign(path, emitter, &backend, params.grants.as_ref())
+                    .map_err(|e| crate::local::backend_err(format!("{e:#}")))?,
+            ),
+            (Some(_), None) => {
+                return Err(crate::local::backend_err(
+                    "an assurance campaign was declared but this process writes no audit chain, \
+                     so nothing the campaign did could be recorded"
+                        .to_string(),
+                ));
+            }
+            (None, _) => None,
+        };
+
         admit_and_boot_local(
             &backend,
             &req,
@@ -270,11 +293,47 @@ impl LocalBackend {
                 clock: &clock,
                 ledger: &ledger,
                 host_signer_keys_dir: None,
-                emitter: emitter.as_ref(),
-                assurance: None,
+                emitter: emitter.as_deref(),
+                assurance: campaign.as_ref(),
             },
         )
         .map_err(|e| crate::local::backend_err(format!("{e:#}")))
+    }
+
+    /// Load a declared campaign and bind it to this boot.
+    ///
+    /// The policy handed to the probe is the one the launch was granted, so a
+    /// probe asks the same question the workload's own egress would: an
+    /// operator cannot widen what a campaign observes by writing a different
+    /// policy into the declaration, because the declaration carries none.
+    fn build_campaign(
+        path: &std::path::Path,
+        emitter: &std::sync::Arc<AuditEmitter>,
+        backend: &AnyBackend,
+        grants: Option<&mvm_contract::grants::Grants>,
+    ) -> anyhow::Result<mvm_hostd::assurance_session::CampaignRequest> {
+        let declaration = mvm_hostd::assurance_session::load_declaration(path)?;
+        // The policy handed to the probe is the launch's own granted egress, so
+        // a probe asks exactly the question the workload's traffic would. A
+        // declaration carries no policy of its own, so an operator cannot widen
+        // what a campaign observes by writing one.
+        let policy = grants
+            .and_then(|g| g.egress.as_ref())
+            .map(|egress| {
+                mvm_core::policy::network_policy::NetworkPolicy::allow_list(egress.allow.clone())
+            })
+            .unwrap_or_else(mvm_core::policy::network_policy::NetworkPolicy::deny_all);
+        Ok(mvm_hostd::assurance_session::CampaignRequest {
+            declaration,
+            emitter: std::sync::Arc::clone(emitter),
+            policy_ceiling: mvm_hostd::assurance_session::default_policy_ceiling(),
+            policy,
+            backend: format!("{:?}", backend.kind()).to_lowercase(),
+            now_unix_ms: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+                .unwrap_or(0),
+        })
     }
 
     /// Fail-closed admission validation of typed secret references, then
@@ -647,6 +706,7 @@ impl LocalBackend {
                 volumes,
                 transient,
                 grants: request.grants.clone(),
+                assurance_campaign: request.assurance_campaign.clone(),
             })
             .await?;
         preparation.commit();

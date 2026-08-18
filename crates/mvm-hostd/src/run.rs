@@ -93,7 +93,7 @@ pub struct LocalRunContext<'a> {
     /// `None` — the default everywhere except a run that explicitly asked for
     /// one — means no assurance work happens at all, so campaign discovery
     /// never sits on the ordinary launch path.
-    pub assurance: Option<&'a crate::assurance_session::CampaignRequest<'a>>,
+    pub assurance: Option<&'a crate::assurance_session::CampaignRequest>,
 }
 
 /// Build the signed-plan host-fs grant list from the launch volume set. The

@@ -404,8 +404,12 @@ pub fn edges_by_label(decl: &CampaignDeclaration) -> BTreeMap<AssuranceId, (Stri
 /// The emitter is an `Arc` because the opened session outlives this call: it
 /// records every probe for as long as the workload runs, so a borrow would tie
 /// the session's lifetime to the boot call that opened it.
-pub struct CampaignRequest<'a> {
-    pub declaration: &'a CampaignDeclaration,
+pub struct CampaignRequest {
+    /// Owned rather than borrowed: the request is assembled by a caller that
+    /// reads the declaration from disk and then hands it down through the
+    /// launch path, so tying it to that caller's frame would force a leak to
+    /// satisfy the lifetime.
+    pub declaration: CampaignDeclaration,
     pub emitter: Arc<AuditEmitter>,
     pub policy_ceiling: AuthorityCeiling,
     /// The workload's admitted egress policy, which the probe consults.
@@ -416,7 +420,7 @@ pub struct CampaignRequest<'a> {
 
 /// Open a declared campaign against a booted VM, using this process's plane.
 pub fn open_for_boot(
-    campaign: &CampaignRequest<'_>,
+    campaign: &CampaignRequest,
     vm: &str,
     admitted: &AdmittedPlan,
 ) -> Result<MvmBinding> {
@@ -430,7 +434,7 @@ pub fn open_for_boot(
         OpenSession {
             vm,
             admitted,
-            declaration: campaign.declaration,
+            declaration: &campaign.declaration,
             emitter: &campaign.emitter,
             policy_ceiling: &campaign.policy_ceiling,
             policy: campaign.policy.clone(),
