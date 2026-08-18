@@ -37,6 +37,12 @@ fn boot_image_workflow() -> String {
         .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()))
 }
 
+fn pages_workflow() -> String {
+    let path = Path::new(".github/workflows/pages.yml");
+    fs::read_to_string(path)
+        .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()))
+}
+
 fn assert_publishes(workflow: &str, asset: &str) {
     assert!(
         workflow.contains(asset),
@@ -442,7 +448,7 @@ fn the_two_release_trains_cannot_fire_each_other() {
 /// a broken identity means the pack quietly stops shipping and everything else
 /// looks green. Nothing else would notice.
 #[test]
-fn the_moved_jobs_keep_the_release_signing_environment() {
+fn boot_image_jobs_use_the_boot_image_signing_environment() {
     let boot_image = boot_image_workflow();
     // The two jobs that cosign-sign a pack manifest inside the job itself.
     for job in ["builder-vm-image", "default-microvm"] {
@@ -453,15 +459,16 @@ fn the_moved_jobs_keep_the_release_signing_environment() {
              out of this list rather than dropping the assertion"
         );
         assert!(
-            block.contains("    environment: release-signing\n"),
-            "{job} must keep `environment: release-signing`, or its keyless \
-             signing identity silently stops being mintable"
+            block.contains("    environment: boot-image-signing\n"),
+            "{job} must use the boot-image protected environment, or its \
+             boot-image tag cannot mint a keyless signing identity"
         );
     }
     // The publish job signs the checksum manifests every downloader anchors on.
     assert!(
-        job_block(&boot_image, "publish-boot-image").contains("    environment: release-signing\n"),
-        "the boot image publish job signs, so it needs the same environment"
+        job_block(&boot_image, "publish-boot-image")
+            .contains("    environment: boot-image-signing\n"),
+        "the boot image publish job signs, so it needs the boot-image environment"
     );
     assert!(
         boot_image.contains("id-token: write"),
@@ -470,6 +477,15 @@ fn the_moved_jobs_keep_the_release_signing_environment() {
     assert!(
         boot_image.contains("contents: write"),
         "creating a release and uploading assets needs contents: write"
+    );
+}
+
+#[test]
+fn pages_workflow_installs_every_wasm_target_used_by_the_demo() {
+    let workflow = pages_workflow();
+    assert!(
+        workflow.contains("targets: wasm32-unknown-unknown, wasm32-wasip1"),
+        "pages.yml must install both the browser and guest WASM targets"
     );
 }
 

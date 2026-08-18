@@ -181,9 +181,10 @@ GitHub's current matching behaviour rather than trusting the sentence.
 
 Two details that are easy to lose in the move:
 
-- Those jobs run under `environment: release-signing`, which constrains which
-  ref can mint a keyless signing identity. The new workflow needs the same
-  environment, or pack signing silently stops working. `continue-on-error: true`
+- Those jobs run under the protected `environment: boot-image-signing`, whose
+  deployment rule admits only `boot-image/v*` refs. This keeps the tag namespace
+  constrained while leaving the CLI `release-signing` environment restricted to
+  `v*`. `continue-on-error: true`
   on the signing step means a broken identity does **not** fail the job — it just
   stops shipping a pack — so this failure is quiet by design and will not be
   noticed without looking.
@@ -453,6 +454,8 @@ mechanics on the artifact where a mistake is cheapest to correct.
 - [x] WS2 — `boot-image/v*` release train (semver from `v0.1.0`), dual-publish window, `DEFAULT_BOOT_IMAGE_TAG`
 - [x] WS3 — sidecar provenance fields + `mvmctl image boot status｜check｜update`
 - [x] WS4 — `MVM_BOOT_IMAGE` escape hatch + doctor readout
+- [x] Follow-up — Pages installs both WASM targets, and boot-image signing uses
+  a protected environment whose tag rule can admit `boot-image/v*`.
 
 **One piece of WS2 deliberately did not ship.** `DEFAULT_BOOT_IMAGE_TAG` exists but
 no consumer reads it. Repointing `download_default_microvm_image` /

@@ -44,7 +44,9 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.96.0
-          targets: wasm32-unknown-unknown
+          # The browser shim uses wasm32-unknown-unknown; the guest workload
+          # built by web/mvm-demo/build.sh uses wasm32-wasip1.
+          targets: wasm32-unknown-unknown, wasm32-wasip1
 
       - name: Install wasm-pack
         run: cargo install wasm-pack --locked

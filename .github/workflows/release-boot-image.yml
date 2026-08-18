@@ -56,11 +56,13 @@ jobs:
     # from the workflow ref that ran it. Gating the job on a protected
     # environment means the ref that can produce a valid signing identity is
     # constrained by the environment's deployment branch/tag rule (restricted
-    # to version tags in repo settings), with an optional required-reviewer
+    # to boot-image version tags in repo settings), with an optional required-reviewer
     # gate on top of the tag-push trigger already enforced above — so the
     # identity a released binary trusts can't be minted from an arbitrary
     # branch or workflow_dispatch run.
-    environment: release-signing
+    # The CLI release environment is restricted to v* tags; boot-image/v*
+    # releases use the matching protected environment instead.
+    environment: boot-image-signing
     strategy:
       matrix:
         include:
@@ -381,7 +383,7 @@ jobs:
     # runtime pack manifest under the same release.yml@<tag> identity class as
     # builder-vm-image — gating it behind the same protected environment
     # constrains which ref can mint a valid signing identity.
-    environment: release-signing
+    environment: boot-image-signing
     strategy:
       matrix:
         include:
@@ -647,7 +649,7 @@ jobs:
     # boot-image release went out carrying one arch and no builder VM, and
     # the CLI release next door then treated its existence as sufficient.
     if: ${{ !cancelled() && (github.event_name == 'push' || github.event.inputs.dry_run == 'false') }}
-    environment: release-signing
+    environment: boot-image-signing
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
