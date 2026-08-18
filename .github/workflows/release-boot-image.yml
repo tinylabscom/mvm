@@ -56,10 +56,12 @@ jobs:
     # from the workflow ref that ran it. Gating the job on a protected
     # environment means the ref that can produce a valid signing identity is
     # constrained by the environment's deployment branch/tag rule (restricted
-    # to version tags in repo settings), with an optional required-reviewer
+    # to boot-image version tags in repo settings), with an optional required-reviewer
     # gate on top of the tag-push trigger already enforced above — so the
     # identity a released binary trusts can't be minted from an arbitrary
     # branch or workflow_dispatch run.
+    # The CLI release environment is restricted to v* tags; boot-image/v*
+    # releases use the matching protected environment instead.
     environment: boot-image-signing
     strategy:
       # One arch's build must not cancel the other's. The sibling is a separate

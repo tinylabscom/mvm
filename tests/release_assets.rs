@@ -37,6 +37,12 @@ fn boot_image_workflow() -> String {
         .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()))
 }
 
+fn pages_workflow() -> String {
+    let path = Path::new(".github/workflows/pages.yml");
+    fs::read_to_string(path)
+        .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()))
+}
+
 fn assert_publishes(workflow: &str, asset: &str) {
     assert!(
         workflow.contains(asset),
@@ -480,6 +486,15 @@ fn the_moved_jobs_keep_the_boot_image_signing_environment() {
     assert!(
         boot_image.contains("contents: write"),
         "creating a release and uploading assets needs contents: write"
+    );
+}
+
+#[test]
+fn pages_workflow_installs_every_wasm_target_used_by_the_demo() {
+    let workflow = pages_workflow();
+    assert!(
+        workflow.contains("targets: wasm32-unknown-unknown, wasm32-wasip1"),
+        "pages.yml must install both the browser and guest WASM targets"
     );
 }
 
