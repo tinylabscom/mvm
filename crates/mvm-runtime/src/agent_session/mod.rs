@@ -273,11 +273,27 @@ impl AgentSessionStore {
 
     /// Park a session, refusing if it has moved past `expected_generation`.
     ///
-    /// The fence matters because two callers can hold the same record: without
-    /// it, a caller holding a pre-resume record would park the residency it
-    /// thinks is current and silently discard the newer one. The record is
-    /// written only after the transition is accepted, so a refused park leaves
-    /// what is on disk untouched.
+    /// What the fence does: refuses the park when the on-disk record is no
+    /// longer at the generation the caller expected — i.e. the caller is
+    /// working from a record some other transition has since superseded.
+    /// That's a real check with a real effect: it is what stops a caller
+    /// holding a pre-resume record from parking the residency it thinks is
+    /// current and silently discarding the newer one, and the record is
+    /// written only after the transition is accepted, so a refused park
+    /// leaves what is on disk untouched.
+    ///
+    /// What it does not do: this is a check-then-act pair (`load` then
+    /// `write`), not a compare-and-swap. Two callers that both `load` the
+    /// same on-disk generation will both pass the fence, and whichever
+    /// `write` lands second wins with no error to either caller — the fence
+    /// serializes against a transition that already happened, not against
+    /// one racing it right now.
+    ///
+    /// What that implies: a caller that can be invoked concurrently for the
+    /// same session must serialize its own calls into this method per
+    /// session id, or this module needs real file locking before such a
+    /// caller is wired in. Nothing in this module does that serialization
+    /// today.
     pub fn park(
         &self,
         id: &AgentSessionId,
@@ -293,6 +309,11 @@ impl AgentSessionStore {
     }
 
     /// Resume a session, refusing if it has moved past `expected_generation`.
+    ///
+    /// Same fence, same limit as `park`: it refuses a caller working from a
+    /// superseded record, but the load-then-write pair is not a
+    /// compare-and-swap, so it does not serialize two callers racing on the
+    /// same on-disk generation. See `park`'s doc for the full explanation.
     pub fn resume(
         &self,
         id: &AgentSessionId,
@@ -636,6 +657,10 @@ mod tests {
         next.generation = 2;
         store.write(&next).unwrap();
         assert_eq!(store.load(&rec.session_id).unwrap().generation, 2);
+        assert!(
+            !dir.join("session.json.tmp").exists(),
+            "the temp must be renamed away, not left beside the record"
+        );
     }
 
     #[test]
