@@ -189,7 +189,15 @@ mod linux {
 
     fn best_effort_raise_loopback() {
         match mvm_agentd::guest_net::bring_iface_up("lo") {
-            Ok(()) => eprintln!("stage0-init: brought loopback interface up"),
+            Ok(mvm_agentd::guest_net::GuestNetwork::Configured) => {
+                eprintln!("stage0-init: brought loopback interface up")
+            }
+            // Unlike eth0 on a workload guest, a kernel with no `lo` is not a
+            // tier — it is a kernel built without loopback. Say which it is
+            // rather than reporting a generic bring-up failure.
+            Ok(mvm_agentd::guest_net::GuestNetwork::NoInterface) => {
+                eprintln!("stage0-init: no loopback interface exists in this guest")
+            }
             Err(e) => eprintln!("stage0-init: bring_iface_up lo failed: {e}"),
         }
         let busybox = Path::new("/mvm-bins/busybox");
