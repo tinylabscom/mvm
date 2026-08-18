@@ -17,12 +17,18 @@ retention ladder) — unmerged at the time of writing, living on
 Two gaps sit between the workflow documents and an AI agent actually running
 inside an admitted microVM.
 
-**Tool calling has no defined surface.** ADR-045 section 8 governs what a
-controller's *planner* may do to the workflow graph. It says nothing about an
-ordinary workload agent emitting tool calls at a model's direction. Without a
-decision, a framework will reach for a guest-side client to whatever tool
-protocol it prefers, which is an unaudited egress path and a namespace that
-mutates under a running admission.
+**Host-mediated tool calling has no defined surface.** ADR-045 section 8
+governs what a controller's *planner* may do to the workflow graph. It says
+nothing about an ordinary workload agent emitting tool calls at a model's
+direction. Without a decision, a framework will reach for a guest-side client
+speaking outward to a remote tool server, which is an unaudited egress path
+and a namespace that mutates under a running admission.
+
+Scope, per ADR-045 section 18: this is about tools that cross the VM boundary,
+which is a handful of services. Tools running inside the guest — a shell, a
+browser driver, an interpreter, a local tool server the agent talks to over
+its own stdio — are deliberately out of scope and stay ungoverned, because the
+NIC-less, verity-sealed microVM is what bounds them.
 
 **Memory has no defined surface either.** The durable agent sessions design
 carries the *substrate* across sandboxes — checkpoint, journal cursor,
@@ -86,6 +92,12 @@ The memory plane has no existing piece beyond the broker it rides on.
       protocol client on any guest-reachable path, in the manner of
       `check-vsock-only-egress`. Without it this decision decays the first time
       a framework is vendored into a guest image.
+- [ ] The gate must catch a guest *originating a connection to a remote tool
+      server*, and must not catch a tool server running wholly inside the
+      guest over stdio or loopback — that is a supported in-guest tool, and a
+      gate that greps for the protocol's name rather than for outbound
+      connection setup would refuse it. A gate written the lazy way here
+      breaks the common packaging of that ecosystem.
 
 ### WS4 — Refusal is a signal
 
