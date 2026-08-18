@@ -1946,12 +1946,31 @@ fn test_setup_verb_is_unrecognized() {
     assert!(result.is_err(), "`setup` was folded into `bootstrap`");
 }
 
+/// `completions` was folded into a hidden `shell-init --emit-completions`
+/// flag, and this test pinned that. The fold is reversed: the reference
+/// documented the hidden flag as the way to get completions, so the capability
+/// was documented and unfindable at once. The verb is back, the hidden flag is
+/// gone, and the eval block calls the verb — one name, and it is the
+/// discoverable one.
 #[test]
-fn test_completions_verb_is_unrecognized() {
-    let result = Cli::try_parse_from(["mvmctl", "completions", "bash"]);
+fn completions_is_a_verb_and_the_eval_block_calls_it() {
+    let cli = Cli::try_parse_from(["mvmctl", "completions", "bash"])
+        .expect("`completions bash` must parse");
+    assert!(matches!(cli.command, Commands::Completions(_)));
+
     assert!(
-        result.is_err(),
-        "`completions` was folded into `shell-init`"
+        Cli::try_parse_from(["mvmctl", "shell-init", "--emit-completions", "bash"]).is_err(),
+        "the hidden flag must be gone, not shadowed by the verb"
+    );
+
+    let block = crate::shell_init::generate_block("/some/path");
+    assert!(
+        block.contains("mvmctl completions"),
+        "the eval block must call the public verb"
+    );
+    assert!(
+        !block.contains("--emit-completions"),
+        "and must not still call the removed flag"
     );
 }
 

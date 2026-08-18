@@ -6,6 +6,7 @@ mod builder_shell_job;
 mod bundle;
 pub mod catalog;
 mod cmd_audit;
+mod completions;
 mod dashboard;
 mod deploy;
 mod deps;
@@ -17,6 +18,7 @@ mod machine;
 mod manifest;
 mod ops;
 mod pack;
+mod plugin;
 /// Supervisor warm-pool: the `mvmctl pool warm/status` command + the launch glue
 /// (`try_warm_claim`) the transient `machine run` path
 /// (`crate::exec::run_inner`) calls to claim a warm standby (auto-named,
@@ -149,6 +151,12 @@ pub(in crate::commands) enum Commands {
     /// Measure this host's launch latency against the published budgets
     #[command(display_order = 7)]
     Bench(bench::Args),
+    /// Emit the integration files a coding agent needs to reach for mvm
+    #[command(display_order = 8)]
+    Plugin(plugin::Args),
+    /// Print a shell completion script
+    #[command(display_order = 8)]
+    Completions(completions::Args),
     /// Rebuild a workload when its local inputs change
     #[command(display_order = 8)]
     Watch(watch::Args),

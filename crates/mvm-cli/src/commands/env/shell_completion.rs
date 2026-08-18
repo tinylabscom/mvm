@@ -1,1 +1,1 @@
-pub(super) use super::completions::{Shell, render};
+pub(in crate::commands) use super::completions::{Shell, render};

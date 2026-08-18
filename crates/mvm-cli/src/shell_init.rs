@@ -132,10 +132,9 @@ mod tests {
     #[test]
     fn test_generate_block_contains_completions() {
         let block = generate_block("/some/path");
-        // The standalone `completions` verb was folded into
-        // `shell-init --emit-completions`; the block now calls back
-        // into shell-init for the per-shell completion script.
-        assert!(block.contains("mvmctl shell-init --emit-completions"));
+        // The block calls the public `completions` verb, not a hidden flag:
+        // one name for one thing, and it is the discoverable one.
+        assert!(block.contains("mvmctl completions"));
     }
 
     #[test]
