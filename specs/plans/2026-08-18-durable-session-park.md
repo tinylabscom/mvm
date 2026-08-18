@@ -11,7 +11,7 @@ transitions that would corrupt a session's identity — without yet touching a V
 
 **Architecture:** Extends `mvm_runtime::agent_session`, built by the substrate
 plan. The record gains the D1 fields it was missing (`journal_cursor`,
-`approval_head`, `tier`, `park_reason`), plus `park()` / `resume()` transitions.
+`approval_head`, `storage_tier`, `park_reason`), plus `park()` / `resume()` transitions.
 A park keeps the generation; a *resume* opens generation+1, which is what fences
 a late frame addressed to the prior generation. Store-level operations
 refuse a caller whose expected generation no longer matches what is on disk, so
@@ -62,7 +62,7 @@ pub struct AgentSessionRecord {
     // ... existing fields ...
     pub journal_cursor: u64,
     pub approval_head: Option<mvm_core::checkpoint::ApprovalHead>,
-    pub tier: Option<StorageTier>,
+    pub storage_tier: Option<StorageTier>,
     pub park_reason: Option<ParkReason>,
 }
 
@@ -97,10 +97,17 @@ that survives a memory image, so this must land before anything parks.
 - Consumes: nothing new.
 - Produces: no signature change — `write` keeps `(&self, &AgentSessionRecord) -> Result<()>`.
 
-**Note on reuse:** this repo has no shared atomic-write helper; the tmp+rename
-pattern is inlined at eleven-plus sites (see `crates/mvm-client/src/volume/lifecycle.rs`).
-Keep this copy **private to this module** rather than adding a twelfth public
-one, and do not refactor the other sites — that is a separate change.
+**Note on reuse (corrected after this task first landed):** this repo does
+carry a shared atomic-write helper, `mvm_core::atomic_io::atomic_write`
+(`crates/mvm-core/src/util/atomic_io.rs`), already used by `warm_artifacts.rs`,
+`vm/template/lifecycle/registry_sync.rs`, and `vm/name_registry.rs` in this
+same crate. Step 3 below originally added a private `write_then_rename` copy
+on the mistaken premise that no shared helper existed, with a fixed temp
+filename and no flush/`fdatasync` before rename — both weaker than the
+shared helper. A later pass deleted `write_then_rename` and switched `write`
+to call `mvm_core::atomic_io::atomic_write` directly; that is what ships
+today. The steps below are left as a record of what this task actually did at
+the time.
 
 - [x] **Step 1: Write the failing test**
 
@@ -196,6 +203,13 @@ fn write_then_rename(path: &Path, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 ```
+
+Both doc comments above ("Kept private to this module deliberately... adding
+another public copy would make the eventual consolidation harder") repeat the
+same mistaken premise the "Note on reuse" above corrects: a shared helper,
+`mvm_core::atomic_io::atomic_write`, already existed. `write_then_rename` was
+deleted in the later correction pass and `write` now calls that helper
+directly.
 
 - [x] **Step 4: Run tests to verify they pass**
 
@@ -368,7 +382,7 @@ addressed to the prior generation refusable after a resume.
         assert_eq!(parked.state, SandboxResidency::Hibernated);
         assert_eq!(parked.generation, 1, "a park suspends a residency, it does not end one");
         assert_eq!(parked.park_reason, Some(ParkReason::ApprovalWait));
-        assert_eq!(parked.tier, Some(StorageTier::Parked));
+        assert_eq!(parked.storage_tier, Some(StorageTier::Parked));
         assert_eq!(parked.updated_unix, 1_755_000_100);
     }
 
@@ -381,7 +395,7 @@ addressed to the prior generation refusable after a resume.
         assert_eq!(live.state, SandboxResidency::Active);
         assert_eq!(live.generation, 2, "a resume opens a new residency");
         assert_eq!(live.park_reason, None);
-        assert_eq!(live.tier, None);
+        assert_eq!(live.storage_tier, None);
         assert_eq!(live.updated_unix, 1_755_000_200);
     }
 
@@ -432,7 +446,7 @@ addressed to the prior generation refusable after a resume.
         let parsed: AgentSessionRecord = serde_json::from_str(old).unwrap();
         assert_eq!(parsed.journal_cursor, 0);
         assert_eq!(parsed.approval_head, None);
-        assert_eq!(parsed.tier, None);
+        assert_eq!(parsed.storage_tier, None);
         assert_eq!(parsed.park_reason, None);
     }
 ```
@@ -459,7 +473,7 @@ Add to `AgentSessionRecord`, after `parent_checkpoint`:
     pub approval_head: Option<mvm_core::checkpoint::ApprovalHead>,
     /// Where the parked state lives. `None` while the session is active.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tier: Option<StorageTier>,
+    pub storage_tier: Option<StorageTier>,
     /// Why the session was parked. `None` while the session is active.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub park_reason: Option<ParkReason>,
@@ -497,7 +511,7 @@ impl AgentSessionRecord {
         }
         Ok(Self {
             state: SandboxResidency::Hibernated,
-            tier: Some(select_tier(reason)),
+            storage_tier: Some(select_tier(reason)),
             park_reason: Some(reason),
             updated_unix: now_unix,
             ..self.clone()
@@ -517,7 +531,7 @@ impl AgentSessionRecord {
         Ok(Self {
             state: SandboxResidency::Active,
             generation: self.generation + 1,
-            tier: None,
+            storage_tier: None,
             park_reason: None,
             updated_unix: now_unix,
             ..self.clone()
@@ -732,10 +746,13 @@ which are built and which remain, accurately — do not tick what is not done.
 WS3 reads "Park path. `ParkReason`, tier selection, quiesce sequence over the
 existing guest verbs, hibernation record commit ordering." This plan delivers
 `ParkReason`, tier selection, and the transition/fence machinery. It does NOT
-deliver the quiesce sequence over the guest verbs — `SleepPrep`,
-`CheckpointIntegrations`, and `Wake` still have no host-side caller anywhere in
-the workspace. Mark WS3 partially complete with a note naming exactly what
-remains, rather than ticking it.
+deliver the quiesce sequence over the guest verbs from a park caller:
+`CheckpointIntegrations` and `Wake` still have no host-side caller anywhere in
+the workspace, and `GuestRequest::SleepPrep`'s one host-side caller — the
+Firecracker stop-time filesystem flush in
+`crates/mvm-backends/src/driver/fc.rs`'s `prepare_guest_filesystems_for_stop`
+— is unrelated to park. Mark WS3 partially complete with a note naming
+exactly what remains, rather than ticking it.
 
 - [x] **Step 3: Update `specs/REFACTOR-STATUS.md`**
 
@@ -779,10 +796,14 @@ git commit -m "docs: record the park state machine slice"
 
 Named so their absence is not read as an oversight:
 
-- **The quiesce sequence.** `GuestRequest::SleepPrep`, `CheckpointIntegrations`,
-  and `Wake` are defined in the agent's protocol but have no host-side caller
-  anywhere in the workspace. Wiring them is the rest of WS3 and needs a live
-  guest to test against.
+- **The quiesce sequence.** `CheckpointIntegrations` and `Wake` are defined in
+  the agent's protocol but have no host-side caller anywhere in the
+  workspace. `GuestRequest::SleepPrep` does have one — the Firecracker
+  stop-time filesystem flush at `crates/mvm-backends/src/driver/fc.rs`'s
+  `prepare_guest_filesystems_for_stop` — but nothing on a park path calls it.
+  Wiring park to reuse or extend that round-trip, and to drive
+  `CheckpointIntegrations`/`Wake`, is the rest of WS3 and needs a live guest
+  to test against.
 - **Resume admission (WS4).** `resume_session` synthesizing a fresh
   `ExecutionPlan` via `mvm_hostd::plan_admission::admit_for_run` and
   `mvm_core::plan::synthesis::SynthesisInput`, the incremental approval-ledger

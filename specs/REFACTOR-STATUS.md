@@ -299,19 +299,24 @@ for detailed scope and acceptance criteria.
       `mvm_core::config::agent_sessions_dir()`, with `parent_checkpoint`
       typed as a `CheckpointDigest` content-address rather than a mutable
       `CheckpointId`. `fork_checkpoint`/`fork_vm_full` explicitly clear the
-      binding on a forked child. The park slice adds crash-safe
-      (tmp+rename) record writes, `ParkReason`/`StorageTier`/`select_tier`,
-      four new record fields (`journal_cursor`, `approval_head`, `tier`,
-      `park_reason`), `AgentSessionRecord::park`/`resume` transitions with
+      binding on a forked child. The park slice adds crash-safe record
+      writes through the shared `mvm_core::atomic_io::atomic_write` helper,
+      `ParkReason`/`StorageTier`/`select_tier`, four new record fields
+      (`journal_cursor`, `approval_head`, `storage_tier`, `park_reason`),
+      `AgentSessionRecord::park`/`resume` transitions with
       `SessionTransitionError`, and store-level `park`/`resume` fenced on
       the caller's expected generation — a check-then-act refusal, not a
       compare-and-swap, so a second caller racing on the same generation is
       not yet serialized; the module has no call sites yet, so nothing races
       it in production today.
-      STILL OPEN: the quiesce sequence over the existing guest verbs
-      (`SleepPrep`/`CheckpointIntegrations`/`Wake` have no host-side caller
-      anywhere in the workspace) is the rest of WS3; WS4 resume admission,
-      WS5 retention ladder + GC, WS6 CLI, WS7 chain records, WS8 BDD.
+      STILL OPEN: the quiesce sequence over the existing guest verbs is the
+      rest of WS3 — `CheckpointIntegrations`/`Wake` have no host-side caller
+      anywhere in the workspace, and while `GuestRequest::SleepPrep` does
+      have one (the Firecracker stop-time filesystem flush at
+      `crates/mvm-backends/src/driver/fc.rs`'s
+      `prepare_guest_filesystems_for_stop`), nothing on a park path calls
+      it; WS4 resume admission, WS5 retention ladder + GC, WS6 CLI, WS7
+      chain records, WS8 BDD.
 
 - [~] **Admission-bound AI assurance sessions** —
       `specs/plans/2026-08-17-admission-bound-ai-assurance-sessions.md`. W1–W4

@@ -57,8 +57,12 @@ the retention policy that decision needs in order to span days.
 
 ### D1 — Hibernation: a third state between live and archived
 
-A session in `Hibernated` has released every host resource except storage. It
-is not `Active` (no live sandbox, no fabric session, no leases) and not
+A session in `Hibernated` is off its live sandbox identity and parked at
+whichever tier D4 selects for the reason. Only the `Resident` tier keeps a
+live paused process — and its memory — around, for the sake of a near-instant
+resume; `Parked` and `Cold` release the process, holding progressively less: a
+memory image on disk, or just the record and journal. Every tier is not
+`Active` (no live sandbox identity, no fabric session, no leases) and not
 `Closed` (not sealed, not purged, still resumable).
 
 ```text
@@ -145,7 +149,7 @@ pub enum ParkReason {
 
 The reason selects the storage tier. `ApprovalWait` and `HostShutdown` go
 directly to `Parked` — an operator decision has unbounded latency and must not
-hold RAM. `Idle` may linger in `Idle` first.
+hold RAM. `Idle` may linger in `Resident` first.
 
 Wake is driven by `ApprovalLedger::respond`
 (`crates/mvm-contract/src/policy/approval.rs:603`) reaching a terminal
@@ -161,7 +165,7 @@ silently widen.
 
 | Tier | Holds | Resume cost | Governed by |
 |---|---|---|---|
-| `Idle` | RAM (live paused process) | instant | `STANDBY_POOL_TTL` |
+| `Resident` | RAM (live paused process) | instant | `STANDBY_POOL_TTL` |
 | `Parked` | disk, GB-scale memory image | restore + blob read | session retention class |
 | `Cold` | KB (record + journal + meta) | boot + journal replay | session retention class |
 | `Closed` | archive only | not resumable | ADR-046 §13 |

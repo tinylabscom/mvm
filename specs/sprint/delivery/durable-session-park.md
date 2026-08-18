@@ -10,13 +10,15 @@ filesystem store `specs/plans/2026-08-18-durable-session-substrate.md` landed
 ## Delivered
 
 - **Crash-safe record writes.** `AgentSessionStore::write` was a truncating
-  write; a crash mid-write left `session.json` partial. It now writes to a
-  sibling `session.json.tmp` and renames over the destination, so a reader
-  only ever observes the prior complete record or the new one, never a
-  partial file. The rename pattern is kept private to the module rather than
-  promoted to a twelfth shared copy of the tmp+rename idiom already inlined
-  across the workspace (see `crates/mvm-client/src/volume/lifecycle.rs`);
-  consolidating those is a separate change.
+  write; a crash mid-write left `session.json` partial. It now goes through
+  the workspace's shared `mvm_core::atomic_io::atomic_write` — the same
+  helper `warm_artifacts.rs`, `vm/template/lifecycle/registry_sync.rs`, and
+  `vm/name_registry.rs` already call in this crate — so a reader only ever
+  observes the prior complete record or the new one, never a partial file,
+  and the write is flushed and `fdatasync`ed before the rename. (An earlier
+  pass on this branch added a private tmp+rename copy on the mistaken belief
+  that no shared helper existed; a later correction pass deleted it in favor
+  of the shared one.)
 - `mvm_runtime::agent_session::{ParkReason, StorageTier, select_tier}` —
   `ParkReason` (`ApprovalWait`, `Idle`, `HostShutdown`, `Operator`,
   `RetentionDemotion`) selects a `StorageTier` (`Resident`, `Parked`,
@@ -25,7 +27,7 @@ filesystem store `specs/plans/2026-08-18-durable-session-substrate.md` landed
   latency is unbounded — parks straight to disk, and a retention demotion
   goes to `Cold`. Both enums round-trip as `snake_case` over serde.
 - Four new fields on `AgentSessionRecord`: `journal_cursor` (u64),
-  `approval_head` (`Option<mvm_core::checkpoint::ApprovalHead>`), `tier`
+  `approval_head` (`Option<mvm_core::checkpoint::ApprovalHead>`), `storage_tier`
   (`Option<StorageTier>`), `park_reason` (`Option<ParkReason>`). All four are
   `#[serde(default)]` (the latter three also `skip_serializing_if`), so a
   record written before this plan still loads.
