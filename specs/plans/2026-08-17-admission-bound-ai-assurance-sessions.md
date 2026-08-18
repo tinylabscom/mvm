@@ -102,11 +102,37 @@ Three properties are structural rather than checked at runtime:
 
 ## Open
 
-- [ ] **W5 — Observer and cleanup evidence.** `EvidenceSet` is consumed by the
-      evaluator but nothing populates `observer_verified` /
-      `cleanup_verified` / `attestation_verified` from a real run yet. Until
-      that lands every live trial evaluates to `INCONCLUSIVE`, which is the
-      correct fail-closed behaviour and not a certifying result.
+- [~] **W5 — Cleanup and disposability evidence (partial).**
+      `assurance_session::collect_evidence` assembles the `EvidenceSet` from
+      what the host itself did or can check now, never from the workload or the
+      declaration. Two halves are genuinely evidence:
+
+      - `cleanup_verified` reads the state dir through
+        `state_dir_has_live_process`, the same probe the admission budget
+        trusts. A VM still running has not been cleaned up, whatever the plan
+        intended.
+      - `disposable_target` comes off the signed plan's `post_run`.
+
+      `attestation_verified` stays false — no provider is wired — and the
+      evaluator only consults it when the plan demands attestation, so a
+      demanding plan fails closed rather than being waved through.
+
+      **`observer_verified` is the honest limit.** It is true when *MVM* 
+      recorded a probe and an effect was attempted. That is real evidence the
+      trial was exercised, and it stops an unexercised session reading as
+      observed — but it is not an independent observer corroborating what
+      happened inside the guest, which is what the assurance contract means by
+      the word. A test
+      (`evidence_from_a_real_session_still_evaluates_inconclusive_today`)
+      assembles everything the host can attest and asserts the verdict is
+      *still* `INCONCLUSIVE` with reason `ObserverMissing`, so nobody mistakes
+      assembled evidence for a certifying result.
+
+- [ ] **W5b — A guest-side observer.** Reporting whether the attempted effect
+      took hold *inside* the VM needs a signal from the guest, corroborated
+      host-side. That is the remaining gap behind a non-`INCONCLUSIVE` outcome,
+      and it is a larger piece than the rest of W5 — closer in shape to W8's
+      provider work than to the evidence plumbing above.
 
 - [ ] **W8 — Provider binary.** The counterparty's
       `assurance run --provider <path>` spawns a framed-stdio provider speaking
