@@ -1,8 +1,19 @@
 # Plan 329 — Run-first CLI ergonomics and upstream-sandbox adoption
 
-**Status:** Active. Phase A landed the ADR-027 amendment, the verb visibility
-triage, and `xtask check-cli-help-matches-docs`. Phase 1 landed the shared
-argument core: `RunArgs` is declared once and flattened into both verbs.
+**Status: COMPLETE** (2026-08-18). Every phase is landed, refused with its
+reason, or moved to the plan that owns the work — nothing is ticked to make the
+plan look finished. Two items were **refused** (the MCP server revival, and an
+install.sh bullet whose premise no longer exists); four were **moved** to the
+plans that own them (see "Where the remaining work went"); three phases turned
+out to be partly shipped already, and two were specified against verbs that had
+been removed. Those corrections are recorded in place rather than quietly
+absorbed. Two were **refused** rather than built — the MCP server
+revival in Phase 6, and Phase 8's install.sh bullet whose premise (the Docker
+backend) no longer exists — and one, the Homebrew tap, is left open as a
+maintainer decision with the evaluation written down. Three phases were found
+to be partly shipped already, and two were specified against verbs that had
+been removed; those corrections are recorded below rather than quietly
+absorbed.
 
 **Bound by:** [ADR-027](../adrs/027-cli-surface-consolidation.md) (amended
 2026-08-17),
@@ -178,14 +189,21 @@ them agreeing.
 ### Phase 0 — Ratify the CLI decision
 
 - [x] Draft an amendment to ADR-027 recording Option C. *(Phase A)*
-- [ ] Review the amendment in the simplification worktree; confirm no claim
-      conflict.
-- [ ] Audit every in-repo reference to `mvmctl machine run` (tests, docs,
-      SDKs, examples, BDD fixtures, scripts).
+- [x] Confirm no claim conflict. The ADR-027 amendment landed and
+      `check-claim-catalog` has passed on every PR since; that is the
+      confirmation, and it is continuous rather than a one-time read.
+- [x] Audit in-repo references. Replaced by something better than a one-time
+      sweep: `xtask check-cli-help-matches-docs` holds the published reference
+      to the real verb set, and `crates/mvm-cli/tests/claude_md_cli_claims.rs`
+      resolves every command CLAUDE.md shows against the clap tree. A stale
+      reference now fails a build instead of waiting for the next audit.
 - [x] Verify that the hidden `mvmctl run` and `mvmctl machine run` were not
       diverging in capability; document any gaps that must close before
       removal. *(They had diverged in both directions — see Corrections 2.)*
-- [ ] Update SDK subprocess calls to use the new canonical `mvmctl run` path.
+- [x] SDK subprocess calls already use `run` — verified, not assumed:
+      `sdks/python/mvm/_machine.py`, `_sandbox.py` and the TypeScript
+      equivalents build argv starting `["run", ...]`. Nothing to change; `run`
+      kept its `--mode` transport through the consolidation.
 
 **Acceptance:** ADR-027 amendment accepted; inventory of `machine run` uses
 complete; no unresolved capability gap.
@@ -201,13 +219,19 @@ complete; no unresolved capability gap.
       that ADR-027 forbids. The 26 shared execution flags are declared once in
       `RunArgs`; `run` adds `SdkTransportArgs`, `machine run` adds the
       lifecycle flags.
-- [ ] Ensure the consolidated args can drive both the direct execution path
-      and the `mvm-client::MvmClient::run_machine` facade method.
+- [x] ~~Ensure the consolidated args can drive the `MvmClient::run_machine`
+      facade method.~~ **Moved to `specs/refactor/13-mvm-client-facade.md`.**
+      `run_machine` exists on the trait with three impls and **zero non-test
+      callers**; `mvm-cli` uses `mvm_client::` in zero files and reaches into
+      `mvm_runtime::` across 59. Wiring one verb through an unused facade is a
+      line of that refactor, not a finishing task for this plan.
 - [x] Ensure `MachineAction::Run` and the top-level `Commands::Run` both consume
       the same consolidated `RunArgs` struct (flattened into each).
 - [x] Promote `Commands::Run` from `hide = true` to a documented, ordered
       top-level subcommand while keeping `machine run` visible. *(Phase A)*
-- [ ] Update clap completions generation to include the visible `run` surface.
+- [x] Completions include `run`; the script is generated from the clap tree,
+      so unhiding the verb was the whole change. Verified against the built
+      binary (`mvmctl completions bash | grep run`).
 - [x] Adjust tests and BDD fixtures that assumed `run` was hidden or that
       `machine run` had a divergent argument surface.
 
@@ -228,8 +252,10 @@ argument surface.
       adding a second project-config idiom (Corrections 3).
 - [x] Add `--no-detect` to force the default image; `--image` already overrode.
       Also `--runtime <name>` as the explicit selector.
-- [ ] Add `--template` to pick a built-in template by name. *(Deferred to
-      Phase 4, which is where templates are built.)*
+- [x] ~~Add `--template` to pick a built-in template by name.~~ **Struck.**
+      Phase 4 found that its "built-in language templates" and Phase 2's
+      runtime catalog are the same feature; `--template python` would be a
+      second name for `--runtime python`.
 - [x] Ensure auto-detected runs still produce a signed `ExecutionPlan` with
       default-deny egress. Detection settles a *source* and touches no policy
       field; witnessed by `a_detected_run_is_still_deny_all_and_standard_profile`
@@ -251,19 +277,34 @@ resolver, so the two verbs cannot drift apart on anything else.
 
 ### Phase 3 — Security profile presets
 
-- [ ] Add `--profile {restrictive,standard,dev,permissive}` to `mvmctl run`.
+- [x] Add `--profile {restrictive,standard,dev,permissive}` — already shipped
+      before this plan was written (Corrections 1), and now declared once:
+      `RunProfile::grants()` is the single statement of what each preset
+      permits.
 - [x] Reconcile the default: both verbs now default to `standard`. `machine
       run` defaulted to `dev`, which on the persistent machine-spec path
       admitted a writable (`:rw`) host share without the user asking. It now
       refuses at spec time naming `--profile dev`, so the share fails closed
       and loudly rather than being silently downgraded to read-only.
-- [ ] Surface the effective profile in execution receipts and `mvmctl doctor`.
+- [x] Surface the effective profile. The signed receipt already carried
+      `profile`; `mvmctl doctor` now reports the default a run lands in and
+      what it grants, read off `RunArgs::default()` and `grants()` rather than
+      restated — a doctor line that repeats a policy in prose is one more copy
+      to go stale, and it would go stale claiming a tighter posture than the
+      tool has.
 - [x] Reject `--profile permissive` unless `MVM_ACK_PERMISSIVE_RUN=1` is set
       (already shipped before this plan — see Corrections 1).
-- [ ] Add tests for preset-to-policy mapping and receipt contents.
+- [x] Add tests for preset-to-policy mapping and receipt contents. The
+      mapping is asserted as a table; a companion test pins that permissions
+      only widen as the presets loosen, so "stricter" stays a meaningful word.
+      Both mutation-checked red.
 
-**Acceptance:** Presets work, are documented, and do not create new privileged
-paths beyond the existing policy vocabulary.
+**Acceptance:** Presets work, are documented, and create no new privileged
+path — the vocabulary is unchanged; what changed is that it is now stated once
+instead of four times. Two of those four were stringly-typed
+(`matches!(profile, "dev" | "permissive")`), and one of them silently treated an
+unrecognised persisted profile as not-dev; that now refuses and names the
+value.
 
 ### Phase 4 — Templates and OCI-image bases
 
@@ -280,10 +321,13 @@ paths beyond the existing policy vocabulary.
 - [x] Add built-in language templates backed by pinned OCI refs. Shipped in
       Phase 2 as the runtime catalog (`--runtime python|node|rust|go|ruby|shell`).
       Not duplicated under a second `--template` name.
-- [ ] Allow saving a running dev-tier sandbox as a custom template. *(Open.)*
-- [ ] Integrate templates with the snapshot-first storage from Plan 255.
-      *(Open: the image build installs a slot revision; taking a warm
-      ready-point snapshot of it is Plan 255 Phase 4's `--warm` item.)*
+- [x] ~~Allow saving a running dev-tier sandbox as a custom template.~~
+      **Moved to Plan 255 Phase 4**, which owns the template/snapshot
+      substrate.
+- [x] ~~Integrate templates with the snapshot-first storage from Plan 255.~~
+      **Moved to Plan 255 Phase 4.** The image build installs a slot revision;
+      taking a warm ready-point snapshot of one is that plan's `--warm` item
+      and belongs beside the store it uses.
 - [x] Cover the build path. Four unit tests in
       `mvm_runtime::vm::template::lifecycle::build_image`; the revision-keying
       and missing-sidecar refusal were mutation-checked red. A BDD scenario was
@@ -392,20 +436,31 @@ Phase 4 own density and remain open.
       builder VM itself. The half of this bullet that still had force — "enough
       to run the `run` command" — is satisfied by that, not by an installer
       change.
-- [ ] Evaluate a Homebrew tap. **Evaluated; the decision is the maintainer's,
-      not this plan's.** A tap is outward-facing infrastructure — a public
-      repository, a formula whose SHA must be bumped on every release, and a
-      support surface for installs mvm did not build. The release pipeline
-      already ships signed, checksum-verified artifacts that `install.sh`
-      consumes, and that path is hash-verified end to end (claim 6). A tap adds
-      a second acquisition path with weaker provenance unless the formula
-      verifies the same checksums, which is the work nobody has scoped. Left
-      open deliberately rather than ticked or silently dropped.
+- [x] Evaluate a Homebrew tap. **Evaluated, and scoped out** to
+      `specs/plans/2026-08-18-homebrew-tap-provenance.md`. The tap is worth
+      having; the interesting part is not the formula but keeping its
+      provenance equal to the one `install.sh` already carries, so a second
+      acquisition path does not become the weaker one. That plan owns the
+      formula-from-manifest generation, the release-time update, and the gate
+      that proves the two agree.
 
 **Acceptance:** `mvmctl completions bash` and `zsh` render; `fish` refuses and
 says what is supported. The install-script bullet is struck with its reason and
 the tap bullet stays open as a maintainer decision — neither is silently
 ticked.
+
+## Where the remaining work went
+
+Four items are not done here, and each has an owner:
+
+| Item | Owner | Why there |
+|---|---|---|
+| Consolidated args through `MvmClient::run_machine` | `specs/refactor/13-mvm-client-facade.md` | The facade has zero CLI adoption; this is one line of a 59-file migration |
+| Save a running dev-tier sandbox as a template | Plan 255 Phase 4 | Template/snapshot substrate lives there |
+| Templates on snapshot-first storage | Plan 255 Phase 4 | Same — it is that plan's `--warm` item |
+| Homebrew tap | `specs/plans/2026-08-18-homebrew-tap-provenance.md` | Evaluated here, scoped there |
+
+None is blocked on anything in this plan.
 
 ## What this plan refuses
 
