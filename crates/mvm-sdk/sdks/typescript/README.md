@@ -164,6 +164,30 @@ Published SDK packages use the ordinary `mvmctl` release; source-checkout
 users can still point `MVM_CLI_BIN` at a locally built `mvmctl`. CLI process
 failures raise `MachineError` with `argv`, `exitCode`, and captured `stderr`.
 
+## Experimental Obscura browser provider
+
+`new BrowserSandbox()` still defaults to Chromium. Obscura is an explicit,
+experimental opt-in for live development:
+
+```ts
+import { BrowserSandbox } from "@runmvm/mvm";
+
+const browser = new BrowserSandbox("obscura", {
+  network: {
+    mode: "none",
+    egress: { allowlist: [{ host: "example.com", port: 443 }] },
+  },
+});
+const websocketUrl = await browser.waitUntilReady();
+```
+
+Set `MVM_SDK_MODE=live`. The provider uses the exported `OBSCURA_IMAGE`, a
+digest-pinned OCI reference; fixes CDP to guest loopback; explicitly routes
+browser traffic through the mvm proxy; and rejects command overrides. It does
+not enable private-network access, stealth behavior, or unrestricted egress.
+Obscura is not a guaranteed drop-in replacement for every Playwright or
+Puppeteer flow.
+
 ## Local SDK development
 
 When changing the TypeScript SDK in this repo:

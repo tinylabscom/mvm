@@ -144,6 +144,30 @@ users can still point `MVM_CLI_BIN` at a locally built `mvmctl`. CLI process
 failures raise `mv.MachineError` with `argv`,
 `exit_code`, and captured `stderr`.
 
+## Experimental Obscura browser provider
+
+`BrowserSandbox()` still defaults to Chromium. Obscura is an explicit,
+experimental opt-in for live development:
+
+```python
+import mvm
+
+browser = mvm.BrowserSandbox(
+    "obscura",
+    network={
+        "mode": "none",
+        "egress": {"allowlist": [{"host": "example.com", "port": 443}]},
+    },
+)
+websocket_url = browser.wait_until_ready()
+```
+
+Set `MVM_SDK_MODE=live`. The provider uses `mvm.OBSCURA_IMAGE`, a digest-pinned
+OCI reference; fixes CDP to guest loopback; explicitly routes browser traffic
+through the mvm proxy; and rejects command overrides. It does not enable
+private-network access, stealth behavior, or unrestricted egress. Obscura is
+not a guaranteed drop-in replacement for every Playwright or Puppeteer flow.
+
 ## Local SDK development
 
 When changing the Python SDK in this repo:
