@@ -824,42 +824,40 @@ mod tests {
 
     #[test]
     fn park_then_resume_carries_the_resume_point_through_unchanged() {
-        // A fixture with every resume-critical field non-default: an empty
-        // `parent_checkpoint`/`journal_cursor`/`approval_head` would let a
-        // transition that dropped one of them pass the rest of the suite
-        // silently. `park` commits `journal_cursor`/`approval_head` from its
-        // `ParkInput`, and `resume` only touches `state`/`generation`/
-        // `storage_tier`/`park_reason`/`updated_unix` — resume has no business
-        // rewriting the resume point park just committed.
+        // `parent_checkpoint` is untouched by both transitions — it isn't
+        // part of `ParkInput` — so an empty fixture value would let a
+        // transition that dropped it pass silently; it must come through
+        // `park` and `resume` via `..self.clone()` unchanged.
+        //
+        // `journal_cursor` and `approval_head`, by contrast, are exactly
+        // what `park` sets from its `ParkInput`. Deliberately giving `park`
+        // values that differ from what the record already carries (rather
+        // than feeding it the record's own fields back) keeps the
+        // assertions below from comparing a value to itself by
+        // construction: they pin what `park` actually committed, and then
+        // that `resume` does not touch what `park` just committed.
         let mut rec = record("sess-alpha");
         rec.parent_checkpoint = Some(
             mvm_core::checkpoint::CheckpointDigest::parse(format!("sha256:{}", "cd".repeat(32)))
                 .unwrap(),
         );
-        rec.journal_cursor = 42;
-        rec.approval_head = Some(
-            mvm_core::checkpoint::ApprovalHead::parse(format!("sha256:{}", "ab".repeat(32)))
-                .unwrap(),
-        );
+        rec.journal_cursor = 1;
+        rec.approval_head = Some(head_of("11"));
 
-        let parked = rec
-            .park(
-                &ParkInput {
-                    reason: ParkReason::ApprovalWait,
-                    journal_cursor: rec.journal_cursor,
-                    approval_head: rec.approval_head.clone(),
-                },
-                100,
-            )
-            .unwrap();
+        let park_input = ParkInput {
+            reason: ParkReason::ApprovalWait,
+            journal_cursor: 42,
+            approval_head: Some(head_of("ab")),
+        };
+        let parked = rec.park(&park_input, 100).unwrap();
         assert_eq!(parked.parent_checkpoint, rec.parent_checkpoint);
-        assert_eq!(parked.journal_cursor, rec.journal_cursor);
-        assert_eq!(parked.approval_head, rec.approval_head);
+        assert_eq!(parked.journal_cursor, park_input.journal_cursor);
+        assert_eq!(parked.approval_head, park_input.approval_head);
 
         let resumed = parked.resume(200).unwrap();
         assert_eq!(resumed.parent_checkpoint, rec.parent_checkpoint);
-        assert_eq!(resumed.journal_cursor, rec.journal_cursor);
-        assert_eq!(resumed.approval_head, rec.approval_head);
+        assert_eq!(resumed.journal_cursor, park_input.journal_cursor);
+        assert_eq!(resumed.approval_head, park_input.approval_head);
     }
 
     fn head_of(byte: &str) -> mvm_core::checkpoint::ApprovalHead {
