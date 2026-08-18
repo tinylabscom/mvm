@@ -458,15 +458,41 @@ Repository signatures prove publication authorship, not truth or
 authorization. CIDs identify bytes, not principals or permissions. The local
 chain-signed audit remains authoritative forensic evidence.
 
-### 18. Agent tool calling is broker dispatch, and the catalog derives from the plan
+### 18. Host-mediated tool calling is broker dispatch, and the catalog derives from the plan
+
+Two different things get called an agent's tools, and only one of them is
+this project's to govern.
+
+**In-guest tools run inside the workload's own microVM**: a shell, a browser
+driver, a test runner, an interpreter, whatever the image carries or the agent
+installs. These are processes in the agent's own sandbox. mvm does not build
+them, catalog them, enumerate them, or permission them. An agent may choose
+freely among them, and the set is unbounded and mostly third-party by design.
+
+That is safe because of what the tier already is rather than because of any
+new control. A workload microVM has no NIC, its rootfs is dm-verity sealed,
+and it reaches no host filesystem beyond its explicit shares. A browser driver
+inside that VM can render, script, and drive an engine all it likes, and none
+of it leaves. Governing the toolbox would add ceremony without adding
+containment, because the boundary already contains it.
+
+**Host-mediated tools cross that boundary**: outbound network, secrets, audit,
+memory that outlives the VM, and — under section 3 — spawning another VM.
+These are the boundary, so they are the entire subject of this section, and
+there are on the order of half a dozen of them rather than an open registry.
+
+The distinction the design rests on is that authority attaches to *effects*,
+not to *tools*. An agent's choice of browser driver is its own business; that
+driver's outbound request is admitted or refused by destination at the
+per-VM substitution endpoint. The tool stays unrestricted and its effect stays
+governed, which is why nobody has to predict the toolbox in advance.
 
 Section 8 governs what a *controller's planner* may do to the workflow graph.
-It does not govern the tool surface of an ordinary AI workload: an agent
-inside an admitted microVM emitting tool calls at a model's direction. That
-surface is not a new plane. It is the host services broker of ADR-020, and it
-stays there.
+It does not govern either category above. The host-mediated surface is not a
+new plane: it is the host services broker of ADR-020, and it stays there.
 
-Every tool an agent may call is a `ServiceId` (`host.<name>.v<n>`) bound in
+Every host-mediated tool an agent may call is a `ServiceId`
+(`host.<name>.v<n>`) bound in
 `ExecutionPlan.services` and enforced before handler dispatch (claim 12).
 
 The direction of derivation is the decision:
@@ -497,13 +523,23 @@ admitted host-side only:
 - Discovery verbs are served from the plan binding, not proxied upstream.
 
 An upstream server that adds, renames, or redefines a tool mid-session
-therefore cannot widen a running guest's surface. A guest-side client would
-reintroduce an unaudited egress path and a mutable namespace, which the
-vsock-only posture of ADR-001 claim 10 and ADR-003 exists to prevent.
+therefore cannot widen a running guest's surface. A guest-side client speaking
+outward would reintroduce an unaudited egress path and a mutable namespace,
+which the vsock-only posture of ADR-001 claim 10 and ADR-003 exists to
+prevent.
 
-A tool surface is fixed for the lifetime of an admission. It changes at an
-epoch boundary, by re-admission, or not at all. A mid-epoch mutable namespace
-is unauditable by construction: there is no finite set to have checked.
+What this does **not** restrict is a tool server running entirely inside the
+guest — a local subprocess an agent talks to over its own stdio or loopback,
+which is how much of that ecosystem is packaged. That is an in-guest tool: it
+is the image's business, it is unrestricted, and any outbound request it makes
+is admitted by destination like every other. The rule is about a guest
+originating connections to a remote server, not about the protocol.
+
+A host-mediated tool surface is fixed for the lifetime of an admission. It
+changes at an epoch boundary, by re-admission, or not at all. A mid-epoch
+mutable namespace is unauditable by construction: there is no finite set to
+have checked. The in-guest toolbox has no such rule and needs none — it is
+bounded by the VM, not by a list.
 
 ### 19. Tool results are data, and injection cannot widen the action set
 
@@ -567,11 +603,13 @@ The implementation must preserve all of the following:
 20. Semantic assertions cannot widen a live constraint snapshot.
 21. A used workload VM never reenters shared warm capacity.
 22. Guest-visible handles do not expose physical host routes or authority.
-23. Every agent-callable tool is a plan-bound service; the catalog presented to
-    a model derives from that binding and never the reverse.
+23. Every host-mediated tool is a plan-bound service; the catalog presented to
+    a model derives from that binding and never the reverse. Tools running
+    inside the guest are out of scope, and the microVM boundary is what
+    bounds them.
 24. No guest speaks a tool-discovery protocol outward; upstream tools compile
     host-side at admission, inside the plan digest.
-25. A tool surface is fixed for the lifetime of an admission.
+25. A host-mediated tool surface is fixed for the lifetime of an admission.
 26. Tool results are data on the stream and mailbox planes, and carry no
     authority.
 ```
