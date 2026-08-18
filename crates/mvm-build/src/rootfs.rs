@@ -34,6 +34,16 @@ const DEFAULT_GUEST_OUTPUT_DEVICE: &str = "/dev/vdc";
 /// regardless of which features its own build enables.
 pub const STAGE0_WORK_EXT4_LABEL: &str = "mvm-work";
 
+/// ext4 volume label on the persistent Stage 0 Nix store image.
+///
+/// The store used to be located by device letter, which couples it to how many
+/// block devices the backend happens to attach ahead of it. Adding one drive —
+/// the FlowMux identity disk — shifted every device behind it, so the guest
+/// mounted a 32 KiB identity image as its Nix store, failed, and silently fell
+/// back to a RAM-backed tmpfs that cannot hold a kernel source tree. The build
+/// then died thousands of lines later on `No space left on device`.
+pub const STAGE0_NIX_STORE_EXT4_LABEL: &str = "mvm-nix-store";
+
 /// Inputs for [`materialize_ext4`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MaterializeExt4Input {

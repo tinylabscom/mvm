@@ -218,20 +218,36 @@ argument surface.
 
 ### Phase 2 — Runtime auto-detection
 
-- [ ] Define a small, auditable runtime catalog mapping command names and
-      project files to OCI image refs (e.g. `python3` / `requirements.txt` →
-      `python:3.12-alpine`, `cargo` / `Cargo.toml` → `rust:1.85-alpine`).
-- [ ] Implement detection order: explicit `--image`, then argv[0], then
-      project files in the working directory, then the bundled default image.
-- [ ] Add `--no-detect` to force the default image, and `--image` to override.
-- [ ] Add `--template` to pick a built-in template by name.
-- [ ] Ensure auto-detected runs still produce a signed `ExecutionPlan` with
-      default-deny egress.
-- [ ] Add unit tests for each detection rule and BDD scenarios for at least
-      Python, Node, Rust, and Go.
+- [x] Define a small, auditable runtime catalog mapping command names and
+      project files to OCI image refs. `mvm_core::runtime_catalog`, modelled on
+      the existing `Catalog`/`CatalogEntry` — same `search`/`find` shape, same
+      `schema_version`. In-tree, never fetched at runtime.
+- [x] Implement detection order: explicit source, `--runtime`, `--no-detect`,
+      `mvm.toml` walk-up, argv[0], project files, bundled default. **Reuses
+      `mvm_core::domain::manifest::discover_manifest_from_dir`** rather than
+      adding a second project-config idiom (Corrections 3).
+- [x] Add `--no-detect` to force the default image; `--image` already overrode.
+      Also `--runtime <name>` as the explicit selector.
+- [ ] Add `--template` to pick a built-in template by name. *(Deferred to
+      Phase 4, which is where templates are built.)*
+- [x] Ensure auto-detected runs still produce a signed `ExecutionPlan` with
+      default-deny egress. Detection settles a *source* and touches no policy
+      field; witnessed by `a_detected_run_is_still_deny_all_and_standard_profile`
+      and a BDD scenario asserting `profile: standard` / `network: deny-all`.
+- [x] Add unit tests for each detection rule (12 in `mvm-core`, 12 in the CLI
+      resolver) and BDD scenarios. Ordering and refusal rules mutation-checked
+      red before being believed.
 
 **Acceptance:** `mvmctl run python3 -c "print('ok')"` boots the right image
 without a manifest; detection is deterministic and tested.
+
+**Scope correction made while building it:** inference is `mvmctl run` only.
+`machine run` creates a named, possibly persistent machine, and picking its base
+image from the working directory is a footgun there — before the split,
+`machine run` inside any Rust checkout silently chose `rust:1-alpine`. It keeps
+its error naming every way to supply a source. `--runtime` works on both, since
+that is the user naming one. The seam is one `Inference` enum passed to one
+resolver, so the two verbs cannot drift apart on anything else.
 
 ### Phase 3 — Security profile presets
 
@@ -251,16 +267,38 @@ paths beyond the existing policy vocabulary.
 
 ### Phase 4 — Templates and OCI-image bases
 
-- [ ] Implement `mvmctl template build --image <ref>` as a first-class path,
-      alongside the existing Nix-flake path.
-- [ ] Add built-in language templates (python, node, rust, go, ruby, java,
-      shell, data-science, web-dev) backed by pinned OCI refs.
-- [ ] Allow saving a running dev-tier sandbox as a custom template.
+- [x] Implement an image-backed build path alongside the Nix-flake one.
+      **Spelled differently than this plan says**, because `mvmctl template
+      build` no longer exists: PR #62 ("Manifest-driven template DX", plans
+      38–40, 2026-05-04) collapsed `template init/create/build NAME` into a
+      manifest file discovered by path, keying slots by
+      `sha256(canonical_manifest_path)` instead of user-invented names. The
+      post-38 spelling is `mvmctl machine build <path>` on an `mvm.toml`
+      carrying `image = "..."`. The manifest half already existed — `image`
+      has been a validated, mutually-exclusive source selector all along;
+      `build` refused it with "image-backed builds are not wired yet".
+- [x] Add built-in language templates backed by pinned OCI refs. Shipped in
+      Phase 2 as the runtime catalog (`--runtime python|node|rust|go|ruby|shell`).
+      Not duplicated under a second `--template` name.
+- [ ] Allow saving a running dev-tier sandbox as a custom template. *(Open.)*
 - [ ] Integrate templates with the snapshot-first storage from Plan 255.
-- [ ] Add BDD scenarios for template build, save, and reuse.
+      *(Open: the image build installs a slot revision; taking a warm
+      ready-point snapshot of it is Plan 255 Phase 4's `--warm` item.)*
+- [x] Cover the build path. Four unit tests in
+      `mvm_runtime::vm::template::lifecycle::build_image`; the revision-keying
+      and missing-sidecar refusal were mutation-checked red. A BDD scenario was
+      written and then **deleted**: it asserted `machine build --help` mentions
+      "manifest", which passes with the feature reverted. Real BDD coverage
+      needs a registry pull, which the hermetic suite does not do.
 
-**Acceptance:** A user can `mvmctl template build --image python:3.12-alpine`
-and then `mvmctl run --template python <script>`.
+**Acceptance (restated for the post-38 spelling):** a user can put
+`image = "alpine:3.20"` in an `mvm.toml`, run `mvmctl machine build .`, and then
+`mvmctl machine run --manifest ./mvm.toml`. Verified by hand end to end: the
+slot revision holds `rootfs.ext4`, `vmlinux`, `mvm-meta.json`, `fc-base.json`
+and `revision.json`, rebuilding the same reference is idempotent, and
+`--manifest` resolves the slot.
+
+The `--runtime` half of the original acceptance shipped in Phase 2.
 
 ### Phase 5 — Snapshot/fork DX
 

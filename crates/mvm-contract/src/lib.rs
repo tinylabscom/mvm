@@ -22,6 +22,11 @@
 
 extern crate alloc;
 
+/// Admission-bound AI assurance sessions: the input envelope an AI
+/// workload receives after admission, the authority it runs under, and
+/// the host-derived outcome of a trial.
+#[cfg(feature = "protocol")]
+pub mod assurance;
 /// The one error a generated builder returns: a required field was
 /// never set. Shared so every input struct reports it identically.
 pub mod builder;

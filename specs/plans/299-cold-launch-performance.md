@@ -505,6 +505,60 @@ a launch appends ~6 entries, so admission cost up to 24 MiB of reads per launch
 a sawtooth in `admit` that no sample would explain. It now reads a bounded tail
 window and widens only if a record spans it.
 
+### The `command` span was a 50 ms floor in the guest agent
+
+`command` — authenticated agent to finished guest command — was 52.5 ms for
+`/bin/true`, and constant to a tenth of a millisecond across runs (52.5, 52.7,
+52.9). A constant is the shape of a floor.
+
+`exec_stream`'s wait loop slept a flat 50 ms whenever `try_wait` returned
+`None`. A command that exits in microseconds always loses that first race — the
+child cannot have been reaped by the time the loop reaches it — so the second
+check found it already gone, having waited the whole interval to look. Nothing
+could finish this span in under 50 ms.
+
+This is the fifth site of the cadence bug, and the first one inside the guest
+rather than on the host, which is why the four Phase 5 fixes and the two seal
+fixes never came near it. It now shares `mvm_core::poll_backoff` with the other
+four, with the idle counter reset on any output so a chatty command keeps
+draining at the fast end rather than decaying to the ceiling — this loop drains
+stdout/stderr on each pass, so the ceiling bounds streaming latency as well as
+exit latency.
+
+Measured, release, HVF/macOS: **52.5 -> 4.6-5.4 ms**.
+
+### Where prepared cold stands after this branch
+
+Release, HVF/macOS, `machine run --image alpine -- true`, warm artifact cache,
+first (cold) sample discarded — **9 samples, not the 20 a publishable lane
+requires**, because the host became too loaded to sample further:
+
+| span | before this branch | after |
+|---|---:|---:|
+| `admit` | 47.4 | 36-40 |
+| `vsock_wait` | 58.2 | 61-70 |
+| `command` | 52.0 | **4.6-5.4** |
+| `teardown` | 91.4 | **39-48** |
+| **total** | **287.2** | **p50 191.2, max 196.2** |
+
+`dispatch_window` is 79-85 ms against its 200 ms p50 budget, unchanged in
+substance by this branch — every cut here is outside the window the contract
+measures, which is the point: the contract was already met and the user-visible
+number was not.
+
+Three caveats, stated because the table above is the kind of thing that gets
+quoted without them. Nine samples is not the lane's 20, so there is no p95/p99
+here and these are not publishable numbers. `vsock_wait` drifted *up* slightly
+and is now the largest remaining span — it is Phase 5's event-driven readiness
+task and untouched by this branch. And `teardown` is still ~40 ms of which
+~33 ms is the guest-RAM reclaim measured above, so it scales with workload size
+and this 512 MiB figure is the best case.
+
+Remaining, in size order: `vsock_wait` 61-70 ms (Phase 5), `teardown` ~40 ms
+(guest-RAM reclaim, Phase 6), `admit` 36-40 ms (of which ~22 ms is three
+`F_FULLFSYNC`s — the chain batch, the receipt, and `plan.json`; the receipt is
+the open durability question above).
+
 ### `stop_pid_disappearance` is guest-RAM teardown, ~48 ms/GB — open
 
 The remaining teardown span. Two candidates were on the table: the 5 ms

@@ -1,0 +1,63 @@
+name: Install apt build dependencies
+description: |
+  `apt-get` against a stalled mirror, with a bounded wait and retries.
+
+  Every lane that compiles installs a handful of system packages first, and a
+  bare `apt-get update && apt-get install` inherits apt's own behaviour when a
+  mirror stops answering: it waits, indefinitely, until the *job* times out an
+  hour later. The job is then `cancelled`, every step after it is `skipped`,
+  and the aggregate lanes that require it report failure — so a network stall
+  on a runner reads as a red pull request, and reads identically to a real
+  break until someone opens the run and sees which step died.
+
+  Bounding the wait converts that hour into a few minutes and a legible error.
+  Retrying absorbs the common case, which is one mirror being briefly
+  unavailable rather than the network being down.
+
+inputs:
+  packages:
+    description: Space-separated package list.
+    required: true
+  attempts:
+    description: How many times to try the update+install pair.
+    required: false
+    default: "3"
+  timeout-seconds:
+    description: Per-attempt ceiling for update and for install, each.
+    required: false
+    default: "180"
+
+runs:
+  using: composite
+  steps:
+    - name: Install ${{ inputs.packages }}
+      shell: bash
+      env:
+        MVM_APT_PACKAGES: ${{ inputs.packages }}
+        MVM_APT_ATTEMPTS: ${{ inputs.attempts }}
+        MVM_APT_TIMEOUT: ${{ inputs.timeout-seconds }}
+      run: |
+        set -euo pipefail
+
+        # These two repositories are the ones observed stalling on hosted
+        # runners, and nothing here needs them.
+        sudo rm -f /etc/apt/sources.list.d/microsoft*.list \
+                   /etc/apt/sources.list.d/azure*.list
+
+        export DEBIAN_FRONTEND=noninteractive
+
+        for attempt in $(seq 1 "$MVM_APT_ATTEMPTS"); do
+          if timeout "$MVM_APT_TIMEOUT" sudo -E apt-get update \
+            && timeout "$MVM_APT_TIMEOUT" sudo -E apt-get install -y --no-install-recommends $MVM_APT_PACKAGES; then
+            echo "apt: installed on attempt $attempt"
+            exit 0
+          fi
+          echo "::warning::apt attempt $attempt/$MVM_APT_ATTEMPTS failed or timed out after ${MVM_APT_TIMEOUT}s"
+          sleep $(( attempt * 5 ))
+        done
+
+        # Say what happened rather than letting the caller infer it from a
+        # missing binary several steps later.
+        echo "::error::apt failed ${MVM_APT_ATTEMPTS} times installing: ${MVM_APT_PACKAGES}." >&2
+        echo "Each attempt was bounded at ${MVM_APT_TIMEOUT}s. A mirror is unreachable or slow; this is infrastructure, not the diff under test." >&2
+        exit 1

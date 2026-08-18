@@ -340,16 +340,22 @@ wasm-clean; clippy/test green.
 
 ### Phase 4 — OCI-image template build path
 
-- [ ] Add `mvmctl template build --image <oci-ref>` support in `mvm-cli`,
-      routed through `mvm-client` to `mvm-sdk`/`mvm-build`.
-- [ ] Reuse `mvm-fs::oci` fetch/unpack and the ext4 writer to materialize the
-      template rootfs.
+- [x] Add image-backed build support in `mvm-cli`, routed through `mvm-client`.
+      **`mvmctl template build` does not exist** — the `template *` mutation
+      namespace was collapsed into manifest-keyed slots by PR #62 (plans 38–40,
+      2026-05-04). The post-38 spelling is `mvmctl machine build <path>` on an
+      `mvm.toml` carrying `image = "..."`.
+- [x] Reuse `mvm-fs::oci` fetch/unpack and the ext4 writer to materialize the
+      rootfs — via `mvm_client::local::materialize_image_rootfs`, which is the
+      same call `run --image` boots through, so there is one materializer
+      rather than two that could disagree.
 - [ ] Optionally take a ready-point snapshot to produce a warm template if
       `--warm` is given.
 - [ ] Ensure the produced template emits the same signed `ExecutionPlan` /
       bundle shape as the Nix path, so admission and audit are uniform.
-- [ ] Add BDD scenario: `template build --image alpine` followed by
-      `machine run --template <id>`.
+- [ ] Add a scenario covering build-then-boot. Deferred: it needs a registry
+      pull, which the hermetic BDD suite does not do. Covered instead by four
+      unit tests plus a hand-run end-to-end.
 
 **Acceptance gate:** OCI-built template is signed, admits cleanly, and boots;
 Nix-built templates still work; clippy/test green.

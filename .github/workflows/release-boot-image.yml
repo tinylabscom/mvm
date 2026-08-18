@@ -495,6 +495,30 @@ jobs:
       - uses: ./.github/actions/install-zigbuild
         if: matrix.arch == 'x86_64'
 
+      # The prod rootfs resolves its agent from /mvm/runtime, which is the
+      # runtime overlay attached as a second virtio-blk drive. It is built by a
+      # sibling job on a different runner, so this one has to build its own
+      # copy — the nix store is already warm from the image build above, so
+      # this is a store lookup far more often than a build. Without it the
+      # guest panics at `Attempted to kill init!` and the gate reports a broken
+      # image when the image is fine and the harness was incomplete.
+      - name: Build the runtime overlay for the boot gate
+        if: matrix.arch == 'x86_64'
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          SYSTEM="${ARCH}-linux"
+          OVERLAY_PATH=$(nix build "./nix/images/runtime-overlay#packages.${SYSTEM}.default" \
+            --no-link --print-out-paths | head -1)
+          mkdir -p overlay-staging
+          # cp -L so `overlay.*` resolve through nix-store symlinks.
+          cp -L "$OVERLAY_PATH/overlay.ext4"     overlay-staging/overlay.ext4
+          cp -L "$OVERLAY_PATH/overlay.verity"   overlay-staging/overlay.verity
+          cp -L "$OVERLAY_PATH/overlay.roothash" overlay-staging/overlay.roothash
+          echo "MVM_RUNTIME_BOOT_OVERLAY_ROOTHASH=$(tr -d '[:space:]' < overlay-staging/overlay.roothash)" \
+            >> "$GITHUB_ENV"
+
       - name: Boot the staged image before it becomes a release asset
         if: matrix.arch == 'x86_64'
         # Boots the artifact in `staging/`, never a published one — the whole
@@ -510,6 +534,8 @@ jobs:
           MVM_RUNTIME_BOOT_BACKEND: firecracker
           MVM_RUNTIME_BOOT_KERNEL: staging/default-microvm-vmlinux-x86_64
           MVM_RUNTIME_BOOT_ROOTFS: staging/default-microvm-rootfs-x86_64.ext4
+          MVM_RUNTIME_BOOT_OVERLAY: overlay-staging/overlay.ext4
+          MVM_RUNTIME_BOOT_OVERLAY_VERITY: overlay-staging/overlay.verity
           MVM_RUNTIME_BOOT_READY: guest-agent
           MVM_RUNTIME_BOOT_RUNS: "1"
           MVM_RUNTIME_BOOT_CONCURRENT: "1"

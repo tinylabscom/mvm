@@ -106,6 +106,7 @@ guest-RPC surface, fleet-shaped workflows).
 
 | Command | Description |
 |---------|-------------|
+| `mvmctl machine build <path>` | Build the slot for a manifest directory. A `flake =` manifest builds through Nix in the builder VM; an `image =` manifest materializes the OCI reference through the same path `run --image` boots, then installs it as a slot revision |
 | `mvmctl kernel build` | Build the custom microVM kernels (builder and workload) |
 | `mvmctl build image <path>` | Build from Mvmfile.toml in the given directory |
 | `mvmctl build image --flake <ref>` | Build from a Nix flake (local or remote) |
@@ -355,6 +356,9 @@ shell).
 |---------|-------------|
 | `mvmctl run -- <cmd>...` | Boot the bundled default microVM image, run `<cmd>`, exit |
 | `mvmctl run --manifest <name-or-path> -- <cmd>...` | Boot a registered manifest/template instead of the default |
+| `mvmctl run npm test` | Infer the runtime when no source flag is given (see **Runtime detection** below) |
+| `mvmctl run --runtime <name> -- <cmd>...` | Boot a named runtime from the built-in catalog; an unknown name is refused, never defaulted |
+| `mvmctl run --no-detect -- <cmd>...` | Skip inference and use the bundled default image |
 | `mvmctl run --image <ref> -- <cmd>...` | Pull or reuse a cached OCI image, emit signed audit-chain provenance for the resolved image, boot its prepared OCI rootfs (read-only virtiofs-root on capable dev-tier backends, otherwise block `rootfs.ext4`), run `<cmd>`, exit |
 | `mvmctl run --image <ref> --prod -- <cmd>...` | Production OCI-image policy: require `<ref>` to be digest-pinned and cosign-verified by the OCI policy before cache use or boot |
 | `mvmctl run --profile standard -- <cmd>` | Default profile on both `run` and `machine run`: explicit env is allowed; host shares must be read-only |
@@ -383,6 +387,53 @@ the default image, start a VM, execute the command, or write a receipt.
 `run --json` is intended for machine callers. It preserves the command's exit
 code, but the JSON does not include raw argv, env values, stdout, stderr, or host
 paths.
+
+### Runtime detection
+
+With no `--image` / `--manifest` / `--flake` / `--deployment` / `--runtime-pack`,
+`mvmctl run` settles the boot source in this order. The order is the contract:
+
+1. **An explicit source flag.** Nothing is inferred.
+2. **`--runtime <name>`** against the built-in catalog. An unknown name is
+   refused and lists the known ones — a typo never falls through to a default.
+3. **`--no-detect`** stops here, leaving the bundled default image.
+4. **An `mvm.toml` (or `Mvmfile.toml`)** in or above the working directory,
+   found by the same walk-up `mvmctl build` uses, stopping at a `.git` boundary.
+5. **The command, then a project file.** `npm` selects node; `Cargo.toml`
+   selects rust. The command wins over the directory — argv is what you just
+   typed, the directory is where you happened to be standing.
+6. **The bundled default image.**
+
+| Runtime | Image | Commands | Project files |
+|---------|-------|----------|---------------|
+| `python` | `python:3.12-alpine` | `python`, `python3`, `pip`, `pip3`, `pytest` | `pyproject.toml`, `requirements.txt`, `Pipfile`, `setup.py` |
+| `node` | `node:22-alpine` | `node`, `npm`, `npx`, `yarn`, `pnpm` | `package.json` |
+| `rust` | `rust:1-alpine` | `cargo`, `rustc` | `Cargo.toml` |
+| `go` | `golang:1-alpine` | `go`, `gofmt` | `go.mod` |
+| `ruby` | `ruby:3-alpine` | `ruby`, `bundle`, `rake`, `gem` | `Gemfile`, `Rakefile` |
+| `shell` | `alpine:3` | `sh`, `bash`, `ash` | — |
+
+An inferred source always announces itself on stderr before booting
+(`[mvm] detected node from the command `npm` — booting node:22-alpine`), so a
+run never boots an image you did not choose without saying so. `--json` stdout
+is unaffected.
+
+Detection picks a **source**, never a posture. An inferred run admits through
+the same signed `ExecutionPlan`, with the same `--profile standard` default and
+the same deny-all egress, as one that named its image.
+
+**`machine run` does not infer.** Steps 4 and 5 are skipped there: it creates a
+named, possibly persistent machine, and picking its base image from whatever
+directory you were standing in is a footgun — `machine run` inside any Rust
+checkout would quietly build a machine on `rust:1-alpine`. It keeps its error
+naming every way to supply a source. `--runtime <name>` works on both verbs,
+because that is you naming one.
+
+The catalog is curated, in-tree, and versioned with the code; it is never
+fetched at runtime. Its refs are **tags, not digests**, which is deliberate:
+they are a dev-tier convenience. `--prod` refuses a mutable reference before any
+network fetch, so a production run cannot inherit a detected tag — it has to
+name a digest.
 
 ## Machine (beginner UX)
 

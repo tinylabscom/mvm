@@ -355,6 +355,16 @@ fn workload_needs_raw_ip_stack(workload_ir: Option<&std::path::Path>) -> Result<
 }
 
 pub(super) fn run_dispatch(cli: &Cli, mut args: MachineRunArgs, cfg: &MvmConfig) -> Result<()> {
+    // Settle the boot source before `resolve_mode` decides whether one is
+    // missing — the same resolver `mvmctl run` uses, so the two verbs infer
+    // identically or not at all.
+    let cwd = std::env::current_dir().context("resolving the working directory")?;
+    crate::commands::vm::exec::resolve_run_source(
+        &mut args.run,
+        &cwd,
+        crate::commands::vm::exec::Inference::ExplicitOnly,
+    )?
+    .announce();
     let resolved_flake_slot = if let Some(flake_ref) = args.run.flake.take() {
         let slot_hash = build::build_flake_to_slot(&flake_ref, args.run.flake_profile.as_deref())?;
         args.run.manifest = Some(slot_hash.clone());

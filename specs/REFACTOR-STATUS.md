@@ -1,6 +1,6 @@
 # Refactor status
 
-Last updated: 2026-08-17
+Last updated: 2026-08-18
 
 This is the cross-plan progress index. The owning plan remains authoritative
 for detailed scope and acceptance criteria.
@@ -284,6 +284,21 @@ for detailed scope and acceptance criteria.
       zero; the later workload boot stopped at a separate readiness timeout.
 
 ## In-flight plans
+
+- [~] **Admission-bound AI assurance sessions** —
+      `specs/plans/2026-08-17-admission-bound-ai-assurance-sessions.md`. W1–W3
+      landed: the `mvm.assurance.ai-session-input/v1` envelope (provider half
+      cannot carry admission facts; the assembled envelope has no
+      `Deserialize`), the five-way `EffectiveAuthority` intersection, the
+      host-derived fail-closed outcome ladder, and `host.assurance.v1` — one
+      declared probe verb, binding-gated, taking a destination *label* the host
+      resolves rather than anything the model composed. Conformed to the
+      counterparty's exact key sets, which disagreed with the implementation
+      prompt in three places (see the plan's drift note). 65 tests.
+      STILL OPEN: W4 guest-side API, W5 observer/cleanup evidence, W6 session
+      lifecycle on the admit path, W7 receipt/audit emission, W8 the
+      framed-stdio provider binary. Until W5–W8 land every live trial
+      evaluates `INCONCLUSIVE` by design; no certifying campaign can run.
 
 - [~] **Embedded-binary content store** — `specs/plans/2026-08-17-embedded-binary-content-store.md`.
       Phases 1–2 landed: both nested legs of `crates/mvm-cli/build.rs` are keyed
@@ -682,7 +697,12 @@ for detailed scope and acceptance criteria.
     Measured on release, HVF/macOS, against an unchanged control span in the
     same runs: `stop_console_cleanup` 57.0 -> 7.0-7.7 ms while
     `stop_pid_disappearance` held at 33.4-35.5 ms against a 33.7 ms baseline.
-    Foreground teardown 91.4 -> 41-45 ms, total 287.2 -> ~233 ms.
+    Foreground teardown 91.4 -> 41-45 ms. A fifth cadence site was then found
+    inside the guest agent — `exec_stream` slept a flat 50 ms before rechecking
+    a child that had already exited, a hard floor under every exec — taking
+    `command` 52.5 -> 4.6-5.4 ms. Total 287.2 -> p50 191.2 ms over 9 samples
+    (not the 20 a publishable lane needs; the host became too loaded to finish
+    the set, so there is no p95/p99 yet).
     Admission's three pre-boot chain barriers now
     share one flush, closing #2293's open acceptance item without changing
     `sync_policy_for`'s fail-closed default, and the chain cursor reads a
@@ -1147,8 +1167,11 @@ for detailed scope and acceptance criteria.
       Phase 1 then landed the shared argument core: the 26 shared execution
       flags are declared once in `RunArgs` and flattened into both verbs, with
       `run` adding the SDK transport and `machine run` the lifecycle flags. Both
-      verbs now default to `--profile standard`. Phases 2–4 and 6–8 remain;
-      runtime auto-detection is next.
+      verbs now default to `--profile standard`. Phase 2 then landed runtime
+      detection: `mvm_core::runtime_catalog` plus one shared resolver whose
+      order is explicit source > `--runtime` > `mvm.toml` walk-up > argv[0] >
+      project file > bundled default. Inference is `run`-only; `machine run`
+      keeps its explicit-source contract. Phases 3–4 and 6–8 remain.
 - [ ] Plan 329 — Browser-tier microVM demo (`specs/plans/329-browser-wasm-backend-demo.md`)
       — in progress on `feat/329-browser-wasm-backend`. Extends Plan 320 with a
       `wasm32-wasip1` guest that boots, provides a shell, and delegates `fetch`

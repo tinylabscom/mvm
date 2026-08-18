@@ -206,9 +206,28 @@ pub fn format_empty_ext4<W: Write + Seek>(
     dev: &mut W,
     size_bytes: u64,
 ) -> Result<FormatSummary, MkfsError> {
+    format_empty_ext4_labeled(dev, size_bytes, b"")
+}
+
+/// [`format_empty_ext4`], stamping `volume_label` into the superblock.
+///
+/// A guest that locates a disk by label instead of by device letter is immune
+/// to another backend attaching one more drive ahead of it — which is how the
+/// Stage 0 Nix store came to be mounted from a 32 KiB identity image. Labels
+/// longer than the 16-byte ext4 field are truncated, as `mkfs.ext4` does.
+pub fn format_empty_ext4_labeled<W: Write + Seek>(
+    dev: &mut W,
+    size_bytes: u64,
+    volume_label: &[u8],
+) -> Result<FormatSummary, MkfsError> {
     let geom = Geometry::plan(size_bytes)?;
 
-    let superblock = build_superblock(&geom);
+    let mut superblock = build_superblock(&geom);
+    // s_volume_name: 16 bytes at 0x78 within the superblock, the same field
+    // the directory-tree writer stamps via BuildOptions::volume_name.
+    let label_len = volume_label.len().min(16);
+    superblock[0x78..0x78 + label_len].copy_from_slice(&volume_label[..label_len]);
+    let superblock = superblock;
     let gdt = build_gdt(&geom);
 
     // Primary superblock: at byte offset 1024, inside block 0 (which also holds
@@ -482,5 +501,47 @@ mod tests {
             format_empty_ext4(&mut cur, 1024 * 1024),
             Err(MkfsError::TooSmall { .. })
         ));
+    }
+}
+
+#[cfg(test)]
+mod label_tests {
+    use super::*;
+    use std::io::Cursor;
+
+    /// A guest locates the Stage 0 store by this label, so it has to land in
+    /// the superblock's s_volume_name field where blkid and the guest's own
+    /// probe read it.
+    #[test]
+    fn the_label_lands_in_the_superblock_volume_name() {
+        let mut cur = Cursor::new(vec![0u8; 16 * 1024 * 1024]);
+        format_empty_ext4_labeled(&mut cur, 16 * 1024 * 1024, b"mvm-nix-store").expect("format");
+        let img = cur.into_inner();
+        assert_eq!(&img[1024 + 0x78..1024 + 0x78 + 13], b"mvm-nix-store");
+    }
+
+    /// The unlabeled entry point must stay byte-identical, so the volume
+    /// caller that does not want a label is unaffected.
+    #[test]
+    fn an_unlabeled_format_leaves_the_volume_name_empty() {
+        let size = 16 * 1024 * 1024;
+        let mut a = Cursor::new(vec![0u8; size as usize]);
+        format_empty_ext4(&mut a, size).expect("format");
+        let mut b = Cursor::new(vec![0u8; size as usize]);
+        format_empty_ext4_labeled(&mut b, size, b"").expect("format");
+        assert_eq!(a.into_inner(), b.into_inner());
+    }
+
+    /// ext4's field is 16 bytes; a longer label truncates rather than
+    /// corrupting the fields that follow it.
+    #[test]
+    fn an_overlong_label_truncates_without_overrunning_the_field() {
+        let size = 16 * 1024 * 1024;
+        let mut cur = Cursor::new(vec![0u8; size as usize]);
+        format_empty_ext4_labeled(&mut cur, size, b"0123456789abcdefOVERRUN").expect("format");
+        let img = cur.into_inner();
+        assert_eq!(&img[1024 + 0x78..1024 + 0x88], b"0123456789abcdef");
+        // s_last_mounted (0x88) must not have been clobbered.
+        assert_eq!(&img[1024 + 0x88..1024 + 0x90], &[0u8; 8]);
     }
 }

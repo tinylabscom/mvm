@@ -2175,6 +2175,68 @@ fn rm_args(names: &[&str], all: bool, yes: bool) -> MachineRemoveArgs {
     }
 }
 
+/// Seed the runtime state directory a booted machine leaves under `vms/`,
+/// which is a different namespace from the `machines/` spec.
+fn seed_runtime_state(name: &str) -> std::path::PathBuf {
+    let dir = config::vm_state_dir(name);
+    std::fs::create_dir_all(&dir).expect("state dir");
+    std::fs::write(dir.join("console.log"), b"boot log").expect("console log");
+    dir
+}
+
+#[test]
+fn removing_a_machine_removes_its_runtime_state_not_only_its_spec() {
+    // `machine rm` deletes `machines/<name>/`. It used to stop there, so a
+    // removed machine kept its console log, sockets and pid file under
+    // `vms/<name>/` forever — and `machine ls`, which reads that directory,
+    // kept listing it.
+    let _state = IsolatedMachineState::new();
+    seed_machine_spec("web");
+    let runtime = seed_runtime_state("web");
+    assert!(runtime.exists());
+
+    remove_machine(rm_args(&["web"], false, true)).expect("remove");
+
+    assert!(
+        !config::machine_state_dir("web").exists(),
+        "the spec must still be removed",
+    );
+    assert!(
+        !runtime.exists(),
+        "the runtime state directory outlived the machine it belonged to",
+    );
+}
+
+#[test]
+fn removing_a_machine_with_no_runtime_state_is_not_an_error() {
+    // A machine created but never booted has a spec and no `vms/` entry.
+    let _state = IsolatedMachineState::new();
+    seed_machine_spec("web");
+    assert!(!config::vm_state_dir("web").exists());
+    remove_machine(rm_args(&["web"], false, true)).expect("remove");
+    assert!(!config::machine_state_dir("web").exists());
+}
+
+#[test]
+fn runtime_state_owned_by_a_live_process_is_left_alone() {
+    // The case that makes this more than a cleanup: `--force` asks the machine
+    // to stop but only warns if the stop failed, so "we asked" is not "nothing
+    // is using this". Deleting a live supervisor's pid file and sockets would
+    // strand it, so a directory the liveness probe still claims is kept.
+    let _state = IsolatedMachineState::new();
+    let dir = config::vm_state_dir("web");
+    std::fs::create_dir_all(&dir).expect("state dir");
+    // Our own pid: the probe's definition of a live owner.
+    std::fs::write(dir.join("libkrun.pid"), std::process::id().to_string()).expect("pid file");
+    assert!(
+        mvm_vmm::host::process_liveness::state_dir_has_live_process(&dir),
+        "the probe must see this as live, or the test proves nothing",
+    );
+
+    assert!(!remove_machine_runtime_state("web").expect("probe"));
+    assert!(dir.exists(), "state owned by a live process must survive");
+}
+
 #[test]
 fn rm_running_refusal_wording() {
     assert!(rm_running_refusal(&[]).is_none());

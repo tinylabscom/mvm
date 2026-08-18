@@ -85,3 +85,22 @@ Feature: machine run request contract
     And the output contains "profile: restrictive"
     And the output contains "cpus=4"
     And the output contains "memory=1G (1024 MiB)"
+
+  # Inference decides which image boots. It must not decide anything else: a
+  # detected run carries the same profile and the same deny-all egress as one
+  # that named its image, or the convenience would be a policy bypass.
+  Scenario: a detected runtime does not relax the run's posture
+    Given an isolated mvm home
+    When I run mvmctl in the isolated mvm home with "run --dry-run --runtime node -- npm test"
+    Then the command exits with code 0
+    And the output contains "profile: standard"
+    And the output contains "network: deny-all"
+
+  # A typo must not silently boot the bundled default and leave the user
+  # reading a "command not found" from a guest they never asked for.
+  Scenario: an unknown runtime name is refused and lists the known ones
+    Given an isolated mvm home
+    When I run mvmctl in the isolated mvm home with "run --runtime pyhton -- true"
+    Then the command exits with code 1
+    And the error output contains "unknown runtime"
+    And the error output contains "python"
