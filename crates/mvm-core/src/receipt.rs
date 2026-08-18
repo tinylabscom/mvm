@@ -52,6 +52,10 @@ pub mod receipt_type {
     pub const CHECKPOINT_FORKED: &str = "checkpoint.forked";
     /// Emitted when a workload input request is refused.
     pub const INPUT_REFUSED: &str = "stream.input_refused";
+    /// Emitted when an assurance session is opened against an admitted plan.
+    pub const ASSURANCE_SESSION_OPENED: &str = "assurance.session_opened";
+    /// Emitted when an assurance trial completes and its outcome is derived.
+    pub const ASSURANCE_TRIAL_COMPLETED: &str = "assurance.trial_completed";
 }
 
 /// Outcome of the action described by a receipt.

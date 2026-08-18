@@ -126,6 +126,8 @@ pub enum ProbeRefusal {
     NonceReplay,
     #[error("the destination label was not declared for this campaign")]
     UndeclaredDestination,
+    #[error("the probe could not be recorded, so it was not run")]
+    AuditUnavailable,
 }
 
 impl ProbeRefusal {
@@ -142,6 +144,7 @@ impl ProbeRefusal {
             Self::StepBudgetExhausted => "step_budget_exhausted",
             Self::NonceReplay => "nonce_replay",
             Self::UndeclaredDestination => "undeclared_destination",
+            Self::AuditUnavailable => "audit_unavailable",
         }
     }
 }

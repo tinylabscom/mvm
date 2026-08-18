@@ -301,8 +301,18 @@ pub fn admit_plan_for_run(
                 bundle = pin.bundle_sha256
             )
         })?;
-        verify_plan_bundle(pin, ctx.resolver, ctx.trust)
+        let verified_bundle = verify_plan_bundle(pin, ctx.resolver, ctx.trust)
             .with_context(|| format!("bundle re-verify for pin {}", pin.bundle_sha256))?;
+        // The signature-verified manifest is the only trustworthy statement of
+        // the bundle's architecture — the boot-time resolver reads an unsigned
+        // registry copy. Refuse here so a foreign-arch pin never reaches a
+        // backend, where it surfaces as an unrelated-looking boot failure.
+        mvm_core::arch::GuestArch::require_host(&verified_bundle.manifest.arch).map_err(|e| {
+            anyhow::anyhow!(
+                "plan pins bundle {bundle} which {e} — refuse",
+                bundle = pin.bundle_sha256
+            )
+        })?;
     }
 
     Ok(AdmittedPlan {
@@ -2636,6 +2646,22 @@ mod tests {
         kernel: &[u8],
         rootfs: &[u8],
     ) -> (Vec<u8>, PlanArtifact) {
+        make_test_bundle_for_arch(
+            sk,
+            kernel,
+            rootfs,
+            &mvm_core::arch::GuestArch::host().to_string(),
+        )
+    }
+
+    /// [`make_test_bundle`] with an explicit declared architecture, so the
+    /// cross-arch refusal can be exercised from either host.
+    fn make_test_bundle_for_arch(
+        sk: &ed25519_dalek::SigningKey,
+        kernel: &[u8],
+        rootfs: &[u8],
+        arch: &str,
+    ) -> (Vec<u8>, PlanArtifact) {
         use mvm_core::plan::bundle::{
             ARTIFACTS_DIR, ArtifactRole, BUNDLE_SCHEMA_VERSION, BundleArtifact, BundleManifest,
             sha256_hex,
@@ -2652,7 +2678,7 @@ mod tests {
             schema_version: BUNDLE_SCHEMA_VERSION,
             publisher: "test".to_string(),
             key_id: key_id.clone(),
-            arch: "aarch64".to_string(),
+            arch: arch.to_string(),
             kernel_version: None,
             profile: None,
             workload_label: None,
@@ -2755,6 +2781,46 @@ mod tests {
         .expect_err("must refuse without context");
         let msg = format!("{err:#}");
         assert!(msg.contains("BundleAdmissionContext"), "got: {msg}");
+    }
+
+    /// A pinned bundle built for the other architecture is refused at the trust
+    /// boundary, before any backend sees it. Without this the plan admits and
+    /// fails deep in boot with an unrelated-looking kernel error.
+    #[test]
+    fn admit_with_cross_arch_pinned_bundle_refuses() {
+        let other = match mvm_core::arch::GuestArch::host() {
+            mvm_core::arch::GuestArch::X86_64 => "aarch64",
+            mvm_core::arch::GuestArch::Aarch64 => "x86_64",
+        };
+        let (_env, _home) = host_with_ceiling(Default::default());
+        let dir = tempfile::tempdir().unwrap();
+        let sk = {
+            let mut __ed_seed = [0u8; 32];
+            rand::rng().fill_bytes(&mut __ed_seed);
+            ed25519_dalek::SigningKey::from_bytes(&__ed_seed)
+        };
+        let (archive, pin) =
+            make_test_bundle_for_arch(&sk, b"kernel-bytes", b"rootfs-bytes", other);
+        let mut map = HashMap::new();
+        map.insert(key_id_from_pubkey(&sk.verifying_key()), sk.verifying_key());
+        let trust = MapTrust(map);
+        let resolver = FixedResolver(archive);
+        let ctx = BundleAdmissionContext {
+            resolver: &resolver,
+            trust: &trust,
+        };
+        let err = admit_for_run(
+            &input_with_pin("vm-cross-arch", &pin),
+            &SystemClock,
+            &InMemoryNonceLedger::new(),
+            Some(dir.path()),
+            Some(&ctx),
+            RunPosture::without_backend(Variant::Dev),
+        )
+        .expect_err("a foreign-arch bundle must not be admitted");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("but this host is"), "{msg}");
+        assert!(msg.contains(other), "{msg}");
     }
 
     #[test]

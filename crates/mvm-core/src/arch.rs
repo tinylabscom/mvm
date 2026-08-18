@@ -38,6 +38,41 @@ impl GuestArch {
             GuestArch::Aarch64
         }
     }
+
+    /// Parse a manifest-declared architecture and require it to match this
+    /// host.
+    ///
+    /// Fails closed on both a mismatch and an architecture this build has no
+    /// variant for, so a bundle that declares something unrecognised is refused
+    /// rather than admitted on the strength of `host()`'s non-x86_64 fallback.
+    ///
+    /// The message is deliberately subject-free — callers prepend whatever they
+    /// are refusing, since the same comparison guards an admitted plan's pinned
+    /// bundle and a registry bundle resolved at boot.
+    pub fn require_host(declared: &str) -> Result<Self, HostArchMismatch> {
+        let declared_arch = declared.parse::<Self>()?;
+        let host = Self::host();
+        if declared_arch == host {
+            Ok(declared_arch)
+        } else {
+            Err(HostArchMismatch::Mismatch {
+                declared: declared_arch,
+                host,
+            })
+        }
+    }
+}
+
+/// Why a declared architecture is not runnable on this host.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum HostArchMismatch {
+    #[error("declares architecture {declared} but this host is {host}")]
+    Mismatch {
+        declared: GuestArch,
+        host: GuestArch,
+    },
+    #[error("declares an architecture this build cannot run: {0}")]
+    Unknown(#[from] UnknownArch),
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -70,6 +105,64 @@ impl std::fmt::Display for GuestArch {
 
 #[cfg(test)]
 mod tests {
+    /// The host arch, and the other one, so these tests read the same on an
+    /// x86_64 CI runner and an aarch64 dev machine.
+    fn other_than_host() -> GuestArch {
+        match GuestArch::host() {
+            GuestArch::X86_64 => GuestArch::Aarch64,
+            GuestArch::Aarch64 => GuestArch::X86_64,
+        }
+    }
+
+    #[test]
+    fn require_host_accepts_the_host_arch_and_its_aliases() {
+        let host = GuestArch::host();
+        assert_eq!(GuestArch::require_host(&host.to_string()), Ok(host));
+        let alias = match host {
+            GuestArch::X86_64 => "amd64",
+            GuestArch::Aarch64 => "arm64",
+        };
+        assert_eq!(GuestArch::require_host(alias), Ok(host));
+        // `<arch>-linux` Nix systems parse too.
+        assert_eq!(GuestArch::require_host(host.nix_system()), Ok(host));
+    }
+
+    #[test]
+    fn require_host_refuses_the_other_arch() {
+        let other = other_than_host();
+        assert_eq!(
+            GuestArch::require_host(&other.to_string()),
+            Err(HostArchMismatch::Mismatch {
+                declared: other,
+                host: GuestArch::host(),
+            })
+        );
+    }
+
+    /// Fails closed rather than falling through to `host()`, whose non-x86_64
+    /// arm would otherwise read an unsupported arch as aarch64.
+    #[test]
+    fn require_host_refuses_an_architecture_this_build_does_not_know() {
+        for declared in ["riscv64", "s390x", "", "aarch64_be"] {
+            assert!(
+                matches!(
+                    GuestArch::require_host(declared),
+                    Err(HostArchMismatch::Unknown(_))
+                ),
+                "{declared} should be refused as unknown"
+            );
+        }
+    }
+
+    #[test]
+    fn the_mismatch_message_names_both_sides() {
+        let msg = GuestArch::require_host(&other_than_host().to_string())
+            .unwrap_err()
+            .to_string();
+        assert!(msg.contains("but this host is"), "{msg}");
+        assert!(msg.contains(&GuestArch::host().to_string()), "{msg}");
+    }
+
     use super::*;
     #[test]
     fn aliases_normalize() {

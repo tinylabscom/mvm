@@ -181,3 +181,73 @@ impl TrialResultDocument {
         }
     }
 }
+
+/// The envelope as a workload reads it.
+///
+/// [`super::input::AiSessionInput`] is serialize-only on purpose: the host must
+/// never be able to parse admission facts out of provider bytes. The guest has
+/// the opposite problem — it only ever *receives* an envelope, and needs the
+/// binding and effective authority to make a call at all — so reading is a
+/// separate type with a separate direction.
+///
+/// This is safe precisely because it is guest-side. Nothing the guest believes
+/// about its own binding is authoritative; the host re-derives every gate from
+/// the session it opened. A workload that forged one of these would be lying
+/// only to itself.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct DeliveredSession {
+    pub schema: String,
+    pub session: super::input::SessionRef,
+    pub source: super::input::SourceRef,
+    pub narrative: super::input::Narrative,
+    pub authority: AuthorityWire,
+    pub synthetic_inputs: super::input::SyntheticInputs,
+    pub output_contract: super::input::OutputContract,
+    pub mvm_binding: MvmBindingWire,
+}
+
+/// Why a delivered envelope is unusable.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum DeliveredSessionError {
+    #[error("delivered envelope exceeds the size limit")]
+    TooLarge,
+    #[error("delivered envelope is not valid for this schema: {0}")]
+    Malformed(String),
+    #[error("unsupported schema {0:?}")]
+    UnsupportedSchema(String),
+    #[error("the delivered envelope grants no tool")]
+    NoTools,
+}
+
+impl DeliveredSession {
+    /// Parse an envelope handed to this workload.
+    pub fn parse_json(bytes: &[u8]) -> Result<Self, DeliveredSessionError> {
+        if bytes.len() > super::input::MAX_SESSION_INPUT_BYTES {
+            return Err(DeliveredSessionError::TooLarge);
+        }
+        let parsed: Self = serde_json::from_slice(bytes)
+            .map_err(|error| DeliveredSessionError::Malformed(alloc::format!("{error}")))?;
+        if parsed.schema != super::input::AI_SESSION_INPUT_SCHEMA {
+            return Err(DeliveredSessionError::UnsupportedSchema(parsed.schema));
+        }
+        if parsed.authority.allowed_tools.is_empty() {
+            return Err(DeliveredSessionError::NoTools);
+        }
+        Ok(parsed)
+    }
+
+    /// Whether `label` is one this campaign declared.
+    #[must_use]
+    pub fn declares_destination(&self, label: &AssuranceId) -> bool {
+        self.synthetic_inputs.destination_labels.contains(label)
+    }
+
+    /// Whether `tool` survived into effective authority.
+    #[must_use]
+    pub fn permits_tool(&self, tool: ToolId) -> bool {
+        self.authority.allowed_tools.contains(&tool)
+    }
+}

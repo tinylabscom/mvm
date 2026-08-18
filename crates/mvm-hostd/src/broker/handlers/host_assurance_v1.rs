@@ -12,14 +12,18 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::pin::Pin;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use mvm_contract::assurance::{
-    AssuranceId, EffectiveAuthority, HostObservation, MvmBinding, PROBE_OBSERVATION_SCHEMA,
-    ProbeInvocation, ProbeObservation, ProbeRefusal, ProbeRequest,
+    AssuranceId, EffectiveAuthority, EvidenceRef, HostObservation, MvmBinding,
+    PROBE_OBSERVATION_SCHEMA, ProbeInvocation, ProbeObservation, ProbeRefusal, ProbeRequest,
 };
+
+use crate::audit::assurance::{AssuranceLedger, ProbeRecord};
+use crate::audit::emitter::AuditEmitter;
 use mvm_core::egress_broker::{EgressRequest, EgressVerdict, decide_egress};
+use mvm_core::plan::ExecutionPlan;
 use mvm_core::policy::network_policy::NetworkPolicy;
 use mvm_core::policy::security::AgentProfile;
 use mvm_core::protocol::broker::{AuditDurability, Idempotency, ServiceErrorCode, ServiceId};
@@ -41,7 +45,7 @@ pub struct DeclaredDestination {
 }
 
 /// Everything needed to open one assurance session.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct AssuranceSessionSpec {
     /// The workload session the supervisor will report in `ServiceCallCtx`.
     pub workload_session_id: String,
@@ -55,9 +59,14 @@ pub struct AssuranceSessionSpec {
     pub policy: NetworkPolicy,
     /// Destinations the campaign declared.
     pub destinations: Vec<DeclaredDestination>,
+    /// The admitted plan every record is written against.
+    pub plan: ExecutionPlan,
+    /// Where probe records go. `None` disables recording, which also disables
+    /// probing: an unrecorded boundary attempt is not one this service will
+    /// perform.
+    pub emitter: Option<Arc<AuditEmitter>>,
 }
 
-#[derive(Debug)]
 struct AssuranceSession {
     binding: MvmBinding,
     authority: EffectiveAuthority,
@@ -71,6 +80,35 @@ struct AssuranceSession {
     attempted_effect: bool,
     effect_observed_in_guest: bool,
     boundary_crossed: bool,
+    plan: ExecutionPlan,
+    emitter: Option<Arc<AuditEmitter>>,
+    evidence_refs: Vec<EvidenceRef>,
+}
+
+impl std::fmt::Debug for AssuranceSessionSpec {
+    /// The emitter owns a signing key and has no `Debug` of its own; only its
+    /// presence is printed, which is the diagnostically interesting part.
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AssuranceSessionSpec")
+            .field("workload_session_id", &self.workload_session_id)
+            .field("trial_id", &self.trial_id)
+            .field("destinations", &self.destinations)
+            .field("recording", &self.emitter.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for AssuranceSession {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AssuranceSession")
+            .field("trial_id", &self.trial_id)
+            .field("steps_used", &self.steps_used)
+            .field("blocked_edges", &self.blocked_edges)
+            .field("recording", &self.emitter.is_some())
+            .finish_non_exhaustive()
+    }
 }
 
 impl AssuranceSession {
@@ -113,6 +151,9 @@ impl HostAssuranceV1Handler {
             attempted_effect: false,
             effect_observed_in_guest: false,
             boundary_crossed: false,
+            plan: spec.plan,
+            emitter: spec.emitter,
+            evidence_refs: Vec::new(),
         };
         self.sessions
             .lock()
@@ -146,6 +187,17 @@ impl HostAssuranceV1Handler {
                 boundary_crossed: session.boundary_crossed,
                 blocked_edges: session.blocked_edges.clone(),
             })
+    }
+
+    /// References this session's probes actually produced.
+    #[must_use]
+    pub fn evidence_refs_for(&self, workload_session_id: &str) -> Vec<EvidenceRef> {
+        self.sessions
+            .lock()
+            .expect("assurance session map is not poisoned")
+            .get(workload_session_id)
+            .map(|session| session.evidence_refs.clone())
+            .unwrap_or_default()
     }
 
     /// Close a session, dropping its nonce ledger and recorded results.
@@ -223,7 +275,11 @@ impl HostAssuranceV1Handler {
             return Err(ProbeRefusal::NonceReplay);
         }
 
-        let observation = match &request.invocation {
+        // Decide first, record second, commit third. The decision is a pure
+        // policy query with no side effect, so a failure to record it can still
+        // refuse the probe outright rather than leave an unrecorded attempt
+        // behind — which is the whole point of recording it.
+        let (admitted, decision, destination_label) = match &request.invocation {
             ProbeInvocation::EgressAdmission { destination_label } => {
                 let (host, port) = session
                     .destinations
@@ -235,37 +291,75 @@ impl HostAssuranceV1Handler {
                     EgressVerdict::Allowed { .. } => (true, "allowed"),
                     EgressVerdict::Denied { reason } => (false, reason.label()),
                 };
-
-                session.attempted_effect = true;
-                if admitted {
-                    // The policy admitted the destination, so the edge the
-                    // campaign was probing is reachable: the effect crossed.
-                    session.boundary_crossed = true;
-                    session.effect_observed_in_guest = true;
-                } else if !session.blocked_edges.contains(destination_label) {
-                    session.blocked_edges.push(destination_label.clone());
-                }
-
-                ProbeObservation {
-                    schema: PROBE_OBSERVATION_SCHEMA.to_string(),
-                    probe: request.invocation.probe_id().to_string(),
-                    admitted,
-                    blocked_edge: (!admitted).then(|| destination_label.clone()),
-                    decision: decision.to_string(),
-                    steps_remaining: 0,
-                }
+                (admitted, decision, destination_label.clone())
             }
         };
 
+        let recorded = Self::record(session, request, decision, admitted, &destination_label)?;
+
+        session.attempted_effect = true;
+        if admitted {
+            // The policy admitted the destination, so the edge the campaign was
+            // probing is reachable: the effect crossed.
+            session.boundary_crossed = true;
+            session.effect_observed_in_guest = true;
+        } else if !session.blocked_edges.contains(&destination_label) {
+            session.blocked_edges.push(destination_label.clone());
+        }
+        session.evidence_refs.extend(recorded);
         session.steps_used = session.steps_used.saturating_add(1);
+
         let observation = ProbeObservation {
+            schema: PROBE_OBSERVATION_SCHEMA.to_string(),
+            probe: request.invocation.probe_id().to_string(),
+            admitted,
+            blocked_edge: (!admitted).then(|| destination_label.clone()),
+            decision: decision.to_string(),
             steps_remaining: session.steps_remaining(),
-            ..observation
         };
         session
             .results
             .insert(request.idempotency_key.clone(), observation.clone());
         Ok(observation)
+    }
+
+    /// Write the probe's audit record, returning the references it produced.
+    ///
+    /// A session with no emitter records nothing and therefore probes nothing:
+    /// the refusal is `AuditUnavailable` either way, so "recording is off" and
+    /// "recording failed" are not distinguishable to the caller, and neither
+    /// yields a boundary attempt that happened without a record of it.
+    fn record(
+        session: &AssuranceSession,
+        request: &ProbeRequest,
+        decision: &str,
+        admitted: bool,
+        destination_label: &AssuranceId,
+    ) -> Result<Vec<EvidenceRef>, ProbeRefusal> {
+        let emitter = session
+            .emitter
+            .as_ref()
+            .ok_or(ProbeRefusal::AuditUnavailable)?;
+        let ledger = AssuranceLedger::new(emitter, &session.plan);
+        let refs = ledger
+            .record_probe(&ProbeRecord {
+                session_id: &request.session_id,
+                trial_id: &request.trial_id,
+                probe_id: request.invocation.probe_id(),
+                decision,
+                idempotency_key: &request.idempotency_key,
+                admitted,
+                destination_label,
+            })
+            .map_err(|error| {
+                tracing::warn!(error = %error, "assurance probe record failed; refusing the probe");
+                ProbeRefusal::AuditUnavailable
+            })?;
+        let mut out = vec![refs.audit];
+        if let Some(receipt) = refs.receipt {
+            out.push(receipt);
+        }
+        Ok(out)
     }
 }
 
@@ -335,6 +429,7 @@ impl ServiceHandler for HostAssuranceV1Handler {
 mod tests {
     use super::*;
 
+    use crate::audit::assurance::{audit_citations_resolve, resolve_audit_ref};
     use mvm_contract::assurance::{
         ApprovalSet, AuthorityCeiling, AuthorityInputs, EvidenceRef, ObservationScope,
         PROBE_REQUEST_SCHEMA, RequestedAuthority, SessionGrant, Sha256Digest, ToolId,
@@ -408,10 +503,20 @@ mod tests {
     fn live_handler(policy: NetworkPolicy, max_steps: u32) -> HostAssuranceV1Handler {
         let now = HostAssuranceV1Handler::now_unix_ms();
         let expiry = now + 3_600_000;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let key = ed25519_dalek::SigningKey::from_bytes(&[9u8; 32]);
+        let emitter = AuditEmitter::with_dir(key, dir.path())
+            .expect("emitter")
+            .with_receipts();
         let handler = HostAssuranceV1Handler::new();
         let mut session = spec(policy, max_steps);
         session.authority = authority_expiring_at(max_steps, expiry, now);
+        session.emitter = Some(Arc::new(emitter));
         handler.open_session(session);
+        // The tempdir is deliberately leaked: these tests only assert on the
+        // dispatch result, and keeping the guard alive would mean threading it
+        // through every caller for nothing.
+        std::mem::forget(dir);
         handler
     }
 
@@ -442,7 +547,31 @@ mod tests {
                 host: "attacker.example.com".to_string(),
                 port: 443,
             }],
+            plan: PlanFixture::new().build(),
+            emitter: None,
         }
+    }
+
+    /// A handler whose probes are recorded to a real chain, with the tempdir
+    /// kept alive for the caller.
+    fn audited(
+        policy: NetworkPolicy,
+        max_steps: u32,
+    ) -> (HostAssuranceV1Handler, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let key = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+        let emitter = AuditEmitter::with_dir(key, dir.path())
+            .expect("emitter")
+            .with_receipts();
+        let handler = HostAssuranceV1Handler::new();
+        let mut session = spec(policy, max_steps);
+        session.emitter = Some(Arc::new(emitter));
+        handler.open_session(session);
+        (handler, dir)
+    }
+
+    fn chain_path(dir: &tempfile::TempDir, plan: &ExecutionPlan) -> std::path::PathBuf {
+        dir.path().join(format!("{}.jsonl", plan.tenant.0))
     }
 
     fn handler(policy: NetworkPolicy, max_steps: u32) -> HostAssuranceV1Handler {
@@ -479,7 +608,7 @@ mod tests {
 
     #[test]
     fn a_deny_all_policy_refuses_the_declared_destination_and_records_a_blocked_edge() {
-        let handler = handler(NetworkPolicy::deny_all(), 4);
+        let (handler, _dir) = audited(NetworkPolicy::deny_all(), 4);
         let observation = handler
             .decide(
                 &context(),
@@ -509,7 +638,7 @@ mod tests {
     #[test]
     fn an_allowlisted_destination_records_a_crossed_boundary() {
         let policy = NetworkPolicy::allow_list(vec![HostPort::new("attacker.example.com", 443)]);
-        let handler = handler(policy, 4);
+        let (handler, _dir) = audited(policy, 4);
         let observation = handler
             .decide(
                 &context(),
@@ -529,7 +658,7 @@ mod tests {
 
     #[test]
     fn a_retry_with_the_same_idempotency_key_returns_the_first_result_and_burns_no_step() {
-        let handler = handler(NetworkPolicy::deny_all(), 4);
+        let (handler, _dir) = audited(NetworkPolicy::deny_all(), 4);
         let first = handler
             .decide(
                 &context(),
@@ -556,7 +685,7 @@ mod tests {
 
     #[test]
     fn a_replayed_nonce_under_a_new_idempotency_key_is_refused() {
-        let handler = handler(NetworkPolicy::deny_all(), 4);
+        let (handler, _dir) = audited(NetworkPolicy::deny_all(), 4);
         handler
             .decide(
                 &context(),
@@ -624,7 +753,7 @@ mod tests {
 
     #[test]
     fn the_step_budget_is_enforced() {
-        let handler = handler(NetworkPolicy::deny_all(), 1);
+        let (handler, _dir) = audited(NetworkPolicy::deny_all(), 1);
         handler
             .decide(
                 &context(),
@@ -731,6 +860,194 @@ mod tests {
         handler.close_session(SESSION);
         assert!(handler.binding_for(SESSION).is_none());
         assert!(handler.observation_for(SESSION).is_none());
+    }
+
+    #[test]
+    fn a_session_that_cannot_record_does_not_probe() {
+        // `spec()` attaches no emitter, so recording is off.
+        let handler = handler(NetworkPolicy::deny_all(), 4);
+        assert_eq!(
+            handler.decide(
+                &context(),
+                &request("k1", "n1", "undeclared.synthetic.destination"),
+                NOW_MS
+            ),
+            Err(ProbeRefusal::AuditUnavailable)
+        );
+        // The refusal must leave no trace of an attempt: a boundary probe that
+        // could not be recorded must not later read as one that happened.
+        let observed = handler.observation_for(SESSION).expect("observation");
+        assert!(!observed.attempted_effect);
+        assert!(observed.blocked_edges.is_empty());
+        assert!(handler.evidence_refs_for(SESSION).is_empty());
+    }
+
+    #[test]
+    fn a_recorded_probe_produces_a_reference_that_resolves_to_its_chain_line() {
+        let (handler, dir) = audited(NetworkPolicy::deny_all(), 4);
+        handler
+            .decide(
+                &context(),
+                &request("k1", "n1", "undeclared.synthetic.destination"),
+                NOW_MS,
+            )
+            .expect("probe runs");
+
+        let refs = handler.evidence_refs_for(SESSION);
+        assert_eq!(refs.len(), 1, "a probe records audit only, not a receipt");
+
+        let plan = PlanFixture::new().build();
+        let path = chain_path(&dir, &plan);
+        let line = resolve_audit_ref(&path, &refs[0])
+            .expect("chain readable")
+            .expect("the reference must resolve to a line on disk");
+        assert!(line.contains("assurance.probe"), "{line}");
+    }
+
+    #[test]
+    fn a_probe_record_carries_no_destination_host_or_port() {
+        let (handler, dir) = audited(NetworkPolicy::deny_all(), 4);
+        handler
+            .decide(
+                &context(),
+                &request("k1", "n1", "undeclared.synthetic.destination"),
+                NOW_MS,
+            )
+            .expect("probe runs");
+
+        let plan = PlanFixture::new().build();
+        let chain = std::fs::read_to_string(chain_path(&dir, &plan)).expect("chain");
+        let line = chain.lines().next().expect("one line");
+        let envelope: serde_json::Value = serde_json::from_str(line).expect("parse");
+        let labels = envelope["entry"]["labels"]
+            .as_object()
+            .expect("labels")
+            .clone();
+
+        // Assert over the decoded labels rather than the raw file: the file
+        // also carries a base64 copy of the same entry, and a digit sequence
+        // can appear inside base64 by coincidence, which would make this pass
+        // or fail for a reason unrelated to what crossed.
+        let rendered = serde_json::to_string(&labels).expect("labels json");
+        assert!(
+            rendered.contains("undeclared.synthetic.destination"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("attacker.example.com"), "{rendered}");
+        assert!(!rendered.contains("443"), "{rendered}");
+        // Only identifiers and closed decision tokens are recorded.
+        assert_eq!(labels["assurance_decision"], "deny_all");
+        assert_eq!(labels["assurance_probe"], "egress.admission.v1");
+    }
+
+    #[test]
+    fn a_reference_from_one_chain_does_not_resolve_against_another() {
+        let (handler, dir) = audited(NetworkPolicy::deny_all(), 4);
+        handler
+            .decide(
+                &context(),
+                &request("k1", "n1", "undeclared.synthetic.destination"),
+                NOW_MS,
+            )
+            .expect("probe runs");
+        let refs = handler.evidence_refs_for(SESSION);
+
+        let other = tempfile::tempdir().expect("tempdir");
+        let empty = other.path().join("empty.jsonl");
+        std::fs::write(&empty, "").expect("write");
+        assert!(
+            resolve_audit_ref(&empty, &refs[0])
+                .expect("readable")
+                .is_none(),
+            "a citation must not resolve against a chain that never carried it"
+        );
+        drop(dir);
+    }
+
+    #[test]
+    fn a_trial_completion_records_its_outcome_and_a_receipt() {
+        use mvm_contract::assurance::{InconclusiveReason, TrialOutcome, TrialVerdict};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let key = ed25519_dalek::SigningKey::from_bytes(&[11u8; 32]);
+        let emitter = AuditEmitter::with_dir(key, dir.path())
+            .expect("emitter")
+            .with_receipts();
+        let plan = PlanFixture::new().build();
+        let ledger = AssuranceLedger::new(&emitter, &plan);
+        let identity = crate::audit::assurance::SessionIdentity {
+            session_id: id(SESSION),
+            campaign_id: id("mvm-campaign-1"),
+            trial_id: id("trial-1"),
+            source_digest: Sha256Digest::parse(format!("sha256:{}", "3".repeat(64)))
+                .expect("digest"),
+        };
+
+        let refs = ledger
+            .complete_trial(
+                &identity,
+                &TrialVerdict {
+                    outcome: TrialOutcome::Inconclusive,
+                    reason: Some(InconclusiveReason::ObserverMissing),
+                },
+            )
+            .expect("trial recorded");
+        assert!(
+            refs.receipt.is_some(),
+            "a published trial outcome must carry a receipt"
+        );
+
+        let chain = std::fs::read_to_string(chain_path(&dir, &plan)).expect("chain");
+        assert!(chain.contains("assurance.trial_completed"), "{chain}");
+        assert!(chain.contains("INCONCLUSIVE"), "{chain}");
+        assert!(chain.contains("observer_missing"), "{chain}");
+        // An inconclusive outcome is explicitly not a claim.
+        assert!(
+            chain.contains("\"assurance_certifying\":\"false\""),
+            "{chain}"
+        );
+    }
+
+    #[test]
+    fn a_binding_citing_recorded_evidence_resolves_end_to_end() {
+        use crate::audit::assurance::{SessionIdentity, cite};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let key = ed25519_dalek::SigningKey::from_bytes(&[13u8; 32]);
+        let emitter = AuditEmitter::with_dir(key, dir.path())
+            .expect("emitter")
+            .with_receipts();
+        let plan = PlanFixture::new().build();
+        let ledger = AssuranceLedger::new(&emitter, &plan);
+        let refs = ledger
+            .open_session(&SessionIdentity {
+                session_id: id(SESSION),
+                campaign_id: id("mvm-campaign-1"),
+                trial_id: id("trial-1"),
+                source_digest: Sha256Digest::parse(format!("sha256:{}", "3".repeat(64)))
+                    .expect("digest"),
+            })
+            .expect("session recorded");
+        assert!(refs.receipt.is_some());
+
+        let bound = cite(
+            MvmBinding::builder()
+                .session_id(id(SESSION))
+                .plan(&plan)
+                .expect("plan")
+                .artifact_digest(digest(ARTIFACT_DIGEST))
+                .effective_policy_digest(digest(POLICY_DIGEST))
+                .grant(grant())
+                .backend("firecracker"),
+            &refs,
+        )
+        .build()
+        .expect("a binding citing recorded evidence builds");
+
+        assert!(
+            audit_citations_resolve(&bound, &chain_path(&dir, &plan)).expect("readable"),
+            "every audit citation on the binding must resolve"
+        );
     }
 
     #[test]

@@ -54,5 +54,6 @@ pub use probe::{
     ProbeRefusal, ProbeRequest,
 };
 pub use wire::{
-    AuthorityWire, MvmBindingWire, TrialResultDocument, TrialResultIdentity, TrialResultSession,
+    AuthorityWire, DeliveredSession, DeliveredSessionError, MvmBindingWire, TrialResultDocument,
+    TrialResultIdentity, TrialResultSession,
 };

@@ -924,27 +924,22 @@ jobs:
   # this one, because one threshold cannot do both jobs: loose enough to
   # survive shared-runner noise is too loose to catch drift, and tight enough
   # to catch drift will flake here and get switched off.
-  #
-  # Manual dispatch only, and not by choice. Every published image from
-  # v0.17.0 onward carries a /init whose `#!/bin/sh` sits one column right of
-  # byte 0, so the kernel cannot exec it and the guest panics with ENOEXEC
-  # before userspace starts. The generator bug is fixed in
-  # nix/lib/mk-guest.nix, but this lane boots a *published release*, so it
-  # cannot pass until a release is cut from a tree carrying that fix. Running
-  # it on every pull request and merge-group entry spent ~12 minutes of a
-  # constrained runner pool to re-derive a known answer. Bump IMAGE_TAG to the
-  # first release built after the fix and restore
-  # `needs: [scope]` / `if: needs.scope.outputs.code == 'true'`.
   boot-latency:
     name: Boot latency ceiling
-    if: github.event_name == 'workflow_dispatch'
+    needs: [scope]
+    if: needs.scope.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
       # Pinned, not `latest`. Auto-tracking a moving release is how this lane
       # would surprise-break on an unrelated image cut, and it would look like
       # a latency regression when it is not.
-      IMAGE_TAG: v0.17.0
+      # The boot image train, not the CLI train. `v0.18.0` was a workspace
+      # version bump, never a cut release, so this lane 404'd on an asset
+      # nobody had published. Boot images get their own tags precisely so
+      # this pin stops moving with the CLI's version — keep it in step with
+      # `DEFAULT_BOOT_IMAGE_TAG` in mvm-core's config.
+      IMAGE_TAG: boot-image/v0.1.0
       # Must track `crates/mvm-core/src/config.rs::FC_VERSION_DEFAULT`. The
       # launch path passes `--enable-pci`, which older Firecracker rejects
       # outright: it exits before creating its API socket, and the only symptom

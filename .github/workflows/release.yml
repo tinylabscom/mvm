@@ -261,6 +261,15 @@ jobs:
     # (the `build` job) but never reaches this publish job — only a tag push or
     # an explicit dry_run=false dispatch publishes.
     if: ${{ !cancelled() && needs.bdd.result == 'success' && needs.build.result == 'success' && (github.event_name == 'push' || github.event.inputs.dry_run == 'false') }}
+    # This job mints the one keyless identity every installed mvmctl trusts:
+    # `release.yml@refs/tags/v{version}`, the sole entry in
+    # RELEASE_IDENTITY_TEMPLATES. The environment's policy admits `v*` tags and
+    # nothing else, so a branch push or a workflow_dispatch from an arbitrary
+    # ref cannot produce a signature the shipped verifier accepts. The boot
+    # image train is gated the same way against `boot-image/v*`, and
+    # revocations against its own tag; this was the last of the three trusted
+    # identities that anything could mint.
+    environment: release-signing
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
