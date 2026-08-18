@@ -251,16 +251,38 @@ paths beyond the existing policy vocabulary.
 
 ### Phase 4 — Templates and OCI-image bases
 
-- [ ] Implement `mvmctl template build --image <ref>` as a first-class path,
-      alongside the existing Nix-flake path.
-- [ ] Add built-in language templates (python, node, rust, go, ruby, java,
-      shell, data-science, web-dev) backed by pinned OCI refs.
-- [ ] Allow saving a running dev-tier sandbox as a custom template.
+- [x] Implement an image-backed build path alongside the Nix-flake one.
+      **Spelled differently than this plan says**, because `mvmctl template
+      build` no longer exists: PR #62 ("Manifest-driven template DX", plans
+      38–40, 2026-05-04) collapsed `template init/create/build NAME` into a
+      manifest file discovered by path, keying slots by
+      `sha256(canonical_manifest_path)` instead of user-invented names. The
+      post-38 spelling is `mvmctl machine build <path>` on an `mvm.toml`
+      carrying `image = "..."`. The manifest half already existed — `image`
+      has been a validated, mutually-exclusive source selector all along;
+      `build` refused it with "image-backed builds are not wired yet".
+- [x] Add built-in language templates backed by pinned OCI refs. Shipped in
+      Phase 2 as the runtime catalog (`--runtime python|node|rust|go|ruby|shell`).
+      Not duplicated under a second `--template` name.
+- [ ] Allow saving a running dev-tier sandbox as a custom template. *(Open.)*
 - [ ] Integrate templates with the snapshot-first storage from Plan 255.
-- [ ] Add BDD scenarios for template build, save, and reuse.
+      *(Open: the image build installs a slot revision; taking a warm
+      ready-point snapshot of it is Plan 255 Phase 4's `--warm` item.)*
+- [x] Cover the build path. Four unit tests in
+      `mvm_runtime::vm::template::lifecycle::build_image`; the revision-keying
+      and missing-sidecar refusal were mutation-checked red. A BDD scenario was
+      written and then **deleted**: it asserted `machine build --help` mentions
+      "manifest", which passes with the feature reverted. Real BDD coverage
+      needs a registry pull, which the hermetic suite does not do.
 
-**Acceptance:** A user can `mvmctl template build --image python:3.12-alpine`
-and then `mvmctl run --template python <script>`.
+**Acceptance (restated for the post-38 spelling):** a user can put
+`image = "alpine:3.20"` in an `mvm.toml`, run `mvmctl machine build .`, and then
+`mvmctl machine run --manifest ./mvm.toml`. Verified by hand end to end: the
+slot revision holds `rootfs.ext4`, `vmlinux`, `mvm-meta.json`, `fc-base.json`
+and `revision.json`, rebuilding the same reference is idempotent, and
+`--manifest` resolves the slot.
+
+The `--runtime` half of the original acceptance shipped in Phase 2.
 
 ### Phase 5 — Snapshot/fork DX
 

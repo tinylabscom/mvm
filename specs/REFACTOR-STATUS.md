@@ -1,6 +1,6 @@
 # Refactor status
 
-Last updated: 2026-08-17
+Last updated: 2026-08-18
 
 This is the cross-plan progress index. The owning plan remains authoritative
 for detailed scope and acceptance criteria.
