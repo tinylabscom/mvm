@@ -682,7 +682,12 @@ for detailed scope and acceptance criteria.
     Measured on release, HVF/macOS, against an unchanged control span in the
     same runs: `stop_console_cleanup` 57.0 -> 7.0-7.7 ms while
     `stop_pid_disappearance` held at 33.4-35.5 ms against a 33.7 ms baseline.
-    Foreground teardown 91.4 -> 41-45 ms, total 287.2 -> ~233 ms.
+    Foreground teardown 91.4 -> 41-45 ms. A fifth cadence site was then found
+    inside the guest agent — `exec_stream` slept a flat 50 ms before rechecking
+    a child that had already exited, a hard floor under every exec — taking
+    `command` 52.5 -> 4.6-5.4 ms. Total 287.2 -> p50 191.2 ms over 9 samples
+    (not the 20 a publishable lane needs; the host became too loaded to finish
+    the set, so there is no p95/p99 yet).
     Admission's three pre-boot chain barriers now
     share one flush, closing #2293's open acceptance item without changing
     `sync_policy_for`'s fail-closed default, and the chain cursor reads a
