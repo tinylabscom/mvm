@@ -6,12 +6,14 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from "../ui/tabs";
 import { CodeBlock } from "../ui/code-block";
 import { SAMPLES } from "./samples";
 
+// The run leg of the Define/Build/Run walk — same flake the Build tab
+// compiles (examples/python/hello-env/, see walk-* in samples.ts), so the
+// printed output follows from the code on the Define tab.
 const TERMINAL_LINES = [
-  { text: '$ mvmctl machine run --image python:3.12 -- \\', delay: 0 },
-  { text: '  python -c "print(2 + 2)"', delay: 500 },
-  { text: "  Pulling image and preparing a private root...", delay: 1200, dim: true },
-  { text: "  Booted. Own kernel. Network: deny-all.", delay: 2500, accent: true },
-  { text: "  4", delay: 3400 },
+  { text: "$ mvmctl machine run --flake /tmp/hello-env --entrypoint", delay: 0 },
+  { text: "  Preparing a private root from the compiled flake...", delay: 900, dim: true },
+  { text: "  Booted. Own kernel. Network: deny-all.", delay: 2200, accent: true },
+  { text: "  hello danny", delay: 3100 },
 ];
 
 // Folded down from the old scroll-synced walkthrough (four steps stacked at
@@ -57,7 +59,7 @@ function TerminalAnimation() {
 }
 
 const STEPS = [
-  { tab: "define", trigger: "Define", sampleId: "python-hello" },
+  { tab: "define", trigger: "Define", sampleId: "walk-define" },
   { tab: "build", trigger: "Build", sampleId: "walk-build" },
   { tab: "run", trigger: "Run", sampleId: "walk-run" },
 ] as const;
