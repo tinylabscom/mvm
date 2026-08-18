@@ -179,7 +179,7 @@ jobs:
 
       - uses: ./.github/actions/apt-deps
         with:
-          packages: libcap-ng-dev lld
+          packages: lld
 
       - uses: ./.github/actions/install-zigbuild
 
@@ -236,7 +236,7 @@ jobs:
       # compiler lint lane, so start them on their own runner.
       - uses: ./.github/actions/apt-deps
         with:
-          packages: libcap-ng-dev lld ripgrep shellcheck
+          packages: lld ripgrep shellcheck
 
       # Nothing else validates the workflow files. A wrong `if:`, a typo'd
       # `needs:` job name, or a bad `${{ }}` reference does not fail a PR — it
@@ -544,7 +544,7 @@ jobs:
 
       - uses: ./.github/actions/apt-deps
         with:
-          packages: libcap-ng-dev lld
+          packages: lld
 
       - uses: ./.github/actions/install-zigbuild
 
@@ -726,7 +726,7 @@ jobs:
 
       - uses: ./.github/actions/apt-deps
         with:
-          packages: attr cryptsetup-bin libcap-ng-dev lld
+          packages: attr cryptsetup-bin lld
 
       - uses: ./.github/actions/install-zigbuild
 
@@ -785,7 +785,7 @@ jobs:
 
       - uses: ./.github/actions/apt-deps
         with:
-          packages: attr cryptsetup-bin libcap-ng-dev lld
+          packages: attr cryptsetup-bin lld
 
       - uses: ./.github/actions/install-zigbuild
 
@@ -841,7 +841,7 @@ jobs:
 
       - uses: ./.github/actions/apt-deps
         with:
-          packages: attr cryptsetup-bin libcap-ng-dev lld
+          packages: attr cryptsetup-bin lld
 
       - uses: ./.github/actions/install-zigbuild
 
@@ -881,7 +881,7 @@ jobs:
 
       - uses: ./.github/actions/apt-deps
         with:
-          packages: libcap-ng-dev lld
+          packages: lld
 
       # This lane compiles a different crate set from the shared workspace key
       # and builds bpf-linker from source, so it gets its own entry rather than
@@ -955,7 +955,7 @@ jobs:
 
       - uses: ./.github/actions/apt-deps
         with:
-          packages: libcap-ng-dev lld
+          packages: lld
 
       # Building the root package runs `crates/mvm-cli/build.rs`, which
       # cross-compiles the embedded host binaries and needs the pinned zig.
