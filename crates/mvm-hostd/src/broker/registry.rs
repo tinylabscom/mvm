@@ -23,6 +23,22 @@ use mvm_core::protocol::handler::{
     ServiceCallCtx, ServiceDispatchResult, ServiceError, ServiceHandler,
 };
 
+/// How many times one unbound name may be refused with a teaching message
+/// before further attempts are answered tersely.
+///
+/// A planner that has been told its surface and keeps calling the same absent
+/// name is in a loop, and each attempt costs a dispatch and an audit line.
+const MAX_UNBOUND_ATTEMPTS_PER_NAME: u32 = 8;
+
+/// How many distinct refused names are tracked at once.
+///
+/// The counter is keyed by a guest-supplied string, so the counter is itself
+/// an exhaustion surface: a guest enumerating names would otherwise grow this
+/// map without bound. Past the cap, untracked names are answered as
+/// rate-bounded rather than admitted to the map — enumeration on a workload
+/// whose real catalog is a handful of entries is already pathological.
+const MAX_TRACKED_REFUSAL_NAMES: usize = 64;
+
 /// Minimal cancellation primitive for one host-side capability invocation.
 #[derive(Clone, Default)]
 pub struct CancellationToken {
@@ -80,6 +96,7 @@ pub struct Registry {
     capabilities: HashMap<CapabilityId, CapabilityRegistration>,
     admitted: HashMap<CapabilityId, [u8; 32]>,
     consumed_invocations: std::sync::Mutex<HashSet<(CapabilityId, AgentRequestId)>>,
+    refusal_counts: std::sync::Mutex<HashMap<String, u32>>,
     audit: Arc<dyn CapabilityAuditSink>,
 }
 
@@ -90,6 +107,7 @@ impl Registry {
             capabilities: HashMap::new(),
             admitted: HashMap::new(),
             consumed_invocations: std::sync::Mutex::new(HashSet::new()),
+            refusal_counts: std::sync::Mutex::new(HashMap::new()),
             audit: Arc::new(NoopCapabilityAuditSink),
         }
     }
@@ -186,6 +204,61 @@ impl Registry {
         catalog
     }
 
+    /// Render the admitted catalog as a refusal suffix.
+    ///
+    /// A refusal that only says "no" leaves a planner guessing, and a guessing
+    /// planner retries. Naming the surface it *does* have turns the wall into
+    /// a fact it can plan around. This discloses nothing: the catalog is the
+    /// projection of the workload's own admission.
+    fn surface_hint(&self) -> String {
+        let names: Vec<String> = self
+            .admitted_catalog()
+            .into_iter()
+            .map(|descriptor| descriptor.id.to_string())
+            .collect();
+        if names.is_empty() {
+            "this workload has no capabilities bound".to_string()
+        } else {
+            format!("bound capabilities: {}", names.join(", "))
+        }
+    }
+
+    /// Count one refusal of `name` and say whether to keep teaching.
+    ///
+    /// Returns `true` while the caller should still receive the surface hint.
+    fn should_still_teach(&self, name: &str) -> bool {
+        let mut counts = self.refusal_counts.lock().expect("refusal mutex");
+        if let Some(count) = counts.get_mut(name) {
+            *count = count.saturating_add(1);
+            return *count <= MAX_UNBOUND_ATTEMPTS_PER_NAME;
+        }
+        if counts.len() < MAX_TRACKED_REFUSAL_NAMES {
+            counts.insert(name.to_string(), 1);
+            return true;
+        }
+        // The map is full. Refuse tersely rather than admit another
+        // guest-chosen key; see MAX_TRACKED_REFUSAL_NAMES.
+        false
+    }
+
+    /// Build a refusal that teaches while that is still useful, and stays
+    /// terse once the caller has demonstrably stopped listening.
+    fn teaching_refusal(
+        &self,
+        code: ServiceErrorCode,
+        subject: &str,
+        detail: String,
+    ) -> ServiceError {
+        if self.should_still_teach(subject) {
+            ServiceError::new(code, format!("{detail}; {}", self.surface_hint()))
+        } else {
+            ServiceError::new(
+                code,
+                format!("{detail}; further attempts on `{subject}` are rate-bounded"),
+            )
+        }
+    }
+
     /// Dispatch a call. Returns `Err(NotBound)` for any service not in
     /// the registry. Per-handler `parse_payload` (gate 5) happens
     /// inside the handler's `dispatch`; the registry just routes.
@@ -197,8 +270,9 @@ impl Registry {
         payload: serde_json::Value,
     ) -> ServiceDispatchResult {
         let Some(handler) = self.handlers.get(service) else {
-            return Err(ServiceError::new(
+            return Err(self.teaching_refusal(
                 ServiceErrorCode::NotBound,
+                &service.to_string(),
                 format!(
                     "service `{}` not bound to workload `{}`",
                     service, ctx.workload_id
@@ -224,8 +298,17 @@ impl Registry {
             Ok(capability) => capability,
             Err(_) => return Err(capability_error(CapabilityFailureCode::ProtocolMismatch)),
         };
+        // Both misses below are surface-discovery failures rather than
+        // malformed requests, so they teach: see `teaching_refusal`.
         let Some(registration) = self.capabilities.get(&capability) else {
-            return Err(capability_error(CapabilityFailureCode::NotRegistered));
+            return Err(self.teaching_refusal(
+                ServiceErrorCode::NotBound,
+                &capability.to_string(),
+                format!(
+                    "typed capability request refused: {:?}",
+                    CapabilityFailureCode::NotRegistered
+                ),
+            ));
         };
         let Some(admitted_digest) = self.admitted.get(&capability) else {
             self.record_refusal(
@@ -233,7 +316,14 @@ impl Registry {
                 invocation,
                 CapabilityFailureCode::AdmissionDenied,
             );
-            return Err(capability_error(CapabilityFailureCode::AdmissionDenied));
+            return Err(self.teaching_refusal(
+                ServiceErrorCode::CapabilityDenied,
+                &capability.to_string(),
+                format!(
+                    "typed capability request refused: {:?}",
+                    CapabilityFailureCode::AdmissionDenied
+                ),
+            ));
         };
         if *admitted_digest != invocation.binding.descriptor_digest
             || !invocation.binding.matches(&registration.descriptor)
@@ -1229,6 +1319,139 @@ mod tests {
         assert!(
             !rendered.contains("/etc/shadow"),
             "audit carries the code, never the value: {rendered}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unbound_call_names_what_the_workload_does_have() {
+        let mut registry = Registry::new();
+        let d = descriptor();
+        registry
+            .register_capability(Arc::new(EchoHandler), d.clone())
+            .expect("register");
+        registry.admit_capabilities([d.binding()]).expect("admit");
+
+        let err = registry
+            .dispatch(
+                &ctx(),
+                &ServiceId::parse("host.time.v1").unwrap(),
+                "now",
+                serde_json::json!({}),
+            )
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.code, ServiceErrorCode::NotBound);
+        assert!(
+            err.message.contains("host.dev.echo.v1::echo"),
+            "a refusal that does not say what IS available teaches nothing: {}",
+            err.message
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unbound_call_with_an_empty_catalog_says_so_plainly() {
+        let registry = Registry::new();
+        let err = registry
+            .dispatch(
+                &ctx(),
+                &ServiceId::parse("host.time.v1").unwrap(),
+                "now",
+                serde_json::json!({}),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(
+            err.message.contains("no capabilities"),
+            "an empty catalog is a statement, not an empty list: {}",
+            err.message
+        );
+    }
+
+    #[tokio::test]
+    async fn repeated_unbound_calls_to_one_name_become_rate_bounded() {
+        let registry = Registry::new();
+        let svc = ServiceId::parse("host.time.v1").unwrap();
+        let mut saw_rate_bound = false;
+        for _ in 0..(MAX_UNBOUND_ATTEMPTS_PER_NAME + 2) {
+            let err = registry
+                .dispatch(&ctx(), &svc, "now", serde_json::json!({}))
+                .await
+                .unwrap_err();
+            if err.message.contains("rate-bounded") {
+                saw_rate_bound = true;
+            }
+        }
+        assert!(
+            saw_rate_bound,
+            "a model retrying one unbound name forever is a denial of service"
+        );
+    }
+
+    #[tokio::test]
+    async fn refusal_tracking_cannot_be_grown_without_bound() {
+        let registry = Registry::new();
+        for i in 0..(MAX_TRACKED_REFUSAL_NAMES * 3) {
+            let svc = ServiceId::parse(format!("host.enum{i}.v1")).expect("service");
+            let _ = registry
+                .dispatch(&ctx(), &svc, "now", serde_json::json!({}))
+                .await;
+        }
+        let tracked = registry.refusal_counts.lock().expect("refusal mutex").len();
+        assert!(
+            tracked <= MAX_TRACKED_REFUSAL_NAMES,
+            "a counter keyed by a guest-supplied name is itself a memory exhaustion \
+             surface; tracked {tracked}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_bound_call_is_unaffected_by_refusal_tracking() {
+        let mut registry = Registry::new();
+        registry.register(Arc::new(EchoHandler));
+        let svc = ServiceId::parse("host.dev.echo.v1").unwrap();
+        for _ in 0..(MAX_UNBOUND_ATTEMPTS_PER_NAME + 5) {
+            registry
+                .dispatch(&ctx(), &svc, "echo", serde_json::json!({"k": "v"}))
+                .await
+                .expect("a bound call never becomes rate-bounded");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_typed_call_to_an_unregistered_capability_names_the_surface() {
+        let mut registry = Registry::new();
+        let d = descriptor();
+        registry
+            .register_capability(Arc::new(EchoHandler), d.clone())
+            .expect("register");
+        registry.admit_capabilities([d.binding()]).expect("admit");
+
+        let payload = serde_json::json!({});
+        let invocation = CapabilityInvocation::from_payload(
+            d.binding(),
+            AgentRequestId::parse("typed-absent-verb").expect("request id"),
+            &payload,
+        )
+        .expect("invocation");
+
+        let err = registry
+            .dispatch_capability(
+                &ctx(),
+                &ServiceId::parse("host.dev.echo.v1").expect("service"),
+                "absent",
+                &invocation,
+                payload,
+                &CancellationToken::new(),
+            )
+            .await
+            .expect_err("an unregistered verb is refused");
+
+        assert!(
+            err.message.contains("host.dev.echo.v1::echo"),
+            "the typed path is the real one; its refusal must teach too: {}",
+            err.message
         );
     }
 }
