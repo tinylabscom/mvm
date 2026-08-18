@@ -271,6 +271,7 @@ impl LocalBackend {
                 ledger: &ledger,
                 host_signer_keys_dir: None,
                 emitter: emitter.as_ref(),
+                assurance: None,
             },
         )
         .map_err(|e| crate::local::backend_err(format!("{e:#}")))
