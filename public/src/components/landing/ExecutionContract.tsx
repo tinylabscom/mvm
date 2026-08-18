@@ -58,8 +58,8 @@ export function ExecutionContract() {
   const base = rawBase.endsWith("/") ? rawBase : `${rawBase}/`;
 
   return (
-    // No bg-raised: this section now sits directly above Positioning, which
-    // is raised — keeping this one on the canvas preserves the alternation.
+    // No bg-raised: this section sits directly below WhyNow, which is
+    // raised — keeping this one on the canvas preserves the alternation.
     <Section id="execution-contract" rule>
       <Reveal>
         <Eyebrow>The contract</Eyebrow>
