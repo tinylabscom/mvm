@@ -207,6 +207,7 @@ mod tests {
             memory_mib: 128,
             env: vec![],
             grants: None,
+            assurance_campaign: None,
         };
         let started = mock.run_machine(spec).await.unwrap();
         assert_eq!(started.status, MachineStatus::Running);
@@ -230,6 +231,7 @@ mod tests {
             memory_mib: 128,
             env: vec![],
             grants: None,
+            assurance_campaign: None,
         };
 
         // create → stopped (not started).
@@ -283,6 +285,7 @@ mod tests {
                 memory_mib: 64,
                 env: vec![],
                 grants: None,
+                assurance_campaign: None,
             })
             .await
             .unwrap();
@@ -337,6 +340,7 @@ mod tests {
                 memory_mib: 64,
                 env: vec![],
                 grants: None,
+                assurance_campaign: None,
             })
             .await
             .unwrap();
@@ -363,6 +367,7 @@ mod tests {
                 memory_mib: 64,
                 env: vec![],
                 grants: None,
+                assurance_campaign: None,
             })
             .await
             .unwrap();

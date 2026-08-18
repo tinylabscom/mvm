@@ -88,6 +88,12 @@ pub struct LocalRunContext<'a> {
     /// `plan.failed` entries around this admission. `None` skips emission
     /// (the caller owns its own audit wiring, e.g. the CLI's up path).
     pub emitter: Option<&'a AuditEmitter>,
+    /// An operator-declared assurance campaign to open against this boot.
+    ///
+    /// `None` — the default everywhere except a run that explicitly asked for
+    /// one — means no assurance work happens at all, so campaign discovery
+    /// never sits on the ordinary launch path.
+    pub assurance: Option<&'a crate::assurance_session::CampaignRequest>,
 }
 
 /// Build the signed-plan host-fs grant list from the launch volume set. The
@@ -266,9 +272,7 @@ pub fn admit_and_boot_local(
             // defaulted: a run that silently picks its own audit durability is
             // how this control erodes.
             audit_durability: crate::audit::durability::AuditDurability::BestEffort,
-            // This entry point declares no campaign; assurance is opt-in and
-            // must never sit on an ordinary run's path.
-            assurance: None,
+            assurance: ctx.assurance,
         },
     )
 }
@@ -316,6 +320,7 @@ mod tests {
                 ledger: &ledger,
                 host_signer_keys_dir: Some(keys.path()),
                 emitter: None,
+                assurance: None,
             },
         )
         .expect("admit + boot over mock");
@@ -417,6 +422,7 @@ mod tests {
                 ledger: &ledger,
                 host_signer_keys_dir: Some(keys.path()),
                 emitter: Some(&emitter),
+                assurance: None,
             },
         )
         .expect("admitted boot with a volume");
@@ -482,6 +488,7 @@ mod tests {
                 ledger: &ledger,
                 host_signer_keys_dir: Some(keys.path()),
                 emitter: Some(&emitter),
+                assurance: None,
             },
         )
         .expect_err("the SDK-sidecar gate must refuse");
@@ -566,6 +573,7 @@ mod tests {
                 ledger: &ledger,
                 host_signer_keys_dir: Some(keys.path()),
                 emitter: None,
+                assurance: None,
             },
         )
         .unwrap_err();

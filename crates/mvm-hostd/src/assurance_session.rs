@@ -39,7 +39,8 @@ use crate::broker::handlers::host_assurance_v1::{
 use crate::plan_admission::AdmittedPlan;
 
 /// A destination an operator declared for one campaign.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DeclaredEdge {
     pub label: AssuranceId,
     pub host: String,
@@ -47,7 +48,15 @@ pub struct DeclaredEdge {
 }
 
 /// What an operator authorized for one campaign against one workload.
-#[derive(Debug, Clone)]
+///
+/// Deserializable so an operator can hand one to `machine run` as a file. It is
+/// authored by a human or by the assurance planner, never by the workload, and
+/// `deny_unknown_fields` means a key this build does not understand refuses the
+/// campaign rather than being silently dropped — a dropped destination or a
+/// dropped approval is exactly the kind of quiet widening this contract exists
+/// to prevent.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CampaignDeclaration {
     pub campaign_id: AssuranceId,
     pub trial_id: AssuranceId,
@@ -61,6 +70,35 @@ pub struct CampaignDeclaration {
     pub requested: RequestedAuthority,
     /// How long the session's grant is live.
     pub grant_ttl_ms: u64,
+}
+
+/// Largest campaign declaration accepted from disk.
+pub const MAX_DECLARATION_BYTES: u64 = 64 * 1024;
+
+/// Read an operator-authored campaign declaration.
+///
+/// Size-checked before parsing, so an oversized file is refused without being
+/// deserialized.
+pub fn load_declaration(path: &std::path::Path) -> Result<CampaignDeclaration> {
+    let metadata = std::fs::metadata(path)
+        .with_context(|| format!("reading campaign declaration {}", path.display()))?;
+    if metadata.len() > MAX_DECLARATION_BYTES {
+        anyhow::bail!(
+            "campaign declaration {} is larger than the {MAX_DECLARATION_BYTES}-byte limit",
+            path.display()
+        );
+    }
+    let body = std::fs::read_to_string(path)
+        .with_context(|| format!("reading campaign declaration {}", path.display()))?;
+    let declaration: CampaignDeclaration = serde_json::from_str(&body)
+        .with_context(|| format!("parsing campaign declaration {}", path.display()))?;
+    if declaration.edges.is_empty() {
+        anyhow::bail!(
+            "campaign declaration {} declares no destination, so it can probe nothing",
+            path.display()
+        );
+    }
+    Ok(declaration)
 }
 
 /// Why no session was opened.
@@ -366,8 +404,12 @@ pub fn edges_by_label(decl: &CampaignDeclaration) -> BTreeMap<AssuranceId, (Stri
 /// The emitter is an `Arc` because the opened session outlives this call: it
 /// records every probe for as long as the workload runs, so a borrow would tie
 /// the session's lifetime to the boot call that opened it.
-pub struct CampaignRequest<'a> {
-    pub declaration: &'a CampaignDeclaration,
+pub struct CampaignRequest {
+    /// Owned rather than borrowed: the request is assembled by a caller that
+    /// reads the declaration from disk and then hands it down through the
+    /// launch path, so tying it to that caller's frame would force a leak to
+    /// satisfy the lifetime.
+    pub declaration: CampaignDeclaration,
     pub emitter: Arc<AuditEmitter>,
     pub policy_ceiling: AuthorityCeiling,
     /// The workload's admitted egress policy, which the probe consults.
@@ -378,7 +420,7 @@ pub struct CampaignRequest<'a> {
 
 /// Open a declared campaign against a booted VM, using this process's plane.
 pub fn open_for_boot(
-    campaign: &CampaignRequest<'_>,
+    campaign: &CampaignRequest,
     vm: &str,
     admitted: &AdmittedPlan,
 ) -> Result<MvmBinding> {
@@ -392,7 +434,7 @@ pub fn open_for_boot(
         OpenSession {
             vm,
             admitted,
-            declaration: campaign.declaration,
+            declaration: &campaign.declaration,
             emitter: &campaign.emitter,
             policy_ceiling: &campaign.policy_ceiling,
             policy: campaign.policy.clone(),
@@ -444,6 +486,60 @@ mod tests {
     fn bound_plan() -> ExecutionPlan {
         let service = ServiceId::parse(HOST_ASSURANCE_SERVICE).expect("service");
         PlanFixture::new().services(vec![service]).build()
+    }
+
+    fn declaration_json() -> String {
+        serde_json::to_string_pretty(&declaration()).expect("a declaration serializes")
+    }
+
+    #[test]
+    fn an_operator_declaration_round_trips_through_a_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("campaign.json");
+        std::fs::write(&path, declaration_json()).expect("write");
+
+        let loaded = load_declaration(&path).expect("a well-formed declaration loads");
+        assert_eq!(loaded.campaign_id, declaration().campaign_id);
+        assert_eq!(loaded.edges.len(), 1);
+        assert_eq!(loaded.edges[0].host, "attacker.example.com");
+        assert!(loaded.approvals.permits(ToolId::CampaignProbeV1));
+    }
+
+    #[test]
+    fn a_declaration_with_an_unknown_key_is_refused() {
+        // A key this build does not understand must refuse the campaign rather
+        // than be dropped: a silently ignored destination or approval is the
+        // quiet widening this contract exists to prevent.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("campaign.json");
+        let body = declaration_json().replace(
+            "{\n  \"campaign_id\"",
+            "{\n  \"escalate\": true,\n  \"campaign_id\"",
+        );
+        std::fs::write(&path, body).expect("write");
+        assert!(load_declaration(&path).is_err());
+    }
+
+    #[test]
+    fn a_declaration_naming_no_destination_is_refused_at_load() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("campaign.json");
+        let empty = CampaignDeclaration {
+            edges: Vec::new(),
+            ..declaration()
+        };
+        std::fs::write(&path, serde_json::to_string(&empty).expect("json")).expect("write");
+        let error = load_declaration(&path).expect_err("a campaign that can probe nothing");
+        assert!(format!("{error:#}").contains("no destination"), "{error:#}");
+    }
+
+    #[test]
+    fn an_oversized_declaration_is_refused_before_it_is_parsed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("campaign.json");
+        std::fs::write(&path, "x".repeat(MAX_DECLARATION_BYTES as usize + 1)).expect("write");
+        let error = load_declaration(&path).expect_err("oversized");
+        assert!(format!("{error:#}").contains("larger than"), "{error:#}");
     }
 
     #[test]

@@ -678,6 +678,17 @@ impl MvmClient for GatewayBackend {
     async fn run_machine(&self, spec: MachineSpec) -> Result<MachineState> {
         // The create-sandbox endpoint has no env field; refuse rather than
         // silently drop env the workload would expect.
+        // A campaign declaration names a file on the *host's* filesystem. A
+        // remote backend has no access to it, and resolving the path against
+        // its own filesystem would run a different campaign than the one the
+        // caller wrote — so refuse rather than silently drop or mis-resolve it.
+        if spec.assurance_campaign.is_some() {
+            return Err(MvmError::InvalidSpec {
+                reason: "an assurance campaign declaration is host-local and cannot be run \
+                         against a remote backend"
+                    .into(),
+            });
+        }
         if !spec.env.is_empty() {
             return Err(MvmError::InvalidSpec {
                 reason: "gateway create-sandbox does not accept env vars; bake them into the image or leave env empty".into(),
@@ -1029,6 +1040,7 @@ mod tests {
             memory_mib: 64,
             env: vec![("A".into(), "B".into())],
             grants: None,
+            assurance_campaign: None,
         };
         // The env guard fires before any request, so no server is needed.
         let err = be.run_machine(spec).await.unwrap_err();

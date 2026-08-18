@@ -693,6 +693,9 @@ impl MvmClient for LocalBackend {
         if let Some(grants) = spec.grants {
             builder = builder.grants(grants);
         }
+        if let Some(path) = spec.assurance_campaign {
+            builder = builder.assurance_campaign(path);
+        }
         self.create_from_request(&builder.build()?)
     }
 
@@ -715,6 +718,9 @@ impl MvmClient for LocalBackend {
         .memory_mib(spec.memory_mib);
         if let Some(grants) = spec.grants {
             builder = builder.grants(grants);
+        }
+        if let Some(path) = spec.assurance_campaign {
+            builder = builder.assurance_campaign(path);
         }
         let outcome = self.launch(builder.build()?).await?;
         Ok(outcome.machine)
@@ -1239,6 +1245,7 @@ mod tests {
             memory_mib: 128,
             env: vec![],
             grants: None,
+            assurance_campaign: None,
         };
         let state = be
             .run_machine(spec)
@@ -1270,6 +1277,7 @@ mod tests {
             memory_mib: 128,
             env: vec![],
             grants: None,
+            assurance_campaign: None,
         };
         let state = be.run_machine(spec).await.expect("boot");
         assert!(
@@ -1319,6 +1327,7 @@ mod tests {
             memory_mib: 128,
             env: vec![],
             grants: None,
+            assurance_campaign: None,
         };
         let state = be.run_machine(spec).await.expect("boot");
         assert!(
