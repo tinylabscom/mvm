@@ -33,15 +33,23 @@ export function DemoTeaser() {
       <div className="grid gap-10 lg:grid-cols-2 lg:items-center lg:gap-14">
         <Reveal>
           <Eyebrow n="02">Try it in your browser</Eyebrow>
-          <h2 className="mb-4 lowercase font-display text-2xl font-bold leading-tight text-title sm:text-3xl">
+          {/* Inline margins, not margin utilities: Starlight's unlayered
+              stylesheet beats layered utilities on this page (see
+              Positioning.tsx). */}
+          <h2
+            className="lowercase font-display text-2xl font-bold leading-tight text-title sm:text-3xl"
+            style={{ marginBottom: "1.5rem" }}
+          >
             run the sandbox demo.
           </h2>
-          <p className="mb-6 max-w-md text-base leading-relaxed text-body">
+          <p className="max-w-md text-base leading-relaxed text-body">
             See policy, placeholder substitution, and chain-signed audit
             verification run from the same wasm core the host uses — no install
             required.
           </p>
-          <Button onClick={() => setOpen(true)}>Run demo</Button>
+          <div style={{ marginTop: "2rem" }}>
+            <Button onClick={() => setOpen(true)}>Run demo</Button>
+          </div>
         </Reveal>
 
         <Reveal delay={80}>

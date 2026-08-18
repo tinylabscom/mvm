@@ -1,10 +1,13 @@
 import { useEffect } from "react";
 import { Backends } from "./Backends";
+import { ExecutionContract } from "./ExecutionContract";
 import { Hero } from "./Hero";
 import { Quickstart } from "./Quickstart";
 import { DemoTeaser } from "./DemoTeaser";
 import { DeploymentTiers } from "./DeploymentTiers";
-import { Positioning } from "./Positioning";
+// Positioning is hidden for now — restore its import alongside the
+// commented-out <Positioning /> below.
+// import { Positioning } from "./Positioning";
 import { RequestAccess } from "./RequestAccess";
 import { WhyNow } from "./WhyNow";
 import { WhyMicrovm } from "./WhyMicrovm";
@@ -23,9 +26,15 @@ import { Footer } from "./Footer";
 //                         emotional core; placed after the demo so the
 //                         reader has just *seen* the governance the story
 //                         argues for.
+//   2c. Execution contract — the composition argument: isolation is table
+//                         stakes, the six-layer contract around the box is
+//                         the differentiator. Directly after the why-now
+//                         story so the claim lands while the problem is
+//                         fresh, before any how-to content.
 //   3. Quickstart       — the shortest path from install to a running microVM.
 //   5. Positioning      — "one project, three ways to drive it": CLI,
 //                         Declare, Runtime, each given its own row.
+//                         HIDDEN for now (commented out below), not removed.
 //   6. Why a microVM      — the positive case for the boundary, made once.
 //                         Placed right after Positioning: the reader has
 //                         just seen how you *use* mvm, so this is where
@@ -59,8 +68,12 @@ export function Landing() {
       <Hero />
       <DemoTeaser />
       <WhyNow />
+      <ExecutionContract />
       <Quickstart />
-      <Positioning />
+      {/* Positioning ("one project. three ways to drive it.") is hidden for
+          now, not deleted — restore by uncommenting here and re-adding its
+          entry to the section-order comment above. */}
+      {/* <Positioning /> */}
       <WhyMicrovm />
       <DeploymentTiers />
       <Backends />
