@@ -1242,6 +1242,17 @@ updates only its own entry below.
       Firecracker build. One run on non-nested aarch64 hardware closes it;
       tracked in
       `specs/plans/268-nonnested-aarch64-machine-run-witness.md`.
+      **Update 2026-08-18:** hardware is no longer the blocker — a Pi 4 (8 GB,
+      real non-nested KVM, EL2, nVHE) is available and boots a Firecracker
+      guest to userspace in 0.28 s, settling `console=ttyS0` and GICv2 on real
+      silicon. The hermetic half shipped: #2658 (the release tarball carries
+      every per-VM binary `mvmctl` spawns — the "needs the full aarch64
+      host-side runtime" gap), #2664 (no panic on a fresh `MVM_HOME`), #2679
+      (foreign-arch bundle refused at boot and admission), #2682 (workspace
+      suite runs natively on aarch64). What blocks the witness now is artifact
+      supply, not hardware: #2675 (no published aarch64 workload kernel for the
+      current version) and #2676 (the macOS HVF builder fails `BadKernel`, so no
+      signed bundle can be built locally).
 
 - [x] **Backend shim removal — invert the driver/backend relationship.**
       `FcDriver`, `HvfDriver`, `LibkrunDriver`, and `QemuDriver` now own their

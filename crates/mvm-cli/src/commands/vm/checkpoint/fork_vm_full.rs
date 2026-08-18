@@ -339,6 +339,7 @@ fn admit_forked_child(p: &AdmitForkedChildParams<'_>) -> Result<AdmittedForkChil
         .find(|b| b.name == mvm_core::checkpoint::ROOTFS_BLOB)
         .map(|b| b.sha256.clone());
     let parent_agent_verbs = parent_agent_verb_override(p.checkpoint, p.store);
+    super::warn_dropped_parent_secrets(p.checkpoint, p.store);
     let tenant = crate::commands::vm::tenant_resolution::resolve_tenant(None);
     let ledger = mvm_hostd::plan_admission::InMemoryNonceLedger::new();
     let admission = crate::commands::vm::up::admit_plan_for_boot(

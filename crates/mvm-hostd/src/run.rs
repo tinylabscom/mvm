@@ -266,6 +266,9 @@ pub fn admit_and_boot_local(
             // defaulted: a run that silently picks its own audit durability is
             // how this control erodes.
             audit_durability: crate::audit::durability::AuditDurability::BestEffort,
+            // This entry point declares no campaign; assurance is opt-in and
+            // must never sit on an ordinary run's path.
+            assurance: None,
         },
     )
 }

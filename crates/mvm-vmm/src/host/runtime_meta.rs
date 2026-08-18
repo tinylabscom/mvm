@@ -592,4 +592,53 @@ mod tests {
             assert_eq!(meta.rootfs_path.as_deref(), Some(rootfs.to_str().unwrap()));
         });
     }
+
+    /// Every sidecar field this module's admission gate reads has to survive
+    /// the trip from `mkGuest` into `mvm-meta.json`, and one did not.
+    ///
+    /// `nix/lib/mk-guest.nix` sets `runtimeLean = true`, but
+    /// `nix/images/default-tenant/flake.nix` serializes the sidecar from an
+    /// explicit `inherit (mvm) …` list that omitted it. A dropped field is not
+    /// a parse error — it takes serde's `false` default — so a rootfs carrying
+    /// no baked agent at all reached the gate looking like one that might
+    /// silently degrade to one, and was refused. That cost five release runs
+    /// because the only place it shows up is a real boot.
+    ///
+    /// Reading the flake is the point: the gate and the serializer are in
+    /// different languages and different repositories of truth, and nothing
+    /// else makes them disagree loudly.
+    #[test]
+    fn the_default_tenant_sidecar_serializes_every_field_this_gate_reads() {
+        // Grow this list whenever the gate above learns to read a new field.
+        const READ_BY_THE_GATE: &[&str] = &["overlayAware", "runtimeLean"];
+
+        let flake = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../nix/images/default-tenant/flake.nix");
+        let body = std::fs::read_to_string(&flake)
+            .unwrap_or_else(|e| panic!("reading {}: {e}", flake.display()));
+
+        // The `inherit (mvm) … ;` block inside `sidecarJson`, which is the only
+        // thing that decides what reaches the JSON.
+        let start = body
+            .find("sidecarJson = mvm:")
+            .expect("default-tenant flake still defines sidecarJson");
+        let inherit_start = body[start..]
+            .find("inherit (mvm)")
+            .map(|i| start + i)
+            .expect("sidecarJson still serializes via `inherit (mvm)`");
+        let inherit_end = body[inherit_start..]
+            .find(';')
+            .map(|i| inherit_start + i)
+            .expect("the inherit list is terminated");
+        let inherited = &body[inherit_start..inherit_end];
+
+        for field in READ_BY_THE_GATE {
+            assert!(
+                inherited.split_whitespace().any(|w| w == *field),
+                "`{field}` is read by the required-overlay admission gate but is not in \
+                 default-tenant's sidecar `inherit (mvm)` list, so it serializes as its \
+                 default and the gate sees the wrong answer. List was: {inherited}"
+            );
+        }
+    }
 }

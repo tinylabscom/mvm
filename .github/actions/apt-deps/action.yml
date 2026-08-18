@@ -44,11 +44,33 @@ runs:
         sudo rm -f /etc/apt/sources.list.d/microsoft*.list \
                    /etc/apt/sources.list.d/azure*.list
 
+        # Removing those source lists was not enough, because the Ubuntu
+        # archive is not reached through one. The runner image points apt at a
+        # *mirrorlist* (`Get:1 file:/etc/apt/apt-mirrors.txt Mirrorlist`) whose
+        # first entry is `azure.archive.ubuntu.com`. When that host stops
+        # answering, every index line comes back `Ign:` and apt keeps retrying
+        # it, so `apt-get update` burns the entire per-attempt budget and all
+        # three attempts fail against a mirror no source list mentions. Point
+        # the mirrorlist at the archive that answers.
+        if [ -f /etc/apt/apt-mirrors.txt ]; then
+          echo "apt: mirrorlist was: $(tr '\n' ' ' < /etc/apt/apt-mirrors.txt)"
+          echo "https://archive.ubuntu.com/ubuntu/" | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
+        fi
+
         export DEBIAN_FRONTEND=noninteractive
 
+        # Bound the per-host wait as well as the per-attempt one. Without
+        # these, a single unreachable host absorbs the whole timeout with its
+        # own backoff and the retry loop never gets to try anything different.
+        apt_opts=(
+          -o Acquire::Retries=2
+          -o Acquire::http::Timeout=15
+          -o Acquire::https::Timeout=15
+        )
+
         for attempt in $(seq 1 "$MVM_APT_ATTEMPTS"); do
-          if timeout "$MVM_APT_TIMEOUT" sudo -E apt-get update \
-            && timeout "$MVM_APT_TIMEOUT" sudo -E apt-get install -y --no-install-recommends $MVM_APT_PACKAGES; then
+          if timeout "$MVM_APT_TIMEOUT" sudo -E apt-get "${apt_opts[@]}" update \
+            && timeout "$MVM_APT_TIMEOUT" sudo -E apt-get "${apt_opts[@]}" install -y --no-install-recommends $MVM_APT_PACKAGES; then
             echo "apt: installed on attempt $attempt"
             exit 0
           fi
@@ -59,5 +81,5 @@ runs:
         # Say what happened rather than letting the caller infer it from a
         # missing binary several steps later.
         echo "::error::apt failed ${MVM_APT_ATTEMPTS} times installing: ${MVM_APT_PACKAGES}." >&2
-        echo "Each attempt was bounded at ${MVM_APT_TIMEOUT}s. A mirror is unreachable or slow; this is infrastructure, not the diff under test." >&2
+        echo "Each attempt was bounded at ${MVM_APT_TIMEOUT}s. A mirror is unreachable or slow; this is infrastructure, not the diff under test. The mirrorlist apt was given is echoed above." >&2
         exit 1

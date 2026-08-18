@@ -25,7 +25,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use mvm_agentd::vsock::{GuestRequest, GuestResponse};
-use mvm_core::vm_backend::VmStartConfig;
+use mvm_core::vm_backend::{RuntimeSourcePolicy, VmStartConfig};
 use mvm_runtime::backend::AnyBackend;
 use mvm_runtime::vsock_transport::VsockTransport as _;
 use serde::Deserialize;
@@ -259,10 +259,31 @@ fn measure_concurrent(spec: &BenchSpec) -> Result<Vec<BootMeasurement>> {
     Ok(measurements)
 }
 
-fn measure_one(spec: &BenchSpec, name: String) -> Result<BootMeasurement> {
-    let backend = AnyBackend::from_hypervisor(&spec.backend);
-    let config = VmStartConfig {
-        name: name.clone(),
+/// The runtime-source policy this boot must declare.
+///
+/// The default, `RootfsOnly`, is right for a fat image whose agent is baked
+/// into the rootfs — and it is also what silently suppresses the
+/// `mvm.runtime_data=` kernel-cmdline token. The host attaches the overlay
+/// drive on the strength of the triple alone, but the cmdline assembler names
+/// the device only for a policy other than `RootfsOnly`. A lean prod image
+/// booted under the default therefore receives the disk and no way to find it,
+/// and panics on a missing agent exactly as if no overlay had been passed.
+///
+/// `RequiredOverlay` rather than `PreferOverlay` because a prod rootfs has no
+/// baked agent to fall back to: if the overlay is unusable the boot should say
+/// so, not fail later as a missing binary.
+fn runtime_source_policy(overlay: Option<&OverlaySpec>) -> RuntimeSourcePolicy {
+    match overlay {
+        Some(_) => RuntimeSourcePolicy::RequiredOverlay,
+        None => RuntimeSourcePolicy::RootfsOnly,
+    }
+}
+
+/// The launch config for one measured boot. Split out from [`measure_one`] so
+/// the cmdline it produces can be asserted without a hypervisor.
+fn start_config(spec: &BenchSpec, name: String) -> VmStartConfig {
+    VmStartConfig {
+        name,
         rootfs_path: spec.rootfs.to_string_lossy().into_owned(),
         kernel_path: Some(spec.kernel.to_string_lossy().into_owned()),
         cpus: spec.cpus,
@@ -278,8 +299,14 @@ fn measure_one(spec: &BenchSpec, name: String) -> Result<BootMeasurement> {
             .as_ref()
             .map(|o| o.verity.to_string_lossy().into_owned()),
         runtime_overlay_roothash: spec.overlay.as_ref().map(|o| o.roothash.clone()),
+        runtime_source_policy: runtime_source_policy(spec.overlay.as_ref()),
         ..Default::default()
-    };
+    }
+}
+
+fn measure_one(spec: &BenchSpec, name: String) -> Result<BootMeasurement> {
+    let backend = AnyBackend::from_hypervisor(&spec.backend);
+    let config = start_config(spec, name.clone());
 
     let started = Instant::now();
     let id = backend
@@ -670,4 +697,98 @@ fn overlay_spec_refuses_a_blank_roothash() {
         .expect_err("a blank roothash is not a roothash")
         .to_string();
     assert!(err.contains(OVERLAY_ROOTHASH_VAR), "{err}");
+}
+
+/// A spec shaped like the released prod artifact set: kernel + lean rootfs +
+/// the overlay triple, and no rootfs verity (the gate boots the rootfs
+/// directly, since no release publishes the initramfs a sealed boot needs).
+#[cfg(test)]
+fn prod_shaped_spec(overlay: Option<OverlaySpec>) -> BenchSpec {
+    BenchSpec {
+        backend: "firecracker".to_string(),
+        kernel: PathBuf::from("/img/vmlinux"),
+        rootfs: PathBuf::from("/img/rootfs.ext4"),
+        runs: 1,
+        concurrent: 1,
+        budget: Duration::from_millis(200),
+        ready: ReadySignal::GuestAgent,
+        cpus: 1,
+        memory_mib: 256,
+        overlay,
+    }
+}
+
+#[cfg(test)]
+fn overlay_fixture() -> OverlaySpec {
+    OverlaySpec {
+        path: PathBuf::from("/img/overlay.ext4"),
+        verity: PathBuf::from("/img/overlay.verity"),
+        roothash: "b".repeat(64),
+    }
+}
+
+#[test]
+fn a_configured_overlay_declares_required_overlay() {
+    assert_eq!(
+        runtime_source_policy(Some(&overlay_fixture())),
+        RuntimeSourcePolicy::RequiredOverlay
+    );
+}
+
+#[test]
+fn no_overlay_stays_rootfs_only() {
+    assert_eq!(runtime_source_policy(None), RuntimeSourcePolicy::RootfsOnly);
+}
+
+/// The regression this file exists to prevent, asserted where it actually
+/// bites: on the kernel cmdline. Attaching the overlay drive is not the same as
+/// telling the guest where it is — the host attaches on the triple alone, but
+/// `/init` mounts `/mvm/runtime` from whatever `mvm.runtime_data=` names, and
+/// under `RootfsOnly` that token is never emitted. A boot missing it panics
+/// with `no guest agent resolved from /mvm/runtime and no baked fallback`,
+/// which is indistinguishable at the console from passing no overlay at all.
+///
+/// `/dev/vdb` is the overlay's device node for this shape: with no rootfs
+/// verity the block slots are 0, 2 and 3, and Firecracker names drives in
+/// slot-sorted attach order, so the second drive is `vdb`.
+#[test]
+fn the_cmdline_names_the_overlay_device_the_guest_init_mounts() {
+    let spec = prod_shaped_spec(Some(overlay_fixture()));
+    let config = start_config(&spec, "bench".to_string());
+
+    let cmdline = mvm_vmm::host::cmdline::workload_cmdline(
+        &config,
+        Path::new("/tmp/mvm-bench-state"),
+        |_virtiofs_root, _has_disk| "console=ttyS0".to_string(),
+    )
+    .expect("a boot declaring a runtime-source policy carries a cmdline");
+
+    assert!(
+        cmdline.contains("mvm.runtime_data=/dev/vdb"),
+        "the guest is never told where the overlay is: {cmdline}"
+    );
+}
+
+/// The other half of the discrimination: the same spec under the default
+/// policy emits no device token, which is precisely the bug. Without this the
+/// test above would still pass if the token became unconditional, and the
+/// policy field could be dropped unnoticed.
+#[test]
+fn the_default_policy_emits_no_overlay_device_token() {
+    let spec = prod_shaped_spec(Some(overlay_fixture()));
+    let config = VmStartConfig {
+        runtime_source_policy: RuntimeSourcePolicy::RootfsOnly,
+        ..start_config(&spec, "bench".to_string())
+    };
+
+    let cmdline = mvm_vmm::host::cmdline::workload_cmdline(
+        &config,
+        Path::new("/tmp/mvm-bench-state"),
+        |_virtiofs_root, _has_disk| "console=ttyS0".to_string(),
+    );
+
+    assert!(
+        !cmdline.unwrap_or_default().contains("mvm.runtime_data="),
+        "RootfsOnly must not name an overlay device; the bug was that it names none"
+    );
 }

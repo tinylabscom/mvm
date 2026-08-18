@@ -976,6 +976,7 @@ fn boot_forked_child(p: BootForkedChildParams<'_>) -> Result<()> {
     AnyBackend::require_hypervisor_selectable(&effective_hypervisor)?;
     let parent_agent_verbs = parent_agent_verb_override(p.parent_checkpoint, p.store);
     let parent_meta = p.store.read_meta(p.parent_checkpoint)?;
+    warn_dropped_parent_secrets(p.parent_checkpoint, p.store);
 
     // Resource shape: flag > parent plan > global defaults.
     let (parent_cpus, parent_mem) = parent_plan_resources(p.parent_checkpoint, p.store);
@@ -1230,6 +1231,47 @@ fn parent_network_mode(
     plan.network_mode
 }
 
+/// The secret binding *names* the parent was admitted with, for diagnostics.
+///
+/// A fork child is admitted with no secrets, so every binding the parent held
+/// is dropped. Without a diagnostic that presents as an upstream that stopped
+/// answering rather than as a capability the child never got.
+///
+/// Names only: `SecretBinding` carries a name and a source reference, never a
+/// value, and only the name is echoed.
+///
+/// An unreadable parent plan yields an empty set, matching the sibling
+/// inheritance helpers. Absence of a plan file is not evidence the parent held
+/// no secrets, so silence here means "unknown", not "none".
+fn parent_secret_names(parent_checkpoint: &CheckpointId, store: &CheckpointStore) -> Vec<String> {
+    let Ok(parent_meta) = store.read_meta(parent_checkpoint) else {
+        return Vec::new();
+    };
+    let Ok(plan) = super::plan_persist::read_plan(&parent_meta.vm_name) else {
+        return Vec::new();
+    };
+    plan.secrets.into_iter().map(|b| b.name).collect()
+}
+
+/// Warn that a fork drops the parent's secret bindings.
+///
+/// Not a refusal: a fork is always prod-profile, so there is no flag to gate a
+/// refusal on, and hard-failing would break forks whose child never needed the
+/// parent's credentials.
+fn warn_dropped_parent_secrets(parent_checkpoint: &CheckpointId, store: &CheckpointStore) {
+    let dropped = parent_secret_names(parent_checkpoint, store);
+    if dropped.is_empty() {
+        return;
+    }
+    tracing::warn!(
+        secrets = %dropped.join(", "),
+        count = dropped.len(),
+        "fork child is admitted with no secret bindings; the parent's are not carried, \
+         so outbound requests to their bound destinations will be refused by the \
+         substitution endpoint"
+    );
+}
+
 fn parent_plan_resources(
     parent_checkpoint: &CheckpointId,
     store: &CheckpointStore,
@@ -1341,6 +1383,121 @@ mod tests {
 
         let verbs = parent_agent_verb_override(&meta.id, &store);
         assert_eq!(verbs, vec!["ping", "run-entrypoint"]);
+    }
+
+    #[test]
+    fn parent_secret_names_lists_the_parent_bindings_by_name() {
+        use mvm_contract::plan::{SecretBinding, SecretSource};
+        use mvm_core::checkpoint::{CheckpointClass, CheckpointId};
+        use mvm_core::plan::test_support::PlanFixture;
+
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let tmp = tempfile::tempdir().unwrap();
+        env.isolate_mvm_home(tmp.path());
+
+        let mut plan = PlanFixture::new()
+            .tenant("local")
+            .plan_id("parent-plan")
+            .build();
+        plan.secrets = vec![
+            SecretBinding {
+                name: "STRIPE_KEY".to_string(),
+                source: SecretSource::Keystore {
+                    address: "kv/stripe".to_string(),
+                },
+            },
+            SecretBinding {
+                name: "DB_PASSWORD".to_string(),
+                source: SecretSource::External {
+                    provider: "vault".to_string(),
+                    path: "secret/db".to_string(),
+                },
+            },
+        ];
+        mvm_hostd::audit::plan_persist::write_plan("secretful-parent", &plan).unwrap();
+
+        let store = mvm_runtime::checkpoint::CheckpointStore::open();
+        let meta = mvm_core::checkpoint::CheckpointMeta::builder(
+            CheckpointId::new("ckpt-secretful"),
+            CheckpointClass::FsQuick,
+            "secretful-parent",
+        )
+        .content(vec![])
+        .supervisor_config_digest("d")
+        .created_unix(1)
+        .build();
+        store.write_meta(&meta).unwrap();
+
+        assert_eq!(
+            parent_secret_names(&meta.id, &store),
+            vec!["STRIPE_KEY".to_string(), "DB_PASSWORD".to_string()],
+        );
+    }
+
+    /// The source half of a binding names a provider and an address. Neither is
+    /// a secret value, but neither is echoed either: the diagnostic is names.
+    #[test]
+    fn parent_secret_names_echoes_no_source_addresses() {
+        use mvm_contract::plan::{SecretBinding, SecretSource};
+        use mvm_core::checkpoint::{CheckpointClass, CheckpointId};
+        use mvm_core::plan::test_support::PlanFixture;
+
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let tmp = tempfile::tempdir().unwrap();
+        env.isolate_mvm_home(tmp.path());
+
+        let mut plan = PlanFixture::new().tenant("local").plan_id("p").build();
+        plan.secrets = vec![SecretBinding {
+            name: "TOKEN".to_string(),
+            source: SecretSource::External {
+                provider: "vault".to_string(),
+                path: "secret/very/specific/path".to_string(),
+            },
+        }];
+        mvm_hostd::audit::plan_persist::write_plan("p-vm", &plan).unwrap();
+
+        let store = mvm_runtime::checkpoint::CheckpointStore::open();
+        let meta = mvm_core::checkpoint::CheckpointMeta::builder(
+            CheckpointId::new("ckpt-src"),
+            CheckpointClass::FsQuick,
+            "p-vm",
+        )
+        .content(vec![])
+        .supervisor_config_digest("d")
+        .created_unix(1)
+        .build();
+        store.write_meta(&meta).unwrap();
+
+        let names = parent_secret_names(&meta.id, &store);
+        assert_eq!(names, vec!["TOKEN".to_string()]);
+        let joined = names.join(", ");
+        assert!(!joined.contains("vault"), "provider leaked: {joined}");
+        assert!(!joined.contains("secret/"), "address leaked: {joined}");
+    }
+
+    /// A parent whose plan cannot be read is "unknown", not "held none" — the
+    /// helper stays quiet rather than asserting the parent was secretless.
+    #[test]
+    fn parent_secret_names_is_empty_when_the_parent_plan_is_unreadable() {
+        use mvm_core::checkpoint::{CheckpointClass, CheckpointId};
+
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let tmp = tempfile::tempdir().unwrap();
+        env.isolate_mvm_home(tmp.path());
+
+        let store = mvm_runtime::checkpoint::CheckpointStore::open();
+        let meta = mvm_core::checkpoint::CheckpointMeta::builder(
+            CheckpointId::new("ckpt-planless"),
+            CheckpointClass::FsQuick,
+            "planless-vm",
+        )
+        .content(vec![])
+        .supervisor_config_digest("d")
+        .created_unix(1)
+        .build();
+        store.write_meta(&meta).unwrap();
+
+        assert!(parent_secret_names(&meta.id, &store).is_empty());
     }
 
     #[test]
