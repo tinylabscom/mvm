@@ -5,7 +5,9 @@ import { Hero } from "./Hero";
 import { Quickstart } from "./Quickstart";
 import { DemoTeaser } from "./DemoTeaser";
 import { DeploymentTiers } from "./DeploymentTiers";
-import { Positioning } from "./Positioning";
+// Positioning is hidden for now — restore its import alongside the
+// commented-out <Positioning /> below.
+// import { Positioning } from "./Positioning";
 import { RequestAccess } from "./RequestAccess";
 import { WhyNow } from "./WhyNow";
 import { WhyMicrovm } from "./WhyMicrovm";
@@ -32,6 +34,7 @@ import { Footer } from "./Footer";
 //   3. Quickstart       — the shortest path from install to a running microVM.
 //   5. Positioning      — "one project, three ways to drive it": CLI,
 //                         Declare, Runtime, each given its own row.
+//                         HIDDEN for now (commented out below), not removed.
 //   6. Why a microVM      — the positive case for the boundary, made once.
 //                         Placed right after Positioning: the reader has
 //                         just seen how you *use* mvm, so this is where
@@ -67,7 +70,10 @@ export function Landing() {
       <WhyNow />
       <ExecutionContract />
       <Quickstart />
-      <Positioning />
+      {/* Positioning ("one project. three ways to drive it.") is hidden for
+          now, not deleted — restore by uncommenting here and re-adding its
+          entry to the section-order comment above. */}
+      {/* <Positioning /> */}
       <WhyMicrovm />
       <DeploymentTiers />
       <Backends />
