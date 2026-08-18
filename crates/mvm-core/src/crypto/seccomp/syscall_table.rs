@@ -312,14 +312,130 @@ mod tests {
         assert!(syscall_name(i64::MAX).is_none());
     }
 
+    /// Legacy syscalls that exist on x86_64 and genuinely do not exist on
+    /// aarch64, which only has the `*at` / `p*` variants. A tier may name
+    /// these — `apply_filter` skips a name that does not resolve, by design —
+    /// but the set has to be *declared*, so that a name resolving nowhere is a
+    /// typo rather than a silent no-op.
+    const LEGACY_X86_ONLY: &[&str] = &[
+        "access",
+        "arch_prctl",
+        "chmod",
+        "chown",
+        "dup2",
+        "epoll_wait",
+        "fork",
+        "futimesat",
+        "getdents",
+        "getpgrp",
+        "lchown",
+        "link",
+        "lstat",
+        "mkdir",
+        "open",
+        "pipe",
+        "poll",
+        "readlink",
+        "rename",
+        "rmdir",
+        "select",
+        "sendfile",
+        "stat",
+        "symlink",
+        "unlink",
+        "vfork",
+    ];
+
+    /// Every tier name either resolves here or is a declared legacy name.
+    ///
+    /// This replaces an assertion that every name resolves on every arch,
+    /// which was stronger than the design: `mvm-seccomp-apply::apply_filter`
+    /// deliberately skips a name it cannot resolve ("the tier is best-effort
+    /// coarse-grained"). The old form passed on x86_64 and could only ever
+    /// fail on aarch64, where it flagged correct behaviour.
     #[test]
-    fn all_tier_syscalls_resolve() {
+    fn every_tier_name_resolves_or_is_a_declared_legacy_name() {
         use crate::crypto::seccomp::SeccompTier;
         for tier in SeccompTier::ALL {
             for name in tier.syscalls() {
                 assert!(
+                    syscall_number(name).is_some() || LEGACY_X86_ONLY.contains(&name),
+                    "{name} in tier {tier} resolves on no architecture and is not \
+                     declared in LEGACY_X86_ONLY — typo, or a name that needs adding \
+                     to the syscall table"
+                );
+            }
+        }
+    }
+
+    /// The assertion with teeth, and the one that would have caught the epoll
+    /// hole: when a tier grants a capability through a legacy name, it must
+    /// also grant the name that carries that capability on aarch64. Otherwise
+    /// the capability exists on x86_64 and is silently EPERM on ARM.
+    ///
+    /// `arch_prctl` and `sendfile` are absent: the first is genuinely x86-only
+    /// with no ARM equivalent, and the second's 64-bit form is used implicitly.
+    #[test]
+    fn a_legacy_name_never_grants_a_capability_that_aarch64_then_lacks() {
+        use crate::crypto::seccomp::SeccompTier;
+        const REPLACEMENT: &[(&str, &str)] = &[
+            ("access", "faccessat"),
+            ("chmod", "fchmodat"),
+            ("chown", "fchownat"),
+            ("dup2", "dup3"),
+            ("epoll_wait", "epoll_pwait"),
+            ("fork", "clone"),
+            ("futimesat", "utimensat"),
+            ("getdents", "getdents64"),
+            ("getpgrp", "getpgid"),
+            ("lchown", "fchownat"),
+            ("link", "linkat"),
+            ("lstat", "newfstatat"),
+            ("mkdir", "mkdirat"),
+            ("open", "openat"),
+            ("pipe", "pipe2"),
+            ("poll", "ppoll"),
+            ("readlink", "readlinkat"),
+            ("rename", "renameat"),
+            ("rmdir", "unlinkat"),
+            ("select", "pselect6"),
+            ("stat", "newfstatat"),
+            ("symlink", "symlinkat"),
+            ("unlink", "unlinkat"),
+            ("vfork", "clone"),
+        ];
+
+        for tier in SeccompTier::ALL {
+            let granted = tier.syscalls();
+            for (legacy, modern) in REPLACEMENT {
+                if !granted.contains(legacy) {
+                    continue;
+                }
+                assert!(
+                    granted.contains(modern),
+                    "tier {tier} allows the legacy `{legacy}` but not `{modern}`, \
+                     which is what carries that capability on aarch64 — the tier \
+                     would grant it on x86_64 and EPERM it on ARM"
+                );
+            }
+        }
+    }
+
+    /// Each declared replacement has to be resolvable, or the check above is
+    /// asserting against a name the table cannot supply.
+    #[test]
+    fn declared_legacy_names_are_actually_absent_here_or_present_everywhere() {
+        for name in LEGACY_X86_ONLY {
+            if cfg!(target_arch = "aarch64") {
+                assert!(
+                    syscall_number(name).is_none(),
+                    "{name} is declared x86-only but resolves on aarch64 — drop it \
+                     from LEGACY_X86_ONLY"
+                );
+            } else {
+                assert!(
                     syscall_number(name).is_some(),
-                    "{name} in tier {tier} must resolve on this arch"
+                    "{name} is declared x86-only but does not resolve on x86_64"
                 );
             }
         }

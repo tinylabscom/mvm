@@ -285,6 +285,18 @@ for detailed scope and acceptance criteria.
 
 ## In-flight plans
 
+- [~] **Secret bindings for forked children** —
+      `specs/plans/2026-08-18-fork-inherits-secret-bindings.md`, issue #2698.
+      W0 landed: a fork that drops its parent's secret bindings now says so,
+      reading the parent's persisted plan rather than needing a schema change.
+      3 tests, mutation-checked.
+      STILL OPEN: everything that closes the gap. Option A (declare the child's
+      bindings at fork, A1-A6) is the recommended build and is unimplemented;
+      Option B (inherit from the checkpoint, attenuated by intersection) is
+      designed and deliberately deferred, not queued. W0 warns only — the
+      refusal arm moved to A6, because a fork is always prod-profile and so had
+      no flag to gate on.
+
 - [~] **Admission-bound AI assurance sessions** —
       `specs/plans/2026-08-17-admission-bound-ai-assurance-sessions.md`. W1–W4,
       W6/W7 and W7b landed: the envelope, the authority intersection, the
@@ -314,6 +326,20 @@ for detailed scope and acceptance criteria.
       rerun-if-env-changed), Phase 4 (dead crate edges; `deps_audit` and the
       tree-sitter grammars off the serial path; the `mvm-hostd` audit cluster),
       Phase 5 (sccache 4.2% Rust hit rate, worktree hygiene)
+
+- [~] **Agent tool and memory planes**
+      (`specs/plans/2026-08-18-agent-tool-and-memory-planes.md`). Opened
+      2026-08-18; no workstream started. Design only: ADR-045 gained sections
+      18-19 (an agent's tool surface is broker dispatch, and the catalog
+      derives from `ExecutionPlan.services` rather than from anything the guest
+      or its model says) and ADR-047 defines the memory plane. Sequenced behind
+      `specs/plans/2026-08-18-durable-agent-sessions.md` WS1, which owns the
+      session identity memory keys on and is itself unmerged.
+  - [ ] WS1-WS4 — tool plane: catalog derivation, argument policy, host-side
+        dynamic-namespace adapter, refusal as a planning signal
+  - [ ] WS5-WS9 — memory plane: store + record, `host.memory.v1`, write scan
+        and ceilings, audit + retention, bounded recall
+  - [ ] WS10 — `mvmctl memory` read-only surface, tests + BDD
 
 - [~] **Launch path as declared stages**
       (`specs/plans/2026-08-15-launch-path-as-declared-stages.md`). Opened

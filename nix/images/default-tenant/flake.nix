@@ -103,9 +103,15 @@
       # overwritten by the fetch path, for which it is no longer true.
       sidecarJson = mvm:
         builtins.toJSON {
+          # `runtimeLean` belongs in this list for the same reason
+          # `overlayAware` does: the required-overlay admission gate reads both,
+          # and a field mkGuest sets but this serializer drops reaches the gate
+          # as its `false` default. That is how a rootfs carrying no baked agent
+          # at all came to be refused as one that might silently degrade to one.
           inherit (mvm)
             name accessible sealed entrypointKind initSystem
-            expectedBootMs agentBinary rootlessEntrypoint hypervisor overlayAware;
+            expectedBootMs agentBinary rootlessEntrypoint hypervisor overlayAware
+            runtimeLean;
           imageTag = bootImageTag;
           source = "built-local";
           builtAt = "";
