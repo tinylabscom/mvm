@@ -65,6 +65,59 @@ pub struct AgentSessionRecord {
     pub updated_unix: u64,
 }
 
+/// Why a sandbox was parked. The reason is not decoration: it selects the
+/// storage tier, because what a park costs while it waits depends entirely on
+/// how long the wait might be.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ParkReason {
+    /// Blocked on a human decision. Latency is unbounded — the operator may be
+    /// asleep — so this must never hold RAM.
+    ApprovalWait,
+    /// No work for a while. Resumption is likely and soon, so this is the one
+    /// reason that may stay resident.
+    Idle,
+    /// The host is going down. The sandbox cannot survive it either way, so the
+    /// memory image goes to disk.
+    HostShutdown,
+    /// An operator parked it explicitly.
+    Operator,
+    /// A retention policy demoted an already-parked session further down the
+    /// ladder.
+    RetentionDemotion,
+}
+
+/// Where a parked session's state lives, and therefore what it costs to hold
+/// and what it costs to resume.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StorageTier {
+    /// Live paused process; memory resident. Fastest to resume, and the only
+    /// tier that consumes RAM while it waits.
+    Resident,
+    /// Memory image on disk, no process. Costs disk, resumes by restore.
+    Parked,
+    /// Record and journal only. Costs almost nothing; resumes by a fresh boot
+    /// and a journal replay.
+    Cold,
+}
+
+/// Pick the tier a park should land in.
+///
+/// The rule is about the wait's shape rather than its cause: a wait whose
+/// length the host cannot predict must not hold the scarcest resource. Only
+/// `Idle` has a bounded, likely-soon resumption, so only `Idle` stays resident.
+#[must_use]
+pub fn select_tier(reason: ParkReason) -> StorageTier {
+    match reason {
+        ParkReason::Idle => StorageTier::Resident,
+        ParkReason::ApprovalWait | ParkReason::HostShutdown | ParkReason::Operator => {
+            StorageTier::Parked
+        }
+        ParkReason::RetentionDemotion => StorageTier::Cold,
+    }
+}
+
 /// Filesystem-backed registry over `config::agent_sessions_dir()` (or any
 /// root, for tests).
 pub struct AgentSessionStore {
@@ -248,6 +301,47 @@ mod tests {
             .map(|r| r.session_id.as_str().to_string())
             .collect();
         assert_eq!(ids, vec!["sess-alpha"]);
+    }
+
+    #[test]
+    fn an_unbounded_wait_parks_straight_to_disk() {
+        // An operator decision and a host shutdown both have unbounded or
+        // externally-determined latency, so neither may hold RAM.
+        assert_eq!(select_tier(ParkReason::ApprovalWait), StorageTier::Parked);
+        assert_eq!(select_tier(ParkReason::HostShutdown), StorageTier::Parked);
+        assert_eq!(select_tier(ParkReason::Operator), StorageTier::Parked);
+    }
+
+    #[test]
+    fn an_idle_session_may_linger_resident() {
+        // Idle is the one reason with a bounded, cheap resumption: the sandbox
+        // may still be wanted shortly, so it stays resident until a TTL demotes
+        // it.
+        assert_eq!(select_tier(ParkReason::Idle), StorageTier::Resident);
+    }
+
+    #[test]
+    fn a_retention_demotion_goes_cold() {
+        assert_eq!(
+            select_tier(ParkReason::RetentionDemotion),
+            StorageTier::Cold
+        );
+    }
+
+    #[test]
+    fn park_reason_and_tier_round_trip_as_snake_case() {
+        let json = serde_json::to_string(&ParkReason::ApprovalWait).unwrap();
+        assert_eq!(json, "\"approval_wait\"");
+        assert_eq!(
+            serde_json::from_str::<ParkReason>(&json).unwrap(),
+            ParkReason::ApprovalWait
+        );
+        let tier = serde_json::to_string(&StorageTier::Parked).unwrap();
+        assert_eq!(tier, "\"parked\"");
+        assert_eq!(
+            serde_json::from_str::<StorageTier>(&tier).unwrap(),
+            StorageTier::Parked
+        );
     }
 
     #[test]
