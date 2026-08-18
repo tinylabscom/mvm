@@ -74,6 +74,8 @@ pub mod rootfs_inject;
 pub mod run_image;
 pub mod runtime_identity;
 pub mod stage0;
+/// Whether a builder guest may fall back to a tmpfs Nix store, or must stop.
+pub mod store_readiness;
 pub mod template_reuse;
 pub mod verity_initrd;
 /// Persistent ext4 image materialization for user-attached block volumes.

@@ -121,22 +121,20 @@ jobs:
       # guest). They are SEPARATE bin targets in `mvm-hostd` — the root
       # `cargo build` above only produces `mvmctl` — so they are built here and
       # ship next to `mvmctl` in the tarball, where the backend's
-      # adjacent-to-exe resolver finds them on a downloaded install.
-      #   - mvm-network-endpoint: the per-VM egress gate. Every VM spawns
-      #     one, on both the FC (Linux) and HVF (macOS) paths, so it ships on
-      #     every target.
-      #   - mvm-hvf-supervisor (macOS only): the raw-HVF VMM supervisor.
-      #   - mvm-libkrun-supervisor (macOS only, and INTENTIONALLY so — not a
-      #     follow-up): it has `required-features = ["libkrun-sys"]`, and the
-      #     released Linux mvmctl deliberately does NOT link libkrun — the
-      #     `libkrun-sys` feature is a macOS-only target dep (see the rationale
-      #     at the top-level Cargo.toml, `[target.'cfg(target_os="macos")']`:
-      #     "Linux CI/runtimes use Firecracker … no libkrun-dev package exists").
-      #     So on Linux the supervisor can't be built here (no libkrun to link)
-      #     and isn't needed at runtime: workloads use Firecracker and the
-      #     builder VM uses libkrun-if-genuinely-available-else-QEMU (ADR-093),
-      #     with libkrun's FFI stubbed out in a no-feature build so it never
-      #     spawns this supervisor.
+      # adjacent-to-exe resolver finds them on a downloaded install. On a
+      # downloaded install that resolver has no `target/` dir to fall back to,
+      # so a binary missing here is a spawn failure at run time.
+      #
+      # This list is the `PerVmScope::Always` half of `PER_VM_HOST_BINARIES` in
+      # crates/mvm-cli/src/host_binaries/manifest.rs, and
+      # `xtask check-per-vm-host-binaries-sync` fails the build if the two
+      # drift. Add a binary there, not here.
+      #
+      # macOS additionally gets the two supervisors. mvm-libkrun-supervisor is
+      # macOS-only INTENTIONALLY — it has `required-features = ["libkrun-sys"]`
+      # and the released Linux mvmctl deliberately does not link libkrun (see
+      # the rationale in the top-level Cargo.toml): Linux workloads use
+      # Firecracker, so the supervisor is neither buildable nor needed there.
       - name: Build per-VM host binaries
         env:
           TARGET: ${{ matrix.target }}
@@ -146,12 +144,18 @@ jobs:
         run: |
           if [[ "${TARGET}" == *apple-darwin ]]; then
             cargo build --release --target "${TARGET}" -p mvm-hostd \
-              --bin mvm-hvf-supervisor \
+              --bin mvm-hvf-supervisor
+            cargo build --release --target "${TARGET}" -p mvm-hostd \
               --bin mvm-libkrun-supervisor --features libkrun-sys
           fi
           # Ships on every target — see the note above.
           cargo build --release --target "${TARGET}" -p mvm-hostd \
-            --bin mvm-network-endpoint
+            --bin mvm-host-agent \
+            --bin mvm-signer-helper \
+            --bin mvm-network-endpoint \
+            --bin mvm-netd \
+            --bin mvm-broker \
+            --bin mvm-audit-signer
 
       - name: Smoke test binary (native targets only)
         if: matrix.target == 'x86_64-unknown-linux-gnu' || matrix.target == 'aarch64-apple-darwin'
@@ -204,12 +208,24 @@ jobs:
           cp "target/${TARGET}/release/${BIN_NAME}" "staging/${ARCHIVE_NAME}/"
           # Per-VM host processes (built in the prior step), shipped next to
           # mvmctl so the backend's adjacent-to-exe resolver finds them on a
-          # downloaded install. copy-if-exists: the set differs by OS (macOS also
-          # gets the hvf/libkrun supervisors), but the substitution endpoint
-          # ships on every target.
-          for hostbin in mvm-hvf-supervisor mvm-libkrun-supervisor mvm-network-endpoint; do
+          # downloaded install. Kept in step with PER_VM_HOST_BINARIES by
+          # `xtask check-per-vm-host-binaries-sync`.
+          #
+          # Fail closed rather than copy-if-exists: a binary that failed to
+          # build would otherwise be silently dropped from the tarball and
+          # surface much later as a spawn failure on a user's machine.
+          REQUIRED_HOSTBINS="mvm-host-agent mvm-signer-helper mvm-network-endpoint mvm-netd mvm-broker mvm-audit-signer"
+          if [[ "${TARGET}" == *apple-darwin ]]; then
+            REQUIRED_HOSTBINS="${REQUIRED_HOSTBINS} mvm-hvf-supervisor mvm-libkrun-supervisor"
+          fi
+          for hostbin in ${REQUIRED_HOSTBINS}; do
             src="target/${TARGET}/release/${hostbin}"
-            [ -f "$src" ] && cp "$src" "staging/${ARCHIVE_NAME}/" && echo "bundled ${hostbin}"
+            if [ ! -f "$src" ]; then
+              echo "::error::${hostbin} was not built for ${TARGET}; mvmctl spawns it at run time and the adjacent-to-exe resolver has no fallback on a downloaded install" >&2
+              exit 1
+            fi
+            cp "$src" "staging/${ARCHIVE_NAME}/"
+            echo "bundled ${hostbin}"
           done
           cp -r assets "staging/${ARCHIVE_NAME}/" 2>/dev/null || true
           cp README.md "staging/${ARCHIVE_NAME}/" 2>/dev/null || true
@@ -245,6 +261,15 @@ jobs:
     # (the `build` job) but never reaches this publish job — only a tag push or
     # an explicit dry_run=false dispatch publishes.
     if: ${{ !cancelled() && needs.bdd.result == 'success' && needs.build.result == 'success' && (github.event_name == 'push' || github.event.inputs.dry_run == 'false') }}
+    # This job mints the one keyless identity every installed mvmctl trusts:
+    # `release.yml@refs/tags/v{version}`, the sole entry in
+    # RELEASE_IDENTITY_TEMPLATES. The environment's policy admits `v*` tags and
+    # nothing else, so a branch push or a workflow_dispatch from an arbitrary
+    # ref cannot produce a signature the shipped verifier accepts. The boot
+    # image train is gated the same way against `boot-image/v*`, and
+    # revocations against its own tag; this was the last of the three trusted
+    # identities that anything could mint.
+    environment: release-signing
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -293,8 +318,21 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+          # Highest version, not most recently created. `gh release list`
+          # orders by creation date, so `.[0]` picks whichever release was cut
+          # last — and the two disagree the moment one is re-cut out of order.
+          # That is not hypothetical: v0.1.1 published, then v0.1.0 was re-cut
+          # after a fix landed, leaving the newer release at the lower version.
+          # Sorting by parsed semver makes which image a CLI release ships a
+          # property of the version, not of the order someone happened to push.
+          # The strict N.N.N match also drops anything that is not a plain
+          # release tag rather than trying to order it.
           BOOT_TAG="$(gh release list --repo "${GITHUB_REPOSITORY}" --limit 100 \
-            --json tagName --jq '[.[] | select(.tagName | startswith("boot-image/v"))] | .[0].tagName // empty')"
+            --json tagName --jq -r '
+              [ .[].tagName
+                | select(test("^boot-image/v[0-9]+\\.[0-9]+\\.[0-9]+$"))
+                | {tag: ., v: (ltrimstr("boot-image/v") | split(".") | map(tonumber))} ]
+              | sort_by(.v) | last | .tag // empty')"
           if [ -z "${BOOT_TAG}" ]; then
             echo "::error::no boot-image/v* release exists, so this release would ship with no boot image assets and every fresh install would 404 on first boot. Publish a boot-image/v* tag first, then re-run this release." >&2
             exit 1
@@ -302,6 +340,32 @@ jobs:
           echo "Attaching boot image assets from ${BOOT_TAG}"
           mkdir -p artifacts
           gh release download "${BOOT_TAG}" --repo "${GITHUB_REPOSITORY}" --dir artifacts --clobber
+
+          # Existence is not usability. The producing side refuses to publish an
+          # incomplete set, but it cannot retract one published before that gate
+          # existed, and this step would attach it without comment. A CLI release
+          # missing these is green and unusable: no x86_64 image means every
+          # x86_64 fresh install 404s on first boot, and no builder-vm assets
+          # means download_builder_vm_image 404s for everyone. The consumer-path
+          # check further down covers only runtime-overlay and sdk-sidecar, and
+          # skips whatever is absent, so nothing else in this job would notice.
+          missing=()
+          for arch in aarch64 x86_64; do
+            for f in \
+              "default-microvm-vmlinux-${arch}" \
+              "default-microvm-rootfs-${arch}.ext4" \
+              "default-microvm-meta-${arch}.json" \
+              "default-microvm-${arch}-checksums-sha256.txt" \
+              "builder-vm-vmlinux-${arch}" \
+              "builder-vm-rootfs-${arch}.ext4" \
+              "builder-vm-${arch}-checksums-sha256.txt"; do
+              [ -s "artifacts/${f}" ] || missing+=("${f}")
+            done
+          done
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "::error::${BOOT_TAG} is incomplete — refusing to ship a CLI release whose boot image would 404 on first boot. Missing: ${missing[*]}" >&2
+            exit 1
+          fi
           # Drop the bundles this job re-mints. The signing step below writes
           # its bundle with create-new semantics, so leaving the boot image
           # train's copy in place would fail that step outright rather than be

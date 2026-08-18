@@ -2777,7 +2777,11 @@ pub(crate) fn prepopulate_stage0_nix_store_image(
         "prepopulating Stage 0 Nix store image with host mkfs.ext4"
     );
     let status = Command::new(&mkfs)
-        .args(["-F", "-q", "-b", "4096", "-d"])
+        // `-L` so the guest can find this disk by label instead of by device
+        // letter, which shifts whenever a backend attaches another drive.
+        .args(["-F", "-q", "-b", "4096", "-L"])
+        .arg(crate::rootfs::STAGE0_NIX_STORE_EXT4_LABEL)
+        .args(["-d"])
         .arg(&seed_nix)
         .arg(store_image)
         .arg(blocks_4k.to_string())
@@ -2830,7 +2834,12 @@ fn format_stage0_store_empty_in_process(store_image: &Path) -> Result<(), Builde
     file.set_len(device_size).map_err(|e| {
         BuilderVmError::ExtractionFailed(format!("resize {}: {e}", store_image.display()))
     })?;
-    let summary = mvm_fs::ext4::mkfs::format_empty_ext4(&mut file, size_bytes).map_err(|e| {
+    let summary = mvm_fs::ext4::mkfs::format_empty_ext4_labeled(
+        &mut file,
+        size_bytes,
+        crate::rootfs::STAGE0_NIX_STORE_EXT4_LABEL.as_bytes(),
+    )
+    .map_err(|e| {
         BuilderVmError::ExtractionFailed(format!(
             "pure-Rust ext4 format of {}: {e}",
             store_image.display()

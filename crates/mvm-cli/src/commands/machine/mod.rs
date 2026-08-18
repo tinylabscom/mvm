@@ -256,69 +256,11 @@ pub(in crate::commands) fn preflight_network(
 /// flags and translates into the same admitted execution path.
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct MachineRunArgs {
-    /// Boot an OCI image.
-    #[arg(long, value_name = "REF", conflicts_with_all = ["manifest", "flake", "runtime_pack", "deployment"])]
-    pub image: Option<String>,
-    /// Boot a pre-built manifest.
-    #[arg(long, value_name = "PATH", conflicts_with_all = ["image", "flake", "runtime_pack", "deployment"])]
-    pub manifest: Option<String>,
-    /// Build and boot a Nix flake.
-    #[arg(long, value_name = "PATH", conflicts_with_all = ["image", "manifest", "runtime_pack", "deployment"])]
-    pub flake: Option<String>,
-    /// Boot a verified runtime pack.
-    #[arg(long, conflicts_with_all = ["image", "manifest", "flake", "deployment"])]
-    pub runtime_pack: bool,
-    /// Boot a local attested deployment (deploy.json plus rootfs.ext4).
-    #[arg(long, value_name = "DIR", conflicts_with_all = ["image", "manifest", "flake", "runtime_pack"])]
-    pub deployment: Option<PathBuf>,
-    /// Select a flake package.
-    #[arg(long, value_name = "PROFILE", requires = "flake")]
-    pub flake_profile: Option<String>,
-    /// Enable outbound networking (off by default).
-    #[arg(long)]
-    pub net: bool,
-    /// Allow outbound access to HOST[:PORT] (repeatable).
-    #[arg(long = "allow-host", value_name = "HOST[:PORT]")]
-    pub allow_host: Vec<String>,
-    /// Set how many vCPUs the guest sees (not a host CPU share).
-    #[arg(long, default_value = "2")]
-    pub cpus: u32,
-    /// Cap host CPU time in millicores (1500 = 1.5 cores); not `--cpus`.
-    #[arg(long = "cpu-limit", value_name = "MILLICORES")]
-    pub cpu_limit: Option<u32>,
-    /// Read grants (CPU, wall clock, egress) from a JSON file.
-    #[arg(long = "grants-file", value_name = "PATH")]
-    pub grants_file: Option<PathBuf>,
-    /// Set memory (for example, 512M or 1G).
-    #[arg(long, default_value = "512M")]
-    pub memory: String,
-    /// Select a security profile.
-    #[arg(long, value_enum, default_value = "dev")]
-    pub profile: RunProfile,
-    /// Allow a production-safe guest-agent verb (repeatable).
-    #[arg(long = "agent-verb", value_name = "VERB")]
-    pub agent_verb: Vec<String>,
-    /// Bind a host service the workload may call (repeatable).
-    #[arg(long = "host-service", value_name = "SERVICE")]
-    pub host_service: Vec<String>,
-    /// Mount HOST_PATH at GUEST_PATH[:MODE].
-    #[arg(long = "mount", visible_alias = "volume")]
-    pub volume: Vec<String>,
-    /// Set a guest environment variable (KEY=VALUE; repeatable).
-    #[arg(short, long)]
-    pub env: Vec<String>,
-    /// Set the command timeout in seconds.
-    #[arg(long)]
-    pub timeout: Option<u64>,
-    /// Write a signed execution receipt.
-    #[arg(long, value_name = "PATH")]
-    pub receipt: Option<PathBuf>,
-    /// Print a redacted JSON summary.
-    #[arg(long)]
-    pub json: bool,
-    /// Show the run plan without booting.
-    #[arg(long)]
-    pub dry_run: bool,
+    /// Every flag `mvmctl run` also takes. Declared once, in `RunArgs`, and
+    /// flattened here — the two verbs had drifted apart field by field, most
+    /// visibly on `--profile`, whose default differed between them.
+    #[command(flatten)]
+    pub run: RunArgs,
     /// Set the machine name.
     #[arg(long, value_name = "NAME")]
     pub name: Option<String>,
@@ -368,9 +310,6 @@ pub(in crate::commands) struct MachineRunArgs {
     /// Recreate a named machine when its config changed.
     #[arg(long)]
     pub force: bool,
-    /// Select the VMM (firecracker, hvf, libkrun, or qemu).
-    #[arg(long, value_name = "HYPERVISOR")]
-    pub hypervisor: Option<String>,
     /// Skip plan-admission signing (hidden; for testing only).
     #[arg(long, hide = true)]
     pub no_supervisor: bool,
@@ -407,12 +346,38 @@ pub(in crate::commands) struct MachineRunArgs {
         conflicts_with_all = ["image", "manifest", "flake", "deployment", "fresh", "reset", "detach"]
     )]
     pub attach: bool,
-    /// Command and arguments to run in the guest.
-    // No `allow_hyphen_values`: it makes an unrecognized flag a silent argv
-    // element, so a typo boots a VM and fails inside the guest shell instead of
-    // being named here. Hyphenated guest argv still works after `--`.
-    #[arg(trailing_var_arg = true)]
-    pub argv: Vec<String>,
+}
+
+/// The same values clap fills in when a flag is absent, for the same reason
+/// [`RunArgs::default`] exists. `machine_run_parsed_defaults_match_the_default_impl`
+/// is the witness that the two stay in step.
+impl Default for MachineRunArgs {
+    fn default() -> Self {
+        Self {
+            run: RunArgs::default(),
+            name: None,
+            detach: false,
+            port: Vec::new(),
+            up_json: false,
+            ttl: None,
+            healthcheck: None,
+            health_interval: 30,
+            health_timeout: 5,
+            health_retries: 3,
+            health_start_period: 0,
+            tty: false,
+            interactive: false,
+            force: false,
+            no_supervisor: false,
+            kernel_pin: None,
+            entrypoint: false,
+            fresh: false,
+            reset: false,
+            from_workload_ir: None,
+            stdin: None,
+            attach: false,
+        }
+    }
 }
 
 impl MachineRunArgs {
@@ -429,42 +394,9 @@ impl MachineRunArgs {
 
     fn into_run_args(self) -> RunArgs {
         RunArgs {
-            // Placeholder; `run_dispatch` overwrites it with the mode
-            // `preflight_network` actually settled on for this launch, which is
-            // the value that reaches the signed plan.
-            network_mode: mvm_contract::plan::NetworkMode::default(),
-            manifest: self.manifest,
-            // Default off; `run_dispatch` sets it for the warm-claim-eligible
-            // transient mode.
-            warm_pool_size: 0,
-            pty: false,
+            // `--name` is the machine's identity; the shared struct calls the
+            // same thing `vm_name` because a transient run has no other name.
             vm_name: self.name,
-            image: self.image,
-            runtime_pack: self.runtime_pack,
-            net: self.net,
-            allow_host: self.allow_host,
-            cpus: self.cpus,
-            cpu_limit: self.cpu_limit,
-            grants_file: self.grants_file,
-            memory: self.memory,
-            profile: self.profile,
-            agent_verb: self.agent_verb,
-            mounts: self.volume,
-            env: self.env,
-            timeout: self.timeout,
-            receipt: self.receipt,
-            json: self.json,
-            dry_run: self.dry_run,
-            launch_plan: None,
-            prod: false,
-            // SDK-transport surface (`--mode`/`--dev`/`--ack-divergence`) stays
-            // off — `machine run` is the beginner contract; that transport lives
-            // on the hidden `run` verb the SDKs shell to.
-            mode: None,
-            dev: false,
-            ack_divergence: Vec::new(),
-            argv: self.argv,
-            stdin: Vec::new(),
             healthcheck: crate::exec::build_healthcheck(
                 self.healthcheck.as_deref(),
                 self.health_interval,
@@ -472,8 +404,7 @@ impl MachineRunArgs {
                 self.health_retries,
                 self.health_start_period,
             ),
-            hypervisor: self.hypervisor,
-            host_service: self.host_service,
+            ..self.run
         }
     }
 
@@ -498,7 +429,7 @@ impl MachineRunArgs {
     /// Resolve the lifecycle mode purely from the flags. Fresh foreground runs
     /// need an image source and an argv; persistent runs just boot and return.
     fn resolve_mode(&self) -> Result<MachineRunMode> {
-        if !self.port.is_empty() && !self.argv.is_empty() {
+        if !self.port.is_empty() && !self.run.argv.is_empty() {
             bail!(
                 "`machine run --port` cannot also run an ad-hoc command; start the service from the image or manifest, or forward it afterward with `machine forward`"
             );
@@ -511,7 +442,7 @@ impl MachineRunArgs {
             // Fresh-boot modes always materialize a new VM and need an image.
             (true, false) => {
                 self.require_image_for_fresh_boot()?;
-                if self.argv.is_empty() {
+                if self.run.argv.is_empty() {
                     bail!("machine run -it needs a command after `--`, for example `-- /bin/sh`");
                 }
                 MachineRunMode::InteractiveTransient
@@ -520,7 +451,7 @@ impl MachineRunArgs {
                 self.require_image_for_fresh_boot()?;
                 // The wasm backend runs the module itself; there is no guest
                 // agent command to dispatch, so an empty argv is allowed.
-                if self.argv.is_empty() && self.hypervisor.as_deref() != Some("wasm") {
+                if self.run.argv.is_empty() && self.run.hypervisor.as_deref() != Some("wasm") {
                     bail!(
                         "machine run needs a command: pass `-- <cmd>`, \
                          or `-d`/`--detach` to boot a persistent machine, \
@@ -536,11 +467,11 @@ impl MachineRunArgs {
     /// Fresh-boot modes (transient, interactive-transient) have no spec to fall
     /// back on, so an image, manifest, flake, or runtime pack is mandatory.
     fn require_image_for_fresh_boot(&self) -> Result<()> {
-        if self.image.is_none()
-            && self.manifest.is_none()
-            && self.flake.is_none()
-            && self.deployment.is_none()
-            && !self.runtime_pack
+        if self.run.image.is_none()
+            && self.run.manifest.is_none()
+            && self.run.flake.is_none()
+            && self.run.deployment.is_none()
+            && !self.run.runtime_pack
         {
             bail!(
                 "machine run needs `--image <ref>`, `--manifest <path>`, `--flake <path>`, `--deployment <dir>`, or \
@@ -665,9 +596,9 @@ fn profile_allows_writable_volume(profile: &str) -> bool {
 /// boot path re-validates via `build_machine_volume_cfg`, so this is the
 /// early, user-facing gate, not the only one.
 fn machine_run_volume_specs(args: &MachineRunArgs) -> Result<Vec<String>> {
-    let profile = run_profile_name(args.profile);
-    let mut out = Vec::with_capacity(args.volume.len());
-    for raw in &args.volume {
+    let profile = run_profile_name(args.run.profile);
+    let mut out = Vec::with_capacity(args.run.mounts.len());
+    for raw in &args.run.mounts {
         let spec = super::shared::parse_volume_spec(raw)?;
         let vmv = super::shared::vm_volume_from_spec_validated(&spec)
             .with_context(|| format!("volume {raw:?}"))?;
@@ -712,19 +643,19 @@ fn machine_run_spec(
     resolved_manifest_slot: Option<&str>,
 ) -> Result<MachineSpec> {
     validate_machine_name(&name)?;
-    let (image, manifest, deployment) = if let Some(path) = &args.deployment {
+    let (image, manifest, deployment) = if let Some(path) = &args.run.deployment {
         let deployment = resolve_local_deployment(path)?;
         (None, None, Some(deployment.directory.display().to_string()))
     } else if let Some(slot) = resolved_manifest_slot {
         // Flake was pre-built; store the slot hash as the manifest source.
         (None, Some(slot.to_string()), None)
-    } else if let Some(m) = &args.manifest {
+    } else if let Some(m) = &args.run.manifest {
         // Manifest-backed: store the manifest ref.
         (None, Some(m.clone()), None)
-    } else if let Some(img) = &args.image {
+    } else if let Some(img) = &args.run.image {
         // Image-backed: store the OCI ref.
         (Some(img.clone()), None, None)
-    } else if args.runtime_pack {
+    } else if args.run.runtime_pack {
         // The verified runtime pack is its own source; recorded via
         // `runtime_pack: true` below, not `image`/`manifest`.
         (None, None, None)
@@ -739,19 +670,19 @@ fn machine_run_spec(
     };
     let config = mvm_core::user_config::load(None);
     let resolved = super::shared::resolve_run_grants(super::shared::GrantInputs {
-        cpu_limit_millicores: args.cpu_limit,
-        timeout_secs: args.timeout,
-        allow_host: &args.allow_host,
-        net: args.net,
-        grants_file: args.grants_file.as_deref(),
+        cpu_limit_millicores: args.run.cpu_limit,
+        timeout_secs: args.run.timeout,
+        allow_host: &args.run.allow_host,
+        net: args.run.net,
+        grants_file: args.run.grants_file.as_deref(),
         // A persistent `machine run` names its source on the command line and
         // reads no project manifest; `machine create` is the verb that sources
         // a `[grants]` table.
         manifest: None,
         config: &config,
     })?;
-    let _ = validate_machine_memory(&args.memory, None)?;
-    let profile = run_profile_name(args.profile).to_string();
+    let _ = validate_machine_memory(&args.run.memory, None)?;
+    let profile = run_profile_name(args.run.profile).to_string();
     Ok(MachineSpec {
         schema_version: MACHINE_SPEC_SCHEMA_VERSION,
         name,
@@ -759,17 +690,17 @@ fn machine_run_spec(
         manifest,
         deployment,
         resolved_digest: None,
-        runtime_pack: args.runtime_pack,
-        net: args.net,
-        allow_host: args.allow_host.clone(),
+        runtime_pack: args.run.runtime_pack,
+        net: args.run.net,
+        allow_host: args.run.allow_host.clone(),
         ports: args.port.clone(),
-        cpus: args.cpus,
-        memory: args.memory.clone(),
+        cpus: args.run.cpus,
+        memory: args.run.memory.clone(),
         mem_initial: None,
         profile,
         volumes: machine_run_volume_specs(args)?,
         init: Vec::new(),
-        agent_verb: args.agent_verb.clone(),
+        agent_verb: args.run.agent_verb.clone(),
         created_at: Some(mvm_core::time::utc_now()),
         last_started_at: None,
         health_check: crate::exec::build_healthcheck(
@@ -1163,6 +1094,12 @@ pub(in crate::commands) struct MachineRestoreArgs {
 struct MachineRemoveSummary {
     name: String,
     removed: bool,
+    /// Whether the runtime state under `vms/<name>/` went with the spec.
+    ///
+    /// Reported rather than assumed: a directory a live process still owns is
+    /// kept, and a caller parsing this needs to be able to tell that apart from
+    /// a complete removal.
+    runtime_state_removed: bool,
 }
 
 #[derive(Debug)]
@@ -1429,6 +1366,32 @@ fn validate_machine_name(name: &str) -> Result<()> {
     naming::validate_id(name, "machine name")
 }
 
+/// Remove a machine's runtime state directory, reporting whether it went.
+///
+/// `machines/<name>/` is the declarative spec and `vms/<name>/` is the state a
+/// boot leaves behind — console log, sockets, pid file. They are separate
+/// namespaces, and `machine rm` used to delete only the first, so a removed
+/// machine kept the second forever and `machine ls`, which reads `vms/`, went
+/// on reporting it.
+///
+/// Returns `false` when a live process still owns the directory rather than
+/// deleting it. `--force` stops the machine first but only warns if that stop
+/// failed, so "we asked it to stop" is not "nothing is using this any more";
+/// removing a live supervisor's pid file and sockets would strand it and hide
+/// it from every later `machine ls` at the same time. Uses the same liveness
+/// probe `env cleanup` and the reconciler make this decision with.
+fn remove_machine_runtime_state(name: &str) -> Result<bool> {
+    let dir = config::vm_state_dir(name);
+    if !dir.exists() {
+        return Ok(true);
+    }
+    if mvm_vmm::host::process_liveness::state_dir_has_live_process(&dir) {
+        return Ok(false);
+    }
+    fs::remove_dir_all(&dir).with_context(|| format!("removing {}", dir.display()))?;
+    Ok(true)
+}
+
 fn remove_machine_spec(name: &str, yes: bool) -> Result<MachineRemoveSummary> {
     validate_machine_name(name)?;
     if !yes {
@@ -1439,9 +1402,11 @@ fn remove_machine_spec(name: &str, yes: bool) -> Result<MachineRemoveSummary> {
         bail!("machine {:?} does not exist", name);
     }
     fs::remove_dir_all(&dir).with_context(|| format!("removing {}", dir.display()))?;
+    let runtime_state_removed = remove_machine_runtime_state(name)?;
     Ok(MachineRemoveSummary {
         name: name.to_string(),
         removed: true,
+        runtime_state_removed,
     })
 }
 
@@ -1701,52 +1666,17 @@ fn run_args_for_image_revert(
     };
     (
         MachineRunArgs {
-            image,
-            flake: None,
-            hypervisor: run.hypervisor,
-            json: run.json,
-            name: None,
             // Restoring an image node replays a recorded workload rather than
             // carrying a caller's stdin, so it requests no input grant.
             stdin: None,
-            manifest,
-            deployment: None,
-            runtime_pack: false,
-            flake_profile: None,
-            net: false,
-            allow_host: Vec::new(),
-            cpus: 2,
-            cpu_limit: None,
-            grants_file: None,
-            memory: "512M".to_string(),
-            profile: RunProfile::Dev,
-            agent_verb: Vec::new(),
-            volume: Vec::new(),
-            env: Vec::new(),
-            timeout: None,
-            receipt: None,
-            dry_run: false,
-            tty: false,
-            interactive: false,
-            force: false,
-            no_supervisor: false,
-            up_json: false,
-            ttl: None,
-            healthcheck: None,
-            health_interval: 30,
-            health_timeout: 5,
-            health_retries: 3,
-            health_start_period: 0,
-            entrypoint: false,
-            fresh: false,
-            reset: false,
-            from_workload_ir: None,
-            attach: false,
-            detach: false,
-            kernel_pin: None,
-            argv: Vec::new(),
-            host_service: Vec::new(),
-            port: Vec::new(),
+            run: RunArgs {
+                image,
+                manifest,
+                hypervisor: run.hypervisor,
+                json: run.json,
+                ..Default::default()
+            },
+            ..Default::default()
         },
         source,
     )

@@ -14,6 +14,7 @@ pub mod at_rest;
 pub mod build_env;
 pub mod catalog;
 pub mod checkpoint;
+pub mod runtime_catalog;
 // The `MvmClient` machine-driving facade (trait + DTOs + mock + remote gateway).
 // Off by default so the runtime-free closure never pulls `async-trait`; enabled
 // by `mvm-client` (which adds the in-process `LocalBackend`) and by `mvm-sdk`'s

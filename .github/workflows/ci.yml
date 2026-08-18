@@ -177,8 +177,9 @@ jobs:
         with:
           components: rustfmt, clippy
 
-      - name: Install system build deps
-        run: sudo rm -f /etc/apt/sources.list.d/microsoft*.list /etc/apt/sources.list.d/azure*.list; sudo apt-get update && sudo apt-get install -y libcap-ng-dev lld
+      - uses: ./.github/actions/apt-deps
+        with:
+          packages: libcap-ng-dev lld
 
       - uses: ./.github/actions/install-zigbuild
 
@@ -233,8 +234,9 @@ jobs:
       # Policy checks invoke xtask, and the stub/parity checks invoke the
       # pinned Python and TypeScript generators. They are independent of the
       # compiler lint lane, so start them on their own runner.
-      - name: Install system build deps
-        run: sudo rm -f /etc/apt/sources.list.d/microsoft*.list /etc/apt/sources.list.d/azure*.list; sudo apt-get update && sudo apt-get install -y libcap-ng-dev lld ripgrep shellcheck
+      - uses: ./.github/actions/apt-deps
+        with:
+          packages: libcap-ng-dev lld ripgrep shellcheck
 
       # Nothing else validates the workflow files. A wrong `if:`, a typo'd
       # `needs:` job name, or a bad `${{ }}` reference does not fail a PR — it
@@ -348,6 +350,9 @@ jobs:
       - name: mvm-cli drives machines through the mvm-client facade
         run: cargo run -p xtask -- check-cli-runtime-surface
 
+      - name: "`mvmctl --help` and the CLI reference describe one surface"
+        run: cargo run -p xtask -- check-cli-help-matches-docs
+
       - name: repr(C) types carry a layout contract (check-abi-layout)
         run: cargo run -p xtask -- check-abi-layout
 
@@ -430,6 +435,12 @@ jobs:
 
       - name: host-binaries manifest parity
         run: cargo run -p xtask -- check-mvm-host-binaries-sync
+
+      # release.yml runs on tags, so a per-VM binary added to the registry but
+      # not to the release job is invisible until a user's downloaded mvmctl
+      # fails to spawn it. Resolve it here, on the PR that adds it.
+      - name: release ships every spawnable per-VM binary
+        run: cargo run -p xtask -- check-per-vm-host-binaries-sync
 
       - name: mvm-core default build is runtime-free
         run: cargo run -p xtask -- check-core-runtime-free
@@ -531,8 +542,9 @@ jobs:
         with:
           components: clippy
 
-      - name: Install system build deps
-        run: sudo rm -f /etc/apt/sources.list.d/microsoft*.list /etc/apt/sources.list.d/azure*.list; sudo apt-get update && sudo apt-get install -y libcap-ng-dev lld
+      - uses: ./.github/actions/apt-deps
+        with:
+          packages: libcap-ng-dev lld
 
       - uses: ./.github/actions/install-zigbuild
 
@@ -712,10 +724,9 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@nightly
 
-      - name: Install system build deps
-        run: |
-          sudo rm -f /etc/apt/sources.list.d/microsoft*.list /etc/apt/sources.list.d/azure*.list; sudo apt-get update
-          sudo apt-get install -y attr cryptsetup-bin libcap-ng-dev lld
+      - uses: ./.github/actions/apt-deps
+        with:
+          packages: attr cryptsetup-bin libcap-ng-dev lld
 
       - uses: ./.github/actions/install-zigbuild
 
@@ -772,10 +783,9 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@nightly
 
-      - name: Install system build deps
-        run: |
-          sudo rm -f /etc/apt/sources.list.d/microsoft*.list /etc/apt/sources.list.d/azure*.list; sudo apt-get update
-          sudo apt-get install -y attr cryptsetup-bin libcap-ng-dev lld
+      - uses: ./.github/actions/apt-deps
+        with:
+          packages: attr cryptsetup-bin libcap-ng-dev lld
 
       - uses: ./.github/actions/install-zigbuild
 
@@ -829,10 +839,9 @@ jobs:
         with:
           targets: wasm32-wasip1
 
-      - name: Install system build deps
-        run: |
-          sudo rm -f /etc/apt/sources.list.d/microsoft*.list /etc/apt/sources.list.d/azure*.list; sudo apt-get update
-          sudo apt-get install -y attr cryptsetup-bin libcap-ng-dev lld
+      - uses: ./.github/actions/apt-deps
+        with:
+          packages: attr cryptsetup-bin libcap-ng-dev lld
 
       - uses: ./.github/actions/install-zigbuild
 
@@ -870,10 +879,9 @@ jobs:
         with:
           components: rust-src
 
-      - name: Install system build deps
-        run: |
-          sudo rm -f /etc/apt/sources.list.d/microsoft*.list /etc/apt/sources.list.d/azure*.list; sudo apt-get update
-          sudo apt-get install -y libcap-ng-dev lld
+      - uses: ./.github/actions/apt-deps
+        with:
+          packages: libcap-ng-dev lld
 
       # This lane compiles a different crate set from the shared workspace key
       # and builds bpf-linker from source, so it gets its own entry rather than
@@ -916,27 +924,22 @@ jobs:
   # this one, because one threshold cannot do both jobs: loose enough to
   # survive shared-runner noise is too loose to catch drift, and tight enough
   # to catch drift will flake here and get switched off.
-  #
-  # Manual dispatch only, and not by choice. Every published image from
-  # v0.17.0 onward carries a /init whose `#!/bin/sh` sits one column right of
-  # byte 0, so the kernel cannot exec it and the guest panics with ENOEXEC
-  # before userspace starts. The generator bug is fixed in
-  # nix/lib/mk-guest.nix, but this lane boots a *published release*, so it
-  # cannot pass until a release is cut from a tree carrying that fix. Running
-  # it on every pull request and merge-group entry spent ~12 minutes of a
-  # constrained runner pool to re-derive a known answer. Bump IMAGE_TAG to the
-  # first release built after the fix and restore
-  # `needs: [scope]` / `if: needs.scope.outputs.code == 'true'`.
   boot-latency:
     name: Boot latency ceiling
-    if: github.event_name == 'workflow_dispatch'
+    needs: [scope]
+    if: needs.scope.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
       # Pinned, not `latest`. Auto-tracking a moving release is how this lane
       # would surprise-break on an unrelated image cut, and it would look like
       # a latency regression when it is not.
-      IMAGE_TAG: v0.17.0
+      # The boot image train, not the CLI train. `v0.18.0` was a workspace
+      # version bump, never a cut release, so this lane 404'd on an asset
+      # nobody had published. Boot images get their own tags precisely so
+      # this pin stops moving with the CLI's version — keep it in step with
+      # `DEFAULT_BOOT_IMAGE_TAG` in mvm-core's config.
+      IMAGE_TAG: boot-image/v0.1.0
       # Must track `crates/mvm-core/src/config.rs::FC_VERSION_DEFAULT`. The
       # launch path passes `--enable-pci`, which older Firecracker rejects
       # outright: it exits before creating its API socket, and the only symptom
@@ -950,10 +953,9 @@ jobs:
       - name: Install stable Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Install system build deps
-        run: |
-          sudo rm -f /etc/apt/sources.list.d/microsoft*.list /etc/apt/sources.list.d/azure*.list; sudo apt-get update
-          sudo apt-get install -y libcap-ng-dev lld
+      - uses: ./.github/actions/apt-deps
+        with:
+          packages: libcap-ng-dev lld
 
       # Building the root package runs `crates/mvm-cli/build.rs`, which
       # cross-compiles the embedded host binaries and needs the pinned zig.
@@ -998,6 +1000,13 @@ jobs:
                    default-microvm-meta-x86_64.json; do
             curl -fL --retry 3 -o "$f" "$base/$f"
           done
+          # The prod rootfs has no baked agent — /init resolves it from
+          # /mvm/runtime, the runtime overlay attached as a second virtio-blk
+          # drive. Fetching kernel and rootfs alone boots a guest that panics at
+          # `Attempted to kill init!` before the agent binds vsock, which reads
+          # as a broken image rather than an incomplete fetch.
+          curl -fL --retry 3 -o runtime-overlay-x86_64.tar.gz \
+            "$base/runtime-overlay-x86_64.tar.gz"
           curl -fL --retry 3 -o checksums.txt \
             "$base/default-microvm-x86_64-checksums-sha256.txt"
           grep -E ' (default-microvm-vmlinux-x86_64|default-microvm-rootfs-x86_64\.ext4|default-microvm-meta-x86_64\.json)$' \
@@ -1010,6 +1019,11 @@ jobs:
           # to be put back under the name the gate looks for. Verified above
           # under its asset name before being renamed.
           cp default-microvm-meta-x86_64.json mvm-meta.json
+          # The overlay tarball carries its own checksum manifest; verify
+          # against that rather than trusting the archive.
+          mkdir -p overlay && tar -C overlay -xzf runtime-overlay-x86_64.tar.gz
+          ( cd overlay && sha256sum -c checksums-sha256.txt )
+          ls -la overlay
           ls -la
 
       - name: Boot within the ceiling
@@ -1024,11 +1038,15 @@ jobs:
           MVM_RUNTIME_BOOT_BACKEND: firecracker
           MVM_RUNTIME_BOOT_KERNEL: /tmp/boot-image/default-microvm-vmlinux-x86_64
           MVM_RUNTIME_BOOT_ROOTFS: /tmp/boot-image/default-microvm-rootfs-x86_64.ext4
+          MVM_RUNTIME_BOOT_OVERLAY: /tmp/boot-image/overlay/overlay.ext4
+          MVM_RUNTIME_BOOT_OVERLAY_VERITY: /tmp/boot-image/overlay/overlay.verity
           MVM_RUNTIME_BOOT_READY: guest-agent
           MVM_RUNTIME_BOOT_RUNS: "5"
           MVM_RUNTIME_BOOT_CONCURRENT: "3"
           MVM_RUNTIME_BOOT_BUDGET_MS: "6000"
         run: |
+          MVM_RUNTIME_BOOT_OVERLAY_ROOTHASH="$(tr -d '[:space:]' \
+            < /tmp/boot-image/overlay/overlay.roothash)" \
           cargo test --test runtime_boot_bench \
             prebuilt_runtime_image_boots_within_budget -- --exact --nocapture
 

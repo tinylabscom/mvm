@@ -219,9 +219,23 @@ test-doc:
 # scoped to this recipe instead of being set globally.
 #
 # A content cache, not a build lock, so parallel sessions don't serialize on it.
-# Needs `cargo install sccache`. For cross-worktree hits the host config also
-# needs `basedirs`; without it every worktree is a private cache and the
-# measured hit rate is 0%.
+# Needs `cargo install sccache`.
+#
+# Do not expect this to dedupe across worktrees. `basedirs` in the host config
+# is necessary for that but is NOT sufficient: sccache's key covers the
+# rustc command line, which carries the target directory's full path, and every
+# worktree has its own. Measured on this host with `basedirs` correctly set,
+# building one crate three ways:
+#
+#   cold, target dir A                       2 hits / 100 misses
+#   target dir A wiped and rebuilt          70 hits /  79 misses
+#   identical source, target dir B           0 hits / 152 misses
+#
+# So it pays for re-populating one checkout after `cargo clean`, and pays
+# nothing for the second checkout — which is why the machine-wide Rust hit rate
+# sits near 2.5% across ~35k compiles rather than the 84% a same-path
+# experiment suggests. Cargo already caches deps within a target dir, so the
+# remaining value here is narrow.
 test-cached:
     @command -v sccache >/dev/null || { echo "sccache not found — install with: cargo install sccache"; exit 1; }
     RUSTC_WRAPPER=sccache CARGO_INCREMENTAL=0 cargo nextest run --workspace

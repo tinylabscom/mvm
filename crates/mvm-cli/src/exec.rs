@@ -12,6 +12,7 @@
 //! "exec not available" regardless of any runtime configuration.
 
 use anyhow::{Context, Result, anyhow};
+use mvm_core::launch_trace::PhaseTimingMode;
 use mvm_core::vm_backend::{
     RequiredCapabilities, SnapshotCapability, VmId, VmStartConfig, VmVolume,
 };
@@ -949,8 +950,8 @@ fn run_inner(
     // one-line breakdown and/or the machine-readable sample at teardown. When
     // both are off every mark stays `None` and costs nothing.
     let sample_path = crate::commands::vm::launch_sample::sample_path_from_env();
-    let render_line = crate::commands::vm::phase_timing::enabled();
-    let timing = render_line || sample_path.is_some();
+    let timing_mode = crate::commands::vm::phase_timing::mode();
+    let timing = timing_mode.is_on() || sample_path.is_some();
     let mut sub_marks = crate::commands::vm::phase_timing::LaunchSubMarks::new(timing);
     let t_start = timing.then(std::time::Instant::now);
 
@@ -1106,9 +1107,15 @@ fn run_inner(
         };
         let phases = marks.to_timings();
         let sub_phases = sub_marks.to_timings();
-        if render_line {
-            eprintln!("{}", phases.render());
-            eprintln!("{}", sub_phases.render());
+        match timing_mode {
+            PhaseTimingMode::Off => {}
+            // The greppable pair stays the machine contract:
+            // scripts/check-hvf-warm-restore.sh parses it by prefix.
+            PhaseTimingMode::Line => {
+                eprintln!("{}", phases.render());
+                eprintln!("{}", sub_phases.render());
+            }
+            PhaseTimingMode::Tree => eprintln!("{}", phases.render_tree(&sub_phases)),
         }
         if let Some(path) = sample_path.as_deref() {
             if let Some(error) = warm_memory_error.as_deref() {
@@ -1285,7 +1292,7 @@ fn resolve_image_artifacts(image: &ImageSource) -> Result<ResolvedImage> {
     match image {
         ImageSource::Template(name) => {
             let (spec, vmlinux, initrd, rootfs, rev) =
-                mvm_runtime::vm::template::lifecycle::template_artifacts_dispatched(name)
+                mvm_runtime::vm::template::lifecycle::template_artifacts_for_boot(name)
                     .with_context(|| format!("Loading template '{name}'"))?;
             let snap_info =
                 mvm_runtime::vm::template::lifecycle::template_snapshot_info_dispatched(name)
@@ -1719,14 +1726,24 @@ fn boot_transient_vm(
     // The per-phase warm-claim lines are a human diagnostic; the marks above
     // feed the machine-readable sample and are collected whenever either is
     // asked for.
+    //
+    // Each line is the span since the previous mark, not the elapsed time since
+    // boot started. Reporting cumulative time under span-shaped names
+    // (`standby_reap=0.0ms warm_claim=4.1ms`) reads as two durations that sum,
+    // when it was really two timestamps — so the reap looked free and the claim
+    // absorbed its cost.
     let render_phases = crate::commands::vm::phase_timing::enabled();
+    let previous_mark = std::cell::Cell::new(boot_started);
     let report_phase = |phase: &'static str| {
-        if let Some(started) = boot_started.filter(|_| render_phases) {
-            eprintln!(
-                "[mvm] warm-claim-phase: {phase}={:.1}ms",
-                started.elapsed().as_secs_f64() * 1_000.0
-            );
-        }
+        let Some(since) = previous_mark.get().filter(|_| render_phases) else {
+            return;
+        };
+        let now = std::time::Instant::now();
+        previous_mark.set(Some(now));
+        eprintln!(
+            "[mvm] warm-claim-phase: {phase}={:.1}ms",
+            now.saturating_duration_since(since).as_secs_f64() * 1_000.0
+        );
     };
     // Reap dead/expired standbys before claiming/booting. There is no daemon, so
     // this on-use reap is what enforces the standby TTL between invocations —
@@ -2198,7 +2215,7 @@ pub fn boot_session_vm(
     admit: Option<&SessionAdmit<'_>>,
 ) -> Result<SessionVm> {
     let (spec, vmlinux, initrd, rootfs, rev) =
-        mvm_runtime::vm::template::lifecycle::template_artifacts_dispatched(env)
+        mvm_runtime::vm::template::lifecycle::template_artifacts_for_boot(env)
             .with_context(|| format!("Loading template '{env}'"))?;
     let snap_info = mvm_runtime::vm::template::lifecycle::template_snapshot_info_dispatched(env)
         .ok()

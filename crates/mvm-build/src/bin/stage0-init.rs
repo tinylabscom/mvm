@@ -62,6 +62,8 @@ mod linux {
     const VSOCK_EGRESS_PROXY_LISTEN_ADDR: &str = mvm_core::guest_netd::DEFAULT_EGRESS_PROXY_LISTEN;
     const VSOCK_EGRESS_PROXY_READY_TIMEOUT: Duration = Duration::from_secs(5);
     const VSOCK_EGRESS_PORT_ENV: &str = "MVM_EGRESS_VSOCK_PORT";
+    /// Marks a store error the tmpfs fallback must not swallow.
+    const FATAL_STORE_PREFIX: &str = "FATAL-STORE: ";
     const VSOCK_EGRESS_PORT_TOKEN_PREFIX: &str = "mvm.vsock_egress_port=";
     const QEMU_STAGE0_VSOCK_MODULES: &[&str] = &[
         "/mvm-bins/vsock-modules/vsock.ko",
@@ -522,6 +524,12 @@ mod linux {
     fn setup_nix_store(qemu: bool) -> Result<(), String> {
         match setup_persistent_nix_store(qemu) {
             Ok(()) => return Ok(()),
+            // A fatal store fault is not something to degrade around: the tmpfs
+            // is sized by guest RAM, so continuing turns a nameable disk problem
+            // into an out-of-space error far from its cause.
+            Err(e) if e.starts_with(FATAL_STORE_PREFIX) => {
+                return Err(e.trim_start_matches(FATAL_STORE_PREFIX).to_string());
+            }
             Err(e) => eprintln!(
                 "stage0-init: persistent Stage 0 /nix store unavailable ({e}); falling back to tmpfs seed copy"
             ),
@@ -558,10 +566,61 @@ mod linux {
         }
     }
 
+    /// Size of a block device in bytes, via its sysfs 512-byte block count.
+    ///
+    /// Read from sysfs rather than by seeking the device: a seek would need the
+    /// device open, and the point of this check is to refuse it before trusting
+    /// it enough to mount.
+    fn block_device_bytes(device: &str) -> Option<u64> {
+        let name = Path::new(device).file_name()?.to_str()?;
+        let raw = std::fs::read_to_string(format!("/sys/class/block/{name}/size")).ok()?;
+        raw.trim().parse::<u64>().ok().map(|blocks| blocks * 512)
+    }
+
     fn setup_persistent_nix_store(qemu: bool) -> Result<(), String> {
-        let device = stage0_nix_store_device(qemu);
+        // Prefer the ext4 label. The device letter is a function of how many
+        // block devices the backend attached ahead of this one, so adding a
+        // drive silently re-letters every disk behind it — which is how this
+        // guest came to mount a 32 KiB identity image as its Nix store, fail,
+        // and fall back to a tmpfs too small for a kernel source tree. The
+        // letter stays as a fallback for a store image formatted before it
+        // carried a label.
+        let label = mvm_build::rootfs::STAGE0_NIX_STORE_EXT4_LABEL;
+        let by_label = find_labeled_ext4_disk(STAGE0_DISK_CANDIDATES, label)
+            .map(|d| d.to_string_lossy().into_owned());
+        let device: &str = match by_label.as_deref() {
+            Some(dev) => {
+                eprintln!("stage0-init: Stage 0 Nix store is {dev} (label {label:?})");
+                dev
+            }
+            None => {
+                let dev = stage0_nix_store_device(qemu);
+                eprintln!(
+                    "stage0-init: no disk carries the ext4 label {label:?}; \
+                     falling back to {dev} by enumeration order"
+                );
+                dev
+            }
+        };
         if !Path::new(device).exists() {
             return Err(format!("{device} is not present"));
+        }
+
+        // A device that is present but far too small is a misidentified disk,
+        // not an empty store. Refuse it here rather than letting the caller
+        // degrade to a RAM-sized tmpfs whose exhaustion surfaces thousands of
+        // lines later as an unrelated-looking build error.
+        if let Some(bytes) = block_device_bytes(device)
+            && bytes < mvm_build::store_readiness::MIN_PLAUSIBLE_STORE_BYTES
+        {
+            return Err(FATAL_STORE_PREFIX.to_string()
+                + &mvm_build::store_readiness::store_readiness_outcome(
+                    mvm_build::store_readiness::StoreProbe::ImplausiblySmall {
+                        device: device.to_string(),
+                        bytes,
+                    },
+                )
+                .expect_err("an undersized store device must refuse"));
         }
 
         std::fs::create_dir_all(STAGE0_NIX_STORE_MOUNT)

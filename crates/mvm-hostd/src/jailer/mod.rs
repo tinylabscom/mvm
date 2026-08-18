@@ -437,6 +437,11 @@ mod tests {
         assert!(spec.allowed_syscalls.contains(&"setsockopt"));
         // Cert-store dir read for rustls-native-certs.
         assert!(spec.allowed_syscalls.contains(&"getdents64"));
+        // Appending to the per-tenant audit log takes a file lock. Without
+        // this the endpoint is killed by SIGSYS on the first flow it allows —
+        // after the upstream connect succeeded, so the failure surfaces as a
+        // guest whose proxy handshake never completes.
+        assert!(spec.allowed_syscalls.contains(&"flock"));
         // Still no privilege-escalation syscalls.
         assert!(!spec.allowed_syscalls.contains(&"execve"));
         assert!(!spec.allowed_syscalls.contains(&"ptrace"));

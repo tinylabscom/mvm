@@ -37,6 +37,12 @@ fn boot_image_workflow() -> String {
         .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()))
 }
 
+fn pages_workflow() -> String {
+    let path = Path::new(".github/workflows/pages.yml");
+    fs::read_to_string(path)
+        .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()))
+}
+
 fn assert_publishes(workflow: &str, asset: &str) {
     assert!(
         workflow.contains(asset),
@@ -435,14 +441,21 @@ fn the_two_release_trains_cannot_fire_each_other() {
     );
 }
 
-/// The protected environment survives the move.
+/// The protected environment survives the move, and it is the boot image
+/// train's own.
 ///
 /// It is what constrains which ref can mint a keyless signing identity. Losing
 /// it does not fail the job: the signing step is `continue-on-error: true`, so
 /// a broken identity means the pack quietly stops shipping and everything else
 /// looks green. Nothing else would notice.
+///
+/// Naming the *wrong* environment fails far louder but just as opaquely. This
+/// workflow fires on `boot-image/v*` and asked for `release-signing`, whose
+/// policy admits `v*` and nothing else — GitHub tag globs anchor at the start
+/// and do not cross `/`. Every gated job was refused one second in, with no
+/// steps run and nothing in the log to read.
 #[test]
-fn the_moved_jobs_keep_the_release_signing_environment() {
+fn the_moved_jobs_keep_the_boot_image_signing_environment() {
     let boot_image = boot_image_workflow();
     // The two jobs that cosign-sign a pack manifest inside the job itself.
     for job in ["builder-vm-image", "default-microvm"] {
@@ -453,14 +466,17 @@ fn the_moved_jobs_keep_the_release_signing_environment() {
              out of this list rather than dropping the assertion"
         );
         assert!(
-            block.contains("    environment: release-signing\n"),
-            "{job} must keep `environment: release-signing`, or its keyless \
-             signing identity silently stops being mintable"
+            block.contains("    environment: boot-image-signing\n"),
+            "{job} must keep `environment: boot-image-signing`, or its keyless \
+             signing identity silently stops being mintable. It must be that \
+             environment and not `release-signing`: this workflow's tags are \
+             `boot-image/v*`, which a `v*` policy refuses outright"
         );
     }
     // The publish job signs the checksum manifests every downloader anchors on.
     assert!(
-        job_block(&boot_image, "publish-boot-image").contains("    environment: release-signing\n"),
+        job_block(&boot_image, "publish-boot-image")
+            .contains("    environment: boot-image-signing\n"),
         "the boot image publish job signs, so it needs the same environment"
     );
     assert!(
@@ -470,6 +486,15 @@ fn the_moved_jobs_keep_the_release_signing_environment() {
     assert!(
         boot_image.contains("contents: write"),
         "creating a release and uploading assets needs contents: write"
+    );
+}
+
+#[test]
+fn pages_workflow_installs_every_wasm_target_used_by_the_demo() {
+    let workflow = pages_workflow();
+    assert!(
+        workflow.contains("targets: wasm32-unknown-unknown, wasm32-wasip1"),
+        "pages.yml must install both the browser and guest WASM targets"
     );
 }
 
@@ -547,5 +572,93 @@ fn a_release_with_no_boot_image_assets_refuses_to_publish() {
     assert!(
         !step.contains("::warning::") && !step.contains("exit 0"),
         "the missing-boot-image path must not warn-and-continue:\n{step}"
+    );
+}
+
+/// The boot gate must carry the toolchain its own test needs.
+///
+/// The gate runs `cargo test`, which builds mvmctl, whose `build.rs`
+/// cross-compiles the embedded host binaries as static musl and requires the
+/// pinned zig. The first real image release failed here: the gate aborted
+/// before starting a guest, which reads in the log as "the image does not
+/// boot" and is nothing of the kind. A gate that cannot run is worse than no
+/// gate, because it blocks a release for a reason that has nothing to do with
+/// the artifact.
+#[test]
+fn the_boot_gate_installs_the_toolchain_its_test_needs() {
+    let workflow = boot_image_workflow();
+    let job = workflow
+        .split("  default-microvm:")
+        .nth(1)
+        .expect("the boot image workflow must define default-microvm");
+    let boot = job
+        .find("- name: Boot the staged image before it becomes a release asset")
+        .expect("the job must boot the staged image");
+
+    // The toolchain has to be installed *before* the boot step, not merely
+    // present somewhere in the file.
+    let before = &job[..boot];
+    assert!(
+        before.contains("./.github/actions/install-zigbuild"),
+        "the boot gate must install the pinned zig before it runs cargo test; \
+         without it the gate fails before reaching a guest"
+    );
+}
+
+/// Every workflow that can mint an identity a shipped binary trusts must be
+/// gated on a protected environment, so the ref allowed to produce a valid
+/// signature is constrained by that environment's tag policy rather than by
+/// whoever can trigger the workflow.
+///
+/// This is not theoretical. `release-boot-image.yml` asked for an environment
+/// scoped to `v*` while firing on `boot-image/v*`; the mismatch blocked every
+/// gated job one second in, with no steps and nothing in the log to read. And
+/// `release.yml` — which mints the one identity `RELEASE_IDENTITY_TEMPLATES`
+/// names, the identity every installed mvmctl verifies against — declared no
+/// environment at all.
+///
+/// The environments' tag policies live in repository settings and cannot be
+/// asserted from here. What is assertable, and what regressed, is that the
+/// declaration exists at all.
+#[test]
+fn workflows_minting_trusted_identities_are_gated_on_an_environment() {
+    for (path, expected_env) in [
+        (".github/workflows/release.yml", "release-signing"),
+        (
+            ".github/workflows/release-boot-image.yml",
+            "boot-image-signing",
+        ),
+        (".github/workflows/revocations.yml", "revocations-signing"),
+    ] {
+        let body = fs::read_to_string(Path::new(path))
+            .unwrap_or_else(|e| panic!("{path} must be readable: {e}"));
+        assert!(
+            body.contains(&format!("environment: {expected_env}")),
+            "{path} mints an identity in mvm_core::release_trust, so it must \
+             declare `environment: {expected_env}`. Without it any ref that can \
+             trigger the workflow can mint a signature the shipped verifier \
+             accepts."
+        );
+    }
+}
+
+/// The two signing environments are deliberately distinct. Sharing one would
+/// let a boot image signature validate a CLI tarball and the reverse, which is
+/// the exact confusion `BOOT_IMAGE_IDENTITY_TEMPLATES` is kept separate from
+/// `RELEASE_IDENTITY_TEMPLATES` to prevent.
+#[test]
+fn the_two_release_trains_do_not_share_a_signing_environment() {
+    let cli = fs::read_to_string(Path::new(".github/workflows/release.yml"))
+        .expect("release.yml must be readable");
+    let boot = fs::read_to_string(Path::new(".github/workflows/release-boot-image.yml"))
+        .expect("release-boot-image.yml must be readable");
+    assert!(
+        !cli.contains("environment: boot-image-signing"),
+        "the CLI train must not sign under the boot image train's environment"
+    );
+    assert!(
+        !boot.contains("environment: release-signing"),
+        "the boot image train must not sign under the CLI train's environment; \
+         its tags are boot-image/v*, which a v*-scoped policy refuses outright"
     );
 }

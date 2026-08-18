@@ -162,6 +162,16 @@ pub(super) fn remove_machine(args: MachineRemoveArgs) -> Result<()> {
         mvm_core::audit_emit!(ConfigChange, vm: &summary.name, "action=machine.rm");
         if !json {
             println!("removed machine {}", summary.name);
+            if !summary.runtime_state_removed {
+                // Saying only "removed" here is what made this hard to notice:
+                // the spec is gone, so the machine cannot be listed or started,
+                // while a live process still holds its runtime directory.
+                crate::ui::warn(&format!(
+                    "kept {} — a live process still owns it; \
+                     stop that process and re-run `mvmctl reconcile` to reclaim it",
+                    config::vm_state_dir(&summary.name).display(),
+                ));
+            }
         }
         summaries.push(summary);
     }

@@ -7,6 +7,8 @@ pub mod addon_dns;
 /// Loopback TCP ↔ host-vsock bridge (`mvm-addon-vsock-bridge`).
 #[cfg(feature = "addons")]
 pub mod addon_vsock_bridge;
+/// The workload-facing assurance campaign API.
+pub mod assurance;
 /// In-guest host-services broker client: dials the supervisor's guest-facing
 /// broker port over vsock and exchanges a framed `ServiceCall` for a framed
 /// `ServiceResponse`. The workload→host call half of the broker path.

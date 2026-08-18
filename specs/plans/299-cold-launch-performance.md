@@ -432,6 +432,237 @@ long-term owner of pool maintenance — it already outlives the CLI and is the
 host-side lifecycle seam this phase names. That would restore automatic warm
 claims without putting the refill on any launch's critical path.
 
+### Phase 6 second change — the cadence bug was in the seal too
+
+Phase 6's first change left `stop_transient` at ~143 ms and called it "real
+cleanup". Decomposed on HVF/macOS with `MVM_PHASE_TIMING`, most of it was not:
+
+```
+teardown=91.4  cleanup_handoff=91.3  stop_transient=90.7
+  stop_driver_kill=33.7  (stop_pid_disappearance=33.7)
+  stop_console_cleanup=57.0
+```
+
+`stop_console_cleanup` is the largest single span in a transient teardown, and
+57 ms of it was two more instances of the cadence bug — a fifth and sixth site,
+missed by "the same cadence bug, three more times" because neither is a
+readiness wait:
+
+- The stream server's accept loop polled a **nonblocking** listener on a fixed
+  25 ms tick, and `shutdown` set a flag and joined it. Mean 12.5 ms per stop.
+  Backoff, the fix used at the other four sites, does **not** help here: the
+  loop idles for the whole life of the VM, so it is always already sitting at
+  the ceiling when the stop arrives. It needed an event, not a shorter tick.
+  The listener now blocks in `accept` and `shutdown` wakes it by connecting to
+  its own socket.
+- `DurableSink::seal` waited for its writer thread by polling `is_finished()`
+  every 20 ms, because `std` has no timed join and the module cannot take a
+  dependency to get one. The writer finishes in microseconds once the job
+  channel drops, so this cost a full tick nearly every time. It now waits on a
+  channel whose sender lives in the writer thread: the disconnect *is* the
+  exit, so the wait is a timed join with no cadence.
+
+Both changes introduce a hazard the polls did not have — a wait that can no
+longer time out on its own — so both are bounded and both have a test for the
+pathological case. The accept wake-up cannot be delivered if something already
+unlinked the socket, and that path detaches rather than hanging teardown.
+
+### Phase 6 third change — admission was five `F_FULLFSYNC`s
+
+Issue #2293 costed the per-launch fsync count on the KVM box and fixed the
+duplicate `plan.admitted` plus the deferrable-event split, taking one launch
+from 8 chain fsyncs to 3. Its second acceptance item — batch the remaining
+causally-ordered burst — was left open. This closes it.
+
+Measured on the same Apple-silicon host, 25 samples, appending an 800-byte
+record:
+
+| barrier | p50 |
+|---|---:|
+| `fsync(2)` | 0.03 ms |
+| **`F_FULLFSYNC`** | **7.41 ms** |
+
+Rust's `sync_data` is `F_FULLFSYNC` on Apple platforms, so the 47.4 ms `admit`
+was ~37 ms of barrier: three chain barriers (`plan.admitted`, the decision
+record, `plan.grant_required`), the `plan.admitted` receipt's `sync_all`, and
+`plan.json`. This is why admission looked cheap on macOS in the original
+#2293 measurement — it was compared against `fsync(2)`, which it does not use.
+
+The three chain barriers now share one flush. Nothing about the durability rule
+changes: they all have to be durable before the same action — this plan booting
+— and none of them acts on the one before it, so syncing each separately bought
+no ordering that the single flush does not. `sync_data` is file-wide, so one
+flush carries all three. The batch closes before the caller receives an
+`AdmissionContext` to boot from, and a failed flush is an error, not a warning.
+
+`sync_policy_for`'s fail-closed default and `DEFERRABLE_EVENTS` are untouched —
+batching is a scope a caller opts into, not a change to what any event means.
+
+**Also on the admit path:** the chain cursor was restored by reading the whole
+active segment on every append. The segment grows to 4 MiB before rotating, and
+a launch appends ~6 entries, so admission cost up to 24 MiB of reads per launch
+— rising as the segment filled and dropping abruptly at each rotation, which is
+a sawtooth in `admit` that no sample would explain. It now reads a bounded tail
+window and widens only if a record spans it.
+
+### The `command` span was a 50 ms floor in the guest agent
+
+`command` — authenticated agent to finished guest command — was 52.5 ms for
+`/bin/true`, and constant to a tenth of a millisecond across runs (52.5, 52.7,
+52.9). A constant is the shape of a floor.
+
+`exec_stream`'s wait loop slept a flat 50 ms whenever `try_wait` returned
+`None`. A command that exits in microseconds always loses that first race — the
+child cannot have been reaped by the time the loop reaches it — so the second
+check found it already gone, having waited the whole interval to look. Nothing
+could finish this span in under 50 ms.
+
+This is the fifth site of the cadence bug, and the first one inside the guest
+rather than on the host, which is why the four Phase 5 fixes and the two seal
+fixes never came near it. It now shares `mvm_core::poll_backoff` with the other
+four, with the idle counter reset on any output so a chatty command keeps
+draining at the fast end rather than decaying to the ceiling — this loop drains
+stdout/stderr on each pass, so the ceiling bounds streaming latency as well as
+exit latency.
+
+Measured, release, HVF/macOS: **52.5 -> 4.6-5.4 ms**.
+
+### Where prepared cold stands after this branch
+
+Release, HVF/macOS, `machine run --image alpine -- true`, warm artifact cache,
+first (cold) sample discarded — **9 samples, not the 20 a publishable lane
+requires**, because the host became too loaded to sample further:
+
+| span | before this branch | after |
+|---|---:|---:|
+| `admit` | 47.4 | 36-40 |
+| `vsock_wait` | 58.2 | 61-70 |
+| `command` | 52.0 | **4.6-5.4** |
+| `teardown` | 91.4 | **39-48** |
+| **total** | **287.2** | **p50 191.2, max 196.2** |
+
+`dispatch_window` is 79-85 ms against its 200 ms p50 budget, unchanged in
+substance by this branch — every cut here is outside the window the contract
+measures, which is the point: the contract was already met and the user-visible
+number was not.
+
+Three caveats, stated because the table above is the kind of thing that gets
+quoted without them. Nine samples is not the lane's 20, so there is no p95/p99
+here and these are not publishable numbers. `vsock_wait` drifted *up* slightly
+and is now the largest remaining span — it is Phase 5's event-driven readiness
+task and untouched by this branch. And `teardown` is still ~40 ms of which
+~33 ms is the guest-RAM reclaim measured above, so it scales with workload size
+and this 512 MiB figure is the best case.
+
+Remaining, in size order: `vsock_wait` 61-70 ms (Phase 5), `teardown` ~40 ms
+(guest-RAM reclaim, Phase 6), `admit` 36-40 ms (of which ~22 ms is three
+`F_FULLFSYNC`s — the chain batch, the receipt, and `plan.json`; the receipt is
+the open durability question above).
+
+### `stop_pid_disappearance` is guest-RAM teardown, ~48 ms/GB — open
+
+The remaining teardown span. Two candidates were on the table: the 5 ms
+watchdog tick observing the SIGTERM flag, and the supervisor's console
+rewrite. `shutdown-timing.json` was supposed to settle it. It does, by
+excluding both.
+
+One release HVF shutdown, 512 MiB guest, from `<state_dir>/shutdown-timing.json`:
+
+| span | µs |
+|---|---:|
+| `watchdog_to_vcpu_exit` | 1,582 |
+| `vm_destroy` | 346 |
+| `console_write` | 869 |
+| `io_thread_join` | 70 |
+| `vcpu_destroy` | 34 |
+| `watchdog_join` | 23 |
+| **sum** | **2,924** |
+
+The host measured `stop_pid_disappearance` at **33–37 ms** for the same
+configuration. **The record accounts for 2.9 ms of it — under 9%.**
+
+The gap is structural, not noise. `pid_disappearance` waits on kqueue
+`EVFILT_PROC` — actual *process exit* — while the record stops being written
+just before `remove_file(pid_file)`. Everything after that point is inside the
+host's measurement and outside the file: the supervisor process still has to
+exit, and its address space still has to be reclaimed.
+
+That it is the address space is measurable directly. Varying only guest memory
+on the transient path, release, two samples each:
+
+| `--memory` | `stop_pid_disappearance` |
+|---|---:|
+| 512M (default) | 33.1, 37.1 ms |
+| 1G | 76.1, 55.8 ms |
+| 2G | 92.0, 92.7 ms |
+| 4G | 193.0, 195.6 ms |
+
+Linear in guest RAM at roughly **48 ms/GB**, and `hv_vm_destroy` is already
+accounted for at 346 µs, so this is the guest allocation being reclaimed at
+process exit rather than any Hypervisor.framework call.
+
+Consequences:
+
+- **The watchdog self-pipe is not worth building.** Its whole prize is the
+  0–5 ms tick, which is at most 15% of this span at the default size and
+  proportionally less at every larger one.
+- **This span is a function of workload size, not of teardown code.** A 4 GiB
+  workload pays ~195 ms of foreground teardown for no reason the user can see,
+  and it will not show up in any `alpine`-sized benchmark — the same blind spot
+  Plan 311 opened for artifact size, now on the stop path.
+- The lever is the wait, not the unmap: the kernel reclaims the address space
+  either way, but the host currently blocks the user's command until it has.
+  `remove_file(pid_file)` already happens *before* exit, so a liveness signal
+  that fires there would return earlier — at the cost of the state directory
+  being removable while the supervisor still holds descriptors into it, which
+  is exactly the ownership rule this phase is not allowed to break. Phase 6's
+  detached-cleanup design is the honest place to resolve it.
+
+Two instrumentation gaps found while doing this, both worth closing before the
+next person trusts this file: `stop_observed_at` is stamped when the watchdog
+*observes* the flag after its sleep, so the tick latency the record exists to
+expose is the one thing it cannot see; and the record is written before process
+exit, so it structurally cannot cover the span that dominates.
+
+### The dominant admit cost is the receipt, not the chain — open
+
+Batching the chain barriers did not move `admit` much, and the emit trace says
+why. One admission, `RUST_LOG=mvm_hostd::audit=debug`:
+
+```
+emit: tokio runtime build  ms=0.030      <- once, now reused (was ~6x)
+emit: signer   signer=0    ms=0.289      <- batched, no fsync
+emit: receipt              ms=35.893     <- the cost
+emit: signer   signer=0    ms=2.505
+admit: record_admission (batched fsync) ms=52.060
+...
+emit: receipt              ms=11.657
+```
+
+**The receipt write is ~36 ms of a ~45 ms `admit`.** Issue #2293 costed chain
+entries and never looked at receipts, so this has been the largest single
+admission cost the whole time and was attributed to the chain.
+
+What makes it worth a decision rather than a patch: `emit_receipt_for_entry`
+is explicitly best-effort — its errors are logged and swallowed, and its own
+doc says receipts "are a derived cache and must never block the primary audit
+emit". But `append_chained` writes the receipt body through `write_atomic`,
+which ends in `sync_all` — an `F_FULLFSYNC` — on the boot path. The head write
+beside it already uses `write_atomic_unsynced`. So a structure the code treats
+as a derived cache everywhere else is the one thing in admission paying full
+durability, synchronously, before the VM starts.
+
+Three options, none taken here because this is a durability decision about
+claim-8 evidence export rather than the redundancy removal the rest of this
+change is:
+
+1. Write the receipt body unsynced, like its head. Cheapest; a receipt can then
+   be lost to power loss while the chain entry it derives from survives — which
+   is the definition of a derived cache, but it does mean `receipt_export` can
+   come up short after a crash.
+2. Keep the sync and move it off the boot path, flushing with the batch.
+3. Keep it as is and accept ~36 ms, having now named it.
+
 ### Phase 5 first change — the readiness cadence was reporting itself
 
 `wait_for_agent` polled on a flat 50 ms tick. Readiness can only be observed on

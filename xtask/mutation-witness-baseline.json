@@ -314,11 +314,11 @@
   "uncovered_claims": [
     {
       "number": 5,
-      "why": "no fn: witness — witnessed by CI lanes only, nothing to mutate"
+      "why": "no fn: witness \u2014 witnessed by CI lanes only, nothing to mutate"
     },
     {
       "number": 7,
-      "why": "no fn: witness — witnessed by CI lanes only, nothing to mutate"
+      "why": "no fn: witness \u2014 witnessed by CI lanes only, nothing to mutate"
     },
     {
       "number": 16,
@@ -1040,6 +1040,16 @@
       "file": "crates/mvm-hostd/src/plan_admission.rs",
       "mutant": "replace AdmitAndStartParams<'a>::builder -> AdmitAndStartParamsBuilder<'a> with Default::default()",
       "reason": "provably equivalent: `AdmitAndStartParams::builder` is a one-line alias for `AdmitAndStartParamsBuilder::new()`, and this file's `impl Default for AdmitAndStartParamsBuilder` returns `Self::new()`, so `Default::default()` evaluates the identical expression. No test can distinguish the two, and the builder's own required-field refusal is asserted directly by the empty-builder test beside it."
+    },
+    {
+      "file": "crates/mvm-hostd/src/supervisor/audit_file.rs",
+      "mutant": "replace > with == in highest_sealed_segment",
+      "reason": "observable only through `read_dir` ordering, which is unspecified. Under `==` the scan keeps whatever entry the directory yields first; whether that differs from the maximum depends on the filesystem, so a test asserting the difference would pass or fail on the host rather than on the code. `the_highest_sequence_wins_not_the_lowest` covers the sign flip, which is the mutation that is deterministically wrong."
+    },
+    {
+      "file": "crates/mvm-hostd/src/supervisor/audit_file.rs",
+      "mutant": "replace > with >= in highest_sealed_segment",
+      "reason": "equivalent. Segment file names are unique per sequence, so two entries never compare equal and `>` and `>=` select the same maximum on every input. No test can distinguish them because no input distinguishes them."
     },
     {
       "file": "crates/mvm-hostd/src/supervisor/audit_file.rs",
