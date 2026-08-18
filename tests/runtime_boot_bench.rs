@@ -66,6 +66,8 @@ fn prebuilt_runtime_image_boots_within_budget() -> Result<()> {
         return Ok(());
     };
 
+    ensure_host_signer()?;
+
     let serial = measure_serial(&spec)?;
     let serial_summary = summarize(&serial);
     eprintln!(
@@ -223,6 +225,26 @@ struct Summary {
     p50: Duration,
     p95: Duration,
     max: Duration,
+}
+
+/// Mint the host signing identity if this machine has none yet.
+///
+/// The readiness probe opens an *authenticated* session with the guest, and the
+/// host half of that handshake signs with `~/.mvm/keys/host-signer.ed25519`.
+/// A real `mvmctl` run reaches that key through `load_or_init`, which creates it
+/// on first use; the harness went straight to the probe, so on a fresh CI runner
+/// the boot succeeded and the readiness check then failed with
+/// `read host signer key … No such file or directory` — a working guest reported
+/// as a broken one.
+///
+/// Minting it here rather than teaching the read path to create it on demand:
+/// the host's signing identity is the anchor the guest pins, and a read that
+/// silently mints one would make "the key was missing" indistinguishable from
+/// "the key was replaced".
+fn ensure_host_signer() -> Result<()> {
+    mvm_hostd::audit::host_keypair::load_or_init()
+        .map(|_| ())
+        .context("initializing the host signer identity the readiness probe signs with")
 }
 
 fn measure_serial(spec: &BenchSpec) -> Result<Vec<BootMeasurement>> {
