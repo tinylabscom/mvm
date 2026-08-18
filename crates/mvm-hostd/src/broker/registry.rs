@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use mvm_contract::protocol::agent_capability::{
     CapabilityAuditEvent, CapabilityBinding, CapabilityDescriptor, CapabilityFailureCode,
-    CapabilityId, CapabilityInvocation, payload_digest,
+    CapabilityId, CapabilityInvocation, evaluate_argument_policy, payload_digest,
 };
 use mvm_contract::protocol::agent_session::AgentRequestId;
 use mvm_core::protocol::broker::{ServiceErrorCode, ServiceId};
@@ -264,6 +264,22 @@ impl Registry {
             );
             return Err(capability_error(CapabilityFailureCode::InputTooLarge));
         }
+        if let Err(refusal) =
+            evaluate_argument_policy(&registration.descriptor.argument_policy, &payload)
+        {
+            self.record_refusal(
+                &capability,
+                invocation,
+                CapabilityFailureCode::ArgumentRefused,
+            );
+            return Err(ServiceError::new(
+                ServiceErrorCode::BadRequest,
+                format!(
+                    "argument at `{}` refused by the {} policy for {}",
+                    refusal.pointer, refusal.kind, capability
+                ),
+            ));
+        }
         let replay_key = (capability.clone(), invocation.invocation_id.clone());
         let inserted = self
             .consumed_invocations
@@ -395,7 +411,9 @@ fn capability_error(code: CapabilityFailureCode) -> ServiceError {
             ServiceErrorCode::CapabilityBindingMismatch
         }
         CapabilityFailureCode::InputTooLarge => ServiceErrorCode::CapabilityInputTooLarge,
-        CapabilityFailureCode::InvalidInput => ServiceErrorCode::BadRequest,
+        CapabilityFailureCode::InvalidInput | CapabilityFailureCode::ArgumentRefused => {
+            ServiceErrorCode::BadRequest
+        }
         CapabilityFailureCode::OutputTooLarge => ServiceErrorCode::CapabilityOutputTooLarge,
         CapabilityFailureCode::Timeout => ServiceErrorCode::Timeout,
         CapabilityFailureCode::Canceled => ServiceErrorCode::CapabilityCanceled,
@@ -425,8 +443,8 @@ mod tests {
     use std::time::Duration;
 
     use mvm_contract::protocol::agent_capability::{
-        CapabilityAuditEvent, CapabilityDescriptor, CapabilityId, CapabilityInvocation,
-        CapabilityLimits, SchemaRef,
+        ArgumentConstraint, ArgumentRule, CapabilityAuditEvent, CapabilityDescriptor, CapabilityId,
+        CapabilityInvocation, CapabilityLimits, SchemaRef,
     };
     use mvm_contract::protocol::agent_session::AgentRequestId;
     use mvm_core::policy::security::AgentProfile;
@@ -1090,5 +1108,127 @@ mod tests {
             .map(|d| d.id.verb)
             .collect();
         assert_eq!(verbs, vec!["echo".to_string(), "echo2".to_string()]);
+    }
+
+    fn descriptor_with_policy(rules: Vec<ArgumentRule>) -> CapabilityDescriptor {
+        CapabilityDescriptor::builder()
+            .id(CapabilityId::new(
+                ServiceId::parse("host.dev.echo.v1").expect("service id"),
+                "echo",
+            )
+            .expect("capability id"))
+            .description("echo a bounded test value")
+            .input_schema(SchemaRef::new("host.dev.echo.input.v1", [1; 32]).expect("schema"))
+            .output_schema(SchemaRef::new("host.dev.echo.output.v1", [2; 32]).expect("schema"))
+            .limits(CapabilityLimits::new(128, 128, 50).expect("limits"))
+            .argument_policy(rules)
+            .build()
+            .expect("descriptor")
+    }
+
+    async fn dispatch_with_policy(
+        rules: Vec<ArgumentRule>,
+        payload: serde_json::Value,
+        audit: &TestAudit,
+    ) -> ServiceDispatchResult {
+        let descriptor = descriptor_with_policy(rules);
+        let binding = descriptor.binding();
+        let mut registry = Registry::new().with_capability_audit_sink(Arc::new(audit.clone()));
+        registry
+            .register_capability(Arc::new(EchoHandler), descriptor)
+            .expect("register");
+        registry
+            .admit_capabilities([binding.clone()])
+            .expect("admit");
+        let invocation = CapabilityInvocation::from_payload(
+            binding,
+            AgentRequestId::parse("typed-request-policy").expect("request id"),
+            &payload,
+        )
+        .expect("invocation");
+        registry
+            .dispatch_capability(
+                &ctx(),
+                &ServiceId::parse("host.dev.echo.v1").expect("service"),
+                "echo",
+                &invocation,
+                payload,
+                &CancellationToken::new(),
+            )
+            .await
+    }
+
+    #[tokio::test]
+    async fn an_argument_outside_the_policy_is_refused_before_the_handler_runs() {
+        let audit = TestAudit::default();
+        let rules = vec![ArgumentRule {
+            pointer: "/destination".into(),
+            constraint: ArgumentConstraint::OneOf {
+                values: vec!["api.example.com".into()],
+            },
+        }];
+        let err = dispatch_with_policy(
+            rules,
+            serde_json::json!({"destination": "attacker.example.com"}),
+            &audit,
+        )
+        .await
+        .expect_err("an out-of-policy argument is refused");
+
+        assert_eq!(err.code, ServiceErrorCode::BadRequest);
+        assert!(
+            err.message.contains("/destination"),
+            "the refusal names the field: {}",
+            err.message
+        );
+        assert!(
+            !err.message.contains("attacker.example.com"),
+            "a refusal that quotes the argument republishes whatever it held: {}",
+            err.message
+        );
+    }
+
+    #[tokio::test]
+    async fn an_in_policy_argument_still_reaches_the_handler() {
+        let audit = TestAudit::default();
+        let rules = vec![ArgumentRule {
+            pointer: "/destination".into(),
+            constraint: ArgumentConstraint::OneOf {
+                values: vec!["api.example.com".into()],
+            },
+        }];
+        let payload = serde_json::json!({"destination": "api.example.com"});
+        let out = dispatch_with_policy(rules, payload.clone(), &audit)
+            .await
+            .expect("an in-policy argument dispatches");
+        assert_eq!(out, payload);
+    }
+
+    #[tokio::test]
+    async fn a_policy_refusal_is_audited_without_the_argument_value() {
+        let audit = TestAudit::default();
+        let rules = vec![ArgumentRule {
+            pointer: "/path".into(),
+            constraint: ArgumentConstraint::PathUnder {
+                prefixes: vec!["/work/".into()],
+            },
+        }];
+        dispatch_with_policy(rules, serde_json::json!({"path": "/etc/shadow"}), &audit)
+            .await
+            .expect_err("refused");
+
+        let events = audit.0.lock().expect("audit mutex");
+        let refused = events
+            .iter()
+            .any(|e| matches!(e, CapabilityAuditEvent::Refused { code, .. } if *code == CapabilityFailureCode::ArgumentRefused));
+        assert!(
+            refused,
+            "the refusal is evidence, so it is recorded: {events:?}"
+        );
+        let rendered = format!("{events:?}");
+        assert!(
+            !rendered.contains("/etc/shadow"),
+            "audit carries the code, never the value: {rendered}"
+        );
     }
 }
