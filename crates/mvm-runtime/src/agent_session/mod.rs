@@ -93,13 +93,29 @@ pub enum SessionTransitionError {
     Closed,
 }
 
+/// What a park commits alongside the state transition.
+///
+/// Grouped into a struct rather than added as further positional arguments so
+/// the values land in the same fenced write as the transition. A caller that
+/// had to `write()` then `park()` would take two writes with no fence between
+/// them — a park does not change the generation, so the fence cannot tell the
+/// two calls apart.
+#[derive(Debug, Clone)]
+pub struct ParkInput {
+    pub reason: ParkReason,
+    /// Journal position the park is consistent with.
+    pub journal_cursor: u64,
+    /// Approval-ledger head the session was last admitted under, if it has one.
+    pub approval_head: Option<mvm_core::checkpoint::ApprovalHead>,
+}
+
 impl AgentSessionRecord {
     /// Suspend a residency. Returns the parked record; does not write it.
     ///
     /// The generation is deliberately unchanged: it identifies one period of
     /// sandbox residency, and a park suspends that period rather than ending
     /// it. `resume` is what opens the next one.
-    pub fn park(&self, reason: ParkReason, now_unix: u64) -> Result<Self, SessionTransitionError> {
+    pub fn park(&self, input: &ParkInput, now_unix: u64) -> Result<Self, SessionTransitionError> {
         match self.state {
             SandboxResidency::Closed => return Err(SessionTransitionError::Closed),
             SandboxResidency::Hibernated => return Err(SessionTransitionError::NotActive),
@@ -107,8 +123,10 @@ impl AgentSessionRecord {
         }
         Ok(Self {
             state: SandboxResidency::Hibernated,
-            storage_tier: Some(select_tier(reason)),
-            park_reason: Some(reason),
+            storage_tier: Some(select_tier(input.reason)),
+            park_reason: Some(input.reason),
+            journal_cursor: input.journal_cursor,
+            approval_head: input.approval_head.clone(),
             updated_unix: now_unix,
             ..self.clone()
         })
@@ -298,12 +316,12 @@ impl AgentSessionStore {
         &self,
         id: &AgentSessionId,
         expected_generation: u64,
-        reason: ParkReason,
+        input: ParkInput,
         now_unix: u64,
     ) -> Result<AgentSessionRecord> {
         let current = self.load(id)?;
         fence(&current, expected_generation)?;
-        let parked = current.park(reason, now_unix)?;
+        let parked = current.park(&input, now_unix)?;
         self.write(&parked)?;
         Ok(parked)
     }
@@ -359,6 +377,15 @@ mod tests {
             approval_head: None,
             storage_tier: None,
             park_reason: None,
+        }
+    }
+
+    /// A minimal park input for tests that only care about the reason.
+    fn park_input(reason: ParkReason) -> ParkInput {
+        ParkInput {
+            reason,
+            journal_cursor: 0,
+            approval_head: None,
         }
     }
 
@@ -435,7 +462,9 @@ mod tests {
     fn parking_keeps_the_generation_and_records_why() {
         let rec = record("sess-alpha");
         assert_eq!(rec.generation, 1);
-        let parked = rec.park(ParkReason::ApprovalWait, 1_755_000_100).unwrap();
+        let parked = rec
+            .park(&park_input(ParkReason::ApprovalWait), 1_755_000_100)
+            .unwrap();
         assert_eq!(parked.state, SandboxResidency::Hibernated);
         assert_eq!(
             parked.generation, 1,
@@ -449,7 +478,7 @@ mod tests {
     #[test]
     fn resuming_opens_a_new_generation_and_clears_the_park() {
         let parked = record("sess-alpha")
-            .park(ParkReason::ApprovalWait, 1_755_000_100)
+            .park(&park_input(ParkReason::ApprovalWait), 1_755_000_100)
             .unwrap();
         let live = parked.resume(1_755_000_200).unwrap();
         assert_eq!(live.state, SandboxResidency::Active);
@@ -461,9 +490,11 @@ mod tests {
 
     #[test]
     fn a_session_cannot_be_parked_twice() {
-        let parked = record("sess-alpha").park(ParkReason::Idle, 1).unwrap();
+        let parked = record("sess-alpha")
+            .park(&park_input(ParkReason::Idle), 1)
+            .unwrap();
         assert!(matches!(
-            parked.park(ParkReason::Idle, 2),
+            parked.park(&park_input(ParkReason::Idle), 2),
             Err(SessionTransitionError::NotActive)
         ));
     }
@@ -481,7 +512,7 @@ mod tests {
         let mut closed = record("sess-alpha");
         closed.state = SandboxResidency::Closed;
         assert!(matches!(
-            closed.park(ParkReason::Idle, 2),
+            closed.park(&park_input(ParkReason::Idle), 2),
             Err(SessionTransitionError::Closed)
         ));
         assert!(matches!(
@@ -555,6 +586,76 @@ mod tests {
     }
 
     #[test]
+    fn park_commits_the_cursor_and_head_with_the_transition() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = AgentSessionStore::at(tmp.path());
+        let rec = record("sess-alpha");
+        store.write(&rec).unwrap();
+
+        let head = mvm_core::checkpoint::ApprovalHead::parse(format!("sha256:{}", "ab".repeat(32)))
+            .unwrap();
+        let parked = store
+            .park(
+                &rec.session_id,
+                1,
+                ParkInput {
+                    reason: ParkReason::ApprovalWait,
+                    journal_cursor: 42,
+                    approval_head: Some(head.clone()),
+                },
+                1_755_000_100,
+            )
+            .unwrap();
+
+        assert_eq!(parked.journal_cursor, 42);
+        assert_eq!(parked.approval_head, Some(head.clone()));
+
+        // One write, not two: the values are on disk after the single call.
+        let on_disk = store.load(&rec.session_id).unwrap();
+        assert_eq!(on_disk.journal_cursor, 42);
+        assert_eq!(on_disk.approval_head, Some(head));
+        assert_eq!(on_disk.state, SandboxResidency::Hibernated);
+    }
+
+    #[test]
+    fn a_refused_park_commits_neither_the_cursor_nor_the_head() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = AgentSessionStore::at(tmp.path());
+        let rec = record("sess-alpha");
+        store.write(&rec).unwrap();
+        store
+            .park(
+                &rec.session_id,
+                1,
+                ParkInput {
+                    reason: ParkReason::Idle,
+                    journal_cursor: 7,
+                    approval_head: None,
+                },
+                100,
+            )
+            .unwrap();
+
+        // Already hibernated: a second park is refused, and must not advance
+        // the cursor it was called with.
+        assert!(
+            store
+                .park(
+                    &rec.session_id,
+                    1,
+                    ParkInput {
+                        reason: ParkReason::Idle,
+                        journal_cursor: 99,
+                        approval_head: None,
+                    },
+                    200,
+                )
+                .is_err()
+        );
+        assert_eq!(store.load(&rec.session_id).unwrap().journal_cursor, 7);
+    }
+
+    #[test]
     fn store_park_persists_the_transition() {
         let tmp = tempfile::tempdir().unwrap();
         let store = AgentSessionStore::at(tmp.path());
@@ -562,7 +663,12 @@ mod tests {
         store.write(&rec).unwrap();
 
         let parked = store
-            .park(&rec.session_id, 1, ParkReason::ApprovalWait, 1_755_000_100)
+            .park(
+                &rec.session_id,
+                1,
+                park_input(ParkReason::ApprovalWait),
+                1_755_000_100,
+            )
             .unwrap();
         assert_eq!(parked.state, SandboxResidency::Hibernated);
         assert_eq!(
@@ -578,7 +684,12 @@ mod tests {
         let rec = record("sess-alpha");
         store.write(&rec).unwrap();
         store
-            .park(&rec.session_id, 1, ParkReason::Idle, 1_755_000_100)
+            .park(
+                &rec.session_id,
+                1,
+                park_input(ParkReason::Idle),
+                1_755_000_100,
+            )
             .unwrap();
 
         let live = store.resume(&rec.session_id, 1, 1_755_000_200).unwrap();
@@ -593,13 +704,13 @@ mod tests {
         let rec = record("sess-alpha");
         store.write(&rec).unwrap();
         store
-            .park(&rec.session_id, 1, ParkReason::Idle, 100)
+            .park(&rec.session_id, 1, park_input(ParkReason::Idle), 100)
             .unwrap();
         store.resume(&rec.session_id, 1, 200).unwrap(); // now generation 2
 
         // A caller still holding generation 1 must not be able to park it.
         let err = store
-            .park(&rec.session_id, 1, ParkReason::Operator, 300)
+            .park(&rec.session_id, 1, park_input(ParkReason::Operator), 300)
             .unwrap_err()
             .to_string();
         assert!(err.contains("generation"), "unexpected error: {err}");
@@ -686,10 +797,10 @@ mod tests {
         // A fixture with every resume-critical field non-default: an empty
         // `parent_checkpoint`/`journal_cursor`/`approval_head` would let a
         // transition that dropped one of them pass the rest of the suite
-        // silently. `park` only touches `state`/`storage_tier`/`park_reason`/
-        // `updated_unix`, and `resume` only touches `state`/`generation`/
-        // `storage_tier`/`park_reason`/`updated_unix` — neither transition has
-        // any business rewriting the resume point itself.
+        // silently. `park` commits `journal_cursor`/`approval_head` from its
+        // `ParkInput`, and `resume` only touches `state`/`generation`/
+        // `storage_tier`/`park_reason`/`updated_unix` — resume has no business
+        // rewriting the resume point park just committed.
         let mut rec = record("sess-alpha");
         rec.parent_checkpoint = Some(
             mvm_core::checkpoint::CheckpointDigest::parse(format!("sha256:{}", "cd".repeat(32)))
@@ -701,7 +812,16 @@ mod tests {
                 .unwrap(),
         );
 
-        let parked = rec.park(ParkReason::ApprovalWait, 100).unwrap();
+        let parked = rec
+            .park(
+                &ParkInput {
+                    reason: ParkReason::ApprovalWait,
+                    journal_cursor: rec.journal_cursor,
+                    approval_head: rec.approval_head.clone(),
+                },
+                100,
+            )
+            .unwrap();
         assert_eq!(parked.parent_checkpoint, rec.parent_checkpoint);
         assert_eq!(parked.journal_cursor, rec.journal_cursor);
         assert_eq!(parked.approval_head, rec.approval_head);
