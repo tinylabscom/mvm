@@ -350,7 +350,12 @@ wasm-clean; clippy/test green.
       same call `run --image` boots through, so there is one materializer
       rather than two that could disagree.
 - [ ] Optionally take a ready-point snapshot to produce a warm template if
-      `--warm` is given.
+      `--warm` is given. **Inherited from the run-first CLI plan's Phase 4**,
+      which built the image-backed slot but left the warm snapshot here, beside
+      the store it uses.
+- [ ] Allow saving a running dev-tier sandbox as a custom template. Also
+      inherited from that plan, for the same reason: it is a snapshot of a live
+      guest, which is this plan's substrate.
 - [ ] Ensure the produced template emits the same signed `ExecutionPlan` /
       bundle shape as the Nix path, so admission and audit are uniform.
 - [ ] Add a scenario covering build-then-boot. Deferred: it needs a registry
