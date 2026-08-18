@@ -111,6 +111,14 @@ fn map_event_to_receipt_type(event: &str) -> Option<(&'static str, ReceiptOutcom
         "checkpoint.restored" => (receipt_type::CHECKPOINT_RESTORED, ReceiptOutcome::Succeeded),
         "checkpoint.forked" => (receipt_type::CHECKPOINT_FORKED, ReceiptOutcome::Succeeded),
         "stream.input_refused" => (receipt_type::INPUT_REFUSED, ReceiptOutcome::Refused),
+        "assurance.session_opened" => (
+            receipt_type::ASSURANCE_SESSION_OPENED,
+            ReceiptOutcome::Authorized,
+        ),
+        "assurance.trial_completed" => (
+            receipt_type::ASSURANCE_TRIAL_COMPLETED,
+            ReceiptOutcome::Succeeded,
+        ),
         _ => return None,
     };
     Some(pair)

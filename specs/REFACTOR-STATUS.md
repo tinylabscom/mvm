@@ -286,19 +286,16 @@ for detailed scope and acceptance criteria.
 ## In-flight plans
 
 - [~] **Admission-bound AI assurance sessions** —
-      `specs/plans/2026-08-17-admission-bound-ai-assurance-sessions.md`. W1–W3
-      landed: the `mvm.assurance.ai-session-input/v1` envelope (provider half
-      cannot carry admission facts; the assembled envelope has no
-      `Deserialize`), the five-way `EffectiveAuthority` intersection, the
-      host-derived fail-closed outcome ladder, and `host.assurance.v1` — one
-      declared probe verb, binding-gated, taking a destination *label* the host
-      resolves rather than anything the model composed. Conformed to the
-      counterparty's exact key sets, which disagreed with the implementation
-      prompt in three places (see the plan's drift note). 65 tests.
-      STILL OPEN: W4 guest-side API, W5 observer/cleanup evidence, W6 session
-      lifecycle on the admit path, W7 receipt/audit emission, W8 the
-      framed-stdio provider binary. Until W5–W8 land every live trial
-      evaluates `INCONCLUSIVE` by design; no certifying campaign can run.
+      `specs/plans/2026-08-17-admission-bound-ai-assurance-sessions.md`. W1–W4
+      and W6/W7 landed: the envelope, the five-way authority intersection, the
+      fail-closed outcome ladder, `host.assurance.v1`, fail-closed audit and
+      receipt emission with citations that actually resolve, and the
+      workload-facing `AssuranceCampaign` whose surface offers no command,
+      path, host or port to pass. 84 tests.
+      STILL OPEN: W5 observer/cleanup evidence, W7b session lifecycle on the
+      admit path (`open_session` has no production caller yet), W8 the
+      framed-stdio provider binary. Until those land every live trial evaluates
+      `INCONCLUSIVE` by design; no certifying campaign can run.
 
 - [~] **Embedded-binary content store** — `specs/plans/2026-08-17-embedded-binary-content-store.md`.
       Phases 1–2 landed: both nested legs of `crates/mvm-cli/build.rs` are keyed
