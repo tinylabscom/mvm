@@ -767,6 +767,15 @@ pub fn checkpoints_dir() -> std::path::PathBuf {
     std::path::PathBuf::from(mvm_home()).join("checkpoints")
 }
 
+/// Durable agent-session store: `<mvm_home>/sessions/`. Each session is a
+/// subdirectory `<id>/` holding `session.json` plus its journal. Sibling to
+/// [`checkpoints_dir`]: a session names checkpoints as its resume points, and
+/// the two are reaped under different retention because one is kilobytes and
+/// the other is gigabytes.
+pub fn sessions_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from(mvm_home()).join("sessions")
+}
+
 /// Copy-on-write snapshot store: `<mvm_home>/snapshots/`. Sibling to
 /// [`checkpoints_dir`] — a checkpoint's `content/` is the immutable source a
 /// warm claim clones from, and the clone the claimed child boots off of lives
@@ -1457,6 +1466,16 @@ mod tests {
         env.set("MVM_HOME", temp.path());
         let dir = checkpoints_dir();
         assert_eq!(dir, temp.path().join("checkpoints"));
+        env.remove("MVM_HOME");
+    }
+
+    #[test]
+    fn sessions_dir_is_under_data_dir() {
+        let mut env = TestEnv::new();
+        let temp = tempfile::tempdir().unwrap();
+        env.set("MVM_HOME", temp.path());
+        let dir = sessions_dir();
+        assert_eq!(dir, temp.path().join("sessions"));
         env.remove("MVM_HOME");
     }
 
