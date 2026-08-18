@@ -4,8 +4,10 @@
 only that a tap be *evaluated*. The evaluation said a tap is worth having and
 that the interesting part is not the formula.
 
-**Backing:** shipped-source. **Adds no new security claim**, and must not
-weaken claim 6 (pre-built artifacts are hash-verified).
+Backing: shipped-source
+Validation: `install.sh`'s existing hash + cosign path, which this must not
+weaken — it adds no new security claim, and claim 6 (pre-built artifacts are
+hash-verified) has to keep holding across both acquisition paths.
 
 ## Why this is not just a formula
 
