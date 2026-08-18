@@ -70,3 +70,107 @@ pub const BOOTSTRAP_SUPPORT_BINARIES: &[SourceBuiltBinary] = &[SourceBuiltBinary
     name: "mvm-egress-client",
     features: "addons",
 }];
+
+/// Where a per-VM host binary can be built, expressed as data so the
+/// build script, the release workflow, and the sync gate all read one
+/// list instead of three hand-kept copies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PerVmScope {
+    /// Every target `mvmctl` ships for.
+    Always,
+    /// macOS on Apple Silicon — the raw-HVF VMM supervisor.
+    MacOsAarch64,
+    /// Only where libkrun headers exist to link against. Deliberately not
+    /// a Linux target: the released Linux `mvmctl` does not link libkrun,
+    /// so the supervisor is neither buildable nor needed there.
+    RequiresLibkrun,
+}
+
+/// A per-VM host process `mvmctl` spawns at runtime, one process per guest.
+///
+/// These are separate `[[bin]]` targets in other packages, so the root
+/// `cargo build` that produces `mvmctl` does not produce them. They are
+/// found at runtime by `resolve_subprocess_bin`, whose only viable lookup
+/// on a downloaded install is *adjacent to the executable* — the
+/// `target/{release,debug}` fallback exists solely for source checkouts.
+/// A binary listed here that the release tarball omits is therefore a
+/// spawn failure for anyone who installed from a release rather than
+/// building from source.
+#[derive(Debug, Clone, Copy)]
+pub struct PerVmBinary {
+    /// Workspace package that owns the `[[bin]]` target.
+    pub package: &'static str,
+    /// Binary name on disk, and the name `resolve_subprocess_bin` asks for.
+    pub name: &'static str,
+    /// Comma-separated Cargo features the binary target requires.
+    pub features: &'static str,
+    pub scope: PerVmScope,
+}
+
+/// The canonical per-VM host binary set. `mvm-cli/build.rs` builds these
+/// beside `mvmctl` for a source checkout, `.github/workflows/release.yml`
+/// builds and packages them for a downloaded install, and
+/// `xtask check-per-vm-host-binaries-sync` fails the build when those two
+/// consumers drift from this list.
+pub const PER_VM_HOST_BINARIES: &[PerVmBinary] = &[
+    // The per-tenant host-services daemon. `host_agent_daemon_enabled()`
+    // defaults to ON, so this is the default services path for every
+    // admitted workload on every backend.
+    PerVmBinary {
+        package: "mvm-hostd",
+        name: "mvm-host-agent",
+        features: "",
+        scope: PerVmScope::Always,
+    },
+    // Resolved by mvm-host-agent adjacent to *itself*, so it travels
+    // wherever mvm-host-agent does.
+    PerVmBinary {
+        package: "mvm-hostd",
+        name: "mvm-signer-helper",
+        features: "",
+        scope: PerVmScope::Always,
+    },
+    // The per-VM egress gate. Every VM spawns one, on both the Firecracker
+    // and HVF paths.
+    PerVmBinary {
+        package: "mvm-hostd",
+        name: "mvm-network-endpoint",
+        features: "",
+        scope: PerVmScope::Always,
+    },
+    // The per-VM L3 gateway. Whether a host may serve the tunnel is decided
+    // at admission, not by whether the binary happens to exist.
+    PerVmBinary {
+        package: "mvm-hostd",
+        name: "mvm-netd",
+        features: "",
+        scope: PerVmScope::Always,
+    },
+    // The per-VM broker fork and its audit signer. Reached when
+    // `MVM_HOST_AGENT_DAEMON=0` selects the pre-daemon path, which is a
+    // documented escape hatch rather than dead code — so both ship.
+    PerVmBinary {
+        package: "mvm-hostd",
+        name: "mvm-broker",
+        features: "",
+        scope: PerVmScope::Always,
+    },
+    PerVmBinary {
+        package: "mvm-hostd",
+        name: "mvm-audit-signer",
+        features: "",
+        scope: PerVmScope::Always,
+    },
+    PerVmBinary {
+        package: "mvm-hostd",
+        name: "mvm-hvf-supervisor",
+        features: "",
+        scope: PerVmScope::MacOsAarch64,
+    },
+    PerVmBinary {
+        package: "mvm-hostd",
+        name: "mvm-libkrun-supervisor",
+        features: "libkrun-sys",
+        scope: PerVmScope::RequiresLibkrun,
+    },
+];
