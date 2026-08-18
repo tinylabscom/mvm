@@ -1,4 +1,7 @@
-# Plan 338 — Implement the local secure message fabric and supersede stdio transport
+# Implement the local secure message fabric and supersede stdio transport
+
+Backing: preview
+Validation: none — this is a proposed design; no code implements it and no test exercises it.
 
 ## Status
 
@@ -279,7 +282,7 @@ reachable fabric path may ship before M2.
 - [ ] Decide platform-specific confinement for Linux.
 - [ ] Decide platform-specific confinement for macOS.
 - [ ] Mark unsupported platforms honestly where equivalent confinement cannot
-      yet be proven.
+      yet be settled.
 - [ ] Decide separate secure sessions vs a fixed closed-lane multiplexer using
       measured handshake/launch evidence.
 - [ ] Do not choose a generic dynamic multiplexer.
@@ -791,7 +794,7 @@ reachable fabric path may ship before M2.
 - [ ] Bind receipts to message/content/session/trace/generation/boot identities.
 - [ ] Extend existing audit signer/checkpoint/Merkle machinery.
 - [ ] Avoid synchronous asymmetric signature per low-level transition unless
-      evidence proves it is required.
+      evidence shows it is required.
 - [ ] Add independent reconciliation between shard high-water and signed audit
       high-water.
 - [ ] Quarantine unexplained divergence.
@@ -1052,7 +1055,7 @@ cargo run -p xtask -- check-fabric-archive-inert
 - [ ] Functional streams are durable/resumable.
 - [ ] SQLite is shard-local, hardened, ciphertext-only, and deterministic.
 - [ ] State-machine commands are reusable by `mvmd`.
-- [ ] Archive-before-purge is crash-proven.
+- [ ] Archive-before-purge is crash-safe.
 - [ ] Performance gates pass.
 - [ ] No distributed capability is overclaimed.
 - [ ] No placeholder, TODO, ignored error, or undocumented degradation remains.

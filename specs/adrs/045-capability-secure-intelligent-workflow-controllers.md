@@ -1,4 +1,7 @@
-# ADR-043 — Capability-secure intelligent workflow controllers
+# ADR-045 — Capability-secure intelligent workflow controllers
+
+Backing: preview
+Validation: none — this is a proposed design; no code implements it and no test exercises it.
 
 **Status:** Proposed  
 **Date:** 2026-08-13  
@@ -355,7 +358,7 @@ and grants. The private checkpoint cannot become generic warm capacity.
 A controller may be granted `SetCapacityTarget`, but the effective target is
 bounded by template, workflow, tenant, and host-pressure policy. The host may
 reduce warm capacity under pressure unless a separate operator-defined
-reservation guarantees it.
+reservation is what makes it hold.
 
 Host-owned events and monotonic timers execute idle TTL and scale-down policy;
 the controller need not remain resident to run timers.
@@ -524,7 +527,7 @@ The implementation must preserve all of the following:
 
 ### Neutral but important
 
-- A workflow receipt proves admitted configuration and recorded lineage, not
+- A workflow receipt is intended to attest admitted configuration and recorded lineage, not
   semantic correctness of the AI result.
 - Redaction cannot prevent all semantic or steganographic exfiltration.
 - The host remains trusted under ADR-001 unless a separate confidential
@@ -577,7 +580,7 @@ claims, reservation, fencing, or authoritative current state.
 ### Replace chain-signed audit with an AT repository
 
 Rejected. Authenticated repository state and optional history do not provide
-the same append-only forensic guarantees, and publication deletion/rollback
+the same append-only forensic properties, and publication deletion/rollback
 must not erase the local source of evidence.
 
 ### Fully opaque guest-to-guest communication by default
@@ -607,7 +610,7 @@ Before implementation reaches production:
 6. Inspect the actual `mvmd` repository and record the issuer, journal,
    reservation, placement, routing, semantic outbox, and projector boundaries.
 7. Keep true AT Protocol compatibility behind a separate optional ADR after the
-   AT-shaped internal model proves useful.
+   AT-shaped internal model turns out to be useful.
 
 ## Acceptance boundary
 

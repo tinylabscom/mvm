@@ -1,4 +1,7 @@
-# Plan 329 — Capability-secure intelligent microVM workflows
+# Capability-secure intelligent microVM workflows
+
+Backing: preview
+Validation: none — this is a proposed design; no code implements it and no test exercises it.
 
 **Status:** PROPOSED — no implementation has begun.  
 **Issue:** not yet assigned.  
@@ -92,7 +95,7 @@ These are release blockers, not preferences.
 18. **Performance is gated.** Direct launch must not regress. The authoritative
     200 ms versus current sub-300 ms warm-launch SLO must be resolved in WS0.
 19. **Plans and claims stay honest.** Controls with no production caller remain
-    declared dormant or preview; they do not become numbered guarantees early.
+    declared dormant or preview; they do not become numbered claims early.
 20. **Tests precede completion.** Checkboxes are marked only after the listed
     tests and repository gates pass.
 
@@ -429,7 +432,7 @@ before a lifecycle verb becomes reachable.
       CPU, memory, disk, artifact, mailbox, network, cost, FDs, sockets,
       channels, warm, parked, and private checkpoints.
 - [ ] No partial reservation on failure.
-- [ ] Reservation expiry/recovery that first proves no live effect.
+- [ ] Reservation expiry/recovery that first checks for no live effect.
 - [ ] Release only after confirmed VMM death and host-resource reap.
 - [ ] Fair-share refusal that does not leak other tenant inventory.
 
@@ -640,7 +643,7 @@ recursive delegation, or fleet distribution.
 
 ### Acceptance
 
-- [ ] The vertical slice proves a fully compromised controller can consume only
+- [ ] The vertical slice is to demonstrate that a fully compromised controller can consume only
       the configured envelope.
 
 
@@ -764,7 +767,7 @@ turning raw stdout or direct guest addressing into a control plane.
       - approvals and policy outcomes;
       - audit-chain references;
       - terminal state and cleanup result.
-- [ ] The receipt proves admitted/executed provenance, not semantic correctness
+- [ ] The receipt is to attest admitted/executed provenance, not semantic correctness
       of an AI result.
 
 ### Tests
@@ -1034,7 +1037,7 @@ implicit authority.
       - teardown incomplete.
 - [ ] Reconcile using boot identity, process liveness, lease ownership, and
       signed plan—not VM name alone.
-- [ ] Reservation and attempt state remain until live side effects are proven
+- [ ] Reservation and attempt state remain until live side effects are settled
       absent.
 - [ ] Orphan reaper is authority-domain and boot scoped.
 
@@ -1493,7 +1496,7 @@ or eventual semantic state on the execution path.
 - [ ] Gap/resync, duplicate event, rollback, schema drift, revoked issuer,
       conflicting labels, and unavailable labeler all follow explicit policy.
 - [ ] Strong reference detects record mutation/substitution.
-- [ ] CID alone never authenticates an issuer or proves an assertion true.
+- [ ] CID alone never authenticates an issuer or makes an assertion true.
 - [ ] Chain-signed audit remains independently verifiable and is not replaced by
       repository current state.
 
@@ -1507,7 +1510,7 @@ or eventual semantic state on the execution path.
 
 ## WS14 — Optional true AT Protocol interoperability bridge
 
-**Status:** DEFERRED until WS13 proves the internal model and official protocol
+**Status:** DEFERRED until WS13 validates the internal model and official protocol
 maturity/dependency assessment remains favorable.
 
 **Purpose:** Publish/import sanitized portable templates, capabilities,
@@ -1968,7 +1971,7 @@ Plan 329 is complete only when all of the following are true:
       direct or child-launch critical path.
 - [ ] ADRs, claims ledger, plan checkboxes, `specs/SPRINT.md`, and
       `specs/REFACTOR-STATUS.md` are updated together as work lands.
-- [ ] User/operator/security documentation describes both guarantees and
+- [ ] User/operator/security documentation describes both properties and
       residual limits without overclaiming.
 
 ## Final implementation principle
@@ -1976,12 +1979,12 @@ Plan 329 is complete only when all of the following are true:
 ```text
 The AI chooses a desired topology.
 The signed snapshots define the legal topology.
-The transactional ledger proves capacity is available.
+The transactional ledger is to establish that capacity is available.
 The host or mvmd realizes the legal topology through ordinary admitted
 single-workload microVM launches.
 ```
 
 The workflow feature is successful only if a compromised controller can cause
 bad work inside its assigned partition but cannot make the partition larger,
-reach outside its authority domain, or weaken the isolation and audit guarantees
+reach outside its authority domain, or weaken the isolation and audit properties
 that direct `mvm` workloads already rely upon.

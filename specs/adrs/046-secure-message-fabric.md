@@ -1,4 +1,7 @@
-# ADR-043 — The secure message fabric is the local workload communication data plane
+# ADR-046 — The secure message fabric is the local workload communication data plane
+
+Backing: preview
+Validation: none — this is a proposed design; no code implements it and no test exercises it.
 
 **Status:** Proposed  
 **Date:** 2026-08-15  
