@@ -810,14 +810,23 @@ jobs:
         with:
           tool: nextest
 
+      # `mvm-fs` is excluded, and only on this lane. Its dev-dependency
+      # `am-fs-ext4` (the independent ext4 read oracle `tests/oracle.rs` and
+      # `tests/xattr.rs` check our writer against) does not compile for
+      # aarch64-linux: it assumes `c_char == i8`, which holds on x86_64-linux
+      # and on aarch64-*darwin* but not on aarch64-linux, where `c_char` is
+      # `u8`. That is upstream's bug, in a dev-only oracle, and it is load
+      # bearing on x86_64 — so the oracle stays an x86_64 oracle rather than
+      # being dropped. `mvm-fs`'s own library still builds here as a dependency
+      # of everything else; it is only its test targets that are skipped.
       - name: Build
-        run: cargo build --all-targets
+        run: cargo build --workspace --exclude mvm-fs --all-targets
 
       - name: Run tests
         # The workspace suite only. The arch-independent extras Test workspace
         # also runs (man pages, the addons feature, doctests) are covered on
         # x86_64 and would only duplicate cost here.
-        run: cargo nextest run --workspace --all-targets
+        run: cargo nextest run --workspace --exclude mvm-fs --all-targets
 
   test-release-witness:
     name: Test release profile (overflow + no debug assertions)
