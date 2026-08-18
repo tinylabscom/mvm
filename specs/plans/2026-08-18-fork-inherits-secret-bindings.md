@@ -1,7 +1,9 @@
 # A forked child gets its parent's secret bindings
 
 Backing: preview
-Validation: none — this is a proposed design; no code implements it and no test exercises it.
+Validation: W0 only — `parent_secret_names` and its three tests in
+`crates/mvm-cli/src/commands/vm/checkpoint.rs`. Options A and B are proposed
+design; no code implements them and no test exercises them.
 
 ## Status
 
@@ -12,7 +14,7 @@ build.** Option B (inherited from the checkpoint) is the more ergonomic design
 and is deliberately deferred — it is recorded so the decision is legible, not
 because it is queued.
 
-Nothing here is implemented.
+W0 (the diagnostic) is implemented. Nothing in Option A or Option B is.
 
 ## The gap
 
@@ -50,11 +52,25 @@ child that cannot reach anything, with no diagnostic — it presents as a networ
 fault, not a missing capability. That is a bad failure mode independent of
 which design wins, and fixing it needs no schema change:
 
-- [ ] W0 — when `admit_forked_child` drops a non-empty parent secret set, warn
-      with the dropped names; refuse under `--prod`. Test: a fork of a
-      secret-holding parent emits the diagnostic, and the `--prod` arm refuses.
+- [x] W0 — when a fork drops a non-empty parent secret set, warn with the
+      dropped names. Source of truth is the parent's **persisted plan**
+      (`plan_persist::read_plan(parent_meta.vm_name).secrets`), which
+      `bind_checkpoint_forked` already reads — so W0 needs no schema change and
+      does not depend on Option B's `CheckpointMeta` field.
 
 W0 is worth landing on its own, before either option below is chosen.
+
+**W0 warns; it does not refuse.** The plan originally said "refuse under
+`--prod`". There is no `--prod` on this path — a fork is *always* prod-profile
+(see the comment on `restrict_agent_verbs` in `admit_forked_child`), so the
+refusal has no flag to hang on, and making it unconditional would turn every
+existing fork of a secret-holding parent from degraded-but-working into a hard
+failure. Refusal belongs to Option A's world: once the child's bindings can be
+declared, refusing an *undeclared* drop is coherent. It is item A6 below.
+
+A caveat the diagnostic cannot avoid: an unreadable parent plan yields an empty
+set, so silence means "unknown", not "the parent held none". A fork of a parent
+whose plan file is gone warns about nothing.
 
 ## Why not simply copy the parent's plan
 
@@ -112,6 +128,9 @@ Work items:
       `stream_audit_entries_carry_the_binding_and_no_payload_bytes`.
 - [ ] A5 — HVF arm wired (`fork_vm_full_arm_hvf`); FC arm wired behind its
       existing `fc_vm_full_fork_experimental_enabled` gate, which stays.
+- [ ] A6 — refuse a fork that drops parent bindings the caller did not
+      re-declare, now that re-declaring is possible. This is W0's refusal arm,
+      deferred to here because it is incoherent before A1.
 
 ## Option B — inherited from the checkpoint (deferred)
 
