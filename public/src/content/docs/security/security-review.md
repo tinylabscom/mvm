@@ -45,7 +45,8 @@ unrestricted policy is an explicit, warned opt-in — never a default.
 
 ## 4. Can it discover or steal credentials?
 
-Raw secret values never enter the guest. The workload sees placeholders; the
+Raw secret values never enter the guest. <!-- allow(doc-claim:secret-non-leakage): backed by numbered claim 13 (no raw secret crosses the broker channel) plus preview claim 16, both named on the line below; the `secret-non-leakage` parity row stays Planned because it asserts more than those two do -->
+The workload sees placeholders; the
 host-side endpoint substitutes real credentials only into connections it
 originates, bound to destination and time. A credential scoped for one
 service cannot be replayed to another from inside the guest, because the
