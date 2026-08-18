@@ -14,8 +14,10 @@ plan. The record gains the D1 fields it was missing (`journal_cursor`,
 `approval_head`, `tier`, `park_reason`), plus `park()` / `resume()` transitions.
 A park keeps the generation; a *resume* opens generation+1, which is what fences
 a late frame addressed to the prior generation. Store-level operations
-compare-and-swap on the generation, so a caller holding a stale record cannot
-clobber a newer one. Every task here is unit-testable with no VM, no backend,
+refuse a caller whose expected generation no longer matches what is on disk, so
+a caller holding a superseded record cannot clobber a newer one. That is a
+check-then-act pair rather than a compare-and-swap: it fences a transition that
+already happened, not one racing it right now. Every task here is unit-testable with no VM, no backend,
 and no async.
 
 **Tech Stack:** Rust, `serde` / `serde_json`, `anyhow`, `thiserror`, `tempfile`,
@@ -550,9 +552,8 @@ git commit -m "feat(runtime): add park and resume transitions to the session rec
 - Consumes: everything from Tasks 1-3.
 - Produces: `AgentSessionStore::park`, `AgentSessionStore::resume`.
 
-**Why a fence:** two callers can hold the same record. Without a
-compare-and-swap on the generation, a caller holding a record from before a
-resume would park the session it thinks it has and silently discard the newer
+**Why a fence:** two callers can hold the same record. Without a generation
+check, a caller holding a record from before a resume would park the session it thinks it has and silently discard the newer
 residency. The store refuses when the on-disk generation is not the one the
 caller expected.
 
