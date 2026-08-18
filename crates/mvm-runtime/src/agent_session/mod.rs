@@ -270,6 +270,54 @@ impl AgentSessionStore {
         out.sort_by(|a, b| a.session_id.as_str().cmp(b.session_id.as_str()));
         Ok(out)
     }
+
+    /// Park a session, refusing if it has moved past `expected_generation`.
+    ///
+    /// The fence matters because two callers can hold the same record: without
+    /// it, a caller holding a pre-resume record would park the residency it
+    /// thinks is current and silently discard the newer one. The record is
+    /// written only after the transition is accepted, so a refused park leaves
+    /// what is on disk untouched.
+    pub fn park(
+        &self,
+        id: &AgentSessionId,
+        expected_generation: u64,
+        reason: ParkReason,
+        now_unix: u64,
+    ) -> Result<AgentSessionRecord> {
+        let current = self.load(id)?;
+        fence(&current, expected_generation)?;
+        let parked = current.park(reason, now_unix)?;
+        self.write(&parked)?;
+        Ok(parked)
+    }
+
+    /// Resume a session, refusing if it has moved past `expected_generation`.
+    pub fn resume(
+        &self,
+        id: &AgentSessionId,
+        expected_generation: u64,
+        now_unix: u64,
+    ) -> Result<AgentSessionRecord> {
+        let current = self.load(id)?;
+        fence(&current, expected_generation)?;
+        let live = current.resume(now_unix)?;
+        self.write(&live)?;
+        Ok(live)
+    }
+}
+
+/// Refuse an operation whose caller is working from a superseded record.
+fn fence(current: &AgentSessionRecord, expected: u64) -> Result<()> {
+    if current.generation != expected {
+        anyhow::bail!(
+            "session {} is at generation {}, not the expected {}",
+            current.session_id.as_str(),
+            current.generation,
+            expected
+        );
+    }
+    Ok(())
 }
 
 /// Write `bytes` to `path` via a temp in the same directory, then rename.
@@ -498,6 +546,77 @@ mod tests {
             serde_json::from_str::<StorageTier>(&tier).unwrap(),
             StorageTier::Parked
         );
+    }
+
+    #[test]
+    fn store_park_persists_the_transition() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = AgentSessionStore::at(tmp.path());
+        let rec = record("sess-alpha");
+        store.write(&rec).unwrap();
+
+        let parked = store
+            .park(&rec.session_id, 1, ParkReason::ApprovalWait, 1_755_000_100)
+            .unwrap();
+        assert_eq!(parked.state, SandboxResidency::Hibernated);
+        assert_eq!(
+            store.load(&rec.session_id).unwrap().park_reason,
+            Some(ParkReason::ApprovalWait)
+        );
+    }
+
+    #[test]
+    fn store_resume_persists_and_bumps_the_generation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = AgentSessionStore::at(tmp.path());
+        let rec = record("sess-alpha");
+        store.write(&rec).unwrap();
+        store
+            .park(&rec.session_id, 1, ParkReason::Idle, 1_755_000_100)
+            .unwrap();
+
+        let live = store.resume(&rec.session_id, 1, 1_755_000_200).unwrap();
+        assert_eq!(live.generation, 2);
+        assert_eq!(store.load(&rec.session_id).unwrap().generation, 2);
+    }
+
+    #[test]
+    fn a_stale_generation_cannot_park_a_session_that_moved_on() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = AgentSessionStore::at(tmp.path());
+        let rec = record("sess-alpha");
+        store.write(&rec).unwrap();
+        store
+            .park(&rec.session_id, 1, ParkReason::Idle, 100)
+            .unwrap();
+        store.resume(&rec.session_id, 1, 200).unwrap(); // now generation 2
+
+        // A caller still holding generation 1 must not be able to park it.
+        let err = store
+            .park(&rec.session_id, 1, ParkReason::Operator, 300)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("generation"), "unexpected error: {err}");
+        assert_eq!(
+            store.load(&rec.session_id).unwrap().state,
+            SandboxResidency::Active,
+            "the stale park must not have taken effect"
+        );
+    }
+
+    #[test]
+    fn a_refused_transition_leaves_the_stored_record_untouched() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = AgentSessionStore::at(tmp.path());
+        let rec = record("sess-alpha");
+        store.write(&rec).unwrap();
+
+        // Resuming an active session is refused; the record must be unchanged.
+        assert!(store.resume(&rec.session_id, 1, 400).is_err());
+        let after = store.load(&rec.session_id).unwrap();
+        assert_eq!(after.state, SandboxResidency::Active);
+        assert_eq!(after.generation, 1);
+        assert_eq!(after.updated_unix, rec.updated_unix);
     }
 
     #[test]
