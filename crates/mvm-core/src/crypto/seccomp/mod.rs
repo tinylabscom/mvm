@@ -8,7 +8,10 @@ pub mod syscall_table;
 /// Cumulative seccomp profile tiers. Each tier is a strict superset of the
 /// previous one, adding more syscall permissions for broader workload needs.
 ///
-/// The syscall lists target x86_64 Linux. Tier membership is defined by
+/// The syscall lists cover x86_64 and aarch64 Linux. A name that does not
+/// exist on the target arch is skipped when the filter is built, so a tier
+/// may name both a legacy syscall and its `*at` replacement; both are needed
+/// for the capability to survive on both arches. Tier membership is defined by
 /// [`SeccompTier::syscalls`], which returns the full set of allowed syscall
 /// names for that tier.
 #[derive(
@@ -342,6 +345,13 @@ fn minimal_extra() -> &'static [&'static str] {
         "epoll_create1",
         "epoll_ctl",
         "epoll_wait",
+        // aarch64 has no `epoll_wait`; glibc's `epoll_wait()` dispatches
+        // `epoll_pwait` there. Without this the entry above resolves to
+        // nothing on aarch64 and every epoll call in a confined role takes
+        // EPERM — the capability is granted on x86_64 and silently absent on
+        // ARM. Listing both names grants one capability on both, which is what
+        // the jailer's own table already does.
+        "epoll_pwait",
         "poll",
         "select",
         // Dir
