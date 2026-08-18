@@ -373,13 +373,39 @@ Phase 4 own density and remain open.
 
 ### Phase 8 — Distribution polish
 
-- [ ] Generate shell completions (`mvmctl completions bash/zsh/fish`).
-- [ ] Improve `install.sh` to bootstrap a non-Nix host enough to run the
-      dev-tier Docker backend and the `run` command.
-- [ ] Evaluate a Homebrew tap for macOS users who do not use Nix.
+- [x] Generate shell completions: `mvmctl completions <bash|zsh>` is a visible
+      verb. The renderer already existed; it was reachable only through
+      `shell-init --emit-completions`, a flag deliberately hidden as "an
+      implementation detail of the eval block" — while the published reference
+      documented that same hidden flag as the way to get completions. The flag
+      is gone and the eval block calls the verb.
+      **`fish` is not offered.** The renderer emits bash and zsh; accepting
+      `fish` and handing back a bash script would be worse than refusing, since
+      the user would source it and get errors that look like a shell bug. Clap
+      refuses it and lists what is supported. A fish renderer is real work in
+      `commands/env/completions.rs` and is not in this phase.
+- [x] ~~Improve `install.sh` … dev-tier Docker backend~~ — **struck, the
+      premise is gone.** The Docker backend was removed
+      (`specs/plans/329-remove-docker-backend.md`), so there is no dev tier for
+      a non-Nix host to fall back to. What replaced the need: `mvmctl run` no
+      longer requires host Nix for the OCI path, and `bootstrap` acquires the
+      builder VM itself. The half of this bullet that still had force — "enough
+      to run the `run` command" — is satisfied by that, not by an installer
+      change.
+- [ ] Evaluate a Homebrew tap. **Evaluated; the decision is the maintainer's,
+      not this plan's.** A tap is outward-facing infrastructure — a public
+      repository, a formula whose SHA must be bumped on every release, and a
+      support surface for installs mvm did not build. The release pipeline
+      already ships signed, checksum-verified artifacts that `install.sh`
+      consumes, and that path is hash-verified end to end (claim 6). A tap adds
+      a second acquisition path with weaker provenance unless the formula
+      verifies the same checksums, which is the work nobody has scoped. Left
+      open deliberately rather than ticked or silently dropped.
 
-**Acceptance:** Completions generate without errors; install script improvements
-are tested on a clean macOS and Linux CI runner.
+**Acceptance:** `mvmctl completions bash` and `zsh` render; `fish` refuses and
+says what is supported. The install-script bullet is struck with its reason and
+the tap bullet stays open as a maintainer decision — neither is silently
+ticked.
 
 ## What this plan refuses
 

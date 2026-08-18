@@ -1067,7 +1067,7 @@ running microVM.
 | Command | Description |
 |---------|-------------|
 | `mvmctl shell-init` | Print shell configuration (completions + dev aliases) to stdout |
-| `mvmctl shell-init --emit-completions <shell>` | Emit just the shell-completion script (replaces the dropped `mvmctl completions <shell>`) |
+| `mvmctl completions <bash\|zsh>` | Print a completion script. `shell-init`'s eval block calls this; the hidden `--emit-completions` flag it used to carry is gone |
 | `mvmctl ops metrics` | Show runtime metrics (Prometheus text format) |
 | `mvmctl ops metrics --json` | Show runtime metrics as JSON |
 | `mvmctl env uninstall` | Remove Firecracker, the builder microVM image, and all mvm state (confirmation required) |
