@@ -76,7 +76,7 @@ pub struct AgentSessionRecord {
     pub approval_head: Option<mvm_core::checkpoint::ApprovalHead>,
     /// Where the parked state lives. `None` while the session is active.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tier: Option<StorageTier>,
+    pub storage_tier: Option<StorageTier>,
     /// Why the session was parked. `None` while the session is active.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub park_reason: Option<ParkReason>,
@@ -107,7 +107,7 @@ impl AgentSessionRecord {
         }
         Ok(Self {
             state: SandboxResidency::Hibernated,
-            tier: Some(select_tier(reason)),
+            storage_tier: Some(select_tier(reason)),
             park_reason: Some(reason),
             updated_unix: now_unix,
             ..self.clone()
@@ -127,7 +127,7 @@ impl AgentSessionRecord {
         Ok(Self {
             state: SandboxResidency::Active,
             generation: self.generation + 1,
-            tier: None,
+            storage_tier: None,
             park_reason: None,
             updated_unix: now_unix,
             ..self.clone()
@@ -217,19 +217,19 @@ impl AgentSessionStore {
 
     /// Write a record, replacing any prior one for the same session.
     ///
-    /// Writes to a temp beside the destination and renames over it, so a crash
-    /// mid-write leaves the previous complete record rather than a truncated
-    /// one. The record is what a session's durability rests on — a memory image
-    /// may be reaped, but losing the record loses the session.
+    /// Goes through the workspace's shared `mvm_core::atomic_io::atomic_write`
+    /// — the same helper `warm_artifacts.rs`, `vm/template/lifecycle/registry_sync.rs`,
+    /// and `vm/name_registry.rs` already use — rather than a private copy: it
+    /// writes to a fresh per-call temp file (so two concurrent writers of the
+    /// same session never share one temp path and clobber each other), then
+    /// flushes and `fdatasync`s before renaming into place, so a crash mid-write
+    /// leaves the previous complete record rather than a truncated one. The
+    /// record is what a session's durability rests on — a memory image may be
+    /// reaped, but losing the record loses the session.
     pub fn write(&self, record: &AgentSessionRecord) -> Result<()> {
         let path = self.record_path(&record.session_id);
-        let dir = path
-            .parent()
-            .expect("record path always has a parent directory");
-        std::fs::create_dir_all(dir)
-            .with_context(|| format!("create session dir {}", dir.display()))?;
         let json = serde_json::to_vec_pretty(record).context("serialize session record")?;
-        write_then_rename(&path, &json)
+        mvm_core::atomic_io::atomic_write(&path, &json)
     }
 
     /// Load one record. An absent or malformed record is an error, never a
@@ -341,21 +341,6 @@ fn fence(current: &AgentSessionRecord, expected: u64) -> Result<()> {
     Ok(())
 }
 
-/// Write `bytes` to `path` via a temp in the same directory, then rename.
-///
-/// Kept private to this module deliberately. The same pattern is inlined at
-/// many other call sites in this workspace; consolidating them is worth doing
-/// but is not this module's job, and adding another public copy would make the
-/// eventual consolidation harder rather than easier.
-fn write_then_rename(path: &Path, bytes: &[u8]) -> Result<()> {
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, bytes)
-        .with_context(|| format!("write session record temp {}", tmp.display()))?;
-    std::fs::rename(&tmp, path)
-        .with_context(|| format!("rename session record into {}", path.display()))?;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -372,7 +357,7 @@ mod tests {
             updated_unix: 1_755_000_000,
             journal_cursor: 0,
             approval_head: None,
-            tier: None,
+            storage_tier: None,
             park_reason: None,
         }
     }
@@ -457,7 +442,7 @@ mod tests {
             "a park suspends a residency, it does not end one"
         );
         assert_eq!(parked.park_reason, Some(ParkReason::ApprovalWait));
-        assert_eq!(parked.tier, Some(StorageTier::Parked));
+        assert_eq!(parked.storage_tier, Some(StorageTier::Parked));
         assert_eq!(parked.updated_unix, 1_755_000_100);
     }
 
@@ -470,7 +455,7 @@ mod tests {
         assert_eq!(live.state, SandboxResidency::Active);
         assert_eq!(live.generation, 2, "a resume opens a new residency");
         assert_eq!(live.park_reason, None);
-        assert_eq!(live.tier, None);
+        assert_eq!(live.storage_tier, None);
         assert_eq!(live.updated_unix, 1_755_000_200);
     }
 
@@ -524,7 +509,7 @@ mod tests {
         let parsed: AgentSessionRecord = serde_json::from_str(old).unwrap();
         assert_eq!(parsed.journal_cursor, 0);
         assert_eq!(parsed.approval_head, None);
-        assert_eq!(parsed.tier, None);
+        assert_eq!(parsed.storage_tier, None);
         assert_eq!(parsed.park_reason, None);
     }
 
@@ -641,26 +626,25 @@ mod tests {
     }
 
     #[test]
-    fn a_write_leaves_no_partial_record_when_a_stale_temp_exists() {
+    fn a_write_succeeds_and_loads_correctly_despite_stale_temp_debris() {
         let tmp = tempfile::tempdir().unwrap();
         let store = AgentSessionStore::at(tmp.path());
         let rec = record("sess-alpha");
         store.write(&rec).unwrap();
 
-        // Simulate a crashed prior write: a leftover temp beside the record.
+        // Simulate debris from an unrelated crashed writer: a leftover
+        // fixed-name temp file beside the record. The shared atomic-write
+        // helper names its own per-call temp file via `tempfile`, so this
+        // file is never the one a write touches — this only proves that
+        // stray debris sitting in the session directory does not stop a
+        // later write from succeeding and loading back the right record.
         let dir = tmp.path().join("sess-alpha");
         std::fs::write(dir.join("session.json.tmp"), b"{ truncated").unwrap();
 
-        // A subsequent write must still succeed and must leave the record
-        // readable, not the debris.
         let mut next = rec.clone();
         next.generation = 2;
         store.write(&next).unwrap();
         assert_eq!(store.load(&rec.session_id).unwrap().generation, 2);
-        assert!(
-            !dir.join("session.json.tmp").exists(),
-            "the temp must be renamed away, not left beside the record"
-        );
     }
 
     #[test]
@@ -695,5 +679,36 @@ mod tests {
         value["parent_checkpoint"] = serde_json::json!("not-a-checkpoint-digest");
         let json = serde_json::to_string(&value).unwrap();
         assert!(serde_json::from_str::<AgentSessionRecord>(&json).is_err());
+    }
+
+    #[test]
+    fn park_then_resume_carries_the_resume_point_through_unchanged() {
+        // A fixture with every resume-critical field non-default: an empty
+        // `parent_checkpoint`/`journal_cursor`/`approval_head` would let a
+        // transition that dropped one of them pass the rest of the suite
+        // silently. `park` only touches `state`/`storage_tier`/`park_reason`/
+        // `updated_unix`, and `resume` only touches `state`/`generation`/
+        // `storage_tier`/`park_reason`/`updated_unix` — neither transition has
+        // any business rewriting the resume point itself.
+        let mut rec = record("sess-alpha");
+        rec.parent_checkpoint = Some(
+            mvm_core::checkpoint::CheckpointDigest::parse(format!("sha256:{}", "cd".repeat(32)))
+                .unwrap(),
+        );
+        rec.journal_cursor = 42;
+        rec.approval_head = Some(
+            mvm_core::checkpoint::ApprovalHead::parse(format!("sha256:{}", "ab".repeat(32)))
+                .unwrap(),
+        );
+
+        let parked = rec.park(ParkReason::ApprovalWait, 100).unwrap();
+        assert_eq!(parked.parent_checkpoint, rec.parent_checkpoint);
+        assert_eq!(parked.journal_cursor, rec.journal_cursor);
+        assert_eq!(parked.approval_head, rec.approval_head);
+
+        let resumed = parked.resume(200).unwrap();
+        assert_eq!(resumed.parent_checkpoint, rec.parent_checkpoint);
+        assert_eq!(resumed.journal_cursor, rec.journal_cursor);
+        assert_eq!(resumed.approval_head, rec.approval_head);
     }
 }
