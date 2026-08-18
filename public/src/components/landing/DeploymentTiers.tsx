@@ -85,8 +85,16 @@ export function DeploymentTiers() {
         ))}
       </div>
       <p className="mt-5 font-mono text-xs leading-relaxed text-label">
-        Local runs today with the open-source CLI. What&rsquo;s enforced right
-        now — with named test witnesses — is in the{" "}
+        Local runs today with the open-source CLI. Tier status is tracked on
+        the{" "}
+        <a
+          href={`${base}security/capability-status/`}
+          className="text-accent underline underline-offset-2 hover:text-accent/80"
+        >
+          capability status
+        </a>{" "}
+        page; what&rsquo;s enforced right now — with named test witnesses — is
+        in the{" "}
         <a
           href={`${base}security/ci-claims/`}
           className="text-accent underline underline-offset-2 hover:text-accent/80"

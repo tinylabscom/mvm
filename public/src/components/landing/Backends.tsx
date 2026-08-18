@@ -14,6 +14,9 @@ const BACKENDS = [
 ];
 
 export function Backends() {
+  const rawBase = import.meta.env.BASE_URL;
+  const base = rawBase.endsWith("/") ? rawBase : `${rawBase}/`;
+
   return (
     <Section id="backends" rule>
       <Reveal>
@@ -46,6 +49,16 @@ export function Backends() {
           </Reveal>
         ))}
       </div>
+      <p className="mt-5 font-mono text-xs leading-relaxed text-label">
+        Shipped, preview, and roadmap capabilities are tracked on the{" "}
+        <a
+          href={`${base}security/capability-status/`}
+          className="text-accent underline underline-offset-2 hover:text-accent/80"
+        >
+          capability status
+        </a>{" "}
+        page.
+      </p>
     </Section>
   );
 }
