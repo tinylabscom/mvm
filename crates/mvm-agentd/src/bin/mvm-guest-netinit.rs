@@ -57,13 +57,27 @@ fn main() {
     // (e.g. a network:None workload with no eth0) logs and continues to the
     // blackhole install — a no-egress guest is degraded, not a hard failure.
     let cmdline = std::fs::read_to_string("/proc/cmdline").unwrap_or_default();
-    if let Err(e) =
-        mvm_agentd::guest_net::configure_guest_network("eth0", &cmdline, "192.168.127.2")
-    {
-        eprintln!(
-            "mvm-guest-netinit: guest network bring-up failed: {e} \
-             (continuing — guest may have no egress)"
-        );
+    match mvm_agentd::guest_net::configure_guest_network("eth0", &cmdline, "192.168.127.2") {
+        Ok(mvm_agentd::guest_net::GuestNetwork::Configured) => {}
+        // Not a failure. Every workload backend boots the guest with a
+        // virtio-vsock device and no net device at all, so eth0 is *supposed*
+        // to be absent here — egress leaves over vsock to the host-side
+        // substitution endpoint. Reporting the invariant as a bring-up failure
+        // the guest is "continuing" past described a healthy sealed workload
+        // as a degraded one, and sent people looking for broken networking
+        // that was working as designed.
+        Ok(mvm_agentd::guest_net::GuestNetwork::NoInterface) => {
+            eprintln!(
+                "mvm-guest-netinit: no eth0 — this guest is NIC-less by design; \
+                 egress leaves over vsock"
+            );
+        }
+        Err(e) => {
+            eprintln!(
+                "mvm-guest-netinit: guest network bring-up failed: {e} \
+                 (continuing — guest may have no egress)"
+            );
+        }
     }
 
     let report = match mvm_agentd::netinit::install_mandatory_deny_via_netlink() {
