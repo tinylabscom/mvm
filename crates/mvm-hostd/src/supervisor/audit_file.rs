@@ -1216,6 +1216,106 @@ fn usable_resume(checkpoint: Option<&ChainCheckpoint>, total_lines: usize) -> Op
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    mod highest_sealed_segment_tests {
+        use super::super::highest_sealed_segment;
+        use mvm_core::config::audit_segment_file_name;
+
+        /// Write the named segments and return the directory holding them.
+        fn dir_with(base: &str, seqs: &[u64]) -> tempfile::TempDir {
+            let dir = tempfile::tempdir().expect("tempdir");
+            for seq in seqs {
+                std::fs::write(
+                    dir.path().join(audit_segment_file_name(base, *seq)),
+                    b"{}\n",
+                )
+                .expect("write segment");
+            }
+            dir
+        }
+
+        /// The point of the function: the *highest* sequence wins.
+        ///
+        /// This kills a sign flip (`>` becoming `<`) but deliberately does not
+        /// claim to kill `>` becoming `==`. Under `==` the function keeps
+        /// whatever `read_dir` yields first, and `read_dir` order is
+        /// unspecified — a test asserting otherwise would pass or fail on the
+        /// filesystem's whim, which is worse than not asserting it. That
+        /// mutant is declared an accepted miss with the reason spelled out.
+        #[test]
+        fn the_highest_sequence_wins_not_the_lowest() {
+            let dir = dir_with("local", &[3, 1, 7, 2]);
+            let (seq, path) = highest_sealed_segment(dir.path(), "local")
+                .expect("scan")
+                .expect("a segment exists");
+            assert_eq!(seq, 7);
+            assert!(path.ends_with(audit_segment_file_name("local", 7)));
+        }
+
+        /// One segment is the degenerate case the comparison never runs on.
+        #[test]
+        fn a_lone_segment_is_the_highest() {
+            let dir = dir_with("local", &[4]);
+            let (seq, _) = highest_sealed_segment(dir.path(), "local")
+                .expect("scan")
+                .expect("a segment exists");
+            assert_eq!(seq, 4);
+        }
+
+        /// A tenant whose name prefixes another must not adopt its segments —
+        /// `local` and `local-two` share a prefix but not a chain.
+        #[test]
+        fn segments_of_a_similarly_named_tenant_are_not_adopted() {
+            let dir = dir_with("local", &[2]);
+            std::fs::write(
+                dir.path().join(audit_segment_file_name("local-two", 9)),
+                b"{}\n",
+            )
+            .expect("write other tenant");
+
+            let (seq, _) = highest_sealed_segment(dir.path(), "local")
+                .expect("scan")
+                .expect("a segment exists");
+            assert_eq!(seq, 2, "9 belongs to local-two");
+        }
+
+        #[test]
+        fn an_empty_directory_has_no_sealed_segment() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            assert!(
+                highest_sealed_segment(dir.path(), "local")
+                    .expect("scan")
+                    .is_none()
+            );
+        }
+
+        /// A missing directory is not an error — a chain that never rotated
+        /// has no segment directory to read.
+        #[test]
+        fn a_missing_directory_reports_no_segment_rather_than_failing() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let gone = dir.path().join("never-created");
+            assert!(
+                highest_sealed_segment(&gone, "local")
+                    .expect("scan")
+                    .is_none()
+            );
+        }
+
+        /// Files that are not segments of this chain are skipped, including
+        /// the active chain file itself.
+        #[test]
+        fn non_segment_files_are_ignored() {
+            let dir = dir_with("local", &[1]);
+            for junk in ["local.jsonl", "local.seg-notanumber.jsonl", "README.md"] {
+                std::fs::write(dir.path().join(junk), b"x").expect("write junk");
+            }
+            let (seq, _) = highest_sealed_segment(dir.path(), "local")
+                .expect("scan")
+                .expect("a segment exists");
+            assert_eq!(seq, 1);
+        }
+    }
     use rand::Rng;
 
     use chrono::Utc;
