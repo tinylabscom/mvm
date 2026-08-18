@@ -205,6 +205,23 @@ pub struct DeviceAnchors {
     pub vsock: std::path::PathBuf,
 }
 
+/// The durable agent session a checkpoint is a resume point for.
+///
+/// `generation` fences a resume: reopening a parked session increments it, so a
+/// frame addressed to an earlier generation is refused rather than delivered
+/// into a successor. `journal_cursor` is the session-journal position the
+/// capture is consistent with, and `approval_head` names the approval-ledger
+/// state the capture was admitted under — a resume bounds its fresh grants
+/// against that head rather than against whatever the ledger holds later.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionBinding {
+    pub session_id: mvm_contract::protocol::agent_session::AgentSessionId,
+    pub generation: u64,
+    pub journal_cursor: u64,
+    pub approval_head: CheckpointDigest,
+}
+
 /// On-disk metadata for one checkpoint (`<checkpoints_dir>/<id>/meta.json`).
 ///
 /// `parent` hash-links to the parent checkpoint's `meta_digest` (its
@@ -897,5 +914,28 @@ mod tests {
         // rejected there — a second, independent illustration of unrelated
         // types with coincidentally similar cousins.
         assert!(crate::packs::Sha256Hex::new(digest.as_str().to_string()).is_err());
+    }
+
+    fn test_binding() -> SessionBinding {
+        SessionBinding {
+            session_id: mvm_contract::protocol::agent_session::AgentSessionId::parse(
+                "sess-incident-42",
+            )
+            .unwrap(),
+            generation: 3,
+            journal_cursor: 118,
+            approval_head: CheckpointDigest::parse(format!("sha256:{}", "cd".repeat(32))).unwrap(),
+        }
+    }
+
+    #[test]
+    fn session_binding_roundtrips_and_denies_unknown() {
+        let binding = test_binding();
+        let json = serde_json::to_string(&binding).unwrap();
+        let back: SessionBinding = serde_json::from_str(&json).unwrap();
+        assert_eq!(binding, back);
+
+        let with_extra = json.replace('{', "{\"surprise\":1,");
+        assert!(serde_json::from_str::<SessionBinding>(&with_extra).is_err());
     }
 }
