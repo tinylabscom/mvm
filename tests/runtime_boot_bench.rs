@@ -59,12 +59,43 @@ const DEFAULT_READY: ReadySignal = ReadySignal::GuestAgent;
 const READY_TIMEOUT: Duration = Duration::from_secs(5);
 const READY_POLL: Duration = Duration::from_millis(5);
 
+/// Establish the ambient host state a real boot needs, and that a fresh
+/// machine does not have.
+///
+/// Admission mints the host signing key on demand (`load_or_init`), but the
+/// boot path also spawns the per-tenant host-agent daemon, and *that* reads the
+/// key with a plain `std::fs::read` — deliberately, since silently minting a
+/// signing key inside a spawn path would be worse than failing. So on a host
+/// that has never signed anything, the VM boots and the bench then dies with
+/// `read host signer key …: No such file or directory`, several minutes into a
+/// release run.
+///
+/// Doing it here rather than in the workflow keeps the bench runnable the same
+/// way locally and in CI, and immune to step reordering. `load_or_init` is
+/// idempotent, so an existing key is reused rather than rotated — which matters:
+/// rotating would orphan any audit chain already signed under the old key.
+fn ensure_host_signer_key() -> Result<()> {
+    ensure_host_signer_key_at(&mvm_core::config::mvm_keys_dir())
+}
+
+/// [`ensure_host_signer_key`] against an explicit keys directory, so the
+/// behaviour can be exercised without touching the ambient `MVM_HOME`.
+fn ensure_host_signer_key_at(keys_dir: &Path) -> Result<()> {
+    mvm_hostd::audit::host_keypair::load_or_init_at(keys_dir)
+        .context("initialize the host signer key the boot path requires")?;
+    Ok(())
+}
+
 #[test]
 fn prebuilt_runtime_image_boots_within_budget() -> Result<()> {
     let Some(spec) = BenchSpec::from_env()? else {
         eprintln!("[runtime_boot_bench] skipped; set {ENABLE_VAR}=1 to run the live benchmark");
         return Ok(());
     };
+
+    // After the skip check on purpose: a bench that is not running must not
+    // leave a signing key behind on a developer's machine.
+    ensure_host_signer_key()?;
 
     let serial = measure_serial(&spec)?;
     let serial_summary = summarize(&serial);
@@ -790,5 +821,37 @@ fn the_default_policy_emits_no_overlay_device_token() {
     assert!(
         !cmdline.unwrap_or_default().contains("mvm.runtime_data="),
         "RootfsOnly must not name an overlay device; the bug was that it names none"
+    );
+}
+
+/// The precondition must actually produce the key the boot path reads, and must
+/// not rotate one that already exists.
+///
+/// Pins the fix for a release-blocking failure: the boot-latency lane booted a
+/// VM and then died on a missing host signer key, because nothing in the lane
+/// had ever signed anything.
+#[test]
+fn ensure_host_signer_key_creates_the_key_and_is_idempotent() {
+    let keys = tempfile::tempdir().expect("tempdir");
+    let key = keys
+        .path()
+        .join(mvm_hostd::audit::host_keypair::SECRET_FILENAME);
+    assert!(!key.exists(), "fixture starts without a key");
+
+    ensure_host_signer_key_at(keys.path()).expect("mint the key");
+    assert!(
+        key.exists(),
+        "the boot path reads this key with a plain read, so the precondition \
+         must create it: {}",
+        key.display()
+    );
+    let first = std::fs::read(&key).expect("read minted key");
+
+    ensure_host_signer_key_at(keys.path()).expect("second call is a no-op");
+    let second = std::fs::read(&key).expect("re-read key");
+    assert_eq!(
+        first, second,
+        "rotating an existing key would orphan any audit chain already signed \
+         under it"
     );
 }
