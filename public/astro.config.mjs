@@ -187,6 +187,7 @@ export default defineConfig({
           label: "Security",
           items: [
             { label: "Capability status", slug: "security/capability-status" },
+            { label: "The security review", slug: "security/security-review" },
             { label: "Matryoshka Model", slug: "security/matryoshka" },
             { label: "Security claim ledger", slug: "security/claim-ledger" },
             { label: "Threat model", slug: "security/threat-model" },

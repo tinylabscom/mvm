@@ -1,5 +1,6 @@
 import { useEffect } from "react";
 import { Backends } from "./Backends";
+import { ExecutionContract } from "./ExecutionContract";
 import { Hero } from "./Hero";
 import { Quickstart } from "./Quickstart";
 import { DemoTeaser } from "./DemoTeaser";
@@ -31,6 +32,10 @@ import { Footer } from "./Footer";
 //                         just seen how you *use* mvm, so this is where
 //                         "here's what you're actually getting" lands
 //                         hardest.
+//   6c. Execution contract — the composition argument: isolation is table
+//                         stakes, the six-layer contract around the box is
+//                         the differentiator. Directly after the boundary
+//                         section so it reads as the escalation of it.
 //   6a. Deployment tiers — "one contract, four places to run it": the
 //                         product-site tier grid (local / hosted / edge /
 //                         confidential), after the case for the boundary
@@ -62,6 +67,7 @@ export function Landing() {
       <Quickstart />
       <Positioning />
       <WhyMicrovm />
+      <ExecutionContract />
       <DeploymentTiers />
       <Backends />
       <FAQ />

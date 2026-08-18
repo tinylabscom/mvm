@@ -121,11 +121,11 @@ export function Hero() {
 
             <Reveal delay={120}>
               <p className="font-display text-xl font-semibold leading-snug text-title sm:text-2xl">
-                Infra for the next‑gen AI stack.
+                Agent execution a security team can approve.
               </p>
               <p className="mt-2 max-w-[46ch] text-base leading-relaxed text-body">
-                Hardened microVMs. Sub-150&nbsp;ms boot. Configurable to the
-                kernel.
+                Hardened microVMs under a signed execution contract.
+                Sub-150&nbsp;ms boot. Configurable to the kernel.
               </p>
             </Reveal>
 
