@@ -28,7 +28,9 @@ export function CTABanner() {
             <h2 className="text-balance lowercase font-display text-2xl font-bold leading-tight text-title sm:text-3xl">
               run something you don&rsquo;t trust.
             </h2>
-            <p className="mx-auto mt-4 max-w-sm text-base leading-relaxed text-body">
+            {/* No max-width cap: the sentence should sit on one line at
+                desktop sizes; it still wraps naturally on narrow screens. */}
+            <p className="mt-4 text-base leading-relaxed text-body">
               One install command. No daemon, no SSH, and no network until
               policy admits it.
             </p>
