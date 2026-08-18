@@ -37,6 +37,23 @@ on:
 permissions:
   contents: read
 
+# These have to match ci.yml's workflow-level `env:` exactly, and the reason is
+# not cosmetic. `Swatinem/rust-cache` folds every environment variable whose
+# name begins with CARGO/CC/CFLAGS/CXX/CMAKE/RUST into the hash it keys the
+# cache on, and its restore-key list stops at that hash — there is no bare
+# prefix to fall back to. So a job that sets `RUSTFLAGS: "-D warnings"` cannot
+# restore an entry written by a job that did not, no matter how identical the
+# lockfile and toolchain are. This workflow had no `env:` block at all, so the
+# one entry every other lane depends on was written under a key none of them
+# ever computes, and every CI job cold-built.
+#
+# It is also the correct cache to write on the merits: `-D warnings` is part of
+# how the artifacts are compiled, so an entry built without it is not the one
+# the consuming lanes want.
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
 # One warm at a time. Merges can land faster than a build completes, and the
 # newest main is the one worth caching — but let an in-flight build finish
 # rather than cancelling, since a half-built target dir caches nothing useful.
@@ -86,10 +103,9 @@ jobs:
           components: clippy
 
       - name: Install system build deps
-        run: |
-          sudo rm -f /etc/apt/sources.list.d/microsoft*.list /etc/apt/sources.list.d/azure*.list
-          sudo apt-get update
-          sudo apt-get install -y attr cryptsetup-bin libcap-ng-dev lld
+        uses: ./.github/actions/apt-deps
+        with:
+          packages: attr cryptsetup-bin lld
 
       - uses: ./.github/actions/install-zigbuild
 
