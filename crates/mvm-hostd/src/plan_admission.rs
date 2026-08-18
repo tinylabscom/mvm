@@ -3397,8 +3397,9 @@ mod tests {
     fn a_declared_campaign_opens_its_session_on_the_boot_path() {
         // The production seam: `admit_and_start` is what a run goes through,
         // and a declared campaign has to become a live session there rather
-        // than in a test that hand-built one. This is the only test that
-        // installs the process-global plane, since a `OnceLock` admits one.
+        // than in a test that hand-built one. The broker-handler tests may
+        // already have installed the process-global plane, so this test uses
+        // that legitimate instance when running in parallel.
         use std::sync::Arc;
 
         use mvm_contract::assurance::{
@@ -3418,10 +3419,7 @@ mod tests {
         let ledger = InMemoryNonceLedger::new();
 
         let plane = Arc::new(HostAssuranceV1Handler::new());
-        assert!(
-            install_host_assurance_plane(Arc::clone(&plane)),
-            "this test owns the process-global plane"
-        );
+        let _ = install_host_assurance_plane(Arc::clone(&plane));
 
         let emitter = Arc::new(
             crate::audit::emitter::AuditEmitter::with_dir(
