@@ -295,16 +295,32 @@ admission.
 
 ### Phase 6 — Agent integration (MCP / plugins)
 
-- [ ] Revive a thin MCP server surface, scoped to **dev-only** sandbox
-      execution (production workloads remain admission-only and non-interactive).
-- [ ] Add `mvmctl plugin install {claude,codex,gemini,opencode,mcp}` that emits
-      the minimal config/skill files each agent needs.
-- [ ] Expose a small tool set: `run_command`, `create_sandbox`, `exec_in_sandbox`,
-      `list_sandboxes`, `stop_sandbox`.
-- [ ] Add BDD scenarios for agent tool use and receipt verification.
+- [x] **Refused, deliberately.** [ADR-002](../adrs/002-local-mcp-server.md)
+      shipped a local MCP server and withdrew it as "a surface nobody drove …
+      duplicated authority that the CLI's JSON output and the SDKs already
+      expose". That reasoning still holds, so rebuilding it identically would
+      fail identically. ADR-002 stays withdrawn and
+      `xtask check-workflow-paths`'s `removed_mcp_server_stays_out_of_ci` stays
+      in force. The distribution problem it was reached for — getting agents to
+      use mvm — is solved below without a protocol layer.
+- [x] Add `mvmctl plugin install <agent>` emitting the files an agent needs.
+      **Claude Code only.** Emitting a config for an agent whose schema was
+      guessed at produces a file that looks installed and does nothing, so only
+      a format that can be verified is offered; `plugin list` names what that
+      is.
+- [x] The tool set is the CLI. `mvmctl run` already covers `run_command`, and
+      `machine create/exec/ls/stop` the rest — each admitting through a signed
+      plan and auditing itself. A parallel tool surface would be a second name
+      for each.
+- [x] Covered by unit tests instead, and more sharply than a scenario would:
+      every flag and every command the emitted skill names is resolved against
+      the real clap tree, so the skill cannot tell an agent to type something
+      that does not exist. Both mutation-checked red.
 
-**Acceptance:** Claude Code can `/sandbox python3 script.py` and the call is
-audited like any other run.
+**Acceptance:** `mvmctl plugin install claude` writes a skill that tells Claude
+Code to sandbox untrusted commands through `mvmctl run` — which is audited like
+any other run, because it *is* any other run. No `/sandbox` command and no
+server: the skill shells to the CLI.
 
 ### Phase 7 — Observability and performance
 

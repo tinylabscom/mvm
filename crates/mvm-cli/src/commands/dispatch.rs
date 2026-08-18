@@ -24,6 +24,7 @@ impl TopLevelCommand for Commands {
             Commands::Explain(a) => vm::explain::run(a),
             Commands::Run(a) => vm::exec::run_transient(cli, a, cfg),
             Commands::Bench(a) => bench::run(a),
+            Commands::Plugin(a) => plugin::run(a),
             Commands::SdkNoVm(a) => vm::sdk_no_vm::run(&a),
             Commands::Doctor(a) => env::doctor::run(cli, a, cfg),
             Commands::Dashboard(a) => dashboard::run(a),
