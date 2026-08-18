@@ -171,6 +171,20 @@ fn handle_client(
     let mut session =
         match AuthenticatedSession::guest(&mut file, guest_signing_key.clone(), &host_signer_key) {
             Ok(session) => session,
+            // A peer that hangs up part-way through the handshake did not fail
+            // to authenticate — it produced no signature at all, and the read
+            // hit end-of-stream. On this socket that is the host's readiness
+            // poll, which connects on a backoff while the guest boots and drops
+            // each probe once it has its answer. Reporting it as a failed
+            // authentication put a security-relevant line on every healthy
+            // boot, which is how a real one gets skipped.
+            Err(error) if error.is_peer_hangup() => {
+                eprintln!(
+                    "mvm-guest-agent: control peer disconnected before completing the \
+                     handshake (readiness probe); no session opened"
+                );
+                return;
+            }
             Err(error) => {
                 eprintln!("mvm-guest-agent: authenticated control handshake failed: {error}");
                 return;
