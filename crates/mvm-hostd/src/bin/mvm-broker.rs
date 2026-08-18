@@ -121,7 +121,7 @@ fn main() -> Result<()> {
 /// leaves the registry without that handler; callers get
 /// `Err(NotBound)` for the missing service.
 fn register_handlers(registry: &mut Registry, cfg: &SubprocessConfig) {
-    register_bound_handlers(registry, &cfg.services_bindings);
+    let _bound = register_bound_handlers(registry, &cfg.services_bindings);
     let host_audit = mvm_core::protocol::broker::ServiceId::parse("host.audit.v1")
         .expect("host.audit.v1 is a valid ServiceId");
     if !cfg.services_bindings.contains(&host_audit) {
