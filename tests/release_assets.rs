@@ -441,14 +441,21 @@ fn the_two_release_trains_cannot_fire_each_other() {
     );
 }
 
-/// The protected environment survives the move.
+/// The protected environment survives the move, and it is the boot image
+/// train's own.
 ///
 /// It is what constrains which ref can mint a keyless signing identity. Losing
 /// it does not fail the job: the signing step is `continue-on-error: true`, so
 /// a broken identity means the pack quietly stops shipping and everything else
 /// looks green. Nothing else would notice.
+///
+/// Naming the *wrong* environment fails far louder but just as opaquely. This
+/// workflow fires on `boot-image/v*` and asked for `release-signing`, whose
+/// policy admits `v*` and nothing else — GitHub tag globs anchor at the start
+/// and do not cross `/`. Every gated job was refused one second in, with no
+/// steps run and nothing in the log to read.
 #[test]
-fn boot_image_jobs_use_the_boot_image_signing_environment() {
+fn the_moved_jobs_keep_the_boot_image_signing_environment() {
     let boot_image = boot_image_workflow();
     // The two jobs that cosign-sign a pack manifest inside the job itself.
     for job in ["builder-vm-image", "default-microvm"] {
@@ -460,15 +467,17 @@ fn boot_image_jobs_use_the_boot_image_signing_environment() {
         );
         assert!(
             block.contains("    environment: boot-image-signing\n"),
-            "{job} must use the boot-image protected environment, or its \
-             boot-image tag cannot mint a keyless signing identity"
+            "{job} must keep `environment: boot-image-signing`, or its keyless \
+             signing identity silently stops being mintable. It must be that \
+             environment and not `release-signing`: this workflow's tags are \
+             `boot-image/v*`, which a `v*` policy refuses outright"
         );
     }
     // The publish job signs the checksum manifests every downloader anchors on.
     assert!(
         job_block(&boot_image, "publish-boot-image")
             .contains("    environment: boot-image-signing\n"),
-        "the boot image publish job signs, so it needs the boot-image environment"
+        "the boot image publish job signs, so it needs the same environment"
     );
     assert!(
         boot_image.contains("id-token: write"),

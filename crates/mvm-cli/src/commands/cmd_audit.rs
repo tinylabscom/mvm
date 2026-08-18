@@ -209,6 +209,7 @@ impl Commands {
             #[cfg(feature = "builder-vm")]
             Commands::BuilderShellJob(_) => "__builder-shell-job",
             Commands::Explain(_) => "explain",
+            Commands::Bench(_) => "bench",
             Commands::Run(_) => "run",
             Commands::SdkNoVm(_) => "__sdk-no-vm",
             Commands::Doctor(_) => "doctor",

@@ -64,6 +64,13 @@ jobs:
     # releases use the matching protected environment instead.
     environment: boot-image-signing
     strategy:
+      # One arch's build must not cancel the other's. The sibling is a separate
+      # artifact, and a transient failure on one runner used to take the other
+      # down before it produced anything — which then read as two broken arches.
+      # Publishing is still all-or-nothing: the completeness gate below refuses
+      # a partial set, so letting both finish costs nothing and tells the truth
+      # about which one actually failed.
+      fail-fast: false
       matrix:
         include:
           - arch: aarch64
@@ -256,6 +263,13 @@ jobs:
     # Skipped on a dry-run dispatch (see builder-vm-image).
     if: ${{ github.event_name == 'push' || github.event.inputs.dry_run == 'false' }}
     strategy:
+      # One arch's build must not cancel the other's. The sibling is a separate
+      # artifact, and a transient failure on one runner used to take the other
+      # down before it produced anything — which then read as two broken arches.
+      # Publishing is still all-or-nothing: the completeness gate below refuses
+      # a partial set, so letting both finish costs nothing and tells the truth
+      # about which one actually failed.
+      fail-fast: false
       matrix:
         include:
           - arch: aarch64
@@ -327,6 +341,13 @@ jobs:
     # Skipped on a dry-run dispatch (see builder-vm-image).
     if: ${{ github.event_name == 'push' || github.event.inputs.dry_run == 'false' }}
     strategy:
+      # One arch's build must not cancel the other's. The sibling is a separate
+      # artifact, and a transient failure on one runner used to take the other
+      # down before it produced anything — which then read as two broken arches.
+      # Publishing is still all-or-nothing: the completeness gate below refuses
+      # a partial set, so letting both finish costs nothing and tells the truth
+      # about which one actually failed.
+      fail-fast: false
       matrix:
         include:
           - arch: aarch64
@@ -385,6 +406,13 @@ jobs:
     # constrains which ref can mint a valid signing identity.
     environment: boot-image-signing
     strategy:
+      # One arch's build must not cancel the other's. The sibling is a separate
+      # artifact, and a transient failure on one runner used to take the other
+      # down before it produced anything — which then read as two broken arches.
+      # Publishing is still all-or-nothing: the completeness gate below refuses
+      # a partial set, so letting both finish costs nothing and tells the truth
+      # about which one actually failed.
+      fail-fast: false
       matrix:
         include:
           - arch: aarch64
