@@ -40,9 +40,15 @@ target exposes only `core` + `alloc`.
 
 Landed here:
 
-- CI gate `baremetal-no-std-boundary` in `.github/workflows/ci.yml` — builds
-  the crate lib for `riscv32imac-unknown-none-elf` on every PR, so a `std` leak
-  can never regress the embedding surface.
+- The bare-metal build runs on every PR, so a `std` leak can never regress the
+  embedding surface. It is **not** a job of its own: `scripts/ci-linux-coverage.sh`
+  builds the crate lib for `riscv32imac-unknown-none-elf` as one line of the
+  `test-linux` job ("Test Linux and conformance"), whose toolchain step installs
+  the target. Earlier revisions of this note named a gate
+  `baremetal-no-std-boundary`; **no such job has ever existed** — do not cite it.
+  A corollary worth knowing: because the check lives inside a shared script, it
+  has no independent job name, no independent failure signal, and no path filter
+  of its own.
 - `just check-embedded [TARGET]` recipe for the same check locally.
 
 `riscv32imac` is the mainline stand-in for the RISC-V microcontrollers this
