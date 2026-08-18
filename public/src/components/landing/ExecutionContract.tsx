@@ -18,37 +18,37 @@ const LAYERS: Array<{
   {
     num: "01",
     title: "Signed admission",
-    body: "Every workload runs from a signed, audited ExecutionPlan — validity window, nonce replay protection, chain-signed lifecycle events. Nothing boots without one.",
+    body: "Nothing boots without a signed, audited ExecutionPlan — validity window, nonce, chain-signed lifecycle.",
     claims: "claim 8",
   },
   {
     num: "02",
     title: "Pinned artifact",
-    body: "Bundles are content-addressed and key-pinned, re-verified at fetch and again at admit. OCI images admit by resolved digest, with provenance recorded.",
+    body: "Artifacts are content-addressed and digest-pinned, re-verified at fetch and again at admit.",
     claims: "claims 9, 14",
   },
   {
     num: "03",
     title: "Granted authority",
-    body: "Network, host services, and credentials are grants in the plan, not ambient capabilities. Egress defaults to deny-all, and raw secret bytes never enter the guest.",
+    body: "Network, services, and credentials are grants in the plan — deny-all by default, raw secrets never in the guest.",
     claims: "claims 10, 12, 13",
   },
   {
     num: "04",
     title: "No bypass path",
-    body: "The workload VM has no network device — on any backend. Every byte leaves over one vsock channel to a host-side gate that originates, and can refuse, the real connection. A CI gate fails the build if a network path reappears.",
+    body: "The guest has no network device. Every byte exits over one vsock channel the host can refuse.",
     claims: "claim 10",
   },
   {
     num: "05",
     title: "Sealed production behavior",
-    body: "A production rootfs is dm-verity sealed and boots with no shell, no PTY, and no dev-only verbs — the admitted program can't be swapped for another one.",
+    body: "A dm-verity-sealed rootfs with no shell, no PTY, no dev verbs — the admitted program can't be swapped.",
     claims: "claims 3, 15",
   },
   {
     num: "06",
     title: "Verifiable record",
-    body: "Admission, launch, policy decisions, and provenance land in a chain-signed audit log. Tampering breaks the chain, and verification exits nonzero.",
+    body: "Every admission and policy decision lands in a chain-signed audit log. Tampering breaks the chain.",
     claims: "claims 8, 14",
   },
 ];
