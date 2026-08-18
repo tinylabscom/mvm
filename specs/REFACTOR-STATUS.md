@@ -285,6 +285,18 @@ for detailed scope and acceptance criteria.
 
 ## In-flight plans
 
+- [~] **Secret bindings for forked children** —
+      `specs/plans/2026-08-18-fork-inherits-secret-bindings.md`, issue #2698.
+      W0 landed: a fork that drops its parent's secret bindings now says so,
+      reading the parent's persisted plan rather than needing a schema change.
+      3 tests, mutation-checked.
+      STILL OPEN: everything that closes the gap. Option A (declare the child's
+      bindings at fork, A1-A6) is the recommended build and is unimplemented;
+      Option B (inherit from the checkpoint, attenuated by intersection) is
+      designed and deliberately deferred, not queued. W0 warns only — the
+      refusal arm moved to A6, because a fork is always prod-profile and so had
+      no flag to gate on.
+
 - [~] **Admission-bound AI assurance sessions** —
       `specs/plans/2026-08-17-admission-bound-ai-assurance-sessions.md`. W1–W4,
       W6/W7 and W7b landed: the envelope, the authority intersection, the
