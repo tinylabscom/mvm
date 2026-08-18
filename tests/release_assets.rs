@@ -589,3 +589,61 @@ fn the_boot_gate_installs_the_toolchain_its_test_needs() {
          without it the gate fails before reaching a guest"
     );
 }
+
+/// Every workflow that can mint an identity a shipped binary trusts must be
+/// gated on a protected environment, so the ref allowed to produce a valid
+/// signature is constrained by that environment's tag policy rather than by
+/// whoever can trigger the workflow.
+///
+/// This is not theoretical. `release-boot-image.yml` asked for an environment
+/// scoped to `v*` while firing on `boot-image/v*`; the mismatch blocked every
+/// gated job one second in, with no steps and nothing in the log to read. And
+/// `release.yml` — which mints the one identity `RELEASE_IDENTITY_TEMPLATES`
+/// names, the identity every installed mvmctl verifies against — declared no
+/// environment at all.
+///
+/// The environments' tag policies live in repository settings and cannot be
+/// asserted from here. What is assertable, and what regressed, is that the
+/// declaration exists at all.
+#[test]
+fn workflows_minting_trusted_identities_are_gated_on_an_environment() {
+    for (path, expected_env) in [
+        (".github/workflows/release.yml", "release-signing"),
+        (
+            ".github/workflows/release-boot-image.yml",
+            "boot-image-signing",
+        ),
+        (".github/workflows/revocations.yml", "revocations-signing"),
+    ] {
+        let body = fs::read_to_string(Path::new(path))
+            .unwrap_or_else(|e| panic!("{path} must be readable: {e}"));
+        assert!(
+            body.contains(&format!("environment: {expected_env}")),
+            "{path} mints an identity in mvm_core::release_trust, so it must \
+             declare `environment: {expected_env}`. Without it any ref that can \
+             trigger the workflow can mint a signature the shipped verifier \
+             accepts."
+        );
+    }
+}
+
+/// The two signing environments are deliberately distinct. Sharing one would
+/// let a boot image signature validate a CLI tarball and the reverse, which is
+/// the exact confusion `BOOT_IMAGE_IDENTITY_TEMPLATES` is kept separate from
+/// `RELEASE_IDENTITY_TEMPLATES` to prevent.
+#[test]
+fn the_two_release_trains_do_not_share_a_signing_environment() {
+    let cli = fs::read_to_string(Path::new(".github/workflows/release.yml"))
+        .expect("release.yml must be readable");
+    let boot = fs::read_to_string(Path::new(".github/workflows/release-boot-image.yml"))
+        .expect("release-boot-image.yml must be readable");
+    assert!(
+        !cli.contains("environment: boot-image-signing"),
+        "the CLI train must not sign under the boot image train's environment"
+    );
+    assert!(
+        !boot.contains("environment: release-signing"),
+        "the boot image train must not sign under the CLI train's environment; \
+         its tags are boot-image/v*, which a v*-scoped policy refuses outright"
+    );
+}
