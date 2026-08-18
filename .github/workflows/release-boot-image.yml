@@ -377,6 +377,12 @@ jobs:
   default-microvm:
     # Skipped on a dry-run dispatch (see builder-vm-image).
     if: ${{ github.event_name == 'push' || github.event.inputs.dry_run == 'false' }}
+    # The boot gate below attaches the runtime overlay, so this job now waits
+    # on the job that builds it. That serialises two previously parallel jobs
+    # and costs the release some wall clock — worth it, because the gate was
+    # otherwise booting a lean rootfs with no agent in it and calling the
+    # result a failure of the image.
+    needs: [runtime-overlay-image]
     # This job mints a keyless (OIDC/Fulcio) signature over the attested
     # runtime pack manifest under the same release.yml@<tag> identity class as
     # builder-vm-image — gating it behind the same protected environment
@@ -493,6 +499,13 @@ jobs:
       - uses: ./.github/actions/install-zigbuild
         if: matrix.arch == 'x86_64'
 
+      - name: Fetch the runtime overlay the boot gate attaches
+        if: matrix.arch == 'x86_64'
+        uses: actions/download-artifact@v6
+        with:
+          name: runtime-overlay-image-${{ matrix.arch }}
+          path: overlay
+
       - name: Boot the staged image before it becomes a release asset
         if: matrix.arch == 'x86_64'
         # Boots the artifact in `staging/`, never a published one — the whole
@@ -508,6 +521,12 @@ jobs:
           MVM_RUNTIME_BOOT_BACKEND: firecracker
           MVM_RUNTIME_BOOT_KERNEL: staging/default-microvm-vmlinux-x86_64
           MVM_RUNTIME_BOOT_ROOTFS: staging/default-microvm-rootfs-x86_64.ext4
+          # `default-microvm` is a lean rootfs: `/init` resolves its agent from
+          # `/mvm/runtime`, which is this overlay. Without it the guest reaches
+          # userspace and panics with "no guest agent resolved".
+          MVM_RUNTIME_BOOT_OVERLAY: overlay/overlay.ext4
+          MVM_RUNTIME_BOOT_OVERLAY_VERITY: overlay/overlay.verity
+          MVM_RUNTIME_BOOT_OVERLAY_ROOTHASH: overlay/overlay.roothash
           MVM_RUNTIME_BOOT_READY: guest-agent
           MVM_RUNTIME_BOOT_RUNS: "1"
           MVM_RUNTIME_BOOT_CONCURRENT: "1"

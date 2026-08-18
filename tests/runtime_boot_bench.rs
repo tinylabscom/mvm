@@ -35,6 +35,17 @@ const CONFIG_VAR: &str = "MVM_RUNTIME_BOOT_CONFIG";
 const BACKEND_VAR: &str = "MVM_RUNTIME_BOOT_BACKEND";
 const KERNEL_VAR: &str = "MVM_RUNTIME_BOOT_KERNEL";
 const ROOTFS_VAR: &str = "MVM_RUNTIME_BOOT_ROOTFS";
+/// The mvm runtime overlay, as its three inseparable parts.
+///
+/// A `mkGuest` rootfs built lean carries no agent: `/init` resolves one from
+/// `/mvm/runtime`, which is the overlay. Booting such an image with kernel and
+/// rootfs alone reaches userspace and then dies with "no guest agent resolved
+/// from /mvm/runtime and no baked fallback", because there was never an agent
+/// to find. Attaching the overlay is what makes the benchmark boot the pair
+/// that actually ships rather than a rootfs on its own.
+const OVERLAY_VAR: &str = "MVM_RUNTIME_BOOT_OVERLAY";
+const OVERLAY_VERITY_VAR: &str = "MVM_RUNTIME_BOOT_OVERLAY_VERITY";
+const OVERLAY_ROOTHASH_VAR: &str = "MVM_RUNTIME_BOOT_OVERLAY_ROOTHASH";
 const RUNS_VAR: &str = "MVM_RUNTIME_BOOT_RUNS";
 const CONCURRENT_VAR: &str = "MVM_RUNTIME_BOOT_CONCURRENT";
 const BUDGET_VAR: &str = "MVM_RUNTIME_BOOT_BUDGET_MS";
@@ -88,11 +99,69 @@ fn prebuilt_runtime_image_boots_within_budget() -> Result<()> {
     Ok(())
 }
 
+/// The overlay triple. Kept together because the backend treats a partial set
+/// as no overlay at all, and a benchmark that silently dropped it would report
+/// a healthy boot for an image that cannot boot as shipped.
+#[derive(Debug, Clone)]
+struct OverlaySpec {
+    image: PathBuf,
+    verity: PathBuf,
+    roothash: String,
+}
+
+impl OverlaySpec {
+    fn from_env(
+        image: Option<PathBuf>,
+        verity: Option<PathBuf>,
+        roothash: Option<PathBuf>,
+    ) -> Result<Option<Self>> {
+        let image = optional_path(OVERLAY_VAR, image)?;
+        let verity = optional_path(OVERLAY_VERITY_VAR, verity)?;
+        let roothash_path = optional_path(OVERLAY_ROOTHASH_VAR, roothash)?;
+
+        match (image, verity, roothash_path) {
+            (None, None, None) => Ok(None),
+            (Some(image), Some(verity), Some(roothash_path)) => {
+                let roothash = std::fs::read_to_string(&roothash_path)
+                    .with_context(|| {
+                        format!("reading {OVERLAY_ROOTHASH_VAR}={}", roothash_path.display())
+                    })?
+                    .trim()
+                    .to_string();
+                if roothash.is_empty() {
+                    bail!(
+                        "{OVERLAY_ROOTHASH_VAR}={} is empty; the backend needs the hex roothash \
+                         to thread `mvm.runtime_roothash` into the guest cmdline",
+                        roothash_path.display()
+                    );
+                }
+                Ok(Some(Self {
+                    image,
+                    verity,
+                    roothash,
+                }))
+            }
+            // Refuse rather than boot without it: the backend attaches the
+            // overlay only when all three are present, so a partial set would
+            // quietly become "no overlay" and the run would fail with a guest
+            // panic that says nothing about the missing argument.
+            _ => bail!(
+                "{OVERLAY_VAR}, {OVERLAY_VERITY_VAR} and {OVERLAY_ROOTHASH_VAR} must be set \
+                 together or not at all"
+            ),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct BenchSpec {
     backend: String,
     kernel: PathBuf,
     rootfs: PathBuf,
+    /// All three or none — the backend only attaches the overlay when the
+    /// ext4, its verity sidecar and the roothash are all present, so a
+    /// partial set would silently boot without it.
+    overlay: Option<OverlaySpec>,
     runs: usize,
     concurrent: usize,
     budget: Duration,
@@ -111,6 +180,11 @@ impl BenchSpec {
 
         let kernel = required_path(KERNEL_VAR, config.kernel)?;
         let rootfs = required_path(ROOTFS_VAR, config.rootfs)?;
+        let overlay = OverlaySpec::from_env(
+            config.overlay,
+            config.overlay_verity,
+            config.overlay_roothash,
+        )?;
         let ready =
             ReadySignal::parse(&env_string_opt(READY_VAR, config.ready).unwrap_or_else(|| {
                 default_ready_for_backend(&env_string_opt(BACKEND_VAR, config.backend.clone()))
@@ -120,6 +194,7 @@ impl BenchSpec {
                 .unwrap_or_else(|| DEFAULT_BACKEND.to_string()),
             kernel,
             rootfs,
+            overlay,
             runs: env_usize(RUNS_VAR, config.runs, DEFAULT_RUNS)?,
             concurrent: env_usize(CONCURRENT_VAR, config.concurrent, DEFAULT_CONCURRENT)?,
             budget: Duration::from_millis(env_u64(
@@ -140,6 +215,11 @@ struct RawBenchConfig {
     backend: Option<String>,
     kernel: Option<PathBuf>,
     rootfs: Option<PathBuf>,
+    overlay: Option<PathBuf>,
+    #[serde(alias = "overlay_verity")]
+    overlay_verity: Option<PathBuf>,
+    #[serde(alias = "overlay_roothash")]
+    overlay_roothash: Option<PathBuf>,
     runs: Option<usize>,
     concurrent: Option<usize>,
     #[serde(alias = "budget_ms")]
@@ -242,6 +322,15 @@ fn measure_one(spec: &BenchSpec, name: String) -> Result<BootMeasurement> {
         memory_mib: spec.memory_mib,
         revision_hash: "runtime-boot-bench".to_string(),
         flake_ref: "prebuilt-runtime-image".to_string(),
+        runtime_overlay_path: spec
+            .overlay
+            .as_ref()
+            .map(|o| o.image.to_string_lossy().into_owned()),
+        runtime_overlay_verity_path: spec
+            .overlay
+            .as_ref()
+            .map(|o| o.verity.to_string_lossy().into_owned()),
+        runtime_overlay_roothash: spec.overlay.as_ref().map(|o| o.roothash.clone()),
         ..Default::default()
     };
 
@@ -407,6 +496,17 @@ fn required_path(var: &str, configured: Option<PathBuf>) -> Result<PathBuf> {
     Ok(path)
 }
 
+/// Like [`required_path`] but absent is a valid answer.
+fn optional_path(var: &str, configured: Option<PathBuf>) -> Result<Option<PathBuf>> {
+    let Some(path) = std::env::var_os(var).map(PathBuf::from).or(configured) else {
+        return Ok(None);
+    };
+    if !path.is_file() {
+        bail!("{var}={} is not a file", path.display());
+    }
+    Ok(Some(path))
+}
+
 fn env_string_opt(var: &str, configured: Option<String>) -> Option<String> {
     std::env::var(var).ok().or(configured)
 }
@@ -520,4 +620,73 @@ fn live_bench_is_disabled_by_default() -> Result<()> {
     }
     assert!(BenchSpec::from_env()?.is_none());
     Ok(())
+}
+
+#[cfg(test)]
+mod overlay_spec_tests {
+    use super::OverlaySpec;
+    use std::path::PathBuf;
+
+    fn file(dir: &std::path::Path, name: &str, body: &str) -> PathBuf {
+        let p = dir.join(name);
+        std::fs::write(&p, body).expect("write fixture");
+        p
+    }
+
+    #[test]
+    fn absent_everywhere_is_no_overlay() {
+        assert!(
+            OverlaySpec::from_env(None, None, None)
+                .expect("no overlay is valid")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_complete_triple_reads_the_roothash() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let spec = OverlaySpec::from_env(
+            Some(file(dir.path(), "overlay.ext4", "x")),
+            Some(file(dir.path(), "overlay.verity", "x")),
+            Some(file(dir.path(), "overlay.roothash", "  deadbeef\n")),
+        )
+        .expect("complete triple")
+        .expect("an overlay");
+        assert_eq!(spec.roothash, "deadbeef", "trimmed, not raw");
+    }
+
+    /// The backend attaches the overlay only when all three are present, so a
+    /// partial set would become "no overlay" and the run would fail inside the
+    /// guest with a panic that never mentions the missing argument. Refusing
+    /// here names the actual mistake.
+    #[test]
+    fn a_partial_triple_is_refused_rather_than_silently_dropped() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let image = file(dir.path(), "overlay.ext4", "x");
+        let verity = file(dir.path(), "overlay.verity", "x");
+
+        for (i, v, r) in [
+            (Some(image.clone()), None, None),
+            (None, Some(verity.clone()), None),
+            (Some(image.clone()), Some(verity.clone()), None),
+        ] {
+            let err = OverlaySpec::from_env(i, v, r).expect_err("partial must refuse");
+            assert!(
+                err.to_string().contains("together or not at all"),
+                "unexpected: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_empty_roothash_is_refused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let err = OverlaySpec::from_env(
+            Some(file(dir.path(), "overlay.ext4", "x")),
+            Some(file(dir.path(), "overlay.verity", "x")),
+            Some(file(dir.path(), "overlay.roothash", "   \n")),
+        )
+        .expect_err("empty roothash must refuse");
+        assert!(err.to_string().contains("is empty"), "unexpected: {err}");
+    }
 }
