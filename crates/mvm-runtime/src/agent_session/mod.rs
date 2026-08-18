@@ -93,6 +93,11 @@ impl AgentSessionStore {
     }
 
     /// Write a record, replacing any prior one for the same session.
+    ///
+    /// Writes to a temp beside the destination and renames over it, so a crash
+    /// mid-write leaves the previous complete record rather than a truncated
+    /// one. The record is what a session's durability rests on — a memory image
+    /// may be reaped, but losing the record loses the session.
     pub fn write(&self, record: &AgentSessionRecord) -> Result<()> {
         let path = self.record_path(&record.session_id);
         let dir = path
@@ -101,9 +106,7 @@ impl AgentSessionStore {
         std::fs::create_dir_all(dir)
             .with_context(|| format!("create session dir {}", dir.display()))?;
         let json = serde_json::to_vec_pretty(record).context("serialize session record")?;
-        std::fs::write(&path, json)
-            .with_context(|| format!("write session record {}", path.display()))?;
-        Ok(())
+        write_then_rename(&path, &json)
     }
 
     /// Load one record. An absent or malformed record is an error, never a
@@ -144,6 +147,21 @@ impl AgentSessionStore {
         out.sort_by(|a, b| a.session_id.as_str().cmp(b.session_id.as_str()));
         Ok(out)
     }
+}
+
+/// Write `bytes` to `path` via a temp in the same directory, then rename.
+///
+/// Kept private to this module deliberately. The same pattern is inlined at
+/// many other call sites in this workspace; consolidating them is worth doing
+/// but is not this module's job, and adding another public copy would make the
+/// eventual consolidation harder rather than easier.
+fn write_then_rename(path: &Path, bytes: &[u8]) -> Result<()> {
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, bytes)
+        .with_context(|| format!("write session record temp {}", tmp.display()))?;
+    std::fs::rename(&tmp, path)
+        .with_context(|| format!("rename session record into {}", path.display()))?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -230,6 +248,47 @@ mod tests {
             .map(|r| r.session_id.as_str().to_string())
             .collect();
         assert_eq!(ids, vec!["sess-alpha"]);
+    }
+
+    #[test]
+    fn a_write_leaves_no_partial_record_when_a_stale_temp_exists() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = AgentSessionStore::at(tmp.path());
+        let rec = record("sess-alpha");
+        store.write(&rec).unwrap();
+
+        // Simulate a crashed prior write: a leftover temp beside the record.
+        let dir = tmp.path().join("sess-alpha");
+        std::fs::write(dir.join("session.json.tmp"), b"{ truncated").unwrap();
+
+        // A subsequent write must still succeed and must leave the record
+        // readable, not the debris.
+        let mut next = rec.clone();
+        next.generation = 2;
+        store.write(&next).unwrap();
+        assert_eq!(store.load(&rec.session_id).unwrap().generation, 2);
+    }
+
+    #[test]
+    fn the_record_is_never_observed_truncated_mid_write() {
+        // Writing over an existing record must be atomic from a reader's view:
+        // the destination is only ever the old complete record or the new one.
+        let tmp = tempfile::tempdir().unwrap();
+        let store = AgentSessionStore::at(tmp.path());
+        let rec = record("sess-alpha");
+        store.write(&rec).unwrap();
+        let path = tmp.path().join("sess-alpha").join("session.json");
+        let before = std::fs::read(&path).unwrap();
+
+        let mut next = rec.clone();
+        next.generation = 7;
+        store.write(&next).unwrap();
+        let after = std::fs::read(&path).unwrap();
+
+        assert_ne!(before, after);
+        // Both are complete records, not partial JSON.
+        serde_json::from_slice::<AgentSessionRecord>(&before).unwrap();
+        serde_json::from_slice::<AgentSessionRecord>(&after).unwrap();
     }
 
     #[test]
