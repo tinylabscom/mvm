@@ -288,6 +288,8 @@ for detailed scope and acceptance criteria.
 - [~] **Durable agent sessions** —
       `specs/plans/2026-08-18-durable-agent-sessions.md` (design) +
       `specs/plans/2026-08-18-durable-session-substrate.md` (implementation,
+      Tasks 1–5 complete) +
+      `specs/plans/2026-08-18-durable-session-park.md` (implementation,
       Tasks 1–5 complete). `CheckpointMeta` gains `Option<SessionBinding>`
       (`session_id`/`generation`/`journal_cursor`/`approval_head`), folded
       into `meta_digest` the same way `grants` already is; `approval_head` is
@@ -297,9 +299,19 @@ for detailed scope and acceptance criteria.
       `mvm_core::config::agent_sessions_dir()`, with `parent_checkpoint`
       typed as a `CheckpointDigest` content-address rather than a mutable
       `CheckpointId`. `fork_checkpoint`/`fork_vm_full` explicitly clear the
-      binding on a forked child.
-      STILL OPEN: everything past the substrate — WS3 park path, WS4 resume
-      path, WS5 retention ladder + GC, WS6 CLI, WS7 chain records, WS8 BDD.
+      binding on a forked child. The park slice adds crash-safe
+      (tmp+rename) record writes, `ParkReason`/`StorageTier`/`select_tier`,
+      four new record fields (`journal_cursor`, `approval_head`, `tier`,
+      `park_reason`), `AgentSessionRecord::park`/`resume` transitions with
+      `SessionTransitionError`, and store-level `park`/`resume` fenced on
+      the caller's expected generation — a check-then-act refusal, not a
+      compare-and-swap, so a second caller racing on the same generation is
+      not yet serialized; the module has no call sites yet, so nothing races
+      it in production today.
+      STILL OPEN: the quiesce sequence over the existing guest verbs
+      (`SleepPrep`/`CheckpointIntegrations`/`Wake` have no host-side caller
+      anywhere in the workspace) is the rest of WS3; WS4 resume admission,
+      WS5 retention ladder + GC, WS6 CLI, WS7 chain records, WS8 BDD.
 
 - [~] **Admission-bound AI assurance sessions** —
       `specs/plans/2026-08-17-admission-bound-ai-assurance-sessions.md`. W1–W4

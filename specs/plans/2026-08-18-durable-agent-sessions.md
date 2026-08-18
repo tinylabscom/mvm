@@ -75,16 +75,26 @@ generation is rejected rather than delivered.
 The hibernation record holds, in the session store:
 
 ```text
-session ID
-current generation
-parent checkpoint digest        (content-addressed resume point)
-journal cursor                  (AgentSessionJournal position)
-approval ledger head + signature
-storage tier                    (Parked | Cold)
-park reason
-audit-chain head
-retention class + expiry
+session ID                      (built)
+current generation              (built)
+parent checkpoint digest        (built — content-addressed resume point)
+journal cursor                  (built — AgentSessionJournal position)
+approval ledger head            (built, as a digest only — see note below)
+storage tier                    (built — Resident | Parked | Cold)
+park reason                     (built)
+audit-chain head                (not built)
+retention class + expiry        (not built)
 ```
+
+`specs/plans/2026-08-18-durable-session-park.md` Task 3 landed the first seven
+fields on `AgentSessionRecord`, plus `park()` / `resume()` transitions and a
+store-level generation fence (`specs/plans/2026-08-18-durable-session-substrate.md`
+landed `parent_checkpoint` earlier). The approval field is narrower than this
+section originally sketched: `approval_head` carries the `ApprovalHead` digest
+alone, not a paired signature — nothing in the record verifies the ledger head
+independently of whatever `ApprovalLedger` is asked to confirm at resume time.
+`audit-chain head` and `retention class + expiry` remain entirely absent; both
+belong to WS5 (the retention plan) and WS7 (chain records).
 
 This is deliberately close in shape to ADR-046 §13's tombstone. A tombstone
 records a session that ended; a hibernation record records one that paused.
@@ -311,6 +321,14 @@ Numbering was reconciled before these documents landed on main (PR #2691):
       digest tests.
 - [ ] **WS3 — Park path.** `ParkReason`, tier selection, quiesce sequence over
       the existing guest verbs, hibernation record commit ordering.
+      `ParkReason`, `select_tier`, the record's `park()`/`resume()`
+      transitions, and crash-safe record commit landed
+      (`specs/plans/2026-08-18-durable-session-park.md`). The quiesce
+      sequence has not: `GuestRequest::SleepPrep`, `CheckpointIntegrations`,
+      and `Wake` are defined in the agent protocol and have host-facing
+      convenience functions in `mvm-agentd/src/vsock/api.rs`, but none of
+      those functions has a caller anywhere in the workspace outside their
+      own tests. Wiring park to call them is what remains.
 - [ ] **WS4 — Resume path.** `resume_session`, incremental ledger-head
       verification, fresh-plan synthesis, tier selection, `PostRestore`
       fabric re-registration.

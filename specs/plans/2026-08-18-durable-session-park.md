@@ -100,7 +100,7 @@ pattern is inlined at eleven-plus sites (see `crates/mvm-client/src/volume/lifec
 Keep this copy **private to this module** rather than adding a twelfth public
 one, and do not refactor the other sites — that is a separate change.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```rust
     #[test]
@@ -145,7 +145,7 @@ one, and do not refactor the other sites — that is a separate change.
     }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `export CARGO_TARGET_DIR=/Users/auser/work/tinylabs/mvmco/.worktrees/mvm-durable-sessions/target && ~/.cargo/bin/cargo nextest run -p mvm-runtime agent_session`
 
@@ -155,7 +155,7 @@ plainly in your report rather than claiming a RED you did not observe — a sing
 `fs::write` of a small buffer is often atomic in practice. Both tests exist to
 pin the property, not to prove the old code broken.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 Replace the body of `write` with a tmp+rename, and add the private helper:
 
@@ -195,12 +195,12 @@ fn write_then_rename(path: &Path, bytes: &[u8]) -> Result<()> {
 }
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run the same nextest command. Expected: PASS, plus the six pre-existing
 `agent_session` tests still green.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 export CARGO_TARGET_DIR=/Users/auser/work/tinylabs/mvmco/.worktrees/mvm-durable-sessions/target
@@ -221,7 +221,7 @@ git commit -m "fix(runtime): write the session record atomically"
 - Consumes: nothing from Task 1.
 - Produces: `ParkReason`, `StorageTier`, `select_tier`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```rust
     #[test]
@@ -263,11 +263,11 @@ git commit -m "fix(runtime): write the session record atomically"
     }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Expected: FAIL to compile — `cannot find type 'ParkReason' in this scope`.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 ```rust
 /// Why a sandbox was parked. The reason is not decoration: it selects the
@@ -324,9 +324,9 @@ pub fn select_tier(reason: ParkReason) -> StorageTier {
 }
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 export CARGO_TARGET_DIR=/Users/auser/work/tinylabs/mvmco/.worktrees/mvm-durable-sessions/target
@@ -355,7 +355,7 @@ sandbox residency, so parking — which suspends such a period rather than endin
 it — leaves it alone, and resuming opens a new one. That is what makes a frame
 addressed to the prior generation refusable after a resume.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```rust
     #[test]
@@ -435,11 +435,11 @@ addressed to the prior generation refusable after a resume.
     }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Expected: FAIL to compile — no `park` method, no `journal_cursor` field.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 Add to `AgentSessionRecord`, after `parent_checkpoint`:
 
@@ -527,9 +527,9 @@ impl AgentSessionRecord {
 If `thiserror` is not already a dependency of `mvm-runtime`, check before adding
 it — it is used widely in this workspace and is very likely present.
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 export CARGO_TARGET_DIR=/Users/auser/work/tinylabs/mvmco/.worktrees/mvm-durable-sessions/target
@@ -556,7 +556,7 @@ resume would park the session it thinks it has and silently discard the newer
 residency. The store refuses when the on-disk generation is not the one the
 caller expected.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```rust
     #[test]
@@ -629,11 +629,11 @@ caller expected.
     }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Expected: FAIL to compile — no `park` method on `AgentSessionStore`.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 ```rust
 impl AgentSessionStore {
@@ -687,9 +687,9 @@ fn fence(current: &AgentSessionRecord, expected: u64) -> Result<()> {
 }
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
-- [ ] **Step 5: Run the full gate**
+- [x] **Step 5: Run the full gate**
 
 ```bash
 export CARGO_TARGET_DIR=/Users/auser/work/tinylabs/mvmco/.worktrees/mvm-durable-sessions/target
@@ -698,7 +698,7 @@ export CARGO_TARGET_DIR=/Users/auser/work/tinylabs/mvmco/.worktrees/mvm-durable-
 ~/.cargo/bin/cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add crates/mvm-runtime/src/agent_session/mod.rs
@@ -718,7 +718,7 @@ git commit -m "feat(runtime): fence store-level session park and resume on the g
 
 **Interfaces:** none.
 
-- [ ] **Step 1: Update the design spec's D1 record shape**
+- [x] **Step 1: Update the design spec's D1 record shape**
 
 D1 lists nine fields for the hibernation record. After this plan the record
 carries: session ID, generation, parent checkpoint digest, journal cursor,
@@ -726,7 +726,7 @@ approval head, storage tier, park reason. Still absent: audit-chain head, and
 retention class + expiry (both belong to the retention plan). Update D1 to say
 which are built and which remain, accurately — do not tick what is not done.
 
-- [ ] **Step 2: Update WS3's checkbox state in the design spec**
+- [x] **Step 2: Update WS3's checkbox state in the design spec**
 
 WS3 reads "Park path. `ParkReason`, tier selection, quiesce sequence over the
 existing guest verbs, hibernation record commit ordering." This plan delivers
@@ -736,19 +736,19 @@ deliver the quiesce sequence over the guest verbs — `SleepPrep`,
 the workspace. Mark WS3 partially complete with a note naming exactly what
 remains, rather than ticking it.
 
-- [ ] **Step 3: Update `specs/REFACTOR-STATUS.md`**
+- [x] **Step 3: Update `specs/REFACTOR-STATUS.md`**
 
 Add or extend this plan's entry and bump "Last updated" to the current date.
 Match the format of the neighbouring in-flight plan entries.
 
-- [ ] **Step 4: Write the delivery record**
+- [x] **Step 4: Write the delivery record**
 
 Create `specs/sprint/delivery/durable-session-park.md` recording what this slice
 delivered, in the style of the existing files in that directory. Do NOT append
 to `specs/SPRINT.md` — `xtask check-sprint-append` fails if its delivery section
 grows.
 
-- [ ] **Step 5: Tick this plan's checkboxes and run the doc gates**
+- [x] **Step 5: Tick this plan's checkboxes and run the doc gates**
 
 ```bash
 export CARGO_TARGET_DIR=/Users/auser/work/tinylabs/mvmco/.worktrees/mvm-durable-sessions/target
@@ -765,7 +765,7 @@ found, and `xtask/src/check_declared_backing.rs` holds the list — note that
 merely quoting one of those words in prose trips the gate too, which is a trap
 worth knowing before you write the delivery record.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add specs/
