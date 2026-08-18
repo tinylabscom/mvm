@@ -838,7 +838,17 @@ fn fork(
     let parent = store.read_meta(&checkpoint)?;
     match parent.class {
         CheckpointClass::VmFull => {
-            fork_vm_full_arm(&store, &checkpoint, new_id, cpus, memory, json)
+            fork_vm_full_arm(fork_vm_full::ForkVmFullArmParams {
+                store: &store,
+                checkpoint: &checkpoint,
+                new_id,
+                cpus_override: cpus,
+                memory_override: memory,
+                json,
+                // No CLI surface declares bindings yet, so a fork declares
+                // none — exactly the prior behaviour.
+                declared_secrets: &[],
+            })
         }
         CheckpointClass::FsQuick => fork_fs_quick_arm(ForkFsQuickArmParams {
             store: &store,

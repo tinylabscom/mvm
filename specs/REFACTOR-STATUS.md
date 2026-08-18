@@ -290,12 +290,17 @@ for detailed scope and acceptance criteria.
       W0 landed: a fork that drops its parent's secret bindings now says so,
       reading the parent's persisted plan rather than needing a schema change.
       3 tests, mutation-checked.
-      STILL OPEN: everything that closes the gap. Option A (declare the child's
-      bindings at fork, A1-A6) is the recommended build and is unimplemented;
-      Option B (inherit from the checkpoint, attenuated by intersection) is
-      designed and deliberately deferred, not queued. W0 warns only — the
-      refusal arm moved to A6, because a fork is always prod-profile and so had
-      no flag to gate on.
+      A1 landed: `declared_secrets` is threaded into the fork admission path, so
+      a child's bindings are declared by the caller rather than inherited, and
+      the child's capability is readable from its own plan. 2 tests,
+      mutation-checked.
+      STILL OPEN: the gap is **not yet closed** — A2 (CLI surface) is what makes
+      A1 reachable; until it lands every caller declares an empty set and no
+      user can declare a binding. Then A3-A5, and A6 (refuse an undeclared
+      drop), which is W0's refusal arm — deferred there because a fork's
+      prod-posture is a hardcoded literal today, not a flag. Option B (inherit
+      from the checkpoint, attenuated by intersection) is designed and
+      deliberately deferred, not queued.
 
 - [~] **Admission-bound AI assurance sessions** —
       `specs/plans/2026-08-17-admission-bound-ai-assurance-sessions.md`. W1–W4,

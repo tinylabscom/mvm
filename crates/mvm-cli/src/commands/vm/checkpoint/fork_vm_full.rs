@@ -22,17 +22,20 @@ use crate::ui;
 
 /// Inputs for [`fork_vm_full_arm`]. Grouped to stay under the
 /// `clippy::too_many_arguments` workspace ceiling.
-struct ForkVmFullArmParams<'a> {
-    store: &'a CheckpointStore,
-    checkpoint: &'a CheckpointId,
-    new_id: Option<String>,
+pub(super) struct ForkVmFullArmParams<'a> {
+    pub(super) store: &'a CheckpointStore,
+    pub(super) checkpoint: &'a CheckpointId,
+    pub(super) new_id: Option<String>,
     /// Refused with a user-visible error: a vm_full fork restores the saved
     /// machine state (cpu/mem baked into the snapshot), so the shape is fixed.
     /// Use an fs_quick fork to boot a resized child.
-    cpus_override: Option<u32>,
+    pub(super) cpus_override: Option<u32>,
     /// Refused with a user-visible error for the same reason as `cpus_override`.
-    memory_override: Option<&'a str>,
-    json: bool,
+    pub(super) memory_override: Option<&'a str>,
+    pub(super) json: bool,
+    /// Secret bindings declared for the child. Empty reproduces the prior
+    /// behaviour: a child admitted with no bindings.
+    pub(super) declared_secrets: &'a [mvm_core::plan::SecretBinding],
 }
 
 /// vm_full fork: clone the captured triple into a new child identity, admit a
@@ -51,22 +54,8 @@ fn fc_vm_full_fork_experimental_enabled() -> bool {
     std::env::var_os("MVM_FORK_VMFULL_FC_EXPERIMENTAL").is_some()
 }
 
-pub(super) fn fork_vm_full_arm(
-    store: &CheckpointStore,
-    checkpoint: &CheckpointId,
-    new_id: Option<String>,
-    cpus_override: Option<u32>,
-    memory_override: Option<&str>,
-    json: bool,
-) -> Result<()> {
-    fork_vm_full_arm_inner(ForkVmFullArmParams {
-        store,
-        checkpoint,
-        new_id,
-        cpus_override,
-        memory_override,
-        json,
-    })
+pub(super) fn fork_vm_full_arm(p: ForkVmFullArmParams<'_>) -> Result<()> {
+    fork_vm_full_arm_inner(p)
 }
 
 fn fork_vm_full_arm_inner(p: ForkVmFullArmParams<'_>) -> Result<()> {
@@ -111,6 +100,7 @@ fn fork_vm_full_arm_inner(p: ForkVmFullArmParams<'_>) -> Result<()> {
             child_id,
             now,
             json: p.json,
+            declared_secrets: p.declared_secrets,
         }),
         Some(VmFullOrigin::Firecracker) => {
             fork_vm_full_arm_fc(ForkVmFullArmFcParams {
@@ -123,6 +113,7 @@ fn fork_vm_full_arm_inner(p: ForkVmFullArmParams<'_>) -> Result<()> {
                 now,
                 json: p.json,
                 bypass_experimental_guard: false,
+                declared_secrets: p.declared_secrets,
             })?;
             Ok(())
         }
@@ -153,6 +144,9 @@ pub(in crate::commands) struct ForkVmFullArmFcParams<'a> {
     /// stays on the lower-level `vm checkpoint fork` path; the user-facing
     /// `machine warm-restore` verb opts in explicitly.
     pub(in crate::commands) bypass_experimental_guard: bool,
+    /// Secret bindings declared for the child. Empty reproduces the prior
+    /// behaviour: a child admitted with no bindings.
+    pub(in crate::commands) declared_secrets: &'a [mvm_core::plan::SecretBinding],
 }
 
 /// FC vm_full fork: clone the captured triple, admit a fresh claim-8 plan for
@@ -212,6 +206,7 @@ pub(in crate::commands) fn fork_vm_full_arm_fc(
         parent_meta: &p.parent_meta,
         child_vm_name: &p.child_vm_name,
         backend_name: "firecracker",
+        declared_secrets: p.declared_secrets,
     })?;
 
     // Verify the parent against the signed audit chain before cloning/restoring.
@@ -304,6 +299,18 @@ struct AdmitForkedChildParams<'a> {
     parent_meta: &'a mvm_core::checkpoint::CheckpointMeta,
     child_vm_name: &'a str,
     backend_name: &'a str,
+    /// Secret bindings the caller declares for this child.
+    ///
+    /// Declared, never inherited: the parent's set is not consulted, so the
+    /// child's capability is readable from the child's own plan without
+    /// walking the lineage. An empty set is the default and reproduces the
+    /// prior behaviour exactly.
+    ///
+    /// Carries a name and a source reference only. The destination binding
+    /// (`auth_type` + `allowed_hosts`) is resolved by name against the
+    /// tenant's `BindingStore` at the substitution endpoint, so a name the
+    /// operator has not bound grants nothing.
+    declared_secrets: &'a [mvm_core::plan::SecretBinding],
 }
 
 /// The admitted claim-8 envelope a vm_full fork boots its child under.
@@ -355,7 +362,7 @@ fn admit_forked_child(p: &AdmitForkedChildParams<'_>) -> Result<AdmittedForkChil
             mem_mib: user_cfg.default_memory_mib as u64,
             seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
             secret_release: mvm_core::plan::SecretReleasePolicy::default(),
-            secrets: Vec::new(),
+            secrets: p.declared_secrets.to_vec(),
             no_supervisor: false,
             ledger: &ledger,
             keys_dir: None,
@@ -417,6 +424,9 @@ struct ForkVmFullArmHvfParams<'a> {
     child_id: CheckpointId,
     now: u64,
     json: bool,
+    /// Secret bindings declared for the child. Empty reproduces the prior
+    /// behaviour: a child admitted with no bindings.
+    declared_secrets: &'a [mvm_core::plan::SecretBinding],
 }
 
 /// HVF vm_full fork: clone the captured state into a fresh child identity, admit
@@ -439,6 +449,7 @@ fn fork_vm_full_arm_hvf(p: ForkVmFullArmHvfParams<'_>) -> Result<()> {
         parent_meta: &p.parent_meta,
         child_vm_name: &p.child_vm_name,
         backend_name: "hvf",
+        declared_secrets: p.declared_secrets,
     })?;
 
     // Verify the parent against the signed audit chain before cloning anything.
@@ -608,6 +619,87 @@ fn require_fork_post_restore_success(reply: mvm_agentd::vsock::PostRestoreReply)
 mod tests {
     use super::*;
 
+    use mvm_contract::plan::{SecretBinding, SecretSource};
+    use mvm_core::checkpoint::{CheckpointClass, CheckpointMeta, ContentBlob, ROOTFS_BLOB};
+
+    /// A parent checkpoint whose recorded rootfs sha matches a real blob on
+    /// disk. The blob has to exist: admission *verifies* the recorded digest
+    /// against the bytes rather than trusting it, so a fixture that records a
+    /// sha without writing the file fails before it reaches the plan.
+    fn parent_with_recorded_rootfs(store: &CheckpointStore, id: &str) -> CheckpointMeta {
+        use sha2::{Digest, Sha256};
+
+        let content_dir = store.content_dir(&CheckpointId::new(id));
+        std::fs::create_dir_all(&content_dir).unwrap();
+        let bytes = b"fixture rootfs";
+        std::fs::write(content_dir.join(ROOTFS_BLOB), bytes).unwrap();
+
+        let meta =
+            CheckpointMeta::builder(CheckpointId::new(id), CheckpointClass::VmFull, "parent-vm")
+                .content(vec![ContentBlob {
+                    name: ROOTFS_BLOB.to_string(),
+                    sha256: hex::encode(Sha256::digest(bytes)),
+                }])
+                .supervisor_config_digest("d")
+                .created_unix(1)
+                .build();
+        store.write_meta(&meta).unwrap();
+        meta
+    }
+
+    fn admitted_child_secrets(declared: &[SecretBinding], vm: &str) -> Vec<SecretBinding> {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::at(tmp.path().join("store"));
+        let id = format!("ck-{vm}");
+        let parent_meta = parent_with_recorded_rootfs(&store, &id);
+        let admitted = admit_forked_child(&AdmitForkedChildParams {
+            store: &store,
+            checkpoint: &CheckpointId::new(&id),
+            parent_meta: &parent_meta,
+            child_vm_name: vm,
+            backend_name: "hvf",
+            declared_secrets: declared,
+        })
+        .expect("a fork child is admitted");
+        admitted
+            .admission
+            .expect("the fork path never sets no_supervisor, so admission is Some")
+            .admitted
+            .plan()
+            .secrets
+            .clone()
+    }
+
+    /// The declared set reaches the child's own signed plan. Declared, not
+    /// inherited: the parent above holds no bindings, so anything present here
+    /// came from the caller.
+    #[test]
+    fn a_declared_binding_lands_in_the_forked_childs_plan() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let home = tempfile::tempdir().unwrap();
+        env.isolate_mvm_home(home.path());
+
+        let declared = vec![SecretBinding {
+            name: "STRIPE_KEY".to_string(),
+            source: SecretSource::Keystore {
+                address: "kv/stripe".to_string(),
+            },
+        }];
+        let got = admitted_child_secrets(&declared, "child-declared");
+        assert_eq!(got, declared);
+    }
+
+    /// The default is unchanged behaviour: declare nothing, carry nothing. This
+    /// is the half that keeps the parent's set from leaking in by accident.
+    #[test]
+    fn a_fork_declaring_nothing_admits_a_child_with_no_bindings() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let home = tempfile::tempdir().unwrap();
+        env.isolate_mvm_home(home.path());
+
+        assert!(admitted_child_secrets(&[], "child-bare").is_empty());
+    }
+
     #[test]
     fn fork_post_restore_requires_acknowledgement_and_reseed() {
         let acknowledged = mvm_agentd::vsock::PostRestoreReply {
@@ -672,6 +764,7 @@ mod tests {
             cpus_override: Some(8),
             memory_override: None,
             json: false,
+            declared_secrets: &[],
         })
         .unwrap_err();
         let msg = err.to_string();
@@ -693,6 +786,7 @@ mod tests {
             cpus_override: None,
             memory_override: Some("2G"),
             json: false,
+            declared_secrets: &[],
         })
         .unwrap_err();
         let msg = err.to_string();
