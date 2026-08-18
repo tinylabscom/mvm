@@ -95,8 +95,22 @@ fields on `AgentSessionRecord`, plus `park()` / `resume()` transitions and a
 store-level generation fence (`specs/plans/2026-08-18-durable-session-substrate.md`
 landed `parent_checkpoint` earlier). The approval field is narrower than this
 section originally sketched: `approval_head` carries the `ApprovalHead` digest
-alone, not a paired signature — nothing in the record verifies the ledger head
-independently of whatever `ApprovalLedger` is asked to confirm at resume time.
+alone, not a paired signature. `specs/plans/2026-08-18-session-approval-head.md`
+closed part of that gap: `ApprovalLedger::head()`
+(`crates/mvm-contract/src/policy/approval.rs`) content-addresses the ledger's
+decision state — every record's approval id, its capability, and its terminal
+state, deliberately excluding wall-clock fields and also excluding
+`resource_digest`, `policy_digest`, `admission_plan_digest`, and
+`authorized_operators` — and `AgentSessionStore::resume` now takes the
+caller's `current_head` and refuses when it differs from the `approval_head`
+`ParkInput` committed at park. What is still missing is the wiring between
+the two calls: nothing in the workspace calls `ApprovalLedger::head()` to
+produce the value either `ParkInput::approval_head` or `resume`'s
+`current_head` carries — that caller is `resume_session`, which does not
+exist, so today a caller of `park`/`resume` supplies the digest itself. And a
+session parked with `approval_head: None` has nothing recorded to compare
+against, so such a resume proceeds with no ledger fence at all; that is a
+documented gap, not an oversight.
 `audit-chain head` and `retention class + expiry` remain entirely absent; both
 belong to WS5 (the retention plan) and WS7 (chain records).
 
@@ -204,6 +218,23 @@ comparison. `ApprovalLedger::from_history`
 (`crates/mvm-contract/src/policy/approval.rs:532`) replays the full history,
 which is correct for recovery and too expensive for the resume path. Resume
 needs a signed ledger head cached in the hibernation record.
+
+`specs/plans/2026-08-18-session-approval-head.md` landed the digest half of
+step 2, on its own, outside any `resume_session` orchestrator:
+`AgentSessionStore::resume` takes a `current_head` parameter and refuses when
+it differs from the `approval_head` recorded at park, comparing
+`ApprovalLedger::head()`'s SHA-256 output for equality — a digest comparison,
+not the signature check this sketch names. Steps 1 (audit-chain head), 3
+(`PolicySet` evaluation at current time), 4 (fresh `ExecutionPlan`
+synthesis), 5 (admission), 6 (tier selection), 7 (`PostRestore`), 8
+(credential minting), and 9 (the chain entry) remain design only: there is no
+`resume_session` function anywhere in the workspace to hold them, and nothing
+calls `ApprovalLedger::head()` to produce the value either side of the
+comparison consumes — a caller supplies both `ParkInput::approval_head` and
+`resume`'s `current_head` itself today. A session parked with
+`approval_head: None` skips the comparison entirely and resumes with no
+ledger fence at all; the fence's own doc comment records this as a
+deliberate gap rather than a defect to close silently later.
 
 This is a hard constraint, not a preference. Plan 297 measures the warm SLO
 from *plan admitted* to guest-ready (p99 ≤ 50ms warm), so admission sits just
@@ -336,6 +367,20 @@ Numbering was reconciled before these documents landed on main (PR #2691):
 - [ ] **WS4 — Resume path.** `resume_session`, incremental ledger-head
       verification, fresh-plan synthesis, tier selection, `PostRestore`
       fabric re-registration.
+      The ledger-head half of verification landed
+      (`specs/plans/2026-08-18-session-approval-head.md`):
+      `ApprovalLedger::head()` content-addresses the ledger's decision state
+      and `AgentSessionStore::resume` refuses when its caller-supplied
+      `current_head` differs from the `approval_head` `ParkInput` committed
+      at park. Everything else remains open: `resume_session` has no
+      implementation anywhere in the workspace; nothing calls
+      `ApprovalLedger::head()` to produce the value fed into either side of
+      that comparison, so a caller supplies it directly today; there is no
+      `SynthesisInput` built through `SynthesisInputBuilder` for a resume, no
+      call into `mvm_hostd::plan_admission::admit_for_run` from this path,
+      no tier selection, and no `PostRestore` fabric re-registration. A
+      session parked with `approval_head: None` resumes with no ledger fence
+      at all.
 - [ ] **WS5 — Retention ladder + GC.** Retention classes, one-way demotion,
       first GC over `checkpoints_dir()` with parent-reachability refusal.
 - [ ] **WS6 — CLI.** `mvmctl session {open,ls,show,park,resume,approve,close}`.

@@ -290,7 +290,9 @@ for detailed scope and acceptance criteria.
       `specs/plans/2026-08-18-durable-session-substrate.md` (implementation,
       Tasks 1–5 complete) +
       `specs/plans/2026-08-18-durable-session-park.md` (implementation,
-      Tasks 1–5 complete). `CheckpointMeta` gains `Option<SessionBinding>`
+      Tasks 1–5 complete) +
+      `specs/plans/2026-08-18-session-approval-head.md` (implementation,
+      Tasks 1–4 complete). `CheckpointMeta` gains `Option<SessionBinding>`
       (`session_id`/`generation`/`journal_cursor`/`approval_head`), folded
       into `meta_digest` the same way `grants` already is; `approval_head` is
       a dedicated `ApprovalHead` newtype, not `CheckpointDigest` reused.
@@ -309,14 +311,30 @@ for detailed scope and acceptance criteria.
       compare-and-swap, so a second caller racing on the same generation is
       not yet serialized; the module has no call sites yet, so nothing races
       it in production today.
+      `ApprovalLedger::head()` (`crates/mvm-contract/src/policy/approval.rs`)
+      content-addresses the ledger's decision state — every record's
+      approval id, its capability, and its terminal state, deliberately
+      excluding wall-clock fields plus `resource_digest`, `policy_digest`,
+      `admission_plan_digest`, and `authorized_operators` — and `ParkInput`
+      lets a park commit the journal cursor and that head with the
+      transition in one fenced write instead of two. `AgentSessionStore::
+resume` takes a `current_head` and refuses when it differs from the
+      head recorded at park.
       STILL OPEN: the quiesce sequence over the existing guest verbs is the
       rest of WS3 — `CheckpointIntegrations`/`Wake` have no host-side caller
       anywhere in the workspace, and while `GuestRequest::SleepPrep` does
       have one (the Firecracker stop-time filesystem flush at
       `crates/mvm-backends/src/driver/fc.rs`'s
       `prepare_guest_filesystems_for_stop`), nothing on a park path calls
-      it; WS4 resume admission, WS5 retention ladder + GC, WS6 CLI, WS7
-      chain records, WS8 BDD.
+      it. WS4 is partial: the ledger-head comparison above landed, but
+      nothing calls `ApprovalLedger::head()` to produce the value either
+      side of it carries — the caller that would is `resume_session`, which
+      does not exist anywhere in the workspace, and neither does a resume's
+      `SynthesisInput`/`SynthesisInputBuilder`, its
+      `mvm_hostd::plan_admission::admit_for_run` call, or its `PostRestore`
+      fabric re-registration. A session parked with `approval_head: None`
+      resumes with no ledger fence at all. WS5 retention ladder + GC, WS6
+      CLI, WS7 chain records, WS8 BDD remain untouched.
 
 - [~] **Admission-bound AI assurance sessions** —
       `specs/plans/2026-08-17-admission-bound-ai-assurance-sessions.md`. W1–W4

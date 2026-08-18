@@ -99,7 +99,7 @@ wall-clock fields such as expiry timestamps: two ledgers that made the same
 decisions must hash alike regardless of when they were asked, or a resume would
 refuse itself for the passage of time alone.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Add inside the existing `mod tests` in `crates/mvm-contract/src/policy/approval.rs`. Read the existing tests first to reuse their fixture helpers for building a ledger, requesting, and responding — do not invent a second fixture style.
 
@@ -139,12 +139,12 @@ on the fixture helpers already in that module. Read those helpers, then write
 each test to the description. If no suitable helper exists, say so in your
 report and write the smallest one that serves all four tests.
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `export CARGO_TARGET_DIR=/Users/auser/work/tinylabs/mvmco/.worktrees/mvm-durable-sessions/target && ~/.cargo/bin/cargo nextest run -p mvm-contract head`
 Expected: FAIL — `no method named 'head' found for struct ApprovalLedger`.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 ```rust
     /// Content-address the ledger's decision state.
@@ -190,13 +190,13 @@ fn state_tag(state: ApprovalState) -> u8 {
 }
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Also confirm the no_std build still works:
 `export CARGO_TARGET_DIR=... && ~/.cargo/bin/cargo check -p mvm-contract --target wasm32-unknown-unknown --no-default-features`
 If that target is not installed, say so in your report rather than skipping silently.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 export CARGO_TARGET_DIR=/Users/auser/work/tinylabs/mvmco/.worktrees/mvm-durable-sessions/target
@@ -223,7 +223,7 @@ cannot tell them apart because a park does not change the generation. One
 params struct makes it a single fenced commit, and keeps `park` from growing a
 fourth and fifth positional argument.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```rust
     #[test]
@@ -279,11 +279,11 @@ fourth and fifth positional argument.
     }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Expected: FAIL to compile — `cannot find struct ParkInput`.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 ```rust
 /// What a park commits alongside the state transition.
@@ -309,12 +309,12 @@ existing fields. Change `AgentSessionStore::park`'s third parameter to
 `ParkInput`. Update every existing call site and test — several tests currently
 pass a bare `ParkReason`.
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run the full `agent_session` module; every pre-existing park test must be
 updated and still green.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 export CARGO_TARGET_DIR=/Users/auser/work/tinylabs/mvmco/.worktrees/mvm-durable-sessions/target
@@ -343,7 +343,7 @@ A session parked with no head (`None`) has nothing to compare, so it resumes
 without this check; that is a real gap and the doc comment must say so rather
 than implying every resume is fenced.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```rust
     fn head_of(byte: &str) -> mvm_core::checkpoint::ApprovalHead {
@@ -403,11 +403,11 @@ than implying every resume is fenced.
     }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Expected: FAIL to compile — `resume` takes three arguments, not four.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 Add the `current_head` parameter to `AgentSessionStore::resume`, and after the
 generation fence and before the transition:
@@ -432,16 +432,16 @@ generation fence and before the transition:
         }
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
-- [ ] **Step 5: Verify the fence is not vacuous**
+- [x] **Step 5: Verify the fence is not vacuous**
 
 Temporarily delete the `if let` block, confirm
 `a_resume_is_refused_when_the_ledger_moved_while_parked` goes RED, then restore.
 Report the RED with its command and output. If you do not see a red, say so and
 stop rather than reporting one you did not observe.
 
-- [ ] **Step 6: Run the full gate and commit**
+- [x] **Step 6: Run the full gate and commit**
 
 ```bash
 export CARGO_TARGET_DIR=/Users/auser/work/tinylabs/mvmco/.worktrees/mvm-durable-sessions/target
@@ -462,7 +462,7 @@ git commit -m "feat(runtime): refuse a resume whose approval ledger moved while 
 - Create: `specs/sprint/delivery/session-approval-head.md`
 - Modify: this plan's checkboxes
 
-- [ ] **Step 1: Update D1 and D5 accurately**
+- [x] **Step 1: Update D1 and D5 accurately**
 
 D1's approval-head field can now be produced and is committed at park. D5's
 "incremental ledger-head verification" is partly real: the comparison exists,
@@ -470,7 +470,7 @@ but there is still no `resume_session` orchestrator, no fresh `ExecutionPlan`
 synthesis, and no `PostRestore` re-registration. Say which is which. Record the
 limit that a session parked with no head resumes unfenced.
 
-- [ ] **Step 2: Mark WS4 partially complete, naming what remains**
+- [x] **Step 2: Mark WS4 partially complete, naming what remains**
 
 Do not tick WS4. It remains: `resume_session` itself, building a
 `SynthesisInput` through `SynthesisInputBuilder`, calling
@@ -480,15 +480,15 @@ before writing it down — do not pipe a search establishing absence through
 `head`, because that is exactly how two false claims reached earlier documents
 on this branch.
 
-- [ ] **Step 3: Update `specs/REFACTOR-STATUS.md`** and bump "Last updated".
+- [x] **Step 3: Update `specs/REFACTOR-STATUS.md`** and bump "Last updated".
 
-- [ ] **Step 4: Write `specs/sprint/delivery/session-approval-head.md`**
+- [x] **Step 4: Write `specs/sprint/delivery/session-approval-head.md`**
 
 Style-match the existing files in that directory. Do NOT append to
 `specs/SPRINT.md` — `xtask check-sprint-append` fails if its delivery section
 grows.
 
-- [ ] **Step 5: Tick this plan's checkboxes and run the doc gates**
+- [x] **Step 5: Tick this plan's checkboxes and run the doc gates**
 
 ```bash
 export CARGO_TARGET_DIR=/Users/auser/work/tinylabs/mvmco/.worktrees/mvm-durable-sessions/target
@@ -502,7 +502,7 @@ These spec files carry `Backing: preview`, which bars a short list of assertive
 verbs matched as whole words — quoting one in prose trips the gate too. Write
 about what the code does. If the gate refuses, it names the word it found.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add specs/
