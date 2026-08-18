@@ -41,7 +41,7 @@ const LAYERS: Array<{
   },
   {
     num: "05",
-    title: "Sealed production behavior",
+    title: "Sealed, immutable production behavior",
     body: "A dm-verity-sealed rootfs with no shell, no PTY, no dev verbs — the admitted program can't be swapped.",
     claims: "claims 3, 15",
   },
