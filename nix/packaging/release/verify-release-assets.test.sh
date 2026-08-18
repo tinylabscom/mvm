@@ -279,7 +279,15 @@ fi
 # creates whatever bins_for names, so a required-but-unbuilt binary verifies
 # green here and fails only at release time. Compare against the workflow.
 RELEASE_YML="$HERE/../../../.github/workflows/release.yml"
-shipped="mvmctl $(sed -n 's/^[[:space:]]*for hostbin in \(.*\); do$/\1/p' "$RELEASE_YML" | head -1)"
+# `release.yml` builds its list into a shell variable and then loops over it,
+# so reading the `for` line yields the literal `${REQUIRED_HOSTBINS}` and every
+# required bin looks like drift. Union the assignments instead — including the
+# conditional one that appends the macOS supervisors — and drop the
+# self-reference the append carries.
+# shellcheck disable=SC2016  # the ${REQUIRED_HOSTBINS} below is a literal to
+# strip out of the workflow's text, not a variable for this shell to expand.
+shipped="mvmctl $(sed -n 's/^[[:space:]]*REQUIRED_HOSTBINS="\(.*\)"[[:space:]]*$/\1/p' "$RELEASE_YML" \
+  | sed 's/\${REQUIRED_HOSTBINS}//g' | tr ' ' '\n' | grep -v '^$' | sort -u | tr '\n' ' ')"
 required="$(sed -n '/^required_bins_for_target()/,/^}/p' "$SCRIPT" \
   | sed -n 's/.*echo "\([^"]*\)".*/\1/p' | tr ' ' '\n' | sort -u)"
 drift=""

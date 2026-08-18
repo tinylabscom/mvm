@@ -9,6 +9,8 @@
 
 use std::time::Instant;
 
+use crate::bench::cold_launch::MIN_MATRIX_SAMPLES;
+use mvm_core::launch_trace::PhaseTimingMode;
 use mvm_runtime::workload_runner::StopTiming;
 use serde::{Deserialize, Serialize};
 
@@ -318,6 +320,112 @@ impl RunPhaseMarks {
 /// as warm-launch latency.
 pub const WARM_START_MAX_MS: f64 = 300.0;
 
+/// Which span contains which, as `(span, parent)`.
+///
+/// Parents named here are either another sub-span or one of the coarse bucket
+/// labels [`RunPhaseTimings::coarse_rows`] emits. This table is the single
+/// place the report's shape is stated, and it is asserted against the spans
+/// themselves by `every_parent_covers_its_children` — a row placed under the
+/// wrong parent renders a plausible, wrong partition, and the arithmetic is
+/// the only thing that catches it.
+///
+/// The non-obvious entries: `artifact_verify` is recorded while drives are
+/// being prepared, not during admission; and `stop_driver_kill` and
+/// `stop_console_cleanup` are siblings under `stop_transient`, not nested —
+/// stopping the console happens after the driver is killed, not inside it.
+const SPAN_PARENTS: &[(&str, &str)] = &[
+    ("mount_fingerprint", "drives"),
+    ("mount_cache_lookup", "drives"),
+    ("mount_materialize", "drives"),
+    ("artifact_verify", "drives"),
+    ("vmm_create", "backend start"),
+    ("guest_kernel_entry", "guest ready"),
+    ("agent_auth", "guest ready"),
+    ("first_dispatch", "command"),
+    ("cleanup_handoff", "teardown"),
+    ("stop_transient", "cleanup_handoff"),
+    ("pool_replenish", "cleanup_handoff"),
+    ("state_remove", "cleanup_handoff"),
+    ("stop_attach", "stop_transient"),
+    ("stop_endpoint_reaping", "stop_transient"),
+    ("stop_driver_kill", "stop_transient"),
+    ("stop_console_cleanup", "stop_transient"),
+    ("stop_supervisor_signal", "stop_driver_kill"),
+    ("stop_pid_disappearance", "stop_driver_kill"),
+    ("stop_force_kill_wait", "stop_driver_kill"),
+    ("stop_state_cleanup", "stop_driver_kill"),
+];
+
+/// One rendered row, before the label column has been sized.
+struct TreeRow {
+    /// Indent already applied, so sizing is one `max` over these.
+    label: String,
+    ms: f64,
+    share: Option<f64>,
+}
+
+/// One coarse bucket, with its share of the launch.
+struct CoarseRow {
+    label: &'static str,
+    ms: f64,
+    share: f64,
+}
+
+impl CoarseRow {
+    fn new(label: &'static str, ms: f64, total_ms: f64) -> Self {
+        let share = if total_ms > 0.0 {
+            ms / total_ms * 100.0
+        } else {
+            0.0
+        };
+        Self { label, ms, share }
+    }
+}
+
+/// Size the label column to the widest row, then emit.
+///
+/// Two passes rather than a fixed column because the deepest labels
+/// (`stop supervisor signal` at four levels of indent) are more than twice the
+/// width of the shallowest, and any constant wide enough for them wastes a
+/// screen of space on every other row.
+fn render_rows(rows: &[TreeRow]) -> String {
+    let width = rows.iter().map(|r| r.label.len()).max().unwrap_or(0);
+    rows.iter()
+        .map(|row| {
+            let value = format!("{:.1}ms", row.ms);
+            let mut line = format!("{:<width$}  {:>9}", row.label, value);
+            if let Some(share) = row.share {
+                line.push_str(&format!("  {share:>3.0}%"));
+            }
+            line.trim_end().to_string()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Append every recorded descendant of `parent`, depth-first, in the order
+/// [`LaunchSubTimings::recorded`] declares them.
+fn push_children(
+    rows: &mut Vec<TreeRow>,
+    parent: &str,
+    depth: usize,
+    recorded: &[(&'static str, f64)],
+) {
+    for (name, ms) in recorded {
+        if SPAN_PARENTS
+            .iter()
+            .any(|(span, span_parent)| span == name && *span_parent == parent)
+        {
+            rows.push(TreeRow {
+                label: format!("{}{}", "  ".repeat(depth), name.replace('_', " ")),
+                ms: *ms,
+                share: None,
+            });
+            push_children(rows, name, depth + 1, recorded);
+        }
+    }
+}
+
 impl RunPhaseTimings {
     /// Admitted-plan to command-dispatch: the window the warm-start SLO is set
     /// against (backend claim/restore + boot-to-agent wait).
@@ -340,6 +448,82 @@ impl RunPhaseTimings {
             LaunchMode::Warm => "over",
             LaunchMode::Cold => "na",
         }
+    }
+
+    /// Render the launch as a nested, aligned report.
+    ///
+    /// Same spans as [`render`](Self::render); only the shape differs. The
+    /// nesting is the containment the flat line hides — `teardown` holds
+    /// `cleanup_handoff` holds `stop_transient`, and reading four sibling
+    /// `stop_*` tokens off one line gives no way to tell which of them add up.
+    #[must_use]
+    pub fn render_tree(&self, sub: &LaunchSubTimings) -> String {
+        let mut out = format!(
+            "[mvm] launch {} — total {:.1}ms, dispatch window {:.1}ms{}",
+            self.launch_mode.as_str(),
+            self.total_ms,
+            self.dispatch_window_ms(),
+            self.budget_context(),
+        );
+        let recorded = sub.recorded();
+        let mut rows = Vec::new();
+        for bucket in self.coarse_rows() {
+            rows.push(TreeRow {
+                label: format!("  {}", bucket.label),
+                ms: bucket.ms,
+                share: Some(bucket.share),
+            });
+            push_children(&mut rows, bucket.label, 2, &recorded);
+        }
+        out.push('\n');
+        out.push_str(&render_rows(&rows));
+        out
+    }
+
+    /// The budget the launch's lane publishes, as context only.
+    ///
+    /// Deliberately renders no pass/fail. The published number is a p50 over at
+    /// least [`MIN_MATRIX_SAMPLES`] samples, and one launch is one sample — a
+    /// per-run "ok" against a percentile is the exact conflation
+    /// `bench::doc_table` warns about, and it would read as a gate that nothing
+    /// is actually gating here.
+    fn budget_context(&self) -> String {
+        let (lane, budget) = match self.launch_mode {
+            LaunchMode::Warm => (
+                "warm-claim",
+                crate::bench::cold_launch::WARM_CLAIM_P50_BUDGET_MS,
+            ),
+            LaunchMode::Cold => (
+                "prepared-cold",
+                crate::bench::cold_launch::PREPARED_COLD_P50_BUDGET_MS,
+            ),
+        };
+        format!(" ({lane} p50 budget {budget:.0}ms across {MIN_MATRIX_SAMPLES} samples)")
+    }
+
+    /// The coarse buckets in runner order, with the warm-only pair dropped on a
+    /// cold launch where they are structurally zero rather than measured.
+    fn coarse_rows(&self) -> Vec<CoarseRow> {
+        let mut rows = vec![
+            CoarseRow::new("resolve", self.resolve_ms, self.total_ms),
+            CoarseRow::new("drives", self.drives_ms, self.total_ms),
+            CoarseRow::new("admit", self.admit_ms, self.total_ms),
+        ];
+        if self.launch_mode == LaunchMode::Warm {
+            rows.push(CoarseRow::new(
+                "pool wait",
+                self.pool_wait_ms,
+                self.total_ms,
+            ));
+            rows.push(CoarseRow::new("claim", self.claim_ms, self.total_ms));
+        }
+        rows.extend([
+            CoarseRow::new("backend start", self.backend_start_ms, self.total_ms),
+            CoarseRow::new("guest ready", self.vsock_wait_ms, self.total_ms),
+            CoarseRow::new("command", self.command_ms, self.total_ms),
+            CoarseRow::new("teardown", self.teardown_ms, self.total_ms),
+        ]);
+        rows
     }
 
     /// A single stable, greppable line for logs and the benchmark harness.
@@ -418,15 +602,19 @@ pub fn warm_vs_cold(warm: &RunPhaseTimings, cold: &RunPhaseTimings) -> WarmVsCol
     }
 }
 
-/// Whether phase timing is enabled, pure over the raw env value so the gate
-/// is testable without mutating process env.
-fn timing_enabled_from(value: Option<&str>) -> bool {
-    matches!(value, Some(v) if v == "1" || v.eq_ignore_ascii_case("true"))
+/// Read `MVM_PHASE_TIMING` and decide how to render a breakdown.
+///
+/// Delegates to `mvm_core::launch_trace`, which owns the variable's name and
+/// its accepted spellings. A second parse here drifted from that one once
+/// already — this module hardcoded the variable name rather than using the
+/// constant beside the parse it was duplicating.
+pub fn mode() -> PhaseTimingMode {
+    mvm_core::launch_trace::phase_timing_mode()
 }
 
-/// Read `MVM_PHASE_TIMING` and decide whether to emit a breakdown.
+/// Whether phase timing should emit anything at all.
 pub fn enabled() -> bool {
-    timing_enabled_from(std::env::var("MVM_PHASE_TIMING").ok().as_deref())
+    mode().is_on()
 }
 
 #[cfg(test)]
@@ -700,13 +888,15 @@ mod tests {
 
     #[test]
     fn timing_gate_only_trips_on_truthy_values() {
-        assert!(timing_enabled_from(Some("1")));
-        assert!(timing_enabled_from(Some("true")));
-        assert!(timing_enabled_from(Some("TRUE")));
-        assert!(!timing_enabled_from(Some("0")));
-        assert!(!timing_enabled_from(Some("")));
-        assert!(!timing_enabled_from(Some("yes")));
-        assert!(!timing_enabled_from(None));
+        use mvm_core::launch_trace::phase_timing_mode_from as parse;
+        assert!(parse(Some("1")).is_on());
+        assert!(parse(Some("true")).is_on());
+        assert!(parse(Some("TRUE")).is_on());
+        assert!(parse(Some("tree")).is_on());
+        assert!(!parse(Some("0")).is_on());
+        assert!(!parse(Some("")).is_on());
+        assert!(!parse(Some("yes")).is_on());
+        assert!(!parse(None).is_on());
     }
 
     #[test]
@@ -739,5 +929,244 @@ mod tests {
         let cold = timings_with_dispatch_window(370.0, 30.0);
         let report = warm_vs_cold(&warm, &cold);
         assert!(report.speedup.is_infinite());
+    }
+
+    /// The launch from the report that prompted the tree renderer: a real
+    /// `machine run --image alpine` on HVF/macOS. Using observed numbers rather
+    /// than invented ones means the containment assertions below are checked
+    /// against a partition a real launch actually produced.
+    fn observed_launch() -> (RunPhaseTimings, LaunchSubTimings) {
+        let phases = RunPhaseTimings {
+            launch_mode: LaunchMode::Cold,
+            resolve_ms: 8.7,
+            drives_ms: 13.4,
+            admit_ms: 47.4,
+            pool_wait_ms: 0.0,
+            claim_ms: 0.0,
+            backend_start_ms: 16.1,
+            vsock_wait_ms: 58.2,
+            warm_window_ms: 74.3,
+            command_ms: 52.0,
+            teardown_ms: 91.4,
+            total_ms: 287.2,
+        };
+        let sub = LaunchSubTimings {
+            artifact_verify_ms: Some(0.2),
+            vmm_create_ms: Some(12.0),
+            guest_kernel_entry_ms: Some(57.1),
+            agent_auth_ms: Some(1.1),
+            first_dispatch_ms: Some(0.0),
+            cleanup_handoff_ms: Some(91.3),
+            stop_transient_ms: Some(90.7),
+            stop_attach_ms: Some(0.0),
+            stop_endpoint_reaping_ms: Some(0.0),
+            stop_driver_kill_ms: Some(33.7),
+            stop_console_cleanup_ms: Some(57.0),
+            stop_supervisor_signal_ms: Some(0.0),
+            stop_pid_disappearance_ms: Some(33.7),
+            stop_force_kill_wait_ms: Some(0.0),
+            stop_state_cleanup_ms: Some(0.0),
+            state_remove_ms: Some(0.5),
+            ..LaunchSubTimings::default()
+        };
+        (phases, sub)
+    }
+
+    #[test]
+    fn every_parent_covers_its_children() {
+        let (phases, sub) = observed_launch();
+        let mut by_name: std::collections::HashMap<&str, f64> = phases
+            .coarse_rows()
+            .into_iter()
+            .map(|row| (row.label, row.ms))
+            .collect();
+        by_name.extend(sub.recorded());
+
+        for (parent, _) in SPAN_PARENTS
+            .iter()
+            .map(|(_, p)| (*p, ()))
+            .collect::<std::collections::BTreeSet<_>>()
+        {
+            let Some(parent_ms) = by_name.get(parent).copied() else {
+                continue;
+            };
+            let children: f64 = SPAN_PARENTS
+                .iter()
+                .filter(|(_, p)| *p == parent)
+                .filter_map(|(span, _)| by_name.get(span).copied())
+                .sum();
+            assert!(
+                parent_ms + 0.05 >= children,
+                "{parent} is {parent_ms}ms but its declared children sum to {children}ms — \
+                 the containment table places a span under a parent that does not contain it",
+            );
+        }
+    }
+
+    #[test]
+    fn every_table_entry_names_a_span_that_can_be_rendered() {
+        // A typo in the table is silent: the row simply never matches a
+        // recorded span and vanishes from the report, which reads as "that
+        // work did not happen" rather than as a broken table.
+        let (phases, sub) = observed_launch();
+        let sub_names: Vec<&str> = LaunchSubTimings {
+            mount_fingerprint_ms: Some(0.0),
+            mount_cache_lookup_ms: Some(0.0),
+            mount_materialize_ms: Some(0.0),
+            pool_replenish_ms: Some(0.0),
+            ..sub
+        }
+        .recorded()
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect();
+        let coarse: Vec<&str> = phases.coarse_rows().into_iter().map(|r| r.label).collect();
+
+        for (span, parent) in SPAN_PARENTS {
+            assert!(sub_names.contains(span), "table names unknown span {span}");
+            assert!(
+                sub_names.contains(parent) || coarse.contains(parent),
+                "span {span} is parented to unknown {parent}",
+            );
+        }
+    }
+
+    #[test]
+    fn every_recorded_span_has_a_place_in_the_tree() {
+        // The converse gap: a span added to LaunchSubTimings but not to the
+        // table is measured, serialized into the JSON sample, and silently
+        // missing from the human report.
+        let all = LaunchSubTimings {
+            mount_fingerprint_ms: Some(1.0),
+            mount_cache_lookup_ms: Some(1.0),
+            mount_materialize_ms: Some(1.0),
+            pool_replenish_ms: Some(1.0),
+            ..observed_launch().1
+        };
+        for (name, _) in all.recorded() {
+            assert!(
+                SPAN_PARENTS.iter().any(|(span, _)| *span == name),
+                "recorded span {name} has no parent declared, so the tree drops it",
+            );
+        }
+    }
+
+    #[test]
+    fn tree_renders_the_observed_launch() {
+        let (phases, sub) = observed_launch();
+        let expected = [
+            "[mvm] launch cold — total 287.2ms, dispatch window 74.3ms (prepared-cold p50 budget 200ms across 20 samples)",
+            "  resolve                             8.7ms    3%",
+            "  drives                             13.4ms    5%",
+            "    artifact verify                   0.2ms",
+            "  admit                              47.4ms   17%",
+            "  backend start                      16.1ms    6%",
+            "    vmm create                       12.0ms",
+            "  guest ready                        58.2ms   20%",
+            "    guest kernel entry               57.1ms",
+            "    agent auth                        1.1ms",
+            "  command                            52.0ms   18%",
+            "    first dispatch                    0.0ms",
+            "  teardown                           91.4ms   32%",
+            "    cleanup handoff                  91.3ms",
+            "      stop transient                 90.7ms",
+            "        stop attach                   0.0ms",
+            "        stop endpoint reaping         0.0ms",
+            "        stop driver kill             33.7ms",
+            "          stop supervisor signal      0.0ms",
+            "          stop pid disappearance     33.7ms",
+            "          stop force kill wait        0.0ms",
+            "          stop state cleanup          0.0ms",
+            "        stop console cleanup         57.0ms",
+            "      state remove                    0.5ms",
+        ]
+        .join("\n");
+        assert_eq!(phases.render_tree(&sub), expected);
+
+        // The coarse buckets partition the launch: they must add up to the
+        // total, or the report is attributing time to nothing.
+        let coarse: f64 = phases.coarse_rows().into_iter().map(|r| r.ms).sum();
+        assert!(
+            (coarse - phases.total_ms).abs() < 0.05,
+            "coarse buckets sum to {coarse}ms against a {}ms total",
+            phases.total_ms,
+        );
+    }
+
+    #[test]
+    fn tree_hides_the_warm_only_rows_on_a_cold_launch() {
+        let (phases, sub) = observed_launch();
+        let cold = phases.render_tree(&sub);
+        assert!(
+            !cold.contains("pool wait"),
+            "cold launch shows a warm-only row"
+        );
+        assert!(
+            !cold.contains("\n  claim"),
+            "cold launch shows a warm-only row"
+        );
+
+        let warm = RunPhaseTimings {
+            launch_mode: LaunchMode::Warm,
+            pool_wait_ms: 2.0,
+            claim_ms: 4.1,
+            ..phases
+        }
+        .render_tree(&sub);
+        assert!(warm.contains("pool wait"));
+        assert!(warm.contains("claim"));
+    }
+
+    #[test]
+    fn tree_reports_the_budget_as_context_and_never_as_a_verdict() {
+        // One launch is one sample; the published budget is a p50 over 20.
+        // Rendering a pass/fail here would read as a gate nothing is applying.
+        let (phases, sub) = observed_launch();
+        let out = phases.render_tree(&sub);
+        assert!(out.contains("p50 budget 200ms across 20 samples"));
+        for verdict in ["ok", "over", "pass", "fail", "PASS", "FAIL", "✓", "✗"] {
+            assert!(
+                !out.contains(verdict),
+                "tree renders a verdict token {verdict}"
+            );
+        }
+    }
+
+    #[test]
+    fn tree_omits_spans_that_were_never_measured() {
+        let (phases, _) = observed_launch();
+        let out = phases.render_tree(&LaunchSubTimings::default());
+        assert!(!out.contains("vmm create"));
+        assert!(!out.contains("stop transient"));
+        // The coarse partition still prints in full — an unmeasured sub-span
+        // is absent, but a bucket that ran is never silently dropped.
+        for bucket in [
+            "resolve",
+            "drives",
+            "admit",
+            "backend start",
+            "guest ready",
+            "command",
+            "teardown",
+        ] {
+            assert!(out.contains(bucket), "coarse bucket {bucket} vanished");
+        }
+    }
+
+    #[test]
+    fn the_greppable_line_is_unchanged_by_the_tree_renderer() {
+        // scripts/check-hvf-warm-restore.sh parses this line; the tree is an
+        // addition, never a replacement.
+        let (phases, _) = observed_launch();
+        assert!(
+            phases
+                .render()
+                .starts_with("[mvm] phase-timing: resolve=8.7ms")
+        );
+        assert!(
+            phases
+                .render()
+                .ends_with("launch_mode=cold dispatch_window=74.3ms warm_slo=na")
+        );
     }
 }

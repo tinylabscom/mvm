@@ -33,8 +33,8 @@ pub struct VmStartParams<'a> {
     pub port_mappings: &'a [config::PortMapping],
     /// Warm-pool target (`--warm-pool-size`); 0 = off.
     pub warm_pool_size: u32,
-    /// Resolved egress policy (deny-all default, or the `--network-preset` /
-    /// `--network-allow` selection). Threaded onto `VmStartConfig` so the
+    /// Resolved egress policy (deny-all default, or the `--net` /
+    /// `--allow-host` selection). Threaded onto `VmStartConfig` so the
     /// gateway-bridge backends enforce the chosen posture instead of
     /// fail-closing to deny-all regardless of the request.
     pub network_policy: mvm_core::network_policy::NetworkPolicy,
@@ -442,8 +442,8 @@ mod tests {
 
     // Regression: `VmStartParams` previously carried no egress policy, so
     // `into_start_config()` fell through to `VmStartConfig::default()` =
-    // deny-all for every `up` boot — silently ignoring `--network-preset` /
-    // `--network-allow`. The resolved policy must survive the conversion so the
+    // deny-all for every boot — silently ignoring `--net` / `--allow-host`.
+    // The resolved policy must survive the conversion so the
     // backend (Firecracker nftables; the libkrun/HVF gateway bridge) enforces
     // the requested posture instead of always deny-all.
     #[test]

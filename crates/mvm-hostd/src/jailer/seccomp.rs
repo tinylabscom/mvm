@@ -40,6 +40,18 @@ pub(crate) const CONFINED_ROLE_SYSCALLS: &[(&str, libc::c_long)] = &[
     ("read", libc::SYS_read),
     ("write", libc::SYS_write),
     ("fsync", libc::SYS_fsync),
+    // The audit recorder locks the per-tenant log before appending, so the
+    // first chain-signed event this endpoint emits calls `flock`. That event is
+    // `host.flow.allowed`, written on the first egress the gate permits — so a
+    // missing `flock` SIGSYS-kills the endpoint at the moment it starts
+    // working, after the connect it was about to report succeeded. The
+    // confinement already grants Landlock write on the audit dir; this is the
+    // syscall that makes the grant usable.
+    ("flock", libc::SYS_flock),
+    // ...and `fdatasync` to make the append durable. The audit chain writes
+    // each entry then syncs it, so both syscalls are on the same first-event
+    // path; allowing only the lock moves the kill one syscall later.
+    ("fdatasync", libc::SYS_fdatasync),
     ("openat", libc::SYS_openat),
     ("close", libc::SYS_close),
     // glibc's resolver seeks while reading /etc/hosts (getaddrinfo); a missing
@@ -147,6 +159,18 @@ pub(crate) const CONFINED_ROLE_SYSCALLS: &[(&str, libc::c_long)] = &[
     ("read", libc::SYS_read),
     ("write", libc::SYS_write),
     ("fsync", libc::SYS_fsync),
+    // The audit recorder locks the per-tenant log before appending, so the
+    // first chain-signed event this endpoint emits calls `flock`. That event is
+    // `host.flow.allowed`, written on the first egress the gate permits — so a
+    // missing `flock` SIGSYS-kills the endpoint at the moment it starts
+    // working, after the connect it was about to report succeeded. The
+    // confinement already grants Landlock write on the audit dir; this is the
+    // syscall that makes the grant usable.
+    ("flock", libc::SYS_flock),
+    // ...and `fdatasync` to make the append durable. The audit chain writes
+    // each entry then syncs it, so both syscalls are on the same first-event
+    // path; allowing only the lock moves the kill one syscall later.
+    ("fdatasync", libc::SYS_fdatasync),
     ("openat", libc::SYS_openat),
     ("close", libc::SYS_close),
     // glibc's resolver seeks while reading /etc/hosts (getaddrinfo); a missing

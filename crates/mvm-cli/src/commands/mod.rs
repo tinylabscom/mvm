@@ -151,12 +151,12 @@ pub(in crate::commands) enum Commands {
     /// Manage versioned packs (list/rollback/prune/download/update)
     #[command(display_order = 9)]
     Pack(pack::Args),
-    /// SDK transport surface (`run --mode live/plan`). Hidden: the user-facing
-    /// transient-run role folded into `machine run`; `run` survives only as the
-    /// SDK Sandbox launcher the Python/TS SDKs shell to, so it stays hidden
-    /// rather than break that transport.
-    #[command(hide = true)]
-    Run(vm::exec::RunArgs),
+    /// Run one command in a fresh transient microVM, then tear it down
+    ///
+    /// The argument surface still differs from `machine run` in both
+    /// directions; consolidating the two into one struct is the next step.
+    #[command(display_order = 2)]
+    Run(vm::exec::TransientRunArgs),
     /// Internal SDK host-dispatch transport for `MVM_NO_VM=1`.
     #[command(name = "__sdk-no-vm", hide = true)]
     SdkNoVm(vm::sdk_no_vm::Args),
@@ -177,52 +177,52 @@ pub(in crate::commands) enum Commands {
     #[cfg(feature = "builder-vm")]
     BuilderShellJob(builder_shell_job::Args),
     /// Environment / install lifecycle (bootstrap, update, sign, …)
-    #[command(hide = true)]
+    #[command(display_order = 10)]
     Env(env::group::Args),
     /// Manage built manifest slots
-    #[command(hide = true)]
+    #[command(display_order = 10)]
     Manifest(manifest::Args),
     /// Inspect cached OCI images
-    #[command(hide = true)]
+    #[command(display_order = 11)]
     Image(image::Args),
     /// Inspect the dm-thin storage pool
     #[command(hide = true)]
     Storage(storage::Args),
     /// Print shell configuration (completions + dev aliases) to stdout
-    #[command(hide = true)]
+    #[command(display_order = 14)]
     ShellInit(env::shell_init::Args),
     /// Operational / observability commands (metrics, config)
-    #[command(hide = true)]
+    #[command(display_order = 14)]
     Ops(ops::group::Args),
     /// Manage named dev networks
-    #[command(hide = true)]
+    #[command(display_order = 12)]
     Network(ops::network::Args),
     /// Browse the bundled image catalog
-    #[command(hide = true)]
+    #[command(display_order = 11)]
     Catalog(catalog::Args),
     /// Manage the cache directory (~/.mvm/cache)
-    #[command(hide = true)]
+    #[command(display_order = 12)]
     Cache(ops::cache::Args),
-    /// Manage the supervisor warm pool (pre-spawned standbys for fast `up`)
-    #[command(hide = true)]
+    /// Manage the supervisor warm pool (pre-spawned standbys for a fast `run`)
+    #[command(display_order = 12)]
     Pool(pool::Args),
     /// Converge the VM name registry with on-disk runtime state
     #[command(hide = true)]
     Reconcile(ops::reconcile::Args),
     /// Manage local secret namespaces
-    #[command(hide = true)]
+    #[command(display_order = 13)]
     Secret(ops::secret::Args),
     /// Seal or verify portable VM bundles
-    #[command(hide = true)]
+    #[command(display_order = 13)]
     Bundle(bundle::Args),
     /// Manage trusted bundle publishers
-    #[command(hide = true)]
+    #[command(display_order = 13)]
     Trust(trust::Args),
     /// Inspect cached application dependencies
-    #[command(hide = true)]
+    #[command(display_order = 14)]
     Deps(deps::Args),
     /// Pack or verify signed `.mvm` artifacts
-    #[command(hide = true)]
+    #[command(display_order = 13)]
     Artifact(vm::artifact::Args),
     /// Host-side seccomp syscall audit (developer tooling).
     #[command(name = "seccomp-audit", hide = true)]

@@ -103,6 +103,16 @@ pub(in crate::commands) enum RunProfile {
     Permissive,
 }
 
+/// A run boots from exactly one source. Spelling the other four at each flag is
+/// what let `run` and `machine run` disagree about which sources exist at all.
+const SOURCES_EXCEPT_IMAGE: [&str; 4] = ["manifest", "flake", "runtime_pack", "deployment"];
+const SOURCES_EXCEPT_MANIFEST: [&str; 4] = ["image", "flake", "runtime_pack", "deployment"];
+const SOURCES_EXCEPT_FLAKE: [&str; 4] = ["image", "manifest", "runtime_pack", "deployment"];
+const SOURCES_EXCEPT_RUNTIME_PACK: [&str; 4] = ["image", "manifest", "flake", "deployment"];
+const SOURCES_EXCEPT_DEPLOYMENT: [&str; 4] = ["image", "manifest", "flake", "runtime_pack"];
+const SOURCES_EXCEPT_RUNTIME: [&str; 5] =
+    ["image", "manifest", "flake", "runtime_pack", "deployment"];
+
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct RunArgs {
     /// The transport this launch derived, carried to admission so the signed
@@ -110,16 +120,21 @@ pub(in crate::commands) struct RunArgs {
     /// machine surface derives it from what the workload declares it needs.
     #[arg(skip)]
     pub network_mode: mvm_contract::plan::NetworkMode,
-    /// Boot a pre-built manifest (path to `mvm.toml`, its directory, or a
-    /// legacy slot name). If omitted, the bundled default microVM image is used.
-    #[arg(short = 'm', long, conflicts_with = "image")]
+    /// Boot a pre-built manifest (mvm.toml, a directory, or a slot).
+    #[arg(short = 'm', long, value_name = "PATH", conflicts_with_all = SOURCES_EXCEPT_MANIFEST)]
     pub manifest: Option<String>,
-    /// Pull or reuse a cached OCI image reference and boot its materialized rootfs.
-    ///
-    /// The image is resolved through the local OCI cache first. A cache miss
-    /// performs the existing verified OCI pull and rootfs materialization path.
-    #[arg(long, value_name = "REF")]
+    /// Boot an OCI image (resolved through the local cache first).
+    #[arg(long, value_name = "REF", conflicts_with_all = SOURCES_EXCEPT_IMAGE)]
     pub image: Option<String>,
+    /// Build and boot a Nix flake.
+    #[arg(long, value_name = "PATH", conflicts_with_all = SOURCES_EXCEPT_FLAKE)]
+    pub flake: Option<String>,
+    /// Select a flake package variant.
+    #[arg(long, value_name = "PROFILE", requires = "flake")]
+    pub flake_profile: Option<String>,
+    /// Boot a local attested deployment (deploy.json plus rootfs.ext4).
+    #[arg(long, value_name = "DIR", conflicts_with_all = SOURCES_EXCEPT_DEPLOYMENT)]
+    pub deployment: Option<PathBuf>,
     /// Internal (not a CLI flag): warm-pool size for this run, set by
     /// `machine run` dispatch from the resolved run mode. `> 0` ⇒ eligible to
     /// claim a pre-booted standby + replenish the pool.
@@ -131,20 +146,22 @@ pub(in crate::commands) struct RunArgs {
     /// Internal (not a CLI flag): optional foreground transient VM identity.
     #[arg(skip)]
     pub vm_name: Option<String>,
-    /// Internal (not a CLI flag): boot from a verified attested runtime pack
-    /// instead of `--manifest`/`--image`/the bundled default. Set by
-    /// `machine run --runtime-pack`.
-    #[arg(skip)]
+    /// Boot a verified attested runtime pack.
+    #[arg(long, conflicts_with_all = SOURCES_EXCEPT_RUNTIME_PACK)]
     pub runtime_pack: bool,
-    /// Enable dev-tier outbound networking (broad egress + DNS). Off by
-    /// default (deny-all). Narrow it with `--allow-host`.
+    /// Boot a named runtime from the built-in catalog.
+    #[arg(long, value_name = "NAME", conflicts_with_all = SOURCES_EXCEPT_RUNTIME)]
+    pub runtime: Option<String>,
+    /// Do not infer a runtime from the command or working directory.
+    #[arg(long, conflicts_with = "runtime")]
+    pub no_detect: bool,
+    /// Enable outbound networking (off by default).
     #[arg(long)]
     pub net: bool,
-    /// Allow egress only to these hosts: `HOST[:PORT]` (PORT defaults to
-    /// 443), repeatable. Implies networking and **wins over `--net`**.
+    /// Allow outbound access to HOST[:PORT] (repeatable).
     #[arg(long = "allow-host", value_name = "HOST[:PORT]")]
     pub allow_host: Vec<String>,
-    /// vCPU cores the guest sees (default: 2). Not a host CPU share.
+    /// Set how many vCPUs the guest sees (not a host CPU share).
     #[arg(long, default_value = "2")]
     pub cpus: u32,
     /// Cap host CPU time in millicores (1500 = 1.5 cores); not `--cpus`.
@@ -153,92 +170,44 @@ pub(in crate::commands) struct RunArgs {
     /// Read grants (CPU, wall clock, egress) from a JSON file.
     #[arg(long = "grants-file", value_name = "PATH")]
     pub grants_file: Option<PathBuf>,
-    /// Memory (supports human-readable: 512M, 1G, ...)
+    /// Set memory (for example, 512M or 1G).
     #[arg(long, default_value = "512M")]
     pub memory: String,
-    /// Security profile for the transient run.
+    /// Select a security profile.
     #[arg(long, value_enum, default_value = "standard")]
     pub profile: RunProfile,
-    /// Attach a live read-only host directory at a guest path.
-    /// Format: `HOST_PATH:/GUEST_PATH:ro`. Repeatable.
-    #[arg(long = "mount", value_name = "HOST:GUEST:ro")]
+    /// Attach a read-only host directory (HOST:/GUEST:ro, repeatable).
+    #[arg(long = "mount", visible_alias = "volume", value_name = "HOST:GUEST:ro")]
     pub mounts: Vec<String>,
-    /// Explicit environment variable to inject (KEY=VALUE). Repeatable.
-    /// Disabled by `--profile restrictive`.
+    /// Inject an environment variable (KEY=VALUE, repeatable).
     #[arg(short, long)]
     pub env: Vec<String>,
-    /// Per-command timeout in seconds. Unset ⇒ no per-command kill.
+    /// Set a per-command timeout in seconds.
     #[arg(long)]
     pub timeout: Option<u64>,
-    /// Write a signed execution receipt to this path. The receipt records
-    /// command/env/mount hashes, output hashes, and exit status; it never
-    /// stores raw argv, env values, stdout, or stderr.
+    /// Write a signed execution receipt to this path.
     #[arg(long, value_name = "PATH")]
     pub receipt: Option<PathBuf>,
-    /// Print a machine-readable, redacted execution summary as JSON.
-    ///
-    /// Guest stdout/stderr are not streamed in this mode; the JSON carries
-    /// only byte counts and hashes. Combine with `--receipt` when a signed
-    /// artifact is needed.
+    /// Print a redacted JSON execution summary (no guest output).
     #[arg(long)]
     pub json: bool,
-    /// Validate and explain the effective run plan without booting a VM.
-    ///
-    /// This preflight never resolves, builds, or starts the selected image. It
-    /// reports hashes and policy-relevant metadata only; raw argv, env values,
-    /// and host paths are omitted.
+    /// Validate the run plan without booting a VM.
     #[arg(long)]
     pub dry_run: bool,
-    /// Path to an mvmforge launch document. Mutually exclusive with trailing argv.
+    /// Path to a launch document (excludes trailing argv).
     #[arg(long, value_name = "PATH", conflicts_with = "argv")]
     pub launch_plan: Option<String>,
-    /// SDK transport mode for `mvmctl run`.
-    ///
-    /// - `--mode plan`: synthesize an ExecutionPlan per Sandbox call
-    ///   and route through `mvm_hostd::supervisor::admit_for_run`; no
-    ///   microVM ever boots.
-    /// - `--mode live`: spawn the user's script with `MVM_SDK_MODE=live`
-    ///   so the SDK shells each `Sandbox` operation to existing
-    ///   `mvmctl up` / `proc start` / `fs write` / `down` against a
-    ///   real microVM.
-    /// - `--mode record` redirects users to `mvmctl compile` (where
-    ///   record is the default mode).
-    ///
-    /// When unset, the verb behaves as a transient-sandbox runner
-    /// over the trailing argv.
-    #[arg(long = "mode", value_enum)]
-    pub mode: Option<RunMode>,
-    /// Friendly alias for `--mode live`.
-    #[arg(long = "dev", conflicts_with_all = ["prod", "mode"])]
-    pub dev: bool,
-    /// Friendly alias for `--mode record`. `mvmctl run --prod`
-    /// redirects users to `mvmctl compile`, where record is the
-    /// default.
-    #[arg(long = "prod", conflicts_with_all = ["dev", "mode"])]
+    /// Require production policy (digest-pinned, verified images).
+    #[arg(long = "prod")]
     pub prod: bool,
-    /// Argv to run inside the guest (use `--` to separate). Required unless
-    /// `--launch-plan` is supplied. Under `--mode plan`, the first
-    /// argv element is a `.py`/`.ts`/`.js` script path.
+    /// Command to run inside the guest (after `--`).
     // No `allow_hyphen_values` — see `Args::argv` above.
-    #[arg(
-        trailing_var_arg = true,
-        required_unless_present_any = ["launch_plan", "mode", "dev", "prod"]
-    )]
+    #[arg(trailing_var_arg = true)]
     pub argv: Vec<String>,
-    /// Acknowledge a divergence class on the plan-mode admission
-    /// path (repeatable). Unacknowledged divergence refuses
-    /// admission: what you previewed is not what would ship.
-    #[arg(long = "ack-divergence", value_name = "KIND")]
-    pub ack_divergence: Vec<String>,
-    /// Internal (not a CLI flag): raw `--agent-verb` values forwarded from
-    /// `machine run`. Empty ⇒ the computed sealed-prod default is used at
-    /// the admit site.
-    #[arg(skip)]
+    /// Allow a production-safe guest-agent verb (repeatable).
+    #[arg(long = "agent-verb", value_name = "VERB")]
     pub agent_verb: Vec<String>,
-    /// Bind a host service this workload may call over the broker channel
-    /// (repeatable). Baked into the signed `ExecutionPlan`; the broker refuses
-    /// any service absent from the set, and binding an SDK-served service
-    /// attaches the optional SDK sidecar read-only.
+    /// Bind a host service this workload may call (repeatable).
     #[arg(long = "host-service", value_name = "SERVICE")]
     pub host_service: Vec<String>,
     /// Internal (not a CLI flag): stdin bytes to forward into the guest `Exec`
@@ -250,11 +219,247 @@ pub(in crate::commands) struct RunArgs {
     /// forwarded from `machine run`'s `--healthcheck` + tuning flags.
     #[arg(skip)]
     pub healthcheck: Option<mvm_contract::ir::HealthCheck>,
-    /// Requested workload hypervisor from `machine run --hypervisor <x>`. Set
-    /// programmatically by `MachineRunArgs::into_run_args`; the transient backend
-    /// selection reads it (taking precedence over the `MVM_HYPERVISOR` env var).
-    #[arg(skip)]
+    /// Select the VMM (firecracker, hvf, libkrun, or qemu).
+    #[arg(long, value_name = "HYPERVISOR")]
     pub hypervisor: Option<String>,
+}
+
+/// Whether a verb infers a boot source it was not given.
+///
+/// `run` is the one-shot where "just run this" is the whole point, so it infers.
+/// `machine run` creates a named — possibly persistent — machine, and guessing
+/// its base image from whatever directory you happened to be standing in is a
+/// footgun there: `machine run` inside any Rust checkout would silently build a
+/// machine on `rust:1-alpine`. It keeps its own error, which names every way to
+/// supply a source. `--runtime` still works on both, because that is the user
+/// naming one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::commands) enum Inference {
+    /// Infer from `mvm.toml`, then argv[0], then a project file.
+    Enabled,
+    /// Only an explicit `--runtime` resolves.
+    ExplicitOnly,
+}
+
+/// Where a run's boot source came from once every rule has had its say.
+///
+/// Returned rather than logged from inside the resolver so the caller decides
+/// how to say it: a boot the user did not explicitly ask for must not be silent
+/// about why it happened.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::commands) enum ResolvedSource {
+    /// The user named a source; nothing was inferred.
+    Explicit,
+    /// An `mvm.toml` in or above the working directory supplied it.
+    ProjectManifest(PathBuf),
+    /// The command or the working directory selected a catalog runtime.
+    Runtime(mvm_core::runtime_catalog::Detection),
+    /// Nothing matched; the bundled default image is used.
+    BundledDefault,
+}
+
+impl ResolvedSource {
+    /// Say what was inferred, on stderr.
+    ///
+    /// Not `ui::info`, which is opt-in chatter shown only under `--verbose`: a
+    /// boot whose image the user did not choose has to announce itself every
+    /// time, or the first they learn of it is a "command not found" from a
+    /// guest they never picked. stderr keeps `--json` stdout machine-readable.
+    pub(in crate::commands) fn announce(&self) {
+        if let Some(note) = self.note() {
+            eprintln!("[mvm] {note}");
+        }
+    }
+
+    /// The line to print before booting, or `None` when the user already knows
+    /// what they asked for.
+    pub(in crate::commands) fn note(&self) -> Option<String> {
+        match self {
+            ResolvedSource::Explicit | ResolvedSource::BundledDefault => None,
+            ResolvedSource::ProjectManifest(path) => Some(format!(
+                "using {} from the project directory",
+                path.display()
+            )),
+            ResolvedSource::Runtime(d) => Some(format!(
+                "detected {} from {} — booting {}",
+                d.runtime,
+                d.via.describe(),
+                d.image
+            )),
+        }
+    }
+}
+
+/// Settle which source a run boots from, filling `args` in place.
+///
+/// One resolver for both verbs. The order is the whole contract:
+///
+/// 1. An explicit `--image` / `--manifest` / `--flake` / `--deployment` /
+///    `--runtime-pack` wins and nothing is inferred.
+/// 2. `--runtime <name>` resolves against the built-in catalog. An unknown name
+///    refuses — it never falls through to a default.
+/// 3. `--no-detect`, or a verb that only takes explicit sources, stops here.
+/// 4. An `mvm.toml` in or above the working directory, found by the same
+///    walk-up `mvmctl build` already uses.
+/// 5. The command being run, then a project file in the working directory.
+/// 6. The bundled default image.
+///
+/// Inference only ever picks a *source*. It does not touch policy: a detected
+/// run admits through the same signed `ExecutionPlan` with the same default-deny
+/// egress as one that named its image, which is what
+/// `a_detected_run_is_still_deny_all_and_admitted` pins.
+pub(in crate::commands) fn resolve_run_source(
+    args: &mut RunArgs,
+    cwd: &std::path::Path,
+    inference: Inference,
+) -> Result<ResolvedSource> {
+    if args.image.is_some()
+        || args.manifest.is_some()
+        || args.flake.is_some()
+        || args.deployment.is_some()
+        || args.runtime_pack
+    {
+        return Ok(ResolvedSource::Explicit);
+    }
+
+    let catalog = mvm_core::runtime_catalog::RuntimeCatalog::builtin();
+
+    if let Some(name) = args.runtime.clone() {
+        let detection = catalog
+            .resolve_named(&name)
+            .map_err(|e| anyhow::anyhow!(e))?;
+        args.image = Some(detection.image.clone());
+        return Ok(ResolvedSource::Runtime(detection));
+    }
+
+    if args.no_detect || inference == Inference::ExplicitOnly {
+        return Ok(ResolvedSource::BundledDefault);
+    }
+
+    if let Some(manifest) = mvm_core::domain::manifest::discover_manifest_from_dir(cwd)
+        .context("looking for an mvm.toml in the working directory")?
+    {
+        args.manifest = Some(manifest.display().to_string());
+        return Ok(ResolvedSource::ProjectManifest(manifest));
+    }
+
+    let present = project_files_in(cwd);
+    if let Some(detection) = catalog.detect(args.argv.first().map(String::as_str), &present) {
+        args.image = Some(detection.image.clone());
+        return Ok(ResolvedSource::Runtime(detection));
+    }
+
+    Ok(ResolvedSource::BundledDefault)
+}
+
+/// The plain filenames directly in `cwd`.
+///
+/// Detection reads names only — never contents — so a directory the user merely
+/// stood in cannot influence anything but which image is chosen. An unreadable
+/// directory detects nothing rather than failing the run.
+fn project_files_in(cwd: &std::path::Path) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(cwd) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
+        .filter_map(|e| e.file_name().into_string().ok())
+        .collect()
+}
+
+/// The SDK transport surface, carried by `mvmctl run` alone.
+///
+/// These are kept out of [`RunArgs`] deliberately. `RunArgs` is flattened into
+/// both `run` and `machine run` so a shared flag is declared exactly once;
+/// `--mode`/`--dev`/`--ack-divergence` are not shared — `machine run` is the
+/// beginner contract and has no business growing an SDK transport — so putting
+/// them here is what lets the rest be flattened.
+#[derive(ClapArgs, Debug, Clone, Default)]
+pub(in crate::commands) struct SdkTransportArgs {
+    /// SDK transport mode for `mvmctl run`.
+    ///
+    /// - `--mode plan`: synthesize an ExecutionPlan per Sandbox call
+    ///   and route through `mvm_hostd::supervisor::admit_for_run`; no
+    ///   microVM ever boots.
+    /// - `--mode live`: spawn the user's script with `MVM_SDK_MODE=live`
+    ///   so the SDK shells each `Sandbox` operation to existing
+    ///   `mvmctl` verbs against a real microVM.
+    /// - `--mode record` redirects users to `mvmctl compile` (where
+    ///   record is the default mode).
+    ///
+    /// When unset, the verb behaves as a transient-sandbox runner
+    /// over the trailing argv.
+    #[arg(long = "mode", value_enum)]
+    pub mode: Option<RunMode>,
+    /// Friendly alias for `--mode live`.
+    #[arg(long = "dev", conflicts_with_all = ["prod", "mode"])]
+    pub dev: bool,
+    /// Acknowledge a divergence class on the plan-mode admission
+    /// path (repeatable). Unacknowledged divergence refuses
+    /// admission: what you previewed is not what would ship.
+    #[arg(long = "ack-divergence", value_name = "KIND")]
+    pub ack_divergence: Vec<String>,
+}
+
+/// `mvmctl run` — the shared execution surface plus the SDK transport.
+#[derive(ClapArgs, Debug, Clone, Default)]
+pub(in crate::commands) struct TransientRunArgs {
+    #[command(flatten)]
+    pub run: RunArgs,
+    #[command(flatten)]
+    pub sdk: SdkTransportArgs,
+}
+
+/// The same values clap fills in when a flag is absent.
+///
+/// Two consumers want a `RunArgs` without spelling thirty fields: the
+/// `machine` dispatch sites that build one programmatically, and the tests.
+/// Writing them out by hand meant every new field edited every one of those
+/// sites, so they drifted toward whatever the author happened to type rather
+/// than toward what the CLI actually does.
+///
+/// The risk this introduces is that these values and the `#[arg(default_value)]`
+/// attributes above disagree. `parsed_defaults_match_the_default_impl` is the
+/// witness: it parses a bare `run -- x` and compares the result field by field.
+impl Default for RunArgs {
+    fn default() -> Self {
+        Self {
+            network_mode: mvm_contract::plan::NetworkMode::default(),
+            manifest: None,
+            image: None,
+            flake: None,
+            flake_profile: None,
+            deployment: None,
+            warm_pool_size: 0,
+            pty: false,
+            vm_name: None,
+            runtime_pack: false,
+            runtime: None,
+            no_detect: false,
+            net: false,
+            allow_host: Vec::new(),
+            cpus: 2,
+            cpu_limit: None,
+            grants_file: None,
+            memory: "512M".to_string(),
+            profile: RunProfile::Standard,
+            mounts: Vec::new(),
+            env: Vec::new(),
+            timeout: None,
+            receipt: None,
+            json: false,
+            dry_run: false,
+            launch_plan: None,
+            prod: false,
+            argv: Vec::new(),
+            agent_verb: Vec::new(),
+            host_service: Vec::new(),
+            stdin: Vec::new(),
+            healthcheck: None,
+            hypervisor: None,
+        }
+    }
 }
 
 /// SDK transport modes for `mvmctl run`. Mirrors the `Mode` enum on
@@ -340,6 +545,36 @@ pub(in crate::commands) fn run_secure(cli: &Cli, args: RunArgs, cfg: &MvmConfig)
     run_secure_with_source(cli, args, cfg, None)
 }
 
+/// `mvmctl run`: peel off the SDK transport, then fall through to the ordinary
+/// transient run every other caller uses.
+///
+/// The peel happens here rather than inside `run_secure_with_source` so the
+/// shared execution path never sees the transport flags, which is what lets
+/// `RunArgs` be flattened into `machine run` without dragging them along.
+pub(in crate::commands) fn run_transient(
+    cli: &Cli,
+    mut args: TransientRunArgs,
+    cfg: &MvmConfig,
+) -> Result<()> {
+    if let Some(mode) = resolve_run_mode(&args.sdk, &args.run)? {
+        return super::run_plan::dispatch_sdk_mode(mode, &args.run, &args.sdk);
+    }
+    // `argv` used to be `required_unless_present_any` over `launch_plan` /
+    // `mode` / `dev` / `prod`. It cannot stay a clap attribute now that the
+    // field is shared: `machine run -d` legitimately boots with no command, and
+    // naming `mode`/`dev` from the shared struct would reference args that do
+    // not exist on the `machine` side. So the one verb that needs it checks it.
+    let cwd = std::env::current_dir().context("resolving the working directory")?;
+    resolve_run_source(&mut args.run, &cwd, Inference::Enabled)?.announce();
+    if args.run.argv.is_empty() && args.run.launch_plan.is_none() {
+        anyhow::bail!(
+            "`mvmctl run` needs a command: `mvmctl run -- <cmd>`. Use `--launch-plan <path>` \
+             for a launch document, or `mvmctl machine run -d` to boot a machine with no command."
+        );
+    }
+    run_secure(cli, args.run, cfg)
+}
+
 /// Run a transient workload through the normal admitted path, optionally
 /// overriding the user-facing image lookup with an already-verified source.
 /// The override is used only by content-addressed restore, where following a
@@ -355,9 +590,6 @@ pub(in crate::commands) fn run_secure_with_source(
     // in. `--dev` (alias for live) is refused in v1; `--prod` (alias
     // for record) redirects to `mvmctl compile`; `--mode plan` routes
     // through the plan-mode admission dry-run.
-    if let Some(mode) = resolve_run_mode(&args)? {
-        return super::run_plan::dispatch_sdk_mode(mode, &args);
-    }
     validate_run_profile(&args)?;
     if args.dry_run {
         let summary = RunPreflightSummary::from_args(&args)?;
@@ -609,15 +841,18 @@ pub(in crate::commands) fn run_secure_with_source(
 /// Env-var precedence matches `mvmctl compile`: `MVM_SDK_MODE`
 /// supersedes any flag-only override so a wrapper script can pin a
 /// mode without the user retyping `--mode`.
-pub(in crate::commands) fn resolve_run_mode(args: &RunArgs) -> Result<Option<RunMode>> {
+pub(in crate::commands) fn resolve_run_mode(
+    sdk: &SdkTransportArgs,
+    run: &RunArgs,
+) -> Result<Option<RunMode>> {
     if let Ok(env_mode) = std::env::var(mvm_sdk::env::MVM_SDK_MODE_ENV) {
         return Ok(Some(parse_env_run_mode(&env_mode)?));
     }
-    if args.dev {
+    if sdk.dev {
         return Ok(Some(RunMode::Live));
     }
-    if args.prod {
-        if args.image.is_some() {
+    if run.prod {
+        if run.image.is_some() {
             return Ok(None);
         }
         anyhow::bail!(
@@ -626,7 +861,7 @@ pub(in crate::commands) fn resolve_run_mode(args: &RunArgs) -> Result<Option<Run
              on `mvmctl run` is for the live sandbox runner, not for SDK record-mode)."
         );
     }
-    match args.mode {
+    match sdk.mode {
         None => Ok(None),
         Some(RunMode::Live) => Ok(Some(RunMode::Live)),
         Some(RunMode::Record) => anyhow::bail!(
@@ -1444,7 +1679,7 @@ mod host_service_flag_tests {
         let crate::commands::machine::MachineAction::Run(run) = group.action else {
             panic!("expected machine run");
         };
-        assert_eq!(run.host_service, ["host.audit.v1", "host.time.v1"]);
+        assert_eq!(run.run.host_service, ["host.audit.v1", "host.time.v1"]);
         let forwarded = run.into_run_args_for_test().into_exec_args();
         assert_eq!(forwarded.host_service, ["host.audit.v1", "host.time.v1"]);
     }
@@ -1624,61 +1859,347 @@ mod tests {
 
     fn run_args(profile: RunProfile) -> RunArgs {
         RunArgs {
-            network_mode: mvm_contract::plan::NetworkMode::default(),
-            warm_pool_size: 0,
-            pty: false,
-            vm_name: None,
-            manifest: None,
-            image: None,
-            runtime_pack: false,
-            net: false,
-            allow_host: Vec::new(),
-            cpus: 2,
-            cpu_limit: None,
-            grants_file: None,
-            memory: "512M".to_string(),
             profile,
-            agent_verb: Vec::new(),
-            mounts: Vec::new(),
-            env: Vec::new(),
             timeout: Some(60),
-            receipt: None,
-            json: false,
-            dry_run: false,
-            launch_plan: None,
-            mode: None,
-            dev: false,
-            prod: false,
             argv: vec!["/bin/true".to_string()],
+            ..Default::default()
+        }
+    }
+
+    /// The resolver decides which *source* a run boots from. These pin the
+    /// order, because the order is the whole contract — and pin that inference
+    /// never reaches policy.
+    mod source_resolution {
+        use super::*;
+
+        fn touch(dir: &std::path::Path, name: &str) {
+            std::fs::write(dir.join(name), b"").expect("write fixture file");
+        }
+
+        /// A directory with no `.git` above it, so the manifest walk-up stops
+        /// there rather than finding this repo's own `mvm.toml`.
+        fn sealed_dir() -> tempfile::TempDir {
+            let dir = tempfile::tempdir().expect("tmpdir");
+            std::fs::create_dir(dir.path().join(".git")).expect("git boundary");
+            dir
+        }
+
+        #[test]
+        fn an_explicit_image_is_never_second_guessed() {
+            let dir = sealed_dir();
+            touch(dir.path(), "package.json");
+            let mut args = RunArgs {
+                image: Some("alpine:3.20".to_string()),
+                argv: vec!["npm".to_string()],
+                ..Default::default()
+            };
+            let resolved =
+                resolve_run_source(&mut args, dir.path(), Inference::Enabled).expect("resolves");
+            assert_eq!(resolved, ResolvedSource::Explicit);
+            assert_eq!(args.image.as_deref(), Some("alpine:3.20"));
+            assert!(
+                resolved.note().is_none(),
+                "nothing was inferred to announce"
+            );
+        }
+
+        #[test]
+        fn a_named_runtime_sets_its_image() {
+            let dir = sealed_dir();
+            let mut args = RunArgs {
+                runtime: Some("go".to_string()),
+                ..Default::default()
+            };
+            let resolved =
+                resolve_run_source(&mut args, dir.path(), Inference::Enabled).expect("resolves");
+            assert!(matches!(resolved, ResolvedSource::Runtime(_)));
+            assert_eq!(args.image.as_deref(), Some("golang:1-alpine"));
+        }
+
+        #[test]
+        fn an_unknown_named_runtime_refuses_rather_than_falling_through() {
+            let dir = sealed_dir();
+            let mut args = RunArgs {
+                runtime: Some("pyhton".to_string()),
+                ..Default::default()
+            };
+            let err = resolve_run_source(&mut args, dir.path(), Inference::Enabled)
+                .expect_err("must refuse");
+            assert!(err.to_string().contains("unknown runtime"), "{err}");
+            assert!(
+                args.image.is_none(),
+                "a refused run must not have chosen an image anyway"
+            );
+        }
+
+        #[test]
+        fn no_detect_leaves_the_bundled_default_even_in_a_project() {
+            let dir = sealed_dir();
+            touch(dir.path(), "Cargo.toml");
+            let mut args = RunArgs {
+                no_detect: true,
+                argv: vec!["cargo".to_string()],
+                ..Default::default()
+            };
+            let resolved =
+                resolve_run_source(&mut args, dir.path(), Inference::Enabled).expect("resolves");
+            assert_eq!(resolved, ResolvedSource::BundledDefault);
+            assert!(args.image.is_none());
+            assert!(args.manifest.is_none());
+        }
+
+        #[test]
+        fn a_project_manifest_beats_the_runtime_catalog() {
+            // The project said what it is; the command is only a hint.
+            let dir = sealed_dir();
+            std::fs::write(
+                dir.path().join("mvm.toml"),
+                b"schema_version = 1\nname = \"demo\"\nimage = \"alpine:3.20\"\n",
+            )
+            .expect("write manifest");
+            touch(dir.path(), "package.json");
+            let mut args = RunArgs {
+                argv: vec!["npm".to_string()],
+                ..Default::default()
+            };
+            let resolved =
+                resolve_run_source(&mut args, dir.path(), Inference::Enabled).expect("resolves");
+            assert!(matches!(resolved, ResolvedSource::ProjectManifest(_)));
+            assert!(args.manifest.is_some());
+            assert!(args.image.is_none(), "the manifest supplies the image");
+        }
+
+        #[test]
+        fn the_catalog_runs_when_there_is_no_manifest() {
+            let dir = sealed_dir();
+            touch(dir.path(), "Cargo.toml");
+            let mut args = RunArgs::default();
+            let resolved =
+                resolve_run_source(&mut args, dir.path(), Inference::Enabled).expect("resolves");
+            assert!(matches!(resolved, ResolvedSource::Runtime(_)));
+            assert_eq!(args.image.as_deref(), Some("rust:1-alpine"));
+        }
+
+        #[test]
+        fn nothing_recognised_falls_back_to_the_bundled_default() {
+            let dir = sealed_dir();
+            touch(dir.path(), "README.md");
+            let mut args = RunArgs {
+                argv: vec!["./mystery".to_string()],
+                ..Default::default()
+            };
+            let resolved =
+                resolve_run_source(&mut args, dir.path(), Inference::Enabled).expect("resolves");
+            assert_eq!(resolved, ResolvedSource::BundledDefault);
+            assert!(args.image.is_none());
+        }
+
+        /// Inference picks a source. It must not pick a posture: a detected run
+        /// carries the same profile and the same deny-all egress as one that
+        /// named its image, or "convenience" would be a policy bypass.
+        #[test]
+        fn a_detected_run_is_still_deny_all_and_standard_profile() {
+            let dir = sealed_dir();
+            touch(dir.path(), "package.json");
+            let mut args = RunArgs::default();
+            let before = (args.profile, args.net, args.allow_host.clone());
+
+            resolve_run_source(&mut args, dir.path(), Inference::Enabled).expect("resolves");
+
+            assert_eq!(args.image.as_deref(), Some("node:22-alpine"));
+            assert_eq!(
+                (args.profile, args.net, args.allow_host.clone()),
+                before,
+                "detection changed a policy field"
+            );
+            assert_eq!(args.profile, RunProfile::Standard);
+            assert!(!args.net, "detected runs stay deny-all");
+            assert!(args.allow_host.is_empty());
+        }
+
+        /// The verb that creates a named machine must not pick its base image
+        /// from whatever directory the user happened to be standing in. Before
+        /// this split, `machine run` inside any Rust checkout silently chose
+        /// `rust:1-alpine`.
+        #[test]
+        fn explicit_only_ignores_the_working_directory() {
+            let dir = sealed_dir();
+            touch(dir.path(), "Cargo.toml");
+            let mut args = RunArgs {
+                argv: vec!["cargo".to_string(), "test".to_string()],
+                ..Default::default()
+            };
+            let resolved = resolve_run_source(&mut args, dir.path(), Inference::ExplicitOnly)
+                .expect("resolves");
+            assert_eq!(resolved, ResolvedSource::BundledDefault);
+            assert!(
+                args.image.is_none() && args.manifest.is_none(),
+                "explicit-only inferred a source anyway"
+            );
+        }
+
+        /// …but naming one is the user speaking, so it resolves on both verbs.
+        #[test]
+        fn explicit_only_still_resolves_a_named_runtime() {
+            let dir = sealed_dir();
+            let mut args = RunArgs {
+                runtime: Some("python".to_string()),
+                ..Default::default()
+            };
+            let resolved = resolve_run_source(&mut args, dir.path(), Inference::ExplicitOnly)
+                .expect("resolves");
+            assert!(matches!(resolved, ResolvedSource::Runtime(_)));
+            assert_eq!(args.image.as_deref(), Some("python:3.12-alpine"));
+        }
+
+        #[test]
+        fn an_unreadable_directory_detects_nothing_instead_of_failing() {
+            let mut args = RunArgs {
+                argv: vec!["./mystery".to_string()],
+                ..Default::default()
+            };
+            let missing = std::path::Path::new("/nonexistent-mvm-detect-fixture");
+            // The manifest walk-up canonicalises, so a missing dir is an error
+            // there; what must not happen is a panic or a silent image choice.
+            let result = resolve_run_source(&mut args, missing, Inference::Enabled);
+            assert!(args.image.is_none());
+            assert!(result.is_err() || result.expect("ok") == ResolvedSource::BundledDefault);
+        }
+    }
+
+    /// `Default` is hand-written, so it can drift from the `default_value`
+    /// attributes clap actually applies. Parse a bare invocation and compare.
+    #[test]
+    fn parsed_defaults_match_the_default_impl() {
+        use clap::Parser;
+
+        let parsed = crate::commands::Cli::try_parse_from(["mvmctl", "run", "--", "x"])
+            .expect("bare `run -- x` parses");
+        let crate::commands::Commands::Run(parsed) = parsed.command else {
+            panic!("expected Commands::Run");
+        };
+        let expected = TransientRunArgs {
+            run: RunArgs {
+                argv: vec!["x".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        assert_eq!(parsed.run.cpus, expected.run.cpus, "--cpus default");
+        assert_eq!(parsed.run.memory, expected.run.memory, "--memory default");
+        assert_eq!(
+            parsed.run.profile, expected.run.profile,
+            "--profile default"
+        );
+        assert_eq!(parsed.run.net, expected.run.net, "--net default");
+        assert_eq!(parsed.run.json, expected.run.json, "--json default");
+        assert_eq!(
+            parsed.run.dry_run, expected.run.dry_run,
+            "--dry-run default"
+        );
+        assert_eq!(parsed.run.prod, expected.run.prod, "--prod default");
+        assert_eq!(
+            parsed.run.timeout, expected.run.timeout,
+            "--timeout default"
+        );
+        assert_eq!(
+            parsed.run.cpu_limit, expected.run.cpu_limit,
+            "--cpu-limit default"
+        );
+        assert_eq!(
+            parsed.run.allow_host, expected.run.allow_host,
+            "--allow-host default"
+        );
+        assert_eq!(parsed.run.mounts, expected.run.mounts, "--mount default");
+        assert_eq!(parsed.run.env, expected.run.env, "--env default");
+        assert_eq!(parsed.run.argv, expected.run.argv, "trailing argv");
+        assert_eq!(parsed.sdk.mode, expected.sdk.mode, "--mode default");
+        assert_eq!(parsed.sdk.dev, expected.sdk.dev, "--dev default");
+        assert_eq!(
+            parsed.sdk.ack_divergence, expected.sdk.ack_divergence,
+            "--ack-divergence default"
+        );
+    }
+
+    /// The shared half of `machine run` is the same `RunArgs`, so its defaults
+    /// are the same values — including `--profile`, which the two verbs used to
+    /// disagree about.
+    #[test]
+    fn machine_run_parsed_defaults_match_the_default_impl() {
+        use clap::Parser;
+
+        let parsed = crate::commands::Cli::try_parse_from(["mvmctl", "machine", "run", "--", "x"])
+            .expect("bare `machine run -- x` parses");
+        let crate::commands::Commands::Machine(machine) = parsed.command else {
+            panic!("expected Commands::Machine");
+        };
+        let crate::commands::machine::MachineAction::Run(parsed) = machine.action else {
+            panic!("expected MachineAction::Run");
+        };
+        let expected = crate::commands::machine::MachineRunArgs::default();
+
+        assert_eq!(parsed.run.cpus, expected.run.cpus, "--cpus default");
+        assert_eq!(parsed.run.memory, expected.run.memory, "--memory default");
+        assert_eq!(
+            parsed.run.profile, expected.run.profile,
+            "--profile default must match `mvmctl run`"
+        );
+        assert_eq!(parsed.detach, expected.detach, "--detach default");
+        assert_eq!(parsed.tty, expected.tty, "--tty default");
+        assert_eq!(
+            parsed.entrypoint, expected.entrypoint,
+            "--entrypoint default"
+        );
+        assert_eq!(
+            parsed.health_interval, expected.health_interval,
+            "--health-interval default"
+        );
+        assert_eq!(
+            parsed.health_timeout, expected.health_timeout,
+            "--health-timeout default"
+        );
+        assert_eq!(
+            parsed.health_retries, expected.health_retries,
+            "--health-retries default"
+        );
+        assert_eq!(
+            parsed.health_start_period, expected.health_start_period,
+            "--health-start-period default"
+        );
+    }
+
+    /// `resolve_run_mode` now reads the transport off `SdkTransportArgs` and the
+    /// shared `RunArgs` separately, so each case names which half it exercises.
+    fn sdk(mode: Option<RunMode>, dev: bool) -> SdkTransportArgs {
+        SdkTransportArgs {
+            mode,
+            dev,
             ack_divergence: Vec::new(),
-            stdin: Vec::new(),
-            healthcheck: None,
-            hypervisor: None,
-            host_service: Vec::new(),
         }
     }
 
     #[test]
     fn resolve_run_mode_returns_none_when_no_mode_flag() {
         let args = run_args(RunProfile::Standard);
-        let mode = resolve_run_mode(&args).expect("no flag resolves to None");
+        let mode = resolve_run_mode(&sdk(None, false), &args).expect("no flag resolves to None");
         assert!(mode.is_none());
     }
 
     #[test]
     fn resolve_run_mode_returns_plan_when_mode_plan() {
-        let mut args = run_args(RunProfile::Standard);
-        args.mode = Some(RunMode::Plan);
-        let mode = resolve_run_mode(&args).expect("plan resolves").unwrap();
+        let args = run_args(RunProfile::Standard);
+        let mode = resolve_run_mode(&sdk(Some(RunMode::Plan), false), &args)
+            .expect("plan resolves")
+            .unwrap();
         assert_eq!(mode, RunMode::Plan);
     }
 
     #[test]
     fn resolve_run_mode_returns_live_for_dev_alias() {
-        let mut args = run_args(RunProfile::Standard);
-        args.dev = true;
-        let mode = resolve_run_mode(&args)
-            .expect("--dev resolves to Some(Live) post-H-live")
+        let args = run_args(RunProfile::Standard);
+        let mode = resolve_run_mode(&sdk(None, true), &args)
+            .expect("--dev resolves to Some(Live)")
             .expect("must be Some(Live)");
         assert_eq!(mode, RunMode::Live);
     }
@@ -1687,9 +2208,8 @@ mod tests {
     fn resolve_run_mode_bails_redirect_for_prod_alias() {
         let mut args = run_args(RunProfile::Standard);
         args.prod = true;
-        let err = resolve_run_mode(&args).expect_err("--prod must bail");
-        let msg = err.to_string();
-        assert!(msg.contains("mvmctl compile"));
+        let err = resolve_run_mode(&sdk(None, false), &args).expect_err("--prod must bail");
+        assert!(err.to_string().contains("mvmctl compile"));
     }
 
     #[test]
@@ -1700,27 +2220,25 @@ mod tests {
                 .to_string(),
         );
         args.prod = true;
-        let mode = resolve_run_mode(&args).expect("image prod is not SDK mode");
+        let mode = resolve_run_mode(&sdk(None, false), &args).expect("image prod is not SDK mode");
         assert!(mode.is_none());
     }
 
     #[test]
     fn resolve_run_mode_returns_live_for_mode_live() {
-        let mut args = run_args(RunProfile::Standard);
-        args.mode = Some(RunMode::Live);
-        let mode = resolve_run_mode(&args)
-            .expect("--mode live resolves to Some(Live) post-H-live")
+        let args = run_args(RunProfile::Standard);
+        let mode = resolve_run_mode(&sdk(Some(RunMode::Live), false), &args)
+            .expect("--mode live resolves to Some(Live)")
             .expect("must be Some(Live)");
         assert_eq!(mode, RunMode::Live);
     }
 
     #[test]
     fn resolve_run_mode_bails_redirect_for_mode_record() {
-        let mut args = run_args(RunProfile::Standard);
-        args.mode = Some(RunMode::Record);
-        let err = resolve_run_mode(&args).expect_err("--mode record must bail");
-        let msg = err.to_string();
-        assert!(msg.contains("mvmctl compile"));
+        let args = run_args(RunProfile::Standard);
+        let err = resolve_run_mode(&sdk(Some(RunMode::Record), false), &args)
+            .expect_err("--mode record must bail");
+        assert!(err.to_string().contains("mvmctl compile"));
     }
 
     #[test]

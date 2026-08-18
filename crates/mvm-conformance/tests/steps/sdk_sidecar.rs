@@ -271,7 +271,8 @@ fn sdk_sends_host_time_request(world: &mut CliWorld) {
             let listener = tokio::net::UnixListener::bind(&server_socket)
                 .map_err(|error| error.to_string())?;
             let mut registry = mvm_hostd::broker::registry::Registry::new();
-            mvm_hostd::broker::handlers::register_bound_handlers(&mut registry, &bindings);
+            let _bound =
+                mvm_hostd::broker::handlers::register_bound_handlers(&mut registry, &bindings);
             ready_tx.send(()).map_err(|error| error.to_string())?;
             tokio::select! {
                 result = mvm_hostd::broker::server::serve_on_listener(

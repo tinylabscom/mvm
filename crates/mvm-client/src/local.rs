@@ -449,6 +449,26 @@ fn path_collision_hint(image_ref: &str) -> String {
     }
 }
 
+/// Materialize an OCI reference into a host `rootfs.ext4`, for a caller that
+/// wants the artifact rather than a running machine.
+///
+/// The build path uses this so an image-backed `mvm.toml` is materialized by
+/// exactly the code a `run --image` boots through — same pull, same hardened
+/// unpack, same runtime injection, and the same `mvm-meta.json` sidecar written
+/// beside the rootfs. A second materializer would be a second answer to "what
+/// does this image become", and the two would drift.
+///
+/// `cache_key` names the cache slot under `~/.mvm/cache/local-run/`.
+pub async fn materialize_image_rootfs(image_ref: &str, cache_key: &str) -> Result<PathBuf> {
+    resolve_local_rootfs(
+        &RootfsSource::Oci {
+            image_ref: image_ref.to_string(),
+        },
+        cache_key,
+    )
+    .await
+}
+
 /// Resolve `spec.image` to a host `rootfs.ext4` path, materializing in-process
 /// as needed (no subprocess, no CLI). Registry pulls are async; the dir +
 /// pre-materialized cases are synchronous.

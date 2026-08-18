@@ -671,8 +671,9 @@ pub(super) fn security_network_policy_default_check() -> Check {
         info: if is_deny_all {
             "deny_all (claim 10 holds — egress refused unless explicitly admitted)".to_string()
         } else {
-            "unrestricted — claim 10 does NOT hold; ADR-002 §10 regression. \
-             Workloads boot with open egress unless --network-preset is set explicitly."
+            "unrestricted — claim 10 does NOT hold; ADR-001 claim-10 regression. \
+             Workloads boot with open egress instead of refusing it unless \
+             `machine run --net` / `--allow-host` admits a destination."
                 .to_string()
         },
     }

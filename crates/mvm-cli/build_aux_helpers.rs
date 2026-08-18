@@ -9,59 +9,101 @@ use std::path::{Path, PathBuf};
 /// only the run target, never sibling `[[bin]]`s in other crates).
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct AuxHelperSpec {
-    pub package: &'static str,
-    pub bin: &'static str,
-    pub features: &'static [&'static str],
+    pub package: String,
+    pub bin: String,
+    pub features: Vec<String>,
 }
 
-/// The helpers to build for `(target_os, target_arch)`, given whether libkrun
-/// is installed. The libkrun supervisor is included only where libkrun is
-/// present because it links `-lkrun`; the HVF supervisor only on macOS/aarch64.
-pub(crate) fn aux_helper_specs(
+/// One `PER_VM_HOST_BINARIES` entry, parsed out of the manifest source.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct PerVmEntry {
+    pub package: String,
+    pub name: String,
+    pub features: String,
+    pub scope: String,
+}
+
+/// Parse `PER_VM_HOST_BINARIES` out of the text of
+/// `crates/mvm-cli/src/host_binaries/manifest.rs`.
+///
+/// Text-parsed rather than imported because a build script cannot depend on
+/// the crate it is building; this mirrors how `build.rs` already reads
+/// `HOST_BINARIES` and `SEED_BINARIES` from the same file, and keeps this
+/// module I/O-free so the selection rules stay unit-testable.
+pub(crate) fn parse_per_vm_binaries(src: &str) -> Vec<PerVmEntry> {
+    let Some(i) = src.find("PER_VM_HOST_BINARIES") else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let (mut package, mut name, mut features) = (None, None, None);
+    for line in src[i..].lines() {
+        if let Some(v) = extract_quoted_after(line, "package:") {
+            package = Some(v);
+        }
+        if let Some(v) = extract_quoted_after(line, "name:") {
+            name = Some(v);
+        }
+        if let Some(v) = extract_quoted_after(line, "features:") {
+            features = Some(v);
+        }
+        if let Some(scope) = line.trim().strip_prefix("scope: PerVmScope::") {
+            let scope = scope.trim_end_matches(',').trim().to_string();
+            if let (Some(package), Some(name), Some(features)) =
+                (package.take(), name.take(), features.take())
+            {
+                out.push(PerVmEntry {
+                    package,
+                    name,
+                    features,
+                    scope,
+                });
+            }
+        }
+        // The const ends at the closing `];` in column 0.
+        if line.starts_with("];") && !out.is_empty() {
+            break;
+        }
+    }
+    out
+}
+
+/// Whether a registry entry applies to this host, given its scope.
+pub(crate) fn scope_applies(
+    scope: &str,
+    target_os: &str,
+    target_arch: &str,
+    libkrun_present: bool,
+) -> bool {
+    match scope {
+        "Always" => true,
+        "MacOsAarch64" => target_os == "macos" && target_arch == "aarch64",
+        "RequiresLibkrun" => libkrun_present,
+        _ => false,
+    }
+}
+
+/// The helpers to build for `(target_os, target_arch)`, selected from the
+/// canonical `PER_VM_HOST_BINARIES` registry. `manifest_src` is the text of
+/// `crates/mvm-cli/src/host_binaries/manifest.rs`.
+pub(crate) fn aux_helper_specs_from(
+    manifest_src: &str,
     target_os: &str,
     target_arch: &str,
     libkrun_present: bool,
 ) -> Vec<AuxHelperSpec> {
-    let mut specs = vec![
-        AuxHelperSpec {
-            package: "mvm-hostd",
-            bin: "mvm-host-agent",
-            features: &[],
-        },
-        AuxHelperSpec {
-            package: "mvm-hostd",
-            bin: "mvm-signer-helper",
-            features: &[],
-        },
-        AuxHelperSpec {
-            package: "mvm-hostd",
-            bin: "mvm-network-endpoint",
-            features: &[],
-        },
-        // The per-VM L3 gateway. Built everywhere mvmctl is: whether a host
-        // can serve the tunnel is decided at admission, not by whether the
-        // binary happens to exist.
-        AuxHelperSpec {
-            package: "mvm-hostd",
-            bin: "mvm-netd",
-            features: &[],
-        },
-    ];
-    if target_os == "macos" && target_arch == "aarch64" {
-        specs.push(AuxHelperSpec {
-            package: "mvm-hostd",
-            bin: "mvm-hvf-supervisor",
-            features: &[],
-        });
-    }
-    if libkrun_present {
-        specs.push(AuxHelperSpec {
-            package: "mvm-hostd",
-            bin: "mvm-libkrun-supervisor",
-            features: &["libkrun-sys"],
-        });
-    }
-    specs
+    parse_per_vm_binaries(manifest_src)
+        .into_iter()
+        .filter(|e| scope_applies(&e.scope, target_os, target_arch, libkrun_present))
+        .map(|e| AuxHelperSpec {
+            package: e.package,
+            bin: e.name,
+            features: if e.features.is_empty() {
+                Vec::new()
+            } else {
+                e.features.split(',').map(str::to_string).collect()
+            },
+        })
+        .collect()
 }
 
 /// Extract the quoted string after `key` on one line, e.g.
@@ -102,23 +144,39 @@ mod tests {
     }
 
     #[test]
-    fn hostd_helpers_include_network_endpoint() {
-        let specs = aux_helper_specs("macos", "aarch64", false);
-        assert!(specs.iter().any(|spec| spec.bin == "mvm-network-endpoint"));
+    fn parser_reads_package_name_features_and_scope() {
+        let src = r#"
+pub const PER_VM_HOST_BINARIES: &[PerVmBinary] = &[
+    PerVmBinary {
+        package: "mvm-hostd",
+        name: "mvm-netd",
+        features: "",
+        scope: PerVmScope::Always,
+    },
+    PerVmBinary {
+        package: "mvm-hostd",
+        name: "mvm-libkrun-supervisor",
+        features: "libkrun-sys",
+        scope: PerVmScope::RequiresLibkrun,
+    },
+];
+"#;
+        let got = parse_per_vm_binaries(src);
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].name, "mvm-netd");
+        assert_eq!(got[0].scope, "Always");
+        assert_eq!(got[1].features, "libkrun-sys");
+        assert_eq!(got[1].scope, "RequiresLibkrun");
     }
 
     #[test]
-    fn host_service_helpers_are_built_beside_mvmctl() {
-        let specs = aux_helper_specs("macos", "aarch64", false);
-        for required in ["mvm-host-agent", "mvm-signer-helper"] {
-            assert!(specs.iter().any(|spec| spec.bin == required));
-        }
+    fn parser_yields_nothing_when_the_const_is_absent() {
+        assert!(parse_per_vm_binaries("fn main() {}").is_empty());
     }
 
     #[test]
-    fn helper_specs_are_never_globally_skipped() {
-        assert!(!aux_helper_specs("linux", "x86_64", false).is_empty());
-        assert!(!aux_helper_specs("macos", "aarch64", true).is_empty());
+    fn an_unknown_scope_selects_nothing() {
+        assert!(!scope_applies("SomethingNew", "linux", "x86_64", true));
     }
 
     #[test]

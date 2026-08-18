@@ -12,8 +12,35 @@
 
 use std::process::ExitCode;
 
-#[cfg(target_os = "linux")]
-use mvm_agentd::vsock::EGRESS_PORT as EGRESS_VSOCK_PORT;
+/// Compiled-in host vsock port, used when no init named one.
+const DEFAULT_HOST_VSOCK_PORT: u32 = mvm_agentd::vsock::EGRESS_PORT;
+
+/// Names the host vsock port the endpoint is listening on for this boot.
+///
+/// The builder tiers allocate that port per build — two builds on one host must
+/// not collide on a fixed number — and hand it down on the kernel cmdline,
+/// which each guest init reads and re-exports here. A guest that ignores it
+/// dials the compiled-in default, finds nothing, and reports a guest with no
+/// network; both guest inits already set this variable and, until now, nothing
+/// read it.
+const HOST_VSOCK_PORT_ENV: &str = "MVM_EGRESS_VSOCK_PORT";
+
+/// Resolve the host port to dial, falling back to the compiled-in default.
+///
+/// Pure over the raw value so the fallback and the refusal are testable without
+/// mutating process env. An unparsable or zero port is a refusal rather than a
+/// silent fallback: it means an init tried to tell us something and we could
+/// not read it, and dialing the default there would reproduce exactly the
+/// misdirected-connect this exists to prevent.
+fn host_vsock_port_from_env(raw: Option<&str>) -> Result<u32, String> {
+    let Some(raw) = raw else {
+        return Ok(DEFAULT_HOST_VSOCK_PORT);
+    };
+    match raw.trim().parse::<u32>() {
+        Ok(port) if port > 0 => Ok(port),
+        _ => Err(raw.to_string()),
+    }
+}
 
 fn main() -> ExitCode {
     tracing_subscriber::fmt()
@@ -25,6 +52,14 @@ fn main() -> ExitCode {
 
     let listen = std::env::var("MVM_EGRESS_LISTEN")
         .unwrap_or_else(|_| mvm_core::guest_netd::DEFAULT_EGRESS_PROXY_LISTEN.into());
+    let host_port =
+        match host_vsock_port_from_env(std::env::var(HOST_VSOCK_PORT_ENV).ok().as_deref()) {
+            Ok(port) => port,
+            Err(raw) => {
+                eprintln!("mvm-egress-client: bad {HOST_VSOCK_PORT_ENV} '{raw}'");
+                return ExitCode::from(2);
+            }
+        };
     let addr: std::net::SocketAddr = match listen.parse() {
         Ok(a) => a,
         Err(e) => {
@@ -32,11 +67,11 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    run(addr)
+    run(addr, host_port)
 }
 
 #[cfg(target_os = "linux")]
-fn run(addr: std::net::SocketAddr) -> ExitCode {
+fn run(addr: std::net::SocketAddr, host_port: u32) -> ExitCode {
     use mvm_agentd::flowmux::{FlowMuxError, FlowMuxReconnectClient};
     use mvm_agentd::flowmux_keys;
     use mvm_agentd::guest_vsock_session::connect_host_vsock;
@@ -84,19 +119,33 @@ fn run(addr: std::net::SocketAddr) -> ExitCode {
         }
     };
 
-    let client = match rt.block_on(FlowMuxReconnectClient::connect(
-        || async {
-            connect_host_vsock(EGRESS_VSOCK_PORT)
-                .await
-                .map_err(FlowMuxError::Transport)
-        },
-        guest_signing_key,
-        host_anchor,
-    )) {
-        Ok(client) => client,
-        Err(e) => {
-            eprintln!("mvm-egress-client: FlowMux connect failed: {e}");
-            return ExitCode::from(1);
+    // The host endpoint is a separate process the host is still starting while
+    // this guest boots, so the first dial routinely arrives before it listens
+    // and is reset. That is a race, not a refusal, and waiting it out is the
+    // difference between a guest with egress and a guest that powers down.
+    // A refusal — bad handshake, not admitted — still fails immediately.
+    let deadline = std::time::Instant::now() + mvm_agentd::flowmux::CONNECT_RETRY_BUDGET;
+    let mut attempt = 0u32;
+    let client = loop {
+        let outcome = rt.block_on(FlowMuxReconnectClient::connect(
+            move || async move {
+                connect_host_vsock(host_port)
+                    .await
+                    .map_err(FlowMuxError::Transport)
+            },
+            guest_signing_key.clone(),
+            host_anchor,
+        ));
+        match outcome {
+            Ok(client) => break client,
+            Err(e) if e.connect_is_retryable() && std::time::Instant::now() < deadline => {
+                attempt = attempt.saturating_add(1);
+                std::thread::sleep(mvm_agentd::flowmux::connect_retry_delay(attempt));
+            }
+            Err(e) => {
+                eprintln!("mvm-egress-client: FlowMux connect failed: {e}");
+                return ExitCode::from(1);
+            }
         }
     };
 
@@ -110,7 +159,46 @@ fn run(addr: std::net::SocketAddr) -> ExitCode {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn run(_addr: std::net::SocketAddr) -> ExitCode {
+fn run(_addr: std::net::SocketAddr, _host_port: u32) -> ExitCode {
     eprintln!("mvm-egress-client: AF_VSOCK egress is only available on Linux guests");
     ExitCode::from(1)
+}
+
+#[cfg(test)]
+mod host_port_tests {
+    use super::*;
+
+    /// A guest with no init-supplied port keeps the compiled-in default, which
+    /// is what the fixed-port tiers rely on.
+    #[test]
+    fn an_absent_env_falls_back_to_the_compiled_in_port() {
+        assert_eq!(host_vsock_port_from_env(None), Ok(DEFAULT_HOST_VSOCK_PORT));
+    }
+
+    /// The regression this exists for: the builder tiers allocate the port per
+    /// build and hand it down, and the client used to ignore it and dial the
+    /// default — reaching nothing, every time.
+    #[test]
+    fn an_init_supplied_port_is_honoured() {
+        assert_eq!(host_vsock_port_from_env(Some("683445")), Ok(683445));
+        assert_eq!(host_vsock_port_from_env(Some(" 45253 ")), Ok(45253));
+        assert_ne!(
+            host_vsock_port_from_env(Some("683445")),
+            Ok(DEFAULT_HOST_VSOCK_PORT),
+            "an explicit port must not silently resolve to the default"
+        );
+    }
+
+    /// An unreadable value means an init tried to say something we could not
+    /// parse. Falling back would reproduce the misdirected dial this fixes, so
+    /// it refuses instead.
+    #[test]
+    fn an_unparsable_or_zero_port_refuses_rather_than_falling_back() {
+        for bad in ["", "0", "-1", "http", "5253x"] {
+            assert!(
+                host_vsock_port_from_env(Some(bad)).is_err(),
+                "{bad:?} must refuse rather than fall back"
+            );
+        }
+    }
 }

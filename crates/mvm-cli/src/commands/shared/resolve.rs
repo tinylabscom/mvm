@@ -248,11 +248,11 @@ fn parse_allow_host(entry: &str) -> Result<mvm_core::network_policy::HostPort> {
     Ok(parsed)
 }
 
-// `resolve_optional_network_policy` was used by `mvmctl template
-// create --network-preset` to bake a default policy into the
-// TemplateSpec. With the `template *` namespace gone and `[network]`
-// removed from `mvm.toml`, runtime policy now lives entirely in
-// `mvmctl up` flags / the user-global config / mvmd tenant config.
+// `resolve_optional_network_policy` was used by a since-removed
+// template-create flag to bake a default policy into the TemplateSpec.
+// With that namespace gone and `[network]` removed from `mvm.toml`,
+// runtime policy now lives entirely in `machine run --net` /
+// `--allow-host`, the user-global config, and mvmd tenant config.
 // Function deleted; the `resolve_network_policy` form (always returns
 // Some) is the only remaining helper.
 

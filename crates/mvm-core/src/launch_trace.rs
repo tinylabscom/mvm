@@ -45,8 +45,50 @@ pub const LAUNCH_TRACE_DRIVER_FILE: &str = "launch-trace-driver.json";
 /// visible in the name itself.
 pub const DRIVER_PHASE_SEPARATOR: &str = ".";
 
-/// Set to `1`/`true` to print a per-phase launch breakdown to stderr.
+/// Set to `1`/`true` to print a per-phase launch breakdown to stderr, or to
+/// `tree` for the same breakdown rendered as a nested, aligned report.
 pub const PHASE_TIMING_ENV: &str = "MVM_PHASE_TIMING";
+
+/// How a launch should render its phase breakdown.
+///
+/// The variants are a rendering choice, not a verbosity ladder: `Line` and
+/// `Tree` carry the same spans and differ only in shape. Anything the parse
+/// does not recognise is [`Off`](PhaseTimingMode::Off), so a typo silently
+/// disables the report rather than half-enabling it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PhaseTimingMode {
+    /// No breakdown printed.
+    Off,
+    /// One greppable `key=value` line per report. The stable machine contract.
+    Line,
+    /// A nested, aligned report grouped by containment.
+    Tree,
+}
+
+impl PhaseTimingMode {
+    /// Whether any breakdown should be printed.
+    #[must_use]
+    pub const fn is_on(self) -> bool {
+        !matches!(self, Self::Off)
+    }
+}
+
+/// Parse [`PHASE_TIMING_ENV`], pure over the raw value so the gate is testable
+/// without mutating process env.
+#[must_use]
+pub fn phase_timing_mode_from(value: Option<&str>) -> PhaseTimingMode {
+    match value.map(str::trim) {
+        Some(v) if v == "1" || v.eq_ignore_ascii_case("true") => PhaseTimingMode::Line,
+        Some(v) if v.eq_ignore_ascii_case("tree") => PhaseTimingMode::Tree,
+        _ => PhaseTimingMode::Off,
+    }
+}
+
+/// Read the environment and decide how to render.
+#[must_use]
+pub fn phase_timing_mode() -> PhaseTimingMode {
+    phase_timing_mode_from(std::env::var(PHASE_TIMING_ENV).ok().as_deref())
+}
 
 /// Names the file a launch writes its machine-readable sample to.
 pub const LAUNCH_SAMPLE_ENV: &str = "MVM_LAUNCH_SAMPLE_JSON";
@@ -98,9 +140,11 @@ impl BackendLaunchTrace {
 /// values so the gate is testable without mutating process env.
 #[must_use]
 pub fn tracing_enabled_from(phase_timing: Option<&str>, sample_path: Option<&str>) -> bool {
-    let truthy = matches!(phase_timing, Some(v) if v == "1" || v.eq_ignore_ascii_case("true"));
+    // Every rendering mode needs the same marks, so this asks only whether the
+    // report is on at all. A mode that recorded nothing would render a report
+    // full of absent spans and read as "the launch did no work".
     let sampling = matches!(sample_path, Some(v) if !v.trim().is_empty());
-    truthy || sampling
+    phase_timing_mode_from(phase_timing).is_on() || sampling
 }
 
 /// Read the environment and decide whether to record.
@@ -488,6 +532,47 @@ mod tests {
         assert!(!tracing_enabled_from(None, None));
         assert!(!tracing_enabled_from(Some("0"), None));
         assert!(!tracing_enabled_from(Some(""), Some("  ")));
+    }
+
+    #[test]
+    fn tree_mode_still_records_backend_phases() {
+        // The trap this pins: a rendering mode that does not arm recording
+        // renders an empty report and reads as a launch that did no work.
+        assert!(tracing_enabled_from(Some("tree"), None));
+        assert_eq!(phase_timing_mode_from(Some("tree")), PhaseTimingMode::Tree);
+    }
+
+    #[test]
+    fn phase_timing_mode_parses_every_accepted_spelling() {
+        for on in ["1", "true", "TRUE", " true "] {
+            assert_eq!(
+                phase_timing_mode_from(Some(on)),
+                PhaseTimingMode::Line,
+                "{on}"
+            );
+        }
+        for tree in ["tree", "TREE", " Tree "] {
+            assert_eq!(
+                phase_timing_mode_from(Some(tree)),
+                PhaseTimingMode::Tree,
+                "{tree}"
+            );
+        }
+        for off in ["0", "", "  ", "yes", "2", "line"] {
+            assert_eq!(
+                phase_timing_mode_from(Some(off)),
+                PhaseTimingMode::Off,
+                "{off}"
+            );
+        }
+        assert_eq!(phase_timing_mode_from(None), PhaseTimingMode::Off);
+    }
+
+    #[test]
+    fn only_off_is_off() {
+        assert!(!PhaseTimingMode::Off.is_on());
+        assert!(PhaseTimingMode::Line.is_on());
+        assert!(PhaseTimingMode::Tree.is_on());
     }
 }
 

@@ -41,6 +41,15 @@ const BUDGET_VAR: &str = "MVM_RUNTIME_BOOT_BUDGET_MS";
 const READY_VAR: &str = "MVM_RUNTIME_BOOT_READY";
 const CPUS_VAR: &str = "MVM_RUNTIME_BOOT_CPUS";
 const MEMORY_MIB_VAR: &str = "MVM_RUNTIME_BOOT_MEMORY_MIB";
+/// The prod guest rootfs carries no baked agent: `/init` resolves it from
+/// `/mvm/runtime`, which is the runtime overlay attached as a second
+/// virtio-blk drive. Booting one without the overlay panics the guest at
+/// `Attempted to kill init!` before the agent can bind vsock, so a harness that
+/// cannot attach an overlay cannot boot a prod image at all. All three are
+/// required together, matching what the backend demands.
+const OVERLAY_VAR: &str = "MVM_RUNTIME_BOOT_OVERLAY";
+const OVERLAY_VERITY_VAR: &str = "MVM_RUNTIME_BOOT_OVERLAY_VERITY";
+const OVERLAY_ROOTHASH_VAR: &str = "MVM_RUNTIME_BOOT_OVERLAY_ROOTHASH";
 
 const DEFAULT_BACKEND: &str = "firecracker";
 const DEFAULT_RUNS: usize = 5;
@@ -99,6 +108,17 @@ struct BenchSpec {
     ready: ReadySignal,
     cpus: u32,
     memory_mib: u32,
+    overlay: Option<OverlaySpec>,
+}
+
+/// All three or none. The backend attaches the overlay only when the path, the
+/// verity sidecar and the roothash are all present, so accepting a partial set
+/// here would boot without an overlay and fail as though none was configured.
+#[derive(Debug, Clone)]
+struct OverlaySpec {
+    path: PathBuf,
+    verity: PathBuf,
+    roothash: String,
 }
 
 impl BenchSpec {
@@ -109,6 +129,7 @@ impl BenchSpec {
         }
         let config = config.unwrap_or_default();
 
+        let overlay = overlay_spec(&config)?;
         let kernel = required_path(KERNEL_VAR, config.kernel)?;
         let rootfs = required_path(ROOTFS_VAR, config.rootfs)?;
         let ready =
@@ -130,6 +151,7 @@ impl BenchSpec {
             ready,
             cpus: env_u32(CPUS_VAR, config.cpus, 1)?,
             memory_mib: env_u32(MEMORY_MIB_VAR, config.memory_mib, 256)?,
+            overlay,
         }))
     }
 }
@@ -148,6 +170,11 @@ struct RawBenchConfig {
     cpus: Option<u32>,
     #[serde(alias = "memory_mib")]
     memory_mib: Option<u32>,
+    overlay: Option<PathBuf>,
+    #[serde(alias = "overlay_verity")]
+    overlay_verity: Option<PathBuf>,
+    #[serde(alias = "overlay_roothash")]
+    overlay_roothash: Option<String>,
 }
 
 impl RawBenchConfig {
@@ -242,6 +269,15 @@ fn measure_one(spec: &BenchSpec, name: String) -> Result<BootMeasurement> {
         memory_mib: spec.memory_mib,
         revision_hash: "runtime-boot-bench".to_string(),
         flake_ref: "prebuilt-runtime-image".to_string(),
+        runtime_overlay_path: spec
+            .overlay
+            .as_ref()
+            .map(|o| o.path.to_string_lossy().into_owned()),
+        runtime_overlay_verity_path: spec
+            .overlay
+            .as_ref()
+            .map(|o| o.verity.to_string_lossy().into_owned()),
+        runtime_overlay_roothash: spec.overlay.as_ref().map(|o| o.roothash.clone()),
         ..Default::default()
     };
 
@@ -396,6 +432,53 @@ fn assert_within_budget(label: &str, actual: Duration, budget: Duration) {
     );
 }
 
+/// Resolve the overlay triple, refusing a partial one. A silently-dropped
+/// overlay is indistinguishable at the console from an image with no agent, so
+/// name the missing piece here rather than let the guest panic explain it.
+fn overlay_spec(config: &RawBenchConfig) -> Result<Option<OverlaySpec>> {
+    let path = env_path_opt(OVERLAY_VAR, config.overlay.clone());
+    let verity = env_path_opt(OVERLAY_VERITY_VAR, config.overlay_verity.clone());
+    let roothash = env_string_opt(OVERLAY_ROOTHASH_VAR, config.overlay_roothash.clone());
+    match (path, verity, roothash) {
+        (None, None, None) => Ok(None),
+        (Some(path), Some(verity), Some(roothash)) => {
+            let roothash = roothash.trim().to_string();
+            if roothash.is_empty() {
+                anyhow::bail!("{OVERLAY_ROOTHASH_VAR} is set but empty");
+            }
+            Ok(Some(OverlaySpec {
+                path,
+                verity,
+                roothash,
+            }))
+        }
+        (path, verity, roothash) => {
+            let mut missing = Vec::new();
+            if path.is_none() {
+                missing.push(OVERLAY_VAR);
+            }
+            if verity.is_none() {
+                missing.push(OVERLAY_VERITY_VAR);
+            }
+            if roothash.is_none() {
+                missing.push(OVERLAY_ROOTHASH_VAR);
+            }
+            anyhow::bail!(
+                "runtime overlay is half-configured; the backend attaches it only \
+                 when all three are set. Missing: {}",
+                missing.join(", ")
+            )
+        }
+    }
+}
+
+fn env_path_opt(var: &str, configured: Option<PathBuf>) -> Option<PathBuf> {
+    std::env::var_os(var)
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .or(configured)
+}
+
 fn required_path(var: &str, configured: Option<PathBuf>) -> Result<PathBuf> {
     let path = std::env::var_os(var)
         .map(PathBuf::from)
@@ -520,4 +603,71 @@ fn live_bench_is_disabled_by_default() -> Result<()> {
     }
     assert!(BenchSpec::from_env()?.is_none());
     Ok(())
+}
+
+/// The overlay is what carries the guest agent for a prod image. A half-set
+/// triple used to be indistinguishable from an unset one, and the backend
+/// silently declined to attach it — the first visible symptom was a kernel
+/// panic that blamed the image.
+#[test]
+fn overlay_spec_is_absent_when_nothing_is_configured() {
+    let config = RawBenchConfig::default();
+    assert!(
+        overlay_spec(&config)
+            .expect("no overlay is valid")
+            .is_none()
+    );
+}
+
+#[test]
+fn overlay_spec_accepts_the_complete_triple() {
+    let config = RawBenchConfig {
+        overlay: Some(PathBuf::from("/tmp/overlay.ext4")),
+        overlay_verity: Some(PathBuf::from("/tmp/overlay.verity")),
+        overlay_roothash: Some("  deadbeef\n".to_string()),
+        ..RawBenchConfig::default()
+    };
+    let spec = overlay_spec(&config)
+        .expect("complete triple is valid")
+        .expect("complete triple yields an overlay");
+    assert_eq!(spec.path, PathBuf::from("/tmp/overlay.ext4"));
+    assert_eq!(spec.verity, PathBuf::from("/tmp/overlay.verity"));
+    // Trimmed: the roothash is read from a file that ends in a newline.
+    assert_eq!(spec.roothash, "deadbeef");
+}
+
+#[test]
+fn overlay_spec_refuses_a_half_configured_overlay_and_names_what_is_missing() {
+    let config = RawBenchConfig {
+        overlay: Some(PathBuf::from("/tmp/overlay.ext4")),
+        ..RawBenchConfig::default()
+    };
+    let err = overlay_spec(&config)
+        .expect_err("a partial overlay must not silently boot without one")
+        .to_string();
+    // Compare the missing list exactly. `contains(OVERLAY_VAR)` would always
+    // hold — it is a prefix of the other two names — so a substring check here
+    // would pass no matter which variables the message actually named.
+    let listed = err
+        .split_once("Missing: ")
+        .map(|(_, rest)| rest.trim().to_string())
+        .unwrap_or_else(|| panic!("error should name what is missing: {err}"));
+    assert_eq!(
+        listed,
+        format!("{OVERLAY_VERITY_VAR}, {OVERLAY_ROOTHASH_VAR}")
+    );
+}
+
+#[test]
+fn overlay_spec_refuses_a_blank_roothash() {
+    let config = RawBenchConfig {
+        overlay: Some(PathBuf::from("/tmp/overlay.ext4")),
+        overlay_verity: Some(PathBuf::from("/tmp/overlay.verity")),
+        overlay_roothash: Some("   \n".to_string()),
+        ..RawBenchConfig::default()
+    };
+    let err = overlay_spec(&config)
+        .expect_err("a blank roothash is not a roothash")
+        .to_string();
+    assert!(err.contains(OVERLAY_ROOTHASH_VAR), "{err}");
 }

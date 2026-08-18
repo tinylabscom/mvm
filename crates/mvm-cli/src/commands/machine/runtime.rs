@@ -10,9 +10,9 @@ pub(super) fn resolve_persistent_spec(
     resolved_manifest_slot: Option<&str>,
 ) -> Result<(MachineSpec, SpecReconcile)> {
     let direct_boot = std::env::var("MVM_DIRECT_BOOT").as_deref() == Ok("1");
-    let has_source = args.image.is_some()
-        || args.manifest.is_some()
-        || args.deployment.is_some()
+    let has_source = args.run.image.is_some()
+        || args.run.manifest.is_some()
+        || args.run.deployment.is_some()
         || resolved_manifest_slot.is_some()
         || direct_boot;
     if !has_source {
@@ -49,13 +49,13 @@ fn run_persistent(
     let existing = load_machine_spec(&name).ok();
     let (spec, action) = resolve_persistent_spec(&args, &name, existing, resolved_flake_slot)?;
 
-    if args.dry_run {
+    if args.run.dry_run {
         let summary = machine_start_preflight_summary(
             &spec,
-            args.hypervisor.as_deref(),
-            args.receipt.as_deref(),
+            args.run.hypervisor.as_deref(),
+            args.run.receipt.as_deref(),
         )?;
-        if args.json {
+        if args.run.json {
             println!("{}", serde_json::to_string_pretty(&summary)?);
         } else {
             print_machine_start_preflight_human(&summary);
@@ -70,17 +70,17 @@ fn run_persistent(
         MachineStartArgs {
             name: name.clone(),
             create_flags: MachineStartCreateFlags::default(),
-            receipt: args.receipt.clone(),
-            json: args.json,
+            receipt: args.run.receipt.clone(),
+            json: args.run.json,
             dry_run: false,
             quiet: false,
-            hypervisor: args.hypervisor.clone(),
+            hypervisor: args.run.hypervisor.clone(),
             no_supervisor: args.no_supervisor,
             kernel_pin: args.kernel_pin.clone(),
-            has_ad_hoc_argv: !args.argv.is_empty(),
+            has_ad_hoc_argv: !args.run.argv.is_empty(),
         },
     )?;
-    if !booted && !args.json && !args.up_json {
+    if !booted && !args.run.json && !args.up_json {
         println!("machine {name} already running");
     }
 
@@ -122,7 +122,7 @@ fn run_persistent_post_start(
     args: &MachineRunArgs,
     name: &str,
 ) -> Result<()> {
-    if !args.argv.is_empty() {
+    if !args.run.argv.is_empty() {
         if !shared::wait_for_guest_agent(name, 30) {
             anyhow::bail!("guest agent for {name:?} not reachable to run the command");
         }
@@ -130,7 +130,7 @@ fn run_persistent_post_start(
             cli,
             console::Args {
                 name: name.to_string(),
-                command: Some(machine_exec_command(&args.argv)),
+                command: Some(machine_exec_command(&args.run.argv)),
                 force: false,
                 env: Vec::new(),
                 pty_argv: Vec::new(),
@@ -181,7 +181,7 @@ pub(super) fn post_start_action(args: &MachineRunArgs) -> PostStart {
         PostStart::Envelope
     } else if !args.port.is_empty() {
         PostStart::Forward
-    } else if args.json {
+    } else if args.run.json {
         PostStart::Quiet
     } else if args.detach {
         PostStart::PrintId
@@ -242,7 +242,7 @@ fn apply_machine_ttl(name: &str, dur_str: &str) -> Result<()> {
 }
 
 fn resolve_build_mode_for_envelope(args: &MachineRunArgs, name: &str) -> &'static str {
-    resolve_machine_build_mode(args.manifest.as_deref(), name)
+    resolve_machine_build_mode(args.run.manifest.as_deref(), name)
 }
 
 /// Resolve a machine's `build_mode` (`"dev"` / `"prod"`) for the boot-time
@@ -255,12 +255,12 @@ pub(super) fn resolve_machine_build_mode(manifest: Option<&str>, name: &str) -> 
 }
 
 fn run_entrypoint_action(args: MachineRunArgs, resolved_flake_slot: Option<String>) -> Result<()> {
-    if args.deployment.is_some() {
+    if args.run.deployment.is_some() {
         anyhow::bail!(
             "machine run --entrypoint does not accept --deployment; use a manifest or flake source"
         );
     }
-    if args.image.is_some() {
+    if args.run.image.is_some() {
         anyhow::bail!(
             "machine run --entrypoint dispatches a manifest/flake image's baked \
              /etc/mvm/entrypoint; an OCI --image runs its own command via the \
@@ -271,7 +271,7 @@ fn run_entrypoint_action(args: MachineRunArgs, resolved_flake_slot: Option<Strin
         resolve_machine_run_name(&args)?
     } else if let Some(slot) = resolved_flake_slot {
         slot
-    } else if let Some(manifest) = args.manifest.clone() {
+    } else if let Some(manifest) = args.run.manifest.clone() {
         manifest
     } else {
         anyhow::bail!(
@@ -279,19 +279,19 @@ fn run_entrypoint_action(args: MachineRunArgs, resolved_flake_slot: Option<Strin
              (or `--attach --name <NAME>` to dispatch into a running machine)"
         );
     };
-    let (memory_mib, _) = validate_machine_memory(&args.memory, None)?;
+    let (memory_mib, _) = validate_machine_memory(&args.run.memory, None)?;
     // Resolve `--net` / `--allow-host` into the egress policy exactly as the
     // transient argv path does, so a baked entrypoint enforces the same posture.
-    let network_policy = shared::resolve_run_network_policy(args.net, &args.allow_host)?;
+    let network_policy = shared::resolve_run_network_policy(args.run.net, &args.run.allow_host)?;
     let stdin = resolve_entrypoint_stdin(args.stdin.as_deref())?;
     invoke::run_entrypoint(invoke::EntrypointCall {
         source,
         stdin,
-        timeout: args.timeout.unwrap_or(30),
-        cpus: args.cpus,
+        timeout: args.run.timeout.unwrap_or(30),
+        cpus: args.run.cpus,
         memory_mib,
         from_workload_ir: args.from_workload_ir.clone(),
-        agent_verb_override: args.agent_verb.clone(),
+        agent_verb_override: args.run.agent_verb.clone(),
         reset: args.reset,
         keep_alive: args.persistent(),
         keep_alive_dev: false,
@@ -355,14 +355,25 @@ fn workload_needs_raw_ip_stack(workload_ir: Option<&std::path::Path>) -> Result<
 }
 
 pub(super) fn run_dispatch(cli: &Cli, mut args: MachineRunArgs, cfg: &MvmConfig) -> Result<()> {
-    let resolved_flake_slot = if let Some(flake_ref) = args.flake.take() {
-        let slot_hash = build::build_flake_to_slot(&flake_ref, args.flake_profile.as_deref())?;
-        args.manifest = Some(slot_hash.clone());
+    // Settle the boot source before `resolve_mode` decides whether one is
+    // missing — the same resolver `mvmctl run` uses, so the two verbs infer
+    // identically or not at all.
+    let cwd = std::env::current_dir().context("resolving the working directory")?;
+    crate::commands::vm::exec::resolve_run_source(
+        &mut args.run,
+        &cwd,
+        crate::commands::vm::exec::Inference::ExplicitOnly,
+    )?
+    .announce();
+    let resolved_flake_slot = if let Some(flake_ref) = args.run.flake.take() {
+        let slot_hash = build::build_flake_to_slot(&flake_ref, args.run.flake_profile.as_deref())?;
+        args.run.manifest = Some(slot_hash.clone());
         Some(slot_hash)
     } else {
         None
     };
     let local_deployment = args
+        .run
         .deployment
         .as_deref()
         .map(super::resolve_local_deployment)
@@ -390,7 +401,7 @@ pub(super) fn run_dispatch(cli: &Cli, mut args: MachineRunArgs, cfg: &MvmConfig)
     // The wasm backend is a claim-free, host-wasmtime runner: it has no
     // standby-pool machinery and should never be blocked by a warm-pool
     // default that it cannot satisfy.
-    let warm_pool_size = if args.hypervisor.as_deref() == Some("wasm") {
+    let warm_pool_size = if args.run.hypervisor.as_deref() == Some("wasm") {
         0
     } else {
         warm_pool_size
@@ -399,7 +410,7 @@ pub(super) fn run_dispatch(cli: &Cli, mut args: MachineRunArgs, cfg: &MvmConfig)
     match mode {
         MachineRunMode::Transient => {
             if let Some(slot) = resolved_flake_slot {
-                args.manifest = Some(slot);
+                args.run.manifest = Some(slot);
             }
             let mut run_args = args.into_run_args();
             // The mode settled above, not a re-derivation: one value reaches
@@ -421,7 +432,7 @@ pub(super) fn run_dispatch(cli: &Cli, mut args: MachineRunArgs, cfg: &MvmConfig)
             use std::io::IsTerminal as _;
             require_tty(std::io::stdin().is_terminal())?;
             if let Some(slot) = resolved_flake_slot {
-                args.manifest = Some(slot);
+                args.run.manifest = Some(slot);
             }
             let mut run_args = args.into_run_args();
             // The mode settled above, not a re-derivation: one value reaches
@@ -451,51 +462,17 @@ pub(in crate::commands) fn boot_persistent_by_name(
         cli,
         MachineRunArgs {
             name: Some(name),
-            flake,
             kernel_pin,
-            hypervisor,
             // Booting by name carries no caller stdin, so it requests no input
             // grant and the plan stays ungranted.
             stdin: None,
             detach: true,
-            image: None,
-            manifest: None,
-            deployment: None,
-            runtime_pack: false,
-            flake_profile: None,
-            net: false,
-            allow_host: Vec::new(),
-            cpus: 2,
-            cpu_limit: None,
-            grants_file: None,
-            memory: "512M".to_string(),
-            profile: RunProfile::Dev,
-            agent_verb: Vec::new(),
-            volume: Vec::new(),
-            env: Vec::new(),
-            timeout: None,
-            receipt: None,
-            json: false,
-            dry_run: false,
-            tty: false,
-            interactive: false,
-            force: false,
-            no_supervisor: false,
-            up_json: false,
-            ttl: None,
-            healthcheck: None,
-            health_interval: 30,
-            health_timeout: 5,
-            health_retries: 3,
-            health_start_period: 0,
-            entrypoint: false,
-            fresh: false,
-            reset: false,
-            from_workload_ir: None,
-            attach: false,
-            argv: Vec::new(),
-            host_service: Vec::new(),
-            port: Vec::new(),
+            run: RunArgs {
+                flake,
+                hypervisor,
+                ..Default::default()
+            },
+            ..Default::default()
         },
         cfg,
     )

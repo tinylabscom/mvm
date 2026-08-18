@@ -14,7 +14,11 @@ use std::time::Duration;
 pub const EGRESS_PROXY_LISTEN_ADDR: &str = mvm_core::guest_netd::DEFAULT_EGRESS_PROXY_LISTEN;
 
 /// How long a guest init waits for that listener before giving up.
-pub const EGRESS_PROXY_READY_TIMEOUT: Duration = Duration::from_secs(5);
+///
+/// Re-exported from `mvm-core` rather than defined here: the egress client
+/// bounds its own connect retries by the same number, and two copies would let
+/// the client outlive the window its supervisor waits.
+pub const EGRESS_PROXY_READY_TIMEOUT: Duration = mvm_core::guest_netd::EGRESS_PROXY_READY_TIMEOUT;
 
 /// How the readiness wait ended. Separated from the waiting so the decision —
 /// the part that has to be right — is a pure function over this enum rather

@@ -1,9 +1,11 @@
 # Plan 329 — Run-first CLI ergonomics and upstream-sandbox adoption
 
-**Status:** Active — ratified. `mvmctl run` and `mvmctl machine run` are both
-first-class commands sharing one consolidated implementation.
+**Status:** Active. Phase A landed the ADR-027 amendment, the verb visibility
+triage, and `xtask check-cli-help-matches-docs`. Phase 1 landed the shared
+argument core: `RunArgs` is declared once and flattened into both verbs.
 
-**Bound by:** [ADR-027](../adrs/027-cli-surface-consolidation.md) (to be amended),
+**Bound by:** [ADR-027](../adrs/027-cli-surface-consolidation.md) (amended
+2026-08-17),
 [ADR-023](../adrs/023-secrets-subsystem-egress-substitution.md),
 [ADR-025](../adrs/025-warm-snapshot-prior-art-adoption-boundary.md),
 [Plan 255](255-vsock-first-snapshot-egress-adoption.md),
@@ -104,15 +106,85 @@ flagship while keeping mvm's stronger assurance posture intact:
 
 ## Phases
 
+## Corrections to this plan (2026-08-17)
+
+Grounding the plan against the tree found four places where it was scoped
+against something other than what is there.
+
+1. **Phase 3 was largely already shipped when this plan was written.**
+   `RunProfile` already carries all four presets — `restrictive` / `standard` /
+   `dev` / `permissive` — at `crates/mvm-cli/src/commands/vm/exec.rs`, and
+   `permissive` already gates on `MVM_ACK_PERMISSIVE_RUN=1`. What is actually
+   missing is narrower: the two entry points disagree on the default
+   (`machine run` defaults to `dev`, `run` to `standard`), and the effective
+   profile is not surfaced in `mvmctl doctor`. Phase 3 is re-scoped to those.
+
+2. **The two run surfaces diverged in both directions**, so Phase 1 is a merge,
+   not a rename. `machine run` alone has `--net`, `--allow-host`,
+   `--healthcheck` and its four companions, `--ttl`, `--stdin`, `--attach`,
+   `--fresh`, `--reset`, `--from-workload-ir`, `--cpu-limit`, `--grants-file`.
+   The formerly-hidden `run` alone has `--mode live|plan|record`, `--dev`,
+   `--prod`, `--launch-plan`, `--ack-divergence`. This is the Phase 0
+   capability-gap audit, and it is now done.
+
+3. **Phase 2 must not invent a project config file.** One exists:
+   `mvm.toml` / `Mvmfile.toml`, with a Cargo-style walk-up from the working
+   directory that stops at a `.git` boundary
+   (`mvm_core::domain::manifest::discover_manifest_from_dir`), and a
+   `ManifestMachineWorkflow` table already carrying image, net, allow_hosts,
+   cpus, and mem. It is simply not consulted by `machine run`, which errors
+   when given no source flag. Wire the existing discovery in rather than
+   adding a second config idiom.
+
+4. **Phase 6 is blocked by a standing decision this plan did not acknowledge.**
+   [ADR-002](../adrs/002-local-mcp-server.md) is **Withdrawn** — the server,
+   its `mcp` Cargo feature, the `mvmctl ops mcp stdio` verb and the CI lane
+   were deleted — and `xtask check-workflow-paths` enforces
+   `removed_mcp_server_stays_out_of_ci`. Reviving MCP means superseding an ADR
+   and deciding that gate's fate before any code is written.
+
+## Phase A — CLI truth: ADR amendment, verb visibility, docs gate
+
+Added 2026-08-17. Not in the original phase list, and a precondition for all of
+it: the published CLI reference and `mvmctl --help` described different
+products. The reference documented `mvmctl run` as the one-shot flagship and
+`mvmctl secret` / `mvmctl trust` as the entry points to the substitution and
+receipt subsystems; all three were `hide = true`. Eleven documented verbs were
+invisible, and seven visible verbs had no reference row.
+
+- [x] Amend ADR-027: `run` is a first-class transient verb; restate the
+      hidden/visible split as three buckets (visible / dev tooling / internal
+      `__` transports) with the cost of hiding made explicit.
+- [x] Promote the user-facing verb groups out of `hide = true` — `run`, `env`,
+      `manifest`, `image`, `catalog`, `cache`, `network`, `pool`, `secret`,
+      `trust`, `bundle`, `artifact`, `deps`, `ops`, `shell-init` — grouped by
+      `display_order`.
+- [x] Keep `seccomp-audit`, `storage`, `reconcile`, `dashboard`,
+      `persistent-builder` hidden as dev tooling, and the `__`-prefixed
+      subprocess transports hidden as internal.
+- [x] Add reference rows for the visible verbs that had none: `kernel`,
+      `deploy`, `generate`, `template`, `prepare`, `explain`, `watch`, `pack`,
+      `pool`, `bundle`, `artifact`, `deps`.
+- [x] Add `xtask check-cli-help-matches-docs` — every documented verb is
+      visible, every visible verb is documented — and register it in the Lint
+      job. Mutation-checked red in both directions before being believed.
+- [x] Fix the stale `--network-preset` references on live paths; the flag does
+      not exist. The `mvmctl doctor` claim-10 failure string named it, and
+      also cited ADR-002 for a claim that lives in ADR-001.
+
+**Acceptance:** `mvmctl --help` and `cli-commands.md` agree, and a gate keeps
+them agreeing.
+
 ### Phase 0 — Ratify the CLI decision
 
-- [ ] Draft an amendment to ADR-027 recording Option C.
+- [x] Draft an amendment to ADR-027 recording Option C. *(Phase A)*
 - [ ] Review the amendment in the simplification worktree; confirm no claim
       conflict.
 - [ ] Audit every in-repo reference to `mvmctl machine run` (tests, docs,
       SDKs, examples, BDD fixtures, scripts).
-- [ ] Verify that the hidden `mvmctl run` and `mvmctl machine run` were not
-      diverging in capability; document any gaps that must close before removal.
+- [x] Verify that the hidden `mvmctl run` and `mvmctl machine run` were not
+      diverging in capability; document any gaps that must close before
+      removal. *(They had diverged in both directions — see Corrections 2.)*
 - [ ] Update SDK subprocess calls to use the new canonical `mvmctl run` path.
 
 **Acceptance:** ADR-027 amendment accepted; inventory of `machine run` uses
@@ -120,17 +192,23 @@ complete; no unresolved capability gap.
 
 ### Phase 1 — Consolidate the `run` argument surface
 
-- [ ] Merge `vm::exec::Args`, `vm::exec::RunArgs`, and
-      `machine::MachineRunArgs` into a single `RunArgs` source of truth in
-      `mvm-cli`.
+- [x] Merge the shared surface into a single `RunArgs` source of truth in
+      `mvm-cli`, flattened into both verbs. **Deviation from the wording
+      above, deliberate:** a literal single struct would give `mvmctl run`
+      `--name`/`-d`/`--port`/`--ttl`/`--entrypoint` and make it a complete
+      synonym for `machine run`, contradicting "flagship one-shot" in the
+      decision record above and re-creating the second-name-for-one-operation
+      that ADR-027 forbids. The 26 shared execution flags are declared once in
+      `RunArgs`; `run` adds `SdkTransportArgs`, `machine run` adds the
+      lifecycle flags.
 - [ ] Ensure the consolidated args can drive both the direct execution path
       and the `mvm-client::MvmClient::run_machine` facade method.
-- [ ] Ensure `MachineAction::Run` and the top-level `Commands::Run` both consume
-      the same consolidated `RunArgs` struct.
-- [ ] Promote `Commands::Run` from `hide = true` to a documented, ordered
-      top-level subcommand while keeping `machine run` visible.
+- [x] Ensure `MachineAction::Run` and the top-level `Commands::Run` both consume
+      the same consolidated `RunArgs` struct (flattened into each).
+- [x] Promote `Commands::Run` from `hide = true` to a documented, ordered
+      top-level subcommand while keeping `machine run` visible. *(Phase A)*
 - [ ] Update clap completions generation to include the visible `run` surface.
-- [ ] Adjust tests and BDD fixtures that assumed `run` was hidden or that
+- [x] Adjust tests and BDD fixtures that assumed `run` was hidden or that
       `machine run` had a divergent argument surface.
 
 **Acceptance:** `cargo nextest run --workspace` and `cargo clippy --workspace
@@ -140,29 +218,48 @@ argument surface.
 
 ### Phase 2 — Runtime auto-detection
 
-- [ ] Define a small, auditable runtime catalog mapping command names and
-      project files to OCI image refs (e.g. `python3` / `requirements.txt` →
-      `python:3.12-alpine`, `cargo` / `Cargo.toml` → `rust:1.85-alpine`).
-- [ ] Implement detection order: explicit `--image`, then argv[0], then
-      project files in the working directory, then the bundled default image.
-- [ ] Add `--no-detect` to force the default image, and `--image` to override.
-- [ ] Add `--template` to pick a built-in template by name.
-- [ ] Ensure auto-detected runs still produce a signed `ExecutionPlan` with
-      default-deny egress.
-- [ ] Add unit tests for each detection rule and BDD scenarios for at least
-      Python, Node, Rust, and Go.
+- [x] Define a small, auditable runtime catalog mapping command names and
+      project files to OCI image refs. `mvm_core::runtime_catalog`, modelled on
+      the existing `Catalog`/`CatalogEntry` — same `search`/`find` shape, same
+      `schema_version`. In-tree, never fetched at runtime.
+- [x] Implement detection order: explicit source, `--runtime`, `--no-detect`,
+      `mvm.toml` walk-up, argv[0], project files, bundled default. **Reuses
+      `mvm_core::domain::manifest::discover_manifest_from_dir`** rather than
+      adding a second project-config idiom (Corrections 3).
+- [x] Add `--no-detect` to force the default image; `--image` already overrode.
+      Also `--runtime <name>` as the explicit selector.
+- [ ] Add `--template` to pick a built-in template by name. *(Deferred to
+      Phase 4, which is where templates are built.)*
+- [x] Ensure auto-detected runs still produce a signed `ExecutionPlan` with
+      default-deny egress. Detection settles a *source* and touches no policy
+      field; witnessed by `a_detected_run_is_still_deny_all_and_standard_profile`
+      and a BDD scenario asserting `profile: standard` / `network: deny-all`.
+- [x] Add unit tests for each detection rule (12 in `mvm-core`, 12 in the CLI
+      resolver) and BDD scenarios. Ordering and refusal rules mutation-checked
+      red before being believed.
 
 **Acceptance:** `mvmctl run python3 -c "print('ok')"` boots the right image
 without a manifest; detection is deterministic and tested.
 
+**Scope correction made while building it:** inference is `mvmctl run` only.
+`machine run` creates a named, possibly persistent machine, and picking its base
+image from the working directory is a footgun there — before the split,
+`machine run` inside any Rust checkout silently chose `rust:1-alpine`. It keeps
+its error naming every way to supply a source. `--runtime` works on both, since
+that is the user naming one. The seam is one `Inference` enum passed to one
+resolver, so the two verbs cannot drift apart on anything else.
+
 ### Phase 3 — Security profile presets
 
 - [ ] Add `--profile {restrictive,standard,dev,permissive}` to `mvmctl run`.
-- [ ] Map each preset unambiguously to existing policy flags (env passthrough,
-      host mounts, network allowlist, seccomp posture).
+- [x] Reconcile the default: both verbs now default to `standard`. `machine
+      run` defaulted to `dev`, which on the persistent machine-spec path
+      admitted a writable (`:rw`) host share without the user asking. It now
+      refuses at spec time naming `--profile dev`, so the share fails closed
+      and loudly rather than being silently downgraded to read-only.
 - [ ] Surface the effective profile in execution receipts and `mvmctl doctor`.
-- [ ] Reject `--profile permissive` unless `MVM_ACK_PERMISSIVE_RUN=1` is set,
-      matching the current escape-hatch behavior.
+- [x] Reject `--profile permissive` unless `MVM_ACK_PERMISSIVE_RUN=1` is set
+      (already shipped before this plan — see Corrections 1).
 - [ ] Add tests for preset-to-policy mapping and receipt contents.
 
 **Acceptance:** Presets work, are documented, and do not create new privileged
@@ -170,16 +267,38 @@ paths beyond the existing policy vocabulary.
 
 ### Phase 4 — Templates and OCI-image bases
 
-- [ ] Implement `mvmctl template build --image <ref>` as a first-class path,
-      alongside the existing Nix-flake path.
-- [ ] Add built-in language templates (python, node, rust, go, ruby, java,
-      shell, data-science, web-dev) backed by pinned OCI refs.
-- [ ] Allow saving a running dev-tier sandbox as a custom template.
+- [x] Implement an image-backed build path alongside the Nix-flake one.
+      **Spelled differently than this plan says**, because `mvmctl template
+      build` no longer exists: PR #62 ("Manifest-driven template DX", plans
+      38–40, 2026-05-04) collapsed `template init/create/build NAME` into a
+      manifest file discovered by path, keying slots by
+      `sha256(canonical_manifest_path)` instead of user-invented names. The
+      post-38 spelling is `mvmctl machine build <path>` on an `mvm.toml`
+      carrying `image = "..."`. The manifest half already existed — `image`
+      has been a validated, mutually-exclusive source selector all along;
+      `build` refused it with "image-backed builds are not wired yet".
+- [x] Add built-in language templates backed by pinned OCI refs. Shipped in
+      Phase 2 as the runtime catalog (`--runtime python|node|rust|go|ruby|shell`).
+      Not duplicated under a second `--template` name.
+- [ ] Allow saving a running dev-tier sandbox as a custom template. *(Open.)*
 - [ ] Integrate templates with the snapshot-first storage from Plan 255.
-- [ ] Add BDD scenarios for template build, save, and reuse.
+      *(Open: the image build installs a slot revision; taking a warm
+      ready-point snapshot of it is Plan 255 Phase 4's `--warm` item.)*
+- [x] Cover the build path. Four unit tests in
+      `mvm_runtime::vm::template::lifecycle::build_image`; the revision-keying
+      and missing-sidecar refusal were mutation-checked red. A BDD scenario was
+      written and then **deleted**: it asserted `machine build --help` mentions
+      "manifest", which passes with the feature reverted. Real BDD coverage
+      needs a registry pull, which the hermetic suite does not do.
 
-**Acceptance:** A user can `mvmctl template build --image python:3.12-alpine`
-and then `mvmctl run --template python <script>`.
+**Acceptance (restated for the post-38 spelling):** a user can put
+`image = "alpine:3.20"` in an `mvm.toml`, run `mvmctl machine build .`, and then
+`mvmctl machine run --manifest ./mvm.toml`. Verified by hand end to end: the
+slot revision holds `rootfs.ext4`, `vmlinux`, `mvm-meta.json`, `fc-base.json`
+and `revision.json`, rebuilding the same reference is idempotent, and
+`--manifest` resolves the slot.
+
+The `--runtime` half of the original acceptance shipped in Phase 2.
 
 ### Phase 5 — Snapshot/fork DX
 

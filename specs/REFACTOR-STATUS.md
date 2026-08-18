@@ -1,6 +1,6 @@
 # Refactor status
 
-Last updated: 2026-08-17
+Last updated: 2026-08-18
 
 This is the cross-plan progress index. The owning plan remains authoritative
 for detailed scope and acceptance criteria.
@@ -284,6 +284,36 @@ for detailed scope and acceptance criteria.
       zero; the later workload boot stopped at a separate readiness timeout.
 
 ## In-flight plans
+
+- [~] **Admission-bound AI assurance sessions** —
+      `specs/plans/2026-08-17-admission-bound-ai-assurance-sessions.md`. W1–W3
+      landed: the `mvm.assurance.ai-session-input/v1` envelope (provider half
+      cannot carry admission facts; the assembled envelope has no
+      `Deserialize`), the five-way `EffectiveAuthority` intersection, the
+      host-derived fail-closed outcome ladder, and `host.assurance.v1` — one
+      declared probe verb, binding-gated, taking a destination *label* the host
+      resolves rather than anything the model composed. Conformed to the
+      counterparty's exact key sets, which disagreed with the implementation
+      prompt in three places (see the plan's drift note). 65 tests.
+      STILL OPEN: W4 guest-side API, W5 observer/cleanup evidence, W6 session
+      lifecycle on the admit path, W7 receipt/audit emission, W8 the
+      framed-stdio provider binary. Until W5–W8 land every live trial
+      evaluates `INCONCLUSIVE` by design; no certifying campaign can run.
+
+- [~] **Embedded-binary content store** — `specs/plans/2026-08-17-embedded-binary-content-store.md`.
+      Phases 1–2 landed: both nested legs of `crates/mvm-cli/build.rs` are keyed
+      on their real dependency closure rather than on `PROFILE == "debug"` plus
+      "the file exists", and the store lives outside `target/` so worktrees,
+      profiles and target triples share it. Cold build **359s → 45.5s**; the
+      build script within it **332.7s → 0.4s**; an `mvm-cli` edit no longer
+      re-runs either leg. The dev profile keeps its stale-embedded-binary trade
+      deliberately, but a miss now knows it is stale and says so via
+      `cargo:warning=`. Supersedes the freshness half of
+      `specs/plans/2026-08-15-aux-helper-binary-freshness.md`.
+      STILL OPEN: Phase 3 (phantom build.rs tests, `MVM_LIBKRUN_HEADER`
+      rerun-if-env-changed), Phase 4 (dead crate edges; `deps_audit` and the
+      tree-sitter grammars off the serial path; the `mvm-hostd` audit cluster),
+      Phase 5 (sccache 4.2% Rust hit rate, worktree hygiene)
 
 - [~] **Launch path as declared stages**
       (`specs/plans/2026-08-15-launch-path-as-declared-stages.md`). Opened
@@ -655,6 +685,37 @@ for detailed scope and acceptance criteria.
     supervisor PID disappearance. Follow-up: give pool maintenance to the
     resident per-tenant daemon and continue reducing supervisor shutdown
     latency.
+    The "real cleanup" remainder was then decomposed and was mostly not:
+    `stop_console_cleanup` was the largest span in a transient teardown and
+    57.0 ms of it was two more instances of the cadence bug — the stream
+    accept loop polling a nonblocking listener on a 25 ms tick, and
+    `DurableSink::seal` polling `is_finished()` every 20 ms for a writer that
+    exits in microseconds. Backoff could not fix the first (it idles at the
+    ceiling for the VM's whole life), so the listener now blocks and shutdown
+    wakes it by connecting to its own socket, bounded and with a detach path;
+    the second waits on a channel the writer thread's sender closes on exit.
+    Measured on release, HVF/macOS, against an unchanged control span in the
+    same runs: `stop_console_cleanup` 57.0 -> 7.0-7.7 ms while
+    `stop_pid_disappearance` held at 33.4-35.5 ms against a 33.7 ms baseline.
+    Foreground teardown 91.4 -> 41-45 ms. A fifth cadence site was then found
+    inside the guest agent — `exec_stream` slept a flat 50 ms before rechecking
+    a child that had already exited, a hard floor under every exec — taking
+    `command` 52.5 -> 4.6-5.4 ms. Total 287.2 -> p50 191.2 ms over 9 samples
+    (not the 20 a publishable lane needs; the host became too loaded to finish
+    the set, so there is no p95/p99 yet).
+    Admission's three pre-boot chain barriers now
+    share one flush, closing #2293's open acceptance item without changing
+    `sync_policy_for`'s fail-closed default, and the chain cursor reads a
+    bounded tail instead of the whole 4 MiB segment on every append. **Two things are open
+    and newly named.** The receipt write, not the chain, is the dominant admit
+    cost at ~36 ms of ~45 ms — a structure the code calls a derived cache,
+    doing an `F_FULLFSYNC` synchronously before boot. And
+    `stop_pid_disappearance` is guest-RAM teardown: `shutdown-timing.json`
+    accounts for only 2.9 ms of it, because the host waits on kqueue process
+    exit while the record stops before the process exits. It is linear in guest
+    memory at ~48 ms/GB (33 ms at 512M, 194 ms at 4G), so the watchdog
+    self-pipe is not worth building and a large workload pays teardown no
+    `alpine`-sized benchmark can see.
   - [ ] Phase 7 — live validation and regression gates
   - [x] Cross-plan fast-machine-substrate contract documented in
         `specs/notes/2026-08-10-fast-machine-substrate.md` (issue #2279)
@@ -1095,6 +1156,22 @@ for detailed scope and acceptance criteria.
         to sign real audit entries.
   - [ ] Does **not** retire `web/audit-verify/` (no Merkle inclusion) — B5 and
         `mvmctl audit pubkey` remain plan 301's
+- [ ] Run-first CLI ergonomics
+      (`specs/plans/329-run-first-cli-and-upstream-adoption.md` — note three
+      plans share the number 329; refer to this one by path) — Phase A landed:
+      ADR-027 amended so `run` is a first-class visible verb, the fifteen
+      user-facing verb groups promoted out of `hide = true`, twelve missing
+      reference rows written, and `xtask check-cli-help-matches-docs` added to
+      the Lint job so `mvmctl --help` and the published CLI reference cannot
+      drift apart again. Phase 5 (snapshot/fork DX) was already complete.
+      Phase 1 then landed the shared argument core: the 26 shared execution
+      flags are declared once in `RunArgs` and flattened into both verbs, with
+      `run` adding the SDK transport and `machine run` the lifecycle flags. Both
+      verbs now default to `--profile standard`. Phase 2 then landed runtime
+      detection: `mvm_core::runtime_catalog` plus one shared resolver whose
+      order is explicit source > `--runtime` > `mvm.toml` walk-up > argv[0] >
+      project file > bundled default. Inference is `run`-only; `machine run`
+      keeps its explicit-source contract. Phases 3–4 and 6–8 remain.
 - [ ] Plan 329 — Browser-tier microVM demo (`specs/plans/329-browser-wasm-backend-demo.md`)
       — in progress on `feat/329-browser-wasm-backend`. Extends Plan 320 with a
       `wasm32-wasip1` guest that boots, provides a shell, and delegates `fetch`
@@ -1749,6 +1826,12 @@ check-l3-expansion-freeze` added as a temporary shrink-only ratchet
         closure at 468, so the ~62 `wasmtime`-family packages behind an
         off-by-default feature stay observed. Not a lockfile count: measured,
         that number does not move when a dependency is removed (~120 orphans)
+  - [x] Sigstore 0.9→0.11 (`specs/plans/2026-08-17-sigstore-0-11-upgrade.md`):
+        sigstore-verify stack bumped, rustls feature selected (ring backend,
+        not aws-lc-rs), dead `VerificationResult.success` API usage removed.
+        Stale `rand`/`rand_core` ALLOWLIST entries ratcheted down in both
+        `xtask/src/check_duplicate_majors.rs` and `deny.toml` (workspace
+        unified on rand 0.10 in a prior change; the allowlist never followed).
 
 - [ ] Plan 313 — egress token accounting, streaming, and compaction
       (`specs/plans/313-egress-token-accounting-and-compaction.md`)

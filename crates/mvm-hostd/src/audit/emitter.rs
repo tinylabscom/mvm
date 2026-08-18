@@ -58,6 +58,7 @@ use mvm_contract::verify::hash_line;
 use mvm_core::plan::ExecutionPlan;
 use std::collections::HashMap;
 use std::sync::Mutex;
+use std::sync::OnceLock;
 
 /// Wire-stable event name and label keys for the wall-clock enforcement entry.
 /// Shared so the supervisor that emits it and any reader asserting on it cannot
@@ -347,6 +348,37 @@ pub struct AuditEmitter {
     decisions_enabled: bool,
     decisions_dir: Option<PathBuf>,
     decision_stores: Mutex<HashMap<String, DecisionStore>>,
+    /// Built once on first emit and reused.
+    ///
+    /// The signer interface is async and the callers are not, so each emit has
+    /// to block on a runtime. Building a fresh one per entry meant paying that
+    /// construction ~6 times for the handful of entries one launch writes, on
+    /// the admission path, for a runtime that only ever drives a blocking file
+    /// append.
+    runtime: OnceLock<tokio::runtime::Runtime>,
+}
+
+impl Drop for AuditEmitter {
+    /// Shut the cached runtime down without blocking.
+    ///
+    /// Caching the runtime removed a per-entry construction, but it also moved
+    /// where the runtime is *dropped*: it used to die inside the synchronous
+    /// emit that built it, and now it dies with the emitter. An emitter
+    /// constructed from inside someone else's async context therefore drops
+    /// its runtime there, and a blocking drop from async is a tokio panic by
+    /// design —
+    ///
+    ///   Cannot drop a runtime in a context where blocking is not allowed.
+    ///
+    /// `shutdown_background` returns immediately and leaves the worker threads
+    /// to exit on their own, which is what this runtime wants anyway: it only
+    /// ever drives a blocking file append that has already completed by the
+    /// time the emitter is being dropped.
+    fn drop(&mut self) {
+        if let Some(rt) = self.runtime.take() {
+            rt.shutdown_background();
+        }
+    }
 }
 
 impl AuditEmitter {
@@ -388,6 +420,7 @@ impl AuditEmitter {
             decisions_enabled: false,
             decisions_dir: None,
             decision_stores: Mutex::new(HashMap::new()),
+            runtime: OnceLock::new(),
         })
     }
 
@@ -1135,12 +1168,58 @@ impl AuditEmitter {
         self.emit_entry_blocking(entry)
     }
 
-    fn emit_entry_blocking(&self, entry: &PlanAuditEntry) -> Result<()> {
-        let t0 = std::time::Instant::now();
-        let rt = tokio::runtime::Builder::new_current_thread()
+    /// Run `f` with every barrier fsync on this emitter's chains held back,
+    /// then sync them all once.
+    ///
+    /// For a burst of entries that all have to be durable before the same
+    /// action — an admission writing `plan.admitted`, its decision record and
+    /// its grant requirement before anything boots — this costs one fsync
+    /// rather than one per entry. `sync_data` is file-wide, so the single
+    /// flush carries every record the batch wrote.
+    ///
+    /// Fails closed: if the flush fails, this returns the error and `f`'s
+    /// result is discarded, so a caller that boots on `Ok` cannot boot on
+    /// records that never reached the disk. The scope must therefore close
+    /// before the action the entries authorize — not at process exit.
+    pub fn batched<T>(&self, f: impl FnOnce() -> Result<T>) -> Result<T> {
+        for signer in &self.signers {
+            signer.begin_batch();
+        }
+        let out = f();
+        // End every batch even if `f` failed, so a later emit is not left
+        // silently deferring its barriers.
+        let mut flush = Ok(());
+        for signer in &self.signers {
+            if let Err(e) = signer.end_batch() {
+                flush = Err(e);
+            }
+        }
+        let out = out?;
+        flush.context("syncing batched audit entries before the action they authorize")?;
+        Ok(out)
+    }
+
+    /// The shared blocking runtime, built on first use.
+    fn runtime(&self) -> Result<&tokio::runtime::Runtime> {
+        if let Some(rt) = self.runtime.get() {
+            return Ok(rt);
+        }
+        let built = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .context("building tokio runtime for audit emit")?;
+        // A concurrent caller may have won the race; either runtime is usable
+        // and the loser's is dropped here.
+        let _ = self.runtime.set(built);
+        Ok(self
+            .runtime
+            .get()
+            .expect("runtime is set on the line above or by the caller that raced us"))
+    }
+
+    fn emit_entry_blocking(&self, entry: &PlanAuditEntry) -> Result<()> {
+        let t0 = std::time::Instant::now();
+        let rt = self.runtime()?;
         let t_rt = std::time::Instant::now();
         tracing::debug!(
             ms = (t_rt - t0).as_secs_f64() * 1000.0,
@@ -1311,6 +1390,38 @@ mod tests {
             .tenant(tenant)
             .plan_id(plan_id)
             .build()
+    }
+
+    /// Construct, use and drop an emitter from inside an async context.
+    ///
+    /// This is the shape the cached runtime made hazardous and that no unit
+    /// test covered: the runtime now dies with the emitter rather than inside
+    /// the emit that built it, so an emitter dropped in async drops a runtime
+    /// in async — which tokio panics on. The conformance suite caught it by
+    /// accident because its steps run under cucumber's runtime; this catches
+    /// it on purpose.
+    #[tokio::test]
+    async fn an_emitter_dropped_inside_an_async_context_does_not_panic() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = {
+            let mut __ed_seed = [0u8; 32];
+            rand::rng().fill_bytes(&mut __ed_seed);
+            SigningKey::from_bytes(&__ed_seed)
+        };
+
+        let emitter = AuditEmitter::with_dir(key, dir.path()).unwrap();
+        // Emit first: the runtime is built lazily, so an emitter that never
+        // emitted would drop a `OnceLock` that was never filled and pass
+        // whatever `Drop` did.
+        emitter
+            .emit_admitted(&fixture_plan("local", "plan-async-drop"), "host:test")
+            .unwrap();
+
+        drop(emitter);
+
+        // Reached only if the drop above did not panic.
+        let content = std::fs::read_to_string(dir.path().join("local.jsonl")).unwrap();
+        assert!(content.contains("plan-async-drop"));
     }
 
     #[test]

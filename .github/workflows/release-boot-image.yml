@@ -66,8 +66,10 @@ jobs:
         include:
           - arch: aarch64
             runner: ubuntu-24.04-arm
+            musl_target: aarch64-unknown-linux-musl
           - arch: x86_64
             runner: ubuntu-latest
+            musl_target: x86_64-unknown-linux-musl
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v6
@@ -81,13 +83,34 @@ jobs:
       - name: Install cosign
         uses: sigstore/cosign-installer@v3
 
+      - uses: ./.github/actions/install-zigbuild
+
+      # The builder-vm rootfs embeds the cross-compiled, statically
+      # musl-linked host-vm binaries, which the flake reads out of
+      # MVM_HOST_BIN_DIR at eval time under `--impure`. mvmctl normally
+      # extracts its embedded copy before invoking nix; nothing does that
+      # here, so the build has to produce them. Without this the eval dies
+      # with "MVM_HOST_BIN_DIR is not set" and the job publishes nothing —
+      # which is how the first boot-image release shipped with no builder-vm
+      # assets at all. Same recipe the reproducibility lanes in security.yml
+      # use, and the same one crates/mvm-cli/build.rs runs.
+      - name: Cross-compile host-vm binaries (MVM_HOST_BIN_DIR contract)
+        env:
+          MUSL_TARGET: ${{ matrix.musl_target }}
+        run: |
+          set -euo pipefail
+          cargo zigbuild --release --locked --target "$MUSL_TARGET" \
+            -p mvm-build --bin mvm-host-vm-init --bin mvm-egress-proxy \
+            --bin mvm-builderd
+          echo "MVM_HOST_BIN_DIR=$PWD/target/${MUSL_TARGET}/release" >> "$GITHUB_ENV"
+
       - name: Build builder VM image
         env:
           ARCH: ${{ matrix.arch }}
         run: |
           SYSTEM="${ARCH}-linux"
           nix build "./nix/images/builder-vm#packages.${SYSTEM}.default" \
-            --no-link --print-out-paths > /tmp/store-path.txt
+            --impure --no-link --print-out-paths > /tmp/store-path.txt
           STORE_PATH=$(head -1 /tmp/store-path.txt)
           echo "STORE_PATH=${STORE_PATH}" >> "$GITHUB_ENV"
           mkdir -p staging
@@ -426,6 +449,13 @@ jobs:
       # static /init read above, which catches the defect class that actually
       # shipped and is a stated compromise rather than a claim of equivalence —
       # an aarch64-only regression that is not a shebang defect still gets past.
+      # The boot gate runs `cargo test`, which builds mvmctl, whose build.rs
+      # cross-compiles the embedded host binaries as static musl and needs the
+      # pinned zig. Without it the gate fails before it ever starts a guest —
+      # which reads as "the image does not boot" and is nothing of the kind.
+      - uses: ./.github/actions/install-zigbuild
+        if: matrix.arch == 'x86_64'
+
       - name: Install firecracker for the boot gate
         if: matrix.arch == 'x86_64'
         env:
@@ -455,6 +485,38 @@ jobs:
           sudo chmod 666 /dev/kvm
           ls -la /dev/kvm
 
+      # Building the root package runs crates/mvm-cli/build.rs, which
+      # cross-compiles the embedded host binaries and needs the pinned zig.
+      # Without it the boot gate below dies at compile time, before it starts
+      # a VM — which is how the first boot-image release shipped with no
+      # x86_64 default-microvm assets while every static check passed.
+      - uses: ./.github/actions/install-zigbuild
+        if: matrix.arch == 'x86_64'
+
+      # The prod rootfs resolves its agent from /mvm/runtime, which is the
+      # runtime overlay attached as a second virtio-blk drive. It is built by a
+      # sibling job on a different runner, so this one has to build its own
+      # copy — the nix store is already warm from the image build above, so
+      # this is a store lookup far more often than a build. Without it the
+      # guest panics at `Attempted to kill init!` and the gate reports a broken
+      # image when the image is fine and the harness was incomplete.
+      - name: Build the runtime overlay for the boot gate
+        if: matrix.arch == 'x86_64'
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          SYSTEM="${ARCH}-linux"
+          OVERLAY_PATH=$(nix build "./nix/images/runtime-overlay#packages.${SYSTEM}.default" \
+            --no-link --print-out-paths | head -1)
+          mkdir -p overlay-staging
+          # cp -L so `overlay.*` resolve through nix-store symlinks.
+          cp -L "$OVERLAY_PATH/overlay.ext4"     overlay-staging/overlay.ext4
+          cp -L "$OVERLAY_PATH/overlay.verity"   overlay-staging/overlay.verity
+          cp -L "$OVERLAY_PATH/overlay.roothash" overlay-staging/overlay.roothash
+          echo "MVM_RUNTIME_BOOT_OVERLAY_ROOTHASH=$(tr -d '[:space:]' < overlay-staging/overlay.roothash)" \
+            >> "$GITHUB_ENV"
+
       - name: Boot the staged image before it becomes a release asset
         if: matrix.arch == 'x86_64'
         # Boots the artifact in `staging/`, never a published one — the whole
@@ -470,6 +532,8 @@ jobs:
           MVM_RUNTIME_BOOT_BACKEND: firecracker
           MVM_RUNTIME_BOOT_KERNEL: staging/default-microvm-vmlinux-x86_64
           MVM_RUNTIME_BOOT_ROOTFS: staging/default-microvm-rootfs-x86_64.ext4
+          MVM_RUNTIME_BOOT_OVERLAY: overlay-staging/overlay.ext4
+          MVM_RUNTIME_BOOT_OVERLAY_VERITY: overlay-staging/overlay.verity
           MVM_RUNTIME_BOOT_READY: guest-agent
           MVM_RUNTIME_BOOT_RUNS: "1"
           MVM_RUNTIME_BOOT_CONCURRENT: "1"
@@ -603,7 +667,11 @@ jobs:
     # `!cancelled()` rather than plain success: the four image jobs are
     # independent artifacts and one arch's Nix build failing must not strand
     # the others, exactly as it does not strand the binary release next door.
-    # A boot-image tag publishes whatever built.
+    # It reaches this job so the completeness check below can name every
+    # missing asset in one report instead of one job conclusion at a time —
+    # it does NOT mean a partial set publishes. It used to: the first
+    # boot-image release went out carrying one arch and no builder VM, and
+    # the CLI release next door then treated its existence as sufficient.
     if: ${{ !cancelled() && (github.event_name == 'push' || github.event.inputs.dry_run == 'false') }}
     environment: release-signing
     runs-on: ubuntu-latest
@@ -656,6 +724,39 @@ jobs:
               "${blob}"
             echo "Signed: ${blob}"
           done
+
+      # release.yml attaches the newest boot-image release's assets to the CLI
+      # release and hard-fails when no such release exists — but it checks only
+      # that one EXISTS, not that it is complete. So a partial release here
+      # publishes a CLI release that is green and unusable: no x86_64 image
+      # means every x86_64 fresh install 404s on first boot, and no builder-vm
+      # assets means download_builder_vm_image 404s for everyone. Refuse here,
+      # where the missing pieces are still named, rather than downstream where
+      # they are silence.
+      - name: Assert every arch produced its full asset set
+        run: |
+          set -euo pipefail
+          missing=()
+          for arch in aarch64 x86_64; do
+            for f in \
+              "default-microvm-vmlinux-${arch}" \
+              "default-microvm-rootfs-${arch}.ext4" \
+              "default-microvm-meta-${arch}.json" \
+              "default-microvm-${arch}-checksums-sha256.txt" \
+              "builder-vm-vmlinux-${arch}" \
+              "builder-vm-rootfs-${arch}.ext4" \
+              "builder-vm-${arch}-checksums-sha256.txt" \
+              "runtime-overlay-${arch}.tar.gz" \
+              "sdk-sidecar-${arch}.tar.gz"; do
+              [ -s "artifacts/${f}" ] || missing+=("${f}")
+            done
+          done
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "::error::boot image release is incomplete — refusing to publish. Missing: ${missing[*]}" >&2
+            echo "Re-run the failed image job(s); the successful ones are already uploaded as run artifacts." >&2
+            exit 1
+          fi
+          echo "All required boot image assets present for both arches."
 
       - name: Create boot image release
         env:

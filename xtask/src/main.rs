@@ -17,6 +17,7 @@ mod check_build_egress_callers;
 mod check_builder_shell_job_sites;
 mod check_claim_catalog;
 mod check_claim_witness_freshness;
+mod check_cli_help_matches_docs;
 mod check_cli_runtime_surface;
 mod check_closure_budget;
 mod check_conformance;
@@ -53,6 +54,7 @@ mod check_no_spec_refs_in_comments;
 mod check_no_string_backend_dispatch;
 mod check_no_vz;
 mod check_one_guest_protocol;
+mod check_per_vm_host_binaries_sync;
 mod check_plan_names;
 mod check_require_grant_token_allowlist;
 mod check_runtime_overlay_version;
@@ -132,6 +134,10 @@ fn main() -> Result<()> {
         Some("check-doc-claims") => {
             let workspace = workspace_root();
             check_doc_claims::run(&workspace)
+        }
+        Some("check-cli-help-matches-docs") => {
+            let workspace = workspace_root();
+            check_cli_help_matches_docs::run(&workspace)
         }
         Some("check-machine-doc-guards") => {
             let workspace = workspace_root();
@@ -362,6 +368,10 @@ fn main() -> Result<()> {
             let workspace = workspace_root();
             check_mvm_host_binaries_sync::run(&workspace)
         }
+        Some("check-per-vm-host-binaries-sync") => {
+            let workspace = workspace_root();
+            check_per_vm_host_binaries_sync::run(&workspace)
+        }
         Some("check-workflow-paths") => {
             let workspace = workspace_root();
             check_workflow_paths::run(&workspace)
@@ -402,7 +412,7 @@ fn main() -> Result<()> {
             ir_parity::check(&workspace)
         }
         Some(other) => anyhow::bail!(
-            "Unknown xtask: {:?}. Available: gen-man, check-adr-coverage, check-no-display-on-secret-types, check-audit-positional, check-doc-claims, check-machine-doc-guards, check-forbidden-deps, check-core-runtime-free, check-content-address-determinism, check-deferrals, check-honesty, check-closure-budget, check-workspace-dep-inheritance, check-duplicate-majors, check-binary-size, check-kernel-config-budget, check-kernel-pin-freshness, check-builder-shell-job-sites, check-guest-entropy-seed, check-guest-agent-runtime-free, check-guest-agent-in-all-images, check-guest-images-no-builder-tools, check-guest-binary-lists, check-no-overclaim, check-two-surfaces, check-no-spec-refs-in-comments, check-no-string-backend-dispatch, check-plan-names, check-single-home, check-single-fixture-corpus, check-test-home-isolation, check-no-network-literals, check-cli-runtime-surface, check-claim-catalog, check-sprint-append, sprint, check-dormant-controls, check-witness-citations, check-declared-backing, check-claim-witness-freshness, check-abi-layout, check-mutation-witnesses, check-nextest-groups, check-conformance, check-trust-gradient, check-vsock-only-egress, check-one-guest-protocol, check-no-gateway-names, check-uniform-vsock-egress, check-l3-expansion-freeze, check-build-egress-callers, check-verified-kernel-reads, check-stream-redaction-seam, check-guest-init-parity, check-require-grant-token-allowlist, check-mvm-host-binaries-sync, check-workflow-paths, check-runtime-overlay-version, check-single-grants-projection, check-single-exec-secs-writer, check-single-host-predicate, check-backend-resource-controls, perf, build-dev-image, gen-stubs, check-stubs, gen-ir-parity, check-ir-parity",
+            "Unknown xtask: {:?}. Available: gen-man, check-adr-coverage, check-no-display-on-secret-types, check-audit-positional, check-doc-claims, check-machine-doc-guards, check-forbidden-deps, check-core-runtime-free, check-content-address-determinism, check-deferrals, check-honesty, check-closure-budget, check-workspace-dep-inheritance, check-duplicate-majors, check-binary-size, check-kernel-config-budget, check-kernel-pin-freshness, check-builder-shell-job-sites, check-guest-entropy-seed, check-guest-agent-runtime-free, check-guest-agent-in-all-images, check-guest-images-no-builder-tools, check-guest-binary-lists, check-no-overclaim, check-two-surfaces, check-no-spec-refs-in-comments, check-no-string-backend-dispatch, check-plan-names, check-single-home, check-single-fixture-corpus, check-test-home-isolation, check-no-network-literals, check-cli-runtime-surface, check-cli-help-matches-docs, check-claim-catalog, check-sprint-append, sprint, check-dormant-controls, check-witness-citations, check-declared-backing, check-claim-witness-freshness, check-abi-layout, check-mutation-witnesses, check-nextest-groups, check-conformance, check-trust-gradient, check-vsock-only-egress, check-one-guest-protocol, check-no-gateway-names, check-uniform-vsock-egress, check-l3-expansion-freeze, check-build-egress-callers, check-verified-kernel-reads, check-stream-redaction-seam, check-guest-init-parity, check-require-grant-token-allowlist, check-mvm-host-binaries-sync, check-per-vm-host-binaries-sync, check-workflow-paths, check-runtime-overlay-version, check-single-grants-projection, check-single-exec-secs-writer, check-single-host-predicate, check-backend-resource-controls, perf, build-dev-image, gen-stubs, check-stubs, gen-ir-parity, check-ir-parity",
             other
         ),
         None => {
@@ -422,6 +432,9 @@ fn main() -> Result<()> {
             );
             eprintln!(
                 "  check-doc-claims                        Plan 74 W0 lint: reject gated marketing phrases in public docs"
+            );
+            eprintln!(
+                "  check-cli-help-matches-docs             Hold `mvmctl --help` and the CLI reference to the same verb set"
             );
             eprintln!(
                 "  check-machine-doc-guards                Plan 200 lint: require machine use-case/limitations docs and reject beginner overclaims"
@@ -533,6 +546,9 @@ fn main() -> Result<()> {
             );
             eprintln!(
                 "  check-mvm-host-binaries-sync            Plan 115 / ADR-004: assert Rust manifest and Nix attrset agree"
+            );
+            eprintln!(
+                "  check-per-vm-host-binaries-sync         assert release.yml builds+packages every spawnable per-VM binary"
             );
             eprintln!(
                 "  check-no-gateway-names                  assert no reference to a removed userspace network gateway"

@@ -88,6 +88,13 @@ const EXEMPTIONS: &[(&str, &[Rule], &str)] = &[
         "writes the user's shell rc file (~/.zshrc / ~/.bashrc); $HOME locates the rc file, not an mvm base dir",
     ),
     (
+        "crates/mvm-cli/build_embed_cache.rs",
+        &[Rule::HomeLiteral, Rule::HomeRead],
+        "the build script's artifact store is a host-level build cache, not an mvm state root: it \
+         must be shared across worktrees and so cannot live under MVM_HOME, which every worktree \
+         redirects at itself",
+    ),
+    (
         "crates/mvm-cli/src/host_binaries/toolchain.rs",
         &[Rule::HomeRead],
         "host toolchain discovery (~/.cargo/bin/rustup, mise python installs) lives in the real $HOME",
