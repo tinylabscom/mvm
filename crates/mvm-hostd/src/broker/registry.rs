@@ -2,9 +2,11 @@
 //! `ServiceCall` to the right [`ServiceHandler`].
 //!
 //! The registry starts with zero handlers registered (every call
-//! returns `Err(NotBound)`); `host.time.v1`, the `host.cost.v1`
-//! workload verb, and the `broker.v1/list_services` introspection verb
-//! wire in their handlers via [`Registry::register`].
+//! returns `Err(NotBound)`); `host.time.v1` and the `host.cost.v1`
+//! workload verb wire in their handlers via [`Registry::register`].
+//!
+//! [`Registry::admitted_catalog`] is the only projection of this state a
+//! guest may be shown.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -158,6 +160,30 @@ impl Registry {
             descriptor_digest,
         });
         Ok(())
+    }
+
+    /// The capability set a guest may be shown: those registered here whose
+    /// descriptor still digests to what the host-signed admission bound.
+    ///
+    /// The intersection carries the weight. A registration is local to this
+    /// subprocess and can drift; an admission is signed and derives from the
+    /// workload's plan. Projecting the registered set instead would let a
+    /// local registration advertise authority the plan never granted, which
+    /// inverts the direction the binding model depends on.
+    #[must_use]
+    pub fn admitted_catalog(&self) -> Vec<CapabilityDescriptor> {
+        let mut catalog: Vec<CapabilityDescriptor> = self
+            .capabilities
+            .iter()
+            .filter(|(id, registration)| {
+                self.admitted
+                    .get(*id)
+                    .is_some_and(|admitted| *admitted == registration.descriptor.digest())
+            })
+            .map(|(_, registration)| registration.descriptor.clone())
+            .collect();
+        catalog.sort_by_key(|descriptor| descriptor.id.to_string());
+        catalog
     }
 
     /// Dispatch a call. Returns `Err(NotBound)` for any service not in
@@ -959,5 +985,110 @@ mod tests {
             !registry.is_empty(),
             "a registry holding a handler is not empty"
         );
+    }
+
+    fn descriptor_named(verb: &str, description: &str) -> CapabilityDescriptor {
+        CapabilityDescriptor::builder()
+            .id(CapabilityId::new(
+                ServiceId::parse("host.dev.echo.v1").expect("service id"),
+                verb,
+            )
+            .expect("capability id"))
+            .description(description)
+            .input_schema(SchemaRef::new("host.dev.echo.input.v1", [1; 32]).expect("schema"))
+            .output_schema(SchemaRef::new("host.dev.echo.output.v1", [2; 32]).expect("schema"))
+            .limits(CapabilityLimits::new(128, 128, 50).expect("limits"))
+            .build()
+            .expect("descriptor")
+    }
+
+    #[test]
+    fn the_catalog_is_admitted_intersected_with_registered() {
+        let mut registry = Registry::new();
+        let d = descriptor();
+        registry
+            .register_capability(Arc::new(EchoHandler), d.clone())
+            .expect("register");
+        registry.admit_capabilities([d.binding()]).expect("admit");
+
+        let catalog = registry.admitted_catalog();
+        assert_eq!(
+            catalog,
+            vec![d],
+            "an admitted, registered capability is shown"
+        );
+    }
+
+    #[test]
+    fn a_registered_capability_that_was_not_admitted_is_invisible() {
+        let mut registry = Registry::new();
+        registry
+            .register_capability(Arc::new(EchoHandler), descriptor())
+            .expect("register");
+
+        assert!(
+            registry.admitted_catalog().is_empty(),
+            "registration is local to this subprocess; only a signed admission may show a tool"
+        );
+    }
+
+    #[test]
+    fn an_admitted_capability_with_no_registered_handler_is_invisible() {
+        let mut registry = Registry::new();
+        registry
+            .admit_capabilities([descriptor().binding()])
+            .expect("admit");
+
+        assert!(
+            registry.admitted_catalog().is_empty(),
+            "a tool with nothing to dispatch to is not a tool"
+        );
+    }
+
+    #[test]
+    fn a_descriptor_that_drifted_from_its_admitted_digest_is_invisible() {
+        let mut registry = Registry::new();
+        let admitted = descriptor_named("echo", "echo a bounded test value");
+        let registered = descriptor_named("echo", "echo a bounded test value, but wider");
+        assert_ne!(
+            admitted.digest(),
+            registered.digest(),
+            "the fixture must actually differ or this test proves nothing"
+        );
+
+        registry
+            .register_capability(Arc::new(EchoHandler), registered)
+            .expect("register");
+        registry
+            .admit_capabilities([admitted.binding()])
+            .expect("admit");
+
+        assert!(
+            registry.admitted_catalog().is_empty(),
+            "a registration may not advertise a descriptor the admission never bound"
+        );
+    }
+
+    #[test]
+    fn the_catalog_is_ordered_deterministically() {
+        let mut registry = Registry::new();
+        let second = descriptor_named("echo2", "a second verb");
+        let first = descriptor_named("echo", "the first verb");
+        registry
+            .register_capability(Arc::new(EchoHandler), second.clone())
+            .expect("register second");
+        registry
+            .register_capability(Arc::new(EchoHandler), first.clone())
+            .expect("register first");
+        registry
+            .admit_capabilities([second.binding(), first.binding()])
+            .expect("admit");
+
+        let verbs: Vec<String> = registry
+            .admitted_catalog()
+            .into_iter()
+            .map(|d| d.id.verb)
+            .collect();
+        assert_eq!(verbs, vec!["echo".to_string(), "echo2".to_string()]);
     }
 }
