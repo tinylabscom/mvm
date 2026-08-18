@@ -96,14 +96,20 @@ pub struct SessionBinding {
     pub session_id: AgentSessionId,
     pub generation: u64,
     pub journal_cursor: u64,
-    pub approval_head: CheckpointDigest,
+    pub approval_head: ApprovalHead,
 }
 ```
+
+`ApprovalHead` is a dedicated `sha256:<64-hex>` newtype, not `CheckpointDigest`
+reused: an approval-ledger head and a checkpoint content-address are different
+hash chains, and `CheckpointDigest` carries no conversion to any other
+prefixed digest type on purpose (see its own doc comment), so the binding
+needs its own type rather than borrowing one that means something else.
 
 Carried as `Option<SessionBinding>` on `CheckpointMeta`, and **inside the meta
 digest**. Admitted grants already sit inside that digest
 (`the_admitted_grant_is_inside_the_content_address`,
-`crates/mvm-core/src/checkpoint.rs:661`), so extending it makes the resume
+`crates/mvm-core/src/checkpoint.rs:699`), so extending it makes the resume
 point content-addressed and tamper-evident by the mechanism already in place.
 
 The payoff is that `materialize_child_from_parent`
@@ -296,9 +302,11 @@ Numbering was reconciled before these documents landed on main (PR #2691):
 
 ## Workstreams
 
-- [ ] **WS1 — Session store.** `mvm-runtime/src/session/` mirroring
-      `checkpoint/`, over a new `mvm_core::config::sessions_dir()`. Record,
-      journal persistence, approval-ledger head caching.
+- [ ] **WS1 — Session store.** `mvm-runtime/src/agent_session/` mirroring
+      `checkpoint/`, over a new `mvm_core::config::agent_sessions_dir()`.
+      Record and store landed
+      (`specs/plans/2026-08-18-durable-session-substrate.md`); journal
+      persistence and approval-ledger head caching have not.
 - [ ] **WS2 — `SessionBinding` on `CheckpointMeta`.** Field, digest coverage,
       digest tests.
 - [ ] **WS3 — Park path.** `ParkReason`, tier selection, quiesce sequence over

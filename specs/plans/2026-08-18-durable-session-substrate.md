@@ -11,9 +11,10 @@ belonging to a specific session at a specific journal position.
 
 **Architecture:** `SessionBinding` is a new optional field on `CheckpointMeta`,
 folded into the existing `meta_digest` derivation the same way `grants` already
-is. A new `SessionStore` in `mvm-runtime/src/session/` mirrors the existing
-`CheckpointStore`, rooted at a new `mvm_core::config::sessions_dir()`. No VM,
-no backend, and no async are involved — every task here is unit-testable.
+is. A new `AgentSessionStore` in `mvm-runtime/src/agent_session/` mirrors the
+existing `CheckpointStore`, rooted at a new
+`mvm_core::config::agent_sessions_dir()`. No VM, no backend, and no async are
+involved — every task here is unit-testable.
 
 **Tech Stack:** Rust, `serde` / `serde_json`, `sha2`, `hex`, `anyhow`,
 `tempfile`, `cargo nextest`.
@@ -41,30 +42,41 @@ Later plans (park, resume, retention) consume exactly these:
 
 ```rust
 // mvm_core::config
-pub fn sessions_dir() -> std::path::PathBuf;
+pub fn agent_sessions_dir() -> std::path::PathBuf;
 
 // mvm_core::checkpoint
+pub struct ApprovalHead(/* sha256:<64-hex>, dedicated newtype — not CheckpointDigest */);
 pub struct SessionBinding {
     pub session_id: mvm_contract::protocol::agent_session::AgentSessionId,
     pub generation: u64,
     pub journal_cursor: u64,
-    pub approval_head: CheckpointDigest,
+    pub approval_head: ApprovalHead,
 }
 impl CheckpointMetaBuilder {
     pub fn session(self, binding: Option<SessionBinding>) -> Self;
 }
 // CheckpointMeta gains: pub session: Option<SessionBinding>
 
-// mvm_runtime::session
-pub struct SessionRecord { /* see Task 4 */ }
-pub struct SessionStore { /* ... */ }
-impl SessionStore {
-    pub fn open() -> anyhow::Result<Self>;
+// mvm_runtime::agent_session
+pub enum SandboxResidency { Active, Hibernated, Closed }
+pub struct AgentSessionRecord {
+    pub session_id: AgentSessionId,
+    pub generation: u64,
+    pub state: SandboxResidency,
+    pub members: Vec<String>,
+    // Content-addressed, not a mutable checkpoint name — see field doc.
+    pub parent_checkpoint: Option<mvm_core::checkpoint::CheckpointDigest>,
+    pub created_unix: u64,
+    pub updated_unix: u64,
+}
+pub struct AgentSessionStore { /* ... */ }
+impl AgentSessionStore {
+    pub fn open() -> Self;
     pub fn at(root: impl Into<std::path::PathBuf>) -> Self;
     pub fn root(&self) -> &std::path::Path;
-    pub fn write(&self, record: &SessionRecord) -> anyhow::Result<()>;
-    pub fn load(&self, id: &AgentSessionId) -> anyhow::Result<SessionRecord>;
-    pub fn list(&self) -> anyhow::Result<Vec<SessionRecord>>;
+    pub fn write(&self, record: &AgentSessionRecord) -> anyhow::Result<()>;
+    pub fn load(&self, id: &AgentSessionId) -> anyhow::Result<AgentSessionRecord>;
+    pub fn list(&self) -> anyhow::Result<Vec<AgentSessionRecord>>;
 }
 ```
 
@@ -81,7 +93,7 @@ impl SessionStore {
 - Consumes: nothing.
 - Produces: `mvm_core::config::sessions_dir() -> PathBuf`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Add to the existing `mod tests` in `crates/mvm-core/src/config.rs`, directly
 after `checkpoints_dir_is_under_data_dir`:
@@ -98,12 +110,12 @@ after `checkpoints_dir_is_under_data_dir`:
     }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `~/.cargo/bin/cargo nextest run -p mvm-core sessions_dir_is_under_data_dir`
 Expected: FAIL — `cannot find function 'sessions_dir' in this scope`.
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 Add to `crates/mvm-core/src/config.rs` immediately after `checkpoints_dir`:
 
@@ -118,12 +130,12 @@ pub fn sessions_dir() -> std::path::PathBuf {
 }
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `~/.cargo/bin/cargo nextest run -p mvm-core sessions_dir_is_under_data_dir`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 cd /Users/auser/work/tinylabs/mvmco/.worktrees/mvm-durable-sessions
@@ -146,7 +158,7 @@ git commit -m "feat(core): add sessions_dir config helper"
   `policy`/`protocol` modules both ride that feature).
 - Produces: `mvm_core::checkpoint::SessionBinding`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Add inside the existing `mod tests` in `crates/mvm-core/src/checkpoint.rs`:
 
@@ -176,12 +188,12 @@ Add inside the existing `mod tests` in `crates/mvm-core/src/checkpoint.rs`:
     }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `~/.cargo/bin/cargo nextest run -p mvm-core session_binding_roundtrips`
 Expected: FAIL — `cannot find type 'SessionBinding' in this scope`.
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 Add to `crates/mvm-core/src/checkpoint.rs` immediately above `CheckpointMeta`:
 
@@ -204,12 +216,12 @@ pub struct SessionBinding {
 }
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `~/.cargo/bin/cargo nextest run -p mvm-core session_binding_roundtrips`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 ~/.cargo/bin/cargo fmt --all
@@ -246,7 +258,7 @@ same attribute for the same reason. The `meta_digest_excludes_audit_ref` and
 `meta_digest_covers_every_load_bearing_field` tests already in the file are the
 guardrails; Step 1 extends them.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Add inside `mod tests` in `crates/mvm-core/src/checkpoint.rs`:
 
@@ -328,13 +340,13 @@ Add inside `mod tests` in `crates/mvm-core/src/checkpoint.rs`:
     }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `~/.cargo/bin/cargo nextest run -p mvm-core session`
 Expected: FAIL — `no method named 'session' found for struct CheckpointMetaBuilder`
 and `struct CheckpointDigestInput has no field named 'session'`.
 
-- [ ] **Step 3: Write the implementation — all six sites**
+- [x] **Step 3: Write the implementation — all six sites**
 
 3a. `CheckpointMeta` struct, after the `grants` field:
 
@@ -390,7 +402,7 @@ and its setter, beside the existing `grants` setter:
 `CheckpointDigestInput` literal, and `session: self.session,` to the
 `CheckpointMeta` literal.
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `~/.cargo/bin/cargo nextest run -p mvm-core checkpoint`
 Expected: PASS, including the pre-existing digest suite
@@ -402,7 +414,7 @@ If `meta_digest_covers_every_load_bearing_field` fails, it enumerates fields
 via a local `struct Fields`; add `session` to that enumeration rather than
 weakening the assertion.
 
-- [ ] **Step 5: Verify no other construction site broke**
+- [x] **Step 5: Verify no other construction site broke**
 
 Run: `~/.cargo/bin/cargo check --workspace --all-targets`
 Expected: PASS. `CheckpointMeta` is constructed through the builder, so adding
@@ -410,7 +422,7 @@ a field should not break callers; a struct-literal construction anywhere will
 surface here as a missing-field error and must be fixed by adding
 `session: None`.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 ~/.cargo/bin/cargo fmt --all
@@ -433,7 +445,7 @@ git commit -m "feat(core): content-address the session binding on a checkpoint"
   `AgentSessionId`, `CheckpointId`.
 - Produces: `mvm_runtime::session::{SessionRecord, SessionState, SessionStore}`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `crates/mvm-runtime/src/session/mod.rs` containing only this test module
 for now (the implementation lands in Step 3):
@@ -502,12 +514,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `~/.cargo/bin/cargo nextest run -p mvm-runtime session`
 Expected: FAIL to compile — `cannot find type 'SessionRecord'`.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 Prepend to `crates/mvm-runtime/src/session/mod.rs`, above the test module:
 
@@ -648,12 +660,12 @@ Then add to `crates/mvm-runtime/src/lib.rs`, beside the existing
 pub mod session;
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `~/.cargo/bin/cargo nextest run -p mvm-runtime session`
 Expected: PASS, all four tests.
 
-- [ ] **Step 5: Run the gate before committing**
+- [x] **Step 5: Run the gate before committing**
 
 ```bash
 ~/.cargo/bin/cargo fmt --all -- --check
@@ -664,12 +676,65 @@ Expected: PASS, all four tests.
 Expected: all three clean. If `tempfile` is not already a dev-dependency of
 `mvm-runtime`, add it under `[dev-dependencies]` using `workspace = true`.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 ~/.cargo/bin/cargo fmt --all
 git add crates/mvm-runtime/src/session/ crates/mvm-runtime/src/lib.rs crates/mvm-runtime/Cargo.toml
 git commit -m "feat(runtime): add filesystem-backed durable session store"
+```
+
+---
+
+### Task 5: Fork must not inherit the parent's session binding
+
+Added after Task 4 landed, once `fork_checkpoint` and `fork_vm_full`
+(`crates/mvm-runtime/src/checkpoint/mod.rs`) were read against the new
+`session` field: both build the child's `CheckpointMeta` from the parent's
+other fields but left `session` untouched, so the builder's `None` default
+made the omission look accidental rather than deliberate — a forked child
+would need to explicitly *not* carry the binding forward, not fall into it by
+omission.
+
+**Files:**
+- Modify: `crates/mvm-runtime/src/checkpoint/mod.rs` — `fork_checkpoint`,
+  `fork_vm_full`.
+- Test: same file, inline `mod tests`.
+
+**Interfaces:**
+- Consumes: `SessionBinding` (Task 2/3).
+- Produces: no new public surface; pins existing behavior.
+
+- [x] **Step 1: Write the failing tests**
+
+`fork_checkpoint_does_not_inherit_the_parent_session` and
+`fork_vm_full_does_not_inherit_the_parent_session` bind a parent checkpoint to
+a session, fork it, and assert the child's `session` is `None`.
+
+- [x] **Step 2: Confirm the tests pass for the right reason**
+
+Mutating either fork path to `.session(parent.session.clone())` makes its
+matching test fail — the tests were run against that mutation to confirm they
+are not vacuously true.
+
+- [x] **Step 3: Add explicit `.session(None)` at both call sites**
+
+A fork starts a new sandbox lineage; a resume continues the same session at
+`generation + 1`. Carrying the parent's binding into a fork would have the
+child claim to be the same session, at the same generation and journal
+cursor, as a parent checkpoint that may still be backing a running sandbox —
+two live identities asserting one session.
+
+- [x] **Step 4: Run the gate before committing**
+
+`cargo fmt --all -- --check`, `cargo nextest run -p mvm-runtime`, `cargo
+clippy --workspace -- -D warnings` — all clean.
+
+- [x] **Step 5: Commit**
+
+```bash
+git add crates/mvm-runtime/src/checkpoint/mod.rs
+git commit -m "fix(runtime): forks must not inherit the parent's session binding"
 ```
 
 ---
