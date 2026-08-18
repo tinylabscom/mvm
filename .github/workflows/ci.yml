@@ -1001,6 +1001,13 @@ jobs:
                    default-microvm-meta-x86_64.json; do
             curl -fL --retry 3 -o "$f" "$base/$f"
           done
+          # The prod rootfs has no baked agent — /init resolves it from
+          # /mvm/runtime, the runtime overlay attached as a second virtio-blk
+          # drive. Fetching kernel and rootfs alone boots a guest that panics at
+          # `Attempted to kill init!` before the agent binds vsock, which reads
+          # as a broken image rather than an incomplete fetch.
+          curl -fL --retry 3 -o runtime-overlay-x86_64.tar.gz \
+            "$base/runtime-overlay-x86_64.tar.gz"
           curl -fL --retry 3 -o checksums.txt \
             "$base/default-microvm-x86_64-checksums-sha256.txt"
           grep -E ' (default-microvm-vmlinux-x86_64|default-microvm-rootfs-x86_64\.ext4|default-microvm-meta-x86_64\.json)$' \
@@ -1013,6 +1020,11 @@ jobs:
           # to be put back under the name the gate looks for. Verified above
           # under its asset name before being renamed.
           cp default-microvm-meta-x86_64.json mvm-meta.json
+          # The overlay tarball carries its own checksum manifest; verify
+          # against that rather than trusting the archive.
+          mkdir -p overlay && tar -C overlay -xzf runtime-overlay-x86_64.tar.gz
+          ( cd overlay && sha256sum -c checksums-sha256.txt )
+          ls -la overlay
           ls -la
 
       - name: Boot within the ceiling
@@ -1027,11 +1039,15 @@ jobs:
           MVM_RUNTIME_BOOT_BACKEND: firecracker
           MVM_RUNTIME_BOOT_KERNEL: /tmp/boot-image/default-microvm-vmlinux-x86_64
           MVM_RUNTIME_BOOT_ROOTFS: /tmp/boot-image/default-microvm-rootfs-x86_64.ext4
+          MVM_RUNTIME_BOOT_OVERLAY: /tmp/boot-image/overlay/overlay.ext4
+          MVM_RUNTIME_BOOT_OVERLAY_VERITY: /tmp/boot-image/overlay/overlay.verity
           MVM_RUNTIME_BOOT_READY: guest-agent
           MVM_RUNTIME_BOOT_RUNS: "5"
           MVM_RUNTIME_BOOT_CONCURRENT: "3"
           MVM_RUNTIME_BOOT_BUDGET_MS: "6000"
         run: |
+          MVM_RUNTIME_BOOT_OVERLAY_ROOTHASH="$(tr -d '[:space:]' \
+            < /tmp/boot-image/overlay/overlay.roothash)" \
           cargo test --test runtime_boot_bench \
             prebuilt_runtime_image_boots_within_budget -- --exact --nocapture
 
