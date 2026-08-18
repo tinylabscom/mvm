@@ -285,17 +285,32 @@ for detailed scope and acceptance criteria.
 
 ## In-flight plans
 
+- [~] **Secret bindings for forked children** —
+      `specs/plans/2026-08-18-fork-inherits-secret-bindings.md`, issue #2698.
+      W0 landed: a fork that drops its parent's secret bindings now says so,
+      reading the parent's persisted plan rather than needing a schema change.
+      3 tests, mutation-checked.
+      STILL OPEN: everything that closes the gap. Option A (declare the child's
+      bindings at fork, A1-A6) is the recommended build and is unimplemented;
+      Option B (inherit from the checkpoint, attenuated by intersection) is
+      designed and deliberately deferred, not queued. W0 warns only — the
+      refusal arm moved to A6, because a fork is always prod-profile and so had
+      no flag to gate on.
+
 - [~] **Admission-bound AI assurance sessions** —
-      `specs/plans/2026-08-17-admission-bound-ai-assurance-sessions.md`. W1–W4
-      and W6/W7 landed: the envelope, the five-way authority intersection, the
+      `specs/plans/2026-08-17-admission-bound-ai-assurance-sessions.md`. W1–W4,
+      W6/W7 and W7b landed: the envelope, the authority intersection, the
       fail-closed outcome ladder, `host.assurance.v1`, fail-closed audit and
-      receipt emission with citations that actually resolve, and the
-      workload-facing `AssuranceCampaign` whose surface offers no command,
-      path, host or port to pass. 84 tests.
-      STILL OPEN: W5 observer/cleanup evidence, W7b session lifecycle on the
-      admit path (`open_session` has no production caller yet), W8 the
-      framed-stdio provider binary. Until those land every live trial evaluates
-      `INCONCLUSIVE` by design; no certifying campaign can run.
+      receipt emission with resolvable citations, the workload-facing
+      `AssuranceCampaign`, and the boot-path session lifecycle behind
+      `AdmitAndStartParams.assurance` (opt-in; `None` on every existing call
+      site). Landing W7b exposed two bugs the fixtures had masked: the binding
+      rejected every real `sha256:`-prefixed plan id, and the probe handler
+      compared the guest's session identity against the supervisor's lookup key.
+      STILL OPEN: W5 observer/cleanup evidence, W8 the framed-stdio provider,
+      and a CLI surface for supplying a campaign declaration. Until those land
+      every live trial evaluates `INCONCLUSIVE` by design; no certifying
+      campaign can run.
 
 - [~] **Embedded-binary content store** — `specs/plans/2026-08-17-embedded-binary-content-store.md`.
       Phases 1–2 landed: both nested legs of `crates/mvm-cli/build.rs` are keyed
@@ -311,6 +326,20 @@ for detailed scope and acceptance criteria.
       rerun-if-env-changed), Phase 4 (dead crate edges; `deps_audit` and the
       tree-sitter grammars off the serial path; the `mvm-hostd` audit cluster),
       Phase 5 (sccache 4.2% Rust hit rate, worktree hygiene)
+
+- [~] **Agent tool and memory planes**
+      (`specs/plans/2026-08-18-agent-tool-and-memory-planes.md`). Opened
+      2026-08-18; no workstream started. Design only: ADR-045 gained sections
+      18-19 (an agent's tool surface is broker dispatch, and the catalog
+      derives from `ExecutionPlan.services` rather than from anything the guest
+      or its model says) and ADR-047 defines the memory plane. Sequenced behind
+      `specs/plans/2026-08-18-durable-agent-sessions.md` WS1, which owns the
+      session identity memory keys on and is itself unmerged.
+  - [ ] WS1-WS4 — tool plane: catalog derivation, argument policy, host-side
+        dynamic-namespace adapter, refusal as a planning signal
+  - [ ] WS5-WS9 — memory plane: store + record, `host.memory.v1`, write scan
+        and ceilings, audit + retention, bounded recall
+  - [ ] WS10 — `mvmctl memory` read-only surface, tests + BDD
 
 - [~] **Launch path as declared stages**
       (`specs/plans/2026-08-15-launch-path-as-declared-stages.md`). Opened

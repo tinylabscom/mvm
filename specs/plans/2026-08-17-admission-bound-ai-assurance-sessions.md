@@ -3,7 +3,7 @@
 Backing: shipped-source
 Validation: a_provider_cannot_smuggle_an_mvm_binding_through_the_request_parser
 
-Status: **W1–W4, W6 landed. W5, W7, W8 open.**
+Status: **W1–W4, W6/W7, W7b landed. W5, W8 open.**
 
 An AI workload can drive a Scout-linked assurance campaign from inside an
 admitted microVM. This plan is the MVM half of that: the typed envelope the
@@ -84,6 +84,22 @@ Three properties are structural rather than checked at runtime:
       decorative. Records carry the declared *label*, never the host or port
       behind it.
 
+- [x] **W7b — Session lifecycle on the boot path.** `assurance_session::open`
+      mints a derived grant, intersects authority, records
+      `assurance.session_opened`, builds the binding from those references, and
+      opens the session — refusing outright if the plan does not bind
+      `host.assurance.v1`, if the campaign declares no edge, or if the record
+      could not be written. `AdmitAndStartParams.assurance` carries an
+      operator-declared campaign through the real boot path, and a test asserts
+      `admit_and_start` produces a live session whose binding quotes the
+      admitted plan. Assurance stays off the ordinary launch path: `None` is the
+      default and every existing call site takes it.
+
+      The plane is a process-global installed when the broker registry binds the
+      service, but `open_on` takes it explicitly — a `OnceLock` admits one
+      value, so a decision path only reachable through the global would be
+      testable exactly once per process.
+
 ## Open
 
 - [ ] **W5 — Observer and cleanup evidence.** `EvidenceSet` is consumed by the
@@ -91,12 +107,6 @@ Three properties are structural rather than checked at runtime:
       `cleanup_verified` / `attestation_verified` from a real run yet. Until
       that lands every live trial evaluates to `INCONCLUSIVE`, which is the
       correct fail-closed behaviour and not a certifying result.
-
-- [ ] **W7b — Session lifecycle on the admit path.**
-      `HostAssuranceV1Handler::open_session` is still called by tests only. It
-      needs a caller that mints the grant, intersects authority, opens the
-      session against the admitted plan, and closes it at teardown. Until then
-      the probe surface is reachable only from a test.
 
 - [ ] **W8 — Provider binary.** The counterparty's
       `assurance run --provider <path>` spawns a framed-stdio provider speaking

@@ -43,6 +43,12 @@ pub fn register_bound_handlers(registry: &mut Registry, bindings: &[ServiceId]) 
         let handler = Arc::new(HostAssuranceV1Handler::new());
         let as_service: Arc<dyn mvm_core::protocol::handler::ServiceHandler> = handler.clone();
         registry.register(as_service);
+        // Publish it process-wide so the admit path can open a session on the
+        // same instance the broker dispatches against. A second registry in one
+        // process keeps its own handler and does not displace the first — the
+        // alternative would point an opened session at a handler no workload
+        // calls, which reads as a campaign that ran and observed nothing.
+        crate::assurance_session::install_host_assurance_plane(Arc::clone(&handler));
         bound.assurance = Some(handler);
     }
 

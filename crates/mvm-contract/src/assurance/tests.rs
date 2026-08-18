@@ -372,6 +372,26 @@ fn the_binding_quotes_the_admitted_plan_rather_than_the_request() {
     let plan = minimal_plan();
     let bound = binding();
     assert_eq!(bound.plan_id.as_str(), plan.plan_id.0);
+    // A real plan id is `sha256:<hex>`; the separator is rendered so the value
+    // survives the counterparty's identifier grammar.
+    let mut real = minimal_plan();
+    real.plan_id = crate::plan::types::PlanId(alloc::format!("sha256:{}", "ab".repeat(32)));
+    let bound_real = MvmBinding::builder()
+        .session_id(id("session-1"))
+        .plan(&real)
+        .expect("a content-addressed plan id is bindable")
+        .artifact_digest(digest(ARTIFACT_DIGEST))
+        .effective_policy_digest(digest(POLICY_DIGEST))
+        .grant(grant())
+        .backend("firecracker")
+        .audit_ref(evidence_ref("mvm:audit:a"))
+        .receipt_ref(evidence_ref("mvm:receipt:r"))
+        .build()
+        .expect("binding");
+    assert_eq!(
+        bound_real.plan_id.as_str(),
+        alloc::format!("sha256-{}", "ab".repeat(32))
+    );
     assert_eq!(bound.plan_version, plan.plan_version);
     assert_eq!(bound.tenant, plan.tenant.0);
     assert_eq!(bound.workload, plan.workload.0);
