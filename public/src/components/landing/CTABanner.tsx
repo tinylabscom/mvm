@@ -15,7 +15,7 @@ export function CTABanner() {
     // (`[data-has-hero] main section > div { margin-inline: auto }`) only
     // matches a direct child of a section. As a plain div this band's
     // wrapper computed margin 0 and the card sat flush left.
-    <section className="w-full border-y border-edge/40 bg-raised py-20 lg:py-28">
+    <section className="w-full border-y border-edge/40 bg-raised pt-10 pb-20 lg:pt-14 lg:pb-28">
       <div className="mx-auto max-w-3xl px-6 sm:px-8">
         <Reveal>
           <div className="rounded-2xl border border-edge/50 bg-canvas px-8 py-12 text-center sm:px-12 sm:py-16">
