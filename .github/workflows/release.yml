@@ -248,8 +248,80 @@ jobs:
             staging/*.tar.gz
             staging/*.sha256
 
+  # The universal initramfs, without which a published prod image cannot be
+  # sealed-booted from its own release assets.
+  #
+  # `mvm-verity-init` runs from this as PID 1: it sets up the dm-verity target
+  # over the rootfs, mounts the runtime overlay at /sysroot/mvm/runtime, and
+  # switch_roots. A source checkout builds one locally
+  # (`resolve_or_build_local_initramfs`); an installed binary calls
+  # `download_initramfs`, which fetches `initramfs-<arch>.tar.gz` from this
+  # release. That download has never once succeeded, because nothing published
+  # the file — so every installed mvmctl has been unable to boot the sealed path
+  # its own rootfs is built for.
+  #
+  # This train, not `boot-image/v*`: `release_base_url` builds `{base}/v{version}`,
+  # and the initramfs bundles this workspace's guest agent, so it versions with
+  # the CLI rather than with the image.
+  initramfs-image:
+    if: ${{ github.event_name == 'push' || github.event.inputs.dry_run == 'false' }}
+    strategy:
+      # One arch must not cancel the other; the completeness check in `release`
+      # refuses a partial set, so letting both finish tells the truth about
+      # which one failed.
+      fail-fast: false
+      matrix:
+        include:
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+          - arch: x86_64
+            runner: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@main
+
+      - name: Build the universal initramfs
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          SYSTEM="${ARCH}-linux"
+          STORE_PATH=$(nix build "./nix/images/initramfs#packages.${SYSTEM}.default" \
+            --no-link --print-out-paths | head -1)
+          mkdir -p "staging/initramfs-${ARCH}"
+          # cp -L so each file resolves through its nix-store symlink.
+          for f in initramfs.cpio.gz initramfs.hash initramfs.size VERSION; do
+            cp -L "$STORE_PATH/$f" "staging/initramfs-${ARCH}/$f"
+          done
+          # The derivation emits four of the five members `download_initramfs`
+          # requires; the manifest over them is packaging's job, exactly as it
+          # is for the runtime overlay.
+          (
+            cd "staging/initramfs-${ARCH}"
+            sha256sum initramfs.cpio.gz initramfs.hash initramfs.size VERSION \
+              > checksums-sha256.txt
+          )
+          tar -C "staging/initramfs-${ARCH}" \
+            -czf "staging/initramfs-${ARCH}.tar.gz" \
+            initramfs.cpio.gz initramfs.hash initramfs.size VERSION checksums-sha256.txt
+          (
+            cd staging
+            sha256sum "initramfs-${ARCH}.tar.gz" > "initramfs-${ARCH}.tar.gz.sha256"
+          )
+
+      - name: Upload initramfs artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: initramfs-image-${{ matrix.arch }}
+          path: |
+            staging/initramfs-${{ matrix.arch }}.tar.gz
+            staging/initramfs-${{ matrix.arch }}.tar.gz.sha256
+
   release:
-    needs: [bdd, build]
+    needs: [bdd, build, initramfs-image]
     # Gate the published release on the mvmctl binary build ONLY. The boot
     # image artifacts are attached when the boot image train has published
     # them (see the dual-publish step below), but their absence must not
@@ -553,6 +625,8 @@ jobs:
             artifacts/builder-vm-*-checksums-sha256.txt.bundle
             artifacts/runtime-overlay-*.tar.gz
             artifacts/runtime-overlay-*.tar.gz.sha256
+            artifacts/initramfs-*.tar.gz
+            artifacts/initramfs-*.tar.gz.sha256
             artifacts/sdk-sidecar-*.tar.gz
             artifacts/sdk-sidecar-*.tar.gz.sha256
             artifacts/runtime-overlay-*.tar.gz.bundle

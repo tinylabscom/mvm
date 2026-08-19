@@ -662,3 +662,76 @@ fn the_two_release_trains_do_not_share_a_signing_environment() {
          its tags are boot-image/v*, which a v*-scoped policy refuses outright"
     );
 }
+
+/// The initramfs is what `mvm-verity-init` runs as PID 1 to set up dm-verity
+/// and mount the runtime overlay before `switch_root`. Without it a published
+/// prod image cannot be sealed-booted from its own release assets — and nothing
+/// published it, so `download_initramfs` had never once succeeded.
+///
+/// Pinned against the Rust constructor rather than against a literal, because
+/// the failure this prevents is a rename on one side only, which produces a 404
+/// at install time and nothing at build time.
+#[test]
+fn release_publishes_every_initramfs_asset_the_downloader_requests() {
+    let workflow = release_workflow();
+    for token in [SHELL_ARCH_TOKEN, MATRIX_ARCH_TOKEN] {
+        let names = mvmctl::build::initramfs::InitramfsArtifactNames::for_arch(token);
+        assert_publishes(&workflow, &names.archive);
+        assert_publishes(&workflow, &names.archive_checksum);
+    }
+}
+
+/// Publishing is not attaching. A job whose artifacts upload but never appear
+/// in `gh release create` leaves the downloader with the same 404 a rename
+/// would, and the release still reports success.
+#[test]
+fn the_release_job_builds_and_attaches_the_initramfs() {
+    let workflow = release_workflow();
+    assert!(
+        workflow.contains("  initramfs-image:"),
+        "release.yml must define the initramfs-image job"
+    );
+    assert!(
+        workflow.contains("needs: [bdd, build, initramfs-image]"),
+        "the release job must wait for initramfs-image, or it publishes without it"
+    );
+    for pattern in [
+        "artifacts/initramfs-*.tar.gz",
+        "artifacts/initramfs-*.tar.gz.sha256",
+    ] {
+        assert!(
+            workflow.contains(pattern),
+            "the release job's asset list must include {pattern:?}"
+        );
+    }
+    // Both arches, or an install on the other one 404s exactly as before.
+    let block = job_block(&workflow, "initramfs-image");
+    for arch in ["aarch64", "x86_64"] {
+        assert!(
+            block.contains(&format!("arch: {arch}")),
+            "the initramfs-image matrix must build {arch}"
+        );
+    }
+}
+
+/// Every member `extract_initramfs_archive` requires must actually be put in
+/// the tarball. Four come from the derivation and the fifth is generated at
+/// packaging; leaving any out fails at install time with
+/// `missing required archive member`, on a host that cannot debug it.
+#[test]
+fn the_initramfs_tarball_carries_every_member_the_extractor_requires() {
+    let workflow = release_workflow();
+    let block = job_block(&workflow, "initramfs-image");
+    for member in [
+        mvm_fs::initramfs::INITRAMFS_IMAGE_FILE,
+        mvm_fs::initramfs::INITRAMFS_HASH_FILE,
+        mvm_fs::initramfs::INITRAMFS_SIZE_FILE,
+        mvm_fs::initramfs::VERSION_FILE,
+        mvm_fs::initramfs::CHECKSUM_MANIFEST_FILE,
+    ] {
+        assert!(
+            block.contains(member),
+            "the initramfs tarball must carry {member:?}, which the extractor requires"
+        );
+    }
+}
