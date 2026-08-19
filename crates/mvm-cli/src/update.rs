@@ -107,6 +107,21 @@ fn strip_v_prefix(tag: &str) -> &str {
 /// serve one picks the artifact; TLS says nothing about who wrote it. Refuses
 /// on a missing, unparseable, or foreign-signed bundle — the shared release
 /// verifier does the deciding.
+/// Download a GitHub release asset.
+///
+/// Release asset URLs always answer `302` and redirect to blob storage, and
+/// `mvm_http` deliberately does not follow redirects ("no HTTP/2, no redirect
+/// following ..." — every one of its other callers has already disabled them).
+/// So a release fetch routed through it fails on the redirect no matter how
+/// correct the URL is. Reuses the curl downloader the working release paths
+/// already use, whose `-fSL` follows the redirect and fails on HTTP error.
+fn download_release_asset(url: &str, dest: &Path) -> Result<()> {
+    let dest_str = dest
+        .to_str()
+        .with_context(|| format!("release asset destination is not UTF-8: {}", dest.display()))?;
+    crate::commands::env::artifact_verify::download_file(url, dest_str)
+}
+
 /// The boot image release every published guest artifact is fetched from, as
 /// `(tag, bare-semver)`.
 ///
@@ -159,7 +174,7 @@ fn fetch_signed_checksum_manifest(
 ) -> Result<String> {
     let staged = tempfile::NamedTempFile::new()
         .with_context(|| format!("creating staging file for {asset}"))?;
-    http::download_file(&format!("{base_url}/{asset}"), staged.path())
+    download_release_asset(&format!("{base_url}/{asset}"), staged.path())
         .with_context(|| format!("downloading {asset} — cannot verify integrity"))?;
     mvm_build::release_signature::verify_release_archive_signature(
         &mvm_build::release_signature::ReleaseSignatureRequest {
@@ -263,7 +278,7 @@ fn download_release(version: &str, target: &str, tmp_dir: &Path) -> Result<()> {
 
     let sp = ui::spinner(&format!("Downloading {}...", download_url));
 
-    http::download_file(&download_url, &dest).with_context(|| {
+    download_release_asset(&download_url, &dest).with_context(|| {
         format!(
             "Download failed. Check that {} has a release for {}.",
             version, target
@@ -363,7 +378,7 @@ pub(crate) fn download_kernel(arch: &str, variant: &str, dest: &Path) -> Result<
         })?
         .into_temp_path();
     let sp = ui::spinner(&format!("Downloading {asset} ({tag})..."));
-    let dl = http::download_file(&asset_url, &download);
+    let dl = download_release_asset(&asset_url, &download);
     sp.finish_and_clear();
     dl.with_context(|| kernel_fetch_hint(&tag, &asset, release_exists(&tag)))?;
 
@@ -770,7 +785,7 @@ fn verify_signature(version: &str, archive_name: &str, archive_path: &Path) -> R
         .join(&bundle_name);
 
     ui::info("Downloading signature bundle...");
-    http::download_file(&bundle_url, &bundle_path)
+    download_release_asset(&bundle_url, &bundle_path)
         .context("Failed to download cosign bundle — cannot verify signature")?;
 
     let output = std::process::Command::new(&cosign)
