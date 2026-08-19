@@ -9,6 +9,7 @@ import { DeploymentTiers } from "./DeploymentTiers";
 // commented-out <Positioning /> below.
 // import { Positioning } from "./Positioning";
 import { RequestAccess } from "./RequestAccess";
+import { SecurityReviewTeaser } from "./SecurityReviewTeaser";
 import { WhyNow } from "./WhyNow";
 import { WhyMicrovm } from "./WhyMicrovm";
 import { FAQ } from "./FAQ";
@@ -31,6 +32,11 @@ import { Footer } from "./Footer";
 //                         the differentiator. Directly after the why-now
 //                         story so the claim lands while the problem is
 //                         fresh, before any how-to content.
+//   2d. Security review   — the wedge: agent products stall in the
+//                         customer's security review, and the contract is
+//                         shaped like that review's questions. Four
+//                         condensed Q→As linking to the full
+//                         /security/security-review/ page.
 //   3. Quickstart       — the shortest path from install to a running microVM.
 //   5. Positioning      — "one project, three ways to drive it": CLI,
 //                         Declare, Runtime, each given its own row.
@@ -69,6 +75,7 @@ export function Landing() {
       <DemoTeaser />
       <WhyNow />
       <ExecutionContract />
+      <SecurityReviewTeaser />
       <Quickstart />
       {/* Positioning ("one project. three ways to drive it.") is hidden for
           now, not deleted — restore by uncommenting here and re-adding its

@@ -26,9 +26,10 @@ export function RequestAccess() {
             execution.
           </h2>
           <p className="max-w-xl text-base leading-relaxed text-body">
-            Working with a small group of design partners building agent
-            platforms, code interpreters, secure workflow runners, multi-tenant
-            SaaS, and edge AI workloads.
+            Working with a small group of design partners shipping agents into
+            environments where the security review is the gate &mdash; agent
+            platforms, code interpreters, secure workflow runners, and
+            multi-tenant SaaS.
           </p>
         </Reveal>
 

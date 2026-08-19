@@ -124,8 +124,9 @@ export function Hero() {
                 Agent execution a security team can approve.
               </p>
               <p className="mt-2 max-w-[46ch] text-base leading-relaxed text-body">
-                Hardened microVMs under a signed execution contract.
-                Sub-150&nbsp;ms boot. Configurable to the kernel.
+                Every run starts from a signed contract &mdash; what may
+                execute, what it can reach, and a verifiable record of what
+                happened. Hardened microVMs, sub-150&nbsp;ms boot.
               </p>
             </Reveal>
 

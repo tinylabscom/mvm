@@ -15,6 +15,15 @@ const FAQ_ITEMS: Array<{ q: string; a: string }> = [
     a: "A container is namespaces and cgroups around processes that still call straight into the host kernel — one kernel, shared by everything on the box. Every mvm workload boots its own Linux kernel under a real hypervisor, with no guest network device on any backend. The isolation is hardware-assisted, not namespace-assisted.",
   },
   {
+    q: "How is this different from other agent sandboxes?",
+    // Source: public/src/content/docs/security/ci-claims.md (the numbered
+    // claim table backing each layer) and
+    // public/src/content/docs/security/security-review.md. Deliberately
+    // names no competitor: the differentiation argument is the composition,
+    // not any one feature.
+    a: "Isolation is table stakes — plenty of runtimes put an agent in a microVM. What's rare is the composition: signed admission, a pinned artifact, explicitly granted authority, no bypass path, sealed production behavior, and a verifiable record — documented together, each backed by a named test or CI gate. A sandbox gives the agent a box; the contract is what a security team can approve.",
+  },
+  {
     q: "Which languages are supported?",
     // Source: public/src/content/docs/sdk/index.md ("Runtime SDK" /
     // "Decorator SDK" table) and README.md Highlights ("SDKs for Python,

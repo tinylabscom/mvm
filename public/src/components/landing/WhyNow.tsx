@@ -60,9 +60,9 @@ export function WhyNow() {
           className="font-display text-lg font-bold leading-snug text-title sm:text-2xl"
           style={{ marginTop: "2.5rem" }}
         >
-          With MVM{" "}
+          A sandbox gives the agent a box.{" "}
           <span className="text-accent-2">
-            Security first isn&rsquo;t a tier, it&rsquo;s the default.
+            MVM gives your security team a contract.
           </span>
         </p>
         <div

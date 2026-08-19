@@ -74,9 +74,10 @@ export function ExecutionContract() {
           <span className="text-accent-2">the contract is the product.</span>
         </h2>
         <p className="max-w-2xl text-base leading-relaxed text-body">
-          Anyone can put an agent in a microVM. A security team approves the
-          contract: what may execute, with what authority, and what proves it.
-          Six layers, enforced and witnessed — not asserted.
+          Developer sandboxes isolate where agents run. Production has to
+          govern what they&rsquo;re authorized to do: what may execute, with
+          what authority, and what proves it. Six layers, enforced and
+          witnessed — not asserted.
         </p>
       </Reveal>
 
