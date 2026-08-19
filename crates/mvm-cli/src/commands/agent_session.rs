@@ -16,10 +16,16 @@ use clap::{Args as ClapArgs, Subcommand};
 
 use mvm_contract::protocol::agent_session::AgentSessionId;
 use mvm_core::checkpoint::ApprovalHead;
+use mvm_core::plan::PlanId;
 use mvm_core::user_config::MvmConfig;
+use mvm_hostd::plan_admission::{InMemoryNonceLedger, SystemClock};
+use mvm_hostd::session_resume::{
+    ResumePlanMaterial, ResumeRequest, ResumedSession, resume_session,
+};
 use mvm_runtime::agent_session::{
     AgentSessionRecord, AgentSessionStore, ParkInput, ParkReason, SandboxResidency, StorageTier,
 };
+use mvm_runtime::checkpoint::CheckpointStore;
 
 use super::Cli;
 
@@ -38,6 +44,8 @@ pub(in crate::commands) enum AgentSessionAction {
     Show(ShowArgs),
     /// Release an active session's sandbox, recording why
     Park(ParkArgs),
+    /// Re-admit a parked session under a freshly signed plan
+    Resume(ResumeArgs),
 }
 
 #[derive(ClapArgs, Debug, Clone)]
@@ -75,11 +83,56 @@ pub(in crate::commands) struct ParkArgs {
     pub approval_head: Option<String>,
 }
 
+/// The workload half of a resume, taken as flags.
+///
+/// The session record deliberately holds none of this: an image, a kernel and
+/// a size change on their own schedule, and recording them in the record would
+/// make it a second copy of the plan that has to be kept in step with one.
+/// Somebody therefore has to supply them, and for now that is the operator.
+/// Deriving them from the resume point's supervisor config is a later step;
+/// taking them as flags keeps the seam visible instead of guessing.
+#[derive(ClapArgs, Debug, Clone)]
+pub(in crate::commands) struct ResumeArgs {
+    /// Session id, as `agent-session ls` prints it
+    pub session_id: String,
+    /// Runtime profile the resumed sandbox is admitted for (hvf, libkrun, …).
+    /// Not in the session record — supply it here.
+    #[arg(long)]
+    pub backend: String,
+    /// Image reference to record in the signed plan. Not in the session
+    /// record — supply it here.
+    #[arg(long)]
+    pub image: String,
+    /// Lowercase-hex SHA-256 of the rootfs the resume boots. Not in the
+    /// session record — supply it here.
+    #[arg(long)]
+    pub image_sha256: String,
+    /// Lowercase-hex SHA-256 of the kernel. Omit for a backend that carries
+    /// its own.
+    #[arg(long)]
+    pub kernel_sha256: Option<String>,
+    /// vCPUs the resumed sandbox is admitted for
+    #[arg(long)]
+    pub cpus: u32,
+    /// Memory the resumed sandbox is admitted for, in MiB
+    #[arg(long)]
+    pub mem_mib: u64,
+    /// The approval ledger's head right now, as `sha256:<64-hex>`. The store
+    /// refuses when it differs from the head recorded at park time, so a
+    /// resume cannot silently run under grants the session was never admitted
+    /// for. Omit only for a session parked without one.
+    #[arg(long)]
+    pub approval_head: Option<String>,
+}
+
 pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Result<()> {
     match args.action {
         AgentSessionAction::Ls(a) => ls(&AgentSessionStore::open(), a.json),
         AgentSessionAction::Show(a) => show(&AgentSessionStore::open(), &a.session_id, a.json),
         AgentSessionAction::Park(a) => park(&AgentSessionStore::open(), &a),
+        AgentSessionAction::Resume(a) => {
+            resume(&AgentSessionStore::open(), &CheckpointStore::open(), &a)
+        }
     }
 }
 
@@ -251,6 +304,121 @@ fn record_park_in_chain(record: &AgentSessionRecord) -> Result<()> {
     let emitter = super::vm::audit_chain::AuditEmitter::new(signer.signing)
         .context("opening the audit chain to record the park")?;
     emitter.emit_session_parked(&plan, park_audit_extras(record))
+}
+
+/// Re-admit a parked session, then bind the resume into the audit chain.
+fn resume(
+    sessions: &AgentSessionStore,
+    checkpoints: &CheckpointStore,
+    args: &ResumeArgs,
+) -> Result<()> {
+    let resumed = resume_record(sessions, checkpoints, args)?;
+    println!("{}", summary_line(&resumed.record));
+    println!("admitted plan:  {}", resumed.admitted.plan_id().0);
+    // Said plainly rather than implied by silence: a resume re-admits the
+    // session under a fresh signed plan and stops there. Restoring the memory
+    // image and starting a sandbox from it is not wired.
+    println!("(no sandbox was booted — a resume re-admits the session, nothing more)");
+    if let Err(error) = record_resume_in_chain(&resumed) {
+        crate::ui::warn(&format!(
+            "session {} resumed, but the resume was not recorded in the audit chain: {error:#}",
+            resumed.record.session_id.as_str()
+        ));
+    }
+    Ok(())
+}
+
+/// Drive the resume through the host's admission path.
+///
+/// This is the first production caller of `resume_session`. It stops at an
+/// admitted plan, exactly as that function does.
+fn resume_record(
+    sessions: &AgentSessionStore,
+    checkpoints: &CheckpointStore,
+    args: &ResumeArgs,
+) -> Result<ResumedSession> {
+    let id = parse_session_id(&args.session_id)?;
+    let approval_head = args
+        .approval_head
+        .as_deref()
+        .map(ApprovalHead::parse)
+        .transpose()
+        .map_err(|e| anyhow::anyhow!("invalid --approval-head: {e}"))?;
+    let current = sessions
+        .load(&id)
+        .with_context(|| format!("no agent session '{}' on this host", args.session_id))?;
+    let material = ResumePlanMaterial {
+        backend_name: args.backend.clone(),
+        image_name: args.image.clone(),
+        image_sha256: args.image_sha256.clone(),
+        kernel_sha256: args.kernel_sha256.clone(),
+        cpus: args.cpus,
+        mem_mib: args.mem_mib,
+    };
+    // The generation is what this command just read, for the same reason the
+    // park path passes what it read: the store's fence refuses a caller
+    // working from a superseded record, and this caller cannot be holding one.
+    let request = ResumeRequest {
+        session_id: &id,
+        expected_generation: current.generation,
+        // The operator's assertion of where the ledger is now, not the head
+        // the record was parked under. Passing the record's own head back
+        // would compare it against itself and check nothing.
+        current_approval_head: approval_head.as_ref(),
+        material: &material,
+        host_signer_keys_dir: None,
+        now_unix: mvm_core::util::time::now_unix_secs(),
+    };
+    // The nonce ledger is per-invocation, so it refuses a replay within one
+    // command and not across two. That is the same posture every other CLI
+    // admission path runs under.
+    resume_session(
+        sessions,
+        checkpoints,
+        &request,
+        &SystemClock,
+        &InMemoryNonceLedger::new(),
+    )
+}
+
+/// The extra labels a `session.resumed` entry carries.
+///
+/// Non-colliding for the same reason the park entry's are, and here the hazard
+/// is live rather than theoretical: this entry rides on the resume plan
+/// itself, which carries `session_id` and `session_generation` as signed
+/// labels. An extra reusing either name would overwrite a value that was
+/// signed with one this command merely believed.
+fn resume_audit_extras(record: &AgentSessionRecord, plan_id: &PlanId) -> Vec<(String, String)> {
+    vec![
+        (
+            "resumed_session".to_string(),
+            record.session_id.as_str().to_string(),
+        ),
+        // The generation the transition wrote — the residency this resume
+        // opened, not the parked one it came from.
+        (
+            "resumed_at_generation".to_string(),
+            record.generation.to_string(),
+        ),
+        // Restates the entry's own plan_id field, so a reader looking only at
+        // labels can still say which admission authorized this residency.
+        ("resumed_plan_id".to_string(), plan_id.0.clone()),
+    ]
+}
+
+/// Bind a completed resume into the chain-signed audit log.
+///
+/// Unlike the park entry, this one needs no plan lookup: the resume produced
+/// the plan it is recorded under.
+fn record_resume_in_chain(resumed: &ResumedSession) -> Result<()> {
+    let signer = super::vm::host_signer::load_or_init()
+        .context("loading the host signer to sign the resume entry")?;
+    let emitter = super::vm::audit_chain::AuditEmitter::new(signer.signing)
+        .context("opening the audit chain to record the resume")?;
+    emitter.emit_session_resumed(
+        resumed.admitted.plan(),
+        resume_audit_extras(&resumed.record, resumed.admitted.plan_id()),
+    )
 }
 
 /// The `ls` row for one session.
@@ -607,6 +775,84 @@ mod tests {
             record,
             "a refused park must not touch the record"
         );
+    }
+
+    fn resume_args(session_id: &str) -> ResumeArgs {
+        ResumeArgs {
+            session_id: session_id.to_string(),
+            backend: "hvf".to_string(),
+            image: "demo".to_string(),
+            image_sha256: "ab".repeat(32),
+            kernel_sha256: Some("cd".repeat(32)),
+            cpus: 2,
+            mem_mib: 512,
+            approval_head: None,
+        }
+    }
+
+    #[test]
+    fn resume_refuses_a_session_that_is_not_parked() {
+        // An active session must be refused on its residency alone, before any
+        // checkpoint is resolved or any plan is signed: a resume of something
+        // already resident would open a second residency for one session.
+        let tmp = tempfile::tempdir().unwrap();
+        let sessions = AgentSessionStore::at(tmp.path().join("sessions"));
+        let checkpoints = CheckpointStore::at(tmp.path().join("checkpoints"));
+        let record = active("sess-alpha");
+        sessions.write(&record).unwrap();
+
+        let err = resume_record(&sessions, &checkpoints, &resume_args("sess-alpha"))
+            .expect_err("an active session must not resume");
+        let text = format!("{err:#}");
+        assert!(text.contains("not parked"), "{text}");
+        assert_eq!(
+            sessions.load(&record.session_id).unwrap(),
+            record,
+            "a refused resume must not touch the record"
+        );
+    }
+
+    #[test]
+    fn resume_refuses_an_unknown_session_naming_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sessions = AgentSessionStore::at(tmp.path().join("sessions"));
+        let checkpoints = CheckpointStore::at(tmp.path().join("checkpoints"));
+        let err = resume_record(&sessions, &checkpoints, &resume_args("sess-nope"))
+            .expect_err("an absent session must refuse");
+        assert!(format!("{err:#}").contains("sess-nope"), "{err:#}");
+    }
+
+    #[test]
+    fn the_resume_entry_keys_do_not_collide_with_the_plan_labels() {
+        // Same hazard as the park entry: extras are merged over the signed
+        // plan's labels, and the resume plan carries `session_id` and
+        // `session_generation` as signed labels of its own.
+        let mut record = active("sess-alpha");
+        record.generation = 2;
+        let extras = resume_audit_extras(&record, &PlanId("plan-abc".to_string()));
+        let keys: Vec<&str> = extras.iter().map(|(k, _)| k.as_str()).collect();
+        assert!(!keys.contains(&"session_id"), "{keys:?}");
+        assert!(!keys.contains(&"session_generation"), "{keys:?}");
+        assert!(!keys.is_empty(), "the entry must carry something");
+    }
+
+    #[test]
+    fn resume_extras_name_the_residency_the_resume_opened() {
+        let mut record = active("sess-alpha");
+        record.generation = 2;
+        let extras = resume_audit_extras(&record, &PlanId("plan-abc".to_string()));
+        let got = |key: &str| {
+            extras
+                .iter()
+                .find(|(k, _)| k == key)
+                .map(|(_, v)| v.as_str())
+        };
+        assert_eq!(got("resumed_session"), Some("sess-alpha"));
+        // The generation the transition wrote, not the parked one it came
+        // from: an entry naming the parent would put the whole chain one
+        // residency behind.
+        assert_eq!(got("resumed_at_generation"), Some("2"));
+        assert_eq!(got("resumed_plan_id"), Some("plan-abc"));
     }
 
     #[test]

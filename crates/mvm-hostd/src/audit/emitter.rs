@@ -832,6 +832,20 @@ impl AuditEmitter {
         self.emit(plan, "session.parked", labels)
     }
 
+    /// Emit `session.resumed` — a parked durable agent session was
+    /// re-admitted into a new residency.
+    ///
+    /// Bound to the freshly signed plan the resume admitted, which is the
+    /// authority the new residency runs under. Nothing of the previous
+    /// residency's authority carries over, and neither does its plan.
+    pub fn emit_session_resumed(
+        &self,
+        plan: &ExecutionPlan,
+        labels: Vec<(String, String)>,
+    ) -> Result<()> {
+        self.emit(plan, "session.resumed", labels)
+    }
+
     /// Emit `stream.subscribed` — a follower attached to `vm_name`'s output
     /// stream at `from_seq`.
     ///
@@ -1876,6 +1890,44 @@ mod tests {
         assert!(content.contains("session.parked"));
         assert!(content.contains("park_reason"));
         assert!(content.contains("approval-wait"));
+        assert!(
+            content.contains("session_generation"),
+            "the plan's own session labels must survive the merge: {content}"
+        );
+        assert_eq!(verify_audit_chain(&path, &vk).unwrap(), 1);
+    }
+
+    #[test]
+    fn session_resumed_event_is_chain_signed_and_keeps_the_plan_labels() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = {
+            let mut __ed_seed = [0u8; 32];
+            rand::rng().fill_bytes(&mut __ed_seed);
+            SigningKey::from_bytes(&__ed_seed)
+        };
+        let vk = key.verifying_key();
+        let emitter = AuditEmitter::with_dir(key, dir.path()).unwrap();
+        let mut plan = fixture_plan("local", "plan-RESUME");
+        plan.audit_labels
+            .insert("session_id".to_string(), "sess-alpha".to_string());
+        plan.audit_labels
+            .insert("session_generation".to_string(), "4".to_string());
+
+        emitter
+            .emit_session_resumed(
+                &plan,
+                vec![
+                    ("resumed_session".to_string(), "sess-alpha".to_string()),
+                    ("resumed_at_generation".to_string(), "4".to_string()),
+                    ("resumed_plan_id".to_string(), "plan-RESUME".to_string()),
+                ],
+            )
+            .unwrap();
+
+        let path = dir.path().join("local.jsonl");
+        let content = std::fs::read_to_string(&path).expect("audit file exists");
+        assert!(content.contains("session.resumed"));
+        assert!(content.contains("resumed_at_generation"));
         assert!(
             content.contains("session_generation"),
             "the plan's own session labels must survive the merge: {content}"

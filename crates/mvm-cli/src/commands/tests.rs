@@ -1945,6 +1945,46 @@ fn agent_session_park_requires_a_reason() {
 }
 
 #[test]
+fn agent_session_resume_requires_the_workload_material() {
+    // The session record deliberately carries no image, kernel or size, so
+    // the operator supplies them. A resume that could be typed without them
+    // would have to guess, which is the thing the flags exist to prevent.
+    assert!(Cli::try_parse_from(["mvmctl", "agent-session", "resume", "sess-a"]).is_err());
+
+    let cli = Cli::try_parse_from([
+        "mvmctl",
+        "agent-session",
+        "resume",
+        "sess-a",
+        "--backend",
+        "hvf",
+        "--image",
+        "demo",
+        "--image-sha256",
+        "abababababababababababababababababababababababababababababababab",
+        "--cpus",
+        "2",
+        "--mem-mib",
+        "512",
+    ])
+    .unwrap();
+    let Commands::AgentSession(args) = cli.command else {
+        panic!("expected the agent-session command")
+    };
+    let agent_session::AgentSessionAction::Resume(resume) = args.action else {
+        panic!("expected the resume subcommand")
+    };
+    assert_eq!(resume.backend, "hvf");
+    assert_eq!(resume.image, "demo");
+    assert_eq!(resume.cpus, 2);
+    assert_eq!(resume.mem_mib, 512);
+    assert!(
+        resume.kernel_sha256.is_none(),
+        "a backend that carries its own kernel supplies no sha"
+    );
+}
+
+#[test]
 fn agent_session_park_takes_a_journal_cursor_and_an_approval_head() {
     let cli = Cli::try_parse_from([
         "mvmctl",
