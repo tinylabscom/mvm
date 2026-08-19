@@ -123,6 +123,19 @@ fn fast_live_witness_executes_the_readme_persistent_machine_path() {
 }
 
 #[test]
+fn canonical_bdd_workflow_uses_bounded_apt_action() {
+    let contents = workflow("bdd.yml");
+    assert!(
+        contents.contains("uses: ./.github/actions/apt-deps"),
+        "BDD setup must inherit the shared mirror replacement, timeouts, and retries"
+    );
+    assert!(
+        !contents.contains("sudo apt-get"),
+        "BDD setup must not bypass the bounded apt action"
+    );
+}
+
+#[test]
 fn runtime_release_publication_needs_bdd() {
     assert_reuses_bdd_gate("release.yml");
     assert_job_needs_bdd("release.yml", "release");
