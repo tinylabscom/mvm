@@ -87,17 +87,30 @@ verified, not merged — check the PR before relying on it being on `main`.
 
 ### WS3 — Host-side dynamic tool adapter
 
-**Status: the gate landed; the adapter has not.** The two halves were split
-because the gate is independent of the rest of Part A — it lives in `xtask/`
-and touches none of the broker files — while the adapter does not, and stacking
-it on an unmerged broker change is how work gets stranded in a squash-merging
-repository.
+**Status: the compilation seam and the gate are in; the transport is not.**
+The seam is `mvm_contract::protocol::upstream_tools::compile_namespace` — pure,
+no I/O, no clock — which is where an upstream server's claims become
+descriptors this host is willing to bind. The protocol client that *fetches*
+those claims is deliberately still absent: it is transport behind a seam that
+already refuses everything a malformed or hostile namespace can express, and
+building it first would have meant testing the security properties through a
+socket.
 
-- [ ] **WS3 — Compile an upstream tool namespace at admission.** The host runs
-      the client. Each upstream tool compiles to a `ServiceId` recorded inside
-      the plan digest, so the surface is fixed for the admission's lifetime.
-- [ ] Discovery verbs answer from the plan binding. An upstream server that
-      adds or redefines a tool mid-session cannot widen a running guest.
+- [x] **WS3 — Compile an upstream tool namespace at admission.** Each upstream
+      tool compiles to a `CapabilityId` under one `ServiceId`, and the result is
+      sorted so an identical namespace always compiles to identical bytes —
+      admission binds a digest, and a digest that depended on upstream ordering
+      would admit differently run to run.
+- [x] An upstream name this host cannot represent as a verb is refused rather
+      than repaired. Lowercasing and substituting would collapse `getWeather`,
+      `get_weather` and `Get Weather` onto one capability, which merges their
+      authority. Duplicate verbs refuse the namespace instead of last-one-wins.
+- [x] Discovery verbs answer from the plan binding — that is WS1's
+      `admitted_catalog`. A namespace that gains a tool compiles to different
+      bindings, so it cannot widen an admission already in flight.
+- [ ] The transport itself: a host-side client that fetches a namespace and
+      hands it to `compile_namespace`. Nothing guest-reachable, and the gate
+      below already refuses the shape that would be wrong.
 - [x] A gate — in the `xtask check-*` family — refusing an outbound tool
       protocol client on any guest-reachable path, in the manner of
       `check-vsock-only-egress`. Without it this decision decays the first time
