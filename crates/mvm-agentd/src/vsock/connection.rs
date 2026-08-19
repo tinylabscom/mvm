@@ -208,6 +208,16 @@ fn try_connect_once(uds_path: &str, port: u32, timeout_secs: u64) -> Result<Unix
     Ok(stream)
 }
 
+/// Perform exactly one Firecracker-mux CONNECT attempt.
+///
+/// Callers that already own a bounded readiness loop use this entry point so
+/// they do not accidentally nest the transport's recovery backoff inside
+/// their own cadence. Ordinary RPC callers should use [`connect_to_port`],
+/// which retains reconnect handling across a restarted listener.
+pub fn connect_to_port_once(uds_path: &str, port: u32, timeout_secs: u64) -> Result<UnixStream> {
+    try_connect_once(uds_path, port, timeout_secs)
+}
+
 /// Connect to a specific vsock port via the Firecracker UDS multiplexer.
 ///
 /// The Firecracker vsock device exposes a single host-side UDS for
@@ -454,6 +464,16 @@ mod tests {
             err_msg.contains("Vsock socket not found at"),
             "Error was: {}",
             err_msg
+        );
+    }
+
+    #[test]
+    fn test_single_connect_attempt_surfaces_the_first_failure() {
+        let error = connect_to_port_once("/nonexistent/v.sock", GUEST_AGENT_PORT, 1)
+            .expect_err("a missing mux socket must fail without an internal retry loop");
+        assert!(
+            error.to_string().contains("Vsock socket not found"),
+            "{error:#}"
         );
     }
 

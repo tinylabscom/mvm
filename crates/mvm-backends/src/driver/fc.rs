@@ -17,7 +17,8 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, anyhow, bail};
 use mvm_agentd::vsock::{
     CONSOLE_PORT_BASE, GUEST_AGENT_PORT, GUEST_CID, GuestRequest, GuestResponse,
-    WORKLOAD_EXIT_PORT, connect_to_port, dev_console_data_ports, send_request_stream,
+    WORKLOAD_EXIT_PORT, connect_to_port, connect_to_port_once, dev_console_data_ports,
+    send_request_stream,
 };
 use mvm_core::config::vm_state_dir;
 use mvm_core::launch_trace::LaunchTraceRecorder;
@@ -49,6 +50,16 @@ const VSOCK_CONNECT_TIMEOUT_SECS: u64 = 30;
 /// Overall deadline for the guest agent to answer its first CONNECT after
 /// `InstanceStart` — the boot-confirmation signal that the guest is up.
 const AGENT_READY_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Per-attempt bound inside the outer boot-readiness deadline.
+const AGENT_READY_PROBE_TIMEOUT_SECS: u64 = 1;
+
+/// Readiness is the hard-budget boundary, so its observation error must stay
+/// materially smaller than the budget. This is intentionally tighter than the
+/// shared recovery backoff used for slow, externally owned state.
+fn guest_ready_poll_delay(attempt: u32) -> Duration {
+    mvm_core::poll_backoff::poll_delay(attempt).min(Duration::from_millis(5))
+}
 
 /// Bound the guest's stop-time filesystem drain. A clean stop refuses to tear
 /// down Firecracker until the guest confirms its filesystems are durable.
@@ -188,10 +199,10 @@ fn fc_drive_puts(blocks: &[BlockDev]) -> Vec<FcApiPut> {
 
 /// Assemble the full NIC-less Firecracker API config sequence for a spec:
 /// logger, boot-source (kernel + initramfs + **`spec.cmdline` verbatim**),
-/// machine-config, slot-ordered drives, the vsock device, and — only when the
-/// spec opts into balloon elasticity — the virtio-balloon device. There is
-/// deliberately no `/network-interfaces` PUT: the converged Firecracker path
-/// attaches no guest NIC.
+/// machine-config, an unthrottled entropy device, slot-ordered drives, the
+/// vsock device, and — only when the spec opts into balloon elasticity — the
+/// virtio-balloon device. There is deliberately no `/network-interfaces` PUT:
+/// the converged Firecracker path attaches no guest NIC.
 pub fn fc_config_api_puts(
     spec: &VmmSpec,
     kernel_for_boot: &str,
@@ -227,6 +238,16 @@ pub fn fc_config_api_puts(
     puts.push(FcApiPut {
         path: "/machine-config".to_string(),
         body: machine_config_body(spec.vcpus, spec.memory_mib),
+    });
+
+    // The guest creates a fresh signing identity before accepting its first
+    // control connection. Feed the kernel CSPRNG from Firecracker's host-backed
+    // virtio-rng device so early userspace never waits for an unseeded pool.
+    // An empty device config means no rate limiter, which keeps boot entropy
+    // off the latency-critical path.
+    puts.push(FcApiPut {
+        path: "/entropy".to_string(),
+        body: "{}".to_string(),
     });
 
     puts.extend(fc_drive_puts(&spec.blocks));
@@ -969,7 +990,9 @@ impl VmmDriver for FcDriver {
                     abs_dir
                 );
             }
-            if connect_to_port(&vsock_uds, GUEST_AGENT_PORT, VSOCK_CONNECT_TIMEOUT_SECS).is_ok() {
+            if connect_to_port_once(&vsock_uds, GUEST_AGENT_PORT, AGENT_READY_PROBE_TIMEOUT_SECS)
+                .is_ok()
+            {
                 break;
             }
             if Instant::now() >= deadline {
@@ -978,7 +1001,7 @@ impl VmmDriver for FcDriver {
                     abs_dir
                 );
             }
-            std::thread::sleep(mvm_core::poll_backoff::poll_delay(attempt));
+            std::thread::sleep(guest_ready_poll_delay(attempt));
             attempt = attempt.saturating_add(1);
         }
 
@@ -1490,6 +1513,10 @@ mod tests {
         assert!(machine.contains("\"vcpu_count\": 2"), "{machine}");
         assert!(machine.contains("\"mem_size_mib\": 512"), "{machine}");
 
+        // Fresh guest entropy is available before userspace creates its
+        // per-boot signing identity.
+        assert_eq!(body_for(&puts, "/entropy"), "{}");
+
         // vsock device carries the guest CID + the mux uds.
         let vsock = body_for(&puts, "/vsock");
         assert!(
@@ -1504,6 +1531,7 @@ mod tests {
                 "/logger",
                 "/boot-source",
                 "/machine-config",
+                "/entropy",
                 "/drives/blk0",
                 "/vsock"
             ]
@@ -1762,6 +1790,21 @@ mod tests {
             .expect("a dead process leaves a removable stale marker");
 
         assert!(!pid_file.exists());
+    }
+
+    #[test]
+    fn boot_agent_poll_stays_fine_through_the_fast_boot_window() {
+        let delays = (0..80)
+            .map(guest_ready_poll_delay)
+            .collect::<Vec<Duration>>();
+        assert_eq!(delays[0], Duration::from_millis(1));
+        assert_eq!(delays[1], Duration::from_millis(2));
+        assert!(
+            delays
+                .iter()
+                .all(|delay| *delay <= Duration::from_millis(5)),
+            "a readiness poll coarser than 5ms can consume the hard boot budget"
+        );
     }
 
     #[test]

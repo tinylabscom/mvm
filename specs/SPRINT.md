@@ -1735,9 +1735,13 @@ Then unify + retire the old paths:
   evidence. The real-host Firecracker/HVF matrix, canonical budget table, and
   resulting native-host gates remain open. The report-level gate now requires
   20 measured samples after two warm-ups, revalidates every raw sample, applies
-  the 200/250/300 ms prepared-cold budget and the independent 30/50 ms warm
-  target, and aggregates whole-VMM resident-memory/fault evidence without
-  zero-filling unavailable counters.
+  the 200/250/300 ms prepared-cold percentile diagnostics and the independent
+  30/50 ms warm target, and aggregates whole-VMM resident-memory/fault evidence
+  without zero-filling unavailable counters. `mvmctl bench` now makes the
+  release requirement explicit: every prepared dispatch must be `<200 ms`, a
+  200.0 ms sample fails even below the publication floor, JSON schema v6 carries
+  the maximum/verdict/remark, and the default output is an accessible timing
+  table with PASS/FAIL words and phase remarks.
 - [x] **Filesystem-path baseline — issue #2281.**
   `mvm_fs::rootfs::measure_ext4_pure` now records a stable JSON baseline for
   source identity, node composition, emitted ext4 size/digest, materializer
@@ -1990,11 +1994,28 @@ Then unify + retire the old paths:
   same function, so the recorded compat key is the one a claim searches for. The
   accepted-and-ignored `--rootfs` flag is removed. This is the resolution half
   of Phase 2 only — the prepared-artifact manifest is still open.
-- [ ] **Prepared cold launch:** with a local, verified kernel/initramfs/artifact
+- [x] **Prepared cold launch:** with a local, verified kernel/initramfs/artifact
   set and a new guest identity, reach authenticated guest readiness and run
-  `/bin/true` in ≤200 ms p50, ≤250 ms p95, and ≤300 ms p99 on Apple Silicon
-  HVF and Linux Firecracker/KVM. This is a prepared-cold requirement, not a
-  warm-pool or snapshot-restore claim.
+  `/bin/true` in strictly under 200 ms on every measured boot on Apple Silicon
+  HVF and Linux Firecracker/KVM. This is a hard per-sample prepared-cold
+  requirement, not a percentile, warm-pool, or snapshot-restore claim.
+  - 2026-08-19 local HVF evidence: release schema-v6 run against cached Alpine,
+    20 measured launches after 2 warm-ups, p50/p95/p99 76.9/86.0/99.3 ms,
+    maximum 102.7 ms, zero degraded or hidden-work samples. The HVF no-mount
+    half passes.
+  - 2026-08-19 established Linux/KVM-host evidence: the baseline Firecracker
+    run was clean but failed at 293.6/299.7/302.2 ms p50/p95/p99 and 302.8 ms
+    maximum. After removing nested readiness retry, overlapping console setup,
+    quieting successful pre-readiness serial output, providing unthrottled
+    entropy, and removing redundant root privilege/socket work, the same
+    schema-v6 20+2 protocol passed at 129.2/131.3/132.0 ms and **132.2 ms
+    maximum**. It used the existing universal 4,310,016-byte kernel; a
+    Firecracker-specific kernel candidate saved only about 3 ms and was
+    rejected. All samples were cached, no-mount, non-degraded, and free of
+    hidden launch work or leaked benchmark processes. The optimized report is
+    `/root/mvm-bench-20260819/reports/prepared-cold-firecracker-alpine-optimized-2026-08-19.json`
+    (SHA-256 `e12f30ae2bf43a32ced2d6fe585fbe5f40a80f89002f61775c6a7ccf7613360e`).
+    Designated signed live jobs remain open.
 - [ ] **Separate the cold lanes:** report prepared cold, prepared cold with a
   mount-cache hit, mount-cache miss, artifact miss, and warm claim as distinct
   distributions. A first-use image pull, build, digest, or ext4 materialization
@@ -2012,6 +2033,9 @@ Then unify + retire the old paths:
   and libkrun where supported. Reuse immutable host mappings and a resident
   control plane only; every launch still gets a fresh guest identity and
   authenticated channel.
+  - [x] Firecracker no-mount slice: reduce authenticated dispatch from a
+    302.8 ms baseline maximum to 132.2 ms without a backend-specific kernel,
+    warm parent, snapshot restore, or weakened identity/authentication checks.
 - [ ] **Readiness and cleanup:** replace polling with event-driven authenticated
   readiness, preserve generation/key checks, and measure command completion and
   teardown separately. Foreground cleanup must remain bounded without weakening

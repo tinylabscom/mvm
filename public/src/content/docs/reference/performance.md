@@ -25,15 +25,15 @@ network would make the gate measure the wrong thing.
 
 <!-- generated:launch-budgets:begin -->
 
-A lane result is publishable only when it carries at least 20 measured samples taken after exactly 2 discarded warm-ups, under report schema version 5. A report that misses any of those is refused rather than published with a caveat.
+A lane result is publishable only when it carries at least 20 measured samples taken after exactly 2 discarded warm-ups, under report schema version 6. A report that misses any of those is refused rather than published with a caveat. Prepared-cold lanes additionally require every measured dispatch to be strictly under 200 ms, even below the publication sample floor.
 
-| Lane | What it measures | p50 | p95 | p99 |
-| --- | --- | --- | --- | --- |
-| `prepared_cold` | Cached artifacts, no mount image, new VMM and new guest identity. | 200 ms | 250 ms | 300 ms |
-| `prepared_cold_mount_hit` | The same launch with an unchanged cached read-only mount image. | 200 ms | 250 ms | 300 ms |
-| `mount_miss` | Directory fingerprint plus first mount-image materialization. | — | — | — |
-| `artifact_miss` | Image acquisition, unpack, verification, and preparation. | — | — | — |
-| `warm_claim` | A claimed warm standby — a comparison point, never folded into a cold number. | 30 ms | — | 50 ms |
+| Lane | What it measures | p50 | p95 | p99 | Every boot |
+| --- | --- | --- | --- | --- | --- |
+| `prepared_cold` | Cached artifacts, no mount image, new VMM and new guest identity. | 200 ms | 250 ms | 300 ms | < 200 ms |
+| `prepared_cold_mount_hit` | The same launch with an unchanged cached read-only mount image. | 200 ms | 250 ms | 300 ms | < 200 ms |
+| `mount_miss` | Directory fingerprint plus first mount-image materialization. | — | — | — | — |
+| `artifact_miss` | Image acquisition, unpack, verification, and preparation. | — | — | — | — |
+| `warm_claim` | A claimed warm standby — a comparison point, never folded into a cold number. | 30 ms | — | 50 ms | — |
 
 <!-- generated:launch-budgets:end -->
 

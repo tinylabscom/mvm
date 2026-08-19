@@ -1,6 +1,6 @@
 # Refactor status
 
-Last updated: 2026-08-18
+Last updated: 2026-08-19
 
 This is the cross-plan progress index. The owning plan remains authoritative
 for detailed scope and acceptance criteria.
@@ -711,13 +711,16 @@ for detailed scope and acceptance criteria.
     `pool warm` could previously spawn nothing on any backend. The
     prepared-artifact manifest and the acquire/prepare split are still open,
     so a cold cache is still populated inline.
-  - [~] Phase 3 — reduce backend cold-start latency. Re-measured on KVM at
-    `c866611af` as Phase 5 asked: `driver_boot` is 630.5 ms, unmoved from
-    623.6 ms, so the cost is real rather than a poll artifact and can be
-    decomposed. It is a shell `sleep 0.1` socket poll plus ~9 curl/sudo
-    subprocesses (**#2292**, closed by PR #2463). On HVF there is little left — `vmm_create`
-    11.6 ms, `driver_boot` 7.8 ms — the remaining cold cost there is guest
-    boot at 58.6 ms.
+  - [~] Phase 3 — reduce backend cold-start latency. The Firecracker no-mount
+    slice now passes on the established KVM host: after a clean 302.8 ms
+    baseline maximum, a schema-v6 20+2 release run measured
+    129.2/131.3/132.0 ms p50/p95/p99 and **132.2 ms maximum**. The change
+    removes nested readiness retry, overlaps console setup, quiets successful
+    pre-readiness serial output, provides unthrottled entropy, and removes
+    redundant root privilege/socket work without weakening authentication or
+    identity checks. It retains the universal 4,310,016-byte kernel; a
+    Firecracker-specific candidate saved only about 3 ms and was rejected.
+    Immutable-map work and the HVF/libkrun slices remain open.
   - [ ] Phase 4 — parallelize independent host work
   - [~] Phase 5 — event-driven guest readiness. The flat 50 ms readiness poll
     was quantizing every launch: adaptive backoff cut `guest_kernel_entry`
@@ -726,7 +729,10 @@ for detailed scope and acceptance criteria.
     wait, teardown pid-exit) now share one backoff in
     `mvm_core::poll_backoff`: VM creation reads 4.6 ms rather than 53.8 ms
     of tick, and total is 310.1 ms p50. The authenticated readiness
-    notification itself remains.
+    notification itself remains. The Firecracker prepared-cold path also no
+    longer nests the connector's 100/200/400 ms recovery ladder inside its
+    bounded readiness loop; one attempt per 1/2/4/5 ms cadence recovered about
+    100 ms without changing authentication or final identity verification.
   - [~] Phase 6 — move cleanup off the foreground critical path. Teardown
     decomposed and the warm-pool refill removed from it: a default
     `machine run` went 1366 ms -> 353.8 ms p50. Remaining teardown is
@@ -770,7 +776,21 @@ for detailed scope and acceptance criteria.
     memory at ~48 ms/GB (33 ms at 512M, 194 ms at 4G), so the watchdog
     self-pipe is not worth building and a large workload pays teardown no
     `alpine`-sized benchmark can see.
-  - [ ] Phase 7 — live validation and regression gates
+  - [~] Phase 7 — live validation and regression gates. The benchmark UX and
+        hard gate are complete: default output is an accessible timing table
+        with explicit PASS/FAIL and phase remarks, `--json` schema v6 includes
+        maximum/limit/verdict/remark, and every prepared dispatch must be
+        strictly `<200 ms` even below the publication sample floor. A local
+        2026-08-19 release HVF/aarch64 no-mount run passed all 20 measured boots
+        after 2 warm-ups: p50/p95/p99 76.9/86.0/99.3 ms, maximum 102.7 ms,
+        with zero degraded or hidden-work samples. The matching established-host
+        Firecracker/x86_64 baseline was clean but failed at
+        293.6/299.7/302.2 ms and 302.8 ms maximum. The optimized 20+2 run on the
+        same host now passes at 129.2/131.3/132.0 ms and **132.2 ms maximum**,
+        with the existing universal kernel and no hidden work, degradation, or
+        leaked benchmark process. Its remote schema-v6 report SHA-256 is
+        `e12f30ae2bf43a32ced2d6fe585fbe5f40a80f89002f61775c6a7ccf7613360e`.
+        Mount lanes, signed evidence, and designated native jobs remain open.
   - [x] Cross-plan fast-machine-substrate contract documented in
         `specs/notes/2026-08-10-fast-machine-substrate.md` (issue #2279)
   - [~] Kernel/boot-substrate budget and filesystem-path evaluation tracked by

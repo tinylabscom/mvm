@@ -399,9 +399,12 @@ server: the skill shells to the CLI.
       prints, and every run writes, the same versioned report the CI gate
       produces, so a user's report and a CI report are comparable artifacts.
 - [x] Warm-start budgets were already defined and published (200/250/300 ms
-      prepared-cold p50/p95/p99; 30/50 ms warm-claim p50/p99). `bench` now
-      prints each measured percentile beside the budget judging it. Density
-      SLOs remain undefined — Plan 265 WS3.
+      prepared-cold p50/p95/p99 diagnostics; 30/50 ms warm-claim p50/p99).
+      `bench` prints each percentile beside its budget and separately enforces
+      the strict per-boot `<200 ms` prepared-cold maximum. Default output is a
+      plain-text timing table with PASS/FAIL and phase remarks; `--json` schema
+      v6 carries the same hard verdict. Density SLOs remain undefined — Plan
+      265 WS3.
 - [x] Published and gated already (the launch-budget page and the
       boot-latency lane). This adds the user-facing way to check a host
       against them.

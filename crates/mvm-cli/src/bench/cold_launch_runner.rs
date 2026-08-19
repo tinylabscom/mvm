@@ -13,8 +13,8 @@ use anyhow::{Context, Result, bail};
 
 use super::cold_launch::{
     ArtifactDigests, ArtifactMeasurements, CacheState, ColdLaunchReport, ColdLaunchSample,
-    KernelConfigMeasurement, LaunchContext, LaunchLane, build_cold_launch_report, validate_lane,
-    validate_matrix_report,
+    KernelConfigMeasurement, LaunchContext, LaunchLane, build_cold_launch_report,
+    validate_hard_boot_requirement, validate_lane, validate_matrix_report,
 };
 use crate::commands::vm::launch_sample::{
     ArtifactPaths, LAUNCH_SAMPLE_ENV, LaunchRootStrategy, LaunchSample, read_sample,
@@ -72,8 +72,20 @@ impl ColdLaunchBench {
         self.lane
     }
 
-    /// Run the warm-up iterations, then the measured ones, and summarise.
+    /// Run, validate, and return one benchmark report.
     pub fn run(&self) -> Result<ColdLaunchReport> {
+        let report = self.measure()?;
+        self.validate_report(&report)?;
+        Ok(report)
+    }
+
+    /// Run the warm-up iterations and measured launches without applying the
+    /// report-level latency gate.
+    ///
+    /// The CLI uses this seam so it can print and persist a failing report
+    /// before returning a non-zero status. Per-sample integrity and lane
+    /// validation still happen here and can never be bypassed.
+    pub fn measure(&self) -> Result<ColdLaunchReport> {
         let staging = tempfile::tempdir().context("creating launch sample staging dir")?;
         let mut strategy = None;
         for index in 0..self.warmup {
@@ -104,12 +116,19 @@ impl ColdLaunchBench {
                 self.kernel_config.as_deref(),
             )?);
         }
-        let report = build_cold_launch_report(self.lane, self.warmup, raw);
+        Ok(build_cold_launch_report(self.lane, self.warmup, raw))
+    }
+
+    /// Apply the strict hard ceiling for every report and the publication
+    /// matrix gate when the configured run count reaches its sample floor.
+    pub fn validate_report(&self, report: &ColdLaunchReport) -> Result<()> {
+        validate_hard_boot_requirement(report)
+            .context("live launch report violated the hard boot requirement")?;
         if self.runs >= super::cold_launch::MIN_MATRIX_SAMPLES {
-            validate_matrix_report(&report)
+            validate_matrix_report(report)
                 .context("live launch report did not pass the matrix publication gate")?;
         }
-        Ok(report)
+        Ok(())
     }
 
     /// Spawn the binary once and read back the sample it wrote.
@@ -694,6 +713,30 @@ tmpfs /tmp tmpfs rw 0 0
             .map(|(_, stats)| *stats)
             .expect("vmm_create is always reported");
         assert_eq!(vmm_create.samples, 4);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn measurement_is_available_before_the_hard_gate_returns_failure() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut sample = sample_for(220.0);
+        sample.phases.backend_start_ms = 170.0;
+        sample.phases.vsock_wait_ms = 30.0;
+        let mvmctl = fake_mvmctl(tmp.path(), &[sample]);
+        let bench = ColdLaunchBench::builder(&mvmctl, LaunchLane::PreparedCold)
+            .runs(1)
+            .warmup(0)
+            .build()
+            .unwrap();
+
+        let report = bench.measure().expect("measurement remains reportable");
+        assert_eq!(report.stats.dispatch_window_ms.max, Some(200.0));
+        let err = bench
+            .validate_report(&report)
+            .expect_err("the exact boundary must fail");
+        let rendered = format!("{err:#}");
+        assert!(rendered.contains("hard boot requirement"), "{rendered}");
+        assert!(rendered.contains("under 200.0ms"), "{rendered}");
     }
 
     #[cfg(unix)]

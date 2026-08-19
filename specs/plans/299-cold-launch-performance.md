@@ -1,8 +1,9 @@
 # Plan 299 — Prepared cold-launch performance
 
-**Status:** Phase 0 complete — substrate implemented and gated, both native
-baselines measured. Phase 6 is promoted ahead of Phase 3 by the measurements;
-Phase 3 is retargeted at the Firecracker boot path.
+**Status:** The prepared-cold no-mount lane passes the strict per-boot limit on
+both native hosts. Firecracker Phase 3 optimization is live-proven with the
+universal kernel; mount lanes, signed evidence, and designated live jobs remain
+open.
 
 This plan is one owner of the [fast machine substrate](../notes/2026-08-10-fast-machine-substrate.md),
 which composes cold launch with Plans 298, 265, 270, and 292. It owns the
@@ -18,8 +19,9 @@ The primary requirement is:
 
 > On a supported, uncontended host, a release `mvmctl machine run` using
 > already-cached, digest-verified artifacts must reach an authenticated guest
-> agent and dispatch `/bin/true` in **≤300 ms at p99**. The p50 target is
-> **≤200 ms**.
+> agent and dispatch `/bin/true` in **strictly under 200 ms on every measured
+> prepared boot**. This is a maximum, not a percentile allowance: a single
+> sample at exactly 200 ms fails.
 
 The requirement measures the prepared cold path: a new VMM and a new guest
 identity, with no warm standby claim and no snapshot restore. It does not pretend
@@ -102,11 +104,16 @@ Every benchmark reports these dimensions independently:
 
 Required release-build gates on each supported backend:
 
-| Lane | p50 | p95 | p99 |
-|---|---:|---:|---:|
-| Prepared cold to authenticated agent | ≤200 ms | ≤250 ms | ≤300 ms |
-| Prepared cold with mount-cache hit | ≤200 ms | ≤250 ms | ≤300 ms |
-| Warm claim to authenticated agent | no regression against Plan 265 | no regression | no regression |
+| Lane | p50 | p95 | p99 | Every boot |
+|---|---:|---:|---:|---:|
+| Prepared cold to authenticated agent | ≤200 ms | ≤250 ms | ≤300 ms | **<200 ms** |
+| Prepared cold with mount-cache hit | ≤200 ms | ≤250 ms | ≤300 ms | **<200 ms** |
+| Warm claim to authenticated agent | no regression against Plan 265 | no regression | no regression | — |
+
+The historical percentile columns remain useful distribution diagnostics, but
+the per-boot maximum is the release requirement and is stricter than all three.
+It is enforced even for an indicative run below the 20-sample publication
+floor, so sample count can never turn the hard requirement off.
 
 **Every published percentile names the image and rootfs size it was measured
 on.** The gates above are size-independent targets, but a launch path can carry
@@ -852,9 +859,28 @@ OCI unpack, verity generation, kernel build, or initramfs build.
 Implement the same typed `VmBackend` contract on each backend; keep the
 optimization backend-local and the benchmark backend-neutral.
 
-- [ ] Replace per-launch shell/API subprocess setup on the Firecracker path with
-      the existing native API seam. Pre-open or memory-map immutable boot
-      artifacts and reuse the control socket setup without reusing guest state.
+- [x] Keep Firecracker configuration on the existing native API seam and remove
+      avoidable privileged-shell setup: a root launch no longer invokes
+      `sudo`, and root-owned API-socket permissions are set directly while the
+      non-root ownership path remains fail-closed.
+- [ ] Pre-open or memory-map immutable boot artifacts without reusing guest
+      state. The current page-cached universal kernel already passes the hard
+      no-mount lane, so this remains an optional measured optimization rather
+      than a reason to add backend-specific kernel artifacts.
+- [x] Remove the Firecracker guest-readiness retry multiplier. The bounded
+      outer readiness loop now performs one connector attempt per 1/2/4/5 ms
+      cadence instead of nesting the connector's 100/200/400 ms ladder inside
+      it. Authentication, boot identity, generation, and timeout checks are
+      unchanged.
+- [x] Start console capture concurrently with VMM boot, suppress successful
+      pre-readiness serial chatter while retaining error output, provide an
+      unthrottled Firecracker entropy device, and avoid redundant root socket
+      setup. Focused tests cover the concurrent boot helper, single connection
+      attempt, quiet successful readiness, and preserved error output.
+- [x] Retain the single universal x86_64 workload kernel. A Firecracker-specific
+      PCI/MMIO kernel split improved the measured path by only about 3 ms, and
+      an uncompressed-initramfs experiment was slower. Neither justified a
+      second kernel identity or its compatibility and release burden.
 - [ ] For the in-house HVF path, profile VM creation, memory map, vCPU start,
       virtio device setup, and first guest instruction separately. Remove only
       measured setup work; preserve the paused-parent handoff and no-NIC guard
@@ -914,8 +940,9 @@ optimization backend-local and the benchmark backend-neutral.
       readiness and immediately after the first guest command. Linux records
       RSS from `/proc/<pid>/statm` plus process minor/major fault deltas; macOS
       records physical footprint and explicitly leaves Linux-only fault counters
-      unavailable. Launch-sample schema v4 and cold-launch schema v5 carry the
-      evidence, and the warm-lane gate rejects a sample that omits it. The
+      unavailable. Launch-sample schema v4 and cold-launch schema v6 carry the
+      evidence (v6 adds span maxima and the strict boot verdict), and the
+      warm-lane gate rejects a sample that omits it. The
       real-host backend matrix remains before #2280 can close.
 - [x] Publish the canonical budget table. `LaunchLane::budgets()` is now the one
       accessor both `validate_matrix_report` and the published table read, so a
@@ -947,9 +974,9 @@ optimization backend-local and the benchmark backend-neutral.
 - [ ] Add backend-specific unit tests for immutable artifact reuse, fresh VM
       identity, failed setup cleanup, and no cross-launch mutable state.
 
-**Exit gate:** backend start plus authenticated agent readiness is below 200 ms
-p50 and below 300 ms p99 for prepared cold on the primary native backend—HVF on
-Apple Silicon and Firecracker on the established Linux KVM host—with no
+**Exit gate:** backend start plus authenticated agent readiness is strictly
+below 200 ms for every prepared-cold sample on the primary native backend—HVF
+on Apple Silicon and Firecracker on the established Linux KVM host—with no
 regression in warm claims or security witnesses.
 
 ## Phase 4 — Parallelize independent host work
@@ -973,6 +1000,10 @@ creating duplicate cache builders or orphan VMs.
 
 ## Phase 5 — Event-driven guest readiness
 
+- [x] Remove the nested connector retry ladder from the existing bounded
+      Firecracker readiness loop. This removes a measured ~100 ms floor while
+      keeping the authenticated readiness protocol and final identity checks;
+      the broader event-notification conversion below remains open.
 - [ ] Replace repeated readiness polling on the prepared-cold path with one
       authenticated readiness notification from the guest agent or existing
       control channel.
@@ -1007,25 +1038,89 @@ green.
 
 ## Phase 7 — Live validation and regression gates
 
-The current macOS/HVF validation attempt is deliberately not a baseline:
-release `mvmctl` emitted schema-3 launch samples, but the transient workload
-reported `degraded: ["host_services"]`. The per-sample gate rejected those
-samples, as intended. An isolated `mvm-host-agent` diagnostic binds its signer
-and control sockets, so the remaining investigation is the detached
-registration path; no degraded timing has been copied into the canonical
-table. Firecracker evidence still must be collected in the project builder VM.
+The 2026-08-19 local Apple Silicon/HVF validation is a publication-grade
+prepared-cold result: release `mvmctl`, Alpine
+`sha256:e7a1a92a5bfeee40966aea60f0796b0e7917cc35591542701834f03a68fa3d18`,
+20 measured launches after 2 discarded warm-ups, and schema v6. The run used an
+isolated `MVM_HOME` seeded copy-on-write from the host's verified warm cache so
+other worktrees' live host agents could not share runtime state. All 20 samples
+reported `backend: "hvf"`, `os: "macos"`, `arch: "aarch64"`, cold launch mode,
+cached artifacts, no mount, no hidden work, and an empty degraded list.
 
+| metric | p50 | p95 | p99 | maximum | hard result |
+|---|---:|---:|---:|---:|---:|
+| authenticated boot dispatch | 76.9 ms | 86.0 ms | 99.3 ms | **102.7 ms** | **PASS — every boot <200 ms** |
+| end to end, including cleanup | 180.9 ms | 202.2 ms | 203.5 ms | 203.8 ms | diagnostic only |
+
+The same 2026-08-19 protocol was then run on the established Linux/KVM host
+with Firecracker/x86_64 and cached Alpine
+`sha256:79ff19e9084a00eece421b2523fb93e22d730e2c0e525905de047e848e56d95f`.
+The exact release binary was transferred by digest and ran from an isolated
+`MVM_HOME`; all 20 measured samples named `backend: "firecracker"`,
+`os: "linux"`, and `arch: "x86_64"`, with no pull, build, mount
+materialization, warm claim, degraded sample, leaked VM state, or leaked
+benchmark process. The hard gate correctly persisted the report and returned
+non-zero:
+
+| metric | p50 | p95 | p99 | maximum | hard result |
+|---|---:|---:|---:|---:|---:|
+| authenticated boot dispatch | 293.6 ms | 299.7 ms | 302.2 ms | **302.8 ms** | **FAIL — maximum is 102.8 ms over the limit** |
+| backend start | 292.2 ms | 298.1 ms | 300.8 ms | 301.5 ms | dominant boot cost |
+| end to end, including cleanup | 797.0 ms | 893.8 ms | 1038.1 ms | 1074.1 ms | diagnostic only |
+
+The baseline raw schema-v6 reports are
+`.mvm-bench-hvf/state/bench/prepared-cold-hvf-alpine-2026-08-19.json` in the
+timing worktree and
+`/root/mvm-bench-20260819/reports/prepared-cold-firecracker-alpine-2026-08-19.json`
+on the established host.
+
+After the Firecracker critical-path changes above, the same host, cached Alpine
+rootfs, 2-vCPU/512-MiB shape, universal 4,310,016-byte workload kernel, and
+schema-v6 protocol passed all 20 measured launches after 2 warm-ups:
+
+| metric | p50 | p95 | p99 | maximum | hard result |
+|---|---:|---:|---:|---:|---:|
+| authenticated boot dispatch | 129.2 ms | 131.3 ms | 132.0 ms | **132.2 ms** | **PASS — every boot <200 ms** |
+| backend start | 128.0 ms | 130.2 ms | 130.9 ms | 131.1 ms | diagnostic |
+| VMM process/config start | 9.9 ms | 10.2 ms | 10.2 ms | 10.2 ms | diagnostic |
+| guest boot to readiness | 99.6 ms | 101.9 ms | 103.5 ms | 103.9 ms | diagnostic |
+
+The optimized report is
+`/root/mvm-bench-20260819/reports/prepared-cold-firecracker-alpine-optimized-2026-08-19.json`,
+SHA-256
+`e12f30ae2bf43a32ced2d6fe585fbe5f40a80f89002f61775c6a7ccf7613360e`.
+It records no pull, build, mount materialization, warm claim, artifact re-hash,
+process-table scan, degraded sample, leaked benchmark VM state, or additional
+Firecracker process. A paired 5+1-run control on the same host measured a
+249.8 ms maximum versus 132.7 ms for the candidate, isolating the source change
+from host/cache effects. These reports are unsigned manual evidence, not the
+still-open signed CI artifact. Mount-hit, mount-miss, libkrun, signed storage,
+and designated live-host jobs remain open.
+
+- [x] Make `mvmctl bench` human-readable by default: an accessible plain-text
+      requirement table, explicit PASS/FAIL words, percentile budgets, and a
+      phase table whose Remarks column explains each boundary. Retain `--json`.
+- [x] Put the hard requirement in schema v6 JSON (`less_than`, limit, observed
+      maximum, verdict, and remark) and add `max` to every span summary.
+- [x] Enforce every prepared-boot dispatch as strictly `<200 ms`, including
+      indicative runs below the publication sample floor. Render and persist a
+      breached report before returning non-zero so the failure remains
+      inspectable. Unit tests pin 199.9 ms PASS and 200.0 ms FAIL.
 - [ ] Add a native Apple Silicon/HVF live benchmark job with cached artifacts,
       no mount, mount-cache hit, and mount miss lanes.
 - [ ] Add a Linux Firecracker live benchmark on the established KVM host and a
-      libkrun lane where supported.
+      libkrun lane where supported. The 2026-08-19 manual Firecracker run is
+      recorded above and passes the hard gate; the automated live job and
+      libkrun lane remain open.
 - [ ] Store signed benchmark evidence with host, backend, artifact, and cache
       metadata; do not make CI infer hardware performance from a hosted runner
       without the required VMM capability.
-- [ ] Add a BDD scenario for the prepared-cold contract and retain hermetic
-      unit tests for all cache, admission, identity, and failure behavior.
+- [x] Add a BDD scenario for the prepared-cold contract and retain hermetic
+      unit tests for all cache, admission, identity, and failure behavior. The
+      scenario pins 199.9 ms as PASS and 200.0 ms as FAIL through the shipped
+      hard-timing gate.
 - [ ] Add a CI regression check that fails when a prepared-cold run performs
-      network/build/mount materialization work or exceeds the p99 budget on a
+      network/build/mount materialization work or any boot reaches 200 ms on a
       designated live host.
 - [ ] Update `specs/SPRINT.md`, Plan 265, Plan 292, and
       `specs/REFACTOR-STATUS.md` with measured results only after the live gates
@@ -1035,13 +1130,13 @@ table. Firecracker evidence still must be collected in the project builder VM.
 
 - [ ] The benchmark distinguishes prepared cold, mount-cache hit, mount miss,
       artifact miss, and warm claim.
-- [ ] Prepared cold reaches an authenticated guest agent in ≤200 ms p50,
-      ≤250 ms p95, and ≤300 ms p99 on the primary native backend.
-- [ ] Mount-cache hit meets ≤200 ms p50, ≤250 ms p95, and ≤300 ms p99.
+- [x] Every prepared-cold boot reaches an authenticated guest agent in strictly
+      under 200 ms on the primary native backend.
+- [ ] Every mount-cache-hit boot meets the same strict sub-200 ms maximum.
 - [ ] No launch path hides image acquisition, build, or first-time mount image
       creation inside the prepared-cold measurement.
 - [ ] Warm-claim performance does not regress against Plan 265.
-- [ ] The full workspace, Linux/backend, BDD, formatting, policy, and clippy
+- [x] The full workspace, Linux/backend, BDD, formatting, policy, and clippy
       gates pass.
 - [ ] Security tests cover cache corruption, symlink/path handling, replay,
       wrong identity, wrong key, stale artifacts, interrupted publication,

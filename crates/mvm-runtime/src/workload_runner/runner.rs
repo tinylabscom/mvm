@@ -243,6 +243,29 @@ impl ConsoleStreamer for NoopConsoleStreamer {
     fn stop(&self, _vm_name: &str) {}
 }
 
+/// Boot the VMM while the best-effort console follower is being installed.
+///
+/// The backend opens the console capture before it starts the VMM, and the
+/// follower tolerates that file not existing yet. Starting both operations at
+/// once keeps observability on the failure path without putting the follower's
+/// process setup in front of guest readiness.
+fn boot_while_starting_console<T>(
+    boot: impl FnOnce() -> Result<T>,
+    start_console: impl FnOnce() + Send,
+    boot_finished: impl FnOnce(),
+) -> Result<T> {
+    std::thread::scope(|scope| {
+        let console = scope.spawn(start_console);
+        let result = boot();
+        boot_finished();
+        // Console capture is best-effort and must never turn a successful VM
+        // boot into a failure. Joining still ensures the follower is installed
+        // before activation can produce output.
+        let _ = console.join();
+        result
+    })
+}
+
 /// Everything the runner needs to start a workload: the admitted launch config,
 /// its tenant/secrets/redaction/policy, and the kernel cmdline the role above
 /// assembled.
@@ -428,19 +451,22 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         });
 
         trace.mark("spec_assembly");
-        let vm = self.driver.boot(&spec)?;
-        trace.mark("driver_boot");
 
-        // Unconditional and best-effort, and before the fallible activation
-        // handshake below rather than after it: the console is the only
-        // channel that still carries output if boot never reaches the guest
-        // agent, which includes a failure in that very handshake.
-        self.console_streamer.start(&ConsoleCapture {
+        // Unconditional and best-effort. The follower can wait for a console
+        // file that does not exist yet, so install it alongside VMM boot rather
+        // than serializing its process setup after guest readiness.
+        let capture = ConsoleCapture {
             vm_name: &inputs.config.name,
             console_log: &socks.console_log,
             redaction: inputs.redaction,
             retention: plan_stream_retention(inputs.config.plan_json.as_deref()),
-        });
+        };
+        let streamer = Arc::clone(&self.console_streamer);
+        let vm = boot_while_starting_console(
+            || self.driver.boot(&spec),
+            || streamer.start(&capture),
+            || trace.mark("driver_boot"),
+        )?;
         trace.mark("console_stream_start");
 
         // Universal initramfs path: the guest PID-1 agent waits for a signed
@@ -1635,6 +1661,28 @@ mod tests {
                     .insert(vm_name.to_string(), bytes);
             }
         }
+    }
+
+    #[test]
+    fn boot_and_console_start_run_concurrently() {
+        let (started_tx, started_rx) = std::sync::mpsc::sync_channel(0);
+        let booted = boot_while_starting_console(
+            || {
+                started_rx
+                    .recv_timeout(Duration::from_secs(1))
+                    .map_err(|error| {
+                        anyhow::anyhow!("console start did not overlap boot: {error}")
+                    })?;
+                Ok(7_u8)
+            },
+            || {
+                let _ = started_tx.send(());
+            },
+            || {},
+        )
+        .expect("the console-start task runs while the driver boot is in progress");
+
+        assert_eq!(booted, 7);
     }
 
     fn config(name: &str) -> VmStartConfig {

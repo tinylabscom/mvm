@@ -551,21 +551,6 @@ fn main() {
         .flatten()
         .map(|p| p.profile)
         .unwrap_or_else(|| mvm_core::security::SecurityPolicy::dev_defaults().profile);
-    eprintln!("mvm-guest-agent: profile={:?}", active_profile);
-
-    if crate::transport::unix_transport_selected() {
-        eprintln!(
-            "mvm-guest-agent: starting on unix socket {} (threshold={}, interval={}s)",
-            crate::transport::unix_socket_path().display(),
-            cfg.busy_threshold,
-            cfg.sample_interval_secs
-        );
-    } else {
-        eprintln!(
-            "mvm-guest-agent: starting on vsock port {} (threshold={}, interval={}s)",
-            cfg.port, cfg.busy_threshold, cfg.sample_interval_secs
-        );
-    }
 
     // PID-1 initramfs setup: mount early filesystems and install the
     // SIGCHLD reaper before the control plane comes up.  On non-PID-1
@@ -652,14 +637,6 @@ fn main() {
         .expect("SysRng entropy for guest signing key");
     let guest_signing_key = Arc::new(SigningKey::from_bytes(&guest_seed));
     boot_state.mark_vsock_bound();
-    eprintln!(
-        "mvm-guest-agent: control plane ready ({}ms)",
-        boot_state
-            .snapshot()
-            .boot_millis
-            .vsock_bound_ms
-            .unwrap_or(0)
-    );
 
     // Defer entrypoint validation + warm-pool startup to a
     // background thread chained in dependency order
@@ -723,17 +700,6 @@ fn main() {
 
     // Port forwarders are started on-demand via StartPortForward requests
     // from the host (works with all backends, no config drive needed).
-
-    match &listener {
-        AgentListener::Vsock(_) => eprintln!(
-            "mvm-guest-agent: listening on vsock port {} (entrypoint, warm pool, integrations, probes initializing in background)",
-            cfg.port
-        ),
-        AgentListener::Unix(_) => eprintln!(
-            "mvm-guest-agent: listening on unix socket {} (entrypoint, warm pool, integrations, probes initializing in background)",
-            crate::transport::unix_socket_path().display()
-        ),
-    }
 
     // Every accepted connection gets its own bounded worker so a long-running
     // data stream cannot prevent Ping, readiness, sleep, or shutdown requests
