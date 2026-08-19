@@ -233,6 +233,17 @@ impl AgentSessionStore {
         self.root.join(id.as_str()).join(RECORD_FILE)
     }
 
+    /// Whether a record file is present for `id`.
+    ///
+    /// Deliberately not `load(id).is_ok()`: a record that is on disk but
+    /// unparseable must still read as present. A caller that probes before
+    /// creating a session would otherwise treat a corrupt record as an absent
+    /// one and overwrite it, and the record is the only thing a parked
+    /// session's resume point can be recovered from.
+    pub fn exists(&self, id: &AgentSessionId) -> bool {
+        self.record_path(id).is_file()
+    }
+
     /// Write a record, replacing any prior one for the same session.
     ///
     /// Goes through the workspace's shared `mvm_core::atomic_io::atomic_write`
@@ -415,6 +426,33 @@ mod tests {
             journal_cursor: 0,
             approval_head: None,
         }
+    }
+
+    #[test]
+    fn exists_reports_a_present_record_even_when_it_will_not_parse() {
+        // The distinction the method exists for: a caller creating a session
+        // probes `exists` and must be told "present" for a corrupt record, or
+        // it would overwrite the only copy of a parked session's resume point.
+        let tmp = tempfile::tempdir().unwrap();
+        let store = AgentSessionStore::at(tmp.path());
+        let rec = record("sess-alpha");
+        assert!(!store.exists(&rec.session_id));
+        store.write(&rec).unwrap();
+        assert!(store.exists(&rec.session_id));
+
+        std::fs::write(
+            tmp.path().join("sess-alpha").join(RECORD_FILE),
+            b"{ not json",
+        )
+        .unwrap();
+        assert!(
+            store.load(&rec.session_id).is_err(),
+            "the record no longer parses"
+        );
+        assert!(
+            store.exists(&rec.session_id),
+            "an unparseable record is still a record"
+        );
     }
 
     #[test]

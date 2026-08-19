@@ -15,7 +15,7 @@ use anyhow::{Context, Result};
 use clap::{Args as ClapArgs, Subcommand};
 
 use mvm_contract::protocol::agent_session::AgentSessionId;
-use mvm_core::checkpoint::ApprovalHead;
+use mvm_core::checkpoint::{ApprovalHead, CheckpointDigest};
 use mvm_core::plan::PlanId;
 use mvm_core::user_config::MvmConfig;
 use mvm_hostd::plan_admission::{InMemoryNonceLedger, SystemClock};
@@ -37,6 +37,8 @@ pub(in crate::commands) struct Args {
 
 #[derive(Subcommand, Debug, Clone)]
 pub(in crate::commands) enum AgentSessionAction {
+    /// Record a new durable agent session, resident from the start
+    Open(OpenArgs),
     /// List every durable agent session recorded on this host
     #[command(alias = "list")]
     Ls(LsArgs),
@@ -46,6 +48,27 @@ pub(in crate::commands) enum AgentSessionAction {
     Park(ParkArgs),
     /// Re-admit a parked session under a freshly signed plan
     Resume(ResumeArgs),
+}
+
+/// What it takes to bring a session into existence.
+///
+/// Every other subcommand needs a record that already exists, so without this
+/// one the verb had no reachable production input at all: `ls` printed nothing
+/// forever and `park` and `resume` could only ever refuse.
+#[derive(ClapArgs, Debug, Clone)]
+pub(in crate::commands) struct OpenArgs {
+    /// Session id to create. Refused if a record already exists under it.
+    pub session_id: String,
+    /// Checkpoint the session may later resume from, as `sha256:<64-hex>`.
+    /// Optional: a session with no resume point is legal, and `resume` will
+    /// refuse it later saying so.
+    #[arg(long)]
+    pub resume_point: Option<String>,
+    /// Sandbox lineage belonging to the session. Repeatable. The first one
+    /// supplies the admitted plan a `park` entry is chained under, so a
+    /// session opened with none cannot record its park in the audit chain.
+    #[arg(long = "member")]
+    pub members: Vec<String>,
 }
 
 #[derive(ClapArgs, Debug, Clone)]
@@ -127,6 +150,7 @@ pub(in crate::commands) struct ResumeArgs {
 
 pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Result<()> {
     match args.action {
+        AgentSessionAction::Open(a) => open(&AgentSessionStore::open(), &a),
         AgentSessionAction::Ls(a) => ls(&AgentSessionStore::open(), a.json),
         AgentSessionAction::Show(a) => show(&AgentSessionStore::open(), &a.session_id, a.json),
         AgentSessionAction::Park(a) => park(&AgentSessionStore::open(), &a),
@@ -140,6 +164,65 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
 /// is refused before it is ever joined into a store path.
 fn parse_session_id(raw: &str) -> Result<AgentSessionId> {
     AgentSessionId::parse(raw).map_err(|e| anyhow::anyhow!("invalid session id '{raw}': {e}"))
+}
+
+/// Create a session record and report the state it starts in.
+fn open(store: &AgentSessionStore, args: &OpenArgs) -> Result<()> {
+    let record = open_record(store, args)?;
+    println!("{}", summary_line(&record));
+    if record.members.is_empty() {
+        // Said at open time rather than discovered at park time: the park is
+        // what fails to chain, and by then the operator has already moved on.
+        crate::ui::warn(
+            "this session records no member sandbox, so a later park has no admitted \
+             plan to bind to and will not reach the audit chain",
+        );
+    }
+    Ok(())
+}
+
+/// Write the initial record, refusing to displace an existing one.
+///
+/// Split from the printing half for the same reason `park_record` is: the
+/// transition is then testable without a terminal.
+fn open_record(store: &AgentSessionStore, args: &OpenArgs) -> Result<AgentSessionRecord> {
+    let id = parse_session_id(&args.session_id)?;
+    let parent_checkpoint = args
+        .resume_point
+        .as_deref()
+        .map(CheckpointDigest::parse)
+        .transpose()
+        .map_err(|e| anyhow::anyhow!("invalid --resume-point: {e}"))?;
+    // Refuse rather than replace. An overwrite would reset a live session to
+    // generation 1 and drop its resume point, which is the one piece of state
+    // a parked session cannot be recovered without. `exists` rather than a
+    // successful `load` so a record that is present but corrupt also refuses.
+    anyhow::ensure!(
+        !store.exists(&id),
+        "agent session '{}' already exists on this host",
+        args.session_id
+    );
+    let now = mvm_core::util::time::now_unix_secs();
+    let record = AgentSessionRecord {
+        session_id: id,
+        // Generation 1, not 0: a generation counts periods of sandbox
+        // residency and this record opens the first one.
+        generation: 1,
+        state: SandboxResidency::Active,
+        members: args.members.clone(),
+        parent_checkpoint,
+        created_unix: now,
+        updated_unix: now,
+        journal_cursor: 0,
+        // Both are the park transition's to write. An active session has not
+        // parked, so it has no tier, no reason, and no head it was parked
+        // under.
+        approval_head: None,
+        storage_tier: None,
+        park_reason: None,
+    };
+    store.write(&record)?;
+    Ok(record)
 }
 
 fn ls(store: &AgentSessionStore, json: bool) -> Result<()> {
@@ -653,17 +736,55 @@ mod tests {
         assert!(format!("{err}").contains("invalid session id"), "{err}");
     }
 
+    /// The signed labels a resume plan actually carries, read out of the
+    /// synthesis the resume path runs.
+    ///
+    /// Derived rather than listed. A hardcoded denylist of `session_id` and
+    /// `session_generation` would miss `session_parent_checkpoint` and
+    /// `session_approval_head`, which that synthesis also emits, and would go
+    /// on missing whatever is added next.
+    fn resume_plan_label_keys(record: &AgentSessionRecord) -> Vec<String> {
+        let material = ResumePlanMaterial {
+            backend_name: "hvf".to_string(),
+            image_name: "demo".to_string(),
+            image_sha256: "ab".repeat(32),
+            kernel_sha256: None,
+            cpus: 1,
+            mem_mib: 256,
+        };
+        let synthesis = mvm_hostd::session_resume::synthesis_for_resume(record, &material);
+        synthesis.audit_labels.keys().cloned().collect()
+    }
+
+    /// Assert an emitter's extras cannot shadow any signed plan label.
+    fn assert_extras_are_disjoint_from_the_plan_labels(
+        record: &AgentSessionRecord,
+        extras: &[(String, String)],
+    ) {
+        let labels = resume_plan_label_keys(record);
+        // Guard the guard: an empty label set would make the disjointness
+        // below hold for a reason that has nothing to do with the code.
+        assert!(
+            labels.contains(&"session_id".to_string()),
+            "the label set is not the one the resume plan carries: {labels:?}"
+        );
+        let keys: Vec<&str> = extras.iter().map(|(k, _)| k.as_str()).collect();
+        assert!(!keys.is_empty(), "the entry must carry something");
+        for label in &labels {
+            assert!(
+                !keys.contains(&label.as_str()),
+                "extra `{label}` would overwrite the signed plan label of the same name \
+                 (extras: {keys:?}, plan labels: {labels:?})"
+            );
+        }
+    }
+
     #[test]
     fn the_park_entry_keys_do_not_collide_with_the_plan_labels() {
         // `for_plan` extends the plan's labels with the per-event extras, so
         // an extra sharing a key silently replaces the signed plan's value.
-        // The resume plan carries `session_id` and `session_generation` as
-        // signed labels; a park entry must not shadow either.
-        let extras = park_audit_extras(&parked("sess-alpha", ParkReason::ApprovalWait));
-        let keys: Vec<&str> = extras.iter().map(|(k, _)| k.as_str()).collect();
-        assert!(!keys.contains(&"session_id"), "{keys:?}");
-        assert!(!keys.contains(&"session_generation"), "{keys:?}");
-        assert!(!keys.is_empty(), "the entry must carry something");
+        let record = parked("sess-alpha", ParkReason::ApprovalWait);
+        assert_extras_are_disjoint_from_the_plan_labels(&record, &park_audit_extras(&record));
     }
 
     #[test]
@@ -824,16 +945,30 @@ mod tests {
 
     #[test]
     fn the_resume_entry_keys_do_not_collide_with_the_plan_labels() {
-        // Same hazard as the park entry: extras are merged over the signed
-        // plan's labels, and the resume plan carries `session_id` and
-        // `session_generation` as signed labels of its own.
-        let mut record = active("sess-alpha");
-        record.generation = 2;
+        // Same hazard as the park entry, and here it is live rather than
+        // theoretical: this entry rides on the resume plan itself.
+        let record = parked("sess-alpha", ParkReason::ApprovalWait);
         let extras = resume_audit_extras(&record, &PlanId("plan-abc".to_string()));
-        let keys: Vec<&str> = extras.iter().map(|(k, _)| k.as_str()).collect();
-        assert!(!keys.contains(&"session_id"), "{keys:?}");
-        assert!(!keys.contains(&"session_generation"), "{keys:?}");
-        assert!(!keys.is_empty(), "the entry must carry something");
+        assert_extras_are_disjoint_from_the_plan_labels(&record, &extras);
+    }
+
+    #[test]
+    fn the_derived_label_set_covers_more_than_the_two_obvious_names() {
+        // The reason the guard is derived: a record carrying a resume point
+        // and an approval head makes the synthesis emit four labels, and a
+        // hardcoded pair would have watched only half of them.
+        let labels = resume_plan_label_keys(&parked("sess-alpha", ParkReason::ApprovalWait));
+        for expected in [
+            "session_id",
+            "session_generation",
+            "session_parent_checkpoint",
+            "session_approval_head",
+        ] {
+            assert!(
+                labels.contains(&expected.to_string()),
+                "missing `{expected}`: {labels:?}"
+            );
+        }
     }
 
     #[test]
@@ -853,6 +988,152 @@ mod tests {
         // residency behind.
         assert_eq!(got("resumed_at_generation"), Some("2"));
         assert_eq!(got("resumed_plan_id"), Some("plan-abc"));
+    }
+
+    fn open_args(session_id: &str) -> OpenArgs {
+        OpenArgs {
+            session_id: session_id.to_string(),
+            resume_point: None,
+            members: vec!["vm-alpha".to_string()],
+        }
+    }
+
+    #[test]
+    fn open_creates_a_resident_record_at_generation_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = AgentSessionStore::at(tmp.path());
+        let record = open_record(&store, &open_args("sess-alpha")).expect("a new session opens");
+
+        assert_eq!(record.generation, 1);
+        assert_eq!(record.state, SandboxResidency::Active);
+        assert_eq!(record.members, vec!["vm-alpha".to_string()]);
+        // A session that has not parked carries none of the park transition's
+        // fields; a tier written here would name a cost nothing is paying.
+        assert_eq!(record.park_reason, None);
+        assert_eq!(record.storage_tier, None);
+        assert_eq!(record.approval_head, None);
+        assert_eq!(
+            store.load(&record.session_id).unwrap(),
+            record,
+            "the record must be readable back through the store"
+        );
+    }
+
+    #[test]
+    fn open_records_a_resume_point_when_one_is_supplied() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = AgentSessionStore::at(tmp.path());
+        let digest = format!("sha256:{}", "1a".repeat(32));
+        let record = open_record(
+            &store,
+            &OpenArgs {
+                resume_point: Some(digest.clone()),
+                ..open_args("sess-alpha")
+            },
+        )
+        .expect("a resume point is legal at open");
+        assert_eq!(
+            record.parent_checkpoint.as_ref().map(ToString::to_string),
+            Some(digest)
+        );
+    }
+
+    #[test]
+    fn opening_an_existing_session_is_refused_and_leaves_it_byte_identical() {
+        // The failure this prevents: an overwrite resets a live session to
+        // generation 1 and drops the resume point it would be brought back
+        // from, so the session becomes unrecoverable rather than merely stale.
+        let tmp = tempfile::tempdir().unwrap();
+        let store = AgentSessionStore::at(tmp.path());
+        let record = parked("sess-alpha", ParkReason::ApprovalWait);
+        store.write(&record).unwrap();
+        let on_disk = tmp.path().join("sess-alpha").join("session.json");
+        let before = std::fs::read(&on_disk).unwrap();
+
+        let err = open_record(&store, &open_args("sess-alpha"))
+            .expect_err("an existing session must not be displaced");
+        assert!(format!("{err:#}").contains("already exists"), "{err:#}");
+        assert_eq!(
+            std::fs::read(&on_disk).unwrap(),
+            before,
+            "a refused open must not rewrite a byte"
+        );
+    }
+
+    #[test]
+    fn open_refuses_a_malformed_session_id_before_it_reaches_the_store() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = AgentSessionStore::at(tmp.path());
+        let err = open_record(&store, &open_args("../escape"))
+            .expect_err("a path-escaping id must refuse");
+        assert!(format!("{err:#}").contains("invalid session id"), "{err:#}");
+    }
+
+    #[test]
+    fn open_refuses_a_malformed_resume_point_and_writes_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = AgentSessionStore::at(tmp.path());
+        let err = open_record(
+            &store,
+            &OpenArgs {
+                resume_point: Some("not-a-digest".to_string()),
+                ..open_args("sess-alpha")
+            },
+        )
+        .expect_err("a malformed digest must be refused at the boundary");
+        assert!(
+            format!("{err:#}").contains("invalid --resume-point"),
+            "{err:#}"
+        );
+        assert!(
+            store.list().unwrap().is_empty(),
+            "a refused open must leave no record behind"
+        );
+    }
+
+    #[test]
+    fn open_then_park_then_show_walks_one_session_end_to_end() {
+        // The four subcommands are only useful as a sequence, and until
+        // `open` existed no sequence was reachable: `park` needed a record
+        // nothing produced. This walks the real code paths in order.
+        let tmp = tempfile::tempdir().unwrap();
+        let store = AgentSessionStore::at(tmp.path());
+
+        let opened = open_record(&store, &open_args("sess-alpha")).expect("open");
+        assert_eq!(opened.state, SandboxResidency::Active);
+        assert_eq!(
+            store.list().unwrap().len(),
+            1,
+            "`ls` must now see the session `open` created"
+        );
+
+        let parked = park_record(
+            &store,
+            &ParkArgs {
+                session_id: "sess-alpha".to_string(),
+                reason: "approval-wait".to_string(),
+                journal_cursor: 9,
+                approval_head: None,
+            },
+        )
+        .expect("the session opened active, so it parks");
+
+        // What `show` renders, read off the same record `show` would load.
+        let rendered = detail_lines(&store.load(&parked.session_id).unwrap()).join("\n");
+        assert!(
+            rendered.contains("residency:      hibernated"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("park reason:    approval-wait"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("storage tier:   parked"), "{rendered}");
+        assert!(rendered.contains("journal cursor: 9"), "{rendered}");
+        assert!(
+            rendered.contains("approval head:  (none recorded"),
+            "the park carried no head, and `show` must say so: {rendered}"
+        );
     }
 
     #[test]

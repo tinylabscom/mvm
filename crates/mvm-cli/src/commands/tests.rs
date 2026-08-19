@@ -1916,6 +1916,50 @@ fn agent_session_ls_parses() {
 }
 
 #[test]
+fn agent_session_open_requires_an_id_and_takes_repeatable_members() {
+    assert!(Cli::try_parse_from(["mvmctl", "agent-session", "open"]).is_err());
+
+    let cli = Cli::try_parse_from([
+        "mvmctl",
+        "agent-session",
+        "open",
+        "sess-a",
+        "--member",
+        "vm-one",
+        "--member",
+        "vm-two",
+        "--resume-point",
+        "sha256:abababababababababababababababababababababababababababababababab",
+    ])
+    .unwrap();
+    let Commands::AgentSession(args) = cli.command else {
+        panic!("expected the agent-session command")
+    };
+    let agent_session::AgentSessionAction::Open(open) = args.action else {
+        panic!("expected the open subcommand")
+    };
+    assert_eq!(open.session_id, "sess-a");
+    assert_eq!(open.members, vec!["vm-one", "vm-two"]);
+    assert!(open.resume_point.is_some());
+}
+
+#[test]
+fn agent_session_open_needs_neither_a_member_nor_a_resume_point() {
+    // Both are legal to omit: a session with no resume point is refused at
+    // resume time, not at open time, and one with no member simply cannot
+    // chain its park.
+    let cli = Cli::try_parse_from(["mvmctl", "agent-session", "open", "sess-a"]).unwrap();
+    let Commands::AgentSession(args) = cli.command else {
+        panic!("expected the agent-session command")
+    };
+    let agent_session::AgentSessionAction::Open(open) = args.action else {
+        panic!("expected the open subcommand")
+    };
+    assert!(open.members.is_empty());
+    assert!(open.resume_point.is_none());
+}
+
+#[test]
 fn agent_session_show_requires_an_id() {
     assert!(Cli::try_parse_from(["mvmctl", "agent-session", "show"]).is_err());
     assert!(Cli::try_parse_from(["mvmctl", "agent-session", "show", "sess-alpha"]).is_ok());
