@@ -1268,6 +1268,99 @@ mod tests {
         assert!(d.transport.pending_rx.iter().any(|(h, _)| h.op == OP_RST));
     }
 
+    /// The regression a FlowMux launch died on: the session handshake opens
+    /// with the *host's* `SessionHello`, so the guest connects and reads. A
+    /// bridge that dials the endpoint only on the first guest payload leaves
+    /// the endpoint with no socket to greet on, and both halves wait — which
+    /// surfaced as "no guest authenticated" with a guest that had connected.
+    #[test]
+    fn egress_port_delivers_a_host_first_greeting_after_only_a_connect() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("subst.sock");
+
+        let Some(listener) = bind_unix_listener(&sock) else {
+            return;
+        };
+        let server = std::thread::spawn(move || {
+            let (mut c, _) = listener.accept().unwrap();
+            c.write_all(b"HELLO").unwrap();
+            // The real endpoint holds the session open waiting for the guest's
+            // reply; dropping here would close the socket before the drain.
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        });
+
+        let mut d = dev();
+        d.set_network_endpoint(&sock);
+
+        let request = VsockHdr {
+            src_cid: GUEST_CID,
+            dst_cid: HOST_CID,
+            src_port: 1600,
+            dst_port: mvm_agentd::vsock::EGRESS_PORT,
+            len: 0,
+            op: OP_REQUEST,
+            typ: TYPE_STREAM,
+            buf_alloc: HOST_BUF_ALLOC,
+            ..Default::default()
+        };
+        d.handle_packet(request, &[]);
+        assert!(
+            d.transport
+                .pending_rx
+                .iter()
+                .any(|(h, _)| h.op == OP_RESPONSE),
+            "the connect itself must still be accepted"
+        );
+
+        let mut greeting = None;
+        for _ in 0..200 {
+            let _ = d.service_host_io();
+            if let Some((h, payload)) = d
+                .transport
+                .pending_rx
+                .iter()
+                .find(|(h, _)| h.op == OP_RW && h.dst_port == 1600)
+            {
+                greeting = Some((*h, payload.clone()));
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let (h, payload) =
+            greeting.expect("the endpoint's greeting reaches a guest that has only connected");
+        assert_eq!(h.src_port, mvm_agentd::vsock::EGRESS_PORT);
+        assert_eq!(payload, b"HELLO");
+        server.join().unwrap();
+    }
+
+    /// With nothing bound the refusal now lands on the connect rather than on
+    /// the first payload, so a guest waiting to be greeted learns immediately
+    /// instead of blocking until its own timeout.
+    #[test]
+    fn egress_port_resets_a_connect_without_endpoint() {
+        let mut d = dev();
+        let request = VsockHdr {
+            src_cid: GUEST_CID,
+            dst_cid: HOST_CID,
+            src_port: 2100,
+            dst_port: mvm_agentd::vsock::EGRESS_PORT,
+            len: 0,
+            op: OP_REQUEST,
+            typ: TYPE_STREAM,
+            ..Default::default()
+        };
+        d.handle_packet(request, &[]);
+        assert!(d.transport.pending_rx.iter().any(|(h, _)| h.op == OP_RST));
+        assert!(
+            !d.transport
+                .pending_rx
+                .iter()
+                .any(|(h, _)| h.op == OP_RESPONSE),
+            "a connect with no endpoint must not read as accepted"
+        );
+    }
+
     #[test]
     fn teardown_cancellation_clears_vsock_state() {
         let mut d = dev();
