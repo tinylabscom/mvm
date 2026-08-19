@@ -153,13 +153,20 @@ consistent with ADR-045 §13.
 
 ```rust
 pub enum ParkReason {
-    ApprovalWait { approval_id: ApprovalRequestId },
+    ApprovalWait,
     Idle,
     HostShutdown,
     Operator,
     RetentionDemotion,
 }
 ```
+
+Fieldless, as built (`crates/mvm-runtime/src/agent_session/mod.rs`) — not the
+`ApprovalWait { approval_id: ApprovalRequestId }` this section originally
+called for. The consequence: nothing on the record links a parked session to
+the approval it is waiting on, so the wake path below cannot be built as
+written — it needs a way to find a parked session *from* an approval id, and
+that lookup does not exist yet. See WS3's remaining-work note.
 
 The reason selects the storage tier. `ApprovalWait` and `HostShutdown` go
 directly to `Parked` — an operator decision has unbounded latency and must not
@@ -229,10 +236,16 @@ not the signature check this sketch names.
 `resume_session` (`crates/mvm-hostd/src/session_resume.rs`), which covers
 step 4 (fresh `ExecutionPlan` synthesis) and step 5 (admission): it loads the
 record, refuses anything but `Hibernated`, resolves the resume point named by
-`parent_checkpoint`, runs `verify_content` against it — content integrity
-only, not `verify_lineage` against a signed `CheckpointChainAnchor`, so it
-catches a tampered blob but not a checkpoint that was never audited —
-synthesizes a plan naming the session and the generation the resume opens,
+`parent_checkpoint`, checks the record's stored `meta_digest` against a fresh
+`compute_meta_digest()` of its own fields — refusing a record whose
+`content[].sha256` was rewritten to vouch for a tampered blob, since
+`by_digest` and `verify_content` both otherwise trust the same file a
+tamperer who can edit a blob can also edit — then runs `verify_content`
+against it. Neither step is `verify_lineage` against a signed
+`CheckpointChainAnchor`, so the pair catches a tampered blob and a
+self-consistently forged record but not a checkpoint that was never audited
+in the first place. Resume then synthesizes a plan naming the session and
+the generation the resume opens,
 and admits it through `mvm_hostd::plan_admission::admit_for_run`. Only then
 does it transition the record, so a refusal at any earlier point leaves the
 session parked and unchanged. Steps 1 (audit-chain head), 3 (`PolicySet`
@@ -389,7 +402,12 @@ Numbering was reconciled before these documents landed on main (PR #2691):
       and `Wake` are defined in the agent protocol and have host-facing
       convenience functions in `mvm-agentd/src/vsock/api.rs`, but none of
       those functions has a caller anywhere in the workspace outside their
-      own tests. Wiring park to call them is what remains.
+      own tests. Wiring park to call them is what remains. `ParkReason` shipped
+      fieldless (see D3): the record does not name the approval a parked
+      session is waiting on, so the `ApprovalLedger::respond`-driven wake path
+      D3 describes has no way to find the parked session an incoming response
+      belongs to. That lookup is unbuilt and is not tracked as anyone's task
+      today.
 - [ ] **WS4 — Resume path.** `resume_session`, incremental ledger-head
       verification, fresh-plan synthesis, tier selection, `PostRestore`
       fabric re-registration.

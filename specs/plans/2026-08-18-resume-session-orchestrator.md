@@ -326,7 +326,7 @@ git commit -m "feat(hostd): admit a fresh plan when resuming a parked session"
 - Create: `specs/sprint/delivery/resume-session-orchestrator.md`
 - Modify: this plan's checkboxes
 
-- [ ] **Step 1: Update D5 accurately**
+- [x] **Step 1: Update D5 accurately**
 
 D5's numbered steps are now partly real: load, the approval-head comparison,
 synthesizing a fresh plan, and admitting it all exist. Absent: tier selection,
@@ -335,20 +335,20 @@ any `PolicySet::evaluate` call, lineage verification against a signed anchor
 credentials at the substitution endpoint, and the chain entry. Say which is
 which, precisely, rather than describing D5 as done.
 
-- [ ] **Step 2: Mark WS4's state, naming what remains**
+- [x] **Step 2: Mark WS4's state, naming what remains**
 
 Do not tick WS4. Verify each remaining absence with an **exhaustive** search —
 `| wc -l` first, or read the whole result. Do not pipe a search establishing
 absence through `head`: two false claims reached committed documents on this
 branch exactly that way. Cite each command in your report.
 
-- [ ] **Step 3: Update `specs/REFACTOR-STATUS.md`** and its "Last updated".
+- [x] **Step 3: Update `specs/REFACTOR-STATUS.md`** and its "Last updated".
 
-- [ ] **Step 4: Write `specs/sprint/delivery/resume-session-orchestrator.md`**,
+- [x] **Step 4: Write `specs/sprint/delivery/resume-session-orchestrator.md`**,
 style-matching that directory. Do NOT append to `specs/SPRINT.md` —
 `xtask check-sprint-append` fails if its delivery section grows.
 
-- [ ] **Step 5: Tick this plan's checkboxes and run the doc gates**
+- [x] **Step 5: Tick this plan's checkboxes and run the doc gates**
 
 ```bash
 export CARGO_TARGET_DIR=/Users/auser/work/tinylabs/mvmco/.worktrees/mvm-durable-sessions/target
@@ -362,7 +362,7 @@ These files carry `Backing: preview`, which bars a short list of assertive verbs
 matched as whole words — quoting one in prose trips the gate too. Write about
 what the code does; the gate names the word it found if it refuses.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add specs/

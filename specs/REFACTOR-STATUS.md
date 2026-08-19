@@ -305,7 +305,7 @@ for detailed scope and acceptance criteria.
       `specs/plans/2026-08-18-session-approval-head.md` (implementation,
       Tasks 1–4 complete) +
       `specs/plans/2026-08-18-resume-session-orchestrator.md` (implementation,
-      Tasks 1–2 complete, Task 3 in progress). `CheckpointMeta` gains `Option<SessionBinding>`
+      Tasks 1–3 complete). `CheckpointMeta` gains `Option<SessionBinding>`
       (`session_id`/`generation`/`journal_cursor`/`approval_head`), folded
       into `meta_digest` the same way `grants` already is; `approval_head` is
       a dedicated `ApprovalHead` newtype, not `CheckpointDigest` reused.
@@ -340,12 +340,18 @@ resume` takes a `current_head` and refuses when it differs from the
       `crates/mvm-backends/src/driver/fc.rs`'s
       `prepare_guest_filesystems_for_stop`), nothing on a park path calls
       it. WS4 is partial: the ledger-head comparison above landed, and so
-      has `resume_session` (`crates/mvm-hostd/src/session_resume.rs`, 12
+      has `resume_session` (`crates/mvm-hostd/src/session_resume.rs`, 13
       tests) — it loads the record, refuses anything but `Hibernated`,
-      resolves the resume point and runs `verify_content` on it (content
-      integrity only, not lineage verification against a signed
-      `CheckpointChainAnchor`, so it catches a tampered blob but not a
-      checkpoint that was never audited), builds a `SynthesisInput` naming
+      resolves the resume point, checks the record's stored `meta_digest`
+      against a fresh `compute_meta_digest()` (refuses a record whose
+      `content[].sha256` was rewritten to vouch for a tampered blob,
+      closing the gap where `by_digest` and `verify_content` trust the same
+      file a tamperer can edit), then runs `verify_content` on it —
+      together this catches a tampered blob and a self-consistently forged
+      record, but not lineage verification against a signed
+      `CheckpointChainAnchor`, so a checkpoint that was never audited but is
+      bit-for-bit and digest-consistent still passes, builds a
+      `SynthesisInput` naming
       the session and the generation the resume opens, admits it through
       `mvm_hostd::plan_admission::admit_for_run`, and only then transitions
       the record, so a refusal anywhere before admission leaves the session

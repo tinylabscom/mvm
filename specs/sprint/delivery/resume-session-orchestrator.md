@@ -31,9 +31,11 @@ VM, backend, or async surface involved.
   when the record has one (omitted rather than blanked when absent, so a
   reader of the chain can tell "never recorded" from "recorded empty").
 - `resume_session(sessions, checkpoints, req, clock, ledger)` — load →
-  require `Hibernated` → resolve `parent_checkpoint` → `verify_content` on
-  it → `synthesis_for_resume` → `admit_for_run` → only then
-  `AgentSessionStore::resume`. 12 tests, including the ordering property
+  require `Hibernated` → resolve `parent_checkpoint` → check the record's
+  stored `meta_digest` against a fresh `compute_meta_digest()` of its own
+  fields → `verify_content` on it → `synthesis_for_resume` → `admit_for_run`
+  → only then
+  `AgentSessionStore::resume`. 13 tests, including the ordering property
   itself: `a_refused_admission_leaves_the_session_parked` asserts a host
   ceiling that refuses the workload leaves the on-disk record untouched, and
   the module doc records that this was verified non-vacuous by moving the
@@ -65,11 +67,14 @@ the ordering-test comment claimed the stronger, inaccurate version.
 Everything D5 sketches past steps 4 and 5, and one gap inside the two steps
 delivered:
 
-- **`verify_content`, not lineage verification.** The resume point is
-  checked for content integrity only — a byte-flipped blob refuses. There is
-  no `verify_lineage` call against a signed `CheckpointChainAnchor`, so a
-  checkpoint that was never audited but is bit-for-bit intact would still be
-  accepted; no caller in the workspace holds an anchor to check against.
+- **A digest self-check plus `verify_content`, not lineage verification.**
+  The resume point's stored `meta_digest` is checked against a fresh
+  `compute_meta_digest()` of its own fields, then a byte-flipped blob still
+  refuses under `verify_content`. Together the two catch a tampered blob and
+  a record edited to vouch for one, but there is no `verify_lineage` call
+  against a signed `CheckpointChainAnchor`, so a checkpoint that was never
+  audited but is bit-for-bit and digest-consistent would still be accepted;
+  no caller in the workspace holds an anchor to check against.
 - **`grants: None`.** `ResumePlanMaterial` has no grant surface, so the
   synthesized plan arms neither a wall-clock timer nor a CPU share. D5's
   step-4 line "grants = exactly the approved scope" has nothing behind it,
