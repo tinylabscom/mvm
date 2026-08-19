@@ -435,17 +435,51 @@ Numbering was reconciled before these documents landed on main (PR #2691):
       it directly today by reading it off the record; there is no tier
       selection, no `PostRestore` fabric re-registration, no credential
       minting at the substitution endpoint, and no chain entry (WS7).
-      `resume_session` itself has no caller anywhere in the workspace outside
-      its own tests — nothing in `mvmctl` or elsewhere invokes it, so none of
-      the above runs on a real resume yet. A session parked with
+      `resume_session` now has one production caller, `mvmctl agent-session
+      resume` (WS6), so the steps above that it does implement do run on a
+      real resume; the steps it does not implement — tier selection,
+      `PostRestore`, credential minting — still do not. A session parked with
       `approval_head: None` resumes with no ledger fence at all.
 - [ ] **WS5 — Retention ladder + GC.** Retention classes, one-way demotion,
       first GC over `checkpoints_dir()` with parent-reachability refusal.
-- [ ] **WS6 — CLI.** `mvmctl session {open,ls,show,park,resume,approve,close}`.
-- [ ] **WS7 — Chain records.** `session.opened`, `sandbox.admitted`,
-      `sandbox.parked`, `approval.requested`, `approval.granted`,
-      `sandbox.resumed`, `session.hibernated`, `session.closed`, wired through
-      the existing `AgentApprovalEvent::audit_action` projection.
+- [x] **WS6 — CLI.** Delivered as `mvmctl agent-session
+      {open,ls,show,park,resume}`
+      (`crates/mvm-cli/src/commands/agent_session.rs`,
+      `specs/plans/2026-08-19-session-cli-and-audit.md`). Named
+      `agent-session`, not `session`: `mvmctl machine session` already means
+      machine-session residency — a warm VM held across `invoke` calls — over
+      a different store.
+      `open` writes the initial record (Active, generation 1) and is what
+      makes the other four reachable at all; before it existed no code path
+      anywhere created an `AgentSessionRecord`, so `ls` printed nothing
+      forever and `park`/`resume` could only refuse. `resume` is the first
+      production caller of `mvm_hostd::session_resume::resume_session` — a
+      caller that is both correctly constructed and, with `open` in place,
+      exercisable end to end.
+      `approve` and `close` are **not** delivered: there is no `close()`
+      transition on the record and no approval-grant surface for a CLI to
+      drive.
+- [ ] **WS7 — Chain records.** Partial. `session.parked` and
+      `session.resumed` are emitted by the CLI's park and resume paths
+      (`AuditEmitter::emit_session_parked` / `emit_session_resumed`), each
+      carrying non-colliding extras so a per-event label cannot overwrite a
+      signed plan label of the same name. Still open: nothing verifies a
+      session's chain as a unit the way `verify_audit_chain` walks a tenant's;
+      there is no `session.closed` entry because no `close()` transition
+      exists to emit one; and a chain-entry write failure downgrades to a
+      warning with exit 0 (the precedent `bind_checkpoint_created` set), so a
+      scripted operator cannot detect a missing entry from the exit status.
+      `session.opened`, `sandbox.admitted`, `approval.requested`,
+      `approval.granted` and `session.hibernated` are unwritten, and nothing
+      yet routes through the `AgentApprovalEvent::audit_action` projection.
+
+      **Event naming.** The two entries that exist are spelled `session.parked`
+      and `session.resumed`, not the `sandbox.parked` / `sandbox.resumed` this
+      spec first proposed. The code's spelling is the better one and the spec
+      follows it: parking and resuming are transitions of a *session*, and
+      `SandboxResidency` is a field of the session record rather than the
+      subject of the event. A `sandbox.` prefix would also read as a sibling of
+      `sandbox.admitted`, which is genuinely about one sandbox.
 - [ ] **WS8 — Tests + BDD** per the Testing section.
 
 ## Out of scope

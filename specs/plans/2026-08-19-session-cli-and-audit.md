@@ -10,8 +10,11 @@ resume leave chain-signed evidence. This is WS6 and WS7 together, because the
 chain entry belongs in the same code path the CLI drives — doing them apart
 would touch park and resume twice.
 
-**Architecture:** A new top-level `mvmctl agent-session` verb with `ls`, `show`,
-`park`, and `resume`. It is **not** called `session`: `mvmctl machine session`
+**Architecture:** A new top-level `mvmctl agent-session` verb with `open`, `ls`,
+`show`, `park`, and `resume`. (`open` was not in this plan as written; review of
+Tasks 1-3 found the verb had no reachable production input without it — nothing
+in the workspace created an `AgentSessionRecord` — so it landed alongside Task
+4.) It is **not** called `session`: `mvmctl machine session`
 already exists for machine sessions — warm-VM residency, idle timeouts, attach —
 which is a different concept, and the types already settled this collision by
 taking the `AgentSession*` prefix. `resume` gives
@@ -90,7 +93,7 @@ sibling top-level verb with subcommands) for module shape, and
 the repo's existing output conventions — check whether sibling verbs support
 `--json` and match that choice rather than inventing a format.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Argument parsing, in `commands/tests.rs` alongside the existing verb-parsing
 tests (read a few first and match their style):
@@ -120,13 +123,13 @@ And a rendering test in the new module: given a record in each residency state,
 the summary line names the state and, when parked, the reason and tier. Assert
 on the rendered string so a format change is visible.
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 `export CARGO_TARGET_DIR=/Users/auser/work/tinylabs/mvmco/.worktrees/mvm-durable-sessions/target && ~/.cargo/bin/cargo nextest run -p mvm-cli agent_session`
 
 Expected: FAIL to compile — no `Commands::AgentSession`.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 `ls` lists every record from `AgentSessionStore::open()`, sorted as the store
 returns them. `show <id>` prints one record's full state: residency, generation,
@@ -138,9 +141,9 @@ Do not print the approval head's value as if it were a secret — it is a digest
 and safe to show — but do say when it is absent, because a session parked
 without one resumes unfenced and an operator should be able to see that.
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 export CARGO_TARGET_DIR=/Users/auser/work/tinylabs/mvmco/.worktrees/mvm-durable-sessions/target
@@ -173,7 +176,7 @@ whose keys do not collide with the resume plan's `session_id` /
 are distinct. Emit only after the store write succeeds: an entry for a park that
 did not happen is worse than a missing one.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```rust
     #[test]
@@ -203,9 +206,9 @@ test, not incidental to it.
 
 Also test that an unparseable `--reason` is refused rather than defaulting.
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 Map `--reason` onto `ParkReason` with an explicit match — no
 stringly-typed fallthrough, and an unknown value is an error naming the accepted
@@ -213,15 +216,15 @@ set. The `--journal-cursor` flag defaults to 0; `--approval-head` is optional
 and parsed through `ApprovalHead::parse` so a malformed value is refused at the
 boundary.
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
-- [ ] **Step 5: Verify the no-collision guard is not vacuous**
+- [x] **Step 5: Verify the no-collision guard is not vacuous**
 
 Temporarily rename one extras key to `session_id`, confirm the collision test
 goes RED, restore. Report that RED with command and output. If it does not go
 red, say so and stop rather than reporting one you did not observe.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 export CARGO_TARGET_DIR=/Users/auser/work/tinylabs/mvmco/.worktrees/mvm-durable-sessions/target
@@ -253,7 +256,7 @@ operator and it is the right first step anyway: it makes the seam visible rather
 than guessing, and a later slice can derive them from the resume point's
 supervisor config. Say so in the flag help text.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Parsing tests for the required flags, plus:
 
@@ -277,9 +280,9 @@ reuse the approach rather than inventing one. If those fixtures are
 `#[cfg(test)]` and unreachable across the crate boundary, say so in your report
 and build the smallest local equivalent.
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 Wire the subcommand to `resume_session`. Emit `session.resumed` **only after**
 it returns `Ok`, carrying the session id, the generation the resume opened, and
@@ -291,9 +294,9 @@ is a real question: this plan does **not** add one, because
 the only record of a refusal that a non-CLI caller would never produce.
 Record that as a limit rather than half-building it.
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
-- [ ] **Step 5: Run the full gate**
+- [x] **Step 5: Run the full gate**
 
 ```bash
 export CARGO_TARGET_DIR=/Users/auser/work/tinylabs/mvmco/.worktrees/mvm-durable-sessions/target
@@ -302,7 +305,7 @@ export CARGO_TARGET_DIR=/Users/auser/work/tinylabs/mvmco/.worktrees/mvm-durable-
 ~/.cargo/bin/cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add crates/mvm-cli/src/commands/agent_session.rs
@@ -320,27 +323,38 @@ git commit -m "feat(cli): add agent-session resume, the first caller of resume_s
 - Create: `specs/sprint/delivery/session-cli-and-audit.md`
 - Modify: this plan's checkboxes
 
-- [ ] **Step 1: Document the verb in the CLI reference**
+- [x] **Step 1: Document the verb in the CLI reference**
 
 `public/src/content/docs/reference/cli-commands.md` is described in CLAUDE.md as
-the complete CLI reference. Add `agent-session` and its four subcommands,
+the complete CLI reference. Add `agent-session` and its five subcommands,
 matching the file's existing entry format. Say plainly that `resume` requires
-the workload material as flags and why.
+the workload material as flags and why. `xtask check-cli-help-matches-docs`
+requires a row for every non-hidden top-level verb, so this gate is red until
+the section lands.
 
-- [ ] **Step 2: Update WS6 and WS7 state**
+- [x] **Step 2: Update WS6 and WS7 state**
 
-WS6 is delivered for `ls`/`show`/`park`/`resume`. WS7 is **partial**: park and
-resume emit entries, but nothing verifies a session's chain as a unit and there
-is no `session.closed` entry because nothing can close a session — no `close()`
-transition exists. Be accurate; do not tick WS7.
+WS6 is delivered for `open`/`ls`/`show`/`park`/`resume`, and `resume_session`
+now has a caller that is both correctly constructed *and* exercisable — the
+second half of which was not true before `open`. WS7 is **partial**: park and
+resume emit entries, but nothing verifies a session's chain as a unit, there is
+no `session.closed` entry because nothing can close a session (no `close()`
+transition exists), and a chain-entry failure downgrades to a warning with exit
+0, so a scripted operator cannot detect a missing entry. Be accurate; do not
+tick WS7.
 
-- [ ] **Step 3: Update `specs/REFACTOR-STATUS.md`** and its "Last updated".
+The design spec spells the events `sandbox.parked` / `sandbox.resumed`; the code
+emits `session.parked` / `session.resumed`. Update the spec to match the code —
+these are session transitions, and `SandboxResidency` is a field of a session
+record rather than the subject of the event.
 
-- [ ] **Step 4: Write `specs/sprint/delivery/session-cli-and-audit.md`**,
+- [x] **Step 3: Update `specs/REFACTOR-STATUS.md`** and its "Last updated".
+
+- [x] **Step 4: Write `specs/sprint/delivery/session-cli-and-audit.md`**,
 style-matching that directory. Do NOT append to `specs/SPRINT.md` —
 `xtask check-sprint-append` fails if its delivery section grows.
 
-- [ ] **Step 5: Tick this plan's checkboxes and run the doc gates**
+- [x] **Step 5: Tick this plan's checkboxes and run the doc gates**
 
 ```bash
 export CARGO_TARGET_DIR=/Users/auser/work/tinylabs/mvmco/.worktrees/mvm-durable-sessions/target
@@ -354,7 +368,7 @@ These spec files carry `Backing: preview`, which bars a short list of assertive
 verbs matched as whole words — quoting one in prose trips the gate. The gate
 names the word it found.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add specs/ public/
@@ -367,9 +381,23 @@ git commit -m "docs: record the session CLI and chain-record slice"
 
 - **A `close()` transition.** `SandboxResidency::Closed` still has no producer,
   so `session.closed` cannot be emitted and a session's resume point is never
-  released by the retention pin.
+  released by the retention pin. This is also why WS6's `close` subcommand is
+  not delivered: there is nothing for it to call. `open` landed as part of this
+  plan after review found the verb had no reachable production input at all —
+  no code path anywhere created an `AgentSessionRecord`, so every other
+  subcommand could only refuse.
+- **A live source for `--approval-head` on `resume`.** Nothing in the workspace
+  calls `ApprovalLedger::head()`, so an operator's only source for the value is
+  `agent-session show` — which prints the head recorded on the record itself.
+  Passing that back compares it against itself and fences nothing. The flag and
+  the store's fence are both correct; what is missing is a reading of the
+  ledger's current state to compare the recorded head against.
 - **Verifying a session's chain as a unit.** Entries are emitted; nothing walks
   a session's entries end to end the way `verify_audit_chain` walks a tenant's.
+- **A chain-entry failure is observable only as a warning.** Both park and
+  resume exit 0 when the entry cannot be written, following
+  `bind_checkpoint_created`'s precedent, so a scripted operator cannot detect a
+  missing entry from the exit status.
 - **Refusal entries.** A refused resume emits nothing.
 - **Deriving `ResumePlanMaterial` from the resume point** rather than taking it
   as operator flags.

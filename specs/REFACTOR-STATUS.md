@@ -1,6 +1,6 @@
 # Refactor status
 
-Last updated: 2026-08-18
+Last updated: 2026-08-19
 
 This is the cross-plan progress index. The owning plan remains authoritative
 for detailed scope and acceptance criteria.
@@ -382,14 +382,29 @@ resume` takes a `current_head` and refuses when it differs from the
       carries — `resume_session` included, which reads its caller-supplied
       `current_approval_head` straight off the record; there is no tier
       selection, no `PostRestore` fabric re-registration, no credential
-      minting at the substitution endpoint, and no chain entry (WS7). The
+      minting at the substitution endpoint. The
       synthesized plan carries `grants: None`, so a resumed session re-arms
-      neither a wall-clock bound nor a CPU share. `resume_session` has no
-      caller anywhere in the workspace outside its own tests — it is wired
-      to no CLI verb or other host code path. A session parked with
-      `approval_head: None` resumes with no ledger fence at all. WS5
-      retention ladder + GC, WS6 CLI, WS7 chain records, WS8 BDD remain
-      untouched.
+      neither a wall-clock bound nor a CPU share. A session parked with
+      `approval_head: None` resumes with no ledger fence at all.
+
+      WS6 is DONE and WS7 is PARTIAL, both via
+      `specs/plans/2026-08-19-session-cli-and-audit.md`
+      (`crates/mvm-cli/src/commands/agent_session.rs`). `mvmctl agent-session`
+      carries `open`, `ls`, `show`, `park` and `resume`. `open` is the
+      producer the verb was missing: before it, no code path anywhere created
+      an `AgentSessionRecord`, so `ls` listed nothing forever and `park` and
+      `resume` could only refuse. With it in place `resume` is a caller of
+      `resume_session` that is both correctly constructed and exercisable, so
+      that function is no longer reachable only from its own tests. WS7 stops
+      short of a tick: `session.parked` and `session.resumed` are emitted, but
+      nothing verifies a session's chain as a unit, there is no
+      `session.closed` entry because no `close()` transition exists, and a
+      failed chain write downgrades to a warning with exit 0, so a scripted
+      operator cannot detect a missing entry. The design spec's
+      `sandbox.parked` / `sandbox.resumed` names were changed to match the
+      code's `session.` prefix rather than the reverse — these are session
+      transitions, and `SandboxResidency` is a field of a session record, not
+      the subject. WS5 retention ladder + GC and WS8 BDD remain untouched here.
 
 - [~] **Admission-bound AI assurance sessions** —
       `specs/plans/2026-08-17-admission-bound-ai-assurance-sessions.md`. W1–W4,
