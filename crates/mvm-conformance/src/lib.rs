@@ -52,22 +52,68 @@ pub struct RuntimeCaps {
 /// Pure so it is unit-testable: the harness supplies real probed capabilities,
 /// tests supply synthetic ones.
 pub fn scenario_should_run(tags: &[String], caps: RuntimeCaps) -> bool {
+    matches!(scenario_gate(tags, caps), ScenarioGate::Run)
+}
+
+/// Why a scenario runs or does not.
+///
+/// `scenario_should_run` collapses this to a bool, which is all the cucumber
+/// filter needs — but a bool cannot be counted by reason, and a suite that
+/// reports nothing about what it declined to attempt reads as full coverage
+/// when it is not. The harness tallies these and says so.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScenarioGate {
+    /// The scenario runs.
+    Run,
+    /// Tagged `@wip`: unfinished by declaration, not by capability.
+    Pending,
+    /// Tagged `@live` on a host that did not opt in (`MVM_BDD_LIVE` unset).
+    /// This is the one that matters: these are the scenarios that boot a real
+    /// microVM, and skipping them is why a change can break every guest boot
+    /// with a green suite.
+    NeedsLiveOptIn,
+    /// Opted into live, but this host cannot boot Firecracker — no `/dev/kvm`
+    /// this process can open, or no `firecracker` on `PATH`.
+    NeedsFirecracker,
+    /// No `.mvmpkg` for a bundle-boot scenario to install.
+    NeedsBundleFixture,
+}
+
+/// The reason behind [`scenario_should_run`]. Same order of checks, so the two
+/// cannot disagree about whether a scenario runs.
+pub fn scenario_gate(tags: &[String], caps: RuntimeCaps) -> ScenarioGate {
     let tagged = |name: &str| tags.iter().any(|t| t == name);
     if tagged(PENDING_TAG) {
-        return false;
+        return ScenarioGate::Pending;
     }
     if tagged(LIVE_TAG) && !caps.live_opted_in {
-        return false;
+        return ScenarioGate::NeedsLiveOptIn;
     }
     // A firecracker scenario is a real boot, so it also requires the `@live`
     // opt-in and is additionally skipped where KVM or the binary is absent.
-    if tagged(FIRECRACKER_TAG) && (!caps.live_opted_in || !caps.firecracker_bootable) {
-        return false;
+    if tagged(FIRECRACKER_TAG) && !caps.live_opted_in {
+        return ScenarioGate::NeedsLiveOptIn;
+    }
+    if tagged(FIRECRACKER_TAG) && !caps.firecracker_bootable {
+        return ScenarioGate::NeedsFirecracker;
     }
     if tagged(BUNDLE_TAG) && !caps.bundle_fixture {
-        return false;
+        return ScenarioGate::NeedsBundleFixture;
     }
-    true
+    ScenarioGate::Run
+}
+
+impl ScenarioGate {
+    /// What to tell the operator, in the summary line.
+    pub fn reason(self) -> Option<&'static str> {
+        match self {
+            Self::Run => None,
+            Self::Pending => Some("@wip"),
+            Self::NeedsLiveOptIn => Some("need MVM_BDD_LIVE (these boot a real microVM)"),
+            Self::NeedsFirecracker => Some("need /dev/kvm + firecracker on PATH"),
+            Self::NeedsBundleFixture => Some("need MVM_BDD_BUNDLE to name a readable .mvmpkg"),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -163,5 +209,110 @@ mod tests {
         ));
         // Both present → runs.
         assert!(scenario_should_run(&tags(&["firecracker"]), ALL));
+    }
+
+    /// The gate and the bool must never disagree about whether a scenario runs
+    /// — they are read by the same filter, and a divergence would make the
+    /// summary describe a different run than the one that happened.
+    #[test]
+    fn the_gate_and_the_bool_agree_on_every_shape() {
+        let caps = [
+            RuntimeCaps {
+                live_opted_in: false,
+                firecracker_bootable: false,
+                bundle_fixture: false,
+            },
+            RuntimeCaps {
+                live_opted_in: true,
+                firecracker_bootable: false,
+                bundle_fixture: false,
+            },
+            RuntimeCaps {
+                live_opted_in: true,
+                firecracker_bootable: true,
+                bundle_fixture: false,
+            },
+            RuntimeCaps {
+                live_opted_in: true,
+                firecracker_bootable: true,
+                bundle_fixture: true,
+            },
+            RuntimeCaps {
+                live_opted_in: false,
+                firecracker_bootable: true,
+                bundle_fixture: true,
+            },
+        ];
+        let shapes = [
+            tags(&[]),
+            tags(&[PENDING_TAG]),
+            tags(&[LIVE_TAG]),
+            tags(&[FIRECRACKER_TAG]),
+            tags(&[LIVE_TAG, FIRECRACKER_TAG]),
+            tags(&[BUNDLE_TAG]),
+            tags(&[LIVE_TAG, FIRECRACKER_TAG, BUNDLE_TAG]),
+        ];
+        for c in caps {
+            for t in &shapes {
+                assert_eq!(
+                    scenario_should_run(t, c),
+                    scenario_gate(t, c) == ScenarioGate::Run,
+                    "tags {t:?} caps {c:?}"
+                );
+            }
+        }
+    }
+
+    /// Each skip reason is distinguishable, because the whole point is to
+    /// count them separately. `@live` without the opt-in is the one that
+    /// matters most — those are the scenarios that boot a real microVM.
+    #[test]
+    fn each_skip_reason_is_reported_distinctly() {
+        let none = RuntimeCaps {
+            live_opted_in: false,
+            firecracker_bootable: false,
+            bundle_fixture: false,
+        };
+        let live_only = RuntimeCaps {
+            live_opted_in: true,
+            firecracker_bootable: false,
+            bundle_fixture: false,
+        };
+        let bootable = RuntimeCaps {
+            live_opted_in: true,
+            firecracker_bootable: true,
+            bundle_fixture: false,
+        };
+
+        assert_eq!(
+            scenario_gate(&tags(&[PENDING_TAG]), bootable),
+            ScenarioGate::Pending
+        );
+        assert_eq!(
+            scenario_gate(&tags(&[LIVE_TAG]), none),
+            ScenarioGate::NeedsLiveOptIn
+        );
+        // Opted in, but this host cannot boot: a different problem with a
+        // different fix, and it must not be reported as "you forgot the flag".
+        assert_eq!(
+            scenario_gate(&tags(&[FIRECRACKER_TAG]), live_only),
+            ScenarioGate::NeedsFirecracker
+        );
+        assert_eq!(
+            scenario_gate(&tags(&[BUNDLE_TAG]), bootable),
+            ScenarioGate::NeedsBundleFixture
+        );
+        assert_eq!(scenario_gate(&tags(&[]), none), ScenarioGate::Run);
+
+        // Every non-Run gate explains itself; Run has nothing to explain.
+        assert!(ScenarioGate::Run.reason().is_none());
+        for g in [
+            ScenarioGate::Pending,
+            ScenarioGate::NeedsLiveOptIn,
+            ScenarioGate::NeedsFirecracker,
+            ScenarioGate::NeedsBundleFixture,
+        ] {
+            assert!(g.reason().is_some(), "{g:?} must say why");
+        }
     }
 }
