@@ -306,18 +306,22 @@ for detailed scope and acceptance criteria.
 
 - [~] **Admission-bound AI assurance sessions** —
       `specs/plans/2026-08-17-admission-bound-ai-assurance-sessions.md`. W1–W4,
-      W6/W7 and W7b landed: the envelope, the authority intersection, the
-      fail-closed outcome ladder, `host.assurance.v1`, fail-closed audit and
-      receipt emission with resolvable citations, the workload-facing
-      `AssuranceCampaign`, and the boot-path session lifecycle behind
-      `AdmitAndStartParams.assurance` (opt-in; `None` on every existing call
-      site). Landing W7b exposed two bugs the fixtures had masked: the binding
-      rejected every real `sha256:`-prefixed plan id, and the probe handler
-      compared the guest's session identity against the supervisor's lookup key.
-      STILL OPEN: W5 observer/cleanup evidence, W8 the framed-stdio provider,
-      and a CLI surface for supplying a campaign declaration. Until those land
-      every live trial evaluates `INCONCLUSIVE` by design; no certifying
-      campaign can run.
+      W6/W7, W7b landed and W5 partial: the envelope, the authority
+      intersection, the fail-closed outcome ladder, `host.assurance.v1`,
+      resolvable audit/receipt citations, the workload-facing
+      `AssuranceCampaign`, the boot-path session lifecycle, and
+      `collect_evidence` — cleanup read through the admission budget's own
+      liveness probe, disposability off the signed plan.
+      `observer_verified` is deliberately only "MVM recorded a probe", not an
+      independent observer, and a test pins that a real session still evaluates
+      `INCONCLUSIVE` for `ObserverMissing`. Landing W7b exposed two bugs the
+      fixtures had masked: the binding rejected every real `sha256:`-prefixed
+      plan id, and the probe handler compared the guest's session identity
+      against the supervisor's lookup key.
+      STILL OPEN: W5b a guest-side observer, W8 the framed-stdio provider, W9b
+      the `mvmctl machine run` seam (`machine run` drives `AnyBackend` directly
+      and never reaches the admit path W9 threaded). No certifying campaign can
+      run.
 
 - [~] **Embedded-binary content store** — `specs/plans/2026-08-17-embedded-binary-content-store.md`.
       Phases 1–2 landed: both nested legs of `crates/mvm-cli/build.rs` are keyed

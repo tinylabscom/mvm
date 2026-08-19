@@ -1052,7 +1052,7 @@ pub struct AdmitAndStartParams<'a> {
     /// declared one. `None` — the default — is every ordinary run: extension
     /// discovery must not sit on the launch critical path, so a run that
     /// declares no campaign does no assurance work at all.
-    pub assurance: Option<&'a crate::assurance_session::CampaignRequest<'a>>,
+    pub assurance: Option<&'a crate::assurance_session::CampaignRequest>,
 }
 
 impl<'a> AdmitAndStartParams<'a> {
@@ -1078,7 +1078,7 @@ pub struct AdmitAndStartParamsBuilder<'a> {
     policy_bundle: Option<&'a PolicyBundle>,
     emitter: Option<&'a crate::audit::emitter::AuditEmitter>,
     audit_durability: Option<crate::audit::durability::AuditDurability>,
-    assurance: Option<&'a crate::assurance_session::CampaignRequest<'a>>,
+    assurance: Option<&'a crate::assurance_session::CampaignRequest>,
 }
 
 impl<'a> AdmitAndStartParamsBuilder<'a> {
@@ -1175,7 +1175,7 @@ impl<'a> AdmitAndStartParamsBuilder<'a> {
     /// Declare an assurance campaign for this boot.
     pub fn assurance(
         mut self,
-        assurance: impl Into<Option<&'a crate::assurance_session::CampaignRequest<'a>>>,
+        assurance: impl Into<Option<&'a crate::assurance_session::CampaignRequest>>,
     ) -> Self {
         self.assurance = assurance.into();
         self
@@ -3453,7 +3453,7 @@ mod tests {
         };
         let now_unix_ms = 1_800_000_000_000;
         let campaign = CampaignRequest {
-            declaration: &declaration,
+            declaration,
             emitter: Arc::clone(&emitter),
             policy_ceiling: default_policy_ceiling(),
             policy: mvm_core::policy::network_policy::NetworkPolicy::deny_all(),

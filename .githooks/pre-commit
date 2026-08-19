@@ -277,4 +277,30 @@ if [ "$has_nix" -eq 1 ] && command -v nix >/dev/null 2>&1; then
     fi
 fi
 
+# ── Workflow files ──────────────────────────────────────────────────────
+#
+# CI lints every workflow with actionlint, and a failure there is expensive
+# out of proportion to the mistake: a typo'd `needs:` name or a bad
+# `${{ }}` reference does not fail loudly, it silently disables a lane that
+# still reads as covered. Catching it here costs milliseconds.
+#
+# Runs over every workflow rather than just the staged ones, exactly as CI
+# does, because a changed job can break a `needs:` reference in a file this
+# commit does not touch. Skipped silently when actionlint is not installed —
+# the hook's job is to catch what it can, not to demand a toolchain.
+workflow_files=$(git diff --cached --name-only --diff-filter=ACM \
+    | grep -E '^\.github/(workflows/.*\.ya?ml|actions/.*/action\.ya?ml)$' || true)
+if [ -n "$workflow_files" ]; then
+    if command -v actionlint >/dev/null 2>&1; then
+        echo "pre-commit: actionlint .github/workflows/*.yml"
+        if ! actionlint .github/workflows/*.yml; then
+            echo "  actionlint failed — fix the workflow before committing." >&2
+            exit 1
+        fi
+    else
+        echo "pre-commit: actionlint not installed; skipping workflow lint" \
+             "(brew install actionlint, or see the Install actionlint step in ci.yml)"
+    fi
+fi
+
 exit 0

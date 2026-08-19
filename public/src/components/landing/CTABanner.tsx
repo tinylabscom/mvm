@@ -15,7 +15,7 @@ export function CTABanner() {
     // (`[data-has-hero] main section > div { margin-inline: auto }`) only
     // matches a direct child of a section. As a plain div this band's
     // wrapper computed margin 0 and the card sat flush left.
-    <section className="w-full border-y border-edge/40 bg-raised py-20 lg:py-28">
+    <section className="w-full border-y border-edge/40 bg-raised pt-10 pb-20 lg:pt-14 lg:pb-28">
       <div className="mx-auto max-w-3xl px-6 sm:px-8">
         <Reveal>
           <div className="rounded-2xl border border-edge/50 bg-canvas px-8 py-12 text-center sm:px-12 sm:py-16">
@@ -28,11 +28,21 @@ export function CTABanner() {
             <h2 className="text-balance lowercase font-display text-2xl font-bold leading-tight text-title sm:text-3xl">
               run something you don&rsquo;t trust.
             </h2>
-            <p className="mx-auto mt-4 max-w-sm text-base leading-relaxed text-body">
+            {/* No max-width cap: the sentence should sit on one line at
+                desktop sizes; it still wraps naturally on narrow screens.
+                Inline margins, not mt-*: Starlight's unlayered stylesheet
+                beats layered utilities on this page (see Positioning.tsx). */}
+            <p
+              className="text-base leading-relaxed text-body"
+              style={{ marginTop: "1.5rem" }}
+            >
               One install command. No daemon, no SSH, and no network until
               policy admits it.
             </p>
-            <div className="mt-8 flex flex-wrap items-center justify-center gap-4">
+            <div
+              className="flex flex-wrap items-center justify-center gap-4"
+              style={{ marginTop: "3rem" }}
+            >
               <a href={`${base}getting-started/installation/`}>
                 <Button size="lg">Get Started</Button>
               </a>

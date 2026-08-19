@@ -17,12 +17,18 @@ retention ladder) — unmerged at the time of writing, living on
 Two gaps sit between the workflow documents and an AI agent actually running
 inside an admitted microVM.
 
-**Tool calling has no defined surface.** ADR-045 section 8 governs what a
-controller's *planner* may do to the workflow graph. It says nothing about an
-ordinary workload agent emitting tool calls at a model's direction. Without a
-decision, a framework will reach for a guest-side client to whatever tool
-protocol it prefers, which is an unaudited egress path and a namespace that
-mutates under a running admission.
+**Host-mediated tool calling has no defined surface.** ADR-045 section 8
+governs what a controller's *planner* may do to the workflow graph. It says
+nothing about an ordinary workload agent emitting tool calls at a model's
+direction. Without a decision, a framework will reach for a guest-side client
+speaking outward to a remote tool server, which is an unaudited egress path
+and a namespace that mutates under a running admission.
+
+Scope, per ADR-045 section 18: this is about tools that cross the VM boundary,
+which is a handful of services. Tools running inside the guest — a shell, a
+browser driver, an interpreter, a local tool server the agent talks to over
+its own stdio — are deliberately out of scope and stay ungoverned, because the
+NIC-less, verity-sealed microVM is what bounds them.
 
 **Memory has no defined surface either.** The durable agent sessions design
 carries the *substrate* across sandboxes — checkpoint, journal cursor,
@@ -86,6 +92,12 @@ The memory plane has no existing piece beyond the broker it rides on.
       protocol client on any guest-reachable path, in the manner of
       `check-vsock-only-egress`. Without it this decision decays the first time
       a framework is vendored into a guest image.
+- [ ] The gate must catch a guest *originating a connection to a remote tool
+      server*, and must not catch a tool server running wholly inside the
+      guest over stdio or loopback — that is a supported in-guest tool, and a
+      gate that greps for the protocol's name rather than for outbound
+      connection setup would refuse it. A gate written the lazy way here
+      breaks the common packaging of that ecosystem.
 
 ### WS4 — Refusal is a signal
 
@@ -159,6 +171,112 @@ The memory plane has no existing piece beyond the broker it rides on.
 - [ ] **WS10 — `mvmctl memory {ls,show,stats}`**, read-only, reading sidecars
       without a VM spawn, in the manner of `mvmctl deps inspect`.
 - [ ] Tests and BDD per the Testing section.
+
+## Forward compatibility — controller-launched child microVMs
+
+ADR-045 section 3 gives a controller real lifecycle authority, and the
+research basis models a launch as `ActionTarget::ChildMicroVm`, a peer of
+`HostService` in one action vocabulary. Nothing in Part A needs redesigning to
+carry that: a launch is a `CapabilityId` like any other, its catalog entry is
+the same projection, and its `template` and `launch_mode` arguments are
+precisely what WS2's `OneOf` constrains — with the template digest pinned the
+way every descriptor digest already is.
+
+Five things have to stay true, and they are recorded here so the next author
+does not rediscover them by hitting them.
+
+- [ ] **FC1 — Reservation is transactional; these gates are not.** Every gate
+      in `dispatch_capability` is a stateless validator: check, then dispatch.
+      A launch must atomically reserve across the resource dimensions and
+      release on failure — reserve, dispatch, then commit or roll back. The
+      argument-policy gate keeps its place ahead of the reservation, but the
+      ladder has no rollback-capable slot and needs one. Putting the
+      reservation inside the handler instead leaks budget on any crash between
+      reserving and dispatching, with nobody holding the rollback.
+- [ ] **FC2 — Launch idempotency is not replay refusal.** `consumed_invocations`
+      refuses a repeated `(CapabilityId, AgentRequestId)` with `Replay`, and
+      the `Idempotency` vocabulary offers `MintFresh`, `CacheRecent { ttl_ms }`
+      and `DedupByCorrelation` — none of which means "the same key returns the
+      same child handle". A controller retrying after a dropped reply needs the
+      prior handle back, or it abandons a live child and relaunches. ADR-045
+      invariant 8 is satisfied by refusing, so the invariant will not catch
+      this; it appears only under retry. Needs a fourth variant, or launch
+      outside that vocabulary.
+- [ ] **FC3 — Launch returns a handle, not a finished child.** The capability
+      means "start a child, return its handle", with results arriving on the
+      mailbox plane. `CapabilityLimits.timeout_ms` is bounded, so modelling it
+      as "run the child to completion" breaks as soon as a child outlives one
+      call timeout.
+- [ ] **FC4 — One descriptor, derived, never two authored.** The research
+      basis's planning-layer `ActionDescriptor` overlaps this plan's
+      enforcement-layer `CapabilityDescriptor`. Authored independently they
+      drift, and then what the model is shown and what the host enforces
+      disagree. Derive the planning descriptor from the enforcement one plus
+      planning metadata, and decide that direction before the planning-snapshot
+      phase — retrofitting it means re-cutting every descriptor digest.
+- [ ] **FC5 — Fan-out is a budget, not a boolean.** See below.
+
+### FC5 — Bounding how many children a controller may start
+
+"May launch children" is a permission and the envelope answers it. "May launch
+five hundred of them right now" is not something a boolean can express. The
+envelope answers *whether*; a budget answers *how much more*, and only the
+second stops a runaway. A controller with a legitimate launch permission and no
+budget is a fork bomb with a signature on it.
+
+Four limits, because each catches a failure the others miss:
+
+- **Concurrency** — live children at once, per controller and per workflow.
+  Catches fan-out.
+- **Rate** — launches per window. Catches a crash-loop, which a concurrency cap
+  never sees: children that die immediately keep the live count near zero while
+  the host burns.
+- **Cumulative** — total attempts over the workflow's life. Catches a slow
+  bleed that stays under both of the above.
+- **Depth** — a controller launching a controller. The bound must exist even
+  while recursive delegation is deferred, because the bound is what keeps it
+  deferred.
+
+How it has to be enforced:
+
+- [ ] **Reserve, do not check.** Check-then-launch is the bug: two controllers
+      both read "under the cap", both launch, and the cap was never real. One
+      authority, one atomic reservation, released on failure — the same reason
+      the resource ledger is transactional rather than advisory.
+- [ ] **Hierarchical.** A subtree budget, so one controller cannot spend the
+      whole workflow's allowance and starve its siblings.
+- [ ] **Host-side, from the signed constraint snapshot.** Never from a count
+      the controller supplies or a limit it names.
+- [ ] **Copy `crates/mvm-hostd/src/admission_budget.rs`'s two properties**
+      rather than reinventing them. Count only *live* children, using the same
+      pid-marker probe the fork path trusts, so a child that crashed without
+      cleanup does not permanently lock its parent out — a safety check that
+      becomes a lockout is worse than the exhaustion it prevents. And charge the
+      configured maximum at admission rather than observed usage, so a child
+      that has not finished starting is already counted.
+- [ ] **Audit every refusal.** A controller repeatedly hitting its launch
+      ceiling is a signal — a crash-loop, or a planner steered into one — and it
+      should be visible without reading guest logs.
+- [ ] **Make the refusal legible to the planner** (WS4). "Launch ceiling
+      reached, N of M live, retry after T" lets a planner wait or re-plan; a
+      bare error makes it retry immediately, which is indistinguishable from the
+      attack the ceiling exists to stop.
+
+The tests that would catch a wrong implementation, since a limit with no test
+is decoration:
+
+- [ ] Two launches racing for the last slot: exactly one is admitted. This is
+      the check-then-act bug and the only test that finds it.
+- [ ] A controller at its concurrency cap is refused, and the refusal is
+      audited.
+- [ ] A child that crash-loops trips the rate limit while the live count stays
+      near zero — the case a concurrency cap alone reports as healthy.
+- [ ] A child that died without cleanup stops being counted, so its parent can
+      launch again rather than being locked out for the workflow's life.
+- [ ] A failed launch releases its reservation; N failed launches do not shrink
+      the budget by N.
+- [ ] A controller cannot exceed its subtree budget by launching through a
+      descendant.
 
 ## Reconciliation required
 

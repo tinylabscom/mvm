@@ -7,6 +7,7 @@
 //! Payload bytes, credentials, and handler errors never enter the audit DTOs.
 
 use alloc::string::String;
+use alloc::vec::Vec;
 use core::fmt;
 
 use serde::{Deserialize, Serialize};
@@ -130,6 +131,109 @@ impl CapabilityLimits {
     }
 }
 
+/// One constraint on one argument position inside a capability payload.
+///
+/// Deliberately a closed, bounded vocabulary rather than an embedded
+/// expression language: a policy an operator cannot read is a policy nobody
+/// audits, and an evaluator with loops is an evaluator with a denial of
+/// service in it.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum ArgumentConstraint {
+    /// The value must be a string drawn from this exact set.
+    OneOf {
+        /// Permitted values.
+        values: Vec<String>,
+    },
+    /// The value must be a string under one of these prefixes, carrying no
+    /// `..` segment.
+    PathUnder {
+        /// Permitted path prefixes.
+        prefixes: Vec<String>,
+    },
+    /// The value's UTF-8 length must not exceed this.
+    MaxLen {
+        /// Inclusive upper bound in bytes.
+        bytes: u32,
+    },
+}
+
+impl ArgumentConstraint {
+    /// A stable, value-free label for audit and refusal messages.
+    #[must_use]
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::OneOf { .. } => "one_of",
+            Self::PathUnder { .. } => "path_under",
+            Self::MaxLen { .. } => "max_len",
+        }
+    }
+}
+
+/// A constraint bound to one location in the payload.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct ArgumentRule {
+    /// RFC 6901 JSON pointer into the payload, e.g. `/destination`.
+    pub pointer: String,
+    /// The constraint the value at that pointer must satisfy.
+    pub constraint: ArgumentConstraint,
+}
+
+/// Why an argument policy refused a call. Carries the location and the rule
+/// kind, never the offending value: a refusal is audited, and an audited
+/// refusal that quotes the argument re-publishes whatever the argument held.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArgumentRefusal {
+    /// Pointer of the rule that refused.
+    pub pointer: String,
+    /// Stable kind label of the constraint that refused.
+    pub kind: &'static str,
+}
+
+/// Evaluate an argument policy against a payload.
+///
+/// A pointer that resolves to nothing is a refusal rather than a pass: a rule
+/// naming an argument the payload omits would otherwise be satisfied by
+/// leaving the argument out, which is the opposite of what the rule says.
+///
+/// # Errors
+///
+/// Returns the first rule that refuses, in policy order.
+pub fn evaluate_argument_policy(
+    rules: &[ArgumentRule],
+    payload: &serde_json::Value,
+) -> Result<(), ArgumentRefusal> {
+    for rule in rules {
+        let refusal = || ArgumentRefusal {
+            pointer: rule.pointer.clone(),
+            kind: rule.constraint.kind(),
+        };
+        let Some(value) = payload.pointer(&rule.pointer) else {
+            return Err(refusal());
+        };
+        let Some(text) = value.as_str() else {
+            return Err(refusal());
+        };
+        let ok = match &rule.constraint {
+            ArgumentConstraint::OneOf { values } => values.iter().any(|v| v == text),
+            ArgumentConstraint::PathUnder { prefixes } => {
+                !text.split('/').any(|segment| segment == "..")
+                    && prefixes
+                        .iter()
+                        .any(|prefix| text.starts_with(prefix.as_str()))
+            }
+            ArgumentConstraint::MaxLen { bytes } => text.len() <= *bytes as usize,
+        };
+        if !ok {
+            return Err(refusal());
+        }
+    }
+    Ok(())
+}
+
 /// Host-advertised metadata for one capability.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -145,6 +249,9 @@ pub struct CapabilityDescriptor {
     pub output_schema: SchemaRef,
     /// Enforced execution and payload bounds.
     pub limits: CapabilityLimits,
+    /// Host-side constraints on argument values, evaluated before dispatch.
+    #[serde(default)]
+    pub argument_policy: Vec<ArgumentRule>,
 }
 
 impl CapabilityDescriptor {
@@ -179,6 +286,7 @@ pub struct CapabilityDescriptorBuilder {
     input_schema: Option<SchemaRef>,
     output_schema: Option<SchemaRef>,
     limits: Option<CapabilityLimits>,
+    argument_policy: Vec<ArgumentRule>,
 }
 
 impl CapabilityDescriptorBuilder {
@@ -212,6 +320,13 @@ impl CapabilityDescriptorBuilder {
         self
     }
 
+    /// Set the host-side argument policy. Absent means no constraint beyond
+    /// the payload bounds in [`CapabilityLimits`].
+    pub fn argument_policy(mut self, rules: Vec<ArgumentRule>) -> Self {
+        self.argument_policy = rules;
+        self
+    }
+
     /// Validate and build the descriptor.
     pub fn build(self) -> Result<CapabilityDescriptor, CapabilityError> {
         let description = self
@@ -230,6 +345,7 @@ impl CapabilityDescriptorBuilder {
                 .output_schema
                 .ok_or(CapabilityError::MissingField("output_schema"))?,
             limits: self.limits.ok_or(CapabilityError::MissingField("limits"))?,
+            argument_policy: self.argument_policy,
         })
     }
 }
@@ -315,6 +431,7 @@ pub enum CapabilityFailureCode {
     InputDigestMismatch,
     InputTooLarge,
     InvalidInput,
+    ArgumentRefused,
     OutputTooLarge,
     Timeout,
     Canceled,
@@ -479,5 +596,116 @@ mod tests {
         let encoded = serde_json::to_string(&event).expect("serialize");
         assert!(!encoded.contains(secret));
         assert!(!encoded.contains("payload"));
+    }
+
+    fn rule(pointer: &str, constraint: ArgumentConstraint) -> ArgumentRule {
+        ArgumentRule {
+            pointer: pointer.into(),
+            constraint,
+        }
+    }
+
+    #[test]
+    fn one_of_admits_a_listed_value_and_refuses_anything_else() {
+        let rules = [rule(
+            "/destination",
+            ArgumentConstraint::OneOf {
+                values: alloc::vec!["api.example.com".into()],
+            },
+        )];
+        let ok = serde_json::json!({"destination": "api.example.com"});
+        assert!(evaluate_argument_policy(&rules, &ok).is_ok());
+
+        let bad = serde_json::json!({"destination": "attacker.example.com"});
+        let refusal = evaluate_argument_policy(&rules, &bad).expect_err("must refuse");
+        assert_eq!(refusal.pointer, "/destination");
+        assert_eq!(refusal.kind, "one_of");
+    }
+
+    #[test]
+    fn path_under_refuses_a_traversal_segment_even_below_the_prefix() {
+        let rules = [rule(
+            "/path",
+            ArgumentConstraint::PathUnder {
+                prefixes: alloc::vec!["/work/".into()],
+            },
+        )];
+        let ok = serde_json::json!({"path": "/work/report.txt"});
+        assert!(evaluate_argument_policy(&rules, &ok).is_ok());
+
+        let escape = serde_json::json!({"path": "/work/../etc/shadow"});
+        assert!(
+            evaluate_argument_policy(&rules, &escape).is_err(),
+            "a prefix match is not containment once `..` is in play"
+        );
+    }
+
+    #[test]
+    fn path_under_refuses_a_value_outside_every_prefix() {
+        let rules = [rule(
+            "/path",
+            ArgumentConstraint::PathUnder {
+                prefixes: alloc::vec!["/work/".into()],
+            },
+        )];
+        let outside = serde_json::json!({"path": "/etc/shadow"});
+        assert!(evaluate_argument_policy(&rules, &outside).is_err());
+    }
+
+    #[test]
+    fn max_len_is_inclusive_at_the_bound() {
+        let rules = [rule("/q", ArgumentConstraint::MaxLen { bytes: 4 })];
+        assert!(evaluate_argument_policy(&rules, &serde_json::json!({"q": "abcd"})).is_ok());
+        assert!(evaluate_argument_policy(&rules, &serde_json::json!({"q": "abcde"})).is_err());
+    }
+
+    #[test]
+    fn a_pointer_resolving_to_nothing_is_refused_not_skipped() {
+        let rules = [rule(
+            "/destination",
+            ArgumentConstraint::OneOf {
+                values: alloc::vec!["api.example.com".into()],
+            },
+        )];
+        let missing = serde_json::json!({"other": "api.example.com"});
+        assert!(
+            evaluate_argument_policy(&rules, &missing).is_err(),
+            "omitting the argument must not satisfy a rule about it"
+        );
+    }
+
+    #[test]
+    fn a_non_string_value_is_refused() {
+        let rules = [rule("/q", ArgumentConstraint::MaxLen { bytes: 64 })];
+        let numeric = serde_json::json!({"q": 7});
+        assert!(evaluate_argument_policy(&rules, &numeric).is_err());
+    }
+
+    #[test]
+    fn argument_policy_participates_in_the_descriptor_digest() {
+        fn build(policy: Vec<ArgumentRule>) -> CapabilityDescriptor {
+            CapabilityDescriptor::builder()
+                .id(CapabilityId::new(
+                    ServiceId::parse("host.dev.echo.v1").expect("service"),
+                    "echo",
+                )
+                .expect("capability"))
+                .description("echo")
+                .input_schema(SchemaRef::new("in.v1", [1; 32]).expect("schema"))
+                .output_schema(SchemaRef::new("out.v1", [2; 32]).expect("schema"))
+                .limits(CapabilityLimits::new(64, 64, 10).expect("limits"))
+                .argument_policy(policy)
+                .build()
+                .expect("descriptor")
+        }
+        assert_ne!(
+            build(alloc::vec![]).digest(),
+            build(alloc::vec![rule(
+                "/q",
+                ArgumentConstraint::MaxLen { bytes: 4 }
+            )])
+            .digest(),
+            "a policy outside the digest could be swapped after admission"
+        );
     }
 }
