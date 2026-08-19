@@ -245,6 +245,7 @@ impl Commands {
             // `trust <sub>` delegates: attest/receipt/audit keep their own
             // verbs, publisher add/list/remove keep `trust`.
             Commands::Trust(a) => a.action.verb_name(),
+            Commands::AgentSession(_) => "agent-session",
             Commands::Deps(_) => "deps",
             Commands::Artifact(_) => "artifact",
             Commands::SeccompAudit(_) => "seccomp-audit",

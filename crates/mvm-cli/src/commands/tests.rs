@@ -1906,6 +1906,27 @@ fn top_level_listing_verbs_are_unrecognized() {
     assert!(Cli::try_parse_from(["mvmctl", "ps"]).is_err());
 }
 
+// --- `agent-session`: the durable-agent-session operator surface ---
+
+#[test]
+fn agent_session_ls_parses() {
+    let cli = Cli::try_parse_from(["mvmctl", "agent-session", "ls"]).unwrap();
+    assert!(matches!(cli.command, Commands::AgentSession(_)));
+}
+
+#[test]
+fn agent_session_show_requires_an_id() {
+    assert!(Cli::try_parse_from(["mvmctl", "agent-session", "show"]).is_err());
+    assert!(Cli::try_parse_from(["mvmctl", "agent-session", "show", "sess-alpha"]).is_ok());
+}
+
+#[test]
+fn agent_session_verb_is_not_named_session() {
+    // `mvmctl machine session` already means machine-session residency.
+    // A bare `session` verb would collide with it in the operator's head.
+    assert!(Cli::try_parse_from(["mvmctl", "session", "ls"]).is_err());
+}
+
 #[test]
 fn test_start_verb_is_unrecognized() {
     let result = Cli::try_parse_from(["mvmctl", "start", "--flake", "."]);
