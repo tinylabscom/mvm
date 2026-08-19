@@ -1181,6 +1181,163 @@ jobs:
             staging/kernel-metrics-${{ matrix.arch }}.json
             staging/workload-config-${{ matrix.arch }}
 
+  guest-image-boot:
+    name: Guest image boots (tree-built)
+    # The gap #2635 names: nothing builds the guest image generator's output and
+    # starts it before the change is on main. The only lane that boots a
+    # tree-built image runs on a `boot-image/v*` tag, which is after the merge.
+    # That is how a rootfs whose /init the kernel could not exec shipped for five
+    # weeks with every checksum verifying clean, and how five successive release
+    # runs each surfaced exactly one more layer — an unattached overlay, a guest
+    # never told where the overlay was, a sidecar field the serializer dropped —
+    # none of which any static check can see, because each one needs a guest that
+    # actually runs.
+    #
+    # Merge queue, not per-PR, and the cost argument is wall-clock rather than
+    # runner-minutes: this job takes ~33 minutes, and the merge-group CI it joins
+    # already takes 32-36, so running in parallel it adds close to nothing to how
+    # long a merge takes. Per-PR it would be pure addition on every push.
+    # `nix-flake-check` above sets the same precedent for the same reason.
+    needs: [scope]
+    if: github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: ./.github/actions/free-disk
+        if: needs.scope.outputs.nix == 'true'
+
+      - name: Install Nix
+        if: needs.scope.outputs.nix == 'true'
+        uses: DeterminateSystems/nix-installer-action@main
+
+      - name: Install Rust toolchain
+        if: needs.scope.outputs.nix == 'true'
+        uses: dtolnay/rust-toolchain@1.96.0
+
+      - uses: ./.github/actions/apt-deps
+        if: needs.scope.outputs.nix == 'true'
+        with:
+          packages: lld
+
+      # `cargo test` below builds mvmctl, whose build.rs cross-compiles the
+      # embedded host binaries as static musl and needs the pinned zig. Without
+      # it this dies at compile time, before it starts a guest — which reads as
+      # "the image does not boot" and is nothing of the kind.
+      - uses: ./.github/actions/install-zigbuild
+        if: needs.scope.outputs.nix == 'true'
+
+      - name: Build the guest image from this tree
+        if: needs.scope.outputs.nix == 'true'
+        run: |
+          set -euo pipefail
+          nix build "./nix/images/default-tenant#packages.x86_64-linux.default" \
+            --impure --no-link --print-out-paths > /tmp/store-path.txt
+          STORE_PATH=$(head -1 /tmp/store-path.txt)
+          mkdir -p staging
+          # cp -L so each artifact resolves through its nix-store symlink.
+          cp -L "$STORE_PATH/vmlinux"       staging/vmlinux
+          cp -L "$STORE_PATH/rootfs.ext4"   staging/rootfs.ext4
+          cp -L "$STORE_PATH/mvm-meta.json" staging/mvm-meta.json
+
+      - name: Assert the tree-built rootfs has an exec'able /init
+        if: needs.scope.outputs.nix == 'true'
+        run: |
+          set -euo pipefail
+          # The cheap half, and the one that catches the defect that actually
+          # shipped. Runs before the boot so a rootfs the kernel cannot exec
+          # fails here, where the message says so, rather than as a panic.
+          command -v debugfs >/dev/null 2>&1 \
+            || { sudo apt-get update && sudo apt-get install -y e2fsprogs; }
+          bash nix/packaging/release/assert-init-shebang.sh \
+            staging/rootfs.ext4 "tree-built x86_64"
+          bash nix/packaging/release/assert-kernel-format.sh \
+            staging/vmlinux x86_64 "tree-built x86_64 kernel"
+
+      # The prod rootfs bakes no agent — /init resolves it from /mvm/runtime,
+      # the runtime overlay attached as a second virtio-blk drive. The nix store
+      # is warm from the image build, so this is usually a store lookup rather
+      # than a build.
+      - name: Build the runtime overlay
+        if: needs.scope.outputs.nix == 'true'
+        run: |
+          set -euo pipefail
+          OVERLAY_PATH=$(nix build "./nix/images/runtime-overlay#packages.x86_64-linux.default" \
+            --no-link --print-out-paths | head -1)
+          mkdir -p overlay-staging
+          cp -L "$OVERLAY_PATH/overlay.ext4"     overlay-staging/overlay.ext4
+          cp -L "$OVERLAY_PATH/overlay.verity"   overlay-staging/overlay.verity
+          cp -L "$OVERLAY_PATH/overlay.roothash" overlay-staging/overlay.roothash
+          echo "MVM_RUNTIME_BOOT_OVERLAY_ROOTHASH=$(tr -d '[:space:]' < overlay-staging/overlay.roothash)" \
+            >> "$GITHUB_ENV"
+
+      - name: Install firecracker
+        if: needs.scope.outputs.nix == 'true'
+        env:
+          # Tracks `crates/mvm-core/src/config.rs::FC_VERSION_DEFAULT`.
+          FC_VERSION: v1.14.1
+        run: |
+          set -euo pipefail
+          curl -fL -o firecracker.tgz \
+            "https://github.com/firecracker-microvm/firecracker/releases/download/${FC_VERSION}/firecracker-${FC_VERSION}-x86_64.tgz"
+          tar -xzf firecracker.tgz
+          sudo install -m 0755 "release-${FC_VERSION}-x86_64/firecracker-${FC_VERSION}-x86_64" /usr/bin/firecracker
+          /usr/bin/firecracker --version
+
+      - name: Grant /dev/kvm access for the job
+        if: needs.scope.outputs.nix == 'true'
+        run: |
+          set -euo pipefail
+          if [ ! -e /dev/kvm ]; then
+            echo "::error::/dev/kvm missing on this runner — the boot gate cannot run." >&2
+            exit 1
+          fi
+          sudo chmod 666 /dev/kvm
+
+      - name: Boot the tree-built image
+        if: needs.scope.outputs.nix == 'true'
+        # Not a latency assertion. The budget is an order of magnitude above the
+        # observed median and RUNS/CONCURRENT are 1, because the only question
+        # here is whether this tree's image reaches userspace and binds its
+        # agent. Latency belongs to `boot-latency`, which pins a *published*
+        # image deliberately so a regression is unambiguous between host code
+        # and image — the two lanes answer different questions and neither
+        # substitutes for the other.
+        env:
+          MVM_RUNTIME_BOOT_BENCH: "1"
+          MVM_RUNTIME_BOOT_BACKEND: firecracker
+          MVM_RUNTIME_BOOT_KERNEL: staging/vmlinux
+          MVM_RUNTIME_BOOT_ROOTFS: staging/rootfs.ext4
+          MVM_RUNTIME_BOOT_OVERLAY: overlay-staging/overlay.ext4
+          MVM_RUNTIME_BOOT_OVERLAY_VERITY: overlay-staging/overlay.verity
+          MVM_RUNTIME_BOOT_READY: guest-agent
+          MVM_RUNTIME_BOOT_RUNS: "1"
+          MVM_RUNTIME_BOOT_CONCURRENT: "1"
+          MVM_RUNTIME_BOOT_BUDGET_MS: "60000"
+        run: |
+          set -euo pipefail
+          # No copy needed: the runtime-overlay admission gate reads
+          # `mvm-meta.json` from the rootfs's own directory, and the build step
+          # already staged it beside `rootfs.ext4`.
+          test -f staging/mvm-meta.json
+          cargo test --test runtime_boot_bench \
+            prebuilt_runtime_image_boots_within_budget -- --exact --nocapture
+
+      - name: Guest console on failure
+        if: ${{ failure() && needs.scope.outputs.nix == 'true' }}
+        run: |
+          for d in "$HOME"/.mvm/vms/*/; do
+            echo "===== $d ====="
+            ls -la "$d" || true
+            # `if`, not `A && B || C`: with the latter the `|| true` also runs
+            # when `cat` itself fails, which would hide a console.log that
+            # exists but cannot be read — the one case worth seeing here.
+            if [ -f "$d/console.log" ]; then
+              cat "$d/console.log"
+            fi
+          done
+
   nix-flake-check:
     name: Nix flake check (Linux eval)
     # Nix eval/build is heavy; run it in the merge queue and on manual dispatch,
