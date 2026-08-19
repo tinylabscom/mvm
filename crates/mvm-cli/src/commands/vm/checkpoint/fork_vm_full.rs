@@ -826,6 +826,8 @@ mod tests {
             child_vm_name: "child-cpu-bounded",
             backend_kind: CPU_METERING_TIER,
             declared_secrets: &[],
+            // Strict default: these cases do not exercise attenuation.
+            allow_secret_drop: false,
         })
         .expect("a cpu-bounded parent is forkable on a tier that meters CPU");
 
@@ -874,6 +876,8 @@ mod tests {
             child_vm_name: "child-cpu-unenforceable",
             backend_kind: BackendKind::Hvf,
             declared_secrets: &[],
+            // Strict default: these cases do not exercise attenuation.
+            allow_secret_drop: false,
         }) {
             // `AdmittedForkChild` carries the child's plan JSON and is
             // deliberately not `Debug`, so this cannot use `expect_err`.
@@ -913,6 +917,8 @@ mod tests {
             child_vm_name: "child-tier-agrees",
             backend_kind: BackendKind::Hvf,
             declared_secrets: &[],
+            // Strict default: these cases do not exercise attenuation.
+            allow_secret_drop: false,
         })
         .expect("a grantless parent is forkable");
 
