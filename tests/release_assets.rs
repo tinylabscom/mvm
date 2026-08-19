@@ -317,6 +317,43 @@ fn the_staged_microvm_image_is_booted_before_it_is_uploaded() {
     );
 }
 
+/// A plain boot proves the release image reaches userspace, but it does not
+/// exercise the initramfs or dm-verity sidecars. The pre-publish gate must run
+/// the exact same staged image a second time with the complete sealed triple.
+#[test]
+fn the_staged_microvm_boot_gate_covers_plain_and_sealed_boots() {
+    let workflow = boot_image_workflow();
+    let job = workflow
+        .split("  default-microvm:")
+        .nth(1)
+        .expect("release-boot-image.yml must define the default-microvm job");
+    let boot = job
+        .find("- name: Boot the staged image before it becomes a release asset")
+        .expect("the default-microvm job must define its boot gate");
+    let rest = &job[boot..];
+    let step_end = rest[1..]
+        .find("\n      - name:")
+        .map_or(rest.len(), |offset| offset + 1);
+    let step = &rest[..step_end];
+
+    assert_eq!(
+        step.matches("prebuilt_runtime_image_boots_within_budget")
+            .count(),
+        2,
+        "the gate must boot once plainly and once through the sealed path"
+    );
+    for variable in [
+        "MVM_RUNTIME_BOOT_INITRD=",
+        "MVM_RUNTIME_BOOT_ROOTFS_VERITY=",
+        "MVM_RUNTIME_BOOT_ROOTFS_ROOTHASH=",
+    ] {
+        assert!(
+            step.contains(variable),
+            "the sealed boot invocation must set {variable}"
+        );
+    }
+}
+
 /// The four jobs that build a boot image. They move as a set: splitting them
 /// across two release trains would mean a `boot-image/vN` release that is
 /// missing a piece the same tag is supposed to carry.
@@ -694,6 +731,11 @@ fn the_release_job_builds_and_attaches_the_initramfs() {
     assert!(
         workflow.contains("needs: [bdd, build, initramfs-image]"),
         "the release job must wait for initramfs-image, or it publishes without it"
+    );
+    let release = job_block(&workflow, "release");
+    assert!(
+        release.contains("needs.initramfs-image.result == 'success'"),
+        "the release job must fail closed when the initramfs build fails"
     );
     for pattern in [
         "artifacts/initramfs-*.tar.gz",

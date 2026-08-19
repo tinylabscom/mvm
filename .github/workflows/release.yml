@@ -322,17 +322,14 @@ jobs:
 
   release:
     needs: [bdd, build, initramfs-image]
-    # Gate the published release on the mvmctl binary build ONLY. The boot
-    # image artifacts are attached when the boot image train has published
-    # them (see the dual-publish step below), but their absence must not
-    # block the binary download (mvmctl tarballs + checksums) that
-    # install.sh / `mvmctl update` / the Homebrew tap consume. `!cancelled()`
-    # keeps that posture; the result check keeps the binary build a hard
-    # requirement.
+    # The CLI binary and universal initramfs form one usable release. Waiting
+    # for the job is not enough under `!cancelled()`: its result must be a hard
+    # success requirement or a failed initramfs build can still publish a tag
+    # whose sealed-boot downloader always returns 404.
     # Dry-run guard: a `workflow_dispatch` with dry_run=true builds + packages
     # (the `build` job) but never reaches this publish job — only a tag push or
     # an explicit dry_run=false dispatch publishes.
-    if: ${{ !cancelled() && needs.bdd.result == 'success' && needs.build.result == 'success' && (github.event_name == 'push' || github.event.inputs.dry_run == 'false') }}
+    if: ${{ !cancelled() && needs.bdd.result == 'success' && needs.build.result == 'success' && needs.initramfs-image.result == 'success' && (github.event_name == 'push' || github.event.inputs.dry_run == 'false') }}
     # This job mints the one keyless identity every installed mvmctl trusts:
     # `release.yml@refs/tags/v{version}`, the sole entry in
     # RELEASE_IDENTITY_TEMPLATES. The environment's policy admits `v*` tags and
