@@ -382,3 +382,21 @@ git commit -m "docs: record the resume orchestrator slice"
   catches a tampered blob but not a checkpoint that was never audited.
 - **Chain records (WS7)** for `session.parked` / `session.resumed`.
 - **Retention ladder and GC (WS5)**.
+- **Grants, and the hazard in how they are slated to arrive.** The plan
+  synthesizes with `grants: None`, so a resumed session declares no CPU,
+  wall-clock or egress bound and D5's "grants = exactly the approved scope" has
+  nothing behind it. The obvious next move is to add a grants field to
+  `ResumePlanMaterial`, and that is the trap: `ResumePlanMaterial` is
+  caller-supplied and has no relationship to the approval head. Grants landing
+  that way would leave the approval fence an equality check on a digest while
+  the grants beside it come from somewhere else entirely — D5's line would then
+  be not merely unimplemented but unimplementable, and nothing would say so.
+  Whoever adds grants must derive them from the approved scope rather than from
+  a caller argument.
+
+  The same change must move `RunPosture` out of `resume_posture()` and onto
+  `ResumeRequest`. `Variant::Dev` is only sound while there are no grants at
+  all: the variant's single consumer is `enforceability_gate`, which acts on
+  declared grants, so Dev and Prod are byte-identical on a grantless plan and
+  diverge the moment one carries a grant. A hardcoded posture emits no compile
+  error to prompt that, which is why it is written down here.

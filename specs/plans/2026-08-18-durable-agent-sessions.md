@@ -249,6 +249,18 @@ wall-clock timer being re-armed, because `hvf_child_restore_config` sets
 avoid auditing a child's kill under its parent's identity. A freshly
 synthesized per-resume plan re-arms both without that misattribution.
 
+That remains the design intent, and it is not yet true of the code.
+`crates/mvm-hostd/src/session_resume.rs` synthesizes the per-resume plan with
+`grants: None`, because `ResumePlanMaterial` — the caller-supplied workload half
+of the plan — carries no grant surface to fill them from. With no `wall_clock`
+grant `exec_secs_from_grants` projects to `0`, and with no `cpu` grant there is
+no share for a host-side control to scope, so the freshly synthesized plan
+arms neither bound: there is nothing in it to arm. Until grants reach the
+synthesis input, a resumed session is unbounded in exactly the two dimensions
+this paragraph describes the resume as fixing, and the `Preview` claim 18
+limitation it names is not retired. The step-4 line
+"grants = exactly the approved scope" is the unimplemented half.
+
 ### D6 — What a restored image may not carry
 
 ADR-046 §14 requires that warm snapshots contain "code and initialized
