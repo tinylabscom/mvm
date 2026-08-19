@@ -1,20 +1,20 @@
 # A forked child gets its parent's secret bindings
 
-Backing: preview
-Validation: W0 only — `parent_secret_names` and its three tests in
-`crates/mvm-cli/src/commands/vm/checkpoint.rs`. Options A and B are proposed
-design; no code implements them and no test exercises them.
+Backing: shipped-source
+Validation: Option A is complete. Focused CLI, admission, tenant-isolation,
+attenuation, and audit tests pass; `cargo test --workspace`, workspace
+all-target clippy, and `just check-gated` are green.
 
 ## Status
 
-**READY FOR IMPLEMENTATION, OPTION A ONLY.**
+**COMPLETE, OPTION A.**
 
 Two designs are recorded here. **Option A (explicit at fork) is the recommended
 build.** Option B (inherited from the checkpoint) is the more ergonomic design
 and is deliberately deferred — it is recorded so the decision is legible, not
 because it is queued.
 
-W0 (the diagnostic) is implemented. Nothing in Option A or Option B is.
+W0 and Option A are implemented. Option B remains deliberately deferred.
 
 ## The gap
 
@@ -60,13 +60,10 @@ which design wins, and fixing it needs no schema change:
 
 W0 is worth landing on its own, before either option below is chosen.
 
-**W0 warns; it does not refuse.** The plan originally said "refuse under
-`--prod`". There is no `--prod` on this path — a fork is *always* prod-profile
-(see the comment on `restrict_agent_verbs` in `admit_forked_child`), so the
-refusal has no flag to hang on, and making it unconditional would turn every
-existing fork of a secret-holding parent from degraded-but-working into a hard
-failure. Refusal belongs to Option A's world: once the child's bindings can be
-declared, refusing an *undeclared* drop is coherent. It is item A6 below.
+W0 began as a warning. Option A makes the drop actionable: a fork now refuses
+to omit a parent binding unless the caller explicitly supplies
+`--allow-secret-drop`. This keeps the secure default while preserving an
+auditable escape hatch for intentional attenuation.
 
 A caveat the diagnostic cannot avoid: an unreadable parent plan yields an empty
 set, so silence means "unknown", not "the parent held none". A fork of a parent
@@ -115,20 +112,48 @@ Why this first:
 
 Work items:
 
-- [ ] A1 — plumb a caller-supplied `Vec<SecretRef>` into `AdmitForkedChildParams`
-      and through to `admit_plan_for_boot`. Test: a child booted with a declared
-      binding resolves a freshly minted placeholder against the declared host
-      set; an undeclared host is refused.
-- [ ] A2 — surface it on the fork CLI. Test: CLI parsing + help text per the
-      repo's `tests/cli.rs` convention.
-- [ ] A3 — cross-tenant declaration refused at admission (this falls out of
+- [x] A1 — plumb a caller-supplied `Vec<SecretBinding>` into
+      `AdmitForkedChildParams` and through to `admit_plan_for_boot`.
+
+      Two corrections to this item as first written. The type is
+      `mvm_core::plan::SecretBinding` (`{name, source}`), **not** the keyholder's
+      `SecretRef`: the plan-level binding carries a name and a source reference,
+      and the destination binding (`auth_type` + `allowed_hosts`) is resolved by
+      name against the tenant's `BindingStore` at the substitution endpoint. A
+      declared name the operator has not bound therefore grants nothing, which is
+      the property that makes declaring safe.
+
+      And the stated test — "resolves a freshly minted placeholder against the
+      declared host set" — needs a booted VM with a live endpoint, which is not a
+      unit test. A1's test is scoped to admission: the declared set lands in the
+      child's signed plan, and an empty set yields none. Placeholder resolution
+      and host-set refusal are already covered at the endpoint by
+      `substitutes_real_credential_for_a_bound_destination` and
+      `unbound_destination_is_refused_without_decrypting`.
+- [x] A2 — `--secret VAR` / `--secret VAR=ADDRESS` on `vm checkpoint fork`,
+      repeatable. Wired to **both** fork arms: vm_full always admits a plan, and
+      fs_quick admits one under `--boot`, so the flag means the same thing
+      whichever class the parent is. Without `--boot` an fs_quick fork carries
+      no plan at all and the help text says so.
+
+      `fork()` moved to a params struct (`ForkCmdParams`) — it was already at
+      seven positional arguments. `revert` reuses `fork()` verbatim as its
+      anti-bypass guarantee and declares nothing, preserving its behaviour.
+
+      **Fixed a defect in A1 as committed:** `admit_forked_child` set `secrets`
+      while leaving `secret_release` at `SecretReleasePolicy::default()`, which
+      is `None` — "no secrets may be released". A child would have carried
+      bindings nothing could release. Both fork arms now derive it from the set
+      via the existing `secret_release_for_bindings` (empty → `None`, non-empty
+      → `PlanBound`) rather than defaulting.
+- [x] A3 — cross-tenant declaration refused at admission (this falls out of
       `BindingStore` tenant scoping; assert it rather than assume it).
-- [ ] A4 — `checkpoint.forked` records the child's binding names + hosts, never
+- [x] A4 — `checkpoint.forked` records the child's binding names + hosts, never
       values. Mirror the assertion shape of
       `stream_audit_entries_carry_the_binding_and_no_payload_bytes`.
-- [ ] A5 — HVF arm wired (`fork_vm_full_arm_hvf`); FC arm wired behind its
+- [x] A5 — HVF arm wired (`fork_vm_full_arm_hvf`); FC arm wired behind its
       existing `fc_vm_full_fork_experimental_enabled` gate, which stays.
-- [ ] A6 — refuse a fork that drops parent bindings the caller did not
+- [x] A6 — refuse a fork that drops parent bindings the caller did not
       re-declare, now that re-declaring is possible. This is W0's refusal arm,
       deferred to here because it is incoherent before A1.
 
@@ -190,11 +215,12 @@ pre-field record and asserts its digest is unchanged.
 - No revocation propagation to *running* children. Narrowing a binding affects
   the next fork, not a child already booted. Killing a live capability is the
   endpoint's job and is unchanged.
-- Nothing for time-travel restore (`bind_checkpoint_restored`). A restore
-  re-admits under a fresh plan for a user-driven reason; capability there is a
-  separate decision this plan does not make.
-- Nothing for `FsQuick` checkpoints — no live guest state, so no live
-  placeholder set to keep meaningful.
+- A time-travel revert still declares no bindings and therefore fails closed
+  for a secret-bearing parent. The explicit `machine restore` surface accepts
+  declarations and intentional attenuation.
+- An unbooted `FsQuick` child has no admitted plan, so `--secret` is rejected
+  unless `--boot` is also present. A booted child uses the same policy as the
+  vm_full path.
 
 ## Claims impact
 

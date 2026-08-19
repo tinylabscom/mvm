@@ -79,6 +79,7 @@ fn main() -> Result<()> {
     // target is live before the guest boots.
     let bound = bind_transport(&cfg.transport)?;
     let terminator = bind_terminator(cfg.terminator_listen)?;
+    let session_readiness = bind_session_readiness(cfg.session_ready_socket.as_deref())?;
     // Always assembled. The one mode that skipped it was `raw`, which is gone:
     // a FlowMux guest can open a typed HTTP flow at any point in its life, and
     // deciding at boot that it will not is the kind of guess that leaves a
@@ -149,6 +150,7 @@ fn main() -> Result<()> {
             assembled.map(|(service, _)| service),
             bound,
             terminator,
+            session_readiness,
             forward_timeout,
         )
         .await
@@ -189,13 +191,26 @@ fn confine_endpoint(cfg: &EndpointConfig) -> Result<()> {
     // endpoint can chain-sign substitution events. `resolver_uds_path` widens
     // the grant with the ONE resolver socket when (and only when) `cfg.resolver`
     // is `Remote` — `Local` leaves the confinement unchanged.
+    let session_marker_parent = cfg
+        .session_marker
+        .as_deref()
+        .map(|marker| {
+            marker.parent().with_context(|| {
+                format!(
+                    "FlowMux session marker has no parent directory: {}",
+                    marker.display()
+                )
+            })
+        })
+        .transpose()?;
     let spec = ConfinementSpec::network_endpoint(
         secret_dir,
         binding_dir,
         mvm_core::config::mvm_audit_dir(),
         mvm_core::config::mvm_keys_dir(),
         resolver_uds_path(cfg),
-    );
+    )
+    .with_session_marker_parent(session_marker_parent);
     confine_self(&spec).context("confine substitution endpoint")?;
     info!("substitution endpoint self-confined (landlock + seccomp)");
     Ok(())
@@ -269,6 +284,27 @@ fn bind_terminator(addr: Option<std::net::SocketAddr>) -> Result<Option<std::net
     Ok(Some(listener))
 }
 
+/// A host-local event listener for launch readiness. It is bound before the
+/// process-ready handshake, exactly like the guest transport, so the launcher
+/// can connect without a listen race after the guest starts.
+struct BoundSessionReadiness(std::os::unix::net::UnixListener);
+
+fn bind_session_readiness(path: Option<&std::path::Path>) -> Result<Option<BoundSessionReadiness>> {
+    let Some(path) = path else {
+        return Ok(None);
+    };
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("create readiness socket parent {}", parent.display()))?;
+    }
+    let listener = std::os::unix::net::UnixListener::bind(path)
+        .with_context(|| format!("session readiness bind on {} failed", path.display()))?;
+    listener
+        .set_nonblocking(true)
+        .context("set session readiness listener nonblocking")?;
+    Ok(Some(BoundSessionReadiness(listener)))
+}
+
 /// Run the primary substitution accept loop, plus the terminator accept loop
 /// when one is bound, until a listener errors (or the process is killed). The
 /// loops run concurrently: a terminated guest reaches the substitution channel
@@ -280,8 +316,13 @@ async fn serve(
     >,
     bound: Bound,
     terminator: Option<std::net::TcpListener>,
+    session_readiness: Option<BoundSessionReadiness>,
     forward_timeout: std::time::Duration,
 ) -> Result<()> {
+    let (session_ready_tx, session_ready_rx) = tokio::sync::watch::channel(false);
+    let readiness_task = session_readiness.map(|BoundSessionReadiness(std_listener)| {
+        tokio::spawn(serve_session_readiness(std_listener, session_ready_rx))
+    });
     // Spawn the terminator loop first so it's accepting while the primary loop
     // owns the task.
     let terminator_task = match terminator {
@@ -306,13 +347,54 @@ async fn serve(
             serve_wire(service, bound, forward_timeout).await?;
         }
         // Authenticated FlowMux session: the converged single networking path.
-        EgressMode::FlowMux => serve_flowmux(cfg, service, bound).await?,
+        EgressMode::FlowMux => serve_flowmux(cfg, service, bound, session_ready_tx).await?,
     }
 
     if let Some(task) = terminator_task {
         task.abort();
     }
+    if let Some(task) = readiness_task {
+        task.abort();
+    }
     Ok(())
+}
+
+async fn serve_session_readiness(
+    std_listener: std::os::unix::net::UnixListener,
+    ready: tokio::sync::watch::Receiver<bool>,
+) -> Result<()> {
+    let listener = tokio::net::UnixListener::from_std(std_listener)
+        .context("adopting session readiness listener into the tokio runtime")?;
+    loop {
+        let (stream, _) = listener
+            .accept()
+            .await
+            .context("accepting a session readiness waiter")?;
+        let waiter_ready = ready.clone();
+        tokio::spawn(async move {
+            if let Err(e) = notify_session_waiter(stream, waiter_ready).await {
+                warn!(error = %e, "could not notify a session readiness waiter");
+            }
+        });
+    }
+}
+
+async fn notify_session_waiter(
+    mut stream: tokio::net::UnixStream,
+    mut ready: tokio::sync::watch::Receiver<bool>,
+) -> Result<()> {
+    use tokio::io::AsyncWriteExt as _;
+
+    if !*ready.borrow() {
+        ready
+            .changed()
+            .await
+            .context("authenticated-session notifier closed")?;
+    }
+    stream
+        .write_all(&[1])
+        .await
+        .context("write authenticated-session readiness signal")
 }
 
 /// The WireRequest substitution serve loop over the adopted listener.
@@ -358,6 +440,7 @@ async fn serve_flowmux(
         std::sync::Arc<mvm_hostd::supervisor::network_endpoint_proxy::SubstitutionService>,
     >,
     bound: Bound,
+    session_ready: tokio::sync::watch::Sender<bool>,
 ) -> Result<()> {
     let identity = cfg
         .flowmux_identity
@@ -416,6 +499,7 @@ async fn serve_flowmux(
         let recorder = recorder.clone();
         let substitution = service.clone();
         let marker = cfg.session_marker.clone();
+        let session_ready = session_ready.clone();
         tokio::task::spawn_blocking(move || {
             let served = FlowMuxSession::accept_with(
                 stream,
@@ -435,7 +519,14 @@ async fn serve_flowmux(
                 // actually reached this endpoint. Recorded before serving, so
                 // a session that dies mid-life does not retract the fact that
                 // one was established.
-                record_session_established(marker.as_deref());
+                if let Err(e) = record_session_established(marker.as_deref()) {
+                    // Authentication succeeded, so keep serving this session,
+                    // but never wake launch without the durable evidence it
+                    // verifies after the event.
+                    warn!(error = %e, "could not record FlowMux session readiness");
+                } else {
+                    let _ = session_ready.send(true);
+                }
                 session.serve().context("serve FlowMux session")
             });
             // One session ending is ordinary — the guest reconnects. Log it
@@ -449,23 +540,28 @@ async fn serve_flowmux(
 
 /// Record that a guest completed an authenticated session.
 ///
-/// Best-effort by design. The marker is a launch-time readiness signal, not an
-/// authorization input: a guest is already authenticated by the time this runs,
-/// so failing to write it must not tear down a working session. A write that
-/// does not land shows up as a launch that refuses, which is the safe way round.
-fn record_session_established(marker: Option<&std::path::Path>) {
+/// The marker is launch-time evidence, not an authorization input: failure does
+/// not tear down an authenticated session, but the caller must not emit the
+/// readiness event unless this returns success.
+fn record_session_established(marker: Option<&std::path::Path>) -> Result<()> {
     let Some(path) = marker else {
-        return;
+        return Ok(());
     };
-    if let Some(parent) = path.parent()
-        && let Err(e) = std::fs::create_dir_all(parent)
-    {
-        warn!(path = %parent.display(), error = %e, "could not create the session marker dir");
-        return;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "create FlowMux session marker directory {}",
+                parent.display()
+            )
+        })?;
     }
-    if let Err(e) = std::fs::write(path, b"1") {
-        warn!(path = %path.display(), error = %e, "could not record the FlowMux session");
-    }
+    std::fs::write(path, b"1")
+        .with_context(|| format!("write FlowMux session marker {}", path.display()))?;
+    // Verify the durable evidence through the same filesystem namespace the
+    // launcher reads before allowing the event to cross the process boundary.
+    std::fs::metadata(path)
+        .with_context(|| format!("verify FlowMux session marker {}", path.display()))?;
+    Ok(())
 }
 
 /// How many back-to-back accept failures mean the listener itself is broken
@@ -581,6 +677,7 @@ mod tests {
             egress_mode: EgressMode::Wire,
             resolver: ResolverBackend::default(),
             session_marker: None,
+            session_ready_socket: None,
             flowmux_identity: None,
         }
     }
@@ -610,7 +707,33 @@ mod tests {
             resolver,
             flowmux_identity: None,
             session_marker: None,
+            session_ready_socket: None,
         }
+    }
+
+    #[test]
+    fn authenticated_session_marker_is_verified_before_readiness() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("session.marker");
+
+        record_session_established(Some(&marker)).expect("record durable session evidence");
+
+        assert_eq!(std::fs::read(marker).unwrap(), b"1");
+    }
+
+    #[test]
+    fn authenticated_session_marker_failure_prevents_readiness() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("marker-is-a-directory");
+        std::fs::create_dir(&marker).unwrap();
+
+        let err = record_session_established(Some(&marker))
+            .expect_err("a marker that cannot be written must fail closed");
+
+        assert!(
+            err.to_string().contains("write FlowMux session marker"),
+            "unexpected: {err:#}"
+        );
     }
 
     #[test]
@@ -702,6 +825,7 @@ mod tests {
             egress_mode: EgressMode::FlowMux,
             resolver: ResolverBackend::default(),
             session_marker: None,
+            session_ready_socket: None,
             flowmux_identity: Some(mvm_hostd::supervisor::network_endpoint::FlowMuxIdentity {
                 session_id: "s".into(),
                 host_signing_key_base64: base64::engine::general_purpose::STANDARD.encode(host_key),

@@ -59,40 +59,50 @@ The memory plane has no existing piece beyond the broker it rides on.
 
 ## Part A — The tool plane
 
+**Where the ticked boxes live:** WS1, WS2 and WS4 are implemented in PR #2705
+and WS3's gate in its own change. A ticked box here means implemented and
+verified, not merged — check the PR before relying on it being on `main`.
+
 ### WS1 — Catalog derivation
 
-- [ ] **WS1 — Derive the presented catalog from the plan.** One function from
+- [x] **WS1 — Derive the presented catalog from the plan.** One function from
       an admitted `ExecutionPlan` to the tool descriptor set a guest may see,
       in `mvm-hostd`'s broker. No other path produces a catalog. A guest asking
       what tools it has receives the projection of its own binding.
-- [ ] Descriptor content — name, argument schema, human description — is
+- [x] Descriptor content — name, argument schema, human description — is
       host-held and versioned with the `ServiceId`, so what the model reads
       cannot be authored by the guest.
 
 ### WS2 — Per-tool argument policy
 
-- [ ] **WS2 — Typed argument policy per `ServiceId`.** ADR-045 section 19 is
+- [x] **WS2 — Typed argument policy per `ServiceId`.** ADR-045 section 19 is
       explicit that binding gates the tool while argument policy constrains the
       call. Today each handler validates its own arguments; a bound tool with
       an unconstrained argument is an unbound tool wearing a name.
-- [ ] One host-side schema per service — destination allow-lists, path scoping,
+- [x] One host-side schema per service — destination allow-lists, path scoping,
       size bounds — enforced before handler dispatch, beside the binding check
       rather than inside each handler.
-- [ ] Refusals audited with the service, the rejected field, and no argument
+- [x] Refusals audited with the service, the rejected field, and no argument
       values.
 
 ### WS3 — Host-side dynamic tool adapter
+
+**Status: the gate landed; the adapter has not.** The two halves were split
+because the gate is independent of the rest of Part A — it lives in `xtask/`
+and touches none of the broker files — while the adapter does not, and stacking
+it on an unmerged broker change is how work gets stranded in a squash-merging
+repository.
 
 - [ ] **WS3 — Compile an upstream tool namespace at admission.** The host runs
       the client. Each upstream tool compiles to a `ServiceId` recorded inside
       the plan digest, so the surface is fixed for the admission's lifetime.
 - [ ] Discovery verbs answer from the plan binding. An upstream server that
       adds or redefines a tool mid-session cannot widen a running guest.
-- [ ] A gate — in the `xtask check-*` family — refusing an outbound tool
+- [x] A gate — in the `xtask check-*` family — refusing an outbound tool
       protocol client on any guest-reachable path, in the manner of
       `check-vsock-only-egress`. Without it this decision decays the first time
       a framework is vendored into a guest image.
-- [ ] The gate must catch a guest *originating a connection to a remote tool
+- [x] The gate must catch a guest *originating a connection to a remote tool
       server*, and must not catch a tool server running wholly inside the
       guest over stdio or loopback — that is a supported in-guest tool, and a
       gate that greps for the protocol's name rather than for outbound
@@ -101,12 +111,12 @@ The memory plane has no existing piece beyond the broker it rides on.
 
 ### WS4 — Refusal is a signal
 
-- [ ] **WS4 — Unbound calls are planning signals, not errors.** The existing
+- [x] **WS4 — Unbound calls are planning signals, not errors.** The existing
       `NotBound` path already refuses. Add the audit entry shape and a
       structured refusal the agent runtime can hand back to the model, so an
       unbound call teaches the model its actual surface instead of surfacing as
       an opaque failure.
-- [ ] Repeated unbound calls to the same name are rate-bounded; a model in a
+- [x] Repeated unbound calls to the same name are rate-bounded; a model in a
       retry loop is a denial-of-service against the broker.
 
 ## Part B — The memory plane

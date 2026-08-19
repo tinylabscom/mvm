@@ -389,6 +389,12 @@ jobs:
       - name: vsock-only egress (no guest NIC on the vmm/HVF path, ADR-100)
         run: cargo run -p xtask -- check-vsock-only-egress
 
+      # The in-guest toolbox is deliberately ungoverned — the microVM boundary
+      # bounds it. What the boundary cannot bound is the guest originating a
+      # connection outward, so that is what this checks.
+      - name: no outbound tool client in guest-shipped code
+        run: cargo run -p xtask -- check-no-guest-tool-client
+
       # The other half of the same rule. The gate above says a guest has only
       # the vsock channel; this one says it speaks exactly one protocol over
       # it. A guest made FlowMux-only while the host still served the old
@@ -651,7 +657,7 @@ jobs:
   test:
     name: Test
     if: ${{ always() }}
-    needs: [scope, test-workspace, test-linux, test-release-witness, test-ebpf-telemetry, bdd-conformance, kernel]
+    needs: [scope, test-workspace, test-workspace-aarch64, test-linux, test-release-witness, test-ebpf-telemetry, bdd-conformance, kernel]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -660,6 +666,7 @@ jobs:
           SCOPE_RESULT: ${{ needs.scope.result }}
           SCOPE_CODE: ${{ needs.scope.outputs.code }}
           WORKSPACE_RESULT: ${{ needs.test-workspace.result }}
+          WORKSPACE_AARCH64_RESULT: ${{ needs.test-workspace-aarch64.result }}
           LINUX_RESULT: ${{ needs.test-linux.result }}
           RELEASE_WITNESS_RESULT: ${{ needs.test-release-witness.result }}
           EBPF_RESULT: ${{ needs.test-ebpf-telemetry.result }}
@@ -678,7 +685,7 @@ jobs:
             false) required=skipped ;;
             *) echo "Invalid code scope: $SCOPE_CODE"; exit 1 ;;
           esac
-          for result in "$WORKSPACE_RESULT" "$LINUX_RESULT" "$RELEASE_WITNESS_RESULT" "$EBPF_RESULT"; do
+          for result in "$WORKSPACE_RESULT" "$WORKSPACE_AARCH64_RESULT" "$LINUX_RESULT" "$RELEASE_WITNESS_RESULT" "$EBPF_RESULT"; do
             if [ "$result" != "$required" ]; then
               echo "A test lane did not match scope $SCOPE_CODE: $result"
               exit 1
@@ -768,6 +775,65 @@ jobs:
       - name: Run doctests
         # nextest does not run doctests; gate them separately.
         run: cargo test --workspace --doc
+
+  test-workspace-aarch64:
+    name: Test workspace (aarch64)
+    needs: [scope]
+    if: needs.scope.outputs.code == 'true'
+    # The only lane that executes mvm's aarch64 code paths. Everything else in
+    # this workflow runs on x86_64, so arch-gated code compiles here for the
+    # first time and its tests run for the first time. The sharpest example is
+    # `jailer::seccomp::CONFINED_ROLE_SYSCALLS`, which is a *separate table* per
+    # architecture: a wrong or missing entry in the aarch64 half SIGSYS-kills a
+    # confined role at the moment it starts working, and no x86_64 runner can
+    # see it. `GuestArch::host()`, the bundle arch gate, and the aarch64
+    # `mvm-seccomp-apply` arm are in the same position.
+    #
+    # SCOPE, honestly: this proves the suite passes natively on aarch64. It does
+    # NOT prove a guest boots — GitHub's arm64 runners expose no nested KVM, so
+    # `backend.start()` is unreachable here exactly as it is in every other lane.
+    # A green run here is not a Tier-1 boot witness; that still needs real
+    # hardware.
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: ./.github/actions/free-disk
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@nightly
+
+      - uses: ./.github/actions/apt-deps
+        with:
+          packages: attr cryptsetup-bin libcap-ng-dev lld
+
+      - uses: ./.github/actions/install-zigbuild
+
+      - uses: ./.github/actions/rust-cache
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+
+      # `mvm-fs` is excluded, and only on this lane. Its dev-dependency
+      # `am-fs-ext4` (the independent ext4 read oracle `tests/oracle.rs` and
+      # `tests/xattr.rs` check our writer against) does not compile for
+      # aarch64-linux: it assumes `c_char == i8`, which holds on x86_64-linux
+      # and on aarch64-*darwin* but not on aarch64-linux, where `c_char` is
+      # `u8`. That is upstream's bug, in a dev-only oracle, and it is load
+      # bearing on x86_64 — so the oracle stays an x86_64 oracle rather than
+      # being dropped. `mvm-fs`'s own library still builds here as a dependency
+      # of everything else; it is only its test targets that are skipped.
+      - name: Build
+        run: cargo build --workspace --exclude mvm-fs --all-targets
+
+      - name: Run tests
+        # The workspace suite only. The arch-independent extras Test workspace
+        # also runs (man pages, the addons feature, doctests) are covered on
+        # x86_64 and would only duplicate cost here.
+        run: cargo nextest run --workspace --exclude mvm-fs --all-targets
 
   test-release-witness:
     name: Test release profile (overflow + no debug assertions)
@@ -1180,6 +1246,163 @@ jobs:
             staging/kernel-${{ matrix.arch }}.json
             staging/kernel-metrics-${{ matrix.arch }}.json
             staging/workload-config-${{ matrix.arch }}
+
+  guest-image-boot:
+    name: Guest image boots (tree-built)
+    # The gap #2635 names: nothing builds the guest image generator's output and
+    # starts it before the change is on main. The only lane that boots a
+    # tree-built image runs on a `boot-image/v*` tag, which is after the merge.
+    # That is how a rootfs whose /init the kernel could not exec shipped for five
+    # weeks with every checksum verifying clean, and how five successive release
+    # runs each surfaced exactly one more layer — an unattached overlay, a guest
+    # never told where the overlay was, a sidecar field the serializer dropped —
+    # none of which any static check can see, because each one needs a guest that
+    # actually runs.
+    #
+    # Merge queue, not per-PR, and the cost argument is wall-clock rather than
+    # runner-minutes: this job takes ~33 minutes, and the merge-group CI it joins
+    # already takes 32-36, so running in parallel it adds close to nothing to how
+    # long a merge takes. Per-PR it would be pure addition on every push.
+    # `nix-flake-check` above sets the same precedent for the same reason.
+    needs: [scope]
+    if: github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: ./.github/actions/free-disk
+        if: needs.scope.outputs.nix == 'true'
+
+      - name: Install Nix
+        if: needs.scope.outputs.nix == 'true'
+        uses: DeterminateSystems/nix-installer-action@main
+
+      - name: Install Rust toolchain
+        if: needs.scope.outputs.nix == 'true'
+        uses: dtolnay/rust-toolchain@1.96.0
+
+      - uses: ./.github/actions/apt-deps
+        if: needs.scope.outputs.nix == 'true'
+        with:
+          packages: lld
+
+      # `cargo test` below builds mvmctl, whose build.rs cross-compiles the
+      # embedded host binaries as static musl and needs the pinned zig. Without
+      # it this dies at compile time, before it starts a guest — which reads as
+      # "the image does not boot" and is nothing of the kind.
+      - uses: ./.github/actions/install-zigbuild
+        if: needs.scope.outputs.nix == 'true'
+
+      - name: Build the guest image from this tree
+        if: needs.scope.outputs.nix == 'true'
+        run: |
+          set -euo pipefail
+          nix build "./nix/images/default-tenant#packages.x86_64-linux.default" \
+            --impure --no-link --print-out-paths > /tmp/store-path.txt
+          STORE_PATH=$(head -1 /tmp/store-path.txt)
+          mkdir -p staging
+          # cp -L so each artifact resolves through its nix-store symlink.
+          cp -L "$STORE_PATH/vmlinux"       staging/vmlinux
+          cp -L "$STORE_PATH/rootfs.ext4"   staging/rootfs.ext4
+          cp -L "$STORE_PATH/mvm-meta.json" staging/mvm-meta.json
+
+      - name: Assert the tree-built rootfs has an exec'able /init
+        if: needs.scope.outputs.nix == 'true'
+        run: |
+          set -euo pipefail
+          # The cheap half, and the one that catches the defect that actually
+          # shipped. Runs before the boot so a rootfs the kernel cannot exec
+          # fails here, where the message says so, rather than as a panic.
+          command -v debugfs >/dev/null 2>&1 \
+            || { sudo apt-get update && sudo apt-get install -y e2fsprogs; }
+          bash nix/packaging/release/assert-init-shebang.sh \
+            staging/rootfs.ext4 "tree-built x86_64"
+          bash nix/packaging/release/assert-kernel-format.sh \
+            staging/vmlinux x86_64 "tree-built x86_64 kernel"
+
+      # The prod rootfs bakes no agent — /init resolves it from /mvm/runtime,
+      # the runtime overlay attached as a second virtio-blk drive. The nix store
+      # is warm from the image build, so this is usually a store lookup rather
+      # than a build.
+      - name: Build the runtime overlay
+        if: needs.scope.outputs.nix == 'true'
+        run: |
+          set -euo pipefail
+          OVERLAY_PATH=$(nix build "./nix/images/runtime-overlay#packages.x86_64-linux.default" \
+            --no-link --print-out-paths | head -1)
+          mkdir -p overlay-staging
+          cp -L "$OVERLAY_PATH/overlay.ext4"     overlay-staging/overlay.ext4
+          cp -L "$OVERLAY_PATH/overlay.verity"   overlay-staging/overlay.verity
+          cp -L "$OVERLAY_PATH/overlay.roothash" overlay-staging/overlay.roothash
+          echo "MVM_RUNTIME_BOOT_OVERLAY_ROOTHASH=$(tr -d '[:space:]' < overlay-staging/overlay.roothash)" \
+            >> "$GITHUB_ENV"
+
+      - name: Install firecracker
+        if: needs.scope.outputs.nix == 'true'
+        env:
+          # Tracks `crates/mvm-core/src/config.rs::FC_VERSION_DEFAULT`.
+          FC_VERSION: v1.14.1
+        run: |
+          set -euo pipefail
+          curl -fL -o firecracker.tgz \
+            "https://github.com/firecracker-microvm/firecracker/releases/download/${FC_VERSION}/firecracker-${FC_VERSION}-x86_64.tgz"
+          tar -xzf firecracker.tgz
+          sudo install -m 0755 "release-${FC_VERSION}-x86_64/firecracker-${FC_VERSION}-x86_64" /usr/bin/firecracker
+          /usr/bin/firecracker --version
+
+      - name: Grant /dev/kvm access for the job
+        if: needs.scope.outputs.nix == 'true'
+        run: |
+          set -euo pipefail
+          if [ ! -e /dev/kvm ]; then
+            echo "::error::/dev/kvm missing on this runner — the boot gate cannot run." >&2
+            exit 1
+          fi
+          sudo chmod 666 /dev/kvm
+
+      - name: Boot the tree-built image
+        if: needs.scope.outputs.nix == 'true'
+        # Not a latency assertion. The budget is an order of magnitude above the
+        # observed median and RUNS/CONCURRENT are 1, because the only question
+        # here is whether this tree's image reaches userspace and binds its
+        # agent. Latency belongs to `boot-latency`, which pins a *published*
+        # image deliberately so a regression is unambiguous between host code
+        # and image — the two lanes answer different questions and neither
+        # substitutes for the other.
+        env:
+          MVM_RUNTIME_BOOT_BENCH: "1"
+          MVM_RUNTIME_BOOT_BACKEND: firecracker
+          MVM_RUNTIME_BOOT_KERNEL: staging/vmlinux
+          MVM_RUNTIME_BOOT_ROOTFS: staging/rootfs.ext4
+          MVM_RUNTIME_BOOT_OVERLAY: overlay-staging/overlay.ext4
+          MVM_RUNTIME_BOOT_OVERLAY_VERITY: overlay-staging/overlay.verity
+          MVM_RUNTIME_BOOT_READY: guest-agent
+          MVM_RUNTIME_BOOT_RUNS: "1"
+          MVM_RUNTIME_BOOT_CONCURRENT: "1"
+          MVM_RUNTIME_BOOT_BUDGET_MS: "60000"
+        run: |
+          set -euo pipefail
+          # No copy needed: the runtime-overlay admission gate reads
+          # `mvm-meta.json` from the rootfs's own directory, and the build step
+          # already staged it beside `rootfs.ext4`.
+          test -f staging/mvm-meta.json
+          cargo test --test runtime_boot_bench \
+            prebuilt_runtime_image_boots_within_budget -- --exact --nocapture
+
+      - name: Guest console on failure
+        if: ${{ failure() && needs.scope.outputs.nix == 'true' }}
+        run: |
+          for d in "$HOME"/.mvm/vms/*/; do
+            echo "===== $d ====="
+            ls -la "$d" || true
+            # `if`, not `A && B || C`: with the latter the `|| true` also runs
+            # when `cat` itself fails, which would hide a console.log that
+            # exists but cannot be read — the one case worth seeing here.
+            if [ -f "$d/console.log" ]; then
+              cat "$d/console.log"
+            fi
+          done
 
   nix-flake-check:
     name: Nix flake check (Linux eval)

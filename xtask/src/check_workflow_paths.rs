@@ -601,8 +601,8 @@ mod tests {
         let test = job_block(&workflow, "test");
         assert!(test.contains("name: Test"));
         assert!(test.contains(
-            "needs: [scope, test-workspace, test-linux, test-release-witness, \
-             test-ebpf-telemetry, bdd-conformance, kernel]"
+            "needs: [scope, test-workspace, test-workspace-aarch64, test-linux, \
+             test-release-witness, test-ebpf-telemetry, bdd-conformance, kernel]"
         ));
 
         // Every lane the aggregate names must also be read back in the loop that

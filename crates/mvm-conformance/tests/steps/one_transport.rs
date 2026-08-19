@@ -326,6 +326,31 @@ fn given_live_endpoint(world: &mut CliWorld) {
     world.one_transport_state = Some(dir);
 }
 
+#[given("an allow-host endpoint that authenticates after agent readiness")]
+fn given_delayed_authenticated_endpoint(world: &mut CliWorld) {
+    use mvm_vmm::host::network_endpoint_spawn::{
+        SUBST_PID_FILE, SUBST_SESSION_FILE, SUBST_SESSION_READY_SOCKET,
+    };
+    use std::io::Write as _;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        dir.path().join(SUBST_PID_FILE),
+        std::process::id().to_string(),
+    )
+    .expect("write pid");
+    let listener =
+        std::os::unix::net::UnixListener::bind(dir.path().join(SUBST_SESSION_READY_SOCKET))
+            .expect("bind session readiness socket");
+    let marker = dir.path().join(SUBST_SESSION_FILE);
+    std::thread::spawn(move || {
+        let (mut waiter, _) = listener.accept().expect("accept launch waiter");
+        std::fs::write(marker, b"1").expect("record authenticated session");
+        waiter.write_all(&[1]).expect("wake launch waiter");
+    });
+    world.one_transport_state = Some(dir);
+}
+
 #[given("a per-VM state dir with no endpoint")]
 fn given_no_endpoint(world: &mut CliWorld) {
     world.one_transport_state = Some(tempfile::tempdir().expect("tempdir"));
@@ -351,6 +376,15 @@ fn then_launch_admitted_after_session(world: &mut CliWorld) {
     let dir = world.one_transport_state.as_ref().expect("state dir");
     std::fs::write(dir.path().join(SUBST_SESSION_FILE), b"1").expect("record session");
     refuse_launch_without_endpoint_session("vm-bdd", dir.path()).expect("admitted");
+}
+
+#[then("the launch is admitted without the FlowMux identity-drive error")]
+fn then_launch_waits_for_session(world: &mut CliWorld) {
+    use mvm_vmm::host::network_endpoint_spawn::wait_for_endpoint_session;
+
+    let dir = world.one_transport_state.as_ref().expect("state dir");
+    wait_for_endpoint_session("vm-bdd", dir.path())
+        .expect("the authenticated-session event admits the launch");
 }
 
 #[then("the launch is admitted")]
@@ -390,6 +424,7 @@ fn secret_bearing_config() -> mvm_hostd::supervisor::network_endpoint::EndpointC
         network_policy: None,
         egress_mode: Default::default(),
         session_marker: None,
+        session_ready_socket: None,
         resolver: Default::default(),
         flowmux_identity: None,
     }

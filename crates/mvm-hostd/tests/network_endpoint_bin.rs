@@ -98,6 +98,7 @@ fn endpoint_bin_serves_substitution_and_refuses_unbound_destination() {
         egress_mode: EgressMode::Wire,
         resolver: ResolverBackend::default(),
         session_marker: None,
+        session_ready_socket: None,
         flowmux_identity: None,
     };
 
@@ -207,6 +208,7 @@ fn endpoint_bin_claim10_gate_refuses_a_bound_but_unadmitted_destination() {
         egress_mode: mvm_hostd::supervisor::network_endpoint::EgressMode::Wire,
         resolver: ResolverBackend::default(),
         session_marker: None,
+        session_ready_socket: None,
         flowmux_identity: None,
     };
 
@@ -262,6 +264,8 @@ fn a_flowmux_endpoint_keeps_serving_sessions_after_one_ends() {
 
     let dir = tempfile::tempdir().unwrap();
     let sock = dir.path().join("network.sock");
+    let session_marker = dir.path().join("session.marker");
+    let session_ready_socket = dir.path().join("session-ready.sock");
 
     let host_key = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
     let host_verify = host_key.verifying_key();
@@ -285,7 +289,8 @@ fn a_flowmux_endpoint_keeps_serving_sessions_after_one_ends() {
         network_policy: None,
         egress_mode: EgressMode::FlowMux,
         resolver: ResolverBackend::default(),
-        session_marker: None,
+        session_marker: Some(session_marker.clone()),
+        session_ready_socket: Some(session_ready_socket.clone()),
         flowmux_identity: Some(FlowMuxIdentity {
             session_id: "keeps-serving".into(),
             host_signing_key_base64: b64.encode(host_key.to_bytes()),
@@ -308,6 +313,14 @@ fn a_flowmux_endpoint_keeps_serving_sessions_after_one_ends() {
     let mut line = String::new();
     stdout.read_line(&mut line).expect("read handshake line");
 
+    // Arm the readiness observer before authenticating. The endpoint bound it
+    // before the process-ready line above, so this has no connect race.
+    let mut readiness = UnixStream::connect(&session_ready_socket)
+        .expect("connect to authenticated-session readiness socket");
+    readiness
+        .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+        .unwrap();
+
     // A guest session: connect, complete the authenticated handshake, drop.
     // The read timeout turns "the host never answered" into a failure rather
     // than a hung test.
@@ -324,6 +337,15 @@ fn a_flowmux_endpoint_keeps_serving_sessions_after_one_ends() {
 
     // First session, then let it end the way a real one does.
     drop(handshake_once("first session"));
+    let mut signal = [0_u8; 1];
+    readiness
+        .read_exact(&mut signal)
+        .expect("authenticated session wakes launch readiness");
+    assert_eq!(signal, [1]);
+    assert!(
+        session_marker.exists(),
+        "the durable marker must exist before the event is delivered"
+    );
 
     // The assertion: a fresh session still authenticates after the first ended.
     let second = handshake_once("second session (after the first ended)");

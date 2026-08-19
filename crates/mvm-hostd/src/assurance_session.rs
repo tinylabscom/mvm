@@ -31,7 +31,9 @@ use mvm_core::policy::network_policy::NetworkPolicy;
 use mvm_core::protocol::broker::ServiceId;
 use sha2::{Digest, Sha256};
 
-use crate::audit::assurance::{AssuranceLedger, SessionIdentity, cite};
+use crate::audit::assurance::{
+    AssuranceAuditSink, AssuranceLedger, PlanIdentity, SessionIdentity, cite,
+};
 use crate::audit::emitter::AuditEmitter;
 use crate::broker::handlers::host_assurance_v1::{
     AssuranceSessionSpec, DeclaredDestination, HOST_ASSURANCE_SERVICE, HostAssuranceV1Handler,
@@ -280,7 +282,8 @@ pub fn open_on(
         trial_id: request.declaration.trial_id.clone(),
         source_digest: request.declaration.source_digest.clone(),
     };
-    let ledger = AssuranceLedger::new(request.emitter, plan);
+    let plan_identity = PlanIdentity::from(plan);
+    let ledger = AssuranceLedger::new(request.emitter.as_ref(), &plan_identity);
     let refs = ledger
         .open_session(&identity)
         .map_err(|error| SessionRefusal::NotRecorded(error.to_string()))?;
@@ -322,8 +325,8 @@ pub fn open_on(
                 port: edge.port,
             })
             .collect(),
-        plan: plan.clone(),
-        emitter: Some(Arc::clone(request.emitter)),
+        identity: PlanIdentity::from(plan),
+        sink: Some(Arc::clone(request.emitter) as Arc<dyn AssuranceAuditSink + Send + Sync>),
     });
     Ok(binding)
 }
@@ -373,7 +376,7 @@ pub fn close_on(
     verdict: &TrialVerdict,
 ) -> Result<()> {
     let _ = plane;
-    AssuranceLedger::new(emitter, admitted.plan())
+    AssuranceLedger::new(emitter, &PlanIdentity::from(admitted.plan()))
         .complete_trial(identity, verdict)
         .context("recording the trial outcome")?;
     Ok(())

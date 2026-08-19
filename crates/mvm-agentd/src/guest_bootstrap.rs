@@ -32,12 +32,19 @@ pub struct EgressClientMissing;
 /// classifying per-error would need every path to preserve an errno, and one
 /// that stopped doing so would silently go back to shouting.
 fn rootfs_is_read_only() -> bool {
-    let Ok(mounts) = std::fs::read_to_string("/proc/mounts") else {
-        // Unreadable /proc: assume writable, which keeps every failure loud.
-        // The wrong guess here costs noise, and the other one costs silence.
-        return false;
-    };
-    root_is_read_only_in(&mounts)
+    // Actually once, not once per step. Every optional step consults this, so
+    // the un-cached version read the file six times on exactly the sealed boot
+    // this exists to quieten, and the doc above claimed otherwise. The mount
+    // cannot change under a running init, so caching costs nothing.
+    static READ_ONLY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *READ_ONLY.get_or_init(|| {
+        let Ok(mounts) = std::fs::read_to_string("/proc/mounts") else {
+            // Unreadable /proc: assume writable, which keeps every failure loud.
+            // The wrong guess here costs noise, and the other one costs silence.
+            return false;
+        };
+        root_is_read_only_in(&mounts)
+    })
 }
 
 /// The `/proc/mounts` half of [`rootfs_is_read_only`], split out so it can be
@@ -112,10 +119,13 @@ pub fn provision_guest_environment() -> Result<(), EgressClientMissing> {
 /// Both are cosmetic-until-they-aren't: without the home the shell starts in a
 /// directory it cannot write, and without the `/etc/passwd` entry `whoami`
 /// exits nonzero and `getpwuid()` returns `NULL` to any library that asks.
-/// Neither failure is worth refusing to boot over — a read-only rootfs that
-/// takes neither write still runs the workload — so both are reported and
-/// stepped past.
+/// Neither failure is worth refusing to boot over. A read-only rootfs cannot
+/// take either write, so use its writable `/tmp` fallback and leave the image's
+/// account databases unchanged without issuing syscalls that must fail.
 fn provision_workload_identity() {
+    if !crate::guest_mount::optional_image_writes_allowed(rootfs_is_read_only()) {
+        return;
+    }
     if let Err(error) = crate::guest_mount::ensure_workload_home() {
         note_optional_step(
             &format!(
