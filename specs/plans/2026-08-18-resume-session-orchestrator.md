@@ -103,7 +103,7 @@ into a duplicate plan.
 for everything a resume does not deliberately differ on. It uses a struct
 literal rather than the builder, so a literal is the consistent choice here.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```rust
 #[cfg(test)]
@@ -151,13 +151,13 @@ You will need a `parked_record(id)` helper building an `AgentSessionRecord` in
 smallest one serving this task and Task 2, using `mvm_runtime::agent_session`'s
 public surface rather than reaching for private state.
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `export CARGO_TARGET_DIR=/Users/auser/work/tinylabs/mvmco/.worktrees/mvm-durable-sessions/target && ~/.cargo/bin/cargo nextest run -p mvm-hostd session_resume`
 
 Expected: FAIL to compile — the module does not exist.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 Create the module with `ResumePlanMaterial` and `synthesis_for_resume`. Mirror
 `run.rs`'s field choices, with these deliberate differences, each carrying a
@@ -173,9 +173,9 @@ fill every field. If a field's right value for a resume is genuinely unclear,
 take `run.rs`'s value, comment that you did, and flag it in your report rather
 than choosing silently.
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 export CARGO_TARGET_DIR=/Users/auser/work/tinylabs/mvmco/.worktrees/mvm-durable-sessions/target
@@ -203,7 +203,7 @@ Admission is the last thing that can fail, so a refusal leaves the record
 exactly as it was: parked and resumable. A transition committed before
 admission would leave a session claiming a residency nothing authorized.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Five tests, described rather than written out because each needs fixtures for a
 checkpoint store with a real content blob and for a signer directory. Read the
@@ -227,9 +227,9 @@ smallest local equivalent.
    fail. This is the ordering property and the one test worth writing most
    carefully.
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 ```rust
 /// Turn a parked session back into an admitted one.
@@ -294,9 +294,9 @@ default, argue that in the report rather than choosing silently. Define
 `host_signer_keys_dir`, and `now_unix` — the argument count is exactly why it
 is a struct.
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
-- [ ] **Step 5: Verify the ordering property is not vacuous**
+- [x] **Step 5: Verify the ordering property is not vacuous**
 
 Temporarily move the `sessions.resume(...)` call to just after the
 `state != Hibernated` check — before verification and admission — and confirm
@@ -305,7 +305,7 @@ Temporarily move the `sessions.resume(...)` call to just after the
 restore. Report both REDs with commands and output. If either does not go red,
 say so and stop rather than reporting one you did not observe.
 
-- [ ] **Step 6: Run the full gate and commit**
+- [x] **Step 6: Run the full gate and commit**
 
 ```bash
 export CARGO_TARGET_DIR=/Users/auser/work/tinylabs/mvmco/.worktrees/mvm-durable-sessions/target

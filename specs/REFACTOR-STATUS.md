@@ -292,7 +292,9 @@ for detailed scope and acceptance criteria.
       `specs/plans/2026-08-18-durable-session-park.md` (implementation,
       Tasks 1–5 complete) +
       `specs/plans/2026-08-18-session-approval-head.md` (implementation,
-      Tasks 1–4 complete). `CheckpointMeta` gains `Option<SessionBinding>`
+      Tasks 1–4 complete) +
+      `specs/plans/2026-08-18-resume-session-orchestrator.md` (implementation,
+      Tasks 1–2 complete, Task 3 in progress). `CheckpointMeta` gains `Option<SessionBinding>`
       (`session_id`/`generation`/`journal_cursor`/`approval_head`), folded
       into `meta_digest` the same way `grants` already is; `approval_head` is
       a dedicated `ApprovalHead` newtype, not `CheckpointDigest` reused.
@@ -326,15 +328,29 @@ resume` takes a `current_head` and refuses when it differs from the
       have one (the Firecracker stop-time filesystem flush at
       `crates/mvm-backends/src/driver/fc.rs`'s
       `prepare_guest_filesystems_for_stop`), nothing on a park path calls
-      it. WS4 is partial: the ledger-head comparison above landed, but
-      nothing calls `ApprovalLedger::head()` to produce the value either
-      side of it carries — the caller that would is `resume_session`, which
-      does not exist anywhere in the workspace, and neither does a resume's
-      `SynthesisInput`/`SynthesisInputBuilder`, its
-      `mvm_hostd::plan_admission::admit_for_run` call, or its `PostRestore`
-      fabric re-registration. A session parked with `approval_head: None`
-      resumes with no ledger fence at all. WS5 retention ladder + GC, WS6
-      CLI, WS7 chain records, WS8 BDD remain untouched.
+      it. WS4 is partial: the ledger-head comparison above landed, and so
+      has `resume_session` (`crates/mvm-hostd/src/session_resume.rs`, 12
+      tests) — it loads the record, refuses anything but `Hibernated`,
+      resolves the resume point and runs `verify_content` on it (content
+      integrity only, not lineage verification against a signed
+      `CheckpointChainAnchor`, so it catches a tampered blob but not a
+      checkpoint that was never audited), builds a `SynthesisInput` naming
+      the session and the generation the resume opens, admits it through
+      `mvm_hostd::plan_admission::admit_for_run`, and only then transitions
+      the record, so a refusal anywhere before admission leaves the session
+      parked and unchanged. Still open: nothing calls `ApprovalLedger::
+      head()` to produce the value either side of the step-2 comparison
+      carries — `resume_session` included, which reads its caller-supplied
+      `current_approval_head` straight off the record; there is no tier
+      selection, no `PostRestore` fabric re-registration, no credential
+      minting at the substitution endpoint, and no chain entry (WS7). The
+      synthesized plan carries `grants: None`, so a resumed session re-arms
+      neither a wall-clock bound nor a CPU share. `resume_session` has no
+      caller anywhere in the workspace outside its own tests — it is wired
+      to no CLI verb or other host code path. A session parked with
+      `approval_head: None` resumes with no ledger fence at all. WS5
+      retention ladder + GC, WS6 CLI, WS7 chain records, WS8 BDD remain
+      untouched.
 
 - [~] **Admission-bound AI assurance sessions** —
       `specs/plans/2026-08-17-admission-bound-ai-assurance-sessions.md`. W1–W4

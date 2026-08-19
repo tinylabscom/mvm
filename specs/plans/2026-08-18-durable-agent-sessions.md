@@ -220,18 +220,32 @@ which is correct for recovery and too expensive for the resume path. Resume
 needs a signed ledger head cached in the hibernation record.
 
 `specs/plans/2026-08-18-session-approval-head.md` landed the digest half of
-step 2, on its own, outside any `resume_session` orchestrator:
-`AgentSessionStore::resume` takes a `current_head` parameter and refuses when
-it differs from the `approval_head` recorded at park, comparing
+step 2: `AgentSessionStore::resume` takes a `current_head` parameter and
+refuses when it differs from the `approval_head` recorded at park, comparing
 `ApprovalLedger::head()`'s SHA-256 output for equality — a digest comparison,
-not the signature check this sketch names. Steps 1 (audit-chain head), 3
-(`PolicySet` evaluation at current time), 4 (fresh `ExecutionPlan`
-synthesis), 5 (admission), 6 (tier selection), 7 (`PostRestore`), 8
-(credential minting), and 9 (the chain entry) remain design only: there is no
-`resume_session` function anywhere in the workspace to hold them, and nothing
-calls `ApprovalLedger::head()` to produce the value either side of the
-comparison consumes — a caller supplies both `ParkInput::approval_head` and
-`resume`'s `current_head` itself today. A session parked with
+not the signature check this sketch names.
+
+`specs/plans/2026-08-18-resume-session-orchestrator.md` landed
+`resume_session` (`crates/mvm-hostd/src/session_resume.rs`), which covers
+step 4 (fresh `ExecutionPlan` synthesis) and step 5 (admission): it loads the
+record, refuses anything but `Hibernated`, resolves the resume point named by
+`parent_checkpoint`, runs `verify_content` against it — content integrity
+only, not `verify_lineage` against a signed `CheckpointChainAnchor`, so it
+catches a tampered blob but not a checkpoint that was never audited —
+synthesizes a plan naming the session and the generation the resume opens,
+and admits it through `mvm_hostd::plan_admission::admit_for_run`. Only then
+does it transition the record, so a refusal at any earlier point leaves the
+session parked and unchanged. Steps 1 (audit-chain head), 3 (`PolicySet`
+evaluation at current time), 6 (tier selection), 7 (`PostRestore`), 8
+(credential minting), and 9 (the chain entry) remain design only — nothing in
+the workspace does any of them. `resume_session` itself has no caller
+anywhere in the workspace outside its own tests: it is wired to no CLI verb,
+broker handler, or other host code path, so none of steps 4–5 runs on a real
+resume yet either. Nothing calls `ApprovalLedger::head()` to produce the
+value either side of the step-2 comparison carries — a caller supplies both
+`ParkInput::approval_head` and `resume`'s `current_head` itself today,
+`resume_session` included: its `ResumeRequest::current_approval_head` is read
+straight off the record the caller already holds. A session parked with
 `approval_head: None` skips the comparison entirely and resumes with no
 ledger fence at all; the fence's own doc comment records this as a
 deliberate gap rather than a defect to close silently later.
@@ -384,15 +398,29 @@ Numbering was reconciled before these documents landed on main (PR #2691):
       `ApprovalLedger::head()` content-addresses the ledger's decision state
       and `AgentSessionStore::resume` refuses when its caller-supplied
       `current_head` differs from the `approval_head` `ParkInput` committed
-      at park. Everything else remains open: `resume_session` has no
-      implementation anywhere in the workspace; nothing calls
-      `ApprovalLedger::head()` to produce the value fed into either side of
-      that comparison, so a caller supplies it directly today; there is no
-      `SynthesisInput` built through `SynthesisInputBuilder` for a resume, no
-      call into `mvm_hostd::plan_admission::admit_for_run` from this path,
-      no tier selection, and no `PostRestore` fabric re-registration. A
-      session parked with `approval_head: None` resumes with no ledger fence
-      at all.
+      at park. `specs/plans/2026-08-18-resume-session-orchestrator.md` then
+      landed `resume_session` (`crates/mvm-hostd/src/session_resume.rs`, 12
+      tests): load, refuse anything but `Hibernated`, resolve the resume
+      point, `verify_content` it, build a `SynthesisInput` naming the session
+      and the generation the resume opens (a struct literal in
+      `synthesis_for_resume`, not `SynthesisInputBuilder` — mirroring
+      `crate::run`'s own choice of literal over builder), and admit it
+      through `mvm_hostd::plan_admission::admit_for_run`; only on success does
+      it call the store's `resume` transition, so a refusal anywhere before
+      that leaves the record parked and untouched. The synthesized plan
+      carries `grants: None` — `ResumePlanMaterial` has no grant surface to
+      fill them from, so the resumed plan re-arms neither the wall-clock
+      timer nor a CPU share (see the `grants: None` paragraph under D5).
+      Still open: nothing calls `ApprovalLedger::head()` to produce the value
+      fed into either side of the step-2 comparison, so a caller — including
+      `resume_session`, via `ResumeRequest::current_approval_head` — supplies
+      it directly today by reading it off the record; there is no tier
+      selection, no `PostRestore` fabric re-registration, no credential
+      minting at the substitution endpoint, and no chain entry (WS7).
+      `resume_session` itself has no caller anywhere in the workspace outside
+      its own tests — nothing in `mvmctl` or elsewhere invokes it, so none of
+      the above runs on a real resume yet. A session parked with
+      `approval_head: None` resumes with no ledger fence at all.
 - [ ] **WS5 — Retention ladder + GC.** Retention classes, one-way demotion,
       first GC over `checkpoints_dir()` with parent-reachability refusal.
 - [ ] **WS6 — CLI.** `mvmctl session {open,ls,show,park,resume,approve,close}`.
