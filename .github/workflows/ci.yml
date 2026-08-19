@@ -389,6 +389,12 @@ jobs:
       - name: vsock-only egress (no guest NIC on the vmm/HVF path, ADR-100)
         run: cargo run -p xtask -- check-vsock-only-egress
 
+      # The in-guest toolbox is deliberately ungoverned — the microVM boundary
+      # bounds it. What the boundary cannot bound is the guest originating a
+      # connection outward, so that is what this checks.
+      - name: no outbound tool client in guest-shipped code
+        run: cargo run -p xtask -- check-no-guest-tool-client
+
       # The other half of the same rule. The gate above says a guest has only
       # the vsock channel; this one says it speaks exactly one protocol over
       # it. A guest made FlowMux-only while the host still served the old
