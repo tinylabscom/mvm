@@ -328,6 +328,16 @@ const SESSION_SUB: &[(&str, AuditPosture)] = &[
     ("reap", AuditPosture::Emits("Kill")),
 ];
 
+const AGENT_SESSION_SUB: &[(&str, AuditPosture)] = &[
+    // Creating the durable record is covered by the top-level command
+    // envelope; parking and resuming also append their lifecycle entries.
+    ("open", AuditPosture::Emits("cmd.agent-session")),
+    ("ls", AuditPosture::ReadOnly),
+    ("show", AuditPosture::ReadOnly),
+    ("park", AuditPosture::Emits("session.parked")),
+    ("resume", AuditPosture::Emits("session.resumed")),
+];
+
 const PROC_SUB: &[(&str, AuditPosture)] = &[
     ("start", AuditPosture::Emits("VmProcStart")),
     ("ls", AuditPosture::ReadOnly),
@@ -565,6 +575,10 @@ const AUDIT_POSTURE: &[(&str, AuditPosture)] = &[
     // Sprint 52 W2 — bundles + trust store.
     ("bundle", AuditPosture::DelegatesToSub(BUNDLE_SUB)),
     ("trust", AuditPosture::DelegatesToSub(TRUST_SUB)),
+    (
+        "agent-session",
+        AuditPosture::DelegatesToSub(AGENT_SESSION_SUB),
+    ),
     // Plan 73 Followup C — sealed deps-volume cache verbs.
     ("deps", AuditPosture::DelegatesToSub(DEPS_SUB)),
     // Plan 76 Phase 6 — portable signed `.mvm` artifacts.
@@ -780,9 +794,13 @@ fn audit_posture_emits_entries_reference_known_audit_kinds() {
         // removal in the chain before deleting the segments it names.
         "chain.pruned",
         // Top-level command audit envelopes.
+        "cmd.agent-session",
         "cmd.deploy",
         // Image time-travel restore marker.
         "image.reverted",
+        // Durable agent-session lifecycle markers.
+        "session.parked",
+        "session.resumed",
     ];
 
     let mut failures: Vec<(String, &'static str)> = Vec::new();
