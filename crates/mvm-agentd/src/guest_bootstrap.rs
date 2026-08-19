@@ -32,12 +32,19 @@ pub struct EgressClientMissing;
 /// classifying per-error would need every path to preserve an errno, and one
 /// that stopped doing so would silently go back to shouting.
 fn rootfs_is_read_only() -> bool {
-    let Ok(mounts) = std::fs::read_to_string("/proc/mounts") else {
-        // Unreadable /proc: assume writable, which keeps every failure loud.
-        // The wrong guess here costs noise, and the other one costs silence.
-        return false;
-    };
-    root_is_read_only_in(&mounts)
+    // Actually once, not once per step. Every optional step consults this, so
+    // the un-cached version read the file six times on exactly the sealed boot
+    // this exists to quieten, and the doc above claimed otherwise. The mount
+    // cannot change under a running init, so caching costs nothing.
+    static READ_ONLY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *READ_ONLY.get_or_init(|| {
+        let Ok(mounts) = std::fs::read_to_string("/proc/mounts") else {
+            // Unreadable /proc: assume writable, which keeps every failure loud.
+            // The wrong guess here costs noise, and the other one costs silence.
+            return false;
+        };
+        root_is_read_only_in(&mounts)
+    })
 }
 
 /// The `/proc/mounts` half of [`rootfs_is_read_only`], split out so it can be
