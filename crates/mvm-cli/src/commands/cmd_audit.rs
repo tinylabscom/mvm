@@ -232,7 +232,7 @@ impl Commands {
             Commands::Build(a) => a.action.verb_name(),
             Commands::Deploy(_) => "deploy",
             Commands::ShellInit(_) => "shell-init",
-            // `ops <sub>` delegates to the per-op verb (metrics/bench/config).
+            // `ops <sub>` delegates to the per-op verb (metrics/config/MCP).
             Commands::Ops(a) => a.action.verb_name(),
             Commands::Network(_) => "network",
             Commands::Catalog(_) => "catalog",

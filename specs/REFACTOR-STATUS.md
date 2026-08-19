@@ -1,6 +1,6 @@
 # Refactor status
 
-Last updated: 2026-08-18
+Last updated: 2026-08-19
 
 This is the cross-plan progress index. The owning plan remains authoritative
 for detailed scope and acceptance criteria.
@@ -1519,7 +1519,8 @@ for detailed scope and acceptance criteria.
   - [x] Remove branch-local multi-gigabyte Cargo target caches
   - [x] Share nested `mvm-cli` builds across feature fingerprints
   - [x] Move man-page tests onto Test's warm compile graph
-  - [x] Keep the removed MCP server and smoke lane out of CI
+  - [x] Keep a dedicated MCP smoke lane out of CI; the later restored server is
+        covered by workspace tests and a named no-boot consumer
   - [x] Complete workspace and Linux clippy verification; the first live run
         passed and measured a 19–21 minute runner wait
 

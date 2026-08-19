@@ -41,7 +41,7 @@ is `env::sign`, install/entitlement re-signing → `env sign`. `bundle`/`deps`
 already own subcommands → keep top-level; fold in only if it reads better.
 The clear single-verb wins are `attest`/`receipt`/`audit`.)
 
-**`ops/`** — `ops metrics` · `bench` · `config`.
+**`ops/`** — `ops metrics` · `ops config` · `ops mcp`.
 
 **`env/`** (D5) — `env bootstrap` · `cleanup` · `uninstall` · `update`
 · `sign` (`env::sign` — re-sign mvmctl+supervisors with the VMM entitlements).

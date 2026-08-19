@@ -103,6 +103,7 @@ const ENV_SUB: &[(&str, AuditPosture)] = &[
 const OPS_SUB: &[(&str, AuditPosture)] = &[
     ("metrics", AuditPosture::ReadOnly),
     ("config", AuditPosture::Emits("ConfigChange")),
+    ("mcp", AuditPosture::InteractiveOrControl),
 ];
 
 // `kernel build` compiles/downloads a microVM kernel into the local

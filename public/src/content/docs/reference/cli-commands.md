@@ -25,7 +25,7 @@ verification under `trust`. Domains that already own their own subcommands
 | Daily drivers (top-level) | `machine` (`run`/`fork`/`restore`/`exec`/`console`/`logs`/`stop`/`forward`/…), `ls`, `build`, `doctor`, `init`, `bootstrap` |
 | `vm <sub>` | `pause`, `resume`, `snapshot`, `save`, `restore`, `checkpoint`, `cp`, `fs`, `proc`, `diff`, `wait`, `boot-report`, `set-ttl`, `forward`, `sandbox`, `session`, `volume` |
 | `build <sub>` | `image` (the former `build`), `compile`, `validate`, `kernel`, `runtime-overlay` |
-| `ops <sub>` | `metrics`, `bench`, `config` |
+| `ops <sub>` | `metrics`, `config`, `mcp` |
 | `env <sub>` | `bootstrap`, `cleanup`, `uninstall`, `update`, `sign` |
 | `trust <sub>` | `add`/`list`/`remove` (publishers), `attest`, `receipt`, `audit` |
 | Already-grouped top-level | `image`, `catalog`, `manifest`, `storage`, `network`, `cache`, `pool`, `secret`, `bundle`, `deps`, `artifact` |
@@ -1070,6 +1070,7 @@ running microVM.
 | `mvmctl completions <bash\|zsh>` | Print a completion script. `shell-init`'s eval block calls this; the hidden `--emit-completions` flag it used to carry is gone |
 | `mvmctl ops metrics` | Show runtime metrics (Prometheus text format) |
 | `mvmctl ops metrics --json` | Show runtime metrics as JSON |
+| `mvmctl ops mcp stdio` | Serve capability-derived `MvmClient` tools as newline-delimited MCP JSON-RPC over local stdin/stdout |
 | `mvmctl env uninstall` | Remove Firecracker, the builder microVM image, and all mvm state (confirmation required) |
 | `mvmctl env uninstall -y` | Uninstall without confirmation |
 | `mvmctl env uninstall --all` | Also remove ~/.mvm/ config dir and /usr/local/bin/mvmctl binary |
