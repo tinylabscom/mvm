@@ -88,6 +88,7 @@ fn collect_help_width_violations(
 
 // Group module aliases — give tests short names (`cleanup`, `up`, etc.) that
 // follow the dispatcher's naming, regardless of which group they live in.
+use super::agent_session;
 use super::build::build;
 use super::build::compile;
 use super::build::group as build_group;
@@ -1904,6 +1905,152 @@ fn test_parse_port_spec_invalid() {
 fn top_level_listing_verbs_are_unrecognized() {
     assert!(Cli::try_parse_from(["mvmctl", "ls"]).is_err());
     assert!(Cli::try_parse_from(["mvmctl", "ps"]).is_err());
+}
+
+// --- `agent-session`: the durable-agent-session operator surface ---
+
+#[test]
+fn agent_session_ls_parses() {
+    let cli = Cli::try_parse_from(["mvmctl", "agent-session", "ls"]).unwrap();
+    assert!(matches!(cli.command, Commands::AgentSession(_)));
+}
+
+#[test]
+fn agent_session_open_requires_an_id_and_takes_repeatable_members() {
+    assert!(Cli::try_parse_from(["mvmctl", "agent-session", "open"]).is_err());
+
+    let cli = Cli::try_parse_from([
+        "mvmctl",
+        "agent-session",
+        "open",
+        "sess-a",
+        "--member",
+        "vm-one",
+        "--member",
+        "vm-two",
+        "--resume-point",
+        "sha256:abababababababababababababababababababababababababababababababab",
+    ])
+    .unwrap();
+    let Commands::AgentSession(args) = cli.command else {
+        panic!("expected the agent-session command")
+    };
+    let agent_session::AgentSessionAction::Open(open) = args.action else {
+        panic!("expected the open subcommand")
+    };
+    assert_eq!(open.session_id, "sess-a");
+    assert_eq!(open.members, vec!["vm-one", "vm-two"]);
+    assert!(open.resume_point.is_some());
+}
+
+#[test]
+fn agent_session_open_needs_neither_a_member_nor_a_resume_point() {
+    // Both are legal to omit: a session with no resume point is refused at
+    // resume time, not at open time, and one with no member simply cannot
+    // chain its park.
+    let cli = Cli::try_parse_from(["mvmctl", "agent-session", "open", "sess-a"]).unwrap();
+    let Commands::AgentSession(args) = cli.command else {
+        panic!("expected the agent-session command")
+    };
+    let agent_session::AgentSessionAction::Open(open) = args.action else {
+        panic!("expected the open subcommand")
+    };
+    assert!(open.members.is_empty());
+    assert!(open.resume_point.is_none());
+}
+
+#[test]
+fn agent_session_show_requires_an_id() {
+    assert!(Cli::try_parse_from(["mvmctl", "agent-session", "show"]).is_err());
+    assert!(Cli::try_parse_from(["mvmctl", "agent-session", "show", "sess-alpha"]).is_ok());
+}
+
+#[test]
+fn agent_session_verb_is_not_named_session() {
+    // `mvmctl machine session` already means machine-session residency.
+    // A bare `session` verb would collide with it in the operator's head.
+    assert!(Cli::try_parse_from(["mvmctl", "session", "ls"]).is_err());
+}
+
+#[test]
+fn agent_session_park_requires_a_reason() {
+    assert!(Cli::try_parse_from(["mvmctl", "agent-session", "park", "sess-a"]).is_err());
+    assert!(
+        Cli::try_parse_from([
+            "mvmctl",
+            "agent-session",
+            "park",
+            "sess-a",
+            "--reason",
+            "approval-wait",
+        ])
+        .is_ok()
+    );
+}
+
+#[test]
+fn agent_session_resume_requires_the_workload_material() {
+    // The session record deliberately carries no image, kernel or size, so
+    // the operator supplies them. A resume that could be typed without them
+    // would have to guess, which is the thing the flags exist to prevent.
+    assert!(Cli::try_parse_from(["mvmctl", "agent-session", "resume", "sess-a"]).is_err());
+
+    let cli = Cli::try_parse_from([
+        "mvmctl",
+        "agent-session",
+        "resume",
+        "sess-a",
+        "--backend",
+        "hvf",
+        "--image",
+        "demo",
+        "--image-sha256",
+        "abababababababababababababababababababababababababababababababab",
+        "--cpus",
+        "2",
+        "--mem-mib",
+        "512",
+    ])
+    .unwrap();
+    let Commands::AgentSession(args) = cli.command else {
+        panic!("expected the agent-session command")
+    };
+    let agent_session::AgentSessionAction::Resume(resume) = args.action else {
+        panic!("expected the resume subcommand")
+    };
+    assert_eq!(resume.backend, "hvf");
+    assert_eq!(resume.image, "demo");
+    assert_eq!(resume.cpus, 2);
+    assert_eq!(resume.mem_mib, 512);
+    assert!(
+        resume.kernel_sha256.is_none(),
+        "a backend that carries its own kernel supplies no sha"
+    );
+}
+
+#[test]
+fn agent_session_park_takes_a_journal_cursor_and_an_approval_head() {
+    let cli = Cli::try_parse_from([
+        "mvmctl",
+        "agent-session",
+        "park",
+        "sess-a",
+        "--reason",
+        "idle",
+        "--journal-cursor",
+        "42",
+        "--approval-head",
+        "sha256:abababababababababababababababababababababababababababababababab",
+    ])
+    .unwrap();
+    let Commands::AgentSession(args) = cli.command else {
+        panic!("expected the agent-session command")
+    };
+    let agent_session::AgentSessionAction::Park(park) = args.action else {
+        panic!("expected the park subcommand")
+    };
+    assert_eq!(park.journal_cursor, 42);
+    assert!(park.approval_head.is_some());
 }
 
 #[test]

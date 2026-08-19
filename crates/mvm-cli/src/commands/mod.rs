@@ -1,3 +1,4 @@
+mod agent_session;
 mod bench;
 mod bootstrap;
 mod build;
@@ -239,6 +240,9 @@ pub(in crate::commands) enum Commands {
     /// Manage trusted bundle publishers
     #[command(display_order = 13)]
     Trust(trust::Args),
+    /// Inspect, park, and resume durable agent sessions
+    #[command(name = "agent-session", display_order = 12)]
+    AgentSession(agent_session::Args),
     /// Inspect cached application dependencies
     #[command(display_order = 14)]
     Deps(deps::Args),
