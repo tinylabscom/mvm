@@ -122,4 +122,4 @@ jobs:
       # already passed CI, and its only job is to leave a cache behind. A
       # genuine breakage is caught by the lanes that gate.
       - name: Build the workspace to populate the cache
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: ./scripts/cargo-stable.sh clippy --workspace --all-targets -- -D warnings

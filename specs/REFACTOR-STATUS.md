@@ -1,11 +1,20 @@
 # Refactor status
 
-Last updated: 2026-08-18
+Last updated: 2026-08-19
 
 This is the cross-plan progress index. The owning plan remains authoritative
 for detailed scope and acceptance criteria.
 
 ## Completed issue closeouts
+
+- [x] **Faster Rust compilation — nightly Cranelift development path.** The
+      dated nightly compiler, eight frontend threads, and Cranelift cut a cold
+      representative build from 172.14s to 66.48s (61.4%). Tests and release
+      builds retain LLVM; Clippy retains stable 1.96 without suppressions.
+      Embedded-host and runtime-overlay guest binaries remain reproducible on
+      their Nix-aligned Rust 1.91.1 pin, isolated from outer nightly flags and
+      host compiler wrappers. The contributor shell was realized successfully
+      in the libkrun builder VM.
 
 - [x] **Issue #2634 — sealed guests have writable runtime state without a
       writable root.** The universal initramfs mounts `/run` and `/tmp` as

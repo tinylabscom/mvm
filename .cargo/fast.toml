@@ -1,0 +1,29 @@
+# Nightly-only contributor build settings. Keep these separate from
+# `.cargo/config.toml`: release, MSRV, and compatibility lanes explicitly use
+# stable toolchains and must remain able to load the workspace configuration.
+
+[build]
+rustflags = ["-Z", "threads=8"]
+
+# Target-specific rustflags take precedence over `[build].rustflags`, so the
+# Linux targets repeat the frontend setting while retaining the fast linker.
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-Z", "threads=8", "-C", "link-arg=-fuse-ld=lld"]
+
+[target.aarch64-unknown-linux-gnu]
+rustflags = ["-Z", "threads=8", "-C", "link-arg=-fuse-ld=lld"]
+
+[unstable]
+codegen-backend = true
+
+# Cranelift is for the edit/build/run loop only. Test and release artifacts keep
+# LLVM so panic unwinding and optimized shipped binaries retain their existing
+# behavior.
+[profile.dev]
+codegen-backend = "cranelift"
+
+[profile.test]
+codegen-backend = "llvm"
+
+[profile.release]
+codegen-backend = "llvm"

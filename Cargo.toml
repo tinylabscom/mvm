@@ -660,6 +660,7 @@ opt-level = 3
 # interpreter dependency, so it boots in any rootfs — the same reason
 # mkGuest static-links its own /init. Both binaries are libc-only (no
 # TLS/ring/openssl), so the musl build is unencumbered.
+rust = "1.91.1"
 zig = "0.13.0"
 cargo-zigbuild = "0.20.0"
 
