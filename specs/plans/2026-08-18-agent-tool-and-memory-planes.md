@@ -108,9 +108,11 @@ socket.
 - [x] Discovery verbs answer from the plan binding — that is WS1's
       `admitted_catalog`. A namespace that gains a tool compiles to different
       bindings, so it cannot widen an admission already in flight.
-- [ ] The transport itself: a host-side client that fetches a namespace and
-      hands it to `compile_namespace`. Nothing guest-reachable, and the gate
-      below already refuses the shape that would be wrong.
+- [ ] **WS3c — The transport.** Fully specified below; implementing it is
+      mechanical. It is last on purpose: it is the only part with no security
+      properties of its own, and putting it behind a seam that already refuses
+      everything a hostile namespace can express means none of those refusals
+      have to be tested through a socket.
 - [x] A gate — in the `xtask check-*` family — refusing an outbound tool
       protocol client on any guest-reachable path, in the manner of
       `check-vsock-only-egress`. Without it this decision decays the first time
@@ -121,6 +123,53 @@ socket.
       gate that greps for the protocol's name rather than for outbound
       connection setup would refuse it. A gate written the lazy way here
       breaks the common packaging of that ecosystem.
+
+#### WS3c design — the transport, specified
+
+**A namespace comes from operator configuration, not from discovery.** The host
+reads a declared list of upstream servers; it does not go looking for them.
+Discovery would make the set of things a workload might be offered depend on
+the network at boot time, which is the mutable-namespace problem wearing a
+different hat.
+
+**One `ServiceHandler` per namespace.** `compile_namespace` yields the
+descriptors; the handler owns the client and routes `verb` to the matching
+upstream tool. It needs no new gate: `dispatch_capability` already enforces the
+binding, the descriptor digest, the argument policy, the size bounds, the
+timeout and replay, and it does that before the handler is reached.
+
+**Prefer a host-side subprocess over stdio to a network client.** A subprocess
+adds no network surface, no new dependency, and no destination to admit, and it
+is how most of that ecosystem ships anyway. A remote server is not a second
+transport — it is a *destination*, and it goes through the ordinary egress
+policy like any other, which is what keeps one rule instead of two.
+
+**Admission is fail-closed.** A namespace that cannot be fetched, cannot be
+parsed, or fails `compile_namespace` refuses the admission rather than booting
+a workload whose catalog advertises tools that will error on first call. A
+planner that is told a tool exists and then finds it does not is worse off than
+one never told: it will retry, and the retry is indistinguishable from the
+enumeration the refusal path is bounding.
+
+**Never re-fetch inside an admission.** If an upstream server dies mid-session,
+its calls fail and the catalog does not change; the surface is fixed for the
+admission's lifetime and a new surface requires a new admission. A handler that
+re-fetched on failure would reintroduce exactly the mid-epoch mutation the
+compile-once rule exists to prevent.
+
+**Upstream text is `Observed`, in ADR-047's sense.** Names and descriptions are
+authored by a third party and land directly in a model's context window. They
+are bounded at compile time and they never become identifiers beyond the verb,
+which is why an unrepresentable name is refused rather than repaired. When the
+memory plane lands, a description quoted into a memory record carries the
+`Observed` class for the same reason.
+
+Tests worth having, none of which need a live server: a namespace that fails to
+fetch refuses the admission; a namespace that compiles registers exactly its
+compiled verbs and no others; a verb absent from the compiled set is `NotBound`
+through the shipped path; an upstream process that dies leaves the catalog
+unchanged; and a call whose upstream response exceeds the descriptor's output
+bound is refused by the existing gate rather than by the handler.
 
 ### WS4 — Refusal is a signal
 
