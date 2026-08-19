@@ -468,8 +468,10 @@ pub fn provision_egress_ca() {
 /// never wanted networking.
 pub fn provision_flowmux_identity() {
     #[cfg(target_os = "linux")]
-    if let Err(e) = crate::flowmux_drive::provision_identity_from_drive() {
-        eprintln!("mvm-init: FlowMux identity not provisioned: {e}");
+    if let Err(error) = crate::flowmux_drive::provision_identity_from_drive()
+        && let Some(warning) = error.boot_warning()
+    {
+        eprintln!("mvm-init: FlowMux identity not provisioned: {warning}");
     }
 }
 

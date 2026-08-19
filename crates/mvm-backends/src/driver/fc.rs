@@ -17,7 +17,8 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, anyhow, bail};
 use mvm_agentd::vsock::{
     CONSOLE_PORT_BASE, GUEST_AGENT_PORT, GUEST_CID, GuestRequest, GuestResponse,
-    WORKLOAD_EXIT_PORT, connect_to_port, dev_console_data_ports, send_request_stream,
+    WORKLOAD_EXIT_PORT, connect_to_port, connect_to_port_once, dev_console_data_ports,
+    send_request_stream,
 };
 use mvm_core::config::vm_state_dir;
 use mvm_core::launch_trace::LaunchTraceRecorder;
@@ -969,7 +970,16 @@ impl VmmDriver for FcDriver {
                     abs_dir
                 );
             }
-            if connect_to_port(&vsock_uds, GUEST_AGENT_PORT, VSOCK_CONNECT_TIMEOUT_SECS).is_ok() {
+            // This loop already owns the deadline and backoff. A normal RPC
+            // connection retries transient races internally, starting with a
+            // 100 ms delay; nesting that cadence here charged every fast boot
+            // whose first probe was early an extra 100 ms. Firecracker exposes
+            // no stable host event for "the guest bound this vsock port", so
+            // retain this bounded compatibility poll with one CONNECT attempt
+            // per probe and verify VMM identity on every pass above.
+            if connect_to_port_once(&vsock_uds, GUEST_AGENT_PORT, VSOCK_CONNECT_TIMEOUT_SECS)
+                .is_ok()
+            {
                 break;
             }
             if Instant::now() >= deadline {
