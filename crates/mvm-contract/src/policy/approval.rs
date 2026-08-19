@@ -1420,4 +1420,55 @@ mod tests {
             "the same approval decision under two different sessions must not collide"
         );
     }
+
+    #[test]
+    fn head_agrees_after_a_ledger_rebuild_from_history() {
+        // The comparison a resume actually performs spans a park and a resume
+        // days apart: the head recorded at park time comes off a *live*
+        // ledger, and the head a resume compares it against comes off a
+        // ledger rebuilt from the journal via `from_history` — the shape
+        // every real host process reconstructs after a restart. Every other
+        // `head()` test above builds and reads one live ledger in one
+        // process, which would pass even if a live ledger and its rebuilt
+        // twin disagreed. This is the missing witness for that.
+        let (request_a, evaluation) = ask_evaluation();
+        let mut journal = journal();
+        let mut ledger = ApprovalLedger::new(session());
+        let approval_a = approval_request(&request_a, &evaluation);
+        ledger
+            .request(&mut journal, &evaluation, approval_a.clone(), 1_000)
+            .expect("request approval a");
+        ledger
+            .respond(
+                &mut journal,
+                ApprovalResponse {
+                    approval_id: approval_a.approval_id.clone(),
+                    operator_id: operator("ops-a"),
+                    outcome: ApprovalOutcome::Approved,
+                    response_nonce: 1,
+                    reason: None,
+                    ticket_ref: None,
+                },
+                1_001,
+            )
+            .expect("authorized response");
+
+        let mut approval_b = approval_request(&request_a, &evaluation);
+        approval_b.approval_id = approval_id("approval-2");
+        approval_b.idempotency_key = IdempotencyKey::parse("approval-retry-2").expect("key");
+        ledger
+            .request(&mut journal, &evaluation, approval_b.clone(), 1_002)
+            .expect("request approval b, left pending");
+
+        let history = journal.history(None, 32).expect("history");
+        let rebuilt =
+            ApprovalLedger::from_history(session(), &history.events).expect("rebuild from history");
+
+        assert_eq!(
+            ledger.head(),
+            rebuilt.head(),
+            "a ledger rebuilt from its own journal history must hash the same as the live one \
+             a resume parked against"
+        );
+    }
 }

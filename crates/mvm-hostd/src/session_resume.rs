@@ -233,9 +233,25 @@ pub fn resume_session(
     let parent = checkpoints
         .by_digest(digest)?
         .ok_or_else(|| anyhow::anyhow!("resume point {digest} is not in the checkpoint store"))?;
-    // Content only. This catches a blob edited after the checkpoint was sealed;
-    // it does not catch a checkpoint that was never audited, which needs a
-    // signed chain anchor the caller would have to supply and no caller holds.
+    // `by_digest` matches on the record's stored `meta_digest` as written, and
+    // `verify_content` hashes blobs against the record's stored
+    // `content[].sha256` as written — both trust the same file a tamperer who
+    // can edit a blob can also edit. Recomputing the digest from the record's
+    // own fields closes that: a rewritten `content[].sha256` moves
+    // `compute_meta_digest()` away from the stored `meta_digest`, so the two
+    // no longer agree and this refuses before content is even hashed. Content
+    // verification alone catches neither a tampered blob (this closes that)
+    // nor an unaudited checkpoint reliably — the latter needs lineage
+    // verification against a signed chain anchor, which stays absent: no
+    // caller here holds one yet.
+    let recomputed = parent.compute_meta_digest();
+    if recomputed != parent.meta_digest {
+        anyhow::bail!(
+            "resume point {digest} failed integrity: stored meta_digest {} does not match its own recomputed digest {} (record edited after it was sealed)",
+            parent.meta_digest,
+            recomputed
+        );
+    }
     mvm_runtime::checkpoint::verify_content(checkpoints, &parent)?;
 
     let input = synthesis_for_resume(&record, req.material);
@@ -556,6 +572,54 @@ mod tests {
         assert!(
             err.to_string().contains("integrity"),
             "the refusal must be the integrity check: {err}"
+        );
+        assert_still_parked(&fx, &rec);
+    }
+
+    #[test]
+    fn a_blob_tampered_alongside_its_recorded_hash_still_refuses() {
+        // The attack `verify_content` alone cannot catch: an attacker who can
+        // edit a content blob can edit the record beside it. Rewrite the
+        // blob's recorded sha256 to match the tampered bytes and leave
+        // `meta_digest` untouched — `by_digest` still finds the record (it
+        // matches on `meta_digest` as stored) and `verify_content` passes (it
+        // hashes against `content[].sha256` as stored). The digest self-check
+        // is what catches this: `content` feeds `compute_meta_digest`, so a
+        // rewritten `content[].sha256` moves the recomputed digest away from
+        // the stored `meta_digest`.
+        let (_env, _home) = isolated_host(GrantCeiling::default());
+        let fx = Fixture::new();
+        let parent = seed_checkpoint(&fx.checkpoints, fx.tmp.path(), "cp-parent");
+
+        let mut rec = parked_record("sess-alpha");
+        rec.parent_checkpoint = Some(parent.meta_digest.clone());
+        fx.sessions.write(&rec).unwrap();
+
+        let blob_path = fx.checkpoints.content_dir(&parent.id).join("rootfs.ext4");
+        let tampered = b"tampered-and-rehashed";
+        std::fs::write(&blob_path, tampered).unwrap();
+        let tampered_sha256 = mvm_core::crypto::image_verify::sha256_file(&blob_path).unwrap();
+
+        let mut forged = fx.checkpoints.read_meta(&parent.id).unwrap();
+        let blob = forged
+            .content
+            .iter_mut()
+            .find(|b| b.name == "rootfs.ext4")
+            .expect("the seeded checkpoint records a rootfs blob");
+        blob.sha256 = tampered_sha256;
+        // Precondition: the forgery is content-consistent (verify_content
+        // alone would pass it) but digest-inconsistent (compute_meta_digest
+        // now disagrees with the untouched meta_digest).
+        assert_ne!(forged.compute_meta_digest(), forged.meta_digest);
+        fx.checkpoints.write_meta(&forged).unwrap();
+
+        let m = material();
+        let err = fx
+            .resume(&fx.request(&rec, &m))
+            .expect_err("a record forged to vouch for its own tampered blob must refuse");
+        assert!(
+            err.to_string().contains("integrity"),
+            "the refusal must be the digest self-check: {err}"
         );
         assert_still_parked(&fx, &rec);
     }
