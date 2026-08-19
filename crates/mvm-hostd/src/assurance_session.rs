@@ -280,7 +280,7 @@ pub fn open_on(
         trial_id: request.declaration.trial_id.clone(),
         source_digest: request.declaration.source_digest.clone(),
     };
-    let ledger = AssuranceLedger::new(request.emitter, plan);
+    let ledger = AssuranceLedger::new(request.emitter.as_ref(), plan);
     let refs = ledger
         .open_session(&identity)
         .map_err(|error| SessionRefusal::NotRecorded(error.to_string()))?;

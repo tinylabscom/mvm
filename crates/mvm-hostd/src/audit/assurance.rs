@@ -116,17 +116,40 @@ impl LedgerRefs {
     }
 }
 
+/// Where an assurance record is written.
+///
+/// Two processes need to write these and they do not share an audit route. The
+/// supervisor holds an [`AuditEmitter`] and writes chain-signed
+/// `PlanAuditEntry` lines with receipts. The broker holds neither — it records
+/// through the audit-signer, whose envelope is a category-and-fields document.
+/// A trait is the only thing that lets one ledger serve both without the
+/// caller choosing a code path per process.
+///
+/// Receipts are deliberately part of the contract rather than an implementation
+/// detail: a sink that cannot write one must say so, because a citation to a
+/// receipt nobody wrote reads as proof.
+pub trait AssuranceAuditSink {
+    /// Record one entry, and its receipt when the caller requires one.
+    fn record(&self, entry: &PlanAuditEntry, receipt: EvidenceReceipt) -> Result<EmittedEvidence>;
+}
+
+impl AssuranceAuditSink for AuditEmitter {
+    fn record(&self, entry: &PlanAuditEntry, receipt: EvidenceReceipt) -> Result<EmittedEvidence> {
+        self.emit_entry_for_evidence(entry, receipt)
+    }
+}
+
 /// Writes the records an assurance campaign cites.
 pub struct AssuranceLedger<'a> {
-    emitter: &'a AuditEmitter,
+    sink: &'a dyn AssuranceAuditSink,
     plan: &'a ExecutionPlan,
 }
 
 impl<'a> AssuranceLedger<'a> {
-    /// Bind a ledger to one admitted plan.
+    /// Bind a ledger to one admitted plan, writing through `sink`.
     #[must_use]
-    pub fn new(emitter: &'a AuditEmitter, plan: &'a ExecutionPlan) -> Self {
-        Self { emitter, plan }
+    pub fn new(sink: &'a dyn AssuranceAuditSink, plan: &'a ExecutionPlan) -> Self {
+        Self { sink, plan }
     }
 
     /// Record that a session opened, and return what a binding may cite.
@@ -228,8 +251,8 @@ impl<'a> AssuranceLedger<'a> {
     {
         let entry = for_plan(self.plan, None, event, labels);
         let emitted = self
-            .emitter
-            .emit_entry_for_evidence(&entry, receipt)
+            .sink
+            .record(&entry, receipt)
             .with_context(|| format!("emitting assurance event {event}"))?;
         LedgerRefs::from_emitted(&entry, &emitted)
     }
@@ -284,4 +307,190 @@ pub fn audit_citations_resolve(binding: &MvmBinding, chain_path: &Path) -> Resul
 #[must_use]
 pub fn is_publishable_claim(outcome: TrialOutcome) -> bool {
     outcome.is_certifying_claim()
+}
+
+/// A sink that records through the audit-signer, for a process holding no
+/// [`AuditEmitter`] — which is every broker.
+///
+/// # What this sink cannot do
+///
+/// It cannot write a receipt. Receipts are appended by the emitter's receipt
+/// store, and the broker has none, so [`EvidenceReceipt::Required`] is an
+/// error here rather than a silent `receipt_id: None`. That is the whole point
+/// of putting receipts in the trait: the split between what each process may
+/// record is enforced, not remembered. Probes are audit-only and ride this
+/// sink; session open and trial completion carry receipts and stay with the
+/// supervisor.
+pub struct SignerSink {
+    client: crate::broker::audit_client::AuditClient,
+    workload_id: String,
+    tenant_id: String,
+    session_id: String,
+}
+
+impl SignerSink {
+    /// Bind a sink to one workload's audit route.
+    #[must_use]
+    pub fn new(
+        client: crate::broker::audit_client::AuditClient,
+        workload_id: impl Into<String>,
+        tenant_id: impl Into<String>,
+        session_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            client,
+            workload_id: workload_id.into(),
+            tenant_id: tenant_id.into(),
+            session_id: session_id.into(),
+        }
+    }
+
+    /// The category every assurance record is appended under.
+    pub const CATEGORY: &'static str = "assurance";
+}
+
+impl AssuranceAuditSink for SignerSink {
+    fn record(&self, entry: &PlanAuditEntry, receipt: EvidenceReceipt) -> Result<EmittedEvidence> {
+        if matches!(receipt, EvidenceReceipt::Required) {
+            anyhow::bail!(
+                "the audit-signer sink cannot write a receipt for {}; \
+                 receipt-bearing records belong to the process holding the emitter",
+                entry.event
+            );
+        }
+
+        // The digest still covers the `PlanAuditEntry`, so a reference minted
+        // here names the same logical record the emitter would have named. The
+        // signer's chain stores it inside `fields`, which is what a resolver
+        // reads on this route.
+        let audit_digest = super::evidence::audit_entry_digest_hex(entry)?;
+        let fields = serde_json::to_value(entry).context("encoding the assurance entry")?;
+        let request = mvm_core::protocol::audit_signer::AppendEntryRequest::AppendEntry {
+            request_id: format!("assurance-{audit_digest}"),
+            category: Self::CATEGORY.to_string(),
+            ts: entry.timestamp.to_rfc3339(),
+            workload_id: self.workload_id.clone(),
+            tenant_id: self.tenant_id.clone(),
+            session_id: self.session_id.clone(),
+            correlation_id: format!("assurance-{}", entry.event),
+            fields,
+        };
+
+        // The ledger is synchronous and the client is not. Mirrors the
+        // emitter's own bridge: block on a scoped thread when a runtime is
+        // already present, because blocking inside one is a tokio panic.
+        let append = || -> Result<()> {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .context("building a runtime for the assurance audit append")?;
+            runtime
+                .block_on(self.client.append(&request))
+                .map(|_| ())
+                .context("appending the assurance entry through the audit-signer")
+        };
+        if tokio::runtime::Handle::try_current().is_ok() {
+            std::thread::scope(|scope| {
+                scope
+                    .spawn(append)
+                    .join()
+                    .map_err(|_| anyhow::anyhow!("assurance audit append thread panicked"))?
+            })?;
+        } else {
+            append()?;
+        }
+
+        Ok(EmittedEvidence {
+            audit_digest,
+            receipt_id: None,
+        })
+    }
+}
+
+#[cfg(test)]
+mod sink_tests {
+    use super::*;
+    use mvm_core::plan::TenantId;
+
+    fn entry(event: &str) -> PlanAuditEntry {
+        PlanAuditEntry {
+            timestamp: chrono::Utc::now(),
+            tenant: TenantId("local".to_string()),
+            plan_id: mvm_core::plan::PlanId("plan-1".to_string()),
+            plan_version: 1,
+            bundle_id: None,
+            bundle_version: None,
+            image_name: "vm".to_string(),
+            image_sha256: "a".repeat(64),
+            event: event.to_string(),
+            labels: Default::default(),
+        }
+    }
+
+    fn sink() -> SignerSink {
+        // The path is never dialled: `Required` is refused before any I/O.
+        SignerSink::new(
+            crate::broker::audit_client::AuditClient::new("/nonexistent/audit.sock"),
+            "workload",
+            "local",
+            "session-1",
+        )
+    }
+
+    #[test]
+    fn the_signer_sink_refuses_a_record_it_cannot_receipt() {
+        // The split between what each process may record is enforced here
+        // rather than remembered at the call site: a broker claiming a receipt
+        // it never wrote is the failure this trait exists to make impossible.
+        let error = sink()
+            .record(
+                &entry("assurance.session_opened"),
+                EvidenceReceipt::Required,
+            )
+            .expect_err("a sink with no receipt store must refuse");
+        let text = format!("{error:#}");
+        assert!(text.contains("cannot write a receipt"), "{text}");
+        assert!(text.contains("assurance.session_opened"), "{text}");
+    }
+
+    #[test]
+    fn the_signer_sink_refuses_before_it_dials_anything() {
+        // The socket does not exist, so a sink that attempted the append would
+        // fail with a connection error instead — which would mean the refusal
+        // above was incidental rather than a rule.
+        let error = format!(
+            "{:#}",
+            sink()
+                .record(
+                    &entry("assurance.trial_completed"),
+                    EvidenceReceipt::Required
+                )
+                .expect_err("refused")
+        );
+        assert!(
+            !error.contains("nonexistent"),
+            "it dialled the socket: {error}"
+        );
+    }
+
+    #[test]
+    fn both_sinks_agree_on_the_reference_a_record_earns() {
+        // A reference minted on either route names the same logical record, so
+        // a campaign's citations do not change meaning with the process that
+        // happened to write them.
+        let entry = entry("assurance.probe");
+        let expected = super::super::evidence::audit_entry_digest_hex(&entry).expect("digest");
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let emitter = AuditEmitter::with_dir(
+            ed25519_dalek::SigningKey::from_bytes(&[51u8; 32]),
+            dir.path(),
+        )
+        .expect("emitter");
+        let via_emitter = emitter
+            .record(&entry, EvidenceReceipt::Omitted)
+            .expect("emitter records");
+        assert_eq!(via_emitter.audit_digest, expected);
+        assert!(via_emitter.receipt_id.is_none());
+    }
 }

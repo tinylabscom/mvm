@@ -344,7 +344,7 @@ impl HostAssuranceV1Handler {
             .emitter
             .as_ref()
             .ok_or(ProbeRefusal::AuditUnavailable)?;
-        let ledger = AssuranceLedger::new(emitter, &session.plan);
+        let ledger = AssuranceLedger::new(emitter.as_ref(), &session.plan);
         let refs = ledger
             .record_probe(&ProbeRecord {
                 session_id: &request.session_id,
