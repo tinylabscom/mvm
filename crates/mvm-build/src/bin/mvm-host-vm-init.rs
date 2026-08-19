@@ -3410,7 +3410,13 @@ mod linux {
         // helper — the same path the workload guest netinit uses. This only
         // exists for the lanes that still present an `eth0` at all; the
         // overlay/runtime rollout itself stays on the explicit vsock seams.
+        // The builder VM is the one tier that genuinely has a NIC, but the
+        // comment above is load-bearing: some lanes present no eth0. Both
+        // outcomes are success here — this function's contract is "the network
+        // is as configured as this lane allows", and a lane with no interface
+        // has nothing left to do.
         mvm_agentd::guest_net::configure_guest_network("eth0", &cmdline, "192.168.127.3")
+            .map(|_| ())
     }
 
     fn run_job(cmd_sh: &str) -> (i32, String) {

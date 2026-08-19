@@ -83,6 +83,12 @@ pub struct LaunchRequest {
     /// the same plan that was signed over it, rather than by a carrier
     /// travelling alongside one.
     pub(crate) grants: Option<mvm_contract::grants::Grants>,
+    /// Path to an operator-authored assurance campaign declaration.
+    ///
+    /// `None` on every ordinary launch. Present only when an operator asked
+    /// for a campaign, which is what keeps campaign discovery off the launch
+    /// critical path rather than merely cheap on it.
+    pub(crate) assurance_campaign: Option<std::path::PathBuf>,
 }
 
 impl LaunchRequest {
@@ -108,6 +114,7 @@ impl LaunchRequest {
             secret_refs: Vec::new(),
             force: false,
             grants: mvm_contract::grants::Grants::default(),
+            assurance_campaign: None,
         }
     }
 
@@ -141,6 +148,7 @@ pub struct LaunchRequestBuilder {
     secret_refs: Vec<MachineSecretRef>,
     force: bool,
     grants: mvm_contract::grants::Grants,
+    assurance_campaign: Option<std::path::PathBuf>,
 }
 
 impl LaunchRequestBuilder {
@@ -256,6 +264,13 @@ impl LaunchRequestBuilder {
         self
     }
 
+    /// Run a declared assurance campaign against this launch.
+    #[must_use]
+    pub fn assurance_campaign(mut self, path: impl Into<std::path::PathBuf>) -> Self {
+        self.assurance_campaign = Some(path.into());
+        self
+    }
+
     /// Attach a managed volume at `guest_path`.
     #[must_use]
     pub fn volume(mut self, spec: LaunchVolumeSpec) -> Self {
@@ -356,6 +371,7 @@ impl LaunchRequestBuilder {
             // granted nothing produces exactly the plan it produced before
             // grants were expressible.
             grants: (self.grants != mvm_contract::grants::Grants::default()).then_some(self.grants),
+            assurance_campaign: self.assurance_campaign,
         })
     }
 }

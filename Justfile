@@ -515,6 +515,19 @@ docs-dev: demo-assets
 docs-build: demo-assets
     cd public && pnpm build
 
+# Publish the docs site to GitHub Pages (dispatches pages.yml on main)
+docs-publish:
+    # `pages.yml` is workflow_dispatch-only on purpose — the old
+    # `push: branches:[main] paths:[public/**]` trigger was dropped in the CI
+    # cost reduction — so a docs change reaches the site only when someone asks
+    # for it. That is why this recipe exists: otherwise publishing is an
+    # undocumented `gh workflow run` you have to already know about.
+    #
+    # `--ref main`, never the current branch: Pages serves what is on main, and
+    # dispatching from a branch would publish something nobody has merged.
+    gh workflow run pages.yml --ref main
+    @echo "Dispatched pages.yml on main. Watch it with: gh run watch \$(gh run list --workflow=pages.yml --limit 1 --json databaseId --jq '.[0].databaseId')"
+
 # Build the browser-tier microVM demo assets (wasm core + guest + fixtures)
 demo-build:
     ./web/mvm-demo/build.sh

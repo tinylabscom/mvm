@@ -963,6 +963,13 @@ jobs:
         with:
           packages: lld
 
+      # This lane anchors on a checksum manifest it downloads. Whoever could
+      # swap the artifact could swap its recorded digest too, so the manifest
+      # is only worth anchoring on once its signature is checked — which is the
+      # same reasoning that made these manifests signed in the first place.
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
       # Building the root package runs `crates/mvm-cli/build.rs`, which
       # cross-compiles the embedded host binaries and needs the pinned zig.
       # Without it the lane fails before it ever boots anything.
@@ -995,9 +1002,18 @@ jobs:
           ls -la /dev/kvm
 
       - name: Fetch and verify the pinned bootable image
-        # Hash-verified against the release's own checksum manifest — the same
-        # posture every other artifact fetch in this repo uses. A corrupted
-        # download must fail here rather than surface as a boot-time mystery.
+        # Signature-verified, then hash-verified against the release's own
+        # checksum manifest — the same posture every other artifact fetch in
+        # this repo uses. A corrupted download must fail here rather than
+        # surface as a boot-time mystery, and a substituted one must fail here
+        # rather than boot.
+        env:
+          # The boot image ships on its own train, so its manifests are signed
+          # by release-boot-image.yml rather than release.yml. Pinning the
+          # wrong workflow here would accept a signature from any other
+          # workflow in this repo.
+          COSIGN_IDENTITY_REGEXP: "^https://github.com/${{ github.repository }}/.github/workflows/release-boot-image.yml@refs/tags/.*$"
+          COSIGN_OIDC_ISSUER: "https://token.actions.githubusercontent.com"
         run: |
           set -euo pipefail
           mkdir -p /tmp/boot-image && cd /tmp/boot-image
@@ -1015,6 +1031,31 @@ jobs:
             "$base/runtime-overlay-x86_64.tar.gz"
           curl -fL --retry 3 -o checksums.txt \
             "$base/default-microvm-x86_64-checksums-sha256.txt"
+          # Both signature bundles, published beside what they sign.
+          curl -fL --retry 3 -o checksums.txt.bundle \
+            "$base/default-microvm-x86_64-checksums-sha256.txt.bundle"
+          curl -fL --retry 3 -o runtime-overlay-x86_64.tar.gz.bundle \
+            "$base/runtime-overlay-x86_64.tar.gz.bundle"
+          # Signature before digest, in that order and not the other way round:
+          # a digest comparison only says the bytes match what the manifest
+          # claims, and an attacker who can replace the artifact can replace the
+          # manifest beside it. `release-boot-image.yml` cosign-signs both of
+          # these on the tag push that publishes them, so the identity below is
+          # that workflow at a tag ref — the same keyless-OIDC check
+          # `verify-release-assets.sh` applies to every other manifest in this
+          # repo. Nothing here is verified against a signature this lane fetched
+          # from the same place as the thing it signs *without* pinning who
+          # signed it.
+          cosign verify-blob \
+            --bundle checksums.txt.bundle \
+            --certificate-identity-regexp "$COSIGN_IDENTITY_REGEXP" \
+            --certificate-oidc-issuer "$COSIGN_OIDC_ISSUER" \
+            checksums.txt
+          cosign verify-blob \
+            --bundle runtime-overlay-x86_64.tar.gz.bundle \
+            --certificate-identity-regexp "$COSIGN_IDENTITY_REGEXP" \
+            --certificate-oidc-issuer "$COSIGN_OIDC_ISSUER" \
+            runtime-overlay-x86_64.tar.gz
           grep -E ' (default-microvm-vmlinux-x86_64|default-microvm-rootfs-x86_64\.ext4|default-microvm-meta-x86_64\.json)$' \
             checksums.txt > expected.txt
           test -s expected.txt
