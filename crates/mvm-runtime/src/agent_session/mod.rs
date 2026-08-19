@@ -424,19 +424,30 @@ fn fence(current: &AgentSessionRecord, expected: u64) -> Result<()> {
     Ok(())
 }
 
+/// Whether `record`'s resume point must survive garbage collection.
+///
+/// This is the one place that decides the rule: a live or hibernated session
+/// can still resume from its `parent_checkpoint`, so that checkpoint must be
+/// held. A `Closed` session is sealed and not resumable, so nothing it names
+/// needs holding. Both `pinned_checkpoints` (the automated sweep's set) and
+/// `pinning_session` (the manual-deletion door's session lookup) project from
+/// this predicate rather than re-deriving it.
+pub fn pins_resume_point(record: &AgentSessionRecord) -> bool {
+    !matches!(record.state, SandboxResidency::Closed)
+}
+
 /// Every checkpoint a live or hibernated session names as its resume point.
 ///
 /// A garbage collector consults this before reaping. Without it, a session
 /// parked for longer than the sweep's age cut loses the checkpoint it resumes
 /// from and becomes permanently unresumable — the record survives and points at
-/// nothing. `Closed` sessions are excluded deliberately: a sealed session is not
-/// resumable, so nothing it names needs holding.
+/// nothing.
 pub fn pinned_checkpoints(
     store: &AgentSessionStore,
 ) -> Result<std::collections::BTreeSet<mvm_core::checkpoint::CheckpointDigest>> {
     let mut pinned = std::collections::BTreeSet::new();
     for record in store.list()? {
-        if matches!(record.state, SandboxResidency::Closed) {
+        if !pins_resume_point(&record) {
             continue;
         }
         if let Some(digest) = record.parent_checkpoint {
@@ -444,6 +455,27 @@ pub fn pinned_checkpoints(
         }
     }
     Ok(pinned)
+}
+
+/// The live or hibernated session whose resume point is `digest`, if any.
+///
+/// Applies the same `pins_resume_point` rule `pinned_checkpoints` sweeps
+/// with, but returns the session identity rather than folding it into a set:
+/// a manual deletion refusal needs to name the session holding the pin,
+/// which the set-only helper can't.
+pub fn pinning_session(
+    store: &AgentSessionStore,
+    digest: &mvm_core::checkpoint::CheckpointDigest,
+) -> Result<Option<AgentSessionId>> {
+    for record in store.list()? {
+        if !pins_resume_point(&record) {
+            continue;
+        }
+        if record.parent_checkpoint.as_ref() == Some(digest) {
+            return Ok(Some(record.session_id));
+        }
+    }
+    Ok(None)
 }
 
 #[cfg(test)]
@@ -1009,6 +1041,21 @@ mod tests {
     fn digest_of(byte: &str) -> mvm_core::checkpoint::CheckpointDigest {
         mvm_core::checkpoint::CheckpointDigest::parse(format!("sha256:{}", byte.repeat(32)))
             .unwrap()
+    }
+
+    #[test]
+    fn pins_resume_point_holds_for_active_and_hibernated_but_not_closed() {
+        let mut active = record("sess-active");
+        active.state = SandboxResidency::Active;
+        assert!(pins_resume_point(&active));
+
+        let mut hibernated = record("sess-hibernated");
+        hibernated.state = SandboxResidency::Hibernated;
+        assert!(pins_resume_point(&hibernated));
+
+        let mut closed = record("sess-closed");
+        closed.state = SandboxResidency::Closed;
+        assert!(!pins_resume_point(&closed));
     }
 
     #[test]

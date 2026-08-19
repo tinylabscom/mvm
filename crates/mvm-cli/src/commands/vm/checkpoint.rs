@@ -739,27 +739,15 @@ fn diff(a: &str, b: &str, json: bool) -> Result<()> {
 }
 
 /// The id of a live or hibernated session whose resume point is `digest`, if
-/// any. Mirrors the pin rule `mvm_runtime::agent_session::pinned_checkpoints`
-/// applies for the automated sweep (`Active`/`Hibernated` pin, `Closed` does
-/// not) but also names the session — the set-only helper can't, and `rm`
-/// needs to tell the operator what is holding the checkpoint it refused to
-/// remove.
+/// any. Delegates the pin rule to `mvm_runtime::agent_session::pinning_session`
+/// — the one place that decides whether a session's resume point still needs
+/// holding — so `rm` can tell the operator what is holding the checkpoint it
+/// refused to remove without re-deriving that rule here.
 fn session_pinning_checkpoint(
     digest: &CheckpointDigest,
 ) -> Result<Option<mvm_contract::protocol::agent_session::AgentSessionId>> {
     let sessions = mvm_runtime::agent_session::AgentSessionStore::open();
-    for record in sessions.list().context("listing agent sessions")? {
-        if matches!(
-            record.state,
-            mvm_runtime::agent_session::SandboxResidency::Closed
-        ) {
-            continue;
-        }
-        if record.parent_checkpoint.as_ref() == Some(digest) {
-            return Ok(Some(record.session_id));
-        }
-    }
-    Ok(None)
+    mvm_runtime::agent_session::pinning_session(&sessions, digest).context("listing agent sessions")
 }
 
 /// `mvmctl vm checkpoint rm <id>`: delete a checkpoint by id.
