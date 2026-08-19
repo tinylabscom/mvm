@@ -861,6 +861,45 @@ pub struct SubstitutionService {
     /// gate (the run loop's gate is still active); a `Some` gate fails closed.
     egress_gate: Option<mvm_runtime::vmm::egress_gate::EgressGate>,
 }
+/// Which audit an error path owes, given the cause and whether the request
+/// carried a placeholder.
+///
+/// Every error on these paths is fail-closed — the socket closes WITHOUT
+/// forwarding — but the causes are not equally interesting. A refusal that
+/// dropped a placeholder and a fail-closed refusal are both claim-bearing
+/// events an operator must be able to see; a parse or forward failure is not
+/// secret-relevant and gets no entry.
+///
+/// Extracted from the two call sites that had this match inline and identical.
+/// Two copies of a security classification is how they drift, and it is why
+/// deleting either one's `FailClosed` arm changed no test: the classification
+/// had no name and so nothing could assert on it directly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ErrorAudit<'a> {
+    /// claim-12: a placeholder was dropped rather than substituted.
+    PlaceholderDropped,
+    /// A fail-closed refusal, carrying the reason to record.
+    FailClosed(&'a str),
+    /// Not secret-relevant; nothing to record.
+    Silent,
+}
+
+pub(crate) fn error_audit(
+    error: &crate::supervisor::terminator::error::TerminatorError,
+    carried_placeholder: bool,
+) -> ErrorAudit<'_> {
+    match error {
+        crate::supervisor::terminator::error::TerminatorError::Refused(_)
+            if carried_placeholder =>
+        {
+            ErrorAudit::PlaceholderDropped
+        }
+        crate::supervisor::terminator::error::TerminatorError::FailClosed(reason) => {
+            ErrorAudit::FailClosed(reason)
+        }
+        _ => ErrorAudit::Silent,
+    }
+}
 
 impl SubstitutionService {
     pub fn new(
@@ -1239,14 +1278,14 @@ impl SubstitutionService {
                 // forwarding. Audit per cause so a claim-12 drop / fail-closed
                 // refusal is observable; a parse / forward failure isn't
                 // secret-relevant.
-                match &e {
-                    terminator::error::TerminatorError::Refused(_) if carried_placeholder => {
+                match error_audit(&e, carried_placeholder) {
+                    ErrorAudit::PlaceholderDropped => {
                         self.audit_placeholder_dropped(destination.as_deref()).await;
                     }
-                    terminator::error::TerminatorError::FailClosed(reason) => {
+                    ErrorAudit::FailClosed(reason) => {
                         self.audit_fail_closed(destination.as_deref(), reason).await;
                     }
-                    _ => {}
+                    ErrorAudit::Silent => {}
                 }
                 tracing::warn!(error = %e, "terminator refused or forward failed; closing");
                 return Ok(());
@@ -1278,7 +1317,7 @@ impl SubstitutionService {
         timeout: std::time::Duration,
     ) -> anyhow::Result<()> {
         use crate::keyholder::NetworkEndpoint;
-        use crate::supervisor::terminator::{self, tls};
+        use crate::supervisor::terminator::tls;
 
         // Peek the SNI without consuming the stream (blocking).
         let (std_stream, sni) = tokio::task::spawn_blocking(move || {
@@ -1357,14 +1396,14 @@ impl SubstitutionService {
             Err(e) => {
                 // Every error path is fail-closed (the socket closes WITHOUT
                 // forwarding); audit per cause exactly like the `:80` path.
-                match &e {
-                    terminator::error::TerminatorError::Refused(_) if carried_placeholder => {
+                match error_audit(&e, carried_placeholder) {
+                    ErrorAudit::PlaceholderDropped => {
                         self.audit_placeholder_dropped(Some(&dest)).await;
                     }
-                    terminator::error::TerminatorError::FailClosed(reason) => {
+                    ErrorAudit::FailClosed(reason) => {
                         self.audit_fail_closed(Some(&dest), reason).await;
                     }
-                    _ => {}
+                    ErrorAudit::Silent => {}
                 }
                 tracing::warn!(error = %e, "https terminator refused or failed; closing");
                 Ok(())
@@ -3318,5 +3357,54 @@ mod server_tests {
             "audit chain must not carry the secret value: {logged}"
         );
         server.abort();
+    }
+}
+
+#[cfg(test)]
+mod error_audit_tests {
+    use super::*;
+    use crate::supervisor::terminator::error::TerminatorError;
+
+    /// A fail-closed refusal must be audited. This is the one the mutation lane
+    /// caught: deleting the `FailClosed` arm left every test passing, because a
+    /// missing audit entry is invisible to anything that only checks the socket
+    /// closed — and every one of these paths closes the socket either way.
+    #[test]
+    fn a_fail_closed_refusal_is_audited_with_its_reason() {
+        let err = TerminatorError::FailClosed("body not scannable in cleartext");
+        assert_eq!(
+            error_audit(&err, false),
+            ErrorAudit::FailClosed("body not scannable in cleartext")
+        );
+        // The reason travels regardless of whether a placeholder was carried:
+        // fail-closed is about what could not be scanned, not about substitution.
+        assert_eq!(
+            error_audit(&err, true),
+            ErrorAudit::FailClosed("body not scannable in cleartext")
+        );
+    }
+
+    /// A refusal is claim-12 relevant only when a placeholder was actually
+    /// dropped. Refusing a request that carried none is not a secret event.
+    #[test]
+    fn a_refusal_is_audited_only_when_it_dropped_a_placeholder() {
+        let err = TerminatorError::Refused("unbound destination".into());
+        assert_eq!(error_audit(&err, true), ErrorAudit::PlaceholderDropped);
+        assert_eq!(error_audit(&err, false), ErrorAudit::Silent);
+    }
+
+    /// Parse and forward failures are fail-closed like everything else here,
+    /// but they are not secret-relevant and must not manufacture audit entries
+    /// — an audit log that records ordinary I/O failures as security events is
+    /// as unreadable as one that records nothing.
+    #[test]
+    fn parse_and_forward_failures_record_nothing() {
+        for err in [
+            TerminatorError::Parse("bad request line".into()),
+            TerminatorError::Forward("connection reset".into()),
+        ] {
+            assert_eq!(error_audit(&err, false), ErrorAudit::Silent, "{err}");
+            assert_eq!(error_audit(&err, true), ErrorAudit::Silent, "{err}");
+        }
     }
 }
