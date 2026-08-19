@@ -12,13 +12,14 @@
 //! what stops the session record drifting into a second, staler copy of the
 //! plan.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::path::Path;
 
 use mvm_contract::plan::types::AuditLabels;
 use mvm_contract::protocol::agent_session::AgentSessionId;
-use mvm_core::checkpoint::ApprovalHead;
+use mvm_core::checkpoint::{ApprovalHead, CheckpointMeta, ROOTFS_BLOB};
 use mvm_core::plan::{PlanSeccompTier, SecretReleasePolicy, SynthesisInput, Variant};
+use mvm_core::protocol::vm_backend::VmStartConfig;
 use mvm_runtime::agent_session::{AgentSessionRecord, AgentSessionStore, SandboxResidency};
 use mvm_runtime::checkpoint::CheckpointStore;
 
@@ -274,6 +275,111 @@ pub fn resume_session(
     )?;
 
     Ok(ResumedSession { record, admitted })
+}
+
+/// What a cold boot needs beyond the session record and its resume point.
+///
+/// A params struct rather than six positional arguments: four of the fields are
+/// borrows and two of those are paths, which a positional call could transpose
+/// with nothing to catch it.
+pub struct ColdBootParams<'a> {
+    /// The session being resumed. Supplies the VM identity and nothing else — a
+    /// cold boot takes its shape from the resume point and the material.
+    pub record: &'a AgentSessionRecord,
+    /// The resume point, already integrity-checked by the caller. Taken as a
+    /// verified value rather than a digest so this cannot be reached with an
+    /// unverified one.
+    pub parent: &'a CheckpointMeta,
+    /// Where the resume point's blobs are read from.
+    pub checkpoints: &'a CheckpointStore,
+    /// The workload half of the plan, so the launch config and the signed plan
+    /// agree on size.
+    pub material: &'a ResumePlanMaterial,
+    /// The session's own state directory: the resume point's blobs are staged
+    /// here and the boot reads them from here.
+    pub state_dir: &'a Path,
+    /// Kernel this boot loads, or `None` for a backend carrying its own. When
+    /// the material names a `kernel_sha256` the plan pins that kernel, and the
+    /// admitted-environment gate hashes whatever path this supplies against the
+    /// pin — so a substituted kernel is refused rather than booted.
+    pub kernel_path: Option<&'a Path>,
+}
+
+/// Build the launch config for a cold-tier resume: a fresh boot from the resume
+/// point's filesystem, under the session's own identity.
+///
+/// Follows `fork_checkpoint`'s mechanism, which is the fs_quick branch — clone
+/// every blob of the parent's content manifest out of the checkpoint store into
+/// a directory the child owns, and boot from those copies. Its vm_full sibling
+/// is the memory-restore path, which is what a `Parked` session would need and
+/// is not what a cold boot does.
+///
+/// The staging is not incidental. Naming the store's own blob as the boot rootfs
+/// would let a running guest write through to the checkpoint, so the next resume
+/// of the same session would fail its integrity check against bytes the guest
+/// itself changed. The session boots from its own copy for the same reason a
+/// fork does.
+pub fn cold_boot_config(params: ColdBootParams<'_>) -> Result<VmStartConfig> {
+    if !params
+        .parent
+        .content
+        .iter()
+        .any(|blob| blob.name == ROOTFS_BLOB)
+    {
+        anyhow::bail!(
+            "resume point {} names no {ROOTFS_BLOB} blob, so a cold boot has nothing to boot from",
+            params.parent.meta_digest
+        );
+    }
+
+    stage_resume_point(params.checkpoints, params.parent, params.state_dir)?;
+
+    let memory_mib = u32::try_from(params.material.mem_mib).map_err(|_| {
+        anyhow::anyhow!(
+            "resume material asks for {} MiB, which does not fit the launch config's memory field",
+            params.material.mem_mib
+        )
+    })?;
+
+    Ok(VmStartConfig {
+        // The session id, which is also the admitted plan's `vm_name`, so the
+        // started VM and the plan that authorized it agree on identity.
+        name: params.record.session_id.as_str().to_string(),
+        rootfs_path: params.state_dir.join(ROOTFS_BLOB).display().to_string(),
+        kernel_path: params.kernel_path.map(|k| k.display().to_string()),
+        cpus: params.material.cpus,
+        memory_mib,
+        ..VmStartConfig::default()
+    })
+}
+
+/// Clone every blob of `parent`'s content manifest into `state_dir`.
+///
+/// Every blob rather than only the rootfs: the manifest carries the guest
+/// sidecars a sealed image needs beside its rootfs, and staging only the rootfs
+/// would leave them where nothing could later name them.
+///
+/// A stale copy left by an earlier residency is removed first. It is not the
+/// resume point's bytes — the guest that wrote it has ended — and cloning onto
+/// an existing file refuses.
+fn stage_resume_point(
+    checkpoints: &CheckpointStore,
+    parent: &CheckpointMeta,
+    state_dir: &Path,
+) -> Result<()> {
+    std::fs::create_dir_all(state_dir)
+        .with_context(|| format!("creating session state dir {}", state_dir.display()))?;
+    let content_dir = checkpoints.content_dir(&parent.id);
+    for blob in &parent.content {
+        let dst = state_dir.join(&blob.name);
+        if dst.exists() {
+            std::fs::remove_file(&dst)
+                .with_context(|| format!("removing stale {}", dst.display()))?;
+        }
+        mvm_runtime::base::cow::clone_rootfs_for_instance(&content_dir.join(&blob.name), &dst)
+            .with_context(|| format!("staging resume-point blob {}", blob.name))?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -698,6 +804,103 @@ mod tests {
         assert_eq!(label("session_parent_checkpoint"), Some(parent.as_str()));
         let head = rec.approval_head.as_ref().unwrap().to_string();
         assert_eq!(label("session_approval_head"), Some(head.as_str()));
+    }
+
+    /// The three inputs a cold-boot config is assembled from, staged together.
+    ///
+    /// Reuses `seed_checkpoint` + `parked_record` rather than a second fixture
+    /// style, so a change to what a resume point looks like reaches these tests.
+    fn cold_boot_fixture(fx: &Fixture) -> (AgentSessionRecord, CheckpointMeta) {
+        let parent = seed_checkpoint(&fx.checkpoints, fx.tmp.path(), "cp-parent");
+        let mut rec = parked_record("sess-alpha");
+        rec.parent_checkpoint = Some(parent.meta_digest.clone());
+        (rec, parent)
+    }
+
+    #[test]
+    fn a_cold_boot_config_names_the_resume_points_rootfs() {
+        // Not an arbitrary path: the bytes behind `rootfs_path` must be the
+        // resume point's, which is the whole reason the resume point exists.
+        let fx = Fixture::new();
+        let state = fx.tmp.path().join("state");
+        let (rec, parent) = cold_boot_fixture(&fx);
+        let m = material();
+
+        let cfg = cold_boot_config(ColdBootParams {
+            record: &rec,
+            parent: &parent,
+            checkpoints: &fx.checkpoints,
+            material: &m,
+            state_dir: &state,
+            kernel_path: None,
+        })
+        .expect("an intact resume point yields a cold-boot config");
+
+        assert_eq!(
+            cfg.rootfs_path,
+            state.join("rootfs.ext4").display().to_string(),
+            "the boot rootfs must be the session's own staged copy"
+        );
+        let staged = std::fs::read(&cfg.rootfs_path).expect("the staged rootfs must be on disk");
+        let source =
+            std::fs::read(fx.checkpoints.content_dir(&parent.id).join("rootfs.ext4")).unwrap();
+        assert_eq!(
+            staged, source,
+            "the staged copy must carry the resume point's bytes"
+        );
+    }
+
+    #[test]
+    fn the_cold_boot_config_and_the_admitted_plan_agree_on_identity() {
+        // The started VM and the plan that authorized it must name the same
+        // thing. A config named anything else boots a machine the plan does not
+        // describe.
+        let fx = Fixture::new();
+        let state = fx.tmp.path().join("state");
+        let (rec, parent) = cold_boot_fixture(&fx);
+        let m = material();
+
+        let cfg = cold_boot_config(ColdBootParams {
+            record: &rec,
+            parent: &parent,
+            checkpoints: &fx.checkpoints,
+            material: &m,
+            state_dir: &state,
+            kernel_path: None,
+        })
+        .unwrap();
+
+        assert_eq!(cfg.name, rec.session_id.as_str());
+        assert_eq!(
+            cfg.name,
+            synthesis_for_resume(&rec, &m).vm_name,
+            "the config name must be the plan's vm_name"
+        );
+    }
+
+    #[test]
+    fn a_resume_point_without_a_rootfs_blob_is_refused() {
+        // Refused here, naming what is missing, rather than at `backend.start`
+        // with an opaque failure about a path that was never going to exist.
+        let fx = Fixture::new();
+        let state = fx.tmp.path().join("state");
+        let (rec, mut parent) = cold_boot_fixture(&fx);
+        parent.content.retain(|blob| blob.name != "rootfs.ext4");
+        let m = material();
+
+        let err = cold_boot_config(ColdBootParams {
+            record: &rec,
+            parent: &parent,
+            checkpoints: &fx.checkpoints,
+            material: &m,
+            state_dir: &state,
+            kernel_path: None,
+        })
+        .expect_err("a resume point with no rootfs blob must be refused");
+        assert!(
+            err.to_string().contains("rootfs.ext4"),
+            "the refusal must name what was missing: {err}"
+        );
     }
 
     #[test]
