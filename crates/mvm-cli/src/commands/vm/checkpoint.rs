@@ -32,6 +32,7 @@ mod fork_vm_full;
 mod lineage;
 mod revert;
 mod timeline;
+mod vm_state;
 use fork_vm_full::fork_vm_full_arm;
 pub(in crate::commands) use fork_vm_full::{ForkVmFullArmFcParams, fork_vm_full_arm_fc};
 pub(in crate::commands) use lineage::SignedChainAnchor;
@@ -40,6 +41,10 @@ pub(in crate::commands) use revert::{
     run_revert, run_rewind,
 };
 pub(in crate::commands) use timeline::{TimelineArgs, run_timeline};
+use vm_state::{
+    backend_for_vm, ensure_save_restore_supported, resolve_quiesced_vm_rootfs,
+    runtime_contract_for_checkpoint, supervisor_config_digest, vm_is_running,
+};
 
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct CheckpointArgs {
@@ -163,6 +168,11 @@ pub(in crate::commands) enum CheckpointCmd {
         /// to ride on.
         #[arg(long = "secret")]
         secret: Vec<String>,
+        /// Permit the child to omit secret bindings declared by the parent.
+        /// Without this flag, every parent binding must be redeclared with
+        /// `--secret`, making capability attenuation explicit and reviewable.
+        #[arg(long)]
+        allow_secret_drop: bool,
         /// Output the fork result as JSON.
         #[arg(long)]
         json: bool,
@@ -214,6 +224,7 @@ pub(in crate::commands) fn run_checkpoint(_cli: &Cli, args: CheckpointArgs) -> R
             cpus,
             memory,
             secret,
+            allow_secret_drop,
             json,
         } => fork(ForkCmdParams {
             id: &id,
@@ -223,6 +234,7 @@ pub(in crate::commands) fn run_checkpoint(_cli: &Cli, args: CheckpointArgs) -> R
             cpus,
             memory: memory.as_deref(),
             declared_secrets: &parse_declared_secrets(&secret)?,
+            allow_secret_drop,
             json,
         }),
         CheckpointCmd::Diff { a, b, json } => diff(&a, &b, json),
@@ -278,155 +290,6 @@ pub(in crate::commands) fn now_unix() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
-}
-
-/// Resolve the host-side bootable rootfs image for a quiesced VM, or a clean
-/// error explaining why a checkpoint can't be taken.
-///
-/// "Quiesced" means the VM is not running, OR the pause verb has written a
-/// pause marker that matches the live supervisor pid (vCPUs and virtio queues
-/// quiesced). A live, unpaused VM is refused: an fs_quick checkpoint has no
-/// memory, so the rootfs must be in a clean, deterministic state.
-///
-/// Resolution order (first match wins):
-/// 1. Per-instance `rootfs.ext4` CoW clone in `vm_state_dir(name)`.
-/// 2. `mode.json` `rootfs_path` field (backend-neutral; written by every
-///    backend that calls `record_from_rootfs` at start time).
-fn resolve_quiesced_vm_rootfs(name: &str) -> Result<PathBuf> {
-    if !vm_is_quiesced(name) {
-        bail!("stop or pause VM '{name}' before checkpointing");
-    }
-    let state_dir = vm_state_dir(name);
-
-    // Per-instance CoW clone — deterministic, present on disk.
-    let instance_rootfs = state_dir.join("rootfs.ext4");
-    if instance_rootfs.is_file() {
-        return Ok(instance_rootfs);
-    }
-
-    // Backend-neutral: every backend that calls `record_from_rootfs` at start
-    // time writes the rootfs path into mode.json.
-    if let Some(path) = rootfs_from_mode_json(&state_dir)? {
-        if !path.exists() {
-            bail!(
-                "fs_quick checkpoint needs the VM's rootfs ({}), which is no longer \
-                 on disk. Pause instead of stopping: `mvmctl vm pause {name}`, \
-                 checkpoint, then `mvmctl vm resume {name}` — or use \
-                 `--class vm-full` on a running VM.",
-                path.display()
-            );
-        }
-        return Ok(path);
-    }
-
-    bail!("fs_quick checkpoint is not supported for this VM's backend");
-}
-
-/// Read `mode.json` and return the recorded `rootfs_path` field, if present.
-/// Absent file or absent field → `Ok(None)`. Malformed JSON propagates.
-fn rootfs_from_mode_json(state_dir: &std::path::Path) -> Result<Option<PathBuf>> {
-    let path = state_dir.join("mode.json");
-    let body = match std::fs::read_to_string(&path) {
-        Ok(b) => b,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
-    };
-    let meta: mvm_runtime::base::runtime_meta::VmRuntimeMeta =
-        serde_json::from_str(&body).with_context(|| format!("parsing {}", path.display()))?;
-    Ok(meta.rootfs_path.map(PathBuf::from))
-}
-
-/// Best-effort liveness: a VM is "running" iff one of its per-backend PID
-/// files names a live process. Delegates to the runtime's probe so this side
-/// cannot keep its own marker list — every registered backend's marker
-/// (`fc.pid`, `libkrun.pid`, `hvf.pid`, `qemu.pid`) is covered by one pass over
-/// the shared list, which is also where the `EPERM`-means-alive rule lives. A
-/// hand-kept list here is how a live HVF VM used to read as stopped, and a
-/// root-owned Firecracker with it.
-fn vm_is_running(name: &str) -> bool {
-    mvm_runtime::checkpoint::vm_is_running(name)
-}
-
-/// fs_quick clones the instance rootfs, so the guest must not be writing:
-/// either the VM is stopped, or it is paused (vCPUs and virtio queues quiesced
-/// — the FC pause verb stamps the fc pid into `fc.paused`; resume and any path
-/// that replaces the process removes or invalidates the marker). A
-/// running-but-paused VM keeps its pid alive, so `vm_is_running` alone would
-/// incorrectly refuse the checkpoint without these marker checks.
-fn vm_is_quiesced(name: &str) -> bool {
-    if !vm_is_running(name) {
-        return true;
-    }
-    fc_pause_marker_matches_live_pid(name) || hvf_pause_marker_present(name)
-}
-
-/// The HVF supervisor writes `pause.state` only after its vCPU has entered the
-/// pause hold, and removes it on resume. Unlike Firecracker's marker this one is
-/// written by the process that owns the vCPU, so its presence beside a live
-/// `hvf.pid` is itself the acknowledgement — there is no pid to cross-check
-/// against a marker some other verb stamped.
-fn hvf_pause_marker_present(name: &str) -> bool {
-    let dir = vm_state_dir(name);
-    dir.join("hvf.pid").is_file() && dir.join("pause.state").is_file()
-}
-
-/// `machine pause` snapshot-seals FC but leaves the fc process running, so a
-/// live pid cannot
-/// distinguish paused from running. The pause verb stamps the fc pid into
-/// `fc.paused` (under `vm_state_dir`); resume removes it. Quiesced iff the
-/// marker matches the live fc pid at `<mvm_home>/vms/<name>/fc.pid`.
-fn fc_pause_marker_matches_live_pid(name: &str) -> bool {
-    let marker = std::fs::read_to_string(vm_state_dir(name).join("fc.paused")).ok();
-    let live =
-        mvm_runtime::microvm::fc_pid_path(name).and_then(|p| std::fs::read_to_string(p).ok());
-    matches!((marker, live), (Some(m), Some(l)) if !m.trim().is_empty() && m.trim() == l.trim())
-}
-
-/// Hash the VM's persisted supervisor config so the checkpoint pins the launch
-/// shape it was captured from. No config on disk → empty digest (the field is
-/// advisory for fs_quick; integrity rests on `content_sha256`).
-fn supervisor_config_digest(state_dir: &std::path::Path) -> String {
-    let cfg_path = state_dir.join("supervisor-config.json");
-    mvm_core::crypto::image_verify::sha256_file(&cfg_path).unwrap_or_default()
-}
-
-fn runtime_contract_for_checkpoint(
-    name: &str,
-) -> Result<(
-    Option<mvm_core::vm_backend::RuntimeSourcePolicy>,
-    Option<String>,
-)> {
-    Ok(mvm_runtime::base::runtime_meta::read(name)?
-        .map(|meta| {
-            (
-                Some(meta.runtime_source_policy),
-                meta.runtime_overlay_version,
-            )
-        })
-        .unwrap_or((None, None)))
-}
-
-/// The backend that actually owns `name`, falling back to the host default for
-/// a VM with no live marker (a restore target that has not been started yet).
-fn backend_for_vm(name: &str) -> AnyBackend {
-    AnyBackend::for_started_vm(name).unwrap_or_else(AnyBackend::auto_select)
-}
-
-/// Refuse a memory-snapshot verb on a backend that cannot save and reload
-/// machine state. The check is against the backend that owns *this* VM, not the
-/// host default: on a host where several VMMs can run, the capability of the
-/// one holding the VM is the only one that matters.
-fn ensure_save_restore_supported(action: &str, backend: &AnyBackend) -> Result<()> {
-    let available = backend.snapshot_capability();
-    if !available.satisfies(SnapshotCapability::SaveRestore) {
-        bail!(
-            "vm {action} requires memory-snapshot support, but backend '{}' reports \
-             snapshot tier '{}' on this host",
-            backend.name(),
-            available.label()
-        );
-    }
-    Ok(())
 }
 
 fn create(name: &str, tag: Option<String>, json: bool) -> Result<()> {
@@ -756,9 +619,41 @@ fn diff(a: &str, b: &str, json: bool) -> Result<()> {
     Ok(())
 }
 
+/// The id of a live or hibernated session whose resume point is `digest`, if
+/// any. Delegates the pin rule to `mvm_runtime::agent_session::pinning_session`
+/// — the one place that decides whether a session's resume point still needs
+/// holding — so `rm` can tell the operator what is holding the checkpoint it
+/// refused to remove without re-deriving that rule here.
+fn session_pinning_checkpoint(
+    digest: &CheckpointDigest,
+) -> Result<Option<mvm_contract::protocol::agent_session::AgentSessionId>> {
+    let sessions = mvm_runtime::agent_session::AgentSessionStore::open();
+    mvm_runtime::agent_session::pinning_session(&sessions, digest).context("listing agent sessions")
+}
+
+/// `mvmctl vm checkpoint rm <id>`: delete a checkpoint by id.
+///
+/// Refuses when the checkpoint is still the resume point of a live or
+/// hibernated agent session — the same guard the automated sweep in
+/// `mvmctl cache prune` applies, closing the manual door to the identical
+/// data-loss class: an operator deleting by hand can otherwise make a parked
+/// session permanently unresumable exactly as an unguarded sweep could.
+/// `rm` has no force/override flag, so this refusal is unconditional; the
+/// operator must close the session first.
 fn rm(id: &str, json: bool) -> Result<()> {
     let id = validated_checkpoint_id(id)?;
-    CheckpointStore::open().remove(&id)?;
+    let store = CheckpointStore::open();
+    if let Ok(meta) = store.read_meta(&id)
+        && let Some(session_id) = session_pinning_checkpoint(&meta.meta_digest)?
+    {
+        bail!(
+            "cannot remove checkpoint '{}': it is the resume point for agent session '{}'; \
+             close that session before removing the checkpoint",
+            id.as_str(),
+            session_id.as_str()
+        );
+    }
+    store.remove(&id)?;
     if json {
         crate::json_out::emit_json(&CheckpointRemoveJson {
             schema_version: 1,
@@ -848,6 +743,7 @@ struct ForkCmdParams<'a> {
     cpus: Option<u32>,
     memory: Option<&'a str>,
     declared_secrets: &'a [mvm_core::plan::SecretBinding],
+    allow_secret_drop: bool,
     json: bool,
 }
 
@@ -857,7 +753,9 @@ struct ForkCmdParams<'a> {
 /// name; `VAR=ADDRESS` separates them. Nothing here contacts the keystore or
 /// resolves a value — a binding is a reference, and an address that names no
 /// secret simply fails to resolve later rather than granting anything.
-fn parse_declared_secrets(values: &[String]) -> Result<Vec<mvm_core::plan::SecretBinding>> {
+pub(in crate::commands) fn parse_declared_secrets(
+    values: &[String],
+) -> Result<Vec<mvm_core::plan::SecretBinding>> {
     values
         .iter()
         .map(|raw| {
@@ -889,6 +787,7 @@ fn fork(p: ForkCmdParams<'_>) -> Result<()> {
         cpus,
         memory,
         declared_secrets,
+        allow_secret_drop,
         json,
     } = p;
     let checkpoint = validated_checkpoint_id(id)?;
@@ -909,6 +808,7 @@ fn fork(p: ForkCmdParams<'_>) -> Result<()> {
                 // No CLI surface declares bindings yet, so a fork declares
                 // none — exactly the prior behaviour.
                 declared_secrets,
+                allow_secret_drop,
             })
         }
         CheckpointClass::FsQuick => fork_fs_quick_arm(ForkFsQuickArmParams {
@@ -920,6 +820,7 @@ fn fork(p: ForkCmdParams<'_>) -> Result<()> {
             cpus_override: cpus,
             memory_override: memory,
             declared_secrets,
+            allow_secret_drop,
             json,
         }),
     }
@@ -938,6 +839,7 @@ struct ForkFsQuickArmParams<'a> {
     /// Declared for the child when `--boot` admits one. A fs_quick fork without
     /// `--boot` admits no plan, so there is nothing for these to ride on.
     declared_secrets: &'a [mvm_core::plan::SecretBinding],
+    allow_secret_drop: bool,
     json: bool,
 }
 
@@ -946,6 +848,21 @@ struct ForkFsQuickArmParams<'a> {
 /// materialized rootfs without clobbering it (the no-clobber seam in
 /// `prepare_instance_rootfs` returns early when source == instance path).
 fn fork_fs_quick_arm(p: ForkFsQuickArmParams<'_>) -> Result<()> {
+    if !p.boot && !p.declared_secrets.is_empty() {
+        bail!(
+            "--secret requires --boot for an fs_quick fork because an unbooted clone has no child plan"
+        );
+    }
+    let child_tenant = super::tenant_resolution::resolve_tenant(None);
+    if p.boot {
+        validate_fork_secret_policy(
+            p.checkpoint,
+            p.store,
+            &child_tenant,
+            p.declared_secrets,
+            p.allow_secret_drop,
+        )?;
+    }
     let now = now_unix();
     let child_vm_name = p
         .new_id
@@ -976,7 +893,14 @@ fn fork_fs_quick_arm(p: ForkFsQuickArmParams<'_>) -> Result<()> {
     // A fork that we can't audit (signer present but emit fails) is refused —
     // an unaudited lineage record would break the chain. A missing plan/signer
     // is best-effort, matching capture.
-    bind_checkpoint_forked(p.checkpoint, &meta, &child_vm_name, p.store)?;
+    bind_checkpoint_forked(
+        p.checkpoint,
+        &meta,
+        &child_vm_name,
+        p.store,
+        p.declared_secrets,
+        &child_tenant,
+    )?;
 
     if p.boot {
         let instance_rootfs = dest_dir.join("rootfs.ext4");
@@ -1055,8 +979,6 @@ fn boot_forked_child(p: BootForkedChildParams<'_>) -> Result<()> {
     AnyBackend::require_hypervisor_selectable(&effective_hypervisor)?;
     let parent_agent_verbs = parent_agent_verb_override(p.parent_checkpoint, p.store);
     let parent_meta = p.store.read_meta(p.parent_checkpoint)?;
-    warn_dropped_parent_secrets(p.parent_checkpoint, p.store);
-
     // Resource shape: flag > parent plan > global defaults.
     let (parent_cpus, parent_mem) = parent_plan_resources(p.parent_checkpoint, p.store);
     let user_cfg = mvm_core::user_config::load(None);
@@ -1334,23 +1256,91 @@ fn parent_secret_names(parent_checkpoint: &CheckpointId, store: &CheckpointStore
     plan.secrets.into_iter().map(|b| b.name).collect()
 }
 
-/// Warn that a fork drops the parent's secret bindings.
-///
-/// Not a refusal: a fork is always prod-profile, so there is no flag to gate a
-/// refusal on, and hard-failing would break forks whose child never needed the
-/// parent's credentials.
-fn warn_dropped_parent_secrets(parent_checkpoint: &CheckpointId, store: &CheckpointStore) {
-    let dropped = parent_secret_names(parent_checkpoint, store);
+fn dropped_parent_secret_names(
+    parent_names: &[String],
+    declared: &[mvm_core::plan::SecretBinding],
+) -> Vec<String> {
+    let declared_names = declared
+        .iter()
+        .map(|binding| binding.name.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    parent_names
+        .iter()
+        .filter(|name| !declared_names.contains(name.as_str()))
+        .cloned()
+        .collect()
+}
+
+fn enforce_secret_attenuation(dropped: &[String], allow_secret_drop: bool) -> Result<()> {
     if dropped.is_empty() {
-        return;
+        return Ok(());
     }
-    tracing::warn!(
-        secrets = %dropped.join(", "),
-        count = dropped.len(),
-        "fork child is admitted with no secret bindings; the parent's are not carried, \
-         so outbound requests to their bound destinations will be refused by the \
-         substitution endpoint"
-    );
+    if !allow_secret_drop {
+        bail!(
+            "fork child would drop parent secret bindings: {}. Redeclare each required binding with --secret NAME, or pass --allow-secret-drop to attenuate them intentionally",
+            dropped.join(", ")
+        );
+    }
+    Ok(())
+}
+
+/// Validate a fork child's complete secret capability before any child boots.
+///
+/// Every declared keystore address must exist in the child's tenant. Parent
+/// bindings are never inherited; omitting one is an explicit attenuation and
+/// therefore requires `--allow-secret-drop`.
+pub(super) fn validate_fork_secret_policy(
+    parent_checkpoint: &CheckpointId,
+    store: &CheckpointStore,
+    tenant: &str,
+    declared: &[mvm_core::plan::SecretBinding],
+    allow_secret_drop: bool,
+) -> Result<()> {
+    let binding_store = mvm_hostd::keyholder::FileBindingStore::default_location()
+        .context("opening the child tenant's secret-binding store")?;
+    resolve_fork_secret_audit(tenant, declared, &binding_store)?;
+
+    let dropped =
+        dropped_parent_secret_names(&parent_secret_names(parent_checkpoint, store), declared);
+    enforce_secret_attenuation(&dropped, allow_secret_drop)?;
+    if !dropped.is_empty() {
+        tracing::warn!(
+            secrets = %dropped.join(", "),
+            count = dropped.len(),
+            "fork child intentionally drops parent secret bindings"
+        );
+    }
+    Ok(())
+}
+
+fn resolve_fork_secret_audit(
+    tenant: &str,
+    declared: &[mvm_core::plan::SecretBinding],
+    bindings: &dyn mvm_hostd::keyholder::BindingStore,
+) -> Result<Vec<mvm_hostd::audit::bind::CheckpointForkSecretBinding>> {
+    use mvm_core::plan::SecretSource;
+
+    declared
+        .iter()
+        .filter_map(|binding| match &binding.source {
+            SecretSource::Keystore { address } => Some((binding, address)),
+            SecretSource::External { .. } => None,
+        })
+        .map(|(binding, address)| {
+            let metadata = bindings
+                .get(tenant, address)
+                .with_context(|| format!("reading binding {address:?} for tenant {tenant:?}"))?
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "secret {address:?} has no binding in child tenant {tenant:?}; bind it for that tenant before forking"
+                    )
+                })?;
+            Ok(mvm_hostd::audit::bind::CheckpointForkSecretBinding {
+                name: binding.name.clone(),
+                allowed_hosts: metadata.allowed_hosts,
+            })
+        })
+        .collect()
 }
 
 fn parent_plan_resources(
@@ -1375,6 +1365,8 @@ pub(crate) fn bind_checkpoint_forked(
     child: &mvm_core::checkpoint::CheckpointMeta,
     child_vm_name: &str,
     store: &CheckpointStore,
+    declared_secrets: &[mvm_core::plan::SecretBinding],
+    child_tenant: &str,
 ) -> Result<()> {
     // The child VM has no persisted plan yet (it was never booted as an independent
     // VM); look up the parent VM name from the parent checkpoint record so the
@@ -1404,15 +1396,85 @@ pub(crate) fn bind_checkpoint_forked(
     let emitter = super::audit_chain::AuditEmitter::new(signer.signing)
         .map(|e| e.with_receipts())
         .context("refusing an unaudited fork: audit emitter unavailable")?;
-    mvm_hostd::audit::bind::bind_checkpoint_forked(&emitter, &plan, parent, child, child_vm_name)
-        .context("refusing an unaudited fork")?;
+    let binding_store = mvm_hostd::keyholder::FileBindingStore::default_location()
+        .context("opening the child tenant's secret-binding store for fork audit")?;
+    let secret_bindings =
+        resolve_fork_secret_audit(child_tenant, declared_secrets, &binding_store)?;
+    mvm_hostd::audit::bind::bind_checkpoint_forked(
+        &emitter,
+        &plan,
+        parent,
+        child,
+        child_vm_name,
+        &secret_bindings,
+    )
+    .context("refusing an unaudited fork")?;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
+    use super::vm_state::{fc_pause_marker_matches_live_pid, vm_is_quiesced};
     use super::*;
+    use mvm_contract::ir::AuthType;
+    use mvm_core::plan::{SecretBinding, SecretSource};
+    use mvm_hostd::keyholder::{BindingStore, FileBindingStore, SecretBindingMeta};
     use mvm_runtime::checkpoint::{CheckpointChainAnchor, verify_lineage};
+
+    fn secret_binding(name: &str, address: &str) -> SecretBinding {
+        SecretBinding {
+            name: name.into(),
+            source: SecretSource::Keystore {
+                address: address.into(),
+            },
+        }
+    }
+
+    #[test]
+    fn dropped_parent_secrets_excludes_explicit_redeclarations() {
+        let parent = vec!["API_KEY".to_string(), "DB_KEY".to_string()];
+        let declared = vec![secret_binding("API_KEY", "child-api")];
+
+        assert_eq!(
+            dropped_parent_secret_names(&parent, &declared),
+            vec!["DB_KEY"]
+        );
+    }
+
+    #[test]
+    fn secret_attenuation_requires_explicit_drop_permission() {
+        let dropped = vec!["DB_KEY".to_string()];
+
+        let error = enforce_secret_attenuation(&dropped, false).unwrap_err();
+        assert!(error.to_string().contains("--allow-secret-drop"));
+        assert!(enforce_secret_attenuation(&dropped, true).is_ok());
+        assert!(enforce_secret_attenuation(&[], false).is_ok());
+    }
+
+    #[test]
+    fn fork_secret_audit_resolves_only_child_tenant_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FileBindingStore::with_dir(dir.path());
+        store
+            .put(
+                "child-tenant",
+                "api-address",
+                &SecretBindingMeta {
+                    auth_type: AuthType::Bearer,
+                    allowed_hosts: vec!["api.example.com".into()],
+                    sigv4: None,
+                    provider: Some("catalog-provider".into()),
+                },
+            )
+            .unwrap();
+        let declared = vec![secret_binding("API_KEY", "api-address")];
+
+        let audit = resolve_fork_secret_audit("child-tenant", &declared, &store).unwrap();
+        assert_eq!(audit.len(), 1);
+        assert_eq!(audit[0].name, "API_KEY");
+        assert_eq!(audit[0].allowed_hosts, vec!["api.example.com"]);
+        assert!(resolve_fork_secret_audit("other-tenant", &declared, &store).is_err());
+    }
 
     #[test]
     fn validated_checkpoint_id_accepts_normal() {
@@ -1639,6 +1701,89 @@ mod tests {
         store.write_meta(&meta).unwrap();
 
         assert!(parent_secret_names(&meta.id, &store).is_empty());
+    }
+
+    /// The manual deletion door (`checkpoint rm`) is a second place the same
+    /// data-loss class Task 1 closed for the automated sweep can happen: an
+    /// operator removing by id, with no pin check, can make a parked session
+    /// permanently unresumable. `rm` must refuse and name the session.
+    #[test]
+    fn rm_refuses_a_checkpoint_pinned_by_a_parked_session() {
+        use mvm_contract::protocol::agent_session::AgentSessionId;
+        use mvm_core::checkpoint::{CheckpointClass, CheckpointId};
+        use mvm_runtime::agent_session::{AgentSessionRecord, AgentSessionStore, SandboxResidency};
+
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let tmp = tempfile::tempdir().unwrap();
+        env.isolate_mvm_home(tmp.path());
+
+        let store = mvm_runtime::checkpoint::CheckpointStore::open();
+        let meta = mvm_core::checkpoint::CheckpointMeta::builder(
+            CheckpointId::new("ckpt-pinned"),
+            CheckpointClass::FsQuick,
+            "vm-alpha",
+        )
+        .content(vec![])
+        .supervisor_config_digest("d")
+        .created_unix(1)
+        .build();
+        store.write_meta(&meta).unwrap();
+
+        let sessions = AgentSessionStore::open();
+        sessions
+            .write(&AgentSessionRecord {
+                session_id: AgentSessionId::parse("sess-parked").unwrap(),
+                generation: 1,
+                state: SandboxResidency::Hibernated,
+                members: vec!["vm-alpha".to_string()],
+                parent_checkpoint: Some(meta.meta_digest.clone()),
+                created_unix: 0,
+                updated_unix: 0,
+                journal_cursor: 0,
+                approval_head: None,
+                storage_tier: None,
+                park_reason: None,
+            })
+            .unwrap();
+
+        let err = rm("ckpt-pinned", false).unwrap_err();
+        assert!(
+            err.to_string().contains("sess-parked"),
+            "refusal must name the session holding the checkpoint: {err}"
+        );
+        assert!(
+            store.read_meta(&CheckpointId::new("ckpt-pinned")).is_ok(),
+            "the checkpoint must still be on disk after the refusal"
+        );
+    }
+
+    #[test]
+    fn rm_removes_a_checkpoint_no_session_pins() {
+        use mvm_core::checkpoint::{CheckpointClass, CheckpointId};
+
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let tmp = tempfile::tempdir().unwrap();
+        env.isolate_mvm_home(tmp.path());
+
+        let store = mvm_runtime::checkpoint::CheckpointStore::open();
+        let meta = mvm_core::checkpoint::CheckpointMeta::builder(
+            CheckpointId::new("ckpt-unpinned"),
+            CheckpointClass::FsQuick,
+            "vm-alpha",
+        )
+        .content(vec![])
+        .supervisor_config_digest("d")
+        .created_unix(1)
+        .build();
+        store.write_meta(&meta).unwrap();
+
+        rm("ckpt-unpinned", false).unwrap();
+        assert!(
+            store
+                .read_meta(&CheckpointId::new("ckpt-unpinned"))
+                .is_err(),
+            "a checkpoint no session pins must still be removable"
+        );
     }
 
     #[test]

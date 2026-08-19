@@ -302,22 +302,15 @@ for detailed scope and acceptance criteria.
 
 ## In-flight plans
 
-- [~] **Secret bindings for forked children** —
+- [x] **Secret bindings for forked children** —
       `specs/plans/2026-08-18-fork-inherits-secret-bindings.md`, issue #2698.
-      W0 landed: a fork that drops its parent's secret bindings now says so,
-      reading the parent's persisted plan rather than needing a schema change.
-      3 tests, mutation-checked.
-      A1 landed: `declared_secrets` is threaded into the fork admission path, so
-      a child's bindings are declared by the caller rather than inherited, and
-      the child's capability is readable from its own plan. 2 tests,
-      mutation-checked.
-      STILL OPEN: the gap is **not yet closed** — A2 (CLI surface) is what makes
-      A1 reachable; until it lands every caller declares an empty set and no
-      user can declare a binding. Then A3-A5, and A6 (refuse an undeclared
-      drop), which is W0's refusal arm — deferred there because a fork's
-      prod-posture is a hardcoded literal today, not a flag. Option B (inherit
-      from the checkpoint, attenuated by intersection) is designed and
-      deliberately deferred, not queued.
+      Option A (W0 and A1–A6) is complete: fork bindings are explicit,
+      tenant-validated before clone/boot, carried by every booting entry point,
+      and recorded as names plus allowed hosts without source or value data.
+      Dropping a parent binding is refused unless the caller explicitly permits
+      attenuation. Option B (implicit checkpoint inheritance) remains designed
+      and deliberately deferred.
+
 - [~] **Durable agent sessions** —
       `specs/plans/2026-08-18-durable-agent-sessions.md` (design) +
       `specs/plans/2026-08-18-durable-session-substrate.md` (implementation,
@@ -327,7 +320,9 @@ for detailed scope and acceptance criteria.
       `specs/plans/2026-08-18-session-approval-head.md` (implementation,
       Tasks 1–4 complete) +
       `specs/plans/2026-08-18-resume-session-orchestrator.md` (implementation,
-      Tasks 1–3 complete). `CheckpointMeta` gains `Option<SessionBinding>`
+      Tasks 1–3 complete) +
+      `specs/plans/2026-08-18-session-retention.md` (implementation, Tasks 1–3
+      complete). `CheckpointMeta` gains `Option<SessionBinding>`
       (`session_id`/`generation`/`journal_cursor`/`approval_head`), folded
       into `meta_digest` the same way `grants` already is; `approval_head` is
       a dedicated `ApprovalHead` newtype, not `CheckpointDigest` reused.
@@ -385,7 +380,20 @@ resume` takes a `current_head` and refuses when it differs from the
       minting at the substitution endpoint. The
       synthesized plan carries `grants: None`, so a resumed session re-arms
       neither a wall-clock bound nor a CPU share. A session parked with
-      `approval_head: None` resumes with no ledger fence at all.
+      `approval_head: None` resumes with no ledger fence at all. WS5 is
+      partial: `specs/plans/2026-08-18-session-retention.md` teaches the
+      pre-existing `checkpoints_dir()` sweep (`sweep_untagged_checkpoints`,
+      `mvmctl cache prune`) to refuse reaping a checkpoint any live or
+      hibernated session names as its parent — via the new
+      `mvm_runtime::agent_session::pinned_checkpoints` — closes the same
+      manual door on `mvmctl vm checkpoint rm`, and adds
+      `AgentSessionRecord::demote`, a one-way `Resident → Parked → Cold` step
+      for an already-hibernated session. Not delivered: retention classes or
+      expiry on the record, a scheduler that calls `demote`, or any actual
+      movement of bytes between tiers — demoting only sets a field, and a
+      `Cold` session's checkpoint is still pinned regardless of tier, so the
+      ladder does not yet make anything reclaimable; closing a session
+      remains the only thing that frees its resume point.
 
       WS6 is DONE and WS7 is PARTIAL, both via
       `specs/plans/2026-08-19-session-cli-and-audit.md`
@@ -404,7 +412,7 @@ resume` takes a `current_head` and refuses when it differs from the
       `sandbox.parked` / `sandbox.resumed` names were changed to match the
       code's `session.` prefix rather than the reverse — these are session
       transitions, and `SandboxResidency` is a field of a session record, not
-      the subject. WS5 retention ladder + GC and WS8 BDD remain untouched here.
+      the subject. WS8 BDD remains untouched.
 
 - [~] **Admission-bound AI assurance sessions** —
       `specs/plans/2026-08-17-admission-bound-ai-assurance-sessions.md`. W1–W4,

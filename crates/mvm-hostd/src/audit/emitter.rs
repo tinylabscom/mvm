@@ -111,6 +111,19 @@ pub mod checkpoint_audit {
     pub const LABEL_PARENT_DIGEST: &str = "parent_digest";
     /// Label: the child's content-address (forked).
     pub const LABEL_CHILD_DIGEST: &str = "child_digest";
+    /// Label: JSON array of child binding names and destination allow-lists.
+    /// This never contains keystore addresses, providers, or secret values.
+    pub const LABEL_SECRET_BINDINGS: &str = "secret_bindings";
+}
+
+/// Complete non-secret label payload for a `checkpoint.forked` event.
+pub struct CheckpointForkedAudit<'a> {
+    pub parent_id: &'a str,
+    pub child_id: &'a str,
+    pub child_vm_name: &'a str,
+    pub parent_digest: &'a str,
+    pub child_digest: &'a str,
+    pub secret_bindings_json: &'a str,
 }
 
 /// Wire-stable event name and label keys for the image version-lineage audit
@@ -975,28 +988,31 @@ impl AuditEmitter {
     pub fn emit_checkpoint_forked(
         &self,
         plan: &ExecutionPlan,
-        parent_id: &str,
-        child_id: &str,
-        child_vm_name: &str,
-        parent_digest: &str,
-        child_digest: &str,
+        audit: CheckpointForkedAudit<'_>,
     ) -> Result<()> {
         use checkpoint_audit as k;
         self.emit(
             plan,
             k::FORKED_EVENT,
             [
-                (k::LABEL_PARENT_ID.to_string(), parent_id.to_string()),
-                (k::LABEL_CHILD_ID.to_string(), child_id.to_string()),
+                (k::LABEL_PARENT_ID.to_string(), audit.parent_id.to_string()),
+                (k::LABEL_CHILD_ID.to_string(), audit.child_id.to_string()),
                 (
                     k::LABEL_CHILD_VM_NAME.to_string(),
-                    child_vm_name.to_string(),
+                    audit.child_vm_name.to_string(),
                 ),
                 (
                     k::LABEL_PARENT_DIGEST.to_string(),
-                    parent_digest.to_string(),
+                    audit.parent_digest.to_string(),
                 ),
-                (k::LABEL_CHILD_DIGEST.to_string(), child_digest.to_string()),
+                (
+                    k::LABEL_CHILD_DIGEST.to_string(),
+                    audit.child_digest.to_string(),
+                ),
+                (
+                    k::LABEL_SECRET_BINDINGS.to_string(),
+                    audit.secret_bindings_json.to_string(),
+                ),
             ],
         )
     }
@@ -2363,11 +2379,14 @@ mod tests {
         emitter
             .emit_checkpoint_forked(
                 &plan,
-                "ckpt-parent",
-                "ckpt-child",
-                "childvm",
-                &parent_digest,
-                &child_digest,
+                CheckpointForkedAudit {
+                    parent_id: "ckpt-parent",
+                    child_id: "ckpt-child",
+                    child_vm_name: "childvm",
+                    parent_digest: &parent_digest,
+                    child_digest: &child_digest,
+                    secret_bindings_json: r#"[{"name":"API_KEY","allowed_hosts":["api.example.com"]}]"#,
+                },
             )
             .unwrap();
         let path = dir.path().join("local.jsonl");
@@ -2380,6 +2399,8 @@ mod tests {
         assert!(content.contains("child_digest"));
         assert!(content.contains(&parent_digest));
         assert!(content.contains(&child_digest));
+        assert!(content.contains("API_KEY"));
+        assert!(content.contains("api.example.com"));
         assert_eq!(verify_audit_chain(&path, &vk).unwrap(), 1);
     }
 
