@@ -294,6 +294,8 @@ fn machine_warm_restore_help_lists_args() {
     assert!(help.contains("warm-restore"));
     assert!(help.contains("CHECKPOINT_ID"));
     assert!(help.contains("--name"));
+    assert!(help.contains("--secret"));
+    assert!(help.contains("--allow-secret-drop"));
     assert!(help.contains("--json"));
 }
 
@@ -342,6 +344,8 @@ fn machine_fork_help_lists_args() {
     assert!(help.contains("PARENT"));
     assert!(help.contains("--as"));
     assert!(help.contains("--branch"));
+    assert!(help.contains("--secret"));
+    assert!(help.contains("--allow-secret-drop"));
     assert!(help.contains("--json"));
 }
 
@@ -364,6 +368,8 @@ fn machine_restore_help_lists_args() {
     assert!(help.contains("CHECKPOINT_ID"));
     assert!(help.contains("--as"));
     assert!(help.contains("--branch"));
+    assert!(help.contains("--secret"));
+    assert!(help.contains("--allow-secret-drop"));
     assert!(help.contains("--json"));
 }
 

@@ -163,6 +163,11 @@ pub(in crate::commands) enum CheckpointCmd {
         /// to ride on.
         #[arg(long = "secret")]
         secret: Vec<String>,
+        /// Permit the child to omit secret bindings declared by the parent.
+        /// Without this flag, every parent binding must be redeclared with
+        /// `--secret`, making capability attenuation explicit and reviewable.
+        #[arg(long)]
+        allow_secret_drop: bool,
         /// Output the fork result as JSON.
         #[arg(long)]
         json: bool,
@@ -214,6 +219,7 @@ pub(in crate::commands) fn run_checkpoint(_cli: &Cli, args: CheckpointArgs) -> R
             cpus,
             memory,
             secret,
+            allow_secret_drop,
             json,
         } => fork(ForkCmdParams {
             id: &id,
@@ -223,6 +229,7 @@ pub(in crate::commands) fn run_checkpoint(_cli: &Cli, args: CheckpointArgs) -> R
             cpus,
             memory: memory.as_deref(),
             declared_secrets: &parse_declared_secrets(&secret)?,
+            allow_secret_drop,
             json,
         }),
         CheckpointCmd::Diff { a, b, json } => diff(&a, &b, json),
@@ -848,6 +855,7 @@ struct ForkCmdParams<'a> {
     cpus: Option<u32>,
     memory: Option<&'a str>,
     declared_secrets: &'a [mvm_core::plan::SecretBinding],
+    allow_secret_drop: bool,
     json: bool,
 }
 
@@ -857,7 +865,9 @@ struct ForkCmdParams<'a> {
 /// name; `VAR=ADDRESS` separates them. Nothing here contacts the keystore or
 /// resolves a value — a binding is a reference, and an address that names no
 /// secret simply fails to resolve later rather than granting anything.
-fn parse_declared_secrets(values: &[String]) -> Result<Vec<mvm_core::plan::SecretBinding>> {
+pub(in crate::commands) fn parse_declared_secrets(
+    values: &[String],
+) -> Result<Vec<mvm_core::plan::SecretBinding>> {
     values
         .iter()
         .map(|raw| {
@@ -889,6 +899,7 @@ fn fork(p: ForkCmdParams<'_>) -> Result<()> {
         cpus,
         memory,
         declared_secrets,
+        allow_secret_drop,
         json,
     } = p;
     let checkpoint = validated_checkpoint_id(id)?;
@@ -909,6 +920,7 @@ fn fork(p: ForkCmdParams<'_>) -> Result<()> {
                 // No CLI surface declares bindings yet, so a fork declares
                 // none — exactly the prior behaviour.
                 declared_secrets,
+                allow_secret_drop,
             })
         }
         CheckpointClass::FsQuick => fork_fs_quick_arm(ForkFsQuickArmParams {
@@ -920,6 +932,7 @@ fn fork(p: ForkCmdParams<'_>) -> Result<()> {
             cpus_override: cpus,
             memory_override: memory,
             declared_secrets,
+            allow_secret_drop,
             json,
         }),
     }
@@ -938,6 +951,7 @@ struct ForkFsQuickArmParams<'a> {
     /// Declared for the child when `--boot` admits one. A fs_quick fork without
     /// `--boot` admits no plan, so there is nothing for these to ride on.
     declared_secrets: &'a [mvm_core::plan::SecretBinding],
+    allow_secret_drop: bool,
     json: bool,
 }
 
@@ -946,6 +960,21 @@ struct ForkFsQuickArmParams<'a> {
 /// materialized rootfs without clobbering it (the no-clobber seam in
 /// `prepare_instance_rootfs` returns early when source == instance path).
 fn fork_fs_quick_arm(p: ForkFsQuickArmParams<'_>) -> Result<()> {
+    if !p.boot && !p.declared_secrets.is_empty() {
+        bail!(
+            "--secret requires --boot for an fs_quick fork because an unbooted clone has no child plan"
+        );
+    }
+    let child_tenant = super::tenant_resolution::resolve_tenant(None);
+    if p.boot {
+        validate_fork_secret_policy(
+            p.checkpoint,
+            p.store,
+            &child_tenant,
+            p.declared_secrets,
+            p.allow_secret_drop,
+        )?;
+    }
     let now = now_unix();
     let child_vm_name = p
         .new_id
@@ -976,7 +1005,14 @@ fn fork_fs_quick_arm(p: ForkFsQuickArmParams<'_>) -> Result<()> {
     // A fork that we can't audit (signer present but emit fails) is refused —
     // an unaudited lineage record would break the chain. A missing plan/signer
     // is best-effort, matching capture.
-    bind_checkpoint_forked(p.checkpoint, &meta, &child_vm_name, p.store)?;
+    bind_checkpoint_forked(
+        p.checkpoint,
+        &meta,
+        &child_vm_name,
+        p.store,
+        p.declared_secrets,
+        &child_tenant,
+    )?;
 
     if p.boot {
         let instance_rootfs = dest_dir.join("rootfs.ext4");
@@ -1055,8 +1091,6 @@ fn boot_forked_child(p: BootForkedChildParams<'_>) -> Result<()> {
     AnyBackend::require_hypervisor_selectable(&effective_hypervisor)?;
     let parent_agent_verbs = parent_agent_verb_override(p.parent_checkpoint, p.store);
     let parent_meta = p.store.read_meta(p.parent_checkpoint)?;
-    warn_dropped_parent_secrets(p.parent_checkpoint, p.store);
-
     // Resource shape: flag > parent plan > global defaults.
     let (parent_cpus, parent_mem) = parent_plan_resources(p.parent_checkpoint, p.store);
     let user_cfg = mvm_core::user_config::load(None);
@@ -1334,23 +1368,91 @@ fn parent_secret_names(parent_checkpoint: &CheckpointId, store: &CheckpointStore
     plan.secrets.into_iter().map(|b| b.name).collect()
 }
 
-/// Warn that a fork drops the parent's secret bindings.
-///
-/// Not a refusal: a fork is always prod-profile, so there is no flag to gate a
-/// refusal on, and hard-failing would break forks whose child never needed the
-/// parent's credentials.
-fn warn_dropped_parent_secrets(parent_checkpoint: &CheckpointId, store: &CheckpointStore) {
-    let dropped = parent_secret_names(parent_checkpoint, store);
+fn dropped_parent_secret_names(
+    parent_names: &[String],
+    declared: &[mvm_core::plan::SecretBinding],
+) -> Vec<String> {
+    let declared_names = declared
+        .iter()
+        .map(|binding| binding.name.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    parent_names
+        .iter()
+        .filter(|name| !declared_names.contains(name.as_str()))
+        .cloned()
+        .collect()
+}
+
+fn enforce_secret_attenuation(dropped: &[String], allow_secret_drop: bool) -> Result<()> {
     if dropped.is_empty() {
-        return;
+        return Ok(());
     }
-    tracing::warn!(
-        secrets = %dropped.join(", "),
-        count = dropped.len(),
-        "fork child is admitted with no secret bindings; the parent's are not carried, \
-         so outbound requests to their bound destinations will be refused by the \
-         substitution endpoint"
-    );
+    if !allow_secret_drop {
+        bail!(
+            "fork child would drop parent secret bindings: {}. Redeclare each required binding with --secret NAME, or pass --allow-secret-drop to attenuate them intentionally",
+            dropped.join(", ")
+        );
+    }
+    Ok(())
+}
+
+/// Validate a fork child's complete secret capability before any child boots.
+///
+/// Every declared keystore address must exist in the child's tenant. Parent
+/// bindings are never inherited; omitting one is an explicit attenuation and
+/// therefore requires `--allow-secret-drop`.
+pub(super) fn validate_fork_secret_policy(
+    parent_checkpoint: &CheckpointId,
+    store: &CheckpointStore,
+    tenant: &str,
+    declared: &[mvm_core::plan::SecretBinding],
+    allow_secret_drop: bool,
+) -> Result<()> {
+    let binding_store = mvm_hostd::keyholder::FileBindingStore::default_location()
+        .context("opening the child tenant's secret-binding store")?;
+    resolve_fork_secret_audit(tenant, declared, &binding_store)?;
+
+    let dropped =
+        dropped_parent_secret_names(&parent_secret_names(parent_checkpoint, store), declared);
+    enforce_secret_attenuation(&dropped, allow_secret_drop)?;
+    if !dropped.is_empty() {
+        tracing::warn!(
+            secrets = %dropped.join(", "),
+            count = dropped.len(),
+            "fork child intentionally drops parent secret bindings"
+        );
+    }
+    Ok(())
+}
+
+fn resolve_fork_secret_audit(
+    tenant: &str,
+    declared: &[mvm_core::plan::SecretBinding],
+    bindings: &dyn mvm_hostd::keyholder::BindingStore,
+) -> Result<Vec<mvm_hostd::audit::bind::CheckpointForkSecretBinding>> {
+    use mvm_core::plan::SecretSource;
+
+    declared
+        .iter()
+        .filter_map(|binding| match &binding.source {
+            SecretSource::Keystore { address } => Some((binding, address)),
+            SecretSource::External { .. } => None,
+        })
+        .map(|(binding, address)| {
+            let metadata = bindings
+                .get(tenant, address)
+                .with_context(|| format!("reading binding {address:?} for tenant {tenant:?}"))?
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "secret {address:?} has no binding in child tenant {tenant:?}; bind it for that tenant before forking"
+                    )
+                })?;
+            Ok(mvm_hostd::audit::bind::CheckpointForkSecretBinding {
+                name: binding.name.clone(),
+                allowed_hosts: metadata.allowed_hosts,
+            })
+        })
+        .collect()
 }
 
 fn parent_plan_resources(
@@ -1375,6 +1477,8 @@ pub(crate) fn bind_checkpoint_forked(
     child: &mvm_core::checkpoint::CheckpointMeta,
     child_vm_name: &str,
     store: &CheckpointStore,
+    declared_secrets: &[mvm_core::plan::SecretBinding],
+    child_tenant: &str,
 ) -> Result<()> {
     // The child VM has no persisted plan yet (it was never booted as an independent
     // VM); look up the parent VM name from the parent checkpoint record so the
@@ -1404,15 +1508,84 @@ pub(crate) fn bind_checkpoint_forked(
     let emitter = super::audit_chain::AuditEmitter::new(signer.signing)
         .map(|e| e.with_receipts())
         .context("refusing an unaudited fork: audit emitter unavailable")?;
-    mvm_hostd::audit::bind::bind_checkpoint_forked(&emitter, &plan, parent, child, child_vm_name)
-        .context("refusing an unaudited fork")?;
+    let binding_store = mvm_hostd::keyholder::FileBindingStore::default_location()
+        .context("opening the child tenant's secret-binding store for fork audit")?;
+    let secret_bindings =
+        resolve_fork_secret_audit(child_tenant, declared_secrets, &binding_store)?;
+    mvm_hostd::audit::bind::bind_checkpoint_forked(
+        &emitter,
+        &plan,
+        parent,
+        child,
+        child_vm_name,
+        &secret_bindings,
+    )
+    .context("refusing an unaudited fork")?;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mvm_contract::ir::AuthType;
+    use mvm_core::plan::{SecretBinding, SecretSource};
+    use mvm_hostd::keyholder::{BindingStore, FileBindingStore, SecretBindingMeta};
     use mvm_runtime::checkpoint::{CheckpointChainAnchor, verify_lineage};
+
+    fn secret_binding(name: &str, address: &str) -> SecretBinding {
+        SecretBinding {
+            name: name.into(),
+            source: SecretSource::Keystore {
+                address: address.into(),
+            },
+        }
+    }
+
+    #[test]
+    fn dropped_parent_secrets_excludes_explicit_redeclarations() {
+        let parent = vec!["API_KEY".to_string(), "DB_KEY".to_string()];
+        let declared = vec![secret_binding("API_KEY", "child-api")];
+
+        assert_eq!(
+            dropped_parent_secret_names(&parent, &declared),
+            vec!["DB_KEY"]
+        );
+    }
+
+    #[test]
+    fn secret_attenuation_requires_explicit_drop_permission() {
+        let dropped = vec!["DB_KEY".to_string()];
+
+        let error = enforce_secret_attenuation(&dropped, false).unwrap_err();
+        assert!(error.to_string().contains("--allow-secret-drop"));
+        assert!(enforce_secret_attenuation(&dropped, true).is_ok());
+        assert!(enforce_secret_attenuation(&[], false).is_ok());
+    }
+
+    #[test]
+    fn fork_secret_audit_resolves_only_child_tenant_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FileBindingStore::with_dir(dir.path());
+        store
+            .put(
+                "child-tenant",
+                "api-address",
+                &SecretBindingMeta {
+                    auth_type: AuthType::Bearer,
+                    allowed_hosts: vec!["api.example.com".into()],
+                    sigv4: None,
+                    provider: Some("catalog-provider".into()),
+                },
+            )
+            .unwrap();
+        let declared = vec![secret_binding("API_KEY", "api-address")];
+
+        let audit = resolve_fork_secret_audit("child-tenant", &declared, &store).unwrap();
+        assert_eq!(audit.len(), 1);
+        assert_eq!(audit[0].name, "API_KEY");
+        assert_eq!(audit[0].allowed_hosts, vec!["api.example.com"]);
+        assert!(resolve_fork_secret_audit("other-tenant", &declared, &store).is_err());
+    }
 
     #[test]
     fn validated_checkpoint_id_accepts_normal() {

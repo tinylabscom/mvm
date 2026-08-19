@@ -37,6 +37,7 @@ pub(super) struct ForkVmFullArmParams<'a> {
     /// Secret bindings declared for the child. Empty reproduces the prior
     /// behaviour: a child admitted with no bindings.
     pub(super) declared_secrets: &'a [mvm_core::plan::SecretBinding],
+    pub(super) allow_secret_drop: bool,
 }
 
 /// vm_full fork: clone the captured triple into a new child identity, admit a
@@ -102,6 +103,7 @@ fn fork_vm_full_arm_inner(p: ForkVmFullArmParams<'_>) -> Result<()> {
             now,
             json: p.json,
             declared_secrets: p.declared_secrets,
+            allow_secret_drop: p.allow_secret_drop,
         }),
         Some(VmFullOrigin::Firecracker) => {
             fork_vm_full_arm_fc(ForkVmFullArmFcParams {
@@ -115,6 +117,7 @@ fn fork_vm_full_arm_inner(p: ForkVmFullArmParams<'_>) -> Result<()> {
                 json: p.json,
                 bypass_experimental_guard: false,
                 declared_secrets: p.declared_secrets,
+                allow_secret_drop: p.allow_secret_drop,
             })?;
             Ok(())
         }
@@ -148,6 +151,7 @@ pub(in crate::commands) struct ForkVmFullArmFcParams<'a> {
     /// Secret bindings declared for the child. Empty reproduces the prior
     /// behaviour: a child admitted with no bindings.
     pub(in crate::commands) declared_secrets: &'a [mvm_core::plan::SecretBinding],
+    pub(in crate::commands) allow_secret_drop: bool,
 }
 
 /// FC vm_full fork: clone the captured triple, admit a fresh claim-8 plan for
@@ -208,6 +212,7 @@ pub(in crate::commands) fn fork_vm_full_arm_fc(
         child_vm_name: &p.child_vm_name,
         backend_kind: BackendKind::Firecracker,
         declared_secrets: p.declared_secrets,
+        allow_secret_drop: p.allow_secret_drop,
     })?;
 
     // Verify the parent against the signed audit chain before cloning/restoring.
@@ -240,7 +245,14 @@ pub(in crate::commands) fn fork_vm_full_arm_fc(
     let meta = fork_result
         .with_context(|| format!("forking FC vm_full checkpoint {:?}", p.checkpoint.as_str()))?;
 
-    bind_checkpoint_forked(p.checkpoint, &meta, &p.child_vm_name, p.store)?;
+    bind_checkpoint_forked(
+        p.checkpoint,
+        &meta,
+        &p.child_vm_name,
+        p.store,
+        p.declared_secrets,
+        &crate::commands::vm::tenant_resolution::resolve_tenant(None),
+    )?;
     crate::commands::vm::up::emit_launched_if(&admission, "firecracker", true);
 
     // Deliver the fresh generation token to every restored child. A grant is
@@ -316,6 +328,7 @@ struct AdmitForkedChildParams<'a> {
     /// tenant's `BindingStore` at the substitution endpoint, so a name the
     /// operator has not bound grants nothing.
     declared_secrets: &'a [mvm_core::plan::SecretBinding],
+    allow_secret_drop: bool,
 }
 
 /// The admitted claim-8 envelope a vm_full fork boots its child under.
@@ -351,8 +364,14 @@ fn admit_forked_child(p: &AdmitForkedChildParams<'_>) -> Result<AdmittedForkChil
         .find(|b| b.name == mvm_core::checkpoint::ROOTFS_BLOB)
         .map(|b| b.sha256.clone());
     let parent_agent_verbs = parent_agent_verb_override(p.checkpoint, p.store);
-    super::warn_dropped_parent_secrets(p.checkpoint, p.store);
     let tenant = crate::commands::vm::tenant_resolution::resolve_tenant(None);
+    super::validate_fork_secret_policy(
+        p.checkpoint,
+        p.store,
+        &tenant,
+        p.declared_secrets,
+        p.allow_secret_drop,
+    )?;
     let ledger = mvm_hostd::plan_admission::InMemoryNonceLedger::new();
     let admission = crate::commands::vm::up::admit_plan_for_boot(
         crate::commands::vm::up::AdmitPlanForBootParams {
@@ -443,6 +462,7 @@ struct ForkVmFullArmHvfParams<'a> {
     /// Secret bindings declared for the child. Empty reproduces the prior
     /// behaviour: a child admitted with no bindings.
     declared_secrets: &'a [mvm_core::plan::SecretBinding],
+    allow_secret_drop: bool,
 }
 
 /// HVF vm_full fork: clone the captured state into a fresh child identity, admit
@@ -466,6 +486,7 @@ fn fork_vm_full_arm_hvf(p: ForkVmFullArmHvfParams<'_>) -> Result<()> {
         child_vm_name: &p.child_vm_name,
         backend_kind: BackendKind::Hvf,
         declared_secrets: p.declared_secrets,
+        allow_secret_drop: p.allow_secret_drop,
     })?;
 
     // Verify the parent against the signed audit chain before cloning anything.
@@ -491,7 +512,14 @@ fn fork_vm_full_arm_hvf(p: ForkVmFullArmHvfParams<'_>) -> Result<()> {
     let meta = fork_result
         .with_context(|| format!("forking HVF vm_full checkpoint {:?}", p.checkpoint.as_str()))?;
 
-    bind_checkpoint_forked(p.checkpoint, &meta, &p.child_vm_name, p.store)?;
+    bind_checkpoint_forked(
+        p.checkpoint,
+        &meta,
+        &p.child_vm_name,
+        p.store,
+        p.declared_secrets,
+        &crate::commands::vm::tenant_resolution::resolve_tenant(None),
+    )?;
     crate::commands::vm::up::emit_launched_if(&admission, "hvf", true);
 
     if let Err(error) = deliver_hvf_fork_post_restore(
@@ -635,8 +663,10 @@ fn require_fork_post_restore_success(reply: mvm_agentd::vsock::PostRestoreReply)
 mod tests {
     use super::*;
 
+    use mvm_contract::ir::AuthType;
     use mvm_contract::plan::{SecretBinding, SecretSource};
     use mvm_core::checkpoint::{CheckpointClass, CheckpointMeta, ContentBlob, ROOTFS_BLOB};
+    use mvm_hostd::keyholder::{BindingStore, FileBindingStore, SecretBindingMeta};
 
     /// A parent checkpoint whose recorded rootfs sha matches a real blob on
     /// disk. The blob has to exist: admission *verifies* the recorded digest
@@ -671,7 +701,28 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let store = CheckpointStore::at(tmp.path().join("store"));
         let id = format!("ck-{vm}");
+        // `parent_with_grants` is the helper that survived on main; the
+        // binding-store seeding below is what the enforcement tests need, so
+        // this keeps both rather than choosing one.
         let parent_meta = parent_with_grants(&store, &id, None);
+        let binding_store = FileBindingStore::default_location().unwrap();
+        for binding in declared {
+            let SecretSource::Keystore { address } = &binding.source else {
+                continue;
+            };
+            binding_store
+                .put(
+                    "local",
+                    address,
+                    &SecretBindingMeta {
+                        auth_type: AuthType::Bearer,
+                        allowed_hosts: vec!["api.example.com".into()],
+                        sigv4: None,
+                        provider: None,
+                    },
+                )
+                .unwrap();
+        }
         let admitted = admit_forked_child(&AdmitForkedChildParams {
             store: &store,
             checkpoint: &CheckpointId::new(&id),
@@ -679,6 +730,7 @@ mod tests {
             child_vm_name: vm,
             backend_kind: BackendKind::Hvf,
             declared_secrets: declared,
+            allow_secret_drop: false,
         })
         .expect("a fork child is admitted");
         admitted
@@ -702,7 +754,7 @@ mod tests {
         let declared = vec![SecretBinding {
             name: "STRIPE_KEY".to_string(),
             source: SecretSource::Keystore {
-                address: "kv/stripe".to_string(),
+                address: "stripe".to_string(),
             },
         }];
         let got = admitted_child_secrets(&declared, "child-declared");
@@ -941,6 +993,7 @@ mod tests {
             memory_override: None,
             json: false,
             declared_secrets: &[],
+            allow_secret_drop: false,
         })
         .unwrap_err();
         let msg = err.to_string();
@@ -963,6 +1016,7 @@ mod tests {
             memory_override: Some("2G"),
             json: false,
             declared_secrets: &[],
+            allow_secret_drop: false,
         })
         .unwrap_err();
         let msg = err.to_string();
