@@ -19,4 +19,4 @@ RPC connector, whose first transient retry sleeps 100 ms.
 - [x] Run formatting, workspace tests/checks, Clippy, and gated Linux checks.
 - [x] Publish the measured host/storage-labelled row and update delivery and
       refactor status.
-- [ ] Open and queue the closing PR.
+- [x] Open and queue the closing PR.
