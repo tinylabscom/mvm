@@ -1,11 +1,21 @@
 # Refactor status
 
-Last updated: 2026-08-18
+Last updated: 2026-08-19
 
 This is the cross-plan progress index. The owning plan remains authoritative
 for detailed scope and acceptance criteria.
 
 ## Completed issue closeouts
+
+- [x] **Issue #2574 — the first publishable Linux/Firecracker launch lane.**
+      The false `host_services` degradation was already removed; the remaining
+      dispatch gap was a nested 100 ms reconnect cadence inside the driver's
+      own readiness backoff. Firecracker now makes one strict CONNECT attempt
+      per bounded probe, while ordinary RPC callers retain resilient retries.
+      On the established rotational KVM host, the required 2 warm-ups + 20
+      measured `prepared_cold` launches passed at **171.5 / 176.0 / 178.0 ms
+      p50/p95/p99** against **200 / 250 / 300 ms** budgets. The public page
+      carries the host, backend, storage class, report path, and digest.
 
 - [x] **Plan 337 COMPLETE — the SDK surface is generated from Rust.** Sessions
       finished Tier C. Python's `contextvars` + `Token` has no

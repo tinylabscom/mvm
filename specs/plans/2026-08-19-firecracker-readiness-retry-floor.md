@@ -14,8 +14,9 @@ RPC connector, whose first transient retry sleeps 100 ms.
       probe; keep ordinary RPC callers on the resilient multi-attempt API.
 - [x] Prove the one-attempt seam does not charge the 100 ms reconnect delay and
       retain the existing restart-race tests for the general connector.
-- [ ] Run the required 2-warm-up + 20-sample prepared-cold lane on the
+- [x] Run the required 2-warm-up + 20-sample prepared-cold lane on the
       established Linux/KVM host and pass the 200/250/300 ms matrix gate.
-- [ ] Run formatting, workspace tests/checks, Clippy, and gated Linux checks.
-- [ ] Publish the measured host/storage-labelled row, update delivery and
-      refactor status, and queue the closing PR.
+- [x] Run formatting, workspace tests/checks, Clippy, and gated Linux checks.
+- [x] Publish the measured host/storage-labelled row and update delivery and
+      refactor status.
+- [ ] Open and queue the closing PR.
