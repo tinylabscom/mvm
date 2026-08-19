@@ -93,6 +93,9 @@ fn check_mvmctl_freshness() -> Result<(), String> {
 /// Where `assert_cmd`'s `cargo_bin` looks: the test binary's target
 /// directory, two levels up from `deps/`.
 fn mvmctl_path() -> PathBuf {
+    if let Some(binary) = std::env::var_os("CARGO_BIN_EXE_mvmctl") {
+        return binary.into();
+    }
     let mut dir = std::env::current_exe().unwrap_or_default();
     dir.pop(); // the test binary's own name
     if dir.ends_with("deps") {

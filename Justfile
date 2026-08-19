@@ -277,7 +277,7 @@ bdd:
     ./scripts/cargo-fast.sh build -p xtask
     just sdk-install-typescript
     just sdk-build-typescript
-    ./scripts/cargo-fast.sh test -p mvm-conformance --test conformance --features bdd
+    CARGO_BIN_EXE_mvmctl="${CARGO_TARGET_DIR:-target}/debug/mvmctl" ./scripts/cargo-fast.sh test -p mvm-conformance --test conformance --features bdd
 
 # Build the per-VM host helper bins explicitly. mvmctl's build script already
 # compiles them during `cargo build`/`cargo run`; this is the manual route for

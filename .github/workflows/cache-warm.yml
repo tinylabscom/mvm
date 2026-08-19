@@ -94,11 +94,10 @@ jobs:
           nix build --print-build-logs --impure --no-link \
             ./nix/images/default-tenant#packages.x86_64-linux.default
 
-      # Nightly is what the heavy lanes (lint-core, lint-features,
-      # test-workspace) use, so it is the toolchain worth warming. Stable lanes
-      # still benefit from the cargo registry half of the cache.
+      # Stable is what the lint lanes use, so warm the exact compiler and
+      # Clippy artifacts those required checks restore.
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@nightly
+        uses: dtolnay/rust-toolchain@1.96.0
         with:
           components: clippy
 

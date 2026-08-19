@@ -558,7 +558,9 @@ mod tests {
         }
 
         let lint_core = job_block(&workflow, "lint-core");
-        assert!(lint_core.contains("cargo clippy --all-targets -- -D warnings"));
+        assert!(
+            lint_core.contains("./scripts/cargo-stable.sh clippy --all-targets -- -D warnings")
+        );
         let lint_policy = job_block(&workflow, "lint-policy");
         assert!(lint_policy.contains("name: Invariant"));
         assert!(lint_policy.contains("bash scripts/check-no-orchestration-server.sh"));
