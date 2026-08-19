@@ -34,8 +34,12 @@ Three things follow, and none of them are covered today:
 3. **The memory image has no retention ladder.** `STANDBY_POOL_TTL` is 30
    minutes with a `PARKED_TTL_MULTIPLIER` of 6
    (`crates/mvm-runtime/src/standby_pool.rs:19-27`), tuned for warm-pool
-   capacity rather than for a task parked overnight. Nothing GCs
-   `checkpoints_dir()` (`crates/mvm-core/src/config.rs:766`) at all.
+   capacity rather than for a task parked overnight. `checkpoints_dir()`
+   (`crates/mvm-core/src/config.rs:766`) already has an age-based, tag-aware
+   sweep (`sweep_untagged_checkpoints`, reached from `mvmctl cache prune`) —
+   but it knows nothing about sessions, so a session parked past the sweep's
+   age cut loses the checkpoint it resumes from with no reachability check at
+   all.
 
 ## Framing
 
@@ -199,8 +203,15 @@ session record governed **separately**: a session may retain its record for 90
 days while its memory image expires in 48 hours. Losing the memory image costs
 speed, never resumability — the journal remains the durable record.
 
-This introduces the first actual GC over `checkpoints_dir()`. It must not
-reap a checkpoint that any live or hibernated session names as its parent.
+`checkpoints_dir()` already has a GC — the age-based, tag-aware
+`sweep_untagged_checkpoints` reached from `mvmctl cache prune`. What is
+missing is teaching it about sessions: it must not reap a checkpoint that any
+live or hibernated session names as its parent.
+(Delivered by `specs/plans/2026-08-18-session-retention.md`: the sweep now
+consults `mvm_runtime::agent_session::pinned_checkpoints` and a manual
+`mvmctl vm checkpoint rm` refuses the same way. Retention classes, expiry,
+and a scheduler that calls `demote` remain undelivered — see that plan's
+"Deferred to later plans" section.)
 
 ### D5 — Resume is re-admission, and it is incremental
 
@@ -439,8 +450,20 @@ Numbering was reconciled before these documents landed on main (PR #2691):
       its own tests — nothing in `mvmctl` or elsewhere invokes it, so none of
       the above runs on a real resume yet. A session parked with
       `approval_head: None` resumes with no ledger fence at all.
-- [ ] **WS5 — Retention ladder + GC.** Retention classes, one-way demotion,
-      first GC over `checkpoints_dir()` with parent-reachability refusal.
+- [ ] **WS5 — Retention ladder + GC.** Partially delivered by
+      `specs/plans/2026-08-18-session-retention.md`: the existing
+      `checkpoints_dir()` sweep (`mvmctl cache prune`) now refuses to reap a
+      checkpoint any live or hibernated session names as its parent, a manual
+      `mvmctl vm checkpoint rm` carries the same refusal, and
+      `AgentSessionRecord::demote` gives a parked session a one-way step down
+      the storage ladder. Not yet delivered: retention classes or expiry on
+      the record, a scheduler that calls `demote`, or any actual movement of
+      bytes between tiers — demoting only sets a field, nothing relocates a
+      memory image, and nothing reads `storage_tier` to decide how to resume.
+      A `Cold` session's checkpoint is still pinned by `pinned_checkpoints`
+      regardless of tier, so the ladder does not yet make anything
+      reclaimable — closing a session remains the only thing that frees its
+      resume point.
 - [ ] **WS6 — CLI.** `mvmctl session {open,ls,show,park,resume,approve,close}`.
 - [ ] **WS7 — Chain records.** `session.opened`, `sandbox.admitted`,
       `sandbox.parked`, `approval.requested`, `approval.granted`,

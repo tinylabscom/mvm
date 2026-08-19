@@ -305,7 +305,9 @@ for detailed scope and acceptance criteria.
       `specs/plans/2026-08-18-session-approval-head.md` (implementation,
       Tasks 1–4 complete) +
       `specs/plans/2026-08-18-resume-session-orchestrator.md` (implementation,
-      Tasks 1–3 complete). `CheckpointMeta` gains `Option<SessionBinding>`
+      Tasks 1–3 complete) +
+      `specs/plans/2026-08-18-session-retention.md` (implementation, Tasks 1–3
+      complete). `CheckpointMeta` gains `Option<SessionBinding>`
       (`session_id`/`generation`/`journal_cursor`/`approval_head`), folded
       into `meta_digest` the same way `grants` already is; `approval_head` is
       a dedicated `ApprovalHead` newtype, not `CheckpointDigest` reused.
@@ -365,9 +367,21 @@ resume` takes a `current_head` and refuses when it differs from the
       neither a wall-clock bound nor a CPU share. `resume_session` has no
       caller anywhere in the workspace outside its own tests — it is wired
       to no CLI verb or other host code path. A session parked with
-      `approval_head: None` resumes with no ledger fence at all. WS5
-      retention ladder + GC, WS6 CLI, WS7 chain records, WS8 BDD remain
-      untouched.
+      `approval_head: None` resumes with no ledger fence at all. WS5 is
+      partial: `specs/plans/2026-08-18-session-retention.md` teaches the
+      pre-existing `checkpoints_dir()` sweep (`sweep_untagged_checkpoints`,
+      `mvmctl cache prune`) to refuse reaping a checkpoint any live or
+      hibernated session names as its parent — via the new
+      `mvm_runtime::agent_session::pinned_checkpoints` — closes the same
+      manual door on `mvmctl vm checkpoint rm`, and adds
+      `AgentSessionRecord::demote`, a one-way `Resident → Parked → Cold` step
+      for an already-hibernated session. Not delivered: retention classes or
+      expiry on the record, a scheduler that calls `demote`, or any actual
+      movement of bytes between tiers — demoting only sets a field, and a
+      `Cold` session's checkpoint is still pinned regardless of tier, so the
+      ladder does not yet make anything reclaimable; closing a session
+      remains the only thing that frees its resume point. WS6 CLI, WS7 chain
+      records, WS8 BDD remain untouched.
 
 - [~] **Admission-bound AI assurance sessions** —
       `specs/plans/2026-08-17-admission-bound-ai-assurance-sessions.md`. W1–W4,
