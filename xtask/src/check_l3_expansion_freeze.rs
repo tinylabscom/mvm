@@ -97,6 +97,7 @@ const EXEMPT: &[&str] = &[
 
 const SKIP_DIRS: &[&str] = &[
     ".git",
+    ".claude",
     ".mvm-test",
     ".mvm-verify",
     "target",
@@ -346,6 +347,36 @@ mod tests {
             unique.len(),
             ALLOWLIST.len(),
             "duplicate allowlist entries hide a stale one"
+        );
+    }
+
+    /// Claude worktrees nested inside the main checkout carry independent
+    /// branch states and must not be scanned as if they were part of the
+    /// source tree.
+    #[test]
+    fn claude_worktrees_are_not_scanned() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let nested = tmp
+            .path()
+            .join(".claude")
+            .join("worktrees")
+            .join("old-branch");
+        std::fs::create_dir_all(&nested).expect("create nested worktree");
+        std::fs::write(
+            nested.join("legacy.rs"),
+            "let mode = NetworkMode::L3Vsock;\n",
+        )
+        .expect("write legacy source");
+        std::fs::write(tmp.path().join("source.rs"), "// clean\n").expect("write source file");
+
+        let found = walk(tmp.path()).expect("walk temp tree");
+        assert!(
+            found.iter().all(|p| !p.ends_with("legacy.rs")),
+            "walker descended into .claude/worktrees: {found:?}"
+        );
+        assert!(
+            found.iter().any(|p| p.ends_with("source.rs")),
+            "walker skipped the real source file: {found:?}"
         );
     }
 }
