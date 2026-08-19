@@ -191,13 +191,26 @@ fn confine_endpoint(cfg: &EndpointConfig) -> Result<()> {
     // endpoint can chain-sign substitution events. `resolver_uds_path` widens
     // the grant with the ONE resolver socket when (and only when) `cfg.resolver`
     // is `Remote` — `Local` leaves the confinement unchanged.
+    let session_marker_parent = cfg
+        .session_marker
+        .as_deref()
+        .map(|marker| {
+            marker.parent().with_context(|| {
+                format!(
+                    "FlowMux session marker has no parent directory: {}",
+                    marker.display()
+                )
+            })
+        })
+        .transpose()?;
     let spec = ConfinementSpec::network_endpoint(
         secret_dir,
         binding_dir,
         mvm_core::config::mvm_audit_dir(),
         mvm_core::config::mvm_keys_dir(),
         resolver_uds_path(cfg),
-    );
+    )
+    .with_session_marker_parent(session_marker_parent);
     confine_self(&spec).context("confine substitution endpoint")?;
     info!("substitution endpoint self-confined (landlock + seccomp)");
     Ok(())

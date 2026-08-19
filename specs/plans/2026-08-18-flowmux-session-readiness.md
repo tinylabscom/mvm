@@ -26,6 +26,8 @@ existing marker as durable verification.
 - Only a successfully authenticated FlowMux session signals readiness.
 - The durable session marker is written before the event and verified after
   wakeup; the socket is a wakeup, not a source of truth.
+- Linux confinement grants the endpoint write access only to the configured
+  marker's per-VM parent directory, and only when session readiness is enabled.
 - Already-authenticated sessions take the marker fast path with no socket wait.
 - Endpoint exit, malformed signals, missing durable evidence, and timeout all
   fail closed.
@@ -42,6 +44,8 @@ existing marker as durable verification.
       durable marker verification.
 - [x] Add real endpoint subprocess coverage and a hermetic BDD scenario for the
       delayed-authentication ordering.
+- [x] Preserve Linux self-confinement while permitting the authenticated
+      session marker to be created and verified.
 - [x] Pass workspace tests, check, formatting, host Clippy, gated Linux checks,
       and product invariant gates.
 - [x] Record delivery and update the FlowMux refactor rollup.

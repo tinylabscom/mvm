@@ -7,6 +7,10 @@ writes the existing durable session marker and then signals that socket. The
 launcher waits for the event and verifies the marker before admitting the
 workload as ready.
 
+On Linux, the endpoint's Landlock ruleset opts into bounded write access to the
+configured marker's per-VM parent directory. Endpoints without session
+readiness retain the narrower default confinement policy.
+
 This is an event-driven wait, not a fixed delay. A healthy launch pays only for
 the authentication and local event delivery, preserving the sub-200 ms warm
 launch target. A guest that never authenticates fails closed at the bounded
