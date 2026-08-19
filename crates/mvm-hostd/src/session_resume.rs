@@ -15,6 +15,7 @@
 use anyhow::Result;
 use std::path::Path;
 
+use mvm_contract::plan::types::AuditLabels;
 use mvm_contract::protocol::agent_session::AgentSessionId;
 use mvm_core::checkpoint::ApprovalHead;
 use mvm_core::plan::{PlanSeccompTier, SecretReleasePolicy, SynthesisInput, Variant};
@@ -99,12 +100,45 @@ pub fn synthesis_for_resume<'a>(
         shares: Vec::new(),
         redaction: Default::default(),
         reversible_replacement: Default::default(),
-        audit_labels: Default::default(),
+        audit_labels: session_audit_labels(record),
         agent_verbs: None,
         services: Vec::new(),
         stream_edges: Vec::new(),
         stream_retention: Default::default(),
     }
+}
+
+/// The session identity every audit entry under this plan should carry.
+///
+/// `SynthesisInput.audit_labels` serializes inside the signed payload and is
+/// inherited by each chain-signed entry, so this is what lets a reader of the
+/// chain say *which residency* acted. Without it two resumes of one session
+/// produce plans differing only by nonce and validity window.
+fn session_audit_labels(record: &AgentSessionRecord) -> AuditLabels {
+    let mut labels = AuditLabels::new();
+    labels.insert(
+        "session_id".to_string(),
+        record.session_id.as_str().to_string(),
+    );
+    // The generation this resume *opens*, not the one on the record. Synthesis
+    // runs before the transition, so the record still holds the parent's — and
+    // `AgentSessionRecord::resume` is about to write this value. Labelling the
+    // parent's would put every audit entry one residency behind, which is
+    // worse than carrying no label at all.
+    labels.insert(
+        "session_generation".to_string(),
+        (record.generation + 1).to_string(),
+    );
+    // Both of the following are omitted rather than blanked when absent: an
+    // empty string reads in the chain as a value that was checked and found
+    // empty, where a missing key reads as a value that was never there.
+    if let Some(parent) = record.parent_checkpoint.as_ref() {
+        labels.insert("session_parent_checkpoint".to_string(), parent.to_string());
+    }
+    if let Some(head) = record.approval_head.as_ref() {
+        labels.insert("session_approval_head".to_string(), head.to_string());
+    }
+    labels
 }
 
 /// What a resume is asked for, in one struct.
@@ -155,11 +189,19 @@ fn resume_posture() -> RunPosture {
 
 /// Turn a parked session back into an admitted one.
 ///
-/// Admission runs before the record transition, deliberately: it is the last
-/// step that can fail, so a refusal leaves the session parked and resumable
-/// rather than half-resumed. A record advanced to a generation that no admitted
-/// plan corresponds to would be worse than no resume at all — the session would
-/// claim a residency nothing authorized.
+/// Admission runs before the record transition, deliberately: no step that can
+/// refuse runs after the record has moved, so a refusal leaves the session
+/// parked and resumable rather than half-resumed. A record advanced to a
+/// generation that no admitted plan corresponds to would be worse than no
+/// resume at all — the session would claim a residency nothing authorized.
+///
+/// Admission is not literally the last fallible step: the store applies its
+/// generation and approval-head fences inside `resume`, after this function has
+/// already signed a plan. That is the right place for them — they are the
+/// store's invariants and duplicating them here is how the two copies start
+/// disagreeing — and it costs nothing that matters, because the store writes
+/// only on success. The plan admitted for a fence-refused resume is dropped
+/// unused; it reaches no backend.
 ///
 /// A resume is a re-admission and not an inheritance: the plan it admits names
 /// this session, is freshly signed, and carries its own nonce and validity
@@ -237,6 +279,10 @@ mod tests {
     /// Goes through the public `park` transition rather than writing
     /// `Hibernated` into the literal, so the fixture cannot drift into a state
     /// the state machine would never produce.
+    fn head_of(byte: &str) -> ApprovalHead {
+        ApprovalHead::parse(format!("sha256:{}", byte.repeat(32))).unwrap()
+    }
+
     fn parked_record(id: &str) -> AgentSessionRecord {
         let active = AgentSessionRecord {
             session_id: AgentSessionId::parse(id).unwrap(),
@@ -258,7 +304,9 @@ mod tests {
                 &ParkInput {
                     reason: ParkReason::ApprovalWait,
                     journal_cursor: 7,
-                    approval_head: None,
+                    // A real recorded head, so a request that passes the wrong
+                    // one — or none — has something to be refused against.
+                    approval_head: Some(head_of("ab")),
                 },
                 1_755_000_100,
             )
@@ -531,6 +579,99 @@ mod tests {
             err.to_string().contains("memory_mib"),
             "the refusal must be the ceiling, not an earlier step: {err}"
         );
+        assert_still_parked(&fx, &rec);
+    }
+    #[test]
+    fn the_audit_labels_name_the_session_and_the_generation_the_resume_opens() {
+        // The plan has to name the residency, not just the session: two
+        // resumes of one session otherwise synthesize plans differing only by
+        // nonce, and an auditor reading the chain cannot tell which residency
+        // acted. That is the whole reason a resume re-admits instead of
+        // inheriting.
+        let rec = parked_record("sess-alpha");
+        let m = material();
+        let input = synthesis_for_resume(&rec, &m);
+
+        let label = |k: &str| input.audit_labels.get(k).map(String::as_str);
+        assert_eq!(label("session_id"), Some("sess-alpha"));
+        // Synthesis runs *before* the transition, so the record still carries
+        // the parent generation. The label must name the one the resume opens,
+        // which is what `AgentSessionRecord::resume` goes on to write.
+        assert_eq!(rec.generation, 1, "the record has not transitioned yet");
+        assert_eq!(label("session_generation"), Some("2"));
+
+        let parent = rec.parent_checkpoint.as_ref().unwrap().to_string();
+        assert_eq!(label("session_parent_checkpoint"), Some(parent.as_str()));
+        let head = rec.approval_head.as_ref().unwrap().to_string();
+        assert_eq!(label("session_approval_head"), Some(head.as_str()));
+    }
+
+    #[test]
+    fn a_session_parked_without_an_approval_head_gets_no_head_label() {
+        // An absent label is honest; an empty-string one would read in the
+        // audit chain as a head that was checked and found blank.
+        let mut rec = parked_record("sess-alpha");
+        rec.approval_head = None;
+        let m = material();
+        let input = synthesis_for_resume(&rec, &m);
+        assert_eq!(input.audit_labels.get("session_approval_head"), None);
+        assert_eq!(
+            input.audit_labels.get("session_id").map(String::as_str),
+            Some("sess-alpha")
+        );
+    }
+
+    #[test]
+    fn a_resume_whose_approval_head_moved_is_refused() {
+        // The head recorded at park is the ledger state the session was last
+        // admitted under. If the ledger moved while it waited, the grants this
+        // resume would run under are not the ones it was admitted for.
+        let (_env, _home) = isolated_host(GrantCeiling::default());
+        let fx = Fixture::new();
+        let parent = seed_checkpoint(&fx.checkpoints, fx.tmp.path(), "cp-parent");
+
+        let mut rec = parked_record("sess-alpha");
+        rec.parent_checkpoint = Some(parent.meta_digest.clone());
+        fx.sessions.write(&rec).unwrap();
+
+        let m = material();
+        let moved = head_of("cd");
+        assert_ne!(Some(&moved), rec.approval_head.as_ref());
+        let mut req = fx.request(&rec, &m);
+        req.current_approval_head = Some(&moved);
+
+        let err = fx
+            .resume(&req)
+            .expect_err("a ledger that moved while parked must refuse the resume");
+        assert!(
+            err.to_string().contains("approval head"),
+            "the refusal must be the approval fence: {err}"
+        );
+        assert_still_parked(&fx, &rec);
+    }
+
+    #[test]
+    fn a_resume_claiming_the_wrong_generation_is_refused() {
+        // The orchestrator's own passthrough, not the store's fence: the store
+        // has its own tests for the comparison, and none of them can tell
+        // whether this function forwards the caller's expectation or
+        // substitutes the record's own generation, which would always match.
+        let (_env, _home) = isolated_host(GrantCeiling::default());
+        let fx = Fixture::new();
+        let parent = seed_checkpoint(&fx.checkpoints, fx.tmp.path(), "cp-parent");
+
+        let mut rec = parked_record("sess-alpha");
+        rec.parent_checkpoint = Some(parent.meta_digest.clone());
+        fx.sessions.write(&rec).unwrap();
+
+        let m = material();
+        let mut req = fx.request(&rec, &m);
+        req.expected_generation = rec.generation + 5;
+
+        let err = fx
+            .resume(&req)
+            .expect_err("a caller working from a superseded record must be refused");
+        assert!(err.to_string().contains("generation"), "{err}");
         assert_still_parked(&fx, &rec);
     }
 }
