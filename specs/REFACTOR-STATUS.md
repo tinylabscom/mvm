@@ -27,6 +27,13 @@ for detailed scope and acceptance criteria.
       absolute `/bin/ping` mediated-tool proof. Together with PRs #2690,
       #2709, and #2720, this closes the NIC-less and read-only boot-noise issue.
 
+- [x] **Issue #2633 — healthy boots no longer report authentication failures.**
+      PR #2707 classified an abandoned readiness probe as transport EOF rather
+      than failed authentication. The remaining no-egress path now treats an
+       unattached FlowMux identity drive as the expected secretless boot shape,
+       while an attached but unreadable drive stays loud. Two focused tests pin
+       both sides of that boundary.
+
 - [x] **Issue #2684 — a sealed boot is reachable and proven before release.**
       The CLI release train publishes both universal-initramfs archives under
       the downloader's exact versioned names and refuses to publish when that
