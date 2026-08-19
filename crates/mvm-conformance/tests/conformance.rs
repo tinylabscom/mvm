@@ -93,8 +93,9 @@ fn check_mvmctl_freshness() -> Result<(), String> {
 /// Where `assert_cmd`'s `cargo_bin` looks: the test binary's target
 /// directory, two levels up from `deps/`.
 fn mvmctl_path() -> PathBuf {
+    let workspace_root = steps::cli::workspace_root();
     if let Some(binary) = std::env::var_os("CARGO_BIN_EXE_mvmctl") {
-        return binary.into();
+        return resolve_binary_path(binary.into(), &workspace_root);
     }
     let mut dir = std::env::current_exe().unwrap_or_default();
     dir.pop(); // the test binary's own name
@@ -102,6 +103,39 @@ fn mvmctl_path() -> PathBuf {
         dir.pop();
     }
     dir.join("mvmctl")
+}
+
+fn resolve_binary_path(binary: PathBuf, workspace_root: &Path) -> PathBuf {
+    if binary.is_absolute() {
+        binary
+    } else {
+        workspace_root.join(binary)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn relative_binary_paths_are_resolved_from_the_workspace_root() {
+        assert_eq!(
+            super::resolve_binary_path(
+                std::path::PathBuf::from("target/debug/mvmctl"),
+                std::path::Path::new("/workspace")
+            ),
+            std::path::PathBuf::from("/workspace/target/debug/mvmctl")
+        );
+    }
+
+    #[test]
+    fn absolute_binary_paths_are_preserved() {
+        assert_eq!(
+            super::resolve_binary_path(
+                std::path::PathBuf::from("/tmp/mvmctl"),
+                std::path::Path::new("/workspace")
+            ),
+            std::path::PathBuf::from("/tmp/mvmctl")
+        );
+    }
 }
 
 /// The most recently modified `.rs` file under `root`, if any.
