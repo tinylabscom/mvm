@@ -28,7 +28,7 @@ prove the protocol against `MockBackend` without booting a VM.
       the sprint and refactor trackers.
 - [x] Pass formatting, workspace tests/checks, all-target clippy, and gated
       target checks.
-- [ ] Open the issue-closing pull request, enable auto-merge, and record the
+- [x] Open the issue-closing pull request, enable auto-merge, and record the
       merge-queue handoff.
 
 ## Validation evidence
@@ -48,3 +48,4 @@ prove the protocol against `MockBackend` without booting a VM.
   calls. Full Linux clippy remains delegated to CI because the shared builder's
   persistent Nix disk is reformatted on every boot and cold jobs exceed its
   fixed 30-minute execution deadline.
+- PR #2737 closes issue #2647 and is handed to the required-check merge queue.
