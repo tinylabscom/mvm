@@ -1330,7 +1330,12 @@ jobs:
           for d in "$HOME"/.mvm/vms/*/; do
             echo "===== $d ====="
             ls -la "$d" || true
-            [ -f "$d/console.log" ] && cat "$d/console.log" || true
+            # `if`, not `A && B || C`: with the latter the `|| true` also runs
+            # when `cat` itself fails, which would hide a console.log that
+            # exists but cannot be read — the one case worth seeing here.
+            if [ -f "$d/console.log" ]; then
+              cat "$d/console.log"
+            fi
           done
 
   nix-flake-check:
