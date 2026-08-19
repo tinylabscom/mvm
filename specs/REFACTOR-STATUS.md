@@ -302,22 +302,15 @@ for detailed scope and acceptance criteria.
 
 ## In-flight plans
 
-- [~] **Secret bindings for forked children** —
+- [x] **Secret bindings for forked children** —
       `specs/plans/2026-08-18-fork-inherits-secret-bindings.md`, issue #2698.
-      W0 landed: a fork that drops its parent's secret bindings now says so,
-      reading the parent's persisted plan rather than needing a schema change.
-      3 tests, mutation-checked.
-      A1 landed: `declared_secrets` is threaded into the fork admission path, so
-      a child's bindings are declared by the caller rather than inherited, and
-      the child's capability is readable from its own plan. 2 tests,
-      mutation-checked.
-      STILL OPEN: the gap is **not yet closed** — A2 (CLI surface) is what makes
-      A1 reachable; until it lands every caller declares an empty set and no
-      user can declare a binding. Then A3-A5, and A6 (refuse an undeclared
-      drop), which is W0's refusal arm — deferred there because a fork's
-      prod-posture is a hardcoded literal today, not a flag. Option B (inherit
-      from the checkpoint, attenuated by intersection) is designed and
-      deliberately deferred, not queued.
+      Option A (W0 and A1–A6) is complete: fork bindings are explicit,
+      tenant-validated before clone/boot, carried by every booting entry point,
+      and recorded as names plus allowed hosts without source or value data.
+      Dropping a parent binding is refused unless the caller explicitly permits
+      attenuation. Option B (implicit checkpoint inheritance) remains designed
+      and deliberately deferred.
+
 - [~] **Durable agent sessions** —
       `specs/plans/2026-08-18-durable-agent-sessions.md` (design) +
       `specs/plans/2026-08-18-durable-session-substrate.md` (implementation,
@@ -390,7 +383,6 @@ resume` takes a `current_head` and refuses when it differs from the
       `approval_head: None` resumes with no ledger fence at all. WS5
       retention ladder + GC, WS6 CLI, WS7 chain records, WS8 BDD remain
       untouched.
-
 - [~] **Admission-bound AI assurance sessions** —
       `specs/plans/2026-08-17-admission-bound-ai-assurance-sessions.md`. W1–W4,
       W6/W7, W7b landed and W5 partial: the envelope, the authority
