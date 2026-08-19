@@ -73,6 +73,16 @@ pub struct MachineSpec {
     pub cpus: u32,
     pub memory_mib: u32,
     pub env: Vec<(String, String)>,
+    /// Path to an operator-authored assurance campaign declaration.
+    ///
+    /// Host-local and meaningful only to a backend running on this machine: it
+    /// names a file the *host* reads, so a remote backend must refuse a spec
+    /// carrying one rather than resolve it against its own filesystem.
+    /// `#[serde(default)]` so a record written before campaigns existed still
+    /// deserializes, and skip-serialized when absent so the ordinary spec's
+    /// bytes do not move.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assurance_campaign: Option<std::path::PathBuf>,
     /// What this workload is permitted to consume or reach. `None` leaves
     /// every dimension unspecified, which each resolves its own way: no CPU
     /// cap, no wall-clock bound, and deny-all egress.
@@ -108,6 +118,7 @@ impl MachineSpec {
             memory_mib: 512,
             env: Vec::new(),
             grants: mvm_contract::grants::Grants::default(),
+            assurance_campaign: None,
         })
     }
 }
@@ -127,9 +138,20 @@ pub struct MachineSpecBuilder {
     memory_mib: u32,
     env: Vec<(String, String)>,
     grants: mvm_contract::grants::Grants,
+    assurance_campaign: Option<std::path::PathBuf>,
 }
 
 impl MachineSpecBuilder {
+    /// Run a declared assurance campaign against this machine.
+    ///
+    /// Host-local: the path is read by the backend's own process, so this is
+    /// meaningful only against a local backend.
+    #[must_use]
+    pub fn assurance_campaign(mut self, path: impl Into<std::path::PathBuf>) -> Self {
+        self.assurance_campaign = Some(path.into());
+        self
+    }
+
     /// Set the vCPU count (default 1).
     #[must_use]
     pub fn cpus(mut self, cpus: u32) -> Self {
@@ -226,6 +248,7 @@ impl MachineSpecBuilder {
             // granted nothing is byte-identical to one written before grants
             // existed.
             grants: (self.grants != mvm_contract::grants::Grants::default()).then_some(self.grants),
+            assurance_campaign: self.assurance_campaign,
         }
     }
 }
@@ -456,6 +479,29 @@ pub struct ReconfigureRequest {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_declared_campaign_survives_the_builder_and_absence_changes_no_bytes() {
+        let plain = MachineSpec::builder("m", "alpine:3.20")
+            .expect("spec")
+            .build();
+        assert!(plain.assurance_campaign.is_none());
+        // Skip-serialized when absent, so an ordinary spec's bytes do not move.
+        let json = serde_json::to_string(&plain).expect("json");
+        assert!(!json.contains("assurance_campaign"), "{json}");
+
+        let declared = MachineSpec::builder("m", "alpine:3.20")
+            .expect("spec")
+            .assurance_campaign("/tmp/campaign.json")
+            .build();
+        assert_eq!(
+            declared.assurance_campaign.as_deref(),
+            Some(std::path::Path::new("/tmp/campaign.json"))
+        );
+        let round: MachineSpec =
+            serde_json::from_str(&serde_json::to_string(&declared).expect("json")).expect("parse");
+        assert_eq!(round.assurance_campaign, declared.assurance_campaign);
+    }
     use super::*;
 
     #[test]
@@ -467,6 +513,7 @@ mod tests {
             memory_mib: 512,
             env: vec![("PORT".into(), "8080".into())],
             grants: None,
+            assurance_campaign: None,
         };
         let json = serde_json::to_string(&spec).unwrap();
         let back: MachineSpec = serde_json::from_str(&json).unwrap();
@@ -538,6 +585,7 @@ mod tests {
                 memory_mib: 512,
                 env: vec![],
                 grants: None,
+                assurance_campaign: None,
             }
         );
 
@@ -576,6 +624,7 @@ mod tests {
             memory_mib: 512,
             env: vec![("PORT".into(), "8080".into())],
             grants: None,
+            assurance_campaign: None,
         };
         assert_eq!(built, literal);
     }

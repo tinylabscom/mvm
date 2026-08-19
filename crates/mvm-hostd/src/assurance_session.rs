@@ -39,7 +39,8 @@ use crate::broker::handlers::host_assurance_v1::{
 use crate::plan_admission::AdmittedPlan;
 
 /// A destination an operator declared for one campaign.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DeclaredEdge {
     pub label: AssuranceId,
     pub host: String,
@@ -47,7 +48,15 @@ pub struct DeclaredEdge {
 }
 
 /// What an operator authorized for one campaign against one workload.
-#[derive(Debug, Clone)]
+///
+/// Deserializable so an operator can hand one to `machine run` as a file. It is
+/// authored by a human or by the assurance planner, never by the workload, and
+/// `deny_unknown_fields` means a key this build does not understand refuses the
+/// campaign rather than being silently dropped — a dropped destination or a
+/// dropped approval is exactly the kind of quiet widening this contract exists
+/// to prevent.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CampaignDeclaration {
     pub campaign_id: AssuranceId,
     pub trial_id: AssuranceId,
@@ -61,6 +70,35 @@ pub struct CampaignDeclaration {
     pub requested: RequestedAuthority,
     /// How long the session's grant is live.
     pub grant_ttl_ms: u64,
+}
+
+/// Largest campaign declaration accepted from disk.
+pub const MAX_DECLARATION_BYTES: u64 = 64 * 1024;
+
+/// Read an operator-authored campaign declaration.
+///
+/// Size-checked before parsing, so an oversized file is refused without being
+/// deserialized.
+pub fn load_declaration(path: &std::path::Path) -> Result<CampaignDeclaration> {
+    let metadata = std::fs::metadata(path)
+        .with_context(|| format!("reading campaign declaration {}", path.display()))?;
+    if metadata.len() > MAX_DECLARATION_BYTES {
+        anyhow::bail!(
+            "campaign declaration {} is larger than the {MAX_DECLARATION_BYTES}-byte limit",
+            path.display()
+        );
+    }
+    let body = std::fs::read_to_string(path)
+        .with_context(|| format!("reading campaign declaration {}", path.display()))?;
+    let declaration: CampaignDeclaration = serde_json::from_str(&body)
+        .with_context(|| format!("parsing campaign declaration {}", path.display()))?;
+    if declaration.edges.is_empty() {
+        anyhow::bail!(
+            "campaign declaration {} declares no destination, so it can probe nothing",
+            path.display()
+        );
+    }
+    Ok(declaration)
 }
 
 /// Why no session was opened.
@@ -366,8 +404,12 @@ pub fn edges_by_label(decl: &CampaignDeclaration) -> BTreeMap<AssuranceId, (Stri
 /// The emitter is an `Arc` because the opened session outlives this call: it
 /// records every probe for as long as the workload runs, so a borrow would tie
 /// the session's lifetime to the boot call that opened it.
-pub struct CampaignRequest<'a> {
-    pub declaration: &'a CampaignDeclaration,
+pub struct CampaignRequest {
+    /// Owned rather than borrowed: the request is assembled by a caller that
+    /// reads the declaration from disk and then hands it down through the
+    /// launch path, so tying it to that caller's frame would force a leak to
+    /// satisfy the lifetime.
+    pub declaration: CampaignDeclaration,
     pub emitter: Arc<AuditEmitter>,
     pub policy_ceiling: AuthorityCeiling,
     /// The workload's admitted egress policy, which the probe consults.
@@ -378,7 +420,7 @@ pub struct CampaignRequest<'a> {
 
 /// Open a declared campaign against a booted VM, using this process's plane.
 pub fn open_for_boot(
-    campaign: &CampaignRequest<'_>,
+    campaign: &CampaignRequest,
     vm: &str,
     admitted: &AdmittedPlan,
 ) -> Result<MvmBinding> {
@@ -392,7 +434,7 @@ pub fn open_for_boot(
         OpenSession {
             vm,
             admitted,
-            declaration: campaign.declaration,
+            declaration: &campaign.declaration,
             emitter: &campaign.emitter,
             policy_ceiling: &campaign.policy_ceiling,
             policy: campaign.policy.clone(),
@@ -401,6 +443,73 @@ pub fn open_for_boot(
         },
     )
     .map_err(|refusal| anyhow::anyhow!("{refusal}"))
+}
+
+/// What the host can attest about a finished trial.
+///
+/// Every field is read from something the host itself did or can check now —
+/// the probes it recorded, the plan it admitted, the state dir it can look at.
+/// Nothing here is taken from the workload or from the declaration, which is
+/// what makes the resulting [`EvidenceSet`] evidence rather than a claim.
+pub struct CollectEvidence<'a> {
+    pub vm: &'a str,
+    pub admitted: &'a AdmittedPlan,
+    pub binding: &'a MvmBinding,
+    /// The campaign's source digest, for the join back to the scan.
+    pub source_digest: &'a Sha256Digest,
+    /// Where per-VM state lives, so teardown can be confirmed.
+    pub mvm_home: &'a std::path::Path,
+}
+
+/// Assemble the evidence a trial is evaluated against.
+///
+/// The three verification flags are deliberately conservative:
+///
+/// - `observer_verified` is true only when the host actually recorded a probe
+///   for this session. A session that opened and was never exercised observed
+///   nothing, and saying otherwise would let an untested trial certify.
+/// - `cleanup_verified` is true only when the workload's state dir no longer
+///   carries a live process, checked through the same probe the admission
+///   budget trusts. A VM still running has not been cleaned up, whatever the
+///   plan intended.
+/// - `attestation_verified` stays false: no attestation provider is wired, and
+///   the evaluator only consults it when the plan demands attestation, so a
+///   `Noop` plan is unaffected and a demanding one correctly fails closed.
+#[must_use]
+pub fn collect_evidence(request: CollectEvidence<'_>) -> mvm_contract::assurance::EvidenceSet {
+    let plan = request.admitted.plan();
+    let plane = host_assurance_plane();
+    let probe_refs = plane
+        .as_ref()
+        .map(|plane| plane.evidence_refs_for(request.vm))
+        .unwrap_or_default();
+    let observed = plane
+        .as_ref()
+        .and_then(|plane| plane.observation_for(request.vm));
+
+    // A recorded probe *and* an attempt: a session whose every probe was
+    // refused before it ran has references but observed no effect.
+    let observer_verified = !probe_refs.is_empty() && observed.is_some_and(|o| o.attempted_effect);
+
+    let state_dir = mvm_core::config::vm_state_dir_at(request.mvm_home, request.vm);
+    let cleanup_verified = !mvm_vmm::host::process_liveness::state_dir_has_live_process(&state_dir);
+
+    let mut audit_refs = request.binding.audit_refs.clone();
+    audit_refs.extend(probe_refs);
+
+    mvm_contract::assurance::EvidenceSet {
+        identity_verified: request.binding.plan_id.as_str()
+            == request.admitted.plan_id().0.replace(':', "-"),
+        observer_verified,
+        cleanup_verified,
+        attestation_verified: false,
+        disposable_target: plan.post_run.destroy_on_exit,
+        artifact_digest: request.binding.artifact_digest.clone(),
+        policy_digest: request.binding.effective_policy_digest.clone(),
+        source_digest: request.source_digest.clone(),
+        audit_refs,
+        receipt_refs: request.binding.receipt_refs.clone(),
+    }
 }
 
 #[cfg(test)]
@@ -444,6 +553,60 @@ mod tests {
     fn bound_plan() -> ExecutionPlan {
         let service = ServiceId::parse(HOST_ASSURANCE_SERVICE).expect("service");
         PlanFixture::new().services(vec![service]).build()
+    }
+
+    fn declaration_json() -> String {
+        serde_json::to_string_pretty(&declaration()).expect("a declaration serializes")
+    }
+
+    #[test]
+    fn an_operator_declaration_round_trips_through_a_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("campaign.json");
+        std::fs::write(&path, declaration_json()).expect("write");
+
+        let loaded = load_declaration(&path).expect("a well-formed declaration loads");
+        assert_eq!(loaded.campaign_id, declaration().campaign_id);
+        assert_eq!(loaded.edges.len(), 1);
+        assert_eq!(loaded.edges[0].host, "attacker.example.com");
+        assert!(loaded.approvals.permits(ToolId::CampaignProbeV1));
+    }
+
+    #[test]
+    fn a_declaration_with_an_unknown_key_is_refused() {
+        // A key this build does not understand must refuse the campaign rather
+        // than be dropped: a silently ignored destination or approval is the
+        // quiet widening this contract exists to prevent.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("campaign.json");
+        let body = declaration_json().replace(
+            "{\n  \"campaign_id\"",
+            "{\n  \"escalate\": true,\n  \"campaign_id\"",
+        );
+        std::fs::write(&path, body).expect("write");
+        assert!(load_declaration(&path).is_err());
+    }
+
+    #[test]
+    fn a_declaration_naming_no_destination_is_refused_at_load() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("campaign.json");
+        let empty = CampaignDeclaration {
+            edges: Vec::new(),
+            ..declaration()
+        };
+        std::fs::write(&path, serde_json::to_string(&empty).expect("json")).expect("write");
+        let error = load_declaration(&path).expect_err("a campaign that can probe nothing");
+        assert!(format!("{error:#}").contains("no destination"), "{error:#}");
+    }
+
+    #[test]
+    fn an_oversized_declaration_is_refused_before_it_is_parsed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("campaign.json");
+        std::fs::write(&path, "x".repeat(MAX_DECLARATION_BYTES as usize + 1)).expect("write");
+        let error = load_declaration(&path).expect_err("oversized");
+        assert!(format!("{error:#}").contains("larger than"), "{error:#}");
     }
 
     #[test]
@@ -761,5 +924,142 @@ mod tests {
         let chain = chain_of(&opened);
         assert!(chain.contains("assurance.trial_completed"), "{chain}");
         assert!(chain.contains("observer_missing"), "{chain}");
+    }
+
+    // ---------------------------------------------------------------------
+    // Evidence collection
+    // ---------------------------------------------------------------------
+
+    fn evidence_for(
+        home: &std::path::Path,
+        vm: &str,
+        binding: &MvmBinding,
+        admitted: &AdmittedPlan,
+    ) -> mvm_contract::assurance::EvidenceSet {
+        collect_evidence(CollectEvidence {
+            vm,
+            admitted,
+            binding,
+            source_digest: &Sha256Digest::parse(SOURCE_DIGEST).expect("digest"),
+            mvm_home: home,
+        })
+    }
+
+    #[test]
+    fn an_unexercised_session_observes_nothing_and_cannot_certify() {
+        let opened = open_against(bound_plan());
+        let binding = opened.result.as_ref().expect("session opens").clone();
+        let home = tempfile::tempdir().expect("tempdir");
+
+        // Opened, never probed. The plane is per-test here, so nothing this
+        // session did was recorded — which is exactly the case that must not
+        // read as an observer having watched.
+        let evidence = evidence_for(home.path(), "vm-a", &binding, &opened.admitted);
+        assert!(
+            !evidence.observer_verified,
+            "a session that ran no probe observed nothing"
+        );
+        assert!(evidence.identity_verified);
+    }
+
+    #[test]
+    fn cleanup_is_verified_only_when_no_live_process_remains() {
+        let opened = open_against(bound_plan());
+        let binding = opened.result.as_ref().expect("session opens").clone();
+        let home = tempfile::tempdir().expect("tempdir");
+
+        // No state dir at all: nothing is running, so cleanup holds.
+        let gone = evidence_for(home.path(), "vm-a", &binding, &opened.admitted);
+        assert!(gone.cleanup_verified);
+
+        // A pid marker pointing at this very process is unambiguously live.
+        let dir = mvm_core::config::vm_state_dir_at(home.path(), "vm-a");
+        std::fs::create_dir_all(&dir).expect("state dir");
+        std::fs::write(dir.join("libkrun.pid"), std::process::id().to_string())
+            .expect("pid marker");
+        let live = evidence_for(home.path(), "vm-a", &binding, &opened.admitted);
+        assert!(
+            !live.cleanup_verified,
+            "a VM still running has not been cleaned up, whatever the plan intended"
+        );
+    }
+
+    #[test]
+    fn attestation_is_never_asserted_without_a_provider() {
+        let opened = open_against(bound_plan());
+        let binding = opened.result.as_ref().expect("session opens").clone();
+        let home = tempfile::tempdir().expect("tempdir");
+        let evidence = evidence_for(home.path(), "vm-a", &binding, &opened.admitted);
+        // Nothing attests today. The evaluator only consults this when the
+        // plan demands attestation, so a Noop plan is unaffected and a
+        // demanding one fails closed rather than being waved through.
+        assert!(!evidence.attestation_verified);
+    }
+
+    #[test]
+    fn the_collected_evidence_quotes_the_binding_not_the_declaration() {
+        let opened = open_against(bound_plan());
+        let binding = opened.result.as_ref().expect("session opens").clone();
+        let home = tempfile::tempdir().expect("tempdir");
+        let evidence = evidence_for(home.path(), "vm-a", &binding, &opened.admitted);
+
+        assert_eq!(evidence.artifact_digest, binding.artifact_digest);
+        assert_eq!(evidence.policy_digest, binding.effective_policy_digest);
+        assert!(!evidence.receipt_refs.is_empty());
+        assert!(!evidence.audit_refs.is_empty());
+    }
+
+    #[test]
+    fn a_non_disposable_plan_is_reported_as_such() {
+        let mut plan = bound_plan();
+        plan.post_run.destroy_on_exit = false;
+        let opened = open_against(plan);
+        let binding = opened.result.as_ref().expect("session opens").clone();
+        let home = tempfile::tempdir().expect("tempdir");
+        let evidence = evidence_for(home.path(), "vm-a", &binding, &opened.admitted);
+        assert!(!evidence.disposable_target);
+    }
+
+    #[test]
+    fn evidence_from_a_real_session_still_evaluates_inconclusive_today() {
+        // The honest end state: everything the host can attest is assembled,
+        // and the trial is still INCONCLUSIVE because no observer ran. This
+        // pins that the gap is the observer, not the plumbing.
+        use mvm_contract::assurance::{
+            EvaluationInputs, HostObservation, InconclusiveReason, TRIAL_RESULT_CANDIDATE_SCHEMA,
+            TrialOutcome, TrialResultCandidate,
+        };
+
+        let opened = open_against(bound_plan());
+        let binding = opened.result.as_ref().expect("session opens").clone();
+        let home = tempfile::tempdir().expect("tempdir");
+        let evidence = evidence_for(home.path(), "vm-a", &binding, &opened.admitted);
+
+        let candidate = TrialResultCandidate {
+            schema: TRIAL_RESULT_CANDIDATE_SCHEMA.to_string(),
+            attempted_effect: true,
+            effect_observed_in_guest: false,
+            boundary_crossed: false,
+            blocked_edges: Vec::new(),
+            evidence_refs: Vec::new(),
+            notes: String::new(),
+        };
+        let observation = HostObservation {
+            attempted_effect: true,
+            effect_observed_in_guest: false,
+            boundary_crossed: false,
+            blocked_edges: Vec::new(),
+        };
+        let verdict = mvm_contract::assurance::evaluate(EvaluationInputs {
+            issued_binding: &binding,
+            echoed_binding: Some(&binding),
+            narrative_applicable: true,
+            planned_source_digest: &Sha256Digest::parse(SOURCE_DIGEST).expect("digest"),
+            candidate: &candidate,
+            observation: &observation,
+            evidence: &evidence,
+        });
+        assert_eq!(verdict.outcome, TrialOutcome::Inconclusive);
+        assert_eq!(verdict.reason, Some(InconclusiveReason::ObserverMissing));
     }
 }
