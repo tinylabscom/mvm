@@ -274,15 +274,16 @@ mod tests {
     use std::path::Path;
     use tempfile::TempDir;
 
+    /// A well-formed approval head, distinguished by its repeated byte.
+    fn head_of(byte: &str) -> ApprovalHead {
+        ApprovalHead::parse(format!("sha256:{}", byte.repeat(32))).unwrap()
+    }
+
     /// A session that has been parked and names a resume point.
     ///
     /// Goes through the public `park` transition rather than writing
     /// `Hibernated` into the literal, so the fixture cannot drift into a state
     /// the state machine would never produce.
-    fn head_of(byte: &str) -> ApprovalHead {
-        ApprovalHead::parse(format!("sha256:{}", byte.repeat(32))).unwrap()
-    }
-
     fn parked_record(id: &str) -> AgentSessionRecord {
         let active = AgentSessionRecord {
             session_id: AgentSessionId::parse(id).unwrap(),
@@ -581,10 +582,11 @@ mod tests {
 
     #[test]
     fn a_refused_admission_leaves_the_session_parked() {
-        // The ordering property. Admission is the last step that can fail, so a
-        // host whose ceiling refuses this workload must leave the record parked
-        // and resumable — a record advanced to a generation no admitted plan
-        // corresponds to would claim a residency nothing authorized.
+        // The ordering property: no step that can refuse runs after the record
+        // has moved. A host whose ceiling refuses this workload must leave the
+        // record parked and resumable — a record advanced to a generation no
+        // admitted plan corresponds to would claim a residency nothing
+        // authorized.
         let (_env, _home) = isolated_host(GrantCeiling {
             max_memory_mib: Some(128),
             ..Default::default()

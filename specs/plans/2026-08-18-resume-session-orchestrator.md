@@ -400,3 +400,9 @@ git commit -m "docs: record the resume orchestrator slice"
   declared grants, so Dev and Prod are byte-identical on a grantless plan and
   diverge the moment one carries a grant. A hardcoded posture emits no compile
   error to prompt that, which is why it is written down here.
+- **Audit-label collision in WS7.** `supervisor::audit::for_plan` lets a
+  per-event extra **override** a plan label of the same key. The
+  `session.resumed` / `session.parked` emitters must not reuse `session_id` or
+  `session_generation` as extras keys, or the signed plan's value is silently
+  replaced by the emitter's — and the label would then attribute the entry to
+  whatever the emitter believed rather than to what was admitted.
