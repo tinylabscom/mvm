@@ -162,6 +162,13 @@ impl AgentSessionRecord {
     /// the same suspended one cheaper to hold. The resume point and journal
     /// cursor are preserved, because a demoted session is still resumable; only
     /// the cost of holding it changed.
+    ///
+    /// This overwrites `park_reason` with `RetentionDemotion`, discarding
+    /// whatever reason the session was originally parked under, so after a
+    /// demotion `storage_tier` and `park_reason` can disagree with each other
+    /// under `select_tier`'s mapping. The stored `storage_tier` is what is
+    /// authoritative from that point on; `park_reason` is a breadcrumb of how
+    /// the session got there, not an input to recompute the tier from.
     pub fn demote(&self, now_unix: u64) -> Result<Self, SessionTransitionError> {
         match self.state {
             SandboxResidency::Closed => return Err(SessionTransitionError::Closed),
@@ -1085,14 +1092,20 @@ mod tests {
         // stays resumable, just more cheaply stored. Two demotes (Resident ->
         // Parked -> Cold) reach the bottom of the ladder cleanly, so there is
         // no need for a fallback branch to get there.
+        //
+        // approval_head is asserted here too: it is the resume fence's input,
+        // and the fence only applies when it is `Some`. A refactor that
+        // dropped the field through `demote` would not fail loudly — it would
+        // silently stop fencing — so this must not leave it `None`.
         let mut rec = record("sess-alpha");
         rec.parent_checkpoint = Some(digest_of("11"));
+        let head = head_of("ab");
         let parked = rec
             .park(
                 &ParkInput {
                     reason: ParkReason::Idle,
                     journal_cursor: 42,
-                    approval_head: None,
+                    approval_head: Some(head.clone()),
                 },
                 100,
             )
@@ -1100,5 +1113,6 @@ mod tests {
         let cold = parked.demote(200).unwrap().demote(300).unwrap();
         assert_eq!(cold.journal_cursor, 42);
         assert_eq!(cold.parent_checkpoint, Some(digest_of("11")));
+        assert_eq!(cold.approval_head, Some(head));
     }
 }
