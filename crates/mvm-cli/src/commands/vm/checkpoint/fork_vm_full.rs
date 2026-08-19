@@ -10,6 +10,7 @@
 //! guest has no NIC to inherit an address on.
 
 use anyhow::{Context, Result};
+use mvm_contract::protocol::vm_backend::BackendKind;
 use mvm_core::checkpoint::{CheckpointId, VmFullOrigin, vm_full_origin};
 use mvm_core::config::vm_state_dir;
 use mvm_runtime::checkpoint::{CheckpointStore, ForkParams, fork_vm_full};
@@ -205,7 +206,7 @@ pub(in crate::commands) fn fork_vm_full_arm_fc(
         checkpoint: p.checkpoint,
         parent_meta: &p.parent_meta,
         child_vm_name: &p.child_vm_name,
-        backend_name: "firecracker",
+        backend_kind: BackendKind::Firecracker,
         declared_secrets: p.declared_secrets,
     })?;
 
@@ -298,7 +299,11 @@ struct AdmitForkedChildParams<'a> {
     checkpoint: &'a CheckpointId,
     parent_meta: &'a mvm_core::checkpoint::CheckpointMeta,
     child_vm_name: &'a str,
-    backend_name: &'a str,
+    /// The tier that will boot this child. Typed, not a label: the grant gate
+    /// measures against it, and a grant checked against a string is checked
+    /// against whatever the caller typed. The plan's `backend_name` is derived
+    /// from this, so the two cannot disagree.
+    backend_kind: BackendKind,
     /// Secret bindings the caller declares for this child.
     ///
     /// Declared, never inherited: the parent's set is not consulted, so the
@@ -354,7 +359,7 @@ fn admit_forked_child(p: &AdmitForkedChildParams<'_>) -> Result<AdmittedForkChil
             network_mode: super::parent_network_mode(p.checkpoint, p.store),
             tenant: &tenant,
             vm_name: p.child_vm_name,
-            backend_name: p.backend_name,
+            backend_name: p.backend_kind.as_str(),
             rootfs_path: &rootfs_blob,
             precomputed_image_sha256: recorded_sha,
             boot_artifact_identity: None,
@@ -390,7 +395,12 @@ fn admit_forked_child(p: &AdmitForkedChildParams<'_>) -> Result<AdmittedForkChil
             // is the widest ask rather than the narrowest — an absent CPU or
             // wall-clock grant means unbounded.
             grants: p.parent_meta.grants.clone(),
-            backend_kind: None,
+            // The tier that will actually boot this child, typed rather than
+            // parsed from a label. `None` here made the gate take its
+            // fail-closed "no backend object, no answer" arm, and a fork child
+            // is admitted prod-profile, so that arm is a refusal: a parent
+            // carrying any cpu or wall-clock grant could not be forked at all.
+            backend_kind: Some(p.backend_kind),
             entrypoint: crate::commands::vm::entrypoint_resolve::ResolvedEntrypoint::unresolved(
                 "a checkpoint fork boots the image the parent booted; this path resolves no entrypoint",
             ),
@@ -454,7 +464,7 @@ fn fork_vm_full_arm_hvf(p: ForkVmFullArmHvfParams<'_>) -> Result<()> {
         checkpoint: p.checkpoint,
         parent_meta: &p.parent_meta,
         child_vm_name: &p.child_vm_name,
-        backend_name: "hvf",
+        backend_kind: BackendKind::Hvf,
         declared_secrets: p.declared_secrets,
     })?;
 
@@ -632,15 +642,18 @@ mod tests {
     /// disk. The blob has to exist: admission *verifies* the recorded digest
     /// against the bytes rather than trusting it, so a fixture that records a
     /// sha without writing the file fails before it reaches the plan.
-    fn parent_with_recorded_rootfs(store: &CheckpointStore, id: &str) -> CheckpointMeta {
+    fn parent_with_grants(
+        store: &CheckpointStore,
+        id: &str,
+        grants: Option<mvm_contract::grants::Grants>,
+    ) -> CheckpointMeta {
         use sha2::{Digest, Sha256};
-
         let content_dir = store.content_dir(&CheckpointId::new(id));
         std::fs::create_dir_all(&content_dir).unwrap();
         let bytes = b"fixture rootfs";
         std::fs::write(content_dir.join(ROOTFS_BLOB), bytes).unwrap();
 
-        let meta =
+        let mut meta =
             CheckpointMeta::builder(CheckpointId::new(id), CheckpointClass::VmFull, "parent-vm")
                 .content(vec![ContentBlob {
                     name: ROOTFS_BLOB.to_string(),
@@ -649,6 +662,7 @@ mod tests {
                 .supervisor_config_digest("d")
                 .created_unix(1)
                 .build();
+        meta.grants = grants;
         store.write_meta(&meta).unwrap();
         meta
     }
@@ -657,13 +671,13 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let store = CheckpointStore::at(tmp.path().join("store"));
         let id = format!("ck-{vm}");
-        let parent_meta = parent_with_recorded_rootfs(&store, &id);
+        let parent_meta = parent_with_grants(&store, &id, None);
         let admitted = admit_forked_child(&AdmitForkedChildParams {
             store: &store,
             checkpoint: &CheckpointId::new(&id),
             parent_meta: &parent_meta,
             child_vm_name: vm,
-            backend_name: "hvf",
+            backend_kind: BackendKind::Hvf,
             declared_secrets: declared,
         })
         .expect("a fork child is admitted");
@@ -704,6 +718,141 @@ mod tests {
         env.isolate_mvm_home(home.path());
 
         assert!(admitted_child_secrets(&[], "child-bare").is_empty());
+    }
+
+    /// A parent that bounded its CPU can still be forked.
+    ///
+    /// The child inherits the parent's grants and is admitted prod-profile, so
+    /// the grant gate refuses anything it cannot name a mechanism for. Passing
+    /// no backend made that refusal unconditional: every such parent became
+    /// unforkable, with an error naming the missing backend rather than the
+    /// grant. The tier is known here — each arm is one backend — so the gate
+    /// measures against it.
+    #[test]
+    fn a_parent_that_bounded_cpu_can_still_be_forked() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let home = tempfile::tempdir().unwrap();
+        env.isolate_mvm_home(home.path());
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::at(tmp.path().join("store"));
+        let id = "ck-cpu-bounded";
+        let parent_meta = parent_with_grants(
+            &store,
+            id,
+            Some(mvm_contract::grants::Grants {
+                cpu: Some(mvm_contract::grants::CpuGrant::Share { millicores: 500 }),
+                ..Default::default()
+            }),
+        );
+
+        let admitted = admit_forked_child(&AdmitForkedChildParams {
+            store: &store,
+            checkpoint: &CheckpointId::new(id),
+            parent_meta: &parent_meta,
+            child_vm_name: "child-cpu-bounded",
+            backend_kind: BackendKind::Hvf,
+            declared_secrets: &[],
+        })
+        .expect("a cpu-bounded parent is forkable");
+
+        let plan = admitted
+            .admission
+            .as_ref()
+            .expect("the fork path never sets no_supervisor")
+            .admitted
+            .plan();
+        assert_eq!(
+            plan.grants.as_ref().and_then(|g| g.cpu),
+            Some(mvm_contract::grants::CpuGrant::Share { millicores: 500 }),
+            "the inherited grant rides in the child's signed plan"
+        );
+    }
+
+    /// The other half: passing the backend did not weaken the gate. A share the
+    /// tier genuinely cannot serve is still refused — and now the refusal names
+    /// the tier and its limit, instead of reporting a missing backend.
+    ///
+    /// 1000 millicores is hvf's ceiling, so 1500 is unenforceable there. That is
+    /// a property of the tier, not of forking: the same grant is refused on the
+    /// same tier however the run was started.
+    #[test]
+    fn a_share_the_tier_cannot_serve_is_still_refused() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let home = tempfile::tempdir().unwrap();
+        env.isolate_mvm_home(home.path());
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::at(tmp.path().join("store"));
+        let id = "ck-cpu-unenforceable";
+        let parent_meta = parent_with_grants(
+            &store,
+            id,
+            Some(mvm_contract::grants::Grants {
+                cpu: Some(mvm_contract::grants::CpuGrant::Share { millicores: 1500 }),
+                ..Default::default()
+            }),
+        );
+
+        let err = match admit_forked_child(&AdmitForkedChildParams {
+            store: &store,
+            checkpoint: &CheckpointId::new(id),
+            parent_meta: &parent_meta,
+            child_vm_name: "child-cpu-unenforceable",
+            backend_kind: BackendKind::Hvf,
+            declared_secrets: &[],
+        }) {
+            // `AdmittedForkChild` carries the child's plan JSON and is
+            // deliberately not `Debug`, so this cannot use `expect_err`.
+            Ok(_) => panic!("a share above the tier's ceiling must be refused"),
+            Err(e) => e,
+        };
+
+        let msg = format!("{err:#}");
+        assert!(msg.contains("hvf"), "the refusal names the tier: {msg}");
+        assert!(
+            msg.contains("cpu.share"),
+            "the refusal names the grant: {msg}"
+        );
+        assert!(
+            !msg.contains("without the backend"),
+            "the refusal must not be the no-backend arm any more: {msg}"
+        );
+    }
+
+    /// The plan records the tier the gate measured against. Two values derived
+    /// from one typed kind cannot drift into disagreeing about what boots.
+    #[test]
+    fn the_childs_plan_names_the_backend_the_gate_measured() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let home = tempfile::tempdir().unwrap();
+        env.isolate_mvm_home(home.path());
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::at(tmp.path().join("store"));
+        let id = "ck-tier-agrees";
+        let parent_meta = parent_with_grants(&store, id, None);
+
+        let admitted = admit_forked_child(&AdmitForkedChildParams {
+            store: &store,
+            checkpoint: &CheckpointId::new(id),
+            parent_meta: &parent_meta,
+            child_vm_name: "child-tier-agrees",
+            backend_kind: BackendKind::Hvf,
+            declared_secrets: &[],
+        })
+        .expect("a grantless parent is forkable");
+
+        let plan = admitted
+            .admission
+            .as_ref()
+            .expect("the fork path never sets no_supervisor")
+            .admitted
+            .plan();
+        // The gate refuses outright when the plan's recorded tier disagrees
+        // with the one it measures against, so these being one value is what
+        // keeps a fork admissible at all.
+        assert_eq!(plan.runtime_profile.0, BackendKind::Hvf.as_str());
     }
 
     #[test]
