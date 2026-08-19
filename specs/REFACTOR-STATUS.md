@@ -7,6 +7,16 @@ for detailed scope and acceptance criteria.
 
 ## Completed issue closeouts
 
+- [x] **Issue #2634 — sealed guests have writable runtime state without a
+      writable root.** The universal initramfs mounts `/run` and `/tmp` as
+      restricted tmpfs filesystems and moves them across the workload-root
+      pivot. Mediated tools can therefore build their `/run` overlay and
+      `/tmp` is real scratch space while the verified image stays read-only.
+      Optional home/passwd mutations are not attempted on a sealed root. The
+      live lifecycle suite covers Alpine `/tmp` writes and retains the
+      absolute `/bin/ping` mediated-tool proof. Together with PRs #2690,
+      #2709, and #2720, this closes the NIC-less and read-only boot-noise issue.
+
 - [x] **Plan 337 COMPLETE — the SDK surface is generated from Rust.** Sessions
       finished Tier C. Python's `contextvars` + `Token` has no
       `AsyncLocalStorage` equivalent, so the shape was a choice, not a

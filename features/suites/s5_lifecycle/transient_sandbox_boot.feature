@@ -11,6 +11,14 @@ Feature: Transient sandbox boot
     Then the command exits with code 0
     And the output contains "mvm-bdd-oci-hello"
 
+  # The verified OCI root stays read-only. Scratch space is a dedicated tmpfs
+  # carried from the universal initramfs across the root pivot.
+  @live
+  Scenario: a sealed OCI workload has writable scratch space
+    When I run mvmctl in an isolated live home with "machine run --name bdd-oci-scratch --image alpine --timeout 120 -- mktemp /tmp/mvm-bdd.XXXXXX"
+    Then the command exits with code 0
+    And the output contains "/tmp/mvm-bdd."
+
   @live
   Scenario: machine run boots a transient sandbox from a Nix flake
     When I run mvmctl in an isolated live home with "machine run --name bdd-nix-boot --flake examples/exit_code --timeout 120"
