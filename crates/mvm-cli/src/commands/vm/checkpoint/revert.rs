@@ -275,15 +275,18 @@ fn revert_checkpoint(
     // Reuse the fork path verbatim: it re-admits through `admit_plan_for_boot`,
     // re-derives the sealed attenuation, and boots. This is the anti-bypass
     // guarantee — a restore never reaches `restore_checkpoint`.
-    super::fork(
-        target.id.as_str(),
-        Some(restored_vm_name.clone()),
-        /* boot */ true,
-        opts.hypervisor,
-        /* cpus */ None,
-        /* memory */ None,
-        opts.json,
-    )
+    super::fork(super::ForkCmdParams {
+        id: target.id.as_str(),
+        new_id: Some(restored_vm_name.clone()),
+        boot: true,
+        hypervisor: opts.hypervisor,
+        cpus: None,
+        memory: None,
+        // A revert re-admits the checkpoint it targets; it declares no bindings
+        // of its own, matching the pre-existing behaviour of this path.
+        declared_secrets: &[],
+        json: opts.json,
+    })
     .with_context(|| format!("restoring checkpoint {:?}", target.id.as_str()))?;
 
     // Bind the restore to the launched plan (persisted by the fork boot) so the
