@@ -29,11 +29,9 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@nightly
 
-      - name: Install system build dependencies
-        run: |
-          sudo rm -f /etc/apt/sources.list.d/microsoft*.list /etc/apt/sources.list.d/azure*.list
-          sudo apt-get update
-          sudo apt-get install -y libcap-ng-dev lld
+      - uses: ./.github/actions/apt-deps
+        with:
+          packages: libcap-ng-dev lld
 
       - uses: ./.github/actions/install-zigbuild
 
