@@ -32,3 +32,8 @@ workflow so these paths cannot silently drift apart.
 A live libkrun builder-VM validation refreshed the locked `rust-overlay` input,
 passed the full flake evaluation, and realized the aarch64 Linux development
 shell with the pinned nightly and Cranelift component.
+
+Pull-request validation also pins the integration edges: required stable
+Clippy components are installed in every stable lint lane, the dated nightly
+includes the WASI target used by the browser guest, and the BDD harness receives
+the exact `mvmctl` path built in the isolated target directory.

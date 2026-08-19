@@ -66,3 +66,9 @@ used `lld` on Linux, so those recommendations required no new change.
   inheriting the outer nightly compiler. That path now resolves Cargo and rustc
   from the Rust 1.91.1 workspace metadata pin and clears outer compiler flags
   and wrappers; focused positive and negative regression tests pass.
+- Pull-request CI then exercised three boundaries absent from the original local
+  proof: stable Clippy components are installed explicitly, the pinned nightly
+  carries the WASI target used by the browser guest, and BDD passes the built
+  `mvmctl` path explicitly because the nightly runner may relocate its harness.
+  The full 210-scenario BDD suite and stable all-targets Clippy pass with those
+  boundaries pinned.
