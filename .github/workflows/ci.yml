@@ -992,8 +992,23 @@ jobs:
   # to catch drift will flake here and get switched off.
   boot-latency:
     name: Boot latency ceiling
+    # Merge queue and manual dispatch, not every PR push. This lane needs a KVM
+    # runner and takes ~11 minutes, and at the 20-concurrent-job cap six of them
+    # were queued at once across open PRs — it was a material share of the wait
+    # before any PR's own jobs could start.
+    #
+    # Safe to move because of what this lane is: it pins a *published* image on
+    # purpose, as a control variable, so a regression it catches is in host-side
+    # code and is caught in the queue before anything reaches main. The budget is
+    # a ceiling with roughly 3x headroom over the observed median, not a
+    # tolerance — it exists to catch multiple-x regressions, and one merge-queue
+    # run catches those exactly as well as one run per push.
+    #
+    # `nix-flake-check` below makes the same trade for the same reason.
     needs: [scope]
-    if: needs.scope.outputs.code == 'true'
+    if: >-
+      needs.scope.outputs.code == 'true'
+      && (github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
