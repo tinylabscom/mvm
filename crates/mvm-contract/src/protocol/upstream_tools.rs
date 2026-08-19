@@ -1,7 +1,7 @@
 //! Compiling an upstream tool namespace into capabilities admission can bind.
 //!
 //! A dynamic tool namespace — Model Context Protocol and its equivalents — is
-//! admitted host-side only (ADR-045 section 18). The host runs the client; the
+//! admitted host-side only. The host runs the client; the
 //! guest never speaks the protocol outward. This module is the seam where what
 //! an upstream server *says* it offers becomes what this host is willing to
 //! bind, and it is deliberately pure: no transport, no I/O, no clock.
