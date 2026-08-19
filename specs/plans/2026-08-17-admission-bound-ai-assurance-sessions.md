@@ -116,6 +116,34 @@ Three properties are structural rather than checked at runtime:
       campaign. `None` everywhere else, so nothing changes for an ordinary
       launch.
 
+## Topology: which process may own a session
+
+Verified by tracing, and it constrains everything still open.
+
+`install_host_assurance_plane` is called only by `register_bound_handlers`,
+which only the `mvm-host-agent` and `mvm-broker` binaries call.
+`assurance_session::open_for_boot` is called only by `admit_and_start`, whose
+production caller runs in the CLI or SDK process. **The two sets are disjoint**:
+the process that opens a session never installs a plane, and the process that
+installs one never opens a session. In production `open` therefore refuses with
+`NoPlane` — fail-closed, but it means no campaign can open outside a
+single-process test.
+
+Two consequences for the remaining work:
+
+- A session must be opened where the broker registry lives. The supervisor
+  holds the plan, so it must mint the binding and the already-intersected
+  authority and pass them to the broker, the way `services_bindings` and
+  `capability_bindings` already travel.
+- The broker cannot use `AssuranceLedger` as written. It has no `AuditEmitter`;
+  it records through `AuditClient`, whose `AppendEntryRequest` is a
+  *category + typed fields* document validated against the audit-signer's
+  allow-list — not a chain-signed `PlanAuditEntry`. Reconciling the two is a
+  real piece of work: a new audit category, a field schema, and a revisit of
+  `audit_entry_digest_hex`/`resolve_audit_ref`, which assume the
+  `PlanAuditEntry` shape. It is **not** a thin sink trait, which is what an
+  earlier estimate here assumed.
+
 ## Open
 
 - [~] **W5 — Cleanup and disposability evidence (partial).**
@@ -150,7 +178,11 @@ Three properties are structural rather than checked at runtime:
       and it is a larger piece than the rest of W5 — closer in shape to W8's
       provider work than to the evidence plumbing above.
 
-- [ ] **W9b — The `mvmctl machine run` verb.** `machine run` does not boot
+- [ ] **W9b — Open the session where the broker lives.** Supersedes the
+      earlier framing of this as a CLI flag: the verb is not the obstacle, the
+      process boundary is. Needs the audit-model reconciliation above first.
+
+- [ ] **W9c — The `mvmctl machine run` verb.** `machine run` does not boot
       through `admit_and_boot_local`; it drives `AnyBackend` directly from
       `commands/machine/lifecycle.rs`, building its own launch config. So the
       W9 thread reaches the *library* launch path and not the CLI verb, and an

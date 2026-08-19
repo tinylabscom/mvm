@@ -7,6 +7,23 @@ for detailed scope and acceptance criteria.
 
 ## Completed issue closeouts
 
+- [x] **Issue #2634 — sealed guests have writable runtime state without a
+      writable root.** The universal initramfs mounts `/run` and `/tmp` as
+      restricted tmpfs filesystems and moves them across the workload-root
+      pivot. Mediated tools can therefore build their `/run` overlay and
+      `/tmp` is real scratch space while the verified image stays read-only.
+      Optional home/passwd mutations are not attempted on a sealed root. The
+      live lifecycle suite covers Alpine `/tmp` writes and retains the
+      absolute `/bin/ping` mediated-tool proof. Together with PRs #2690,
+      #2709, and #2720, this closes the NIC-less and read-only boot-noise issue.
+
+- [x] **Issue #2684 — a sealed boot is reachable and proven before release.**
+      The CLI release train publishes both universal-initramfs archives under
+      the downloader's exact versioned names and refuses to publish when that
+      build fails. The boot-image train exercises its staged x86_64 production
+      image both plainly and with the complete initramfs + dm-verity triple
+      before upload; the harness refuses partial or malformed integrity input.
+
 - [x] **Plan 337 COMPLETE — the SDK surface is generated from Rust.** Sessions
       finished Tier C. Python's `contextvars` + `Token` has no
       `AsyncLocalStorage` equivalent, so the shape was a choice, not a
@@ -290,12 +307,17 @@ for detailed scope and acceptance criteria.
       W0 landed: a fork that drops its parent's secret bindings now says so,
       reading the parent's persisted plan rather than needing a schema change.
       3 tests, mutation-checked.
-      STILL OPEN: everything that closes the gap. Option A (declare the child's
-      bindings at fork, A1-A6) is the recommended build and is unimplemented;
-      Option B (inherit from the checkpoint, attenuated by intersection) is
-      designed and deliberately deferred, not queued. W0 warns only — the
-      refusal arm moved to A6, because a fork is always prod-profile and so had
-      no flag to gate on.
+      A1 landed: `declared_secrets` is threaded into the fork admission path, so
+      a child's bindings are declared by the caller rather than inherited, and
+      the child's capability is readable from its own plan. 2 tests,
+      mutation-checked.
+      STILL OPEN: the gap is **not yet closed** — A2 (CLI surface) is what makes
+      A1 reachable; until it lands every caller declares an empty set and no
+      user can declare a binding. Then A3-A5, and A6 (refuse an undeclared
+      drop), which is W0's refusal arm — deferred there because a fork's
+      prod-posture is a hardcoded literal today, not a flag. Option B (inherit
+      from the checkpoint, attenuated by intersection) is designed and
+      deliberately deferred, not queued.
 - [~] **Durable agent sessions** —
       `specs/plans/2026-08-18-durable-agent-sessions.md` (design) +
       `specs/plans/2026-08-18-durable-session-substrate.md` (implementation,
@@ -411,8 +433,10 @@ resume` takes a `current_head` and refuses when it differs from the
       or its model says) and ADR-047 defines the memory plane. Sequenced behind
       `specs/plans/2026-08-18-durable-agent-sessions.md` WS1, which owns the
       session identity memory keys on and is itself unmerged.
-  - [ ] WS1-WS4 — tool plane: catalog derivation, argument policy, host-side
-        dynamic-namespace adapter, refusal as a planning signal
+  - [x] WS1 — catalog derivation from the signed admission (PR #2705)
+  - [x] WS2 — per-capability argument policy inside the descriptor digest (#2705)
+  - [~] WS3 — the guest-side-client gate landed; the host-side adapter has not
+  - [x] WS4 — refusal names the surface, and repeated misses are rate-bounded (#2705)
   - [ ] WS5-WS9 — memory plane: store + record, `host.memory.v1`, write scan
         and ceilings, audit + retention, bounded recall
   - [ ] WS10 — `mvmctl memory` read-only surface, tests + BDD
@@ -1642,8 +1666,10 @@ resume` takes a `current_head` and refuses when it differs from the
   `main`. The cutover completes there, on one transport, folding `Wire` and `MVM_ICMP/1`
   into FlowMux rather than leaving three protocols behind a sniff.
   WS0-WS7 are complete: substitution rides `OpenHttp`, `ping` rides `IcmpEcho`,
-  the raw dispatcher and `EgressMode::Raw` are deleted, readiness fails closed
-  on a launch whose endpoint carried no session, and
+  the raw dispatcher and `EgressMode::Raw` are deleted, and launch readiness
+  waits on an endpoint-owned authenticated-session event before verifying its
+  durable marker and failing closed if no session arrives. This removes the
+  guest-agent/FlowMux authentication race without a fixed sleep. In addition,
   `xtask check-one-guest-protocol` fails the build if a second guest->host
   protocol returns. `EgressMode::Wire` survives for the wasm tier's host-side
   `mvm:egress` import, which is host-internal IPC rather than a guest channel.**
@@ -1683,10 +1709,13 @@ check-l3-expansion-freeze` added as a temporary shrink-only ratchet
         has not happened (`crates/mvm-hostd/tests/workload_stream_plane.rs` still
         imports `EndpointSpawner`), the duplicate `EGRESS_VSOCK_PORT = 5253`
         survives in `mvm-egress-client.rs` and `mvm-addon-dns.rs` because
-        `mvm-agentd` does not depend on `mvm-net`, and the fail-closed readiness
-        assertion — a networking-granted workload must not reach ready when the
-        FlowMux session fails to authenticate — is unwitnessed. Phase 3 is
-        already ahead of this, so the phase gate will not catch the residue.
+        `mvm-agentd` does not depend on `mvm-net`. The fail-closed readiness
+        assertion is now witnessed by a delayed-authentication BDD scenario,
+        endpoint subprocess coverage, and focused timeout/exit tests: launch
+        cannot reach ready until an authenticated FlowMux session has written
+        durable evidence and signaled its endpoint-owned event. Phase 3 is
+        already ahead of this, so the phase gate will not catch the remaining
+        rename and constant residue.
         Landed: `GuestService::NetworkFlow`
         now names the port-5253 channel; the endpoint binary, proxy, spawner, and
         test files are renamed to `mvm-network-endpoint`/`network_endpoint_*`;

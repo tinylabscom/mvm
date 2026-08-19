@@ -2002,7 +2002,7 @@ fn run_in_guest(
     // purpose: the endpoint binds and reports ready before the guest boots, so
     // waiting for a session there would block on an event the wait itself
     // prevents.
-    mvm_runtime::network_endpoint_spawn::refuse_launch_without_endpoint_session(
+    mvm_runtime::network_endpoint_spawn::wait_for_endpoint_session(
         vm_name,
         &mvm_core::config::vm_state_dir(vm_name),
     )?;
