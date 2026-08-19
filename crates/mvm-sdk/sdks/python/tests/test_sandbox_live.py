@@ -280,6 +280,10 @@ def test_live_create_rejects_secret_and_unrepresentable_options_before_boot(
         mvm.Sandbox.create("minimal", resources={"cpu_cores": 1})
     assert _read_fixture_log(tmp_path) == []
 
+    with pytest.raises(mvm.SandboxModeError, match="unknown fields"):
+        mvm.Sandbox.create("minimal", network={"raw_ip_stack": True})
+    assert _read_fixture_log(tmp_path) == []
+
 
 def test_sandbox_create_live_propagates_mvmctl_failure(
     tmp_path: Path,

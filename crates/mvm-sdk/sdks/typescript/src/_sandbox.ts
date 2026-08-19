@@ -441,7 +441,7 @@ function lowerLiveOptions(options: SandboxCreateOptions): string[] {
   }
   const network = options.network;
   if (network === undefined) return argv;
-  const known = new Set(["mode", "egress", "ports", "peers", "dns", "raw_ip_stack"]);
+  const known = new Set(["mode", "egress", "ports", "peers", "dns"]);
   const unknown = Object.keys(network).filter((key) => !known.has(key));
   if (unknown.length > 0) rejectLiveOption("network", `unknown fields: ${unknown.join(", ")}`);
   if ((network.mode ?? "none") !== "none") {
@@ -450,7 +450,6 @@ function lowerLiveOptions(options: SandboxCreateOptions): string[] {
   if (network.ports && network.ports.length > 0) rejectLiveOption("network.ports", "use Sandbox.forward after boot");
   if (network.peers && network.peers.length > 0) rejectLiveOption("network.peers", "the live CLI has no peer equivalent");
   if (network.dns !== undefined && network.dns !== null) rejectLiveOption("network.dns", "the live CLI has no DNS equivalent");
-  if (network.raw_ip_stack === true) rejectLiveOption("network.raw_ip_stack", "Obscura must stay on the proxy path");
   if (network.egress === undefined || network.egress === null) return argv;
   if (Object.keys(network.egress).some((key) => key !== "allowlist") || !Array.isArray(network.egress.allowlist)) {
     rejectLiveOption("network.egress", "expected only an allowlist");

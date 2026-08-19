@@ -544,7 +544,6 @@ def _lower_live_options(
         "ports",
         "peers",
         "dns",
-        "raw_ip_stack",
     }
     if unknown:
         _reject_live_option("network", f"unknown fields: {sorted(unknown)}")
@@ -556,8 +555,6 @@ def _lower_live_options(
         _reject_live_option("network.peers", "the live CLI has no peer equivalent")
     if encoded_network.get("dns") is not None:
         _reject_live_option("network.dns", "the live CLI has no DNS equivalent")
-    if encoded_network.get("raw_ip_stack") is True:
-        _reject_live_option("network.raw_ip_stack", "Obscura must stay on the proxy path")
 
     egress = encoded_network.get("egress")
     if egress is None:

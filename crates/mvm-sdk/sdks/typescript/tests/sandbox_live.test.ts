@@ -364,6 +364,12 @@ describe("Sandbox.create (live mode)", () => {
       }),
     ).toThrow(/resources/);
     expect(readFixtureLog()).toEqual([]);
+    expect(() =>
+      mvm.Sandbox.create("minimal", {
+        network: { raw_ip_stack: true },
+      }),
+    ).toThrow(/unknown fields/);
+    expect(readFixtureLog()).toEqual([]);
   });
 
   it("propagates mvmctl failure", () => {
