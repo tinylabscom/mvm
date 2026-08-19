@@ -506,8 +506,14 @@ async fn serve_flowmux(
                 // actually reached this endpoint. Recorded before serving, so
                 // a session that dies mid-life does not retract the fact that
                 // one was established.
-                record_session_established(marker.as_deref());
-                let _ = session_ready.send(true);
+                if let Err(e) = record_session_established(marker.as_deref()) {
+                    // Authentication succeeded, so keep serving this session,
+                    // but never wake launch without the durable evidence it
+                    // verifies after the event.
+                    warn!(error = %e, "could not record FlowMux session readiness");
+                } else {
+                    let _ = session_ready.send(true);
+                }
                 session.serve().context("serve FlowMux session")
             });
             // One session ending is ordinary — the guest reconnects. Log it
@@ -521,23 +527,28 @@ async fn serve_flowmux(
 
 /// Record that a guest completed an authenticated session.
 ///
-/// Best-effort by design. The marker is a launch-time readiness signal, not an
-/// authorization input: a guest is already authenticated by the time this runs,
-/// so failing to write it must not tear down a working session. A write that
-/// does not land shows up as a launch that refuses, which is the safe way round.
-fn record_session_established(marker: Option<&std::path::Path>) {
+/// The marker is launch-time evidence, not an authorization input: failure does
+/// not tear down an authenticated session, but the caller must not emit the
+/// readiness event unless this returns success.
+fn record_session_established(marker: Option<&std::path::Path>) -> Result<()> {
     let Some(path) = marker else {
-        return;
+        return Ok(());
     };
-    if let Some(parent) = path.parent()
-        && let Err(e) = std::fs::create_dir_all(parent)
-    {
-        warn!(path = %parent.display(), error = %e, "could not create the session marker dir");
-        return;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "create FlowMux session marker directory {}",
+                parent.display()
+            )
+        })?;
     }
-    if let Err(e) = std::fs::write(path, b"1") {
-        warn!(path = %path.display(), error = %e, "could not record the FlowMux session");
-    }
+    std::fs::write(path, b"1")
+        .with_context(|| format!("write FlowMux session marker {}", path.display()))?;
+    // Verify the durable evidence through the same filesystem namespace the
+    // launcher reads before allowing the event to cross the process boundary.
+    std::fs::metadata(path)
+        .with_context(|| format!("verify FlowMux session marker {}", path.display()))?;
+    Ok(())
 }
 
 /// How many back-to-back accept failures mean the listener itself is broken
@@ -685,6 +696,31 @@ mod tests {
             session_marker: None,
             session_ready_socket: None,
         }
+    }
+
+    #[test]
+    fn authenticated_session_marker_is_verified_before_readiness() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("session.marker");
+
+        record_session_established(Some(&marker)).expect("record durable session evidence");
+
+        assert_eq!(std::fs::read(marker).unwrap(), b"1");
+    }
+
+    #[test]
+    fn authenticated_session_marker_failure_prevents_readiness() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("marker-is-a-directory");
+        std::fs::create_dir(&marker).unwrap();
+
+        let err = record_session_established(Some(&marker))
+            .expect_err("a marker that cannot be written must fail closed");
+
+        assert!(
+            err.to_string().contains("write FlowMux session marker"),
+            "unexpected: {err:#}"
+        );
     }
 
     #[test]
