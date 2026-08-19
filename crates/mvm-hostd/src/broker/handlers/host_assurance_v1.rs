@@ -20,10 +20,8 @@ use mvm_contract::assurance::{
     PROBE_OBSERVATION_SCHEMA, ProbeInvocation, ProbeObservation, ProbeRefusal, ProbeRequest,
 };
 
-use crate::audit::assurance::{AssuranceLedger, ProbeRecord};
-use crate::audit::emitter::AuditEmitter;
+use crate::audit::assurance::{AssuranceAuditSink, AssuranceLedger, PlanIdentity, ProbeRecord};
 use mvm_core::egress_broker::{EgressRequest, EgressVerdict, decide_egress};
-use mvm_core::plan::ExecutionPlan;
 use mvm_core::policy::network_policy::NetworkPolicy;
 use mvm_core::policy::security::AgentProfile;
 use mvm_core::protocol::broker::{AuditDurability, Idempotency, ServiceErrorCode, ServiceId};
@@ -59,12 +57,12 @@ pub struct AssuranceSessionSpec {
     pub policy: NetworkPolicy,
     /// Destinations the campaign declared.
     pub destinations: Vec<DeclaredDestination>,
-    /// The admitted plan every record is written against.
-    pub plan: ExecutionPlan,
+    /// The admitted plan's identity — the only part of it a record quotes.
+    pub identity: PlanIdentity,
     /// Where probe records go. `None` disables recording, which also disables
     /// probing: an unrecorded boundary attempt is not one this service will
     /// perform.
-    pub emitter: Option<Arc<AuditEmitter>>,
+    pub sink: Option<Arc<dyn AssuranceAuditSink + Send + Sync>>,
 }
 
 struct AssuranceSession {
@@ -80,8 +78,8 @@ struct AssuranceSession {
     attempted_effect: bool,
     effect_observed_in_guest: bool,
     boundary_crossed: bool,
-    plan: ExecutionPlan,
-    emitter: Option<Arc<AuditEmitter>>,
+    identity: PlanIdentity,
+    sink: Option<Arc<dyn AssuranceAuditSink + Send + Sync>>,
     evidence_refs: Vec<EvidenceRef>,
 }
 
@@ -94,7 +92,7 @@ impl std::fmt::Debug for AssuranceSessionSpec {
             .field("workload_session_id", &self.workload_session_id)
             .field("trial_id", &self.trial_id)
             .field("destinations", &self.destinations)
-            .field("recording", &self.emitter.is_some())
+            .field("recording", &self.sink.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -106,7 +104,7 @@ impl std::fmt::Debug for AssuranceSession {
             .field("trial_id", &self.trial_id)
             .field("steps_used", &self.steps_used)
             .field("blocked_edges", &self.blocked_edges)
-            .field("recording", &self.emitter.is_some())
+            .field("recording", &self.sink.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -151,8 +149,8 @@ impl HostAssuranceV1Handler {
             attempted_effect: false,
             effect_observed_in_guest: false,
             boundary_crossed: false,
-            plan: spec.plan,
-            emitter: spec.emitter,
+            identity: spec.identity,
+            sink: spec.sink,
             evidence_refs: Vec::new(),
         };
         self.sessions
@@ -340,11 +338,11 @@ impl HostAssuranceV1Handler {
         admitted: bool,
         destination_label: &AssuranceId,
     ) -> Result<Vec<EvidenceRef>, ProbeRefusal> {
-        let emitter = session
-            .emitter
+        let sink = session
+            .sink
             .as_ref()
             .ok_or(ProbeRefusal::AuditUnavailable)?;
-        let ledger = AssuranceLedger::new(emitter, &session.plan);
+        let ledger = AssuranceLedger::new(sink.as_ref(), &session.identity);
         let refs = ledger
             .record_probe(&ProbeRecord {
                 session_id: &request.session_id,
@@ -434,11 +432,13 @@ mod tests {
     use super::*;
 
     use crate::audit::assurance::{audit_citations_resolve, resolve_audit_ref};
+    use crate::audit::emitter::AuditEmitter;
     use mvm_contract::assurance::{
         ApprovalSet, AuthorityCeiling, AuthorityInputs, EvidenceRef, ObservationScope,
         PROBE_REQUEST_SCHEMA, RequestedAuthority, SessionGrant, Sha256Digest, ToolId,
     };
     use mvm_contract::policy::network_policy::HostPort;
+    use mvm_core::plan::ExecutionPlan;
     use mvm_core::plan::test_support::PlanFixture;
     use mvm_core::protocol::broker::CorrelationId;
 
@@ -515,7 +515,7 @@ mod tests {
         let handler = HostAssuranceV1Handler::new();
         let mut session = spec(policy, max_steps);
         session.authority = authority_expiring_at(max_steps, expiry, now);
-        session.emitter = Some(Arc::new(emitter));
+        session.sink = Some(Arc::new(emitter) as Arc<dyn AssuranceAuditSink + Send + Sync>);
         handler.open_session(session);
         // The tempdir is deliberately leaked: these tests only assert on the
         // dispatch result, and keeping the guard alive would mean threading it
@@ -551,8 +551,8 @@ mod tests {
                 host: "attacker.example.com".to_string(),
                 port: 443,
             }],
-            plan: PlanFixture::new().build(),
-            emitter: None,
+            identity: PlanIdentity::from(&PlanFixture::new().build()),
+            sink: None,
         }
     }
 
@@ -569,7 +569,7 @@ mod tests {
             .with_receipts();
         let handler = HostAssuranceV1Handler::new();
         let mut session = spec(policy, max_steps);
-        session.emitter = Some(Arc::new(emitter));
+        session.sink = Some(Arc::new(emitter) as Arc<dyn AssuranceAuditSink + Send + Sync>);
         handler.open_session(session);
         (handler, dir)
     }
@@ -978,7 +978,8 @@ mod tests {
             .expect("emitter")
             .with_receipts();
         let plan = PlanFixture::new().build();
-        let ledger = AssuranceLedger::new(&emitter, &plan);
+        let identity = PlanIdentity::from(&plan);
+        let ledger = AssuranceLedger::new(&emitter, &identity);
         let identity = crate::audit::assurance::SessionIdentity {
             session_id: id(SESSION),
             campaign_id: id("mvm-campaign-1"),
@@ -1022,7 +1023,8 @@ mod tests {
             .expect("emitter")
             .with_receipts();
         let plan = PlanFixture::new().build();
-        let ledger = AssuranceLedger::new(&emitter, &plan);
+        let identity = PlanIdentity::from(&plan);
+        let ledger = AssuranceLedger::new(&emitter, &identity);
         let refs = ledger
             .open_session(&SessionIdentity {
                 session_id: id(SESSION),

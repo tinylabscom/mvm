@@ -246,6 +246,13 @@ pub struct EndpointConfig {
     /// between an endpoint that is serving and one that merely started.
     #[serde(default)]
     pub session_marker: Option<std::path::PathBuf>,
+    /// Host-local event socket for the first authenticated session.
+    ///
+    /// The endpoint binds this before its process-ready handshake and wakes
+    /// connected launchers after writing `session_marker`. It carries no
+    /// identity or secret data; the marker remains the durable evidence.
+    #[serde(default)]
+    pub session_ready_socket: Option<std::path::PathBuf>,
     /// How to resolve a bound secret's raw value: this host's local encrypted
     /// store (default), or a remote fleet-secrets daemon over a UDS. See
     /// [`ResolverBackend`].
@@ -538,6 +545,7 @@ mod tests {
             resolver: ResolverBackend::default(),
             flowmux_identity: None,
             session_marker: None,
+            session_ready_socket: None,
         }
     }
 

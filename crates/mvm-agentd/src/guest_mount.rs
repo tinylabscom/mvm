@@ -143,6 +143,28 @@ pub fn mount_early_filesystems() -> Result<()> {
         // branched off before the early mounts.
         ensure_dir("/dev")?;
         mount("devtmpfs", "/dev", "devtmpfs", libc::MS_NOSUID, "")?;
+
+        // The activated workload root is deliberately read-only. Runtime
+        // state and scratch files therefore need their own writable mounts,
+        // created before the pivot and carried across with the pseudofs
+        // mounts by `pivot_to_root`. OCI materialization guarantees both
+        // target directories exist in the sealed root.
+        ensure_dir("/run")?;
+        mount(
+            "tmpfs",
+            "/run",
+            "tmpfs",
+            libc::MS_NOSUID | libc::MS_NODEV,
+            "mode=0755",
+        )?;
+        ensure_dir("/tmp")?;
+        mount(
+            "tmpfs",
+            "/tmp",
+            "tmpfs",
+            libc::MS_NOSUID | libc::MS_NODEV,
+            "mode=1777",
+        )?;
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -431,21 +453,21 @@ pub fn mount_volumes(volumes: &[VolumeConfig], root: &Path) -> Result<()> {
 
 /// Pivot into the mounted rootfs, making it the active `/`.
 ///
-/// Moves `/proc`, `/sys`, and `/dev` into the new root, then performs the
-/// canonical switch_root sequence (chdir + MS_MOVE + chroot).  The agent
-/// process keeps running; it does not exec a new init.
+/// Moves `/proc`, `/sys`, `/dev`, `/run`, and `/tmp` into the new root, then
+/// performs the canonical switch_root sequence (chdir + MS_MOVE + chroot).
+/// The agent process keeps running; it does not exec a new init.
 pub fn pivot_to_root(new_root: &Path) -> Result<()> {
     #[cfg(target_os = "linux")]
     {
         // Ensure the target directories exist in the new root.
-        for sub in ["proc", "sys", "dev"] {
+        for sub in ["proc", "sys", "dev", "run", "tmp"] {
             let dst = new_root.join(sub);
             ensure_dir(&dst.to_string_lossy())?;
         }
 
         // Move the initramfs pseudo-filesystems into the new root so the
         // workload (and the agent itself) keeps seeing them.
-        for sub in ["/proc", "/sys", "/dev"] {
+        for sub in ["/proc", "/sys", "/dev", "/run", "/tmp"] {
             let dst = new_root.join(&sub[1..]).to_string_lossy().to_string();
             let _ = ensure_dir(&dst);
             move_mount(sub, &dst)
@@ -508,6 +530,17 @@ pub fn workload_home() -> &'static str {
     } else {
         WORKLOAD_HOME_FALLBACK
     }
+}
+
+/// Whether optional writes into the image-owned root can be attempted.
+///
+/// Runtime state has dedicated writable mounts. Cosmetic image changes such
+/// as creating a preferred home or naming the workload uid do not, so a
+/// sealed root skips them without issuing syscalls that must fail.
+#[must_use]
+#[cfg(any(target_os = "linux", test))]
+pub(crate) const fn optional_image_writes_allowed(rootfs_read_only: bool) -> bool {
+    !rootfs_read_only
 }
 
 /// The privilege drop as bare syscalls, allocating nothing on any path.
@@ -1361,7 +1394,7 @@ mod tests {
             .next()
             .expect("function body is delimited by the next item");
 
-        for target in ["/proc", "/sys", "/dev"] {
+        for target in ["/proc", "/sys", "/dev", "/run", "/tmp"] {
             let created = body
                 .find(&format!("ensure_dir(\"{target}\")"))
                 .unwrap_or_else(|| {
@@ -1378,6 +1411,46 @@ mod tests {
                 "{target}: ensure_dir must come before the mount, not after"
             );
         }
+    }
+
+    /// Runtime writes belong on tmpfs, and those mounts must survive the
+    /// switch from the universal initramfs to the sealed workload root.
+    #[test]
+    fn writable_runtime_mounts_are_tmpfs_and_move_into_the_workload_root() {
+        let src = include_str!("guest_mount.rs");
+        let early = src
+            .split("pub fn mount_early_filesystems")
+            .nth(1)
+            .expect("mount_early_filesystems must exist")
+            .split("\npub fn ")
+            .next()
+            .expect("function body is delimited by the next item");
+        let pivot = src
+            .split("pub fn pivot_to_root")
+            .nth(1)
+            .expect("pivot_to_root must exist")
+            .split("\npub fn ")
+            .next()
+            .expect("function body is delimited by the next item");
+
+        for target in ["/run", "/tmp"] {
+            assert!(
+                early.contains(&format!(
+                    "\"tmpfs\",\n            \"{target}\",\n            \"tmpfs\""
+                )),
+                "{target} must be mounted as tmpfs before the read-only root is activated"
+            );
+            assert!(
+                pivot.contains(&format!("\"{target}\"")),
+                "{target} must move into the activated workload root"
+            );
+        }
+    }
+
+    #[test]
+    fn sealed_roots_refuse_optional_image_writes() {
+        assert!(!optional_image_writes_allowed(true));
+        assert!(optional_image_writes_allowed(false));
     }
 
     /// devtmpfs must be mounted unconditionally, never gated on `/dev/console`.

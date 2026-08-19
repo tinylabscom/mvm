@@ -1,5 +1,11 @@
 # Live BDD merge-queue witness
 
+Backing: shipped-source
+Validation: the structural tests this plan describes — the workflow trigger,
+the just recipe, the scenario selector, and the exact public command sequence
+the live witness drives.
+
+
 Issue #2657 identified three separate gaps: live scenarios were silently
 skipped, no CI lane opted into them, and the README contract stopped at command
 parsing. The skipped-scenario report addresses the first gap. This closeout
