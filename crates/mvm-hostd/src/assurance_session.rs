@@ -445,6 +445,73 @@ pub fn open_for_boot(
     .map_err(|refusal| anyhow::anyhow!("{refusal}"))
 }
 
+/// What the host can attest about a finished trial.
+///
+/// Every field is read from something the host itself did or can check now —
+/// the probes it recorded, the plan it admitted, the state dir it can look at.
+/// Nothing here is taken from the workload or from the declaration, which is
+/// what makes the resulting [`EvidenceSet`] evidence rather than a claim.
+pub struct CollectEvidence<'a> {
+    pub vm: &'a str,
+    pub admitted: &'a AdmittedPlan,
+    pub binding: &'a MvmBinding,
+    /// The campaign's source digest, for the join back to the scan.
+    pub source_digest: &'a Sha256Digest,
+    /// Where per-VM state lives, so teardown can be confirmed.
+    pub mvm_home: &'a std::path::Path,
+}
+
+/// Assemble the evidence a trial is evaluated against.
+///
+/// The three verification flags are deliberately conservative:
+///
+/// - `observer_verified` is true only when the host actually recorded a probe
+///   for this session. A session that opened and was never exercised observed
+///   nothing, and saying otherwise would let an untested trial certify.
+/// - `cleanup_verified` is true only when the workload's state dir no longer
+///   carries a live process, checked through the same probe the admission
+///   budget trusts. A VM still running has not been cleaned up, whatever the
+///   plan intended.
+/// - `attestation_verified` stays false: no attestation provider is wired, and
+///   the evaluator only consults it when the plan demands attestation, so a
+///   `Noop` plan is unaffected and a demanding one correctly fails closed.
+#[must_use]
+pub fn collect_evidence(request: CollectEvidence<'_>) -> mvm_contract::assurance::EvidenceSet {
+    let plan = request.admitted.plan();
+    let plane = host_assurance_plane();
+    let probe_refs = plane
+        .as_ref()
+        .map(|plane| plane.evidence_refs_for(request.vm))
+        .unwrap_or_default();
+    let observed = plane
+        .as_ref()
+        .and_then(|plane| plane.observation_for(request.vm));
+
+    // A recorded probe *and* an attempt: a session whose every probe was
+    // refused before it ran has references but observed no effect.
+    let observer_verified = !probe_refs.is_empty() && observed.is_some_and(|o| o.attempted_effect);
+
+    let state_dir = mvm_core::config::vm_state_dir_at(request.mvm_home, request.vm);
+    let cleanup_verified = !mvm_vmm::host::process_liveness::state_dir_has_live_process(&state_dir);
+
+    let mut audit_refs = request.binding.audit_refs.clone();
+    audit_refs.extend(probe_refs);
+
+    mvm_contract::assurance::EvidenceSet {
+        identity_verified: request.binding.plan_id.as_str()
+            == request.admitted.plan_id().0.replace(':', "-"),
+        observer_verified,
+        cleanup_verified,
+        attestation_verified: false,
+        disposable_target: plan.post_run.destroy_on_exit,
+        artifact_digest: request.binding.artifact_digest.clone(),
+        policy_digest: request.binding.effective_policy_digest.clone(),
+        source_digest: request.source_digest.clone(),
+        audit_refs,
+        receipt_refs: request.binding.receipt_refs.clone(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -857,5 +924,142 @@ mod tests {
         let chain = chain_of(&opened);
         assert!(chain.contains("assurance.trial_completed"), "{chain}");
         assert!(chain.contains("observer_missing"), "{chain}");
+    }
+
+    // ---------------------------------------------------------------------
+    // Evidence collection
+    // ---------------------------------------------------------------------
+
+    fn evidence_for(
+        home: &std::path::Path,
+        vm: &str,
+        binding: &MvmBinding,
+        admitted: &AdmittedPlan,
+    ) -> mvm_contract::assurance::EvidenceSet {
+        collect_evidence(CollectEvidence {
+            vm,
+            admitted,
+            binding,
+            source_digest: &Sha256Digest::parse(SOURCE_DIGEST).expect("digest"),
+            mvm_home: home,
+        })
+    }
+
+    #[test]
+    fn an_unexercised_session_observes_nothing_and_cannot_certify() {
+        let opened = open_against(bound_plan());
+        let binding = opened.result.as_ref().expect("session opens").clone();
+        let home = tempfile::tempdir().expect("tempdir");
+
+        // Opened, never probed. The plane is per-test here, so nothing this
+        // session did was recorded — which is exactly the case that must not
+        // read as an observer having watched.
+        let evidence = evidence_for(home.path(), "vm-a", &binding, &opened.admitted);
+        assert!(
+            !evidence.observer_verified,
+            "a session that ran no probe observed nothing"
+        );
+        assert!(evidence.identity_verified);
+    }
+
+    #[test]
+    fn cleanup_is_verified_only_when_no_live_process_remains() {
+        let opened = open_against(bound_plan());
+        let binding = opened.result.as_ref().expect("session opens").clone();
+        let home = tempfile::tempdir().expect("tempdir");
+
+        // No state dir at all: nothing is running, so cleanup holds.
+        let gone = evidence_for(home.path(), "vm-a", &binding, &opened.admitted);
+        assert!(gone.cleanup_verified);
+
+        // A pid marker pointing at this very process is unambiguously live.
+        let dir = mvm_core::config::vm_state_dir_at(home.path(), "vm-a");
+        std::fs::create_dir_all(&dir).expect("state dir");
+        std::fs::write(dir.join("libkrun.pid"), std::process::id().to_string())
+            .expect("pid marker");
+        let live = evidence_for(home.path(), "vm-a", &binding, &opened.admitted);
+        assert!(
+            !live.cleanup_verified,
+            "a VM still running has not been cleaned up, whatever the plan intended"
+        );
+    }
+
+    #[test]
+    fn attestation_is_never_asserted_without_a_provider() {
+        let opened = open_against(bound_plan());
+        let binding = opened.result.as_ref().expect("session opens").clone();
+        let home = tempfile::tempdir().expect("tempdir");
+        let evidence = evidence_for(home.path(), "vm-a", &binding, &opened.admitted);
+        // Nothing attests today. The evaluator only consults this when the
+        // plan demands attestation, so a Noop plan is unaffected and a
+        // demanding one fails closed rather than being waved through.
+        assert!(!evidence.attestation_verified);
+    }
+
+    #[test]
+    fn the_collected_evidence_quotes_the_binding_not_the_declaration() {
+        let opened = open_against(bound_plan());
+        let binding = opened.result.as_ref().expect("session opens").clone();
+        let home = tempfile::tempdir().expect("tempdir");
+        let evidence = evidence_for(home.path(), "vm-a", &binding, &opened.admitted);
+
+        assert_eq!(evidence.artifact_digest, binding.artifact_digest);
+        assert_eq!(evidence.policy_digest, binding.effective_policy_digest);
+        assert!(!evidence.receipt_refs.is_empty());
+        assert!(!evidence.audit_refs.is_empty());
+    }
+
+    #[test]
+    fn a_non_disposable_plan_is_reported_as_such() {
+        let mut plan = bound_plan();
+        plan.post_run.destroy_on_exit = false;
+        let opened = open_against(plan);
+        let binding = opened.result.as_ref().expect("session opens").clone();
+        let home = tempfile::tempdir().expect("tempdir");
+        let evidence = evidence_for(home.path(), "vm-a", &binding, &opened.admitted);
+        assert!(!evidence.disposable_target);
+    }
+
+    #[test]
+    fn evidence_from_a_real_session_still_evaluates_inconclusive_today() {
+        // The honest end state: everything the host can attest is assembled,
+        // and the trial is still INCONCLUSIVE because no observer ran. This
+        // pins that the gap is the observer, not the plumbing.
+        use mvm_contract::assurance::{
+            EvaluationInputs, HostObservation, InconclusiveReason, TRIAL_RESULT_CANDIDATE_SCHEMA,
+            TrialOutcome, TrialResultCandidate,
+        };
+
+        let opened = open_against(bound_plan());
+        let binding = opened.result.as_ref().expect("session opens").clone();
+        let home = tempfile::tempdir().expect("tempdir");
+        let evidence = evidence_for(home.path(), "vm-a", &binding, &opened.admitted);
+
+        let candidate = TrialResultCandidate {
+            schema: TRIAL_RESULT_CANDIDATE_SCHEMA.to_string(),
+            attempted_effect: true,
+            effect_observed_in_guest: false,
+            boundary_crossed: false,
+            blocked_edges: Vec::new(),
+            evidence_refs: Vec::new(),
+            notes: String::new(),
+        };
+        let observation = HostObservation {
+            attempted_effect: true,
+            effect_observed_in_guest: false,
+            boundary_crossed: false,
+            blocked_edges: Vec::new(),
+        };
+        let verdict = mvm_contract::assurance::evaluate(EvaluationInputs {
+            issued_binding: &binding,
+            echoed_binding: Some(&binding),
+            narrative_applicable: true,
+            planned_source_digest: &Sha256Digest::parse(SOURCE_DIGEST).expect("digest"),
+            candidate: &candidate,
+            observation: &observation,
+            evidence: &evidence,
+        });
+        assert_eq!(verdict.outcome, TrialOutcome::Inconclusive);
+        assert_eq!(verdict.reason, Some(InconclusiveReason::ObserverMissing));
     }
 }
