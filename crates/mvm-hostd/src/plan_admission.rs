@@ -1530,9 +1530,24 @@ pub fn admit_and_start(
             // launch they belong to. A refusal here fails the boot: a campaign
             // the operator declared and that silently did not open would be
             // reported as a trial that observed nothing.
-            if let Some(campaign) = params.assurance {
-                crate::assurance_session::open_for_boot(campaign, &vm_id.0, &admitted)
-                    .context("opening the declared assurance session")?;
+            if let Some(campaign) = params.assurance
+                && let Err(err) =
+                    crate::assurance_session::open_for_boot(campaign, &vm_id.0, &admitted)
+            {
+                // Rolls the launch back rather than returning with the VM up.
+                // The session opens after the backend start, so a bare `?`
+                // here left a running workload behind while reporting the boot
+                // as failed — and an orphan whose only record says it did not
+                // start is worse than either outcome alone.
+                return Err(undo_launch(UndoLaunch {
+                    backend,
+                    vm_id: &vm_id,
+                    admitted: &admitted,
+                    emitter: params.emitter,
+                    stage: "assurance-session",
+                    reason: "the declared assurance campaign could not be opened",
+                    err,
+                }));
             }
             Ok(StartedMachine {
                 vm_id,
@@ -3391,6 +3406,109 @@ mod tests {
             backend.status(&started.vm_id).unwrap(),
             mvm_core::vm_backend::VmStatus::Running
         ));
+    }
+
+    #[test]
+    fn a_campaign_that_cannot_open_rolls_the_launch_back() {
+        // The session opens *after* the backend start, so a failure there used
+        // to return with the workload still running.
+        //
+        // The campaign declares no destination, which `open` refuses whether or
+        // not a plane happens to be installed. Asserting on the absence of the
+        // process-global plane instead would make this test depend on run
+        // order — a `OnceLock` admits one value and the neighbouring test
+        // installs it, so it would pass under nextest and flake under
+        // `cargo test`.
+        use std::sync::Arc;
+
+        use mvm_contract::assurance::{
+            ApprovalSet, AssuranceId, ObservationScope, RequestedAuthority, Sha256Digest, ToolId,
+        };
+
+        use crate::assurance_session::{
+            CampaignDeclaration, CampaignRequest, default_policy_ceiling,
+        };
+
+        let (_env, _home) = host_with_ceiling(Default::default());
+        let dir = tempfile::tempdir().unwrap();
+        let audit = tempfile::tempdir().unwrap();
+        let backend = mvm_runtime::AnyBackend::from_hypervisor("mock");
+        let ledger = InMemoryNonceLedger::new();
+        let emitter = Arc::new(
+            crate::audit::emitter::AuditEmitter::with_dir(
+                ed25519_dalek::SigningKey::from_bytes(&[41u8; 32]),
+                audit.path(),
+            )
+            .expect("emitter"),
+        );
+        let id = |raw: &str| AssuranceId::parse(raw).expect("identifier");
+        let declaration = CampaignDeclaration {
+            campaign_id: id("mvm-campaign-9"),
+            trial_id: id("trial-9"),
+            source_run_id: id("scout-9"),
+            source_digest: Sha256Digest::parse(format!("sha256:{}", "5".repeat(64)))
+                .expect("digest"),
+            edges: Vec::new(),
+            approvals: ApprovalSet::none().with(ToolId::CampaignProbeV1),
+            requested: RequestedAuthority {
+                allowed_tools: vec![ToolId::CampaignProbeV1],
+                observation_scopes: vec![ObservationScope::HostAuditRefs],
+                max_steps: 4,
+                max_output_bytes: 4096,
+                deadline_unix_ms: 0,
+            },
+            grant_ttl_ms: 600_000,
+        };
+        let campaign = CampaignRequest {
+            declaration,
+            emitter: Arc::clone(&emitter),
+            policy_ceiling: default_policy_ceiling(),
+            policy: mvm_core::policy::network_policy::NetworkPolicy::deny_all(),
+            backend: "mock".to_string(),
+            now_unix_ms: 1_800_000_000_000,
+        };
+
+        let service =
+            mvm_core::protocol::broker::ServiceId::parse("host.assurance.v1").expect("service id");
+        let mut synthesis = fixture_input("vm-rollback");
+        synthesis.services = vec![service];
+        let config = mvm_core::vm_backend::VmStartConfig {
+            name: "vm-rollback".into(),
+            rootfs_path: "/store/rootfs.ext4".into(),
+            ..Default::default()
+        };
+
+        let err = admit_and_start(
+            &backend,
+            AdmitAndStartParams {
+                synthesis: &synthesis,
+                config,
+                clock: &SystemClock,
+                ledger: &ledger,
+                host_signer_keys_dir: Some(dir.path()),
+                bundle_ctx: None,
+                variant: Variant::Dev,
+                policy_bundle: None,
+                emitter: Some(&emitter),
+                audit_durability: crate::audit::durability::AuditDurability::BestEffort,
+                assurance: Some(&campaign),
+            },
+        )
+        .expect_err("a campaign declaring no destination cannot open");
+        // Deliberately not asserted on the message: which refusal fires
+        // depends on whether a neighbouring test installed the process-global
+        // plane first (`NoPlane`) or not (`NoEdges`). Both roll the launch
+        // back, and the rollback is the property under test.
+        let _ = &err;
+
+        // The whole point: no workload is left running behind the failure.
+        assert!(
+            !matches!(
+                backend.status(&mvm_core::vm_backend::VmId("vm-rollback".into())),
+                Ok(mvm_core::vm_backend::VmStatus::Running)
+            ),
+            "a campaign that could not open must not leave the VM up"
+        );
     }
 
     #[test]
