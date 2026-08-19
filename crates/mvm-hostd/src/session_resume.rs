@@ -487,6 +487,34 @@ mod tests {
     }
 
     #[test]
+    fn the_generation_label_matches_the_generation_the_transition_writes() {
+        // The label is computed before the transition, so it is a prediction of
+        // what `AgentSessionRecord::resume` will write. Nothing couples the two
+        // — if the increment ever changes, the label drifts silently and every
+        // audit entry names the wrong residency. This reads both back off one
+        // real resume and compares them.
+        let (_env, _home) = isolated_host(GrantCeiling::default());
+        let fx = Fixture::new();
+        let parent = seed_checkpoint(&fx.checkpoints, fx.tmp.path(), "cp-parent");
+
+        let mut rec = parked_record("sess-alpha");
+        rec.parent_checkpoint = Some(parent.meta_digest.clone());
+        fx.sessions.write(&rec).unwrap();
+
+        let m = material();
+        let resumed = fx.resume(&fx.request(&rec, &m)).unwrap();
+        assert_eq!(
+            resumed
+                .admitted
+                .plan()
+                .audit_labels
+                .get("session_generation"),
+            Some(&resumed.record.generation.to_string()),
+            "the signed label must name the generation the record actually took"
+        );
+    }
+
+    #[test]
     fn a_missing_parent_checkpoint_refuses_before_admission() {
         let (_env, _home) = isolated_host(GrantCeiling::default());
         let fx = Fixture::new();
