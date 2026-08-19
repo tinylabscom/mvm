@@ -65,5 +65,8 @@ pub mod plan_admission;
 /// `start_enter`) so the rejection ladder is unit-testable.
 pub mod prelaunch;
 pub mod run;
+/// Resume orchestration for durable agent sessions: turn a parked session
+/// record back into an admitted `ExecutionPlan`.
+pub mod session_resume;
 pub mod stream;
 pub mod supervisor;

@@ -33,7 +33,7 @@ use crate::plan_admission::{
 /// The tenant every locally-run machine is admitted under. Local runs are
 /// single-tenant by construction (one host, one operator), so the audit chain
 /// and gateway substrate key off this fixed label rather than a fleet tenant.
-const LOCAL_TENANT: &str = "local";
+pub(crate) const LOCAL_TENANT: &str = "local";
 
 /// A minimal, safe-by-default request to admit and boot a locally-materialized
 /// rootfs. The caller resolves the image to `rootfs_path` (and its optional
