@@ -17,6 +17,11 @@ pub const PENDING_TAG: &str = "wip";
 /// network; opt in with `MVM_BDD_LIVE=1` (skipped in the default hermetic lane).
 pub const LIVE_TAG: &str = "live";
 
+/// Cucumber tag for the narrow real-microVM lifecycle selected by the merge
+/// queue. Selection stays inside [`scenario_gate_for_ci`] so it cannot replace
+/// or bypass the live and Firecracker capability checks.
+pub const CI_LIVE_TAG: &str = "ci_live";
+
 /// Cucumber tag for a scenario that boots a real Firecracker microVM. Being a
 /// real boot it also honors the `@live` opt-in (`MVM_BDD_LIVE`), and it runs
 /// only where a usable `/dev/kvm` and a `firecracker` binary are both present —
@@ -77,6 +82,9 @@ pub enum ScenarioGate {
     NeedsFirecracker,
     /// No `.mvmpkg` for a bundle-boot scenario to install.
     NeedsBundleFixture,
+    /// The merge-queue lane selected only `@ci_live` scenarios, and this
+    /// scenario is outside that deliberately narrow subset.
+    OutsideCiLiveSubset,
 }
 
 /// The reason behind [`scenario_should_run`]. Same order of checks, so the two
@@ -103,6 +111,21 @@ pub fn scenario_gate(tags: &[String], caps: RuntimeCaps) -> ScenarioGate {
     ScenarioGate::Run
 }
 
+/// Apply the merge-queue subset selection without replacing the capability
+/// checks. Cucumber's command-line tag filter replaces the programmatic
+/// filter; keeping the selection here makes a missing live opt-in or KVM
+/// capability continue to fail closed.
+pub fn scenario_gate_for_ci(
+    tags: &[String],
+    caps: RuntimeCaps,
+    ci_live_only: bool,
+) -> ScenarioGate {
+    if ci_live_only && !tags.iter().any(|tag| tag == CI_LIVE_TAG) {
+        return ScenarioGate::OutsideCiLiveSubset;
+    }
+    scenario_gate(tags, caps)
+}
+
 impl ScenarioGate {
     /// What to tell the operator, in the summary line.
     pub fn reason(self) -> Option<&'static str> {
@@ -112,6 +135,7 @@ impl ScenarioGate {
             Self::NeedsLiveOptIn => Some("need MVM_BDD_LIVE (these boot a real microVM)"),
             Self::NeedsFirecracker => Some("need /dev/kvm + firecracker on PATH"),
             Self::NeedsBundleFixture => Some("need MVM_BDD_BUNDLE to name a readable .mvmpkg"),
+            Self::OutsideCiLiveSubset => Some("outside the merge-queue @ci_live subset"),
         }
     }
 }
@@ -311,8 +335,42 @@ mod tests {
             ScenarioGate::NeedsLiveOptIn,
             ScenarioGate::NeedsFirecracker,
             ScenarioGate::NeedsBundleFixture,
+            ScenarioGate::OutsideCiLiveSubset,
         ] {
             assert!(g.reason().is_some(), "{g:?} must say why");
         }
+    }
+
+    #[test]
+    fn ci_subset_selection_preserves_live_and_firecracker_gates() {
+        let selected = tags(&[LIVE_TAG, FIRECRACKER_TAG, CI_LIVE_TAG]);
+        assert_eq!(
+            scenario_gate_for_ci(&selected, NONE, true),
+            ScenarioGate::NeedsLiveOptIn
+        );
+        assert_eq!(
+            scenario_gate_for_ci(
+                &selected,
+                RuntimeCaps {
+                    live_opted_in: true,
+                    firecracker_bootable: false,
+                    bundle_fixture: false,
+                },
+                true,
+            ),
+            ScenarioGate::NeedsFirecracker
+        );
+        assert_eq!(
+            scenario_gate_for_ci(&selected, ALL, true),
+            ScenarioGate::Run
+        );
+        assert_eq!(
+            scenario_gate_for_ci(&tags(&[LIVE_TAG]), ALL, true),
+            ScenarioGate::OutsideCiLiveSubset
+        );
+        assert_eq!(
+            scenario_gate_for_ci(&tags(&[]), NONE, false),
+            ScenarioGate::Run
+        );
     }
 }

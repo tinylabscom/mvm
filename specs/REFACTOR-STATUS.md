@@ -1,11 +1,20 @@
 # Refactor status
 
-Last updated: 2026-08-18
+Last updated: 2026-08-19
 
 This is the cross-plan progress index. The owning plan remains authoritative
 for detailed scope and acceptance criteria.
 
 ## Completed issue closeouts
+
+- [x] **Issue #2657 — live BDD is visible and merge-gated.** Capability skips
+      are reported instead of disappearing from the test summary, and a
+      merge-queue/manual-only KVM lane runs one tagged Firecracker witness for
+      the README persistent-machine lifecycle. The CI-only selector composes
+      with the existing live and backend capability gates, so narrowing the
+      suite cannot accidentally authorize a live boot. Structural tests pin
+      the workflow trigger, recipe, selector, and exact public command
+      sequence.
 
 - [x] **Plan 337 COMPLETE — the SDK surface is generated from Rust.** Sessions
       finished Tier C. Python's `contextvars` + `Token` has no

@@ -27,7 +27,7 @@ use std::path::{Path, PathBuf};
 
 use cucumber::World as _;
 use cucumber::gherkin::{Feature, Rule, Scenario};
-use mvm_conformance::{RuntimeCaps, ScenarioGate, scenario_gate};
+use mvm_conformance::{RuntimeCaps, ScenarioGate, scenario_gate_for_ci};
 use world::CliWorld;
 
 #[tokio::main]
@@ -149,7 +149,11 @@ fn newest_source(root: &Path) -> Option<(PathBuf, std::time::SystemTime)> {
 /// clean skip, never a failure — so the suite stays green on hosts without KVM
 /// (GitHub-hosted ARM runners, or any dev box lacking `/dev/kvm`).
 fn should_run(_feature: &Feature, _rule: Option<&Rule>, scenario: &Scenario) -> bool {
-    let gate = scenario_gate(&scenario.tags, probe_caps());
+    let gate = scenario_gate_for_ci(
+        &scenario.tags,
+        probe_caps(),
+        std::env::var_os("MVM_BDD_CI_LIVE_ONLY").is_some(),
+    );
     record_gate(gate);
     matches!(gate, ScenarioGate::Run)
 }

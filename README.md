@@ -693,7 +693,9 @@ every CLI option including hidden internal options, exercises the SDK fixtures,
 and rejects new README code blocks without a corresponding test witness. Static
 install, Nix, and embedding examples are checked for their required contract
 tokens; live boot, egress, and guest-I/O behavior remains covered by tagged
-integration scenarios.
+integration scenarios. The merge queue also runs a KVM-backed fast witness for
+the persistent-machine path above: create, start, exec, logs, inspect, stop, and
+remove all operate one real Firecracker guest before the change can merge.
 
 - [Getting started](public/src/content/docs/getting-started/) ·
   [Python quickstart](public/src/content/docs/getting-started/python-quickstart.md)
