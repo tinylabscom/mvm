@@ -720,6 +720,23 @@ mod tests {
         assert!(admitted_child_secrets(&[], "child-bare").is_empty());
     }
 
+    /// The tier this test must use to mean anything: one that actually meters
+    /// CPU on the host running it.
+    ///
+    /// `ResourceControls::for_backend` answers per host, not per kind alone —
+    /// HVF reports `HvfVcpuQuota` only under `cfg!(target_os = "macos")`, and
+    /// `CpuControl::None` elsewhere, because there is no in-process vCPU
+    /// scheduler to enforce a share on Linux. Firecracker is the mirror image:
+    /// `CgroupShare` on Linux, nothing on macOS. Hardcoding either one makes
+    /// the test assert the opposite thing on the other platform — which is why
+    /// it passed locally on a Mac and failed in Linux CI, where the refusal it
+    /// was written to disprove is the correct answer.
+    const CPU_METERING_TIER: BackendKind = if cfg!(target_os = "macos") {
+        BackendKind::Hvf
+    } else {
+        BackendKind::Firecracker
+    };
+
     /// A parent that bounded its CPU can still be forked.
     ///
     /// The child inherits the parent's grants and is admitted prod-profile, so
@@ -728,6 +745,10 @@ mod tests {
     /// unforkable, with an error naming the missing backend rather than the
     /// grant. The tier is known here — each arm is one backend — so the gate
     /// measures against it.
+    ///
+    /// The companion `a_share_the_tier_cannot_serve_is_still_refused` covers
+    /// the other direction, so this pair says "admitted where a mechanism
+    /// exists, refused where it does not" rather than either alone.
     #[test]
     fn a_parent_that_bounded_cpu_can_still_be_forked() {
         let mut env = mvm_core::util::test_env::TestEnv::new();
@@ -751,10 +772,10 @@ mod tests {
             checkpoint: &CheckpointId::new(id),
             parent_meta: &parent_meta,
             child_vm_name: "child-cpu-bounded",
-            backend_kind: BackendKind::Hvf,
+            backend_kind: CPU_METERING_TIER,
             declared_secrets: &[],
         })
-        .expect("a cpu-bounded parent is forkable");
+        .expect("a cpu-bounded parent is forkable on a tier that meters CPU");
 
         let plan = admitted
             .admission
