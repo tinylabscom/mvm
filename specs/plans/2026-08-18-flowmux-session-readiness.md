@@ -1,5 +1,8 @@
 # FlowMux session readiness without a launch race
 
+Backing: shipped-source
+Validation: check-sprint-append
+
 **Status:** COMPLETE
 **Date:** 2026-08-18
 **Branch:** `fix/flowmux-session-readiness`
