@@ -56,6 +56,26 @@ fn page_distinguishes_budgets_from_measurements() {
     );
 }
 
+#[test]
+fn page_publishes_the_seeded_firecracker_report_as_measurement() {
+    let page = read_page();
+    for expected in [
+        "Intel i7-7700",
+        "Firecracker v1.14.1",
+        "rotational md-RAID",
+        "20 (+2 warm-ups)",
+        "171.5 ms",
+        "176.0 ms",
+        "178.0 ms",
+        "523ffd3f2904696141edd806861093abb1011de00d6c345b7acc3be27f4ee6c4",
+    ] {
+        assert!(
+            page.contains(expected),
+            "the seeded Firecracker measurement must publish {expected:?}"
+        );
+    }
+}
+
 /// A gate that cannot fail is not a gate: perturbing a number inside the
 /// generated region must be detected by the same comparison the real test runs.
 #[test]
