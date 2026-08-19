@@ -895,7 +895,9 @@ pub(super) fn promote_builder_vm_stage0_cache(
 pub(super) fn download_builder_vm_image(arch: &str, cache_dir: &str) -> Result<()> {
     let version = env!("CARGO_PKG_VERSION");
     let names = builder_vm_artifact_names(arch);
-    let base_url = format!("https://github.com/tinylabscom/mvm/releases/download/v{version}");
+    // Builder-VM images ship on the boot image counter, not the CLI's.
+    let (tag, image_version) = crate::update::boot_image_release()?;
+    let base_url = format!("https://github.com/tinylabscom/mvm/releases/download/{tag}");
     let kernel_url = format!("{base_url}/{}", names.kernel);
     let rootfs_url = format!("{base_url}/{}", names.rootfs);
     let cmdline_url = format!("{base_url}/{}", names.cmdline);
@@ -908,7 +910,8 @@ pub(super) fn download_builder_vm_image(arch: &str, cache_dir: &str) -> Result<(
         &ChecksumManifest {
             base_url: &base_url,
             asset: &names.checksums,
-            version,
+            version: &image_version,
+            train: mvm_build::release_signature::ReleaseTrain::BootImage,
         },
         &[
             &names.kernel,

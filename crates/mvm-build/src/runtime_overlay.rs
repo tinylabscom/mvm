@@ -935,6 +935,10 @@ pub fn download_runtime_overlay(
             asset: &names.archive,
             archive_path: &archive_local,
             version,
+            // Unchanged: this path still resolves its base URL from the CLI
+            // version, so its signature train must stay the CLI one. Splitting
+            // its download tag from its cache key is a separate change.
+            train: crate::release_signature::ReleaseTrain::Cli,
         },
     )?;
     extract_release_archive(&archive_local, stage, &OVERLAY_ARCHIVE_MEMBERS)?;
