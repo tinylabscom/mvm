@@ -21,6 +21,9 @@ pub const ALLOWED_CATEGORIES: &[&str] = &[
     "dns",
     // Workload-emitted via `host.audit.v1` in `mvm-broker`.
     "workload_audit",
+    // Assurance campaign records. Emitted by the broker, which records through
+    // the audit-signer rather than an `AuditEmitter` it does not have.
+    "assurance",
 ];
 
 /// True iff `category` is in the allow-list.
@@ -35,6 +38,15 @@ mod tests {
     #[test]
     fn allowed_categories_include_workload_audit() {
         assert!(is_allowed("workload_audit"));
+    }
+
+    #[test]
+    fn the_assurance_category_is_accepted() {
+        // The broker records campaign probes through the signer, so a refused
+        // category there would mean a boundary attempt with no record — which
+        // the probe path treats as a reason to refuse the probe outright.
+        assert!(is_allowed("assurance"));
+        assert!(!is_allowed("assurance_probe"));
     }
 
     #[test]

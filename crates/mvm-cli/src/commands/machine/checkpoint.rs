@@ -157,6 +157,7 @@ pub(in crate::commands) fn fork_vm_full_machine(input: ForkVmFullMachineInput) -
             now,
             json: input.json,
             bypass_experimental_guard: true,
+            declared_secrets: &[],
         },
     )?;
     Ok(())

@@ -108,6 +108,10 @@ impl Verdict {
             .env("SCOPE_RESULT", self.scope_result)
             .env("SCOPE_CODE", self.code)
             .env("WORKSPACE_RESULT", self.lanes)
+            // The aarch64 lane carries the same `code` scope as the other four
+            // in the loop, so it moves with them rather than getting its own
+            // field.
+            .env("WORKSPACE_AARCH64_RESULT", self.lanes)
             .env("LINUX_RESULT", self.lanes)
             .env("RELEASE_WITNESS_RESULT", self.lanes)
             .env("EBPF_RESULT", self.lanes)

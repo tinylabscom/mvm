@@ -9,7 +9,7 @@
 //! workload paths use the authenticated vsock/UDS endpoint transport.
 
 use crate::host::drive_file::DriveFile;
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use mvm_contract::builder::BuilderError;
 use mvm_contract::stream::secret_fingerprint::SecretFingerprint;
 use mvm_core::crypto::egress_ca::EgressCa;
@@ -183,6 +183,96 @@ pub const SUBST_PID_FILE: &str = "substitution.pid";
 /// Per-VM file the endpoint writes when a guest completes an authenticated
 /// session on it.
 pub const SUBST_SESSION_FILE: &str = "substitution.session";
+
+/// Per-VM Unix socket that wakes the launcher after the first authenticated
+/// FlowMux session. The marker above remains the durable evidence; this socket
+/// is only the event that avoids racing a one-shot marker check.
+pub const SUBST_SESSION_READY_SOCKET: &str = "substitution-session-ready.sock";
+
+/// Bound on the gap between guest-agent readiness and FlowMux authentication.
+/// A healthy guest normally authenticates before the launcher connects, so
+/// this is a failure deadline rather than launch-path latency.
+const DEFAULT_SESSION_READY_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Wait for the endpoint's first authenticated FlowMux session.
+///
+/// The endpoint binds its readiness socket before reporting process readiness,
+/// then writes one byte only after it has recorded the durable session marker.
+/// This gives launch a real happens-before edge without polling or a fixed
+/// sleep. A boot with no endpoint remains valid and returns immediately.
+pub fn wait_for_endpoint_session(vm_name: &str, state_dir: &Path) -> anyhow::Result<()> {
+    wait_for_endpoint_session_with_timeout(vm_name, state_dir, DEFAULT_SESSION_READY_TIMEOUT)
+}
+
+fn wait_for_endpoint_session_with_timeout(
+    vm_name: &str,
+    state_dir: &Path,
+    timeout: Duration,
+) -> anyhow::Result<()> {
+    use std::io::Read as _;
+
+    if endpoint_session_established(state_dir) {
+        return Ok(());
+    }
+
+    let pid_file = state_dir.join(SUBST_PID_FILE);
+    let Some(pid) = read_pid(&pid_file) else {
+        return Ok(());
+    };
+    if !pid_alive(pid) {
+        return refuse_launch_without_endpoint_session(vm_name, state_dir);
+    }
+
+    let socket = state_dir.join(SUBST_SESSION_READY_SOCKET);
+    let mut stream = std::os::unix::net::UnixStream::connect(&socket).map_err(|e| {
+        if pid_alive(pid) {
+            anyhow!(
+                "VM {vm_name}: connect to network endpoint session readiness socket {}: {e}",
+                socket.display()
+            )
+        } else {
+            anyhow!(
+                "VM {vm_name}: the network endpoint exited before any guest authenticated \
+                 against it — the workload has no network."
+            )
+        }
+    })?;
+    stream
+        .set_read_timeout(Some(timeout))
+        .with_context(|| format!("set network endpoint readiness timeout for VM {vm_name}"))?;
+
+    let mut signal = [0_u8; 1];
+    match stream.read_exact(&mut signal) {
+        Ok(()) if signal == [1] => {}
+        Ok(()) => anyhow::bail!(
+            "VM {vm_name}: network endpoint sent an invalid authenticated-session signal"
+        ),
+        Err(e)
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+            ) =>
+        {
+            anyhow::bail!(
+                "VM {vm_name}: the network endpoint is running but no guest authenticated \
+                 within {timeout:?} — the workload has no network. Check that the guest \
+                 found its FlowMux identity drive."
+            )
+        }
+        Err(e) => {
+            if !pid_alive(pid) {
+                return refuse_launch_without_endpoint_session(vm_name, state_dir);
+            }
+            return Err(anyhow!(
+                "VM {vm_name}: waiting for the network endpoint's authenticated session: {e}"
+            ));
+        }
+    }
+
+    // The event is only a wakeup. The marker is the durable source of truth,
+    // and final verification keeps a malformed or premature signal fail-closed.
+    refuse_launch_without_endpoint_session(vm_name, state_dir)
+}
 
 /// Whether a guest has authenticated against this VM's endpoint.
 #[must_use]
@@ -686,6 +776,10 @@ fn build_endpoint_config_json(params: &SubstitutionSpawnParams<'_>) -> serde_jso
     if let Some(marker) = params.session_marker.as_ref() {
         cfg["session_marker"] = serde_json::json!(marker);
     }
+    if params.flowmux_identity.is_some() {
+        cfg["session_ready_socket"] =
+            serde_json::json!(params.state_dir.join(SUBST_SESSION_READY_SOCKET));
+    }
     if let Some(proxy) = params.egress_proxy.as_ref() {
         // `EndpointConfig.proxy_*`: the operator's upstream proxy for the
         // forward leg. Resolved on the host, where configuration lives, rather
@@ -775,10 +869,12 @@ pub fn spawn_network_endpoint(mut params: SubstitutionSpawnParams<'_>) -> Result
         params.egress_proxy = EgressProxySpawnConfig::from_host_env();
     }
     let session_marker = params.state_dir.join(SUBST_SESSION_FILE);
+    let session_ready_socket = params.state_dir.join(SUBST_SESSION_READY_SOCKET);
     // A stale marker from a previous boot would make this launch look ready
     // before any guest had connected, which is the exact failure the check
     // exists to catch.
     let _ = std::fs::remove_file(&session_marker);
+    let _ = std::fs::remove_file(&session_ready_socket);
     params.session_marker = Some(session_marker);
     let cfg = build_endpoint_config_json(&params);
     let SubstitutionSpawnParams {
@@ -1020,6 +1116,7 @@ pub fn reap_network_endpoint(state_dir: &Path, vm_name: &str) {
         kill(spid, libc::SIGTERM);
     }
     let _ = std::fs::remove_file(state_dir.join(SUBST_PID_FILE));
+    let _ = std::fs::remove_file(state_dir.join(SUBST_SESSION_READY_SOCKET));
     let _ = std::fs::remove_file(mvm_core::config::vm_substitution_env_path(vm_name));
     // The endpoint's secrets are gone; the shapes the gate recognised them by
     // go with them, so a recycled VM name cannot inherit them.
@@ -1083,6 +1180,85 @@ mod tests {
         std::fs::write(dir.path().join(SUBST_SESSION_FILE), b"1").unwrap();
         assert!(endpoint_session_established(dir.path()));
         assert!(refuse_launch_without_endpoint_session("vm-1", dir.path()).is_ok());
+    }
+
+    #[test]
+    fn a_launch_waits_for_a_delayed_authenticated_session() {
+        use std::io::Write as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(SUBST_PID_FILE),
+            std::process::id().to_string(),
+        )
+        .unwrap();
+        let ready_socket = dir.path().join(SUBST_SESSION_READY_SOCKET);
+        let listener = std::os::unix::net::UnixListener::bind(&ready_socket).unwrap();
+        let marker = dir.path().join(SUBST_SESSION_FILE);
+        let endpoint = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            std::fs::write(marker, b"1").unwrap();
+            stream.write_all(&[1]).unwrap();
+        });
+
+        wait_for_endpoint_session_with_timeout(
+            "vm-1",
+            dir.path(),
+            std::time::Duration::from_secs(1),
+        )
+        .expect("the authenticated-session event admits the launch");
+        endpoint.join().unwrap();
+    }
+
+    #[test]
+    fn a_launch_does_not_wait_when_the_session_is_already_recorded() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(SUBST_SESSION_FILE), b"1").unwrap();
+
+        wait_for_endpoint_session_with_timeout("vm-1", dir.path(), std::time::Duration::ZERO)
+            .expect("durable session evidence admits immediately");
+    }
+
+    #[test]
+    fn a_launch_reports_an_endpoint_that_exited_before_authentication() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(SUBST_PID_FILE), "2147483646").unwrap();
+
+        let err = wait_for_endpoint_session_with_timeout(
+            "vm-1",
+            dir.path(),
+            std::time::Duration::from_secs(1),
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("exited before any guest authenticated"),
+            "unexpected: {err}"
+        );
+    }
+
+    #[test]
+    fn a_launch_times_out_when_a_live_endpoint_never_authenticates() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(SUBST_PID_FILE),
+            std::process::id().to_string(),
+        )
+        .unwrap();
+        let _listener =
+            std::os::unix::net::UnixListener::bind(dir.path().join(SUBST_SESSION_READY_SOCKET))
+                .unwrap();
+
+        let err = wait_for_endpoint_session_with_timeout(
+            "vm-1",
+            dir.path(),
+            std::time::Duration::from_millis(20),
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("no guest authenticated within"),
+            "unexpected: {err}"
+        );
     }
 
     /// The marker is per-boot. A file left by a previous run would make the
@@ -2003,6 +2179,10 @@ mod tests {
         assert_eq!(id["session_id"], "vm-123-boot-456");
         assert_eq!(id["host_signing_key_base64"], "aG9zdC1rZXktYnl0ZXM");
         assert_eq!(id["guest_verifying_key_base64"], "Z3Vlc3Qta2V5LWJ5dGVz");
+        assert_eq!(
+            cfg["session_ready_socket"],
+            serde_json::json!(Path::new("/tmp").join(SUBST_SESSION_READY_SOCKET))
+        );
     }
 
     // ── the cert-to-guest / key-to-endpoint split ──

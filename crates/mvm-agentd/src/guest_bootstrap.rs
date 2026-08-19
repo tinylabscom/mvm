@@ -119,10 +119,13 @@ pub fn provision_guest_environment() -> Result<(), EgressClientMissing> {
 /// Both are cosmetic-until-they-aren't: without the home the shell starts in a
 /// directory it cannot write, and without the `/etc/passwd` entry `whoami`
 /// exits nonzero and `getpwuid()` returns `NULL` to any library that asks.
-/// Neither failure is worth refusing to boot over — a read-only rootfs that
-/// takes neither write still runs the workload — so both are reported and
-/// stepped past.
+/// Neither failure is worth refusing to boot over. A read-only rootfs cannot
+/// take either write, so use its writable `/tmp` fallback and leave the image's
+/// account databases unchanged without issuing syscalls that must fail.
 fn provision_workload_identity() {
+    if !crate::guest_mount::optional_image_writes_allowed(rootfs_is_read_only()) {
+        return;
+    }
     if let Err(error) = crate::guest_mount::ensure_workload_home() {
         note_optional_step(
             &format!(

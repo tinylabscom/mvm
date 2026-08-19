@@ -1,5 +1,9 @@
 # Firecracker readiness retry floor
 
+Backing: shipped-source
+Validation: the one-attempt CONNECT seam and the bounded readiness loop
+this plan describes, plus the launch-sample medians it is measured against.
+
 Issue #2574's current Linux/KVM baseline is a 291.4 ms prepared-cold dispatch
 median against a 200 ms budget. After the console-volume and process-spawn
 fixes, the remaining gap matches a nested retry cadence: the Firecracker boot
