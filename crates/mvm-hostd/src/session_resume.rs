@@ -20,7 +20,9 @@ use mvm_contract::protocol::agent_session::AgentSessionId;
 use mvm_core::checkpoint::{ApprovalHead, CheckpointMeta, ROOTFS_BLOB};
 use mvm_core::plan::{PlanSeccompTier, SecretReleasePolicy, SynthesisInput, Variant};
 use mvm_core::protocol::vm_backend::VmStartConfig;
-use mvm_runtime::agent_session::{AgentSessionRecord, AgentSessionStore, SandboxResidency};
+use mvm_runtime::agent_session::{
+    AgentSessionRecord, AgentSessionStore, SandboxResidency, StorageTier,
+};
 use mvm_runtime::checkpoint::CheckpointStore;
 
 use crate::plan_admission::{AdmittedPlan, Clock, InMemoryNonceLedger, RunPosture};
@@ -174,6 +176,12 @@ pub struct ResumedSession {
     /// The plan this residency was admitted under. Holding one is proof
     /// admission ran — it cannot be built any other way.
     pub admitted: AdmittedPlan,
+    /// The resume point, as it was read and verified during this resume.
+    ///
+    /// Handed back rather than left for a caller to re-read: a caller that
+    /// resolved it again would be building on bytes nobody checked in between,
+    /// which is the gap the verification exists to close.
+    pub resume_point: CheckpointMeta,
 }
 
 /// The posture a resume is admitted under.
@@ -274,7 +282,11 @@ pub fn resume_session(
         req.now_unix,
     )?;
 
-    Ok(ResumedSession { record, admitted })
+    Ok(ResumedSession {
+        record,
+        admitted,
+        resume_point: parent,
+    })
 }
 
 /// What a cold boot needs beyond the session record and its resume point.
@@ -382,6 +394,130 @@ fn stage_resume_point(
     Ok(())
 }
 
+/// What a resume-and-boot is asked for: the resume itself, plus the launch
+/// shape the session record does not hold.
+pub struct ResumeBootRequest<'a> {
+    /// The resume half, unchanged — this path admits through exactly the same
+    /// request a boot-less resume does.
+    pub resume: &'a ResumeRequest<'a>,
+    /// The backend that boots the resumed sandbox.
+    pub backend: &'a mvm_runtime::AnyBackend,
+    /// The session's own state directory, where the resume point is staged.
+    pub state_dir: &'a Path,
+    /// Kernel this boot loads, or `None` for a backend carrying its own.
+    pub kernel_path: Option<&'a Path>,
+    /// Optional chain-signed emitter for the launch records.
+    pub emitter: Option<&'a crate::audit::emitter::AuditEmitter>,
+}
+
+/// A resumed session that is also running: the advanced record and the machine.
+#[derive(Debug)]
+pub struct BootedSession {
+    /// The record as written, at the new generation.
+    pub record: AgentSessionRecord,
+    /// The started VM, carrying the plan it was admitted under. Holding one is
+    /// proof both admission and the shared post-admission gates ran.
+    pub started: crate::plan_admission::StartedMachine,
+}
+
+/// Refuse a tier whose resume path is not built.
+///
+/// `Cold` alone: it resumes by a fresh boot, which is what this path does.
+/// Cold-booting a `Parked` session would silently discard the memory image the
+/// operator believes is being restored — data loss reported as success — and
+/// `Resident` would abandon a live paused process rather than claim it. Both
+/// refuse by name so the operator learns which path is missing rather than
+/// getting a sandbox that lost their work.
+///
+/// A record with no tier at all refuses for the same reason: nothing here can
+/// tell whether a memory image is waiting for it.
+fn require_cold_tier(record: &AgentSessionRecord) -> Result<()> {
+    match record.storage_tier {
+        Some(StorageTier::Cold) => Ok(()),
+        Some(StorageTier::Parked) => anyhow::bail!(
+            "session {} is parked at the parked tier, whose memory-image restore is not built; \
+             booting it cold would discard the memory image it was parked with",
+            record.session_id.as_str()
+        ),
+        Some(StorageTier::Resident) => anyhow::bail!(
+            "session {} is parked at the resident tier, whose standby claim is not built; \
+             booting it cold would abandon the paused sandbox still holding its memory",
+            record.session_id.as_str()
+        ),
+        None => anyhow::bail!(
+            "session {} records no storage tier, so there is no way to tell whether a memory \
+             image is waiting for it; refusing rather than booting cold",
+            record.session_id.as_str()
+        ),
+    }
+}
+
+/// Resume a parked session and boot it: admit, transition, **then** start.
+///
+/// The record moves before the VM does. Both orders can fail, and the question
+/// is which wreckage an operator can act on. A VM started before the record
+/// moved is an orphan: the session still reads as parked, nothing associates the
+/// running sandbox with it, and no later operation will reap it. A record moved
+/// before a boot that then failed is an active session with nothing running —
+/// visible in `agent-session ls`, attributable to a signed plan, and something
+/// the operator can retry or park again. The second is recoverable and the first
+/// is not, so the transition goes first.
+///
+/// The tier gate runs before either, so a refusal for an unbuilt tier leaves the
+/// record exactly as parked — the same property `resume_session` holds for its
+/// own refusals.
+///
+/// Only the `Cold` tier boots. See [`require_cold_tier`].
+pub fn resume_and_boot(
+    sessions: &AgentSessionStore,
+    checkpoints: &CheckpointStore,
+    req: &ResumeBootRequest<'_>,
+    clock: &dyn Clock,
+    ledger: &InMemoryNonceLedger,
+) -> Result<BootedSession> {
+    // Before anything that can move the record or sign a plan: a tier this path
+    // cannot serve must cost nothing.
+    //
+    // Only for a parked record. A session that is not parked has no meaningful
+    // tier — nothing put one there — and `resume_session` refuses it a step
+    // later with the reason that actually helps, rather than this gate
+    // reporting a missing tier for a session whose real problem is that it is
+    // still running.
+    let record = sessions.load(req.resume.session_id)?;
+    if record.state == SandboxResidency::Hibernated {
+        require_cold_tier(&record)?;
+    }
+
+    let resumed = resume_session(sessions, checkpoints, req.resume, clock, ledger)?;
+
+    let config = cold_boot_config(ColdBootParams {
+        record: &resumed.record,
+        parent: &resumed.resume_point,
+        checkpoints,
+        material: req.resume.material,
+        state_dir: req.state_dir,
+        kernel_path: req.kernel_path,
+    })?;
+
+    // The shared post-admission tail, not a second admission: the plan
+    // `resume_session` signed is the one this boots under, so there is exactly
+    // one signed authority for this residency.
+    let started =
+        crate::plan_admission::start_admitted(crate::plan_admission::StartAdmittedParams {
+            backend: req.backend,
+            admitted: resumed.admitted,
+            config,
+            policy_bundle: None,
+            emitter: req.emitter,
+            assurance: None,
+        })?;
+
+    Ok(BootedSession {
+        record: resumed.record,
+        started,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -407,6 +543,13 @@ mod tests {
     /// `Hibernated` into the literal, so the fixture cannot drift into a state
     /// the state machine would never produce.
     fn parked_record(id: &str) -> AgentSessionRecord {
+        parked_record_at(id, ParkReason::ApprovalWait)
+    }
+
+    /// The same fixture parked for a given reason, which is what picks the
+    /// storage tier. Going through `select_tier` rather than writing a tier into
+    /// the literal keeps the fixture on the state machine's own mapping.
+    fn parked_record_at(id: &str, reason: ParkReason) -> AgentSessionRecord {
         let active = AgentSessionRecord {
             session_id: AgentSessionId::parse(id).unwrap(),
             generation: 1,
@@ -425,7 +568,7 @@ mod tests {
         active
             .park(
                 &ParkInput {
-                    reason: ParkReason::ApprovalWait,
+                    reason,
                     journal_cursor: 7,
                     // A real recorded head, so a request that passes the wrong
                     // one — or none — has something to be refused against.
@@ -900,6 +1043,179 @@ mod tests {
         assert!(
             err.to_string().contains("rootfs.ext4"),
             "the refusal must name what was missing: {err}"
+        );
+    }
+
+    // ───────────────────────────────────────────────────────────────
+    // resume_and_boot: the tier gate and the admit -> transition -> boot order
+    // ───────────────────────────────────────────────────────────────
+
+    /// A resume point, a record parked at `reason`'s tier, and a kernel on disk
+    /// whose digest the material pins.
+    ///
+    /// The kernel is real rather than a fixed string because the plan pins
+    /// `kernel_sha256`, and the admitted-environment gate inside the shared boot
+    /// tail hashes whatever path the config supplies against that pin. A fixture
+    /// naming a kernel that does not hash to the pin would be refused by the
+    /// gate, and the test would pass for the wrong reason.
+    fn boot_fixture(
+        fx: &Fixture,
+        reason: ParkReason,
+    ) -> (AgentSessionRecord, ResumePlanMaterial, std::path::PathBuf) {
+        let parent = seed_checkpoint(&fx.checkpoints, fx.tmp.path(), "cp-parent");
+        let mut rec = parked_record_at("sess-alpha", reason);
+        rec.parent_checkpoint = Some(parent.meta_digest.clone());
+        fx.sessions.write(&rec).unwrap();
+
+        let kernel = fx.tmp.path().join("vmlinux");
+        std::fs::write(&kernel, b"resume-kernel").unwrap();
+        let mut m = material();
+        m.kernel_sha256 = Some(mvm_core::crypto::image_verify::sha256_file(&kernel).unwrap());
+        (rec, m, kernel)
+    }
+
+    #[test]
+    fn a_cold_tier_resume_with_boot_starts_the_sandbox() {
+        let (_env, _home) = isolated_host(GrantCeiling::default());
+        let fx = Fixture::new();
+        let (rec, m, kernel) = boot_fixture(&fx, ParkReason::RetentionDemotion);
+        assert_eq!(
+            rec.storage_tier,
+            Some(StorageTier::Cold),
+            "the fixture must be the tier under test"
+        );
+        let backend = mvm_runtime::AnyBackend::from_hypervisor("mock");
+        let state = fx.tmp.path().join("state");
+
+        let req = fx.request(&rec, &m);
+        let booted = resume_and_boot(
+            &fx.sessions,
+            &fx.checkpoints,
+            &ResumeBootRequest {
+                resume: &req,
+                backend: &backend,
+                state_dir: &state,
+                kernel_path: Some(&kernel),
+                emitter: None,
+            },
+            &crate::plan_admission::SystemClock,
+            &crate::plan_admission::InMemoryNonceLedger::new(),
+        )
+        .expect("a cold-tier resume must boot");
+
+        // The record moved, and it moved before the boot.
+        assert_eq!(booted.record.state, SandboxResidency::Active);
+        assert_eq!(booted.record.generation, rec.generation + 1);
+        // The VM is running under the session's own name, which is also the
+        // admitted plan's workload name.
+        assert_eq!(booted.started.vm_id.0, rec.session_id.as_str());
+        assert_eq!(
+            backend.status(&booted.started.vm_id).unwrap(),
+            mvm_core::vm_backend::VmStatus::Running
+        );
+        assert_eq!(
+            booted.started.admitted.plan().workload.0,
+            rec.session_id.as_str()
+        );
+    }
+
+    #[test]
+    fn a_parked_tier_resume_with_boot_is_refused_and_leaves_the_session_parked() {
+        // Cold-booting a `Parked` session would discard the memory image the
+        // operator believes is being restored. The refusal comes before the
+        // transition, so the session stays parked and resumable once the
+        // restore path exists.
+        let (_env, _home) = isolated_host(GrantCeiling::default());
+        let fx = Fixture::new();
+        let (rec, m, kernel) = boot_fixture(&fx, ParkReason::ApprovalWait);
+        assert_eq!(rec.storage_tier, Some(StorageTier::Parked));
+        let backend = mvm_runtime::AnyBackend::from_hypervisor("mock");
+        let state = fx.tmp.path().join("state");
+
+        let req = fx.request(&rec, &m);
+        let err = resume_and_boot(
+            &fx.sessions,
+            &fx.checkpoints,
+            &ResumeBootRequest {
+                resume: &req,
+                backend: &backend,
+                state_dir: &state,
+                kernel_path: Some(&kernel),
+                emitter: None,
+            },
+            &crate::plan_admission::SystemClock,
+            &crate::plan_admission::InMemoryNonceLedger::new(),
+        )
+        .expect_err("a parked-tier resume must not cold-boot");
+        let text = format!("{err:#}");
+        assert!(
+            text.contains("parked"),
+            "the refusal must name the tier: {text}"
+        );
+        assert!(
+            text.contains("not built"),
+            "the refusal must say the path is unbuilt: {text}"
+        );
+        assert_still_parked(&fx, &rec);
+        assert!(
+            backend.list().unwrap().is_empty(),
+            "a refused resume must not start a VM"
+        );
+    }
+
+    #[test]
+    fn a_resident_tier_resume_with_boot_is_refused_and_leaves_the_session_parked() {
+        let (_env, _home) = isolated_host(GrantCeiling::default());
+        let fx = Fixture::new();
+        let (rec, m, kernel) = boot_fixture(&fx, ParkReason::Idle);
+        assert_eq!(rec.storage_tier, Some(StorageTier::Resident));
+        let backend = mvm_runtime::AnyBackend::from_hypervisor("mock");
+        let state = fx.tmp.path().join("state");
+
+        let req = fx.request(&rec, &m);
+        let err = resume_and_boot(
+            &fx.sessions,
+            &fx.checkpoints,
+            &ResumeBootRequest {
+                resume: &req,
+                backend: &backend,
+                state_dir: &state,
+                kernel_path: Some(&kernel),
+                emitter: None,
+            },
+            &crate::plan_admission::SystemClock,
+            &crate::plan_admission::InMemoryNonceLedger::new(),
+        )
+        .expect_err("a resident-tier resume must not cold-boot");
+        let text = format!("{err:#}");
+        assert!(
+            text.contains("resident"),
+            "the refusal must name the tier: {text}"
+        );
+        assert!(
+            text.contains("not built"),
+            "the refusal must say the path is unbuilt: {text}"
+        );
+        assert_still_parked(&fx, &rec);
+        assert!(backend.list().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_resume_without_boot_admits_and_transitions_and_starts_nothing() {
+        // The unchanged behaviour, asserted against a live backend rather than
+        // by inspection: `resume_session` must still stop at an admitted plan.
+        let (_env, _home) = isolated_host(GrantCeiling::default());
+        let fx = Fixture::new();
+        let (rec, m, _kernel) = boot_fixture(&fx, ParkReason::RetentionDemotion);
+        let backend = mvm_runtime::AnyBackend::from_hypervisor("mock");
+
+        let resumed = fx.resume(&fx.request(&rec, &m)).expect("resume admits");
+
+        assert_eq!(resumed.record.state, SandboxResidency::Active);
+        assert_eq!(resumed.record.generation, rec.generation + 1);
+        assert!(
+            backend.list().unwrap().is_empty(),
+            "resume without --boot must start nothing"
         );
     }
 
