@@ -387,6 +387,28 @@ fn fence(current: &AgentSessionRecord, expected: u64) -> Result<()> {
     Ok(())
 }
 
+/// Every checkpoint a live or hibernated session names as its resume point.
+///
+/// A garbage collector consults this before reaping. Without it, a session
+/// parked for longer than the sweep's age cut loses the checkpoint it resumes
+/// from and becomes permanently unresumable — the record survives and points at
+/// nothing. `Closed` sessions are excluded deliberately: a sealed session is not
+/// resumable, so nothing it names needs holding.
+pub fn pinned_checkpoints(
+    store: &AgentSessionStore,
+) -> Result<std::collections::BTreeSet<mvm_core::checkpoint::CheckpointDigest>> {
+    let mut pinned = std::collections::BTreeSet::new();
+    for record in store.list()? {
+        if matches!(record.state, SandboxResidency::Closed) {
+            continue;
+        }
+        if let Some(digest) = record.parent_checkpoint {
+            pinned.insert(digest);
+        }
+    }
+    Ok(pinned)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -945,5 +967,46 @@ mod tests {
                 .resume(&rec.session_id, 1, Some(&head_of("cd")), 200)
                 .is_ok()
         );
+    }
+
+    fn digest_of(byte: &str) -> mvm_core::checkpoint::CheckpointDigest {
+        mvm_core::checkpoint::CheckpointDigest::parse(format!("sha256:{}", byte.repeat(32)))
+            .unwrap()
+    }
+
+    #[test]
+    fn pinned_checkpoints_covers_active_and_hibernated_but_not_closed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = AgentSessionStore::at(tmp.path());
+
+        let mut live = record("sess-live");
+        live.parent_checkpoint = Some(digest_of("11"));
+        store.write(&live).unwrap();
+
+        let mut parked = record("sess-parked");
+        parked.parent_checkpoint = Some(digest_of("22"));
+        parked.state = SandboxResidency::Hibernated;
+        store.write(&parked).unwrap();
+
+        let mut closed = record("sess-closed");
+        closed.parent_checkpoint = Some(digest_of("33"));
+        closed.state = SandboxResidency::Closed;
+        store.write(&closed).unwrap();
+
+        let pinned = pinned_checkpoints(&store).unwrap();
+        assert!(pinned.contains(&digest_of("11")));
+        assert!(pinned.contains(&digest_of("22")));
+        assert!(
+            !pinned.contains(&digest_of("33")),
+            "a closed session is not resumable, so it pins nothing"
+        );
+    }
+
+    #[test]
+    fn a_session_with_no_resume_point_pins_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = AgentSessionStore::at(tmp.path());
+        store.write(&record("sess-alpha")).unwrap();
+        assert!(pinned_checkpoints(&store).unwrap().is_empty());
     }
 }
