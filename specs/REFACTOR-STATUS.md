@@ -372,7 +372,7 @@ for detailed scope and acceptance criteria.
       session identity memory keys on and is itself unmerged.
   - [x] WS1 — catalog derivation from the signed admission (PR #2705)
   - [x] WS2 — per-capability argument policy inside the descriptor digest (#2705)
-  - [~] WS3 — the guest-side-client gate landed; the host-side adapter has not
+  - [~] WS3 — gate + compilation seam landed; only the transport client remains
   - [x] WS4 — refusal names the surface, and repeated misses are rate-bounded (#2705)
   - [ ] WS5-WS9 — memory plane: store + record, `host.memory.v1`, write scan
         and ceilings, audit + retention, bounded recall
