@@ -817,6 +817,21 @@ impl AuditEmitter {
         self.emit(plan, "plan.oci_provenance", labels)
     }
 
+    /// Emit `session.parked` — a durable agent session released its sandbox.
+    ///
+    /// Bound to the plan the parked residency was admitted under, so the chain
+    /// records which authorization the session was running with when it
+    /// stopped. The caller supplies the labels; they name the session, the
+    /// generation, the reason and the storage tier, and carry nothing the
+    /// session was working on.
+    pub fn emit_session_parked(
+        &self,
+        plan: &ExecutionPlan,
+        labels: Vec<(String, String)>,
+    ) -> Result<()> {
+        self.emit(plan, "session.parked", labels)
+    }
+
     /// Emit `stream.subscribed` — a follower attached to `vm_name`'s output
     /// stream at `from_seq`.
     ///
@@ -1822,6 +1837,49 @@ mod tests {
         assert!(content.contains("docker.io"));
         assert!(content.contains("oci_resolved_digest"));
         assert!(content.contains("oci_layer_digests"));
+        assert_eq!(verify_audit_chain(&path, &vk).unwrap(), 1);
+    }
+
+    #[test]
+    fn session_parked_event_is_chain_signed_and_keeps_the_plan_labels() {
+        // The park entry's extras must add to the plan's session labels, not
+        // replace them: `for_plan` merges extras over the plan's own labels,
+        // so a key collision would overwrite what was signed.
+        let dir = tempfile::tempdir().unwrap();
+        let key = {
+            let mut __ed_seed = [0u8; 32];
+            rand::rng().fill_bytes(&mut __ed_seed);
+            SigningKey::from_bytes(&__ed_seed)
+        };
+        let vk = key.verifying_key();
+        let emitter = AuditEmitter::with_dir(key, dir.path()).unwrap();
+        let mut plan = fixture_plan("local", "plan-SESSION");
+        plan.audit_labels
+            .insert("session_id".to_string(), "sess-alpha".to_string());
+        plan.audit_labels
+            .insert("session_generation".to_string(), "3".to_string());
+
+        emitter
+            .emit_session_parked(
+                &plan,
+                vec![
+                    ("parked_session".to_string(), "sess-alpha".to_string()),
+                    ("parked_at_generation".to_string(), "3".to_string()),
+                    ("park_reason".to_string(), "approval-wait".to_string()),
+                    ("park_storage_tier".to_string(), "parked".to_string()),
+                ],
+            )
+            .unwrap();
+
+        let path = dir.path().join("local.jsonl");
+        let content = std::fs::read_to_string(&path).expect("audit file exists");
+        assert!(content.contains("session.parked"));
+        assert!(content.contains("park_reason"));
+        assert!(content.contains("approval-wait"));
+        assert!(
+            content.contains("session_generation"),
+            "the plan's own session labels must survive the merge: {content}"
+        );
         assert_eq!(verify_audit_chain(&path, &vk).unwrap(), 1);
     }
 

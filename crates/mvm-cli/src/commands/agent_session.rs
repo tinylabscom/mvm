@@ -15,9 +15,10 @@ use anyhow::{Context, Result};
 use clap::{Args as ClapArgs, Subcommand};
 
 use mvm_contract::protocol::agent_session::AgentSessionId;
+use mvm_core::checkpoint::ApprovalHead;
 use mvm_core::user_config::MvmConfig;
 use mvm_runtime::agent_session::{
-    AgentSessionRecord, AgentSessionStore, ParkReason, SandboxResidency, StorageTier,
+    AgentSessionRecord, AgentSessionStore, ParkInput, ParkReason, SandboxResidency, StorageTier,
 };
 
 use super::Cli;
@@ -35,6 +36,8 @@ pub(in crate::commands) enum AgentSessionAction {
     Ls(LsArgs),
     /// Print one session's recorded state in full
     Show(ShowArgs),
+    /// Release an active session's sandbox, recording why
+    Park(ParkArgs),
 }
 
 #[derive(ClapArgs, Debug, Clone)]
@@ -53,10 +56,30 @@ pub(in crate::commands) struct ShowArgs {
     pub json: bool,
 }
 
+#[derive(ClapArgs, Debug, Clone)]
+pub(in crate::commands) struct ParkArgs {
+    /// Session id, as `agent-session ls` prints it
+    pub session_id: String,
+    /// Why the session is parking. One of approval-wait, idle,
+    /// host-shutdown, operator, retention-demotion. The reason selects the
+    /// storage tier, so it is not decoration.
+    #[arg(long)]
+    pub reason: String,
+    /// Session-journal position the park is consistent with. A later resume
+    /// that replayed from an earlier cursor would re-run committed work.
+    #[arg(long, default_value_t = 0)]
+    pub journal_cursor: u64,
+    /// Approval-ledger head the session was last admitted under, as
+    /// `sha256:<64-hex>`. A session parked without one resumes unfenced.
+    #[arg(long)]
+    pub approval_head: Option<String>,
+}
+
 pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Result<()> {
     match args.action {
         AgentSessionAction::Ls(a) => ls(&AgentSessionStore::open(), a.json),
         AgentSessionAction::Show(a) => show(&AgentSessionStore::open(), &a.session_id, a.json),
+        AgentSessionAction::Park(a) => park(&AgentSessionStore::open(), &a),
     }
 }
 
@@ -97,6 +120,137 @@ fn show(store: &AgentSessionStore, raw_id: &str, json: bool) -> Result<()> {
         println!("{line}");
     }
     Ok(())
+}
+
+/// Park a session, then bind the park into the chain-signed audit log.
+fn park(store: &AgentSessionStore, args: &ParkArgs) -> Result<()> {
+    let record = park_record(store, args)?;
+    println!("{}", summary_line(&record));
+    // The record is already durable at this point. A chain entry that cannot
+    // be written is reported rather than raised: failing here would tell an
+    // operator the park did not happen when it did, and a park with no entry
+    // is the lesser of those two wrongs.
+    if let Err(error) = record_park_in_chain(&record) {
+        crate::ui::warn(&format!(
+            "session {} parked, but the park was not recorded in the audit chain: {error:#}",
+            record.session_id.as_str()
+        ));
+    }
+    Ok(())
+}
+
+/// Apply the park to the store and return the record it wrote.
+///
+/// Split from the audit half so the transition is testable without a signer
+/// or an audit directory.
+fn park_record(store: &AgentSessionStore, args: &ParkArgs) -> Result<AgentSessionRecord> {
+    let id = parse_session_id(&args.session_id)?;
+    let reason = parse_park_reason(&args.reason)?;
+    let approval_head = args
+        .approval_head
+        .as_deref()
+        .map(ApprovalHead::parse)
+        .transpose()
+        .map_err(|e| anyhow::anyhow!("invalid --approval-head: {e}"))?;
+    let current = store
+        .load(&id)
+        .with_context(|| format!("no agent session '{}' on this host", args.session_id))?;
+    // The store's fence refuses a caller working from a record some other
+    // transition has superseded. This command loaded the record a moment ago
+    // and is the caller, so it passes what it just read; the fence is doing
+    // nothing for it. What the fence cannot do either way is serialize two
+    // concurrent parks of one session — that needs file locking the store
+    // does not have.
+    store.park(
+        &id,
+        current.generation,
+        ParkInput {
+            reason,
+            journal_cursor: args.journal_cursor,
+            approval_head,
+        },
+        mvm_core::util::time::now_unix_secs(),
+    )
+}
+
+/// Map the `--reason` spelling onto the typed reason.
+///
+/// An explicit match rather than a permissive lookup: an unrecognised reason
+/// is refused naming the accepted set, because falling through to a default
+/// would pick a storage tier the operator never asked for.
+fn parse_park_reason(raw: &str) -> Result<ParkReason> {
+    match raw {
+        "approval-wait" => Ok(ParkReason::ApprovalWait),
+        "idle" => Ok(ParkReason::Idle),
+        "host-shutdown" => Ok(ParkReason::HostShutdown),
+        "operator" => Ok(ParkReason::Operator),
+        "retention-demotion" => Ok(ParkReason::RetentionDemotion),
+        other => anyhow::bail!(
+            "unknown park reason '{other}'; accepted: approval-wait, idle, \
+             host-shutdown, operator, retention-demotion"
+        ),
+    }
+}
+
+/// The extra labels a `session.parked` entry carries.
+///
+/// The keys are deliberately not `session_id` / `session_generation`. An
+/// entry's extras are merged *over* the signed plan's audit labels, and a
+/// resume plan carries both of those names as signed labels; an extra reusing
+/// one would replace what was admitted with what this command believed, so the
+/// entry would attribute the park to the emitter's belief rather than to the
+/// admission. The `parked_`/`park_` prefixes keep both readable side by side.
+fn park_audit_extras(record: &AgentSessionRecord) -> Vec<(String, String)> {
+    let mut extras = vec![
+        (
+            "parked_session".to_string(),
+            record.session_id.as_str().to_string(),
+        ),
+        (
+            "parked_at_generation".to_string(),
+            record.generation.to_string(),
+        ),
+    ];
+    // Both are written by the park transition, so both are present on a record
+    // this function is called with. They are still emitted conditionally
+    // rather than defaulted: a blank tier would read in the chain as a tier
+    // that was checked and found empty.
+    if let Some(reason) = record.park_reason {
+        extras.push((
+            "park_reason".to_string(),
+            park_reason_name(reason).to_string(),
+        ));
+    }
+    if let Some(tier) = record.storage_tier {
+        extras.push((
+            "park_storage_tier".to_string(),
+            storage_tier_name(tier).to_string(),
+        ));
+    }
+    extras
+}
+
+/// Bind a completed park into the chain-signed audit log.
+///
+/// The entry rides on the plan the parked residency was admitted under: the
+/// session record holds no plan of its own, and the member sandbox's persisted
+/// plan is the authority the residency actually ran with. A session with no
+/// member, or a member with no persisted plan, has nothing to bind to and is
+/// reported rather than recorded under a plan it never ran.
+fn record_park_in_chain(record: &AgentSessionRecord) -> Result<()> {
+    let member = record.members.first().ok_or_else(|| {
+        anyhow::anyhow!(
+            "session {} records no member sandbox, so there is no admitted plan to bind to",
+            record.session_id.as_str()
+        )
+    })?;
+    let plan = mvm_hostd::audit::plan_persist::read_plan(member)
+        .with_context(|| format!("reading the admitted plan of member sandbox '{member}'"))?;
+    let signer = super::vm::host_signer::load_or_init()
+        .context("loading the host signer to sign the park entry")?;
+    let emitter = super::vm::audit_chain::AuditEmitter::new(signer.signing)
+        .context("opening the audit chain to record the park")?;
+    emitter.emit_session_parked(&plan, park_audit_extras(record))
 }
 
 /// The `ls` row for one session.
@@ -329,6 +483,130 @@ mod tests {
         let store = AgentSessionStore::at(tmp.path());
         let err = show(&store, "../escape", false).expect_err("a path-escaping id must refuse");
         assert!(format!("{err}").contains("invalid session id"), "{err}");
+    }
+
+    #[test]
+    fn the_park_entry_keys_do_not_collide_with_the_plan_labels() {
+        // `for_plan` extends the plan's labels with the per-event extras, so
+        // an extra sharing a key silently replaces the signed plan's value.
+        // The resume plan carries `session_id` and `session_generation` as
+        // signed labels; a park entry must not shadow either.
+        let extras = park_audit_extras(&parked("sess-alpha", ParkReason::ApprovalWait));
+        let keys: Vec<&str> = extras.iter().map(|(k, _)| k.as_str()).collect();
+        assert!(!keys.contains(&"session_id"), "{keys:?}");
+        assert!(!keys.contains(&"session_generation"), "{keys:?}");
+        assert!(!keys.is_empty(), "the entry must carry something");
+    }
+
+    #[test]
+    fn park_extras_carry_what_the_store_actually_wrote() {
+        let record = parked("sess-alpha", ParkReason::ApprovalWait);
+        let extras = park_audit_extras(&record);
+        let got = |key: &str| {
+            extras
+                .iter()
+                .find(|(k, _)| k == key)
+                .map(|(_, v)| v.as_str())
+        };
+        assert_eq!(got("parked_session"), Some("sess-alpha"));
+        // The generation is unchanged by a park — it identifies one period of
+        // residency, which a park suspends rather than ends.
+        assert_eq!(got("parked_at_generation"), Some("1"));
+        assert_eq!(got("park_reason"), Some("approval-wait"));
+        assert_eq!(got("park_storage_tier"), Some("parked"));
+    }
+
+    #[test]
+    fn an_unknown_park_reason_is_refused_and_names_the_accepted_set() {
+        let err = parse_park_reason("whenever").expect_err("an unknown reason must refuse");
+        let text = format!("{err}");
+        assert!(text.contains("whenever"), "{text}");
+        for accepted in ["approval-wait", "idle", "host-shutdown", "operator"] {
+            assert!(
+                text.contains(accepted),
+                "the error must list `{accepted}`: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_park_reason_round_trips_through_its_operator_spelling() {
+        // What `ls` prints back is exactly what `--reason` accepts. A reason
+        // added later that renders one way and parses another would leave an
+        // operator retyping a value the tool just showed them.
+        for reason in [
+            ParkReason::ApprovalWait,
+            ParkReason::Idle,
+            ParkReason::HostShutdown,
+            ParkReason::Operator,
+            ParkReason::RetentionDemotion,
+        ] {
+            assert_eq!(parse_park_reason(park_reason_name(reason)).unwrap(), reason);
+        }
+    }
+
+    #[test]
+    fn parking_an_already_parked_session_refuses_and_leaves_the_record_alone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = AgentSessionStore::at(tmp.path());
+        let record = parked("sess-alpha", ParkReason::Idle);
+        store.write(&record).unwrap();
+        park_record(
+            &store,
+            &ParkArgs {
+                session_id: "sess-alpha".to_string(),
+                reason: "operator".to_string(),
+                journal_cursor: 0,
+                approval_head: None,
+            },
+        )
+        .expect_err("a hibernated session is not active, so it cannot be parked");
+        assert_eq!(store.load(&record.session_id).unwrap(), record);
+    }
+
+    #[test]
+    fn a_park_writes_the_reason_and_the_tier_it_selects() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = AgentSessionStore::at(tmp.path());
+        store.write(&active("sess-alpha")).unwrap();
+        let parked = park_record(
+            &store,
+            &ParkArgs {
+                session_id: "sess-alpha".to_string(),
+                reason: "approval-wait".to_string(),
+                journal_cursor: 11,
+                approval_head: None,
+            },
+        )
+        .expect("an active session parks");
+        assert_eq!(parked.state, SandboxResidency::Hibernated);
+        assert_eq!(parked.park_reason, Some(ParkReason::ApprovalWait));
+        assert_eq!(parked.storage_tier, Some(StorageTier::Parked));
+        assert_eq!(parked.journal_cursor, 11);
+        assert_eq!(store.load(&parked.session_id).unwrap(), parked);
+    }
+
+    #[test]
+    fn a_malformed_approval_head_is_refused_before_the_record_moves() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = AgentSessionStore::at(tmp.path());
+        let record = active("sess-alpha");
+        store.write(&record).unwrap();
+        park_record(
+            &store,
+            &ParkArgs {
+                session_id: "sess-alpha".to_string(),
+                reason: "operator".to_string(),
+                journal_cursor: 0,
+                approval_head: Some("not-a-digest".to_string()),
+            },
+        )
+        .expect_err("a malformed head must be refused at the boundary");
+        assert_eq!(
+            store.load(&record.session_id).unwrap(),
+            record,
+            "a refused park must not touch the record"
+        );
     }
 
     #[test]

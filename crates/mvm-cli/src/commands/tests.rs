@@ -88,6 +88,7 @@ fn collect_help_width_violations(
 
 // Group module aliases — give tests short names (`cleanup`, `up`, etc.) that
 // follow the dispatcher's naming, regardless of which group they live in.
+use super::agent_session;
 use super::build::build;
 use super::build::compile;
 use super::build::group as build_group;
@@ -1925,6 +1926,47 @@ fn agent_session_verb_is_not_named_session() {
     // `mvmctl machine session` already means machine-session residency.
     // A bare `session` verb would collide with it in the operator's head.
     assert!(Cli::try_parse_from(["mvmctl", "session", "ls"]).is_err());
+}
+
+#[test]
+fn agent_session_park_requires_a_reason() {
+    assert!(Cli::try_parse_from(["mvmctl", "agent-session", "park", "sess-a"]).is_err());
+    assert!(
+        Cli::try_parse_from([
+            "mvmctl",
+            "agent-session",
+            "park",
+            "sess-a",
+            "--reason",
+            "approval-wait",
+        ])
+        .is_ok()
+    );
+}
+
+#[test]
+fn agent_session_park_takes_a_journal_cursor_and_an_approval_head() {
+    let cli = Cli::try_parse_from([
+        "mvmctl",
+        "agent-session",
+        "park",
+        "sess-a",
+        "--reason",
+        "idle",
+        "--journal-cursor",
+        "42",
+        "--approval-head",
+        "sha256:abababababababababababababababababababababababababababababababab",
+    ])
+    .unwrap();
+    let Commands::AgentSession(args) = cli.command else {
+        panic!("expected the agent-session command")
+    };
+    let agent_session::AgentSessionAction::Park(park) = args.action else {
+        panic!("expected the park subcommand")
+    };
+    assert_eq!(park.journal_cursor, 42);
+    assert!(park.approval_head.is_some());
 }
 
 #[test]
