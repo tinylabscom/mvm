@@ -24,6 +24,13 @@ for detailed scope and acceptance criteria.
        while an attached but unreadable drive stays loud. Two focused tests pin
        both sides of that boundary.
 
+- [x] **Issue #2684 — a sealed boot is reachable and proven before release.**
+      The CLI release train publishes both universal-initramfs archives under
+      the downloader's exact versioned names and refuses to publish when that
+      build fails. The boot-image train exercises its staged x86_64 production
+      image both plainly and with the complete initramfs + dm-verity triple
+      before upload; the harness refuses partial or malformed integrity input.
+
 - [x] **Plan 337 COMPLETE — the SDK surface is generated from Rust.** Sessions
       finished Tier C. Python's `contextvars` + `Token` has no
       `AsyncLocalStorage` equivalent, so the shape was a choice, not a
