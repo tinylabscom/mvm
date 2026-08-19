@@ -1,6 +1,6 @@
 //! `xtask check-no-guest-tool-client`
 //!
-//! An agent's in-guest toolbox is deliberately ungoverned (ADR-045 section 18):
+//! An agent's in-guest toolbox is deliberately ungoverned:
 //! a shell, a browser driver, an interpreter, or a tool server the agent talks
 //! to over its own stdio or loopback are all the image's business, and the
 //! microVM boundary is what bounds them rather than any list the host keeps.
