@@ -26,7 +26,7 @@ prove the protocol against `MockBackend` without booting a VM.
       no-boot roundtrip consumer.
 - [x] Supersede withdrawn ADR-002 with the new client-facade decision and sync
       the sprint and refactor trackers.
-- [ ] Pass formatting, workspace tests/checks, all-target clippy, and gated
+- [x] Pass formatting, workspace tests/checks, all-target clippy, and gated
       target checks.
 - [ ] Open the issue-closing pull request, enable auto-merge, and record the
       merge-queue handoff.
@@ -39,9 +39,10 @@ prove the protocol against `MockBackend` without booting a VM.
   MCP help scenario passes.
 - `just check-gated`, `cargo check --workspace`, and
   `cargo clippy --workspace -- -D warnings` pass on the macOS host.
-- The full executable workspace test matrix passes. Its final combined rustdoc
-  invocation twice hit a transient Cargo metadata failure; the affected
-  `cargo test -p mvm-cli --doc` target passes immediately in isolation.
+- `cargo test --workspace` passes on the rebased commit, including all
+  doctests. An earlier cold run hit a transient Cargo metadata failure during
+  the final rustdoc invocation; the affected target and the exact-commit full
+  rerun both pass.
 - The static ARM64 Linux MCP example runs the named no-boot stdio consumer in
   the libkrun builder and completes discovery, catalog, and facade-capability
   calls. Full Linux clippy remains delegated to CI because the shared builder's
