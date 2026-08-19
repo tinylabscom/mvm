@@ -17,6 +17,13 @@ for detailed scope and acceptance criteria.
       absolute `/bin/ping` mediated-tool proof. Together with PRs #2690,
       #2709, and #2720, this closes the NIC-less and read-only boot-noise issue.
 
+- [x] **Issue #2633 — healthy boots no longer report authentication failures.**
+      PR #2707 classified an abandoned readiness probe as transport EOF rather
+      than failed authentication. The remaining no-egress path now treats an
+       unattached FlowMux identity drive as the expected secretless boot shape,
+       while an attached but unreadable drive stays loud. Two focused tests pin
+       both sides of that boundary.
+
 - [x] **Plan 337 COMPLETE — the SDK surface is generated from Rust.** Sessions
       finished Tier C. Python's `contextvars` + `Token` has no
       `AsyncLocalStorage` equivalent, so the shape was a choice, not a
