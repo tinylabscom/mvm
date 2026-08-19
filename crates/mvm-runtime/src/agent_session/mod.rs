@@ -82,15 +82,17 @@ pub struct AgentSessionRecord {
     pub park_reason: Option<ParkReason>,
 }
 
-/// Why a park or resume was refused.
+/// Why a park, resume, or demote was refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum SessionTransitionError {
     #[error("session is not active, so it cannot be parked")]
     NotActive,
-    #[error("session is not hibernated, so it cannot be resumed")]
+    #[error("session is not hibernated, so it cannot be resumed or demoted")]
     NotHibernated,
     #[error("session is closed")]
     Closed,
+    #[error("session is already at the coldest storage tier")]
+    AlreadyColdest,
 }
 
 /// What a park commits alongside the state transition.
@@ -147,6 +149,34 @@ impl AgentSessionRecord {
             generation: self.generation + 1,
             storage_tier: None,
             park_reason: None,
+            updated_unix: now_unix,
+            ..self.clone()
+        })
+    }
+
+    /// Move an already-parked session one rung down the storage ladder.
+    ///
+    /// One-way and always downward: `Resident` releases RAM to disk, `Parked`
+    /// releases the memory image and leaves the record and journal. The
+    /// generation is unchanged — demoting does not end a residency, it makes
+    /// the same suspended one cheaper to hold. The resume point and journal
+    /// cursor are preserved, because a demoted session is still resumable; only
+    /// the cost of holding it changed.
+    pub fn demote(&self, now_unix: u64) -> Result<Self, SessionTransitionError> {
+        match self.state {
+            SandboxResidency::Closed => return Err(SessionTransitionError::Closed),
+            SandboxResidency::Active => return Err(SessionTransitionError::NotHibernated),
+            SandboxResidency::Hibernated => {}
+        }
+        let next = match self.storage_tier {
+            Some(StorageTier::Resident) => StorageTier::Parked,
+            Some(StorageTier::Parked) => StorageTier::Cold,
+            Some(StorageTier::Cold) => return Err(SessionTransitionError::AlreadyColdest),
+            None => return Err(SessionTransitionError::NotHibernated),
+        };
+        Ok(Self {
+            storage_tier: Some(next),
+            park_reason: Some(ParkReason::RetentionDemotion),
             updated_unix: now_unix,
             ..self.clone()
         })
@@ -1008,5 +1038,67 @@ mod tests {
         let store = AgentSessionStore::at(tmp.path());
         store.write(&record("sess-alpha")).unwrap();
         assert!(pinned_checkpoints(&store).unwrap().is_empty());
+    }
+
+    #[test]
+    fn demotion_walks_one_rung_down_the_ladder() {
+        let resident = record("sess-alpha")
+            .park(&park_input(ParkReason::Idle), 100)
+            .unwrap();
+        assert_eq!(resident.storage_tier, Some(StorageTier::Resident));
+
+        let parked = resident.demote(200).unwrap();
+        assert_eq!(parked.storage_tier, Some(StorageTier::Parked));
+        assert_eq!(parked.park_reason, Some(ParkReason::RetentionDemotion));
+        assert_eq!(
+            parked.generation, resident.generation,
+            "demotion is not a new residency"
+        );
+
+        let cold = parked.demote(300).unwrap();
+        assert_eq!(cold.storage_tier, Some(StorageTier::Cold));
+    }
+
+    #[test]
+    fn a_cold_session_cannot_be_demoted_further() {
+        let cold = record("sess-alpha")
+            .park(&park_input(ParkReason::RetentionDemotion), 100)
+            .unwrap();
+        assert_eq!(cold.storage_tier, Some(StorageTier::Cold));
+        assert!(matches!(
+            cold.demote(200),
+            Err(SessionTransitionError::AlreadyColdest)
+        ));
+    }
+
+    #[test]
+    fn an_active_session_cannot_be_demoted() {
+        assert!(matches!(
+            record("sess-alpha").demote(200),
+            Err(SessionTransitionError::NotHibernated)
+        ));
+    }
+
+    #[test]
+    fn demotion_preserves_the_resume_point_and_the_cursor() {
+        // The whole point of demoting rather than closing is that the session
+        // stays resumable, just more cheaply stored. Two demotes (Resident ->
+        // Parked -> Cold) reach the bottom of the ladder cleanly, so there is
+        // no need for a fallback branch to get there.
+        let mut rec = record("sess-alpha");
+        rec.parent_checkpoint = Some(digest_of("11"));
+        let parked = rec
+            .park(
+                &ParkInput {
+                    reason: ParkReason::Idle,
+                    journal_cursor: 42,
+                    approval_head: None,
+                },
+                100,
+            )
+            .unwrap();
+        let cold = parked.demote(200).unwrap().demote(300).unwrap();
+        assert_eq!(cold.journal_cursor, 42);
+        assert_eq!(cold.parent_checkpoint, Some(digest_of("11")));
     }
 }
