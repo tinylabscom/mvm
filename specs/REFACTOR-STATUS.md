@@ -1570,8 +1570,10 @@ for detailed scope and acceptance criteria.
   `main`. The cutover completes there, on one transport, folding `Wire` and `MVM_ICMP/1`
   into FlowMux rather than leaving three protocols behind a sniff.
   WS0-WS7 are complete: substitution rides `OpenHttp`, `ping` rides `IcmpEcho`,
-  the raw dispatcher and `EgressMode::Raw` are deleted, readiness fails closed
-  on a launch whose endpoint carried no session, and
+  the raw dispatcher and `EgressMode::Raw` are deleted, and launch readiness
+  waits on an endpoint-owned authenticated-session event before verifying its
+  durable marker and failing closed if no session arrives. This removes the
+  guest-agent/FlowMux authentication race without a fixed sleep. In addition,
   `xtask check-one-guest-protocol` fails the build if a second guest->host
   protocol returns. `EgressMode::Wire` survives for the wasm tier's host-side
   `mvm:egress` import, which is host-internal IPC rather than a guest channel.**
@@ -1611,10 +1613,13 @@ check-l3-expansion-freeze` added as a temporary shrink-only ratchet
         has not happened (`crates/mvm-hostd/tests/workload_stream_plane.rs` still
         imports `EndpointSpawner`), the duplicate `EGRESS_VSOCK_PORT = 5253`
         survives in `mvm-egress-client.rs` and `mvm-addon-dns.rs` because
-        `mvm-agentd` does not depend on `mvm-net`, and the fail-closed readiness
-        assertion — a networking-granted workload must not reach ready when the
-        FlowMux session fails to authenticate — is unwitnessed. Phase 3 is
-        already ahead of this, so the phase gate will not catch the residue.
+        `mvm-agentd` does not depend on `mvm-net`. The fail-closed readiness
+        assertion is now witnessed by a delayed-authentication BDD scenario,
+        endpoint subprocess coverage, and focused timeout/exit tests: launch
+        cannot reach ready until an authenticated FlowMux session has written
+        durable evidence and signaled its endpoint-owned event. Phase 3 is
+        already ahead of this, so the phase gate will not catch the remaining
+        rename and constant residue.
         Landed: `GuestService::NetworkFlow`
         now names the port-5253 channel; the endpoint binary, proxy, spawner, and
         test files are renamed to `mvm-network-endpoint`/`network_endpoint_*`;
