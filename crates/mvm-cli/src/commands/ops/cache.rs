@@ -509,7 +509,8 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             }
 
             // Untagged-checkpoint GC: tagged checkpoints are user-pinned; untagged
-            // ones follow cache retention. One corrupt meta.json makes list() fail,
+            // ones follow cache retention, unless a still-resumable session names
+            // one as its resume point. One corrupt meta.json makes list() fail,
             // which logs a warning and skips the sweep — acceptable for a prune pass.
             const CHECKPOINT_MAX_AGE_SECS: u64 = 7 * 24 * 60 * 60;
             let ckpt_store = mvm_runtime::checkpoint::CheckpointStore::open();
@@ -522,9 +523,22 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_secs())
                     .unwrap_or(0);
-                match sweep_untagged_checkpoints(&ckpt_store, now, CHECKPOINT_MAX_AGE_SECS) {
-                    Ok(n) => removed += n as u64,
-                    Err(e) => ui::warn(&format!("checkpoint sweep failed: {e}")),
+                let sessions = mvm_runtime::agent_session::AgentSessionStore::open();
+                match mvm_runtime::agent_session::pinned_checkpoints(&sessions) {
+                    Ok(pinned) => {
+                        match sweep_untagged_checkpoints(
+                            &ckpt_store,
+                            now,
+                            CHECKPOINT_MAX_AGE_SECS,
+                            &pinned,
+                        ) {
+                            Ok(n) => removed += n as u64,
+                            Err(e) => ui::warn(&format!("checkpoint sweep failed: {e}")),
+                        }
+                    }
+                    Err(e) => ui::warn(&format!(
+                        "checkpoint sweep skipped: could not determine session-pinned checkpoints: {e}"
+                    )),
                 }
             }
 
@@ -821,21 +835,35 @@ fn reclaim_entries(entries: &[CacheEntry], kind: &str, dry_run: bool) -> (u64, u
 }
 
 /// Remove untagged checkpoints older than `max_age_secs`. Tagged checkpoints
-/// are user-pinned and never swept. Returns the count removed.
+/// are user-pinned and never swept; neither is a checkpoint in `pinned` — the
+/// resume point of a session that is still `Active` or `Hibernated`. Without
+/// that guard, a session parked longer than `max_age_secs` would lose the
+/// checkpoint it resumes from and become permanently unresumable: the session
+/// record survives, pointing at nothing. Returns the count removed.
 pub(super) fn sweep_untagged_checkpoints(
     store: &mvm_runtime::checkpoint::CheckpointStore,
     now_unix: u64,
     max_age_secs: u64,
+    pinned: &std::collections::BTreeSet<mvm_core::checkpoint::CheckpointDigest>,
 ) -> anyhow::Result<usize> {
     let mut removed = 0;
     for m in store.list()? {
         if m.tag.is_some() {
             continue;
         }
-        if now_unix.saturating_sub(m.created_unix) > max_age_secs {
-            store.remove(&m.id)?;
-            removed += 1;
+        if now_unix.saturating_sub(m.created_unix) <= max_age_secs {
+            continue;
         }
+        if pinned.contains(&m.meta_digest) {
+            println!(
+                "Kept checkpoint: {} (pinned by a parked session's resume point)",
+                m.id
+            );
+            continue;
+        }
+        store.remove(&m.id)?;
+        println!("Removed checkpoint: {} (untagged, aged out)", m.id);
+        removed += 1;
     }
     Ok(removed)
 }
@@ -1127,10 +1155,119 @@ mod tests {
             .unwrap();
 
         let now = 10_000_000u64;
-        let removed = super::sweep_untagged_checkpoints(&store, now, 1).unwrap();
+        let removed =
+            super::sweep_untagged_checkpoints(&store, now, 1, &Default::default()).unwrap();
         assert_eq!(removed, 1);
         assert!(store.read_meta(&CheckpointId::new("old-tagged")).is_ok());
         assert!(store.read_meta(&CheckpointId::new("old-untagged")).is_err());
+    }
+
+    #[test]
+    fn prune_skips_a_checkpoint_pinned_by_a_parked_session() {
+        use mvm_core::checkpoint::{CheckpointClass, CheckpointId, CheckpointMeta};
+        use mvm_runtime::checkpoint::CheckpointStore;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::at(tmp.path());
+        let mk = |id: &str, age: u64| {
+            CheckpointMeta::builder(CheckpointId::new(id), CheckpointClass::FsQuick, "vm")
+                .content(vec![mvm_core::checkpoint::ContentBlob {
+                    name: "rootfs.ext4".into(),
+                    sha256: "h".into(),
+                }])
+                .supervisor_config_digest("d")
+                .created_unix(age)
+                .build()
+        };
+        let pinned_meta = mk("pinned-untagged", 0);
+        let unpinned_meta = mk("unpinned-untagged", 0);
+        store.write_meta(&pinned_meta).unwrap();
+        store.write_meta(&unpinned_meta).unwrap();
+
+        let mut pinned = std::collections::BTreeSet::new();
+        pinned.insert(pinned_meta.meta_digest.clone());
+
+        let now = 10_000_000u64;
+        let removed = super::sweep_untagged_checkpoints(&store, now, 1, &pinned).unwrap();
+        assert_eq!(removed, 1, "only the unpinned checkpoint should be reaped");
+        assert!(
+            store
+                .read_meta(&CheckpointId::new("pinned-untagged"))
+                .is_ok(),
+            "a checkpoint pinned by a parked session must survive the sweep"
+        );
+        assert!(
+            store
+                .read_meta(&CheckpointId::new("unpinned-untagged"))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn pinned_checkpoints_derived_from_a_real_session_protects_its_checkpoint() {
+        // Task 1's other test builds the pinned set by hand, which proves the
+        // sweep honours whatever set it's handed but not that the set the CLI
+        // actually derives from disk is the right one. This test closes that
+        // gap: a real `AgentSessionRecord` naming a real checkpoint's
+        // `meta_digest` as its `parent_checkpoint`, run through the same
+        // `pinned_checkpoints` the prune path calls, must protect that exact
+        // checkpoint — and only that one.
+        use mvm_contract::protocol::agent_session::AgentSessionId;
+        use mvm_core::checkpoint::{CheckpointClass, CheckpointId, CheckpointMeta};
+        use mvm_runtime::agent_session::{AgentSessionRecord, AgentSessionStore, SandboxResidency};
+        use mvm_runtime::checkpoint::CheckpointStore;
+
+        let ckpt_tmp = tempfile::tempdir().unwrap();
+        let ckpt_store = CheckpointStore::at(ckpt_tmp.path());
+        let mk = |id: &str, age: u64| {
+            CheckpointMeta::builder(CheckpointId::new(id), CheckpointClass::FsQuick, "vm")
+                .content(vec![mvm_core::checkpoint::ContentBlob {
+                    name: "rootfs.ext4".into(),
+                    sha256: "h".into(),
+                }])
+                .supervisor_config_digest("d")
+                .created_unix(age)
+                .build()
+        };
+        let resumed_from = mk("resumed-from", 0);
+        let orphaned = mk("orphaned", 0);
+        ckpt_store.write_meta(&resumed_from).unwrap();
+        ckpt_store.write_meta(&orphaned).unwrap();
+
+        let session_tmp = tempfile::tempdir().unwrap();
+        let session_store = AgentSessionStore::at(session_tmp.path());
+        let record = AgentSessionRecord {
+            session_id: AgentSessionId::parse("sess-parked").unwrap(),
+            generation: 1,
+            state: SandboxResidency::Hibernated,
+            members: vec!["vm-alpha".to_string()],
+            parent_checkpoint: Some(resumed_from.meta_digest.clone()),
+            created_unix: 0,
+            updated_unix: 0,
+            journal_cursor: 0,
+            approval_head: None,
+            storage_tier: None,
+            park_reason: None,
+        };
+        session_store.write(&record).unwrap();
+
+        let pinned = mvm_runtime::agent_session::pinned_checkpoints(&session_store).unwrap();
+
+        let now = 10_000_000u64;
+        let removed = super::sweep_untagged_checkpoints(&ckpt_store, now, 1, &pinned).unwrap();
+        assert_eq!(removed, 1, "only the orphaned checkpoint should be reaped");
+        assert!(
+            ckpt_store
+                .read_meta(&CheckpointId::new("resumed-from"))
+                .is_ok(),
+            "the checkpoint the parked session actually resumes from must survive"
+        );
+        assert!(
+            ckpt_store
+                .read_meta(&CheckpointId::new("orphaned"))
+                .is_err(),
+            "a checkpoint no session names must still be reaped"
+        );
     }
 
     #[test]

@@ -1,6 +1,6 @@
 # Refactor status
 
-Last updated: 2026-08-18
+Last updated: 2026-08-19
 
 This is the cross-plan progress index. The owning plan remains authoritative
 for detailed scope and acceptance criteria.
@@ -320,7 +320,9 @@ for detailed scope and acceptance criteria.
       `specs/plans/2026-08-18-session-approval-head.md` (implementation,
       Tasks 1–4 complete) +
       `specs/plans/2026-08-18-resume-session-orchestrator.md` (implementation,
-      Tasks 1–3 complete). `CheckpointMeta` gains `Option<SessionBinding>`
+      Tasks 1–3 complete) +
+      `specs/plans/2026-08-18-session-retention.md` (implementation, Tasks 1–3
+      complete). `CheckpointMeta` gains `Option<SessionBinding>`
       (`session_id`/`generation`/`journal_cursor`/`approval_head`), folded
       into `meta_digest` the same way `grants` already is; `approval_head` is
       a dedicated `ApprovalHead` newtype, not `CheckpointDigest` reused.
@@ -375,14 +377,43 @@ resume` takes a `current_head` and refuses when it differs from the
       carries — `resume_session` included, which reads its caller-supplied
       `current_approval_head` straight off the record; there is no tier
       selection, no `PostRestore` fabric re-registration, no credential
-      minting at the substitution endpoint, and no chain entry (WS7). The
+      minting at the substitution endpoint. The
       synthesized plan carries `grants: None`, so a resumed session re-arms
-      neither a wall-clock bound nor a CPU share. `resume_session` has no
-      caller anywhere in the workspace outside its own tests — it is wired
-      to no CLI verb or other host code path. A session parked with
-      `approval_head: None` resumes with no ledger fence at all. WS5
-      retention ladder + GC, WS6 CLI, WS7 chain records, WS8 BDD remain
-      untouched.
+      neither a wall-clock bound nor a CPU share. A session parked with
+      `approval_head: None` resumes with no ledger fence at all. WS5 is
+      partial: `specs/plans/2026-08-18-session-retention.md` teaches the
+      pre-existing `checkpoints_dir()` sweep (`sweep_untagged_checkpoints`,
+      `mvmctl cache prune`) to refuse reaping a checkpoint any live or
+      hibernated session names as its parent — via the new
+      `mvm_runtime::agent_session::pinned_checkpoints` — closes the same
+      manual door on `mvmctl vm checkpoint rm`, and adds
+      `AgentSessionRecord::demote`, a one-way `Resident → Parked → Cold` step
+      for an already-hibernated session. Not delivered: retention classes or
+      expiry on the record, a scheduler that calls `demote`, or any actual
+      movement of bytes between tiers — demoting only sets a field, and a
+      `Cold` session's checkpoint is still pinned regardless of tier, so the
+      ladder does not yet make anything reclaimable; closing a session
+      remains the only thing that frees its resume point.
+
+      WS6 is DONE and WS7 is PARTIAL, both via
+      `specs/plans/2026-08-19-session-cli-and-audit.md`
+      (`crates/mvm-cli/src/commands/agent_session.rs`). `mvmctl agent-session`
+      carries `open`, `ls`, `show`, `park` and `resume`. `open` is the
+      producer the verb was missing: before it, no code path anywhere created
+      an `AgentSessionRecord`, so `ls` listed nothing forever and `park` and
+      `resume` could only refuse. With it in place `resume` is a caller of
+      `resume_session` that is both correctly constructed and exercisable, so
+      that function is no longer reachable only from its own tests. WS7 stops
+      short of a tick: `session.parked` and `session.resumed` are emitted, but
+      nothing verifies a session's chain as a unit, there is no
+      `session.closed` entry because no `close()` transition exists, and a
+      failed chain write downgrades to a warning with exit 0, so a scripted
+      operator cannot detect a missing entry. The design spec's
+      `sandbox.parked` / `sandbox.resumed` names were changed to match the
+      code's `session.` prefix rather than the reverse — these are session
+      transitions, and `SandboxResidency` is a field of a session record, not
+      the subject. WS8 BDD remains untouched.
+
 - [~] **Admission-bound AI assurance sessions** —
       `specs/plans/2026-08-17-admission-bound-ai-assurance-sessions.md`. W1–W4,
       W6/W7, W7b landed and W5 partial: the envelope, the authority
