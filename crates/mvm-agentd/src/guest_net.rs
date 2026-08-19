@@ -292,9 +292,27 @@ pub(crate) fn set_sockaddr_in(dst: *mut libc::sockaddr, addr: [u8; 4]) {
 /// `ioctl(SIOCSIFFLAGS, IFF_UP)`. Equivalent to `ip link set dev <iface> up`,
 /// issued directly so we don't pin a path-dependency in the rootfs and the
 /// error names the failing ioctl. Must run before `udhcpc` (busybox udhcpc
+/// What bringing the guest network up actually found.
+///
+/// A workload microVM boots with a virtio-vsock device and **no NIC at all** —
+/// that is the vsock-only invariant behind claims 10 and 13, and
+/// `xtask check-vsock-only-egress` enforces it. `eth0` being absent there is
+/// the designed configuration, not a fault, and the two cases have to be
+/// distinguishable at the call site: the builder VM does have a NIC, so a
+/// missing interface there is a real failure. Returning `Ok` for both and
+/// letting each caller decide beats a shared error string neither can act on.
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GuestNetwork {
+    /// The interface exists and is configured (lease or static fallback).
+    Configured,
+    /// There is no such interface on this guest.
+    NoInterface,
+}
+
 /// binds a `PF_PACKET` socket that needs the link already up).
 #[cfg(target_os = "linux")]
-pub fn bring_iface_up(iface: &str) -> Result<(), String> {
+pub fn bring_iface_up(iface: &str) -> Result<GuestNetwork, String> {
     let name = encode_iface_name(iface)?;
     // SAFETY: socket(2) returns -1 on error (checked) or a valid fd; closed below.
     let sock = unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0) };
@@ -310,10 +328,14 @@ pub fn bring_iface_up(iface: &str) -> Result<(), String> {
         let mut ifr: libc::ifreq = unsafe { std::mem::zeroed() };
         ifr.ifr_name = name;
         if unsafe { libc::ioctl(sock, SIOCGIFFLAGS_REQUEST, &mut ifr) } < 0 {
-            return Err(format!(
-                "SIOCGIFFLAGS {iface}: {}",
-                std::io::Error::last_os_error()
-            ));
+            let err = std::io::Error::last_os_error();
+            // ENODEV is the kernel saying the interface does not exist, which
+            // is not the same as failing to configure one that does. Every
+            // other errno stays a hard error.
+            if err.raw_os_error() == Some(libc::ENODEV) {
+                return Ok(GuestNetwork::NoInterface);
+            }
+            return Err(format!("SIOCGIFFLAGS {iface}: {err}"));
         }
         // SAFETY: SIOCGIFFLAGS populated ifru_flags; OR-in IFF_UP through the
         // same Copy union variant.
@@ -327,7 +349,7 @@ pub fn bring_iface_up(iface: &str) -> Result<(), String> {
                 std::io::Error::last_os_error()
             ));
         }
-        Ok(())
+        Ok(GuestNetwork::Configured)
     })();
     // SAFETY: sock is owned by this function until close.
     unsafe { libc::close(sock) };
@@ -395,8 +417,13 @@ pub fn configure_guest_network(
     iface: &str,
     cmdline: &str,
     fallback_ip: &str,
-) -> Result<(), String> {
-    bring_iface_up(iface)?;
+) -> Result<GuestNetwork, String> {
+    if bring_iface_up(iface)? == GuestNetwork::NoInterface {
+        // Nothing downstream — DHCP, the static fallback, the default route —
+        // has an interface to act on. Returning here keeps the caller's log
+        // line the single statement about this guest's network.
+        return Ok(GuestNetwork::NoInterface);
+    }
 
     if let Err(e) = seed_resolv_conf(cmdline) {
         eprintln!("guest-net: resolv.conf seed skipped: {e} (continuing — DNS degraded)");
@@ -436,7 +463,7 @@ pub fn configure_guest_network(
     } else if !udhcpc_success {
         return Err("udhcpc obtained no lease and no static fallback applies".to_string());
     }
-    Ok(())
+    Ok(GuestNetwork::Configured)
 }
 
 #[cfg(test)]
@@ -561,5 +588,36 @@ nameserver 10.0.0.3
         assert_eq!(SIOCGIFFLAGS_REQUEST as u64, libc::SIOCGIFFLAGS as u64);
         assert_eq!(SIOCSIFFLAGS_REQUEST as u64, libc::SIOCSIFFLAGS as u64);
         assert_eq!(SIOCADDRT_REQUEST as u64, libc::SIOCADDRT as u64);
+    }
+
+    /// The distinction this split exists for, at the syscall that draws it.
+    ///
+    /// A name no guest has yields ENODEV from SIOCGIFFLAGS — the same errno a
+    /// NIC-less workload guest gets for `eth0` — and that must read as "there
+    /// is no such interface", not as a bring-up failure. Reading interface
+    /// flags needs no privileges, so this runs anywhere Linux does.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_nonexistent_interface_is_reported_as_absent_not_as_a_failure() {
+        // 15 chars max (IFNAMSIZ - 1), and nothing plausibly present.
+        let outcome = bring_iface_up("mvmnodev0");
+        assert_eq!(
+            outcome,
+            Ok(GuestNetwork::NoInterface),
+            "ENODEV must be the absent-interface outcome, not an error"
+        );
+    }
+
+    /// The other half: an interface that cannot even be named is a caller
+    /// error, and must not be laundered into "this guest has no NIC" — that
+    /// would turn a typo into a silently networkless guest.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_unencodable_interface_name_stays_an_error() {
+        let too_long = "x".repeat(libc::IFNAMSIZ + 4);
+        assert!(
+            bring_iface_up(&too_long).is_err(),
+            "an unusable name is an error, not an absent interface"
+        );
     }
 }

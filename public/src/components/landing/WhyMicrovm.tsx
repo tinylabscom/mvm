@@ -20,15 +20,21 @@ export function WhyMicrovm() {
       <div className="grid gap-10 lg:grid-cols-2 lg:items-center lg:gap-14">
         <div>
           <Eyebrow>The boundary</Eyebrow>
-          <h2 className="mb-3 lowercase font-display text-2xl font-bold leading-tight text-title sm:text-3xl">
+          {/* Inline margins, not margin utilities: Starlight's unlayered
+              stylesheet beats layered utilities on this page (see
+              Positioning.tsx). */}
+          <h2
+            className="lowercase font-display text-2xl font-bold leading-tight text-title sm:text-3xl"
+            style={{ marginBottom: "1.5rem" }}
+          >
             Why A MicroVM
           </h2>
-          <p className="mb-6 max-w-md text-base leading-relaxed text-body">
+          <p className="max-w-md text-base leading-relaxed text-body">
             Every mvm workload boots its own guest kernel under a real
             hypervisor, on its own root filesystem &mdash; a hardware-assisted
             boundary, not a shared one.
           </p>
-          <ul className="space-y-3">
+          <ul className="space-y-3" style={{ marginTop: "2.5rem" }}>
             {GIVES_YOU.map((item) => (
               <li key={item.label} className="flex gap-3 text-sm leading-relaxed text-body">
                 <span className="mt-2 h-1.5 w-1.5 shrink-0 rounded-full bg-accent-3" aria-hidden="true" />

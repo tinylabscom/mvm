@@ -6,6 +6,7 @@ mod builder_shell_job;
 mod bundle;
 pub mod catalog;
 mod cmd_audit;
+mod completions;
 mod dashboard;
 mod deploy;
 mod deps;
@@ -17,6 +18,7 @@ mod machine;
 mod manifest;
 mod ops;
 mod pack;
+mod plugin;
 /// Supervisor warm-pool: the `mvmctl pool warm/status` command + the launch glue
 /// (`try_warm_claim`) the transient `machine run` path
 /// (`crate::exec::run_inner`) calls to claim a warm standby (auto-named,
@@ -44,6 +46,7 @@ pub mod warm_artifact_source {
 
 pub(in crate::commands) use build::ir_input::load_ir_json_workload;
 pub(crate) use shared::{DirShareSpec, parse_dir_share_spec};
+pub(crate) use vm::exec::RunProfile;
 
 #[cfg(test)]
 mod tests;
@@ -109,6 +112,14 @@ pub(in crate::commands) struct Cli {
     pub command: Commands,
 }
 
+/// The security profile a run lands in when the user names none.
+///
+/// Read from the parsed default rather than named again, so `doctor` cannot
+/// report a posture the CLI does not actually apply.
+pub(crate) fn default_run_profile() -> RunProfile {
+    vm::exec::RunArgs::default().profile
+}
+
 #[derive(Subcommand, Debug, Clone)]
 #[allow(clippy::large_enum_variant)] // Up variant has many CLI fields; boxing breaks Clap derive
 pub(in crate::commands) enum Commands {
@@ -149,6 +160,12 @@ pub(in crate::commands) enum Commands {
     /// Measure this host's launch latency against the published budgets
     #[command(display_order = 7)]
     Bench(bench::Args),
+    /// Emit the integration files a coding agent needs to reach for mvm
+    #[command(display_order = 8)]
+    Plugin(plugin::Args),
+    /// Print a shell completion script
+    #[command(display_order = 8)]
+    Completions(completions::Args),
     /// Rebuild a workload when its local inputs change
     #[command(display_order = 8)]
     Watch(watch::Args),

@@ -11,7 +11,7 @@ use std::os::fd::AsRawFd;
 use std::path::Path;
 use std::ptr::NonNull;
 
-use super::HvfError;
+use super::{BootFault, HvfError};
 use zeroize::Zeroize;
 
 /// Apple-silicon hypervisor page size; `hv_vm_map` and `MAP_FIXED` sub-maps
@@ -177,9 +177,10 @@ impl GuestRam {
     pub fn map_private_file(&mut self, path: &Path) -> Result<(), HvfError> {
         let file_len = File::open(path)
             .and_then(|file| file.metadata())
-            .map_err(|_| HvfError::BadKernel)?
+            .map_err(|e| HvfError::BadBoot(BootFault::KernelOpen(e.kind())))?
             .len();
-        let file_len = usize::try_from(file_len).map_err(|_| HvfError::BadKernel)?;
+        let file_len =
+            usize::try_from(file_len).map_err(|_| HvfError::BadBoot(BootFault::Overflow))?;
         if file_len != self.len || !file_len.is_multiple_of(HVF_PAGE_SIZE) {
             return Err(HvfError::SnapshotState("snapshot RAM file length mismatch"));
         }
@@ -192,7 +193,10 @@ impl GuestRam {
             .checked_add(bytes.len())
             .is_none_or(|end| end > self.len)
         {
-            return Err(HvfError::BadKernel);
+            return Err(HvfError::BadBoot(BootFault::KernelTooLarge {
+                needed: offset.saturating_add(bytes.len()),
+                available: self.len,
+            }));
         }
         // SAFETY: destination bounds are checked above, and a borrowed slice
         // cannot overlap this owned mmap reservation.
@@ -214,14 +218,20 @@ impl GuestRam {
         len: usize,
     ) -> Result<(), HvfError> {
         let mapped_len = page_rounded_len(len)?;
-        if !offset.is_multiple_of(HVF_PAGE_SIZE)
-            || offset
-                .checked_add(mapped_len)
-                .is_none_or(|end| end > self.len)
-        {
-            return Err(HvfError::BadKernel);
+        if !offset.is_multiple_of(HVF_PAGE_SIZE) {
+            return Err(HvfError::BadBoot(BootFault::Misaligned { offset }));
         }
-        let file = File::open(path).map_err(|_| HvfError::BadKernel)?;
+        if offset
+            .checked_add(mapped_len)
+            .is_none_or(|end| end > self.len)
+        {
+            return Err(HvfError::BadBoot(BootFault::KernelTooLarge {
+                needed: offset.saturating_add(mapped_len),
+                available: self.len,
+            }));
+        }
+        let file =
+            File::open(path).map_err(|e| HvfError::BadBoot(BootFault::KernelOpen(e.kind())))?;
         let dst = unsafe { self.ptr.as_ptr().add(offset) };
         // SAFETY: dst is page-aligned inside this owned reservation, and
         // mapped_len is page-rounded. MAP_FIXED intentionally replaces only the
@@ -245,11 +255,11 @@ impl GuestRam {
 
 pub(crate) fn page_rounded_len(len: usize) -> Result<usize, HvfError> {
     if len == 0 {
-        return Err(HvfError::BadKernel);
+        return Err(HvfError::BadBoot(BootFault::KernelEmpty));
     }
     len.checked_add(HVF_PAGE_SIZE - 1)
         .map(|n| n / HVF_PAGE_SIZE * HVF_PAGE_SIZE)
-        .ok_or(HvfError::BadKernel)
+        .ok_or(HvfError::BadBoot(BootFault::Overflow))
 }
 
 impl Drop for GuestRam {

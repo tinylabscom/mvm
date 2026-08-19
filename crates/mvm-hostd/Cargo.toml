@@ -103,7 +103,9 @@ mvm-vmm.workspace = true
 # guest vsock exec protocol (`send_exec_streaming`, `GUEST_AGENT_PORT`) —
 # the healthcheck probe's host->guest exec leg.
 mvm-agentd.workspace = true
-mvm-fs.workspace = true
+# Reached only by the `mvm-apfs-snapshot-helper` bin, which is itself
+# `required-features = ["trusted-apfs"]` and macOS-gated.
+mvm-fs = { workspace = true, optional = true }
 # builder-vm: pulls libkrun_network_provider::vsock_egress_opt_in (Phase A egress
 # server wiring in mvm-libkrun-supervisor); gated here so it only activates in the
 # per-VM supervisor process, not in library users.
@@ -241,7 +243,7 @@ libkrun-sys = ["libkrun-sys/libkrun-sys"]
 libkrun-live = ["libkrun-sys"]
 # Propagate the debug-only HVF warm-restore validation lane to the supervisor.
 hvf-live-validation = ["mvm-runtime/hvf-live-validation"]
-trusted-apfs = ["mvm-runtime/trusted-apfs"]
+trusted-apfs = ["mvm-runtime/trusted-apfs", "dep:mvm-fs"]
 
 [lints]
 workspace = true

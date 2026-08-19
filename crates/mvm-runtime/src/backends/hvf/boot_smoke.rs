@@ -47,6 +47,50 @@ pub struct BootProof {
     pub syndrome: u64,
 }
 
+/// Why an HVF boot could not be set up.
+///
+/// One variant per distinguishable cause. `BadKernel` used to be a single unit
+/// variant returned from more than twenty places, so "the kernel file is
+/// missing", "the kernel is empty", "the image does not fit in guest RAM" and
+/// "too many disks were attached" all printed as the same four words, and the
+/// operator had to read the source and guess which one they had.
+///
+/// [`HvfError`] is `Copy` — it is returned through the vCPU run loop — so this
+/// carries an [`std::io::ErrorKind`] and sizes rather than a `PathBuf` and an
+/// `io::Error`. That is enough to tell the causes apart; the path is known to
+/// whoever supplied it and belongs where the error is rendered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BootFault {
+    /// Opening or stat-ing the kernel image failed.
+    KernelOpen(std::io::ErrorKind),
+    /// Reading the kernel image header failed (short file, I/O error).
+    KernelRead(std::io::ErrorKind),
+    /// The image is zero bytes.
+    KernelEmpty,
+    /// The bytes are not a usable arm64 `Image` (bad magic or header).
+    KernelNotArm64Image,
+    /// The image does not fit the window it must load into.
+    KernelTooLarge { needed: usize, available: usize },
+    /// A load offset is not page-aligned.
+    Misaligned { offset: usize },
+    /// A length or address computation overflowed.
+    Overflow,
+    /// Guest RAM is too small to hold even the DTB window.
+    GuestRamTooSmall { ram: usize, needed: usize },
+    /// No gap between the kernel and the DTB window for the initramfs.
+    InitrdNoRoom {
+        kernel_end: usize,
+        initrd_len: usize,
+        dtb_offset: usize,
+    },
+    /// More disks than the device model has MMIO slots for.
+    TooManyDisks { given: usize, max: usize },
+    /// More virtiofs shares than the device model has MMIO slots for.
+    TooManyFilesystems { given: usize, max: usize },
+    /// The generated device tree exceeds its reserved window.
+    DtbTooLarge { needed: usize, max: usize },
+}
+
 /// Failure points along the HVF boot path, each carrying the raw `hv_return_t`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HvfError {
@@ -65,8 +109,8 @@ pub enum HvfError {
     UnexpectedExit(hv_exit_reason_t),
     /// An exception with an unexpected class (ESR `EC`).
     UnexpectedException(u32),
-    /// The supplied kernel image is not a usable arm64 `Image`.
-    BadKernel,
+    /// The boot could not be set up. Carries which check failed.
+    BadBoot(BootFault),
     /// In-kernel GICv3 creation failed (needs macOS 15+).
     GicCreate(hv_return_t),
     /// Serialized HVF state failed structural validation.

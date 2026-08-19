@@ -16,7 +16,12 @@ export function RequestAccess() {
       <div className="grid gap-10 lg:grid-cols-[1.1fr_0.9fr] lg:items-start lg:gap-14">
         <Reveal>
           <Eyebrow>Request access</Eyebrow>
-          <h2 className="mb-4 lowercase font-display text-2xl font-bold leading-tight text-title sm:text-3xl">
+          {/* Inline margin, not mb-*: Starlight's unlayered stylesheet beats
+              layered utilities on this page (see Positioning.tsx). */}
+          <h2
+            className="lowercase font-display text-2xl font-bold leading-tight text-title sm:text-3xl"
+            style={{ marginBottom: "1.5rem" }}
+          >
             run the workload. isolate the tenant. enforce the policy. audit the
             execution.
           </h2>

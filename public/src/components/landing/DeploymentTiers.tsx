@@ -2,7 +2,18 @@ import { Eyebrow } from "./primitives/Eyebrow";
 import { Reveal } from "./primitives/Reveal";
 import { Section } from "./primitives/Section";
 
-const TIERS = [
+// Status labels are load-bearing: only tier 01 ships today. Hosted is
+// design-partner gated (the request-access form is the way in), and tiers
+// 03/04 are roadmap — hardware attestation is explicitly out of scope of
+// the current runtime, so nothing here may imply attestation-gated key
+// release exists.
+const TIERS: Array<{
+  label: string;
+  name: string;
+  body: string;
+  status?: string;
+  confidential?: boolean;
+}> = [
   {
     label: "01 / Local",
     name: "Local Development",
@@ -11,31 +22,42 @@ const TIERS = [
   {
     label: "02 / Hosted",
     name: "Hosted Standard",
-    body: "Firecracker on our Linux/KVM fleet. High-density, short-lived workloads.",
+    body: "Firecracker on Linux/KVM fleet infrastructure. High-density, short-lived workloads.",
+    status: "Design partners",
   },
   {
     label: "03 / Edge",
     name: "Edge & Private",
-    body: "Your VPC or your metal, via Incus or containerd. TPM, Secure Enclave, AVF.",
+    body: "Your VPC or your metal. The same signed contract, forward-deployed into your infrastructure.",
+    status: "Roadmap",
   },
   {
     label: "04 / Confidential",
     name: "Hosted Confidential",
-    body: "SEV-SNP and TDX. Hardware-rooted memory confidentiality gates key release.",
+    body: "AMD SEV-SNP and Intel TDX. Hardware attestation is out of scope of today's shipped runtime.",
+    status: "Roadmap",
     confidential: true,
   },
 ];
 
 export function DeploymentTiers() {
+  const rawBase = import.meta.env.BASE_URL;
+  const base = rawBase.endsWith("/") ? rawBase : `${rawBase}/`;
+
   return (
     <Section id="deployment" rule>
       <Reveal>
         <Eyebrow>Deployment</Eyebrow>
-        <h2 className="mb-8 lowercase font-display text-2xl font-bold leading-tight text-title sm:text-3xl">
+        <h2 className="lowercase font-display text-2xl font-bold leading-tight text-title sm:text-3xl">
           one contract. four places to run it.
         </h2>
       </Reveal>
-      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+      {/* Inline margin, not mt-*: Starlight's unlayered stylesheet beats
+          layered utilities on this page (see Positioning.tsx). */}
+      <div
+        className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4"
+        style={{ marginTop: "3rem" }}
+      >
         {TIERS.map((tier, i) => (
           <Reveal key={tier.label} delay={i * 80}>
             <div
@@ -45,15 +67,22 @@ export function DeploymentTiers() {
                   : "h-full rounded-xl border border-glass-border/60 bg-raised p-5 transition-colors hover:border-accent/50"
               }
             >
-              <p
-                className={
-                  tier.confidential
-                    ? "mb-3 font-mono text-[11px] font-semibold tracking-[0.14em] uppercase text-accent-3"
-                    : "mb-3 font-mono text-[11px] font-semibold tracking-[0.14em] uppercase text-label"
-                }
-              >
-                {tier.label}
-              </p>
+              <div className="mb-3 flex items-baseline justify-between gap-2">
+                <p
+                  className={
+                    tier.confidential
+                      ? "font-mono text-[11px] font-semibold tracking-[0.14em] uppercase text-accent-3"
+                      : "font-mono text-[11px] font-semibold tracking-[0.14em] uppercase text-label"
+                  }
+                >
+                  {tier.label}
+                </p>
+                {tier.status && (
+                  <span className="shrink-0 rounded border border-edge/50 px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-widest text-label">
+                    {tier.status}
+                  </span>
+                )}
+              </div>
               <h3 className="text-base font-semibold text-title">{tier.name}</h3>
               <p className="mt-2 text-sm leading-relaxed text-body">{tier.body}</p>
             </div>
@@ -61,8 +90,23 @@ export function DeploymentTiers() {
         ))}
       </div>
       <p className="mt-5 font-mono text-xs leading-relaxed text-label">
-        Trust tier is recorded on every release. Sensitive key release is gated
-        on the tier you require.
+        Local runs today with the open-source CLI. Tier status is tracked on
+        the{" "}
+        <a
+          href={`${base}security/capability-status/`}
+          className="text-accent underline underline-offset-2 hover:text-accent/80"
+        >
+          capability status
+        </a>{" "}
+        page; what&rsquo;s enforced right now — with named test witnesses — is
+        in the{" "}
+        <a
+          href={`${base}security/ci-claims/`}
+          className="text-accent underline underline-offset-2 hover:text-accent/80"
+        >
+          CI-enforced claims
+        </a>
+        .
       </p>
     </Section>
   );

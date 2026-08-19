@@ -1048,6 +1048,11 @@ pub struct AdmitAndStartParams<'a> {
     /// it is the record that the run was allowed, and it is written before the
     /// backend starts, so refusing on it actually stops the unaudited run.
     pub audit_durability: crate::audit::durability::AuditDurability,
+    /// An assurance campaign to open against this boot, when the operator
+    /// declared one. `None` — the default — is every ordinary run: extension
+    /// discovery must not sit on the launch critical path, so a run that
+    /// declares no campaign does no assurance work at all.
+    pub assurance: Option<&'a crate::assurance_session::CampaignRequest>,
 }
 
 impl<'a> AdmitAndStartParams<'a> {
@@ -1073,6 +1078,7 @@ pub struct AdmitAndStartParamsBuilder<'a> {
     policy_bundle: Option<&'a PolicyBundle>,
     emitter: Option<&'a crate::audit::emitter::AuditEmitter>,
     audit_durability: Option<crate::audit::durability::AuditDurability>,
+    assurance: Option<&'a crate::assurance_session::CampaignRequest>,
 }
 
 impl<'a> AdmitAndStartParamsBuilder<'a> {
@@ -1090,6 +1096,7 @@ impl<'a> AdmitAndStartParamsBuilder<'a> {
             policy_bundle: None,
             emitter: None,
             audit_durability: None,
+            assurance: None,
         }
     }
 
@@ -1165,6 +1172,15 @@ impl<'a> AdmitAndStartParamsBuilder<'a> {
         self
     }
 
+    /// Declare an assurance campaign for this boot.
+    pub fn assurance(
+        mut self,
+        assurance: impl Into<Option<&'a crate::assurance_session::CampaignRequest>>,
+    ) -> Self {
+        self.assurance = assurance.into();
+        self
+    }
+
     /// Set `audit_durability`.
     #[must_use]
     pub fn audit_durability(
@@ -1201,6 +1217,7 @@ impl<'a> AdmitAndStartParamsBuilder<'a> {
                 "AdmitAndStartParams",
                 "audit_durability",
             ))?,
+            assurance: self.assurance,
         })
     }
 }
@@ -1507,6 +1524,15 @@ pub fn admit_and_start(
                 if let Err(e) = emitter.emit_grants_enforced(admitted.plan(), &enforced_grants) {
                     tracing::warn!(error = %e, "audit emit_grants_enforced failed (non-fatal)");
                 }
+            }
+            // After the VM is running, so a failed boot leaves no session, and
+            // after `plan.launched`, so the campaign's own records follow the
+            // launch they belong to. A refusal here fails the boot: a campaign
+            // the operator declared and that silently did not open would be
+            // reported as a trial that observed nothing.
+            if let Some(campaign) = params.assurance {
+                crate::assurance_session::open_for_boot(campaign, &vm_id.0, &admitted)
+                    .context("opening the declared assurance session")?;
             }
             Ok(StartedMachine {
                 vm_id,
@@ -3351,6 +3377,7 @@ mod tests {
                 policy_bundle: None,
                 emitter: None,
                 audit_durability: crate::audit::durability::AuditDurability::BestEffort,
+                assurance: None,
             },
         )
         .expect("admit + boot");
@@ -3364,6 +3391,118 @@ mod tests {
             backend.status(&started.vm_id).unwrap(),
             mvm_core::vm_backend::VmStatus::Running
         ));
+    }
+
+    #[test]
+    fn a_declared_campaign_opens_its_session_on_the_boot_path() {
+        // The production seam: `admit_and_start` is what a run goes through,
+        // and a declared campaign has to become a live session there rather
+        // than in a test that hand-built one. The broker-handler tests may
+        // already have installed the process-global plane, so this test uses
+        // that legitimate instance when running in parallel.
+        use std::sync::Arc;
+
+        use mvm_contract::assurance::{
+            ApprovalSet, AssuranceId, ObservationScope, RequestedAuthority, Sha256Digest, ToolId,
+        };
+
+        use crate::assurance_session::{
+            CampaignDeclaration, CampaignRequest, DeclaredEdge, default_policy_ceiling,
+            host_assurance_plane, install_host_assurance_plane,
+        };
+        use crate::broker::handlers::host_assurance_v1::HostAssuranceV1Handler;
+
+        let (_env, _home) = host_with_ceiling(Default::default());
+        let dir = tempfile::tempdir().unwrap();
+        let audit = tempfile::tempdir().unwrap();
+        let backend = mvm_runtime::AnyBackend::from_hypervisor("mock");
+        let ledger = InMemoryNonceLedger::new();
+
+        let plane = Arc::new(HostAssuranceV1Handler::new());
+        let _ = install_host_assurance_plane(Arc::clone(&plane));
+
+        let emitter = Arc::new(
+            crate::audit::emitter::AuditEmitter::with_dir(
+                ed25519_dalek::SigningKey::from_bytes(&[31u8; 32]),
+                audit.path(),
+            )
+            .expect("emitter")
+            .with_receipts(),
+        );
+        let id = |raw: &str| AssuranceId::parse(raw).expect("identifier");
+        let declaration = CampaignDeclaration {
+            campaign_id: id("mvm-campaign-1"),
+            trial_id: id("trial-1"),
+            source_run_id: id("scout-1"),
+            source_digest: Sha256Digest::parse(format!("sha256:{}", "3".repeat(64)))
+                .expect("digest"),
+            edges: vec![DeclaredEdge {
+                label: id("undeclared.synthetic.destination"),
+                host: "attacker.example.com".to_string(),
+                port: 443,
+            }],
+            approvals: ApprovalSet::none().with(ToolId::CampaignProbeV1),
+            requested: RequestedAuthority {
+                allowed_tools: vec![ToolId::CampaignProbeV1],
+                observation_scopes: vec![ObservationScope::HostAuditRefs],
+                max_steps: 4,
+                max_output_bytes: 4096,
+                deadline_unix_ms: 0,
+            },
+            grant_ttl_ms: 600_000,
+        };
+        let now_unix_ms = 1_800_000_000_000;
+        let campaign = CampaignRequest {
+            declaration,
+            emitter: Arc::clone(&emitter),
+            policy_ceiling: default_policy_ceiling(),
+            policy: mvm_core::policy::network_policy::NetworkPolicy::deny_all(),
+            backend: "mock".to_string(),
+            now_unix_ms,
+        };
+
+        let service =
+            mvm_core::protocol::broker::ServiceId::parse("host.assurance.v1").expect("service id");
+        let mut synthesis = fixture_input("vm-assurance");
+        synthesis.services = vec![service];
+        let config = mvm_core::vm_backend::VmStartConfig {
+            name: "vm-assurance".into(),
+            rootfs_path: "/store/rootfs.ext4".into(),
+            ..Default::default()
+        };
+
+        let started = admit_and_start(
+            &backend,
+            AdmitAndStartParams {
+                synthesis: &synthesis,
+                config,
+                clock: &SystemClock,
+                ledger: &ledger,
+                host_signer_keys_dir: Some(dir.path()),
+                bundle_ctx: None,
+                variant: Variant::Dev,
+                policy_bundle: None,
+                emitter: Some(&emitter),
+                audit_durability: crate::audit::durability::AuditDurability::BestEffort,
+                assurance: Some(&campaign),
+            },
+        )
+        .expect("admit + boot with a declared campaign");
+
+        let plane = host_assurance_plane().expect("the plane this test installed");
+        let binding = plane
+            .binding_for(&started.vm_id.0)
+            .expect("the boot path opened a session for this VM");
+        // The binding renders the content address in the counterparty's
+        // identifier grammar; it still names exactly this plan.
+        assert_eq!(
+            binding.plan_id.as_str(),
+            started.admitted.plan_id().0.replace(':', "-")
+        );
+        assert_eq!(binding.runtime.backend.as_str(), "mock");
+        // Its citations came from real emission on the boot path.
+        assert!(!binding.audit_refs.is_empty());
+        assert!(!binding.receipt_refs.is_empty());
     }
 
     /// The bound the backend spawns under comes off the signed plan, and only
@@ -3456,6 +3595,7 @@ mod tests {
                 policy_bundle: None,
                 emitter: None,
                 audit_durability: crate::audit::durability::AuditDurability::BestEffort,
+                assurance: None,
             },
         )
         .expect("admit + boot");
@@ -3502,6 +3642,7 @@ mod tests {
                 policy_bundle: None,
                 emitter: Some(&emitter),
                 audit_durability: crate::audit::durability::AuditDurability::BestEffort,
+                assurance: None,
             },
         )
         .expect("admit + boot");
@@ -3551,6 +3692,7 @@ mod tests {
                 policy_bundle: None,
                 emitter: None,
                 audit_durability: crate::audit::durability::AuditDurability::BestEffort,
+                assurance: None,
             },
         )
         .expect_err("the plan's profile and the booting backend disagree");
@@ -3611,6 +3753,7 @@ mod tests {
                 policy_bundle: None,
                 emitter: Some(&emitter),
                 audit_durability: AuditDurability::Required,
+                assurance: None,
             },
         )
         .expect_err("an unauditable sealed run must not boot");
@@ -3664,6 +3807,7 @@ mod tests {
                 policy_bundle: None,
                 emitter: Some(&emitter),
                 audit_durability: AuditDurability::BestEffort,
+                assurance: None,
             },
         )
         .expect("a dev run is not blocked by a broken audit chain");
@@ -3704,6 +3848,7 @@ mod tests {
                 policy_bundle: None,
                 emitter: None,
                 audit_durability: crate::audit::durability::AuditDurability::BestEffort,
+                assurance: None,
             },
         )
         .expect_err("unadmitted volume must refuse");

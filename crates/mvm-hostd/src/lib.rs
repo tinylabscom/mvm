@@ -24,6 +24,7 @@
 //!   workload-exit control listener.
 
 pub mod admission_budget;
+pub mod assurance_session;
 pub mod audit;
 pub mod audit_signer;
 pub mod broker;

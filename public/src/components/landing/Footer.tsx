@@ -60,26 +60,8 @@ export function Footer() {
 
   return (
     <footer className="landing-footer border-t border-glass-border/60 bg-canvas pt-16 lg:pt-20">
-      <div className="landing-footer__inner mx-auto max-w-6xl px-6 sm:px-8">
-        <p className="mb-14 max-w-2xl lowercase font-display text-2xl font-bold leading-tight text-title sm:text-3xl lg:mb-16">
-          no shared kernel. no exceptions.
-        </p>
-      </div>
       <div className="landing-footer__inner mx-auto max-w-6xl px-6 pb-10 sm:px-8 lg:pb-12">
-        <div className="grid gap-12 sm:grid-cols-2 lg:grid-cols-[minmax(0,1.35fr)_repeat(3,minmax(0,1fr))] lg:gap-16">
-          <div className="max-w-xs">
-            <a
-              href={base}
-              className="font-mono text-3xl font-bold text-title no-underline"
-            >
-              mvm
-            </a>
-            <p className="mt-5 max-w-sm text-base leading-7 text-body">
-              Secure, reproducible microVMs for running untrusted code without
-              turning every developer into an infrastructure operator.
-            </p>
-          </div>
-
+        <div className="grid gap-12 sm:grid-cols-2 lg:grid-cols-3 lg:gap-16">
           {linkGroups.map((group) => (
             <nav key={group.title} aria-label={group.title}>
               <h2 className="font-mono text-xs tracking-[0.2em] uppercase text-label">

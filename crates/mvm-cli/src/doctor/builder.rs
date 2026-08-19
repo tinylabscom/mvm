@@ -286,11 +286,20 @@ pub(super) fn builder_transport_check(_plat: Platform) -> Check {
 pub(super) fn builder_backend_check(plat: Platform) -> Check {
     use mvm_build::builder_backend_select::{
         BuilderBackendChoice, MVM_BUILDER_BACKEND_ENV, MVM_LINUX_BUILDER_VM_ENV,
-        auto_detect_default, linux_builder_vm_requested, resolve_env_override,
+        auto_detect_default_for, linux_builder_vm_requested, resolve_env_override,
     };
 
     let env_override = resolve_env_override();
-    let auto = auto_detect_default();
+    // Derive the whole line from the `plat` we were handed, not from a second,
+    // independent probe of the live host. `auto_detect_default()` re-probes;
+    // using it here made the backend half of this line describe the real host
+    // while the availability half described `plat`, so the two could disagree
+    // and the report would be internally inconsistent. It also made the
+    // function untestable for any platform other than the one running it.
+    let auto = auto_detect_default_for(
+        plat,
+        plat.is_hvf_default_tier() && cfg!(target_arch = "aarch64"),
+    );
     let resolved = env_override.unwrap_or(auto);
 
     // Best-effort: detect whether the override came from the
@@ -725,6 +734,39 @@ mod tests {
         assert_eq!(c.name, "builder transport");
         assert!(c.info.contains("unsupported legacy"), "got {:?}", c.info);
         assert!(c.info.contains("qemu"), "got {:?}", c.info);
+    }
+
+    /// The report line must derive entirely from the platform it is handed.
+    ///
+    /// This pins the fix for a real inconsistency: the check used to resolve
+    /// the backend from a second, independent probe of the live host
+    /// (`auto_detect_default()`) while deriving the availability half from the
+    /// `plat` argument, so on a host whose real platform differed from `plat`
+    /// the two halves of one line described different machines.
+    ///
+    /// It is also the assertion that fails on *any* host if that regresses:
+    /// a Linux box with `/dev/kvm` re-probes to qemu, one without re-probes to
+    /// libkrun, so whichever machine runs this, one of the two cases below
+    /// contradicts the live probe.
+    #[cfg(all(target_os = "linux", feature = "builder-vm"))]
+    #[test]
+    fn builder_backend_check_derives_the_backend_from_the_platform_it_is_given() {
+        let mut env = TestEnv::new();
+        env.remove("MVM_BUILDER_BACKEND");
+
+        let native = builder_backend_check(Platform::LinuxNative);
+        assert!(
+            native.info.starts_with("qemu — "),
+            "LinuxNative must resolve qemu regardless of the running host; got: {}",
+            native.info
+        );
+
+        let no_kvm = builder_backend_check(Platform::LinuxNoKvm);
+        assert!(
+            no_kvm.info.starts_with("libkrun — "),
+            "LinuxNoKvm must resolve libkrun regardless of the running host; got: {}",
+            no_kvm.info
+        );
     }
 
     #[cfg(all(target_os = "linux", feature = "builder-vm"))]

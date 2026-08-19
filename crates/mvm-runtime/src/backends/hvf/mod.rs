@@ -18,7 +18,7 @@ pub use mvm_backends::driver::hvf_bootargs::{
 };
 pub use mvm_vmm::vmm::virtio::DiskImage;
 
-pub use boot_smoke::{BootProof, HvfError, MAGIC, boot_smoke, probe_available};
+pub use boot_smoke::{BootFault, BootProof, HvfError, MAGIC, boot_smoke, probe_available};
 pub use console_smoke::{ConsoleProof, console_smoke};
 pub use hv_impl::{HvfHandle, HvfVcpu, HvfVm};
 pub use kernel_boot::{
