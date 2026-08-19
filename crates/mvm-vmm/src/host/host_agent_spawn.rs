@@ -399,6 +399,7 @@ pub fn register_host_agent_services_if_admitted(
             audit_signer_uds_path: None,
             services_bindings: services.to_vec(),
             capability_bindings: vec![],
+            assurance: None,
         },
     )?;
     warm_claim_debug("register_vm_done");
@@ -697,6 +698,7 @@ mod tests {
             ),
             services_bindings: vec![],
             capability_bindings: vec![],
+            assurance: None,
         }
     }
 

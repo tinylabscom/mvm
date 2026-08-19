@@ -116,63 +116,46 @@ impl LedgerRefs {
     }
 }
 
-/// The only part of an admitted plan an assurance record quotes.
-///
-/// The broker records campaign probes but is deliberately never given the
-/// plan — it receives derived bindings, the way `services_bindings` and
-/// `capability_bindings` already travel. These six fields are exactly what a
-/// `PlanAuditEntry` carries, so passing them keeps the records identical on
-/// both routes without widening what the broker is trusted with.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PlanIdentity {
-    pub tenant: mvm_core::plan::TenantId,
-    pub plan_id: mvm_core::plan::PlanId,
-    pub plan_version: u32,
-    pub image_name: String,
-    pub image_sha256: String,
-    /// Labels the plan asks to be copied onto every entry it generates.
-    #[serde(default)]
-    pub audit_labels: std::collections::BTreeMap<String, String>,
-}
+/// Re-exported: the wire type now lives in `mvm-contract`, because the
+/// carrier (`RegisterVm`) is declared there and its producer sits below this
+/// crate.
+pub use mvm_contract::assurance::PlanIdentity;
 
-impl From<&ExecutionPlan> for PlanIdentity {
-    fn from(plan: &ExecutionPlan) -> Self {
-        Self {
-            tenant: plan.tenant.clone(),
-            plan_id: plan.plan_id.clone(),
-            plan_version: plan.plan_version,
-            image_name: plan.image.name.clone(),
-            image_sha256: plan.image.sha256.to_ascii_lowercase(),
-            audit_labels: plan.audit_labels.clone(),
-        }
+/// Build the entry `identity` would produce for `event`.
+///
+/// Mirrors `supervisor::for_plan` field for field; it exists separately
+/// because that one needs a whole plan and this route has none.
+fn entry_for(
+    identity: &PlanIdentity,
+    event: &str,
+    extras: impl IntoIterator<Item = (String, String)>,
+) -> PlanAuditEntry {
+    let mut labels = identity.audit_labels.clone();
+    labels.extend(extras);
+    PlanAuditEntry {
+        timestamp: chrono::Utc::now(),
+        tenant: identity.tenant.clone(),
+        plan_id: identity.plan_id.clone(),
+        plan_version: identity.plan_version,
+        bundle_id: None,
+        bundle_version: None,
+        image_name: identity.image_name.clone(),
+        image_sha256: identity.image_sha256.clone(),
+        event: event.to_string(),
+        labels,
     }
 }
 
-impl PlanIdentity {
-    /// Build the entry this identity would produce for `event`.
-    ///
-    /// Mirrors `supervisor::for_plan` field for field; it exists separately
-    /// because that one needs a whole plan and this route has none.
-    fn entry(
-        &self,
-        event: &str,
-        extras: impl IntoIterator<Item = (String, String)>,
-    ) -> PlanAuditEntry {
-        let mut labels = self.audit_labels.clone();
-        labels.extend(extras);
-        PlanAuditEntry {
-            timestamp: chrono::Utc::now(),
-            tenant: self.tenant.clone(),
-            plan_id: self.plan_id.clone(),
-            plan_version: self.plan_version,
-            bundle_id: None,
-            bundle_version: None,
-            image_name: self.image_name.clone(),
-            image_sha256: self.image_sha256.clone(),
-            event: event.to_string(),
-            labels,
-        }
+/// Derive the identity an admitted plan presents to the ledger.
+#[must_use]
+pub fn identity_of(plan: &ExecutionPlan) -> PlanIdentity {
+    PlanIdentity {
+        tenant: plan.tenant.clone(),
+        plan_id: plan.plan_id.clone(),
+        plan_version: plan.plan_version,
+        image_name: plan.image.name.clone(),
+        image_sha256: plan.image.sha256.to_ascii_lowercase(),
+        audit_labels: plan.audit_labels.clone(),
     }
 }
 
@@ -309,7 +292,7 @@ impl<'a> AssuranceLedger<'a> {
     where
         I: IntoIterator<Item = (String, String)>,
     {
-        let entry = self.identity.entry(event, labels);
+        let entry = entry_for(self.identity, event, labels);
         let emitted = self
             .sink
             .record(&entry, receipt)
