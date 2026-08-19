@@ -1,0 +1,2717 @@
+{
+  "schema_version": 5,
+  "lane": "prepared_cold",
+  "warmup": 2,
+  "stats": {
+    "dispatch_window_ms": {
+      "samples": 20,
+      "p50": 171.523689,
+      "p95": 176.01775945,
+      "p99": 178.04064308999997
+    },
+    "total_ms": {
+      "samples": 20,
+      "p50": 795.078485,
+      "p95": 924.2901114000001,
+      "p99": 1095.6763646799998
+    },
+    "resolve_ms": {
+      "samples": 20,
+      "p50": 0.009660499999999999,
+      "p95": 0.010824450000000001,
+      "p99": 0.011028890000000001
+    },
+    "drives_ms": {
+      "samples": 20,
+      "p50": 21.468226,
+      "p95": 21.644622499999997,
+      "p99": 22.2174117
+    },
+    "admit_ms": {
+      "samples": 20,
+      "p50": 414.545338,
+      "p95": 489.6814865500002,
+      "p99": 709.6138669099997
+    },
+    "backend_start_ms": {
+      "samples": 20,
+      "p50": 170.2912755,
+      "p95": 174.75854545,
+      "p99": 176.64265308999998
+    },
+    "vsock_wait_ms": {
+      "samples": 20,
+      "p50": 1.1371015,
+      "p95": 1.3695108999999999,
+      "p99": 1.42004938
+    },
+    "command_ms": {
+      "samples": 20,
+      "p50": 53.589845499999996,
+      "p95": 54.1417571,
+      "p99": 54.28644742
+    },
+    "teardown_ms": {
+      "samples": 20,
+      "p50": 120.671924,
+      "p95": 196.61253635,
+      "p99": 206.80306247
+    },
+    "sub_phases": [
+      [
+        "mount_fingerprint",
+        {
+          "samples": 0,
+          "p50": null,
+          "p95": null,
+          "p99": null
+        }
+      ],
+      [
+        "mount_cache_lookup",
+        {
+          "samples": 0,
+          "p50": null,
+          "p95": null,
+          "p99": null
+        }
+      ],
+      [
+        "mount_materialize",
+        {
+          "samples": 0,
+          "p50": null,
+          "p95": null,
+          "p99": null
+        }
+      ],
+      [
+        "artifact_verify",
+        {
+          "samples": 20,
+          "p50": 0.0131585,
+          "p95": 0.0136687,
+          "p99": 0.01369454
+        }
+      ],
+      [
+        "vmm_create",
+        {
+          "samples": 20,
+          "p50": 170.28027049999997,
+          "p95": 174.7507171,
+          "p99": 176.62949941999997
+        }
+      ],
+      [
+        "guest_kernel_entry",
+        {
+          "samples": 20,
+          "p50": 0.028805499999999998,
+          "p95": 0.037023000000000014,
+          "p99": 0.049897399999999974
+        }
+      ],
+      [
+        "agent_auth",
+        {
+          "samples": 20,
+          "p50": 1.085523,
+          "p95": 1.3123761,
+          "p99": 1.36132162
+        }
+      ],
+      [
+        "first_dispatch",
+        {
+          "samples": 20,
+          "p50": 0.16733549999999997,
+          "p95": 0.25552854999999997,
+          "p99": 0.27432410999999995
+        }
+      ],
+      [
+        "cleanup_handoff",
+        {
+          "samples": 20,
+          "p50": 120.50274999999999,
+          "p95": 196.4444085,
+          "p99": 206.6341009
+        }
+      ],
+      [
+        "stop_transient",
+        {
+          "samples": 20,
+          "p50": 119.7029895,
+          "p95": 195.50351380000004,
+          "p99": 205.75964996
+        }
+      ],
+      [
+        "pool_replenish",
+        {
+          "samples": 0,
+          "p50": null,
+          "p95": null,
+          "p99": null
+        }
+      ],
+      [
+        "state_remove",
+        {
+          "samples": 20,
+          "p50": 0.8449985,
+          "p95": 0.9521382500000001,
+          "p99": 1.0663852499999997
+        }
+      ]
+    ],
+    "backend_phases": [
+      [
+        "endpoint_spawn",
+        {
+          "samples": 20,
+          "p50": 0.004543999999999999,
+          "p95": 0.0187044,
+          "p99": 0.020564879999999997
+        }
+      ],
+      [
+        "spec_assembly",
+        {
+          "samples": 20,
+          "p50": 0.065804,
+          "p95": 0.0816479,
+          "p99": 0.08807597999999998
+        }
+      ],
+      [
+        "driver_boot",
+        {
+          "samples": 20,
+          "p50": 139.533661,
+          "p95": 142.2639937,
+          "p99": 142.52561154
+        }
+      ],
+      [
+        "console_stream_start",
+        {
+          "samples": 20,
+          "p50": 3.784465,
+          "p95": 5.880396500000002,
+          "p99": 6.834036899999999
+        }
+      ],
+      [
+        "activate_workload",
+        {
+          "samples": 20,
+          "p50": 26.955268000000004,
+          "p95": 30.29155455,
+          "p99": 31.38654051
+        }
+      ],
+      [
+        "broker_register",
+        {
+          "samples": 20,
+          "p50": 0.078596,
+          "p95": 0.11939159999999999,
+          "p99": 0.12355031999999999
+        }
+      ],
+      [
+        "driver_boot.vmm_start",
+        {
+          "samples": 20,
+          "p50": 42.834320000000005,
+          "p95": 43.13167085,
+          "p99": 43.19418617
+        }
+      ],
+      [
+        "driver_boot.guest_boot",
+        {
+          "samples": 20,
+          "p50": 96.603069,
+          "p95": 99.3540306,
+          "p99": 99.51628452
+        }
+      ]
+    ],
+    "warm_ready_resident_bytes": {
+      "samples": 0,
+      "p50": null,
+      "p95": null,
+      "p99": null
+    },
+    "warm_first_command_resident_growth_bytes": {
+      "samples": 0,
+      "p50": null,
+      "p95": null,
+      "p99": null
+    },
+    "warm_first_command_resident_reclaimed_bytes": {
+      "samples": 0,
+      "p50": null,
+      "p95": null,
+      "p99": null
+    },
+    "warm_first_command_minor_faults": {
+      "samples": 0,
+      "p50": null,
+      "p95": null,
+      "p99": null
+    },
+    "warm_first_command_major_faults": {
+      "samples": 0,
+      "p50": null,
+      "p95": null,
+      "p99": null
+    }
+  },
+  "raw": [
+    {
+      "lane": "prepared_cold",
+      "number": 1,
+      "context": {
+        "backend": "firecracker",
+        "os": "linux",
+        "arch": "x86_64",
+        "mvm_version": "0.18.0",
+        "vmm_version": null,
+        "root_strategy": "block_ext4",
+        "sizing": {
+          "cpus": 2,
+          "memory_mib": 512,
+          "mem_initial_mib": null
+        },
+        "filesystem": "ext4",
+        "artifacts": {
+          "kernel": "/root/.mvm/cache/builder-vm/x86_64/kernels/workload/vmlinux",
+          "initramfs": "/root/.mvm/cache/initramfs/0.18.0/x86_64/initramfs.cpio.gz",
+          "runtime_overlay": "/root/.mvm/cache/runtime-overlay/0.18.0/x86_64/overlay.ext4",
+          "rootfs": "/root/.mvm/cache/oci/rootfs/79ff19e9084a00eece421b2523fb93e22d730e2c0e525905de047e848e56d95f-0.18.0-guest-dcedf73f4f9ac92c/rootfs.ext4"
+        },
+        "digests": {
+          "kernel_sha256": "5996ed9e1a08398ef40d3f1c3b18e416dff933d7df2aaad146b083b32a0a7e0a",
+          "initramfs_sha256": "4d6ae0c849c03ef6c85260b8a54b9d6e1133685c402d9aebdd5544ae4a9ca876",
+          "runtime_overlay_sha256": "0cdf54679552245ca246f08ecebf37f01ff1cdf6e3b93ec4c7272f09fa33e102",
+          "rootfs_sha256": "cb872dc37e1210862d2f4471bfccae8f3cb2bb83f3da92fc4d4d4d6f5dbff884"
+        },
+        "measurements": {
+          "kernel_bytes": 4310016,
+          "initramfs_bytes": 1190544,
+          "runtime_overlay_bytes": 9908224,
+          "rootfs_bytes": 10317824,
+          "kernel_config": null
+        }
+      },
+      "cache": {
+        "artifacts_cached": true,
+        "mount": "not_used"
+      },
+      "work": {
+        "image_pull": false,
+        "image_build": false,
+        "mount_materialize": false,
+        "warm_claim": false,
+        "artifact_bytes_hashed": 0,
+        "process_table_scans": 0
+      },
+      "launch_mode": "cold",
+      "phases": {
+        "launch_mode": "cold",
+        "resolve_ms": 0.010158,
+        "drives_ms": 21.444871,
+        "admit_ms": 406.30535000000003,
+        "pool_wait_ms": 0.0,
+        "claim_ms": 0.0,
+        "backend_start_ms": 169.16306600000001,
+        "vsock_wait_ms": 1.029672,
+        "warm_window_ms": 170.19273800000002,
+        "command_ms": 53.752559,
+        "teardown_ms": 99.08285699999999,
+        "total_ms": 750.788533
+      },
+      "sub_phases": {
+        "mount_fingerprint_ms": null,
+        "mount_cache_lookup_ms": null,
+        "mount_materialize_ms": null,
+        "artifact_verify_ms": 0.013276,
+        "vmm_create_ms": 169.14959,
+        "guest_kernel_entry_ms": 0.027725,
+        "agent_auth_ms": 0.984072,
+        "first_dispatch_ms": 0.149511,
+        "cleanup_handoff_ms": 98.910566,
+        "stop_transient_ms": 98.165762,
+        "stop_attach_ms": 0.019188999999999998,
+        "stop_endpoint_reaping_ms": 0.033204000000000004,
+        "stop_driver_kill_ms": 30.411555,
+        "stop_console_cleanup_ms": 67.69806,
+        "stop_supervisor_signal_ms": null,
+        "stop_pid_disappearance_ms": null,
+        "stop_force_kill_wait_ms": null,
+        "stop_state_cleanup_ms": null,
+        "pool_replenish_ms": null,
+        "state_remove_ms": 0.744235
+      },
+      "warm_first_command_memory": null,
+      "backend_phases": [
+        {
+          "name": "endpoint_spawn",
+          "ms": 0.004438
+        },
+        {
+          "name": "spec_assembly",
+          "ms": 0.066188
+        },
+        {
+          "name": "driver_boot",
+          "ms": 138.967946
+        },
+        {
+          "name": "console_stream_start",
+          "ms": 3.756227
+        },
+        {
+          "name": "activate_workload",
+          "ms": 25.981561
+        },
+        {
+          "name": "broker_register",
+          "ms": 0.079793
+        },
+        {
+          "name": "driver_boot.vmm_start",
+          "ms": 43.057527
+        },
+        {
+          "name": "driver_boot.guest_boot",
+          "ms": 95.82527400000001
+        }
+      ],
+      "degraded": []
+    },
+    {
+      "lane": "prepared_cold",
+      "number": 2,
+      "context": {
+        "backend": "firecracker",
+        "os": "linux",
+        "arch": "x86_64",
+        "mvm_version": "0.18.0",
+        "vmm_version": null,
+        "root_strategy": "block_ext4",
+        "sizing": {
+          "cpus": 2,
+          "memory_mib": 512,
+          "mem_initial_mib": null
+        },
+        "filesystem": "ext4",
+        "artifacts": {
+          "kernel": "/root/.mvm/cache/builder-vm/x86_64/kernels/workload/vmlinux",
+          "initramfs": "/root/.mvm/cache/initramfs/0.18.0/x86_64/initramfs.cpio.gz",
+          "runtime_overlay": "/root/.mvm/cache/runtime-overlay/0.18.0/x86_64/overlay.ext4",
+          "rootfs": "/root/.mvm/cache/oci/rootfs/79ff19e9084a00eece421b2523fb93e22d730e2c0e525905de047e848e56d95f-0.18.0-guest-dcedf73f4f9ac92c/rootfs.ext4"
+        },
+        "digests": {
+          "kernel_sha256": "5996ed9e1a08398ef40d3f1c3b18e416dff933d7df2aaad146b083b32a0a7e0a",
+          "initramfs_sha256": "4d6ae0c849c03ef6c85260b8a54b9d6e1133685c402d9aebdd5544ae4a9ca876",
+          "runtime_overlay_sha256": "0cdf54679552245ca246f08ecebf37f01ff1cdf6e3b93ec4c7272f09fa33e102",
+          "rootfs_sha256": "cb872dc37e1210862d2f4471bfccae8f3cb2bb83f3da92fc4d4d4d6f5dbff884"
+        },
+        "measurements": {
+          "kernel_bytes": 4310016,
+          "initramfs_bytes": 1190544,
+          "runtime_overlay_bytes": 9908224,
+          "rootfs_bytes": 10317824,
+          "kernel_config": null
+        }
+      },
+      "cache": {
+        "artifacts_cached": true,
+        "mount": "not_used"
+      },
+      "work": {
+        "image_pull": false,
+        "image_build": false,
+        "mount_materialize": false,
+        "warm_claim": false,
+        "artifact_bytes_hashed": 0,
+        "process_table_scans": 0
+      },
+      "launch_mode": "cold",
+      "phases": {
+        "launch_mode": "cold",
+        "resolve_ms": 0.008817,
+        "drives_ms": 21.286507999999998,
+        "admit_ms": 397.923171,
+        "pool_wait_ms": 0.0,
+        "claim_ms": 0.0,
+        "backend_start_ms": 171.685959,
+        "vsock_wait_ms": 1.175739,
+        "warm_window_ms": 172.86169800000002,
+        "command_ms": 54.132238,
+        "teardown_ms": 128.75906700000002,
+        "total_ms": 774.971499
+      },
+      "sub_phases": {
+        "mount_fingerprint_ms": null,
+        "mount_cache_lookup_ms": null,
+        "mount_materialize_ms": null,
+        "artifact_verify_ms": 0.013701,
+        "vmm_create_ms": 171.672977,
+        "guest_kernel_entry_ms": 0.027959,
+        "agent_auth_ms": 1.1249859999999998,
+        "first_dispatch_ms": 0.24153,
+        "cleanup_handoff_ms": 128.580205,
+        "stop_transient_ms": 127.72914099999998,
+        "stop_attach_ms": 0.020215,
+        "stop_endpoint_reaping_ms": 0.035964,
+        "stop_driver_kill_ms": 28.6643,
+        "stop_console_cleanup_ms": 99.004939,
+        "stop_supervisor_signal_ms": null,
+        "stop_pid_disappearance_ms": null,
+        "stop_force_kill_wait_ms": null,
+        "stop_state_cleanup_ms": null,
+        "pool_replenish_ms": null,
+        "state_remove_ms": 0.850386
+      },
+      "warm_first_command_memory": null,
+      "backend_phases": [
+        {
+          "name": "endpoint_spawn",
+          "ms": 0.02103
+        },
+        {
+          "name": "spec_assembly",
+          "ms": 0.05312
+        },
+        {
+          "name": "driver_boot",
+          "ms": 142.06460900000002
+        },
+        {
+          "name": "console_stream_start",
+          "ms": 3.930846
+        },
+        {
+          "name": "activate_workload",
+          "ms": 25.239977
+        },
+        {
+          "name": "broker_register",
+          "ms": 0.074082
+        },
+        {
+          "name": "driver_boot.vmm_start",
+          "ms": 42.622113000000006
+        },
+        {
+          "name": "driver_boot.guest_boot",
+          "ms": 99.343356
+        }
+      ],
+      "degraded": []
+    },
+    {
+      "lane": "prepared_cold",
+      "number": 3,
+      "context": {
+        "backend": "firecracker",
+        "os": "linux",
+        "arch": "x86_64",
+        "mvm_version": "0.18.0",
+        "vmm_version": null,
+        "root_strategy": "block_ext4",
+        "sizing": {
+          "cpus": 2,
+          "memory_mib": 512,
+          "mem_initial_mib": null
+        },
+        "filesystem": "ext4",
+        "artifacts": {
+          "kernel": "/root/.mvm/cache/builder-vm/x86_64/kernels/workload/vmlinux",
+          "initramfs": "/root/.mvm/cache/initramfs/0.18.0/x86_64/initramfs.cpio.gz",
+          "runtime_overlay": "/root/.mvm/cache/runtime-overlay/0.18.0/x86_64/overlay.ext4",
+          "rootfs": "/root/.mvm/cache/oci/rootfs/79ff19e9084a00eece421b2523fb93e22d730e2c0e525905de047e848e56d95f-0.18.0-guest-dcedf73f4f9ac92c/rootfs.ext4"
+        },
+        "digests": {
+          "kernel_sha256": "5996ed9e1a08398ef40d3f1c3b18e416dff933d7df2aaad146b083b32a0a7e0a",
+          "initramfs_sha256": "4d6ae0c849c03ef6c85260b8a54b9d6e1133685c402d9aebdd5544ae4a9ca876",
+          "runtime_overlay_sha256": "0cdf54679552245ca246f08ecebf37f01ff1cdf6e3b93ec4c7272f09fa33e102",
+          "rootfs_sha256": "cb872dc37e1210862d2f4471bfccae8f3cb2bb83f3da92fc4d4d4d6f5dbff884"
+        },
+        "measurements": {
+          "kernel_bytes": 4310016,
+          "initramfs_bytes": 1190544,
+          "runtime_overlay_bytes": 9908224,
+          "rootfs_bytes": 10317824,
+          "kernel_config": null
+        }
+      },
+      "cache": {
+        "artifacts_cached": true,
+        "mount": "not_used"
+      },
+      "work": {
+        "image_pull": false,
+        "image_build": false,
+        "mount_materialize": false,
+        "warm_claim": false,
+        "artifact_bytes_hashed": 0,
+        "process_table_scans": 0
+      },
+      "launch_mode": "cold",
+      "phases": {
+        "launch_mode": "cold",
+        "resolve_ms": 0.008251,
+        "drives_ms": 21.505554999999998,
+        "admit_ms": 412.147578,
+        "pool_wait_ms": 0.0,
+        "claim_ms": 0.0,
+        "backend_start_ms": 170.250649,
+        "vsock_wait_ms": 1.220286,
+        "warm_window_ms": 171.470935,
+        "command_ms": 53.684764,
+        "teardown_ms": 122.32049500000001,
+        "total_ms": 781.1375780000001
+      },
+      "sub_phases": {
+        "mount_fingerprint_ms": null,
+        "mount_cache_lookup_ms": null,
+        "mount_materialize_ms": null,
+        "artifact_verify_ms": 0.013035,
+        "vmm_create_ms": 170.23574499999998,
+        "guest_kernel_entry_ms": 0.028614999999999998,
+        "agent_auth_ms": 1.170696,
+        "first_dispatch_ms": 0.17515,
+        "cleanup_handoff_ms": 122.151922,
+        "stop_transient_ms": 121.377656,
+        "stop_attach_ms": 0.019222,
+        "stop_endpoint_reaping_ms": 0.030920999999999997,
+        "stop_driver_kill_ms": 29.083883,
+        "stop_console_cleanup_ms": 92.240447,
+        "stop_supervisor_signal_ms": null,
+        "stop_pid_disappearance_ms": null,
+        "stop_force_kill_wait_ms": null,
+        "stop_state_cleanup_ms": null,
+        "pool_replenish_ms": null,
+        "state_remove_ms": 0.773651
+      },
+      "warm_first_command_memory": null,
+      "backend_phases": [
+        {
+          "name": "endpoint_spawn",
+          "ms": 0.0042699999999999995
+        },
+        {
+          "name": "spec_assembly",
+          "ms": 0.053402
+        },
+        {
+          "name": "driver_boot",
+          "ms": 136.437332
+        },
+        {
+          "name": "console_stream_start",
+          "ms": 3.766788
+        },
+        {
+          "name": "activate_workload",
+          "ms": 29.575407000000002
+        },
+        {
+          "name": "broker_register",
+          "ms": 0.081263
+        },
+        {
+          "name": "driver_boot.vmm_start",
+          "ms": 42.769473000000005
+        },
+        {
+          "name": "driver_boot.guest_boot",
+          "ms": 93.595752
+        }
+      ],
+      "degraded": []
+    },
+    {
+      "lane": "prepared_cold",
+      "number": 4,
+      "context": {
+        "backend": "firecracker",
+        "os": "linux",
+        "arch": "x86_64",
+        "mvm_version": "0.18.0",
+        "vmm_version": null,
+        "root_strategy": "block_ext4",
+        "sizing": {
+          "cpus": 2,
+          "memory_mib": 512,
+          "mem_initial_mib": null
+        },
+        "filesystem": "ext4",
+        "artifacts": {
+          "kernel": "/root/.mvm/cache/builder-vm/x86_64/kernels/workload/vmlinux",
+          "initramfs": "/root/.mvm/cache/initramfs/0.18.0/x86_64/initramfs.cpio.gz",
+          "runtime_overlay": "/root/.mvm/cache/runtime-overlay/0.18.0/x86_64/overlay.ext4",
+          "rootfs": "/root/.mvm/cache/oci/rootfs/79ff19e9084a00eece421b2523fb93e22d730e2c0e525905de047e848e56d95f-0.18.0-guest-dcedf73f4f9ac92c/rootfs.ext4"
+        },
+        "digests": {
+          "kernel_sha256": "5996ed9e1a08398ef40d3f1c3b18e416dff933d7df2aaad146b083b32a0a7e0a",
+          "initramfs_sha256": "4d6ae0c849c03ef6c85260b8a54b9d6e1133685c402d9aebdd5544ae4a9ca876",
+          "runtime_overlay_sha256": "0cdf54679552245ca246f08ecebf37f01ff1cdf6e3b93ec4c7272f09fa33e102",
+          "rootfs_sha256": "cb872dc37e1210862d2f4471bfccae8f3cb2bb83f3da92fc4d4d4d6f5dbff884"
+        },
+        "measurements": {
+          "kernel_bytes": 4310016,
+          "initramfs_bytes": 1190544,
+          "runtime_overlay_bytes": 9908224,
+          "rootfs_bytes": 10317824,
+          "kernel_config": null
+        }
+      },
+      "cache": {
+        "artifacts_cached": true,
+        "mount": "not_used"
+      },
+      "work": {
+        "image_pull": false,
+        "image_build": false,
+        "mount_materialize": false,
+        "warm_claim": false,
+        "artifact_bytes_hashed": 0,
+        "process_table_scans": 0
+      },
+      "launch_mode": "cold",
+      "phases": {
+        "launch_mode": "cold",
+        "resolve_ms": 0.010325,
+        "drives_ms": 22.360609,
+        "admit_ms": 764.5969620000001,
+        "pool_wait_ms": 0.0,
+        "claim_ms": 0.0,
+        "backend_start_ms": 177.11368,
+        "vsock_wait_ms": 1.432684,
+        "warm_window_ms": 178.546364,
+        "command_ms": 54.32262,
+        "teardown_ms": 118.686048,
+        "total_ms": 1138.522928
+      },
+      "sub_phases": {
+        "mount_fingerprint_ms": null,
+        "mount_cache_lookup_ms": null,
+        "mount_materialize_ms": null,
+        "artifact_verify_ms": 0.009274,
+        "vmm_create_ms": 177.09919499999998,
+        "guest_kernel_entry_ms": 0.035253,
+        "agent_auth_ms": 1.373558,
+        "first_dispatch_ms": 0.12569100000000002,
+        "cleanup_handoff_ms": 118.515384,
+        "stop_transient_ms": 117.62247500000001,
+        "stop_attach_ms": 0.019887000000000002,
+        "stop_endpoint_reaping_ms": 0.031582,
+        "stop_driver_kill_ms": 29.100312,
+        "stop_console_cleanup_ms": 88.467033,
+        "stop_supervisor_signal_ms": null,
+        "stop_pid_disappearance_ms": null,
+        "stop_force_kill_wait_ms": null,
+        "stop_state_cleanup_ms": null,
+        "pool_replenish_ms": null,
+        "state_remove_ms": 0.892138
+      },
+      "warm_first_command_memory": null,
+      "backend_phases": [
+        {
+          "name": "endpoint_spawn",
+          "ms": 0.004453
+        },
+        {
+          "name": "spec_assembly",
+          "ms": 0.06679800000000001
+        },
+        {
+          "name": "driver_boot",
+          "ms": 141.638559
+        },
+        {
+          "name": "console_stream_start",
+          "ms": 7.072447
+        },
+        {
+          "name": "activate_workload",
+          "ms": 27.952007000000002
+        },
+        {
+          "name": "broker_register",
+          "ms": 0.073034
+        },
+        {
+          "name": "driver_boot.vmm_start",
+          "ms": 42.896468
+        },
+        {
+          "name": "driver_boot.guest_boot",
+          "ms": 98.633703
+        }
+      ],
+      "degraded": []
+    },
+    {
+      "lane": "prepared_cold",
+      "number": 5,
+      "context": {
+        "backend": "firecracker",
+        "os": "linux",
+        "arch": "x86_64",
+        "mvm_version": "0.18.0",
+        "vmm_version": null,
+        "root_strategy": "block_ext4",
+        "sizing": {
+          "cpus": 2,
+          "memory_mib": 512,
+          "mem_initial_mib": null
+        },
+        "filesystem": "ext4",
+        "artifacts": {
+          "kernel": "/root/.mvm/cache/builder-vm/x86_64/kernels/workload/vmlinux",
+          "initramfs": "/root/.mvm/cache/initramfs/0.18.0/x86_64/initramfs.cpio.gz",
+          "runtime_overlay": "/root/.mvm/cache/runtime-overlay/0.18.0/x86_64/overlay.ext4",
+          "rootfs": "/root/.mvm/cache/oci/rootfs/79ff19e9084a00eece421b2523fb93e22d730e2c0e525905de047e848e56d95f-0.18.0-guest-dcedf73f4f9ac92c/rootfs.ext4"
+        },
+        "digests": {
+          "kernel_sha256": "5996ed9e1a08398ef40d3f1c3b18e416dff933d7df2aaad146b083b32a0a7e0a",
+          "initramfs_sha256": "4d6ae0c849c03ef6c85260b8a54b9d6e1133685c402d9aebdd5544ae4a9ca876",
+          "runtime_overlay_sha256": "0cdf54679552245ca246f08ecebf37f01ff1cdf6e3b93ec4c7272f09fa33e102",
+          "rootfs_sha256": "cb872dc37e1210862d2f4471bfccae8f3cb2bb83f3da92fc4d4d4d6f5dbff884"
+        },
+        "measurements": {
+          "kernel_bytes": 4310016,
+          "initramfs_bytes": 1190544,
+          "runtime_overlay_bytes": 9908224,
+          "rootfs_bytes": 10317824,
+          "kernel_config": null
+        }
+      },
+      "cache": {
+        "artifacts_cached": true,
+        "mount": "not_used"
+      },
+      "work": {
+        "image_pull": false,
+        "image_build": false,
+        "mount_materialize": false,
+        "warm_claim": false,
+        "artifact_bytes_hashed": 0,
+        "process_table_scans": 0
+      },
+      "launch_mode": "cold",
+      "phases": {
+        "launch_mode": "cold",
+        "resolve_ms": 0.008515,
+        "drives_ms": 21.357705000000003,
+        "admit_ms": 410.991047,
+        "pool_wait_ms": 0.0,
+        "claim_ms": 0.0,
+        "backend_start_ms": 169.542249,
+        "vsock_wait_ms": 1.041333,
+        "warm_window_ms": 170.583582,
+        "command_ms": 52.911312,
+        "teardown_ms": 106.13153799999999,
+        "total_ms": 761.983699
+      },
+      "sub_phases": {
+        "mount_fingerprint_ms": null,
+        "mount_cache_lookup_ms": null,
+        "mount_materialize_ms": null,
+        "artifact_verify_ms": 0.013348,
+        "vmm_create_ms": 169.528053,
+        "guest_kernel_entry_ms": 0.028218999999999998,
+        "agent_auth_ms": 0.9916630000000001,
+        "first_dispatch_ms": 0.141817,
+        "cleanup_handoff_ms": 105.970991,
+        "stop_transient_ms": 105.222224,
+        "stop_attach_ms": 0.017772,
+        "stop_endpoint_reaping_ms": 0.030312000000000002,
+        "stop_driver_kill_ms": 32.407224,
+        "stop_console_cleanup_ms": 72.76295400000001,
+        "stop_supervisor_signal_ms": null,
+        "stop_pid_disappearance_ms": null,
+        "stop_force_kill_wait_ms": null,
+        "stop_state_cleanup_ms": null,
+        "pool_replenish_ms": null,
+        "state_remove_ms": 0.748067
+      },
+      "warm_first_command_memory": null,
+      "backend_phases": [
+        {
+          "name": "endpoint_spawn",
+          "ms": 0.0171
+        },
+        {
+          "name": "spec_assembly",
+          "ms": 0.052648
+        },
+        {
+          "name": "driver_boot",
+          "ms": 140.57571399999998
+        },
+        {
+          "name": "console_stream_start",
+          "ms": 3.840666
+        },
+        {
+          "name": "activate_workload",
+          "ms": 24.668492
+        },
+        {
+          "name": "broker_register",
+          "ms": 0.081957
+        },
+        {
+          "name": "driver_boot.vmm_start",
+          "ms": 42.820082
+        },
+        {
+          "name": "driver_boot.guest_boot",
+          "ms": 97.663808
+        }
+      ],
+      "degraded": []
+    },
+    {
+      "lane": "prepared_cold",
+      "number": 6,
+      "context": {
+        "backend": "firecracker",
+        "os": "linux",
+        "arch": "x86_64",
+        "mvm_version": "0.18.0",
+        "vmm_version": null,
+        "root_strategy": "block_ext4",
+        "sizing": {
+          "cpus": 2,
+          "memory_mib": 512,
+          "mem_initial_mib": null
+        },
+        "filesystem": "ext4",
+        "artifacts": {
+          "kernel": "/root/.mvm/cache/builder-vm/x86_64/kernels/workload/vmlinux",
+          "initramfs": "/root/.mvm/cache/initramfs/0.18.0/x86_64/initramfs.cpio.gz",
+          "runtime_overlay": "/root/.mvm/cache/runtime-overlay/0.18.0/x86_64/overlay.ext4",
+          "rootfs": "/root/.mvm/cache/oci/rootfs/79ff19e9084a00eece421b2523fb93e22d730e2c0e525905de047e848e56d95f-0.18.0-guest-dcedf73f4f9ac92c/rootfs.ext4"
+        },
+        "digests": {
+          "kernel_sha256": "5996ed9e1a08398ef40d3f1c3b18e416dff933d7df2aaad146b083b32a0a7e0a",
+          "initramfs_sha256": "4d6ae0c849c03ef6c85260b8a54b9d6e1133685c402d9aebdd5544ae4a9ca876",
+          "runtime_overlay_sha256": "0cdf54679552245ca246f08ecebf37f01ff1cdf6e3b93ec4c7272f09fa33e102",
+          "rootfs_sha256": "cb872dc37e1210862d2f4471bfccae8f3cb2bb83f3da92fc4d4d4d6f5dbff884"
+        },
+        "measurements": {
+          "kernel_bytes": 4310016,
+          "initramfs_bytes": 1190544,
+          "runtime_overlay_bytes": 9908224,
+          "rootfs_bytes": 10317824,
+          "kernel_config": null
+        }
+      },
+      "cache": {
+        "artifacts_cached": true,
+        "mount": "not_used"
+      },
+      "work": {
+        "image_pull": false,
+        "image_build": false,
+        "mount_materialize": false,
+        "warm_claim": false,
+        "artifact_bytes_hashed": 0,
+        "process_table_scans": 0
+      },
+      "launch_mode": "cold",
+      "phases": {
+        "launch_mode": "cold",
+        "resolve_ms": 0.008252,
+        "drives_ms": 21.431128,
+        "admit_ms": 400.236027,
+        "pool_wait_ms": 0.0,
+        "claim_ms": 0.0,
+        "backend_start_ms": 169.609075,
+        "vsock_wait_ms": 1.098145,
+        "warm_window_ms": 170.70722,
+        "command_ms": 53.167916000000005,
+        "teardown_ms": 189.277787,
+        "total_ms": 834.82833
+      },
+      "sub_phases": {
+        "mount_fingerprint_ms": null,
+        "mount_cache_lookup_ms": null,
+        "mount_materialize_ms": null,
+        "artifact_verify_ms": 0.009534,
+        "vmm_create_ms": 169.594211,
+        "guest_kernel_entry_ms": 0.035237000000000004,
+        "agent_auth_ms": 1.039693,
+        "first_dispatch_ms": 0.148754,
+        "cleanup_handoff_ms": 189.087634,
+        "stop_transient_ms": 188.24897700000002,
+        "stop_attach_ms": 0.021608000000000002,
+        "stop_endpoint_reaping_ms": 0.035531,
+        "stop_driver_kill_ms": 74.231368,
+        "stop_console_cleanup_ms": 113.95664699999999,
+        "stop_supervisor_signal_ms": null,
+        "stop_pid_disappearance_ms": null,
+        "stop_force_kill_wait_ms": null,
+        "stop_state_cleanup_ms": null,
+        "pool_replenish_ms": null,
+        "state_remove_ms": 0.837943
+      },
+      "warm_first_command_memory": null,
+      "backend_phases": [
+        {
+          "name": "endpoint_spawn",
+          "ms": 0.004556
+        },
+        {
+          "name": "spec_assembly",
+          "ms": 0.054124
+        },
+        {
+          "name": "driver_boot",
+          "ms": 138.50035
+        },
+        {
+          "name": "console_stream_start",
+          "ms": 3.744924
+        },
+        {
+          "name": "activate_workload",
+          "ms": 26.898344
+        },
+        {
+          "name": "broker_register",
+          "ms": 0.072885
+        },
+        {
+          "name": "driver_boot.vmm_start",
+          "ms": 43.08898
+        },
+        {
+          "name": "driver_boot.guest_boot",
+          "ms": 95.34453599999999
+        }
+      ],
+      "degraded": []
+    },
+    {
+      "lane": "prepared_cold",
+      "number": 7,
+      "context": {
+        "backend": "firecracker",
+        "os": "linux",
+        "arch": "x86_64",
+        "mvm_version": "0.18.0",
+        "vmm_version": null,
+        "root_strategy": "block_ext4",
+        "sizing": {
+          "cpus": 2,
+          "memory_mib": 512,
+          "mem_initial_mib": null
+        },
+        "filesystem": "ext4",
+        "artifacts": {
+          "kernel": "/root/.mvm/cache/builder-vm/x86_64/kernels/workload/vmlinux",
+          "initramfs": "/root/.mvm/cache/initramfs/0.18.0/x86_64/initramfs.cpio.gz",
+          "runtime_overlay": "/root/.mvm/cache/runtime-overlay/0.18.0/x86_64/overlay.ext4",
+          "rootfs": "/root/.mvm/cache/oci/rootfs/79ff19e9084a00eece421b2523fb93e22d730e2c0e525905de047e848e56d95f-0.18.0-guest-dcedf73f4f9ac92c/rootfs.ext4"
+        },
+        "digests": {
+          "kernel_sha256": "5996ed9e1a08398ef40d3f1c3b18e416dff933d7df2aaad146b083b32a0a7e0a",
+          "initramfs_sha256": "4d6ae0c849c03ef6c85260b8a54b9d6e1133685c402d9aebdd5544ae4a9ca876",
+          "runtime_overlay_sha256": "0cdf54679552245ca246f08ecebf37f01ff1cdf6e3b93ec4c7272f09fa33e102",
+          "rootfs_sha256": "cb872dc37e1210862d2f4471bfccae8f3cb2bb83f3da92fc4d4d4d6f5dbff884"
+        },
+        "measurements": {
+          "kernel_bytes": 4310016,
+          "initramfs_bytes": 1190544,
+          "runtime_overlay_bytes": 9908224,
+          "rootfs_bytes": 10317824,
+          "kernel_config": null
+        }
+      },
+      "cache": {
+        "artifacts_cached": true,
+        "mount": "not_used"
+      },
+      "work": {
+        "image_pull": false,
+        "image_build": false,
+        "mount_materialize": false,
+        "warm_claim": false,
+        "artifact_bytes_hashed": 0,
+        "process_table_scans": 0
+      },
+      "launch_mode": "cold",
+      "phases": {
+        "launch_mode": "cold",
+        "resolve_ms": 0.007887,
+        "drives_ms": 21.491581,
+        "admit_ms": 475.085743,
+        "pool_wait_ms": 0.0,
+        "claim_ms": 0.0,
+        "backend_start_ms": 170.55902,
+        "vsock_wait_ms": 1.063258,
+        "warm_window_ms": 171.622278,
+        "command_ms": 53.912659000000005,
+        "teardown_ms": 111.592399,
+        "total_ms": 833.712547
+      },
+      "sub_phases": {
+        "mount_fingerprint_ms": null,
+        "mount_cache_lookup_ms": null,
+        "mount_materialize_ms": null,
+        "artifact_verify_ms": 0.013294,
+        "vmm_create_ms": 170.54488,
+        "guest_kernel_entry_ms": 0.02796,
+        "agent_auth_ms": 1.012667,
+        "first_dispatch_ms": 0.16863699999999998,
+        "cleanup_handoff_ms": 111.42232,
+        "stop_transient_ms": 110.633028,
+        "stop_attach_ms": 0.020716,
+        "stop_endpoint_reaping_ms": 0.034517,
+        "stop_driver_kill_ms": 40.941843999999996,
+        "stop_console_cleanup_ms": 69.632341,
+        "stop_supervisor_signal_ms": null,
+        "stop_pid_disappearance_ms": null,
+        "stop_force_kill_wait_ms": null,
+        "stop_state_cleanup_ms": null,
+        "pool_replenish_ms": null,
+        "state_remove_ms": 0.788629
+      },
+      "warm_first_command_memory": null,
+      "backend_phases": [
+        {
+          "name": "endpoint_spawn",
+          "ms": 0.004364
+        },
+        {
+          "name": "spec_assembly",
+          "ms": 0.061288
+        },
+        {
+          "name": "driver_boot",
+          "ms": 141.68513299999998
+        },
+        {
+          "name": "console_stream_start",
+          "ms": 3.756301
+        },
+        {
+          "name": "activate_workload",
+          "ms": 24.67002
+        },
+        {
+          "name": "broker_register",
+          "ms": 0.076819
+        },
+        {
+          "name": "driver_boot.vmm_start",
+          "ms": 43.209815
+        },
+        {
+          "name": "driver_boot.guest_boot",
+          "ms": 98.387161
+        }
+      ],
+      "degraded": []
+    },
+    {
+      "lane": "prepared_cold",
+      "number": 8,
+      "context": {
+        "backend": "firecracker",
+        "os": "linux",
+        "arch": "x86_64",
+        "mvm_version": "0.18.0",
+        "vmm_version": null,
+        "root_strategy": "block_ext4",
+        "sizing": {
+          "cpus": 2,
+          "memory_mib": 512,
+          "mem_initial_mib": null
+        },
+        "filesystem": "ext4",
+        "artifacts": {
+          "kernel": "/root/.mvm/cache/builder-vm/x86_64/kernels/workload/vmlinux",
+          "initramfs": "/root/.mvm/cache/initramfs/0.18.0/x86_64/initramfs.cpio.gz",
+          "runtime_overlay": "/root/.mvm/cache/runtime-overlay/0.18.0/x86_64/overlay.ext4",
+          "rootfs": "/root/.mvm/cache/oci/rootfs/79ff19e9084a00eece421b2523fb93e22d730e2c0e525905de047e848e56d95f-0.18.0-guest-dcedf73f4f9ac92c/rootfs.ext4"
+        },
+        "digests": {
+          "kernel_sha256": "5996ed9e1a08398ef40d3f1c3b18e416dff933d7df2aaad146b083b32a0a7e0a",
+          "initramfs_sha256": "4d6ae0c849c03ef6c85260b8a54b9d6e1133685c402d9aebdd5544ae4a9ca876",
+          "runtime_overlay_sha256": "0cdf54679552245ca246f08ecebf37f01ff1cdf6e3b93ec4c7272f09fa33e102",
+          "rootfs_sha256": "cb872dc37e1210862d2f4471bfccae8f3cb2bb83f3da92fc4d4d4d6f5dbff884"
+        },
+        "measurements": {
+          "kernel_bytes": 4310016,
+          "initramfs_bytes": 1190544,
+          "runtime_overlay_bytes": 9908224,
+          "rootfs_bytes": 10317824,
+          "kernel_config": null
+        }
+      },
+      "cache": {
+        "artifacts_cached": true,
+        "mount": "not_used"
+      },
+      "work": {
+        "image_pull": false,
+        "image_build": false,
+        "mount_materialize": false,
+        "warm_claim": false,
+        "artifact_bytes_hashed": 0,
+        "process_table_scans": 0
+      },
+      "launch_mode": "cold",
+      "phases": {
+        "launch_mode": "cold",
+        "resolve_ms": 0.010811000000000001,
+        "drives_ms": 21.361907,
+        "admit_ms": 448.108807,
+        "pool_wait_ms": 0.0,
+        "claim_ms": 0.0,
+        "backend_start_ms": 172.94310700000003,
+        "vsock_wait_ms": 1.128026,
+        "warm_window_ms": 174.07113299999997,
+        "command_ms": 53.218744,
+        "teardown_ms": 169.846544,
+        "total_ms": 866.617946
+      },
+      "sub_phases": {
+        "mount_fingerprint_ms": null,
+        "mount_cache_lookup_ms": null,
+        "mount_materialize_ms": null,
+        "artifact_verify_ms": 0.013105,
+        "vmm_create_ms": 172.928939,
+        "guest_kernel_entry_ms": 0.027802,
+        "agent_auth_ms": 1.076411,
+        "first_dispatch_ms": 0.14842999999999998,
+        "cleanup_handoff_ms": 169.67861200000002,
+        "stop_transient_ms": 168.582852,
+        "stop_attach_ms": 0.018151999999999998,
+        "stop_endpoint_reaping_ms": 0.031332,
+        "stop_driver_kill_ms": 73.496346,
+        "stop_console_cleanup_ms": 95.032967,
+        "stop_supervisor_signal_ms": null,
+        "stop_pid_disappearance_ms": null,
+        "stop_force_kill_wait_ms": null,
+        "stop_state_cleanup_ms": null,
+        "pool_replenish_ms": null,
+        "state_remove_ms": 1.094947
+      },
+      "warm_first_command_memory": null,
+      "backend_phases": [
+        {
+          "name": "endpoint_spawn",
+          "ms": 0.009067
+        },
+        {
+          "name": "spec_assembly",
+          "ms": 0.07053000000000001
+        },
+        {
+          "name": "driver_boot",
+          "ms": 141.68795500000002
+        },
+        {
+          "name": "console_stream_start",
+          "ms": 3.776348
+        },
+        {
+          "name": "activate_workload",
+          "ms": 27.012192000000002
+        },
+        {
+          "name": "broker_register",
+          "ms": 0.077399
+        },
+        {
+          "name": "driver_boot.vmm_start",
+          "ms": 42.784848000000004
+        },
+        {
+          "name": "driver_boot.guest_boot",
+          "ms": 98.82812100000001
+        }
+      ],
+      "degraded": []
+    },
+    {
+      "lane": "prepared_cold",
+      "number": 9,
+      "context": {
+        "backend": "firecracker",
+        "os": "linux",
+        "arch": "x86_64",
+        "mvm_version": "0.18.0",
+        "vmm_version": null,
+        "root_strategy": "block_ext4",
+        "sizing": {
+          "cpus": 2,
+          "memory_mib": 512,
+          "mem_initial_mib": null
+        },
+        "filesystem": "ext4",
+        "artifacts": {
+          "kernel": "/root/.mvm/cache/builder-vm/x86_64/kernels/workload/vmlinux",
+          "initramfs": "/root/.mvm/cache/initramfs/0.18.0/x86_64/initramfs.cpio.gz",
+          "runtime_overlay": "/root/.mvm/cache/runtime-overlay/0.18.0/x86_64/overlay.ext4",
+          "rootfs": "/root/.mvm/cache/oci/rootfs/79ff19e9084a00eece421b2523fb93e22d730e2c0e525905de047e848e56d95f-0.18.0-guest-dcedf73f4f9ac92c/rootfs.ext4"
+        },
+        "digests": {
+          "kernel_sha256": "5996ed9e1a08398ef40d3f1c3b18e416dff933d7df2aaad146b083b32a0a7e0a",
+          "initramfs_sha256": "4d6ae0c849c03ef6c85260b8a54b9d6e1133685c402d9aebdd5544ae4a9ca876",
+          "runtime_overlay_sha256": "0cdf54679552245ca246f08ecebf37f01ff1cdf6e3b93ec4c7272f09fa33e102",
+          "rootfs_sha256": "cb872dc37e1210862d2f4471bfccae8f3cb2bb83f3da92fc4d4d4d6f5dbff884"
+        },
+        "measurements": {
+          "kernel_bytes": 4310016,
+          "initramfs_bytes": 1190544,
+          "runtime_overlay_bytes": 9908224,
+          "rootfs_bytes": 10317824,
+          "kernel_config": null
+        }
+      },
+      "cache": {
+        "artifacts_cached": true,
+        "mount": "not_used"
+      },
+      "work": {
+        "image_pull": false,
+        "image_build": false,
+        "mount_materialize": false,
+        "warm_claim": false,
+        "artifact_bytes_hashed": 0,
+        "process_table_scans": 0
+      },
+      "launch_mode": "cold",
+      "phases": {
+        "launch_mode": "cold",
+        "resolve_ms": 0.009692,
+        "drives_ms": 21.338629,
+        "admit_ms": 384.325651,
+        "pool_wait_ms": 0.0,
+        "claim_ms": 0.0,
+        "backend_start_ms": 174.634591,
+        "vsock_wait_ms": 1.250084,
+        "warm_window_ms": 175.884675,
+        "command_ms": 53.923567999999996,
+        "teardown_ms": 105.68786,
+        "total_ms": 741.170075
+      },
+      "sub_phases": {
+        "mount_fingerprint_ms": null,
+        "mount_cache_lookup_ms": null,
+        "mount_materialize_ms": null,
+        "artifact_verify_ms": 0.013635999999999999,
+        "vmm_create_ms": 174.627113,
+        "guest_kernel_entry_ms": 0.034691,
+        "agent_auth_ms": 1.189961,
+        "first_dispatch_ms": 0.178506,
+        "cleanup_handoff_ms": 105.50646499999999,
+        "stop_transient_ms": 104.597988,
+        "stop_attach_ms": 0.021239,
+        "stop_endpoint_reaping_ms": 0.032996,
+        "stop_driver_kill_ms": 24.28471,
+        "stop_console_cleanup_ms": 80.254513,
+        "stop_supervisor_signal_ms": null,
+        "stop_pid_disappearance_ms": null,
+        "stop_force_kill_wait_ms": null,
+        "stop_state_cleanup_ms": null,
+        "pool_replenish_ms": null,
+        "state_remove_ms": 0.907698
+      },
+      "warm_first_command_memory": null,
+      "backend_phases": [
+        {
+          "name": "endpoint_spawn",
+          "ms": 0.0048790000000000005
+        },
+        {
+          "name": "spec_assembly",
+          "ms": 0.06583399999999999
+        },
+        {
+          "name": "driver_boot",
+          "ms": 140.940452
+        },
+        {
+          "name": "console_stream_start",
+          "ms": 5.8176570000000005
+        },
+        {
+          "name": "activate_workload",
+          "ms": 27.408838000000003
+        },
+        {
+          "name": "broker_register",
+          "ms": 0.090587
+        },
+        {
+          "name": "driver_boot.vmm_start",
+          "ms": 42.588466
+        },
+        {
+          "name": "driver_boot.guest_boot",
+          "ms": 98.25281600000001
+        }
+      ],
+      "degraded": []
+    },
+    {
+      "lane": "prepared_cold",
+      "number": 10,
+      "context": {
+        "backend": "firecracker",
+        "os": "linux",
+        "arch": "x86_64",
+        "mvm_version": "0.18.0",
+        "vmm_version": null,
+        "root_strategy": "block_ext4",
+        "sizing": {
+          "cpus": 2,
+          "memory_mib": 512,
+          "mem_initial_mib": null
+        },
+        "filesystem": "ext4",
+        "artifacts": {
+          "kernel": "/root/.mvm/cache/builder-vm/x86_64/kernels/workload/vmlinux",
+          "initramfs": "/root/.mvm/cache/initramfs/0.18.0/x86_64/initramfs.cpio.gz",
+          "runtime_overlay": "/root/.mvm/cache/runtime-overlay/0.18.0/x86_64/overlay.ext4",
+          "rootfs": "/root/.mvm/cache/oci/rootfs/79ff19e9084a00eece421b2523fb93e22d730e2c0e525905de047e848e56d95f-0.18.0-guest-dcedf73f4f9ac92c/rootfs.ext4"
+        },
+        "digests": {
+          "kernel_sha256": "5996ed9e1a08398ef40d3f1c3b18e416dff933d7df2aaad146b083b32a0a7e0a",
+          "initramfs_sha256": "4d6ae0c849c03ef6c85260b8a54b9d6e1133685c402d9aebdd5544ae4a9ca876",
+          "runtime_overlay_sha256": "0cdf54679552245ca246f08ecebf37f01ff1cdf6e3b93ec4c7272f09fa33e102",
+          "rootfs_sha256": "cb872dc37e1210862d2f4471bfccae8f3cb2bb83f3da92fc4d4d4d6f5dbff884"
+        },
+        "measurements": {
+          "kernel_bytes": 4310016,
+          "initramfs_bytes": 1190544,
+          "runtime_overlay_bytes": 9908224,
+          "rootfs_bytes": 10317824,
+          "kernel_config": null
+        }
+      },
+      "cache": {
+        "artifacts_cached": true,
+        "mount": "not_used"
+      },
+      "work": {
+        "image_pull": false,
+        "image_build": false,
+        "mount_materialize": false,
+        "warm_claim": false,
+        "artifact_bytes_hashed": 0,
+        "process_table_scans": 0
+      },
+      "launch_mode": "cold",
+      "phases": {
+        "launch_mode": "cold",
+        "resolve_ms": 0.009728,
+        "drives_ms": 21.372657999999998,
+        "admit_ms": 384.984473,
+        "pool_wait_ms": 0.0,
+        "claim_ms": 0.0,
+        "backend_start_ms": 171.476664,
+        "vsock_wait_ms": 1.1089019999999998,
+        "warm_window_ms": 172.585566,
+        "command_ms": 53.800599,
+        "teardown_ms": 209.350694,
+        "total_ms": 842.103718
+      },
+      "sub_phases": {
+        "mount_fingerprint_ms": null,
+        "mount_cache_lookup_ms": null,
+        "mount_materialize_ms": null,
+        "artifact_verify_ms": 0.013065,
+        "vmm_create_ms": 171.462048,
+        "guest_kernel_entry_ms": 0.027599000000000002,
+        "agent_auth_ms": 1.058414,
+        "first_dispatch_ms": 0.16252,
+        "cleanup_handoff_ms": 209.181524,
+        "stop_transient_ms": 208.32368400000001,
+        "stop_attach_ms": 0.019687999999999997,
+        "stop_endpoint_reaping_ms": 0.034716,
+        "stop_driver_kill_ms": 72.702892,
+        "stop_console_cleanup_ms": 135.562905,
+        "stop_supervisor_signal_ms": null,
+        "stop_pid_disappearance_ms": null,
+        "stop_force_kill_wait_ms": null,
+        "stop_state_cleanup_ms": null,
+        "pool_replenish_ms": null,
+        "state_remove_ms": 0.8569209999999999
+      },
+      "warm_first_command_memory": null,
+      "backend_phases": [
+        {
+          "name": "endpoint_spawn",
+          "ms": 0.004612
+        },
+        {
+          "name": "spec_assembly",
+          "ms": 0.069963
+        },
+        {
+          "name": "driver_boot",
+          "ms": 135.516088
+        },
+        {
+          "name": "console_stream_start",
+          "ms": 3.794042
+        },
+        {
+          "name": "activate_workload",
+          "ms": 31.660287000000004
+        },
+        {
+          "name": "broker_register",
+          "ms": 0.12458999999999999
+        },
+        {
+          "name": "driver_boot.vmm_start",
+          "ms": 42.591561999999996
+        },
+        {
+          "name": "driver_boot.guest_boot",
+          "ms": 92.83219299999999
+        }
+      ],
+      "degraded": []
+    },
+    {
+      "lane": "prepared_cold",
+      "number": 11,
+      "context": {
+        "backend": "firecracker",
+        "os": "linux",
+        "arch": "x86_64",
+        "mvm_version": "0.18.0",
+        "vmm_version": null,
+        "root_strategy": "block_ext4",
+        "sizing": {
+          "cpus": 2,
+          "memory_mib": 512,
+          "mem_initial_mib": null
+        },
+        "filesystem": "ext4",
+        "artifacts": {
+          "kernel": "/root/.mvm/cache/builder-vm/x86_64/kernels/workload/vmlinux",
+          "initramfs": "/root/.mvm/cache/initramfs/0.18.0/x86_64/initramfs.cpio.gz",
+          "runtime_overlay": "/root/.mvm/cache/runtime-overlay/0.18.0/x86_64/overlay.ext4",
+          "rootfs": "/root/.mvm/cache/oci/rootfs/79ff19e9084a00eece421b2523fb93e22d730e2c0e525905de047e848e56d95f-0.18.0-guest-dcedf73f4f9ac92c/rootfs.ext4"
+        },
+        "digests": {
+          "kernel_sha256": "5996ed9e1a08398ef40d3f1c3b18e416dff933d7df2aaad146b083b32a0a7e0a",
+          "initramfs_sha256": "4d6ae0c849c03ef6c85260b8a54b9d6e1133685c402d9aebdd5544ae4a9ca876",
+          "runtime_overlay_sha256": "0cdf54679552245ca246f08ecebf37f01ff1cdf6e3b93ec4c7272f09fa33e102",
+          "rootfs_sha256": "cb872dc37e1210862d2f4471bfccae8f3cb2bb83f3da92fc4d4d4d6f5dbff884"
+        },
+        "measurements": {
+          "kernel_bytes": 4310016,
+          "initramfs_bytes": 1190544,
+          "runtime_overlay_bytes": 9908224,
+          "rootfs_bytes": 10317824,
+          "kernel_config": null
+        }
+      },
+      "cache": {
+        "artifacts_cached": true,
+        "mount": "not_used"
+      },
+      "work": {
+        "image_pull": false,
+        "image_build": false,
+        "mount_materialize": false,
+        "warm_claim": false,
+        "artifact_bytes_hashed": 0,
+        "process_table_scans": 0
+      },
+      "launch_mode": "cold",
+      "phases": {
+        "launch_mode": "cold",
+        "resolve_ms": 0.009786000000000001,
+        "drives_ms": 21.532117,
+        "admit_ms": 416.943098,
+        "pool_wait_ms": 0.0,
+        "claim_ms": 0.0,
+        "backend_start_ms": 168.434513,
+        "vsock_wait_ms": 1.1119299999999999,
+        "warm_window_ms": 169.54644299999998,
+        "command_ms": 53.615590999999995,
+        "teardown_ms": 113.14590700000001,
+        "total_ms": 774.792942
+      },
+      "sub_phases": {
+        "mount_fingerprint_ms": null,
+        "mount_cache_lookup_ms": null,
+        "mount_materialize_ms": null,
+        "artifact_verify_ms": 0.013295000000000001,
+        "vmm_create_ms": 168.41887699999998,
+        "guest_kernel_entry_ms": 0.053116,
+        "agent_auth_ms": 1.02414,
+        "first_dispatch_ms": 0.174302,
+        "cleanup_handoff_ms": 112.974126,
+        "stop_transient_ms": 112.187748,
+        "stop_attach_ms": 0.020123000000000002,
+        "stop_endpoint_reaping_ms": 0.032157,
+        "stop_driver_kill_ms": 28.767689,
+        "stop_console_cleanup_ms": 83.363599,
+        "stop_supervisor_signal_ms": null,
+        "stop_pid_disappearance_ms": null,
+        "stop_force_kill_wait_ms": null,
+        "stop_state_cleanup_ms": null,
+        "pool_replenish_ms": null,
+        "state_remove_ms": 0.785716
+      },
+      "warm_first_command_memory": null,
+      "backend_phases": [
+        {
+          "name": "endpoint_spawn",
+          "ms": 0.004583
+        },
+        {
+          "name": "spec_assembly",
+          "ms": 0.066771
+        },
+        {
+          "name": "driver_boot",
+          "ms": 138.849148
+        },
+        {
+          "name": "console_stream_start",
+          "ms": 4.421278
+        },
+        {
+          "name": "activate_workload",
+          "ms": 24.676251
+        },
+        {
+          "name": "broker_register",
+          "ms": 0.098788
+        },
+        {
+          "name": "driver_boot.vmm_start",
+          "ms": 42.846269
+        },
+        {
+          "name": "driver_boot.guest_boot",
+          "ms": 95.92695599999999
+        }
+      ],
+      "degraded": []
+    },
+    {
+      "lane": "prepared_cold",
+      "number": 12,
+      "context": {
+        "backend": "firecracker",
+        "os": "linux",
+        "arch": "x86_64",
+        "mvm_version": "0.18.0",
+        "vmm_version": null,
+        "root_strategy": "block_ext4",
+        "sizing": {
+          "cpus": 2,
+          "memory_mib": 512,
+          "mem_initial_mib": null
+        },
+        "filesystem": "ext4",
+        "artifacts": {
+          "kernel": "/root/.mvm/cache/builder-vm/x86_64/kernels/workload/vmlinux",
+          "initramfs": "/root/.mvm/cache/initramfs/0.18.0/x86_64/initramfs.cpio.gz",
+          "runtime_overlay": "/root/.mvm/cache/runtime-overlay/0.18.0/x86_64/overlay.ext4",
+          "rootfs": "/root/.mvm/cache/oci/rootfs/79ff19e9084a00eece421b2523fb93e22d730e2c0e525905de047e848e56d95f-0.18.0-guest-dcedf73f4f9ac92c/rootfs.ext4"
+        },
+        "digests": {
+          "kernel_sha256": "5996ed9e1a08398ef40d3f1c3b18e416dff933d7df2aaad146b083b32a0a7e0a",
+          "initramfs_sha256": "4d6ae0c849c03ef6c85260b8a54b9d6e1133685c402d9aebdd5544ae4a9ca876",
+          "runtime_overlay_sha256": "0cdf54679552245ca246f08ecebf37f01ff1cdf6e3b93ec4c7272f09fa33e102",
+          "rootfs_sha256": "cb872dc37e1210862d2f4471bfccae8f3cb2bb83f3da92fc4d4d4d6f5dbff884"
+        },
+        "measurements": {
+          "kernel_bytes": 4310016,
+          "initramfs_bytes": 1190544,
+          "runtime_overlay_bytes": 9908224,
+          "rootfs_bytes": 10317824,
+          "kernel_config": null
+        }
+      },
+      "cache": {
+        "artifacts_cached": true,
+        "mount": "not_used"
+      },
+      "work": {
+        "image_pull": false,
+        "image_build": false,
+        "mount_materialize": false,
+        "warm_claim": false,
+        "artifact_bytes_hashed": 0,
+        "process_table_scans": 0
+      },
+      "launch_mode": "cold",
+      "phases": {
+        "launch_mode": "cold",
+        "resolve_ms": 0.011080000000000001,
+        "drives_ms": 21.517129999999998,
+        "admit_ms": 406.844746,
+        "pool_wait_ms": 0.0,
+        "claim_ms": 0.0,
+        "backend_start_ms": 172.839956,
+        "vsock_wait_ms": 0.977613,
+        "warm_window_ms": 173.817569,
+        "command_ms": 53.332749,
+        "teardown_ms": 119.023353,
+        "total_ms": 774.546627
+      },
+      "sub_phases": {
+        "mount_fingerprint_ms": null,
+        "mount_cache_lookup_ms": null,
+        "mount_materialize_ms": null,
+        "artifact_verify_ms": 0.012993000000000001,
+        "vmm_create_ms": 172.82500100000001,
+        "guest_kernel_entry_ms": 0.027979,
+        "agent_auth_ms": 0.9276650000000001,
+        "first_dispatch_ms": 0.136122,
+        "cleanup_handoff_ms": 118.853578,
+        "stop_transient_ms": 118.028323,
+        "stop_attach_ms": 0.018709999999999997,
+        "stop_endpoint_reaping_ms": 0.031481,
+        "stop_driver_kill_ms": 36.678792,
+        "stop_console_cleanup_ms": 81.295154,
+        "stop_supervisor_signal_ms": null,
+        "stop_pid_disappearance_ms": null,
+        "stop_force_kill_wait_ms": null,
+        "stop_state_cleanup_ms": null,
+        "pool_replenish_ms": null,
+        "state_remove_ms": 0.8245769999999999
+      },
+      "warm_first_command_memory": null,
+      "backend_phases": [
+        {
+          "name": "endpoint_spawn",
+          "ms": 0.004516
+        },
+        {
+          "name": "spec_assembly",
+          "ms": 0.07030700000000001
+        },
+        {
+          "name": "driver_boot",
+          "ms": 142.246782
+        },
+        {
+          "name": "console_stream_start",
+          "ms": 3.764926
+        },
+        {
+          "name": "activate_workload",
+          "ms": 26.370622
+        },
+        {
+          "name": "broker_register",
+          "ms": 0.076174
+        },
+        {
+          "name": "driver_boot.vmm_start",
+          "ms": 42.854169
+        },
+        {
+          "name": "driver_boot.guest_boot",
+          "ms": 99.295525
+        }
+      ],
+      "degraded": []
+    },
+    {
+      "lane": "prepared_cold",
+      "number": 13,
+      "context": {
+        "backend": "firecracker",
+        "os": "linux",
+        "arch": "x86_64",
+        "mvm_version": "0.18.0",
+        "vmm_version": null,
+        "root_strategy": "block_ext4",
+        "sizing": {
+          "cpus": 2,
+          "memory_mib": 512,
+          "mem_initial_mib": null
+        },
+        "filesystem": "ext4",
+        "artifacts": {
+          "kernel": "/root/.mvm/cache/builder-vm/x86_64/kernels/workload/vmlinux",
+          "initramfs": "/root/.mvm/cache/initramfs/0.18.0/x86_64/initramfs.cpio.gz",
+          "runtime_overlay": "/root/.mvm/cache/runtime-overlay/0.18.0/x86_64/overlay.ext4",
+          "rootfs": "/root/.mvm/cache/oci/rootfs/79ff19e9084a00eece421b2523fb93e22d730e2c0e525905de047e848e56d95f-0.18.0-guest-dcedf73f4f9ac92c/rootfs.ext4"
+        },
+        "digests": {
+          "kernel_sha256": "5996ed9e1a08398ef40d3f1c3b18e416dff933d7df2aaad146b083b32a0a7e0a",
+          "initramfs_sha256": "4d6ae0c849c03ef6c85260b8a54b9d6e1133685c402d9aebdd5544ae4a9ca876",
+          "runtime_overlay_sha256": "0cdf54679552245ca246f08ecebf37f01ff1cdf6e3b93ec4c7272f09fa33e102",
+          "rootfs_sha256": "cb872dc37e1210862d2f4471bfccae8f3cb2bb83f3da92fc4d4d4d6f5dbff884"
+        },
+        "measurements": {
+          "kernel_bytes": 4310016,
+          "initramfs_bytes": 1190544,
+          "runtime_overlay_bytes": 9908224,
+          "rootfs_bytes": 10317824,
+          "kernel_config": null
+        }
+      },
+      "cache": {
+        "artifacts_cached": true,
+        "mount": "not_used"
+      },
+      "work": {
+        "image_pull": false,
+        "image_build": false,
+        "mount_materialize": false,
+        "warm_claim": false,
+        "artifact_bytes_hashed": 0,
+        "process_table_scans": 0
+      },
+      "launch_mode": "cold",
+      "phases": {
+        "launch_mode": "cold",
+        "resolve_ms": 0.010502000000000001,
+        "drives_ms": 21.325904,
+        "admit_ms": 432.461934,
+        "pool_wait_ms": 0.0,
+        "claim_ms": 0.0,
+        "backend_start_ms": 168.808228,
+        "vsock_wait_ms": 1.211033,
+        "warm_window_ms": 170.019261,
+        "command_ms": 53.056165,
+        "teardown_ms": 114.33028300000001,
+        "total_ms": 791.2040489999999
+      },
+      "sub_phases": {
+        "mount_fingerprint_ms": null,
+        "mount_cache_lookup_ms": null,
+        "mount_materialize_ms": null,
+        "artifact_verify_ms": 0.013212,
+        "vmm_create_ms": 168.793443,
+        "guest_kernel_entry_ms": 0.028148,
+        "agent_auth_ms": 1.1546919999999998,
+        "first_dispatch_ms": 0.181686,
+        "cleanup_handoff_ms": 114.155541,
+        "stop_transient_ms": 113.376041,
+        "stop_attach_ms": 0.020381999999999997,
+        "stop_endpoint_reaping_ms": 0.032693,
+        "stop_driver_kill_ms": 35.698595,
+        "stop_console_cleanup_ms": 77.62042299999999,
+        "stop_supervisor_signal_ms": null,
+        "stop_pid_disappearance_ms": null,
+        "stop_force_kill_wait_ms": null,
+        "stop_state_cleanup_ms": null,
+        "pool_replenish_ms": null,
+        "state_remove_ms": 0.7789370000000001
+      },
+      "warm_first_command_memory": null,
+      "backend_phases": [
+        {
+          "name": "endpoint_spawn",
+          "ms": 0.008181
+        },
+        {
+          "name": "spec_assembly",
+          "ms": 0.065774
+        },
+        {
+          "name": "driver_boot",
+          "ms": 133.35594600000002
+        },
+        {
+          "name": "console_stream_start",
+          "ms": 4.761893
+        },
+        {
+          "name": "activate_workload",
+          "ms": 30.219516
+        },
+        {
+          "name": "broker_register",
+          "ms": 0.093752
+        },
+        {
+          "name": "driver_boot.vmm_start",
+          "ms": 42.829951
+        },
+        {
+          "name": "driver_boot.guest_boot",
+          "ms": 90.433274
+        }
+      ],
+      "degraded": []
+    },
+    {
+      "lane": "prepared_cold",
+      "number": 14,
+      "context": {
+        "backend": "firecracker",
+        "os": "linux",
+        "arch": "x86_64",
+        "mvm_version": "0.18.0",
+        "vmm_version": null,
+        "root_strategy": "block_ext4",
+        "sizing": {
+          "cpus": 2,
+          "memory_mib": 512,
+          "mem_initial_mib": null
+        },
+        "filesystem": "ext4",
+        "artifacts": {
+          "kernel": "/root/.mvm/cache/builder-vm/x86_64/kernels/workload/vmlinux",
+          "initramfs": "/root/.mvm/cache/initramfs/0.18.0/x86_64/initramfs.cpio.gz",
+          "runtime_overlay": "/root/.mvm/cache/runtime-overlay/0.18.0/x86_64/overlay.ext4",
+          "rootfs": "/root/.mvm/cache/oci/rootfs/79ff19e9084a00eece421b2523fb93e22d730e2c0e525905de047e848e56d95f-0.18.0-guest-dcedf73f4f9ac92c/rootfs.ext4"
+        },
+        "digests": {
+          "kernel_sha256": "5996ed9e1a08398ef40d3f1c3b18e416dff933d7df2aaad146b083b32a0a7e0a",
+          "initramfs_sha256": "4d6ae0c849c03ef6c85260b8a54b9d6e1133685c402d9aebdd5544ae4a9ca876",
+          "runtime_overlay_sha256": "0cdf54679552245ca246f08ecebf37f01ff1cdf6e3b93ec4c7272f09fa33e102",
+          "rootfs_sha256": "cb872dc37e1210862d2f4471bfccae8f3cb2bb83f3da92fc4d4d4d6f5dbff884"
+        },
+        "measurements": {
+          "kernel_bytes": 4310016,
+          "initramfs_bytes": 1190544,
+          "runtime_overlay_bytes": 9908224,
+          "rootfs_bytes": 10317824,
+          "kernel_config": null
+        }
+      },
+      "cache": {
+        "artifacts_cached": true,
+        "mount": "not_used"
+      },
+      "work": {
+        "image_pull": false,
+        "image_build": false,
+        "mount_materialize": false,
+        "warm_claim": false,
+        "artifact_bytes_hashed": 0,
+        "process_table_scans": 0
+      },
+      "launch_mode": "cold",
+      "phases": {
+        "launch_mode": "cold",
+        "resolve_ms": 0.009582,
+        "drives_ms": 21.606938999999997,
+        "admit_ms": 423.915614,
+        "pool_wait_ms": 0.0,
+        "claim_ms": 0.0,
+        "backend_start_ms": 169.83033799999998,
+        "vsock_wait_ms": 1.271795,
+        "warm_window_ms": 171.10213299999998,
+        "command_ms": 53.039773,
+        "teardown_ms": 147.458247,
+        "total_ms": 817.132288
+      },
+      "sub_phases": {
+        "mount_fingerprint_ms": null,
+        "mount_cache_lookup_ms": null,
+        "mount_materialize_ms": null,
+        "artifact_verify_ms": 0.009966000000000001,
+        "vmm_create_ms": 169.815806,
+        "guest_kernel_entry_ms": 0.035845,
+        "agent_auth_ms": 1.212559,
+        "first_dispatch_ms": 0.166034,
+        "cleanup_handoff_ms": 147.297081,
+        "stop_transient_ms": 146.42247,
+        "stop_attach_ms": 0.030713,
+        "stop_endpoint_reaping_ms": 0.032451,
+        "stop_driver_kill_ms": 49.553957000000004,
+        "stop_console_cleanup_ms": 96.801874,
+        "stop_supervisor_signal_ms": null,
+        "stop_pid_disappearance_ms": null,
+        "stop_force_kill_wait_ms": null,
+        "stop_state_cleanup_ms": null,
+        "pool_replenish_ms": null,
+        "state_remove_ms": 0.87395
+      },
+      "warm_first_command_memory": null,
+      "backend_phases": [
+        {
+          "name": "endpoint_spawn",
+          "ms": 0.018581999999999998
+        },
+        {
+          "name": "spec_assembly",
+          "ms": 0.06630399999999999
+        },
+        {
+          "name": "driver_boot",
+          "ms": 140.334891
+        },
+        {
+          "name": "console_stream_start",
+          "ms": 3.800831
+        },
+        {
+          "name": "activate_workload",
+          "ms": 25.229382
+        },
+        {
+          "name": "broker_register",
+          "ms": 0.090047
+        },
+        {
+          "name": "driver_boot.vmm_start",
+          "ms": 42.905397
+        },
+        {
+          "name": "driver_boot.guest_boot",
+          "ms": 97.36392500000001
+        }
+      ],
+      "degraded": []
+    },
+    {
+      "lane": "prepared_cold",
+      "number": 15,
+      "context": {
+        "backend": "firecracker",
+        "os": "linux",
+        "arch": "x86_64",
+        "mvm_version": "0.18.0",
+        "vmm_version": null,
+        "root_strategy": "block_ext4",
+        "sizing": {
+          "cpus": 2,
+          "memory_mib": 512,
+          "mem_initial_mib": null
+        },
+        "filesystem": "ext4",
+        "artifacts": {
+          "kernel": "/root/.mvm/cache/builder-vm/x86_64/kernels/workload/vmlinux",
+          "initramfs": "/root/.mvm/cache/initramfs/0.18.0/x86_64/initramfs.cpio.gz",
+          "runtime_overlay": "/root/.mvm/cache/runtime-overlay/0.18.0/x86_64/overlay.ext4",
+          "rootfs": "/root/.mvm/cache/oci/rootfs/79ff19e9084a00eece421b2523fb93e22d730e2c0e525905de047e848e56d95f-0.18.0-guest-dcedf73f4f9ac92c/rootfs.ext4"
+        },
+        "digests": {
+          "kernel_sha256": "5996ed9e1a08398ef40d3f1c3b18e416dff933d7df2aaad146b083b32a0a7e0a",
+          "initramfs_sha256": "4d6ae0c849c03ef6c85260b8a54b9d6e1133685c402d9aebdd5544ae4a9ca876",
+          "runtime_overlay_sha256": "0cdf54679552245ca246f08ecebf37f01ff1cdf6e3b93ec4c7272f09fa33e102",
+          "rootfs_sha256": "cb872dc37e1210862d2f4471bfccae8f3cb2bb83f3da92fc4d4d4d6f5dbff884"
+        },
+        "measurements": {
+          "kernel_bytes": 4310016,
+          "initramfs_bytes": 1190544,
+          "runtime_overlay_bytes": 9908224,
+          "rootfs_bytes": 10317824,
+          "kernel_config": null
+        }
+      },
+      "cache": {
+        "artifacts_cached": true,
+        "mount": "not_used"
+      },
+      "work": {
+        "image_pull": false,
+        "image_build": false,
+        "mount_materialize": false,
+        "warm_claim": false,
+        "artifact_bytes_hashed": 0,
+        "process_table_scans": 0
+      },
+      "launch_mode": "cold",
+      "phases": {
+        "launch_mode": "cold",
+        "resolve_ms": 0.009629,
+        "drives_ms": 21.516696,
+        "admit_ms": 423.229307,
+        "pool_wait_ms": 0.0,
+        "claim_ms": 0.0,
+        "backend_start_ms": 168.022799,
+        "vsock_wait_ms": 1.290203,
+        "warm_window_ms": 169.31300199999998,
+        "command_ms": 53.497316000000005,
+        "teardown_ms": 131.386971,
+        "total_ms": 798.9529210000001
+      },
+      "sub_phases": {
+        "mount_fingerprint_ms": null,
+        "mount_cache_lookup_ms": null,
+        "mount_materialize_ms": null,
+        "artifact_verify_ms": 0.013505,
+        "vmm_create_ms": 168.00875000000002,
+        "guest_kernel_entry_ms": 0.028996,
+        "agent_auth_ms": 1.235248,
+        "first_dispatch_ms": 0.18618300000000002,
+        "cleanup_handoff_ms": 131.20432100000002,
+        "stop_transient_ms": 130.342503,
+        "stop_attach_ms": 0.02101,
+        "stop_endpoint_reaping_ms": 0.034123,
+        "stop_driver_kill_ms": 31.966038,
+        "stop_console_cleanup_ms": 98.317193,
+        "stop_supervisor_signal_ms": null,
+        "stop_pid_disappearance_ms": null,
+        "stop_force_kill_wait_ms": null,
+        "stop_state_cleanup_ms": null,
+        "pool_replenish_ms": null,
+        "state_remove_ms": 0.861152
+      },
+      "warm_first_command_memory": null,
+      "backend_phases": [
+        {
+          "name": "endpoint_spawn",
+          "ms": 0.004344000000000001
+        },
+        {
+          "name": "spec_assembly",
+          "ms": 0.06507
+        },
+        {
+          "name": "driver_boot",
+          "ms": 134.975202
+        },
+        {
+          "name": "console_stream_start",
+          "ms": 3.774183
+        },
+        {
+          "name": "activate_workload",
+          "ms": 28.734577
+        },
+        {
+          "name": "broker_register",
+          "ms": 0.11911799999999999
+        },
+        {
+          "name": "driver_boot.vmm_start",
+          "ms": 43.127558
+        },
+        {
+          "name": "driver_boot.guest_boot",
+          "ms": 91.73421599999999
+        }
+      ],
+      "degraded": []
+    },
+    {
+      "lane": "prepared_cold",
+      "number": 16,
+      "context": {
+        "backend": "firecracker",
+        "os": "linux",
+        "arch": "x86_64",
+        "mvm_version": "0.18.0",
+        "vmm_version": null,
+        "root_strategy": "block_ext4",
+        "sizing": {
+          "cpus": 2,
+          "memory_mib": 512,
+          "mem_initial_mib": null
+        },
+        "filesystem": "ext4",
+        "artifacts": {
+          "kernel": "/root/.mvm/cache/builder-vm/x86_64/kernels/workload/vmlinux",
+          "initramfs": "/root/.mvm/cache/initramfs/0.18.0/x86_64/initramfs.cpio.gz",
+          "runtime_overlay": "/root/.mvm/cache/runtime-overlay/0.18.0/x86_64/overlay.ext4",
+          "rootfs": "/root/.mvm/cache/oci/rootfs/79ff19e9084a00eece421b2523fb93e22d730e2c0e525905de047e848e56d95f-0.18.0-guest-dcedf73f4f9ac92c/rootfs.ext4"
+        },
+        "digests": {
+          "kernel_sha256": "5996ed9e1a08398ef40d3f1c3b18e416dff933d7df2aaad146b083b32a0a7e0a",
+          "initramfs_sha256": "4d6ae0c849c03ef6c85260b8a54b9d6e1133685c402d9aebdd5544ae4a9ca876",
+          "runtime_overlay_sha256": "0cdf54679552245ca246f08ecebf37f01ff1cdf6e3b93ec4c7272f09fa33e102",
+          "rootfs_sha256": "cb872dc37e1210862d2f4471bfccae8f3cb2bb83f3da92fc4d4d4d6f5dbff884"
+        },
+        "measurements": {
+          "kernel_bytes": 4310016,
+          "initramfs_bytes": 1190544,
+          "runtime_overlay_bytes": 9908224,
+          "rootfs_bytes": 10317824,
+          "kernel_config": null
+        }
+      },
+      "cache": {
+        "artifacts_cached": true,
+        "mount": "not_used"
+      },
+      "work": {
+        "image_pull": false,
+        "image_build": false,
+        "mount_materialize": false,
+        "warm_claim": false,
+        "artifact_bytes_hashed": 0,
+        "process_table_scans": 0
+      },
+      "launch_mode": "cold",
+      "phases": {
+        "launch_mode": "cold",
+        "resolve_ms": 0.009561,
+        "drives_ms": 21.293369,
+        "admit_ms": 470.89225600000003,
+        "pool_wait_ms": 0.0,
+        "claim_ms": 0.0,
+        "backend_start_ms": 170.331902,
+        "vsock_wait_ms": 1.2445410000000001,
+        "warm_window_ms": 171.57644299999998,
+        "command_ms": 53.300964,
+        "teardown_ms": 195.942107,
+        "total_ms": 913.0147
+      },
+      "sub_phases": {
+        "mount_fingerprint_ms": null,
+        "mount_cache_lookup_ms": null,
+        "mount_materialize_ms": null,
+        "artifact_verify_ms": 0.013667,
+        "vmm_create_ms": 170.324796,
+        "guest_kernel_entry_ms": 0.036176,
+        "agent_auth_ms": 1.186489,
+        "first_dispatch_ms": 0.27902299999999997,
+        "cleanup_handoff_ms": 195.774034,
+        "stop_transient_ms": 194.82876800000003,
+        "stop_attach_ms": 0.019364,
+        "stop_endpoint_reaping_ms": 0.033731,
+        "stop_driver_kill_ms": 99.529754,
+        "stop_console_cleanup_ms": 95.241834,
+        "stop_supervisor_signal_ms": null,
+        "stop_pid_disappearance_ms": null,
+        "stop_force_kill_wait_ms": null,
+        "stop_state_cleanup_ms": null,
+        "pool_replenish_ms": null,
+        "state_remove_ms": 0.944622
+      },
+      "warm_first_command_memory": null,
+      "backend_phases": [
+        {
+          "name": "endpoint_spawn",
+          "ms": 0.004532
+        },
+        {
+          "name": "spec_assembly",
+          "ms": 0.052791000000000005
+        },
+        {
+          "name": "driver_boot",
+          "ms": 140.099376
+        },
+        {
+          "name": "console_stream_start",
+          "ms": 3.792582
+        },
+        {
+          "name": "activate_workload",
+          "ms": 26.011422999999997
+        },
+        {
+          "name": "broker_register",
+          "ms": 0.07450599999999999
+        },
+        {
+          "name": "driver_boot.vmm_start",
+          "ms": 42.736191
+        },
+        {
+          "name": "driver_boot.guest_boot",
+          "ms": 97.279182
+        }
+      ],
+      "degraded": []
+    },
+    {
+      "lane": "prepared_cold",
+      "number": 17,
+      "context": {
+        "backend": "firecracker",
+        "os": "linux",
+        "arch": "x86_64",
+        "mvm_version": "0.18.0",
+        "vmm_version": null,
+        "root_strategy": "block_ext4",
+        "sizing": {
+          "cpus": 2,
+          "memory_mib": 512,
+          "mem_initial_mib": null
+        },
+        "filesystem": "ext4",
+        "artifacts": {
+          "kernel": "/root/.mvm/cache/builder-vm/x86_64/kernels/workload/vmlinux",
+          "initramfs": "/root/.mvm/cache/initramfs/0.18.0/x86_64/initramfs.cpio.gz",
+          "runtime_overlay": "/root/.mvm/cache/runtime-overlay/0.18.0/x86_64/overlay.ext4",
+          "rootfs": "/root/.mvm/cache/oci/rootfs/79ff19e9084a00eece421b2523fb93e22d730e2c0e525905de047e848e56d95f-0.18.0-guest-dcedf73f4f9ac92c/rootfs.ext4"
+        },
+        "digests": {
+          "kernel_sha256": "5996ed9e1a08398ef40d3f1c3b18e416dff933d7df2aaad146b083b32a0a7e0a",
+          "initramfs_sha256": "4d6ae0c849c03ef6c85260b8a54b9d6e1133685c402d9aebdd5544ae4a9ca876",
+          "runtime_overlay_sha256": "0cdf54679552245ca246f08ecebf37f01ff1cdf6e3b93ec4c7272f09fa33e102",
+          "rootfs_sha256": "cb872dc37e1210862d2f4471bfccae8f3cb2bb83f3da92fc4d4d4d6f5dbff884"
+        },
+        "measurements": {
+          "kernel_bytes": 4310016,
+          "initramfs_bytes": 1190544,
+          "runtime_overlay_bytes": 9908224,
+          "rootfs_bytes": 10317824,
+          "kernel_config": null
+        }
+      },
+      "cache": {
+        "artifacts_cached": true,
+        "mount": "not_used"
+      },
+      "work": {
+        "image_pull": false,
+        "image_build": false,
+        "mount_materialize": false,
+        "warm_claim": false,
+        "artifact_bytes_hashed": 0,
+        "process_table_scans": 0
+      },
+      "launch_mode": "cold",
+      "phases": {
+        "launch_mode": "cold",
+        "resolve_ms": 0.010232,
+        "drives_ms": 21.537093,
+        "admit_ms": 436.09742800000004,
+        "pool_wait_ms": 0.0,
+        "claim_ms": 0.0,
+        "backend_start_ms": 169.823947,
+        "vsock_wait_ms": 1.146177,
+        "warm_window_ms": 170.970124,
+        "command_ms": 53.853047000000004,
+        "teardown_ms": 136.28261999999998,
+        "total_ms": 818.750544
+      },
+      "sub_phases": {
+        "mount_fingerprint_ms": null,
+        "mount_cache_lookup_ms": null,
+        "mount_materialize_ms": null,
+        "artifact_verify_ms": 0.013031,
+        "vmm_create_ms": 169.80912700000002,
+        "guest_kernel_entry_ms": 0.028048,
+        "agent_auth_ms": 1.094635,
+        "first_dispatch_ms": 0.197722,
+        "cleanup_handoff_ms": 136.11636099999998,
+        "stop_transient_ms": 135.277026,
+        "stop_attach_ms": 0.021356999999999998,
+        "stop_endpoint_reaping_ms": 0.03922,
+        "stop_driver_kill_ms": 63.016719,
+        "stop_console_cleanup_ms": 72.19562,
+        "stop_supervisor_signal_ms": null,
+        "stop_pid_disappearance_ms": null,
+        "stop_force_kill_wait_ms": null,
+        "stop_state_cleanup_ms": null,
+        "pool_replenish_ms": null,
+        "state_remove_ms": 0.838743
+      },
+      "warm_first_command_memory": null,
+      "backend_phases": [
+        {
+          "name": "endpoint_spawn",
+          "ms": 0.004163
+        },
+        {
+          "name": "spec_assembly",
+          "ms": 0.089683
+        },
+        {
+          "name": "driver_boot",
+          "ms": 137.315522
+        },
+        {
+          "name": "console_stream_start",
+          "ms": 3.743176
+        },
+        {
+          "name": "activate_workload",
+          "ms": 28.271583999999997
+        },
+        {
+          "name": "broker_register",
+          "ms": 0.094482
+        },
+        {
+          "name": "driver_boot.vmm_start",
+          "ms": 42.639365999999995
+        },
+        {
+          "name": "driver_boot.guest_boot",
+          "ms": 94.584437
+        }
+      ],
+      "degraded": []
+    },
+    {
+      "lane": "prepared_cold",
+      "number": 18,
+      "context": {
+        "backend": "firecracker",
+        "os": "linux",
+        "arch": "x86_64",
+        "mvm_version": "0.18.0",
+        "vmm_version": null,
+        "root_strategy": "block_ext4",
+        "sizing": {
+          "cpus": 2,
+          "memory_mib": 512,
+          "mem_initial_mib": null
+        },
+        "filesystem": "ext4",
+        "artifacts": {
+          "kernel": "/root/.mvm/cache/builder-vm/x86_64/kernels/workload/vmlinux",
+          "initramfs": "/root/.mvm/cache/initramfs/0.18.0/x86_64/initramfs.cpio.gz",
+          "runtime_overlay": "/root/.mvm/cache/runtime-overlay/0.18.0/x86_64/overlay.ext4",
+          "rootfs": "/root/.mvm/cache/oci/rootfs/79ff19e9084a00eece421b2523fb93e22d730e2c0e525905de047e848e56d95f-0.18.0-guest-dcedf73f4f9ac92c/rootfs.ext4"
+        },
+        "digests": {
+          "kernel_sha256": "5996ed9e1a08398ef40d3f1c3b18e416dff933d7df2aaad146b083b32a0a7e0a",
+          "initramfs_sha256": "4d6ae0c849c03ef6c85260b8a54b9d6e1133685c402d9aebdd5544ae4a9ca876",
+          "runtime_overlay_sha256": "0cdf54679552245ca246f08ecebf37f01ff1cdf6e3b93ec4c7272f09fa33e102",
+          "rootfs_sha256": "cb872dc37e1210862d2f4471bfccae8f3cb2bb83f3da92fc4d4d4d6f5dbff884"
+        },
+        "measurements": {
+          "kernel_bytes": 4310016,
+          "initramfs_bytes": 1190544,
+          "runtime_overlay_bytes": 9908224,
+          "rootfs_bytes": 10317824,
+          "kernel_config": null
+        }
+      },
+      "cache": {
+        "artifacts_cached": true,
+        "mount": "not_used"
+      },
+      "work": {
+        "image_pull": false,
+        "image_build": false,
+        "mount_materialize": false,
+        "warm_claim": false,
+        "artifact_bytes_hashed": 0,
+        "process_table_scans": 0
+      },
+      "launch_mode": "cold",
+      "phases": {
+        "launch_mode": "cold",
+        "resolve_ms": 0.009115,
+        "drives_ms": 21.519999000000002,
+        "admit_ms": 475.212251,
+        "pool_wait_ms": 0.0,
+        "claim_ms": 0.0,
+        "backend_start_ms": 168.577322,
+        "vsock_wait_ms": 0.9817,
+        "warm_window_ms": 169.559022,
+        "command_ms": 53.171859000000005,
+        "teardown_ms": 174.688997,
+        "total_ms": 894.161243
+      },
+      "sub_phases": {
+        "mount_fingerprint_ms": null,
+        "mount_cache_lookup_ms": null,
+        "mount_materialize_ms": null,
+        "artifact_verify_ms": 0.013604999999999999,
+        "vmm_create_ms": 168.57017499999998,
+        "guest_kernel_entry_ms": 0.034293,
+        "agent_auth_ms": 0.925546,
+        "first_dispatch_ms": 0.150146,
+        "cleanup_handoff_ms": 174.516681,
+        "stop_transient_ms": 173.654171,
+        "stop_attach_ms": 0.019163,
+        "stop_endpoint_reaping_ms": 0.032496000000000004,
+        "stop_driver_kill_ms": 78.73606,
+        "stop_console_cleanup_ms": 94.862289,
+        "stop_supervisor_signal_ms": null,
+        "stop_pid_disappearance_ms": null,
+        "stop_force_kill_wait_ms": null,
+        "stop_state_cleanup_ms": null,
+        "pool_replenish_ms": null,
+        "state_remove_ms": 0.8617400000000001
+      },
+      "warm_first_command_memory": null,
+      "backend_phases": [
+        {
+          "name": "endpoint_spawn",
+          "ms": 0.004325
+        },
+        {
+          "name": "spec_assembly",
+          "ms": 0.053383
+        },
+        {
+          "name": "driver_boot",
+          "ms": 135.333448
+        },
+        {
+          "name": "console_stream_start",
+          "ms": 3.76118
+        },
+        {
+          "name": "activate_workload",
+          "ms": 29.040291
+        },
+        {
+          "name": "broker_register",
+          "ms": 0.073375
+        },
+        {
+          "name": "driver_boot.vmm_start",
+          "ms": 42.803824999999996
+        },
+        {
+          "name": "driver_boot.guest_boot",
+          "ms": 92.452792
+        }
+      ],
+      "degraded": []
+    },
+    {
+      "lane": "prepared_cold",
+      "number": 19,
+      "context": {
+        "backend": "firecracker",
+        "os": "linux",
+        "arch": "x86_64",
+        "mvm_version": "0.18.0",
+        "vmm_version": null,
+        "root_strategy": "block_ext4",
+        "sizing": {
+          "cpus": 2,
+          "memory_mib": 512,
+          "mem_initial_mib": null
+        },
+        "filesystem": "ext4",
+        "artifacts": {
+          "kernel": "/root/.mvm/cache/builder-vm/x86_64/kernels/workload/vmlinux",
+          "initramfs": "/root/.mvm/cache/initramfs/0.18.0/x86_64/initramfs.cpio.gz",
+          "runtime_overlay": "/root/.mvm/cache/runtime-overlay/0.18.0/x86_64/overlay.ext4",
+          "rootfs": "/root/.mvm/cache/oci/rootfs/79ff19e9084a00eece421b2523fb93e22d730e2c0e525905de047e848e56d95f-0.18.0-guest-dcedf73f4f9ac92c/rootfs.ext4"
+        },
+        "digests": {
+          "kernel_sha256": "5996ed9e1a08398ef40d3f1c3b18e416dff933d7df2aaad146b083b32a0a7e0a",
+          "initramfs_sha256": "4d6ae0c849c03ef6c85260b8a54b9d6e1133685c402d9aebdd5544ae4a9ca876",
+          "runtime_overlay_sha256": "0cdf54679552245ca246f08ecebf37f01ff1cdf6e3b93ec4c7272f09fa33e102",
+          "rootfs_sha256": "cb872dc37e1210862d2f4471bfccae8f3cb2bb83f3da92fc4d4d4d6f5dbff884"
+        },
+        "measurements": {
+          "kernel_bytes": 4310016,
+          "initramfs_bytes": 1190544,
+          "runtime_overlay_bytes": 9908224,
+          "rootfs_bytes": 10317824,
+          "kernel_config": null
+        }
+      },
+      "cache": {
+        "artifacts_cached": true,
+        "mount": "not_used"
+      },
+      "work": {
+        "image_pull": false,
+        "image_build": false,
+        "mount_materialize": false,
+        "warm_claim": false,
+        "artifact_bytes_hashed": 0,
+        "process_table_scans": 0
+      },
+      "launch_mode": "cold",
+      "phases": {
+        "launch_mode": "cold",
+        "resolve_ms": 0.007683000000000001,
+        "drives_ms": 21.491719999999997,
+        "admit_ms": 398.334156,
+        "pool_wait_ms": 0.0,
+        "claim_ms": 0.0,
+        "backend_start_ms": 173.660551,
+        "vsock_wait_ms": 1.088917,
+        "warm_window_ms": 174.74946799999998,
+        "command_ms": 53.710428,
+        "teardown_ms": 109.977392,
+        "total_ms": 758.270847
+      },
+      "sub_phases": {
+        "mount_fingerprint_ms": null,
+        "mount_cache_lookup_ms": null,
+        "mount_materialize_ms": null,
+        "artifact_verify_ms": 0.009588999999999999,
+        "vmm_create_ms": 173.64334100000002,
+        "guest_kernel_entry_ms": 0.034495,
+        "agent_auth_ms": 1.031704,
+        "first_dispatch_ms": 0.131108,
+        "cleanup_handoff_ms": 109.808812,
+        "stop_transient_ms": 108.968522,
+        "stop_attach_ms": 0.020278,
+        "stop_endpoint_reaping_ms": 0.03452,
+        "stop_driver_kill_ms": 33.903366,
+        "stop_console_cleanup_ms": 75.006157,
+        "stop_supervisor_signal_ms": null,
+        "stop_pid_disappearance_ms": null,
+        "stop_force_kill_wait_ms": null,
+        "stop_state_cleanup_ms": null,
+        "pool_replenish_ms": null,
+        "state_remove_ms": 0.839611
+      },
+      "warm_first_command_memory": null,
+      "backend_phases": [
+        {
+          "name": "endpoint_spawn",
+          "ms": 0.004591
+        },
+        {
+          "name": "spec_assembly",
+          "ms": 0.065721
+        },
+        {
+          "name": "driver_boot",
+          "ms": 142.591016
+        },
+        {
+          "name": "console_stream_start",
+          "ms": 3.808307
+        },
+        {
+          "name": "activate_workload",
+          "ms": 26.810447
+        },
+        {
+          "name": "broker_register",
+          "ms": 0.074492
+        },
+        {
+          "name": "driver_boot.vmm_start",
+          "ms": 42.945704
+        },
+        {
+          "name": "driver_boot.guest_boot",
+          "ms": 99.556848
+        }
+      ],
+      "degraded": []
+    },
+    {
+      "lane": "prepared_cold",
+      "number": 20,
+      "context": {
+        "backend": "firecracker",
+        "os": "linux",
+        "arch": "x86_64",
+        "mvm_version": "0.18.0",
+        "vmm_version": null,
+        "root_strategy": "block_ext4",
+        "sizing": {
+          "cpus": 2,
+          "memory_mib": 512,
+          "mem_initial_mib": null
+        },
+        "filesystem": "ext4",
+        "artifacts": {
+          "kernel": "/root/.mvm/cache/builder-vm/x86_64/kernels/workload/vmlinux",
+          "initramfs": "/root/.mvm/cache/initramfs/0.18.0/x86_64/initramfs.cpio.gz",
+          "runtime_overlay": "/root/.mvm/cache/runtime-overlay/0.18.0/x86_64/overlay.ext4",
+          "rootfs": "/root/.mvm/cache/oci/rootfs/79ff19e9084a00eece421b2523fb93e22d730e2c0e525905de047e848e56d95f-0.18.0-guest-dcedf73f4f9ac92c/rootfs.ext4"
+        },
+        "digests": {
+          "kernel_sha256": "5996ed9e1a08398ef40d3f1c3b18e416dff933d7df2aaad146b083b32a0a7e0a",
+          "initramfs_sha256": "4d6ae0c849c03ef6c85260b8a54b9d6e1133685c402d9aebdd5544ae4a9ca876",
+          "runtime_overlay_sha256": "0cdf54679552245ca246f08ecebf37f01ff1cdf6e3b93ec4c7272f09fa33e102",
+          "rootfs_sha256": "cb872dc37e1210862d2f4471bfccae8f3cb2bb83f3da92fc4d4d4d6f5dbff884"
+        },
+        "measurements": {
+          "kernel_bytes": 4310016,
+          "initramfs_bytes": 1190544,
+          "runtime_overlay_bytes": 9908224,
+          "rootfs_bytes": 10317824,
+          "kernel_config": null
+        }
+      },
+      "cache": {
+        "artifacts_cached": true,
+        "mount": "not_used"
+      },
+      "work": {
+        "image_pull": false,
+        "image_build": false,
+        "mount_materialize": false,
+        "warm_claim": false,
+        "artifact_bytes_hashed": 0,
+        "process_table_scans": 0
+      },
+      "launch_mode": "cold",
+      "phases": {
+        "launch_mode": "cold",
+        "resolve_ms": 0.010456,
+        "drives_ms": 21.298164,
+        "admit_ms": 398.788429,
+        "pool_wait_ms": 0.0,
+        "claim_ms": 0.0,
+        "backend_start_ms": 170.43832,
+        "vsock_wait_ms": 1.366186,
+        "warm_window_ms": 171.804506,
+        "command_ms": 53.5641,
+        "teardown_ms": 111.71942299999999,
+        "total_ms": 757.185078
+      },
+      "sub_phases": {
+        "mount_fingerprint_ms": null,
+        "mount_cache_lookup_ms": null,
+        "mount_materialize_ms": null,
+        "artifact_verify_ms": 0.012876,
+        "vmm_create_ms": 170.430415,
+        "guest_kernel_entry_ms": 0.034703000000000005,
+        "agent_auth_ms": 1.309156,
+        "first_dispatch_ms": 0.25429199999999996,
+        "cleanup_handoff_ms": 111.527608,
+        "stop_transient_ms": 110.654643,
+        "stop_attach_ms": 0.019506,
+        "stop_endpoint_reaping_ms": 0.034862,
+        "stop_driver_kill_ms": 35.463788,
+        "stop_console_cleanup_ms": 75.132757,
+        "stop_supervisor_signal_ms": null,
+        "stop_pid_disappearance_ms": null,
+        "stop_force_kill_wait_ms": null,
+        "stop_state_cleanup_ms": null,
+        "pool_replenish_ms": null,
+        "state_remove_ms": 0.872398
+      },
+      "warm_first_command_memory": null,
+      "backend_phases": [
+        {
+          "name": "endpoint_spawn",
+          "ms": 0.004297
+        },
+        {
+          "name": "spec_assembly",
+          "ms": 0.08122499999999999
+        },
+        {
+          "name": "driver_boot",
+          "ms": 137.34335000000002
+        },
+        {
+          "name": "console_stream_start",
+          "ms": 3.6988440000000002
+        },
+        {
+          "name": "activate_workload",
+          "ms": 28.951194
+        },
+        {
+          "name": "broker_register",
+          "ms": 0.072297
+        },
+        {
+          "name": "driver_boot.vmm_start",
+          "ms": 42.838689
+        },
+        {
+          "name": "driver_boot.guest_boot",
+          "ms": 94.390314
+        }
+      ],
+      "degraded": []
+    }
+  ]
+}

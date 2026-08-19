@@ -16,6 +16,16 @@ for detailed scope and acceptance criteria.
       host compiler wrappers. The contributor shell was realized successfully
       in the libkrun builder VM.
 
+- [x] **Issue #2574 — the first publishable Linux/Firecracker launch lane.**
+      The false `host_services` degradation was already removed; the remaining
+      dispatch gap was a nested 100 ms reconnect cadence inside the driver's
+      own readiness backoff. Firecracker now makes one strict CONNECT attempt
+      per bounded probe, while ordinary RPC callers retain resilient retries.
+      On the established rotational KVM host, the required 2 warm-ups + 20
+      measured `prepared_cold` launches passed at **171.5 / 176.0 / 178.0 ms
+      p50/p95/p99** against **200 / 250 / 300 ms** budgets. The public page
+      carries the host, backend, storage class, report path, and digest.
+
 - [x] **Issue #2634 — sealed guests have writable runtime state without a
       writable root.** The universal initramfs mounts `/run` and `/tmp` as
       restricted tmpfs filesystems and moves them across the workload-root
@@ -25,6 +35,13 @@ for detailed scope and acceptance criteria.
       live lifecycle suite covers Alpine `/tmp` writes and retains the
       absolute `/bin/ping` mediated-tool proof. Together with PRs #2690,
       #2709, and #2720, this closes the NIC-less and read-only boot-noise issue.
+
+- [x] **Issue #2633 — healthy boots no longer report authentication failures.**
+      PR #2707 classified an abandoned readiness probe as transport EOF rather
+      than failed authentication. The remaining no-egress path now treats an
+       unattached FlowMux identity drive as the expected secretless boot shape,
+       while an attached but unreadable drive stays loud. Two focused tests pin
+       both sides of that boundary.
 
 - [x] **Issue #2684 — a sealed boot is reachable and proven before release.**
       The CLI release train publishes both universal-initramfs archives under
@@ -311,22 +328,14 @@ for detailed scope and acceptance criteria.
 
 ## In-flight plans
 
-- [~] **Secret bindings for forked children** —
+- [x] **Secret bindings for forked children** —
       `specs/plans/2026-08-18-fork-inherits-secret-bindings.md`, issue #2698.
-      W0 landed: a fork that drops its parent's secret bindings now says so,
-      reading the parent's persisted plan rather than needing a schema change.
-      3 tests, mutation-checked.
-      A1 landed: `declared_secrets` is threaded into the fork admission path, so
-      a child's bindings are declared by the caller rather than inherited, and
-      the child's capability is readable from its own plan. 2 tests,
-      mutation-checked.
-      STILL OPEN: the gap is **not yet closed** — A2 (CLI surface) is what makes
-      A1 reachable; until it lands every caller declares an empty set and no
-      user can declare a binding. Then A3-A5, and A6 (refuse an undeclared
-      drop), which is W0's refusal arm — deferred there because a fork's
-      prod-posture is a hardcoded literal today, not a flag. Option B (inherit
-      from the checkpoint, attenuated by intersection) is designed and
-      deliberately deferred, not queued.
+      Option A (W0 and A1–A6) is complete: fork bindings are explicit,
+      tenant-validated before clone/boot, carried by every booting entry point,
+      and recorded as names plus allowed hosts without source or value data.
+      Dropping a parent binding is refused unless the caller explicitly permits
+      attenuation. Option B (implicit checkpoint inheritance) remains designed
+      and deliberately deferred.
 
 - [~] **Admission-bound AI assurance sessions** —
       `specs/plans/2026-08-17-admission-bound-ai-assurance-sessions.md`. W1–W4,

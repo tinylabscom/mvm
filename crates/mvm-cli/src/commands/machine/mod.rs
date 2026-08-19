@@ -1053,6 +1053,12 @@ pub(in crate::commands) struct MachineWarmRestoreArgs {
     /// Name for the fresh child VM (auto-generated if omitted).
     #[arg(long, value_name = "NAME")]
     pub name: Option<String>,
+    /// Declare a child secret binding (`VAR` or `VAR=ADDRESS`). Repeatable.
+    #[arg(long = "secret")]
+    pub secret: Vec<String>,
+    /// Permit intentionally omitting one or more parent secret bindings.
+    #[arg(long)]
+    pub allow_secret_drop: bool,
     /// Output the result as JSON.
     #[arg(long)]
     pub json: bool,
@@ -1069,6 +1075,12 @@ pub(in crate::commands) struct MachineForkArgs {
     /// Auto-name the child as `<parent>-<branch>-<timestamp>`.
     #[arg(long, value_name = "BRANCH", conflicts_with = "child_name")]
     pub branch: Option<String>,
+    /// Declare a child secret binding (`VAR` or `VAR=ADDRESS`). Repeatable.
+    #[arg(long = "secret")]
+    pub secret: Vec<String>,
+    /// Permit intentionally omitting one or more parent secret bindings.
+    #[arg(long)]
+    pub allow_secret_drop: bool,
     /// Output the result as JSON.
     #[arg(long)]
     pub json: bool,
@@ -1085,6 +1097,12 @@ pub(in crate::commands) struct MachineRestoreArgs {
     /// Auto-name the child as `<checkpoint>-<branch>-<timestamp>`.
     #[arg(long, value_name = "BRANCH", conflicts_with = "child_name")]
     pub branch: Option<String>,
+    /// Declare a child secret binding (`VAR` or `VAR=ADDRESS`). Repeatable.
+    #[arg(long = "secret")]
+    pub secret: Vec<String>,
+    /// Permit intentionally omitting one or more parent secret bindings.
+    #[arg(long)]
+    pub allow_secret_drop: bool,
     /// Output the result as JSON.
     #[arg(long)]
     pub json: bool,
@@ -1602,9 +1620,12 @@ pub(in crate::commands) fn run(cli: &Cli, args: Args, cfg: &MvmConfig) -> Result
 
 /// Run `machine warm-restore`: fork a vm_full checkpoint into a fresh child VM.
 fn run_warm_restore(args: MachineWarmRestoreArgs) -> Result<()> {
+    let declared_secrets = super::vm::checkpoint::parse_declared_secrets(&args.secret)?;
     fork_vm_full_machine(ForkVmFullMachineInput {
         checkpoint_id: args.checkpoint,
         child_vm_name: args.name,
+        declared_secrets,
+        allow_secret_drop: args.allow_secret_drop,
         json: args.json,
     })?;
     Ok(())
@@ -1612,20 +1633,26 @@ fn run_warm_restore(args: MachineWarmRestoreArgs) -> Result<()> {
 
 /// Run `machine fork`: capture and branch a running machine into a fresh child VM.
 fn run_fork(args: MachineForkArgs) -> Result<()> {
+    let declared_secrets = super::vm::checkpoint::parse_declared_secrets(&args.secret)?;
     checkpoint::fork_machine(checkpoint::ForkMachineInput {
         parent_name: args.parent,
         child_name: args.child_name,
         branch: args.branch,
+        declared_secrets,
+        allow_secret_drop: args.allow_secret_drop,
         json: args.json,
     })
 }
 
 /// Run `machine restore`: branch a vm_full checkpoint into a fresh child VM.
 fn run_restore(args: MachineRestoreArgs) -> Result<()> {
+    let declared_secrets = super::vm::checkpoint::parse_declared_secrets(&args.secret)?;
     checkpoint::restore_machine(checkpoint::RestoreMachineInput {
         checkpoint_id: args.checkpoint,
         child_name: args.child_name,
         branch: args.branch,
+        declared_secrets,
+        allow_secret_drop: args.allow_secret_drop,
         json: args.json,
     })
 }

@@ -22,6 +22,10 @@ pub(in crate::commands) struct ForkMachineInput {
     pub child_name: Option<String>,
     /// Branch slug for auto-naming (`--branch`).
     pub branch: Option<String>,
+    /// Secret bindings explicitly declared for the child.
+    pub declared_secrets: Vec<mvm_core::plan::SecretBinding>,
+    /// Whether omitting a parent binding is intentional.
+    pub allow_secret_drop: bool,
     /// Emit machine-readable JSON instead of human text.
     pub json: bool,
 }
@@ -34,6 +38,10 @@ pub(in crate::commands) struct RestoreMachineInput {
     pub child_name: Option<String>,
     /// Branch slug for auto-naming (`--branch`).
     pub branch: Option<String>,
+    /// Secret bindings explicitly declared for the child.
+    pub declared_secrets: Vec<mvm_core::plan::SecretBinding>,
+    /// Whether omitting a parent binding is intentional.
+    pub allow_secret_drop: bool,
     /// Emit machine-readable JSON instead of human text.
     pub json: bool,
 }
@@ -61,6 +69,8 @@ pub(in crate::commands) fn fork_machine(input: ForkMachineInput) -> Result<()> {
     fork_vm_full_machine(ForkVmFullMachineInput {
         checkpoint_id: checkpoint_id.as_str().to_string(),
         child_vm_name: Some(child_name),
+        declared_secrets: input.declared_secrets,
+        allow_secret_drop: input.allow_secret_drop,
         json: input.json,
     })
     .with_context(|| format!("forking child from checkpoint {}", checkpoint_id.as_str()))?;
@@ -99,6 +109,8 @@ pub(in crate::commands) fn restore_machine(input: RestoreMachineInput) -> Result
     fork_vm_full_machine(ForkVmFullMachineInput {
         checkpoint_id: input.checkpoint_id,
         child_vm_name: Some(child_name),
+        declared_secrets: input.declared_secrets,
+        allow_secret_drop: input.allow_secret_drop,
         json: input.json,
     })?;
     Ok(())
@@ -110,6 +122,10 @@ pub(in crate::commands) struct ForkVmFullMachineInput {
     pub checkpoint_id: String,
     /// Desired child VM name; auto-generated if omitted.
     pub child_vm_name: Option<String>,
+    /// Secret bindings explicitly declared for the child.
+    pub declared_secrets: Vec<mvm_core::plan::SecretBinding>,
+    /// Whether omitting a parent binding is intentional.
+    pub allow_secret_drop: bool,
     /// Emit machine-readable JSON instead of human text.
     pub json: bool,
 }
@@ -157,7 +173,8 @@ pub(in crate::commands) fn fork_vm_full_machine(input: ForkVmFullMachineInput) -
             now,
             json: input.json,
             bypass_experimental_guard: true,
-            declared_secrets: &[],
+            declared_secrets: &input.declared_secrets,
+            allow_secret_drop: input.allow_secret_drop,
         },
     )?;
     Ok(())

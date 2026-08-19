@@ -285,6 +285,10 @@ fn revert_checkpoint(
         // A revert re-admits the checkpoint it targets; it declares no bindings
         // of its own, matching the pre-existing behaviour of this path.
         declared_secrets: &[],
+        // A revert cannot silently attenuate capabilities. Operators restoring
+        // a secret-bearing checkpoint use `machine restore`, whose explicit
+        // declaration/drop flags describe the fresh child's capability.
+        allow_secret_drop: false,
         json: opts.json,
     })
     .with_context(|| format!("restoring checkpoint {:?}", target.id.as_str()))?;
