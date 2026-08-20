@@ -5,6 +5,10 @@
       The merge-queue fuzz compile gate also consumes refreshed committed
       lockfiles with `--locked`, so newly published registry versions cannot
       replace the reviewed graph while the invariant job is running.
+      Readiness witnesses now reject invalid authentication signals, broken
+      live-endpoint channels, and endpoint death through the public launch
+      boundary; direct tests also pin secret-redacted debug output, optional
+      spawn-builder projection, and FlowMux identity configuration.
       The root graph and every affected standalone fuzz graph pin `arrayref`
       to a byte-for-byte vendored copy of the reviewed 0.3.9 upstream revision.
       A discovery-based regression test proves each manifest and lockfile use
