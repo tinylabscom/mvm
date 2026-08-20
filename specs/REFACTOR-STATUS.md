@@ -338,6 +338,10 @@ for detailed scope and acceptance criteria.
       vendored copy of the reviewed 0.3.9 upstream revision. Pinned file hashes
       guard the vendored source, Git dependencies remain denied, and Nix image
       sources plus the host build fingerprint retain that path dependency.
+      The exact Security rerun's capability-builder finding now has a direct
+      all-fields witness; its only remaining constructor mutant is documented
+      as the identical `Default::default()` expression rather than waived as
+      an untested behavior.
       Closure remains gated on a clean Security workflow run from current
       `main`, including every mutation shard and both reproducibility builds.
 

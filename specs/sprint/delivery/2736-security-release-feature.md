@@ -16,6 +16,11 @@
       Nix image-source filtering and the mirrored host build fingerprint retain
       the vendored dependency directory, with a regression test covering the
       omission that previously broke offline runtime-overlay builds.
+      The first exact full Security rerun also exposed two newly measured
+      capability-builder mutants: a direct all-operations assertion now kills
+      the real field-loss mutation, while the constructor-to-`Default`
+      replacement is recorded as provably identical with the required
+      mutation-baseline rationale.
       The exact feature check fails on the prior source and passes after the
       fix; every fuzz manifest compiles from its lockfile, and workspace
       all-target Clippy, workflow syntax, formatting, and the workspace suite

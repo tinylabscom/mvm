@@ -1007,6 +1007,11 @@
       "reason": "the discriminating input is a bare relative name that exists as a file or directory in the process's current directory. A test cannot create one without writing into the repo working tree or mutating process-global CWD shared by parallel tests under the documented cargo test fallback."
     },
     {
+      "file": "crates/mvm-contract/src/protocol/capability_negotiation.rs",
+      "mutant": "replace ClientOperationCapabilities::builder -> ClientOperationCapabilitiesBuilder with Default::default()",
+      "reason": "provably equivalent: `ClientOperationCapabilities::builder` returns `ClientOperationCapabilitiesBuilder::default()` directly, so the mutant evaluates the identical expression. No test can distinguish the two, while the adjacent builder test asserts that `build` preserves every enabled operation."
+    },
+    {
       "file": "crates/mvm-core/src/plan/synthesis.rs",
       "mutant": "replace SynthesisInput<'a>::builder -> SynthesisInputBuilder<'a> with Default::default()",
       "reason": "provably equivalent: `SynthesisInput::builder` is a one-line alias for `SynthesisInputBuilder::new()`, and this file's `impl Default for SynthesisInputBuilder` returns `Self::new()`, so `Default::default()` evaluates the identical expression. No test can distinguish the two, and the builder's own required-field refusal is asserted directly by the empty-builder test beside it."
