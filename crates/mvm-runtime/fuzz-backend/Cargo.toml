@@ -30,6 +30,9 @@ test = false
 doc = false
 bench = false
 
+[patch.crates-io]
+arrayref = { git = "https://github.com/droundy/arrayref", rev = "f8d0299d863922db6c409d08098941e833b70d69" }
+
 # virtio-vsock queue-geometry + descriptor-table hardening guard. Feeds a random
 # RAM image plus a random register-programming sequence into the vsock transport
 # and asserts no panic / no unbounded allocation — the regression guard for the

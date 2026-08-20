@@ -566,6 +566,12 @@ hvf-live-validation = [
 # validation lane. The normal binary remains fail-closed without it.
 trusted-apfs = ["mvm-cli/trusted-apfs", "mvm-runtime/trusted-apfs"]
 
+# The crates.io owner yanked the established arrayref releases and published
+# an unbuildable replacement with an unexpected dependency. Keep the reviewed
+# 0.3.9 source at the exact upstream revision recorded in its published crate.
+[patch.crates-io]
+arrayref = { git = "https://github.com/droundy/arrayref", rev = "f8d0299d863922db6c409d08098941e833b70d69" }
+
 [profile.release]
 opt-level = 3
 strip = true
