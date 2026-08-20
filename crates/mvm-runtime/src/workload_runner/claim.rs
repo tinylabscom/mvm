@@ -163,6 +163,8 @@ pub struct EndpointSpawnInputs<'a> {
     pub network_policy: &'a NetworkPolicy,
     /// Transport-neutral resource ceilings from the admitted plan.
     pub network_limits: mvm_core::plan::NetworkLimits,
+    /// Exact signed ingress mappings owned by this endpoint.
+    pub ingress: &'a [mvm_core::plan::IngressMapping],
     /// Where this boot's FlowMux identity comes from. A cold boot mints one; a
     /// warm claim inherits its parent's, because the restored child already
     /// holds the parent's signing key in memory.
@@ -252,7 +254,10 @@ impl<'a> ClaimGuards<'a> {
         vm: &VmId,
         inputs: &EndpointSpawnInputs<'_>,
     ) -> Result<EndpointHandle> {
-        if inputs.secrets.is_empty() && !inputs.network_policy.allows_egress() {
+        if inputs.secrets.is_empty()
+            && !inputs.network_policy.allows_egress()
+            && inputs.ingress.is_empty()
+        {
             return Ok(EndpointHandle {
                 egress_uds: None,
                 identity_drive: None,
@@ -272,6 +277,7 @@ impl<'a> ClaimGuards<'a> {
             redaction: inputs.redaction,
             network_policy: inputs.network_policy,
             network_limits: inputs.network_limits,
+            ingress: inputs.ingress,
             identity: inputs.identity,
         })?;
         Ok(EndpointHandle {
@@ -384,6 +390,7 @@ mod tests {
             redaction,
             network_policy: policy,
             network_limits: mvm_core::plan::NetworkLimits::default(),
+            ingress: &[],
         }
     }
 

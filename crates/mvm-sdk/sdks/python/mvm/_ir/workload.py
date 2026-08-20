@@ -317,6 +317,12 @@ class PortProto(Enum):
     udp = 'udp'
 
 
+class PortTransform(Enum):
+    opaque = 'opaque'
+    http = 'http'
+    tls = 'tls'
+
+
 class PythonTool1(Enum):
     uv = 'uv'
 
@@ -470,8 +476,12 @@ class Mount:
 @dataclass
 class PortForward:
     guest: int
+    guest_addr: str
     host: int
+    host_addr: str
+    mapping_id: int
     proto: PortProto
+    transform: PortTransform
 
 
 @dataclass

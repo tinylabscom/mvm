@@ -4,7 +4,7 @@
 //! key and the host-signer trust anchor (built by
 //! `mvm_vmm::host::flowmux_identity`). Every guest init — the Nix-built
 //! workload `/init`, the OCI init, Stage 0, and the persistent builder VM —
-//! copies those two files into `/run/mvm` before starting the egress client,
+//! copies those files into `/run/mvm` before starting the egress client,
 //! which cannot bind its loopback listener without them.
 //!
 //! This module is deliberately **not** behind the `addons` feature: the guest
@@ -32,6 +32,23 @@ pub const GUEST_SIGNING_KEY_FILE: &str = "flowmux-guest-signing-key";
 /// Basename of the host-signer trust anchor on the drive.
 pub const HOST_SIGNER_PUB_FILE: &str = "host-signer.pub";
 
+/// Basename of the guest-visible declared ingress targets on the drive.
+pub const INGRESS_TARGETS_FILE: &str = "flowmux-ingress.json";
+
+/// One guest-loopback target keyed by the signed ingress mapping ID.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GuestIngressTarget {
+    /// Stable non-zero ID from the signed ingress mapping.
+    pub mapping_id: u16,
+    /// Transport the guest loopback service expects.
+    pub protocol: mvm_contract::plan::IngressProtocol,
+    /// Exact guest-loopback IP address (`127.0.0.1` or `::1`).
+    pub guest_addr: String,
+    /// Guest-loopback service port.
+    pub guest_port: u16,
+}
+
 /// Where the guest copies the drive's contents to.
 pub const RUN_MVM_DIR: &str = "/run/mvm";
 
@@ -40,6 +57,9 @@ pub const GUEST_SIGNING_KEY_MODE: u32 = 0o400;
 
 /// Mode the public anchor is written with inside the guest.
 pub const HOST_SIGNER_PUB_MODE: u32 = 0o444;
+
+/// Mode the non-secret ingress target map is written with inside the guest.
+pub const INGRESS_TARGETS_MODE: u32 = 0o444;
 
 /// Where the kernel lists this guest's block devices.
 const SYS_CLASS_BLOCK: &str = "/sys/class/block";
@@ -199,8 +219,8 @@ pub use linux::provision_identity_from_drive;
 mod linux {
     use super::{
         GUEST_SIGNING_KEY_FILE, GUEST_SIGNING_KEY_MODE, HOST_SIGNER_PUB_FILE, HOST_SIGNER_PUB_MODE,
-        IDENTITY_DRIVE_LABEL, IdentityDriveError, RUN_MVM_DIR, find_labeled_ext4_disk_among,
-        virtio_block_devices,
+        IDENTITY_DRIVE_LABEL, INGRESS_TARGETS_FILE, INGRESS_TARGETS_MODE, IdentityDriveError,
+        RUN_MVM_DIR, find_labeled_ext4_disk_among, virtio_block_devices,
     };
     use std::path::Path;
 
@@ -241,6 +261,11 @@ mod linux {
             HOST_SIGNER_PUB_FILE,
             HOST_SIGNER_PUB_MODE,
             "the host-signer anchor",
+        )?;
+        copy_one(
+            INGRESS_TARGETS_FILE,
+            INGRESS_TARGETS_MODE,
+            "the declared ingress targets",
         )
     }
 

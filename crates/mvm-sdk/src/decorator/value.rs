@@ -12,8 +12,8 @@ use std::path::{Path, PathBuf};
 
 use crate::ir::{
     App, AuthType, Dependencies, Entrypoint, EnvValue, Format, HookCmd, Hooks, Image, Mount,
-    Network, NetworkEgress, NetworkMode, NodeTool, PortForward, PortProto, PythonTool, Resources,
-    SecretMount, SecretRef, Source, Workload,
+    Network, NetworkEgress, NetworkMode, NodeTool, PortForward, PortProto, PortTransform,
+    PythonTool, Resources, SecretMount, SecretRef, Source, Workload,
 };
 
 use super::ParseError;
@@ -467,7 +467,67 @@ fn helper_to_network(v: Value, path: &Path, line: usize) -> Result<Network, Pars
                             });
                         }
                     };
-                    Ok(PortForward { guest, host, proto })
+                    let mapping_id = match d.remove("mapping_id") {
+                        Some(Value::Int(n)) => n as u16,
+                        other => {
+                            return Err(ParseError::HelperBadKwarg {
+                                path: path.to_path_buf(),
+                                line,
+                                helper: "mvm.network".to_string(),
+                                kwarg: "ports[].mapping_id".to_string(),
+                                detail: format!("expected integer, got {other:?}"),
+                            });
+                        }
+                    };
+                    let host_addr = match d.remove("host_addr") {
+                        Some(Value::Str(value)) => value,
+                        other => {
+                            return Err(ParseError::HelperBadKwarg {
+                                path: path.to_path_buf(),
+                                line,
+                                helper: "mvm.network".to_string(),
+                                kwarg: "ports[].host_addr".to_string(),
+                                detail: format!("expected string, got {other:?}"),
+                            });
+                        }
+                    };
+                    let guest_addr = match d.remove("guest_addr") {
+                        Some(Value::Str(value)) => value,
+                        other => {
+                            return Err(ParseError::HelperBadKwarg {
+                                path: path.to_path_buf(),
+                                line,
+                                helper: "mvm.network".to_string(),
+                                kwarg: "ports[].guest_addr".to_string(),
+                                detail: format!("expected string, got {other:?}"),
+                            });
+                        }
+                    };
+                    let transform = match d.remove("transform") {
+                        Some(Value::Str(value)) if value == "opaque" => PortTransform::Opaque,
+                        Some(Value::Str(value)) if value == "http" => PortTransform::Http,
+                        Some(Value::Str(value)) if value == "tls" => PortTransform::Tls,
+                        other => {
+                            return Err(ParseError::HelperBadKwarg {
+                                path: path.to_path_buf(),
+                                line,
+                                helper: "mvm.network".to_string(),
+                                kwarg: "ports[].transform".to_string(),
+                                detail: format!(
+                                    "expected \"opaque\"/\"http\"/\"tls\", got {other:?}"
+                                ),
+                            });
+                        }
+                    };
+                    Ok(PortForward {
+                        mapping_id,
+                        host_addr,
+                        guest,
+                        host,
+                        proto,
+                        guest_addr,
+                        transform,
+                    })
                 }
                 other => Err(ParseError::HelperBadKwarg {
                     path: path.to_path_buf(),

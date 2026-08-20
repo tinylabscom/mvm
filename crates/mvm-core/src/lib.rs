@@ -57,10 +57,6 @@ pub mod icmp_wire;
 /// Content-addressed image version-lineage nodes (the image analog of
 /// [`checkpoint`]). Provenance metadata, never authorization.
 pub mod image_lineage;
-/// Host ingress-broker decision logic (host listener only by explicit policy).
-pub mod ingress_broker;
-/// Ingress-broker handler: compose decision + trace into an audit record.
-pub mod ingress_handler;
 /// Ingress secret redaction (mask known secret values before they reach the guest).
 pub mod ingress_redaction;
 /// `mvm-init` supervisor core logic: metadata → exec spec, marker progression.

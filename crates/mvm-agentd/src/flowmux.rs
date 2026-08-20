@@ -19,12 +19,15 @@ use std::time::Duration;
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use mvm_contract::protocol::network_flow::hello::{Handshake, agree};
 use mvm_contract::protocol::network_flow::{
-    Direction, FrameError, Opcode, SessionValidator, UDP_ADDR_PREFIX_LEN, decode, encode_into,
+    Direction, FrameError, MAX_UDP_DATAGRAM_LEN, Opcode, SessionValidator, UDP_ADDR_PREFIX_LEN,
+    decode, encode_into,
 };
 use mvm_core::net::session::Session;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::{mpsc, oneshot, watch};
 use tracing::{info, warn};
+
+use crate::flowmux_drive::GuestIngressTarget;
 
 /// How this side names itself in a handshake refusal. Only ever read by a
 /// human reading the error.
@@ -142,6 +145,11 @@ struct UdpAssociationState {
     tx: mpsc::UnboundedSender<UdpEvent>,
 }
 
+struct InboundUdpDatagram {
+    peer: SocketAddr,
+    payload: Vec<u8>,
+}
+
 /// A request from a client handle to the session pump.
 #[derive(Debug)]
 enum ClientRequest {
@@ -180,6 +188,12 @@ enum ClientRequest {
     UdpSend {
         stream_id: u32,
         destination: SocketAddr,
+        payload: Vec<u8>,
+    },
+    /// Reply from a declared guest-loopback UDP target to an observed peer.
+    InboundUdpReply {
+        stream_id: u32,
+        peer: SocketAddr,
         payload: Vec<u8>,
     },
     /// Close a UDP association from the guest side.
@@ -247,6 +261,19 @@ impl FlowMuxClient {
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
+        Self::connect_with_ingress(stream, guest_signing_key, host_anchor, Vec::new()).await
+    }
+
+    /// Connect with the signed plan's guest-loopback ingress targets.
+    pub async fn connect_with_ingress<S>(
+        stream: S,
+        guest_signing_key: SigningKey,
+        host_anchor: VerifyingKey,
+        ingress_targets: Vec<GuestIngressTarget>,
+    ) -> Result<Self, FlowMuxError>
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
         let handle = tokio::runtime::Handle::try_current()
             .map_err(|e| FlowMuxError::Handshake(e.to_string()))?;
 
@@ -267,16 +294,39 @@ impl FlowMuxClient {
         let (client_tx, client_rx) = mpsc::unbounded_channel();
         let (state_tx, state_rx) = watch::channel(SessionState::Connecting);
 
+        let mut targets = BTreeMap::new();
+        for target in ingress_targets {
+            if target.mapping_id == 0 || targets.insert(target.mapping_id, target).is_some() {
+                return Err(FlowMuxError::Frame(
+                    "ingress targets must have unique non-zero mapping ids".to_string(),
+                ));
+            }
+        }
+
         let next_stream_id = Arc::new(AtomicU32::new(FIRST_GUEST_STREAM_ID));
         let pump = SessionPump {
             stream: Box::pin(stream),
             session,
-            validator: SessionValidator::default(),
+            validator: SessionValidator::new_with_ingress(targets.iter().map(
+                |(&mapping, target)| {
+                    let kind = match target.protocol {
+                        mvm_contract::plan::IngressProtocol::Tcp => {
+                            mvm_contract::protocol::network_flow::IngressFlowKind::Tcp
+                        }
+                        mvm_contract::plan::IngressProtocol::Udp => {
+                            mvm_contract::protocol::network_flow::IngressFlowKind::Udp
+                        }
+                    };
+                    (mapping, kind)
+                },
+            )),
             client_rx,
             client_tx: client_tx.clone(),
             state_tx,
+            ingress_targets: targets,
             tcp_streams: BTreeMap::new(),
             udp_associations: BTreeMap::new(),
+            inbound_udp: BTreeMap::new(),
             pending_opens: BTreeMap::new(),
             pending_resolves: BTreeMap::new(),
             frame_reader: FrameReader::default(),
@@ -381,8 +431,10 @@ struct SessionPump<S> {
     client_rx: mpsc::UnboundedReceiver<ClientRequest>,
     client_tx: mpsc::UnboundedSender<ClientRequest>,
     state_tx: watch::Sender<SessionState>,
+    ingress_targets: BTreeMap<u16, GuestIngressTarget>,
     tcp_streams: BTreeMap<u32, TcpStreamState>,
     udp_associations: BTreeMap<u32, UdpAssociationState>,
+    inbound_udp: BTreeMap<u32, mpsc::Sender<InboundUdpDatagram>>,
     pending_opens: BTreeMap<u32, PendingOpen>,
     pending_resolves: BTreeMap<u32, oneshot::Sender<Result<Vec<u8>, FlowMuxError>>>,
     /// Survives a `select!` cancellation so a half-read frame resumes.
@@ -534,6 +586,13 @@ where
             } => {
                 self.send_udp(stream_id, destination, &payload).await?;
             }
+            ClientRequest::InboundUdpReply {
+                stream_id,
+                peer,
+                payload,
+            } => {
+                self.send_udp(stream_id, peer, &payload).await?;
+            }
             ClientRequest::CloseUdp { stream_id } => {
                 self.send_close_udp(stream_id).await?;
             }
@@ -656,6 +715,9 @@ where
             .map_err(|e| FlowMuxError::Frame(e.to_string()))?;
 
         match opcode {
+            Opcode::InboundOpen => {
+                self.handle_inbound_open(stream_id, &payload).await?;
+            }
             Opcode::Opened => {
                 if let Some(PendingOpen::Tcp {
                     respond,
@@ -751,6 +813,7 @@ where
                 if let Some(state) = self.udp_associations.remove(&stream_id) {
                     let _ = state.tx.send(UdpEvent::Reset(reason.clone()));
                 }
+                self.inbound_udp.remove(&stream_id);
                 if let Some(pending) = self.pending_opens.remove(&stream_id) {
                     complete_pending_open_error(
                         pending,
@@ -762,10 +825,15 @@ where
                 }
             }
             Opcode::UdpRecv => {
-                if let Some(state) = self.udp_associations.get_mut(&stream_id)
-                    && let Ok((addr, body)) = decode_udp_addr(&payload)
-                {
-                    let _ = state.tx.send(UdpEvent::Recv(addr, body.to_vec()));
+                if let Ok((addr, body)) = decode_udp_addr(&payload) {
+                    if let Some(sender) = self.inbound_udp.get(&stream_id) {
+                        let _ = sender.try_send(InboundUdpDatagram {
+                            peer: addr,
+                            payload: body.to_vec(),
+                        });
+                    } else if let Some(state) = self.udp_associations.get_mut(&stream_id) {
+                        let _ = state.tx.send(UdpEvent::Recv(addr, body.to_vec()));
+                    }
                 }
             }
             Opcode::CloseUdp => {
@@ -773,6 +841,7 @@ where
                 if let Some(state) = self.udp_associations.remove(&stream_id) {
                     let _ = state.tx.send(UdpEvent::CloseUdp(reason));
                 }
+                self.inbound_udp.remove(&stream_id);
             }
             Opcode::WindowUpdate => {
                 if payload.len() == 4 {
@@ -796,6 +865,169 @@ where
             }
         }
         Ok(())
+    }
+
+    async fn handle_inbound_open(
+        &mut self,
+        stream_id: u32,
+        payload: &[u8],
+    ) -> Result<(), FlowMuxError> {
+        let Some(mapping_id) = decode_ingress_mapping_id(payload) else {
+            return self
+                .send_inbound_refused(stream_id, "missing ingress mapping id")
+                .await;
+        };
+        let Some(target) = self.ingress_targets.get(&mapping_id).cloned() else {
+            return self
+                .send_inbound_refused(stream_id, "undeclared ingress mapping")
+                .await;
+        };
+        match target.protocol {
+            mvm_contract::plan::IngressProtocol::Tcp => {
+                self.open_inbound_tcp(stream_id, mapping_id, &target).await
+            }
+            mvm_contract::plan::IngressProtocol::Udp => {
+                self.open_inbound_udp(stream_id, mapping_id, &target).await
+            }
+        }
+    }
+
+    async fn open_inbound_tcp(
+        &mut self,
+        stream_id: u32,
+        mapping_id: u16,
+        target: &GuestIngressTarget,
+    ) -> Result<(), FlowMuxError> {
+        let guest_ip = target.guest_addr.parse().map_err(|error| {
+            FlowMuxError::Frame(format!("invalid guest ingress target: {error}"))
+        })?;
+        let address = SocketAddr::new(guest_ip, target.guest_port);
+        let local = match tokio::net::TcpStream::connect(address).await {
+            Ok(stream) => stream,
+            Err(error) => {
+                warn!(mapping_id, %address, %error, "guest ingress target refused connection");
+                return self
+                    .send_inbound_refused(stream_id, "guest loopback target unavailable")
+                    .await;
+            }
+        };
+
+        let (stream_event_tx, stream_event_rx) = mpsc::unbounded_channel();
+        self.tcp_streams.insert(
+            stream_id,
+            TcpStreamState {
+                tx: stream_event_tx,
+                host_half_closed: false,
+            },
+        );
+        self.send_inbound_ready(stream_id).await?;
+
+        let mut flow = FlowMuxStream {
+            stream_id,
+            tx: self.client_tx.clone(),
+            rx: stream_event_rx,
+            read_buf: Vec::new(),
+        };
+        tokio::spawn(async move {
+            let mut local = local;
+            if let Err(error) = tokio::io::copy_bidirectional(&mut local, &mut flow).await {
+                warn!(stream_id, %error, "guest ingress relay ended");
+            }
+        });
+        Ok(())
+    }
+
+    async fn open_inbound_udp(
+        &mut self,
+        stream_id: u32,
+        mapping_id: u16,
+        target: &GuestIngressTarget,
+    ) -> Result<(), FlowMuxError> {
+        let guest_ip = target.guest_addr.parse().map_err(|error| {
+            FlowMuxError::Frame(format!("invalid guest UDP ingress target: {error}"))
+        })?;
+        let target_addr = SocketAddr::new(guest_ip, target.guest_port);
+        let bind_addr = SocketAddr::new(guest_ip, 0);
+        let socket = match tokio::net::UdpSocket::bind(bind_addr).await {
+            Ok(socket) => socket,
+            Err(error) => {
+                warn!(mapping_id, %bind_addr, %error, "guest UDP ingress bind failed");
+                return self
+                    .send_inbound_refused(stream_id, "guest UDP ingress unavailable")
+                    .await;
+            }
+        };
+        if let Err(error) = socket.connect(target_addr).await {
+            warn!(mapping_id, %target_addr, %error, "guest UDP ingress target connect failed");
+            return self
+                .send_inbound_refused(stream_id, "guest UDP ingress target unavailable")
+                .await;
+        }
+
+        let (datagram_tx, mut datagram_rx) = mpsc::channel::<InboundUdpDatagram>(64);
+        self.inbound_udp.insert(stream_id, datagram_tx);
+        self.send_inbound_ready(stream_id).await?;
+        let client_tx = self.client_tx.clone();
+        tokio::spawn(async move {
+            let mut response = vec![0_u8; MAX_UDP_DATAGRAM_LEN];
+            while let Some(datagram) = datagram_rx.recv().await {
+                if let Err(error) = socket.send(&datagram.payload).await {
+                    warn!(stream_id, %error, "guest UDP ingress delivery failed");
+                    break;
+                }
+                let received =
+                    match tokio::time::timeout(Duration::from_secs(5), socket.recv(&mut response))
+                        .await
+                    {
+                        Ok(Ok(received)) => received,
+                        Ok(Err(error)) => {
+                            warn!(stream_id, %error, "guest UDP ingress reply failed");
+                            break;
+                        }
+                        Err(_) => continue,
+                    };
+                if client_tx
+                    .send(ClientRequest::InboundUdpReply {
+                        stream_id,
+                        peer: datagram.peer,
+                        payload: response[..received].to_vec(),
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+        Ok(())
+    }
+
+    async fn send_inbound_ready(&mut self, stream_id: u32) -> Result<(), FlowMuxError> {
+        self.validator
+            .admit(&frame_facts(
+                Direction::GuestToHost,
+                Opcode::InboundReady,
+                stream_id,
+                0,
+            ))
+            .map_err(|error| FlowMuxError::Frame(error.to_string()))?;
+        self.write_frame(Opcode::InboundReady, stream_id, &[]).await
+    }
+
+    async fn send_inbound_refused(
+        &mut self,
+        stream_id: u32,
+        reason: &str,
+    ) -> Result<(), FlowMuxError> {
+        self.validator
+            .admit(&frame_facts(
+                Direction::GuestToHost,
+                Opcode::InboundRefused,
+                stream_id,
+                reason.len() as u32,
+            ))
+            .map_err(|error| FlowMuxError::Frame(error.to_string()))?;
+        self.write_frame(Opcode::InboundRefused, stream_id, reason.as_bytes())
+            .await
     }
 
     async fn send_data(&mut self, stream_id: u32, bytes: &[u8]) -> Result<(), FlowMuxError> {
@@ -1222,6 +1454,8 @@ fn inbound_frame_facts(
         payload.len() as u32,
     );
     match (opcode, payload) {
+        (Opcode::InboundOpen, payload) => decode_ingress_mapping_id(payload)
+            .map_or(facts, |mapping| facts.with_ingress_mapping(mapping)),
         (Opcode::WindowUpdate, [a, b, c, d]) => {
             facts.with_credit(u32::from_be_bytes([*a, *b, *c, *d]))
         }
@@ -1229,6 +1463,11 @@ fn inbound_frame_facts(
         // it — the decode is a faithful read, not a way to wave frames through.
         _ => facts,
     }
+}
+
+fn decode_ingress_mapping_id(payload: &[u8]) -> Option<u16> {
+    let bytes: [u8; 2] = payload.get(..2)?.try_into().ok()?;
+    Some(u16::from_be_bytes(bytes))
 }
 
 /// Encode one DNS A or AAAA question for a FlowMux `Resolve` frame.
@@ -1371,9 +1610,31 @@ impl FlowMuxReconnectClient {
         F: Fn() -> Fut + Send + Sync + 'static,
         Fut: std::future::Future<Output = Result<S, FlowMuxError>> + Send,
     {
+        Self::connect_with_ingress(connector, guest_signing_key, host_anchor, Vec::new()).await
+    }
+
+    /// Connect and retain the signed ingress target set across reconnects.
+    pub async fn connect_with_ingress<S, F, Fut>(
+        connector: F,
+        guest_signing_key: SigningKey,
+        host_anchor: VerifyingKey,
+        ingress_targets: Vec<GuestIngressTarget>,
+    ) -> Result<Self, FlowMuxError>
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+        F: Fn() -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = Result<S, FlowMuxError>> + Send,
+    {
+        let ingress_targets = Arc::new(ingress_targets);
         let initial = connector().await?;
         let client = Arc::new(
-            FlowMuxClient::connect(initial, guest_signing_key.clone(), host_anchor).await?,
+            FlowMuxClient::connect_with_ingress(
+                initial,
+                guest_signing_key.clone(),
+                host_anchor,
+                ingress_targets.as_ref().clone(),
+            )
+            .await?,
         );
         let (current_tx, current_rx) = watch::channel(Some(Arc::clone(&client)));
 
@@ -1383,6 +1644,7 @@ impl FlowMuxReconnectClient {
                 connector,
                 guest_signing_key,
                 host_anchor,
+                ingress_targets,
                 current_tx,
                 &mut state_rx,
                 ReconnectPolicy::default(),
@@ -1485,6 +1747,7 @@ async fn reconnect_loop<S, F, Fut>(
     connector: F,
     guest_signing_key: SigningKey,
     host_anchor: VerifyingKey,
+    ingress_targets: Arc<Vec<GuestIngressTarget>>,
     current_tx: watch::Sender<Option<Arc<FlowMuxClient>>>,
     state_rx: &mut watch::Receiver<SessionState>,
     policy: ReconnectPolicy,
@@ -1526,7 +1789,14 @@ async fn reconnect_loop<S, F, Fut>(
 
         match connector().await {
             Ok(stream) => {
-                match FlowMuxClient::connect(stream, guest_signing_key.clone(), host_anchor).await {
+                match FlowMuxClient::connect_with_ingress(
+                    stream,
+                    guest_signing_key.clone(),
+                    host_anchor,
+                    ingress_targets.as_ref().clone(),
+                )
+                .await
+                {
                     Ok(client) => {
                         let new_client = Arc::new(client);
                         let state = new_client.state();
@@ -1890,6 +2160,222 @@ mod tests {
 
         stream.shutdown().await.unwrap();
 
+        host.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn guest_client_relays_declared_inbound_tcp_to_loopback() {
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let guest_port = listener.local_addr().unwrap().port();
+        let (guest_stream, host_stream) = tokio::io::duplex(4096);
+        let (guest_key, _guest_anchor) = generate_keypair();
+        let (host_key, host_anchor) = generate_keypair();
+
+        let host = tokio::spawn(async move {
+            let (mut host_stream, mut host_session) = host_handshake(host_stream, host_key).await;
+            let (opcode, _, _, _) = recv_frame(&mut host_stream, &mut host_session)
+                .await
+                .unwrap();
+            assert_eq!(opcode, Opcode::Hello);
+            send_frame(
+                &mut host_stream,
+                &mut host_session,
+                Opcode::HelloAck,
+                0,
+                &Handshake::local("test-host").encode(),
+            )
+            .await;
+
+            send_frame(
+                &mut host_stream,
+                &mut host_session,
+                Opcode::InboundOpen,
+                2,
+                &17_u16.to_be_bytes(),
+            )
+            .await;
+            let (opcode, stream_id, _, _) = recv_frame(&mut host_stream, &mut host_session)
+                .await
+                .unwrap();
+            assert_eq!((opcode, stream_id), (Opcode::InboundReady, 2));
+
+            send_frame(
+                &mut host_stream,
+                &mut host_session,
+                Opcode::Data,
+                2,
+                b"from-host",
+            )
+            .await;
+            loop {
+                let (opcode, stream_id, _, payload) =
+                    recv_frame(&mut host_stream, &mut host_session)
+                        .await
+                        .unwrap();
+                if opcode == Opcode::Data {
+                    assert_eq!(stream_id, 2);
+                    assert_eq!(payload, b"from-guest");
+                    break;
+                }
+                assert_eq!(opcode, Opcode::WindowUpdate);
+            }
+        });
+
+        let _client = FlowMuxClient::connect_with_ingress(
+            guest_stream,
+            guest_key,
+            host_anchor,
+            vec![GuestIngressTarget {
+                mapping_id: 17,
+                protocol: mvm_contract::plan::IngressProtocol::Tcp,
+                guest_addr: std::net::Ipv4Addr::LOCALHOST.to_string(),
+                guest_port,
+            }],
+        )
+        .await
+        .expect("guest handshake");
+
+        let (mut loopback, _) = listener.accept().await.unwrap();
+        let mut payload = [0_u8; 9];
+        loopback.read_exact(&mut payload).await.unwrap();
+        assert_eq!(&payload, b"from-host");
+        loopback.write_all(b"from-guest").await.unwrap();
+        host.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn guest_client_refuses_inbound_tcp_when_loopback_target_is_unavailable() {
+        let guest_port = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let (guest_stream, host_stream) = tokio::io::duplex(4096);
+        let (guest_key, _guest_anchor) = generate_keypair();
+        let (host_key, host_anchor) = generate_keypair();
+
+        let host = tokio::spawn(async move {
+            let (mut host_stream, mut host_session) = host_handshake(host_stream, host_key).await;
+            let (opcode, _, _, _) = recv_frame(&mut host_stream, &mut host_session)
+                .await
+                .unwrap();
+            assert_eq!(opcode, Opcode::Hello);
+            send_frame(
+                &mut host_stream,
+                &mut host_session,
+                Opcode::HelloAck,
+                0,
+                &Handshake::local("test-host").encode(),
+            )
+            .await;
+            send_frame(
+                &mut host_stream,
+                &mut host_session,
+                Opcode::InboundOpen,
+                2,
+                &23_u16.to_be_bytes(),
+            )
+            .await;
+            let (opcode, stream_id, _, reason) = recv_frame(&mut host_stream, &mut host_session)
+                .await
+                .unwrap();
+            assert_eq!((opcode, stream_id), (Opcode::InboundRefused, 2));
+            assert!(!reason.is_empty());
+        });
+
+        let _client = FlowMuxClient::connect_with_ingress(
+            guest_stream,
+            guest_key,
+            host_anchor,
+            vec![GuestIngressTarget {
+                mapping_id: 23,
+                protocol: mvm_contract::plan::IngressProtocol::Tcp,
+                guest_addr: std::net::Ipv4Addr::LOCALHOST.to_string(),
+                guest_port,
+            }],
+        )
+        .await
+        .expect("guest handshake");
+        host.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn guest_client_relays_declared_inbound_udp_to_loopback() {
+        let service = tokio::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let guest_port = service.local_addr().unwrap().port();
+        let external_peer = SocketAddr::new(std::net::Ipv4Addr::new(192, 0, 2, 44).into(), 4040);
+        let (guest_stream, host_stream) = tokio::io::duplex(4096);
+        let (guest_key, _guest_anchor) = generate_keypair();
+        let (host_key, host_anchor) = generate_keypair();
+
+        let host = tokio::spawn(async move {
+            let (mut host_stream, mut host_session) = host_handshake(host_stream, host_key).await;
+            let (opcode, _, _, _) = recv_frame(&mut host_stream, &mut host_session)
+                .await
+                .unwrap();
+            assert_eq!(opcode, Opcode::Hello);
+            send_frame(
+                &mut host_stream,
+                &mut host_session,
+                Opcode::HelloAck,
+                0,
+                &Handshake::local("test-host").encode(),
+            )
+            .await;
+            send_frame(
+                &mut host_stream,
+                &mut host_session,
+                Opcode::InboundOpen,
+                2,
+                &31_u16.to_be_bytes(),
+            )
+            .await;
+            let (opcode, stream_id, _, _) = recv_frame(&mut host_stream, &mut host_session)
+                .await
+                .unwrap();
+            assert_eq!((opcode, stream_id), (Opcode::InboundReady, 2));
+
+            let mut datagram = encode_udp_addr(external_peer.ip(), external_peer.port());
+            datagram.extend_from_slice(b"udp-request");
+            send_frame(
+                &mut host_stream,
+                &mut host_session,
+                Opcode::UdpRecv,
+                2,
+                &datagram,
+            )
+            .await;
+            let (opcode, stream_id, _, payload) = recv_frame(&mut host_stream, &mut host_session)
+                .await
+                .unwrap();
+            assert_eq!((opcode, stream_id), (Opcode::UdpSend, 2));
+            let (peer, body) = decode_udp_addr(&payload).unwrap();
+            assert_eq!(peer, external_peer);
+            assert_eq!(body, b"udp-response");
+        });
+
+        let _client = FlowMuxClient::connect_with_ingress(
+            guest_stream,
+            guest_key,
+            host_anchor,
+            vec![GuestIngressTarget {
+                mapping_id: 31,
+                protocol: mvm_contract::plan::IngressProtocol::Udp,
+                guest_addr: std::net::Ipv4Addr::LOCALHOST.to_string(),
+                guest_port,
+            }],
+        )
+        .await
+        .expect("guest handshake");
+
+        let mut request = [0_u8; 64];
+        let (received, source) = service.recv_from(&mut request).await.unwrap();
+        assert_eq!(&request[..received], b"udp-request");
+        service.send_to(b"udp-response", source).await.unwrap();
         host.await.unwrap();
     }
 

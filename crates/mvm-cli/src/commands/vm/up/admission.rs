@@ -365,6 +365,7 @@ pub(in crate::commands::vm) fn admit_plan_for_boot(
         kernel_sha256: None,
         network_mode: p.network_mode,
         l3_network: None,
+        ingress: Vec::new(),
         vm_name: p.vm_name,
         tenant: Some(p.tenant),
         backend_name: p.backend_name,

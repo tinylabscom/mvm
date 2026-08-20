@@ -27,8 +27,8 @@ use ed25519_dalek::{SigningKey, VerifyingKey};
 use mvm_contract::protocol::dns::{MAX_DNS_MESSAGE, decode_query, encode_response};
 use mvm_contract::protocol::network_flow::hello::{Handshake, agree};
 use mvm_contract::protocol::network_flow::{
-    Direction, FrameError, HEADER_LEN, LENGTH_PREFIX_LEN, Opcode, SessionValidator,
-    UDP_ADDR_PREFIX_LEN, decode,
+    Direction, FrameError, HEADER_LEN, IngressFlowKind, LENGTH_PREFIX_LEN, Opcode,
+    SessionValidator, UDP_ADDR_PREFIX_LEN, decode,
 };
 use mvm_core::net::session::Session;
 use mvm_vmm::vsock_egress_bridge::egress_gate::{DnsVerdict, EgressGate, EgressVerdict};
@@ -36,8 +36,8 @@ use tracing::{info, warn};
 
 use self::registry::{RegistryLimits, StreamRegistry, VmFlowBudget, class_for_open};
 use self::udp_relay::{
-    UdpAssociationHandle, UdpRelayParams, UdpSendMsg, decode_udp_addr, run_udp_relay,
-    udp_event_sources,
+    UdpAssociationHandle, UdpPeerAdmission, UdpRelayParams, UdpSendMsg, decode_udp_addr,
+    run_udp_relay, udp_event_sources,
 };
 
 use crate::supervisor::audit_recorder::{EventCategory, Recorder};
@@ -47,6 +47,11 @@ use mvm_core::rate_limit::TokenBucket;
 /// How this side names itself in a handshake refusal. Only ever read by a
 /// human reading the error.
 const HOST_BUILD: &str = concat!("mvm-hostd ", env!("CARGO_PKG_VERSION"));
+
+type IngressOpenResult = Result<(), String>;
+type IngressOpenWaiters = BTreeMap<u32, std::sync::mpsc::SyncSender<IngressOpenResult>>;
+type SharedIngressOpenWaiters = Arc<Mutex<IngressOpenWaiters>>;
+type SharedUdpAssociations = Arc<Mutex<BTreeMap<u32, UdpAssociationHandle>>>;
 
 /// Per-address connect budget when trying an admitted set: small so an
 /// unreachable address (e.g. an AAAA with no host IPv6 egress) fails over to
@@ -176,7 +181,9 @@ pub struct FlowMuxSession {
     registry: Arc<Mutex<StreamRegistry>>,
     /// Active guest-initiated TCP streams and their upstream sockets. The host
     /// half of each stream lives in a dedicated thread.
-    streams: BTreeMap<u32, TcpStreamHandle>,
+    streams: Arc<Mutex<BTreeMap<u32, TcpStreamHandle>>>,
+    /// Host-initiated opens awaiting the guest's loopback connect decision.
+    pending_ingress: SharedIngressOpenWaiters,
     /// The rate/inflight guard the ICMP verb admits against.
     ///
     /// Per session, like the registry: one guest's echoes cannot spend
@@ -196,7 +203,7 @@ pub struct FlowMuxSession {
     substitution: Option<Arc<crate::supervisor::network_endpoint_proxy::SubstitutionService>>,
     /// Active guest-initiated UDP associations. Each association runs in its
     /// own relay thread.
-    udp_associations: BTreeMap<u32, UdpAssociationHandle>,
+    udp_associations: SharedUdpAssociations,
     gate: EgressGate,
     read_buf: Vec<u8>,
     limits: RegistryLimits,
@@ -216,7 +223,7 @@ impl std::fmt::Debug for FlowMuxSession {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("FlowMuxSession")
             .field("session_id", &self.session_id())
-            .field("streams", &self.streams.len())
+            .field("streams", &lock_tcp_streams(&self.streams).len())
             .finish_non_exhaustive()
     }
 }
@@ -234,6 +241,311 @@ struct TcpStreamHandle {
     retired: Arc<AtomicBool>,
 }
 
+/// Cloneable host-initiated ingress side of one authenticated session.
+#[derive(Clone)]
+pub struct FlowMuxIngressHandle {
+    session: Arc<Mutex<Session>>,
+    writer: Arc<Mutex<UnixStream>>,
+    validator: Arc<Mutex<SessionValidator>>,
+    registry: Arc<Mutex<StreamRegistry>>,
+    streams: Arc<Mutex<BTreeMap<u32, TcpStreamHandle>>>,
+    pending: SharedIngressOpenWaiters,
+    credit_wait: Duration,
+    recorder: Option<Arc<Recorder>>,
+    runtime_handle: Option<tokio::runtime::Handle>,
+    udp_associations: SharedUdpAssociations,
+    udp_idle_timeout: Duration,
+    max_udp_peers: usize,
+}
+
+impl FlowMuxIngressHandle {
+    /// Open one accepted opaque TCP connection on an admitted mapping.
+    pub fn open_tcp(&self, mapping_id: u16, external: TcpStream) -> Result<(), FlowMuxError> {
+        let result = self.open_tcp_inner(mapping_id, external);
+        let (event_name, verdict) = if result.is_ok() {
+            ("host.ingress.allowed", "allowed")
+        } else {
+            ("host.ingress.denied", "denied")
+        };
+        emit_unbound_audit(
+            self.recorder.as_ref(),
+            self.runtime_handle.as_ref(),
+            EventCategory::Host,
+            event_name,
+            BTreeMap::from([
+                ("mapping_id".to_string(), mapping_id.to_string()),
+                ("class".to_string(), "tcp_ingress".to_string()),
+                ("verdict".to_string(), verdict.to_string()),
+            ]),
+        );
+        result
+    }
+
+    fn open_tcp_inner(&self, mapping_id: u16, external: TcpStream) -> Result<(), FlowMuxError> {
+        let stream_id = lock_registry(&self.registry)
+            .alloc_host(registry::FlowClass::Tcp)
+            .map_err(|error| FlowMuxError::FrameRefused(error.to_string()))?;
+        let tracked = match external.try_clone() {
+            Ok(stream) => stream,
+            Err(error) => {
+                let _ = lock_registry(&self.registry).retire(stream_id);
+                return Err(FlowMuxError::Transport(error));
+            }
+        };
+        lock_tcp_streams(&self.streams).insert(
+            stream_id,
+            TcpStreamHandle {
+                upstream: tracked,
+                host_half_closed: Arc::new(AtomicBool::new(false)),
+                retired: Arc::new(AtomicBool::new(false)),
+            },
+        );
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        lock_pending_ingress(&self.pending).insert(stream_id, sender);
+
+        let payload = mapping_id.to_be_bytes();
+        if let Err(error) = lock_validator(&self.validator).admit(
+            &mvm_contract::protocol::network_flow::FrameFacts::new(
+                Direction::HostToGuest,
+                Opcode::InboundOpen,
+                stream_id,
+            )
+            .with_payload(payload.len() as u32)
+            .with_ingress_mapping(mapping_id),
+        ) {
+            lock_pending_ingress(&self.pending).remove(&stream_id);
+            if let Some(handle) = lock_tcp_streams(&self.streams).remove(&stream_id) {
+                let _ = handle.upstream.shutdown(std::net::Shutdown::Both);
+            }
+            let _ = lock_registry(&self.registry).retire(stream_id);
+            return Err(FlowMuxError::FrameRefused(error.to_string()));
+        }
+        if let Err(error) = write_frame_to(
+            &self.session,
+            &self.writer,
+            Opcode::InboundOpen,
+            stream_id,
+            &payload,
+        ) {
+            lock_pending_ingress(&self.pending).remove(&stream_id);
+            if let Some(handle) = lock_tcp_streams(&self.streams).remove(&stream_id) {
+                let _ = handle.upstream.shutdown(std::net::Shutdown::Both);
+            }
+            let _ = lock_registry(&self.registry).retire(stream_id);
+            return Err(error);
+        }
+
+        match receiver.recv_timeout(Duration::from_secs(5)) {
+            Ok(Ok(())) => self.spawn_tcp_relay(stream_id, external),
+            Ok(Err(reason)) => {
+                if let Some(handle) = lock_tcp_streams(&self.streams).remove(&stream_id) {
+                    let _ = handle.upstream.shutdown(std::net::Shutdown::Both);
+                }
+                Err(FlowMuxError::FrameRefused(format!(
+                    "guest refused ingress mapping {mapping_id}: {reason}"
+                )))
+            }
+            Err(error) => {
+                lock_pending_ingress(&self.pending).remove(&stream_id);
+                if let Some(handle) = lock_tcp_streams(&self.streams).remove(&stream_id) {
+                    let _ = handle.upstream.shutdown(std::net::Shutdown::Both);
+                }
+                let _ = lock_registry(&self.registry).retire(stream_id);
+                Err(FlowMuxError::FrameRefused(format!(
+                    "guest ingress response timed out: {error}"
+                )))
+            }
+        }
+    }
+
+    /// Start one admitted UDP listener mapping for this authenticated session.
+    pub fn open_udp(
+        &self,
+        mapping_id: u16,
+        socket: std::net::UdpSocket,
+    ) -> Result<(), FlowMuxError> {
+        let result = self.open_udp_inner(mapping_id, socket);
+        let (event_name, verdict) = if result.is_ok() {
+            ("host.ingress.allowed", "allowed")
+        } else {
+            ("host.ingress.denied", "denied")
+        };
+        emit_unbound_audit(
+            self.recorder.as_ref(),
+            self.runtime_handle.as_ref(),
+            EventCategory::Host,
+            event_name,
+            BTreeMap::from([
+                ("mapping_id".to_string(), mapping_id.to_string()),
+                ("class".to_string(), "udp_ingress".to_string()),
+                ("verdict".to_string(), verdict.to_string()),
+            ]),
+        );
+        result
+    }
+
+    fn open_udp_inner(
+        &self,
+        mapping_id: u16,
+        socket: std::net::UdpSocket,
+    ) -> Result<(), FlowMuxError> {
+        let stream_id = lock_registry(&self.registry)
+            .alloc_host(registry::FlowClass::Udp)
+            .map_err(|error| FlowMuxError::FrameRefused(error.to_string()))?;
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        lock_pending_ingress(&self.pending).insert(stream_id, sender);
+        let payload = mapping_id.to_be_bytes();
+        if let Err(error) = lock_validator(&self.validator).admit(
+            &mvm_contract::protocol::network_flow::FrameFacts::new(
+                Direction::HostToGuest,
+                Opcode::InboundOpen,
+                stream_id,
+            )
+            .with_payload(payload.len() as u32)
+            .with_ingress_mapping(mapping_id),
+        ) {
+            lock_pending_ingress(&self.pending).remove(&stream_id);
+            let _ = lock_registry(&self.registry).retire(stream_id);
+            return Err(FlowMuxError::FrameRefused(error.to_string()));
+        }
+        if let Err(error) = write_frame_to(
+            &self.session,
+            &self.writer,
+            Opcode::InboundOpen,
+            stream_id,
+            &payload,
+        ) {
+            lock_pending_ingress(&self.pending).remove(&stream_id);
+            let _ = lock_registry(&self.registry).retire(stream_id);
+            return Err(error);
+        }
+        match receiver.recv_timeout(Duration::from_secs(5)) {
+            Ok(Ok(())) => {}
+            Ok(Err(reason)) => {
+                return Err(FlowMuxError::FrameRefused(format!(
+                    "guest refused UDP ingress mapping {mapping_id}: {reason}"
+                )));
+            }
+            Err(error) => {
+                lock_pending_ingress(&self.pending).remove(&stream_id);
+                let _ = lock_registry(&self.registry).retire(stream_id);
+                return Err(FlowMuxError::FrameRefused(format!(
+                    "guest UDP ingress response timed out: {error}"
+                )));
+            }
+        }
+
+        let (poll, waker) = match udp_event_sources(&socket) {
+            Ok(sources) => sources,
+            Err(error) => {
+                self.abort_udp_ingress(stream_id, b"UDP relay setup failed");
+                return Err(FlowMuxError::Transport(error));
+            }
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        lock_udp_associations(&self.udp_associations).insert(
+            stream_id,
+            UdpAssociationHandle {
+                tx,
+                waker: Arc::clone(&waker),
+                peer_admission: UdpPeerAdmission::ObservedOnly,
+            },
+        );
+        let session = Arc::clone(&self.session);
+        let writer = Arc::clone(&self.writer);
+        let registry = Arc::clone(&self.registry);
+        let idle_timeout = self.udp_idle_timeout;
+        let max_peers = self.max_udp_peers;
+        if let Err(error) = std::thread::Builder::new()
+            .name(format!("flowmux-ingress-udp-{stream_id}"))
+            .spawn(move || {
+                run_udp_relay(UdpRelayParams {
+                    stream_id,
+                    socket,
+                    poll,
+                    session,
+                    writer,
+                    idle_timeout,
+                    max_peers,
+                    peer_admission: UdpPeerAdmission::ObservedOnly,
+                    rx,
+                    registry,
+                });
+            })
+        {
+            lock_udp_associations(&self.udp_associations).remove(&stream_id);
+            self.abort_udp_ingress(stream_id, b"UDP relay unavailable");
+            return Err(FlowMuxError::Transport(error));
+        }
+        Ok(())
+    }
+
+    fn abort_udp_ingress(&self, stream_id: u32, reason: &[u8]) {
+        lock_pending_ingress(&self.pending).remove(&stream_id);
+        lock_udp_associations(&self.udp_associations).remove(&stream_id);
+        if lock_validator(&self.validator)
+            .admit(
+                &mvm_contract::protocol::network_flow::FrameFacts::new(
+                    Direction::HostToGuest,
+                    Opcode::Reset,
+                    stream_id,
+                )
+                .with_payload(u32::try_from(reason.len()).unwrap_or(u32::MAX)),
+            )
+            .is_ok()
+        {
+            let _ = write_frame_to(
+                &self.session,
+                &self.writer,
+                Opcode::Reset,
+                stream_id,
+                reason,
+            );
+        }
+        let _ = lock_registry(&self.registry).retire(stream_id);
+    }
+
+    fn spawn_tcp_relay(&self, stream_id: u32, upstream: TcpStream) -> Result<(), FlowMuxError> {
+        let upstream_read = upstream.try_clone()?;
+        let host_half_closed = Arc::new(AtomicBool::new(false));
+        let relay_flag = Arc::clone(&host_half_closed);
+        let retired = Arc::new(AtomicBool::new(false));
+        let retired_flag = Arc::clone(&retired);
+        let session = Arc::clone(&self.session);
+        let writer = Arc::clone(&self.writer);
+        let registry = Arc::clone(&self.registry);
+        let validator = Arc::clone(&self.validator);
+        let credit_wait = self.credit_wait;
+
+        std::thread::Builder::new()
+            .name(format!("flowmux-ingress-tcp-{stream_id}"))
+            .spawn(move || {
+                run_tcp_relay(TcpRelayParams {
+                    stream_id,
+                    upstream: upstream_read,
+                    session,
+                    writer,
+                    registry,
+                    validator,
+                    host_half_closed: relay_flag,
+                    retired: retired_flag,
+                    credit_wait,
+                })
+            })
+            .map_err(FlowMuxError::Transport)?;
+
+        lock_tcp_streams(&self.streams).insert(
+            stream_id,
+            TcpStreamHandle {
+                upstream,
+                host_half_closed,
+                retired,
+            },
+        );
+        Ok(())
+    }
+}
+
 /// What one accepted FlowMux session needs to serve.
 ///
 /// A struct with a builder rather than a longer argument list: the optional
@@ -248,6 +560,7 @@ pub struct FlowMuxAccept {
     recorder: Option<Arc<Recorder>>,
     substitution: Option<Arc<crate::supervisor::network_endpoint_proxy::SubstitutionService>>,
     vm_resources: Option<Arc<FlowMuxVmResources>>,
+    ingress_mappings: Vec<(u16, IngressFlowKind)>,
 }
 
 impl FlowMuxAccept {
@@ -270,6 +583,7 @@ impl FlowMuxAccept {
             recorder: None,
             substitution: None,
             vm_resources: None,
+            ingress_mappings: Vec::new(),
         }
     }
 
@@ -301,6 +615,26 @@ impl FlowMuxAccept {
         self.vm_resources = Some(resources);
         self
     }
+
+    /// Attach the signed ingress mapping IDs this session may open.
+    #[must_use]
+    pub fn with_ingress_mappings(mut self, mappings: impl IntoIterator<Item = u16>) -> Self {
+        self.ingress_mappings = mappings
+            .into_iter()
+            .map(|mapping| (mapping, IngressFlowKind::Tcp))
+            .collect();
+        self
+    }
+
+    /// Attach signed ingress mapping IDs and their transport classes.
+    #[must_use]
+    pub fn with_ingress_transports(
+        mut self,
+        mappings: impl IntoIterator<Item = (u16, IngressFlowKind)>,
+    ) -> Self {
+        self.ingress_mappings = mappings.into_iter().collect();
+        self
+    }
 }
 
 impl Drop for FlowMuxSession {
@@ -319,6 +653,25 @@ impl FlowMuxSession {
     /// Return the session identifier for logging and correlation.
     pub fn session_id(&self) -> String {
         lock_session(&self.session).session_id().to_string()
+    }
+
+    /// Clone the host-initiated ingress half of this authenticated session.
+    #[must_use]
+    pub fn ingress_handle(&self) -> FlowMuxIngressHandle {
+        FlowMuxIngressHandle {
+            session: Arc::clone(&self.session),
+            writer: Arc::clone(&self.writer),
+            validator: Arc::clone(&self.validator),
+            registry: Arc::clone(&self.registry),
+            streams: Arc::clone(&self.streams),
+            pending: Arc::clone(&self.pending_ingress),
+            credit_wait: self.limits.credit_wait,
+            recorder: self.recorder.as_ref().map(Arc::clone),
+            runtime_handle: self.runtime_handle.clone(),
+            udp_associations: Arc::clone(&self.udp_associations),
+            udp_idle_timeout: self.limits.udp_idle_timeout,
+            max_udp_peers: self.limits.max_udp_peers,
+        }
     }
 
     /// Accept one authenticated FlowMux session on `stream`.
@@ -359,6 +712,7 @@ impl FlowMuxSession {
             recorder,
             substitution,
             vm_resources,
+            ingress_mappings,
         } = params;
         let session_id = session_id.as_str();
         // Split the socket into independent read/write descriptors so the
@@ -382,17 +736,20 @@ impl FlowMuxSession {
             reader: stream,
             writer: Arc::new(Mutex::new(writer)),
             session: Arc::new(Mutex::new(session)),
-            validator: Arc::new(Mutex::new(SessionValidator::default())),
+            validator: Arc::new(Mutex::new(SessionValidator::new_with_ingress(
+                ingress_mappings,
+            ))),
             registry: Arc::new(Mutex::new(StreamRegistry::with_budget(
                 limits,
                 Arc::clone(&resources.registry_budget),
             ))),
-            streams: BTreeMap::new(),
+            streams: Arc::new(Mutex::new(BTreeMap::new())),
+            pending_ingress: Arc::new(Mutex::new(BTreeMap::new())),
             icmp_rate: Arc::clone(&resources.icmp_rate),
             http_flows: BTreeMap::new(),
             http_cancellations: Arc::new(Mutex::new(BTreeMap::new())),
             substitution,
-            udp_associations: BTreeMap::new(),
+            udp_associations: Arc::new(Mutex::new(BTreeMap::new())),
             gate,
             read_buf: Vec::with_capacity(4096),
             limits,
@@ -414,17 +771,13 @@ impl FlowMuxSession {
         event_name: &str,
         labels: BTreeMap<String, String>,
     ) {
-        let (Some(recorder), Some(handle)) = (&self.recorder, &self.runtime_handle) else {
-            return;
-        };
-        let recorder = Arc::clone(recorder);
-        let event_name = event_name.to_string();
-        let fut = async move {
-            let _ = recorder.record_unbound(category, event_name, labels).await;
-        };
-        // The session runs in `spawn_blocking`; block_on is acceptable
-        // because the audit signer writes to a local file and returns quickly.
-        handle.block_on(fut);
+        emit_unbound_audit(
+            self.recorder.as_ref(),
+            self.runtime_handle.as_ref(),
+            category,
+            event_name,
+            labels,
+        );
     }
 
     /// Check the per-class connection-rate limiter. Returns `true` when the
@@ -525,6 +878,12 @@ impl FlowMuxSession {
                         warn!(error = %e, stream_id, "FlowMux TCP open failed");
                         self.send_reset(stream_id, "host error")?;
                     }
+                }
+                Opcode::InboundReady => {
+                    self.handle_inbound_ready(stream_id);
+                }
+                Opcode::InboundRefused => {
+                    self.handle_inbound_refused(stream_id, payload_len);
                 }
                 Opcode::Data => {
                     if let Err(e) = self.handle_guest_data(stream_id, payload_len) {
@@ -899,14 +1258,21 @@ impl FlowMuxSession {
                     writer,
                     idle_timeout,
                     max_peers,
+                    peer_admission: UdpPeerAdmission::GuestMayIntroduce,
                     rx,
                     registry: registry_arc,
                 })
             })
             .map_err(FlowMuxError::Transport)?;
 
-        self.udp_associations
-            .insert(stream_id, UdpAssociationHandle { tx, waker });
+        lock_udp_associations(&self.udp_associations).insert(
+            stream_id,
+            UdpAssociationHandle {
+                tx,
+                waker,
+                peer_admission: UdpPeerAdmission::GuestMayIntroduce,
+            },
+        );
         self.send_udp_opened(stream_id)?;
         self.emit_audit(
             EventCategory::Host,
@@ -920,8 +1286,12 @@ impl FlowMuxSession {
     }
 
     fn handle_udp_send(&mut self, stream_id: u32, payload_len: u32) -> Result<(), FlowMuxError> {
-        let handle = match self.udp_associations.get(&stream_id) {
-            Some(h) => h,
+        let relay = match lock_udp_associations(&self.udp_associations).get(&stream_id) {
+            Some(handle) => (
+                handle.tx.clone(),
+                Arc::clone(&handle.waker),
+                handle.peer_admission,
+            ),
             None => {
                 warn!(stream_id, "UdpSend on unknown association");
                 self.send_goaway("unknown UDP association")?;
@@ -940,35 +1310,37 @@ impl FlowMuxSession {
             .map_err(|e| FlowMuxError::FrameRefused(format!("invalid UdpSend address: {e}")))?;
         let target = format!("{ip}:{port}");
 
-        if let Some(reason) = self
-            .substitution
-            .as_ref()
-            .and_then(|service| service.opaque_refusal_reason(&ip.to_string()))
-        {
-            warn!(stream_id, %target, reason, "FlowMux opaque UDP transform refused");
-            self.emit_audit(
-                EventCategory::Host,
-                "host.flow.denied",
-                BTreeMap::from([
-                    ("stream_id".to_string(), stream_id.to_string()),
-                    ("class".to_string(), "udp".to_string()),
-                    ("target".to_string(), target),
-                    ("reason".to_string(), "typed_transform_required".to_string()),
-                ]),
-            );
-            return Ok(());
-        }
-
-        match self.gate.decide_udp_request(&target) {
-            EgressVerdict::Allow { .. } => {}
-            EgressVerdict::Deny(reason) => {
-                warn!(stream_id, %target, %reason, "FlowMux UDP datagram denied");
+        if relay.2 == UdpPeerAdmission::GuestMayIntroduce {
+            if let Some(reason) = self
+                .substitution
+                .as_ref()
+                .and_then(|service| service.opaque_refusal_reason(&ip.to_string()))
+            {
+                warn!(stream_id, %target, reason, "FlowMux opaque UDP transform refused");
+                self.emit_audit(
+                    EventCategory::Host,
+                    "host.flow.denied",
+                    BTreeMap::from([
+                        ("stream_id".to_string(), stream_id.to_string()),
+                        ("class".to_string(), "udp".to_string()),
+                        ("target".to_string(), target),
+                        ("reason".to_string(), "typed_transform_required".to_string()),
+                    ]),
+                );
                 return Ok(());
             }
-            EgressVerdict::Malformed => {
-                return Err(FlowMuxError::FrameRefused(
-                    "malformed UDP destination".to_string(),
-                ));
+
+            match self.gate.decide_udp_request(&target) {
+                EgressVerdict::Allow { .. } => {}
+                EgressVerdict::Deny(reason) => {
+                    warn!(stream_id, %target, %reason, "FlowMux UDP datagram denied");
+                    return Ok(());
+                }
+                EgressVerdict::Malformed => {
+                    return Err(FlowMuxError::FrameRefused(
+                        "malformed UDP destination".to_string(),
+                    ));
+                }
             }
         }
 
@@ -976,17 +1348,19 @@ impl FlowMuxSession {
             destination: SocketAddr::new(ip, port),
             payload: datagram.to_vec(),
         };
-        if handle.tx.send(msg).is_err() {
+        if relay.0.send(msg).is_err() {
             return Err(FlowMuxError::FrameRefused(
                 "UDP relay thread has exited".to_string(),
             ));
         }
-        handle.waker.wake().map_err(FlowMuxError::Transport)?;
+        relay.1.wake().map_err(FlowMuxError::Transport)?;
         Ok(())
     }
 
     fn remove_udp_association(&mut self, stream_id: u32) {
-        if let Some(UdpAssociationHandle { tx, waker }) = self.udp_associations.remove(&stream_id) {
+        if let Some(UdpAssociationHandle { tx, waker, .. }) =
+            lock_udp_associations(&self.udp_associations).remove(&stream_id)
+        {
             drop(tx);
             let _ = waker.wake();
         }
@@ -1001,49 +1375,14 @@ impl FlowMuxSession {
     }
 
     fn spawn_tcp_relay(&mut self, stream_id: u32, upstream: TcpStream) -> Result<(), FlowMuxError> {
-        let upstream_read = upstream.try_clone()?;
-        let host_half_closed = Arc::new(AtomicBool::new(false));
-        let relay_flag = Arc::clone(&host_half_closed);
-        let retired = Arc::new(AtomicBool::new(false));
-        let retired_flag = Arc::clone(&retired);
-        let session = Arc::clone(&self.session);
-        let writer = Arc::clone(&self.writer);
-        let registry = Arc::clone(&self.registry);
-        let validator = Arc::clone(&self.validator);
-        let credit_wait = self.limits.credit_wait;
-
-        std::thread::Builder::new()
-            .name(format!("flowmux-tcp-{stream_id}"))
-            .spawn(move || {
-                run_tcp_relay(TcpRelayParams {
-                    stream_id,
-                    upstream: upstream_read,
-                    session,
-                    writer,
-                    registry,
-                    validator,
-                    host_half_closed: relay_flag,
-                    retired: retired_flag,
-                    credit_wait,
-                })
-            })
-            .map_err(FlowMuxError::Transport)?;
-
-        self.streams.insert(
-            stream_id,
-            TcpStreamHandle {
-                upstream,
-                host_half_closed,
-                retired,
-            },
-        );
-        Ok(())
+        self.ingress_handle().spawn_tcp_relay(stream_id, upstream)
     }
 
     fn handle_guest_data(&mut self, stream_id: u32, payload_len: u32) -> Result<(), FlowMuxError> {
         let payload = self.frame_payload(payload_len).to_vec();
 
-        let handle = match self.streams.get_mut(&stream_id) {
+        let mut streams = lock_tcp_streams(&self.streams);
+        let handle = match streams.get_mut(&stream_id) {
             Some(h) => h,
             None => {
                 warn!(stream_id, "Data frame on unknown stream");
@@ -1053,6 +1392,7 @@ impl FlowMuxSession {
         };
 
         if handle.host_half_closed.load(Ordering::Relaxed) {
+            drop(streams);
             self.send_reset(stream_id, "data after host half-close")?;
             self.remove_stream(stream_id);
             return Ok(());
@@ -1063,6 +1403,7 @@ impl FlowMuxSession {
             if let Err(e) = reg.consume_guest_credit(stream_id, payload_len) {
                 warn!(error = %e, stream_id, "guest credit exhausted");
                 drop(reg);
+                drop(streams);
                 self.send_reset(stream_id, "credit exhausted")?;
                 self.remove_stream(stream_id);
                 return Ok(());
@@ -1075,6 +1416,7 @@ impl FlowMuxSession {
             .and_then(|_| handle.upstream.flush())
         {
             warn!(error = %e, stream_id, "write to upstream failed");
+            drop(streams);
             self.send_reset(stream_id, "upstream write failed")?;
             self.remove_stream(stream_id);
             return Ok(());
@@ -1097,7 +1439,8 @@ impl FlowMuxSession {
     }
 
     fn handle_guest_half_close(&mut self, stream_id: u32) -> Result<(), FlowMuxError> {
-        let handle = match self.streams.get_mut(&stream_id) {
+        let mut streams = lock_tcp_streams(&self.streams);
+        let handle = match streams.get_mut(&stream_id) {
             Some(h) => h,
             None => {
                 warn!(stream_id, "HalfClose on unknown stream");
@@ -1111,6 +1454,7 @@ impl FlowMuxSession {
         if handle.host_half_closed.load(Ordering::Relaxed) {
             // Both directions are now done.
             handle.retired.store(true, Ordering::Relaxed);
+            drop(streams);
             self.send_reset(stream_id, "stream complete")?;
             self.remove_stream(stream_id);
         } else {
@@ -1281,13 +1625,30 @@ impl FlowMuxSession {
             .map_err(|e| FlowMuxError::FrameRefused(e.to_string()))
     }
 
+    fn handle_inbound_ready(&mut self, stream_id: u32) {
+        let result = lock_registry(&self.registry)
+            .confirm(stream_id)
+            .map_err(|error| error.to_string());
+        if let Some(sender) = lock_pending_ingress(&self.pending_ingress).remove(&stream_id) {
+            let _ = sender.send(result);
+        }
+    }
+
+    fn handle_inbound_refused(&mut self, stream_id: u32, payload_len: u32) {
+        let reason = String::from_utf8_lossy(self.frame_payload(payload_len)).into_owned();
+        let _ = lock_registry(&self.registry).retire(stream_id);
+        if let Some(sender) = lock_pending_ingress(&self.pending_ingress).remove(&stream_id) {
+            let _ = sender.send(Err(reason));
+        }
+    }
+
     fn reset_stream(&mut self, stream_id: u32) -> Result<(), FlowMuxError> {
         // Dropping an incomplete typed request wipes its zeroizing body buffer.
         // A guest reset is cancellation, not permission to retain the partial
         // cleartext until the authenticated session itself eventually exits.
         self.http_flows.remove(&stream_id);
         http_flow::cancel_forwarding(&self.http_cancellations, stream_id);
-        let was_live = self.streams.remove(&stream_id);
+        let was_live = lock_tcp_streams(&self.streams).remove(&stream_id);
         let live = was_live.is_some();
         if let Some(handle) = was_live {
             handle.retired.store(true, Ordering::Relaxed);
@@ -1307,7 +1668,7 @@ impl FlowMuxSession {
     }
 
     fn remove_stream(&mut self, stream_id: u32) {
-        if let Some(handle) = self.streams.remove(&stream_id) {
+        if let Some(handle) = lock_tcp_streams(&self.streams).remove(&stream_id) {
             handle.retired.store(true, Ordering::Relaxed);
             let _ = handle.upstream.shutdown(std::net::Shutdown::Both);
         }
@@ -1499,6 +1860,46 @@ fn lock_validator(
 
 fn lock_registry(registry: &Mutex<StreamRegistry>) -> std::sync::MutexGuard<'_, StreamRegistry> {
     registry.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+fn lock_tcp_streams(
+    streams: &Mutex<BTreeMap<u32, TcpStreamHandle>>,
+) -> std::sync::MutexGuard<'_, BTreeMap<u32, TcpStreamHandle>> {
+    streams.lock().unwrap_or_else(|error| error.into_inner())
+}
+
+fn lock_pending_ingress(
+    pending: &Mutex<IngressOpenWaiters>,
+) -> std::sync::MutexGuard<'_, IngressOpenWaiters> {
+    pending.lock().unwrap_or_else(|error| error.into_inner())
+}
+
+fn lock_udp_associations(
+    associations: &Mutex<BTreeMap<u32, UdpAssociationHandle>>,
+) -> std::sync::MutexGuard<'_, BTreeMap<u32, UdpAssociationHandle>> {
+    associations
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+}
+
+fn emit_unbound_audit(
+    recorder: Option<&Arc<Recorder>>,
+    runtime_handle: Option<&tokio::runtime::Handle>,
+    category: EventCategory,
+    event_name: &str,
+    labels: BTreeMap<String, String>,
+) {
+    let (Some(recorder), Some(handle)) = (recorder, runtime_handle) else {
+        return;
+    };
+    let recorder = Arc::clone(recorder);
+    let event_name = event_name.to_string();
+    let future = async move {
+        let _ = recorder.record_unbound(category, event_name, labels).await;
+    };
+    // Session and ingress relay work runs outside Tokio's async workers. The
+    // signer writes one local record and returns before the flow proceeds.
+    handle.block_on(future);
 }
 
 /// Serialize and send one encrypted frame through a shared writer.
@@ -1865,6 +2266,228 @@ mod tests {
 
         drop(guest_stream);
         host_handle.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn declared_inbound_tcp_uses_an_even_stream_and_roundtrips_external_data() {
+        let (host_key, host_verify) = fresh_keys();
+        let (guest_key, guest_verify) = fresh_keys();
+        let (host_stream, mut guest_stream) = UnixStream::pair().unwrap();
+        let (ingress_tx, ingress_rx) = std::sync::mpsc::sync_channel(1);
+
+        let host = thread::spawn(move || {
+            let mut session = FlowMuxSession::accept_with(
+                host_stream,
+                FlowMuxAccept::new(
+                    "test-session",
+                    host_key,
+                    guest_verify,
+                    RegistryLimits::default(),
+                    EgressGate::default_deny(),
+                )
+                .with_ingress_mappings([17]),
+            )
+            .unwrap();
+            ingress_tx.send(session.ingress_handle()).unwrap();
+            session.serve()
+        });
+
+        let (mut guest_session, _) =
+            Session::guest(&mut guest_stream, guest_key, &host_verify).unwrap();
+        guest_stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        write_frame(
+            &mut guest_stream,
+            &mut guest_session,
+            Opcode::Hello,
+            0,
+            &Handshake::local("test-guest").encode(),
+        );
+        let (opcode, _, _) = read_flowmux_frame(&mut guest_stream, &mut guest_session);
+        assert_eq!(opcode, Opcode::HelloAck);
+
+        let ingress = ingress_rx.recv().unwrap();
+        let listener = std::net::TcpListener::bind((local_test_ip(), 0)).unwrap();
+        let mut external = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        external
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let (accepted, _) = listener.accept().unwrap();
+        let (opened_tx, opened_rx) = std::sync::mpsc::sync_channel(1);
+        thread::spawn(move || {
+            let _ = opened_tx.send(ingress.open_tcp(17, accepted));
+        });
+        match opened_rx.recv_timeout(Duration::from_millis(50)) {
+            Ok(result) => panic!("host ingress opener returned before guest readiness: {result:?}"),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(error) => panic!("host ingress opener channel failed: {error}"),
+        }
+
+        let (opcode, stream_id, mapping) =
+            read_flowmux_frame(&mut guest_stream, &mut guest_session);
+        assert_eq!(opcode, Opcode::InboundOpen);
+        assert_eq!(stream_id % 2, 0);
+        assert_eq!(mapping, 17_u16.to_be_bytes());
+        write_frame(
+            &mut guest_stream,
+            &mut guest_session,
+            Opcode::InboundReady,
+            stream_id,
+            &[],
+        );
+        opened_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("guest readiness must wake the host opener")
+            .unwrap();
+
+        external.write_all(b"from-external").unwrap();
+        let (opcode, data_stream, payload) = loop {
+            let frame = read_flowmux_frame(&mut guest_stream, &mut guest_session);
+            if frame.0 == Opcode::Data {
+                break frame;
+            }
+        };
+        assert_eq!((opcode, data_stream), (Opcode::Data, stream_id));
+        assert_eq!(payload, b"from-external");
+
+        write_frame(
+            &mut guest_stream,
+            &mut guest_session,
+            Opcode::Data,
+            stream_id,
+            b"from-guest",
+        );
+        let mut response = [0_u8; 10];
+        external.read_exact(&mut response).unwrap();
+        assert_eq!(&response, b"from-guest");
+
+        drop(external);
+        drop(guest_stream);
+        host.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn declared_inbound_udp_replies_only_to_an_observed_peer() {
+        let (host_key, host_verify) = fresh_keys();
+        let (guest_key, guest_verify) = fresh_keys();
+        let (host_stream, mut guest_stream) = UnixStream::pair().unwrap();
+        let (ingress_tx, ingress_rx) = std::sync::mpsc::sync_channel(1);
+        let host = thread::spawn(move || {
+            let mut session = FlowMuxSession::accept_with(
+                host_stream,
+                FlowMuxAccept::new(
+                    "test-session",
+                    host_key,
+                    guest_verify,
+                    RegistryLimits::default(),
+                    EgressGate::default_deny(),
+                )
+                .with_ingress_transports([(17, IngressFlowKind::Udp)]),
+            )
+            .unwrap();
+            ingress_tx.send(session.ingress_handle()).unwrap();
+            session.serve()
+        });
+
+        let (mut guest_session, _) =
+            Session::guest(&mut guest_stream, guest_key, &host_verify).unwrap();
+        guest_stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        write_frame(
+            &mut guest_stream,
+            &mut guest_session,
+            Opcode::Hello,
+            0,
+            &Handshake::local("test-guest").encode(),
+        );
+        let (opcode, _, _) = read_flowmux_frame(&mut guest_stream, &mut guest_session);
+        assert_eq!(opcode, Opcode::HelloAck);
+
+        let listener = std::net::UdpSocket::bind((local_test_ip(), 0)).unwrap();
+        let listener_addr = listener.local_addr().unwrap();
+        let ingress = ingress_rx.recv().unwrap();
+        let (opened_tx, opened_rx) = std::sync::mpsc::sync_channel(1);
+        thread::spawn(move || {
+            let _ = opened_tx.send(ingress.open_udp(17, listener));
+        });
+        let (opcode, stream_id, mapping) =
+            read_flowmux_frame(&mut guest_stream, &mut guest_session);
+        assert_eq!(
+            (opcode, mapping),
+            (Opcode::InboundOpen, 17_u16.to_be_bytes().to_vec())
+        );
+        assert_eq!(stream_id % 2, 0);
+        write_frame(
+            &mut guest_stream,
+            &mut guest_session,
+            Opcode::InboundReady,
+            stream_id,
+            &[],
+        );
+        opened_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("guest UDP readiness must wake the host opener")
+            .unwrap();
+
+        let external = std::net::UdpSocket::bind((local_test_ip(), 0)).unwrap();
+        external
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        external.send_to(b"udp-request", listener_addr).unwrap();
+        let (opcode, data_stream, payload) =
+            read_flowmux_frame(&mut guest_stream, &mut guest_session);
+        assert_eq!((opcode, data_stream), (Opcode::UdpRecv, stream_id));
+        let (peer_ip, peer_port, body) = decode_udp_addr(&payload).unwrap();
+        assert_eq!(
+            SocketAddr::new(peer_ip, peer_port),
+            external.local_addr().unwrap()
+        );
+        assert_eq!(body, b"udp-request");
+
+        let mut reply = udp_relay::encode_udp_addr(peer_ip, peer_port);
+        reply.extend_from_slice(b"udp-response");
+        write_frame(
+            &mut guest_stream,
+            &mut guest_session,
+            Opcode::UdpSend,
+            stream_id,
+            &reply,
+        );
+        let mut response = [0_u8; 32];
+        let (received, _) = external.recv_from(&mut response).unwrap();
+        assert_eq!(&response[..received], b"udp-response");
+
+        let unknown = std::net::UdpSocket::bind((local_test_ip(), 0)).unwrap();
+        unknown
+            .set_read_timeout(Some(Duration::from_millis(100)))
+            .unwrap();
+        let unknown_addr = unknown.local_addr().unwrap();
+        let mut forged = udp_relay::encode_udp_addr(unknown_addr.ip(), unknown_addr.port());
+        forged.extend_from_slice(b"must-not-arrive");
+        write_frame(
+            &mut guest_stream,
+            &mut guest_session,
+            Opcode::UdpSend,
+            stream_id,
+            &forged,
+        );
+        let error = unknown.recv_from(&mut response).unwrap_err();
+        assert!(matches!(
+            error.kind(),
+            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+        ));
+
+        write_frame(
+            &mut guest_stream,
+            &mut guest_session,
+            Opcode::CloseUdp,
+            stream_id,
+            &[],
+        );
+        drop(guest_stream);
+        host.join().unwrap().unwrap();
     }
 
     #[test]

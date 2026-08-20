@@ -238,6 +238,9 @@ pub struct EndpointConfig {
     /// existed.
     #[serde(default)]
     pub network_limits: mvm_core::plan::NetworkLimits,
+    /// Exact signed ingress mappings this endpoint owns.
+    #[serde(default)]
+    pub ingress: Vec<mvm_core::plan::IngressMapping>,
     /// Which egress protocol the relayed guest stream carries. `Wire` (default,
     /// secret-bearing) keeps the existing WireRequest substitution serve loop; `Raw`
     /// selects the raw-TCP splice serve loop. Fixed at admission — never sniffed.
@@ -554,6 +557,7 @@ mod tests {
             tls_intermediate: None,
             network_policy: None,
             network_limits: mvm_core::plan::NetworkLimits::default(),
+            ingress: Vec::new(),
             egress_mode: EgressMode::Wire,
             resolver: ResolverBackend::default(),
             flowmux_identity: None,

@@ -399,6 +399,7 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         std::fs::create_dir_all(&state_dir)
             .with_context(|| format!("create state dir {}", state_dir.display()))?;
         let network_limits = admitted_network_limits(inputs.config.plan_json.as_deref())?;
+        let ingress = admitted_ingress(inputs.config.plan_json.as_deref())?;
 
         // Spawn the per-child substitution endpoint through the shared
         // `ClaimGuards`, so a warm claim stands up the identical guarded endpoint
@@ -414,6 +415,7 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
                 redaction: inputs.redaction,
                 network_policy: inputs.network_policy,
                 network_limits,
+                ingress: &ingress,
                 // A cold boot mints this guest's identity and hands it a drive.
                 identity: FlowMuxIdentitySource::Mint,
             },
@@ -664,6 +666,7 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         let network_limits = plan
             .effective_network_limits()
             .map_err(|e| StandbyError::ClaimFailed(format!("network limits: {e}")))?;
+        let ingress = plan.ingress.clone();
         if let Some(file) = claim_debug.as_mut() {
             let _ = writeln!(
                 file,
@@ -683,6 +686,7 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
                     redaction: &redaction,
                     network_policy: &claim.network_policy,
                     network_limits,
+                    ingress: &ingress,
                     // A restored child already holds its parent's signing key
                     // in the memory image it woke from, and there is no way to
                     // put a different one there. Its endpoint pins what the
@@ -1398,6 +1402,18 @@ fn admitted_network_limits(plan_json: Option<&str>) -> Result<mvm_core::plan::Ne
         .transpose()
         .context("validate admitted plan network limits")
         .map(Option::unwrap_or_default)
+}
+
+fn admitted_ingress(plan_json: Option<&str>) -> Result<Vec<mvm_core::plan::IngressMapping>> {
+    let plan = plan_json
+        .map(mvm_core::plan::plan_from_admitted_json)
+        .transpose()
+        .context("parse admitted plan ingress")?;
+    if let Some(plan) = &plan {
+        plan.validate_ingress()
+            .context("validate admitted plan ingress")?;
+    }
+    Ok(plan.map_or_else(Vec::new, |plan| plan.ingress))
 }
 
 /// How many times to redraw a fresh child name before giving up. A collision is

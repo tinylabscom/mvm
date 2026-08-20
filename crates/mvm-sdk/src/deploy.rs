@@ -163,9 +163,13 @@ pub struct NetworkSpec {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PortForward {
+    pub mapping_id: u16,
+    pub host_addr: String,
     pub guest: u16,
     pub host: u16,
     pub proto: String,
+    pub guest_addr: String,
+    pub transform: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -531,11 +535,19 @@ pub fn build_mvmd_spec(workload: &Workload) -> MvmdSpec {
             .ports
             .iter()
             .map(|p| PortForward {
+                mapping_id: p.mapping_id,
+                host_addr: p.host_addr.clone(),
                 guest: p.guest,
                 host: p.host,
                 proto: match p.proto {
                     crate::ir::PortProto::Tcp => "tcp".into(),
                     crate::ir::PortProto::Udp => "udp".into(),
+                },
+                guest_addr: p.guest_addr.clone(),
+                transform: match p.transform {
+                    crate::ir::PortTransform::Opaque => "opaque".into(),
+                    crate::ir::PortTransform::Http => "http".into(),
+                    crate::ir::PortTransform::Tls => "tls".into(),
                 },
             })
             .collect(),
@@ -770,9 +782,13 @@ mod tests {
                     raw_ip_stack: false,
                     mode: NetworkMode::Bridge,
                     ports: vec![crate::ir::PortForward {
+                        mapping_id: 1,
+                        host_addr: "127.0.0.1".into(),
                         guest: 8080,
                         host: 0,
                         proto: PortProto::Tcp,
+                        guest_addr: "127.0.0.1".into(),
+                        transform: crate::ir::PortTransform::Opaque,
                     }],
                     egress: None,
                     peers: vec![],

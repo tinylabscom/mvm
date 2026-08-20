@@ -324,6 +324,7 @@ pub(crate) mod tests {
             network_mode: Default::default(),
             stream_retention: Default::default(),
             l3_network: None,
+            ingress: Vec::new(),
             network_limits: Default::default(),
             schema_version: SCHEMA_VERSION,
             plan_id: PlanId("plan-x".to_string()),

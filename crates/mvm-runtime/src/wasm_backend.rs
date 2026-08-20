@@ -461,6 +461,7 @@ fn wasm_network_endpoint_spawn_params<'a>(
         tls_intermediate: None,
         network_policy: Some(network_policy),
         network_limits: plan.network_limits,
+        ingress: &[],
         resolver_remote: None,
         binding_store_dir: None,
         flowmux_identity: None,

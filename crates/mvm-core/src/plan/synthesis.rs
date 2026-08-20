@@ -44,10 +44,11 @@
 
 use crate::plan::{
     AdmissionProfile, ArtifactPolicy, AttestationMode, AttestationRequirement, AuditLabels,
-    AuditTaxonomy, DepsVolumeBinding, EnvironmentRef, ExecutionPlan, FsPolicyRef, KeyRotationSpec,
-    L3NetworkSpec, NetworkMode, Nonce, PlanId, PlanSeccompTier, PolicyRef, PostRunLifecycle,
-    Resources, RuntimeProfileRef, SCHEMA_VERSION, SecretBinding, SecretReleasePolicy,
-    SignedImageRef, StreamRetention, TenantId, TimeoutSpec, WorkloadId, WorkloadIntent,
+    AuditTaxonomy, DepsVolumeBinding, EnvironmentRef, ExecutionPlan, FsPolicyRef, IngressMapping,
+    KeyRotationSpec, L3NetworkSpec, NetworkMode, Nonce, PlanId, PlanSeccompTier, PolicyRef,
+    PostRunLifecycle, Resources, RuntimeProfileRef, SCHEMA_VERSION, SecretBinding,
+    SecretReleasePolicy, SignedImageRef, StreamRetention, TenantId, TimeoutSpec, WorkloadId,
+    WorkloadIntent,
 };
 use anyhow::Result;
 use chrono::{Duration, Utc};
@@ -130,6 +131,8 @@ pub struct SynthesisInput<'a> {
     /// The L3-tunnel contract, when `network_mode` selects it. Admission
     /// refuses the pair being inconsistent in either direction.
     pub l3_network: Option<L3NetworkSpec>,
+    /// Exact host listeners and guest-loopback targets admitted for ingress.
+    pub ingress: Vec<IngressMapping>,
     /// What this workload asks to be permitted to consume. `None` = it
     /// declares none. Resolved across the caller's declaration surfaces before
     /// it gets here; admission checks it against the host's ceiling — which is
@@ -233,6 +236,7 @@ pub struct SynthesisInputBuilder<'a> {
     audit_event_prefix: Option<&'a str>,
     network_mode: Option<NetworkMode>,
     l3_network: Option<L3NetworkSpec>,
+    ingress: Option<Vec<IngressMapping>>,
     grants: Option<mvm_contract::grants::Grants>,
     cpus: Option<u32>,
     mem_mib: Option<u64>,
@@ -274,6 +278,7 @@ impl<'a> SynthesisInputBuilder<'a> {
             audit_event_prefix: None,
             network_mode: None,
             l3_network: None,
+            ingress: None,
             grants: None,
             cpus: None,
             mem_mib: None,
@@ -416,6 +421,13 @@ impl<'a> SynthesisInputBuilder<'a> {
     #[must_use]
     pub fn l3_network(mut self, l3_network: impl Into<Option<L3NetworkSpec>>) -> Self {
         self.l3_network = l3_network.into();
+        self
+    }
+
+    /// Set the admitted ingress mappings.
+    #[must_use]
+    pub fn ingress(mut self, ingress: Vec<IngressMapping>) -> Self {
+        self.ingress = Some(ingress);
         self
     }
 
@@ -574,6 +586,7 @@ impl<'a> SynthesisInputBuilder<'a> {
                 .network_mode
                 .ok_or(BuilderError::missing("SynthesisInput", "network_mode"))?,
             l3_network: self.l3_network,
+            ingress: self.ingress.unwrap_or_default(),
             grants: self.grants,
             cpus: self
                 .cpus
@@ -745,6 +758,7 @@ pub fn synthesize_plan(input: &SynthesisInput<'_>) -> Result<ExecutionPlan> {
         // guarantee they never do.
         l3_network: l3_spec_for(input.network_mode, input.l3_network.as_ref()),
         network_limits: Default::default(),
+        ingress: input.ingress.clone(),
         schema_version: SCHEMA_VERSION,
         // Placeholder — overwritten below with the content-address once every
         // load-bearing field is set. The derivation excludes `plan_id`, so this
@@ -795,6 +809,8 @@ pub fn synthesize_plan(input: &SynthesisInput<'_>) -> Result<ExecutionPlan> {
         stream_edges: input.stream_edges.clone(),
         stream_retention: input.stream_retention,
     };
+
+    plan.validate_ingress()?;
 
     // Content-address the finished plan. The fresh nonce makes this unique per
     // synthesis; the signature the caller applies next covers the derived id.
@@ -880,6 +896,7 @@ mod tests {
             kernel_sha256: None,
             network_mode: NetworkMode::default(),
             l3_network: None,
+            ingress: Vec::new(),
             vm_name,
             tenant: None,
             backend_name: "firecracker",

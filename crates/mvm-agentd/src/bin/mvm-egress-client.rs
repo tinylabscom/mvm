@@ -105,6 +105,14 @@ fn run(addr: std::net::SocketAddr, host_port: u32) -> ExitCode {
         }
     };
 
+    let ingress_targets = match rt.block_on(flowmux_keys::load_ingress_targets()) {
+        Ok(targets) => targets,
+        Err(e) => {
+            eprintln!("mvm-egress-client: failed to load ingress targets: {e:#}");
+            return ExitCode::from(1);
+        }
+    };
+
     let host_anchor = match flowmux_keys::load_host_signer_verifying_key(std::path::Path::new(
         flowmux_keys::DEFAULT_HOST_SIGNER_PUBKEY_PATH,
     )) {
@@ -127,7 +135,7 @@ fn run(addr: std::net::SocketAddr, host_port: u32) -> ExitCode {
     let deadline = std::time::Instant::now() + mvm_agentd::flowmux::CONNECT_RETRY_BUDGET;
     let mut attempt = 0u32;
     let client = loop {
-        let outcome = rt.block_on(FlowMuxReconnectClient::connect(
+        let outcome = rt.block_on(FlowMuxReconnectClient::connect_with_ingress(
             move || async move {
                 connect_host_vsock(host_port)
                     .await
@@ -135,6 +143,7 @@ fn run(addr: std::net::SocketAddr, host_port: u32) -> ExitCode {
             },
             guest_signing_key.clone(),
             host_anchor,
+            ingress_targets.clone(),
         ));
         match outcome {
             Ok(client) => break client,

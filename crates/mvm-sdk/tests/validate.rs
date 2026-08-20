@@ -1,7 +1,7 @@
 use mvm_sdk::ir::{
     App, AuthType, Concurrency, Entrypoint, EnvValue, ErrorCode, Format, HostPort, Image,
-    InProcessMode, Network, NetworkEgress, NetworkMode, PortForward, PortProto, Resources,
-    SecretMount, SecretRef, Source, Volume, WarmProcessConfig, Workload, validate,
+    InProcessMode, Network, NetworkEgress, NetworkMode, PortForward, PortProto, PortTransform,
+    Resources, SecretMount, SecretRef, Source, Volume, WarmProcessConfig, Workload, validate,
 };
 
 fn base_app() -> App {
@@ -225,9 +225,13 @@ fn rejects_network_none_with_ports() {
         raw_ip_stack: false,
         mode: NetworkMode::None,
         ports: vec![PortForward {
+            mapping_id: 1,
+            host_addr: "127.0.0.1".to_string(),
             guest: 8080,
             host: 8080,
             proto: PortProto::Tcp,
+            guest_addr: "127.0.0.1".to_string(),
+            transform: PortTransform::Opaque,
         }],
         egress: None,
         peers: vec![],
@@ -258,15 +262,97 @@ fn accepts_bridge_network_with_ports() {
         raw_ip_stack: false,
         mode: NetworkMode::Bridge,
         ports: vec![PortForward {
+            mapping_id: 1,
+            host_addr: "127.0.0.1".to_string(),
             guest: 8080,
             host: 18080,
             proto: PortProto::Tcp,
+            guest_addr: "127.0.0.1".to_string(),
+            transform: PortTransform::Opaque,
         }],
         egress: None,
         peers: vec![],
         dns: None,
     });
     validate(&w).unwrap();
+}
+
+fn ingress_mapping(mapping_id: u16, host: u16) -> PortForward {
+    PortForward {
+        mapping_id,
+        host_addr: "127.0.0.1".to_string(),
+        guest: 8080,
+        host,
+        proto: PortProto::Tcp,
+        guest_addr: "127.0.0.1".to_string(),
+        transform: PortTransform::Opaque,
+    }
+}
+
+fn workload_with_ingress(ports: Vec<PortForward>) -> Workload {
+    let mut workload = base_workload();
+    workload.apps[0].network = Some(Network {
+        raw_ip_stack: false,
+        mode: NetworkMode::Bridge,
+        ports,
+        egress: None,
+        peers: vec![],
+        dns: None,
+    });
+    workload
+}
+
+#[test]
+fn rejects_duplicate_ingress_mapping_id() {
+    let workload =
+        workload_with_ingress(vec![ingress_mapping(1, 18080), ingress_mapping(1, 18081)]);
+    let errors = validate(&workload).unwrap_err();
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.code == ErrorCode::IngressDuplicateMapping),
+        "{errors:?}"
+    );
+}
+
+#[test]
+fn rejects_duplicate_ingress_bind() {
+    let workload =
+        workload_with_ingress(vec![ingress_mapping(1, 18080), ingress_mapping(2, 18080)]);
+    let errors = validate(&workload).unwrap_err();
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.code == ErrorCode::IngressDuplicateBind),
+        "{errors:?}"
+    );
+}
+
+#[test]
+fn rejects_non_loopback_ingress_guest_target() {
+    let mut mapping = ingress_mapping(1, 18080);
+    mapping.guest_addr = "10.0.0.2".to_string();
+    let errors = validate(&workload_with_ingress(vec![mapping])).unwrap_err();
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.code == ErrorCode::IngressGuestNotLoopback),
+        "{errors:?}"
+    );
+}
+
+#[test]
+fn rejects_typed_udp_ingress() {
+    let mut mapping = ingress_mapping(1, 18080);
+    mapping.proto = PortProto::Udp;
+    mapping.transform = PortTransform::Tls;
+    let errors = validate(&workload_with_ingress(vec![mapping])).unwrap_err();
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.code == ErrorCode::IngressUnsupportedTransform),
+        "{errors:?}"
+    );
 }
 
 fn function_app() -> App {
