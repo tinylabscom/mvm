@@ -20,5 +20,7 @@ microVM integration run.
 - [x] Exercise the README persistent lifecycle against one real Firecracker
       guest: create, start, exec, logs, inspect, stop, and remove.
 - [x] Pin the workflow, recipe, and command sequence with structural tests.
+- [x] Use the published, hash-verified workload kernel because hosted runners
+      do not permit QEMU to read their `/boot` kernel for a Stage 0 build.
 - [x] Run formatting, focused tests, workspace checks, Clippy, and gated checks.
 - [x] Update delivery and refactor status, then queue PR #2727.

@@ -17,10 +17,17 @@ programmatic filter; using it here would have bypassed both `MVM_BDD_LIVE` and
 the KVM capability check. Unit probes prove that the CI subset still refuses
 when live execution is not opted in or Firecracker is unavailable.
 
+The merge-queue witness also pins `MVM_KERNEL_SOURCE=download`. GitHub-hosted
+runners expose their running distro kernel under `/boot` but do not permit QEMU
+to read it, so the Stage 0 compile fallback cannot be the artifact source in
+this lane. The published workload kernel is hash-verified by the existing
+download path and keeps the witness focused on the documented lifecycle.
+
 ## Validation
 
 - `actionlint .github/workflows/bdd.yml`
 - focused conformance and workflow-structure tests
+- merge-queue workflow-contract coverage for the published-kernel source
 - safe scenario-selection probes with live execution disabled and without KVM
 - `cargo fmt --all -- --check`
 - `cargo check --workspace`
