@@ -13,6 +13,9 @@
       to a byte-for-byte vendored copy of the reviewed 0.3.9 upstream revision.
       A discovery-based regression test proves each manifest and lockfile use
       it, verifies the vendored file hashes, and keeps Git sources denied.
+      Nix image-source filtering and the mirrored host build fingerprint retain
+      the vendored dependency directory, with a regression test covering the
+      omission that previously broke offline runtime-overlay builds.
       The exact feature check fails on the prior source and passes after the
       fix; every fuzz manifest compiles from its lockfile, and workspace
       all-target Clippy, workflow syntax, formatting, and the workspace suite

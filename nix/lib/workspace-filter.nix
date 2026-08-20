@@ -29,6 +29,7 @@
 #   tests/                   root package integration targets; the source-built
 #                            mvmctl derivation leaves doCheck at its default, so
 #                            `cargo test --package mvmctl` compiles these
+#   third_party/             vendored path dependencies referenced by Cargo.toml
 #   schema/                  wire schemas; kept because they never churn, so
 #                            excluding them would buy nothing
 #   nix/                     the flakes themselves, nix/lib, nix/packages, and
@@ -71,6 +72,7 @@ let
     "crates"
     "xtask"
     "tests"
+    "third_party"
     "schema"
     "nix"
   ];

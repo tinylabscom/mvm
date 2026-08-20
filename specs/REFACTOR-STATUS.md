@@ -336,7 +336,8 @@ for detailed scope and acceptance criteria.
       projection, and endpoint identity configuration.
       Every dependency graph that contains `arrayref` resolves a byte-for-byte
       vendored copy of the reviewed 0.3.9 upstream revision. Pinned file hashes
-      guard the vendored source, and Git dependencies remain denied.
+      guard the vendored source, Git dependencies remain denied, and Nix image
+      sources plus the host build fingerprint retain that path dependency.
       Closure remains gated on a clean Security workflow run from current
       `main`, including every mutation shard and both reproducibility builds.
 

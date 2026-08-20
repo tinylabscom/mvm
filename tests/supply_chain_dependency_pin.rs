@@ -99,6 +99,25 @@ fn sha256(path: &Path) -> String {
     encoded
 }
 
+fn nix_filter_list(name: &str) -> Vec<String> {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let path = workspace.join("nix/lib/workspace-filter.nix");
+    let body = read(&path);
+    let start = body
+        .find(&format!("{name} = ["))
+        .unwrap_or_else(|| panic!("{name} list not found in {}", path.display()));
+    let rest = &body[start..];
+    let end = rest
+        .find(']')
+        .unwrap_or_else(|| panic!("{name} list is unterminated in {}", path.display()));
+    rest[..end]
+        .split('"')
+        .skip(1)
+        .step_by(2)
+        .map(str::to_string)
+        .collect()
+}
+
 #[test]
 fn every_arrayref_graph_uses_the_vendored_reviewed_source() {
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -140,6 +159,16 @@ fn vendored_arrayref_matches_the_reviewed_upstream_revision() {
     assert_eq!(sha256(&vendored.join("Cargo.toml")), CARGO_TOML_SHA256);
     assert_eq!(sha256(&vendored.join("LICENSE")), LICENSE_SHA256);
     assert_eq!(sha256(&vendored.join("src/lib.rs")), LIB_SHA256);
+}
+
+#[test]
+fn nix_workspace_filter_includes_the_vendored_arrayref_source() {
+    let included = nix_filter_list("includedTopLevel");
+
+    assert!(
+        included.iter().any(|entry| entry == "third_party"),
+        "Nix image builds must include the top-level directory containing the vendored arrayref path dependency"
+    );
 }
 
 #[test]
