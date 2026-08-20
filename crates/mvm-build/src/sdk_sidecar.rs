@@ -148,6 +148,9 @@ pub fn download_sdk_sidecar(
             asset: &names.archive,
             archive_path: &archive_local,
             version,
+            // Unchanged for the same reason as the runtime overlay: the base
+            // URL is still CLI-version-derived, so the train must match it.
+            train: crate::release_signature::ReleaseTrain::Cli,
         },
     )?;
 

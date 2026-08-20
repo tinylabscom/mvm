@@ -556,8 +556,11 @@ fn download_default_microvm_image(
     kernel_path: &str,
     rootfs_path: &str,
 ) -> Result<(String, String)> {
-    let version = env!("CARGO_PKG_VERSION");
-    let base_url = format!("https://github.com/tinylabscom/mvm/releases/download/v{version}");
+    // The default microVM ships on the boot image counter, not the CLI's. See
+    // `update::boot_image_release` for why deriving this from CARGO_PKG_VERSION
+    // 404s for most of a release cycle.
+    let (tag, image_version) = crate::update::boot_image_release()?;
+    let base_url = format!("https://github.com/tinylabscom/mvm/releases/download/{tag}");
     let arch = if cfg!(target_arch = "aarch64") {
         "aarch64"
     } else {
@@ -567,16 +570,15 @@ fn download_default_microvm_image(
     let assets = default_microvm_assets(cache_dir, arch);
     let checksums_name = format!("default-microvm-{arch}-checksums-sha256.txt");
 
-    ui::info(&format!(
-        "Downloading default microVM image (v{version})..."
-    ));
+    ui::info(&format!("Downloading default microVM image ({tag})..."));
 
     let asset_names: Vec<&str> = assets.iter().map(|(n, _)| n.as_str()).collect();
     let expected = fetch_expected_hashes(
         &ChecksumManifest {
             base_url: &base_url,
             asset: &checksums_name,
-            version,
+            version: &image_version,
+            train: mvm_build::release_signature::ReleaseTrain::BootImage,
         },
         &asset_names,
     )?;
