@@ -2580,3 +2580,17 @@ Cross-sprint work tracked in `specs/plans/2026-08-15-merge-queue-throughput.md`.
       provider remained non-certifying and report correlation correctly ended
       globally `INCONCLUSIVE`. Real KVM, trusted attestation, and a
       trusted-provider run remain open.
+## 2026-08-21 assurance closeout evidence
+
+The supplied native x86_64 Linux/KVM host now runs the concrete assurance
+provider through a real Firecracker guest. The run uses signed pack
+`sha256:f72aeb04240d16ea6c0c8a4855f3d8443006e7eb3702429af005c3718946e59d`,
+plan `sha256:18a220846c25a6cec1f0b4f36dd4bfbab764f4e50671394e6da32acfcbd7ef16`,
+session `s-ebc20dc44ec9937f1acc4b7c85038c1b`, grant digest
+`sha256:b0991c541656cac6ebd02c27389a8b3c299b7cbadd6d4477653a0219545acf34`,
+Firecracker backend, observer and cleanup receipts, and exact terminal replay
+without a second VM. The result is `INCONCLUSIVE` (`attestation_verified:false`,
+`attempted_effect:false`): no TPM2/SEV-SNP/TDX device or manufacturer
+collateral is available. The full Scout-linked run remains blocked by the
+sibling's `sha256:6e21…` policy digest versus MVM's published four-reference
+`sha256:nul-separated-policy-refs-v1` digest.
