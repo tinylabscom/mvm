@@ -23,3 +23,21 @@ fn fuzz_compile_gates_use_committed_lockfiles() {
         );
     }
 }
+
+#[test]
+fn pull_request_fuzz_detection_compares_the_fetched_trees() {
+    let workflow = WORKFLOWS[0];
+    let step = workflow
+        .split("- name: Detect fuzz-crate changes")
+        .nth(1)
+        .expect("pull-request workflow must detect fuzz-crate changes");
+    let command = step
+        .lines()
+        .find(|line| line.contains("git diff --name-only"))
+        .expect("fuzz change detector must compare the base and head trees");
+
+    assert!(
+        command.contains("\"$BASE_SHA\" HEAD"),
+        "depth-one checkouts must compare trees without finding a merge base: {command}"
+    );
+}

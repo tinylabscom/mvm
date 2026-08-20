@@ -334,6 +334,9 @@ for detailed scope and acceptance criteria.
       Focused mutation witnesses cover authenticated-session signal validity,
       live/dead endpoint readiness branches, redacted TLS material, builder
       projection, and endpoint identity configuration.
+      Every dependency graph that contains `arrayref` resolves a byte-for-byte
+      vendored copy of the reviewed 0.3.9 upstream revision. Pinned file hashes
+      guard the vendored source, and Git dependencies remain denied.
       Closure remains gated on a clean Security workflow run from current
       `main`, including every mutation shard and both reproducibility builds.
 
