@@ -572,6 +572,11 @@ trusted-apfs = ["mvm-cli/trusted-apfs", "mvm-runtime/trusted-apfs"]
 # Keep the oracle enabled in native gates while the one-line upstream fix is
 # pending; the vendored source is otherwise the published 0.4.0 package.
 am-fs-ext4 = { path = "third_party/am-fs-ext4" }
+# The registry owner account yanked every established arrayref release and
+# published 0.3.10 with an unresolvable `proc-macro1` dependency. Keep BLAKE3
+# on the reviewed 0.3.9 source at an immutable upstream revision until the
+# registry package is restored.
+arrayref = { path = "third_party/arrayref" }
 
 [profile.release]
 opt-level = 3

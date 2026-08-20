@@ -92,6 +92,7 @@ const INCLUDED_TOP_LEVEL: &[&str] = &[
     "third_party",
     "xtask",
     "tests",
+    "third_party",
     "schema",
     "nix",
 ];

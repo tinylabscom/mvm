@@ -676,6 +676,39 @@ mod report_tests {
     }
 
     #[test]
+    fn client_operations_builder_preserves_every_enabled_operation() {
+        let operations = ClientOperationCapabilities::builder()
+            .list(true)
+            .inspect(true)
+            .create(true)
+            .run(true)
+            .start(true)
+            .stop(true)
+            .pause(true)
+            .resume(true)
+            .remove(true)
+            .logs(true)
+            .exec(true)
+            .reconfigure(true)
+            .set_ttl(true)
+            .build();
+
+        assert!(operations.list);
+        assert!(operations.inspect);
+        assert!(operations.create);
+        assert!(operations.run);
+        assert!(operations.start);
+        assert!(operations.stop);
+        assert!(operations.pause);
+        assert!(operations.resume);
+        assert!(operations.remove);
+        assert!(operations.logs);
+        assert!(operations.exec);
+        assert!(operations.reconfigure);
+        assert!(operations.set_ttl);
+    }
+
+    #[test]
     fn client_operations_round_trip_through_json() {
         let operations = ClientOperationCapabilities::builder()
             .list(true)
