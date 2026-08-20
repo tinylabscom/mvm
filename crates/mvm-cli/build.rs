@@ -165,6 +165,7 @@ fn main() {
     let host_target_dir = nested_target_dir.join("host-vm-target");
 
     let pin = read_pinned_toolchain(&workspace_root);
+    println!("cargo:rustc-env=MVM_PINNED_RUST={}", pin.rust);
     println!("cargo:rustc-env=MVM_PINNED_ZIG={}", pin.zig);
     println!(
         "cargo:rustc-env=MVM_PINNED_CARGO_ZIGBUILD={}",
@@ -246,7 +247,10 @@ fn main() {
             binary: &binary.name,
             features: &binary.features,
             target: &pin.target,
-            toolchain: &format!("zig={} zigbuild={}", pin.zig, pin.cargo_zigbuild),
+            toolchain: &format!(
+                "rust={} zig={} zigbuild={}",
+                pin.rust, pin.zig, pin.cargo_zigbuild
+            ),
             flavor: "musl-static",
         });
 
@@ -300,6 +304,7 @@ fn main() {
                 .with_binary(&binary.name)
                 .with_features(&binary.features)
                 .with_target(&pin.target)
+                .with_rust_pin(&pin.rust)
                 .with_zig_pin(&pin.zig)
                 .with_output(&out_file)
                 .build(),
@@ -608,6 +613,7 @@ struct ZigbuildRequest<'a> {
     binary: Option<&'a str>,
     features: Option<&'a str>,
     target: Option<&'a str>,
+    rust_pin: Option<&'a str>,
     zig_pin: Option<&'a str>,
     output: Option<&'a Path>,
 }
@@ -643,6 +649,11 @@ impl<'a> ZigbuildRequest<'a> {
         self
     }
 
+    fn with_rust_pin(mut self, rust_pin: &'a str) -> Self {
+        self.rust_pin = Some(rust_pin);
+        self
+    }
+
     fn with_zig_pin(mut self, zig_pin: &'a str) -> Self {
         self.zig_pin = Some(zig_pin);
         self
@@ -661,6 +672,7 @@ impl<'a> ZigbuildRequest<'a> {
             binary: self.binary.expect("zigbuild request binary"),
             features: self.features.expect("zigbuild request features"),
             target: self.target.expect("zigbuild request target"),
+            rust_pin: self.rust_pin.expect("zigbuild request Rust pin"),
             zig_pin: self.zig_pin.expect("zigbuild request Zig pin"),
             output: self.output.expect("zigbuild request output"),
         }
@@ -674,6 +686,7 @@ struct ZigbuildSpec<'a> {
     binary: &'a str,
     features: &'a str,
     target: &'a str,
+    rust_pin: &'a str,
     zig_pin: &'a str,
     output: &'a Path,
 }
@@ -687,7 +700,7 @@ fn run_cargo_zigbuild(spec: ZigbuildSpec<'_>) {
     // cargo sets RUSTC=rustc which doesn't have the cross targets, and that
     // value propagates into the nested `cargo build` that cargo-zigbuild
     // spawns. Using the rustup cargo avoids that.
-    let (cargo, rustc) = rustup_cargo_and_rustc(strip_glibc(spec.target));
+    let (cargo, rustc) = rustup_cargo_and_rustc(strip_glibc(spec.target), spec.rust_pin);
     let mut cmd = Command::new(&cargo);
     cmd.args([
         "zigbuild",
@@ -702,13 +715,8 @@ fn run_cargo_zigbuild(spec: ZigbuildSpec<'_>) {
     if !spec.features.is_empty() {
         cmd.args(["--features", spec.features]);
     }
-    cmd.env("RUSTC", &rustc)
-        // Dedicated target dir — see the deadlock note in main().
-        .env("CARGO_TARGET_DIR", spec.target_dir)
-        .env_remove("RUSTUP_TOOLCHAIN")
-        .env_remove("RUSTC_WRAPPER")
-        .env_remove("RUSTC_WORKSPACE_WRAPPER")
-        .current_dir(spec.root);
+    apply_nested_rust_env(&mut cmd, &rustc, spec.target_dir);
+    cmd.current_dir(spec.root);
     apply_zigbuild_env(&mut cmd, spec.target_dir);
     // Pin the zig binary cargo-zigbuild uses. Left to PATH, a Homebrew-upgraded
     // zig (newer than the pin) fails downstream with a cryptic `CacheCheckFailed`.
@@ -732,6 +740,21 @@ fn run_cargo_zigbuild(spec: ZigbuildSpec<'_>) {
         .join(spec.binary);
     std::fs::copy(&built, spec.output)
         .unwrap_or_else(|e| panic!("copy {} → {}: {e}", built.display(), spec.output.display()));
+}
+
+fn apply_nested_rust_env(cmd: &mut Command, rustc: &str, target_dir: &Path) {
+    cmd.env("RUSTC", rustc)
+        // Dedicated target dir — see the deadlock note in main().
+        .env("CARGO_TARGET_DIR", target_dir)
+        // Empty values override host Cargo configuration; removing them would
+        // allow a global sccache wrapper to reappear in the nested build.
+        .env("RUSTC_WRAPPER", "")
+        .env("RUSTC_WORKSPACE_WRAPPER", "")
+        .env_remove("RUSTUP_TOOLCHAIN")
+        // The outer nightly's frontend flags are incompatible with the pinned
+        // stable compiler used for reproducible embedded binaries.
+        .env_remove("RUSTFLAGS")
+        .env_remove("CARGO_ENCODED_RUSTFLAGS");
 }
 
 fn apply_zigbuild_env(cmd: &mut Command, target_dir: &Path) {
@@ -811,6 +834,39 @@ fn render_embedded_rs(entries: &[(String, PathBuf, String)]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nested_rust_env_drops_outer_nightly_flags_and_wrappers() {
+        let mut cmd = Command::new("cargo");
+        cmd.env("RUSTFLAGS", "-Zthreads=8")
+            .env("CARGO_ENCODED_RUSTFLAGS", "-Zthreads=8")
+            .env("RUSTC_WRAPPER", "sccache");
+
+        apply_nested_rust_env(&mut cmd, "/toolchain/rustc", Path::new("/nested-target"));
+
+        let env = cmd
+            .get_envs()
+            .map(|(key, value)| {
+                (
+                    key.to_string_lossy().into_owned(),
+                    value.map(|item| item.to_string_lossy().into_owned()),
+                )
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+        assert_eq!(env.get("RUSTC"), Some(&Some("/toolchain/rustc".into())));
+        assert_eq!(
+            env.get("CARGO_TARGET_DIR"),
+            Some(&Some("/nested-target".into()))
+        );
+        assert_eq!(env.get("RUSTC_WRAPPER"), Some(&Some(String::new())));
+        assert_eq!(
+            env.get("RUSTC_WORKSPACE_WRAPPER"),
+            Some(&Some(String::new()))
+        );
+        assert_eq!(env.get("RUSTFLAGS"), Some(&None));
+        assert_eq!(env.get("CARGO_ENCODED_RUSTFLAGS"), Some(&None));
+        assert_eq!(env.get("RUSTUP_TOOLCHAIN"), Some(&None));
+    }
 
     #[test]
     fn strip_glibc_removes_version_suffix() {

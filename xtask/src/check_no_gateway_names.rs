@@ -62,6 +62,7 @@ const EXEMPT: &[&str] = &[
 /// would fail the gate on prose that has already been corrected at the source.
 const SKIP_DIRS: &[&str] = &[
     ".git",
+    ".claude",
     ".mvm-test",
     ".mvm-verify",
     "target",
@@ -238,6 +239,24 @@ mod tests {
         std::fs::write(tmp.path().join("source.txt"), "clean\n").expect("source file");
 
         run(tmp.path()).expect("generated mvm state must not enter source policy scans");
+    }
+
+    /// Nested Claude worktrees inside the main checkout carry independent branch
+    /// states and must not be treated as source tree content.
+    #[test]
+    fn claude_worktrees_are_not_scanned() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let nested = tmp
+            .path()
+            .join(".claude")
+            .join("worktrees")
+            .join("old-branch");
+        std::fs::create_dir_all(&nested).expect("create nested worktree");
+        std::fs::write(nested.join("legacy.txt"), "spawn gvproxy for the guest\n")
+            .expect("write legacy file");
+        std::fs::write(tmp.path().join("source.txt"), "clean\n").expect("write source file");
+
+        run(tmp.path()).expect("nested claude worktrees must not pollute source scans");
     }
 
     /// `passthru` is a Nix attribute used throughout the builder pipeline and

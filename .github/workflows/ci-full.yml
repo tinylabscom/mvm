@@ -58,7 +58,7 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@nightly
+        uses: dtolnay/rust-toolchain@1.96.0
         with:
           components: rustfmt, clippy
 
@@ -99,7 +99,7 @@ jobs:
         run: cargo fmt -- --check
 
       - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: ./scripts/cargo-stable.sh clippy --all-targets -- -D warnings
 
       # `xtask check-adr-coverage` is informational — current
       # workspace carries ~12 forward references from compliance
@@ -746,7 +746,7 @@ jobs:
 
       - name: Install Rust toolchain
         if: steps.filter.outputs.libkrun == 'true' || github.ref == 'refs/heads/main'
-        uses: dtolnay/rust-toolchain@nightly
+        uses: dtolnay/rust-toolchain@1.96.0
         with:
           components: clippy
 
@@ -793,7 +793,7 @@ jobs:
 
       - name: Clippy libkrun-sys --features libkrun-sys --all-targets
         if: steps.filter.outputs.libkrun == 'true' || github.ref == 'refs/heads/main'
-        run: cargo clippy -p libkrun-sys --features libkrun-sys --all-targets -- -D warnings
+        run: ./scripts/cargo-stable.sh clippy -p libkrun-sys --features libkrun-sys --all-targets -- -D warnings
 
   # ── Workload spawn smoke (Plan 107 A2.4, runner-direct variant) ───
   # Drives the real A2.2/A2.3 spawn path: the in-guest

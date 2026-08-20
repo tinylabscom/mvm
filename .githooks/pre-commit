@@ -11,7 +11,7 @@
 #   1. Skip entirely if the staged set is empty.
 #   2. Run cargo fmt --all if any Rust files are staged (auto-fixes,
 #      re-stages).
-#   3. Run cargo clippy --all-targets -- -D warnings if any Rust files
+#   3. Run stable cargo clippy --all-targets -- -D warnings if any Rust files
 #      are staged, scoped to the packages that own them when every one
 #      of those packages is a leaf (nothing in the workspace depends on
 #      it) and no manifest changed; otherwise across --workspace. A leaf
@@ -183,10 +183,10 @@ if [ "$has_rust" -eq 1 ]; then
             echo "pre-commit: clippy covering the whole workspace — $scope_reason"
         fi
 
-        echo "pre-commit: cargo clippy $scope_label --all-targets -- -D warnings"
+        echo "pre-commit: stable cargo clippy $scope_label --all-targets -- -D warnings"
         # Unquoted on purpose: $scope_args is a list of flags we built.
         # shellcheck disable=SC2086
-        if ! cargo clippy $scope_args --all-targets -- -D warnings; then
+        if ! ./scripts/cargo-stable.sh clippy $scope_args --all-targets -- -D warnings; then
             echo
             echo "  clippy failed. CI gates on the same '-D warnings' rule, so"
             echo "  this commit will fail on push. Re-run with MVM_SKIP_CLIPPY=1"
