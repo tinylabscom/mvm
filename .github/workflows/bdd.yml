@@ -92,7 +92,7 @@ jobs:
 
       - uses: ./.github/actions/apt-deps
         with:
-          packages: libcap-ng-dev lld
+          packages: libcap-ng-dev lld qemu-system-x86 qemu-utils
 
       - uses: ./.github/actions/install-zigbuild
 
