@@ -289,10 +289,10 @@ impl ExecutionPlan {
         &self,
     ) -> Result<NetworkLimits, crate::plan::types::NetworkLimitsError> {
         if !self.network_limits.is_default() {
-            return Ok(self.network_limits);
+            return self.network_limits.validate();
         }
         let Some(legacy) = &self.l3_network else {
-            return Ok(self.network_limits);
+            return self.network_limits.validate();
         };
         NetworkLimits::builder()
             .max_tcp_flows(legacy.max_flows)

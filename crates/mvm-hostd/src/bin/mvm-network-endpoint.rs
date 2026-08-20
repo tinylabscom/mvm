@@ -30,7 +30,9 @@ use anyhow::{Context, Result};
 use tracing::{info, warn};
 
 use mvm_hostd::keyholder::secret_placeholder_env;
-use mvm_hostd::supervisor::flowmux::{FlowMuxSession, registry::RegistryLimits};
+use mvm_hostd::supervisor::flowmux::{
+    FlowMuxSession, FlowMuxVmResources, registry::RegistryLimits,
+};
 use mvm_hostd::supervisor::network_endpoint::{
     EgressMode, EndpointConfig, EndpointHandshake, EndpointTransport, ResolverBackend, assemble,
     build_audit_recorder, fingerprint_bound_secrets, parse,
@@ -67,6 +69,7 @@ fn main() -> Result<()> {
 
     let raw = read_stdin_blocking()?;
     let cfg = parse(&raw).context("mvm-network-endpoint config parse failed")?;
+    validate_flowmux_limits(&cfg)?;
     info!(
         tenant_id = %cfg.tenant_id,
         secrets = cfg.secrets.len(),
@@ -155,6 +158,15 @@ fn main() -> Result<()> {
         )
         .await
     })
+}
+
+fn validate_flowmux_limits(cfg: &EndpointConfig) -> Result<()> {
+    if cfg.egress_mode == EgressMode::FlowMux {
+        cfg.network_limits
+            .validate()
+            .context("validate admitted FlowMux network limits")?;
+    }
+    Ok(())
 }
 
 /// The one extra Landlock/seccomp grant `Remote` needs beyond `Local`: the
@@ -456,6 +468,12 @@ async fn serve_flowmux(
         .context("decode FlowMux guest verifying key")?;
     let session_id = identity.session_id.clone();
     let recorder = build_audit_recorder(&cfg.tenant_id).map(std::sync::Arc::new);
+    let admitted_limits = cfg
+        .network_limits
+        .validate()
+        .context("validate admitted FlowMux network limits")?;
+    let limits = RegistryLimits::from_network_limits(admitted_limits);
+    let vm_resources = std::sync::Arc::new(FlowMuxVmResources::new(admitted_limits));
 
     let listener = FlowMuxListener::adopt(bound)?;
     let mut consecutive_accept_errors = 0_u32;
@@ -484,11 +502,15 @@ async fn serve_flowmux(
             }
         };
 
-        // RegistryLimits uses defaults here because the spawner does not yet
-        // thread the admitted plan's limits through cfg.network_policy /
-        // NetworkLimits. Built per session so one session's accounting cannot
-        // be spent by another.
-        let limits = RegistryLimits::default();
+        let Some(session_permit) = vm_resources.try_acquire_session() else {
+            warn!(
+                limit = mvm_hostd::supervisor::flowmux::MAX_CONCURRENT_FLOWMUX_SESSIONS,
+                "FlowMux session ceiling reached"
+            );
+            drop(stream);
+            continue;
+        };
+
         let gate = cfg
             .network_policy
             .as_ref()
@@ -500,7 +522,9 @@ async fn serve_flowmux(
         let substitution = service.clone();
         let marker = cfg.session_marker.clone();
         let session_ready = session_ready.clone();
+        let vm_resources = std::sync::Arc::clone(&vm_resources);
         tokio::task::spawn_blocking(move || {
+            let _session_permit = session_permit;
             let served = FlowMuxSession::accept_with(
                 stream,
                 mvm_hostd::supervisor::flowmux::FlowMuxAccept::new(
@@ -511,7 +535,8 @@ async fn serve_flowmux(
                     gate,
                 )
                 .with_recorder(recorder)
-                .with_substitution(substitution),
+                .with_substitution(substitution)
+                .with_vm_resources(vm_resources),
             )
             .context("accept FlowMux session")
             .and_then(|mut session| {
@@ -674,6 +699,7 @@ mod tests {
                     443,
                 )],
             )),
+            network_limits: mvm_core::plan::NetworkLimits::default(),
             egress_mode: EgressMode::Wire,
             resolver: ResolverBackend::default(),
             session_marker: None,
@@ -703,6 +729,7 @@ mod tests {
             terminator_listen: None,
             tls_intermediate: None,
             network_policy: None,
+            network_limits: mvm_core::plan::NetworkLimits::default(),
             egress_mode: EgressMode::Wire,
             resolver,
             flowmux_identity: None,
@@ -822,6 +849,7 @@ mod tests {
             terminator_listen: None,
             tls_intermediate: None,
             network_policy: None,
+            network_limits: mvm_core::plan::NetworkLimits::default(),
             egress_mode: EgressMode::FlowMux,
             resolver: ResolverBackend::default(),
             session_marker: None,

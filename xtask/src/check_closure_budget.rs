@@ -57,7 +57,12 @@ const BUDGETS: &[ClosureBudget] = &[
 /// 233 (was 232): `mvm-observability`, the same +1 the Linux budget took —
 /// a workspace crate holding subscriber assembly that `mvm-core` used to
 /// own, carrying no new third-party code on either target.
-const MACOS_CLOSURE_BUDGET: usize = 233;
+///
+/// 231 (was 233): ratcheted to the measured graph after adding `mvm-mcp`, the
+/// stdio-only adapter over the existing `mvm-client` facade. The adapter is one
+/// first-party crate and adds no third-party crate to mvmctl's already-linked
+/// dependency graph.
+const MACOS_CLOSURE_BUDGET: usize = 231;
 
 /// Max distinct crates allowed in `mvmctl`'s default no-dev closure on
 /// `x86_64-unknown-linux-gnu`. Baseline measured 2026-06-17 against the audited default
@@ -185,7 +190,11 @@ const MACOS_CLOSURE_BUDGET: usize = 233;
 /// the sealed guest agent `mvm-agentd` 111 -> 102 (its `tracing-subscriber`
 /// is now gated behind `addons`, since only the helper bins install one).
 /// Measured +1 here, -9 on the guest agent and the embedded musl bins.
-pub(crate) const CLOSURE_BUDGET: usize = 239;
+///
+/// 240 (was 239): `mvm-mcp`, the stdio-only adapter over the existing
+/// `mvm-client` facade. It adds one first-party crate and no third-party crate
+/// to mvmctl's already-linked dependency graph.
+pub(crate) const CLOSURE_BUDGET: usize = 240;
 
 pub fn run(workspace: &Path) -> Result<()> {
     for budget in BUDGETS {

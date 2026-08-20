@@ -114,7 +114,8 @@ fn recording_with_no_command_start_fails_lowering() {
     let recording = RuntimeRecording {
         workload_id: "no-cmd".into(),
         create: mvm_sdk::runtime::SandboxCreate {
-            template: "python-3.12".into(),
+            template: Some("python-3.12".into()),
+            image: None,
             env: Default::default(),
             include: vec![],
             tags: Default::default(),

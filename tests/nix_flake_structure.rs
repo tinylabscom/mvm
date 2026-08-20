@@ -240,8 +240,8 @@ fn native_vmm_recipes_are_source_built_and_pinned() {
         );
     }
 
-    const KERNEL_VERSION: &str = "6.12.103";
-    const KERNEL_HASH: &str = "sha256-8UOqreiHe6VhbniLRIJXbbKEgbz1V+9Tf0/MOTj8MXY=";
+    const KERNEL_VERSION: &str = "6.12.104";
+    const KERNEL_HASH: &str = "sha256-lJ0WahJjvQzwxaq0TutXhpYVCZ58SL+I0OStt3N5uZk=";
     assert!(
         libkrunfw.contains(&format!("linux-{KERNEL_VERSION}.tar.xz"))
             && libkrunfw.contains(&format!("hash = \"{KERNEL_HASH}\""))
@@ -1572,5 +1572,43 @@ fn default_tenant_exports_and_ci_counts_the_rootfs_closure() {
     assert!(
         ci.contains("--closure-paths \"$image_path/rootfs-closure-paths\""),
         "the footprint CI gate must consume the exported closure inventory"
+    );
+}
+
+/// No published-image fetch may build its release URL from the CLI's own
+/// version.
+///
+/// The CLI ships from `v<crate version>`; the guest images ship from
+/// `boot-image/vN`, on a counter that moves independently so a kernel fix does
+/// not wait for a CLI release. Deriving an image URL from `CARGO_PKG_VERSION`
+/// therefore points at a tag nobody has published for most of a release cycle —
+/// a 404 on the first boot of a fresh install, which is exactly how it shipped.
+///
+/// `runtime_overlay.rs` and `sdk_sidecar.rs` are deliberately excluded: their
+/// version is also the on-disk cache key, so splitting their download tag from
+/// their cache identity is a separate change, not a rename.
+#[test]
+fn image_fetches_do_not_derive_their_release_url_from_the_cli_version() {
+    let cli = repo_dir().join("crates/mvm-cli/src");
+    let offenders: Vec<String> = [
+        "commands/env/builder_vm/default_microvm.rs",
+        "commands/env/builder_vm/stage0_cache.rs",
+        "commands/image/boot/update.rs",
+        "update.rs",
+    ]
+    .iter()
+    .filter(|rel| {
+        fs::read_to_string(cli.join(rel))
+            .unwrap_or_default()
+            .contains("releases/download/v{version}")
+    })
+    .map(|rel| (*rel).to_string())
+    .collect();
+
+    assert!(
+        offenders.is_empty(),
+        "these build an image release URL from the CLI version, which 404s \
+         whenever the crate version is ahead of the last CLI tag: {offenders:?}. \
+         Use `update::boot_image_release()`."
     );
 }

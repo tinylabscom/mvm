@@ -33,7 +33,7 @@ use crate::plan_admission::{
 /// The tenant every locally-run machine is admitted under. Local runs are
 /// single-tenant by construction (one host, one operator), so the audit chain
 /// and gateway substrate key off this fixed label rather than a fleet tenant.
-const LOCAL_TENANT: &str = "local";
+pub(crate) const LOCAL_TENANT: &str = "local";
 
 /// A minimal, safe-by-default request to admit and boot a locally-materialized
 /// rootfs. The caller resolves the image to `rootfs_path` (and its optional
@@ -127,7 +127,10 @@ pub fn shares_from_vm_volumes(volumes: &[VmVolume]) -> Vec<mvm_core::plan::HostS
 /// boot exactly as it does on the CLI path. Non-fatal on a cold cache under
 /// `PreferOverlay` (the guest falls back to a baked agent when it has one);
 /// fails closed when the policy is `RequiredOverlay`.
-fn attach_runtime_overlay_from_cache(config: &mut VmStartConfig, backend_name: &str) -> Result<()> {
+pub(crate) fn attach_runtime_overlay_from_cache(
+    config: &mut VmStartConfig,
+    backend_name: &str,
+) -> Result<()> {
     use mvm_build::runtime_overlay::{RuntimeOverlayResolver, resolve_or_seed_from_default_cache};
     if !matches!(backend_name, "firecracker" | "hvf" | "qemu" | "libkrun") {
         return Ok(());

@@ -368,6 +368,12 @@ pub fn fork_checkpoint(
     // rather than restates the parent's permission set — inheritance is the
     // only shape that cannot widen.
     .grants(parent.grants.clone())
+    // A fork starts a new lineage, not a continuation of the parent's durable
+    // agent session: carrying the binding forward would claim the child is
+    // the same session at the same generation and journal cursor as a parent
+    // that may still be running, which is two live sandboxes asserting one
+    // identity. The child is unbound until something binds it fresh.
+    .session(None)
     .build();
     store.write_meta(&child)?;
     Ok(child)
@@ -462,6 +468,12 @@ pub fn fork_vm_full(
     // grandchild is then bounded by what this restore actually got, not by the
     // wider set its grandparent held.
     .grants(child_grants)
+    // Same reasoning as fork_checkpoint: forking a vm_full checkpoint starts a
+    // new sandbox lineage, so the child does not inherit the parent's durable
+    // agent session binding. It boots as its own identity with its own
+    // generation, and something else must bind it to a session before that
+    // binding is meaningful.
+    .session(None)
     .build();
     store.write_meta(&child)?;
     Ok(child)
@@ -1185,7 +1197,8 @@ mod tests {
     use super::*;
     use chrono::{Duration, Utc};
     use mvm_core::checkpoint::{
-        CheckpointClass, CheckpointDigest, CheckpointId, CheckpointMeta, ContentBlob,
+        ApprovalHead, CheckpointClass, CheckpointDigest, CheckpointId, CheckpointMeta, ContentBlob,
+        SessionBinding,
     };
 
     fn meta(id: &str, tag: Option<&str>, parent: Option<CheckpointDigest>) -> CheckpointMeta {
@@ -1343,6 +1356,69 @@ mod tests {
             },
         )
         .unwrap()
+    }
+
+    fn test_session_binding() -> SessionBinding {
+        SessionBinding {
+            session_id: mvm_contract::protocol::agent_session::AgentSessionId::parse(
+                "sess-fork-test",
+            )
+            .unwrap(),
+            generation: 2,
+            journal_cursor: 40,
+            approval_head: ApprovalHead::parse(format!("sha256:{}", "ab".repeat(32))).unwrap(),
+        }
+    }
+
+    /// Rewrites `meta`'s stored record to carry a `SessionBinding`, as if it
+    /// were captured from a VM resuming a durable agent session. Used only to
+    /// build fork-test fixtures; capture itself does not yet wire a session in.
+    fn bind_to_session(store: &CheckpointStore, meta: &CheckpointMeta) -> CheckpointMeta {
+        let bound = CheckpointMeta::builder(meta.id.clone(), meta.class, meta.vm_name.clone())
+            .tag(meta.tag.clone())
+            .parent(meta.parent.clone())
+            .created_unix(meta.created_unix)
+            .content(meta.content.clone())
+            .supervisor_config_digest(meta.supervisor_config_digest.clone())
+            .runtime_source_policy(meta.runtime_source_policy)
+            .runtime_overlay_version(meta.runtime_overlay_version.clone())
+            .grants(meta.grants.clone())
+            .session(Some(test_session_binding()))
+            .build();
+        store.write_meta(&bound).unwrap();
+        bound
+    }
+
+    #[test]
+    fn fork_checkpoint_does_not_inherit_the_parent_session() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::at(tmp.path().join("store"));
+        let parent = seed_fs_quick_checkpoint(&store, tmp.path(), "p-session");
+        let parent = bind_to_session(&store, &parent);
+        assert!(parent.session.is_some());
+
+        let dst = tmp.path().join("childvm-state");
+        let child = fork_checkpoint(
+            &store,
+            ForkParams {
+                checkpoint: parent.id.clone(),
+                child_id: CheckpointId::new("f-session"),
+                child_vm_name: "childvm-session".into(),
+                dest_dir: dst,
+                created_unix: 2,
+                child_plan_json: None,
+                child_tenant_id: None,
+            },
+            &AgreeingAnchor,
+        )
+        .unwrap();
+
+        // A fork branches a new lineage; it must not claim to be the parent's
+        // session at the parent's generation and journal cursor.
+        assert!(
+            child.session.is_none(),
+            "forked child must not inherit the parent's session binding"
+        );
     }
 
     #[test]
@@ -2521,6 +2597,42 @@ mod tests {
                 Ok(())
             }
         }
+    }
+
+    #[test]
+    fn fork_vm_full_does_not_inherit_the_parent_session() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::at(tmp.path().join("store"));
+        let parent = seed_fc_vm_full_checkpoint(&store, tmp.path(), "fcv-session");
+        let parent = bind_to_session(&store, &parent);
+        assert!(parent.session.is_some());
+        let (child_plan_json, child_tenant_id) = admitted_child_plan();
+
+        let dest = tmp.path().join("childvm-state");
+        let restorer = RecordedRestore::default();
+        let child = fork_vm_full(
+            &store,
+            ForkParams {
+                checkpoint: parent.id.clone(),
+                child_id: CheckpointId::new("fcf-session"),
+                child_vm_name: "fc-childvm-session".into(),
+                dest_dir: dest,
+                created_unix: 2,
+                child_plan_json: Some(child_plan_json),
+                child_tenant_id: Some(child_tenant_id),
+            },
+            &restorer.restore(),
+            &AgreeingAnchor,
+        )
+        .unwrap();
+
+        // Same reasoning as fork_checkpoint: a fork is a new lineage, not a
+        // continuation of the parent's session at generation+1, so the child
+        // must not carry the parent's binding forward.
+        assert!(
+            child.session.is_none(),
+            "forked child must not inherit the parent's session binding"
+        );
     }
 
     #[test]

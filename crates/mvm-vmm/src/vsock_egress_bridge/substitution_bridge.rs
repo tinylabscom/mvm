@@ -236,9 +236,22 @@ fn refill_tokens(state: &mut EgressBudgetState, rate: u64, now: Instant) {
 /// stream abstraction and the per-VM UDS endpoint. Policy, HTTP parsing, TLS, and
 /// host client behavior stay above this seam.
 pub(crate) trait GuestEndpointRelay {
-    /// Relay guest→host bytes for `conn_id`. The first payload may open the
-    /// endpoint connection. Implementations fail closed on missing endpoints or
-    /// connect failures.
+    /// Open the endpoint side of `conn_id` before any guest bytes arrive.
+    ///
+    /// Needed because the endpoint speaks first on this channel: the FlowMux
+    /// session handshake opens with the host's `SessionHello`, so a guest that
+    /// has connected sits in a read. Deferring the endpoint dial to the first
+    /// guest payload deadlocks that exchange — each side waits for the other.
+    ///
+    /// Returns `false` when the connection cannot be opened, which is the same
+    /// fail-closed set [`Self::relay_guest_bytes`] refuses on: no endpoint
+    /// bound, the per-guest connection cap, an exhausted stream budget, or a
+    /// failed dial.
+    fn open_connection(&mut self, conn_id: u32) -> bool;
+
+    /// Relay guest→host bytes for `conn_id`, opening the endpoint connection if
+    /// [`Self::open_connection`] has not already. Implementations fail closed on
+    /// missing endpoints or connect failures.
     fn relay_guest_bytes(&mut self, conn_id: u32, payload: &[u8]) -> EndpointRelayAction;
 
     /// Drain host→guest endpoint bytes once from every active connection.
@@ -362,46 +375,54 @@ impl SubstitutionBridge {
 }
 
 impl GuestEndpointRelay for SubstitutionBridge {
-    fn relay_guest_bytes(&mut self, conn_id: u32, payload: &[u8]) -> EndpointRelayAction {
-        if let Some(conn) = self.conns.get_mut(&conn_id) {
-            if !self.budget.consume_waiting(payload.len()) {
-                return EndpointRelayAction::Refused;
-            }
-            write_nonblocking(&mut conn.stream, payload);
-            conn.last_activity = Instant::now();
-            return EndpointRelayAction::Relayed;
+    fn open_connection(&mut self, conn_id: u32) -> bool {
+        if self.conns.contains_key(&conn_id) {
+            return true;
         }
         if self.conns.len() >= MAX_CONNECTIONS {
-            return EndpointRelayAction::Refused;
+            return false;
         }
         if !self.budget.try_reserve_stream() {
-            return EndpointRelayAction::Refused;
+            return false;
         }
         let Some(path) = self.endpoint.clone() else {
             self.budget.release_stream();
-            return EndpointRelayAction::Refused;
+            return false;
         };
         match UnixStream::connect(&path) {
             Ok(stream) => {
                 let _ = stream.set_nonblocking(true);
-                if !self.budget.consume_waiting(payload.len()) {
-                    self.budget.release_stream();
-                    return EndpointRelayAction::Refused;
-                }
-                let conn = self.conns.entry(conn_id).or_insert(EndpointConn {
-                    stream,
-                    last_activity: Instant::now(),
-                });
-                write_nonblocking(&mut conn.stream, payload);
-                conn.last_activity = Instant::now();
+                self.conns.insert(
+                    conn_id,
+                    EndpointConn {
+                        stream,
+                        last_activity: Instant::now(),
+                    },
+                );
                 self.bump(1);
-                EndpointRelayAction::Relayed
+                true
             }
             Err(_) => {
                 self.budget.release_stream();
-                EndpointRelayAction::Refused
+                false
             }
         }
+    }
+
+    fn relay_guest_bytes(&mut self, conn_id: u32, payload: &[u8]) -> EndpointRelayAction {
+        if !self.open_connection(conn_id) {
+            return EndpointRelayAction::Refused;
+        }
+        if !self.budget.consume_waiting(payload.len()) {
+            return EndpointRelayAction::Refused;
+        }
+        let conn = self
+            .conns
+            .get_mut(&conn_id)
+            .expect("open_connection returned true, so the connection is present");
+        write_nonblocking(&mut conn.stream, payload);
+        conn.last_activity = Instant::now();
+        EndpointRelayAction::Relayed
     }
 
     fn drain_endpoint_bytes(&mut self) -> EndpointRelayDrain {
@@ -502,6 +523,61 @@ mod tests {
             EndpointRelayAction::Refused
         );
         assert!(!b.is_active());
+    }
+
+    /// Opening ahead of any guest bytes is what lets a host-first protocol
+    /// greet the guest. It must still fail closed with nothing bound, and must
+    /// hand the stream reservation back when it does — otherwise a guest that
+    /// retries its connect burns the budget down and the endpoint that finally
+    /// arrives can never be dialed.
+    #[test]
+    fn open_connection_fails_closed_without_an_endpoint_and_returns_the_reservation() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("subst.sock");
+
+        let mut b = SubstitutionBridge::new();
+        for conn_id in 0..MAX_EGRESS_STREAMS as u32 + 1 {
+            assert!(!b.open_connection(conn_id), "nothing is bound yet");
+        }
+        assert!(!b.is_active());
+
+        let Some(listener) = bind_unix_listener(&sock) else {
+            return;
+        };
+        let server = std::thread::spawn(move || listener.accept().map(|(c, _)| c));
+        b.set_endpoint(&sock);
+        assert!(
+            b.open_connection(0),
+            "every refused open returned its reservation, so the budget has room"
+        );
+        drop(server.join().unwrap());
+    }
+
+    /// An opened connection is live before a single guest byte, and closing it
+    /// gives the stream slot back.
+    #[test]
+    fn open_connection_is_active_before_any_guest_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("subst.sock");
+        let Some(listener) = bind_unix_listener(&sock) else {
+            return;
+        };
+        let server = std::thread::spawn(move || listener.accept().map(|(c, _)| c));
+
+        let mut b = SubstitutionBridge::new();
+        b.set_endpoint(&sock);
+        assert!(b.open_connection(9));
+        assert!(
+            b.is_active(),
+            "the endpoint side is open with no guest bytes"
+        );
+        // Idempotent: a second open on the same id reuses the connection.
+        assert!(b.open_connection(9));
+        assert_eq!(b.conns.len(), 1);
+
+        b.close_connection(9);
+        assert!(!b.is_active());
+        drop(server.join().unwrap());
     }
 
     #[test]
