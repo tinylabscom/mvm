@@ -34,7 +34,7 @@ use mvm_core::net::session::Session;
 use mvm_vmm::vsock_egress_bridge::egress_gate::{DnsVerdict, EgressGate, EgressVerdict};
 use tracing::{info, warn};
 
-use self::registry::{RegistryLimits, StreamRegistry, class_for_open};
+use self::registry::{RegistryLimits, StreamRegistry, VmFlowBudget, class_for_open};
 use self::udp_relay::{
     UdpAssociationHandle, UdpRelayParams, UdpSendMsg, decode_udp_addr, run_udp_relay,
 };
@@ -52,6 +52,11 @@ const HOST_BUILD: &str = concat!("mvm-hostd ", env!("CARGO_PKG_VERSION"));
 /// the next candidate quickly.
 const PER_IP_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 
+/// Host ceiling for concurrent guest processes authenticated to one VM's
+/// endpoint. Counting before the handshake also prevents idle handshake
+/// sockets from creating an unbounded thread set.
+pub const MAX_CONCURRENT_FLOWMUX_SESSIONS: usize = 16;
+
 /// Per-session rate limiter for new connection/association/resolve attempts.
 ///
 /// A guest can otherwise force the host to open an unbounded number of TCP
@@ -63,6 +68,44 @@ pub struct ConnectionRateLimiter {
     udp: Mutex<TokenBucket>,
     dns: Mutex<TokenBucket>,
     icmp: Mutex<TokenBucket>,
+}
+
+/// Endpoint-scoped resources shared by every FlowMux session for one VM.
+pub struct FlowMuxVmResources {
+    registry_budget: Arc<VmFlowBudget>,
+    rate_limiter: Arc<ConnectionRateLimiter>,
+    icmp_rate: Arc<crate::supervisor::egress_rate::EgressRateGuard>,
+    session_slots: Arc<tokio::sync::Semaphore>,
+}
+
+impl FlowMuxVmResources {
+    /// Build the shared owner from the admitted signed limits and host runtime
+    /// bounds that are not yet plan-configurable.
+    #[must_use]
+    pub fn new(network: mvm_core::plan::NetworkLimits) -> Self {
+        let limits = RegistryLimits::from_network_limits(network);
+        Self {
+            registry_budget: Arc::new(VmFlowBudget::new(network, limits.max_icmp)),
+            rate_limiter: Arc::new(ConnectionRateLimiter::from_limits(&limits)),
+            icmp_rate: Arc::new(crate::supervisor::egress_rate::EgressRateGuard::builder().build()),
+            session_slots: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_FLOWMUX_SESSIONS)),
+        }
+    }
+
+    fn from_registry_limits(limits: RegistryLimits) -> Self {
+        Self {
+            registry_budget: Arc::new(VmFlowBudget::from_registry_limits(limits)),
+            rate_limiter: Arc::new(ConnectionRateLimiter::from_limits(&limits)),
+            icmp_rate: Arc::new(crate::supervisor::egress_rate::EgressRateGuard::builder().build()),
+            session_slots: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_FLOWMUX_SESSIONS)),
+        }
+    }
+
+    /// Reserve one endpoint session without waiting. The owned permit is held
+    /// by the serving task and returns capacity on every exit path.
+    pub fn try_acquire_session(self: &Arc<Self>) -> Option<tokio::sync::OwnedSemaphorePermit> {
+        Arc::clone(&self.session_slots).try_acquire_owned().ok()
+    }
 }
 
 impl ConnectionRateLimiter {
@@ -200,6 +243,7 @@ pub struct FlowMuxAccept {
     gate: EgressGate,
     recorder: Option<Arc<Recorder>>,
     substitution: Option<Arc<crate::supervisor::network_endpoint_proxy::SubstitutionService>>,
+    vm_resources: Option<Arc<FlowMuxVmResources>>,
 }
 
 impl FlowMuxAccept {
@@ -221,6 +265,7 @@ impl FlowMuxAccept {
             gate,
             recorder: None,
             substitution: None,
+            vm_resources: None,
         }
     }
 
@@ -243,6 +288,13 @@ impl FlowMuxAccept {
         substitution: Option<Arc<crate::supervisor::network_endpoint_proxy::SubstitutionService>>,
     ) -> Self {
         self.substitution = substitution;
+        self
+    }
+
+    /// Attach the endpoint's VM-wide budget, rate guards, and session owner.
+    #[must_use]
+    pub fn with_vm_resources(mut self, resources: Arc<FlowMuxVmResources>) -> Self {
+        self.vm_resources = Some(resources);
         self
     }
 }
@@ -290,6 +342,7 @@ impl FlowMuxSession {
             gate,
             recorder,
             substitution,
+            vm_resources,
         } = params;
         let session_id = session_id.as_str();
         // Split the socket into independent read/write descriptors so the
@@ -307,14 +360,19 @@ impl FlowMuxSession {
 
         info!(session_id, "FlowMux handshake complete");
 
+        let resources = vm_resources
+            .unwrap_or_else(|| Arc::new(FlowMuxVmResources::from_registry_limits(limits)));
         Ok(Self {
             reader: stream,
             writer: Arc::new(Mutex::new(writer)),
             session: Arc::new(Mutex::new(session)),
             validator: Arc::new(Mutex::new(SessionValidator::default())),
-            registry: Arc::new(Mutex::new(StreamRegistry::new(limits))),
+            registry: Arc::new(Mutex::new(StreamRegistry::with_budget(
+                limits,
+                Arc::clone(&resources.registry_budget),
+            ))),
             streams: BTreeMap::new(),
-            icmp_rate: Arc::new(crate::supervisor::egress_rate::EgressRateGuard::builder().build()),
+            icmp_rate: Arc::clone(&resources.icmp_rate),
             http_flows: BTreeMap::new(),
             substitution,
             udp_associations: BTreeMap::new(),
@@ -324,7 +382,7 @@ impl FlowMuxSession {
             connect_timeout: Duration::from_secs(30),
             recorder,
             runtime_handle: tokio::runtime::Handle::try_current().ok(),
-            rate_limiter: Arc::new(ConnectionRateLimiter::from_limits(&limits)),
+            rate_limiter: Arc::clone(&resources.rate_limiter),
         })
     }
 
@@ -2712,5 +2770,47 @@ mod tests {
 
         drop(guest);
         host.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn vm_resources_bound_sessions_and_return_slots_on_drop() {
+        let resources = Arc::new(FlowMuxVmResources::new(
+            mvm_core::plan::NetworkLimits::default(),
+        ));
+        let mut permits = Vec::new();
+        for _ in 0..MAX_CONCURRENT_FLOWMUX_SESSIONS {
+            permits.push(
+                resources
+                    .try_acquire_session()
+                    .expect("session below the endpoint ceiling"),
+            );
+        }
+        assert!(resources.try_acquire_session().is_none());
+
+        drop(permits.pop());
+        assert!(resources.try_acquire_session().is_some());
+    }
+
+    #[test]
+    fn vm_resources_share_one_rate_budget_across_session_clones() {
+        let limits = RegistryLimits {
+            tcp_connect_rate: 1,
+            ..Default::default()
+        };
+        let resources = Arc::new(FlowMuxVmResources::from_registry_limits(limits));
+        let first_session = Arc::clone(&resources);
+        let second_session = Arc::clone(&resources);
+
+        assert!(
+            first_session
+                .rate_limiter
+                .try_open(registry::FlowClass::Tcp)
+        );
+        assert!(
+            !second_session
+                .rate_limiter
+                .try_open(registry::FlowClass::Http),
+            "typed HTTP and opaque TCP sessions must spend one VM rate budget"
+        );
     }
 }

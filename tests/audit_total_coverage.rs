@@ -791,6 +791,8 @@ fn audit_posture_emits_entries_reference_known_audit_kinds() {
         // Plan-64 audit-chain events.
         "plan.admitted",
         "plan.launched",
+        "session.parked",
+        "session.resumed",
         // Plan-326 chain-structure event: `trust audit prune` records the
         // removal in the chain before deleting the segments it names.
         "chain.pruned",
@@ -799,9 +801,6 @@ fn audit_posture_emits_entries_reference_known_audit_kinds() {
         "cmd.deploy",
         // Image time-travel restore marker.
         "image.reverted",
-        // Durable agent-session lifecycle markers.
-        "session.parked",
-        "session.resumed",
     ];
 
     let mut failures: Vec<(String, &'static str)> = Vec::new();

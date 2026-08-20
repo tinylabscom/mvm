@@ -92,6 +92,33 @@ impl NetworkLimits {
         self == &Self::default()
     }
 
+    /// Validate ceilings decoded from an untrusted or persisted wire value.
+    /// Construction through the builder already calls this; runtime consumers
+    /// call it again at their boundary so serde cannot bypass the invariant.
+    pub fn validate(self) -> Result<Self, NetworkLimitsError> {
+        if self.max_tcp_flows == 0 {
+            return Err(NetworkLimitsError::Zero {
+                field: "max_tcp_flows",
+            });
+        }
+        if self.max_udp_associations == 0 {
+            return Err(NetworkLimitsError::Zero {
+                field: "max_udp_associations",
+            });
+        }
+        if self.max_dns_bindings == 0 {
+            return Err(NetworkLimitsError::Zero {
+                field: "max_dns_bindings",
+            });
+        }
+        if self.max_ingress_listeners == 0 {
+            return Err(NetworkLimitsError::Zero {
+                field: "max_ingress_listeners",
+            });
+        }
+        Ok(self)
+    }
+
     const fn defaults() -> Self {
         Self {
             max_tcp_flows: Self::default_max_tcp_flows(),
@@ -177,27 +204,7 @@ impl NetworkLimitsBuilder {
 
     /// Validate that every resource class retains a non-zero ceiling.
     pub fn build(self) -> Result<NetworkLimits, NetworkLimitsError> {
-        if self.limits.max_tcp_flows == 0 {
-            return Err(NetworkLimitsError::Zero {
-                field: "max_tcp_flows",
-            });
-        }
-        if self.limits.max_udp_associations == 0 {
-            return Err(NetworkLimitsError::Zero {
-                field: "max_udp_associations",
-            });
-        }
-        if self.limits.max_dns_bindings == 0 {
-            return Err(NetworkLimitsError::Zero {
-                field: "max_dns_bindings",
-            });
-        }
-        if self.limits.max_ingress_listeners == 0 {
-            return Err(NetworkLimitsError::Zero {
-                field: "max_ingress_listeners",
-            });
-        }
-        Ok(self.limits)
+        self.limits.validate()
     }
 }
 
@@ -1212,6 +1219,17 @@ mod network_limits_tests {
         ] {
             assert!(matches!(result, Err(NetworkLimitsError::Zero { .. })));
         }
+    }
+
+    #[test]
+    fn validation_refuses_a_zero_decoded_by_serde() {
+        let decoded: NetworkLimits = serde_json::from_str(r#"{"max_tcp_flows":0}"#).unwrap();
+        assert_eq!(
+            decoded.validate(),
+            Err(NetworkLimitsError::Zero {
+                field: "max_tcp_flows"
+            })
+        );
     }
 }
 
