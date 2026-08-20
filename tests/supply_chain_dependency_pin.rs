@@ -1,33 +1,78 @@
-use std::path::Path;
+use std::fmt::Write as _;
+use std::path::{Path, PathBuf};
+
+use sha2::{Digest, Sha256};
 
 const ARRAYREF_REVISION: &str = "f8d0299d863922db6c409d08098941e833b70d69";
 const ARRAYREF_REPOSITORY: &str = "https://github.com/droundy/arrayref";
+const CARGO_TOML_SHA256: &str = "122da2bce2d1aea793e4dc4d38a98966c67f3339a4db2f8fc740bd74ce97e668";
+const LICENSE_SHA256: &str = "1bc7e6f475b3ec99b7e2643411950ae2368c250dd4c5c325f80f9811362a94a1";
+const LIB_SHA256: &str = "b74872c9bb2b836132817e024a3f9205f83a6864de1a9bfb46acc1bfbbc1873a";
 
 fn read(path: &Path) -> String {
     std::fs::read_to_string(path)
         .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()))
 }
 
-fn assert_arrayref_patch(manifest_path: &Path) {
-    let manifest: toml::Value =
-        toml::from_str(&read(manifest_path)).expect("Cargo.toml must parse");
-    let patch = &manifest["patch"]["crates-io"]["arrayref"];
+fn parse_toml(path: &Path) -> toml::Value {
+    toml::from_str(&read(path))
+        .unwrap_or_else(|error| panic!("failed to parse {}: {error}", path.display()))
+}
 
-    assert_eq!(patch["git"].as_str(), Some(ARRAYREF_REPOSITORY));
-    assert_eq!(patch["rev"].as_str(), Some(ARRAYREF_REVISION));
+fn assert_arrayref_patch(manifest_path: &Path, vendored: &Path) {
+    let manifest = parse_toml(manifest_path);
+    let patch = &manifest["patch"]["crates-io"]["arrayref"];
+    let relative = patch["path"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{} must use a path patch", manifest_path.display()));
+    let resolved = manifest_path
+        .parent()
+        .expect("a manifest has a containing directory")
+        .join(relative)
+        .canonicalize()
+        .unwrap_or_else(|error| {
+            panic!(
+                "failed to resolve arrayref patch from {}: {error}",
+                manifest_path.display()
+            )
+        });
+
+    assert_eq!(resolved, vendored);
+    assert!(patch.get("git").is_none());
+    assert!(patch.get("rev").is_none());
+}
+
+fn arrayref_package(lockfile_path: &Path) -> toml::Value {
+    let lock = parse_toml(lockfile_path);
+    let matches: Vec<_> = lock["package"]
+        .as_array()
+        .expect("Cargo.lock package must be an array")
+        .iter()
+        .filter(|package| package["name"].as_str() == Some("arrayref"))
+        .cloned()
+        .collect();
+
+    assert_eq!(
+        matches.len(),
+        1,
+        "{} must resolve exactly one arrayref package",
+        lockfile_path.display()
+    );
+    matches.into_iter().next().expect("one package was found")
 }
 
 fn assert_arrayref_lock(lockfile_path: &Path) {
-    let expected_source =
-        format!("git+{ARRAYREF_REPOSITORY}?rev={ARRAYREF_REVISION}#{ARRAYREF_REVISION}");
+    let package = arrayref_package(lockfile_path);
+    assert_eq!(package["version"].as_str(), Some("0.3.9"));
     assert!(
-        read(lockfile_path).contains(&expected_source),
-        "{} must resolve arrayref from the reviewed revision",
+        package.get("source").is_none(),
+        "{} must resolve arrayref from the vendored path",
         lockfile_path.display()
     );
+    assert!(package.get("checksum").is_none());
 }
 
-fn collect_lockfiles(directory: &Path, lockfiles: &mut Vec<std::path::PathBuf>) {
+fn collect_lockfiles(directory: &Path, lockfiles: &mut Vec<PathBuf>) {
     let entries = std::fs::read_dir(directory)
         .unwrap_or_else(|error| panic!("failed to read {}: {error}", directory.display()));
     for entry in entries {
@@ -44,9 +89,23 @@ fn collect_lockfiles(directory: &Path, lockfiles: &mut Vec<std::path::PathBuf>) 
     }
 }
 
+fn sha256(path: &Path) -> String {
+    let bytes = std::fs::read(path)
+        .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+    let mut encoded = String::with_capacity(64);
+    for byte in Sha256::digest(bytes) {
+        write!(&mut encoded, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    encoded
+}
+
 #[test]
-fn every_arrayref_graph_uses_the_reviewed_upstream_revision() {
+fn every_arrayref_graph_uses_the_vendored_reviewed_source() {
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let vendored = workspace
+        .join("third_party/arrayref")
+        .canonicalize()
+        .expect("vendored arrayref directory must exist");
     let mut lockfiles = vec![workspace.join("Cargo.lock")];
     collect_lockfiles(&workspace.join("crates"), &mut lockfiles);
     let affected: Vec<_> = lockfiles
@@ -60,20 +119,36 @@ fn every_arrayref_graph_uses_the_reviewed_upstream_revision() {
             .parent()
             .expect("a lockfile has a containing directory")
             .join("Cargo.toml");
-        assert_arrayref_patch(&manifest);
+        assert_arrayref_patch(&manifest, &vendored);
         assert_arrayref_lock(&lockfile);
     }
 }
 
 #[test]
-fn deny_policy_allows_only_the_pinned_repository() {
+fn vendored_arrayref_matches_the_reviewed_upstream_revision() {
+    let vendored = Path::new(env!("CARGO_MANIFEST_DIR")).join("third_party/arrayref");
+    let origin = parse_toml(&vendored.join("ORIGIN.toml"));
+
+    assert_eq!(origin["repository"].as_str(), Some(ARRAYREF_REPOSITORY));
+    assert_eq!(origin["revision"].as_str(), Some(ARRAYREF_REVISION));
+    assert_eq!(
+        origin["cargo_toml_sha256"].as_str(),
+        Some(CARGO_TOML_SHA256)
+    );
+    assert_eq!(origin["license_sha256"].as_str(), Some(LICENSE_SHA256));
+    assert_eq!(origin["lib_sha256"].as_str(), Some(LIB_SHA256));
+    assert_eq!(sha256(&vendored.join("Cargo.toml")), CARGO_TOML_SHA256);
+    assert_eq!(sha256(&vendored.join("LICENSE")), LICENSE_SHA256);
+    assert_eq!(sha256(&vendored.join("src/lib.rs")), LIB_SHA256);
+}
+
+#[test]
+fn deny_policy_rejects_git_sources() {
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let policy: toml::Value =
-        toml::from_str(&read(&workspace.join("deny.toml"))).expect("deny.toml must parse");
+    let policy = parse_toml(&workspace.join("deny.toml"));
     let allowed = policy["sources"]["allow-git"]
         .as_array()
         .expect("sources.allow-git must be an array");
 
-    assert_eq!(allowed.len(), 1);
-    assert_eq!(allowed[0].as_str(), Some(ARRAYREF_REPOSITORY));
+    assert!(allowed.is_empty());
 }

@@ -172,7 +172,6 @@ checksum = "c3d036a3c4ab069c7b410a2ce876bd74808d2d0888a82667669f8e783a898bf1"
 [[package]]
 name = "arrayref"
 version = "0.3.9"
-source = "git+https://github.com/droundy/arrayref?rev=f8d0299d863922db6c409d08098941e833b70d69#f8d0299d863922db6c409d08098941e833b70d69"
 
 [[package]]
 name = "arrayvec"
