@@ -659,16 +659,17 @@ beside it already uses `write_atomic_unsynced`. So a structure the code treats
 as a derived cache everywhere else is the one thing in admission paying full
 durability, synchronously, before the VM starts.
 
-Three options, none taken here because this is a durability decision about
-claim-8 evidence export rather than the redundancy removal the rest of this
-change is:
-
-1. Write the receipt body unsynced, like its head. Cheapest; a receipt can then
-   be lost to power loss while the chain entry it derives from survives — which
-   is the definition of a derived cache, but it does mean `receipt_export` can
-   come up short after a crash.
-2. Keep the sync and move it off the boot path, flushing with the batch.
-3. Keep it as is and accept ~36 ms, having now named it.
+The 2026-08-20 follow-up selected the safe form of option 2: keep the receipt,
+decision cache, and authoritative audit chain durable before boot, but issue
+their independent flushes concurrently at their shared pre-action boundary.
+The scope owns an `Arc<AtomicSyncState>` so audit emission remains correctly
+batched when it crosses helper threads; an error or dropped scope synchronously
+retries every pending path. The command and launch audit paths also share one
+validated signer, making the final command outcome the terminal audit barrier
+instead of paying a separate launch-emitter drop barrier. Receipt-head recovery
+now reconstructs from receipt files even when a crash leaves the head ahead of
+the durable receipts. No receipt was made unsynced and no fail-closed boundary
+moved after its protected action.
 
 ### Phase 5 first change — the readiness cadence was reporting itself
 
@@ -1143,6 +1144,33 @@ the *full* durable lifecycle sub-200 requires low-latency persistent storage
 (NVMe or equivalent) and then a fresh 20+2 validation; moving the audit chain
 to tmpfs or returning before safe teardown is not an acceptable optimization.
 
+The 2026-08-20 lifecycle follow-up retained those boundaries while overlapping
+the independent pre-boot receipt, decision-cache, and audit-chain flushes and
+sharing the launch/command audit signer. `strace` confirmed the three admission
+flushes started together and the child paid one terminal audit flush. The same
+universal kernel and 20+2 protocol then measured:
+
+| metric | before p50 | after p50 | after p95 | after p99 | after maximum |
+|---|---:|---:|---:|---:|---:|
+| authenticated boot dispatch | 138.1 ms | 135.4 ms | 151.5 ms | 182.8 ms | **190.6 ms — PASS** |
+| admission | 268.3 ms | 160.5 ms | 185.5 ms | 193.3 ms | 195.3 ms |
+| command | — | 18.2 ms | 19.1 ms | 19.1 ms | 19.1 ms |
+| teardown | 109.4 ms | 102.1 ms | 122.5 ms | 124.3 ms | 124.7 ms |
+| in-process run through teardown | 527.4 ms | 416.2 ms | 443.8 ms | 443.9 ms | 444.0 ms |
+| full CLI lifecycle through final audit + exit | 762.9 ms | **580.6 ms** | 605.3 ms | 607.0 ms | 607.4 ms |
+
+Median full lifecycle fell 182.3 ms (23.9%) and median admission fell 107.8 ms
+(40.2%). Every boot remained strictly below 200 ms. The remaining full-command
+floor is the sum of real boot, command, teardown, and mandatory durability on
+rotational RAID1; it cannot safely become a sub-200 ms claim on this host.
+The report is
+`/root/mvm-bench-20260819/reports/prepared-cold-firecracker-full-lifecycle-durable-batch-2026-08-20.json`,
+SHA-256
+`89aabed4403cdca9def18666cdd9af28f6ccc05cd856868f65e025a71d02f980`.
+The release binary SHA-256 is
+`0ec1550913109597910ee29271d1b5aacd80b669a653c4633c5e9a2d2b7241f7`.
+No benchmark VM or Firecracker process leaked.
+
 - [x] Make `mvmctl bench` human-readable by default: an accessible plain-text
       requirement table, explicit PASS/FAIL words, percentile budgets, and a
       phase table whose Remarks column explains each boundary. Retain `--json`.
@@ -1160,6 +1188,11 @@ to tmpfs or returning before safe teardown is not an acceptable optimization.
       without trusting mutable path names: cache a completed validation behind
       manifest digest plus mutation-sensitive filesystem identities, and prove
       same-size rewrites and corrupt stamps fail closed in focused tests.
+- [x] Batch independent receipt, decision-cache, and audit-chain durability at
+      their shared pre-boot boundary, share the launch/command audit signer, and
+      retain synchronous recovery for every batch failure and drop path. A
+      release 20+2 Firecracker run reduced full lifecycle p50 from 762.9 ms to
+      580.6 ms while every universal-kernel boot remained below 200 ms.
 - [ ] Add a native Apple Silicon/HVF live benchmark job with cached artifacts,
       no mount, mount-cache hit, and mount miss lanes.
 - [ ] Add a Linux Firecracker live benchmark on the established KVM host and a

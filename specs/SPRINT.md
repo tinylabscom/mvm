@@ -2030,6 +2030,18 @@ Then unify + retire the old paths:
     low-latency persistent storage and a fresh validation, not a specialized
     kernel or a weaker audit/cleanup boundary. Report SHA-256:
     `d224bacb3aa04b727a74c424ff20a2f93f8adf3196da0743e63bd1acea922c74`.
+  - 2026-08-20 full-lifecycle follow-up: independent receipt, decision-cache,
+    and authoritative audit-chain flushes now run concurrently at their shared
+    pre-boot durability boundary; launch and command audit emission share one
+    validated signer and terminal barrier. Failures and dropped batch scopes
+    still synchronously retry every pending path, and receipt-head recovery
+    handles a crash that leaves the head ahead of receipt files. On the same
+    Firecracker host and universal kernel, a release 20+2 run cut admission p50
+    from 268.3 to 160.5 ms and full CLI lifecycle p50 from 762.9 to 580.6 ms
+    (23.9%). Authenticated boot remained inside the hard requirement at
+    135.4/151.5/182.8 ms p50/p95/p99 and **190.6 ms maximum**, with no leaked
+    benchmark process. Report SHA-256:
+    `89aabed4403cdca9def18666cdd9af28f6ccc05cd856868f65e025a71d02f980`.
 - [ ] **Separate the cold lanes:** report prepared cold, prepared cold with a
   mount-cache hit, mount-cache miss, artifact miss, and warm claim as distinct
   distributions. A first-use image pull, build, digest, or ext4 materialization

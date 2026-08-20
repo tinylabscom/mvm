@@ -1,6 +1,6 @@
 # Refactor status
 
-Last updated: 2026-08-19
+Last updated: 2026-08-20
 
 This is the cross-plan progress index. The owning plan remains authoritative
 for detailed scope and acceptance criteria.
@@ -785,6 +785,14 @@ for detailed scope and acceptance criteria.
     RAID1 and individual required flushes take 60-175 ms. Sub-200 full durable
     lifecycle work therefore moves next to low-latency persistent storage and
     remeasurement, not tmpfs audit state or an early unsafe return.
+    The 2026-08-20 safe batching follow-up overlaps the independent receipt,
+    decision-cache, and authoritative chain flushes at their common pre-boot
+    barrier, shares the launch/command audit signer, and retains synchronous
+    retry on batch errors and drops. The same universal-kernel 20+2 lane cut
+    admission p50 from 268.3 to 160.5 ms and full CLI lifecycle p50 from 762.9
+    to 580.6 ms; every boot still passed at 135.4/151.5/182.8 ms
+    p50/p95/p99 and 190.6 ms maximum. Report SHA-256:
+    `89aabed4403cdca9def18666cdd9af28f6ccc05cd856868f65e025a71d02f980`.
   - [~] Phase 7 — live validation and regression gates. The benchmark UX and
         hard gate are complete: default output is an accessible timing table
         with explicit PASS/FAIL and phase remarks, `--json` schema v6 includes
