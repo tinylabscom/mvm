@@ -2,52 +2,23 @@
 
 ## Status
 
-**Phases 2-4 are superseded by
-`specs/plans/2026-08-15-flowmux-single-transport-cutover.md` (issue #2543). Track the
-remaining work there, not here.**
+**The active remainder moved to
+`specs/plans/2026-08-19-flowmux-single-path-closeout.md` and issue #2751. Do not
+use the closed phase issues below as the current tracker.**
 
-**Phase 0 complete (#2369). Phase 1 complete (#2370). Phase 2 substantially landed but NOT complete (#2371). Phase 3 machinery landed but NOT on the production path (#2372).**
+Phase 0 froze L3 expansion and Phase 1 pinned the protocol. The transport
+cutover in `specs/plans/2026-08-15-flowmux-single-transport-cutover.md` completed
+the production outbound path: TCP, UDP, DNS, mediated ICMP, and typed HTTP use
+FlowMux, the raw/Wire dispatcher is gone, and launch waits for authenticated
+session readiness. PR #2741 then fixed the host-first handshake on the
+relayed-vsock backends.
 
-Worse than "not on the production path": #2480 shipped the guest half anyway, so
-`mvm-egress-client` is FlowMux-only while every host spawn site still serves Raw/Wire.
-Guest egress is dead on `main` — builder VM, Stage 0, and every workload. The four
-tracking issues below (#2368, #2371, #2372, #2373) are all closed despite this; do not
-read a closed issue here as landed work.
-
-**Read this before ticking another Phase 3 box.** The host-side FlowMux
-acceptor and the guest-side FlowMux client both exist and are unit-tested, and
-nothing connects them on a real launch. `RealNetworkEndpointSpawner::spawn` —
-the single production spawn — passes `flowmux_identity: None`, hard-coded;
-`EndpointSpawnRequest` has no field for it, so no caller can ask; and the only
-construction of `FlowMuxIdentitySpawnConfig` in the workspace is inside a
-`#[cfg(test)]` function. `claim.rs` still selects the mode with
-`let raw_egress = inputs.secrets.is_empty()`. Every admitted workload today
-speaks `Wire` or `Raw`.
-
-Two consequences. Phase 3's last checkbox cannot be executed as written —
-deleting `EgressMode` and `raw_egress` would remove the only modes production
-uses and break all egress. And Phase 2's remaining box and Phase 3's remaining
-box are the same work: neither "a failed FlowMux session prevents readiness"
-nor "every flow type reaches one pipeline" means anything until the production
-spawn carries a FlowMux identity. Land them together, with a live witness —
-this changes the egress path for every workload on every backend.
-
-Phase 2 previously carried a `COMPLETE` status while six of its seven
-checkboxes were unchecked below. Two are verifiably undone on `main`: the
-`EndpointSpawner` → `NetworkEndpointSpawner` rename has not happened, and the
-hand-maintained duplicate `EGRESS_VSOCK_PORT = 5253` still exists in
-`mvm-egress-client.rs` and `mvm-addon-dns.rs` because `mvm-agentd` does not
-depend on `mvm-net` and so cannot reach the typed service mapping.
-
-Phase 3 is now ahead of Phase 2. The strict ordering was the mechanism meant to
-catch Phase 2 residue, so that residue will not be caught by a later phase gate
-and must be closed deliberately — in particular the fail-closed readiness
-assertion, which is invariant 4 and the reason Phase 2 exists.
-
-ADR-042 is accepted and the raw-packet path is frozen: new
-`raw_ip_stack=true` / `NetworkMode::L3Vsock` launches are refused at synthesis,
-admission, and CLI preflight, and `xtask check-l3-expansion-freeze` holds the
-line. No FlowMux runtime exists yet.
+Phases 4–8 remain incomplete. Admitted `NetworkLimits` are not the endpoint's
+shared per-VM budgets, typed HTTP still buffers complete messages at a
+compatibility seam, declared ingress is contract-only, `raw_ip_stack` and the
+frozen L3 implementation remain in the tree, and the permanent gates,
+performance comparison, and final backend matrix have not landed. The
+successor plan splits those items into reviewable, dependency-ordered changes.
 
 ## Tracking issues
 

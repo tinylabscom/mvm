@@ -1597,107 +1597,33 @@ for detailed scope and acceptance criteria.
         (recon §7.7 → #2019)
 
 - [~] Plan 316 — Single flow-aware vsock networking path
-  **Phases 2-4 superseded by
-  `specs/plans/2026-08-15-flowmux-single-transport-cutover.md` (#2543): #2480 shipped the
-  FlowMux guest adapter without host identity provisioning, so guest egress is dead on
-  `main`. The cutover completes there, on one transport, folding `Wire` and `MVM_ICMP/1`
-  into FlowMux rather than leaving three protocols behind a sniff.
-  WS0-WS7 are complete: substitution rides `OpenHttp`, `ping` rides `IcmpEcho`,
-  the raw dispatcher and `EgressMode::Raw` are deleted, and launch readiness
-  waits on an endpoint-owned authenticated-session event before verifying its
-  durable marker and failing closed if no session arrives. This removes the
-  guest-agent/FlowMux authentication race without a fixed sleep. In addition,
-  `xtask check-one-guest-protocol` fails the build if a second guest->host
-  protocol returns. `EgressMode::Wire` survives for the wasm tier's host-side
-  `mvm:egress` import, which is host-internal IPC rather than a guest channel.**
-  (`specs/plans/316-single-flow-vsock-networking.md`, ADR-042, umbrella #2368)
-  Collapses the two production workload networking paths to one authenticated
-  FlowMux session on `GuestService::NetworkFlow` through one
-  `mvm-network-endpoint`. Supersedes the production-path decisions in plan 285
-  and plan 287; both are frozen, not yet deleted.
-  - [x] Phase 0 — ratify the invariant and freeze expansion (#2369): ADR-042
-        accepted; ADR-036 and ADR-037 marked superseded for production workload
-        networking; `specs/refactor/03-networking.md` corrected from "the raw
-        packet path is deleted" to the actual two-path state; ADR-001's tier
-        matrix and claim-10 section qualified; `xtask
-check-l3-expansion-freeze` added as a temporary shrink-only ratchet
-        over `L3Vsock`/`raw_ip_stack`/`NetworkControl`/`NetworkData`/
-        `spawn_netd`/`host_datapath` (29 allowlist entries); synthesis,
-        admission, and CLI preflight refuse `raw_ip_stack=true`/`L3Vsock` with
-        a migration error naming the loopback adapters and typed connectors
-  - [x] Phase 1 — pin protocol, resource, and performance baselines (#2370).
-        Closed 2026-08-13. Landed: `mvm-contract::protocol::network_flow` — the
-        v1 frame header (20 bytes, `u32` length field because 64 KiB does not
-        fit a `u16`), all 27 opcodes with their class/sender/confirmation
-        relations, state-independent cap-before-allocate decoding with golden
-        byte fixtures, and the session/stream state machine (parity-split stream
-        IDs, watermark reuse rejection rather than an unbounded set, per-stream
-        credit, declared-listener-backed ingress, fail-closed on every
-        refusal). 87 unit tests. `crates/mvm-contract/fuzz` adds
-        `fuzz_network_flow_decode` and `fuzz_network_flow_state` with 95
-        committed seeds, wired into `security.yml`. Transport-neutral signed
-        `NetworkLimits` is also implemented with default-byte compatibility,
-        validation, and one legacy/FlowMux accessor. `mvm-core::net::session`
-        extracts the authenticated session so it is shared by control RPC and
-        FlowMux, with tests for replay, tampering, wrong identity, and counter
-        exhaustion. Remaining: the perf harness + baselines.
-  - [~] Phase 2 — the one authenticated endpoint (#2371). Substantially landed,
-        **not complete**: the `EndpointSpawner` → `NetworkEndpointSpawner` rename
-        has not happened (`crates/mvm-hostd/tests/workload_stream_plane.rs` still
-        imports `EndpointSpawner`), the duplicate `EGRESS_VSOCK_PORT = 5253`
-        survives in `mvm-egress-client.rs` and `mvm-addon-dns.rs` because
-        `mvm-agentd` does not depend on `mvm-net`. The fail-closed readiness
-        assertion is now witnessed by a delayed-authentication BDD scenario,
-        endpoint subprocess coverage, and focused timeout/exit tests: launch
-        cannot reach ready until an authenticated FlowMux session has written
-        durable evidence and signaled its endpoint-owned event. Phase 3 is
-        already ahead of this, so the phase gate will not catch the remaining
-        rename and constant residue.
-        Landed: `GuestService::NetworkFlow`
-        now names the port-5253 channel; the endpoint binary, proxy, spawner, and
-        test files are renamed to `mvm-network-endpoint`/`network_endpoint_*`;
-        `mvm-hostd::supervisor::flowmux` landed the authenticated FlowMux session
-        acceptor (`FlowMuxSession::accept`, `serve`, `Hello`/`HelloAck`, `GoAway`
-        for unimplemented flows) and bounded per-stream registries
-        (`flowmux::registry`) with unit tests for parity, ceilings, state
-        transitions, and credit accounting. The acceptor is wired into the
-        `mvm-network-endpoint` binary (`EgressMode::FlowMux`,
-        `EndpointConfig::flowmux_identity`, `serve_flowmux`) and the spawner emits
-        the identity on stdin. Backend witness tests in `mvm-vmm::host::spec_map`
-        and the Firecracker/HVF/libkrun driver modules prove exactly one
-        `NetworkFlow` service and no L3 services per granted workload.
-  - [~] Phase 3 — converge egress TCP, UDP, and DNS (#2372). **The machinery
-    below is landed and unit-tested but is NOT on the production path:**
-    `RealNetworkEndpointSpawner::spawn` hard-codes `flowmux_identity: None`,
-    `EndpointSpawnRequest` has no field for it, and the only
-    `FlowMuxIdentitySpawnConfig` construction in the workspace is inside a
-    `#[cfg(test)]` function. `claim.rs` still selects the mode with
-    `let raw_egress = inputs.secrets.is_empty()`, so every admitted workload
-    speaks `Wire` or `Raw`. The last checkbox (delete `EgressMode`/`raw_egress`)
-    therefore cannot be executed as written — it would break all egress. Landed:
-    guest-initiated `OpenTcp` with typed `Opened`/`Refused` replies,
-    `OpenUdp`/`UdpSend`/`UdpRecv` associations, `Resolve`/`Resolved` DNS
-    frames, per-direction host credit accounting, UDP idle expiry, per-
-    association peer bounds, per-class connection-rate limiting, payload-
-    free audit emission for TCP/UDP allows/denies and DNS resolves/refusals,
-    and host-side integration tests for allowed/denied TCP, UDP round-trip,
-    DNS pinning, UDP idle expiry, peer bounds, half-close, reset, and rate-
-    limit overflow. Guest-side `FlowMuxClient` / `FlowMuxReconnectClient`,
-    `FlowMuxStream`, `FlowMuxUdpSocket`, async frame pump, and unit tests
-    are implemented in `crates/mvm-agentd/src/flowmux.rs`. Guest-side
-    adapters are now wired: `mvm-egress-client` uses
-    `flowmux_egress::run` with a single `FlowMuxReconnectClient`,
-    `mvm-addon-dns` optionally forwards through `FlowMuxClient::resolve`,
-    and the legacy line-prelude symbols (`HTTP_FORWARD_FRAME`,
-    `MVM_DNS/1`, `MVM_SOCKS5_UDP/1`) are removed from the guest modules.
-    Unit tests cover the new DNS and SOCKS5/HTTP parsing paths.
-    Remaining: delete the host-side raw-egress dispatcher and add endpoint
-    crash/restart integration tests.
-  - [~] Phase 4 — stream typed transformations (#2373)
-  - [ ] Phase 5 — declared ingress on FlowMux (#2374)
-  - [ ] Phase 6 — compatibility boundary (#2375)
-  - [ ] Phase 7 — delete L3 completely (#2376)
-  - [ ] Phase 8 — make "one path" mechanically enforceable (#2377)
+  (`specs/plans/316-single-flow-vsock-networking.md`, ADR-042). The active
+  remainder is issue #2751 and
+  `specs/plans/2026-08-19-flowmux-single-path-closeout.md`; the original phase
+  issues are closed historical records.
+  - [x] Protocol, authenticated endpoint, production outbound cutover, and
+        authenticated-session readiness. TCP, UDP, DNS, mediated ICMP, and
+        typed HTTP use FlowMux on `GuestService::NetworkFlow`; the raw/Wire
+        guest dispatcher is deleted and `check-one-guest-protocol` guards the
+        transport boundary.
+  - [x] Relayed-vsock host-first handshake (#2741). HVF and libkrun now open
+        the endpoint relay on guest connect, retain the route needed for a
+        host-first greeting, and reset immediately when no endpoint exists.
+  - [ ] Shared per-VM admitted limits. The endpoint still creates default
+        registry limits per session, so concurrent sessions can multiply a
+        nominal VM ceiling.
+  - [ ] FlowMux performance harness and labelled legacy/current baselines.
+  - [~] Typed HTTP uses FlowMux frames but still crosses a whole-message
+        compatibility seam; bounded end-to-end streaming and endpoint-owned
+        typed connector execution remain.
+  - [ ] Declared ingress runtime. The wire opcodes and state transitions exist;
+        endpoint listener and guest-adapter handling do not.
+  - [ ] Remove the rejected `raw_ip_stack`/`L3Vsock` public compatibility
+        surface now that the migration release condition has passed.
+  - [ ] Delete frozen L3 contract, guest, host, VMM, dependency, packaging,
+        kernel, CI, and test slices.
+  - [ ] Permanent single-path/socket-owner gates plus the final performance,
+        Firecracker, HVF, libkrun, BDD, supply-chain, and documentation matrix.
 
 - [~] Plan 285 — L3 TUN-over-vsock network mode
   (`specs/plans/285-l3-tun-over-vsock.md`, ADR-036)
