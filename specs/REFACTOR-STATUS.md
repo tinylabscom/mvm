@@ -7,6 +7,15 @@ for detailed scope and acceptance criteria.
 
 ## Completed issue closeouts
 
+- [x] **Issue #2657 — live BDD is visible and merge-gated.** Capability skips
+      are reported instead of disappearing from the test summary, and a
+      merge-queue/manual-only KVM lane runs one tagged Firecracker witness for
+      the README persistent-machine lifecycle. The CI-only selector composes
+      with the existing live and backend capability gates, so narrowing the
+      suite cannot accidentally authorize a live boot. Structural tests pin
+      the workflow trigger, recipe, selector, and exact public command
+      sequence.
+
 - [x] **Issue #2756 — Linux 6.12.104 kernel pin refresh.** The libkrunfw
       firmware build and custom workload/builder kernels consume the same
       kernel.org-verified source archive and SRI hash. Structural parity and
