@@ -19,6 +19,8 @@ pub(super) struct RunJsonSummary {
     pub(super) invocation: ReceiptInput,
     pub(super) outcome: ReceiptOutcome,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) phase_timing: Option<crate::commands::vm::phase_timing::RunPhaseTimingReport>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) receipt_path: Option<PathBuf>,
 }
 
@@ -82,6 +84,7 @@ impl RunJsonSummary {
             schema_version: 1,
             invocation,
             outcome: ReceiptOutcome::from_exec_output(output),
+            phase_timing: output.phase_timing.clone(),
             receipt_path,
         }
     }
