@@ -12,8 +12,10 @@ use std::process::Command;
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
-const SCHEMA_VERSION: u32 = 1;
-const MIN_SAMPLES_PER_CASE: u32 = 30;
+/// Current raw-probe and report schema version.
+pub const SCHEMA_VERSION: u32 = 1;
+/// Minimum number of independent measurement waves at every matrix point.
+pub const MIN_SAMPLES_PER_CASE: u32 = 30;
 const LIVE_PROBE_ENV: &str = "MVM_NETWORK_PERF_LIVE";
 
 pub const MAX_OPAQUE_LATENCY_RATIO: f64 = 1.05;
@@ -251,8 +253,9 @@ fn run_probe(args: &[String]) -> Result<()> {
         .with_context(|| format!("run network performance probe {program}"))?;
     if !result.status.success() {
         bail!(
-            "network performance probe exited with status {}",
-            result.status
+            "network performance probe exited with status {}: {}",
+            result.status,
+            String::from_utf8_lossy(&result.stderr).trim()
         );
     }
     let probe: NetworkPerfProbe = serde_json::from_slice(&result.stdout)

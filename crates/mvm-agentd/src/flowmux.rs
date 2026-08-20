@@ -19,7 +19,7 @@ use std::time::Duration;
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use mvm_contract::protocol::network_flow::hello::{Handshake, agree};
 use mvm_contract::protocol::network_flow::{
-    Direction, FrameError, Opcode, SessionValidator, decode, encode_into,
+    Direction, FrameError, Opcode, SessionValidator, UDP_ADDR_PREFIX_LEN, decode, encode_into,
 };
 use mvm_core::net::session::Session;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -1231,7 +1231,8 @@ fn inbound_frame_facts(
     }
 }
 
-fn build_dns_query(name: &str, qtype: u16, id: u16) -> Result<Vec<u8>, FlowMuxError> {
+/// Encode one DNS A or AAAA question for a FlowMux `Resolve` frame.
+pub fn build_dns_query(name: &str, qtype: u16, id: u16) -> Result<Vec<u8>, FlowMuxError> {
     let mut query = Vec::with_capacity(64);
 
     // Header: ID, flags (standard recursive query), QDCOUNT=1, others 0.
@@ -1268,11 +1269,14 @@ fn build_dns_query(name: &str, qtype: u16, id: u16) -> Result<Vec<u8>, FlowMuxEr
     Ok(query)
 }
 
-fn encode_udp_addr(ip: std::net::IpAddr, port: u16) -> Vec<u8> {
-    let mut out = Vec::with_capacity(1 + 16 + 2);
+/// Encode the destination prefix carried by a FlowMux UDP frame.
+pub fn encode_udp_addr(ip: std::net::IpAddr, port: u16) -> Vec<u8> {
+    let mut out = Vec::with_capacity(UDP_ADDR_PREFIX_LEN);
     match ip {
         std::net::IpAddr::V4(v4) => {
             out.push(0x01);
+            out.extend_from_slice(&[0; 10]);
+            out.extend_from_slice(&[0xff, 0xff]);
             out.extend_from_slice(&v4.octets());
         }
         std::net::IpAddr::V6(v6) => {
@@ -1284,38 +1288,35 @@ fn encode_udp_addr(ip: std::net::IpAddr, port: u16) -> Vec<u8> {
     out
 }
 
-fn decode_udp_addr(bytes: &[u8]) -> Result<(SocketAddr, &[u8]), FlowMuxError> {
-    if bytes.is_empty() {
-        return Err(FlowMuxError::Frame("empty UDP address".into()));
+/// Decode the source prefix and datagram body carried by a FlowMux UDP frame.
+pub fn decode_udp_addr(bytes: &[u8]) -> Result<(SocketAddr, &[u8]), FlowMuxError> {
+    if bytes.len() < UDP_ADDR_PREFIX_LEN {
+        return Err(FlowMuxError::Frame(format!(
+            "short UDP address: {} < {UDP_ADDR_PREFIX_LEN}",
+            bytes.len()
+        )));
     }
-    let (ip, rest) = match bytes[0] {
-        0x01 => {
-            if bytes.len() < 1 + 4 + 2 {
-                return Err(FlowMuxError::Frame("short IPv4 UDP address".into()));
+    let address: [u8; 16] = bytes[1..17]
+        .try_into()
+        .map_err(|_| FlowMuxError::Frame("truncated UDP address slot".into()))?;
+    let ip =
+        match bytes[0] {
+            0x01 => {
+                let v6 = std::net::Ipv6Addr::from(address);
+                std::net::IpAddr::V4(v6.to_ipv4_mapped().ok_or_else(|| {
+                    FlowMuxError::Frame("IPv4-mapped UDP address expected".into())
+                })?)
             }
-            let ip = std::net::IpAddr::from(std::net::Ipv4Addr::new(
-                bytes[1], bytes[2], bytes[3], bytes[4],
-            ));
-            (ip, &bytes[5..])
-        }
-        0x04 => {
-            if bytes.len() < 1 + 16 + 2 {
-                return Err(FlowMuxError::Frame("short IPv6 UDP address".into()));
+            0x04 => std::net::IpAddr::V6(std::net::Ipv6Addr::from(address)),
+            tag => {
+                return Err(FlowMuxError::Frame(format!(
+                    "unknown UDP address tag {tag}"
+                )));
             }
-            let mut octets = [0u8; 16];
-            octets.copy_from_slice(&bytes[1..17]);
-            let ip = std::net::IpAddr::from(std::net::Ipv6Addr::from(octets));
-            (ip, &bytes[17..])
-        }
-        tag => {
-            return Err(FlowMuxError::Frame(format!(
-                "unknown UDP address tag {tag}"
-            )));
-        }
-    };
-    let port = u16::from_be_bytes([rest[0], rest[1]]);
+        };
+    let port = u16::from_be_bytes([bytes[17], bytes[18]]);
     let addr = SocketAddr::new(ip, port);
-    Ok((addr, &rest[2..]))
+    Ok((addr, &bytes[UDP_ADDR_PREFIX_LEN..]))
 }
 
 /// Default timeout for an individual call that waits through reconnect.
@@ -1558,6 +1559,11 @@ mod tests {
     fn udp_addr_roundtrips_ipv4_and_ipv6() {
         let v4 = SocketAddr::new(std::net::IpAddr::from([127, 0, 0, 1]), 1234);
         let encoded = encode_udp_addr(v4.ip(), v4.port());
+        assert_eq!(encoded.len(), UDP_ADDR_PREFIX_LEN);
+        assert_eq!(
+            &encoded[..13],
+            &[1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff]
+        );
         let (decoded, rest) = decode_udp_addr(&encoded).unwrap();
         assert_eq!(decoded, v4);
         assert!(rest.is_empty());
@@ -1567,6 +1573,15 @@ mod tests {
         let (decoded, rest) = decode_udp_addr(&encoded).unwrap();
         assert_eq!(decoded, v6);
         assert!(rest.is_empty());
+    }
+
+    #[test]
+    fn udp_addr_refuses_a_short_or_non_mapped_ipv4_slot() {
+        assert!(decode_udp_addr(&[0x01, 127, 0, 0, 1, 0, 53]).is_err());
+        let mut non_mapped = vec![0x01];
+        non_mapped.extend_from_slice(&[0; 16]);
+        non_mapped.extend_from_slice(&53_u16.to_be_bytes());
+        assert!(decode_udp_addr(&non_mapped).is_err());
     }
 
     #[test]
