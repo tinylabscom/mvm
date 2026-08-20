@@ -451,9 +451,13 @@ resume` takes a `current_head` and refuses when it differs from the
       `sha256:b0991c541656cac6ebd02c27389a8b3c299b7cbadd6d4477653a0219545acf34`
       are recorded. An identical retry replays the bounded terminal response
       without a second VM. The run is `INCONCLUSIVE` because no TPM2/SEV-SNP/TDX
-      trust root is present and the probe reported no attempted effect; the
-      sibling's policy digest still differs from MVM's published four-reference
-      vector.
+      trust root is present and the probe reported no attempted effect. The
+      sibling now consumes MVM's published four-reference
+      `sha256:nul-separated-policy-refs-v1` vector and the exact digest
+      `sha256:5dd0de53b6d211f764728599e291e93a9491dc34f87596e906365fb74c95e0ff`.
+      A current Scout-linked attempt reached signed-plan admission but failed
+      closed before guest-agent startup on `mvm-oci-init` path-policy denial;
+      its identical retry replayed without a second execution.
 
 - [~] **Embedded-binary content store** — `specs/plans/2026-08-17-embedded-binary-content-store.md`.
       Phases 1–2 landed: both nested legs of `crates/mvm-cli/build.rs` are keyed

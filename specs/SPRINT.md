@@ -2591,6 +2591,10 @@ session `s-ebc20dc44ec9937f1acc4b7c85038c1b`, grant digest
 Firecracker backend, observer and cleanup receipts, and exact terminal replay
 without a second VM. The result is `INCONCLUSIVE` (`attestation_verified:false`,
 `attempted_effect:false`): no TPM2/SEV-SNP/TDX device or manufacturer
-collateral is available. The full Scout-linked run remains blocked by the
-sibling's `sha256:6e21…` policy digest versus MVM's published four-reference
-`sha256:nul-separated-policy-refs-v1` digest.
+collateral is available. The sibling now consumes MVM's published four-reference
+`sha256:nul-separated-policy-refs-v1` digest and emits
+`sha256:5dd0de53b6d211f764728599e291e93a9491dc34f87596e906365fb74c95e0ff`.
+The full Scout-linked attempt reached signed-plan admission but failed closed
+before guest-agent startup on `mvm-oci-init` user-volume path-policy denial;
+the exact retry replayed without a second execution. Trusted hardware
+attestation and a successful typed effect probe remain open.

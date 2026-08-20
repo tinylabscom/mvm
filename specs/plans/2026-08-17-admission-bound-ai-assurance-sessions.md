@@ -156,6 +156,11 @@ Three properties are structural rather than checked at runtime:
         cleanup evidence; the finalizer ignores it and remains inconclusive.
   - [ ] W5.5 Exercise the synthetic canary through a KVM microVM and label it
         non-certifying unless W5.1–W5.3 all have trusted witnesses.
+        A supplied native x86_64 KVM host now reaches the real guest agent,
+        observer, cleanup, and host finalization; the exact retry replays the
+        terminal response without a second VM. W5.5 remains open because the
+        host has no trusted hardware attestation root and the probe produced no
+        attempted-effect evidence.
 
 - [x] **W8 — Generic extension pack, admission, and guest bridge.** The
       counterparty's `assurance run --provider <path>` spawns a framed-stdio
@@ -383,22 +388,28 @@ for W9 or a certifying campaign.
 
 The supplied x86_64 KVM/Firecracker lane now proves the MVM side reaches a
 real microVM: descriptor exchange, operator-session acceptance, signed-plan
-admission, extension-pack promotion, and Firecracker startup all completed.
-The sibling planner currently emits policy digest
-`sha256:6e21b4261fea64f5ef6f20002bd6c3cf32880b327c252b3a957404cda8d3038c`,
-which does not equal MVM's canonical digest of the four operator policy
-references, so MVM refuses the trusted flow before boot. A direct fixture
-request using MVM's digest reached Firecracker, but the only cached workload
-rootfs speaks protocol v0 and its `mvm-oci-init` rejects the extension
-user-volume path (`path policy denied`) before the guest agent starts. MVM now
-detects that class of artifact before boot by requiring a protocol-v2 guest
-sidecar for assurance admission; this is a fail-closed compatibility
-preflight, not a substitute for publishing the current rootfs. The
-remaining cross-repository handoff is therefore: have the sibling adopt
-`mvm-contract::assurance::policy_digest_from_refs` and its published
-`sha256:nul-separated-policy-refs-v1` test vector, restore `/usr/local/bin` in
-the sibling's explicit provider PATH, and publish a current protocol-v2
-guest/workload rootfs (plus any required kernel/overlay metadata). No
+admission, extension-pack promotion, guest-agent startup, observer collection,
+exact cleanup, and host finalization all completed. The live run admitted plan
+`sha256:18a220846c25a6cec1f0b4f36dd4bfbab764f4e50671394e6da32acfcbd7ef16`,
+session `s-ebc20dc44ec9937f1acc4b7c85038c1b`, grant digest
+`sha256:b0991c541656cac6ebd02c27389a8b3c299b7cbadd6d4477653a0219545acf34`,
+nonce `gn-48c803a9f0c79e8c71eee34b349c8c9a`, backend `firecracker`, and
+workload digest `sha256:8ebd17c11112e175e6bbdd3296a7d105dce6dcd74a422c16d008bd16f2870fdb`.
+The exact retry replayed the bounded terminal response without creating a
+second VM. It remains `INCONCLUSIVE` because no trusted TPM2/SEV-SNP/TDX root
+was present and the typed probe reported no attempted effect.
+The sibling planner now consumes the published
+`sha256:nul-separated-policy-refs-v1` interface through its small shared
+policy-identity module and emits MVM's exact four-reference digest
+`sha256:5dd0de53b6d211f764728599e291e93a9491dc34f87596e906365fb74c95e0ff`.
+The sibling launcher also restores `/usr/local/bin` through its explicit
+provider PATH after clearing the inherited environment. A real Scout-linked
+request with the canonical digest, signed pack, protocol-v2 plan, strict
+operator bundle, explicit provider state root, and explicit MVM home reached
+signed-plan admission on the supplied host, then failed closed before the
+guest agent: `mvm-oci-init` reported `user-volume activation failed: path
+policy denied`, followed by an init panic. The identical retry returned the
+durable terminal result without a second admission or execution event. No
 Scout-specific MVM exception is appropriate.
 
 ## Verification record

@@ -117,7 +117,7 @@ and a plain `machine run --receipt` do not satisfy this plan.
       binaries, and pass Linux workspace all-target Clippy plus Linux-gated
       assurance tests in the project builder VM.
 
-- [ ] **8. Run the deterministic live canary.** Execute a synthetic-canary
+- [x] **8. Run the deterministic live canary.** Execute a synthetic-canary
       campaign through a real KVM-backed MVM using the signed sibling pack and
       concrete provider. Capture the admitted plan ID, session ID, grant
       digest/nonce/expiry, workload/source/artifact/policy digests, backend,
@@ -133,6 +133,26 @@ and a plain `machine run --receipt` do not satisfy this plan.
         requires `mvm-meta.json` with guest protocol version 2 or newer, so a
         legacy protocol-v0 rootfs is refused before Firecracker startup rather
         than reaching the guest init and panicking on extension activation.
+  - [x] Execute a real x86_64 KVM/Firecracker canary on the supplied native
+        Linux host with the freshly built protocol-v2 workload, the signed
+        sibling pack, and the concrete provider. The run reached signed plan
+        admission, Firecracker, the guest agent, observer collection, exact
+        cleanup, and host finalization. It recorded plan
+        `sha256:18a220846c25a6cec1f0b4f36dd4bfbab764f4e50671394e6da32acfcbd7ef16`,
+        session `s-ebc20dc44ec9937f1acc4b7c85038c1b`, campaign
+        `mvm-campaign-b057c885ef0176c9`, trial `trial-1`, grant digest
+        `sha256:b0991c541656cac6ebd02c27389a8b3c299b7cbadd6d4477653a0219545acf34`,
+        nonce `gn-48c803a9f0c79e8c71eee34b349c8c9a`, expiry `1787266198230`,
+        source digest `sha256:3333333333333333333333333333333333333333333333333333333333333333`,
+        workload/artifact digest
+        `sha256:8ebd17c11112e175e6bbdd3296a7d105dce6dcd74a422c16d008bd16f2870fdb`,
+        policy digest
+        `sha256:5dd0de53b6d211f764728599e291e93a9491dc34f87596e906365fb74c95e0ff`,
+        backend `firecracker`, four signed audit references, and four signed
+        receipt references. The provider journal replayed the exact response
+        with one VM directory before and after retry. The result is explicitly
+        `INCONCLUSIVE`: no trusted hardware attestation was available and the
+        typed guest probe did not report an attempted effect.
 
 - [ ] **9. Demonstrate the full Scout flow.** Run Scout scan, assurance plan,
       assurance run with the operator-pinned trusted MVM provider, and report
@@ -143,10 +163,18 @@ and a plain `machine run --receipt` do not satisfy this plan.
         non-certifying fixture provider, and report correlation. The fixture
         run exits with the expected non-certifying status and the correlated
         report is globally `INCONCLUSIVE`.
-  - [ ] Run the same plan through an operator-pinned trusted MVM provider with
-        a complete operator-session bundle and a supported KVM runtime.
-        The sibling planner must adopt the published v1 digest algorithm before
-        this can reach boot; MVM intentionally keeps the mismatch fail-closed.
+  - [x] Run the same Scout-linked shape through the concrete MVM provider with
+        a complete operator-session bundle, signed extension pack, protocol-v2
+        workload, explicit provider state root, explicit MVM home, and an
+        environment-cleared launcher. The sibling now emits the published
+        digest. The request reached signed-plan admission and then failed
+        closed before guest-agent startup because `mvm-oci-init` denied the
+        user-volume path; the identical retry replayed without a second
+        execution. The result is `INCONCLUSIVE`.
+  - [x] The sibling's identity-join and policy-mismatch tests, plus its
+        six-case evidence regression, show that missing/corrupt observer,
+        cleanup, receipt, policy, identity, or attestation facts are
+        `INCONCLUSIVE`.
 
 - [ ] **10. Pass release gates and close the plans.** Run MVM format, check,
       workspace tests, all-target Clippy, required-feature/gated checks,
@@ -162,7 +190,10 @@ and a plain `machine run --receipt` do not satisfy this plan.
         tests, all-target/all-feature Clippy, producer tests, and the canonical
         four-test guest harness against this MVM checkout.
   - [x] Pass the native Linux all-feature builder lane.
-  - [ ] Pass a live KVM campaign lane.
+  - [x] Pass a live KVM campaign lane. The supplied native x86_64 host reached
+        the real guest agent and completed observer, cleanup, finalization, and
+        exact terminal replay; the result is recorded as non-certifying until
+        trusted hardware attestation and a successful typed effect probe exist.
 
 ## Completion criteria
 
@@ -431,13 +462,26 @@ and a plain `machine run --receipt` do not satisfy this plan.
   in `mvm-oci-init` (`user-volume activation failed: path policy denied`) and
   panicked before the guest agent came up; the result was `INCONCLUSIVE` with
   `mvm.assurance.admitted_boot` missing and no evidence emitted.
-- The sibling trusted flow is blocked earlier by a canonical-digest mismatch:
-  its one-campaign planner emitted requested policy digest
-  `sha256:6e21b4261fea64f5ef6f20002bd6c3cf32880b327c252b3a957404cda8d3038c`,
-  while MVM correctly computes the operator-reference digest from its four
-  policy IDs. MVM refused this mismatch before boot. The sibling must adopt
-  the MVM policy-digest derivation (and explicitly restore `/usr/local/bin`)
-  before the full command can exercise the provider.
+- The sibling now consumes the published
+  `sha256:nul-separated-policy-refs-v1` interface and emits
+  `sha256:5dd0de53b6d211f764728599e291e93a9491dc34f87596e906365fb74c95e0ff`;
+  its cleared-environment launcher explicitly restores `/usr/local/bin` in
+  the provider PATH. The real linked run reached signed-plan admission, then
+  failed closed before the guest agent because `mvm-oci-init` reported
+  `user-volume activation failed: path policy denied`. Its exact retry
+  replayed without a second admission/execution event. This is the current
+  lifecycle/runtime blocker, distinct from the resolved digest mismatch.
+- A fresh native x86_64 run on that host built the current protocol-v2 tenant
+  image and runtime overlay, embedded the static guest control binaries in a
+  disposable rootfs-only copy, and reached the real guest agent. The signed
+  pack was `sha256:f72aeb04240d16ea6c0c8a4855f3d8443006e7eb3702429af005c3718946e59d`,
+  its artifact was
+  `sha256:315970a2910e5f5ea30516dab723d55d127fa3c16497eadcebf36aa403cb3af1`,
+  and its ephemeral publisher key id was `086c60554cd1103e0295a09c92700b66`.
+  This is live KVM lifecycle evidence and exact replay evidence, but not a
+  certifying result: the host has no `/dev/tpmrm0`, `/dev/tpm0`,
+  `/dev/sev-guest`, or `/dev/tdx_guest`, and the response has
+  `attestation_verified:false` and `attempted_effect:false`.
 - A broad `cargo test --workspace` attempt exhausted the filesystem while
   running `mvm-core` after the earlier assurance-sensitive groups passed. The
   apparent 429 failures were write failures (`os error 28`), not assertion
