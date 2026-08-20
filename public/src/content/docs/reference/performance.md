@@ -25,7 +25,7 @@ network would make the gate measure the wrong thing.
 
 <!-- generated:launch-budgets:begin -->
 
-A lane result is publishable only when it carries at least 20 measured samples taken after exactly 2 discarded warm-ups, under report schema version 6. A report that misses any of those is refused rather than published with a caveat. Prepared-cold lanes additionally require every measured dispatch to be strictly under 200 ms, even below the publication sample floor.
+A lane result is publishable only when it carries at least 20 measured samples taken after exactly 2 discarded warm-ups, under report schema version 7. A report that misses any of those is refused rather than published with a caveat. Prepared-cold lanes additionally require every measured dispatch to be strictly under 200 ms, even below the publication sample floor.
 
 | Lane | What it measures | p50 | p95 | p99 | Every boot |
 | --- | --- | --- | --- | --- | --- |

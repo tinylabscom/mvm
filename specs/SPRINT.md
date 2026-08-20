@@ -2016,6 +2016,20 @@ Then unify + retire the old paths:
     `/root/mvm-bench-20260819/reports/prepared-cold-firecracker-alpine-optimized-2026-08-19.json`
     (SHA-256 `e12f30ae2bf43a32ced2d6fe585fbe5f40a80f89002f61775c6a7ccf7613360e`).
     Designated signed live jobs remain open.
+  - The benchmark now also reports the parent-observed full CLI lifecycle in
+    schema v7 and the accessible table. Repeated prepared runtime-overlay
+    validation is guarded by a mutation-sensitive validation stamp, reducing a
+    warmed attach to 0.42 ms while same-size rewrites, replacements, and corrupt
+    stamps still fall back to full fail-closed verification. A fresh 20+2
+    Firecracker run kept authenticated boot below the hard limit at
+    138.1/148.2/174.6 ms p50/p95/p99 and **181.3 ms maximum**, but measured the
+    full process lifecycle at 762.9/822.8/848.3 ms and **854.6 ms maximum**.
+    Admission was 268.3 ms p50 and teardown 109.4 ms p50. The host is backed by
+    rotational ext4-on-RAID1, where required durability flushes measured
+    60-175 ms apiece; a full durable lifecycle below 200 ms therefore requires
+    low-latency persistent storage and a fresh validation, not a specialized
+    kernel or a weaker audit/cleanup boundary. Report SHA-256:
+    `d224bacb3aa04b727a74c424ff20a2f93f8adf3196da0743e63bd1acea922c74`.
 - [ ] **Separate the cold lanes:** report prepared cold, prepared cold with a
   mount-cache hit, mount-cache miss, artifact miss, and warm claim as distinct
   distributions. A first-use image pull, build, digest, or ext4 materialization

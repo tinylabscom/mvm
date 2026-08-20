@@ -1415,7 +1415,7 @@ impl AuditEmitter {
 }
 
 /// Write `bytes` to `path` atomically: a same-directory temp file is
-/// written, fsync'd, then `rename`d over `path`. A concurrent reader sees
+/// written, data-synced, then `rename`d over `path`. A concurrent reader sees
 /// either the old file or the complete new one, never a torn write. The
 /// temp name carries the pid so two publishers don't collide on it.
 /// [`write_atomic`], without the fsync.
@@ -1450,8 +1450,13 @@ fn write_atomic_inner(path: &Path, bytes: &[u8], sync: bool) -> Result<()> {
         f.write_all(bytes)
             .with_context(|| format!("writing temp file {}", tmp.display()))?;
         if sync {
-            f.sync_all()
-                .with_context(|| format!("fsync temp file {}", tmp.display()))?;
+            // `sync_data` preserves the file bytes and the size metadata
+            // needed to read them while avoiding unrelated inode-metadata
+            // work. The subsequent rename's directory entry has never been
+            // fsynced by this helper, so `sync_all` did not make publication
+            // itself more durable than this.
+            f.sync_data()
+                .with_context(|| format!("fdatasync temp file {}", tmp.display()))?;
         }
         Ok(())
     })();

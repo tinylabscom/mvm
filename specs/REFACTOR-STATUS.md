@@ -776,6 +776,15 @@ for detailed scope and acceptance criteria.
     memory at ~48 ms/GB (33 ms at 512M, 194 ms at 4G), so the watchdog
     self-pipe is not worth building and a large workload pays teardown no
     `alpine`-sized benchmark can see.
+    The complete command boundary is now measured directly in schema v7. A
+    mutation-sensitive prepared-overlay validation stamp removes repeated full
+    payload hashing (0.42 ms warmed attach) without trusting mutable path names,
+    and durable atomic files use `fdatasync`; the synchronous fail-closed audit
+    barrier is unchanged. On the established host, admission remained
+    268.3 ms p50 and teardown 109.4 ms p50 because ext4 sits on rotational
+    RAID1 and individual required flushes take 60-175 ms. Sub-200 full durable
+    lifecycle work therefore moves next to low-latency persistent storage and
+    remeasurement, not tmpfs audit state or an early unsafe return.
   - [~] Phase 7 — live validation and regression gates. The benchmark UX and
         hard gate are complete: default output is an accessible timing table
         with explicit PASS/FAIL and phase remarks, `--json` schema v6 includes
@@ -790,6 +799,12 @@ for detailed scope and acceptance criteria.
         with the existing universal kernel and no hidden work, degradation, or
         leaked benchmark process. Its remote schema-v6 report SHA-256 is
         `e12f30ae2bf43a32ced2d6fe585fbe5f40a80f89002f61775c6a7ccf7613360e`.
+        Schema v7 adds the parent-observed process-spawn-through-final-audit
+        boundary. A fresh 20+2 Firecracker run still passed every authenticated
+        boot at 138.1/148.2/174.6 ms and **181.3 ms maximum**, while exposing
+        the full lifecycle at 762.9/822.8/848.3 ms and **854.6 ms maximum**.
+        Its report SHA-256 is
+        `d224bacb3aa04b727a74c424ff20a2f93f8adf3196da0743e63bd1acea922c74`.
         Mount lanes, signed evidence, and designated native jobs remain open.
   - [x] Cross-plan fast-machine-substrate contract documented in
         `specs/notes/2026-08-10-fast-machine-substrate.md` (issue #2279)

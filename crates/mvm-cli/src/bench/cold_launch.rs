@@ -30,9 +30,10 @@ use super::stats::percentile;
 /// adds the selected root filesystem strategy; version 4 adds whole-VMM warm
 /// resident-memory and first-command fault evidence; version 5 changes Linux
 /// memory accounting from PSS to RSS; version 6 adds maxima and the explicit
-/// hard boot requirement. Older reports remain readable through serde defaults
+/// hard boot requirement; version 7 adds the outer, shell-visible command
+/// lifecycle wall clock. Older reports remain readable through serde defaults
 /// but are not comparable without the new substrate.
-pub const COLD_LAUNCH_SCHEMA_VERSION: u32 = 6;
+pub const COLD_LAUNCH_SCHEMA_VERSION: u32 = 7;
 
 /// Minimum measured samples in a publishable live matrix lane.
 pub const MIN_MATRIX_SAMPLES: u32 = 20;
@@ -706,6 +707,10 @@ pub struct ColdLaunchSample {
     pub cache: CacheState,
     pub work: LaunchWork,
     pub launch_mode: LaunchMode,
+    /// Parent-observed process wall clock, from immediately before spawning
+    /// `mvmctl` until it exits after command-level audit completion.
+    #[serde(default)]
+    pub command_lifecycle_ms: f64,
     pub phases: RunPhaseTimings,
     pub sub_phases: LaunchSubTimings,
     /// Whole-VMM warm-ready and first-command memory evidence.
@@ -808,6 +813,9 @@ pub struct LaneStats {
     /// Admitted plan to command dispatch — the window the launch contract is
     /// set against.
     pub dispatch_window_ms: SpanStats,
+    /// The shell-visible lifetime of the complete `mvmctl` child process.
+    #[serde(default)]
+    pub command_lifecycle_ms: SpanStats,
     pub total_ms: SpanStats,
     pub resolve_ms: SpanStats,
     pub drives_ms: SpanStats,
@@ -910,6 +918,7 @@ pub fn build_cold_launch_report(
         warmup,
         stats: LaneStats {
             dispatch_window_ms,
+            command_lifecycle_ms: col(|s| s.command_lifecycle_ms),
             total_ms: col(|s| s.phases.total_ms),
             resolve_ms: col(|s| s.phases.resolve_ms),
             drives_ms: col(|s| s.phases.drives_ms),
@@ -1097,6 +1106,7 @@ mod tests {
             },
             work: LaunchWork::default(),
             launch_mode: LaunchMode::Cold,
+            command_lifecycle_ms: total_ms + 25.0,
             phases: phases(total_ms),
             sub_phases: LaunchSubTimings {
                 vmm_create_ms: Some(total_ms / 2.0),
@@ -1481,6 +1491,7 @@ mod tests {
         assert_eq!(report.stats.total_ms.p50, Some(250.0));
         assert_eq!(report.stats.total_ms.p95, Some(385.0));
         assert_eq!(report.stats.total_ms.p99, Some(397.0));
+        assert_eq!(report.stats.command_lifecycle_ms.p50, Some(275.0));
         // Dispatch window is constant across the fixture, so every
         // percentile lands on it.
         assert_eq!(report.stats.dispatch_window_ms.p50, Some(130.0));

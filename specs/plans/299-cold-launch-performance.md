@@ -940,8 +940,9 @@ optimization backend-local and the benchmark backend-neutral.
       readiness and immediately after the first guest command. Linux records
       RSS from `/proc/<pid>/statm` plus process minor/major fault deltas; macOS
       records physical footprint and explicitly leaves Linux-only fault counters
-      unavailable. Launch-sample schema v4 and cold-launch schema v6 carry the
-      evidence (v6 adds span maxima and the strict boot verdict), and the
+      unavailable. Launch-sample schema v4 and cold-launch schema v7 carry the
+      evidence (v6 added span maxima and the strict boot verdict; v7 adds the
+      parent-observed full CLI lifecycle), and the
       warm-lane gate rejects a sample that omits it. The
       real-host backend matrix remains before #2280 can close.
 - [x] Publish the canonical budget table. `LaunchLane::budgets()` is now the one
@@ -1021,7 +1022,12 @@ backend and no unauthenticated or replayed notification can release dispatch.
 
 ## Phase 6 — Move cleanup off the foreground critical path safely
 
-- [ ] Split command completion from cleanup completion in the timing model.
+- [x] Split command completion, VM cleanup completion, and final CLI process
+      exit in the timing model. Schema v7 retains the in-process phase total
+      through teardown and adds a parent-observed `command_lifecycle_ms` from
+      immediately before spawn through command-level audit completion and
+      process exit. The human report labels both rather than calling the
+      shorter window “end to end.”
 - [ ] Hand transient cleanup to the existing host-side lifecycle/reaper seam
       after the guest exit code and audit receipt are durable.
 - [ ] Keep the VM state directory, PID ownership, cache locks, and network
@@ -1097,6 +1103,46 @@ from host/cache effects. These reports are unsigned manual evidence, not the
 still-open signed CI artifact. Mount-hit, mount-miss, libkrun, signed storage,
 and designated live-host jobs remain open.
 
+The next 2026-08-19 slice measured the complete shell-visible command rather
+than inferring it from the launch process's internal teardown mark. Prepared
+runtime-overlay validation now has a reconstructible metadata stamp: the first
+resolve still hashes every canonical file and inspects the ext4 payload; later
+resolves take the fast path only while the manifest digest plus file
+device/inode/size/mtime/ctime identities are unchanged. A same-size rewrite,
+atomic replacement, corrupt stamp, or missing stamp falls back to full
+fail-closed validation. On the established host this changed a warmed overlay
+attach from 43–75 ms to 0.42 ms. Durable atomic cache writes use `fdatasync`
+instead of flushing unrelated inode metadata; the admission audit barrier
+remains synchronous and fail-closed.
+
+The publication-grade schema-v7 Firecracker run used the same universal
+4,310,016-byte kernel, cached Alpine, isolated `MVM_HOME`, and 20+2 protocol:
+
+| metric | p50 | p95 | p99 | maximum | requirement |
+|---|---:|---:|---:|---:|---:|
+| authenticated boot dispatch | 138.1 ms | 148.2 ms | 174.6 ms | **181.3 ms** | **PASS — every boot <200 ms** |
+| admission | 268.3 ms | 302.3 ms | 308.7 ms | 310.3 ms | diagnostic |
+| teardown | 109.4 ms | 118.9 ms | 120.6 ms | 121.1 ms | diagnostic |
+| in-process run through teardown | 527.4 ms | 576.8 ms | 590.3 ms | 593.6 ms | diagnostic |
+| full CLI lifecycle through final audit + exit | 762.9 ms | 822.8 ms | 848.3 ms | **854.6 ms** | diagnostic |
+
+The report is
+`/root/mvm-bench-20260819/reports/prepared-cold-firecracker-full-lifecycle-2026-08-19.json`,
+SHA-256
+`d224bacb3aa04b727a74c424ff20a2f93f8adf3196da0743e63bd1acea922c74`.
+It has 20 raw samples, no hidden acquisition/hash/process-scan work, no
+degradation, and no leaked benchmark VM or Firecracker process.
+
+`lsblk` and `findmnt` identify this host's storage as two rotational 1.8-TB
+drives behind ext4-on-RAID1. A syscall trace measured individual required
+flushes at 60–175 ms. One pre-action admission flush plus the observed
+138-ms boot therefore cannot fit a complete durable command lifecycle below
+200 ms on this storage even if every other phase were free. The 200-ms hard
+requirement remains correctly scoped to authenticated boot dispatch. Making
+the *full* durable lifecycle sub-200 requires low-latency persistent storage
+(NVMe or equivalent) and then a fresh 20+2 validation; moving the audit chain
+to tmpfs or returning before safe teardown is not an acceptable optimization.
+
 - [x] Make `mvmctl bench` human-readable by default: an accessible plain-text
       requirement table, explicit PASS/FAIL words, percentile budgets, and a
       phase table whose Remarks column explains each boundary. Retain `--json`.
@@ -1106,6 +1152,14 @@ and designated live-host jobs remain open.
       indicative runs below the publication sample floor. Render and persist a
       breached report before returning non-zero so the failure remains
       inspectable. Unit tests pin 199.9 ms PASS and 200.0 ms FAIL.
+- [x] Add the parent-observed full CLI lifecycle to schema v7 raw samples,
+      percentile/max summaries, and the accessible timing table. It includes
+      process spawn, command-level audit completion, and process exit—the
+      costs omitted by the internal teardown mark.
+- [x] Remove repeated full runtime-overlay hashing from prepared launches
+      without trusting mutable path names: cache a completed validation behind
+      manifest digest plus mutation-sensitive filesystem identities, and prove
+      same-size rewrites and corrupt stamps fail closed in focused tests.
 - [ ] Add a native Apple Silicon/HVF live benchmark job with cached artifacts,
       no mount, mount-cache hit, and mount miss lanes.
 - [ ] Add a Linux Firecracker live benchmark on the established KVM host and a

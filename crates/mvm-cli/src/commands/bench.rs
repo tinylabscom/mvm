@@ -255,7 +255,7 @@ fn format_ms(value: Option<f64>) -> String {
 
 fn timing_rows(
     report: &crate::bench::cold_launch::ColdLaunchReport,
-) -> [(&'static str, SpanStats, &'static str); 9] {
+) -> [(&'static str, SpanStats, &'static str); 10] {
     let stats = &report.stats;
     [
         (
@@ -299,9 +299,14 @@ fn timing_rows(
             "Stop and reap the transient VM.",
         ),
         (
-            "End to end",
+            "Measured run",
             stats.total_ms,
-            "Full command including setup, workload, and cleanup.",
+            "In-process setup, workload, and cleanup through VM teardown.",
+        ),
+        (
+            "Full CLI lifecycle",
+            stats.command_lifecycle_ms,
+            "Shell-visible time: process spawn through final audit and exit.",
         ),
     ]
 }
@@ -339,6 +344,13 @@ mod tests {
             warmup: 2,
             stats: LaneStats {
                 dispatch_window_ms: measured,
+                command_lifecycle_ms: SpanStats {
+                    p50: Some(180.0),
+                    p95: Some(190.0),
+                    p99: Some(195.0),
+                    max: Some(198.0),
+                    ..measured
+                },
                 total_ms: measured,
                 backend_start_ms: measured,
                 vsock_wait_ms: measured,
@@ -378,6 +390,8 @@ mod tests {
         assert!(rendered.contains("< 200.0 ms"), "{rendered}");
         assert!(rendered.contains("PASS"), "{rendered}");
         assert!(rendered.contains("Timing breakdown"), "{rendered}");
+        assert!(rendered.contains("Full CLI lifecycle"), "{rendered}");
+        assert!(rendered.contains("final audit and exit"), "{rendered}");
         assert!(rendered.contains("Remarks"), "{rendered}");
         assert!(
             rendered.contains("Create the VMM and enter the guest kernel."),
