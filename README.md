@@ -746,11 +746,23 @@ and emits install hints for anything missing.
 ### Build, test, lint
 
 ```bash
-just build           # cargo build
+just build           # nightly Cranelift + 8-thread rustc frontend
 just test            # cargo nextest run --workspace   (the named test gate)
 just lint            # cargo fmt --all -- --check  +  clippy -D warnings
 just ci              # lint + tests + doctests — run this before every PR
 ```
+
+The repository pins a dated nightly and installs Cranelift through
+`rust-toolchain.toml`. Development recipes route Cargo through
+`scripts/cargo-fast.sh`: dev builds use Cranelift and eight frontend threads,
+while tests and release builds retain LLVM. The nightly-only settings live in
+`.cargo/fast.toml`, separate from the baseline Cargo configuration, so explicit
+stable/MSRV and release lanes remain loadable. Lint recipes use the repository's
+stable Rust 1.96 toolchain because current nightly Clippy reports a generated
+async-trait future as carrying a redundant must-use annotation; no lint is
+suppressed. Reproducible embedded-host and runtime-overlay guest binaries remain
+on their separately pinned stable Rust toolchain so outer nightly flags cannot
+leak into Zig-based artifact builds.
 
 Ground rules (enforced by CI — see [AGENTS.md](AGENTS.md) for the full set):
 

@@ -194,6 +194,70 @@ impl RegistrationJournal {
     }
 }
 
+/// Open the assurance session the supervisor admitted for this VM.
+///
+/// This daemon is the process a probe reaches, so it is the only place a
+/// session can usefully exist. The registration is host-signed, so what
+/// arrives here has already been decided: the binding names a plan the
+/// supervisor verified, the authority is post-intersection, and the declared
+/// destinations are resolved. Nothing is judged again.
+///
+/// Both refusals below open nothing rather than opening something partial. A
+/// session whose service is not bound and a session with no audit route are
+/// each a registration that does not describe a run this daemon should serve,
+/// and the probe verb answers `NotBound` or `AuditUnavailable` either way.
+fn open_admitted_assurance_session(bound: &super::handlers::BoundHandlers, r: &RegisterVm) {
+    let Some(session) = &r.assurance else { return };
+    let Some(handler) = &bound.assurance else {
+        tracing::warn!(
+            vm_id = %r.vm_id,
+            "an assurance session was registered but host.assurance.v1 is not bound; \
+             opening nothing"
+        );
+        return;
+    };
+    let Some(path) = &r.audit_signer_uds_path else {
+        tracing::warn!(
+            vm_id = %r.vm_id,
+            "an assurance session was registered with no audit route; its probes could \
+             not be recorded, so the session is not opened"
+        );
+        return;
+    };
+
+    let sink = crate::audit::assurance::SignerSink::new(
+        super::audit_client::AuditClient::new(path.clone()),
+        r.workload_id.clone().unwrap_or_else(|| r.vm_id.clone()),
+        r.tenant_id.clone(),
+        session.workload_session_id.clone(),
+    );
+    handler.open_session(super::handlers::host_assurance_v1::AssuranceSessionSpec {
+        workload_session_id: session.workload_session_id.clone(),
+        binding: session.binding.clone(),
+        authority: session.authority.clone(),
+        trial_id: session.trial_id.clone(),
+        policy: session.policy.clone(),
+        destinations: session
+            .destinations
+            .iter()
+            .map(
+                |edge| super::handlers::host_assurance_v1::DeclaredDestination {
+                    label: edge.label.clone(),
+                    host: edge.host.clone(),
+                    port: edge.port,
+                },
+            )
+            .collect(),
+        identity: session.identity.clone(),
+        sink: Some(std::sync::Arc::new(sink)),
+    });
+    tracing::info!(
+        vm_id = %r.vm_id,
+        workload_session_id = %session.workload_session_id,
+        "assurance session opened for the admitted campaign"
+    );
+}
+
 impl HostAgentDaemon {
     /// New daemon for `tenant_id`, verifying control messages against
     /// `verifying_key` (the host signer's public key). `max_frame_bytes` caps
@@ -371,7 +435,8 @@ impl HostAgentDaemon {
         registry
             .admit_capabilities(r.capability_bindings.clone())
             .context("load host-signed capability bindings")?;
-        let _bound = register_bound_handlers(&mut registry, &r.services_bindings);
+        let bound = register_bound_handlers(&mut registry, &r.services_bindings);
+        open_admitted_assurance_session(&bound, r);
         let host_audit = mvm_core::protocol::broker::ServiceId::parse("host.audit.v1")
             .expect("host.audit.v1 is a valid ServiceId");
         if r.services_bindings.contains(&host_audit)
@@ -719,6 +784,7 @@ mod tests {
             audit_signer_uds_path: signer.map(|p| p.to_string_lossy().into_owned()),
             services_bindings: vec![],
             capability_bindings: vec![],
+            assurance: None,
         }
     }
 

@@ -57,6 +57,26 @@ pub struct ReleaseSignatureRequest<'a> {
     /// Version whose signing identity is accepted. The release identity is
     /// tag-bound, so this pins *which* release may have signed the archive.
     pub version: &'a str,
+    /// Which release train published the asset, and therefore which workflow
+    /// identity may have signed it.
+    pub train: ReleaseTrain,
+}
+
+/// The release train an asset was published on.
+///
+/// The two trains sign different artifact classes under different refs, and
+/// `mvm_core::release_trust` keeps their identity sets deliberately disjoint so
+/// a signature minted over a boot image cannot validate a CLI tarball or the
+/// reverse. Making the caller name its train keeps that separation a decision
+/// at the fetch site rather than an accident of which helper it reached for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ReleaseTrain {
+    /// `release.yml`, signing CLI tarballs under `refs/tags/v<version>`.
+    #[default]
+    Cli,
+    /// `release-boot-image.yml`, signing images under
+    /// `refs/tags/boot-image/v<version>`.
+    BootImage,
 }
 
 /// Verify `request`'s archive against the release workflow's keyless signing
@@ -106,11 +126,17 @@ fn verify_against_release_identities(
     bundle: &[u8],
     request: &ReleaseSignatureRequest<'_>,
 ) -> Result<(), RuntimeOverlayError> {
+    let identities = match request.train {
+        ReleaseTrain::Cli => mvm_core::release_trust::accepted_release_identities(request.version),
+        ReleaseTrain::BootImage => {
+            mvm_core::release_trust::accepted_boot_image_identities(request.version)
+        }
+    };
     verify_release_archive_bytes(
         archive,
         bundle,
         request.asset,
-        &mvm_core::release_trust::accepted_release_identities(request.version),
+        &identities,
         mvm_core::release_trust::RELEASE_OIDC_ISSUER,
     )
 }
@@ -196,6 +222,7 @@ mod tests {
             asset: ASSET,
             archive_path: &path,
             version: FIXTURE_VERSION,
+            train: ReleaseTrain::Cli,
         })
         .map_err(|e| e.to_string())
     }

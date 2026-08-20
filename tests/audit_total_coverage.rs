@@ -103,6 +103,7 @@ const ENV_SUB: &[(&str, AuditPosture)] = &[
 const OPS_SUB: &[(&str, AuditPosture)] = &[
     ("metrics", AuditPosture::ReadOnly),
     ("config", AuditPosture::Emits("ConfigChange")),
+    ("mcp", AuditPosture::InteractiveOrControl),
 ];
 
 // `kernel build` compiles/downloads a microVM kernel into the local
@@ -326,6 +327,16 @@ const SESSION_SUB: &[(&str, AuditPosture)] = &[
     ("kill", AuditPosture::Emits("Kill")),
     ("set-timeout", AuditPosture::Emits("VmTtlSet")),
     ("reap", AuditPosture::Emits("Kill")),
+];
+
+const AGENT_SESSION_SUB: &[(&str, AuditPosture)] = &[
+    // Creating the durable record is covered by the top-level command
+    // envelope; parking and resuming also append their lifecycle entries.
+    ("open", AuditPosture::Emits("cmd.agent-session")),
+    ("ls", AuditPosture::ReadOnly),
+    ("show", AuditPosture::ReadOnly),
+    ("park", AuditPosture::Emits("session.parked")),
+    ("resume", AuditPosture::Emits("session.resumed")),
 ];
 
 const PROC_SUB: &[(&str, AuditPosture)] = &[
@@ -565,6 +576,10 @@ const AUDIT_POSTURE: &[(&str, AuditPosture)] = &[
     // Sprint 52 W2 — bundles + trust store.
     ("bundle", AuditPosture::DelegatesToSub(BUNDLE_SUB)),
     ("trust", AuditPosture::DelegatesToSub(TRUST_SUB)),
+    (
+        "agent-session",
+        AuditPosture::DelegatesToSub(AGENT_SESSION_SUB),
+    ),
     // Plan 73 Followup C — sealed deps-volume cache verbs.
     ("deps", AuditPosture::DelegatesToSub(DEPS_SUB)),
     // Plan 76 Phase 6 — portable signed `.mvm` artifacts.
@@ -776,10 +791,13 @@ fn audit_posture_emits_entries_reference_known_audit_kinds() {
         // Plan-64 audit-chain events.
         "plan.admitted",
         "plan.launched",
+        "session.parked",
+        "session.resumed",
         // Plan-326 chain-structure event: `trust audit prune` records the
         // removal in the chain before deleting the segments it names.
         "chain.pruned",
         // Top-level command audit envelopes.
+        "cmd.agent-session",
         "cmd.deploy",
         // Image time-travel restore marker.
         "image.reverted",

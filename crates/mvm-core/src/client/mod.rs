@@ -12,7 +12,9 @@
 
 use async_trait::async_trait;
 
-pub use mvm_contract::protocol::capability_negotiation::BackendCapabilityReport;
+pub use mvm_contract::protocol::capability_negotiation::{
+    BackendCapabilityReport, ClientOperationCapabilities, ClientOperationCapabilitiesBuilder,
+};
 
 pub mod dto;
 pub mod error;

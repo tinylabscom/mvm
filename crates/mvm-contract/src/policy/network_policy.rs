@@ -44,6 +44,7 @@ pub enum NetworkPolicyParseError {
 
 /// A host:port pair for network allowlist rules.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct HostPort {
     pub host: String,
     pub port: u16,
@@ -95,6 +96,7 @@ pub fn is_banned_ssh_port(port: u16) -> bool {
 /// Built-in network presets for common workloads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum NetworkPreset {
     /// Full internet access (no filtering). Default for backward compatibility.
     Unrestricted,
@@ -178,6 +180,7 @@ impl fmt::Display for NetworkPreset {
 /// the policy resolves to a non-empty allowlist.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum EgressMode {
     /// No filtering — guest gets full outbound. Implied by an
     /// unrestricted policy.
@@ -236,6 +239,7 @@ impl fmt::Display for EgressMode {
 /// consumer to re-thread a separate parameter.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum NetworkPolicy {
     /// Use a built-in preset.
     Preset {

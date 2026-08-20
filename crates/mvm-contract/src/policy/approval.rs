@@ -695,6 +695,40 @@ impl ApprovalLedger {
             .map(|index| self.records[index].state)
     }
 
+    /// Content-address the ledger's decision state.
+    ///
+    /// A session records this at park time and a resume compares against it, so
+    /// what it covers is what a resume treats as "the ledger has not moved":
+    /// every record's identity, the capability it was asked about, and the
+    /// state it reached. Timestamps are deliberately excluded — two ledgers
+    /// that made the same decisions hash alike however long ago they were
+    /// asked, so a session cannot refuse itself for the passage of time.
+    ///
+    /// Not covered: `resource_digest`, `policy_digest`, `admission_plan_digest`,
+    /// and `authorized_operators` play no part in the hash. That is in spec —
+    /// the head names the decision, not every input that produced it — but is
+    /// worth stating plainly since this is a persistence contract the moment a
+    /// caller records one.
+    ///
+    /// The hash is order-dependent: records fold in `self.records`' iteration
+    /// order. That is safe today because records are append-only (`request`
+    /// pushes, nothing reorders or removes), but a future rebuild path that
+    /// reconstructed a ledger's records in a different order would move the
+    /// head even though the decisions were identical.
+    #[must_use]
+    pub fn head(&self) -> [u8; 32] {
+        let mut hasher = Sha256::new();
+        hasher.update(self.session_id.as_str().as_bytes());
+        hasher.update([0u8]); // terminator: ids cannot run together
+        for record in &self.records {
+            hasher.update(record.request.approval_id.as_str().as_bytes());
+            hasher.update([0u8]); // terminator: ids cannot run together
+            hasher.update([capability_tag(record.request.capability)]);
+            hasher.update([state_tag(record.state)]);
+        }
+        hasher.finalize().into()
+    }
+
     fn expire_record(
         &mut self,
         journal: &mut AgentSessionJournal,
@@ -844,6 +878,18 @@ fn effect_tag(effect: PolicyEffect) -> u8 {
         PolicyEffect::Deny => 1,
         PolicyEffect::Ask => 2,
         PolicyEffect::Allow => 3,
+    }
+}
+
+/// Stable tag per approval state. Written out rather than derived so renaming a
+/// variant cannot silently move every recorded head.
+fn state_tag(state: ApprovalState) -> u8 {
+    match state {
+        ApprovalState::Pending => 0,
+        ApprovalState::Approved => 1,
+        ApprovalState::Denied => 2,
+        ApprovalState::Expired => 3,
+        ApprovalState::Canceled => 4,
     }
 }
 
@@ -1118,6 +1164,311 @@ mod tests {
                 .expect_err("canceled response")
                 .to_string(),
             "approval response was duplicated or arrived after a terminal state"
+        );
+    }
+
+    #[test]
+    fn an_empty_ledger_has_a_stable_head() {
+        // On its own this would pass against a `head()` that returns a fixed
+        // constant — it only pins that two independently constructed empty
+        // ledgers agree, not that `head()` is a function of any real input.
+        // `a_decision_moves_the_head` is what rules out constancy; the
+        // `_do_not_collide` / `_differ` tests below are what rule out a hash
+        // that is a function of state alone.
+        let a = ApprovalLedger::new(AgentSessionId::parse("sess-a").unwrap());
+        let b = ApprovalLedger::new(AgentSessionId::parse("sess-a").unwrap());
+        assert_eq!(a.head(), b.head());
+    }
+
+    #[test]
+    fn a_decision_moves_the_head() {
+        let (request, evaluation) = ask_evaluation();
+        let mut journal = journal();
+        let mut ledger = ApprovalLedger::new(session());
+        let approval = approval_request(&request, &evaluation);
+        ledger
+            .request(&mut journal, &evaluation, approval.clone(), 1_000)
+            .expect("request approval");
+        let pending_head = ledger.head();
+        ledger
+            .respond(
+                &mut journal,
+                ApprovalResponse {
+                    approval_id: approval.approval_id.clone(),
+                    operator_id: operator("ops-a"),
+                    outcome: ApprovalOutcome::Approved,
+                    response_nonce: 1,
+                    reason: None,
+                    ticket_ref: None,
+                },
+                1_001,
+            )
+            .expect("authorized response");
+        assert_ne!(
+            pending_head,
+            ledger.head(),
+            "an answered request must not hash the same as a pending one"
+        );
+    }
+
+    #[test]
+    fn the_head_ignores_when_a_decision_was_made() {
+        let (request, evaluation) = ask_evaluation();
+
+        let mut journal_a = journal();
+        let mut ledger_a = ApprovalLedger::new(session());
+        let mut approval_a = approval_request(&request, &evaluation);
+        approval_a.expires_at_unix_ms = 5_000;
+        ledger_a
+            .request(&mut journal_a, &evaluation, approval_a.clone(), 1_000)
+            .expect("request approval a");
+        ledger_a
+            .respond(
+                &mut journal_a,
+                ApprovalResponse {
+                    approval_id: approval_a.approval_id.clone(),
+                    operator_id: operator("ops-a"),
+                    outcome: ApprovalOutcome::Approved,
+                    response_nonce: 1,
+                    reason: None,
+                    ticket_ref: None,
+                },
+                1_001,
+            )
+            .expect("response a");
+
+        let mut journal_b = journal();
+        let mut ledger_b = ApprovalLedger::new(session());
+        let mut approval_b = approval_request(&request, &evaluation);
+        approval_b.expires_at_unix_ms = 50_000;
+        ledger_b
+            .request(&mut journal_b, &evaluation, approval_b.clone(), 1_000)
+            .expect("request approval b");
+        ledger_b
+            .respond(
+                &mut journal_b,
+                ApprovalResponse {
+                    approval_id: approval_b.approval_id.clone(),
+                    operator_id: operator("ops-a"),
+                    outcome: ApprovalOutcome::Approved,
+                    response_nonce: 1,
+                    reason: None,
+                    ticket_ref: None,
+                },
+                1_001,
+            )
+            .expect("response b");
+
+        assert_eq!(
+            ledger_a.head(),
+            ledger_b.head(),
+            "identical decisions at different expiry timestamps must hash alike"
+        );
+    }
+
+    #[test]
+    fn two_different_decisions_do_not_collide() {
+        let (request, evaluation) = ask_evaluation();
+
+        let mut journal_a = journal();
+        let mut ledger_a = ApprovalLedger::new(session());
+        let approval_a = approval_request(&request, &evaluation);
+        ledger_a
+            .request(&mut journal_a, &evaluation, approval_a.clone(), 1_000)
+            .expect("request approval a");
+        ledger_a
+            .respond(
+                &mut journal_a,
+                ApprovalResponse {
+                    approval_id: approval_a.approval_id.clone(),
+                    operator_id: operator("ops-a"),
+                    outcome: ApprovalOutcome::Approved,
+                    response_nonce: 1,
+                    reason: None,
+                    ticket_ref: None,
+                },
+                1_001,
+            )
+            .expect("response a");
+
+        let mut journal_b = journal();
+        let mut ledger_b = ApprovalLedger::new(session());
+        let approval_b = approval_request(&request, &evaluation);
+        ledger_b
+            .request(&mut journal_b, &evaluation, approval_b.clone(), 1_000)
+            .expect("request approval b");
+        ledger_b
+            .respond(
+                &mut journal_b,
+                ApprovalResponse {
+                    approval_id: approval_b.approval_id.clone(),
+                    operator_id: operator("ops-a"),
+                    outcome: ApprovalOutcome::Denied,
+                    response_nonce: 1,
+                    reason: None,
+                    ticket_ref: None,
+                },
+                1_001,
+            )
+            .expect("response b");
+
+        assert_ne!(
+            ledger_a.head(),
+            ledger_b.head(),
+            "an approved and a denied request over the same capability must not collide"
+        );
+    }
+
+    #[test]
+    fn a_different_approval_id_moves_the_head() {
+        // The fence's own motivating scenario: same record count, same
+        // capability, same (pending) state — only the identity of *which*
+        // approval is pending differs. Session parks with X pending over
+        // capability C; while parked X is canceled and a fresh Y is opened
+        // pending over the same C. If `head()` did not cover `approval_id`,
+        // those two ledgers would hash identically and a resume would not
+        // notice the swap.
+        let (request, evaluation) = ask_evaluation();
+
+        let mut journal_a = journal();
+        let mut ledger_a = ApprovalLedger::new(session());
+        let approval_a = approval_request(&request, &evaluation);
+        ledger_a
+            .request(&mut journal_a, &evaluation, approval_a.clone(), 1_000)
+            .expect("request approval a");
+
+        let mut journal_b = journal();
+        let mut ledger_b = ApprovalLedger::new(session());
+        let mut approval_b = approval_request(&request, &evaluation);
+        approval_b.approval_id = approval_id("approval-2");
+        approval_b.idempotency_key = IdempotencyKey::parse("approval-retry-2").expect("key");
+        ledger_b
+            .request(&mut journal_b, &evaluation, approval_b.clone(), 1_000)
+            .expect("request approval b");
+
+        assert_ne!(
+            ledger_a.head(),
+            ledger_b.head(),
+            "two different pending approval ids over the same capability must not collide"
+        );
+    }
+
+    #[test]
+    fn a_different_capability_moves_the_head() {
+        // Same approval id, same (pending) state — only the capability the
+        // approval was asked over differs.
+        let (request_a, evaluation_a) = ask_evaluation();
+        let approval_a = approval_request(&request_a, &evaluation_a);
+        let mut journal_a = journal();
+        let mut ledger_a = ApprovalLedger::new(session());
+        ledger_a
+            .request(&mut journal_a, &evaluation_a, approval_a.clone(), 1_000)
+            .expect("request approval a");
+
+        let request_b = request(PolicyCapability::NetworkConnect, [4; 32]);
+        let policy_b = PolicySet::new(vec![PolicyRule {
+            capability: PolicyCapability::NetworkConnect,
+            resource_digest: None,
+            priority: 10,
+            effect: PolicyEffect::Ask,
+        }])
+        .expect("policy");
+        let evaluation_b = policy_b.evaluate(&request_b);
+        assert!(matches!(evaluation_b.decision, PolicyDecision::Ask(_)));
+        let approval_b = approval_request(&request_b, &evaluation_b);
+        let mut journal_b = journal();
+        let mut ledger_b = ApprovalLedger::new(session());
+        ledger_b
+            .request(&mut journal_b, &evaluation_b, approval_b.clone(), 1_000)
+            .expect("request approval b");
+
+        assert_ne!(
+            ledger_a.head(),
+            ledger_b.head(),
+            "the same approval id over two different capabilities must not collide"
+        );
+    }
+
+    #[test]
+    fn a_different_session_id_moves_the_head() {
+        // Same approval id, same capability, same (pending) state — only the
+        // owning session differs.
+        let (request_shape, evaluation) = ask_evaluation();
+
+        let mut journal_a = journal();
+        let mut ledger_a = ApprovalLedger::new(session());
+        let approval_a = approval_request(&request_shape, &evaluation);
+        ledger_a
+            .request(&mut journal_a, &evaluation, approval_a.clone(), 1_000)
+            .expect("request approval a");
+
+        let session_b = AgentSessionId::parse("approval-session-b").expect("valid session");
+        let mut journal_b =
+            AgentSessionJournal::open(session_b.clone(), [1; 32], 1, RetentionPolicy::default())
+                .expect("open")
+                .0;
+        let mut ledger_b = ApprovalLedger::new(session_b.clone());
+        let mut approval_b = approval_request(&request_shape, &evaluation);
+        approval_b.session_id = session_b.clone();
+        ledger_b
+            .request(&mut journal_b, &evaluation, approval_b.clone(), 1_000)
+            .expect("request approval b");
+
+        assert_ne!(
+            ledger_a.head(),
+            ledger_b.head(),
+            "the same approval decision under two different sessions must not collide"
+        );
+    }
+
+    #[test]
+    fn head_agrees_after_a_ledger_rebuild_from_history() {
+        // The comparison a resume actually performs spans a park and a resume
+        // days apart: the head recorded at park time comes off a *live*
+        // ledger, and the head a resume compares it against comes off a
+        // ledger rebuilt from the journal via `from_history` — the shape
+        // every real host process reconstructs after a restart. Every other
+        // `head()` test above builds and reads one live ledger in one
+        // process, which would pass even if a live ledger and its rebuilt
+        // twin disagreed. This is the missing witness for that.
+        let (request_a, evaluation) = ask_evaluation();
+        let mut journal = journal();
+        let mut ledger = ApprovalLedger::new(session());
+        let approval_a = approval_request(&request_a, &evaluation);
+        ledger
+            .request(&mut journal, &evaluation, approval_a.clone(), 1_000)
+            .expect("request approval a");
+        ledger
+            .respond(
+                &mut journal,
+                ApprovalResponse {
+                    approval_id: approval_a.approval_id.clone(),
+                    operator_id: operator("ops-a"),
+                    outcome: ApprovalOutcome::Approved,
+                    response_nonce: 1,
+                    reason: None,
+                    ticket_ref: None,
+                },
+                1_001,
+            )
+            .expect("authorized response");
+
+        let mut approval_b = approval_request(&request_a, &evaluation);
+        approval_b.approval_id = approval_id("approval-2");
+        approval_b.idempotency_key = IdempotencyKey::parse("approval-retry-2").expect("key");
+        ledger
+            .request(&mut journal, &evaluation, approval_b.clone(), 1_002)
+            .expect("request approval b, left pending");
+
+        let history = journal.history(None, 32).expect("history");
+        let rebuilt =
+            ApprovalLedger::from_history(session(), &history.events).expect("rebuild from history");
+
+        assert_eq!(
+            ledger.head(),
+            rebuilt.head(),
+            "a ledger rebuilt from its own journal history must hash the same as the live one \
+             a resume parked against"
         );
     }
 }
