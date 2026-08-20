@@ -331,6 +331,9 @@ for detailed scope and acceptance criteria.
 - [~] **Security lane recovery — issue #2736.** The advisory finding is fixed,
       the release-artifact bootstrap source now compiles with warnings denied,
       and pull-request CI exercises that otherwise dormant feature directly.
+      Focused mutation witnesses cover authenticated-session signal validity,
+      live/dead endpoint readiness branches, redacted TLS material, builder
+      projection, and endpoint identity configuration.
       Closure remains gated on a clean Security workflow run from current
       `main`, including every mutation shard and both reproducibility builds.
 

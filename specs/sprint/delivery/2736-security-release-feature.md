@@ -5,6 +5,10 @@
       The merge-queue fuzz compile gate also consumes refreshed committed
       lockfiles with `--locked`, so newly published registry versions cannot
       replace the reviewed graph while the invariant job is running.
+      Readiness witnesses now reject invalid authentication signals, broken
+      live-endpoint channels, and endpoint death through the public launch
+      boundary; direct tests also pin secret-redacted debug output, optional
+      spawn-builder projection, and FlowMux identity configuration.
       The exact feature check fails on the prior source and passes after the
       fix; every fuzz manifest compiles from its lockfile, and workspace
       all-target Clippy, workflow syntax, formatting, and the workspace suite
