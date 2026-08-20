@@ -20,6 +20,7 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
 use tokio::net::{UnixListener, UnixStream};
 use url::Url;
+use zeroize::Zeroizing;
 
 use mvm_contract::ir::AuthType;
 use mvm_core::plan::SecretBinding;
@@ -687,6 +688,17 @@ pub struct ForwardResponse {
     pub body: Vec<u8>,
 }
 
+/// A real-destination response whose decoded body is delivered incrementally.
+///
+/// The bounded receiver makes backpressure part of the type: the upstream
+/// reader cannot outrun the FlowMux writer by more than four HTTP chunks.
+pub struct ForwardStreamResponse {
+    pub status: u16,
+    pub headers: Vec<(String, String)>,
+    pub body_len: Option<u64>,
+    pub body: tokio::sync::mpsc::Receiver<Result<Vec<u8>, ForwardError>>,
+}
+
 /// Errors from the forward leg.
 #[derive(Debug, thiserror::Error)]
 pub enum ForwardError {
@@ -741,6 +753,30 @@ pub struct FromPlanInputs<'a> {
 #[async_trait]
 pub trait Forwarder: Send + Sync {
     async fn forward(&self, req: PreparedRequest) -> Result<ForwardResponse, ForwardError>;
+
+    /// Forward with a bounded incremental response body.
+    ///
+    /// Test doubles and compatibility forwarders get a safe buffered adapter;
+    /// the production forwarder overrides this and reads the upstream socket
+    /// only as the receiver makes room.
+    async fn forward_stream(
+        &self,
+        req: PreparedRequest,
+    ) -> Result<ForwardStreamResponse, ForwardError> {
+        let response = self.forward(req).await?;
+        let body_len = Some(response.body.len() as u64);
+        let (sender, receiver) = tokio::sync::mpsc::channel(1);
+        sender
+            .send(Ok(response.body))
+            .await
+            .map_err(|_| ForwardError::Failed("response consumer closed".into()))?;
+        Ok(ForwardStreamResponse {
+            status: response.status,
+            headers: response.headers,
+            body_len,
+            body: receiver,
+        })
+    }
 }
 
 /// Flatten an error and its `source()` chain into one message. The client wraps
@@ -790,6 +826,22 @@ impl HardenedForwarder {
 #[async_trait]
 impl Forwarder for HardenedForwarder {
     async fn forward(&self, req: PreparedRequest) -> Result<ForwardResponse, ForwardError> {
+        let mut response = self.forward_stream(req).await?;
+        let mut body = Vec::new();
+        while let Some(chunk) = response.body.recv().await {
+            body.extend_from_slice(&chunk?);
+        }
+        Ok(ForwardResponse {
+            status: response.status,
+            headers: response.headers,
+            body,
+        })
+    }
+
+    async fn forward_stream(
+        &self,
+        req: PreparedRequest,
+    ) -> Result<ForwardStreamResponse, ForwardError> {
         let method = mvm_http::Method::from_bytes(req.method.as_bytes())
             .map_err(|e| ForwardError::Failed(format!("bad method: {e}")))?;
         let client = hardened_client_builder_via(self.timeout_secs, self.proxy.as_ref())
@@ -803,7 +855,7 @@ impl Forwarder for HardenedForwarder {
         if !req.body.is_empty() {
             rb = rb.body(req.body);
         }
-        let resp = rb
+        let mut resp = rb
             .send()
             .await
             .map_err(|e| ForwardError::Failed(err_chain(&e)))?;
@@ -814,14 +866,30 @@ impl Forwarder for HardenedForwarder {
             .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or_default().to_string()))
             .collect();
         check_forward_response_length(resp.content_length())?;
-        let body = resp
-            .bytes()
-            .await
-            .map_err(|e| ForwardError::Failed(err_chain(&e)))?
-            .to_vec();
-        Ok(ForwardResponse {
+        let body_len = resp.content_length();
+        let (sender, body) = tokio::sync::mpsc::channel(4);
+        tokio::spawn(async move {
+            loop {
+                match resp.chunk().await {
+                    Ok(Some(chunk)) => {
+                        if sender.send(Ok(chunk.to_vec())).await.is_err() {
+                            return;
+                        }
+                    }
+                    Ok(None) => return,
+                    Err(error) => {
+                        let _ = sender
+                            .send(Err(ForwardError::Failed(err_chain(&error))))
+                            .await;
+                        return;
+                    }
+                }
+            }
+        });
+        Ok(ForwardStreamResponse {
             status,
             headers,
+            body_len,
             body,
         })
     }
@@ -860,6 +928,120 @@ pub struct SubstitutionService {
     /// unadmitted `host:port` is refused here. `None` ⇒ this endpoint does not
     /// gate (the run loop's gate is still active); a `Some` gate fails closed.
     egress_gate: Option<mvm_runtime::vmm::egress_gate::EgressGate>,
+}
+
+/// Security state retained from request preparation through response
+/// completion. It contains metadata and rewrite state, never an extra copy of
+/// the request or a credential value.
+struct PreparedFlow {
+    request: Option<PreparedRequest>,
+    destination: Option<String>,
+    substituted: Vec<(String, AuthType)>,
+    replacement_flow: ReplacementFlow,
+    replacement_proofs: Vec<mvm_core::policy::RewriteProofRecord>,
+    redaction_hits: RedactionHits,
+    redaction_action: mvm_core::policy::RedactionAction,
+}
+
+/// Raw suffix retained between transform chunks. A 64 KiB window is larger
+/// than every configured secret/PII fingerprint; an adversarial pattern that
+/// still cannot reach a stable cut by twice that bound fails closed.
+const STREAM_TRANSFORM_OVERLAP: usize = 64 * 1024;
+const MAX_STREAM_TRANSFORM_PENDING: usize = STREAM_TRANSFORM_OVERLAP * 2;
+
+struct StreamingRedactor {
+    pending: Zeroizing<Vec<u8>>,
+}
+
+impl StreamingRedactor {
+    fn new() -> Self {
+        Self {
+            pending: Zeroizing::new(Vec::new()),
+        }
+    }
+
+    fn push(
+        &mut self,
+        redactor: &RedactingSubstitution,
+        action: &mvm_core::policy::RedactionAction,
+        chunk: &[u8],
+    ) -> Result<(Vec<u8>, RedactionHits), SensitiveDetectionError> {
+        self.pending.extend_from_slice(chunk);
+        if self.pending.len() <= STREAM_TRANSFORM_OVERLAP {
+            return Ok((Vec::new(), RedactionHits::default()));
+        }
+
+        let safe_len = self.pending.len() - STREAM_TRANSFORM_OVERLAP;
+        let (prefix, prefix_hits) = redact_or_copy(redactor, action, &self.pending[..safe_len])?;
+        let (whole, _) = redact_or_copy(redactor, action, &self.pending)?;
+        if whole.starts_with(&prefix) {
+            let suffix = self.pending.split_off(safe_len);
+            *self.pending = suffix;
+            return Ok((prefix, prefix_hits));
+        }
+        if self.pending.len() > MAX_STREAM_TRANSFORM_PENDING {
+            return Err(SensitiveDetectionError);
+        }
+        Ok((Vec::new(), RedactionHits::default()))
+    }
+
+    fn finish(
+        &mut self,
+        redactor: &RedactingSubstitution,
+        action: &mvm_core::policy::RedactionAction,
+    ) -> Result<(Vec<u8>, RedactionHits), SensitiveDetectionError> {
+        let pending = std::mem::take(&mut *self.pending);
+        redact_or_copy(redactor, action, &pending)
+    }
+}
+
+fn redact_or_copy(
+    redactor: &RedactingSubstitution,
+    action: &mvm_core::policy::RedactionAction,
+    bytes: &[u8],
+) -> Result<(Vec<u8>, RedactionHits), SensitiveDetectionError> {
+    match redactor.redact_bytes_for(bytes, action) {
+        Some((_redacted, hits)) if hits.detector_failures > 0 => Err(SensitiveDetectionError),
+        Some((redacted, hits)) => Ok((redacted, hits)),
+        None => Ok((bytes.to_vec(), RedactionHits::default())),
+    }
+}
+
+#[cfg(test)]
+mod streaming_redactor_tests {
+    use super::*;
+
+    #[test]
+    fn a_secret_split_across_chunks_is_withheld_and_redacted() {
+        let secret = b"sk-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let split = 17;
+        let mut first = vec![b'x'; STREAM_TRANSFORM_OVERLAP - split];
+        first.extend_from_slice(&secret[..split]);
+
+        let redactor = RedactingSubstitution::with_default_rules();
+        let action = mvm_core::policy::RedactionAction::default();
+        let mut stream = StreamingRedactor::new();
+        let (ready, _) = stream.push(&redactor, &action, &first).unwrap();
+        assert!(ready.is_empty(), "the possible prefix must stay withheld");
+        let (ready, _) = stream.push(&redactor, &action, &secret[split..]).unwrap();
+        let (tail, hits) = stream.finish(&redactor, &action).unwrap();
+        let output = [ready, tail].concat();
+        assert!(!output.windows(secret.len()).any(|window| window == secret));
+        assert!(!hits.secrets.is_empty(), "the split token must be detected");
+    }
+
+    #[test]
+    fn clean_streams_release_every_byte_in_order_with_bounded_carry() {
+        let redactor = RedactingSubstitution::with_default_rules();
+        let action = mvm_core::policy::RedactionAction::default();
+        let mut stream = StreamingRedactor::new();
+        let input = vec![b'x'; STREAM_TRANSFORM_OVERLAP + 123];
+        let (ready, _) = stream.push(&redactor, &action, &input).unwrap();
+        assert_eq!(ready.len(), 123);
+        assert!(stream.pending.len() <= STREAM_TRANSFORM_OVERLAP);
+        let (tail, _) = stream.finish(&redactor, &action).unwrap();
+        assert_eq!([ready, tail].concat(), input);
+    }
 }
 /// Which audit an error path owes, given the cause and whether the request
 /// carried a placeholder.
@@ -1448,12 +1630,154 @@ impl SubstitutionService {
     /// destination binding, the claim-10 gate, payload-free audit — happens
     /// here and only here, on every transport.
     pub(crate) async fn process(&self, wire: WireRequest) -> WireResponse {
+        let mut flow = match self.prepare_flow(wire).await {
+            Ok(flow) => flow,
+            Err(refusal) => return refusal,
+        };
+        let request = flow
+            .request
+            .take()
+            .expect("a prepared flow owns exactly one request");
+        match self.forwarder.forward(request).await {
+            Ok(mut response) => {
+                let reinject_proofs = flow.replacement_flow.reinject_response(&mut response);
+                self.audit_completed_flow(&flow, &reinject_proofs).await;
+                WireResponse::Ok {
+                    status: response.status,
+                    headers: response.headers,
+                    body_b64: B64.encode(response.body),
+                }
+            }
+            Err(error) => WireResponse::Refused {
+                message: error.to_string(),
+            },
+        }
+    }
+
+    /// Substitute and forward one FlowMux request while keeping the upstream
+    /// response body incremental and bounded.
+    pub(crate) async fn process_stream(
+        self: &Arc<Self>,
+        wire: WireRequest,
+    ) -> Result<ForwardStreamResponse, WireResponse> {
+        let mut flow = self.prepare_flow(wire).await?;
+        let request = flow
+            .request
+            .take()
+            .expect("a prepared flow owns exactly one request");
+        let mut upstream = self
+            .forwarder
+            .forward_stream(request)
+            .await
+            .map_err(|error| WireResponse::Refused {
+                message: error.to_string(),
+            })?;
+
+        // Reinject and redact response headers before any body byte can cross
+        // to the guest. HTTP transfer framing belongs to the upstream leg, not
+        // FlowMux; remove it because transforms may change decoded length.
+        let mut head = ForwardResponse {
+            status: upstream.status,
+            headers: upstream.headers,
+            body: Vec::new(),
+        };
+        let mut reinject_proofs = flow.replacement_flow.reinject_response(&mut head);
+        head.headers.retain(|(name, _)| {
+            !name.eq_ignore_ascii_case("content-length")
+                && !name.eq_ignore_ascii_case("transfer-encoding")
+        });
+        for (_, value) in &mut head.headers {
+            if let Some((redacted, hits)) = self
+                .redactor
+                .redact_bytes_for(value.as_bytes(), &flow.redaction_action)
+            {
+                if hits.detector_failures > 0 {
+                    return Err(WireResponse::Refused {
+                        message: "sensitive-data detector failed closed; refusing response".into(),
+                    });
+                }
+                *value = String::from_utf8_lossy(&redacted).into_owned();
+                flow.redaction_hits.merge(hits);
+            }
+        }
+
+        let response_status = head.status;
+        let response_headers = std::mem::take(&mut head.headers);
+        let (sender, receiver) = tokio::sync::mpsc::channel(4);
+        let service = Arc::clone(self);
+        tokio::spawn(async move {
+            let mut redactor = StreamingRedactor::new();
+            while let Some(next) = upstream.body.recv().await {
+                let chunk = match next {
+                    Ok(chunk) => chunk,
+                    Err(error) => {
+                        let _ = sender.send(Err(error)).await;
+                        return;
+                    }
+                };
+                let mut response = ForwardResponse {
+                    status: response_status,
+                    headers: Vec::new(),
+                    body: chunk,
+                };
+                reinject_proofs.extend(flow.replacement_flow.reinject_response(&mut response));
+                let (ready, hits) = match redactor.push(
+                    &service.redactor,
+                    &flow.redaction_action,
+                    &response.body,
+                ) {
+                    Ok(result) => result,
+                    Err(_) => {
+                        let _ = sender
+                            .send(Err(ForwardError::Failed(
+                                "sensitive-data detector failed closed".into(),
+                            )))
+                            .await;
+                        return;
+                    }
+                };
+                flow.redaction_hits.merge(hits);
+                if !ready.is_empty() && sender.send(Ok(ready)).await.is_err() {
+                    return;
+                }
+            }
+            let (tail, hits) = match redactor.finish(&service.redactor, &flow.redaction_action) {
+                Ok(result) => result,
+                Err(_) => {
+                    let _ = sender
+                        .send(Err(ForwardError::Failed(
+                            "sensitive-data detector failed closed".into(),
+                        )))
+                        .await;
+                    return;
+                }
+            };
+            flow.redaction_hits.merge(hits);
+            if !tail.is_empty() && sender.send(Ok(tail)).await.is_err() {
+                return;
+            }
+            service.audit_completed_flow(&flow, &reinject_proofs).await;
+        });
+
+        Ok(ForwardStreamResponse {
+            status: response_status,
+            headers: response_headers,
+            // Header/body transforms can change decoded length. Completion is
+            // explicit and the guest applies an independent hard cap.
+            body_len: None,
+            body: receiver,
+        })
+    }
+
+    /// Apply every pre-connect security decision once, returning the prepared
+    /// request plus the state needed to transform and audit its response.
+    async fn prepare_flow(&self, wire: WireRequest) -> Result<PreparedFlow, WireResponse> {
         let body = match B64.decode(wire.body_b64.as_bytes()) {
             Ok(b) => b,
             Err(e) => {
-                return WireResponse::Refused {
+                return Err(WireResponse::Refused {
                     message: format!("bad body encoding: {e}"),
-                };
+                });
             }
         };
         let req = ProxyRequest {
@@ -1482,9 +1806,9 @@ impl SubstitutionService {
                 )
             });
             if !admitted {
-                return WireResponse::Refused {
+                return Err(WireResponse::Refused {
                     message: "egress destination not admitted by network policy (claim-10)".into(),
-                };
+                });
             }
         }
         let substituted = collect_substituted_meta(&endpoint, &req.headers);
@@ -1512,11 +1836,11 @@ impl SubstitutionService {
         // cleartext terminator cores so the gate can't drift.
         if let Some(reason) = fail_closed_reason(&req.headers, req.body.len(), &action) {
             self.audit_fail_closed(destination.as_deref(), reason).await;
-            return WireResponse::Refused {
+            return Err(WireResponse::Refused {
                 message: "egress redaction enabled for destination but body is \
                           compressed or over the scan cap; refusing (fail-closed)"
                     .into(),
-            };
+            });
         }
         // Whether the request smuggled a host placeholder at all — decides if a
         // refusal is a claim-12 placeholder drop (audited) or a plain bad request.
@@ -1539,9 +1863,9 @@ impl SubstitutionService {
             Err(_) => {
                 self.audit_fail_closed(destination.as_deref(), "fail_closed_detector")
                     .await;
-                return WireResponse::Refused {
+                return Err(WireResponse::Refused {
                     message: "sensitive-data detector failed closed; refusing request".into(),
-                };
+                });
             }
         };
         let prepared = match prepare_request(&endpoint, req) {
@@ -1553,32 +1877,39 @@ impl SubstitutionService {
                 if carried_placeholder {
                     self.audit_placeholder_dropped(destination.as_deref()).await;
                 }
-                return WireResponse::Refused {
+                return Err(WireResponse::Refused {
                     message: e.to_string(),
-                };
+                });
             }
         };
-        match self.forwarder.forward(prepared).await {
-            Ok(mut r) => {
-                let reinject_proofs = replacement_flow.reinject_response(&mut r);
-                self.audit_substitutions(&substituted, destination.as_deref())
-                    .await;
-                self.audit_rewrite_proofs("replace", &replacement_proofs, destination.as_deref())
-                    .await;
-                self.audit_rewrite_proofs("reinject", &reinject_proofs, destination.as_deref())
-                    .await;
-                self.audit_redactions(&redaction_hits, destination.as_deref())
-                    .await;
-                WireResponse::Ok {
-                    status: r.status,
-                    headers: r.headers,
-                    body_b64: B64.encode(r.body),
-                }
-            }
-            Err(e) => WireResponse::Refused {
-                message: e.to_string(),
-            },
-        }
+        Ok(PreparedFlow {
+            request: Some(prepared),
+            destination,
+            substituted,
+            replacement_flow,
+            replacement_proofs,
+            redaction_hits,
+            redaction_action: action,
+        })
+    }
+
+    async fn audit_completed_flow(
+        &self,
+        flow: &PreparedFlow,
+        reinject_proofs: &[mvm_core::policy::RewriteProofRecord],
+    ) {
+        self.audit_substitutions(&flow.substituted, flow.destination.as_deref())
+            .await;
+        self.audit_rewrite_proofs(
+            "replace",
+            &flow.replacement_proofs,
+            flow.destination.as_deref(),
+        )
+        .await;
+        self.audit_rewrite_proofs("reinject", reinject_proofs, flow.destination.as_deref())
+            .await;
+        self.audit_redactions(&flow.redaction_hits, flow.destination.as_deref())
+            .await;
     }
 
     /// Mask undeclared secret-shaped / PII content out of a guest-authored

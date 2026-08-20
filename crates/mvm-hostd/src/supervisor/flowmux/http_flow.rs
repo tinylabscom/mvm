@@ -15,6 +15,7 @@
 use std::collections::BTreeMap;
 use std::os::unix::net::UnixStream;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
@@ -22,6 +23,7 @@ use mvm_contract::protocol::network_flow::{MAX_PAYLOAD_LEN, Opcode};
 use mvm_core::net::session::Session;
 use mvm_core::substitution_wire::{HttpFlowHead, HttpFlowResponseHead, WireRequest, WireResponse};
 use tracing::warn;
+use zeroize::Zeroizing;
 
 use super::super::network_endpoint_proxy::SubstitutionService;
 use super::write_frame_to;
@@ -34,7 +36,7 @@ use super::write_frame_to;
 /// instead of forwarded.
 pub(super) struct HttpFlow {
     head: Option<HttpFlowHead>,
-    body: Vec<u8>,
+    body: Zeroizing<Vec<u8>>,
 }
 
 /// Why a frame on an HTTP flow could not be accepted.
@@ -42,6 +44,8 @@ pub(super) struct HttpFlow {
 pub(super) enum HttpFlowError {
     #[error("HttpRequestHead is not valid JSON: {0}")]
     BadHead(String),
+    #[error("request head of {got} bytes exceeds the {max} allowed")]
+    HeadTooLarge { got: usize, max: usize },
     #[error("a second HttpRequestHead on the same flow")]
     DuplicateHead,
     #[error("HttpRequestBody before HttpRequestHead")]
@@ -59,11 +63,17 @@ pub(super) enum HttpFlowError {
 /// large upload wants a plain TCP flow, which streams.
 pub(super) const MAX_HTTP_BODY_LEN: u64 = 32 * 1024 * 1024;
 
+/// Maximum serialized request-head size accepted on a typed flow.
+pub(super) const MAX_HTTP_HEAD_LEN: usize = 64 * 1024;
+
+/// Maximum silence between decoded upstream response chunks.
+const HTTP_RESPONSE_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+
 impl HttpFlow {
     pub(super) fn new() -> Self {
         Self {
             head: None,
-            body: Vec::new(),
+            body: Zeroizing::new(Vec::new()),
         }
     }
 
@@ -73,6 +83,12 @@ impl HttpFlow {
     pub(super) fn accept_head(&mut self, payload: &[u8]) -> Result<(), HttpFlowError> {
         if self.head.is_some() {
             return Err(HttpFlowError::DuplicateHead);
+        }
+        if payload.len() > MAX_HTTP_HEAD_LEN {
+            return Err(HttpFlowError::HeadTooLarge {
+                got: payload.len(),
+                max: MAX_HTTP_HEAD_LEN,
+            });
         }
         let head: HttpFlowHead =
             serde_json::from_slice(payload).map_err(|e| HttpFlowError::BadHead(e.to_string()))?;
@@ -116,13 +132,18 @@ impl HttpFlow {
             method: head.method,
             url: head.url,
             headers: head.headers,
-            body_b64: B64.encode(std::mem::take(&mut self.body)),
+            body_b64: B64.encode(std::mem::take(&mut *self.body)),
         })
     }
 }
 
 /// Every HTTP flow this session is assembling, by stream id.
 pub(super) type HttpFlows = BTreeMap<u32, HttpFlow>;
+
+/// Cancel an assembling flow, dropping its zeroizing body immediately.
+pub(super) fn cancel(flows: &mut HttpFlows, stream_id: u32) -> bool {
+    flows.remove(&stream_id).is_some()
+}
 
 /// Forward one assembled request and frame the reply back to the guest.
 ///
@@ -140,11 +161,58 @@ pub(super) fn spawn_forward(
     request: WireRequest,
 ) {
     handle.spawn(async move {
-        let response = service.process(request).await;
-        if let Err(e) = write_response(&session, &writer, stream_id, response) {
+        let result = match service.process_stream(request).await {
+            Ok(response) => write_stream_response(&session, &writer, stream_id, response).await,
+            Err(refusal) => write_response(&session, &writer, stream_id, refusal),
+        };
+        if let Err(e) = result {
             warn!(stream_id, error = %e, "FlowMux failed to send HTTP response");
+            let _ = write_frame_to(
+                &session,
+                &writer,
+                Opcode::Reset,
+                stream_id,
+                b"http response failed",
+            );
         }
     });
+}
+
+/// Frame a bounded upstream stream without collecting its body in host
+/// memory. Each receive waits on the channel event with an idle deadline.
+async fn write_stream_response(
+    session: &Mutex<Session>,
+    writer: &Mutex<UnixStream>,
+    stream_id: u32,
+    mut response: super::super::network_endpoint_proxy::ForwardStreamResponse,
+) -> Result<(), super::FlowMuxError> {
+    let head = HttpFlowResponseHead::Ok {
+        status: response.status,
+        headers: response.headers,
+        body_len: response.body_len,
+    };
+    let encoded =
+        serde_json::to_vec(&head).map_err(|e| super::FlowMuxError::FrameRefused(e.to_string()))?;
+    write_frame_to(
+        session,
+        writer,
+        Opcode::HttpResponseHead,
+        stream_id,
+        &encoded,
+    )?;
+    loop {
+        let next = tokio::time::timeout(HTTP_RESPONSE_IDLE_TIMEOUT, response.body.recv())
+            .await
+            .map_err(|_| super::FlowMuxError::FrameRefused("http response idle timeout".into()))?;
+        let Some(chunk) = next else {
+            break;
+        };
+        let chunk = chunk.map_err(|error| super::FlowMuxError::FrameRefused(error.to_string()))?;
+        for frame in chunk.chunks(MAX_PAYLOAD_LEN) {
+            write_frame_to(session, writer, Opcode::HttpResponseBody, stream_id, frame)?;
+        }
+    }
+    write_frame_to(session, writer, Opcode::HttpComplete, stream_id, &[])
 }
 
 /// Frame a `WireResponse` as head, body chunks, and a completion.
@@ -167,7 +235,7 @@ fn write_response(
                 HttpFlowResponseHead::Ok {
                     status,
                     headers,
-                    body_len: body.len() as u64,
+                    body_len: Some(body.len() as u64),
                 },
                 body,
             )
@@ -276,6 +344,39 @@ mod tests {
             flow.accept_head(&head_json(MAX_HTTP_BODY_LEN + 1)),
             Err(HttpFlowError::BodyTooLarge { .. })
         ));
+    }
+
+    #[test]
+    fn an_oversized_serialized_head_is_refused_before_json_parsing() {
+        let mut flow = HttpFlow::new();
+        let payload = vec![b' '; MAX_HTTP_HEAD_LEN + 1];
+        assert!(matches!(
+            flow.accept_head(&payload),
+            Err(HttpFlowError::HeadTooLarge { .. })
+        ));
+    }
+
+    #[test]
+    fn an_incomplete_body_uses_zeroizing_storage() {
+        fn assert_zeroizing(_: &Zeroizing<Vec<u8>>) {}
+
+        let mut flow = HttpFlow::new();
+        flow.accept_head(&head_json(8)).unwrap();
+        flow.accept_body(b"secret").unwrap();
+        assert_zeroizing(&flow.body);
+    }
+
+    #[test]
+    fn cancellation_removes_an_incomplete_flow_immediately() {
+        let mut flows = HttpFlows::new();
+        let mut flow = HttpFlow::new();
+        flow.accept_head(&head_json(8)).unwrap();
+        flow.accept_body(b"secret").unwrap();
+        flows.insert(7, flow);
+
+        assert!(cancel(&mut flows, 7));
+        assert!(flows.is_empty());
+        assert!(!cancel(&mut flows, 7), "a second cancel is idempotent");
     }
 
     #[test]

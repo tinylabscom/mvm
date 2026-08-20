@@ -1169,7 +1169,7 @@ impl FlowMuxSession {
         let Some(request) = flow.take_when_complete() else {
             return Ok(());
         };
-        self.http_flows.remove(&stream_id);
+        http_flow::cancel(&mut self.http_flows, stream_id);
         let (Some(service), Some(handle)) = (&self.substitution, &self.runtime_handle) else {
             return Err(FlowMuxError::FrameRefused(
                 "no runtime to forward the http flow on".to_string(),
@@ -1217,6 +1217,10 @@ impl FlowMuxSession {
     }
 
     fn reset_stream(&mut self, stream_id: u32) -> Result<(), FlowMuxError> {
+        // Dropping an incomplete typed request wipes its zeroizing body buffer.
+        // A guest reset is cancellation, not permission to retain the partial
+        // cleartext until the authenticated session itself eventually exits.
+        self.http_flows.remove(&stream_id);
         let was_live = self.streams.remove(&stream_id);
         let live = was_live.is_some();
         if let Some(handle) = was_live {
