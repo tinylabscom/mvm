@@ -127,7 +127,10 @@ pub fn shares_from_vm_volumes(volumes: &[VmVolume]) -> Vec<mvm_core::plan::HostS
 /// boot exactly as it does on the CLI path. Non-fatal on a cold cache under
 /// `PreferOverlay` (the guest falls back to a baked agent when it has one);
 /// fails closed when the policy is `RequiredOverlay`.
-fn attach_runtime_overlay_from_cache(config: &mut VmStartConfig, backend_name: &str) -> Result<()> {
+pub(crate) fn attach_runtime_overlay_from_cache(
+    config: &mut VmStartConfig,
+    backend_name: &str,
+) -> Result<()> {
     use mvm_build::runtime_overlay::{RuntimeOverlayResolver, resolve_or_seed_from_default_cache};
     if !matches!(backend_name, "firecracker" | "hvf" | "qemu" | "libkrun") {
         return Ok(());

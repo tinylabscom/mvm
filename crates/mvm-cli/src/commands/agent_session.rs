@@ -523,12 +523,6 @@ fn resume_booting(
     println!("{}", summary_line(&booted.record));
     println!("admitted plan:  {}", booted.started.admitted.plan_id().0);
     println!("booted sandbox: {}", booted.started.vm_id.0);
-    if let Err(error) = record_resume_in_chain(&booted.record, &booted.started.admitted) {
-        crate::ui::warn(&format!(
-            "session {} resumed and booted, but the resume was not recorded in the audit chain: {error:#}",
-            booted.record.session_id.as_str()
-        ));
-    }
     Ok(())
 }
 
@@ -556,6 +550,10 @@ fn resume_boot_record(
     // The session's own state dir, named for the session, so the staged resume
     // point sits where every other per-VM artifact for that name does.
     let state_dir = mvm_core::config::vm_state_dir(inputs.id.as_str());
+    let signer = super::vm::host_signer::load_or_init()
+        .context("loading the host signer to sign the resume entry")?;
+    let emitter = super::vm::audit_chain::AuditEmitter::new(signer.signing)
+        .context("opening the audit chain to record the resume")?;
     resume_and_boot(
         sessions,
         checkpoints,
@@ -564,7 +562,7 @@ fn resume_boot_record(
             backend,
             state_dir: &state_dir,
             kernel_path: args.kernel.as_deref(),
-            emitter: None,
+            emitter: Some(&emitter),
         },
         &SystemClock,
         &InMemoryNonceLedger::new(),

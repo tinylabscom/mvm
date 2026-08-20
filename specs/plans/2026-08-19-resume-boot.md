@@ -112,7 +112,7 @@ emissions, same undo. If you find yourself wanting to improve something while
 moving it, don't — note it in your report instead. A refactor that also changes
 behaviour cannot be reviewed as either.
 
-- [ ] **Step 1: Confirm the current tests cover the moved code**
+- [x] **Step 1: Confirm the current tests cover the moved code**
 
 Before touching anything, run the existing admission suite and record the count:
 
@@ -124,7 +124,7 @@ export CARGO_TARGET_DIR=/Users/auser/work/tinylabs/mvmco/.worktrees/mvm-durable-
 Note the number. That same set must pass unchanged after the extraction — that
 is what makes this a safe refactor rather than a rewrite. Report both numbers.
 
-- [ ] **Step 2: Extract the function**
+- [x] **Step 2: Extract the function**
 
 Move the post-admission tail into `start_admitted`, taking a
 `StartAdmittedParams` struct (the argument count is exactly why). Have
@@ -133,17 +133,17 @@ Move the post-admission tail into `start_admitted`, taking a
 prose that now lives in `start_admitted` moves with it, and `admit_and_start`
 keeps a line saying it admits and then delegates.
 
-- [ ] **Step 3: Run the same suite; the count must match**
+- [x] **Step 3: Run the same suite; the count must match**
 
 Any change in the number is a bug in the extraction. Report both.
 
-- [ ] **Step 4: Verify the extraction is real**
+- [x] **Step 4: Verify the extraction is real**
 
 `grep -c "run_post_admission_gates" crates/mvm-hostd/src/plan_admission.rs`
 must show it called from exactly one place. If `admit_and_start` still contains
 a `backend.start(` call, the extraction is incomplete.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 export CARGO_TARGET_DIR=/Users/auser/work/tinylabs/mvmco/.worktrees/mvm-durable-sessions/target
@@ -171,7 +171,7 @@ a `CheckpointMeta`'s `content` names its blobs. Read
 follow whichever of those a cold boot corresponds to. If neither fits, say so in
 your report and stop rather than inventing a third way to find a rootfs.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 - a cold-boot config names the resume point's rootfs, not an arbitrary path;
 - the config's `name` is the session id, matching the admitted plan's `vm_name`,
@@ -183,13 +183,13 @@ your report and stop rather than inventing a third way to find a rootfs.
 Use the fixtures already in `session_resume.rs`'s `mod tests` (`seed_checkpoint`,
 `parked_record`); do not invent a second fixture style.
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/mvm-hostd/src/session_resume.rs
@@ -222,7 +222,7 @@ message naming the tier and saying the path is not built, not silently cold-boot
 — a `Parked` session cold-booted would discard a memory image the operator
 believes is being restored, which is data loss disguised as success.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 - a `Cold`-tier resume with `--boot` reaches `start_admitted` (use the mock
   backend — read how `plan_admission`'s tests drive `AnyBackend::Mock`);
@@ -233,19 +233,19 @@ believes is being restored, which is data loss disguised as success.
 - `resume` without `--boot` still admits and transitions without starting
   anything, exactly as today.
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
-- [ ] **Step 5: Verify the tier refusal is not vacuous**
+- [x] **Step 5: Verify the tier refusal is not vacuous**
 
 Temporarily let `Parked` fall through to the cold path, confirm that test goes
 RED, restore. Report the RED with command and output; if it does not go red, say
 so and stop rather than reporting one you did not observe.
 
-- [ ] **Step 6: Full gate and commit**
+- [x] **Step 6: Full gate and commit**
 
 ```bash
 export CARGO_TARGET_DIR=/Users/auser/work/tinylabs/mvmco/.worktrees/mvm-durable-sessions/target
@@ -265,7 +265,7 @@ the path works.
 
 **Files:** none in the repo — this produces a report.
 
-- [ ] **Step 1: Build on the host**
+- [x] **Step 1: Build on the host**
 
 ```bash
 ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=no \
@@ -282,7 +282,7 @@ cargo build -p mvm-cli
 
 Do not disturb `/root/mvm`.
 
-- [ ] **Step 2: Run the Linux-gated tests that a macOS check cannot see**
+- [x] **Step 2: Run the Linux-gated tests that a macOS check cannot see**
 
 ```bash
 cargo nextest run -p mvm-hostd -p mvm-runtime -p mvm-cli
@@ -291,7 +291,7 @@ cargo nextest run -p mvm-hostd -p mvm-runtime -p mvm-cli
 Report the count and any failure. A macOS-green / Linux-red difference is the
 finding this task exists to catch.
 
-- [ ] **Step 3: Drive the real lifecycle**
+- [x] **Step 3: Drive the real lifecycle**
 
 Using the built `mvmctl`, on the host:
 1. produce a checkpoint that can serve as a resume point (reuse whatever
@@ -307,7 +307,7 @@ Capture the console log and the exit status. **If any step fails, that is the
 result** — report it exactly rather than working around it. A failure here is
 worth more than a green mock test.
 
-- [ ] **Step 4: Write the witness report**
+- [x] **Step 4: Write the witness report**
 
 Record it under `specs/sprint/delivery/` with the commands, the console
 evidence, and what did and did not work. If the boot did not happen, say so
@@ -317,16 +317,16 @@ plainly in the title.
 
 ### Task 5: Specs and delivery record
 
-- [ ] **Step 1** Update D5 steps 6-7 state in
+- [x] **Step 1** Update D5 steps 6-7 state in
 `specs/plans/2026-08-18-durable-agent-sessions.md` — what boots, what refuses,
 and that `Parked`/`Resident` are unbuilt.
-- [ ] **Step 2** Update `specs/REFACTOR-STATUS.md` and its "Last updated".
-- [ ] **Step 3** Create `specs/sprint/delivery/resume-boot.md`.
-- [ ] **Step 4** Tick this plan's checkboxes and run the doc gates:
+- [x] **Step 2** Update `specs/REFACTOR-STATUS.md` and its "Last updated".
+- [x] **Step 3** Create `specs/sprint/delivery/resume-boot.md`.
+- [x] **Step 4** Tick this plan's checkboxes and run the doc gates:
 `check-plan-names`, `check-declared-backing`, `check-sprint-append`,
 `check-no-spec-refs-in-comments`, `check-cli-help-matches-docs` (the `--boot`
 flag may need a reference row).
-- [ ] **Step 5** Commit.
+- [x] **Step 5** Commit.
 
 These spec files carry `Backing: preview`, which bars a short list of assertive
 verbs matched as whole words — quoting one trips the gate. Prefer "introduces",

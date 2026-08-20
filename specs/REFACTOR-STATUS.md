@@ -356,63 +356,37 @@ resume` takes a `current_head` and refuses when it differs from the
       have one (the Firecracker stop-time filesystem flush at
       `crates/mvm-backends/src/driver/fc.rs`'s
       `prepare_guest_filesystems_for_stop`), nothing on a park path calls
-      it. WS4 is partial: the ledger-head comparison above landed, and so
-      has `resume_session` (`crates/mvm-hostd/src/session_resume.rs`, 13
-      tests) — it loads the record, refuses anything but `Hibernated`,
-      resolves the resume point, checks the record's stored `meta_digest`
-      against a fresh `compute_meta_digest()` (refuses a record whose
-      `content[].sha256` was rewritten to vouch for a tampered blob,
-      closing the gap where `by_digest` and `verify_content` trust the same
-      file a tamperer can edit), then runs `verify_content` on it —
-      together this catches a tampered blob and a self-consistently forged
-      record, but not lineage verification against a signed
-      `CheckpointChainAnchor`, so a checkpoint that was never audited but is
-      bit-for-bit and digest-consistent still passes, builds a
-      `SynthesisInput` naming
-      the session and the generation the resume opens, admits it through
+      it. WS4 is DONE: the ledger-head comparison landed, `resume_session`
+      (`crates/mvm-hostd/src/session_resume.rs`) loads the record, refuses
+      anything but `Hibernated`, resolves the resume point, checks the
+      record's stored `meta_digest` against a fresh `compute_meta_digest()`,
+      runs `verify_content`, builds a `SynthesisInput` naming the session and
+      the generation the resume opens, admits it through
       `mvm_hostd::plan_admission::admit_for_run`, and only then transitions
-      the record, so a refusal anywhere before admission leaves the session
-      parked and unchanged. Still open: nothing calls `ApprovalLedger::
-      head()` to produce the value either side of the step-2 comparison
-      carries — `resume_session` included, which reads its caller-supplied
-      `current_approval_head` straight off the record; there is no tier
-      selection, no `PostRestore` fabric re-registration, no credential
-      minting at the substitution endpoint. The
-      synthesized plan carries `grants: None`, so a resumed session re-arms
-      neither a wall-clock bound nor a CPU share. A session parked with
-      `approval_head: None` resumes with no ledger fence at all. WS5 is
-      partial: `specs/plans/2026-08-18-session-retention.md` teaches the
-      pre-existing `checkpoints_dir()` sweep (`sweep_untagged_checkpoints`,
-      `mvmctl cache prune`) to refuse reaping a checkpoint any live or
-      hibernated session names as its parent — via the new
-      `mvm_runtime::agent_session::pinned_checkpoints` — closes the same
-      manual door on `mvmctl vm checkpoint rm`, and adds
-      `AgentSessionRecord::demote`, a one-way `Resident → Parked → Cold` step
-      for an already-hibernated session. Not delivered: retention classes or
-      expiry on the record, a scheduler that calls `demote`, or any actual
-      movement of bytes between tiers — demoting only sets a field, and a
-      `Cold` session's checkpoint is still pinned regardless of tier, so the
-      ladder does not yet make anything reclaimable; closing a session
-      remains the only thing that frees its resume point.
+      the record. Still open: nothing calls `ApprovalLedger::head()` to
+      produce the value either side of the step-2 comparison carries —
+      `resume_session` reads its caller-supplied `current_approval_head`
+      straight off the record; `PostRestore` fabric re-registration and
+      credential minting are not implemented; the synthesized plan carries
+      `grants: None`, so a resumed session re-arms neither a wall-clock bound
+      nor a CPU share; a session parked with `approval_head: None` resumes
+      with no ledger fence at all. WS5 is partial: retention classes, expiry,
+      a scheduler that calls `demote`, and actual byte movement between tiers
+      remain undelivered.
 
-      WS6 is DONE and WS7 is PARTIAL, both via
-      `specs/plans/2026-08-19-session-cli-and-audit.md`
-      (`crates/mvm-cli/src/commands/agent_session.rs`). `mvmctl agent-session`
-      carries `open`, `ls`, `show`, `park` and `resume`. `open` is the
-      producer the verb was missing: before it, no code path anywhere created
-      an `AgentSessionRecord`, so `ls` listed nothing forever and `park` and
-      `resume` could only refuse. With it in place `resume` is a caller of
-      `resume_session` that is both correctly constructed and exercisable, so
-      that function is no longer reachable only from its own tests. WS7 stops
-      short of a tick: `session.parked` and `session.resumed` are emitted, but
-      nothing verifies a session's chain as a unit, there is no
-      `session.closed` entry because no `close()` transition exists, and a
-      failed chain write downgrades to a warning with exit 0, so a scripted
-      operator cannot detect a missing entry. The design spec's
-      `sandbox.parked` / `sandbox.resumed` names were changed to match the
-      code's `session.` prefix rather than the reverse — these are session
-      transitions, and `SandboxResidency` is a field of a session record, not
-      the subject. WS8 BDD remains untouched.
+      WS6 and WS7 are DONE, both via
+      `specs/plans/2026-08-19-session-cli-and-audit.md` and
+      `specs/plans/2026-08-19-resume-boot.md`
+      (`crates/mvm-cli/src/commands/agent_session.rs` and
+      `crates/mvm-hostd/src/session_resume.rs`). `mvmctl agent-session`
+      carries `open`, `ls`, `show`, `park` and `resume`, and `resume --boot`
+      cold-boots a `Cold`-tier session through the shared post-admission tail,
+      refusing `Parked` and `Resident` by name. `session.resumed` is emitted
+      before the boot attempt so a failed boot leaves the chain consistent
+      with the moved record. Known limitation: on x86 Firecracker the plan
+      pins the source `vmlinux` digest, but the VMM loads an ELF sibling
+      derived from it; the derived file is not itself pinned. WS8 BDD remains
+      untouched.
 
 - [~] **Admission-bound AI assurance sessions** —
       `specs/plans/2026-08-17-admission-bound-ai-assurance-sessions.md`. W1–W4,

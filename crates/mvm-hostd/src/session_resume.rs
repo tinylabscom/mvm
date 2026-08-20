@@ -17,9 +17,12 @@ use std::path::Path;
 
 use mvm_contract::plan::types::AuditLabels;
 use mvm_contract::protocol::agent_session::AgentSessionId;
-use mvm_core::checkpoint::{ApprovalHead, CheckpointMeta, ROOTFS_BLOB};
+use mvm_core::checkpoint::{ApprovalHead, CheckpointMeta, ROOTFS_BLOB, ROOTFS_VERITY_BLOB};
 use mvm_core::plan::{PlanSeccompTier, SecretReleasePolicy, SynthesisInput, Variant};
-use mvm_core::protocol::vm_backend::VmStartConfig;
+use mvm_core::protocol::vm_backend::{
+    RuntimeSourceLaunchKind, RuntimeSourcePolicySelection, VmStartConfig,
+    select_runtime_source_policy,
+};
 use mvm_runtime::agent_session::{
     AgentSessionRecord, AgentSessionStore, SandboxResidency, StorageTier,
 };
@@ -311,9 +314,11 @@ pub struct ColdBootParams<'a> {
     /// here and the boot reads them from here.
     pub state_dir: &'a Path,
     /// Kernel this boot loads, or `None` for a backend carrying its own. When
-    /// the material names a `kernel_sha256` the plan pins that kernel, and the
-    /// admitted-environment gate hashes whatever path this supplies against the
-    /// pin — so a substituted kernel is refused rather than booted.
+    /// the material names a `kernel_sha256`, the plan pins the digest of the
+    /// file at this path and the admitted-environment gate refuses a mismatch.
+    /// On x86 Firecracker the VMM loads an ELF sibling extracted from this
+    /// file, so the pin covers the source file rather than the bytes that
+    /// execute; callers that need an execute-time pin must pin the ELF.
     pub kernel_path: Option<&'a Path>,
 }
 
@@ -344,6 +349,7 @@ pub fn cold_boot_config(params: ColdBootParams<'_>) -> Result<VmStartConfig> {
         );
     }
 
+    let verity = has_verity_pair(params.parent)?;
     stage_resume_point(params.checkpoints, params.parent, params.state_dir)?;
 
     let memory_mib = u32::try_from(params.material.mem_mib).map_err(|_| {
@@ -353,7 +359,19 @@ pub fn cold_boot_config(params: ColdBootParams<'_>) -> Result<VmStartConfig> {
         )
     })?;
 
-    Ok(VmStartConfig {
+    // Preserve the runtime-source contract the resume point was captured under.
+    // When the checkpoint predates the field, fall back to the same rule a fresh
+    // workload image uses for this backend.
+    let runtime_source_policy = params.parent.runtime_source_policy.unwrap_or_else(|| {
+        select_runtime_source_policy(RuntimeSourcePolicySelection {
+            backend_name: Some(&params.material.backend_name),
+            sealed: false,
+            root_strategy: None,
+            launch_kind: RuntimeSourceLaunchKind::WorkloadImage,
+        })
+    });
+
+    let mut config = VmStartConfig {
         // The session id, which is also the admitted plan's `vm_name`, so the
         // started VM and the plan that authorized it agree on identity.
         name: params.record.session_id.as_str().to_string(),
@@ -361,9 +379,61 @@ pub fn cold_boot_config(params: ColdBootParams<'_>) -> Result<VmStartConfig> {
         kernel_path: params.kernel_path.map(|k| k.display().to_string()),
         cpus: params.material.cpus,
         memory_mib,
+        runtime_source_policy,
         ..VmStartConfig::default()
-    })
+    };
+
+    if verity {
+        config.verity_path = Some(
+            params
+                .state_dir
+                .join(ROOTFS_VERITY_BLOB)
+                .display()
+                .to_string(),
+        );
+        config.roothash = Some(read_roothash(params.state_dir)?);
+    }
+
+    // A runtime-lean rootfs needs the guest agent from the overlay. The cache
+    // resolver uses the current host package version, matching the fresh-run path.
+    crate::run::attach_runtime_overlay_from_cache(&mut config, &params.material.backend_name)?;
+
+    Ok(config)
 }
+
+/// True when the resume point carries a complete dm-verity sidecar set.
+///
+/// A checkpoint with only one of the two files is malformed: the hash tree is
+/// useless without the root hash, and a root hash without a tree cannot verify
+/// anything. Refusing here keeps the failure close to the data declaration.
+fn has_verity_pair(parent: &CheckpointMeta) -> Result<bool> {
+    let has_verity = parent
+        .content
+        .iter()
+        .any(|blob| blob.name == ROOTFS_VERITY_BLOB);
+    let has_roothash = parent
+        .content
+        .iter()
+        .any(|blob| blob.name == ROOTFS_ROOTHASH_BLOB);
+    anyhow::ensure!(
+        has_verity == has_roothash,
+        "resume point {} has an incomplete dm-verity sidecar set (verity={verity}, roothash={rothash})",
+        parent.meta_digest,
+        verity = has_verity,
+        rothash = has_roothash
+    );
+    Ok(has_verity)
+}
+
+/// Read the lowercase-hex root hash from the staged `rootfs.roothash` file.
+fn read_roothash(state_dir: &Path) -> Result<String> {
+    let path = state_dir.join(ROOTFS_ROOTHASH_BLOB);
+    let text = std::fs::read_to_string(&path)
+        .with_context(|| format!("reading root hash at {}", path.display()))?;
+    Ok(text.trim().to_string())
+}
+
+const ROOTFS_ROOTHASH_BLOB: &str = "rootfs.roothash";
 
 /// Clone every blob of `parent`'s content manifest into `state_dir`.
 ///
@@ -392,6 +462,49 @@ fn stage_resume_point(
             .with_context(|| format!("staging resume-point blob {}", blob.name))?;
     }
     Ok(())
+}
+
+/// Labels that ride a `session.resumed` audit entry.
+///
+/// Kept in the hostd module rather than the CLI so both the boot and no-boot
+/// resume paths can carry the same fields, and so a boot that fails after the
+/// record moved still writes the same entry shape.
+fn resume_audit_labels(
+    record: &AgentSessionRecord,
+    admitted: &AdmittedPlan,
+) -> Vec<(String, String)> {
+    vec![
+        (
+            "resumed_session".to_string(),
+            record.session_id.as_str().to_string(),
+        ),
+        (
+            "resumed_at_generation".to_string(),
+            record.generation.to_string(),
+        ),
+        ("resumed_plan_id".to_string(), admitted.plan_id().0.clone()),
+    ]
+}
+
+/// Emit `session.resumed` for a transition that already happened.
+///
+/// Best-effort at the call site: a failure to sign the chain is logged but does
+/// not stop the boot, because the chain is a witness to a record that is already
+/// on disk, not a precondition for it.
+fn emit_session_resumed(
+    emitter: &crate::audit::emitter::AuditEmitter,
+    record: &AgentSessionRecord,
+    admitted: &AdmittedPlan,
+) {
+    if let Err(error) =
+        emitter.emit_session_resumed(admitted.plan(), resume_audit_labels(record, admitted))
+    {
+        tracing::warn!(
+            session_id = record.session_id.as_str(),
+            plan_id = %admitted.plan_id().0,
+            "session resume was not recorded in the audit chain: {error:#}"
+        );
+    }
 }
 
 /// What a resume-and-boot is asked for: the resume itself, plus the launch
@@ -489,6 +602,13 @@ pub fn resume_and_boot(
     }
 
     let resumed = resume_session(sessions, checkpoints, req.resume, clock, ledger)?;
+
+    // The record moved before this point. Log the transition in the chain now,
+    // before anything that can fail to boot: a boot failure must not erase the
+    // fact that a signed plan authorized the transition.
+    if let Some(emitter) = req.emitter {
+        emit_session_resumed(emitter, &resumed.record, &resumed.admitted);
+    }
 
     let config = cold_boot_config(ColdBootParams {
         record: &resumed.record,
@@ -645,7 +765,12 @@ mod tests {
     /// Goes through the public `capture_fs_quick` — the same call the
     /// checkpoint module's own fixtures use — rather than hand-writing a
     /// `meta.json` beside a file.
-    fn seed_checkpoint(store: &CheckpointStore, tmp: &Path, id: &str) -> CheckpointMeta {
+    fn seed_checkpoint(
+        store: &CheckpointStore,
+        tmp: &Path,
+        id: &str,
+        runtime_source_policy: Option<mvm_core::protocol::vm_backend::RuntimeSourcePolicy>,
+    ) -> CheckpointMeta {
         let rootfs = tmp.join("rootfs.ext4");
         std::fs::write(&rootfs, b"fake-ext4-bytes").unwrap();
         capture_fs_quick(
@@ -655,7 +780,7 @@ mod tests {
                 vm_name: "vm-alpha".into(),
                 rootfs,
                 supervisor_config_digest: "d".into(),
-                runtime_source_policy: None,
+                runtime_source_policy,
                 runtime_overlay_version: None,
                 tag: None,
                 created_unix: 1,
@@ -727,7 +852,7 @@ mod tests {
     fn a_resume_admits_a_plan_and_advances_the_generation() {
         let (_env, _home) = isolated_host(GrantCeiling::default());
         let fx = Fixture::new();
-        let parent = seed_checkpoint(&fx.checkpoints, fx.tmp.path(), "cp-parent");
+        let parent = seed_checkpoint(&fx.checkpoints, fx.tmp.path(), "cp-parent", None);
 
         let mut rec = parked_record("sess-alpha");
         rec.parent_checkpoint = Some(parent.meta_digest.clone());
@@ -761,7 +886,7 @@ mod tests {
         // real resume and compares them.
         let (_env, _home) = isolated_host(GrantCeiling::default());
         let fx = Fixture::new();
-        let parent = seed_checkpoint(&fx.checkpoints, fx.tmp.path(), "cp-parent");
+        let parent = seed_checkpoint(&fx.checkpoints, fx.tmp.path(), "cp-parent", None);
 
         let mut rec = parked_record("sess-alpha");
         rec.parent_checkpoint = Some(parent.meta_digest.clone());
@@ -804,7 +929,7 @@ mod tests {
     fn a_tampered_parent_checkpoint_refuses_before_admission() {
         let (_env, _home) = isolated_host(GrantCeiling::default());
         let fx = Fixture::new();
-        let parent = seed_checkpoint(&fx.checkpoints, fx.tmp.path(), "cp-parent");
+        let parent = seed_checkpoint(&fx.checkpoints, fx.tmp.path(), "cp-parent", None);
 
         let mut rec = parked_record("sess-alpha");
         rec.parent_checkpoint = Some(parent.meta_digest.clone());
@@ -838,7 +963,7 @@ mod tests {
         // the stored `meta_digest`.
         let (_env, _home) = isolated_host(GrantCeiling::default());
         let fx = Fixture::new();
-        let parent = seed_checkpoint(&fx.checkpoints, fx.tmp.path(), "cp-parent");
+        let parent = seed_checkpoint(&fx.checkpoints, fx.tmp.path(), "cp-parent", None);
 
         let mut rec = parked_record("sess-alpha");
         rec.parent_checkpoint = Some(parent.meta_digest.clone());
@@ -877,7 +1002,7 @@ mod tests {
     fn an_active_session_cannot_be_resumed() {
         let (_env, _home) = isolated_host(GrantCeiling::default());
         let fx = Fixture::new();
-        let parent = seed_checkpoint(&fx.checkpoints, fx.tmp.path(), "cp-parent");
+        let parent = seed_checkpoint(&fx.checkpoints, fx.tmp.path(), "cp-parent", None);
 
         let mut rec = parked_record("sess-alpha");
         rec.parent_checkpoint = Some(parent.meta_digest.clone());
@@ -905,7 +1030,7 @@ mod tests {
             ..Default::default()
         });
         let fx = Fixture::new();
-        let parent = seed_checkpoint(&fx.checkpoints, fx.tmp.path(), "cp-parent");
+        let parent = seed_checkpoint(&fx.checkpoints, fx.tmp.path(), "cp-parent", None);
 
         let mut rec = parked_record("sess-alpha");
         rec.parent_checkpoint = Some(parent.meta_digest.clone());
@@ -954,7 +1079,13 @@ mod tests {
     /// Reuses `seed_checkpoint` + `parked_record` rather than a second fixture
     /// style, so a change to what a resume point looks like reaches these tests.
     fn cold_boot_fixture(fx: &Fixture) -> (AgentSessionRecord, CheckpointMeta) {
-        let parent = seed_checkpoint(&fx.checkpoints, fx.tmp.path(), "cp-parent");
+        use mvm_core::protocol::vm_backend::RuntimeSourcePolicy;
+        let parent = seed_checkpoint(
+            &fx.checkpoints,
+            fx.tmp.path(),
+            "cp-parent",
+            Some(RuntimeSourcePolicy::RootfsOnly),
+        );
         let mut rec = parked_record("sess-alpha");
         rec.parent_checkpoint = Some(parent.meta_digest.clone());
         (rec, parent)
@@ -1062,7 +1193,13 @@ mod tests {
         fx: &Fixture,
         reason: ParkReason,
     ) -> (AgentSessionRecord, ResumePlanMaterial, std::path::PathBuf) {
-        let parent = seed_checkpoint(&fx.checkpoints, fx.tmp.path(), "cp-parent");
+        use mvm_core::protocol::vm_backend::RuntimeSourcePolicy;
+        let parent = seed_checkpoint(
+            &fx.checkpoints,
+            fx.tmp.path(),
+            "cp-parent",
+            Some(RuntimeSourcePolicy::RootfsOnly),
+        );
         let mut rec = parked_record_at("sess-alpha", reason);
         rec.parent_checkpoint = Some(parent.meta_digest.clone());
         fx.sessions.write(&rec).unwrap();
@@ -1241,7 +1378,7 @@ mod tests {
         // resume would run under are not the ones it was admitted for.
         let (_env, _home) = isolated_host(GrantCeiling::default());
         let fx = Fixture::new();
-        let parent = seed_checkpoint(&fx.checkpoints, fx.tmp.path(), "cp-parent");
+        let parent = seed_checkpoint(&fx.checkpoints, fx.tmp.path(), "cp-parent", None);
 
         let mut rec = parked_record("sess-alpha");
         rec.parent_checkpoint = Some(parent.meta_digest.clone());
@@ -1271,7 +1408,7 @@ mod tests {
         // substitutes the record's own generation, which would always match.
         let (_env, _home) = isolated_host(GrantCeiling::default());
         let fx = Fixture::new();
-        let parent = seed_checkpoint(&fx.checkpoints, fx.tmp.path(), "cp-parent");
+        let parent = seed_checkpoint(&fx.checkpoints, fx.tmp.path(), "cp-parent", None);
 
         let mut rec = parked_record("sess-alpha");
         rec.parent_checkpoint = Some(parent.meta_digest.clone());
@@ -1286,5 +1423,210 @@ mod tests {
             .expect_err("a caller working from a superseded record must be refused");
         assert!(err.to_string().contains("generation"), "{err}");
         assert_still_parked(&fx, &rec);
+    }
+
+    #[test]
+    fn cold_boot_config_uses_recorded_runtime_source_policy() {
+        use mvm_core::protocol::vm_backend::RuntimeSourcePolicy;
+        let fx = Fixture::new();
+        let state = fx.tmp.path().join("state");
+        let parent = seed_checkpoint(
+            &fx.checkpoints,
+            fx.tmp.path(),
+            "cp-policy",
+            Some(RuntimeSourcePolicy::RequiredOverlay),
+        );
+        let rec = parked_record("sess-alpha");
+
+        let mut m = material();
+        m.backend_name = "mock".to_string();
+        let cfg = cold_boot_config(ColdBootParams {
+            record: &rec,
+            parent: &parent,
+            checkpoints: &fx.checkpoints,
+            material: &m,
+            state_dir: &state,
+            kernel_path: None,
+        })
+        .expect("policy-bearing checkpoint yields a config");
+
+        assert_eq!(
+            cfg.runtime_source_policy,
+            RuntimeSourcePolicy::RequiredOverlay
+        );
+    }
+
+    #[test]
+    fn cold_boot_config_falls_back_to_workload_image_policy_for_legacy_checkpoint() {
+        use mvm_core::protocol::vm_backend::RuntimeSourcePolicy;
+        let fx = Fixture::new();
+        let state = fx.tmp.path().join("state");
+        let parent = seed_checkpoint(&fx.checkpoints, fx.tmp.path(), "cp-legacy", None);
+        let rec = parked_record("sess-alpha");
+
+        let mut m = material();
+        m.backend_name = "mock".to_string();
+        let cfg = cold_boot_config(ColdBootParams {
+            record: &rec,
+            parent: &parent,
+            checkpoints: &fx.checkpoints,
+            material: &m,
+            state_dir: &state,
+            kernel_path: None,
+        })
+        .expect("legacy checkpoint yields a config");
+
+        // Material backend_name is "mock", so the workload-image fallback is
+        // PreferOverlay (mock is not a real block-rooted backend).
+        assert_eq!(
+            cfg.runtime_source_policy,
+            RuntimeSourcePolicy::PreferOverlay
+        );
+    }
+
+    #[test]
+    fn cold_boot_config_stages_and_names_verity_sidecars() {
+        use mvm_core::checkpoint::ContentBlob;
+        use mvm_core::protocol::vm_backend::RuntimeSourcePolicy;
+        let fx = Fixture::new();
+        let state = fx.tmp.path().join("state");
+        let mut parent = seed_checkpoint(
+            &fx.checkpoints,
+            fx.tmp.path(),
+            "cp-verity",
+            Some(RuntimeSourcePolicy::RootfsOnly),
+        );
+
+        // Inject verity sidecars into the content manifest and onto disk.
+        // The digests are not load-bearing for this unit: `cold_boot_config`
+        // stages by blob name and does not re-verify the manifest here.
+        let verity_bytes = b"verity-tree";
+        let roothash = "abc123def456";
+        let content_dir = fx.checkpoints.content_dir(&parent.id);
+        std::fs::write(content_dir.join(ROOTFS_VERITY_BLOB), verity_bytes).unwrap();
+        std::fs::write(content_dir.join(ROOTFS_ROOTHASH_BLOB), roothash).unwrap();
+        parent.content.push(ContentBlob {
+            name: ROOTFS_VERITY_BLOB.into(),
+            sha256: "0".repeat(64),
+        });
+        parent.content.push(ContentBlob {
+            name: ROOTFS_ROOTHASH_BLOB.into(),
+            sha256: "1".repeat(64),
+        });
+        let rec = parked_record("sess-alpha");
+
+        let cfg = cold_boot_config(ColdBootParams {
+            record: &rec,
+            parent: &parent,
+            checkpoints: &fx.checkpoints,
+            material: &material(),
+            state_dir: &state,
+            kernel_path: None,
+        })
+        .expect("verity-bearing checkpoint yields a config");
+
+        assert_eq!(
+            cfg.verity_path,
+            Some(state.join(ROOTFS_VERITY_BLOB).display().to_string())
+        );
+        assert_eq!(cfg.roothash, Some(roothash.to_string()));
+    }
+
+    #[test]
+    fn cold_boot_config_refuses_incomplete_verity_sidecar_set() {
+        use mvm_core::checkpoint::ContentBlob;
+        use mvm_core::protocol::vm_backend::RuntimeSourcePolicy;
+        let fx = Fixture::new();
+        let state = fx.tmp.path().join("state");
+        let mut parent = seed_checkpoint(
+            &fx.checkpoints,
+            fx.tmp.path(),
+            "cp-broken",
+            Some(RuntimeSourcePolicy::RootfsOnly),
+        );
+        // Only the verity tree, no roothash.
+        let verity_bytes = b"verity-tree";
+        let content_dir = fx.checkpoints.content_dir(&parent.id);
+        std::fs::write(content_dir.join(ROOTFS_VERITY_BLOB), verity_bytes).unwrap();
+        parent.content.push(ContentBlob {
+            name: ROOTFS_VERITY_BLOB.into(),
+            sha256: "0".repeat(64),
+        });
+        let rec = parked_record("sess-alpha");
+
+        let err = cold_boot_config(ColdBootParams {
+            record: &rec,
+            parent: &parent,
+            checkpoints: &fx.checkpoints,
+            material: &material(),
+            state_dir: &state,
+            kernel_path: None,
+        })
+        .expect_err("incomplete verity set must be refused");
+        assert!(
+            err.to_string().contains("incomplete dm-verity"),
+            "refusal must name the sidecar problem: {err}"
+        );
+    }
+
+    #[test]
+    fn a_booting_resume_records_session_resumed_before_the_boot() {
+        use mvm_core::protocol::vm_backend::RuntimeSourcePolicy;
+        let (_env, _home) = isolated_host(GrantCeiling::default());
+        let fx = Fixture::new();
+        let parent = seed_checkpoint(
+            &fx.checkpoints,
+            fx.tmp.path(),
+            "cp-audit",
+            Some(RuntimeSourcePolicy::RootfsOnly),
+        );
+        let mut rec = parked_record_at("sess-alpha", ParkReason::RetentionDemotion);
+        rec.parent_checkpoint = Some(parent.meta_digest.clone());
+        fx.sessions.write(&rec).unwrap();
+
+        let kernel = fx.tmp.path().join("vmlinux");
+        std::fs::write(&kernel, b"resume-kernel").unwrap();
+        let mut m = material();
+        m.kernel_sha256 = Some(mvm_core::crypto::image_verify::sha256_file(&kernel).unwrap());
+
+        let audit_dir = fx.tmp.path().join("audit");
+        let signer = ed25519_dalek::SigningKey::from_bytes(&[29u8; 32]);
+        let emitter = crate::audit::emitter::AuditEmitter::with_dir(signer, &audit_dir)
+            .expect("emitter")
+            .with_receipts();
+
+        let req = fx.request(&rec, &m);
+        let state = fx.tmp.path().join("state");
+        let backend = mvm_runtime::AnyBackend::from_hypervisor("mock");
+        let booted = resume_and_boot(
+            &fx.sessions,
+            &fx.checkpoints,
+            &ResumeBootRequest {
+                resume: &req,
+                backend: &backend,
+                state_dir: &state,
+                kernel_path: Some(&kernel),
+                emitter: Some(&emitter),
+            },
+            &crate::plan_admission::SystemClock,
+            &crate::plan_admission::InMemoryNonceLedger::new(),
+        )
+        .expect("cold-tier resume must boot");
+
+        let chain = std::fs::read_to_string(audit_dir.join("local.jsonl"))
+            .expect("audit chain file written");
+        assert!(
+            chain.contains("session.resumed"),
+            "chain must record the resume: {chain}"
+        );
+        assert!(
+            chain.contains("resumed_at_generation"),
+            "resume entry must carry generation label: {chain}"
+        );
+        assert_eq!(
+            booted.record.generation,
+            rec.generation + 1,
+            "the booted record must be the new generation"
+        );
     }
 }

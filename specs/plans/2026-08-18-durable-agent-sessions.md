@@ -245,28 +245,20 @@ not the signature check this sketch names.
 
 `specs/plans/2026-08-18-resume-session-orchestrator.md` landed
 `resume_session` (`crates/mvm-hostd/src/session_resume.rs`), which covers
-step 4 (fresh `ExecutionPlan` synthesis) and step 5 (admission): it loads the
-record, refuses anything but `Hibernated`, resolves the resume point named by
-`parent_checkpoint`, checks the record's stored `meta_digest` against a fresh
-`compute_meta_digest()` of its own fields — refusing a record whose
-`content[].sha256` was rewritten to vouch for a tampered blob, since
-`by_digest` and `verify_content` both otherwise trust the same file a
-tamperer who can edit a blob can also edit — then runs `verify_content`
-against it. Neither step is `verify_lineage` against a signed
-`CheckpointChainAnchor`, so the pair catches a tampered blob and a
-self-consistently forged record but not a checkpoint that was never audited
-in the first place. Resume then synthesizes a plan naming the session and
-the generation the resume opens,
-and admits it through `mvm_hostd::plan_admission::admit_for_run`. Only then
-does it transition the record, so a refusal at any earlier point leaves the
-session parked and unchanged. Steps 1 (audit-chain head), 3 (`PolicySet`
-evaluation at current time), 6 (tier selection), 7 (`PostRestore`), 8
-(credential minting), and 9 (the chain entry) remain design only — nothing in
-the workspace does any of them. `resume_session` itself has no caller
-anywhere in the workspace outside its own tests: it is wired to no CLI verb,
-broker handler, or other host code path, so none of steps 4–5 runs on a real
-resume yet either. Nothing calls `ApprovalLedger::head()` to produce the
-value either side of the step-2 comparison carries — a caller supplies both
+step 4 (fresh `ExecutionPlan` synthesis) and step 5 (admission).
+`specs/plans/2026-08-19-resume-boot.md` lands the cold-tier half of step 6:
+`mvmctl agent-session resume --boot` drives `resume_and_boot`, which refuses
+`Parked` and `Resident` tiers by name, transitions the record, and then boots
+a fresh VM from the resume point's rootfs through the shared
+`start_admitted` post-admission tail. The config carries the resume point's
+runtime-source policy, attaches the runtime overlay from the host cache, and
+threads dm-verity roothash tokens when the checkpoint has them. Step 9's
+`session.resumed` chain entry is emitted before the boot attempt, so a boot
+failure leaves the chain consistent with the moved record. Steps 1
+(audit-chain head), 3 (`PolicySet` evaluation at current time), 7
+(`PostRestore` fabric re-registration), and 8 (credential minting) remain
+design only. Nothing calls `ApprovalLedger::head()` to produce the value
+either side of the step-2 comparison carries — a caller supplies both
 `ParkInput::approval_head` and `resume`'s `current_head` itself today,
 `resume_session` included: its `ResumeRequest::current_approval_head` is read
 straight off the record the caller already holds. A session parked with
