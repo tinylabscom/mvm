@@ -11,6 +11,10 @@ edition = "2024"
 # self-identifies this manifest as standalone.
 [workspace]
 
+# This standalone graph cannot inherit the root workspace's source patch.
+[patch.crates-io]
+arrayref = { git = "https://github.com/droundy/arrayref", rev = "f8d0299d863922db6c409d08098941e833b70d69" }
+
 [package.metadata]
 cargo-fuzz = true
 
@@ -18,9 +22,9 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 # rcgen (pulled in transitively via mvm-hostd's egress-CA TLS path) carries
 # a blanket `impl<T: Into<String>> From<T>` that collides with an impl
-# `time` 0.3.48 added, breaking the build with E0119. There is no committed
-# lock here (cargo-fuzz gitignores it), so the bound lives in the manifest —
-# drop it once rcgen or time resolves the coherence clash.
+# `time` 0.3.48 added, breaking the build with E0119. The committed lock is
+# checked with `--locked`, while this manifest bound keeps fresh resolution
+# safe; drop it once rcgen or time resolves the coherence clash.
 time = ">=0.3, <0.3.48"
 # The admitter's private-range list is `IpNet`, so a harness that opens one
 # has to name the type.
