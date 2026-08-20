@@ -114,26 +114,43 @@ test that should have caught the disabled refusal never ran and the mutant
 looked clean. Re-run with explicit filters. A filtered mutation check proves
 nothing unless the filter is confirmed to include the test that must fail.
 
-## Not delivered
+## A3–A6 — tenant validation, audit, entry points, and attenuation
 
-W0, A1 and A2 are delivered; A3-A6 are not.
+Every declared keystore address is resolved against the child's tenant-scoped
+`FileBindingStore` before cloning or booting. An unbound or cross-tenant address
+therefore refuses admission. External providers retain their existing runtime
+resolution contract and do not acquire local binding metadata by accident.
 
-With A2 the gap is closed for the path it covers: a user can declare bindings on
-`vm checkpoint fork` and the child is admitted carrying them. What remains is
-narrower than it was, and worth naming precisely rather than implying the whole
-feature is done:
+`checkpoint.forked` now records a JSON list containing each local binding's
+guest name and allowed hosts. The event never records source addresses,
+providers, or values. The audit API uses a named parameter struct rather than
+growing another positional argument list.
 
-- A3 — assert cross-tenant declaration is refused. This falls out of
-  `BindingStore` tenant scoping today, but it is assumed rather than tested.
-- A4 — record the child's binding names + hosts on `checkpoint.forked`.
-- A5 — the `machine warm-restore` entry point (`machine/checkpoint.rs`) still
-  passes `&[]`; only the `vm checkpoint fork` verb takes the flag.
-- A6 — refuse an undeclared drop (W0's refusal arm).
+The declaration surface is wired through both HVF and Firecracker vm_full
+arms, with the existing experimental Firecracker gate unchanged, and through
+the booted fs_quick path. `machine fork`, `machine restore`, and
+`machine warm-restore` expose the same repeatable `--secret` and explicit
+`--allow-secret-drop` flags as `vm checkpoint fork`.
 
-**Not verified end-to-end.** No booted VM has resolved a declared binding
-through a live substitution endpoint. The tests here assert what reaches the
-signed plan; the endpoint's own suite covers resolution and host-set refusal
-separately. Nothing has yet exercised the two together.
+A fork refuses any parent guest binding name that the caller did not re-declare
+unless `--allow-secret-drop` is present. The explicit-drop warning contains
+names only. An unbooted fs_quick fork rejects `--secret` because it has no child
+plan; revert declares nothing and consequently fails closed for secret-bearing
+parents rather than bypassing the attenuation check.
+
+Added coverage includes:
+
+- `secret_attenuation_requires_explicit_drop_permission`
+- `dropped_parent_secrets_excludes_explicit_redeclarations`
+- `fork_secret_audit_resolves_only_child_tenant_metadata`
+- hostd bind/emitter assertions for names and allowed hosts with no source or
+  secret value
+- CLI help assertions for the three machine entry points
+
+Focused tests, workspace tests, isolated doctests, workspace all-target clippy,
+and the Linux/BDD gated compile are green. No booted VM was required: admission
+composition is tested here, while live placeholder resolution and host refusal
+remain covered by the substitution endpoint's own tests.
 
 Option B (inherit from the checkpoint) remains designed and deliberately
 deferred.

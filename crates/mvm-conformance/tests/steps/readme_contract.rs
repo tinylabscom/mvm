@@ -6,14 +6,13 @@
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
-use std::process::Command;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use assert_cmd::cargo::CommandCargoExt;
 use clap::Command as ClapCommand;
 use cucumber::{then, when};
 use serde::Deserialize;
 
+use crate::steps::cli::mvmctl_command;
 use crate::world::CliWorld;
 
 /// Repo root — two levels above this crate's manifest dir, resolved at compile
@@ -39,10 +38,7 @@ fn isolated_mvm_home() -> PathBuf {
 /// capturing its `Output`. Panics with an actionable hint if the binary is
 /// missing, mirroring the sibling `cli` steps.
 fn spawn_mvmctl(args: &str, home: Option<PathBuf>) -> std::process::Output {
-    #[allow(deprecated)] // matches the sibling cli.rs use of this API
-    let mut cmd = Command::cargo_bin("mvmctl").unwrap_or_else(|e| {
-        panic!("mvmctl binary not found ({e}) — run `cargo build --bin mvmctl` before `just bdd`")
-    });
+    let mut cmd = mvmctl_command();
     if let Some(home) = home {
         // Reconcile-on-entry converges live-VM state; disable it so a refusal
         // guard runs against a clean slate with no host side effects.

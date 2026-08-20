@@ -179,56 +179,11 @@ fn sync_paths_concurrently(paths: Vec<PathBuf>) -> Result<()> {
     results.map(|_| ())
 }
 
-/// Wire-stable event name and label keys for the wall-clock enforcement entry.
-/// Shared so the supervisor that emits it and any reader asserting on it cannot
-/// drift on a string.
-pub mod wall_clock_audit {
-    /// Emitted when a supervisor timer killed a workload at its deadline.
-    pub const EXPIRED_EVENT: &str = "plan.wall_clock_expired";
-    /// Label: the bound that was enforced, in seconds.
-    pub const LABEL_BOUND_SECS: &str = "wall_clock_secs";
-    /// Label: wall-clock seconds actually elapsed when the timer fired.
-    pub const LABEL_ELAPSED_SECS: &str = "elapsed_secs";
-    /// Label: which mechanism killed it, so the entry names a fact rather than
-    /// leaving the reader to infer one.
-    pub const LABEL_ENFORCED_BY: &str = "enforced_by";
-}
+mod session_events;
 
-/// Wire-stable event names and label keys for the checkpoint audit entries.
-/// Shared so the emitter (writer) and the lineage chain-anchor (reader) can't
-/// drift on a string — a drift there would silently defeat chain-anchored
-/// lineage verification.
-pub mod checkpoint_audit {
-    /// Emitted when a VM's state is frozen into a checkpoint.
-    pub const CREATED_EVENT: &str = "checkpoint.created";
-    /// Emitted when a VM is resumed from a vm_full checkpoint (same identity).
-    pub const RESTORED_EVENT: &str = "checkpoint.restored";
-    /// Emitted when a new sandbox is branched from a checkpoint.
-    pub const FORKED_EVENT: &str = "checkpoint.forked";
-
-    /// Label: the checkpoint's own id (created/restored).
-    pub const LABEL_CHECKPOINT_ID: &str = "checkpoint_id";
-    /// Label: the checkpoint's content-address (created/restored).
-    pub const LABEL_META_DIGEST: &str = "meta_digest";
-    /// Label: the checkpoint class (created).
-    pub const LABEL_CLASS: &str = "class";
-    /// Label: the owning VM name (created/restored).
-    pub const LABEL_VM_NAME: &str = "vm_name";
-    /// Label: how a restore was initiated (`revert` / `rewind` / `advance`),
-    /// so a time-travel restore is distinguishable in the chain from a
-    /// same-identity resume. Carried on `checkpoint.restored`.
-    pub const LABEL_VIA: &str = "via";
-    /// Label: the parent checkpoint id (forked).
-    pub const LABEL_PARENT_ID: &str = "parent_id";
-    /// Label: the child (new) checkpoint id (forked).
-    pub const LABEL_CHILD_ID: &str = "child_id";
-    /// Label: the child VM name (forked).
-    pub const LABEL_CHILD_VM_NAME: &str = "child_vm_name";
-    /// Label: the parent's content-address, i.e. the child's hash-link (forked).
-    pub const LABEL_PARENT_DIGEST: &str = "parent_digest";
-    /// Label: the child's content-address (forked).
-    pub const LABEL_CHILD_DIGEST: &str = "child_digest";
-}
+pub mod checkpoint_audit;
+pub mod wall_clock_audit;
+pub use checkpoint_audit::CheckpointForkedAudit;
 
 /// Wire-stable event name and label keys for the image version-lineage audit
 /// entry. Shared so the emitter (writer) and the lineage chain-anchor (reader)
@@ -1129,28 +1084,31 @@ impl AuditEmitter {
     pub fn emit_checkpoint_forked(
         &self,
         plan: &ExecutionPlan,
-        parent_id: &str,
-        child_id: &str,
-        child_vm_name: &str,
-        parent_digest: &str,
-        child_digest: &str,
+        audit: CheckpointForkedAudit<'_>,
     ) -> Result<()> {
         use checkpoint_audit as k;
         self.emit(
             plan,
             k::FORKED_EVENT,
             [
-                (k::LABEL_PARENT_ID.to_string(), parent_id.to_string()),
-                (k::LABEL_CHILD_ID.to_string(), child_id.to_string()),
+                (k::LABEL_PARENT_ID.to_string(), audit.parent_id.to_string()),
+                (k::LABEL_CHILD_ID.to_string(), audit.child_id.to_string()),
                 (
                     k::LABEL_CHILD_VM_NAME.to_string(),
-                    child_vm_name.to_string(),
+                    audit.child_vm_name.to_string(),
                 ),
                 (
                     k::LABEL_PARENT_DIGEST.to_string(),
-                    parent_digest.to_string(),
+                    audit.parent_digest.to_string(),
                 ),
-                (k::LABEL_CHILD_DIGEST.to_string(), child_digest.to_string()),
+                (
+                    k::LABEL_CHILD_DIGEST.to_string(),
+                    audit.child_digest.to_string(),
+                ),
+                (
+                    k::LABEL_SECRET_BINDINGS.to_string(),
+                    audit.secret_bindings_json.to_string(),
+                ),
             ],
         )
     }
@@ -2083,6 +2041,87 @@ mod tests {
     }
 
     #[test]
+    fn session_parked_event_is_chain_signed_and_keeps_the_plan_labels() {
+        // The park entry's extras must add to the plan's session labels, not
+        // replace them: `for_plan` merges extras over the plan's own labels,
+        // so a key collision would overwrite what was signed.
+        let dir = tempfile::tempdir().unwrap();
+        let key = {
+            let mut __ed_seed = [0u8; 32];
+            rand::rng().fill_bytes(&mut __ed_seed);
+            SigningKey::from_bytes(&__ed_seed)
+        };
+        let vk = key.verifying_key();
+        let emitter = AuditEmitter::with_dir(key, dir.path()).unwrap();
+        let mut plan = fixture_plan("local", "plan-SESSION");
+        plan.audit_labels
+            .insert("session_id".to_string(), "sess-alpha".to_string());
+        plan.audit_labels
+            .insert("session_generation".to_string(), "3".to_string());
+
+        emitter
+            .emit_session_parked(
+                &plan,
+                vec![
+                    ("parked_session".to_string(), "sess-alpha".to_string()),
+                    ("parked_at_generation".to_string(), "3".to_string()),
+                    ("park_reason".to_string(), "approval-wait".to_string()),
+                    ("park_storage_tier".to_string(), "parked".to_string()),
+                ],
+            )
+            .unwrap();
+
+        let path = dir.path().join("local.jsonl");
+        let content = std::fs::read_to_string(&path).expect("audit file exists");
+        assert!(content.contains("session.parked"));
+        assert!(content.contains("park_reason"));
+        assert!(content.contains("approval-wait"));
+        assert!(
+            content.contains("session_generation"),
+            "the plan's own session labels must survive the merge: {content}"
+        );
+        assert_eq!(verify_audit_chain(&path, &vk).unwrap(), 1);
+    }
+
+    #[test]
+    fn session_resumed_event_is_chain_signed_and_keeps_the_plan_labels() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = {
+            let mut __ed_seed = [0u8; 32];
+            rand::rng().fill_bytes(&mut __ed_seed);
+            SigningKey::from_bytes(&__ed_seed)
+        };
+        let vk = key.verifying_key();
+        let emitter = AuditEmitter::with_dir(key, dir.path()).unwrap();
+        let mut plan = fixture_plan("local", "plan-RESUME");
+        plan.audit_labels
+            .insert("session_id".to_string(), "sess-alpha".to_string());
+        plan.audit_labels
+            .insert("session_generation".to_string(), "4".to_string());
+
+        emitter
+            .emit_session_resumed(
+                &plan,
+                vec![
+                    ("resumed_session".to_string(), "sess-alpha".to_string()),
+                    ("resumed_at_generation".to_string(), "4".to_string()),
+                    ("resumed_plan_id".to_string(), "plan-RESUME".to_string()),
+                ],
+            )
+            .unwrap();
+
+        let path = dir.path().join("local.jsonl");
+        let content = std::fs::read_to_string(&path).expect("audit file exists");
+        assert!(content.contains("session.resumed"));
+        assert!(content.contains("resumed_at_generation"));
+        assert!(
+            content.contains("session_generation"),
+            "the plan's own session labels must survive the merge: {content}"
+        );
+        assert_eq!(verify_audit_chain(&path, &vk).unwrap(), 1);
+    }
+
+    #[test]
     fn boot_posture_event_is_chain_signed_and_distinguishes_root_strategy() {
         // The dev virtiofs-root boot and the block boot must be distinguishable
         // in the tamper-evident chain (dev-tier virtiofs vs the claim-3 block
@@ -2510,11 +2549,14 @@ mod tests {
         emitter
             .emit_checkpoint_forked(
                 &plan,
-                "ckpt-parent",
-                "ckpt-child",
-                "childvm",
-                &parent_digest,
-                &child_digest,
+                CheckpointForkedAudit {
+                    parent_id: "ckpt-parent",
+                    child_id: "ckpt-child",
+                    child_vm_name: "childvm",
+                    parent_digest: &parent_digest,
+                    child_digest: &child_digest,
+                    secret_bindings_json: r#"[{"name":"API_KEY","allowed_hosts":["api.example.com"]}]"#,
+                },
             )
             .unwrap();
         let path = dir.path().join("local.jsonl");
@@ -2527,6 +2569,8 @@ mod tests {
         assert!(content.contains("child_digest"));
         assert!(content.contains(&parent_digest));
         assert!(content.contains(&child_digest));
+        assert!(content.contains("API_KEY"));
+        assert!(content.contains("api.example.com"));
         assert_eq!(verify_audit_chain(&path, &vk).unwrap(), 1);
     }
 

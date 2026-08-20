@@ -773,6 +773,30 @@ exceeds the ≤200 ms p50 contract before any VMM work happens; on macOS it is
 invisible. Phase 4's "keep admission entirely local" is necessary but not
 sufficient — local is not the same as cheap when every entry is a barrier.
 
+### Firecracker prepared-cold gate — 2026-08-19
+
+Issue #2574 exposed a second readiness delay after the earlier driver work:
+the Firecracker boot loop already owned the 60-second deadline and a 1/2/4 ms
+probe cadence, but each probe called the general guest-RPC connector. That
+connector independently retries four times and starts with a 100 ms sleep, so
+the nested retry policy imposed a readiness floor on a guest that was already
+starting quickly.
+
+The boot path now performs one strict CONNECT attempt per outer probe. The
+outer loop still verifies process identity, retains its bounded deadline and
+compatibility polling, and remains the sole owner of retry timing. Ordinary
+guest RPC calls retain the resilient multi-attempt connector. Firecracker does
+not expose a stable host-side event for the guest binding an individual vsock
+port, so this bounded probe remains reconciliation of guest-owned state rather
+than an event wait.
+
+On the established KVM host (Intel i7-7700, Firecracker v1.14.1, rotational
+md-RAID), commit `b107dfb22c` measured 20 prepared-cold launches after two
+warm-ups at **171.5 ms p50, 176.0 ms p95, and 178.0 ms p99**, down from the
+issue's 291.4 ms p50 baseline and below all three gates. The raw schema-v5
+report is published at
+`specs/evidence/performance/2574-prepared-cold-firecracker-2026-08-19.json`.
+
 ## Phase 1 — Content-addressed `--mount` image cache
 
 - [ ] Add a reusable `mvm-fs` directory fingerprint helper covering relative

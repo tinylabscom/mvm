@@ -3,6 +3,20 @@
 use assert_cmd::cargo::CommandCargoExt;
 use std::process::Command;
 
+#[test]
+fn ops_mcp_help_advertises_the_stdio_transport() {
+    let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
+        .args(["ops", "mcp", "--help"])
+        .output()
+        .expect("run mvmctl ops mcp --help");
+    assert!(
+        out.status.success(),
+        "mcp help must succeed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(String::from_utf8_lossy(&out.stdout).contains("stdio"));
+}
+
 /// The README's persistent-machine form uses a positional name. Creating the
 /// spec is host-only and must succeed without booting or contacting a VM.
 #[test]
@@ -294,6 +308,8 @@ fn machine_warm_restore_help_lists_args() {
     assert!(help.contains("warm-restore"));
     assert!(help.contains("CHECKPOINT_ID"));
     assert!(help.contains("--name"));
+    assert!(help.contains("--secret"));
+    assert!(help.contains("--allow-secret-drop"));
     assert!(help.contains("--json"));
 }
 
@@ -342,6 +358,8 @@ fn machine_fork_help_lists_args() {
     assert!(help.contains("PARENT"));
     assert!(help.contains("--as"));
     assert!(help.contains("--branch"));
+    assert!(help.contains("--secret"));
+    assert!(help.contains("--allow-secret-drop"));
     assert!(help.contains("--json"));
 }
 
@@ -364,6 +382,8 @@ fn machine_restore_help_lists_args() {
     assert!(help.contains("CHECKPOINT_ID"));
     assert!(help.contains("--as"));
     assert!(help.contains("--branch"));
+    assert!(help.contains("--secret"));
+    assert!(help.contains("--allow-secret-drop"));
     assert!(help.contains("--json"));
 }
 

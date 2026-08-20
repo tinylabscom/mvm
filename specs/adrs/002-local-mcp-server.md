@@ -2,14 +2,14 @@
 
 ## Status
 
-Withdrawn (2026-07-31). The server, its `mcp` Cargo feature, the
+Withdrawn (2026-07-31); superseded by ADR-048 (2026-08-19). The server, its `mcp` Cargo feature, the
 `mvmctl ops mcp stdio` verb, the stdio roundtrip smoke script, and the
 `mcp-server-smoke` CI lane were all deleted. It was a surface nobody
 drove: it shipped behind an opt-in feature composed only into `user`,
 had no consumer, and duplicated authority that the CLI's JSON output
 and the SDKs already expose. The record below is kept for the numbering
-and for the reasoning, should a tool-server surface ever be revisited —
-it does not describe code that exists.
+and for the reasoning. ADR-048 revisits the surface only as a capability-derived
+adapter over `MvmClient`; this record does not describe the replacement.
 
 ## Context
 

@@ -35,6 +35,9 @@ pub mod warm_artifact_builder;
 pub mod warm_artifacts;
 pub mod warm_readiness;
 
+/// Filesystem-backed store for durable agent sessions (see [`checkpoint`]
+/// for the analogous per-checkpoint store).
+pub mod agent_session;
 pub mod apple_container;
 pub mod apple_container_backend;
 pub mod artifacts;

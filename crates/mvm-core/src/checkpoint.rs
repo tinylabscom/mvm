@@ -205,6 +205,110 @@ pub struct DeviceAnchors {
     pub vsock: std::path::PathBuf,
 }
 
+/// The approval-ledger head a [`SessionBinding`] was admitted under.
+///
+/// Shares the `sha256:<64-hex>` wire shape with [`CheckpointDigest`] — both
+/// are heads of a hash chain — but an approval-ledger head is deliberately
+/// not a `CheckpointDigest`. `CheckpointDigest`'s own doc explains why the
+/// shape is shared with no conversion: so the boundary between unrelated
+/// hash-chain heads is a type-system property, not a string check. Without
+/// this newtype, `approval_head: CheckpointDigest` would let an approval head
+/// be assigned wherever a checkpoint content-address is expected (or the
+/// reverse) with the compiler saying nothing — and because `SessionBinding`
+/// sits inside `CheckpointMeta`'s digest input, whichever encoding shipped
+/// first would freeze into every sealed record's `meta_digest`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct ApprovalHead(String);
+
+impl ApprovalHead {
+    /// The fixed hash-axis prefix every approval head carries.
+    pub const PREFIX: &'static str = "sha256:";
+
+    /// Validates and wraps a `sha256:<64 lowercase hex>` string. Rejects any
+    /// other prefix, wrong length, or non-lowercase-hex content.
+    pub fn parse(value: impl Into<String>) -> Result<Self, ApprovalHeadParseError> {
+        use crate::digest_shape::Sha256PrefixedShape;
+        let value = value.into();
+        match crate::digest_shape::validate_sha256_prefixed(&value) {
+            Sha256PrefixedShape::Ok => Ok(Self(value)),
+            Sha256PrefixedShape::MissingPrefix => Err(ApprovalHeadParseError::MissingPrefix(value)),
+            Sha256PrefixedShape::WrongLength { len } => {
+                Err(ApprovalHeadParseError::WrongLength { len })
+            }
+            Sha256PrefixedShape::NonHex { ch } => Err(ApprovalHeadParseError::NonHex { ch }),
+        }
+    }
+
+    /// Wrap a raw 32-byte digest — the shape `PolicySet::digest` and the
+    /// approval ledger produce — as the `sha256:<64-hex>` wire form.
+    pub fn from_bytes(bytes: &[u8; 32]) -> Self {
+        Self(format!("{}{}", Self::PREFIX, hex::encode(bytes)))
+    }
+
+    /// The `sha256:<64-hex>` string view.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for ApprovalHead {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::str::FromStr for ApprovalHead {
+    type Err = ApprovalHeadParseError;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::parse(s)
+    }
+}
+
+impl TryFrom<String> for ApprovalHead {
+    type Error = ApprovalHeadParseError;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::parse(value)
+    }
+}
+
+impl From<ApprovalHead> for String {
+    fn from(head: ApprovalHead) -> Self {
+        head.0
+    }
+}
+
+/// [`ApprovalHead::parse`] / [`ApprovalHead::from_str`] failure.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum ApprovalHeadParseError {
+    /// The value did not start with `sha256:`.
+    #[error("approval head must start with \"sha256:\", got {0:?}")]
+    MissingPrefix(String),
+    /// The hex portion (after the prefix) was not exactly 64 characters.
+    #[error("approval head hex must be exactly 64 chars, got {len}")]
+    WrongLength { len: usize },
+    /// The hex portion contained a non-lowercase-hex character.
+    #[error("approval head hex must be lowercase 0-9a-f, found {ch:?}")]
+    NonHex { ch: char },
+}
+
+/// The durable agent session a checkpoint is a resume point for.
+///
+/// `generation` fences a resume: reopening a parked session increments it, so a
+/// frame addressed to an earlier generation is refused rather than delivered
+/// into a successor. `journal_cursor` is the session-journal position the
+/// capture is consistent with, and `approval_head` names the approval-ledger
+/// state the capture was admitted under — a resume bounds its fresh grants
+/// against that head rather than against whatever the ledger holds later.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionBinding {
+    pub session_id: mvm_contract::protocol::agent_session::AgentSessionId,
+    pub generation: u64,
+    pub journal_cursor: u64,
+    pub approval_head: ApprovalHead,
+}
+
 /// On-disk metadata for one checkpoint (`<checkpoints_dir>/<id>/meta.json`).
 ///
 /// `parent` hash-links to the parent checkpoint's `meta_digest` (its
@@ -242,6 +346,12 @@ pub struct CheckpointMeta {
     /// parent held stops verifying before it can justify a wider child.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grants: Option<mvm_contract::grants::Grants>,
+    /// The durable agent session this checkpoint is a resume point for, when
+    /// it has one. Load-bearing so a resume cannot be redirected to a
+    /// different session or replayed at an earlier journal position: the
+    /// digest covers this field and the signed chain covers the digest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<SessionBinding>,
     /// Content-address of the load-bearing fields above. Required with no serde
     /// default: a record that carries no content-address cannot be
     /// lineage-verified, so a pre-lineage meta.json must fail closed rather than
@@ -269,6 +379,7 @@ impl CheckpointMeta {
             runtime_overlay_version: None,
             snapshot_id: None,
             grants: None,
+            session: None,
             audit_ref: None,
         }
     }
@@ -292,6 +403,7 @@ impl CheckpointMeta {
             runtime_overlay_version: &self.runtime_overlay_version,
             snapshot_id: &self.snapshot_id,
             grants: &self.grants,
+            session: &self.session,
         }
         .digest()
     }
@@ -317,6 +429,7 @@ impl CheckpointMeta {
             .runtime_overlay_version(self.runtime_overlay_version.clone())
             .snapshot_id(Some(snapshot_id.into()))
             .grants(self.grants.clone())
+            .session(self.session.clone())
             .audit_ref(self.audit_ref.clone())
             .build()
     }
@@ -363,6 +476,11 @@ struct CheckpointDigestInput<'a> {
     /// tamper over a field nobody touched.
     #[serde(skip_serializing_if = "Option::is_none")]
     grants: &'a Option<mvm_contract::grants::Grants>,
+    /// Skipped when absent for the same reason `grants` is: a record sealed
+    /// before this field existed must hash exactly as it did then, or lineage
+    /// verification reports drift on a record nobody edited.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    session: &'a Option<SessionBinding>,
 }
 
 impl CheckpointDigestInput<'_> {
@@ -413,6 +531,7 @@ pub struct CheckpointMetaBuilder {
     runtime_overlay_version: Option<String>,
     snapshot_id: Option<String>,
     grants: Option<mvm_contract::grants::Grants>,
+    session: Option<SessionBinding>,
     audit_ref: Option<String>,
 }
 
@@ -457,6 +576,10 @@ impl CheckpointMetaBuilder {
         self.grants = grants;
         self
     }
+    pub fn session(mut self, binding: Option<SessionBinding>) -> Self {
+        self.session = binding;
+        self
+    }
     pub fn audit_ref(mut self, r: Option<String>) -> Self {
         self.audit_ref = r;
         self
@@ -479,6 +602,7 @@ impl CheckpointMetaBuilder {
             runtime_overlay_version: &self.runtime_overlay_version,
             snapshot_id: &self.snapshot_id,
             grants: &self.grants,
+            session: &self.session,
         }
         .digest();
         CheckpointMeta {
@@ -494,6 +618,7 @@ impl CheckpointMetaBuilder {
             runtime_overlay_version: self.runtime_overlay_version,
             snapshot_id: self.snapshot_id,
             grants: self.grants,
+            session: self.session,
             meta_digest,
             audit_ref: self.audit_ref,
         }
@@ -766,6 +891,7 @@ mod tests {
             policy: Option<RuntimeSourcePolicy>,
             overlay: Option<String>,
             grants: Option<mvm_contract::grants::Grants>,
+            session: Option<SessionBinding>,
         }
         let build = |f: &Fields| {
             CheckpointMeta::builder(CheckpointId::new(f.id.clone()), f.class, f.vm.clone())
@@ -777,6 +903,7 @@ mod tests {
                 .runtime_source_policy(f.policy)
                 .runtime_overlay_version(f.overlay.clone())
                 .grants(f.grants.clone())
+                .session(f.session.clone())
                 .build()
                 .meta_digest
         };
@@ -792,6 +919,7 @@ mod tests {
             policy: Some(RuntimeSourcePolicy::PreferOverlay),
             overlay: Some("0.1.0".into()),
             grants: None,
+            session: None,
         };
         let baseline = build(&base);
 
@@ -831,6 +959,73 @@ mod tests {
             ..Default::default()
         });
         assert_ne!(baseline, build(&f), "grants");
+        let mut f = base.clone();
+        f.session = Some(test_binding());
+        assert_ne!(baseline, build(&f), "session");
+    }
+
+    #[test]
+    fn meta_digest_changes_when_the_session_binding_changes() {
+        let base =
+            CheckpointMeta::builder(CheckpointId::new("cp-1"), CheckpointClass::VmFull, "vm-1")
+                .session(Some(test_binding()))
+                .build();
+
+        let mut other_binding = test_binding();
+        other_binding.generation += 1;
+        let bumped =
+            CheckpointMeta::builder(CheckpointId::new("cp-1"), CheckpointClass::VmFull, "vm-1")
+                .session(Some(other_binding))
+                .build();
+
+        assert_ne!(base.meta_digest, bumped.meta_digest);
+        assert_eq!(base.meta_digest, base.compute_meta_digest());
+        assert_eq!(bumped.meta_digest, bumped.compute_meta_digest());
+    }
+
+    #[test]
+    fn a_sessionless_checkpoint_hashes_as_it_did_before_the_field_existed() {
+        // A record that binds no session must be byte-identical in the digest
+        // input to one built before `session` was added, or every checkpoint on
+        // disk reads as tampered.
+        let sessionless =
+            CheckpointMeta::builder(CheckpointId::new("cp-1"), CheckpointClass::VmFull, "vm-1")
+                .build();
+        assert!(sessionless.session.is_none());
+        assert_eq!(sessionless.meta_digest, sessionless.compute_meta_digest());
+
+        let input = CheckpointDigestInput {
+            id: &sessionless.id,
+            class: sessionless.class,
+            vm_name: &sessionless.vm_name,
+            tag: &sessionless.tag,
+            parent: &sessionless.parent,
+            created_unix: sessionless.created_unix,
+            content: sorted_content(&sessionless.content),
+            supervisor_config_digest: &sessionless.supervisor_config_digest,
+            runtime_source_policy: &sessionless.runtime_source_policy,
+            runtime_overlay_version: &sessionless.runtime_overlay_version,
+            snapshot_id: &sessionless.snapshot_id,
+            grants: &sessionless.grants,
+            session: &None,
+        };
+        let json = serde_json::to_string(&input).unwrap();
+        assert!(
+            !json.contains("session"),
+            "an absent session must not appear in the digest input: {json}"
+        );
+    }
+
+    #[test]
+    fn session_binding_survives_meta_json_roundtrip() {
+        let meta =
+            CheckpointMeta::builder(CheckpointId::new("cp-1"), CheckpointClass::VmFull, "vm-1")
+                .session(Some(test_binding()))
+                .build();
+        let json = serde_json::to_string(&meta).unwrap();
+        let back: CheckpointMeta = serde_json::from_str(&json).unwrap();
+        assert_eq!(meta, back);
+        assert_eq!(back.session.unwrap().journal_cursor, 118);
     }
 
     #[test]
@@ -897,5 +1092,80 @@ mod tests {
         // rejected there — a second, independent illustration of unrelated
         // types with coincidentally similar cousins.
         assert!(crate::packs::Sha256Hex::new(digest.as_str().to_string()).is_err());
+    }
+
+    fn test_binding() -> SessionBinding {
+        SessionBinding {
+            session_id: mvm_contract::protocol::agent_session::AgentSessionId::parse(
+                "sess-incident-42",
+            )
+            .unwrap(),
+            generation: 3,
+            journal_cursor: 118,
+            approval_head: ApprovalHead::parse(format!("sha256:{}", "cd".repeat(32))).unwrap(),
+        }
+    }
+
+    #[test]
+    fn session_binding_roundtrips_and_denies_unknown() {
+        let binding = test_binding();
+        let json = serde_json::to_string(&binding).unwrap();
+        let back: SessionBinding = serde_json::from_str(&json).unwrap();
+        assert_eq!(binding, back);
+
+        let with_extra = json.replace('{', "{\"surprise\":1,");
+        assert!(serde_json::from_str::<SessionBinding>(&with_extra).is_err());
+    }
+
+    #[test]
+    fn approval_head_parse_accepts_and_round_trips_serde() {
+        let s = format!("sha256:{}", "b".repeat(64));
+        let d = ApprovalHead::parse(s.clone()).unwrap();
+        assert_eq!(d.as_str(), s);
+        assert_eq!(d.to_string(), s);
+        let via_from_str: ApprovalHead = s.parse().unwrap();
+        assert_eq!(via_from_str, d);
+        let json = serde_json::to_string(&d).unwrap();
+        assert_eq!(json, format!("{:?}", s));
+        let back: ApprovalHead = serde_json::from_str(&json).unwrap();
+        assert_eq!(d, back);
+    }
+
+    #[test]
+    fn approval_head_parse_rejects_malformed() {
+        let wrong_prefix = format!("md5:{}", "a".repeat(64));
+        assert_eq!(
+            ApprovalHead::parse(wrong_prefix.clone()).unwrap_err(),
+            ApprovalHeadParseError::MissingPrefix(wrong_prefix)
+        );
+        assert_eq!(
+            ApprovalHead::parse(format!("sha256:{}", "a".repeat(63))).unwrap_err(),
+            ApprovalHeadParseError::WrongLength { len: 63 }
+        );
+        assert_eq!(
+            ApprovalHead::parse(format!("sha256:{}", "A".repeat(64))).unwrap_err(),
+            ApprovalHeadParseError::NonHex { ch: 'A' }
+        );
+        let bad = "\"not-an-approval-head\"";
+        assert!(serde_json::from_str::<ApprovalHead>(bad).is_err());
+    }
+
+    #[test]
+    fn approval_head_from_bytes_produces_expected_hex() {
+        let bytes = [0xabu8; 32];
+        let head = ApprovalHead::from_bytes(&bytes);
+        assert_eq!(head.as_str(), format!("sha256:{}", "ab".repeat(32)));
+    }
+
+    /// Same shape, independently re-validated as two distinct types — not a
+    /// conversion. There is no `From`/`TryFrom`/`Deref` between `ApprovalHead`
+    /// and `CheckpointDigest`, so a value of one is never accepted where the
+    /// other is expected; `SessionBinding.approval_head` typed as
+    /// `ApprovalHead` is what makes that a compile-time property.
+    #[test]
+    fn approval_head_shape_overlaps_checkpoint_digest_but_types_never_convert() {
+        let s = format!("sha256:{}", "c".repeat(64));
+        assert!(ApprovalHead::parse(s.clone()).is_ok());
+        assert!(CheckpointDigest::parse(s).is_ok());
     }
 }

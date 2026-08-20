@@ -6,11 +6,10 @@
 //! fixture name, which the `Then` steps compare.
 
 use std::path::PathBuf;
-use std::process::Command;
 
-use assert_cmd::cargo::CommandCargoExt;
 use cucumber::{then, when};
 
+use crate::steps::cli::mvmctl_command;
 use crate::world::CliWorld;
 
 /// Absolute path to a fixture under this suite, resolved from the crate
@@ -30,10 +29,7 @@ fn fixture_path(name: &str) -> PathBuf {
 #[when(expr = "I compute the workload address of fixture {string}")]
 fn compute_address(world: &mut CliWorld, fixture: String) {
     let path = fixture_path(&fixture);
-    #[allow(deprecated)] // matches the sibling cli.rs use of this API
-    let mut cmd = Command::cargo_bin("mvmctl").unwrap_or_else(|e| {
-        panic!("mvmctl binary not found ({e}) — run `cargo build --bin mvmctl` before `just bdd`")
-    });
+    let mut cmd = mvmctl_command();
     let output = cmd
         .args(["build", "address", "--from-ir"])
         .arg(&path)

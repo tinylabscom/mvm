@@ -990,6 +990,13 @@ impl VmmDriver for FcDriver {
                     abs_dir
                 );
             }
+            // This loop already owns the deadline and backoff. A normal RPC
+            // connection retries transient races internally, starting with a
+            // 100 ms delay; nesting that cadence here charged every fast boot
+            // whose first probe was early an extra 100 ms. Firecracker exposes
+            // no stable host event for "the guest bound this vsock port", so
+            // retain this bounded compatibility poll with one CONNECT attempt
+            // per probe and verify VMM identity on every pass above.
             if connect_to_port_once(&vsock_uds, GUEST_AGENT_PORT, AGENT_READY_PROBE_TIMEOUT_SECS)
                 .is_ok()
             {

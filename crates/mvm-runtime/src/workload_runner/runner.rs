@@ -421,6 +421,7 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         let state_dir = vm_state_dir(&inputs.config.name);
         std::fs::create_dir_all(&state_dir)
             .with_context(|| format!("create state dir {}", state_dir.display()))?;
+        let network_limits = admitted_network_limits(inputs.config.plan_json.as_deref())?;
 
         // Spawn the per-child substitution endpoint through the shared
         // `ClaimGuards`, so a warm claim stands up the identical guarded endpoint
@@ -435,6 +436,7 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
                 secrets: inputs.secrets,
                 redaction: inputs.redaction,
                 network_policy: inputs.network_policy,
+                network_limits,
                 // A cold boot mints this guest's identity and hands it a drive.
                 identity: FlowMuxIdentitySource::Mint,
             },
@@ -685,6 +687,9 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
             mvm_core::plan::secrets_from_signed_json(&claim.plan_json).unwrap_or_default();
         let redaction =
             mvm_core::plan::redaction_from_signed_json(&claim.plan_json).unwrap_or_default();
+        let network_limits = plan
+            .effective_network_limits()
+            .map_err(|e| StandbyError::ClaimFailed(format!("network limits: {e}")))?;
         if let Some(file) = claim_debug.as_mut() {
             let _ = writeln!(
                 file,
@@ -703,6 +708,7 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
                     secrets: &secrets,
                     redaction: &redaction,
                     network_policy: &claim.network_policy,
+                    network_limits,
                     // A restored child already holds its parent's signing key
                     // in the memory image it woke from, and there is no way to
                     // put a different one there. Its endpoint pins what the
@@ -1409,6 +1415,17 @@ fn admitted_services(plan_json: Option<&str>) -> Result<Vec<ServiceId>> {
         .map(|plan| plan.map_or_else(Vec::new, |plan| plan.services))
 }
 
+fn admitted_network_limits(plan_json: Option<&str>) -> Result<mvm_core::plan::NetworkLimits> {
+    plan_json
+        .map(mvm_core::plan::plan_from_admitted_json)
+        .transpose()
+        .context("parse admitted plan network limits")?
+        .map(|plan| plan.effective_network_limits())
+        .transpose()
+        .context("validate admitted plan network limits")
+        .map(Option::unwrap_or_default)
+}
+
 /// How many times to redraw a fresh child name before giving up. A collision is
 /// astronomically unlikely (random suffix), so a small bound is a fail-closed
 /// backstop, never a hot loop.
@@ -1533,6 +1550,7 @@ mod tests {
         tenant: String,
         secrets_len: usize,
         policy: NetworkPolicy,
+        network_limits: mvm_core::plan::NetworkLimits,
     }
 
     impl RecordingSpawner {
@@ -1551,6 +1569,7 @@ mod tests {
                 tenant: req.tenant.to_string(),
                 secrets_len: req.secrets.len(),
                 policy: req.network_policy.clone(),
+                network_limits: req.network_limits,
             });
             Ok(SpawnedEndpoint {
                 egress_uds: self.uds.clone(),
@@ -1973,6 +1992,10 @@ mod tests {
              does not fork on whether secrets are present"
         );
         assert_eq!(recorded.secrets_len, 1);
+        assert_eq!(
+            recorded.network_limits,
+            mvm_core::plan::NetworkLimits::default()
+        );
     }
 
     #[test]
@@ -3659,6 +3682,28 @@ mod tests {
         plan.agent_verbs = agent_verbs;
         let key = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
         serde_json::to_string(&mvm_core::plan::sign_plan(&plan, &key, "host:test")).unwrap()
+    }
+
+    #[test]
+    fn admitted_network_limits_are_extracted_without_defaulting() {
+        let expected = mvm_core::plan::NetworkLimits::builder()
+            .max_tcp_flows(7)
+            .max_udp_associations(5)
+            .max_dns_bindings(3)
+            .max_ingress_listeners(2)
+            .build()
+            .unwrap();
+        let mut plan = mvm_core::plan::test_support::PlanFixture::new().build();
+        plan.network_limits = expected;
+        let key = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+        let json =
+            serde_json::to_string(&mvm_core::plan::sign_plan(&plan, &key, "host:test")).unwrap();
+
+        assert_eq!(admitted_network_limits(Some(&json)).unwrap(), expected);
+        assert_eq!(
+            admitted_network_limits(None).unwrap(),
+            mvm_core::plan::NetworkLimits::default()
+        );
     }
 
     #[derive(Default)]

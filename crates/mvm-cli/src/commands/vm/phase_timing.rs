@@ -16,6 +16,74 @@ use serde::{Deserialize, Serialize};
 
 use super::launch_sample::LaunchSubTimings;
 
+/// Timing collected for one completed transient launch.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunPhaseTimingReport {
+    pub phases: RunPhaseTimings,
+    pub sub_phases: LaunchSubTimings,
+    pub backend_phases: Vec<mvm_core::launch_trace::TracePhase>,
+    pub degraded: Vec<String>,
+}
+
+impl RunPhaseTimingReport {
+    #[must_use]
+    pub fn new(
+        phases: RunPhaseTimings,
+        sub_phases: LaunchSubTimings,
+        backend_phases: Vec<mvm_core::launch_trace::TracePhase>,
+        degraded: Vec<String>,
+    ) -> Self {
+        Self {
+            phases,
+            sub_phases,
+            backend_phases,
+            degraded,
+        }
+    }
+
+    /// Render the report as a compact human-readable table.
+    #[must_use]
+    pub fn render_table(&self) -> String {
+        let mut rows = vec![
+            ("resolve", self.phases.resolve_ms),
+            ("drives", self.phases.drives_ms),
+            ("admit", self.phases.admit_ms),
+        ];
+        if self.phases.launch_mode == LaunchMode::Warm {
+            rows.extend([
+                ("pool wait", self.phases.pool_wait_ms),
+                ("claim", self.phases.claim_ms),
+            ]);
+        }
+        rows.extend([
+            ("backend start", self.phases.backend_start_ms),
+            ("guest ready", self.phases.vsock_wait_ms),
+            ("command", self.phases.command_ms),
+            ("teardown", self.phases.teardown_ms),
+            ("total", self.phases.total_ms),
+        ]);
+        let width = rows.iter().map(|(name, _)| name.len()).max().unwrap_or(0);
+        let mut out = format!(
+            "[mvm] phase timing ({})\n{:<width$}  {:>9}\n",
+            self.phases.launch_mode.as_str(),
+            "phase",
+            "duration",
+            width = width
+        );
+        out.push_str(&format!("{}  {}\n", "-".repeat(width), "-".repeat(9)));
+        for (name, ms) in rows {
+            out.push_str(&format!("{name:<width$}  {ms:>8.1}ms\n"));
+        }
+        out.push_str(&format!(
+            "dispatch window: {:.1}ms\nwarm SLO: {}",
+            self.phases.dispatch_window_ms(),
+            self.phases.warm_slo_status()
+        ));
+        out
+    }
+}
+
 /// Whether the backend satisfied the launch from a warm standby or performed
 /// a normal boot/restore path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -718,6 +786,36 @@ mod tests {
             t.render(),
             "[mvm] phase-timing: resolve=5.0ms drives=7.0ms admit=8.0ms pool_wait_ms=5.0 claim_ms=95.0 backend_start=100.0ms vsock_wait=30.0ms warm_window_ms=130.0 command=10.0ms teardown=15.0ms total=175.0ms launch_mode=warm dispatch_window=130.0ms warm_slo=ok"
         );
+    }
+
+    #[test]
+    fn report_renders_as_a_table_and_roundtrips_as_json() {
+        let phases = RunPhaseTimings {
+            launch_mode: LaunchMode::Warm,
+            resolve_ms: 5.0,
+            drives_ms: 7.0,
+            admit_ms: 8.0,
+            pool_wait_ms: 5.0,
+            claim_ms: 95.0,
+            backend_start_ms: 100.0,
+            vsock_wait_ms: 30.0,
+            warm_window_ms: 130.0,
+            command_ms: 10.0,
+            teardown_ms: 15.0,
+            total_ms: 175.0,
+        };
+        let report =
+            RunPhaseTimingReport::new(phases, LaunchSubTimings::default(), Vec::new(), Vec::new());
+        let table = report.render_table();
+        assert!(table.contains("phase timing (warm)"));
+        assert!(table.contains("backend start"));
+        assert!(table.contains("total"));
+        assert!(!table.contains("phase-timing:"));
+
+        let json = serde_json::to_string(&report).expect("serialize timing report");
+        let decoded: RunPhaseTimingReport =
+            serde_json::from_str(&json).expect("deserialize timing report");
+        assert_eq!(decoded, report);
     }
 
     /// Build timings with a chosen dispatch window (`backend_start +

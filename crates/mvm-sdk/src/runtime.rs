@@ -126,17 +126,20 @@ pub struct RuntimeRecording {
     pub ops: Vec<RecordedOp>,
 }
 
-/// The `Sandbox.create(template, ...)` kwargs as recorded.
+/// The `Sandbox.create(source, ...)` kwargs as recorded.
 ///
 /// Every field maps directly to an `App` field in the lowered
-/// `Workload`. `template` resolves to an `Image` via
-/// [`resolve_base_image`]; the rest are passed through.
+/// `Workload`. Exactly one of `template` or `image` must be present.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SandboxCreate {
     /// Well-known base image template id (`python-3.12`, `node-22`,
     /// `minimal`, …). See [`resolve_base_image`] for the v1 list.
-    pub template: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template: Option<String>,
+    /// Digest-pinned OCI image reference.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
     #[serde(default)]
     pub env: BTreeMap<String, EnvValue>,
     /// Source directories to bundle into the rootfs at `/app/<dir>`.
@@ -242,6 +245,12 @@ pub const KNOWN_BASE_IMAGES: &[&str] = &[
 #[derive(Debug, thiserror::Error)]
 pub enum LowerError {
     #[error(
+        "runtime recording must contain exactly one non-empty boot source: `template` or `image`"
+    )]
+    InvalidBootSource,
+    #[error("OCI image source `{0}` must be pinned as <reference>@sha256:<64 lowercase hex>")]
+    InvalidImageSource(String),
+    #[error(
         "unknown base image template `{0}` — known templates: python-3.12, python-3.13, node-22, node-lts, minimal"
     )]
     UnknownBaseImage(String),
@@ -272,6 +281,30 @@ pub enum LowerError {
         "recording digest mismatch: expected {expected}, got {actual} — the bytes changed between capture and use"
     )]
     DigestMismatch { expected: String, actual: String },
+}
+
+fn resolve_recorded_image(create: &SandboxCreate) -> Result<Image, LowerError> {
+    match (&create.template, &create.image) {
+        (Some(template), None) if !template.is_empty() => resolve_base_image(template),
+        (None, Some(image)) if !image.is_empty() => {
+            let Some((reference, hex_digest)) = image.rsplit_once("@sha256:") else {
+                return Err(LowerError::InvalidImageSource(image.clone()));
+            };
+            if reference.is_empty()
+                || hex_digest.len() != 64
+                || !hex_digest
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            {
+                return Err(LowerError::InvalidImageSource(image.clone()));
+            }
+            Ok(Image::OciBase {
+                reference: reference.to_string(),
+                digest: format!("sha256:{hex_digest}"),
+            })
+        }
+        _ => Err(LowerError::InvalidBootSource),
+    }
 }
 
 /// One place the trace replay knowingly differs from what the
@@ -372,7 +405,7 @@ pub fn compile_recording_with_findings(
         }
     }
 
-    let image = resolve_base_image(&rec.create.template)?;
+    let image = resolve_recorded_image(&rec.create)?;
     let resources = rec.create.resources.clone().unwrap_or(Resources {
         cpu_cores: 1,
         memory_mb: 256,
@@ -514,7 +547,8 @@ mod tests {
 
     fn minimal_create(template: &str) -> SandboxCreate {
         SandboxCreate {
-            template: template.into(),
+            template: Some(template.into()),
+            image: None,
             env: BTreeMap::new(),
             include: Vec::new(),
             tags: BTreeMap::new(),
@@ -537,6 +571,76 @@ mod tests {
         match err {
             LowerError::UnknownBaseImage(t) => assert_eq!(t, "python-2.7"),
             other => panic!("expected UnknownBaseImage, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn digest_pinned_oci_source_lowers() {
+        let mut create = minimal_create("minimal");
+        create.template = None;
+        create.image = Some(format!(
+            "docker.io/example/browser@sha256:{}",
+            "a".repeat(64)
+        ));
+        let rec = RuntimeRecording {
+            workload_id: "browser".into(),
+            create,
+            ops: vec![RecordedOp::CommandStart {
+                argv: vec!["/browser".into()],
+                env: BTreeMap::new(),
+            }],
+        };
+        let workload = compile_recording(&rec).expect("pinned OCI image must lower");
+        assert_eq!(
+            workload.apps[0].image,
+            Image::OciBase {
+                reference: "docker.io/example/browser".into(),
+                digest: format!("sha256:{}", "a".repeat(64)),
+            }
+        );
+    }
+
+    #[test]
+    fn mutable_oci_source_fails_closed() {
+        let mut create = minimal_create("minimal");
+        create.template = None;
+        create.image = Some("docker.io/example/browser:latest".into());
+        let rec = RuntimeRecording {
+            workload_id: "browser".into(),
+            create,
+            ops: vec![RecordedOp::CommandStart {
+                argv: vec!["/browser".into()],
+                env: BTreeMap::new(),
+            }],
+        };
+        assert!(matches!(
+            compile_recording(&rec),
+            Err(LowerError::InvalidImageSource(_))
+        ));
+    }
+
+    #[test]
+    fn missing_or_conflicting_boot_sources_fail_closed() {
+        let mut missing = minimal_create("minimal");
+        missing.template = None;
+        let mut conflicting = minimal_create("minimal");
+        conflicting.image = Some(format!(
+            "docker.io/example/browser@sha256:{}",
+            "a".repeat(64)
+        ));
+        for create in [missing, conflicting] {
+            let rec = RuntimeRecording {
+                workload_id: "browser".into(),
+                create,
+                ops: vec![RecordedOp::CommandStart {
+                    argv: vec!["/browser".into()],
+                    env: BTreeMap::new(),
+                }],
+            };
+            assert!(matches!(
+                compile_recording(&rec),
+                Err(LowerError::InvalidBootSource)
+            ));
         }
     }
 
@@ -670,7 +774,8 @@ mod tests {
         let rec = RuntimeRecording {
             workload_id: "etl".into(),
             create: SandboxCreate {
-                template: "python-3.12".into(),
+                template: Some("python-3.12".into()),
+                image: None,
                 env: env.clone(),
                 include: vec!["src".into(), "lib".into()],
                 tags: BTreeMap::new(),

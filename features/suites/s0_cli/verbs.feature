@@ -55,3 +55,8 @@ Feature: mvmctl top-level CLI surface
 
   Scenario: every alternative CLI help entry point obeys the one-line limit
     Then every alternative CLI help item is one line shorter than 80 columns
+
+  Scenario: the MCP consumer advertises its local stdio transport
+    When I run mvmctl with "ops mcp --help"
+    Then the command exits with code 0
+    And the help output contains "stdio"
