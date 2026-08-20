@@ -840,11 +840,12 @@ pub fn snapshot_eligible(
 ///
 /// `run_captured` returns this instead of streaming guest output to the
 /// CLI's terminal, so a caller can inspect the run's output as data.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ExecOutput {
     pub exit_code: i32,
     pub stdout: String,
     pub stderr: String,
+    pub phase_timing: Option<crate::commands::vm::phase_timing::RunPhaseTimingReport>,
 }
 
 /// Run the request and capture stdout/stderr instead of streaming.
@@ -1046,7 +1047,7 @@ fn run_inner(
         run_in_guest(&vm_name, &req, capture, timing, &mut sub_marks)
     };
     let t_command_done = timing.then(std::time::Instant::now);
-    let (result, t_vsock_ready) = match run_outcome {
+    let (mut result, t_vsock_ready) = match run_outcome {
         Ok((either, vsock_ready)) => (Ok(either), vsock_ready),
         Err(e) => (Err(e), None),
     };
@@ -1073,6 +1074,7 @@ fn run_inner(
 
     // Emit the phase breakdown when every seam was marked (i.e. timing was
     // enabled and the run reached teardown without an early return).
+    let mut phase_timing = None;
     if let (
         Some(start),
         Some(image_resolved),
@@ -1107,15 +1109,24 @@ fn run_inner(
         };
         let phases = marks.to_timings();
         let sub_phases = sub_marks.to_timings();
-        match timing_mode {
-            PhaseTimingMode::Off => {}
-            // The greppable pair stays the machine contract:
-            // scripts/check-hvf-warm-restore.sh parses it by prefix.
-            PhaseTimingMode::Line => {
-                eprintln!("{}", phases.render());
-                eprintln!("{}", sub_phases.render());
+        let report = crate::commands::vm::phase_timing::RunPhaseTimingReport::new(
+            phases,
+            sub_phases,
+            backend_phases.clone(),
+            degraded.clone(),
+        );
+        if timing_mode.is_on() {
+            if capture {
+                phase_timing = Some(report.clone());
+            } else {
+                eprintln!("{}", report.render_table());
+                // Keep the line form available to existing timing consumers;
+                // structured callers receive the report instead of stderr.
+                if timing_mode == PhaseTimingMode::Line {
+                    eprintln!("{}", report.phases.render());
+                    eprintln!("{}", report.sub_phases.render());
+                }
             }
-            PhaseTimingMode::Tree => eprintln!("{}", phases.render_tree(&sub_phases)),
         }
         if let Some(path) = sample_path.as_deref() {
             if let Some(error) = warm_memory_error.as_deref() {
@@ -1144,6 +1155,12 @@ fn run_inner(
                 }
             }
         }
+    }
+
+    if let Some(report) = phase_timing
+        && let Ok(Either::Right(output)) = &mut result
+    {
+        output.phase_timing = Some(report);
     }
 
     if interrupted.load(std::sync::atomic::Ordering::SeqCst) {
@@ -2089,6 +2106,7 @@ fn run_in_guest(
             exit_code,
             stdout: String::from_utf8_lossy(&out).into_owned(),
             stderr: String::from_utf8_lossy(&err).into_owned(),
+            phase_timing: None,
         })
     } else {
         Either::Left(exit_code)
@@ -2391,6 +2409,7 @@ pub fn dispatch_in_session(
         exit_code,
         stdout: String::from_utf8_lossy(&out).into_owned(),
         stderr: String::from_utf8_lossy(&err).into_owned(),
+        phase_timing: None,
     })
 }
 
