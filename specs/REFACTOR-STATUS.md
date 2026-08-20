@@ -283,6 +283,13 @@ for detailed scope and acceptance criteria.
 
 ## Fast machine substrate
 
+- [~] **Obscura browser provider pilot.** An explicit experimental provider,
+      typed SDK OCI source, honest live-option lowering, bounded CDP readiness,
+      and pinned Nix guest example are implemented on an isolated feature
+      branch. Chromium remains the default. Real-backend policy proof,
+      compatibility, full Nix/workspace, and native Linux gates remain open in
+      `specs/plans/2026-08-18-obscura-browser-provider.md`.
+
 - [x] **Issue #2279 — define the fast machine substrate and canonical template
       contract.** The cross-plan note joins Plans 298, 299, 265, 270, and 292
       around one prepared template identity, explicit lifecycle phases, a
@@ -328,6 +335,109 @@ for detailed scope and acceptance criteria.
       attenuation. Option B (implicit checkpoint inheritance) remains designed
       and deliberately deferred.
 
+- [~] **Durable agent sessions** —
+      `specs/plans/2026-08-18-durable-agent-sessions.md` (design) +
+      `specs/plans/2026-08-18-durable-session-substrate.md` (implementation,
+      Tasks 1–5 complete) +
+      `specs/plans/2026-08-18-durable-session-park.md` (implementation,
+      Tasks 1–5 complete) +
+      `specs/plans/2026-08-18-session-approval-head.md` (implementation,
+      Tasks 1–4 complete) +
+      `specs/plans/2026-08-18-resume-session-orchestrator.md` (implementation,
+      Tasks 1–3 complete) +
+      `specs/plans/2026-08-18-session-retention.md` (implementation, Tasks 1–3
+      complete). `CheckpointMeta` gains `Option<SessionBinding>`
+      (`session_id`/`generation`/`journal_cursor`/`approval_head`), folded
+      into `meta_digest` the same way `grants` already is; `approval_head` is
+      a dedicated `ApprovalHead` newtype, not `CheckpointDigest` reused.
+      `mvm_runtime::agent_session::AgentSessionStore` gives sessions a
+      filesystem store (`AgentSessionRecord`, `SandboxResidency`) over
+      `mvm_core::config::agent_sessions_dir()`, with `parent_checkpoint`
+      typed as a `CheckpointDigest` content-address rather than a mutable
+      `CheckpointId`. `fork_checkpoint`/`fork_vm_full` explicitly clear the
+      binding on a forked child. The park slice adds crash-safe record
+      writes through the shared `mvm_core::atomic_io::atomic_write` helper,
+      `ParkReason`/`StorageTier`/`select_tier`, four new record fields
+      (`journal_cursor`, `approval_head`, `storage_tier`, `park_reason`),
+      `AgentSessionRecord::park`/`resume` transitions with
+      `SessionTransitionError`, and store-level `park`/`resume` fenced on
+      the caller's expected generation — a check-then-act refusal, not a
+      compare-and-swap, so a second caller racing on the same generation is
+      not yet serialized; the module has no call sites yet, so nothing races
+      it in production today.
+      `ApprovalLedger::head()` (`crates/mvm-contract/src/policy/approval.rs`)
+      content-addresses the ledger's decision state — every record's
+      approval id, its capability, and its terminal state, deliberately
+      excluding wall-clock fields plus `resource_digest`, `policy_digest`,
+      `admission_plan_digest`, and `authorized_operators` — and `ParkInput`
+      lets a park commit the journal cursor and that head with the
+      transition in one fenced write instead of two. `AgentSessionStore::
+resume` takes a `current_head` and refuses when it differs from the
+      head recorded at park.
+      STILL OPEN: the quiesce sequence over the existing guest verbs is the
+      rest of WS3 — `CheckpointIntegrations`/`Wake` have no host-side caller
+      anywhere in the workspace, and while `GuestRequest::SleepPrep` does
+      have one (the Firecracker stop-time filesystem flush at
+      `crates/mvm-backends/src/driver/fc.rs`'s
+      `prepare_guest_filesystems_for_stop`), nothing on a park path calls
+      it. WS4 is partial: the ledger-head comparison above landed, and so
+      has `resume_session` (`crates/mvm-hostd/src/session_resume.rs`, 13
+      tests) — it loads the record, refuses anything but `Hibernated`,
+      resolves the resume point, checks the record's stored `meta_digest`
+      against a fresh `compute_meta_digest()` (refuses a record whose
+      `content[].sha256` was rewritten to vouch for a tampered blob,
+      closing the gap where `by_digest` and `verify_content` trust the same
+      file a tamperer can edit), then runs `verify_content` on it —
+      together this catches a tampered blob and a self-consistently forged
+      record, but not lineage verification against a signed
+      `CheckpointChainAnchor`, so a checkpoint that was never audited but is
+      bit-for-bit and digest-consistent still passes, builds a
+      `SynthesisInput` naming
+      the session and the generation the resume opens, admits it through
+      `mvm_hostd::plan_admission::admit_for_run`, and only then transitions
+      the record, so a refusal anywhere before admission leaves the session
+      parked and unchanged. Still open: nothing calls `ApprovalLedger::
+      head()` to produce the value either side of the step-2 comparison
+      carries — `resume_session` included, which reads its caller-supplied
+      `current_approval_head` straight off the record; there is no tier
+      selection, no `PostRestore` fabric re-registration, no credential
+      minting at the substitution endpoint. The
+      synthesized plan carries `grants: None`, so a resumed session re-arms
+      neither a wall-clock bound nor a CPU share. A session parked with
+      `approval_head: None` resumes with no ledger fence at all. WS5 is
+      partial: `specs/plans/2026-08-18-session-retention.md` teaches the
+      pre-existing `checkpoints_dir()` sweep (`sweep_untagged_checkpoints`,
+      `mvmctl cache prune`) to refuse reaping a checkpoint any live or
+      hibernated session names as its parent — via the new
+      `mvm_runtime::agent_session::pinned_checkpoints` — closes the same
+      manual door on `mvmctl vm checkpoint rm`, and adds
+      `AgentSessionRecord::demote`, a one-way `Resident → Parked → Cold` step
+      for an already-hibernated session. Not delivered: retention classes or
+      expiry on the record, a scheduler that calls `demote`, or any actual
+      movement of bytes between tiers — demoting only sets a field, and a
+      `Cold` session's checkpoint is still pinned regardless of tier, so the
+      ladder does not yet make anything reclaimable; closing a session
+      remains the only thing that frees its resume point.
+
+      WS6 is DONE and WS7 is PARTIAL, both via
+      `specs/plans/2026-08-19-session-cli-and-audit.md`
+      (`crates/mvm-cli/src/commands/agent_session.rs`). `mvmctl agent-session`
+      carries `open`, `ls`, `show`, `park` and `resume`. `open` is the
+      producer the verb was missing: before it, no code path anywhere created
+      an `AgentSessionRecord`, so `ls` listed nothing forever and `park` and
+      `resume` could only refuse. With it in place `resume` is a caller of
+      `resume_session` that is both correctly constructed and exercisable, so
+      that function is no longer reachable only from its own tests. WS7 stops
+      short of a tick: `session.parked` and `session.resumed` are emitted, but
+      nothing verifies a session's chain as a unit, there is no
+      `session.closed` entry because no `close()` transition exists, and a
+      failed chain write downgrades to a warning with exit 0, so a scripted
+      operator cannot detect a missing entry. The design spec's
+      `sandbox.parked` / `sandbox.resumed` names were changed to match the
+      code's `session.` prefix rather than the reverse — these are session
+      transitions, and `SandboxResidency` is a field of a session record, not
+      the subject. WS8 BDD remains untouched.
+
 - [~] **Admission-bound AI assurance sessions** —
       `specs/plans/2026-08-17-admission-bound-ai-assurance-sessions.md`. W1–W4,
       W6/W7, W7b landed and W5 partial: the envelope, the authority
@@ -372,7 +482,7 @@ for detailed scope and acceptance criteria.
       session identity memory keys on and is itself unmerged.
   - [x] WS1 — catalog derivation from the signed admission (PR #2705)
   - [x] WS2 — per-capability argument policy inside the descriptor digest (#2705)
-  - [~] WS3 — the guest-side-client gate landed; the host-side adapter has not
+  - [~] WS3 — gate + compilation seam landed; only the transport client remains
   - [x] WS4 — refusal names the surface, and repeated misses are rate-bounded (#2705)
   - [ ] WS5-WS9 — memory plane: store + record, `host.memory.v1`, write scan
         and ceilings, audit + retention, bounded recall
@@ -1535,7 +1645,8 @@ for detailed scope and acceptance criteria.
   - [x] Remove branch-local multi-gigabyte Cargo target caches
   - [x] Share nested `mvm-cli` builds across feature fingerprints
   - [x] Move man-page tests onto Test's warm compile graph
-  - [x] Keep the removed MCP server and smoke lane out of CI
+  - [x] Keep a dedicated MCP smoke lane out of CI; the later restored server is
+        covered by workspace tests and a named no-boot consumer
   - [x] Complete workspace and Linux clippy verification; the first live run
         passed and measured a 19–21 minute runner wait
 

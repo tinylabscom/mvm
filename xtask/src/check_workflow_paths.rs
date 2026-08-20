@@ -771,7 +771,7 @@ mod tests {
     }
 
     #[test]
-    fn removed_mcp_server_stays_out_of_ci() {
+    fn dedicated_mcp_smoke_lane_stays_out_of_ci() {
         let workflow = ci_workflow();
         for removed in [
             "MCP server stdio roundtrip",
@@ -781,7 +781,7 @@ mod tests {
         ] {
             assert!(
                 !workflow.contains(removed),
-                "removed MCP server CI surface returned: {removed}"
+                "dedicated MCP CI surface must stay absent: {removed}"
             );
         }
     }

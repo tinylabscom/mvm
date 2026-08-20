@@ -11,10 +11,11 @@ use crate::client::dto::{
     PauseOutcome, ReconfigureRequest, ResumeOpts, ResumeOutcome,
 };
 use crate::client::error::{MvmError, Result};
-use mvm_contract::protocol::capability_negotiation::BackendCapabilityReport;
+use mvm_contract::protocol::capability_negotiation::{
+    BackendCapabilityReport, ClientOperationCapabilities,
+};
 use mvm_contract::protocol::vm_backend::{BackendKind, VmCapabilities};
 
-#[derive(Default)]
 pub struct MockBackend {
     machines: Mutex<Vec<MachineState>>,
     next: Mutex<u64>,
@@ -22,6 +23,36 @@ pub struct MockBackend {
     /// that forgets to set it sees refusals rather than a backend that
     /// silently claims to do everything.
     capabilities: Mutex<VmCapabilities>,
+    operations: Mutex<ClientOperationCapabilities>,
+}
+
+impl Default for MockBackend {
+    fn default() -> Self {
+        Self {
+            machines: Mutex::new(Vec::new()),
+            next: Mutex::new(0),
+            capabilities: Mutex::new(VmCapabilities::default()),
+            operations: Mutex::new(all_mock_operations()),
+        }
+    }
+}
+
+fn all_mock_operations() -> ClientOperationCapabilities {
+    ClientOperationCapabilities::builder()
+        .list(true)
+        .inspect(true)
+        .create(true)
+        .run(true)
+        .start(true)
+        .stop(true)
+        .pause(true)
+        .resume(true)
+        .remove(true)
+        .logs(true)
+        .exec(true)
+        .reconfigure(true)
+        .set_ttl(true)
+        .build()
 }
 
 impl MockBackend {
@@ -29,6 +60,16 @@ impl MockBackend {
     /// paths a real backend would need hardware to reach.
     pub fn with_capabilities(self, capabilities: VmCapabilities) -> Self {
         *self.capabilities.lock().unwrap() = capabilities;
+        self
+    }
+
+    /// Override the operation surface this test double advertises.
+    #[must_use]
+    pub fn with_operations(self, operations: ClientOperationCapabilities) -> Self {
+        *self
+            .operations
+            .lock()
+            .expect("mock operation capability lock poisoned") = operations;
         self
     }
 }
@@ -61,6 +102,12 @@ impl MvmClient for MockBackend {
         Ok(BackendCapabilityReport::new(
             BackendKind::Mock,
             self.capabilities.lock().unwrap().clone(),
+        )
+        .with_operations(
+            self.operations
+                .lock()
+                .expect("mock operation capability lock poisoned")
+                .clone(),
         ))
     }
 
@@ -195,6 +242,28 @@ impl MvmClient for MockBackend {
 mod tests {
     use super::*;
     use crate::client::dto::*;
+
+    #[tokio::test]
+    async fn mock_reports_every_facade_operation_it_implements() {
+        let operations = MockBackend::default()
+            .backend_capabilities()
+            .await
+            .expect("mock capabilities")
+            .operations;
+        assert!(operations.list);
+        assert!(operations.inspect);
+        assert!(operations.create);
+        assert!(operations.run);
+        assert!(operations.start);
+        assert!(operations.stop);
+        assert!(operations.pause);
+        assert!(operations.resume);
+        assert!(operations.remove);
+        assert!(operations.logs);
+        assert!(operations.exec);
+        assert!(operations.reconfigure);
+        assert!(operations.set_ttl);
+    }
 
     #[tokio::test]
     async fn run_then_list_then_stop_roundtrips() {

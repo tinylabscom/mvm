@@ -26,6 +26,7 @@ mvm-hostd.workspace = true
 # The `MvmClient` facade: read-only listing/inspect commands route through
 # `mvm_client::LocalBackend` instead of reaching `mvm_runtime` internals.
 mvm-client.workspace = true
+mvm-mcp.workspace = true
 # `mvmctl compile` reads the Workload IR (mvm_contract::ir, re-exported from
 # mvm_contract::ir) and routes it through the compile pipeline.
 mvm-sdk.workspace = true

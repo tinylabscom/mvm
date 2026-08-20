@@ -523,6 +523,30 @@ fn discard_preloaded_child(backend: &AnyBackend, handle: &StandbyHandle) {
     }
 }
 
+/// Whether a standby pool this backend cannot serve should fail the launch.
+///
+/// The warm target is not always something anyone asked for. On the HVF
+/// default tier the host residency policy resolves to always-warm on its own,
+/// and a run that names a pool-less backend — `--hypervisor libkrun`, wasm —
+/// inherits that default without ever opting into it. Refusing there makes
+/// those backends unusable on this host for a pool nobody configured, which is
+/// what `machine run --hypervisor libkrun` reported: "claiming *configured*
+/// warm standby", naming a configuration that did not exist.
+///
+/// An operator who set `MVM_RESIDENCY` did ask, and a request this backend
+/// cannot serve is worth saying out loud rather than quietly cold-booting.
+///
+/// Pure over the source so both answers are testable without mutating process
+/// env, which no test can do safely while others run beside it.
+fn unsupported_standby_pool_is_fatal(source: mvm_core::residency::ResidencySource) -> bool {
+    matches!(source, mvm_core::residency::ResidencySource::EnvOverride)
+}
+
+/// How this launch came by its warm target.
+fn residency_source() -> mvm_core::residency::ResidencySource {
+    mvm_core::residency::resolve_residency().1
+}
+
 pub fn warm_to_target(pool: &SupervisorStandbyPool, p: &WarmParams<'_>) -> Result<WarmResult> {
     if p.target == 0 {
         return Ok(WarmResult {
@@ -531,6 +555,12 @@ pub fn warm_to_target(pool: &SupervisorStandbyPool, p: &WarmParams<'_>) -> Resul
         });
     }
     if !p.backend.capabilities().standby_pool {
+        if !unsupported_standby_pool_is_fatal(residency_source()) {
+            return Ok(WarmResult {
+                spawned: 0,
+                failed: 0,
+            });
+        }
         return Err(anyhow::Error::new(StandbyError::Unsupported {
             backend: p.backend.name().to_string(),
         })
@@ -743,6 +773,9 @@ where
                 },
             ));
         }
+        if !unsupported_standby_pool_is_fatal(residency_source()) {
+            return Ok(LaunchDecision::ColdBoot);
+        }
         return Err(anyhow::Error::new(StandbyError::Unsupported {
             backend: backend.name().to_string(),
         })
@@ -942,6 +975,9 @@ pub fn try_warm_claim(
         return Ok(None);
     };
     if !backend.capabilities().standby_pool {
+        if !unsupported_standby_pool_is_fatal(residency_source()) {
+            return Ok(None);
+        }
         return Err(anyhow::Error::new(StandbyError::Unsupported {
             backend: backend.name().to_string(),
         })
@@ -1271,11 +1307,18 @@ mod tests {
         );
     }
 
+    /// A pool the operator named is still worth refusing over: silently
+    /// cold-booting would hide that the backend they also chose cannot serve
+    /// the residency they asked for.
+    ///
+    /// qemu is the dev/test substrate and is never wired for the standby pool,
+    /// so it stays "unsupported" regardless of which workload backend grows a
+    /// live warm path next.
     #[test]
-    fn try_warm_claim_refuses_unsupported_backend_instead_of_cold_booting() {
-        // qemu is the dev/test substrate and is never wired for the standby
-        // pool, so it stays "unsupported" regardless of which workload backend
-        // grows a live warm path next.
+    fn try_warm_claim_refuses_an_operator_configured_pool_on_an_unsupported_backend() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.set("MVM_RESIDENCY", "warm");
+
         let backend = AnyBackend::from_hypervisor("qemu");
         let err = try_warm_claim(&backend, &eligible_cfg(), false)
             .expect_err("configured warm pool must not silently cold-boot");
@@ -1287,6 +1330,22 @@ mod tests {
         assert!(
             message.contains("requested standby-pool recovery"),
             "{message}"
+        );
+    }
+
+    /// The other half, and the regression: with no `MVM_RESIDENCY` the warm
+    /// target is the host tier's own default, which a run naming a pool-less
+    /// backend never opted into. It cold-boots instead of failing the launch.
+    #[test]
+    fn try_warm_claim_cold_boots_a_host_default_pool_on_an_unsupported_backend() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.remove("MVM_RESIDENCY");
+
+        let backend = AnyBackend::from_hypervisor("qemu");
+        assert_eq!(
+            try_warm_claim(&backend, &eligible_cfg(), false).unwrap(),
+            None,
+            "a default nobody configured must not fail the launch"
         );
     }
 
@@ -1385,6 +1444,29 @@ mod tests {
             warm_claim_plan_json(libkrun.as_vm_backend(), &cfg),
             Some("{\"signed\":\"plan\"}".into())
         );
+    }
+
+    /// The regression: on the HVF default tier the residency policy resolves to
+    /// always-warm with nobody configuring anything, and every pool-less
+    /// backend inherited it. `machine run --hypervisor libkrun` then died on
+    /// "claiming configured warm standby / standby pool is not supported by
+    /// this backend" before it could boot, naming a configuration that did not
+    /// exist. A host default is a preference, so it yields to the backend.
+    #[test]
+    fn a_host_default_warm_target_yields_to_a_backend_with_no_pool() {
+        assert!(!unsupported_standby_pool_is_fatal(
+            mvm_core::residency::ResidencySource::AutoDetect
+        ));
+    }
+
+    /// An operator who set `MVM_RESIDENCY` asked for warm by name. Silently
+    /// cold-booting there would hide that the backend they also chose cannot
+    /// do it, so that one still refuses.
+    #[test]
+    fn an_operator_set_residency_still_refuses_a_backend_with_no_pool() {
+        assert!(unsupported_standby_pool_is_fatal(
+            mvm_core::residency::ResidencySource::EnvOverride
+        ));
     }
 
     #[test]

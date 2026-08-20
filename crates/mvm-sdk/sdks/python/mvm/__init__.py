@@ -83,7 +83,13 @@ from mvm._hostsvc import (
     UnavailableError,
     VerbNotImplementedError,
 )
-from mvm._helpers import BrowserSandbox, CodeError, CodeSandbox
+from mvm._helpers import (
+    OBSCURA_IMAGE,
+    BrowserReadyError,
+    BrowserSandbox,
+    CodeError,
+    CodeSandbox,
+)
 
 # Rust-owned env-var names (crates/mvm-sdk/src/env.rs), generated into
 # `_env/vars.py`. MVM_SDK_MODE_ENV / MVM_SDK_OUT_PATH_ENV were already
@@ -144,8 +150,10 @@ __all__ = [
     "SCHEMA_VERSION",
     "BadRequestError",
     "BrowserSandbox",
+    "BrowserReadyError",
     "CodeError",
     "CodeSandbox",
+    "OBSCURA_IMAGE",
     "HostServiceError",
     "InvalidInputError",
     "NotBoundError",

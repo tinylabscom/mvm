@@ -50,7 +50,8 @@ export { MVM_CLI_BIN_ENV } from "./_cli.js";
 // ────────────────────────────────────────────────────────────────────
 
 export interface SandboxCreateWire {
-  template: string;
+  template?: string;
+  image?: string;
   env: Record<string, EnvValue>;
   include: string[];
   tags: Record<string, string>;
@@ -370,6 +371,96 @@ export interface SandboxCreateOptions {
   ttl?: string | number | null;
   resources?: Resources;
   network?: Network;
+  /** Entrypoint used for this boot. */
+  command?: string[];
+}
+
+/** Typed boot source. A bare string remains a manifest for compatibility. */
+export type SandboxSource = string | { manifest: string } | { image: string };
+
+type BootSource = { kind: "manifest" | "image"; value: string };
+
+function bootSource(source: SandboxSource): BootSource {
+  if (typeof source === "string") {
+    if (source.length === 0) throw new TypeError("source must be non-empty");
+    return { kind: "manifest", value: source };
+  }
+  const keys = Object.keys(source);
+  if (keys.length !== 1 || (keys[0] !== "manifest" && keys[0] !== "image")) {
+    throw new TypeError("source must contain exactly one of manifest or image");
+  }
+  const kind = keys[0] as "manifest" | "image";
+  const value = kind === "manifest" && "manifest" in source
+    ? source.manifest
+    : kind === "image" && "image" in source
+      ? source.image
+      : undefined;
+  if (typeof value !== "string" || value.length === 0) {
+    throw new TypeError(`${kind} source must be a non-empty string`);
+  }
+  return { kind, value };
+}
+
+function rejectLiveOption(name: string, reason: string): never {
+  throw new SandboxModeError(`Sandbox live mode cannot represent \`${name}\` safely: ${reason}`);
+}
+
+function formatAllowHost(host: unknown, port: unknown): string {
+  const wildcards = new Set(["*", "0.0.0.0", "::", "0.0.0.0/0", "::/0"]);
+  if (typeof host !== "string" || host.length === 0 || wildcards.has(host)) {
+    return rejectLiveOption("network.egress", "allowlist hosts must be specific");
+  }
+  if (!Number.isInteger(port) || (port as number) < 1 || (port as number) > 65535) {
+    return rejectLiveOption("network.egress", "allowlist ports must be 1..65535");
+  }
+  const renderedHost = host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
+  return `${renderedHost}:${String(port)}`;
+}
+
+function lowerLiveOptions(options: SandboxCreateOptions): string[] {
+  const argv: string[] = [];
+  const env = encodeEnvMap(options.env);
+  for (const key of Object.keys(env).sort()) {
+    const value = env[key];
+    if (value?.kind !== "literal" || Object.keys(value).some((field) => field !== "kind" && field !== "value")) {
+      rejectLiveOption("env", "only literal values can be placed on CLI argv");
+    }
+    if (typeof value.value !== "string") {
+      rejectLiveOption("env", "literal values must be strings");
+    }
+    argv.push("--env", `${key}=${value.value}`);
+  }
+  if (options.include && options.include.length > 0) {
+    rejectLiveOption("include", "the live CLI has no source-bundle equivalent");
+  }
+  if (options.tags && Object.keys(options.tags).length > 0) {
+    rejectLiveOption("tags", "the live CLI has no tag equivalent");
+  }
+  if (options.resources !== undefined) {
+    rejectLiveOption("resources", "rootfs_size_mb has no live CLI equivalent, so partial lowering is refused");
+  }
+  const network = options.network;
+  if (network === undefined) return argv;
+  const known = new Set(["mode", "egress", "ports", "peers", "dns"]);
+  const unknown = Object.keys(network).filter((key) => !known.has(key));
+  if (unknown.length > 0) rejectLiveOption("network", `unknown fields: ${unknown.join(", ")}`);
+  if ((network.mode ?? "none") !== "none") {
+    rejectLiveOption("network.mode", "only the NIC-less `none` mode is supported");
+  }
+  if (network.ports && network.ports.length > 0) rejectLiveOption("network.ports", "use Sandbox.forward after boot");
+  if (network.peers && network.peers.length > 0) rejectLiveOption("network.peers", "the live CLI has no peer equivalent");
+  if (network.dns !== undefined && network.dns !== null) rejectLiveOption("network.dns", "the live CLI has no DNS equivalent");
+  if (network.egress === undefined || network.egress === null) return argv;
+  if (Object.keys(network.egress).some((key) => key !== "allowlist") || !Array.isArray(network.egress.allowlist)) {
+    rejectLiveOption("network.egress", "expected only an allowlist");
+  }
+  for (const entry of network.egress.allowlist) {
+    if (Object.keys(entry).some((key) => key !== "host" && key !== "port")) {
+      rejectLiveOption("network.egress", "entries must contain only host and port");
+    }
+    argv.push("--allow-host", formatAllowHost(entry.host, entry.port));
+  }
+  return argv;
 }
 
 export interface SandboxCommandsStartOptions {
@@ -440,10 +531,12 @@ export class LiveTransport {
     this.buildMode = opts.buildMode;
   }
 
-  static forTemplate(opts: {
-    template: string;
+  static forSource(opts: {
+    source: BootSource;
     workloadId: string;
     ttlSeconds: number;
+    createArgs: string[];
+    bootCommand: string[] | null;
   }): LiveTransport {
     let mvmCliBin: string;
     try {
@@ -468,11 +561,13 @@ export class LiveTransport {
       "--up-json",
       "--name",
       vmId,
-      "--manifest",
-      opts.template,
+      opts.source.kind === "manifest" ? "--manifest" : "--image",
+      opts.source.value,
+      ...opts.createArgs,
       "--ttl",
       `${opts.ttlSeconds}s`,
     ];
+    if (opts.bootCommand !== null) argv.push("--", ...opts.bootCommand);
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     let result;
     try {
@@ -1154,7 +1249,7 @@ export class Sandbox {
     };
   }
 
-  static create(template: string, options: SandboxCreateOptions = {}): Sandbox {
+  static create(sourceInput: SandboxSource, options: SandboxCreateOptions = {}): Sandbox {
     const mode = resolveMode();
     if (recording !== null || isLiveActive()) {
       throw new Error(
@@ -1162,20 +1257,24 @@ export class Sandbox {
           "Per the SDK plan's 'v1 scope: one app per workload' decision, a script may construct at most one Sandbox.",
       );
     }
-    if (typeof template !== "string" || template.length === 0) {
-      throw new TypeError("template must be a non-empty string");
+    const source = bootSource(sourceInput);
+    const command = options.command;
+    if (command !== undefined && (command.length === 0 || !command.every((arg) => typeof arg === "string" && arg.length > 0))) {
+      throw new TypeError("command must be a non-empty string array");
     }
     let ttlSeconds = parseTtl(options.ttl);
     if (ttlSeconds === null) {
       ttlSeconds = DEFAULT_TTL_SECONDS;
     }
-    const wid = options.workloadId ?? template;
+    const wid = options.workloadId ?? source.value;
 
     if (mode === "live") {
-      const live = LiveTransport.forTemplate({
-        template,
+      const live = LiveTransport.forSource({
+        source,
         workloadId: wid,
         ttlSeconds,
+        createArgs: lowerLiveOptions(options),
+        bootCommand: command ? [...command] : null,
       });
       const sb = new Sandbox(wid, live);
       liveSandbox = sb;
@@ -1184,7 +1283,9 @@ export class Sandbox {
 
     // record mode (existing path).
     const create: SandboxCreateWire = {
-      template,
+      ...(source.kind === "manifest"
+        ? { template: source.value }
+        : { image: source.value }),
       env: encodeEnvMap(options.env),
       include: options.include ? [...options.include] : [],
       tags: options.tags ? { ...options.tags } : {},
@@ -1196,7 +1297,7 @@ export class Sandbox {
     recording = {
       workload_id: wid,
       create,
-      ops: [],
+      ops: command ? [{ kind: "command_start", argv: [...command], env: {} }] : [],
     };
     return new Sandbox(wid, null);
   }
