@@ -27,7 +27,7 @@ pub use types::{
     PlanSeccompTierParseError, PolicyRef, PostRunLifecycle, ReleasePin, Resources,
     RuntimeProfileRef, SecretBinding, SecretReleasePolicy, SecretSource, ShareKind, SignedImageRef,
     StreamRetention, TenantId, TimeoutSpec, Variant, WorkloadId, WorkloadIntent,
-    validate_ingress_mappings,
+    validate_ingress_mappings, validate_ingress_material,
 };
 pub use validity::FreshnessClaims;
 pub use verb::{VerbId, VerbIdError};

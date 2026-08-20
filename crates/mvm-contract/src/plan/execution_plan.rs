@@ -20,6 +20,7 @@ use crate::plan::types::{
     IngressMappingsError, KeyRotationSpec, L3NetworkSpec, NetworkLimits, NetworkMode, Nonce,
     PlanId, PolicyRef, PostRunLifecycle, ReleasePin, Resources, RuntimeProfileRef, SecretBinding,
     SignedImageRef, StreamRetention, TenantId, WorkloadId, validate_ingress_mappings,
+    validate_ingress_material,
 };
 use crate::plan::verb::VerbId;
 use crate::protocol::broker::ServiceId;
@@ -287,7 +288,8 @@ pub struct ExecutionPlan {
 impl ExecutionPlan {
     /// Validate all ingress mappings as one signed listener set.
     pub fn validate_ingress(&self) -> Result<(), IngressMappingsError> {
-        validate_ingress_mappings(&self.ingress, self.network_limits.max_ingress_listeners)
+        validate_ingress_mappings(&self.ingress, self.network_limits.max_ingress_listeners)?;
+        validate_ingress_material(&self.ingress, &self.secrets)
     }
 
     /// Resolve the transport-neutral networking ceilings for this plan.

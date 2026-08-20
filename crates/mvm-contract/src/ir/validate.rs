@@ -399,6 +399,31 @@ pub fn validate(workload: &Workload) -> Result<(), Vec<ValidationError>> {
                             .to_string(),
                     });
                 }
+                match (mapping.transform, mapping.tls_secret.as_deref()) {
+                    (PortTransform::Tls, Some("")) => {
+                        errors.push(ValidationError {
+                            code: ErrorCode::IngressInvalidMapping,
+                            path: format!("{path}.tls_secret"),
+                            detail: "TLS ingress secret reference must not be empty".to_string(),
+                        });
+                    }
+                    (PortTransform::Tls, None) => errors.push(ValidationError {
+                        code: ErrorCode::IngressInvalidMapping,
+                        path: format!("{path}.tls_secret"),
+                        detail: "TLS ingress requires a plan-bound PEM secret reference"
+                            .to_string(),
+                    }),
+                    (PortTransform::Opaque | PortTransform::Http, Some(_)) => {
+                        errors.push(ValidationError {
+                            code: ErrorCode::IngressInvalidMapping,
+                            path: format!("{path}.tls_secret"),
+                            detail: "only TLS ingress may declare a PEM secret reference"
+                                .to_string(),
+                        });
+                    }
+                    (PortTransform::Tls, Some(_))
+                    | (PortTransform::Opaque | PortTransform::Http, None) => {}
+                }
             }
             if is_function_entrypoint && network.mode == NetworkMode::Host {
                 errors.push(ValidationError {

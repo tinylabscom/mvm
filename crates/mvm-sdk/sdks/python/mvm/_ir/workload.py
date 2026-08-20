@@ -482,6 +482,7 @@ class PortForward:
     mapping_id: int
     proto: PortProto
     transform: PortTransform
+    tls_secret: Optional[str] = None
 
 
 @dataclass

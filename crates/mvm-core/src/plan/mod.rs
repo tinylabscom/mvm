@@ -72,6 +72,7 @@ pub use types::{
     PolicyRef, PostRunLifecycle, ReleasePin, Resources, RuntimeProfileRef, SecretBinding,
     SecretReleasePolicy, SecretSource, ShareKind, SignedImageRef, StreamRetention, TenantId,
     TimeoutSpec, Variant, WorkloadId, WorkloadIntent, validate_ingress_mappings,
+    validate_ingress_material,
 };
 pub use validity::{
     CheckedFreshness, Freshness, FreshnessClaims, NonceStore, PlanValidityError, check_window,

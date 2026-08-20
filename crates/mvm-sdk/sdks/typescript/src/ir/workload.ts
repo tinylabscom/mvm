@@ -452,6 +452,10 @@ host_addr: string
 mapping_id: number
 proto: PortProto
 /**
+ * Name of the workload secret containing a PEM certificate chain and private key. Required only for `tls`; the raw material stays host-side.
+ */
+tls_secret?: (string | null)
+/**
  * Host-owned content treatment required for this mapping.
  */
 transform: PortTransform

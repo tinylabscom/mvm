@@ -27,6 +27,7 @@
 use std::io::{Read, Write};
 
 use anyhow::{Context, Result};
+use secrecy::ExposeSecret as _;
 use tracing::{info, warn};
 
 use mvm_hostd::keyholder::secret_placeholder_env;
@@ -82,7 +83,6 @@ fn main() -> Result<()> {
     // target is live before the guest boots.
     let bound = bind_transport(&cfg.transport)?;
     let terminator = bind_terminator(cfg.terminator_listen)?;
-    let ingress = bind_ingress(&cfg)?;
     let session_readiness = bind_session_readiness(cfg.session_ready_socket.as_deref())?;
     let connector = bind_connector(cfg.connector_uds_path.as_deref())?;
     // Always assembled. The one mode that skipped it was `raw`, which is gone:
@@ -93,6 +93,15 @@ fn main() -> Result<()> {
     mvm_hostd::supervisor::network_endpoint::refuse_secrets_without_substitution(
         &cfg,
         assembled.is_some(),
+    )?;
+    let ingress = bind_ingress(
+        &cfg,
+        Some(
+            &assembled
+                .as_ref()
+                .context("FlowMux endpoint assembled no substitution service")?
+                .0,
+        ),
     )?;
 
     // Ready handshake: report the minted (guest var → placeholder) pairs on
@@ -176,6 +185,8 @@ fn validate_flowmux_limits(cfg: &EndpointConfig) -> Result<()> {
             cfg.network_limits.max_ingress_listeners,
         )
         .context("validate admitted FlowMux ingress mappings")?;
+        mvm_core::plan::validate_ingress_material(&cfg.ingress, &cfg.secrets)
+            .context("validate admitted FlowMux ingress transformation material")?;
     } else if !cfg.ingress.is_empty() {
         anyhow::bail!("declared ingress requires the authenticated FlowMux endpoint");
     }
@@ -184,21 +195,44 @@ fn validate_flowmux_limits(cfg: &EndpointConfig) -> Result<()> {
 
 #[derive(Debug)]
 struct BoundIngress {
-    tcp: Vec<(u16, std::net::TcpListener)>,
+    tcp: Vec<BoundTcpIngress>,
     udp: Vec<(u16, std::net::UdpSocket)>,
 }
 
-fn bind_ingress(cfg: &EndpointConfig) -> Result<BoundIngress> {
+#[derive(Debug)]
+struct BoundTcpIngress {
+    mapping_id: u16,
+    profile_key: String,
+    listener: std::net::TcpListener,
+    transform: BoundTcpTransform,
+}
+
+#[derive(Clone)]
+enum BoundTcpTransform {
+    Opaque,
+    Http,
+    Tls(std::sync::Arc<rustls::ServerConfig>),
+}
+
+impl std::fmt::Debug for BoundTcpTransform {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Opaque => formatter.write_str("Opaque"),
+            Self::Http => formatter.write_str("Http"),
+            Self::Tls(_) => formatter.write_str("Tls(<host-only config>)"),
+        }
+    }
+}
+
+fn bind_ingress(
+    cfg: &EndpointConfig,
+    service: Option<
+        &std::sync::Arc<mvm_hostd::supervisor::network_endpoint_proxy::SubstitutionService>,
+    >,
+) -> Result<BoundIngress> {
     let mut tcp = Vec::new();
     let mut udp = Vec::new();
     for mapping in &cfg.ingress {
-        if mapping.transform != mvm_core::plan::IngressTransform::Opaque {
-            anyhow::bail!(
-                "ingress mapping {} requires unavailable {:?} transformation material",
-                mapping.mapping_id,
-                mapping.transform
-            );
-        }
         let ip = mapping.host_addr.parse().with_context(|| {
             format!("parse ingress mapping {} host address", mapping.mapping_id)
         })?;
@@ -211,7 +245,44 @@ fn bind_ingress(cfg: &EndpointConfig) -> Result<BoundIngress> {
                         mapping.mapping_id
                     )
                 })?;
-                tcp.push((mapping.mapping_id, listener));
+                let transform = match mapping.transform {
+                    mvm_core::plan::IngressTransform::Opaque => BoundTcpTransform::Opaque,
+                    mvm_core::plan::IngressTransform::Http => BoundTcpTransform::Http,
+                    mvm_core::plan::IngressTransform::Tls => {
+                        let secret_name = mapping
+                            .tls_secret
+                            .as_deref()
+                            .context("validated TLS ingress mapping lost its secret reference")?;
+                        let material = service
+                            .context("TLS ingress requires the assembled endpoint service")?
+                            .resolve_host_material(secret_name)
+                            .with_context(|| {
+                                format!(
+                                    "resolve TLS material for ingress mapping {}",
+                                    mapping.mapping_id
+                                )
+                            })?;
+                        let pem = std::str::from_utf8(material.expose_secret())
+                            .context("ingress TLS PEM is not UTF-8")?;
+                        let config =
+                            mvm_hostd::supervisor::terminator::tls::server_config_from_pem_bundle(
+                                pem,
+                            )
+                            .with_context(|| {
+                                format!(
+                                    "parse TLS material for ingress mapping {}",
+                                    mapping.mapping_id
+                                )
+                            })?;
+                        BoundTcpTransform::Tls(std::sync::Arc::new(config))
+                    }
+                };
+                tcp.push(BoundTcpIngress {
+                    mapping_id: mapping.mapping_id,
+                    profile_key: mapping.host_addr.clone(),
+                    listener,
+                    transform,
+                });
             }
             mvm_core::plan::IngressProtocol::Udp => {
                 let socket = std::net::UdpSocket::bind(address).with_context(|| {
@@ -240,47 +311,140 @@ struct ActiveIngress {
 }
 
 impl BoundIngress {
-    fn start(self) -> Result<IngressDispatcher> {
+    fn start(
+        self,
+        service: std::sync::Arc<mvm_hostd::supervisor::network_endpoint_proxy::SubstitutionService>,
+    ) -> Result<IngressDispatcher> {
+        let BoundIngress { tcp, udp } = self;
+        let runtime = tokio::runtime::Handle::current();
         let dispatcher = IngressDispatcher {
             active: std::sync::Arc::new(std::sync::Mutex::new(ActiveIngress::default())),
             udp: std::sync::Arc::new(
-                self.udp
-                    .into_iter()
+                udp.into_iter()
                     .map(|(mapping, socket)| (mapping, std::sync::Arc::new(socket)))
                     .collect(),
             ),
         };
-        for (mapping_id, listener) in self.tcp {
+        for ingress in tcp {
+            let mapping_id = ingress.mapping_id;
             let active = std::sync::Arc::clone(&dispatcher.active);
+            let service = std::sync::Arc::clone(&service);
+            let runtime = runtime.clone();
             std::thread::Builder::new()
                 .name(format!("flowmux-ingress-listener-{mapping_id}"))
-                .spawn(move || {
-                    loop {
-                        let (stream, _) = match listener.accept() {
-                            Ok(accepted) => accepted,
-                            Err(error) => {
-                                warn!(mapping_id, %error, "TCP ingress listener stopped");
-                                return;
-                            }
-                        };
-                        let handle = active
-                            .lock()
-                            .unwrap_or_else(|error| error.into_inner())
-                            .handle
-                            .clone();
-                        let Some(handle) = handle else {
-                            drop(stream);
-                            continue;
-                        };
-                        if let Err(error) = handle.open_tcp(mapping_id, stream) {
-                            warn!(mapping_id, %error, "TCP ingress connection refused");
-                        }
-                    }
-                })
+                .spawn(move || ingress.serve(active, service, runtime))
                 .context("spawn FlowMux ingress listener")?;
         }
         Ok(dispatcher)
     }
+}
+
+impl BoundTcpIngress {
+    fn serve(
+        self,
+        active: std::sync::Arc<std::sync::Mutex<ActiveIngress>>,
+        service: std::sync::Arc<mvm_hostd::supervisor::network_endpoint_proxy::SubstitutionService>,
+        runtime: tokio::runtime::Handle,
+    ) {
+        loop {
+            let (external, _) = match self.listener.accept() {
+                Ok(accepted) => accepted,
+                Err(error) => {
+                    warn!(mapping_id = self.mapping_id, %error, "TCP ingress listener stopped");
+                    return;
+                }
+            };
+            let handle = active
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .handle
+                .clone();
+            let Some(handle) = handle else {
+                drop(external);
+                continue;
+            };
+            if let Err(error) = self.dispatch(external, &handle, &service, &runtime) {
+                warn!(mapping_id = self.mapping_id, %error, "TCP ingress connection refused");
+            }
+        }
+    }
+
+    fn dispatch(
+        &self,
+        external: std::net::TcpStream,
+        handle: &FlowMuxIngressHandle,
+        service: &std::sync::Arc<
+            mvm_hostd::supervisor::network_endpoint_proxy::SubstitutionService,
+        >,
+        runtime: &tokio::runtime::Handle,
+    ) -> Result<()> {
+        if matches!(self.transform, BoundTcpTransform::Opaque) {
+            handle
+                .open_tcp(self.mapping_id, external)
+                .map_err(anyhow::Error::from)?;
+            return Ok(());
+        }
+
+        let (flowmux_side, mut transform_side) = tcp_stream_pair()?;
+        handle
+            .open_tcp(self.mapping_id, flowmux_side)
+            .map_err(anyhow::Error::from)?;
+        let timeout = Some(std::time::Duration::from_secs(30));
+        external.set_read_timeout(timeout)?;
+        external.set_write_timeout(timeout)?;
+        transform_side.set_read_timeout(timeout)?;
+        transform_side.set_write_timeout(timeout)?;
+
+        let mapping_id = self.mapping_id;
+        let profile_key = self.profile_key.clone();
+        let transform = self.transform.clone();
+        let service = std::sync::Arc::clone(service);
+        let runtime = runtime.clone();
+        std::thread::Builder::new()
+            .name(format!("flowmux-ingress-transform-{mapping_id}"))
+            .spawn(move || {
+                let transformer = service.ingress_transformer(&profile_key);
+                let result = match transform {
+                    BoundTcpTransform::Opaque => {
+                        warn!(mapping_id, "opaque ingress reached transform worker");
+                        return;
+                    }
+                    BoundTcpTransform::Http => {
+                        let mut external = external;
+                        transformer.relay_once(&mut external, &mut transform_side)
+                    }
+                    BoundTcpTransform::Tls(config) => {
+                        let connection = match rustls::ServerConnection::new(config) {
+                            Ok(connection) => connection,
+                            Err(error) => {
+                                warn!(mapping_id, %error, "TLS ingress setup failed");
+                                return;
+                            }
+                        };
+                        let mut tls = rustls::StreamOwned::new(connection, external);
+                        transformer.relay_once(&mut tls, &mut transform_side)
+                    }
+                };
+                if let Err(error) = &result {
+                    warn!(mapping_id, %error, "ingress transformation failed closed");
+                }
+                service.audit_ingress_transform(&runtime, mapping_id, &result);
+                let _ = transform_side.shutdown(std::net::Shutdown::Both);
+            })
+            .context("spawn FlowMux ingress transformation")?;
+        Ok(())
+    }
+}
+
+fn tcp_stream_pair() -> Result<(std::net::TcpStream, std::net::TcpStream)> {
+    let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        .context("bind internal ingress transform bridge")?;
+    let client = std::net::TcpStream::connect(listener.local_addr()?)
+        .context("connect internal ingress transform bridge")?;
+    let (server, _) = listener
+        .accept()
+        .context("accept internal ingress transform bridge")?;
+    Ok((client, server))
 }
 
 impl IngressDispatcher {
@@ -797,7 +961,12 @@ async fn serve_flowmux(
         .collect::<Vec<_>>();
 
     let listener = FlowMuxListener::adopt(bound)?;
-    let ingress_dispatcher = ingress.start()?;
+    let ingress_dispatcher = ingress.start(
+        service
+            .as_ref()
+            .context("FlowMux ingress requires the endpoint service")?
+            .clone(),
+    )?;
     let mut consecutive_accept_errors = 0_u32;
     loop {
         let stream = match listener.accept().await {
@@ -1093,6 +1262,14 @@ mod tests {
             .port()
     }
 
+    fn unused_udp_port() -> u16 {
+        std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port()
+    }
+
     #[test]
     fn serve_params_builder_rejects_missing_required_fields() {
         let error = match ServeParams::builder().build() {
@@ -1140,9 +1317,25 @@ mod tests {
         cfg.ingress = vec![ingress_mapping("127.0.0.1", port)];
 
         validate_flowmux_limits(&cfg).unwrap();
-        let bound = bind_ingress(&cfg).unwrap();
+        let bound = bind_ingress(&cfg, None).unwrap();
         assert_eq!(bound.tcp.len(), 1);
         assert!(std::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port)).is_ok());
+    }
+
+    #[test]
+    fn explicitly_signed_wildcard_is_bound_without_widening_exact_mappings() {
+        let mut cfg = uds_cfg();
+        cfg.egress_mode = EgressMode::FlowMux;
+        let port = unused_tcp_port();
+        cfg.ingress = vec![ingress_mapping("0.0.0.0", port)];
+
+        validate_flowmux_limits(&cfg).unwrap();
+        let bound = bind_ingress(&cfg, None).unwrap();
+        let listener = &bound.tcp.first().expect("one wildcard listener").listener;
+        assert!(listener.local_addr().unwrap().ip().is_unspecified());
+
+        drop(bound);
+        assert!(std::net::TcpListener::bind((std::net::Ipv4Addr::UNSPECIFIED, port)).is_ok());
     }
 
     #[test]
@@ -1154,13 +1347,71 @@ mod tests {
         cfg.ingress = vec![mapping];
 
         validate_flowmux_limits(&cfg).unwrap();
-        let bound = bind_ingress(&cfg).unwrap();
+        let bound = bind_ingress(&cfg, None).unwrap();
         assert_eq!(bound.udp.len(), 1);
         let (_, socket) = bound.udp.first().expect("one admitted UDP listener");
         assert_eq!(
             socket.local_addr().unwrap().ip(),
             std::net::Ipv4Addr::LOCALHOST
         );
+    }
+
+    #[test]
+    fn explicitly_admitted_wildcard_ingress_binds_the_wildcard() {
+        let mut cfg = uds_cfg();
+        cfg.egress_mode = EgressMode::FlowMux;
+        cfg.ingress = vec![ingress_mapping("0.0.0.0", unused_tcp_port())];
+
+        validate_flowmux_limits(&cfg).unwrap();
+        let bound = bind_ingress(&cfg, None).unwrap();
+        let listener = &bound
+            .tcp
+            .first()
+            .expect("one admitted TCP listener")
+            .listener;
+        assert!(listener.local_addr().unwrap().ip().is_unspecified());
+    }
+
+    #[test]
+    fn undeclared_ingress_port_is_not_bound() {
+        let mut cfg = uds_cfg();
+        cfg.egress_mode = EgressMode::FlowMux;
+        let admitted_reservation =
+            std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let undeclared_reservation =
+            std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let admitted = admitted_reservation.local_addr().unwrap().port();
+        let undeclared = undeclared_reservation.local_addr().unwrap().port();
+        assert_ne!(admitted, undeclared);
+        drop(admitted_reservation);
+        drop(undeclared_reservation);
+        cfg.ingress = vec![ingress_mapping("127.0.0.1", admitted)];
+
+        let _bound = bind_ingress(&cfg, None).unwrap();
+        std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, undeclared))
+            .expect("the endpoint must not own an undeclared listener");
+    }
+
+    #[test]
+    fn dropping_unstarted_ingress_releases_every_socket() {
+        let tcp_port = unused_tcp_port();
+        let udp_port = unused_udp_port();
+        let mut tcp = ingress_mapping("127.0.0.1", tcp_port);
+        tcp.mapping_id = 1;
+        let mut udp = ingress_mapping("127.0.0.1", udp_port);
+        udp.mapping_id = 2;
+        udp.protocol = IngressProtocol::Udp;
+        let mut cfg = uds_cfg();
+        cfg.egress_mode = EgressMode::FlowMux;
+        cfg.ingress = vec![tcp, udp];
+
+        let bound = bind_ingress(&cfg, None).unwrap();
+        drop(bound);
+
+        std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, tcp_port))
+            .expect("TCP ingress listener must be released on teardown");
+        std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, udp_port))
+            .expect("UDP ingress listener must be released on teardown");
     }
 
     #[test]
@@ -1173,7 +1424,7 @@ mod tests {
             occupied.local_addr().unwrap().port(),
         )];
 
-        let error = bind_ingress(&cfg).expect_err("an occupied exact bind must fail closed");
+        let error = bind_ingress(&cfg, None).expect_err("an occupied exact bind must fail closed");
         assert!(error.to_string().contains("bind admitted TCP ingress"));
     }
 
@@ -1183,14 +1434,48 @@ mod tests {
         cfg.egress_mode = EgressMode::FlowMux;
         let mut mapping = ingress_mapping("127.0.0.1", unused_tcp_port());
         mapping.transform = IngressTransform::Tls;
+        mapping.tls_secret = Some("INGRESS_TLS_PEM".to_string());
         cfg.ingress = vec![mapping];
 
-        let error = bind_ingress(&cfg).expect_err("missing transform material must fail closed");
+        let error =
+            bind_ingress(&cfg, None).expect_err("missing transform material must fail closed");
         assert!(
             error
                 .to_string()
-                .contains("unavailable Tls transformation material")
+                .contains("requires the assembled endpoint service")
         );
+    }
+
+    #[test]
+    fn ingress_tls_config_serializes_only_the_plan_bound_reference() {
+        let private_key_marker = "-----BEGIN PRIVATE KEY-----\nnever-serialize-me";
+        let mut cfg = uds_cfg();
+        cfg.egress_mode = EgressMode::FlowMux;
+        cfg.secrets.push(SecretBinding {
+            name: "INGRESS_TLS_PEM".to_string(),
+            source: SecretSource::Keystore {
+                address: "ingress/tls".to_string(),
+            },
+        });
+        cfg.ingress = vec![
+            IngressMapping::builder()
+                .mapping_id(9)
+                .protocol(IngressProtocol::Tcp)
+                .host_addr("127.0.0.1")
+                .host_port(unused_tcp_port())
+                .guest_addr("127.0.0.1")
+                .guest_port(8080)
+                .transform(IngressTransform::Tls)
+                .tls_secret("INGRESS_TLS_PEM")
+                .build()
+                .unwrap(),
+        ];
+
+        validate_flowmux_limits(&cfg).unwrap();
+        let json = serde_json::to_string(&cfg).unwrap();
+        assert!(json.contains("INGRESS_TLS_PEM"));
+        assert!(!json.contains(private_key_marker));
+        assert!(!json.contains("key_pem"));
     }
 
     #[test]

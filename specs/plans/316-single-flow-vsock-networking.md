@@ -13,12 +13,12 @@ FlowMux, the raw/Wire dispatcher is gone, and launch waits for authenticated
 session readiness. PR #2741 then fixed the host-first handshake on the
 relayed-vsock backends.
 
-Phases 4–8 remain incomplete. Admitted `NetworkLimits` are not the endpoint's
-shared per-VM budgets, typed HTTP still buffers complete messages at a
-compatibility seam, declared ingress is contract-only, `raw_ip_stack` and the
-frozen L3 implementation remain in the tree, and the permanent gates,
-performance comparison, and final backend matrix have not landed. The
-successor plan splits those items into reviewable, dependency-ordered changes.
+The shared per-VM endpoint budgets, bounded typed transformations, endpoint-
+owned connectors, and declared FlowMux ingress runtime have landed through W4
+of the successor plan. The performance harness, `raw_ip_stack` removal, frozen
+L3 deletion, permanent gates, performance comparison, and final backend matrix
+remain. The successor plan splits those items into reviewable,
+dependency-ordered changes.
 
 ## Tracking issues
 

@@ -731,6 +731,10 @@ pub struct PortForward {
     pub guest_addr: String,
     /// Host-owned content treatment required for this mapping.
     pub transform: PortTransform,
+    /// Name of the workload secret containing a PEM certificate chain and
+    /// private key. Required only for `tls`; the raw material stays host-side.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls_secret: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]

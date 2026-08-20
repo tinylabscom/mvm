@@ -232,6 +232,7 @@ fn rejects_network_none_with_ports() {
             proto: PortProto::Tcp,
             guest_addr: "127.0.0.1".to_string(),
             transform: PortTransform::Opaque,
+            tls_secret: None,
         }],
         egress: None,
         peers: vec![],
@@ -269,6 +270,7 @@ fn accepts_bridge_network_with_ports() {
             proto: PortProto::Tcp,
             guest_addr: "127.0.0.1".to_string(),
             transform: PortTransform::Opaque,
+            tls_secret: None,
         }],
         egress: None,
         peers: vec![],
@@ -286,6 +288,7 @@ fn ingress_mapping(mapping_id: u16, host: u16) -> PortForward {
         proto: PortProto::Tcp,
         guest_addr: "127.0.0.1".to_string(),
         transform: PortTransform::Opaque,
+        tls_secret: None,
     }
 }
 

@@ -1,6 +1,6 @@
 # Refactor status
 
-Last updated: 2026-08-19
+Last updated: 2026-08-20
 
 This is the cross-plan progress index. The owning plan remains authoritative
 for detailed scope and acceptance criteria.
@@ -1620,8 +1620,11 @@ for detailed scope and acceptance criteria.
         fail-closed cancellation and audit behavior; web fetch and search
         authorize in their brokers but resolve, connect, and execute through
         the per-VM network endpoint.
-  - [ ] Declared ingress runtime. The wire opcodes and state transitions exist;
-        endpoint listener and guest-adapter handling do not.
+  - [x] Declared ingress runtime. Signed transport-neutral mappings reach exact
+        endpoint binds before readiness; TCP and bounded observed-peer UDP use
+        host-initiated FlowMux streams and declared guest-loopback targets.
+        HTTP/TLS transformations remain host-owned, TLS keys never enter the
+        guest contract, and opaque TCP stays explicitly non-transforming.
   - [ ] Remove the rejected `raw_ip_stack`/`L3Vsock` public compatibility
         surface now that the migration release condition has passed.
   - [ ] Delete frozen L3 contract, guest, host, VMM, dependency, packaging,

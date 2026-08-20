@@ -170,6 +170,8 @@ pub struct PortForward {
     pub proto: String,
     pub guest_addr: String,
     pub transform: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls_secret: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -549,6 +551,7 @@ pub fn build_mvmd_spec(workload: &Workload) -> MvmdSpec {
                     crate::ir::PortTransform::Http => "http".into(),
                     crate::ir::PortTransform::Tls => "tls".into(),
                 },
+                tls_secret: p.tls_secret.clone(),
             })
             .collect(),
     });
@@ -789,6 +792,7 @@ mod tests {
                         proto: PortProto::Tcp,
                         guest_addr: "127.0.0.1".into(),
                         transform: crate::ir::PortTransform::Opaque,
+                        tls_secret: None,
                     }],
                     egress: None,
                     peers: vec![],

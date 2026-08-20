@@ -286,6 +286,11 @@ pub struct IngressMapping {
     pub guest_addr: String,
     pub guest_port: u16,
     pub transform: IngressTransform,
+    /// Plan-bound host secret containing the PEM certificate chain and private
+    /// key used for TLS termination. The reference is signed; the resolved
+    /// bytes remain inside the endpoint and never cross FlowMux.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls_secret: Option<String>,
 }
 
 impl IngressMapping {
@@ -322,6 +327,19 @@ impl IngressMapping {
                 transform: self.transform,
             });
         }
+        match (self.transform, self.tls_secret.as_deref()) {
+            (IngressTransform::Tls, Some("")) => {
+                return Err(IngressMappingError::EmptyTlsSecretReference);
+            }
+            (IngressTransform::Tls, None) => {
+                return Err(IngressMappingError::MissingTlsSecretReference);
+            }
+            (IngressTransform::Opaque | IngressTransform::Http, Some(_)) => {
+                return Err(IngressMappingError::UnexpectedTlsSecretReference);
+            }
+            (IngressTransform::Tls, Some(_))
+            | (IngressTransform::Opaque | IngressTransform::Http, None) => {}
+        }
         Ok(())
     }
 }
@@ -336,6 +354,7 @@ pub struct IngressMappingBuilder {
     guest_addr: Option<String>,
     guest_port: Option<u16>,
     transform: Option<IngressTransform>,
+    tls_secret: Option<String>,
 }
 
 impl IngressMappingBuilder {
@@ -349,6 +368,7 @@ impl IngressMappingBuilder {
             guest_addr: None,
             guest_port: None,
             transform: None,
+            tls_secret: None,
         }
     }
 
@@ -394,6 +414,13 @@ impl IngressMappingBuilder {
         self
     }
 
+    /// Set the signed reference to the host-only TLS PEM bundle.
+    #[must_use]
+    pub fn tls_secret(mut self, tls_secret: impl Into<String>) -> Self {
+        self.tls_secret = Some(tls_secret.into());
+        self
+    }
+
     pub fn build(self) -> Result<IngressMapping, IngressMappingBuildError> {
         let mapping = IngressMapping {
             mapping_id: self
@@ -417,6 +444,7 @@ impl IngressMappingBuilder {
             transform: self
                 .transform
                 .ok_or(IngressMappingBuildError::Missing("transform"))?,
+            tls_secret: self.tls_secret,
         };
         mapping
             .validate()
@@ -451,6 +479,12 @@ pub enum IngressMappingError {
         protocol: IngressProtocol,
         transform: IngressTransform,
     },
+    #[error("TLS ingress requires a plan-bound certificate secret reference")]
+    MissingTlsSecretReference,
+    #[error("TLS ingress certificate secret reference must not be empty")]
+    EmptyTlsSecretReference,
+    #[error("only TLS ingress may carry a certificate secret reference")]
+    UnexpectedTlsSecretReference,
 }
 
 /// Validate a complete signed ingress mapping set against its listener cap.
@@ -493,6 +527,32 @@ pub fn validate_ingress_mappings(
     Ok(())
 }
 
+/// Validate that every typed ingress mapping can obtain its host-owned
+/// material from the same signed plan. Only keystore bindings are handed to
+/// the endpoint's resolver today, so an external-provider reference is
+/// refused rather than becoming a runtime downgrade to opaque relay.
+pub fn validate_ingress_material(
+    mappings: &[IngressMapping],
+    secrets: &[SecretBinding],
+) -> Result<(), IngressMappingsError> {
+    for mapping in mappings {
+        let Some(name) = mapping.tls_secret.as_deref() else {
+            continue;
+        };
+        let Some(binding) = secrets.iter().find(|binding| binding.name == name) else {
+            return Err(IngressMappingsError::TlsSecretNotInPlan {
+                mapping_id: mapping.mapping_id,
+            });
+        };
+        if !matches!(binding.source, SecretSource::Keystore { .. }) {
+            return Err(IngressMappingsError::TlsSecretNotKeystore {
+                mapping_id: mapping.mapping_id,
+            });
+        }
+    }
+    Ok(())
+}
+
 /// Why a signed ingress mapping set is inadmissible.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum IngressMappingsError {
@@ -511,6 +571,10 @@ pub enum IngressMappingsError {
     },
     #[error("ingress listener bind is duplicated at indexes {first} and {duplicate}")]
     DuplicateBind { first: usize, duplicate: usize },
+    #[error("ingress mapping {mapping_id} names a TLS secret absent from the signed plan")]
+    TlsSecretNotInPlan { mapping_id: u16 },
+    #[error("ingress mapping {mapping_id} names TLS material unavailable to the endpoint")]
+    TlsSecretNotKeystore { mapping_id: u16 },
 }
 
 /// The L3-tunnel half of a workload's admitted networking contract.
@@ -1487,6 +1551,7 @@ mod ingress_mapping_tests {
             guest_addr: "127.0.0.1".to_string(),
             guest_port: 8080,
             transform: IngressTransform::Opaque,
+            tls_secret: None,
         }
     }
 
@@ -1551,6 +1616,31 @@ mod ingress_mapping_tests {
     }
 
     #[test]
+    fn tls_requires_exactly_one_nonempty_host_secret_reference() {
+        let mut mapping = opaque_tcp();
+        mapping.transform = IngressTransform::Tls;
+        assert_eq!(
+            mapping.validate(),
+            Err(IngressMappingError::MissingTlsSecretReference)
+        );
+
+        mapping.tls_secret = Some(String::new());
+        assert_eq!(
+            mapping.validate(),
+            Err(IngressMappingError::EmptyTlsSecretReference)
+        );
+
+        mapping.tls_secret = Some("INGRESS_TLS_PEM".to_string());
+        mapping.validate().unwrap();
+
+        mapping.transform = IngressTransform::Opaque;
+        assert_eq!(
+            mapping.validate(),
+            Err(IngressMappingError::UnexpectedTlsSecretReference)
+        );
+    }
+
+    #[test]
     fn unknown_mapping_field_is_refused() {
         let mut json = serde_json::to_value(opaque_tcp()).unwrap();
         json.as_object_mut()
@@ -1590,6 +1680,45 @@ mod ingress_mapping_tests {
             validate_ingress_mappings(&[opaque_tcp()], 0),
             Err(IngressMappingsError::TooMany { count: 1, max: 0 })
         );
+    }
+
+    #[test]
+    fn tls_material_must_be_a_keystore_secret_in_the_same_plan() {
+        let mapping = IngressMapping::builder()
+            .mapping_id(7)
+            .protocol(IngressProtocol::Tcp)
+            .host_addr("127.0.0.1")
+            .host_port(8443)
+            .guest_addr("127.0.0.1")
+            .guest_port(8080)
+            .transform(IngressTransform::Tls)
+            .tls_secret("INGRESS_TLS_PEM")
+            .build()
+            .unwrap();
+        assert_eq!(
+            validate_ingress_material(std::slice::from_ref(&mapping), &[]),
+            Err(IngressMappingsError::TlsSecretNotInPlan { mapping_id: 7 })
+        );
+
+        let external = SecretBinding {
+            name: "INGRESS_TLS_PEM".to_string(),
+            source: SecretSource::External {
+                provider: "vault".to_string(),
+                path: "ingress/tls".to_string(),
+            },
+        };
+        assert_eq!(
+            validate_ingress_material(std::slice::from_ref(&mapping), &[external]),
+            Err(IngressMappingsError::TlsSecretNotKeystore { mapping_id: 7 })
+        );
+
+        let keystore = SecretBinding {
+            name: "INGRESS_TLS_PEM".to_string(),
+            source: SecretSource::Keystore {
+                address: "ingress/tls".to_string(),
+            },
+        };
+        validate_ingress_material(&[mapping], &[keystore]).unwrap();
     }
 }
 

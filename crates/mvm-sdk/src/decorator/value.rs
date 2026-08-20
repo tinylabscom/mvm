@@ -426,7 +426,8 @@ fn helper_to_network(v: Value, path: &Path, line: usize) -> Result<Network, Pars
     let ports = match kwargs.remove("ports") {
         Some(Value::List(items)) => items
             .into_iter()
-            .map(|v| match v {
+            .enumerate()
+            .map(|(index, v)| match v {
                 Value::Dict(mut d) => {
                     let guest = match d.remove("guest") {
                         Some(Value::Int(n)) => n as u16,
@@ -469,6 +470,7 @@ fn helper_to_network(v: Value, path: &Path, line: usize) -> Result<Network, Pars
                     };
                     let mapping_id = match d.remove("mapping_id") {
                         Some(Value::Int(n)) => n as u16,
+                        None => u16::try_from(index.saturating_add(1)).unwrap_or(u16::MAX),
                         other => {
                             return Err(ParseError::HelperBadKwarg {
                                 path: path.to_path_buf(),
@@ -481,6 +483,7 @@ fn helper_to_network(v: Value, path: &Path, line: usize) -> Result<Network, Pars
                     };
                     let host_addr = match d.remove("host_addr") {
                         Some(Value::Str(value)) => value,
+                        None => "127.0.0.1".to_string(),
                         other => {
                             return Err(ParseError::HelperBadKwarg {
                                 path: path.to_path_buf(),
@@ -493,6 +496,7 @@ fn helper_to_network(v: Value, path: &Path, line: usize) -> Result<Network, Pars
                     };
                     let guest_addr = match d.remove("guest_addr") {
                         Some(Value::Str(value)) => value,
+                        None => "127.0.0.1".to_string(),
                         other => {
                             return Err(ParseError::HelperBadKwarg {
                                 path: path.to_path_buf(),
@@ -507,6 +511,7 @@ fn helper_to_network(v: Value, path: &Path, line: usize) -> Result<Network, Pars
                         Some(Value::Str(value)) if value == "opaque" => PortTransform::Opaque,
                         Some(Value::Str(value)) if value == "http" => PortTransform::Http,
                         Some(Value::Str(value)) if value == "tls" => PortTransform::Tls,
+                        None => PortTransform::Opaque,
                         other => {
                             return Err(ParseError::HelperBadKwarg {
                                 path: path.to_path_buf(),
@@ -519,6 +524,19 @@ fn helper_to_network(v: Value, path: &Path, line: usize) -> Result<Network, Pars
                             });
                         }
                     };
+                    let tls_secret = match d.remove("tls_secret") {
+                        Some(Value::Str(value)) => Some(value),
+                        None => None,
+                        other => {
+                            return Err(ParseError::HelperBadKwarg {
+                                path: path.to_path_buf(),
+                                line,
+                                helper: "mvm.network".to_string(),
+                                kwarg: "ports[].tls_secret".to_string(),
+                                detail: format!("expected string, got {other:?}"),
+                            });
+                        }
+                    };
                     Ok(PortForward {
                         mapping_id,
                         host_addr,
@@ -527,6 +545,7 @@ fn helper_to_network(v: Value, path: &Path, line: usize) -> Result<Network, Pars
                         proto,
                         guest_addr,
                         transform,
+                        tls_secret,
                     })
                 }
                 other => Err(ParseError::HelperBadKwarg {

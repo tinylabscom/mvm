@@ -89,6 +89,7 @@ pub mod names_gazetteer;
 /// credential, binding-checked). The forward leg + the guest-facing
 /// listener are separate transport steps.
 pub mod flowmux;
+pub mod ingress_transform;
 pub mod network;
 /// The per-VM substitution endpoint subprocess library half: the
 /// stdin config contract + store-opening/service assembly. The

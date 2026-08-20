@@ -410,7 +410,7 @@ fn lower_ingress(app: &App) -> Result<Vec<IngressMapping>> {
                 .ports
                 .iter()
                 .map(|mapping| {
-                    IngressMapping::builder()
+                    let builder = IngressMapping::builder()
                         .mapping_id(mapping.mapping_id)
                         .protocol(match mapping.proto {
                             PortProto::Tcp => IngressProtocol::Tcp,
@@ -424,7 +424,12 @@ fn lower_ingress(app: &App) -> Result<Vec<IngressMapping>> {
                             PortTransform::Opaque => IngressTransform::Opaque,
                             PortTransform::Http => IngressTransform::Http,
                             PortTransform::Tls => IngressTransform::Tls,
-                        })
+                        });
+                    let builder = match mapping.tls_secret.as_deref() {
+                        Some(secret) => builder.tls_secret(secret),
+                        None => builder,
+                    };
+                    builder
                         .build()
                         .with_context(|| format!("invalid ingress mapping {}", mapping.mapping_id))
                 })
