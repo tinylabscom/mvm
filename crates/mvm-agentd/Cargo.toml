@@ -178,11 +178,16 @@ schema = ["dep:schemars", "mvm-core/schema"]
 # `/init`, never linked into `mvm-guest-agent`, so gating them here costs
 # the sealed agent nothing.
 addons = [
-    "dep:tokio",
+    "flowmux-async",
     "dep:hickory-proto",
     "dep:tokio-vsock",
     "dep:tracing-subscriber",
 ]
+# The reusable async FlowMux client itself needs Tokio but not the Linux-only
+# AF_VSOCK adapter or DNS helper binaries bundled by `addons`. Benchmark and
+# protocol fixtures enable this narrower surface so they do not pull a second
+# `nix` major through `tokio-vsock`.
+flowmux-async = ["dep:tokio"]
 
 [dependencies]
 mvm-core.workspace = true

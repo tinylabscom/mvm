@@ -1714,7 +1714,10 @@ resume` takes a `current_head` and refuses when it differs from the
         sessions. Aggregate TCP/HTTP, UDP, DNS, ICMP, ingress-listener, and
         session ceilings survive session churn and return reservations on
         teardown; malformed admitted limits fail before the endpoint binds.
-  - [ ] FlowMux performance harness and labelled legacy/current baselines.
+  - [x] FlowMux performance harness and labelled legacy/current baselines.
+        Strict macOS arm64 and Linux x86_64 host-loopback reports are recorded;
+        their 21/28 pre-deletion threshold misses remain explicit, with no
+        approved exception, for the final closeout matrix to resolve.
   - [~] Typed HTTP uses FlowMux frames but still crosses a whole-message
         compatibility seam; bounded end-to-end streaming and endpoint-owned
         typed connector execution remain.

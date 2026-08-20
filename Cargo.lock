@@ -3296,6 +3296,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
+ "xtask",
  "zeroize",
 ]
 

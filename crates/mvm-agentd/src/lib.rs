@@ -37,7 +37,7 @@ pub mod entrypoint;
 /// defer the child's deadline or grow the pump's queue without bound.
 pub mod entrypoint_stream;
 /// Guest-side FlowMux client for the converged single networking path.
-#[cfg(feature = "addons")]
+#[cfg(feature = "flowmux-async")]
 pub mod flowmux;
 /// Load the per-boot FlowMux identity material used by the guest-side adapters.
 pub mod flowmux_drive;
