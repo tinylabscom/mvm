@@ -18,11 +18,17 @@ use crate::world::CliWorld;
 /// binaries built alongside `mvmctl` are visible during live boots.
 pub(crate) fn mvmctl_command() -> Command {
     #[allow(deprecated)] // matches crates/mvm-cli/tests/cli.rs's use of this API
-    let mut cmd = Command::cargo_bin("mvmctl").unwrap_or_else(|e| {
+    let cargo_cmd = Command::cargo_bin("mvmctl").unwrap_or_else(|e| {
         panic!("mvmctl binary not found ({e}) — run `cargo build --bin mvmctl` before `just bdd`")
     });
 
-    let bin_path = PathBuf::from(cmd.get_program());
+    let cargo_path = PathBuf::from(cargo_cmd.get_program());
+    let bin_path = if cargo_path.is_absolute() {
+        cargo_path
+    } else {
+        workspace_root().join(cargo_path)
+    };
+    let mut cmd = Command::new(&bin_path);
     if let Some(bin_dir) = bin_path.parent() {
         let mut path = bin_dir.as_os_str().to_os_string();
         path.push(":");
@@ -50,10 +56,7 @@ pub(crate) fn workspace_root() -> PathBuf {
 
 #[when(expr = "I run mvmctl with {string}")]
 fn run_mvmctl(world: &mut CliWorld, args: String) {
-    #[allow(deprecated)] // matches crates/mvm-cli/tests/cli.rs's use of this API
-    let mut cmd = Command::cargo_bin("mvmctl").unwrap_or_else(|e| {
-        panic!("mvmctl binary not found ({e}) — run `cargo build --bin mvmctl` before `just bdd`")
-    });
+    let mut cmd = mvmctl_command();
     let output = cmd
         .args(args.split_whitespace())
         .output()
@@ -88,10 +91,7 @@ fn run_mvmctl_isolated_home(world: &mut CliWorld, args: String) {
     // dev's real `~/.mvm`. The run is synchronous (`output()` blocks to exit)
     // and the fail-fast path spawns no VM, so the temp dir can drop right after.
     let home = tempfile::tempdir().expect("create isolated MVM_HOME");
-    #[allow(deprecated)] // matches crates/mvm-cli/tests/cli.rs's use of this API
-    let mut cmd = Command::cargo_bin("mvmctl").unwrap_or_else(|e| {
-        panic!("mvmctl binary not found ({e}) — run `cargo build --bin mvmctl` before `just bdd`")
-    });
+    let mut cmd = mvmctl_command();
     let output = cmd
         .args(args.split_whitespace())
         .env("HOME", home.path())
@@ -114,10 +114,7 @@ fn run_mvmctl_in_isolated_home(world: &mut CliWorld, args: String) {
         .isolated_home
         .as_ref()
         .expect("`Given an isolated mvm home` must run before this step");
-    #[allow(deprecated)] // matches the sibling steps' use of this API
-    let mut cmd = Command::cargo_bin("mvmctl").unwrap_or_else(|e| {
-        panic!("mvmctl binary not found ({e}) — run `cargo build --bin mvmctl` before `just bdd`")
-    });
+    let mut cmd = mvmctl_command();
     cmd.args(args.split_whitespace())
         .env("HOME", home.path())
         .env("MVM_HOME", home.path());
