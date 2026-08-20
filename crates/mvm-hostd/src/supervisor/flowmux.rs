@@ -37,6 +37,7 @@ use tracing::{info, warn};
 use self::registry::{RegistryLimits, StreamRegistry, VmFlowBudget, class_for_open};
 use self::udp_relay::{
     UdpAssociationHandle, UdpRelayParams, UdpSendMsg, decode_udp_addr, run_udp_relay,
+    udp_event_sources,
 };
 
 use crate::supervisor::audit_recorder::{EventCategory, Recorder};
@@ -844,6 +845,7 @@ impl FlowMuxSession {
             warn!(stream_id, error = %e, "FlowMux UDP bind failed");
             FlowMuxError::Transport(e)
         })?;
+        let (poll, waker) = udp_event_sources(&socket).map_err(FlowMuxError::Transport)?;
         let idle_timeout = self.limits.udp_idle_timeout;
         let max_peers = self.limits.max_udp_peers;
 
@@ -857,6 +859,7 @@ impl FlowMuxSession {
                 run_udp_relay(UdpRelayParams {
                     stream_id,
                     socket,
+                    poll,
                     session,
                     writer,
                     idle_timeout,
@@ -868,7 +871,7 @@ impl FlowMuxSession {
             .map_err(FlowMuxError::Transport)?;
 
         self.udp_associations
-            .insert(stream_id, UdpAssociationHandle { tx });
+            .insert(stream_id, UdpAssociationHandle { tx, waker });
         self.send_udp_opened(stream_id)?;
         self.emit_audit(
             EventCategory::Host,
@@ -924,11 +927,15 @@ impl FlowMuxSession {
                 "UDP relay thread has exited".to_string(),
             ));
         }
+        handle.waker.wake().map_err(FlowMuxError::Transport)?;
         Ok(())
     }
 
     fn remove_udp_association(&mut self, stream_id: u32) {
-        let _ = self.udp_associations.remove(&stream_id);
+        if let Some(UdpAssociationHandle { tx, waker }) = self.udp_associations.remove(&stream_id) {
+            drop(tx);
+            let _ = waker.wake();
+        }
         let _ = lock_registry(&self.registry).retire(stream_id);
     }
 

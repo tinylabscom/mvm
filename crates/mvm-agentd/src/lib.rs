@@ -39,7 +39,7 @@ pub mod entrypoint_stream;
 /// Boot-validated optional extension executables.
 pub mod extension;
 /// Guest-side FlowMux client for the converged single networking path.
-#[cfg(feature = "addons")]
+#[cfg(feature = "flowmux-async")]
 pub mod flowmux;
 /// Load the per-boot FlowMux identity material used by the guest-side adapters.
 pub mod flowmux_drive;

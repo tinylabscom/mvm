@@ -1,11 +1,61 @@
 # Refactor status
 
-Last updated: 2026-08-20
+Last updated: 2026-08-19
 
 This is the cross-plan progress index. The owning plan remains authoritative
 for detailed scope and acceptance criteria.
 
 ## Completed issue closeouts
+
+- [x] **Issue #2657 — live BDD is visible and merge-gated.** Capability skips
+      are reported instead of disappearing from the test summary, and a
+      merge-queue/manual-only KVM lane runs one tagged Firecracker witness for
+      the README persistent-machine lifecycle. The CI-only selector composes
+      with the existing live and backend capability gates, so narrowing the
+      suite cannot accidentally authorize a live boot. Structural tests pin
+      the workflow trigger, recipe, selector, and exact public command
+      sequence.
+
+- [x] **Issue #2756 — Linux 6.12.104 kernel pin refresh.** The libkrunfw
+      firmware build and custom workload/builder kernels consume the same
+      kernel.org-verified source archive and SRI hash. Structural parity and
+      freshness checks report both pins synchronized and current.
+
+- [x] **Faster Rust compilation — nightly Cranelift development path.** The
+      dated nightly compiler, eight frontend threads, and Cranelift cut a cold
+      representative build from 172.14s to 66.48s (61.4%). Tests and release
+      builds retain LLVM; Clippy retains stable 1.96 without suppressions.
+      Embedded-host and runtime-overlay guest binaries remain reproducible on
+      their Nix-aligned Rust 1.91.1 pin, isolated from outer nightly flags and
+      host compiler wrappers. The contributor shell was realized successfully
+      in the libkrun builder VM.
+
+- [x] **Issue #2574 — the first publishable Linux/Firecracker launch lane.**
+      The false `host_services` degradation was already removed; the remaining
+      dispatch gap was a nested 100 ms reconnect cadence inside the driver's
+      own readiness backoff. Firecracker now makes one strict CONNECT attempt
+      per bounded probe, while ordinary RPC callers retain resilient retries.
+      On the established rotational KVM host, the required 2 warm-ups + 20
+      measured `prepared_cold` launches passed at **171.5 / 176.0 / 178.0 ms
+      p50/p95/p99** against **200 / 250 / 300 ms** budgets. The public page
+      carries the host, backend, storage class, report path, and digest.
+
+- [x] **Issue #2634 — sealed guests have writable runtime state without a
+      writable root.** The universal initramfs mounts `/run` and `/tmp` as
+      restricted tmpfs filesystems and moves them across the workload-root
+      pivot. Mediated tools can therefore build their `/run` overlay and
+      `/tmp` is real scratch space while the verified image stays read-only.
+      Optional home/passwd mutations are not attempted on a sealed root. The
+      live lifecycle suite covers Alpine `/tmp` writes and retains the
+      absolute `/bin/ping` mediated-tool proof. Together with PRs #2690,
+      #2709, and #2720, this closes the NIC-less and read-only boot-noise issue.
+
+- [x] **Issue #2684 — a sealed boot is reachable and proven before release.**
+      The CLI release train publishes both universal-initramfs archives under
+      the downloader's exact versioned names and refuses to publish when that
+      build fails. The boot-image train exercises its staged x86_64 production
+      image both plainly and with the complete initramfs + dm-verity triple
+      before upload; the harness refuses partial or malformed integrity input.
 
 - [x] **Plan 337 COMPLETE — the SDK surface is generated from Rust.** Sessions
       finished Tier C. Python's `contextvars` + `Token` has no
@@ -249,6 +299,13 @@ for detailed scope and acceptance criteria.
 
 ## Fast machine substrate
 
+- [~] **Obscura browser provider pilot.** An explicit experimental provider,
+      typed SDK OCI source, honest live-option lowering, bounded CDP readiness,
+      and pinned Nix guest example are implemented on an isolated feature
+      branch. Chromium remains the default. Real-backend policy proof,
+      compatibility, full Nix/workspace, and native Linux gates remain open in
+      `specs/plans/2026-08-18-obscura-browser-provider.md`.
+
 - [x] **Issue #2279 — define the fast machine substrate and canonical template
       contract.** The cross-plan note joins Plans 298, 299, 265, 270, and 292
       around one prepared template identity, explicit lifecycle phases, a
@@ -285,197 +342,110 @@ for detailed scope and acceptance criteria.
 
 ## In-flight plans
 
+- [x] **Secret bindings for forked children** —
+      `specs/plans/2026-08-18-fork-inherits-secret-bindings.md`, issue #2698.
+      Option A (W0 and A1–A6) is complete: fork bindings are explicit,
+      tenant-validated before clone/boot, carried by every booting entry point,
+      and recorded as names plus allowed hosts without source or value data.
+      Dropping a parent binding is refused unless the caller explicitly permits
+      attenuation. Option B (implicit checkpoint inheritance) remains designed
+      and deliberately deferred.
+
+- [~] **Durable agent sessions** —
+      `specs/plans/2026-08-18-durable-agent-sessions.md` (design) +
+      `specs/plans/2026-08-18-durable-session-substrate.md` (implementation,
+      Tasks 1–5 complete) +
+      `specs/plans/2026-08-18-durable-session-park.md` (implementation,
+      Tasks 1–5 complete) +
+      `specs/plans/2026-08-18-session-approval-head.md` (implementation,
+      Tasks 1–4 complete) +
+      `specs/plans/2026-08-18-resume-session-orchestrator.md` (implementation,
+      Tasks 1–3 complete) +
+      `specs/plans/2026-08-18-session-retention.md` (implementation, Tasks 1–3
+      complete). `CheckpointMeta` gains `Option<SessionBinding>`
+      (`session_id`/`generation`/`journal_cursor`/`approval_head`), folded
+      into `meta_digest` the same way `grants` already is; `approval_head` is
+      a dedicated `ApprovalHead` newtype, not `CheckpointDigest` reused.
+      `mvm_runtime::agent_session::AgentSessionStore` gives sessions a
+      filesystem store (`AgentSessionRecord`, `SandboxResidency`) over
+      `mvm_core::config::agent_sessions_dir()`, with `parent_checkpoint`
+      typed as a `CheckpointDigest` content-address rather than a mutable
+      `CheckpointId`. `fork_checkpoint`/`fork_vm_full` explicitly clear the
+      binding on a forked child. The park slice adds crash-safe record
+      writes through the shared `mvm_core::atomic_io::atomic_write` helper,
+      `ParkReason`/`StorageTier`/`select_tier`, four new record fields
+      (`journal_cursor`, `approval_head`, `storage_tier`, `park_reason`),
+      `AgentSessionRecord::park`/`resume` transitions with
+      `SessionTransitionError`, and store-level `park`/`resume` fenced on
+      the caller's expected generation — a check-then-act refusal, not a
+      compare-and-swap, so a second caller racing on the same generation is
+      not yet serialized; the module has no call sites yet, so nothing races
+      it in production today.
+      `ApprovalLedger::head()` (`crates/mvm-contract/src/policy/approval.rs`)
+      content-addresses the ledger's decision state — every record's
+      approval id, its capability, and its terminal state, deliberately
+      excluding wall-clock fields plus `resource_digest`, `policy_digest`,
+      `admission_plan_digest`, and `authorized_operators` — and `ParkInput`
+      lets a park commit the journal cursor and that head with the
+      transition in one fenced write instead of two. `AgentSessionStore::
+resume` takes a `current_head` and refuses when it differs from the
+      head recorded at park.
+      STILL OPEN: the quiesce sequence over the existing guest verbs is the
+      rest of WS3 — `CheckpointIntegrations`/`Wake` have no host-side caller
+      anywhere in the workspace, and while `GuestRequest::SleepPrep` does
+      have one (the Firecracker stop-time filesystem flush at
+      `crates/mvm-backends/src/driver/fc.rs`'s
+      `prepare_guest_filesystems_for_stop`), nothing on a park path calls
+      it. WS4 is DONE: the ledger-head comparison landed, `resume_session`
+      (`crates/mvm-hostd/src/session_resume.rs`) loads the record, refuses
+      anything but `Hibernated`, resolves the resume point, checks the
+      record's stored `meta_digest` against a fresh `compute_meta_digest()`,
+      runs `verify_content`, builds a `SynthesisInput` naming the session and
+      the generation the resume opens, admits it through
+      `mvm_hostd::plan_admission::admit_for_run`, and only then transitions
+      the record. Still open: nothing calls `ApprovalLedger::head()` to
+      produce the value either side of the step-2 comparison carries —
+      `resume_session` reads its caller-supplied `current_approval_head`
+      straight off the record; `PostRestore` fabric re-registration and
+      credential minting are not implemented; the synthesized plan carries
+      `grants: None`, so a resumed session re-arms neither a wall-clock bound
+      nor a CPU share; a session parked with `approval_head: None` resumes
+      with no ledger fence at all. WS5 is partial: retention classes, expiry,
+      a scheduler that calls `demote`, and actual byte movement between tiers
+      remain undelivered.
+
+      WS6 and WS7 are DONE, both via
+      `specs/plans/2026-08-19-session-cli-and-audit.md` and
+      `specs/plans/2026-08-19-resume-boot.md`
+      (`crates/mvm-cli/src/commands/agent_session.rs` and
+      `crates/mvm-hostd/src/session_resume.rs`). `mvmctl agent-session`
+      carries `open`, `ls`, `show`, `park` and `resume`, and `resume --boot`
+      cold-boots a `Cold`-tier session through the shared post-admission tail,
+      refusing `Parked` and `Resident` by name. `session.resumed` is emitted
+      before the boot attempt so a failed boot leaves the chain consistent
+      with the moved record. Known limitation: on x86 Firecracker the plan
+      pins the source `vmlinux` digest, but the VMM loads an ELF sibling
+      derived from it; the derived file is not itself pinned. WS8 BDD remains
+      untouched.
+
 - [~] **Admission-bound AI assurance sessions** —
       `specs/plans/2026-08-17-admission-bound-ai-assurance-sessions.md`. W1–W4,
-      W6/W7 and W7b landed: the envelope, the authority intersection, the
-      fail-closed outcome ladder, `host.assurance.v1`, fail-closed audit and
-      receipt emission with resolvable citations, the workload-facing
-      `AssuranceCampaign`, and the boot-path session lifecycle behind
-      `AdmitAndStartParams.assurance` (opt-in; `None` on every existing call
-      site). W8.1–W8.5 now add the generic optional-extension pack model:
-      signed/revocable pack verification, exact content-addressed launch-time
-      re-verification, five-way capability intersection, signed-plan binding,
-      read-only guest activation, manifest-only dispatch, typed broker
-      propagation, signed `run-extension` and `cancel-extension` verb
-      requirements, and resource/payload/output/artifact/concurrency limits.
-      W5.4 adds strict durable
-      dispatch recovery: an exact duplicate is never re-executed and instead
-      receives a signed `INCONCLUSIVE / execution_interrupted` completion with
-      idempotent audit/receipt references; malformed or mismatched state fails
-      closed. W5.1 commits the typed host broker's own observation with exact
-      probe citations and a signed observer receipt after rejoining every
-      session identity. W5.2 refuses non-disposable targets and signs cleanup
-      only after the exact backend/VM is stopped and read back as `Stopped`.
-      W9.1 strictly parses the sibling provider request and joins it to an
-      operator-authored full session request without synthesizing fields the
-      sibling omits. The production prompt adapter now persists digest-only
-      agent-session events, recovers accepted work after crash, and delegates
-      to the at-most-once generic dispatcher. Its live cancellation path first
-      commits `Canceling`, then sends an identity-only `cancel-extension` RPC
-      that can stop only the active admitted process group; a pre-dispatch
-      cancellation prevents child creation, while an active cancellation is
-      acknowledged only after the call stops. Both run and cancel verbs must be
-      present in the signed plan. The host atomically persists its signed
-      cancellation audit/receipt references before journal confirmation, so a
-      retry after controller crash returns the exact evidence without another
-      transport call, and joins it to final evidence only on exact
-      session/campaign/trial/source identity.
-      The generic `MVEX` v1 controller frame and blocking stream adapter are
-      now sibling-compatible and tested for size-before-allocation, digest,
-      sequence/replay, typed errors, cancellation and shutdown. The strict
-      provider-response type is in schema emission. The sibling now permits a
-      certifying provider only behind an operator-pinned descriptor identity;
-      an unpinned or mismatched process remains non-certifying.
-      Host finalization accepts only
-      typed observer/cleanup evidence, derives and signs the verdict, and emits
-      the sibling's exact evidence shape; missing cleanup is inconclusive, and
-      interrupted recovery cannot promote unjoined controller cleanup into
-      verified evidence. W5.3 now adds a host-only runtime-attestation verifier
-      join: its canonical challenge binds every admitted identity, grant
-      nonce/expiry, backend, and opening receipt; provider, challenge, enrolled
-      root, freshness, and lifetime mismatches fail closed; and only the joined
-      result emits signed attestation audit/receipt evidence. Native quote
-      providers remain unimplemented, so this plumbing does not certify a live
-      campaign. The concrete provider now carries the operator-selected
-      attestation mode into the signed plan, rejects a required request
-      against `noop`, and has no configuration field for a software
-      verification boolean; ordinary synthesis retains the closed `noop`
-      default.
-      No extension identity or
-      discovery enters an ordinary launch. Landing W7b exposed two bugs the fixtures had masked: the binding
-      rejected every real `sha256:`-prefixed plan id, and the probe handler
-      compared the guest's session identity against the supervisor's lookup key.
-      STILL OPEN: W5 attestation evidence and real KVM canary;
-      the supplied x86_64 KVM lane now reaches Firecracker after descriptor,
-      operator-session, pack, and signed-plan admission. The sibling planner's
-      policy digest (`sha256:6e21b4261fea64f5ef6f20002bd6c3cf32880b327c252b3a957404cda8d3038c`)
-      does not match MVM's canonical four-reference digest, and the only
-      cached workload rootfs is protocol-v0: `mvm-oci-init` denies the
-      extension user-volume path and panics before the guest agent. W5.5
-      therefore remains open pending sibling digest alignment and a current
-      protocol-v2 guest rootfs/workload pack. MVM now publishes the cross-repository
-      algorithm and vector through `mvm-contract`: SHA-256 over the four exact
-      references in network/egress/filesystem/tool order with one NUL separator
-      (`sha256:nul-separated-policy-refs-v1`); the admission path uses that
-      helper directly, so the mismatch remains fail-closed until the sibling
-      adopts it. Assurance admission also now reads the workload's adjacent
-      `mvm-meta.json` before starting a backend and refuses missing or
-      protocol-v0/1 metadata; this prevents the known legacy OCI init from
-      reaching Firecracker and failing during extension-volume activation.
-      W9.2 now includes a generic host-signed controller-service proxy: the
-      resident broker admits only exact signed typed descriptors, derives the
-      VM/session identity, and reaches the controller-owned handler over a
-      bounded host-only UDS while audit keys remain controller-side. Direct,
-      mismatched, oversized, missing-controller, and controller-failure paths
-      fail closed, and post-start session-open refusal stops the VM.
-      W9.3 now durably commits the provider request digest and typed terminal
-      response before transport, replays completed responses without another
-      admitted-runner call, refuses interrupted/failed/conflicting retries,
-      and derives `certifying` from complete host evidence. W9.2/W9.4 now have
-      a fixed `LifecycleAdmittedCampaignRunner`: it rechecks the boot identity,
-      binds the already-open admitted session, durably dispatches beneath an
-      explicit provider state root, confirms exact backend cleanup, and returns
-      the host finalizer's evidence. The real signed-pack
-      `OperatorConfiguredTrialBooter` is now injected into the checked-in
-      executable; it loads a strict private boot config, verifies and promotes
-      the exact pack, intersects authority, constructs the admitted boot
-      inputs, boots, and opens the campaign. The sibling
-      CLI now accepts a strict operator-session bundle, joins it to the Scout
-      request, and transfers it through `OpenSession`; MVM repeats the exact
-      all-campaign join before durable claim or runner work. The new
-      `serve_provider` helper and `mvm-extension-provider` executable own only
-      the bounded MVEX process boundary; the executable now returns the exact
-      admitted-boot failure instead of a placeholder missing-runner result. The
-      controller accepts the bundle only
-      through `OpenSession` and refuses missing, extra, or mismatched session
-      identities. A process-level test covers the executable's complete
-      sibling-compatible frame sequence. The ordered closeout is tracked in
-      `specs/plans/2026-08-18-certifying-assurance-campaign-closeout.md`. The
-      separate operator bundle supplies the trial, authority, canary, and
-      destination facts intentionally absent from the Scout-derived request.
-      The sibling launcher now passes an explicit absolute provider state root
-      and global MVM home while retaining `env_clear`; it restores only the
-      selected `MVM_HOME`. MVM requires the private boot config to pin that
-      exact global root, refuses relative and symlink replay roots, and roots
-      prompt history beneath the provider directory without ambient or
-      temporary fallback.
-      The fixed runner and concrete controller now also cover the complete
-      lifecycle recovery matrix: minimum admitted deadlines trigger durable
-      identity-bound cancellation, stale or closed grants never dispatch,
-      retries and reconstructed controllers do not execute twice, and guest
-      failure, partial observation, cleanup failure, and concurrent-run
-      exhaustion remain explicitly non-certifying. The focused matrix passes
-      9 lifecycle-runner, 9 provider-controller, 7 durable adapter, 4 guest
-      cancellation-state, and 27 host assurance broker tests. Bounded provider
-      journals omit prompt, credential, and runner-diagnostic markers.
-      The sibling host package disables implicit binary discovery so `scoutd`
-      can be built only by its explicit canonical MVM-API harness; its current
-      73 workspace, 4 pack-producer, and 4 guest-harness tests pass with
-      all-target check, Clippy, and formatting.
-      Host-available MVM validation passes the clean complete workspace test
-      run including doctests, 1,906 hostd library tests, 64 assurance contract
-      tests, workspace all-target check and Clippy, six-key schema emission,
-      formatting, the x86_64 Linux cross-target and BDD required-feature gates,
-      plan-name validation, and sprint-append validation. The monolithic
-      workspace gate is deterministic after isolating xtask's nested Cargo
-      target and guarding environment-dependent manifest and mock-agent
-      fixtures. The native Linux
-      all-feature lane is green; the real-KVM lane remains open.
-      The sibling now owns a static guest `scoutd`, strict recipe, SPDX SBOM,
-      and independently signed generic extension pack accepted by MVM's
-      product-agnostic verifier. Its guest loop now compiles against MVM's
-      canonical assurance client, selects only admitted destination labels,
-      obeys the step budget, invokes only the typed campaign probe, and emits a
-      verdict-free candidate. MVM validates the observation join before host
-      evidence finalization. The starter provider still returns broker-
-      unavailable and the fixture remains expressly non-certifying. The final
-      macOS workspace format, check, test,
-      all-targets Clippy, BDD required-feature compile, schema, metadata, and
-      sibling gates pass. The native libkrun builder now passes a
-      source-current six-disk runtime probe. Corrected Stage 0 persistent-store
-      preparation completed without ext4, data-loss, or capacity errors. The
-      rebuilt image's static `/sbin/mvm-setpriv` launches the automatic agent
-      as UID 990 with exactly `CAP_KILL|CAP_SYS_TIME` effective and ambient and
-      `NoNewPrivs=1`; the strict live result recorded capability mask
-      `0000000002000020` and exit code zero. Mutable XDG, Rustup, Cargo, target,
-      and temporary state use explicit `/out` paths without changing `HOME`.
-      The native lane is now closed: its source-current run passes focused
-      sparse-store, Stage 0 prepopulation/recovery, Stage 0 binary, VMM, and
-      hostd assurance tests; workspace all-target/all-feature Clippy and check;
-      and BDD required-feature compilation. Eight fresh durable gate markers
-      under
-      `/nix/var/mvm/assurance-gates/2026-08-20-admission-ai-assurance-final-current`
-      record the completed lane; all 559 Linux `mvm-vmm` tests and 72 focused
-      hostd assurance tests passed and the exact-current shell job exited zero.
-      Its source-matched VM state is `mvm-builder-vm-1787217398177-7306`. The
-      builder also exposes no KVM or TPM2/SNP/TDX device. Exact-current probe
-      `mvm-builder-vm-1787214676670-12105` found no device or TSM/TDX report
-      path and an empty `/sys/class/tpm`; seven all-feature provider tests
-      prove only their fail-closed `NotYetImplemented` behavior. The only
-      discovered KVM is in
-      an owner-approved Lima test VM for which this checkout has no
-      admission-visible production-safe backend. Production assurance
-      admission now rejects configured `qemu` and `mock` dev/test backends
-      before artifact or pack work; the focused refusal test and
-      `mvm-hostd` all-target/all-feature Clippy pass. This is a negative
-      admission proof, not a live KVM execution. Until the open work lands,
-      every live trial evaluates `INCONCLUSIVE` by design; no certifying
-      campaign can run.
-      The reference Scout flow produced run
-      `scout-1787181844-1787181844602-371467bf57b4`; its fixture-only run and
-      correlation are globally `INCONCLUSIVE` and produced no admitted MVM
-      plan/session/grant/receipt identities. A sibling report currently shows
-      fixture-supplied per-finding `PREVENTED` labels despite
-      `certifying: false`; those labels are not certifying MVM evidence.
-      The provider now binds the operator-selected attestation mode into the
-      signed plan and rejects required-attestation requests against `noop`.
-      QEMU/mock are production-refused and QEMU is available only through an
-      explicit non-certifying dev/test tier. A native canary build exhausted
-      the shared 68.7 GiB Nix store while realizing the aarch64 dev image; no
-      pre-existing state was removed and the live lane remains open. A follow-up
-      isolated retry with a fresh 96 GiB sparse store stopped before VM startup
-      because Stage 0 could not resolve `releases.nixos.org` to fetch the pinned
-      `nix-2.34.7-aarch64-linux.tar.xz` seed.
+      W6/W7, W7b landed and W5 partial: the envelope, the authority
+      intersection, the fail-closed outcome ladder, `host.assurance.v1`,
+      resolvable audit/receipt citations, the workload-facing
+      `AssuranceCampaign`, the boot-path session lifecycle, and
+      `collect_evidence` — cleanup read through the admission budget's own
+      liveness probe, disposability off the signed plan.
+      `observer_verified` is deliberately only "MVM recorded a probe", not an
+      independent observer, and a test pins that a real session still evaluates
+      `INCONCLUSIVE` for `ObserverMissing`. Landing W7b exposed two bugs the
+      fixtures had masked: the binding rejected every real `sha256:`-prefixed
+      plan id, and the probe handler compared the guest's session identity
+      against the supervisor's lookup key.
+      STILL OPEN: W5b a guest-side observer, W8 the framed-stdio provider, W9b
+      the `mvmctl machine run` seam (`machine run` drives `AnyBackend` directly
+      and never reaches the admit path W9 threaded). No certifying campaign can
+      run.
 
 - [~] **Embedded-binary content store** — `specs/plans/2026-08-17-embedded-binary-content-store.md`.
       Phases 1–2 landed: both nested legs of `crates/mvm-cli/build.rs` are keyed
@@ -491,6 +461,22 @@ for detailed scope and acceptance criteria.
       rerun-if-env-changed), Phase 4 (dead crate edges; `deps_audit` and the
       tree-sitter grammars off the serial path; the `mvm-hostd` audit cluster),
       Phase 5 (sccache 4.2% Rust hit rate, worktree hygiene)
+
+- [~] **Agent tool and memory planes**
+      (`specs/plans/2026-08-18-agent-tool-and-memory-planes.md`). Opened
+      2026-08-18; no workstream started. Design only: ADR-045 gained sections
+      18-19 (an agent's tool surface is broker dispatch, and the catalog
+      derives from `ExecutionPlan.services` rather than from anything the guest
+      or its model says) and ADR-047 defines the memory plane. Sequenced behind
+      `specs/plans/2026-08-18-durable-agent-sessions.md` WS1, which owns the
+      session identity memory keys on and is itself unmerged.
+  - [x] WS1 — catalog derivation from the signed admission (PR #2705)
+  - [x] WS2 — per-capability argument policy inside the descriptor digest (#2705)
+  - [~] WS3 — the guest-side-client gate landed; the host-side adapter has not
+  - [x] WS4 — refusal names the surface, and repeated misses are rate-bounded (#2705)
+  - [ ] WS5-WS9 — memory plane: store + record, `host.memory.v1`, write scan
+        and ceilings, audit + retention, bounded recall
+  - [ ] WS10 — `mvmctl memory` read-only surface, tests + BDD
 
 - [~] **Launch path as declared stages**
       (`specs/plans/2026-08-15-launch-path-as-declared-stages.md`). Opened
@@ -1711,102 +1697,38 @@ for detailed scope and acceptance criteria.
         (recon §7.7 → #2019)
 
 - [~] Plan 316 — Single flow-aware vsock networking path
-  **Phases 2-4 superseded by
-  `specs/plans/2026-08-15-flowmux-single-transport-cutover.md` (#2543): #2480 shipped the
-  FlowMux guest adapter without host identity provisioning, so guest egress is dead on
-  `main`. The cutover completes there, on one transport, folding `Wire` and `MVM_ICMP/1`
-  into FlowMux rather than leaving three protocols behind a sniff.
-  WS0-WS7 are complete: substitution rides `OpenHttp`, `ping` rides `IcmpEcho`,
-  the raw dispatcher and `EgressMode::Raw` are deleted, readiness fails closed
-  on a launch whose endpoint carried no session, and
-  `xtask check-one-guest-protocol` fails the build if a second guest->host
-  protocol returns. `EgressMode::Wire` survives for the wasm tier's host-side
-  `mvm:egress` import, which is host-internal IPC rather than a guest channel.**
-  (`specs/plans/316-single-flow-vsock-networking.md`, ADR-042, umbrella #2368)
-  Collapses the two production workload networking paths to one authenticated
-  FlowMux session on `GuestService::NetworkFlow` through one
-  `mvm-network-endpoint`. Supersedes the production-path decisions in plan 285
-  and plan 287; both are frozen, not yet deleted.
-  - [x] Phase 0 — ratify the invariant and freeze expansion (#2369): ADR-042
-        accepted; ADR-036 and ADR-037 marked superseded for production workload
-        networking; `specs/refactor/03-networking.md` corrected from "the raw
-        packet path is deleted" to the actual two-path state; ADR-001's tier
-        matrix and claim-10 section qualified; `xtask
-check-l3-expansion-freeze` added as a temporary shrink-only ratchet
-        over `L3Vsock`/`raw_ip_stack`/`NetworkControl`/`NetworkData`/
-        `spawn_netd`/`host_datapath` (29 allowlist entries); synthesis,
-        admission, and CLI preflight refuse `raw_ip_stack=true`/`L3Vsock` with
-        a migration error naming the loopback adapters and typed connectors
-  - [x] Phase 1 — pin protocol, resource, and performance baselines (#2370).
-        Closed 2026-08-13. Landed: `mvm-contract::protocol::network_flow` — the
-        v1 frame header (20 bytes, `u32` length field because 64 KiB does not
-        fit a `u16`), all 27 opcodes with their class/sender/confirmation
-        relations, state-independent cap-before-allocate decoding with golden
-        byte fixtures, and the session/stream state machine (parity-split stream
-        IDs, watermark reuse rejection rather than an unbounded set, per-stream
-        credit, declared-listener-backed ingress, fail-closed on every
-        refusal). 87 unit tests. `crates/mvm-contract/fuzz` adds
-        `fuzz_network_flow_decode` and `fuzz_network_flow_state` with 95
-        committed seeds, wired into `security.yml`. Transport-neutral signed
-        `NetworkLimits` is also implemented with default-byte compatibility,
-        validation, and one legacy/FlowMux accessor. `mvm-core::net::session`
-        extracts the authenticated session so it is shared by control RPC and
-        FlowMux, with tests for replay, tampering, wrong identity, and counter
-        exhaustion. Remaining: the perf harness + baselines.
-  - [~] Phase 2 — the one authenticated endpoint (#2371). Substantially landed,
-        **not complete**: the `EndpointSpawner` → `NetworkEndpointSpawner` rename
-        has not happened (`crates/mvm-hostd/tests/workload_stream_plane.rs` still
-        imports `EndpointSpawner`), the duplicate `EGRESS_VSOCK_PORT = 5253`
-        survives in `mvm-egress-client.rs` and `mvm-addon-dns.rs` because
-        `mvm-agentd` does not depend on `mvm-net`, and the fail-closed readiness
-        assertion — a networking-granted workload must not reach ready when the
-        FlowMux session fails to authenticate — is unwitnessed. Phase 3 is
-        already ahead of this, so the phase gate will not catch the residue.
-        Landed: `GuestService::NetworkFlow`
-        now names the port-5253 channel; the endpoint binary, proxy, spawner, and
-        test files are renamed to `mvm-network-endpoint`/`network_endpoint_*`;
-        `mvm-hostd::supervisor::flowmux` landed the authenticated FlowMux session
-        acceptor (`FlowMuxSession::accept`, `serve`, `Hello`/`HelloAck`, `GoAway`
-        for unimplemented flows) and bounded per-stream registries
-        (`flowmux::registry`) with unit tests for parity, ceilings, state
-        transitions, and credit accounting. The acceptor is wired into the
-        `mvm-network-endpoint` binary (`EgressMode::FlowMux`,
-        `EndpointConfig::flowmux_identity`, `serve_flowmux`) and the spawner emits
-        the identity on stdin. Backend witness tests in `mvm-vmm::host::spec_map`
-        and the Firecracker/HVF/libkrun driver modules prove exactly one
-        `NetworkFlow` service and no L3 services per granted workload.
-  - [~] Phase 3 — converge egress TCP, UDP, and DNS (#2372). **The machinery
-    below is landed and unit-tested but is NOT on the production path:**
-    `RealNetworkEndpointSpawner::spawn` hard-codes `flowmux_identity: None`,
-    `EndpointSpawnRequest` has no field for it, and the only
-    `FlowMuxIdentitySpawnConfig` construction in the workspace is inside a
-    `#[cfg(test)]` function. `claim.rs` still selects the mode with
-    `let raw_egress = inputs.secrets.is_empty()`, so every admitted workload
-    speaks `Wire` or `Raw`. The last checkbox (delete `EgressMode`/`raw_egress`)
-    therefore cannot be executed as written — it would break all egress. Landed:
-    guest-initiated `OpenTcp` with typed `Opened`/`Refused` replies,
-    `OpenUdp`/`UdpSend`/`UdpRecv` associations, `Resolve`/`Resolved` DNS
-    frames, per-direction host credit accounting, UDP idle expiry, per-
-    association peer bounds, per-class connection-rate limiting, payload-
-    free audit emission for TCP/UDP allows/denies and DNS resolves/refusals,
-    and host-side integration tests for allowed/denied TCP, UDP round-trip,
-    DNS pinning, UDP idle expiry, peer bounds, half-close, reset, and rate-
-    limit overflow. Guest-side `FlowMuxClient` / `FlowMuxReconnectClient`,
-    `FlowMuxStream`, `FlowMuxUdpSocket`, async frame pump, and unit tests
-    are implemented in `crates/mvm-agentd/src/flowmux.rs`. Guest-side
-    adapters are now wired: `mvm-egress-client` uses
-    `flowmux_egress::run` with a single `FlowMuxReconnectClient`,
-    `mvm-addon-dns` optionally forwards through `FlowMuxClient::resolve`,
-    and the legacy line-prelude symbols (`HTTP_FORWARD_FRAME`,
-    `MVM_DNS/1`, `MVM_SOCKS5_UDP/1`) are removed from the guest modules.
-    Unit tests cover the new DNS and SOCKS5/HTTP parsing paths.
-    Remaining: delete the host-side raw-egress dispatcher and add endpoint
-    crash/restart integration tests.
-  - [~] Phase 4 — stream typed transformations (#2373)
-  - [ ] Phase 5 — declared ingress on FlowMux (#2374)
-  - [ ] Phase 6 — compatibility boundary (#2375)
-  - [ ] Phase 7 — delete L3 completely (#2376)
-  - [ ] Phase 8 — make "one path" mechanically enforceable (#2377)
+  (`specs/plans/316-single-flow-vsock-networking.md`, ADR-042). The active
+  remainder is issue #2751 and
+  `specs/plans/2026-08-19-flowmux-single-path-closeout.md`; the original phase
+  issues are closed historical records.
+  - [x] Protocol, authenticated endpoint, production outbound cutover, and
+        authenticated-session readiness. TCP, UDP, DNS, mediated ICMP, and
+        typed HTTP use FlowMux on `GuestService::NetworkFlow`; the raw/Wire
+        guest dispatcher is deleted and `check-one-guest-protocol` guards the
+        transport boundary.
+  - [x] Relayed-vsock host-first handshake (#2741). HVF and libkrun now open
+        the endpoint relay on guest connect, retain the route needed for a
+        host-first greeting, and reset immediately when no endpoint exists.
+  - [x] Shared per-VM admitted limits. Signed `NetworkLimits` reach endpoint
+        startup, where one RAII budget and rate limiter are shared across all
+        sessions. Aggregate TCP/HTTP, UDP, DNS, ICMP, ingress-listener, and
+        session ceilings survive session churn and return reservations on
+        teardown; malformed admitted limits fail before the endpoint binds.
+  - [x] FlowMux performance harness and labelled legacy/current baselines.
+        Strict macOS arm64 and Linux x86_64 host-loopback reports are recorded;
+        their 21/28 pre-deletion threshold misses remain explicit, with no
+        approved exception, for the final closeout matrix to resolve.
+  - [~] Typed HTTP uses FlowMux frames but still crosses a whole-message
+        compatibility seam; bounded end-to-end streaming and endpoint-owned
+        typed connector execution remain.
+  - [ ] Declared ingress runtime. The wire opcodes and state transitions exist;
+        endpoint listener and guest-adapter handling do not.
+  - [ ] Remove the rejected `raw_ip_stack`/`L3Vsock` public compatibility
+        surface now that the migration release condition has passed.
+  - [ ] Delete frozen L3 contract, guest, host, VMM, dependency, packaging,
+        kernel, CI, and test slices.
+  - [ ] Permanent single-path/socket-owner gates plus the final performance,
+        Firecracker, HVF, libkrun, BDD, supply-chain, and documentation matrix.
 
 - [~] Plan 285 — L3 TUN-over-vsock network mode
   (`specs/plans/285-l3-tun-over-vsock.md`, ADR-036)
