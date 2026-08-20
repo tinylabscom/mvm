@@ -27,18 +27,39 @@ fn assert_arrayref_lock(lockfile_path: &Path) {
     );
 }
 
+fn collect_lockfiles(directory: &Path, lockfiles: &mut Vec<std::path::PathBuf>) {
+    let entries = std::fs::read_dir(directory)
+        .unwrap_or_else(|error| panic!("failed to read {}: {error}", directory.display()));
+    for entry in entries {
+        let entry = entry.expect("directory entry must be readable");
+        let path = entry.path();
+        let file_type = entry
+            .file_type()
+            .unwrap_or_else(|error| panic!("failed to inspect {}: {error}", path.display()));
+        if file_type.is_dir() {
+            collect_lockfiles(&path, lockfiles);
+        } else if path.file_name().is_some_and(|name| name == "Cargo.lock") {
+            lockfiles.push(path);
+        }
+    }
+}
+
 #[test]
 fn every_arrayref_graph_uses_the_reviewed_upstream_revision() {
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let graphs = [
-        (workspace.join("Cargo.toml"), workspace.join("Cargo.lock")),
-        (
-            workspace.join("crates/mvm-hostd/fuzz/Cargo.toml"),
-            workspace.join("crates/mvm-hostd/fuzz/Cargo.lock"),
-        ),
-    ];
+    let mut lockfiles = vec![workspace.join("Cargo.lock")];
+    collect_lockfiles(&workspace.join("crates"), &mut lockfiles);
+    let affected: Vec<_> = lockfiles
+        .into_iter()
+        .filter(|lockfile| read(lockfile).contains("name = \"arrayref\""))
+        .collect();
 
-    for (manifest, lockfile) in graphs {
+    assert!(!affected.is_empty(), "the workspace must contain arrayref");
+    for lockfile in affected {
+        let manifest = lockfile
+            .parent()
+            .expect("a lockfile has a containing directory")
+            .join("Cargo.toml");
         assert_arrayref_patch(&manifest);
         assert_arrayref_lock(&lockfile);
     }

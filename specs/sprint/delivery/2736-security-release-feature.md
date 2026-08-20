@@ -5,10 +5,10 @@
       The merge-queue fuzz compile gate also consumes refreshed committed
       lockfiles with `--locked`, so newly published registry versions cannot
       replace the reviewed graph while the invariant job is running.
-      The root graph and standalone `mvm-hostd` fuzz graph pin `arrayref` to
-      the immutable upstream revision for the reviewed 0.3.9 source; a
-      regression test proves both manifests and lockfiles agree, while the
-      source policy admits only that upstream repository.
+      The root graph and every affected standalone fuzz graph pin `arrayref`
+      to the immutable upstream revision for the reviewed 0.3.9 source; a
+      discovery-based regression test proves each manifest and lockfile agree,
+      while the source policy admits only that upstream repository.
       The exact feature check fails on the prior source and passes after the
       fix; every fuzz manifest compiles from its lockfile, and workspace
       all-target Clippy, workflow syntax, formatting, and the workspace suite
