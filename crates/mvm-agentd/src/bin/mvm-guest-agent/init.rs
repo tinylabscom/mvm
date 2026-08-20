@@ -33,8 +33,6 @@ pub(crate) fn early_setup() {
     if !is_pid1() {
         return;
     }
-    eprintln!("mvm-guest-agent: running as PID 1, performing early initramfs setup");
-
     #[cfg(target_os = "linux")]
     {
         if crate::transport::unix_transport_selected() {
@@ -83,7 +81,7 @@ fn provision_host_signer_anchor() {
             )
         });
     match result {
-        Ok(true) => eprintln!("mvm-guest-agent: host-signer anchor provisioned from cmdline"),
+        Ok(true) => {}
         Ok(false) => {
             eprintln!("mvm-guest-agent: no host-signer anchor on cmdline; control stays closed")
         }
@@ -127,7 +125,6 @@ pub(crate) fn apply_activation(
     guest_mount::drop_guest_agent_privilege(guest_mount::WORKLOAD_UID, guest_mount::WORKLOAD_GID)?;
 
     boot_state.set_activation(ActivationState::Activated);
-    eprintln!("mvm-guest-agent: activation complete, serving operational RPCs");
     Ok(())
 }
 
