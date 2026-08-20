@@ -1615,9 +1615,11 @@ for detailed scope and acceptance criteria.
         session ceilings survive session churn and return reservations on
         teardown; malformed admitted limits fail before the endpoint binds.
   - [ ] FlowMux performance harness and labelled legacy/current baselines.
-  - [~] Typed HTTP uses FlowMux frames but still crosses a whole-message
-        compatibility seam; bounded end-to-end streaming and endpoint-owned
-        typed connector execution remain.
+  - [x] Bounded typed transformations and endpoint-owned connectors. Typed
+        HTTP now streams incrementally with bounded cross-frame transforms,
+        fail-closed cancellation and audit behavior; web fetch and search
+        authorize in their brokers but resolve, connect, and execute through
+        the per-VM network endpoint.
   - [ ] Declared ingress runtime. The wire opcodes and state transitions exist;
         endpoint listener and guest-adapter handling do not.
   - [ ] Remove the rejected `raw_ip_stack`/`L3Vsock` public compatibility
