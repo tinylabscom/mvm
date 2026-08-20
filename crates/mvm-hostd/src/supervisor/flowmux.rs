@@ -458,10 +458,12 @@ impl FlowMuxSession {
             ))
             .map_err(|e| FlowMuxError::FrameRefused(e.to_string()))?;
 
-        self.send_hello_ack()?;
         lock_validator(&self.validator)
             .mark_hello_ack_sent()
             .map_err(|e| FlowMuxError::FrameRefused(e.to_string()))?;
+        // Make readiness visible to concurrent host-side ingress before the
+        // peer can observe the acknowledgement that promises that readiness.
+        self.send_hello_ack()?;
 
         loop {
             let (opcode, stream_id, payload_len) = match self.read_frame()? {
