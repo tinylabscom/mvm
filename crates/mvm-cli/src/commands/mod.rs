@@ -213,7 +213,7 @@ pub(in crate::commands) enum Commands {
     /// Print shell configuration (completions + dev aliases) to stdout
     #[command(display_order = 14)]
     ShellInit(env::shell_init::Args),
-    /// Operational / observability commands (metrics, config)
+    /// Operational / observability commands (metrics, config, MCP)
     #[command(display_order = 14)]
     Ops(ops::group::Args),
     /// Manage named dev networks

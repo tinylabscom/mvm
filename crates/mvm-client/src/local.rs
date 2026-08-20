@@ -28,11 +28,11 @@ use mvm_fs::oci::{
 };
 use mvm_runtime::AnyBackend;
 
-use mvm_core::client::BackendCapabilityReport;
 use mvm_core::client::dto::{
     ExecResult, LogOpts, MachineFilter, MachineId, MachineSpec, MachineState, MachineStatus,
     PauseOpts, PauseOutcome, PortMapping, ResumeOpts, ResumeOutcome,
 };
+use mvm_core::client::{BackendCapabilityReport, ClientOperationCapabilities};
 use mvm_core::client::{MvmClient, MvmError, Result};
 use mvm_core::config::vm_state_dir;
 use mvm_core::vm_backend::{SnapshotCapability, VmStartConfig, WarmStartError};
@@ -603,10 +603,26 @@ impl MvmClient for LocalBackend {
     async fn backend_capabilities(&self) -> Result<BackendCapabilityReport> {
         // Straight from the backend that will actually run the workload, so
         // the report cannot drift from the thing it describes.
-        Ok(BackendCapabilityReport::new(
-            self.backend.kind(),
-            self.backend.capabilities(),
-        ))
+        let capabilities = self.backend.capabilities();
+        Ok(
+            BackendCapabilityReport::new(self.backend.kind(), capabilities.clone())
+                .with_operations(
+                    ClientOperationCapabilities::builder()
+                        .list(true)
+                        .inspect(true)
+                        .create(true)
+                        .run(true)
+                        .start(true)
+                        .stop(true)
+                        .pause(capabilities.pause_resume)
+                        .resume(capabilities.pause_resume)
+                        .remove(true)
+                        .logs(true)
+                        .reconfigure(true)
+                        .set_ttl(true)
+                        .build(),
+                ),
+        )
     }
 
     async fn list_machines(&self, filter: MachineFilter) -> Result<Vec<MachineState>> {
@@ -979,6 +995,21 @@ mod tests {
             }),
             MachineStatus::Failed
         );
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "test-support")]
+    async fn local_operation_report_omits_the_unwired_exec_seam() {
+        let operations = LocalBackend::with_hypervisor("mock")
+            .backend_capabilities()
+            .await
+            .expect("local capabilities")
+            .operations;
+        assert!(operations.list && operations.inspect && operations.run);
+        assert!(operations.create && operations.start && operations.stop);
+        assert!(operations.remove && operations.logs && operations.reconfigure);
+        assert!(operations.set_ttl);
+        assert!(!operations.exec);
     }
 
     #[test]

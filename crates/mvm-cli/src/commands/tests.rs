@@ -2199,6 +2199,20 @@ fn test_metrics_command_parses() {
 }
 
 #[test]
+fn mcp_stdio_command_parses() {
+    let cli = Cli::try_parse_from(["mvmctl", "ops", "mcp", "stdio"])
+        .expect("the named MCP stdio consumer must parse");
+    assert!(matches!(
+        cli.command,
+        Commands::Ops(ops::group::Args {
+            action: ops::group::OpsCmd::Mcp(ops::mcp::Args {
+                transport: ops::mcp::Transport::Stdio
+            })
+        })
+    ));
+}
+
+#[test]
 fn test_metrics_json_flag_parses() {
     let cli = Cli::try_parse_from(["mvmctl", "ops", "metrics", "--json"]).unwrap();
     assert!(matches!(
