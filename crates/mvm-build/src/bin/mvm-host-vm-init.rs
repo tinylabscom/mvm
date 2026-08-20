@@ -610,7 +610,7 @@ fn resolve_agent_binary(
 /// restored wall clock. No workload process inherits either capability.
 #[cfg(any(target_os = "linux", test))]
 fn agent_spawn_command(agent_bin: &Path) -> Command {
-    let mut c = Command::new("setpriv");
+    let mut c = Command::new("mvm-setpriv");
     c.arg(format!("--reuid={AGENT_UID}"))
         .arg(format!("--regid={AGENT_UID}"))
         .arg("--clear-groups")
