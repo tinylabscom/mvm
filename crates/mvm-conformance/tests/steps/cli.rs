@@ -6,7 +6,6 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
-use assert_cmd::cargo::CommandCargoExt;
 use cucumber::{given, then, when};
 use tokio::task::spawn_blocking;
 use tokio::time::timeout;
@@ -17,12 +16,21 @@ use crate::world::CliWorld;
 /// the conformance suite uses, plus the target directory on `PATH` so helper
 /// binaries built alongside `mvmctl` are visible during live boots.
 pub(crate) fn mvmctl_command() -> Command {
-    #[allow(deprecated)] // matches crates/mvm-cli/tests/cli.rs's use of this API
-    let cargo_cmd = Command::cargo_bin("mvmctl").unwrap_or_else(|e| {
-        panic!("mvmctl binary not found ({e}) — run `cargo build --bin mvmctl` before `just bdd`")
-    });
-
-    let cargo_path = PathBuf::from(cargo_cmd.get_program());
+    let cargo_path = std::env::var_os("CARGO_BIN_EXE_mvmctl")
+        .map(PathBuf::from)
+        .or_else(|| {
+            let mut dir = std::env::current_exe().ok()?;
+            dir.pop();
+            if dir.ends_with("deps") {
+                dir.pop();
+            }
+            Some(dir.join("mvmctl"))
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "mvmctl binary path unavailable — run `cargo build --bin mvmctl` before `just bdd`"
+            )
+        });
     let bin_path = if cargo_path.is_absolute() {
         cargo_path
     } else {
