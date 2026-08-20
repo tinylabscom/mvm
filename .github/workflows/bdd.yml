@@ -85,6 +85,10 @@ jobs:
       # passes flags older Firecracker releases reject before opening the API
       # socket, which otherwise surfaces as an unhelpful socket timeout.
       FC_VERSION: v1.14.1
+      # Hosted runners protect their distro kernel under /boot. Use the
+      # published, hash-verified workload kernel instead of falling back to a
+      # Stage 0 source build that attempts to boot that unreadable host file.
+      MVM_KERNEL_SOURCE: download
     steps:
       - uses: actions/checkout@v6
 

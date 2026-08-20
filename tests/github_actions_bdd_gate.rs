@@ -73,6 +73,7 @@ fn canonical_bdd_workflow_runs_a_kvm_live_witness_in_the_merge_queue() {
         "github.event_name == 'workflow_dispatch'",
         "runs-on: ubuntu-latest",
         "FC_VERSION: v1.14.1",
+        "MVM_KERNEL_SOURCE: download",
         "packages: libcap-ng-dev lld qemu-system-x86 qemu-utils",
         "sudo chmod 666 /dev/kvm",
         "run: just bdd-live-ci",
