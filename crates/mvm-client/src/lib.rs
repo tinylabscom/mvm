@@ -39,7 +39,11 @@ pub use mvm_core::client::dto::{
 #[cfg(feature = "remote")]
 pub use mvm_core::client::gateway;
 pub use mvm_core::client::mock::{self, MockBackend};
-pub use mvm_core::client::{MvmClient, MvmError, Result};
+pub use mvm_core::client::{
+    BackendCapabilityReport, ClientOperationCapabilities, ClientOperationCapabilitiesBuilder,
+    MvmClient, MvmError, Result,
+};
+pub use mvm_core::naming::validate_vm_name;
 
 pub use boot::{
     ResumeBootLocalRequest, ResumeBootLocalRequestBuilder, backend_is_running, backend_kind_for,

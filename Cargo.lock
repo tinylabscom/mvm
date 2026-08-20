@@ -3058,6 +3058,7 @@ dependencies = [
  "mvm-fs",
  "mvm-hostd",
  "mvm-http",
+ "mvm-mcp",
  "mvm-net",
  "mvm-observability",
  "mvm-runtime",
@@ -3317,6 +3318,18 @@ dependencies = [
  "tokio-rustls",
  "tracing",
  "url",
+]
+
+[[package]]
+name = "mvm-mcp"
+version = "0.18.0"
+dependencies = [
+ "chrono",
+ "mvm-client",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
 ]
 
 [[package]]

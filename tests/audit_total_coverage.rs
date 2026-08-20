@@ -103,6 +103,7 @@ const ENV_SUB: &[(&str, AuditPosture)] = &[
 const OPS_SUB: &[(&str, AuditPosture)] = &[
     ("metrics", AuditPosture::ReadOnly),
     ("config", AuditPosture::Emits("ConfigChange")),
+    ("mcp", AuditPosture::InteractiveOrControl),
 ];
 
 // `kernel build` compiles/downloads a microVM kernel into the local
@@ -328,6 +329,16 @@ const SESSION_SUB: &[(&str, AuditPosture)] = &[
     ("reap", AuditPosture::Emits("Kill")),
 ];
 
+const AGENT_SESSION_SUB: &[(&str, AuditPosture)] = &[
+    // Creating the durable record is covered by the top-level command
+    // envelope; parking and resuming also append their lifecycle entries.
+    ("open", AuditPosture::Emits("cmd.agent-session")),
+    ("ls", AuditPosture::ReadOnly),
+    ("show", AuditPosture::ReadOnly),
+    ("park", AuditPosture::Emits("session.parked")),
+    ("resume", AuditPosture::Emits("session.resumed")),
+];
+
 const PROC_SUB: &[(&str, AuditPosture)] = &[
     ("start", AuditPosture::Emits("VmProcStart")),
     ("ls", AuditPosture::ReadOnly),
@@ -477,17 +488,6 @@ const DEPS_SUB: &[(&str, AuditPosture)] = &[
     ("capture", AuditPosture::Emits("DepsAudit")),
     ("install", AuditPosture::Emits("DepsAudit")),
     ("capture-live", AuditPosture::Emits("DepsAudit")),
-];
-
-const AGENT_SESSION_SUB: &[(&str, AuditPosture)] = &[
-    ("open", AuditPosture::InteractiveOrControl),
-    ("ls", AuditPosture::ReadOnly),
-    ("show", AuditPosture::ReadOnly),
-    ("park", AuditPosture::Emits("session.parked")),
-    (
-        "resume",
-        AuditPosture::Emits("session.resumed+plan.admitted"),
-    ),
 ];
 
 /// Every top-level `mvmctl` subcommand keyed by its clap name.
@@ -797,6 +797,7 @@ fn audit_posture_emits_entries_reference_known_audit_kinds() {
         // removal in the chain before deleting the segments it names.
         "chain.pruned",
         // Top-level command audit envelopes.
+        "cmd.agent-session",
         "cmd.deploy",
         // Image time-travel restore marker.
         "image.reverted",

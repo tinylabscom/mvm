@@ -459,10 +459,12 @@ pub struct BuildProvenance {
 /// reference this id verbatim.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct PlanId(pub String);
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct TenantId(pub String);
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]

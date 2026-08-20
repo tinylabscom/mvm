@@ -431,6 +431,7 @@ impl ServiceHandler for HostAssuranceV1Handler {
 mod tests {
     use super::*;
 
+    use crate::audit::assurance::identity_of;
     use crate::audit::assurance::{audit_citations_resolve, resolve_audit_ref};
     use crate::audit::emitter::AuditEmitter;
     use mvm_contract::assurance::{
@@ -551,7 +552,7 @@ mod tests {
                 host: "attacker.example.com".to_string(),
                 port: 443,
             }],
-            identity: PlanIdentity::from(&PlanFixture::new().build()),
+            identity: identity_of(&PlanFixture::new().build()),
             sink: None,
         }
     }
@@ -978,7 +979,7 @@ mod tests {
             .expect("emitter")
             .with_receipts();
         let plan = PlanFixture::new().build();
-        let identity = PlanIdentity::from(&plan);
+        let identity = identity_of(&plan);
         let ledger = AssuranceLedger::new(&emitter, &identity);
         let identity = crate::audit::assurance::SessionIdentity {
             session_id: id(SESSION),
@@ -1023,7 +1024,7 @@ mod tests {
             .expect("emitter")
             .with_receipts();
         let plan = PlanFixture::new().build();
-        let identity = PlanIdentity::from(&plan);
+        let identity = identity_of(&plan);
         let ledger = AssuranceLedger::new(&emitter, &identity);
         let refs = ledger
             .open_session(&SessionIdentity {

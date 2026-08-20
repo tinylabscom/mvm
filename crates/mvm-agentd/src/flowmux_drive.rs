@@ -162,6 +162,21 @@ pub enum IdentityDriveError {
     Unreadable(String),
 }
 
+impl IdentityDriveError {
+    /// Return the failures worth printing during unconditional guest setup.
+    ///
+    /// A boot with no egress policy intentionally has no identity drive, while
+    /// a drive that was attached but cannot be read is a real provisioning
+    /// failure and must stay visible.
+    #[must_use]
+    pub fn boot_warning(&self) -> Option<&Self> {
+        match self {
+            Self::NotAttached => None,
+            Self::Unreadable(_) => Some(self),
+        }
+    }
+}
+
 impl std::fmt::Display for IdentityDriveError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -501,5 +516,22 @@ mod tests {
         let rendered = IdentityDriveError::NotAttached.to_string();
         assert!(rendered.contains(IDENTITY_DRIVE_LABEL), "{rendered}");
         assert!(rendered.contains("did not attach"), "{rendered}");
+    }
+
+    #[test]
+    fn an_unattached_identity_drive_is_an_expected_secretless_boot() {
+        assert!(IdentityDriveError::NotAttached.boot_warning().is_none());
+    }
+
+    #[test]
+    fn an_attached_but_unreadable_identity_drive_stays_loud() {
+        let error = IdentityDriveError::Unreadable("mount refused".to_owned());
+        let warning = error
+            .boot_warning()
+            .expect("an unreadable attached drive must remain visible");
+        assert_eq!(
+            warning.to_string(),
+            "reading the FlowMux identity drive: mount refused"
+        );
     }
 }

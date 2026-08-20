@@ -27,6 +27,7 @@ pub mod ids;
 pub mod input;
 pub mod outcome;
 pub mod probe;
+pub mod session;
 pub mod wire;
 
 #[cfg(test)]
@@ -53,6 +54,7 @@ pub use probe::{
     PROBE_OBSERVATION_SCHEMA, PROBE_REQUEST_SCHEMA, ProbeInvocation, ProbeObservation,
     ProbeRefusal, ProbeRequest,
 };
+pub use session::{AdmittedAssuranceSession, DeclaredEdge, PlanIdentity};
 pub use wire::{
     AuthorityWire, DeliveredSession, DeliveredSessionError, MvmBindingWire, TrialResultDocument,
     TrialResultIdentity, TrialResultSession,
