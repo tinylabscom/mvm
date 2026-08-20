@@ -25,6 +25,8 @@ from __future__ import annotations
 import json
 import os
 import stat
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
@@ -231,6 +233,58 @@ def test_sandbox_create_live_parses_envelope_and_records_vm(
     assert "--ttl" in calls[0]
 
 
+def test_live_image_boot_lowers_literal_env_allowlist_and_command(tmp_path: Path) -> None:
+    script = _write_fixture_mvmctl(
+        tmp_path,
+        up_envelope={"schema_version": 1, "vm_id": "browser", "build_mode": "dev"},
+    )
+    os.environ["MVM_SDK_MODE"] = "live"
+    os.environ["MVM_CLI_BIN"] = str(script)
+    mvm.Sandbox.create(
+        image=mvm.OBSCURA_IMAGE,
+        env={"MODE": "safe"},
+        network={
+            "mode": "none",
+            "egress": {"allowlist": [{"host": "example.com", "port": 443}]},
+        },
+        command=["/obscura", "serve"],
+    )
+    call = _read_fixture_log(tmp_path)[0]
+    assert f"--image {mvm.OBSCURA_IMAGE}" in call
+    assert "--env MODE=safe" in call
+    assert "--allow-host example.com:443" in call
+    assert "-- /obscura serve" in call
+
+
+def test_live_create_rejects_secret_and_unrepresentable_options_before_boot(
+    tmp_path: Path,
+) -> None:
+    script = _write_fixture_mvmctl(
+        tmp_path,
+        up_envelope={"schema_version": 1, "vm_id": "unused", "build_mode": "dev"},
+    )
+    os.environ["MVM_SDK_MODE"] = "live"
+    os.environ["MVM_CLI_BIN"] = str(script)
+    with pytest.raises(mvm.SandboxModeError, match="only literal"):
+        mvm.Sandbox.create(
+            "minimal",
+            env={
+                "TOKEN": mvm.secret(
+                    "token", type="bearer", hosts=["example.com"]
+                )
+            },
+        )
+    assert _read_fixture_log(tmp_path) == []
+
+    with pytest.raises(mvm.SandboxModeError, match="resources"):
+        mvm.Sandbox.create("minimal", resources={"cpu_cores": 1})
+    assert _read_fixture_log(tmp_path) == []
+
+    with pytest.raises(mvm.SandboxModeError, match="unknown fields"):
+        mvm.Sandbox.create("minimal", network={"raw_ip_stack": True})
+    assert _read_fixture_log(tmp_path) == []
+
+
 def test_sandbox_create_live_propagates_mvmctl_failure(
     tmp_path: Path,
 ) -> None:
@@ -240,6 +294,87 @@ def test_sandbox_create_live_propagates_mvmctl_failure(
 
     with pytest.raises(mvm.SandboxLiveError, match="exit code 7"):
         mvm.Sandbox.create("python-3.12")
+
+
+def test_obscura_provider_uses_pinned_image_fixed_safe_command_and_allowlist(
+    tmp_path: Path,
+) -> None:
+    script = _write_fixture_mvmctl(
+        tmp_path,
+        up_envelope={"schema_version": 1, "vm_id": "obscura", "build_mode": "dev"},
+    )
+    os.environ["MVM_SDK_MODE"] = "live"
+    os.environ["MVM_CLI_BIN"] = str(script)
+    browser = mvm.BrowserSandbox(
+        "obscura",
+        network={
+            "mode": "none",
+            "egress": {"allowlist": [{"host": "example.com", "port": 443}]},
+        },
+    )
+    try:
+        call = _read_fixture_log(tmp_path)[0]
+        assert f"--image {mvm.OBSCURA_IMAGE}" in call
+        assert "--allow-host example.com:443" in call
+        assert "-- /obscura --proxy http://127.0.0.1:1080 serve" in call
+        assert "--host 127.0.0.1 --port 9222" in call
+        assert "private" not in call
+        assert "stealth" not in call
+    finally:
+        browser.kill()
+
+
+def test_obscura_provider_refuses_command_override_before_boot(tmp_path: Path) -> None:
+    script = _write_fixture_mvmctl(
+        tmp_path,
+        up_envelope={"schema_version": 1, "vm_id": "unused", "build_mode": "dev"},
+    )
+    os.environ["MVM_SDK_MODE"] = "live"
+    os.environ["MVM_CLI_BIN"] = str(script)
+    with pytest.raises(ValueError, match="does not allow command overrides"):
+        mvm.BrowserSandbox("obscura", command=["/bin/sh"])
+    assert _read_fixture_log(tmp_path) == []
+
+
+def test_browser_readiness_validates_cdp_and_timeout_cleans_up(tmp_path: Path) -> None:
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            body = json.dumps(
+                {"webSocketDebuggerUrl": "ws://127.0.0.1/devtools/browser/test"}
+            ).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, _format: str, *_args: object) -> None:
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    port = int(server.server_address[1])
+    script = _write_fixture_mvmctl(
+        tmp_path,
+        up_envelope={"schema_version": 1, "vm_id": "browser", "build_mode": "dev"},
+    )
+    os.environ["MVM_SDK_MODE"] = "live"
+    os.environ["MVM_CLI_BIN"] = str(script)
+    browser = mvm.BrowserSandbox("chromium", host_port=port)
+    try:
+        assert browser.wait_until_ready(timeout=1) == (
+            "ws://127.0.0.1/devtools/browser/test"
+        )
+    finally:
+        browser.kill()
+        server.shutdown()
+        server.server_close()
+
+    mvm.reset_recording()
+    failing = mvm.BrowserSandbox("chromium", host_port=port)
+    with pytest.raises(mvm.BrowserReadyError):
+        failing.wait_until_ready(timeout=0.02, retry_interval=0.002)
+    assert any(call.startswith("machine stop browser --yes") for call in _read_fixture_log(tmp_path))
 
 
 # ── commands.start (claim-4 dev-only enforcement) ──────────────────

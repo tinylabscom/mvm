@@ -27,7 +27,10 @@ jobs:
           node-version: "22"
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@nightly
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-08-08
+          components: rustc-codegen-cranelift
 
       - uses: ./.github/actions/apt-deps
         with:

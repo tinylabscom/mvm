@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 pub struct Pin {
+    pub rust: String,
     pub zig: String,
     pub cargo_zigbuild: String,
     pub target: String,
@@ -22,6 +23,10 @@ pub fn read_pinned_toolchain(root: &Path, arch: &str) -> Pin {
         toml::from_str(&toml_str).unwrap_or_else(|e| panic!("parse workspace Cargo.toml: {e}"));
     let p = &v["workspace"]["metadata"]["mvm"]["toolchain"];
     Pin {
+        rust: p["rust"]
+            .as_str()
+            .expect("workspace embedded Rust toolchain pin")
+            .to_string(),
         zig: p["zig"].as_str().unwrap().to_string(),
         cargo_zigbuild: p["cargo-zigbuild"].as_str().unwrap().to_string(),
         target: resolve_target_for_arch(p, arch),
@@ -68,7 +73,7 @@ pub fn pinned_zig_path_or_fail(zig_pin: &str) -> Option<String> {
     );
 }
 
-pub fn rustup_cargo_and_rustc(target: &str) -> (String, String) {
+pub fn rustup_cargo_and_rustc(target: &str, toolchain: &str) -> (String, String) {
     if let Some((cargo, rustc)) = configured_embed_tools() {
         assert!(
             rustc_has_target(&rustc, target),
@@ -78,24 +83,15 @@ pub fn rustup_cargo_and_rustc(target: &str) -> (String, String) {
         return (cargo, rustc);
     }
 
-    let env_rustc = std::env::var("RUSTC").unwrap_or_default();
-    let env_cargo = std::env::var("CARGO").unwrap_or_default();
-    if !env_rustc.is_empty() && rustc_has_target(&env_rustc, target) {
-        return (
-            if env_cargo.is_empty() {
-                "cargo".to_string()
-            } else {
-                env_cargo
-            },
-            env_rustc,
-        );
-    }
-
     let home = std::env::var("HOME").unwrap_or_default();
     let rustup_candidates = vec!["rustup".to_string(), format!("{home}/.cargo/bin/rustup")];
     for rustup in &rustup_candidates {
-        let rustc_out = Command::new(rustup).args(["which", "rustc"]).output();
-        let cargo_out = Command::new(rustup).args(["which", "cargo"]).output();
+        let rustc_out = Command::new(rustup)
+            .args(["which", "rustc", "--toolchain", toolchain])
+            .output();
+        let cargo_out = Command::new(rustup)
+            .args(["which", "cargo", "--toolchain", toolchain])
+            .output();
         if let (Ok(rc), Ok(ca)) = (rustc_out, cargo_out)
             && rc.status.success()
             && ca.status.success()
@@ -108,17 +104,11 @@ pub fn rustup_cargo_and_rustc(target: &str) -> (String, String) {
         }
     }
 
-    (
-        if env_cargo.is_empty() {
-            "cargo".to_string()
-        } else {
-            env_cargo
-        },
-        if env_rustc.is_empty() {
-            "rustc".to_string()
-        } else {
-            env_rustc
-        },
+    panic!(
+        "Rust toolchain {toolchain} with target {target} is required for embedded host binaries. \
+         Install it with `rustup toolchain install {toolchain} --profile minimal` followed by \
+         `rustup target add {target} --toolchain {toolchain}`, or set MVM_EMBED_CARGO and \
+         MVM_EMBED_RUSTC to an equivalent pinned toolchain"
     )
 }
 
@@ -229,6 +219,49 @@ fn rustc_has_target(rustc: &str, target: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_the_complete_embedded_toolchain_pin() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        std::fs::write(
+            tmp.path().join("Cargo.toml"),
+            r#"
+[workspace.metadata.mvm.toolchain]
+rust = "1.91.1"
+zig = "0.13.0"
+cargo-zigbuild = "0.20.0"
+
+[workspace.metadata.mvm.toolchain.targets]
+aarch64 = "aarch64-unknown-linux-musl"
+"#,
+        )
+        .expect("write Cargo.toml");
+
+        let pin = read_pinned_toolchain(tmp.path(), "aarch64");
+        assert_eq!(pin.rust, "1.91.1");
+        assert_eq!(pin.zig, "0.13.0");
+        assert_eq!(pin.cargo_zigbuild, "0.20.0");
+        assert_eq!(pin.target, "aarch64-unknown-linux-musl");
+    }
+
+    #[test]
+    fn configured_embed_tools_require_rustc_and_default_cargo() {
+        assert_eq!(configured_embed_tools_from(None, None), None);
+        assert_eq!(
+            configured_embed_tools_from(None, Some(" /toolchain/rustc ".to_string())),
+            Some(("cargo".to_string(), "/toolchain/rustc".to_string()))
+        );
+        assert_eq!(
+            configured_embed_tools_from(
+                Some(" /toolchain/cargo ".to_string()),
+                Some(" /toolchain/rustc ".to_string())
+            ),
+            Some((
+                "/toolchain/cargo".to_string(),
+                "/toolchain/rustc".to_string()
+            ))
+        );
+    }
 
     #[test]
     fn ziglang_mise_path_finds_matching_installed_zig() {

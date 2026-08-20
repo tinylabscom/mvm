@@ -55,7 +55,6 @@ mod linux {
     /// explicit rather than a `/sys/class/block` walk — a RootDir guest never
     /// has more than a handful of disks, and a missing candidate is just a
     /// failed `File::open` (cheap, non-fatal).
-    const STAGE0_DISK_CANDIDATES: &[&str] = &["/dev/vda", "/dev/vdb", "/dev/vdc", "/dev/vdd"];
 
     const VSOCK_EGRESS_PROXY_URL: &str = mvm_core::guest_netd::DEFAULT_EGRESS_PROXY_URL;
     const VSOCK_EGRESS_NO_PROXY: &str = "127.0.0.1,localhost";
@@ -594,7 +593,12 @@ mod linux {
         // letter stays as a fallback for a store image formatted before it
         // carried a label.
         let label = mvm_build::rootfs::STAGE0_NIX_STORE_EXT4_LABEL;
-        let by_label = find_labeled_ext4_disk(STAGE0_DISK_CANDIDATES, label)
+        // Every attached virtio disk, not a fixed prefix of them. The QEMU path
+        // attaches seed, work, out, mvm-bins and the FlowMux identity ahead of
+        // the store, so a four-entry list stopped two devices short of the disk
+        // it was looking for — the lookup could never succeed there, fell back
+        // to enumeration order, and picked the 32 KiB identity image.
+        let by_label = find_labeled_ext4_disk_among(virtio_block_devices(), label)
             .map(|d| d.to_string_lossy().into_owned());
         let device: &str = match by_label.as_deref() {
             Some(dev) => {
@@ -1171,7 +1175,7 @@ mod linux {
     // `mvm_agentd::flowmux_drive`: Stage 0 mounts `/work` by label and the
     // identity drive by label, and a second copy of the superblock layout is
     // exactly the kind of duplicate that drifts.
-    use mvm_agentd::flowmux_drive::find_labeled_ext4_disk;
+    use mvm_agentd::flowmux_drive::{find_labeled_ext4_disk_among, virtio_block_devices};
 
     /// Mounts `/work` for the libkrun backend. Prefers the ext4 disk
     /// carrying [`mvm_build::rootfs::STAGE0_WORK_EXT4_LABEL`] — the host
@@ -1183,7 +1187,10 @@ mod linux {
     fn mount_libkrun_work_share() -> Result<(), String> {
         std::fs::create_dir_all("/work").map_err(|e| format!("create /work: {e}"))?;
         let label = mvm_build::rootfs::STAGE0_WORK_EXT4_LABEL;
-        match find_labeled_ext4_disk(STAGE0_DISK_CANDIDATES, label) {
+        // Same enumeration as the store lookup, for the same reason: a fixed
+        // prefix of device letters is the positional assumption the label
+        // removes, and /work is not guaranteed to land inside it either.
+        match find_labeled_ext4_disk_among(virtio_block_devices(), label) {
             Some(dev) => {
                 let dev = dev.to_string_lossy().into_owned();
                 mount_fs_ro(&dev, "/work", "ext4")?;

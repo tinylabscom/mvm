@@ -114,7 +114,8 @@ mod tests {
 
     fn empty_create() -> SandboxCreate {
         SandboxCreate {
-            template: "minimal".to_string(),
+            template: Some("minimal".to_string()),
+            image: None,
             env: BTreeMap::new(),
             include: Vec::new(),
             tags: BTreeMap::new(),

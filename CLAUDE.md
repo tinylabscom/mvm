@@ -126,7 +126,7 @@ mvm-contract: `verify` (audit-log verifier), `ir/` (Workload IR), wire/policy DT
 
 mvm-core: `plan/` (ExecutionPlan, bundle, signing, validity), `policy/` (security, audit, network_policy, bundle/resolver), `crypto/` (attestation, keystore, secret_store, snapshot_*), `protocol.rs`, `agent.rs`, `catalog.rs`, `config.rs` (paths/`MVM_HOME`)
 
-mvm-runtime: `backend.rs` (`AnyBackend` dispatch + `FirecrackerBackend`), `driver/` + `workload_runner/` (the converged runner seam every claim-bearing workload boots through), `backends/hvf/`, `wasm_backend.rs`, `apple_container_backend.rs`, `mock.rs`; the libkrun/qemu/hvf VMM impls themselves live in `mvm-backends` (`legacy::{libkrun,qemu,hvf}`) and are re-exported from `lib.rs`. Also `microvm/` (Firecracker driver), `vm/` (templates + `template/lifecycle/`, checkpoints), `base/` (shell, ui, linux_env, cow), `storage/`, `network/`, `codesign.rs`, `artifacts/`
+mvm-runtime: `backend.rs` (`AnyBackend` dispatch + `FirecrackerBackend`), `driver/` + `workload_runner/` (the converged runner seam every claim-bearing workload boots through), `backends/hvf/`, `wasm_backend.rs`, `apple_container_backend.rs`, `mock.rs`; the libkrun/qemu/hvf VMM impls themselves live in `mvm-backends` (`legacy::{libkrun,qemu,hvf}`) and are re-exported from `lib.rs`. Also `microvm/` (Firecracker driver), `vm/` (templates + `template/lifecycle/`, checkpoints), `agent_session/` (filesystem store for durable agent sessions, the checkpoint analog), `base/` (shell, ui, linux_env, cow), `storage/`, `network/`, `codesign.rs`, `artifacts/`
 
 mvm-fs: `oci/unpack/` (allow-listed unpacker), `oci/`, the ext4 writer, `overlay`
 

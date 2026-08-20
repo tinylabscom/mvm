@@ -267,19 +267,15 @@ fn run_stage0_qemu(
         cmd.arg("-drive")
             .arg(format!("file={},if=virtio,format=raw", disk.display()));
     }
-    // Read-only, matching how the shell-job and build paths attach it.
+    // Read-only, matching how the shell-job and build paths attach it. Attached
+    // once: a second copy consumed another device letter and pushed the Nix
+    // store further down the enumeration, which is how the store ended up
+    // beyond where the guest looked for it.
     #[cfg(feature = "builder-vm")]
     cmd.arg("-drive").arg(format!(
         "file={},if=virtio,format=raw,readonly=on",
         identity_drive.display()
     ));
-    #[cfg(feature = "builder-vm")]
-    {
-        cmd.arg("-drive").arg(format!(
-            "file={},if=virtio,format=raw,readonly=on",
-            identity_drive.display()
-        ));
-    }
     #[cfg(feature = "builder-vm")]
     cmd.arg("-drive").arg(format!(
         "file={},if=virtio,format=raw",
@@ -1772,5 +1768,36 @@ fi
             result.vm_state_dir.join("console.log").exists(),
             "live proof must leave a console log for diagnosis"
         );
+    }
+
+    /// Each disk gets exactly one `-drive`.
+    ///
+    /// The FlowMux identity image was attached twice, which consumed a device
+    /// letter and pushed the Nix store one slot further down the enumeration —
+    /// past where the guest looked for it. The guest then fell back to
+    /// enumeration order and selected the 32 KiB identity image as its store,
+    /// failing closed on every Stage 0 kernel build.
+    #[test]
+    fn no_disk_is_attached_to_stage0_twice() {
+        let src = include_str!("qemu_builder.rs");
+        let block = src
+            .split_once("for disk in [&vda, &vdb, &vdc, &vdd]")
+            .expect("stage 0 still attaches its disks here")
+            .1
+            .split_once("\"-device\"")
+            .expect("the drive list ends before the vsock device")
+            .0;
+
+        for operand in [
+            "identity_drive.display()",
+            "nix_store_lock.path().display()",
+        ] {
+            let n = block.matches(operand).count();
+            assert_eq!(
+                n, 1,
+                "{operand} is attached {n} times; each disk takes exactly one \
+                 -drive, and a duplicate re-letters every disk behind it"
+            );
+        }
     }
 }

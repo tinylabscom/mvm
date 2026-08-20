@@ -619,9 +619,41 @@ fn diff(a: &str, b: &str, json: bool) -> Result<()> {
     Ok(())
 }
 
+/// The id of a live or hibernated session whose resume point is `digest`, if
+/// any. Delegates the pin rule to `mvm_runtime::agent_session::pinning_session`
+/// — the one place that decides whether a session's resume point still needs
+/// holding — so `rm` can tell the operator what is holding the checkpoint it
+/// refused to remove without re-deriving that rule here.
+fn session_pinning_checkpoint(
+    digest: &CheckpointDigest,
+) -> Result<Option<mvm_contract::protocol::agent_session::AgentSessionId>> {
+    let sessions = mvm_runtime::agent_session::AgentSessionStore::open();
+    mvm_runtime::agent_session::pinning_session(&sessions, digest).context("listing agent sessions")
+}
+
+/// `mvmctl vm checkpoint rm <id>`: delete a checkpoint by id.
+///
+/// Refuses when the checkpoint is still the resume point of a live or
+/// hibernated agent session — the same guard the automated sweep in
+/// `mvmctl cache prune` applies, closing the manual door to the identical
+/// data-loss class: an operator deleting by hand can otherwise make a parked
+/// session permanently unresumable exactly as an unguarded sweep could.
+/// `rm` has no force/override flag, so this refusal is unconditional; the
+/// operator must close the session first.
 fn rm(id: &str, json: bool) -> Result<()> {
     let id = validated_checkpoint_id(id)?;
-    CheckpointStore::open().remove(&id)?;
+    let store = CheckpointStore::open();
+    if let Ok(meta) = store.read_meta(&id)
+        && let Some(session_id) = session_pinning_checkpoint(&meta.meta_digest)?
+    {
+        bail!(
+            "cannot remove checkpoint '{}': it is the resume point for agent session '{}'; \
+             close that session before removing the checkpoint",
+            id.as_str(),
+            session_id.as_str()
+        );
+    }
+    store.remove(&id)?;
     if json {
         crate::json_out::emit_json(&CheckpointRemoveJson {
             schema_version: 1,
@@ -1669,6 +1701,89 @@ mod tests {
         store.write_meta(&meta).unwrap();
 
         assert!(parent_secret_names(&meta.id, &store).is_empty());
+    }
+
+    /// The manual deletion door (`checkpoint rm`) is a second place the same
+    /// data-loss class Task 1 closed for the automated sweep can happen: an
+    /// operator removing by id, with no pin check, can make a parked session
+    /// permanently unresumable. `rm` must refuse and name the session.
+    #[test]
+    fn rm_refuses_a_checkpoint_pinned_by_a_parked_session() {
+        use mvm_contract::protocol::agent_session::AgentSessionId;
+        use mvm_core::checkpoint::{CheckpointClass, CheckpointId};
+        use mvm_runtime::agent_session::{AgentSessionRecord, AgentSessionStore, SandboxResidency};
+
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let tmp = tempfile::tempdir().unwrap();
+        env.isolate_mvm_home(tmp.path());
+
+        let store = mvm_runtime::checkpoint::CheckpointStore::open();
+        let meta = mvm_core::checkpoint::CheckpointMeta::builder(
+            CheckpointId::new("ckpt-pinned"),
+            CheckpointClass::FsQuick,
+            "vm-alpha",
+        )
+        .content(vec![])
+        .supervisor_config_digest("d")
+        .created_unix(1)
+        .build();
+        store.write_meta(&meta).unwrap();
+
+        let sessions = AgentSessionStore::open();
+        sessions
+            .write(&AgentSessionRecord {
+                session_id: AgentSessionId::parse("sess-parked").unwrap(),
+                generation: 1,
+                state: SandboxResidency::Hibernated,
+                members: vec!["vm-alpha".to_string()],
+                parent_checkpoint: Some(meta.meta_digest.clone()),
+                created_unix: 0,
+                updated_unix: 0,
+                journal_cursor: 0,
+                approval_head: None,
+                storage_tier: None,
+                park_reason: None,
+            })
+            .unwrap();
+
+        let err = rm("ckpt-pinned", false).unwrap_err();
+        assert!(
+            err.to_string().contains("sess-parked"),
+            "refusal must name the session holding the checkpoint: {err}"
+        );
+        assert!(
+            store.read_meta(&CheckpointId::new("ckpt-pinned")).is_ok(),
+            "the checkpoint must still be on disk after the refusal"
+        );
+    }
+
+    #[test]
+    fn rm_removes_a_checkpoint_no_session_pins() {
+        use mvm_core::checkpoint::{CheckpointClass, CheckpointId};
+
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let tmp = tempfile::tempdir().unwrap();
+        env.isolate_mvm_home(tmp.path());
+
+        let store = mvm_runtime::checkpoint::CheckpointStore::open();
+        let meta = mvm_core::checkpoint::CheckpointMeta::builder(
+            CheckpointId::new("ckpt-unpinned"),
+            CheckpointClass::FsQuick,
+            "vm-alpha",
+        )
+        .content(vec![])
+        .supervisor_config_digest("d")
+        .created_unix(1)
+        .build();
+        store.write_meta(&meta).unwrap();
+
+        rm("ckpt-unpinned", false).unwrap();
+        assert!(
+            store
+                .read_meta(&CheckpointId::new("ckpt-unpinned"))
+                .is_err(),
+            "a checkpoint no session pins must still be removable"
+        );
     }
 
     #[test]
