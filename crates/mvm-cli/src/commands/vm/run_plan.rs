@@ -474,7 +474,8 @@ mod tests {
         let recording = RuntimeRecording {
             workload_id: "wl".to_string(),
             create: SandboxCreate {
-                template: "minimal".to_string(),
+                template: Some("minimal".to_string()),
+                image: None,
                 env: BTreeMap::new(),
                 include: Vec::new(),
                 tags: BTreeMap::new(),

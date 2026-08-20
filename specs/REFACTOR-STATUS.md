@@ -283,6 +283,13 @@ for detailed scope and acceptance criteria.
 
 ## Fast machine substrate
 
+- [~] **Obscura browser provider pilot.** An explicit experimental provider,
+      typed SDK OCI source, honest live-option lowering, bounded CDP readiness,
+      and pinned Nix guest example are implemented on an isolated feature
+      branch. Chromium remains the default. Real-backend policy proof,
+      compatibility, full Nix/workspace, and native Linux gates remain open in
+      `specs/plans/2026-08-18-obscura-browser-provider.md`.
+
 - [x] **Issue #2279 — define the fast machine substrate and canonical template
       contract.** The cross-plan note joins Plans 298, 299, 265, 270, and 292
       around one prepared template identity, explicit lifecycle phases, a
