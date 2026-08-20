@@ -11,6 +11,8 @@
 //! See `limits` for why a guest's admitted allowance and this process's
 //! descriptor budget are different numbers.
 
+#[cfg(any(test, feature = "network-perf"))]
+pub mod benchmark;
 pub mod device;
 pub mod ingress;
 pub mod limits;

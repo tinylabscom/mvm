@@ -58,6 +58,11 @@ path = "src/bin/mvm-signer-helper.rs"
 name = "mvm-network-endpoint"
 path = "src/bin/mvm-network-endpoint.rs"
 
+[[example]]
+name = "network_perf_probe"
+path = "examples/network_perf_probe.rs"
+required-features = ["network-perf"]
+
 # Per-VM supervisor host processes — one process per guest VM. libkrun VMM +
 # merged in-process bridge; libkrun-sys-gated so a host without libkrun.h
 # skips it on a default workspace build.
@@ -210,6 +215,10 @@ hickory-proto = { workspace = true }
 
 [dev-dependencies]
 tempfile.workspace = true
+xtask = { path = "../../xtask" }
+# The release-only networking probe drives the same guest FlowMux client used
+# by the loopback adapters; that client is intentionally behind `addons`.
+mvm-agentd = { workspace = true, features = ["addons"] }
 # plan_admission bundle re-verify tests build/read `.mvmpkg` archives; verb-grant
 # test decodes the signer pubkey hex.
 tar.workspace = true
@@ -228,6 +237,9 @@ ctor = "0.2"
 
 [features]
 default = []
+# Build the hermetic legacy-L3/FlowMux comparison producer. Never enabled by
+# a production binary; it exposes only a high-level loopback fixture.
+network-perf = []
 # Enable the host-side eBPF/procfs egress telemetry probe in the supervisor.
 # Off by default so the Aya dependency tree does not inflate mvmctl's closure.
 ebpf-telemetry = ["dep:aya", "dep:aya-log"]

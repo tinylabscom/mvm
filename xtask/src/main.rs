@@ -1,5 +1,6 @@
 use anyhow::Result;
 use std::path::PathBuf;
+use xtask::network_perf;
 
 // Only the gen-man path (gated behind `man`) uses these.
 #[cfg(feature = "man")]
@@ -80,7 +81,6 @@ mod fs_walk;
 mod gen_sdk_surface;
 mod gen_stubs;
 mod ir_parity;
-mod network_perf;
 mod perf;
 mod rust_source;
 mod sprint;
