@@ -184,6 +184,9 @@ pub struct FlowMuxSession {
     icmp_rate: Arc<crate::supervisor::egress_rate::EgressRateGuard>,
     /// Typed HTTP flows still being assembled, by stream id.
     http_flows: http_flow::HttpFlows,
+    /// Cancellation owners for typed HTTP tasks after their request assembly
+    /// entry has been released.
+    http_cancellations: http_flow::HttpCancellations,
     /// The substitution service typed HTTP flows are forwarded through.
     ///
     /// `None` on an endpoint that assembled no substitution service, where an
@@ -300,6 +303,18 @@ impl FlowMuxAccept {
     }
 }
 
+impl Drop for FlowMuxSession {
+    fn drop(&mut self) {
+        let mut cancellations = self
+            .http_cancellations
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for (_, sender) in std::mem::take(&mut *cancellations) {
+            let _ = sender.send(true);
+        }
+    }
+}
+
 impl FlowMuxSession {
     /// Return the session identifier for logging and correlation.
     pub fn session_id(&self) -> String {
@@ -375,6 +390,7 @@ impl FlowMuxSession {
             streams: BTreeMap::new(),
             icmp_rate: Arc::clone(&resources.icmp_rate),
             http_flows: BTreeMap::new(),
+            http_cancellations: Arc::new(Mutex::new(BTreeMap::new())),
             substitution,
             udp_associations: BTreeMap::new(),
             gate,
@@ -620,6 +636,25 @@ impl FlowMuxSession {
             }
         };
         let target = target.to_string();
+
+        if let Some(reason) = self
+            .substitution
+            .as_ref()
+            .and_then(|service| service.opaque_refusal_reason(host))
+        {
+            self.send_refused(stream_id, reason)?;
+            self.emit_audit(
+                EventCategory::Host,
+                "host.flow.denied",
+                BTreeMap::from([
+                    ("stream_id".to_string(), stream_id.to_string()),
+                    ("class".to_string(), "tcp".to_string()),
+                    ("target".to_string(), target),
+                    ("reason".to_string(), "typed_transform_required".to_string()),
+                ]),
+            );
+            return Ok(());
+        }
 
         if !self.check_connection_rate(registry::FlowClass::Tcp) {
             self.send_refused(stream_id, "rate limited")?;
@@ -905,6 +940,25 @@ impl FlowMuxSession {
             .map_err(|e| FlowMuxError::FrameRefused(format!("invalid UdpSend address: {e}")))?;
         let target = format!("{ip}:{port}");
 
+        if let Some(reason) = self
+            .substitution
+            .as_ref()
+            .and_then(|service| service.opaque_refusal_reason(&ip.to_string()))
+        {
+            warn!(stream_id, %target, reason, "FlowMux opaque UDP transform refused");
+            self.emit_audit(
+                EventCategory::Host,
+                "host.flow.denied",
+                BTreeMap::from([
+                    ("stream_id".to_string(), stream_id.to_string()),
+                    ("class".to_string(), "udp".to_string()),
+                    ("target".to_string(), target),
+                    ("reason".to_string(), "typed_transform_required".to_string()),
+                ]),
+            );
+            return Ok(());
+        }
+
         match self.gate.decide_udp_request(&target) {
             EgressVerdict::Allow { .. } => {}
             EgressVerdict::Deny(reason) => {
@@ -1169,15 +1223,24 @@ impl FlowMuxSession {
                     "no runtime to forward the http flow on".to_string(),
                 ));
             };
-            http_flow::spawn_forward(
-                handle,
-                Arc::clone(service),
-                Arc::clone(&self.session),
-                Arc::clone(&self.writer),
-                stream_id,
-                request.head,
-                request.body,
-            );
+            let (cancel_sender, cancel_receiver) = tokio::sync::watch::channel(false);
+            self.http_cancellations
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(stream_id, cancel_sender);
+            let task = http_flow::ForwardTask::builder()
+                .runtime(handle.clone())
+                .service(Arc::clone(service))
+                .session(Arc::clone(&self.session))
+                .writer(Arc::clone(&self.writer))
+                .stream_id(stream_id)
+                .request(request)
+                .cancellation(cancel_receiver)
+                .cancellations(Arc::clone(&self.http_cancellations))
+                .registry(Arc::clone(&self.registry))
+                .build()
+                .map_err(|error| FlowMuxError::FrameRefused(error.to_string()))?;
+            http_flow::spawn_forward(task);
         } else {
             flow.accept_body(&payload)
                 .map_err(|e| FlowMuxError::FrameRefused(e.to_string()))?;
@@ -1223,6 +1286,7 @@ impl FlowMuxSession {
         // A guest reset is cancellation, not permission to retain the partial
         // cleartext until the authenticated session itself eventually exits.
         self.http_flows.remove(&stream_id);
+        http_flow::cancel_forwarding(&self.http_cancellations, stream_id);
         let was_live = self.streams.remove(&stream_id);
         let live = was_live.is_some();
         if let Some(handle) = was_live {

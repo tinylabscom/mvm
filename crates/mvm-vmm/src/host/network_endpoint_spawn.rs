@@ -188,6 +188,10 @@ pub const SUBST_SESSION_FILE: &str = "substitution.session";
 /// FlowMux session. The marker above remains the durable evidence; this socket
 /// is only the event that avoids racing a one-shot marker check.
 pub const SUBST_SESSION_READY_SOCKET: &str = "substitution-session-ready.sock";
+/// Host-local typed-connector socket served by the same per-VM endpoint that
+/// owns guest FlowMux egress. Broker/tool code may authorize a request, but it
+/// reaches the network only by sending that request here.
+pub const SUBST_CONNECTOR_SOCKET: &str = "network-endpoint-connector.sock";
 
 /// Bound on the gap between guest-agent readiness and FlowMux authentication.
 /// A healthy guest normally authenticates before the launcher connects, so
@@ -796,6 +800,8 @@ fn build_endpoint_config_json(params: &SubstitutionSpawnParams<'_>) -> serde_jso
     if params.flowmux_identity.is_some() {
         cfg["session_ready_socket"] =
             serde_json::json!(params.state_dir.join(SUBST_SESSION_READY_SOCKET));
+        cfg["connector_uds_path"] =
+            serde_json::json!(params.state_dir.join(SUBST_CONNECTOR_SOCKET));
     }
     if let Some(proxy) = params.egress_proxy.as_ref() {
         // `EndpointConfig.proxy_*`: the operator's upstream proxy for the
@@ -1134,6 +1140,7 @@ pub fn reap_network_endpoint(state_dir: &Path, vm_name: &str) {
     }
     let _ = std::fs::remove_file(state_dir.join(SUBST_PID_FILE));
     let _ = std::fs::remove_file(state_dir.join(SUBST_SESSION_READY_SOCKET));
+    let _ = std::fs::remove_file(state_dir.join(SUBST_CONNECTOR_SOCKET));
     let _ = std::fs::remove_file(mvm_core::config::vm_substitution_env_path(vm_name));
     // The endpoint's secrets are gone; the shapes the gate recognised them by
     // go with them, so a recycled VM name cannot inherit them.
@@ -2205,6 +2212,10 @@ mod tests {
         assert_eq!(
             cfg["session_ready_socket"],
             serde_json::json!(Path::new("/tmp").join(SUBST_SESSION_READY_SOCKET))
+        );
+        assert_eq!(
+            cfg["connector_uds_path"],
+            serde_json::json!(Path::new("/tmp").join(SUBST_CONNECTOR_SOCKET))
         );
     }
 

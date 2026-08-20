@@ -156,6 +156,115 @@ impl HttpFlow {
 /// Every HTTP flow this session is assembling, by stream id.
 pub(super) type HttpFlows = BTreeMap<u32, HttpFlow>;
 
+/// Cancellation owners for forwarding tasks that outlive request assembly.
+/// The entry is installed before the task is spawned, so completion cannot
+/// race ahead of registration and leave a stale handle behind.
+pub(super) type HttpCancellations = Arc<Mutex<BTreeMap<u32, tokio::sync::watch::Sender<bool>>>>;
+
+pub(super) struct ForwardTask {
+    runtime: tokio::runtime::Handle,
+    service: Arc<SubstitutionService>,
+    session: Arc<Mutex<Session>>,
+    writer: Arc<Mutex<UnixStream>>,
+    stream_id: u32,
+    request: HttpRequestStream,
+    cancellation: tokio::sync::watch::Receiver<bool>,
+    cancellations: HttpCancellations,
+    registry: Arc<Mutex<super::registry::StreamRegistry>>,
+}
+
+#[derive(Default)]
+pub(super) struct ForwardTaskBuilder {
+    runtime: Option<tokio::runtime::Handle>,
+    service: Option<Arc<SubstitutionService>>,
+    session: Option<Arc<Mutex<Session>>>,
+    writer: Option<Arc<Mutex<UnixStream>>>,
+    stream_id: Option<u32>,
+    request: Option<HttpRequestStream>,
+    cancellation: Option<tokio::sync::watch::Receiver<bool>>,
+    cancellations: Option<HttpCancellations>,
+    registry: Option<Arc<Mutex<super::registry::StreamRegistry>>>,
+}
+
+impl ForwardTask {
+    pub(super) fn builder() -> ForwardTaskBuilder {
+        ForwardTaskBuilder::default()
+    }
+}
+
+impl ForwardTaskBuilder {
+    pub(super) fn runtime(mut self, value: tokio::runtime::Handle) -> Self {
+        self.runtime = Some(value);
+        self
+    }
+
+    pub(super) fn service(mut self, value: Arc<SubstitutionService>) -> Self {
+        self.service = Some(value);
+        self
+    }
+
+    pub(super) fn session(mut self, value: Arc<Mutex<Session>>) -> Self {
+        self.session = Some(value);
+        self
+    }
+
+    pub(super) fn writer(mut self, value: Arc<Mutex<UnixStream>>) -> Self {
+        self.writer = Some(value);
+        self
+    }
+
+    pub(super) fn stream_id(mut self, value: u32) -> Self {
+        self.stream_id = Some(value);
+        self
+    }
+
+    pub(super) fn request(mut self, value: HttpRequestStream) -> Self {
+        self.request = Some(value);
+        self
+    }
+
+    pub(super) fn cancellation(mut self, value: tokio::sync::watch::Receiver<bool>) -> Self {
+        self.cancellation = Some(value);
+        self
+    }
+
+    pub(super) fn cancellations(mut self, value: HttpCancellations) -> Self {
+        self.cancellations = Some(value);
+        self
+    }
+
+    pub(super) fn registry(mut self, value: Arc<Mutex<super::registry::StreamRegistry>>) -> Self {
+        self.registry = Some(value);
+        self
+    }
+
+    pub(super) fn build(self) -> Result<ForwardTask, &'static str> {
+        Ok(ForwardTask {
+            runtime: self.runtime.ok_or("forward task runtime missing")?,
+            service: self.service.ok_or("forward task service missing")?,
+            session: self.session.ok_or("forward task session missing")?,
+            writer: self.writer.ok_or("forward task writer missing")?,
+            stream_id: self.stream_id.ok_or("forward task stream id missing")?,
+            request: self.request.ok_or("forward task request missing")?,
+            cancellation: self
+                .cancellation
+                .ok_or("forward task cancellation missing")?,
+            cancellations: self
+                .cancellations
+                .ok_or("forward task cancellation owners missing")?,
+            registry: self.registry.ok_or("forward task registry missing")?,
+        })
+    }
+}
+
+pub(super) fn cancel_forwarding(cancellations: &HttpCancellations, stream_id: u32) -> bool {
+    let sender = cancellations
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(&stream_id);
+    sender.is_some_and(|sender| sender.send(true).is_ok())
+}
+
 /// Cancel an assembling flow, dropping its zeroizing body immediately.
 pub(super) fn cancel(flows: &mut HttpFlows, stream_id: u32) -> bool {
     flows.remove(&stream_id).is_some()
@@ -168,20 +277,44 @@ pub(super) fn cancel(flows: &mut HttpFlows, stream_id: u32) -> bool {
 /// inside `spawn_blocking`, where tokio's `block_on` panics. And a request
 /// forwarded inline would stall every other flow on the session behind one
 /// slow upstream.
-pub(super) fn spawn_forward(
-    handle: &tokio::runtime::Handle,
-    service: Arc<SubstitutionService>,
-    session: Arc<Mutex<Session>>,
-    writer: Arc<Mutex<UnixStream>>,
-    stream_id: u32,
-    head: HttpFlowHead,
-    body: tokio::sync::mpsc::Receiver<Zeroizing<Vec<u8>>>,
-) {
-    handle.spawn(async move {
-        let result = match service.process_body_stream(head, body).await {
-            Ok(response) => write_stream_response(&session, &writer, stream_id, response).await,
-            Err(refusal) => write_response(&session, &writer, stream_id, refusal),
+pub(super) fn spawn_forward(task: ForwardTask) {
+    let ForwardTask {
+        runtime,
+        service,
+        session,
+        writer,
+        stream_id,
+        request,
+        mut cancellation,
+        cancellations,
+        registry,
+    } = task;
+    let HttpRequestStream { head, body } = request;
+    runtime.spawn(async move {
+        let request_url = head.url.clone();
+        let result = tokio::select! {
+            biased;
+            canceled = cancellation.changed() => {
+                let reason = if canceled.is_ok() {
+                    "guest_reset"
+                } else {
+                    "session_closed"
+                };
+                service.audit_http_stream_failure(&request_url, reason).await;
+                Ok(())
+            }
+            response = service.process_body_stream(head, body) => {
+                match response {
+                    Ok(response) => write_stream_response(&session, &writer, stream_id, response).await,
+                    Err(refusal) => write_response(&session, &writer, stream_id, refusal),
+                }
+            }
         };
+        cancellations
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&stream_id);
+        let _ = super::lock_registry(&registry).retire(stream_id);
         if let Err(e) = result {
             warn!(stream_id, error = %e, "FlowMux failed to send HTTP response");
             let _ = write_frame_to(
@@ -395,6 +528,35 @@ mod tests {
         assert!(cancel(&mut flows, 7));
         assert!(flows.is_empty());
         assert!(!cancel(&mut flows, 7), "a second cancel is idempotent");
+    }
+
+    #[tokio::test]
+    async fn forwarding_cancellation_is_event_driven_and_releases_its_owner() {
+        let cancellations = HttpCancellations::default();
+        let (sender, mut receiver) = tokio::sync::watch::channel(false);
+        cancellations
+            .lock()
+            .expect("cancellation map lock")
+            .insert(9, sender);
+
+        assert!(cancel_forwarding(&cancellations, 9));
+        receiver.changed().await.expect("cancellation event");
+        assert!(*receiver.borrow());
+        assert!(
+            cancellations
+                .lock()
+                .expect("cancellation map lock")
+                .is_empty()
+        );
+        assert!(!cancel_forwarding(&cancellations, 9));
+    }
+
+    #[test]
+    fn a_forward_task_builder_refuses_missing_runtime_state() {
+        assert!(matches!(
+            ForwardTask::builder().build(),
+            Err("forward task runtime missing")
+        ));
     }
 
     #[test]

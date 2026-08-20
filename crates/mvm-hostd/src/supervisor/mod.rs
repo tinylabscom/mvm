@@ -94,6 +94,7 @@ pub mod network;
 /// stdin config contract + store-opening/service assembly. The
 /// `mvm-network-endpoint` bin is the process wrapper.
 pub mod network_endpoint;
+pub mod network_endpoint_connector;
 pub mod network_endpoint_proxy;
 pub mod pii_redactor;
 pub mod policy_tool_gate;

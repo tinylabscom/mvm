@@ -429,6 +429,18 @@ pub(crate) fn redaction_active(action: &mvm_core::policy::RedactionAction) -> bo
         || !matches!(action.names, mvm_core::policy::NameMode::Off)
 }
 
+/// Whether the policy's catch-all action explicitly opts every destination
+/// into inspection beyond the curated baseline. `RedactionAction::default()`
+/// remains compatible with ordinary opaque relay; it is applied when a caller
+/// deliberately chooses the typed HTTP class. Non-default detector modes are
+/// an admitted requirement and therefore make opaque relay dishonest.
+fn explicit_default_redaction(action: &mvm_core::policy::RedactionAction) -> bool {
+    !matches!(action.entropy, mvm_core::policy::EntropyMode::Off)
+        || !matches!(action.names, mvm_core::policy::NameMode::Off)
+        || action.pii.mode.is_some()
+        || !matches!(action.secrets, mvm_core::policy::SecretAction::Block)
+}
+
 #[cfg(test)]
 mod redaction_category_tests {
     use super::redaction_categories;
@@ -1090,6 +1102,26 @@ mod streaming_redactor_tests {
         let (tail, _) = stream.finish(&redactor, &action).unwrap();
         assert_eq!([ready, tail].concat(), input);
     }
+
+    #[test]
+    fn a_long_clean_stream_never_grows_the_overlap_buffer() {
+        let redactor = RedactingSubstitution::with_default_rules();
+        let action = mvm_core::policy::RedactionAction::default();
+        let mut stream = StreamingRedactor::new();
+        let chunk = vec![b'x'; 8 * 1024];
+        let mut emitted = 0usize;
+
+        for _ in 0..1024 {
+            let (ready, hits) = stream.push(&redactor, &action, &chunk).unwrap();
+            assert!(hits.is_empty());
+            emitted = emitted.saturating_add(ready.len());
+            assert!(stream.pending.len() <= STREAM_TRANSFORM_OVERLAP);
+        }
+        let (tail, hits) = stream.finish(&redactor, &action).unwrap();
+        assert!(hits.is_empty());
+        emitted = emitted.saturating_add(tail.len());
+        assert_eq!(emitted, chunk.len() * 1024);
+    }
 }
 /// Which audit an error path owes, given the cause and whether the request
 /// carried a placeholder.
@@ -1171,6 +1203,48 @@ impl SubstitutionService {
     ) -> Self {
         self.reversible_replacement_policy = policy;
         self
+    }
+
+    /// Explain why an opaque flow to `destination` cannot honestly satisfy the
+    /// admitted transformation policy.
+    ///
+    /// Secret bindings and explicitly enabled replacement/redaction profiles
+    /// are destination-bound. Letting the same destination use opaque TCP or
+    /// UDP would silently bypass the only path that can inspect, substitute,
+    /// or redact its bytes. The caller refuses before DNS resolution or socket
+    /// creation. The curated default redaction action does not make every
+    /// opaque destination transformed; only an explicit profile/default opt-in
+    /// or a bound secret does.
+    pub(crate) fn opaque_refusal_reason(&self, destination: &str) -> Option<&'static str> {
+        if self.registry.host_is_bound(destination) {
+            return Some("destination requires secret substitution over typed HTTP");
+        }
+
+        if crate::supervisor::reversible_replacement_resolve::resolve(
+            &self.reversible_replacement_policy,
+            destination,
+        )
+        .enabled
+        {
+            return Some("destination requires reversible replacement over typed HTTP");
+        }
+
+        let explicit_redaction = self
+            .redaction_policy
+            .profiles
+            .iter()
+            .find(|profile| mvm_contract::ir::host_matches(&profile.host, destination))
+            .map(|profile| redaction_active(&profile.action))
+            .unwrap_or_else(|| explicit_default_redaction(&self.redaction_policy.default));
+        explicit_redaction.then_some("destination requires redaction over typed HTTP")
+    }
+
+    /// Record cancellation/failure metadata for a typed HTTP stream without
+    /// ever placing request bytes, headers, credentials, or the full URL in
+    /// the audit record.
+    pub(crate) async fn audit_http_stream_failure(&self, url: &str, reason: &str) {
+        let destination = destination_host(url).ok();
+        self.audit_fail_closed(destination.as_deref(), reason).await;
     }
 
     /// The attached redaction policy. Test-only: lets the threading tests prove
@@ -1759,15 +1833,23 @@ impl SubstitutionService {
         if signs_body || replaces_body {
             let mut replay = Zeroizing::new(Vec::new());
             loop {
-                let next = tokio::time::timeout(HTTP_REQUEST_IDLE_TIMEOUT, body.recv())
-                    .await
-                    .map_err(|_| WireResponse::Refused {
-                        message: "request body idle timeout".into(),
-                    })?;
+                let next = match tokio::time::timeout(HTTP_REQUEST_IDLE_TIMEOUT, body.recv()).await
+                {
+                    Ok(next) => next,
+                    Err(_) => {
+                        self.audit_fail_closed(destination.as_deref(), "request_body_idle_timeout")
+                            .await;
+                        return Err(WireResponse::Refused {
+                            message: "request body idle timeout".into(),
+                        });
+                    }
+                };
                 let Some(chunk) = next else {
                     break;
                 };
                 if replay.len().saturating_add(chunk.len()) > MAX_HTTP_STREAM_BODY_BYTES {
+                    self.audit_fail_closed(destination.as_deref(), "request_body_limit_exceeded")
+                        .await;
                     return Err(WireResponse::Refused {
                         message: format!(
                             "request body exceeds the {MAX_HTTP_STREAM_BODY_BYTES} byte limit"
@@ -1777,6 +1859,8 @@ impl SubstitutionService {
                 replay.extend_from_slice(&chunk);
             }
             if replay.len() as u64 != head.body_len {
+                self.audit_fail_closed(destination.as_deref(), "request_body_truncated")
+                    .await;
                 return Err(WireResponse::Refused {
                     message: "request body ended before its declared length".into(),
                 });
@@ -1806,6 +1890,7 @@ impl SubstitutionService {
         let (sender, receiver) = tokio::sync::mpsc::channel(4);
         let service = Arc::clone(self);
         let action = flow.redaction_action.clone();
+        let producer_destination = destination.clone();
         let producer = tokio::spawn(async move {
             let mut redactor = StreamingRedactor::new();
             let mut hits = RedactionHits::default();
@@ -1815,6 +1900,12 @@ impl SubstitutionService {
                 {
                     Ok(next) => next,
                     Err(_) => {
+                        service
+                            .audit_fail_closed(
+                                producer_destination.as_deref(),
+                                "request_body_idle_timeout",
+                            )
+                            .await;
                         let _ = sender.send(Err("request body idle timeout".into())).await;
                         return Err(SensitiveDetectionError);
                     }
@@ -1824,6 +1915,12 @@ impl SubstitutionService {
                 };
                 received = received.saturating_add(chunk.len() as u64);
                 if received > expected_len {
+                    service
+                        .audit_fail_closed(
+                            producer_destination.as_deref(),
+                            "request_body_length_exceeded",
+                        )
+                        .await;
                     let _ = sender
                         .send(Err("request body exceeded its declared length".into()))
                         .await;
@@ -1832,6 +1929,12 @@ impl SubstitutionService {
                 let (ready, chunk_hits) = match redactor.push(&service.redactor, &action, &chunk) {
                     Ok(result) => result,
                     Err(error) => {
+                        service
+                            .audit_fail_closed(
+                                producer_destination.as_deref(),
+                                "request_body_detector_failed",
+                            )
+                            .await;
                         let _ = sender
                             .send(Err("sensitive-data detector failed closed".into()))
                             .await;
@@ -1840,18 +1943,44 @@ impl SubstitutionService {
                 };
                 hits.merge(chunk_hits);
                 if !ready.is_empty() && sender.send(Ok(ready)).await.is_err() {
+                    service
+                        .audit_fail_closed(
+                            producer_destination.as_deref(),
+                            "request_body_stream_canceled",
+                        )
+                        .await;
                     return Err(SensitiveDetectionError);
                 }
             }
             if received != expected_len {
+                service
+                    .audit_fail_closed(producer_destination.as_deref(), "request_body_truncated")
+                    .await;
                 let _ = sender
                     .send(Err("request body ended before its declared length".into()))
                     .await;
                 return Err(SensitiveDetectionError);
             }
-            let (tail, tail_hits) = redactor.finish(&service.redactor, &action)?;
+            let (tail, tail_hits) = match redactor.finish(&service.redactor, &action) {
+                Ok(result) => result,
+                Err(error) => {
+                    service
+                        .audit_fail_closed(
+                            producer_destination.as_deref(),
+                            "request_body_detector_failed",
+                        )
+                        .await;
+                    return Err(error);
+                }
+            };
             hits.merge(tail_hits);
             if !tail.is_empty() && sender.send(Ok(tail)).await.is_err() {
+                service
+                    .audit_fail_closed(
+                        producer_destination.as_deref(),
+                        "request_body_stream_canceled",
+                    )
+                    .await;
                 return Err(SensitiveDetectionError);
             }
             Ok(hits)
@@ -1899,6 +2028,11 @@ impl SubstitutionService {
                 .redact_bytes_for(value.as_bytes(), &flow.redaction_action)
             {
                 if hits.detector_failures > 0 {
+                    self.audit_fail_closed(
+                        flow.destination.as_deref(),
+                        "response_header_detector_failed",
+                    )
+                    .await;
                     return Err(WireResponse::Refused {
                         message: "sensitive-data detector failed closed; refusing response".into(),
                     });
@@ -1912,6 +2046,7 @@ impl SubstitutionService {
         let response_headers = std::mem::take(&mut head.headers);
         let (sender, receiver) = tokio::sync::mpsc::channel(4);
         let service = Arc::clone(self);
+        let response_destination = flow.destination.clone();
         tokio::spawn(async move {
             let mut redactor = StreamingRedactor::new();
             let mut reinjector = StreamingReinjector::new();
@@ -1929,6 +2064,12 @@ impl SubstitutionService {
                     match redactor.push(&service.redactor, &flow.redaction_action, &reintroduced) {
                         Ok(result) => result,
                         Err(_) => {
+                            service
+                                .audit_fail_closed(
+                                    response_destination.as_deref(),
+                                    "response_body_detector_failed",
+                                )
+                                .await;
                             let _ = sender
                                 .send(Err(ForwardError::Failed(
                                     "sensitive-data detector failed closed".into(),
@@ -1939,6 +2080,12 @@ impl SubstitutionService {
                     };
                 flow.redaction_hits.merge(hits);
                 if !ready.is_empty() && sender.send(Ok(ready)).await.is_err() {
+                    service
+                        .audit_fail_closed(
+                            response_destination.as_deref(),
+                            "response_body_stream_canceled",
+                        )
+                        .await;
                     return;
                 }
             }
@@ -1951,6 +2098,12 @@ impl SubstitutionService {
             ) {
                 Ok(result) => result,
                 Err(_) => {
+                    service
+                        .audit_fail_closed(
+                            response_destination.as_deref(),
+                            "response_body_detector_failed",
+                        )
+                        .await;
                     let _ = sender
                         .send(Err(ForwardError::Failed(
                             "sensitive-data detector failed closed".into(),
@@ -1961,11 +2114,23 @@ impl SubstitutionService {
             };
             flow.redaction_hits.merge(hits);
             if !ready.is_empty() && sender.send(Ok(ready)).await.is_err() {
+                service
+                    .audit_fail_closed(
+                        response_destination.as_deref(),
+                        "response_body_stream_canceled",
+                    )
+                    .await;
                 return;
             }
             let (tail, hits) = match redactor.finish(&service.redactor, &flow.redaction_action) {
                 Ok(result) => result,
                 Err(_) => {
+                    service
+                        .audit_fail_closed(
+                            response_destination.as_deref(),
+                            "response_body_detector_failed",
+                        )
+                        .await;
                     let _ = sender
                         .send(Err(ForwardError::Failed(
                             "sensitive-data detector failed closed".into(),
@@ -1976,6 +2141,12 @@ impl SubstitutionService {
             };
             flow.redaction_hits.merge(hits);
             if !tail.is_empty() && sender.send(Ok(tail)).await.is_err() {
+                service
+                    .audit_fail_closed(
+                        response_destination.as_deref(),
+                        "response_body_stream_canceled",
+                    )
+                    .await;
                 return;
             }
             service.audit_completed_flow(&flow, &reinject_proofs).await;
@@ -2868,6 +3039,10 @@ mod server_tests {
         seen: Mutex<Option<PreparedRequest>>,
     }
 
+    struct RedirectForwarder {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
     #[async_trait]
     impl Forwarder for MockForwarder {
         async fn forward(&self, req: PreparedRequest) -> Result<ForwardResponse, ForwardError> {
@@ -2876,6 +3051,18 @@ mod server_tests {
                 status: 200,
                 headers: vec![("x-mock".into(), "1".into())],
                 body: b"pong".to_vec(),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl Forwarder for RedirectForwarder {
+        async fn forward(&self, _req: PreparedRequest) -> Result<ForwardResponse, ForwardError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(ForwardResponse {
+                status: 302,
+                headers: vec![("location".into(), "https://unbound.example/steal".into())],
+                body: Vec::new(),
             })
         }
     }
@@ -2940,6 +3127,74 @@ mod server_tests {
             service = service.with_reversible_replacement_policy(policy);
         }
         (Arc::new(service), ph, forwarder, dir)
+    }
+
+    #[test]
+    fn a_secret_bound_destination_requires_the_typed_transform_class() {
+        let (service, _placeholder, _forwarder, _dir) =
+            service_with("sk-live-zzz", &["api.openai.com"]);
+
+        assert_eq!(
+            service.opaque_refusal_reason("api.openai.com"),
+            Some("destination requires secret substitution over typed HTTP")
+        );
+        assert_eq!(service.opaque_refusal_reason("example.com"), None);
+    }
+
+    #[test]
+    fn explicit_redaction_and_replacement_require_the_typed_transform_class() {
+        use mvm_core::policy::{
+            EntropyMode, RedactionAction, RedactionPolicy, RedactionProfile,
+            ReversibleReplacementAction, ReversibleReplacementPolicy, ReversibleReplacementProfile,
+        };
+
+        let redaction = RedactionPolicy {
+            profiles: vec![RedactionProfile {
+                host: "redact.example".into(),
+                action: RedactionAction {
+                    entropy: EntropyMode::Redact {
+                        min_bits_per_char: 4.0,
+                        min_run_len: 20,
+                    },
+                    ..Default::default()
+                },
+            }],
+            ..Default::default()
+        };
+        let replacement = ReversibleReplacementPolicy {
+            profiles: vec![ReversibleReplacementProfile {
+                host: "replace.example".into(),
+                action: ReversibleReplacementAction {
+                    enabled: true,
+                    ..Default::default()
+                },
+            }],
+            ..Default::default()
+        };
+        let (service, _placeholder, _forwarder, _dir) = service_with_policies(
+            "sk-live-zzz",
+            &["secret.example"],
+            Some(redaction),
+            Some(replacement),
+        );
+
+        assert_eq!(
+            service.opaque_refusal_reason("redact.example"),
+            Some("destination requires redaction over typed HTTP")
+        );
+        assert_eq!(
+            service.opaque_refusal_reason("replace.example"),
+            Some("destination requires reversible replacement over typed HTTP")
+        );
+        assert_eq!(service.opaque_refusal_reason("opaque.example"), None);
+    }
+
+    #[test]
+    fn curated_default_redaction_does_not_claim_to_transform_opaque_flows() {
+        let (service, _placeholder, _forwarder, _dir) =
+            service_with("sk-live-zzz", &["api.openai.com"]);
+
+        assert_eq!(service.opaque_refusal_reason("opaque.example"), None);
     }
 
     #[tokio::test]
@@ -3197,6 +3452,101 @@ mod server_tests {
             server.abort();
         });
         rt.shutdown_timeout(std::time::Duration::from_millis(50));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stalled_streaming_request_hits_the_idle_deadline_without_forwarding() {
+        let (service, _placeholder, forwarder, _dir) =
+            service_with("sk-live-zzz", &["api.openai.com"]);
+        let (sender, receiver) = tokio::sync::mpsc::channel(1);
+        let task_service = Arc::clone(&service);
+        let request = tokio::spawn(async move {
+            task_service
+                .process_body_stream(
+                    mvm_core::substitution_wire::HttpFlowHead {
+                        method: "POST".into(),
+                        url: "https://api.openai.com/v1".into(),
+                        headers: Vec::new(),
+                        body_len: 1,
+                    },
+                    receiver,
+                )
+                .await
+        });
+
+        tokio::task::yield_now().await;
+        tokio::time::advance(HTTP_REQUEST_IDLE_TIMEOUT + std::time::Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+        drop(sender);
+        let refusal = match request.await.expect("request task") {
+            Ok(_) => panic!("idle request must refuse"),
+            Err(refusal) => refusal,
+        };
+        assert!(
+            matches!(
+                refusal,
+                WireResponse::Refused { ref message }
+                    if message.contains("idle timeout") || message.contains("failed closed")
+            ),
+            "unexpected refusal: {refusal:?}"
+        );
+        assert!(
+            forwarder.seen.lock().unwrap().is_none(),
+            "an incomplete request must never reach the destination"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_redirect_is_returned_without_following_or_rebinding_substitution() {
+        let dir = tempdir().unwrap();
+        let store = FileSecretStore::with_dir(dir.path());
+        store
+            .put(
+                "local",
+                "openai",
+                &SecretBox::new(Box::new("sk-live-zzz".to_string())),
+            )
+            .unwrap();
+        let resolver: Arc<dyn SecretResolver> =
+            Arc::new(LocalResolver::new("local", Arc::new(store)));
+        let mut registry = SubstitutionRegistry::new();
+        let placeholder = registry
+            .mint(bearer_ref("openai", &["api.openai.com"]))
+            .as_str()
+            .to_string();
+        let forwarder = Arc::new(RedirectForwarder {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let service = Arc::new(SubstitutionService::new(
+            Arc::new(registry),
+            resolver,
+            forwarder.clone(),
+        ));
+        let (sender, receiver) = tokio::sync::mpsc::channel(1);
+        drop(sender);
+        let mut response = service
+            .process_body_stream(
+                mvm_core::substitution_wire::HttpFlowHead {
+                    method: "GET".into(),
+                    url: "https://api.openai.com/v1".into(),
+                    headers: vec![("authorization".into(), format!("Bearer {placeholder}"))],
+                    body_len: 0,
+                },
+                receiver,
+            )
+            .await
+            .expect("redirect response");
+        while response.body.recv().await.is_some() {}
+
+        assert_eq!(response.status, 302);
+        assert!(response.headers.iter().any(|(name, value)| {
+            name.eq_ignore_ascii_case("location") && value == "https://unbound.example/steal"
+        }));
+        assert_eq!(
+            forwarder.calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the endpoint must surface a redirect, never follow it with the bound credential"
+        );
     }
 
     #[tokio::test]
