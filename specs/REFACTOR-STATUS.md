@@ -342,6 +342,23 @@ for detailed scope and acceptance criteria.
 
 ## In-flight plans
 
+- [~] **Security lane recovery — issue #2736.** The advisory finding is fixed,
+      the release-artifact bootstrap source now compiles with warnings denied,
+      and pull-request CI exercises that otherwise dormant feature directly.
+      Focused mutation witnesses cover authenticated-session signal validity,
+      live/dead endpoint readiness branches, redacted TLS material, builder
+      projection, and endpoint identity configuration.
+      Every dependency graph that contains `arrayref` resolves a byte-for-byte
+      vendored copy of the reviewed 0.3.9 upstream revision. Pinned file hashes
+      guard the vendored source, Git dependencies remain denied, and Nix image
+      sources plus the host build fingerprint retain that path dependency.
+      The exact Security rerun's capability-builder finding now has a direct
+      all-fields witness; its only remaining constructor mutant is documented
+      as the identical `Default::default()` expression rather than waived as
+      an untested behavior.
+      Closure remains gated on a clean Security workflow run from current
+      `main`, including every mutation shard and both reproducibility builds.
+
 - [x] **Secret bindings for forked children** —
       `specs/plans/2026-08-18-fork-inherits-secret-bindings.md`, issue #2698.
       Option A (W0 and A1–A6) is complete: fork bindings are explicit,

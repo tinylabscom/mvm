@@ -175,7 +175,7 @@ jobs:
           for manifest in crates/*/fuzz*/Cargo.toml crates/deps/*/fuzz*/Cargo.toml; do
             [ -f "$manifest" ] || continue
             echo "::group::$manifest"
-            cargo check --manifest-path "$manifest" --all-targets || fail=1
+            cargo check --locked --manifest-path "$manifest" --all-targets || fail=1
             echo "::endgroup::"
           done
           exit "$fail"
