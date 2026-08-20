@@ -893,7 +893,6 @@ pub(super) fn promote_builder_vm_stage0_cache(
 /// at compile time via `--features release-artifact-bootstrap`.
 #[cfg(feature = "release-artifact-bootstrap")]
 pub(super) fn download_builder_vm_image(arch: &str, cache_dir: &str) -> Result<()> {
-    let version = env!("CARGO_PKG_VERSION");
     let names = builder_vm_artifact_names(arch);
     // Builder-VM images ship on the boot image counter, not the CLI's.
     let (tag, image_version) = crate::update::boot_image_release()?;

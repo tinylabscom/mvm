@@ -1,6 +1,6 @@
 # Refactor status
 
-Last updated: 2026-08-19
+Last updated: 2026-08-20
 
 This is the cross-plan progress index. The owning plan remains authoritative
 for detailed scope and acceptance criteria.
@@ -334,6 +334,12 @@ for detailed scope and acceptance criteria.
       zero; the later workload boot stopped at a separate readiness timeout.
 
 ## In-flight plans
+
+- [~] **Security lane recovery — issue #2736.** The advisory finding is fixed,
+      the release-artifact bootstrap source now compiles with warnings denied,
+      and pull-request CI exercises that otherwise dormant feature directly.
+      Closure remains gated on a clean Security workflow run from current
+      `main`, including every mutation shard and both reproducibility builds.
 
 - [x] **Secret bindings for forked children** —
       `specs/plans/2026-08-18-fork-inherits-secret-bindings.md`, issue #2698.

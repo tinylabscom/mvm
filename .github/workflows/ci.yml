@@ -591,6 +591,13 @@ jobs:
           cargo nextest run -p mvm-agentd --features addons
           cargo check -p mvm-agentd --features addons --bins
 
+      # End-user release builds enable a bootstrap path that contributor builds
+      # deliberately omit. Keep that source compiled with warnings denied on
+      # every code-changing pull request so the nightly reproducibility lane is
+      # evidence, not the first compiler to see it.
+      - name: release-artifact bootstrap feature compiles
+        run: cargo check -p mvm-cli --features release-artifact-bootstrap --lib
+
       - name: Assert auto-detect still picks libkrun off Linux/HVF
         run: |
           cargo test -p mvm-build --features builder-vm --lib \
