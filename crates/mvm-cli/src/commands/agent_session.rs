@@ -14,6 +14,7 @@
 use anyhow::{Context, Result};
 use clap::{Args as ClapArgs, Subcommand};
 
+use mvm_client::{ResumeBootLocalRequest, resume_and_boot_local};
 use mvm_contract::protocol::agent_session::AgentSessionId;
 use mvm_core::checkpoint::{ApprovalHead, CheckpointDigest};
 use mvm_core::plan::PlanId;
@@ -21,10 +22,8 @@ use mvm_core::user_config::MvmConfig;
 use mvm_hostd::plan_admission::AdmittedPlan;
 use mvm_hostd::plan_admission::{InMemoryNonceLedger, SystemClock};
 use mvm_hostd::session_resume::{
-    BootedSession, ResumeBootRequest, ResumePlanMaterial, ResumeRequest, ResumedSession,
-    resume_and_boot, resume_session,
+    BootedSession, ResumePlanMaterial, ResumeRequest, ResumedSession, resume_session,
 };
-use mvm_runtime::AnyBackend;
 use mvm_runtime::agent_session::{
     AgentSessionRecord, AgentSessionStore, ParkInput, ParkReason, SandboxResidency, StorageTier,
 };
@@ -516,9 +515,7 @@ fn resume_booting(
     checkpoints: &CheckpointStore,
     args: &ResumeArgs,
 ) -> Result<()> {
-    AnyBackend::require_hypervisor_selectable(&args.backend)?;
-    let backend = AnyBackend::from_hypervisor(&args.backend);
-    let booted = resume_boot_record(sessions, checkpoints, args, &backend)?;
+    let booted = resume_boot_record(sessions, checkpoints, args)?;
 
     println!("{}", summary_line(&booted.record));
     println!("admitted plan:  {}", booted.started.admitted.plan_id().0);
@@ -526,16 +523,11 @@ fn resume_booting(
     Ok(())
 }
 
-/// Drive a booting resume, against a caller-supplied backend.
-///
-/// Takes the backend rather than resolving it, for the same reason the no-boot
-/// path takes its stores: a test can then drive the whole thing without a
-/// hypervisor.
+/// Drive a booting resume through the client-owned backend boundary.
 fn resume_boot_record(
     sessions: &AgentSessionStore,
     checkpoints: &CheckpointStore,
     args: &ResumeArgs,
-    backend: &AnyBackend,
 ) -> Result<BootedSession> {
     // Refused here rather than by the admitted-environment gate, which only
     // runs once the record has already transitioned. A plan that pins a kernel
@@ -554,19 +546,17 @@ fn resume_boot_record(
         .context("loading the host signer to sign the resume entry")?;
     let emitter = super::vm::audit_chain::AuditEmitter::new(signer.signing)
         .context("opening the audit chain to record the resume")?;
-    resume_and_boot(
-        sessions,
-        checkpoints,
-        &ResumeBootRequest {
-            resume: &inputs.request(),
-            backend,
-            state_dir: &state_dir,
-            kernel_path: args.kernel.as_deref(),
-            emitter: Some(&emitter),
-        },
-        &SystemClock,
-        &InMemoryNonceLedger::new(),
-    )
+    let resume = inputs.request();
+    let request = ResumeBootLocalRequest::builder()
+        .sessions(sessions)
+        .checkpoints(checkpoints)
+        .resume(&resume)
+        .backend_name(&args.backend)
+        .state_dir(&state_dir)
+        .kernel_path(args.kernel.as_deref())
+        .emitter(Some(&emitter))
+        .build()?;
+    resume_and_boot_local(&request, &SystemClock, &InMemoryNonceLedger::new())
 }
 
 /// The extra labels a `session.resumed` entry carries.
@@ -1028,6 +1018,7 @@ mod tests {
     fn boot_args(session_id: &str, kernel: &std::path::Path) -> ResumeArgs {
         ResumeArgs {
             boot: true,
+            backend: "mock".to_string(),
             kernel: Some(kernel.to_path_buf()),
             ..resume_args(session_id)
         }
@@ -1041,21 +1032,14 @@ mod tests {
         p
     }
 
-    /// The mock only exists behind `test-support`; outside it
-    /// `from_hypervisor("mock")` silently degrades to the real default backend,
-    /// so every test that hands a backend to the boot path is gated the way
-    /// `pool`'s are rather than risking one that boots for real.
-    #[cfg(feature = "test-support")]
-    fn mock_backend() -> AnyBackend {
-        AnyBackend::Mock(mvm_runtime::mock::MockBackend::new())
-    }
-
     #[cfg(feature = "test-support")]
     #[test]
     fn boot_refuses_a_parked_tier_session_naming_the_tier() {
         // The flag reaches the tier gate: a session parked with a memory image
         // must not be cold-booted out from under the operator.
         let tmp = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(tmp.path());
         let sessions = AgentSessionStore::at(tmp.path().join("sessions"));
         let checkpoints = CheckpointStore::at(tmp.path().join("checkpoints"));
         let record = parked("sess-alpha", ParkReason::ApprovalWait);
@@ -1063,9 +1047,8 @@ mod tests {
         sessions.write(&record).unwrap();
 
         let kernel = stub_kernel(tmp.path());
-        let backend = mock_backend();
         let args = boot_args("sess-alpha", &kernel);
-        let err = resume_boot_record(&sessions, &checkpoints, &args, &backend)
+        let err = resume_boot_record(&sessions, &checkpoints, &args)
             .expect_err("a parked-tier session must not boot");
         let text = format!("{err:#}");
         assert!(text.contains("parked"), "{text}");
@@ -1075,13 +1058,14 @@ mod tests {
             record,
             "a refused boot must not touch the record"
         );
-        assert!(backend.list().unwrap().is_empty(), "nothing may be started");
     }
 
     #[cfg(feature = "test-support")]
     #[test]
     fn boot_refuses_a_resident_tier_session_naming_the_tier() {
         let tmp = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(tmp.path());
         let sessions = AgentSessionStore::at(tmp.path().join("sessions"));
         let checkpoints = CheckpointStore::at(tmp.path().join("checkpoints"));
         let record = parked("sess-alpha", ParkReason::Idle);
@@ -1089,15 +1073,13 @@ mod tests {
         sessions.write(&record).unwrap();
 
         let kernel = stub_kernel(tmp.path());
-        let backend = mock_backend();
         let args = boot_args("sess-alpha", &kernel);
-        let err = resume_boot_record(&sessions, &checkpoints, &args, &backend)
+        let err = resume_boot_record(&sessions, &checkpoints, &args)
             .expect_err("a resident-tier session must not boot");
         let text = format!("{err:#}");
         assert!(text.contains("resident"), "{text}");
         assert!(text.contains("not built"), "{text}");
         assert_eq!(sessions.load(&record.session_id).unwrap(), record);
-        assert!(backend.list().unwrap().is_empty());
     }
 
     #[cfg(feature = "test-support")]
@@ -1106,21 +1088,21 @@ mod tests {
         // The residency check still comes first: an active session has no
         // parked state to resume, whatever tier it might name.
         let tmp = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(tmp.path());
         let sessions = AgentSessionStore::at(tmp.path().join("sessions"));
         let checkpoints = CheckpointStore::at(tmp.path().join("checkpoints"));
         let record = active("sess-alpha");
         sessions.write(&record).unwrap();
 
         let kernel = stub_kernel(tmp.path());
-        let backend = mock_backend();
         let args = boot_args("sess-alpha", &kernel);
-        let err = resume_boot_record(&sessions, &checkpoints, &args, &backend)
+        let err = resume_boot_record(&sessions, &checkpoints, &args)
             .expect_err("an active session must not boot");
         // On its residency, not on the tier it does not have: the tier gate
         // steps aside for a record nothing ever parked.
         assert!(format!("{err:#}").contains("not parked"), "{err:#}");
         assert_eq!(sessions.load(&record.session_id).unwrap(), record);
-        assert!(backend.list().unwrap().is_empty());
     }
 
     #[cfg(feature = "test-support")]
@@ -1140,8 +1122,7 @@ mod tests {
             ..resume_args("sess-alpha")
         };
         assert!(args.kernel_sha256.is_some() && args.kernel.is_none());
-        let backend = mock_backend();
-        let err = resume_boot_record(&sessions, &checkpoints, &args, &backend)
+        let err = resume_boot_record(&sessions, &checkpoints, &args)
             .expect_err("a pinned kernel with no path must refuse");
         assert!(format!("{err:#}").contains("--kernel"), "{err:#}");
         assert_eq!(
@@ -1149,7 +1130,6 @@ mod tests {
             record,
             "the refusal must come before the transition"
         );
-        assert!(backend.list().unwrap().is_empty());
     }
 
     #[test]
