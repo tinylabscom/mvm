@@ -25,7 +25,7 @@ verification under `trust`. Domains that already own their own subcommands
 | Daily drivers (top-level) | `machine` (`run`/`fork`/`restore`/`exec`/`console`/`logs`/`stop`/`forward`/…), `ls`, `build`, `doctor`, `init`, `bootstrap` |
 | `vm <sub>` | `pause`, `resume`, `snapshot`, `save`, `restore`, `checkpoint`, `cp`, `fs`, `proc`, `diff`, `wait`, `boot-report`, `set-ttl`, `forward`, `sandbox`, `session`, `volume` |
 | `build <sub>` | `image` (the former `build`), `compile`, `validate`, `kernel`, `runtime-overlay` |
-| `ops <sub>` | `metrics`, `bench`, `config` |
+| `ops <sub>` | `metrics`, `config`, `mcp` |
 | `env <sub>` | `bootstrap`, `cleanup`, `uninstall`, `update`, `sign` |
 | `trust <sub>` | `add`/`list`/`remove` (publishers), `attest`, `receipt`, `audit` |
 | Already-grouped top-level | `image`, `catalog`, `manifest`, `storage`, `network`, `cache`, `pool`, `secret`, `bundle`, `deps`, `artifact` |
@@ -843,6 +843,50 @@ silently selecting a weaker tier.
 
 Checkpoint blobs are stored under the configured checkpoint store (`MVM_HOME` / `~/.mvm` via the core path helpers). The audit chain records `checkpoint.created`, `checkpoint.restored`, and `checkpoint.forked` entries with content hashes; restore and fork refuse tampered checkpoint content before booting.
 
+## Durable Agent Sessions
+
+`mvmctl agent-session` is the operator surface for durable agent sessions: an
+agent session outlives the sandbox that runs it, parking (releasing its
+sandbox) and resuming later as a fresh admission. It is deliberately not
+spelled `session` — `mvmctl machine session` already means machine-session
+residency, a warm VM kept alive across `invoke` calls, which is a different
+concept over a different store.
+
+| Command | Description |
+|---------|-------------|
+| `mvmctl agent-session open <id> [--resume-point <sha256:...>] [--member <name>]...` | Record a new session, resident from the start, at generation 1. Refuses if a record already exists under that id. `--member` is repeatable. |
+| `mvmctl agent-session ls [--json]` | List every session recorded on this host, one summary line each: id, generation, residency, and — when parked — reason and storage tier. |
+| `mvmctl agent-session show <id> [--json]` | Print one session's recorded state in full: residency, generation, storage tier, park reason, journal cursor, resume point, approval head, members, timestamps. An absent session is an error naming the id. |
+| `mvmctl agent-session park <id> --reason <reason> [--journal-cursor <n>] [--approval-head <sha256:...>]` | Release an active session's sandbox. `--reason` is one of `approval-wait`, `idle`, `host-shutdown`, `operator`, `retention-demotion`, and selects the storage tier. Emits a `session.parked` chain entry. |
+| `mvmctl agent-session resume <id> --backend <name> --image <ref> --image-sha256 <hex> --cpus <n> --mem-mib <n> [--kernel-sha256 <hex>] [--approval-head <sha256:...>]` | Re-admit a parked session under a freshly signed `ExecutionPlan`. Emits a `session.resumed` chain entry. |
+
+`open` is what gives the other four subcommands something to act on: `park` and
+`resume` both need a record that already exists, and nothing else on the host
+writes one.
+
+`resume` takes the workload material — backend, image reference, rootfs and
+kernel SHA-256, vCPUs, memory — as flags because the session record
+deliberately does not carry it. An image, a kernel and a sandbox size each
+change on their own schedule, and recording them in the record would make it a
+second copy of the plan that has to be kept in step with one. Deriving them
+from the resume point's supervisor config instead is a later step; taking them
+as flags keeps the seam visible rather than guessing.
+
+A resume stops at an admitted plan. It does not restore a memory image and does
+not boot a sandbox — the command says so on completion.
+
+`--approval-head` on `resume` is the operator's assertion of where the approval
+ledger is *now*. The store refuses when it differs from the head recorded at
+park time, so a session cannot silently resume under grants it was never
+admitted for. A session parked without a head resumes unfenced, and
+`agent-session show` says so in as many words.
+
+Both chain entries are best-effort: if the entry cannot be written the
+transition is still reported as done, with a warning, because the store write
+already succeeded and failing afterwards would tell an operator a park did not
+happen when it did. A caller that needs the entry must verify the chain
+separately.
+
 ## File Copy
 
 | Command | Description |
@@ -1070,6 +1114,7 @@ running microVM.
 | `mvmctl completions <bash\|zsh>` | Print a completion script. `shell-init`'s eval block calls this; the hidden `--emit-completions` flag it used to carry is gone |
 | `mvmctl ops metrics` | Show runtime metrics (Prometheus text format) |
 | `mvmctl ops metrics --json` | Show runtime metrics as JSON |
+| `mvmctl ops mcp stdio` | Serve capability-derived `MvmClient` tools as newline-delimited MCP JSON-RPC over local stdin/stdout |
 | `mvmctl env uninstall` | Remove Firecracker, the builder microVM image, and all mvm state (confirmation required) |
 | `mvmctl env uninstall -y` | Uninstall without confirmation |
 | `mvmctl env uninstall --all` | Also remove ~/.mvm/ config dir and /usr/local/bin/mvmctl binary |

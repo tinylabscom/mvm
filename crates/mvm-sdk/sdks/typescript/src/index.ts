@@ -112,6 +112,7 @@ export type {
   SandboxCreateWire,
   SandboxExecOptions,
   SandboxInfo,
+  SandboxSource,
   FsEntry,
   FsStat,
   ProcessResult,
@@ -141,7 +142,13 @@ export type {
 } from "./_machine.js";
 
 // Typed Sandbox presets (Phase C).
-export { BrowserSandbox, CodeError, CodeSandbox } from "./_helpers.js";
+export {
+  BrowserReadyError,
+  BrowserSandbox,
+  CodeError,
+  CodeSandbox,
+  OBSCURA_IMAGE,
+} from "./_helpers.js";
 export type { BrowserSandboxOptions } from "./_helpers.js";
 
 // In-guest host-services runtime surface (`mvm.audit.emit`, `mvm.host.time()`).

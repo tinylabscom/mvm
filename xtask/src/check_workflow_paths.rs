@@ -558,7 +558,9 @@ mod tests {
         }
 
         let lint_core = job_block(&workflow, "lint-core");
-        assert!(lint_core.contains("cargo clippy --all-targets -- -D warnings"));
+        assert!(
+            lint_core.contains("./scripts/cargo-stable.sh clippy --all-targets -- -D warnings")
+        );
         let lint_policy = job_block(&workflow, "lint-policy");
         assert!(lint_policy.contains("name: Invariant"));
         assert!(lint_policy.contains("bash scripts/check-no-orchestration-server.sh"));
@@ -771,7 +773,7 @@ mod tests {
     }
 
     #[test]
-    fn removed_mcp_server_stays_out_of_ci() {
+    fn dedicated_mcp_smoke_lane_stays_out_of_ci() {
         let workflow = ci_workflow();
         for removed in [
             "MCP server stdio roundtrip",
@@ -781,7 +783,7 @@ mod tests {
         ] {
             assert!(
                 !workflow.contains(removed),
-                "removed MCP server CI surface returned: {removed}"
+                "dedicated MCP CI surface must stay absent: {removed}"
             );
         }
     }

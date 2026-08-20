@@ -1308,19 +1308,6 @@ fn apply_admitted_grants(
         .context("applying the admitted plan's grants to the started VM")
 }
 
-/// The single admitted-boot entrypoint every driver shares — the CLI's
-/// `mvmctl up`/`run` and the `mvm-client` local backend both reach it, so a
-/// workload can never boot on a path that skipped admission.
-///
-/// Order matters and is fail-closed: synthesize + sign + verify + validity +
-/// replay (+ bundle re-verify) run first; only then is the signed plan threaded
-/// onto the launch config and every volume checked against the admitted shares
-/// (claim 1); only then does the backend start the VM. Any earlier failure
-/// returns with **no VM created** — admission is a gate, not a formality.
-///
-/// The caller resolves the image to a `config.rootfs_path` beforehand; this
-/// function is backend-agnostic (it drives whatever `AnyBackend` it is handed,
-/// including the in-memory mock in tests).
 /// The four post-admission gates between `plan.admitted` and the backend
 /// start, run in order. On refusal the failing stage's wire label is
 /// returned alongside the error so the caller can emit a terminal
@@ -1410,49 +1397,53 @@ fn undo_launch(undo: UndoLaunch<'_>) -> anyhow::Error {
     undo.err
 }
 
+/// Everything the post-admission tail needs, in one struct.
+///
+/// A params struct rather than six positional arguments: three of the fields
+/// are optional borrows of unrelated types and a positional call could drop or
+/// transpose one with nothing to catch it.
+pub struct StartAdmittedParams<'a> {
+    pub backend: &'a AnyBackend,
+    /// The plan this boot runs under. Taken by value because it is handed back
+    /// on the [`StartedMachine`], and holding one is the only proof admission
+    /// ran — it cannot be built any other way.
+    pub admitted: AdmittedPlan,
+    pub config: VmStartConfig,
+    pub policy_bundle: Option<&'a PolicyBundle>,
+    /// Optional chain-signed emitter: `plan.launched` fires on a successful
+    /// backend start, `plan.failed` on a start failure or a post-start refusal.
+    /// The caller owns `plan.admitted`, which is already recorded by the time
+    /// this runs.
+    pub emitter: Option<&'a crate::audit::emitter::AuditEmitter>,
+    /// An assurance campaign to open against this boot, when the operator
+    /// declared one. `None` — the default — is every ordinary run.
+    pub assurance: Option<&'a crate::assurance_session::CampaignRequest>,
+}
+
+/// The post-admission tail every admitted boot shares: the gates, the backend
+/// start, the grants, the budget charge and the launch records.
+///
+/// Split out of [`admit_and_start`] so a caller holding an already-admitted
+/// plan — a resumed durable session, for one — can boot it without admitting a
+/// second time. Two admissions would mean two nonces and two signed plans, with
+/// the second silently becoming the real authority. Because this is the only
+/// path from an `AdmittedPlan` to a running VM, a caller cannot boot on a path
+/// that skipped a gate.
+///
+/// Order matters and is fail-closed: the signed plan is threaded onto the
+/// launch config and every volume checked against the admitted shares
+/// (claim 1); only then does the backend start the VM. A refusal in any gate
+/// returns with **no VM created**, and a refusal *after* the start rolls the
+/// launch back rather than leaving a VM up whose only record says it was
+/// bounded.
+///
+/// The caller resolves the image to a `config.rootfs_path` beforehand; this
+/// function is backend-agnostic (it drives whatever `AnyBackend` it is handed,
+/// including the in-memory mock in tests).
 #[tracing::instrument(skip_all)]
-pub fn admit_and_start(
-    backend: &AnyBackend,
-    params: AdmitAndStartParams<'_>,
-) -> Result<StartedMachine> {
-    // The tier comes from the backend that is about to boot this plan — the
-    // object itself, via its typed discriminant. Nothing here reads a backend
-    // name: the grant gate decides which resource controls a run is measured
-    // against, and deciding that from a string is how a plan ends up measured
-    // against a tier it is not running on.
-    let posture = RunPosture::on_backend(params.variant, backend.kind());
-
-    // Synthesize the plan up-front so a refusal can be recorded with the
-    // plan context if admission fails. Synthesis failures have no plan to
-    // anchor to; they propagate without a chain entry.
-    let plan = synthesize_plan(params.synthesis).context("synthesizing plan")?;
-
-    let admitted = match admit_plan_for_run(
-        &plan,
-        params.clock,
-        params.ledger,
-        params.host_signer_keys_dir,
-        params.bundle_ctx,
-        posture,
-    ) {
-        Ok(admitted) => admitted,
-        Err(err) => {
-            if let Some(emitter) = params.emitter
-                && let Err(e) =
-                    emitter.emit_refused(&plan, "admit_plan_for_run", &format!("{err:#}"))
-            {
-                tracing::warn!(error = %e, "audit emit_refused failed (non-fatal)");
-            }
-            return Err(err);
-        }
-    };
-
-    crate::audit::durability::record_admission(
-        params.emitter,
-        admitted.plan(),
-        admitted.signer_id(),
-        params.audit_durability,
-    )?;
+pub fn start_admitted(params: StartAdmittedParams<'_>) -> Result<StartedMachine> {
+    let backend = params.backend;
+    let admitted = params.admitted;
 
     // A refusal in any post-admission gate must still terminate the chain:
     // `plan.admitted` already fired, so a gate refusal emits `plan.failed`
@@ -1568,6 +1559,69 @@ pub fn admit_and_start(
             Err(err)
         }
     }
+}
+
+/// The single admitted-boot entrypoint every driver shares — the CLI's
+/// `mvmctl up`/`run` and the `mvm-client` local backend both reach it, so a
+/// workload can never boot on a path that skipped admission.
+///
+/// Order matters and is fail-closed: synthesize + sign + verify + validity +
+/// replay (+ bundle re-verify) run first, and any failure among them returns
+/// with **no VM created** — admission is a gate, not a formality. Only once the
+/// admission is recorded does this delegate to [`start_admitted`], which owns
+/// the rest of the order.
+#[tracing::instrument(skip_all)]
+pub fn admit_and_start(
+    backend: &AnyBackend,
+    params: AdmitAndStartParams<'_>,
+) -> Result<StartedMachine> {
+    // The tier comes from the backend that is about to boot this plan — the
+    // object itself, via its typed discriminant. Nothing here reads a backend
+    // name: the grant gate decides which resource controls a run is measured
+    // against, and deciding that from a string is how a plan ends up measured
+    // against a tier it is not running on.
+    let posture = RunPosture::on_backend(params.variant, backend.kind());
+
+    // Synthesize the plan up-front so a refusal can be recorded with the
+    // plan context if admission fails. Synthesis failures have no plan to
+    // anchor to; they propagate without a chain entry.
+    let plan = synthesize_plan(params.synthesis).context("synthesizing plan")?;
+
+    let admitted = match admit_plan_for_run(
+        &plan,
+        params.clock,
+        params.ledger,
+        params.host_signer_keys_dir,
+        params.bundle_ctx,
+        posture,
+    ) {
+        Ok(admitted) => admitted,
+        Err(err) => {
+            if let Some(emitter) = params.emitter
+                && let Err(e) =
+                    emitter.emit_refused(&plan, "admit_plan_for_run", &format!("{err:#}"))
+            {
+                tracing::warn!(error = %e, "audit emit_refused failed (non-fatal)");
+            }
+            return Err(err);
+        }
+    };
+
+    crate::audit::durability::record_admission(
+        params.emitter,
+        admitted.plan(),
+        admitted.signer_id(),
+        params.audit_durability,
+    )?;
+
+    start_admitted(StartAdmittedParams {
+        backend,
+        admitted,
+        config: params.config,
+        policy_bundle: params.policy_bundle,
+        emitter: params.emitter,
+        assurance: params.assurance,
+    })
 }
 
 #[cfg(test)]

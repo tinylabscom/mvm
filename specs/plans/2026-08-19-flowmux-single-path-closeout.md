@@ -63,17 +63,22 @@ Each implementation pull request updates this plan, its delivery record, and
 
 ### W2 — Add the performance harness before deleting the baseline path
 
-- [ ] Add `xtask network-perf` with machine-readable reports for opaque TCP,
+- [x] Add `xtask network-perf` with machine-readable reports for opaque TCP,
       UDP, DNS, and transformed HTTP latency, throughput, CPU, copies where
       measurable, and peak RSS.
-- [ ] Record host-, backend-, storage-, build-, and sample-labelled legacy L3
+- [x] Record host-, backend-, storage-, build-, and sample-labelled legacy L3
       and current FlowMux baselines under `specs/benchmarks/network/`.
-- [ ] Make comparison thresholds explicit: opaque latency at most 5% slower,
+- [x] Make comparison thresholds explicit: opaque latency at most 5% slower,
       throughput at least 95%, RSS growth at most 10%, and transformed HTTP
       latency at most 10% slower unless an owner-approved measured exception is
       recorded here.
-- [ ] Keep the harness hermetic by default and isolate live KVM/HVF/libkrun
+- [x] Keep the harness hermetic by default and isolate live KVM/HVF/libkrun
       runners behind explicit environment checks.
+
+The pre-deletion comparisons are deliberately retained as failing evidence:
+21 checks miss on the labelled macOS arm64 host and 28 miss on the labelled
+Linux x86_64 host. No owner exception is approved. W8 must produce a passing
+final report or record an explicit owner-approved measured exception.
 
 ### W3 — Make typed transformations bounded and endpoint-owned
 
@@ -93,7 +98,6 @@ Each implementation pull request updates this plan, its delivery record, and
 The host-side performance probe enables the narrow `flowmux-client` feature,
 not the guest addon bundle. This keeps guest-only vsock dependencies out of
 host test graphs and preserves the duplicate-major dependency invariant.
-
 ### W4 — Implement declared ingress on FlowMux
 
 - [x] Replace `L3IngressMapping` with a transport-neutral signed-plan/IR type

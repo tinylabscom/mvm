@@ -18,6 +18,7 @@ members = [
     "crates/mvm-cli",
     "crates/mvm-hostd",
     "crates/mvm-client",
+    "crates/mvm-mcp",
     # plan 74 W1 — OCI image distribution client (registry resolution,
     # manifest fetch, digest verification; layer fetch + ext4 unpack +
     # verity generation land in subsequent W1 PRs). Anonymous-only at
@@ -354,6 +355,7 @@ tree-sitter-typescript = "0.23.2"
 mvm-contract = { path = "crates/mvm-contract", version = "0.18.0", default-features = false, features = ["protocol"] }
 mvm-core = { path = "crates/mvm-core", version = "0.18.0" }
 mvm-client = { path = "crates/mvm-client", version = "0.18.0" }
+mvm-mcp = { path = "crates/mvm-mcp", version = "0.18.0" }
 mvm-agentd = { path = "crates/mvm-agentd", version = "0.18.0" }
 mvm-build = { path = "crates/mvm-build", version = "0.18.0", default-features = false }
 mvm-runtime = { path = "crates/mvm-runtime", version = "0.18.0", default-features = false }
@@ -660,6 +662,7 @@ opt-level = 3
 # interpreter dependency, so it boots in any rootfs — the same reason
 # mkGuest static-links its own /init. Both binaries are libc-only (no
 # TLS/ring/openssl), so the musl build is unencumbered.
+rust = "1.91.1"
 zig = "0.13.0"
 cargo-zigbuild = "0.20.0"
 

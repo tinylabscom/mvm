@@ -65,3 +65,18 @@ Baseline filenames use
 `<implementation>-<os>-<arch>-<backend>-<source-commit>.json`. Never edit a
 measurement to make a comparison pass; rerun the labelled probe or record an
 owner-approved exception in the owning plan with the raw reports attached.
+
+## Recorded pre-deletion evidence
+
+| Host | Legacy report | FlowMux report | Comparison |
+| --- | --- | --- | --- |
+| macOS arm64, Apple M4 Max, APFS SSD | `legacy-l3-macos-arm64-host-loopback-a14271e9d8.json` | `flow-mux-macos-arm64-host-loopback-a14271e9d8.json` | `comparison-macos-arm64-host-loopback-a14271e9d8.json` |
+| Linux x86_64, AMD EPYC 7763, GitHub-hosted ephemeral SSD | `legacy-l3-linux-x86_64-host-loopback-5d2e4c3c5b.json` | `flow-mux-linux-x86_64-host-loopback-5d2e4c3c5b.json` | `comparison-linux-x86_64-host-loopback-5d2e4c3c5b.json` |
+
+Both comparisons are intentionally recorded as failures: 21 threshold checks
+miss on macOS and 28 miss on Linux. The largest gaps are opaque TCP/UDP
+latency and throughput; transformed HTTP request latency and per-case RSS no
+longer fail after the harness stopped charging each request for a complete
+authenticated-session handshake and stopped reusing process-lifetime peak
+RSS. No exception is approved or implied by these files. They are the
+pre-deletion baseline W8 must improve upon or explicitly resolve.

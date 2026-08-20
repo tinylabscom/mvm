@@ -30,22 +30,24 @@ install-hooks:
 toolchain-embed:
     #!/usr/bin/env bash
     set -euo pipefail
+    RUST=$(python3 -c "import tomllib; print(tomllib.load(open('Cargo.toml','rb'))['workspace']['metadata']['mvm']['toolchain']['rust'])")
     ZIG=$(python3 -c "import tomllib; print(tomllib.load(open('Cargo.toml','rb'))['workspace']['metadata']['mvm']['toolchain']['zig'])")
-    echo "installing pinned zig ${ZIG} (ziglang) + musl rust targets"
+    echo "installing pinned Rust ${RUST} + zig ${ZIG} (ziglang) + musl targets"
     python3 -m pip install --quiet "ziglang==${ZIG}"
-    rustup target add aarch64-unknown-linux-musl x86_64-unknown-linux-musl
-    echo "embed toolchain ready: zig ${ZIG} + aarch64/x86_64 musl targets"
+    rustup toolchain install "${RUST}" --profile minimal
+    rustup target add aarch64-unknown-linux-musl x86_64-unknown-linux-musl --toolchain "${RUST}"
+    echo "embed toolchain ready: Rust ${RUST} + zig ${ZIG} + aarch64/x86_64 musl targets"
 
 # Build all crates (debug)
 build:
-    cargo build --workspace
+    ./scripts/cargo-fast.sh build --workspace
 
 # `--all-targets` is narrower than it sounds: it skips any target behind
 # `required-features`, and on macOS it cannot compile `cfg(target_os = "linux")`
 # files at all. `check-gated` covers both.
 # Type-check without codegen
 check:
-    cargo check --workspace --all-targets
+    ./scripts/cargo-fast.sh check --workspace --all-targets
 
 # Cross-compile every crate's lib for Linux (glibc) via zig — no Docker — so
 # cfg(target_os="linux") code a macOS host never compiles is caught locally.
@@ -57,7 +59,7 @@ check:
 # COW FICLONE path (mvm-runtime) only type-checks against glibc.
 # Cross-compile every crate's lib for Linux via zig
 check-linux TARGET="x86_64-unknown-linux-gnu":
-    cargo zigbuild --target {{ TARGET }} --workspace --lib --all-features
+    ./scripts/cargo-stable.sh zigbuild --target {{ TARGET }} --workspace --lib --all-features
 
 # Type-check the targets `just check` cannot see. Two blind spots, both of which
 # have shipped a red CI run that named neither:
@@ -82,8 +84,8 @@ check-linux TARGET="x86_64-unknown-linux-gnu":
 # anything that changes a shared type's shape; a warm run is far cheaper.
 # Type-check the linux-gated and feature-gated targets `just check` cannot see
 check-gated TARGET="x86_64-unknown-linux-gnu":
-    cargo-zigbuild check --target {{ TARGET }} --workspace --all-targets
-    cargo check -p mvm-conformance --all-targets --features bdd
+    ./scripts/cargo-stable.sh --direct cargo-zigbuild check --target {{ TARGET }} --workspace --all-targets
+    ./scripts/cargo-stable.sh check -p mvm-conformance --all-targets --features bdd
 
 # Bare-metal no_std proof for the embeddable foundation crate (mvm-contract).
 # A `-none-elf` target exposes only core + alloc with no std to leak into, so
@@ -99,7 +101,7 @@ check-embedded TARGET="riscv32imac-unknown-none-elf":
 
 # Run mvmctl with arguments
 run *ARGS:
-    cargo run -- {{ ARGS }}
+    ./scripts/cargo-fast.sh run -- {{ ARGS }}
 
 # Run mvmctl with the dev env set (worktree-local MVM_HOME).
 dev *ARGS:
@@ -109,7 +111,7 @@ dev *ARGS:
 
 # CARGO_TARGET_DIR / CARGO_HOME).
 dev-cargo *ARGS:
-    bash -c 'source scripts/dev-env.sh && cargo {{ ARGS }}'
+    bash -c 'source scripts/dev-env.sh && ./scripts/cargo-fast.sh {{ ARGS }}'
 
 # Run cargo test --workspace with the dev env.
 dev-test:
@@ -117,7 +119,7 @@ dev-test:
 
 # Run clippy with the dev env.
 dev-clippy:
-    just dev-cargo clippy --workspace -- -D warnings
+    bash -c 'source scripts/dev-env.sh && ./scripts/cargo-stable.sh clippy --workspace -- -D warnings'
 
 # Build the host-side eBPF object for vsock egress telemetry.
 
@@ -131,6 +133,11 @@ build-ebpf:
 # Run cargo check with the dev env.
 dev-check:
     just dev-cargo check --workspace
+
+# Verify that the nightly fast path stays pinned and does not leak into the
+# stable-compatible Cargo configuration used by release and MSRV lanes.
+check-fast-cargo:
+    ./scripts/check-fast-cargo.sh
 
 # Prebuild or refresh the version-matched read-only runtime overlay once so
 # later required-overlay boots can reuse it without rebuilding guest binaries
@@ -196,13 +203,13 @@ test:
     #!/usr/bin/env bash
     set -euo pipefail
     mkdir -p target/nextest
-    cargo nextest run --workspace 2>&1 | tee target/nextest/last-run.log
+    ./scripts/cargo-fast.sh nextest run --workspace 2>&1 | tee target/nextest/last-run.log
 
 # Doctests. nextest does NOT run doctests, so `just test` skips them;
 
 # this is the companion that keeps doc-fence coverage gated.
 test-doc:
-    cargo test --workspace --doc
+    ./scripts/cargo-fast.sh test --workspace --doc
 
 # Run tests with sccache also caching the workspace crates.
 #
@@ -243,22 +250,22 @@ test-cached:
 
 # Test a single crate
 test-crate CRATE:
-    cargo nextest run -p {{ CRATE }}
+    ./scripts/cargo-fast.sh nextest run -p {{ CRATE }}
 
 # Run tests matching a filter expression
 test-filter FILTER:
-    cargo nextest run --workspace -E 'test({{ FILTER }})'
+    ./scripts/cargo-fast.sh nextest run --workspace -E 'test({{ FILTER }})'
 
 # Run tests under the `ci` profile: no retries, slow-test warnings, and a
 # JUnit report at target/nextest/ci/junit.xml carrying pass/fail structure
 
 # only (no captured test output — see .config/nextest.toml).
 test-ci:
-    cargo nextest run --workspace --profile ci
+    ./scripts/cargo-fast.sh nextest run --workspace --profile ci
 
 # Run tests with cargo test (fallback if nextest not installed)
 test-cargo:
-    cargo test --workspace
+    ./scripts/cargo-fast.sh test --workspace
 
 # BDD conformance suite (cucumber-rs): builds mvmctl and the TypeScript SDK,
 # checks generated SDK artifacts, then runs every Gherkin scenario under
@@ -266,19 +273,19 @@ test-cargo:
 
 # not-yet-implemented coverage and are filtered out by the runner.
 bdd:
-    cargo build --bin mvmctl
-    cargo build -p xtask
+    ./scripts/cargo-fast.sh build --bin mvmctl
+    ./scripts/cargo-fast.sh build -p xtask
     just sdk-install-typescript
     just sdk-build-typescript
-    cargo test -p mvm-conformance --test conformance --features bdd
+    CARGO_BIN_EXE_mvmctl="${CARGO_TARGET_DIR:-target}/debug/mvmctl" ./scripts/cargo-fast.sh test -p mvm-conformance --test conformance --features bdd
 
 # Build the per-VM host helper bins explicitly. mvmctl's build script already
 # compiles them during `cargo build`/`cargo run`; this is the manual route for
 
 # a targeted rebuild or CI.
 build-supervisors:
-    cargo build -p mvm-hostd --bin mvm-network-endpoint --bin mvm-hvf-supervisor
-    cargo build -p mvm-hostd --bin mvm-libkrun-supervisor --features libkrun-sys
+    ./scripts/cargo-fast.sh build -p mvm-hostd --bin mvm-network-endpoint --bin mvm-hvf-supervisor
+    ./scripts/cargo-fast.sh build -p mvm-hostd --bin mvm-libkrun-supervisor --features libkrun-sys
 
 # Drop the cached cross-compiled host binaries so the next build rebuilds them.
 # Dev builds reuse these instead of re-running cargo-zigbuild, which is ~93% of
@@ -340,7 +347,7 @@ fmt-check:
 
 # Run clippy with warnings as errors
 clippy:
-    cargo clippy --workspace --all-targets -- -D warnings
+    ./scripts/cargo-stable.sh clippy --workspace --all-targets -- -D warnings
 
 # Compile the cucumber conformance target. It sits behind the `bdd` feature to
 # stay out of `cargo nextest run --workspace` (nextest lists tests via `--list`,
@@ -349,10 +356,10 @@ clippy:
 
 # elsewhere in the workspace can break it unnoticed.
 clippy-bdd:
-    cargo clippy -p mvm-conformance --tests --features bdd -- -D warnings
+    ./scripts/cargo-stable.sh clippy -p mvm-conformance --tests --features bdd -- -D warnings
 
 # Format check + clippy + model gates (workspace + the feature-gated BDD target)
-lint: fmt-check clippy clippy-bdd model
+lint: fmt-check clippy clippy-bdd model check-fast-cargo
 
 # ── Claim mutation testing ───────────────────────────────────────────────
 # Verify the committed mutation surface still matches the claims ledger.
@@ -402,8 +409,8 @@ release-auto:
     echo "==> Preparing automatic release (PR-based)"
     # Quality gates — auto-fix fmt and clippy, then test.
     cargo fmt --all
-    cargo clippy --fix --allow-dirty --workspace --all-targets -- -D warnings
-    cargo clippy --workspace --all-targets -- -D warnings
+    ./scripts/cargo-stable.sh clippy --fix --allow-dirty --workspace --all-targets -- -D warnings
+    ./scripts/cargo-stable.sh clippy --workspace --all-targets -- -D warnings
     cargo nextest run --workspace
     NEXT_VERSION=$(git cliff --bumped-version | sed 's/^v//')
     echo "==> Auto-detected next version: $NEXT_VERSION"
@@ -415,8 +422,8 @@ release VERSION:
     set -euo pipefail
     echo "==> Preparing release v{{ VERSION }}"
     cargo fmt --all
-    cargo clippy --fix --allow-dirty --workspace --all-targets -- -D warnings
-    cargo clippy --workspace --all-targets -- -D warnings
+    ./scripts/cargo-stable.sh clippy --fix --allow-dirty --workspace --all-targets -- -D warnings
+    ./scripts/cargo-stable.sh clippy --workspace --all-targets -- -D warnings
     cargo nextest run --workspace
     just _release-prep "{{ VERSION }}"
 
