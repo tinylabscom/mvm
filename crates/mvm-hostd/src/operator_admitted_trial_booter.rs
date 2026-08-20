@@ -488,7 +488,7 @@ impl OperatorConfiguredTrialBooter {
         let clock = SystemClock;
         let started = {
             let campaign = CampaignRequest {
-                declaration: &declaration,
+                declaration: declaration.clone(),
                 emitter: Arc::clone(&self.emitter),
                 policy_ceiling: self.config.authority.ceiling.clone(),
                 policy: network_policy,

@@ -209,6 +209,14 @@ impl RegistrationJournal {
 /// and the probe verb answers `NotBound` or `AuditUnavailable` either way.
 fn open_admitted_assurance_session(bound: &super::handlers::BoundHandlers, r: &RegisterVm) {
     let Some(session) = &r.assurance else { return };
+    let Some(session_ref) = &session.session else {
+        tracing::warn!(vm_id = %r.vm_id, "legacy assurance registration has no provider session identity; refusing to open");
+        return;
+    };
+    let Some(source_digest) = &session.source_digest else {
+        tracing::warn!(vm_id = %r.vm_id, "assurance registration has no source digest; refusing to open");
+        return;
+    };
     let Some(handler) = &bound.assurance else {
         tracing::warn!(
             vm_id = %r.vm_id,
@@ -235,6 +243,8 @@ fn open_admitted_assurance_session(bound: &super::handlers::BoundHandlers, r: &R
     handler.open_session(super::handlers::host_assurance_v1::AssuranceSessionSpec {
         workload_session_id: session.workload_session_id.clone(),
         binding: session.binding.clone(),
+        session: session_ref.clone(),
+        source_digest: source_digest.clone(),
         authority: session.authority.clone(),
         trial_id: session.trial_id.clone(),
         policy: session.policy.clone(),

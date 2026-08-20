@@ -3898,11 +3898,15 @@ mod tests {
         );
         let id = |raw: &str| AssuranceId::parse(raw).expect("identifier");
         let declaration = CampaignDeclaration {
+            request_id: id("mvm-request-rollback"),
+            idempotency_key: id("trial-retry-rollback"),
             campaign_id: id("mvm-campaign-9"),
             trial_id: id("trial-9"),
             source_run_id: id("scout-9"),
             source_digest: Sha256Digest::parse(format!("sha256:{}", "5".repeat(64)))
                 .expect("digest"),
+            artifact_digest: Sha256Digest::parse(format!("sha256:{}", "6".repeat(64)))
+                .expect("artifact digest"),
             edges: Vec::new(),
             approvals: ApprovalSet::none().with(ToolId::CampaignProbeV1),
             requested: RequestedAuthority {
@@ -3942,6 +3946,7 @@ mod tests {
                 ledger: &ledger,
                 host_signer_keys_dir: Some(dir.path()),
                 bundle_ctx: None,
+                extension_ctx: None,
                 variant: Variant::Dev,
                 policy_bundle: None,
                 emitter: Some(&emitter),

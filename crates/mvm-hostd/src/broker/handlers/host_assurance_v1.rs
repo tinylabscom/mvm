@@ -26,7 +26,6 @@ use crate::audit::assurance::{
     AssuranceAuditSink, AssuranceLedger, AttestationRecord, LedgerRefs, PlanIdentity, ProbeRecord,
     SessionIdentity,
 };
-use crate::audit::emitter::AuditEmitter;
 use mvm_core::egress_broker::{EgressRequest, EgressVerdict, decide_egress};
 use mvm_core::policy::network_policy::NetworkPolicy;
 use mvm_core::policy::security::AgentProfile;
@@ -285,7 +284,7 @@ impl HostAssuranceV1Handler {
         identity: &SessionIdentity,
         verdict: &TrialVerdict,
     ) -> anyhow::Result<LedgerRefs> {
-        let (emitter, plan) = {
+        let (sink, plan_identity) = {
             let sessions = self
                 .sessions
                 .lock()
@@ -301,13 +300,13 @@ impl HostAssuranceV1Handler {
             {
                 anyhow::bail!("recovered dispatch identity does not match the open session");
             }
-            let emitter = session
-                .emitter
+            let sink = session
+                .sink
                 .as_ref()
                 .ok_or_else(|| anyhow::anyhow!("assurance audit recording is unavailable"))?;
-            (Arc::clone(emitter), session.plan.clone())
+            (Arc::clone(sink), session.identity.clone())
         };
-        AssuranceLedger::new(&emitter, &plan).complete_trial(identity, verdict)
+        AssuranceLedger::new(sink.as_ref(), &plan_identity).complete_trial(identity, verdict)
     }
 
     /// Commit the observation accumulated by the typed host broker.
@@ -321,7 +320,7 @@ impl HostAssuranceV1Handler {
         binding: &MvmBinding,
         identity: &SessionIdentity,
     ) -> anyhow::Result<VerifiedObservation> {
-        let (emitter, plan, observation, probe_refs) = {
+        let (sink, plan_identity, observation, probe_refs) = {
             let sessions = self
                 .sessions
                 .lock()
@@ -337,8 +336,8 @@ impl HostAssuranceV1Handler {
             {
                 anyhow::bail!("observer identity does not match the open session");
             }
-            let emitter = session
-                .emitter
+            let sink = session
+                .sink
                 .as_ref()
                 .ok_or_else(|| anyhow::anyhow!("assurance audit recording is unavailable"))?;
             let observation = HostObservation {
@@ -348,13 +347,13 @@ impl HostAssuranceV1Handler {
                 blocked_edges: session.blocked_edges.clone(),
             };
             (
-                Arc::clone(emitter),
-                session.plan.clone(),
+                Arc::clone(sink),
+                session.identity.clone(),
                 observation,
                 session.evidence_refs.clone(),
             )
         };
-        let refs = AssuranceLedger::new(&emitter, &plan).record_observation(
+        let refs = AssuranceLedger::new(sink.as_ref(), &plan_identity).record_observation(
             identity,
             &observation,
             &probe_refs,
@@ -364,7 +363,7 @@ impl HostAssuranceV1Handler {
             .ok_or_else(|| anyhow::anyhow!("observer completion produced no receipt"))?;
         Ok(VerifiedObservation {
             observation,
-            probe_refs,
+            probe_refs: probe_refs.to_vec(),
             audit_ref: refs.audit,
             receipt_ref,
         })
@@ -378,7 +377,7 @@ impl HostAssuranceV1Handler {
         binding: &MvmBinding,
         identity: &SessionIdentity,
     ) -> anyhow::Result<LedgerRefs> {
-        let (emitter, plan) = {
+        let (sink, plan_identity) = {
             let sessions = self
                 .sessions
                 .lock()
@@ -394,13 +393,13 @@ impl HostAssuranceV1Handler {
             {
                 anyhow::bail!("cancellation identity does not match the open session");
             }
-            let emitter = session
-                .emitter
+            let sink = session
+                .sink
                 .as_ref()
                 .ok_or_else(|| anyhow::anyhow!("assurance audit recording is unavailable"))?;
-            (Arc::clone(emitter), session.plan.clone())
+            (Arc::clone(sink), session.identity.clone())
         };
-        AssuranceLedger::new(&emitter, &plan).record_cancellation(identity)
+        AssuranceLedger::new(sink.as_ref(), &plan_identity).record_cancellation(identity)
     }
 
     /// Sign cleanup evidence after the caller has stopped and read back the
@@ -412,7 +411,7 @@ impl HostAssuranceV1Handler {
         binding: &MvmBinding,
         identity: &SessionIdentity,
     ) -> anyhow::Result<LedgerRefs> {
-        let (emitter, plan) = {
+        let (sink, plan_identity) = {
             let sessions = self
                 .sessions
                 .lock()
@@ -428,13 +427,13 @@ impl HostAssuranceV1Handler {
             {
                 anyhow::bail!("cleanup identity does not match the open session");
             }
-            let emitter = session
-                .emitter
+            let sink = session
+                .sink
                 .as_ref()
                 .ok_or_else(|| anyhow::anyhow!("assurance audit recording is unavailable"))?;
-            (Arc::clone(emitter), session.plan.clone())
+            (Arc::clone(sink), session.identity.clone())
         };
-        AssuranceLedger::new(&emitter, &plan).record_cleanup(identity)
+        AssuranceLedger::new(sink.as_ref(), &plan_identity).record_cleanup(identity)
     }
 
     /// Sign attestation evidence after the trusted runtime verifier has
@@ -446,7 +445,7 @@ impl HostAssuranceV1Handler {
         identity: &SessionIdentity,
         attestation: &AttestationRecord<'_>,
     ) -> anyhow::Result<LedgerRefs> {
-        let (emitter, plan) = {
+        let (sink, plan_identity) = {
             let sessions = self
                 .sessions
                 .lock()
@@ -462,13 +461,14 @@ impl HostAssuranceV1Handler {
             {
                 anyhow::bail!("attestation identity does not match the open session");
             }
-            let emitter = session
-                .emitter
+            let sink = session
+                .sink
                 .as_ref()
                 .ok_or_else(|| anyhow::anyhow!("assurance audit recording is unavailable"))?;
-            (Arc::clone(emitter), session.plan.clone())
+            (Arc::clone(sink), session.identity.clone())
         };
-        AssuranceLedger::new(&emitter, &plan).record_attestation(identity, attestation)
+        AssuranceLedger::new(sink.as_ref(), &plan_identity)
+            .record_attestation(identity, attestation)
     }
 
     /// Close a session, dropping its nonce ledger and recorded results.
