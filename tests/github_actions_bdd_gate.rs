@@ -97,6 +97,7 @@ fn live_bdd_recipe_opts_in_and_selects_only_the_fast_ci_witness() {
 
     assert!(recipe.contains("MVM_BDD_LIVE=1"));
     assert!(recipe.contains("MVM_BDD_CI_LIVE_ONLY=1"));
+    assert!(recipe.contains("CARGO_BIN_EXE_mvmctl=\"${CARGO_TARGET_DIR:-target}/debug/mvmctl\""));
     assert!(!recipe.contains("--tags"));
 }
 

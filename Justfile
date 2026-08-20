@@ -284,7 +284,7 @@ bdd:
 # witness lanes while proving that the public commands operate a real guest.
 bdd-live-ci:
     cargo build --bin mvmctl
-    MVM_BDD_LIVE=1 MVM_BDD_CI_LIVE_ONLY=1 cargo test -p mvm-conformance --test conformance --features bdd
+    CARGO_BIN_EXE_mvmctl="${CARGO_TARGET_DIR:-target}/debug/mvmctl" MVM_BDD_LIVE=1 MVM_BDD_CI_LIVE_ONLY=1 cargo test -p mvm-conformance --test conformance --features bdd
 
 # Build the per-VM host helper bins explicitly. mvmctl's build script already
 # compiles them during `cargo build`/`cargo run`; this is the manual route for
