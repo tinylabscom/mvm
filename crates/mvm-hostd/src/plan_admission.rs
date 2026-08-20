@@ -4276,7 +4276,7 @@ mod tests {
         assert!(
             refusal
                 .to_string()
-                .contains("opening the declared assurance session")
+                .contains("does not bind the campaign source identity")
         );
         assert!(
             matches!(
