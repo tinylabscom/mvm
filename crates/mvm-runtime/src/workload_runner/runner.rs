@@ -5,11 +5,10 @@
 //! `NetworkEndpointSpawner` trait so the runner is unit-testable with no real VM and no
 //! real endpoint process.
 
+use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-
-use anyhow::{Context, Result};
 
 use mvm_core::checkpoint::{CheckpointId, CheckpointMeta};
 use mvm_core::config::{vm_network_endpoint_socket, vm_state_dir, vms_dir};
@@ -58,6 +57,7 @@ use mvm_vmm::host::spec_map::{
 use mvm_vmm::post_restore::PostRestoreOutcome;
 
 mod backend;
+mod console_boot;
 mod refusal;
 mod sockets;
 mod spawner;
@@ -241,29 +241,6 @@ pub struct NoopConsoleStreamer;
 impl ConsoleStreamer for NoopConsoleStreamer {
     fn start(&self, _capture: &ConsoleCapture<'_>) {}
     fn stop(&self, _vm_name: &str) {}
-}
-
-/// Boot the VMM while the best-effort console follower is being installed.
-///
-/// The backend opens the console capture before it starts the VMM, and the
-/// follower tolerates that file not existing yet. Starting both operations at
-/// once keeps observability on the failure path without putting the follower's
-/// process setup in front of guest readiness.
-fn boot_while_starting_console<T>(
-    boot: impl FnOnce() -> Result<T>,
-    start_console: impl FnOnce() + Send,
-    boot_finished: impl FnOnce(),
-) -> Result<T> {
-    std::thread::scope(|scope| {
-        let console = scope.spawn(start_console);
-        let result = boot();
-        boot_finished();
-        // Console capture is best-effort and must never turn a successful VM
-        // boot into a failure. Joining still ensures the follower is installed
-        // before activation can produce output.
-        let _ = console.join();
-        result
-    })
 }
 
 /// Everything the runner needs to start a workload: the admitted launch config,
@@ -464,7 +441,7 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
             retention: plan_stream_retention(inputs.config.plan_json.as_deref()),
         };
         let streamer = Arc::clone(&self.console_streamer);
-        let vm = boot_while_starting_console(
+        let vm = console_boot::boot_while_starting_console(
             || self.driver.boot(&spec),
             || streamer.start(&capture),
             || trace.mark("driver_boot"),
@@ -1685,7 +1662,7 @@ mod tests {
     #[test]
     fn boot_and_console_start_run_concurrently() {
         let (started_tx, started_rx) = std::sync::mpsc::sync_channel(0);
-        let booted = boot_while_starting_console(
+        let booted = console_boot::boot_while_starting_console(
             || {
                 started_rx
                     .recv_timeout(Duration::from_secs(1))

@@ -58,174 +58,19 @@ use mvm_contract::provenance::{
 };
 use mvm_contract::verify::hash_line;
 use mvm_core::plan::ExecutionPlan;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
-/// Atomic publications made inside one admission durability boundary.
-///
-/// Shared rather than thread-local because synchronous audit callers may be
-/// bridged through a scoped helper thread when a Tokio runtime is already
-/// active. The files remain complete and visible after rename; this only
-/// groups their stable-storage waits so independent files can flush in
-/// parallel.
-#[derive(Debug, Default)]
-pub(crate) struct AtomicSyncState {
-    paths: Mutex<Option<HashSet<PathBuf>>>,
-}
-
-struct AtomicSyncBatch {
-    state: Arc<AtomicSyncState>,
-    finished: bool,
-    fallback_paths: Vec<PathBuf>,
-}
-
-impl AtomicSyncBatch {
-    fn begin(state: Arc<AtomicSyncState>) -> Result<Self> {
-        let mut paths = state.paths.lock().expect("atomic sync state poisoned");
-        if paths.is_some() {
-            anyhow::bail!("nested atomic durability batches are not supported");
-        }
-        *paths = Some(HashSet::new());
-        drop(paths);
-        Ok(Self {
-            state,
-            finished: false,
-            fallback_paths: Vec::new(),
-        })
-    }
-
-    fn finish(mut self, mut paths: Vec<PathBuf>) -> Result<()> {
-        paths.extend(take_atomic_sync_batch(&self.state));
-        self.fallback_paths = paths.clone();
-        sync_paths_concurrently(paths)?;
-        self.fallback_paths.clear();
-        self.finished = true;
-        Ok(())
-    }
-}
-
-impl Drop for AtomicSyncBatch {
-    fn drop(&mut self) {
-        if self.finished {
-            return;
-        }
-        self.fallback_paths
-            .extend(take_atomic_sync_batch(&self.state));
-        for path in &self.fallback_paths {
-            if let Err(error) = sync_path(path) {
-                tracing::warn!(
-                    path = %path.display(),
-                    error = %error,
-                    "flushing an interrupted atomic durability batch failed"
-                );
-            }
-        }
-    }
-}
-
-fn take_atomic_sync_batch(state: &AtomicSyncState) -> Vec<PathBuf> {
-    state
-        .paths
-        .lock()
-        .expect("atomic sync state poisoned")
-        .take()
-        .unwrap_or_default()
-        .into_iter()
-        .collect()
-}
-
-fn atomic_sync_is_batched(state: &AtomicSyncState) -> bool {
-    state
-        .paths
-        .lock()
-        .expect("atomic sync state poisoned")
-        .is_some()
-}
-
-fn defer_atomic_sync(state: &AtomicSyncState, path: &Path) -> bool {
-    let mut batch = state.paths.lock().expect("atomic sync state poisoned");
-    let Some(paths) = batch.as_mut() else {
-        return false;
-    };
-    paths.insert(path.to_path_buf());
-    true
-}
-
-fn sync_path(path: &Path) -> std::io::Result<()> {
-    std::fs::OpenOptions::new()
-        .append(true)
-        .open(path)?
-        .sync_data()
-}
-
-fn sync_paths_concurrently(paths: Vec<PathBuf>) -> Result<()> {
-    let paths: HashSet<PathBuf> = paths.into_iter().collect();
-    let results = std::thread::scope(|scope| {
-        paths
-            .into_iter()
-            .map(|path| scope.spawn(move || sync_path(&path).map_err(|error| (path, error))))
-            .collect::<Vec<_>>()
-            .into_iter()
-            .map(|worker| {
-                worker
-                    .join()
-                    .map_err(|_| anyhow::anyhow!("durability worker panicked"))?
-                    .map_err(|(path, error)| {
-                        anyhow::anyhow!("fdatasync {}: {error}", path.display())
-                    })
-            })
-            .collect::<Result<Vec<_>>>()
-    });
-    results.map(|_| ())
-}
+mod atomic_sync;
+pub(crate) use atomic_sync::AtomicSyncState;
+use atomic_sync::{AtomicSyncBatch, atomic_sync_is_batched, defer_atomic_sync, sync_path};
 
 mod session_events;
 
 pub mod checkpoint_audit;
 pub mod wall_clock_audit;
 pub use checkpoint_audit::CheckpointForkedAudit;
-
-/// Wire-stable event name and label keys for the image version-lineage audit
-/// entry. Shared so the emitter (writer) and the lineage chain-anchor (reader)
-/// cannot drift on a string — a drift there would silently defeat chain-anchored
-/// image-lineage verification.
-pub mod image_audit {
-    /// Emitted when a compiled image's version-lineage node is created.
-    pub const CREATED_EVENT: &str = "image.created";
-    /// Emitted when a fresh VM is launched from a prior image-lineage node (a
-    /// time-travel restore), so a revert is distinguishable in the chain from an
-    /// ordinary image run. Not a creation event — the chain-anchor never indexes
-    /// it, since a restore mints no new lineage node.
-    pub const REVERTED_EVENT: &str = "image.reverted";
-    /// Label: how a restore was initiated (`revert` / `rewind` / `advance`).
-    /// Carried on [`REVERTED_EVENT`].
-    pub const LABEL_VIA: &str = "via";
-    /// Label: the reconstructed `machine run` reference a restore re-runs.
-    /// Carried on [`REVERTED_EVENT`].
-    pub const LABEL_REVERTED_REFERENCE: &str = "image_reverted_reference";
-    /// Label: the node's own content-address. The chain-anchor keys on this.
-    pub const LABEL_NODE_DIGEST: &str = "image_node_digest";
-    /// Label: the predecessor node's content-address (the parent hash-link), or
-    /// [`GENESIS_PARENT`] when the node has none.
-    pub const LABEL_PARENT_DIGEST: &str = "image_parent_digest";
-    /// Label: the build-identity discriminant (`"flake"` / `"oci"`).
-    pub const LABEL_BUILD_IDENTITY_KIND: &str = "image_build_identity_kind";
-    /// Label: the build-identity value (flake slot hash, or
-    /// `"<registry>/<repository>"`).
-    pub const LABEL_BUILD_IDENTITY: &str = "image_build_identity";
-    /// Label: the provenance discriminant (`"build"` / `"oci"`).
-    pub const LABEL_PROVENANCE_KIND: &str = "image_provenance_kind";
-    /// Label: the build-provenance input reference.
-    pub const LABEL_PROVENANCE_INPUT_REF: &str = "image_provenance_input_ref";
-    /// Label: the build-provenance lock digest, when recorded.
-    pub const LABEL_PROVENANCE_LOCK_DIGEST: &str = "image_provenance_lock_digest";
-    /// Label: the OCI-provenance resolved manifest digest.
-    pub const LABEL_PROVENANCE_RESOLVED_DIGEST: &str = "image_provenance_resolved_digest";
-    /// Label: the OCI-provenance layer digest set (comma-joined).
-    pub const LABEL_PROVENANCE_LAYER_DIGESTS: &str = "image_provenance_layer_digests";
-    /// [`LABEL_PARENT_DIGEST`] sentinel for a genesis (parentless) node.
-    pub const GENESIS_PARENT: &str = "genesis";
-}
+pub mod image_audit;
 
 /// Wire-stable event name and label keys for the workload output-stream audit
 /// entries. Shared so the emitter (writer) and any reader cannot drift on a
