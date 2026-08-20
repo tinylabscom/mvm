@@ -7,6 +7,11 @@ for detailed scope and acceptance criteria.
 
 ## Completed issue closeouts
 
+- [x] **Issue #2756 — Linux 6.12.104 kernel pin refresh.** The libkrunfw
+      firmware build and custom workload/builder kernels consume the same
+      kernel.org-verified source archive and SRI hash. Structural parity and
+      freshness checks report both pins synchronized and current.
+
 - [x] **Faster Rust compilation — nightly Cranelift development path.** The
       dated nightly compiler, eight frontend threads, and Cranelift cut a cold
       representative build from 172.14s to 66.48s (61.4%). Tests and release
