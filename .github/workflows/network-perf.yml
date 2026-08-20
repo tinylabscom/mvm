@@ -1,6 +1,16 @@
 name: Network performance evidence
 
 on:
+  pull_request:
+    paths:
+      - ".github/workflows/network-perf.yml"
+      - "crates/mvm-agentd/src/flowmux.rs"
+      - "crates/mvm-agentd/src/flowmux_sync.rs"
+      - "crates/mvm-hostd/examples/network_perf_probe.rs"
+      - "crates/mvm-hostd/src/netd/userspace/**"
+      - "crates/mvm-hostd/src/supervisor/flowmux/**"
+      - "xtask/src/network_perf.rs"
+      - "specs/benchmarks/network/**"
   workflow_dispatch:
 
 permissions:
