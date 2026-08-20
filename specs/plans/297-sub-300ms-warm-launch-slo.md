@@ -27,9 +27,13 @@ The aggregate targets are stronger than the hard ceiling:
 | Warm p99 | `≤ 50ms` | Scheduler and filesystem variance budget |
 | Cold boot | separately reported | Diagnostic baseline; not a warm-SLO failure |
 
-The CLI timing line reports `launch_mode` and `warm_slo`. A cold run reports
+The CLI timing record reports `launch_mode` and `warm_slo`. A cold run reports
 its actual phases and is never labeled as a warm success. A warm run that
 exceeds the ceiling fails the launch contract and records the phase breakdown.
+When phase timing is requested, JSON runs keep stdout as one machine-readable
+document and include the structured timing record in `phase_timing`; human
+readable runs render the same information as a table. The legacy timing line
+and detail records remain available to non-JSON log consumers.
 
 ## Critical-path design
 
@@ -100,6 +104,8 @@ and no claim silently falls back after being labeled warm.
       excludes unrelated filesystem cleanup.
 - [x] Add `pool_wait_ms`, `claim_ms`, and `warm_window_ms` to the runtime timing
       record.
+- [x] Keep phase timing JSON-safe by embedding it in `--json` output and render
+      it as a table for non-JSON runs.
 - [x] Preload paused Firecracker child VMMs during pool refill, run the
       no-NIC device-model guard before publication, and resume only after the
       claim wires fresh host channels and completes the child identity gates.
