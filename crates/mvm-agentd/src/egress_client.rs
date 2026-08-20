@@ -271,9 +271,25 @@ where
     stream.flush().await
 }
 
+/// Where an absolute-form HTTP forward request wants to go, and whether the
+/// origin expects TLS there.
+///
+/// The scheme is carried out rather than folded into the port because the two
+/// answers have opposite consequences. A `http://` request is forwarded
+/// verbatim, which is what a forward proxy is for. A `https://` one cannot be:
+/// this proxy relays bytes and never originates TLS, so forwarding the head
+/// would put a cleartext request on port 443.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HttpForwardTarget {
+    /// `host:port`, defaulted per scheme when the authority names no port.
+    pub(crate) target: String,
+    /// The absolute-form URI named `https`.
+    pub(crate) tls: bool,
+}
+
 /// Extract the TCP target (`host:port`) from an absolute-form HTTP forward
 /// request head. HTTP targets use port 80 by default; HTTPS targets use 443.
-pub(crate) fn http_forward_target(head: &[u8]) -> std::io::Result<String> {
+pub(crate) fn http_forward_target(head: &[u8]) -> std::io::Result<HttpForwardTarget> {
     let text = std::str::from_utf8(head).map_err(|_| invalid_http("HTTP proxy head not UTF-8"))?;
     let request_line = text
         .split_once('\n')
@@ -308,12 +324,12 @@ pub(crate) fn http_forward_target(head: &[u8]) -> std::io::Result<String> {
         .map(|(_, rest)| rest)
         .unwrap_or(target);
     let authority = authority.split(['/', '?']).next().unwrap_or(authority);
-    let default_port = if target.len() >= 8 && target[..8].eq_ignore_ascii_case("https://") {
-        443
-    } else {
-        80
-    };
-    parse_authority_target(authority, default_port)
+    let tls = target.len() >= 8 && target[..8].eq_ignore_ascii_case("https://");
+    let default_port = if tls { 443 } else { 80 };
+    Ok(HttpForwardTarget {
+        target: parse_authority_target(authority, default_port)?,
+        tls,
+    })
 }
 
 fn parse_authority_target(authority: &str, default_port: u16) -> std::io::Result<String> {
@@ -542,32 +558,43 @@ mod tests {
             route.head().unwrap(),
             b"GET https://example.com/path?q=1 HTTP/1.1\r\nHost: example.com\r\n\r\n"
         );
-        assert_eq!(
-            http_forward_target(route.head().unwrap()).unwrap(),
-            "example.com:443"
-        );
+        let forward = http_forward_target(route.head().unwrap()).unwrap();
+        assert_eq!(forward.target, "example.com:443");
+        assert!(forward.tls, "the scheme has to survive the parse");
     }
 
     #[test]
     fn http_forward_target_uses_port_80_for_http() {
-        assert_eq!(
-            http_forward_target(b"GET http://example.com/ HTTP/1.1\r\n\r\n").unwrap(),
-            "example.com:80"
-        );
+        let forward = http_forward_target(b"GET http://example.com/ HTTP/1.1\r\n\r\n").unwrap();
+        assert_eq!(forward.target, "example.com:80");
+        assert!(!forward.tls, "a http:// request is forwardable as-is");
     }
 
+    /// The port is right and the scheme is reported, which is what stops the
+    /// head being forwarded in cleartext to a port that expects TLS.
     #[test]
-    fn http_forward_target_uses_port_443_for_https() {
-        assert_eq!(
-            http_forward_target(b"GET https://example.com/ HTTP/1.1\r\n\r\n").unwrap(),
-            "example.com:443"
-        );
+    fn http_forward_target_uses_port_443_for_https_and_reports_tls() {
+        let forward = http_forward_target(b"GET https://example.com/ HTTP/1.1\r\n\r\n").unwrap();
+        assert_eq!(forward.target, "example.com:443");
+        assert!(forward.tls);
+    }
+
+    /// An explicit port does not change what the scheme means: `https://` on
+    /// any port still expects TLS the proxy cannot originate.
+    #[test]
+    fn an_explicit_port_does_not_hide_the_https_scheme() {
+        let forward =
+            http_forward_target(b"GET https://example.com:8080/ HTTP/1.1\r\n\r\n").unwrap();
+        assert_eq!(forward.target, "example.com:8080");
+        assert!(forward.tls);
     }
 
     #[test]
     fn http_forward_target_honours_explicit_port() {
         assert_eq!(
-            http_forward_target(b"GET https://example.com:8080/ HTTP/1.1\r\n\r\n").unwrap(),
+            http_forward_target(b"GET http://example.com:8080/ HTTP/1.1\r\n\r\n")
+                .unwrap()
+                .target,
             "example.com:8080"
         );
     }
