@@ -363,7 +363,7 @@ impl FileAuditSigner {
     /// Best-effort by signature: a failure here cannot be reported to whoever
     /// emitted the entry, because they were told it succeeded when it was
     /// written. It is logged instead of swallowed.
-    /// Hold barrier fsyncs until [`end_batch`](Self::end_batch).
+    /// Hold barrier fsyncs until the caller takes and syncs the batch paths.
     pub(crate) fn begin_batch(&self) {
         self.batching.store(true, Ordering::SeqCst);
     }
@@ -374,12 +374,9 @@ impl FileAuditSigner {
     /// and it has to: the entries it is syncing include barriers whose emitters
     /// have not yet been told they succeeded. A caller that ignored this would
     /// be strictly worse off than syncing each entry separately.
+    #[cfg(test)]
     pub(crate) fn end_batch(&self) -> Result<(), AuditError> {
-        self.batching.store(false, Ordering::SeqCst);
-        let pending: Vec<PathBuf> = {
-            let mut guard = self.pending_sync.lock().expect("pending_sync poisoned");
-            guard.drain().collect()
-        };
+        let pending = self.take_batched_paths();
         for path in pending {
             OpenOptions::new()
                 .append(true)
@@ -388,6 +385,18 @@ impl FileAuditSigner {
                 .map_err(|e| AuditError::Io(format!("{}: {e}", path.display())))?;
         }
         Ok(())
+    }
+
+    /// Stop holding barriers and hand the files that need syncing to a
+    /// coordinator.
+    ///
+    /// The caller owns the durability wait. This lets one admission wait for
+    /// several independent files in parallel while still completing every
+    /// wait before the admitted action begins.
+    pub(crate) fn take_batched_paths(&self) -> Vec<PathBuf> {
+        self.batching.store(false, Ordering::SeqCst);
+        let mut guard = self.pending_sync.lock().expect("pending_sync poisoned");
+        guard.drain().collect()
     }
 
     pub fn flush_deferred(&self) {

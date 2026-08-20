@@ -58,9 +58,126 @@ use mvm_contract::provenance::{
 };
 use mvm_contract::verify::hash_line;
 use mvm_core::plan::ExecutionPlan;
-use std::collections::HashMap;
-use std::sync::Mutex;
-use std::sync::OnceLock;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex, OnceLock};
+
+/// Atomic publications made inside one admission durability boundary.
+///
+/// Shared rather than thread-local because synchronous audit callers may be
+/// bridged through a scoped helper thread when a Tokio runtime is already
+/// active. The files remain complete and visible after rename; this only
+/// groups their stable-storage waits so independent files can flush in
+/// parallel.
+#[derive(Debug, Default)]
+pub(crate) struct AtomicSyncState {
+    paths: Mutex<Option<HashSet<PathBuf>>>,
+}
+
+struct AtomicSyncBatch {
+    state: Arc<AtomicSyncState>,
+    finished: bool,
+    fallback_paths: Vec<PathBuf>,
+}
+
+impl AtomicSyncBatch {
+    fn begin(state: Arc<AtomicSyncState>) -> Result<Self> {
+        let mut paths = state.paths.lock().expect("atomic sync state poisoned");
+        if paths.is_some() {
+            anyhow::bail!("nested atomic durability batches are not supported");
+        }
+        *paths = Some(HashSet::new());
+        drop(paths);
+        Ok(Self {
+            state,
+            finished: false,
+            fallback_paths: Vec::new(),
+        })
+    }
+
+    fn finish(mut self, mut paths: Vec<PathBuf>) -> Result<()> {
+        paths.extend(take_atomic_sync_batch(&self.state));
+        self.fallback_paths = paths.clone();
+        sync_paths_concurrently(paths)?;
+        self.fallback_paths.clear();
+        self.finished = true;
+        Ok(())
+    }
+}
+
+impl Drop for AtomicSyncBatch {
+    fn drop(&mut self) {
+        if self.finished {
+            return;
+        }
+        self.fallback_paths
+            .extend(take_atomic_sync_batch(&self.state));
+        for path in &self.fallback_paths {
+            if let Err(error) = sync_path(path) {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %error,
+                    "flushing an interrupted atomic durability batch failed"
+                );
+            }
+        }
+    }
+}
+
+fn take_atomic_sync_batch(state: &AtomicSyncState) -> Vec<PathBuf> {
+    state
+        .paths
+        .lock()
+        .expect("atomic sync state poisoned")
+        .take()
+        .unwrap_or_default()
+        .into_iter()
+        .collect()
+}
+
+fn atomic_sync_is_batched(state: &AtomicSyncState) -> bool {
+    state
+        .paths
+        .lock()
+        .expect("atomic sync state poisoned")
+        .is_some()
+}
+
+fn defer_atomic_sync(state: &AtomicSyncState, path: &Path) -> bool {
+    let mut batch = state.paths.lock().expect("atomic sync state poisoned");
+    let Some(paths) = batch.as_mut() else {
+        return false;
+    };
+    paths.insert(path.to_path_buf());
+    true
+}
+
+fn sync_path(path: &Path) -> std::io::Result<()> {
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(path)?
+        .sync_data()
+}
+
+fn sync_paths_concurrently(paths: Vec<PathBuf>) -> Result<()> {
+    let paths: HashSet<PathBuf> = paths.into_iter().collect();
+    let results = std::thread::scope(|scope| {
+        paths
+            .into_iter()
+            .map(|path| scope.spawn(move || sync_path(&path).map_err(|error| (path, error))))
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|worker| {
+                worker
+                    .join()
+                    .map_err(|_| anyhow::anyhow!("durability worker panicked"))?
+                    .map_err(|(path, error)| {
+                        anyhow::anyhow!("fdatasync {}: {error}", path.display())
+                    })
+            })
+            .collect::<Result<Vec<_>>>()
+    });
+    results.map(|_| ())
+}
 
 /// Wire-stable event name and label keys for the wall-clock enforcement entry.
 /// Shared so the supervisor that emits it and any reader asserting on it cannot
@@ -342,7 +459,7 @@ pub fn audit_root_path_for_tenant(audit_dir: &Path, tenant: &str) -> PathBuf {
 /// and sign a published Merkle root over the tenant chain
 /// ([`Self::publish_root`]).
 pub struct AuditEmitter {
-    signers: Vec<FileAuditSigner>,
+    signers: Vec<Arc<FileAuditSigner>>,
     signing_key: SigningKey,
     audit_dir: PathBuf,
     receipts_enabled: bool,
@@ -350,6 +467,7 @@ pub struct AuditEmitter {
     decisions_enabled: bool,
     decisions_dir: Option<PathBuf>,
     decision_stores: Mutex<HashMap<String, DecisionStore>>,
+    atomic_sync_state: Arc<AtomicSyncState>,
     /// Built once on first emit and reused.
     ///
     /// The signer interface is async and the callers are not, so each emit has
@@ -411,8 +529,44 @@ impl AuditEmitter {
                 })?;
             }
         }
-        let signer = FileAuditSigner::open(signing_key.clone(), audit_dir)
-            .with_context(|| format!("opening FileAuditSigner at {}", audit_dir.display()))?;
+        let signer = Arc::new(
+            FileAuditSigner::open(signing_key.clone(), audit_dir)
+                .with_context(|| format!("opening FileAuditSigner at {}", audit_dir.display()))?,
+        );
+        Self::from_primary_signer(signing_key, audit_dir, signer)
+    }
+
+    /// Construct around an existing signer for the same key and audit
+    /// directory.
+    ///
+    /// Sharing the command-envelope signer keeps deferred launch records alive
+    /// until the terminal command record performs the file-wide durability
+    /// barrier. The signer still flushes on its final `Arc` drop, so unwind and
+    /// early-return paths retain the ordinary fallback.
+    pub fn with_primary_signer(
+        signing_key: SigningKey,
+        audit_dir: &Path,
+        signer: Arc<FileAuditSigner>,
+    ) -> Result<Self> {
+        if signer.verifying_key() != signing_key.verifying_key() {
+            anyhow::bail!("shared audit signer does not match the emitter signing key");
+        }
+        let probe_tenant = "__mvm_audit_path_probe";
+        if signer.tenant_path(probe_tenant) != audit_dir.join(format!("{probe_tenant}.jsonl")) {
+            anyhow::bail!("shared audit signer does not target the emitter audit directory");
+        }
+        Self::from_primary_signer(signing_key, audit_dir, signer)
+    }
+
+    fn from_primary_signer(
+        signing_key: SigningKey,
+        audit_dir: &Path,
+        signer: Arc<FileAuditSigner>,
+    ) -> Result<Self> {
+        if !audit_dir.exists() {
+            std::fs::create_dir_all(audit_dir)
+                .with_context(|| format!("creating audit dir at {}", audit_dir.display()))?;
+        }
         Ok(Self {
             signers: vec![signer],
             signing_key,
@@ -422,6 +576,7 @@ impl AuditEmitter {
             decisions_enabled: false,
             decisions_dir: None,
             decision_stores: Mutex::new(HashMap::new()),
+            atomic_sync_state: Arc::new(AtomicSyncState::default()),
             runtime: OnceLock::new(),
         })
     }
@@ -443,6 +598,34 @@ impl AuditEmitter {
         }
 
         let mut emitter = Self::with_dir(signing_key.clone(), audit_dir)?;
+        emitter.add_policy_destinations(signing_key, policy)?;
+        Ok(emitter)
+    }
+
+    /// Policy-aware constructor that reuses the primary local-chain signer.
+    /// Additional `file://` policy destinations retain independent signers.
+    pub fn with_policy_and_primary_signer(
+        signing_key: SigningKey,
+        audit_dir: &Path,
+        policy: &mvm_core::policy::AuditPolicy,
+        primary_signer: Arc<FileAuditSigner>,
+    ) -> Result<Self> {
+        if !policy.chain_signing {
+            anyhow::bail!(
+                "policy audit.chain_signing=false is not supported for policy-bound admission"
+            );
+        }
+        let mut emitter =
+            Self::with_primary_signer(signing_key.clone(), audit_dir, primary_signer)?;
+        emitter.add_policy_destinations(signing_key, policy)?;
+        Ok(emitter)
+    }
+
+    fn add_policy_destinations(
+        &mut self,
+        signing_key: SigningKey,
+        policy: &mvm_core::policy::AuditPolicy,
+    ) -> Result<()> {
         for destination in &policy.stream_destinations {
             let Some(raw_path) = destination.strip_prefix("file://") else {
                 anyhow::bail!(
@@ -459,9 +642,9 @@ impl AuditEmitter {
             }
             let signer = FileAuditSigner::open_file(signing_key.clone(), &path)
                 .with_context(|| format!("opening audit stream {}", path.display()))?;
-            emitter.signers.push(signer);
+            self.signers.push(Arc::new(signer));
         }
-        Ok(emitter)
+        Ok(())
     }
 
     /// Enable runtime emission of signed [`ExecutionReceipt`]s alongside
@@ -646,7 +829,7 @@ impl AuditEmitter {
 
         if self.decisions_enabled
             && let Some(store) = self.decision_store_for_tenant(&plan.tenant.0)
-            && let Err(e) = store.put(&record)
+            && let Err(e) = store.put_batched(&record, &self.atomic_sync_state)
         {
             tracing::warn!(
                 decision_id = %record.decision_id.0,
@@ -1184,21 +1367,25 @@ impl AuditEmitter {
     /// records that never reached the disk. The scope must therefore close
     /// before the action the entries authorize — not at process exit.
     pub fn batched<T>(&self, f: impl FnOnce() -> Result<T>) -> Result<T> {
+        let atomic_batch = AtomicSyncBatch::begin(Arc::clone(&self.atomic_sync_state))?;
         for signer in &self.signers {
             signer.begin_batch();
         }
         let out = f();
         // End every batch even if `f` failed, so a later emit is not left
         // silently deferring its barriers.
-        let mut flush = Ok(());
+        let mut paths = Vec::new();
         for signer in &self.signers {
-            if let Err(e) = signer.end_batch() {
-                flush = Err(e);
-            }
+            paths.extend(signer.take_batched_paths());
         }
-        let out = out?;
-        flush.context("syncing batched audit entries before the action they authorize")?;
-        Ok(out)
+        let flush = atomic_batch
+            .finish(paths)
+            .context("syncing batched audit entries before the action they authorize");
+        match (out, flush) {
+            (Err(error), _) => Err(error),
+            (Ok(_), Err(error)) => Err(error),
+            (Ok(value), Ok(())) => Ok(value),
+        }
     }
 
     /// The shared blocking runtime, built on first use.
@@ -1315,7 +1502,7 @@ impl AuditEmitter {
             )
         })?;
         let mut emitted_id = None;
-        store.append_chained(|prev| {
+        store.append_chained_batched(&self.atomic_sync_state, |prev| {
             receipt.prev_receipt_id = prev;
             receipt.receipt_id = receipt.compute_id().context("computing receipt id")?;
             emitted_id = Some(receipt.receipt_id.clone());
@@ -1353,7 +1540,7 @@ impl AuditEmitter {
         // of the receipt id and of the signed bytes, so reading the head out
         // here and appending afterwards would let a concurrent emitter claim
         // the same parent between the two.
-        let appended = store.append_chained(|prev| {
+        let appended = store.append_chained_batched(&self.atomic_sync_state, |prev| {
             receipt.prev_receipt_id = prev;
             receipt.receipt_id = receipt.compute_id().context("computing receipt id")?;
             let signed_at = chrono::Utc::now().to_rfc3339();
@@ -1414,24 +1601,40 @@ impl AuditEmitter {
     }
 }
 
-/// Write `bytes` to `path` atomically: a same-directory temp file is
-/// written, data-synced, then `rename`d over `path`. A concurrent reader sees
-/// either the old file or the complete new one, never a torn write. The
-/// temp name carries the pid so two publishers don't collide on it.
+/// Write `bytes` to `path` atomically: a same-directory temp file is written,
+/// made durable, then `rename`d over `path`. Inside [`AuditEmitter::batched`]
+/// the complete file is renamed first and its stable-storage wait joins the
+/// batch; every wait still completes before the batch returns. A concurrent
+/// reader sees either the old file or the complete new one, never a torn
+/// write. The temp name carries the pid so two publishers don't collide on
+/// it.
 /// [`write_atomic`], without the fsync.
 ///
 /// Still atomic — the rename gives a reader either the whole old file or the
 /// whole new one. What is dropped is survival of power loss, which is the
 /// right trade only for something reconstructible from data already durable.
 pub(crate) fn write_atomic_unsynced(path: &Path, bytes: &[u8]) -> Result<()> {
-    write_atomic_inner(path, bytes, false)
+    write_atomic_inner(path, bytes, false, None)
 }
 
 pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
-    write_atomic_inner(path, bytes, true)
+    write_atomic_inner(path, bytes, true, None)
 }
 
-fn write_atomic_inner(path: &Path, bytes: &[u8], sync: bool) -> Result<()> {
+pub(crate) fn write_atomic_batched(
+    path: &Path,
+    bytes: &[u8],
+    state: &AtomicSyncState,
+) -> Result<()> {
+    write_atomic_inner(path, bytes, true, Some(state))
+}
+
+fn write_atomic_inner(
+    path: &Path,
+    bytes: &[u8],
+    sync: bool,
+    state: Option<&AtomicSyncState>,
+) -> Result<()> {
     use std::io::Write;
     let dir = path
         .parent()
@@ -1444,12 +1647,13 @@ fn write_atomic_inner(path: &Path, bytes: &[u8], sync: bool) -> Result<()> {
     let tmp = dir.join(format!(".{file_name}.tmp.{}", std::process::id()));
     // Best-effort: if any step before the rename fails, don't leave the
     // partial temp file behind.
+    let batched_sync = sync && state.is_some_and(atomic_sync_is_batched);
     let write = (|| -> Result<()> {
         let mut f = std::fs::File::create(&tmp)
             .with_context(|| format!("creating temp file {}", tmp.display()))?;
         f.write_all(bytes)
             .with_context(|| format!("writing temp file {}", tmp.display()))?;
-        if sync {
+        if sync && !batched_sync {
             // `sync_data` preserves the file bytes and the size metadata
             // needed to read them while avoiding unrelated inode-metadata
             // work. The subsequent rename's directory entry has never been
@@ -1469,6 +1673,9 @@ fn write_atomic_inner(path: &Path, bytes: &[u8], sync: bool) -> Result<()> {
         return Err(anyhow::Error::from(e))
             .with_context(|| format!("renaming {} to {}", tmp.display(), path.display()));
     }
+    if batched_sync && !state.is_some_and(|state| defer_atomic_sync(state, path)) {
+        sync_path(path).with_context(|| format!("fdatasync file {}", path.display()))?;
+    }
     Ok(())
 }
 
@@ -1483,6 +1690,51 @@ mod tests {
             .tenant(tenant)
             .plan_id(plan_id)
             .build()
+    }
+
+    #[test]
+    fn a_durability_batch_flushes_atomic_files_even_when_the_body_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = SigningKey::from_bytes(&[31; 32]);
+        let emitter = AuditEmitter::with_dir(key, dir.path()).unwrap();
+        let first = dir.path().join("first.json");
+        let second = dir.path().join("second.json");
+
+        let error = emitter
+            .batched::<()>(|| {
+                write_atomic_batched(&first, br#"{"value":1}"#, &emitter.atomic_sync_state)?;
+                write_atomic_batched(&second, br#"{"value":2}"#, &emitter.atomic_sync_state)?;
+                anyhow::bail!("admission body failed")
+            })
+            .unwrap_err();
+
+        assert!(error.to_string().contains("admission body failed"));
+        assert_eq!(std::fs::read(&first).unwrap(), br#"{"value":1}"#);
+        assert_eq!(std::fs::read(&second).unwrap(), br#"{"value":2}"#);
+        assert!(
+            !atomic_sync_is_batched(&emitter.atomic_sync_state),
+            "an error must close the thread-local durability scope"
+        );
+
+        let after = dir.path().join("after.json");
+        write_atomic(&after, b"after").unwrap();
+        assert_eq!(std::fs::read(after).unwrap(), b"after");
+    }
+
+    #[test]
+    fn a_shared_primary_signer_must_match_the_key_and_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let key = SigningKey::from_bytes(&[32; 32]);
+        let signer = Arc::new(FileAuditSigner::open(key.clone(), dir.path()).unwrap());
+
+        let emitter =
+            AuditEmitter::with_primary_signer(key.clone(), dir.path(), signer.clone()).unwrap();
+        assert!(Arc::ptr_eq(&emitter.signers[0], &signer));
+
+        let wrong_key = SigningKey::from_bytes(&[33; 32]);
+        assert!(AuditEmitter::with_primary_signer(wrong_key, dir.path(), signer.clone()).is_err());
+        assert!(AuditEmitter::with_primary_signer(key, other.path(), signer).is_err());
     }
 
     /// Construct, use and drop an emitter from inside an async context.

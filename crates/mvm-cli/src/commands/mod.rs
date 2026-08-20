@@ -317,13 +317,14 @@ fn run_command() -> Result<()> {
     maybe_converge_on_entry(&cli.command);
 
     let cfg = mvm_core::user_config::load(None);
-    let cmd_recorder = cmd_audit::build_cmd_recorder();
+    let cmd_audit = cmd_audit::build_cmd_recorder();
+    let cmd_recorder = cmd_audit.as_ref().map(cmd_audit::CommandAudit::recorder);
     let verb = cli.command.verb_name();
-    cmd_audit::emit_cmd_invoked(cmd_recorder.as_ref(), verb);
+    cmd_audit::emit_cmd_invoked(cmd_recorder, verb);
 
     let result = cli.command.clone().run(&cli, &cfg);
 
-    cmd_audit::emit_cmd_outcome(cmd_recorder.as_ref(), verb, &result);
+    cmd_audit::emit_cmd_outcome(cmd_recorder, verb, &result);
 
     with_hints(result)
 }
