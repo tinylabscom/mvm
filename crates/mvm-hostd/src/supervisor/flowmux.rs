@@ -12,6 +12,7 @@ pub mod registry;
 mod tcp_relay;
 use tcp_relay::{TcpRelayParams, connect_first_admitted, run_tcp_relay};
 mod udp_relay;
+mod wire;
 
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
@@ -38,6 +39,10 @@ use self::registry::{RegistryLimits, StreamRegistry, VmFlowBudget, class_for_ope
 use self::udp_relay::{
     UdpAssociationHandle, UdpRelayParams, UdpSendMsg, decode_udp_addr, run_udp_relay,
     udp_event_sources,
+};
+use self::wire::{
+    is_peer_disconnect, lock_registry, lock_session, lock_validator, parse_host_port,
+    write_frame_to,
 };
 
 use crate::supervisor::audit_recorder::{EventCategory, Recorder};
@@ -1466,87 +1471,6 @@ impl FlowMuxSession {
             frame.header.payload_len,
         )))
     }
-}
-
-/// Returns true for the common "peer closed the connection" I/O errors that
-/// can race with an in-flight read when the guest drops its socket.
-fn is_peer_disconnect(e: &std::io::Error) -> bool {
-    matches!(
-        e.kind(),
-        std::io::ErrorKind::ConnectionReset
-            | std::io::ErrorKind::ConnectionAborted
-            | std::io::ErrorKind::BrokenPipe
-    )
-}
-
-/// Lock the shared writer, recovering from poison so a crashed relay thread
-/// does not silence the whole session.
-fn lock_writer(writer: &Mutex<UnixStream>) -> std::sync::MutexGuard<'_, UnixStream> {
-    writer.lock().unwrap_or_else(|e| e.into_inner())
-}
-
-/// Lock the shared session, recovering from poison.
-fn lock_session(session: &Mutex<Session>) -> std::sync::MutexGuard<'_, Session> {
-    session.lock().unwrap_or_else(|e| e.into_inner())
-}
-
-/// Lock the shared registry, recovering from poison.
-fn lock_validator(
-    validator: &Mutex<SessionValidator>,
-) -> std::sync::MutexGuard<'_, SessionValidator> {
-    validator.lock().unwrap_or_else(|e| e.into_inner())
-}
-
-fn lock_registry(registry: &Mutex<StreamRegistry>) -> std::sync::MutexGuard<'_, StreamRegistry> {
-    registry.lock().unwrap_or_else(|e| e.into_inner())
-}
-
-/// Serialize and send one encrypted frame through a shared writer.
-///
-/// Locks the session first, then the writer, so sequence numbers are assigned
-/// in the same order the bytes are emitted. The paired locks are released
-/// once the frame is flushed.
-fn write_frame_to(
-    session: &Mutex<Session>,
-    writer: &Mutex<UnixStream>,
-    opcode: Opcode,
-    stream_id: u32,
-    payload: &[u8],
-) -> Result<(), FlowMuxError> {
-    let mut frame = Vec::new();
-    mvm_contract::protocol::network_flow::encode_into(&mut frame, opcode, stream_id, payload)
-        .map_err(|e| FlowMuxError::FrameRefused(e.to_string()))?;
-
-    let mut session = lock_session(session);
-    let sealed = session
-        .seal(&frame)
-        .map_err(|e| FlowMuxError::FrameRefused(e.to_string()))?;
-    let mut sealed_bytes = Vec::new();
-    sealed
-        .encode(&mut sealed_bytes)
-        .map_err(|e| FlowMuxError::FrameRefused(e.to_string()))?;
-    let len = u32::try_from(sealed_bytes.len())
-        .map_err(|_| FlowMuxError::FrameRefused("sealed frame too large".into()))?;
-
-    let mut writer = lock_writer(writer);
-    writer.write_all(&len.to_be_bytes())?;
-    writer.write_all(&sealed_bytes)?;
-    writer.flush()?;
-    Ok(())
-}
-
-/// Split `host:port`, rejecting an empty host or an unparseable port.
-fn parse_host_port(target: &str) -> Result<(&str, u16), String> {
-    let (host, port_str) = target
-        .rsplit_once(':')
-        .ok_or_else(|| "target must be host:port".to_string())?;
-    if host.is_empty() {
-        return Err("host must not be empty".to_string());
-    }
-    let port = port_str
-        .parse::<u16>()
-        .map_err(|_| format!("port must be a 16-bit integer: {port_str}"))?;
-    Ok((host, port))
 }
 
 #[cfg(test)]
