@@ -1609,9 +1609,11 @@ for detailed scope and acceptance criteria.
   - [x] Relayed-vsock host-first handshake (#2741). HVF and libkrun now open
         the endpoint relay on guest connect, retain the route needed for a
         host-first greeting, and reset immediately when no endpoint exists.
-  - [ ] Shared per-VM admitted limits. The endpoint still creates default
-        registry limits per session, so concurrent sessions can multiply a
-        nominal VM ceiling.
+  - [x] Shared per-VM admitted limits. Signed `NetworkLimits` reach endpoint
+        startup, where one RAII budget and rate limiter are shared across all
+        sessions. Aggregate TCP/HTTP, UDP, DNS, ICMP, ingress-listener, and
+        session ceilings survive session churn and return reservations on
+        teardown; malformed admitted limits fail before the endpoint binds.
   - [ ] FlowMux performance harness and labelled legacy/current baselines.
   - [~] Typed HTTP uses FlowMux frames but still crosses a whole-message
         compatibility seam; bounded end-to-end streaming and endpoint-owned

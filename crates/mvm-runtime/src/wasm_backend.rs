@@ -50,7 +50,7 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 
 use crate::workload_backend::{EgressSubstitutionTransport, WorkloadBackend};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use mvm_contract::grants::{CpuGrant, Grants, WallClockGrant};
 use mvm_contract::protocol::resource_controls::EnforcedGrants;
 use mvm_core::vm_backend::{
@@ -381,6 +381,7 @@ struct WasmEndpointPlan {
     tenant: String,
     secrets: Vec<mvm_core::plan::SecretBinding>,
     redaction: mvm_core::policy::RedactionPolicy,
+    network_limits: mvm_core::plan::NetworkLimits,
     socket_path: PathBuf,
 }
 
@@ -411,12 +412,23 @@ fn wasm_endpoint_plan(
     if secrets.is_empty() && !config.network_policy.allows_egress() {
         return Ok(None);
     }
+    let network_limits = config
+        .plan_json
+        .as_deref()
+        .map(mvm_core::plan::plan_from_admitted_json)
+        .transpose()
+        .context("parse admitted plan network limits")?
+        .map(|plan| plan.effective_network_limits())
+        .transpose()
+        .context("validate admitted plan network limits")?
+        .unwrap_or_default();
     Ok(Some(WasmEndpointPlan {
         vm_name: config.name.clone(),
         state_dir: state_dir.to_path_buf(),
         tenant,
         secrets,
         redaction,
+        network_limits,
         socket_path: mvm_core::config::vm_network_endpoint_socket(&config.name),
     }))
 }
@@ -448,6 +460,7 @@ fn wasm_network_endpoint_spawn_params<'a>(
         egress_proxy: None,
         tls_intermediate: None,
         network_policy: Some(network_policy),
+        network_limits: plan.network_limits,
         resolver_remote: None,
         binding_store_dir: None,
         flowmux_identity: None,

@@ -47,15 +47,15 @@ Each implementation pull request updates this plan, its delivery record, and
 
 ### W1 — Enforce admitted limits as shared per-VM budgets
 
-- [ ] Thread signed `NetworkLimits` from the admitted plan through
+- [x] Thread signed `NetworkLimits` from the admitted plan through
       `EndpointSpawnRequest`, `EndpointConfig`, and endpoint startup without a
       fallback to `RegistryLimits::default()` on an admitted workload.
-- [ ] Introduce one per-VM budget owner shared by all authenticated sessions;
+- [x] Introduce one per-VM budget owner shared by all authenticated sessions;
       session churn or multiple guest processes must not multiply stream,
       association, byte-credit, listener, peer, or rate ceilings.
-- [ ] Bound concurrent authenticated sessions and ensure every reservation is
+- [x] Bound concurrent authenticated sessions and ensure every reservation is
       released on refusal, cancellation, EOF, and endpoint teardown.
-- [ ] Add serde/default/validation tests, cross-session exhaustion tests,
+- [x] Add serde/default/validation tests, cross-session exhaustion tests,
       reconnect tests, and endpoint subprocess coverage for malformed or
       missing limits.
 

@@ -413,6 +413,7 @@ fn secret_bearing_config() -> mvm_hostd::supervisor::network_endpoint::EndpointC
         },
         redaction: mvm_core::policy::RedactionPolicy::default(),
         reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
+        network_limits: mvm_core::plan::NetworkLimits::default(),
         forward_timeout_secs: 30,
         proxy_https: None,
         proxy_http: None,

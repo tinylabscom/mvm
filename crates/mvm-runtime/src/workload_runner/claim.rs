@@ -161,6 +161,8 @@ pub struct EndpointSpawnInputs<'a> {
     pub secrets: &'a [SecretBinding],
     pub redaction: &'a RedactionPolicy,
     pub network_policy: &'a NetworkPolicy,
+    /// Transport-neutral resource ceilings from the admitted plan.
+    pub network_limits: mvm_core::plan::NetworkLimits,
     /// Where this boot's FlowMux identity comes from. A cold boot mints one; a
     /// warm claim inherits its parent's, because the restored child already
     /// holds the parent's signing key in memory.
@@ -269,6 +271,7 @@ impl<'a> ClaimGuards<'a> {
             secrets: inputs.secrets,
             redaction: inputs.redaction,
             network_policy: inputs.network_policy,
+            network_limits: inputs.network_limits,
             identity: inputs.identity,
         })?;
         Ok(EndpointHandle {
@@ -380,6 +383,7 @@ mod tests {
             secrets: &[],
             redaction,
             network_policy: policy,
+            network_limits: mvm_core::plan::NetworkLimits::default(),
         }
     }
 

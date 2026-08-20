@@ -232,6 +232,12 @@ pub struct EndpointConfig {
     /// closed when set: an unadmitted destination is refused before any forward.
     #[serde(default)]
     pub network_policy: Option<mvm_core::policy::network_policy::NetworkPolicy>,
+    /// Transport-neutral resource ceilings from the admitted execution plan.
+    /// Every FlowMux session for this VM draws from one shared owner of these
+    /// limits; the default preserves endpoint configs written before the field
+    /// existed.
+    #[serde(default)]
+    pub network_limits: mvm_core::plan::NetworkLimits,
     /// Which egress protocol the relayed guest stream carries. `Wire` (default,
     /// secret-bearing) keeps the existing WireRequest substitution serve loop; `Raw`
     /// selects the raw-TCP splice serve loop. Fixed at admission — never sniffed.
@@ -541,6 +547,7 @@ mod tests {
             terminator_listen: None,
             tls_intermediate: None,
             network_policy: None,
+            network_limits: mvm_core::plan::NetworkLimits::default(),
             egress_mode: EgressMode::Wire,
             resolver: ResolverBackend::default(),
             flowmux_identity: None,
@@ -594,6 +601,18 @@ mod tests {
             .insert("smuggled".into(), serde_json::json!("x"));
         let err = parse(&serde_json::to_vec(&bad).unwrap()).unwrap_err();
         assert!(err.to_string().contains("unknown field"), "got {err}");
+    }
+
+    #[test]
+    fn legacy_config_defaults_network_limits() {
+        let parsed = parse(
+            br#"{"tenant_id":"t","secrets":[],"transport":{"kind":"uds","path":"/tmp/x.sock"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            parsed.network_limits,
+            mvm_core::plan::NetworkLimits::default()
+        );
     }
 
     #[test]

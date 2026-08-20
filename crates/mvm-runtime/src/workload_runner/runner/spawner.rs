@@ -29,6 +29,8 @@ pub struct NetworkEndpointSpawnRequest<'a> {
     pub secrets: &'a [SecretBinding],
     pub redaction: &'a RedactionPolicy,
     pub network_policy: &'a NetworkPolicy,
+    /// Transport-neutral resource ceilings from the admitted plan.
+    pub network_limits: mvm_core::plan::NetworkLimits,
     /// Where the guest's half of the authenticated session comes from.
     pub identity: FlowMuxIdentitySource<'a>,
 }
@@ -107,6 +109,7 @@ impl NetworkEndpointSpawner for RealNetworkEndpointSpawner {
             session_marker: None,
             tls_intermediate: None,
             network_policy: Some(req.network_policy),
+            network_limits: req.network_limits,
             resolver_remote: None,
             binding_store_dir: None,
             flowmux_identity: Some(identity),
