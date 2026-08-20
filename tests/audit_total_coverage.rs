@@ -479,6 +479,17 @@ const DEPS_SUB: &[(&str, AuditPosture)] = &[
     ("capture-live", AuditPosture::Emits("DepsAudit")),
 ];
 
+const AGENT_SESSION_SUB: &[(&str, AuditPosture)] = &[
+    ("open", AuditPosture::InteractiveOrControl),
+    ("ls", AuditPosture::ReadOnly),
+    ("show", AuditPosture::ReadOnly),
+    ("park", AuditPosture::Emits("session.parked")),
+    (
+        "resume",
+        AuditPosture::Emits("session.resumed+plan.admitted"),
+    ),
+];
+
 /// Every top-level `mvmctl` subcommand keyed by its clap name.
 ///
 /// Order matches the `Commands` enum in
@@ -565,6 +576,10 @@ const AUDIT_POSTURE: &[(&str, AuditPosture)] = &[
     // Sprint 52 W2 — bundles + trust store.
     ("bundle", AuditPosture::DelegatesToSub(BUNDLE_SUB)),
     ("trust", AuditPosture::DelegatesToSub(TRUST_SUB)),
+    (
+        "agent-session",
+        AuditPosture::DelegatesToSub(AGENT_SESSION_SUB),
+    ),
     // Plan 73 Followup C — sealed deps-volume cache verbs.
     ("deps", AuditPosture::DelegatesToSub(DEPS_SUB)),
     // Plan 76 Phase 6 — portable signed `.mvm` artifacts.
@@ -776,6 +791,8 @@ fn audit_posture_emits_entries_reference_known_audit_kinds() {
         // Plan-64 audit-chain events.
         "plan.admitted",
         "plan.launched",
+        "session.parked",
+        "session.resumed",
         // Plan-326 chain-structure event: `trust audit prune` records the
         // removal in the chain before deleting the segments it names.
         "chain.pruned",
