@@ -57,19 +57,20 @@ use mvm_vmm::host::spec_map::{
 use mvm_vmm::post_restore::PostRestoreOutcome;
 
 mod backend;
+mod broker;
 mod console_boot;
 mod refusal;
 mod sockets;
 mod spawner;
 mod warm_claim;
 
+pub use broker::RealBrokerRegistrar;
 use refusal::{map_lineage_refusal, refuse, require_fresh_child_identity};
 use sockets::standing_sockets;
 pub use spawner::{
     FlowMuxIdentitySource, NetworkEndpointSpawnRequest, NetworkEndpointSpawner,
     RealNetworkEndpointSpawner, SpawnedEndpoint,
 };
-
 /// What the runner needs to register the per-VM host-services broker after boot.
 pub struct BrokerRegisterRequest<'a> {
     /// VM name — the registration's `vm_id`, workload id, and per-VM chain key.
@@ -106,6 +107,12 @@ pub trait BrokerRegistrar: Send + Sync {
 pub struct BrokerGuard(mvm_vmm::host::host_agent_spawn::ServicesGuard);
 
 impl BrokerGuard {
+    pub(crate) fn from_services_guard(
+        guard: mvm_vmm::host::host_agent_spawn::ServicesGuard,
+    ) -> Self {
+        Self(guard)
+    }
+
     /// A guard that reaps nothing on drop — the unadmitted / spawn-failed path.
     fn defused() -> Self {
         Self(mvm_vmm::host::host_agent_spawn::ServicesGuard::None)
@@ -127,62 +134,6 @@ impl BrokerGuard {
     #[must_use]
     pub fn services_healthy(&self, requested: &[ServiceId]) -> bool {
         requested.is_empty() || self.0.is_registered()
-    }
-}
-
-/// The production `BrokerRegistrar`: delegates to the existing per-tenant
-/// host-agent registration (default) or the per-VM broker fork
-/// (`MVM_HOST_AGENT_DAEMON=0`). No broker logic is reimplemented here — this is
-/// the same registration the raw backend `start` paths run, lifted onto the
-/// runner so a workload moved here keeps its host services.
-pub struct RealBrokerRegistrar;
-
-impl BrokerRegistrar for RealBrokerRegistrar {
-    fn register(&self, req: &BrokerRegisterRequest<'_>) -> Result<BrokerGuard> {
-        // Unadmitted or carrying no service bindings: register nothing. The
-        // spec carries no usable broker channel, so a stray guest dial fails closed.
-        if req.services.is_empty() {
-            return Ok(BrokerGuard::defused());
-        }
-        let (Some(tenant), Some(broker_listen_socket)) = (req.tenant, req.broker_listen_socket)
-        else {
-            return Ok(BrokerGuard::defused());
-        };
-
-        let guard = if mvm_vmm::host::host_agent_spawn::host_agent_daemon_enabled() {
-            mvm_vmm::host::host_agent_spawn::register_host_agent_services_if_admitted(
-                mvm_vmm::host::host_agent_spawn::HostAgentServicesParams {
-                    workload_id: req.vm_name,
-                    tenant_id: Some(tenant),
-                    vm_name: req.vm_name,
-                    state_dir: req.state_dir,
-                    broker_listen_socket,
-                    services: req.services,
-                    capability_bindings: req.capability_bindings,
-                    service_proxies: req.service_proxies,
-                },
-            )
-            .map(mvm_vmm::host::host_agent_spawn::ServicesGuard::Agent)?
-        } else {
-            if !req.service_proxies.is_empty() {
-                anyhow::bail!(
-                    "controller-backed typed services require the resident host-agent path"
-                );
-            }
-            mvm_vmm::host::broker_services_spawn::spawn_broker_services_if_admitted(
-                mvm_vmm::host::broker_services_spawn::BrokerServicesSpawnParams {
-                    workload_id: req.vm_name,
-                    tenant_id: Some(tenant),
-                    vm_name: req.vm_name,
-                    state_dir: req.state_dir,
-                    broker_listen_socket,
-                    services: req.services,
-                    capability_bindings: req.capability_bindings,
-                },
-            )
-            .map(mvm_vmm::host::host_agent_spawn::ServicesGuard::Fork)?
-        };
-        Ok(BrokerGuard(guard))
     }
 }
 
