@@ -29,6 +29,14 @@ HVF probes run on the macOS host under the repository's explicit HVF test
 exception. The harness passes `MVM_NETWORK_PERF_BACKEND` and a minimum
 `MVM_NETWORK_PERF_SAMPLES=30` to the probe.
 
+The manual `Network performance evidence` workflow records the paired
+host-loopback reports on a native Linux x86_64 runner and uploads the three
+strict JSON artifacts. This avoids cross-architecture emulation and ensures
+the legacy and FlowMux measurements share one ephemeral host. It deliberately
+does not turn a failed comparison into a passing check: W2 captures the
+pre-deletion measurements, while the final closeout gate must either pass the
+published ceilings or name an owner-approved exception.
+
 Validate one report or compare a FlowMux candidate against its pre-deletion L3
 baseline:
 
