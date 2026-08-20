@@ -22,12 +22,15 @@ runners expose their running distro kernel under `/boot` but do not permit QEMU
 to read it, so the Stage 0 compile fallback cannot be the artifact source in
 this lane. The published workload kernel is hash-verified by the existing
 download path and keeps the witness focused on the documented lifecycle.
+The recipe explicitly enables the root `user` feature so checksum-manifest
+verification cannot be compiled out of this release-artifact path.
 
 ## Validation
 
 - `actionlint .github/workflows/bdd.yml`
 - focused conformance and workflow-structure tests
-- merge-queue workflow-contract coverage for the published-kernel source
+- merge-queue workflow-contract coverage for the published-kernel source and
+  its required manifest-verification feature
 - safe scenario-selection probes with live execution disabled and without KVM
 - `cargo fmt --all -- --check`
 - `cargo check --workspace`
