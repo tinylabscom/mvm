@@ -8,10 +8,13 @@
 //! Everything else fails closed with `GoAway`.
 
 mod http_flow;
+mod ingress;
 pub mod registry;
+mod resources;
 mod tcp_relay;
-use tcp_relay::{TcpRelayParams, connect_first_admitted, run_tcp_relay};
+use tcp_relay::connect_first_admitted;
 mod udp_relay;
+mod wire;
 
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
@@ -34,117 +37,34 @@ use mvm_core::net::session::Session;
 use mvm_vmm::vsock_egress_bridge::egress_gate::{DnsVerdict, EgressGate, EgressVerdict};
 use tracing::{info, warn};
 
-use self::registry::{RegistryLimits, StreamRegistry, VmFlowBudget, class_for_open};
+pub use self::ingress::FlowMuxIngressHandle;
+use self::ingress::{
+    SharedIngressOpenWaiters, SharedUdpAssociations, emit_unbound_audit, lock_pending_ingress,
+    lock_tcp_streams, lock_udp_associations,
+};
+use self::registry::{RegistryLimits, StreamRegistry, class_for_open};
+pub use self::resources::{
+    ConnectionRateLimiter, FlowMuxVmResources, MAX_CONCURRENT_FLOWMUX_SESSIONS,
+};
 use self::udp_relay::{
     UdpAssociationHandle, UdpPeerAdmission, UdpRelayParams, UdpSendMsg, decode_udp_addr,
     run_udp_relay, udp_event_sources,
 };
+use self::wire::{
+    is_peer_disconnect, lock_registry, lock_session, lock_validator, parse_host_port,
+    write_frame_to,
+};
 
 use crate::supervisor::audit_recorder::{EventCategory, Recorder};
 use crate::supervisor::dns_resolver::resolve_hostname_ips;
-use mvm_core::rate_limit::TokenBucket;
-
 /// How this side names itself in a handshake refusal. Only ever read by a
 /// human reading the error.
 const HOST_BUILD: &str = concat!("mvm-hostd ", env!("CARGO_PKG_VERSION"));
-
-type IngressOpenResult = Result<(), String>;
-type IngressOpenWaiters = BTreeMap<u32, std::sync::mpsc::SyncSender<IngressOpenResult>>;
-type SharedIngressOpenWaiters = Arc<Mutex<IngressOpenWaiters>>;
-type SharedUdpAssociations = Arc<Mutex<BTreeMap<u32, UdpAssociationHandle>>>;
 
 /// Per-address connect budget when trying an admitted set: small so an
 /// unreachable address (e.g. an AAAA with no host IPv6 egress) fails over to
 /// the next candidate quickly.
 const PER_IP_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
-
-/// Host ceiling for concurrent guest processes authenticated to one VM's
-/// endpoint. Counting before the handshake also prevents idle handshake
-/// sockets from creating an unbounded thread set.
-pub const MAX_CONCURRENT_FLOWMUX_SESSIONS: usize = 16;
-
-/// Per-session rate limiter for new connection/association/resolve attempts.
-///
-/// A guest can otherwise force the host to open an unbounded number of TCP
-/// connections, UDP associations, or DNS queries per second. Each class gets
-/// its own one-second-burst token bucket; zero capacity disables limiting.
-#[derive(Debug)]
-pub struct ConnectionRateLimiter {
-    tcp: Mutex<TokenBucket>,
-    udp: Mutex<TokenBucket>,
-    dns: Mutex<TokenBucket>,
-    icmp: Mutex<TokenBucket>,
-}
-
-/// Endpoint-scoped resources shared by every FlowMux session for one VM.
-pub struct FlowMuxVmResources {
-    registry_budget: Arc<VmFlowBudget>,
-    rate_limiter: Arc<ConnectionRateLimiter>,
-    icmp_rate: Arc<crate::supervisor::egress_rate::EgressRateGuard>,
-    session_slots: Arc<tokio::sync::Semaphore>,
-}
-
-impl FlowMuxVmResources {
-    /// Build the shared owner from the admitted signed limits and host runtime
-    /// bounds that are not yet plan-configurable.
-    #[must_use]
-    pub fn new(network: mvm_core::plan::NetworkLimits) -> Self {
-        let limits = RegistryLimits::from_network_limits(network);
-        Self {
-            registry_budget: Arc::new(VmFlowBudget::new(network, limits.max_icmp)),
-            rate_limiter: Arc::new(ConnectionRateLimiter::from_limits(&limits)),
-            icmp_rate: Arc::new(crate::supervisor::egress_rate::EgressRateGuard::builder().build()),
-            session_slots: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_FLOWMUX_SESSIONS)),
-        }
-    }
-
-    fn from_registry_limits(limits: RegistryLimits) -> Self {
-        Self {
-            registry_budget: Arc::new(VmFlowBudget::from_registry_limits(limits)),
-            rate_limiter: Arc::new(ConnectionRateLimiter::from_limits(&limits)),
-            icmp_rate: Arc::new(crate::supervisor::egress_rate::EgressRateGuard::builder().build()),
-            session_slots: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_FLOWMUX_SESSIONS)),
-        }
-    }
-
-    /// Reserve one endpoint session without waiting. The owned permit is held
-    /// by the serving task and returns capacity on every exit path.
-    pub fn try_acquire_session(self: &Arc<Self>) -> Option<tokio::sync::OwnedSemaphorePermit> {
-        Arc::clone(&self.session_slots).try_acquire_owned().ok()
-    }
-}
-
-impl ConnectionRateLimiter {
-    /// Build a limiter from the per-class rates in [`RegistryLimits`].
-    pub fn from_limits(limits: &RegistryLimits) -> Self {
-        Self {
-            tcp: Mutex::new(TokenBucket::new(limits.tcp_connect_rate)),
-            udp: Mutex::new(TokenBucket::new(limits.udp_open_rate)),
-            dns: Mutex::new(TokenBucket::new(limits.dns_resolve_rate)),
-            icmp: Mutex::new(TokenBucket::new(limits.icmp_echo_rate)),
-        }
-    }
-
-    /// Try to admit one new flow of `class`. Returns `true` when admitted or
-    /// when the limiter for this class is disabled.
-    pub fn try_open(&self, class: registry::FlowClass) -> bool {
-        let bucket = match class {
-            // A typed HTTP flow ends in a host-originated TCP connection, so
-            // it spends the same budget rather than getting a private one to
-            // route around it.
-            registry::FlowClass::Tcp | registry::FlowClass::Http => &self.tcp,
-            registry::FlowClass::Udp => &self.udp,
-            registry::FlowClass::Dns => &self.dns,
-            registry::FlowClass::Icmp => &self.icmp,
-        };
-        let mut guard = bucket.lock().expect("rate limiter bucket poisoned");
-        // A zero-capacity bucket means "unlimited" for this class.
-        if guard.capacity() == 0.0 {
-            return true;
-        }
-        guard.try_take()
-    }
-}
 
 /// Why the FlowMux session ended.
 #[derive(Debug, thiserror::Error)]
@@ -239,311 +159,6 @@ struct TcpStreamHandle {
     /// thread does not emit a stale `HalfClose` or `Reset` after an explicit
     /// reset or full close.
     retired: Arc<AtomicBool>,
-}
-
-/// Cloneable host-initiated ingress side of one authenticated session.
-#[derive(Clone)]
-pub struct FlowMuxIngressHandle {
-    session: Arc<Mutex<Session>>,
-    writer: Arc<Mutex<UnixStream>>,
-    validator: Arc<Mutex<SessionValidator>>,
-    registry: Arc<Mutex<StreamRegistry>>,
-    streams: Arc<Mutex<BTreeMap<u32, TcpStreamHandle>>>,
-    pending: SharedIngressOpenWaiters,
-    credit_wait: Duration,
-    recorder: Option<Arc<Recorder>>,
-    runtime_handle: Option<tokio::runtime::Handle>,
-    udp_associations: SharedUdpAssociations,
-    udp_idle_timeout: Duration,
-    max_udp_peers: usize,
-}
-
-impl FlowMuxIngressHandle {
-    /// Open one accepted opaque TCP connection on an admitted mapping.
-    pub fn open_tcp(&self, mapping_id: u16, external: TcpStream) -> Result<(), FlowMuxError> {
-        let result = self.open_tcp_inner(mapping_id, external);
-        let (event_name, verdict) = if result.is_ok() {
-            ("host.ingress.allowed", "allowed")
-        } else {
-            ("host.ingress.denied", "denied")
-        };
-        emit_unbound_audit(
-            self.recorder.as_ref(),
-            self.runtime_handle.as_ref(),
-            EventCategory::Host,
-            event_name,
-            BTreeMap::from([
-                ("mapping_id".to_string(), mapping_id.to_string()),
-                ("class".to_string(), "tcp_ingress".to_string()),
-                ("verdict".to_string(), verdict.to_string()),
-            ]),
-        );
-        result
-    }
-
-    fn open_tcp_inner(&self, mapping_id: u16, external: TcpStream) -> Result<(), FlowMuxError> {
-        let stream_id = lock_registry(&self.registry)
-            .alloc_host(registry::FlowClass::Tcp)
-            .map_err(|error| FlowMuxError::FrameRefused(error.to_string()))?;
-        let tracked = match external.try_clone() {
-            Ok(stream) => stream,
-            Err(error) => {
-                let _ = lock_registry(&self.registry).retire(stream_id);
-                return Err(FlowMuxError::Transport(error));
-            }
-        };
-        lock_tcp_streams(&self.streams).insert(
-            stream_id,
-            TcpStreamHandle {
-                upstream: tracked,
-                host_half_closed: Arc::new(AtomicBool::new(false)),
-                retired: Arc::new(AtomicBool::new(false)),
-            },
-        );
-        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
-        lock_pending_ingress(&self.pending).insert(stream_id, sender);
-
-        let payload = mapping_id.to_be_bytes();
-        if let Err(error) = lock_validator(&self.validator).admit(
-            &mvm_contract::protocol::network_flow::FrameFacts::new(
-                Direction::HostToGuest,
-                Opcode::InboundOpen,
-                stream_id,
-            )
-            .with_payload(payload.len() as u32)
-            .with_ingress_mapping(mapping_id),
-        ) {
-            lock_pending_ingress(&self.pending).remove(&stream_id);
-            if let Some(handle) = lock_tcp_streams(&self.streams).remove(&stream_id) {
-                let _ = handle.upstream.shutdown(std::net::Shutdown::Both);
-            }
-            let _ = lock_registry(&self.registry).retire(stream_id);
-            return Err(FlowMuxError::FrameRefused(error.to_string()));
-        }
-        if let Err(error) = write_frame_to(
-            &self.session,
-            &self.writer,
-            Opcode::InboundOpen,
-            stream_id,
-            &payload,
-        ) {
-            lock_pending_ingress(&self.pending).remove(&stream_id);
-            if let Some(handle) = lock_tcp_streams(&self.streams).remove(&stream_id) {
-                let _ = handle.upstream.shutdown(std::net::Shutdown::Both);
-            }
-            let _ = lock_registry(&self.registry).retire(stream_id);
-            return Err(error);
-        }
-
-        match receiver.recv_timeout(Duration::from_secs(5)) {
-            Ok(Ok(())) => self.spawn_tcp_relay(stream_id, external),
-            Ok(Err(reason)) => {
-                if let Some(handle) = lock_tcp_streams(&self.streams).remove(&stream_id) {
-                    let _ = handle.upstream.shutdown(std::net::Shutdown::Both);
-                }
-                Err(FlowMuxError::FrameRefused(format!(
-                    "guest refused ingress mapping {mapping_id}: {reason}"
-                )))
-            }
-            Err(error) => {
-                lock_pending_ingress(&self.pending).remove(&stream_id);
-                if let Some(handle) = lock_tcp_streams(&self.streams).remove(&stream_id) {
-                    let _ = handle.upstream.shutdown(std::net::Shutdown::Both);
-                }
-                let _ = lock_registry(&self.registry).retire(stream_id);
-                Err(FlowMuxError::FrameRefused(format!(
-                    "guest ingress response timed out: {error}"
-                )))
-            }
-        }
-    }
-
-    /// Start one admitted UDP listener mapping for this authenticated session.
-    pub fn open_udp(
-        &self,
-        mapping_id: u16,
-        socket: std::net::UdpSocket,
-    ) -> Result<(), FlowMuxError> {
-        let result = self.open_udp_inner(mapping_id, socket);
-        let (event_name, verdict) = if result.is_ok() {
-            ("host.ingress.allowed", "allowed")
-        } else {
-            ("host.ingress.denied", "denied")
-        };
-        emit_unbound_audit(
-            self.recorder.as_ref(),
-            self.runtime_handle.as_ref(),
-            EventCategory::Host,
-            event_name,
-            BTreeMap::from([
-                ("mapping_id".to_string(), mapping_id.to_string()),
-                ("class".to_string(), "udp_ingress".to_string()),
-                ("verdict".to_string(), verdict.to_string()),
-            ]),
-        );
-        result
-    }
-
-    fn open_udp_inner(
-        &self,
-        mapping_id: u16,
-        socket: std::net::UdpSocket,
-    ) -> Result<(), FlowMuxError> {
-        let stream_id = lock_registry(&self.registry)
-            .alloc_host(registry::FlowClass::Udp)
-            .map_err(|error| FlowMuxError::FrameRefused(error.to_string()))?;
-        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
-        lock_pending_ingress(&self.pending).insert(stream_id, sender);
-        let payload = mapping_id.to_be_bytes();
-        if let Err(error) = lock_validator(&self.validator).admit(
-            &mvm_contract::protocol::network_flow::FrameFacts::new(
-                Direction::HostToGuest,
-                Opcode::InboundOpen,
-                stream_id,
-            )
-            .with_payload(payload.len() as u32)
-            .with_ingress_mapping(mapping_id),
-        ) {
-            lock_pending_ingress(&self.pending).remove(&stream_id);
-            let _ = lock_registry(&self.registry).retire(stream_id);
-            return Err(FlowMuxError::FrameRefused(error.to_string()));
-        }
-        if let Err(error) = write_frame_to(
-            &self.session,
-            &self.writer,
-            Opcode::InboundOpen,
-            stream_id,
-            &payload,
-        ) {
-            lock_pending_ingress(&self.pending).remove(&stream_id);
-            let _ = lock_registry(&self.registry).retire(stream_id);
-            return Err(error);
-        }
-        match receiver.recv_timeout(Duration::from_secs(5)) {
-            Ok(Ok(())) => {}
-            Ok(Err(reason)) => {
-                return Err(FlowMuxError::FrameRefused(format!(
-                    "guest refused UDP ingress mapping {mapping_id}: {reason}"
-                )));
-            }
-            Err(error) => {
-                lock_pending_ingress(&self.pending).remove(&stream_id);
-                let _ = lock_registry(&self.registry).retire(stream_id);
-                return Err(FlowMuxError::FrameRefused(format!(
-                    "guest UDP ingress response timed out: {error}"
-                )));
-            }
-        }
-
-        let (poll, waker) = match udp_event_sources(&socket) {
-            Ok(sources) => sources,
-            Err(error) => {
-                self.abort_udp_ingress(stream_id, b"UDP relay setup failed");
-                return Err(FlowMuxError::Transport(error));
-            }
-        };
-        let (tx, rx) = std::sync::mpsc::channel();
-        lock_udp_associations(&self.udp_associations).insert(
-            stream_id,
-            UdpAssociationHandle {
-                tx,
-                waker: Arc::clone(&waker),
-                peer_admission: UdpPeerAdmission::ObservedOnly,
-            },
-        );
-        let session = Arc::clone(&self.session);
-        let writer = Arc::clone(&self.writer);
-        let registry = Arc::clone(&self.registry);
-        let idle_timeout = self.udp_idle_timeout;
-        let max_peers = self.max_udp_peers;
-        if let Err(error) = std::thread::Builder::new()
-            .name(format!("flowmux-ingress-udp-{stream_id}"))
-            .spawn(move || {
-                run_udp_relay(UdpRelayParams {
-                    stream_id,
-                    socket,
-                    poll,
-                    session,
-                    writer,
-                    idle_timeout,
-                    max_peers,
-                    peer_admission: UdpPeerAdmission::ObservedOnly,
-                    rx,
-                    registry,
-                });
-            })
-        {
-            lock_udp_associations(&self.udp_associations).remove(&stream_id);
-            self.abort_udp_ingress(stream_id, b"UDP relay unavailable");
-            return Err(FlowMuxError::Transport(error));
-        }
-        Ok(())
-    }
-
-    fn abort_udp_ingress(&self, stream_id: u32, reason: &[u8]) {
-        lock_pending_ingress(&self.pending).remove(&stream_id);
-        lock_udp_associations(&self.udp_associations).remove(&stream_id);
-        if lock_validator(&self.validator)
-            .admit(
-                &mvm_contract::protocol::network_flow::FrameFacts::new(
-                    Direction::HostToGuest,
-                    Opcode::Reset,
-                    stream_id,
-                )
-                .with_payload(u32::try_from(reason.len()).unwrap_or(u32::MAX)),
-            )
-            .is_ok()
-        {
-            let _ = write_frame_to(
-                &self.session,
-                &self.writer,
-                Opcode::Reset,
-                stream_id,
-                reason,
-            );
-        }
-        let _ = lock_registry(&self.registry).retire(stream_id);
-    }
-
-    fn spawn_tcp_relay(&self, stream_id: u32, upstream: TcpStream) -> Result<(), FlowMuxError> {
-        let upstream_read = upstream.try_clone()?;
-        let host_half_closed = Arc::new(AtomicBool::new(false));
-        let relay_flag = Arc::clone(&host_half_closed);
-        let retired = Arc::new(AtomicBool::new(false));
-        let retired_flag = Arc::clone(&retired);
-        let session = Arc::clone(&self.session);
-        let writer = Arc::clone(&self.writer);
-        let registry = Arc::clone(&self.registry);
-        let validator = Arc::clone(&self.validator);
-        let credit_wait = self.credit_wait;
-
-        std::thread::Builder::new()
-            .name(format!("flowmux-ingress-tcp-{stream_id}"))
-            .spawn(move || {
-                run_tcp_relay(TcpRelayParams {
-                    stream_id,
-                    upstream: upstream_read,
-                    session,
-                    writer,
-                    registry,
-                    validator,
-                    host_half_closed: relay_flag,
-                    retired: retired_flag,
-                    credit_wait,
-                })
-            })
-            .map_err(FlowMuxError::Transport)?;
-
-        lock_tcp_streams(&self.streams).insert(
-            stream_id,
-            TcpStreamHandle {
-                upstream,
-                host_half_closed,
-                retired,
-            },
-        );
-        Ok(())
-    }
 }
 
 /// What one accepted FlowMux session needs to serve.
@@ -1827,127 +1442,6 @@ impl FlowMuxSession {
             frame.header.payload_len,
         )))
     }
-}
-
-/// Returns true for the common "peer closed the connection" I/O errors that
-/// can race with an in-flight read when the guest drops its socket.
-fn is_peer_disconnect(e: &std::io::Error) -> bool {
-    matches!(
-        e.kind(),
-        std::io::ErrorKind::ConnectionReset
-            | std::io::ErrorKind::ConnectionAborted
-            | std::io::ErrorKind::BrokenPipe
-    )
-}
-
-/// Lock the shared writer, recovering from poison so a crashed relay thread
-/// does not silence the whole session.
-fn lock_writer(writer: &Mutex<UnixStream>) -> std::sync::MutexGuard<'_, UnixStream> {
-    writer.lock().unwrap_or_else(|e| e.into_inner())
-}
-
-/// Lock the shared session, recovering from poison.
-fn lock_session(session: &Mutex<Session>) -> std::sync::MutexGuard<'_, Session> {
-    session.lock().unwrap_or_else(|e| e.into_inner())
-}
-
-/// Lock the shared registry, recovering from poison.
-fn lock_validator(
-    validator: &Mutex<SessionValidator>,
-) -> std::sync::MutexGuard<'_, SessionValidator> {
-    validator.lock().unwrap_or_else(|e| e.into_inner())
-}
-
-fn lock_registry(registry: &Mutex<StreamRegistry>) -> std::sync::MutexGuard<'_, StreamRegistry> {
-    registry.lock().unwrap_or_else(|e| e.into_inner())
-}
-
-fn lock_tcp_streams(
-    streams: &Mutex<BTreeMap<u32, TcpStreamHandle>>,
-) -> std::sync::MutexGuard<'_, BTreeMap<u32, TcpStreamHandle>> {
-    streams.lock().unwrap_or_else(|error| error.into_inner())
-}
-
-fn lock_pending_ingress(
-    pending: &Mutex<IngressOpenWaiters>,
-) -> std::sync::MutexGuard<'_, IngressOpenWaiters> {
-    pending.lock().unwrap_or_else(|error| error.into_inner())
-}
-
-fn lock_udp_associations(
-    associations: &Mutex<BTreeMap<u32, UdpAssociationHandle>>,
-) -> std::sync::MutexGuard<'_, BTreeMap<u32, UdpAssociationHandle>> {
-    associations
-        .lock()
-        .unwrap_or_else(|error| error.into_inner())
-}
-
-fn emit_unbound_audit(
-    recorder: Option<&Arc<Recorder>>,
-    runtime_handle: Option<&tokio::runtime::Handle>,
-    category: EventCategory,
-    event_name: &str,
-    labels: BTreeMap<String, String>,
-) {
-    let (Some(recorder), Some(handle)) = (recorder, runtime_handle) else {
-        return;
-    };
-    let recorder = Arc::clone(recorder);
-    let event_name = event_name.to_string();
-    let future = async move {
-        let _ = recorder.record_unbound(category, event_name, labels).await;
-    };
-    // Session and ingress relay work runs outside Tokio's async workers. The
-    // signer writes one local record and returns before the flow proceeds.
-    handle.block_on(future);
-}
-
-/// Serialize and send one encrypted frame through a shared writer.
-///
-/// Locks the session first, then the writer, so sequence numbers are assigned
-/// in the same order the bytes are emitted. The paired locks are released
-/// once the frame is flushed.
-fn write_frame_to(
-    session: &Mutex<Session>,
-    writer: &Mutex<UnixStream>,
-    opcode: Opcode,
-    stream_id: u32,
-    payload: &[u8],
-) -> Result<(), FlowMuxError> {
-    let mut frame = Vec::new();
-    mvm_contract::protocol::network_flow::encode_into(&mut frame, opcode, stream_id, payload)
-        .map_err(|e| FlowMuxError::FrameRefused(e.to_string()))?;
-
-    let mut session = lock_session(session);
-    let sealed = session
-        .seal(&frame)
-        .map_err(|e| FlowMuxError::FrameRefused(e.to_string()))?;
-    let mut sealed_bytes = Vec::new();
-    sealed
-        .encode(&mut sealed_bytes)
-        .map_err(|e| FlowMuxError::FrameRefused(e.to_string()))?;
-    let len = u32::try_from(sealed_bytes.len())
-        .map_err(|_| FlowMuxError::FrameRefused("sealed frame too large".into()))?;
-
-    let mut writer = lock_writer(writer);
-    writer.write_all(&len.to_be_bytes())?;
-    writer.write_all(&sealed_bytes)?;
-    writer.flush()?;
-    Ok(())
-}
-
-/// Split `host:port`, rejecting an empty host or an unparseable port.
-fn parse_host_port(target: &str) -> Result<(&str, u16), String> {
-    let (host, port_str) = target
-        .rsplit_once(':')
-        .ok_or_else(|| "target must be host:port".to_string())?;
-    if host.is_empty() {
-        return Err("host must not be empty".to_string());
-    }
-    let port = port_str
-        .parse::<u16>()
-        .map_err(|_| format!("port must be a 16-bit integer: {port_str}"))?;
-    Ok((host, port))
 }
 
 #[cfg(test)]

@@ -57,12 +57,14 @@ use mvm_vmm::host::spec_map::{
 };
 use mvm_vmm::post_restore::PostRestoreOutcome;
 
+mod admission;
 mod backend;
 mod refusal;
 mod sockets;
 mod spawner;
 mod warm_claim;
 
+use admission::{admitted_ingress, admitted_network_limits, admitted_services};
 use refusal::{map_lineage_refusal, refuse, require_fresh_child_identity};
 use sockets::standing_sockets;
 pub use spawner::{
@@ -1383,37 +1385,6 @@ fn reclaim_consumed_resident_checkpoint_at(
 fn claim_plan(claim: &StandbyClaim) -> std::result::Result<ExecutionPlan, StandbyError> {
     mvm_core::plan::plan_from_admitted_json(&claim.plan_json)
         .map_err(|_| refuse(ClaimRefusal::PlanMissing))
-}
-
-fn admitted_services(plan_json: Option<&str>) -> Result<Vec<ServiceId>> {
-    plan_json
-        .map(mvm_core::plan::plan_from_admitted_json)
-        .transpose()
-        .context("parse admitted plan host services")
-        .map(|plan| plan.map_or_else(Vec::new, |plan| plan.services))
-}
-
-fn admitted_network_limits(plan_json: Option<&str>) -> Result<mvm_core::plan::NetworkLimits> {
-    plan_json
-        .map(mvm_core::plan::plan_from_admitted_json)
-        .transpose()
-        .context("parse admitted plan network limits")?
-        .map(|plan| plan.effective_network_limits())
-        .transpose()
-        .context("validate admitted plan network limits")
-        .map(Option::unwrap_or_default)
-}
-
-fn admitted_ingress(plan_json: Option<&str>) -> Result<Vec<mvm_core::plan::IngressMapping>> {
-    let plan = plan_json
-        .map(mvm_core::plan::plan_from_admitted_json)
-        .transpose()
-        .context("parse admitted plan ingress")?;
-    if let Some(plan) = &plan {
-        plan.validate_ingress()
-            .context("validate admitted plan ingress")?;
-    }
-    Ok(plan.map_or_else(Vec::new, |plan| plan.ingress))
 }
 
 /// How many times to redraw a fresh child name before giving up. A collision is
