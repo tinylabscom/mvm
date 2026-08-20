@@ -5,11 +5,10 @@
 //! `NetworkEndpointSpawner` trait so the runner is unit-testable with no real VM and no
 //! real endpoint process.
 
+use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-
-use anyhow::{Context, Result};
 
 use mvm_core::checkpoint::{CheckpointId, CheckpointMeta};
 use mvm_core::config::{vm_network_endpoint_socket, vm_state_dir, vms_dir};
@@ -59,6 +58,7 @@ use mvm_vmm::post_restore::PostRestoreOutcome;
 
 mod admission;
 mod backend;
+mod console_boot;
 mod refusal;
 mod sockets;
 mod spawner;
@@ -434,19 +434,22 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         });
 
         trace.mark("spec_assembly");
-        let vm = self.driver.boot(&spec)?;
-        trace.mark("driver_boot");
 
-        // Unconditional and best-effort, and before the fallible activation
-        // handshake below rather than after it: the console is the only
-        // channel that still carries output if boot never reaches the guest
-        // agent, which includes a failure in that very handshake.
-        self.console_streamer.start(&ConsoleCapture {
+        // Unconditional and best-effort. The follower can wait for a console
+        // file that does not exist yet, so install it alongside VMM boot rather
+        // than serializing its process setup after guest readiness.
+        let capture = ConsoleCapture {
             vm_name: &inputs.config.name,
             console_log: &socks.console_log,
             redaction: inputs.redaction,
             retention: plan_stream_retention(inputs.config.plan_json.as_deref()),
-        });
+        };
+        let streamer = Arc::clone(&self.console_streamer);
+        let vm = console_boot::boot_while_starting_console(
+            || self.driver.boot(&spec),
+            || streamer.start(&capture),
+            || trace.mark("driver_boot"),
+        )?;
         trace.mark("console_stream_start");
 
         // Universal initramfs path: the guest PID-1 agent waits for a signed
@@ -1641,6 +1644,28 @@ mod tests {
                     .insert(vm_name.to_string(), bytes);
             }
         }
+    }
+
+    #[test]
+    fn boot_and_console_start_run_concurrently() {
+        let (started_tx, started_rx) = std::sync::mpsc::sync_channel(0);
+        let booted = console_boot::boot_while_starting_console(
+            || {
+                started_rx
+                    .recv_timeout(Duration::from_secs(1))
+                    .map_err(|error| {
+                        anyhow::anyhow!("console start did not overlap boot: {error}")
+                    })?;
+                Ok(7_u8)
+            },
+            || {
+                let _ = started_tx.send(());
+            },
+            || {},
+        )
+        .expect("the console-start task runs while the driver boot is in progress");
+
+        assert_eq!(booted, 7);
     }
 
     fn config(name: &str) -> VmStartConfig {

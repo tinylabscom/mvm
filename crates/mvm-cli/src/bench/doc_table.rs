@@ -15,6 +15,7 @@
 
 use super::cold_launch::{
     COLD_LAUNCH_SCHEMA_VERSION, LaunchLane, MATRIX_WARMUP_SAMPLES, MIN_MATRIX_SAMPLES,
+    PREPARED_COLD_HARD_MAX_MS,
 };
 
 /// Delimiters bounding the generated region of the performance page. The text
@@ -31,6 +32,13 @@ fn cell(budget_ms: Option<f64>) -> String {
     }
 }
 
+fn hard_max_cell(budget_ms: Option<f64>) -> String {
+    match budget_ms {
+        Some(ms) => format!("< {ms:.0} ms"),
+        None => "—".to_string(),
+    }
+}
+
 /// The sample-count contract a lane report must satisfy to be published,
 /// stated from the constants the report-level gate enforces.
 #[must_use]
@@ -40,7 +48,10 @@ pub fn sample_contract_sentence() -> String {
          {MIN_MATRIX_SAMPLES} measured samples taken after exactly \
          {MATRIX_WARMUP_SAMPLES} discarded warm-ups, under report schema \
          version {COLD_LAUNCH_SCHEMA_VERSION}. A report that misses any of \
-         those is refused rather than published with a caveat."
+         those is refused rather than published with a caveat. Prepared-cold \
+         lanes additionally require every measured dispatch to be strictly \
+         under {PREPARED_COLD_HARD_MAX_MS:.0} ms, even below the publication \
+         sample floor."
     )
 }
 
@@ -55,17 +66,18 @@ pub fn render_budget_section() -> String {
     out.push_str("\n\n");
     out.push_str(&sample_contract_sentence());
     out.push_str("\n\n");
-    out.push_str("| Lane | What it measures | p50 | p95 | p99 |\n");
-    out.push_str("| --- | --- | --- | --- | --- |\n");
+    out.push_str("| Lane | What it measures | p50 | p95 | p99 | Every boot |\n");
+    out.push_str("| --- | --- | --- | --- | --- | --- |\n");
     for lane in LaunchLane::ALL {
         let budgets = lane.budgets();
         out.push_str(&format!(
-            "| `{}` | {} | {} | {} | {} |\n",
+            "| `{}` | {} | {} | {} | {} | {} |\n",
             lane.as_str(),
             lane.description(),
             cell(budgets.p50_ms),
             cell(budgets.p95_ms),
             cell(budgets.p99_ms),
+            hard_max_cell(budgets.hard_max_ms),
         ));
     }
     out.push('\n');
@@ -114,10 +126,10 @@ mod tests {
     fn budgeted_lanes_print_their_gated_numbers() {
         let rendered = render_budget_section();
         // The prepared-cold contract: 200/250/300 ms at p50/p95/p99.
-        assert!(rendered.contains("| 200 ms | 250 ms | 300 ms |"));
+        assert!(rendered.contains("| 200 ms | 250 ms | 300 ms | < 200 ms |"));
         // The warm-claim contract publishes no p95, and says so with a dash
         // rather than a zero.
-        assert!(rendered.contains("| 30 ms | — | 50 ms |"));
+        assert!(rendered.contains("| 30 ms | — | 50 ms | — |"));
     }
 
     #[test]
@@ -127,9 +139,10 @@ mod tests {
             assert_eq!(budgets.p50_ms, None);
             assert_eq!(budgets.p95_ms, None);
             assert_eq!(budgets.p99_ms, None);
+            assert_eq!(budgets.hard_max_ms, None);
         }
         let rendered = render_budget_section();
-        assert!(rendered.contains("| — | — | — |"));
+        assert!(rendered.contains("| — | — | — | — |"));
         assert!(
             !rendered.contains("| 0 ms"),
             "an unbudgeted percentile must never render as a zero budget"
@@ -170,6 +183,7 @@ mod tests {
             "exactly {MATRIX_WARMUP_SAMPLES} discarded warm-ups"
         )));
         assert!(sentence.contains(&format!("schema version {COLD_LAUNCH_SCHEMA_VERSION}")));
+        assert!(sentence.contains(&format!("strictly under {PREPARED_COLD_HARD_MAX_MS:.0} ms")));
         assert!(render_budget_section().contains(&sentence));
     }
 }
