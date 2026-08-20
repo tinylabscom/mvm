@@ -1619,7 +1619,9 @@ for detailed scope and acceptance criteria.
         HTTP now streams incrementally with bounded cross-frame transforms,
         fail-closed cancellation and audit behavior; web fetch and search
         authorize in their brokers but resolve, connect, and execute through
-        the per-VM network endpoint.
+        the per-VM network endpoint. The host performance probe enables only
+        the FlowMux client surface, keeping guest-only vsock dependencies out
+        of the host graph and the duplicate-major invariant clean.
   - [ ] Declared ingress runtime. The wire opcodes and state transitions exist;
         endpoint listener and guest-adapter handling do not.
   - [ ] Remove the rejected `raw_ip_stack`/`L3Vsock` public compatibility
