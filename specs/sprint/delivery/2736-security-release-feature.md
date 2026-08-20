@@ -2,7 +2,11 @@
       every code-changing pull request instead of first being seen by the
       nightly reproducibility build. The stale CLI-version binding left behind
       when builder downloads moved to the boot-image release tag is removed.
+      The merge-queue fuzz compile gate also consumes refreshed committed
+      lockfiles with `--locked`, so newly published registry versions cannot
+      replace the reviewed graph while the invariant job is running.
       The exact feature check fails on the prior source and passes after the
-      fix; workspace all-target Clippy, workflow syntax, formatting, and the
-      workspace suite pass, with the sole transient doctest target passing on
-      its isolated rerun after the suite's nested Cargo process exited.
+      fix; every fuzz manifest compiles from its lockfile, and workspace
+      all-target Clippy, workflow syntax, formatting, and the workspace suite
+      pass, with the sole transient doctest target passing on its isolated
+      rerun after the suite's nested Cargo process exited.
