@@ -113,31 +113,6 @@ fn resolve_binary_path(binary: PathBuf, workspace_root: &Path) -> PathBuf {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn relative_binary_paths_are_resolved_from_the_workspace_root() {
-        assert_eq!(
-            super::resolve_binary_path(
-                std::path::PathBuf::from("target/debug/mvmctl"),
-                std::path::Path::new("/workspace")
-            ),
-            std::path::PathBuf::from("/workspace/target/debug/mvmctl")
-        );
-    }
-
-    #[test]
-    fn absolute_binary_paths_are_preserved() {
-        assert_eq!(
-            super::resolve_binary_path(
-                std::path::PathBuf::from("/tmp/mvmctl"),
-                std::path::Path::new("/workspace")
-            ),
-            std::path::PathBuf::from("/tmp/mvmctl")
-        );
-    }
-}
-
 /// The most recently modified `.rs` file under `root`, if any.
 fn newest_source(root: &Path) -> Option<(PathBuf, std::time::SystemTime)> {
     fn walk(dir: &Path, best: &mut Option<(PathBuf, std::time::SystemTime)>) {
@@ -220,4 +195,29 @@ fn features_dir() -> PathBuf {
         .join("..")
         .join("features")
         .join("suites")
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn relative_binary_paths_are_resolved_from_the_workspace_root() {
+        assert_eq!(
+            super::resolve_binary_path(
+                std::path::PathBuf::from("target/debug/mvmctl"),
+                std::path::Path::new("/workspace")
+            ),
+            std::path::PathBuf::from("/workspace/target/debug/mvmctl")
+        );
+    }
+
+    #[test]
+    fn absolute_binary_paths_are_preserved() {
+        assert_eq!(
+            super::resolve_binary_path(
+                std::path::PathBuf::from("/tmp/mvmctl"),
+                std::path::Path::new("/workspace")
+            ),
+            std::path::PathBuf::from("/tmp/mvmctl")
+        );
+    }
 }
