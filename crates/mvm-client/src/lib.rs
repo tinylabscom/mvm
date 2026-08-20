@@ -46,8 +46,9 @@ pub use mvm_core::client::{
 pub use mvm_core::naming::validate_vm_name;
 
 pub use boot::{
-    backend_is_running, backend_kind_for, backend_stop_by_name, enforced_grants_after_start,
-    require_hypervisor_selectable, start_prepared,
+    ResumeBootLocalRequest, ResumeBootLocalRequestBuilder, backend_is_running, backend_kind_for,
+    backend_stop_by_name, enforced_grants_after_start, require_hypervisor_selectable,
+    resume_and_boot_local, start_prepared,
 };
 pub use connect::{Target, connect};
 pub use grants::{enforced_grants_of, record_enforced_grants};
