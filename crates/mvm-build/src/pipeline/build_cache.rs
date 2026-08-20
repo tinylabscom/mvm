@@ -91,6 +91,7 @@ const INCLUDED_TOP_LEVEL: &[&str] = &[
     "crates",
     "xtask",
     "tests",
+    "third_party",
     "schema",
     "nix",
 ];
