@@ -613,8 +613,6 @@ fn build_runtime_overlay_guest_binaries_into_cache(
         guest_build_target_dir(cache_root, fingerprint),
     );
     let triple = spec.target_triple();
-    let cargo = spec.cargo.clone().unwrap_or_else(|| "cargo".into());
-
     let prod_args = vec![
         "zigbuild".to_string(),
         "--release".to_string(),
@@ -646,7 +644,7 @@ fn build_runtime_overlay_guest_binaries_into_cache(
         "--features".to_string(),
         "mvm-agentd/addons".to_string(),
     ];
-    run_zigbuild(&spec, cargo.as_os_str(), &prod_args)?;
+    run_zigbuild(&spec, &prod_args)?;
     let output_dir = spec.output_dir();
     install_one(&output_dir.join("mvm-guest-agent"), &layout.agent)?;
     install_one(&output_dir.join("mvm-guest-netinit"), &layout.netinit)?;
@@ -661,26 +659,23 @@ fn build_runtime_overlay_guest_binaries_into_cache(
     Ok(layout.binaries())
 }
 
-fn run_zigbuild(
-    spec: &GuestAgentBuildSpec,
-    cargo: &std::ffi::OsStr,
-    args: &[String],
-) -> Result<(), GuestAgentBuildError> {
+fn run_zigbuild(spec: &GuestAgentBuildSpec, args: &[String]) -> Result<(), GuestAgentBuildError> {
     let _zigbuild_lock = acquire_guest_zigbuild_lock(&spec.target_dir)?;
+    let (cargo, rustc) = zigbuild_tools(spec)?;
     tracing::info!(
         ?args,
         workspace = %spec.workspace_root.display(),
         "cross-compiling guest runtime via cargo zigbuild (first build for this source checkout)"
     );
-    let mut cmd = std::process::Command::new(cargo);
+    let mut cmd = std::process::Command::new(&cargo);
     cmd.args(args).current_dir(&spec.workspace_root);
-    apply_zigbuild_env(&mut cmd, spec)?;
+    apply_zigbuild_env(&mut cmd, spec, rustc.as_deref())?;
     // Inherit stdio so cargo's own "Compiling …" progress streams to the user: a
     // multi-minute guest cross-compile must look alive, not like a silent hang.
     let status = cmd
         .status()
         .map_err(|e| GuestAgentBuildError::BuildFailed {
-            reason: format!("spawn `{}`: {e}", PathBuf::from(cargo).display()),
+            reason: format!("spawn `{}`: {e}", cargo.display()),
         })?;
     if status.success() {
         return Ok(());
@@ -724,20 +719,21 @@ pub fn build_guest_binaries(
     mvm_core::launch_trace::record_image_build();
     let _zigbuild_lock = acquire_guest_zigbuild_lock(&spec.target_dir)?;
     let argv = spec.argv();
+    let (cargo, rustc) = zigbuild_tools(spec)?;
     tracing::info!(
         bins = ?&argv[1..],
         workspace = %spec.workspace_root.display(),
         "cross-compiling guest runtime via cargo zigbuild (first build for this source checkout)"
     );
-    let mut cmd = std::process::Command::new(&argv[0]);
+    let mut cmd = std::process::Command::new(&cargo);
     cmd.args(&argv[1..]).current_dir(&spec.workspace_root);
-    apply_zigbuild_env(&mut cmd, spec)?;
+    apply_zigbuild_env(&mut cmd, spec, rustc.as_deref())?;
     // Inherit stdio so cargo's own "Compiling …" progress streams to the user: a
     // multi-minute guest cross-compile must look alive, not like a silent hang.
     let status = cmd
         .status()
         .map_err(|e| GuestAgentBuildError::BuildFailed {
-            reason: format!("spawn `{}`: {e}", argv[0]),
+            reason: format!("spawn `{}`: {e}", cargo.display()),
         })?;
     if !status.success() {
         return Err(GuestAgentBuildError::BuildFailed {
@@ -779,14 +775,20 @@ pub fn build_guest_binaries(
 fn apply_zigbuild_env(
     cmd: &mut std::process::Command,
     spec: &GuestAgentBuildSpec,
+    rustc: Option<&Path>,
 ) -> Result<(), GuestAgentBuildError> {
-    // Pin RUSTC to the rustup toolchain when available — a Homebrew
-    // `rustc` earlier on `$PATH` carries no cross-target std and fails
-    // the musl build with E0463.
-    if let Some(rustc) = rustup_rustc() {
+    if let Some(rustc) = rustc {
         cmd.env("RUSTC", rustc);
     }
-    cmd.env("CARGO_TARGET_DIR", &spec.target_dir);
+    cmd.env("CARGO_TARGET_DIR", &spec.target_dir)
+        // These builds are reproducible guest artifacts, not part of the
+        // contributor's outer compilation session. Do not inherit a nightly
+        // frontend flag or host-global compiler wrapper.
+        .env("RUSTC_WRAPPER", "")
+        .env("RUSTC_WORKSPACE_WRAPPER", "")
+        .env_remove("RUSTUP_TOOLCHAIN")
+        .env_remove("RUSTFLAGS")
+        .env_remove("CARGO_ENCODED_RUSTFLAGS");
 
     // Keep cargo-zigbuild's own cache under the mvm cache root instead of
     // whatever platform-global default the host picks (for example
@@ -863,21 +865,70 @@ fn hash_file(hasher: &mut Sha256, rel: &str, path: &Path) -> Result<(), GuestAge
     Ok(())
 }
 
-/// `rustup which rustc` path, or `None` if rustup isn't installed.
-fn rustup_rustc() -> Option<PathBuf> {
-    let out = std::process::Command::new("rustup")
-        .args(["which", "rustc"])
+fn zigbuild_tools(
+    spec: &GuestAgentBuildSpec,
+) -> Result<(PathBuf, Option<PathBuf>), GuestAgentBuildError> {
+    if let Some(cargo) = &spec.cargo {
+        return Ok((cargo.clone(), None));
+    }
+    let toolchain = pinned_rust_toolchain(&spec.workspace_root)?;
+    let cargo = rustup_tool(&toolchain, "cargo")?;
+    let rustc = rustup_tool(&toolchain, "rustc")?;
+    Ok((cargo, Some(rustc)))
+}
+
+fn pinned_rust_toolchain(workspace_root: &Path) -> Result<String, GuestAgentBuildError> {
+    let manifest = workspace_root.join("Cargo.toml");
+    let contents = std::fs::read_to_string(&manifest)?;
+    let value = contents
+        .parse::<toml::Value>()
+        .map_err(|e| GuestAgentBuildError::BuildFailed {
+            reason: format!("parse {}: {e}", manifest.display()),
+        })?;
+    value
+        .get("workspace")
+        .and_then(|item| item.get("metadata"))
+        .and_then(|item| item.get("mvm"))
+        .and_then(|item| item.get("toolchain"))
+        .and_then(|item| item.get("rust"))
+        .and_then(toml::Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| GuestAgentBuildError::BuildFailed {
+            reason: format!(
+                "{} is missing workspace.metadata.mvm.toolchain.rust",
+                manifest.display()
+            ),
+        })
+}
+
+fn rustup_tool(toolchain: &str, tool: &str) -> Result<PathBuf, GuestAgentBuildError> {
+    let output = std::process::Command::new("rustup")
+        .args(["which", tool, "--toolchain", toolchain])
         .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
+        .map_err(|e| GuestAgentBuildError::BuildFailed {
+            reason: format!("resolve {tool} from Rust {toolchain}: {e}"),
+        })?;
+    if !output.status.success() {
+        return Err(GuestAgentBuildError::BuildFailed {
+            reason: format!(
+                "Rust {toolchain} is required for guest binaries; install it with \
+                 `rustup toolchain install {toolchain} --profile minimal` and add the required \
+                 musl target"
+            ),
+        });
     }
-    let path = String::from_utf8(out.stdout).ok()?.trim().to_string();
+    let path = String::from_utf8(output.stdout)
+        .map_err(|e| GuestAgentBuildError::BuildFailed {
+            reason: format!("rustup returned a non-UTF-8 {tool} path: {e}"),
+        })?
+        .trim()
+        .to_owned();
     if path.is_empty() {
-        None
-    } else {
-        Some(PathBuf::from(path))
+        return Err(GuestAgentBuildError::BuildFailed {
+            reason: format!("rustup returned an empty {tool} path for Rust {toolchain}"),
+        });
     }
+    Ok(PathBuf::from(path))
 }
 
 #[cfg(unix)]
@@ -1209,13 +1260,16 @@ mod tests {
             PathBuf::from("/tmp/mvm-cache-root/guest-agent-build/target"),
         );
         let mut cmd = std::process::Command::new("cargo");
-        apply_zigbuild_env(&mut cmd, &spec).expect("configure zigbuild env");
+        cmd.env("RUSTFLAGS", "-Zthreads=8")
+            .env("CARGO_ENCODED_RUSTFLAGS", "-Zthreads=8")
+            .env("RUSTC_WRAPPER", "sccache")
+            .env("RUSTUP_TOOLCHAIN", "nightly");
+        apply_zigbuild_env(&mut cmd, &spec, Some(Path::new("/pinned/rustc")))
+            .expect("configure zigbuild env");
 
         let envs: std::collections::HashMap<_, _> = cmd
             .get_envs()
-            .filter_map(|(key, value)| {
-                value.map(|value| (key.to_os_string(), value.to_os_string()))
-            })
+            .map(|(key, value)| (key.to_os_string(), value.map(std::ffi::OsStr::to_os_string)))
             .collect();
         let expected_zigbuild_cache = scoped_tool_cache_dir(
             "cargo-zigbuild",
@@ -1227,18 +1281,66 @@ mod tests {
         );
         assert_eq!(
             envs.get(std::ffi::OsStr::new("CARGO_ZIGBUILD_CACHE_DIR")),
-            Some(&expected_zigbuild_cache.into_os_string())
+            Some(&Some(expected_zigbuild_cache.into_os_string()))
         );
         assert_eq!(
             envs.get(std::ffi::OsStr::new("ZIG_GLOBAL_CACHE_DIR")),
-            Some(&expected_zig_cache.into_os_string())
+            Some(&Some(expected_zig_cache.into_os_string()))
         );
         assert_eq!(
             envs.get(std::ffi::OsStr::new("CARGO_TARGET_DIR")),
-            Some(&std::ffi::OsString::from(
+            Some(&Some(std::ffi::OsString::from(
                 "/tmp/mvm-cache-root/guest-agent-build/target"
-            ))
+            )))
         );
+        assert_eq!(
+            envs.get(std::ffi::OsStr::new("RUSTC")),
+            Some(&Some(std::ffi::OsString::from("/pinned/rustc")))
+        );
+        assert_eq!(
+            envs.get(std::ffi::OsStr::new("RUSTC_WRAPPER")),
+            Some(&Some(std::ffi::OsString::new()))
+        );
+        assert_eq!(
+            envs.get(std::ffi::OsStr::new("RUSTC_WORKSPACE_WRAPPER")),
+            Some(&Some(std::ffi::OsString::new()))
+        );
+        for removed in ["RUSTUP_TOOLCHAIN", "RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS"] {
+            assert_eq!(
+                envs.get(std::ffi::OsStr::new(removed)),
+                Some(&None),
+                "{removed} must not leak into the pinned guest build"
+            );
+        }
+    }
+
+    #[test]
+    fn reads_the_guest_rust_pin_from_workspace_metadata() {
+        let workspace = tempfile::tempdir().expect("workspace tempdir");
+        std::fs::write(
+            workspace.path().join("Cargo.toml"),
+            r#"
+[workspace.metadata.mvm.toolchain]
+rust = "1.91.1"
+"#,
+        )
+        .expect("write workspace manifest");
+
+        assert_eq!(
+            pinned_rust_toolchain(workspace.path()).expect("read embedded Rust pin"),
+            "1.91.1"
+        );
+    }
+
+    #[test]
+    fn missing_guest_rust_pin_is_rejected() {
+        let workspace = tempfile::tempdir().expect("workspace tempdir");
+        std::fs::write(workspace.path().join("Cargo.toml"), "[workspace]\n")
+            .expect("write workspace manifest");
+
+        let error = pinned_rust_toolchain(workspace.path())
+            .expect_err("workspace without a Rust pin must fail");
+        assert!(error.to_string().contains("toolchain.rust"));
     }
 
     #[test]

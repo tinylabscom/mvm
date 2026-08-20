@@ -7,6 +7,15 @@ for detailed scope and acceptance criteria.
 
 ## Completed issue closeouts
 
+- [x] **Faster Rust compilation — nightly Cranelift development path.** The
+      dated nightly compiler, eight frontend threads, and Cranelift cut a cold
+      representative build from 172.14s to 66.48s (61.4%). Tests and release
+      builds retain LLVM; Clippy retains stable 1.96 without suppressions.
+      Embedded-host and runtime-overlay guest binaries remain reproducible on
+      their Nix-aligned Rust 1.91.1 pin, isolated from outer nightly flags and
+      host compiler wrappers. The contributor shell was realized successfully
+      in the libkrun builder VM.
+
 - [x] **Issue #2574 — the first publishable Linux/Firecracker launch lane.**
       The false `host_services` degradation was already removed; the remaining
       dispatch gap was a nested 100 ms reconnect cadence inside the driver's

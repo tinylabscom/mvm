@@ -20,8 +20,6 @@
       ];
 
       forAllSystems = nixpkgs.lib.genAttrs systems;
-      toolchain = builtins.fromTOML (builtins.readFile ./rust-toolchain.toml);
-      rustChannel = toolchain.toolchain.channel;
     in
     {
       devShells = forAllSystems (system:
@@ -31,17 +29,7 @@
             overlays = [ (import rust-overlay) ];
           };
 
-          rust = pkgs.rust-bin.stable.${rustChannel}.default.override {
-            extensions = [
-              "clippy"
-              "rust-src"
-              "rustfmt"
-            ];
-            targets = [
-              "aarch64-unknown-linux-musl"
-              "x86_64-unknown-linux-musl"
-            ];
-          };
+          rust = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
 
           zig = if pkgs ? zig_0_13 then pkgs.zig_0_13 else pkgs.zig;
 
@@ -100,7 +88,7 @@
               fi
 
               echo "mvm development shell"
-              echo "Rust toolchain: ${rustChannel}"
+              echo "Rust toolchain: $(rustc --version)"
               echo "Try: just build, just test, or just lint"
               echo "Nix workload flake: ./nix"
             '';
