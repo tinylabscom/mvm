@@ -27,7 +27,7 @@ use std::path::{Path, PathBuf};
 
 use cucumber::World as _;
 use cucumber::gherkin::{Feature, Rule, Scenario};
-use mvm_conformance::{RuntimeCaps, scenario_should_run};
+use mvm_conformance::{RuntimeCaps, ScenarioGate, scenario_gate_for_ci};
 use world::CliWorld;
 
 #[tokio::main]
@@ -45,10 +45,23 @@ async fn main() {
     // Warm-restore scenarios mutate the process `MVM_HOME` and call
     // in-process seal/verify helpers. Run all scenarios sequentially so
     // no other thread observes the environment mid-scenario.
-    CliWorld::cucumber()
+    // `filter_run` rather than `filter_run_and_exit`: the latter calls
+    // `process::exit`, which runs no destructors and leaves no point at which
+    // the skip tally can be printed. This reproduces its exit behaviour around
+    // the report.
+    let writer = CliWorld::cucumber()
         .max_concurrent_scenarios(1)
-        .filter_run_and_exit(features_dir(), should_run)
+        .filter_run(features_dir(), should_run)
         .await;
+
+    report_skips();
+
+    // `execution_has_failed` comes from the `Stats` trait, which the concrete
+    // writer only exposes when the trait is in scope.
+    use cucumber::writer::Stats as _;
+    if writer.execution_has_failed() {
+        std::process::exit(1);
+    }
 }
 
 /// Refuse to run against an `mvmctl` that is missing or older than the
@@ -148,7 +161,51 @@ fn newest_source(root: &Path) -> Option<(PathBuf, std::time::SystemTime)> {
 /// clean skip, never a failure — so the suite stays green on hosts without KVM
 /// (GitHub-hosted ARM runners, or any dev box lacking `/dev/kvm`).
 fn should_run(_feature: &Feature, _rule: Option<&Rule>, scenario: &Scenario) -> bool {
-    scenario_should_run(&scenario.tags, probe_caps())
+    let gate = scenario_gate_for_ci(
+        &scenario.tags,
+        probe_caps(),
+        std::env::var_os("MVM_BDD_CI_LIVE_ONLY").is_some(),
+    );
+    record_gate(gate);
+    matches!(gate, ScenarioGate::Run)
+}
+
+/// Tally of every filter decision, so the run can say what it declined to
+/// attempt. A green suite that is silent about its skips reads as full
+/// coverage, and the `@live` scenarios it skips are exactly the ones that boot
+/// a real microVM.
+static SKIPPED: std::sync::Mutex<Vec<ScenarioGate>> = std::sync::Mutex::new(Vec::new());
+
+fn record_gate(gate: ScenarioGate) {
+    if gate == ScenarioGate::Run {
+        return;
+    }
+    if let Ok(mut skipped) = SKIPPED.lock() {
+        skipped.push(gate);
+    }
+}
+
+/// Print one line per skip reason, after the run.
+fn report_skips() {
+    let Ok(skipped) = SKIPPED.lock() else {
+        return;
+    };
+    if skipped.is_empty() {
+        eprintln!("[bdd] no scenarios skipped");
+        return;
+    }
+    let mut counts: std::collections::BTreeMap<&'static str, usize> =
+        std::collections::BTreeMap::new();
+    for gate in skipped.iter() {
+        if let Some(reason) = gate.reason() {
+            *counts.entry(reason).or_default() += 1;
+        }
+    }
+    eprintln!("[bdd] {} scenario(s) did NOT run:", skipped.len());
+    for (reason, count) in counts {
+        eprintln!("[bdd]   {count:>3}  {reason}");
+    }
+    eprintln!("[bdd] a green suite is not full coverage while any of these are nonzero.");
 }
 
 /// Probe the host for the capabilities the tag gates require. Re-run per
