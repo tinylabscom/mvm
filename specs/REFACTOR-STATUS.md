@@ -331,6 +331,9 @@ for detailed scope and acceptance criteria.
 - [~] **Security lane recovery — issue #2736.** The advisory finding is fixed,
       the release-artifact bootstrap source now compiles with warnings denied,
       and pull-request CI exercises that otherwise dormant feature directly.
+      Every dependency graph that contains `arrayref` resolves a byte-for-byte
+      vendored copy of the reviewed 0.3.9 upstream revision. Pinned file hashes
+      guard the vendored source, and Git dependencies remain denied.
       Closure remains gated on a clean Security workflow run from current
       `main`, including every mutation shard and both reproducibility builds.
 
