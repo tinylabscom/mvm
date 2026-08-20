@@ -81,6 +81,20 @@ pub struct RegisterVm {
     /// existed. Omitting the empty case keeps them byte-identical.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub capability_bindings: Vec<CapabilityBinding>,
+    /// An assurance campaign session the supervisor admitted for this VM.
+    ///
+    /// The daemon opens it against the handler it registers, because that is
+    /// the process a probe reaches. Absent on every ordinary workload.
+    ///
+    /// Skip-serialized when absent for the same reason `capability_bindings`
+    /// is when empty: `ControlRequest` is signed over its JCS canonical bytes,
+    /// so a field that serialized as `null` on every registration would move
+    /// those bytes and invalidate signatures produced before it existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Boxed: the session is much larger than the rest of the registration,
+    /// and `ControlRequest` is an enum whose other variants are small — an
+    /// inline copy would size every control message by the rarest one.
+    pub assurance: Option<alloc::boxed::Box<crate::assurance::AdmittedAssuranceSession>>,
 }
 
 /// Deregister a VM at teardown: the daemon unbinds + drops its listen socket
@@ -135,6 +149,28 @@ pub enum ControlResponse {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn an_absent_campaign_leaves_the_signed_bytes_alone() {
+        // `ControlRequest` is signed over its JCS canonical bytes, so a field
+        // that serialized on every registration would invalidate signatures
+        // produced before it existed — the same reason `capability_bindings`
+        // is skip-serialized when empty.
+        let req = sample_register();
+        let json = serde_json::to_string(&req).expect("serialize");
+        assert!(!json.contains("assurance"), "{json}");
+    }
+
+    #[test]
+    fn a_registration_without_the_field_still_parses() {
+        // Older signed registrations predate the field and must keep working.
+        let json = serde_json::to_string(&sample_register()).expect("serialize");
+        let back: ControlRequest = serde_json::from_str(&json).expect("parse");
+        match back {
+            ControlRequest::Register(vm) => assert!(vm.assurance.is_none()),
+            other => panic!("expected a Register, got {other:?}"),
+        }
+    }
     use alloc::vec;
 
     use super::*;
@@ -150,6 +186,7 @@ mod tests {
             audit_signer_uds_path: Some("/run/state/vm-1/audit-signer.sock".into()),
             services_bindings: vec![ServiceId::parse("host.time.v1").unwrap()],
             capability_bindings: vec![],
+            assurance: None,
         })
     }
 

@@ -7,6 +7,16 @@ for detailed scope and acceptance criteria.
 
 ## Completed issue closeouts
 
+- [x] **Issue #2574 — the first publishable Linux/Firecracker launch lane.**
+      The false `host_services` degradation was already removed; the remaining
+      dispatch gap was a nested 100 ms reconnect cadence inside the driver's
+      own readiness backoff. Firecracker now makes one strict CONNECT attempt
+      per bounded probe, while ordinary RPC callers retain resilient retries.
+      On the established rotational KVM host, the required 2 warm-ups + 20
+      measured `prepared_cold` launches passed at **171.5 / 176.0 / 178.0 ms
+      p50/p95/p99** against **200 / 250 / 300 ms** budgets. The public page
+      carries the host, backend, storage class, report path, and digest.
+
 - [x] **Issue #2634 — sealed guests have writable runtime state without a
       writable root.** The universal initramfs mounts `/run` and `/tmp` as
       restricted tmpfs filesystems and moves them across the workload-root
@@ -16,6 +26,13 @@ for detailed scope and acceptance criteria.
       live lifecycle suite covers Alpine `/tmp` writes and retains the
       absolute `/bin/ping` mediated-tool proof. Together with PRs #2690,
       #2709, and #2720, this closes the NIC-less and read-only boot-noise issue.
+
+- [x] **Issue #2633 — healthy boots no longer report authentication failures.**
+      PR #2707 classified an abandoned readiness probe as transport EOF rather
+      than failed authentication. The remaining no-egress path now treats an
+       unattached FlowMux identity drive as the expected secretless boot shape,
+       while an attached but unreadable drive stays loud. Two focused tests pin
+       both sides of that boundary.
 
 - [x] **Issue #2684 — a sealed boot is reachable and proven before release.**
       The CLI release train publishes both universal-initramfs archives under
@@ -432,7 +449,7 @@ resume` takes a `current_head` and refuses when it differs from the
       session identity memory keys on and is itself unmerged.
   - [x] WS1 — catalog derivation from the signed admission (PR #2705)
   - [x] WS2 — per-capability argument policy inside the descriptor digest (#2705)
-  - [~] WS3 — the guest-side-client gate landed; the host-side adapter has not
+  - [~] WS3 — gate + compilation seam landed; only the transport client remains
   - [x] WS4 — refusal names the surface, and repeated misses are rate-bounded (#2705)
   - [ ] WS5-WS9 — memory plane: store + record, `host.memory.v1`, write scan
         and ceilings, audit + retention, bounded recall

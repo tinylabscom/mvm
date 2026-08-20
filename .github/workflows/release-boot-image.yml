@@ -467,6 +467,11 @@ jobs:
             "staging/default-microvm-rootfs-${ARCH}.ext4" "staged ${ARCH}"
           bash nix/packaging/release/assert-kernel-format.sh \
             "staging/default-microvm-vmlinux-${ARCH}" "${ARCH}" "staged ${ARCH} kernel"
+          # Runs on BOTH legs, unlike the boot gate below. Reading JSON needs no
+          # KVM, so the one defect class that has actually shipped through the
+          # aarch64 leg's blind spot — an incoherent sidecar — is caught on both.
+          bash nix/packaging/release/assert-sidecar-coherent.sh \
+            "staging/default-microvm-meta-${ARCH}.json" "staged ${ARCH} sidecar"
 
       # Nothing in this job ever started the image. Every gate below the build
       # is a checksum, a signature or a byte-level read, and none of those can
@@ -476,9 +481,12 @@ jobs:
       #
       # x86_64 only: the aarch64 leg runs on ubuntu-24.04-arm, which has no
       # nested KVM and cannot boot a guest at all. That leg's coverage is the
-      # static /init read above, which catches the defect class that actually
-      # shipped and is a stated compromise rather than a claim of equivalence —
-      # an aarch64-only regression that is not a shebang defect still gets past.
+      # static reads above — the /init shebang, the kernel format, and the
+      # sidecar coherence check, each catching a class that has actually shipped
+      # — and remains a stated compromise rather than a claim of equivalence: an
+      # aarch64-only regression outside those classes still gets past. Closing
+      # it needs an arm64 runner with KVM, which is infrastructure rather than
+      # anything this file can express.
       # The boot gate runs `cargo test`, which builds mvmctl, whose build.rs
       # cross-compiles the embedded host binaries as static musl and needs the
       # pinned zig. Without it the gate fails before it ever starts a guest —
