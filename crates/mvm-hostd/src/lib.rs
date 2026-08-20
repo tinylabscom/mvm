@@ -24,11 +24,16 @@
 //!   workload-exit control listener.
 
 pub mod admission_budget;
+pub mod admitted_campaign_runner;
+pub mod assurance_agent_adapter;
+pub mod assurance_attestation;
+pub mod assurance_provider;
 pub mod assurance_session;
 pub mod audit;
 pub mod audit_signer;
 pub mod broker;
 pub mod exit_capture;
+pub mod extension_controller;
 /// Length-prefixed message framing (4-byte BE length + body,
 /// cap-before-alloc) for the same-uid UDS control channels. Relocated
 /// from `mvm_core::framing` so `mvm-core`'s default build pulls no
@@ -54,6 +59,7 @@ pub mod netd;
 /// about its own networking. Node-local by construction: it answers only
 /// from state this node owns, scoped to the caller the kernel identifies.
 pub mod nodectl;
+pub mod operator_admitted_trial_booter;
 /// Redacting panic hook for the daemon bins. A panic payload is the one
 /// string the no-`Display`-on-secret-types gate cannot reach.
 pub mod panic_hook;

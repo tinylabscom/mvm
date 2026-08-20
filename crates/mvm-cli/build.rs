@@ -175,6 +175,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed=MVM_EMBED_CARGO");
     println!("cargo:rerun-if-env-changed=MVM_EMBED_RUSTC");
     println!("cargo:rerun-if-env-changed=MVM_EMBED_ZIG");
+    println!("cargo:rerun-if-env-changed=MVM_EMBED_NO_CACHE");
 
     // HOST_BINARIES (installed into the builder/dev VM rootfs), SEED_BINARIES
     // (host-side only, e.g. the Stage 0 nix-seed's /init), and bootstrap

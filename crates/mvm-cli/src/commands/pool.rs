@@ -416,8 +416,10 @@ fn admit_standby_parent_plan(
         audit_labels: Default::default(),
         agent_verbs: None,
         services: Vec::new(),
+        extensions: Vec::new(),
         stream_edges: Vec::new(),
         stream_retention: Default::default(),
+        attestation_mode: mvm_contract::plan::AttestationMode::Noop,
         // The parent reaches nothing, so it gets the closed transport and no
         // L3 spec — the same "no workload authority" posture as the empty
         // secrets, services, and shares above.

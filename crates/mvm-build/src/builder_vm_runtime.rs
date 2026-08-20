@@ -372,14 +372,22 @@ const WORKSPACE_SNAPSHOT_SKIP: &[&str] = &[
 
 /// Stage an allowlisted, filtered copy of the mvm workspace into `mvm_src`:
 /// only the cargo tree — root `Cargo.{toml,lock}` + `src` + `crates` +
-/// `xtask` (the `[workspace] members`) — with `WORKSPACE_SNAPSHOT_SKIP`
+/// `third_party` local dependencies + `xtask` (the `[workspace] members`) —
+/// with `WORKSPACE_SNAPSHOT_SKIP`
 /// basenames pruned at any depth. This is what `mvm/mvm-workspace`
 /// resolves to, so `mvm-guest-agent` / `mvm-addon-dns` compile from a clean
 /// source tree. Allowlist (not blocklist): a missing member fails the build
 /// loudly rather than silently leaking host files into the rootfs.
 fn stage_filtered_workspace(workspace: &Path, mvm_src: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(mvm_src)?;
-    for item in ["Cargo.toml", "Cargo.lock", "src", "crates", "xtask"] {
+    for item in [
+        "Cargo.toml",
+        "Cargo.lock",
+        "src",
+        "crates",
+        "third_party",
+        "xtask",
+    ] {
         let from = workspace.join(item);
         if !from.exists() {
             continue;

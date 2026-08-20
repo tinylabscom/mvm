@@ -109,28 +109,17 @@ pub fn ensure_fc_loadable_kernel(path: &Path) -> Result<PathBuf> {
     Ok(elf_path)
 }
 
-/// Identifies the `vmlinux` an extracted ELF came from, as `<len>:<mtime_nanos>`.
+/// Identifies the exact `vmlinux` an extracted ELF came from.
 ///
-/// A cache-coherence check, not an integrity control: it answers "was this
-/// sibling derived from the file sitting here now?", and that answer only has
-/// to change when the file does. Integrity belongs to the caller — `vmlinux` is
-/// verified against its recorded digest before this function is reached, and
-/// the ELF is extracted from those verified bytes.
-///
-/// Length and mtime rather than a content hash because this runs on every boot:
-/// hashing a multi-megabyte kernel to answer a cache question would put
-/// milliseconds on the launch path to re-derive what the caller already
-/// established.
+/// Filesystems exposed through a builder or shared-volume boundary may report
+/// timestamps at one-second resolution. A same-sized kernel replacement can
+/// therefore retain the same `(length, mtime)` pair and must not reuse an ELF
+/// extracted from the previous bytes. Hashing is deliberate here: serving a
+/// stale kernel would cross the verified-kernel seam, while the caller invokes
+/// this only during kernel preparation.
 fn source_stamp(path: &Path) -> Result<String> {
-    let meta =
-        std::fs::metadata(path).with_context(|| format!("stat kernel {}", path.display()))?;
-    let mtime = meta
-        .modified()
-        .with_context(|| format!("read mtime of {}", path.display()))?
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    Ok(format!("{}:{mtime}", meta.len()))
+    mvm_core::crypto::image_verify::sha256_file(path)
+        .with_context(|| format!("hash kernel {} for extracted-ELF cache", path.display()))
 }
 
 /// Read just the first 4 bytes and test the ELF magic — avoids slurping a

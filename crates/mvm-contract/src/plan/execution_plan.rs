@@ -22,6 +22,7 @@ use crate::plan::types::{
 };
 use crate::plan::verb::VerbId;
 use crate::protocol::broker::ServiceId;
+use crate::protocol::extension_pack::ExtensionPlanBinding;
 
 /// Wire-format version of the `ExecutionPlan`. New fields are additive with
 /// `#[serde(default)]`; the verifier rejects any plan whose `schema_version`
@@ -256,6 +257,12 @@ pub struct ExecutionPlan {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub services: Vec<ServiceId>,
 
+    /// Optional independently signed extension packs admitted for this exact
+    /// workload. Empty keeps ordinary launches on the existing path: no pack
+    /// discovery, installation, or extension dispatch occurs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extensions: Vec<ExtensionPlanBinding>,
+
     /// Inbound stream edges: other workloads whose output feeds this one's
     /// stdin. Each names a *binding* the host resolves, never a VM — see
     /// [`crate::stream::edge`] for why a guest never addresses another guest.
@@ -381,6 +388,7 @@ pub(crate) fn minimal_plan() -> ExecutionPlan {
         deps_volume: None,
         shares: Vec::new(),
         services: Vec::new(),
+        extensions: Vec::new(),
         stream_edges: Vec::new(),
         stream_retention: StreamRetention::Persist,
     }

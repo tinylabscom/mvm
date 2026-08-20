@@ -25,13 +25,94 @@
 //! control socket and acts on these messages is `mvm_hostd::broker::daemon`;
 //! the backend that signs + sends them registers VMs at `start()`.
 
+use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
 
 use serde::{Deserialize, Serialize};
 
-use super::agent_capability::CapabilityBinding;
-use super::broker::ServiceId;
+use crate::policy::security::AgentProfile;
+
+use super::agent_capability::{CapabilityBinding, CapabilityDescriptor};
+use super::broker::{CorrelationId, ServiceErrorCode, ServiceId};
+
+/// Maximum number of controller-backed service bindings on one VM.
+pub const MAX_SERVICE_PROXIES: usize = 64;
+/// Maximum encoded request or response accepted by a controller proxy.
+pub const MAX_SERVICE_PROXY_FRAME_BYTES: usize = 1024 * 1024;
+/// Maximum host-only UDS path carried by a signed proxy binding.
+pub const MAX_SERVICE_PROXY_ENDPOINT_BYTES: usize = 4096;
+
+/// One typed service implemented by an admitting controller and reached by the
+/// resident broker over a host-only UDS.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ServiceProxyBinding {
+    /// Exact service routed to the endpoint.
+    pub service: ServiceId,
+    /// Host-created absolute UDS path. This value never reaches the guest.
+    pub endpoint: String,
+    /// Full descriptors the proxy may implement. The daemon additionally
+    /// requires each descriptor digest to appear in signed VM admission.
+    pub capabilities: Vec<CapabilityDescriptor>,
+}
+
+impl ServiceProxyBinding {
+    /// Validate the signed binding before it can affect broker dispatch.
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.endpoint.is_empty()
+            || self.endpoint.len() > MAX_SERVICE_PROXY_ENDPOINT_BYTES
+            || !self.endpoint.starts_with('/')
+            || self.endpoint.chars().any(char::is_control)
+        {
+            return Err("service proxy endpoint is invalid");
+        }
+        if self.capabilities.is_empty() || self.capabilities.len() > MAX_SERVICE_PROXIES {
+            return Err("service proxy capability count is invalid");
+        }
+        let mut ids = Vec::with_capacity(self.capabilities.len());
+        for descriptor in &self.capabilities {
+            if descriptor.id.service != self.service {
+                return Err("service proxy capability names another service");
+            }
+            if ids.contains(&descriptor.id) {
+                return Err("service proxy repeats a capability");
+            }
+            ids.push(descriptor.id.clone());
+        }
+        Ok(())
+    }
+}
+
+/// Server-authored call context forwarded from the resident broker to a
+/// controller-backed typed handler.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ServiceProxyRequest {
+    pub service: ServiceId,
+    pub verb: String,
+    pub workload_id: String,
+    pub tenant_id: String,
+    pub correlation_id: CorrelationId,
+    pub session_id: String,
+    pub profile: AgentProfile,
+    pub composition_depth: u8,
+    pub composition_width: u8,
+    pub payload: serde_json::Value,
+}
+
+/// Result returned by a controller-backed typed handler.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ServiceProxyResponse {
+    Ok {
+        payload: serde_json::Value,
+    },
+    Err {
+        code: ServiceErrorCode,
+        message: String,
+    },
+}
 
 /// Register a VM with the host-agent daemon: bind its `BROKER_PORT` listen
 /// socket and record the bindings + audit-chain path the daemon dispatches
@@ -95,6 +176,10 @@ pub struct RegisterVm {
     /// and `ControlRequest` is an enum whose other variants are small — an
     /// inline copy would size every control message by the rarest one.
     pub assurance: Option<alloc::boxed::Box<crate::assurance::AdmittedAssuranceSession>>,
+    /// Controller-backed typed services. Empty for ordinary launches and
+    /// omitted from their signed canonical bytes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub service_proxies: Vec<ServiceProxyBinding>,
 }
 
 /// Deregister a VM at teardown: the daemon unbinds + drops its listen socket
@@ -111,7 +196,7 @@ pub struct DeregisterVm {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ControlRequest {
     /// Bind + record a VM.
-    Register(RegisterVm),
+    Register(Box<RegisterVm>),
     /// Unbind + drop a VM.
     Deregister(DeregisterVm),
 }
@@ -176,7 +261,7 @@ mod tests {
     use super::*;
 
     fn sample_register() -> ControlRequest {
-        ControlRequest::Register(RegisterVm {
+        ControlRequest::Register(Box::new(RegisterVm {
             vm_id: "vm-1".into(),
             workload_id: Some("wl-1".into()),
             tenant_id: "local".into(),
@@ -187,7 +272,8 @@ mod tests {
             services_bindings: vec![ServiceId::parse("host.time.v1").unwrap()],
             capability_bindings: vec![],
             assurance: None,
-        })
+            service_proxies: vec![],
+        }))
     }
 
     #[test]
@@ -209,5 +295,11 @@ mod tests {
         // `deny_unknown_fields` fails closed on an unexpected key.
         let bad = r#"{"kind":"deregister","vm_id":"vm-1","extra":true}"#;
         assert!(serde_json::from_str::<ControlRequest>(bad).is_err());
+    }
+
+    #[test]
+    fn empty_service_proxies_do_not_change_ordinary_registration_shape() {
+        let json = serde_json::to_string(&sample_register()).unwrap();
+        assert!(!json.contains("service_proxies"));
     }
 }

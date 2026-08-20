@@ -36,6 +36,13 @@ path = "src/bin/mvm-netd.rs"
 name = "mvm-broker"
 path = "src/bin/mvm-broker.rs"
 
+# Optional admitted extension-provider process. It owns the bounded MVEX
+# transport and loads one strict operator boot configuration from its explicit
+# private state root; ordinary launch never invokes it.
+[[bin]]
+name = "mvm-extension-provider"
+path = "src/bin/mvm-extension-provider.rs"
+
 [[bin]]
 name = "mvm-host-agent"
 path = "src/bin/mvm-host-agent.rs"

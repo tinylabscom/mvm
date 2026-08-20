@@ -196,6 +196,14 @@ pub struct VmStartConfig {
     pub ports: Vec<VmPortMapping>,
     /// Extra volumes to mount in the guest.
     pub volumes: Vec<VmVolume>,
+    /// Exact optional extension bindings re-verified during admission. Empty
+    /// for every ordinary launch.
+    pub extensions: Vec<mvm_contract::protocol::extension_pack::ExtensionPlanBinding>,
+    /// Plan identity shared by all entries in `extensions`.
+    pub extension_plan_id: Option<String>,
+    /// Optional controller-backed typed broker services. Empty for ordinary
+    /// launches; populated only after admission creates a host-only endpoint.
+    pub service_proxies: Vec<mvm_contract::protocol::broker_control::ServiceProxyBinding>,
     /// Extra config files to make available to the guest.
     pub config_files: Vec<VmFile>,
     /// Secret files (written with restricted permissions).

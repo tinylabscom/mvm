@@ -566,6 +566,13 @@ hvf-live-validation = [
 # validation lane. The normal binary remains fail-closed without it.
 trusted-apfs = ["mvm-cli/trusted-apfs", "mvm-runtime/trusted-apfs"]
 
+[patch.crates-io]
+# The locked test oracle initializes a C `char` array as `i8`, which does not
+# compile on targets where `c_char` is unsigned (including aarch64 Linux).
+# Keep the oracle enabled in native gates while the one-line upstream fix is
+# pending; the vendored source is otherwise the published 0.4.0 package.
+am-fs-ext4 = { path = "third_party/am-fs-ext4" }
+
 [profile.release]
 opt-level = 3
 strip = true

@@ -177,12 +177,14 @@ impl EffectiveAuthority {
             .requested
             .max_steps
             .min(inputs.extension_maximum.max_steps)
-            .min(inputs.policy_ceiling.max_steps);
+            .min(inputs.policy_ceiling.max_steps)
+            .min(inputs.grant.max_steps);
         let max_output_bytes = inputs
             .requested
             .max_output_bytes
             .min(inputs.extension_maximum.max_output_bytes)
-            .min(inputs.policy_ceiling.max_output_bytes);
+            .min(inputs.policy_ceiling.max_output_bytes)
+            .min(inputs.grant.max_output_bytes);
         if max_steps == 0 || max_output_bytes == 0 {
             return Err(AuthorityError::EmptyBudget);
         }

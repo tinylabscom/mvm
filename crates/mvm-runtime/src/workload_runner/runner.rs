@@ -86,6 +86,10 @@ pub struct BrokerRegisterRequest<'a> {
     /// Host services from the admitted plan. Empty means no broker process is
     /// needed and every broker call remains fail-closed.
     pub services: &'a [ServiceId],
+    /// Exact typed capabilities carried by admitted extension bindings.
+    pub capability_bindings: &'a [mvm_contract::protocol::agent_capability::CapabilityBinding],
+    /// Controller-backed typed services prepared by the admitting process.
+    pub service_proxies: &'a [mvm_contract::protocol::broker_control::ServiceProxyBinding],
 }
 
 /// Register/spawn the per-VM host-services broker for an admitted workload,
@@ -154,10 +158,17 @@ impl BrokerRegistrar for RealBrokerRegistrar {
                     state_dir: req.state_dir,
                     broker_listen_socket,
                     services: req.services,
+                    capability_bindings: req.capability_bindings,
+                    service_proxies: req.service_proxies,
                 },
             )
             .map(mvm_vmm::host::host_agent_spawn::ServicesGuard::Agent)?
         } else {
+            if !req.service_proxies.is_empty() {
+                anyhow::bail!(
+                    "controller-backed typed services require the resident host-agent path"
+                );
+            }
             mvm_vmm::host::broker_services_spawn::spawn_broker_services_if_admitted(
                 mvm_vmm::host::broker_services_spawn::BrokerServicesSpawnParams {
                     workload_id: req.vm_name,
@@ -166,6 +177,7 @@ impl BrokerRegistrar for RealBrokerRegistrar {
                     state_dir: req.state_dir,
                     broker_listen_socket,
                     services: req.services,
+                    capability_bindings: req.capability_bindings,
                 },
             )
             .map(mvm_vmm::host::host_agent_spawn::ServicesGuard::Fork)?
@@ -459,13 +471,16 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         // Register the per-VM broker for the exact admitted host-service set.
         // The guard's Drop reaps on any early return until it is defused. A
         // requested service whose broker cannot start fails the launch closed.
-        let services = admitted_services(inputs.config.plan_json.as_deref())?;
+        let (services, capability_bindings) =
+            admitted_broker_bindings(inputs.config.plan_json.as_deref())?;
         let mut broker_guard = self.broker.register(&BrokerRegisterRequest {
             vm_name: &inputs.config.name,
             state_dir: &state_dir,
             tenant: inputs.config.tenant_id.as_deref(),
             broker_listen_socket: socks.broker.as_deref(),
             services: &services,
+            capability_bindings: &capability_bindings,
+            service_proxies: &inputs.config.service_proxies,
         })?;
         endpoint.defuse();
         broker_guard.defuse();
@@ -703,6 +718,11 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         // Register the child's exact admitted host-service set before the fork,
         // because the restored guest can dial `BROKER_PORT` immediately. Any
         // registration failure refuses the claim; the guard reaps until commit.
+        let child_capabilities: Vec<_> = plan
+            .extensions
+            .iter()
+            .flat_map(|extension| extension.capabilities.iter().cloned())
+            .collect();
         let mut broker_guard = self
             .broker
             .register(&BrokerRegisterRequest {
@@ -711,6 +731,8 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
                 tenant: child_cfg.tenant_id.as_deref(),
                 broker_listen_socket: socks.broker.as_deref(),
                 services: &plan.services,
+                capability_bindings: &child_capabilities,
+                service_proxies: &child_cfg.service_proxies,
             })
             .map_err(|e| StandbyError::ClaimFailed(format!("register child broker: {e}")))?;
         claim_phase!("broker_registered");
@@ -1381,12 +1403,29 @@ fn claim_plan(claim: &StandbyClaim) -> std::result::Result<ExecutionPlan, Standb
         .map_err(|_| refuse(ClaimRefusal::PlanMissing))
 }
 
-fn admitted_services(plan_json: Option<&str>) -> Result<Vec<ServiceId>> {
+fn admitted_broker_bindings(
+    plan_json: Option<&str>,
+) -> Result<(
+    Vec<ServiceId>,
+    Vec<mvm_contract::protocol::agent_capability::CapabilityBinding>,
+)> {
     plan_json
         .map(mvm_core::plan::plan_from_admitted_json)
         .transpose()
         .context("parse admitted plan host services")
-        .map(|plan| plan.map_or_else(Vec::new, |plan| plan.services))
+        .map(|plan| {
+            plan.map_or_else(
+                || (Vec::new(), Vec::new()),
+                |plan| {
+                    let capabilities = plan
+                        .extensions
+                        .iter()
+                        .flat_map(|extension| extension.capabilities.iter().cloned())
+                        .collect();
+                    (plan.services, capabilities)
+                },
+            )
+        })
 }
 
 fn admitted_network_limits(plan_json: Option<&str>) -> Result<mvm_core::plan::NetworkLimits> {

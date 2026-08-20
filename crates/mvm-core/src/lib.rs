@@ -45,6 +45,7 @@ pub mod egress_handler;
 /// Secrets are substituted into outbound requests host-side and never enter the
 /// guest.
 pub mod exit_capture;
+pub mod extension_admission;
 /// Per-dimension resolution of a workload's grants across the CLI, a JSON
 /// grants file, the project manifest, and the operator's host config.
 pub mod grants_resolve;

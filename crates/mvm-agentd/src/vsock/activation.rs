@@ -7,6 +7,7 @@
 //! environment, drops privilege, and transitions from the `Awaiting`
 //! boot state to `Activated`.
 
+use mvm_contract::assurance::{AssuranceId, Sha256Digest};
 use serde::{Deserialize, Serialize};
 
 /// Host-to-guest activation message.  This is the only control verb
@@ -27,11 +28,85 @@ pub struct ActivateEnvironment {
     /// overlay are in place.
     #[serde(default)]
     pub volumes: Vec<VolumeConfig>,
+    /// Exact optional extension identities admitted by the signed plan.
+    #[serde(default)]
+    pub extensions: Vec<ExtensionConfig>,
     /// Optional verb-grant envelope to pin before serving operational
     /// RPCs.  When present, the activation message itself must be signed
     /// by the host-signer trust anchor.
     #[serde(default)]
     pub verb_grant_envelope: Option<mvm_core::protocol::vm_backend::VerbGrantEnvelope>,
+}
+
+/// One read-only extension artifact mounted for identity-only dispatch.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct ExtensionConfig {
+    pub binding: mvm_contract::protocol::extension_pack::ExtensionPlanBinding,
+    pub plan_id: AssuranceId,
+    pub mountpoint: String,
+    pub device: String,
+}
+
+/// Identity-bound input for one optional extension invocation. There is no
+/// program, argv, environment, mount, destination, or host path on this wire.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct ExtensionDispatch {
+    pub extension_id: mvm_contract::protocol::extension_pack::ExtensionId,
+    pub pack_digest: [u8; 32],
+    pub contract_digest: [u8; 32],
+    pub request_id: AssuranceId,
+    pub session_id: AssuranceId,
+    pub campaign_id: AssuranceId,
+    pub trial_id: AssuranceId,
+    pub plan_id: AssuranceId,
+    pub idempotency_key: AssuranceId,
+    pub grant_digest: Sha256Digest,
+    pub nonce: AssuranceId,
+    pub input: Vec<u8>,
+}
+
+impl ExtensionDispatch {
+    /// Exact identity a controller must echo to cancel this invocation.
+    #[must_use]
+    pub fn cancellation(&self) -> ExtensionCancellation {
+        ExtensionCancellation {
+            extension_id: self.extension_id.clone(),
+            pack_digest: self.pack_digest,
+            contract_digest: self.contract_digest,
+            request_id: self.request_id.clone(),
+            session_id: self.session_id.clone(),
+            campaign_id: self.campaign_id.clone(),
+            trial_id: self.trial_id.clone(),
+            plan_id: self.plan_id.clone(),
+            idempotency_key: self.idempotency_key.clone(),
+            grant_digest: self.grant_digest.clone(),
+            nonce: self.nonce.clone(),
+        }
+    }
+}
+
+/// Identity-only cancellation for one active optional-extension invocation.
+/// It deliberately carries no process selector, signal, path, or cleanup
+/// scope; the guest resolves the already-admitted process from this identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct ExtensionCancellation {
+    pub extension_id: mvm_contract::protocol::extension_pack::ExtensionId,
+    pub pack_digest: [u8; 32],
+    pub contract_digest: [u8; 32],
+    pub request_id: AssuranceId,
+    pub session_id: AssuranceId,
+    pub campaign_id: AssuranceId,
+    pub trial_id: AssuranceId,
+    pub plan_id: AssuranceId,
+    pub idempotency_key: AssuranceId,
+    pub grant_digest: Sha256Digest,
+    pub nonce: AssuranceId,
 }
 
 /// Root device the guest mounts as `/`.  Three mount shapes, selected by
@@ -146,6 +221,7 @@ mod tests {
                 kind: VolumeConfigKind::VirtioFs,
                 device: None,
             }],
+            extensions: Vec::new(),
             verb_grant_envelope: None,
         };
         let json = serde_json::to_string(&env).expect("serialize");
@@ -173,6 +249,7 @@ mod tests {
             },
             runtime: None,
             volumes: Vec::new(),
+            extensions: Vec::new(),
             verb_grant_envelope: None,
         };
         let json = serde_json::to_string(&env).expect("serialize");
@@ -192,6 +269,7 @@ mod tests {
             },
             runtime: None,
             volumes: Vec::new(),
+            extensions: Vec::new(),
             verb_grant_envelope: None,
         };
         let json = serde_json::to_string(&env).expect("serialize");
@@ -221,6 +299,7 @@ mod tests {
             },
             runtime: None,
             volumes: Vec::new(),
+            extensions: Vec::new(),
             verb_grant_envelope: None,
         };
         let json = serde_json::to_string(&env).expect("serialize");

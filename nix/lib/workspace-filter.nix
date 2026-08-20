@@ -25,6 +25,7 @@
 #   build.rs                 root package build script
 #   src/                     root package (`mvmctl`) sources
 #   crates/                  every workspace member
+#   third_party/             workspace-local patched/path dependencies
 #   xtask/                   workspace member
 #   tests/                   root package integration targets; the source-built
 #                            mvmctl derivation leaves doCheck at its default, so
@@ -69,6 +70,7 @@ let
     "build.rs"
     "src"
     "crates"
+    "third_party"
     "xtask"
     "tests"
     "schema"

@@ -600,18 +600,19 @@ fn resolve_agent_binary(
         .map(Path::to_path_buf)
 }
 
-/// Build the `setpriv` command that forks the guest agent under the agent
-/// uid. Mirrors the workload `/init` invocation in `nix/lib/mk-guest.nix`:
-/// `setpriv --reuid --regid --clear-groups --securebits=keep-caps
-/// --inh-caps=+kill --ambient-caps=+kill --inh-caps=+sys_time
-/// --ambient-caps=+sys_time --no-new-privs -- <agent>`.
+/// Build the `setsid` + `mvm-setpriv` command that forks the guest agent under
+/// the agent uid. Mirrors the workload `/init` invocation in
+/// `nix/lib/mk-guest.nix`; the builder image installs the same static helper at
+/// `/sbin/mvm-setpriv`.
 /// The agent receives only `CAP_KILL` and `CAP_SYS_TIME`: the former permits
 /// the authenticated agent to signal PID 1, and the latter corrects a
 /// restored wall clock. No workload process inherits either capability.
 #[cfg(any(target_os = "linux", test))]
 fn agent_spawn_command(agent_bin: &Path) -> Command {
-    let mut c = Command::new("setpriv");
-    c.arg(format!("--reuid={AGENT_UID}"))
+    let mut c = Command::new("/bin/busybox");
+    c.arg("setsid")
+        .arg("/sbin/mvm-setpriv")
+        .arg(format!("--reuid={AGENT_UID}"))
         .arg(format!("--regid={AGENT_UID}"))
         .arg("--clear-groups")
         .arg("--securebits=keep-caps")
@@ -713,11 +714,13 @@ mod tests {
     #[test]
     fn agent_spawn_command_mirrors_workload_init_setpriv() {
         let cmd = agent_spawn_command(Path::new("/usr/local/bin/mvm-guest-agent"));
-        assert_eq!(cmd.get_program().to_str().unwrap(), "setpriv");
+        assert_eq!(cmd.get_program().to_str().unwrap(), "/bin/busybox");
         let args: Vec<&str> = cmd.get_args().map(|a| a.to_str().unwrap()).collect();
         assert_eq!(
             args,
             [
+                "setsid",
+                "/sbin/mvm-setpriv",
                 "--reuid=990",
                 "--regid=990",
                 "--clear-groups",
@@ -1390,8 +1393,6 @@ mod linux {
     /// RPC on port 5252; without it the host can boot the builder VM but
     /// can't reach the agent.
     fn fork_guest_agent() {
-        use std::os::unix::process::CommandExt;
-
         let runtime_source_policy = crate::runtime_source_policy_from_cmdline(
             &std::fs::read_to_string("/proc/cmdline").unwrap_or_default(),
         );
@@ -1410,17 +1411,8 @@ mod linux {
             return;
         };
         let mut cmd = crate::agent_spawn_command(&agent_bin);
-        // New session so the agent isn't in PID 1's signal / controlling-
-        // terminal group — the workload /init uses `setsid` for the same
-        // reason. stdio is inherited so the agent's logs reach the console.
-        unsafe {
-            cmd.pre_exec(|| {
-                // SAFETY: async-signal-safe, no allocation, runs in the
-                // forked child before execve.
-                libc::setsid();
-                Ok(())
-            });
-        }
+        // BusyBox `setsid` puts the agent in a new session, matching the
+        // workload init path. Stdio is inherited so logs reach the console.
         match cmd.spawn() {
             Ok(child) => eprintln!(
                 "mvm-host-vm-init: forked mvm-guest-agent pid={} from {}",
