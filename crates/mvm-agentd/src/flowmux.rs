@@ -1737,7 +1737,7 @@ impl FlowMuxReconnectClient {
     ///
     /// Test-only: lets in-crate tests stand up a client that is already
     /// connected to a mock host without going through the reconnect factory.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "addons"))]
     pub(crate) fn from_receiver(current: watch::Receiver<Option<Arc<FlowMuxClient>>>) -> Self {
         Self { current }
     }

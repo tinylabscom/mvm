@@ -1619,7 +1619,9 @@ for detailed scope and acceptance criteria.
         HTTP now streams incrementally with bounded cross-frame transforms,
         fail-closed cancellation and audit behavior; web fetch and search
         authorize in their brokers but resolve, connect, and execute through
-        the per-VM network endpoint.
+        the per-VM network endpoint. The host performance probe enables only
+        the FlowMux client surface, keeping guest-only vsock dependencies out
+        of the host graph and the duplicate-major invariant clean.
   - [x] Declared ingress runtime. Signed transport-neutral mappings reach exact
         endpoint binds before readiness; TCP and bounded observed-peer UDP use
         host-initiated FlowMux streams and declared guest-loopback targets.

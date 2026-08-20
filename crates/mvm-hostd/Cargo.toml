@@ -218,8 +218,8 @@ hickory-proto = { workspace = true }
 tempfile.workspace = true
 xtask = { path = "../../xtask" }
 # The release-only networking probe drives the same guest FlowMux client used
-# by the loopback adapters; that client is intentionally behind `addons`.
-mvm-agentd = { workspace = true, features = ["addons"] }
+# by the loopback adapters without linking their guest-only transport helpers.
+mvm-agentd = { workspace = true, features = ["flowmux-client"] }
 # plan_admission bundle re-verify tests build/read `.mvmpkg` archives; verb-grant
 # test decodes the signer pubkey hex.
 tar.workspace = true

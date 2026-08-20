@@ -90,6 +90,10 @@ Each implementation pull request updates this plan, its delivery record, and
 - [x] Add positive, refusal, split-token, redirect, oversized-head/body,
       timeout, cancellation, audit-leak, and long-stream tests.
 
+The host-side performance probe enables the narrow `flowmux-client` feature,
+not the guest addon bundle. This keeps guest-only vsock dependencies out of
+host test graphs and preserves the duplicate-major dependency invariant.
+
 ### W4 — Implement declared ingress on FlowMux
 
 - [x] Replace `L3IngressMapping` with a transport-neutral signed-plan/IR type
