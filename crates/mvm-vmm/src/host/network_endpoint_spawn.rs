@@ -474,6 +474,8 @@ pub struct SubstitutionSpawnParams<'a> {
     /// egress itself (the relay path — the run loop no longer gates); `None` ⇒
     /// ungated here (the legacy in-loop gate is the enforcer).
     pub network_policy: Option<&'a mvm_core::policy::network_policy::NetworkPolicy>,
+    /// Transport-neutral resource ceilings from the admitted execution plan.
+    pub network_limits: mvm_core::plan::NetworkLimits,
     /// `Some` ⇒ the endpoint resolves secret *values* remotely (see
     /// [`RemoteResolverSpawnConfig`]) instead of its local encrypted store.
     /// `None` preserves today's `Local` (unchanged) resolver behavior.
@@ -509,6 +511,7 @@ pub struct SubstitutionSpawnParamsBuilder<'a> {
     terminator_listen: Option<SocketAddr>,
     tls_intermediate: Option<(String, String)>,
     network_policy: Option<&'a mvm_core::policy::network_policy::NetworkPolicy>,
+    network_limits: Option<mvm_core::plan::NetworkLimits>,
     resolver_remote: Option<RemoteResolverSpawnConfig<'a>>,
     binding_store_dir: Option<&'a Path>,
     flowmux_identity: Option<FlowMuxIdentitySpawnConfig>,
@@ -529,6 +532,7 @@ impl<'a> SubstitutionSpawnParamsBuilder<'a> {
             terminator_listen: None,
             tls_intermediate: None,
             network_policy: None,
+            network_limits: None,
             resolver_remote: None,
             binding_store_dir: None,
             flowmux_identity: None,
@@ -605,6 +609,13 @@ impl<'a> SubstitutionSpawnParamsBuilder<'a> {
         self
     }
 
+    /// Set the admitted transport-neutral networking ceilings.
+    #[must_use]
+    pub fn network_limits(mut self, network_limits: mvm_core::plan::NetworkLimits) -> Self {
+        self.network_limits = Some(network_limits);
+        self
+    }
+
     /// Set `resolver_remote`. Takes a value or an `Option`; unset means `None`.
     #[must_use]
     pub fn resolver_remote(
@@ -667,6 +678,10 @@ impl<'a> SubstitutionSpawnParamsBuilder<'a> {
             terminator_listen: self.terminator_listen,
             tls_intermediate: self.tls_intermediate,
             network_policy: self.network_policy,
+            network_limits: self.network_limits.ok_or(BuilderError::missing(
+                "SubstitutionSpawnParams",
+                "network_limits",
+            ))?,
             resolver_remote: self.resolver_remote,
             binding_store_dir: self.binding_store_dir,
             flowmux_identity: self.flowmux_identity,
@@ -743,6 +758,7 @@ pub fn endpoint_config_for_identity(
         session_marker: None,
         tls_intermediate: None,
         network_policy: None,
+        network_limits: mvm_core::plan::NetworkLimits::default(),
         resolver_remote: None,
         binding_store_dir: None,
         flowmux_identity,
@@ -772,6 +788,7 @@ fn build_endpoint_config_json(params: &SubstitutionSpawnParams<'_>) -> serde_jso
         } else {
             "wire"
         },
+        "network_limits": params.network_limits,
     });
     if let Some(marker) = params.session_marker.as_ref() {
         cfg["session_marker"] = serde_json::json!(marker);
@@ -1288,6 +1305,7 @@ mod tests {
             .tenant("local")
             .secrets(&[])
             .redaction(&redaction)
+            .network_limits(mvm_contract::plan::NetworkLimits::default())
             .transport(EndpointTransport::Uds {
                 path: dir.path().join("sub.sock"),
             })
@@ -1772,6 +1790,7 @@ mod tests {
             session_marker: None,
             tls_intermediate: None,
             network_policy: None,
+            network_limits: mvm_core::plan::NetworkLimits::default(),
             resolver_remote: None,
             binding_store_dir: None,
             flowmux_identity: None,
@@ -1833,6 +1852,7 @@ mod tests {
             session_marker: None,
             tls_intermediate: None,
             network_policy: None,
+            network_limits: mvm_core::plan::NetworkLimits::default(),
             resolver_remote: None,
             binding_store_dir: None,
             flowmux_identity: None,
@@ -1899,6 +1919,7 @@ mod tests {
             session_marker: None,
             tls_intermediate: None,
             network_policy: None,
+            network_limits: mvm_core::plan::NetworkLimits::default(),
             resolver_remote: None,
             binding_store_dir: None,
             flowmux_identity: None,
@@ -1966,6 +1987,7 @@ mod tests {
             session_marker: None,
             tls_intermediate: None,
             network_policy: None,
+            network_limits: mvm_core::plan::NetworkLimits::default(),
             resolver_remote: None,
             binding_store_dir: None,
             flowmux_identity: None,
@@ -2026,6 +2048,7 @@ mod tests {
             session_marker: None,
             tls_intermediate: None,
             network_policy,
+            network_limits: mvm_core::plan::NetworkLimits::default(),
             resolver_remote: None,
             binding_store_dir: None,
             flowmux_identity: None,
@@ -2183,6 +2206,25 @@ mod tests {
             cfg["session_ready_socket"],
             serde_json::json!(Path::new("/tmp").join(SUBST_SESSION_READY_SOCKET))
         );
+    }
+
+    #[test]
+    fn endpoint_config_json_carries_admitted_network_limits() {
+        let redaction = mvm_core::policy::RedactionPolicy::default();
+        let sock = Path::new("/tmp/vsock-5253.sock");
+        let mut params = minimal_params(&redaction, sock, None);
+        params.network_limits = mvm_core::plan::NetworkLimits::builder()
+            .max_tcp_flows(7)
+            .max_udp_associations(5)
+            .max_dns_bindings(3)
+            .max_ingress_listeners(2)
+            .build()
+            .unwrap();
+
+        let cfg = build_endpoint_config_json(&params);
+        let round: mvm_core::plan::NetworkLimits =
+            serde_json::from_value(cfg["network_limits"].clone()).unwrap();
+        assert_eq!(round, params.network_limits);
     }
 
     // ── the cert-to-guest / key-to-endpoint split ──
