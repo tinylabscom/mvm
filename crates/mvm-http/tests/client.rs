@@ -190,6 +190,33 @@ async fn transformed_request_body_uses_bounded_chunked_framing() {
 }
 
 #[tokio::test]
+async fn a_failed_transform_closes_without_completing_the_chunked_body() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut received = Vec::new();
+        socket.read_to_end(&mut received).await.unwrap();
+        received
+    });
+    let (tx, rx) = tokio::sync::mpsc::channel(2);
+    tx.send(Ok(b"partial".to_vec())).await.unwrap();
+    tx.send(Err("transform failed closed".into()))
+        .await
+        .unwrap();
+    drop(tx);
+    let error = client_for(addr)
+        .post(url_for(addr))
+        .body_checked_chunked(rx)
+        .send()
+        .await
+        .unwrap_err();
+    assert!(matches!(error, Error::RequestBodyProducer(_)), "{error:?}");
+    let received = server.await.unwrap();
+    assert!(!received.ends_with(b"0\r\n\r\n"));
+}
+
+#[tokio::test]
 async fn chunked_body_is_decoded_across_chunks() {
     let (addr, _srv) = serve_raw(
         b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n\

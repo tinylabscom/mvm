@@ -1160,29 +1160,31 @@ impl FlowMuxSession {
         let flow = self.http_flows.get_mut(&stream_id).ok_or_else(|| {
             FlowMuxError::FrameRefused(format!("http frame on unopened flow {stream_id}"))
         })?;
-        match opcode {
-            Opcode::HttpRequestHead => flow.accept_head(&payload),
-            _ => flow.accept_body(&payload),
+        if opcode == Opcode::HttpRequestHead {
+            let request = flow
+                .accept_head(&payload)
+                .map_err(|e| FlowMuxError::FrameRefused(e.to_string()))?;
+            let (Some(service), Some(handle)) = (&self.substitution, &self.runtime_handle) else {
+                return Err(FlowMuxError::FrameRefused(
+                    "no runtime to forward the http flow on".to_string(),
+                ));
+            };
+            http_flow::spawn_forward(
+                handle,
+                Arc::clone(service),
+                Arc::clone(&self.session),
+                Arc::clone(&self.writer),
+                stream_id,
+                request.head,
+                request.body,
+            );
+        } else {
+            flow.accept_body(&payload)
+                .map_err(|e| FlowMuxError::FrameRefused(e.to_string()))?;
         }
-        .map_err(|e| FlowMuxError::FrameRefused(e.to_string()))?;
-
-        let Some(request) = flow.take_when_complete() else {
-            return Ok(());
-        };
-        http_flow::cancel(&mut self.http_flows, stream_id);
-        let (Some(service), Some(handle)) = (&self.substitution, &self.runtime_handle) else {
-            return Err(FlowMuxError::FrameRefused(
-                "no runtime to forward the http flow on".to_string(),
-            ));
-        };
-        http_flow::spawn_forward(
-            handle,
-            Arc::clone(service),
-            Arc::clone(&self.session),
-            Arc::clone(&self.writer),
-            stream_id,
-            request,
-        );
+        if flow.is_complete() {
+            http_flow::cancel(&mut self.http_flows, stream_id);
+        }
         Ok(())
     }
 

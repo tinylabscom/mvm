@@ -21,7 +21,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
 use mvm_contract::protocol::network_flow::{MAX_PAYLOAD_LEN, Opcode};
 use mvm_core::net::session::Session;
-use mvm_core::substitution_wire::{HttpFlowHead, HttpFlowResponseHead, WireRequest, WireResponse};
+use mvm_core::substitution_wire::{HttpFlowHead, HttpFlowResponseHead, WireResponse};
 use tracing::warn;
 use zeroize::Zeroizing;
 
@@ -36,7 +36,13 @@ use super::write_frame_to;
 /// instead of forwarded.
 pub(super) struct HttpFlow {
     head: Option<HttpFlowHead>,
-    body: Zeroizing<Vec<u8>>,
+    received: u64,
+    sender: Option<tokio::sync::mpsc::Sender<Zeroizing<Vec<u8>>>>,
+}
+
+pub(super) struct HttpRequestStream {
+    pub(super) head: HttpFlowHead,
+    pub(super) body: tokio::sync::mpsc::Receiver<Zeroizing<Vec<u8>>>,
 }
 
 /// Why a frame on an HTTP flow could not be accepted.
@@ -54,6 +60,8 @@ pub(super) enum HttpFlowError {
     BodyOverrun { got: u64, declared: u64 },
     #[error("declared body of {declared} bytes exceeds the {max} allowed")]
     BodyTooLarge { declared: u64, max: u64 },
+    #[error("request body consumer closed before completion")]
+    BodyConsumerClosed,
 }
 
 /// The largest request body a single typed HTTP flow may declare.
@@ -73,14 +81,18 @@ impl HttpFlow {
     pub(super) fn new() -> Self {
         Self {
             head: None,
-            body: Zeroizing::new(Vec::new()),
+            received: 0,
+            sender: None,
         }
     }
 
     /// Take the request head. Returns an error rather than replacing a head
     /// that already arrived: two heads on one flow is a protocol violation,
     /// not a retry.
-    pub(super) fn accept_head(&mut self, payload: &[u8]) -> Result<(), HttpFlowError> {
+    pub(super) fn accept_head(
+        &mut self,
+        payload: &[u8],
+    ) -> Result<HttpRequestStream, HttpFlowError> {
         if self.head.is_some() {
             return Err(HttpFlowError::DuplicateHead);
         }
@@ -98,10 +110,13 @@ impl HttpFlow {
                 max: MAX_HTTP_BODY_LEN,
             });
         }
-        self.body
-            .reserve(head.body_len.min(MAX_PAYLOAD_LEN as u64) as usize);
-        self.head = Some(head);
-        Ok(())
+        let (sender, receiver) = tokio::sync::mpsc::channel(4);
+        self.sender = (head.body_len > 0).then_some(sender);
+        self.head = Some(head.clone());
+        Ok(HttpRequestStream {
+            head,
+            body: receiver,
+        })
     }
 
     /// Append a body chunk. Overrunning the declared length is refused rather
@@ -110,30 +125,31 @@ impl HttpFlow {
         let Some(head) = self.head.as_ref() else {
             return Err(HttpFlowError::BodyBeforeHead);
         };
-        let got = self.body.len() as u64 + payload.len() as u64;
+        let got = self.received.saturating_add(payload.len() as u64);
         if got > head.body_len {
             return Err(HttpFlowError::BodyOverrun {
                 got,
                 declared: head.body_len,
             });
         }
-        self.body.extend_from_slice(payload);
+        let sender = self
+            .sender
+            .as_ref()
+            .ok_or(HttpFlowError::BodyConsumerClosed)?;
+        sender
+            .blocking_send(Zeroizing::new(payload.to_vec()))
+            .map_err(|_| HttpFlowError::BodyConsumerClosed)?;
+        self.received = got;
+        if got == head.body_len {
+            self.sender.take();
+        }
         Ok(())
     }
 
-    /// The assembled request, once every declared body byte has arrived.
-    pub(super) fn take_when_complete(&mut self) -> Option<WireRequest> {
-        let head = self.head.as_ref()?;
-        if (self.body.len() as u64) != head.body_len {
-            return None;
-        }
-        let head = self.head.take()?;
-        Some(WireRequest {
-            method: head.method,
-            url: head.url,
-            headers: head.headers,
-            body_b64: B64.encode(std::mem::take(&mut *self.body)),
-        })
+    pub(super) fn is_complete(&self) -> bool {
+        self.head
+            .as_ref()
+            .is_some_and(|head| self.received == head.body_len)
     }
 }
 
@@ -158,10 +174,11 @@ pub(super) fn spawn_forward(
     session: Arc<Mutex<Session>>,
     writer: Arc<Mutex<UnixStream>>,
     stream_id: u32,
-    request: WireRequest,
+    head: HttpFlowHead,
+    body: tokio::sync::mpsc::Receiver<Zeroizing<Vec<u8>>>,
 ) {
     handle.spawn(async move {
-        let result = match service.process_stream(request).await {
+        let result = match service.process_body_stream(head, body).await {
             Ok(response) => write_stream_response(&session, &writer, stream_id, response).await,
             Err(refusal) => write_response(&session, &writer, stream_id, refusal),
         };
@@ -275,34 +292,34 @@ mod tests {
     }
 
     #[test]
-    fn a_flow_assembles_a_head_and_its_body_into_one_request() {
+    fn a_flow_streams_a_head_and_body_through_a_bounded_channel() {
         let mut flow = HttpFlow::new();
-        flow.accept_head(&head_json(5)).unwrap();
-        assert!(flow.take_when_complete().is_none(), "body is not in yet");
+        let request = flow.accept_head(&head_json(5)).unwrap();
+        assert_eq!(request.head.headers[0].1, "Bearer mvm-secret-abc");
+        let mut receiver = request.body;
+        assert!(!flow.is_complete(), "body is not in yet");
         flow.accept_body(b"he").unwrap();
-        assert!(flow.take_when_complete().is_none(), "still short");
+        assert!(!flow.is_complete(), "still short");
         flow.accept_body(b"llo").unwrap();
-
-        let req = flow.take_when_complete().expect("complete");
-        assert_eq!(req.method, "POST");
-        assert_eq!(B64.decode(req.body_b64.as_bytes()).unwrap(), b"hello");
-        // The placeholder crosses untouched — resolving it is the host
-        // substitution service's job, not the framing's.
-        assert_eq!(req.headers[0].1, "Bearer mvm-secret-abc");
+        assert!(flow.is_complete());
+        let first = receiver.blocking_recv().unwrap();
+        let second = receiver.blocking_recv().unwrap();
+        assert_eq!([first.as_slice(), second.as_slice()].concat(), b"hello");
+        assert!(receiver.blocking_recv().is_none());
     }
 
     #[test]
     fn a_bodyless_request_is_complete_as_soon_as_its_head_lands() {
         let mut flow = HttpFlow::new();
-        flow.accept_head(&head_json(0)).unwrap();
-        let req = flow.take_when_complete().expect("complete");
-        assert!(req.body_b64.is_empty());
+        let mut receiver = flow.accept_head(&head_json(0)).unwrap().body;
+        assert!(flow.is_complete());
+        assert!(receiver.blocking_recv().is_none());
     }
 
     #[test]
     fn a_body_longer_than_declared_is_refused_not_truncated() {
         let mut flow = HttpFlow::new();
-        flow.accept_head(&head_json(2)).unwrap();
+        let _receiver = flow.accept_head(&head_json(2)).unwrap().body;
         assert!(matches!(
             flow.accept_body(b"toolong"),
             Err(HttpFlowError::BodyOverrun { .. })
@@ -321,7 +338,7 @@ mod tests {
     #[test]
     fn a_second_head_on_one_flow_is_refused() {
         let mut flow = HttpFlow::new();
-        flow.accept_head(&head_json(0)).unwrap();
+        let _ = flow.accept_head(&head_json(0)).unwrap();
         assert!(matches!(
             flow.accept_head(&head_json(0)),
             Err(HttpFlowError::DuplicateHead)
@@ -357,20 +374,21 @@ mod tests {
     }
 
     #[test]
-    fn an_incomplete_body_uses_zeroizing_storage() {
+    fn an_incomplete_body_uses_zeroizing_channel_storage() {
         fn assert_zeroizing(_: &Zeroizing<Vec<u8>>) {}
 
         let mut flow = HttpFlow::new();
-        flow.accept_head(&head_json(8)).unwrap();
+        let mut receiver = flow.accept_head(&head_json(8)).unwrap().body;
         flow.accept_body(b"secret").unwrap();
-        assert_zeroizing(&flow.body);
+        let chunk = receiver.blocking_recv().unwrap();
+        assert_zeroizing(&chunk);
     }
 
     #[test]
     fn cancellation_removes_an_incomplete_flow_immediately() {
         let mut flows = HttpFlows::new();
         let mut flow = HttpFlow::new();
-        flow.accept_head(&head_json(8)).unwrap();
+        let _receiver = flow.accept_head(&head_json(8)).unwrap().body;
         flow.accept_body(b"secret").unwrap();
         flows.insert(7, flow);
 

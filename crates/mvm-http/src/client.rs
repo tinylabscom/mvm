@@ -299,6 +299,9 @@ enum RequestBody {
         declared_len: Option<u64>,
         receiver: tokio::sync::mpsc::Receiver<Vec<u8>>,
     },
+    CheckedChunked {
+        receiver: tokio::sync::mpsc::Receiver<std::result::Result<Vec<u8>, String>>,
+    },
 }
 
 impl RequestBody {
@@ -311,7 +314,8 @@ impl RequestBody {
             } => RequestBodyFraming::Fixed(*declared_len),
             Self::Stream {
                 declared_len: None, ..
-            } => RequestBodyFraming::Chunked,
+            }
+            | Self::CheckedChunked { .. } => RequestBodyFraming::Chunked,
         }
     }
 }
@@ -405,6 +409,19 @@ impl RequestBuilder {
             declared_len: None,
             receiver,
         });
+        self
+    }
+
+    /// Stream a transformed body whose producer can fail closed.
+    ///
+    /// A producer error closes the connection without the final chunk, so the
+    /// destination cannot accept a partial transformed request as complete.
+    #[must_use]
+    pub fn body_checked_chunked(
+        mut self,
+        receiver: tokio::sync::mpsc::Receiver<std::result::Result<Vec<u8>, String>>,
+    ) -> Self {
+        self.body = Some(RequestBody::CheckedChunked { receiver });
         self
     }
 
@@ -591,6 +608,21 @@ async fn write_request_body(stream: &mut Stream, body: Option<RequestBody>) -> R
             mut receiver,
         }) => {
             while let Some(chunk) = receiver.recv().await {
+                if chunk.is_empty() {
+                    continue;
+                }
+                stream
+                    .write_all(format!("{:x}\r\n", chunk.len()).as_bytes())
+                    .await?;
+                stream.write_all(&chunk).await?;
+                stream.write_all(b"\r\n").await?;
+            }
+            stream.write_all(b"0\r\n\r\n").await?;
+            Ok(())
+        }
+        Some(RequestBody::CheckedChunked { mut receiver }) => {
+            while let Some(next) = receiver.recv().await {
+                let chunk = next.map_err(Error::RequestBodyProducer)?;
                 if chunk.is_empty() {
                     continue;
                 }

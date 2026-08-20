@@ -37,7 +37,9 @@ use crate::supervisor::accept_loop::{
 };
 use crate::supervisor::audit_recorder::Recorder;
 use crate::supervisor::network::stages::{RedactingSubstitution, RedactionHits};
-use crate::supervisor::reversible_replacement::{ReplacementEngine, ReplacementFlow};
+use crate::supervisor::reversible_replacement::{
+    ReplacementEngine, ReplacementFlow, StreamingReinjector,
+};
 use crate::supervisor::secret_audit::{
     emit_rewrite_proof, emit_secret_placeholder_dropped, emit_secret_redacted,
     emit_secret_substituted,
@@ -52,6 +54,9 @@ pub use mvm_contract::substitution::{
 const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 /// The response body must fit inside the bounded guest-facing response frame.
 const MAX_FORWARD_RESPONSE_BYTES: usize = MAX_FRAME_BYTES;
+/// Typed FlowMux request ceiling, independent of transport frame size.
+const MAX_HTTP_STREAM_BODY_BYTES: usize = 32 * 1024 * 1024;
+const HTTP_REQUEST_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 #[cfg(not(target_os = "linux"))]
 const RVPROXY_ORIGINAL_DST_MAGIC: &[u8; 8] = b"RVPXOD01";
 
@@ -777,6 +782,31 @@ pub trait Forwarder: Send + Sync {
             body: receiver,
         })
     }
+
+    /// Forward a request whose body arrives through a bounded channel.
+    ///
+    /// The default adapter is for test doubles: it preserves their existing
+    /// whole-request assertions while enforcing the production body ceiling.
+    /// The production forwarder overrides it and writes chunks directly to the
+    /// upstream socket.
+    async fn forward_body_stream(
+        &self,
+        mut req: PreparedRequest,
+        mut body: tokio::sync::mpsc::Receiver<Result<Vec<u8>, String>>,
+    ) -> Result<ForwardStreamResponse, ForwardError> {
+        let mut collected = Vec::new();
+        while let Some(next) = body.recv().await {
+            let chunk = next.map_err(ForwardError::Failed)?;
+            if collected.len().saturating_add(chunk.len()) > MAX_FORWARD_RESPONSE_BYTES {
+                return Err(ForwardError::Failed(format!(
+                    "request body exceeds the {MAX_FORWARD_RESPONSE_BYTES} byte limit"
+                )));
+            }
+            collected.extend_from_slice(&chunk);
+        }
+        req.body = collected;
+        self.forward_stream(req).await
+    }
 }
 
 /// Flatten an error and its `source()` chain into one message. The client wraps
@@ -821,26 +851,11 @@ impl HardenedForwarder {
         self.proxy = proxy;
         self
     }
-}
 
-#[async_trait]
-impl Forwarder for HardenedForwarder {
-    async fn forward(&self, req: PreparedRequest) -> Result<ForwardResponse, ForwardError> {
-        let mut response = self.forward_stream(req).await?;
-        let mut body = Vec::new();
-        while let Some(chunk) = response.body.recv().await {
-            body.extend_from_slice(&chunk?);
-        }
-        Ok(ForwardResponse {
-            status: response.status,
-            headers: response.headers,
-            body,
-        })
-    }
-
-    async fn forward_stream(
+    async fn send_streaming(
         &self,
         req: PreparedRequest,
+        stream_body: Option<tokio::sync::mpsc::Receiver<Result<Vec<u8>, String>>>,
     ) -> Result<ForwardStreamResponse, ForwardError> {
         let method = mvm_http::Method::from_bytes(req.method.as_bytes())
             .map_err(|e| ForwardError::Failed(format!("bad method: {e}")))?;
@@ -852,9 +867,11 @@ impl Forwarder for HardenedForwarder {
         for (k, v) in &req.headers {
             rb = rb.header(k, v);
         }
-        if !req.body.is_empty() {
-            rb = rb.body(req.body);
-        }
+        rb = match stream_body {
+            Some(receiver) => rb.body_checked_chunked(receiver),
+            None if !req.body.is_empty() => rb.body(req.body),
+            None => rb,
+        };
         let mut resp = rb
             .send()
             .await
@@ -892,6 +909,37 @@ impl Forwarder for HardenedForwarder {
             body_len,
             body,
         })
+    }
+}
+
+#[async_trait]
+impl Forwarder for HardenedForwarder {
+    async fn forward(&self, req: PreparedRequest) -> Result<ForwardResponse, ForwardError> {
+        let mut response = self.forward_stream(req).await?;
+        let mut body = Vec::new();
+        while let Some(chunk) = response.body.recv().await {
+            body.extend_from_slice(&chunk?);
+        }
+        Ok(ForwardResponse {
+            status: response.status,
+            headers: response.headers,
+            body,
+        })
+    }
+
+    async fn forward_stream(
+        &self,
+        req: PreparedRequest,
+    ) -> Result<ForwardStreamResponse, ForwardError> {
+        self.send_streaming(req, None).await
+    }
+
+    async fn forward_body_stream(
+        &self,
+        req: PreparedRequest,
+        body: tokio::sync::mpsc::Receiver<Result<Vec<u8>, String>>,
+    ) -> Result<ForwardStreamResponse, ForwardError> {
+        self.send_streaming(req, Some(body)).await
     }
 }
 
@@ -1665,7 +1713,7 @@ impl SubstitutionService {
             .request
             .take()
             .expect("a prepared flow owns exactly one request");
-        let mut upstream = self
+        let upstream = self
             .forwarder
             .forward_stream(request)
             .await
@@ -1673,6 +1721,165 @@ impl SubstitutionService {
                 message: error.to_string(),
             })?;
 
+        self.transform_response_stream(flow, upstream).await
+    }
+
+    /// Process a FlowMux request body as bounded chunks. Signing and
+    /// reversible request-body replacement need replay after seeing the full
+    /// payload, so those explicit classes retain a bounded zeroizing replay
+    /// buffer; every other typed request streams through the inspector.
+    pub(crate) async fn process_body_stream(
+        self: &Arc<Self>,
+        head: mvm_core::substitution_wire::HttpFlowHead,
+        mut body: tokio::sync::mpsc::Receiver<Zeroizing<Vec<u8>>>,
+    ) -> Result<ForwardStreamResponse, WireResponse> {
+        let destination = destination_host(&head.url).ok();
+        let replacement_action = destination
+            .as_deref()
+            .map(|dest| {
+                crate::supervisor::reversible_replacement_resolve::resolve(
+                    &self.reversible_replacement_policy,
+                    dest,
+                )
+            })
+            .cloned()
+            .unwrap_or_default();
+        let endpoint = NetworkEndpoint::new(&self.registry, self.resolver.as_ref());
+        let signs_body = head.headers.iter().any(|(_, value)| {
+            find_placeholder(value).is_some_and(|placeholder| {
+                matches!(
+                    endpoint.auth_type(placeholder),
+                    Some(AuthType::Sigv4 | AuthType::Hmac)
+                )
+            })
+        });
+        let replaces_body =
+            replacement_action.replaces_on(mvm_core::policy::RewriteSurface::RequestBody);
+
+        if signs_body || replaces_body {
+            let mut replay = Zeroizing::new(Vec::new());
+            loop {
+                let next = tokio::time::timeout(HTTP_REQUEST_IDLE_TIMEOUT, body.recv())
+                    .await
+                    .map_err(|_| WireResponse::Refused {
+                        message: "request body idle timeout".into(),
+                    })?;
+                let Some(chunk) = next else {
+                    break;
+                };
+                if replay.len().saturating_add(chunk.len()) > MAX_HTTP_STREAM_BODY_BYTES {
+                    return Err(WireResponse::Refused {
+                        message: format!(
+                            "request body exceeds the {MAX_HTTP_STREAM_BODY_BYTES} byte limit"
+                        ),
+                    });
+                }
+                replay.extend_from_slice(&chunk);
+            }
+            if replay.len() as u64 != head.body_len {
+                return Err(WireResponse::Refused {
+                    message: "request body ended before its declared length".into(),
+                });
+            }
+            return self
+                .process_stream(WireRequest {
+                    method: head.method,
+                    url: head.url,
+                    headers: head.headers,
+                    body_b64: B64.encode(&*replay),
+                })
+                .await;
+        }
+
+        let wire = WireRequest {
+            method: head.method,
+            url: head.url,
+            headers: head.headers,
+            body_b64: String::new(),
+        };
+        let mut flow = self.prepare_flow(wire).await?;
+        let request = flow
+            .request
+            .take()
+            .expect("a prepared flow owns exactly one request");
+        let expected_len = head.body_len;
+        let (sender, receiver) = tokio::sync::mpsc::channel(4);
+        let service = Arc::clone(self);
+        let action = flow.redaction_action.clone();
+        let producer = tokio::spawn(async move {
+            let mut redactor = StreamingRedactor::new();
+            let mut hits = RedactionHits::default();
+            let mut received = 0_u64;
+            loop {
+                let next = match tokio::time::timeout(HTTP_REQUEST_IDLE_TIMEOUT, body.recv()).await
+                {
+                    Ok(next) => next,
+                    Err(_) => {
+                        let _ = sender.send(Err("request body idle timeout".into())).await;
+                        return Err(SensitiveDetectionError);
+                    }
+                };
+                let Some(chunk) = next else {
+                    break;
+                };
+                received = received.saturating_add(chunk.len() as u64);
+                if received > expected_len {
+                    let _ = sender
+                        .send(Err("request body exceeded its declared length".into()))
+                        .await;
+                    return Err(SensitiveDetectionError);
+                }
+                let (ready, chunk_hits) = match redactor.push(&service.redactor, &action, &chunk) {
+                    Ok(result) => result,
+                    Err(error) => {
+                        let _ = sender
+                            .send(Err("sensitive-data detector failed closed".into()))
+                            .await;
+                        return Err(error);
+                    }
+                };
+                hits.merge(chunk_hits);
+                if !ready.is_empty() && sender.send(Ok(ready)).await.is_err() {
+                    return Err(SensitiveDetectionError);
+                }
+            }
+            if received != expected_len {
+                let _ = sender
+                    .send(Err("request body ended before its declared length".into()))
+                    .await;
+                return Err(SensitiveDetectionError);
+            }
+            let (tail, tail_hits) = redactor.finish(&service.redactor, &action)?;
+            hits.merge(tail_hits);
+            if !tail.is_empty() && sender.send(Ok(tail)).await.is_err() {
+                return Err(SensitiveDetectionError);
+            }
+            Ok(hits)
+        });
+        let upstream = self
+            .forwarder
+            .forward_body_stream(request, receiver)
+            .await
+            .map_err(|error| WireResponse::Refused {
+                message: error.to_string(),
+            })?;
+        let request_hits = producer
+            .await
+            .map_err(|_| WireResponse::Refused {
+                message: "request transform task failed closed".into(),
+            })?
+            .map_err(|_| WireResponse::Refused {
+                message: "request transform failed closed".into(),
+            })?;
+        flow.redaction_hits.merge(request_hits);
+        self.transform_response_stream(flow, upstream).await
+    }
+
+    async fn transform_response_stream(
+        self: &Arc<Self>,
+        mut flow: PreparedFlow,
+        mut upstream: ForwardStreamResponse,
+    ) -> Result<ForwardStreamResponse, WireResponse> {
         // Reinject and redact response headers before any body byte can cross
         // to the guest. HTTP transfer framing belongs to the upstream leg, not
         // FlowMux; remove it because transforms may change decoded length.
@@ -1707,6 +1914,7 @@ impl SubstitutionService {
         let service = Arc::clone(self);
         tokio::spawn(async move {
             let mut redactor = StreamingRedactor::new();
+            let mut reinjector = StreamingReinjector::new();
             while let Some(next) = upstream.body.recv().await {
                 let chunk = match next {
                     Ok(chunk) => chunk,
@@ -1715,31 +1923,45 @@ impl SubstitutionService {
                         return;
                     }
                 };
-                let mut response = ForwardResponse {
-                    status: response_status,
-                    headers: Vec::new(),
-                    body: chunk,
-                };
-                reinject_proofs.extend(flow.replacement_flow.reinject_response(&mut response));
-                let (ready, hits) = match redactor.push(
-                    &service.redactor,
-                    &flow.redaction_action,
-                    &response.body,
-                ) {
-                    Ok(result) => result,
-                    Err(_) => {
-                        let _ = sender
-                            .send(Err(ForwardError::Failed(
-                                "sensitive-data detector failed closed".into(),
-                            )))
-                            .await;
-                        return;
-                    }
-                };
+                let (reintroduced, proofs) = reinjector.push(&mut flow.replacement_flow, &chunk);
+                reinject_proofs.extend(proofs);
+                let (ready, hits) =
+                    match redactor.push(&service.redactor, &flow.redaction_action, &reintroduced) {
+                        Ok(result) => result,
+                        Err(_) => {
+                            let _ = sender
+                                .send(Err(ForwardError::Failed(
+                                    "sensitive-data detector failed closed".into(),
+                                )))
+                                .await;
+                            return;
+                        }
+                    };
                 flow.redaction_hits.merge(hits);
                 if !ready.is_empty() && sender.send(Ok(ready)).await.is_err() {
                     return;
                 }
+            }
+            let (reintroduced_tail, proofs) = reinjector.finish(&mut flow.replacement_flow);
+            reinject_proofs.extend(proofs);
+            let (ready, hits) = match redactor.push(
+                &service.redactor,
+                &flow.redaction_action,
+                &reintroduced_tail,
+            ) {
+                Ok(result) => result,
+                Err(_) => {
+                    let _ = sender
+                        .send(Err(ForwardError::Failed(
+                            "sensitive-data detector failed closed".into(),
+                        )))
+                        .await;
+                    return;
+                }
+            };
+            flow.redaction_hits.merge(hits);
+            if !ready.is_empty() && sender.send(Ok(ready)).await.is_err() {
+                return;
             }
             let (tail, hits) = match redactor.finish(&service.redactor, &flow.redaction_action) {
                 Ok(result) => result,
@@ -2718,6 +2940,117 @@ mod server_tests {
             service = service.with_reversible_replacement_policy(policy);
         }
         (Arc::new(service), ph, forwarder, dir)
+    }
+
+    #[tokio::test]
+    async fn flowmux_request_body_streams_through_split_token_redaction() {
+        let (service, placeholder, forwarder, _dir) =
+            service_with("sk-live-zzz", &["api.openai.com"]);
+        let secret = b"sk-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let split = 13;
+        let mut first = vec![b'x'; STREAM_TRANSFORM_OVERLAP - split];
+        first.extend_from_slice(&secret[..split]);
+        let second = secret[split..].to_vec();
+        let body_len = (first.len() + second.len()) as u64;
+        let (sender, receiver) = tokio::sync::mpsc::channel(4);
+        sender.send(Zeroizing::new(first)).await.unwrap();
+        sender.send(Zeroizing::new(second)).await.unwrap();
+        drop(sender);
+
+        let mut response = service
+            .process_body_stream(
+                mvm_core::substitution_wire::HttpFlowHead {
+                    method: "POST".into(),
+                    url: "https://api.openai.com/v1".into(),
+                    headers: vec![("authorization".into(), format!("Bearer {placeholder}"))],
+                    body_len,
+                },
+                receiver,
+            )
+            .await
+            .expect("streamed request");
+        let mut response_body = Vec::new();
+        while let Some(chunk) = response.body.recv().await {
+            response_body.extend_from_slice(&chunk.unwrap());
+        }
+        assert_eq!(response_body, b"pong");
+
+        let seen = forwarder.seen.lock().unwrap();
+        let request = seen.as_ref().expect("forwarded request");
+        assert!(
+            !request
+                .body
+                .windows(secret.len())
+                .any(|window| window == secret),
+            "split secret crossed the request inspector"
+        );
+        assert_eq!(request.headers[0].1, "Bearer sk-live-zzz");
+    }
+
+    #[tokio::test]
+    async fn signing_flow_uses_the_bounded_replay_buffer_before_forwarding() {
+        let dir = tempdir().unwrap();
+        let store = FileSecretStore::with_dir(dir.path());
+        store
+            .put(
+                "local",
+                "hook",
+                &SecretBox::new(Box::new("Jefe".to_string())),
+            )
+            .unwrap();
+        let resolver: Arc<dyn SecretResolver> =
+            Arc::new(LocalResolver::new("local", Arc::new(store)));
+        let mut registry = SubstitutionRegistry::new();
+        let placeholder = registry
+            .mint(SecretRef {
+                name: "hook".into(),
+                mount: SecretMount::Env { var: "K".into() },
+                auth_type: AuthType::Hmac,
+                allowed_hosts: vec!["hooks.example.com".into()],
+                sigv4: None,
+            })
+            .as_str()
+            .to_string();
+        let forwarder = Arc::new(MockForwarder {
+            seen: Mutex::new(None),
+        });
+        let service = Arc::new(SubstitutionService::new(
+            Arc::new(registry),
+            resolver,
+            forwarder.clone(),
+        ));
+        let body = b"what do ya want for nothing?";
+        let (sender, receiver) = tokio::sync::mpsc::channel(2);
+        sender
+            .send(Zeroizing::new(body[..10].to_vec()))
+            .await
+            .unwrap();
+        sender
+            .send(Zeroizing::new(body[10..].to_vec()))
+            .await
+            .unwrap();
+        drop(sender);
+        let mut response = service
+            .process_body_stream(
+                mvm_core::substitution_wire::HttpFlowHead {
+                    method: "POST".into(),
+                    url: "https://hooks.example.com/event".into(),
+                    headers: vec![("x-sig".into(), placeholder)],
+                    body_len: body.len() as u64,
+                },
+                receiver,
+            )
+            .await
+            .expect("signed request");
+        while response.body.recv().await.is_some() {}
+
+        let seen = forwarder.seen.lock().unwrap();
+        let request = seen.as_ref().expect("forwarded request");
+        assert_eq!(request.body, body);
+        assert!(request.headers.iter().any(|(name, value)| {
+            name.eq_ignore_ascii_case("x-mvm-signature")
+                && value == "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
+        }));
     }
 
     /// End-to-end over a **real AF_VSOCK** connection (Linux vsock loopback,
