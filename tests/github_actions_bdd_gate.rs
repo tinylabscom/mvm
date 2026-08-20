@@ -73,6 +73,7 @@ fn canonical_bdd_workflow_runs_a_kvm_live_witness_in_the_merge_queue() {
         "github.event_name == 'workflow_dispatch'",
         "runs-on: ubuntu-latest",
         "FC_VERSION: v1.14.1",
+        "packages: libcap-ng-dev lld qemu-system-x86 qemu-utils",
         "sudo chmod 666 /dev/kvm",
         "run: just bdd-live-ci",
     ] {
@@ -96,6 +97,7 @@ fn live_bdd_recipe_opts_in_and_selects_only_the_fast_ci_witness() {
 
     assert!(recipe.contains("MVM_BDD_LIVE=1"));
     assert!(recipe.contains("MVM_BDD_CI_LIVE_ONLY=1"));
+    assert!(recipe.contains("CARGO_BIN_EXE_mvmctl=\"${CARGO_TARGET_DIR:-target}/debug/mvmctl\""));
     assert!(!recipe.contains("--tags"));
 }
 
