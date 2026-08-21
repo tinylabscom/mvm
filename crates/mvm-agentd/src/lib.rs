@@ -36,6 +36,8 @@ pub mod entrypoint;
 /// threads, so a consumer that blocks — a host that stopped reading — cannot
 /// defer the child's deadline or grow the pump's queue without bound.
 pub mod entrypoint_stream;
+/// Boot-validated optional extension executables.
+pub mod extension;
 /// Guest-side FlowMux client for the converged single networking path.
 #[cfg(feature = "flowmux-async")]
 pub mod flowmux;

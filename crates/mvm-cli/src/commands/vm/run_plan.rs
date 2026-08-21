@@ -398,7 +398,9 @@ fn synthesis_input_for_app<'a>(
         audit_labels: Default::default(),
         agent_verbs: None,
         services: Vec::new(),
+        extensions: Vec::new(),
         stream_retention: Default::default(),
+        attestation_mode: mvm_contract::plan::AttestationMode::Noop,
     })
 }
 

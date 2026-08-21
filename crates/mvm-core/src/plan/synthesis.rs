@@ -194,6 +194,9 @@ pub struct SynthesisInput<'a> {
     /// grant (`mvm_contract::stream::INPUT_GRANT_SERVICE`) — no dedicated field
     /// was needed, since `mvm_contract::stream::grants_input` reads this list.
     pub services: Vec<mvm_contract::protocol::broker::ServiceId>,
+    /// Verified optional extensions admitted for this exact workload. Empty
+    /// keeps extension resolution out of ordinary launch.
+    pub extensions: Vec<mvm_contract::protocol::extension_pack::ExtensionPlanBinding>,
     /// Inbound stream edges this workload is fed by. Empty (the default) means
     /// no other workload writes its stdin.
     pub stream_edges: Vec<mvm_contract::stream::StreamEdge>,
@@ -203,6 +206,10 @@ pub struct SynthesisInput<'a> {
     /// live and keeps nothing. Admitted rather than flagged so an absent
     /// transcript is attributable to a signed decision.
     pub stream_retention: StreamRetention,
+    /// Runtime attestation required by the signed plan. Ordinary launch
+    /// callers use `Noop`; assurance controllers may select a hardware mode
+    /// only from operator-owned configuration.
+    pub attestation_mode: AttestationMode,
 }
 
 impl<'a> SynthesisInput<'a> {
@@ -251,8 +258,10 @@ pub struct SynthesisInputBuilder<'a> {
     audit_labels: Option<AuditLabels>,
     agent_verbs: Option<Vec<crate::plan::VerbId>>,
     services: Option<Vec<mvm_contract::protocol::broker::ServiceId>>,
+    extensions: Option<Vec<mvm_contract::protocol::extension_pack::ExtensionPlanBinding>>,
     stream_edges: Option<Vec<mvm_contract::stream::StreamEdge>>,
     stream_retention: Option<StreamRetention>,
+    attestation_mode: Option<AttestationMode>,
 }
 
 impl<'a> SynthesisInputBuilder<'a> {
@@ -293,8 +302,10 @@ impl<'a> SynthesisInputBuilder<'a> {
             audit_labels: None,
             agent_verbs: None,
             services: None,
+            extensions: None,
             stream_edges: None,
             stream_retention: None,
+            attestation_mode: None,
         }
     }
 
@@ -535,6 +546,16 @@ impl<'a> SynthesisInputBuilder<'a> {
         self
     }
 
+    /// Set verified optional extension bindings.
+    #[must_use]
+    pub fn extensions(
+        mut self,
+        extensions: Vec<mvm_contract::protocol::extension_pack::ExtensionPlanBinding>,
+    ) -> Self {
+        self.extensions = Some(extensions);
+        self
+    }
+
     /// Set `stream_edges`.
     #[must_use]
     pub fn stream_edges(mut self, stream_edges: Vec<mvm_contract::stream::StreamEdge>) -> Self {
@@ -546,6 +567,13 @@ impl<'a> SynthesisInputBuilder<'a> {
     #[must_use]
     pub fn stream_retention(mut self, stream_retention: StreamRetention) -> Self {
         self.stream_retention = Some(stream_retention);
+        self
+    }
+
+    /// Set the runtime attestation mode signed into the execution plan.
+    #[must_use]
+    pub fn attestation_mode(mut self, attestation_mode: AttestationMode) -> Self {
+        self.attestation_mode = Some(attestation_mode);
         self
     }
 
@@ -622,12 +650,14 @@ impl<'a> SynthesisInputBuilder<'a> {
             services: self
                 .services
                 .ok_or(BuilderError::missing("SynthesisInput", "services"))?,
+            extensions: self.extensions.unwrap_or_default(),
             stream_edges: self
                 .stream_edges
                 .ok_or(BuilderError::missing("SynthesisInput", "stream_edges"))?,
             stream_retention: self
                 .stream_retention
                 .ok_or(BuilderError::missing("SynthesisInput", "stream_retention"))?,
+            attestation_mode: self.attestation_mode.unwrap_or(AttestationMode::Noop),
         })
     }
 }
@@ -786,7 +816,7 @@ pub fn synthesize_plan(input: &SynthesisInput<'_>) -> Result<ExecutionPlan> {
         audit_labels,
         key_rotation: KeyRotationSpec { interval_days: 0 },
         attestation: AttestationRequirement {
-            mode: AttestationMode::Noop,
+            mode: input.attestation_mode.clone(),
         },
         release_pin: None,
         post_run: PostRunLifecycle {
@@ -806,6 +836,7 @@ pub fn synthesize_plan(input: &SynthesisInput<'_>) -> Result<ExecutionPlan> {
         deps_volume: input.deps_volume.clone(),
         shares: input.shares.clone(),
         services: input.services.clone(),
+        extensions: input.extensions.clone(),
         stream_edges: input.stream_edges.clone(),
         stream_retention: input.stream_retention,
     };
@@ -925,8 +956,10 @@ mod tests {
             audit_labels: Default::default(),
             agent_verbs: None,
             services: Vec::new(),
+            extensions: Vec::new(),
             stream_edges: Vec::new(),
             stream_retention: Default::default(),
+            attestation_mode: AttestationMode::Noop,
         }
     }
 
@@ -1087,6 +1120,16 @@ mod tests {
         let plan = synthesize_plan(&input("myvm")).unwrap();
         assert_eq!(plan.attestation.mode, AttestationMode::Noop);
         assert!(plan.release_pin.is_none());
+    }
+
+    #[test]
+    fn carries_explicit_attestation_mode_into_the_plan() {
+        let mut input = input("attested-vm");
+        input.attestation_mode = AttestationMode::Tpm2;
+
+        let plan = synthesize_plan(&input).expect("explicit attestation mode synthesizes");
+
+        assert_eq!(plan.attestation.mode, AttestationMode::Tpm2);
     }
 
     #[test]

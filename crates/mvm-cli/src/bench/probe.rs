@@ -90,7 +90,9 @@ pub fn admit_probe_plan(
         audit_labels: Default::default(),
         agent_verbs: None,
         services: Vec::new(),
+        extensions: Vec::new(),
         stream_retention: Default::default(),
+        attestation_mode: mvm_contract::plan::AttestationMode::Noop,
     };
     let ledger = InMemoryNonceLedger::new();
     admit_for_run(
@@ -142,7 +144,7 @@ impl HeldProbeVm {
 #[cfg(feature = "libkrun-live")]
 impl Drop for HeldProbeVm {
     fn drop(&mut self) {
-        use mvm_core::vm_backend::{VmBackend, VmId};
+        use mvm_core::vm_backend::VmId;
 
         let backend = mvm_runtime::AnyBackend::from_hypervisor("libkrun").into_dyn();
         let _ = backend.stop(&VmId(self.vm_name.clone()));
@@ -179,7 +181,7 @@ pub fn boot_measure_once(vm_name: &str) -> Result<BootMarks> {
 /// can sample the live supervisor process footprint.
 #[cfg(feature = "libkrun-live")]
 pub fn boot_hold_once(vm_name: &str) -> Result<HeldProbeVm> {
-    use mvm_core::vm_backend::{VmBackend, VmStartConfig};
+    use mvm_core::vm_backend::VmStartConfig;
     use std::time::Instant;
 
     use mvm_hostd::plan_admission::populate_audit_substrate;

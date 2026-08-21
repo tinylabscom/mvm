@@ -1238,16 +1238,17 @@ mod tests {
         let endpoint = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
             std::fs::write(marker, b"1").unwrap();
-            stream.write_all(&[1]).unwrap();
+            let _ = stream.write_all(&[1]);
         });
 
-        wait_for_endpoint_session_with_timeout(
+        let result = wait_for_endpoint_session_with_timeout(
             "vm-1",
             dir.path(),
             std::time::Duration::from_secs(1),
-        )
-        .expect("the authenticated-session event admits the launch");
+        );
+        let _ = std::os::unix::net::UnixStream::connect(&ready_socket);
         endpoint.join().unwrap();
+        result.expect("the authenticated-session event admits the launch");
     }
 
     #[test]

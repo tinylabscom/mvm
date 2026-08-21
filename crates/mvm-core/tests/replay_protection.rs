@@ -77,6 +77,7 @@ fn fixture_plan(nonce: [u8; 16]) -> ExecutionPlan {
         deps_volume: None,
         shares: Vec::new(),
         services: Vec::new(),
+        extensions: Vec::new(),
         stream_edges: Vec::new(),
     }
 }

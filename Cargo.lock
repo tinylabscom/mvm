@@ -76,8 +76,6 @@ checksum = "5c00781b62009bed91093230d1cd103d6155b264a574c661876b33154a4fad58"
 [[package]]
 name = "am-fs-ext4"
 version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9703276ae3a212c463bfcbc8b3618086d35dc041a0299c463a6550cacf0218d5"
 dependencies = [
  "am-fs-core",
  "bitflags 2.13.0",
@@ -172,8 +170,6 @@ checksum = "c3d036a3c4ab069c7b410a2ce876bd74808d2d0888a82667669f8e783a898bf1"
 [[package]]
 name = "arrayref"
 version = "0.3.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "76a2e8124351fda1ef8aaaa3bbd7ebbcb486bbcd4225aca0aa0d84bb2db8fecb"
 
 [[package]]
 name = "arrayvec"

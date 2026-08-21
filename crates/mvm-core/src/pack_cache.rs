@@ -130,6 +130,13 @@ pub struct VerifiedPackDir {
     pub verified: VerifiedPack,
 }
 
+/// Exact manifest and directory returned by digest-pinned resolution.
+#[derive(Debug, Clone)]
+pub struct VerifiedPackRecord {
+    pub dir: VerifiedPackDir,
+    pub manifest: PackManifest,
+}
+
 #[derive(Debug, Error)]
 pub enum PackCacheError {
     #[error("pack verification failed: {0}")]
@@ -145,6 +152,8 @@ pub enum PackCacheError {
     ReservedFileName(String),
     #[error("no promoted version {hash:?} recorded for pack key {key:?}")]
     UnknownPackVersion { key: PackKey, hash: Sha256Hex },
+    #[error("cached pack manifest at {path} is missing or malformed")]
+    CachedManifestUnreadable { path: String },
 }
 
 fn io_at(path: &Path) -> impl Fn(std::io::Error) -> PackCacheError + '_ {
@@ -161,6 +170,19 @@ fn io_at(path: &Path) -> impl Fn(std::io::Error) -> PackCacheError + '_ {
 /// holds a still-verifying copy of this pack, that dir is returned unchanged; a
 /// promoted dir whose content no longer verifies is replaced.
 pub fn promote(
+    staged_root: &Path,
+    manifest: &PackManifest,
+    ctx: &PackVerifyCtx<'_>,
+) -> Result<VerifiedPackDir, PackCacheError> {
+    promote_at(&pack_cache_dir(), staged_root, manifest, ctx)
+}
+
+/// Verify and promote beneath an explicit content-addressed cache root.
+///
+/// Provider processes use this form so an empty inherited environment cannot
+/// redirect an admitted pack through `HOME` or `MVM_HOME`.
+pub fn promote_at(
+    cache_root: &Path,
     staged_root: &Path,
     manifest: &PackManifest,
     ctx: &PackVerifyCtx<'_>,
@@ -183,7 +205,7 @@ pub fn promote(
     // it and leave the cache exactly as it was.
     let verified = ctx.verify(manifest, staged_root)?;
 
-    let final_dir = pack_dir(manifest.outputs.pack_hash.as_str());
+    let final_dir = cache_root.join(manifest.outputs.pack_hash.as_str());
 
     // A pre-existing promoted dir that still verifies is authoritative — skip the
     // copy entirely. One that no longer verifies is poisoned and must be replaced.
@@ -197,7 +219,7 @@ pub fn promote(
         std::fs::remove_dir_all(&final_dir).map_err(io_at(&final_dir))?;
     }
 
-    let quarantine = new_quarantine_dir()?;
+    let quarantine = new_quarantine_dir_at(cache_root)?;
     match populate_and_rename(&quarantine, staged_root, manifest, &final_dir) {
         Ok(()) => Ok(VerifiedPackDir {
             root: final_dir,
@@ -369,6 +391,44 @@ pub fn resolve_pack(
         }
     }
     Ok(None)
+}
+
+/// Resolve and re-verify one exact content-addressed pack.
+///
+/// Unlike active-version resolution, this never falls back to another pack:
+/// a signed execution plan names one digest, so absence, tampering, kind
+/// mismatch, or revocation of that digest must refuse the launch.
+pub fn resolve_pack_digest(
+    kind: PackKind,
+    digest: &Sha256Hex,
+    ctx: &PackVerifyCtx<'_>,
+) -> Result<Option<VerifiedPackRecord>, PackCacheError> {
+    resolve_pack_digest_at(&pack_cache_dir(), kind, digest, ctx)
+}
+
+/// Resolve and re-verify an exact digest beneath an explicit cache root.
+pub fn resolve_pack_digest_at(
+    cache_root: &Path,
+    kind: PackKind,
+    digest: &Sha256Hex,
+    ctx: &PackVerifyCtx<'_>,
+) -> Result<Option<VerifiedPackRecord>, PackCacheError> {
+    let root = cache_root.join(digest.as_str());
+    if !root.is_dir() {
+        return Ok(None);
+    }
+    let manifest =
+        read_manifest(&root).ok_or_else(|| PackCacheError::CachedManifestUnreadable {
+            path: root.display().to_string(),
+        })?;
+    if manifest.outputs.pack_hash != *digest || manifest.kind != kind {
+        return Ok(None);
+    }
+    let verified = ctx.verify(&manifest, &root)?;
+    Ok(Some(VerifiedPackRecord {
+        dir: VerifiedPackDir { root, verified },
+        manifest,
+    }))
 }
 
 /// Why a compatible runtime/builder pack is or is not ready for instant launch.
@@ -773,8 +833,8 @@ pub fn prune_versions(keep_recent: usize, dry_run: bool) -> Result<Vec<Sha256Hex
     Ok(prunable)
 }
 
-fn new_quarantine_dir() -> Result<PathBuf, PackCacheError> {
-    let incoming = pack_cache_dir().join(QUARANTINE_DIR_NAME);
+fn new_quarantine_dir_at(cache_root: &Path) -> Result<PathBuf, PackCacheError> {
+    let incoming = cache_root.join(QUARANTINE_DIR_NAME);
     harden_dir(&incoming)?;
     let counter = QUARANTINE_COUNTER.fetch_add(1, Ordering::Relaxed);
     let dir = incoming.join(format!("{}-{}", std::process::id(), counter));
@@ -1026,6 +1086,34 @@ mod tests {
         assert!(expected.join("builder.img").exists());
         // Re-verify the promoted copy directly.
         verify_pack_at(&manifest, &expected, &policy, &trust, &rev).expect("promoted verifies");
+    }
+
+    #[test]
+    fn explicit_cache_promotion_and_resolution_never_consult_ambient_home() {
+        let ambient = TempDir::new().expect("ambient cache");
+        let mut env = TestEnv::new();
+        env.set("MVM_HOME", ambient.path());
+        let explicit = TempDir::new().expect("explicit cache");
+        let (staged, manifest) = staged_builder_pack();
+        let trust = trust_store();
+        let rev = good_revocation();
+        let policy = policy();
+        let ctx = PackVerifyCtx::ed25519(&policy, &trust, &rev);
+
+        let promoted = promote_at(explicit.path(), staged.path(), &manifest, &ctx)
+            .expect("promote under explicit root");
+        assert!(promoted.root.starts_with(explicit.path()));
+        assert!(!pack_dir(manifest.outputs.pack_hash.as_str()).exists());
+
+        let resolved = resolve_pack_digest_at(
+            explicit.path(),
+            PackKind::Builder,
+            &manifest.outputs.pack_hash,
+            &ctx,
+        )
+        .expect("resolve explicit pack")
+        .expect("pack exists");
+        assert_eq!(resolved.dir.root, promoted.root);
     }
 
     #[test]

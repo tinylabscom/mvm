@@ -682,7 +682,8 @@ mod linux {
     /// writeback ahead of that marker and makes kernel error accounting part of
     /// the guest result.
     fn finalize_persistent_nix_store() -> Result<(), String> {
-        if is_qemu() {
+        if !persistent_store_finalization_required(is_qemu(), is_mountpoint(STAGE0_NIX_STORE_MOUNT))
+        {
             return Ok(());
         }
 
@@ -694,6 +695,10 @@ mod linux {
         unmount(NIX_TARGET)?;
         unmount(STAGE0_NIX_STORE_MOUNT)?;
         Ok(())
+    }
+
+    fn persistent_store_finalization_required(qemu: bool, persistent_mounted: bool) -> bool {
+        !qemu && persistent_mounted
     }
 
     fn reject_ext4_errors(errors_count_path: &Path) -> Result<(), String> {
@@ -746,8 +751,7 @@ mod linux {
 
     fn format_ext4_with(mkfs: &Path, dev: &str) -> Result<(), String> {
         let blocks_4k = device_size_4k_blocks(dev)?;
-        let status = Command::new(mkfs)
-            .args(["-F", "-q", "-b", "4096", dev, &blocks_4k.to_string()])
+        let status = ext4_format_command(mkfs, dev, blocks_4k)
             .status()
             .map_err(|e| format!("spawn {}: {e}", mkfs.display()))?;
         if !status.success() {
@@ -758,6 +762,16 @@ mod linux {
             ));
         }
         Ok(())
+    }
+
+    fn ext4_format_command(mkfs: &Path, dev: &str, blocks_4k: u64) -> Command {
+        let mut command = Command::new(mkfs);
+        command
+            .args(["-F", "-q", "-b", "4096", "-L"])
+            .arg(mvm_build::rootfs::STAGE0_NIX_STORE_EXT4_LABEL)
+            .arg(dev)
+            .arg(blocks_4k.to_string());
+        command
     }
 
     fn device_size_4k_blocks(dev: &str) -> Result<u64, String> {
@@ -1321,6 +1335,14 @@ mod linux {
         Ok(find_seed_bin_in(store, "nix").is_ok() && find_seed_cacert_in(store).is_ok())
     }
 
+    fn nul_terminated_c_chars(chars: &[libc::c_char]) -> Vec<u8> {
+        chars
+            .iter()
+            .take_while(|&&c| c != 0)
+            .map(|&c| u8::from_ne_bytes(c.to_ne_bytes()))
+            .collect()
+    }
+
     /// `uname -m` via libc (no coreutils in the seed). aarch64 / x86_64.
     fn machine_arch() -> Result<String, String> {
         let mut uts: libc::utsname = unsafe { std::mem::zeroed() };
@@ -1328,12 +1350,7 @@ mod linux {
         if unsafe { libc::uname(&mut uts) } != 0 {
             return Err("uname() failed".into());
         }
-        let bytes: Vec<u8> = uts
-            .machine
-            .iter()
-            .take_while(|&&c| c != 0)
-            .map(|&c| c as u8)
-            .collect();
+        let bytes = nul_terminated_c_chars(&uts.machine);
         Ok(String::from_utf8_lossy(&bytes).into_owned())
     }
 
@@ -1395,6 +1412,35 @@ mod linux {
         }
 
         #[test]
+        fn c_char_bytes_preserve_bytes_and_stop_at_nul() {
+            let chars: [libc::c_char; 5] = [109, 118, 109, 0, 120];
+            assert_eq!(super::nul_terminated_c_chars(&chars), b"mvm");
+        }
+
+        #[test]
+        fn guest_ext4_format_pins_stage0_store_label_and_block_count() {
+            let command = super::ext4_format_command(
+                std::path::Path::new("/sbin/mkfs.ext4"),
+                "/dev/vda",
+                4096,
+            );
+            assert_eq!(command.get_program(), "/sbin/mkfs.ext4");
+            assert_eq!(
+                command.get_args().collect::<Vec<_>>(),
+                [
+                    "-F",
+                    "-q",
+                    "-b",
+                    "4096",
+                    "-L",
+                    mvm_build::rootfs::STAGE0_NIX_STORE_EXT4_LABEL,
+                    "/dev/vda",
+                    "4096",
+                ]
+            );
+        }
+
+        #[test]
         fn purge_stale_nix_builder_home_removes_leftover_and_tolerates_absence() {
             let root = tempfile::tempdir().expect("tempdir");
             // Clean boot: no `/homeless-shelter` present — a no-op, never an error.
@@ -1418,6 +1464,14 @@ mod linux {
             std::fs::write(&errors, "7\n").expect("write nonzero count");
             let error = super::reject_ext4_errors(&errors).expect_err("errors must fail");
             assert!(error.contains("7 filesystem error(s)"), "{error}");
+        }
+
+        #[test]
+        fn ext4_finalization_applies_only_to_a_mounted_libkrun_store() {
+            assert!(super::persistent_store_finalization_required(false, true));
+            assert!(!super::persistent_store_finalization_required(false, false));
+            assert!(!super::persistent_store_finalization_required(true, true));
+            assert!(!super::persistent_store_finalization_required(true, false));
         }
 
         #[test]

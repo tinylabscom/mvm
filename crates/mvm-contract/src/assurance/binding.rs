@@ -37,6 +37,10 @@ pub struct SessionGrant {
     pub allowed_tools: Vec<ToolId>,
     /// Observation channels this grant authorizes.
     pub observation_scopes: Vec<ObservationScope>,
+    /// Maximum campaign steps this grant authorizes.
+    pub max_steps: u32,
+    /// Maximum candidate/output bytes this grant authorizes.
+    pub max_output_bytes: u32,
 }
 
 impl SessionGrant {

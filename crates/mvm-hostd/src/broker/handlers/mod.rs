@@ -42,7 +42,10 @@ pub fn register_bound_handlers(registry: &mut Registry, bindings: &[ServiceId]) 
     if bindings.contains(&host_assurance) {
         let handler = Arc::new(HostAssuranceV1Handler::new());
         let as_service: Arc<dyn mvm_core::protocol::handler::ServiceHandler> = handler.clone();
-        registry.register(as_service);
+        registry.register(Arc::clone(&as_service));
+        registry
+            .register_capability(as_service, HostAssuranceV1Handler::capability_descriptor())
+            .expect("built-in assurance capability descriptor is valid");
         // Publish it process-wide so the admit path can open a session on the
         // same instance the broker dispatches against. A second registry in one
         // process keeps its own handler and does not displace the first — the

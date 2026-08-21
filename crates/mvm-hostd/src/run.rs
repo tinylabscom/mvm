@@ -223,7 +223,9 @@ pub fn admit_and_boot_local(
         audit_labels: Default::default(),
         agent_verbs: None,
         services: Vec::new(),
+        extensions: Vec::new(),
         stream_retention: Default::default(),
+        attestation_mode: mvm_contract::plan::AttestationMode::Noop,
     };
 
     let path_string = |p: &Path| p.to_string_lossy().into_owned();
@@ -267,6 +269,7 @@ pub fn admit_and_boot_local(
             ledger: ctx.ledger,
             host_signer_keys_dir: ctx.host_signer_keys_dir,
             bundle_ctx: None,
+            extension_ctx: None,
             variant: mvm_core::plan::Variant::Dev,
             policy_bundle: None,
             emitter: ctx.emitter,

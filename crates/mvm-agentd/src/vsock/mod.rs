@@ -28,7 +28,8 @@ mod verb_grant;
 mod workload_privilege;
 
 pub use activation::{
-    ActivateEnvironment, RootfsConfig, RuntimeOverlayConfig, VolumeConfig, VolumeConfigKind,
+    ActivateEnvironment, ExtensionCancellation, ExtensionConfig, ExtensionDispatch, RootfsConfig,
+    RuntimeOverlayConfig, VolumeConfig, VolumeConfigKind,
 };
 pub use api::{
     PRIMED_MARKER_PATH, PostRestoreReply, checkpoint_integrations, interpret_primed_status,
@@ -64,8 +65,8 @@ pub use response_payloads::{
 pub use rpc::{
     ControlSession, RpcError, RunEntrypointCall, call_streaming, call_unary, check_response,
     negotiate_protocol, probe_agent_ready, read_exec_stream, require_capabilities,
-    send_close_stream_input, send_exec_streaming, send_run_code_streaming, send_run_detached,
-    send_run_entrypoint, send_stream_input,
+    send_cancel_extension, send_close_stream_input, send_exec_streaming, send_run_code_streaming,
+    send_run_detached, send_run_entrypoint, send_run_extension, send_stream_input,
 };
 pub use verb_grant::{
     HOST_SIGNER_PUB_CMDLINE_KEY, HOST_SIGNER_PUBKEY_PATH, TrustDecision, VERB_TRUST_POLICY_PATH,

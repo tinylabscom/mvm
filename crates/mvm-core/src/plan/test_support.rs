@@ -33,6 +33,7 @@ pub struct PlanFixture {
     valid_from: Option<DateTime<Utc>>,
     valid_until: Option<DateTime<Utc>>,
     services: Vec<ServiceId>,
+    extensions: Vec<mvm_contract::protocol::extension_pack::ExtensionPlanBinding>,
     stream_edges: Vec<mvm_contract::stream::StreamEdge>,
     stream_retention: StreamRetention,
     audit_labels: BTreeMap<String, String>,
@@ -51,6 +52,7 @@ impl Default for PlanFixture {
             valid_from: None,
             valid_until: None,
             services: Vec::new(),
+            extensions: Vec::new(),
             stream_edges: Vec::new(),
             stream_retention: StreamRetention::default(),
             audit_labels: BTreeMap::new(),
@@ -98,6 +100,14 @@ impl PlanFixture {
     /// broker's dispatch gate and the SDK-sidecar attachment decision.
     pub fn services(mut self, services: Vec<ServiceId>) -> Self {
         self.services = services;
+        self
+    }
+
+    pub fn extensions(
+        mut self,
+        extensions: Vec<mvm_contract::protocol::extension_pack::ExtensionPlanBinding>,
+    ) -> Self {
+        self.extensions = extensions;
         self
     }
 
@@ -199,6 +209,7 @@ impl PlanFixture {
             deps_volume: None,
             shares: Vec::new(),
             services: self.services,
+            extensions: self.extensions,
             stream_edges: self.stream_edges.clone(),
             stream_retention: self.stream_retention,
         }
