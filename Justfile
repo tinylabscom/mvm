@@ -273,7 +273,10 @@ test-cargo:
 
 # not-yet-implemented coverage and are filtered out by the runner.
 bdd:
-    ./scripts/cargo-fast.sh build --bin mvmctl
+    # The wasm backend is required for the hermetic lifecycle teardown scenario
+    # (it is the only backend that can exercise real exit-code propagation on a
+    # macOS host without a VM or builder VM).
+    ./scripts/cargo-fast.sh build --bin mvmctl --features "mvm-cli/wasm-backend mvm-runtime/wasm-backend"
     ./scripts/cargo-fast.sh build -p xtask
     just sdk-install-typescript
     just sdk-build-typescript

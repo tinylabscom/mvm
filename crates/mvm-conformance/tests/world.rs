@@ -336,6 +336,8 @@ pub struct CliWorld {
     pub sealed_rootfs: Option<Vec<u8>>,
     /// dm-verity root hash recorded for `sealed_rootfs`.
     pub sealed_rootfs_roothash: Option<String>,
+    /// Result of the MVM-SEC-05 fuzz-surface scenario's deterministic corpus run.
+    pub fuzz_run: Option<FuzzRun>,
     /// Tempdir backing a secrets/PII scenario's isolated secret store.
     pub secret_tmp: Option<tempfile::TempDir>,
     /// Raw value stored for the current secret scenario.
@@ -429,6 +431,21 @@ pub enum WarmClaimOutcome {
         /// before any clone or boot side effect.
         any_fork_occurred: bool,
     },
+}
+
+/// Outcome of parsing one MVM-SEC-05 fuzz corpus entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParseOutcome {
+    /// The parser returned an error, None, or some value — no panic.
+    Completed,
+    /// The parser panicked.
+    Panicked,
+}
+
+/// Result of the MVM-SEC-05 fuzz-surface scenario's deterministic corpus run.
+#[derive(Debug, Clone)]
+pub struct FuzzRun {
+    pub results: Vec<(String, ParseOutcome)>,
 }
 
 /// The observable, runner-owned facts a successful guarded fork produces:

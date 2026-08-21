@@ -99,6 +99,9 @@ flate2.workspace = true
 # set the `mvmctl` binary builds with, so this adds no new closure. Dev-only:
 # `cargo tree -p mvm-conformance -e no-dev` must not gain it.
 mvm-cli = { workspace = true, features = ["builder-vm", "pure-mkfs"] }
+# The MVM-SEC-05 fuzz-surface scenario exercises the libkrun supervisor-config
+# JSON parser. Dev-only: the BDD harness is not a dependency of any shipped crate.
+libkrun-sys = { workspace = true }
 
 [lints]
 workspace = true
