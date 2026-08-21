@@ -14,7 +14,9 @@ for detailed scope and acceptance criteria.
       kernel, initramfs, runtime overlay, and OCI guest shims. The release
       overlay carries all six shims, contract tests prevent producer/consumer
       drift, and worktree-stable Cargo targets reuse dependencies without
-      weakening content-keyed final caches. The owning plan is
+      weakening content-keyed final caches. Production OCI admission runs
+      before artifact preparation, so a refused pull starts no build or
+      download. The owning plan is
       `specs/plans/2026-08-20-artifact-acquisition-contract.md`.
 
 - [x] **Issue #2657 — live BDD is visible and merge-gated.** Capability skips

@@ -34,6 +34,8 @@ and report the cold-build phase clearly.
 - `cargo clippy --workspace --all-targets -- -D warnings`
 - `just check-gated`
 - release-channel policy and source-detection tests
+- production OCI policy preflight regression proving rejection precedes guest
+  runtime preparation
 - release-asset structure and guest-binary-list synchronization gates
 - project builder-VM realization of
   `nix/images/runtime-overlay#runtime-overlay` for `aarch64-linux`, including

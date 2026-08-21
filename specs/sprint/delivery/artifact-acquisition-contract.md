@@ -17,7 +17,8 @@ producer, installer, and guest injection lists from drifting.
 `mvmctl bootstrap` prepares every launch-critical artifact rather than stopping
 after the builder VM and kernel. Image pull and every image-backed launch entry
 point also pass through the same OCI-runtime preparation seam, after production
-digest admission but before materialization.
+digest and registry-policy admission but before materialization. A rejected
+production pull therefore never starts a contributor build or release download.
 
 Contributor cold builds are now a named phase with elapsed-time and cache
 feedback. Cargo output is quiet by default and available with `-v`. Intermediate
@@ -33,6 +34,7 @@ stale output cannot be selected.
 - `cargo check --workspace`
 - `cargo clippy --workspace --all-targets -- -D warnings`
 - `just check-gated`
+- focused production-policy-before-artifact-preparation regression
 - `cargo test -p mvm-build --features release-channel --lib official_build_does_not_detect`
 - `cargo run -p xtask -- check-guest-binary-lists`
 - project builder-VM realization of
