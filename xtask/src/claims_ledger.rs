@@ -210,6 +210,25 @@ pub fn ci_anchors(content: &str) -> Vec<String> {
         if let Some(rest) = step_name {
             anchors.extend(parenthesised_tokens(rest));
         }
+
+        // The policy driver runs every gate in one step, so the step name
+        // cannot carry sixty-three parenthesised tokens. It anchors them
+        // all instead, read from the same table it executes.
+        //
+        // Without this, collapsing the lane's per-gate steps would have
+        // silently unbacked every claim citing one — the witness would
+        // stop resolving while the gate kept running, which is the
+        // opposite of what this ledger is for.
+        if trimmed.strip_prefix("run:").is_some_and(|run| {
+            run.split_whitespace()
+                .eq(["cargo", "run", "-p", "xtask", "--", "check-all"])
+        }) {
+            anchors.extend(
+                crate::check_all::GATES
+                    .iter()
+                    .map(|(name, _)| name.to_string()),
+            );
+        }
     }
     anchors
 }
