@@ -3,7 +3,7 @@
 Backing: preview
 Validation: none
 
-**Status: IN PROGRESS — Workstream 0 complete, Workstream 1 first slice complete, Workstream 2 engine packaging in progress**  
+**Status: IN PROGRESS — Workstream 0 complete, Workstream 1 first slice merged in PR #2776, Workstream 2 engine packaging code landed; `nix build .#qemu-wasm-engine` verification pending on the Linux builder VM**  
 **Opened:** 2026-08-15  
 **ADR:** `specs/adrs/049-weblinux-browser-backend-and-local-builder.md`  
 **Numbered against:** `main@0c9ef804db4b3a89fdd72190a987fea87ff9e664`  
