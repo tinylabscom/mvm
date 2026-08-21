@@ -1169,6 +1169,12 @@ let
     for applet in $(${busybox}/bin/busybox --list); do
       ln -sf /bin/busybox "$out/bin/$applet"
     done
+    # mvm-setpriv is a dedicated static-musl helper used by the guest
+    # PID 1 and by mvm-host-vm-init. Install it alongside busybox so it
+    # is on PATH; keep the busybox "setpriv" applet available for any
+    # ad-hoc use that does not need the custom flags.
+    cp ${setprivPkg}/bin/mvm-setpriv "$out/bin/mvm-setpriv"
+    chmod 0755 "$out/bin/mvm-setpriv"
     # /sbin/init is what the kernel actually execs at boot (when
     # there's no init=/init kernel param). We point both at our
     # custom init script so either path works.

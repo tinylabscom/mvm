@@ -148,21 +148,28 @@ pub fn run_before_build_hook(rootfs_path: &Path) -> Result<(), BuilderHookError>
 }
 
 fn mount_rootfs(rootfs_path: &Path) -> Result<(), BuilderHookError> {
-    // `loop` asks the kernel to auto-allocate a loop device for the
-    // file-backed ext4 image. The builder VM kernel keeps BLK_DEV_LOOP
-    // enabled for image assembly.
-    mount(
-        Some(rootfs_path.as_os_str()),
-        MOUNT_POINT,
-        Some("ext4"),
-        MsFlags::empty(),
-        Some("loop"),
-    )
-    .map_err(|e| BuilderHookError::MountRootfs {
-        rootfs: rootfs_path.to_path_buf(),
-        mount_point: MOUNT_POINT,
-        source: std::io::Error::other(format!("{e}")),
-    })
+    // util-linux mount -o loop allocates a loop device for the
+    // file-backed ext4 image. The nix mount(2) syscall wrapper
+    // lacks LOOP_SET_FD, so shell out.
+    let status = std::process::Command::new("mount")
+        .arg("-o")
+        .arg("loop")
+        .arg(rootfs_path)
+        .arg(MOUNT_POINT)
+        .status()
+        .map_err(|e| BuilderHookError::MountRootfs {
+            rootfs: rootfs_path.to_path_buf(),
+            mount_point: MOUNT_POINT,
+            source: e,
+        })?;
+    if !status.success() {
+        return Err(BuilderHookError::MountRootfs {
+            rootfs: rootfs_path.to_path_buf(),
+            mount_point: MOUNT_POINT,
+            source: std::io::Error::other(format!("mount exited with status {status}")),
+        });
+    }
+    Ok(())
 }
 
 fn bind_mount(source: &str, target: &str) -> Result<(), std::io::Error> {

@@ -1,4 +1,6 @@
 /target
+# Local ad-hoc tool downloads (e.g. act binary).
+/.bin/
 # Swift Package Manager build output (mvm-providers/swift, mvm-vz-supervisor).
 **/.build/
 .playwright-mcp/
