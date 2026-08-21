@@ -2450,6 +2450,20 @@ Cross-sprint work tracked in `specs/plans/2026-08-15-merge-queue-throughput.md`.
 - [ ] Land the workflow change, pass Linux all-target Clippy, and apply and
       verify the live merge-queue and required-check settings.
 
+## Plan 338 — WebLinux browser backend, builder, workbench, and `mvmd` deployment client
+
+Cross-sprint work tracked in `specs/plans/338-weblinux-browser-backend-builder-workbench-and-mvmd-deploy.md`.
+
+- [x] 0.1 Add ADR-049 and Plan 338 with `Backing:`/`Validation:` headers.
+- [x] 0.2 Update ADR-024 to reflect the browser-Linux implementation and link ADR-049.
+- [x] 0.3 Update ADR-006 to allow `mvmctl deploy` as a client operation to `mvmd`.
+- [x] 1.1 Add `BackendKind::WebLinux` and pure capability metadata.
+- [x] 1.7 Define minimal portable lifecycle protocol skeleton.
+- [x] 2.1 Pin and package a reproducible QEMU-Wasm engine through Nix.
+      Pinned upstream revisions and added `nix/packages/qemu-wasm.nix`;
+      build is queued for the Linux builder VM.
+- [ ] 2.8 Boot an `mvm`-built x86_64 kernel under headless Chromium and record measurements.
+
 ## Appendix A — ADR consolidation clusters (~91 → ~15)
 
 | Canonical ADR (theme)                       | Merge these                                                                            |
