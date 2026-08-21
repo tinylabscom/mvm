@@ -362,7 +362,10 @@ ADR-001 §"Appendix: Cardoso minimum-viable-policy checklist".
     gate every PR. It lived in `ci-full.yml` until 2026-08-21, which was
     `workflow_dispatch`-only and had been triggered zero times since it
     was written: ADR-001's ledger cited `ci:app-deps-audit` for claim 11
-    the whole time, against a lane that had never once run. It exercises
+    the whole time, against a lane that had never once run. (`ci-full.yml`
+    still exists, as `Extended CI`, and now runs nightly — it kept the
+    lanes that are neither security-bearing nor duplicated by `ci.yml`,
+    including the repository's only macOS coverage.) It exercises
     `mvmctl build compile` on
     `examples/python/hello-app-with-deps/`, seals a clean + a high-CVE
     fixture via `mvm-build`'s `mvm-app-deps-fixture-tool` example,

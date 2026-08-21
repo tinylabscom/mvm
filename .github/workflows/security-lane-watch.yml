@@ -37,7 +37,7 @@ name: Security lane watch
 
 on:
   workflow_run:
-    workflows: ["Security", "Pack signing smoke"]
+    workflows: ["Security", "Pack signing smoke", "Extended CI"]
     types: [completed]
 
 permissions:

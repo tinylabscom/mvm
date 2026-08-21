@@ -859,6 +859,52 @@ mod tests {
         assert!(kernel.contains("push:"));
     }
 
+    /// Every security lane runs on a schedule someone will notice.
+    ///
+    /// This exists because the lanes below were deleted, not weakened:
+    /// `sealed-prod-allowlist` and `jailer-property` were removed with
+    /// `ci-full.yml` on the reasoning that the workflow had never been
+    /// triggered. It hadn't — the run count was zero and that was real —
+    /// but a security lane that has never run is one to start running.
+    /// Both now sit in `security.yml`, which is what
+    /// `security-lane-watch.yml` reports on.
+    #[test]
+    fn security_lanes_live_where_the_watcher_reads_them() {
+        let security = workflow("security.yml");
+        for lane in [
+            "sealed-prod-allowlist:",
+            "jailer-property:",
+            "app-deps-audit:",
+            "oci-hardening:",
+        ] {
+            assert!(
+                security.contains(lane),
+                "{lane} must live in security.yml — that is the workflow \
+                 security-lane-watch.yml watches, and these lanes back \
+                 numbered claims in ADR-001"
+            );
+        }
+
+        // Watched, and on a cadence. A lane only reachable by dispatch is
+        // one nobody runs; that is how these came to be dead in the first
+        // place.
+        let watcher = workflow("security-lane-watch.yml");
+        for (name, wf) in [
+            ("Security", "security.yml"),
+            ("Pack signing smoke", "pack-signing-smoke.yml"),
+            ("Extended CI", "ci-full.yml"),
+        ] {
+            assert!(
+                watcher.contains(name),
+                "security-lane-watch.yml must report on {name}"
+            );
+            assert!(
+                workflow(wf).contains("schedule:"),
+                "{wf} must run on a schedule, not dispatch alone"
+            );
+        }
+    }
+
     /// Only one workflow may publish a required check's name.
     ///
     /// Both of these build kernels from the same script, and both once

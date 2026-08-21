@@ -1,0 +1,455 @@
+name: Extended CI
+
+on:
+  # Nightly, plus operator dispatch. Pull requests use ci.yml, which is
+  # intentionally capped so day-to-day changes do not fan out into the
+  # platform and live-VM lanes.
+  #
+  # This was `workflow_dispatch` alone until 2026-08-21, and in that time
+  # it ran zero times — every lane below was dead, including the only
+  # macOS coverage in the repository. A lane nobody triggers is not a
+  # slower gate, it is an absent one, so the cadence is now automatic and
+  # its silence is detectable.
+  schedule:
+    - cron: "51 4 * * *"
+  workflow_dispatch:
+
+# Cancel a previous run when a new commit lands on the same branch.
+# Without this, the PR check panel accumulates stale failed runs from
+# superseded SHAs (we hit this on PRs #17 and #18). `main` runs are
+# never cancelled because the group is keyed on workflow + ref.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+# ── Lane shape ────────────────────────────────────────────────────────
+# Manual full-matrix workflow. Normal pull requests intentionally do
+# not invoke this file; they use ci.yml's four-job day-to-day surface.
+# Use this workflow when an operator wants all historical CI lanes
+# without cutting a release tag.
+#
+# Removed at various points:
+#   • The standalone `check` job — `clippy --all-targets` runs `cargo
+#     check` internally, so a separate `cargo check` lane was a wasted
+#     ~minute per PR.
+#   • The standalone `build-linux` job — `test` already runs `cargo
+#     build` + `cargo test` on ubuntu-latest, so `build-linux` was a
+#     duplicate.
+#   • The standalone `fmt` and `check-adr-coverage` jobs — each ran
+#     sub-minute work behind a full runner spin-up. Folded into the
+#     unified `lint` job so the three share one runner, one cache,
+#     one toolchain install. Save ~3 min wall-clock + 2 runner-
+#     minutes per PR run.
+jobs:
+
+
+  e2e:
+    name: E2E Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@nightly
+
+      # Plan 115 / ADR-065 — mvm-cli's build.rs needs zigbuild.
+      - uses: ./.github/actions/install-zigbuild
+
+      - name: Install system build deps (see test job for why)
+        run: sudo apt-get update && sudo apt-get install -y libcap-ng-dev
+
+      - name: Cache cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-e2e-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-e2e-
+
+      - name: Run E2E tests
+        # Keep this lane on end-to-end smoke targets that compile
+        # without live microVM host state.
+        #
+        # `runtime_boot_bench` is a COMPILE check here and nothing more. It
+        # self-skips unless `MVM_RUNTIME_BOOT_BENCH=1`, which this lane
+        # deliberately does not set, so it asserts nothing about boot latency.
+        # That assertion lives in ci.yml's `boot-latency` lane, which supplies
+        # a real image and /dev/kvm. Said plainly because the bare target name
+        # reads like latency coverage and is not.
+        run: cargo test --test smoke_run_json_receipt --test runtime_boot_bench
+
+  sdk-release-dry-run:
+    name: SDK release dry-run
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/publish-sdk.yml
+    with:
+      dry_run: true
+
+
+
+
+
+  # ── Lane: Builder VM image build (Linux, Plan 100 W2) ────────────
+  # Plan 100 W2 — "ensure `nix/images/builder-vm/` builds on Linux
+  # contributor hosts." Today the artifact is built on macOS via the
+  # libkrun-on-macOS path; Linux contributors (the ones Plan 100 will
+  # eventually make nested-libkrun-the-default for) have never had
+  # the eval *and* realise paths exercised end-to-end on a Linux
+  # runner.
+  #
+  # The eval-only `nix-flake-check` lane above catches eval bugs.
+  # This lane goes one step further: it actually runs `nix build` so
+  # a regression in the package set (kernel config, busybox version,
+  # toolchain pin) surfaces here, not when a Linux contributor next
+  # runs `mvmctl dev up` against an updated flake.
+  #
+  # Paths-gated to keep PR-time cost sane — `nix build` of the
+  # builder-VM image is bandwidth-heavy (~1-2 GB of substitutes on
+  # cold cache).
+  builder-vm-image-linux:
+    name: Builder VM image build (Linux, Plan 100 W2)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Detect builder-vm-touching paths
+        id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            builder_vm:
+              - 'nix/images/builder-vm/**'
+              - 'nix/lib/**'
+              # `mvm-host-vm-init` is a [[bin]] of mvm-build, not a crate of
+              # its own — the standalone directory this used to name was
+              # absorbed. A filter on a path that cannot exist never matches,
+              # so edits to the builder VM's PID 1 stopped triggering this
+              # lane silently.
+              - 'crates/mvm-build/src/bin/mvm-host-vm-init/**'
+
+      - name: Install Nix
+        if: steps.filter.outputs.builder_vm == 'true' || github.ref == 'refs/heads/main'
+        uses: DeterminateSystems/nix-installer-action@main
+
+      - name: Build builder-vm image
+        if: steps.filter.outputs.builder_vm == 'true' || github.ref == 'refs/heads/main'
+        # `--no-link` avoids the gc-root file; `--print-out-paths`
+        # gives us the store path to inspect afterward. The four
+        # outputs the flake commits to (per `flake.nix` line 14):
+        # `vmlinux`, `rootfs.ext4`, `cmdline.txt`, `manifest.json`.
+        #
+        # Plan 115 / ADR-065: the flake reads `MVM_HOST_BIN_DIR`
+        # under `--impure` to inject mvm-host-vm-init + mvm-egress-proxy
+        # via extraFiles. mvmctl normally extracts its embedded copy
+        # before invoking nix; CI uses placeholder files so the flake
+        # evaluates + builds (the rootfs will contain placeholder
+        # bytes at the binary install paths, which is fine for an
+        # eval-and-realise smoke).
+        run: |
+          set -euo pipefail
+          HOST_BIN_DIR=$(mktemp -d)
+          # Placeholder bytes — flake just needs the files to exist
+          # at the names the manifest declares.
+          : > "$HOST_BIN_DIR/mvm-host-vm-init"
+          : > "$HOST_BIN_DIR/mvm-egress-proxy"
+          chmod 0755 "$HOST_BIN_DIR"/mvm-*
+          MVM_HOST_BIN_DIR="$HOST_BIN_DIR" \
+            nix build "./nix/images/builder-vm#packages.x86_64-linux.default" \
+              --impure --no-link --print-out-paths \
+              > /tmp/builder-vm-store-path.txt
+          STORE_PATH=$(head -1 /tmp/builder-vm-store-path.txt)
+          echo "STORE_PATH=$STORE_PATH"
+          ls -la "$STORE_PATH/"
+
+      - name: Assert all four outputs exist
+        if: steps.filter.outputs.builder_vm == 'true' || github.ref == 'refs/heads/main'
+        # `nix build` returns 0 even when a non-fatal post-build hook
+        # squelches an output. Pin the contract by asserting every
+        # file the flake commits to is actually on disk. A future
+        # `flake.nix` change that drops one of these silently fails
+        # here, not in a contributor's `mvmctl dev up`.
+        run: |
+          set -euo pipefail
+          STORE_PATH=$(head -1 /tmp/builder-vm-store-path.txt)
+          for f in vmlinux rootfs.ext4 cmdline.txt manifest.json; do
+            if [ ! -e "$STORE_PATH/$f" ]; then
+              echo "::error::builder-vm output missing: $STORE_PATH/$f" >&2
+              exit 1
+            fi
+            ls -la "$STORE_PATH/$f"
+          done
+          echo "All four builder-vm outputs present."
+
+      - name: SHA-256 + size for visibility
+        if: steps.filter.outputs.builder_vm == 'true' || github.ref == 'refs/heads/main'
+        # Diff-grade visibility — a kernel-config change should show
+        # up as a different vmlinux hash, surfacing in the CI log
+        # without requiring downstream debugging.
+        run: |
+          set -euo pipefail
+          STORE_PATH=$(head -1 /tmp/builder-vm-store-path.txt)
+          (cd "$STORE_PATH" && sha256sum vmlinux rootfs.ext4 cmdline.txt manifest.json)
+          du -h "$STORE_PATH"/vmlinux "$STORE_PATH"/rootfs.ext4
+
+  # ── Lane: Apple (release-only) ────────────────────────────────────
+  # macOS regressions surface here, on release-tag pushes only. The
+  # PR-time lanes above run on Linux because macOS runners cost ~10×
+  # and the Darwin-specific surface in this codebase is narrow. If
+  # you need to verify a Darwin-specific change before cutting a real
+  # release, push a pre-release tag (e.g. `v0.0.0-rc.1`) — that's the
+  # one supported way to trigger this lane. workflow_dispatch is
+  # intentionally not enough.
+  apple:
+    name: Apple (release-only)
+    runs-on: macos-latest
+    # `cargo build --all-targets` builds the Rust-native per-VM host bins
+    # (workspace `[[bin]]`s in mvm-hostd) — no Swift build step.
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Cache cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-apple-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-apple-
+
+      - name: Build
+        run: cargo build --all-targets
+
+      - name: Run tests
+        run: cargo test
+
+  # ── Lane: libkrun (macOS Apple Silicon, paths-gated) ──
+  # macos-latest is ~10x the per-minute cost of ubuntu-latest (ADR-012),
+  # so this lane is path-gated: it only spins up the heavy steps when a
+  # PR touches libkrun code or its direct consumers, or on pushes to
+  # main where the cost is worth catching post-merge drift.
+  #
+  # What it validates that the Linux lanes don't:
+  #   - bindgen + libclang against the Homebrew libkrun.h is wired
+  #     correctly (the `libkrun-sys` feature compiles + links).
+  #   - the `mvm-libkrun-supervisor` binary builds.
+  #   - the sys::Context::* FFI round-trips against the real
+  #     libkrun.dylib (8 wrapper unit tests in libkrun-sys).
+  #   - LibkrunBackend's spawn / PID-file / signal logic compiles
+  #     and its non-FFI unit tests pass.
+  #
+  # End-to-end VM boot (plan 57 W4.3) is out of scope here - GitHub
+  # macOS runners don't expose Hypervisor.framework to user-mode
+  # processes, so `krun_start_enter` can't actually create a guest.
+  # The lane catches everything before that boundary.
+  libkrun-macos:
+    name: libkrun (macOS Apple Silicon)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Detect libkrun-touching paths
+        id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            libkrun:
+              - 'crates/deps/libkrun-sys/**'
+              - 'crates/mvm-runtime/src/libkrun.rs'
+              - 'crates/mvm-runtime/Cargo.toml'
+              - 'crates/mvm-providers/src/apple_container/**'
+              - '.github/workflows/ci.yml'
+
+      - name: Install Rust toolchain
+        if: steps.filter.outputs.libkrun == 'true' || github.ref == 'refs/heads/main'
+        uses: dtolnay/rust-toolchain@1.96.0
+        with:
+          components: clippy
+
+      - name: Install libkrun
+        if: steps.filter.outputs.libkrun == 'true' || github.ref == 'refs/heads/main'
+        # `libkrun` ships from Sergio Lopez's `slp/krun` Homebrew tap
+        # (not core homebrew). The bottle puts `libkrun.h` +
+        # `libkrun.dylib` under `/opt/homebrew/{include,lib}` on Apple
+        # Silicon - exactly the layout `crates/deps/libkrun-sys/build.rs`
+        # probes for.
+        run: |
+          brew tap slp/krun
+          brew install libkrun
+
+      - name: Cache cargo
+        if: steps.filter.outputs.libkrun == 'true' || github.ref == 'refs/heads/main'
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-libkrun-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-libkrun-
+
+      - name: Default-feature workspace build (no libkrun-sys)
+        if: steps.filter.outputs.libkrun == 'true' || github.ref == 'refs/heads/main'
+        # Sanity: the fallback path (no libkrun-sys) keeps compiling.
+        # Mirrors how every other workspace consumer that touches
+        # libkrun-sys builds.
+        run: cargo build -p libkrun-sys -p mvm-runtime
+
+      - name: Build libkrun-sys with libkrun-sys (lib + bin + examples)
+        if: steps.filter.outputs.libkrun == 'true' || github.ref == 'refs/heads/main'
+        run: cargo build -p libkrun-sys --features libkrun-sys --all-targets
+
+      - name: Test libkrun-sys with libkrun-sys
+        if: steps.filter.outputs.libkrun == 'true' || github.ref == 'refs/heads/main'
+        run: cargo test -p libkrun-sys --features libkrun-sys
+
+      - name: Test mvm-runtime (libkrun module)
+        if: steps.filter.outputs.libkrun == 'true' || github.ref == 'refs/heads/main'
+        run: cargo test -p mvm-runtime libkrun
+
+      - name: Clippy libkrun-sys --features libkrun-sys --all-targets
+        if: steps.filter.outputs.libkrun == 'true' || github.ref == 'refs/heads/main'
+        run: ./scripts/cargo-stable.sh clippy -p libkrun-sys --features libkrun-sys --all-targets -- -D warnings
+
+  # ── Workload spawn smoke (Plan 107 A2.4, runner-direct variant) ───
+  # Drives the real A2.2/A2.3 spawn path: the in-guest
+  # `mvm_host_vm_init::workload::start_workload` + `FirecrackerVmm`
+  # boot a *live* Firecracker workload microVM and the test asserts
+  # the kernel actually executed (then tears it down).
+  #
+  # Scope: the runner stands in for the host VM, so Firecracker uses
+  # the runner's /dev/kvm directly (L1) — no nested KVM needed, which
+  # is why this runs on a stock ubuntu-latest. The genuine
+  # libkrun-host-VM *nesting* (L2, the no-ptrace trust uplift) is
+  # Plan 107 A4.5's live-KVM smoke on a nested-KVM runner — not this lane.
+  workload-spawn-smoke-linux:
+    name: Workload spawn smoke (Plan 107 A2.4)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Detect workload-spawn-touching paths
+        id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            spawn:
+              # Same absorbed-path bug the builder VM lane above already
+              # fixed: mvm-host-vm-init is a [[bin]] of mvm-build, so the
+              # standalone crate directory this named cannot exist and the
+              # filter never matched.
+              - 'crates/mvm-build/src/bin/mvm-host-vm-init/**'
+
+      - name: Install Rust toolchain
+        if: steps.filter.outputs.spawn == 'true' || github.ref == 'refs/heads/main'
+        uses: dtolnay/rust-toolchain@1.96.0
+
+      - name: Install firecracker
+        if: steps.filter.outputs.spawn == 'true' || github.ref == 'refs/heads/main'
+        # Pin to a known release — auto-tracking `latest` is how this
+        # lane would surprise-break on an unrelated Firecracker cut.
+        # Installed at /usr/bin/firecracker to match
+        # `mvm_host_vm_init::workload::FIRECRACKER_BIN` (the exact path
+        # A2.1 bakes into the builder-vm rootfs).
+        env:
+          FC_VERSION: v1.10.1
+        run: |
+          set -euo pipefail
+          curl -fL -o firecracker.tgz \
+            "https://github.com/firecracker-microvm/firecracker/releases/download/${FC_VERSION}/firecracker-${FC_VERSION}-x86_64.tgz"
+          tar -xzf firecracker.tgz
+          sudo install -m 0755 "release-${FC_VERSION}-x86_64/firecracker-${FC_VERSION}-x86_64" /usr/bin/firecracker
+          /usr/bin/firecracker --version
+
+      - name: Grant /dev/kvm access for the job
+        if: steps.filter.outputs.spawn == 'true' || github.ref == 'refs/heads/main'
+        # ubuntu-latest's /dev/kvm is root:kvm 0660 and the runner user
+        # isn't in the kvm group, so firecracker would get EACCES.
+        # `sudo chmod 666` is the canonical GHA fix; the runner is
+        # ephemeral so the looser mode is confined to this job.
+        run: |
+          set -euo pipefail
+          if [ ! -e /dev/kvm ]; then
+            echo "::error::/dev/kvm missing on this runner — firecracker can't run." >&2
+            exit 1
+          fi
+          sudo chmod 666 /dev/kvm
+          ls -la /dev/kvm
+
+      - name: Cache cargo
+        if: steps.filter.outputs.spawn == 'true' || github.ref == 'refs/heads/main'
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-spawn-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-spawn-
+
+      - name: Fetch Firecracker CI kernel + build rootfs
+        if: steps.filter.outputs.spawn == 'true' || github.ref == 'refs/heads/main'
+        # The mvm Firecracker path uses the upstream Firecracker-CI
+        # kernel (`crates/mvm-runtime/src/firecracker.rs` downloads
+        # `firecracker-ci/<ver>/x86_64/vmlinux-5.10.*` from S3), NOT the
+        # Nix `vmlinux` outputs — on x86_64 those are bzImage (for
+        # libkrun/Vz, which accept bzImage), and
+        # Firecracker's loader requires an *uncompressed ELF* vmlinux
+        # (it rejects bzImage with "Invalid Elf magic number"). So the
+        # smoke boots the same ELF kernel production Firecracker uses.
+        # The rootfs only needs to be a valid block device the kernel
+        # attempts to mount — a small empty ext4 is enough for the
+        # VMM-viability gate (the kernel prints "Linux version" to
+        # ttyS0 before it ever touches root).
+        env:
+          FC_CI_VER: v1.10
+        run: |
+          set -euo pipefail
+          mkdir -p ci-artifacts
+          # Resolve the latest vmlinux-5.10.NNN key from the S3 index
+          # (same listing the production path uses), then download it.
+          KEY=$(curl -fsSL "http://spec.ccfc.min.s3.amazonaws.com/?prefix=firecracker-ci/${FC_CI_VER}/x86_64/vmlinux-5.10&list-type=2" \
+            | grep -oE "firecracker-ci/${FC_CI_VER}/x86_64/vmlinux-5\.10\.[0-9]+" \
+            | sort -V | tail -1)
+          if [ -z "$KEY" ]; then
+            echo "::error::could not resolve a Firecracker-CI vmlinux-5.10 key from S3" >&2
+            exit 1
+          fi
+          echo "Firecracker CI kernel: $KEY"
+          curl -fL -o ci-artifacts/vmlinux "https://s3.amazonaws.com/spec.ccfc.min/${KEY}"
+          # Minimal valid ext4 root drive (64 MiB, empty).
+          truncate -s 64M ci-artifacts/rootfs.ext4
+          mkfs.ext4 -F -q ci-artifacts/rootfs.ext4
+          chmod 0644 ci-artifacts/vmlinux ci-artifacts/rootfs.ext4
+          file ci-artifacts/vmlinux
+          ls -la ci-artifacts/
+
+      - name: Run workload spawn smoke
+        if: steps.filter.outputs.spawn == 'true' || github.ref == 'refs/heads/main'
+        # MVM_FC_BOOT_SMOKE gates the otherwise-inert
+        # `workload::tests::live_firecracker_boot_smoke` test; the env
+        # vars point it at the freshly built workload artifacts. The
+        # test boots a real Firecracker workload via start_workload and
+        # asserts a kernel-boot marker on the guest serial.
+        env:
+          MVM_FC_BOOT_SMOKE: "1"
+          MVM_FC_SMOKE_KERNEL: ${{ github.workspace }}/ci-artifacts/vmlinux
+          MVM_FC_SMOKE_ROOTFS: ${{ github.workspace }}/ci-artifacts/rootfs.ext4
+        run: cargo test -p mvm-build --bin mvm-host-vm-init live_firecracker_boot_smoke -- --nocapture
+
+
+
+
+
+

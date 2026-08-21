@@ -43,13 +43,49 @@ watches it too, so a red signing round-trip is reported like any other
 lane; its issue title is keyed on the workflow name so two lanes cannot
 overwrite each other's report.
 
+## Kept and given a cadence
+
+`ci-full.yml` survives as **`Extended CI`**, on a nightly cron. Only the
+three jobs `ci.yml` genuinely duplicates on every PR — `lint`, `test`,
+`nix-flake-check` — are gone. What remains had no other home and, in
+several cases, no substitute anywhere in the tree:
+
+| lane | why it stays |
+| --- | --- |
+| `apple`, `libkrun-macos` | the **only** macOS coverage in the repository, for a macOS-first tool |
+| `workload-spawn-smoke-linux` | the only live Firecracker boot smoke |
+| `builder-vm-image-linux` | builder-VM image build |
+| `e2e` | `smoke_run_json_receipt`, `runtime_boot` |
+| `sdk-release-dry-run` | dry-run of the SDK publish path |
+
+Every one of them carried `if: github.event_name == 'workflow_dispatch'`
+on a dispatch-only workflow, and `apple` additionally required a release
+tag, so none could fire on a cron. Those guards are removed. `e2e`'s
+`needs: test` is dropped with the job it named.
+
+`security-lane-watch.yml` watches `Extended CI` too: a nightly nobody
+watches is the defect this branch exists to fix, and it should not be
+reintroduced one workflow to the left.
+
 ## Deleted
 
-- `ci-full.yml` — everything left in it after the move duplicated `ci.yml`
-  (`lint`, `test`, `nix-flake-check`, 17 xtask gates).
 - `windows.yml` — the only workflow in the tree with no consumer at all:
   no test, no script, no gate, no dispatch from another workflow, and
   0 runs ever.
+
+## Correction
+
+The first pass of this work **deleted `ci-full.yml` outright**, having
+moved only the seven lanes that were claim-adjacent. That dropped
+`sealed-prod-allowlist` (the SealedProd vsock allowlist, plan 76 Phase 1)
+and `jailer-property` (the seccomp and Landlock property suites, claims 1
+and 2) — both security lanes — along with all macOS coverage. Both are now
+in `security.yml` with the other claim witnesses.
+
+The reasoning that produced it was "this workflow has never run, therefore
+it is dead." Never having run is a reason to start running a security
+lane, not a reason to remove it. The run-count evidence was sound; the
+conclusion drawn from it was not.
 
 Two consumers had to be updated first, and neither would have failed
 loudly: `tests/github_actions_fuzz_gate.rs` `include_str!`s `ci-full.yml`,

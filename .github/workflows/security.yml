@@ -1440,3 +1440,93 @@ jobs:
 
       - name: ${{ matrix.lane.id }}
         run: ${{ matrix.lane.test }}
+
+  # Claim 15's sealed-prod tier, and claims 1/2's confinement primitives.
+  #
+  # Both lanes were deleted along with ci-full.yml in the first pass of this
+  # consolidation, on the reasoning that the workflow had never run. That
+  # was the wrong conclusion from the right observation: a security lane
+  # that has never run is a lane to start running, not one to remove.
+  sealed-prod-allowlist:
+    name: Sealed-prod vsock allowlist (plan 76 Phase 1)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Install system build deps
+        run: sudo apt-get update && sudo apt-get install -y libcap-ng-dev
+
+      - name: Cache cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-sealed-prod-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-sealed-prod-
+
+      - name: Assert SealedProd vsock allowlist matches plan 76 §Phase 1
+        run: ./scripts/check-sealed-prod-allowlist.sh
+
+  jailer-property:
+    name: jailer property tests (seccomp + Landlock) (Plan 113 §Task 9)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Install system build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libcap-ng-dev lld
+
+      - name: Cache cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-jailer-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-jailer-
+
+      # Kept as a probe rather than an assertion because both property
+      # suites share `confine_self`, which applies Landlock first: without
+      # the LSM active the seccomp half cannot be reached either, and the
+      # failure would say nothing about this repo.
+      #
+      # It is a silent-skip risk and named as one: a skip leaves the job
+      # green with nothing exercised, and the watcher reads job
+      # conclusions, so it cannot tell that apart from a pass. The step
+      # summary below is what a reader has to check. Making the absence
+      # fail instead would be the stronger gate, but only once a runner
+      # image is pinned that is known to carry Landlock.
+      - name: Probe Landlock kernel support
+        id: landlock_probe
+        run: |
+          set -euo pipefail
+          uname -r
+          echo "active LSMs: $(cat /sys/kernel/security/lsm 2>/dev/null || echo '(unreadable)')"
+          if ! grep -qw landlock /sys/kernel/security/lsm 2>/dev/null; then
+            echo "::warning::Landlock LSM not active on this runner — the jailer property tests did NOT run."
+            echo "- :warning: jailer property tests **skipped**: Landlock LSM not active" >> "$GITHUB_STEP_SUMMARY"
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          cat /sys/kernel/security/landlock/abi_versions 2>/dev/null \
+            || echo "(abi_versions not exposed on this kernel)"
+          echo "available=true" >> "$GITHUB_OUTPUT"
+
+      - name: Run property tests (seccomp + Landlock)
+        if: steps.landlock_probe.outputs.available == 'true'
+        run: |
+          cargo test -p mvm-hostd \
+            --test seccomp_property \
+            --test landlock_property \
+            -- --ignored --nocapture
