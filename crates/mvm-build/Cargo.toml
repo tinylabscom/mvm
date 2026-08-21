@@ -170,6 +170,9 @@ xattr.workspace = true
 
 [features]
 default = []
+# Marks an official binary distribution so artifact resolvers do not infer
+# contributor behavior from the checkout that happens to launch the binary.
+release-channel = []
 # Forwards to mvm-core's sigstore keyless-verification feature so
 # `builder_pack`'s tests can exercise `verify_pack_keyless_at` without
 # every mvm-build build pulling the sigstore dependency tree.

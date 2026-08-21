@@ -141,6 +141,11 @@ libkrun-live = []
 # release artifact. The feature is only intended to be enabled when cutting
 # an end-user-binary release that legitimately wants the download fallback.
 release-artifact-bootstrap = []
+# Mark an official distribution separately from the builder-image bootstrap
+# capability. CI exercises the published-builder path from a source checkout;
+# coupling these features makes that test refuse its local runtime overlay
+# before it can boot the workload.
+release-channel = ["mvm-build/release-channel"]
 custom-dns = ["mvm-hostd/custom-dns"]
 dev-watch = ["dep:notify", "dep:notify-debouncer-mini"]
 manifest-verify = [
