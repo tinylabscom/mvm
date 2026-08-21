@@ -1100,6 +1100,26 @@ where
             .session
             .seal(&frame)
             .map_err(|e| FlowMuxError::Frame(e.to_string()))?;
+        // The sequence is spent from here on, whether or not the bytes land, so
+        // anything that fails below ends the session rather than leaving the
+        // peer permanently one frame behind. A partial `write_all` is worse
+        // still: the stream itself is then mid-frame.
+        let sequence = sealed.sequence;
+        match self.write_sealed(&sealed).await {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                self.session.poison_send(sequence, error.to_string());
+                Err(error)
+            }
+        }
+    }
+
+    /// Encode and write one already-sealed frame. Split out so every way this
+    /// can fail funnels through the one poison in [`Self::write_frame`].
+    async fn write_sealed(
+        &mut self,
+        sealed: &mvm_core::net::session::SealedFrame,
+    ) -> Result<(), FlowMuxError> {
         let mut sealed_bytes = Vec::new();
         sealed
             .encode(&mut sealed_bytes)
