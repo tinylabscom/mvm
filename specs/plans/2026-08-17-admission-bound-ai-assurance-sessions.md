@@ -400,7 +400,9 @@ second VM. It remains `INCONCLUSIVE` because no trusted TPM2/SEV-SNP/TDX root
 was present and the typed probe reported no attempted effect.
 The sibling planner now consumes the published
 `sha256:nul-separated-policy-refs-v1` interface through its small shared
-policy-identity module and emits MVM's exact four-reference digest
+policy-identity module and emits MVM's exact four-reference digest over
+`operator-network-v1`, `operator-egress-v1`, `operator-fs-v1`, and
+`operator-tools-v1` in admission order:
 `sha256:5dd0de53b6d211f764728599e291e93a9491dc34f87596e906365fb74c95e0ff`.
 The sibling launcher also restores `/usr/local/bin` through its explicit
 provider PATH after clearing the inherited environment. A real Scout-linked

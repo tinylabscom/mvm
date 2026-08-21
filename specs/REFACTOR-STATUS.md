@@ -470,7 +470,9 @@ resume` takes a `current_head` and refuses when it differs from the
       without a second VM. The run is `INCONCLUSIVE` because no TPM2/SEV-SNP/TDX
       trust root is present and the probe reported no attempted effect. The
       sibling now consumes MVM's published four-reference
-      `sha256:nul-separated-policy-refs-v1` vector and the exact digest
+      `sha256:nul-separated-policy-refs-v1` vector over
+      `operator-network-v1`, `operator-egress-v1`, `operator-fs-v1`, and
+      `operator-tools-v1` and the exact digest
       `sha256:5dd0de53b6d211f764728599e291e93a9491dc34f87596e906365fb74c95e0ff`.
       A current Scout-linked attempt reached signed-plan admission but failed
       closed before guest-agent startup on `mvm-oci-init` path-policy denial;

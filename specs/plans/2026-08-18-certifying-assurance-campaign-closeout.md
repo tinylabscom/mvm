@@ -125,9 +125,10 @@ and a plain `machine run --receipt` do not satisfy this plan.
       execution receipt. Label it non-certifying unless every trust-root and
       observer requirement validates.
   - [x] Publish MVM's counterparty test vector for the effective policy
-        digest: `sha256:nul-separated-policy-refs-v1` hashes the four exact
-        references in network, egress, filesystem, tool order with one NUL
-        separator between fields. MVM computes this through the shared
+        digest: `sha256:nul-separated-policy-refs-v1` hashes
+        `operator-network-v1`, `operator-egress-v1`, `operator-fs-v1`, and
+        `operator-tools-v1` in network, egress, filesystem, tool order with
+        one NUL separator between fields. MVM computes this through the shared
         `mvm-contract` helper and refuses any other requested identity.
   - [x] Add a workload compatibility preflight: assurance admission now
         requires `mvm-meta.json` with guest protocol version 2 or newer, so a

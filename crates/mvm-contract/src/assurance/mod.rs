@@ -57,7 +57,10 @@ pub use outcome::{
     InconclusiveReason, TRIAL_EVIDENCE_SCHEMA, TRIAL_RESULT_CANDIDATE_SCHEMA, TRIAL_RESULT_SCHEMA,
     TrialEvidenceRecord, TrialOutcome, TrialResultCandidate, TrialVerdict, evaluate,
 };
-pub use policy::{POLICY_DIGEST_ALGORITHM_V1, policy_digest_from_refs};
+pub use policy::{
+    EGRESS_POLICY_REF, FILESYSTEM_POLICY_REF, NETWORK_POLICY_REF, POLICY_DIGEST_ALGORITHM_V1,
+    PUBLISHED_POLICY_DIGEST, TOOL_POLICY_REF, policy_digest_from_refs,
+};
 pub use probe::{
     HOST_ASSURANCE_SERVICE, PROBE_OBSERVATION_SCHEMA, PROBE_REQUEST_SCHEMA, ProbeInvocation,
     ProbeObservation, ProbeObservationError, ProbeRefusal, ProbeRequest,

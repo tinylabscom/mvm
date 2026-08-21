@@ -12,6 +12,16 @@ use super::Sha256Digest;
 /// Stable identifier for the policy-reference digest encoding.
 pub const POLICY_DIGEST_ALGORITHM_V1: &str = "sha256:nul-separated-policy-refs-v1";
 
+/// Operator-published policy references used by assurance admission.
+pub const NETWORK_POLICY_REF: &str = "operator-network-v1";
+pub const EGRESS_POLICY_REF: &str = "operator-egress-v1";
+pub const FILESYSTEM_POLICY_REF: &str = "operator-fs-v1";
+pub const TOOL_POLICY_REF: &str = "operator-tools-v1";
+
+/// Published four-reference identity for the operator assurance policy.
+pub const PUBLISHED_POLICY_DIGEST: &str =
+    "sha256:5dd0de53b6d211f764728599e291e93a9491dc34f87596e906365fb74c95e0ff";
+
 /// Compute the effective policy identity from its four admitted references.
 ///
 /// The order is part of the wire contract: network, egress, filesystem, then
@@ -39,7 +49,10 @@ pub fn policy_digest_from_refs(
 
 #[cfg(test)]
 mod tests {
-    use super::{POLICY_DIGEST_ALGORITHM_V1, policy_digest_from_refs};
+    use super::{
+        EGRESS_POLICY_REF, FILESYSTEM_POLICY_REF, NETWORK_POLICY_REF, POLICY_DIGEST_ALGORITHM_V1,
+        PUBLISHED_POLICY_DIGEST, TOOL_POLICY_REF, policy_digest_from_refs,
+    };
 
     #[test]
     fn vector_is_stable_for_counterparty_implementations() {
@@ -48,8 +61,14 @@ mod tests {
             "sha256:nul-separated-policy-refs-v1"
         );
         assert_eq!(
-            policy_digest_from_refs("network-ref", "egress-ref", "fs-ref", "tool-ref").as_str(),
-            "sha256:ceb231aeca18c7c5a226eee39df6ba05a7b8c9179885ea0f1bc67aaf121161b8"
+            policy_digest_from_refs(
+                NETWORK_POLICY_REF,
+                EGRESS_POLICY_REF,
+                FILESYSTEM_POLICY_REF,
+                TOOL_POLICY_REF,
+            )
+            .as_str(),
+            PUBLISHED_POLICY_DIGEST
         );
     }
 

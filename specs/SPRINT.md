@@ -2642,7 +2642,9 @@ Firecracker backend, observer and cleanup receipts, and exact terminal replay
 without a second VM. The result is `INCONCLUSIVE` (`attestation_verified:false`,
 `attempted_effect:false`): no TPM2/SEV-SNP/TDX device or manufacturer
 collateral is available. The sibling now consumes MVM's published four-reference
-`sha256:nul-separated-policy-refs-v1` digest and emits
+`sha256:nul-separated-policy-refs-v1` digest over
+`operator-network-v1`, `operator-egress-v1`, `operator-fs-v1`, and
+`operator-tools-v1` and emits
 `sha256:5dd0de53b6d211f764728599e291e93a9491dc34f87596e906365fb74c95e0ff`.
 The full Scout-linked attempt reached signed-plan admission but failed closed
 before guest-agent startup on `mvm-oci-init` user-volume path-policy denial;
