@@ -1110,8 +1110,9 @@ fn tail_forward(
     }
 }
 
-/// Finalize a flake build: read `<job_dir>/result`, validate the
-/// `rootfs.ext4` (and optional `vmlinux`) landed in `artifact_out`,
+/// Finalize a flake build: read the guest result from `<job_dir>/result` or its
+/// host-visible mirror in `artifact_out`, validate the `rootfs.ext4` (and
+/// optional `vmlinux`) landed in `artifact_out`,
 /// return a [`BuilderArtifacts::Image`]. Hypervisor-agnostic — the
 /// inputs are all host paths into virtio-fs shares libkrun and HVF
 /// both attach identically.
@@ -1120,7 +1121,7 @@ pub fn finalize_flake_job(
     artifact_out: &Path,
     job_id: &str,
 ) -> Result<BuilderArtifacts, BuilderVmError> {
-    let result = read_job_result(job_dir)?;
+    let result = read_flake_job_result(job_dir, artifact_out)?;
     if result.exit_code != 0 {
         // The 20-line `stderr_tail` in `result` is from the OUTER
         // cmd.sh (run_job captures cmd.sh's stderr into a 20-line
@@ -1182,6 +1183,25 @@ pub fn finalize_flake_job(
         lock_hash: None,
         accessible: None,
     })
+}
+
+fn read_flake_job_result(job_dir: &Path, artifact_out: &Path) -> Result<JobResult, BuilderVmError> {
+    // Guest init writes the same result to both writable shares. Some VMM/FUSE
+    // combinations can lose one share's final write during power-off, so accept
+    // the mirror only when the primary file is absent. A malformed primary
+    // remains a hard failure and cannot be hidden by the mirror.
+    match read_job_result(job_dir) {
+        Ok(result) => Ok(result),
+        Err(BuilderVmError::NixBuildFailed(primary)) => match read_job_result(artifact_out) {
+            Ok(result) => Ok(result),
+            Err(BuilderVmError::NixBuildFailed(_)) => Err(BuilderVmError::NixBuildFailed(format!(
+                "{primary}; mirrored result was also absent at {}",
+                artifact_out.join("result").display()
+            ))),
+            Err(err) => Err(err),
+        },
+        Err(err) => Err(err),
+    }
 }
 
 /// Read `<job_dir>/store-path` and extract the leading Nix store hash
@@ -1627,6 +1647,24 @@ mod tests {
             }
             other => panic!("wrong artifact variant: {other:?}"),
         }
+    }
+
+    #[test]
+    fn finalize_flake_job_reads_mirrored_result_from_artifact_out() {
+        let scratch = tempfile::TempDir::new().unwrap();
+        let job_dir = scratch.path().join("job");
+        let artifact_out = scratch.path().join("out");
+        std::fs::create_dir_all(&job_dir).unwrap();
+        std::fs::create_dir_all(&artifact_out).unwrap();
+        std::fs::write(
+            artifact_out.join("result"),
+            r#"{"exit_code":0,"stderr_tail":""}"#,
+        )
+        .unwrap();
+        std::fs::write(artifact_out.join("rootfs.ext4"), b"rootfs").unwrap();
+
+        let artifacts = finalize_flake_job(&job_dir, &artifact_out, "fallback-job-id").unwrap();
+        assert!(matches!(artifacts, BuilderArtifacts::Image { .. }));
     }
 
     /// `read_last_bytes_of` returns the trailing `max_bytes` of a

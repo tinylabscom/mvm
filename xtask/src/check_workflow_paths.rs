@@ -773,6 +773,27 @@ mod tests {
     }
 
     #[test]
+    fn aarch64_no_kvm_smoke_grants_runner_vhost_vsock_access() {
+        let workflow = ci_workflow();
+        let smoke = job_block(&workflow, "aarch64-no-kvm-smoke");
+        let grant = concat!(
+            "      - name: Grant QEMU access to vhost-vsock\n",
+            "        run: |\n",
+            "          test -c /dev/vhost-vsock\n",
+            "          sudo chown \"$USER\" /dev/vhost-vsock\n",
+            "          sudo chmod 0600 /dev/vhost-vsock",
+        );
+        assert!(
+            smoke.contains(grant),
+            "the hosted runner must grant its current user access to vhost-vsock"
+        );
+        assert!(
+            smoke.find(grant) < smoke.find("Build and boot the sealed exit_code workload"),
+            "vhost-vsock access must be granted before QEMU starts"
+        );
+    }
+
+    #[test]
     fn dedicated_mcp_smoke_lane_stays_out_of_ci() {
         let workflow = ci_workflow();
         for removed in [
