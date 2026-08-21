@@ -1264,6 +1264,14 @@ updates only its own entry below.
       a Firecracker-compatible bundle (or kernel override) is still required
       before the guest agent can answer. The invocation gap is closed; the
       remaining blocker is the bundle's kernel target.
+      **Update 2026-08-20 (later):** the HVF builder VM boot panic was traced
+      to `/bin/mvm-setpriv` missing from the builder rootfs PATH; fixing
+      `nix/lib/mk-guest.nix` to install the helper allowed the builder VM to
+      boot and build a fresh workload kernel. A new Firecracker-compatible
+      `examples/exit_code` bundle was exported at `/tmp/exit-code.mvmpkg`
+      (24 MiB) with `virtio_pci` and `virtio_vsock` built into the kernel.
+      The only remaining blocker is that `rpi1.local` is no longer reachable
+      via mDNS, so Pi-side validation is on hold until network access returns.
 
 - [x] **Backend shim removal — invert the driver/backend relationship.**
       `FcDriver`, `HvfDriver`, `LibkrunDriver`, and `QemuDriver` now own their

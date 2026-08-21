@@ -150,19 +150,25 @@ aarch64 `mvmctl`, and the `mvm-hostd` subprocess bins).
 - [ ] Copy that directory to the target and `chmod +x` the binaries.
 - [ ] Put the `mvm-hostd` bins on `PATH` beside `mvmctl` — the Firecracker path
       spawns them as separate processes.
-- [ ] If the bundle is stale or gone, rebuild on the Mac:
-      `mvmctl machine build --flake ./examples/sleeper --builder hvf`, then
-      `mvmctl machine build ./examples/sleeper` to register a slot, then
-      `mvmctl bundle export <FULL 64-char slot hash> --out sleeper.mvmpkg`.
+- [x] If the bundle is stale or gone, rebuild on the Mac:
+      `mvmctl machine run --flake ./examples/exit_code --builder hvf --hypervisor hvf`
+      (builds and registers the slot), then
+      `mvmctl bundle export <FULL 64-char slot hash> --out exit-code.mvmpkg`.
+      Done: exported `/tmp/exit-code.mvmpkg` (24 MiB) with a freshly compiled
+      Firecracker-compatible workload kernel (`virtio_pci`, `virtio_vsock`
+      built-in).
 
 ### 4. Run the witness
 
 - [ ] `export MVM_HOME=/tmp/mvm-edge` and place the host-signer public key at
       `$MVM_HOME/trusted-publishers/<key_id>.pub`, or `bundle install` refuses
       the archive.
-- [ ] `mvmctl bundle install ./sleeper-meta.mvmpkg` — expect **3 artifacts**
+- [ ] `mvmctl bundle install ./exit-code.mvmpkg` — expect **3 artifacts**
       (kernel, rootfs, guest sidecar) and capture the printed content address.
-- [ ] `mvmctl machine run --manifest <sha> --entrypoint --timeout 120`.
+- [ ] `mvmctl machine run --manifest <sha> --hypervisor firecracker -- /bin/true`.
+
+> **2026-08-20 blocker:** `rpi1.local` no longer resolves via mDNS, so the
+> Pi-side install/run validation is on hold until network access returns.
 
 ### 5. Confirm and record
 
