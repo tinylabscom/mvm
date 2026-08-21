@@ -3,7 +3,7 @@
 use std::fs;
 
 const EXPECTED_BUILD: &str =
-    "cargo build --release -p mvmctl --features release-artifact-bootstrap";
+    "cargo build --release -p mvmctl --features user,release-artifact-bootstrap";
 const LIBRARY_ONLY_BUILD: &str =
     "cargo build --release -p mvm-cli --features release-artifact-bootstrap";
 

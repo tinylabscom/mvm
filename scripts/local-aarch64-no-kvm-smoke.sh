@@ -54,7 +54,7 @@ cargo install cargo-zigbuild --version 0.20.0 --locked
 cd /work
 
 echo "Building mvmctl ..."
-cargo build --release -p mvmctl --features release-artifact-bootstrap,release-channel
+cargo build --release -p mvmctl --features user,release-artifact-bootstrap,release-channel
 
 # The source-checkout bootstrap path would rebuild the builder VM image from
 # scratch under TCG. Hide the in-repo flake so mvmctl downloads the published

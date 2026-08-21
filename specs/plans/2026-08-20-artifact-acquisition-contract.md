@@ -37,6 +37,9 @@ and report the cold-build phase clearly.
 - production OCI policy preflight regression proving rejection precedes guest
   runtime preparation
 - merge-queue aarch64 no-KVM smoke builds the root `mvmctl` binary it executes
+  with the `user` signature-verification surface and release bootstrap enabled
+- refreshed standalone `mvm-hostd` fuzz lock passes stable and pinned-nightly
+  `--locked --all-targets` checks after the current-main dependency expansion
 - release-asset structure and guest-binary-list synchronization gates
 - project builder-VM realization of
   `nix/images/runtime-overlay#runtime-overlay` for `aarch64-linux`, including

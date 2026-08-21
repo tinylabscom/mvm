@@ -35,7 +35,9 @@ stale output cannot be selected.
 - `cargo clippy --workspace --all-targets -- -D warnings`
 - `just check-gated`
 - focused production-policy-before-artifact-preparation regression
-- merge-queue aarch64 no-KVM binary-build contract regression
+- merge-queue aarch64 no-KVM binary-build contract regression, including the
+  `user` signature-verification surface required by downloaded manifests
+- refreshed standalone `mvm-hostd` fuzz lock under stable and pinned nightly
 - `cargo test -p mvm-build --features release-channel --lib official_build_does_not_detect`
 - `cargo run -p xtask -- check-guest-binary-lists`
 - project builder-VM realization of
