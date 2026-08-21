@@ -19,7 +19,7 @@ Implemented the first slice of `mvm capture`.
   with fake `.env` secret for redaction testing.
 - Added library and CLI integration tests proving report versioning, secret
   redaction, canonical IR resolution, and Nix rendering.
-- Added ADR-049 and plan `specs/plans/2026-08-20-mvm-capture.md`.
+- Added ADR-050 and plan `specs/plans/2026-08-20-mvm-capture.md`.
 - Updated `public/src/content/docs/reference/cli-commands.md` and added
   `public/src/content/docs/guides/capture.md`.
 

@@ -1,4 +1,7 @@
-# ADR-049: `mvm capture` — Project-Environment Capture Frontend
+# ADR-050: `mvm capture` — Project-Environment Capture Frontend
+
+Backing: shipped-source
+Validation: `cargo test -p mvm-capture` and capture CLI integration tests
 
 ## Status
 

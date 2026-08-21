@@ -1,3 +1,8 @@
+---
+title: "Capturing a Project Environment"
+description: Inspect a Linux project, resolve its environment, and render a reviewable MVM definition.
+---
+
 # Capturing a Project Environment
 
 `mvm capture` inspects a project directory and the host environment required

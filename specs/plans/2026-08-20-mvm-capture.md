@@ -1,5 +1,8 @@
 # Plan: Evidence-Backed Linux Environment Capture Frontend
 
+Backing: shipped-source
+Validation: `cargo test -p mvm-capture` and capture CLI integration tests
+
 ## Goal
 
 Implement the first production-oriented slice of `mvm capture`: a CLI path
@@ -13,7 +16,7 @@ Phase 1 complete.
 
 ## Design
 
-See `specs/adrs/049-mvm-capture-project-environment.md`.
+See `specs/adrs/050-mvm-capture-project-environment.md`.
 
 ## Implemented
 
@@ -59,7 +62,7 @@ See `specs/adrs/049-mvm-capture-project-environment.md`.
       and CLI reference updates in `public/src/content/docs/reference/cli-commands.md`.
 - [x] CLI integration tests proving help visibility and the
       project→resolve workflow.
-- [x] ADR-049 and this plan.
+- [x] ADR-050 and this plan.
 
 ## Remaining work (next smallest phases)
 
