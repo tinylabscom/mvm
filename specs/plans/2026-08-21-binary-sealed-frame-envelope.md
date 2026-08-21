@@ -117,10 +117,10 @@ in the sense that the path was previously shaped like the live one.
 
 ### W5 — a benchmark that keeps the number honest
 
-- [ ] Commit a trimmed version of the throwaway probe used above, so the
+- [x] Commit a trimmed version of the throwaway probe used above, so the
       encode/decode cost of the control envelope is measurable on demand rather
       than re-derived by hand each time.
-- [ ] It reports bytes and per-frame encode/decode for a representative
+- [x] It reports bytes and per-frame encode/decode for a representative
       `ExecEvent::Stdout` chunk. It is not a pass/fail gate — a wall-clock
       assertion in CI is the test shape that passes for the wrong reason.
 
