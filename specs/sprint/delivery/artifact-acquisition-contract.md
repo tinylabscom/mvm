@@ -39,9 +39,10 @@ stale output cannot be selected.
 - focused production-policy-before-artifact-preparation regression
 - merge-queue aarch64 no-KVM binary-build contract regression, including the
   source-channel root binary it executes, the `user` signature-verification
-  surface required by downloaded manifests, and the `virtiofsd` dependency
-  required to share the checkout with the builder VM. A separate
-  release-channel helper downloads only the already-published builder image;
+  surface required by downloaded manifests, the `virtiofsd` dependency needed
+  to share the checkout with the builder VM, and `ipxe-qemu` for its
+  `efi-virtio.rom`. A separate release-channel helper downloads only the
+  already-published builder image;
   the source binary then bootstraps source-matched runtime artifacts before the
   first launch. The tagged release workflow verifies the future-format signed
   overlay through the production downloader before publishing it

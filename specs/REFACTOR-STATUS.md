@@ -20,10 +20,11 @@ for detailed scope and acceptance criteria.
       source-channel root CLI binary with user-facing manifest verification;
       a separate release-channel helper downloads only the published builder
       image because a pre-merge build cannot consume its not-yet-published
-      runtime archive format. It installs `virtiofsd`, bootstraps source-matched
-      runtime artifacts before the first builder-backed launch, and pins the
-      dependency order that makes the overlay available before kernel
-      preparation. The tagged release workflow separately verifies the signed
+      runtime archive format. It installs `virtiofsd` plus the `ipxe-qemu`
+      package that carries `efi-virtio.rom`, bootstraps source-matched runtime
+      artifacts before the first builder-backed launch, and pins the dependency
+      order that makes the overlay available before kernel preparation. The
+      tagged release workflow separately verifies the signed
       future-format overlay through the production downloader before publish.
       The standalone hostd fuzz lock is refreshed for the current dependency
       graph.

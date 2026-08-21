@@ -40,11 +40,12 @@ and report the cold-build phase clearly.
   `mvmctl` binary with the `user` signature-verification surface, while a
   separate release-channel helper downloads only the already-published builder
   VM; pre-merge code cannot consume its new runtime-overlay archive contract
-  until a release publishes those bytes. The smoke installs `virtiofsd`, then
-  runs source-matched bootstrap before its first builder-backed launch, with
-  the runtime overlay prepared before that builder produces the workload
-  kernel. The tagged release workflow independently signs the newly packaged
-  overlay and drives it through the exact production downloader before publish
+  until a release publishes those bytes. The smoke installs `virtiofsd` and
+  `ipxe-qemu` (the Ubuntu package carrying `efi-virtio.rom`), then runs
+  source-matched bootstrap before its first builder-backed launch, with the
+  runtime overlay prepared before that builder produces the workload kernel.
+  The tagged release workflow independently signs the newly packaged overlay
+  and drives it through the exact production downloader before publish
 - refreshed standalone `mvm-hostd` fuzz lock passes stable and pinned-nightly
   `--locked --all-targets` checks after the current-main dependency expansion
 - release-asset structure and guest-binary-list synchronization gates

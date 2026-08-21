@@ -9,6 +9,7 @@ const COPY_SOURCE_BINARY: &str = "cp target/release/mvmctl /tmp/mvmctl-source-un
 const LIBRARY_ONLY_BUILD: &str =
     "cargo build --release -p mvm-cli --features release-artifact-bootstrap";
 const REQUIRED_VIRTIOFS_PACKAGE: &str = "virtiofsd";
+const REQUIRED_VIRTIO_ROM_PACKAGE: &str = "ipxe-qemu";
 const REQUIRED_BUILDER_DOWNLOAD: &str =
     "./target/release/mvmctl --builder qemu __builder-vm-bootstrap -v";
 const REQUIRED_BOOTSTRAP: &str =
@@ -48,6 +49,10 @@ fn aarch64_no_kvm_smokes_build_the_mvmctl_binary_they_execute() {
         assert!(
             contents.contains(REQUIRED_VIRTIOFS_PACKAGE),
             "{source} must install virtiofsd before the builder VM shares the checkout"
+        );
+        assert!(
+            contents.contains(REQUIRED_VIRTIO_ROM_PACKAGE),
+            "{source} must install the QEMU virtio ROM before booting the builder VM"
         );
         let source_build = contents
             .find(EXPECTED_SOURCE_BUILD)
