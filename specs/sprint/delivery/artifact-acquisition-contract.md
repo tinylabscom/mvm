@@ -38,9 +38,13 @@ stale output cannot be selected.
 - `just check-gated`
 - focused production-policy-before-artifact-preparation regression
 - merge-queue aarch64 no-KVM binary-build contract regression, including the
-  `user` signature-verification surface required by downloaded manifests and
-  the `virtiofsd` dependency required to share the checkout with the builder VM;
-  it executes release bootstrap before the first builder-backed launch
+  source-channel root binary it executes, the `user` signature-verification
+  surface required by downloaded manifests, and the `virtiofsd` dependency
+  required to share the checkout with the builder VM. A separate
+  release-channel helper downloads only the already-published builder image;
+  the source binary then bootstraps source-matched runtime artifacts before the
+  first launch. The tagged release workflow verifies the future-format signed
+  overlay through the production downloader before publishing it
 - refreshed standalone `mvm-hostd` fuzz lock under stable and pinned nightly
 - `cargo test -p mvm-build --features release-channel --lib official_build_does_not_detect`
 - `cargo run -p xtask -- check-guest-binary-lists`

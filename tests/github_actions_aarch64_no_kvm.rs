@@ -2,13 +2,18 @@
 
 use std::fs;
 
-const EXPECTED_BUILD: &str =
-    "cargo build --release -p mvmctl --features user,release-artifact-bootstrap";
+const EXPECTED_RELEASE_HELPER_BUILD: &str =
+    "cargo build --release -p mvmctl --features user,release-artifact-bootstrap,release-channel";
+const EXPECTED_SOURCE_BUILD: &str = "cargo build --release -p mvmctl --features user";
+const COPY_SOURCE_BINARY: &str = "cp target/release/mvmctl /tmp/mvmctl-source-under-test";
 const LIBRARY_ONLY_BUILD: &str =
     "cargo build --release -p mvm-cli --features release-artifact-bootstrap";
 const REQUIRED_VIRTIOFS_PACKAGE: &str = "virtiofsd";
-const REQUIRED_BOOTSTRAP: &str = "./target/release/mvmctl --builder qemu bootstrap --production -v";
-const FIRST_MACHINE_RUN: &str = "./target/release/mvmctl machine run";
+const REQUIRED_BUILDER_DOWNLOAD: &str =
+    "./target/release/mvmctl --builder qemu __builder-vm-bootstrap -v";
+const REQUIRED_BOOTSTRAP: &str =
+    "/tmp/mvmctl-source-under-test --builder qemu bootstrap --production -v";
+const FIRST_MACHINE_RUN: &str = "/tmp/mvmctl-source-under-test machine run";
 
 #[test]
 fn aarch64_no_kvm_smokes_build_the_mvmctl_binary_they_execute() {
@@ -25,8 +30,16 @@ fn aarch64_no_kvm_smokes_build_the_mvmctl_binary_they_execute() {
         ("local smoke script", script.as_str()),
     ] {
         assert!(
-            contents.contains(EXPECTED_BUILD),
-            "{source} must build the root mvmctl package before executing target/release/mvmctl"
+            contents.contains(EXPECTED_SOURCE_BUILD),
+            "{source} must build the root mvmctl package in source-channel mode"
+        );
+        assert!(
+            contents.contains(COPY_SOURCE_BINARY),
+            "{source} must preserve the exact source-channel binary used by the smoke"
+        );
+        assert!(
+            contents.contains(EXPECTED_RELEASE_HELPER_BUILD),
+            "{source} must build the release-only published-builder download helper"
         );
         assert!(
             !contents.contains(LIBRARY_ONLY_BUILD),
@@ -36,15 +49,31 @@ fn aarch64_no_kvm_smokes_build_the_mvmctl_binary_they_execute() {
             contents.contains(REQUIRED_VIRTIOFS_PACKAGE),
             "{source} must install virtiofsd before the builder VM shares the checkout"
         );
+        let source_build = contents
+            .find(EXPECTED_SOURCE_BUILD)
+            .expect("source build must be present");
+        let preserve_source = contents
+            .find(COPY_SOURCE_BINARY)
+            .expect("source binary copy must be present");
+        let release_helper_build = contents
+            .find(EXPECTED_RELEASE_HELPER_BUILD)
+            .expect("release helper build must be present");
+        let builder_download = contents
+            .find(REQUIRED_BUILDER_DOWNLOAD)
+            .unwrap_or_else(|| panic!("{source} must download the published builder VM"));
         let bootstrap = contents
             .find(REQUIRED_BOOTSTRAP)
-            .unwrap_or_else(|| panic!("{source} must bootstrap published launch artifacts"));
+            .unwrap_or_else(|| panic!("{source} must bootstrap source-matched launch artifacts"));
         let machine_run = contents
             .find(FIRST_MACHINE_RUN)
             .unwrap_or_else(|| panic!("{source} must execute the first machine run"));
         assert!(
-            bootstrap < machine_run,
-            "{source} must bootstrap the runtime overlay before the builder-backed machine run"
+            source_build < preserve_source
+                && preserve_source < release_helper_build
+                && release_helper_build < builder_download
+                && builder_download < bootstrap
+                && bootstrap < machine_run,
+            "{source} must preserve the source binary, download only the builder VM with the release helper, then bootstrap before launch"
         );
     }
 }

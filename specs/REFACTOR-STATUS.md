@@ -16,13 +16,17 @@ for detailed scope and acceptance criteria.
       drift, and worktree-stable Cargo targets reuse dependencies without
       weakening content-keyed final caches. Production OCI admission runs
       before artifact preparation, so a refused pull starts no build or
-      download. The merge-queue aarch64 smoke builds the root CLI binary it
-      executes with user-facing manifest verification enabled, preventing a
-      library-only or unverifying build from bypassing that witness; it also
-      installs `virtiofsd`, bootstraps the published runtime before the first
-      builder-backed launch, and pins the dependency order that makes the
-      overlay available before kernel preparation. The standalone hostd
-      fuzz lock is refreshed for the current dependency graph.
+      download. The merge-queue aarch64 smoke preserves and executes a
+      source-channel root CLI binary with user-facing manifest verification;
+      a separate release-channel helper downloads only the published builder
+      image because a pre-merge build cannot consume its not-yet-published
+      runtime archive format. It installs `virtiofsd`, bootstraps source-matched
+      runtime artifacts before the first builder-backed launch, and pins the
+      dependency order that makes the overlay available before kernel
+      preparation. The tagged release workflow separately verifies the signed
+      future-format overlay through the production downloader before publish.
+      The standalone hostd fuzz lock is refreshed for the current dependency
+      graph.
       The owning plan is
       `specs/plans/2026-08-20-artifact-acquisition-contract.md`.
 
