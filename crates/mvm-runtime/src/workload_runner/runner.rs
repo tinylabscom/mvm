@@ -65,7 +65,8 @@ mod sockets;
 mod spawner;
 mod warm_claim;
 
-use admission::{admitted_ingress, admitted_network_limits, admitted_services};
+use admission::{admitted_ingress, admitted_network_limits};
+pub use broker::RealBrokerRegistrar;
 use refusal::{map_lineage_refusal, refuse, require_fresh_child_identity};
 use sockets::standing_sockets;
 pub use spawner::{
@@ -1360,6 +1361,31 @@ fn reclaim_consumed_resident_checkpoint_at(
 fn claim_plan(claim: &StandbyClaim) -> std::result::Result<ExecutionPlan, StandbyError> {
     mvm_core::plan::plan_from_admitted_json(&claim.plan_json)
         .map_err(|_| refuse(ClaimRefusal::PlanMissing))
+}
+
+fn admitted_broker_bindings(
+    plan_json: Option<&str>,
+) -> Result<(
+    Vec<ServiceId>,
+    Vec<mvm_contract::protocol::agent_capability::CapabilityBinding>,
+)> {
+    plan_json
+        .map(mvm_core::plan::plan_from_admitted_json)
+        .transpose()
+        .context("parse admitted plan host services")
+        .map(|plan| {
+            plan.map_or_else(
+                || (Vec::new(), Vec::new()),
+                |plan| {
+                    let capabilities = plan
+                        .extensions
+                        .iter()
+                        .flat_map(|extension| extension.capabilities.iter().cloned())
+                        .collect();
+                    (plan.services, capabilities)
+                },
+            )
+        })
 }
 
 /// How many times to redraw a fresh child name before giving up. A collision is

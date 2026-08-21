@@ -1,16 +1,6 @@
 //! Admitted network surfaces decoded for workload launch.
 
 use anyhow::{Context, Result};
-use mvm_core::protocol::broker::ServiceId;
-
-pub(super) fn admitted_services(plan_json: Option<&str>) -> Result<Vec<ServiceId>> {
-    plan_json
-        .map(mvm_core::plan::plan_from_admitted_json)
-        .transpose()
-        .context("parse admitted plan host services")
-        .map(|plan| plan.map_or_else(Vec::new, |plan| plan.services))
-}
-
 pub(super) fn admitted_network_limits(
     plan_json: Option<&str>,
 ) -> Result<mvm_core::plan::NetworkLimits> {
