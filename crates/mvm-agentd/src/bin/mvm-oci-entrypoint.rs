@@ -3,26 +3,21 @@
 //! The guest agent validates and executes this binary through the normal
 //! `/etc/mvm/entrypoint` contract. This runner then execs the OCI image's
 //! configured Entrypoint/Cmd argv directly, without `/bin/sh -c`.
+//!
+//! It resolves the environment through `mvm_agentd::workload_env`, the same
+//! resolver the interactive console uses, so a workload and a shell opened
+//! against it see the same `PATH`, the same image vars, and the same working
+//! directory.
 
 #[cfg(target_os = "linux")]
 mod linux {
-    use serde::Deserialize;
     use std::os::unix::process::CommandExt;
     use std::process::Command;
 
-    const CONFIG_PATH: &str = "/etc/mvm/oci-entrypoint.json";
-
-    #[derive(Debug, Deserialize)]
-    struct OciEntrypointConfig {
-        argv: Vec<String>,
-        #[serde(default)]
-        env: Vec<String>,
-        #[serde(default)]
-        working_dir: Option<String>,
-    }
+    use mvm_agentd::workload_env::{ImageRuntimeConfig, WorkloadEnvironment};
 
     pub fn main() {
-        let config = match read_config() {
+        let config = match ImageRuntimeConfig::load() {
             Ok(config) => config,
             Err(e) => {
                 eprintln!("mvm-oci-entrypoint: {e}");
@@ -34,30 +29,15 @@ mod linux {
             std::process::exit(127);
         }
 
+        // No `.inherit()`: a non-interactive workload starts from the image's
+        // declaration alone, not from whatever PID 1 happened to export.
+        let resolved = WorkloadEnvironment::builder().image(&config).build();
+
         let mut command = Command::new(&config.argv[0]);
         command.args(&config.argv[1..]);
         command.env_clear();
-        command.env("HOME", mvm_agentd::guest_mount::workload_home());
-        let mut has_path = false;
-        for item in &config.env {
-            if let Some((key, value)) = item.split_once('=') {
-                if key == "PATH" {
-                    has_path = true;
-                }
-                command.env(key, value);
-            }
-        }
-        if !has_path {
-            command.env(
-                "PATH",
-                "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-            );
-        }
-        if let Some(dir) = &config.working_dir
-            && !dir.is_empty()
-        {
-            command.current_dir(dir);
-        }
+        command.envs(resolved.vars());
+        command.current_dir(resolved.working_dir());
 
         let err = command.exec();
         eprintln!(
@@ -65,11 +45,6 @@ mod linux {
             config.argv.first().map(String::as_str)
         );
         std::process::exit(127);
-    }
-
-    fn read_config() -> Result<OciEntrypointConfig, String> {
-        let bytes = std::fs::read(CONFIG_PATH).map_err(|e| format!("read {CONFIG_PATH}: {e}"))?;
-        serde_json::from_slice(&bytes).map_err(|e| format!("parse {CONFIG_PATH}: {e}"))
     }
 }
 

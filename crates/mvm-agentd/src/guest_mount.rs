@@ -20,9 +20,17 @@ pub const WORKLOAD_UID: u32 = 901;
 /// Fixed group used by the guest agent and workload command runner.
 pub const WORKLOAD_GID: u32 = 901;
 
-/// Home directory used by workload processes when the rootfs is writable.
+/// Home directory used by workload processes.
+///
+/// The workload root is mounted read-only, so this is a *mount point*: image
+/// materialization bakes the empty directory in, and [`mount_workload_home`]
+/// lays a writable tmpfs over it at boot.
 pub const WORKLOAD_HOME: &str = "/home/mvm-worker";
-/// Writable fallback home for read-only workload rootfs images.
+/// [`WORKLOAD_HOME`] relative to the rootfs root, for host-side materialization
+/// into a staging directory. Kept in step by `home_paths_name_the_same_dir`.
+pub const WORKLOAD_HOME_REL: &str = "home/mvm-worker";
+/// Writable fallback home for an image that carries no [`WORKLOAD_HOME`] mount
+/// point — one mvm neither built nor materialized.
 pub const WORKLOAD_HOME_FALLBACK: &str = "/tmp";
 
 /// Linux capability used by the authenticated guest agent to signal PID 1.
@@ -512,6 +520,10 @@ pub fn drop_guest_agent_privilege(uid: u32, gid: u32) -> Result<()> {
 }
 
 /// Ensure the preferred workload home exists before the agent drops privilege.
+///
+/// Only reachable on a writable root. A read-only root gets its home from
+/// [`mount_workload_home`] instead, over a mount point baked in at image
+/// materialization.
 #[cfg(target_os = "linux")]
 pub fn ensure_workload_home() -> Result<()> {
     ensure_dir(WORKLOAD_HOME)?;
@@ -523,8 +535,71 @@ pub fn ensure_workload_home() -> Result<()> {
     Ok(())
 }
 
+/// Lay a writable tmpfs over the workload's home.
+///
+/// Every workload root is mounted read-only, so the baked-in home is an empty
+/// directory its owner cannot write — which is not a home. Mounting over it
+/// needs no write to the underlying filesystem, so this works on a sealed
+/// dm-verity root exactly as it does on a plain one. Must run after the pivot
+/// and before the privilege drop.
+///
+/// An image with no mount point gets nothing mounted; [`workload_home`] then
+/// reports the `/tmp` fallback, which is writable for a different reason.
+#[cfg(target_os = "linux")]
+pub fn mount_workload_home() -> Result<()> {
+    if !Path::new(WORKLOAD_HOME).is_dir() {
+        // No mount point to mount over. Leave the resolution unrecorded so
+        // `workload_home` falls through to its own probe, which covers the
+        // writable root that creates the directory a moment later.
+        return Ok(());
+    }
+    let result = mount(
+        "tmpfs",
+        WORKLOAD_HOME,
+        "tmpfs",
+        libc::MS_NOSUID | libc::MS_NODEV,
+        &format!("mode=0755,uid={WORKLOAD_UID},gid={WORKLOAD_GID}"),
+    );
+    // Record either way. On failure the mount point is still *there*, so the
+    // probe in `workload_home` would report a directory the workload cannot
+    // write as its home — worse than the fallback it is supposed to get.
+    let _ = RESOLVED_HOME.set(home_after_mount(result.is_ok()));
+    result
+}
+
+/// Which home a mount attempt leaves the workload with.
+///
+/// Split out from [`mount_workload_home`] so the rule is testable without a
+/// guest: the failure arm is the whole point, and it is the arm no host test
+/// can reach through the syscall.
+#[must_use]
+#[cfg(any(target_os = "linux", test))]
+pub(crate) const fn home_after_mount(mounted: bool) -> &'static str {
+    if mounted {
+        WORKLOAD_HOME
+    } else {
+        WORKLOAD_HOME_FALLBACK
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn mount_workload_home() -> Result<()> {
+    Ok(())
+}
+
+/// What [`mount_workload_home`] settled on, once it has run.
+static RESOLVED_HOME: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
+
 /// Resolve the writable home directory for workload processes.
+///
+/// Prefers what the boot path actually secured. The probe below is the answer
+/// before that runs, and on a writable root where the directory is created
+/// rather than mounted: a present [`WORKLOAD_HOME`] there really is writable,
+/// which on a read-only root it would not be.
 pub fn workload_home() -> &'static str {
+    if let Some(home) = RESOLVED_HOME.get() {
+        return home;
+    }
     if Path::new(WORKLOAD_HOME).is_dir() {
         WORKLOAD_HOME
     } else {
@@ -1445,6 +1520,37 @@ mod tests {
                 "{target} must move into the activated workload root"
             );
         }
+    }
+
+    /// A failed home mount must fall back, not hand the workload the
+    /// read-only mount point it was going to cover. The mount point exists
+    /// either way, so the `is_dir` probe alone gets this wrong.
+    #[test]
+    fn a_failed_home_mount_falls_back_instead_of_reporting_a_read_only_home() {
+        assert_eq!(home_after_mount(true), WORKLOAD_HOME);
+        assert_eq!(home_after_mount(false), WORKLOAD_HOME_FALLBACK);
+    }
+
+    /// The home is mounted over, never written into: a write cannot land on
+    /// the read-only root every workload actually boots with.
+    #[test]
+    fn the_workload_home_is_secured_by_a_mount_not_a_write() {
+        let src = include_str!("guest_mount.rs");
+        let body = src
+            .split("pub fn mount_workload_home")
+            .nth(1)
+            .expect("mount_workload_home must exist")
+            .split("\n#[cfg(not(target_os = \"linux\"))]")
+            .next()
+            .expect("the Linux arm is delimited by the non-Linux one");
+        assert!(
+            body.contains("mount(") && body.contains("tmpfs"),
+            "the home must come from a tmpfs mount: {body}"
+        );
+        assert!(
+            body.contains("uid={WORKLOAD_UID}"),
+            "the workload must own its home: {body}"
+        );
     }
 
     #[test]

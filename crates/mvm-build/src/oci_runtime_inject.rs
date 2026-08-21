@@ -16,6 +16,10 @@
 //! - `/mvm/sdk`, the reserved read-only SDK sidecar mount point.
 //! - `/etc/mvm/{name,variant}` and, for sealed boots,
 //!   `/etc/mvm/verb-trust.json`.
+//! - `/etc/{passwd,group}` entries naming the workload uid, and the
+//!   `/home/mvm-worker` mount point, which is what `mk-guest.nix` already
+//!   bakes into the images mvm builds itself. The workload root is mounted
+//!   read-only, so a boot-time write cannot stand in for either.
 //! - For rootfs-only launch shapes, baked guest binaries under
 //!   `/usr/local/bin/`.
 //!
@@ -142,23 +146,20 @@ fn inject_shape_bytes() -> Vec<u8> {
     out
 }
 
-/// Shell-free runtime config for an OCI image's declared Entrypoint/Cmd.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct OciEntrypointConfig {
-    pub argv: Vec<String>,
-    #[serde(default)]
-    pub env: Vec<String>,
-    #[serde(default)]
-    pub working_dir: Option<String>,
-}
+/// The image's declared runtime config. Defined by the guest crate that reads
+/// it back, so the writer and the reader cannot drift apart.
+pub use mvm_agentd::workload_env::ImageRuntimeConfig;
 
 const AGENT_DEST: &str = "usr/local/bin/mvm-guest-agent";
 const NETINIT_DEST: &str = "usr/local/bin/mvm-guest-netinit";
 const EGRESS_CLIENT_DEST: &str = "usr/local/bin/mvm-egress-client";
 const ENTRYPOINT_RUNNER_DEST: &str = "usr/lib/mvm/wrappers/oci-entrypoint";
 const ENTRYPOINT_MARKER_DEST: &str = "etc/mvm/entrypoint";
-const OCI_ENTRYPOINT_CONFIG_DEST: &str = "etc/mvm/oci-entrypoint.json";
+const IMAGE_RUNTIME_CONFIG_DEST: &str = mvm_agentd::workload_env::CONFIG_REL_PATH;
 const VERB_TRUST_DEST: &str = "etc/mvm/verb-trust.json";
+
+/// The workload's home, relative to the rootfs root.
+const WORKLOAD_HOME_REL: &str = mvm_agentd::guest_mount::WORKLOAD_HOME_REL;
 
 /// Directories `inject_mvm_runtime` creates in the target rootfs, with their
 /// modes. Named rather than inline so [`MvmRuntimeBinaries::content_digest`]
@@ -179,6 +180,10 @@ const INJECT_DIRS: &[(&str, u32)] = &[
     ("mvm/runtime", 0o755),
     ("mvm/sdk", 0o755),
     ("usr/lib/mvm/wrappers", 0o755),
+    // The mount point the guest lays a writable tmpfs over. It has to exist
+    // in the image because the root it lives in is read-only by the time any
+    // guest code runs.
+    (WORKLOAD_HOME_REL, 0o755),
 ];
 
 /// Every destination path `inject_mvm_runtime` writes, in a fixed order.
@@ -190,11 +195,13 @@ const INJECT_DESTS: &[&str] = &[
     EGRESS_CLIENT_DEST,
     ENTRYPOINT_RUNNER_DEST,
     ENTRYPOINT_MARKER_DEST,
-    OCI_ENTRYPOINT_CONFIG_DEST,
+    IMAGE_RUNTIME_CONFIG_DEST,
     VERB_TRUST_DEST,
     "init",
     "etc/mvm/variant",
     "etc/mvm/name",
+    "etc/passwd",
+    "etc/group",
 ];
 
 /// Which runtime shape to inject into an OCI-prepared rootfs.
@@ -216,7 +223,7 @@ pub enum RuntimeInjectionProfile {
 pub fn inject_mvm_runtime(
     rootfs_dir: &Path,
     bins: &MvmRuntimeBinaries,
-    entrypoint: Option<&OciEntrypointConfig>,
+    entrypoint: Option<&ImageRuntimeConfig>,
     sealed: bool,
     profile: RuntimeInjectionProfile,
 ) -> Result<InjectedPaths, io::Error> {
@@ -234,6 +241,17 @@ pub fn inject_mvm_runtime(
         ensure_dir(rootfs_dir, rel, *mode)?;
     }
     let runtime_dir = rootfs_dir.join("mvm").join("runtime");
+
+    // Name the workload uid inside the image's own account databases. The
+    // guest cannot do this for itself: every workload root is mounted
+    // read-only, so the boot-time equivalent silently no-ops and the image is
+    // left with a uid `getpwuid` cannot resolve — `whoami` fails, `ls -l`
+    // prints digits, and an interactive shell greets you as `I have no name!`.
+    // Appends only, and never over an entry the image already claims.
+    mvm_agentd::workload_identity::provision_in(
+        rootfs_dir,
+        mvm_agentd::guest_mount::WORKLOAD_HOME,
+    )?;
 
     let etc_mvm = rootfs_dir.join("etc").join("mvm");
     std::fs::create_dir_all(&etc_mvm)?;
@@ -269,20 +287,26 @@ pub fn inject_mvm_runtime(
     let entrypoint_runner_dest = rootfs_dir.join(ENTRYPOINT_RUNNER_DEST);
     copy_file_with_mode(&bins.entrypoint_runner, &entrypoint_runner_dest, 0o555)?;
 
-    if let Some(entrypoint) = entrypoint
-        && !entrypoint.argv.is_empty()
-    {
+    if let Some(entrypoint) = entrypoint.filter(|config| !config.is_empty()) {
+        // Written whenever the image declares anything at all. Gating this on
+        // a non-empty argv threw away the image's `Env` and `WorkingDir`
+        // alongside the absent command, and the interactive console reads
+        // this file too.
         let entrypoint_json = serde_json::to_vec(entrypoint).map_err(io::Error::other)?;
         write_file(
-            &rootfs_dir.join(OCI_ENTRYPOINT_CONFIG_DEST),
+            &rootfs_dir.join(IMAGE_RUNTIME_CONFIG_DEST),
             &entrypoint_json,
             0o644,
         )?;
-        write_file(
-            &rootfs_dir.join(ENTRYPOINT_MARKER_DEST),
-            b"/usr/lib/mvm/wrappers/oci-entrypoint\n",
-            0o644,
-        )?;
+        // The marker is what makes the agent *run* something, so it stays
+        // gated on there being something to run.
+        if !entrypoint.argv.is_empty() {
+            write_file(
+                &rootfs_dir.join(ENTRYPOINT_MARKER_DEST),
+                b"/usr/lib/mvm/wrappers/oci-entrypoint\n",
+                0o644,
+            )?;
+        }
     }
 
     let init_dest = rootfs_dir.join("init");
@@ -567,6 +591,197 @@ mod tests {
         }
     }
 
+    /// The reported bug: `machine run --image rust:latest -it` landed in a
+    /// shell with no image `PATH`. `rust:latest` declares `Cmd` *and* `Env`,
+    /// but every consumer read the file only when there was an entrypoint to
+    /// run — and the interactive console did not read it at all.
+    #[test]
+    fn an_image_declaring_env_and_no_command_still_gets_its_config_written() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("rootfs");
+        std::fs::create_dir_all(&root).unwrap();
+        let bins = fake_bins(tmp.path());
+
+        let config = ImageRuntimeConfig {
+            argv: Vec::new(),
+            env: vec!["PATH=/usr/local/cargo/bin".to_string()],
+            working_dir: None,
+        };
+        inject_mvm_runtime(
+            &root,
+            &bins,
+            Some(&config),
+            false,
+            RuntimeInjectionProfile::RootfsOnly,
+        )
+        .expect("inject");
+
+        let written: ImageRuntimeConfig = serde_json::from_slice(
+            &std::fs::read(root.join(IMAGE_RUNTIME_CONFIG_DEST)).expect("config written"),
+        )
+        .expect("config parses");
+        assert_eq!(written, config);
+        // Nothing to run, so nothing claims the entrypoint contract.
+        assert!(!root.join(ENTRYPOINT_MARKER_DEST).exists());
+    }
+
+    #[test]
+    fn an_image_declaring_nothing_gets_no_config_at_all() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("rootfs");
+        std::fs::create_dir_all(&root).unwrap();
+        let bins = fake_bins(tmp.path());
+
+        inject_mvm_runtime(
+            &root,
+            &bins,
+            Some(&ImageRuntimeConfig::default()),
+            false,
+            RuntimeInjectionProfile::RootfsOnly,
+        )
+        .expect("inject");
+
+        assert!(!root.join(IMAGE_RUNTIME_CONFIG_DEST).exists());
+        assert!(!root.join(ENTRYPOINT_MARKER_DEST).exists());
+    }
+
+    /// The second half of the reported bug: the shell greeted the operator as
+    /// `I have no name!`. Every workload root is mounted read-only, so the
+    /// guest cannot name its own uid at boot — the entry has to be baked in,
+    /// exactly as `mk-guest.nix` does for the images mvm builds itself.
+    #[test]
+    fn inject_names_the_workload_uid_in_the_images_account_databases() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("rootfs");
+        std::fs::create_dir_all(root.join("etc")).unwrap();
+        std::fs::write(root.join("etc/passwd"), "root:x:0:0:root:/root:/bin/bash\n").unwrap();
+        std::fs::write(root.join("etc/group"), "root:x:0:\n").unwrap();
+        let bins = fake_bins(tmp.path());
+
+        inject_mvm_runtime(
+            &root,
+            &bins,
+            None,
+            false,
+            RuntimeInjectionProfile::RootfsOnly,
+        )
+        .expect("inject");
+
+        let passwd = std::fs::read_to_string(root.join("etc/passwd")).unwrap();
+        assert!(
+            passwd.contains(&format!(
+                "mvm-worker:x:{}:{}:",
+                mvm_agentd::guest_mount::WORKLOAD_UID,
+                mvm_agentd::guest_mount::WORKLOAD_GID
+            )),
+            "uid not named: {passwd}"
+        );
+        assert!(
+            passwd.contains(mvm_agentd::guest_mount::WORKLOAD_HOME),
+            "entry must point at the home the guest mounts: {passwd}"
+        );
+        // The image's own accounts are untouched.
+        assert!(passwd.starts_with("root:x:0:0:root:/root:/bin/bash\n"));
+        assert!(
+            std::fs::read_to_string(root.join("etc/group"))
+                .unwrap()
+                .contains("mvm-worker:x:901:")
+        );
+    }
+
+    /// A `scratch` image ships no account databases at all; creating them is
+    /// what makes the identity resolvable there.
+    #[test]
+    fn inject_creates_account_databases_an_image_does_not_ship() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("rootfs");
+        std::fs::create_dir_all(&root).unwrap();
+        let bins = fake_bins(tmp.path());
+
+        inject_mvm_runtime(
+            &root,
+            &bins,
+            None,
+            false,
+            RuntimeInjectionProfile::RootfsOnly,
+        )
+        .expect("inject");
+
+        assert!(
+            std::fs::read_to_string(root.join("etc/passwd"))
+                .unwrap()
+                .contains("mvm-worker:x:901:")
+        );
+    }
+
+    /// An image that already claims the uid or the name wins; nothing is
+    /// rewritten, uid 0 least of all.
+    #[test]
+    fn inject_leaves_an_image_that_already_claims_the_identity_alone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("rootfs");
+        std::fs::create_dir_all(root.join("etc")).unwrap();
+        let existing = "root:x:0:0:root:/root:/bin/sh\nsomeone:x:901:901::/home/someone:/bin/sh\n";
+        std::fs::write(root.join("etc/passwd"), existing).unwrap();
+        let bins = fake_bins(tmp.path());
+
+        inject_mvm_runtime(
+            &root,
+            &bins,
+            None,
+            false,
+            RuntimeInjectionProfile::RootfsOnly,
+        )
+        .expect("inject");
+
+        assert_eq!(
+            std::fs::read_to_string(root.join("etc/passwd")).unwrap(),
+            existing
+        );
+    }
+
+    /// The home is a *mount point*: the guest lays a writable tmpfs over it,
+    /// which needs no write to the read-only root but does need the directory
+    /// to already be there.
+    #[test]
+    fn inject_creates_the_home_mount_point_the_guest_mounts_over() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("rootfs");
+        std::fs::create_dir_all(&root).unwrap();
+        let bins = fake_bins(tmp.path());
+
+        inject_mvm_runtime(
+            &root,
+            &bins,
+            None,
+            false,
+            RuntimeInjectionProfile::RootfsOnly,
+        )
+        .expect("inject");
+
+        assert!(
+            root.join(mvm_agentd::guest_mount::WORKLOAD_HOME_REL)
+                .is_dir()
+        );
+    }
+
+    /// Baking new files into the rootfs changes what a materialized image
+    /// contains, so an image sealed before they existed has to re-materialize
+    /// rather than boot without them.
+    #[test]
+    fn the_account_databases_and_home_are_folded_into_the_content_digest() {
+        for name in [
+            "etc/passwd",
+            "etc/group",
+            mvm_agentd::guest_mount::WORKLOAD_HOME_REL,
+        ] {
+            assert!(
+                INJECT_DESTS.contains(&name) || INJECT_DIRS.iter().any(|(rel, _)| *rel == name),
+                "{name} is written but not folded into the identity"
+            );
+        }
+    }
+
     #[test]
     fn inject_writes_init_binaries_and_mount_point() {
         let tmp = tempfile::tempdir().unwrap();
@@ -574,7 +789,7 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let bins = fake_bins(tmp.path());
 
-        let entrypoint = OciEntrypointConfig {
+        let entrypoint = ImageRuntimeConfig {
             argv: vec![
                 "/app/server".to_string(),
                 "--port".to_string(),
@@ -624,10 +839,9 @@ mod tests {
             std::fs::read_to_string(root.join("etc/mvm/entrypoint")).unwrap(),
             "/usr/lib/mvm/wrappers/oci-entrypoint\n"
         );
-        let written_entrypoint: OciEntrypointConfig = serde_json::from_slice(
-            &std::fs::read(root.join("etc/mvm/oci-entrypoint.json")).unwrap(),
-        )
-        .unwrap();
+        let written_entrypoint: ImageRuntimeConfig =
+            serde_json::from_slice(&std::fs::read(root.join(IMAGE_RUNTIME_CONFIG_DEST)).unwrap())
+                .unwrap();
         assert_eq!(written_entrypoint, entrypoint);
         assert!(injected.runtime_mount_point.is_dir());
         assert!(root.join("mvm/runtime").is_dir());

@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-use crate::oci_runtime_inject::{MvmRuntimeBinaries, OciEntrypointConfig};
+use crate::oci_runtime_inject::{ImageRuntimeConfig, MvmRuntimeBinaries};
 use crate::rootfs::MaterializeExt4Input;
 use mvm_fs::oci_to_rootfs::{
     MaterializedRootfs, OciUnpackError, VeritySealedRootfs, VeritysetupOptions, seal_with_verity,
@@ -23,7 +23,7 @@ pub struct InjectAndMaterializeRequest<'a> {
     output: &'a Path,
     label: &'a str,
     profile: crate::oci_runtime_inject::RuntimeInjectionProfile,
-    entrypoint: Option<&'a OciEntrypointConfig>,
+    entrypoint: Option<&'a ImageRuntimeConfig>,
     sealed: bool,
     deferred_nodes: Vec<mvm_fs::ext4::Node>,
 }
@@ -54,7 +54,7 @@ pub struct InjectAndMaterializeRequestBuilder<'a> {
     output: &'a Path,
     label: &'a str,
     profile: crate::oci_runtime_inject::RuntimeInjectionProfile,
-    entrypoint: Option<&'a OciEntrypointConfig>,
+    entrypoint: Option<&'a ImageRuntimeConfig>,
     sealed: bool,
     deferred_nodes: Vec<mvm_fs::ext4::Node>,
 }
@@ -65,7 +65,7 @@ impl<'a> InjectAndMaterializeRequestBuilder<'a> {
         self
     }
 
-    pub fn entrypoint(mut self, entrypoint: Option<&'a OciEntrypointConfig>) -> Self {
+    pub fn entrypoint(mut self, entrypoint: Option<&'a ImageRuntimeConfig>) -> Self {
         self.entrypoint = entrypoint;
         self
     }
@@ -156,7 +156,7 @@ pub fn inject_and_materialize(request: InjectAndMaterializeRequest<'_>) -> Resul
         sealed,
         profile == crate::oci_runtime_inject::RuntimeInjectionProfile::RuntimeLean,
     )
-    // The same argv baked into `etc/mvm/oci-entrypoint.json` above, put where
+    // The same argv baked into `etc/mvm/image-runtime.json` above, put where
     // the host can still read it: once this tree is an ext4 blob nothing on
     // the host opens it, and admission has to know what the image runs before
     // it decides whether anything may drive its stdin.

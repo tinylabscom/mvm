@@ -232,15 +232,20 @@ pub fn open_session(
     // functions. `putenv`/`execvp` can `malloc` — if another thread held the
     // allocator lock at fork time the child would deadlock — so we build a
     // fixed `envp` here and hand it to `execve` (async-signal-safe) instead.
-    let shell_env = build_shell_env_with(extra_env);
+    let resolved = build_shell_env_with(extra_env);
+    let shell_env = resolved.to_envp();
     let mut envp: Vec<*const u8> = shell_env.iter().map(|c| c.as_ptr().cast::<u8>()).collect();
     envp.push(std::ptr::null());
     // Same reason as `envp`: the child's `chdir` target has to be a NUL string
-    // allocated before the fork. Start where `$HOME` points — the workload's
-    // own writable home — rather than in root's, which the workload uid can
-    // neither write nor, on most images, read.
-    let start_dir = std::ffi::CString::new(crate::guest_mount::workload_home())
-        .unwrap_or_else(|_| c"/".to_owned());
+    // allocated before the fork. The resolver already picked it — the image's
+    // own `WorkingDir` when it declares one, and otherwise the workload's
+    // writable home rather than root's, which the workload uid can neither
+    // write nor, on most images, read.
+    let start_dir = {
+        use std::os::unix::ffi::OsStrExt;
+        std::ffi::CString::new(resolved.working_dir().as_bytes())
+            .unwrap_or_else(|_| c"/".to_owned())
+    };
     // SAFETY: fork() takes no arguments and has no preconditions; it returns
     // twice (0 in the child, the child pid in the parent).
     let pid = unsafe { fork() };
@@ -700,8 +705,19 @@ unsafe extern "C" {
 
 const SHUT_RDWR: i32 = 2;
 
-fn build_shell_env_with(extra_env: &[(String, String)]) -> Vec<std::ffi::CString> {
-    build_shell_env_from(std::env::vars_os(), extra_env)
+/// The console session's environment, resolved through the one shared
+/// resolver so an interactive shell lands in exactly the environment the
+/// image's own entrypoint would have run in.
+fn build_shell_env_with(
+    extra_env: &[(String, String)],
+) -> crate::workload_env::WorkloadEnvironment {
+    let image = crate::workload_env::ImageRuntimeConfig::load().unwrap_or_else(|error| {
+        // A malformed config must not cost the operator their shell; it costs
+        // them the image's declared vars, and says so.
+        eprintln!("mvm-guest-agent: ignoring unreadable image runtime config: {error}");
+        crate::workload_env::ImageRuntimeConfig::default()
+    });
+    build_shell_env_from(std::env::vars_os(), &image, extra_env)
 }
 
 fn build_console_argv(argv: &[String]) -> Result<Vec<std::ffi::CString>, ConsoleError> {
@@ -733,38 +749,24 @@ fn build_console_argv(argv: &[String]) -> Result<Vec<std::ffi::CString>, Console
 
 /// Pure core of the shell environment builder, parameterized over the source
 /// vars so it is testable without mutating process-global state.
-fn build_shell_env_from<I>(vars: I, extra_env: &[(String, String)]) -> Vec<std::ffi::CString>
+fn build_shell_env_from<I>(
+    vars: I,
+    image: &crate::workload_env::ImageRuntimeConfig,
+    extra_env: &[(String, String)],
+) -> crate::workload_env::WorkloadEnvironment
 where
     I: IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
 {
-    use std::os::unix::ffi::OsStrExt;
-    let mut env: Vec<std::ffi::CString> = Vec::new();
-    for (key, val) in vars {
-        // HOME/TERM are forced below; drop any inherited copy so the shell
-        // sees exactly one of each.
-        if key == "HOME" || key == "TERM" {
-            continue;
-        }
-        let mut kv = key.as_bytes().to_vec();
-        kv.push(b'=');
-        kv.extend_from_slice(val.as_bytes());
-        // Skip any var carrying an interior NUL — it can't cross the C ABI.
-        if let Ok(c) = std::ffi::CString::new(kv) {
-            env.push(c);
-        }
-    }
-    for (key, val) in extra_env {
-        if key.contains('\0') || key.contains('=') || val.contains('\0') {
-            continue;
-        }
-        if let Ok(c) = std::ffi::CString::new(format!("{key}={val}")) {
-            env.push(c);
-        }
-    }
-    let home = format!("HOME={}", crate::guest_mount::workload_home());
-    env.push(std::ffi::CString::new(home).expect("no interior NUL"));
-    env.push(std::ffi::CString::new("TERM=xterm-256color").expect("no interior NUL"));
-    env
+    crate::workload_env::WorkloadEnvironment::builder()
+        .inherit(vars)
+        .image(image)
+        .overrides(
+            extra_env
+                .iter()
+                .map(|(key, val)| (key.as_str(), val.as_str())),
+        )
+        .interactive()
+        .build()
 }
 
 #[cfg(test)]
@@ -807,6 +809,17 @@ mod tests {
         std::ffi::OsString::from(s)
     }
 
+    fn no_image() -> crate::workload_env::ImageRuntimeConfig {
+        crate::workload_env::ImageRuntimeConfig::default()
+    }
+
+    fn strings(env: &crate::workload_env::WorkloadEnvironment) -> Vec<String> {
+        env.to_envp()
+            .iter()
+            .filter_map(|c| c.to_str().ok().map(str::to_string))
+            .collect()
+    }
+
     #[test]
     fn build_shell_env_overrides_home_and_term() {
         // Inherited HOME/TERM are dropped; the forced values are appended once.
@@ -816,19 +829,20 @@ mod tests {
                 (oss("TERM"), oss("dumb")),
                 (oss("PATH"), oss("/usr/bin")),
             ],
+            &no_image(),
             &[],
         );
-        let strs: Vec<&str> = out.iter().filter_map(|c| c.to_str().ok()).collect();
+        let strs = strings(&out);
         assert!(
-            strs.contains(&"PATH=/usr/bin"),
+            strs.iter().any(|s| s == "PATH=/usr/bin"),
             "inherited PATH kept: {strs:?}"
         );
         assert_eq!(strs.iter().filter(|s| s.starts_with("HOME=")).count(), 1);
         assert_eq!(strs.iter().filter(|s| s.starts_with("TERM=")).count(), 1);
         let expected_home = format!("HOME={}", crate::guest_mount::workload_home());
-        assert!(strs.contains(&expected_home.as_str()), "{strs:?}");
-        assert!(strs.contains(&"TERM=xterm-256color"), "{strs:?}");
-        assert!(!strs.contains(&"HOME=/somewhere/else"));
+        assert!(strs.contains(&expected_home), "{strs:?}");
+        assert!(strs.iter().any(|s| s == "TERM=xterm-256color"), "{strs:?}");
+        assert!(!strs.iter().any(|s| s == "HOME=/somewhere/else"));
     }
 
     #[test]
@@ -837,22 +851,93 @@ mod tests {
         // A value with an embedded NUL can't cross the C ABI — it's dropped,
         // but the forced HOME/TERM still come through.
         let bad = std::ffi::OsString::from_vec(b"a\0b".to_vec());
-        let out = build_shell_env_from([(oss("WEIRD"), bad)], &[]);
-        let strs: Vec<&str> = out.iter().filter_map(|c| c.to_str().ok()).collect();
+        let out = build_shell_env_from([(oss("WEIRD"), bad)], &no_image(), &[]);
+        let strs = strings(&out);
         assert!(!strs.iter().any(|s| s.starts_with("WEIRD=")), "{strs:?}");
         let expected_home = format!("HOME={}", crate::guest_mount::workload_home());
-        assert!(strs.contains(&expected_home.as_str()));
-        assert!(strs.contains(&"TERM=xterm-256color"));
+        assert!(strs.contains(&expected_home));
+        assert!(strs.iter().any(|s| s == "TERM=xterm-256color"));
     }
 
     #[test]
     fn build_shell_env_adds_valid_extra_env() {
         let out = build_shell_env_from(
             [(oss("PATH"), oss("/usr/bin"))],
+            &no_image(),
             &[("MVM_SESSION_TAG".to_string(), "abc123".to_string())],
         );
-        let strs: Vec<&str> = out.iter().filter_map(|c| c.to_str().ok()).collect();
-        assert!(strs.contains(&"MVM_SESSION_TAG=abc123"));
+        assert!(strings(&out).iter().any(|s| s == "MVM_SESSION_TAG=abc123"));
+    }
+
+    /// The reported bug: `machine run --image rust:latest -it -- /bin/bash`
+    /// landed in a shell where `which rustc` found nothing. `rust:latest`
+    /// keeps its toolchain in `/usr/local/cargo/bin` and puts it on `PATH`
+    /// through the image config alone, which the console never read.
+    #[test]
+    fn console_takes_path_from_the_image_over_the_agents_own() {
+        let image = crate::workload_env::ImageRuntimeConfig {
+            argv: vec!["bash".to_string()],
+            env: vec![
+                "PATH=/usr/local/cargo/bin:/usr/local/bin:/usr/bin".to_string(),
+                "CARGO_HOME=/usr/local/cargo".to_string(),
+                "RUSTUP_HOME=/usr/local/rustup".to_string(),
+            ],
+            working_dir: None,
+        };
+        let out = build_shell_env_from([(oss("PATH"), oss("/usr/bin:/bin"))], &image, &[]);
+        let strs = strings(&out);
+        assert!(
+            strs.iter()
+                .any(|s| s == "PATH=/usr/local/cargo/bin:/usr/local/bin:/usr/bin"),
+            "image PATH must beat the agent's inherited one: {strs:?}"
+        );
+        assert_eq!(
+            strs.iter().filter(|s| s.starts_with("PATH=")).count(),
+            1,
+            "a repeated PATH resolves to the first entry, so the override must \
+             replace rather than append: {strs:?}"
+        );
+        assert!(strs.iter().any(|s| s == "CARGO_HOME=/usr/local/cargo"));
+        assert!(strs.iter().any(|s| s == "RUSTUP_HOME=/usr/local/rustup"));
+    }
+
+    /// `--env` is the operator's correction, so it outranks the image.
+    #[test]
+    fn explicit_env_flags_outrank_the_image_declaration() {
+        let image = crate::workload_env::ImageRuntimeConfig {
+            argv: Vec::new(),
+            env: vec!["NAME=from-image".to_string(), "PATH=/image/bin".to_string()],
+            working_dir: None,
+        };
+        let out = build_shell_env_from(
+            [(oss("NAME"), oss("from-agent"))],
+            &image,
+            &[("NAME".to_string(), "ari".to_string())],
+        );
+        let strs = strings(&out);
+        assert!(strs.iter().any(|s| s == "NAME=ari"), "{strs:?}");
+        assert_eq!(strs.iter().filter(|s| s.starts_with("NAME=")).count(), 1);
+    }
+
+    /// An image that declares a `WorkingDir` gets it, matching where its own
+    /// entrypoint would have started.
+    #[test]
+    fn console_starts_in_the_images_working_dir_when_it_declares_one() {
+        let image = crate::workload_env::ImageRuntimeConfig {
+            argv: Vec::new(),
+            env: Vec::new(),
+            working_dir: Some("/usr/src/app".to_string()),
+        };
+        let out = build_shell_env_from(std::iter::empty(), &image, &[]);
+        assert_eq!(out.working_dir(), std::ffi::OsStr::new("/usr/src/app"));
+
+        // ...and falls back to the writable home when it declares none, which
+        // is where an interactive session has always started.
+        let out = build_shell_env_from(std::iter::empty(), &no_image(), &[]);
+        assert_eq!(
+            out.working_dir(),
+            std::ffi::OsStr::new(crate::guest_mount::workload_home())
+        );
     }
 
     /// The reported bug: `mvmctl machine run -it` printed

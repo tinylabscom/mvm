@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
-use mvm_build::oci_runtime_inject::OciEntrypointConfig;
+use mvm_build::oci_runtime_inject::ImageRuntimeConfig;
 use mvm_build::rootfs::MaterializeExt4Input;
 
 use super::cache::safe_cache_path;
@@ -81,28 +81,28 @@ pub(super) fn prepared_virtiofs_root(
         .join("rootfs-only")
 }
 
-pub(super) fn oci_entrypoint_from_config_bytes(
-    bytes: &[u8],
-) -> Result<Option<OciEntrypointConfig>> {
+/// The image's declared runtime config, or `None` when it declares nothing.
+///
+/// An empty argv does not make the result empty: an image is free to declare
+/// `Env` and no command, and discarding the environment along with the absent
+/// command is what left `rust:latest` without `/usr/local/cargo/bin` on
+/// `PATH`.
+pub(super) fn oci_entrypoint_from_config_bytes(bytes: &[u8]) -> Result<Option<ImageRuntimeConfig>> {
     let config: OciImageConfig = serde_json::from_slice(bytes).context("parse OCI image config")?;
     let mut argv = config.config.entrypoint.unwrap_or_default();
     argv.extend(config.config.cmd.unwrap_or_default());
-    if argv.is_empty() {
-        return Ok(None);
-    }
-    let env = config.config.env;
-    let working_dir = config.config.working_dir.filter(|dir| !dir.is_empty());
-    Ok(Some(OciEntrypointConfig {
+    let resolved = ImageRuntimeConfig {
         argv,
-        env,
-        working_dir,
-    }))
+        env: config.config.env,
+        working_dir: config.config.working_dir,
+    };
+    Ok((!resolved.is_empty()).then_some(resolved))
 }
 
 pub(super) fn oci_entrypoint_from_cache_path(
     cache_root: &Path,
     config_path: Option<&str>,
-) -> Result<Option<OciEntrypointConfig>> {
+) -> Result<Option<ImageRuntimeConfig>> {
     let Some(config_path) = config_path else {
         return Ok(None);
     };
@@ -156,7 +156,7 @@ pub(super) type RuntimeMaterializer = fn(
     &Path,
     &Path,
     &str,
-    Option<&OciEntrypointConfig>,
+    Option<&ImageRuntimeConfig>,
     bool,
     Vec<mvm_fs::ext4::Node>,
 ) -> Result<()>;
@@ -235,7 +235,7 @@ pub(super) fn inject_runtime_and_materialize(
     unpacked_root: &Path,
     rootfs_abs: &Path,
     image_label: &str,
-    entrypoint: Option<&OciEntrypointConfig>,
+    entrypoint: Option<&ImageRuntimeConfig>,
     sealed: bool,
     deferred_nodes: Vec<mvm_fs::ext4::Node>,
 ) -> Result<()> {
