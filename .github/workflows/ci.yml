@@ -1602,7 +1602,7 @@ jobs:
       # flake so `mvmctl` treats this as an installed binary and downloads the
       # published image instead.
       - name: Build mvmctl
-        run: cargo build --release -p mvm-cli --features release-artifact-bootstrap
+        run: cargo build --release -p mvm-cli --features release-artifact-bootstrap,release-channel
 
       - name: Use published builder VM bootstrap path
         run: mv nix/images/builder-vm nix/images/builder-vm.hidden
