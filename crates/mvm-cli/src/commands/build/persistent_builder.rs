@@ -206,6 +206,10 @@ fn persistent_backend(explicit: Option<BuilderBackendChoice>) -> Result<Persiste
              (QEMU is a one-shot dev/test backend). Use `--builder libkrun` \
              (or omit `--builder` for libkrun)."
         ),
+        Some(BuilderBackendChoice::WebLinux) => bail!(
+            "`mvmctl persistent-builder start` has no WebLinux persistent builder \
+             (WebLinux is browser-only). Use `--builder libkrun` or `--builder hvf`."
+        ),
     }
 }
 

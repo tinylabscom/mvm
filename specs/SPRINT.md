@@ -1249,10 +1249,29 @@ updates only its own entry below.
       every per-VM binary `mvmctl` spawns — the "needs the full aarch64
       host-side runtime" gap), #2664 (no panic on a fresh `MVM_HOME`), #2679
       (foreign-arch bundle refused at boot and admission), #2682 (workspace
-      suite runs natively on aarch64). What blocks the witness now is artifact
-      supply, not hardware: #2675 (no published aarch64 workload kernel for the
-      current version) and #2676 (the macOS HVF builder fails `BadKernel`, so no
-      signed bundle can be built locally).
+      suite runs natively on aarch64).
+      **Update 2026-08-20:** the aarch64 GNU host binaries were cross-built on
+      macOS (`mvmctl` + `mvm-hostd` per-VM set), copied to the Pi, and the
+      signed `examples/sleeper` bundle installed and verified. The correct CLI
+      invocation is transient `machine run --manifest <bundle-sha> --hypervisor
+      firecracker -- <cmd>`; `--detach` / named-machine paths still expect a
+      templates slot and fail. Two host-side prerequisites surfaced:
+      `firecracker` must be on `root`'s `PATH` (the launch script uses `sudo`),
+      and the `0.18.0/aarch64` runtime overlay must be seeded in
+      `~/.mvm/cache` because the release download 404s. With those satisfied
+      the VM reaches `InstanceStart`, but the HVF-builder-produced bundle
+      kernel lacks Firecracker PCI virtio-blk/vsock drivers (`error -524`), so
+      a Firecracker-compatible bundle (or kernel override) is still required
+      before the guest agent can answer. The invocation gap is closed; the
+      remaining blocker is the bundle's kernel target.
+      **Update 2026-08-20 (later):** the HVF builder VM boot panic was traced
+      to `/bin/mvm-setpriv` missing from the builder rootfs PATH; fixing
+      `nix/lib/mk-guest.nix` to install the helper allowed the builder VM to
+      boot and build a fresh workload kernel. A new Firecracker-compatible
+      `examples/exit_code` bundle was exported at `/tmp/exit-code.mvmpkg`
+      (24 MiB) with `virtio_pci` and `virtio_vsock` built into the kernel.
+      The only remaining blocker is that `rpi1.local` is no longer reachable
+      via mDNS, so Pi-side validation is on hold until network access returns.
 
 - [x] **Backend shim removal — invert the driver/backend relationship.**
       `FcDriver`, `HvfDriver`, `LibkrunDriver`, and `QemuDriver` now own their
@@ -2449,6 +2468,23 @@ Cross-sprint work tracked in `specs/plans/2026-08-15-merge-queue-throughput.md`.
       serial test suite.
 - [ ] Land the workflow change, pass Linux all-target Clippy, and apply and
       verify the live merge-queue and required-check settings.
+
+## Plan 338 — WebLinux browser backend, builder, workbench, and `mvmd` deployment client
+
+Cross-sprint work tracked in `specs/plans/338-weblinux-browser-backend-builder-workbench-and-mvmd-deploy.md`.
+
+- [x] 0.1 Add ADR-049 and Plan 338 with `Backing:`/`Validation:` headers.
+- [x] 0.2 Update ADR-024 to reflect the browser-Linux implementation and link ADR-049.
+- [x] 0.3 Update ADR-006 to allow `mvmctl deploy` as a client operation to `mvmd`.
+- [x] 1.1 Add `BackendKind::WebLinux` and pure capability metadata.
+- [x] 1.7 Define minimal portable lifecycle protocol skeleton.
+- [x] 2.1 Pin and package a reproducible QEMU-Wasm engine through Nix.
+      Pinned upstream revisions and added `nix/packages/qemu-wasm.nix`;
+      build is queued for the Linux builder VM.
+- [ ] 2.8 Boot an `mvm`-built x86_64 kernel under headless Chromium and record measurements.
+
+Workstream 1 first slice (1.1, 1.7) and the WS-2 engine packaging
+scaffolding landed in PR #2776.
 
 ## Appendix A — ADR consolidation clusters (~91 → ~15)
 

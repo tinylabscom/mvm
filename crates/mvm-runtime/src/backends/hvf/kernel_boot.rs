@@ -74,24 +74,24 @@ const VIRTIO_MMIO_BASE: u64 = 0x0a00_0000;
 const VIRTIO_IRQ: u32 = 48;
 const VSOCK_MMIO_BASE: u64 = 0x0a00_0200;
 const VSOCK_IRQ: u32 = 49;
-/// virtio-fs windows start above the disk band (MAX_DISKS=5 → up to
+/// virtio-fs windows start above the disk band (MAX_DISKS=6 → up to
 /// base+5*stride) and vsock. The first slot is the optional virtio-fs root;
 /// following slots are live user directory shares.
-const FS_MMIO_BASE: u64 = VIRTIO_MMIO_BASE + 6 * MMIO_STRIDE;
+const FS_MMIO_BASE: u64 = VIRTIO_MMIO_BASE + 7 * MMIO_STRIDE;
 const FS_IRQ: u32 = 54;
 /// Maximum number of user virtio-fs shares in one HVF guest. The bound keeps the
 /// MMIO and SPI allocations fixed and leaves the entropy device at a stable slot.
 const MAX_VIRTIOFS_SHARES: usize = 8;
 /// The entropy device follows every optional disk/vsock/virtio-fs window, so its
 /// stable address cannot collide with a device combination selected at runtime.
-const RNG_MMIO_BASE: u64 = VIRTIO_MMIO_BASE + (7 + MAX_VIRTIOFS_SHARES as u64) * MMIO_STRIDE;
+const RNG_MMIO_BASE: u64 = VIRTIO_MMIO_BASE + (8 + MAX_VIRTIOFS_SHARES as u64) * MMIO_STRIDE;
 const RNG_IRQ: u32 = FS_IRQ + MAX_VIRTIOFS_SHARES as u32 + 1;
 /// virtio-mmio window stride; each device occupies one 0x200 slot.
 const MMIO_STRIDE: u64 = 0x200;
 /// Max virtio-blk devices (`/dev/vda`..). The builder-with-runtime-overlay path
 /// needs five: rootfs, nix-store, input, output, and the read-only runtime
 /// overlay.
-const MAX_DISKS: usize = 5;
+const MAX_DISKS: usize = 6;
 
 /// MMIO base + SPI for virtio-blk device `i` (`/dev/vda` = 0). Disk 0 keeps the
 /// original single-disk window; disks 1+ sit *above* the vsock slot, so vsock's

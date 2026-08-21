@@ -17,6 +17,7 @@ use crate::microvm::FlakeRunConfig;
 #[cfg(feature = "test-support")]
 use crate::mock::MockBackend;
 use crate::wasm_backend::WasmBackend;
+use crate::web_linux_backend::WebLinuxBackend;
 use crate::workload_runner::{
     RealBrokerRegistrar, RealNetworkEndpointSpawner, StopTiming, WorkloadRunner,
 };
@@ -355,6 +356,12 @@ pub enum AnyBackend {
     /// a missing kernel artifact fails `start` closed with a typed error
     /// naming the fetch source.
     AppleContainer(AppleContainerBackend),
+    /// Browser-hosted WebLinux backend — see [`crate::web_linux_backend`].
+    /// Runs a Nix-built Linux kernel under QEMU-Wasm inside a browser
+    /// Worker. The native stub is selectable via `--hypervisor web-linux`
+    /// but fails closed on any lifecycle operation; `auto_select` never
+    /// returns this kind.
+    WebLinux(WebLinuxBackend),
 }
 
 impl AnyBackend {
@@ -499,6 +506,7 @@ impl AnyBackend {
             Self::Hvf(backend) => backend,
             Self::Wasm(backend) => backend,
             Self::AppleContainer(backend) => backend,
+            Self::WebLinux(backend) => backend,
         }
     }
 
@@ -516,6 +524,9 @@ impl AnyBackend {
             Self::Hvf(backend) => std::sync::Arc::new(backend) as std::sync::Arc<dyn VmBackend>,
             Self::Wasm(backend) => std::sync::Arc::new(backend) as std::sync::Arc<dyn VmBackend>,
             Self::AppleContainer(backend) => {
+                std::sync::Arc::new(backend) as std::sync::Arc<dyn VmBackend>
+            }
+            Self::WebLinux(backend) => {
                 std::sync::Arc::new(backend) as std::sync::Arc<dyn VmBackend>
             }
         }
@@ -580,6 +591,9 @@ impl AnyBackend {
             // same egress endpoint, broker registration, and activation gate
             // apply verbatim.
             AnyBackend::AppleContainer(b) => Some(b),
+            // WebLinux is browser-only in this build; the native stub cannot
+            // carry an untrusted workload.
+            AnyBackend::WebLinux(_) => None,
         }
     }
 
@@ -635,11 +649,12 @@ impl AnyBackend {
             // No warm pool on these backends: qemu and wasm are not
             // workload-bearing; apple-container is, but the HVF driver has no
             // standby support — all fail closed.
-            AnyBackend::Qemu(_) | AnyBackend::Wasm(_) | AnyBackend::AppleContainer(_) => {
-                Err(mvm_core::vm_backend::StandbyError::Unsupported {
-                    backend: self.inner().name().to_string(),
-                })
-            }
+            AnyBackend::Qemu(_)
+            | AnyBackend::Wasm(_)
+            | AnyBackend::AppleContainer(_)
+            | AnyBackend::WebLinux(_) => Err(mvm_core::vm_backend::StandbyError::Unsupported {
+                backend: self.inner().name().to_string(),
+            }),
         }
     }
 
@@ -666,7 +681,7 @@ impl AnyBackend {
             // and wasm have no save/restore mechanics at all.
             #[cfg(feature = "test-support")]
             AnyBackend::Mock(_) => None,
-            AnyBackend::Qemu(_) | AnyBackend::Wasm(_) => None,
+            AnyBackend::Qemu(_) | AnyBackend::Wasm(_) | AnyBackend::WebLinux(_) => None,
         }
     }
 
@@ -678,7 +693,10 @@ impl AnyBackend {
             AnyBackend::Hvf(runner) => runner.supports_preloaded_standby(),
             #[cfg(feature = "test-support")]
             AnyBackend::Mock(_) => false,
-            AnyBackend::Qemu(_) | AnyBackend::Wasm(_) | AnyBackend::AppleContainer(_) => false,
+            AnyBackend::Qemu(_)
+            | AnyBackend::Wasm(_)
+            | AnyBackend::AppleContainer(_)
+            | AnyBackend::WebLinux(_) => false,
         }
     }
 
@@ -698,11 +716,12 @@ impl AnyBackend {
             AnyBackend::Mock(_) => Err(mvm_core::vm_backend::StandbyError::Unsupported {
                 backend: self.inner().name().to_string(),
             }),
-            AnyBackend::Qemu(_) | AnyBackend::Wasm(_) | AnyBackend::AppleContainer(_) => {
-                Err(mvm_core::vm_backend::StandbyError::Unsupported {
-                    backend: self.inner().name().to_string(),
-                })
-            }
+            AnyBackend::Qemu(_)
+            | AnyBackend::Wasm(_)
+            | AnyBackend::AppleContainer(_)
+            | AnyBackend::WebLinux(_) => Err(mvm_core::vm_backend::StandbyError::Unsupported {
+                backend: self.inner().name().to_string(),
+            }),
         }
     }
 
@@ -742,11 +761,12 @@ impl AnyBackend {
             // No warm pool on these backends: qemu and wasm are not
             // workload-bearing; apple-container is, but the HVF driver has no
             // standby support — all fail closed.
-            AnyBackend::Qemu(_) | AnyBackend::Wasm(_) | AnyBackend::AppleContainer(_) => {
-                Err(mvm_core::vm_backend::StandbyError::Unsupported {
-                    backend: self.inner().name().to_string(),
-                })
-            }
+            AnyBackend::Qemu(_)
+            | AnyBackend::Wasm(_)
+            | AnyBackend::AppleContainer(_)
+            | AnyBackend::WebLinux(_) => Err(mvm_core::vm_backend::StandbyError::Unsupported {
+                backend: self.inner().name().to_string(),
+            }),
         }
     }
 
@@ -792,6 +812,7 @@ impl AnyBackend {
             Self::Hvf(backend) => backend.stop_with_timing(id).map(Some),
             Self::Wasm(backend) => backend.stop(id).map(|_| None),
             Self::AppleContainer(backend) => backend.stop_with_timing(id).map(Some),
+            Self::WebLinux(backend) => backend.stop(id).map(|_| None),
         }
     }
 
@@ -1513,6 +1534,16 @@ mod tests {
                     "apple-container",
                     vec!["container"],
                     BackendTier::Tier2,
+                    None,
+                    None,
+                    true,
+                    false,
+                    false,
+                ),
+                (
+                    "web-linux",
+                    Vec::new(),
+                    BackendTier::Tier3,
                     None,
                     None,
                     true,

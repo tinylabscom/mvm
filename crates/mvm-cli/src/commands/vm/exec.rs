@@ -327,7 +327,7 @@ pub(in crate::commands) struct RunArgs {
     /// forwarded from `machine run`'s `--healthcheck` + tuning flags.
     #[arg(skip)]
     pub healthcheck: Option<mvm_contract::ir::HealthCheck>,
-    /// Select the VMM (firecracker, hvf, libkrun, or qemu).
+    /// Select the VMM (firecracker, hvf, libkrun, qemu, or web-linux).
     #[arg(long, value_name = "HYPERVISOR")]
     pub hypervisor: Option<String>,
 }

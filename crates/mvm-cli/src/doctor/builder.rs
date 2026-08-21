@@ -250,6 +250,9 @@ pub(super) fn builder_transport_check(plat: Platform) -> Check {
             "unsupported legacy builder path: qemu dev/test fallback with guest-network bootstrap; not part of the production vsock-only architecture"
                 .to_string()
         }
+        BuilderBackendChoice::WebLinux => {
+            "browser-only WebLinux builder; no native transport or builder guest".to_string()
+        }
     };
     Check {
         name: "builder transport",
@@ -346,6 +349,9 @@ pub(super) fn builder_backend_check(plat: Platform) -> Check {
         }
         BuilderBackendChoice::Hvf => {
             "HVF builder (constructor registered at CLI startup)".to_string()
+        }
+        BuilderBackendChoice::WebLinux => {
+            "WebLinux builder is browser-only; not available on native hosts".to_string()
         }
     };
 

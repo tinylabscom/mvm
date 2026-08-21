@@ -129,6 +129,14 @@ impl ResourceControls {
                 cpu: CpuControl::None,
                 wall_clock: WallClockControl::None,
             },
+            // Browser-hosted software emulation. CPU and wall-clock bounds are
+            // declared in the plan but cannot be enforced by the host OS; the
+            // browser runtime refuses rather than claiming an unenforceable
+            // control.
+            BackendKind::WebLinux => Self {
+                cpu: CpuControl::None,
+                wall_clock: WallClockControl::None,
+            },
         }
     }
 }

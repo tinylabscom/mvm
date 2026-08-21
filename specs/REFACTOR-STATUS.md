@@ -1,6 +1,6 @@
 # Refactor status
 
-Last updated: 2026-08-19
+Last updated: 2026-08-20
 
 This is the cross-plan progress index. The owning plan remains authoritative
 for detailed scope and acceptance criteria.
@@ -341,6 +341,24 @@ for detailed scope and acceptance criteria.
       zero; the later workload boot stopped at a separate readiness timeout.
 
 ## In-flight plans
+
+- [~] **Plan 338 — WebLinux browser backend, builder, workbench, and `mvmd`
+      deployment client**
+      (`specs/plans/338-weblinux-browser-backend-builder-workbench-and-mvmd-deploy.md`).
+      ADR-049 renumbered from ADR-043 to avoid collision with the existing
+      ADR-043. ADR-024 updated to link ADR-049 while preserving the direct-WASI
+      claim-free boundary. ADR-006 updated to allow `mvmctl deploy` as an
+      authenticated `mvmd` client operation. Plan 338 registered in
+      `specs/SPRINT.md` and this file. First slice landed in PR #2776:
+      `BackendKind::WebLinux` with contract-level capability dimensions,
+      native `AnyBackend::WebLinux` stub that fails closed,
+      `BuilderBackendChoice::WebLinux` excluded from native auto-detect,
+      minimal portable lifecycle DTOs (`BackendRequest`/`BackendResponse`,
+      `ArtifactRef`/`ArtifactSetRef`), and matching tests. WS-2 engine
+      feasibility is now pinned: `ktock/qemu-wasm` 5a65998d47, Emscripten
+      3.1.50, zlib/libffi/pixman/glib/xterm-pty versions are recorded, and
+      `nix/packages/qemu-wasm.nix` packages the engine through the Nix
+      builder boundary. Build verification is queued for the Linux builder.
 
 - [~] **Security lane recovery — issue #2736.** The advisory finding is fixed,
       the release-artifact bootstrap source now compiles with warnings denied,

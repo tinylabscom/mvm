@@ -36,6 +36,7 @@
 
 base.mkKernel {
   extraEnables = [
+    "BLK_DEV_LOOP"
     # virtio-fs (FUSE-backed) — host share mounts
     "VIRTIO_FS" "FUSE_FS" "MIGRATION" "MEMORY_HOTPLUG" "MEMORY_HOTREMOVE" "SPARSEMEM_VMEMMAP" "ZONE_DEVICE" "FS_DAX" "FUSE_DAX"
 

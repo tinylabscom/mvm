@@ -1,0 +1,28 @@
+# Aarch64 no-KVM bundle smoke test on `ubuntu-24.04-arm`
+
+Added the `aarch64-no-kvm-smoke` job to `.github/workflows/ci.yml`. It runs
+only on `merge_group` and `workflow_dispatch` (not per-PR), on a native
+`ubuntu-24.04-arm` runner that exposes no nested KVM.
+
+The lane:
+
+1. Builds `mvmctl` with the `release-artifact-bootstrap` feature so it can
+   download published builder VM / workload artifacts.
+2. Hides the in-repo `nix/images/builder-vm` flake for the duration of the
+   test, so `mvmctl` treats the binary as installed and downloads the published
+   builder VM image instead of rebuilding it from scratch inside Stage 0 under
+   TCG.
+3. Boots the sealed `examples/exit_code` workload with
+   `mvmctl machine run --builder qemu --hypervisor qemu`, which falls back to
+   TCG because `/dev/kvm` is absent. The guest is expected to exit 7.
+4. Exports the built slot to a signed `.mvmpkg`.
+5. Installs the bundle against the CI-generated host-signer trust anchor.
+6. Re-runs the installed bundle with `mvmctl machine run --manifest <sha>
+   --hypervisor qemu`, again expecting exit 7.
+
+This is the closest CI approximation to the Raspberry Pi no-KVM path: the
+workload rootfs is built through the Stage 0 QEMU builder and the guest boots
+via QEMU TCG on a real aarch64 host.
+
+Diagnostics (`console.log`, `firecracker.log`, `qemu.log`, and the captured
+mvmctl output) are dumped on failure.

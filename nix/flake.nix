@@ -172,7 +172,7 @@
           inherit (hostPackages) mvmctl;
         }
         // nixpkgs.lib.optionalAttrs final.stdenv.hostPlatform.isLinux {
-          inherit (hostPackages) libkrun libkrunfw mvmctl-native-libkrun;
+          inherit (hostPackages) libkrun libkrunfw mvmctl-native-libkrun qemu-wasm-engine;
         };
 
       # ── User-facing: lib.<system>.mkGuest ────────────────────────
@@ -207,7 +207,7 @@
           default = hostPackages.mvmctl;
         }
         // nixpkgs.lib.optionalAttrs (system == "x86_64-linux" || system == "aarch64-linux") {
-          inherit (hostPackages) libkrun libkrunfw mvmctl-native-libkrun;
+          inherit (hostPackages) libkrun libkrunfw mvmctl-native-libkrun qemu-wasm-engine;
         }
         // nixpkgs.lib.optionalAttrs (builtins.elem system systems) {
           internal-minimal-runner =

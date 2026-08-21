@@ -51,6 +51,9 @@ pub enum CapabilityAlternative {
     /// Reach the per-VM substitution endpoint through the wasm tier's
     /// `mvm:egress` host import. Same endpoint, same policy and audit path.
     NetworkEndpointOverWasmImport,
+    /// Reach the per-VM substitution endpoint through a browser MessagePort /
+    /// Worker channel. Same endpoint, same policy and audit path.
+    NetworkEndpointOverBrowserChannel,
     /// Send bytes on the workload's stdin route rather than opening an
     /// interactive terminal. Not a terminal: no program selection, no argv
     /// or environment change.
@@ -84,6 +87,9 @@ impl CapabilityAlternative {
             }
             Self::NetworkEndpointOverWasmImport => {
                 "reach the per-VM substitution endpoint through the `mvm:egress` host import"
+            }
+            Self::NetworkEndpointOverBrowserChannel => {
+                "reach the per-VM substitution endpoint through a browser MessagePort/Worker channel"
             }
             Self::WorkloadStdinRoute => {
                 "write to the workload's stdin route instead of opening an interactive terminal"
@@ -135,6 +141,7 @@ fn alternative_for(capability: &'static str, backend: BackendKind) -> Capability
             BackendKind::Firecracker | BackendKind::Libkrun | BackendKind::Hvf => {
                 CapabilityAlternative::StandbyPool
             }
+            BackendKind::WebLinux => CapabilityAlternative::ColdStartFromSignedPlan,
             _ => CapabilityAlternative::ColdStartFromSignedPlan,
         },
 
@@ -143,6 +150,7 @@ fn alternative_for(capability: &'static str, backend: BackendKind) -> Capability
         // reaches the seam, never whether policy and audit apply to it.
         "vsock" | "host_vsock_proxy" | "l3_vsock" => match backend {
             BackendKind::Wasm => CapabilityAlternative::NetworkEndpointOverWasmImport,
+            BackendKind::WebLinux => CapabilityAlternative::NetworkEndpointOverBrowserChannel,
             _ => CapabilityAlternative::NetworkEndpointOverUds,
         },
 

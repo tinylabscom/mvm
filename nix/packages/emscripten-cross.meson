@@ -1,0 +1,18 @@
+[host_machine]
+system = 'emscripten'
+cpu_family = 'wasm32'
+cpu = 'wasm32'
+endian = 'little'
+
+[binaries]
+c = 'emcc'
+cpp = 'em++'
+ar = 'emar'
+ranlib = 'emranlib'
+pkgconfig = ['pkg-config', '--static']
+
+[built-in options]
+c_args = ['-O3', '-pthread', '-DWASM_BIGINT']
+cpp_args = ['-O3', '-pthread', '-DWASM_BIGINT']
+c_link_args = ['-sWASM_BIGINT', '-sASYNCIFY=1', '-L/builddeps/target/lib']
+cpp_link_args = ['-sWASM_BIGINT', '-sASYNCIFY=1', '-L/builddeps/target/lib']
