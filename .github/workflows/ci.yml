@@ -197,7 +197,9 @@ jobs:
                      nix/packaging/release/assert-init-shebang.sh \
                      nix/packaging/release/assert-kernel-format.sh \
                      scripts/check-no-orchestration-server.sh \
-                     scripts/check-no-orchestration-server.test.sh
+                     scripts/check-no-orchestration-server.test.sh \
+                     scripts/security-lane-verdict.sh \
+                     scripts/security-lane-verdict.test.sh
 
       - name: Release-asset verifier gate tests
         run: bash nix/packaging/release/verify-release-assets.test.sh
@@ -282,6 +284,11 @@ jobs:
 
       - name: Orchestration-server gate tests
         run: bash scripts/check-no-orchestration-server.test.sh
+
+      # The nightly security lanes do not run on a PR, so this is the only
+      # place their failure reporting is exercised before it has to work.
+      - name: Security lane verdict tests
+        run: bash scripts/security-lane-verdict.test.sh
 
       - name: Architecture scan not required for this diff
         if: needs.scope.outputs.architecture == 'false'
