@@ -381,6 +381,7 @@ pub(crate) mod tests {
             shares: Vec::new(),
             agent_verbs: None,
             services: Vec::new(),
+            extensions: Vec::new(),
             stream_edges: Vec::new(),
         }
     }

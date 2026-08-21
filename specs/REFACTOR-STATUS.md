@@ -459,10 +459,24 @@ resume` takes a `current_head` and refuses when it differs from the
       fixtures had masked: the binding rejected every real `sha256:`-prefixed
       plan id, and the probe handler compared the guest's session identity
       against the supervisor's lookup key.
-      STILL OPEN: W5b a guest-side observer, W8 the framed-stdio provider, W9b
-      the `mvmctl machine run` seam (`machine run` drives `AnyBackend` directly
-      and never reaches the admit path W9 threaded). No certifying campaign can
-      run.
+      STILL OPEN: trusted hardware attestation and the full Scout-linked
+      certifying campaign. The supplied native x86_64 KVM host now proves the
+      concrete provider reaches a real Firecracker guest agent, observer,
+      exact cleanup, and host finalization; plan
+      `sha256:18a220846c25a6cec1f0b4f36dd4bfbab764f4e50671394e6da32acfcbd7ef16`
+      and grant digest
+      `sha256:b0991c541656cac6ebd02c27389a8b3c299b7cbadd6d4477653a0219545acf34`
+      are recorded. An identical retry replays the bounded terminal response
+      without a second VM. The run is `INCONCLUSIVE` because no TPM2/SEV-SNP/TDX
+      trust root is present and the probe reported no attempted effect. The
+      sibling now consumes MVM's published four-reference
+      `sha256:nul-separated-policy-refs-v1` vector over
+      `operator-network-v1`, `operator-egress-v1`, `operator-fs-v1`, and
+      `operator-tools-v1` and the exact digest
+      `sha256:5dd0de53b6d211f764728599e291e93a9491dc34f87596e906365fb74c95e0ff`.
+      A current Scout-linked attempt reached signed-plan admission but failed
+      closed before guest-agent startup on `mvm-oci-init` path-policy denial;
+      its identical retry replayed without a second execution.
 
 - [~] **Embedded-binary content store** — `specs/plans/2026-08-17-embedded-binary-content-store.md`.
       Phases 1–2 landed: both nested legs of `crates/mvm-cli/build.rs` are keyed

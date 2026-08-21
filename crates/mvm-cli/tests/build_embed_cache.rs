@@ -462,6 +462,15 @@ fn the_opt_out_env_var_disables_the_store_entirely() {
 }
 
 #[test]
+fn the_opt_out_env_var_retriggers_the_build_script() {
+    let build_script = include_str!("../build.rs");
+    assert!(
+        build_script.contains("cargo:rerun-if-env-changed=MVM_EMBED_NO_CACHE"),
+        "changing the opt-out must invalidate Cargo's cached build-script result"
+    );
+}
+
+#[test]
 fn hashing_a_file_as_though_it_were_a_tree_yields_nothing() {
     // The contract that made the manifest silently drop out of the key:
     // `hash_tree` lists a directory, so a file path contributes no entries.

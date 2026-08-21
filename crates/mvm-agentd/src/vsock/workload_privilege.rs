@@ -122,6 +122,7 @@ mod tests {
                 "Exec",
                 "ExecBatch",
                 "RunEntrypoint",
+                "RunExtension",
                 "RunDetached",
                 "ConsoleOpen",
                 "ProcStart",

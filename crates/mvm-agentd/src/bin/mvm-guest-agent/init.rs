@@ -20,6 +20,7 @@
 use mvm_agentd::guest_mount;
 use mvm_agentd::vsock::ActivateEnvironment;
 
+use crate::globals::VALIDATED_EXTENSIONS;
 use crate::state::{ActivationState, AgentBootState};
 
 /// True when this process is PID 1 in the initramfs.
@@ -122,6 +123,18 @@ pub(crate) fn apply_activation(
     // It has to land after the pivot (it writes into the workload's root) and
     // before the privilege drop (mounts and interface changes need root).
     bootstrap_guest_environment()?;
+    let validated_extensions = mvm_agentd::extension::validate_extensions(
+        &env.extensions,
+        std::path::Path::new("/run/mvm/extension-markers"),
+    );
+    if let Err(error) = &validated_extensions {
+        return Err(guest_mount::MountError::InvalidConfig(error.clone()));
+    }
+    VALIDATED_EXTENSIONS
+        .set(validated_extensions)
+        .map_err(|_| {
+            guest_mount::MountError::InvalidConfig("extensions already activated".into())
+        })?;
     guest_mount::drop_guest_agent_privilege(guest_mount::WORKLOAD_UID, guest_mount::WORKLOAD_GID)?;
 
     boot_state.set_activation(ActivationState::Activated);

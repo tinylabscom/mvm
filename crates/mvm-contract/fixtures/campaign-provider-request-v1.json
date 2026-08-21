@@ -1,0 +1,28 @@
+{
+  "schema": "mvm.security.campaign-request/v1",
+  "request_id": "mvm-request-1",
+  "source_run_id": "scout-1",
+  "subject_kind": "local_repository",
+  "subject_locator": "repository-ref-1",
+  "subject_revision": "0123456789abcdef",
+  "source_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+  "artifact_locator": "oci:example/app:1",
+  "requested_policy_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+  "profile": "sealed",
+  "runner": "mvm",
+  "build_posture": "verified",
+  "timeout_seconds": 600,
+  "max_trials": 1,
+  "require_disposable_target": true,
+  "require_attestation": false,
+  "campaigns": [
+    {
+      "campaign_id": "mvm-campaign-1",
+      "finding_id": "SCOUT-RCE-001",
+      "narrative_id": "mvm.boundary.process-exec.v1",
+      "objective": "attempt the declared process effect",
+      "expected_boundary": "the effect cannot cross from guest to host",
+      "required_capabilities": ["observation.stream.v1"]
+    }
+  ]
+}
