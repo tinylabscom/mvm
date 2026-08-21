@@ -1272,6 +1272,14 @@ updates only its own entry below.
       (24 MiB) with `virtio_pci` and `virtio_vsock` built into the kernel.
       The only remaining blocker is that `rpi1.local` is no longer reachable
       via mDNS, so Pi-side validation is on hold until network access returns.
+      **Update 2026-08-21:** the merge-group QEMU-TCG witness exposed a second
+      distribution boundary: enabling the published builder bootstrap also
+      selected release-only runtime-overlay downloads in CI, where the source
+      checkout is intentionally available. The feature split now keeps
+      `release-artifact-bootstrap` independent from `release-channel`; release
+      and security builds opt into both explicitly, while the aarch64 witness
+      can build its checked-out overlay and still download the published
+      builder image.
 
 - [x] **Backend shim removal — invert the driver/backend relationship.**
       `FcDriver`, `HvfDriver`, `LibkrunDriver`, and `QemuDriver` now own their

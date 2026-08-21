@@ -1209,6 +1209,18 @@ mod runtime_overlay_attach_tests {
         );
     }
 
+    #[cfg(feature = "release-channel")]
+    #[test]
+    fn release_channel_defaults_to_published_runtime_overlay() {
+        let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut env = TestEnv::new();
+        env.remove(RUNTIME_OVERLAY_ACQUIRE_MODE_ENV);
+        assert_eq!(
+            runtime_overlay_acquire_mode(),
+            RuntimeOverlayAcquireMode::DownloadPublishedArtifact
+        );
+    }
+
     #[test]
     fn attach_runtime_overlay_if_cached_version_uses_requested_cached_version() {
         let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());

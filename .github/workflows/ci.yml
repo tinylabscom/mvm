@@ -1589,7 +1589,7 @@ jobs:
         with:
           # qemu-system-arm provides qemu-system-aarch64; e2fsprogs provides the
           # mkfs.ext4/debugfs tools the Stage 0 builder uses to pack images.
-          packages: qemu-system-arm e2fsprogs attr jq
+          packages: qemu-system-arm ipxe-qemu e2fsprogs attr jq virtiofsd
 
       - uses: ./.github/actions/rust-cache
         with:
@@ -1602,7 +1602,7 @@ jobs:
       # flake so `mvmctl` treats this as an installed binary and downloads the
       # published image instead.
       - name: Build mvmctl
-        run: cargo build --release -p mvm-cli --features release-artifact-bootstrap
+        run: cargo build --release -p mvmctl --features release-artifact-bootstrap,release-channel
 
       - name: Use published builder VM bootstrap path
         run: mv nix/images/builder-vm nix/images/builder-vm.hidden

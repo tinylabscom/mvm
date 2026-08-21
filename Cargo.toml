@@ -541,6 +541,9 @@ hostd-transport = ["mvm-core/hostd-transport"]
 # VM images on a cache miss. Off for source checkouts (they build locally); the
 # release workflow turns it on.
 release-artifact-bootstrap = ["mvm-cli/release-artifact-bootstrap"]
+# Mark an official distribution separately so runtime artifact resolution uses
+# the published channel even when the binary runs from a source checkout.
+release-channel = ["mvm-cli/release-channel"]
 
 # Optional S3 storage backend for the template registry — a heavy cloud dep kept
 # opt-in (not part of the local host runtime; fleet/deployment use only).

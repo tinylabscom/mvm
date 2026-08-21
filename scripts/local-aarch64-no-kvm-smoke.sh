@@ -40,7 +40,7 @@ echo "Installing system dependencies ..."
 apt-get update -qq
 apt-get install -y -qq \
     curl git build-essential pkg-config \
-    qemu-system-arm e2fsprogs attr jq
+    qemu-system-arm ipxe-qemu e2fsprogs attr jq virtiofsd
 
 echo "Installing Rust nightly + musl targets ..."
 curl --proto =https --tlsv1.2 -sSf https://sh.rustup.rs \
@@ -54,7 +54,7 @@ cargo install cargo-zigbuild --version 0.20.0 --locked
 cd /work
 
 echo "Building mvmctl ..."
-cargo build --release -p mvm-cli --features release-artifact-bootstrap
+cargo build --release -p mvmctl --features release-artifact-bootstrap,release-channel
 
 # The source-checkout bootstrap path would rebuild the builder VM image from
 # scratch under TCG. Hide the in-repo flake so mvmctl downloads the published
