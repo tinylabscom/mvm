@@ -62,7 +62,10 @@ const BUDGETS: &[ClosureBudget] = &[
 /// stdio-only adapter over the existing `mvm-client` facade. The adapter is one
 /// first-party crate and adds no third-party crate to mvmctl's already-linked
 /// dependency graph.
-const MACOS_CLOSURE_BUDGET: usize = 231;
+///
+/// 232 (was 231): `mvm-capture`, the project-environment capture frontend. It
+/// adds one first-party crate and no new third-party crate to mvmctl's closure.
+const MACOS_CLOSURE_BUDGET: usize = 232;
 
 /// Max distinct crates allowed in `mvmctl`'s default no-dev closure on
 /// `x86_64-unknown-linux-gnu`. Baseline measured 2026-06-17 against the audited default
@@ -194,7 +197,10 @@ const MACOS_CLOSURE_BUDGET: usize = 231;
 /// 240 (was 239): `mvm-mcp`, the stdio-only adapter over the existing
 /// `mvm-client` facade. It adds one first-party crate and no third-party crate
 /// to mvmctl's already-linked dependency graph.
-pub(crate) const CLOSURE_BUDGET: usize = 240;
+///
+/// 241 (was 240): `mvm-capture`, the project-environment capture frontend. It
+/// adds one first-party crate and no new third-party crate to mvmctl's closure.
+pub(crate) const CLOSURE_BUDGET: usize = 241;
 
 pub fn run(workspace: &Path) -> Result<()> {
     for budget in BUDGETS {

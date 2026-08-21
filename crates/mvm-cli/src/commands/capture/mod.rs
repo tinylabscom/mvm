@@ -10,7 +10,7 @@ use anyhow::{Context, Result};
 use clap::{Args as ClapArgs, Subcommand};
 use mvm_core::user_config::MvmConfig;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct Args {
@@ -173,7 +173,7 @@ fn run_verify(args: VerifyArgs) -> Result<()> {
 
 fn run_verification_records(
     commands: &[String],
-    out_dir: &PathBuf,
+    out_dir: &Path,
     exec_in_builder_vm: bool,
     boot_and_replay: bool,
 ) -> Result<Vec<mvm_capture::report::VerificationRecord>> {
@@ -189,7 +189,7 @@ fn run_verification_records(
         };
 
         let config = BuilderVmConfig {
-            work_dir: out_dir.clone(),
+            work_dir: out_dir.to_path_buf(),
             mvmctl_path: None,
         };
 
