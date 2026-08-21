@@ -1595,6 +1595,12 @@ jobs:
         with:
           key: aarch64-no-kvm-smoke
 
+      - name: Grant QEMU access to vhost-vsock
+        run: |
+          test -c /dev/vhost-vsock
+          sudo chown "$USER" /dev/vhost-vsock
+          sudo chmod 0600 /dev/vhost-vsock
+
       # The release-cut bootstrap path can download a published builder VM
       # image; the default source-checkout path would rebuild it from scratch
       # inside Stage 0 under TCG, which is far too slow for a CI gate. Build

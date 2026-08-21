@@ -24,5 +24,10 @@ This is the closest CI approximation to the Raspberry Pi no-KVM path: the
 workload rootfs is built through the Stage 0 QEMU builder and the guest boots
 via QEMU TCG on a real aarch64 host.
 
+The hosted runner exposes `/dev/vhost-vsock` but leaves it inaccessible to the
+runner user. The job transfers that one ephemeral device node to the current
+user with mode `0600` before QEMU starts; an `xtask` workflow-structure test
+keeps the grant ordered before the first boot.
+
 Diagnostics (`console.log`, `firecracker.log`, `qemu.log`, and the captured
 mvmctl output) are dumped on failure.
