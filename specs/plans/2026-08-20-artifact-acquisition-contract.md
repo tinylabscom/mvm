@@ -1,6 +1,6 @@
 # Artifact acquisition contract
 
-Backing: user-requested
+Backing: shipped-source
 Validation: workspace gates
 
 **Status:** COMPLETE
