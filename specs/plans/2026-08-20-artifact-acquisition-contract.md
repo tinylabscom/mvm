@@ -36,6 +36,7 @@ and report the cold-build phase clearly.
 - release-channel policy and source-detection tests
 - production OCI policy preflight regression proving rejection precedes guest
   runtime preparation
+- merge-queue aarch64 no-KVM smoke builds the root `mvmctl` binary it executes
 - release-asset structure and guest-binary-list synchronization gates
 - project builder-VM realization of
   `nix/images/runtime-overlay#runtime-overlay` for `aarch64-linux`, including
