@@ -268,7 +268,10 @@ fn main() -> Result<()> {
         }
         Some("check-claim-witness-freshness") => {
             let workspace = workspace_root();
-            check_claim_witness_freshness::run(&workspace)
+            // Reporting-chain checks are for the scheduled run; see the
+            // module docs for why a pull request must not fail on them.
+            let reporting = args.iter().any(|a| a == "--check-reporting");
+            check_claim_witness_freshness::run(&workspace, reporting)
         }
         Some("check-witness-citations") => {
             let workspace = workspace_root();
