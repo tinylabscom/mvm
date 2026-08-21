@@ -1643,6 +1643,11 @@ jobs:
       - name: Use published builder VM bootstrap path
         run: mv nix/images/builder-vm nix/images/builder-vm.hidden
 
+      - name: Bootstrap published launch artifacts
+        env:
+          MVM_KERNEL_SOURCE: auto
+        run: ./target/release/mvmctl --builder qemu bootstrap --production -v
+
       - name: Build and boot the sealed exit_code workload under QEMU TCG
         id: first-boot
         env:

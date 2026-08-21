@@ -19,7 +19,9 @@ for detailed scope and acceptance criteria.
       download. The merge-queue aarch64 smoke builds the root CLI binary it
       executes with user-facing manifest verification enabled, preventing a
       library-only or unverifying build from bypassing that witness; it also
-      installs `virtiofsd` before sharing the checkout. The standalone hostd
+      installs `virtiofsd`, bootstraps the published runtime before the first
+      builder-backed launch, and pins the dependency order that makes the
+      overlay available before kernel preparation. The standalone hostd
       fuzz lock is refreshed for the current dependency graph.
       The owning plan is
       `specs/plans/2026-08-20-artifact-acquisition-contract.md`.

@@ -15,10 +15,12 @@ cache. Structural release tests and the guest-binary-list gate prevent the
 producer, installer, and guest injection lists from drifting.
 
 `mvmctl bootstrap` prepares every launch-critical artifact rather than stopping
-after the builder VM and kernel. Image pull and every image-backed launch entry
-point also pass through the same OCI-runtime preparation seam, after production
-digest and registry-policy admission but before materialization. A rejected
-production pull therefore never starts a contributor build or release download.
+after the builder VM and kernel. It prepares the shared runtime before asking
+the builder VM to produce that kernel, because the builder launch itself mounts
+the runtime overlay. Image pull and every image-backed launch entry point also
+pass through the same OCI-runtime preparation seam, after production digest and
+registry-policy admission but before materialization. A rejected production
+pull therefore never starts a contributor build or release download.
 
 Contributor cold builds are now a named phase with elapsed-time and cache
 feedback. Cargo output is quiet by default and available with `-v`. Intermediate
@@ -37,7 +39,8 @@ stale output cannot be selected.
 - focused production-policy-before-artifact-preparation regression
 - merge-queue aarch64 no-KVM binary-build contract regression, including the
   `user` signature-verification surface required by downloaded manifests and
-  the `virtiofsd` dependency required to share the checkout with the builder VM
+  the `virtiofsd` dependency required to share the checkout with the builder VM;
+  it executes release bootstrap before the first builder-backed launch
 - refreshed standalone `mvm-hostd` fuzz lock under stable and pinned nightly
 - `cargo test -p mvm-build --features release-channel --lib official_build_does_not_detect`
 - `cargo run -p xtask -- check-guest-binary-lists`

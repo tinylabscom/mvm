@@ -66,6 +66,9 @@ export MVM_KERNEL_SOURCE=auto
 rm -rf "$MVM_HOME"
 mkdir -p "$MVM_HOME"
 
+echo "Bootstrapping published launch artifacts ..."
+./target/release/mvmctl --builder qemu bootstrap --production -v
+
 echo "Booting sealed exit_code workload under QEMU TCG ..."
 set +e
 ./target/release/mvmctl machine run \

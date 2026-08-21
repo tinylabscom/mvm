@@ -28,8 +28,8 @@ pub(in crate::commands) fn bootstrap_environment(production: bool) -> Result<()>
     run_steps(production)?;
     let kernel = acquire_bootstrap_artifacts_with(
         super::builder_vm::bootstrap_builder_vm_image,
-        super::builder_vm::ensure_workload_kernel,
         prepare_launch_runtime_artifacts,
+        super::builder_vm::ensure_workload_kernel,
     )?;
     ui::success(&format!(
         "\nBootstrap complete. Builder VM, workload kernel, runtime overlay, initramfs, and OCI guest shims are ready.\nFuture machine runs will reuse these artifacts.\nWorkload kernel: {kernel}"
@@ -37,10 +37,10 @@ pub(in crate::commands) fn bootstrap_environment(production: bool) -> Result<()>
     Ok(())
 }
 
-fn acquire_bootstrap_artifacts_with<B, K, R>(
+fn acquire_bootstrap_artifacts_with<B, R, K>(
     builder: B,
-    workload_kernel: K,
     runtime: R,
+    workload_kernel: K,
 ) -> Result<String>
 where
     B: FnOnce() -> Result<()>,
@@ -51,12 +51,12 @@ where
     builder().context("preparing builder VM")?;
     ui::success("Builder VM ready.");
 
-    ui::info("Preparing workload kernel...");
-    let kernel = workload_kernel().context("preparing workload kernel")?;
-    ui::success("Workload kernel ready.");
     ui::info("Preparing shared guest runtime...");
     runtime().context("preparing shared guest runtime")?;
     ui::success("Shared guest runtime ready.");
+    ui::info("Preparing workload kernel...");
+    let kernel = workload_kernel().context("preparing workload kernel")?;
+    ui::success("Workload kernel ready.");
     Ok(kernel)
 }
 
@@ -134,7 +134,7 @@ mod tests {
     use std::cell::RefCell;
 
     #[test]
-    fn bootstrap_acquires_builder_then_workload_kernel() {
+    fn bootstrap_acquires_runtime_before_workload_kernel() {
         let calls = RefCell::new(Vec::new());
         let kernel = acquire_bootstrap_artifacts_with(
             || {
@@ -142,42 +142,42 @@ mod tests {
                 Ok(())
             },
             || {
-                calls.borrow_mut().push("workload");
-                Ok("/cache/workload/vmlinux".to_string())
-            },
-            || {
                 calls.borrow_mut().push("runtime");
                 Ok(())
+            },
+            || {
+                calls.borrow_mut().push("workload");
+                Ok("/cache/workload/vmlinux".to_string())
             },
         )
         .unwrap();
 
-        assert_eq!(calls.into_inner(), ["builder", "workload", "runtime"]);
+        assert_eq!(calls.into_inner(), ["builder", "runtime", "workload"]);
         assert_eq!(kernel, "/cache/workload/vmlinux");
     }
 
     #[test]
     fn bootstrap_never_reports_ready_after_builder_failure() {
-        let workload_called = std::cell::Cell::new(false);
+        let runtime_called = std::cell::Cell::new(false);
         let result = acquire_bootstrap_artifacts_with(
             || anyhow::bail!("builder failed"),
             || {
-                workload_called.set(true);
-                Ok("/cache/workload/vmlinux".to_string())
+                runtime_called.set(true);
+                Ok(())
             },
-            || Ok(()),
+            || Ok("/cache/workload/vmlinux".to_string()),
         );
 
         assert!(result.is_err());
-        assert!(!workload_called.get());
+        assert!(!runtime_called.get());
     }
 
     #[test]
     fn bootstrap_fails_when_workload_kernel_is_not_ready() {
         let result = acquire_bootstrap_artifacts_with(
             || Ok(()),
-            || anyhow::bail!("kernel acquisition failed"),
             || Ok(()),
+            || anyhow::bail!("kernel acquisition failed"),
         );
 
         let err = result.unwrap_err().to_string();
@@ -186,10 +186,14 @@ mod tests {
 
     #[test]
     fn bootstrap_fails_when_shared_runtime_is_not_ready() {
+        let workload_called = std::cell::Cell::new(false);
         let result = acquire_bootstrap_artifacts_with(
             || Ok(()),
-            || Ok("/cache/workload/vmlinux".to_string()),
             || anyhow::bail!("overlay unavailable"),
+            || {
+                workload_called.set(true);
+                Ok("/cache/workload/vmlinux".to_string())
+            },
         );
 
         let err = result.unwrap_err().to_string();
@@ -197,5 +201,6 @@ mod tests {
             err.contains("shared guest runtime"),
             "unexpected error: {err}"
         );
+        assert!(!workload_called.get());
     }
 }
