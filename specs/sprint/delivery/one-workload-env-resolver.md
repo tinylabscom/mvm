@@ -124,7 +124,7 @@ The `(none)` hostname. The machine name never reaches the guest, so setting it
 needs a new `mvm.hostname=` kernel-cmdline parameter plumbed through every
 backend's boot-args construction and the boot-args validator. Deliberately
 scoped out; `(none)` is what Nix-built images report too, so this is not an
-OCI-path regression. Tracked separately.
+OCI-path regression. Tracked as tinylabscom/mvm#2789.
 
 Not verified on real hardware: this lands with the unit and gate evidence
 above. The end-to-end proof is `mvmctl machine run --image rust:latest -it --
