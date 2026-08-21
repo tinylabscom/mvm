@@ -83,6 +83,12 @@ pub(in crate::commands) fn run(cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resul
                  use --builder hvf or --builder libkrun"
             )
         }
+        BuilderBackendChoice::WebLinux => {
+            bail!(
+                "builder shell jobs are not available for the WebLinux backend; \
+                 WebLinux is browser-only; use --builder hvf or --builder libkrun"
+            )
+        }
     };
 
     let console_log = result.vm_state_dir.join("console.log");

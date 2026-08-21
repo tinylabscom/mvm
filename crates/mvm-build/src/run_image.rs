@@ -259,6 +259,10 @@ fn seal_run_rootfs_with_verity_builder_vm(rootfs_ext4: &Path) -> Result<()> {
             BuilderBackendChoice::Qemu => QemuBuilderVm::new()
                 .run_shell_script(&shell_job)
                 .map(|_| ()),
+            BuilderBackendChoice::WebLinux => Err(crate::builder_vm::BuilderVmError::VmmUnavailable {
+                requested: "web-linux".into(),
+                reason: "the web-linux builder is browser-only; select libkrun, qemu, or hvf on a native host".into(),
+            }),
         }
     })?;
     Ok(())
