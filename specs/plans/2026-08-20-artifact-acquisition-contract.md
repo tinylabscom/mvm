@@ -38,6 +38,7 @@ and report the cold-build phase clearly.
   runtime preparation
 - merge-queue aarch64 no-KVM smoke builds the root `mvmctl` binary it executes
   with the `user` signature-verification surface and release bootstrap enabled
+  and installs `virtiofsd` before the downloaded builder VM shares the checkout
 - refreshed standalone `mvm-hostd` fuzz lock passes stable and pinned-nightly
   `--locked --all-targets` checks after the current-main dependency expansion
 - release-asset structure and guest-binary-list synchronization gates

@@ -6,6 +6,7 @@ const EXPECTED_BUILD: &str =
     "cargo build --release -p mvmctl --features user,release-artifact-bootstrap";
 const LIBRARY_ONLY_BUILD: &str =
     "cargo build --release -p mvm-cli --features release-artifact-bootstrap";
+const REQUIRED_VIRTIOFS_PACKAGE: &str = "virtiofsd";
 
 #[test]
 fn aarch64_no_kvm_smokes_build_the_mvmctl_binary_they_execute() {
@@ -28,6 +29,10 @@ fn aarch64_no_kvm_smokes_build_the_mvmctl_binary_they_execute() {
         assert!(
             !contents.contains(LIBRARY_ONLY_BUILD),
             "{source} must not build only the mvm-cli library"
+        );
+        assert!(
+            contents.contains(REQUIRED_VIRTIOFS_PACKAGE),
+            "{source} must install virtiofsd before the builder VM shares the checkout"
         );
     }
 }

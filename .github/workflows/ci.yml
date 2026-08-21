@@ -1611,9 +1611,10 @@ jobs:
 
       - uses: ./.github/actions/apt-deps
         with:
-          # qemu-system-arm provides qemu-system-aarch64; e2fsprogs provides the
-          # mkfs.ext4/debugfs tools the Stage 0 builder uses to pack images.
-          packages: qemu-system-arm ipxe-qemu e2fsprogs attr jq virtiofsd
+          # qemu-system-arm provides qemu-system-aarch64; ipxe-qemu provides
+          # efi-virtio.rom; virtiofsd shares the checkout with the builder VM;
+          # e2fsprogs provides the mkfs.ext4 and debugfs image-packing tools.
+          packages: qemu-system-arm ipxe-qemu virtiofsd e2fsprogs attr jq
 
       - uses: ./.github/actions/rust-cache
         with:
