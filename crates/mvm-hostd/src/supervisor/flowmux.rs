@@ -54,10 +54,6 @@ use self::wire::{
     is_peer_disconnect, lock_registry, lock_session, lock_validator, parse_host_port,
     write_frame_to,
 };
-use self::wire::{
-    is_peer_disconnect, lock_registry, lock_session, lock_validator, parse_host_port,
-    write_frame_to,
-};
 
 use crate::supervisor::audit_recorder::{EventCategory, Recorder};
 use crate::supervisor::dns_resolver::resolve_hostname_ips;
@@ -253,18 +249,6 @@ impl FlowMuxAccept {
     ) -> Self {
         self.ingress_mappings = mappings.into_iter().collect();
         self
-    }
-}
-
-impl Drop for FlowMuxSession {
-    fn drop(&mut self) {
-        let mut cancellations = self
-            .http_cancellations
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        for (_, sender) in std::mem::take(&mut *cancellations) {
-            let _ = sender.send(true);
-        }
     }
 }
 
