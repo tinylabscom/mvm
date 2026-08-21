@@ -105,7 +105,7 @@ statement = "Vsock framing, supervisor-config JSON, and the userspace datapath's
 # packets to the kernel rather than parsing them here.
 witnesses = [
     "ci:fuzz_guest_request",
-    "ci:fuzz_authenticated_frame",
+    "ci:fuzz_sealed_frame",
     "ci:fuzz_supervisor_config",
     "ci:fuzz_datapath_ingress",
     "ci:fuzz_input_frame",
