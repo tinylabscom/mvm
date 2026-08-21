@@ -6,7 +6,7 @@ Feature: Warm-restore positive boot path
   @live @firecracker
   Scenario: a vm_full checkpoint warm-restores into a running child VM
     Given an isolated mvm home
-    When I run mvmctl in an isolated live home with "machine create --name bdd-warm-parent --image alpine"
+    When I run mvmctl in an isolated live home with "machine create bdd-warm-parent --image alpine"
     Then the command exits with code 0
     When I run mvmctl in an isolated live home with "machine start bdd-warm-parent"
     Then the command exits with code 0
