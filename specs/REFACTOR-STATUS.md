@@ -1,6 +1,6 @@
 # Refactor status
 
-Last updated: 2026-08-20
+Last updated: 2026-08-21
 
 This is the cross-plan progress index. The owning plan remains authoritative
 for detailed scope and acceptance criteria.
@@ -341,6 +341,15 @@ for detailed scope and acceptance criteria.
       zero; the later workload boot stopped at a separate readiness timeout.
 
 ## In-flight plans
+
+- [ ] **HVF builder state out of the workload VM namespace**
+      (`specs/plans/2026-08-21-hvf-builder-state-out-of-the-workload-namespace.md`).
+      The HVF builder family stages VM state under `~/.mvm/vms/` rather than
+      the builder cache root libkrun uses, so `machine ls` listed a running
+      `nix build` as a user machine and the orphan reaper never pruned a
+      finished build's dir. Both reading ends are fixed by name via
+      `mvm_core::naming::is_builder_owned_vm_name`; separating the two state
+      roots so the filter stops being the mechanism is open.
 
 - [~] **Plan 338 — WebLinux browser backend, builder, workbench, and `mvmd`
       deployment client**

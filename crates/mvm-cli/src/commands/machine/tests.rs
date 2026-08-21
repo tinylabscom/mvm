@@ -2316,8 +2316,11 @@ fn resolve_remove_targets_dedupes_named_and_enumerates_all() {
     assert_eq!(all, vec!["alpha", "zeta"]);
 }
 
+/// Named for what it drives: `load_machine_spec` itself. The `shell`/`exec`
+/// wrappers no longer go through it — they gate on `require_console_target`,
+/// which admits a transient with no spec.
 #[test]
-fn running_vm_wrappers_require_a_persisted_machine_spec() {
+fn loading_a_missing_machine_spec_names_the_recovery_verbs() {
     let _state = IsolatedMachineState::new();
     let err = load_machine_spec("web").expect_err("missing spec rejected");
     let msg = format!("{err:#}");
@@ -2325,6 +2328,55 @@ fn running_vm_wrappers_require_a_persisted_machine_spec() {
     assert!(msg.contains("machine \"web\" does not exist"), "msg: {msg}");
     assert!(msg.contains("machine ls"), "msg: {msg}");
     assert!(msg.contains("machine create"), "msg: {msg}");
+}
+
+/// `machine shell`/`exec` used to gate on a persisted spec, which a
+/// transient VM from `machine run` never has — so the console was refused for
+/// a machine `machine ls` was listing as running. The gate is existence now,
+/// and a transient's existence is its runtime state dir.
+#[test]
+fn console_target_accepts_a_transient_vm_with_no_spec() {
+    let _state = IsolatedMachineState::new();
+    std::fs::create_dir_all(config::vm_state_dir("adhoc")).expect("seed runtime state");
+    lifecycle::require_console_target("adhoc").expect("a live transient is a console target");
+}
+
+#[test]
+fn console_target_accepts_a_created_machine_that_has_never_booted() {
+    let _state = IsolatedMachineState::new();
+    seed_machine_spec("web");
+    lifecycle::require_console_target("web").expect("a created machine is a console target");
+}
+
+#[test]
+fn console_target_rejects_a_name_with_neither_spec_nor_state() {
+    let _state = IsolatedMachineState::new();
+    let msg = format!(
+        "{:#}",
+        lifecycle::require_console_target("ghost").expect_err("unknown name rejected")
+    );
+    assert!(
+        msg.contains("machine \"ghost\" does not exist"),
+        "msg: {msg}"
+    );
+    assert!(msg.contains("machine ls"), "msg: {msg}");
+}
+
+/// Relaxing the gate to "has a runtime state dir" must not open the builder
+/// VM, which stages its state in the same directory and is headless: it
+/// serves no agent and no PTY, so admitting it would swap a wrong error for a
+/// hang.
+#[test]
+fn console_target_rejects_an_internal_builder_vm_by_name() {
+    let _state = IsolatedMachineState::new();
+    let job = mvm_core::naming::builder_shell_vm_name("92326-1787337475138993000");
+    std::fs::create_dir_all(config::vm_state_dir(&job)).expect("seed builder state");
+    let msg = format!(
+        "{:#}",
+        lifecycle::require_console_target(&job).expect_err("builder VM is not a console target")
+    );
+    assert!(msg.contains("internal builder VM"), "msg: {msg}");
+    assert!(msg.contains("headless"), "msg: {msg}");
 }
 
 #[test]

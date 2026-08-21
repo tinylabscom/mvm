@@ -4576,7 +4576,10 @@ impl LibkrunPersistentHostVm {
         let job_dir = builder_vm_cache_dir().join("jobs").join(&session_id);
         stage_persistent_job_dir(&job_dir)?;
 
-        let vm_name = format!("mvm-persistent-builder-vm-{session_id}");
+        let vm_name = mvm_core::naming::persistent_builder_vm_name(
+            mvm_core::naming::BuilderVmSlot::Libkrun,
+            &session_id,
+        );
         let vm_state_dir = builder_vm_cache_dir().join("vms").join(&vm_name);
         std::fs::create_dir_all(&vm_state_dir).map_err(|e| {
             BuilderVmError::ExtractionFailed(format!(

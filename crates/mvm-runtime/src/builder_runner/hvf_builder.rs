@@ -105,7 +105,7 @@ impl HvfBuilderVm {
             ))
         })?;
 
-        let name = format!("mvm-hvf-builder-shell-{job_id}");
+        let name = mvm_core::naming::builder_shell_vm_name(&job_id);
         let runtime_overlay = require_runtime_overlay_ext4()?;
         let outcome = BuilderRunner::new(HvfDriver::new())
             .build(&BuilderBuild {
