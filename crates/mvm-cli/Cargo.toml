@@ -144,8 +144,9 @@ release-artifact-bootstrap = []
 # Mark an official distribution separately from the builder-image bootstrap
 # capability. CI exercises the published-builder path from a source checkout;
 # coupling these features makes that test refuse its local runtime overlay
-# before it can boot the workload.
-release-channel = ["mvm-build/release-channel"]
+# before it can boot the workload. Official artifacts also verify the signed
+# builder manifest before using a published image.
+release-channel = ["mvm-build/release-channel", "manifest-verify"]
 custom-dns = ["mvm-hostd/custom-dns"]
 dev-watch = ["dep:notify", "dep:notify-debouncer-mini"]
 manifest-verify = [
