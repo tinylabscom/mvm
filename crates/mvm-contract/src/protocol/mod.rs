@@ -10,6 +10,8 @@ pub mod broker;
 pub mod broker_control;
 pub mod capability_negotiation;
 pub mod dns;
+pub mod extension_controller;
+pub mod extension_pack;
 pub mod handler;
 pub mod host_audit;
 pub mod host_cost;

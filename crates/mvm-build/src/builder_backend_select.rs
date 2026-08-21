@@ -27,7 +27,9 @@ use std::sync::OnceLock;
 
 use crate::builder_health;
 use crate::builder_vm::{BuilderVm, BuilderVmError};
-use crate::libkrun_builder::{LibkrunBuilderVm, builder_vm_cache_dir, host_arch_tag};
+use crate::libkrun_builder::{
+    DEFAULT_VCPUS, LibkrunBuilderVm, builder_vm_cache_dir, host_arch_tag,
+};
 use crate::qemu_builder::QemuBuilderVm;
 use mvm_core::platform::{Platform, current};
 
@@ -67,6 +69,13 @@ pub const MVM_BUILDER_BACKEND_ENV: &str = "MVM_BUILDER_BACKEND";
 /// Surfaced as a constant so `mvmctl doctor` can reference it
 /// without re-deriving the string.
 pub const MVM_LINUX_BUILDER_VM_ENV: &str = "MVM_LINUX_BUILDER_VM";
+
+/// Stage 0's no-host-mkfs compatibility path builds in a tmpfs, whose default
+/// capacity is half of guest RAM. The builder image closure plus its final
+/// rootfs copy exceeds the steady-state builder's 8 GiB tmpfs, so Stage 0 gets
+/// a larger one-shot memory budget while ordinary builder jobs retain their
+/// existing resource profile.
+const LIBKRUN_STAGE0_MEMORY_MIB: u32 = 24 * 1024;
 
 /// Recognised choices for [`MVM_BUILDER_BACKEND_ENV`]. Kept as a
 /// tagged enum so a future addition (e.g. Firecracker-builder on
@@ -260,12 +269,17 @@ pub fn resolve_stage0_backend_for_choice(
 ) -> Box<dyn BuilderVm> {
     match stage0_backend_choice(choice) {
         BuilderBackendChoice::Qemu => Box::new(QemuBuilderVm::new()),
-        BuilderBackendChoice::Libkrun | BuilderBackendChoice::Hvf => Box::new(
-            LibkrunBuilderVm::default()
-                .with_verbose(verbose)
-                .with_closure_nar(closure_nar_for_host_arch()),
-        ),
+        BuilderBackendChoice::Libkrun | BuilderBackendChoice::Hvf => {
+            Box::new(libkrun_stage0_backend(verbose))
+        }
     }
+}
+
+fn libkrun_stage0_backend(verbose: bool) -> LibkrunBuilderVm {
+    LibkrunBuilderVm::default()
+        .with_resources(DEFAULT_VCPUS, LIBKRUN_STAGE0_MEMORY_MIB)
+        .with_verbose(verbose)
+        .with_closure_nar(closure_nar_for_host_arch())
 }
 
 /// Stage 0 currently has only two concrete driver targets: explicit qemu stays
@@ -823,6 +837,14 @@ mod tests {
         assert_eq!(stage0_backend_choice(Hvf), Libkrun);
         assert_eq!(stage0_backend_choice(Libkrun), Libkrun);
         assert_eq!(stage0_backend_choice(Qemu), Qemu);
+    }
+
+    #[test]
+    fn libkrun_stage0_has_capacity_for_the_tmpfs_compatibility_path() {
+        let backend = libkrun_stage0_backend(false);
+        assert_eq!(backend.vcpus, DEFAULT_VCPUS);
+        assert_eq!(backend.memory_mib, LIBKRUN_STAGE0_MEMORY_MIB);
+        assert_eq!(backend.memory_mib, 24 * 1024);
     }
 
     #[test]

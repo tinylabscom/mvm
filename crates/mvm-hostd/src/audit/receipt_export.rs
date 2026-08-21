@@ -119,6 +119,18 @@ fn map_event_to_receipt_type(event: &str) -> Option<(&'static str, ReceiptOutcom
             receipt_type::ASSURANCE_TRIAL_COMPLETED,
             ReceiptOutcome::Succeeded,
         ),
+        "assurance.observer_completed" => (
+            receipt_type::ASSURANCE_OBSERVER_COMPLETED,
+            ReceiptOutcome::Succeeded,
+        ),
+        "assurance.cleanup_completed" => (
+            receipt_type::ASSURANCE_CLEANUP_COMPLETED,
+            ReceiptOutcome::Succeeded,
+        ),
+        "assurance.attestation_verified" => (
+            receipt_type::ASSURANCE_ATTESTATION_VERIFIED,
+            ReceiptOutcome::Succeeded,
+        ),
         _ => return None,
     };
     Some(pair)
@@ -287,6 +299,54 @@ mod tests {
 
         assert_eq!(receipt.receipt_type, receipt_type::PLAN_EXITED);
         assert_eq!(receipt.outcome, ReceiptOutcome::Failed);
+    }
+
+    #[test]
+    fn assurance_observer_entry_maps_to_a_signed_evidence_receipt() {
+        let entry = sample_audit_entry("assurance.observer_completed", BTreeMap::new());
+        let signing_key = SigningKey::from_bytes(&[8u8; 32]);
+        let host_did = DidKey::from_verifying_key(signing_key.verifying_key()).to_did_key();
+
+        let receipt = audit_entry_to_receipt(&entry, &host_did).expect("known event");
+
+        assert_eq!(
+            receipt.receipt_type,
+            receipt_type::ASSURANCE_OBSERVER_COMPLETED
+        );
+        assert_eq!(receipt.outcome, ReceiptOutcome::Succeeded);
+        receipt.verify_id().expect("content address verifies");
+    }
+
+    #[test]
+    fn assurance_cleanup_entry_maps_to_a_signed_evidence_receipt() {
+        let entry = sample_audit_entry("assurance.cleanup_completed", BTreeMap::new());
+        let signing_key = SigningKey::from_bytes(&[9u8; 32]);
+        let host_did = DidKey::from_verifying_key(signing_key.verifying_key()).to_did_key();
+
+        let receipt = audit_entry_to_receipt(&entry, &host_did).expect("known event");
+
+        assert_eq!(
+            receipt.receipt_type,
+            receipt_type::ASSURANCE_CLEANUP_COMPLETED
+        );
+        assert_eq!(receipt.outcome, ReceiptOutcome::Succeeded);
+        receipt.verify_id().expect("content address verifies");
+    }
+
+    #[test]
+    fn assurance_attestation_entry_maps_to_a_signed_evidence_receipt() {
+        let entry = sample_audit_entry("assurance.attestation_verified", BTreeMap::new());
+        let signing_key = SigningKey::from_bytes(&[10u8; 32]);
+        let host_did = DidKey::from_verifying_key(signing_key.verifying_key()).to_did_key();
+
+        let receipt = audit_entry_to_receipt(&entry, &host_did).expect("known event");
+
+        assert_eq!(
+            receipt.receipt_type,
+            receipt_type::ASSURANCE_ATTESTATION_VERIFIED
+        );
+        assert_eq!(receipt.outcome, ReceiptOutcome::Succeeded);
+        receipt.verify_id().expect("content address verifies");
     }
 
     #[test]

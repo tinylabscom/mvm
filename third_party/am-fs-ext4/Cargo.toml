@@ -1,0 +1,51 @@
+[package]
+name = "am-fs-ext4"
+version = "0.4.0"
+edition = "2021"
+license = "MIT"
+description = "Pure-Rust ext4 filesystem driver. Exposes a C ABI (fs_ext4_*) suitable for FFI from C/C++/Go/etc."
+repository = "https://github.com/christhomas/rust-fs-ext4"
+
+[lib]
+name = "fs_ext4"
+crate-type = ["staticlib", "rlib"]
+
+# Standalone CLI tool. Cross-platform — builds + runs identically on
+# Linux/macOS/Windows because it only depends on this crate's own
+# pure-Rust format path. Distributed via Homebrew tap on macOS and
+# `cargo install` everywhere; embedders that route formatting through
+# their own UI (e.g. an FSKit `startFormat` handler) call
+# `format_filesystem()` directly instead of shelling out to this binary.
+#
+# Binary name uses underscore — Cargo's bin name field doesn't accept
+# dots. Homebrew formula symlinks /usr/local/bin/mkfs.ext4 → mkfs_ext4
+# at install time so the user-visible command matches Linux convention.
+[[bin]]
+name = "mkfs_ext4"
+path = "src/bin/mkfs_ext4.rs"
+
+[dependencies]
+crc32c = "0.6"
+bitflags = "2"
+unicode-normalization = "0.1"
+caseless = "0.2"
+# Block-device trait surface shared with sister crates (qcow2 reader,
+# partition probe, future fs-* drivers). Local path dep until both crates
+# publish; flip to a published version on the first crates.io release.
+# Strictly additive — ext4's existing BlockDevice trait is unchanged; this
+# adds a bridge module so external `fs_core::BlockDevice` implementors
+# (a `Qcow2Reader`, a `SliceReader`, etc.) can be mounted by ext4.
+am-fs-core = "0.2"
+
+[dev-dependencies]
+hex = "0.4"
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = 3
+panic = "unwind"  # required for catch_unwind at FFI boundary (see src/capi.rs)
+
+[profile.dev]
+opt-level = 1
+panic = "unwind"

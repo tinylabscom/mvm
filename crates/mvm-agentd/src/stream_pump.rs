@@ -33,7 +33,9 @@ use std::time::Instant;
 
 use mvm_core::transcript::{Admission, CaptureBounds, GapMarker, GapTally, RingState};
 
-use crate::entrypoint::{CallCaps, ControlRecord, signal_of, signal_process_group};
+use crate::entrypoint::{
+    CallCaps, CancellationToken, ControlRecord, signal_of, signal_process_group,
+};
 use crate::vsock::{EntrypointEvent, GuestResponse, MAX_DATA_CHUNK_SIZE, MAX_FRAME_SIZE};
 
 /// Bytes pulled from a pipe in one `read`. Larger than the frame budget on
@@ -88,6 +90,8 @@ pub enum PumpOutcome {
     Crashed { signal: i32 },
     /// The child outlived its deadline and was killed.
     Timeout,
+    /// The owning controller canceled the call and the child was killed.
+    Canceled,
 }
 
 /// Which of a workload's two byte streams a chunk or a gap belongs to.
@@ -314,6 +318,7 @@ pub struct Pump<'a> {
     caps: &'a CallCaps,
     control: Option<OwnedFd>,
     deadline: Option<Instant>,
+    cancellation: Option<CancellationToken>,
 }
 
 impl<'a> Pump<'a> {
@@ -322,6 +327,7 @@ impl<'a> Pump<'a> {
             caps,
             control: None,
             deadline: None,
+            cancellation: None,
         }
     }
 
@@ -341,6 +347,12 @@ impl<'a> Pump<'a> {
     /// that way at all.
     pub fn deadline(mut self, at: Instant) -> Self {
         self.deadline = Some(at);
+        self
+    }
+
+    /// Cancel this call when the owning controller requests it.
+    pub fn cancellation(mut self, token: CancellationToken) -> Self {
+        self.cancellation = Some(token);
         self
     }
 
@@ -404,7 +416,9 @@ impl<'a> Pump<'a> {
             // by the signal that finally landed.
             Ok(Some(status)) => Some(match ladder {
                 KillLadder::Running => outcome_from_status(&status),
-                KillLadder::Terminated { .. } | KillLadder::Killed => PumpOutcome::Timeout,
+                KillLadder::Terminated { reason, .. } | KillLadder::Killed { reason } => {
+                    reason.outcome()
+                }
             }),
             Ok(None) => {
                 self.step_kill_ladder(child, ladder);
@@ -415,7 +429,12 @@ impl<'a> Pump<'a> {
             // rather than pump a process we can never observe again.
             Err(_) => {
                 signal_process_group(child, libc::SIGKILL);
-                Some(PumpOutcome::Timeout)
+                Some(
+                    self.cancellation
+                        .as_ref()
+                        .filter(|token| token.is_requested())
+                        .map_or(PumpOutcome::Timeout, |_| PumpOutcome::Canceled),
+                )
             }
         }
     }
@@ -426,20 +445,50 @@ impl<'a> Pump<'a> {
     fn step_kill_ladder(&self, child: &Child, ladder: &mut KillLadder) {
         match ladder {
             KillLadder::Running => {
-                if self.deadline.is_some_and(|at| Instant::now() >= at) {
+                let reason = if self
+                    .cancellation
+                    .as_ref()
+                    .is_some_and(CancellationToken::is_requested)
+                {
+                    Some(TerminationReason::Canceled)
+                } else if self.deadline.is_some_and(|at| Instant::now() >= at) {
+                    Some(TerminationReason::Timeout)
+                } else {
+                    None
+                };
+                if let Some(reason) = reason {
                     signal_process_group(child, libc::SIGTERM);
                     *ladder = KillLadder::Terminated {
                         escalate_at: Instant::now() + self.caps.kill_grace_period,
+                        reason,
                     };
                 }
             }
-            KillLadder::Terminated { escalate_at } => {
+            KillLadder::Terminated {
+                escalate_at,
+                reason,
+            } => {
                 if Instant::now() >= *escalate_at {
                     signal_process_group(child, libc::SIGKILL);
-                    *ladder = KillLadder::Killed;
+                    *ladder = KillLadder::Killed { reason: *reason };
                 }
             }
-            KillLadder::Killed => {}
+            KillLadder::Killed { .. } => {}
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum TerminationReason {
+    Timeout,
+    Canceled,
+}
+
+impl TerminationReason {
+    fn outcome(self) -> PumpOutcome {
+        match self {
+            Self::Timeout => PumpOutcome::Timeout,
+            Self::Canceled => PumpOutcome::Canceled,
         }
     }
 }
@@ -451,9 +500,12 @@ enum KillLadder {
     /// Nothing signalled; the child is inside its deadline or has none.
     Running,
     /// SIGTERM delivered; escalate to SIGKILL at this instant.
-    Terminated { escalate_at: Instant },
+    Terminated {
+        escalate_at: Instant,
+        reason: TerminationReason,
+    },
     /// SIGKILL delivered; only reaping is left.
-    Killed,
+    Killed { reason: TerminationReason },
 }
 
 /// Hand at most [`EVENTS_PER_POLL`] queued events to the sink and report how

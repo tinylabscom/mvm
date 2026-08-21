@@ -56,6 +56,13 @@ pub mod receipt_type {
     pub const ASSURANCE_SESSION_OPENED: &str = "assurance.session_opened";
     /// Emitted when an assurance trial completes and its outcome is derived.
     pub const ASSURANCE_TRIAL_COMPLETED: &str = "assurance.trial_completed";
+    /// Emitted when the host observer commits its trial observation.
+    pub const ASSURANCE_OBSERVER_COMPLETED: &str = "assurance.observer_completed";
+    /// Emitted after the admitted disposable VM is confirmed stopped.
+    pub const ASSURANCE_CLEANUP_COMPLETED: &str = "assurance.cleanup_completed";
+    /// Emitted after a trusted runtime verifier joins a native quote to the
+    /// admitted assurance session.
+    pub const ASSURANCE_ATTESTATION_VERIFIED: &str = "assurance.attestation_verified";
 }
 
 /// Outcome of the action described by a receipt.

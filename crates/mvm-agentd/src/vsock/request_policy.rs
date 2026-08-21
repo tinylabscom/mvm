@@ -56,6 +56,8 @@ impl GuestRequest {
             GuestRequest::Exec { .. } => Verb::Exec,
             GuestRequest::ExecBatch { .. } => Verb::ExecBatch,
             GuestRequest::RunEntrypoint { .. } => Verb::RunEntrypoint,
+            GuestRequest::RunExtension { .. } => Verb::RunExtension,
+            GuestRequest::CancelExtension { .. } => Verb::CancelExtension,
             GuestRequest::RunDetached { .. } => Verb::RunDetached,
             GuestRequest::PostRestore { .. } => Verb::PostRestore,
             GuestRequest::FsDiff => Verb::FsDiff,
@@ -118,6 +120,8 @@ impl GuestRequest {
             | GuestRequest::ProbeStatus
             | GuestRequest::PrimedStatus
             | GuestRequest::RunEntrypoint { .. }
+            | GuestRequest::RunExtension { .. }
+            | GuestRequest::CancelExtension { .. }
             | GuestRequest::PostRestore { .. }
             | GuestRequest::EntrypointStatus
             | GuestRequest::ReadinessStatus
@@ -203,6 +207,8 @@ impl GuestRequest {
             "post-restore",
             "entrypoint-status",
             "run-entrypoint",
+            "run-extension",
+            "cancel-extension",
             "stream-input",
             "close-stream-input",
             "mount-volume",
@@ -670,6 +676,7 @@ mod tests {
                 kind: crate::vsock::VolumeConfigKind::VirtioFs,
                 device: None,
             }],
+            extensions: Vec::new(),
             verb_grant_envelope: None,
         });
         assert_eq!(req.verb(), Verb::ActivateEnvironment);

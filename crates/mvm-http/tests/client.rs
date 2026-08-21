@@ -27,9 +27,18 @@ async fn serve_raw_then(
     let addr = listener.local_addr().unwrap();
     let handle = tokio::spawn(async move {
         let (mut sock, _) = listener.accept().await.unwrap();
-        let mut req = vec![0u8; 8192];
-        let n = sock.read(&mut req).await.unwrap_or(0);
-        req.truncate(n);
+        let mut req = Vec::with_capacity(8192);
+        loop {
+            let mut chunk = [0u8; 1024];
+            let n = sock.read(&mut chunk).await.unwrap_or(0);
+            if n == 0 {
+                break;
+            }
+            req.extend_from_slice(&chunk[..n]);
+            if request_is_complete(&req) || req.len() >= 8192 {
+                break;
+            }
+        }
         sock.write_all(reply).await.ok();
         if !abrupt {
             sock.shutdown().await.ok();
@@ -37,6 +46,21 @@ async fn serve_raw_then(
         req
     });
     (addr, handle)
+}
+
+fn request_is_complete(request: &[u8]) -> bool {
+    let Some(header_end) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n") else {
+        return false;
+    };
+    let body_start = header_end + 4;
+    let headers = String::from_utf8_lossy(&request[..header_end]);
+    let content_length = headers.lines().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        name.eq_ignore_ascii_case("content-length")
+            .then(|| value.trim().parse::<usize>().ok())
+            .flatten()
+    });
+    content_length.is_none_or(|length| request.len() >= body_start + length)
 }
 
 fn client_for(addr: SocketAddr) -> Client {

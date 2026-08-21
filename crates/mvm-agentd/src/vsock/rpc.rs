@@ -439,6 +439,50 @@ where
     }
 }
 
+/// Dispatch one exact admitted optional extension and consume its bounded
+/// output stream.
+pub fn send_run_extension<F>(
+    stream: &mut UnixStream,
+    dispatch: ExtensionDispatch,
+    mut on_event: F,
+) -> Result<EntrypointEvent>
+where
+    F: FnMut(&EntrypointEvent),
+{
+    require_capabilities(stream, &[GuestCapability::RunExtension])?;
+    let request = GuestRequest::RunExtension { dispatch };
+    let mut session = RpcSession::open(stream)?;
+    session.write(stream, &request)?;
+    loop {
+        let response: GuestResponse = session.read(stream)?;
+        let event = match response {
+            GuestResponse::EntrypointEvent(event) => event,
+            GuestResponse::Error { message } => bail!("guest agent error: {message}"),
+            GuestResponse::WorkloadPrivilegeRefused { verb, uid } => {
+                return Err(RpcError::WorkloadPrivilegeRefused { verb, uid }.into());
+            }
+            other => bail!("expected extension EntrypointEvent stream, got {other:?}"),
+        };
+        if event.is_terminal() {
+            return Ok(event);
+        }
+        on_event(&event);
+    }
+}
+
+/// Cancel one exact active optional-extension invocation.
+pub fn send_cancel_extension(
+    stream: &mut UnixStream,
+    cancellation: ExtensionCancellation,
+) -> Result<()> {
+    require_capabilities(stream, &[GuestCapability::RunExtension])?;
+    let request = GuestRequest::CancelExtension { cancellation };
+    match call_unary(stream, &request)? {
+        GuestResponse::ExtensionCancellationAck => Ok(()),
+        other => bail!("expected extension cancellation acknowledgement, got {other:?}"),
+    }
+}
+
 /// Send an `Exec` request and stream its response. Invokes `on_event`
 /// for each `Stdout`/`Stderr` chunk as it arrives; returns the terminal
 /// `Exit` or `TimedOut`. The guest agent applies its runtime profile and
@@ -572,6 +616,34 @@ mod tests {
         }
     }
 
+    fn extension_cancellation() -> ExtensionCancellation {
+        ExtensionCancellation {
+            extension_id: mvm_contract::protocol::extension_pack::ExtensionId::parse(
+                "org.example.extension",
+            )
+            .expect("extension id"),
+            pack_digest: [1; 32],
+            contract_digest: [2; 32],
+            request_id: mvm_contract::assurance::AssuranceId::parse("request-1").expect("request"),
+            session_id: mvm_contract::assurance::AssuranceId::parse("session-1").expect("session"),
+            campaign_id: mvm_contract::assurance::AssuranceId::parse("campaign-1")
+                .expect("campaign"),
+            trial_id: mvm_contract::assurance::AssuranceId::parse("trial-1").expect("trial"),
+            plan_id: mvm_contract::assurance::AssuranceId::parse(format!(
+                "sha256-{}",
+                "a".repeat(64)
+            ))
+            .expect("plan"),
+            idempotency_key: mvm_contract::assurance::AssuranceId::parse("trial-1").expect("key"),
+            grant_digest: mvm_contract::assurance::Sha256Digest::parse(format!(
+                "sha256:{}",
+                "b".repeat(64)
+            ))
+            .expect("grant"),
+            nonce: mvm_contract::assurance::AssuranceId::parse("nonce-1").expect("nonce"),
+        }
+    }
+
     #[test]
     fn test_negotiate_protocol_round_trip_on_stream() {
         let (mut host, mut guest) = UnixStream::pair().unwrap();
@@ -633,6 +705,42 @@ mod tests {
         guest_thread.join().unwrap();
         assert!(err.to_string().contains("protocol mismatch"));
         assert!(err.to_string().contains("rebuild guest image"));
+    }
+
+    #[test]
+    fn extension_cancellation_round_trips_over_mock_io() {
+        let (mut host, mut guest) = UnixStream::pair().expect("socket pair");
+        let expected = extension_cancellation();
+        let expected_by_guest = expected.clone();
+        let guest_thread = std::thread::spawn(move || {
+            let hello: GuestRequest = read_frame(&mut guest).expect("hello");
+            let GuestRequest::ProtocolHello {
+                host_protocol_version,
+                min_supported_version,
+                host_version,
+                requested_capabilities,
+            } = hello
+            else {
+                panic!("expected protocol hello");
+            };
+            let response = protocol_hello_response(
+                host_protocol_version,
+                min_supported_version,
+                &host_version,
+                &requested_capabilities,
+            );
+            write_frame(&mut guest, &response).expect("hello response");
+            let request: GuestRequest = read_frame(&mut guest).expect("cancel request");
+            assert!(matches!(
+                request,
+                GuestRequest::CancelExtension { cancellation }
+                    if cancellation == expected_by_guest
+            ));
+            write_frame(&mut guest, &GuestResponse::ExtensionCancellationAck).expect("cancel ack");
+        });
+
+        send_cancel_extension(&mut host, expected).expect("cancel extension");
+        guest_thread.join().expect("guest thread");
     }
 
     #[test]

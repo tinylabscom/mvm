@@ -25,6 +25,7 @@
 
 pub mod clone;
 pub mod ext4;
+pub mod extension_image;
 pub mod hash;
 pub mod initramfs;
 pub mod oci;

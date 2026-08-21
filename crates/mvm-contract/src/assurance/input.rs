@@ -38,6 +38,8 @@ use super::wire::{AuthorityWire, MvmBindingWire};
 
 /// Schema identity of the input envelope.
 pub const AI_SESSION_INPUT_SCHEMA: &str = "mvm.assurance.ai-session-input/v1";
+/// Schema identity of the untrusted pre-admission request.
+pub const AI_SESSION_REQUEST_SCHEMA: &str = "mvm.assurance.ai-session-request/v1";
 
 /// Largest accepted encoded request.
 pub const MAX_SESSION_INPUT_BYTES: usize = 64 * 1024;
@@ -140,6 +142,9 @@ pub struct SessionRef {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct SourceRef {
     pub subject_kind: SubjectKind,
+    /// Bounded operator-declared subject locator. This is correlation input,
+    /// never a host path the workload may open.
+    pub subject_locator: String,
     /// Revision of the scanned subject, when the subject had one.
     pub subject_revision: Option<String>,
     pub source_digest: Sha256Digest,
@@ -207,7 +212,7 @@ pub struct SyntheticInputs {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct OutputContract {
     pub kind: String,
-    pub must_include: Vec<String>,
+    pub required_fields: Vec<String>,
 }
 
 /// The provider-supplied half of the envelope. Untrusted.
@@ -215,7 +220,7 @@ pub struct OutputContract {
 #[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct AssuranceSessionRequest {
-    /// Must equal [`AI_SESSION_INPUT_SCHEMA`].
+    /// Must equal [`AI_SESSION_REQUEST_SCHEMA`].
     pub schema: String,
     pub session: SessionRef,
     pub source: SourceRef,
@@ -233,7 +238,7 @@ pub enum SessionInputError {
     TooLarge,
     #[error("request is not valid JSON for this schema: {0}")]
     Malformed(String),
-    #[error("unsupported schema {0:?}; expected {AI_SESSION_INPUT_SCHEMA}")]
+    #[error("unsupported schema {0:?}; expected {AI_SESSION_REQUEST_SCHEMA}")]
     UnsupportedSchema(String),
     #[error("field {field} exceeds its length limit")]
     FieldTooLong { field: &'static str },
@@ -264,7 +269,7 @@ impl AssuranceSessionRequest {
 
     /// Check every bound serde cannot express.
     pub fn validate(&self) -> Result<(), SessionInputError> {
-        if self.schema != AI_SESSION_INPUT_SCHEMA {
+        if self.schema != AI_SESSION_REQUEST_SCHEMA {
             return Err(SessionInputError::UnsupportedSchema(self.schema.clone()));
         }
 
@@ -274,6 +279,11 @@ impl AssuranceSessionRequest {
             &self.narrative.expected_boundary,
         )?;
         bounded("source.location", &self.source.location, MAX_LOCATION_BYTES)?;
+        bounded(
+            "source.subject_locator",
+            &self.source.subject_locator,
+            MAX_LOCATOR_BYTES,
+        )?;
         if let Some(locator) = &self.source.artifact_locator {
             bounded("source.artifact_locator", locator, MAX_LOCATOR_BYTES)?;
         }
@@ -285,8 +295,13 @@ impl AssuranceSessionRequest {
             &self.output_contract.kind,
             MAX_PROSE_BYTES,
         )?;
-        for field in &self.output_contract.must_include {
-            bounded("output_contract.must_include[]", field, MAX_PROSE_BYTES)?;
+        if self.output_contract.kind != super::outcome::TRIAL_RESULT_SCHEMA {
+            return Err(SessionInputError::OutOfRange {
+                field: "output_contract.kind",
+            });
+        }
+        for field in &self.output_contract.required_fields {
+            bounded("output_contract.required_fields[]", field, MAX_PROSE_BYTES)?;
         }
 
         limit(
@@ -320,10 +335,32 @@ impl AssuranceSessionRequest {
             MAX_DESTINATION_LABELS,
         )?;
         limit(
-            "output_contract.must_include",
-            self.output_contract.must_include.len(),
+            "output_contract.required_fields",
+            self.output_contract.required_fields.len(),
             MAX_MUST_INCLUDE,
         )?;
+
+        for required in [
+            "source_digest",
+            "artifact_digest",
+            "policy_digest",
+            "attempted_effect",
+            "effect_observed_in_guest",
+            "boundary_crossed",
+            "blocked_edges",
+            "evidence_refs",
+        ] {
+            if !self
+                .output_contract
+                .required_fields
+                .iter()
+                .any(|field| field == required)
+            {
+                return Err(SessionInputError::FieldEmpty {
+                    field: "output_contract.required_fields",
+                });
+            }
+        }
 
         if self.authority.max_steps == 0 || self.authority.max_steps > MAX_STEPS_CEILING {
             return Err(SessionInputError::OutOfRange {
@@ -351,8 +388,44 @@ impl AssuranceSessionRequest {
                 field: "authority.observation_scopes",
             });
         }
+        reject_duplicates("source.evidence_refs", &self.source.evidence_refs)?;
+        reject_duplicates("authority.allowed_tools", &self.authority.allowed_tools)?;
+        reject_duplicates(
+            "authority.observation_scopes",
+            &self.authority.observation_scopes,
+        )?;
+        reject_duplicates(
+            "narrative.required_capabilities",
+            &self.narrative.required_capabilities,
+        )?;
+        reject_duplicates(
+            "synthetic_inputs.canary_ids",
+            &self.synthetic_inputs.canary_ids,
+        )?;
+        reject_duplicates(
+            "synthetic_inputs.destination_labels",
+            &self.synthetic_inputs.destination_labels,
+        )?;
+        reject_duplicates(
+            "output_contract.required_fields",
+            &self.output_contract.required_fields,
+        )?;
         Ok(())
     }
+}
+
+fn reject_duplicates<T: PartialEq>(
+    field: &'static str,
+    values: &[T],
+) -> Result<(), SessionInputError> {
+    if values
+        .iter()
+        .enumerate()
+        .any(|(index, value)| values[..index].contains(value))
+    {
+        return Err(SessionInputError::OutOfRange { field });
+    }
+    Ok(())
 }
 
 fn bounded_prose(field: &'static str, value: &str) -> Result<(), SessionInputError> {
@@ -413,7 +486,7 @@ impl AiSessionInput {
     ) -> Result<Self, SessionInputError> {
         request.validate()?;
         Ok(Self {
-            schema: request.schema,
+            schema: String::from(AI_SESSION_INPUT_SCHEMA),
             session: request.session,
             source: request.source,
             narrative: request.narrative,
@@ -442,9 +515,19 @@ impl AiSessionInput {
         &self.session
     }
 
+    /// The validated source identity, as it appears on the wire.
+    #[must_use]
+    pub fn source(&self) -> &SourceRef {
+        &self.source
+    }
+
     /// Encode the envelope for delivery.
     pub fn to_json(&self) -> Result<alloc::string::String, SessionInputError> {
-        serde_json::to_string(self)
-            .map_err(|error| SessionInputError::Malformed(alloc::format!("{error}")))
+        let encoded = serde_json::to_string(self)
+            .map_err(|error| SessionInputError::Malformed(alloc::format!("{error}")))?;
+        if encoded.len() > MAX_SESSION_INPUT_BYTES {
+            return Err(SessionInputError::TooLarge);
+        }
+        Ok(encoded)
     }
 }

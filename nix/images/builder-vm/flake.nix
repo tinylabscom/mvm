@@ -153,6 +153,16 @@
           };
         });
 
+      # Use the same static privilege-drop helper as workload init. Including
+      # it in the package list gives the builder rootfs a stable
+      # `/sbin/mvm-setpriv` symlink through mkGuest's package population loop.
+      builderSetprivFor = pkgs:
+        import (workspace + "/nix/packages/mvm-setpriv.nix") {
+          rustPlatform = pkgs.pkgsStatic.rustPlatform;
+          lib = pkgs.lib;
+          mvmSrc = workspace;
+        };
+
       # Narrower than the interactive image. See module-level docs
       # above for the rationale on each.
       #
@@ -216,6 +226,7 @@
         iptables-legacy
         e2fsprogs
         util-linux
+        (builderSetprivFor pkgs)
         # The host VM spawns one Firecracker workload microVM per
         # `WorkloadStart` dispatch inside itself. Sourced from the pinned
         # nixpkgs above — an upstream Nix package, never an

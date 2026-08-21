@@ -80,6 +80,7 @@ pub(in crate::commands) enum PackKindArg {
     Runtime,
     #[value(name = "dev-image")]
     DevImage,
+    Extension,
 }
 
 impl PackKindArg {
@@ -88,6 +89,7 @@ impl PackKindArg {
             PackKindArg::Builder => PackKind::Builder,
             PackKindArg::Runtime => PackKind::Runtime,
             PackKindArg::DevImage => PackKind::ImageProject,
+            PackKindArg::Extension => PackKind::Extension,
         }
     }
 
@@ -97,6 +99,7 @@ impl PackKindArg {
             PackKindArg::Builder => "builder",
             PackKindArg::Runtime => "runtime",
             PackKindArg::DevImage => "dev-image",
+            PackKindArg::Extension => "extension",
         }
     }
 }

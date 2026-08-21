@@ -67,7 +67,9 @@ fn admitted_with_grant(vm: &str) -> AdmittedPlan {
         audit_labels: Default::default(),
         agent_verbs: None,
         services: vec![ServiceId::parse(INPUT_GRANT_SERVICE).expect("the grant token parses")],
+        extensions: Vec::new(),
         stream_retention: Default::default(),
+        attestation_mode: mvm_contract::plan::AttestationMode::Noop,
         network_mode: mvm_contract::plan::NetworkMode::None,
         l3_network: None,
     };
