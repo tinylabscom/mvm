@@ -131,6 +131,7 @@ pub mod wasm_activation;
 /// user-supplied WASI module. Always constructible; the real engine only
 /// compiles in behind the opt-in `wasm-backend` feature.
 pub mod wasm_backend;
+pub mod web_linux_backend;
 /// `WorkloadBackend` marker trait — the type-level permission to carry an
 /// untrusted workload. The admitted launch path accepts `&dyn WorkloadBackend`
 /// only, so a non-workload backend (QEMU dev/test, mock) cannot reach it.

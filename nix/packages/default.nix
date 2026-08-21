@@ -35,6 +35,10 @@ let
       withNativeLibkrun = true;
       inherit libkrun libkrunfw;
     };
+
+    # Browser-only WebLinux engine.  Built on demand; default native targets
+    # do not depend on it.
+    qemu-wasm-engine = pkgs.callPackage ./qemu-wasm.nix { };
   });
 
   mvmctl = pkgs.callPackage ./mvmctl.nix {

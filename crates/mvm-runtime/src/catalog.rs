@@ -17,6 +17,7 @@ use crate::backend::{AnyBackend, BackendTier};
 #[cfg(feature = "test-support")]
 use crate::mock::MockBackend;
 use crate::wasm_backend::WasmBackend;
+use crate::web_linux_backend::WebLinuxBackend;
 use mvm_core::vm_backend::VmBackend;
 
 // `BackendKind` is defined in `mvm-core` alongside the `VmBackend` trait
@@ -257,6 +258,20 @@ backend_catalog![
         bundled_kernel: false,
         needs_plan_json: false,
         is_workload: true
+    },    {
+        kind: WebLinux,
+        selector: "web-linux",
+        aliases: [],
+        constructor: AnyBackend::WebLinux(WebLinuxBackend::new()),
+        tier: Tier3,
+        marker_file: None,
+        started_vm_probe_order: None,
+        list_all: true,
+        balloon_support: false,
+        warm_start_support: false,
+        bundled_kernel: false,
+        needs_plan_json: false,
+        is_workload: true
     },
 ];
 
@@ -383,7 +398,8 @@ mod tests {
                 "qemu",
                 "hvf",
                 "wasm",
-                "apple-container"
+                "apple-container",
+                "web-linux"
             ]
         );
         // Started-VM probe is sorted by probe order, not declaration order.
