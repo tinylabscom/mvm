@@ -859,6 +859,31 @@ mod tests {
         assert!(kernel.contains("push:"));
     }
 
+    /// Only one workflow may publish a required check's name.
+    ///
+    /// Both of these build kernels from the same script, and both once
+    /// declared `name: Build kernels (<arch>)` — a required status check.
+    /// It resolved unambiguously only because their triggers happen not to
+    /// overlap: give `kernel-build.yml` a `pull_request` or `merge_group`
+    /// trigger and two runs answer to one required context, with branch
+    /// protection reading whichever reported last. The test above pins the
+    /// triggers apart; this pins the names apart, so neither half of the
+    /// arrangement can quietly go away.
+    #[test]
+    fn only_one_workflow_claims_the_required_kernel_check_name() {
+        const REQUIRED: &str = "name: Build kernels (${{ matrix.arch }})";
+
+        assert!(
+            workflow("ci.yml").contains(REQUIRED),
+            "ci.yml owns the required kernel check name"
+        );
+        assert!(
+            !workflow("kernel-build.yml").contains(REQUIRED),
+            "kernel-build.yml must not publish the same check name as ci.yml — \
+             it is the tag-time publisher, not the required PR gate"
+        );
+    }
+
     #[test]
     fn trusted_main_warms_workspace_and_nix_outputs_for_validation() {
         let cache_action = workflow("../actions/rust-cache/action.yml");

@@ -1,6 +1,6 @@
 name: Pack signing smoke
 
-# Manual-only gate that proves the keyless pack signing round-trip works
+# Nightly gate that proves the keyless pack signing round-trip works
 # against a REAL cosign bundle, not just the offline fixtures the unit
 # suite exercises. It produces a throwaway keyless manifest over dummy
 # artifacts, signs it with `cosign sign-blob` using this job's own GitHub
@@ -9,6 +9,14 @@ name: Pack signing smoke
 # a real user consumes and publishes no artifacts.
 
 on:
+  # Ran zero times between being written and 2026-08-21, because
+  # workflow_dispatch was its only trigger and nobody dispatched it. A
+  # signing round-trip nobody runs proves nothing about the release it is
+  # supposed to protect, so it now runs on the same nightly cadence as the
+  # rest of the security lanes. Offset from Security's :17 so a slow
+  # nightly is not mistaken for a missing one.
+  schedule:
+    - cron: "43 4 * * *"
   workflow_dispatch:
 
 permissions:
