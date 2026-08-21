@@ -38,6 +38,9 @@ pub(crate) fn runtime_overlay_acquire_mode() -> RuntimeOverlayAcquireMode {
             _ => {}
         }
     }
+    if cfg!(feature = "release-channel") {
+        return RuntimeOverlayAcquireMode::DownloadPublishedArtifact;
+    }
     if runtime_overlay_source_checkout_root().is_some() {
         RuntimeOverlayAcquireMode::BuildFromSourceCheckout
     } else {
