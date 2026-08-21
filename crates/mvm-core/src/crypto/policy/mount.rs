@@ -2,22 +2,36 @@
 //!
 //! Restricts where a host-supplied virtio-fs share can land inside
 //! the guest. Shares cross the verity boundary (they're not part
-//! of the rootfs); without this policy a host could mount a share
-//! over `/usr` or `/etc/mvm/` and shadow verity-protected files
-//! post-boot. The whitelist + deny-list pair pins shares to a
-//! small set of subtrees that the rootfs explicitly leaves
-//! writable.
+//! of the rootfs); without this policy a share could be mounted
+//! over a path the mvm runtime owns and shadow it post-boot.
 //!
 //! # Policy shape
 //!
-//! - **Allow-roots** — shares may only mount under one of these
-//!   prefixes. The default ships `/mnt`, `/data`, and `/work`,
-//!   matching the conventions in the project's example flakes.
-//! - **Deny-prefixes** — even when an allow-root is widened by
-//!   image-specific config, these prefixes can never be a mount
-//!   target. The default covers the verity-protected tree
-//!   (`/etc`, `/usr`, `/lib`, `/lib64`, `/bin`, `/sbin`, `/boot`,
-//!   `/init`) plus `/proc`, `/sys`, `/dev`, and `/run/mvm-secrets`.
+//! - **Allow-roots** — a share may *only* land at or under `/data`,
+//!   `/work`, or `/mnt`. An allow-list, not a deny-list: the rootfs
+//!   and every runtime-managed mount is off-limits *by construction*
+//!   rather than by enumeration, so a path the policy has never heard
+//!   of is refused rather than admitted.
+//! - **Protected paths** — the paths the mvm runtime owns. Most sit
+//!   outside the allow-roots and are already unreachable; the ones
+//!   that matter are those *inside* an allow-root, notably the config
+//!   and secret drives under `/mnt`, which the allow-roots alone
+//!   would admit.
+//!
+//! # Containment is bidirectional
+//!
+//! A candidate mountpoint is rejected when it is a **descendant** of
+//! a protected path (mounting *inside* the runtime's tree) *or* an
+//! **ancestor** of one (mounting *over* a parent, which shadows
+//! everything beneath it).
+//!
+//! The ancestor direction is not decoration. `/mnt` is an allow-root
+//! and `/mnt/config` is protected, so a descendant-only check admits
+//! a share at `/mnt` that hides the config and secret drives — or,
+//! if the share mounts first, lands the secret drive *inside* a
+//! host-shared directory. Any reserved path beneath an allow-root has
+//! this shape; checking both directions closes the class rather than
+//! the instance.
 //!
 //! Pure logic — no fs I/O. Callers feed the policy a string from
 //! the wire and get a typed verdict. The agent runs the actual
@@ -27,34 +41,39 @@ use std::path::Path;
 
 use thiserror::Error;
 
-/// Default subtrees a share can be mounted under.
-pub const DEFAULT_MOUNT_ALLOW_ROOTS: &[&str] = &["/mnt", "/data", "/work"];
+/// Subtrees a share may mount under.
+pub const MOUNT_ALLOW_ROOTS: &[&str] = &["/data", "/work", "/mnt"];
 
-/// Default prefixes that always reject a share mount, regardless
-/// of allow-root override. The bare-root path `/` is rejected by
-/// a separate check in `validate` — `Path::starts_with("/")` is
-/// trivially true for every absolute path, so listing `/` here
-/// would block everything.
+/// Paths the mvm runtime owns, which a share may neither sit inside
+/// nor shadow.
 ///
-/// **Nix-immutable paths** (`/nix`, `/run/booted-system`,
-/// `/run/current-system`) are denied — the Nix store is
-/// content-addressed and reproducibility-critical; volumes must
-/// never overlay it.
-pub const DEFAULT_MOUNT_DENY_PREFIXES: &[&str] = &[
-    "/etc",
-    "/usr",
-    "/lib",
-    "/lib64",
-    "/bin",
-    "/sbin",
-    "/boot",
-    "/init",
+/// The entries beneath an allow-root are the load-bearing ones —
+/// `/mnt/config` and `/mnt/secrets` are reachable under the
+/// allow-roots and must be carved back out. The rest are outside the
+/// allow-roots already; they are listed so a refusal names the runtime
+/// path it is protecting instead of reporting a bare allow-root miss,
+/// and so widening an allow-root later cannot silently expose them.
+pub const PROTECTED_RUNTIME_PATHS: &[&str] = &[
+    // Reachable under an allow-root: the config and secret drives.
+    "/mnt/config",
+    "/mnt/secrets",
+    // Outside the allow-roots, named for error quality and defence in
+    // depth.
     "/proc",
     "/sys",
     "/dev",
+    "/init",
+    "/etc",
+    "/usr",
+    "/bin",
+    "/sbin",
+    "/lib",
+    "/lib64",
+    "/boot",
+    "/mvm",
+    "/run/mvm",
     "/run/mvm-secrets",
     "/run/mvm-etc",
-    // Nix-immutable paths.
     "/nix",
     "/run/booted-system",
     "/run/current-system",
@@ -71,40 +90,41 @@ pub enum MountPathError {
     EmbeddedNul { raw: String },
     #[error("mount path {raw:?} contains `..` (path traversal not allowed)")]
     PathTraversal { raw: String },
-    #[error("mount path {raw:?} matches deny-prefix {matched:?}")]
+    #[error("mount path {raw:?} is inside the mvm runtime path {matched:?}")]
     Denied { raw: String, matched: String },
+    #[error(
+        "mount path {raw:?} would shadow the mvm runtime path {protected:?}; \
+         mount on a subdirectory instead"
+    )]
+    Shadows { raw: String, protected: String },
     #[error("mount path {raw:?} is outside the allow-roots {allow:?}")]
     OutsideAllowRoots { raw: String, allow: Vec<String> },
 }
 
-/// Mount-path policy. Production wires
-/// `MountPathPolicy::default()` at construction time; tests can
-/// build a custom policy via `with_allow_roots` /
-/// `with_deny_prefixes`.
+/// Mount-path policy. `default()` is the shipped posture; the
+/// constructors exist for tests that need a different shape.
 #[derive(Debug, Clone)]
 pub struct MountPathPolicy {
     allow_roots: Vec<String>,
-    deny_prefixes: Vec<String>,
+    protected: Vec<String>,
 }
 
 impl Default for MountPathPolicy {
     fn default() -> Self {
         Self {
-            allow_roots: DEFAULT_MOUNT_ALLOW_ROOTS
-                .iter()
-                .map(|s| s.to_string())
-                .collect(),
-            deny_prefixes: DEFAULT_MOUNT_DENY_PREFIXES
-                .iter()
-                .map(|s| s.to_string())
-                .collect(),
+            allow_roots: owned(MOUNT_ALLOW_ROOTS),
+            protected: owned(PROTECTED_RUNTIME_PATHS),
         }
     }
 }
 
+fn owned(paths: &[&str]) -> Vec<String> {
+    paths.iter().map(|s| (*s).to_string()).collect()
+}
+
 impl MountPathPolicy {
-    /// Build a policy with caller-supplied allow-roots, default
-    /// deny-prefixes still active.
+    /// Build a policy with caller-supplied allow-roots, keeping the
+    /// default protected-path set.
     pub fn with_allow_roots<I, S>(roots: I) -> Self
     where
         I: IntoIterator<Item = S>,
@@ -112,21 +132,17 @@ impl MountPathPolicy {
     {
         Self {
             allow_roots: roots.into_iter().map(Into::into).collect(),
-            deny_prefixes: DEFAULT_MOUNT_DENY_PREFIXES
-                .iter()
-                .map(|s| s.to_string())
-                .collect(),
+            ..Self::default()
         }
     }
 
-    /// Add an extra deny-prefix on top of the defaults.
+    /// Add an extra protected path on top of the defaults.
     pub fn with_extra_deny<I, S>(mut self, extras: I) -> Self
     where
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
-        self.deny_prefixes
-            .extend(extras.into_iter().map(Into::into));
+        self.protected.extend(extras.into_iter().map(Into::into));
         self
     }
 
@@ -163,9 +179,9 @@ impl MountPathPolicy {
         let normalized = normalize_trailing_slashes(raw);
         let normalized_path = Path::new(&normalized);
 
-        // Exact-root reject. Mounting a share over `/` is always
-        // wrong; the deny-prefix list can't enforce this on its
-        // own because `starts_with("/")` is universally true.
+        // Exact-root reject, ahead of the containment checks so that
+        // mounting over `/` reports itself rather than naming whichever
+        // protected path happens to sort first.
         if normalized_path == Path::new("/") {
             return Err(MountPathError::Denied {
                 raw: raw.to_string(),
@@ -173,17 +189,28 @@ impl MountPathPolicy {
             });
         }
 
-        // Deny check first. A path can match an allow-root and
-        // still hit a deny-prefix (e.g. allow `/data` plus a deny
-        // on `/data/secrets/`); deny wins.
-        if let Some(matched) = self.deny_match(normalized_path) {
+        // Containment first, in both directions. A path can sit under
+        // an allow-root and still collide with a protected path — `/mnt`
+        // shadows the config and secret drives — so the protected set
+        // wins over the allow-roots.
+        if let Some(matched) = self.containing_protected(normalized_path) {
             return Err(MountPathError::Denied {
                 raw: raw.to_string(),
                 matched: matched.to_string(),
             });
         }
+        if let Some(protected) = self.shadowed_protected(normalized_path) {
+            return Err(MountPathError::Shadows {
+                raw: raw.to_string(),
+                protected: protected.to_string(),
+            });
+        }
 
-        if !self.matches_any_allow_root(normalized_path) {
+        if !self
+            .allow_roots
+            .iter()
+            .any(|root| starts_with_segment_aware(normalized_path, Path::new(root.as_str())))
+        {
             return Err(MountPathError::OutsideAllowRoots {
                 raw: raw.to_string(),
                 allow: self.allow_roots.clone(),
@@ -192,22 +219,27 @@ impl MountPathPolicy {
         Ok(normalized)
     }
 
-    fn deny_match(&self, path: &Path) -> Option<&str> {
-        self.deny_prefixes
+    /// The protected path that `path` sits at or under, if any —
+    /// i.e. mounting *inside* the mvm runtime's tree.
+    fn containing_protected(&self, path: &Path) -> Option<&str> {
+        self.protected
             .iter()
             .find(|prefix| starts_with_segment_aware(path, Path::new(prefix.as_str())))
             .map(String::as_str)
     }
 
-    fn matches_any_allow_root(&self, path: &Path) -> bool {
-        self.allow_roots
+    /// The protected path that sits at or under `path`, if any —
+    /// i.e. mounting *over* a parent and shadowing what's beneath.
+    fn shadowed_protected(&self, path: &Path) -> Option<&str> {
+        self.protected
             .iter()
-            .any(|root| starts_with_segment_aware(path, Path::new(root.as_str())))
+            .find(|protected| starts_with_segment_aware(Path::new(protected.as_str()), path))
+            .map(String::as_str)
     }
 }
 
 /// Free-function shortcut for callers that don't need the
-/// configurable policy.
+/// configurable policy. Applies the [`MountTier::Strict`] posture.
 pub fn validate_mount_path(raw: &str) -> Result<String, MountPathError> {
     MountPathPolicy::default().validate(raw)
 }
@@ -220,13 +252,11 @@ fn normalize_trailing_slashes(raw: &str) -> String {
     s
 }
 
+/// `Path::starts_with` is component-aware: `/foo/bar` starts with
+/// `/foo` but `/foobar` does not. That segment awareness is what keeps
+/// `/nixos` out of the `/nix` protected subtree and `/etcetera` out of
+/// `/etc`.
 fn starts_with_segment_aware(path: &Path, prefix: &Path) -> bool {
-    // Path::starts_with is component-aware (`/foo` starts_with `/`
-    // and `/foo/bar`/`/foo` but not `/foobar`). Special-case the
-    // bare-root prefix because Path::starts_with("/") is true for
-    // every absolute path, which we *want* for the deny `/` rule —
-    // the bare-root deny is what blocks `mount over /`. Above the
-    // bare-root case, normal segment semantics apply.
     path.starts_with(prefix)
 }
 
@@ -268,8 +298,8 @@ mod tests {
     }
 
     #[test]
-    fn accepts_default_allow_roots() {
-        for path in ["/mnt", "/mnt/foo", "/data", "/data/x/y", "/work/sandbox"] {
+    fn accepts_allow_roots() {
+        for path in ["/data", "/data/x/y", "/work", "/work/sandbox", "/mnt/share"] {
             validate_mount_path(path)
                 .unwrap_or_else(|e| panic!("expected accept for {path:?}, got {e}"));
         }
@@ -277,7 +307,7 @@ mod tests {
 
     #[test]
     fn rejects_outside_allow_roots() {
-        for path in ["/home/user", "/tmp", "/var/lib/app"] {
+        for path in ["/home/user", "/tmp", "/var/lib/app", "/opt", "/srv"] {
             assert!(
                 matches!(
                     validate_mount_path(path),
@@ -289,12 +319,11 @@ mod tests {
     }
 
     #[test]
-    fn rejects_default_deny_prefixes() {
-        // Each of these shouldn't even get evaluated against the
-        // allow-roots — the deny-list fires first.
+    fn denies_the_runtime_paths() {
         for path in [
             "/etc/mvm/keys",
             "/usr/bin/sh",
+            "/usr/local/bin/mvm-guest-agent",
             "/lib/x86_64-linux-gnu/libc.so",
             "/lib64/ld-linux.so",
             "/bin/sh",
@@ -306,10 +335,9 @@ mod tests {
             "/dev/null",
             "/run/mvm-secrets/foo",
             "/run/mvm-etc/passwd",
-            // Nix-immutable paths.
+            "/mvm/runtime",
             "/nix",
             "/nix/store/abc123-pkg",
-            "/nix/var/log",
             "/run/booted-system/sw/bin/sh",
             "/run/current-system/etc/profile",
         ] {
@@ -321,10 +349,67 @@ mod tests {
         }
     }
 
+    /// The ancestor half of the containment rule, which is the whole
+    /// reason the check runs in both directions.
+    ///
+    /// `/mnt` is an allow-root, so an allow-roots-plus-descendants check
+    /// admits it — and a share there hides `/mnt/config` and
+    /// `/mnt/secrets`, or lands the secret drive inside a host-shared
+    /// directory depending on mount order. Deleting `shadowed_protected`
+    /// must fail this test.
+    #[test]
+    fn bare_mnt_is_refused_because_it_shadows_the_config_drive() {
+        let err = validate_mount_path("/mnt").unwrap_err();
+        match err {
+            MountPathError::Shadows { protected, .. } => {
+                assert!(
+                    protected == "/mnt/config" || protected == "/mnt/secrets",
+                    "expected a reserved drive, got {protected:?}"
+                );
+            }
+            other => panic!("expected Shadows for /mnt, got {other:?}"),
+        }
+        // The reserved drives themselves, and paths beneath them.
+        for reserved in ["/mnt/config", "/mnt/secrets"] {
+            assert!(
+                matches!(
+                    validate_mount_path(reserved),
+                    Err(MountPathError::Denied { .. })
+                ),
+                "{reserved} is reserved by the runtime"
+            );
+            assert!(
+                validate_mount_path(&format!("{reserved}/nested")).is_err(),
+                "{reserved}/nested is under a reserved drive"
+            );
+        }
+        // Siblings under the same allow-root stay fine, including one
+        // that merely shares a string prefix with a reserved drive.
+        for ok in ["/mnt/share", "/mnt/configx", "/mnt/secretsy"] {
+            validate_mount_path(ok).unwrap_or_else(|e| panic!("{ok} should be allowed: {e}"));
+        }
+    }
+
+    /// The ancestor rule must honour segment boundaries in the same way
+    /// the descendant rule does, or it would refuse unrelated siblings.
+    #[test]
+    fn the_ancestor_rule_is_segment_aware() {
+        let policy = MountPathPolicy::with_allow_roots(["/"]).with_extra_deny(["/a/bc/keep"]);
+        // `/a/bc` is a genuine ancestor of the protected path.
+        assert!(matches!(
+            policy.validate("/a/bc"),
+            Err(MountPathError::Shadows { .. })
+        ));
+        // `/a/b` merely shares a string prefix with `/a/bc` and is not.
+        policy
+            .validate("/a/b")
+            .expect("/a/b is not an ancestor of /a/bc/keep");
+    }
+
     #[test]
     fn nix_paths_denied_segment_aware() {
-        // `/nixos` is not a child of `/nix` — the deny match must
-        // honour path-segment boundaries.
+        // `/nixos` is not a child of `/nix` — containment must honour
+        // path-segment boundaries.
         let err = validate_mount_path("/nixos").unwrap_err();
         assert!(
             matches!(err, MountPathError::OutsideAllowRoots { .. }),
@@ -334,10 +419,8 @@ mod tests {
 
     #[test]
     fn deny_match_is_segment_aware_for_etc() {
-        // `/etcetera` shares a string prefix with `/etc` but is
-        // not a child of it. Should be allowed (assuming it lives
-        // under an allow-root — it doesn't, so it's rejected for
-        // OutsideAllowRoots, *not* Denied).
+        // `/etcetera` shares a string prefix with `/etc` but is not a
+        // child of it, so it fails on the allow-roots, not containment.
         let err = validate_mount_path("/etcetera").unwrap_err();
         assert!(
             matches!(err, MountPathError::OutsideAllowRoots { .. }),
@@ -355,18 +438,20 @@ mod tests {
     fn trailing_slash_is_normalised() {
         let normalized = validate_mount_path("/data/").unwrap();
         assert_eq!(normalized, "/data");
+        // And normalising must not change a verdict.
+        assert!(validate_mount_path("/mnt/").is_err());
     }
 
     #[test]
     fn extra_deny_layer_takes_priority_over_allow_root() {
         let policy = MountPathPolicy::default().with_extra_deny(["/data/secrets"]);
         // `/data/secrets/key` is under the `/data` allow-root, but
-        // matches the extra deny — must reject.
+        // matches the extra protected path — must reject.
         assert!(matches!(
             policy.validate("/data/secrets/key"),
             Err(MountPathError::Denied { .. })
         ));
-        // Sibling under `/data` but outside the deny is fine.
+        // Sibling under `/data` but outside the protected path is fine.
         policy.validate("/data/public/x").unwrap();
     }
 
@@ -379,7 +464,7 @@ mod tests {
             policy.validate("/data/x"),
             Err(MountPathError::OutsideAllowRoots { .. })
         ));
-        // Defaults deny-list still applies.
+        // The protected set still applies.
         assert!(matches!(
             policy.validate("/etc/mvm/x"),
             Err(MountPathError::Denied { .. })

@@ -168,6 +168,13 @@
       ]
     },
     {
+      "path": "crates/mvm-core/src/crypto/policy/mount.rs",
+      "package": "mvm-core",
+      "claims": [
+        1
+      ]
+    },
+    {
       "path": "crates/mvm-core/src/plan/bundle.rs",
       "package": "mvm-core",
       "claims": [
@@ -314,11 +321,11 @@
   "uncovered_claims": [
     {
       "number": 5,
-      "why": "no fn: witness \u2014 witnessed by CI lanes only, nothing to mutate"
+      "why": "no fn: witness — witnessed by CI lanes only, nothing to mutate"
     },
     {
       "number": 7,
-      "why": "no fn: witness \u2014 witnessed by CI lanes only, nothing to mutate"
+      "why": "no fn: witness — witnessed by CI lanes only, nothing to mutate"
     },
     {
       "number": 16,
