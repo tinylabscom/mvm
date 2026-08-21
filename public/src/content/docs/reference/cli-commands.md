@@ -18,7 +18,7 @@ running VM live under `vm`, build-time verbs under `build`, observability
 under `ops`, install/environment lifecycle under `env`, and provenance &
 verification under `trust`. Domains that already own their own subcommands
 (`image`, `catalog`, `manifest`, `storage`, `network`, `cache`, `pool`,
-`secret`, `bundle`, `deps`, `artifact`) stay top-level.
+`secret`, `bundle`, `deps`, `artifact`, `capture`) stay top-level.
 
 | Group / top-level | Commands |
 |--------|----------|
@@ -28,7 +28,7 @@ verification under `trust`. Domains that already own their own subcommands
 | `ops <sub>` | `metrics`, `config`, `mcp` |
 | `env <sub>` | `bootstrap`, `cleanup`, `uninstall`, `update`, `sign` |
 | `trust <sub>` | `add`/`list`/`remove` (publishers), `attest`, `receipt`, `audit` |
-| Already-grouped top-level | `image`, `catalog`, `manifest`, `storage`, `network`, `cache`, `pool`, `secret`, `bundle`, `deps`, `artifact` |
+| Already-grouped top-level | `image`, `catalog`, `manifest`, `storage`, `network`, `cache`, `pool`, `secret`, `bundle`, `deps`, `artifact`, `capture` |
 
 **Beginner vs. advanced surfaces.** [`mvmctl machine`](#machine-beginner-ux)
 (further down) is the beginner-facing front door — one small command group for
@@ -45,6 +45,7 @@ guest-RPC surface, fleet-shaped workflows).
 
 | Command | Description |
 |---------|-------------|
+| `mvmctl capture` | Inspect a Linux project and selected commands, resolve the evidence into canonical MVM IR, and render or verify the resulting environment (`project`, `resolve`, and `verify` subcommands) |
 | `mvmctl machine run --flake <ref>` | Build a Nix flake and boot a transient VM |
 | `mvmctl machine run --manifest <path>` | Boot a pre-built manifest (`mvm.toml`, its directory, or a slot name; short form `-m`). Mutually exclusive with `--flake`/`--image` |
 | `mvmctl machine run --image <ref>` | Boot an OCI image (pulled/cached). Mutually exclusive with `--flake`/`--manifest` |
