@@ -40,7 +40,7 @@ echo "Installing system dependencies ..."
 apt-get update -qq
 apt-get install -y -qq \
     curl git build-essential pkg-config \
-    qemu-system-arm e2fsprogs attr jq virtiofsd
+    qemu-system-arm qemu-system-common qemu-system-data e2fsprogs attr jq virtiofsd
 
 echo "Installing Rust nightly + musl targets ..."
 curl --proto =https --tlsv1.2 -sSf https://sh.rustup.rs \

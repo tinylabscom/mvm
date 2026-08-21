@@ -1589,7 +1589,7 @@ jobs:
         with:
           # qemu-system-arm provides qemu-system-aarch64; e2fsprogs provides the
           # mkfs.ext4/debugfs tools the Stage 0 builder uses to pack images.
-          packages: qemu-system-arm e2fsprogs attr jq virtiofsd
+          packages: qemu-system-arm qemu-system-common qemu-system-data e2fsprogs attr jq virtiofsd
 
       - uses: ./.github/actions/rust-cache
         with:
