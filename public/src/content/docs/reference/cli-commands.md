@@ -1121,6 +1121,52 @@ running microVM.
 | `mvmctl env uninstall --dry-run` | Print what would be removed without removing |
 
 ## Global Options
+## Capture
+
+Inspect a project environment, produce a reviewable capture report, resolve it to the canonical MVM IR, render Nix artifacts, and optionally verify them in the Linux builder VM.
+
+### `mvmctl capture project`
+
+Inspect a project directory and emit a versioned capture report.
+
+| Option | Description |
+|--------|-------------|
+| `<path>` | Project directory to inspect |
+| `--output <path>` | Output file for the capture report (required) |
+| `--run "<cmd>"` | Explicit command to record for later tracing/verification; repeatable |
+
+### `mvmctl capture resolve`
+
+Resolve a capture report into the canonical MVM IR.
+
+| Option | Description |
+|--------|-------------|
+| `<report>` | Capture report to resolve |
+| `--output <path>` | Output file for the canonical IR (required) |
+
+### `mvmctl capture verify`
+
+Render `flake.nix`, `launch.json`, and `workload.json` from the canonical IR and record verification status.
+
+| Option | Description |
+|--------|-------------|
+| `<environment>` | Canonical IR file produced by `capture resolve` |
+| `--manifest-dir <dir>` | Directory containing the project source (defaults to the current directory) |
+| `--out-dir <dir>` | Directory for rendered Nix artifacts and `verification.json` (defaults to a temp directory) |
+| `--run "<cmd>"` | Verification command to record or execute; repeatable |
+| `--exec-in-builder-vm` | Build the rendered flake inside the Linux builder VM via `mvmctl __builder-shell-job`. Requires a bootstrapped builder VM. Default behavior records the command without executing it |
+| `--boot-and-replay` | Boot a microVM inside the Linux builder VM and replay the verification command as the guest entrypoint. Requires a bootstrapped builder VM with working microVM support. Mutually exclusive with `--exec-in-builder-vm`; default behavior records the command without executing it |
+
+Output files written to `--out-dir`:
+
+- `flake.nix` — Nix flake defining the guest image.
+- `launch.json` — resolved entrypoint and metadata.
+- `workload.json` — host-side workload IR.
+- `verification.json` — canonical IR plus a `verification` array with one record per `--run` command.
+
+See the capture guide for security boundaries and limitations.
+
+## Global Options
 
 All commands accept these global options:
 

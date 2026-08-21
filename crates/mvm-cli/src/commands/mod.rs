@@ -5,6 +5,7 @@ mod build;
 #[cfg(feature = "builder-vm")]
 mod builder_shell_job;
 mod bundle;
+mod capture;
 pub mod catalog;
 mod cmd_audit;
 mod completions;
@@ -246,6 +247,9 @@ pub(in crate::commands) enum Commands {
     /// Inspect cached application dependencies
     #[command(display_order = 14)]
     Deps(deps::Args),
+    /// Capture a project environment and resolve it to MVM IR
+    #[command(display_order = 14)]
+    Capture(capture::Args),
     /// Pack or verify signed `.mvm` artifacts
     #[command(display_order = 13)]
     Artifact(vm::artifact::Args),
