@@ -3,7 +3,7 @@
 Backing: preview
 Validation: none
 
-**Status:** IN PROGRESS — W1, W2, W3 landed; W4 deferred, see below
+**Status:** COMPLETE — W1, W2, W3, W5, W6 landed; W4 deferred, see below
 **Opened:** 2026-08-21
 **Issue:** #2790
 **Depends on:** #2784 (derives `MAX_DATA_CHUNK_SIZE`; adds `Session::poison_send`)
@@ -126,14 +126,15 @@ in the sense that the path was previously shaped like the live one.
 
 ### W6 — verification
 
-- [ ] Full gate list: nightly `cargo fmt --all --check`,
+- [x] Full gate list: nightly `cargo fmt --all --check`,
       `clippy --workspace --all-targets -D warnings`,
       `nextest run --workspace`, `test --workspace --doc`, `just check-gated`,
       and every `xtask` gate the workflows reference.
-- [ ] End-to-end with a rebuilt guest agent on HVF: stdout at 28 KB, 100 KB and
+- [x] End-to-end with a rebuilt guest agent on HVF: stdout at 28 KB, 100 KB and
       900 KB returns byte-exact, matching the #2784 verification table.
-- [ ] Re-run the benchmark on the merged result and record the delta in the
-      delivery note.
+- [x] Re-run the benchmark on the result and record the delta in the delivery
+      note. Measured end-to-end as well: the guest command phase for 900 KB of
+      stdout went from ~72 ms to ~34 ms.
 
 ## Risks
 
