@@ -463,6 +463,16 @@ mod tests {
     }
 
     #[test]
+    fn test_single_connect_attempt_surfaces_the_first_failure() {
+        let error = connect_to_port_once("/nonexistent/v.sock", GUEST_AGENT_PORT, 1)
+            .expect_err("a missing mux socket must fail without an internal retry loop");
+        assert!(
+            error.to_string().contains("Vsock socket not found"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
     fn test_connect_to_nonexistent_retries_are_bounded() {
         // A missing socket can be transient during restart. We retry briefly,
         // but the bounded exponential backoff must still fail quickly.

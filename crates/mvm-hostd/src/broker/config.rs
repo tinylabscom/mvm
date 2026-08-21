@@ -8,6 +8,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
+use mvm_contract::protocol::agent_capability::CapabilityBinding;
 use mvm_core::protocol::broker::ServiceId;
 use serde::{Deserialize, Serialize};
 
@@ -48,6 +49,9 @@ pub struct SubprocessConfig {
     /// Exact host-service bindings admitted for this workload.
     #[serde(default)]
     pub services_bindings: Vec<ServiceId>,
+    /// Exact typed capability bindings derived from the signed execution plan.
+    #[serde(default)]
+    pub capability_bindings: Vec<CapabilityBinding>,
 }
 
 fn default_max_frame_bytes() -> usize {
@@ -103,6 +107,7 @@ mod tests {
             max_frame_bytes: 65_536,
             parse_timeout: Duration::from_millis(50),
             services_bindings: vec![],
+            capability_bindings: vec![],
         };
         let bytes = serde_json::to_vec(&cfg).unwrap();
         let parsed: SubprocessConfig = parse(&bytes).unwrap();

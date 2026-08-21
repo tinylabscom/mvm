@@ -1042,6 +1042,69 @@ mod tests {
         );
     }
 
+    /// Firecracker's serial console is synchronous and every byte requires a
+    /// guest exit. Normal-path boot progress is already observable through the
+    /// authenticated readiness response, so only failures should use stderr
+    /// before the control plane can serve requests.
+    #[test]
+    fn pid1_success_path_stays_quiet_until_control_requests_are_served() {
+        let agent = include_str!("../bin/mvm-guest-agent.rs");
+        let main = agent
+            .split("fn main()")
+            .nth(1)
+            .expect("the agent main function must exist");
+        let before_accept_loop = main
+            .split("loop {")
+            .next()
+            .expect("the control accept loop must exist");
+        for message in [
+            "mvm-guest-agent: profile=",
+            "mvm-guest-agent: starting on vsock",
+            "mvm-guest-agent: control plane ready",
+            "mvm-guest-agent: listening on vsock",
+        ] {
+            assert!(
+                !before_accept_loop.contains(message),
+                "normal boot must not synchronously write {message:?} before serving control requests"
+            );
+        }
+
+        let init = include_str!("../bin/mvm-guest-agent/init.rs");
+        for message in [
+            "running as PID 1",
+            "host-signer anchor provisioned",
+            "activation complete",
+        ] {
+            assert!(
+                !init.contains(message),
+                "normal activation must not synchronously write {message:?} before its ACK"
+            );
+        }
+        assert!(
+            init.contains("FATAL (PID 1)"),
+            "failure diagnostics must remain on the serial console"
+        );
+        assert!(
+            init.contains("control stays closed"),
+            "fail-closed signer diagnostics must remain on the serial console"
+        );
+
+        let background_boot = include_str!("../bin/mvm-guest-agent/boot.rs");
+        for message in [
+            "entrypoint validated",
+            "no per-call entrypoint wrapper baked",
+        ] {
+            assert!(
+                !background_boot.contains(message),
+                "normal background discovery must not contend for the serial console during activation"
+            );
+        }
+        assert!(
+            background_boot.contains("entrypoint validation failed"),
+            "entrypoint failure diagnostics must remain on the serial console"
+        );
+    }
+
     #[test]
     fn load_pinned_verb_grant_malformed_envelope_returns_none() {
         let dir = tempfile::tempdir().unwrap();

@@ -239,7 +239,9 @@ fn synthesis_input(vm_name: &str) -> SynthesisInput<'_> {
         audit_labels: Default::default(),
         agent_verbs: None,
         services: Vec::new(),
+        extensions: Vec::new(),
         stream_retention: Default::default(),
+        attestation_mode: mvm_contract::plan::AttestationMode::Noop,
         // Closed transport: this fixture's workload reaches nothing.
         network_mode: mvm_contract::plan::NetworkMode::None,
         l3_network: None,

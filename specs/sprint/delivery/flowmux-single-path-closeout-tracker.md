@@ -15,3 +15,8 @@ deletion, permanent invariant gates, then the cross-backend evidence matrix.
 
 This entry changes tracking only. It does not claim that any of those runtime
 workstreams is complete.
+
+W3 verification keeps its host-side performance probe on the narrow
+`mvm-agentd/flowmux-client` feature. The probe therefore exercises the same
+FlowMux client without pulling the guest addon bundle's vsock transport into
+the host dependency graph; the duplicate-major invariant remains clean.

@@ -380,10 +380,8 @@ impl BuilderVsockEgressEndpoint {
                     stderr_log_path.display()
                 ))
             })?;
-        let mut child = Command::new(mvmctl_path)
-            .arg("__builder-egress-supervisor")
-            .arg("--endpoint")
-            .arg(&endpoint_path)
+        let mut endpoint_command = builder_egress_supervisor_command(&mvmctl_path, &endpoint_path);
+        let mut child = endpoint_command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::from(stderr_log))
@@ -452,6 +450,22 @@ impl BuilderVsockEgressEndpoint {
     fn reap(&self) {
         reap_builder_vsock_egress_endpoint(&self.state_dir);
     }
+}
+
+fn builder_egress_supervisor_command(mvmctl_path: &Path, endpoint_path: &Path) -> Command {
+    let mut command = Command::new(mvmctl_path);
+    command
+        .arg("__builder-egress-supervisor")
+        .arg("--endpoint")
+        .arg(endpoint_path)
+        // This child's stdout is a typed JSON handshake channel. The parent
+        // CLI's verbose RUST_LOG value must not turn tracing records into
+        // protocol bytes before the wrapper execs the endpoint.
+        .env("RUST_LOG", "off")
+        .env_remove(mvm_core::observability::span_timing::ENV_ENABLE)
+        .env_remove(mvm_core::observability::span_timing::ENV_OUT)
+        .env_remove(mvm_core::observability::span_timing::ENV_FILTER);
+    command
 }
 
 fn builder_vsock_socket_dir(state_dir: &Path) -> Result<PathBuf, BuilderVmError> {
@@ -1029,9 +1043,13 @@ impl LibkrunBuilderVm {
                 {
                     0
                 }
-                Err(error) => return Err(error),
+                Err(error) => {
+                    invalidate_stage0_store_after_ext4_error(&console_log, nix_store_lock.path())?;
+                    return Err(error);
+                }
             };
         if exit_code != 0 {
+            invalidate_stage0_store_after_ext4_error(&console_log, nix_store_lock.path())?;
             return Err(BuilderVmError::NixBuildFailed(format!(
                 "Stage 0 supervisor exited with status {exit_code}; \
                  console log at {}",
@@ -1043,6 +1061,7 @@ impl LibkrunBuilderVm {
         // from the console so a nix failure surfaces here with its own log
         // instead of as a downstream "rootfs.ext4 missing" error.
         let console = std::fs::read_to_string(&console_log).unwrap_or_default();
+        invalidate_stage0_store_after_ext4_error(&console_log, nix_store_lock.path())?;
         let console_log_path = console_log.to_string_lossy();
         stage0_run_result(&console, &console_log_path)
     }
@@ -2726,6 +2745,15 @@ pub(crate) fn prepopulate_stage0_nix_store_image(
     image: &BuilderVmImage,
     store_image: &Path,
 ) -> Result<(), BuilderVmError> {
+    let host_mkfs = find_host_mkfs_ext4();
+    prepopulate_stage0_nix_store_image_with_mkfs(image, store_image, host_mkfs.as_deref())
+}
+
+fn prepopulate_stage0_nix_store_image_with_mkfs(
+    image: &BuilderVmImage,
+    store_image: &Path,
+    host_mkfs: Option<&Path>,
+) -> Result<(), BuilderVmError> {
     let BuilderVmImage::RootDir { root_dir, .. } = image else {
         return Ok(());
     };
@@ -2738,7 +2766,7 @@ pub(crate) fn prepopulate_stage0_nix_store_image(
     let marker = stage0_nix_store_host_marker(&seed_store)?;
     let marker_path = stage0_nix_store_host_marker_path(store_image);
     if std::fs::read_to_string(&marker_path).is_ok_and(|existing| existing == marker)
-        && stage0_store_superblock_is_clean(store_image)?
+        && stage0_store_superblock_is_recoverable(store_image)?
     {
         return Ok(());
     }
@@ -2753,16 +2781,12 @@ pub(crate) fn prepopulate_stage0_nix_store_image(
         })?;
     }
 
-    let Some(mkfs) = find_host_mkfs_ext4() else {
-        // No host mkfs.ext4 (macOS ships none): format the store image in-process
-        // with the memory-safe pure-Rust writer so Stage 0 gets a real,
-        // persistent Nix store instead of falling back to a throwaway tmpfs on
-        // every boot — the fallback recompiles the whole builder closure cold
-        // each time. The image is formatted empty; the guest seeds it from the
-        // verified root store on first boot. Record the same host marker the
-        // seeded path writes so a later run skips reformatting and preserves the
-        // guest-seeded, grown store instead of wiping it.
-        format_stage0_store_empty_in_process(store_image)?;
+    let Some(mkfs) = host_mkfs else {
+        // macOS has no host mkfs.ext4, and the minimal verified Stage 0 seed
+        // intentionally does not carry e2fsprogs. Format a valid labeled ext4
+        // image in-process when that capability is compiled in; otherwise
+        // leave a blank device and let a richer Linux seed format it.
+        format_stage0_store_without_host_mkfs(store_image)?;
         std::fs::write(&marker_path, marker).map_err(|e| {
             BuilderVmError::ExtractionFailed(format!("write {}: {e}", marker_path.display()))
         })?;
@@ -2776,7 +2800,7 @@ pub(crate) fn prepopulate_stage0_nix_store_image(
         blocks_4k,
         "prepopulating Stage 0 Nix store image with host mkfs.ext4"
     );
-    let status = Command::new(&mkfs)
+    let status = Command::new(mkfs)
         // `-L` so the guest can find this disk by label instead of by device
         // letter, which shifts whenever a backend attaches another drive.
         .args(["-F", "-q", "-b", "4096", "-L"])
@@ -2802,13 +2826,41 @@ pub(crate) fn prepopulate_stage0_nix_store_image(
     Ok(())
 }
 
-/// Format the Stage 0 Nix store image as an empty, growable ext4 in-process,
-/// used when the host has no `mkfs.ext4` (macOS). Sized to the device minus the
-/// same 64 KiB margin the host-`mkfs` path leaves for libkrun virtio-blk
-/// geometry rounding. Leaves no seed marker: the guest treats the empty
-/// filesystem as uninitialized and seeds it from the verified root store.
+/// Reset a failed or seed-mismatched Stage 0 store to a blank sparse device.
+/// The Linux Stage 0 guest formats it with e2fsprogs before copying the verified
+/// seed closure. Truncating before restoring the device size discards every
+/// block from a previously damaged filesystem without materializing 64 GiB of
+/// zeros on the host.
+#[cfg(not(feature = "pure-mkfs"))]
+fn reset_stage0_store_for_guest_format(store_image: &Path) -> Result<(), BuilderVmError> {
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(store_image)
+        .map_err(|e| {
+            BuilderVmError::ExtractionFailed(format!("open {}: {e}", store_image.display()))
+        })?;
+    let device_size = file
+        .metadata()
+        .map_err(|e| {
+            BuilderVmError::ExtractionFailed(format!("stat {}: {e}", store_image.display()))
+        })?
+        .len();
+    file.set_len(0).map_err(|e| {
+        BuilderVmError::ExtractionFailed(format!("truncate {}: {e}", store_image.display()))
+    })?;
+    file.set_len(device_size).map_err(|e| {
+        BuilderVmError::ExtractionFailed(format!("resize {}: {e}", store_image.display()))
+    })?;
+    tracing::info!(
+        image = %store_image.display(),
+        device_size,
+        "reset Stage 0 Nix store for in-guest e2fsprogs format"
+    );
+    Ok(())
+}
+
 #[cfg(feature = "pure-mkfs")]
-fn format_stage0_store_empty_in_process(store_image: &Path) -> Result<(), BuilderVmError> {
+fn format_stage0_store_without_host_mkfs(store_image: &Path) -> Result<(), BuilderVmError> {
     let blocks_4k = host_file_4k_blocks_for_ext4(store_image)?;
     let size_bytes = blocks_4k * mvm_fs::ext4::BLOCK_SIZE as u64;
     let mut file = std::fs::OpenOptions::new()
@@ -2824,10 +2876,6 @@ fn format_stage0_store_empty_in_process(store_image: &Path) -> Result<(), Builde
             BuilderVmError::ExtractionFailed(format!("stat {}: {e}", store_image.display()))
         })?
         .len();
-    // `format_empty_ext4` writes only filesystem metadata so a large sparse
-    // backing file stays sparse. Reset the file first: every inode table the
-    // formatter advertises as zeroed must actually be zero even when this is a
-    // recovery reformat of an image containing an older Nix store.
     file.set_len(0).map_err(|e| {
         BuilderVmError::ExtractionFailed(format!("truncate {}: {e}", store_image.display()))
     })?;
@@ -2849,20 +2897,14 @@ fn format_stage0_store_empty_in_process(store_image: &Path) -> Result<(), Builde
         image = %store_image.display(),
         free_blocks = summary.free_blocks,
         groups = summary.groups,
-        "formatted Stage 0 Nix store image in-process (no host mkfs.ext4)"
+        "formatted Stage 0 Nix store image in-process"
     );
     Ok(())
 }
 
-/// Without the pure-Rust writer there is nothing to format on a host lacking
-/// `mkfs.ext4`; Stage 0 falls back to its in-guest tmpfs seed copy.
 #[cfg(not(feature = "pure-mkfs"))]
-fn format_stage0_store_empty_in_process(store_image: &Path) -> Result<(), BuilderVmError> {
-    tracing::warn!(
-        image = %store_image.display(),
-        "mkfs.ext4 is not available on the host and pure-mkfs is disabled; Stage 0 will fall back to in-guest seed-store setup"
-    );
-    Ok(())
+fn format_stage0_store_without_host_mkfs(store_image: &Path) -> Result<(), BuilderVmError> {
+    reset_stage0_store_for_guest_format(store_image)
 }
 
 fn find_host_mkfs_ext4() -> Option<PathBuf> {
@@ -2900,13 +2942,45 @@ fn stage0_nix_store_host_marker_path(store_image: &Path) -> PathBuf {
     store_image.with_extension("stage0-seed")
 }
 
+fn invalidate_stage0_store_after_ext4_error(
+    console_log: &Path,
+    store_image: &Path,
+) -> Result<(), BuilderVmError> {
+    const EXT4_ERROR_REPORT: &str = "persistent Stage 0 ext4 store reported";
+    let console = std::fs::read_to_string(console_log).unwrap_or_default();
+    if !console.contains(EXT4_ERROR_REPORT) {
+        return Ok(());
+    }
+
+    let marker_path = stage0_nix_store_host_marker_path(store_image);
+    match std::fs::remove_file(&marker_path) {
+        Ok(()) => {
+            tracing::warn!(
+                image = %store_image.display(),
+                console = %console_log.display(),
+                "invalidated Stage 0 Nix store after guest ext4 error report"
+            );
+            Ok(())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(BuilderVmError::ExtractionFailed(format!(
+            "remove invalid Stage 0 store marker {}: {error}",
+            marker_path.display()
+        ))),
+    }
+}
+
 const EXT4_SUPERBLOCK_MAGIC_OFFSET: u64 = 1024 + 0x38;
 const EXT4_SUPERBLOCK_MAGIC: u16 = 0xEF53;
+#[cfg(test)]
 const EXT4_VALID_FS: u16 = 0x0001;
+const EXT4_ERROR_FS: u16 = 0x0002;
 
-/// The external seed marker is only reusable when ext4 itself reports a clean
-/// unmount. A zero/dirty/error state forces a fresh sparse format before boot.
-fn stage0_store_superblock_is_clean(store_image: &Path) -> Result<bool, BuilderVmError> {
+/// The external seed marker remains reusable after an interrupted mount when
+/// ext4 has a valid superblock and has not recorded filesystem errors. A dirty
+/// journal is recoverable: the next guest mount replays it before Nix reads the
+/// store. Only an invalid superblock or the explicit error bit forces a reset.
+fn stage0_store_superblock_is_recoverable(store_image: &Path) -> Result<bool, BuilderVmError> {
     use std::io::{Read, Seek, SeekFrom};
 
     let mut file = std::fs::File::open(store_image).map_err(|e| {
@@ -2925,12 +2999,12 @@ fn stage0_store_superblock_is_clean(store_image: &Path) -> Result<bool, BuilderV
     })?;
     let magic = u16::from_le_bytes([fields[0], fields[1]]);
     let state = u16::from_le_bytes([fields[2], fields[3]]);
-    Ok(magic == EXT4_SUPERBLOCK_MAGIC && state == EXT4_VALID_FS)
+    Ok(magic == EXT4_SUPERBLOCK_MAGIC && state & EXT4_ERROR_FS == 0)
 }
 
 fn stage0_nix_store_host_marker(seed_store: &Path) -> Result<String, BuilderVmError> {
     Ok(format!(
-        "schema_version=1\nseed_store_entries_sha256={}\n",
+        "schema_version=2\nseed_store_entries_sha256={}\n",
         seed_store_entries_hash(seed_store)?
     ))
 }
@@ -4741,6 +4815,38 @@ impl PersistentVmHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn builder_egress_supervisor_keeps_protocol_stdout_free_of_tracing() {
+        let command = builder_egress_supervisor_command(
+            Path::new("/opt/mvmctl"),
+            Path::new("/opt/mvm-network-endpoint"),
+        );
+        assert_eq!(command.get_program(), "/opt/mvmctl");
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            [
+                "__builder-egress-supervisor",
+                "--endpoint",
+                "/opt/mvm-network-endpoint"
+            ]
+        );
+        let env = command.get_envs().collect::<Vec<_>>();
+        assert!(env.iter().any(|(key, value)| {
+            *key == "RUST_LOG" && value.is_some_and(|value| value == "off")
+        }));
+        for key in [
+            mvm_core::observability::span_timing::ENV_ENABLE,
+            mvm_core::observability::span_timing::ENV_OUT,
+            mvm_core::observability::span_timing::ENV_FILTER,
+        ] {
+            assert!(
+                env.iter()
+                    .any(|(candidate, value)| *candidate == key && value.is_none()),
+                "{key} must be removed from the protocol child"
+            );
+        }
+    }
     use crate::builder_vm_runtime::{INSTALL_SPEC_FILENAME, shell_single_quote_escape};
     use mvm_core::util::test_env::TestEnv;
     use tempfile::TempDir;
@@ -5302,12 +5408,23 @@ mod tests {
         let workspace = scratch.path().join("mvm-ws");
         std::fs::create_dir_all(workspace.join("crates/mvm-agentd/src")).unwrap();
         std::fs::create_dir_all(workspace.join("crates/mvm-agentd/target/debug")).unwrap();
+        std::fs::create_dir_all(workspace.join("third_party/local-path-crate/src")).unwrap();
         std::fs::create_dir_all(workspace.join("public")).unwrap();
         std::fs::write(workspace.join("Cargo.toml"), "[workspace]").unwrap();
         std::fs::write(workspace.join("Cargo.lock"), "").unwrap();
         std::fs::write(workspace.join("crates/mvm-agentd/Cargo.toml"), "x").unwrap();
         std::fs::write(workspace.join("crates/mvm-agentd/src/lib.rs"), "x").unwrap();
         std::fs::write(workspace.join("crates/mvm-agentd/target/debug/junk"), "x").unwrap();
+        std::fs::write(
+            workspace.join("third_party/local-path-crate/Cargo.toml"),
+            "[package]\nname = \"local-path-crate\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            workspace.join("third_party/local-path-crate/src/lib.rs"),
+            "pub fn linked() {}",
+        )
+        .unwrap();
         std::fs::write(workspace.join("public/index.html"), "x").unwrap();
 
         let job = BuilderJob::Flake {
@@ -5333,6 +5450,12 @@ mod tests {
             job_dir
                 .join("mvm-src/crates/mvm-agentd/src/lib.rs")
                 .exists()
+        );
+        assert!(
+            job_dir
+                .join("mvm-src/third_party/local-path-crate/src/lib.rs")
+                .exists(),
+            "workspace-local path dependencies must be staged"
         );
         assert!(
             !job_dir.join("mvm-src/crates/mvm-agentd/target").exists(),
@@ -5461,7 +5584,7 @@ mod tests {
         std::fs::create_dir_all(store.join("aaa-seed-a")).unwrap();
 
         let marker = stage0_nix_store_host_marker(&store).unwrap();
-        assert!(marker.starts_with("schema_version=1\n"));
+        assert!(marker.starts_with("schema_version=2\n"));
         assert!(marker.contains("seed_store_entries_sha256="));
 
         std::fs::remove_dir_all(&store).unwrap();
@@ -5482,12 +5605,40 @@ mod tests {
         assert_eq!(host_file_4k_blocks_for_ext4(&image).unwrap(), 16);
     }
 
-    /// The no-host-mkfs path formats the store image into a valid ext4 in-process
-    /// and, crucially, writes no host seed marker — so the guest treats the fresh
-    /// filesystem as uninitialized and seeds it from the verified root store.
+    /// The no-host-mkfs path leaves a blank sparse device so the Linux guest's
+    /// established e2fsprogs formatter owns the long-lived filesystem.
+    #[cfg(not(feature = "pure-mkfs"))]
+    #[test]
+    fn stage0_store_reset_leaves_blank_sparse_device_for_guest_format() {
+        let scratch = TempDir::new().unwrap();
+        let image = scratch.path().join("nix-store-stage0-test.img");
+        std::fs::File::create(&image)
+            .unwrap()
+            .set_len(64 * 1024 * 1024)
+            .unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&image)
+            .unwrap()
+            .write_all(b"stale-filesystem")
+            .unwrap();
+
+        reset_stage0_store_for_guest_format(&image).unwrap();
+
+        assert_eq!(std::fs::metadata(&image).unwrap().len(), 64 * 1024 * 1024);
+        let mut prefix = [0u8; 16];
+        std::fs::File::open(&image)
+            .unwrap()
+            .read_exact(&mut prefix)
+            .unwrap();
+        assert_eq!(prefix, [0; 16]);
+    }
+
     #[cfg(feature = "pure-mkfs")]
     #[test]
-    fn stage0_store_empty_format_writes_valid_ext4_without_marker() {
+    fn stage0_store_without_host_mkfs_writes_labeled_ext4() {
+        use std::io::{Read, Seek, SeekFrom};
+
         let scratch = TempDir::new().unwrap();
         let image = scratch.path().join("nix-store-stage0-test.img");
         std::fs::File::create(&image)
@@ -5495,26 +5646,24 @@ mod tests {
             .set_len(64 * 1024 * 1024)
             .unwrap();
 
-        format_stage0_store_empty_in_process(&image).unwrap();
+        format_stage0_store_without_host_mkfs(&image).unwrap();
 
-        // ext4 superblock magic (0xEF53) at byte offset 1024 + 0x38.
-        let bytes = std::fs::read(&image).unwrap();
-        assert_eq!(
-            u16::from_le_bytes([bytes[1024 + 0x38], bytes[1024 + 0x39]]),
-            0xEF53,
-            "store image must be a valid ext4"
-        );
-        assert!(
-            !stage0_nix_store_host_marker_path(&image).exists(),
-            "no host seed marker: the guest must seed the empty store itself"
-        );
+        let mut file = std::fs::File::open(&image).unwrap();
+        file.seek(SeekFrom::Start(1024 + 0x38)).unwrap();
+        let mut magic = [0u8; 2];
+        file.read_exact(&mut magic).unwrap();
+        assert_eq!(u16::from_le_bytes(magic), EXT4_SUPERBLOCK_MAGIC);
+
+        file.seek(SeekFrom::Start(1024 + 0x78)).unwrap();
+        let mut label = [0u8; 16];
+        file.read_exact(&mut label).unwrap();
+        assert!(label.starts_with(crate::rootfs::STAGE0_NIX_STORE_EXT4_LABEL.as_bytes()));
     }
 
     /// A matching external marker must not hide filesystem corruption. The
     /// second prepopulation pass reformats an image whose ext4 error-state bit
     /// is set, restoring a usable sparse store instead of handing it back to
     /// Stage 0.
-    #[cfg(feature = "pure-mkfs")]
     #[test]
     fn stage0_store_prepopulate_repairs_corrupt_marked_store() {
         use std::io::{Read, Seek, SeekFrom, Write};
@@ -5534,8 +5683,8 @@ mod tests {
             .set_len(64 * 1024 * 1024)
             .unwrap();
 
-        // Pass 1: formats and records the host marker (macOS/no-mkfs path).
-        prepopulate_stage0_nix_store_image(&image, &store_image).unwrap();
+        // Pass 1: create the best available clean store and record the seed marker.
+        prepopulate_stage0_nix_store_image_with_mkfs(&image, &store_image, None).unwrap();
         assert!(
             stage0_nix_store_host_marker_path(&store_image).exists(),
             "first prepopulate records the host marker"
@@ -5555,11 +5704,26 @@ mod tests {
             f.read_exact(&mut b).unwrap();
             u16::from_le_bytes(b)
         };
+        #[cfg(feature = "pure-mkfs")]
+        assert_eq!(read_magic(&store_image), EXT4_SUPERBLOCK_MAGIC);
+        #[cfg(not(feature = "pure-mkfs"))]
         assert_eq!(
             read_magic(&store_image),
-            0xEF53,
-            "pass 1 wrote a valid ext4"
+            0,
+            "guest must receive a blank disk"
         );
+
+        // Model the guest's e2fsprogs format and clean unmount by writing the
+        // superblock fields the host-side health check consumes.
+        {
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .open(&store_image)
+                .unwrap();
+            f.seek(SeekFrom::Start(magic_off)).unwrap();
+            f.write_all(&EXT4_SUPERBLOCK_MAGIC.to_le_bytes()).unwrap();
+            f.write_all(&EXT4_VALID_FS.to_le_bytes()).unwrap();
+        }
 
         // Set EXT4_ERROR_FS in the superblock state; only a reformat restores
         // the valid-filesystem state.
@@ -5569,21 +5733,20 @@ mod tests {
                 .open(&store_image)
                 .unwrap();
             f.seek(SeekFrom::Start(magic_off + 2)).unwrap();
-            f.write_all(&0x0002_u16.to_le_bytes()).unwrap();
+            f.write_all(&EXT4_ERROR_FS.to_le_bytes()).unwrap();
         }
 
-        // Pass 2: marker matches, but filesystem health does not → reformat.
-        prepopulate_stage0_nix_store_image(&image, &store_image).unwrap();
-        assert_eq!(
-            read_state(&store_image),
-            EXT4_VALID_FS,
-            "a corrupt marked store must be reformatted"
-        );
+        // Pass 2: marker matches, but filesystem health does not, so the
+        // damaged state must be replaced rather than mounted again.
+        prepopulate_stage0_nix_store_image_with_mkfs(&image, &store_image, None).unwrap();
+        #[cfg(feature = "pure-mkfs")]
+        assert_eq!(read_state(&store_image), EXT4_VALID_FS);
+        #[cfg(not(feature = "pure-mkfs"))]
+        assert_eq!(read_state(&store_image), 0);
     }
 
-    #[cfg(feature = "pure-mkfs")]
     #[test]
-    fn stage0_store_prepopulate_preserves_clean_marked_store() {
+    fn stage0_store_prepopulate_preserves_recoverable_dirty_marked_store() {
         use std::io::{Read, Seek, SeekFrom, Write};
 
         let scratch = TempDir::new().unwrap();
@@ -5601,7 +5764,21 @@ mod tests {
             .set_len(64 * 1024 * 1024)
             .unwrap();
 
-        prepopulate_stage0_nix_store_image(&image, &store_image).unwrap();
+        prepopulate_stage0_nix_store_image_with_mkfs(&image, &store_image, None).unwrap();
+        // Model a successful guest format followed by a forced host-side
+        // timeout while the filesystem is mounted. The valid bit is clear,
+        // but ext4 has not recorded an error and can replay its journal.
+        {
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .open(&store_image)
+                .unwrap();
+            file.seek(SeekFrom::Start(EXT4_SUPERBLOCK_MAGIC_OFFSET))
+                .unwrap();
+            file.write_all(&EXT4_SUPERBLOCK_MAGIC.to_le_bytes())
+                .unwrap();
+            file.write_all(&0_u16.to_le_bytes()).unwrap();
+        }
         let sentinel_offset = 8 * 1024 * 1024;
         let mut file = std::fs::OpenOptions::new()
             .read(true)
@@ -5612,12 +5789,39 @@ mod tests {
         file.write_all(b"warm-cache").unwrap();
         drop(file);
 
-        prepopulate_stage0_nix_store_image(&image, &store_image).unwrap();
+        prepopulate_stage0_nix_store_image_with_mkfs(&image, &store_image, None).unwrap();
         let mut file = std::fs::File::open(&store_image).unwrap();
         file.seek(SeekFrom::Start(sentinel_offset)).unwrap();
         let mut sentinel = [0u8; 10];
         file.read_exact(&mut sentinel).unwrap();
         assert_eq!(&sentinel, b"warm-cache");
+    }
+
+    #[test]
+    fn stage0_ext4_error_report_invalidates_only_the_external_store_marker() {
+        let scratch = TempDir::new().unwrap();
+        let store_image = scratch.path().join("nix-store-stage0-test.img");
+        let marker = stage0_nix_store_host_marker_path(&store_image);
+        let console = scratch.path().join("console.log");
+        std::fs::write(&marker, b"seed").unwrap();
+        std::fs::write(&console, b"stage0-init: build failed: nix build exit 1\n").unwrap();
+
+        invalidate_stage0_store_after_ext4_error(&console, &store_image).unwrap();
+        assert!(
+            marker.exists(),
+            "ordinary build failures preserve the warm store"
+        );
+
+        std::fs::write(
+            &console,
+            b"stage0-init: build failed: persistent Stage 0 ext4 store reported 7 filesystem error(s)\n",
+        )
+        .unwrap();
+        invalidate_stage0_store_after_ext4_error(&console, &store_image).unwrap();
+        assert!(
+            !marker.exists(),
+            "filesystem errors force a fresh guest format"
+        );
     }
 
     // `read_job_result_*`, `extract_nix_store_hash_*`,

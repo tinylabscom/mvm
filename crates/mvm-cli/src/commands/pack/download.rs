@@ -41,6 +41,7 @@ pub(in crate::commands) fn not_fetchable(kind: PackKind) -> Result<()> {
         PackKind::Builder => "builder",
         PackKind::Runtime => "runtime",
         PackKind::ImageProject => "dev-image",
+        PackKind::Extension => "extension",
     };
     bail!(
         "{label} pack download is not yet fetchable — {label} release-fetch is not wired \

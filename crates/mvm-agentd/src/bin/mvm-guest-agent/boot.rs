@@ -46,10 +46,6 @@ pub(crate) const READINESS_INTERVAL: Duration = Duration::from_millis(200);
 pub(crate) fn init_entrypoint_validation(boot_state: &Arc<AgentBootState>) {
     let result = match EntrypointPolicy::production().validate() {
         Ok(v) => {
-            eprintln!(
-                "mvm-guest-agent: entrypoint validated at {} (held open for fexecve)",
-                v.resolved.display()
-            );
             boot_state.set_entrypoint(ComponentState::Ready);
             Ok(v)
         }
@@ -58,11 +54,7 @@ pub(crate) fn init_entrypoint_validation(boot_state: &Arc<AgentBootState>) {
             // command, not a per-call wrapper under /usr/lib/mvm/wrappers/.
             // RunEntrypoint is simply not offered here — a clean state, not a
             // failure (the default/sealed-idle image and every command/shell
-            // image today). Reported as `Disabled`, logged calmly.
-            eprintln!(
-                "mvm-guest-agent: no per-call entrypoint wrapper baked; \
-                 RunEntrypoint not offered for this image"
-            );
+            // image today). Reported as `Disabled` through readiness.
             boot_state.set_entrypoint(ComponentState::Disabled);
             Err("this image does not offer a per-call entrypoint (RunEntrypoint)".to_string())
         }

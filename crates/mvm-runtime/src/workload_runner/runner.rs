@@ -5,11 +5,10 @@
 //! `NetworkEndpointSpawner` trait so the runner is unit-testable with no real VM and no
 //! real endpoint process.
 
+use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-
-use anyhow::{Context, Result};
 
 use mvm_core::checkpoint::{CheckpointId, CheckpointMeta};
 use mvm_core::config::{vm_network_endpoint_socket, vm_state_dir, vms_dir};
@@ -58,18 +57,20 @@ use mvm_vmm::host::spec_map::{
 use mvm_vmm::post_restore::PostRestoreOutcome;
 
 mod backend;
+mod broker;
+mod console_boot;
 mod refusal;
 mod sockets;
 mod spawner;
 mod warm_claim;
 
+pub use broker::RealBrokerRegistrar;
 use refusal::{map_lineage_refusal, refuse, require_fresh_child_identity};
 use sockets::standing_sockets;
 pub use spawner::{
     FlowMuxIdentitySource, NetworkEndpointSpawnRequest, NetworkEndpointSpawner,
     RealNetworkEndpointSpawner, SpawnedEndpoint,
 };
-
 /// What the runner needs to register the per-VM host-services broker after boot.
 pub struct BrokerRegisterRequest<'a> {
     /// VM name — the registration's `vm_id`, workload id, and per-VM chain key.
@@ -86,6 +87,10 @@ pub struct BrokerRegisterRequest<'a> {
     /// Host services from the admitted plan. Empty means no broker process is
     /// needed and every broker call remains fail-closed.
     pub services: &'a [ServiceId],
+    /// Exact typed capabilities carried by admitted extension bindings.
+    pub capability_bindings: &'a [mvm_contract::protocol::agent_capability::CapabilityBinding],
+    /// Controller-backed typed services prepared by the admitting process.
+    pub service_proxies: &'a [mvm_contract::protocol::broker_control::ServiceProxyBinding],
 }
 
 /// Register/spawn the per-VM host-services broker for an admitted workload,
@@ -102,6 +107,12 @@ pub trait BrokerRegistrar: Send + Sync {
 pub struct BrokerGuard(mvm_vmm::host::host_agent_spawn::ServicesGuard);
 
 impl BrokerGuard {
+    pub(crate) fn from_services_guard(
+        guard: mvm_vmm::host::host_agent_spawn::ServicesGuard,
+    ) -> Self {
+        Self(guard)
+    }
+
     /// A guard that reaps nothing on drop — the unadmitted / spawn-failed path.
     fn defused() -> Self {
         Self(mvm_vmm::host::host_agent_spawn::ServicesGuard::None)
@@ -123,54 +134,6 @@ impl BrokerGuard {
     #[must_use]
     pub fn services_healthy(&self, requested: &[ServiceId]) -> bool {
         requested.is_empty() || self.0.is_registered()
-    }
-}
-
-/// The production `BrokerRegistrar`: delegates to the existing per-tenant
-/// host-agent registration (default) or the per-VM broker fork
-/// (`MVM_HOST_AGENT_DAEMON=0`). No broker logic is reimplemented here — this is
-/// the same registration the raw backend `start` paths run, lifted onto the
-/// runner so a workload moved here keeps its host services.
-pub struct RealBrokerRegistrar;
-
-impl BrokerRegistrar for RealBrokerRegistrar {
-    fn register(&self, req: &BrokerRegisterRequest<'_>) -> Result<BrokerGuard> {
-        // Unadmitted or carrying no service bindings: register nothing. The
-        // spec carries no usable broker channel, so a stray guest dial fails closed.
-        if req.services.is_empty() {
-            return Ok(BrokerGuard::defused());
-        }
-        let (Some(tenant), Some(broker_listen_socket)) = (req.tenant, req.broker_listen_socket)
-        else {
-            return Ok(BrokerGuard::defused());
-        };
-
-        let guard = if mvm_vmm::host::host_agent_spawn::host_agent_daemon_enabled() {
-            mvm_vmm::host::host_agent_spawn::register_host_agent_services_if_admitted(
-                mvm_vmm::host::host_agent_spawn::HostAgentServicesParams {
-                    workload_id: req.vm_name,
-                    tenant_id: Some(tenant),
-                    vm_name: req.vm_name,
-                    state_dir: req.state_dir,
-                    broker_listen_socket,
-                    services: req.services,
-                },
-            )
-            .map(mvm_vmm::host::host_agent_spawn::ServicesGuard::Agent)?
-        } else {
-            mvm_vmm::host::broker_services_spawn::spawn_broker_services_if_admitted(
-                mvm_vmm::host::broker_services_spawn::BrokerServicesSpawnParams {
-                    workload_id: req.vm_name,
-                    tenant_id: Some(tenant),
-                    vm_name: req.vm_name,
-                    state_dir: req.state_dir,
-                    broker_listen_socket,
-                    services: req.services,
-                },
-            )
-            .map(mvm_vmm::host::host_agent_spawn::ServicesGuard::Fork)?
-        };
-        Ok(BrokerGuard(guard))
     }
 }
 
@@ -430,19 +393,22 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         });
 
         trace.mark("spec_assembly");
-        let vm = self.driver.boot(&spec)?;
-        trace.mark("driver_boot");
 
-        // Unconditional and best-effort, and before the fallible activation
-        // handshake below rather than after it: the console is the only
-        // channel that still carries output if boot never reaches the guest
-        // agent, which includes a failure in that very handshake.
-        self.console_streamer.start(&ConsoleCapture {
+        // Unconditional and best-effort. The follower can wait for a console
+        // file that does not exist yet, so install it alongside VMM boot rather
+        // than serializing its process setup after guest readiness.
+        let capture = ConsoleCapture {
             vm_name: &inputs.config.name,
             console_log: &socks.console_log,
             redaction: inputs.redaction,
             retention: plan_stream_retention(inputs.config.plan_json.as_deref()),
-        });
+        };
+        let streamer = Arc::clone(&self.console_streamer);
+        let vm = console_boot::boot_while_starting_console(
+            || self.driver.boot(&spec),
+            || streamer.start(&capture),
+            || trace.mark("driver_boot"),
+        )?;
         trace.mark("console_stream_start");
 
         // Universal initramfs path: the guest PID-1 agent waits for a signed
@@ -459,13 +425,16 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         // Register the per-VM broker for the exact admitted host-service set.
         // The guard's Drop reaps on any early return until it is defused. A
         // requested service whose broker cannot start fails the launch closed.
-        let services = admitted_services(inputs.config.plan_json.as_deref())?;
+        let (services, capability_bindings) =
+            admitted_broker_bindings(inputs.config.plan_json.as_deref())?;
         let mut broker_guard = self.broker.register(&BrokerRegisterRequest {
             vm_name: &inputs.config.name,
             state_dir: &state_dir,
             tenant: inputs.config.tenant_id.as_deref(),
             broker_listen_socket: socks.broker.as_deref(),
             services: &services,
+            capability_bindings: &capability_bindings,
+            service_proxies: &inputs.config.service_proxies,
         })?;
         endpoint.defuse();
         broker_guard.defuse();
@@ -703,6 +672,11 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         // Register the child's exact admitted host-service set before the fork,
         // because the restored guest can dial `BROKER_PORT` immediately. Any
         // registration failure refuses the claim; the guard reaps until commit.
+        let child_capabilities: Vec<_> = plan
+            .extensions
+            .iter()
+            .flat_map(|extension| extension.capabilities.iter().cloned())
+            .collect();
         let mut broker_guard = self
             .broker
             .register(&BrokerRegisterRequest {
@@ -711,6 +685,8 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
                 tenant: child_cfg.tenant_id.as_deref(),
                 broker_listen_socket: socks.broker.as_deref(),
                 services: &plan.services,
+                capability_bindings: &child_capabilities,
+                service_proxies: &child_cfg.service_proxies,
             })
             .map_err(|e| StandbyError::ClaimFailed(format!("register child broker: {e}")))?;
         claim_phase!("broker_registered");
@@ -1381,12 +1357,29 @@ fn claim_plan(claim: &StandbyClaim) -> std::result::Result<ExecutionPlan, Standb
         .map_err(|_| refuse(ClaimRefusal::PlanMissing))
 }
 
-fn admitted_services(plan_json: Option<&str>) -> Result<Vec<ServiceId>> {
+fn admitted_broker_bindings(
+    plan_json: Option<&str>,
+) -> Result<(
+    Vec<ServiceId>,
+    Vec<mvm_contract::protocol::agent_capability::CapabilityBinding>,
+)> {
     plan_json
         .map(mvm_core::plan::plan_from_admitted_json)
         .transpose()
         .context("parse admitted plan host services")
-        .map(|plan| plan.map_or_else(Vec::new, |plan| plan.services))
+        .map(|plan| {
+            plan.map_or_else(
+                || (Vec::new(), Vec::new()),
+                |plan| {
+                    let capabilities = plan
+                        .extensions
+                        .iter()
+                        .flat_map(|extension| extension.capabilities.iter().cloned())
+                        .collect();
+                    (plan.services, capabilities)
+                },
+            )
+        })
 }
 
 fn admitted_network_limits(plan_json: Option<&str>) -> Result<mvm_core::plan::NetworkLimits> {
@@ -1654,6 +1647,28 @@ mod tests {
                     .insert(vm_name.to_string(), bytes);
             }
         }
+    }
+
+    #[test]
+    fn boot_and_console_start_run_concurrently() {
+        let (started_tx, started_rx) = std::sync::mpsc::sync_channel(0);
+        let booted = console_boot::boot_while_starting_console(
+            || {
+                started_rx
+                    .recv_timeout(Duration::from_secs(1))
+                    .map_err(|error| {
+                        anyhow::anyhow!("console start did not overlap boot: {error}")
+                    })?;
+                Ok(7_u8)
+            },
+            || {
+                let _ = started_tx.send(());
+            },
+            || {},
+        )
+        .expect("the console-start task runs while the driver boot is in progress");
+
+        assert_eq!(booted, 7);
     }
 
     fn config(name: &str) -> VmStartConfig {

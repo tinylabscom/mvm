@@ -491,10 +491,11 @@ mod tests {
     #[test]
     fn encode_iface_name_eth0_pads_with_nul() {
         let buf = encode_iface_name("eth0").expect("eth0 fits");
-        assert_eq!(buf[0] as u8, b'e');
-        assert_eq!(buf[3] as u8, b'0');
-        assert_eq!(buf[4] as u8, 0, "remainder NUL-padded");
-        assert_eq!(buf[libc::IFNAMSIZ - 1] as u8, 0);
+        let byte = |value: libc::c_char| u8::from_ne_bytes(value.to_ne_bytes());
+        assert_eq!(byte(buf[0]), b'e');
+        assert_eq!(byte(buf[3]), b'0');
+        assert_eq!(byte(buf[4]), 0, "remainder NUL-padded");
+        assert_eq!(byte(buf[libc::IFNAMSIZ - 1]), 0);
     }
 
     #[test]

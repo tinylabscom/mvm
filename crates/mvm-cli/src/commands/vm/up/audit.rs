@@ -5,6 +5,7 @@
 
 use anyhow::Result;
 
+use crate::commands::cmd_audit;
 use crate::commands::vm::audit_chain::{AuditEmitter, default_audit_dir};
 use crate::commands::vm::policy_resolver::ResolveError;
 
@@ -12,9 +13,13 @@ pub(super) fn build_default_audit_emitter(
     signing_key: ed25519_dalek::SigningKey,
     audit_dir: Option<&std::path::Path>,
 ) -> Result<AuditEmitter> {
-    let emitter = match audit_dir {
-        Some(dir) => AuditEmitter::with_dir(signing_key, dir),
-        None => AuditEmitter::new(signing_key),
+    let dir = match audit_dir {
+        Some(dir) => dir.to_path_buf(),
+        None => default_audit_dir()?,
+    };
+    let emitter = match cmd_audit::active_signer_for(&dir) {
+        Some(signer) => AuditEmitter::with_primary_signer(signing_key, &dir, signer),
+        None => AuditEmitter::with_dir(signing_key, &dir),
     }?;
     emitter.with_decisions()
 }
@@ -30,7 +35,12 @@ pub(super) fn build_policy_audit_emitter(
                 Some(dir) => dir.to_path_buf(),
                 None => default_audit_dir()?,
             };
-            AuditEmitter::with_policy(signing_key, &dir, policy)
+            match cmd_audit::active_signer_for(&dir) {
+                Some(signer) => {
+                    AuditEmitter::with_policy_and_primary_signer(signing_key, &dir, policy, signer)
+                }
+                None => AuditEmitter::with_policy(signing_key, &dir, policy),
+            }
         }
         None => build_default_audit_emitter(signing_key, audit_dir),
     }?;
@@ -178,7 +188,9 @@ chain_signing = true
                 audit_labels: Default::default(),
                 agent_verbs: None,
                 services: Vec::new(),
+                extensions: Vec::new(),
                 stream_retention: Default::default(),
+                attestation_mode: mvm_contract::plan::AttestationMode::Noop,
             },
             &SystemClock,
             &ledger,
@@ -289,7 +301,9 @@ stream_destinations = ["file://{}"]
                 audit_labels: Default::default(),
                 agent_verbs: None,
                 services: Vec::new(),
+                extensions: Vec::new(),
                 stream_retention: Default::default(),
+                attestation_mode: mvm_contract::plan::AttestationMode::Noop,
             },
             &SystemClock,
             &ledger,
@@ -399,7 +413,9 @@ chain_signing = false
                 audit_labels: Default::default(),
                 agent_verbs: None,
                 services: Vec::new(),
+                extensions: Vec::new(),
                 stream_retention: Default::default(),
+                attestation_mode: mvm_contract::plan::AttestationMode::Noop,
             },
             &SystemClock,
             &ledger,
@@ -484,7 +500,9 @@ chain_signing = false
                 audit_labels: Default::default(),
                 agent_verbs: None,
                 services: Vec::new(),
+                extensions: Vec::new(),
                 stream_retention: Default::default(),
+                attestation_mode: mvm_contract::plan::AttestationMode::Noop,
             },
             &SystemClock,
             &ledger,
@@ -589,7 +607,9 @@ disabled_inspectors = ["ssrf_guarrd"]
                 audit_labels: Default::default(),
                 agent_verbs: None,
                 services: Vec::new(),
+                extensions: Vec::new(),
                 stream_retention: Default::default(),
+                attestation_mode: mvm_contract::plan::AttestationMode::Noop,
             },
             &SystemClock,
             &ledger,
@@ -700,7 +720,9 @@ port_hi  = 443
                 audit_labels: Default::default(),
                 agent_verbs: None,
                 services: Vec::new(),
+                extensions: Vec::new(),
                 stream_retention: Default::default(),
+                attestation_mode: mvm_contract::plan::AttestationMode::Noop,
             },
             &SystemClock,
             &ledger,

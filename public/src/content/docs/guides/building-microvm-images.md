@@ -171,17 +171,22 @@ The `mkGuest` library produces a **busybox-as-PID-1** rootfs (no NixOS, no syste
 
 ## Boot-time targets
 
-**Floor: ≤ 300 ms cold p50 on every backend.** A backend that can't hit it is a backend we drop.
+**Hard floor: every prepared-cold boot must complete in strictly under 200 ms
+on every supported backend.** This is a per-boot maximum, not a percentile that
+can hide a slow launch. A backend that cannot meet it is not release-ready.
 
 | Backend | Cold p50 | Snapshot-cloned p50 | Notes |
 |---|---|---|---|
-| Firecracker (Linux/KVM) | ≤ 300 ms | ≤ 30 ms | Default for typical workloads. |
-| Cloud Hypervisor (Linux/KVM) | ≤ 300 ms | ≤ 50 ms | Tier-1 peer of FC. Adds VFIO/GPU, virtio-gpu, virtio-fs, larger guests. Opt-in via `--hypervisor cloud-hypervisor`. |
-| libkrun / libkrun (Linux/KVM) | ≤ 300 ms | ≤ 30 ms | Cross-platform default; libkrun-backed. |
-| libkrun / libkrun (macOS HVF) | ≤ 300 ms | ≤ 60 ms | macOS path; HVF adds ~100ms over KVM. |
-| Apple Virtualization framework | ≤ 300 ms | ≤ 200 ms | Legacy ladder; superseded by libkrun per ADR-013. |
+| Firecracker (Linux/KVM) | < 200 ms | ≤ 30 ms | Hard prepared-cold requirement; every measured dispatch must pass. |
+| Cloud Hypervisor (Linux/KVM) | < 200 ms | ≤ 50 ms | Tier-1 peer of FC. Adds VFIO/GPU, virtio-gpu, virtio-fs, larger guests. Opt-in via `--hypervisor cloud-hypervisor`. |
+| libkrun / libkrun (Linux/KVM) | < 200 ms | ≤ 30 ms | Cross-platform default; libkrun-backed. |
+| libkrun / libkrun (macOS HVF) | < 200 ms | ≤ 60 ms | Cross-platform default; libkrun-backed. |
+| Apple Virtualization framework | < 200 ms | ≤ 200 ms | Legacy ladder; superseded by libkrun per ADR-013. |
 
-The numbers are surfaced on every `mkGuest` derivation as `passthru.mvm.expectedBootMs` so you can `nix eval .#default.passthru.mvm.expectedBootMs` to confirm. Phase 9 enforces with `xtask perf --backend <name> --p50-ms 300 --runs 100`. See [ADR-013 §"Boot-time budget"](https://github.com/tinylabscom/mvm/blob/main/specs/adrs/013-libkrun-libkrun-microvm-nix-pivot.md) for rationale.
+The artifact expectation is surfaced on every `mkGuest` derivation as
+`passthru.mvm.expectedBootMs`, while `mvmctl bench prepared-cold` enforces the
+runtime maximum from raw samples. See [ADR-013 §"Boot-time budget"](https://github.com/tinylabscom/mvm/blob/main/specs/adrs/013-libkrun-libkrun-microvm-nix-pivot.md)
+for the original backend rationale.
 
 The floor is achievable because the rootfs uses **busybox-as-PID-1** with a custom `/init` (no NixOS, no systemd, no OpenRC). See [ADR-030](https://github.com/tinylabscom/mvm/blob/main/specs/adrs/030-libkrun-pivot.md) for why this matters and the implementation breadcrumb.
 

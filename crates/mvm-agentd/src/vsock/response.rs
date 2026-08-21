@@ -226,6 +226,8 @@ pub enum GuestResponse {
     /// whose `is_terminal` returns true (`Exit` or `Error`). The
     /// host reads frames in a loop until terminal.
     EntrypointEvent(EntrypointEvent),
+    /// The exact active extension invocation accepted cancellation.
+    ExtensionCancellationAck,
     /// One event in the streaming response of a DevOnly `Exec` call.
     /// Terminated by `ExecEvent::Exit`.
     ExecEvent(ExecEvent),
@@ -346,7 +348,8 @@ name_enum! {
     pub enum Verb {
         ActivateEnvironment, ProtocolHello, WorkerStatus, SleepPrep, Wake, Ping, ResourceUsage,
         IntegrationStatus,
-        CheckpointIntegrations, ProbeStatus, PrimedStatus, Exec, ExecBatch, RunEntrypoint,
+        CheckpointIntegrations, ProbeStatus, PrimedStatus, Exec, ExecBatch, RunEntrypoint, RunExtension,
+        CancelExtension,
         RunDetached,
         PostRestore,
         FsDiff, StartPortForward, StartUnixSocketForward, ConsoleOpen,
@@ -365,7 +368,7 @@ name_enum! {
         ActivateEnvironmentAck, ActivateEnvironmentError, NotActivated,
         ProtocolHelloAck, ProtocolMismatch, WorkerStatus, SleepPrepAck, WakeAck,
         Pong, ResourceUsageReport, Error, UnsupportedInProfile, VerbNotAuthorized, WorkloadPrivilegeRefused, IntegrationStatusReport,
-        CheckpointResult, ProbeStatusReport, PrimedStatusReport, EntrypointEvent, ExecEvent,
+        CheckpointResult, ProbeStatusReport, PrimedStatusReport, EntrypointEvent, ExtensionCancellationAck, ExecEvent,
         ExecBatchResult, DetachedStarted,
         PostRestoreAck, FsDiffResult, PortForwardStarted,
         UnixSocketForwardStarted, ConsoleOpened, ConsoleExited, ConsoleResized,
@@ -430,6 +433,7 @@ impl Verb {
             Self::Exec
             | Self::ExecBatch
             | Self::RunEntrypoint
+            | Self::RunExtension
             | Self::FsDiff
             | Self::FsRead
             | Self::FsWrite
@@ -450,6 +454,7 @@ impl Verb {
             | Self::CheckpointIntegrations
             | Self::ProbeStatus
             | Self::PrimedStatus
+            | Self::CancelExtension
             | Self::RunDetached
             | Self::PostRestore
             | Self::StartPortForward
@@ -491,6 +496,7 @@ impl Verb {
             Self::Exec
             | Self::ExecBatch
             | Self::RunEntrypoint
+            | Self::RunExtension
             | Self::RunDetached
             | Self::RunCode
             | Self::ProcStart
@@ -512,6 +518,7 @@ impl Verb {
             | Self::CheckpointIntegrations
             | Self::ProbeStatus
             | Self::PrimedStatus
+            | Self::CancelExtension
             | Self::PostRestore
             | Self::FsDiff
             | Self::StartPortForward
@@ -576,6 +583,8 @@ impl Verb {
             Verb::Exec => stream(&[R::ExecEvent]),
             Verb::ExecBatch => unary(&[R::ExecBatchResult]),
             Verb::RunEntrypoint => stream(&[R::EntrypointEvent]),
+            Verb::RunExtension => stream(&[R::EntrypointEvent]),
+            Verb::CancelExtension => unary(&[R::ExtensionCancellationAck]),
             Verb::RunDetached => unary(&[R::DetachedStarted]),
             Verb::PostRestore => unary(&[R::PostRestoreAck]),
             Verb::FsDiff => unary(&[R::FsDiffResult]),
@@ -638,6 +647,7 @@ impl GuestResponse {
             GuestResponse::ProbeStatusReport { .. } => ResponseVariant::ProbeStatusReport,
             GuestResponse::PrimedStatusReport { .. } => ResponseVariant::PrimedStatusReport,
             GuestResponse::EntrypointEvent(_) => ResponseVariant::EntrypointEvent,
+            GuestResponse::ExtensionCancellationAck => ResponseVariant::ExtensionCancellationAck,
             GuestResponse::ExecEvent(_) => ResponseVariant::ExecEvent,
             GuestResponse::ExecBatchResult { .. } => ResponseVariant::ExecBatchResult,
             GuestResponse::DetachedStarted { .. } => ResponseVariant::DetachedStarted,
@@ -685,6 +695,7 @@ pub enum GuestCapability {
     IntegrationStatus,
     EntrypointStatus,
     RunEntrypoint,
+    RunExtension,
     FilesystemRpc,
     ProcessRpc,
     Console,
@@ -727,6 +738,7 @@ pub fn supported_capabilities() -> Vec<GuestCapability> {
         GuestCapability::IntegrationStatus,
         GuestCapability::EntrypointStatus,
         GuestCapability::RunEntrypoint,
+        GuestCapability::RunExtension,
         GuestCapability::FilesystemRpc,
         GuestCapability::ProcessRpc,
         GuestCapability::Console,
@@ -851,6 +863,9 @@ pub enum RunEntrypointError {
     /// The wrapper exceeded `timeout_secs`. Agent killed the
     /// process group.
     Timeout,
+    /// The admitted controller canceled the call and the agent killed its
+    /// process group.
+    Canceled,
     /// Another `RunEntrypoint` is in flight on this VM. M12: agents
     /// serialize per-VM; concurrency comes from pool growth.
     Busy,
@@ -1593,7 +1608,7 @@ mod tests {
     }
 
     #[test]
-    fn streaming_verbs_are_exactly_the_four() {
+    fn streaming_verbs_are_the_closed_expected_set() {
         let streaming: BTreeSet<_> = Verb::ALL
             .iter()
             .filter(|v| v.response_contract().kind == ResponseKind::Stream)
@@ -1601,7 +1616,13 @@ mod tests {
             .collect();
         assert_eq!(
             streaming,
-            BTreeSet::from(["Exec", "ProcWait", "RunCode", "RunEntrypoint"])
+            BTreeSet::from([
+                "Exec",
+                "ProcWait",
+                "RunCode",
+                "RunEntrypoint",
+                "RunExtension",
+            ])
         );
     }
 

@@ -367,6 +367,8 @@ impl std::error::Error for ValidationError {}
 
 use std::io::Write;
 use std::process::{Child, Command, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::stream_pump::{CapturedOutput, Pump, PumpOutcome, RetainingSink};
@@ -422,6 +424,36 @@ impl Default for CallCaps {
     }
 }
 
+/// Kernel-enforced resource ceilings applied to a child before `execve`.
+///
+/// Wall time and byte-stream limits remain in [`CallCaps`]; these ceilings
+/// bound resources the stream pump cannot control.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProcessResourceLimits {
+    /// Maximum process address space in bytes.
+    pub address_space_bytes: u64,
+    /// Maximum CPU time in milliseconds. The kernel limit is rounded up to a
+    /// whole second so every positive admitted budget remains executable.
+    pub cpu_millis: u32,
+}
+
+/// Cloneable, process-local cancellation signal for one admitted call.
+#[derive(Debug, Clone, Default)]
+pub struct CancellationToken(Arc<AtomicBool>);
+
+impl CancellationToken {
+    /// Request cancellation. Repeated requests are idempotent.
+    pub fn request(&self) {
+        self.0.store(true, Ordering::Release);
+    }
+
+    /// Whether cancellation has been requested.
+    #[must_use]
+    pub fn is_requested(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
+}
+
 /// One control-channel record parsed from the wrapper's fd-3 stream.
 /// Wire format (length-prefixed JSON header + length-prefixed payload)
 /// is documented at `mvm_agentd::vsock::EntrypointEvent::Control`.
@@ -456,6 +488,11 @@ pub struct EntrypointCall<'a> {
     /// Wall-clock budget before the kill ladder starts.
     pub timeout: Duration,
     pub caps: CallCaps,
+    /// Optional kernel resource ceilings. Ordinary entrypoint calls retain
+    /// their existing behavior; admitted extensions always set this value.
+    pub resource_limits: Option<ProcessResourceLimits>,
+    /// Optional controller-owned cancellation signal.
+    pub cancellation: Option<CancellationToken>,
     /// Environment injected after `env_clear()`.
     pub env: Vec<(String, String)>,
     /// Keep the child's stdin open after `stdin` is written, handing it to
@@ -479,6 +516,8 @@ pub enum RunOutcome {
     Exited { code: i32 },
     /// Wrapper exceeded the wall-clock timeout. Killed.
     Timeout,
+    /// The owning controller canceled the call. Killed.
+    Canceled,
     /// The request payload exceeded `stdin_max`; the wrapper was never
     /// spawned.
     StdinCap,
@@ -494,6 +533,7 @@ impl From<PumpOutcome> for RunOutcome {
             PumpOutcome::Exited(code) => RunOutcome::Exited { code },
             PumpOutcome::Crashed { signal } => RunOutcome::WrapperCrashed { signal },
             PumpOutcome::Timeout => RunOutcome::Timeout,
+            PumpOutcome::Canceled => RunOutcome::Canceled,
         }
     }
 }
@@ -510,6 +550,8 @@ pub enum CallOutcome {
     Exited { code: i32, output: CapturedOutput },
     /// Wrapper exceeded the wall-clock timeout. Killed.
     Timeout { output: CapturedOutput },
+    /// The owning controller canceled the call.
+    Canceled { output: CapturedOutput },
     /// The request payload exceeded `stdin_max`; the wrapper was never
     /// spawned, so there is nothing captured to report.
     StdinCap,
@@ -540,6 +582,8 @@ pub fn execute(
         stdin: stdin_data,
         timeout,
         caps,
+        resource_limits: None,
+        cancellation: None,
         env,
         stream_input: false,
     };
@@ -549,6 +593,7 @@ pub fn execute(
     match outcome {
         RunOutcome::Exited { code } => CallOutcome::Exited { code, output },
         RunOutcome::Timeout => CallOutcome::Timeout { output },
+        RunOutcome::Canceled => CallOutcome::Canceled { output },
         RunOutcome::WrapperCrashed { signal } => CallOutcome::WrapperCrashed { signal, output },
         RunOutcome::StdinCap => CallOutcome::StdinCap,
         RunOutcome::SpawnFailed { message } => CallOutcome::SpawnFailed { message },
@@ -581,11 +626,19 @@ pub fn execute_streaming(
         stdin: stdin_data,
         timeout,
         caps,
+        resource_limits: _resource_limits,
+        cancellation,
         env,
         stream_input,
     } = call;
     if stdin_data.len() > caps.stdin_max {
         return RunOutcome::StdinCap;
+    }
+    if cancellation
+        .as_ref()
+        .is_some_and(CancellationToken::is_requested)
+    {
+        return RunOutcome::Canceled;
     }
 
     // On Linux `spawn_path` references the validation fd by number via
@@ -676,8 +729,14 @@ pub fn execute_streaming(
     // signal-safe libc calls are used (dup2, fcntl, close, prctl). No Rust
     // allocator calls.
     unsafe {
+        #[cfg(target_os = "linux")]
+        let resource_limits = *_resource_limits;
         cmd.pre_exec(move || {
             install_fd3_in_child(write_raw)?;
+            #[cfg(target_os = "linux")]
+            if let Some(limits) = resource_limits {
+                apply_process_resource_limits(limits)?;
+            }
             crate::guest_mount::drop_workload_capability_bounding_set()
         });
     }
@@ -720,10 +779,13 @@ pub fn execute_streaming(
 
     // Nothing here waits for the child to die before output moves: the pump
     // hands each read straight to `sink`.
-    let outcome = Pump::new(caps)
+    let mut pump = Pump::new(caps)
         .control_channel(fd3_read)
-        .deadline(Instant::now() + *timeout)
-        .run(&mut child, sink);
+        .deadline(Instant::now() + *timeout);
+    if let Some(token) = cancellation {
+        pump = pump.cancellation(token.clone());
+    }
+    let outcome = pump.run(&mut child, sink);
 
     if *stream_input {
         // The child is reaped. A desk left open would answer the next host
@@ -731,6 +793,35 @@ pub fn execute_streaming(
         crate::stream_input::InputDesk::abandon();
     }
     outcome.into()
+}
+
+#[cfg(target_os = "linux")]
+fn apply_process_resource_limits(limits: ProcessResourceLimits) -> std::io::Result<()> {
+    let address_space = libc::rlim_t::try_from(limits.address_space_bytes)
+        .map_err(|_| std::io::Error::from_raw_os_error(libc::EINVAL))?;
+    let cpu_seconds = u64::from(limits.cpu_millis).div_ceil(1000).max(1);
+    let cpu = libc::rlim_t::try_from(cpu_seconds)
+        .map_err(|_| std::io::Error::from_raw_os_error(libc::EINVAL))?;
+    let address_limit = libc::rlimit {
+        rlim_cur: address_space,
+        rlim_max: address_space,
+    };
+    let cpu_limit = libc::rlimit {
+        rlim_cur: cpu,
+        rlim_max: cpu,
+    };
+    // SAFETY: setrlimit reads each fully initialized stack value during the
+    // syscall. This function is called only by the post-fork pre-exec hook and
+    // performs no allocation after constructing the values above.
+    unsafe {
+        if libc::setrlimit(libc::RLIMIT_AS, &address_limit) != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        if libc::setrlimit(libc::RLIMIT_CPU, &cpu_limit) != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+    Ok(())
 }
 
 /// Create an `O_CLOEXEC` pipe and return `(read_end, write_end)` as

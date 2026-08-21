@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use hmac::{Hmac, KeyInit, Mac};
 use rand::Rng;
 use sha2::Sha256;
+use zeroize::Zeroizing;
 
 use mvm_core::policy::{
     OpaqueRewriteToken, ReversibleReplacementAction, RewriteFlowId, RewriteProofRecord,
@@ -99,6 +100,62 @@ pub struct ReplacementFlow {
     values_by_token: HashMap<String, TokenEntry>,
     next_token_index: u64,
     next_event_index: u64,
+}
+
+/// Bounded exact-token reinjection across arbitrary response chunk boundaries.
+pub(crate) struct StreamingReinjector {
+    pending: Zeroizing<Vec<u8>>,
+}
+
+impl StreamingReinjector {
+    pub(crate) fn new() -> Self {
+        Self {
+            pending: Zeroizing::new(Vec::new()),
+        }
+    }
+
+    pub(crate) fn push(
+        &mut self,
+        flow: &mut ReplacementFlow,
+        chunk: &[u8],
+    ) -> (Vec<u8>, Vec<RewriteProofRecord>) {
+        self.pending.extend_from_slice(chunk);
+        let longest = flow
+            .values_by_token
+            .keys()
+            .map(String::len)
+            .max()
+            .unwrap_or(0);
+        if longest == 0 {
+            return (std::mem::take(&mut *self.pending), Vec::new());
+        }
+        let candidate = self.pending.len().saturating_sub(longest.saturating_sub(1));
+        let stable =
+            flow.values_by_token
+                .keys()
+                .flat_map(|token| {
+                    self.pending.windows(token.len()).enumerate().filter_map(
+                        move |(start, window)| {
+                            let end = start + token.len();
+                            (window == token.as_bytes() && start < candidate && end > candidate)
+                                .then_some(start)
+                        },
+                    )
+                })
+                .min()
+                .unwrap_or(candidate);
+        let suffix = self.pending.split_off(stable);
+        let ready = std::mem::replace(&mut *self.pending, suffix);
+        flow.reinject_bytes(&ready, RewriteSurface::ResponseBody, None)
+    }
+
+    pub(crate) fn finish(
+        &mut self,
+        flow: &mut ReplacementFlow,
+    ) -> (Vec<u8>, Vec<RewriteProofRecord>) {
+        let pending = std::mem::take(&mut *self.pending);
+        flow.reinject_bytes(&pending, RewriteSurface::ResponseBody, None)
+    }
 }
 
 impl ReplacementFlow {
@@ -434,6 +491,25 @@ mod tests {
         let text = String::from_utf8(response.body).unwrap();
         assert!(text.contains("+14155550123"));
         assert!(text.contains("sk-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
+    }
+
+    #[test]
+    fn response_token_split_across_chunks_is_reinjected_once() {
+        let engine = ReplacementEngine::new();
+        let mut flow = engine.start_flow("tenant-a", &enabled_action());
+        let secret = b"sk-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let (token, replace_proofs) = flow.replace_body(secret);
+        assert_eq!(replace_proofs.len(), 1);
+        let split = token.len() / 2;
+        let mut stream = StreamingReinjector::new();
+        let (first, first_proofs) = stream.push(&mut flow, &token[..split]);
+        assert!(first.is_empty());
+        assert!(first_proofs.is_empty());
+        let (second, mut proofs) = stream.push(&mut flow, &token[split..]);
+        let (tail, tail_proofs) = stream.finish(&mut flow);
+        proofs.extend(tail_proofs);
+        assert_eq!([first, second, tail].concat(), secret);
+        assert_eq!(proofs.len(), 1, "one token produces one reinjection proof");
     }
 
     #[test]

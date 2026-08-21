@@ -18,7 +18,9 @@ use std::path::Path;
 use mvm_contract::plan::types::AuditLabels;
 use mvm_contract::protocol::agent_session::AgentSessionId;
 use mvm_core::checkpoint::{ApprovalHead, CheckpointMeta, ROOTFS_BLOB, ROOTFS_VERITY_BLOB};
-use mvm_core::plan::{PlanSeccompTier, SecretReleasePolicy, SynthesisInput, Variant};
+use mvm_core::plan::{
+    AttestationMode, PlanSeccompTier, SecretReleasePolicy, SynthesisInput, Variant,
+};
 use mvm_core::protocol::vm_backend::{
     RuntimeSourceLaunchKind, RuntimeSourcePolicySelection, VmStartConfig,
     select_runtime_source_policy,
@@ -111,6 +113,8 @@ pub fn synthesis_for_resume<'a>(
         services: Vec::new(),
         stream_edges: Vec::new(),
         stream_retention: Default::default(),
+        extensions: Vec::new(),
+        attestation_mode: AttestationMode::Noop,
     }
 }
 

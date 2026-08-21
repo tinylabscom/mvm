@@ -1754,9 +1754,13 @@ Then unify + retire the old paths:
   evidence. The real-host Firecracker/HVF matrix, canonical budget table, and
   resulting native-host gates remain open. The report-level gate now requires
   20 measured samples after two warm-ups, revalidates every raw sample, applies
-  the 200/250/300 ms prepared-cold budget and the independent 30/50 ms warm
-  target, and aggregates whole-VMM resident-memory/fault evidence without
-  zero-filling unavailable counters.
+  the 200/250/300 ms prepared-cold percentile diagnostics and the independent
+  30/50 ms warm target, and aggregates whole-VMM resident-memory/fault evidence
+  without zero-filling unavailable counters. `mvmctl bench` now makes the
+  release requirement explicit: every prepared dispatch must be `<200 ms`, a
+  200.0 ms sample fails even below the publication floor, JSON schema v6 carries
+  the maximum/verdict/remark, and the default output is an accessible timing
+  table with PASS/FAIL words and phase remarks.
 - [x] **Filesystem-path baseline — issue #2281.**
   `mvm_fs::rootfs::measure_ext4_pure` now records a stable JSON baseline for
   source identity, node composition, emitted ext4 size/digest, materializer
@@ -2009,11 +2013,54 @@ Then unify + retire the old paths:
   same function, so the recorded compat key is the one a claim searches for. The
   accepted-and-ignored `--rootfs` flag is removed. This is the resolution half
   of Phase 2 only — the prepared-artifact manifest is still open.
-- [ ] **Prepared cold launch:** with a local, verified kernel/initramfs/artifact
+- [x] **Prepared cold launch:** with a local, verified kernel/initramfs/artifact
   set and a new guest identity, reach authenticated guest readiness and run
-  `/bin/true` in ≤200 ms p50, ≤250 ms p95, and ≤300 ms p99 on Apple Silicon
-  HVF and Linux Firecracker/KVM. This is a prepared-cold requirement, not a
-  warm-pool or snapshot-restore claim.
+  `/bin/true` in strictly under 200 ms on every measured boot on Apple Silicon
+  HVF and Linux Firecracker/KVM. This is a hard per-sample prepared-cold
+  requirement, not a percentile, warm-pool, or snapshot-restore claim.
+  - 2026-08-19 local HVF evidence: release schema-v6 run against cached Alpine,
+    20 measured launches after 2 warm-ups, p50/p95/p99 76.9/86.0/99.3 ms,
+    maximum 102.7 ms, zero degraded or hidden-work samples. The HVF no-mount
+    half passes.
+  - 2026-08-19 established Linux/KVM-host evidence: the baseline Firecracker
+    run was clean but failed at 293.6/299.7/302.2 ms p50/p95/p99 and 302.8 ms
+    maximum. After removing nested readiness retry, overlapping console setup,
+    quieting successful pre-readiness serial output, providing unthrottled
+    entropy, and removing redundant root privilege/socket work, the same
+    schema-v6 20+2 protocol passed at 129.2/131.3/132.0 ms and **132.2 ms
+    maximum**. It used the existing universal 4,310,016-byte kernel; a
+    Firecracker-specific kernel candidate saved only about 3 ms and was
+    rejected. All samples were cached, no-mount, non-degraded, and free of
+    hidden launch work or leaked benchmark processes. The optimized report is
+    `/root/mvm-bench-20260819/reports/prepared-cold-firecracker-alpine-optimized-2026-08-19.json`
+    (SHA-256 `e12f30ae2bf43a32ced2d6fe585fbe5f40a80f89002f61775c6a7ccf7613360e`).
+    Designated signed live jobs remain open.
+  - The benchmark now also reports the parent-observed full CLI lifecycle in
+    schema v7 and the accessible table. Repeated prepared runtime-overlay
+    validation is guarded by a mutation-sensitive validation stamp, reducing a
+    warmed attach to 0.42 ms while same-size rewrites, replacements, and corrupt
+    stamps still fall back to full fail-closed verification. A fresh 20+2
+    Firecracker run kept authenticated boot below the hard limit at
+    138.1/148.2/174.6 ms p50/p95/p99 and **181.3 ms maximum**, but measured the
+    full process lifecycle at 762.9/822.8/848.3 ms and **854.6 ms maximum**.
+    Admission was 268.3 ms p50 and teardown 109.4 ms p50. The host is backed by
+    rotational ext4-on-RAID1, where required durability flushes measured
+    60-175 ms apiece; a full durable lifecycle below 200 ms therefore requires
+    low-latency persistent storage and a fresh validation, not a specialized
+    kernel or a weaker audit/cleanup boundary. Report SHA-256:
+    `d224bacb3aa04b727a74c424ff20a2f93f8adf3196da0743e63bd1acea922c74`.
+  - 2026-08-20 full-lifecycle follow-up: independent receipt, decision-cache,
+    and authoritative audit-chain flushes now run concurrently at their shared
+    pre-boot durability boundary; launch and command audit emission share one
+    validated signer and terminal barrier. Failures and dropped batch scopes
+    still synchronously retry every pending path, and receipt-head recovery
+    handles a crash that leaves the head ahead of receipt files. On the same
+    Firecracker host and universal kernel, a release 20+2 run cut admission p50
+    from 268.3 to 160.5 ms and full CLI lifecycle p50 from 762.9 to 580.6 ms
+    (23.9%). Authenticated boot remained inside the hard requirement at
+    135.4/151.5/182.8 ms p50/p95/p99 and **190.6 ms maximum**, with no leaked
+    benchmark process. Report SHA-256:
+    `89aabed4403cdca9def18666cdd9af28f6ccc05cd856868f65e025a71d02f980`.
 - [ ] **Separate the cold lanes:** report prepared cold, prepared cold with a
   mount-cache hit, mount-cache miss, artifact miss, and warm claim as distinct
   distributions. A first-use image pull, build, digest, or ext4 materialization
@@ -2031,6 +2078,9 @@ Then unify + retire the old paths:
   and libkrun where supported. Reuse immutable host mappings and a resident
   control plane only; every launch still gets a fresh guest identity and
   authenticated channel.
+  - [x] Firecracker no-mount slice: reduce authenticated dispatch from a
+    302.8 ms baseline maximum to 132.2 ms without a backend-specific kernel,
+    warm parent, snapshot restore, or weakened identity/authentication checks.
 - [ ] **Readiness and cleanup:** replace polling with event-driven authenticated
   readiness, preserve generation/key checks, and measure command completion and
   teardown separately. Foreground cleanup must remain bounded without weakening
@@ -2461,3 +2511,161 @@ Cross-sprint work tracked in `specs/plans/2026-08-15-merge-queue-throughput.md`.
 - `crates/mvm-runtime/src/storage/{pool,thin}.rs` dm-thin substrate — **NOT dead**: backs the live `mvmctl storage info`/`gc` verbs (`ThinPoolImpl`/`DeviceMapperBackend`), kept (WS8).
 - QEMU backend (WS1e), retired-backend remnants, the Swift supervisor dir (WS0.4).
 - 28 member features → 2 (WS5); ~24 `#[cfg]`-heavy gates collapse.
+
+## 2026-08-18 — Assurance controller-service bridge
+
+- [x] Carry optional generic typed-service proxy bindings in host-signed VM
+      registration while preserving the canonical bytes of ordinary launches.
+- [x] Keep authoritative assurance session/evidence state and audit signing
+      keys in the admitting controller; route the resident broker over a
+      bounded host-only UDS with exact signed descriptor and capability checks.
+- [x] Derive live broker session identity from VM registration, refuse direct
+      non-capability calls, and fail closed for mismatched identities,
+      oversized frames, missing/controller failure, and unsigned bindings.
+- [x] Stop a just-started VM when assurance session opening fails, preventing a
+      workload from continuing under a weaker post-admission binding.
+- [x] Pass the focused signed-control, controller-proxy, daemon, registry,
+      admitted-boot rollback, real typed-probe round-trip, and all-target
+      Clippy checks for the changed crates.
+- [x] Persist terminal provider request/result identity before transport;
+      replay completed responses exactly and refuse interrupted, failed, or
+      conflicting retries without executing the admitted runner twice.
+- [x] Pass the post-journal full macOS workspace format, check, test, and
+      all-target Clippy gates plus the x86_64 Linux cross-target and BDD
+      required-feature compilation gates.
+- [x] Close the counterparty fact gap with a strict operator-session bundle:
+      validate it against the Scout request in `mvm-security`, transfer it only
+      through `OpenSession`, and require MVM's all-or-nothing identity join
+      before durable claim or runner execution.
+- [x] Build the sibling-owned signed `scoutd` extension pack. The sibling now
+      emits a static x86_64-musl guest entrypoint, strict build recipe, SPDX
+      SBOM, and independently signed generic pack. MVM's product-agnostic ext4
+      materializer and verifier accept the actual artifact; tamper, expiry,
+      revocation, wrong-signer, protocol, and artifact-budget failures are
+      covered and fail closed.
+- [x] Inject the real admitted boot configuration. `LifecycleAdmittedCampaignRunner` now
+      fixes the join, already-open session binding, explicit-root durable
+      dispatch, host observation, confirmed cleanup, and finalization sequence;
+      positive and identity-mismatch mock-backend tests pass. The reusable
+      `serve_provider` helper and dedicated `mvm-extension-provider` executable
+      own the bounded MVEX process boundary. The checked-in executable now
+      injects an operator-configured `AdmittedTrialBooter` that resolves,
+      re-verifies, and promotes the exact signed pack before plan admission.
+      A process-level conformance test covers the real executable's `Hello`,
+      `OpenSession`, `Start`, and `Shutdown` sequence. Then run the admitted
+      live microVM flow, tracked by
+      `specs/plans/2026-08-18-certifying-assurance-campaign-closeout.md`. The
+      sibling launcher now carries an explicit absolute
+      `--provider-state-root` and global `--provider-mvm-home` while clearing
+      the provider environment. It restores only the selected `MVM_HOME`; MVM
+      requires an exact boot-config match, rejects relative/symlink replay
+      roots, and uses no ambient or temporary fallback. The concrete-provider
+      lifecycle fault/recovery matrix is now complete: deadline cancellation,
+      stale and closed grants, replay/idempotency, controller recovery on both
+      sides of terminal commit, guest failure, host reconstruction, partial
+      observation, cleanup failure, and concurrent-run exhaustion all fail
+      closed under focused tests. Current focused counts are 9 lifecycle-runner,
+      9 provider-controller, 7 durable adapter, 4 guest cancellation-state,
+      and 27 host assurance broker tests; the durable provider journal omits
+      prompt, credential, and runner-diagnostic markers and remains size
+      bounded. The sibling host package now disables implicit binary discovery,
+      keeping `scoutd` exclusively behind its explicit MVM-API harness. The
+      sibling passes 73 workspace tests, all-target check and Clippy, formatting,
+      4 pack-producer tests, and 4 guest-harness tests. The sibling-owned `scoutd` now compiles against
+      MVM's canonical guest assurance API, selects only declared destination
+      labels within the admitted step budget, calls only `campaign_probe.v1`,
+      and emits a verdict-free candidate. MVM validates every returned
+      observation against the exact invocation before host observation,
+      confirmed cleanup, and finalization. Focused contract, guest, broker,
+      host-session, lifecycle-runner, and provider-process tests pass, as does
+      touched-crate all-target Clippy. W5.3 now carries runtime attestation
+      only through a host-selected verifier: a canonical challenge binds every
+      admitted identity, grant nonce/expiry, backend, and opening receipt;
+      provider, challenge, enrolled-root, freshness, and lifetime mismatches
+      fail closed; and a successful join emits signed attestation audit and
+      receipt evidence. Seven focused tests cover the positive and refusal
+      paths. The concrete provider carries its operator-selected attestation
+      mode into the signed plan, refuses a required request against `noop`,
+      and rejects injected verification booleans; ordinary synthesis callers
+      retain the closed `noop` default. Trusted hardware attestation, the real
+      KVM canary, and the full Scout-linked admitted run remain open, so current evidence is non-certifying and
+      `INCONCLUSIVE`. MVM's policy identity is now a shared contract rather than a host-private
+      helper: `mvm-contract` publishes `sha256:nul-separated-policy-refs-v1`
+      and a deterministic vector, and host admission uses the same function.
+      The sibling planner still needs to adopt that vector before the trusted
+      KVM flow can proceed. Assurance admission also now requires adjacent
+      guest metadata at protocol version 2 or newer, refusing the legacy
+      protocol-v0 OCI rootfs before Firecracker startup. The native libkrun builder now passes a source-current
+      six-disk runtime probe. Corrected Stage 0 persistent-store preparation
+      completed without ext4, data-loss, or capacity errors and promoted the
+      new rootfs. Its static `/sbin/mvm-setpriv` launches the automatic agent
+      as UID 990 with exactly `CAP_KILL|CAP_SYS_TIME` effective and ambient and
+      `NoNewPrivs=1`; the strict live result recorded capability mask
+      `0000000002000020` and exit code zero. Mutable XDG, Rustup, Cargo, target,
+      and temporary state use explicit `/out` paths without changing `HOME`.
+      Host x86_64 Linux all-target cross-check and BDD required-feature
+      compilation now pass. The source-current native Linux lane also passes
+      focused sparse-store, Stage 0 prepopulation/recovery, Stage 0 binary,
+      VMM, and hostd assurance tests; workspace all-target/all-feature Clippy
+      and check; and BDD required-feature compilation. Its eight durable gate
+      markers under
+      `/nix/var/mvm/assurance-gates/2026-08-20-admission-ai-assurance-final-current`
+      close item 7; the fresh run includes all 559 Linux `mvm-vmm` tests and
+      72 focused hostd assurance tests and exits zero. Its source-matched VM
+      state is `mvm-builder-vm-1787217398177-7306`. Hardware probing found no
+      KVM or TPM2/SNP/TDX device in that builder. Exact-current probe
+      `mvm-builder-vm-1787214676670-12105` found
+      absent `/dev/{tpmrm0,tpm0,sev-guest,tdx_guest,kvm}`, no TSM/TDX report
+      path, and an empty `/sys/class/tpm`; seven all-feature provider tests
+      prove only the fail-closed `NotYetImplemented` behavior. Item 6 stays
+      open pending one real trusted device and its manufacturer verifier
+      collateral. The existing
+      Lima test VM has KVM but no admission-visible production-safe backend in
+      this checkout. Production assurance admission now rejects the configured
+      `qemu` and `mock` dev/test backends before artifact or pack work; its
+      focused refusal test and `mvm-hostd` all-target/all-feature Clippy pass.
+      This proves the negative admission boundary, not a live KVM campaign.
+      The provider now binds operator-selected attestation mode into the
+      signed plan and refuses required-attestation requests when configured as
+      `noop`. QEMU/mock are production-refused and QEMU is admitted only in an
+      explicit non-certifying dev/test tier. The attempted native aarch64
+      canary build filled the shared 68.7 GiB Nix store while realizing the
+      default-tenant image; no garbage collection or pre-existing state removal
+      was performed, so the live lane remains open. A follow-up isolated retry
+      with a fresh 96 GiB sparse store stopped before VM startup because Stage 0
+      could not resolve `releases.nixos.org` to fetch the pinned
+      `nix-2.34.7-aarch64-linux.tar.xz` seed.
+      Host-available MVM checks additionally pass the clean complete workspace
+      test run including doctests, 1,906 hostd library tests, 64 assurance
+      contract tests, workspace all-target check and Clippy, six-key schema
+      emission, formatting, plan-name validation, and sprint-append validation.
+      The exact parallel workspace gate is stable after isolating xtask's
+      nested Cargo target, guarding environment-dependent manifest/mock-agent
+      fixtures, and using a Firecracker-compatible pack in the positive
+      production-booter fixture while retaining explicit `qemu`/`mock`
+      refusal tests.
+      The reference Scout scan and plan produced run
+      `scout-1787181844-1787181844602-371467bf57b4`; the only available fixture
+      provider remained non-certifying and report correlation correctly ended
+      globally `INCONCLUSIVE`. Real KVM, trusted attestation, and a
+      trusted-provider run remain open.
+## 2026-08-21 assurance closeout evidence
+
+The supplied native x86_64 Linux/KVM host now runs the concrete assurance
+provider through a real Firecracker guest. The run uses signed pack
+`sha256:f72aeb04240d16ea6c0c8a4855f3d8443006e7eb3702429af005c3718946e59d`,
+plan `sha256:18a220846c25a6cec1f0b4f36dd4bfbab764f4e50671394e6da32acfcbd7ef16`,
+session `s-ebc20dc44ec9937f1acc4b7c85038c1b`, grant digest
+`sha256:b0991c541656cac6ebd02c27389a8b3c299b7cbadd6d4477653a0219545acf34`,
+Firecracker backend, observer and cleanup receipts, and exact terminal replay
+without a second VM. The result is `INCONCLUSIVE` (`attestation_verified:false`,
+`attempted_effect:false`): no TPM2/SEV-SNP/TDX device or manufacturer
+collateral is available. The sibling now consumes MVM's published four-reference
+`sha256:nul-separated-policy-refs-v1` digest over
+`operator-network-v1`, `operator-egress-v1`, `operator-fs-v1`, and
+`operator-tools-v1` and emits
+`sha256:5dd0de53b6d211f764728599e291e93a9491dc34f87596e906365fb74c95e0ff`.
+The full Scout-linked attempt reached signed-plan admission but failed closed
+before guest-agent startup on `mvm-oci-init` user-volume path-policy denial;
+the exact retry replayed without a second execution. Trusted hardware
+attestation and a successful typed effect probe remain open.

@@ -28,7 +28,7 @@ base64 = { workspace = true }
 rustls = { workspace = true, features = ["tls12"] }
 rustls-pki-types = "1"
 rustls-platform-verifier = "0.7"
-tokio = { workspace = true, features = ["io-util", "net", "rt", "time"] }
+tokio = { workspace = true, features = ["io-util", "net", "rt", "sync", "time"] }
 tokio-rustls = { version = "0.26", default-features = false, features = [
     "ring",
 ] }

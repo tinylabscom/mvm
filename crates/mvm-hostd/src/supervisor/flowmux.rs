@@ -12,6 +12,7 @@ pub mod registry;
 mod tcp_relay;
 use tcp_relay::{TcpRelayParams, connect_first_admitted, run_tcp_relay};
 mod udp_relay;
+mod wire;
 
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
@@ -37,6 +38,11 @@ use tracing::{info, warn};
 use self::registry::{RegistryLimits, StreamRegistry, VmFlowBudget, class_for_open};
 use self::udp_relay::{
     UdpAssociationHandle, UdpRelayParams, UdpSendMsg, decode_udp_addr, run_udp_relay,
+    udp_event_sources,
+};
+use self::wire::{
+    is_peer_disconnect, lock_registry, lock_session, lock_validator, parse_host_port,
+    write_frame_to,
 };
 
 use crate::supervisor::audit_recorder::{EventCategory, Recorder};
@@ -183,6 +189,9 @@ pub struct FlowMuxSession {
     icmp_rate: Arc<crate::supervisor::egress_rate::EgressRateGuard>,
     /// Typed HTTP flows still being assembled, by stream id.
     http_flows: http_flow::HttpFlows,
+    /// Cancellation owners for typed HTTP tasks after their request assembly
+    /// entry has been released.
+    http_cancellations: http_flow::HttpCancellations,
     /// The substitution service typed HTTP flows are forwarded through.
     ///
     /// `None` on an endpoint that assembled no substitution service, where an
@@ -299,6 +308,18 @@ impl FlowMuxAccept {
     }
 }
 
+impl Drop for FlowMuxSession {
+    fn drop(&mut self) {
+        let mut cancellations = self
+            .http_cancellations
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for (_, sender) in std::mem::take(&mut *cancellations) {
+            let _ = sender.send(true);
+        }
+    }
+}
+
 impl FlowMuxSession {
     /// Return the session identifier for logging and correlation.
     pub fn session_id(&self) -> String {
@@ -374,6 +395,7 @@ impl FlowMuxSession {
             streams: BTreeMap::new(),
             icmp_rate: Arc::clone(&resources.icmp_rate),
             http_flows: BTreeMap::new(),
+            http_cancellations: Arc::new(Mutex::new(BTreeMap::new())),
             substitution,
             udp_associations: BTreeMap::new(),
             gate,
@@ -620,6 +642,25 @@ impl FlowMuxSession {
         };
         let target = target.to_string();
 
+        if let Some(reason) = self
+            .substitution
+            .as_ref()
+            .and_then(|service| service.opaque_refusal_reason(host))
+        {
+            self.send_refused(stream_id, reason)?;
+            self.emit_audit(
+                EventCategory::Host,
+                "host.flow.denied",
+                BTreeMap::from([
+                    ("stream_id".to_string(), stream_id.to_string()),
+                    ("class".to_string(), "tcp".to_string()),
+                    ("target".to_string(), target),
+                    ("reason".to_string(), "typed_transform_required".to_string()),
+                ]),
+            );
+            return Ok(());
+        }
+
         if !self.check_connection_rate(registry::FlowClass::Tcp) {
             self.send_refused(stream_id, "rate limited")?;
             self.emit_audit(
@@ -844,6 +885,7 @@ impl FlowMuxSession {
             warn!(stream_id, error = %e, "FlowMux UDP bind failed");
             FlowMuxError::Transport(e)
         })?;
+        let (poll, waker) = udp_event_sources(&socket).map_err(FlowMuxError::Transport)?;
         let idle_timeout = self.limits.udp_idle_timeout;
         let max_peers = self.limits.max_udp_peers;
 
@@ -857,6 +899,7 @@ impl FlowMuxSession {
                 run_udp_relay(UdpRelayParams {
                     stream_id,
                     socket,
+                    poll,
                     session,
                     writer,
                     idle_timeout,
@@ -868,7 +911,7 @@ impl FlowMuxSession {
             .map_err(FlowMuxError::Transport)?;
 
         self.udp_associations
-            .insert(stream_id, UdpAssociationHandle { tx });
+            .insert(stream_id, UdpAssociationHandle { tx, waker });
         self.send_udp_opened(stream_id)?;
         self.emit_audit(
             EventCategory::Host,
@@ -902,6 +945,25 @@ impl FlowMuxSession {
             .map_err(|e| FlowMuxError::FrameRefused(format!("invalid UdpSend address: {e}")))?;
         let target = format!("{ip}:{port}");
 
+        if let Some(reason) = self
+            .substitution
+            .as_ref()
+            .and_then(|service| service.opaque_refusal_reason(&ip.to_string()))
+        {
+            warn!(stream_id, %target, reason, "FlowMux opaque UDP transform refused");
+            self.emit_audit(
+                EventCategory::Host,
+                "host.flow.denied",
+                BTreeMap::from([
+                    ("stream_id".to_string(), stream_id.to_string()),
+                    ("class".to_string(), "udp".to_string()),
+                    ("target".to_string(), target),
+                    ("reason".to_string(), "typed_transform_required".to_string()),
+                ]),
+            );
+            return Ok(());
+        }
+
         match self.gate.decide_udp_request(&target) {
             EgressVerdict::Allow { .. } => {}
             EgressVerdict::Deny(reason) => {
@@ -924,11 +986,15 @@ impl FlowMuxSession {
                 "UDP relay thread has exited".to_string(),
             ));
         }
+        handle.waker.wake().map_err(FlowMuxError::Transport)?;
         Ok(())
     }
 
     fn remove_udp_association(&mut self, stream_id: u32) {
-        let _ = self.udp_associations.remove(&stream_id);
+        if let Some(UdpAssociationHandle { tx, waker }) = self.udp_associations.remove(&stream_id) {
+            drop(tx);
+            let _ = waker.wake();
+        }
         let _ = lock_registry(&self.registry).retire(stream_id);
     }
 
@@ -1153,29 +1219,40 @@ impl FlowMuxSession {
         let flow = self.http_flows.get_mut(&stream_id).ok_or_else(|| {
             FlowMuxError::FrameRefused(format!("http frame on unopened flow {stream_id}"))
         })?;
-        match opcode {
-            Opcode::HttpRequestHead => flow.accept_head(&payload),
-            _ => flow.accept_body(&payload),
+        if opcode == Opcode::HttpRequestHead {
+            let request = flow
+                .accept_head(&payload)
+                .map_err(|e| FlowMuxError::FrameRefused(e.to_string()))?;
+            let (Some(service), Some(handle)) = (&self.substitution, &self.runtime_handle) else {
+                return Err(FlowMuxError::FrameRefused(
+                    "no runtime to forward the http flow on".to_string(),
+                ));
+            };
+            let (cancel_sender, cancel_receiver) = tokio::sync::watch::channel(false);
+            self.http_cancellations
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(stream_id, cancel_sender);
+            let task = http_flow::ForwardTask::builder()
+                .runtime(handle.clone())
+                .service(Arc::clone(service))
+                .session(Arc::clone(&self.session))
+                .writer(Arc::clone(&self.writer))
+                .stream_id(stream_id)
+                .request(request)
+                .cancellation(cancel_receiver)
+                .cancellations(Arc::clone(&self.http_cancellations))
+                .registry(Arc::clone(&self.registry))
+                .build()
+                .map_err(|error| FlowMuxError::FrameRefused(error.to_string()))?;
+            http_flow::spawn_forward(task);
+        } else {
+            flow.accept_body(&payload)
+                .map_err(|e| FlowMuxError::FrameRefused(e.to_string()))?;
         }
-        .map_err(|e| FlowMuxError::FrameRefused(e.to_string()))?;
-
-        let Some(request) = flow.take_when_complete() else {
-            return Ok(());
-        };
-        self.http_flows.remove(&stream_id);
-        let (Some(service), Some(handle)) = (&self.substitution, &self.runtime_handle) else {
-            return Err(FlowMuxError::FrameRefused(
-                "no runtime to forward the http flow on".to_string(),
-            ));
-        };
-        http_flow::spawn_forward(
-            handle,
-            Arc::clone(service),
-            Arc::clone(&self.session),
-            Arc::clone(&self.writer),
-            stream_id,
-            request,
-        );
+        if flow.is_complete() {
+            http_flow::cancel(&mut self.http_flows, stream_id);
+        }
         Ok(())
     }
 
@@ -1210,6 +1287,11 @@ impl FlowMuxSession {
     }
 
     fn reset_stream(&mut self, stream_id: u32) -> Result<(), FlowMuxError> {
+        // Dropping an incomplete typed request wipes its zeroizing body buffer.
+        // A guest reset is cancellation, not permission to retain the partial
+        // cleartext until the authenticated session itself eventually exits.
+        self.http_flows.remove(&stream_id);
+        http_flow::cancel_forwarding(&self.http_cancellations, stream_id);
         let was_live = self.streams.remove(&stream_id);
         let live = was_live.is_some();
         if let Some(handle) = was_live {
@@ -1389,87 +1471,6 @@ impl FlowMuxSession {
             frame.header.payload_len,
         )))
     }
-}
-
-/// Returns true for the common "peer closed the connection" I/O errors that
-/// can race with an in-flight read when the guest drops its socket.
-fn is_peer_disconnect(e: &std::io::Error) -> bool {
-    matches!(
-        e.kind(),
-        std::io::ErrorKind::ConnectionReset
-            | std::io::ErrorKind::ConnectionAborted
-            | std::io::ErrorKind::BrokenPipe
-    )
-}
-
-/// Lock the shared writer, recovering from poison so a crashed relay thread
-/// does not silence the whole session.
-fn lock_writer(writer: &Mutex<UnixStream>) -> std::sync::MutexGuard<'_, UnixStream> {
-    writer.lock().unwrap_or_else(|e| e.into_inner())
-}
-
-/// Lock the shared session, recovering from poison.
-fn lock_session(session: &Mutex<Session>) -> std::sync::MutexGuard<'_, Session> {
-    session.lock().unwrap_or_else(|e| e.into_inner())
-}
-
-/// Lock the shared registry, recovering from poison.
-fn lock_validator(
-    validator: &Mutex<SessionValidator>,
-) -> std::sync::MutexGuard<'_, SessionValidator> {
-    validator.lock().unwrap_or_else(|e| e.into_inner())
-}
-
-fn lock_registry(registry: &Mutex<StreamRegistry>) -> std::sync::MutexGuard<'_, StreamRegistry> {
-    registry.lock().unwrap_or_else(|e| e.into_inner())
-}
-
-/// Serialize and send one encrypted frame through a shared writer.
-///
-/// Locks the session first, then the writer, so sequence numbers are assigned
-/// in the same order the bytes are emitted. The paired locks are released
-/// once the frame is flushed.
-fn write_frame_to(
-    session: &Mutex<Session>,
-    writer: &Mutex<UnixStream>,
-    opcode: Opcode,
-    stream_id: u32,
-    payload: &[u8],
-) -> Result<(), FlowMuxError> {
-    let mut frame = Vec::new();
-    mvm_contract::protocol::network_flow::encode_into(&mut frame, opcode, stream_id, payload)
-        .map_err(|e| FlowMuxError::FrameRefused(e.to_string()))?;
-
-    let mut session = lock_session(session);
-    let sealed = session
-        .seal(&frame)
-        .map_err(|e| FlowMuxError::FrameRefused(e.to_string()))?;
-    let mut sealed_bytes = Vec::new();
-    sealed
-        .encode(&mut sealed_bytes)
-        .map_err(|e| FlowMuxError::FrameRefused(e.to_string()))?;
-    let len = u32::try_from(sealed_bytes.len())
-        .map_err(|_| FlowMuxError::FrameRefused("sealed frame too large".into()))?;
-
-    let mut writer = lock_writer(writer);
-    writer.write_all(&len.to_be_bytes())?;
-    writer.write_all(&sealed_bytes)?;
-    writer.flush()?;
-    Ok(())
-}
-
-/// Split `host:port`, rejecting an empty host or an unparseable port.
-fn parse_host_port(target: &str) -> Result<(&str, u16), String> {
-    let (host, port_str) = target
-        .rsplit_once(':')
-        .ok_or_else(|| "target must be host:port".to_string())?;
-    if host.is_empty() {
-        return Err("host must not be empty".to_string());
-    }
-    let port = port_str
-        .parse::<u16>()
-        .map_err(|_| format!("port must be a 16-bit integer: {port_str}"))?;
-    Ok((host, port))
 }
 
 #[cfg(test)]

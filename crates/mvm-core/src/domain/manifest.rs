@@ -922,6 +922,7 @@ impl PersistedManifest {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::util::test_env::TestEnv;
     use tempfile::TempDir;
 
     fn write(dir: &Path, name: &str, body: &str) {
@@ -1592,6 +1593,10 @@ mod tests {
 
     #[test]
     fn slot_dir_for_manifest_path_combines_canonical_key_and_slot_dir() {
+        // Both helpers resolve MVM_HOME independently. Hold the shared env
+        // guard so another parallel test cannot change that process-wide
+        // input between the two calls.
+        let _env = TestEnv::new();
         let tmp = TempDir::new().unwrap();
         write(tmp.path(), "mvm.toml", minimal_manifest_toml());
         let key = canonical_key_for_path(&tmp.path().join("mvm.toml")).unwrap();

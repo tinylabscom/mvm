@@ -24,11 +24,16 @@ use anyhow::{Context, Result, bail};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
 use ed25519_dalek::{SigningKey, VerifyingKey};
+use mvm_contract::protocol::network_flow::hello::{Handshake, agree};
 use mvm_contract::protocol::network_flow::{
     MAX_FRAME_LEN, MAX_PAYLOAD_LEN, Opcode, decode, encode_into,
 };
 use mvm_core::net::session::{Session, read_sealed_frame, write_sealed_frame};
 use mvm_core::substitution_wire::{HttpFlowHead, HttpFlowResponseHead, WireRequest, WireResponse};
+
+/// Independent guest-side ceiling for a typed response, including responses
+/// whose upstream did not declare a content length.
+const MAX_HTTP_RESPONSE_BODY_LEN: u64 = 32 * 1024 * 1024;
 
 use crate::flowmux_drive::{GUEST_SIGNING_KEY_FILE, HOST_SIGNER_PUB_FILE};
 
@@ -37,6 +42,9 @@ const RUN_MVM_DIR: &str = "/run/mvm";
 
 /// How long to wait for the host endpoint to accept a connection.
 const CONNECT_TIMEOUT_SECS: u64 = 10;
+
+/// Human-readable build identity carried in the versioned FlowMux hello.
+const GUEST_BUILD: &str = concat!("mvm-agentd ", env!("CARGO_PKG_VERSION"));
 
 /// One authenticated FlowMux session, used for one exchange and dropped.
 pub struct SyncFlowMux {
@@ -47,6 +55,15 @@ pub struct SyncFlowMux {
 
 /// One decoded frame: opcode, stream id, payload.
 pub type Frame = (Opcode, u32, Vec<u8>);
+
+/// Result of asking the host to open one typed HTTP stream.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HttpFlowOpen {
+    /// The host accepted the flow and assigned this stream id.
+    Opened(u32),
+    /// The host refused the flow before any request bytes were sent.
+    Refused(WireResponse),
+}
 
 impl SyncFlowMux {
     /// Dial the host endpoint and complete the handshake, loading this boot's
@@ -88,11 +105,15 @@ impl SyncFlowMux {
             // requires.
             next_stream_id: 1,
         };
-        client.send(Opcode::Hello, 0, &[])?;
-        let (opcode, _stream_id, _payload) = client.recv()?;
+        let local = Handshake::local(GUEST_BUILD);
+        client.send(Opcode::Hello, 0, &local.encode())?;
+        let (opcode, _stream_id, payload) = client.recv()?;
         if opcode != Opcode::HelloAck {
             bail!("expected HelloAck to open the session, got {opcode:?}");
         }
+        let host = Handshake::decode(&payload)
+            .map_err(|e| anyhow::anyhow!("invalid FlowMux HelloAck: {e}"))?;
+        agree(&local, &host).map_err(|e| anyhow::anyhow!("incompatible FlowMux host: {e}"))?;
         Ok(client)
     }
 
@@ -183,21 +204,41 @@ impl SyncFlowMux {
     /// the host — this only frames what goes out and what comes back, which is
     /// the whole reason the guest never holds a credential.
     pub fn exchange_http(&mut self, request: &WireRequest) -> Result<WireResponse> {
+        match self.open_http()? {
+            HttpFlowOpen::Opened(stream_id) => self.exchange_open_http(stream_id, request),
+            HttpFlowOpen::Refused(response) => Ok(response),
+        }
+    }
+
+    /// Open one typed HTTP stream without sending its request yet.
+    ///
+    /// Keeping stream establishment separate lets long-lived clients observe
+    /// admission latency without reconnecting the authenticated session.
+    pub fn open_http(&mut self) -> Result<HttpFlowOpen> {
+        let stream_id = self.next_stream_id();
+        self.send(Opcode::OpenHttp, stream_id, &[])?;
+        match self.recv()? {
+            (Opcode::Opened, id, _) if id == stream_id => Ok(HttpFlowOpen::Opened(stream_id)),
+            (Opcode::Refused, id, payload) if id == stream_id => {
+                Ok(HttpFlowOpen::Refused(WireResponse::Refused {
+                    message: refusal_message(&payload, "the host refused the flow"),
+                }))
+            }
+            (opcode, id, _) => {
+                bail!("expected Opened for http flow {stream_id}, got {opcode:?} on {id}")
+            }
+        }
+    }
+
+    /// Exchange one request on an already-open typed HTTP stream.
+    pub fn exchange_open_http(
+        &mut self,
+        stream_id: u32,
+        request: &WireRequest,
+    ) -> Result<WireResponse> {
         let body = B64
             .decode(request.body_b64.as_bytes())
             .context("decoding the proxied request body")?;
-        let stream_id = self.next_stream_id();
-
-        self.send(Opcode::OpenHttp, stream_id, &[])?;
-        match self.recv()? {
-            (Opcode::Opened, _, _) => {}
-            (Opcode::Refused, _, payload) => {
-                return Ok(WireResponse::Refused {
-                    message: refusal_message(&payload, "the host refused the flow"),
-                });
-            }
-            (opcode, _, _) => bail!("expected Opened for the http flow, got {opcode:?}"),
-        }
 
         let head = HttpFlowHead {
             method: request.method.clone(),
@@ -240,12 +281,15 @@ impl SyncFlowMux {
             HttpFlowResponseHead::Refused { message } => {
                 // Still drain to the completion so the session is left clean
                 // for the next exchange on it.
-                let _ = self.drain_to_complete(stream_id, 0, &mut Vec::new());
+                let _ = self.drain_to_complete(stream_id, Some(0), &mut Vec::new());
                 return Ok(WireResponse::Refused { message });
             }
         };
 
-        let mut body = Vec::with_capacity(body_len.min(1 << 20) as usize);
+        if body_len.is_some_and(|len| len > MAX_HTTP_RESPONSE_BODY_LEN) {
+            bail!("response body exceeds the {MAX_HTTP_RESPONSE_BODY_LEN} byte limit");
+        }
+        let mut body = Vec::with_capacity(body_len.unwrap_or(0).min(1 << 20) as usize);
         self.drain_to_complete(stream_id, body_len, &mut body)?;
         Ok(WireResponse::Ok {
             status,
@@ -259,7 +303,7 @@ impl SyncFlowMux {
     fn drain_to_complete(
         &mut self,
         stream_id: u32,
-        body_len: u64,
+        body_len: Option<u64>,
         body: &mut Vec<u8>,
     ) -> Result<()> {
         loop {
@@ -267,8 +311,13 @@ impl SyncFlowMux {
                 (Opcode::HttpComplete, id, _) if id == stream_id => break,
                 (Opcode::HttpResponseBody, id, payload) if id == stream_id => {
                     body.extend_from_slice(&payload);
-                    if body.len() as u64 > body_len {
-                        bail!("response body overran the declared {body_len} bytes");
+                    if body.len() as u64 > MAX_HTTP_RESPONSE_BODY_LEN {
+                        bail!("response body exceeds the {MAX_HTTP_RESPONSE_BODY_LEN} byte limit");
+                    }
+                    if let Some(declared) = body_len
+                        && body.len() as u64 > declared
+                    {
+                        bail!("response body overran the declared {declared} bytes");
                     }
                 }
                 (Opcode::Reset, _, payload) => {
@@ -279,9 +328,11 @@ impl SyncFlowMux {
                 }
             }
         }
-        if (body.len() as u64) != body_len {
+        if let Some(declared) = body_len
+            && body.len() as u64 != declared
+        {
             bail!(
-                "response body was {} bytes, head declared {body_len}",
+                "response body was {} bytes, head declared {declared}",
                 body.len()
             );
         }
@@ -395,7 +446,13 @@ mod tests {
 
             let (opcode, _, _) = recv(&mut session, &mut stream);
             assert_eq!(opcode, Opcode::Hello);
-            send(&mut session, &mut stream, Opcode::HelloAck, 0, &[]);
+            send(
+                &mut session,
+                &mut stream,
+                Opcode::HelloAck,
+                0,
+                &Handshake::local("test-host").encode(),
+            );
 
             let (opcode, sid, _) = recv(&mut session, &mut stream);
             assert_eq!(opcode, Opcode::OpenHttp);
@@ -425,7 +482,9 @@ mod tests {
             let response_head = HttpFlowResponseHead::Ok {
                 status: 200,
                 headers: vec![("content-type".into(), "text/plain".into())],
-                body_len: reply_body.len() as u64,
+                // A chunked upstream has no declared decoded length. The
+                // guest drains bounded body frames through HttpComplete.
+                body_len: None,
             };
             send(
                 &mut session,
@@ -497,7 +556,13 @@ mod tests {
             let plain = session.open(&sealed).unwrap();
             assert_eq!(decode(&plain).unwrap().header.opcode, Opcode::Hello);
             let mut wire = Vec::new();
-            encode_into(&mut wire, Opcode::HelloAck, 0, &[]).unwrap();
+            encode_into(
+                &mut wire,
+                Opcode::HelloAck,
+                0,
+                &Handshake::local("test-host").encode(),
+            )
+            .unwrap();
             let sealed = session.seal(&wire).unwrap();
             write_sealed_frame(&mut stream, &sealed).unwrap();
 

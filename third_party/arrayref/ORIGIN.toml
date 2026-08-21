@@ -1,0 +1,5 @@
+repository = "https://github.com/droundy/arrayref"
+revision = "f8d0299d863922db6c409d08098941e833b70d69"
+cargo_toml_sha256 = "122da2bce2d1aea793e4dc4d38a98966c67f3339a4db2f8fc740bd74ce97e668"
+license_sha256 = "1bc7e6f475b3ec99b7e2643411950ae2368c250dd4c5c325f80f9811362a94a1"
+lib_sha256 = "b74872c9bb2b836132817e024a3f9205f83a6864de1a9bfb46acc1bfbbc1873a"

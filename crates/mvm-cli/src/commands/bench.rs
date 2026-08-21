@@ -15,8 +15,9 @@
 
 use anyhow::{Context, Result};
 use clap::Args as ClapArgs;
+use std::fmt::Write as _;
 
-use crate::bench::cold_launch::{LaunchLane, MIN_MATRIX_SAMPLES};
+use crate::bench::cold_launch::{LaunchLane, MIN_MATRIX_SAMPLES, SpanStats};
 use crate::bench::cold_launch_runner::ColdLaunchBench;
 use crate::ui;
 
@@ -145,51 +146,178 @@ pub(in crate::commands) fn run(args: Args) -> Result<()> {
         }
     }
 
-    let report = ColdLaunchBench::builder(&mvmctl, lane)
+    let bench = ColdLaunchBench::builder(&mvmctl, lane)
         .args(launch)
         .runs(args.runs)
         .warmup(args.warmup)
-        .build()?
-        .run()
-        .context("running the launch benchmark")?;
+        .build()?;
+    let report = bench.measure().context("running the launch benchmark")?;
 
     let out_path = crate::bench::write_report_with_latest(&report, args.out.clone(), "bench")
         .context("writing the benchmark report")?;
 
     if args.json {
         println!("{}", serde_json::to_string_pretty(&report)?);
-        return Ok(());
+    } else {
+        print!("{}", render_summary(&report));
+        ui::info(&format!("\nReport: {}", out_path.display()));
     }
 
-    print_summary(&report);
-    ui::info(&format!("\nReport: {}", out_path.display()));
+    // Render and persist the evidence before failing. A breached hard ceiling
+    // is the report a user most needs to inspect, not a reason to discard it.
+    bench.validate_report(&report)?;
     Ok(())
 }
 
-/// Print each measured percentile beside the budget it is judged against, so
-/// the verdict is visible rather than something the reader has to look up.
-fn print_summary(report: &crate::bench::cold_launch::ColdLaunchReport) {
+/// Render the benchmark as labelled tables with plain-text verdicts.
+///
+/// Status is never conveyed by colour alone, phase names are expanded into
+/// ordinary language, and the hard maximum is separate from percentiles so a
+/// reader cannot mistake p99 for "every boot".
+fn render_summary(report: &crate::bench::cold_launch::ColdLaunchReport) -> String {
+    let mut out = String::new();
     let budgets = report.lane.budgets();
-    println!("\nlane: {}", report.lane.as_str());
-    println!("samples: {}", report.stats.dispatch_window_ms.samples);
-    println!("\n  percentile   measured     budget   verdict");
+    let _ = writeln!(out, "\nLaunch timing");
+    let _ = writeln!(out, "  Lane:    {}", report.lane.as_str());
+    let _ = writeln!(
+        out,
+        "  Samples: {} measured, {} warm-up",
+        report.stats.dispatch_window_ms.samples, report.warmup
+    );
+
+    let _ = writeln!(out, "\nHard requirement");
+    let _ = writeln!(
+        out,
+        "  {:<24} {:>12} {:>14}  {:<6}  Remarks",
+        "Metric", "Observed", "Requirement", "Status"
+    );
+    if let Some(requirement) = &report.hard_requirement {
+        let observed = format_ms(requirement.observed_max_ms);
+        let limit = format!("< {:.1} ms", requirement.limit_ms);
+        let status = if requirement.met { "PASS" } else { "FAIL" };
+        let _ = writeln!(
+            out,
+            "  {:<24} {:>12} {:>14}  {:<6}  {}",
+            "Boot dispatch maximum", observed, limit, status, requirement.remark
+        );
+    } else {
+        let _ = writeln!(
+            out,
+            "  {:<24} {:>12} {:>14}  {:<6}  This lane has no hard boot ceiling.",
+            "Boot dispatch maximum", "n/a", "n/a", "N/A"
+        );
+    }
+
+    let _ = writeln!(out, "\nPublished percentile budgets");
+    let _ = writeln!(
+        out,
+        "  {:<11} {:>12} {:>12}  {:<6}",
+        "Percentile", "Measured", "Budget", "Status"
+    );
 
     let measured = report.stats.dispatch_window_ms.by_percentile();
     for ((label, value), (_, budget)) in measured.iter().zip(budgets.by_percentile().iter()) {
-        let measured_s = value.map_or_else(|| "—".to_string(), |v| format!("{v:.1} ms"));
-        let budget_s = budget.map_or_else(|| "—".to_string(), |b| format!("{b:.0} ms"));
+        let measured_s = format_ms(*value);
+        let budget_s = budget.map_or_else(|| "n/a".to_string(), |b| format!("<= {b:.0} ms"));
         let verdict = match (value, budget) {
-            (Some(v), Some(b)) if *v <= *b => "ok",
-            (Some(_), Some(_)) => "OVER",
-            _ => "",
+            (Some(v), Some(b)) if *v <= *b => "PASS",
+            (Some(_), Some(_)) => "FAIL",
+            _ => "N/A",
         };
-        println!("  {label:<11}{measured_s:>10}{budget_s:>11}   {verdict}");
+        let _ = writeln!(
+            out,
+            "  {label:<11} {measured_s:>12} {budget_s:>12}  {verdict:<6}"
+        );
     }
+
+    let _ = writeln!(out, "\nTiming breakdown");
+    let _ = writeln!(
+        out,
+        "  {:<18} {:>10} {:>10} {:>10} {:>10}  Remarks",
+        "Phase", "p50", "p95", "p99", "Max"
+    );
+    for (phase, stats, remark) in timing_rows(report) {
+        let _ = writeln!(
+            out,
+            "  {phase:<18} {:>10} {:>10} {:>10} {:>10}  {remark}",
+            format_ms(stats.p50),
+            format_ms(stats.p95),
+            format_ms(stats.p99),
+            format_ms(stats.max),
+        );
+    }
+    out
+}
+
+fn format_ms(value: Option<f64>) -> String {
+    value.map_or_else(|| "n/a".to_string(), |ms| format!("{ms:.1} ms"))
+}
+
+fn timing_rows(
+    report: &crate::bench::cold_launch::ColdLaunchReport,
+) -> [(&'static str, SpanStats, &'static str); 10] {
+    let stats = &report.stats;
+    [
+        (
+            "Boot dispatch",
+            stats.dispatch_window_ms,
+            "HARD requirement applies to the maximum, not a percentile.",
+        ),
+        (
+            "  Backend start",
+            stats.backend_start_ms,
+            "Create the VMM and enter the guest kernel.",
+        ),
+        (
+            "  Agent ready",
+            stats.vsock_wait_ms,
+            "Reach the authenticated guest agent and dispatch boundary.",
+        ),
+        (
+            "Resolve",
+            stats.resolve_ms,
+            "Select cached image and runtime artifacts before boot.",
+        ),
+        (
+            "Drives",
+            stats.drives_ms,
+            "Prepare the guest's immutable and writable drives.",
+        ),
+        (
+            "Admission",
+            stats.admit_ms,
+            "Validate policy and bind the signed launch plan.",
+        ),
+        (
+            "Command",
+            stats.command_ms,
+            "Run the benchmark command after boot dispatch.",
+        ),
+        (
+            "Teardown",
+            stats.teardown_ms,
+            "Stop and reap the transient VM.",
+        ),
+        (
+            "Measured run",
+            stats.total_ms,
+            "In-process setup, workload, and cleanup through VM teardown.",
+        ),
+        (
+            "Full CLI lifecycle",
+            stats.command_lifecycle_ms,
+            "Shell-visible time: process spawn through final audit and exit.",
+        ),
+    ]
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bench::cold_launch::{
+        COLD_LAUNCH_SCHEMA_VERSION, ColdLaunchReport, HardBootRequirement, LaneStats,
+        RequirementComparison, TimingMetric,
+    };
     use clap::Parser;
 
     fn parse(argv: &[&str]) -> Result<Args> {
@@ -199,6 +327,46 @@ mod tests {
         match cli.command {
             crate::commands::Commands::Bench(a) => Ok(a),
             _ => panic!("expected Commands::Bench"),
+        }
+    }
+
+    fn summary_report(max_ms: f64, met: bool) -> ColdLaunchReport {
+        let measured = SpanStats {
+            samples: 2,
+            p50: Some(100.0),
+            p95: Some(max_ms),
+            p99: Some(max_ms),
+            max: Some(max_ms),
+        };
+        ColdLaunchReport {
+            schema_version: COLD_LAUNCH_SCHEMA_VERSION,
+            lane: LaunchLane::PreparedCold,
+            warmup: 2,
+            stats: LaneStats {
+                dispatch_window_ms: measured,
+                command_lifecycle_ms: SpanStats {
+                    p50: Some(180.0),
+                    p95: Some(190.0),
+                    p99: Some(195.0),
+                    max: Some(198.0),
+                    ..measured
+                },
+                total_ms: measured,
+                backend_start_ms: measured,
+                vsock_wait_ms: measured,
+                ..LaneStats::default()
+            },
+            hard_requirement: Some(HardBootRequirement {
+                metric: TimingMetric::DispatchWindowMs,
+                comparison: RequirementComparison::LessThan,
+                limit_ms: 200.0,
+                observed_max_ms: Some(max_ms),
+                met,
+                remark:
+                    "Every prepared boot must reach authenticated command dispatch in under 200 ms."
+                        .to_string(),
+            }),
+            raw: Vec::new(),
         }
     }
 
@@ -212,6 +380,42 @@ mod tests {
             args.launch.is_empty(),
             "the default launch is applied later"
         );
+    }
+
+    #[test]
+    fn human_summary_names_the_hard_maximum_and_explains_each_phase() {
+        let rendered = render_summary(&summary_report(150.0, true));
+        assert!(rendered.contains("Hard requirement"), "{rendered}");
+        assert!(rendered.contains("Boot dispatch maximum"), "{rendered}");
+        assert!(rendered.contains("< 200.0 ms"), "{rendered}");
+        assert!(rendered.contains("PASS"), "{rendered}");
+        assert!(rendered.contains("Timing breakdown"), "{rendered}");
+        assert!(rendered.contains("Full CLI lifecycle"), "{rendered}");
+        assert!(rendered.contains("final audit and exit"), "{rendered}");
+        assert!(rendered.contains("Remarks"), "{rendered}");
+        assert!(
+            rendered.contains("Create the VMM and enter the guest kernel."),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("not a percentile"),
+            "the output must distinguish max from p99: {rendered}"
+        );
+        assert!(
+            !rendered.contains("\u{1b}["),
+            "status must not require terminal colour: {rendered}"
+        );
+    }
+
+    #[test]
+    fn human_summary_prints_an_explicit_failure_at_the_boundary() {
+        let rendered = render_summary(&summary_report(200.0, false));
+        let hard_row = rendered
+            .lines()
+            .find(|line| line.contains("Boot dispatch maximum"))
+            .expect("hard-requirement row");
+        assert!(hard_row.contains("FAIL"), "{hard_row}");
+        assert!(hard_row.contains("200.0 ms"), "{hard_row}");
     }
 
     /// The default has to be host-independent or the baseline is not one.

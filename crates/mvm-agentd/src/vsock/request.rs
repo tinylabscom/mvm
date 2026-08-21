@@ -117,6 +117,13 @@ pub enum GuestRequest {
         #[serde(default)]
         stream_input: bool,
     },
+    /// Run one exact optional extension admitted and mounted at activation.
+    /// The request carries identities and bounded stdin only; the executable,
+    /// mount, environment, and resource ceilings are fixed by admission.
+    RunExtension { dispatch: ExtensionDispatch },
+    /// Cancel one exact active optional-extension invocation. There is no PID,
+    /// signal, command, or cleanup selector on this surface.
+    CancelExtension { cancellation: ExtensionCancellation },
     /// Run an arbitrary argv as a detached workload (dev-only).
     ///
     /// Mirrors how the image's `/init` runs its baked entrypoint, but
@@ -496,6 +503,8 @@ impl GuestRequest {
             Self::Exec { .. } => "exec",
             Self::ExecBatch { .. } => "exec-batch",
             Self::RunEntrypoint { .. } => "run-entrypoint",
+            Self::RunExtension { .. } => "run-extension",
+            Self::CancelExtension { .. } => "cancel-extension",
             Self::RunDetached { .. } => "run-detached",
             Self::PostRestore { .. } => "post-restore",
             Self::FsDiff => "fs-diff",
@@ -1351,8 +1360,70 @@ mod tests {
                 roothash: "b".repeat(64),
             }),
             volumes: Vec::new(),
+            extensions: Vec::new(),
             verb_grant_envelope: None,
         });
         assert_eq!(req.kind_name(), "activate-environment");
+    }
+
+    #[test]
+    fn run_extension_has_no_command_or_host_authority() {
+        let request = serde_json::json!({
+            "RunExtension": { "dispatch": {
+                "extension_id": "org.example.extension",
+                "pack_digest": vec![1; 32],
+                "contract_digest": vec![2; 32],
+                "request_id": "mvm-request-1",
+                "session_id": "session-1",
+                "campaign_id": "campaign-1",
+                "trial_id": "trial-1",
+                "plan_id": "sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "idempotency_key": "trial-key-1",
+                "grant_digest": format!("sha256:{}", "b".repeat(64)),
+                "nonce": "nonce-1",
+                "input": [123, 125]
+            }}
+        });
+        let parsed: GuestRequest = serde_json::from_value(request.clone()).expect("strict request");
+        assert_eq!(parsed.kind_name(), "run-extension");
+        assert_eq!(parsed.class(), RequestClass::ProdSafe);
+        let encoded = serde_json::to_string(&parsed).expect("encode");
+        for forbidden in ["command", "argv", "env", "host_path", "destination"] {
+            assert!(!encoded.contains(forbidden), "{encoded}");
+        }
+
+        let mut forged = request;
+        forged["RunExtension"]["dispatch"]["command"] = serde_json::json!("/bin/sh");
+        assert!(serde_json::from_value::<GuestRequest>(forged).is_err());
+    }
+
+    #[test]
+    fn cancel_extension_is_identity_only_and_rejects_process_authority() {
+        let request = serde_json::json!({
+            "CancelExtension": { "cancellation": {
+                "extension_id": "org.example.extension",
+                "pack_digest": vec![1; 32],
+                "contract_digest": vec![2; 32],
+                "request_id": "mvm-request-1",
+                "session_id": "session-1",
+                "campaign_id": "campaign-1",
+                "trial_id": "trial-1",
+                "plan_id": "sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "idempotency_key": "trial-key-1",
+                "grant_digest": format!("sha256:{}", "b".repeat(64)),
+                "nonce": "nonce-1"
+            }}
+        });
+        let parsed: GuestRequest = serde_json::from_value(request.clone()).expect("strict request");
+        assert_eq!(parsed.kind_name(), "cancel-extension");
+        assert_eq!(parsed.class(), RequestClass::ProdSafe);
+        let encoded = serde_json::to_string(&parsed).expect("encode");
+        for forbidden in ["pid", "signal", "command", "path", "cleanup"] {
+            assert!(!encoded.contains(forbidden), "{encoded}");
+        }
+
+        let mut forged = request;
+        forged["CancelExtension"]["cancellation"]["signal"] = serde_json::json!(9);
+        assert!(serde_json::from_value::<GuestRequest>(forged).is_err());
     }
 }

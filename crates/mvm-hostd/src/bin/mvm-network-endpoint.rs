@@ -83,6 +83,7 @@ fn main() -> Result<()> {
     let bound = bind_transport(&cfg.transport)?;
     let terminator = bind_terminator(cfg.terminator_listen)?;
     let session_readiness = bind_session_readiness(cfg.session_ready_socket.as_deref())?;
+    let connector = bind_connector(cfg.connector_uds_path.as_deref())?;
     // Always assembled. The one mode that skipped it was `raw`, which is gone:
     // a FlowMux guest can open a typed HTTP flow at any point in its life, and
     // deciding at boot that it will not is the kind of guess that leaves a
@@ -154,6 +155,7 @@ fn main() -> Result<()> {
             bound,
             terminator,
             session_readiness,
+            connector,
             forward_timeout,
         )
         .await
@@ -317,6 +319,33 @@ fn bind_session_readiness(path: Option<&std::path::Path>) -> Result<Option<Bound
     Ok(Some(BoundSessionReadiness(listener)))
 }
 
+/// Bind the host-local typed connector before reporting process readiness.
+/// Broker/tool code connects here, but the endpoint remains the only process
+/// that resolves and dials the external destination.
+struct BoundConnector(std::os::unix::net::UnixListener);
+
+fn bind_connector(path: Option<&std::path::Path>) -> Result<Option<BoundConnector>> {
+    let Some(path) = path else {
+        return Ok(None);
+    };
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("create connector socket parent {}", parent.display()))?;
+    }
+    let listener = std::os::unix::net::UnixListener::bind(path)
+        .with_context(|| format!("typed connector bind on {} failed", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("restrict typed connector {} to mode 0600", path.display()))?;
+    }
+    listener
+        .set_nonblocking(true)
+        .context("set typed connector listener nonblocking")?;
+    Ok(Some(BoundConnector(listener)))
+}
+
 /// Run the primary substitution accept loop, plus the terminator accept loop
 /// when one is bound, until a listener errors (or the process is killed). The
 /// loops run concurrently: a terminated guest reaches the substitution channel
@@ -329,12 +358,24 @@ async fn serve(
     bound: Bound,
     terminator: Option<std::net::TcpListener>,
     session_readiness: Option<BoundSessionReadiness>,
+    connector: Option<BoundConnector>,
     forward_timeout: std::time::Duration,
 ) -> Result<()> {
     let (session_ready_tx, session_ready_rx) = tokio::sync::watch::channel(false);
     let readiness_task = session_readiness.map(|BoundSessionReadiness(std_listener)| {
         tokio::spawn(serve_session_readiness(std_listener, session_ready_rx))
     });
+    let connector_task = match connector {
+        Some(BoundConnector(std_listener)) => {
+            let service = service
+                .as_ref()
+                .context("typed connector configured without a substitution service")?;
+            let listener = tokio::net::UnixListener::from_std(std_listener)
+                .context("adopting typed connector listener into the tokio runtime")?;
+            Some(tokio::spawn(std::sync::Arc::clone(service).serve(listener)))
+        }
+        None => None,
+    };
     // Spawn the terminator loop first so it's accepting while the primary loop
     // owns the task.
     let terminator_task = match terminator {
@@ -366,6 +407,9 @@ async fn serve(
         task.abort();
     }
     if let Some(task) = readiness_task {
+        task.abort();
+    }
+    if let Some(task) = connector_task {
         task.abort();
     }
     Ok(())
@@ -704,6 +748,7 @@ mod tests {
             resolver: ResolverBackend::default(),
             session_marker: None,
             session_ready_socket: None,
+            connector_uds_path: None,
             flowmux_identity: None,
         }
     }
@@ -735,6 +780,7 @@ mod tests {
             flowmux_identity: None,
             session_marker: None,
             session_ready_socket: None,
+            connector_uds_path: None,
         }
     }
 
@@ -746,6 +792,26 @@ mod tests {
         record_session_established(Some(&marker)).expect("record durable session evidence");
 
         assert_eq!(std::fs::read(marker).unwrap(), b"1");
+    }
+
+    #[test]
+    fn typed_connector_is_bound_before_readiness() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("connector.sock");
+        let bound = bind_connector(Some(&path)).unwrap().expect("configured");
+        assert!(path.exists());
+        use std::os::unix::fs::PermissionsExt as _;
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert!(std::os::unix::net::UnixListener::bind(&path).is_err());
+        drop(bound);
+    }
+
+    #[test]
+    fn absent_typed_connector_does_not_bind_a_socket() {
+        assert!(bind_connector(None).unwrap().is_none());
     }
 
     #[test]
@@ -854,6 +920,7 @@ mod tests {
             resolver: ResolverBackend::default(),
             session_marker: None,
             session_ready_socket: None,
+            connector_uds_path: Some(PathBuf::from("/tmp/mvm-flowmux-connector.sock")),
             flowmux_identity: Some(mvm_hostd::supervisor::network_endpoint::FlowMuxIdentity {
                 session_id: "s".into(),
                 host_signing_key_base64: base64::engine::general_purpose::STANDARD.encode(host_key),
