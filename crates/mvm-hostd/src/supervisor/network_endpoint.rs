@@ -259,6 +259,12 @@ pub struct EndpointConfig {
     /// identity or secret data; the marker remains the durable evidence.
     #[serde(default)]
     pub session_ready_socket: Option<std::path::PathBuf>,
+    /// Host-local typed connector ingress. This listener is owned by the same
+    /// endpoint process and uses the same signed policy projection, secret
+    /// registry, redaction engine, audit sink, and hardened forwarder as guest
+    /// `OpenHttp` flows. Absent on legacy endpoint configs.
+    #[serde(default)]
+    pub connector_uds_path: Option<std::path::PathBuf>,
     /// How to resolve a bound secret's raw value: this host's local encrypted
     /// store (default), or a remote fleet-secrets daemon over a UDS. See
     /// [`ResolverBackend`].
@@ -553,6 +559,7 @@ mod tests {
             flowmux_identity: None,
             session_marker: None,
             session_ready_socket: None,
+            connector_uds_path: None,
         }
     }
 

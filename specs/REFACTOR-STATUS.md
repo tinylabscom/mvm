@@ -1,6 +1,6 @@
 # Refactor status
 
-Last updated: 2026-08-20
+Last updated: 2026-08-19
 
 This is the cross-plan progress index. The owning plan remains authoritative
 for detailed scope and acceptance criteria.
@@ -851,16 +851,13 @@ resume` takes a `current_head` and refuses when it differs from the
     `pool warm` could previously spawn nothing on any backend. The
     prepared-artifact manifest and the acquire/prepare split are still open,
     so a cold cache is still populated inline.
-  - [~] Phase 3 — reduce backend cold-start latency. The Firecracker no-mount
-    slice now passes on the established KVM host: after a clean 302.8 ms
-    baseline maximum, a schema-v6 20+2 release run measured
-    129.2/131.3/132.0 ms p50/p95/p99 and **132.2 ms maximum**. The change
-    removes nested readiness retry, overlaps console setup, quiets successful
-    pre-readiness serial output, provides unthrottled entropy, and removes
-    redundant root privilege/socket work without weakening authentication or
-    identity checks. It retains the universal 4,310,016-byte kernel; a
-    Firecracker-specific candidate saved only about 3 ms and was rejected.
-    Immutable-map work and the HVF/libkrun slices remain open.
+  - [~] Phase 3 — reduce backend cold-start latency. Re-measured on KVM at
+    `c866611af` as Phase 5 asked: `driver_boot` is 630.5 ms, unmoved from
+    623.6 ms, so the cost is real rather than a poll artifact and can be
+    decomposed. It is a shell `sleep 0.1` socket poll plus ~9 curl/sudo
+    subprocesses (**#2292**, closed by PR #2463). On HVF there is little left — `vmm_create`
+    11.6 ms, `driver_boot` 7.8 ms — the remaining cold cost there is guest
+    boot at 58.6 ms.
   - [ ] Phase 4 — parallelize independent host work
   - [~] Phase 5 — event-driven guest readiness. The flat 50 ms readiness poll
     was quantizing every launch: adaptive backoff cut `guest_kernel_entry`
@@ -869,10 +866,7 @@ resume` takes a `current_head` and refuses when it differs from the
     wait, teardown pid-exit) now share one backoff in
     `mvm_core::poll_backoff`: VM creation reads 4.6 ms rather than 53.8 ms
     of tick, and total is 310.1 ms p50. The authenticated readiness
-    notification itself remains. The Firecracker prepared-cold path also no
-    longer nests the connector's 100/200/400 ms recovery ladder inside its
-    bounded readiness loop; one attempt per 1/2/4/5 ms cadence recovered about
-    100 ms without changing authentication or final identity verification.
+    notification itself remains.
   - [~] Phase 6 — move cleanup off the foreground critical path. Teardown
     decomposed and the warm-pool refill removed from it: a default
     `machine run` went 1366 ms -> 353.8 ms p50. Remaining teardown is
@@ -916,44 +910,7 @@ resume` takes a `current_head` and refuses when it differs from the
     memory at ~48 ms/GB (33 ms at 512M, 194 ms at 4G), so the watchdog
     self-pipe is not worth building and a large workload pays teardown no
     `alpine`-sized benchmark can see.
-    The complete command boundary is now measured directly in schema v7. A
-    mutation-sensitive prepared-overlay validation stamp removes repeated full
-    payload hashing (0.42 ms warmed attach) without trusting mutable path names,
-    and durable atomic files use `fdatasync`; the synchronous fail-closed audit
-    barrier is unchanged. On the established host, admission remained
-    268.3 ms p50 and teardown 109.4 ms p50 because ext4 sits on rotational
-    RAID1 and individual required flushes take 60-175 ms. Sub-200 full durable
-    lifecycle work therefore moves next to low-latency persistent storage and
-    remeasurement, not tmpfs audit state or an early unsafe return.
-    The 2026-08-20 safe batching follow-up overlaps the independent receipt,
-    decision-cache, and authoritative chain flushes at their common pre-boot
-    barrier, shares the launch/command audit signer, and retains synchronous
-    retry on batch errors and drops. The same universal-kernel 20+2 lane cut
-    admission p50 from 268.3 to 160.5 ms and full CLI lifecycle p50 from 762.9
-    to 580.6 ms; every boot still passed at 135.4/151.5/182.8 ms
-    p50/p95/p99 and 190.6 ms maximum. Report SHA-256:
-    `89aabed4403cdca9def18666cdd9af28f6ccc05cd856868f65e025a71d02f980`.
-  - [~] Phase 7 — live validation and regression gates. The benchmark UX and
-        hard gate are complete: default output is an accessible timing table
-        with explicit PASS/FAIL and phase remarks, `--json` schema v6 includes
-        maximum/limit/verdict/remark, and every prepared dispatch must be
-        strictly `<200 ms` even below the publication sample floor. A local
-        2026-08-19 release HVF/aarch64 no-mount run passed all 20 measured boots
-        after 2 warm-ups: p50/p95/p99 76.9/86.0/99.3 ms, maximum 102.7 ms,
-        with zero degraded or hidden-work samples. The matching established-host
-        Firecracker/x86_64 baseline was clean but failed at
-        293.6/299.7/302.2 ms and 302.8 ms maximum. The optimized 20+2 run on the
-        same host now passes at 129.2/131.3/132.0 ms and **132.2 ms maximum**,
-        with the existing universal kernel and no hidden work, degradation, or
-        leaked benchmark process. Its remote schema-v6 report SHA-256 is
-        `e12f30ae2bf43a32ced2d6fe585fbe5f40a80f89002f61775c6a7ccf7613360e`.
-        Schema v7 adds the parent-observed process-spawn-through-final-audit
-        boundary. A fresh 20+2 Firecracker run still passed every authenticated
-        boot at 138.1/148.2/174.6 ms and **181.3 ms maximum**, while exposing
-        the full lifecycle at 762.9/822.8/848.3 ms and **854.6 ms maximum**.
-        Its report SHA-256 is
-        `d224bacb3aa04b727a74c424ff20a2f93f8adf3196da0743e63bd1acea922c74`.
-        Mount lanes, signed evidence, and designated native jobs remain open.
+  - [ ] Phase 7 — live validation and regression gates
   - [x] Cross-plan fast-machine-substrate contract documented in
         `specs/notes/2026-08-10-fast-machine-substrate.md` (issue #2279)
   - [~] Kernel/boot-substrate budget and filesystem-path evaluation tracked by
@@ -1792,9 +1749,13 @@ resume` takes a `current_head` and refuses when it differs from the
         Strict macOS arm64 and Linux x86_64 host-loopback reports are recorded;
         their 21/28 pre-deletion threshold misses remain explicit, with no
         approved exception, for the final closeout matrix to resolve.
-  - [~] Typed HTTP uses FlowMux frames but still crosses a whole-message
-        compatibility seam; bounded end-to-end streaming and endpoint-owned
-        typed connector execution remain.
+  - [x] Bounded typed transformations and endpoint-owned connectors. Typed
+        HTTP now streams incrementally with bounded cross-frame transforms,
+        fail-closed cancellation and audit behavior; web fetch and search
+        authorize in their brokers but resolve, connect, and execute through
+        the per-VM network endpoint. The host performance probe enables only
+        the FlowMux client surface, keeping guest-only vsock dependencies out
+        of the host graph and the duplicate-major invariant clean.
   - [ ] Declared ingress runtime. The wire opcodes and state transitions exist;
         endpoint listener and guest-adapter handling do not.
   - [ ] Remove the rejected `raw_ip_stack`/`L3Vsock` public compatibility

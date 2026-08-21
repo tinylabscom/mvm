@@ -20,6 +20,7 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
 use tokio::net::{UnixListener, UnixStream};
 use url::Url;
+use zeroize::Zeroizing;
 
 use mvm_contract::ir::AuthType;
 use mvm_core::plan::SecretBinding;
@@ -36,7 +37,9 @@ use crate::supervisor::accept_loop::{
 };
 use crate::supervisor::audit_recorder::Recorder;
 use crate::supervisor::network::stages::{RedactingSubstitution, RedactionHits};
-use crate::supervisor::reversible_replacement::{ReplacementEngine, ReplacementFlow};
+use crate::supervisor::reversible_replacement::{
+    ReplacementEngine, ReplacementFlow, StreamingReinjector,
+};
 use crate::supervisor::secret_audit::{
     emit_rewrite_proof, emit_secret_placeholder_dropped, emit_secret_redacted,
     emit_secret_substituted,
@@ -51,6 +54,9 @@ pub use mvm_contract::substitution::{
 const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 /// The response body must fit inside the bounded guest-facing response frame.
 const MAX_FORWARD_RESPONSE_BYTES: usize = MAX_FRAME_BYTES;
+/// Typed FlowMux request ceiling, independent of transport frame size.
+const MAX_HTTP_STREAM_BODY_BYTES: usize = 32 * 1024 * 1024;
+const HTTP_REQUEST_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 #[cfg(not(target_os = "linux"))]
 const RVPROXY_ORIGINAL_DST_MAGIC: &[u8; 8] = b"RVPXOD01";
 
@@ -423,6 +429,18 @@ pub(crate) fn redaction_active(action: &mvm_core::policy::RedactionAction) -> bo
         || !matches!(action.names, mvm_core::policy::NameMode::Off)
 }
 
+/// Whether the policy's catch-all action explicitly opts every destination
+/// into inspection beyond the curated baseline. `RedactionAction::default()`
+/// remains compatible with ordinary opaque relay; it is applied when a caller
+/// deliberately chooses the typed HTTP class. Non-default detector modes are
+/// an admitted requirement and therefore make opaque relay dishonest.
+fn explicit_default_redaction(action: &mvm_core::policy::RedactionAction) -> bool {
+    !matches!(action.entropy, mvm_core::policy::EntropyMode::Off)
+        || !matches!(action.names, mvm_core::policy::NameMode::Off)
+        || action.pii.mode.is_some()
+        || !matches!(action.secrets, mvm_core::policy::SecretAction::Block)
+}
+
 #[cfg(test)]
 mod redaction_category_tests {
     use super::redaction_categories;
@@ -687,6 +705,17 @@ pub struct ForwardResponse {
     pub body: Vec<u8>,
 }
 
+/// A real-destination response whose decoded body is delivered incrementally.
+///
+/// The bounded receiver makes backpressure part of the type: the upstream
+/// reader cannot outrun the FlowMux writer by more than four HTTP chunks.
+pub struct ForwardStreamResponse {
+    pub status: u16,
+    pub headers: Vec<(String, String)>,
+    pub body_len: Option<u64>,
+    pub body: tokio::sync::mpsc::Receiver<Result<Vec<u8>, ForwardError>>,
+}
+
 /// Errors from the forward leg.
 #[derive(Debug, thiserror::Error)]
 pub enum ForwardError {
@@ -741,6 +770,55 @@ pub struct FromPlanInputs<'a> {
 #[async_trait]
 pub trait Forwarder: Send + Sync {
     async fn forward(&self, req: PreparedRequest) -> Result<ForwardResponse, ForwardError>;
+
+    /// Forward with a bounded incremental response body.
+    ///
+    /// Test doubles and compatibility forwarders get a safe buffered adapter;
+    /// the production forwarder overrides this and reads the upstream socket
+    /// only as the receiver makes room.
+    async fn forward_stream(
+        &self,
+        req: PreparedRequest,
+    ) -> Result<ForwardStreamResponse, ForwardError> {
+        let response = self.forward(req).await?;
+        let body_len = Some(response.body.len() as u64);
+        let (sender, receiver) = tokio::sync::mpsc::channel(1);
+        sender
+            .send(Ok(response.body))
+            .await
+            .map_err(|_| ForwardError::Failed("response consumer closed".into()))?;
+        Ok(ForwardStreamResponse {
+            status: response.status,
+            headers: response.headers,
+            body_len,
+            body: receiver,
+        })
+    }
+
+    /// Forward a request whose body arrives through a bounded channel.
+    ///
+    /// The default adapter is for test doubles: it preserves their existing
+    /// whole-request assertions while enforcing the production body ceiling.
+    /// The production forwarder overrides it and writes chunks directly to the
+    /// upstream socket.
+    async fn forward_body_stream(
+        &self,
+        mut req: PreparedRequest,
+        mut body: tokio::sync::mpsc::Receiver<Result<Vec<u8>, String>>,
+    ) -> Result<ForwardStreamResponse, ForwardError> {
+        let mut collected = Vec::new();
+        while let Some(next) = body.recv().await {
+            let chunk = next.map_err(ForwardError::Failed)?;
+            if collected.len().saturating_add(chunk.len()) > MAX_FORWARD_RESPONSE_BYTES {
+                return Err(ForwardError::Failed(format!(
+                    "request body exceeds the {MAX_FORWARD_RESPONSE_BYTES} byte limit"
+                )));
+            }
+            collected.extend_from_slice(&chunk);
+        }
+        req.body = collected;
+        self.forward_stream(req).await
+    }
 }
 
 /// Flatten an error and its `source()` chain into one message. The client wraps
@@ -785,11 +863,12 @@ impl HardenedForwarder {
         self.proxy = proxy;
         self
     }
-}
 
-#[async_trait]
-impl Forwarder for HardenedForwarder {
-    async fn forward(&self, req: PreparedRequest) -> Result<ForwardResponse, ForwardError> {
+    async fn send_streaming(
+        &self,
+        req: PreparedRequest,
+        stream_body: Option<tokio::sync::mpsc::Receiver<Result<Vec<u8>, String>>>,
+    ) -> Result<ForwardStreamResponse, ForwardError> {
         let method = mvm_http::Method::from_bytes(req.method.as_bytes())
             .map_err(|e| ForwardError::Failed(format!("bad method: {e}")))?;
         let client = hardened_client_builder_via(self.timeout_secs, self.proxy.as_ref())
@@ -800,10 +879,12 @@ impl Forwarder for HardenedForwarder {
         for (k, v) in &req.headers {
             rb = rb.header(k, v);
         }
-        if !req.body.is_empty() {
-            rb = rb.body(req.body);
-        }
-        let resp = rb
+        rb = match stream_body {
+            Some(receiver) => rb.body_checked_chunked(receiver),
+            None if !req.body.is_empty() => rb.body(req.body),
+            None => rb,
+        };
+        let mut resp = rb
             .send()
             .await
             .map_err(|e| ForwardError::Failed(err_chain(&e)))?;
@@ -814,16 +895,63 @@ impl Forwarder for HardenedForwarder {
             .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or_default().to_string()))
             .collect();
         check_forward_response_length(resp.content_length())?;
-        let body = resp
-            .bytes()
-            .await
-            .map_err(|e| ForwardError::Failed(err_chain(&e)))?
-            .to_vec();
-        Ok(ForwardResponse {
+        let body_len = resp.content_length();
+        let (sender, body) = tokio::sync::mpsc::channel(4);
+        tokio::spawn(async move {
+            loop {
+                match resp.chunk().await {
+                    Ok(Some(chunk)) => {
+                        if sender.send(Ok(chunk.to_vec())).await.is_err() {
+                            return;
+                        }
+                    }
+                    Ok(None) => return,
+                    Err(error) => {
+                        let _ = sender
+                            .send(Err(ForwardError::Failed(err_chain(&error))))
+                            .await;
+                        return;
+                    }
+                }
+            }
+        });
+        Ok(ForwardStreamResponse {
             status,
             headers,
+            body_len,
             body,
         })
+    }
+}
+
+#[async_trait]
+impl Forwarder for HardenedForwarder {
+    async fn forward(&self, req: PreparedRequest) -> Result<ForwardResponse, ForwardError> {
+        let mut response = self.forward_stream(req).await?;
+        let mut body = Vec::new();
+        while let Some(chunk) = response.body.recv().await {
+            body.extend_from_slice(&chunk?);
+        }
+        Ok(ForwardResponse {
+            status: response.status,
+            headers: response.headers,
+            body,
+        })
+    }
+
+    async fn forward_stream(
+        &self,
+        req: PreparedRequest,
+    ) -> Result<ForwardStreamResponse, ForwardError> {
+        self.send_streaming(req, None).await
+    }
+
+    async fn forward_body_stream(
+        &self,
+        req: PreparedRequest,
+        body: tokio::sync::mpsc::Receiver<Result<Vec<u8>, String>>,
+    ) -> Result<ForwardStreamResponse, ForwardError> {
+        self.send_streaming(req, Some(body)).await
     }
 }
 
@@ -860,6 +988,140 @@ pub struct SubstitutionService {
     /// unadmitted `host:port` is refused here. `None` ⇒ this endpoint does not
     /// gate (the run loop's gate is still active); a `Some` gate fails closed.
     egress_gate: Option<mvm_runtime::vmm::egress_gate::EgressGate>,
+}
+
+/// Security state retained from request preparation through response
+/// completion. It contains metadata and rewrite state, never an extra copy of
+/// the request or a credential value.
+struct PreparedFlow {
+    request: Option<PreparedRequest>,
+    destination: Option<String>,
+    substituted: Vec<(String, AuthType)>,
+    replacement_flow: ReplacementFlow,
+    replacement_proofs: Vec<mvm_core::policy::RewriteProofRecord>,
+    redaction_hits: RedactionHits,
+    redaction_action: mvm_core::policy::RedactionAction,
+}
+
+/// Raw suffix retained between transform chunks. A 64 KiB window is larger
+/// than every configured secret/PII fingerprint; an adversarial pattern that
+/// still cannot reach a stable cut by twice that bound fails closed.
+const STREAM_TRANSFORM_OVERLAP: usize = 64 * 1024;
+const MAX_STREAM_TRANSFORM_PENDING: usize = STREAM_TRANSFORM_OVERLAP * 2;
+
+struct StreamingRedactor {
+    pending: Zeroizing<Vec<u8>>,
+}
+
+impl StreamingRedactor {
+    fn new() -> Self {
+        Self {
+            pending: Zeroizing::new(Vec::new()),
+        }
+    }
+
+    fn push(
+        &mut self,
+        redactor: &RedactingSubstitution,
+        action: &mvm_core::policy::RedactionAction,
+        chunk: &[u8],
+    ) -> Result<(Vec<u8>, RedactionHits), SensitiveDetectionError> {
+        self.pending.extend_from_slice(chunk);
+        if self.pending.len() <= STREAM_TRANSFORM_OVERLAP {
+            return Ok((Vec::new(), RedactionHits::default()));
+        }
+
+        let safe_len = self.pending.len() - STREAM_TRANSFORM_OVERLAP;
+        let (prefix, prefix_hits) = redact_or_copy(redactor, action, &self.pending[..safe_len])?;
+        let (whole, _) = redact_or_copy(redactor, action, &self.pending)?;
+        if whole.starts_with(&prefix) {
+            let suffix = self.pending.split_off(safe_len);
+            *self.pending = suffix;
+            return Ok((prefix, prefix_hits));
+        }
+        if self.pending.len() > MAX_STREAM_TRANSFORM_PENDING {
+            return Err(SensitiveDetectionError);
+        }
+        Ok((Vec::new(), RedactionHits::default()))
+    }
+
+    fn finish(
+        &mut self,
+        redactor: &RedactingSubstitution,
+        action: &mvm_core::policy::RedactionAction,
+    ) -> Result<(Vec<u8>, RedactionHits), SensitiveDetectionError> {
+        let pending = std::mem::take(&mut *self.pending);
+        redact_or_copy(redactor, action, &pending)
+    }
+}
+
+fn redact_or_copy(
+    redactor: &RedactingSubstitution,
+    action: &mvm_core::policy::RedactionAction,
+    bytes: &[u8],
+) -> Result<(Vec<u8>, RedactionHits), SensitiveDetectionError> {
+    match redactor.redact_bytes_for(bytes, action) {
+        Some((_redacted, hits)) if hits.detector_failures > 0 => Err(SensitiveDetectionError),
+        Some((redacted, hits)) => Ok((redacted, hits)),
+        None => Ok((bytes.to_vec(), RedactionHits::default())),
+    }
+}
+
+#[cfg(test)]
+mod streaming_redactor_tests {
+    use super::*;
+
+    #[test]
+    fn a_secret_split_across_chunks_is_withheld_and_redacted() {
+        let secret = b"sk-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let split = 17;
+        let mut first = vec![b'x'; STREAM_TRANSFORM_OVERLAP - split];
+        first.extend_from_slice(&secret[..split]);
+
+        let redactor = RedactingSubstitution::with_default_rules();
+        let action = mvm_core::policy::RedactionAction::default();
+        let mut stream = StreamingRedactor::new();
+        let (ready, _) = stream.push(&redactor, &action, &first).unwrap();
+        assert!(ready.is_empty(), "the possible prefix must stay withheld");
+        let (ready, _) = stream.push(&redactor, &action, &secret[split..]).unwrap();
+        let (tail, hits) = stream.finish(&redactor, &action).unwrap();
+        let output = [ready, tail].concat();
+        assert!(!output.windows(secret.len()).any(|window| window == secret));
+        assert!(!hits.secrets.is_empty(), "the split token must be detected");
+    }
+
+    #[test]
+    fn clean_streams_release_every_byte_in_order_with_bounded_carry() {
+        let redactor = RedactingSubstitution::with_default_rules();
+        let action = mvm_core::policy::RedactionAction::default();
+        let mut stream = StreamingRedactor::new();
+        let input = vec![b'x'; STREAM_TRANSFORM_OVERLAP + 123];
+        let (ready, _) = stream.push(&redactor, &action, &input).unwrap();
+        assert_eq!(ready.len(), 123);
+        assert!(stream.pending.len() <= STREAM_TRANSFORM_OVERLAP);
+        let (tail, _) = stream.finish(&redactor, &action).unwrap();
+        assert_eq!([ready, tail].concat(), input);
+    }
+
+    #[test]
+    fn a_long_clean_stream_never_grows_the_overlap_buffer() {
+        let redactor = RedactingSubstitution::with_default_rules();
+        let action = mvm_core::policy::RedactionAction::default();
+        let mut stream = StreamingRedactor::new();
+        let chunk = vec![b'x'; 8 * 1024];
+        let mut emitted = 0usize;
+
+        for _ in 0..1024 {
+            let (ready, hits) = stream.push(&redactor, &action, &chunk).unwrap();
+            assert!(hits.is_empty());
+            emitted = emitted.saturating_add(ready.len());
+            assert!(stream.pending.len() <= STREAM_TRANSFORM_OVERLAP);
+        }
+        let (tail, hits) = stream.finish(&redactor, &action).unwrap();
+        assert!(hits.is_empty());
+        emitted = emitted.saturating_add(tail.len());
+        assert_eq!(emitted, chunk.len() * 1024);
+    }
 }
 /// Which audit an error path owes, given the cause and whether the request
 /// carried a placeholder.
@@ -941,6 +1203,48 @@ impl SubstitutionService {
     ) -> Self {
         self.reversible_replacement_policy = policy;
         self
+    }
+
+    /// Explain why an opaque flow to `destination` cannot honestly satisfy the
+    /// admitted transformation policy.
+    ///
+    /// Secret bindings and explicitly enabled replacement/redaction profiles
+    /// are destination-bound. Letting the same destination use opaque TCP or
+    /// UDP would silently bypass the only path that can inspect, substitute,
+    /// or redact its bytes. The caller refuses before DNS resolution or socket
+    /// creation. The curated default redaction action does not make every
+    /// opaque destination transformed; only an explicit profile/default opt-in
+    /// or a bound secret does.
+    pub(crate) fn opaque_refusal_reason(&self, destination: &str) -> Option<&'static str> {
+        if self.registry.host_is_bound(destination) {
+            return Some("destination requires secret substitution over typed HTTP");
+        }
+
+        if crate::supervisor::reversible_replacement_resolve::resolve(
+            &self.reversible_replacement_policy,
+            destination,
+        )
+        .enabled
+        {
+            return Some("destination requires reversible replacement over typed HTTP");
+        }
+
+        let explicit_redaction = self
+            .redaction_policy
+            .profiles
+            .iter()
+            .find(|profile| mvm_contract::ir::host_matches(&profile.host, destination))
+            .map(|profile| redaction_active(&profile.action))
+            .unwrap_or_else(|| explicit_default_redaction(&self.redaction_policy.default));
+        explicit_redaction.then_some("destination requires redaction over typed HTTP")
+    }
+
+    /// Record cancellation/failure metadata for a typed HTTP stream without
+    /// ever placing request bytes, headers, credentials, or the full URL in
+    /// the audit record.
+    pub(crate) async fn audit_http_stream_failure(&self, url: &str, reason: &str) {
+        let destination = destination_host(url).ok();
+        self.audit_fail_closed(destination.as_deref(), reason).await;
     }
 
     /// The attached redaction policy. Test-only: lets the threading tests prove
@@ -1448,12 +1752,425 @@ impl SubstitutionService {
     /// destination binding, the claim-10 gate, payload-free audit — happens
     /// here and only here, on every transport.
     pub(crate) async fn process(&self, wire: WireRequest) -> WireResponse {
+        let mut flow = match self.prepare_flow(wire).await {
+            Ok(flow) => flow,
+            Err(refusal) => return refusal,
+        };
+        let request = flow
+            .request
+            .take()
+            .expect("a prepared flow owns exactly one request");
+        match self.forwarder.forward(request).await {
+            Ok(mut response) => {
+                let reinject_proofs = flow.replacement_flow.reinject_response(&mut response);
+                self.audit_completed_flow(&flow, &reinject_proofs).await;
+                WireResponse::Ok {
+                    status: response.status,
+                    headers: response.headers,
+                    body_b64: B64.encode(response.body),
+                }
+            }
+            Err(error) => WireResponse::Refused {
+                message: error.to_string(),
+            },
+        }
+    }
+
+    /// Substitute and forward one FlowMux request while keeping the upstream
+    /// response body incremental and bounded.
+    pub(crate) async fn process_stream(
+        self: &Arc<Self>,
+        wire: WireRequest,
+    ) -> Result<ForwardStreamResponse, WireResponse> {
+        let mut flow = self.prepare_flow(wire).await?;
+        let request = flow
+            .request
+            .take()
+            .expect("a prepared flow owns exactly one request");
+        let upstream = self
+            .forwarder
+            .forward_stream(request)
+            .await
+            .map_err(|error| WireResponse::Refused {
+                message: error.to_string(),
+            })?;
+
+        self.transform_response_stream(flow, upstream).await
+    }
+
+    /// Process a FlowMux request body as bounded chunks. Signing and
+    /// reversible request-body replacement need replay after seeing the full
+    /// payload, so those explicit classes retain a bounded zeroizing replay
+    /// buffer; every other typed request streams through the inspector.
+    pub(crate) async fn process_body_stream(
+        self: &Arc<Self>,
+        head: mvm_core::substitution_wire::HttpFlowHead,
+        mut body: tokio::sync::mpsc::Receiver<Zeroizing<Vec<u8>>>,
+    ) -> Result<ForwardStreamResponse, WireResponse> {
+        let destination = destination_host(&head.url).ok();
+        let replacement_action = destination
+            .as_deref()
+            .map(|dest| {
+                crate::supervisor::reversible_replacement_resolve::resolve(
+                    &self.reversible_replacement_policy,
+                    dest,
+                )
+            })
+            .cloned()
+            .unwrap_or_default();
+        let endpoint = NetworkEndpoint::new(&self.registry, self.resolver.as_ref());
+        let signs_body = head.headers.iter().any(|(_, value)| {
+            find_placeholder(value).is_some_and(|placeholder| {
+                matches!(
+                    endpoint.auth_type(placeholder),
+                    Some(AuthType::Sigv4 | AuthType::Hmac)
+                )
+            })
+        });
+        let replaces_body =
+            replacement_action.replaces_on(mvm_core::policy::RewriteSurface::RequestBody);
+
+        if signs_body || replaces_body {
+            let mut replay = Zeroizing::new(Vec::new());
+            loop {
+                let next = match tokio::time::timeout(HTTP_REQUEST_IDLE_TIMEOUT, body.recv()).await
+                {
+                    Ok(next) => next,
+                    Err(_) => {
+                        self.audit_fail_closed(destination.as_deref(), "request_body_idle_timeout")
+                            .await;
+                        return Err(WireResponse::Refused {
+                            message: "request body idle timeout".into(),
+                        });
+                    }
+                };
+                let Some(chunk) = next else {
+                    break;
+                };
+                if replay.len().saturating_add(chunk.len()) > MAX_HTTP_STREAM_BODY_BYTES {
+                    self.audit_fail_closed(destination.as_deref(), "request_body_limit_exceeded")
+                        .await;
+                    return Err(WireResponse::Refused {
+                        message: format!(
+                            "request body exceeds the {MAX_HTTP_STREAM_BODY_BYTES} byte limit"
+                        ),
+                    });
+                }
+                replay.extend_from_slice(&chunk);
+            }
+            if replay.len() as u64 != head.body_len {
+                self.audit_fail_closed(destination.as_deref(), "request_body_truncated")
+                    .await;
+                return Err(WireResponse::Refused {
+                    message: "request body ended before its declared length".into(),
+                });
+            }
+            return self
+                .process_stream(WireRequest {
+                    method: head.method,
+                    url: head.url,
+                    headers: head.headers,
+                    body_b64: B64.encode(&*replay),
+                })
+                .await;
+        }
+
+        let wire = WireRequest {
+            method: head.method,
+            url: head.url,
+            headers: head.headers,
+            body_b64: String::new(),
+        };
+        let mut flow = self.prepare_flow(wire).await?;
+        let request = flow
+            .request
+            .take()
+            .expect("a prepared flow owns exactly one request");
+        let expected_len = head.body_len;
+        let (sender, receiver) = tokio::sync::mpsc::channel(4);
+        let service = Arc::clone(self);
+        let action = flow.redaction_action.clone();
+        let producer_destination = destination.clone();
+        let producer = tokio::spawn(async move {
+            let mut redactor = StreamingRedactor::new();
+            let mut hits = RedactionHits::default();
+            let mut received = 0_u64;
+            loop {
+                let next = match tokio::time::timeout(HTTP_REQUEST_IDLE_TIMEOUT, body.recv()).await
+                {
+                    Ok(next) => next,
+                    Err(_) => {
+                        service
+                            .audit_fail_closed(
+                                producer_destination.as_deref(),
+                                "request_body_idle_timeout",
+                            )
+                            .await;
+                        let _ = sender.send(Err("request body idle timeout".into())).await;
+                        return Err(SensitiveDetectionError);
+                    }
+                };
+                let Some(chunk) = next else {
+                    break;
+                };
+                received = received.saturating_add(chunk.len() as u64);
+                if received > expected_len {
+                    service
+                        .audit_fail_closed(
+                            producer_destination.as_deref(),
+                            "request_body_length_exceeded",
+                        )
+                        .await;
+                    let _ = sender
+                        .send(Err("request body exceeded its declared length".into()))
+                        .await;
+                    return Err(SensitiveDetectionError);
+                }
+                let (ready, chunk_hits) = match redactor.push(&service.redactor, &action, &chunk) {
+                    Ok(result) => result,
+                    Err(error) => {
+                        service
+                            .audit_fail_closed(
+                                producer_destination.as_deref(),
+                                "request_body_detector_failed",
+                            )
+                            .await;
+                        let _ = sender
+                            .send(Err("sensitive-data detector failed closed".into()))
+                            .await;
+                        return Err(error);
+                    }
+                };
+                hits.merge(chunk_hits);
+                if !ready.is_empty() && sender.send(Ok(ready)).await.is_err() {
+                    service
+                        .audit_fail_closed(
+                            producer_destination.as_deref(),
+                            "request_body_stream_canceled",
+                        )
+                        .await;
+                    return Err(SensitiveDetectionError);
+                }
+            }
+            if received != expected_len {
+                service
+                    .audit_fail_closed(producer_destination.as_deref(), "request_body_truncated")
+                    .await;
+                let _ = sender
+                    .send(Err("request body ended before its declared length".into()))
+                    .await;
+                return Err(SensitiveDetectionError);
+            }
+            let (tail, tail_hits) = match redactor.finish(&service.redactor, &action) {
+                Ok(result) => result,
+                Err(error) => {
+                    service
+                        .audit_fail_closed(
+                            producer_destination.as_deref(),
+                            "request_body_detector_failed",
+                        )
+                        .await;
+                    return Err(error);
+                }
+            };
+            hits.merge(tail_hits);
+            if !tail.is_empty() && sender.send(Ok(tail)).await.is_err() {
+                service
+                    .audit_fail_closed(
+                        producer_destination.as_deref(),
+                        "request_body_stream_canceled",
+                    )
+                    .await;
+                return Err(SensitiveDetectionError);
+            }
+            Ok(hits)
+        });
+        let upstream = self
+            .forwarder
+            .forward_body_stream(request, receiver)
+            .await
+            .map_err(|error| WireResponse::Refused {
+                message: error.to_string(),
+            })?;
+        let request_hits = producer
+            .await
+            .map_err(|_| WireResponse::Refused {
+                message: "request transform task failed closed".into(),
+            })?
+            .map_err(|_| WireResponse::Refused {
+                message: "request transform failed closed".into(),
+            })?;
+        flow.redaction_hits.merge(request_hits);
+        self.transform_response_stream(flow, upstream).await
+    }
+
+    async fn transform_response_stream(
+        self: &Arc<Self>,
+        mut flow: PreparedFlow,
+        mut upstream: ForwardStreamResponse,
+    ) -> Result<ForwardStreamResponse, WireResponse> {
+        // Reinject and redact response headers before any body byte can cross
+        // to the guest. HTTP transfer framing belongs to the upstream leg, not
+        // FlowMux; remove it because transforms may change decoded length.
+        let mut head = ForwardResponse {
+            status: upstream.status,
+            headers: upstream.headers,
+            body: Vec::new(),
+        };
+        let mut reinject_proofs = flow.replacement_flow.reinject_response(&mut head);
+        head.headers.retain(|(name, _)| {
+            !name.eq_ignore_ascii_case("content-length")
+                && !name.eq_ignore_ascii_case("transfer-encoding")
+        });
+        for (_, value) in &mut head.headers {
+            if let Some((redacted, hits)) = self
+                .redactor
+                .redact_bytes_for(value.as_bytes(), &flow.redaction_action)
+            {
+                if hits.detector_failures > 0 {
+                    self.audit_fail_closed(
+                        flow.destination.as_deref(),
+                        "response_header_detector_failed",
+                    )
+                    .await;
+                    return Err(WireResponse::Refused {
+                        message: "sensitive-data detector failed closed; refusing response".into(),
+                    });
+                }
+                *value = String::from_utf8_lossy(&redacted).into_owned();
+                flow.redaction_hits.merge(hits);
+            }
+        }
+
+        let response_status = head.status;
+        let response_headers = std::mem::take(&mut head.headers);
+        let (sender, receiver) = tokio::sync::mpsc::channel(4);
+        let service = Arc::clone(self);
+        let response_destination = flow.destination.clone();
+        tokio::spawn(async move {
+            let mut redactor = StreamingRedactor::new();
+            let mut reinjector = StreamingReinjector::new();
+            while let Some(next) = upstream.body.recv().await {
+                let chunk = match next {
+                    Ok(chunk) => chunk,
+                    Err(error) => {
+                        let _ = sender.send(Err(error)).await;
+                        return;
+                    }
+                };
+                let (reintroduced, proofs) = reinjector.push(&mut flow.replacement_flow, &chunk);
+                reinject_proofs.extend(proofs);
+                let (ready, hits) =
+                    match redactor.push(&service.redactor, &flow.redaction_action, &reintroduced) {
+                        Ok(result) => result,
+                        Err(_) => {
+                            service
+                                .audit_fail_closed(
+                                    response_destination.as_deref(),
+                                    "response_body_detector_failed",
+                                )
+                                .await;
+                            let _ = sender
+                                .send(Err(ForwardError::Failed(
+                                    "sensitive-data detector failed closed".into(),
+                                )))
+                                .await;
+                            return;
+                        }
+                    };
+                flow.redaction_hits.merge(hits);
+                if !ready.is_empty() && sender.send(Ok(ready)).await.is_err() {
+                    service
+                        .audit_fail_closed(
+                            response_destination.as_deref(),
+                            "response_body_stream_canceled",
+                        )
+                        .await;
+                    return;
+                }
+            }
+            let (reintroduced_tail, proofs) = reinjector.finish(&mut flow.replacement_flow);
+            reinject_proofs.extend(proofs);
+            let (ready, hits) = match redactor.push(
+                &service.redactor,
+                &flow.redaction_action,
+                &reintroduced_tail,
+            ) {
+                Ok(result) => result,
+                Err(_) => {
+                    service
+                        .audit_fail_closed(
+                            response_destination.as_deref(),
+                            "response_body_detector_failed",
+                        )
+                        .await;
+                    let _ = sender
+                        .send(Err(ForwardError::Failed(
+                            "sensitive-data detector failed closed".into(),
+                        )))
+                        .await;
+                    return;
+                }
+            };
+            flow.redaction_hits.merge(hits);
+            if !ready.is_empty() && sender.send(Ok(ready)).await.is_err() {
+                service
+                    .audit_fail_closed(
+                        response_destination.as_deref(),
+                        "response_body_stream_canceled",
+                    )
+                    .await;
+                return;
+            }
+            let (tail, hits) = match redactor.finish(&service.redactor, &flow.redaction_action) {
+                Ok(result) => result,
+                Err(_) => {
+                    service
+                        .audit_fail_closed(
+                            response_destination.as_deref(),
+                            "response_body_detector_failed",
+                        )
+                        .await;
+                    let _ = sender
+                        .send(Err(ForwardError::Failed(
+                            "sensitive-data detector failed closed".into(),
+                        )))
+                        .await;
+                    return;
+                }
+            };
+            flow.redaction_hits.merge(hits);
+            if !tail.is_empty() && sender.send(Ok(tail)).await.is_err() {
+                service
+                    .audit_fail_closed(
+                        response_destination.as_deref(),
+                        "response_body_stream_canceled",
+                    )
+                    .await;
+                return;
+            }
+            service.audit_completed_flow(&flow, &reinject_proofs).await;
+        });
+
+        Ok(ForwardStreamResponse {
+            status: response_status,
+            headers: response_headers,
+            // Header/body transforms can change decoded length. Completion is
+            // explicit and the guest applies an independent hard cap.
+            body_len: None,
+            body: receiver,
+        })
+    }
+
+    /// Apply every pre-connect security decision once, returning the prepared
+    /// request plus the state needed to transform and audit its response.
+    async fn prepare_flow(&self, wire: WireRequest) -> Result<PreparedFlow, WireResponse> {
         let body = match B64.decode(wire.body_b64.as_bytes()) {
             Ok(b) => b,
             Err(e) => {
-                return WireResponse::Refused {
+                return Err(WireResponse::Refused {
                     message: format!("bad body encoding: {e}"),
-                };
+                });
             }
         };
         let req = ProxyRequest {
@@ -1482,9 +2199,9 @@ impl SubstitutionService {
                 )
             });
             if !admitted {
-                return WireResponse::Refused {
+                return Err(WireResponse::Refused {
                     message: "egress destination not admitted by network policy (claim-10)".into(),
-                };
+                });
             }
         }
         let substituted = collect_substituted_meta(&endpoint, &req.headers);
@@ -1512,11 +2229,11 @@ impl SubstitutionService {
         // cleartext terminator cores so the gate can't drift.
         if let Some(reason) = fail_closed_reason(&req.headers, req.body.len(), &action) {
             self.audit_fail_closed(destination.as_deref(), reason).await;
-            return WireResponse::Refused {
+            return Err(WireResponse::Refused {
                 message: "egress redaction enabled for destination but body is \
                           compressed or over the scan cap; refusing (fail-closed)"
                     .into(),
-            };
+            });
         }
         // Whether the request smuggled a host placeholder at all — decides if a
         // refusal is a claim-12 placeholder drop (audited) or a plain bad request.
@@ -1539,9 +2256,9 @@ impl SubstitutionService {
             Err(_) => {
                 self.audit_fail_closed(destination.as_deref(), "fail_closed_detector")
                     .await;
-                return WireResponse::Refused {
+                return Err(WireResponse::Refused {
                     message: "sensitive-data detector failed closed; refusing request".into(),
-                };
+                });
             }
         };
         let prepared = match prepare_request(&endpoint, req) {
@@ -1553,32 +2270,39 @@ impl SubstitutionService {
                 if carried_placeholder {
                     self.audit_placeholder_dropped(destination.as_deref()).await;
                 }
-                return WireResponse::Refused {
+                return Err(WireResponse::Refused {
                     message: e.to_string(),
-                };
+                });
             }
         };
-        match self.forwarder.forward(prepared).await {
-            Ok(mut r) => {
-                let reinject_proofs = replacement_flow.reinject_response(&mut r);
-                self.audit_substitutions(&substituted, destination.as_deref())
-                    .await;
-                self.audit_rewrite_proofs("replace", &replacement_proofs, destination.as_deref())
-                    .await;
-                self.audit_rewrite_proofs("reinject", &reinject_proofs, destination.as_deref())
-                    .await;
-                self.audit_redactions(&redaction_hits, destination.as_deref())
-                    .await;
-                WireResponse::Ok {
-                    status: r.status,
-                    headers: r.headers,
-                    body_b64: B64.encode(r.body),
-                }
-            }
-            Err(e) => WireResponse::Refused {
-                message: e.to_string(),
-            },
-        }
+        Ok(PreparedFlow {
+            request: Some(prepared),
+            destination,
+            substituted,
+            replacement_flow,
+            replacement_proofs,
+            redaction_hits,
+            redaction_action: action,
+        })
+    }
+
+    async fn audit_completed_flow(
+        &self,
+        flow: &PreparedFlow,
+        reinject_proofs: &[mvm_core::policy::RewriteProofRecord],
+    ) {
+        self.audit_substitutions(&flow.substituted, flow.destination.as_deref())
+            .await;
+        self.audit_rewrite_proofs(
+            "replace",
+            &flow.replacement_proofs,
+            flow.destination.as_deref(),
+        )
+        .await;
+        self.audit_rewrite_proofs("reinject", reinject_proofs, flow.destination.as_deref())
+            .await;
+        self.audit_redactions(&flow.redaction_hits, flow.destination.as_deref())
+            .await;
     }
 
     /// Mask undeclared secret-shaped / PII content out of a guest-authored
@@ -2315,6 +3039,10 @@ mod server_tests {
         seen: Mutex<Option<PreparedRequest>>,
     }
 
+    struct RedirectForwarder {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
     #[async_trait]
     impl Forwarder for MockForwarder {
         async fn forward(&self, req: PreparedRequest) -> Result<ForwardResponse, ForwardError> {
@@ -2323,6 +3051,18 @@ mod server_tests {
                 status: 200,
                 headers: vec![("x-mock".into(), "1".into())],
                 body: b"pong".to_vec(),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl Forwarder for RedirectForwarder {
+        async fn forward(&self, _req: PreparedRequest) -> Result<ForwardResponse, ForwardError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(ForwardResponse {
+                status: 302,
+                headers: vec![("location".into(), "https://unbound.example/steal".into())],
+                body: Vec::new(),
             })
         }
     }
@@ -2387,6 +3127,185 @@ mod server_tests {
             service = service.with_reversible_replacement_policy(policy);
         }
         (Arc::new(service), ph, forwarder, dir)
+    }
+
+    #[test]
+    fn a_secret_bound_destination_requires_the_typed_transform_class() {
+        let (service, _placeholder, _forwarder, _dir) =
+            service_with("sk-live-zzz", &["api.openai.com"]);
+
+        assert_eq!(
+            service.opaque_refusal_reason("api.openai.com"),
+            Some("destination requires secret substitution over typed HTTP")
+        );
+        assert_eq!(service.opaque_refusal_reason("example.com"), None);
+    }
+
+    #[test]
+    fn explicit_redaction_and_replacement_require_the_typed_transform_class() {
+        use mvm_core::policy::{
+            EntropyMode, RedactionAction, RedactionPolicy, RedactionProfile,
+            ReversibleReplacementAction, ReversibleReplacementPolicy, ReversibleReplacementProfile,
+        };
+
+        let redaction = RedactionPolicy {
+            profiles: vec![RedactionProfile {
+                host: "redact.example".into(),
+                action: RedactionAction {
+                    entropy: EntropyMode::Redact {
+                        min_bits_per_char: 4.0,
+                        min_run_len: 20,
+                    },
+                    ..Default::default()
+                },
+            }],
+            ..Default::default()
+        };
+        let replacement = ReversibleReplacementPolicy {
+            profiles: vec![ReversibleReplacementProfile {
+                host: "replace.example".into(),
+                action: ReversibleReplacementAction {
+                    enabled: true,
+                    ..Default::default()
+                },
+            }],
+            ..Default::default()
+        };
+        let (service, _placeholder, _forwarder, _dir) = service_with_policies(
+            "sk-live-zzz",
+            &["secret.example"],
+            Some(redaction),
+            Some(replacement),
+        );
+
+        assert_eq!(
+            service.opaque_refusal_reason("redact.example"),
+            Some("destination requires redaction over typed HTTP")
+        );
+        assert_eq!(
+            service.opaque_refusal_reason("replace.example"),
+            Some("destination requires reversible replacement over typed HTTP")
+        );
+        assert_eq!(service.opaque_refusal_reason("opaque.example"), None);
+    }
+
+    #[test]
+    fn curated_default_redaction_does_not_claim_to_transform_opaque_flows() {
+        let (service, _placeholder, _forwarder, _dir) =
+            service_with("sk-live-zzz", &["api.openai.com"]);
+
+        assert_eq!(service.opaque_refusal_reason("opaque.example"), None);
+    }
+
+    #[tokio::test]
+    async fn flowmux_request_body_streams_through_split_token_redaction() {
+        let (service, placeholder, forwarder, _dir) =
+            service_with("sk-live-zzz", &["api.openai.com"]);
+        let secret = b"sk-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let split = 13;
+        let mut first = vec![b'x'; STREAM_TRANSFORM_OVERLAP - split];
+        first.extend_from_slice(&secret[..split]);
+        let second = secret[split..].to_vec();
+        let body_len = (first.len() + second.len()) as u64;
+        let (sender, receiver) = tokio::sync::mpsc::channel(4);
+        sender.send(Zeroizing::new(first)).await.unwrap();
+        sender.send(Zeroizing::new(second)).await.unwrap();
+        drop(sender);
+
+        let mut response = service
+            .process_body_stream(
+                mvm_core::substitution_wire::HttpFlowHead {
+                    method: "POST".into(),
+                    url: "https://api.openai.com/v1".into(),
+                    headers: vec![("authorization".into(), format!("Bearer {placeholder}"))],
+                    body_len,
+                },
+                receiver,
+            )
+            .await
+            .expect("streamed request");
+        let mut response_body = Vec::new();
+        while let Some(chunk) = response.body.recv().await {
+            response_body.extend_from_slice(&chunk.unwrap());
+        }
+        assert_eq!(response_body, b"pong");
+
+        let seen = forwarder.seen.lock().unwrap();
+        let request = seen.as_ref().expect("forwarded request");
+        assert!(
+            !request
+                .body
+                .windows(secret.len())
+                .any(|window| window == secret),
+            "split secret crossed the request inspector"
+        );
+        assert_eq!(request.headers[0].1, "Bearer sk-live-zzz");
+    }
+
+    #[tokio::test]
+    async fn signing_flow_uses_the_bounded_replay_buffer_before_forwarding() {
+        let dir = tempdir().unwrap();
+        let store = FileSecretStore::with_dir(dir.path());
+        store
+            .put(
+                "local",
+                "hook",
+                &SecretBox::new(Box::new("Jefe".to_string())),
+            )
+            .unwrap();
+        let resolver: Arc<dyn SecretResolver> =
+            Arc::new(LocalResolver::new("local", Arc::new(store)));
+        let mut registry = SubstitutionRegistry::new();
+        let placeholder = registry
+            .mint(SecretRef {
+                name: "hook".into(),
+                mount: SecretMount::Env { var: "K".into() },
+                auth_type: AuthType::Hmac,
+                allowed_hosts: vec!["hooks.example.com".into()],
+                sigv4: None,
+            })
+            .as_str()
+            .to_string();
+        let forwarder = Arc::new(MockForwarder {
+            seen: Mutex::new(None),
+        });
+        let service = Arc::new(SubstitutionService::new(
+            Arc::new(registry),
+            resolver,
+            forwarder.clone(),
+        ));
+        let body = b"what do ya want for nothing?";
+        let (sender, receiver) = tokio::sync::mpsc::channel(2);
+        sender
+            .send(Zeroizing::new(body[..10].to_vec()))
+            .await
+            .unwrap();
+        sender
+            .send(Zeroizing::new(body[10..].to_vec()))
+            .await
+            .unwrap();
+        drop(sender);
+        let mut response = service
+            .process_body_stream(
+                mvm_core::substitution_wire::HttpFlowHead {
+                    method: "POST".into(),
+                    url: "https://hooks.example.com/event".into(),
+                    headers: vec![("x-sig".into(), placeholder)],
+                    body_len: body.len() as u64,
+                },
+                receiver,
+            )
+            .await
+            .expect("signed request");
+        while response.body.recv().await.is_some() {}
+
+        let seen = forwarder.seen.lock().unwrap();
+        let request = seen.as_ref().expect("forwarded request");
+        assert_eq!(request.body, body);
+        assert!(request.headers.iter().any(|(name, value)| {
+            name.eq_ignore_ascii_case("x-mvm-signature")
+                && value == "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
+        }));
     }
 
     /// End-to-end over a **real AF_VSOCK** connection (Linux vsock loopback,
@@ -2533,6 +3452,101 @@ mod server_tests {
             server.abort();
         });
         rt.shutdown_timeout(std::time::Duration::from_millis(50));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stalled_streaming_request_hits_the_idle_deadline_without_forwarding() {
+        let (service, _placeholder, forwarder, _dir) =
+            service_with("sk-live-zzz", &["api.openai.com"]);
+        let (sender, receiver) = tokio::sync::mpsc::channel(1);
+        let task_service = Arc::clone(&service);
+        let request = tokio::spawn(async move {
+            task_service
+                .process_body_stream(
+                    mvm_core::substitution_wire::HttpFlowHead {
+                        method: "POST".into(),
+                        url: "https://api.openai.com/v1".into(),
+                        headers: Vec::new(),
+                        body_len: 1,
+                    },
+                    receiver,
+                )
+                .await
+        });
+
+        tokio::task::yield_now().await;
+        tokio::time::advance(HTTP_REQUEST_IDLE_TIMEOUT + std::time::Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+        drop(sender);
+        let refusal = match request.await.expect("request task") {
+            Ok(_) => panic!("idle request must refuse"),
+            Err(refusal) => refusal,
+        };
+        assert!(
+            matches!(
+                refusal,
+                WireResponse::Refused { ref message }
+                    if message.contains("idle timeout") || message.contains("failed closed")
+            ),
+            "unexpected refusal: {refusal:?}"
+        );
+        assert!(
+            forwarder.seen.lock().unwrap().is_none(),
+            "an incomplete request must never reach the destination"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_redirect_is_returned_without_following_or_rebinding_substitution() {
+        let dir = tempdir().unwrap();
+        let store = FileSecretStore::with_dir(dir.path());
+        store
+            .put(
+                "local",
+                "openai",
+                &SecretBox::new(Box::new("sk-live-zzz".to_string())),
+            )
+            .unwrap();
+        let resolver: Arc<dyn SecretResolver> =
+            Arc::new(LocalResolver::new("local", Arc::new(store)));
+        let mut registry = SubstitutionRegistry::new();
+        let placeholder = registry
+            .mint(bearer_ref("openai", &["api.openai.com"]))
+            .as_str()
+            .to_string();
+        let forwarder = Arc::new(RedirectForwarder {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let service = Arc::new(SubstitutionService::new(
+            Arc::new(registry),
+            resolver,
+            forwarder.clone(),
+        ));
+        let (sender, receiver) = tokio::sync::mpsc::channel(1);
+        drop(sender);
+        let mut response = service
+            .process_body_stream(
+                mvm_core::substitution_wire::HttpFlowHead {
+                    method: "GET".into(),
+                    url: "https://api.openai.com/v1".into(),
+                    headers: vec![("authorization".into(), format!("Bearer {placeholder}"))],
+                    body_len: 0,
+                },
+                receiver,
+            )
+            .await
+            .expect("redirect response");
+        while response.body.recv().await.is_some() {}
+
+        assert_eq!(response.status, 302);
+        assert!(response.headers.iter().any(|(name, value)| {
+            name.eq_ignore_ascii_case("location") && value == "https://unbound.example/steal"
+        }));
+        assert_eq!(
+            forwarder.calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the endpoint must surface a redirect, never follow it with the bound credential"
+        );
     }
 
     #[tokio::test]

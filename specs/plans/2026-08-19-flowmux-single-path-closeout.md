@@ -80,19 +80,22 @@ final report or record an explicit owner-approved measured exception.
 
 ### W3 — Make typed transformations bounded and endpoint-owned
 
-- [ ] Replace whole-message `WireRequest`/`WireResponse` buffering with bounded
+- [x] Replace whole-message `WireRequest`/`WireResponse` buffering with bounded
       incremental head/body handling from `OpenHttp` through completion.
-- [ ] Preserve transformation matches across frame boundaries with a bounded
+- [x] Preserve transformation matches across frame boundaries with a bounded
       overlap window, enforce head/body/idle/credit ceilings, and zeroize
       secret-bearing buffers on completion and cancellation.
-- [ ] Apply destination-bound substitution only after final DNS and redirect
+- [x] Apply destination-bound substitution only after final DNS and redirect
       admission; redact each response chunk before it crosses to the guest.
-- [ ] Route typed connector network execution through the endpoint. Brokers
+- [x] Route typed connector network execution through the endpoint. Brokers
       retain binding authorization but do not connect, resolve, or create an
       independent HTTP client for workload traffic.
-- [ ] Add positive, refusal, split-token, redirect, oversized-head/body,
+- [x] Add positive, refusal, split-token, redirect, oversized-head/body,
       timeout, cancellation, audit-leak, and long-stream tests.
 
+The host-side performance probe enables the narrow `flowmux-client` feature,
+not the guest addon bundle. This keeps guest-only vsock dependencies out of
+host test graphs and preserves the duplicate-major dependency invariant.
 ### W4 — Implement declared ingress on FlowMux
 
 - [ ] Replace `L3IngressMapping` with a transport-neutral signed-plan/IR type

@@ -285,11 +285,45 @@ pub struct RequestBuilder {
     method: Method,
     url: std::result::Result<Url, Error>,
     headers: HeaderMap,
-    body: Option<Vec<u8>>,
+    body: Option<RequestBody>,
     timeout: Option<Duration>,
     max_response_bytes: Option<u64>,
     /// A builder-stage failure, surfaced at `send` so the chain stays fluent.
     error: Option<Error>,
+}
+
+#[derive(Debug)]
+enum RequestBody {
+    Bytes(Vec<u8>),
+    Stream {
+        declared_len: Option<u64>,
+        receiver: tokio::sync::mpsc::Receiver<Vec<u8>>,
+    },
+    CheckedChunked {
+        receiver: tokio::sync::mpsc::Receiver<std::result::Result<Vec<u8>, String>>,
+    },
+}
+
+impl RequestBody {
+    fn framing(&self) -> RequestBodyFraming {
+        match self {
+            Self::Bytes(bytes) => RequestBodyFraming::Fixed(bytes.len() as u64),
+            Self::Stream {
+                declared_len: Some(declared_len),
+                ..
+            } => RequestBodyFraming::Fixed(*declared_len),
+            Self::Stream {
+                declared_len: None, ..
+            }
+            | Self::CheckedChunked { .. } => RequestBodyFraming::Chunked,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RequestBodyFraming {
+    Fixed(u64),
+    Chunked,
 }
 
 impl RequestBuilder {
@@ -341,7 +375,53 @@ impl RequestBuilder {
 
     #[must_use]
     pub fn body(mut self, body: impl Into<Vec<u8>>) -> Self {
-        self.body = Some(body.into());
+        self.body = Some(RequestBody::Bytes(body.into()));
+        self
+    }
+
+    /// Stream a request body with a length committed before any body bytes.
+    ///
+    /// The receiver provides backpressure selected by its creator. Sending
+    /// fewer or more bytes than `declared_len` fails closed, so the emitted
+    /// `Content-Length` can never disagree with what reaches the socket.
+    #[must_use]
+    pub fn body_stream(
+        mut self,
+        declared_len: u64,
+        receiver: tokio::sync::mpsc::Receiver<Vec<u8>>,
+    ) -> Self {
+        self.body = Some(RequestBody::Stream {
+            declared_len: Some(declared_len),
+            receiver,
+        });
+        self
+    }
+
+    /// Stream a request body with HTTP/1.1 chunked transfer framing.
+    ///
+    /// Use this when a bounded transform can change the decoded byte count.
+    /// The channel capacity remains the caller's backpressure bound; empty
+    /// chunks are ignored and the terminating chunk is emitted only after the
+    /// producer closes cleanly.
+    #[must_use]
+    pub fn body_chunked(mut self, receiver: tokio::sync::mpsc::Receiver<Vec<u8>>) -> Self {
+        self.body = Some(RequestBody::Stream {
+            declared_len: None,
+            receiver,
+        });
+        self
+    }
+
+    /// Stream a transformed body whose producer can fail closed.
+    ///
+    /// A producer error closes the connection without the final chunk, so the
+    /// destination cannot accept a partial transformed request as complete.
+    #[must_use]
+    pub fn body_checked_chunked(
+        mut self,
+        receiver: tokio::sync::mpsc::Receiver<std::result::Result<Vec<u8>, String>>,
+    ) -> Self {
+        self.body = Some(RequestBody::CheckedChunked { receiver });
         self
     }
 
@@ -349,7 +429,7 @@ impl RequestBuilder {
     pub fn json<T: serde::Serialize>(mut self, value: &T) -> Self {
         match serde_json::to_vec(value) {
             Ok(v) => {
-                self.body = Some(v);
+                self.body = Some(RequestBody::Bytes(v));
                 self.headers.insert(
                     http::header::CONTENT_TYPE,
                     HeaderValue::from_static("application/json"),
@@ -415,7 +495,7 @@ async fn send_once(
     method: Method,
     url: Url,
     extra_headers: HeaderMap,
-    body: Option<Vec<u8>>,
+    body: Option<RequestBody>,
     max_response_bytes: Option<u64>,
 ) -> Result<Response> {
     let scheme = url.scheme().to_ascii_lowercase();
@@ -465,18 +545,17 @@ async fn send_once(
         }
     };
 
+    let body_framing = body.as_ref().map(RequestBody::framing);
     let head = serialize_request(
         &inner,
         &method,
         &url,
         &extra_headers,
-        body.as_deref(),
+        body_framing,
         absolute_uri,
     )?;
     stream.write_all(&head).await?;
-    if let Some(b) = &body {
-        stream.write_all(b).await?;
-    }
+    write_request_body(&mut stream, body).await?;
     stream.flush().await?;
 
     read_response(
@@ -486,6 +565,77 @@ async fn send_once(
         url.to_string(),
     )
     .await
+}
+
+async fn write_request_body(stream: &mut Stream, body: Option<RequestBody>) -> Result<()> {
+    match body {
+        None => Ok(()),
+        Some(RequestBody::Bytes(bytes)) => {
+            stream.write_all(&bytes).await?;
+            Ok(())
+        }
+        Some(RequestBody::Stream {
+            declared_len: Some(declared_len),
+            mut receiver,
+        }) => {
+            let mut written = 0_u64;
+            while let Some(chunk) = receiver.recv().await {
+                let chunk_len =
+                    u64::try_from(chunk.len()).map_err(|_| Error::RequestBodyTooLarge {
+                        declared: declared_len,
+                    })?;
+                written = written
+                    .checked_add(chunk_len)
+                    .ok_or(Error::RequestBodyTooLarge {
+                        declared: declared_len,
+                    })?;
+                if written > declared_len {
+                    return Err(Error::RequestBodyTooLarge {
+                        declared: declared_len,
+                    });
+                }
+                stream.write_all(&chunk).await?;
+            }
+            if written != declared_len {
+                return Err(Error::IncompleteRequestBody {
+                    remaining: declared_len.saturating_sub(written),
+                });
+            }
+            Ok(())
+        }
+        Some(RequestBody::Stream {
+            declared_len: None,
+            mut receiver,
+        }) => {
+            while let Some(chunk) = receiver.recv().await {
+                if chunk.is_empty() {
+                    continue;
+                }
+                stream
+                    .write_all(format!("{:x}\r\n", chunk.len()).as_bytes())
+                    .await?;
+                stream.write_all(&chunk).await?;
+                stream.write_all(b"\r\n").await?;
+            }
+            stream.write_all(b"0\r\n\r\n").await?;
+            Ok(())
+        }
+        Some(RequestBody::CheckedChunked { mut receiver }) => {
+            while let Some(next) = receiver.recv().await {
+                let chunk = next.map_err(Error::RequestBodyProducer)?;
+                if chunk.is_empty() {
+                    continue;
+                }
+                stream
+                    .write_all(format!("{:x}\r\n", chunk.len()).as_bytes())
+                    .await?;
+                stream.write_all(&chunk).await?;
+                stream.write_all(b"\r\n").await?;
+            }
+            stream.write_all(b"0\r\n\r\n").await?;
+            Ok(())
+        }
+    }
 }
 
 async fn connect(
@@ -812,7 +962,7 @@ fn serialize_request(
     method: &Method,
     url: &Url,
     extra: &HeaderMap,
-    body: Option<&[u8]>,
+    body_framing: Option<RequestBodyFraming>,
     absolute_uri: bool,
 ) -> Result<Vec<u8>> {
     // Absolute-form is how a plaintext request tells an HTTP proxy where it is
@@ -858,8 +1008,14 @@ fn serialize_request(
     out.extend_from_slice(b"\r\n");
     out.extend_from_slice(b"connection: close\r\n");
     out.extend_from_slice(b"accept: */*\r\n");
-    if let Some(b) = body {
-        out.extend_from_slice(format!("content-length: {}\r\n", b.len()).as_bytes());
+    match body_framing {
+        Some(RequestBodyFraming::Fixed(body_len)) => {
+            out.extend_from_slice(format!("content-length: {body_len}\r\n").as_bytes());
+        }
+        Some(RequestBodyFraming::Chunked) => {
+            out.extend_from_slice(b"transfer-encoding: chunked\r\n");
+        }
+        None => {}
     }
     for (name, value) in headers.iter() {
         // Host/Connection/Content-Length are ours; a caller-supplied duplicate
@@ -937,9 +1093,11 @@ mod tests {
         }
     }
 
-    fn serialize(url: &str, extra: HeaderMap, body: Option<&[u8]>) -> String {
+    fn serialize(url: &str, extra: HeaderMap, body_len: Option<u64>) -> String {
         let u = Url::parse(url).unwrap();
-        let out = serialize_request(&inner(), &Method::GET, &u, &extra, body, false).unwrap();
+        let body_framing = body_len.map(RequestBodyFraming::Fixed);
+        let out =
+            serialize_request(&inner(), &Method::GET, &u, &extra, body_framing, false).unwrap();
         String::from_utf8(out).unwrap()
     }
 
@@ -969,7 +1127,7 @@ mod tests {
 
     #[test]
     fn body_sets_content_length_exactly_once() {
-        let s = serialize("https://example.com/", HeaderMap::new(), Some(b"hello"));
+        let s = serialize("https://example.com/", HeaderMap::new(), Some(5));
         assert_eq!(s.matches("content-length:").count(), 1, "{s}");
         assert!(s.contains("content-length: 5\r\n"), "{s}");
     }
@@ -988,7 +1146,7 @@ mod tests {
             HeaderValue::from_static("chunked"),
         );
         h.insert(http::header::HOST, HeaderValue::from_static("evil.example"));
-        let s = serialize("https://example.com/", h, Some(b"hi"));
+        let s = serialize("https://example.com/", h, Some(2));
         assert_eq!(s.matches("content-length:").count(), 1, "{s}");
         assert!(!s.contains("transfer-encoding"), "{s}");
         assert!(!s.contains("evil.example"), "{s}");

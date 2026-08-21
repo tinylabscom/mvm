@@ -13,7 +13,7 @@
 //!    default; operators must opt in per provider).
 //! 4. Delegates to an injected [`SearchProvider`] so the
 //!    policy/validation layers are testable without an upstream
-//!    HTTP client. The default provider is [`NoopSearchProvider`],
+//!    endpoint connector. The default provider is [`NoopSearchProvider`],
 //!    which always returns [`SearchError::Unwired`]; real Brave /
 //!    Google / DuckDuckGo impls land in follow-up slices.
 //!
@@ -35,16 +35,20 @@
 //!   credentials are supervisor-owned. The agent doesn't see them.
 
 use std::collections::BTreeSet;
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
-use secrecy::{ExposeSecret, SecretBox};
+use base64::Engine as _;
+use mvm_contract::substitution::Placeholder;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use url::Url;
 
-use super::http_hardening::{DEFAULT_RESPONSE_BODY_CAP, hardened_client_builder, read_capped};
+use super::http_hardening::DEFAULT_RESPONSE_BODY_CAP;
 use super::{HostMediatedTool, ToolInvokeError};
+use crate::supervisor::network_endpoint_connector::EndpointHttpConnector;
 
 pub const TOOL_NAME: &str = "mvm.web_search";
 
@@ -74,8 +78,50 @@ fn build_query_url(endpoint: &str, params: &[(&str, &str)]) -> Result<Url, Searc
     Ok(url)
 }
 
+async fn execute_provider_request(
+    connector: &EndpointHttpConnector,
+    request: &mvm_core::substitution_wire::WireRequest,
+) -> Result<(u16, Vec<u8>), SearchError> {
+    let response = connector
+        .execute(request)
+        .await
+        .map_err(|error| SearchError::Upstream(error.to_string()))?;
+    match response {
+        mvm_core::substitution_wire::WireResponse::Ok {
+            status, body_b64, ..
+        } => {
+            let body = base64::engine::general_purpose::STANDARD
+                .decode(body_b64)
+                .map_err(|_| {
+                    SearchError::Upstream("endpoint returned invalid body encoding".into())
+                })?;
+            if body.len() > DEFAULT_RESPONSE_BODY_CAP {
+                return Err(SearchError::Upstream(format!(
+                    "response body exceeded {DEFAULT_RESPONSE_BODY_CAP}-byte cap"
+                )));
+            }
+            Ok((status, body))
+        }
+        mvm_core::substitution_wire::WireResponse::Refused { message } => {
+            Err(SearchError::Upstream(message))
+        }
+    }
+}
+
+fn classify_status(provider: &str, status: u16) -> Result<(), SearchError> {
+    if status == 429 {
+        return Err(SearchError::RateLimited);
+    }
+    if !(200..300).contains(&status) {
+        return Err(SearchError::Upstream(format!(
+            "{provider} search returned status {status}"
+        )));
+    }
+    Ok(())
+}
+
 /// Pluggable upstream search adapter. Production impls (`BraveProvider`,
-/// `GoogleProvider`, …) wrap their respective HTTP clients;
+/// `GoogleProvider`, …) format typed requests for the endpoint connector;
 /// [`NoopSearchProvider`] is the substrate default and returns
 /// [`SearchError::Unwired`] so the tool ships fail-closed.
 #[async_trait]
@@ -130,14 +176,9 @@ impl SearchProvider for NoopSearchProvider {
 /// API key. The agent never sees the key — it's pinned inside this
 /// struct at construction and consumed only by the HTTP send.
 ///
-/// ## Credential lifetime hardening
-///
-/// `api_key` is held as `SecretBox<String>` so the bytes zeroize
-/// on drop. The wrapper also refuses accidental `Debug`/`Display`
-/// formatting — only `expose_secret()` at the wire boundary
-/// returns the underlying string. The provider does NOT derive
-/// `Debug`; tests that need to print a representation should use
-/// `name()` instead.
+/// The provider holds only the endpoint-minted opaque placeholder. The real
+/// API key remains inside the endpoint process and is substituted only after
+/// destination binding and network-policy admission.
 ///
 /// ## Wire shape
 ///
@@ -149,8 +190,8 @@ impl SearchProvider for NoopSearchProvider {
 /// `BraveResponse`/`BraveWebResults`/`BraveResult` carry only what
 /// we need.
 pub struct BraveSearchProvider {
-    api_key: SecretBox<String>,
-    client: mvm_http::Client,
+    api_key: Placeholder,
+    connector: EndpointHttpConnector,
     endpoint: String,
 }
 
@@ -158,23 +199,17 @@ impl BraveSearchProvider {
     /// Canonical Brave Search API endpoint.
     pub const DEFAULT_ENDPOINT: &'static str = "https://api.search.brave.com/res/v1/web/search";
 
-    /// Build with the default endpoint + a hardened HTTP client
-    /// (no-auto-redirect + SSRF-filtering resolver).
+    /// Build with the default endpoint and the per-VM typed connector.
     /// `api_key` is the operator's `X-Subscription-Token` value
-    /// wrapped in `SecretBox<String>` so it zeroizes on drop.
-    /// The constructor takes a `SecretBox` rather
-    /// than `impl Into<String>` so the operator must explicitly
-    /// commit to the secret-lifetime contract — accidental raw-
-    /// string construction stops at the type system.
-    pub fn new(api_key: SecretBox<String>) -> Result<Self, SearchError> {
-        let client = hardened_client_builder(15)
-            .build()
-            .map_err(|e| SearchError::Upstream(format!("building HTTP client: {e}")))?;
-        Ok(Self {
+    /// represented by an endpoint-minted placeholder; raw credentials are not
+    /// accepted by this constructor.
+    #[must_use]
+    pub fn new(connector_uds_path: impl Into<PathBuf>, api_key: Placeholder) -> Self {
+        Self {
             api_key,
-            client,
+            connector: EndpointHttpConnector::new(connector_uds_path, Duration::from_secs(15)),
             endpoint: Self::DEFAULT_ENDPOINT.to_string(),
-        })
+        }
     }
 
     /// Override the endpoint — used by tests to point at a mock
@@ -225,31 +260,17 @@ impl SearchProvider for BraveSearchProvider {
             &self.endpoint,
             &[("q", query), ("count", count_string.as_str())],
         )?;
-        let response = self
-            .client
-            .get(request_url)
-            .header(
-                "X-Subscription-Token",
-                self.api_key.expose_secret().as_str(),
-            )
-            .send()
-            .await
-            .map_err(|e| SearchError::Upstream(e.to_string()))?;
-        let status = response.status();
-        if status.as_u16() == 429 {
-            return Err(SearchError::RateLimited);
-        }
-        if !status.is_success() {
-            return Err(SearchError::Upstream(format!(
-                "Brave search returned status {status}"
-            )));
-        }
-        // Cap the response body before parsing so a malicious
-        // upstream (or compromised CDN) can't push gigabytes of
-        // JSON at the supervisor.
-        let body = read_capped(response, DEFAULT_RESPONSE_BODY_CAP)
-            .await
-            .map_err(SearchError::Upstream)?;
+        let request = mvm_core::substitution_wire::WireRequest {
+            method: "GET".into(),
+            url: request_url.to_string(),
+            headers: vec![(
+                "X-Subscription-Token".into(),
+                self.api_key.as_str().to_string(),
+            )],
+            body_b64: String::new(),
+        };
+        let (status, body) = execute_provider_request(&self.connector, &request).await?;
+        classify_status("Brave", status)?;
         let parsed: BraveResponse = serde_json::from_slice(&body)
             .map_err(|e| SearchError::Upstream(format!("decoding Brave response: {e}")))?;
         let hits: Vec<SearchHit> = parsed
@@ -442,18 +463,17 @@ impl HostMediatedTool for WebSearchTool {
 /// <https://docs.tavily.com/api-reference/endpoint/search>.
 ///
 /// Tavily's auth shape differs from Brave's: the API key travels
-/// inside the JSON request body (`"api_key": "<key>"`), and the
-/// search itself is a POST (not a GET-with-query-string). Otherwise
-/// the abstraction matches — supervisor owns the key (held as
-/// `SecretBox<String>`), the agent never sees it.
+/// in an authorization header, and the search itself is a POST. The broker
+/// carries only a placeholder; the endpoint injects the real key immediately
+/// before the external send.
 ///
 /// Tavily is "search-for-LLMs" by design: each result row carries
 /// a `content` field that's an LLM-friendly snippet (often longer
 /// than Brave's `description`). We map it to `snippet` so the
 /// agent surface stays uniform across providers.
 pub struct TavilySearchProvider {
-    api_key: SecretBox<String>,
-    client: mvm_http::Client,
+    api_key: Placeholder,
+    connector: EndpointHttpConnector,
     endpoint: String,
 }
 
@@ -466,18 +486,17 @@ impl TavilySearchProvider {
     /// plenty of headroom for the slow-tail case.
     const DEFAULT_TIMEOUT_SECS: u64 = 20;
 
-    /// Build with the default endpoint + a hardened HTTP client
-    /// (no auto-redirect, SSRF-filtering resolver, zeroize-on-drop
-    /// credential).
-    pub fn new(api_key: SecretBox<String>) -> Result<Self, SearchError> {
-        let client = hardened_client_builder(Self::DEFAULT_TIMEOUT_SECS)
-            .build()
-            .map_err(|e| SearchError::Upstream(format!("building HTTP client: {e}")))?;
-        Ok(Self {
+    /// Build with the default endpoint and the per-VM typed connector.
+    #[must_use]
+    pub fn new(connector_uds_path: impl Into<PathBuf>, api_key: Placeholder) -> Self {
+        Self {
             api_key,
-            client,
+            connector: EndpointHttpConnector::new(
+                connector_uds_path,
+                Duration::from_secs(Self::DEFAULT_TIMEOUT_SECS),
+            ),
             endpoint: Self::DEFAULT_ENDPOINT.to_string(),
-        })
+        }
     }
 
     /// Test seam — point at a mock HTTP server. Production callers
@@ -518,29 +537,26 @@ impl SearchProvider for TavilySearchProvider {
         // caller-supplied 50 doesn't trip an upstream 422.
         let max = max_results.min(20);
         let body = serde_json::json!({
-            "api_key": self.api_key.expose_secret(),
             "query": query,
             "max_results": max,
         });
-        let response = self
-            .client
-            .post(&self.endpoint)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| SearchError::Upstream(e.to_string()))?;
-        let status = response.status();
-        if status.as_u16() == 429 {
-            return Err(SearchError::RateLimited);
-        }
-        if !status.is_success() {
-            return Err(SearchError::Upstream(format!(
-                "Tavily search returned status {status}"
-            )));
-        }
-        let body = read_capped(response, DEFAULT_RESPONSE_BODY_CAP)
-            .await
-            .map_err(SearchError::Upstream)?;
+        let request = mvm_core::substitution_wire::WireRequest {
+            method: "POST".into(),
+            url: self.endpoint.clone(),
+            headers: vec![
+                (
+                    "Authorization".into(),
+                    format!("Bearer {}", self.api_key.as_str()),
+                ),
+                ("Content-Type".into(), "application/json".into()),
+            ],
+            body_b64: base64::engine::general_purpose::STANDARD.encode(
+                serde_json::to_vec(&body)
+                    .map_err(|error| SearchError::Upstream(error.to_string()))?,
+            ),
+        };
+        let (status, body) = execute_provider_request(&self.connector, &request).await?;
+        classify_status("Tavily", status)?;
         let parsed: TavilyResponse = serde_json::from_slice(&body)
             .map_err(|e| SearchError::Upstream(format!("decoding Tavily response: {e}")))?;
         let hits: Vec<SearchHit> = parsed
@@ -562,46 +578,14 @@ impl SearchProvider for TavilySearchProvider {
 /// Google Custom Search API provider. Documented at
 /// <https://developers.google.com/custom-search/v1/overview>.
 ///
-/// ## API-key-in-URL hardening
-///
-/// Google's Custom Search v1 endpoint requires both an API key
-/// AND a Custom Search Engine (CSE) ID in the URL query string:
-///
-/// ```text
-/// https://www.googleapis.com/customsearch/v1?key=<API_KEY>&cx=<CSE_ID>&q=<query>
-/// ```
-///
-/// This is structurally less safe than Brave's
-/// `X-Subscription-Token` header or Tavily's request-body field
-/// — URLs show up in:
-///
-/// - `mvm_http::Error::Display` formatting on network failures
-///   (the error string includes the requested URL with query
-///   params).
-/// - Server access logs at the upstream (Google's own logs are
-///   the operator's problem, not ours).
-/// - Audit fields if we naively wrap the error.
-///
-/// **Mitigation (this struct):**
-///
-/// 1. The constructed URL is never passed to `tracing` or audit
-///    fields. The provider builds the URL inside `search()` via
-///    the client's `query()` helper and discards it after the send.
-/// 2. Any error string surfaced upward goes through
-///    `redact_credentials`, which replaces every occurrence of
-///    the API key and CSE ID with `<REDACTED>`. The redacted
-///    string is what reaches the audit chain + `tracing` +
-///    operator-visible diagnostics.
-/// 3. The hand-written `Debug` impl below redacts both
-///    credentials, so accidental `{provider:?}` formatting
-///    (e.g. via `tracing::error!(provider = ?p, ...)`) does not
-///    leak the key.
-/// 4. The agent never sees either credential — same posture as
-///    Brave + Tavily; the supervisor owns them.
+/// The API key is carried as an opaque `x-goog-api-key` placeholder and
+/// substituted by the endpoint after binding and admission. Only the CSE ID,
+/// query, and result count appear in the URL. The hand-written `Debug` and
+/// error scrubber remain defensive barriers around both identifiers.
 pub struct GoogleSearchProvider {
-    api_key: SecretBox<String>,
-    cse_id: SecretBox<String>,
-    client: mvm_http::Client,
+    api_key: Placeholder,
+    cse_id: String,
+    connector: EndpointHttpConnector,
     endpoint: String,
 }
 
@@ -614,26 +598,24 @@ impl GoogleSearchProvider {
     /// connections to occupy a tokio task.
     const DEFAULT_TIMEOUT_SECS: u64 = 15;
 
-    /// Build with the default endpoint + a fresh HTTP client.
-    /// Both `api_key` (your operator's Google Cloud API key) and
-    /// `cse_id` (Custom Search Engine ID) are pinned inside the
-    /// struct and consumed only by the HTTP send.
-    pub fn new(api_key: SecretBox<String>, cse_id: SecretBox<String>) -> Result<Self, SearchError> {
-        // Hardened builder applies no-auto-redirect +
-        // SSRF-filtering DNS resolver; both
-        // credentials are held as `SecretBox<String>` so they
-        // zeroize on drop. The HTTP client can't be poisoned
-        // via DNS or chased to a non-Google host via 3xx, and the
-        // bytes don't sit in freed memory after the provider drops.
-        let client = hardened_client_builder(Self::DEFAULT_TIMEOUT_SECS)
-            .build()
-            .map_err(|e| SearchError::Upstream(format!("building HTTP client: {e}")))?;
-        Ok(Self {
+    /// Build with the default endpoint and per-VM typed connector. `api_key`
+    /// is an opaque endpoint placeholder; `cse_id` is the public search-engine
+    /// selector placed in the query.
+    #[must_use]
+    pub fn new(
+        connector_uds_path: impl Into<PathBuf>,
+        api_key: Placeholder,
+        cse_id: impl Into<String>,
+    ) -> Self {
+        Self {
             api_key,
-            cse_id,
-            client,
+            cse_id: cse_id.into(),
+            connector: EndpointHttpConnector::new(
+                connector_uds_path,
+                Duration::from_secs(Self::DEFAULT_TIMEOUT_SECS),
+            ),
             endpoint: Self::DEFAULT_ENDPOINT.to_string(),
-        })
+        }
     }
 
     /// Test seam — point at a mock HTTP server. Production callers
@@ -649,22 +631,19 @@ impl GoogleSearchProvider {
     /// production path uses it internally before every `SearchError`
     /// emission.
     ///
-    /// The credentials live behind `SecretBox<String>`, so
-    /// this method exposes them only for the duration of the
-    /// `String::replace` call — the underlying bytes don't escape
-    /// into a longer-lived borrow.
+    /// This is defense in depth for the opaque placeholder and CSE identifier;
+    /// the raw API key never enters this process.
     pub fn redact_credentials(&self, message: String) -> String {
-        let api_key = self.api_key.expose_secret();
-        let cse_id = self.cse_id.expose_secret();
+        let api_key = self.api_key.as_str();
         let scrubbed = if api_key.is_empty() {
             message
         } else {
-            message.replace(api_key.as_str(), "<REDACTED>")
+            message.replace(api_key, "<REDACTED>")
         };
-        if cse_id.is_empty() {
+        if self.cse_id.is_empty() {
             scrubbed
         } else {
-            scrubbed.replace(cse_id.as_str(), "<REDACTED>")
+            scrubbed.replace(&self.cse_id, "<REDACTED>")
         }
     }
 }
@@ -717,33 +696,21 @@ impl SearchProvider for GoogleSearchProvider {
         let request_url = build_query_url(
             &self.endpoint,
             &[
-                ("key", self.api_key.expose_secret().as_str()),
-                ("cx", self.cse_id.expose_secret().as_str()),
+                ("cx", self.cse_id.as_str()),
                 ("q", query),
                 ("num", num_string.as_str()),
             ],
         )?;
-        let response = self
-            .client
-            .get(request_url)
-            .send()
+        let request = mvm_core::substitution_wire::WireRequest {
+            method: "GET".into(),
+            url: request_url.to_string(),
+            headers: vec![("x-goog-api-key".into(), self.api_key.as_str().to_string())],
+            body_b64: String::new(),
+        };
+        let (status, body) = execute_provider_request(&self.connector, &request)
             .await
-            .map_err(|e| SearchError::Upstream(self.redact_credentials(e.to_string())))?;
-        let status = response.status();
-        if status.as_u16() == 429 {
-            return Err(SearchError::RateLimited);
-        }
-        if !status.is_success() {
-            // Status messages include the URL on some
-            // error paths. Scrub defensively even though the
-            // canonical "non-success" string here doesn't.
-            return Err(SearchError::Upstream(self.redact_credentials(format!(
-                "Google search returned status {status}"
-            ))));
-        }
-        let body = read_capped(response, DEFAULT_RESPONSE_BODY_CAP)
-            .await
-            .map_err(|msg| SearchError::Upstream(self.redact_credentials(msg)))?;
+            .map_err(|error| SearchError::Upstream(self.redact_credentials(error.to_string())))?;
+        classify_status("Google", status)?;
         let parsed: GoogleResponse = serde_json::from_slice(&body).map_err(|e| {
             SearchError::Upstream(self.redact_credentials(format!("decoding Google response: {e}")))
         })?;
@@ -814,11 +781,43 @@ mod tests {
     use super::*;
     use mvm_core::util::test_env::TestEnv;
 
-    /// Test helper: wrap a literal in `SecretBox<String>`. The
-    /// production callers receive a `SecretBox` from the credential
-    /// resolver in mvm-cli; tests build their own here.
-    fn sk(s: &str) -> SecretBox<String> {
-        SecretBox::new(Box::new(s.to_string()))
+    fn sk(s: &str) -> Placeholder {
+        Placeholder::new(s)
+    }
+
+    fn connector() -> &'static str {
+        "/tmp/mvm-search-endpoint.sock"
+    }
+
+    async fn spawn_connector(
+        body: &'static [u8],
+    ) -> (
+        tempfile::TempDir,
+        std::path::PathBuf,
+        tokio::sync::oneshot::Receiver<mvm_core::substitution_wire::WireRequest>,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("connector.sock");
+        let listener = tokio::net::UnixListener::bind(&path).unwrap();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let request = crate::framing::read_json_frame(&mut stream, 16 * 1024 * 1024)
+                .await
+                .unwrap();
+            tx.send(request).ok();
+            crate::framing::write_json_frame(
+                &mut stream,
+                &mvm_core::substitution_wire::WireResponse::Ok {
+                    status: 200,
+                    headers: Vec::new(),
+                    body_b64: base64::engine::general_purpose::STANDARD.encode(body),
+                },
+            )
+            .await
+            .unwrap();
+        });
+        (dir, path, rx)
     }
 
     struct StubProvider {
@@ -1119,22 +1118,34 @@ mod tests {
 
     #[test]
     fn brave_provider_is_named_brave() {
-        let p = BraveSearchProvider::new(sk("test-key")).expect("build brave");
+        let p = BraveSearchProvider::new(connector(), sk("test-key"));
         assert_eq!(p.name(), "brave");
     }
 
     #[test]
     fn brave_provider_constructs_with_default_endpoint() {
-        let p = BraveSearchProvider::new(sk("key")).unwrap();
+        let p = BraveSearchProvider::new(connector(), sk("key"));
         assert_eq!(p.endpoint, BraveSearchProvider::DEFAULT_ENDPOINT);
     }
 
     #[test]
     fn brave_provider_with_endpoint_overrides() {
-        let p = BraveSearchProvider::new(sk("key"))
-            .unwrap()
+        let p = BraveSearchProvider::new(connector(), sk("key"))
             .with_endpoint("https://mock.test/search");
         assert_eq!(p.endpoint, "https://mock.test/search");
+    }
+
+    #[tokio::test]
+    async fn brave_routes_a_placeholder_through_the_endpoint_connector() {
+        let (_dir, path, request) = spawn_connector(
+            br#"{"web":{"results":[{"title":"x","url":"https://x.test","description":"y"}]}}"#,
+        )
+        .await;
+        let provider = BraveSearchProvider::new(path, sk("mvm-secret-deadbeef"));
+        provider.search("rust", 1).await.unwrap();
+        let request = request.await.unwrap();
+        assert_eq!(request.headers[0].1, "mvm-secret-deadbeef");
+        assert!(!request.headers[0].1.contains("real-key"));
     }
 
     #[test]
@@ -1201,22 +1212,36 @@ mod tests {
 
     #[test]
     fn tavily_provider_is_named_tavily() {
-        let p = TavilySearchProvider::new(sk("test-key")).expect("build tavily");
+        let p = TavilySearchProvider::new(connector(), sk("test-key"));
         assert_eq!(p.name(), "tavily");
     }
 
     #[test]
     fn tavily_provider_constructs_with_default_endpoint() {
-        let p = TavilySearchProvider::new(sk("key")).unwrap();
+        let p = TavilySearchProvider::new(connector(), sk("key"));
         assert_eq!(p.endpoint, TavilySearchProvider::DEFAULT_ENDPOINT);
     }
 
     #[test]
     fn tavily_provider_with_endpoint_overrides() {
-        let p = TavilySearchProvider::new(sk("key"))
-            .unwrap()
+        let p = TavilySearchProvider::new(connector(), sk("key"))
             .with_endpoint("https://mock.test/search");
         assert_eq!(p.endpoint, "https://mock.test/search");
+    }
+
+    #[tokio::test]
+    async fn tavily_routes_a_placeholder_through_the_endpoint_connector() {
+        let (_dir, path, request) =
+            spawn_connector(br#"{"results":[{"title":"x","url":"https://x.test","content":"y"}]}"#)
+                .await;
+        let provider = TavilySearchProvider::new(path, sk("mvm-secret-deadbeef"));
+        provider.search("rust", 1).await.unwrap();
+        let request = request.await.unwrap();
+        assert_eq!(request.headers[0].1, "Bearer mvm-secret-deadbeef");
+        let body = base64::engine::general_purpose::STANDARD
+            .decode(request.body_b64)
+            .unwrap();
+        assert!(!String::from_utf8(body).unwrap().contains("api_key"));
     }
 
     #[test]
@@ -1273,14 +1298,27 @@ mod tests {
 
     #[test]
     fn google_provider_is_named_google() {
-        let p = GoogleSearchProvider::new(sk("test-key"), sk("test-cse")).unwrap();
+        let p = GoogleSearchProvider::new(connector(), sk("test-key"), "test-cse");
         assert_eq!(p.name(), "google");
     }
 
     #[test]
     fn google_provider_constructs_with_default_endpoint() {
-        let p = GoogleSearchProvider::new(sk("k"), sk("c")).unwrap();
+        let p = GoogleSearchProvider::new(connector(), sk("k"), "c");
         assert_eq!(p.endpoint, GoogleSearchProvider::DEFAULT_ENDPOINT);
+    }
+
+    #[tokio::test]
+    async fn google_routes_a_placeholder_through_the_endpoint_connector() {
+        let (_dir, path, request) =
+            spawn_connector(br#"{"items":[{"title":"x","link":"https://x.test","snippet":"y"}]}"#)
+                .await;
+        let provider = GoogleSearchProvider::new(path, sk("mvm-secret-deadbeef"), "cse");
+        provider.search("rust", 1).await.unwrap();
+        let request = request.await.unwrap();
+        assert_eq!(request.headers[0].1, "mvm-secret-deadbeef");
+        assert!(!request.url.contains("key="));
+        assert!(request.url.contains("cx=cse"));
     }
 
     #[test]
@@ -1328,7 +1366,7 @@ mod tests {
         // The hand-written Debug must NOT print the api_key or
         // cse_id verbatim, so `tracing::error!(provider = ?p,
         // ...)` doesn't leak them into the audit chain.
-        let p = GoogleSearchProvider::new(sk("MY-SECRET-KEY"), sk("MY-CSE-ID")).unwrap();
+        let p = GoogleSearchProvider::new(connector(), sk("MY-SECRET-KEY"), "MY-CSE-ID");
         let formatted = format!("{p:?}");
         assert!(
             !formatted.contains("MY-SECRET-KEY"),
@@ -1346,7 +1384,7 @@ mod tests {
 
     #[test]
     fn redact_credentials_removes_api_key_and_cse_id() {
-        let p = GoogleSearchProvider::new(sk("MY-SECRET-KEY"), sk("MY-CSE-ID")).unwrap();
+        let p = GoogleSearchProvider::new(connector(), sk("MY-SECRET-KEY"), "MY-CSE-ID");
         let raw = "connect error to \
                    https://www.googleapis.com/customsearch/v1?key=MY-SECRET-KEY&cx=MY-CSE-ID&q=x"
             .to_string();
@@ -1371,7 +1409,7 @@ mod tests {
         // strings would, under naive `String::replace("", ...)`,
         // expand a marker between every character. The impl
         // short-circuits empty inputs to avoid that.
-        let p = GoogleSearchProvider::new(sk(""), sk("")).unwrap();
+        let p = GoogleSearchProvider::new(connector(), sk(""), "");
         assert_eq!(
             p.redact_credentials("hello world".to_string()),
             "hello world"
@@ -1380,12 +1418,9 @@ mod tests {
 
     #[tokio::test]
     async fn google_search_network_error_does_not_leak_api_key() {
-        // W5 end-to-end: point at an unreachable port so the client
-        // returns a network error whose Display includes the URL
-        // (which contains the API key). The provider must scrub
-        // it before wrapping into SearchError::Upstream.
-        let p = GoogleSearchProvider::new(sk("MY-SECRET-KEY"), sk("MY-CSE-ID"))
-            .unwrap()
+        // An absent connector must return a payload-free error and cannot fall
+        // back to a direct network connection.
+        let p = GoogleSearchProvider::new(connector(), sk("MY-SECRET-KEY"), "MY-CSE-ID")
             .with_endpoint("http://127.0.0.1:1/");
         let err = p.search("rust async", 5).await.unwrap_err();
         match err {

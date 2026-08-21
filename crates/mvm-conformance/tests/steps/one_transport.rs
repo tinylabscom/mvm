@@ -427,6 +427,7 @@ fn secret_bearing_config() -> mvm_hostd::supervisor::network_endpoint::EndpointC
         session_marker: None,
         session_ready_socket: None,
         resolver: Default::default(),
+        connector_uds_path: None,
         flowmux_identity: None,
     }
 }

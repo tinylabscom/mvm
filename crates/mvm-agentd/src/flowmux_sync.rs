@@ -31,6 +31,10 @@ use mvm_contract::protocol::network_flow::{
 use mvm_core::net::session::{Session, read_sealed_frame, write_sealed_frame};
 use mvm_core::substitution_wire::{HttpFlowHead, HttpFlowResponseHead, WireRequest, WireResponse};
 
+/// Independent guest-side ceiling for a typed response, including responses
+/// whose upstream did not declare a content length.
+const MAX_HTTP_RESPONSE_BODY_LEN: u64 = 32 * 1024 * 1024;
+
 use crate::flowmux_drive::{GUEST_SIGNING_KEY_FILE, HOST_SIGNER_PUB_FILE};
 
 /// Where the guest inits leave the identity material the drive carried.
@@ -277,12 +281,15 @@ impl SyncFlowMux {
             HttpFlowResponseHead::Refused { message } => {
                 // Still drain to the completion so the session is left clean
                 // for the next exchange on it.
-                let _ = self.drain_to_complete(stream_id, 0, &mut Vec::new());
+                let _ = self.drain_to_complete(stream_id, Some(0), &mut Vec::new());
                 return Ok(WireResponse::Refused { message });
             }
         };
 
-        let mut body = Vec::with_capacity(body_len.min(1 << 20) as usize);
+        if body_len.is_some_and(|len| len > MAX_HTTP_RESPONSE_BODY_LEN) {
+            bail!("response body exceeds the {MAX_HTTP_RESPONSE_BODY_LEN} byte limit");
+        }
+        let mut body = Vec::with_capacity(body_len.unwrap_or(0).min(1 << 20) as usize);
         self.drain_to_complete(stream_id, body_len, &mut body)?;
         Ok(WireResponse::Ok {
             status,
@@ -296,7 +303,7 @@ impl SyncFlowMux {
     fn drain_to_complete(
         &mut self,
         stream_id: u32,
-        body_len: u64,
+        body_len: Option<u64>,
         body: &mut Vec<u8>,
     ) -> Result<()> {
         loop {
@@ -304,8 +311,13 @@ impl SyncFlowMux {
                 (Opcode::HttpComplete, id, _) if id == stream_id => break,
                 (Opcode::HttpResponseBody, id, payload) if id == stream_id => {
                     body.extend_from_slice(&payload);
-                    if body.len() as u64 > body_len {
-                        bail!("response body overran the declared {body_len} bytes");
+                    if body.len() as u64 > MAX_HTTP_RESPONSE_BODY_LEN {
+                        bail!("response body exceeds the {MAX_HTTP_RESPONSE_BODY_LEN} byte limit");
+                    }
+                    if let Some(declared) = body_len
+                        && body.len() as u64 > declared
+                    {
+                        bail!("response body overran the declared {declared} bytes");
                     }
                 }
                 (Opcode::Reset, _, payload) => {
@@ -316,9 +328,11 @@ impl SyncFlowMux {
                 }
             }
         }
-        if (body.len() as u64) != body_len {
+        if let Some(declared) = body_len
+            && body.len() as u64 != declared
+        {
             bail!(
-                "response body was {} bytes, head declared {body_len}",
+                "response body was {} bytes, head declared {declared}",
                 body.len()
             );
         }
@@ -468,7 +482,9 @@ mod tests {
             let response_head = HttpFlowResponseHead::Ok {
                 status: 200,
                 headers: vec![("content-type".into(), "text/plain".into())],
-                body_len: reply_body.len() as u64,
+                // A chunked upstream has no declared decoded length. The
+                // guest drains bounded body frames through HttpComplete.
+                body_len: None,
             };
             send(
                 &mut session,

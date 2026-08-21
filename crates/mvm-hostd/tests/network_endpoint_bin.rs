@@ -100,6 +100,7 @@ impl Drop for Kill {
 fn endpoint_bin_serves_substitution_and_refuses_unbound_destination() {
     let dir = tempfile::tempdir().unwrap();
     let sock = dir.path().join("substitution.sock");
+    let connector = dir.path().join("connector.sock");
 
     // Host stores: a Bearer secret bound to api.openai.com only.
     FileBindingStore::with_dir(dir.path().join("bindings"))
@@ -147,6 +148,7 @@ fn endpoint_bin_serves_substitution_and_refuses_unbound_destination() {
         resolver: ResolverBackend::default(),
         session_marker: None,
         session_ready_socket: None,
+        connector_uds_path: Some(connector.clone()),
         flowmux_identity: None,
     };
 
@@ -174,7 +176,7 @@ fn endpoint_bin_serves_substitution_and_refuses_unbound_destination() {
     assert!(placeholder.starts_with("mvm-secret-"), "got {placeholder}");
 
     // The endpoint bound the UDS before the handshake, so it's reachable now.
-    let mut conn = UnixStream::connect(&sock).expect("connect to endpoint UDS");
+    let mut conn = UnixStream::connect(&connector).expect("connect to typed endpoint connector");
     let req = WireRequest {
         method: "POST".into(),
         // NOT in allowed_hosts — claim-12 bind-check refuses before forwarding,
@@ -258,6 +260,7 @@ fn endpoint_bin_claim10_gate_refuses_a_bound_but_unadmitted_destination() {
         resolver: ResolverBackend::default(),
         session_marker: None,
         session_ready_socket: None,
+        connector_uds_path: None,
         flowmux_identity: None,
     };
 
@@ -341,6 +344,7 @@ fn a_flowmux_endpoint_keeps_serving_sessions_after_one_ends() {
         resolver: ResolverBackend::default(),
         session_marker: Some(session_marker.clone()),
         session_ready_socket: Some(session_ready_socket.clone()),
+        connector_uds_path: None,
         flowmux_identity: Some(FlowMuxIdentity {
             session_id: "keeps-serving".into(),
             host_signing_key_base64: b64.encode(host_key.to_bytes()),
@@ -443,6 +447,7 @@ fn a_flowmux_endpoint_enforces_one_admitted_ceiling_across_sessions() {
         egress_mode: EgressMode::FlowMux,
         resolver: ResolverBackend::default(),
         session_marker: None,
+        connector_uds_path: None,
         session_ready_socket: None,
         flowmux_identity: Some(FlowMuxIdentity {
             session_id: "shared-limit".into(),
@@ -540,6 +545,7 @@ fn a_flowmux_endpoint_refuses_zero_limits_decoded_from_config() {
         resolver: ResolverBackend::default(),
         session_marker: None,
         session_ready_socket: None,
+        connector_uds_path: None,
         flowmux_identity: Some(FlowMuxIdentity {
             session_id: "invalid-limit".into(),
             host_signing_key_base64: b64.encode([23u8; 32]),

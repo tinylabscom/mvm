@@ -10,6 +10,7 @@ on:
       - "crates/mvm-hostd/src/netd/userspace/**"
       - "crates/mvm-hostd/src/supervisor/flowmux/**"
       - "xtask/src/network_perf.rs"
+      - "specs/benchmarks/network/**"
   workflow_dispatch:
 
 permissions:
