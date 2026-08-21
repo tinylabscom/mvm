@@ -184,8 +184,9 @@ fn seed_from_default_cache(
 }
 
 /// Resolve a cached universal initramfs, or return an error describing why it
-/// is unavailable. A cold cache on Linux falls back to the deterministic
-/// cargo build; a cold cache elsewhere falls back to the published download.
+/// is unavailable. A cold contributor cache on Linux falls back to the
+/// deterministic Cargo build; release distributions and non-Linux hosts use
+/// the published download.
 pub fn resolve_or_build_local_initramfs(
     _env: &dyn ShellEnvironment,
     cache_root: &Path,
@@ -201,8 +202,10 @@ pub fn resolve_or_build_local_initramfs(
     }
 
     #[cfg(target_os = "linux")]
-    {
+    if crate::artifact_acquisition::compiled_channel().permits_automatic_builds() {
         build_initramfs_with_cargo(cache_root, version, arch)
+    } else {
+        download_initramfs_with_negative_cache(version, arch, cache_root)
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -455,10 +458,8 @@ const DEFAULT_RELEASE_BASE: &str = "https://github.com/tinylabscom/mvm/releases/
 
 /// A confirmed release-artifact 404 is retried daily so a late release upload
 /// becomes visible without making every invocation pay the network cost.
-#[cfg(any(not(target_os = "linux"), test))]
 const RELEASE_NOT_FOUND_TTL: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
 
-#[cfg(any(not(target_os = "linux"), test))]
 const RELEASE_NOT_FOUND_CACHE_DIR: &str = ".release-not-found";
 
 /// Documented escape hatch to bypass SHA-256 integrity checks. Mirrors the
@@ -493,7 +494,6 @@ pub fn release_base_url(version: &str) -> String {
     format!("{}/v{version}", base.trim_end_matches('/'))
 }
 
-#[cfg(any(not(target_os = "linux"), test))]
 fn release_not_found_marker(cache_root: &Path, version: &str, arch: GuestArch) -> PathBuf {
     cache_root
         .join(RELEASE_NOT_FOUND_CACHE_DIR)
@@ -501,7 +501,6 @@ fn release_not_found_marker(cache_root: &Path, version: &str, arch: GuestArch) -
         .join(arch.to_string())
 }
 
-#[cfg(any(not(target_os = "linux"), test))]
 fn record_release_not_found(
     cache_root: &Path,
     version: &str,
@@ -514,7 +513,6 @@ fn record_release_not_found(
     Ok(())
 }
 
-#[cfg(any(not(target_os = "linux"), test))]
 fn release_not_found_is_fresh(cache_root: &Path, version: &str, arch: GuestArch, now: u64) -> bool {
     let marker = release_not_found_marker(cache_root, version, arch);
     let Some(observed_at) = std::fs::read_to_string(marker)
@@ -526,7 +524,6 @@ fn release_not_found_is_fresh(cache_root: &Path, version: &str, arch: GuestArch,
     now.saturating_sub(observed_at) < RELEASE_NOT_FOUND_TTL.as_secs()
 }
 
-#[cfg(not(target_os = "linux"))]
 fn current_unix_seconds() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -534,7 +531,6 @@ fn current_unix_seconds() -> u64 {
         .as_secs()
 }
 
-#[cfg(any(not(target_os = "linux"), test))]
 fn not_found_error(version: &str, arch: GuestArch) -> InitramfsBuildError {
     let names = InitramfsArtifactNames::for_arch(&arch.to_string());
     InitramfsBuildError::DownloadNotFound {
@@ -542,7 +538,6 @@ fn not_found_error(version: &str, arch: GuestArch) -> InitramfsBuildError {
     }
 }
 
-#[cfg(any(not(target_os = "linux"), test))]
 fn with_release_negative_cache<T>(
     cache_root: &Path,
     version: &str,
@@ -584,7 +579,6 @@ fn with_release_negative_cache<T>(
     }
 }
 
-#[cfg(not(target_os = "linux"))]
 fn download_initramfs_with_negative_cache(
     version: &str,
     arch: GuestArch,

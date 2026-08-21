@@ -64,7 +64,9 @@ mod builder_backend_attempt_order_tests {
 
 #[cfg(test)]
 mod default_microvm_tests {
-    use super::default_microvm::default_workload_kernel_source;
+    use super::default_microvm::{
+        default_workload_kernel_source, default_workload_kernel_source_for,
+    };
     use super::{KernelSource, default_microvm_assets, missing_workload_kernel_message};
 
     #[test]
@@ -127,6 +129,17 @@ mod default_microvm_tests {
         assert_eq!(default_workload_kernel_source(true), KernelSource::Compile);
         assert_eq!(
             default_workload_kernel_source(false),
+            KernelSource::Download
+        );
+    }
+
+    #[test]
+    fn official_release_defaults_to_download_even_inside_a_checkout() {
+        assert_eq!(
+            default_workload_kernel_source_for(
+                mvm_build::artifact_acquisition::DistributionChannel::Release,
+                true,
+            ),
             KernelSource::Download
         );
     }

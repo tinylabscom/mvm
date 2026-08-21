@@ -22,25 +22,30 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
     bootstrap_environment(args.production)
 }
 
-/// Full environment bootstrap: host tooling plus the builder VM image and
-/// workload kernel. Completion means the next `machine run` does not discover
-/// a builder-image or workload-kernel build on its hot path.
+/// Full environment bootstrap: host tooling plus every shared artifact needed
+/// before an OCI workload can launch.
 pub(in crate::commands) fn bootstrap_environment(production: bool) -> Result<()> {
     run_steps(production)?;
     let kernel = acquire_bootstrap_artifacts_with(
         super::builder_vm::bootstrap_builder_vm_image,
         super::builder_vm::ensure_workload_kernel,
+        prepare_launch_runtime_artifacts,
     )?;
     ui::success(&format!(
-        "\nBootstrap complete. Builder VM and workload kernel are ready.\nFuture machine runs will reuse these artifacts.\nWorkload kernel: {kernel}"
+        "\nBootstrap complete. Builder VM, workload kernel, runtime overlay, initramfs, and OCI guest shims are ready.\nFuture machine runs will reuse these artifacts.\nWorkload kernel: {kernel}"
     ));
     Ok(())
 }
 
-fn acquire_bootstrap_artifacts_with<B, K>(builder: B, workload_kernel: K) -> Result<String>
+fn acquire_bootstrap_artifacts_with<B, K, R>(
+    builder: B,
+    workload_kernel: K,
+    runtime: R,
+) -> Result<String>
 where
     B: FnOnce() -> Result<()>,
     K: FnOnce() -> Result<String>,
+    R: FnOnce() -> Result<()>,
 {
     ui::info("Preparing builder VM...");
     builder().context("preparing builder VM")?;
@@ -49,7 +54,58 @@ where
     ui::info("Preparing workload kernel...");
     let kernel = workload_kernel().context("preparing workload kernel")?;
     ui::success("Workload kernel ready.");
+    ui::info("Preparing shared guest runtime...");
+    runtime().context("preparing shared guest runtime")?;
+    ui::success("Shared guest runtime ready.");
     Ok(kernel)
+}
+
+fn prepare_launch_runtime_artifacts() -> Result<()> {
+    use crate::commands::runtime_overlay::{
+        RuntimeOverlayAcquireMode, RuntimeOverlayAcquireParams, acquire_runtime_overlay,
+        runtime_overlay_acquire_mode,
+    };
+
+    let cache_root = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir());
+    let oci_cache_root = cache_root.join("oci");
+    let version = env!("CARGO_PKG_VERSION");
+    let arch = mvm_core::arch::GuestArch::host();
+    crate::commands::runtime_overlay::prepare_oci_guest_runtime(&oci_cache_root)?;
+    let mode = runtime_overlay_acquire_mode();
+    match mode {
+        RuntimeOverlayAcquireMode::BuildFromSourceCheckout => {
+            mvm_build::runtime_overlay::resolve_or_build_local_runtime_overlay(
+                &cache_root,
+                version,
+                arch,
+            )?;
+        }
+        RuntimeOverlayAcquireMode::DownloadPublishedArtifact => {
+            let resolver = mvm_fs::overlay::RuntimeOverlayResolver::new(
+                cache_root.clone(),
+                version.to_string(),
+            );
+            let overlay_ready =
+                mvm_build::runtime_overlay::resolve_or_seed_from_default_cache(&resolver, arch)
+                    .is_ok();
+            if !overlay_ready {
+                acquire_runtime_overlay(&RuntimeOverlayAcquireParams {
+                    cache_root: &cache_root,
+                    expected_version: version,
+                    arch,
+                    source_checkout_root: None,
+                })?;
+            }
+        }
+    }
+
+    mvm_build::initramfs::resolve_or_build_local_initramfs(
+        &mvm_runtime::build_env::RuntimeBuildEnv,
+        &cache_root.join("initramfs"),
+        version,
+        arch,
+    )?;
+    Ok(())
 }
 
 /// Run the host-tooling bootstrap steps only (no builder-image prefetch) —
@@ -89,10 +145,14 @@ mod tests {
                 calls.borrow_mut().push("workload");
                 Ok("/cache/workload/vmlinux".to_string())
             },
+            || {
+                calls.borrow_mut().push("runtime");
+                Ok(())
+            },
         )
         .unwrap();
 
-        assert_eq!(calls.into_inner(), ["builder", "workload"]);
+        assert_eq!(calls.into_inner(), ["builder", "workload", "runtime"]);
         assert_eq!(kernel, "/cache/workload/vmlinux");
     }
 
@@ -105,6 +165,7 @@ mod tests {
                 workload_called.set(true);
                 Ok("/cache/workload/vmlinux".to_string())
             },
+            || Ok(()),
         );
 
         assert!(result.is_err());
@@ -116,9 +177,25 @@ mod tests {
         let result = acquire_bootstrap_artifacts_with(
             || Ok(()),
             || anyhow::bail!("kernel acquisition failed"),
+            || Ok(()),
         );
 
         let err = result.unwrap_err().to_string();
         assert!(err.contains("workload kernel"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn bootstrap_fails_when_shared_runtime_is_not_ready() {
+        let result = acquire_bootstrap_artifacts_with(
+            || Ok(()),
+            || Ok("/cache/workload/vmlinux".to_string()),
+            || anyhow::bail!("overlay unavailable"),
+        );
+
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("shared guest runtime"),
+            "unexpected error: {err}"
+        );
     }
 }

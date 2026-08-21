@@ -54,6 +54,8 @@ pub(in crate::commands) fn resolve_or_pull_run_image(
     reference: &str,
     prod: bool,
 ) -> Result<ResolvedOciRunImage> {
+    ensure_prod_digest_pin(reference, prod)?;
+    crate::commands::runtime_overlay::prepare_oci_guest_runtime(cache_root)?;
     resolve_or_pull_run_image_with(
         cache_root,
         reference,
@@ -206,6 +208,7 @@ pub(super) fn pull_image_with_trust(
     if prod && !image_ref.is_digest_pinned() {
         bail!("mvmctl image pull --prod requires a digest-pinned reference");
     }
+    crate::commands::runtime_overlay::prepare_oci_guest_runtime(cache_root)?;
     pull_image_ref(cache_root, image_ref, reference, prod)
 }
 

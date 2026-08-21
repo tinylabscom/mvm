@@ -62,6 +62,10 @@ pkgs.rustPlatform.buildRustPackage {
     # for `MANDATORY_DENY_RANGES` at boot from `/init` (uid 0) before
     # the main agent forks under setpriv.
     "--bin" "mvm-guest-netinit"
+    # Runtime-lean OCI roots still need their static PID 1 and entrypoint
+    # wrapper before the read-only runtime overlay is mounted.
+    "--bin" "mvm-oci-init"
+    "--bin" "mvm-oci-entrypoint"
   ];
 
   # Same selection for the `nix flake check`-equivalent test run.

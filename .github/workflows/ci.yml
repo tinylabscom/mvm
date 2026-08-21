@@ -591,12 +591,18 @@ jobs:
           cargo nextest run -p mvm-agentd --features addons
           cargo check -p mvm-agentd --features addons --bins
 
-      # End-user release builds enable a bootstrap path that contributor builds
-      # deliberately omit. Keep that source compiled with warnings denied on
-      # every code-changing pull request so the nightly reproducibility lane is
-      # evidence, not the first compiler to see it.
-      - name: release-artifact bootstrap feature compiles
-        run: cargo check -p mvm-cli --features release-artifact-bootstrap --lib
+      # End-user release builds enable an acquisition policy that contributor
+      # builds deliberately omit: checkout proximity must never select a local
+      # compiler. Compile the CLI and execute the policy boundary tests on every
+      # code-changing pull request so the release workflow is not the first
+      # process to exercise that channel.
+      - name: release artifact acquisition contract
+        run: |
+          cargo check -p mvm-cli --features release-artifact-bootstrap --lib
+          cargo test -p mvm-build --features release-channel --lib \
+            artifact_acquisition
+          cargo test -p mvm-build --features release-channel --lib \
+            official_build_does_not_detect
 
       - name: Assert auto-detect still picks libkrun off Linux/HVF
         run: |

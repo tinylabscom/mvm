@@ -7,6 +7,16 @@ for detailed scope and acceptance criteria.
 
 ## Completed issue closeouts
 
+- [x] **Artifact acquisition is explicit across source and release builds.**
+      Official binaries download verified launch artifacts even when invoked
+      from an mvm checkout; contributor binaries may build source-matched
+      artifacts and name that cold-build phase. Bootstrap now prepares the
+      kernel, initramfs, runtime overlay, and OCI guest shims. The release
+      overlay carries all six shims, contract tests prevent producer/consumer
+      drift, and worktree-stable Cargo targets reuse dependencies without
+      weakening content-keyed final caches. The owning plan is
+      `specs/plans/2026-08-20-artifact-acquisition-contract.md`.
+
 - [x] **Issue #2657 — live BDD is visible and merge-gated.** Capability skips
       are reported instead of disappearing from the test summary, and a
       merge-queue/manual-only KVM lane runs one tagged Firecracker witness for

@@ -18,6 +18,20 @@
 
 use mvm_core::arch::GuestArch;
 use sha2::{Digest, Sha256};
+
+/// Internal CLI-to-builder switch: raw Cargo progress is opt-in with `-v`.
+pub const GUEST_BUILD_VERBOSE_ENV: &str = "MVM_GUEST_BUILD_VERBOSE";
+
+/// Static guest binaries required while materializing and booting an OCI root.
+/// Release packaging and download verification share this canonical set.
+pub const OCI_GUEST_RUNTIME_BINARY_NAMES: [&str; 6] = [
+    "mvm-oci-init",
+    "mvm-guest-agent",
+    "mvm-guest-netinit",
+    "mvm-egress-client",
+    "mvm-oci-entrypoint",
+    "mvm-verity-init",
+];
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
@@ -263,13 +277,15 @@ impl GuestAgentBuildSpec {
     }
 }
 
-/// The source-isolated Cargo target dir for a guest cross-compile.
+/// The worktree-isolated Cargo target dir for guest cross-compiles.
 ///
-/// Sharing one target directory across worktrees lets Cargo accept another
-/// checkout's newer output without recompiling. Hashing the content key keeps
-/// paths safe and gives every source generation a distinct dependency graph.
-pub fn guest_build_target_dir(cache_root: &Path, build_key: &str) -> PathBuf {
-    let digest = Sha256::digest(build_key.as_bytes());
+/// One checkout reuses dependency output across source edits; different
+/// worktrees hash to different target dirs and cannot serve each other stale
+/// workspace artifacts. Final guest binaries remain content-keyed separately.
+pub fn guest_build_target_dir(cache_root: &Path, workspace_root: &Path) -> PathBuf {
+    let stable_root =
+        std::fs::canonicalize(workspace_root).unwrap_or_else(|_| workspace_root.to_path_buf());
+    let digest = Sha256::digest(stable_root.to_string_lossy().as_bytes());
     cache_root
         .join("guest-agent-build")
         .join("targets")
@@ -304,18 +320,37 @@ pub fn source_workspace_from(start: &Path) -> Option<PathBuf> {
 pub fn detect_source_workspace() -> Option<PathBuf> {
     let executable = std::env::current_exe().ok();
     let current_dir = std::env::current_dir().ok();
-    source_workspace_for(
+    source_workspace_for_channel(
+        crate::artifact_acquisition::compiled_channel(),
         executable.as_deref(),
         current_dir.as_deref(),
         Path::new(env!("CARGO_MANIFEST_DIR")),
     )
 }
 
+#[cfg(test)]
 fn source_workspace_for(
     executable: Option<&Path>,
     current_dir: Option<&Path>,
     compiled_manifest_dir: &Path,
 ) -> Option<PathBuf> {
+    source_workspace_for_channel(
+        crate::artifact_acquisition::DistributionChannel::Source,
+        executable,
+        current_dir,
+        compiled_manifest_dir,
+    )
+}
+
+fn source_workspace_for_channel(
+    channel: crate::artifact_acquisition::DistributionChannel,
+    executable: Option<&Path>,
+    current_dir: Option<&Path>,
+    compiled_manifest_dir: &Path,
+) -> Option<PathBuf> {
+    if !channel.permits_automatic_builds() {
+        return None;
+    }
     executable
         .and_then(source_workspace_from)
         .or_else(|| current_dir.and_then(source_workspace_from))
@@ -387,54 +422,33 @@ pub fn guest_binary_source() -> Result<GuestBinarySource, GuestAgentBuildError> 
     }
 }
 
-/// A stable content fingerprint over the guest crate sources compiled into the
-/// runtime binaries (`mvm-agentd`): each crate's
-/// `Cargo.toml` plus every file under its `src/`. Hashes workspace-relative
-/// paths and bytes in sorted order so the digest is deterministic.
+/// A stable content fingerprint over every workspace input that can change the
+/// OCI guest binaries: dependency lock, workspace manifest, shared core code,
+/// guest code, and this build recipe. Host-only CLI edits are excluded.
 pub fn guest_source_fingerprint(workspace_root: &Path) -> Result<String, GuestAgentBuildError> {
-    use sha2::{Digest, Sha256};
-
-    let mut files: Vec<PathBuf> = Vec::new();
-    let crate_dir = workspace_root.join("crates/mvm-agentd");
-    let manifest = crate_dir.join("Cargo.toml");
-    if manifest.is_file() {
-        files.push(manifest);
-    }
-    collect_source_files(&crate_dir.join("src"), &mut files)?;
-    files.sort();
-
-    let mut h = Sha256::new();
-    for f in &files {
-        let rel = f.strip_prefix(workspace_root).unwrap_or(f);
-        h.update(rel.to_string_lossy().as_bytes());
-        h.update([0u8]);
-        h.update(std::fs::read(f)?);
-        h.update([0u8]);
-    }
-    Ok(hex::encode(h.finalize()))
-}
-
-/// Collect every regular file under `dir` (recursively) into `out`. Skips a
-/// `target` directory defensively; absent `dir` is a no-op.
-fn collect_source_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), GuestAgentBuildError> {
-    if !dir.exists() {
-        return Ok(());
-    }
-    let mut stack = vec![dir.to_path_buf()];
-    while let Some(path) = stack.pop() {
-        let meta = std::fs::symlink_metadata(&path)?;
-        if meta.is_dir() {
-            if path.file_name().is_some_and(|n| n == "target") {
-                continue;
-            }
-            for entry in std::fs::read_dir(&path)? {
-                stack.push(entry?.path());
-            }
-        } else if meta.is_file() {
-            out.push(path);
+    let mut hasher = Sha256::new();
+    hasher.update(b"mvm-oci-guest-build-input-v1\0");
+    for rel in [
+        "Cargo.lock",
+        "Cargo.toml",
+        "crates/mvm-contract/Cargo.toml",
+        "crates/mvm-contract/src",
+        "crates/mvm-core/Cargo.toml",
+        "crates/mvm-core/src",
+        "crates/mvm-agentd/Cargo.toml",
+        "crates/mvm-agentd/src",
+        "crates/mvm-build/src/guest_agent_build.rs",
+    ] {
+        let path = workspace_root.join(rel);
+        if path.is_dir() {
+            hash_dir_recursive(&mut hasher, rel, &path)?;
+        } else if path.is_file() {
+            hash_file(&mut hasher, rel, &path)?;
+        } else {
+            return Err(GuestAgentBuildError::OutputMissing(path));
         }
     }
-    Ok(())
+    Ok(hex::encode(hasher.finalize()))
 }
 
 /// Resolve the guest binaries for `(cache_key, arch)`, building + caching them
@@ -462,7 +476,7 @@ pub fn resolve_or_build_guest_binaries(
     let spec = GuestAgentBuildSpec::new(
         workspace_root.to_path_buf(),
         arch,
-        guest_build_target_dir(cache_root, cache_key),
+        guest_build_target_dir(cache_root, workspace_root),
     );
     let built = build_guest_binaries(&spec)?;
     install_into_cache(
@@ -564,39 +578,13 @@ pub fn resolve_or_build_runtime_overlay_guest_binaries(
     if layout.is_complete() {
         return Ok(layout.binaries());
     }
-    build_runtime_overlay_guest_binaries_into_cache(
-        cache_root,
-        &layout,
-        workspace_root,
-        arch,
-        &fingerprint,
-    )
+    build_runtime_overlay_guest_binaries_into_cache(cache_root, &layout, workspace_root, arch)
 }
 
 pub fn runtime_overlay_source_checkout_fingerprint(
     workspace_root: &Path,
 ) -> Result<String, GuestAgentBuildError> {
-    let mut hasher = Sha256::new();
-    hasher.update(b"mvm-runtime-overlay-source-checkout-v1\0");
-    for rel in [
-        "Cargo.lock",
-        "Cargo.toml",
-        "crates/mvm-core/Cargo.toml",
-        "crates/mvm-core/src",
-        "crates/mvm-agentd/Cargo.toml",
-        "crates/mvm-agentd/src",
-        "crates/mvm-build/src/guest_agent_build.rs",
-    ] {
-        let path = workspace_root.join(rel);
-        if path.is_dir() {
-            hash_dir_recursive(&mut hasher, rel, &path)?;
-        } else if path.is_file() {
-            hash_file(&mut hasher, rel, &path)?;
-        } else {
-            return Err(GuestAgentBuildError::OutputMissing(path));
-        }
-    }
-    Ok(hex::encode(hasher.finalize()))
+    guest_source_fingerprint(workspace_root)
 }
 
 fn build_runtime_overlay_guest_binaries_into_cache(
@@ -604,13 +592,12 @@ fn build_runtime_overlay_guest_binaries_into_cache(
     layout: &RuntimeOverlayGuestLayout,
     workspace_root: &Path,
     arch: GuestArch,
-    fingerprint: &str,
 ) -> Result<RuntimeOverlayGuestBinaries, GuestAgentBuildError> {
     std::fs::create_dir_all(&layout.dir)?;
     let spec = GuestAgentBuildSpec::new(
         workspace_root.to_path_buf(),
         arch,
-        guest_build_target_dir(cache_root, fingerprint),
+        guest_build_target_dir(cache_root, workspace_root),
     );
     let triple = spec.target_triple();
     let prod_args = vec![
@@ -660,6 +647,7 @@ fn build_runtime_overlay_guest_binaries_into_cache(
 }
 
 fn run_zigbuild(spec: &GuestAgentBuildSpec, args: &[String]) -> Result<(), GuestAgentBuildError> {
+    let started = std::time::Instant::now();
     let _zigbuild_lock = acquire_guest_zigbuild_lock(&spec.target_dir)?;
     let (cargo, rustc) = zigbuild_tools(spec)?;
     tracing::info!(
@@ -668,16 +656,21 @@ fn run_zigbuild(spec: &GuestAgentBuildSpec, args: &[String]) -> Result<(), Guest
         "cross-compiling guest runtime via cargo zigbuild (first build for this source checkout)"
     );
     let mut cmd = std::process::Command::new(&cargo);
-    cmd.args(args).current_dir(&spec.workspace_root);
+    cmd.args(zigbuild_args_for_output(args))
+        .current_dir(&spec.workspace_root);
     apply_zigbuild_env(&mut cmd, spec, rustc.as_deref())?;
-    // Inherit stdio so cargo's own "Compiling …" progress streams to the user: a
-    // multi-minute guest cross-compile must look alive, not like a silent hang.
+    // Cargo inherits stdio. Quiet mode suppresses routine progress while still
+    // surfacing compiler errors; the CLI's verbose mode preserves raw output.
     let status = cmd
         .status()
         .map_err(|e| GuestAgentBuildError::BuildFailed {
             reason: format!("spawn `{}`: {e}", cargo.display()),
         })?;
     if status.success() {
+        tracing::info!(
+            elapsed_ms = started.elapsed().as_millis(),
+            "guest runtime build complete"
+        );
         return Ok(());
     }
     Err(GuestAgentBuildError::BuildFailed {
@@ -717,6 +710,7 @@ pub fn build_guest_binaries(
     // measurement that hides a multi-minute build behind a "prepared" label is
     // worthless, so it is recorded at the one site that starts one.
     mvm_core::launch_trace::record_image_build();
+    let started = std::time::Instant::now();
     let _zigbuild_lock = acquire_guest_zigbuild_lock(&spec.target_dir)?;
     let argv = spec.argv();
     let (cargo, rustc) = zigbuild_tools(spec)?;
@@ -726,10 +720,11 @@ pub fn build_guest_binaries(
         "cross-compiling guest runtime via cargo zigbuild (first build for this source checkout)"
     );
     let mut cmd = std::process::Command::new(&cargo);
-    cmd.args(&argv[1..]).current_dir(&spec.workspace_root);
+    cmd.args(zigbuild_args_for_output(&argv[1..]))
+        .current_dir(&spec.workspace_root);
     apply_zigbuild_env(&mut cmd, spec, rustc.as_deref())?;
-    // Inherit stdio so cargo's own "Compiling …" progress streams to the user: a
-    // multi-minute guest cross-compile must look alive, not like a silent hang.
+    // Cargo inherits stdio. Quiet mode suppresses routine progress while still
+    // surfacing compiler errors; the CLI's verbose mode preserves raw output.
     let status = cmd
         .status()
         .map_err(|e| GuestAgentBuildError::BuildFailed {
@@ -743,6 +738,10 @@ pub fn build_guest_binaries(
             ),
         });
     }
+    tracing::info!(
+        elapsed_ms = started.elapsed().as_millis(),
+        "guest runtime build complete"
+    );
     let dir = spec.output_dir();
     let oci_init = dir.join("mvm-oci-init");
     let agent = dir.join("mvm-guest-agent");
@@ -770,6 +769,17 @@ pub fn build_guest_binaries(
         entrypoint_runner,
         verity_init,
     ))
+}
+
+fn zigbuild_args_for_output(args: &[String]) -> Vec<String> {
+    if std::env::var_os(GUEST_BUILD_VERBOSE_ENV).is_some() || args.is_empty() {
+        return args.to_vec();
+    }
+    let mut quiet = Vec::with_capacity(args.len() + 1);
+    quiet.push(args[0].clone());
+    quiet.push("--quiet".to_string());
+    quiet.extend_from_slice(&args[1..]);
+    quiet
 }
 
 fn apply_zigbuild_env(
@@ -943,29 +953,25 @@ fn set_exec(_path: &Path) -> Result<(), GuestAgentBuildError> {
     Ok(())
 }
 
+/// A minimal static ELF64-LE fixture accepted by the production validator.
+#[cfg(test)]
+pub(crate) fn fake_static_elf(arch: GuestArch, tag: &[u8]) -> Vec<u8> {
+    let machine: u16 = match arch {
+        GuestArch::X86_64 => 0x3E,
+        GuestArch::Aarch64 => 0xB7,
+    };
+    let mut bytes = vec![0u8; 64];
+    bytes[..4].copy_from_slice(&[0x7f, b'E', b'L', b'F']);
+    bytes[4] = 2;
+    bytes[5] = 1;
+    bytes[18..20].copy_from_slice(&machine.to_le_bytes());
+    bytes[54..56].copy_from_slice(&56u16.to_le_bytes());
+    bytes.extend_from_slice(tag);
+    bytes
+}
+
 #[cfg(test)]
 mod tests {
-
-    /// A minimal static ELF64-LE for `arch` that `validate_static_guest_elf`
-    /// accepts, tagged so each artifact's bytes stay distinguishable.
-    ///
-    /// The install path validates what it caches, so these fixtures have to be
-    /// loadable-looking rather than arbitrary strings.
-    fn fake_static_elf(arch: GuestArch, tag: &[u8]) -> Vec<u8> {
-        let machine: u16 = match arch {
-            GuestArch::X86_64 => 0x3E,
-            GuestArch::Aarch64 => 0xB7,
-        };
-        let mut b = vec![0u8; 64];
-        b[..4].copy_from_slice(&[0x7f, b'E', b'L', b'F']);
-        b[4] = 2; // ELFCLASS64
-        b[5] = 1; // ELFDATA2LSB
-        b[18..20].copy_from_slice(&machine.to_le_bytes());
-        // e_phoff / e_phnum stay zero: no program headers, so no PT_INTERP.
-        b[54..56].copy_from_slice(&56u16.to_le_bytes()); // e_phentsize
-        b.extend_from_slice(tag);
-        b
-    }
     use super::*;
     use mvm_core::util::test_env::TestEnv;
 
@@ -1229,14 +1235,33 @@ mod tests {
     }
 
     #[test]
-    fn guest_build_target_dirs_are_isolated_by_source_key() {
-        let first = guest_build_target_dir(Path::new("/c"), "src-aaa");
+    fn guest_build_target_dir_reuses_dependencies_across_edits_in_one_checkout() {
+        let first = guest_build_target_dir(Path::new("/c"), Path::new("/ws"));
         assert!(first.starts_with("/c/guest-agent-build/targets"));
+        assert_eq!(
+            first,
+            guest_build_target_dir(Path::new("/c"), Path::new("/ws")),
+            "source edits in one checkout must reuse Cargo dependency output"
+        );
         assert_ne!(
             first,
-            guest_build_target_dir(Path::new("/c"), "src-bbb"),
-            "different source checkouts must never share Cargo outputs"
+            guest_build_target_dir(Path::new("/c"), Path::new("/other-ws")),
+            "different worktrees must keep Cargo outputs isolated"
         );
+    }
+
+    #[test]
+    fn quiet_is_default_and_verbose_preserves_raw_cargo_output() {
+        let mut env = TestEnv::new();
+        env.remove(GUEST_BUILD_VERBOSE_ENV);
+        let args = vec!["zigbuild".to_string(), "--release".to_string()];
+        assert_eq!(
+            zigbuild_args_for_output(&args),
+            ["zigbuild", "--quiet", "--release"]
+        );
+
+        env.set(GUEST_BUILD_VERBOSE_ENV, "1");
+        assert_eq!(zigbuild_args_for_output(&args), args);
     }
 
     #[test]
@@ -1439,10 +1464,31 @@ rust = "1.91.1"
     /// Build a minimal fake source checkout under `root`: a workspace `Cargo.toml`
     /// plus a `crates/mvm-agentd/{Cargo.toml,src/main.rs}` carrying `agent_body`.
     fn make_fake_checkout(root: &Path, agent_body: &str) {
+        std::fs::create_dir_all(root.join("crates/mvm-contract/src")).unwrap();
+        std::fs::create_dir_all(root.join("crates/mvm-core/src")).unwrap();
         std::fs::create_dir_all(root.join("crates/mvm-agentd/src")).unwrap();
+        std::fs::create_dir_all(root.join("crates/mvm-build/src")).unwrap();
+        std::fs::write(root.join("Cargo.lock"), b"version = 4\n").unwrap();
         std::fs::write(root.join("Cargo.toml"), b"[workspace]\n").unwrap();
+        std::fs::write(root.join("crates/mvm-contract/Cargo.toml"), b"[package]\n").unwrap();
+        std::fs::write(
+            root.join("crates/mvm-contract/src/lib.rs"),
+            b"pub fn wire() {}\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("crates/mvm-core/Cargo.toml"), b"[package]\n").unwrap();
+        std::fs::write(
+            root.join("crates/mvm-core/src/lib.rs"),
+            b"pub fn core() {}\n",
+        )
+        .unwrap();
         std::fs::write(root.join("crates/mvm-agentd/Cargo.toml"), b"[package]\n").unwrap();
         std::fs::write(root.join("crates/mvm-agentd/src/main.rs"), agent_body).unwrap();
+        std::fs::write(
+            root.join("crates/mvm-build/src/guest_agent_build.rs"),
+            b"pub fn recipe() {}\n",
+        )
+        .unwrap();
     }
 
     #[test]
@@ -1492,12 +1538,46 @@ rust = "1.91.1"
     }
 
     #[test]
+    fn release_channel_ignores_every_checkout_hint() {
+        let executable_checkout = tempfile::tempdir().unwrap();
+        let current_checkout = tempfile::tempdir().unwrap();
+        make_fake_checkout(executable_checkout.path(), "fn main() { /* executable */ }");
+        make_fake_checkout(current_checkout.path(), "fn main() { /* current */ }");
+
+        let executable = executable_checkout.path().join("target/release/mvmctl");
+        let current_dir = current_checkout.path().join("crates/mvm-agentd");
+        let compiled_manifest = executable_checkout.path().join("crates/mvm-build");
+
+        assert_eq!(
+            source_workspace_for_channel(
+                crate::artifact_acquisition::DistributionChannel::Release,
+                Some(&executable),
+                Some(&current_dir),
+                &compiled_manifest,
+            ),
+            None,
+            "an official binary must not compile merely because it runs inside a checkout"
+        );
+    }
+
+    #[test]
+    #[cfg(not(feature = "release-channel"))]
     fn detect_source_workspace_resolves_this_repo() {
         // Running under nextest, cwd is `crates/mvm-build`; the walk up finds the
         // real workspace root, and it carries the guest crate.
         let ws = detect_source_workspace().expect("this is a source checkout");
         assert!(ws.join("crates/mvm-agentd").is_dir());
         assert!(ws.join("Cargo.toml").is_file());
+    }
+
+    #[cfg(feature = "release-channel")]
+    #[test]
+    fn official_build_does_not_detect_the_checkout_it_was_compiled_in() {
+        assert_eq!(detect_source_workspace(), None);
+        assert!(!source_build_pending(
+            Path::new("/tmp/official-release-empty-cache"),
+            GuestArch::host(),
+        ));
     }
 
     #[test]
@@ -1519,6 +1599,19 @@ rust = "1.91.1"
         // The digest is lowercase hex.
         assert_eq!(fa.len(), 64);
         assert!(fa.bytes().all(|x| x.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn fingerprint_fails_closed_when_a_declared_input_is_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        make_fake_checkout(tmp.path(), "fn main() {}");
+        std::fs::remove_file(tmp.path().join("Cargo.lock")).unwrap();
+
+        assert!(matches!(
+            guest_source_fingerprint(tmp.path()),
+            Err(GuestAgentBuildError::OutputMissing(path))
+                if path == tmp.path().join("Cargo.lock")
+        ));
     }
 
     #[test]
@@ -1582,40 +1675,11 @@ rust = "1.91.1"
     }
 
     #[test]
-    fn runtime_overlay_source_fingerprint_changes_when_guest_source_changes() {
+    fn guest_build_fingerprint_changes_when_shared_guest_dependency_changes() {
         let tmp = tempfile::TempDir::new().expect("tempdir");
         let root = tmp.path();
-        std::fs::create_dir_all(root.join("crates/mvm-core/src")).expect("mkdir mvm-core src");
-        std::fs::create_dir_all(root.join("crates/mvm-agentd/src")).expect("mkdir mvm-agentd src");
-        std::fs::create_dir_all(root.join("crates/mvm-build/src")).expect("mkdir mvm-build src");
+        make_fake_checkout(root, "pub fn guest() {}\n");
         std::fs::create_dir_all(root.join("crates/mvm-cli/src")).expect("mkdir mvm-cli src");
-        std::fs::write(root.join("Cargo.toml"), "[workspace]\n").expect("write workspace cargo");
-        std::fs::write(root.join("Cargo.lock"), "version = 3\n").expect("write cargo lock");
-        std::fs::write(
-            root.join("crates/mvm-core/Cargo.toml"),
-            "[package]\nname = \"mvm-core\"\nversion = \"0.1.0\"\n",
-        )
-        .expect("write mvm-core cargo");
-        std::fs::write(
-            root.join("crates/mvm-core/src/lib.rs"),
-            "pub fn core() {}\n",
-        )
-        .expect("write mvm-core src");
-        std::fs::write(
-            root.join("crates/mvm-agentd/Cargo.toml"),
-            "[package]\nname = \"mvm-agentd\"\nversion = \"0.1.0\"\n",
-        )
-        .expect("write mvm-agentd cargo");
-        std::fs::write(
-            root.join("crates/mvm-agentd/src/lib.rs"),
-            "pub fn guest() {}\n",
-        )
-        .expect("write mvm-agentd src");
-        std::fs::write(
-            root.join("crates/mvm-build/src/guest_agent_build.rs"),
-            "pub fn build_spec() {}\n",
-        )
-        .expect("write guest_agent_build src");
         std::fs::write(
             root.join("crates/mvm-cli/src/lib.rs"),
             "pub fn host_only() {}\n",
@@ -1624,10 +1688,10 @@ rust = "1.91.1"
 
         let before = runtime_overlay_source_checkout_fingerprint(root).expect("fingerprint before");
         std::fs::write(
-            root.join("crates/mvm-agentd/src/lib.rs"),
-            "pub fn guest() { println!(\"changed\"); }\n",
+            root.join("crates/mvm-contract/src/lib.rs"),
+            "pub fn wire() { println!(\"changed\"); }\n",
         )
-        .expect("rewrite mvm-agentd src");
+        .expect("rewrite mvm-contract src");
         let after = runtime_overlay_source_checkout_fingerprint(root).expect("fingerprint after");
 
         assert_ne!(before, after);
@@ -1637,37 +1701,8 @@ rust = "1.91.1"
     fn runtime_overlay_source_fingerprint_ignores_host_only_files() {
         let tmp = tempfile::TempDir::new().expect("tempdir");
         let root = tmp.path();
-        std::fs::create_dir_all(root.join("crates/mvm-core/src")).expect("mkdir mvm-core src");
-        std::fs::create_dir_all(root.join("crates/mvm-agentd/src")).expect("mkdir mvm-agentd src");
-        std::fs::create_dir_all(root.join("crates/mvm-build/src")).expect("mkdir mvm-build src");
+        make_fake_checkout(root, "pub fn guest() {}\n");
         std::fs::create_dir_all(root.join("crates/mvm-cli/src")).expect("mkdir mvm-cli src");
-        std::fs::write(root.join("Cargo.toml"), "[workspace]\n").expect("write workspace cargo");
-        std::fs::write(root.join("Cargo.lock"), "version = 3\n").expect("write cargo lock");
-        std::fs::write(
-            root.join("crates/mvm-core/Cargo.toml"),
-            "[package]\nname = \"mvm-core\"\nversion = \"0.1.0\"\n",
-        )
-        .expect("write mvm-core cargo");
-        std::fs::write(
-            root.join("crates/mvm-core/src/lib.rs"),
-            "pub fn core() {}\n",
-        )
-        .expect("write mvm-core src");
-        std::fs::write(
-            root.join("crates/mvm-agentd/Cargo.toml"),
-            "[package]\nname = \"mvm-agentd\"\nversion = \"0.1.0\"\n",
-        )
-        .expect("write mvm-agentd cargo");
-        std::fs::write(
-            root.join("crates/mvm-agentd/src/lib.rs"),
-            "pub fn guest() {}\n",
-        )
-        .expect("write mvm-agentd src");
-        std::fs::write(
-            root.join("crates/mvm-build/src/guest_agent_build.rs"),
-            "pub fn build_spec() {}\n",
-        )
-        .expect("write guest_agent_build src");
         std::fs::write(
             root.join("crates/mvm-cli/src/lib.rs"),
             "pub fn host_only() {}\n",

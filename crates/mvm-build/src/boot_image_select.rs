@@ -136,12 +136,21 @@ pub fn resolve(flag: Option<BootImageAcquisition>, is_source_checkout: bool) -> 
         };
     }
     ResolvedBootImage {
-        choice: if is_source_checkout {
-            BootImageAcquisition::Build
-        } else {
-            BootImageAcquisition::Fetch
-        },
+        choice: auto_detect(
+            crate::artifact_acquisition::compiled_channel(),
+            is_source_checkout,
+        ),
         source: BootImageSource::AutoDetect,
+    }
+}
+
+fn auto_detect(
+    channel: crate::artifact_acquisition::DistributionChannel,
+    is_source_checkout: bool,
+) -> BootImageAcquisition {
+    match crate::artifact_acquisition::default_acquisition(channel, is_source_checkout) {
+        crate::artifact_acquisition::DefaultAcquisition::Build => BootImageAcquisition::Build,
+        crate::artifact_acquisition::DefaultAcquisition::Download => BootImageAcquisition::Fetch,
     }
 }
 
@@ -171,7 +180,9 @@ mod tests {
         }
     }
 
-    /// The whole table: every knob state against both host kinds.
+    /// The whole table for contributor builds: every knob state against both
+    /// source-availability states.
+    #[cfg(not(feature = "release-channel"))]
     #[test]
     fn each_knob_value_resolves_to_the_intended_arm() {
         use BootImageAcquisition::{Build, Fetch};
@@ -218,11 +229,26 @@ mod tests {
         assert_eq!(got.source, BootImageSource::Flag);
     }
 
-    /// The default must be exactly today's behaviour: a checkout builds.
+    /// Contributor builds continue to compile artifacts available in the checkout.
     #[test]
     fn an_unset_knob_leaves_a_source_checkout_building() {
-        let mut test_env = TestEnv::new();
-        test_env.remove(MVM_BOOT_IMAGE_ENV);
-        assert_eq!(resolve(None, true).choice, BootImageAcquisition::Build);
+        assert_eq!(
+            auto_detect(
+                crate::artifact_acquisition::DistributionChannel::Source,
+                true,
+            ),
+            BootImageAcquisition::Build
+        );
+    }
+
+    #[test]
+    fn release_channel_auto_detect_never_builds_inside_a_checkout() {
+        assert_eq!(
+            auto_detect(
+                crate::artifact_acquisition::DistributionChannel::Release,
+                true,
+            ),
+            BootImageAcquisition::Fetch
+        );
     }
 }

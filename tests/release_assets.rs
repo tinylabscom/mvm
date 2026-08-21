@@ -70,6 +70,32 @@ fn release_publishes_every_runtime_overlay_asset_the_downloader_requests() {
     }
 }
 
+#[test]
+fn runtime_overlay_release_carries_every_oci_guest_runtime_binary() {
+    let workflow = boot_image_workflow();
+    let runtime_flake = fs::read_to_string("nix/images/runtime-overlay/flake.nix")
+        .expect("runtime-overlay flake must be readable");
+    let guest_package = fs::read_to_string("nix/packages/mvm-guest-agent.nix")
+        .expect("guest-agent package must be readable");
+
+    for name in mvmctl::build::guest_agent_build::OCI_GUEST_RUNTIME_BINARY_NAMES {
+        assert!(
+            workflow.contains(name),
+            "release-boot-image.yml must put {name} in the published runtime archive"
+        );
+        assert!(
+            runtime_flake.contains(name),
+            "runtime-overlay flake must stage {name} for release packaging"
+        );
+        if name != "mvm-egress-client" {
+            assert!(
+                guest_package.contains(name),
+                "mvm-guest-agent.nix must build {name} before the overlay flake stages it"
+            );
+        }
+    }
+}
+
 /// Publishing the asset is not enough — the release job has to attach it. A job
 /// whose artifacts upload but are never listed in `gh release create` leaves
 /// the downloader with a 404 exactly as a rename would.
