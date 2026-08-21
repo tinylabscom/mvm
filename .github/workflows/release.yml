@@ -24,7 +24,7 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  MVMCTL_RELEASE_FEATURES: host,user,template-registry-s3,release-artifact-bootstrap
+  MVMCTL_RELEASE_FEATURES: host,user,template-registry-s3,release-artifact-bootstrap,release-channel
 
 jobs:
   bdd:

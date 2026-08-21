@@ -49,7 +49,7 @@ const INTERNAL: [&str; 8] = [
 /// either product surface (they gate acquisition mechanics, not behaviour).
 /// `dev` is the local-development meta-feature (the `host` + `user` union that
 /// runs every documented example) — a convenience, not a third product surface.
-const BUILD_ONLY: [&str; 2] = ["release-artifact-bootstrap", "dev"];
+const BUILD_ONLY: [&str; 3] = ["release-artifact-bootstrap", "release-channel", "dev"];
 
 /// `dev` must aggregate both surfaces so a contributor can run every README /
 /// docs example from one build. Asserted structurally below.
@@ -301,6 +301,7 @@ dev = ["host", "user", "dev-watch"]
             "template-registry-s3",
             "hostd-transport",
             "release-artifact-bootstrap",
+            "release-channel",
             "test-support",
         ] {
             assert!(allowed.contains(f), "{f} must be classified");
