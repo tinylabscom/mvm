@@ -2483,6 +2483,9 @@ Cross-sprint work tracked in `specs/plans/338-weblinux-browser-backend-builder-w
       build is queued for the Linux builder VM.
 - [ ] 2.8 Boot an `mvm`-built x86_64 kernel under headless Chromium and record measurements.
 
+Workstream 1 first slice (1.1, 1.7) and the WS-2 engine packaging
+scaffolding landed in PR #2776.
+
 ## Appendix A — ADR consolidation clusters (~91 → ~15)
 
 | Canonical ADR (theme)                       | Merge these                                                                            |

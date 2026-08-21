@@ -1,6 +1,6 @@
 # Refactor status
 
-Last updated: 2026-08-19
+Last updated: 2026-08-20
 
 This is the cross-plan progress index. The owning plan remains authoritative
 for detailed scope and acceptance criteria.
@@ -349,7 +349,7 @@ for detailed scope and acceptance criteria.
       ADR-043. ADR-024 updated to link ADR-049 while preserving the direct-WASI
       claim-free boundary. ADR-006 updated to allow `mvmctl deploy` as an
       authenticated `mvmd` client operation. Plan 338 registered in
-      `specs/SPRINT.md` and this file. First slice landed:
+      `specs/SPRINT.md` and this file. First slice landed in PR #2776:
       `BackendKind::WebLinux` with contract-level capability dimensions,
       native `AnyBackend::WebLinux` stub that fails closed,
       `BuilderBackendChoice::WebLinux` excluded from native auto-detect,
