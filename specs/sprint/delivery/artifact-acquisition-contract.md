@@ -41,7 +41,9 @@ stale output cannot be selected.
   source-channel root binary it executes, the `user` signature-verification
   surface required by downloaded manifests, the `virtiofsd` dependency needed
   to share the checkout with the builder VM, and `ipxe-qemu` for its
-  `efi-virtio.rom`. A separate release-channel helper downloads only the
+  `efi-virtio.rom`. The hosted runner grants the unprivileged QEMU process
+  access to `/dev/vhost-vsock`, while the local Docker witness passes through
+  that device. A separate release-channel helper downloads only the
   already-published builder image;
   the source binary then bootstraps source-matched runtime artifacts before the
   first launch. The tagged release workflow verifies the future-format signed

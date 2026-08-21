@@ -1616,6 +1616,12 @@ jobs:
           # e2fsprogs provides the mkfs.ext4 and debugfs image-packing tools.
           packages: qemu-system-arm ipxe-qemu virtiofsd e2fsprogs attr jq
 
+      - name: Allow unprivileged QEMU to use host vsock
+        run: |
+          test -c /dev/vhost-vsock
+          sudo chown "$(id -u):$(id -g)" /dev/vhost-vsock
+          test -r /dev/vhost-vsock && test -w /dev/vhost-vsock
+
       - uses: ./.github/actions/rust-cache
         with:
           key: aarch64-no-kvm-smoke

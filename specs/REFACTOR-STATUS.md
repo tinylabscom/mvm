@@ -22,9 +22,11 @@ for detailed scope and acceptance criteria.
       image because a pre-merge build cannot consume its not-yet-published
       runtime archive format. It installs `virtiofsd` plus the `ipxe-qemu`
       package that carries `efi-virtio.rom`, bootstraps source-matched runtime
-      artifacts before the first builder-backed launch, and pins the dependency
-      order that makes the overlay available before kernel preparation. The
-      tagged release workflow separately verifies the signed
+      artifacts before the first builder-backed launch, grants the hosted
+      runner's unprivileged QEMU process access to `/dev/vhost-vsock`, and
+      passes that one device into the local Docker witness. It pins the
+      dependency order that makes the overlay available before kernel
+      preparation. The tagged release workflow separately verifies the signed
       future-format overlay through the production downloader before publish.
       The standalone hostd fuzz lock is refreshed for the current dependency
       graph.

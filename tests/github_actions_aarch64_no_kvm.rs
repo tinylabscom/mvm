@@ -10,6 +10,8 @@ const LIBRARY_ONLY_BUILD: &str =
     "cargo build --release -p mvm-cli --features release-artifact-bootstrap";
 const REQUIRED_VIRTIOFS_PACKAGE: &str = "virtiofsd";
 const REQUIRED_VIRTIO_ROM_PACKAGE: &str = "ipxe-qemu";
+const REQUIRED_CI_VSOCK_OWNERSHIP: &str = "sudo chown \"$(id -u):$(id -g)\" /dev/vhost-vsock";
+const REQUIRED_LOCAL_VSOCK_DEVICE: &str = "--device /dev/vhost-vsock:/dev/vhost-vsock";
 const REQUIRED_BUILDER_DOWNLOAD: &str =
     "./target/release/mvmctl --builder qemu __builder-vm-bootstrap -v";
 const REQUIRED_BOOTSTRAP: &str =
@@ -81,4 +83,13 @@ fn aarch64_no_kvm_smokes_build_the_mvmctl_binary_they_execute() {
             "{source} must preserve the source binary, download only the builder VM with the release helper, then bootstrap before launch"
         );
     }
+
+    assert!(
+        job.contains(REQUIRED_CI_VSOCK_OWNERSHIP),
+        "CI workflow must let the unprivileged QEMU process open /dev/vhost-vsock"
+    );
+    assert!(
+        script.contains(REQUIRED_LOCAL_VSOCK_DEVICE),
+        "local smoke container must receive the host vhost-vsock device"
+    );
 }

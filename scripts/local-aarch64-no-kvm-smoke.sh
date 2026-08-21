@@ -27,6 +27,7 @@ trap cleanup EXIT
 echo "Starting arm64 Ubuntu container (QEMU TCG smoke test) ..."
 docker run -d --rm --platform linux/arm64 \
     --name "$container_name" \
+    --device /dev/vhost-vsock:/dev/vhost-vsock \
     -v "$repo_root":/work \
     -w /work \
     ubuntu:24.04 \
