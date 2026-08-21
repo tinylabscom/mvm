@@ -2472,6 +2472,7 @@ Cross-sprint work tracked in `specs/plans/2026-08-15-merge-queue-throughput.md`.
 ## Plan 338 — WebLinux browser backend, builder, workbench, and `mvmd` deployment client
 
 Cross-sprint work tracked in `specs/plans/338-weblinux-browser-backend-builder-workbench-and-mvmd-deploy.md`.
+Browser-hosted demo scoped in `specs/plans/2026-08-21-weblinux-browser-demo.md`.
 
 - [x] 0.1 Add ADR-049 and Plan 338 with `Backing:`/`Validation:` headers.
 - [x] 0.2 Update ADR-024 to reflect the browser-Linux implementation and link ADR-049.
