@@ -380,18 +380,33 @@ fn plan_verify_fails_unknown_signer(world: &mut CliWorld) {
 
 #[when(expr = "I capture a vm_full checkpoint from {string}")]
 fn capture_vm_full_checkpoint(world: &mut CliWorld, name: String) {
-    crate::steps::cli::run_mvmctl_isolated_live_home(
-        world,
-        format!("machine vm checkpoint create --class vm-full {name}"),
-    );
+    // The user-facing path that captures a vm_full checkpoint on Firecracker is
+    // `machine fork`, which also auto-boots a first child. The experimental guard
+    // keeps the lower-level fork path opt-in until per-child guest re-addressing
+    // lands, so this live scenario explicitly enables it.
+    let mut cmd = crate::steps::cli::mvmctl_command();
+    let home = world
+        .isolated_home
+        .as_ref()
+        .expect("an isolated mvm home must be created first");
+    let output = cmd
+        .current_dir(crate::steps::cli::workspace_root())
+        .args(["machine", "fork", "--json", &name])
+        .env("HOME", home.path())
+        .env("MVM_HOME", home.path())
+        .env("MVM_FORK_VMFULL_FC_EXPERIMENTAL", "1")
+        .output()
+        .expect("failed to spawn mvmctl machine fork");
+    world.last_run = Some(output);
     if world.last_output().status.success() {
         let stdout = String::from_utf8_lossy(&world.last_output().stdout);
-        // "<name>: vm_full checkpoint <id> created"
-        let id = stdout
-            .split_whitespace()
-            .nth(3)
+        let parsed: serde_json::Value =
+            serde_json::from_str(&stdout).expect("machine fork --json must emit JSON");
+        let id = parsed
+            .get("parent_id")
+            .and_then(|v| v.as_str())
             .map(str::to_string)
-            .expect("checkpoint output must contain the checkpoint id");
+            .expect("fork JSON must contain parent_id (the captured checkpoint id)");
         world.warm_restore_checkpoint_id = Some(id);
     }
 }

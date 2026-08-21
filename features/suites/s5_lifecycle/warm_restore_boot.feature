@@ -3,11 +3,17 @@ Feature: Warm-restore positive boot path
   A running VM's vm_full checkpoint can be warm-restored into a fresh child
   VM that boots and reports Running.
 
-  @live @firecracker @wip
+  @live @firecracker
   Scenario: a vm_full checkpoint warm-restores into a running child VM
-    # Blocked: `machine checkpoint create --class vm-full` currently reports
-    # Firecracker snapshot capability unsupported on this host, and the live
-    # warm-pool test rootfs/kernel pair panics at init. Enable this scenario
-    # once FC warm-restore is fully wired and a compatible live fixture is
-    # available.
-    Given a scenario awaiting its step implementation
+    Given an isolated mvm home
+    When I run mvmctl in an isolated live home with "machine create --name bdd-warm-parent --image alpine"
+    Then the command exits with code 0
+    When I run mvmctl in an isolated live home with "machine start bdd-warm-parent"
+    Then the command exits with code 0
+    When I capture a vm_full checkpoint from bdd-warm-parent
+    Then the command exits with code 0
+    When I stop the parent VM bdd-warm-parent
+    Then the command exits with code 0
+    When I warm-restore the checkpoint into a child named bdd-warm-child
+    Then the command exits with code 0
+    Then the child VM bdd-warm-child is running
