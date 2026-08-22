@@ -229,7 +229,7 @@ mod tests {
 [workspace.metadata.mvm.toolchain]
 rust = "1.91.1"
 zig = "0.13.0"
-cargo-zigbuild = "0.20.0"
+cargo-zigbuild = "0.23.0"
 
 [workspace.metadata.mvm.toolchain.targets]
 aarch64 = "aarch64-unknown-linux-musl"

@@ -39,7 +39,7 @@ runs:
         # crates.io occasionally returns partial downloads on hosted runners.
         # Retry the pinned install instead of failing CI before fmt/clippy run.
         for attempt in 1 2 3; do
-          if CARGO_NET_RETRY=10 cargo install cargo-zigbuild --version 0.20.0 --locked; then
+          if CARGO_NET_RETRY=10 cargo install cargo-zigbuild --version 0.23.0 --locked; then
             exit 0
           fi
 

@@ -687,7 +687,7 @@ opt-level = 3
 # TLS/ring/openssl), so the musl build is unencumbered.
 rust = "1.91.1"
 zig = "0.13.0"
-cargo-zigbuild = "0.20.0"
+cargo-zigbuild = "0.23.0"
 
 # Per-arch musl target. build.rs picks the entry for CARGO_CFG_TARGET_ARCH
 # (the arch mvmctl is built for == the arch of the guest it boots, since the
