@@ -2783,3 +2783,18 @@ the resolved graph; the focused supply-chain pin test and locked fuzz check
 pass. These are validation repairs only: the performance decision and wider
 Firecracker/HVF/libkrun live matrix remain open, so the W8 tracker and issue
 #2751 remain open.
+
+## 2026-08-22 FlowMux SDK ingress compatibility repair
+
+The final-evidence BDD lane exposed that its old SDK snapshot retired more than
+dynamic forwarding: it also overwrote typed OCI sources, boot commands,
+literal environment and egress lowering, and the pinned browser/readiness
+surface. Python and TypeScript now preserve those APIs while declaring opaque
+loopback TCP ingress on `machine run` before boot. Dynamic forwarding still
+fails closed with migration guidance, and both SDK suites cover the combined
+contract. The retired guest port-forward request has also been removed from
+the generated Python protocol binding, restoring schema drift checks. The same
+BDD rerun exposed outer nightly-only Cargo flags leaking
+into the pinned stable nested cross-compiler; nested builds now clear every
+outer toolchain, wrapper, and Rust flag variable, with a focused regression
+test covering the boundary.

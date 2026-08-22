@@ -122,6 +122,11 @@ host test graphs and preserves the duplicate-major dependency invariant.
 - [x] Add exact/wildcard bind, undeclared port, TCP/UDP delivery, guest refusal,
       exhaustion, TLS-key non-disclosure, streaming transform, audit, and
       teardown tests plus BDD coverage.
+- [x] Retire post-admission SDK forwarding without regressing typed manifest or
+      OCI sources, boot-command overrides, literal environment and egress
+      lowering, or the pinned browser provider and readiness surfaces.
+- [x] Regenerate SDK protocol bindings after removing the guest port-forward
+      request so the committed Python types match the canonical schema.
 
 The public-surface CI rerun exposed a stack-order defect in the completed UDP
 ingress work: replies to peers already observed by an ingress mapping were
@@ -233,17 +238,26 @@ checks also pass.
       inside the project builder VM.
 - [x] Run BDD, dependency, supply-chain, schema, product, claim, and permanent
       networking gates.
+- [x] Isolate pinned nested cross-compiles from the outer Cargo toolchain,
+      compiler wrappers, and nightly-only Rust flags; cover the scrubbed
+      command environment with a regression test.
 - [ ] Update ADR/claim witnesses, public networking docs, release notes, this
       plan, the sprint delivery archive, and the refactor rollup; close #2751
       only after every acceptance item is backed by recorded output.
 
-The post-stack validation rerun also found and fixed four closeout defects:
+The post-stack validation rerun also found and fixed six closeout defects:
 the standalone `mvm-sdk` fuzz lockfile had drifted; ingress UDP replies were
 incorrectly rechecked against outbound egress admission after the relay had
-already observed the external peer; the Python package root still exported
-two deleted browser helpers; and the refreshed fuzz resolver selected
+already observed the external peer; an old evidence-tree snapshot overwrote
+newer Python and TypeScript SDK boot-source, command, egress, and browser
+surfaces while retiring dynamic forwarding; the generated Python protocol
+binding still contained the deleted guest port-forward request; outer nightly-only Cargo flags
+leaked into the pinned stable nested cross-compiler; and the refreshed fuzz resolver selected
 `blake3` 1.8.7, bypassing the workspace-reviewed vendored `arrayref`. The
-Python exports now match the helper module, and the fuzz lock pins `blake3`
+SDKs now declare ingress before boot while preserving those public surfaces,
+and their generated protocol bindings match the canonical schema;
+nested cross-compiles clear outer toolchain, wrapper, and Rust flag variables,
+and the fuzz lock pins `blake3`
 1.8.6 so the reviewed patch remains active. The full host workspace test,
 check, doc-test, and formatting chain passes; the locked fuzz build passes on
 Rust 1.91.1; the focused observed-peer test passes five consecutive runs; and

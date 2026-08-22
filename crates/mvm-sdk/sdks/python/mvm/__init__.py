@@ -86,6 +86,8 @@ from mvm._hostsvc import (
     VerbNotImplementedError,
 )
 from mvm._helpers import (
+    OBSCURA_IMAGE,
+    BrowserReadyError,
     BrowserSandbox,
     CodeError,
     CodeSandbox,
@@ -150,8 +152,10 @@ __all__ = [
     "SCHEMA_VERSION",
     "BadRequestError",
     "BrowserSandbox",
+    "BrowserReadyError",
     "CodeError",
     "CodeSandbox",
+    "OBSCURA_IMAGE",
     "HostServiceError",
     "InvalidInputError",
     "NotBoundError",

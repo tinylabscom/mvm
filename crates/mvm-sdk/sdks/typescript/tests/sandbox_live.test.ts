@@ -9,6 +9,7 @@
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import * as fs from "node:fs";
+import * as http from "node:http";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as mvm from "../src/index.js";
@@ -365,7 +366,7 @@ describe("Sandbox.create (live mode)", () => {
     expect(readFixtureLog()).toEqual([]);
     expect(() =>
       mvm.Sandbox.create("minimal", {
-        network: { mode: "none", raw_ip_stack: true },
+        network: { raw_ip_stack: true } as never,
       }),
     ).toThrow(/unknown fields/);
     expect(readFixtureLog()).toEqual([]);
@@ -944,6 +945,72 @@ describe("CodeSandbox", () => {
 // ── BrowserSandbox typed helper — Plan 125 C2 ────────────────────────
 
 describe("BrowserSandbox", () => {
+  it("uses the pinned image, fixed proxy/loopback command, and allowlist", () => {
+    const script = writeFixtureMvmctl({
+      upEnvelope: { schema_version: 1, vm_id: "obscura", build_mode: "dev" },
+    });
+    process.env.MVM_SDK_MODE = "live";
+    process.env.MVM_CLI_BIN = script;
+    const bs = new mvm.BrowserSandbox("obscura", {
+      network: {
+        mode: "none",
+        egress: { allowlist: [{ host: "example.com", port: 443 }] },
+      },
+    });
+    try {
+      const call = readFixtureLog()[0];
+      expect(call).toContain(`--image ${mvm.OBSCURA_IMAGE}`);
+      expect(call).toContain("--allow-host example.com:443");
+      expect(call).toContain("-- /obscura --proxy http://127.0.0.1:1080 serve");
+      expect(call).toContain("--host 127.0.0.1 --port 9222");
+      expect(call).not.toContain("private");
+      expect(call).not.toContain("stealth");
+    } finally {
+      bs.kill();
+    }
+  });
+
+  it("refuses an Obscura command override before boot", () => {
+    const script = writeFixtureMvmctl({
+      upEnvelope: { schema_version: 1, vm_id: "unused", build_mode: "dev" },
+    });
+    process.env.MVM_SDK_MODE = "live";
+    process.env.MVM_CLI_BIN = script;
+    expect(() => new mvm.BrowserSandbox("obscura", { command: ["/bin/sh"] })).toThrow(
+      /does not allow command overrides/,
+    );
+    expect(readFixtureLog()).toEqual([]);
+  });
+
+  it("validates CDP readiness and cleans up after timeout", async () => {
+    const server = http.createServer((_request, response) => {
+      response.setHeader("content-type", "application/json");
+      response.end(JSON.stringify({ webSocketDebuggerUrl: "ws://127.0.0.1/devtools/browser/test" }));
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (address === null || typeof address === "string") throw new Error("expected TCP address");
+    const script = writeFixtureMvmctl({
+      upEnvelope: { schema_version: 1, vm_id: "browser", build_mode: "dev" },
+    });
+    process.env.MVM_SDK_MODE = "live";
+    process.env.MVM_CLI_BIN = script;
+    const bs = new mvm.BrowserSandbox("chromium", { hostPort: address.port });
+    expect(await bs.waitUntilReady({ timeoutMs: 1000 })).toBe(
+      "ws://127.0.0.1/devtools/browser/test",
+    );
+    bs.kill();
+    await new Promise<void>((resolve, reject) =>
+      server.close((error) => (error ? reject(error) : resolve())),
+    );
+
+    const failing = new mvm.BrowserSandbox("chromium", { hostPort: address.port });
+    await expect(failing.waitUntilReady({ timeoutMs: 20, retryMs: 2 })).rejects.toBeInstanceOf(
+      mvm.BrowserReadyError,
+    );
+    expect(readFixtureLog().some((call) => call.startsWith("machine stop browser --yes"))).toBe(true);
+  });
+
   it("declares the CDP port and endpoint() returns the host URL", () => {
     const script = writeFixtureMvmctl({
       upEnvelope: { schema_version: 1, vm_id: "sb-br-vm", build_mode: "dev" },

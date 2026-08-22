@@ -1798,10 +1798,13 @@ resume` takes a `current_head` and refuses when it differs from the
         the FlowMux client surface, keeping guest-only vsock dependencies out
         of the host graph and the duplicate-major invariant clean.
   - [x] Declared ingress runtime. Signed transport-neutral mappings reach exact
-        endpoint binds before readiness; TCP and bounded observed-peer UDP use
-        host-initiated FlowMux streams and declared guest-loopback targets.
-        HTTP/TLS transformations remain host-owned, TLS keys never enter the
-        guest contract, and opaque TCP stays explicitly non-transforming.
+      endpoint binds before readiness; TCP and bounded observed-peer UDP use
+      host-initiated FlowMux streams and declared guest-loopback targets.
+      HTTP/TLS transformations remain host-owned, TLS keys never enter the
+      guest contract, and opaque TCP stays explicitly non-transforming. Python
+      and TypeScript browser helpers declare their listener before boot and
+      preserve the existing OCI, command, egress, and readiness surfaces;
+      dynamic post-admission forwarding fails with migration guidance.
   - [x] Remove the rejected `raw_ip_stack`/`L3Vsock` public compatibility
         surface now that the migration release condition has passed. Public
         IR, SDK, schema, CLI, fixtures, and docs expose no raw-network mode;

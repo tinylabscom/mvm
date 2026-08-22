@@ -40,15 +40,24 @@ HTTPS absolute-URI refusal, and a correctly denied port-80 request under the
 bare-host port-443 default. A libkrun builder bootstrap reached its Stage0 Nix
 build and was interrupted before the final shell job completed.
 
-The post-stack validation rerun exposed four independent defects. The
+The post-stack validation rerun exposed six independent defects. The
 standalone SDK fuzz lockfile was stale; the active FlowMux session
 implementation applied outbound UDP admission to an ingress reply even after
-the external peer had been observed; the Python package root still exported
-two browser helpers deleted by the closeout stack; and the refreshed fuzz
+the external peer had been observed; an old evidence-tree snapshot overwrote
+newer SDK boot-source, command, egress, and browser support while retiring
+dynamic forwarding; the generated Python protocol binding still contained the
+deleted guest port-forward request; outer nightly-only Cargo flags leaked into the pinned
+stable nested cross-compiler; and the refreshed fuzz
 resolver selected `blake3` 1.8.7, leaving the reviewed vendored `arrayref`
 patch unused. Ingress UDP replies now bypass outbound admission while the
 relay's observed-peer table continues to reject unseen destinations. The
-Python exports match the helper module, and the fuzz lock pins `blake3` 1.8.6
+Python and TypeScript SDKs now preserve typed manifest and OCI sources,
+boot-command overrides, literal environment and egress lowering, the pinned
+browser provider, and bounded readiness checks while declaring ingress before
+boot; dynamic post-admission forwarding fails with migration guidance. The
+SDK protocol bindings now match the canonical schema. The
+nested build boundary clears outer toolchain, wrapper, and Rust flag variables,
+with a focused regression test. The fuzz lock pins `blake3` 1.8.6
 so the reviewed patch remains active. The full host workspace test, check,
 doc-test, and formatting chain passes; the focused ingress test passes five
 consecutive runs; the locked fuzz check passes on Rust 1.91.1; and hostd
