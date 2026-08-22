@@ -52,7 +52,7 @@ Network policy should start narrow and open only required destinations or
 ports. Port forwarding is explicit:
 
 ```sh
-mvmctl machine forward devbox -p 8080:8080
+mvmctl machine run --image alpine --name devbox --port 8080:8080
 ```
 
 Prefer loopback host binds for local development unless public exposure is an

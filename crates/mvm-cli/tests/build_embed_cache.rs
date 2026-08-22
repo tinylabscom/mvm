@@ -475,9 +475,10 @@ fn the_opt_out_env_var_disables_the_store_entirely() {
 fn the_opt_out_env_var_retriggers_the_build_script() {
     let build_script = include_str!("../build.rs");
     assert!(
-        build_script.contains("cargo:rerun-if-env-changed=MVM_EMBED_NO_CACHE"),
-        "changing the opt-out must invalidate Cargo's cached build-script result"
+        build_script.contains("\"MVM_EMBED_NO_CACHE\","),
+        "the force-refresh control must be declared in the build script's rerun env list"
     );
+    assert!(build_script.contains("cargo:rerun-if-env-changed={env_var}"));
 }
 
 #[test]

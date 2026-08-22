@@ -13,6 +13,13 @@ use host_binaries_toolchain::{
     workspace_root_from_manifest_dir,
 };
 
+const EMBED_BUILD_ENV_VARS: &[&str] = &[
+    "MVM_EMBED_CARGO",
+    "MVM_EMBED_RUSTC",
+    "MVM_EMBED_ZIG",
+    "MVM_EMBED_NO_CACHE",
+];
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct EmbeddedSourceBinary {
     package: String,
@@ -165,17 +172,15 @@ fn main() {
     let host_target_dir = nested_target_dir.join("host-vm-target");
 
     let pin = read_pinned_toolchain(&workspace_root);
-    println!("cargo:rustc-env=MVM_PINNED_RUST={}", pin.rust);
     println!("cargo:rustc-env=MVM_PINNED_ZIG={}", pin.zig);
     println!(
         "cargo:rustc-env=MVM_PINNED_CARGO_ZIGBUILD={}",
         pin.cargo_zigbuild
     );
     println!("cargo:rustc-env=MVM_PINNED_TARGET={}", pin.target);
-    println!("cargo:rerun-if-env-changed=MVM_EMBED_CARGO");
-    println!("cargo:rerun-if-env-changed=MVM_EMBED_RUSTC");
-    println!("cargo:rerun-if-env-changed=MVM_EMBED_ZIG");
-    println!("cargo:rerun-if-env-changed=MVM_EMBED_NO_CACHE");
+    for env_var in EMBED_BUILD_ENV_VARS {
+        println!("cargo:rerun-if-env-changed={env_var}");
+    }
 
     // HOST_BINARIES (installed into the builder/dev VM rootfs), SEED_BINARIES
     // (host-side only, e.g. the Stage 0 nix-seed's /init), and bootstrap
@@ -248,10 +253,7 @@ fn main() {
             binary: &binary.name,
             features: &binary.features,
             target: &pin.target,
-            toolchain: &format!(
-                "rust={} zig={} zigbuild={}",
-                pin.rust, pin.zig, pin.cargo_zigbuild
-            ),
+            toolchain: &format!("zig={} zigbuild={}", pin.zig, pin.cargo_zigbuild),
             flavor: "musl-static",
         });
 
@@ -716,8 +718,13 @@ fn run_cargo_zigbuild(spec: ZigbuildSpec<'_>) {
     if !spec.features.is_empty() {
         cmd.args(["--features", spec.features]);
     }
-    apply_nested_rust_env(&mut cmd, &rustc, spec.target_dir);
-    cmd.current_dir(spec.root);
+    cmd.env("RUSTC", &rustc)
+        // Dedicated target dir — see the deadlock note in main().
+        .env("CARGO_TARGET_DIR", spec.target_dir)
+        .env_remove("RUSTUP_TOOLCHAIN")
+        .env_remove("RUSTC_WRAPPER")
+        .env_remove("RUSTC_WORKSPACE_WRAPPER")
+        .current_dir(spec.root);
     apply_zigbuild_env(&mut cmd, spec.target_dir);
     // Pin the zig binary cargo-zigbuild uses. Left to PATH, a Homebrew-upgraded
     // zig (newer than the pin) fails downstream with a cryptic `CacheCheckFailed`.
@@ -741,21 +748,6 @@ fn run_cargo_zigbuild(spec: ZigbuildSpec<'_>) {
         .join(spec.binary);
     std::fs::copy(&built, spec.output)
         .unwrap_or_else(|e| panic!("copy {} → {}: {e}", built.display(), spec.output.display()));
-}
-
-fn apply_nested_rust_env(cmd: &mut Command, rustc: &str, target_dir: &Path) {
-    cmd.env("RUSTC", rustc)
-        // Dedicated target dir — see the deadlock note in main().
-        .env("CARGO_TARGET_DIR", target_dir)
-        // Empty values override host Cargo configuration; removing them would
-        // allow a global sccache wrapper to reappear in the nested build.
-        .env("RUSTC_WRAPPER", "")
-        .env("RUSTC_WORKSPACE_WRAPPER", "")
-        .env_remove("RUSTUP_TOOLCHAIN")
-        // The outer nightly's frontend flags are incompatible with the pinned
-        // stable compiler used for reproducible embedded binaries.
-        .env_remove("RUSTFLAGS")
-        .env_remove("CARGO_ENCODED_RUSTFLAGS");
 }
 
 fn apply_zigbuild_env(cmd: &mut Command, target_dir: &Path) {
@@ -837,36 +829,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn nested_rust_env_drops_outer_nightly_flags_and_wrappers() {
-        let mut cmd = Command::new("cargo");
-        cmd.env("RUSTFLAGS", "-Zthreads=8")
-            .env("CARGO_ENCODED_RUSTFLAGS", "-Zthreads=8")
-            .env("RUSTC_WRAPPER", "sccache");
-
-        apply_nested_rust_env(&mut cmd, "/toolchain/rustc", Path::new("/nested-target"));
-
-        let env = cmd
-            .get_envs()
-            .map(|(key, value)| {
-                (
-                    key.to_string_lossy().into_owned(),
-                    value.map(|item| item.to_string_lossy().into_owned()),
-                )
-            })
-            .collect::<std::collections::BTreeMap<_, _>>();
-        assert_eq!(env.get("RUSTC"), Some(&Some("/toolchain/rustc".into())));
+    fn embedded_build_controls_all_retrigger_the_build_script() {
         assert_eq!(
-            env.get("CARGO_TARGET_DIR"),
-            Some(&Some("/nested-target".into()))
+            EMBED_BUILD_ENV_VARS,
+            &[
+                "MVM_EMBED_CARGO",
+                "MVM_EMBED_RUSTC",
+                "MVM_EMBED_ZIG",
+                "MVM_EMBED_NO_CACHE",
+            ]
         );
-        assert_eq!(env.get("RUSTC_WRAPPER"), Some(&Some(String::new())));
-        assert_eq!(
-            env.get("RUSTC_WORKSPACE_WRAPPER"),
-            Some(&Some(String::new()))
-        );
-        assert_eq!(env.get("RUSTFLAGS"), Some(&None));
-        assert_eq!(env.get("CARGO_ENCODED_RUSTFLAGS"), Some(&None));
-        assert_eq!(env.get("RUSTUP_TOOLCHAIN"), Some(&None));
     }
 
     #[test]

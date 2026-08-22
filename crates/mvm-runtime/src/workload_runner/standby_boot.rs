@@ -273,7 +273,6 @@ fn factory_parent_spec_inner(
         exit: &exit,
         broker: Some(&broker),
         console_data: Vec::new(),
-        ingress_tcp: Vec::new(),
     };
     VmmSpec {
         vsock: workload_vsock_ports(&sockets),
@@ -388,7 +387,6 @@ mod tests {
                 exit: Path::new("/run/workload.exit"),
                 broker: None,
                 console_data: Vec::new(),
-                ingress_tcp: Vec::new(),
             },
             cmdline: cmdline::runner_cmdline(launch, state_dir, fc_base),
             console_log: state_dir.join("console.log"),

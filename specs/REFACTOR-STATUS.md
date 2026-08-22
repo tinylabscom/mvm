@@ -1787,6 +1787,9 @@ resume` takes a `current_head` and refuses when it differs from the
         Strict macOS arm64 and Linux x86_64 host-loopback reports are recorded;
         their 21/28 pre-deletion threshold misses remain explicit, with no
         approved exception, for the final closeout matrix to resolve.
+        The first post-deletion macOS candidate batches TCP credits and improves
+        the result to 20 misses (12/32 checks pass), but still fails the gate;
+        its raw report and comparison are recorded with no implied exception.
   - [x] Bounded typed transformations and endpoint-owned connectors. Typed
         HTTP now streams incrementally with bounded cross-frame transforms,
         fail-closed cancellation and audit behavior; web fetch and search
@@ -1816,7 +1819,11 @@ resume` takes a `current_head` and refuses when it differs from the
         every flow family shares one admitted policy, budget, identity, VM
         resource, and audit sink.
   - [ ] Final performance, Firecracker, HVF, libkrun, BDD, supply-chain, and
-        documentation evidence matrix.
+        documentation evidence matrix. A fresh macOS arm64 host-loopback
+        comparison remains failing and is retained as raw evidence; no
+        performance exception has been recorded. Firecracker now has a passing
+        admitted TCP/DNS witness on the approved Lima-KVM test tier; the wider
+        live matrix remains open.
 
 - [x] Plan 285 — L3 TUN-over-vsock network mode
   (`specs/plans/285-l3-tun-over-vsock.md`, ADR-036)

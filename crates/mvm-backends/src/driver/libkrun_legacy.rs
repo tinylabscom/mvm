@@ -31,14 +31,12 @@ use mvm_core::vm_backend::{StandbyClaim, StandbyError, StandbySpec, VmStartConfi
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-/// Kernel cmdline token that turns on the in-guest vsock egress client.
-/// Emitted only when outbound egress is allowed and the workload carries no
-/// bound secrets, so the raw SOCKS path never contends with the
-/// substitution endpoint for the shared egress port.
-pub fn vsock_egress_cmdline_token(config: &VmStartConfig, state_dir: &Path) -> Option<String> {
-    (config.network_policy.allows_egress()
-        && !mvm_vmm::host::egress_shared::state_has_bound_secrets(state_dir).unwrap_or(false))
-    .then(|| "mvm.vsock_egress=1".to_string())
+/// Kernel cmdline token that turns on the authenticated in-guest vsock client.
+/// It is also required for declared ingress under outbound deny-all; secret-
+/// bearing workloads remain on the host-side substitution endpoint.
+pub fn vsock_egress_cmdline_token(config: &VmStartConfig, _state_dir: &Path) -> Option<String> {
+    mvm_vmm::host::egress_shared::effective_vsock_egress(config)
+        .then(|| "mvm.vsock_egress=1".to_string())
 }
 
 /// How long [`LibkrunBackend::start`] waits for the supervisor to

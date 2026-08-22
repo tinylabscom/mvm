@@ -94,10 +94,9 @@ worked LLM-agent example showing the pattern end-to-end.
 
 ```bash
 mvmctl machine build --flake ./openclaw
-mvmctl machine run --flake ./openclaw --name oc -d \
+mvmctl machine run --flake ./openclaw --name oc --port 3000:3000 \
     --mount nix/examples/openclaw/config:/mnt/config \
     --mount nix/examples/openclaw/secrets:/mnt/secrets
-mvmctl machine forward oc -p 3000:3000
 ```
 
 Each `-v` flag mounts a host directory as an ext4 drive read-only by
@@ -121,10 +120,9 @@ cat > /tmp/my-secrets/secret-refs.env << 'EOF'
 ANTHROPIC_API_KEY_REF=anthropic-api-key
 EOF
 
-mvmctl machine run --flake ./openclaw --name oc -d \
+mvmctl machine run --flake ./openclaw --name oc --port 3000:3000 \
     --mount /tmp/oc-config:/mnt/config \
     --mount /tmp/oc-secrets:/mnt/secrets
-mvmctl machine forward oc -p 3000:3000
 ```
 
 A typical `mkGuest` service uses `preStart` to check for
@@ -141,10 +139,9 @@ and readiness boundary.
 
 ```bash
 mvmctl machine build --flake ./openclaw --snapshot
-mvmctl machine run --flake ./openclaw --name oc -d \
+mvmctl machine run --flake ./openclaw --name oc --port 3000:3000 \
     --mount nix/examples/openclaw/config:/mnt/config \
     --mount nix/examples/openclaw/secrets:/mnt/secrets
-mvmctl machine forward oc -p 3000:3000
 ```
 
 When restoring from a snapshot with `-v` mounts, the guest agent
@@ -171,20 +168,20 @@ keys:
 ```bash
 # Production gateway with prod Anthropic key
 mvmctl machine run --manifest openclaw --name oc-prod \
+    --port 3000:3000 \
     --mount ./prod/config:/mnt/config \
     --mount ./prod/secrets:/mnt/secrets
-mvmctl machine forward oc-prod -p 3000:3000
 
 # Staging gateway with test key
 mvmctl machine run --manifest openclaw --name oc-staging \
+    --port 3001:3000 \
     --mount ./staging/config:/mnt/config \
     --mount ./staging/secrets:/mnt/secrets
-mvmctl machine forward oc-staging -p 3001:3000
 
 # Dev gateway with no key (localhost-only testing)
 mvmctl machine run --manifest openclaw --name oc-dev \
+    --port 3002:3000 \
     --mount ./dev/config:/mnt/config
-mvmctl machine forward oc-dev -p 3002:3000
 ```
 
 All three restore from the same snapshot (1-2 second boot) but get

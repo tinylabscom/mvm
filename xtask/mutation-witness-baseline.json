@@ -196,6 +196,13 @@
       ]
     },
     {
+      "path": "crates/mvm-hostd/src/bin/mvm-network-endpoint.rs",
+      "package": "mvm-hostd",
+      "claims": [
+        10
+      ]
+    },
+    {
       "path": "crates/mvm-hostd/src/broker/registry.rs",
       "package": "mvm-hostd",
       "claims": [

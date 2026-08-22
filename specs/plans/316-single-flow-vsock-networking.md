@@ -15,10 +15,10 @@ relayed-vsock backends.
 
 The shared per-VM endpoint budgets, bounded typed transformations, endpoint-
 owned connectors, declared FlowMux ingress runtime, performance harness,
-public compatibility-surface removal, and complete frozen-L3 deletion are
-implemented through W6 of the successor plan's dependency-ordered PR stack.
-Permanent gates, the final performance comparison, and the final backend
-matrix remain.
+public compatibility-surface removal, complete frozen-L3 deletion, and
+permanent single-path/socket-owner gates are implemented through W7 of the
+successor plan's dependency-ordered PR stack. The final performance decision
+and live backend matrix remain under that successor plan.
 
 ## Tracking issues
 
@@ -173,10 +173,9 @@ the admitted launch state, never from guest bytes.
 
 ### Phase 0 — Ratify the invariant and freeze expansion
 
-- [x] Add `machine run --port HOST:GUEST` as a foreground convenience over the
-      existing `machine forward` seam. It adds no networking runtime path,
-      binds host loopback explicitly, and refuses detached ownership; Phase 5
-      will replace the transitional proxy with signed FlowMux ingress.
+- [x] Add `machine run --port HOST:GUEST`; the initial foreground proxy was
+      transitional. Phase 5 replaced it with signed FlowMux ingress, and the
+      dynamic post-admission command is now an explicit migration refusal.
 - [x] Add an accepted ADR that records the L4-with-selective-L7 decision, the
       impossibility of arbitrary guest TLS plus host replacement without TLS
       interception, and the rejection of a host MITM CA as the universal path.
@@ -278,7 +277,7 @@ exactly one `NetworkFlow` service per granted workload with no L3 services.
 Unchecked boxes below are unchecked because they are not done, not because the
 bookkeeping lagged — see the Status section.
 
-- [ ] Rename the production role from `mvm-substitution-endpoint` to
+- [x] Rename the production role from `mvm-substitution-endpoint` to
       `mvm-network-endpoint`, including Cargo bin declarations, release
       packaging, updater manifests, helper resolution, confinement profiles,
       scripts, process reaping, metrics labels, and operator diagnostics.
@@ -300,17 +299,17 @@ bookkeeping lagged — see the Status section.
       `EndpointSpawnRequest` moved with them, and `xtask
       check-uniform-vsock-egress` — which pins the converged runner shape by
       type name — was updated in the same change.
-- [ ] Make the endpoint authenticate one long-lived FlowMux session before it
+- [x] Make the endpoint authenticate one long-lived FlowMux session before it
       accepts any flow frame. A failed or missing session prevents workload
       readiness when the signed plan grants networking.
-- [ ] Add bounded per-stream registries, odd/even ID allocation, independent
+- [x] Add bounded per-stream registries, odd/even ID allocation, independent
       credit windows, cancellation-safe teardown, and endpoint-wide graceful
       shutdown. No lock guard may cross an await.
-- [ ] Keep the legacy raw/WireRequest dispatch behind an internal transition
+- [x] Keep the legacy raw/WireRequest dispatch behind an internal transition
       adapter for this phase only. It must call the new endpoint's canonical
       admission and socket-owner functions; it may not retain an independent
       connect, bind, DNS, rate, or audit implementation.
-- [ ] Add tests proving Firecracker, HVF, and libkrun specs expose exactly one
+- [x] Add tests proving Firecracker, HVF, and libkrun specs expose exactly one
       `NetworkFlow` service when networking is granted, none when it is absent,
       and never expose L3 control/data services.
 
@@ -366,7 +365,7 @@ in `spawn_blocking`.
       one reconnect owner. A session loss fails all live local flows promptly
       and reconnects under bounded exponential backoff without replaying an
       `Open`, request body, or datagram.
-- [ ] Delete `EgressMode`, `raw_egress`, protocol sniffing, duplicate line
+- [x] Delete `EgressMode`, `raw_egress`, protocol sniffing, duplicate line
       markers, and the raw-vs-wire admission choice. A workload with and without
       secret bindings uses the same protocol and endpoint.
 - [x] Add integration tests for deny-all, allowed/denied TCP, truthful connect
@@ -376,54 +375,54 @@ in `spawn_blocking`.
 
 ### Phase 4 — Stream typed transformations over the same path
 
-- [ ] Replace `WireRequest`/`WireResponse` whole-body JSON/base64 exchange with
+- [x] Replace `WireRequest`/`WireResponse` whole-body JSON/base64 exchange with
       `OpenHttp` plus bounded streaming head/body frames on FlowMux. Fold Plan
       313 Phase 1 into this work so long responses no longer buffer wholly or
       fail at a total-request 30-second deadline.
-- [ ] Route typed connector network execution through the endpoint. Broker
+- [x] Route typed connector network execution through the endpoint. Broker
       dispatch retains binding authorization but cannot call `TcpStream::connect`,
       an HTTP client, or a resolver directly.
-- [ ] Apply destination-bound substitution only after final DNS/redirect
+- [x] Apply destination-bound substitution only after final DNS/redirect
       admission and immediately before host TLS/request emission. Apply response
       redaction before each chunk crosses to the guest.
-- [ ] Carry transformation policy as an explicit admitted flow class. Refuse an
+- [x] Carry transformation policy as an explicit admitted flow class. Refuse an
       opaque TCP/UDP request when the plan requires substitution, reversible
       replacement, or redaction; never silently downgrade it.
-- [ ] Preserve streaming boundaries through the inspector using a bounded
+- [x] Preserve streaming boundaries through the inspector using a bounded
       overlap window large enough for the longest configured fingerprint, so a
       secret or PII token split across frames is still detected.
-- [ ] Add positive, negative, and boundary tests: valid substitution, wrong
+- [x] Add positive, negative, and boundary tests: valid substitution, wrong
       destination, unknown placeholder, redirect to an unbound host, split-frame
       secret, transformed streaming response, oversized head, body ceiling,
       idle timeout, audit redaction, and zeroized cleanup after cancellation.
 
 ### Phase 5 — Implement declared ingress on FlowMux
 
-- [ ] Move `L3IngressMapping` into a transport-neutral signed-plan and workload-
+- [x] Move `L3IngressMapping` into a transport-neutral signed-plan and workload-
       IR type with protocol, exact host bind address, host port, guest loopback
       address/port, and transform class. Update Rust, Python, and TypeScript SDK
       serde fixtures and schemas together.
-- [ ] Make `mvm-network-endpoint` bind listeners only after plan admission and
+- [x] Make `mvm-network-endpoint` bind listeners only after plan admission and
       before reporting ready. Duplicate binds, wildcard binds not explicitly
       signed, unsupported protocols, and unavailable transform material refuse
       the launch.
-- [ ] Implement TCP ingress with even stream IDs: `InboundOpen` names only the
+- [x] Implement TCP ingress with even stream IDs: `InboundOpen` names only the
       admitted mapping ID and redacted peer metadata; the guest adapter connects
       to the declared loopback target and returns `InboundReady` before bytes
       flow.
-- [ ] Implement UDP ingress with one bounded peer table per declared mapping.
+- [x] Implement UDP ingress with one bounded peer table per declared mapping.
       Replies may target only a peer that previously sent a datagram to that
       mapping, preserving the existing no-UDP-egress-around-policy invariant.
-- [ ] Implement host-owned HTTP/TLS ingress transformation. Certificate keys
+- [x] Implement host-owned HTTP/TLS ingress transformation. Certificate keys
       are resolved by plan-bound secret reference inside the endpoint, never
       serialized to the guest; request redaction/replacement happens before
       guest delivery and response redaction happens before host transmission.
-- [ ] Support opaque TCP ingress through the same frames and endpoint, but mark
+- [x] Support opaque TCP ingress through the same frames and endpoint, but mark
       it explicitly non-transforming. Admission refuses it whenever the mapping
       requires content transformation.
-- [ ] Remove the unused `mvm_core::ingress_broker` and `ingress_handler` model;
+- [x] Remove the unused `mvm_core::ingress_broker` and `ingress_handler` model;
       no second listener process or policy type survives.
-- [ ] Add tests for exact/wildcard bind decisions, undeclared ports, TCP and UDP
+- [x] Add tests for exact/wildcard bind decisions, undeclared ports, TCP and UDP
       delivery, guest-local refusal, listener exhaustion, peer exhaustion,
       TLS-key non-disclosure, transformed request/response streaming, opaque-
       transform mismatch, audit metadata, and teardown releasing every socket.
@@ -474,16 +473,16 @@ in `spawn_blocking`.
 
 ### Phase 8 — Make “one path” mechanically enforceable
 
-- [ ] Replace `check-uniform-vsock-egress` and `check-vsock-only-egress` with
+- [x] Replace `check-uniform-vsock-egress` and `check-vsock-only-egress` with
       `check-single-network-path`. It must parse the workspace and assert:
       exactly one production network endpoint bin, exactly one production spawn
       implementation, every workload backend binds `NetworkFlow`, and no
       forbidden raw-packet/NIC/gateway symbols occur outside historical specs.
-- [ ] Add a socket-owner gate that permits outbound `connect` and workload
+- [x] Add a socket-owner gate that permits outbound `connect` and workload
       listener `bind` only in the network endpoint and explicitly enumerated
       host infrastructure clients unrelated to workload networking. Test both a
       forbidden synthetic call and every narrow exemption.
-- [ ] Add a signed-plan projection test proving TCP, UDP, DNS, ingress, and typed
+- [x] Add a signed-plan projection test proving TCP, UDP, DNS, ingress, and typed
       connectors all reach the same canonical policy object and audit sink.
 - [ ] Run the final `xtask network-perf` matrix against the Phase-1 legacy
       baselines. For opaque TCP/UDP, p50 and p95 latency may regress by at most
@@ -505,14 +504,14 @@ in `spawn_blocking`.
 
 ## Definition of done
 
-- [ ] The source tree contains no production L3/raw-packet workload networking
+- [x] The source tree contains no production L3/raw-packet workload networking
       code and no second ingress or egress socket owner.
-- [ ] An admitted workload has either no `NetworkFlow` capability or exactly
+- [x] An admitted workload has either no `NetworkFlow` capability or exactly
       one authenticated FlowMux endpoint; there is no transport selector.
-- [ ] TCP, UDP, DNS, ingress, opaque relay, and typed transformations share one
+- [x] TCP, UDP, DNS, ingress, opaque relay, and typed transformations share one
       policy projection, resource budget, session identity, audit sink, and
       endpoint lifecycle.
-- [ ] Claims 5, 8, 10, 12, and 13 remain `Shipped`; preview claim 16 retains
+- [x] Claims 5, 8, 10, 12, and 13 remain `Shipped`; preview claim 16 retains
       positive, negative, split-frame, wrong-destination, and audit-leak
       witnesses on the sole path.
 - [ ] The performance gates and all repository tests are green on the required

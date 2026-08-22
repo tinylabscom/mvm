@@ -8,9 +8,8 @@ longer represent the raw-packet compatibility path. Stale serialized
 `raw_ip_stack` and `l3_vsock` inputs fail at their outer compatibility boundary
 with guidance toward the supported loopback adapters and typed connectors.
 
-The superseded implementation remains in-tree only as deletion residue until
-the next workstream removes it. It cannot be admitted or reached from the
-public workload surface.
+The superseded implementation is physically deleted. Only the narrow stale-
+input refusal remains at the public decoding boundary.
 
 ## Target invariant
 
@@ -45,13 +44,13 @@ prove every forbidden case and each narrow infrastructure exemption.
 ## Security properties on the socket-aware path
 
 Firecracker, libkrun, and HVF all bind
-`WorkloadRunner<VmmDriver, RealEndpointSpawner, RealBrokerRegistrar>`; their
+`WorkloadRunner<VmmDriver, RealNetworkEndpointSpawner, RealBrokerRegistrar>`; their
 capability shape advertises host-vsock mediation and no routable guest NIC.
 The runner owns admission and default-deny. The endpoint spawner owns admitted
-host/port connections. The broker and substitution endpoint own secret-bearing
-requests, so credentials never enter the guest. The supervisor L4 gate applies
-the final host/port policy and audit boundary. Plan 316 keeps this seam and
-makes it the only one.
+host/port connections and ingress listeners. The broker authorizes typed
+connector bindings but delegates their network execution to the endpoint, so
+credentials never enter the guest and no second socket owner exists. The
+endpoint's shared L4 gate applies the final host/port policy and audit boundary.
 
 QEMU remains an explicit development/test substrate outside the production
 workload claim boundary. Its networking behavior is not a production egress

@@ -386,7 +386,7 @@ jobs:
       - name: Trust-gradient ledger
         run: cargo run -p xtask -- check-trust-gradient
 
-      - name: single workload network path and socket owner
+      - name: single workload network path and socket owner (single-network-path)
         run: cargo run -p xtask -- check-single-network-path
 
       # The in-guest toolbox is deliberately ungoverned — the microVM boundary
