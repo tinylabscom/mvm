@@ -171,6 +171,10 @@ pub enum ReceiptError {
     /// The `receipt_id` did not match the recomputed content address.
     #[error("receipt_id does not match recomputed content address")]
     ReceiptIdMismatch,
+
+    /// The archive's content address does not match its contents.
+    #[error("archive_id does not match recomputed content address")]
+    ArchiveIdMismatch,
     /// The `did:key` could not be parsed.
     #[error("did:key parse error: {0}")]
     DidKey(#[from] crate::did_key::DidKeyError),
