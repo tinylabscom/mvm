@@ -1676,7 +1676,7 @@ jobs:
             fi
           done
           echo "===== VM state dirs ====="
-          for d in "$MVM_HOME"/vms/*/; do
+          for d in "$MVM_HOME"/vms/*/ "$MVM_HOME"/cache/builder-vm/vms/*/; do
             echo "--- $d ---"
             ls -la "$d" || true
             for f in console.log firecracker.log qemu.log; do

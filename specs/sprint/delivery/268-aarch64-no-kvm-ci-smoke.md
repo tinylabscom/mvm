@@ -30,4 +30,15 @@ user with mode `0600` before QEMU starts; an `xtask` workflow-structure test
 keeps the grant ordered before the first boot.
 
 Diagnostics (`console.log`, `firecracker.log`, `qemu.log`, and the captured
-mvmctl output) are dumped on failure.
+mvmctl output) are dumped on failure, including builder VM state under
+`$MVM_HOME/cache/builder-vm/vms`.
+
+The merge-queue witness also caught a QEMU-only drive-layout bug: the QEMU
+builder had reused the one-shot libkrun runtime-overlay attachment, whose
+kernel command line enables raw-disk job transport. QEMU supplies `/job` and
+`/out` through virtio-fs instead, so the guest interpreted the runtime and
+identity disks as nonexistent job input/output and never returned a result.
+QEMU now shares the virtio-fs runtime-overlay contract used by persistent
+builders: `/dev/vdc` is only the read-only runtime overlay, no disk-transport
+tokens are present, and the writable job/output shares remain authoritative.
+Unit tests pin both the shared attachment and the QEMU call-site contract.
