@@ -83,3 +83,21 @@ trigger the watcher, including cancelled ones, so cancellation does not
 explain it. The guard fix above means a delivered event now reports
 correctly; it does not explain a `workflow_run` event that never arrived.
 Tracked separately rather than guessed at.
+
+## 3. The first completed old-layout run exposed seven missing witnesses
+
+Security run 32552650847 finally completed the previous four-shard layout and
+reported seven actionable survivors in `plan_admission.rs`: extension budget
+conjunction, verified-contract identity, inclusive artifact-size bounds,
+guest-extension plan identity and placement, mountpoint collision, and the
+assurance proxy's duplicate-service check. These are authorization decisions,
+so accepting them into the mutation baseline would hide real fail-open changes.
+
+The predicates are now small, named units with boundary and one-field-at-a-time
+witnesses. Attachment tests assert the signed plan identity, guest-only
+placement, and duplicate mount refusal; the assurance proxy test pins exact
+service equality. A bounded local mutation run exercised the twenty generated
+mutants covering those predicates and adjacent provenance fields: 20/20 were
+caught in seven minutes. The run also proved that the previously accepted
+`replace * with + in admit_within_host_budget` mutant is now caught, so that
+obsolete baseline entry is removed instead of retained as a waiver.

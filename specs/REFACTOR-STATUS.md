@@ -1,6 +1,6 @@
 # Refactor status
 
-Last updated: 2026-08-21
+Last updated: 2026-08-22
 
 This is the cross-plan progress index. The owning plan remains authoritative
 for detailed scope and acceptance criteria.
@@ -382,7 +382,11 @@ for detailed scope and acceptance criteria.
       The exact Security rerun's capability-builder finding now has a direct
       all-fields witness; its only remaining constructor mutant is documented
       as the identical `Default::default()` expression rather than waived as
-      an untested behavior.
+      an untested behavior. Completed run 32552650847 then exposed seven
+      authorization survivors in extension verification and attachment;
+      focused boundary and single-field witnesses catch all 20 generated
+      mutants across those predicates, and the now-caught host-budget miss has
+      been removed from the accepted baseline.
       Closure remains gated on a clean Security workflow run from current
       `main`, including every mutation shard and both reproducibility builds.
 
