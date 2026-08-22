@@ -635,7 +635,7 @@ mod tests {
         let guard = DataDirGuard::new();
         let root = guard.path().join("vol-root");
         create("work", Some(root.to_str().unwrap()), false, "16M").unwrap();
-        let err = mount("vm-1", "work", None, "/mnt/work", false).unwrap_err();
+        let err = mount("vm-1", "work", None, "/data/work", false).unwrap_err();
         assert!(format!("{err:#}").contains("is locked"), "got: {err:#}");
     }
 

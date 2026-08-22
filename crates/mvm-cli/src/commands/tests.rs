@@ -888,7 +888,7 @@ fn volume_mount_managed_omits_host() {
         "--volume",
         "work",
         "--guest",
-        "/mnt/work",
+        "/data/work",
     ])
     .unwrap();
     let Commands::Machine(mg) = cli.command else {
@@ -909,7 +909,7 @@ fn volume_mount_managed_omits_host() {
             assert_eq!(name, "vm-1");
             assert_eq!(volume, "work");
             assert_eq!(host, None);
-            assert_eq!(guest, "/mnt/work");
+            assert_eq!(guest, "/data/work");
             assert!(!rw);
             assert!(!remote);
         }
@@ -1528,7 +1528,7 @@ fn test_run_volume_persistent() {
         "--image",
         "alpine:latest",
         "--mount",
-        "/data:/mnt/data:4G",
+        "/data:/data/vol:4G",
         "--",
         "sh",
     ])
@@ -1540,7 +1540,7 @@ fn test_run_volume_persistent() {
                 ..
             }) => {
                 assert_eq!(volume.len(), 1);
-                assert_eq!(volume[0], "/data:/mnt/data:4G");
+                assert_eq!(volume[0], "/data:/data/vol:4G");
             }
             _ => panic!("Expected machine run"),
         },
@@ -1567,7 +1567,7 @@ fn test_parse_volume_spec_dir_share() {
 
 #[test]
 fn test_parse_volume_spec_disk() {
-    let spec = parse_volume_spec("/data:/mnt/data:4G").unwrap();
+    let spec = parse_volume_spec("/data:/data/vol:4G").unwrap();
     match spec {
         VolumeSpec::Disk {
             host,
@@ -1577,7 +1577,7 @@ fn test_parse_volume_spec_disk() {
             ..
         } => {
             assert_eq!(host, "/data");
-            assert_eq!(guest, "/mnt/data");
+            assert_eq!(guest, "/data/vol");
             assert_eq!(size, "4G");
             assert!(!encrypted);
         }
@@ -1595,10 +1595,10 @@ fn test_parse_volume_spec_invalid() {
 fn test_parse_volume_spec_generic_dir_share() {
     // A generic guest mount (not /mnt/config|secrets) now parses as a
     // dir share — the old "unsupported mount" bail is gone.
-    let spec = parse_volume_spec("/tmp/foo:/mnt/custom").unwrap();
+    let spec = parse_volume_spec("/tmp/foo:/data/custom").unwrap();
     match spec {
         VolumeSpec::DirShare { guest_mount, .. } => {
-            assert_eq!(guest_mount, "/mnt/custom");
+            assert_eq!(guest_mount, "/data/custom");
         }
         _ => panic!("Expected DirShare"),
     }

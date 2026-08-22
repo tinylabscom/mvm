@@ -290,17 +290,22 @@ pub fn materialize_disk_volume(v: &VmVolume) -> Result<()> {
 
 /// The only guest paths a user volume may mount on. An **allow-list**
 /// (not a deny-list) so the base rootfs and every runtime-managed mount
-/// (`/`, `/root`, `/etc`, `/usr`, `/nix`, `/dev`, the builder shares, …)
-/// are read-only and never user-controllable *by construction* — a
-/// volume can only land at/under one of these roots. These mirror the
-/// in-guest `mvm_security::policy::MountPathPolicy` allow-roots and are
-/// the only mountpoints mkGuest pre-creates on the read-only rootfs.
-const ALLOWED_GUEST_MOUNT_ROOTS: &[&str] = &["/data", "/work", "/mnt"];
+/// (`/`, `/root`, `/etc`, `/usr`, `/nix`, `/dev`, `/mnt`, the builder
+/// shares, …) are read-only and never user-controllable *by
+/// construction* — a volume can only land at/under one of these roots.
+/// These mirror the in-guest `mvm_core::crypto::policy::MountPathPolicy`
+/// allow-roots and are mountpoints mkGuest pre-creates on the read-only
+/// rootfs.
+///
+/// `/mnt` is deliberately absent: `/init` mounts the config and secret
+/// drives beneath it, so it belongs to the runtime, not the user.
+const ALLOWED_GUEST_MOUNT_ROOTS: &[&str] = &["/data", "/work"];
 
-/// Guest paths reserved by the runtime even though they sit under an
-/// allowed root: the config + secret drives. A *directory share* at
-/// these is intercepted earlier as a config/secret drive; any other use
-/// (e.g. a disk image) is refused here.
+/// Guest paths reserved by the runtime. Both sit under `/mnt`, which is
+/// no longer an allow-root, so the allow-list alone already refuses them.
+/// Retained deliberately for two reasons: it is checked first, so these
+/// report as *reserved* rather than as a generic allow-root miss, and it
+/// keeps the drives protected if `/mnt` is ever restored to the roots.
 const RESERVED_UNDER_ALLOWED: &[&str] = &["/mnt/config", "/mnt/secrets"];
 
 /// Enforce the user-volume mount allow-list: the guest path must be one
@@ -513,7 +518,7 @@ mod volume_spec_tests {
 
         assert!(error.contains("invalid mount"), "unexpected error: {error}");
         assert!(
-            error.contains("user volumes may only mount under /data, /work, /mnt"),
+            error.contains("user volumes may only mount under /data, /work"),
             "unexpected error: {error}"
         );
     }
@@ -608,7 +613,7 @@ mod volume_spec_tests {
     fn validated_conversion_enforces_mount_allow_list() {
         // The guest-mount allow-list fires before host-path validation,
         // so a fake host path is fine here. Anything not under
-        // /data,/work,/mnt — including system paths — is refused.
+        // /data,/work — including system paths and /mnt — is refused.
         for guest in [
             "/",
             "/root",
@@ -622,6 +627,10 @@ mod volume_spec_tests {
             "/srv/data",
             "/data-evil",
             "/workspace",
+            // `/mnt` belongs to the runtime, which mounts the config and
+            // secret drives beneath it before any user volume attaches.
+            "/mnt",
+            "/mnt/extra",
         ] {
             let spec = parse_volume_spec(&format!("/h:{guest}")).unwrap();
             assert!(
@@ -629,7 +638,8 @@ mod volume_spec_tests {
                 "should refuse mount outside the allow-list: {guest}"
             );
         }
-        // The config/secret drives are reserved even though under /mnt.
+        // The config/secret drives stay refused, and report as reserved
+        // rather than as a generic allow-root miss.
         for guest in ["/mnt/config", "/mnt/secrets"] {
             let spec = parse_volume_spec(&format!("/h:{guest}")).unwrap();
             assert!(
@@ -640,7 +650,7 @@ mod volume_spec_tests {
         // The allow-roots (and paths under them) pass the mount check —
         // validate_guest_mount is pure, so it returns Ok before the
         // host-path FS check would run.
-        for guest in ["/data", "/work", "/mnt", "/mnt/extra", "/data/sub"] {
+        for guest in ["/data", "/work", "/data/sub", "/work/src"] {
             assert!(
                 validate_guest_mount(guest).is_ok(),
                 "allow-root should pass: {guest}"
@@ -747,28 +757,40 @@ mod volume_spec_tests {
         }
     }
 
-    /// The reserved paths sit *under* an allowed root, so the allow-list
-    /// alone would admit them; the reserved check is what refuses them.
-    /// Both its equality and its prefix arm need a case, or one of the
-    /// two can be weakened without any test noticing.
+    /// The reserved runtime drives, refused twice over.
+    ///
+    /// `/mnt` is no longer an allow-root, so the allow-list alone already
+    /// refuses these. The reserved check is kept ahead of it so they report
+    /// as *reserved* rather than as a generic allow-root miss, and so the
+    /// drives stay protected if `/mnt` is ever restored to the roots. Both
+    /// its equality and its prefix arm need a case, or one of the two can be
+    /// weakened without any test noticing.
     #[test]
-    fn reserved_runtime_mounts_are_refused_even_under_an_allowed_root() {
+    fn reserved_runtime_mounts_are_refused_and_named_as_reserved() {
         for reserved in RESERVED_UNDER_ALLOWED {
-            // Exact match.
+            // Exact match, reported as reserved rather than as an
+            // allow-root miss.
+            let err = validate_guest_mount(reserved)
+                .expect_err("{reserved} is reserved by the runtime")
+                .to_string();
             assert!(
-                validate_guest_mount(reserved).is_err(),
-                "{reserved} is reserved by the runtime"
+                err.contains("reserved"),
+                "{reserved} should report as reserved, got: {err}"
             );
             // A path *under* the reserved drive.
             assert!(
                 validate_guest_mount(&format!("{reserved}/nested")).is_err(),
                 "{reserved}/nested is under a reserved drive"
             );
-            // A sibling that merely shares the prefix is not reserved, so
-            // the check must not be a bare `starts_with`.
+            // A sibling that merely shares the prefix is not *reserved*, so
+            // the check must not be a bare `starts_with`. It is still
+            // refused, but by the allow-list, since it sits under `/mnt`.
+            let err = validate_guest_mount(&format!("{reserved}x"))
+                .expect_err("{reserved}x is outside the allow-roots")
+                .to_string();
             assert!(
-                validate_guest_mount(&format!("{reserved}x")).is_ok(),
-                "{reserved}x is a distinct path and stays allowed"
+                !err.contains("reserved"),
+                "{reserved}x is a distinct path, not a reserved drive, got: {err}"
             );
         }
     }

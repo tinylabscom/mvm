@@ -28,7 +28,16 @@ use std::path::Path;
 use thiserror::Error;
 
 /// Default subtrees a share can be mounted under.
-pub const DEFAULT_MOUNT_ALLOW_ROOTS: &[&str] = &["/mnt", "/data", "/work"];
+///
+/// `/mnt` is deliberately absent. The runtime owns it: `/init` mounts the
+/// read-only config and secret drives at `/mnt/config` and `/mnt/secrets`
+/// before any user volume is attached. While `/mnt` was an allow-root, a
+/// share placed at `/mnt` passed both the allow-root check and the
+/// reserved-path check — the latter only refuses a path that *names* a
+/// reserved drive — and mounted over drives that were already there,
+/// hiding them from the guest. Leaving `/mnt` off the list makes the whole
+/// subtree unreachable to a user volume, so that cannot be expressed.
+pub const DEFAULT_MOUNT_ALLOW_ROOTS: &[&str] = &["/data", "/work"];
 
 /// Default prefixes that always reject a share mount, regardless
 /// of allow-root override. The bare-root path `/` is rejected by
@@ -269,10 +278,28 @@ mod tests {
 
     #[test]
     fn accepts_default_allow_roots() {
-        for path in ["/mnt", "/mnt/foo", "/data", "/data/x/y", "/work/sandbox"] {
+        for path in ["/data", "/data/x/y", "/work", "/work/sandbox"] {
             validate_mount_path(path)
                 .unwrap_or_else(|e| panic!("expected accept for {path:?}, got {e}"));
         }
+    }
+
+    /// `/mnt` belongs to the runtime: `/init` mounts the config and secret
+    /// drives beneath it before any user volume is attached. Restoring it to
+    /// the allow-roots reintroduces a share at `/mnt` mounting over drives
+    /// that are already there.
+    #[test]
+    fn mnt_is_not_an_allow_root_so_the_runtime_drives_are_unreachable() {
+        for path in ["/mnt", "/mnt/foo", "/mnt/config", "/mnt/secrets"] {
+            assert!(
+                matches!(
+                    validate_mount_path(path),
+                    Err(MountPathError::OutsideAllowRoots { .. })
+                ),
+                "{path} must be outside the allow-roots",
+            );
+        }
+        assert!(!DEFAULT_MOUNT_ALLOW_ROOTS.contains(&"/mnt"));
     }
 
     #[test]
