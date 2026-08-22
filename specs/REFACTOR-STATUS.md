@@ -1,11 +1,18 @@
 # Refactor status
 
-Last updated: 2026-08-20
+Last updated: 2026-08-21
 
 This is the cross-plan progress index. The owning plan remains authoritative
 for detailed scope and acceptance criteria.
 
 ## Completed issue closeouts
+
+- [x] **Issue #2792 — Security watcher delivery has an independent backstop.**
+      The scheduled claim-witness reconciliation now inspects only scheduled
+      runs and requires the latest one to be fresh, completed, and successful.
+      A failed, cancelled, timed-out, or still-running nightly is therefore
+      reported even if GitHub omits the event-driven watcher's `workflow_run`
+      delivery; pull-request and dispatch runs cannot mask the evidence.
 
 - [x] **Issue #2657 — live BDD is visible and merge-gated.** Capability skips
       are reported instead of disappearing from the test summary, and a

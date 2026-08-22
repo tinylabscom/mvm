@@ -1,8 +1,7 @@
 //! `xtask check-claim-witness-freshness`
 //!
 //! A claim whose witness is a CI lane has two ways to stop backing it. The
-//! lane can go **red**, and the lane can stop **running**. Those need
-//! different detectors, and only the first one is covered today.
+//! lane can go **red**, and the lane can stop **running**.
 //!
 //! `Security lane watch` reports a red lane, but it triggers on
 //! `workflow_run: [Security] completed` — so it fires only when Security
@@ -12,14 +11,12 @@
 //! 2026-06-16, then did not run again until 2026-07-21. Five weeks with
 //! every claim's ledger entry green and no evidence behind any of them.
 //!
-//! This gate asks the question absence-blind detectors cannot: *did the lane
-//! run at all?* For every scheduled workflow that anchors a `ci:` witness,
-//! it reads the most recent run and fails when that run is older than the
-//! schedule can explain.
-//!
-//! Conclusions are deliberately **not** re-checked here. That is the other
-//! detector's job, and duplicating it would put two gates on one property
-//! and let them disagree.
+//! This gate is the independent backstop for both failure modes. For every
+//! scheduled workflow that anchors a `ci:` witness, it reads the most recent
+//! scheduled run and fails when that run is older than the schedule can
+//! explain or did not complete successfully. Re-checking the conclusion is
+//! intentional: GitHub can omit a `workflow_run` delivery, so the event-driven
+//! watcher cannot be the only observer of a failed nightly.
 
 use anyhow::{Context, Result, bail};
 use std::collections::{BTreeMap, BTreeSet};
@@ -70,6 +67,24 @@ pub enum Freshness {
     NotScheduled,
 }
 
+/// The fields needed from the latest scheduled Actions run.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LatestRun {
+    pub created_at: String,
+    pub status: String,
+    pub conclusion: Option<String>,
+}
+
+/// Whether the latest scheduled run established healthy evidence.
+#[derive(Debug, PartialEq, Eq)]
+pub enum RunOutcome {
+    Healthy,
+    Unhealthy {
+        status: String,
+        conclusion: Option<String>,
+    },
+}
+
 pub fn run(workspace: &Path) -> Result<()> {
     let workflows = resolve_witness_workflows(workspace)?;
     if workflows.is_empty() {
@@ -87,13 +102,40 @@ pub fn run(workspace: &Path) -> Result<()> {
         let allowed = wf.max_age_hours();
         // Only pay for an API call once the schedule says absence means
         // something.
-        let age = match allowed {
-            Some(_) => latest_run_age_hours(&wf.file)?,
+        let latest = match allowed {
+            Some(_) => latest_scheduled_run(&wf.file)?,
             None => None,
         };
+        let age = latest
+            .as_ref()
+            .map(|run| {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .context("reading the system clock")?
+                    .as_secs() as i64;
+                age_hours_since(&run.created_at, now).with_context(|| {
+                    format!(
+                        "interpreting run timestamp {:?} for {}",
+                        run.created_at, wf.file
+                    )
+                })
+            })
+            .transpose()?;
         match classify(age, allowed) {
             Freshness::NotScheduled => skipped.push(wf.file.clone()),
-            Freshness::Fresh => checked += 1,
+            Freshness::Fresh => {
+                let run = latest
+                    .as_ref()
+                    .expect("a fresh verdict requires a latest scheduled run");
+                match classify_outcome(run) {
+                    RunOutcome::Healthy => checked += 1,
+                    RunOutcome::Unhealthy { status, conclusion } => problems.push(format!(
+                        "{} latest scheduled run has status {status:?} and conclusion {:?} — \
+                         claim(s) {:?} are witnessed by {:?}",
+                        wf.file, conclusion, wf.claims, wf.witnesses
+                    )),
+                }
+            }
             Freshness::NeverRan => problems.push(format!(
                 "{} has never run, yet it backs claim(s) {:?} via {:?}",
                 wf.file, wf.claims, wf.witnesses
@@ -117,16 +159,16 @@ pub fn run(workspace: &Path) -> Result<()> {
 
     if !problems.is_empty() {
         bail!(
-            "check-claim-witness-freshness: {} claim-bearing lane(s) have stopped running:\n  {}\n\n\
-             A lane that does not run reports no failure, so a red-lane watcher stays silent and \
-             every claim it backs keeps a green ledger entry with nothing behind it.",
+            "check-claim-witness-freshness: {} claim-bearing lane(s) are stale or unhealthy:\n  {}\n\n\
+             The scheduled backstop independently verifies both cadence and conclusion because a \
+             missing workflow_run delivery can otherwise hide a failed lane.",
             problems.len(),
             problems.join("\n  ")
         );
     }
 
     eprintln!(
-        "check-claim-witness-freshness: clean ({checked} scheduled lane(s) fresh, {} unscheduled)",
+        "check-claim-witness-freshness: clean ({checked} scheduled lane(s) fresh and successful, {} unscheduled)",
         skipped.len()
     );
     Ok(())
@@ -147,6 +189,17 @@ pub fn classify(age_hours: Option<u32>, allowed_hours: Option<u32>) -> Freshness
             allowed_hours,
         },
         Some(_) => Freshness::Fresh,
+    }
+}
+
+pub fn classify_outcome(run: &LatestRun) -> RunOutcome {
+    if run.status == "completed" && run.conclusion.as_deref() == Some("success") {
+        RunOutcome::Healthy
+    } else {
+        RunOutcome::Unhealthy {
+            status: run.status.clone(),
+            conclusion: run.conclusion.clone(),
+        }
     }
 }
 
@@ -253,19 +306,20 @@ pub fn cron_interval_hours(expr: &str) -> Option<u32> {
     (count > 0).then(|| 24 / count.max(1))
 }
 
-/// Age in hours of the most recent run of `file` on the default branch, or
-/// None when it has never run.
-fn latest_run_age_hours(file: &str) -> Result<Option<u32>> {
+/// Most recent scheduled run of `file`, or None when it has never run.
+fn latest_scheduled_run(file: &str) -> Result<Option<LatestRun>> {
     let out = std::process::Command::new("gh")
         .args([
             "run",
             "list",
             "--workflow",
             file,
+            "--event",
+            "schedule",
             "--limit",
             "1",
             "--json",
-            "createdAt",
+            "createdAt,status,conclusion",
         ])
         .output()
         .with_context(|| format!("running `gh run list --workflow {file}`"))?;
@@ -275,27 +329,21 @@ fn latest_run_age_hours(file: &str) -> Result<Option<u32>> {
             String::from_utf8_lossy(&out.stderr).trim()
         );
     }
-    let text = String::from_utf8_lossy(&out.stdout);
-    let Some(created) = first_created_at(&text) else {
-        return Ok(None);
-    };
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .context("reading the system clock")?
-        .as_secs() as i64;
-    age_hours_since(&created, now)
-        .with_context(|| format!("interpreting run timestamp {created:?} for {file}"))
-        .map(Some)
+    Ok(first_run(&String::from_utf8_lossy(&out.stdout)))
 }
 
-/// `createdAt` of the first entry in `gh run list --json createdAt` output.
-pub fn first_created_at(json: &str) -> Option<String> {
+/// First entry in `gh run list --json createdAt,status,conclusion` output.
+pub fn first_run(json: &str) -> Option<LatestRun> {
     let v: serde_json::Value = serde_json::from_str(json).ok()?;
-    v.as_array()?
-        .first()?
-        .get("createdAt")?
-        .as_str()
-        .map(str::to_string)
+    let run = v.as_array()?.first()?;
+    Some(LatestRun {
+        created_at: run.get("createdAt")?.as_str()?.to_string(),
+        status: run.get("status")?.as_str()?.to_string(),
+        conclusion: run
+            .get("conclusion")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+    })
 }
 
 /// Hours between `rfc3339` and `now_unix`. Pure, so the verdict this gate
@@ -427,13 +475,55 @@ mod tests {
     }
 
     #[test]
-    fn first_created_at_reads_the_newest_entry() {
-        let json = r#"[{"createdAt":"2026-07-31T05:26:57Z"},{"createdAt":"2026-07-30T05:17:49Z"}]"#;
+    fn latest_scheduled_run_must_complete_successfully() {
+        let successful = LatestRun {
+            created_at: "2026-08-21T04:17:00Z".to_string(),
+            status: "completed".to_string(),
+            conclusion: Some("success".to_string()),
+        };
+        assert_eq!(classify_outcome(&successful), RunOutcome::Healthy);
+
+        for conclusion in ["failure", "cancelled", "timed_out"] {
+            let run = LatestRun {
+                conclusion: Some(conclusion.to_string()),
+                ..successful.clone()
+            };
+            assert_eq!(
+                classify_outcome(&run),
+                RunOutcome::Unhealthy {
+                    status: "completed".to_string(),
+                    conclusion: Some(conclusion.to_string()),
+                }
+            );
+        }
+
+        let running = LatestRun {
+            status: "in_progress".to_string(),
+            conclusion: None,
+            ..successful
+        };
         assert_eq!(
-            first_created_at(json).as_deref(),
-            Some("2026-07-31T05:26:57Z")
+            classify_outcome(&running),
+            RunOutcome::Unhealthy {
+                status: "in_progress".to_string(),
+                conclusion: None,
+            }
         );
-        assert_eq!(first_created_at("[]"), None);
+    }
+
+    #[test]
+    fn first_run_reads_status_and_conclusion() {
+        let json = r#"[{"createdAt":"2026-08-21T04:17:00Z","status":"completed","conclusion":"cancelled"}]"#;
+        assert_eq!(
+            first_run(json),
+            Some(LatestRun {
+                created_at: "2026-08-21T04:17:00Z".to_string(),
+                status: "completed".to_string(),
+                conclusion: Some("cancelled".to_string()),
+            })
+        );
+        assert_eq!(first_run("[]"), None);
+        assert_eq!(first_run("not json"), None);
     }
 
     #[test]
