@@ -269,6 +269,34 @@ impl Recorder {
         Ok(())
     }
 
+    /// Emit a `host.ai.usage` chain-signed audit entry.
+    ///
+    /// The record carries only provider-reported counts and routing metadata;
+    /// request/response bodies, headers, and credentials are never included.
+    pub async fn record_ai_usage(
+        &self,
+        record: &mvm_core::policy::audit::ai_usage::AiUsageRecord,
+    ) -> Result<(), RecorderError> {
+        self.record_unbound(EventCategory::Host, "host.ai.usage", record.to_labels())
+            .await
+    }
+
+    /// Emit a `host.ai.budget_exceeded` chain-signed audit entry.
+    ///
+    /// Emitted when the VM's AI egress budget has been exceeded and a
+    /// subsequent request is refused before forwarding.
+    pub async fn record_ai_budget_exceeded(
+        &self,
+        record: &mvm_core::policy::audit::ai_usage::AiUsageRecord,
+    ) -> Result<(), RecorderError> {
+        self.record_unbound(
+            EventCategory::Host,
+            "host.ai.budget_exceeded",
+            record.to_labels(),
+        )
+        .await
+    }
+
     fn bump_metric(&self, category: EventCategory) {
         let Some(ref m) = self.metrics else {
             return;

@@ -171,6 +171,10 @@ pub struct FlowMuxIdentity {
 pub struct EndpointConfig {
     /// Tenant the workload belongs to — the store lookup key.
     pub tenant_id: String,
+    /// VM instance identifier. Used to attribute AI egress metrics and audit
+    /// records to this workload.
+    #[serde(default)]
+    pub instance_id: String,
     /// The admitted plan's `secrets` (name → source). Only
     /// [`mvm_core::plan::SecretSource::Keystore`] entries participate; the
     /// endpoint reconstructs each one's binding from the host binding store.
@@ -421,10 +425,17 @@ pub fn assemble_with_projection(
         tracing::info!(proxy = %p.summary(), "forward leg routed through an upstream proxy");
     }
 
+    let ai_policy = cfg
+        .network_policy
+        .as_ref()
+        .and_then(|policy| policy.ai())
+        .cloned();
+
     let (service, handed) = SubstitutionService::from_plan(
         crate::supervisor::network_endpoint_proxy::FromPlanInputs {
             plan_secrets: &cfg.secrets,
             tenant: &cfg.tenant_id,
+            instance_id: &cfg.instance_id,
             bindings: &bindings,
             resolver,
             forward_timeout_secs: cfg.forward_timeout_secs,
@@ -433,6 +444,7 @@ pub fn assemble_with_projection(
             reversible_replacement: cfg.reversible_replacement.clone(),
             tls_intermediate,
             recorder: None,
+            ai_policy,
         },
     )?;
 
@@ -616,6 +628,7 @@ mod tests {
     fn vsock_cfg(secrets: Vec<SecretBinding>, dir: &std::path::Path) -> EndpointConfig {
         EndpointConfig {
             tenant_id: "local".into(),
+            instance_id: "test".into(),
             secrets,
             transport: EndpointTransport::Vsock { port: 5253 },
             redaction: mvm_core::policy::RedactionPolicy::default(),

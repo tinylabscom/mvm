@@ -622,6 +622,7 @@ fn machine_run_spec(
         // a `[grants]` table.
         manifest: None,
         config: &config,
+        ai: None,
     })?;
     let _ = validate_machine_memory(&args.run.memory, None)?;
     let profile = run_profile_name(args.run.profile).to_string();
@@ -635,6 +636,7 @@ fn machine_run_spec(
         runtime_pack: args.run.runtime_pack,
         net: args.run.net,
         allow_host: args.run.allow_host.clone(),
+        ai: None,
         ports: args.port.clone(),
         cpus: args.run.cpus,
         memory: args.run.memory.clone(),
@@ -1076,6 +1078,7 @@ struct MachineSpecInputs<'a> {
     image: Option<&'a str>,
     net: bool,
     allow_host: &'a [String],
+    ai: Option<&'a mvm_core::network_policy::AiPolicy>,
     cpus: Option<u32>,
     cpu_limit: Option<u32>,
     timeout: Option<u64>,
@@ -1109,6 +1112,9 @@ fn build_machine_spec(inputs: MachineSpecInputs<'_>) -> Result<MachineSpec> {
     } else {
         inputs.allow_host.to_vec()
     };
+    let ai = inputs
+        .ai
+        .or(workflow.and_then(|workflow| workflow.ai.as_ref()));
     // Resolving grants also settles the egress policy, so validating it
     // here validates the same policy the machine will actually boot under.
     let config = mvm_core::user_config::load(None);
@@ -1120,6 +1126,7 @@ fn build_machine_spec(inputs: MachineSpecInputs<'_>) -> Result<MachineSpec> {
         grants_file: inputs.grants_file,
         manifest: workflow.map(|workflow| &workflow.grants),
         config: &config,
+        ai,
     })?;
     let cpus = inputs
         .cpus
@@ -1154,6 +1161,7 @@ fn build_machine_spec(inputs: MachineSpecInputs<'_>) -> Result<MachineSpec> {
         runtime_pack: false,
         net,
         allow_host,
+        ai: ai.cloned(),
         ports: Vec::new(),
         cpus,
         memory,
@@ -1207,6 +1215,7 @@ impl MachineCreateArgs {
             image: self.image.as_deref(),
             net: self.net,
             allow_host: &self.allow_host,
+            ai: None,
             cpus: self.cpus,
             cpu_limit: self.cpu_limit,
             timeout: self.timeout,

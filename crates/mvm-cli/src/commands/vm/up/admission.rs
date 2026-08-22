@@ -2219,6 +2219,7 @@ allow_hosts = ["localhost:8443"]
             grants_file: None,
             manifest: Some(&declared),
             config: &config,
+            ai: None,
         })
         .expect("the manifest's grants resolve");
 
@@ -2307,6 +2308,7 @@ allow_hosts = ["localhost:8443"]
             grants_file: None,
             manifest: Some(&declared),
             config: &config,
+            ai: None,
         })
         .expect("resolves");
 
@@ -2360,6 +2362,7 @@ allow_hosts = ["localhost:8443"]
             grants_file: None,
             manifest: Some(&declared),
             config: &config,
+            ai: None,
         })
         .expect_err("the resolver refuses a grant over this host's ceiling");
         let early = format!("{early:#}");
@@ -2380,6 +2383,7 @@ allow_hosts = ["localhost:8443"]
             grants_file: None,
             manifest: Some(&declared),
             config: &MvmConfig::default(),
+            ai: None,
         })
         .expect("an unbounded config resolves the same grant");
 
@@ -2439,6 +2443,7 @@ allow_hosts = ["localhost:8443"]
             grants_file: None,
             manifest: None,
             config: &config,
+            ai: None,
         })
         .expect("resolves");
         assert_eq!(resolved.plan_grants, None);

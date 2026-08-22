@@ -8,6 +8,17 @@
 > The current tree is treated as a **disposable v1**. This sprint restructures it completely.
 > **No legacy paths, no compatibility shims, no aliases.** Hard renames only.
 
+## In progress
+
+- [x] **AI egress metering and token budgets.**
+      `specs/plans/2026-08-21-ai-egress-metering-and-budget.md`.
+      Provider-reported token counts at the host substitution endpoint,
+      per-VM Prometheus metrics, chain-signed audit records, and an optional
+      token budget that refuses further AI egress when exhausted. OpenAI and
+      Anthropic in v1; provider additions are macro-declared.
+      All phases are complete and green (`cargo check`, `cargo clippy`,
+      `just check-gated`, unit/integration tests, and SDK tests).
+
 ## Delivered (archive — closed to new entries)
 
 > **Do not append here.** A new delivery entry goes in its own file under

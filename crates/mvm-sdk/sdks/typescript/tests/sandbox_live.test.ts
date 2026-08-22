@@ -366,7 +366,7 @@ describe("Sandbox.create (live mode)", () => {
     expect(readFixtureLog()).toEqual([]);
     expect(() =>
       mvm.Sandbox.create("minimal", {
-        network: { raw_ip_stack: true },
+        network: { mode: "none", raw_ip_stack: true },
       }),
     ).toThrow(/unknown fields/);
     expect(readFixtureLog()).toEqual([]);

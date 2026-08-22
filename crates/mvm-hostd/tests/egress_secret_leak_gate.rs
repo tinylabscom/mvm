@@ -117,6 +117,8 @@ fn handed_placeholders_never_contain_the_secret_value() {
     let (_service, handed) = SubstitutionService::from_plan(FromPlanInputs {
         plan_secrets: &plan,
         tenant: "local",
+        instance_id: "",
+        ai_policy: None,
         bindings: &bindings,
         resolver,
         forward_timeout_secs: 30,

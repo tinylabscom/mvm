@@ -122,6 +122,15 @@ mvmctl machine run --image alpine --mount .:/work -- ls /work
 mvmctl machine run --image alpine -vvv --allow-host api.example.com -- ps aux
 ```
 
+# Cap AI API usage with a token budget by adding [network.ai] to mvm.toml:
+#   [network]
+#   allow_hosts = ["api.openai.com:443"]
+#   [network.ai]
+#   metering = true
+#   [network.ai.budget]
+#   max_total_tokens = 1_000_000
+mvmctl machine run --flake . -- ./ask-model
+
 ### Persistent machines
 
 A persistent machine has a name and an on-disk spec: create once, start/stop/exec
