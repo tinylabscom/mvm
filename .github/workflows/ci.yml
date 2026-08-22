@@ -1611,6 +1611,11 @@ jobs:
       # flake so `mvmctl` treats this as an installed binary and downloads the
       # published image instead.
       - name: Build mvmctl
+        env:
+          # This witness boots embedded builder-guest code. A restored Cargo
+          # cache may contain binaries built from an older source tree, which
+          # would make the live gate validate stale mvm-host-vm-init behavior.
+          MVM_EMBED_NO_CACHE: 1
         run: cargo build --release -p mvmctl --features release-artifact-bootstrap,release-channel
 
       - name: Use published builder VM bootstrap path
