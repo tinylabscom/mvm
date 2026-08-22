@@ -50,7 +50,11 @@ const BUDGET_TARGET: &str = "x86_64-unknown-linux-gnu";
 /// pulls in no third-party graph. That is the distinction this budget exists to
 /// police: it ratchets against *dependency* growth, and a new crate of ours that
 /// vendors nothing is not that.
-const FEATURE_CLOSURE_BUDGET: usize = 469;
+///
+/// 470 (was 469): the first-party `mvm-capture` workspace crate. Its third-party
+/// dependencies were already present; the single new closure node is the crate
+/// itself, compiled by the all-features workspace lanes.
+const FEATURE_CLOSURE_BUDGET: usize = 470;
 
 /// The two gates measure nested sets — everything in the default closure is
 /// reachable with all features on — so a feature budget at or below the default

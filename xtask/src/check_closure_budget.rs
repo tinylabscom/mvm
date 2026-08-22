@@ -61,7 +61,10 @@ const BUDGETS: &[ClosureBudget] = &[
 /// 227 (was 233): deleting the superseded L3 stack removes seven crates from
 /// this graph; the first-party `mvm-mcp` adapter adds one and no third-party
 /// crates.
-const MACOS_CLOSURE_BUDGET: usize = 227;
+///
+/// 228 (was 227): `mvm-capture`, the project-environment capture frontend. It
+/// adds one first-party crate and no new third-party crate to mvmctl's closure.
+const MACOS_CLOSURE_BUDGET: usize = 228;
 
 /// Max distinct crates allowed in `mvmctl`'s default no-dev closure on
 /// `x86_64-unknown-linux-gnu`. Baseline measured 2026-06-17 against the audited default
@@ -181,7 +184,10 @@ const MACOS_CLOSURE_BUDGET: usize = 227;
 ///
 /// 236 (was 239): deleting the superseded L3 stack removes its retired graph;
 /// `mvm-mcp` contributes one first-party crate and no new third-party crate.
-pub(crate) const CLOSURE_BUDGET: usize = 236;
+///
+/// 237 (was 236): `mvm-capture`, the project-environment capture frontend. It
+/// adds one first-party crate and no new third-party crate to mvmctl's closure.
+pub(crate) const CLOSURE_BUDGET: usize = 237;
 
 pub fn run(workspace: &Path) -> Result<()> {
     for budget in BUDGETS {
