@@ -8,9 +8,8 @@
 #[cfg(target_os = "linux")]
 mod linux {
     use mvm_agentd::guest_bootstrap::{
-        cmdline, cmdline_has_flag, cmdline_value, cstring_str, ensure_runtime_dirs, hex_decode,
-        is_executable, provision_guest_environment, resolve_exec, runtime_source_policy, spawn_one,
-        spawn_one_as,
+        cmdline, cmdline_value, cstring_str, ensure_runtime_dirs, hex_decode, is_executable,
+        provision_guest_environment, runtime_source_policy, spawn_one_as,
     };
     use std::ffi::{CString, OsStr};
     use std::fs;
@@ -20,9 +19,6 @@ mod linux {
 
     const AGENT_FALLBACK: &str = "/usr/local/bin/mvm-guest-agent";
     const AGENT_OVERLAY: &str = "/mvm/runtime/agent";
-    const NET_AGENT_FALLBACK: &str = "/usr/local/bin/mvm-net-agent";
-    const NET_AGENT_OVERLAY: &str = "/mvm/runtime/net-agent";
-    const L3_READY_TIMEOUT: Duration = Duration::from_secs(15);
     pub fn main() {
         mount_pseudofs();
         if let Err(error) = resync_clock_from_host() {
@@ -41,9 +37,6 @@ mod linux {
         provision_host_signer_pub();
         if provision_guest_environment().is_err() {
             std::process::exit(1);
-        }
-        if cmdline_has_flag(mvm_contract::l3::GUEST_CMDLINE_FLAG) {
-            start_l3_tunnel();
         }
         // The init has finished every root-only step. Lock down the process
         // before any workload-facing child is spawned: no new privileges and an
@@ -301,30 +294,6 @@ mod linux {
             .map(Path::new)
             .find(|path| is_exec(path))
             .map(Path::to_path_buf)
-    }
-
-    fn start_l3_tunnel() {
-        let ready = Path::new(mvm_contract::l3::GUEST_READY_FILE);
-        let _ = fs::remove_file(ready);
-        let Some(agent) = resolve_exec([NET_AGENT_OVERLAY, NET_AGENT_FALLBACK]) else {
-            eprintln!(
-                "mvm-oci-init: {} was set but no l3 net agent resolved — refusing to boot",
-                mvm_contract::l3::GUEST_CMDLINE_FLAG
-            );
-            std::process::exit(1);
-        };
-        spawn_one(&agent, "net-agent");
-        let deadline = std::time::Instant::now() + L3_READY_TIMEOUT;
-        while std::time::Instant::now() < deadline {
-            if ready.exists() {
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        }
-        eprintln!(
-            "mvm-oci-init: l3 tunnel did not become ready within {L3_READY_TIMEOUT:?} — refusing to boot"
-        );
-        std::process::exit(1);
     }
 
     fn idle_forever() -> ! {

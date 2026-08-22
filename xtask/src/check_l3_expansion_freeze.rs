@@ -40,21 +40,10 @@ const FROZEN: &[&str] = &[
 /// entry that stops matching is a hard failure, which is what makes the list
 /// monotonically shrink.
 const ALLOWLIST: &[&str] = &[
-    // The refusal itself has to name what it refuses.
-    "crates/mvm-core/src/plan/l3_retirement.rs",
     // The IR compatibility boundary still names the rejected legacy field.
     "crates/mvm-contract/src/ir/workload.rs",
     // CLI compatibility input still names the rejected legacy field.
     "crates/mvm-cli/src/commands/machine/runtime.rs",
-    // Host forwarder and its channel identities.
-    "crates/mvm-hostd/src/bin/mvm-netd.rs",
-    "crates/mvm-hostd/src/netd/",
-    "crates/mvm-net/src/channel.rs",
-    "crates/mvm-net/src/l3/",
-    // Launch-spec guards and the VMM wiring behind them.
-    "crates/mvm-vmm/src/driver/spec.rs",
-    "crates/mvm-vmm/src/host/netd_spawn.rs",
-    "crates/mvm-vmm/src/host/spec_map.rs",
     // Decorator compatibility boundaries still name the rejected kwarg.
     "crates/mvm-sdk/src/decorator/python.rs",
     "crates/mvm-sdk/src/decorator/value.rs",
@@ -264,9 +253,9 @@ mod tests {
         for sym in FROZEN {
             assert!(re.is_match(sym), "{sym} does not match its own pattern");
         }
-        // The refusal helper's name embeds a frozen symbol after an underscore,
+        // A compatibility helper may embed a frozen symbol after an underscore,
         // which is a word character — so it must not trip the gate.
-        assert!(!re.is_match("refuse_raw_ip_stack"));
+        assert!(!re.is_match("reject_raw_ip_stack_input"));
         // Prose spells the mode with a hyphen; only the type name is frozen.
         assert!(!re.is_match("l3-vsock"));
     }
@@ -286,7 +275,7 @@ mod tests {
     #[test]
     fn test_paths_are_out_of_scope() {
         for rel in [
-            "crates/mvm-hostd/tests/l3_tunnel_e2e.rs",
+            "crates/mvm-hostd/tests/network_endpoint_bin.rs",
             "crates/mvm-cli/src/commands/machine/tests.rs",
             "crates/mvm-core/src/plan/test_support.rs",
             "crates/mvm-agentd/fuzz/fuzz_targets/x.rs",
@@ -308,15 +297,15 @@ mod tests {
     #[test]
     fn a_directory_entry_covers_its_files_and_a_file_entry_does_not_prefix_match() {
         assert_eq!(
-            allowlist_entry_for("crates/mvm-net/src/l3/compat.rs"),
-            Some("crates/mvm-net/src/l3/")
+            allowlist_entry_for("crates/mvm-sdk/src/decorator/python.rs"),
+            Some("crates/mvm-sdk/src/decorator/python.rs")
         );
         assert_eq!(
-            allowlist_entry_for("crates/mvm-net/src/channel.rs"),
-            Some("crates/mvm-net/src/channel.rs")
+            allowlist_entry_for("crates/mvm-contract/src/ir/workload.rs"),
+            Some("crates/mvm-contract/src/ir/workload.rs")
         );
         assert_eq!(
-            allowlist_entry_for("crates/mvm-net/src/channel_extra.rs"),
+            allowlist_entry_for("crates/mvm-contract/src/ir/workload_extra.rs"),
             None
         );
     }

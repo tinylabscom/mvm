@@ -99,14 +99,6 @@ required-features = ["addons"]
 name = "mvm-ping"
 path = "src/bin/mvm-ping.rs"
 
-# In-guest L3 TUN-over-vsock tunnel agent. Creates `mvm0`, framing raw IP
-# packets onto dedicated vsock connections to the host gateway. Linux-only
-# at runtime; compiles as an inert binary elsewhere so workspace builds stay
-# green for macOS contributors.
-[[bin]]
-name = "mvm-net-agent"
-path = "src/bin/mvm-net-agent.rs"
-
 # In-guest one-shot workload-exit-code reporter over AF_VSOCK.
 [[bin]]
 name = "mvm-exit-report"
@@ -198,7 +190,6 @@ mvm-contract.workspace = true
 # Only under `schema` (protocol-schema codegen) — see the feature above.
 schemars = { version = "0.8", optional = true }
 anyhow.workspace = true
-aes-gcm.workspace = true
 base64.workspace = true
 chrono.workspace = true
 ed25519-dalek.workspace = true
@@ -206,7 +197,6 @@ libc.workspace = true
 rand.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-sha2.workspace = true
 x25519-dalek.workspace = true
 zeroize.workspace = true
 # The readiness/shutdown hook runner uses thiserror for

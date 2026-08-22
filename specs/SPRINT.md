@@ -863,11 +863,11 @@ updates only its own entry below.
       run on a KVM host (6/6, live forwarding witness, clean teardown); 23
       hermetic BDD scenarios in `s25_l3_vsock`. macOS is capability-declared
       and refuses; native Windows is not claimed.
-      **Retired by plan 316 (ADR-042).** This shipped, and it is now a second
-      production networking path with its own policy code — which is the
-      problem plan 316 fixes. Frozen as of Phase 0: new
-      `raw_ip_stack=true`/`L3Vsock` launches are refused at synthesis,
-      admission, and CLI preflight; running VMs drain; deletion is Phase 7.
+      **Retired and deleted by plan 316 (ADR-042).** The historical path has
+      been removed from the contract, guest, host, VMM, packaging, kernel, CI,
+      dependency, and live-test surfaces. FlowMux is now the only production
+      workload-networking implementation; permanent invariants and the final
+      backend evidence matrix remain in the active closeout plan.
 
 - [~] Workload stream plane — 22 tasks, **Phase 1 complete, Phase 2 landed
       dormant**. Tracked in `specs/plans/295-workload-stream-plane.md` and
@@ -2732,3 +2732,11 @@ the builder image's explicit util-linux `/sbin/mount`, with a focused constant
 regression pinning that executable contract. The live lane forces a refresh of
 embedded host binaries so the guest always carries the checkout under test,
 even when Cargo caches are restored.
+
+## 2026-08-22 FlowMux deletion fuzz-lock repair
+
+The deletion slice's standalone `mvm-agentd` fuzz lock had resolved `blake3`
+1.8.7, bypassing the workspace-reviewed vendored `arrayref` patch and causing
+the locked invariant lane to fail closed. The lock now pins `blake3` 1.8.6;
+the patch is active and the standalone all-target fuzz check passes with
+`--locked`.

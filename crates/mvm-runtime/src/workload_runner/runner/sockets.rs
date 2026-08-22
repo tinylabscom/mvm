@@ -34,8 +34,6 @@ impl StandingSockets {
             egress_gateway: egress_uds,
             exit: &self.exit,
             broker: self.broker.as_deref(),
-            network_control: None,
-            network_data: None,
             console_data: self.console_data.clone(),
             ingress_tcp: self.ingress_tcp.clone(),
         }
