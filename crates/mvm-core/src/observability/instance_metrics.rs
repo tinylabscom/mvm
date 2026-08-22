@@ -61,6 +61,14 @@ pub struct InstanceMetricsValues {
     pub uptime_secs: u64,
     /// Unix-seconds when the last sample fired. Zero = never.
     pub last_sample_unix_secs: u64,
+    /// Cumulative AI API requests made by the VM through the host egress seam.
+    pub ai_requests_total: u64,
+    /// Cumulative input/prompt tokens reported by AI providers.
+    pub ai_tokens_input_total: u64,
+    /// Cumulative output/completion tokens reported by AI providers.
+    pub ai_tokens_output_total: u64,
+    /// Cumulative total tokens reported by AI providers.
+    pub ai_tokens_total_total: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -116,6 +124,33 @@ impl InstanceMetricsRegistry {
         match map.get_mut(instance_id) {
             Some(entry) => {
                 entry.values = values;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Atomically update only the AI egress counters on an existing entry.
+    ///
+    /// This leaves CPU, memory, network, and disk samples untouched, so the
+    /// substitution endpoint and the supervisor sampler can both contribute
+    /// to the same VM's exposition without racing on the full value snapshot.
+    /// Returns `false` if the instance is not registered.
+    pub fn update_ai_counters(
+        &self,
+        instance_id: &str,
+        requests: u64,
+        input_tokens: u64,
+        output_tokens: u64,
+        total_tokens: u64,
+    ) -> bool {
+        let mut map = self.entries.lock().expect("instance_metrics mutex");
+        match map.get_mut(instance_id) {
+            Some(entry) => {
+                entry.values.ai_requests_total = requests;
+                entry.values.ai_tokens_input_total = input_tokens;
+                entry.values.ai_tokens_output_total = output_tokens;
+                entry.values.ai_tokens_total_total = total_tokens;
                 true
             }
             None => false,
@@ -260,6 +295,30 @@ const METRIC_SPECS: &[MetricSpec] = &[
         kind: MetricKind::Gauge,
         help: "Unix seconds at the most recent sample for this VM (0 = never sampled)",
         read: |v| v.last_sample_unix_secs,
+    },
+    MetricSpec {
+        name: "mvm_instance_ai_requests_total",
+        kind: MetricKind::Counter,
+        help: "Cumulative AI API requests made by the VM through the host egress seam",
+        read: |v| v.ai_requests_total,
+    },
+    MetricSpec {
+        name: "mvm_instance_ai_tokens_input_total",
+        kind: MetricKind::Counter,
+        help: "Cumulative input/prompt tokens reported by AI providers",
+        read: |v| v.ai_tokens_input_total,
+    },
+    MetricSpec {
+        name: "mvm_instance_ai_tokens_output_total",
+        kind: MetricKind::Counter,
+        help: "Cumulative output/completion tokens reported by AI providers",
+        read: |v| v.ai_tokens_output_total,
+    },
+    MetricSpec {
+        name: "mvm_instance_ai_tokens_total_total",
+        kind: MetricKind::Counter,
+        help: "Cumulative total tokens reported by AI providers",
+        read: |v| v.ai_tokens_total_total,
     },
 ];
 

@@ -181,7 +181,8 @@ Logs and ports should keep policy visible:
 for event in sandbox.logs(follow=True, redact=True):
     print(event.message)
 
-forward = sandbox.ports.forward(host="127.0.0.1", host_port=8080, guest_port=8000)
+# Ingress is declared in Sandbox.create(..., network={"ports": [...]})
+# before the signed plan is admitted.
 ```
 
 </TabItem>
@@ -192,19 +193,16 @@ for await (const event of sandbox.logs({ follow: true, redact: true })) {
   console.log(event.message);
 }
 
-const forward = await sandbox.ports.forward({
-  host: "127.0.0.1",
-  hostPort: 8080,
-  guestPort: 8000,
-});
+// Ingress is declared in Sandbox.create(..., { network: { ports: [...] } })
+// before the signed plan is admitted.
 ```
 
 </TabItem>
 </Tabs>
 
-Until language helpers are shipped, use the CLI logging and port-forwarding
-commands. Bind host ports explicitly and avoid wildcard listeners unless the
-workflow requires them.
+Until language helpers are shipped, declare ingress through `machine run
+--port` or the manifest. Bind host ports explicitly and avoid wildcard
+listeners unless the workflow requires them.
 
 ## Target lifecycle and snapshots
 

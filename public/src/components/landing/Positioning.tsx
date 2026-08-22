@@ -89,7 +89,7 @@ export function Positioning() {
   return (
     <Section rule space="roomy" className="bg-raised">
       <Reveal>
-        <h2 className="mb-6 max-w-xl lowercase font-display text-3xl font-bold leading-tight text-title sm:text-4xl">
+        <h2 className="mb-6 max-w-xl lowercase font-display tracking-tight text-3xl font-semibold leading-tight text-title sm:text-4xl">
           one project.
           <br />
           <span className="inline-block bg-accent-2 px-2 py-0.5 text-canvas">
@@ -119,7 +119,7 @@ export function Positioning() {
               <p className="mb-1.5 font-mono text-xs tracking-[0.2em] uppercase text-accent">
                 {row.label}
               </p>
-              <h3 className="mb-2 lowercase font-display text-lg font-bold text-title">
+              <h3 className="mb-2 lowercase font-display tracking-tight text-lg font-semibold text-title">
                 {row.heading}
               </h3>
               <p className="text-sm leading-relaxed text-body">{row.body}</p>

@@ -37,21 +37,16 @@ fn the_registry_is_not_silently_empty() {
 
 #[test]
 fn the_host_independent_helpers_build_on_every_host() {
-    // Neither of these is gated on host capability, and the reason is the
-    // same for both: whether a launch uses the egress endpoint or the L3
-    // gateway is decided at admission from the signed plan. A binary that
-    // existed on some hosts and not others would turn that into a
-    // host-dependent decision.
+    // The egress endpoint is not gated on host capability: every supported
+    // backend routes admitted network access through the same per-VM seam.
     for (os, arch) in HOSTS {
         for libkrun in [false, true] {
             let s = specs(os, arch, libkrun);
             let bins = bins(&s);
-            for required in ["mvm-network-endpoint", "mvm-netd"] {
-                assert!(
-                    bins.contains(&required),
-                    "{required} must build on {os}/{arch} (libkrun={libkrun}), got {bins:?}"
-                );
-            }
+            assert!(
+                bins.contains(&"mvm-network-endpoint"),
+                "mvm-network-endpoint must build on {os}/{arch} (libkrun={libkrun}), got {bins:?}"
+            );
         }
     }
 }

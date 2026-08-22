@@ -576,7 +576,7 @@ fn run_port_is_repeatable_and_implies_persistence() {
         args.resolve_mode().expect("port forward resolves"),
         MachineRunMode::Persistent
     );
-    assert_eq!(post_start_action(&args), PostStart::Forward);
+    assert_eq!(post_start_action(&args), PostStart::Attach);
 }
 
 #[test]
@@ -608,12 +608,11 @@ fn run_port_rejects_invalid_mappings_and_detached_ownership() {
         "http.server",
     ])
     .expect("the trailing command is syntactically valid");
-    let error = with_command
-        .resolve_mode()
-        .expect_err("one attached CLI cannot own both console and forwarding");
-    assert!(
-        error.to_string().contains("machine forward"),
-        "the refusal should name the two-command alternative: {error:#}"
+    assert_eq!(
+        with_command
+            .resolve_mode()
+            .expect("declared FlowMux ingress and a foreground service share one owner"),
+        MachineRunMode::Persistent
     );
 }
 
@@ -784,6 +783,7 @@ fn spec_fixture(name: &str) -> MachineSpec {
         runtime_pack: false,
         net: false,
         allow_host: vec![],
+        ai: None,
         ports: vec![],
         cpus: 2,
         memory: "512M".to_string(),
@@ -1708,6 +1708,7 @@ fn mark_machine_started_sets_digest_and_timestamp() {
         runtime_pack: false,
         net: false,
         allow_host: Vec::new(),
+        ai: None,
         ports: vec![],
         cpus: 2,
         memory: "512M".to_string(),
@@ -1933,6 +1934,7 @@ fn machine_start_receipt_input_redacts_host_paths_and_surfaces_policy() {
         runtime_pack: false,
         net: false,
         allow_host: vec!["api.example.com".to_string()],
+        ai: None,
         ports: vec![],
         cpus: 4,
         memory: "2G".to_string(),
@@ -2022,6 +2024,7 @@ fn machine_start_preflight_reports_uniform_l4_enforcement_for_oci_allow_host() {
         runtime_pack: false,
         net: false,
         allow_host: vec!["api.example.com".to_string()],
+        ai: None,
         ports: vec![],
         cpus: 2,
         memory: "512M".to_string(),
@@ -2083,6 +2086,7 @@ fn create_refuses_overwrite_without_force() {
         runtime_pack: false,
         net: false,
         allow_host: Vec::new(),
+        ai: None,
         ports: vec![],
         cpus: 2,
         memory: "512M".to_string(),
@@ -2115,6 +2119,7 @@ fn remove_machine_spec_requires_confirmation_and_deletes_dir() {
         runtime_pack: false,
         net: false,
         allow_host: Vec::new(),
+        ai: None,
         ports: vec![],
         cpus: 2,
         memory: "512M".to_string(),
@@ -2149,6 +2154,7 @@ fn seed_machine_spec(name: &str) {
         runtime_pack: false,
         net: false,
         allow_host: Vec::new(),
+        ai: None,
         ports: vec![],
         cpus: 2,
         memory: "512M".to_string(),
@@ -2701,6 +2707,7 @@ fn reconfigure_spec_fixture() -> MachineSpec {
         runtime_pack: false,
         net: false,
         allow_host: vec![],
+        ai: None,
         ports: vec![],
         cpus: 2,
         memory: "512M".into(),
@@ -2780,6 +2787,7 @@ fn patch_allow_host_replace_and_clear() {
 
     let base = MachineSpec {
         allow_host: vec!["old:443".into()],
+        ai: None,
         ports: vec![],
         ..reconfigure_spec_fixture()
     };
@@ -2856,9 +2864,9 @@ fn rewind_parses_as_its_own_verb() {
     assert_eq!(machine_subcommand(&action), "rewind");
 }
 
-/// The lineage forward-step is `advance`, deliberately NOT `forward` — `machine
-/// forward` is the port-forwarding op folded from `vm forward`. Both must parse
-/// to distinct, non-colliding actions.
+/// The lineage forward-step is `advance`, deliberately NOT `forward` — the
+/// latter remains a parsing-compatible migration boundary. Both must parse to
+/// distinct, non-colliding actions.
 #[test]
 fn advance_does_not_collide_with_the_port_forward_verb() {
     let advance = parse(&["advance", "ckpt-x", "--to", "sha256:child"]).expect("parse advance");
@@ -2869,7 +2877,7 @@ fn advance_does_not_collide_with_the_port_forward_verb() {
         }
         other => panic!("expected advance, got {other:?}"),
     }
-    // `forward` still routes to the folded port-forwarding op, untouched.
+    // `forward` still routes to the folded migration boundary.
     let forward = parse(&["forward", "myvm", "8080:80"]).expect("parse forward");
     assert!(matches!(forward, MachineAction::Vm(VmCmd::Forward(_))));
 }
@@ -3189,6 +3197,7 @@ fn the_argv_the_sdk_facade_emits_parses_back_into_the_grant_it_encoded() {
             grants_file: args.run.grants_file.as_deref(),
             manifest: None,
             config: &config,
+            ai: None,
         })
         .expect("resolves");
 

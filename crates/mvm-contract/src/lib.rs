@@ -37,11 +37,6 @@ pub mod entrypoint;
 pub mod grants;
 #[cfg(feature = "protocol")]
 pub mod ir;
-/// The L3-over-vsock tunnel protocol: framing, control messages, and
-/// bounded IP validation. Shared by the in-guest agent and the host
-/// gateway.
-#[cfg(feature = "protocol")]
-pub mod l3;
 /// Guest lifecycle markers + snapshot timing (the `mvm-init` ↔ host contract).
 #[cfg(feature = "protocol")]
 pub mod lifecycle;

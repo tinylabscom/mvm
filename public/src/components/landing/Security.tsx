@@ -56,7 +56,7 @@ export function Security() {
         {/* Left: statement + escape hatch to the rest. */}
         <Reveal>
           <Eyebrow>Security</Eyebrow>
-          <h2 className="mb-4 lowercase font-display text-2xl font-bold leading-tight text-title sm:text-3xl">
+          <h2 className="mb-4 lowercase font-display tracking-tight text-2xl font-semibold leading-tight text-title sm:text-3xl">
             trust the boundary
           </h2>
           <p className="mb-4 max-w-md text-base leading-relaxed text-body">

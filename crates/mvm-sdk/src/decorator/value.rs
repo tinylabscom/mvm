@@ -580,6 +580,7 @@ fn helper_to_network(v: Value, path: &Path, line: usize) -> Result<Network, Pars
         egress: None::<NetworkEgress>,
         peers: vec![],
         dns: None,
+        ai: None,
     })
 }
 

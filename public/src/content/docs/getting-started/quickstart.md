@@ -101,11 +101,10 @@ Build a microVM image and run it in one command:
 mvmctl machine run --flake . --cpus 2 --memory 1024
 ```
 
-Run in background with port forwarding:
+Run persistently with signed ingress:
 
 ```bash
-mvmctl machine run --flake . --name my-vm -d
-mvmctl machine forward my-vm -p 8080:8080
+mvmctl machine run --flake . --name my-vm --port 8080:8080
 ```
 
 Or build separately:
