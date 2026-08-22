@@ -786,6 +786,28 @@ fn mk_guest_installs_netinit_at_boot() {
 }
 
 #[test]
+fn mk_guest_assigns_ipv4_loopback_before_starting_guest_services() {
+    let path = nix_dir().join("lib").join("mk-guest.nix");
+    let content = fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("nix/lib/mk-guest.nix must be present: {e}"));
+    let address = content
+        .find("ip addr replace 127.0.0.1/8 dev lo")
+        .expect("guest init assigns the canonical IPv4 loopback address");
+    let agent = content
+        .find("# Stage 2.5 — guest agent supervisor")
+        .expect("guest init starts the guest agent");
+
+    assert!(
+        address < agent,
+        "loopback must have an address before any guest service binds it"
+    );
+    assert!(
+        content.contains("ifconfig lo 127.0.0.1 netmask 255.0.0.0 up"),
+        "the no-ip-applet fallback must assign the same address"
+    );
+}
+
+#[test]
 fn mk_guest_seeds_vsock_egress_dns_before_privilege_drop() {
     let path = nix_dir().join("lib").join("mk-guest.nix");
     let content = fs::read_to_string(&path)

@@ -2757,3 +2757,42 @@ The host-binary manifest integration test now reuses Cargo's prebuilt `xtask`
 binary instead of starting a nested workspace compilation. The full workspace
 test run therefore retains the manifest synchronization assertion without
 racing concurrent doctest compilation.
+## 2026-08-21 FlowMux Firecracker and CI evidence
+
+The approved Lima-KVM Firecracker tier now boots the FlowMux-only Alpine guest
+and completes an admitted TCP/DNS fetch: `example.com:80` returns the Example
+Domain body with exit code zero. The post-stack CI rerun found a stale
+standalone SDK fuzz lockfile and an ingress UDP regression: the active session
+path applied outbound deny-all to replies for already observed ingress peers.
+The lockfile is regenerated, and only guest-introduced UDP destinations pass
+through outbound admission; observed-peer ingress replies remain constrained
+by the relay peer table. The focused ingress test passes five consecutive
+runs, the locked fuzz check passes on Rust 1.91.1, and hostd all-target Clippy
+passes with warnings denied. Performance, the wider backend behavior matrix,
+and libkrun evidence remain open.
+
+## 2026-08-21 FlowMux final-evidence validation follow-up
+
+The closeout branch now passes the complete macOS host workspace test,
+doc-test, check, and formatting chain after synchronizing the Python package
+root with the deleted browser helpers. The standalone SDK fuzz lock also pins
+`blake3` 1.8.6 so the workspace-reviewed vendored `arrayref` patch remains in
+the resolved graph; the focused supply-chain pin test and locked fuzz check
+pass. These are validation repairs only: the performance decision and wider
+Firecracker/HVF/libkrun live matrix remain open, so the W8 tracker and issue
+#2751 remain open.
+
+## 2026-08-22 FlowMux SDK ingress compatibility repair
+
+The final-evidence BDD lane exposed that its old SDK snapshot retired more than
+dynamic forwarding: it also overwrote typed OCI sources, boot commands,
+literal environment and egress lowering, and the pinned browser/readiness
+surface. Python and TypeScript now preserve those APIs while declaring opaque
+loopback TCP ingress on `machine run` before boot. Dynamic forwarding still
+fails closed with migration guidance, and both SDK suites cover the combined
+contract. The retired guest port-forward request has also been removed from
+the generated Python protocol binding, restoring schema drift checks. The same
+BDD rerun exposed outer nightly-only Cargo flags leaking
+into the pinned stable nested cross-compiler; nested builds now clear every
+outer toolchain, wrapper, and Rust flag variable, with a focused regression
+test covering the boundary.

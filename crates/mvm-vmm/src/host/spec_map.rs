@@ -206,8 +206,6 @@ pub struct WorkloadSockets<'a> {
     /// `dev_console_data_ports()`, pre-opened so a PTY can attach. Empty for
     /// sealed prod boots (`dev_console = false` in `VmStartConfig`).
     pub console_data: Vec<(u32, PathBuf)>,
-    /// Explicitly admitted guest TCP ingress channels.
-    pub ingress_tcp: Vec<(u32, PathBuf)>,
 }
 
 /// The standing vsock ports every workload VM carries: the agent RPC channel the
@@ -249,13 +247,6 @@ pub fn workload_vsock_ports(socks: &WorkloadSockets) -> Vec<VsockPort> {
     for (port, path) in &socks.console_data {
         ports.push(VsockPort {
             service: GuestService::ConsoleData { port: *port },
-            host_uds: path.clone(),
-            direction: VsockDirection::HostDials,
-        });
-    }
-    for (port, path) in &socks.ingress_tcp {
-        ports.push(VsockPort {
-            service: GuestService::IngressTcp { port: *port },
             host_uds: path.clone(),
             direction: VsockDirection::HostDials,
         });
@@ -863,7 +854,6 @@ mod tests {
             exit: Path::new("/run/workload.exit"),
             broker: None,
             console_data: Vec::new(),
-            ingress_tcp: Vec::new(),
         };
         let ports = workload_vsock_ports(&socks);
 
@@ -892,7 +882,6 @@ mod tests {
             exit: Path::new("/run/workload.exit"),
             broker: None,
             console_data: Vec::new(),
-            ingress_tcp: Vec::new(),
         };
         let ports = workload_vsock_ports(&socks);
         assert_eq!(ports.len(), 2);
@@ -920,7 +909,6 @@ mod tests {
             exit: Path::new("/run/workload.exit"),
             broker: None,
             console_data: Vec::new(),
-            ingress_tcp: Vec::new(),
         }
     }
 
@@ -949,7 +937,6 @@ mod tests {
             exit: Path::new("/run/workload.exit"),
             broker: Some(Path::new("/run/broker.sock")),
             console_data: Vec::new(),
-            ingress_tcp: Vec::new(),
         };
         let broker = workload_vsock_ports(&admitted)
             .into_iter()
@@ -1135,7 +1122,6 @@ mod tests {
             exit: Path::new("/run/workload.exit"),
             broker: None,
             console_data,
-            ingress_tcp: Vec::new(),
         };
         let ports = workload_vsock_ports(&socks);
 
@@ -1164,7 +1150,6 @@ mod tests {
             exit: Path::new("/run/workload.exit"),
             broker: None,
             console_data: Vec::new(),
-            ingress_tcp: Vec::new(),
         };
         let ports = workload_vsock_ports(&socks);
         assert_eq!(ports.len(), 3, "no console ports on a sealed prod boot");
@@ -1187,7 +1172,6 @@ mod tests {
                 exit: Path::new("/run/workload.exit"),
                 broker: None,
                 console_data,
-                ingress_tcp: Vec::new(),
             },
             cmdline: String::new(),
             console_log: PathBuf::from("/run/console.log"),

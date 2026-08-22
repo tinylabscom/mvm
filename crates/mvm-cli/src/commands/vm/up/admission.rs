@@ -259,6 +259,13 @@ impl std::fmt::Debug for AdmissionContext {
 pub(in crate::commands::vm) fn admit_plan_for_boot(
     p: AdmitPlanForBootParams<'_>,
 ) -> Result<Option<AdmissionContext>> {
+    admit_plan_for_boot_with_ingress(p, Vec::new())
+}
+
+pub(in crate::commands::vm) fn admit_plan_for_boot_with_ingress(
+    p: AdmitPlanForBootParams<'_>,
+    ingress: Vec<mvm_core::plan::IngressMapping>,
+) -> Result<Option<AdmissionContext>> {
     if p.no_supervisor {
         return Ok(None);
     }
@@ -364,7 +371,7 @@ pub(in crate::commands::vm) fn admit_plan_for_boot(
         stream_edges: Vec::new(),
         kernel_sha256: None,
         network_mode: p.network_mode,
-        ingress: Vec::new(),
+        ingress,
         vm_name: p.vm_name,
         tenant: Some(p.tenant),
         backend_name: p.backend_name,

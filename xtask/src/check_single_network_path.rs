@@ -40,6 +40,12 @@ const RETIRED_SYMBOLS: &[&str] = &[
     "L3NetworkSpec",
     "L3IngressMapping",
     "NetworkLease",
+    "StartPortForward",
+    "PortForwardStarted",
+    "PORT_FORWARD_BASE",
+    "IngressTcp",
+    "start_port_forward_on",
+    "run_port_forwarder",
 ];
 
 const NIC_SYMBOLS: &[&str] = &[
@@ -427,6 +433,20 @@ mod tests {
         );
         assert_eq!(hits.len(), 1);
         assert!(hits[0].contains("NetworkControl"));
+    }
+
+    #[test]
+    fn synthetic_legacy_port_forward_protocol_is_detected() {
+        let re = Regex::new(&format!(r"\b({})\b", RETIRED_SYMBOLS.join("|"))).unwrap();
+        let mut hits = Vec::new();
+        collect_regex_hits(
+            "crates/probe/src/lib.rs",
+            "fn regression() { let _ = GuestRequest::StartPortForward { guest_port: 80 }; }",
+            &re,
+            &mut hits,
+        );
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].contains("StartPortForward"));
     }
 
     #[test]

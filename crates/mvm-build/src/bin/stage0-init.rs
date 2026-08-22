@@ -51,11 +51,6 @@ mod linux {
     use std::process::{Child, Command, ExitCode, ExitStatus, Stdio};
     use std::time::{Duration, Instant};
 
-    /// Fixed set of virtio-blk candidates Stage 0 ever attaches. Small and
-    /// explicit rather than a `/sys/class/block` walk — a RootDir guest never
-    /// has more than a handful of disks, and a missing candidate is just a
-    /// failed `File::open` (cheap, non-fatal).
-
     const VSOCK_EGRESS_PROXY_URL: &str = mvm_core::guest_netd::DEFAULT_EGRESS_PROXY_URL;
     const VSOCK_EGRESS_NO_PROXY: &str = "127.0.0.1,localhost";
     const VSOCK_EGRESS_PROXY_LISTEN_ADDR: &str = mvm_core::guest_netd::DEFAULT_EGRESS_PROXY_LISTEN;
@@ -79,7 +74,9 @@ mod linux {
     /// launcher attaches this before the virtio-fs shares, so it enumerates as
     /// `/dev/vda`. QEMU uses `/dev/vda` as the rootfs, so this is libkrun-only.
     const LIBKRUN_STAGE0_NIX_STORE_DEV: &str = "/dev/vda";
-    const QEMU_STAGE0_NIX_STORE_DEV: &str = "/dev/vde";
+    /// QEMU attaches seed, work, output, and host binaries first, then the
+    /// read-only FlowMux identity. The persistent store follows as `/dev/vdf`.
+    const QEMU_STAGE0_NIX_STORE_DEV: &str = "/dev/vdf";
     /// Mount point for the persistent Stage 0 Nix store before binding it over
     /// `/nix`.
     const STAGE0_NIX_STORE_MOUNT: &str = "/nix-stage0-store";
@@ -1408,7 +1405,7 @@ mod linux {
         #[test]
         fn stage0_nix_store_device_matches_backend_disk_order() {
             assert_eq!(stage0_nix_store_device(false), "/dev/vda");
-            assert_eq!(stage0_nix_store_device(true), "/dev/vde");
+            assert_eq!(stage0_nix_store_device(true), "/dev/vdf");
         }
 
         #[test]

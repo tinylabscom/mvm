@@ -209,7 +209,7 @@ pub(in crate::commands) struct MachineRunArgs {
     /// Keep the machine running and return.
     #[arg(short = 'd', long)]
     pub detach: bool,
-    /// Forward HOST:GUEST (or PORT) while attached.
+    /// Declare signed TCP ingress HOST:GUEST (or PORT) before boot.
     #[arg(
         short,
         long,
@@ -356,7 +356,7 @@ impl MachineRunArgs {
     }
 
     /// `-d`/`--detach`, `--up-json`, `--ttl`, a declared `--healthcheck`, or
-    /// an attached port forward
+    /// declared FlowMux ingress
     /// makes the machine survive the command. `--tty`/`--name` are deliberately
     /// not consulted — persistence, interactivity, and identity are independent
     /// axes.
@@ -371,11 +371,6 @@ impl MachineRunArgs {
     /// Resolve the lifecycle mode purely from the flags. Fresh foreground runs
     /// need an image source and an argv; persistent runs just boot and return.
     fn resolve_mode(&self) -> Result<MachineRunMode> {
-        if !self.port.is_empty() && !self.run.argv.is_empty() {
-            bail!(
-                "`machine run --port` cannot also run an ad-hoc command; start the service from the image or manifest, or forward it afterward with `machine forward`"
-            );
-        }
         let mode = match (self.interactive(), self.persistent()) {
             (true, true) => bail!(
                 "`machine run -it` is foreground-only; use `machine exec <name> -it -- <cmd>` for an interactive command in a long-lived machine"

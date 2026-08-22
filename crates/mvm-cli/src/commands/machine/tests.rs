@@ -576,7 +576,7 @@ fn run_port_is_repeatable_and_implies_persistence() {
         args.resolve_mode().expect("port forward resolves"),
         MachineRunMode::Persistent
     );
-    assert_eq!(post_start_action(&args), PostStart::Forward);
+    assert_eq!(post_start_action(&args), PostStart::Attach);
 }
 
 #[test]
@@ -608,12 +608,11 @@ fn run_port_rejects_invalid_mappings_and_detached_ownership() {
         "http.server",
     ])
     .expect("the trailing command is syntactically valid");
-    let error = with_command
-        .resolve_mode()
-        .expect_err("one attached CLI cannot own both console and forwarding");
-    assert!(
-        error.to_string().contains("machine forward"),
-        "the refusal should name the two-command alternative: {error:#}"
+    assert_eq!(
+        with_command
+            .resolve_mode()
+            .expect("declared FlowMux ingress and a foreground service share one owner"),
+        MachineRunMode::Persistent
     );
 }
 
@@ -2865,9 +2864,9 @@ fn rewind_parses_as_its_own_verb() {
     assert_eq!(machine_subcommand(&action), "rewind");
 }
 
-/// The lineage forward-step is `advance`, deliberately NOT `forward` — `machine
-/// forward` is the port-forwarding op folded from `vm forward`. Both must parse
-/// to distinct, non-colliding actions.
+/// The lineage forward-step is `advance`, deliberately NOT `forward` — the
+/// latter remains a parsing-compatible migration boundary. Both must parse to
+/// distinct, non-colliding actions.
 #[test]
 fn advance_does_not_collide_with_the_port_forward_verb() {
     let advance = parse(&["advance", "ckpt-x", "--to", "sha256:child"]).expect("parse advance");
@@ -2878,7 +2877,7 @@ fn advance_does_not_collide_with_the_port_forward_verb() {
         }
         other => panic!("expected advance, got {other:?}"),
     }
-    // `forward` still routes to the folded port-forwarding op, untouched.
+    // `forward` still routes to the folded migration boundary.
     let forward = parse(&["forward", "myvm", "8080:80"]).expect("parse forward");
     assert!(matches!(forward, MachineAction::Vm(VmCmd::Forward(_))));
 }

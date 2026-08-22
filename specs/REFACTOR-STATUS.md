@@ -1786,6 +1786,9 @@ resume` takes a `current_head` and refuses when it differs from the
         Strict macOS arm64 and Linux x86_64 host-loopback reports are recorded;
         their 21/28 pre-deletion threshold misses remain explicit, with no
         approved exception, for the final closeout matrix to resolve.
+        The first post-deletion macOS candidate batches TCP credits and improves
+        the result to 20 misses (12/32 checks pass), but still fails the gate;
+        its raw report and comparison are recorded with no implied exception.
   - [x] Bounded typed transformations and endpoint-owned connectors. Typed
         HTTP now streams incrementally with bounded cross-frame transforms,
         fail-closed cancellation and audit behavior; web fetch and search
@@ -1794,10 +1797,13 @@ resume` takes a `current_head` and refuses when it differs from the
         the FlowMux client surface, keeping guest-only vsock dependencies out
         of the host graph and the duplicate-major invariant clean.
   - [x] Declared ingress runtime. Signed transport-neutral mappings reach exact
-        endpoint binds before readiness; TCP and bounded observed-peer UDP use
-        host-initiated FlowMux streams and declared guest-loopback targets.
-        HTTP/TLS transformations remain host-owned, TLS keys never enter the
-        guest contract, and opaque TCP stays explicitly non-transforming.
+      endpoint binds before readiness; TCP and bounded observed-peer UDP use
+      host-initiated FlowMux streams and declared guest-loopback targets.
+      HTTP/TLS transformations remain host-owned, TLS keys never enter the
+      guest contract, and opaque TCP stays explicitly non-transforming. Python
+      and TypeScript browser helpers declare their listener before boot and
+      preserve the existing OCI, command, egress, and readiness surfaces;
+      dynamic post-admission forwarding fails with migration guidance.
   - [x] Remove the rejected `raw_ip_stack`/`L3Vsock` public compatibility
         surface now that the migration release condition has passed. Public
         IR, SDK, schema, CLI, fixtures, and docs expose no raw-network mode;
@@ -1815,7 +1821,11 @@ resume` takes a `current_head` and refuses when it differs from the
         every flow family shares one admitted policy, budget, identity, VM
         resource, and audit sink.
   - [ ] Final performance, Firecracker, HVF, libkrun, BDD, supply-chain, and
-        documentation evidence matrix.
+        documentation evidence matrix. A fresh macOS arm64 host-loopback
+        comparison remains failing and is retained as raw evidence; no
+        performance exception has been recorded. Firecracker now has a passing
+        admitted TCP/DNS witness on the approved Lima-KVM test tier; the wider
+        live matrix remains open.
 
 - [x] Plan 285 — L3 TUN-over-vsock network mode
   (`specs/plans/285-l3-tun-over-vsock.md`, ADR-036)

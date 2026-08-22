@@ -51,8 +51,7 @@ mvmctl machine run --flake . --name agent-sandbox \
 Keep inbound ports separate from outbound egress:
 
 ```sh
-mvmctl machine run --flake . --name api-dev -d
-mvmctl machine forward api-dev -p 8080:8080
+mvmctl machine run --flake . --name api-dev --port 8080:8080
 ```
 
 Opening a host port does not mean the guest should have outbound internet

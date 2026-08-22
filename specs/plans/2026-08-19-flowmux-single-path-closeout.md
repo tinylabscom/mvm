@@ -1,7 +1,7 @@
 # FlowMux single-path closeout
 
-Backing: preview
-Validation: none
+Backing: shipped-source
+Validation: check-single-network-path
 
 **Issue:** [#2751](https://github.com/tinylabscom/mvm/issues/2751)
 **Predecessors:** Plan 316, ADR-042, and the FlowMux transport cutover in
@@ -14,7 +14,7 @@ host-first FlowMux handshake on relayed-vsock backends as well as direct-vsock
 backends. The outbound cutover is complete: guest TCP, UDP, DNS, mediated ICMP,
 and typed HTTP all use the authenticated protocol on `NetworkFlow`.
 
-Workstreams W1–W6 are now implemented in the dependency-ordered PR stack.
+Workstreams W1–W7 are now implemented in the dependency-ordered PR stack.
 Admitted `NetworkLimits` are shared
 per-VM endpoint budgets; typed HTTP and connectors use bounded endpoint-owned
 streaming transforms; and signed TCP/UDP/HTTP/TLS ingress binds only admitted
@@ -23,8 +23,9 @@ declared guest-loopback target. The performance harness and labelled legacy
 baselines are recorded, and the rejected `raw_ip_stack`/`L3Vsock` public
 surface is gone with explicit stale-input migration errors. The frozen L3
 implementation, packaging, kernel requirement, dependencies, and live product
-tests are deleted. Permanent single-path gates and the final
-performance/backend matrix remain. This plan owns that remainder. The closed Plan 316 phase issues are
+tests are deleted. Permanent single-path and socket-owner gates now enforce the
+result; the final performance decision and backend matrix remain. This plan
+owns that remainder. The closed Plan 316 phase issues are
 historical; issue #2751 is the active umbrella.
 
 ## Outcome
@@ -121,6 +122,11 @@ host test graphs and preserves the duplicate-major dependency invariant.
 - [x] Add exact/wildcard bind, undeclared port, TCP/UDP delivery, guest refusal,
       exhaustion, TLS-key non-disclosure, streaming transform, audit, and
       teardown tests plus BDD coverage.
+- [x] Retire post-admission SDK forwarding without regressing typed manifest or
+      OCI sources, boot-command overrides, literal environment and egress
+      lowering, or the pinned browser provider and readiness surfaces.
+- [x] Regenerate SDK protocol bindings after removing the guest port-forward
+      request so the committed Python types match the canonical schema.
 
 The public-surface CI rerun exposed a stack-order defect in the completed UDP
 ingress work: replies to peers already observed by an ingress mapping were
@@ -210,28 +216,69 @@ checks also pass.
 ### W8 — Run the final evidence matrix and close the umbrella
 
 - [ ] Run `xtask network-perf` against the recorded baseline and record the
-      final report and any approved exception.
+      final report and any approved exception. A fresh release run is recorded
+      at `specs/benchmarks/network/flow-mux-macos-arm64-host-loopback-642140ec38.json`
+      with comparison
+      `specs/benchmarks/network/comparison-macos-arm64-host-loopback-642140ec38.json`.
+      It remains truthfully `passed: false` (12/32 checks pass; maximum
+      latency ratio 14.5x; minimum throughput ratio 0.325x), so this item is
+      still a performance blocker. The raw evidence and thresholds were not
+      edited. The failures are concentrated in short-flow authenticated
+      framing/session setup and endpoint-relay paths versus the deleted direct
+      L3 baseline; this is a measured diagnosis, not an acceptance exception.
 - [ ] Live-witness Firecracker on Linux/KVM, HVF on macOS, and libkrun on every
       supported host OS. Cover deny-all, TCP, UDP, DNS, typed substitution,
       ingress, endpoint crash, no guest NIC, and no L3 services.
+      The approved Lima-KVM Firecracker lane now passes an admitted TCP/DNS
+      witness: Alpine fetched `http://example.com` under the exact
+      `example.com:80` rule and exited zero. The wider behavior matrix and
+      libkrun closeout remain open.
 - [ ] Run workspace test/check/doc-test/formatting on the macOS host; run Linux
       all-target/all-feature Clippy, gated tests, Nix checks, and live KVM work
       inside the project builder VM.
-- [ ] Run BDD, dependency, supply-chain, schema, product, claim, and permanent
+- [x] Run BDD, dependency, supply-chain, schema, product, claim, and permanent
       networking gates.
+- [x] Isolate pinned nested cross-compiles from the outer Cargo toolchain,
+      compiler wrappers, and nightly-only Rust flags; cover the scrubbed
+      command environment with a regression test.
 - [ ] Update ADR/claim witnesses, public networking docs, release notes, this
       plan, the sprint delivery archive, and the refactor rollup; close #2751
       only after every acceptance item is backed by recorded output.
 
+The post-stack validation rerun also found and fixed six closeout defects:
+the standalone `mvm-sdk` fuzz lockfile had drifted; ingress UDP replies were
+incorrectly rechecked against outbound egress admission after the relay had
+already observed the external peer; an old evidence-tree snapshot overwrote
+newer Python and TypeScript SDK boot-source, command, egress, and browser
+surfaces while retiring dynamic forwarding; the generated Python protocol
+binding still contained the deleted guest port-forward request; outer nightly-only Cargo flags
+leaked into the pinned stable nested cross-compiler; and the refreshed fuzz resolver selected
+`blake3` 1.8.7, bypassing the workspace-reviewed vendored `arrayref`. The
+SDKs now declare ingress before boot while preserving those public surfaces,
+and their generated protocol bindings match the canonical schema;
+nested cross-compiles clear outer toolchain, wrapper, and Rust flag variables,
+and the fuzz lock pins `blake3`
+1.8.6 so the reviewed patch remains active. The full host workspace test,
+check, doc-test, and formatting chain passes; the locked fuzz build passes on
+Rust 1.91.1; the focused observed-peer test passes five consecutive runs; and
+hostd all-target Clippy passes with warnings denied.
+
+The first post-deletion macOS arm64 host-loopback candidate is recorded at
+`c22db543f1`. It passes 12 of 32 comparisons and misses 20: ten opaque-TCP,
+six UDP, and four transformed-HTTP connect checks. The raw candidate and
+comparison reports are retained under `specs/benchmarks/network/`; no
+performance exception is approved or implied. W8 remains open until the
+published ceilings pass or the owner explicitly accepts the measured delta.
+
 ## Definition of done
 
-- [ ] The production source tree contains no L3/raw-packet workload networking
+- [x] The production source tree contains no L3/raw-packet workload networking
       code, public raw-network mode, or second ingress/egress socket owner.
-- [ ] Every admitted network flow shares one endpoint, authenticated protocol,
+- [x] Every admitted network flow shares one endpoint, authenticated protocol,
       signed-plan projection, per-VM budget owner, and payload-free audit sink.
-- [ ] Typed transformation and declared ingress are bounded, streaming, and
+- [x] Typed transformation and declared ingress are bounded, streaming, and
       covered across positive, negative, cancellation, and boundary cases.
-- [ ] Permanent gates reject a second path or socket owner.
+- [x] Permanent gates reject a second path or socket owner.
 - [ ] Performance budgets and the required cross-backend live matrix pass, and
       all repository validation is green.
 
