@@ -664,7 +664,7 @@ jobs:
   test:
     name: Test
     if: ${{ always() }}
-    needs: [scope, test-workspace, test-workspace-aarch64, test-linux, test-release-witness, test-ebpf-telemetry, bdd-conformance, kernel]
+    needs: [scope, test-workspace, test-workspace-aarch64, test-linux, test-release-witness, test-ebpf-telemetry, bdd-conformance, kernel, aarch64-no-kvm-smoke]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -681,6 +681,8 @@ jobs:
           BDD_RESULT: ${{ needs.bdd-conformance.result }}
           KERNEL_SCOPE: ${{ needs.scope.outputs.kernel }}
           KERNEL_RESULT: ${{ needs.kernel.result }}
+          NO_KVM_REQUIRED: ${{ github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch' }}
+          NO_KVM_RESULT: ${{ needs.aarch64-no-kvm-smoke.result }}
         run: |
           set -euo pipefail
           if [ "$SCOPE_RESULT" != success ]; then
@@ -721,6 +723,19 @@ jobs:
           # was removed — failed every PR that does not touch a kernel path.
           if [ "$KERNEL_RESULT" != success ]; then
             echo "Kernel validation did not succeed (scope $KERNEL_SCOPE): $KERNEL_RESULT"
+            exit 1
+          fi
+          case "$NO_KVM_REQUIRED" in
+            true|false) ;;
+            *) echo "Invalid no-KVM event requirement: $NO_KVM_REQUIRED"; exit 1 ;;
+          esac
+          if [ "$SCOPE_CODE" = true ] && [ "$NO_KVM_REQUIRED" = true ]; then
+            no_kvm_expected=success
+          else
+            no_kvm_expected=skipped
+          fi
+          if [ "$NO_KVM_RESULT" != "$no_kvm_expected" ]; then
+            echo "Aarch64 no-KVM smoke did not match code scope $SCOPE_CODE and event requirement $NO_KVM_REQUIRED: $NO_KVM_RESULT"
             exit 1
           fi
 

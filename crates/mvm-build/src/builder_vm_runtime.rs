@@ -631,8 +631,11 @@ fi
 BUILD_HOOK_ROOTFS="/tmp/mvm-rootfs-before-build.ext4"
 cp -L "$ROOTFS_SRC" "$BUILD_HOOK_ROOTFS"
 echo "mvm-builder-vm: running before_build hook" >&2
-if ! /sbin/mvm-host-vm-init run-before-build-hook "$BUILD_HOOK_ROOTFS"; then
-    hook_rc=$?
+set +e
+/sbin/mvm-host-vm-init run-before-build-hook "$BUILD_HOOK_ROOTFS"
+hook_rc=$?
+set -e
+if [ "$hook_rc" -ne 0 ]; then
     echo "mvm-builder-vm: before_build hook failed (exit $hook_rc)" >&2
     rm -f "$BUILD_HOOK_ROOTFS"
     exit $hook_rc
@@ -2079,6 +2082,16 @@ mod tests {
         assert!(
             body.contains(r#"rm -f "$BUILD_HOOK_ROOTFS""#),
             "temp rootfs must be cleaned up on hook failure in:\n{body}"
+        );
+        assert!(
+            body.contains(
+                "set +e\n/sbin/mvm-host-vm-init run-before-build-hook \"$BUILD_HOOK_ROOTFS\"\nhook_rc=$?\nset -e"
+            ),
+            "the hook's real exit status must be captured before testing it in:\n{body}"
+        );
+        assert!(
+            !body.contains("if ! /sbin/mvm-host-vm-init run-before-build-hook"),
+            "negating the hook command makes `$?` report the `!` result instead of the hook failure"
         );
     }
 

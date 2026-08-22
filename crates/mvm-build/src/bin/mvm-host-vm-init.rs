@@ -123,6 +123,28 @@ mod workload_proxy;
 #[path = "mvm-host-vm-init/builder_hooks.rs"]
 mod builder_hooks;
 
+/// Parse the exact device path emitted by `losetup --find --show`.
+///
+/// Kept outside the Linux-only mount module so every host exercises the
+/// validation that stands between subprocess output and a privileged mount.
+#[cfg(any(target_os = "linux", test))]
+fn parse_loop_device(output: &[u8]) -> Result<std::path::PathBuf, std::io::Error> {
+    let text = std::str::from_utf8(output)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    let path = text.strip_suffix('\n').unwrap_or(text);
+    let Some(number) = path.strip_prefix("/dev/loop") else {
+        return Err(std::io::Error::other(format!(
+            "losetup returned unexpected device path {path:?}"
+        )));
+    };
+    if number.is_empty() || !number.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(std::io::Error::other(format!(
+            "losetup returned unexpected device path {path:?}"
+        )));
+    }
+    Ok(std::path::PathBuf::from(path))
+}
+
 fn main() -> ExitCode {
     // Subcommand dispatch for builder-VM utility operations. When invoked
     // as `mvm-host-vm-init run-before-build-hook <rootfs.ext4>`, mount the
@@ -663,6 +685,23 @@ fn closure_marker_contents(closure_hash: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn loop_device_parser_accepts_only_kernel_loop_paths() {
+        assert_eq!(
+            parse_loop_device(b"/dev/loop12\n").expect("valid loop device"),
+            Path::new("/dev/loop12")
+        );
+        for invalid in [
+            b"".as_slice(),
+            b"/dev/loop\n".as_slice(),
+            b"/tmp/loop12\n".as_slice(),
+            b"/dev/loop12 extra\n".as_slice(),
+            b"/dev/loopx\n".as_slice(),
+        ] {
+            assert!(parse_loop_device(invalid).is_err(), "accepted {invalid:?}");
+        }
+    }
 
     // ── ext4 store damage detection ──
 
