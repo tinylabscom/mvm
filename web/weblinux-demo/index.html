@@ -71,6 +71,31 @@
     }
     .ready { color: var(--success); font-weight: 600; }
     .error { color: var(--error); font-weight: 600; }
+    .input-line {
+      display: flex;
+      gap: 0.5rem;
+      align-items: center;
+      margin-top: 0.5rem;
+    }
+    .input-line .prompt {
+      color: var(--accent);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 0.8125rem;
+    }
+    .input-line input {
+      flex: 1;
+      background: #000;
+      color: #e6edf3;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 0.4rem 0.6rem;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 0.8125rem;
+    }
+    .input-line input:disabled {
+      background: var(--panel);
+      color: var(--muted);
+    }
   </style>
 </head>
 <body>
@@ -85,6 +110,10 @@
       <span id="status">Status: idle</span>
     </div>
     <pre id="log"></pre>
+    <form id="input-form" class="input-line" autocomplete="off">
+      <span class="prompt">$</span>
+      <input id="command" type="text" spellcheck="false" autocomplete="off" disabled />
+    </form>
   </main>
   <script type="module" src="demo.js"></script>
 </body>

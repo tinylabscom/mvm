@@ -7,9 +7,24 @@
 const baseUrl = self.location.href.replace(/\/[^/]*$/, "/");
 const marker = "QEMU-WASM-SMOKE-READY";
 
-function postLog(line) {
-  self.postMessage({ type: "log", line });
-  console.log("[demo]", line);
+let inputCallback = null;
+let outputBuffer = "";
+
+function flushOutputBuffer() {
+  let newline;
+  while ((newline = outputBuffer.indexOf("\n")) !== -1) {
+    const line = outputBuffer.slice(0, newline).replace(/\r$/, "");
+    outputBuffer = outputBuffer.slice(newline + 1);
+    if (line) {
+      self.postMessage({ type: "log", line });
+      console.log("[demo]", line);
+    }
+  }
+  if (outputBuffer.length > 4096) {
+    self.postMessage({ type: "log", line: outputBuffer });
+    console.log("[demo]", outputBuffer);
+    outputBuffer = "";
+  }
 }
 
 function postStatus(status) {
@@ -26,7 +41,44 @@ function postError(error) {
   console.error("DEMO-RESULT: ERROR", error);
 }
 
+// Minimal xterm.js-shaped object that lets xterm-pty's Master route output to
+// the UI and accept injected input from the main thread.
+function createFakeTerminal() {
+  let markerSeen = false;
+  return {
+    write: (data, callback) => {
+      const text = typeof data === "string" ? data : new TextDecoder().decode(data);
+      outputBuffer += text;
+      if (!markerSeen && outputBuffer.includes(marker)) {
+        markerSeen = true;
+        postReady();
+      }
+      flushOutputBuffer();
+      if (callback) callback();
+    },
+    onData: (cb) => {
+      inputCallback = cb;
+      return { dispose: () => {} };
+    },
+    onBinary: (_cb) => {
+      return { dispose: () => {} };
+    },
+    onResize: (_cb) => {
+      return { dispose: () => {} };
+    },
+  };
+}
+
 self.onmessage = async (event) => {
+  if (event.data.type === "stdin") {
+    if (inputCallback) {
+      // Send a carriage return so xterm-pty's line discipline turns it into a
+      // newline for the shell.
+      inputCallback(event.data.line + "\r");
+    }
+    return;
+  }
+
   if (event.data.type !== "run") {
     return;
   }
@@ -40,12 +92,14 @@ self.onmessage = async (event) => {
     self.Module = self.Module || {};
     self.Module.print = (line) => {
       if (typeof line === "string") {
-        postLog(`[print] ${line}`);
+        outputBuffer += `[print] ${line}\n`;
+        flushOutputBuffer();
       }
     };
     self.Module.printErr = (line) => {
       if (typeof line === "string") {
-        postLog(`[err] ${line}`);
+        outputBuffer += `[err] ${line}\n`;
+        flushOutputBuffer();
       }
     };
     self.Module.onAbort = (what) => {
@@ -65,37 +119,13 @@ self.onmessage = async (event) => {
     ];
 
     const { master, slave } = self.openpty();
-    let ptyBuffer = "";
-    let markerSeen = false;
-
-    master.onWrite(([buf, callback]) => {
-      ptyBuffer += new TextDecoder().decode(buf);
-      let newline;
-      while ((newline = ptyBuffer.indexOf("\n")) !== -1) {
-        const line = ptyBuffer.slice(0, newline).replace(/\r$/, "");
-        ptyBuffer = ptyBuffer.slice(newline + 1);
-        if (line) {
-          postLog(line);
-          if (!markerSeen && line.includes(marker)) {
-            markerSeen = true;
-            postReady();
-          }
-        }
-      }
-      if (ptyBuffer.length > 4096) {
-        postLog(ptyBuffer);
-        ptyBuffer = "";
-      }
-      if (callback) {
-        callback();
-      }
-    });
+    const fakeTerm = createFakeTerminal();
+    master.activate(fakeTerm);
 
     self.Module.pty = slave;
-    // Point Emscripten's pthread bootstrap at the engine main script.
     self.Module["mainScriptUrlOrBlob"] = `${self.location.origin}${new URL("qemu-system-x86_64.js", self.location.href).pathname}`;
 
-    // Patch the TTY poll so it does not block on the xterm-pty slave.
+    // Patch the TTY poll to avoid blocking on the pty.
     const interval = setInterval(() => {
       if (self.Module["TTY"]) {
         clearInterval(interval);

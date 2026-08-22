@@ -5,6 +5,8 @@ const statusEl = document.getElementById("status");
 const logEl = document.getElementById("log");
 const runBtn = document.getElementById("runBtn");
 const stopBtn = document.getElementById("stopBtn");
+const inputForm = document.getElementById("input-form");
+const commandEl = document.getElementById("command");
 
 let worker = null;
 
@@ -30,6 +32,7 @@ function stopWorker() {
   setStatus("stopped");
   runBtn.disabled = false;
   stopBtn.disabled = true;
+  commandEl.disabled = true;
 }
 
 function runWorker() {
@@ -56,12 +59,20 @@ function runWorker() {
       case "ready":
         setStatus("ready", "ready");
         logLine("DEMO-RESULT: READY");
+        commandEl.disabled = false;
+        commandEl.focus();
+        // Allow headless tests to inject a command via ?exec=...
+        const exec = new URLSearchParams(location.search).get("exec");
+        if (exec) {
+          worker.postMessage({ type: "stdin", line: exec });
+        }
         break;
       case "error":
         setStatus("error", "error");
         logLine(`ERROR: ${data.error}`);
         runBtn.disabled = false;
         stopBtn.disabled = true;
+        commandEl.disabled = true;
         break;
       case "stopped":
         setStatus("stopped");
@@ -82,6 +93,14 @@ function runWorker() {
 
   worker.postMessage({ type: "run" });
 }
+
+inputForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  if (!worker || commandEl.disabled) return;
+  const line = commandEl.value;
+  commandEl.value = "";
+  worker.postMessage({ type: "stdin", line });
+});
 
 runBtn.addEventListener("click", runWorker);
 stopBtn.addEventListener("click", stopWorker);
