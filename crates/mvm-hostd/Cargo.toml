@@ -141,6 +141,7 @@ serde_json.workspace = true
 # RFC 8785 JSON Canonicalization Scheme — audit-signer stable bytes-to-sign.
 serde_jcs = "0.1"
 sha2.workspace = true
+tar.workspace = true
 # keyholder HMAC-SHA256 signer (webhook HMAC + AWS SigV4 key derivation).
 hmac.workspace = true
 # hex digests for flow-byte-log record refs.
@@ -184,7 +185,6 @@ xtask = { path = "../../xtask" }
 mvm-agentd = { workspace = true, features = ["flowmux-async"] }
 # plan_admission bundle re-verify tests build/read `.mvmpkg` archives; verb-grant
 # test decodes the signer pubkey hex.
-tar.workspace = true
 hex.workspace = true
 # `TestEnv` env-var guard for env-mutating tests (reaper / network_endpoint).
 mvm-core = { workspace = true, features = ["test-support"] }
