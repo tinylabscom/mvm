@@ -48,7 +48,7 @@ export function DeploymentTiers() {
     <Section id="deployment" rule>
       <Reveal>
         <Eyebrow>Deployment</Eyebrow>
-        <h2 className="lowercase font-display text-2xl font-bold leading-tight text-title sm:text-3xl">
+        <h2 className="lowercase font-display tracking-tight text-2xl font-semibold leading-tight text-title sm:text-3xl">
           one contract. four places to run it.
         </h2>
       </Reveal>

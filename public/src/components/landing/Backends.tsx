@@ -25,7 +25,7 @@ export function Backends() {
             stylesheet beats layered utilities on this page (see
             Positioning.tsx). */}
         <h2
-          className="lowercase font-display text-2xl font-bold leading-tight text-title sm:text-3xl"
+          className="lowercase font-display tracking-tight text-2xl font-semibold leading-tight text-title sm:text-3xl"
           style={{ marginBottom: "1.5rem" }}
         >
           the backend is an implementation detail.
