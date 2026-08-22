@@ -14,15 +14,17 @@ host-first FlowMux handshake on relayed-vsock backends as well as direct-vsock
 backends. The outbound cutover is complete: guest TCP, UDP, DNS, mediated ICMP,
 and typed HTTP all use the authenticated protocol on `NetworkFlow`.
 
-Workstreams W1–W4 are now implemented. Admitted `NetworkLimits` are shared
+Workstreams W1–W5 are now implemented in the dependency-ordered PR stack.
+Admitted `NetworkLimits` are shared
 per-VM endpoint budgets; typed HTTP and connectors use bounded endpoint-owned
 streaming transforms; and signed TCP/UDP/HTTP/TLS ingress binds only admitted
 listeners, crosses the authenticated FlowMux session, and terminates at the
-declared guest-loopback target. The performance harness, rejected
-`raw_ip_stack` removal, frozen L3 deletion, permanent single-path gates, and
-final performance/backend matrix remain. This plan owns that remainder. The
-closed Plan 316 phase issues are historical; issue #2751 is the active
-umbrella.
+declared guest-loopback target. The performance harness and labelled legacy
+baselines are recorded, and the rejected `raw_ip_stack`/`L3Vsock` public
+surface is gone with explicit stale-input migration errors. Frozen L3
+deletion, permanent single-path gates, and the final performance/backend matrix
+remain. This plan owns that remainder. The closed Plan 316 phase issues are
+historical; issue #2751 is the active umbrella.
 
 ## Outcome
 
@@ -121,16 +123,16 @@ host test graphs and preserves the duplicate-major dependency invariant.
 
 ### W5 — Remove the rejected public compatibility surface
 
-- [ ] Remove `raw_ip_stack` and `NetworkMode::L3Vsock` from the Rust IR,
+- [x] Remove `raw_ip_stack` and `NetworkMode::L3Vsock` from the Rust IR,
       Python and TypeScript SDKs, generated schemas, fixtures, examples, CLI
       help, and public documentation.
-- [ ] Preserve an explicit migration error for stale serialized input at the
+- [x] Preserve an explicit migration error for stale serialized input at the
       outer compatibility boundary without representing the rejected mode in
       admitted domain types.
-- [ ] Document the supported loopback proxy, SOCKS5h/UDP, controlled DNS,
+- [x] Document the supported loopback proxy, SOCKS5h/UDP, controlled DNS,
       mediated ping, and typed connector surfaces, and the fail-closed result
       for applications that bypass them.
-- [ ] Add schema parity, stale-input refusal, supported-adapter, typed-
+- [x] Add schema parity, stale-input refusal, supported-adapter, typed-
       connector, and non-cooperative direct-socket BDD tests.
 
 ### W6 — Delete the superseded L3 implementation

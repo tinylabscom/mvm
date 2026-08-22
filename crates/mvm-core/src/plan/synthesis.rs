@@ -675,11 +675,8 @@ impl<'a> Default for SynthesisInputBuilder<'a> {
 /// are both refused at admission, and neither is constructible from here.
 /// A caller that supplied a spec keeps it; one that did not gets the
 /// version-1 defaults.
-fn l3_spec_for(mode: NetworkMode, supplied: Option<&L3NetworkSpec>) -> Option<L3NetworkSpec> {
-    if !mode.is_l3_vsock() {
-        return None;
-    }
-    Some(supplied.cloned().unwrap_or_else(L3NetworkSpec::v1))
+fn l3_spec_for(_mode: NetworkMode, _supplied: Option<&L3NetworkSpec>) -> Option<L3NetworkSpec> {
+    None
 }
 
 /// Build an unsigned `ExecutionPlan` from CLI-shaped input.
@@ -1311,7 +1308,6 @@ mod l3_spec_tests {
     /// that can guarantee they never do, so it derives one from the other.
     #[test]
     fn the_spec_is_present_exactly_when_the_mode_is_the_tunnel() {
-        assert!(l3_spec_for(NetworkMode::L3Vsock, None).is_some());
         assert!(l3_spec_for(NetworkMode::None, None).is_none());
         assert!(l3_spec_for(NetworkMode::HostVsockProxy, None).is_none());
     }
@@ -1327,51 +1323,33 @@ mod l3_spec_tests {
     /// A caller that configured limits or ingress keeps them; only the
     /// absent case gets defaults.
     #[test]
-    fn a_supplied_spec_is_preserved() {
+    fn a_supplied_spec_is_not_represented_in_a_new_plan() {
         let mut supplied = L3NetworkSpec::v1();
         supplied.max_flows = 17;
-        let carried = l3_spec_for(NetworkMode::L3Vsock, Some(&supplied)).expect("present");
-        assert_eq!(carried.max_flows, 17);
+        assert!(l3_spec_for(NetworkMode::HostVsockProxy, Some(&supplied)).is_none());
     }
 
     /// The IPv6 request travels in the signed plan, so what the host
     /// allocates for is what was admitted rather than something the launch
     /// path decided on its own.
     #[test]
-    fn an_ipv6_request_survives_synthesis_into_the_signed_plan() {
+    fn an_ipv6_l3_request_is_not_carried_into_a_new_plan() {
         let supplied = L3NetworkSpec::v1().requesting_ipv6();
-        let carried = l3_spec_for(NetworkMode::L3Vsock, Some(&supplied)).expect("present");
-        assert!(carried.requests_ipv6());
-        // And the default is still v4-only, so nothing gets a second
-        // address family by not mentioning one.
-        assert!(
-            !l3_spec_for(NetworkMode::L3Vsock, None)
-                .unwrap()
-                .requests_ipv6()
-        );
+        assert!(l3_spec_for(NetworkMode::HostVsockProxy, Some(&supplied)).is_none());
     }
 
     #[test]
-    fn an_absent_spec_becomes_the_version_one_defaults() {
-        let carried = l3_spec_for(NetworkMode::L3Vsock, None).expect("present");
-        assert_eq!(carried, L3NetworkSpec::v1());
+    fn an_absent_spec_stays_absent() {
+        assert!(l3_spec_for(NetworkMode::HostVsockProxy, None).is_none());
     }
 
     /// The end-to-end property: a synthesized plan is always admissible on
     /// this axis, whichever mode it carries.
     #[test]
     fn every_synthesized_plan_has_a_consistent_mode_and_spec() {
-        for mode in [
-            NetworkMode::None,
-            NetworkMode::HostVsockProxy,
-            NetworkMode::L3Vsock,
-        ] {
+        for mode in [NetworkMode::None, NetworkMode::HostVsockProxy] {
             let spec = l3_spec_for(mode, None);
-            assert_eq!(
-                mode.is_l3_vsock(),
-                spec.is_some(),
-                "{mode:?} produced an inadmissible mode/spec pairing"
-            );
+            assert!(spec.is_none(), "{mode:?} produced a retired L3 spec");
         }
     }
 }

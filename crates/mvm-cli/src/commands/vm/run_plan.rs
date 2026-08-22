@@ -210,12 +210,7 @@ fn run_plan_mode(args: &RunArgs, sdk: &super::exec::SdkTransportArgs) -> Result<
     let mut failed_count = 0usize;
 
     for app in &workload.apps {
-        // The transport follows from what the app declared it needs, not
-        // from anything the operator passed: an app that needs a real
-        // in-guest IP stack gets the tunnel, everything else keeps the
-        // socket-aware path.
-        let needs_raw_ip = app.network.as_ref().is_some_and(|n| n.raw_ip_stack);
-        let network_mode = crate::commands::machine::preflight_network(needs_raw_ip)?;
+        let network_mode = crate::commands::machine::preflight_network();
         let input = synthesis_input_for_app(&workload, app, network_mode)?;
         // A recorded sandbox run is a developer artifact; nothing here is
         // sealed, so an unenforceable grant is reported, not fatal.
