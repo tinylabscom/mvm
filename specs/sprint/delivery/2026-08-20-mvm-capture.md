@@ -15,11 +15,14 @@ Implemented the first slice of `mvm capture`.
   `crates/mvm-cli/src/commands/capture/`.
 - Reused the existing Nix renderer via `mvm_sdk::compile::compile`; no new
   templating engine was introduced.
-- Added deterministic Rust fixture under `tests/fixtures/capture/rust-hello/`
-  with fake `.env` secret for redaction testing.
+- Added a deterministic Rust fixture under
+  `tests/fixtures/capture/rust-hello/`; the redaction test creates its fake
+  `.env` secret in a separate temporary project.
 - Added library and CLI integration tests proving report versioning, secret
   redaction, canonical IR resolution, and Nix rendering.
 - Added ADR-050 and plan `specs/plans/2026-08-20-mvm-capture.md`.
+- Made the `.env` redaction witness self-contained: it creates the secret file
+  in a temporary project and therefore runs identically in a clean CI checkout.
 - Raised the all-features workspace closure ratchet by one, from 477 to 478,
   for the new first-party `mvm-capture` crate itself; its third-party
   dependencies were already present in the closure.

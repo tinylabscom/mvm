@@ -46,8 +46,14 @@ fn capture_report_is_versioned_and_contains_manifests() {
 
 #[test]
 fn secret_value_is_not_emitted_in_report() {
+    let project = tempfile::tempdir().expect("secret fixture directory");
+    std::fs::write(
+        project.path().join(".env"),
+        "DATABASE_URL=postgres://admin:super_secret_value_12345@db/app\n",
+    )
+    .expect("write secret fixture");
     let opts = mvm_capture::collect::CollectOptions {
-        project_path: fixture_root(),
+        project_path: project.path().to_path_buf(),
         ..Default::default()
     };
     let report = mvm_capture::collect::collect_project(&opts).expect("collect succeeds");

@@ -84,6 +84,9 @@ See `specs/adrs/050-mvm-capture-project-environment.md`.
 
 - [x] Workspace builds and affected tests pass.
 - [x] `cargo clippy -p mvm-capture -- -D warnings` passes.
+- [x] The secret-redaction fixture creates its own ignored `.env` input, so a
+      clean checkout exercises the privacy boundary without relying on an
+      untracked developer file.
 - [x] Fixture project produces a versioned capture report.
 - [x] Report resolves into canonical MVM IR.
 - [x] Canonical IR renders through the existing Nix path.

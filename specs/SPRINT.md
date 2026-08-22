@@ -2744,3 +2744,8 @@ The AArch64 CI witness also proved that valid ELF metadata can live beyond the
 bounded inspection prefix. Capture now preserves the header evidence, omits
 unread segments with an explicit warning, and continues without executing or
 fully loading the discovered binary.
+
+The clean-checkout workspace lane exposed that the `.env` redaction witness
+had depended on a locally present ignored fixture file. It now creates the
+secret-bearing `.env` inside a temporary project, preserving the same negative
+privacy assertions while making the test deterministic in CI.
