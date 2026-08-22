@@ -15,6 +15,7 @@ pub struct ElfMetadata {
     pub build_id: Option<String>,
     pub is_64: bool,
     pub is_little_endian: bool,
+    pub incomplete: bool,
 }
 
 const ELFMAG: &[u8] = b"\x7fELF";
@@ -36,7 +37,24 @@ const DT_NULL: u64 = 0;
 /// Returns `Ok(None)` if the file is not an ELF. Returns `Err` only for
 /// inputs that claim to be ELF but are malformed in a way that suggests
 /// tampering or truncation.
+#[cfg(test)]
 pub fn parse_elf_metadata(bytes: &[u8]) -> Result<Option<ElfMetadata>, CaptureError> {
+    parse_elf_metadata_with_extent(bytes, true)
+}
+
+/// Parse metadata from an intentionally bounded prefix of an ELF file.
+///
+/// Segments outside the supplied prefix are omitted and reported through
+/// [`ElfMetadata::incomplete`]; malformed structures inside the prefix still
+/// fail closed.
+pub fn parse_elf_prefix_metadata(bytes: &[u8]) -> Result<Option<ElfMetadata>, CaptureError> {
+    parse_elf_metadata_with_extent(bytes, false)
+}
+
+fn parse_elf_metadata_with_extent(
+    bytes: &[u8],
+    complete_file: bool,
+) -> Result<Option<ElfMetadata>, CaptureError> {
     if bytes.len() < 52 || bytes.get(..4) != Some(ELFMAG) {
         return Ok(None);
     }
@@ -83,7 +101,8 @@ pub fn parse_elf_metadata(bytes: &[u8]) -> Result<Option<ElfMetadata>, CaptureEr
         ..Default::default()
     };
 
-    let phdrs = parse_program_headers(bytes, &header)?;
+    let (phdrs, program_headers_incomplete) = parse_program_headers(bytes, &header, complete_file)?;
+    metadata.incomplete = program_headers_incomplete;
 
     let mut dyn_offset = None;
     let mut dyn_filesz = 0usize;
@@ -92,14 +111,55 @@ pub fn parse_elf_metadata(bytes: &[u8]) -> Result<Option<ElfMetadata>, CaptureEr
     for ph in &phdrs {
         match ph.p_type {
             PT_INTERP => {
-                metadata.interpreter = Some(read_cstr(bytes, ph.p_offset, ph.p_filesz as usize)?);
+                if range_is_available(bytes, ph.p_offset, ph.p_filesz) {
+                    metadata.interpreter = Some(read_cstr(
+                        bytes,
+                        ph.p_offset,
+                        usize::try_from(ph.p_filesz).map_err(|_| {
+                            CaptureError::MalformedManifest(
+                                PathBuf::from("<elf>"),
+                                "interpreter segment size overflow".to_owned(),
+                            )
+                        })?,
+                    )?);
+                } else if complete_file {
+                    return Err(CaptureError::MalformedManifest(
+                        PathBuf::from("<elf>"),
+                        "interpreter segment out of bounds".to_owned(),
+                    ));
+                } else {
+                    metadata.incomplete = true;
+                }
             }
             PT_DYNAMIC => {
-                dyn_offset = Some(ph.p_offset);
-                dyn_filesz = ph.p_filesz as usize;
+                if range_is_available(bytes, ph.p_offset, ph.p_filesz) {
+                    dyn_offset = Some(ph.p_offset);
+                    dyn_filesz = usize::try_from(ph.p_filesz).map_err(|_| {
+                        CaptureError::MalformedManifest(
+                            PathBuf::from("<elf>"),
+                            "dynamic segment size overflow".to_owned(),
+                        )
+                    })?;
+                } else if complete_file {
+                    return Err(CaptureError::MalformedManifest(
+                        PathBuf::from("<elf>"),
+                        "dynamic segment out of bounds".to_owned(),
+                    ));
+                } else {
+                    metadata.incomplete = true;
+                }
             }
             PT_NOTE if metadata.build_id.is_none() => {
-                metadata.build_id = parse_note_build_id(bytes, ph.p_offset, ph.p_filesz)?;
+                if range_is_available(bytes, ph.p_offset, ph.p_filesz) {
+                    metadata.build_id = parse_note_build_id(bytes, ph.p_offset, ph.p_filesz)?;
+                } else if complete_file {
+                    return Err(CaptureError::MalformedManifest(
+                        PathBuf::from("<elf>"),
+                        "note segment out of bounds".to_owned(),
+                    ));
+                } else {
+                    metadata.incomplete = true;
+                }
             }
             _ => {}
         }
@@ -116,14 +176,42 @@ pub fn parse_elf_metadata(bytes: &[u8]) -> Result<Option<ElfMetadata>, CaptureEr
     // Resolve DT_NEEDED string offsets against the dynamic string table.
     if let Some(strtab_va) = strtab_vaddr {
         if let Some(strtab_offset) = vaddr_to_file_offset(&phdrs, strtab_va) {
+            if strtab_offset >= bytes.len() {
+                if !complete_file {
+                    metadata.needed_libraries.clear();
+                    metadata.incomplete = true;
+                    return Ok(Some(metadata));
+                }
+                return Err(CaptureError::MalformedManifest(
+                    PathBuf::from("<elf>"),
+                    "ELF string table out of bounds".to_owned(),
+                ));
+            }
             for needed in &mut metadata.needed_libraries {
                 let offset = strtab_offset
-                    + needed.parse::<usize>().map_err(|_| {
+                    .checked_add(needed.parse::<usize>().map_err(|_| {
                         CaptureError::MalformedManifest(
                             PathBuf::from("<elf>"),
                             "invalid DT_NEEDED string offset".to_owned(),
                         )
+                    })?)
+                    .ok_or_else(|| {
+                        CaptureError::MalformedManifest(
+                            PathBuf::from("<elf>"),
+                            "DT_NEEDED string offset overflow".to_owned(),
+                        )
                     })?;
+                if offset >= bytes.len() {
+                    if !complete_file {
+                        metadata.needed_libraries.clear();
+                        metadata.incomplete = true;
+                        return Ok(Some(metadata));
+                    }
+                    return Err(CaptureError::MalformedManifest(
+                        PathBuf::from("<elf>"),
+                        "ELF string offset out of bounds".to_owned(),
+                    ));
+                }
                 *needed = read_cstr(bytes, offset, bytes.len() - offset)?;
             }
         }
@@ -185,10 +273,11 @@ struct ProgramHeader {
 fn parse_program_headers(
     bytes: &[u8],
     header: &ElfHeader,
-) -> Result<Vec<ProgramHeader>, CaptureError> {
+    complete_file: bool,
+) -> Result<(Vec<ProgramHeader>, bool), CaptureError> {
     let entry_size = if header.e_phentsize == 0 {
         if header.e_phoff == 0 {
-            return Ok(vec![]);
+            return Ok((vec![], false));
         }
         return Err(CaptureError::MalformedManifest(
             PathBuf::from("<elf>"),
@@ -199,6 +288,7 @@ fn parse_program_headers(
     };
 
     let mut phdrs = Vec::with_capacity(header.e_phnum);
+    let mut incomplete = false;
     for i in 0..header.e_phnum {
         let start = header
             .e_phoff
@@ -214,9 +304,20 @@ fn parse_program_headers(
                     "program header offset overflow".to_owned(),
                 )
             })?;
+        if start.saturating_add(entry_size) > bytes.len() && !complete_file {
+            incomplete = true;
+            break;
+        }
         phdrs.push(parse_program_header(bytes, start, entry_size)?);
     }
-    Ok(phdrs)
+    Ok((phdrs, incomplete))
+}
+
+fn range_is_available(bytes: &[u8], offset: usize, size: u64) -> bool {
+    usize::try_from(size)
+        .ok()
+        .and_then(|size| offset.checked_add(size))
+        .is_some_and(|end| end <= bytes.len())
 }
 
 fn parse_program_header(
@@ -420,6 +521,26 @@ mod tests {
         bytes[54..56].copy_from_slice(&56u16.to_le_bytes()); // e_phentsize
         bytes[56..58].copy_from_slice(&1u16.to_le_bytes()); // one program header claimed
         assert!(parse_elf_metadata(&bytes).is_err());
+    }
+
+    #[test]
+    fn bounded_prefix_keeps_header_metadata_and_marks_omitted_segments() {
+        let mut elf = CraftedElf64::new();
+        elf.set_entrypoint_type(ET_EXEC);
+        elf.set_machine(183);
+        elf.add_needed(["libc.so.6".to_owned()]);
+        let bytes = elf.build();
+        let dynamic_offset = 64 + (2 * 56) + b"\0libc.so.6\0".len();
+        assert!(dynamic_offset < bytes.len());
+
+        assert!(parse_elf_metadata(&bytes[..dynamic_offset]).is_err());
+        let metadata = parse_elf_prefix_metadata(&bytes[..dynamic_offset])
+            .expect("bounded prefix is accepted")
+            .expect("fixture is ELF");
+
+        assert_eq!(metadata.arch.as_deref(), Some("aarch64"));
+        assert!(metadata.needed_libraries.is_empty());
+        assert!(metadata.incomplete);
     }
 
     #[test]

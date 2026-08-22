@@ -23,6 +23,9 @@ Implemented the first slice of `mvm capture`.
 - Raised the all-features workspace closure ratchet by one, from 477 to 478,
   for the new first-party `mvm-capture` crate itself; its third-party
   dependencies were already present in the closure.
+- Kept bounded ELF inspection portable across Linux architectures: metadata
+  segments beyond the read prefix are omitted with an explicit warning rather
+  than rejecting an otherwise valid executable and aborting the capture.
 - Updated `public/src/content/docs/reference/cli-commands.md` and added
   `public/src/content/docs/guides/capture.md`.
 

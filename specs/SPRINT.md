@@ -2739,3 +2739,8 @@ The `mvm-capture` workspace addition raises the all-features closure by exactly
 one first-party node, from 477 to 478, without adding a new third-party crate.
 The feature-closure ratchet and delivery evidence now record that measured
 change explicitly.
+
+The AArch64 CI witness also proved that valid ELF metadata can live beyond the
+bounded inspection prefix. Capture now preserves the header evidence, omits
+unread segments with an explicit warning, and continues without executing or
+fully loading the discovered binary.

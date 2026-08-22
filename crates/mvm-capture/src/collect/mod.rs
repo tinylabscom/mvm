@@ -128,10 +128,16 @@ pub(crate) fn inspect_executable(
     // Read a bounded prefix for ELF parsing; metadata lives in the first page.
     let prefix_len = limits.max_file_bytes.min(65_536);
     if let Ok(bytes) = read_prefix(path, prefix_len) {
-        if let Some(parsed) = elf::parse_elf_metadata(&bytes)? {
+        if let Some(parsed) = elf::parse_elf_prefix_metadata(&bytes)? {
             evidence.interpreter = parsed.interpreter;
             evidence.needed_libraries = parsed.needed_libraries;
             evidence.build_id = parsed.build_id;
+            if parsed.incomplete {
+                warnings.push(format!(
+                    "ELF metadata outside the bounded {}-byte prefix was omitted",
+                    bytes.len()
+                ));
+            }
         }
     }
 
