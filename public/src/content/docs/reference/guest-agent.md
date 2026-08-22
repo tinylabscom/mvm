@@ -72,8 +72,14 @@ readiness, lifecycle, and cancellation requests. A saturated transfer cannot
 consume all control capacity.
 
 Every encoded request and response is capped symmetrically at 256 KiB before
-any bytes are written. User-content chunks are at most 48 KiB, leaving enough
-headroom for worst-case JSON encoding and the response envelope. The split is
+any bytes are written. User-content chunks are at most 15.5 KiB, leaving enough
+headroom for worst-case JSON encoding and the response envelope.
+
+That chunk size is derived from the 256 KiB cap rather than chosen. Content is
+encoded twice on its way to the wire: once as a `Vec<u8>` in the request or
+response body, and again as the sealed envelope's ciphertext, which is itself a
+`Vec<u8>`. Neither hop is base64, so the worst case — four characters per byte,
+`255,` — applies twice and the expansions multiply. The split is
 orthogonal to the agent profile gate: `Exec` is dev-only and data-plane;
 `Ping` is always available and control-plane.
 
@@ -105,10 +111,10 @@ share the 48-request data admission budget.
 
 | Verb | Flow | Frame cap | Chunk size | Terminal | Backpressure | Payload in audit? |
 |---|---|---|---|---|---|---|
-| `RunEntrypoint` | Request → `EntrypointEvent` stream | 256 KiB per event | 48 KiB stdout/stderr | `Exit` / `Killed` / `TimedOut` / `Error` | Bounded process buffers. | No. |
-| `ProcWait` | Request → `ProcWaitEvent` stream | 256 KiB per event | 48 KiB stdout/stderr | `Exit` / `Killed` / `TimedOut` / `Error` | Typed non-terminal backpressure events. | No. |
-| `ProcSendInput` | Bounded request → ack | 256 KiB | At most 48 KiB per protocol frame | `InputAccepted` | Caller retries subsequent chunks. | No; byte count only. |
-| `FsRead` / `FsWrite` | Repeated offset requests → bounded responses | 256 KiB | 48 KiB | Each chunk response | Caller advances the offset; the first write truncates and later chunks do not. | No; offsets, sizes, and counts only. |
+| `RunEntrypoint` | Request → `EntrypointEvent` stream | 256 KiB per event | 15.5 KiB stdout/stderr | `Exit` / `Killed` / `TimedOut` / `Error` | Bounded process buffers. | No. |
+| `ProcWait` | Request → `ProcWaitEvent` stream | 256 KiB per event | 15.5 KiB stdout/stderr | `Exit` / `Killed` / `TimedOut` / `Error` | Typed non-terminal backpressure events. | No. |
+| `ProcSendInput` | Bounded request → ack | 256 KiB | At most 15.5 KiB per protocol frame | `InputAccepted` | Caller retries subsequent chunks. | No; byte count only. |
+| `FsRead` / `FsWrite` | Repeated offset requests → bounded responses | 256 KiB | 15.5 KiB | Each chunk response | Caller advances the offset; the first write truncates and later chunks do not. | No; offsets, sizes, and counts only. |
 | `FsList` / `FsDiff` | Request → bounded metadata response | 256 KiB | Protocol-bounded result | Response itself | Result caps and frame cap fail closed. | No file contents. |
 | `Exec` / `ExecBatch` / `RunCode` (dev-only) | One-shot request and capture | 256 KiB | Protocol-bounded result | Response itself | Oversized encoded responses fail closed. | No. |
 | Console PTY traffic | Raw bytes on a dedicated vsock port | Raw transport | TTY-shaped reads | Close or PTY exit | Kernel/socket backpressure; only the host CID may connect. | No. |
