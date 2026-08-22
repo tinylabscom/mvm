@@ -132,6 +132,75 @@ pub struct ExportedEvidence {
     pub cited: Vec<CitedEntry>,
 }
 
+/// The audit tree one export pass is anchored to.
+///
+/// Built once per export and shared by every receipt, so a run's receipts all
+/// name the same tree.
+pub struct ChainPosition {
+    root_hash: String,
+    tree_size: u64,
+}
+
+impl ChainPosition {
+    /// Build the Merkle root over `tenant`'s verified chain.
+    ///
+    /// Refuses on a chain that does not verify, because
+    /// [`crate::audit::merkle::build_root_in`] does — a root over a corrupt log
+    /// would attest the corruption.
+    pub fn build(
+        audit_dir: &std::path::Path,
+        tenant: &str,
+        signing_key: &SigningKey,
+    ) -> Result<Self> {
+        let (root, tree_size) =
+            crate::audit::merkle::build_root_in(audit_dir, tenant, &signing_key.verifying_key())?;
+        Ok(Self {
+            root_hash: hex::encode(root),
+            tree_size,
+        })
+    }
+
+    /// Stamp a receipt with where it came from, then re-address it.
+    ///
+    /// The extensions are signed material, so the content address has to be
+    /// recomputed after they land. Doing both here is deliberate: an insert
+    /// that forgot the recompute would produce a receipt whose `receipt_id`
+    /// does not match its own bytes, and `verify` would reject it far from the
+    /// line that caused it.
+    pub fn attach(&self, receipt: &mut ExecutionReceipt, entry: &PlanAuditEntry) -> Result<()> {
+        let digest = crate::audit::evidence::audit_entry_digest_hex(entry)
+            .with_context(|| format!("digesting audit entry '{}'", entry.event))?;
+        receipt.extensions.insert(
+            mvm_core::receipt::extension_key::AUDIT_DIGEST.to_string(),
+            Value::String(digest),
+        );
+        receipt.extensions.insert(
+            mvm_core::receipt::extension_key::AUDIT_ROOT.to_string(),
+            Value::String(self.root_hash.clone()),
+        );
+        receipt.extensions.insert(
+            mvm_core::receipt::extension_key::TREE_SIZE.to_string(),
+            Value::Number(self.tree_size.into()),
+        );
+        receipt.receipt_id = receipt
+            .compute_id()
+            .map_err(|e| anyhow::anyhow!("recomputing receipt id after stamping position: {e}"))?;
+        Ok(())
+    }
+
+    /// The root hash this pass is anchored to, as lowercase hex.
+    #[must_use]
+    pub fn root_hash(&self) -> &str {
+        &self.root_hash
+    }
+
+    /// The tree size that root was built at.
+    #[must_use]
+    pub fn tree_size(&self) -> u64 {
+        self.tree_size
+    }
+}
+
 /// Classify an audit `event`.
 ///
 /// Every event resolves: unrecognised ones are [`EntryMapping::Cited`] rather
@@ -168,6 +237,12 @@ pub fn export_evidence(
     let host_did = DidKey::from_verifying_key(signing_key.verifying_key()).to_did_key();
     let signed_at = chrono::Utc::now().to_rfc3339();
 
+    // One root for the whole pass. Every receipt from this export cites it, and
+    // every inclusion proof an archive builds binds to it; a root rebuilt
+    // per-entry would let two receipts from one run name different trees.
+    let position = ChainPosition::build(audit_dir, tenant, signing_key)
+        .with_context(|| format!("building the audit root for tenant '{tenant}'"))?;
+
     let mut out = ExportedEvidence::default();
     for (leaf_index, entry) in entries.iter().enumerate() {
         if let Some(filter) = plan_id_filter
@@ -177,9 +252,12 @@ pub fn export_evidence(
         }
         match map_event(&entry.event) {
             EntryMapping::Receipt { .. } => {
-                let receipt = audit_entry_to_receipt(entry, &host_did).with_context(|| {
+                let mut receipt = audit_entry_to_receipt(entry, &host_did).with_context(|| {
                     format!("building a receipt for a mapped event '{}'", entry.event)
                 })?;
+                position
+                    .attach(&mut receipt, entry)
+                    .context("attaching the chain position to a receipt")?;
                 let signed = SignedExecutionReceipt::sign(receipt, signing_key, signed_at.clone())
                     .context("signing execution receipt")?;
                 out.receipts.push(signed);

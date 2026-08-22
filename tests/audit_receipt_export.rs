@@ -376,3 +376,102 @@ fn a_citation_carries_the_leaf_index_that_addresses_the_real_tree() {
         "leaf index must address the full chain"
     );
 }
+
+#[test]
+fn an_exported_receipt_names_the_chain_position_it_came_from() {
+    let sandbox = ExportSandbox::new();
+    let key = write_chain_with_egress_and_input(&sandbox);
+    let plan_id = sample_plan_id().0;
+
+    let evidence = mvm_hostd::audit::receipt_export::export_evidence(
+        &sandbox.audit_dir(),
+        "local",
+        Some(&plan_id),
+        &key,
+    )
+    .expect("export");
+
+    let first = evidence.receipts.first().expect("at least one receipt");
+    let ext = &first.payload.extensions;
+    for k in [
+        mvm_core::receipt::extension_key::AUDIT_DIGEST,
+        mvm_core::receipt::extension_key::AUDIT_ROOT,
+        mvm_core::receipt::extension_key::TREE_SIZE,
+    ] {
+        assert!(ext.contains_key(k), "missing extension {k}; had {ext:?}");
+    }
+
+    // The extensions are inside the signed payload, so a receipt carrying them
+    // still verifies and its content address still matches.
+    first
+        .verify()
+        .expect("receipt still verifies with extensions present");
+}
+
+#[test]
+fn every_exported_receipt_shares_one_audit_root() {
+    // Proofs in an archive all bind to a single root; receipts exported in the
+    // same pass must therefore name that same root, not one root each.
+    let sandbox = ExportSandbox::new();
+    let key = write_chain_with_egress_and_input(&sandbox);
+    let plan_id = sample_plan_id().0;
+
+    let evidence = mvm_hostd::audit::receipt_export::export_evidence(
+        &sandbox.audit_dir(),
+        "local",
+        Some(&plan_id),
+        &key,
+    )
+    .expect("export");
+
+    let roots: std::collections::BTreeSet<String> = evidence
+        .receipts
+        .iter()
+        .map(|r| {
+            r.payload
+                .extensions
+                .get(mvm_core::receipt::extension_key::AUDIT_ROOT)
+                .and_then(|v| v.as_str())
+                .expect("audit root extension")
+                .to_string()
+        })
+        .collect();
+    assert_eq!(
+        roots.len(),
+        1,
+        "all receipts must cite one root, got {roots:?}"
+    );
+}
+
+#[test]
+fn the_audit_digest_extension_resolves_to_the_entry_it_came_from() {
+    let sandbox = ExportSandbox::new();
+    let key = write_chain_with_egress_and_input(&sandbox);
+    let plan_id = sample_plan_id().0;
+
+    let evidence = mvm_hostd::audit::receipt_export::export_evidence(
+        &sandbox.audit_dir(),
+        "local",
+        Some(&plan_id),
+        &key,
+    )
+    .expect("export");
+
+    let path = mvm_hostd::audit::emitter::audit_path_for_tenant(&sandbox.audit_dir(), "local");
+    let chain =
+        mvm_hostd::supervisor::audit_file::verify_audit_chain_entries(&path, &key.verifying_key())
+            .expect("chain");
+
+    // First receipt is plan.admitted, the first chain entry.
+    let want = mvm_hostd::audit::evidence::audit_entry_digest_hex(&chain[0]).expect("digest");
+    let got = evidence.receipts[0]
+        .payload
+        .extensions
+        .get(mvm_core::receipt::extension_key::AUDIT_DIGEST)
+        .and_then(|v| v.as_str())
+        .expect("audit digest extension");
+    assert_eq!(
+        got, want,
+        "the digest must identify the exact signed entry bytes"
+    );
+}
