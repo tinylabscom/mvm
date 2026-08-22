@@ -1012,7 +1012,7 @@ jobs:
       # nobody had published. Boot images get their own tags precisely so
       # this pin stops moving with the CLI's version — keep it in step with
       # `DEFAULT_BOOT_IMAGE_TAG` in mvm-core's config.
-      IMAGE_TAG: boot-image/v0.1.0
+      IMAGE_TAG: boot-image/v0.1.3
       # Must track `crates/mvm-core/src/config.rs::FC_VERSION_DEFAULT`. The
       # launch path passes `--enable-pci`, which older Firecracker rejects
       # outright: it exits before creating its API socket, and the only symptom

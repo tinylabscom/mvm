@@ -14,15 +14,13 @@ pub const FC_VERSION_DEFAULT: &str = match option_env!("MVM_FC_VERSION") {
 /// rather than a bare version, because it is spliced straight into a release
 /// download URL: `https://github.com/<repo>/releases/download/<tag>/<asset>`.
 ///
-/// **Nothing reads this yet.** `download_default_microvm_image` and the
-/// workload kernel fetch still build their URLs from the CLI's own version and
-/// must keep doing so until a `boot-image/v0.1.0` release actually exists —
-/// repointing them at a tag nobody has published turns every fresh install's
-/// first boot into a 404. Publishing that tag is the condition that unblocks
-/// the switch.
+/// Downloaders and the merge-queue boot witnesses must stay on this same
+/// published tag. Advancing the constant before the release exists turns every
+/// fresh install's first boot into a 404; advancing only one consumer makes CI
+/// validate a different image from the one users receive.
 pub const DEFAULT_BOOT_IMAGE_TAG: &str = match option_env!("MVM_BOOT_IMAGE_TAG") {
     Some(t) => t,
-    None => "boot-image/v0.1.0",
+    None => "boot-image/v0.1.3",
 };
 
 /// Host CPU architecture for arch-tagged downloads (the Firecracker release
