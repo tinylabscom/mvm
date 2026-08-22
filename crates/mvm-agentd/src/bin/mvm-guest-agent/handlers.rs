@@ -592,6 +592,7 @@ pub(crate) fn handle_primed_status() -> GuestResponse {
 pub(crate) fn handle_post_restore(
     ctx: &mut HandlerCtx,
     token: [u8; mvm_core::crypto::vmgenid::GENID_BYTES],
+    hostname: Option<&str>,
     host_epoch_secs: Option<u64>,
     grant_envelope: Option<mvm_core::protocol::vm_backend::VerbGrantEnvelope>,
 ) -> GuestResponse {
@@ -611,6 +612,11 @@ pub(crate) fn handle_post_restore(
             Err(error) => (false, Some(format!("clock resync failed: {error}"))),
         },
     };
+    let hostname_error = hostname.and_then(|value| {
+        mvm_agentd::guest_hostname::provision(value)
+            .err()
+            .map(|error| format!("hostname provisioning failed: {error}"))
+    });
     // Re-pin the verb grant if the host sent a fresh envelope. This
     // covers restore across a plan change (a fork mints a fresh
     // host-signed grant with the child's new session_id/plan_nonce and
@@ -649,15 +655,23 @@ pub(crate) fn handle_post_restore(
         )),
         Err(e) => Some(format!("failed to send signal: {}", e)),
     };
-    let success = clock_error.is_none() && signal_detail.is_none();
-    let detail = match (clock_error, signal_detail) {
-        (None, None) if host_epoch_secs.is_some() => {
-            Some("post-restore clock sync and init signal completed".to_string())
-        }
-        (None, None) => Some("post-restore signal sent to init".to_string()),
-        (Some(clock), None) => Some(clock),
-        (None, Some(signal)) => Some(signal),
-        (Some(clock), Some(signal)) => Some(format!("{clock}; {signal}")),
+    let errors = [hostname_error, clock_error, signal_detail]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    let success = errors.is_empty();
+    let detail = if success {
+        Some(
+            match (hostname.is_some(), host_epoch_secs.is_some()) {
+                (true, true) => "post-restore hostname, clock sync, and init signal completed",
+                (true, false) => "post-restore hostname and init signal completed",
+                (false, true) => "post-restore clock sync and init signal completed",
+                (false, false) => "post-restore signal sent to init",
+            }
+            .to_string(),
+        )
+    } else {
+        Some(errors.join("; "))
     };
     GuestResponse::PostRestoreAck {
         success,

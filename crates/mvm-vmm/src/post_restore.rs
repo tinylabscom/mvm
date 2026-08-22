@@ -214,6 +214,9 @@ pub struct VsockPostRestoreSignal {
     /// it rotates its VMGenID. Random per resume; an all-zero token requests
     /// no rotation (template restore).
     pub token: [u8; mvm_core::crypto::vmgenid::GENID_BYTES],
+    /// Workload identity to install as the guest hostname. A factory parent
+    /// carries no name because the child identity is unknown until claim time.
+    pub hostname: Option<String>,
     /// Signed capability to pin while the restored guest adopts its fresh
     /// identity. Ordinary resume paths carry no new grant.
     pub grant_envelope: Option<mvm_core::protocol::vm_backend::VerbGrantEnvelope>,
@@ -223,6 +226,7 @@ impl VsockPostRestoreSignal {
     pub fn request(&self, host_epoch_secs: u64) -> mvm_agentd::vsock::GuestRequest {
         mvm_agentd::vsock::GuestRequest::PostRestore {
             token: self.token,
+            hostname: self.hostname.clone(),
             host_epoch_secs: Some(host_epoch_secs),
             grant_envelope: self.grant_envelope.clone(),
         }
@@ -408,11 +412,13 @@ mod tests {
         };
         let signal = VsockPostRestoreSignal {
             token: [9u8; mvm_core::crypto::vmgenid::GENID_BYTES],
+            hostname: Some("child-final".to_string()),
             grant_envelope: Some(envelope),
         };
 
         let mvm_agentd::vsock::GuestRequest::PostRestore {
             token,
+            hostname,
             host_epoch_secs,
             grant_envelope,
         } = signal.request(42)
@@ -420,6 +426,7 @@ mod tests {
             panic!("post-restore signal built the wrong request variant");
         };
         assert_eq!(token, [9u8; mvm_core::crypto::vmgenid::GENID_BYTES]);
+        assert_eq!(hostname.as_deref(), Some("child-final"));
         assert_eq!(host_epoch_secs, Some(42));
         assert_eq!(
             grant_envelope.expect("grant is carried").grant.session_id,

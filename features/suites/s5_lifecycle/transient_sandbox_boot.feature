@@ -11,6 +11,12 @@ Feature: Transient sandbox boot
     Then the command exits with code 0
     And the output contains "mvm-bdd-oci-hello"
 
+  @live
+  Scenario: a named machine observes that name as its guest hostname
+    When I run mvmctl in an isolated live home with "machine run --name bdd-guest-hostname --image alpine --timeout 120 -- /bin/hostname"
+    Then the command exits with code 0
+    And the output contains "bdd-guest-hostname"
+
   # The verified OCI root stays read-only. Scratch space is a dedicated tmpfs
   # carried from the universal initramfs across the root pivot.
   @live

@@ -63,6 +63,9 @@ pub mod genid;
 /// legacy per-rootfs initrd and the universal-initramfs agent cannot drift.
 #[cfg(target_os = "linux")]
 pub mod guest_bootstrap;
+/// Guest hostname validation and provisioning shared by cold boot and warm
+/// post-restore identity delivery.
+pub mod guest_hostname;
 pub mod guest_mount;
 /// Shared in-guest network bring-up (eth0 up + DHCP + static fallback), used by
 /// both the builder VM init and the workload guest netinit.
