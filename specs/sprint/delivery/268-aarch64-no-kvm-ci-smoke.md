@@ -42,3 +42,12 @@ QEMU now shares the virtio-fs runtime-overlay contract used by persistent
 builders: `/dev/vdc` is only the read-only runtime overlay, no disk-transport
 tokens are present, and the writable job/output shares remain authoritative.
 Unit tests pin both the shared attachment and the QEMU call-site contract.
+
+The corrected drive layout then exposed a release-skew compatibility case:
+an older published builder init copied the signing key and host anchor but not
+the newer empty ingress-target projection from the identity drive. The current
+egress client used the signing key alone as its "already provisioned" marker,
+so it skipped its own idempotent drive copy and failed closed on the missing
+projection. Egress startup now treats all three files as one identity contract
+and reprovisions whenever any member is absent. A regression test covers the
+two-file legacy state and the complete three-file state.

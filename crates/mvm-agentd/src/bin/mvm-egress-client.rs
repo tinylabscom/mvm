@@ -42,6 +42,11 @@ fn host_vsock_port_from_env(raw: Option<&str>) -> Result<u32, String> {
     }
 }
 
+#[cfg(any(target_os = "linux", test))]
+fn flowmux_identity_is_complete(paths: [&std::path::Path; 3]) -> bool {
+    paths.into_iter().all(std::path::Path::is_file)
+}
+
 fn main() -> ExitCode {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -91,8 +96,11 @@ fn run(addr: std::net::SocketAddr, host_port: u32) -> ExitCode {
     // superblock-label probe. Idempotent, so an init that already provisioned
     // (Stage 0 and the builder VM do, to get a named refusal earlier) is
     // unaffected.
-    if !std::path::Path::new(flowmux_keys::DEFAULT_GUEST_SIGNING_KEY_PATH).exists()
-        && let Err(e) = mvm_agentd::flowmux_drive::provision_identity_from_drive()
+    if !flowmux_identity_is_complete([
+        std::path::Path::new(flowmux_keys::DEFAULT_GUEST_SIGNING_KEY_PATH),
+        std::path::Path::new(flowmux_keys::DEFAULT_HOST_SIGNER_PUBKEY_PATH),
+        std::path::Path::new(flowmux_keys::DEFAULT_INGRESS_TARGETS_PATH),
+    ]) && let Err(e) = mvm_agentd::flowmux_drive::provision_identity_from_drive()
     {
         eprintln!("mvm-egress-client: FlowMux identity not provisioned: {e}");
     }
@@ -174,7 +182,7 @@ fn run(_addr: std::net::SocketAddr, _host_port: u32) -> ExitCode {
 }
 
 #[cfg(test)]
-mod host_port_tests {
+mod tests {
     use super::*;
 
     /// A guest with no init-supplied port keeps the compiled-in default, which
@@ -209,5 +217,28 @@ mod host_port_tests {
                 "{bad:?} must refuse rather than fall back"
             );
         }
+    }
+
+    #[test]
+    fn a_legacy_partial_identity_is_reprovisioned() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let signing_key = dir.path().join("flowmux-guest-signing-key");
+        let host_anchor = dir.path().join("host-signer.pub");
+        let ingress_targets = dir.path().join("flowmux-ingress.json");
+
+        std::fs::write(&signing_key, [0_u8; 32]).expect("write signing key");
+        std::fs::write(&host_anchor, [1_u8; 32]).expect("write host anchor");
+        assert!(!flowmux_identity_is_complete([
+            &signing_key,
+            &host_anchor,
+            &ingress_targets,
+        ]));
+
+        std::fs::write(&ingress_targets, b"[]").expect("write ingress targets");
+        assert!(flowmux_identity_is_complete([
+            &signing_key,
+            &host_anchor,
+            &ingress_targets,
+        ]));
     }
 }
