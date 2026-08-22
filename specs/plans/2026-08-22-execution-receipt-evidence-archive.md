@@ -16,8 +16,10 @@ reader to discover:
   `transcript.sealed` as first written here.
 - Inclusion is two checks, not one: membership *plus*
   `proof.leaf_index == leaf.index`. A proof for the wrong leaf verifies.
-- `--with-transcripts` is not implemented and not advertised. See ADR-110's
-  open question about which transcript store is authoritative.
+- `--with-transcripts` is not implemented and not advertised. The store is
+  now decided (the forensic `mvm_transcripts_dir`, layout
+  `<tenant>/<capture-id>`); embedding is blocked on `emit_transcript_sealed`
+  having no production caller, so nothing is anchored to embed. ADR-110.
 
 **Date:** 2026-08-22
 **Owner:** mvm

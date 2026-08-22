@@ -120,7 +120,8 @@ Stated so no later reader has to infer them:
 - Sealed transcripts are cited by the root already written into the chain, not
   embedded. `--with-transcripts` is **not implemented and not advertised**; the
   writer refuses it rather than quietly citing roots while a caller believes it
-  carried ciphertext. See the open question below.
+  carried ciphertext. The store and layout are decided below; the remaining
+  blocker is that nothing anchors a transcript in production.
 - `SignedEvidenceManifest.signed_at` is outside the signed material and remains
   forgeable, exactly as on a receipt envelope. The archive's content address is
   signed.
@@ -130,19 +131,51 @@ Stated so no later reader has to infer them:
   (`LeafCitation`, `TranscriptCitation`, `EvidenceManifest`,
   `SignedEvidenceManifest`) all carry it.
 
-## Open question: which transcript store is authoritative
+## Which transcript store the archive uses
 
-Embedding sealed chunks is blocked on a question this ADR does not answer.
-There are two locations:
+The archive's transcript citations come from **`config::mvm_transcripts_dir`** —
+`<mvm_home>/audit/transcripts/<tenant>/<capture-id>/` — and never from
+`config::vm_stream_transcript_dir`.
 
-- `config::vm_stream_transcript_dir` — `<vm_state_dir>/stream`, written by
-  `mvm_hostd::stream::plane`.
-- `config::mvm_transcripts_dir` — `<mvm_home>/audit/transcripts/`, read by
-  `mvmctl trust audit transcript` and, as far as this branch can tell, written
-  by nothing.
+These are two subsystems, not two homes for one thing:
 
-The two disagree about layout as well: `mvm_transcripts_dir`'s doc comment
-describes `<tenant>/<vm>/<capture-id>/`, while its only consumer builds
-`<tenant>/<capture-id>`. An embedder has to pick one, and picking wrong
-produces an archive that silently carries nothing. Resolving that is a
-prerequisite for `--with-transcripts`, not part of it.
+| | `vm_stream_transcript_dir` | `mvm_transcripts_dir` |
+|---|---|---|
+| What | the workload's captured stdout/stderr | operator-armed forensic capture |
+| Path | `<vm_state_dir>/stream/` | `<audit_dir>/transcripts/<tenant>/<capture-id>/` |
+| Lifetime | lives and dies with the VM | outlives it, under `audit/` |
+| Addressed by | VM name | tenant, then capture id |
+| Read by | `mvmctl logs` | `mvmctl trust audit transcript` |
+| Anchored in the chain | no | yes, by design |
+
+An archive only ever learns of a transcript through a
+`gateway.transcript_sealed` chain entry, and that anchor belongs to the
+forensic subsystem. The stream capture is operational VM state that is
+deliberately outside the chain; carrying it in an evidence archive would place
+unanchored bytes beside anchored ones and blur what the archive attests.
+
+### The layout is `<tenant>/<capture-id>`, and now has one definition
+
+Two doc comments in `config.rs` disagreed: one described
+`<tenant>/<capture-id>/`, the other `<tenant>/<vm>/<capture-id>/`. The only
+consumer built the former, so the latter was stale. The VM is deliberately not
+a path component — a capture names its VM in its manifest binding, and readers
+discover captures by scanning tenants, which a VM-keyed path would defeat.
+
+`config::transcript_capture_dir{,_at}` is now the single constructor, and
+`a_forensic_capture_is_tenant_then_capture_id_with_no_vm_component` pins the
+shape so the two ends cannot drift again.
+
+## Prerequisite for `--with-transcripts`: the anchor is not wired
+
+Choosing the store does not unblock embedding. `emit_transcript_sealed` has
+**no production caller** — all three call sites are tests (`emitter.rs` unit,
+`transcript.rs`'s `#[cfg(test)] mod tests`, and a conformance step). So
+`gateway.transcript_sealed` never reaches a real audit chain, `collect_transcripts`
+returns an empty list on any real host, and an embedder would have nothing to
+find.
+
+Wiring the sealing verb to emit its anchor in production is the prerequisite,
+and it is a transcript-subsystem defect rather than an archive one. Until it
+lands, an archive honestly reports zero transcripts because there are zero
+anchored transcripts, and `--with-transcripts` stays unadvertised.
