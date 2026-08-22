@@ -1,8 +1,11 @@
 # AI egress metering and token budgets
 
+Backing: shipped-source
+Validation: check-sprint-append
+
 ## Status
 
-**IN PROGRESS**
+**COMPLETE**
 
 Builds on the seam identified in Plan 313 (egress token accounting). Plan 313
 remains responsible for streaming response relay (Phase 1) and opt-in
