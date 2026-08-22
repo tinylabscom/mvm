@@ -250,12 +250,14 @@ fn every_receipt_member_has_a_matching_inclusion_proof() {
     let dir = TempDir::new().unwrap();
     let (bytes, _key) = build(dir.path(), ArchiveScope::Tenant);
     let names = tar_member_names(&bytes);
-    let receipts = names.iter().filter(|n| n.starts_with("receipts/")).count();
     let proofs = names.iter().filter(|n| n.starts_with("proofs/")).count();
-    assert!(receipts > 0, "expected receipts; had {names:?}");
+    let signed = read_manifest(&bytes);
+    assert!(proofs > 0, "expected proofs; had {names:?}");
     assert_eq!(
-        receipts, proofs,
-        "one proof per receipt, so a reader can bind each to the signed root"
+        proofs,
+        signed.manifest.leaves.len(),
+        "one proof per LEAF -- a citation with no proof is bound to nothing a \
+         verifier can check independently of the host's signature"
     );
 }
 
@@ -369,16 +371,30 @@ fn each_proof_is_bound_to_the_leaf_its_own_receipt_came_from() {
     for leaf in receipt_leaves {
         let receipt: mvm_core::receipt::SignedExecutionReceipt =
             serde_json::from_slice(&read_member(&bytes, &leaf.member)).expect("decode receipt");
-        let proof_member = format!(
-            "proofs/{}.json",
-            receipt.payload.receipt_id.replace(':', "_")
-        );
+        let proof_member = mvm_hostd::audit::receipt_archive::proof_member_for(leaf.index);
         let proof: mvm_contract::merkle::InclusionProof =
             serde_json::from_slice(&read_member(&bytes, &proof_member)).expect("decode proof");
         assert_eq!(
             proof.leaf_index, leaf.index,
             "{} cites leaf {} but its proof is for leaf {}",
             leaf.member, leaf.index, proof.leaf_index
+        );
+
+        // The receipt's own self-locating extension and the manifest's
+        // citation must name the same audit entry. They are written by
+        // different passes, so agreeing is a property worth pinning rather
+        // than an identity.
+        let stamped = receipt
+            .payload
+            .extensions
+            .get(mvm_core::receipt::extension_key::AUDIT_DIGEST)
+            .and_then(|v| v.as_str())
+            .expect("receipt carries its audit digest");
+        assert_eq!(
+            format!("sha256:{stamped}"),
+            leaf.digest,
+            "{} stamps a different entry than the manifest cites",
+            leaf.member
         );
     }
 }
@@ -459,7 +475,7 @@ fn a_tenant_scoped_archive_derives_its_completeness() {
         CompletenessResult::Derived,
         "{report:?}"
     );
-    assert_eq!(report.exit_code(), 0);
+    assert_eq!(report.exit_code(), 0, "{report:?}");
 }
 
 #[test]

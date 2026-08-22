@@ -53,6 +53,16 @@ pub const HOST_PUBKEY_MEMBER: &str = "host.pub";
 /// Archive member holding the host `did:key` as text.
 pub const HOST_DID_MEMBER: &str = "host.did";
 
+/// Archive-relative path of the inclusion proof for leaf `index`.
+///
+/// Keyed by leaf index rather than by receipt id so *every* leaf has a proof
+/// under the same rule -- a citation with no proof would sit in the manifest
+/// bound to nothing but the host's signature over it.
+#[must_use]
+pub fn proof_member_for(index: u64) -> String {
+    format!("proofs/leaf-{index}.json")
+}
+
 /// What to put in an archive.
 ///
 /// A params struct rather than positional arguments: the fields are three
@@ -184,7 +194,7 @@ pub fn write_archive(req: &ArchiveRequest, signing_key: &SigningKey) -> Result<V
         },
         &mut parts,
     )?;
-    add_cited_members(&evidence, &mut parts)?;
+    add_cited_members(&evidence, req, signing_key, &mut parts)?;
     add_chain_members(&req.audit_dir, &req.tenant, &mut parts.members)?;
 
     let transcripts = collect_transcripts(&entries, req.with_transcripts)?;
@@ -277,10 +287,7 @@ fn add_receipt_members(ctx: &ReceiptPass<'_>, parts: &mut ArchiveParts) -> Resul
         )
         .with_context(|| format!("building an inclusion proof for leaf {leaf_index}"))?;
         parts.members.push((
-            format!(
-                "proofs/{}.json",
-                signed.payload.receipt_id.replace(':', "_")
-            ),
+            proof_member_for(leaf_index as u64),
             serde_json::to_vec_pretty(&proof).context("serializing an inclusion proof")?,
         ));
 
@@ -300,9 +307,28 @@ fn add_receipt_members(ctx: &ReceiptPass<'_>, parts: &mut ArchiveParts) -> Resul
     Ok(())
 }
 
-fn add_cited_members(evidence: &ExportedEvidence, parts: &mut ArchiveParts) -> Result<()> {
+fn add_cited_members(
+    evidence: &ExportedEvidence,
+    req: &ArchiveRequest,
+    signing_key: &SigningKey,
+    parts: &mut ArchiveParts,
+) -> Result<()> {
     for cited in &evidence.cited {
         let member = format!("cited/{}.json", cited.leaf_index);
+        // A citation gets the same proof a receipt does. Without one it would
+        // be bound to nothing a verifier could check independently of the
+        // host's signature over the manifest.
+        let proof = crate::audit::merkle::build_inclusion_in(
+            &req.audit_dir,
+            &req.tenant,
+            &signing_key.verifying_key(),
+            cited.leaf_index as usize,
+        )
+        .with_context(|| format!("building an inclusion proof for leaf {}", cited.leaf_index))?;
+        parts.members.push((
+            proof_member_for(cited.leaf_index),
+            serde_json::to_vec_pretty(&proof).context("serializing an inclusion proof")?,
+        ));
         parts.push_leaf(
             member.clone(),
             serde_json::to_vec_pretty(&CitedJson::from(cited))

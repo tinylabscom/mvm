@@ -20,10 +20,10 @@
 //! # Why inclusion is two checks, not one
 //!
 //! [`mvm_contract::merkle::verify_membership`] attests that a leaf is in the
-//! host-signed tree. It says nothing about *which* leaf the receipt beside it
+//! host-signed tree. It says nothing about *which* leaf the member beside it
 //! came from — a proof built for the wrong leaf verifies perfectly well and
 //! attests the wrong entry. So inclusion also requires each proof's
-//! `leaf_index` to equal the index its own receipt's citation claims.
+//! `leaf_index` to equal the index its own leaf citation claims.
 
 use std::collections::BTreeMap;
 use std::io::Read;
@@ -36,7 +36,7 @@ use mvm_core::receipt::SignedExecutionReceipt;
 use mvm_core::receipt_archive::{Completeness, SignedEvidenceManifest};
 use sha2::{Digest, Sha256};
 
-use crate::audit::receipt_archive::{HOST_PUBKEY_MEMBER, MANIFEST_MEMBER};
+use crate::audit::receipt_archive::{HOST_PUBKEY_MEMBER, MANIFEST_MEMBER, proof_member_for};
 
 /// Largest archive this verifier will read into memory.
 ///
@@ -239,32 +239,18 @@ fn check_integrity(
     CheckResult::Passed
 }
 
-/// Every proof binds to the signed root, and to its own receipt's leaf.
+/// Every leaf's proof binds to the signed root, at that leaf's own index.
 fn check_inclusion(
     signed: &SignedEvidenceManifest,
     members: &BTreeMap<String, Vec<u8>>,
     vk: &VerifyingKey,
 ) -> CheckResult {
-    let mut checked = 0usize;
     for leaf in &signed.manifest.leaves {
-        if !leaf.member.starts_with("receipts/") {
-            continue;
-        }
-        let Some(receipt_bytes) = members.get(&leaf.member) else {
-            return CheckResult::Failed(format!("receipt member {} missing", leaf.member));
-        };
-        let receipt: SignedExecutionReceipt = match serde_json::from_slice(receipt_bytes) {
-            Ok(r) => r,
-            Err(e) => return CheckResult::Failed(format!("decoding {}: {e}", leaf.member)),
-        };
-        let proof_member = format!(
-            "proofs/{}.json",
-            receipt.payload.receipt_id.replace(':', "_")
-        );
+        let proof_member = proof_member_for(leaf.index);
         let Some(proof_bytes) = members.get(&proof_member) else {
             return CheckResult::Failed(format!(
-                "receipt {} has no proof at {proof_member}",
-                leaf.member
+                "leaf {} ({}) has no proof at {proof_member}",
+                leaf.index, leaf.member
             ));
         };
         let proof: InclusionProof = match serde_json::from_slice(proof_bytes) {
@@ -280,20 +266,14 @@ fn check_inclusion(
             return CheckResult::Failed(format!("{proof_member}: {e}"));
         }
         // Membership alone would accept a proof for a different leaf: valid
-        // arithmetic, wrong entry. The binding to this receipt's own citation
-        // is what makes the proof evidence about this receipt.
+        // arithmetic, wrong entry. The binding to this leaf's own index is
+        // what makes the proof evidence about this leaf.
         if proof.leaf_index != leaf.index {
             return CheckResult::Failed(format!(
-                "{} cites leaf {} but {proof_member} proves leaf {}",
-                leaf.member, leaf.index, proof.leaf_index
+                "leaf {} cites {} but {proof_member} proves leaf {}",
+                leaf.index, leaf.member, proof.leaf_index
             ));
         }
-        checked += 1;
-    }
-    if checked == 0 && !signed.manifest.leaves.is_empty() {
-        return CheckResult::Failed(
-            "archive carries leaves but no receipt proofs to check".to_string(),
-        );
     }
     CheckResult::Passed
 }
