@@ -2704,3 +2704,11 @@ remain mandatory for guest-introduced UDP destinations; replies to a peer
 already observed by the bounded ingress relay use that peer table instead.
 The focused regression passes five consecutive runs, including the path that
 rejects a forged unseen peer.
+
+## 2026-08-21 merge-queue actionlint download retry
+
+The pinned actionlint download now retries connection resets and other
+transient transfer failures with `curl --retry-all-errors`, while retaining a
+three-attempt bound, a two-second retry delay, and checksum verification. This
+repairs the infrastructure-only failure that ejected the otherwise-green
+aarch64 vsock permission PR from the merge queue.
