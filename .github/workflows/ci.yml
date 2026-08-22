@@ -340,7 +340,6 @@ jobs:
 
 
 
-
       # The in-guest toolbox is deliberately ungoverned — the microVM boundary
       # bounds it. What the boundary cannot bound is the guest originating a
       # connection outward, so that is what this checks.
@@ -349,15 +348,6 @@ jobs:
       # the vsock channel; this one says it speaks exactly one protocol over
       # it. A guest made FlowMux-only while the host still served the old
       # protocol is what killed egress on main with every test green.
-
-      # Tree-wide companion to the check above. The userspace network gateways
-      # went with the guest-NIC path; a reference coming back is how a second
-      # egress model grows back alongside the real one.
-
-      # Temporary, shrink-only ratchet: the raw-packet workload networking path
-      # is frozen while the single flow-aware vsock path is built. Deleted with
-      # its last allowlist entry.
-
 
       # A wall-clock bound is declared once, as a grant. `exec_secs` is that
       # grant's projection into the plan's older encoding; a second writer is a

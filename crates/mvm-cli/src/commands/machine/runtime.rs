@@ -139,7 +139,6 @@ fn run_persistent_post_start(
         );
     }
     match post_start_action(args) {
-        PostStart::Forward => crate::commands::vm::forward::forward_ports(name, &args.port),
         PostStart::Envelope => {
             let build_mode_str = resolve_build_mode_for_envelope(args, name);
             let envelope = serde_json::json!({
@@ -162,8 +161,6 @@ fn run_persistent_post_start(
 /// What `machine run` does once a persistent machine is up.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum PostStart {
-    /// Keep this CLI attached as the owner of the requested host port forwards.
-    Forward,
     /// `--up-json`: the SDK boot envelope, and nothing else on stdout.
     Envelope,
     /// `--json`: the caller is parsing stdout, so say nothing extra.
@@ -179,8 +176,6 @@ pub(super) enum PostStart {
 pub(super) fn post_start_action(args: &MachineRunArgs) -> PostStart {
     if args.up_json {
         PostStart::Envelope
-    } else if !args.port.is_empty() {
-        PostStart::Forward
     } else if args.run.json {
         PostStart::Quiet
     } else if args.detach {
@@ -610,6 +605,7 @@ mod network_surface_tests {
             egress: None,
             peers: vec![],
             dns: None,
+            ai: None,
         }
     }
 

@@ -51,8 +51,7 @@ mvmctl machine run --flake . --name agent-sandbox \
 Keep inbound ports separate from outbound egress:
 
 ```sh
-mvmctl machine run --flake . --name api-dev -d
-mvmctl machine forward api-dev -p 8080:8080
+mvmctl machine run --flake . --name api-dev --port 8080:8080
 ```
 
 Opening a host port does not mean the guest should have outbound internet
@@ -158,6 +157,88 @@ Use a dedicated profile:
 - isolated persistent workspace if state must survive;
 - no credential-bearing browser profile unless the task requires it;
 - cold state or snapshots retained only with a clear retention rule.
+
+
+## AI egress metering and budgets
+
+When a workload is allowed to call AI APIs, you can meter token usage and
+cap it with a budget. Enable metering in the `[network.ai]` section of
+`mvm.toml`:
+
+```toml
+[network]
+allow_hosts = ["api.openai.com:443"]
+
+[network.ai]
+metering = true
+
+[network.ai.budget]
+max_total_tokens = 1_000_000
+max_input_tokens = 500_000
+max_output_tokens = 500_000
+```
+
+Equivalent SDK declarations:
+
+<Tabs syncKey="network-declaration-language">
+<TabItem label="Python">
+
+```python
+network=mvm.network(
+    mode="bridge",
+    egress=mvm.egress([
+        mvm.host_port("api.openai.com", 443),
+    ]),
+    ai=mvm.ai_policy(
+        metering=True,
+        budget=mvm.ai_budget(
+            max_total_tokens=1_000_000,
+            max_input_tokens=500_000,
+            max_output_tokens=500_000,
+        ),
+    ),
+)
+```
+
+</TabItem>
+<TabItem label="TypeScript">
+
+```ts
+network: mvm.network({
+  mode: "bridge",
+  egress: mvm.egress([
+    mvm.hostPort("api.openai.com", 443),
+  ]),
+  ai: mvm.aiPolicy({
+    metering: true,
+    budget: mvm.aiBudget({
+      maxTotalTokens: 1_000_000,
+      maxInputTokens: 500_000,
+      maxOutputTokens: 500_000,
+    }),
+  }),
+})
+```
+
+</TabItem>
+</Tabs>
+
+Behavior:
+
+- Metering only inspects traffic to known AI providers (`api.openai.com`,
+  `*.openai.azure.com`, `api.anthropic.com`). Arbitrary destinations are not
+  parsed.
+- Only provider-reported usage is counted. For OpenAI, set
+  `stream_options.include_usage=true` so streamed responses include a trailing
+  usage block; Anthropic includes usage automatically.
+- Budget enforcement is best-effort at response time: the request that crosses
+  the budget is allowed and recorded; the **next** AI request is refused.
+- Metrics are published as `mvm_instance_ai_requests_total`,
+  `mvm_instance_ai_tokens_input_total`,
+  `mvm_instance_ai_tokens_output_total`, and
+  `mvm_instance_ai_tokens_total_total`. Audit records contain counts and
+  provider/model metadata only — never request or response bodies, headers, or
+  credentials.
 
 ## Backend enforcement notes
 

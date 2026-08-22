@@ -191,7 +191,6 @@ pub fn admit_and_boot_local(
         stream_edges: Vec::new(),
         kernel_sha256: kernel_sha.as_deref(),
         network_mode: Default::default(),
-        l3_network: None,
         ingress: Vec::new(),
         vm_name: &req.name,
         tenant: Some(LOCAL_TENANT),

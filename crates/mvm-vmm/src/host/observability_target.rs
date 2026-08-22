@@ -11,12 +11,12 @@ use std::path::PathBuf;
 use mvm_core::vm_backend::BackendKind;
 use serde::{Deserialize, Serialize};
 
-use crate::host::{egress_shared, netd_spawn, network_endpoint_spawn};
+use crate::host::network_endpoint_spawn;
 
 /// Identifies a process that an observability probe may attach to.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProcessTarget {
-    /// Logical role, e.g. "vmm", "substitution", "netd", "broker",
+    /// Logical role, e.g. "vmm", "substitution", "broker",
     /// "audit-signer", "qemu-vsock-bridge".
     pub role: String,
 
@@ -57,10 +57,6 @@ pub struct VsockTarget {
 /// Network-related observability target fields.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NetworkTarget {
-    /// Whether an L3 vsock tunnel gateway (`mvm-netd`) is active.
-    #[serde(default)]
-    pub has_netd: bool,
-
     /// Path to the substitution endpoint's Unix domain socket.
     pub substitution_socket: PathBuf,
 }
@@ -92,7 +88,7 @@ pub struct VmObservabilityTarget {
     /// VMM process target.
     pub vmm: VmmTarget,
 
-    /// Helper processes (substitution endpoint, netd, broker, etc.).
+    /// Helper processes (substitution endpoint, broker, etc.).
     pub helpers: Vec<ProcessTarget>,
 
     /// Vsock socket layout.
@@ -122,11 +118,6 @@ impl VmObservabilityTarget {
     /// Return the substitution-endpoint helper target, if recorded.
     pub fn substitution_target(&self) -> Option<&ProcessTarget> {
         self.helpers.iter().find(|h| h.role == "substitution")
-    }
-
-    /// Return the netd helper target, if recorded.
-    pub fn netd_target(&self) -> Option<&ProcessTarget> {
-        self.helpers.iter().find(|h| h.role == "netd")
     }
 }
 
@@ -176,21 +167,12 @@ pub fn build_from_start_config(
         .and_then(|json| mvm_core::plan::plan_from_admitted_json(json).ok())
         .map(|plan| plan.plan_id.0);
 
-    let mut helpers = vec![ProcessTarget {
+    let helpers = vec![ProcessTarget {
         role: "substitution".to_string(),
         process_name: "mvm-network-endpoint".to_string(),
         pid_file: state_dir.join(network_endpoint_spawn::SUBST_PID_FILE),
         pid: None,
     }];
-
-    if egress_shared::l3_cmdline_token(start_config).is_some() {
-        helpers.push(ProcessTarget {
-            role: "netd".to_string(),
-            process_name: "mvm-netd".to_string(),
-            pid_file: state_dir.join(netd_spawn::NETD_PID_FILE),
-            pid: None,
-        });
-    }
 
     VmObservabilityTarget {
         backend_kind: format!("{kind:?}").to_lowercase(),
@@ -210,7 +192,6 @@ pub fn build_from_start_config(
             socket_dir,
         },
         network: NetworkTarget {
-            has_netd: egress_shared::l3_cmdline_token(start_config).is_some(),
             substitution_socket,
         },
         cgroup_path: None,
@@ -269,7 +250,6 @@ mod tests {
         assert_eq!(target.backend_kind, "libkrun");
         assert_eq!(target.vmm.process_name, "mvm-libkrun-supervisor");
         assert!(target.helpers.iter().any(|h| h.role == "substitution"));
-        assert!(!target.network.has_netd);
     }
 
     #[test]

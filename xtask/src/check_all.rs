@@ -110,8 +110,8 @@ pub const GATES: &[Gate] = &[
     ("check-honesty", crate::check_honesty::run),
     ("check-trust-gradient", crate::check_trust_gradient::run),
     (
-        "check-vsock-only-egress",
-        crate::check_vsock_only_egress::run,
+        "check-single-network-path",
+        crate::check_single_network_path::run,
     ),
     (
         "check-no-guest-tool-client",
@@ -120,15 +120,6 @@ pub const GATES: &[Gate] = &[
     (
         "check-one-guest-protocol",
         crate::check_one_guest_protocol::run,
-    ),
-    ("check-no-gateway-names", crate::check_no_gateway_names::run),
-    (
-        "check-l3-expansion-freeze",
-        crate::check_l3_expansion_freeze::run,
-    ),
-    (
-        "check-uniform-vsock-egress",
-        crate::check_uniform_vsock_egress::run,
     ),
     (
         "check-single-exec-secs-writer",

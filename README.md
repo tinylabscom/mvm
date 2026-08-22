@@ -122,6 +122,15 @@ mvmctl machine run --image alpine --mount .:/work -- ls /work
 mvmctl machine run --image alpine -vvv --allow-host api.example.com -- ps aux
 ```
 
+# Cap AI API usage with a token budget by adding [network.ai] to mvm.toml:
+#   [network]
+#   allow_hosts = ["api.openai.com:443"]
+#   [network.ai]
+#   metering = true
+#   [network.ai.budget]
+#   max_total_tokens = 1_000_000
+mvmctl machine run --flake . -- ./ask-model
+
 ### Persistent machines
 
 A persistent machine has a name and an on-disk spec: create once, start/stop/exec
@@ -593,25 +602,25 @@ forwarding seams.
 
 ### Vsock-only: the invariant the other guarantees rest on
 
-**No workload microVM has a network device.** Not on one backend — on every
-one. Firecracker's config sequence omits `/network-interfaces`; libkrun pins
-`NetworkingMode::VsockDirect` and never calls a net attach; the in-house HVF
-device model has no net device; the QEMU dev/test driver emits no `-netdev`.
-Guest I/O leaves over virtio-vsock to a per-VM host-side endpoint, and the host
-originates the real connection.
+**No production workload microVM has a network device.** Firecracker's config
+sequence omits `/network-interfaces`; libkrun pins its direct-vsock mode; and
+the in-house HVF device model has no net device. Guest I/O leaves over one
+authenticated FlowMux session to a per-VM host endpoint, and the host originates
+the real connection or owns the admitted ingress listener. QEMU's explicit
+user-mode network is a dev/test facility outside this production claim.
 
-This is enforced mechanically, not by convention. Two CI gates fail closed on
-any regression:
+This is enforced mechanically, not by convention:
 
-- **`xtask check-vsock-only-egress`** — fails if `virtio_net`, a tap device, or
-  a userspace-gateway token appears anywhere on a workload path.
-- **`xtask check-uniform-vsock-egress`** — pins Firecracker, libkrun, and HVF to
-  a single egress-endpoint spawn site, so no backend can grow a second gate.
+- **`xtask check-single-network-path`** pins every claim-bearing backend to the
+  one endpoint spawner and `NetworkFlow` channel, rejects raw-packet/NIC/L3
+  symbols, and inventories every production workload `connect` and listener
+  bind so a second socket owner fails CI.
+- **`xtask check-one-guest-protocol`** rejects any guest caller of the network
+  port that does not construct an authenticated FlowMux client.
 
-The type system enforces it too: the host-side forwarding seam accepts only an
-`AdmittedPacket`, a type with private fields and no public constructor. There is
-no way to reach a datapath with bytes that have not passed policy, because there
-is no way to construct one.
+The admitted domain cannot represent the removed raw-network mode. Every
+network operation instead receives the endpoint's one signed-plan projection:
+the same policy, per-VM resource budget, identity, and payload-free audit sink.
 
 **The builder VM is the deliberate exception.** It runs `nix build` and does
 have a NIC, because it must reach package mirrors. It carries no untrusted

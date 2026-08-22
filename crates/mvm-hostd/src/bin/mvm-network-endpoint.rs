@@ -35,8 +35,8 @@ use mvm_hostd::supervisor::flowmux::{
     FlowMuxIngressHandle, FlowMuxSession, FlowMuxVmResources, registry::RegistryLimits,
 };
 use mvm_hostd::supervisor::network_endpoint::{
-    EgressMode, EndpointConfig, EndpointHandshake, EndpointTransport, ResolverBackend, assemble,
-    build_audit_recorder, fingerprint_bound_secrets, parse,
+    EgressMode, EndpointConfig, EndpointHandshake, EndpointNetworkProjection, EndpointTransport,
+    ResolverBackend, assemble_with_projection, fingerprint_bound_secrets, parse,
 };
 
 fn read_stdin_blocking() -> Result<Vec<u8>> {
@@ -89,7 +89,11 @@ fn main() -> Result<()> {
     // a FlowMux guest can open a typed HTTP flow at any point in its life, and
     // deciding at boot that it will not is the kind of guess that leaves a
     // placeholder with nothing to resolve it.
-    let assembled = Some(assemble(&cfg).context("assembling substitution service")?);
+    let network_projection = EndpointNetworkProjection::from_config(&cfg);
+    let assembled = Some(
+        assemble_with_projection(&cfg, &network_projection)
+            .context("assembling substitution service")?,
+    );
     mvm_hostd::supervisor::network_endpoint::refuse_secrets_without_substitution(
         &cfg,
         assembled.is_some(),
@@ -168,6 +172,7 @@ fn main() -> Result<()> {
                 .ingress(ingress)
                 .session_readiness(session_readiness)
                 .connector(connector)
+                .network_projection(network_projection)
                 .forward_timeout(forward_timeout)
                 .build()?,
         )
@@ -681,6 +686,7 @@ struct ServeParams<'a> {
     ingress: BoundIngress,
     session_readiness: Option<BoundSessionReadiness>,
     connector: Option<BoundConnector>,
+    network_projection: EndpointNetworkProjection,
     forward_timeout: std::time::Duration,
 }
 
@@ -693,6 +699,7 @@ struct ServeParamsBuilder<'a> {
     ingress: Option<BoundIngress>,
     session_readiness: Option<BoundSessionReadiness>,
     connector: Option<BoundConnector>,
+    network_projection: Option<EndpointNetworkProjection>,
     forward_timeout: Option<std::time::Duration>,
 }
 
@@ -706,6 +713,7 @@ impl<'a> ServeParams<'a> {
             ingress: None,
             session_readiness: None,
             connector: None,
+            network_projection: None,
             forward_timeout: None,
         }
     }
@@ -752,6 +760,11 @@ impl<'a> ServeParamsBuilder<'a> {
         self
     }
 
+    fn network_projection(mut self, projection: EndpointNetworkProjection) -> Self {
+        self.network_projection = Some(projection);
+        self
+    }
+
     fn forward_timeout(mut self, timeout: std::time::Duration) -> Self {
         self.forward_timeout = Some(timeout);
         self
@@ -766,6 +779,9 @@ impl<'a> ServeParamsBuilder<'a> {
             ingress: self.ingress.context("ServeParams missing ingress")?,
             session_readiness: self.session_readiness,
             connector: self.connector,
+            network_projection: self
+                .network_projection
+                .context("ServeParams missing network_projection")?,
             forward_timeout: self
                 .forward_timeout
                 .context("ServeParams missing forward_timeout")?,
@@ -782,6 +798,7 @@ async fn serve(params: ServeParams<'_>) -> Result<()> {
         ingress,
         session_readiness,
         connector,
+        network_projection,
         forward_timeout,
     } = params;
     let (session_ready_tx, session_ready_rx) = tokio::sync::watch::channel(false);
@@ -824,7 +841,15 @@ async fn serve(params: ServeParams<'_>) -> Result<()> {
         }
         // Authenticated FlowMux session: the converged single networking path.
         EgressMode::FlowMux => {
-            serve_flowmux(cfg, service, bound, ingress, session_ready_tx).await?
+            serve_flowmux(
+                cfg,
+                service,
+                network_projection,
+                bound,
+                ingress,
+                session_ready_tx,
+            )
+            .await?
         }
     }
 
@@ -915,54 +940,112 @@ async fn serve_wire(
 /// raw loops can adopt it into tokio), which means it must be adopted here too
 /// rather than accepted on a blocking thread — a blocking accept on it returns
 /// `EAGAIN` immediately and forever.
+struct DecodedFlowMuxIdentity {
+    session_id: String,
+    host_key: ed25519_dalek::SigningKey,
+    guest_anchor: ed25519_dalek::VerifyingKey,
+}
+
+/// One immutable projection of the admitted endpoint config shared by every
+/// FlowMux opcode and every accepted session for this VM.
+struct FlowMuxEndpointProjection {
+    identity: std::sync::Arc<DecodedFlowMuxIdentity>,
+    gate: std::sync::Arc<mvm_runtime::vmm::egress_gate::EgressGate>,
+    recorder: Option<std::sync::Arc<mvm_hostd::supervisor::audit_recorder::Recorder>>,
+    resources: std::sync::Arc<FlowMuxVmResources>,
+    limits: RegistryLimits,
+    substitution:
+        Option<std::sync::Arc<mvm_hostd::supervisor::network_endpoint_proxy::SubstitutionService>>,
+    ingress_transports:
+        std::sync::Arc<Vec<(u16, mvm_contract::protocol::network_flow::IngressFlowKind)>>,
+}
+
+impl FlowMuxEndpointProjection {
+    fn from_config(
+        cfg: &EndpointConfig,
+        substitution: Option<
+            std::sync::Arc<mvm_hostd::supervisor::network_endpoint_proxy::SubstitutionService>,
+        >,
+        network: EndpointNetworkProjection,
+    ) -> Result<Self> {
+        let identity = cfg
+            .flowmux_identity
+            .as_ref()
+            .context("flowmux egress configured without identity")?;
+        let identity = std::sync::Arc::new(DecodedFlowMuxIdentity {
+            session_id: identity.session_id.clone(),
+            host_key: decode_signing_key(&identity.host_signing_key_base64)
+                .context("decode FlowMux host signing key")?,
+            guest_anchor: decode_verifying_key(&identity.guest_verifying_key_base64)
+                .context("decode FlowMux guest verifying key")?,
+        });
+        let admitted_limits = cfg
+            .network_limits
+            .validate()
+            .context("validate admitted FlowMux network limits")?;
+        let limits = RegistryLimits::from_network_limits(admitted_limits);
+        let resources = std::sync::Arc::new(FlowMuxVmResources::new(admitted_limits));
+        let ingress_transports = cfg
+            .ingress
+            .iter()
+            .map(|mapping| {
+                let kind = match mapping.protocol {
+                    mvm_core::plan::IngressProtocol::Tcp => {
+                        mvm_contract::protocol::network_flow::IngressFlowKind::Tcp
+                    }
+                    mvm_core::plan::IngressProtocol::Udp => {
+                        mvm_contract::protocol::network_flow::IngressFlowKind::Udp
+                    }
+                };
+                (mapping.mapping_id, kind)
+            })
+            .collect::<Vec<_>>();
+        Ok(Self {
+            identity,
+            gate: network.flowmux_gate()?,
+            recorder: network.recorder(),
+            resources,
+            limits,
+            substitution,
+            ingress_transports: std::sync::Arc::new(ingress_transports),
+        })
+    }
+
+    fn accept_params(&self) -> mvm_hostd::supervisor::flowmux::FlowMuxAccept {
+        mvm_hostd::supervisor::flowmux::FlowMuxAccept::new_shared(
+            &self.identity.session_id,
+            self.identity.host_key.clone(),
+            self.identity.guest_anchor,
+            self.limits,
+            std::sync::Arc::clone(&self.gate),
+        )
+        .with_recorder(self.recorder.as_ref().map(std::sync::Arc::clone))
+        .with_substitution(self.substitution.as_ref().map(std::sync::Arc::clone))
+        .with_vm_resources(std::sync::Arc::clone(&self.resources))
+        .with_ingress_transports(self.ingress_transports.iter().copied())
+    }
+}
+
 async fn serve_flowmux(
     cfg: &EndpointConfig,
     service: Option<
         std::sync::Arc<mvm_hostd::supervisor::network_endpoint_proxy::SubstitutionService>,
     >,
+    network_projection: EndpointNetworkProjection,
     bound: Bound,
     ingress: BoundIngress,
     session_ready: tokio::sync::watch::Sender<bool>,
 ) -> Result<()> {
-    let identity = cfg
-        .flowmux_identity
-        .as_ref()
-        .context("flowmux egress configured without identity")?;
-
-    // Decode once, up front: bad key material is a config error that should
-    // fail the endpoint immediately, not surface as a puzzling handshake
-    // failure on whichever session happens to connect first.
-    let host_key = decode_signing_key(&identity.host_signing_key_base64)
-        .context("decode FlowMux host signing key")?;
-    let guest_anchor = decode_verifying_key(&identity.guest_verifying_key_base64)
-        .context("decode FlowMux guest verifying key")?;
-    let session_id = identity.session_id.clone();
-    let recorder = build_audit_recorder(&cfg.tenant_id).map(std::sync::Arc::new);
-    let admitted_limits = cfg
-        .network_limits
-        .validate()
-        .context("validate admitted FlowMux network limits")?;
-    let limits = RegistryLimits::from_network_limits(admitted_limits);
-    let vm_resources = std::sync::Arc::new(FlowMuxVmResources::new(admitted_limits));
-    let ingress_transports = cfg
-        .ingress
-        .iter()
-        .map(|mapping| {
-            let kind = match mapping.protocol {
-                mvm_core::plan::IngressProtocol::Tcp => {
-                    mvm_contract::protocol::network_flow::IngressFlowKind::Tcp
-                }
-                mvm_core::plan::IngressProtocol::Udp => {
-                    mvm_contract::protocol::network_flow::IngressFlowKind::Udp
-                }
-            };
-            (mapping.mapping_id, kind)
-        })
-        .collect::<Vec<_>>();
+    let projection = std::sync::Arc::new(FlowMuxEndpointProjection::from_config(
+        cfg,
+        service,
+        network_projection,
+    )?);
 
     let listener = FlowMuxListener::adopt(bound)?;
     let ingress_dispatcher = ingress.start(
-        service
+        projection
+            .substitution
             .as_ref()
             .context("FlowMux ingress requires the endpoint service")?
             .clone(),
@@ -993,7 +1076,7 @@ async fn serve_flowmux(
             }
         };
 
-        let Some(session_permit) = vm_resources.try_acquire_session() else {
+        let Some(session_permit) = projection.resources.try_acquire_session() else {
             warn!(
                 limit = mvm_hostd::supervisor::flowmux::MAX_CONCURRENT_FLOWMUX_SESSIONS,
                 "FlowMux session ceiling reached"
@@ -1002,55 +1085,32 @@ async fn serve_flowmux(
             continue;
         };
 
-        let gate = cfg
-            .network_policy
-            .as_ref()
-            .map(mvm_hostd::supervisor::network_endpoint::build_egress_gate)
-            .unwrap_or_else(mvm_runtime::vmm::egress_gate::EgressGate::default_deny);
-        let host_key = host_key.clone();
-        let session_id = session_id.clone();
-        let recorder = recorder.clone();
-        let substitution = service.clone();
         let marker = cfg.session_marker.clone();
         let session_ready = session_ready.clone();
-        let vm_resources = std::sync::Arc::clone(&vm_resources);
-        let ingress_transports = ingress_transports.clone();
+        let projection = std::sync::Arc::clone(&projection);
         let ingress_dispatcher = ingress_dispatcher.clone();
         tokio::task::spawn_blocking(move || {
             let _session_permit = session_permit;
-            let served = FlowMuxSession::accept_with(
-                stream,
-                mvm_hostd::supervisor::flowmux::FlowMuxAccept::new(
-                    &session_id,
-                    host_key,
-                    guest_anchor,
-                    limits,
-                    gate,
-                )
-                .with_recorder(recorder)
-                .with_substitution(substitution)
-                .with_vm_resources(vm_resources)
-                .with_ingress_transports(ingress_transports),
-            )
-            .context("accept FlowMux session")
-            .and_then(|mut session| {
-                let ingress_generation = ingress_dispatcher.activate(session.ingress_handle());
-                // A session that authenticated is the first evidence a guest
-                // actually reached this endpoint. Recorded before serving, so
-                // a session that dies mid-life does not retract the fact that
-                // one was established.
-                if let Err(e) = record_session_established(marker.as_deref()) {
-                    // Authentication succeeded, so keep serving this session,
-                    // but never wake launch without the durable evidence it
-                    // verifies after the event.
-                    warn!(error = %e, "could not record FlowMux session readiness");
-                } else {
-                    let _ = session_ready.send(true);
-                }
-                let result = session.serve().context("serve FlowMux session");
-                ingress_dispatcher.deactivate(ingress_generation);
-                result
-            });
+            let served = FlowMuxSession::accept_with(stream, projection.accept_params())
+                .context("accept FlowMux session")
+                .and_then(|mut session| {
+                    let ingress_generation = ingress_dispatcher.activate(session.ingress_handle());
+                    // A session that authenticated is the first evidence a guest
+                    // actually reached this endpoint. Recorded before serving, so
+                    // a session that dies mid-life does not retract the fact that
+                    // one was established.
+                    if let Err(e) = record_session_established(marker.as_deref()) {
+                        // Authentication succeeded, so keep serving this session,
+                        // but never wake launch without the durable evidence it
+                        // verifies after the event.
+                        warn!(error = %e, "could not record FlowMux session readiness");
+                    } else {
+                        let _ = session_ready.send(true);
+                    }
+                    let result = session.serve().context("serve FlowMux session");
+                    ingress_dispatcher.deactivate(ingress_generation);
+                    result
+                });
             // One session ending is ordinary — the guest reconnects. Log it
             // and keep accepting rather than taking the endpoint down with it.
             if let Err(e) = served {
@@ -1178,6 +1238,7 @@ mod tests {
     fn uds_cfg() -> EndpointConfig {
         EndpointConfig {
             tenant_id: "local".into(),
+            instance_id: "test".into(),
             secrets: Vec::new(),
             transport: EndpointTransport::Uds {
                 path: "/tmp/mvm-network-endpoint-test.sock".into(),
@@ -1215,6 +1276,7 @@ mod tests {
     fn config_with_resolver(resolver: ResolverBackend) -> EndpointConfig {
         EndpointConfig {
             tenant_id: "acme".into(),
+            instance_id: "test".into(),
             secrets: vec![],
             transport: EndpointTransport::Uds {
                 path: PathBuf::from("/tmp/mvm-network-endpoint-test.sock"),
@@ -1287,6 +1349,60 @@ mod tests {
         record_session_established(Some(&marker)).expect("record durable session evidence");
 
         assert_eq!(std::fs::read(marker).unwrap(), b"1");
+    }
+
+    #[test]
+    fn admitted_projection_is_one_object_graph_for_every_network_surface() {
+        use base64::Engine as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.set("MVM_HOME", dir.path());
+        let keys = mvm_core::config::mvm_keys_dir();
+        std::fs::create_dir_all(&keys).unwrap();
+        std::fs::write(keys.join("host-signer.ed25519"), [9_u8; 32]).unwrap();
+
+        let host_key = ed25519_dalek::SigningKey::from_bytes(&[3_u8; 32]);
+        let guest_key = ed25519_dalek::SigningKey::from_bytes(&[4_u8; 32]);
+        let mut cfg = uds_cfg();
+        cfg.egress_mode = EgressMode::FlowMux;
+        cfg.flowmux_identity = Some(mvm_hostd::supervisor::network_endpoint::FlowMuxIdentity {
+            session_id: "signed-plan-session".into(),
+            host_signing_key_base64: base64::engine::general_purpose::STANDARD
+                .encode(host_key.to_bytes()),
+            guest_verifying_key_base64: base64::engine::general_purpose::STANDARD
+                .encode(guest_key.verifying_key().to_bytes()),
+        });
+        cfg.ingress = vec![ingress_mapping("127.0.0.1", 8443)];
+
+        let network = EndpointNetworkProjection::from_config(&cfg);
+        let projection = FlowMuxEndpointProjection::from_config(&cfg, None, network).unwrap();
+        let expected = (
+            std::sync::Arc::as_ptr(&projection.gate).cast::<()>() as usize,
+            std::sync::Arc::as_ptr(&projection.resources).cast::<()>() as usize,
+            std::sync::Arc::as_ptr(&projection.identity).cast::<()>() as usize,
+            projection
+                .recorder
+                .as_ref()
+                .map(|recorder| std::sync::Arc::as_ptr(recorder).cast::<()>() as usize),
+        );
+        assert!(expected.3.is_some(), "fixture must carry an audit sink");
+
+        for surface in ["tcp", "udp", "dns", "typed_connector", "ingress"] {
+            let observed = (
+                std::sync::Arc::as_ptr(&projection.gate).cast::<()>() as usize,
+                std::sync::Arc::as_ptr(&projection.resources).cast::<()>() as usize,
+                std::sync::Arc::as_ptr(&projection.identity).cast::<()>() as usize,
+                projection
+                    .recorder
+                    .as_ref()
+                    .map(|recorder| std::sync::Arc::as_ptr(recorder).cast::<()>() as usize),
+            );
+            assert_eq!(
+                observed, expected,
+                "{surface} diverged from the endpoint projection"
+            );
+        }
     }
 
     #[test]
@@ -1564,6 +1680,7 @@ mod tests {
         let guest_key = [2u8; 32];
         let cfg = EndpointConfig {
             tenant_id: "tenant".into(),
+            instance_id: "test".into(),
             secrets: Vec::new(),
             transport: EndpointTransport::Uds {
                 path: PathBuf::from("/tmp/mvm-flowmux-test.sock"),
