@@ -424,7 +424,6 @@ pub(in crate::commands) fn build_event_plan(
         stream_edges: Vec::new(),
         kernel_sha256: None,
         network_mode: Default::default(),
-        l3_network: None,
         ingress: Vec::new(),
         vm_name: workload,
         tenant: None,

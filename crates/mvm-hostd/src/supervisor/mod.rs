@@ -28,6 +28,7 @@
 //! - `supervisor` — `Supervisor` aggregate that owns the slots.
 
 pub mod accept_loop;
+pub mod ai_meter;
 pub mod artifact;
 pub mod audit;
 pub mod audit_checkpoint;
@@ -44,11 +45,7 @@ pub mod circuit_breaker;
 pub mod destination;
 /// Chain-signed metadata audit for policy-gated DNS questions.
 pub mod dns_audit;
-/// Policy-gated DNS service for NIC-less guests.
-pub mod dns_handler;
-/// Pure DNS resolution fallback used by the FlowMux and legacy DNS-over-vsock
-/// paths. Kept separate so the retired raw-egress module can be deleted once
-/// FlowMux actually carries production egress.
+/// Pure DNS resolution used by the FlowMux endpoint.
 pub mod dns_resolver;
 /// Host-side vsock egress telemetry (eBPF/procfs).
 pub mod ebpf_telemetry;
@@ -69,7 +66,6 @@ pub mod gateway_audit;
 pub mod egress_rate;
 #[cfg(feature = "custom-dns")]
 pub mod hickory_dns;
-pub mod http_forward;
 pub mod icmp_audit;
 pub mod icmp_echo;
 pub mod icmp_handler;
@@ -100,10 +96,6 @@ pub mod network_endpoint_proxy;
 pub mod pii_redactor;
 pub mod policy_tool_gate;
 pub mod proxy;
-/// The raw-TCP egress serve loop for the substitution endpoint: a NIC-less guest
-/// whose plan carries no secrets sends `host:port` then splices bytes, gated by
-/// the same claim-10 [`egress_gate`](mvm_runtime::vmm::egress_gate) the wire path uses.
-pub mod raw_egress;
 pub mod reaper;
 pub mod redaction_resolve;
 pub mod reversible_replacement;
@@ -113,8 +105,6 @@ pub mod reversible_replacement_resolve;
 pub mod secret_audit;
 pub mod secrets_scanner;
 pub mod sensitive_detector;
-/// Policy-gated SOCKS5 UDP Associate relay over the egress vsock stream.
-pub mod socks5_udp;
 /// Transparent egress terminator primitives: original destination
 /// recovery after nft REDIRECT, plus the future forward/substitute
 /// legs (orig_dst is the only piece here now).

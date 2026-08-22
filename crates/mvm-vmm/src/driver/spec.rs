@@ -178,13 +178,10 @@ mod tests {
     #[test]
     fn typed_vsock_service_resolves_its_transport_port() {
         let channel = VsockPort {
-            service: GuestService::NetworkData { queue: 0 },
-            host_uds: "/run/network-data.sock".into(),
+            service: GuestService::NetworkFlow,
+            host_uds: "/run/network-flow.sock".into(),
             direction: VsockDirection::GuestDials,
         };
-        assert_eq!(
-            channel.port(),
-            GuestService::NetworkData { queue: 0 }.port()
-        );
+        assert_eq!(channel.port(), GuestService::NetworkFlow.port());
     }
 }

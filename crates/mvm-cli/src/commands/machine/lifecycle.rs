@@ -95,6 +95,7 @@ pub(super) fn resolve_start_spec(args: &MachineStartArgs) -> Result<(MachineSpec
         image: args.create_flags.image.as_deref(),
         net: args.create_flags.net,
         allow_host: &args.create_flags.allow_host,
+        ai: None,
         cpus: args.create_flags.cpus,
         cpu_limit: args.create_flags.cpu_limit,
         timeout: args.create_flags.timeout,
@@ -168,7 +169,8 @@ pub(super) fn start_machine(args: MachineStartArgs) -> Result<()> {
         spec.grants.as_ref().and_then(|g| g.egress.as_ref()),
         spec.net,
         &spec.allow_host,
-    )?;
+    )?
+    .with_ai(spec.ai.clone());
     let (memory_mib, mem_initial_mib) =
         validate_machine_memory(&spec.memory, spec.mem_initial.as_deref())?;
     let volume_cfg = build_machine_volume_cfg(&spec.volumes)?;
@@ -296,8 +298,41 @@ pub(super) fn start_machine(args: MachineStartArgs) -> Result<()> {
     Ok(())
 }
 
+/// Gate `machine shell` / `machine exec` on the machine existing at all,
+/// rather than on it having a persisted spec.
+///
+/// Both verbs reach the guest over the per-VM vsock socket under
+/// `~/.mvm/vms/<name>/` and never read the spec they used to load — it was a
+/// bare existence check. But `machine run` boots a transient VM that has a
+/// live console and no spec, so that check refused, with "does not exist", a
+/// machine `machine ls` was listing as running.
+///
+/// A builder VM is refused by name. It is headless by construction — no guest
+/// agent, no PTY — so admitting it would trade one wrong error for a worse
+/// one, and the build system is not a machine the user drives.
+pub(super) fn require_console_target(name: &str) -> Result<()> {
+    // Before the name reaches `vm_state_dir`: the gate is the first thing
+    // either verb does, and `console::run`'s own validation is downstream of
+    // it.
+    validate_machine_name(name)?;
+    if mvm_core::naming::is_builder_owned_vm_name(name) {
+        bail!(
+            "{name:?} is an internal builder VM, not a machine. \
+             The builder VM is headless — it has no shell and no console. \
+             Its logs are the way in; `mvmctl doctor` reports its state."
+        );
+    }
+    if load_machine_spec(name).is_ok() || config::vm_state_dir(name).exists() {
+        return Ok(());
+    }
+    bail!(
+        "machine {name:?} does not exist. Run `mvmctl machine ls` to list machines, \
+         or `mvmctl machine create {name} --image <ref>` to create one."
+    )
+}
+
 pub(super) fn exec_machine(cli: &Cli, args: MachineExecArgs, cfg: &MvmConfig) -> Result<()> {
-    let _ = load_machine_spec(&args.name)?;
+    require_console_target(&args.name)?;
     let command = if args.argv.is_empty() {
         None
     } else {
@@ -328,7 +363,7 @@ pub(super) fn exec_machine(cli: &Cli, args: MachineExecArgs, cfg: &MvmConfig) ->
 }
 
 pub(super) fn shell_machine(cli: &Cli, args: MachineShellArgs, cfg: &MvmConfig) -> Result<()> {
-    let _ = load_machine_spec(&args.name)?;
+    require_console_target(&args.name)?;
     console::run(
         cli,
         console::Args {

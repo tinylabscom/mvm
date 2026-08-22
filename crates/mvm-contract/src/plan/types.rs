@@ -248,19 +248,6 @@ impl NetworkMode {
     }
 }
 
-/// How much ICMP an L3 workload may exchange.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum L3IcmpPolicy {
-    /// No ICMP at all.
-    Deny,
-    /// Error and control messages only — enough for path-MTU discovery.
-    ErrorsOnly,
-    /// Errors plus echo to admitted destinations.
-    #[default]
-    EchoAndErrors,
-}
-
 /// Transport protocol carried by a declared ingress mapping.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -590,93 +577,6 @@ pub enum IngressMappingsError {
     TlsSecretNotInPlan { mapping_id: u16 },
     #[error("ingress mapping {mapping_id} names TLS material unavailable to the endpoint")]
     TlsSecretNotKeystore { mapping_id: u16 },
-}
-
-/// Retired L3 tunnel parameters retained only to deserialize and explicitly
-/// reject stale signed plans during migration.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct L3NetworkSpec {
-    /// Wire-protocol major version the plan admits. Version 1 today.
-    pub protocol_version: u8,
-    /// Optional wire features the workload asks for, from
-    /// [`crate::l3::message::features`].
-    ///
-    /// This is the request side of the handshake: what is set here is what
-    /// the host allocates addresses for, and what the forwarding backend
-    /// is then required to be able to carry. `features::IPV6` is the only
-    /// one version 1 acts on. It is off by default — a workload that does
-    /// not name it keeps the v4-only posture, and one address family fewer
-    /// is one fewer for a compromised guest to reach anything through.
-    #[serde(default)]
-    pub features: u32,
-    /// MTU assigned to the guest interface.
-    pub mtu: u16,
-    /// Data queues to open. Version 1 admits exactly one.
-    pub queue_count: u16,
-    /// CIDR the host allocates the machine's point-to-point /30 from. `None`
-    /// means the host default pool.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub address_pool: Option<String>,
-    /// Private ranges this workload may reach. Empty — the default — denies
-    /// every RFC1918 destination. `MANDATORY_DENY_RANGES` is unconditional
-    /// and cannot be opened here.
-    #[serde(default)]
-    pub admitted_private_cidrs: Vec<String>,
-    #[serde(default)]
-    pub icmp: L3IcmpPolicy,
-    /// Whether IP fragments are carried. Version 1 admits `false` only;
-    /// reassembly is an unbounded-state sink.
-    #[serde(default)]
-    pub allow_fragments: bool,
-    /// Cap on concurrent flows for this machine.
-    pub max_flows: u32,
-    /// Cap on live DNS bindings for this machine.
-    pub max_dns_bindings: u32,
-    /// Revision counter for the networking rules. Flows and DNS bindings
-    /// from a superseded epoch never apply.
-    #[serde(default)]
-    pub policy_epoch: u64,
-}
-
-impl L3NetworkSpec {
-    /// The version-1 shape with conservative defaults: one queue, MTU 1500,
-    /// no fragments, no private ranges, no ingress.
-    pub fn v1() -> Self {
-        Self {
-            protocol_version: 1,
-            features: 0,
-            mtu: 1500,
-            queue_count: 1,
-            address_pool: None,
-            admitted_private_cidrs: Vec::new(),
-            icmp: L3IcmpPolicy::default(),
-            allow_fragments: false,
-            max_flows: 4096,
-            max_dns_bindings: 1024,
-            policy_epoch: 0,
-        }
-    }
-
-    /// The same spec, asking the host for an IPv6 assignment as well.
-    pub fn requesting_ipv6(mut self) -> Self {
-        self.features |= crate::l3::message::features::IPV6;
-        self
-    }
-
-    /// Whether this plan asked for IPv6.
-    pub fn requests_ipv6(&self) -> bool {
-        self.features & crate::l3::message::features::IPV6 != 0
-    }
-
-    /// Feature bits this build does not understand. Non-empty means the
-    /// plan asked for something that cannot be served, which is a refusal
-    /// rather than something to mask off — a workload silently given less
-    /// than it was admitted for is exactly what the capability check
-    /// exists to prevent.
-    pub fn unknown_features(&self) -> u32 {
-        self.features & !crate::l3::message::features::KNOWN
-    }
 }
 
 /// Whether this workload's captured output is written to a durable

@@ -126,9 +126,6 @@ pub(super) const BUILDER_SIDECARS: &[&str] = &["builder.pid", "stage0.pid"];
 /// so the reaper would SIGTERM the helpers of a guest that is still running.
 pub(super) const WORKLOAD_SIDECARS: &[&str] = mvm_vmm::host::process_liveness::PID_FILE_NAMES;
 
-/// Dir-name prefix of the persistent dev builder VM.
-const PERSISTENT_BUILDER_DIR_PREFIX: &str = "mvm-persistent-builder-";
-
 fn reap_orphaned_vm_helpers_both_roots(
     remove_builder_dirs: bool,
     dry_run: bool,
@@ -146,10 +143,14 @@ fn reap_orphaned_vm_helpers_both_roots(
         dry_run,
         &snapshot,
     )?;
+    // `remove_builder_dirs` rather than a flat `false`: everything under the
+    // workload root is managed except a per-job builder dir, so this grants
+    // exactly the authority to prune finished builds that stage there, and
+    // the kill-only startup sweep (which passes `false`) still removes nothing.
     let workload = reap_orphaned_vm_helpers_at_with_snapshot(
         &workload_root,
         WORKLOAD_SIDECARS,
-        false,
+        remove_builder_dirs,
         true,
         dry_run,
         &snapshot,
@@ -245,7 +246,14 @@ pub(super) fn reap_orphaned_vm_helpers_at_with_snapshot(
         let Some(dir_basename) = dir.file_name().and_then(|s| s.to_str()) else {
             continue;
         };
-        let managed = all_dirs_managed || dir_basename.starts_with(PERSISTENT_BUILDER_DIR_PREFIX);
+        // A per-job builder dir is ephemeral wherever it sits. The HVF
+        // builder family stages its jobs under the workload root, so without
+        // this the blanket `all_dirs_managed` there would treat a finished
+        // build's leftovers as restartable machine state and keep them
+        // forever — and now that the inventory no longer lists builder VMs,
+        // nothing would show they had accumulated.
+        let managed = !mvm_core::naming::is_ephemeral_builder_vm_name(dir_basename)
+            && (all_dirs_managed || mvm_core::naming::is_builder_owned_vm_name(dir_basename));
 
         let mut dir_has_live_owner = false;
         let mut killed_in_dir = 0u64;
