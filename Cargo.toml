@@ -46,6 +46,10 @@ members = [
     # placeholder — re-add it when the
     # `#[mvm::function]`/`#[mvm::image]`/… bodies actually land.
     "crates/mvm-sdk",
+    # mvm-capture — project-environment capture frontend. Linux-specific
+    # collectors are gated at runtime; the crate compiles on macOS/Windows
+    # as a stub so workspace builds stay green for non-Linux contributors.
+    "crates/mvm-capture",
     # Plan 104 W1a — host services broker subprocess (one of three
     # per-VM subprocesses: mvm-broker, mvm-host-signer,
     # mvm-audit-signer; ADR-020 dropped mvm-secrets-dispatcher). W1a
@@ -365,6 +369,7 @@ mvm-hostd = { path = "crates/mvm-hostd", version = "0.18.0", default-features = 
 
 # plan 60 Phase 5 — build-time SDK port from ../mvmforge.
 mvm-sdk = { path = "crates/mvm-sdk", version = "0.18.0" }
+mvm-capture = { path = "crates/mvm-capture", version = "0.18.0" }
 # Plan 57 W1 — libkrun FFI bindings split out of mvm-providers so the
 # bindgen + libclang build cost is isolated from the rest of the
 # workspace. Default feature set is empty; consumers wanting real FFI
@@ -682,7 +687,7 @@ opt-level = 3
 # TLS/ring/openssl), so the musl build is unencumbered.
 rust = "1.91.1"
 zig = "0.13.0"
-cargo-zigbuild = "0.20.0"
+cargo-zigbuild = "0.23.0"
 
 # Per-arch musl target. build.rs picks the entry for CARGO_CFG_TARGET_ARCH
 # (the arch mvmctl is built for == the arch of the guest it boots, since the

@@ -59,7 +59,7 @@ The three honesty levels (R2):
 
 | ID | Level | Statement | Witnesses |
 | --- | --- | --- | --- |
-| `MVM-SEC-05` | `build` | Vsock framing, supervisor-config JSON, and FlowMux's guest-facing decoder and session state are fuzzed | `ci:fuzz_guest_request`, `ci:fuzz_authenticated_frame`, `ci:fuzz_supervisor_config`, `ci:fuzz_network_flow_decode`, `ci:fuzz_network_flow_state`, `ci:fuzz_input_frame` |
+| `MVM-SEC-05` | `build` | Vsock framing, supervisor-config JSON, and FlowMux's guest-facing decoder and session state are fuzzed | `ci:fuzz_guest_request`, `ci:fuzz_sealed_frame`, `ci:fuzz_supervisor_config`, `ci:fuzz_network_flow_decode`, `ci:fuzz_network_flow_state`, `ci:fuzz_input_frame` |
 
 ## guest_privilege
 
