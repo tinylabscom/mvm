@@ -1425,6 +1425,30 @@ fn mk_guest_uses_the_static_custom_privilege_helper() {
     );
 }
 
+#[test]
+fn builder_hook_uses_the_installed_util_linux_mount() {
+    let builder_flake_path = nix_dir().join("images/builder-vm/flake.nix");
+    let builder_flake = fs::read_to_string(&builder_flake_path)
+        .unwrap_or_else(|e| panic!("reading {}: {e}", builder_flake_path.display()));
+    assert!(
+        builder_flake.contains("        util-linux"),
+        "the builder image must retain util-linux for file-backed loop mounts"
+    );
+
+    let hook_path = repo_dir().join("crates/mvm-build/src/bin/mvm-host-vm-init/builder_hooks.rs");
+    let hook = fs::read_to_string(&hook_path)
+        .unwrap_or_else(|e| panic!("reading {}: {e}", hook_path.display()));
+    assert!(
+        hook.contains("const UTIL_LINUX_MOUNT: &str = \"/sbin/mount\";")
+            && hook.contains("Command::new(UTIL_LINUX_MOUNT)"),
+        "the hook runner must bypass BusyBox and invoke the installed util-linux mount"
+    );
+    assert!(
+        !hook.contains("Command::new(\"mount\")"),
+        "a PATH-resolved mount can select BusyBox, which cannot allocate the loop device"
+    );
+}
+
 /// Every recipe whose `src` is the whole workspace must normalize it before the
 /// generic unpacker runs: a `path:` input evaluated from the `nix/` subflake can
 /// retain a trailing `nix/..` shape and the unpacker then fails with

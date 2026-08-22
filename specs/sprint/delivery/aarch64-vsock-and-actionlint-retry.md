@@ -19,3 +19,14 @@ backend capability negotiation. Its mutation shard could delete the WebLinux
 transport arm because the wildcard silently substituted the UDS route. Both
 backend matches are now exhaustive, so a new or missing backend is a compile
 failure, and a focused WebLinux test pins the browser-channel alternative.
+
+The merge-group AArch64 witness then reached the before-build lifecycle hook
+and exposed an image-path mismatch: the hook runner invoked bare `mount`, so
+the inherited PATH selected BusyBox instead of the installed util-linux
+binary. BusyBox passed `loop` through as an ext4 option, the hook failed after
+the expensive build, and no `rootfs.ext4` was returned. The runner now invokes
+the image contract's explicit `/sbin/mount`; a focused constant regression
+pins that selection so PATH ordering cannot silently restore the broken path.
+The AArch64 live lane also opts out of the embedded-host-binary cache while it
+builds `mvmctl`, ensuring source changes to the builder guest are cross-compiled
+and injected rather than hidden by a restored stale binary.
