@@ -20,12 +20,14 @@ pub use sdk_sidecar::{
 pub use types::{
     AdmissionProfile, ArtifactDigests, ArtifactPolicy, AttestationMode, AttestationRequirement,
     AuditLabels, AuditTaxonomy, BuildProvenance, DepsVolumeBinding, DepsVolumeBindingError,
-    FsPolicyRef, HostShareGrant, InputKind, KeyRotationSpec, L3IcmpPolicy, L3IngressMapping,
-    L3NetworkSpec, NetworkLimits, NetworkLimitsBuilder, NetworkLimitsError, NetworkMode, Nonce,
-    NonceParseError, PlanId, PlanSeccompTier, PlanSeccompTierParseError, PolicyRef,
-    PostRunLifecycle, ReleasePin, Resources, RuntimeProfileRef, SecretBinding, SecretReleasePolicy,
-    SecretSource, ShareKind, SignedImageRef, StreamRetention, TenantId, TimeoutSpec, Variant,
-    WorkloadId, WorkloadIntent,
+    FsPolicyRef, HostShareGrant, IngressMapping, IngressMappingBuildError, IngressMappingBuilder,
+    IngressMappingError, IngressMappingsError, IngressProtocol, IngressTransform, InputKind,
+    KeyRotationSpec, L3IcmpPolicy, L3NetworkSpec, NetworkLimits, NetworkLimitsBuilder,
+    NetworkLimitsError, NetworkMode, Nonce, NonceParseError, PlanId, PlanSeccompTier,
+    PlanSeccompTierParseError, PolicyRef, PostRunLifecycle, ReleasePin, Resources,
+    RuntimeProfileRef, SecretBinding, SecretReleasePolicy, SecretSource, ShareKind, SignedImageRef,
+    StreamRetention, TenantId, TimeoutSpec, Variant, WorkloadId, WorkloadIntent,
+    validate_ingress_mappings, validate_ingress_material,
 };
 pub use validity::FreshnessClaims;
 pub use verb::{VerbId, VerbIdError};

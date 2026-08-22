@@ -143,7 +143,7 @@ pub const GUEST_JOB_DIR: &str = "/job";
 const BUILDER_INPUT_DEVICE: &str = "/dev/vdc";
 const BUILDER_OUTPUT_DEVICE: &str = "/dev/vdd";
 const BUILDER_RUNTIME_DEVICE: &str = "/dev/vde";
-const PERSISTENT_BUILDER_RUNTIME_DEVICE: &str = "/dev/vdc";
+const BUILDER_VIRTIOFS_RUNTIME_DEVICE: &str = "/dev/vdc";
 const BUILDER_INPUT_DISK_MIN: u64 = 16 << 20;
 const BUILDER_VSOCK_EGRESS_TOKEN: &str = "mvm.vsock_egress=1";
 const BUILDER_SUBST_PID_FILE: &str = "substitution.pid";
@@ -253,7 +253,7 @@ fn builder_runtime_overlay_cmdline(base_cmdline: &str, runtime_device: &str) -> 
     append_cmdline_token(&cmdline, &format!("mvm.runtime_data={runtime_device}"))
 }
 
-fn persistent_builder_runtime_overlay_cmdline(base_cmdline: &str, runtime_device: &str) -> String {
+fn builder_virtiofs_runtime_overlay_cmdline(base_cmdline: &str, runtime_device: &str) -> String {
     let cmdline = builder_boot_contract_cmdline(base_cmdline);
     let cmdline = builder_vsock_egress_cmdline(&cmdline);
     let cmdline = append_cmdline_token(&cmdline, "mvm.runtime_source_policy=required_overlay");
@@ -702,16 +702,16 @@ pub(crate) fn builder_runtime_overlay_attachment<'a>(
     }
 }
 
-fn persistent_builder_runtime_overlay_attachment<'a>(
+pub(crate) fn builder_virtiofs_runtime_overlay_attachment<'a>(
     image: &'a BuilderVmImage,
     runtime_overlay: Option<&'a Path>,
 ) -> Option<BuilderRuntimeOverlayAttachment<'a>> {
     match (image, runtime_overlay) {
         (BuilderVmImage::Rootfs { cmdline, .. }, Some(runtime_overlay)) => {
             Some(BuilderRuntimeOverlayAttachment {
-                cmdline: persistent_builder_runtime_overlay_cmdline(
+                cmdline: builder_virtiofs_runtime_overlay_cmdline(
                     cmdline,
-                    PERSISTENT_BUILDER_RUNTIME_DEVICE,
+                    BUILDER_VIRTIOFS_RUNTIME_DEVICE,
                 ),
                 disk_path: runtime_overlay,
                 read_only: true,
@@ -4635,7 +4635,7 @@ impl LibkrunPersistentHostVm {
             krun = krun.add_vsock_port(mvm_agentd::vsock::GUEST_AGENT_PORT);
         }
         if let Some(attachment) =
-            persistent_builder_runtime_overlay_attachment(&image, runtime_overlay.as_deref())
+            builder_virtiofs_runtime_overlay_attachment(&image, runtime_overlay.as_deref())
         {
             krun = krun.with_cmdline(attachment.cmdline).add_disk(
                 "runtime-overlay",
@@ -7265,15 +7265,15 @@ mod tests {
     }
 
     #[test]
-    fn persistent_builder_runtime_overlay_uses_virtiofs_disk_layout() {
+    fn builder_virtiofs_runtime_overlay_uses_virtiofs_disk_layout() {
         let image = BuilderVmImage::new(
             PathBuf::from("/img/Image"),
             PathBuf::from("/img/rootfs.ext4"),
             "console=hvc0 root=/dev/vda".to_string(),
         );
         let overlay = Path::new("/cache/runtime-overlay.ext4");
-        let attachment = persistent_builder_runtime_overlay_attachment(&image, Some(overlay))
-            .expect("persistent rootfs builders attach the runtime overlay");
+        let attachment = builder_virtiofs_runtime_overlay_attachment(&image, Some(overlay))
+            .expect("virtio-fs rootfs builders attach the runtime overlay");
 
         assert_eq!(attachment.disk_path, overlay);
         assert!(attachment.read_only);

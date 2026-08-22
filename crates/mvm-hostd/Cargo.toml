@@ -167,6 +167,7 @@ toml.workspace = true
 url = "2"
 # Server-side TLS termination for bound-host https egress.
 rustls = { workspace = true }
+httparse = "1"
 zeroize.workspace = true
 tokio = { workspace = true, features = ["io-util", "macros", "net", "process", "rt", "rt-multi-thread", "signal", "sync", "time"] }
 tracing.workspace = true

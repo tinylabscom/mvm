@@ -28,10 +28,10 @@ use crate::builder_vm::{BuilderArtifacts, BuilderJob, BuilderMounts, BuilderVm, 
 use crate::builder_vm_runtime::{CLOSURE_SEED_TAG, acquire_nix_store_image_lock_named};
 #[cfg(feature = "builder-vm")]
 use crate::libkrun_builder::{
-    BuilderEndpointTransport, BuilderShellJob, BuilderShellResult, BuilderVmImage,
-    BuilderVsockEgressEndpoint, DEFAULT_NIX_STORE_MIB, builder_runtime_overlay_attachment,
-    builder_vm_cache_dir, prepopulate_stage0_nix_store_image, require_runtime_overlay_ext4,
-    stage0_nix_store_image_name,
+    BuilderEndpointTransport, BuilderRuntimeOverlayAttachment, BuilderShellJob, BuilderShellResult,
+    BuilderVmImage, BuilderVsockEgressEndpoint, DEFAULT_NIX_STORE_MIB,
+    builder_virtiofs_runtime_overlay_attachment, builder_vm_cache_dir,
+    prepopulate_stage0_nix_store_image, require_runtime_overlay_ext4, stage0_nix_store_image_name,
 };
 use mvm_core::config::DEFAULT_MVM_HOME_DIR_NAME;
 
@@ -998,7 +998,7 @@ fn run_shell_script_qemu(job: &BuilderShellJob) -> Result<BuilderShellResult, Bu
     let runtime_overlay = require_runtime_overlay_ext4()
         .map_err(|e| BuilderVmError::RuntimeOverlayUnavailable(format!("{e:#}")))?;
     let egress_port = allocate_qemu_builder_egress_port();
-    let overlay_cmdline = builder_runtime_overlay_attachment(
+    let overlay_cmdline = qemu_runtime_overlay_attachment(
         &BuilderVmImage::Rootfs {
             kernel_path: kernel.clone(),
             rootfs_path: rootfs.clone(),
@@ -1276,7 +1276,7 @@ fn run_build_qemu(
     let runtime_overlay = require_runtime_overlay_ext4()
         .map_err(|e| BuilderVmError::RuntimeOverlayUnavailable(format!("{e:#}")))?;
     let egress_port = allocate_qemu_builder_egress_port();
-    let overlay_cmdline = builder_runtime_overlay_attachment(
+    let overlay_cmdline = qemu_runtime_overlay_attachment(
         &BuilderVmImage::Rootfs {
             kernel_path: kernel.clone(),
             rootfs_path: rootfs.clone(),
@@ -1481,6 +1481,14 @@ fn allocate_qemu_builder_egress_port() -> u32 {
         .saturating_add(NEXT_QEMU_BUILDER_EGRESS_PORT.fetch_add(1, Ordering::Relaxed))
 }
 
+#[cfg(feature = "builder-vm")]
+fn qemu_runtime_overlay_attachment<'a>(
+    image: &'a BuilderVmImage,
+    runtime_overlay: Option<&'a Path>,
+) -> Option<BuilderRuntimeOverlayAttachment<'a>> {
+    builder_virtiofs_runtime_overlay_attachment(image, runtime_overlay)
+}
+
 /// Adapt the cached builder-image kernel cmdline for a QEMU boot. The
 /// image cmdline is libkrun-flavoured (`console=hvc0 root=/dev/vda ro
 /// rootfstype=ext4 init=/sbin/mvm-host-vm-init`); for QEMU we swap the
@@ -1536,6 +1544,26 @@ mod vsock_module_tests {
 
     #[cfg(feature = "builder-vm")]
     use crate::libkrun_builder::{BuilderExtraDisk, BuilderShellJob};
+
+    #[cfg(feature = "builder-vm")]
+    #[test]
+    fn qemu_runtime_overlay_keeps_virtiofs_transport() {
+        let image = BuilderVmImage::new(
+            PathBuf::from("/img/Image"),
+            PathBuf::from("/img/rootfs.ext4"),
+            "console=hvc0 root=/dev/vda".to_string(),
+        );
+        let overlay = Path::new("/cache/runtime-overlay.ext4");
+        let attachment = qemu_runtime_overlay_attachment(&image, Some(overlay))
+            .expect("QEMU rootfs builders attach the runtime overlay");
+
+        assert_eq!(attachment.disk_path, overlay);
+        assert!(attachment.read_only);
+        assert!(attachment.cmdline.contains("mvm.runtime_data=/dev/vdc"));
+        assert!(!attachment.cmdline.contains("mvm.builder_transport=disk"));
+        assert!(!attachment.cmdline.contains("mvm.builder_input="));
+        assert!(!attachment.cmdline.contains("mvm.builder_output="));
+    }
 
     #[cfg(feature = "builder-vm")]
     #[test]

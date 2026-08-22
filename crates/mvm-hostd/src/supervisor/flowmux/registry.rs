@@ -331,7 +331,7 @@ impl StreamRegistry {
         Self {
             limits,
             next_guest_id: 1, // guest-initiated IDs are odd
-            next_host_id: 0,  // host-initiated IDs are even
+            next_host_id: 2,  // host-initiated flow IDs are non-zero and even
             streams: BTreeMap::new(),
             budget,
         }
@@ -435,7 +435,7 @@ impl StreamRegistry {
     /// Record a host-initiated stream ID supplied by the local ingress handler.
     /// The ID must be even, not already live, and within the class ceiling.
     pub fn open_host(&mut self, stream_id: u32, class: FlowClass) -> Result<(), RegistryError> {
-        if !stream_id.is_multiple_of(2) {
+        if stream_id == 0 || !stream_id.is_multiple_of(2) {
             return Err(RegistryError::InvalidStreamId { stream_id });
         }
         if self.live_count(class) >= self.class_limit(class) {
@@ -653,9 +653,18 @@ mod tests {
     #[test]
     fn host_ids_are_even_and_monotonic() {
         let mut reg = StreamRegistry::new(RegistryLimits::default());
-        assert_eq!(reg.alloc_host(FlowClass::Tcp).unwrap(), 0);
         assert_eq!(reg.alloc_host(FlowClass::Tcp).unwrap(), 2);
-        assert_eq!(reg.alloc_host(FlowClass::Udp).unwrap(), 4);
+        assert_eq!(reg.alloc_host(FlowClass::Tcp).unwrap(), 4);
+        assert_eq!(reg.alloc_host(FlowClass::Udp).unwrap(), 6);
+    }
+
+    #[test]
+    fn host_open_refuses_the_control_stream() {
+        let mut reg = StreamRegistry::new(RegistryLimits::default());
+        assert_eq!(
+            reg.open_host(0, FlowClass::Tcp),
+            Err(RegistryError::InvalidStreamId { stream_id: 0 })
+        );
     }
 
     #[test]

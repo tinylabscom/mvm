@@ -1384,6 +1384,7 @@ dependencies = [
  "hex",
  "hickory-proto",
  "hmac",
+ "httparse",
  "ipnet",
  "landlock",
  "leakguard",

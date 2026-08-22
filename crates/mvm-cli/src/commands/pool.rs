@@ -425,6 +425,7 @@ fn admit_standby_parent_plan(
         // secrets, services, and shares above.
         network_mode: mvm_contract::plan::NetworkMode::None,
         l3_network: None,
+        ingress: Vec::new(),
     };
     let ledger = InMemoryNonceLedger::new();
     admit_for_run(

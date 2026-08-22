@@ -72,6 +72,7 @@ fn admitted_with_grant(vm: &str) -> AdmittedPlan {
         attestation_mode: mvm_contract::plan::AttestationMode::Noop,
         network_mode: mvm_contract::plan::NetworkMode::None,
         l3_network: None,
+        ingress: Vec::new(),
     };
     admit_for_run(
         &input,

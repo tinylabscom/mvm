@@ -50,7 +50,9 @@ pub use limits::{
     UDP_ADDR_PREFIX_LEN,
 };
 pub use opcode::{FlowClass, Opcode, Sender};
-pub use state::{FrameFacts, SessionState, SessionValidator, StateError, StreamState};
+pub use state::{
+    FrameFacts, IngressFlowKind, SessionState, SessionValidator, StateError, StreamState,
+};
 
 #[cfg(test)]
 mod tests {

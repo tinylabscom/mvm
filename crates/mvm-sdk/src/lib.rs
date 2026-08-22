@@ -152,7 +152,7 @@ pub use crate::ir::{
     EnvValue as IrEnvValue, Format as IrFormat, HostPort, Image as IrImage, Mount as IrMount,
     MountMode, MountSource, Network as IrNetwork, NetworkDns as IrNetworkDns,
     NetworkEgress as IrNetworkEgress, NetworkMode as IrNetworkMode, NodeTool as IrNodeTool,
-    PortForward as IrPortForward, PortProto, PythonTool as IrPythonTool, Resources as IrResources,
-    SecretMount, SecretRef, Source as IrSource, ValidationError, Volume as IrVolume,
-    Workload as IrWorkload, ir_hash,
+    PortForward as IrPortForward, PortProto, PortTransform, PythonTool as IrPythonTool,
+    Resources as IrResources, SecretMount, SecretRef, Source as IrSource, ValidationError,
+    Volume as IrVolume, Workload as IrWorkload, ir_hash,
 };

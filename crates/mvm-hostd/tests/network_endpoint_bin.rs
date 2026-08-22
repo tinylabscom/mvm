@@ -144,6 +144,7 @@ fn endpoint_bin_serves_substitution_and_refuses_unbound_destination() {
         tls_intermediate: None,
         network_policy: None,
         network_limits: mvm_core::plan::NetworkLimits::default(),
+        ingress: Vec::new(),
         egress_mode: EgressMode::Wire,
         resolver: ResolverBackend::default(),
         session_marker: None,
@@ -256,6 +257,7 @@ fn endpoint_bin_claim10_gate_refuses_a_bound_but_unadmitted_destination() {
         // Deny-all: the endpoint gates every destination — even the bound one.
         network_policy: Some(mvm_core::policy::network_policy::NetworkPolicy::deny_all()),
         network_limits: mvm_core::plan::NetworkLimits::default(),
+        ingress: Vec::new(),
         egress_mode: mvm_hostd::supervisor::network_endpoint::EgressMode::Wire,
         resolver: ResolverBackend::default(),
         session_marker: None,
@@ -340,6 +342,7 @@ fn a_flowmux_endpoint_keeps_serving_sessions_after_one_ends() {
         tls_intermediate: None,
         network_policy: None,
         network_limits: mvm_core::plan::NetworkLimits::default(),
+        ingress: Vec::new(),
         egress_mode: EgressMode::FlowMux,
         resolver: ResolverBackend::default(),
         session_marker: Some(session_marker.clone()),
@@ -444,6 +447,7 @@ fn a_flowmux_endpoint_enforces_one_admitted_ceiling_across_sessions() {
             .max_udp_associations(1)
             .build()
             .unwrap(),
+        ingress: Vec::new(),
         egress_mode: EgressMode::FlowMux,
         resolver: ResolverBackend::default(),
         session_marker: None,
@@ -541,6 +545,7 @@ fn a_flowmux_endpoint_refuses_zero_limits_decoded_from_config() {
         tls_intermediate: None,
         network_policy: None,
         network_limits: mvm_core::plan::NetworkLimits::default(),
+        ingress: Vec::new(),
         egress_mode: EgressMode::FlowMux,
         resolver: ResolverBackend::default(),
         session_marker: None,

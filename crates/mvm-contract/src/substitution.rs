@@ -190,6 +190,12 @@ mod tests {
         assert_eq!(map.len(), 2);
         assert!(map.resolve("mvm-secret-1111").is_some());
         assert!(map.resolve("mvm-secret-2222").is_some());
+        assert_eq!(
+            map.resolve_name("openai")
+                .map(|secret| secret.name.as_str()),
+            Some("openai")
+        );
+        assert!(map.resolve_name("missing").is_none());
     }
 
     #[test]
@@ -241,6 +247,14 @@ impl PlaceholderMap {
     /// token this session never minted (a smuggled or stale token).
     pub fn resolve(&self, token: &str) -> Option<&SecretRef> {
         self.map.get(&Placeholder::new(token))
+    }
+
+    /// Resolve a signed plan secret by its stable name. This is for host-owned
+    /// material such as an ingress TLS key, where no placeholder ever needs to
+    /// cross toward the guest. Multiple unlinkable placeholders for the same
+    /// secret intentionally collapse to the same immutable reference here.
+    pub fn resolve_name(&self, name: &str) -> Option<&SecretRef> {
+        self.map.values().find(|secret| secret.name == name)
     }
 
     /// Whether any secret in this session is bound to `host` — a

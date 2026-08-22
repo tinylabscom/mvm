@@ -1774,8 +1774,11 @@ resume` takes a `current_head` and refuses when it differs from the
         the per-VM network endpoint. The host performance probe enables only
         the FlowMux client surface, keeping guest-only vsock dependencies out
         of the host graph and the duplicate-major invariant clean.
-  - [ ] Declared ingress runtime. The wire opcodes and state transitions exist;
-        endpoint listener and guest-adapter handling do not.
+  - [x] Declared ingress runtime. Signed transport-neutral mappings reach exact
+        endpoint binds before readiness; TCP and bounded observed-peer UDP use
+        host-initiated FlowMux streams and declared guest-loopback targets.
+        HTTP/TLS transformations remain host-owned, TLS keys never enter the
+        guest contract, and opaque TCP stays explicitly non-transforming.
   - [ ] Remove the rejected `raw_ip_stack`/`L3Vsock` public compatibility
         surface now that the migration release condition has passed.
   - [ ] Delete frozen L3 contract, guest, host, VMM, dependency, packaging,

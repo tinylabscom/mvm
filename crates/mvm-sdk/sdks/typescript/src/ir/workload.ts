@@ -210,6 +210,7 @@ provider: string
 }
 })
 export type PortProto = ("tcp" | "udp")
+export type PortTransform = ("opaque" | "http" | "tls")
 export type Source = ({
 exclude?: string[]
 include?: string[]
@@ -436,8 +437,28 @@ port: number
 }
 export interface PortForward {
 guest: number
+/**
+ * Exact loopback target inside the guest.
+ */
+guest_addr: string
 host: number
+/**
+ * Exact host address to bind. Wildcards must be declared literally.
+ */
+host_addr: string
+/**
+ * Stable non-zero ID carried by a host-initiated FlowMux open.
+ */
+mapping_id: number
 proto: PortProto
+/**
+ * Name of the workload secret containing a PEM certificate chain and private key. Required only for `tls`; the raw material stays host-side.
+ */
+tls_secret?: (string | null)
+/**
+ * Host-owned content treatment required for this mapping.
+ */
+transform: PortTransform
 }
 export interface Resources {
 cpu_cores: number

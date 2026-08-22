@@ -369,6 +369,9 @@ fn admit_plan_for_run_inner(
     // not only in synthesis: admission is what a plan built elsewhere reaches,
     // and the refusal has to hold for those too.
     mvm_core::plan::refuse_retired_l3(&verified.network_mode, verified.l3_network.is_some())?;
+    verified
+        .validate_ingress()
+        .context("validating signed ingress mappings")?;
 
     // Validity window — refuses plans whose now() is outside
     // [valid_from, valid_until). For freshly-synthesized plans this
@@ -2130,6 +2133,7 @@ mod tests {
             kernel_sha256: None,
             network_mode: Default::default(),
             l3_network: None,
+            ingress: Vec::new(),
             vm_name,
             tenant: None,
             backend_name: "firecracker",

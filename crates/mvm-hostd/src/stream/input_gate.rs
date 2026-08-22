@@ -1125,6 +1125,7 @@ mod tests {
             // Closed transport: this fixture's workload reaches nothing.
             network_mode: mvm_contract::plan::NetworkMode::None,
             l3_network: None,
+            ingress: Vec::new(),
         }
     }
 

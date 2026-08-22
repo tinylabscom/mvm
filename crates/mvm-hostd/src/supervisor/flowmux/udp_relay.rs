@@ -35,6 +35,7 @@ pub(super) struct UdpSendMsg {
 pub(super) struct UdpAssociationHandle {
     pub(super) tx: std::sync::mpsc::Sender<UdpSendMsg>,
     pub(super) waker: Arc<Waker>,
+    pub(super) peer_admission: UdpPeerAdmission,
 }
 
 /// Parameters for the per-association UDP relay thread.
@@ -47,8 +48,19 @@ pub(super) struct UdpRelayParams {
     pub(super) writer: Arc<Mutex<UnixStream>>,
     pub(super) idle_timeout: Duration,
     pub(super) max_peers: usize,
+    pub(super) peer_admission: UdpPeerAdmission,
     pub(super) rx: std::sync::mpsc::Receiver<UdpSendMsg>,
     pub(super) registry: Arc<Mutex<StreamRegistry>>,
+}
+
+/// Whether a guest datagram may introduce a peer or may only answer one that
+/// previously sent to the host socket.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum UdpPeerAdmission {
+    /// Outbound association: the guest selects admitted destinations.
+    GuestMayIntroduce,
+    /// Ingress mapping: the guest may reply only to observed external peers.
+    ObservedOnly,
 }
 
 /// Per-association UDP relay thread: read datagrams from the upstream socket
@@ -67,6 +79,7 @@ pub(super) fn run_udp_relay(params: UdpRelayParams) {
         writer,
         idle_timeout,
         max_peers,
+        peer_admission,
         rx,
         registry,
     } = params;
@@ -150,10 +163,14 @@ pub(super) fn run_udp_relay(params: UdpRelayParams) {
                         Ok(msg) => {
                             activity_this_iter = true;
                             let already_peer = peers.contains(&msg.destination);
-                            if !already_peer && peers.len() >= max_peers {
-                                continue;
+                            if !already_peer {
+                                if peer_admission == UdpPeerAdmission::ObservedOnly
+                                    || peers.len() >= max_peers
+                                {
+                                    continue;
+                                }
+                                peers.insert(msg.destination);
                             }
-                            peers.insert(msg.destination);
                             if let Err(error) = socket.send_to(&msg.payload, msg.destination) {
                                 warn!(stream_id, %error, "FlowMux UDP send failed");
                                 relay_failed = true;

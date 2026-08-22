@@ -14,13 +14,15 @@ host-first FlowMux handshake on relayed-vsock backends as well as direct-vsock
 backends. The outbound cutover is complete: guest TCP, UDP, DNS, mediated ICMP,
 and typed HTTP all use the authenticated protocol on `NetworkFlow`.
 
-That is not the final single-path architecture. Admitted `NetworkLimits` still
-stop before the endpoint's registries, typed HTTP still buffers complete
-messages at its compatibility seam, declared ingress has no runtime, the
-rejected `raw_ip_stack` configuration and frozen L3 implementation remain in
-the tree, and the permanent single-path gates and final performance/backend
-matrix do not exist. This plan owns that remainder. The closed Plan 316 phase
-issues are historical; issue #2751 is the active umbrella.
+Workstreams W1–W4 are now implemented. Admitted `NetworkLimits` are shared
+per-VM endpoint budgets; typed HTTP and connectors use bounded endpoint-owned
+streaming transforms; and signed TCP/UDP/HTTP/TLS ingress binds only admitted
+listeners, crosses the authenticated FlowMux session, and terminates at the
+declared guest-loopback target. The performance harness, rejected
+`raw_ip_stack` removal, frozen L3 deletion, permanent single-path gates, and
+final performance/backend matrix remain. This plan owns that remainder. The
+closed Plan 316 phase issues are historical; issue #2751 is the active
+umbrella.
 
 ## Outcome
 
@@ -98,22 +100,22 @@ not the guest addon bundle. This keeps guest-only vsock dependencies out of
 host test graphs and preserves the duplicate-major dependency invariant.
 ### W4 — Implement declared ingress on FlowMux
 
-- [ ] Replace `L3IngressMapping` with a transport-neutral signed-plan/IR type
+- [x] Replace `L3IngressMapping` with a transport-neutral signed-plan/IR type
       carrying mapping ID, protocol, exact host bind, guest loopback target,
       and transformation class; update Rust, Python, TypeScript, schemas, and
       fixtures together.
-- [ ] Bind only admitted listeners before endpoint readiness. Refuse duplicate
+- [x] Bind only admitted listeners before endpoint readiness. Refuse duplicate
       or unavailable binds, undeclared wildcards, unsupported protocols, and
       unavailable transformation material.
-- [ ] Implement TCP ingress with even stream IDs and the existing
+- [x] Implement TCP ingress with even stream IDs and the existing
       `InboundOpen`/`InboundReady`/`InboundRefused` contract before relaying
       bytes to a declared guest-loopback target.
-- [ ] Implement UDP ingress with bounded per-mapping peer tables; replies may
+- [x] Implement UDP ingress with bounded per-mapping peer tables; replies may
       target only a peer that previously sent to that mapping.
-- [ ] Keep TLS keys and transformation material host-side, support explicitly
+- [x] Keep TLS keys and transformation material host-side, support explicitly
       opaque TCP without transformation, and delete the unused second ingress
       broker/handler model.
-- [ ] Add exact/wildcard bind, undeclared port, TCP/UDP delivery, guest refusal,
+- [x] Add exact/wildcard bind, undeclared port, TCP/UDP delivery, guest refusal,
       exhaustion, TLS-key non-disclosure, streaming transform, audit, and
       teardown tests plus BDD coverage.
 

@@ -720,17 +720,38 @@ pub enum NetworkMode {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct PortForward {
+    /// Stable non-zero ID carried by a host-initiated FlowMux open.
+    pub mapping_id: u16,
+    /// Exact host address to bind. Wildcards must be declared literally.
+    pub host_addr: String,
     pub guest: u16,
     pub host: u16,
     pub proto: PortProto,
+    /// Exact loopback target inside the guest.
+    pub guest_addr: String,
+    /// Host-owned content treatment required for this mapping.
+    pub transform: PortTransform,
+    /// Name of the workload secret containing a PEM certificate chain and
+    /// private key. Required only for `tls`; the raw material stays host-side.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls_secret: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum PortProto {
     Tcp,
     Udp,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum PortTransform {
+    Opaque,
+    Http,
+    Tls,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

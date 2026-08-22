@@ -166,6 +166,7 @@ impl<D: VmmDriver + 'static> BuilderRunner<D> {
             tls_intermediate: None,
             network_policy: Some(&builder_policy),
             network_limits: mvm_core::plan::NetworkLimits::default(),
+            ingress: &[],
             resolver_remote: None,
             binding_store_dir: None,
             flowmux_identity: Some(builder_identity.spawn_config().clone()),

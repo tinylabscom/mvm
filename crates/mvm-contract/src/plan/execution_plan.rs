@@ -16,9 +16,11 @@ use crate::lifecycle::SnapshotAt;
 use crate::plan::bundle::PlanArtifact;
 use crate::plan::types::{
     AdmissionProfile, ArtifactPolicy, AttestationRequirement, AuditLabels, BuildProvenance,
-    DepsVolumeBinding, EnvironmentRef, FsPolicyRef, HostShareGrant, KeyRotationSpec, L3NetworkSpec,
-    NetworkLimits, NetworkMode, Nonce, PlanId, PolicyRef, PostRunLifecycle, ReleasePin, Resources,
-    RuntimeProfileRef, SecretBinding, SignedImageRef, StreamRetention, TenantId, WorkloadId,
+    DepsVolumeBinding, EnvironmentRef, FsPolicyRef, HostShareGrant, IngressMapping,
+    IngressMappingsError, KeyRotationSpec, L3NetworkSpec, NetworkLimits, NetworkMode, Nonce,
+    PlanId, PolicyRef, PostRunLifecycle, ReleasePin, Resources, RuntimeProfileRef, SecretBinding,
+    SignedImageRef, StreamRetention, TenantId, WorkloadId, validate_ingress_mappings,
+    validate_ingress_material,
 };
 use crate::plan::verb::VerbId;
 use crate::protocol::broker::ServiceId;
@@ -126,6 +128,11 @@ pub struct ExecutionPlan {
     /// transport-specific limits.
     #[serde(default, skip_serializing_if = "NetworkLimits::is_default")]
     pub network_limits: NetworkLimits,
+
+    /// Exact host listeners and guest-loopback targets admitted for ingress.
+    /// Empty means the endpoint owns no public listener for this workload.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ingress: Vec<IngressMapping>,
 
     /// Opt-in warm-snapshot timing. `None` (default) = this workload is not
     /// warm-snapshotted; `Some(at)` = the host may capture a warm snapshot when
@@ -286,6 +293,12 @@ pub struct ExecutionPlan {
 }
 
 impl ExecutionPlan {
+    /// Validate all ingress mappings as one signed listener set.
+    pub fn validate_ingress(&self) -> Result<(), IngressMappingsError> {
+        validate_ingress_mappings(&self.ingress, self.network_limits.max_ingress_listeners)?;
+        validate_ingress_material(&self.ingress, &self.secrets)
+    }
+
     /// Resolve the transport-neutral networking ceilings for this plan.
     ///
     /// A pre-migration L3 plan can still carry non-default flow and DNS
@@ -356,6 +369,7 @@ pub(crate) fn minimal_plan() -> ExecutionPlan {
         network_policy: PolicyRef("local-default".to_string()),
         network_mode: Default::default(),
         l3_network: None,
+        ingress: Vec::new(),
         network_limits: Default::default(),
         snapshot_at: Default::default(),
         build_provenance: Default::default(),
