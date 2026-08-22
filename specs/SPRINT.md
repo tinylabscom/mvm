@@ -2712,3 +2712,12 @@ transient transfer failures with `curl --retry-all-errors`, while retaining a
 three-attempt bound, a two-second retry delay, and checksum verification. This
 repairs the infrastructure-only failure that ejected the otherwise-green
 aarch64 vsock permission PR from the merge queue.
+
+## 2026-08-21 claim-18 backend-alternative witness
+
+The scheduled Security mutation lane found that capability negotiation's
+WebLinux transport arm could be deleted while a wildcard silently selected the
+wrong UDS alternative. Recovery and transport alternatives now match every
+`BackendKind` exhaustively, and a focused WebLinux negotiation witness requires
+the browser-channel route. A missing backend arm is therefore a compile error,
+while the behavior-specific test catches a wrong explicit alternative.

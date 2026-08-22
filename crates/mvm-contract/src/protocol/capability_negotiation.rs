@@ -141,8 +141,11 @@ fn alternative_for(capability: &'static str, backend: BackendKind) -> Capability
             BackendKind::Firecracker | BackendKind::Libkrun | BackendKind::Hvf => {
                 CapabilityAlternative::StandbyPool
             }
-            BackendKind::WebLinux => CapabilityAlternative::ColdStartFromSignedPlan,
-            _ => CapabilityAlternative::ColdStartFromSignedPlan,
+            BackendKind::Qemu
+            | BackendKind::Mock
+            | BackendKind::Wasm
+            | BackendKind::WebLinux
+            | BackendKind::AppleContainer => CapabilityAlternative::ColdStartFromSignedPlan,
         },
 
         // Transport capabilities. Every one of these ends at the same per-VM
@@ -151,7 +154,12 @@ fn alternative_for(capability: &'static str, backend: BackendKind) -> Capability
         "vsock" | "host_vsock_proxy" | "l3_vsock" => match backend {
             BackendKind::Wasm => CapabilityAlternative::NetworkEndpointOverWasmImport,
             BackendKind::WebLinux => CapabilityAlternative::NetworkEndpointOverBrowserChannel,
-            _ => CapabilityAlternative::NetworkEndpointOverUds,
+            BackendKind::Firecracker
+            | BackendKind::Libkrun
+            | BackendKind::Qemu
+            | BackendKind::Mock
+            | BackendKind::Hvf
+            | BackendKind::AppleContainer => CapabilityAlternative::NetworkEndpointOverUds,
         },
 
         // Interactive access. The stdin route carries bytes to an already
@@ -449,6 +457,18 @@ mod tests {
         assert_eq!(
             gaps[0].alternative,
             CapabilityAlternative::NetworkEndpointOverWasmImport
+        );
+    }
+
+    #[test]
+    fn the_web_linux_tier_reaches_the_endpoint_through_its_browser_channel() {
+        let required = require(|r| r.vsock = true);
+        let gaps = barren()
+            .negotiate(&required, BackendKind::WebLinux)
+            .expect_err("the browser-hosted tier has no native vsock device");
+        assert_eq!(
+            gaps[0].alternative,
+            CapabilityAlternative::NetworkEndpointOverBrowserChannel
         );
     }
 

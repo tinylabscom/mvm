@@ -13,3 +13,9 @@ existing three-attempt limit, pinned version, and checksum verification.
 Validation covers actionlint over every workflow, workflow-path policy,
 formatting, sprint append, plan names, and the CI workflow's exact bounded
 retry arguments.
+
+The next scheduled Security run exposed a separate claim-18 witness gap in
+backend capability negotiation. Its mutation shard could delete the WebLinux
+transport arm because the wildcard silently substituted the UDS route. Both
+backend matches are now exhaustive, so a new or missing backend is a compile
+failure, and a focused WebLinux test pins the browser-channel alternative.
