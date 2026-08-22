@@ -8,7 +8,7 @@ use crate::ui;
 
 use ed25519_dalek::VerifyingKey;
 use mvm_client::audit::{AuditSourceId, AuditSourceKind, LocalAuditReader};
-use mvm_contract::merkle::{InclusionProof, SignedAuditRoot, verify_inclusion, verify_signed_root};
+use mvm_contract::merkle::{InclusionProof, SignedAuditRoot, verify_membership};
 use mvm_core::user_config::MvmConfig;
 use mvm_hostd::supervisor::SignedEnvelope;
 
@@ -878,32 +878,7 @@ fn run_verify_inclusion(
     vk: &VerifyingKey,
     expected_tenant: &str,
 ) -> Result<String> {
-    verify_signed_root(signed_root, vk)
-        .map_err(|e| anyhow::anyhow!("signed-root verification failed: {e}"))?;
-    if signed_root.tenant != expected_tenant {
-        anyhow::bail!(
-            "tenant binding failed: signed root is for tenant '{}', expected '{}'",
-            signed_root.tenant,
-            expected_tenant
-        );
-    }
-    verify_inclusion(proof)
-        .map_err(|e| anyhow::anyhow!("inclusion-proof verification failed: {e}"))?;
-    if proof.root != signed_root.root_hash {
-        anyhow::bail!(
-            "root binding failed: proof root {} does not match the host-signed root {}",
-            proof.root,
-            signed_root.root_hash
-        );
-    }
-    if proof.tree_size != signed_root.tree_size {
-        anyhow::bail!(
-            "tree-size binding failed: proof tree_size {} does not match the host-signed \
-             tree_size {}",
-            proof.tree_size,
-            signed_root.tree_size
-        );
-    }
+    verify_membership(proof, signed_root, vk, expected_tenant)?;
     Ok(format!(
         "verified: entry at index {idx} of {n} is in the host-signed log (root {root})",
         idx = proof.leaf_index,
@@ -1701,7 +1676,9 @@ mod merkle_verb_tests {
     use super::*;
     use base64::Engine;
     use ed25519_dalek::{Signer, SigningKey};
-    use mvm_contract::merkle::{build_inclusion_proof, merkle_root, root_signing_bytes};
+    use mvm_contract::merkle::{
+        build_inclusion_proof, merkle_root, root_signing_bytes, verify_inclusion,
+    };
     use rand::Rng;
 
     fn fresh_key() -> SigningKey {
