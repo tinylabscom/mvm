@@ -179,18 +179,33 @@ capability-gated skip).
 
 ### W7 — Replace migration ratchets with permanent invariants
 
-- [ ] Add `check-single-network-path`: exactly one production endpoint binary
+- [x] Add `check-single-network-path`: exactly one production endpoint binary
       and spawn implementation, every networked backend binds `NetworkFlow`,
       and forbidden packet/NIC/gateway symbols occur only in historical specs.
-- [ ] Add a socket-owner gate permitting workload outbound connects and
+- [x] Add a socket-owner gate permitting workload outbound connects and
       ingress listener binds only inside the endpoint, with narrow enumerated
       exemptions for unrelated host infrastructure.
-- [ ] Test each gate with forbidden synthetic fixtures and its exact allowed
+- [x] Test each gate with forbidden synthetic fixtures and its exact allowed
       cases, then retire temporary L3 freeze/uniform-vsock gates that no longer
       describe the tree.
-- [ ] Add a signed-plan projection test showing TCP, UDP, DNS, typed connectors,
+- [x] Add a signed-plan projection test showing TCP, UDP, DNS, typed connectors,
       and ingress share one policy object, budget owner, identity, and audit
       sink.
+
+**Validation.** The permanent gate rejects synthetic second endpoint spawns,
+runner/channel divergence, retired L3 and guest-NIC symbols, stale public mode
+spellings, and unauthorized outbound-connect or listener-bind sites while
+preserving exact endpoint and unrelated-infrastructure cases. Endpoint
+projection tests exercise TCP, UDP, DNS, typed connectors, and ingress against
+the same policy, budget, identity, VM resource, and audit allocations. A
+connector service test additionally asserts pointer identity for the shared
+gate and recorder. Host all-target/all-feature Clippy, the complete `mvm-hostd` suite,
+the complete workspace test and doctest suite, Linux all-target and BDD-feature
+gated compilation, and all 56 BDD features pass (194 scenarios: 193 passed and
+one capability-gated skip). Formatting, dependency, advisory, license, source,
+ban, duplicate-major, closure-budget, conformance, claim, workflow-path,
+process-citation, sprint-append, one-guest-protocol, and single-network-path
+checks also pass.
 
 ### W8 — Run the final evidence matrix and close the umbrella
 

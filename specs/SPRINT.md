@@ -2740,3 +2740,10 @@ The deletion slice's standalone `mvm-agentd` fuzz lock had resolved `blake3`
 the locked invariant lane to fail closed. The lock now pins `blake3` 1.8.6;
 the patch is active and the standalone all-target fuzz check passes with
 `--locked`.
+
+## 2026-08-21 FlowMux permanent-gate harness repair
+
+The host-binary manifest integration test now reuses Cargo's prebuilt `xtask`
+binary instead of starting a nested workspace compilation. The full workspace
+test run therefore retains the manifest synchronization assertion without
+racing concurrent doctest compilation.

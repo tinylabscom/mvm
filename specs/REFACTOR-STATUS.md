@@ -1799,8 +1799,13 @@ resume` takes a `current_head` and refuses when it differs from the
         workspace, gated-target, formatting, and BDD validation pass. The
         standalone agent fuzz lock retains the reviewed vendored `arrayref`
         patch through its `blake3` 1.8.6 pin.
-  - [ ] Permanent single-path/socket-owner gates plus the final performance,
-        Firecracker, HVF, libkrun, BDD, supply-chain, and documentation matrix.
+  - [x] Permanent single-path and socket-owner invariants replace the migration
+        ratchets. Synthetic fixtures reject every forbidden endpoint, backend,
+        channel, L3/NIC, and socket-owner shape, while projection tests prove
+        every flow family shares one admitted policy, budget, identity, VM
+        resource, and audit sink.
+  - [ ] Final performance, Firecracker, HVF, libkrun, BDD, supply-chain, and
+        documentation evidence matrix.
 
 - [x] Plan 285 — L3 TUN-over-vsock network mode
   (`specs/plans/285-l3-tun-over-vsock.md`, ADR-036)

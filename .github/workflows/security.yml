@@ -273,7 +273,7 @@ jobs:
       # 1800 was chosen when this lane had four targets. It has seventeen,
       # and seventeen half-hours do not fit in six. Every nightly run was
       # stopped partway down the list — most recently after eleven targets —
-      # so the last six, `fuzz_datapath_ingress` among them, had never
+      # so the last six targets had never
       # executed on a cron run at all. The job's conclusion was `cancelled`,
       # which the lane watcher did not count, so nothing said so.
       FUZZ_SECS_SCHEDULE: 720

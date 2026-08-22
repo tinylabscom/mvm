@@ -971,7 +971,7 @@ pub struct SubstitutionService {
     redactor: RedactingSubstitution,
     /// Optional chain-signed audit recorder. When set, each substitution emits
     /// a `secret.substituted` entry (metadata only — claim 13).
-    recorder: Option<Recorder>,
+    recorder: Option<Arc<Recorder>>,
     /// The per-VM name-constrained intermediate the `https` terminator mints
     /// per-SNI leaves under. `None` ⇒ no TLS leg (`http`-only). Set from
     /// `EndpointConfig.tls_intermediate` at assemble.
@@ -987,7 +987,7 @@ pub struct SubstitutionService {
     /// against the VM's resolved network policy before any forward — an
     /// unadmitted `host:port` is refused here. `None` ⇒ this endpoint does not
     /// gate (the run loop's gate is still active); a `Some` gate fails closed.
-    egress_gate: Option<mvm_runtime::vmm::egress_gate::EgressGate>,
+    egress_gate: Option<Arc<mvm_runtime::vmm::egress_gate::EgressGate>>,
 }
 
 /// Failure to resolve host-owned transformation material by its signed plan
@@ -1353,6 +1353,12 @@ impl SubstitutionService {
     /// Attach a chain-signed audit recorder; each substitution then emits a
     /// `secret.substituted` entry (metadata only — claim 13).
     pub fn with_recorder(mut self, recorder: Recorder) -> Self {
+        self.recorder = Some(Arc::new(recorder));
+        self
+    }
+
+    /// Attach the endpoint's shared chain-signed audit sink.
+    pub fn with_shared_recorder(mut self, recorder: Arc<Recorder>) -> Self {
         self.recorder = Some(recorder);
         self
     }
@@ -1370,8 +1376,29 @@ impl SubstitutionService {
     /// Attach the claim-10 egress gate. Once attached, `process` refuses any
     /// destination the VM's network policy doesn't admit before forwarding.
     pub fn with_egress_gate(mut self, gate: mvm_runtime::vmm::egress_gate::EgressGate) -> Self {
+        self.egress_gate = Some(Arc::new(gate));
+        self
+    }
+
+    /// Attach the endpoint's shared claim-10 policy object.
+    pub fn with_shared_egress_gate(
+        mut self,
+        gate: Arc<mvm_runtime::vmm::egress_gate::EgressGate>,
+    ) -> Self {
         self.egress_gate = Some(gate);
         self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn shared_projection_ids(&self) -> (Option<usize>, Option<usize>) {
+        (
+            self.egress_gate
+                .as_ref()
+                .map(|gate| Arc::as_ptr(gate).cast::<()>() as usize),
+            self.recorder
+                .as_ref()
+                .map(|recorder| Arc::as_ptr(recorder).cast::<()>() as usize),
+        )
     }
 
     /// Assemble a ready-to-serve service from an admitted plan's secret
@@ -1436,7 +1463,7 @@ impl SubstitutionService {
                     AcceptAction::Fatal => {
                         tracing::error!(error = %e, "substitution endpoint accept failed; stopping");
                         record_listener_stopped(
-                            self.recorder.as_ref(),
+                            self.recorder.as_deref(),
                             "substitution-uds",
                             &e.to_string(),
                         )
@@ -1475,7 +1502,7 @@ impl SubstitutionService {
                     AcceptAction::Fatal => {
                         tracing::error!(error = %e, "vsock substitution accept failed; stopping");
                         record_listener_stopped(
-                            self.recorder.as_ref(),
+                            self.recorder.as_deref(),
                             "substitution-vsock",
                             &e.to_string(),
                         )
@@ -1488,7 +1515,7 @@ impl SubstitutionService {
                 Err(e) => {
                     tracing::error!(error = %e, "vsock accept task panicked; stopping");
                     record_listener_stopped(
-                        self.recorder.as_ref(),
+                        self.recorder.as_deref(),
                         "substitution-vsock",
                         &e.to_string(),
                     )
@@ -1549,7 +1576,7 @@ impl SubstitutionService {
                     AcceptAction::Fatal => {
                         tracing::error!(error = %e, "terminator accept failed; stopping");
                         record_listener_stopped(
-                            self.recorder.as_ref(),
+                            self.recorder.as_deref(),
                             "terminator",
                             &e.to_string(),
                         )
