@@ -666,7 +666,7 @@ pub fn vm_stream_socket_at(state_dir: &std::path::Path) -> std::path::PathBuf {
 /// workload's output capture is always-on, exactly one per VM, and lives and
 /// dies with the VM, so it is addressed the way the rest of that VM's state is.
 ///
-/// Survives the VM exiting: this is what `mvmctl logs` reads once the broker is
+/// Survives the VM exiting: this is what `mvmctl machine logs` reads once the broker is
 /// gone, which is half of "capturable while it runs *and* when it exits".
 pub fn vm_stream_transcript_dir_at(state_dir: &std::path::Path) -> std::path::PathBuf {
     state_dir.join("stream")

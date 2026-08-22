@@ -145,7 +145,7 @@ These are two subsystems, not two homes for one thing:
 | Path | `<vm_state_dir>/stream/` | `<audit_dir>/transcripts/<tenant>/<capture-id>/` |
 | Lifetime | lives and dies with the VM | outlives it, under `audit/` |
 | Addressed by | VM name | tenant, then capture id |
-| Read by | `mvmctl logs` | `mvmctl trust audit transcript` |
+| Read by | `mvmctl machine logs` | `mvmctl trust audit transcript` |
 | Anchored in the chain | no | yes, by design |
 
 An archive only ever learns of a transcript through a
