@@ -2732,3 +2732,11 @@ the builder image's explicit util-linux `/sbin/mount`, with a focused constant
 regression pinning that executable contract. The live lane forces a refresh of
 embedded host binaries so the guest always carries the checkout under test,
 even when Cargo caches are restored.
+
+## 2026-08-22 FlowMux deletion fuzz-lock repair
+
+The deletion slice's standalone `mvm-agentd` fuzz lock had resolved `blake3`
+1.8.7, bypassing the workspace-reviewed vendored `arrayref` patch and causing
+the locked invariant lane to fail closed. The lock now pins `blake3` 1.8.6;
+the patch is active and the standalone all-target fuzz check passes with
+`--locked`.

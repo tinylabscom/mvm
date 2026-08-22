@@ -1,6 +1,6 @@
 # Refactor status
 
-Last updated: 2026-08-21
+Last updated: 2026-08-22
 
 This is the cross-plan progress index. The owning plan remains authoritative
 for detailed scope and acceptance criteria.
@@ -1796,7 +1796,9 @@ resume` takes a `current_head` and refuses when it differs from the
   - [x] Delete frozen L3 contract, guest, host, VMM, dependency, packaging,
         kernel, CI, and test slices. More than 41,000 lines and every L3-only
         binary/dependency are gone; dependency, supply-chain, closure, full
-        workspace, gated-target, formatting, and BDD validation pass.
+        workspace, gated-target, formatting, and BDD validation pass. The
+        standalone agent fuzz lock retains the reviewed vendored `arrayref`
+        patch through its `blake3` 1.8.6 pin.
   - [ ] Permanent single-path/socket-owner gates plus the final performance,
         Firecracker, HVF, libkrun, BDD, supply-chain, and documentation matrix.
 

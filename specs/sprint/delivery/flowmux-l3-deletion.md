@@ -20,6 +20,10 @@ Clippy, all-feature gated compilation, formatting, the complete workspace test
 and doctest suite, and all 56 BDD features pass (194 scenarios: 193 passed and
 one capability-gated skip).
 
+The standalone `mvm-agentd` fuzz lock pins `blake3` 1.8.6 so the
+workspace-reviewed vendored `arrayref` patch remains active; its locked
+all-target check passes.
+
 Claim 5 now names the permanent FlowMux frame-decoder and session-state fuzz
 targets instead of the deleted raw-packet datapath harness. The claim catalog
 therefore fails if either replacement witness disappears.

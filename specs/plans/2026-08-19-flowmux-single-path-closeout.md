@@ -161,12 +161,17 @@ consecutive runs.
       delete scenarios for intentionally unsupported raw networking.
 - [x] Run dependency, advisory, license, duplicate-major, and closure-budget
       checks with no L3-only binary or dependency left.
+- [x] Refresh the standalone `mvm-agentd` fuzz lock to the reviewed `blake3`
+      1.8.6 graph so the vendored `arrayref` patch remains active under
+      `--locked` validation.
 
 **Validation.** W6 removes more than 41,000 lines across the raw-packet
 contract, guest agent, host gateway, VMM lifecycle, packaging, Nix, kernel, CI,
 fuzz, and live-product slices. `cargo machete` reports no unused dependencies;
 advisory, license, source, ban, duplicate-major, default-closure, and
-all-feature closure checks pass. The all-feature closure is 468 crates, with
+all-feature closure checks pass. The standalone agent fuzz graph also passes
+its locked all-target check with the reviewed `arrayref` patch active. The
+all-feature closure is 468 crates, with
 default Linux and macOS closures at 235 and 226. Host all-target Clippy,
 all-feature gated compilation, formatting, the complete workspace test and
 doctest suite, and all 56 BDD features pass (194 scenarios: 193 passed and one
