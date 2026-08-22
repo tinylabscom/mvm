@@ -1,7 +1,6 @@
 # Refactor status
 
 Last updated: 2026-08-22
-
 ## Completed
 
 - [x] **AI egress metering and token budgets** —

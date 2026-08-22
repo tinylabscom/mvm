@@ -107,13 +107,15 @@ export function Hero() {
             </Reveal>
 
             <Reveal delay={80}>
-              {/* Mono sets ~20% wider than the Inter clamp this replaced —
-                  ceiling and max-width are both retuned for the mono
-                  metrics, not carried over from the sans-face values.
-                  Verified no overflow at 390/1024/1440 (rag.mjs). */}
+              {/* Sized for Inter, not for the mono face this used to set in:
+                  Inter runs ~20% narrower at the same point size, so the
+                  ceiling goes up and the max-widths come down to hold the
+                  same two-line break. Tracking is -0.03em rather than the
+                  -0.01em mono wanted — a sans this large needs the pull, and
+                  it is most of what keeps the headline from reading generic. */}
               <h1
-                className="max-w-[15rem] sm:max-w-[24rem] lg:max-w-lg lowercase font-display font-bold leading-[1.08] tracking-[-0.01em] text-title"
-                style={{ fontSize: "clamp(2.25rem, 4.2vw, 3.25rem)" }}
+                className="max-w-[16rem] sm:max-w-[26rem] lg:max-w-xl lowercase font-display font-semibold leading-[1.05] tracking-[-0.03em] text-title"
+                style={{ fontSize: "clamp(2.5rem, 4.8vw, 3.9rem)" }}
               >
                 Run code you don&rsquo;t <span className="text-accent-2">trust</span>.
               </h1>
