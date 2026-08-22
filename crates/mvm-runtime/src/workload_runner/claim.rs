@@ -371,7 +371,9 @@ mod tests {
         fn spawn(&self, req: &NetworkEndpointSpawnRequest<'_>) -> anyhow::Result<SpawnedEndpoint> {
             *self.seen_vm.lock().unwrap() = Some(req.vm_name.to_string());
             Ok(SpawnedEndpoint {
-                egress_uds: mvm_core::config::vm_network_endpoint_socket(req.vm_name),
+                egress_uds: PathBuf::from("fake-endpoints")
+                    .join(req.vm_name)
+                    .join("substitution-endpoint.sock"),
                 identity_drive: None,
             })
         }
@@ -396,12 +398,6 @@ mod tests {
 
     #[test]
     fn claim_guards_spawn_endpoint_keys_the_socket_on_the_given_vm() {
-        // The endpoint socket is `MVM_HOME`-rooted; serialize against tests that
-        // mutate `MVM_HOME` (the warm-claim runner tests) so the spawn and the
-        // expected-path recompute both read one stable home.
-        let _home = crate::base::runtime_meta::HOME_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
         let spawner = FakeSpawner::default();
         let guards = ClaimGuards::new(&spawner);
         let redaction = RedactionPolicy::default();
@@ -411,8 +407,12 @@ mod tests {
                 443,
             )]);
         let state = tempfile::tempdir().unwrap();
-        let expected_child = mvm_core::config::vm_network_endpoint_socket("child-a");
-        let expected_sibling = mvm_core::config::vm_network_endpoint_socket("child-b");
+        let expected_child = PathBuf::from("fake-endpoints")
+            .join("child-a")
+            .join("substitution-endpoint.sock");
+        let expected_sibling = PathBuf::from("fake-endpoints")
+            .join("child-b")
+            .join("substitution-endpoint.sock");
 
         let mut child = guards
             .spawn_endpoint(

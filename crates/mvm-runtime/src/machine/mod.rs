@@ -31,10 +31,6 @@ pub enum NetworkMode {
     HostVsockProxy,
 }
 
-/// The guest-NIC invariant, checked on the launch specification so every
-/// launcher inherits it rather than each remembering.
-pub mod nic_guard;
-
 const DEFAULT_CPUS: u32 = 1;
 const DEFAULT_MEMORY_MIB: u64 = 512;
 

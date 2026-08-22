@@ -264,11 +264,11 @@ fn build_echo_request(ip: IpAddr, seq: u16, payload_len: u16) -> Vec<u8> {
 /// The 16-bit one's-complement checksum from RFC 1071.
 fn internet_checksum(data: &[u8]) -> u16 {
     let mut sum: u32 = 0;
-    let mut chunks = data.chunks_exact(2);
-    for pair in &mut chunks {
+    let (chunks, remainder) = data.as_chunks::<2>();
+    for pair in chunks {
         sum += u32::from(u16::from_be_bytes([pair[0], pair[1]]));
     }
-    if let Some(&last) = chunks.remainder().first() {
+    if let Some(&last) = remainder.first() {
         sum += u32::from(u16::from_be_bytes([last, 0]));
     }
     while sum >> 16 != 0 {

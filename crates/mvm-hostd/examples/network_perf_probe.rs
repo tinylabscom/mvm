@@ -1,10 +1,10 @@
 //! Release-only host-loopback producer for `xtask network-perf run-probe`.
 
 use std::io::{Read, Write};
-use std::net::{IpAddr, TcpListener, ToSocketAddrs, UdpSocket};
+use std::net::{IpAddr, TcpListener, UdpSocket};
 use std::os::unix::net::UnixStream;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -24,7 +24,6 @@ use mvm_core::crypto::secret_store::{FileSecretStore, SecretStore};
 use mvm_core::substitution_wire::{WireRequest, WireResponse};
 use mvm_hostd::keyholder::resolver::LocalResolver;
 use mvm_hostd::keyholder::substitution::SubstitutionRegistry;
-use mvm_hostd::netd::userspace::benchmark::LegacyL3Fixture;
 use mvm_hostd::supervisor::flowmux::registry::RegistryLimits;
 use mvm_hostd::supervisor::flowmux::{FlowMuxAccept, FlowMuxSession};
 use mvm_hostd::supervisor::network_endpoint_proxy::{
@@ -36,9 +35,7 @@ use xtask::network_perf::{
     ProbeCase, SCHEMA_VERSION, SampleMatrix,
 };
 
-// The matrix is shared across TCP, UDP, DNS, and typed HTTP. Keep its largest
-// payload below the retired L3 path's fixed MTU so UDP remains a valid single
-// datagram rather than measuring an admission refusal.
+// The matrix is shared across TCP, UDP, DNS, and typed HTTP.
 const PAYLOAD_BYTES: [u64; 2] = [64, 1024];
 const CONCURRENCY: [u32; 1] = [1];
 const TIMEOUT: Duration = Duration::from_secs(5);
@@ -57,31 +54,14 @@ fn main() -> Result<()> {
     let mut cases = Vec::new();
     for payload_bytes in PAYLOAD_BYTES {
         let payload = usize::try_from(payload_bytes).context("payload fits usize")?;
-        match implementation {
-            Implementation::LegacyL3 => {
-                cases.push(benchmark_legacy_tcp(payload, samples)?);
-                cases.push(benchmark_legacy_udp(payload, samples)?);
-                cases.push(benchmark_legacy_dns(payload_bytes, samples)?);
-                cases.push(benchmark_legacy_typed_http(payload, samples)?);
-            }
-            Implementation::FlowMux => {
-                cases.push(
-                    benchmark_flowmux_tcp(payload, samples)
-                        .context("benchmark FlowMux opaque TCP")?,
-                );
-                cases.push(
-                    benchmark_flowmux_udp(payload, samples).context("benchmark FlowMux UDP")?,
-                );
-                cases.push(
-                    benchmark_flowmux_dns(payload_bytes, samples)
-                        .context("benchmark FlowMux DNS")?,
-                );
-                cases.push(
-                    benchmark_flowmux_typed_http(payload, samples)
-                        .context("benchmark FlowMux typed HTTP")?,
-                );
-            }
-        }
+        cases
+            .push(benchmark_flowmux_tcp(payload, samples).context("benchmark FlowMux opaque TCP")?);
+        cases.push(benchmark_flowmux_udp(payload, samples).context("benchmark FlowMux UDP")?);
+        cases.push(benchmark_flowmux_dns(payload_bytes, samples).context("benchmark FlowMux DNS")?);
+        cases.push(
+            benchmark_flowmux_typed_http(payload, samples)
+                .context("benchmark FlowMux typed HTTP")?,
+        );
     }
     let report = NetworkPerfProbe {
         schema_version: SCHEMA_VERSION,
@@ -108,7 +88,6 @@ fn main() -> Result<()> {
 
 fn implementation_from_env() -> Result<Implementation> {
     match required_env("MVM_NETWORK_PERF_IMPLEMENTATION")?.as_str() {
-        "legacy_l3" => Ok(Implementation::LegacyL3),
         "flow_mux" => Ok(Implementation::FlowMux),
         other => bail!("unknown MVM_NETWORK_PERF_IMPLEMENTATION {other:?}"),
     }
@@ -130,151 +109,6 @@ fn required_env(name: &str) -> Result<String> {
         bail!("{name} must not be empty");
     }
     Ok(value)
-}
-
-fn benchmark_legacy_tcp(payload_bytes: usize, samples: u32) -> Result<ProbeCase> {
-    let listener = TcpListener::bind("0.0.0.0:0")?;
-    let addr = std::net::SocketAddr::new(local_test_ip()?, listener.local_addr()?.port());
-    let server = thread::spawn(move || -> std::io::Result<()> {
-        for _ in 0..samples {
-            let (mut stream, _) = listener.accept()?;
-            stream.set_read_timeout(Some(TIMEOUT))?;
-            let mut body = vec![0; payload_bytes];
-            stream.read_exact(&mut body)?;
-            stream.write_all(&body)?;
-        }
-        Ok(())
-    });
-    let payload = vec![0x5a; payload_bytes];
-    let mut fixture = LegacyL3Fixture::for_target(addr, Proto::Tcp)?;
-    let usage = Usage::start()?;
-    let elapsed = Instant::now();
-    let mut connect = Vec::with_capacity(samples as usize);
-    let mut request = Vec::with_capacity(samples as usize);
-    for _ in 0..samples {
-        let (connect_elapsed, request_elapsed) = fixture.tcp_echo(addr, &payload)?;
-        connect.push(micros(connect_elapsed));
-        request.push(micros(request_elapsed));
-    }
-    join_server(server)?;
-    ProbeCaseBuilder::new(NetworkPath::OpaqueTcp, payload_bytes)
-        .connect_latency(connect)
-        .request_latency(request)
-        .elapsed(elapsed.elapsed())
-        .transferred_bytes(transferred(payload_bytes, samples)?)
-        .usage(usage.finish()?)
-        .build()
-}
-
-fn benchmark_legacy_udp(payload_bytes: usize, samples: u32) -> Result<ProbeCase> {
-    let server_socket = UdpSocket::bind("0.0.0.0:0")?;
-    let addr = std::net::SocketAddr::new(local_test_ip()?, server_socket.local_addr()?.port());
-    server_socket.set_read_timeout(Some(TIMEOUT))?;
-    let server = thread::spawn(move || -> std::io::Result<()> {
-        let mut body = vec![0; payload_bytes];
-        for _ in 0..samples {
-            let (len, peer) = server_socket.recv_from(&mut body)?;
-            server_socket.send_to(&body[..len], peer)?;
-        }
-        Ok(())
-    });
-    let mut fixture = LegacyL3Fixture::for_target(addr, Proto::Udp)?;
-    let payload = vec![0x6b; payload_bytes];
-    let usage = Usage::start()?;
-    let elapsed = Instant::now();
-    let mut request = Vec::with_capacity(samples as usize);
-    for _ in 0..samples {
-        request.push(micros(fixture.udp_echo(addr, &payload)?));
-    }
-    join_server(server)?;
-    ProbeCaseBuilder::new(NetworkPath::Udp, payload_bytes)
-        .request_latency(request)
-        .elapsed(elapsed.elapsed())
-        .transferred_bytes(transferred(payload_bytes, samples)?)
-        .usage(usage.finish()?)
-        .build()
-}
-
-fn benchmark_legacy_dns(payload_bytes: u64, samples: u32) -> Result<ProbeCase> {
-    let usage = Usage::start()?;
-    let elapsed = Instant::now();
-    let mut request = Vec::with_capacity(samples as usize);
-    for _ in 0..samples {
-        let started = Instant::now();
-        let addresses = ("localhost", 0).to_socket_addrs()?.collect::<Vec<_>>();
-        if addresses.is_empty() {
-            bail!("localhost resolved to no addresses");
-        }
-        request.push(micros(started.elapsed()));
-    }
-    ProbeCaseBuilder::new(NetworkPath::Dns, usize::try_from(payload_bytes)?)
-        .request_latency(request)
-        .elapsed(elapsed.elapsed())
-        .completed_operations(u64::from(samples))
-        .usage(usage.finish()?)
-        .build()
-}
-
-fn benchmark_legacy_typed_http(payload_bytes: usize, samples: u32) -> Result<ProbeCase> {
-    let dir = tempfile::tempdir()?;
-    let path = dir.path().join("typed-http.sock");
-    let (_secret_dir, service) = echo_substitution_service()?;
-    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
-    let (ready_tx, ready_rx) = mpsc::sync_channel(1);
-    let server_path = path.clone();
-    let server = thread::spawn(move || -> Result<()> {
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()?;
-        runtime.block_on(async move {
-            let listener = tokio::net::UnixListener::bind(&server_path)?;
-            let task = tokio::spawn(service.serve(listener));
-            ready_tx.send(()).context("announce typed HTTP fixture")?;
-            let _ = shutdown_rx.await;
-            task.abort();
-            let _ = task.await;
-            Ok::<_, anyhow::Error>(())
-        })
-    });
-    ready_rx.recv().context("wait for typed HTTP fixture")?;
-    let request_wire = WireRequest {
-        method: "POST".into(),
-        url: "https://fixture.invalid/echo".into(),
-        headers: vec![],
-        body_b64: B64.encode(vec![0x7c; payload_bytes]),
-    };
-    let usage = Usage::start()?;
-    let elapsed = Instant::now();
-    let mut connect = Vec::with_capacity(samples as usize);
-    let mut request = Vec::with_capacity(samples as usize);
-    let mut bytes = 0_u64;
-    for _ in 0..samples {
-        let started = Instant::now();
-        let mut stream = UnixStream::connect(&path)?;
-        connect.push(micros(started.elapsed()));
-        let started = Instant::now();
-        bytes = bytes.saturating_add(write_json(&mut stream, &request_wire)?);
-        let response: WireResponse = read_json(&mut stream)?;
-        let WireResponse::Ok { body_b64, .. } = response else {
-            bail!("typed HTTP fixture refused its echo request");
-        };
-        if B64.decode(&body_b64)? != vec![0x7c; payload_bytes] {
-            bail!("typed HTTP echo changed the payload");
-        }
-        bytes = bytes.saturating_add(u64::try_from(body_b64.len())?);
-        request.push(micros(started.elapsed()));
-    }
-    let _ = shutdown_tx.send(());
-    server
-        .join()
-        .map_err(|_| anyhow::anyhow!("typed HTTP fixture panicked"))??;
-    ProbeCaseBuilder::new(NetworkPath::TransformedHttp, payload_bytes)
-        .connect_latency(connect)
-        .request_latency(request)
-        .elapsed(elapsed.elapsed())
-        .transferred_bytes(bytes)
-        .usage(usage.finish()?)
-        .build()
 }
 
 fn benchmark_flowmux_tcp(payload_bytes: usize, samples: u32) -> Result<ProbeCase> {
@@ -596,23 +430,6 @@ fn join_flowmux(host: FlowMuxHost) -> Result<()> {
     host.join()
         .map_err(|_| anyhow::anyhow!("FlowMux host fixture panicked"))??;
     Ok(())
-}
-
-fn read_json<T: serde::de::DeserializeOwned>(stream: &mut UnixStream) -> Result<T> {
-    let mut length = [0; 4];
-    stream.read_exact(&mut length)?;
-    let length = usize::try_from(u32::from_be_bytes(length))?;
-    let mut body = vec![0; length];
-    stream.read_exact(&mut body)?;
-    serde_json::from_slice(&body).context("decode typed HTTP fixture frame")
-}
-
-fn write_json<T: serde::Serialize>(stream: &mut UnixStream, value: &T) -> Result<u64> {
-    let body = serde_json::to_vec(value)?;
-    let length = u32::try_from(body.len()).context("typed HTTP fixture frame too large")?;
-    stream.write_all(&length.to_be_bytes())?;
-    stream.write_all(&body)?;
-    Ok(u64::from(length) + 4)
 }
 
 struct Usage {
