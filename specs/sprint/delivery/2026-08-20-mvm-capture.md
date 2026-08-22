@@ -20,6 +20,9 @@ Implemented the first slice of `mvm capture`.
 - Added library and CLI integration tests proving report versioning, secret
   redaction, canonical IR resolution, and Nix rendering.
 - Added ADR-050 and plan `specs/plans/2026-08-20-mvm-capture.md`.
+- Raised the all-features workspace closure ratchet by one, from 477 to 478,
+  for the new first-party `mvm-capture` crate itself; its third-party
+  dependencies were already present in the closure.
 - Updated `public/src/content/docs/reference/cli-commands.md` and added
   `public/src/content/docs/guides/capture.md`.
 

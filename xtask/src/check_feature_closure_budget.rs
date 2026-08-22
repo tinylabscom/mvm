@@ -42,6 +42,10 @@ const BUDGET_TARGET: &str = "x86_64-unknown-linux-gnu";
 /// Lower it freely as deps drop; raising it must be justified in the change
 /// that does.
 ///
+/// 478 (was 477): the first-party `mvm-capture` workspace crate. Its third-party
+/// dependencies were already present; the single new closure node is the crate
+/// itself, compiled by the all-features workspace lanes.
+///
 /// 477 (was 476): the first-party `mvm-mcp` crate. It is the +1 itself — its
 /// only dependencies are workspace crates already in this closure
 /// (`mvm-client`, `chrono`, `serde`, `serde_json`, `thiserror`, `tokio`), so it
@@ -52,7 +56,7 @@ const BUDGET_TARGET: &str = "x86_64-unknown-linux-gnu";
 /// 476 (was 475): `sigstore-tuf` enters with the sigstore-verify 0.9→0.11
 /// upgrade; it was absent from 0.9's dependency graph and is reachable only
 /// behind the `manifest-verify` optional feature.
-const FEATURE_CLOSURE_BUDGET: usize = 477;
+const FEATURE_CLOSURE_BUDGET: usize = 478;
 
 /// The two gates measure nested sets — everything in the default closure is
 /// reachable with all features on — so a feature budget at or below the default

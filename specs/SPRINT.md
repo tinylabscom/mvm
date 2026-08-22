@@ -2732,3 +2732,10 @@ the builder image's explicit util-linux `/sbin/mount`, with a focused constant
 regression pinning that executable contract. The live lane forces a refresh of
 embedded host binaries so the guest always carries the checkout under test,
 even when Cargo caches are restored.
+
+## 2026-08-22 capture all-features closure witness
+
+The `mvm-capture` workspace addition raises the all-features closure by exactly
+one first-party node, from 477 to 478, without adding a new third-party crate.
+The feature-closure ratchet and delivery evidence now record that measured
+change explicitly.

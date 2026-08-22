@@ -92,6 +92,4 @@ See `specs/adrs/050-mvm-capture-project-environment.md`.
 - [x] Filesystem traversal is bounded.
 - [x] No discovered executable is run automatically.
 - [x] Linux-specific functionality is isolated from unsupported platforms.
-- [ ] Full workspace clippy is blocked by pre-existing `mvm-core`
-      `double_must_use` warnings on the nightly toolchain; these are
-      unrelated to this change.
+- [x] Full workspace clippy passes with `--all-targets -- -D warnings`.
