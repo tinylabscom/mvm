@@ -795,6 +795,19 @@ mod tests {
             smoke.find(grant) < smoke.find("Build and boot the sealed exit_code workload"),
             "vhost-vsock access must be granted before QEMU starts"
         );
+        let current_embedded_bins = concat!(
+            "      - name: Build mvmctl\n",
+            "        env:\n",
+            "          # This witness boots embedded builder-guest code. A restored Cargo\n",
+            "          # cache may contain binaries built from an older source tree, which\n",
+            "          # would make the live gate validate stale mvm-host-vm-init behavior.\n",
+            "          MVM_EMBED_NO_CACHE: 1\n",
+            "        run: cargo build --release -p mvmctl",
+        );
+        assert!(
+            smoke.contains(current_embedded_bins),
+            "the live AArch64 gate must rebuild embedded host binaries from its checkout"
+        );
     }
 
     #[test]

@@ -2721,3 +2721,14 @@ wrong UDS alternative. Recovery and transport alternatives now match every
 `BackendKind` exhaustively, and a focused WebLinux negotiation witness requires
 the browser-channel route. A missing backend arm is therefore a compile error,
 while the behavior-specific test catches a wrong explicit alternative.
+
+## 2026-08-22 AArch64 before-build loop mount repair
+
+The merge-group AArch64 QEMU witness completed its workload build but failed
+the before-build lifecycle hook because bare `mount` resolved to BusyBox.
+BusyBox forwarded `loop` to ext4 instead of allocating a loop device, so the
+guest powered down without returning `rootfs.ext4`. The hook runner now calls
+the builder image's explicit util-linux `/sbin/mount`, with a focused constant
+regression pinning that executable contract. The live lane forces a refresh of
+embedded host binaries so the guest always carries the checkout under test,
+even when Cargo caches are restored.
