@@ -244,8 +244,10 @@ Use these as prior art, not as unreviewed vendored artifacts:
   - Workers;
   - browser/version support.
 - [ ] 2.7 Boot the upstream Alpine demo image only as a toolchain smoke test.
-- [ ] 2.8 Boot an `mvm`-built x86_64 kernel and minimal `mkGuest` rootfs with
-      `console=ttyS0 root=/dev/vda init=/init`.
+- [x] 2.8 Boot an `mvm`-built x86_64 kernel and minimal busybox rootfs under
+      headless Chromium. The smoke guest uses `console=ttyS0 root=/dev/vda`
+      with busybox `init` + `/etc/inittab`, and the headless-Chromium harness
+      reports `SMOKE-RESULT: READY` in ~26 s with a peak RSS of ~2.5 GiB.
 - [ ] 2.9 Stream serial output from a dedicated QEMU Worker without blocking
       the editor/main thread.
 - [ ] 2.10 Record:

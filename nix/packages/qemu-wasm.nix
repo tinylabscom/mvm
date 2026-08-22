@@ -20,6 +20,7 @@
   stdenv,
   fetchurl,
   python3,
+  writeShellScript,
   pkg-config,
   ninja,
   meson,
@@ -28,7 +29,6 @@
   libtool,
   perl,
   gettext,
-  makeWrapper,
   unzip,
 }:
 
@@ -203,6 +203,15 @@ let
 
   depsPrefix = "/builddeps/target";
 
+  # Wrapper for Emscripten's file_packager.py.  It must run with a writable
+  # HOME because Emscripten writes cache/lock files there.  Using a runtime
+  # expansion of TMPDIR keeps the wrapper usable from other derivations and
+  # from user shells, instead of hardcoding the engine's build-time TMPDIR.
+  filePackagerWrapper = writeShellScript "qemu-wasm-file-packager" ''
+    export HOME="''${TMPDIR:-/tmp}"
+    exec ${python3}/bin/python ${emscripten}/share/emscripten/tools/file_packager.py "$@"
+  '';
+
   crossMeson = ./emscripten-cross.meson;
 in
 
@@ -228,7 +237,6 @@ stdenv.mkDerivation (finalAttrs: {
     automake
     libtool
     unzip
-    makeWrapper
   ];
 
   postUnpack = ''
@@ -485,10 +493,9 @@ stdenv.mkDerivation (finalAttrs: {
     cp qemu-wasm-src/pc-bios/{bios-256k.bin,vgabios-stdvga.bin,kvmvapic.bin,linuxboot_dma.bin} \
       $out/share/qemu-wasm/bios/ 2>/dev/null || true
 
-    makeWrapper ${emscripten}/share/emscripten/tools/file_packager.py \
-      $out/bin/qemu-wasm-file-packager \
-      --set PYTHON ${python3}/bin/python \
-      --set HOME $TMPDIR
+    mkdir -p $out/bin
+    cp ${filePackagerWrapper} $out/bin/qemu-wasm-file-packager
+    chmod +x $out/bin/qemu-wasm-file-packager
 
     cat > $out/share/qemu-wasm/PINS <<'PINS_EOF'
     qemu-wasm ${qemuWasmRev}

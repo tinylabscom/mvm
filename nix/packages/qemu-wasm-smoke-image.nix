@@ -20,7 +20,25 @@ let
 
   # Reuse mvm's slim kernel base, but cross-built for x86_64.
   kernelBase = import ../images/kernel/base.nix { pkgs = crossPkgs; };
-  kernel = kernelBase.mkKernel { extraDisables = [ "IPV6" ]; };
+  kernelConfig = kernelBase.mkConfigfile {
+    extraDisables = [ "IPV6" ];
+    extraEnables = [
+      # QEMU-Wasm exposes the x86_64 machine's 8250 UART as the console
+      # for -nographic. The base config enables these only on arm64.
+      "SERIAL_8250"
+      "SERIAL_8250_CONSOLE"
+    ];
+  };
+
+  kernel = kernelBase.mkKernel {
+    extraDisables = [ "IPV6" ];
+    extraEnables = [
+      # QEMU-Wasm exposes the x86_64 machine's 8250 UART as the console
+      # for -nographic. The base config enables these only on arm64.
+      "SERIAL_8250"
+      "SERIAL_8250_CONSOLE"
+    ];
+  };
 
   # Static busybox for the guest.
   busybox = crossPkgs.busybox.override { enableStatic = true; };
@@ -31,7 +49,7 @@ let
       inherit busybox;
     }
     ''
-      mkdir -p rootfs/bin rootfs/etc/init.d rootfs/proc rootfs/sys rootfs/tmp rootfs/run
+      mkdir -p rootfs/bin rootfs/etc rootfs/dev rootfs/proc rootfs/sys rootfs/tmp rootfs/run
       cp ${busybox}/bin/busybox rootfs/bin/busybox
       chmod +x rootfs/bin/busybox
       # Use the build-platform busybox to enumerate applets; the cross-built
@@ -40,15 +58,16 @@ let
         ln -s busybox rootfs/bin/$applet
       done
 
-      cat > rootfs/init <<'EOF2'
-      #!/bin/busybox sh
-      mount -t proc proc /proc
-      mount -t sysfs sysfs /sys
-      mount -t tmpfs tmpfs /tmp
-      echo "QEMU-WASM-SMOKE-READY"
-      exec /bin/sh
-      EOF2
-      chmod +x rootfs/init
+      # Use busybox init directly so the marker is emitted as a sysinit
+      # action and a shell is respawned on the serial console.  A script
+      # shebang would also work, but relying on the init applet avoids any
+      # permission/execution edge cases inside the minimal ext2 rootfs.
+      ln -s bin/busybox rootfs/init
+
+      cat > rootfs/etc/inittab <<'EOF2'
+::sysinit:/bin/echo QEMU-WASM-SMOKE-READY
+console::respawn:-/bin/sh
+EOF2
 
       # Create a small ext2 rootfs. 8 MiB is enough for busybox + inodes.
       rm -f $out
@@ -73,6 +92,8 @@ stdenv.mkDerivation {
     mkdir -p $out
     cp ${kernel}/bzImage $out/kernel.img
     cp ${rootfs} $out/rootfs.bin
+    # Keep the final .config for debugging kernel console/driver enablement.
+    cp ${kernelConfig} $out/kernel.config
     runHook postInstall
   '';
 

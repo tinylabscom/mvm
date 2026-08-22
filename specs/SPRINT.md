@@ -2491,9 +2491,10 @@ Browser-hosted demo scoped in `specs/plans/2026-08-21-weblinux-browser-demo.md`.
       Pinned upstream revisions and added `nix/packages/qemu-wasm.nix`;
       `nix build .#qemu-wasm-engine` verified inside the aarch64-linux HVF
       builder VM.
-- [ ] 2.8 Boot an `mvm`-built x86_64 kernel under headless Chromium and record measurements.
+- [x] 2.8 Boot an `mvm`-built x86_64 kernel under headless Chromium and record measurements.
       - [x] 2.8.1 Build a minimal x86_64 smoke guest image (`nix/packages/qemu-wasm-smoke-image.nix`) and verify it inside the aarch64-linux builder VM.
       - [x] 2.8.2 Package the image + engine + pc-bios into a browser preload pack (`nix/packages/qemu-wasm-smoke-pack.nix`) using Emscripten's `file_packager.py`; verified end-to-end in the builder VM.
+      - [x] 2.8.3 Fix the `qemu-wasm-file-packager` wrapper so it expands the caller's `TMPDIR` at runtime instead of hardcoding the engine build-time `/build`; rerun the smoke test and confirm `SMOKE-RESULT: READY` in ~26 s.
 
 Workstream 1 first slice (1.1, 1.7) and the WS-2 engine packaging
 scaffolding landed in PR #2776.
