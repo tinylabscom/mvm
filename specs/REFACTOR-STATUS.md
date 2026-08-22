@@ -1793,19 +1793,18 @@ resume` takes a `current_head` and refuses when it differs from the
         IR, SDK, schema, CLI, fixtures, and docs expose no raw-network mode;
         stale serialized input receives an explicit migration refusal, while
         supported loopback adapters and typed connectors remain on FlowMux.
-  - [ ] Delete frozen L3 contract, guest, host, VMM, dependency, packaging,
-        kernel, CI, and test slices.
+  - [x] Delete frozen L3 contract, guest, host, VMM, dependency, packaging,
+        kernel, CI, and test slices. More than 41,000 lines and every L3-only
+        binary/dependency are gone; dependency, supply-chain, closure, full
+        workspace, gated-target, formatting, and BDD validation pass.
   - [ ] Permanent single-path/socket-owner gates plus the final performance,
         Firecracker, HVF, libkrun, BDD, supply-chain, and documentation matrix.
 
-- [~] Plan 285 — L3 TUN-over-vsock network mode
+- [x] Plan 285 — L3 TUN-over-vsock network mode
   (`specs/plans/285-l3-tun-over-vsock.md`, ADR-036)
-  **Frozen by plan 316 Phase 0.** No feature work lands on this runtime path;
-  only security fixes needed to keep the tree safe during migration may modify
-  it. ADR-036 is superseded for production workload networking, and new
-  `raw_ip_stack=true` / `NetworkMode::L3Vsock` launches are refused. Deletion
-  is plan 316 Phase 7 (#2376). The completed workstreams below stand as
-  historical record.
+  **Retired and deleted by plan 316.** ADR-036 is superseded for production
+  workload networking. The completed workstreams below stand only as a
+  historical record of the removed implementation.
   - [x] W1–W8 — canonical `NetworkMode::L3Vsock`, the shared fuzzable wire
         protocol, the pure policy core, the guest `mvm-net-agent`, the
         machine-scoped host gateway, audit kinds, docs, and the unprivileged
@@ -1829,10 +1828,9 @@ resume` takes a `current_head` and refuses when it differs from the
         numeric ports are derived only at the VMM boundary
   - [x] Removed builder-role policy from `VmmSpec`; all boots require the
         typed substitution channel and HVF fails closed when it is absent
-  - [ ] macOS forwarding backend — capability-declared and refusing; the
-        userspace socket gateway is not implemented
-  - [ ] WSL2 validation on a real runner; node-to-node transport; mvmd
-        node-control RPC surface
+  - [~] Historical remainder intentionally descoped with deletion: macOS and
+        WSL2 forwarding validation, node-to-node transport, and the dormant
+        node-control surface are not part of the FlowMux product path.
 
 - [~] Plan 265 — Fast-start SLO, backend sequencing & competitive positioning
   (`specs/plans/265-fast-start-slo-sequencing-positioning.md`)

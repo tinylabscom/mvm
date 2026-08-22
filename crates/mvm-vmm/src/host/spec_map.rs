@@ -202,12 +202,6 @@ pub struct WorkloadSockets<'a> {
     /// unadmitted VM carries no broker port, so a stray guest dial stays
     /// `ECONNREFUSED` (fail-closed).
     pub broker: Option<&'a Path>,
-    /// L3 tunnel control: the guest dials `NetworkControl` when the admitted
-    /// plan selects `l3-vsock`; absent for every other network mode.
-    pub network_control: Option<&'a Path>,
-    /// L3 tunnel packet queue zero: the guest dials `NetworkData` when the
-    /// admitted plan selects `l3-vsock`; absent for every other network mode.
-    pub network_data: Option<&'a Path>,
     /// Dev-only interactive console data ports: one host UDS per port in
     /// `dev_console_data_ports()`, pre-opened so a PTY can attach. Empty for
     /// sealed prod boots (`dev_console = false` in `VmStartConfig`).
@@ -246,20 +240,6 @@ pub fn workload_vsock_ports(socks: &WorkloadSockets) -> Vec<VsockPort> {
         ports.push(VsockPort {
             service: GuestService::Broker,
             host_uds: broker.into(),
-            direction: VsockDirection::GuestDials,
-        });
-    }
-    if let Some(network_control) = socks.network_control {
-        ports.push(VsockPort {
-            service: GuestService::NetworkControl,
-            host_uds: network_control.into(),
-            direction: VsockDirection::GuestDials,
-        });
-    }
-    if let Some(network_data) = socks.network_data {
-        ports.push(VsockPort {
-            service: GuestService::NetworkData { queue: 0 },
-            host_uds: network_data.into(),
             direction: VsockDirection::GuestDials,
         });
     }
@@ -882,8 +862,6 @@ mod tests {
             egress_gateway: Some(Path::new("/run/egress.sock")),
             exit: Path::new("/run/workload.exit"),
             broker: None,
-            network_control: None,
-            network_data: None,
             console_data: Vec::new(),
             ingress_tcp: Vec::new(),
         };
@@ -907,43 +885,12 @@ mod tests {
     }
 
     #[test]
-    fn workload_vsock_ports_wire_l3_control_and_data_channels_when_present() {
-        let socks = WorkloadSockets {
-            agent: Path::new("/run/agent.sock"),
-            egress_gateway: Some(Path::new("/run/egress.sock")),
-            exit: Path::new("/run/workload.exit"),
-            broker: None,
-            network_control: Some(Path::new("/run/network-control.sock")),
-            network_data: Some(Path::new("/run/network-data-0.sock")),
-            console_data: Vec::new(),
-            ingress_tcp: Vec::new(),
-        };
-        let ports = workload_vsock_ports(&socks);
-
-        let control = ports
-            .iter()
-            .find(|port| port.service == GuestService::NetworkControl)
-            .expect("l3 control channel is present");
-        assert_eq!(control.direction, VsockDirection::GuestDials);
-        assert_eq!(control.host_uds, PathBuf::from("/run/network-control.sock"));
-
-        let data = ports
-            .iter()
-            .find(|port| port.service == (GuestService::NetworkData { queue: 0 }))
-            .expect("l3 data channel is present");
-        assert_eq!(data.direction, VsockDirection::GuestDials);
-        assert_eq!(data.host_uds, PathBuf::from("/run/network-data-0.sock"));
-    }
-
-    #[test]
     fn workload_vsock_ports_omit_egress_when_the_policy_grants_none() {
         let socks = WorkloadSockets {
             agent: Path::new("/run/agent.sock"),
             egress_gateway: None,
             exit: Path::new("/run/workload.exit"),
             broker: None,
-            network_control: None,
-            network_data: None,
             console_data: Vec::new(),
             ingress_tcp: Vec::new(),
         };
@@ -972,8 +919,6 @@ mod tests {
             egress_gateway: Some(Path::new("/run/egress.sock")),
             exit: Path::new("/run/workload.exit"),
             broker: None,
-            network_control: None,
-            network_data: None,
             console_data: Vec::new(),
             ingress_tcp: Vec::new(),
         }
@@ -993,43 +938,6 @@ mod tests {
             "exactly one NetworkFlow channel on the converged path"
         );
         assert_eq!(network_flow[0].direction, VsockDirection::GuestDials);
-
-        assert!(
-            !ports
-                .iter()
-                .any(|p| p.service == GuestService::NetworkControl),
-            "converged path must not carry L3 NetworkControl"
-        );
-        assert!(
-            !ports
-                .iter()
-                .any(|p| p.service == GuestService::NetworkData { queue: 0 }),
-            "converged path must not carry L3 NetworkData"
-        );
-    }
-
-    #[test]
-    fn workload_vsock_ports_l3_path_exposes_control_and_data_channels() {
-        // The frozen L3 path is still mapped faithfully when its sockets are
-        // supplied. New launches are refused at admission; this test only
-        // witnesses that the mapping does not silently drop declared channels.
-        let mut socks = sample_sockets();
-        socks.network_control = Some(Path::new("/run/network-control.sock"));
-        socks.network_data = Some(Path::new("/run/network-data-0.sock"));
-        let ports = workload_vsock_ports(&socks);
-
-        assert!(
-            ports
-                .iter()
-                .any(|p| p.service == GuestService::NetworkControl),
-            "L3 path carries NetworkControl"
-        );
-        assert!(
-            ports
-                .iter()
-                .any(|p| p.service == GuestService::NetworkData { queue: 0 }),
-            "L3 path carries NetworkData"
-        );
     }
 
     #[test]
@@ -1040,8 +948,6 @@ mod tests {
             egress_gateway: Some(Path::new("/run/egress.sock")),
             exit: Path::new("/run/workload.exit"),
             broker: Some(Path::new("/run/broker.sock")),
-            network_control: None,
-            network_data: None,
             console_data: Vec::new(),
             ingress_tcp: Vec::new(),
         };
@@ -1228,8 +1134,6 @@ mod tests {
             egress_gateway: Some(Path::new("/run/egress.sock")),
             exit: Path::new("/run/workload.exit"),
             broker: None,
-            network_control: None,
-            network_data: None,
             console_data,
             ingress_tcp: Vec::new(),
         };
@@ -1259,8 +1163,6 @@ mod tests {
             egress_gateway: Some(Path::new("/run/egress.sock")),
             exit: Path::new("/run/workload.exit"),
             broker: None,
-            network_control: None,
-            network_data: None,
             console_data: Vec::new(),
             ingress_tcp: Vec::new(),
         };
@@ -1284,8 +1186,6 @@ mod tests {
                 egress_gateway: Some(Path::new("/run/egress.sock")),
                 exit: Path::new("/run/workload.exit"),
                 broker: None,
-                network_control: None,
-                network_data: None,
                 console_data,
                 ingress_tcp: Vec::new(),
             },

@@ -14,16 +14,17 @@ host-first FlowMux handshake on relayed-vsock backends as well as direct-vsock
 backends. The outbound cutover is complete: guest TCP, UDP, DNS, mediated ICMP,
 and typed HTTP all use the authenticated protocol on `NetworkFlow`.
 
-Workstreams W1–W5 are now implemented in the dependency-ordered PR stack.
+Workstreams W1–W6 are now implemented in the dependency-ordered PR stack.
 Admitted `NetworkLimits` are shared
 per-VM endpoint budgets; typed HTTP and connectors use bounded endpoint-owned
 streaming transforms; and signed TCP/UDP/HTTP/TLS ingress binds only admitted
 listeners, crosses the authenticated FlowMux session, and terminates at the
 declared guest-loopback target. The performance harness and labelled legacy
 baselines are recorded, and the rejected `raw_ip_stack`/`L3Vsock` public
-surface is gone with explicit stale-input migration errors. Frozen L3
-deletion, permanent single-path gates, and the final performance/backend matrix
-remain. This plan owns that remainder. The closed Plan 316 phase issues are
+surface is gone with explicit stale-input migration errors. The frozen L3
+implementation, packaging, kernel requirement, dependencies, and live product
+tests are deleted. Permanent single-path gates and the final
+performance/backend matrix remain. This plan owns that remainder. The closed Plan 316 phase issues are
 historical; issue #2751 is the active umbrella.
 
 ## Outcome
@@ -145,21 +146,31 @@ consecutive runs.
 
 ### W6 — Delete the superseded L3 implementation
 
-- [ ] Delete contract and policy L3 modules, L3-only channel identities,
+- [x] Delete contract and policy L3 modules, L3-only channel identities,
       leases, fuzz targets, synthesis/admission branches, and live product
       scenarios.
-- [ ] Delete `mvm-net` and `mvm-agentd` L3 modules, `mvm-net-agent`, guest TUN
+- [x] Delete `mvm-net` and `mvm-agentd` L3 modules, `mvm-net-agent`, guest TUN
       setup/cmdline/runtime-overlay code, and the workload-kernel TUN
       requirement where no non-network consumer remains.
-- [ ] Delete hostd netd modules and binary, host TUN/netns/nftables and smoltcp
+- [x] Delete hostd netd modules and binary, host TUN/netns/nftables and smoltcp
       datapaths, privileged L3 tests, VMM spawn/reap/teardown hooks, and
       control/data service sockets.
-- [ ] Remove resulting dependencies and packaging/Nix/CI/kernel residue; update
+- [x] Remove resulting dependencies and packaging/Nix/CI/kernel residue; update
       lockfiles and closure budgets.
-- [ ] Rewrite protocol-independent security scenarios against FlowMux and
+- [x] Rewrite protocol-independent security scenarios against FlowMux and
       delete scenarios for intentionally unsupported raw networking.
-- [ ] Run dependency, advisory, license, duplicate-major, and closure-budget
+- [x] Run dependency, advisory, license, duplicate-major, and closure-budget
       checks with no L3-only binary or dependency left.
+
+**Validation.** W6 removes more than 41,000 lines across the raw-packet
+contract, guest agent, host gateway, VMM lifecycle, packaging, Nix, kernel, CI,
+fuzz, and live-product slices. `cargo machete` reports no unused dependencies;
+advisory, license, source, ban, duplicate-major, default-closure, and
+all-feature closure checks pass. The all-feature closure is 468 crates, with
+default Linux and macOS closures at 235 and 226. Host all-target Clippy,
+all-feature gated compilation, formatting, the complete workspace test and
+doctest suite, and all 56 BDD features pass (194 scenarios: 193 passed and one
+capability-gated skip).
 
 ### W7 — Replace migration ratchets with permanent invariants
 

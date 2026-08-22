@@ -14,10 +14,11 @@ session readiness. PR #2741 then fixed the host-first handshake on the
 relayed-vsock backends.
 
 The shared per-VM endpoint budgets, bounded typed transformations, endpoint-
-owned connectors, declared FlowMux ingress runtime, performance harness, and
-public compatibility-surface removal are implemented through W5 of the
-successor plan's dependency-ordered PR stack. Frozen L3 deletion, permanent
-gates, the final performance comparison, and the final backend matrix remain.
+owned connectors, declared FlowMux ingress runtime, performance harness,
+public compatibility-surface removal, and complete frozen-L3 deletion are
+implemented through W6 of the successor plan's dependency-ordered PR stack.
+Permanent gates, the final performance comparison, and the final backend
+matrix remain.
 
 ## Tracking issues
 
@@ -236,12 +237,12 @@ and one shared refusal, `mvm_core::plan::l3_retirement`, called from
       FlowMux. Prove wrong boot ID, wrong plan digest, wrong key, replayed
       sequence, tampered ciphertext, expired session, and counter exhaustion
       fail before dispatch.
-- [ ] Add a hermetic `xtask network-perf` harness that runs legacy raw TCP,
+- [x] Add a hermetic `xtask network-perf` harness that runs legacy raw TCP,
       legacy typed HTTP, legacy UDP, and the new FlowMux equivalents against
       loopback fixtures. It records JSON containing host/arch, build profile,
       payload size, concurrency, p50/p95 connect latency, p50/p95 request
       latency, throughput, CPU time, peak RSS, and bytes copied.
-- [ ] Record 30-sample release-build legacy baselines on Linux x86_64 and macOS
+- [x] Record 30-sample release-build legacy baselines on Linux x86_64 and macOS
       arm64 before changing the endpoint. Store the result under
       `specs/benchmarks/network/` with the source commit and command embedded in
       the JSON. The harness refuses to compare different hosts, architectures,
@@ -450,25 +451,25 @@ in `spawn_blocking`.
 
 ### Phase 7 — Delete L3 completely
 
-- [ ] Delete `mvm-contract::l3`, `NetworkMode`, `L3NetworkSpec`,
+- [x] Delete `mvm-contract::l3`, `NetworkMode`, `L3NetworkSpec`,
       `L3IngressMapping`, and every synthesis/admission branch that selects or
       validates an L3 mode.
-- [ ] Delete `mvm-net/src/l3/`, the L3 channel identities and leases that have
+- [x] Delete `mvm-net/src/l3/`, the L3 channel identities and leases that have
       no non-network consumer, and the L3-only fuzz targets.
-- [ ] Delete `mvm-agentd/src/l3/`, `mvm-net-agent`, guest `mvm0` setup, L3
+- [x] Delete `mvm-agentd/src/l3/`, `mvm-net-agent`, guest `mvm0` setup, L3
       cmdline parsing, `CONFIG_TUN` workload-kernel requirement, and runtime
       overlay staging for the agent.
-- [ ] Delete `mvm-hostd/src/netd/`, the `mvm-netd` bin, Linux host-TUN/netns/
+- [x] Delete `mvm-hostd/src/netd/`, the `mvm-netd` bin, Linux host-TUN/netns/
       nftables setup, the userspace smoltcp datapath, and L3 privileged tests.
-- [ ] Delete `mvm-vmm::host::netd_spawn`, network control/data VMM sockets,
+- [x] Delete `mvm-vmm::host::netd_spawn`, network control/data VMM sockets,
       reaping/observability hooks, and backend teardown calls.
-- [ ] Remove smoltcp and every dependency that becomes unused; update
+- [x] Remove smoltcp and every dependency that becomes unused; update
       `Cargo.lock`, `deny.toml`, closure-budget baselines, release packaging,
       Nix derivations, kernel configs, scripts, and CI path filters.
-- [ ] Remove `s25_l3_vsock` as a live product suite. Preserve only protocol-
+- [x] Remove `s25_l3_vsock` as a live product suite. Preserve only protocol-
       independent security scenarios by rewriting them against FlowMux; delete
       tests whose asserted capability is intentionally unsupported.
-- [ ] Run `cargo machete`, `cargo deny check`, `cargo audit`, and the duplicate-
+- [x] Run `cargo machete`, `cargo deny check`, `cargo audit`, and the duplicate-
       major/closure-budget gates; no L3-only dependency or binary may remain.
 
 ### Phase 8 — Make “one path” mechanically enforceable

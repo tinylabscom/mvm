@@ -95,7 +95,6 @@ libkrun-sys = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
-ext4-view.workspace = true
 # `.mvm` packed artifacts carry an Ed25519
 # manifest signature. We verify (and produce, when the caller
 # hands us a signing key) signatures inside this crate so the
