@@ -255,7 +255,7 @@ jobs:
         run: |
           set -euo pipefail
           tarball="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
-          curl -fL --retry 3 -o "$tarball" \
+          curl -fL --retry 3 --retry-all-errors --retry-delay 2 -o "$tarball" \
             "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/${tarball}"
           echo "${ACTIONLINT_SHA256}  ${tarball}" | sha256sum -c -
           tar -xzf "$tarball" actionlint
