@@ -87,6 +87,14 @@ pub fn summarize_volume_spec(raw: &str) -> VolumeAttachment {
 /// the listing is stable and the two kinds read as groups. `posture`
 /// resolves the dev/prod posture per record — pass
 /// [`resolve_workload_posture`] on a live host, or a stub in tests.
+///
+/// Builder VMs are dropped from the spec-less remainder. The HVF builder
+/// family writes its runtime state into `~/.mvm/vms/` alongside workload
+/// machines, so the live scan finds a running `nix build` and, having no spec
+/// to join it to, was presenting it as a transient machine the user owned —
+/// with every spec-derived column blank and every spec-requiring verb
+/// (`shell`, `inspect`, `rm`) refusing the name it had just printed. A spec
+/// with a builder-shaped name is still listed: that one the user did create.
 pub fn join_inventory(
     specs: Vec<PersistedMachineSpec>,
     live: Vec<MachineState>,
@@ -105,10 +113,13 @@ pub fn join_inventory(
     persistent.sort_by(|a, b| a.name.cmp(&b.name));
 
     // Whatever the spec registry did not claim is running without a spec.
-    let transient = by_name.into_values().map(|state| {
-        let posture = posture(None, &state.name);
-        transient_record(state, posture)
-    });
+    let transient = by_name
+        .into_values()
+        .filter(|state| !mvm_core::naming::is_builder_owned_vm_name(&state.name))
+        .map(|state| {
+            let posture = posture(None, &state.name);
+            transient_record(state, posture)
+        });
 
     persistent.into_iter().chain(transient).collect()
 }
@@ -331,6 +342,7 @@ mod tests {
             runtime_pack: false,
             net: false,
             allow_host: vec![],
+            ai: None,
             ports: vec![],
             cpus: 2,
             memory: "512M".to_string(),
@@ -420,6 +432,49 @@ mod tests {
         assert_eq!(r.backend.as_deref(), Some("hvf"));
         assert_eq!(r.tags.get("env").map(String::as_str), Some("prod"));
         assert_eq!(r.expires_at.as_deref(), Some("2099-01-01T00:00:00Z"));
+    }
+
+    /// The reported bug: an HVF builder shell job stages its runtime state in
+    /// `~/.mvm/vms/` like a workload, so the live scan found it and the join,
+    /// having no spec for it, rendered it as a transient machine — which
+    /// `machine shell`/`rm` then said did not exist.
+    #[test]
+    fn a_live_builder_vm_without_a_spec_is_not_a_machine() {
+        let job = mvm_core::naming::builder_shell_vm_name("92326-1787337475138993000");
+        let persistent = mvm_core::naming::persistent_builder_vm_name(
+            mvm_core::naming::BuilderVmSlot::Hvf,
+            "session",
+        );
+        let records = join_inventory(
+            vec![spec("web")],
+            vec![
+                live(&job, MachineStatus::Running),
+                live(&persistent, MachineStatus::Running),
+                live("adhoc", MachineStatus::Running),
+            ],
+            stub_posture,
+        );
+        let names: Vec<&str> = records.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["web", "adhoc"],
+            "builder VMs are the build system's, not the user's"
+        );
+    }
+
+    /// The filter keys on "live and spec-less", not on the name alone: a
+    /// machine the user created is theirs whatever they called it.
+    #[test]
+    fn a_user_spec_with_a_builder_shaped_name_is_still_listed() {
+        let name = mvm_core::naming::builder_shell_vm_name("mine");
+        let records = join_inventory(
+            vec![spec(&name)],
+            vec![live(&name, MachineStatus::Running)],
+            stub_posture,
+        );
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].name, name);
+        assert_eq!(records[0].kind, MachineKind::Persistent);
     }
 
     #[test]

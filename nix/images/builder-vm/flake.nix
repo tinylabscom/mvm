@@ -426,7 +426,7 @@
               "vmlinux":      { "sha256": "$kernel_sha", "size": $kernel_size },
               "rootfs_ext4":  { "sha256": "$rootfs_sha", "size": $rootfs_size },
               "cmdline": "${builderCmdline}",
-              "cache_contract_version": 3,
+              "cache_contract_version": 4,
               "runtime_overlay_ready": true,
               "vsock_egress_ready": true
             }
@@ -467,7 +467,7 @@
             "system": "${system}",
             "rootfs_ext4": { "sha256": "$rootfs_sha", "size": $rootfs_size },
             "cmdline": "${builderCmdline}",
-            "cache_contract_version": 3,
+            "cache_contract_version": 4,
             "runtime_overlay_ready": true,
             "vsock_egress_ready": true,
             "stage0_rootfs_only": true

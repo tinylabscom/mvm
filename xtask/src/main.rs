@@ -41,13 +41,11 @@ mod check_guest_init_parity;
 mod check_honesty;
 pub(crate) mod check_kernel_config_budget;
 mod check_kernel_pin_freshness;
-mod check_l3_expansion_freeze;
 mod check_machine_doc_guards;
 mod check_mutation_witnesses;
 mod check_mvm_host_binaries_sync;
 mod check_nextest_groups;
 mod check_no_display_on_secret_types;
-mod check_no_gateway_names;
 mod check_no_guest_tool_client;
 mod check_no_host_nix;
 mod check_no_network_literals;
@@ -65,14 +63,13 @@ mod check_single_fixture_corpus;
 mod check_single_grants_projection;
 mod check_single_home;
 mod check_single_host_predicate;
+mod check_single_network_path;
 mod check_sprint_append;
 mod check_stream_redaction_seam;
 mod check_test_home_isolation;
 mod check_trust_gradient;
 mod check_two_surfaces;
-mod check_uniform_vsock_egress;
 mod check_verified_kernel_reads;
-mod check_vsock_only_egress;
 mod check_witness_citations;
 mod check_workflow_paths;
 mod check_workspace_dep_inheritance;
@@ -334,10 +331,6 @@ fn main() -> Result<()> {
             let workspace = workspace_root();
             check_trust_gradient::run(&workspace)
         }
-        Some("check-no-gateway-names") => {
-            let workspace = workspace_root();
-            check_no_gateway_names::run(&workspace)
-        }
         Some("check-one-guest-protocol") => {
             let workspace = workspace_root();
             check_one_guest_protocol::run(&workspace)
@@ -346,21 +339,13 @@ fn main() -> Result<()> {
             let workspace = workspace_root();
             check_no_guest_tool_client::run(&workspace)
         }
-        Some("check-vsock-only-egress") => {
+        Some("check-single-network-path") => {
             let workspace = workspace_root();
-            check_vsock_only_egress::run(&workspace)
+            check_single_network_path::run(&workspace)
         }
         Some("check-guest-init-parity") => {
             let workspace = workspace_root();
             check_guest_init_parity::run(&workspace)
-        }
-        Some("check-l3-expansion-freeze") => {
-            let workspace = workspace_root();
-            check_l3_expansion_freeze::run(&workspace)
-        }
-        Some("check-uniform-vsock-egress") => {
-            let workspace = workspace_root();
-            check_uniform_vsock_egress::run(&workspace)
         }
         Some("check-stream-redaction-seam") => {
             let workspace = workspace_root();
@@ -419,7 +404,7 @@ fn main() -> Result<()> {
             ir_parity::check(&workspace)
         }
         Some(other) => anyhow::bail!(
-            "Unknown xtask: {:?}. Available: gen-man, check-adr-coverage, check-no-display-on-secret-types, check-audit-positional, check-doc-claims, check-machine-doc-guards, check-forbidden-deps, check-core-runtime-free, check-content-address-determinism, check-deferrals, check-honesty, check-closure-budget, check-workspace-dep-inheritance, check-duplicate-majors, check-binary-size, check-kernel-config-budget, check-kernel-pin-freshness, check-builder-shell-job-sites, check-guest-entropy-seed, check-guest-agent-runtime-free, check-guest-agent-in-all-images, check-guest-images-no-builder-tools, check-guest-binary-lists, check-no-overclaim, check-two-surfaces, check-no-spec-refs-in-comments, check-no-string-backend-dispatch, check-plan-names, check-single-home, check-single-fixture-corpus, check-test-home-isolation, check-no-network-literals, check-cli-runtime-surface, check-cli-help-matches-docs, check-claim-catalog, check-sprint-append, sprint, check-dormant-controls, check-witness-citations, check-declared-backing, check-claim-witness-freshness, check-abi-layout, check-mutation-witnesses, check-nextest-groups, check-conformance, check-trust-gradient, check-vsock-only-egress, check-no-guest-tool-client, check-one-guest-protocol, check-no-gateway-names, check-uniform-vsock-egress, check-l3-expansion-freeze, check-build-egress-callers, check-verified-kernel-reads, check-stream-redaction-seam, check-guest-init-parity, check-require-grant-token-allowlist, check-mvm-host-binaries-sync, check-per-vm-host-binaries-sync, check-workflow-paths, check-runtime-overlay-version, check-single-grants-projection, check-single-exec-secs-writer, check-single-host-predicate, check-backend-resource-controls, perf, network-perf, build-dev-image, gen-stubs, check-stubs, gen-ir-parity, check-ir-parity",
+            "Unknown xtask: {:?}. Available: gen-man, check-adr-coverage, check-no-display-on-secret-types, check-audit-positional, check-doc-claims, check-machine-doc-guards, check-forbidden-deps, check-core-runtime-free, check-content-address-determinism, check-deferrals, check-honesty, check-closure-budget, check-workspace-dep-inheritance, check-duplicate-majors, check-binary-size, check-kernel-config-budget, check-kernel-pin-freshness, check-builder-shell-job-sites, check-guest-entropy-seed, check-guest-agent-runtime-free, check-guest-agent-in-all-images, check-guest-images-no-builder-tools, check-guest-binary-lists, check-no-overclaim, check-two-surfaces, check-no-spec-refs-in-comments, check-no-string-backend-dispatch, check-plan-names, check-single-home, check-single-fixture-corpus, check-test-home-isolation, check-no-network-literals, check-cli-runtime-surface, check-cli-help-matches-docs, check-claim-catalog, check-sprint-append, sprint, check-dormant-controls, check-witness-citations, check-declared-backing, check-claim-witness-freshness, check-abi-layout, check-mutation-witnesses, check-nextest-groups, check-conformance, check-trust-gradient, check-single-network-path, check-no-guest-tool-client, check-one-guest-protocol, check-build-egress-callers, check-verified-kernel-reads, check-stream-redaction-seam, check-guest-init-parity, check-require-grant-token-allowlist, check-mvm-host-binaries-sync, check-per-vm-host-binaries-sync, check-workflow-paths, check-runtime-overlay-version, check-single-grants-projection, check-single-exec-secs-writer, check-single-host-predicate, check-backend-resource-controls, perf, network-perf, build-dev-image, gen-stubs, check-stubs, gen-ir-parity, check-ir-parity",
             other
         ),
         None => {
@@ -558,7 +543,7 @@ fn main() -> Result<()> {
                 "  check-per-vm-host-binaries-sync         assert release.yml builds+packages every spawnable per-VM binary"
             );
             eprintln!(
-                "  check-no-gateway-names                  assert no reference to a removed userspace network gateway"
+                "  check-single-network-path              assert one endpoint, one NetworkFlow channel, no guest NIC/L3 path, and one workload socket owner"
             );
             eprintln!(
                 "  check-workflow-paths                    assert every workflow working-directory and cargo-fuzz target still exists"

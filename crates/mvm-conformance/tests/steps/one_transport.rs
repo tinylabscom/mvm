@@ -535,6 +535,7 @@ fn secret_bearing_config() -> mvm_hostd::supervisor::network_endpoint::EndpointC
 
     EndpointConfig {
         tenant_id: "local".into(),
+        instance_id: "test".into(),
         secrets: vec![SecretBinding {
             name: "OPENAI_API_KEY".into(),
             source: SecretSource::Keystore {
