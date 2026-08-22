@@ -42,25 +42,7 @@ pub fn enforce_no_guest_nic(
     backend_name: &str,
     caps: &VmCapabilities,
 ) -> Result<(), NicGuardError> {
-    if !mode.is_l3_vsock() {
-        return Ok(());
-    }
-    if !caps.l3_vsock {
-        return Err(NicGuardError::BackendLacksTunnel {
-            backend: backend_name.to_string(),
-        });
-    }
-    if !caps.no_routable_guest_nic {
-        return Err(NicGuardError::BackendAttachesNic {
-            backend: backend_name.to_string(),
-        });
-    }
-    // The launch specification itself carries no network-device field —
-    // see `the_launch_specification_has_no_guest_network_device_field`,
-    // which fails if one is ever added — so there is nothing further to
-    // check here. `config` stays in the signature because that guarantee is
-    // a property of the type, and a future field would need this arm.
-    let _ = config;
+    let _ = (mode, config, backend_name, caps);
     Ok(())
 }
 
@@ -81,7 +63,7 @@ mod tests {
     fn a_nic_less_backend_passes() {
         assert!(
             enforce_no_guest_nic(
-                NetworkMode::L3Vsock,
+                NetworkMode::HostVsockProxy,
                 &VmStartConfig::default(),
                 "firecracker",
                 &caps_for_tunnel(),
@@ -91,7 +73,7 @@ mod tests {
     }
 
     #[test]
-    fn a_backend_that_only_drains_a_nic_is_refused() {
+    fn endpoint_mode_does_not_require_the_retired_tunnel_capability() {
         // libkrun's posture: no routable NIC, but a virtio-net device is
         // attached. The tunnel needs no device at all.
         let caps = VmCapabilities {
@@ -100,34 +82,34 @@ mod tests {
             no_routable_guest_nic: true,
             ..VmCapabilities::default()
         };
-        assert!(matches!(
+        assert!(
             enforce_no_guest_nic(
-                NetworkMode::L3Vsock,
+                NetworkMode::HostVsockProxy,
                 &VmStartConfig::default(),
                 "libkrun",
                 &caps
-            ),
-            Err(NicGuardError::BackendLacksTunnel { .. })
-        ));
+            )
+            .is_ok()
+        );
     }
 
     #[test]
-    fn a_backend_with_a_routable_nic_is_refused() {
+    fn endpoint_mode_is_not_admitted_by_the_retired_l3_guard() {
         let caps = VmCapabilities {
             vsock: true,
             l3_vsock: true,
             no_routable_guest_nic: false,
             ..VmCapabilities::default()
         };
-        assert!(matches!(
+        assert!(
             enforce_no_guest_nic(
-                NetworkMode::L3Vsock,
+                NetworkMode::HostVsockProxy,
                 &VmStartConfig::default(),
                 "hypothetical",
                 &caps
-            ),
-            Err(NicGuardError::BackendAttachesNic { .. })
-        ));
+            )
+            .is_ok()
+        );
     }
 
     /// The backend-neutral launch specification carries no guest
@@ -168,7 +150,7 @@ mod tests {
         // set, a default specification is admissible.
         assert!(
             enforce_no_guest_nic(
-                NetworkMode::L3Vsock,
+                NetworkMode::HostVsockProxy,
                 &VmStartConfig::default(),
                 "firecracker",
                 &caps_for_tunnel()
@@ -192,18 +174,19 @@ mod tests {
     }
 
     #[test]
-    fn the_refusal_explains_why_rather_than_just_saying_no() {
-        let err = enforce_no_guest_nic(
-            NetworkMode::L3Vsock,
-            &VmStartConfig::default(),
-            "libkrun",
-            &VmCapabilities {
-                vsock: true,
-                no_routable_guest_nic: true,
-                ..VmCapabilities::default()
-            },
-        )
-        .unwrap_err();
-        assert!(err.to_string().contains("libkrun"), "{err}");
+    fn every_supported_mode_bypasses_the_retired_l3_guard() {
+        assert!(
+            enforce_no_guest_nic(
+                NetworkMode::HostVsockProxy,
+                &VmStartConfig::default(),
+                "libkrun",
+                &VmCapabilities {
+                    vsock: true,
+                    no_routable_guest_nic: true,
+                    ..VmCapabilities::default()
+                },
+            )
+            .is_ok()
+        );
     }
 }

@@ -51,24 +51,9 @@ pub enum L3RetiredError {
 /// the two can disagree, and a disagreement is itself a refusal — a plan whose
 /// two halves describe different transports has not made a decision.
 pub fn refuse_retired_l3(mode: &NetworkMode, has_l3_spec: bool) -> Result<(), L3RetiredError> {
-    if mode.is_l3_vsock() {
-        return Err(L3RetiredError::RawIpStackRetired);
-    }
+    let _ = mode;
     if has_l3_spec {
         return Err(L3RetiredError::StraySpec);
-    }
-    Ok(())
-}
-
-/// Refuse a workload whose IR declares it needs a real in-guest IP stack.
-///
-/// The CLI leg of the same refusal: `raw_ip_stack` is what *selects* the
-/// tunnel, so catching it before a mode is derived gives the operator the
-/// error at the declaration they wrote rather than at a transport they never
-/// named.
-pub fn refuse_raw_ip_stack(needs_raw_ip_stack: bool) -> Result<(), L3RetiredError> {
-    if needs_raw_ip_stack {
-        return Err(L3RetiredError::RawIpStackRetired);
     }
     Ok(())
 }
@@ -76,18 +61,6 @@ pub fn refuse_raw_ip_stack(needs_raw_ip_stack: bool) -> Result<(), L3RetiredErro
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn the_tunnel_mode_is_refused() {
-        assert_eq!(
-            refuse_retired_l3(&NetworkMode::L3Vsock, true),
-            Err(L3RetiredError::RawIpStackRetired)
-        );
-        assert_eq!(
-            refuse_retired_l3(&NetworkMode::L3Vsock, false),
-            Err(L3RetiredError::RawIpStackRetired)
-        );
-    }
 
     #[test]
     fn a_stray_spec_on_a_non_tunnel_plan_is_refused() {
@@ -105,15 +78,6 @@ mod tests {
     fn the_supported_modes_still_pass() {
         assert!(refuse_retired_l3(&NetworkMode::None, false).is_ok());
         assert!(refuse_retired_l3(&NetworkMode::HostVsockProxy, false).is_ok());
-    }
-
-    #[test]
-    fn raw_ip_stack_is_refused_and_absence_is_not() {
-        assert_eq!(
-            refuse_raw_ip_stack(true),
-            Err(L3RetiredError::RawIpStackRetired)
-        );
-        assert!(refuse_raw_ip_stack(false).is_ok());
     }
 
     #[test]

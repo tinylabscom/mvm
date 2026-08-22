@@ -98,12 +98,8 @@ pub fn plan_json_has_bound_secrets(plan_json: &str) -> bool {
 /// separate host-side switch that could drift from it. An undecodable plan
 /// answers `None`, which is the closed side: a guest that is not told to
 /// start the tunnel simply has no network.
-pub fn l3_cmdline_token(config: &VmStartConfig) -> Option<String> {
-    let plan_json = config.plan_json.as_deref()?;
-    let plan = mvm_core::plan::plan_from_admitted_json(plan_json).ok()?;
-    plan.network_mode
-        .is_l3_vsock()
-        .then(|| mvm_contract::l3::GUEST_CMDLINE_FLAG.to_string())
+pub fn l3_cmdline_token(_config: &VmStartConfig) -> Option<String> {
+    None
 }
 
 /// True when the workload's persisted plan carries at least one bound secret
@@ -337,9 +333,6 @@ mod l3_token_tests {
     fn plan_json(mode: NetworkMode) -> String {
         let mut plan = mvm_core::plan::test_support::PlanFixture::new().build();
         plan.network_mode = mode;
-        if mode.is_l3_vsock() {
-            plan.l3_network = Some(mvm_core::plan::L3NetworkSpec::v1());
-        }
         serde_json::to_string(&plan).expect("plan serializes")
     }
 
@@ -348,15 +341,6 @@ mod l3_token_tests {
             plan_json,
             ..VmStartConfig::default()
         }
-    }
-
-    #[test]
-    fn an_l3_plan_yields_the_guest_cmdline_flag() {
-        let config = config_with(Some(plan_json(NetworkMode::L3Vsock)));
-        assert_eq!(
-            l3_cmdline_token(&config).as_deref(),
-            Some(mvm_contract::l3::GUEST_CMDLINE_FLAG)
-        );
     }
 
     #[test]

@@ -211,24 +211,9 @@ def test_hook_list_of_mvm_hooks_passes_through():
     assert bs[1] == {"kind": "argv", "argv": ["setup-2", "--flag"]}
 
 
-def test_network_defaults_keep_the_socket_aware_transport():
-    # Silence must never select the tunnel: it is the weaker posture, and a
-    # workload that did not ask for it should not get it.
-    assert mvm.network(mode="bridge").raw_ip_stack is False
-
-
-def test_network_carries_a_declared_raw_ip_stack():
-    assert mvm.network(mode="bridge", raw_ip_stack=True).raw_ip_stack is True
-
-
-def test_network_refuses_a_non_boolean_raw_ip_stack():
-    # Truthiness would read "false" as true. The kwarg decides which
-    # transport the workload is admitted for, so a wrong reading strands it
-    # on one it cannot use. The static decorator parser refuses the same
-    # shape; this keeps the two routes to the IR in agreement.
-    for bad in ("yes", "false", 1, None):
-        with pytest.raises(TypeError, match="raw_ip_stack must be a bool"):
-            mvm.network(mode="bridge", raw_ip_stack=bad)
+def test_network_surface_no_longer_accepts_raw_ip_stack():
+    with pytest.raises(TypeError, match="unexpected keyword argument 'raw_ip_stack'"):
+        mvm.network(mode="bridge", raw_ip_stack=True)
 
 
 def test_network_still_refuses_an_unknown_mode():

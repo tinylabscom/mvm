@@ -1952,7 +1952,9 @@ mod tests {
             &reply,
         );
         let mut response = [0_u8; 32];
-        let (received, _) = external.recv_from(&mut response).unwrap();
+        let (received, _) = external
+            .recv_from(&mut response)
+            .expect("observed UDP peer must receive the guest reply");
         assert_eq!(&response[..received], b"udp-response");
 
         let unknown = std::net::UdpSocket::bind((local_test_ip(), 0)).unwrap();

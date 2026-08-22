@@ -624,7 +624,7 @@ pub enum MountMode {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(deny_unknown_fields)]
+#[serde(try_from = "NetworkWire", deny_unknown_fields)]
 pub struct Network {
     pub mode: NetworkMode,
     #[serde(default)]
@@ -647,18 +647,41 @@ pub struct Network {
     /// "unspecified — substrate picks based on `mode`".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dns: Option<NetworkDns>,
-    /// The workload needs a real in-guest IP stack: raw sockets, ICMP,
-    /// non-TCP/UDP protocols, or its own resolver.
-    ///
-    /// A statement about the *workload*, not about a transport. It is what
-    /// selects the L3 tunnel, and it is declared here rather than chosen at
-    /// run time so the same workload resolves the same way on every host.
-    ///
-    /// Leave it off unless the workload genuinely needs it: the tunnel
-    /// cannot carry host-side secret substitution or cleartext redaction,
-    /// because the guest originates its own connections.
-    #[serde(default, skip_serializing_if = "core::ops::Not::not")]
-    pub raw_ip_stack: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NetworkWire {
+    mode: NetworkMode,
+    #[serde(default)]
+    ports: Vec<PortForward>,
+    #[serde(default)]
+    egress: Option<NetworkEgress>,
+    #[serde(default)]
+    peers: Vec<String>,
+    #[serde(default)]
+    dns: Option<NetworkDns>,
+    #[serde(default)]
+    raw_ip_stack: Option<bool>,
+}
+
+impl TryFrom<NetworkWire> for Network {
+    type Error = &'static str;
+
+    fn try_from(wire: NetworkWire) -> Result<Self, Self::Error> {
+        if wire.raw_ip_stack.is_some() {
+            return Err(
+                "raw_ip_stack has been retired; use the guest loopback HTTP proxy, SOCKS5h/UDP, controlled DNS, mediated ping, or a typed connector",
+            );
+        }
+        Ok(Self {
+            mode: wire.mode,
+            ports: wire.ports,
+            egress: wire.egress,
+            peers: wire.peers,
+            dns: wire.dns,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

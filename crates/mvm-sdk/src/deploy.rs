@@ -782,7 +782,6 @@ mod tests {
                 env: BTreeMap::new(),
                 mounts: vec![],
                 network: Some(crate::ir::Network {
-                    raw_ip_stack: false,
                     mode: NetworkMode::Bridge,
                     ports: vec![crate::ir::PortForward {
                         mapping_id: 1,

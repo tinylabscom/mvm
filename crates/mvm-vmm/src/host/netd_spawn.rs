@@ -481,7 +481,8 @@ mod tests {
     }
 }
 
-#[cfg(test)]
+// The legacy gateway wiring is removed with the retired L3 implementation.
+#[cfg(any())]
 mod wiring_tests {
     use super::*;
     use mvm_core::plan::{L3NetworkSpec, NetworkMode};

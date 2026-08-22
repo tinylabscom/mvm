@@ -100,21 +100,14 @@ pub fn check_mode_compatibility(
     requirements: &SubstitutionRequirements,
     has_l3_spec: bool,
 ) -> Result<(), ModeCompatError> {
-    if mode.is_l3_vsock() && requirements.needs_owned_cleartext() {
-        return Err(ModeCompatError::NeedsOwnedCleartext {
-            reasons: requirements.reasons(),
-        });
-    }
-    match (mode.is_l3_vsock(), has_l3_spec) {
-        (true, false) => Err(ModeCompatError::SpecMismatch {
+    let _ = requirements;
+    if has_l3_spec {
+        Err(ModeCompatError::SpecMismatch {
             mode,
-            detail: "l3-vsock was selected but the plan carries no l3 network spec",
-        }),
-        (false, true) => Err(ModeCompatError::SpecMismatch {
-            mode,
-            detail: "an l3 network spec is present but the plan does not select l3-vsock",
-        }),
-        _ => Ok(()),
+            detail: "an l3 network spec is present after the raw-packet mode was retired",
+        })
+    } else {
+        Ok(())
     }
 }
 
@@ -130,30 +123,27 @@ mod tests {
     }
 
     #[test]
-    fn a_plan_needing_nothing_special_may_select_l3() {
+    fn a_supported_plan_needing_nothing_special_is_admitted() {
         assert!(
             check_mode_compatibility(
-                NetworkMode::L3Vsock,
+                NetworkMode::HostVsockProxy,
                 &SubstitutionRequirements::default(),
-                true
+                false
             )
             .is_ok()
         );
     }
 
     #[test]
-    fn a_plan_that_binds_secrets_cannot_select_l3() {
-        let err = check_mode_compatibility(NetworkMode::L3Vsock, &needs_substitution(), true)
-            .unwrap_err();
-        assert!(matches!(err, ModeCompatError::NeedsOwnedCleartext { .. }));
-        // The message must tell the operator what to do, not just refuse.
-        let msg = err.to_string();
-        assert!(msg.contains("raw_ip_stack"), "{msg}");
-        assert!(msg.contains("binds secrets"), "{msg}");
+    fn a_plan_that_binds_secrets_uses_the_endpoint_mode() {
+        assert!(
+            check_mode_compatibility(NetworkMode::HostVsockProxy, &needs_substitution(), false)
+                .is_ok()
+        );
     }
 
     #[test]
-    fn reversible_replacement_and_redaction_each_block_l3_on_their_own() {
+    fn reversible_replacement_and_redaction_use_the_endpoint_mode() {
         for requirements in [
             SubstitutionRequirements {
                 reversible_replacement_enabled: true,
@@ -165,24 +155,22 @@ mod tests {
             },
         ] {
             assert!(
-                check_mode_compatibility(NetworkMode::L3Vsock, &requirements, true).is_err(),
-                "{requirements:?} must not be admitted on l3-vsock"
+                check_mode_compatibility(NetworkMode::HostVsockProxy, &requirements, false).is_ok(),
+                "{requirements:?} must be admitted on the endpoint path"
             );
         }
     }
 
     #[test]
-    fn every_reason_is_named_so_an_operator_can_fix_all_of_them_at_once() {
+    fn every_endpoint_transformation_requirement_is_supported_together() {
         let requirements = SubstitutionRequirements {
             binds_secrets: true,
             reversible_replacement_enabled: true,
             redaction_enabled: true,
         };
-        let err = check_mode_compatibility(NetworkMode::L3Vsock, &requirements, true).unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("binds secrets"), "{msg}");
-        assert!(msg.contains("reversible replacement"), "{msg}");
-        assert!(msg.contains("redaction"), "{msg}");
+        assert!(
+            check_mode_compatibility(NetworkMode::HostVsockProxy, &requirements, false).is_ok()
+        );
     }
 
     #[test]
@@ -196,18 +184,6 @@ mod tests {
             check_mode_compatibility(NetworkMode::HostVsockProxy, &requirements, false).is_ok(),
             "the brokered mode is exactly where these workloads belong"
         );
-    }
-
-    #[test]
-    fn selecting_l3_without_a_spec_is_refused() {
-        assert!(matches!(
-            check_mode_compatibility(
-                NetworkMode::L3Vsock,
-                &SubstitutionRequirements::default(),
-                false
-            ),
-            Err(ModeCompatError::SpecMismatch { .. })
-        ));
     }
 
     #[test]

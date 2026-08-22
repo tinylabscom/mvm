@@ -49,7 +49,7 @@ pub use bundle::{
 };
 pub use content_id::{PlanIdMismatch, compute_plan_id, verify_plan_id};
 pub use execution_plan::{ExecutionPlan, SCHEMA_VERSION};
-pub use l3_retirement::{L3RetiredError, refuse_raw_ip_stack, refuse_retired_l3};
+pub use l3_retirement::{L3RetiredError, refuse_retired_l3};
 pub use sdk_sidecar::{
     SDK_HOST_SERVICES, SDK_SIDECAR_GUEST_PATH, SDK_SIDECAR_LIB_PATH, is_sdk_host_service,
     sdk_host_services_in, sdk_sidecar_required, sdk_sidecar_required_for,

@@ -14,11 +14,10 @@ session readiness. PR #2741 then fixed the host-first handshake on the
 relayed-vsock backends.
 
 The shared per-VM endpoint budgets, bounded typed transformations, endpoint-
-owned connectors, and declared FlowMux ingress runtime have landed through W4
-of the successor plan. The performance harness, `raw_ip_stack` removal, frozen
-L3 deletion, permanent gates, performance comparison, and final backend matrix
-remain. The successor plan splits those items into reviewable,
-dependency-ordered changes.
+owned connectors, declared FlowMux ingress runtime, performance harness, and
+public compatibility-surface removal are implemented through W5 of the
+successor plan's dependency-ordered PR stack. Frozen L3 deletion, permanent
+gates, the final performance comparison, and the final backend matrix remain.
 
 ## Tracking issues
 
@@ -430,22 +429,22 @@ in `spawn_blocking`.
 
 ### Phase 6 — Set the compatibility boundary without weakening isolation
 
-- [ ] Keep the loopback HTTP proxy, SOCKS5h, SOCKS5 UDP, controlled DNS stub,
+- [x] Keep the loopback HTTP proxy, SOCKS5h, SOCKS5 UDP, controlled DNS stub,
       mediated ping helper, and typed SDK connectors as the supported guest
       compatibility surfaces; all terminate in the same FlowMux client.
-- [ ] Keep the Phase-0 `network.raw_ip_stack=true` rejection through the
+- [x] Keep the Phase-0 `network.raw_ip_stack=true` rejection through the
       migration release. Do not silently reinterpret the declaration as
       FlowMux networking.
-- [ ] Remove `raw_ip_stack` from the Rust IR, Python/TypeScript SDKs, generated
+- [x] Remove `raw_ip_stack` from the Rust IR, Python/TypeScript SDKs, generated
       schemas, examples, documentation, and fixtures after the rejection release.
-- [ ] Close Plan 278 as rejected: do not set `DUMPABLE=1`, add `CAP_SYS_PTRACE`,
+- [x] Close Plan 278 as rejected: do not set `DUMPABLE=1`, add `CAP_SYS_PTRACE`,
       read workload memory, or install seccomp user-notification for networking
       compatibility.
-- [ ] Document that a program which ignores the supported adapters has no
+- [x] Document that a program which ignores the supported adapters has no
       network route and fails closed. Raw sockets, arbitrary IP protocols,
       custom in-guest resolvers, and general ICMP are unsupported rather than
       routed through a second stack.
-- [ ] Add BDD scenarios proving a proxy-aware application works, a typed
+- [x] Add BDD scenarios proving a proxy-aware application works, a typed
       connector transforms, and a non-cooperative direct socket cannot bypass
       FlowMux or reach the host network.
 

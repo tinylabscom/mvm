@@ -114,11 +114,9 @@ pub struct ExecutionPlan {
     #[serde(default)]
     pub network_mode: NetworkMode,
 
-    /// The L3-tunnel contract, when `network_mode` is
-    /// [`NetworkMode::L3Vsock`]. Admission refuses an `l3_vsock` plan with no
-    /// spec and a spec on a plan with another mode, so the two fields cannot
-    /// disagree about what was admitted. `#[serde(default)]` so a plan
-    /// without the field deserializes as the safe absent case.
+    /// Retired L3 tunnel parameters retained only so stale signed plans can be
+    /// rejected explicitly during migration. `#[serde(default)]` keeps old
+    /// plans without the field on the safe absent path.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub l3_network: Option<L3NetworkSpec>,
 

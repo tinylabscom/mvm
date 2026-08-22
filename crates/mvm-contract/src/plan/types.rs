@@ -11,7 +11,7 @@ use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de};
 
 /// How a workload reaches the network. Closed by default: the guest gets no
 /// virtio-net device and can reach nothing until networking is explicitly
@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 /// vsock, and the `network_policy` allowlist still gates which endpoints are
 /// reachable. Carried in the signed `ExecutionPlan` so the transport is part of
 /// the admitted contract, not a host-wide setting.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NetworkMode {
     /// No guest NIC, no broker — the workload cannot reach the network.
@@ -28,18 +28,39 @@ pub enum NetworkMode {
     None,
     /// No guest NIC; egress and ingress are mediated by host brokers over vsock.
     HostVsockProxy,
-    /// No guest NIC; the guest gets a point-to-point `mvm0` **TUN** interface
-    /// and raw IP packets are framed over dedicated vsock connections to the
-    /// host gateway, which applies policy before anything reaches host
-    /// networking.
-    ///
-    /// A compatibility mode for workloads that need a real IP stack. It is
-    /// never selected implicitly — the presence of an egress rule does not
-    /// imply it — and there is no fallback between it and the other modes.
-    /// It trades the socket-aware path's connection intent and owned-cleartext
-    /// substitution for IP-stack fidelity; see
-    /// `specs/adrs/036-l3-tun-over-vsock.md` §"Capability difference".
-    L3Vsock,
+}
+
+impl<'de> Deserialize<'de> for NetworkMode {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct Visitor;
+
+        impl de::Visitor<'_> for Visitor {
+            type Value = NetworkMode;
+
+            fn expecting(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+                formatter.write_str("none or host_vsock_proxy")
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                match value {
+                    "none" => Ok(NetworkMode::None),
+                    "host_vsock_proxy" => Ok(NetworkMode::HostVsockProxy),
+                    "l3_vsock" => Err(E::custom(
+                        "l3_vsock has been retired; use the authenticated FlowMux loopback adapters or a typed connector",
+                    )),
+                    _ => Err(E::unknown_variant(value, &["none", "host_vsock_proxy"])),
+                }
+            }
+        }
+
+        deserializer.deserialize_str(Visitor)
+    }
 }
 
 /// Transport-neutral per-workload networking resource ceilings.
@@ -223,13 +244,7 @@ impl NetworkMode {
         match self {
             Self::None => "none",
             Self::HostVsockProxy => "host_vsock_proxy",
-            Self::L3Vsock => "l3_vsock",
         }
-    }
-
-    /// Whether this mode carries the L3 tunnel.
-    pub fn is_l3_vsock(&self) -> bool {
-        matches!(self, Self::L3Vsock)
     }
 }
 
@@ -577,12 +592,8 @@ pub enum IngressMappingsError {
     TlsSecretNotKeystore { mapping_id: u16 },
 }
 
-/// The L3-tunnel half of a workload's admitted networking contract.
-///
-/// Present only when [`NetworkMode::L3Vsock`] is selected; admission refuses
-/// an `l3_vsock` plan that carries no spec, and refuses a spec on a plan whose
-/// mode is something else. Every field is part of the signed contract, so the
-/// transport's shape is admitted rather than host-chosen.
+/// Retired L3 tunnel parameters retained only to deserialize and explicitly
+/// reject stale signed plans during migration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct L3NetworkSpec {
@@ -1475,6 +1486,25 @@ mod network_mode_tests {
             serde_json::from_str::<NetworkMode>("\"none\"").unwrap(),
             NetworkMode::None
         );
+    }
+
+    #[test]
+    fn stale_l3_token_is_refused_with_migration_guidance() {
+        let err = serde_json::from_str::<NetworkMode>("\"l3_vsock\"")
+            .expect_err("retired mode must not enter the admitted domain");
+        let message = err.to_string();
+        assert!(message.contains("l3_vsock has been retired"), "{message}");
+        assert!(message.contains("FlowMux loopback adapters"), "{message}");
+        assert!(message.contains("typed connector"), "{message}");
+    }
+
+    #[test]
+    fn unknown_token_is_not_reported_as_a_retired_mode() {
+        let err = serde_json::from_str::<NetworkMode>("\"future_mode\"")
+            .expect_err("unknown modes must fail closed");
+        let message = err.to_string();
+        assert!(message.contains("unknown variant"), "{message}");
+        assert!(!message.contains("has been retired"), "{message}");
     }
 }
 

@@ -2695,3 +2695,12 @@ The full Scout-linked attempt reached signed-plan admission but failed closed
 before guest-agent startup on `mvm-oci-init` user-volume path-policy denial;
 the exact retry replayed without a second execution. Trusted hardware
 attestation and a successful typed effect probe remain open.
+
+## 2026-08-21 FlowMux public-surface stack-order repair
+
+The public-surface slice now carries the ingress UDP observed-peer reply fix
+required by its own regression test. Outbound transform and egress admission
+remain mandatory for guest-introduced UDP destinations; replies to a peer
+already observed by the bounded ingress relay use that peer table instead.
+The focused regression passes five consecutive runs, including the path that
+rejects a forged unseen peer.

@@ -1779,8 +1779,11 @@ resume` takes a `current_head` and refuses when it differs from the
         host-initiated FlowMux streams and declared guest-loopback targets.
         HTTP/TLS transformations remain host-owned, TLS keys never enter the
         guest contract, and opaque TCP stays explicitly non-transforming.
-  - [ ] Remove the rejected `raw_ip_stack`/`L3Vsock` public compatibility
-        surface now that the migration release condition has passed.
+  - [x] Remove the rejected `raw_ip_stack`/`L3Vsock` public compatibility
+        surface now that the migration release condition has passed. Public
+        IR, SDK, schema, CLI, fixtures, and docs expose no raw-network mode;
+        stale serialized input receives an explicit migration refusal, while
+        supported loopback adapters and typed connectors remain on FlowMux.
   - [ ] Delete frozen L3 contract, guest, host, VMM, dependency, packaging,
         kernel, CI, and test slices.
   - [ ] Permanent single-path/socket-owner gates plus the final performance,

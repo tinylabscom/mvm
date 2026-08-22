@@ -1307,28 +1307,30 @@ mod tests {
             std::process::id().to_string(),
         )
         .unwrap();
-        let listener =
-            std::os::unix::net::UnixListener::bind(dir.path().join(SUBST_SESSION_READY_SOCKET))
-                .unwrap();
+        let ready_socket = dir.path().join(SUBST_SESSION_READY_SOCKET);
+        let listener = std::os::unix::net::UnixListener::bind(&ready_socket).unwrap();
         let marker = dir.path().join(SUBST_SESSION_FILE);
         let endpoint = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
             std::fs::write(marker, b"1").unwrap();
-            stream.write_all(&[2]).unwrap();
+            let _ = stream.write_all(&[2]);
         });
 
-        let err = wait_for_endpoint_session_with_timeout(
+        let result = wait_for_endpoint_session_with_timeout(
             "vm-1",
             dir.path(),
             std::time::Duration::from_secs(1),
-        )
-        .unwrap_err();
+        );
+        if result.is_ok() {
+            let _ = std::os::unix::net::UnixStream::connect(&ready_socket);
+        }
+        endpoint.join().unwrap();
+        let err = result.unwrap_err();
         assert!(
             err.to_string()
                 .contains("invalid authenticated-session signal"),
             "unexpected: {err}"
         );
-        endpoint.join().unwrap();
     }
 
     #[test]
@@ -1339,26 +1341,28 @@ mod tests {
             std::process::id().to_string(),
         )
         .unwrap();
-        let listener =
-            std::os::unix::net::UnixListener::bind(dir.path().join(SUBST_SESSION_READY_SOCKET))
-                .unwrap();
+        let ready_socket = dir.path().join(SUBST_SESSION_READY_SOCKET);
+        let listener = std::os::unix::net::UnixListener::bind(&ready_socket).unwrap();
         let endpoint = std::thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
             drop(stream);
         });
 
-        let err = wait_for_endpoint_session_with_timeout(
+        let result = wait_for_endpoint_session_with_timeout(
             "vm-1",
             dir.path(),
             std::time::Duration::from_secs(1),
-        )
-        .unwrap_err();
+        );
+        if result.is_ok() {
+            let _ = std::os::unix::net::UnixStream::connect(&ready_socket);
+        }
+        endpoint.join().unwrap();
+        let err = result.unwrap_err();
         assert!(
             err.to_string()
                 .contains("waiting for the network endpoint's authenticated session"),
             "unexpected: {err}"
         );
-        endpoint.join().unwrap();
     }
 
     /// The marker is per-boot. A file left by a previous run would make the

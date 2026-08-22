@@ -742,30 +742,15 @@ def network(
     egress: _ir.NetworkEgress | None = None,
     peers: list[str] | None = None,
     dns: _ir.NetworkDns | None = None,
-    raw_ip_stack: bool = False,
 ) -> _ir.Network:
     """Declare an app's network posture (plan-0004 §Phase 5).
 
     `mode` is the high-level toggle: `"none"`, `"bridge"`, or
     `"host"` (host is rejected for function-entrypoint workloads).
-    `egress` / `peers` / `dns` layer granular grants on top.
-
-    `raw_ip_stack` declares that the workload needs a real in-guest IP
-    stack — raw sockets, ICMP, non-TCP/UDP protocols, or its own
-    resolver. It selects the transport, so it is a declaration about the
-    workload rather than a choice about the host. Leaving it out keeps
-    the socket-aware default, which is the stronger posture.
+    `egress` / `peers` / `dns` layer granular grants on top. Applications
+    use the guest loopback HTTP proxy, SOCKS5h/UDP, controlled DNS, mediated
+    ping, or typed connectors; direct raw networking is unsupported.
     """
-    # Refuse a non-boolean rather than reading it for truthiness. This kwarg
-    # decides which transport the workload is admitted for, so taking
-    # `"yes"` as true — or `"false"` as true, which truthiness also does —
-    # would strand it on a transport it cannot use. The static decorator
-    # parser refuses the same shape; both routes to the IR must agree.
-    if not isinstance(raw_ip_stack, bool):
-        raise TypeError(
-            f"raw_ip_stack must be a bool, got {type(raw_ip_stack).__name__} "
-            f"({raw_ip_stack!r})"
-        )
     # `NetworkMode` is `Union[NetworkMode1, NetworkMode2]`, and a Union is
     # not callable — constructing it raised TypeError for every caller.
     # Resolve against the enum arm rather than the union: `NetworkMode2` is
@@ -783,7 +768,6 @@ def network(
         egress=egress,
         peers=list(peers) if peers else [],
         dns=dns,
-        raw_ip_stack=raw_ip_stack,
     )
 
 

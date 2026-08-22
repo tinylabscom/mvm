@@ -42,40 +42,22 @@ const FROZEN: &[&str] = &[
 const ALLOWLIST: &[&str] = &[
     // The refusal itself has to name what it refuses.
     "crates/mvm-core/src/plan/l3_retirement.rs",
-    // Plan type + IR surface.
+    // The IR compatibility boundary still names the rejected legacy field.
     "crates/mvm-contract/src/ir/workload.rs",
-    "crates/mvm-contract/src/plan/execution_plan.rs",
-    "crates/mvm-contract/src/plan/types.rs",
-    "crates/mvm-core/src/plan/synthesis.rs",
-    // CLI mode derivation and the launch paths that carry the mode.
-    "crates/mvm-cli/src/commands/machine/mod.rs",
+    // CLI compatibility input still names the rejected legacy field.
     "crates/mvm-cli/src/commands/machine/runtime.rs",
-    "crates/mvm-cli/src/commands/vm/run_plan.rs",
-    "crates/mvm-cli/src/commands/vm/up/admission.rs",
     // Host forwarder and its channel identities.
     "crates/mvm-hostd/src/bin/mvm-netd.rs",
     "crates/mvm-hostd/src/netd/",
     "crates/mvm-net/src/channel.rs",
     "crates/mvm-net/src/l3/",
     // Launch-spec guards and the VMM wiring behind them.
-    "crates/mvm-runtime/src/machine/mod.rs",
-    "crates/mvm-runtime/src/machine/nic_guard.rs",
     "crates/mvm-vmm/src/driver/spec.rs",
-    "crates/mvm-vmm/src/host/egress_shared.rs",
     "crates/mvm-vmm/src/host/netd_spawn.rs",
     "crates/mvm-vmm/src/host/spec_map.rs",
-    // SDK surfaces that still spell the declaration, plus the generated schema
-    // and the user-facing guide. All three go when the declaration goes.
-    "crates/mvm-sdk/src/ctor/network.rs",
+    // Decorator compatibility boundaries still name the rejected kwarg.
     "crates/mvm-sdk/src/decorator/python.rs",
     "crates/mvm-sdk/src/decorator/value.rs",
-    "crates/mvm-sdk/src/deploy.rs",
-    "crates/mvm-sdk/sdks/python/mvm/_dsl.py",
-    "crates/mvm-sdk/sdks/python/mvm/_ir/workload.py",
-    "crates/mvm-sdk/sdks/typescript/src/index.ts",
-    "crates/mvm-sdk/sdks/typescript/src/ir/workload.ts",
-    "public/src/content/docs/guides/l3-vsock-networking.md",
-    "schema/workload-ir-v0.json",
 ];
 
 /// Path fragments that mark a file as test code, which this gate does not read.

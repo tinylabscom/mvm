@@ -1,6 +1,7 @@
 //! Admitted network surfaces decoded for workload launch.
 
 use anyhow::{Context, Result};
+
 pub(super) fn admitted_network_limits(
     plan_json: Option<&str>,
 ) -> Result<mvm_core::plan::NetworkLimits> {
