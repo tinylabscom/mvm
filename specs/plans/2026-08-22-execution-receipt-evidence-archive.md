@@ -3,7 +3,21 @@
 Backing: preview
 Validation: none
 
-**Status:** Design. No workstream started.
+**Status:** WS1-WS4 + WS6 shipped. WS3 shipped except transcript embedding.
+WS5 (mvmd storage) is specced in the mvmd repo and not started.
+
+**Shipped differences from this design**, recorded here rather than left for a
+reader to discover:
+
+- Proofs are per **leaf**, not per receipt (`proofs/leaf-<index>.json`). A
+  citation with no proof was bound to nothing a verifier could check
+  independently of the host's signature. Found by running the exporter.
+- The sealed-transcript event is `gateway.transcript_sealed`, not
+  `transcript.sealed` as first written here.
+- Inclusion is two checks, not one: membership *plus*
+  `proof.leaf_index == leaf.index`. A proof for the wrong leaf verifies.
+- `--with-transcripts` is not implemented and not advertised. See ADR-110's
+  open question about which transcript store is authoritative.
 
 **Date:** 2026-08-22
 **Owner:** mvm
@@ -35,7 +49,7 @@ names and `return None`s everything else. The caller's `None => continue`
 | `flow.egress.allowed` / `flow.egress.denied` | `EventCategory::Flow`, `audit_recorder.rs` | the claim-10 decision per outbound connection |
 | `stream.subscribed` | `emitter.rs:85` | who attached to workload output, and from which seq |
 | `stream.input_granted` | `emitter.rs:105` | who was admitted to workload stdin |
-| `transcript.sealed` | `emitter.rs:1005` | the sealed transcript manifest root |
+| `gateway.transcript_sealed` | `emitter.rs:1005` | the sealed transcript manifest root |
 | `dns.*`, `policy.*`, `secret.*`, `key.*` | `audit_recorder.rs` taxonomy | resolution, policy load, secret CRUD, key rotation |
 
 An operator reading the current output has no way to tell an export with no

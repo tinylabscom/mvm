@@ -3,6 +3,9 @@
 Backing: preview
 Validation: none
 
+**Status:** Tasks 1-8 complete. Transcript chunk embedding remains; see
+ADR-110's open question.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: use `superpowers:subagent-driven-development`
 > (recommended) or `superpowers:executing-plans` to implement this task-by-task.
 > Steps use checkbox (`- [ ]`) syntax for tracking.
@@ -721,7 +724,7 @@ Order of operations matters and is not arbitrary:
    rather than re-deriving the signing bytes.
 4. `build_inclusion_in(...)` per receipt leaf index.
 5. Copy the in-scope raw chain lines into `audit/`.
-6. Collect transcript citations from `transcript.sealed` entries; embed chunks
+6. Collect transcript citations from `gateway.transcript_sealed` entries; embed chunks
    only when `with_transcripts`.
 7. Hash every member, fill `members`, `counts_by_event`, `leaves`.
 8. Set `completeness` from the scope: `Plan` → `Attested`, `Tenant` → `Derivable`.
