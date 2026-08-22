@@ -39,6 +39,16 @@ let
     # Browser-only WebLinux engine.  Built on demand; default native targets
     # do not depend on it.
     qemu-wasm-engine = pkgs.callPackage ./qemu-wasm.nix { };
+
+    # Minimal x86_64 guest image for QEMU-Wasm smoke tests.
+    qemu-wasm-smoke-image = pkgs.callPackage ./qemu-wasm-smoke-image.nix {
+      inherit qemu-wasm-engine;
+    };
+
+    # Browser-ready asset bundle (engine + image + HTML runner).
+    qemu-wasm-smoke-pack = pkgs.callPackage ./qemu-wasm-smoke-pack.nix {
+      inherit qemu-wasm-engine qemu-wasm-smoke-image;
+    };
   });
 
   mvmctl = pkgs.callPackage ./mvmctl.nix {

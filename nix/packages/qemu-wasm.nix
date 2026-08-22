@@ -504,6 +504,10 @@ stdenv.mkDerivation (finalAttrs: {
     runHook postInstall
   '';
 
+  passthru = {
+    inherit emscripten;
+  };
+
   doCheck = false;
 
   meta = {

@@ -57,13 +57,13 @@ let
   # race while unpacking this archive. Materialize the source with bsdtar once
   # and pass the resulting directory to all kernel derivations.
   kernelSourceTree =
-    pkgs.runCommand "linux-${kernelVersion}-source"
+    pkgs.buildPackages.runCommand "linux-${kernelVersion}-source"
       {
-        nativeBuildInputs = [ pkgs.libarchive ];
+        nativeBuildInputs = [ pkgs.buildPackages.libarchive ];
       }
       ''
         mkdir -p "$out"
-        ${pkgs.libarchive}/bin/bsdtar -xf ${kernelSrc} -C "$out" --strip-components=1
+        ${pkgs.buildPackages.libarchive}/bin/bsdtar -xf ${kernelSrc} -C "$out" --strip-components=1
       '';
 
   # ── Base: minimal feature set common to every mvm microVM kernel ──
@@ -682,9 +682,9 @@ let
       extraDisables ? [ ],
       requiredExtraDisables ? [ ],
     }:
-    pkgs.runCommandCC "mvm-kernel-config"
+    pkgs.buildPackages.runCommandCC "mvm-kernel-config"
       {
-        nativeBuildInputs = with pkgs; [
+        nativeBuildInputs = with pkgs.buildPackages; [
           gnumake
           bison
           flex
@@ -708,8 +708,8 @@ let
         chmod -R u+w .
 
         export ARCH=${kernelArch}
-        export SHELL=${pkgs.bash}/bin/bash
-        export CONFIG_SHELL=${pkgs.bash}/bin/bash
+        export SHELL=${pkgs.buildPackages.bash}/bin/bash
+        export CONFIG_SHELL=${pkgs.buildPackages.bash}/bin/bash
 
         # Linux Kconfig's `$(shell,...)` helper goes through `popen()`, which
         # hardwires `/bin/sh -c ...` instead of respecting PATH or Kbuild's
@@ -718,7 +718,7 @@ let
         # probe (compiler/linker presence, cc-version, etc.).
         if [ ! -x /bin/sh ]; then
           mkdir -p /bin
-          ln -s ${pkgs.bash}/bin/sh /bin/sh
+          ln -s ${pkgs.buildPackages.bash}/bin/sh /bin/sh
         fi
 
         # `scripts/config` ships `#!/usr/bin/env bash`; the Nix sandbox has
@@ -830,12 +830,12 @@ let
         # kernel tree ships the extractor for exactly this. Emit it beside the
         # bzImage so the format is available rather than inferred from a name.
         nativeBuildInputs = (old.nativeBuildInputs or [ ]) ++ [
-          pkgs.gzip
-          pkgs.xz
-          pkgs.lz4
-          pkgs.zstd
-          pkgs.lzop
-          pkgs.binutils
+          pkgs.buildPackages.gzip
+          pkgs.buildPackages.xz
+          pkgs.buildPackages.lz4
+          pkgs.buildPackages.zstd
+          pkgs.buildPackages.lzop
+          pkgs.buildPackages.binutils
         ];
         postInstall = (old.postInstall or "") + ''
           bash ${kernelSourceTree}/scripts/extract-vmlinux "$out/bzImage" > "$out/vmlinux"
