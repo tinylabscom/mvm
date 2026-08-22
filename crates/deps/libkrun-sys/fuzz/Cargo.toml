@@ -40,9 +40,6 @@ test = false
 doc = false
 bench = false
 
-[patch.crates-io]
-arrayref = { git = "https://github.com/droundy/arrayref", rev = "f8d0299d863922db6c409d08098941e833b70d69" }
-
 # Fuzz the `SupervisorAttachConfig` decoder, the only
 # attacker-reachable-post-spawn surface (the prelaunched supervisor reads it
 # off a same-uid control UDS). Goal: never panic on any input.

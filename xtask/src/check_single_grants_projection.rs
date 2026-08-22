@@ -4,7 +4,7 @@
 //! derivation is a second policy decision point, and two decision points can
 //! disagree — at which point the enforced policy is whichever one the
 //! enforcement path happened to read. This is the same discipline
-//! `check-uniform-vsock-egress` applies to the egress gate itself.
+//! `check-single-network-path` applies to the endpoint and egress gate.
 //!
 //! The rule: outside the projection file, no function signature may both
 //! take a `Grants` and return a `NetworkPolicy`. Keying on the signature

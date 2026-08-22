@@ -1224,7 +1224,7 @@ fn parent_network_mode(
     parent_checkpoint: &CheckpointId,
     store: &CheckpointStore,
 ) -> mvm_contract::plan::NetworkMode {
-    let fallback = crate::commands::machine::derive_network_mode(false);
+    let fallback = crate::commands::machine::preflight_network();
     let Ok(parent_meta) = store.read_meta(parent_checkpoint) else {
         return fallback;
     };

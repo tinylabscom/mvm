@@ -24,7 +24,7 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  MVMCTL_RELEASE_FEATURES: host,user,template-registry-s3,release-artifact-bootstrap
+  MVMCTL_RELEASE_FEATURES: host,user,template-registry-s3,release-artifact-bootstrap,release-channel
 
 jobs:
   bdd:
@@ -115,7 +115,7 @@ jobs:
           # Use vendored OpenSSL for cross-compilation to avoid linking issues
           OPENSSL_STATIC: 1
           OPENSSL_VENDORED: 1
-        run: cargo build --release --target "${TARGET}" --features "${MVMCTL_RELEASE_FEATURES}"
+        run: cargo build --profile release-min --target "${TARGET}" --features "${MVMCTL_RELEASE_FEATURES}"
 
       # The per-VM host processes mvmctl spawns at runtime (one process per
       # guest). They are SEPARATE bin targets in `mvm-hostd` — the root
@@ -153,7 +153,6 @@ jobs:
             --bin mvm-host-agent \
             --bin mvm-signer-helper \
             --bin mvm-network-endpoint \
-            --bin mvm-netd \
             --bin mvm-broker \
             --bin mvm-audit-signer
 
@@ -163,7 +162,7 @@ jobs:
           TARGET: ${{ matrix.target }}
         shell: bash
         run: |
-          BIN="target/${TARGET}/release/mvmctl"
+          BIN="target/${TARGET}/release-min/mvmctl"
           "$BIN" --version
           "$BIN" --help > /dev/null
           "$BIN" ops metrics --json | python3 -c "
@@ -177,18 +176,17 @@ jobs:
       - name: Binary size within budget (measured targets only)
         # Per-target byte budget for the release `mvmctl`. Only targets with a
         # measured baseline are gated; add a branch here once a new target is
-        # measured. aarch64-apple-darwin measured 30,007,616 bytes at v0.17.0
-        # (2026-07-08) — the 0.16→0.17 feature arc (guest RAM, healthcheck,
-        # signing, docs) grew it past the old 28 MiB budget. Budget 33,554,432
-        # (32 MiB) for headroom.
+        # measured. aarch64-apple-darwin measured 19,206,160 bytes with the
+        # `release-min` profile at v0.18.0 (2026-08-20). Budget 25,165,824
+        # (24 MiB) for headroom while keeping the size ratchet tight.
         if: matrix.target == 'aarch64-apple-darwin'
         env:
           TARGET: ${{ matrix.target }}
         shell: bash
         run: |
           cargo run --package xtask -- check-binary-size \
-            --path "target/${TARGET}/release/mvmctl" \
-            --budget-bytes 33554432
+            --path "target/${TARGET}/release-min/mvmctl" \
+            --budget-bytes 25165824
 
       - name: Generate man pages
         shell: bash
@@ -205,7 +203,7 @@ jobs:
           ARCHIVE_NAME="mvmctl-${TARGET}"
 
           mkdir -p "staging/${ARCHIVE_NAME}"
-          cp "target/${TARGET}/release/${BIN_NAME}" "staging/${ARCHIVE_NAME}/"
+          cp "target/${TARGET}/release-min/${BIN_NAME}" "staging/${ARCHIVE_NAME}/"
           # Per-VM host processes (built in the prior step), shipped next to
           # mvmctl so the backend's adjacent-to-exe resolver finds them on a
           # downloaded install. Kept in step with PER_VM_HOST_BINARIES by
@@ -214,7 +212,7 @@ jobs:
           # Fail closed rather than copy-if-exists: a binary that failed to
           # build would otherwise be silently dropped from the tarball and
           # surface much later as a spawn failure on a user's machine.
-          REQUIRED_HOSTBINS="mvm-host-agent mvm-signer-helper mvm-network-endpoint mvm-netd mvm-broker mvm-audit-signer"
+          REQUIRED_HOSTBINS="mvm-host-agent mvm-signer-helper mvm-network-endpoint mvm-broker mvm-audit-signer"
           if [[ "${TARGET}" == *apple-darwin ]]; then
             REQUIRED_HOSTBINS="${REQUIRED_HOSTBINS} mvm-hvf-supervisor mvm-libkrun-supervisor"
           fi

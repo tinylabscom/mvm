@@ -327,7 +327,7 @@ pub(in crate::commands) struct RunArgs {
     /// forwarded from `machine run`'s `--healthcheck` + tuning flags.
     #[arg(skip)]
     pub healthcheck: Option<mvm_contract::ir::HealthCheck>,
-    /// Select the VMM (firecracker, hvf, libkrun, or qemu).
+    /// Select the VMM (firecracker, hvf, libkrun, qemu, or web-linux).
     #[arg(long, value_name = "HYPERVISOR")]
     pub hypervisor: Option<String>,
 }
@@ -727,6 +727,7 @@ pub(in crate::commands) fn run_secure_with_source(
         // `[grants]` table.
         manifest: None,
         config: &host_config,
+        ai: None,
     })?;
     let network_policy = resolved_grants.network_policy.clone();
 
@@ -903,6 +904,9 @@ pub(in crate::commands) fn run_secure_with_source(
         }
         if !json_requested && !output.stderr.is_empty() {
             eprint!("{}", output.stderr);
+        }
+        if !json_requested && let Some(timing) = output.phase_timing.as_ref() {
+            eprintln!("{}", timing.render_table());
         }
         let summary = RunJsonSummary::from_parts(receipt_input.clone(), &output, receipt_path);
         if let Some(path) = summary.receipt_path.as_deref() {
@@ -2522,6 +2526,7 @@ mod tests {
             exit_code: 7,
             stdout: "secret stdout".to_string(),
             stderr: "secret stderr".to_string(),
+            phase_timing: None,
         };
 
         let outcome = ReceiptOutcome::from_exec_output(&output);
@@ -2541,6 +2546,27 @@ mod tests {
             exit_code: 0,
             stdout: "sensitive stdout".to_string(),
             stderr: "sensitive stderr".to_string(),
+            phase_timing: Some(
+                crate::commands::vm::phase_timing::RunPhaseTimingReport::new(
+                    crate::commands::vm::phase_timing::RunPhaseTimings {
+                        launch_mode: crate::commands::vm::phase_timing::LaunchMode::Cold,
+                        resolve_ms: 1.0,
+                        drives_ms: 2.0,
+                        admit_ms: 3.0,
+                        pool_wait_ms: 0.0,
+                        claim_ms: 0.0,
+                        backend_start_ms: 4.0,
+                        vsock_wait_ms: 5.0,
+                        warm_window_ms: 9.0,
+                        command_ms: 6.0,
+                        teardown_ms: 7.0,
+                        total_ms: 28.0,
+                    },
+                    crate::commands::vm::launch_sample::LaunchSubTimings::default(),
+                    Vec::new(),
+                    Vec::new(),
+                ),
+            ),
         };
         let summary = RunJsonSummary::from_parts(
             ReceiptInput::from_run_args(&args, "firecracker").expect("receipt input"),
@@ -2551,6 +2577,8 @@ mod tests {
         assert!(json.contains("stdout_sha256"));
         assert!(json.contains("stderr_sha256"));
         assert!(json.contains("/tmp/receipt.json"));
+        assert!(json.contains("\"phase_timing\""));
+        assert!(json.contains("\"total_ms\":28.0"));
         assert!(!json.contains("sensitive stdout"));
         assert!(!json.contains("sensitive stderr"));
     }

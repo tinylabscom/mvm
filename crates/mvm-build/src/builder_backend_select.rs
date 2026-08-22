@@ -26,8 +26,10 @@ use std::path::PathBuf;
 use std::sync::OnceLock;
 
 use crate::builder_health;
-use crate::builder_vm::{BuilderVm, BuilderVmError};
-use crate::libkrun_builder::{LibkrunBuilderVm, builder_vm_cache_dir, host_arch_tag};
+use crate::builder_vm::{BuilderArtifacts, BuilderJob, BuilderMounts, BuilderVm, BuilderVmError};
+use crate::libkrun_builder::{
+    DEFAULT_VCPUS, LibkrunBuilderVm, builder_vm_cache_dir, host_arch_tag,
+};
 use crate::qemu_builder::QemuBuilderVm;
 use mvm_core::platform::{Platform, current};
 
@@ -68,6 +70,13 @@ pub const MVM_BUILDER_BACKEND_ENV: &str = "MVM_BUILDER_BACKEND";
 /// without re-deriving the string.
 pub const MVM_LINUX_BUILDER_VM_ENV: &str = "MVM_LINUX_BUILDER_VM";
 
+/// Stage 0's no-host-mkfs compatibility path builds in a tmpfs, whose default
+/// capacity is half of guest RAM. The builder image closure plus its final
+/// rootfs copy exceeds the steady-state builder's 8 GiB tmpfs, so Stage 0 gets
+/// a larger one-shot memory budget while ordinary builder jobs retain their
+/// existing resource profile.
+const LIBKRUN_STAGE0_MEMORY_MIB: u32 = 24 * 1024;
+
 /// Recognised choices for [`MVM_BUILDER_BACKEND_ENV`]. Kept as a
 /// tagged enum so a future addition (e.g. Firecracker-builder on
 /// Linux) is a `match` exhaustiveness check rather than a string
@@ -85,6 +94,10 @@ pub enum BuilderBackendChoice {
     /// auto-detected default on macOS-26 Apple Silicon; opt-in elsewhere via
     /// `MVM_BUILDER_BACKEND=hvf` / `--builder hvf`.
     Hvf,
+    /// Browser-hosted WebLinux builder VM. Native hosts never auto-detect
+    /// this; it is parsed only for catalog/help parity and fails closed if
+    /// a native build tries to resolve it.
+    WebLinux,
 }
 
 impl BuilderBackendChoice {
@@ -94,6 +107,7 @@ impl BuilderBackendChoice {
             BuilderBackendChoice::Libkrun => "libkrun",
             BuilderBackendChoice::Qemu => "qemu",
             BuilderBackendChoice::Hvf => "hvf",
+            BuilderBackendChoice::WebLinux => "web-linux",
         }
     }
 }
@@ -176,6 +190,26 @@ pub fn resolve_choice() -> BuilderBackendChoice {
     resolve_choice_with_override(None)
 }
 
+/// Browser-only builder stub. The WebLinux builder runs inside a browser
+/// Worker and has no native implementation; resolving it on a native host
+/// yields a builder whose operations fail closed rather than silently
+/// falling back to a different backend.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct WebLinuxBuilderVm;
+
+impl BuilderVm for WebLinuxBuilderVm {
+    fn run_build(
+        &self,
+        _job: &BuilderJob,
+        _mounts: &BuilderMounts,
+    ) -> Result<BuilderArtifacts, BuilderVmError> {
+        Err(BuilderVmError::VmmUnavailable {
+            requested: "web-linux".to_string(),
+            reason: "the web-linux builder is browser-only; run it in a WebAssembly browser environment, or select libkrun/qemu/hvf on a native host".to_string(),
+        })
+    }
+}
+
 /// Construct the builder driver the selection resolves to. Returns
 /// a boxed trait object so callers don't have to enumerate concrete
 /// types at the call site.
@@ -212,6 +246,7 @@ pub fn resolve_builder_backend_with_override(
             )()
             .expect("registered hvf builder constructor failed")
         }
+        BuilderBackendChoice::WebLinux => Box::new(WebLinuxBuilderVm),
     }
 }
 
@@ -232,6 +267,7 @@ pub fn try_resolve_builder_backend_with_override(
                 reason: "hvf builder constructor not registered (CLI startup did not run)".into(),
             }),
         },
+        BuilderBackendChoice::WebLinux => Ok(Box::new(WebLinuxBuilderVm)),
     }
 }
 
@@ -260,12 +296,18 @@ pub fn resolve_stage0_backend_for_choice(
 ) -> Box<dyn BuilderVm> {
     match stage0_backend_choice(choice) {
         BuilderBackendChoice::Qemu => Box::new(QemuBuilderVm::new()),
-        BuilderBackendChoice::Libkrun | BuilderBackendChoice::Hvf => Box::new(
-            LibkrunBuilderVm::default()
-                .with_verbose(verbose)
-                .with_closure_nar(closure_nar_for_host_arch()),
-        ),
+        BuilderBackendChoice::Libkrun | BuilderBackendChoice::Hvf => {
+            Box::new(libkrun_stage0_backend(verbose))
+        }
+        BuilderBackendChoice::WebLinux => Box::new(WebLinuxBuilderVm),
     }
+}
+
+fn libkrun_stage0_backend(verbose: bool) -> LibkrunBuilderVm {
+    LibkrunBuilderVm::default()
+        .with_resources(DEFAULT_VCPUS, LIBKRUN_STAGE0_MEMORY_MIB)
+        .with_verbose(verbose)
+        .with_closure_nar(closure_nar_for_host_arch())
 }
 
 /// Stage 0 currently has only two concrete driver targets: explicit qemu stays
@@ -275,6 +317,9 @@ fn stage0_backend_choice(choice: BuilderBackendChoice) -> BuilderBackendChoice {
     match choice {
         BuilderBackendChoice::Qemu => BuilderBackendChoice::Qemu,
         BuilderBackendChoice::Libkrun | BuilderBackendChoice::Hvf => BuilderBackendChoice::Libkrun,
+        // WebLinux has no native Stage 0; the resolved WebLinuxBuilderVm fails
+        // closed when its run_stage0 is invoked.
+        BuilderBackendChoice::WebLinux => BuilderBackendChoice::WebLinux,
     }
 }
 
@@ -621,6 +666,15 @@ mod tests {
         });
     }
 
+    #[test]
+    fn resolve_env_override_web_linux_falls_through_to_auto_detect() {
+        // WebLinux is browser-only; a native env override must not
+        // select it silently.
+        with_env(Some("web-linux"), || {
+            assert_eq!(resolve_env_override(), None);
+        });
+    }
+
     // ── Priority: flag > env > auto-detect ──
 
     #[test]
@@ -682,6 +736,7 @@ mod tests {
     fn backend_choice_name_round_trips() {
         assert_eq!(BuilderBackendChoice::Libkrun.name(), "libkrun");
         assert_eq!(BuilderBackendChoice::Qemu.name(), "qemu");
+        assert_eq!(BuilderBackendChoice::WebLinux.name(), "web-linux");
     }
 
     #[test]
@@ -823,6 +878,14 @@ mod tests {
         assert_eq!(stage0_backend_choice(Hvf), Libkrun);
         assert_eq!(stage0_backend_choice(Libkrun), Libkrun);
         assert_eq!(stage0_backend_choice(Qemu), Qemu);
+    }
+
+    #[test]
+    fn libkrun_stage0_has_capacity_for_the_tmpfs_compatibility_path() {
+        let backend = libkrun_stage0_backend(false);
+        assert_eq!(backend.vcpus, DEFAULT_VCPUS);
+        assert_eq!(backend.memory_mib, LIBKRUN_STAGE0_MEMORY_MIB);
+        assert_eq!(backend.memory_mib, 24 * 1024);
     }
 
     #[test]

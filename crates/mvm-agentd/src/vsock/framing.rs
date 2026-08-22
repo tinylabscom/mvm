@@ -368,12 +368,19 @@ impl AuthenticatedSession {
     }
 
     /// Write one encrypted, signed control frame.
+    ///
+    /// A write that fails after the frame is sealed ends the session: the
+    /// sequence number is already spent, so continuing would put every later
+    /// frame one ahead of what the peer expects and surface as an
+    /// unexplained sequence mismatch instead of the write failure that
+    /// actually happened.
     pub fn write<T: Serialize>(&mut self, stream: &mut impl Write, value: &T) -> Result<()> {
         let plaintext = serde_json::to_vec(value).with_context(|| "serialize control payload")?;
         let sealed = self
             .inner
             .seal(&plaintext)
             .map_err(|error| anyhow::anyhow!("control frame seal failed: {error}"))?;
+        let sequence = sealed.sequence;
         let frame = AuthenticatedFrame {
             version: sealed.version,
             sig_alg: sealed.sig_alg,
@@ -386,8 +393,9 @@ impl AuthenticatedSession {
                 signer_id: sealed.signer_id,
             },
         };
-        write_frame(stream, &frame)?;
-        Ok(())
+        write_frame(stream, &frame).inspect_err(|error| {
+            self.inner.poison_send(sequence, error.to_string());
+        })
     }
 
     /// Read, authenticate, decrypt, and deserialize one control frame.
@@ -736,6 +744,144 @@ mod tests {
             read_authenticated_frame(&mut host_stream, &guest_vk, session_id, 0).unwrap();
         assert!(matches!(resp, GuestResponse::Pong));
         assert_eq!(seq, 1);
+    }
+
+    /// Build a host/guest session pair over a socketpair, as a completed
+    /// handshake would leave them.
+    fn confidential_pair() -> (
+        (UnixStream, AuthenticatedSession),
+        (UnixStream, AuthenticatedSession),
+    ) {
+        let (mut host_stream, mut guest_stream) = UnixStream::pair().unwrap();
+        host_stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        guest_stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let host_key = test_keypair();
+        let guest_key = test_keypair();
+        let host_anchor = host_key.verifying_key();
+
+        let guest_thread = std::thread::spawn(move || {
+            let session =
+                AuthenticatedSession::guest(&mut guest_stream, guest_key, &host_anchor).unwrap();
+            (guest_stream, session)
+        });
+        let host_session =
+            AuthenticatedSession::host(&mut host_stream, "chunk-cap-test", host_key).unwrap();
+        let guest = guest_thread.join().unwrap();
+        ((host_stream, host_session), guest)
+    }
+
+    /// The witness the chunk cap was missing: a full-size chunk of the most
+    /// expensive bytes there are must still fit the frame cap *after* both JSON
+    /// encodings — the response body and the sealed envelope's ciphertext.
+    ///
+    /// Checking the cap against the response body alone is what let a 48 KiB
+    /// chunk pass the handler and then fail on the wire.
+    #[test]
+    fn sealed_worst_case_chunk_fits_the_frame_cap() {
+        let (_host, (guest_stream, mut guest_session)) = confidential_pair();
+        drop(guest_stream);
+
+        // 0xFF is the worst case: every byte serializes as the four characters
+        // `255,` in both the response body and the sealed ciphertext.
+        let response = GuestResponse::ExecEvent(ExecEvent::Stdout {
+            chunk: vec![0xFF; MAX_DATA_CHUNK_SIZE],
+        });
+
+        let mut wire = Vec::new();
+        guest_session
+            .write(&mut wire, &response)
+            .expect("a full-size chunk must fit the wire");
+
+        let body = wire.len() - 4;
+        assert!(
+            body <= MAX_FRAME_SIZE,
+            "a {MAX_DATA_CHUNK_SIZE}-byte chunk sealed to {body} bytes, over the \
+             {MAX_FRAME_SIZE}-byte cap"
+        );
+
+        let mut host_session = _host.1;
+        let decoded: GuestResponse = host_session
+            .read(&mut std::io::Cursor::new(wire))
+            .expect("the frame must round-trip");
+        assert!(matches!(
+            decoded,
+            GuestResponse::ExecEvent(ExecEvent::Stdout { .. })
+        ));
+    }
+
+    /// A chunk the old cap allowed is still too big for the wire. Pins the
+    /// boundary so a future edit that raises `MAX_DATA_CHUNK_SIZE` back toward
+    /// 48 KiB has to confront this.
+    #[test]
+    fn a_chunk_above_the_cap_fails_the_write_and_poisons_the_session() {
+        let (_host, (_guest_stream, mut guest_session)) = confidential_pair();
+
+        let oversize = GuestResponse::ExecEvent(ExecEvent::Stdout {
+            chunk: vec![0xFF; 48 * 1024],
+        });
+        let mut wire = Vec::new();
+        let err = guest_session
+            .write(&mut wire, &oversize)
+            .expect_err("48 KiB of worst-case bytes must not fit the sealed envelope");
+        assert!(
+            err.to_string().contains("Frame too large"),
+            "expected the frame cap to reject it, got {err}"
+        );
+        assert!(wire.is_empty(), "nothing may reach the wire on a rejection");
+
+        // The sequence that frame consumed cannot be reissued, so the session
+        // must be finished rather than silently one ahead of the peer.
+        let next = guest_session.write(&mut wire, &GuestResponse::Pong);
+        let err = next.expect_err("a poisoned session must refuse further writes");
+        assert!(
+            err.to_string().contains("session poisoned"),
+            "expected the poison to name itself, got {err}"
+        );
+    }
+
+    /// The user-visible failure this fixes: a write that dies after the seal
+    /// used to leave the peer permanently one frame behind, reported several
+    /// frames later as a sequence mismatch with no mention of the write.
+    #[test]
+    fn a_transport_failure_after_the_seal_does_not_desync_the_peer() {
+        struct DeadTransport;
+        impl Write for DeadTransport {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "peer went away",
+                ))
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let ((mut host_stream, mut host_session), (mut guest_stream, mut guest_session)) =
+            confidential_pair();
+
+        host_session
+            .write(&mut DeadTransport, &GuestRequest::Ping)
+            .expect_err("the transport is dead");
+
+        // Without the poison this write would succeed and land as sequence 2
+        // against a peer still expecting 1.
+        let err = host_session
+            .write(&mut host_stream, &GuestRequest::Ping)
+            .expect_err("the session must be finished, not one frame ahead");
+        assert!(err.to_string().contains("session poisoned"), "got {err}");
+
+        // And the peer sees nothing rather than a frame it must reject.
+        drop(host_stream);
+        assert!(
+            guest_session
+                .read::<GuestRequest>(&mut guest_stream)
+                .is_err()
+        );
     }
 
     #[test]

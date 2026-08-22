@@ -20,6 +20,7 @@
 use mvm_agentd::guest_mount;
 use mvm_agentd::vsock::ActivateEnvironment;
 
+use crate::globals::VALIDATED_EXTENSIONS;
 use crate::state::{ActivationState, AgentBootState};
 
 /// True when this process is PID 1 in the initramfs.
@@ -33,8 +34,6 @@ pub(crate) fn early_setup() {
     if !is_pid1() {
         return;
     }
-    eprintln!("mvm-guest-agent: running as PID 1, performing early initramfs setup");
-
     #[cfg(target_os = "linux")]
     {
         if crate::transport::unix_transport_selected() {
@@ -83,7 +82,7 @@ fn provision_host_signer_anchor() {
             )
         });
     match result {
-        Ok(true) => eprintln!("mvm-guest-agent: host-signer anchor provisioned from cmdline"),
+        Ok(true) => {}
         Ok(false) => {
             eprintln!("mvm-guest-agent: no host-signer anchor on cmdline; control stays closed")
         }
@@ -124,10 +123,21 @@ pub(crate) fn apply_activation(
     // It has to land after the pivot (it writes into the workload's root) and
     // before the privilege drop (mounts and interface changes need root).
     bootstrap_guest_environment()?;
+    let validated_extensions = mvm_agentd::extension::validate_extensions(
+        &env.extensions,
+        std::path::Path::new("/run/mvm/extension-markers"),
+    );
+    if let Err(error) = &validated_extensions {
+        return Err(guest_mount::MountError::InvalidConfig(error.clone()));
+    }
+    VALIDATED_EXTENSIONS
+        .set(validated_extensions)
+        .map_err(|_| {
+            guest_mount::MountError::InvalidConfig("extensions already activated".into())
+        })?;
     guest_mount::drop_guest_agent_privilege(guest_mount::WORKLOAD_UID, guest_mount::WORKLOAD_GID)?;
 
     boot_state.set_activation(ActivationState::Activated);
-    eprintln!("mvm-guest-agent: activation complete, serving operational RPCs");
     Ok(())
 }
 

@@ -255,7 +255,7 @@ jobs:
         run: |
           set -euo pipefail
           tarball="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
-          curl -fL --retry 3 -o "$tarball" \
+          curl -fL --retry 3 --retry-all-errors --retry-delay 2 -o "$tarball" \
             "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/${tarball}"
           echo "${ACTIONLINT_SHA256}  ${tarball}" | sha256sum -c -
           tar -xzf "$tarball" actionlint
@@ -386,8 +386,8 @@ jobs:
       - name: Trust-gradient ledger
         run: cargo run -p xtask -- check-trust-gradient
 
-      - name: vsock-only egress (no guest NIC on the vmm/HVF path, ADR-100)
-        run: cargo run -p xtask -- check-vsock-only-egress
+      - name: single workload network path and socket owner (single-network-path)
+        run: cargo run -p xtask -- check-single-network-path
 
       # The in-guest toolbox is deliberately ungoverned — the microVM boundary
       # bounds it. What the boundary cannot bound is the guest originating a
@@ -401,21 +401,6 @@ jobs:
       # protocol is what killed egress on main with every test green.
       - name: one guest→host protocol
         run: cargo run -p xtask -- check-one-guest-protocol
-
-      # Tree-wide companion to the check above. The userspace network gateways
-      # went with the guest-NIC path; a reference coming back is how a second
-      # egress model grows back alongside the real one.
-      - name: no reference to a removed userspace network gateway
-        run: cargo run -p xtask -- check-no-gateway-names
-
-      # Temporary, shrink-only ratchet: the raw-packet workload networking path
-      # is frozen while the single flow-aware vsock path is built. Deleted with
-      # its last allowlist entry.
-      - name: l3 expansion freeze (no new raw-packet networking references)
-        run: cargo run -p xtask -- check-l3-expansion-freeze
-
-      - name: uniform vsock egress (Firecracker + libkrun + HVF use the WorkloadRunner seam)
-        run: cargo run -p xtask -- check-uniform-vsock-egress
 
       # A wall-clock bound is declared once, as a grant. `exec_secs` is that
       # grant's projection into the plan's older encoding; a second writer is a
@@ -485,7 +470,7 @@ jobs:
             echo "changed=true" >> "$GITHUB_OUTPUT"; exit 0
           fi
           git fetch --no-tags --depth=1 origin "$BASE_SHA" >/dev/null 2>&1 || true
-          if git diff --name-only "$BASE_SHA"...HEAD 2>/dev/null | grep -qE '(^|/)fuzz[^/]*/'; then
+          if git diff --name-only "$BASE_SHA" HEAD 2>/dev/null | grep -qE '(^|/)fuzz[^/]*/'; then
             echo "changed=true" >> "$GITHUB_OUTPUT"
           else
             echo "changed=false" >> "$GITHUB_OUTPUT"
@@ -590,6 +575,13 @@ jobs:
         run: |
           cargo nextest run -p mvm-agentd --features addons
           cargo check -p mvm-agentd --features addons --bins
+
+      # End-user release builds enable a bootstrap path that contributor builds
+      # deliberately omit. Keep that source compiled with warnings denied on
+      # every code-changing pull request so the nightly reproducibility lane is
+      # evidence, not the first compiler to see it.
+      - name: release-artifact bootstrap feature compiles
+        run: cargo check -p mvm-cli --features release-artifact-bootstrap --lib
 
       - name: Assert auto-detect still picks libkrun off Linux/HVF
         run: |
@@ -1550,3 +1542,139 @@ jobs:
             --closure-paths "$image_path/rootfs-closure-paths" \
             --sdk-sidecar "$sidecar_path/sdk.ext4" \
             --json
+
+  # aarch64 no-KVM smoke test. GitHub's ubuntu-24.04-arm runners expose no
+  # nested KVM, so this exercises the same QEMU TCG fallback path a Raspberry
+  # Pi without /dev/kvm would take: build the workload flake through the Linux
+  # Stage 0 QEMU builder, seal it as a signed .mvmpkg, install it, and boot the
+  # installed bundle with the QEMU backend.
+  aarch64-no-kvm-smoke:
+    name: Aarch64 no-KVM bundle smoke (QEMU TCG)
+    needs: [scope]
+    if: >-
+      needs.scope.outputs.code == 'true'
+      && (github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-24.04-arm
+    # Cold paths may compile the workload kernel inside Stage 0 under TCG.
+    timeout-minutes: 300
+    env:
+      CARGO_TERM_COLOR: always
+      MVM_HOME: ${{ github.workspace }}/.mvm-ci
+      # A cold no-KVM build compiles the workload under TCG and can exceed
+      # the normal 30-minute builder deadline while still making progress.
+      MVM_BUILDER_VM_TIMEOUT_SECS: 7200
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: ./.github/actions/free-disk
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@nightly
+
+      - uses: ./.github/actions/install-zigbuild
+
+      - uses: ./.github/actions/apt-deps
+        with:
+          # qemu-system-arm provides qemu-system-aarch64; e2fsprogs provides the
+          # mkfs.ext4/debugfs tools the Stage 0 builder uses to pack images.
+          packages: qemu-system-arm ipxe-qemu e2fsprogs attr jq virtiofsd
+
+      - uses: ./.github/actions/rust-cache
+        with:
+          key: aarch64-no-kvm-smoke
+
+      - name: Grant QEMU access to vhost-vsock
+        run: |
+          test -c /dev/vhost-vsock
+          sudo chown "$USER" /dev/vhost-vsock
+          sudo chmod 0600 /dev/vhost-vsock
+
+      # The release-cut bootstrap path can download a published builder VM
+      # image; the default source-checkout path would rebuild it from scratch
+      # inside Stage 0 under TCG, which is far too slow for a CI gate. Build
+      # with the release bootstrap feature and hide the in-repo builder VM
+      # flake so `mvmctl` treats this as an installed binary and downloads the
+      # published image instead.
+      - name: Build mvmctl
+        env:
+          # This witness boots embedded builder-guest code. A restored Cargo
+          # cache may contain binaries built from an older source tree, which
+          # would make the live gate validate stale mvm-host-vm-init behavior.
+          MVM_EMBED_NO_CACHE: 1
+        run: cargo build --release -p mvmctl --features release-artifact-bootstrap,release-channel
+
+      - name: Use published builder VM bootstrap path
+        run: mv nix/images/builder-vm nix/images/builder-vm.hidden
+
+      - name: Build and boot the sealed exit_code workload under QEMU TCG
+        id: first-boot
+        env:
+          MVM_KERNEL_SOURCE: auto
+        run: |
+          set -euo pipefail
+          mkdir -p "$MVM_HOME"
+          set +e
+          ./target/release/mvmctl machine run \
+            --flake examples/exit_code \
+            --builder qemu \
+            --hypervisor qemu \
+            -v \
+            -- /bin/true \
+            > /tmp/mvmctl-first-boot.log 2>&1
+          actual=$?
+          set -e
+          if [ "$actual" -ne 7 ]; then
+            echo "::error::expected guest exit code 7 from first boot, got $actual"
+            tail -250 /tmp/mvmctl-first-boot.log
+            exit 1
+          fi
+          echo "ok: sealed aarch64 workload built and exited $actual under QEMU TCG"
+
+      - name: Export, install, and re-run the bundle
+        id: bundle-roundtrip
+        run: |
+          set -euo pipefail
+          slot_hash=$(./target/release/mvmctl manifest ls --json 2>&1 | sed 's/\x1b\[[0-9;]*m//g' | jq -r '.[0].slot_hash')
+          ./target/release/mvmctl bundle export "$slot_hash" \
+            --out /tmp/exit-code-aarch64.mvmpkg \
+            > /tmp/mvmctl-export.log 2>&1
+          ./target/release/mvmctl trust add "$MVM_HOME/keys/host-signer.pub"
+          install_output=$(./target/release/mvmctl bundle install /tmp/exit-code-aarch64.mvmpkg 2>&1 | tee /tmp/mvmctl-install.log)
+          installed_sha=$(printf '%s' "$install_output" | sed 's/\x1b\[[0-9;]*m//g' | awk '/Installed bundle / {print $3}')
+          echo "installed bundle content address: $installed_sha"
+          set +e
+          ./target/release/mvmctl machine run \
+            --manifest "$installed_sha" \
+            --hypervisor qemu \
+            -v \
+            -- /bin/true \
+            > /tmp/mvmctl-bundle-run.log 2>&1
+          actual=$?
+          set -e
+          if [ "$actual" -ne 7 ]; then
+            echo "::error::expected guest exit code 7 from installed bundle, got $actual"
+            tail -250 /tmp/mvmctl-bundle-run.log
+            exit 1
+          fi
+          echo "ok: installed aarch64 bundle exited $actual under QEMU TCG"
+
+      - name: Dump diagnostics on failure
+        if: failure()
+        run: |
+          for log in /tmp/mvmctl-first-boot.log /tmp/mvmctl-export.log \
+                     /tmp/mvmctl-install.log /tmp/mvmctl-bundle-run.log; do
+            if [ -f "$log" ]; then
+              echo "===== $log ====="
+              tail -250 "$log" || true
+            fi
+          done
+          echo "===== VM state dirs ====="
+          for d in "$MVM_HOME"/vms/*/ "$MVM_HOME"/cache/builder-vm/vms/*/; do
+            echo "--- $d ---"
+            ls -la "$d" || true
+            for f in console.log firecracker.log qemu.log; do
+              if [ -s "$d$f" ]; then
+                echo "--- $f ---"; tail -100 "$d$f" || true
+              fi
+            done
+          done

@@ -424,7 +424,7 @@ pub(in crate::commands) fn build_event_plan(
         stream_edges: Vec::new(),
         kernel_sha256: None,
         network_mode: Default::default(),
-        l3_network: None,
+        ingress: Vec::new(),
         vm_name: workload,
         tenant: None,
         backend_name: workload,
@@ -453,7 +453,9 @@ pub(in crate::commands) fn build_event_plan(
         audit_labels: Default::default(),
         agent_verbs: None,
         services: Vec::new(),
+        extensions: Vec::new(),
         stream_retention: Default::default(),
+        attestation_mode: mvm_contract::plan::AttestationMode::Noop,
     };
     synthesize_plan(&input).context("synthesizing the image-lineage audit-envelope plan")
 }

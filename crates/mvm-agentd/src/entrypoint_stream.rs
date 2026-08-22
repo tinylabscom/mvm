@@ -303,6 +303,10 @@ fn terminal_event(outcome: RunOutcome, timeout: Duration) -> EntrypointEvent {
             kind: RunEntrypointError::Timeout,
             message: format!("wrapper exceeded {}s timeout", timeout.as_secs()),
         },
+        RunOutcome::Canceled => EntrypointEvent::Error {
+            kind: RunEntrypointError::Canceled,
+            message: "entrypoint canceled by its admitted controller".to_string(),
+        },
         RunOutcome::StdinCap => EntrypointEvent::Error {
             kind: RunEntrypointError::PayloadCap,
             message: "stdin exceeded its cap".to_string(),
@@ -331,6 +335,7 @@ mod tests {
         let outcomes = [
             RunOutcome::Exited { code: 3 },
             RunOutcome::Timeout,
+            RunOutcome::Canceled,
             RunOutcome::StdinCap,
             RunOutcome::SpawnFailed {
                 message: "no such wrapper".to_string(),

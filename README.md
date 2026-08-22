@@ -30,8 +30,8 @@ Linux + /dev/kvm           →  Firecracker
 - **Three ways to define a workload** — an OCI image, a Nix flake (`mkGuest`), or
   a decorated function (`@mvm.app`) — all compile to the same signed, auditable
   microVM
-- **SDKs for Python, TypeScript, and Rust** — a *decorator* SDK for authoring
-  workloads and a *runtime* SDK for driving them, both thin wrappers over one
+- **SDKs for Python, TypeScript, and Rust** — a _decorator_ SDK for authoring
+  workloads and a _runtime_ SDK for driving them, both thin wrappers over one
   conformance-pinned surface
 - **Security claims, CI-enforced** — 15+ numbered claims (signed execution
   plans, chain-signed audit log, dm-verity boot, default-deny egress, run-shaped
@@ -122,6 +122,15 @@ mvmctl machine run --image alpine --mount .:/work -- ls /work
 mvmctl machine run --image alpine -vvv --allow-host api.example.com -- ps aux
 ```
 
+# Cap AI API usage with a token budget by adding [network.ai] to mvm.toml:
+#   [network]
+#   allow_hosts = ["api.openai.com:443"]
+#   [network.ai]
+#   metering = true
+#   [network.ai.budget]
+#   max_total_tokens = 1_000_000
+mvmctl machine run --flake . -- ./ask-model
+
 ### Persistent machines
 
 A persistent machine has a name and an on-disk spec: create once, start/stop/exec
@@ -157,7 +166,7 @@ downloads what is missing or invalid. If a Stage 0 source build is interrupted,
 the incomplete output is never installed; rerunning resumes with the persistent
 Nix store still warm.
 
-For an interactive shell you want a *workload* microVM, not the builder — use a
+For an interactive shell you want a _workload_ microVM, not the builder — use a
 transient run against a dev-tier image: `mvmctl machine run --image alpine -it -- /bin/sh`.
 
 On the first image-backed run, mvm may build and cache the workload kernel
@@ -183,17 +192,17 @@ Working example workloads live in [`examples/`](examples/) — build any of them
 with `mvmctl machine run --flake examples/<name>` (Nix) or `mvmctl build compile`
 (SDK):
 
-| Example | Kind | What it shows |
-|---|---|---|
-| [`examples/python/hello-app`](examples/python/hello-app) | Python decorator | Minimal `@mvm.app` function-entrypoint workload |
-| [`examples/python/hello-app-with-deps`](examples/python/hello-app-with-deps) | Python decorator | `@mvm.app` with a locked `python_deps` (uv) dependency → sealed deps volume |
-| [`examples/python/secret-egress`](examples/python/secret-egress) | Python decorator | Secret substitution over egress — the workload sees a placeholder, never the raw secret |
-| [`examples/typescript/hello-app`](examples/typescript/hello-app) | TS decorator | Minimal `mvm.app({...})(fn)` workload |
-| [`examples/typescript/hello-app-with-deps`](examples/typescript/hello-app-with-deps) | TS decorator | `mvm.app` with locked `node_deps` |
-| [`examples/exit_code`](examples/exit_code) | Nix flake | One-shot sealed workload (exits a chosen code) |
-| [`examples/sleeper`](examples/sleeper) | Nix flake | Long-lived sealed workload fixture |
-| [`examples/egress-probe`](examples/egress-probe) | Nix flake | One-shot workload that TCP-probes targets and exits a verdict — exercises egress policy |
-| [`examples/audit-probe`](examples/audit-probe) | Nix flake | In-guest `host.audit.v1` round-trip fixture |
+| Example                                                                              | Kind             | What it shows                                                                           |
+| ------------------------------------------------------------------------------------ | ---------------- | --------------------------------------------------------------------------------------- |
+| [`examples/python/hello-app`](examples/python/hello-app)                             | Python decorator | Minimal `@mvm.app` function-entrypoint workload                                         |
+| [`examples/python/hello-app-with-deps`](examples/python/hello-app-with-deps)         | Python decorator | `@mvm.app` with a locked `python_deps` (uv) dependency → sealed deps volume             |
+| [`examples/python/secret-egress`](examples/python/secret-egress)                     | Python decorator | Secret substitution over egress — the workload sees a placeholder, never the raw secret |
+| [`examples/typescript/hello-app`](examples/typescript/hello-app)                     | TS decorator     | Minimal `mvm.app({...})(fn)` workload                                                   |
+| [`examples/typescript/hello-app-with-deps`](examples/typescript/hello-app-with-deps) | TS decorator     | `mvm.app` with locked `node_deps`                                                       |
+| [`examples/exit_code`](examples/exit_code)                                           | Nix flake        | One-shot sealed workload (exits a chosen code)                                          |
+| [`examples/sleeper`](examples/sleeper)                                               | Nix flake        | Long-lived sealed workload fixture                                                      |
+| [`examples/egress-probe`](examples/egress-probe)                                     | Nix flake        | One-shot workload that TCP-probes targets and exits a verdict — exercises egress policy |
+| [`examples/audit-probe`](examples/audit-probe)                                       | Nix flake        | In-guest `host.audit.v1` round-trip fixture                                             |
 
 ### From a template
 
@@ -332,10 +341,9 @@ inside the microVM.
 
 ---
 
-
 ### From dev loop to attested image
 
-The three routes above are the *start* of one path: pick a base, iterate until
+The three routes above are the _start_ of one path: pick a base, iterate until
 the workload actually works, then end with a sealed, hashed, recorded artifact.
 
 What that looks like today:
@@ -374,12 +382,12 @@ the exact surface the CLI does — decorators emit the canonical `Workload` IR;
 runtime calls go through the client facade — pinned by shared conformance
 fixtures so no SDK can drift from `mvmctl`.
 
-### Decorator SDK — *authoring*
+### Decorator SDK — _authoring_
 
 Declare a workload where it lives. `@mvm.app(...)` (Python) / `mvm.app({...})`
 (TypeScript) is higher-order: it records the declaration and returns your
 function unchanged, so the same file still runs normally under `python` / `tsx`
-and is *also* read statically by `mvmctl build compile`.
+and is _also_ read statically by `mvmctl build compile`.
 
 <table>
 <tr><th>Python</th><th>TypeScript</th></tr>
@@ -422,7 +430,7 @@ the IR directly for inspection or tests with `mvm.emit_json()` /
 the canonical `ir::Workload`, and renders the flake — so adding a language means
 emitting that IR, not writing a compiler.
 
-### Runtime SDK — *control plane*
+### Runtime SDK — _control plane_
 
 Drive machines imperatively: create, exec, move files, run processes, forward
 ports, tear down. The Python/TypeScript `Sandbox` object model and the Rust
@@ -584,29 +592,35 @@ detailed sequence.
 
 Backend selection is automatic per host (`--hypervisor` overrides); all backends
 consume the same image artifacts. Egress is default-deny — where policy admits
-flows they are enforced and audited host-side.
+flows they are enforced and audited host-side. On Linux, an optional host-side
+[eBPF](https://ebpf.io/) probe attached to the egress substitution process
+observes `tcp_connect` events (destination address and port) via a ring buffer,
+with a procfs fallback when BPF loading is unavailable. The probe does not widen
+the guest attack surface: the guest still has no NIC, the probe reads no guest
+payloads, and policy enforcement remains at the existing admission and vsock
+forwarding seams.
 
 ### Vsock-only: the invariant the other guarantees rest on
 
-**No workload microVM has a network device.** Not on one backend — on every
-one. Firecracker's config sequence omits `/network-interfaces`; libkrun pins
-`NetworkingMode::VsockDirect` and never calls a net attach; the in-house HVF
-device model has no net device; the QEMU dev/test driver emits no `-netdev`.
-Guest I/O leaves over virtio-vsock to a per-VM host-side endpoint, and the host
-originates the real connection.
+**No production workload microVM has a network device.** Firecracker's config
+sequence omits `/network-interfaces`; libkrun pins its direct-vsock mode; and
+the in-house HVF device model has no net device. Guest I/O leaves over one
+authenticated FlowMux session to a per-VM host endpoint, and the host originates
+the real connection or owns the admitted ingress listener. QEMU's explicit
+user-mode network is a dev/test facility outside this production claim.
 
-This is enforced mechanically, not by convention. Two CI gates fail closed on
-any regression:
+This is enforced mechanically, not by convention:
 
-- **`xtask check-vsock-only-egress`** — fails if `virtio_net`, a tap device, or
-  a userspace-gateway token appears anywhere on a workload path.
-- **`xtask check-uniform-vsock-egress`** — pins Firecracker, libkrun, and HVF to
-  a single egress-endpoint spawn site, so no backend can grow a second gate.
+- **`xtask check-single-network-path`** pins every claim-bearing backend to the
+  one endpoint spawner and `NetworkFlow` channel, rejects raw-packet/NIC/L3
+  symbols, and inventories every production workload `connect` and listener
+  bind so a second socket owner fails CI.
+- **`xtask check-one-guest-protocol`** rejects any guest caller of the network
+  port that does not construct an authenticated FlowMux client.
 
-The type system enforces it too: the host-side forwarding seam accepts only an
-`AdmittedPacket`, a type with private fields and no public constructor. There is
-no way to reach a datapath with bytes that have not passed policy, because there
-is no way to construct one.
+The admitted domain cannot represent the removed raw-network mode. Every
+network operation instead receives the endpoint's one signed-plan projection:
+the same policy, per-VM resource budget, identity, and payload-free audit sink.
 
 **The builder VM is the deliberate exception.** It runs `nix build` and does
 have a NIC, because it must reach package mirrors. It carries no untrusted
@@ -663,7 +677,7 @@ claims), each backed by a named test or workflow gate. In summary:
     argv or env, or spawn anything, and it is refused outright without a grant
     in the signed plan.
 
-Claim 15 used to hold by *absence*: there was no host→guest byte path at all.
+Claim 15 used to hold by _absence_: there was no host→guest byte path at all.
 The workload input channel built one, so refusing input is now a policy
 decision rather than a consequence of there being nothing to refuse. ADR-001
 carries that rewording, plus a `Preview` claim 17 for the input channel with
@@ -676,7 +690,7 @@ surface yet. See
 
 The guest agent runs as an unprivileged uid under `setpriv`; `~/.mvm` and
 `~/.mvm/cache` are mode 0700. **Out of scope** (named in ADR-001): a malicious
-*host* (mvmctl trusts the host with the hypervisor and private keys),
+_host_ (mvmctl trusts the host with the hypervisor and private keys),
 multi-tenant guests (one guest = one workload), and hardware-backed key
 attestation.
 
@@ -693,7 +707,9 @@ every CLI option including hidden internal options, exercises the SDK fixtures,
 and rejects new README code blocks without a corresponding test witness. Static
 install, Nix, and embedding examples are checked for their required contract
 tokens; live boot, egress, and guest-I/O behavior remains covered by tagged
-integration scenarios.
+integration scenarios. The merge queue also runs a KVM-backed fast witness for
+the persistent-machine path above: create, start, exec, logs, inspect, stop, and
+remove all operate one real Firecracker guest before the change can merge.
 
 - [Getting started](public/src/content/docs/getting-started/) ·
   [Python quickstart](public/src/content/docs/getting-started/python-quickstart.md)
@@ -771,7 +787,7 @@ Ground rules (enforced by CI — see [AGENTS.md](AGENTS.md) for the full set):
 - **Always `cargo fmt --all`** — without `--all`, other workspace members are
   silently skipped and CI will fail.
 - **No task is done without tests.** Types get serde round-trips; wire/protocol
-  code gets tampered-input rejection tests; security paths get positive *and*
+  code gets tampered-input rejection tests; security paths get positive _and_
   negative cases. SDK changes must keep the shared conformance fixtures
   (`tests/machine-fixtures/`) green — that is what keeps the wrappers thin.
 - **Reuse first.** Search the workspace before adding a helper — duplicated logic
@@ -786,7 +802,7 @@ Ground rules (enforced by CI — see [AGENTS.md](AGENTS.md) for the full set):
   claim→witness mapping is machine-checked.
 
 Keep PRs focused (one concern each) and write commit messages that explain
-*why*. PRs merge through the GitHub **merge queue** once CI is green. The full
+_why_. PRs merge through the GitHub **merge queue** once CI is green. The full
 live suite (workspace clippy on x86_64-linux, seccomp probes, longer fuzz runs,
 live-KVM smokes) needs real `/dev/kvm`; cloud-init scaffolding for a throwaway
 KVM box lives in [`nix/ops/hetzner/`](nix/ops/hetzner/), and the

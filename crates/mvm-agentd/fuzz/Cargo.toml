@@ -13,6 +13,10 @@ edition = "2024"
 # table is the documented fix.
 [workspace]
 
+# This standalone graph cannot inherit the root workspace's source patch.
+[patch.crates-io]
+arrayref = { path = "../../../third_party/arrayref" }
+
 # cargo-fuzz looks for this metadata key; without it the harness refuses
 # to drive the binaries.
 [package.metadata]
@@ -51,9 +55,6 @@ path = "fuzz_targets/fuzz_guest_request.rs"
 test = false
 doc = false
 bench = false
-
-[patch.crates-io]
-arrayref = { git = "https://github.com/droundy/arrayref", rev = "f8d0299d863922db6c409d08098941e833b70d69" }
 
 [[bin]]
 name = "fuzz_authenticated_frame"

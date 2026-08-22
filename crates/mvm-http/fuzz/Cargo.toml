@@ -27,6 +27,3 @@ name = "fuzz_response_parse"
 path = "fuzz_targets/fuzz_response_parse.rs"
 test = false
 doc = false
-
-[patch.crates-io]
-arrayref = { git = "https://github.com/droundy/arrayref", rev = "f8d0299d863922db6c409d08098941e833b70d69" }

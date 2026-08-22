@@ -10,7 +10,7 @@
 //!   Firecracker / libkrun VM `--runs N` times, computes
 //!   p50/p95/max wall-clock, asserts thresholds. Linux + KVM
 //!   required; gated by `MVM_LIVE_SMOKE=1` + a rootfs path so a
-//!   bare macOS host skips cleanly. Enforces the "cold-boot ≤ 500ms
+//!   bare macOS host skips cleanly. Enforces the "cold-boot < 200ms
 //!   Firecracker / ≤ 1s libkrun" line.
 //! - **`footprint`** — sum the Nix-built rootfs, runtime overlay, initramfs,
 //!   verity sidecars, and optional kernel, assert the supplied guest artifacts
@@ -89,8 +89,8 @@ pub const GUEST_AGENT_RSS_MAX_BYTES: u64 = 8 * 1024 * 1024;
 pub const SDK_SIDECAR_MAX_BYTES: u64 = 8 * 1024 * 1024;
 
 /// Cold-boot wall-clock budget for the Firecracker backend.
-/// The floor is 300ms; the strict gate is 500ms p50.
-pub const FIRECRACKER_BOOT_BUDGET: Duration = Duration::from_millis(500);
+/// Every prepared-cold dispatch must be strictly below this threshold.
+pub const FIRECRACKER_BOOT_BUDGET: Duration = Duration::from_millis(200);
 
 /// Cold-boot wall-clock budget for the libkrun backend. Slower than
 /// Firecracker because libkrun's startup +
@@ -856,8 +856,8 @@ mod tests {
     }
 
     #[test]
-    fn firecracker_boot_budget_is_500ms() {
-        assert_eq!(FIRECRACKER_BOOT_BUDGET, Duration::from_millis(500));
+    fn firecracker_boot_budget_is_200ms() {
+        assert_eq!(FIRECRACKER_BOOT_BUDGET, Duration::from_millis(200));
     }
 
     #[test]

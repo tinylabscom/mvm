@@ -160,7 +160,20 @@ All notable changes to mvm are documented in this file.
 - **xtask**: Claim-bearing prose must declare what backs it (Plan 306 WS1)
 - **sec**: Sign the checksum manifests that gate boot bytes
 
+### Removed
+- **networking**: Remove the public `raw_ip_stack`/`l3_vsock` mode and its L3
+  packet protocol, guest TUN agent, host forwarders, VMM hooks, packaging,
+  dependencies, and migration ratchets. Stale serialized inputs now receive a
+  migration error naming the supported loopback and typed-connector surfaces.
+
 ### Changed
+- **networking**: Make authenticated FlowMux the sole production workload
+  networking path across Firecracker, HVF, and libkrun. One per-VM endpoint now
+  owns admitted TCP, UDP, controlled DNS, typed transformations, and declared
+  ingress with shared limits, identity, policy, and payload-free audit state.
+- **networking**: Stream typed HTTP transformations with bounded head, body,
+  overlap, idle, and credit limits, and execute typed connector traffic inside
+  the network endpoint instead of a second broker-owned client.
 - **runtime**: Document the runtime-overlay operational contract explicitly for
   release verification and operator rollout: running VMs do not hot-remount,
   stopped VMs pick up the new version on restart, and Linux rootfs-backed
@@ -282,6 +295,9 @@ All notable changes to mvm are documented in this file.
 - **bench**: Publish the launch budgets, and gate the page against them
 
 ### Fixed
+- **builder**: Invalidate builder images whose baked PID 1 predates the
+  three-file FlowMux identity contract, and make `MVM_EMBED_NO_CACHE` reliably
+  retrigger the embedded-helper build.
 - **hvf/oci**: Guest BROKER_PORT bridge + OCI rootfs self-heal
 - **machine**: Make `run -d -- <cmd>` detach instead of foreground-blocking
 - **machine**: Gate persistent OCI egress backends

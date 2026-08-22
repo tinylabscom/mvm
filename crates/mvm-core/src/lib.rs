@@ -45,6 +45,7 @@ pub mod egress_handler;
 /// Secrets are substituted into outbound requests host-side and never enter the
 /// guest.
 pub mod exit_capture;
+pub mod extension_admission;
 /// Per-dimension resolution of a workload's grants across the CLI, a JSON
 /// grants file, the project manifest, and the operator's host config.
 pub mod grants_resolve;
@@ -57,10 +58,6 @@ pub mod icmp_wire;
 /// Content-addressed image version-lineage nodes (the image analog of
 /// [`checkpoint`]). Provenance metadata, never authorization.
 pub mod image_lineage;
-/// Host ingress-broker decision logic (host listener only by explicit policy).
-pub mod ingress_broker;
-/// Ingress-broker handler: compose decision + trace into an audit record.
-pub mod ingress_handler;
 /// Ingress secret redaction (mask known secret values before they reach the guest).
 pub mod ingress_redaction;
 /// `mvm-init` supervisor core logic: metadata → exec spec, marker progression.

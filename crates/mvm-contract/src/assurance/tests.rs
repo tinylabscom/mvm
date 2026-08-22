@@ -36,59 +36,7 @@ fn evidence_ref(raw: &str) -> EvidenceRef {
 }
 
 fn request_json() -> String {
-    alloc::format!(
-        r#"{{
-  "schema": "mvm.assurance.ai-session-input/v1",
-  "session": {{
-    "request_id": "mvm-request-1",
-    "idempotency_key": "trial-1",
-    "source_run_id": "scout-1",
-    "campaign_id": "mvm-campaign-1",
-    "trial_id": "trial-1"
-  }},
-  "source": {{
-    "subject_kind": "local_repository",
-    "subject_revision": "0123456789abcdef",
-    "source_digest": "{SOURCE_DIGEST}",
-    "finding_id": "SCOUT-RCE-001",
-    "group_id": "group-1",
-    "rule_id": "SCOUT-RCE-001",
-    "category": "command_injection",
-    "severity": "critical",
-    "location": "src/worker.py:42:7",
-    "evidence_refs": ["scout:finding:SCOUT-RCE-001"],
-    "artifact_locator": "oci:example/app:1",
-    "requested_policy_digest": "{POLICY_DIGEST}"
-  }},
-  "narrative": {{
-    "narrative_id": "mvm.boundary.process-exec.v1",
-    "objective": "attempt the declared process effect",
-    "expected_boundary": "the effect cannot cross from guest to host",
-    "required_capabilities": ["observation.stream.v1"]
-  }},
-  "authority": {{
-    "allowed_tools": ["campaign_probe.v1"],
-    "observation_scopes": ["guest.stdout.digest", "host.audit.refs"],
-    "max_steps": 12,
-    "max_output_bytes": 65536,
-    "deadline_unix_ms": 0
-  }},
-  "synthetic_inputs": {{
-    "canary_ids": ["canary.synthetic.secret.1"],
-    "destination_labels": ["undeclared.synthetic.destination"]
-  }},
-  "output_contract": {{
-    "kind": "mvm.assurance.trial-result/v1",
-    "must_include": [
-      "attempted_effect",
-      "effect_observed_in_guest",
-      "boundary_crossed",
-      "blocked_edges",
-      "evidence_refs"
-    ]
-  }}
-}}"#
-    )
+    include_str!("../../fixtures/assurance-ai-session-request-v1.json").to_string()
 }
 
 fn request() -> AssuranceSessionRequest {
@@ -105,6 +53,8 @@ fn grant() -> SessionGrant {
             ObservationScope::GuestStdoutDigest,
             ObservationScope::HostAuditRefs,
         ],
+        max_steps: 12,
+        max_output_bytes: 65_536,
     }
 }
 
@@ -199,8 +149,8 @@ fn a_provider_cannot_smuggle_an_mvm_binding_through_the_request_parser() {
     // This is the attack the two-type split exists to stop: a provider that
     // supplies its own admission facts.
     let forged = request_json().replace(
-        "\"schema\": \"mvm.assurance.ai-session-input/v1\",",
-        "\"schema\": \"mvm.assurance.ai-session-input/v1\",\n  \"mvm_binding\": {\"plan_id\": \"forged\"},",
+        "\"schema\": \"mvm.assurance.ai-session-request/v1\",",
+        "\"schema\": \"mvm.assurance.ai-session-request/v1\",\n  \"mvm_binding\": {\"plan_id\": \"forged\"},",
     );
     let error = AssuranceSessionRequest::parse_json(forged.as_bytes())
         .expect_err("an mvm_binding key must be refused");
@@ -225,6 +175,28 @@ fn an_unknown_field_anywhere_fails_closed() {
 }
 
 #[test]
+fn an_incomplete_or_duplicated_output_contract_is_refused() {
+    let missing = request_json().replace("      \"source_digest\",\n", "");
+    assert_eq!(
+        AssuranceSessionRequest::parse_json(missing.as_bytes()),
+        Err(SessionInputError::FieldEmpty {
+            field: "output_contract.required_fields"
+        })
+    );
+
+    let duplicated = request_json().replace(
+        "      \"source_digest\",",
+        "      \"source_digest\",\n      \"source_digest\",",
+    );
+    assert_eq!(
+        AssuranceSessionRequest::parse_json(duplicated.as_bytes()),
+        Err(SessionInputError::OutOfRange {
+            field: "output_contract.required_fields"
+        })
+    );
+}
+
+#[test]
 fn an_oversized_body_is_refused_before_it_is_parsed() {
     let body = vec![b'x'; input::MAX_SESSION_INPUT_BYTES + 1];
     assert_eq!(
@@ -236,8 +208,8 @@ fn an_oversized_body_is_refused_before_it_is_parsed() {
 #[test]
 fn an_unsupported_schema_is_refused() {
     let forged = request_json().replace(
-        "mvm.assurance.ai-session-input/v1",
-        "mvm.assurance.ai-session-input/v2",
+        "mvm.assurance.ai-session-request/v1",
+        "mvm.assurance.ai-session-request/v2",
     );
     // The schema string appears twice; only the envelope's own matters here.
     let error = AssuranceSessionRequest::parse_json(forged.as_bytes()).expect_err("v2 is unknown");
@@ -505,6 +477,8 @@ fn the_envelope_matches_the_counterparty_key_set_exactly() {
     let value: serde_json::Value =
         serde_json::from_str(&envelope.to_json().expect("encode")).expect("parse");
 
+    assert_eq!(value["schema"], AI_SESSION_INPUT_SCHEMA);
+
     assert_eq!(
         keys_of(&value),
         sorted(&[
@@ -553,6 +527,28 @@ fn the_envelope_matches_the_counterparty_key_set_exactly() {
             "deadline_unix_ms",
         ])
     );
+    assert_eq!(
+        keys_of(&value["source"]),
+        sorted(&[
+            "subject_kind",
+            "subject_locator",
+            "subject_revision",
+            "source_digest",
+            "finding_id",
+            "group_id",
+            "rule_id",
+            "category",
+            "severity",
+            "location",
+            "evidence_refs",
+            "artifact_locator",
+            "requested_policy_digest",
+        ])
+    );
+    assert_eq!(
+        keys_of(&value["output_contract"]),
+        sorted(&["kind", "required_fields"])
+    );
 }
 
 #[test]
@@ -578,6 +574,7 @@ fn the_envelope_carries_the_admitted_plan_and_no_synthetic_values() {
     assert!(json.contains("canary.synthetic.secret.1"), "{json}");
     assert_eq!(envelope.binding().session_id.as_str(), "session-1");
     assert_eq!(envelope.session().campaign_id.as_str(), "mvm-campaign-1");
+    assert_eq!(envelope.source().source_digest.as_str(), SOURCE_DIGEST);
     // The grant is referenced by digest; the grant document never crosses.
     assert!(json.contains("session_grant_digest"), "{json}");
 }
@@ -680,6 +677,19 @@ fn effective_authority_is_the_intersection_and_takes_the_lowest_budget() {
     assert_eq!(effective.max_output_bytes(), 1024);
     // The request set no deadline, so the grant expiry becomes the bound.
     assert_eq!(effective.deadline_unix_ms(), EXPIRY_MS);
+}
+
+#[test]
+fn the_short_lived_grant_can_narrow_step_and_output_budgets() {
+    let mut narrow_grant = grant();
+    narrow_grant.max_steps = 3;
+    narrow_grant.max_output_bytes = 768;
+    let approvals = ApprovalSet::none().with(ToolId::CampaignProbeV1);
+
+    let effective = intersect(&permissive_ceiling(), &narrow_grant, &approvals, NOW_MS)
+        .expect("narrow grant remains usable");
+    assert_eq!(effective.max_steps(), 3);
+    assert_eq!(effective.max_output_bytes(), 768);
 }
 
 #[test]
@@ -1127,10 +1137,7 @@ fn the_envelope_the_host_writes_is_the_one_the_guest_reads() {
 
 #[test]
 fn the_guest_reader_fails_closed_on_a_foreign_or_oversized_envelope() {
-    let bad_schema = request_json().replace(
-        "mvm.assurance.ai-session-input/v1",
-        "mvm.assurance.ai-session-input/v9",
-    );
+    let bad_schema = request_json();
     assert!(matches!(
         wire::DeliveredSession::parse_json(bad_schema.as_bytes()),
         // No `mvm_binding` key at all, so this fails as malformed before the

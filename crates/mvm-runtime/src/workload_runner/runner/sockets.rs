@@ -20,7 +20,6 @@ pub(super) struct StandingSockets {
     /// Per-port UDS for the interactive console data range. Non-empty only when
     /// `VmStartConfig.dev_console` is true; empty for all sealed prod boots.
     pub(super) console_data: Vec<(u32, PathBuf)>,
-    pub(super) ingress_tcp: Vec<(u32, PathBuf)>,
 }
 
 impl StandingSockets {
@@ -34,10 +33,7 @@ impl StandingSockets {
             egress_gateway: egress_uds,
             exit: &self.exit,
             broker: self.broker.as_deref(),
-            network_control: None,
-            network_data: None,
             console_data: self.console_data.clone(),
-            ingress_tcp: self.ingress_tcp.clone(),
         }
     }
 }
@@ -56,18 +52,5 @@ pub(super) fn standing_sockets(state_dir: &Path, config: &VmStartConfig) -> Stan
             .then(|| mvm_core::config::vm_vsock_port_socket_at(state_dir, BROKER_PORT)),
         console_log: state_dir.join("console.log"),
         console_data: console_data_sockets(state_dir, config.dev_console),
-        ingress_tcp: config
-            .ports
-            .iter()
-            .map(|mapping| mvm_agentd::vsock::PORT_FORWARD_BASE + u32::from(mapping.guest))
-            .collect::<std::collections::BTreeSet<_>>()
-            .into_iter()
-            .map(|port| {
-                (
-                    port,
-                    mvm_core::config::vm_hvf_vsock_port_socket_at(state_dir, port),
-                )
-            })
-            .collect(),
     }
 }

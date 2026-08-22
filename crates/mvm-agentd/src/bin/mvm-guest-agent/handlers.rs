@@ -9,12 +9,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use mvm_agentd::entrypoint::{CallCaps, EntrypointCall};
+use mvm_agentd::entrypoint::{CallCaps, EntrypointCall, ProcessResourceLimits};
 use mvm_agentd::entrypoint_stream::stream_call;
 use mvm_agentd::stream_input::InputDesk;
 use mvm_agentd::stream_pump::{CapturedOutput, StreamGap};
 use mvm_agentd::vsock::{
-    ComponentState, EntrypointEvent, FsChange, FsChangeKind, GuestResponse, RunEntrypointError,
+    ComponentState, EntrypointEvent, ExtensionCancellation, ExtensionDispatch, FsChange,
+    FsChangeKind, GuestResponse, RunEntrypointError,
 };
 use mvm_agentd::worker_pool::{DispatchError, DispatchOutcome, WorkerPool};
 use mvm_agentd::worker_protocol::WorkerOutcome;
@@ -22,10 +23,11 @@ use mvm_contract::stream::input::{CloseInput, InputFrame};
 
 use crate::HandlerCtx;
 use crate::globals::{
-    RUN_ENTRYPOINT_LOCK, VALIDATED_ENTRYPOINT, WARM_POOL, reseed_on_post_restore,
+    RUN_ENTRYPOINT_LOCK, VALIDATED_ENTRYPOINT, VALIDATED_EXTENSIONS, WARM_POOL,
+    reseed_on_post_restore,
 };
 use crate::health::build_integration_reports;
-use crate::port_forward::{run_port_forwarder, start_unix_socket_forwarder};
+use crate::port_forward::start_unix_socket_forwarder;
 use crate::probe::build_probe_reports;
 use crate::socket::write_response;
 
@@ -201,6 +203,8 @@ fn handle_run_entrypoint(
         stdin: &stdin,
         timeout: Duration::from_secs(timeout_secs),
         caps: CallCaps::v1(),
+        resource_limits: None,
+        cancellation: None,
         env,
         stream_input,
     };
@@ -218,6 +222,142 @@ fn handle_run_entrypoint(
         write_response(&mut *file, &evt(event));
     });
     evt(terminal)
+}
+
+/// Execute one boot-validated optional extension with no program-selection
+/// surface. Every identity is compared before a process exists.
+pub(crate) fn handle_run_extension(
+    file: &mut dyn Write,
+    dispatch: ExtensionDispatch,
+) -> GuestResponse {
+    let extensions = match VALIDATED_EXTENSIONS.get() {
+        Some(Ok(extensions)) => extensions,
+        Some(Err(message)) => {
+            return evt(EntrypointEvent::Error {
+                kind: RunEntrypointError::EntrypointInvalid,
+                message: message.clone(),
+            });
+        }
+        None => {
+            return evt(EntrypointEvent::Error {
+                kind: RunEntrypointError::EntrypointInvalid,
+                message: "optional extensions were not activated".to_string(),
+            });
+        }
+    };
+    let Some(extension) = extensions.iter().find(|candidate| {
+        candidate.config.binding.extension_id == dispatch.extension_id
+            && candidate.config.binding.pack_digest == dispatch.pack_digest
+            && candidate.config.binding.contract_digest == dispatch.contract_digest
+    }) else {
+        return evt(EntrypointEvent::Error {
+            kind: RunEntrypointError::EntrypointInvalid,
+            message: "extension identity was not admitted".to_string(),
+        });
+    };
+    if extension.config.plan_id != dispatch.plan_id {
+        return evt(EntrypointEvent::Error {
+            kind: RunEntrypointError::EntrypointInvalid,
+            message: "extension plan identity mismatch".to_string(),
+        });
+    }
+    let budgets = extension.config.binding.budgets;
+    if dispatch.input.len() > usize::try_from(budgets.max_payload_bytes).expect("u32 fits in usize")
+    {
+        return evt(EntrypointEvent::Error {
+            kind: RunEntrypointError::InternalError,
+            message: "extension input exceeds its admitted budget".to_string(),
+        });
+    }
+    let _guard = match extension.call_lock.try_lock() {
+        Ok(guard) => guard,
+        Err(_) => {
+            return evt(EntrypointEvent::Error {
+                kind: RunEntrypointError::Busy,
+                message: "extension concurrency budget is exhausted".to_string(),
+            });
+        }
+    };
+    let active_call = match extension.cancellation.begin(dispatch.cancellation()) {
+        Ok(active) => active,
+        Err(message) => {
+            return evt(EntrypointEvent::Error {
+                kind: RunEntrypointError::Busy,
+                message,
+            });
+        }
+    };
+    let tmpdir = match make_call_tmpdir() {
+        Ok(tmpdir) => tmpdir,
+        Err(error) => {
+            return evt(EntrypointEvent::Error {
+                kind: RunEntrypointError::InternalError,
+                message: format!("create extension TMPDIR: {error}"),
+            });
+        }
+    };
+    let output_max = usize::try_from(budgets.max_output_bytes).expect("u32 fits in usize");
+    let call = EntrypointCall {
+        entrypoint: &extension.entrypoint,
+        cwd: tmpdir.path(),
+        stdin: &dispatch.input,
+        timeout: Duration::from_millis(budgets.duration_ms),
+        caps: CallCaps {
+            stdin_max: usize::try_from(budgets.max_payload_bytes).expect("u32 fits in usize"),
+            stdout_max: output_max,
+            stderr_max: output_max,
+            fd3_max: 0,
+            ..CallCaps::v1()
+        },
+        resource_limits: Some(ProcessResourceLimits {
+            address_space_bytes: budgets.memory_bytes,
+            cpu_millis: budgets.cpu_millis,
+        }),
+        cancellation: Some(active_call.token()),
+        env: Vec::new(),
+        stream_input: false,
+    };
+    let mut emitted = 0usize;
+    let terminal = stream_call(call, &mut |event| {
+        let bytes = match &event {
+            EntrypointEvent::Stdout { chunk } | EntrypointEvent::Stderr { chunk } => chunk.len(),
+            _ => 0,
+        };
+        if emitted.saturating_add(bytes) <= output_max {
+            emitted = emitted.saturating_add(bytes);
+            write_response(&mut *file, &evt(event));
+        }
+    });
+    evt(terminal)
+}
+
+/// Cancel only the active call whose complete admitted identity matches.
+pub(crate) fn handle_cancel_extension(cancellation: ExtensionCancellation) -> GuestResponse {
+    let extensions = match VALIDATED_EXTENSIONS.get() {
+        Some(Ok(extensions)) => extensions,
+        _ => {
+            return GuestResponse::Error {
+                message: "extension cancellation did not match an active call".to_string(),
+            };
+        }
+    };
+    let Some(extension) = extensions.iter().find(|candidate| {
+        candidate.config.binding.extension_id == cancellation.extension_id
+            && candidate.config.binding.pack_digest == cancellation.pack_digest
+            && candidate.config.binding.contract_digest == cancellation.contract_digest
+            && candidate.config.plan_id == cancellation.plan_id
+    }) else {
+        return GuestResponse::Error {
+            message: "extension cancellation did not match an active call".to_string(),
+        };
+    };
+    match extension
+        .cancellation
+        .request_and_wait(&cancellation, Duration::from_secs(5))
+    {
+        Ok(()) => GuestResponse::ExtensionCancellationAck,
+        Err(message) => GuestResponse::Error { message },
+    }
 }
 
 /// Emit each control record a warm worker returned as one
@@ -575,18 +715,6 @@ pub(crate) fn handle_fs_diff() -> GuestResponse {
     // the rootfs is mounted read-only with an overlay.
     let changes = collect_fs_diff();
     GuestResponse::FsDiffResult { changes }
-}
-
-pub(crate) fn handle_start_port_forward(guest_port: u16) -> GuestResponse {
-    let vsock_port = mvm_agentd::vsock::PORT_FORWARD_BASE + guest_port as u32;
-    eprintln!("port-fwd: starting vsock:{vsock_port} → tcp://localhost:{guest_port}");
-    std::thread::spawn(move || {
-        run_port_forwarder(vsock_port, guest_port);
-    });
-    GuestResponse::PortForwardStarted {
-        guest_port,
-        vsock_port,
-    }
 }
 
 pub(crate) fn handle_start_unix_socket_forward(

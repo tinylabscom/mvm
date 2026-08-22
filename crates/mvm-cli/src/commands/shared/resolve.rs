@@ -2,23 +2,6 @@
 
 use anyhow::{Context, Result};
 
-use mvm_runtime::microvm;
-
-/// Resolve a VM name to its absolute directory path and verify the VM
-/// is running.
-pub fn resolve_running_vm(name: &str) -> Result<String> {
-    let abs_dir = microvm::resolve_running_vm_dir(name)?;
-    let hypervisor = super::resolve_effective_hypervisor("firecracker");
-    if !mvm_client::backend_is_running(&hypervisor, name) {
-        anyhow::bail!(
-            "VM '{}' is not running. Use 'mvmctl status' to list running VMs.",
-            name
-        );
-    }
-
-    Ok(abs_dir)
-}
-
 /// One of two ways to refer to a built manifest: a legacy name (looked
 /// up in the name-keyed registry) or a manifest path that resolves to
 /// a slot hash.
@@ -301,25 +284,6 @@ mod tests {
     use super::*;
     use mvm_core::network_policy::{HostPort, NetworkPolicy, NetworkPreset};
     use mvm_core::util::test_env::TestEnv;
-
-    /// A VM that is not running must be refused.
-    ///
-    /// The check is `if !backend_is_running(..)`. Deleting the `!` inverts it:
-    /// a stopped VM resolves successfully and the caller proceeds to operate on
-    /// a machine that is not there. Nothing asserted the refusal, so the
-    /// inversion survived.
-    #[test]
-    fn a_vm_that_is_not_running_is_refused() {
-        let home = tempfile::tempdir().expect("tempdir");
-        let mut env = TestEnv::new();
-        env.isolate_mvm_home(home.path());
-        let err = resolve_running_vm("definitely-not-running")
-            .expect_err("a VM that is not running must not resolve");
-        assert!(
-            err.to_string().contains("is not running"),
-            "refusal must name the reason; got: {err}"
-        );
-    }
 
     /// A bare directory name is a manifest *path*, not a registry name.
     ///

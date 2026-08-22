@@ -51,17 +51,26 @@
   --color-gray-4: #6e7681;
 
   /* Dark glows read as light bloom; light mode dials this down to a tint
-     (see --glow-strength in the light palette blocks below). */
-  --glow-strength: 22%;
+     (see --glow-strength in the light palette blocks below). Every glow on
+     the site — the hero blooms, the card sheens, the halo behind the hero
+     diagram — is mixed from this one number, so it is the single lever for
+     how loud the page is. Held at 22% it lit the whole viewport and made
+     the dark background read as backlit rather than as a page; half that
+     keeps the depth cue and drops the haze. */
+  --glow-strength: 11%;
 
   /* Font tokens are scheme-invariant — no light-mode override needed.
      --font-display carries every heading (landing + docs, via the explicit
-     h1-h4 rule in custom.css) — JetBrains Mono Variable, not Inter, is the
-     deliberate choice: it's the single biggest lever in reading as
-     technical rather than generic-SaaS. --font-body carries everything
-     else — prose, list text, docs body copy via --sl-font in custom.css —
-     because mono hurts readability at paragraph length. */
-  --font-display: "JetBrains Mono Variable", ui-monospace, monospace;
+     h1-h4 rule in custom.css). It was JetBrains Mono. It is now Inter, set
+     at weight 600 with negative tracking: mono reads as technical at three
+     words and as a wall at thirty, and the site has enough long headings
+     and docs h2/h3s for that to cost more than it buys. What still reads
+     technical is where mono is *kept* — code frames, eyebrows, labels, CLI
+     samples, terminal chrome — and those are untouched. --font-body is the
+     same face at normal weight, so headings and prose share one family and
+     the hierarchy comes from weight, size and tracking rather than from a
+     typeface switch. */
+  --font-display: "Inter Variable", ui-sans-serif, system-ui, sans-serif;
   --font-mono: "JetBrains Mono Variable", ui-monospace, monospace;
   --font-body: "Inter Variable", ui-sans-serif, system-ui, sans-serif;
 
@@ -104,6 +113,20 @@
   --color-glow-2: color-mix(in oklab, var(--color-accent-2) var(--glow-strength), transparent);
   --color-glow-3: color-mix(in oklab, var(--color-accent-3) var(--glow-strength), transparent);
 
+  /* Architecture-diagram planes. The diagrams encode three distinct
+     meanings — the security plane, the data/flow plane, and the sealed
+     guest — and collapsing them to one accent would delete information
+     the figure is carrying. Each aliases a base palette token rather than
+     introducing a hex, so both schemes come for free; the -soft fills are
+     mixed against the raised surface so a tinted region stays a tint at
+     any page background. */
+  --color-plane-security: var(--color-rust);
+  --color-plane-flow: var(--color-accent);
+  --color-plane-sealed: var(--color-green);
+  --color-plane-security-soft: color-mix(in oklab, var(--color-rust) 14%, var(--color-surface));
+  --color-plane-flow-soft: color-mix(in oklab, var(--color-accent) 12%, var(--color-surface));
+  --color-plane-sealed-soft: color-mix(in oklab, var(--color-green) 12%, var(--color-surface));
+
   /* Terminal window dots — product affordance, theme-independent. */
   --color-dot-close: #ff5f57;
   --color-dot-minimize: #febc2e;
@@ -140,7 +163,7 @@
     --color-gray-1: #1f2328;
     --color-gray-2: #424a53;
     --color-gray-4: #6e7681;
-    --glow-strength: 7%;
+    --glow-strength: 4%;
   }
 
   /* Auto mode + OS prefers light → use the light palette. The
@@ -169,7 +192,7 @@
       --color-gray-1: #1f2328;
       --color-gray-2: #424a53;
       --color-gray-4: #6e7681;
-      --glow-strength: 7%;
+      --glow-strength: 4%;
     }
   }
 }

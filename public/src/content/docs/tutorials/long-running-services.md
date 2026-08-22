@@ -14,8 +14,7 @@ Services need more lifecycle structure than one-shot commands.
 - Use `mvmctl machine logs`, `mvmctl wait`, and `mvmctl boot-report` for diagnostics.
 
 ```sh
-mvmctl machine run --manifest ./mvm.toml --name api-dev -d
-mvmctl machine forward api-dev -p 8080:8080
+mvmctl machine run --manifest ./mvm.toml --name api-dev --port 8080:8080
 mvmctl wait api-dev --for all
 mvmctl machine logs api-dev -f
 ```

@@ -139,7 +139,6 @@ fn run_persistent_post_start(
         );
     }
     match post_start_action(args) {
-        PostStart::Forward => crate::commands::vm::forward::forward_ports(name, &args.port),
         PostStart::Envelope => {
             let build_mode_str = resolve_build_mode_for_envelope(args, name);
             let envelope = serde_json::json!({
@@ -162,8 +161,6 @@ fn run_persistent_post_start(
 /// What `machine run` does once a persistent machine is up.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum PostStart {
-    /// Keep this CLI attached as the owner of the requested host port forwards.
-    Forward,
     /// `--up-json`: the SDK boot envelope, and nothing else on stdout.
     Envelope,
     /// `--json`: the caller is parsing stdout, so say nothing extra.
@@ -179,8 +176,6 @@ pub(super) enum PostStart {
 pub(super) fn post_start_action(args: &MachineRunArgs) -> PostStart {
     if args.up_json {
         PostStart::Envelope
-    } else if !args.port.is_empty() {
-        PostStart::Forward
     } else if args.run.json {
         PostStart::Quiet
     } else if args.detach {
@@ -337,23 +332,6 @@ fn resolve_entrypoint_stdin_with(
     }
 }
 
-/// Whether the launch's workload declared that it needs a real in-guest IP
-/// stack.
-///
-/// Reads the same `network.raw_ip_stack` field the admission path reads, so
-/// a workload cannot be admitted for one transport and booted on another.
-/// Absent IR, or IR with no app declaring it, means no: silence must never
-/// select the tunnel, because it is the weaker posture.
-fn workload_needs_raw_ip_stack(workload_ir: Option<&std::path::Path>) -> Result<bool> {
-    let Some(workload) = crate::commands::vm::up::load_workload_ir(workload_ir)? else {
-        return Ok(false);
-    };
-    Ok(workload
-        .apps
-        .iter()
-        .any(|app| app.network.as_ref().is_some_and(|n| n.raw_ip_stack)))
-}
-
 pub(super) fn run_dispatch(cli: &Cli, mut args: MachineRunArgs, cfg: &MvmConfig) -> Result<()> {
     // Settle the boot source before `resolve_mode` decides whether one is
     // missing — the same resolver `mvmctl run` uses, so the two verbs infer
@@ -379,17 +357,10 @@ pub(super) fn run_dispatch(cli: &Cli, mut args: MachineRunArgs, cfg: &MvmConfig)
         .map(super::resolve_local_deployment)
         .transpose()?;
 
-    // Settle the networking configuration before any build or boot work.
-    // There is no mode to choose: the derivation picks the strongest
-    // transport this workload and this host can actually support.
-    //
-    // The declaration lives in the workload IR, so a run that carries one
-    // is the only run that can ask for the tunnel. An ad-hoc `--image`
-    // launch has no workload to declare anything and keeps the
-    // socket-aware default.
-    let network_mode = super::preflight_network(workload_needs_raw_ip_stack(
-        args.from_workload_ir.as_deref(),
-    )?)?;
+    // Parsing the workload IR happens at the compile/admission boundary. A
+    // stale raw-network declaration is refused there before this single-path
+    // runtime selection can be reached.
+    let network_mode = super::preflight_network();
     tracing::debug!(?network_mode, "derived machine networking");
 
     if args.entrypoint {
@@ -581,8 +552,7 @@ mod entrypoint_stdin_tests {
 }
 
 #[cfg(test)]
-mod raw_ip_stack_tests {
-    use super::*;
+mod network_surface_tests {
 
     /// Build the fixture from the real IR types rather than hand-rolled
     /// JSON, so it cannot drift from the schema it is meant to exercise.
@@ -628,43 +598,53 @@ mod raw_ip_stack_tests {
         path
     }
 
-    fn net(raw_ip_stack: bool) -> mvm_contract::ir::Network {
+    fn net() -> mvm_contract::ir::Network {
         mvm_contract::ir::Network {
             mode: mvm_contract::ir::NetworkMode::Bridge,
             ports: vec![],
             egress: None,
             peers: vec![],
             dns: None,
-            raw_ip_stack,
+            ai: None,
         }
     }
 
     #[test]
     fn a_launch_with_no_workload_ir_keeps_the_socket_aware_default() {
-        // An ad-hoc `--image` run has nothing to declare a need.
-        assert!(!workload_needs_raw_ip_stack(None).expect("no ir"));
+        assert_eq!(
+            super::super::preflight_network(),
+            mvm_contract::plan::NetworkMode::HostVsockProxy
+        );
     }
 
     #[test]
-    fn a_workload_that_declares_the_need_reaches_the_boot_path() {
-        // The regression this pins: the boot path once passed a hardcoded
-        // `false`, so a workload admitted for the tunnel booted on the
-        // socket-aware transport instead.
+    fn a_stale_raw_declaration_is_refused_while_loading_the_ir() {
         let dir = tempfile::tempdir().expect("temp dir");
-        let ir = write_ir(dir.path(), Some(net(true)));
-        assert!(workload_needs_raw_ip_stack(Some(&ir)).expect("ir parses"));
+        let ir = dir.path().join("workload.json");
+        std::fs::write(
+            &ir,
+            br#"{"schema_version":"0.1","id":"legacy","apps":[{"name":"probe","source":{"kind":"local_path","path":"."},"image":{"kind":"nix_packages","packages":[]},"entrypoints":[],"resources":{"cpu_cores":1,"memory_mb":256,"rootfs_size_mb":512},"network":{"mode":"bridge","raw_ip_stack":true}}]}"#,
+        )
+        .expect("write stale IR");
+        let err = crate::commands::vm::up::load_workload_ir(Some(&ir))
+            .expect_err("the retired field must fail at the IR boundary");
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("raw_ip_stack has been retired"),
+            "{message}"
+        );
     }
 
     #[test]
     fn a_workload_that_declares_nothing_does_not_get_the_tunnel() {
         let dir = tempfile::tempdir().expect("temp dir");
-        for network in [Some(net(false)), None] {
+        for network in [Some(net()), None] {
             let described = format!("{network:?}");
             let ir = write_ir(dir.path(), network);
-            assert!(
-                !workload_needs_raw_ip_stack(Some(&ir)).expect("ir parses"),
-                "silence must not select the tunnel ({described})"
-            );
+            let loaded = crate::commands::vm::up::load_workload_ir(Some(&ir))
+                .expect("IR loads")
+                .expect("workload present");
+            assert_eq!(loaded.apps.len(), 1, "{described}");
         }
     }
 
@@ -674,6 +654,6 @@ mod raw_ip_stack_tests {
         let dir = tempfile::tempdir().expect("temp dir");
         let bad = dir.path().join("workload.json");
         std::fs::write(&bad, b"{ not json").expect("write");
-        assert!(workload_needs_raw_ip_stack(Some(&bad)).is_err());
+        assert!(crate::commands::vm::up::load_workload_ir(Some(&bad)).is_err());
     }
 }

@@ -210,6 +210,7 @@ provider: string
 }
 })
 export type PortProto = ("tcp" | "udp")
+export type PortTransform = ("opaque" | "http" | "tls")
 export type Source = ({
 exclude?: string[]
 include?: string[]
@@ -402,6 +403,10 @@ target: string
 }
 export interface Network {
 /**
+ * Optional AI egress metering and budget policy for this app.
+ */
+ai?: (AiPolicy | null)
+/**
  * DNS posture. `Some(None_)` = no resolver; `Some(System)` = inherit substrate default; `Some(Resolver)` = pin a single host:port resolver. Default (None) means "unspecified — substrate picks based on `mode`".
  */
 dns?: (NetworkDns | null)
@@ -415,14 +420,27 @@ mode: NetworkMode
  */
 peers?: string[]
 ports?: PortForward[]
+}
 /**
- * The workload needs a real in-guest IP stack: raw sockets, ICMP, non-TCP/UDP protocols, or its own resolver.
- * 
- * A statement about the *workload*, not about a transport. It is what selects the L3 tunnel, and it is declared here rather than chosen at run time so the same workload resolves the same way on every host.
- * 
- * Leave it off unless the workload genuinely needs it: the tunnel cannot carry host-side secret substitution or cleartext redaction, because the guest originates its own connections.
+ * AI-specific egress policy attached to a network grant.
  */
-raw_ip_stack?: boolean
+export interface AiPolicy {
+/**
+ * Optional token budget. `None` means no limit.
+ */
+budget?: (AiBudget | null)
+/**
+ * Whether to record AI token usage for this workload.
+ */
+metering?: boolean
+}
+/**
+ * Token budget for AI egress. A `None` field means no limit for that category.
+ */
+export interface AiBudget {
+max_input_tokens?: (number | null)
+max_output_tokens?: (number | null)
+max_total_tokens?: (number | null)
 }
 export interface NetworkEgress {
 /**
@@ -436,8 +454,28 @@ port: number
 }
 export interface PortForward {
 guest: number
+/**
+ * Exact loopback target inside the guest.
+ */
+guest_addr: string
 host: number
+/**
+ * Exact host address to bind. Wildcards must be declared literally.
+ */
+host_addr: string
+/**
+ * Stable non-zero ID carried by a host-initiated FlowMux open.
+ */
+mapping_id: number
 proto: PortProto
+/**
+ * Name of the workload secret containing a PEM certificate chain and private key. Required only for `tls`; the raw material stays host-side.
+ */
+tls_secret?: (string | null)
+/**
+ * Host-owned content treatment required for this mapping.
+ */
+transform: PortTransform
 }
 export interface Resources {
 cpu_cores: number

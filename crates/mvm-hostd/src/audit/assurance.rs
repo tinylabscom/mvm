@@ -19,7 +19,8 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use mvm_contract::assurance::{
-    AssuranceId, EvidenceRef, MvmBinding, Sha256Digest, TrialOutcome, TrialVerdict,
+    AssuranceId, EvidenceRef, HostObservation, MvmBinding, SessionGrant, Sha256Digest,
+    TrialOutcome, TrialVerdict,
 };
 use mvm_core::plan::ExecutionPlan;
 use sha2::{Digest, Sha256};
@@ -30,8 +31,16 @@ use crate::supervisor::PlanAuditEntry;
 
 /// Audit event emitted when a session is opened against an admitted plan.
 pub const EVENT_SESSION_OPENED: &str = "assurance.session_opened";
+/// Audit event emitted after the guest accepted identity-bound cancellation.
+pub const EVENT_SESSION_CANCELED: &str = "assurance.session_canceled";
 /// Audit event emitted for one declared probe.
 pub const EVENT_PROBE: &str = "assurance.probe";
+/// Audit event emitted when the host observer commits its account.
+pub const EVENT_OBSERVER_COMPLETED: &str = "assurance.observer_completed";
+/// Audit event emitted only after the admitted disposable VM is read back as stopped.
+pub const EVENT_CLEANUP_COMPLETED: &str = "assurance.cleanup_completed";
+/// Audit event emitted only after a trusted runtime verifier accepts a native quote.
+pub const EVENT_ATTESTATION_VERIFIED: &str = "assurance.attestation_verified";
 /// Audit event emitted when a trial's outcome is derived.
 pub const EVENT_TRIAL_COMPLETED: &str = "assurance.trial_completed";
 
@@ -94,6 +103,15 @@ pub struct SessionIdentity {
     pub campaign_id: AssuranceId,
     pub trial_id: AssuranceId,
     pub source_digest: Sha256Digest,
+}
+
+/// Public, bounded fields from a runtime attestation verification.
+#[derive(Debug, Clone, Copy)]
+pub struct AttestationRecord<'a> {
+    pub provider: &'a str,
+    pub challenge_digest: &'a Sha256Digest,
+    pub quote_digest: &'a Sha256Digest,
+    pub trust_root_ref: &'a EvidenceRef,
 }
 
 /// What an emit produced, in the form a binding cites.
@@ -199,7 +217,11 @@ impl<'a> AssuranceLedger<'a> {
     ///
     /// Labels carry identifiers and digests only. No prompt bytes, no probe
     /// arguments, and no policy contents cross into the chain.
-    pub fn open_session(&self, identity: &SessionIdentity) -> Result<LedgerRefs> {
+    pub fn open_session(
+        &self,
+        identity: &SessionIdentity,
+        grant: &SessionGrant,
+    ) -> Result<LedgerRefs> {
         let labels = [
             (
                 "assurance_session".to_string(),
@@ -213,6 +235,33 @@ impl<'a> AssuranceLedger<'a> {
             (
                 "assurance_source_digest".to_string(),
                 identity.source_digest.to_string(),
+            ),
+            (
+                "assurance_grant_digest".to_string(),
+                grant.grant_digest.to_string(),
+            ),
+            ("assurance_grant_nonce".to_string(), grant.nonce.to_string()),
+            (
+                "assurance_grant_expires_unix_ms".to_string(),
+                grant.expires_unix_ms.to_string(),
+            ),
+            (
+                "assurance_grant_allowed_tools".to_string(),
+                serde_json::to_string(&grant.allowed_tools)
+                    .context("encoding assurance grant tools")?,
+            ),
+            (
+                "assurance_grant_observation_scopes".to_string(),
+                serde_json::to_string(&grant.observation_scopes)
+                    .context("encoding assurance grant scopes")?,
+            ),
+            (
+                "assurance_grant_max_steps".to_string(),
+                grant.max_steps.to_string(),
+            ),
+            (
+                "assurance_grant_max_output_bytes".to_string(),
+                grant.max_output_bytes.to_string(),
             ),
         ];
         self.emit(EVENT_SESSION_OPENED, labels, EvidenceReceipt::Required)
@@ -245,6 +294,141 @@ impl<'a> AssuranceLedger<'a> {
         // Audit only: a probe is fine-grained, and the receipt a campaign
         // publishes is the trial's, not each attempt's.
         self.emit(EVENT_PROBE, labels, EvidenceReceipt::Omitted)
+    }
+
+    /// Record that the guest accepted cancellation for the exact session.
+    pub fn record_cancellation(&self, identity: &SessionIdentity) -> Result<LedgerRefs> {
+        let labels = [
+            (
+                "assurance_session".to_string(),
+                identity.session_id.to_string(),
+            ),
+            (
+                "assurance_campaign".to_string(),
+                identity.campaign_id.to_string(),
+            ),
+            ("assurance_trial".to_string(), identity.trial_id.to_string()),
+            (
+                "assurance_source_digest".to_string(),
+                identity.source_digest.to_string(),
+            ),
+        ];
+        self.emit(EVENT_SESSION_CANCELED, labels, EvidenceReceipt::Required)
+    }
+
+    /// Commit the host observer's bounded account and the exact probe records
+    /// from which it was derived.
+    pub fn record_observation(
+        &self,
+        identity: &SessionIdentity,
+        observation: &HostObservation,
+        probe_refs: &[EvidenceRef],
+    ) -> Result<LedgerRefs> {
+        let labels = [
+            (
+                "assurance_session".to_string(),
+                identity.session_id.to_string(),
+            ),
+            (
+                "assurance_campaign".to_string(),
+                identity.campaign_id.to_string(),
+            ),
+            ("assurance_trial".to_string(), identity.trial_id.to_string()),
+            (
+                "assurance_source_digest".to_string(),
+                identity.source_digest.to_string(),
+            ),
+            (
+                "assurance_attempted_effect".to_string(),
+                observation.attempted_effect.to_string(),
+            ),
+            (
+                "assurance_effect_observed_in_guest".to_string(),
+                observation.effect_observed_in_guest.to_string(),
+            ),
+            (
+                "assurance_boundary_crossed".to_string(),
+                observation.boundary_crossed.to_string(),
+            ),
+            (
+                "assurance_blocked_edges".to_string(),
+                serde_json::to_string(&observation.blocked_edges)
+                    .context("encoding observer blocked edges")?,
+            ),
+            (
+                "assurance_probe_refs".to_string(),
+                serde_json::to_string(probe_refs).context("encoding observer probe references")?,
+            ),
+        ];
+        self.emit(EVENT_OBSERVER_COMPLETED, labels, EvidenceReceipt::Required)
+    }
+
+    /// Commit host-confirmed teardown of the disposable trial target.
+    pub fn record_cleanup(&self, identity: &SessionIdentity) -> Result<LedgerRefs> {
+        let labels = [
+            (
+                "assurance_session".to_string(),
+                identity.session_id.to_string(),
+            ),
+            (
+                "assurance_campaign".to_string(),
+                identity.campaign_id.to_string(),
+            ),
+            ("assurance_trial".to_string(), identity.trial_id.to_string()),
+            (
+                "assurance_source_digest".to_string(),
+                identity.source_digest.to_string(),
+            ),
+            (
+                "assurance_cleanup_status".to_string(),
+                "confirmed_stopped".to_string(),
+            ),
+        ];
+        self.emit(EVENT_CLEANUP_COMPLETED, labels, EvidenceReceipt::Required)
+    }
+
+    /// Commit a verified native quote without storing the quote bytes.
+    pub fn record_attestation(
+        &self,
+        identity: &SessionIdentity,
+        attestation: &AttestationRecord<'_>,
+    ) -> Result<LedgerRefs> {
+        let labels = [
+            (
+                "assurance_session".to_string(),
+                identity.session_id.to_string(),
+            ),
+            (
+                "assurance_campaign".to_string(),
+                identity.campaign_id.to_string(),
+            ),
+            ("assurance_trial".to_string(), identity.trial_id.to_string()),
+            (
+                "assurance_source_digest".to_string(),
+                identity.source_digest.to_string(),
+            ),
+            (
+                "assurance_attestation_provider".to_string(),
+                attestation.provider.to_string(),
+            ),
+            (
+                "assurance_attestation_challenge_digest".to_string(),
+                attestation.challenge_digest.to_string(),
+            ),
+            (
+                "assurance_attestation_quote_digest".to_string(),
+                attestation.quote_digest.to_string(),
+            ),
+            (
+                "assurance_attestation_trust_root".to_string(),
+                attestation.trust_root_ref.to_string(),
+            ),
+        ];
+        self.emit(
+            EVENT_ATTESTATION_VERIFIED,
+            labels,
+            EvidenceReceipt::Required,
+        )
     }
 
     /// Record the derived outcome of a trial.

@@ -5,6 +5,7 @@
 
 use anyhow::Result;
 
+use crate::commands::cmd_audit;
 use crate::commands::vm::audit_chain::{AuditEmitter, default_audit_dir};
 use crate::commands::vm::policy_resolver::ResolveError;
 
@@ -12,9 +13,13 @@ pub(super) fn build_default_audit_emitter(
     signing_key: ed25519_dalek::SigningKey,
     audit_dir: Option<&std::path::Path>,
 ) -> Result<AuditEmitter> {
-    let emitter = match audit_dir {
-        Some(dir) => AuditEmitter::with_dir(signing_key, dir),
-        None => AuditEmitter::new(signing_key),
+    let dir = match audit_dir {
+        Some(dir) => dir.to_path_buf(),
+        None => default_audit_dir()?,
+    };
+    let emitter = match cmd_audit::active_signer_for(&dir) {
+        Some(signer) => AuditEmitter::with_primary_signer(signing_key, &dir, signer),
+        None => AuditEmitter::with_dir(signing_key, &dir),
     }?;
     emitter.with_decisions()
 }
@@ -30,7 +35,12 @@ pub(super) fn build_policy_audit_emitter(
                 Some(dir) => dir.to_path_buf(),
                 None => default_audit_dir()?,
             };
-            AuditEmitter::with_policy(signing_key, &dir, policy)
+            match cmd_audit::active_signer_for(&dir) {
+                Some(signer) => {
+                    AuditEmitter::with_policy_and_primary_signer(signing_key, &dir, policy, signer)
+                }
+                None => AuditEmitter::with_policy(signing_key, &dir, policy),
+            }
         }
         None => build_default_audit_emitter(signing_key, audit_dir),
     }?;
@@ -149,7 +159,7 @@ chain_signing = true
                 stream_edges: Vec::new(),
                 kernel_sha256: None,
                 network_mode: Default::default(),
-                l3_network: None,
+                ingress: Vec::new(),
                 vm_name: "vm-live",
                 tenant: Some("acme"),
                 backend_name: "firecracker",
@@ -178,7 +188,9 @@ chain_signing = true
                 audit_labels: Default::default(),
                 agent_verbs: None,
                 services: Vec::new(),
+                extensions: Vec::new(),
                 stream_retention: Default::default(),
+                attestation_mode: mvm_contract::plan::AttestationMode::Noop,
             },
             &SystemClock,
             &ledger,
@@ -260,7 +272,7 @@ stream_destinations = ["file://{}"]
                 stream_edges: Vec::new(),
                 kernel_sha256: None,
                 network_mode: Default::default(),
-                l3_network: None,
+                ingress: Vec::new(),
                 vm_name: "vm-stream",
                 tenant: Some("acme"),
                 backend_name: "firecracker",
@@ -289,7 +301,9 @@ stream_destinations = ["file://{}"]
                 audit_labels: Default::default(),
                 agent_verbs: None,
                 services: Vec::new(),
+                extensions: Vec::new(),
                 stream_retention: Default::default(),
+                attestation_mode: mvm_contract::plan::AttestationMode::Noop,
             },
             &SystemClock,
             &ledger,
@@ -370,7 +384,7 @@ chain_signing = false
                 stream_edges: Vec::new(),
                 kernel_sha256: None,
                 network_mode: Default::default(),
-                l3_network: None,
+                ingress: Vec::new(),
                 vm_name: "vm-unsigned-audit",
                 tenant: Some("acme"),
                 backend_name: "firecracker",
@@ -399,7 +413,9 @@ chain_signing = false
                 audit_labels: Default::default(),
                 agent_verbs: None,
                 services: Vec::new(),
+                extensions: Vec::new(),
                 stream_retention: Default::default(),
+                attestation_mode: mvm_contract::plan::AttestationMode::Noop,
             },
             &SystemClock,
             &ledger,
@@ -455,7 +471,7 @@ chain_signing = false
                 stream_edges: Vec::new(),
                 kernel_sha256: None,
                 network_mode: Default::default(),
-                l3_network: None,
+                ingress: Vec::new(),
                 vm_name: "vm-nope",
                 tenant: Some("acme"),
                 backend_name: "firecracker",
@@ -484,7 +500,9 @@ chain_signing = false
                 audit_labels: Default::default(),
                 agent_verbs: None,
                 services: Vec::new(),
+                extensions: Vec::new(),
                 stream_retention: Default::default(),
+                attestation_mode: mvm_contract::plan::AttestationMode::Noop,
             },
             &SystemClock,
             &ledger,
@@ -560,7 +578,7 @@ disabled_inspectors = ["ssrf_guarrd"]
                 stream_edges: Vec::new(),
                 kernel_sha256: None,
                 network_mode: Default::default(),
-                l3_network: None,
+                ingress: Vec::new(),
                 vm_name: "vm-typo",
                 tenant: Some("acme"),
                 backend_name: "firecracker",
@@ -589,7 +607,9 @@ disabled_inspectors = ["ssrf_guarrd"]
                 audit_labels: Default::default(),
                 agent_verbs: None,
                 services: Vec::new(),
+                extensions: Vec::new(),
                 stream_retention: Default::default(),
+                attestation_mode: mvm_contract::plan::AttestationMode::Noop,
             },
             &SystemClock,
             &ledger,
@@ -671,7 +691,7 @@ port_hi  = 443
                 stream_edges: Vec::new(),
                 kernel_sha256: None,
                 network_mode: Default::default(),
-                l3_network: None,
+                ingress: Vec::new(),
                 vm_name: "vm-bad",
                 tenant: Some("acme"),
                 backend_name: "firecracker",
@@ -700,7 +720,9 @@ port_hi  = 443
                 audit_labels: Default::default(),
                 agent_verbs: None,
                 services: Vec::new(),
+                extensions: Vec::new(),
                 stream_retention: Default::default(),
+                attestation_mode: mvm_contract::plan::AttestationMode::Noop,
             },
             &SystemClock,
             &ledger,

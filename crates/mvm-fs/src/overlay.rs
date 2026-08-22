@@ -40,12 +40,28 @@
 //! canonical `Display` form.
 
 use std::collections::HashMap;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// File name of the per-artifact sha256sum-format checksum manifest.
 pub const CHECKSUM_MANIFEST_FILE: &str = "checksums-sha256.txt";
+
+/// Best-effort cache of a completed full integrity + payload validation.
+///
+/// The stamp is never accepted on its own: every canonical file and the
+/// checksum manifest must retain the exact filesystem identity captured after
+/// validation. A mismatch or unreadable stamp falls back to full validation.
+const VALIDATION_STAMP_FILE: &str = ".validated-v1.json";
+const VALIDATION_STAMP_SCHEMA_VERSION: u32 = 1;
+const CANONICAL_OVERLAY_FILES: [&str; 4] = [
+    "overlay.ext4",
+    "overlay.verity",
+    "overlay.roothash",
+    "VERSION",
+];
 
 /// File name of the source-checkout fingerprint marker a local build drops
 /// next to the artifact (freshness key for source-built overlays).
@@ -342,9 +358,15 @@ impl RuntimeOverlayResolver {
             });
         }
 
-        verify_overlay_dir_integrity(&layout.artifact_dir)?;
+        let validation_cached = validation_stamp_matches(&layout.artifact_dir);
+        if !validation_cached {
+            verify_overlay_dir_integrity(&layout.artifact_dir)?;
+        }
         let roothash = read_roothash_file(&layout.roothash_file)?;
-        validate_overlay_payload(&layout.overlay_ext4)?;
+        if !validation_cached {
+            validate_overlay_payload(&layout.overlay_ext4)?;
+            write_validation_stamp(&layout.artifact_dir);
+        }
 
         Ok(RuntimeOverlayArtifact {
             overlay_ext4: layout.overlay_ext4,
@@ -401,12 +423,7 @@ pub fn verify_overlay_dir_integrity(dir: &Path) -> Result<(), OverlayError> {
     let manifest_path = dir.join(CHECKSUM_MANIFEST_FILE);
     let body = std::fs::read_to_string(&manifest_path)?;
     let expected = parse_checksums_manifest(&body);
-    for name in [
-        "overlay.ext4",
-        "overlay.verity",
-        "overlay.roothash",
-        "VERSION",
-    ] {
+    for name in CANONICAL_OVERLAY_FILES {
         let Some(expected_hash) = expected.get(name) else {
             return Err(OverlayError::ChecksumManifestMissing {
                 manifest_path: manifest_path.clone(),
@@ -423,6 +440,145 @@ pub fn verify_overlay_dir_integrity(dir: &Path) -> Result<(), OverlayError> {
         }
     }
     Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ValidationStamp {
+    schema_version: u32,
+    checksum_manifest_sha256: String,
+    files: Vec<FileFingerprint>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FileFingerprint {
+    name: String,
+    len: u64,
+    modified_secs: u64,
+    modified_nanos: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    unix_dev: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    unix_inode: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    unix_ctime_secs: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    unix_ctime_nanos: Option<i64>,
+}
+
+fn validation_stamp_path(dir: &Path) -> PathBuf {
+    dir.join(VALIDATION_STAMP_FILE)
+}
+
+/// Accept a prior validation only while every input retains the filesystem
+/// identity it had after the full checksum and payload scan.
+///
+/// On Unix, device/inode/change-time make a same-size rewrite or atomic file
+/// replacement invalidate the stamp even if an actor restores the mtime. The
+/// manifest digest additionally makes editing its expected hashes visible.
+/// This is a performance cache, not a new trust root: acquisition signature
+/// verification and dm-verity remain the authenticity and guest-read
+/// enforcement boundaries.
+fn validation_stamp_matches(dir: &Path) -> bool {
+    let body = match std::fs::read(validation_stamp_path(dir)) {
+        Ok(body) => body,
+        Err(_) => return false,
+    };
+    let stamp: ValidationStamp = match serde_json::from_slice(&body) {
+        Ok(stamp) => stamp,
+        Err(_) => return false,
+    };
+    if stamp.schema_version != VALIDATION_STAMP_SCHEMA_VERSION {
+        return false;
+    }
+    let manifest_path = dir.join(CHECKSUM_MANIFEST_FILE);
+    if compute_file_sha256(&manifest_path).ok().as_deref()
+        != Some(stamp.checksum_manifest_sha256.as_str())
+    {
+        return false;
+    }
+    validation_fingerprints(dir).is_some_and(|fingerprints| fingerprints == stamp.files)
+}
+
+fn validation_fingerprints(dir: &Path) -> Option<Vec<FileFingerprint>> {
+    CANONICAL_OVERLAY_FILES
+        .into_iter()
+        .chain(std::iter::once(CHECKSUM_MANIFEST_FILE))
+        .map(|name| file_fingerprint(dir, name))
+        .collect()
+}
+
+fn file_fingerprint(dir: &Path, name: &str) -> Option<FileFingerprint> {
+    let metadata = std::fs::metadata(dir.join(name)).ok()?;
+    if !metadata.is_file() {
+        return None;
+    }
+    let modified = metadata
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?;
+    #[cfg(unix)]
+    let (unix_dev, unix_inode, unix_ctime_secs, unix_ctime_nanos) = {
+        use std::os::unix::fs::MetadataExt as _;
+        (
+            Some(metadata.dev()),
+            Some(metadata.ino()),
+            Some(metadata.ctime()),
+            Some(metadata.ctime_nsec()),
+        )
+    };
+    #[cfg(not(unix))]
+    let (unix_dev, unix_inode, unix_ctime_secs, unix_ctime_nanos) = (None, None, None, None);
+    Some(FileFingerprint {
+        name: name.to_string(),
+        len: metadata.len(),
+        modified_secs: modified.as_secs(),
+        modified_nanos: modified.subsec_nanos(),
+        unix_dev,
+        unix_inode,
+        unix_ctime_secs,
+        unix_ctime_nanos,
+    })
+}
+
+/// Publish a reconstructible validation stamp without adding a durability
+/// barrier to cache resolution. A crash can lose the stamp, in which case the
+/// next resolve simply performs the full validation again.
+fn write_validation_stamp(dir: &Path) {
+    let Some(files) = validation_fingerprints(dir) else {
+        return;
+    };
+    let Ok(checksum_manifest_sha256) = compute_file_sha256(&dir.join(CHECKSUM_MANIFEST_FILE))
+    else {
+        return;
+    };
+    let stamp = ValidationStamp {
+        schema_version: VALIDATION_STAMP_SCHEMA_VERSION,
+        checksum_manifest_sha256,
+        files,
+    };
+    let Ok(body) = serde_json::to_vec_pretty(&stamp) else {
+        return;
+    };
+    let path = validation_stamp_path(dir);
+    let staged = dir.join(format!(
+        ".{VALIDATION_STAMP_FILE}.{}.{}.tmp",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_nanos())
+    ));
+    let written = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&staged)
+        .and_then(|mut file| file.write_all(&body));
+    if written.is_ok() {
+        let _ = std::fs::rename(&staged, &path);
+    }
+    let _ = std::fs::remove_file(staged);
 }
 
 /// Read an `overlay.roothash` text file and validate it parses to 64
@@ -717,6 +873,72 @@ mod tests {
         assert!(artifact.overlay_ext4.ends_with("overlay.ext4"));
         assert!(artifact.sidecar.ends_with("overlay.verity"));
         assert!(artifact.roothash_file.ends_with("overlay.roothash"));
+    }
+
+    #[test]
+    fn successful_full_validation_publishes_a_reconstructible_stamp() {
+        let cache = complete_cache("0.14.0", "aarch64");
+        let artifact_dir = cache.path().join("runtime-overlay/0.14.0/aarch64");
+        let resolver = RuntimeOverlayResolver::new(cache.path().to_path_buf(), "0.14.0".into());
+
+        resolver
+            .resolve("aarch64")
+            .expect("first resolve validates");
+
+        let stamp_path = validation_stamp_path(&artifact_dir);
+        let stamp: ValidationStamp = serde_json::from_slice(
+            &std::fs::read(&stamp_path).expect("validation stamp was published"),
+        )
+        .expect("validation stamp parses");
+        assert_eq!(stamp.schema_version, VALIDATION_STAMP_SCHEMA_VERSION);
+        assert_eq!(stamp.files.len(), CANONICAL_OVERLAY_FILES.len() + 1);
+        assert!(validation_stamp_matches(&artifact_dir));
+    }
+
+    #[test]
+    fn same_size_overlay_rewrite_invalidates_stamp_and_fails_closed() {
+        let cache = complete_cache("0.14.0", "aarch64");
+        let artifact_dir = cache.path().join("runtime-overlay/0.14.0/aarch64");
+        let overlay = artifact_dir.join("overlay.ext4");
+        let resolver = RuntimeOverlayResolver::new(cache.path().to_path_buf(), "0.14.0".into());
+        resolver
+            .resolve("aarch64")
+            .expect("first resolve validates");
+        let mut bytes = std::fs::read(&overlay).expect("read overlay fixture");
+        let last = bytes.last_mut().expect("overlay fixture is non-empty");
+        *last ^= 0xff;
+        std::fs::write(&overlay, bytes).expect("rewrite overlay at the same length");
+
+        assert!(!validation_stamp_matches(&artifact_dir));
+        let err = resolver
+            .resolve("aarch64")
+            .expect_err("changed bytes must force full validation and fail");
+        assert!(
+            matches!(
+                err,
+                OverlayError::ChecksumManifestMismatch { ref name, .. }
+                    if name == "overlay.ext4"
+            ),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn corrupt_validation_stamp_falls_back_to_full_validation_and_repairs_it() {
+        let cache = complete_cache("0.14.0", "aarch64");
+        let artifact_dir = cache.path().join("runtime-overlay/0.14.0/aarch64");
+        let resolver = RuntimeOverlayResolver::new(cache.path().to_path_buf(), "0.14.0".into());
+        resolver
+            .resolve("aarch64")
+            .expect("first resolve validates");
+        std::fs::write(validation_stamp_path(&artifact_dir), b"not-json")
+            .expect("corrupt validation stamp");
+
+        resolver
+            .resolve("aarch64")
+            .expect("corrupt cache metadata cannot reject a valid artifact");
+
+        assert!(validation_stamp_matches(&artifact_dir));
     }
 
     #[test]

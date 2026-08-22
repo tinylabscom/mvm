@@ -37,6 +37,19 @@ class AddonTier(Enum):
     in_vm = 'in_vm'
 
 
+@dataclass
+class AiBudget:
+    max_input_tokens: Optional[int] = None
+    max_output_tokens: Optional[int] = None
+    max_total_tokens: Optional[int] = None
+
+
+@dataclass
+class AiPolicy:
+    budget: Optional[AiBudget] = None
+    metering: Optional[bool] = False
+
+
 class AuthType(Enum):
     sigv4 = 'sigv4'
     hmac = 'hmac'
@@ -317,6 +330,12 @@ class PortProto(Enum):
     udp = 'udp'
 
 
+class PortTransform(Enum):
+    opaque = 'opaque'
+    http = 'http'
+    tls = 'tls'
+
+
 class PythonTool1(Enum):
     uv = 'uv'
 
@@ -470,8 +489,13 @@ class Mount:
 @dataclass
 class PortForward:
     guest: int
+    guest_addr: str
     host: int
+    host_addr: str
+    mapping_id: int
     proto: PortProto
+    transform: PortTransform
+    tls_secret: Optional[str] = None
 
 
 @dataclass
@@ -495,11 +519,11 @@ EnvValue = Union[EnvValue1, EnvValue2]
 @dataclass
 class Network:
     mode: NetworkMode
+    ai: Optional[AiPolicy] = None
     dns: Optional[NetworkDns] = None
     egress: Optional[NetworkEgress] = None
     peers: Optional[List[str]] = None
     ports: Optional[List[PortForward]] = field(default_factory=lambda: [])
-    raw_ip_stack: Optional[bool] = None
 
 
 @dataclass

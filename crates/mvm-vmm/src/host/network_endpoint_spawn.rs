@@ -13,7 +13,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use mvm_contract::builder::BuilderError;
 use mvm_contract::stream::secret_fingerprint::SecretFingerprint;
 use mvm_core::crypto::egress_ca::EgressCa;
-use mvm_core::plan::SecretBinding;
+use mvm_core::plan::{IngressMapping, SecretBinding};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -188,6 +188,10 @@ pub const SUBST_SESSION_FILE: &str = "substitution.session";
 /// FlowMux session. The marker above remains the durable evidence; this socket
 /// is only the event that avoids racing a one-shot marker check.
 pub const SUBST_SESSION_READY_SOCKET: &str = "substitution-session-ready.sock";
+/// Host-local typed-connector socket served by the same per-VM endpoint that
+/// owns guest FlowMux egress. Broker/tool code may authorize a request, but it
+/// reaches the network only by sending that request here.
+pub const SUBST_CONNECTOR_SOCKET: &str = "network-endpoint-connector.sock";
 
 /// Bound on the gap between guest-agent readiness and FlowMux authentication.
 /// A healthy guest normally authenticates before the launcher connects, so
@@ -476,6 +480,8 @@ pub struct SubstitutionSpawnParams<'a> {
     pub network_policy: Option<&'a mvm_core::policy::network_policy::NetworkPolicy>,
     /// Transport-neutral resource ceilings from the admitted execution plan.
     pub network_limits: mvm_core::plan::NetworkLimits,
+    /// Exact signed ingress mappings this endpoint must own.
+    pub ingress: &'a [IngressMapping],
     /// `Some` ⇒ the endpoint resolves secret *values* remotely (see
     /// [`RemoteResolverSpawnConfig`]) instead of its local encrypted store.
     /// `None` preserves today's `Local` (unchanged) resolver behavior.
@@ -512,6 +518,7 @@ pub struct SubstitutionSpawnParamsBuilder<'a> {
     tls_intermediate: Option<(String, String)>,
     network_policy: Option<&'a mvm_core::policy::network_policy::NetworkPolicy>,
     network_limits: Option<mvm_core::plan::NetworkLimits>,
+    ingress: Option<&'a [IngressMapping]>,
     resolver_remote: Option<RemoteResolverSpawnConfig<'a>>,
     binding_store_dir: Option<&'a Path>,
     flowmux_identity: Option<FlowMuxIdentitySpawnConfig>,
@@ -533,6 +540,7 @@ impl<'a> SubstitutionSpawnParamsBuilder<'a> {
             tls_intermediate: None,
             network_policy: None,
             network_limits: None,
+            ingress: None,
             resolver_remote: None,
             binding_store_dir: None,
             flowmux_identity: None,
@@ -616,6 +624,13 @@ impl<'a> SubstitutionSpawnParamsBuilder<'a> {
         self
     }
 
+    /// Set the exact signed ingress mappings.
+    #[must_use]
+    pub fn ingress(mut self, ingress: &'a [IngressMapping]) -> Self {
+        self.ingress = Some(ingress);
+        self
+    }
+
     /// Set `resolver_remote`. Takes a value or an `Option`; unset means `None`.
     #[must_use]
     pub fn resolver_remote(
@@ -682,6 +697,9 @@ impl<'a> SubstitutionSpawnParamsBuilder<'a> {
                 "SubstitutionSpawnParams",
                 "network_limits",
             ))?,
+            ingress: self
+                .ingress
+                .ok_or(BuilderError::missing("SubstitutionSpawnParams", "ingress"))?,
             resolver_remote: self.resolver_remote,
             binding_store_dir: self.binding_store_dir,
             flowmux_identity: self.flowmux_identity,
@@ -759,6 +777,7 @@ pub fn endpoint_config_for_identity(
         tls_intermediate: None,
         network_policy: None,
         network_limits: mvm_core::plan::NetworkLimits::default(),
+        ingress: &[],
         resolver_remote: None,
         binding_store_dir: None,
         flowmux_identity,
@@ -789,6 +808,7 @@ fn build_endpoint_config_json(params: &SubstitutionSpawnParams<'_>) -> serde_jso
             "wire"
         },
         "network_limits": params.network_limits,
+        "ingress": params.ingress,
     });
     if let Some(marker) = params.session_marker.as_ref() {
         cfg["session_marker"] = serde_json::json!(marker);
@@ -796,6 +816,8 @@ fn build_endpoint_config_json(params: &SubstitutionSpawnParams<'_>) -> serde_jso
     if params.flowmux_identity.is_some() {
         cfg["session_ready_socket"] =
             serde_json::json!(params.state_dir.join(SUBST_SESSION_READY_SOCKET));
+        cfg["connector_uds_path"] =
+            serde_json::json!(params.state_dir.join(SUBST_CONNECTOR_SOCKET));
     }
     if let Some(proxy) = params.egress_proxy.as_ref() {
         // `EndpointConfig.proxy_*`: the operator's upstream proxy for the
@@ -1134,6 +1156,7 @@ pub fn reap_network_endpoint(state_dir: &Path, vm_name: &str) {
     }
     let _ = std::fs::remove_file(state_dir.join(SUBST_PID_FILE));
     let _ = std::fs::remove_file(state_dir.join(SUBST_SESSION_READY_SOCKET));
+    let _ = std::fs::remove_file(state_dir.join(SUBST_CONNECTOR_SOCKET));
     let _ = std::fs::remove_file(mvm_core::config::vm_substitution_env_path(vm_name));
     // The endpoint's secrets are gone; the shapes the gate recognised them by
     // go with them, so a recycled VM name cannot inherit them.
@@ -1215,16 +1238,17 @@ mod tests {
         let endpoint = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
             std::fs::write(marker, b"1").unwrap();
-            stream.write_all(&[1]).unwrap();
+            let _ = stream.write_all(&[1]);
         });
 
-        wait_for_endpoint_session_with_timeout(
+        let result = wait_for_endpoint_session_with_timeout(
             "vm-1",
             dir.path(),
             std::time::Duration::from_secs(1),
-        )
-        .expect("the authenticated-session event admits the launch");
+        );
+        let _ = std::os::unix::net::UnixStream::connect(&ready_socket);
         endpoint.join().unwrap();
+        result.expect("the authenticated-session event admits the launch");
     }
 
     #[test]
@@ -1241,12 +1265,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join(SUBST_PID_FILE), "2147483646").unwrap();
 
-        let err = wait_for_endpoint_session_with_timeout(
-            "vm-1",
-            dir.path(),
-            std::time::Duration::from_secs(1),
-        )
-        .unwrap_err();
+        let err = wait_for_endpoint_session("vm-1", dir.path()).unwrap_err();
         assert!(
             err.to_string()
                 .contains("exited before any guest authenticated"),
@@ -1274,6 +1293,74 @@ mod tests {
         .unwrap_err();
         assert!(
             err.to_string().contains("no guest authenticated within"),
+            "unexpected: {err}"
+        );
+    }
+
+    #[test]
+    fn a_launch_rejects_an_invalid_session_signal_even_when_a_marker_exists() {
+        use std::io::Write as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(SUBST_PID_FILE),
+            std::process::id().to_string(),
+        )
+        .unwrap();
+        let ready_socket = dir.path().join(SUBST_SESSION_READY_SOCKET);
+        let listener = std::os::unix::net::UnixListener::bind(&ready_socket).unwrap();
+        let marker = dir.path().join(SUBST_SESSION_FILE);
+        let endpoint = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            std::fs::write(marker, b"1").unwrap();
+            let _ = stream.write_all(&[2]);
+        });
+
+        let result = wait_for_endpoint_session_with_timeout(
+            "vm-1",
+            dir.path(),
+            std::time::Duration::from_secs(1),
+        );
+        if result.is_ok() {
+            let _ = std::os::unix::net::UnixStream::connect(&ready_socket);
+        }
+        endpoint.join().unwrap();
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("invalid authenticated-session signal"),
+            "unexpected: {err}"
+        );
+    }
+
+    #[test]
+    fn a_launch_reports_a_broken_readiness_channel_from_a_live_endpoint() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(SUBST_PID_FILE),
+            std::process::id().to_string(),
+        )
+        .unwrap();
+        let ready_socket = dir.path().join(SUBST_SESSION_READY_SOCKET);
+        let listener = std::os::unix::net::UnixListener::bind(&ready_socket).unwrap();
+        let endpoint = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            drop(stream);
+        });
+
+        let result = wait_for_endpoint_session_with_timeout(
+            "vm-1",
+            dir.path(),
+            std::time::Duration::from_secs(1),
+        );
+        if result.is_ok() {
+            let _ = std::os::unix::net::UnixStream::connect(&ready_socket);
+        }
+        endpoint.join().unwrap();
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("waiting for the network endpoint's authenticated session"),
             "unexpected: {err}"
         );
     }
@@ -1306,6 +1393,7 @@ mod tests {
             .secrets(&[])
             .redaction(&redaction)
             .network_limits(mvm_contract::plan::NetworkLimits::default())
+            .ingress(&[])
             .transport(EndpointTransport::Uds {
                 path: dir.path().join("sub.sock"),
             })
@@ -1314,6 +1402,94 @@ mod tests {
         params.session_marker = Some(marker.clone());
         let cfg = build_endpoint_config_json(&params);
         assert_eq!(cfg["session_marker"], serde_json::json!(marker));
+    }
+
+    #[test]
+    fn tls_delivery_debug_redacts_the_private_key() {
+        let delivery = EgressTlsDelivery {
+            guest_cert: DriveFile {
+                name: EGRESS_CERT_DRIVE_NAME.to_string(),
+                content: "guest certificate".to_string(),
+                mode: 0o444,
+            },
+            endpoint_cert_pem: "endpoint certificate".to_string(),
+            endpoint_key_pem: "never-print-this-private-key".to_string(),
+        };
+
+        let rendered = format!("{delivery:?}");
+        assert!(rendered.contains(EGRESS_CERT_DRIVE_NAME));
+        assert!(rendered.contains("<intermediate cert>"));
+        assert!(rendered.contains("<redacted>"));
+        assert!(!rendered.contains("never-print-this-private-key"));
+    }
+
+    #[test]
+    fn substitution_spawn_builder_preserves_every_optional_endpoint_input() {
+        let dir = tempfile::tempdir().unwrap();
+        let redaction = mvm_core::policy::RedactionPolicy::default();
+        let network_policy = mvm_core::policy::network_policy::NetworkPolicy::default();
+        let limits = mvm_core::plan::NetworkLimits::default();
+        let terminator: SocketAddr = "127.0.0.1:18080".parse().unwrap();
+        let tls = ("certificate".to_string(), "private-key".to_string());
+        let resolver = RemoteResolverSpawnConfig {
+            uds_path: dir.path(),
+            timeout_secs: 9,
+        };
+        let identity = FlowMuxIdentitySpawnConfig {
+            session_id: "session-builder".to_string(),
+            host_signing_key_base64: "host-key".to_string(),
+            guest_verifying_key_base64: "guest-key".to_string(),
+        };
+        let proxy = EgressProxySpawnConfig {
+            https: Some("http://proxy.example:8443".to_string()),
+            http: Some("http://proxy.example:8080".to_string()),
+            no_proxy: Some("localhost".to_string()),
+        };
+
+        let params = SubstitutionSpawnParams::builder()
+            .vm_name("vm-builder")
+            .state_dir(dir.path())
+            .tenant("tenant-builder")
+            .secrets(&[])
+            .redaction(&redaction)
+            .transport(EndpointTransport::Uds {
+                path: dir.path().join("endpoint.sock"),
+            })
+            .network_limits(limits)
+            .ingress(&[])
+            .terminator_listen(terminator)
+            .tls_intermediate(tls.clone())
+            .network_policy(&network_policy)
+            .resolver_remote(resolver)
+            .binding_store_dir(dir.path())
+            .flowmux_identity(identity.clone())
+            .egress_proxy(proxy.clone())
+            .build()
+            .expect("every named builder input is retained");
+
+        assert_eq!(params.terminator_listen, Some(terminator));
+        assert_eq!(params.tls_intermediate, Some(tls));
+        assert_eq!(params.network_policy, Some(&network_policy));
+        assert_eq!(params.resolver_remote, Some(resolver));
+        assert_eq!(params.binding_store_dir, Some(dir.path()));
+        assert_eq!(params.flowmux_identity, Some(identity));
+        assert_eq!(params.egress_proxy, Some(proxy));
+    }
+
+    #[test]
+    fn endpoint_config_for_identity_selects_flowmux_and_carries_the_anchor() {
+        let identity = FlowMuxIdentitySpawnConfig {
+            session_id: "session-config".to_string(),
+            host_signing_key_base64: "host-signing-key".to_string(),
+            guest_verifying_key_base64: "guest-verifying-key".to_string(),
+        };
+
+        let config = endpoint_config_for_identity(Some(identity));
+        assert_eq!(config["egress_mode"], "flow_mux");
+        assert_eq!(
+            config["flowmux_identity"]["guest_verifying_key_base64"],
+            "guest-verifying-key"
+        );
     }
     use super::*;
     use mvm_contract::stream::secret_fingerprint::SecretCategory;
@@ -1791,6 +1967,7 @@ mod tests {
             tls_intermediate: None,
             network_policy: None,
             network_limits: mvm_core::plan::NetworkLimits::default(),
+            ingress: &[],
             resolver_remote: None,
             binding_store_dir: None,
             flowmux_identity: None,
@@ -1853,6 +2030,7 @@ mod tests {
             tls_intermediate: None,
             network_policy: None,
             network_limits: mvm_core::plan::NetworkLimits::default(),
+            ingress: &[],
             resolver_remote: None,
             binding_store_dir: None,
             flowmux_identity: None,
@@ -1920,6 +2098,7 @@ mod tests {
             tls_intermediate: None,
             network_policy: None,
             network_limits: mvm_core::plan::NetworkLimits::default(),
+            ingress: &[],
             resolver_remote: None,
             binding_store_dir: None,
             flowmux_identity: None,
@@ -1988,6 +2167,7 @@ mod tests {
             tls_intermediate: None,
             network_policy: None,
             network_limits: mvm_core::plan::NetworkLimits::default(),
+            ingress: &[],
             resolver_remote: None,
             binding_store_dir: None,
             flowmux_identity: None,
@@ -2049,6 +2229,7 @@ mod tests {
             tls_intermediate: None,
             network_policy,
             network_limits: mvm_core::plan::NetworkLimits::default(),
+            ingress: &[],
             resolver_remote: None,
             binding_store_dir: None,
             flowmux_identity: None,
@@ -2205,6 +2386,10 @@ mod tests {
         assert_eq!(
             cfg["session_ready_socket"],
             serde_json::json!(Path::new("/tmp").join(SUBST_SESSION_READY_SOCKET))
+        );
+        assert_eq!(
+            cfg["connector_uds_path"],
+            serde_json::json!(Path::new("/tmp").join(SUBST_CONNECTOR_SOCKET))
         );
     }
 

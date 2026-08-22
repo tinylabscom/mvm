@@ -8,10 +8,13 @@
 
 use std::collections::BTreeSet;
 use std::net::{IpAddr, SocketAddr};
+use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use mio::unix::SourceFd;
+use mio::{Events, Interest, Poll, Token, Waker};
 use mvm_contract::protocol::network_flow::{MAX_UDP_DATAGRAM_LEN, Opcode, UDP_ADDR_PREFIX_LEN};
 use mvm_core::net::session::Session;
 use tracing::warn;
@@ -31,6 +34,8 @@ pub(super) struct UdpSendMsg {
 /// channel.
 pub(super) struct UdpAssociationHandle {
     pub(super) tx: std::sync::mpsc::Sender<UdpSendMsg>,
+    pub(super) waker: Arc<Waker>,
+    pub(super) peer_admission: UdpPeerAdmission,
 }
 
 /// Parameters for the per-association UDP relay thread.
@@ -38,12 +43,24 @@ pub(super) struct UdpAssociationHandle {
 pub(super) struct UdpRelayParams {
     pub(super) stream_id: u32,
     pub(super) socket: std::net::UdpSocket,
+    pub(super) poll: Poll,
     pub(super) session: Arc<Mutex<Session>>,
     pub(super) writer: Arc<Mutex<UnixStream>>,
     pub(super) idle_timeout: Duration,
     pub(super) max_peers: usize,
+    pub(super) peer_admission: UdpPeerAdmission,
     pub(super) rx: std::sync::mpsc::Receiver<UdpSendMsg>,
     pub(super) registry: Arc<Mutex<StreamRegistry>>,
+}
+
+/// Whether a guest datagram may introduce a peer or may only answer one that
+/// previously sent to the host socket.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum UdpPeerAdmission {
+    /// Outbound association: the guest selects admitted destinations.
+    GuestMayIntroduce,
+    /// Ingress mapping: the guest may reply only to observed external peers.
+    ObservedOnly,
 }
 
 /// Per-association UDP relay thread: read datagrams from the upstream socket
@@ -57,19 +74,23 @@ pub(super) fn run_udp_relay(params: UdpRelayParams) {
     let UdpRelayParams {
         stream_id,
         socket,
+        mut poll,
         session,
         writer,
         idle_timeout,
         max_peers,
+        peer_admission,
         rx,
         registry,
     } = params;
-    const MAX_POLL: Duration = Duration::from_secs(1);
 
     let mut buf = vec![0_u8; MAX_UDP_DATAGRAM_LEN];
+    let mut events = Events::with_capacity(4);
     let mut peers: BTreeSet<SocketAddr> = BTreeSet::new();
     let mut last_activity = std::time::Instant::now();
     let mut idle_expired = false;
+    let mut guest_closed = false;
+    let mut relay_failed = false;
 
     loop {
         let remaining = idle_timeout.saturating_sub(last_activity.elapsed());
@@ -77,70 +98,104 @@ pub(super) fn run_udp_relay(params: UdpRelayParams) {
             idle_expired = true;
             break;
         }
-        let budget = remaining.min(MAX_POLL);
-        if socket.set_read_timeout(Some(budget)).is_err() {
-            warn!(stream_id, "FlowMux UDP relay failed to set read timeout");
+        if let Err(error) = poll.poll(&mut events, Some(remaining)) {
+            warn!(stream_id, %error, "FlowMux UDP event wait failed");
+            relay_failed = true;
+            break;
+        }
+        if events.is_empty() {
+            idle_expired = true;
             break;
         }
 
         let mut activity_this_iter = false;
-        match socket.recv_from(&mut buf) {
-            Ok((len, source)) => {
-                let already_peer = peers.contains(&source);
-                if !already_peer && peers.len() >= max_peers {
-                    // Peer bound would be exceeded; drop silently.
-                    activity_this_iter = true;
-                } else {
-                    peers.insert(source);
-                    let mut payload = encode_udp_addr(source.ip(), source.port());
-                    payload.extend_from_slice(&buf[..len]);
-                    let frame_len = u32::try_from(payload.len()).unwrap_or(u32::MAX);
-                    if let Err(e) =
-                        lock_registry(&registry).consume_host_credit(stream_id, frame_len)
-                    {
-                        warn!(stream_id, error = %e, "FlowMux UDP host credit exhausted");
-                        let _ = write_frame_to(
-                            &session,
-                            &writer,
-                            Opcode::Reset,
-                            stream_id,
-                            b"host credit exhausted",
-                        );
-                        break;
+        for event in &events {
+            match event.token() {
+                UDP_SOCKET => loop {
+                    match socket.recv_from(&mut buf) {
+                        Ok((len, source)) => {
+                            activity_this_iter = true;
+                            let already_peer = peers.contains(&source);
+                            if !already_peer && peers.len() >= max_peers {
+                                continue;
+                            }
+                            peers.insert(source);
+                            let mut payload = encode_udp_addr(source.ip(), source.port());
+                            payload.extend_from_slice(&buf[..len]);
+                            let frame_len = u32::try_from(payload.len()).unwrap_or(u32::MAX);
+                            if let Err(e) =
+                                lock_registry(&registry).consume_host_credit(stream_id, frame_len)
+                            {
+                                warn!(stream_id, error = %e, "FlowMux UDP host credit exhausted");
+                                let _ = write_frame_to(
+                                    &session,
+                                    &writer,
+                                    Opcode::Reset,
+                                    stream_id,
+                                    b"host credit exhausted",
+                                );
+                                relay_failed = true;
+                                break;
+                            }
+                            if write_frame_to(
+                                &session,
+                                &writer,
+                                Opcode::UdpRecv,
+                                stream_id,
+                                &payload,
+                            )
+                            .is_err()
+                            {
+                                relay_failed = true;
+                                break;
+                            }
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                        Err(error) => {
+                            warn!(stream_id, %error, "FlowMux UDP recv failed");
+                            relay_failed = true;
+                            break;
+                        }
                     }
-                    if write_frame_to(&session, &writer, Opcode::UdpRecv, stream_id, &payload)
-                        .is_err()
-                    {
-                        break;
+                },
+                UDP_WAKE => loop {
+                    match rx.try_recv() {
+                        Ok(msg) => {
+                            activity_this_iter = true;
+                            let already_peer = peers.contains(&msg.destination);
+                            if !already_peer {
+                                if peer_admission == UdpPeerAdmission::ObservedOnly
+                                    || peers.len() >= max_peers
+                                {
+                                    continue;
+                                }
+                                peers.insert(msg.destination);
+                            }
+                            if let Err(error) = socket.send_to(&msg.payload, msg.destination) {
+                                warn!(stream_id, %error, "FlowMux UDP send failed");
+                                relay_failed = true;
+                                break;
+                            }
+                        }
+                        Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                        Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                            guest_closed = true;
+                            break;
+                        }
                     }
-                    activity_this_iter = true;
-                }
+                },
+                _ => {}
             }
-            Err(e)
-                if e.kind() == std::io::ErrorKind::TimedOut
-                    || e.kind() == std::io::ErrorKind::WouldBlock => {}
-            Err(e) => {
-                warn!(stream_id, error = %e, "FlowMux UDP recv failed");
-                break;
-            }
-        }
-
-        // Drain any guest-send requests without blocking.
-        while let Ok(msg) = rx.try_recv() {
-            activity_this_iter = true;
-            let already_peer = peers.contains(&msg.destination);
-            if !already_peer && peers.len() >= max_peers {
-                // Peer bound would be exceeded; drop silently.
-                continue;
-            }
-            peers.insert(msg.destination);
-            if socket.send_to(&msg.payload, msg.destination).is_err() {
+            if guest_closed || relay_failed {
                 break;
             }
         }
 
         if activity_this_iter {
             last_activity = std::time::Instant::now();
+        }
+        if guest_closed || relay_failed {
+            break;
         }
     }
 
@@ -153,7 +208,7 @@ pub(super) fn run_udp_relay(params: UdpRelayParams) {
             stream_id,
             b"idle timeout",
         );
-    } else {
+    } else if relay_failed {
         let _ = write_frame_to(
             &session,
             &writer,
@@ -162,6 +217,22 @@ pub(super) fn run_udp_relay(params: UdpRelayParams) {
             b"UDP relay error",
         );
     }
+}
+
+pub(super) const UDP_SOCKET: Token = Token(0);
+pub(super) const UDP_WAKE: Token = Token(1);
+
+pub(super) fn udp_event_sources(
+    socket: &std::net::UdpSocket,
+) -> std::io::Result<(Poll, Arc<Waker>)> {
+    socket.set_nonblocking(true)?;
+    let poll = Poll::new()?;
+    let fd = socket.as_raw_fd();
+    let mut source = SourceFd(&fd);
+    poll.registry()
+        .register(&mut source, UDP_SOCKET, Interest::READABLE)?;
+    let waker = Arc::new(Waker::new(poll.registry(), UDP_WAKE)?);
+    Ok((poll, waker))
 }
 
 /// Encode a UDP address prefix: one family tag, a 16-byte address slot, and a

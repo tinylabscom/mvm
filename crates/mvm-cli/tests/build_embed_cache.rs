@@ -254,8 +254,8 @@ fn cache_root_is_absent_without_an_override_or_home() {
 #[test]
 fn artifacts_are_addressed_by_key_then_name() {
     assert_eq!(
-        artifact_path(Path::new("/store"), "abc123", "mvm-netd"),
-        PathBuf::from("/store/abc123/mvm-netd")
+        artifact_path(Path::new("/store"), "abc123", "mvm-network-endpoint"),
+        PathBuf::from("/store/abc123/mvm-network-endpoint")
     );
 }
 
@@ -263,7 +263,7 @@ fn artifacts_are_addressed_by_key_then_name() {
 fn two_binaries_from_one_key_do_not_collide() {
     let root = Path::new("/store");
     assert_ne!(
-        artifact_path(root, "k", "mvm-netd"),
+        artifact_path(root, "k", "mvm-network-endpoint"),
         artifact_path(root, "k", "mvm-host-agent")
     );
 }
@@ -309,12 +309,17 @@ fn publishing_then_restoring_round_trips_the_bytes() {
     let store = tempfile::tempdir().expect("tempdir");
     let work = tempfile::tempdir().expect("tempdir");
 
-    let built = work.path().join("mvm-netd");
+    let built = work.path().join("mvm-network-endpoint");
     std::fs::write(&built, b"\x7fELF built here").expect("write");
-    install(store.path(), "keyA", "mvm-netd", &built);
+    install(store.path(), "keyA", "mvm-network-endpoint", &built);
 
-    let restored = work.path().join("out/mvm-netd");
-    assert!(lookup(store.path(), "keyA", "mvm-netd", &restored));
+    let restored = work.path().join("out/mvm-network-endpoint");
+    assert!(lookup(
+        store.path(),
+        "keyA",
+        "mvm-network-endpoint",
+        &restored
+    ));
     assert_eq!(
         std::fs::read(&restored).expect("read"),
         b"\x7fELF built here"
@@ -328,8 +333,8 @@ fn restoring_a_key_that_was_never_published_is_a_miss() {
     assert!(!lookup(
         store.path(),
         "absent",
-        "mvm-netd",
-        &work.path().join("mvm-netd")
+        "mvm-network-endpoint",
+        &work.path().join("mvm-network-endpoint")
     ));
 }
 
@@ -340,12 +345,17 @@ fn a_different_key_never_serves_another_keys_bytes() {
     let store = tempfile::tempdir().expect("tempdir");
     let work = tempfile::tempdir().expect("tempdir");
 
-    let built = work.path().join("mvm-netd");
+    let built = work.path().join("mvm-network-endpoint");
     std::fs::write(&built, b"old").expect("write");
-    install(store.path(), "keyOld", "mvm-netd", &built);
+    install(store.path(), "keyOld", "mvm-network-endpoint", &built);
 
-    let restored = work.path().join("out/mvm-netd");
-    assert!(!lookup(store.path(), "keyNew", "mvm-netd", &restored));
+    let restored = work.path().join("out/mvm-network-endpoint");
+    assert!(!lookup(
+        store.path(),
+        "keyNew",
+        "mvm-network-endpoint",
+        &restored
+    ));
 }
 
 #[test]
@@ -355,9 +365,9 @@ fn publishing_leaves_no_temporary_file_behind() {
     let store = tempfile::tempdir().expect("tempdir");
     let work = tempfile::tempdir().expect("tempdir");
 
-    let built = work.path().join("mvm-netd");
+    let built = work.path().join("mvm-network-endpoint");
     std::fs::write(&built, b"bytes").expect("write");
-    install(store.path(), "keyA", "mvm-netd", &built);
+    install(store.path(), "keyA", "mvm-network-endpoint", &built);
 
     let leftovers: Vec<_> = std::fs::read_dir(store.path().join("keyA"))
         .expect("read_dir")
@@ -378,13 +388,13 @@ fn publishing_an_unreadable_source_does_not_break_the_build() {
     install(
         store.path(),
         "keyA",
-        "mvm-netd",
+        "mvm-network-endpoint",
         Path::new("/definitely/not/here"),
     );
     assert!(!lookup(
         store.path(),
         "keyA",
-        "mvm-netd",
+        "mvm-network-endpoint",
         &store.path().join("out")
     ));
 }
@@ -459,6 +469,15 @@ fn the_opt_out_env_var_disables_the_store_entirely() {
             "HOME is set in every environment this suite runs in"
         );
     }
+}
+
+#[test]
+fn the_opt_out_env_var_retriggers_the_build_script() {
+    let build_script = include_str!("../build.rs");
+    assert!(
+        build_script.contains("cargo:rerun-if-env-changed=MVM_EMBED_NO_CACHE"),
+        "changing the opt-out must invalidate Cargo's cached build-script result"
+    );
 }
 
 #[test]

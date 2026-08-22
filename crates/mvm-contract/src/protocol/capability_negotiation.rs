@@ -51,6 +51,9 @@ pub enum CapabilityAlternative {
     /// Reach the per-VM substitution endpoint through the wasm tier's
     /// `mvm:egress` host import. Same endpoint, same policy and audit path.
     NetworkEndpointOverWasmImport,
+    /// Reach the per-VM substitution endpoint through a browser MessagePort /
+    /// Worker channel. Same endpoint, same policy and audit path.
+    NetworkEndpointOverBrowserChannel,
     /// Send bytes on the workload's stdin route rather than opening an
     /// interactive terminal. Not a terminal: no program selection, no argv
     /// or environment change.
@@ -84,6 +87,9 @@ impl CapabilityAlternative {
             }
             Self::NetworkEndpointOverWasmImport => {
                 "reach the per-VM substitution endpoint through the `mvm:egress` host import"
+            }
+            Self::NetworkEndpointOverBrowserChannel => {
+                "reach the per-VM substitution endpoint through a browser MessagePort/Worker channel"
             }
             Self::WorkloadStdinRoute => {
                 "write to the workload's stdin route instead of opening an interactive terminal"
@@ -135,15 +141,25 @@ fn alternative_for(capability: &'static str, backend: BackendKind) -> Capability
             BackendKind::Firecracker | BackendKind::Libkrun | BackendKind::Hvf => {
                 CapabilityAlternative::StandbyPool
             }
-            _ => CapabilityAlternative::ColdStartFromSignedPlan,
+            BackendKind::Qemu
+            | BackendKind::Mock
+            | BackendKind::Wasm
+            | BackendKind::WebLinux
+            | BackendKind::AppleContainer => CapabilityAlternative::ColdStartFromSignedPlan,
         },
 
         // Transport capabilities. Every one of these ends at the same per-VM
         // substitution endpoint, so the substitute changes how the workload
         // reaches the seam, never whether policy and audit apply to it.
-        "vsock" | "host_vsock_proxy" | "l3_vsock" => match backend {
+        "vsock" | "host_vsock_proxy" => match backend {
             BackendKind::Wasm => CapabilityAlternative::NetworkEndpointOverWasmImport,
-            _ => CapabilityAlternative::NetworkEndpointOverUds,
+            BackendKind::WebLinux => CapabilityAlternative::NetworkEndpointOverBrowserChannel,
+            BackendKind::Firecracker
+            | BackendKind::Libkrun
+            | BackendKind::Qemu
+            | BackendKind::Mock
+            | BackendKind::Hvf
+            | BackendKind::AppleContainer => CapabilityAlternative::NetworkEndpointOverUds,
         },
 
         // Interactive access. The stdin route carries bytes to an already
@@ -445,6 +461,18 @@ mod tests {
     }
 
     #[test]
+    fn the_web_linux_tier_reaches_the_endpoint_through_its_browser_channel() {
+        let required = require(|r| r.vsock = true);
+        let gaps = barren()
+            .negotiate(&required, BackendKind::WebLinux)
+            .expect_err("the browser-hosted tier has no native vsock device");
+        assert_eq!(
+            gaps[0].alternative,
+            CapabilityAlternative::NetworkEndpointOverBrowserChannel
+        );
+    }
+
+    #[test]
     fn a_missing_snapshot_tier_falls_back_to_replaying_the_signed_plan() {
         let required = require(|r| r.vcpu_state_snapshot = true);
         let gaps = barren()
@@ -642,13 +670,12 @@ mod tests {
             vsock: true,
             no_routable_guest_nic: true,
             host_vsock_proxy: true,
-            l3_vsock: true,
             pty_exec: true,
         };
         let gaps = barren()
             .negotiate(&required, BackendKind::Firecracker)
             .expect_err("a barren backend serves nothing");
-        assert_eq!(gaps.len(), 10, "every capability must produce a gap");
+        assert_eq!(gaps.len(), 9, "every capability must produce a gap");
         for gap in &gaps {
             assert!(
                 !gap.alternative
@@ -673,6 +700,39 @@ mod report_tests {
             ClientOperationCapabilities::builder().build()
         );
         assert!(!ClientOperationCapabilities::default().exec);
+    }
+
+    #[test]
+    fn client_operations_builder_preserves_every_enabled_operation() {
+        let operations = ClientOperationCapabilities::builder()
+            .list(true)
+            .inspect(true)
+            .create(true)
+            .run(true)
+            .start(true)
+            .stop(true)
+            .pause(true)
+            .resume(true)
+            .remove(true)
+            .logs(true)
+            .exec(true)
+            .reconfigure(true)
+            .set_ttl(true)
+            .build();
+
+        assert!(operations.list);
+        assert!(operations.inspect);
+        assert!(operations.create);
+        assert!(operations.run);
+        assert!(operations.start);
+        assert!(operations.stop);
+        assert!(operations.pause);
+        assert!(operations.resume);
+        assert!(operations.remove);
+        assert!(operations.logs);
+        assert!(operations.exec);
+        assert!(operations.reconfigure);
+        assert!(operations.set_ttl);
     }
 
     #[test]

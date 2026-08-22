@@ -10,14 +10,8 @@ Long-running services are useful for preview servers, API sandboxes, browser tar
 ## Start a service
 
 ```sh
-cargo run -- up servicebox --flake .
-cargo run -- exec servicebox -- python -m http.server 8000
-```
-
-Expose a host port only when the workflow needs it:
-
-```sh
-cargo run -- forward servicebox 8080:8000
+mvmctl machine run --manifest . --name servicebox --port 8080:8000 -- \
+  python -m http.server 8000
 ```
 
 The exact command surface may vary by backend and profile; check [CLI Commands](/reference/cli-commands/) for current flags.
@@ -27,7 +21,7 @@ The exact command surface may vary by backend and profile; check [CLI Commands](
 - Bind only the ports you need.
 - Prefer loopback host exposure for local development.
 - Do not expose admin consoles without auth.
-- Log port-forward creation and teardown.
+- Review ingress admission and teardown audit events.
 - Stop or cold-pause the sandbox when the service no longer needs CPU.
 
 ## Planned runtime SDK shape
@@ -38,18 +32,30 @@ The exact command surface may vary by backend and profile; check [CLI Commands](
 <TabItem label="Python">
 
 ```python
-sandbox = Sandbox.create(image="nix:./flake#service")
+sandbox = Sandbox.create(
+    image="nix:./flake#service",
+    network={"mode": "none", "ports": [{
+        "mapping_id": 1, "proto": "tcp", "transform": "opaque",
+        "host_addr": "127.0.0.1", "host": 8080,
+        "guest_addr": "127.0.0.1", "guest": 8000,
+    }]},
+)
 proc = sandbox.exec_background(["python", "-m", "http.server", "8000"])
-port = sandbox.ports.forward(guest=8000, host=8080)
 ```
 
 </TabItem>
 <TabItem label="TypeScript">
 
 ```ts
-const sandbox = await Sandbox.create({ image: "nix:./flake#service" });
+const sandbox = await Sandbox.create({
+  image: "nix:./flake#service",
+  network: { mode: "none", ports: [{
+    mapping_id: 1, proto: "tcp", transform: "opaque",
+    host_addr: "127.0.0.1", host: 8080,
+    guest_addr: "127.0.0.1", guest: 8000,
+  }] },
+});
 const proc = await sandbox.execBackground(["node", "server.js"]);
-const port = await sandbox.ports.forward({ guest: 8000, host: 8080 });
 ```
 
 </TabItem>

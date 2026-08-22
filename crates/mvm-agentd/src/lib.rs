@@ -36,8 +36,10 @@ pub mod entrypoint;
 /// threads, so a consumer that blocks — a host that stopped reading — cannot
 /// defer the child's deadline or grow the pump's queue without bound.
 pub mod entrypoint_stream;
+/// Boot-validated optional extension executables.
+pub mod extension;
 /// Guest-side FlowMux client for the converged single networking path.
-#[cfg(feature = "addons")]
+#[cfg(feature = "flowmux-async")]
 pub mod flowmux;
 /// Load the per-boot FlowMux identity material used by the guest-side adapters.
 pub mod flowmux_drive;
@@ -79,10 +81,6 @@ pub mod host_cost;
 pub mod host_time;
 pub mod icmp_client;
 pub mod integrations;
-/// The in-guest half of the L3 TUN-over-vsock tunnel: the `mvm0` device,
-/// its host-assigned configuration, the privilege drop, and the packet
-/// pump. `mvm0` terminates only in this agent.
-pub mod l3;
 pub mod lifecycle_hooks;
 /// Guest-side network defense. The `mvm-guest-netinit`
 /// binary calls into this module at boot to install kernel blackhole
@@ -91,9 +89,8 @@ pub mod lifecycle_hooks;
 /// `RawNetlinkInstaller` (a synchronous `AF_NETLINK` socket via libc)
 /// is Linux-only and gated inside the module.
 pub mod netinit;
-/// Shared rtnetlink plumbing: the kernel ABI constants, the request
-/// framing, and the synchronous socket that both `netinit`'s blackhole
-/// routes and the L3 agent's IPv6 bring-up send through.
+/// Shared rtnetlink plumbing: kernel ABI constants, request framing, and the
+/// synchronous socket used by `netinit`'s blackhole routes.
 pub mod netlink;
 pub mod probes;
 /// Restore-time guest wall-clock synchronization.

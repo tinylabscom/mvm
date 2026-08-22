@@ -31,8 +31,8 @@ There is no third package and no gateway binary. Every libkrun lane — builder
 VM, Stage 0, and workload — boots with an explicit virtio-vsock device and no
 guest NIC, so there is nothing for a userspace network gateway to sit between.
 The `MVM_NETWORKING` and `MVM_GATEWAY_BIN` knobs that used to select one are
-gone, and `xtask check-no-gateway-names` fails the build if a reference comes
-back.
+gone, and `xtask check-single-network-path` fails the build if a gateway,
+guest NIC, or second endpoint path comes back.
 
 `mvmctl doctor` reports the libkrun install state and emits hints when it is missing.
 
@@ -158,8 +158,8 @@ The `RuntimeBuildEnv` in mvm implements only `ShellEnvironment`. The full `Build
 
 ### Key Design Decisions
 
-- **Firecracker-only on Linux; libkrun (macOS 13-25) / HVF (macOS 26+) on macOS**: no Docker/containers on any auto-detected runtime path. The only container-tier backend is `--hypervisor apple-container` (Apple's prebuilt container kernel on the in-house HVF VMM), and `auto_select` returns it only when explicitly selected; it is not a fallback. Builds run Nix inside the builder VM (libkrun on macOS 13-25 / HVF on macOS 26+ / libkrun on Linux, with an auto-fallback to the QEMU builder where libkrun can't create its VM — ADR-007; note the _builder_ VMM is not Firecracker even on Linux). The QEMU/microvm_nix backend (Plan 166) is a **`mvm`-only dev/test backend, never used by `mvmd`** — it carries no untrusted multi-tenant workload, so claim-10 egress enforcement is deliberately not wired into its start path (it's Tier 2 dev/test, not a workload-bearing tier — see ADR-001 §"Per-backend tier matrix" claim-10 egress-enforcement note). Egress default-deny is enforced at one seam for every backend on the admitted workload funnel — Firecracker, libkrun, HVF, and `apple-container`, which holds an `HvfRunner` and substitutes only the kernel image, so it inherits that seam verbatim: the per-VM substitution endpoint, whose shared `EgressGate` is the sole claim-10 decision point. `xtask check-uniform-vsock-egress` pins Firecracker, libkrun, and HVF to that one spawn site so a backend cannot grow a second gate. The tiers `AnyBackend::as_workload_backend` returns `None` for — QEMU and Wasm — are barred from that funnel instead of gated on it.
-- **Workload microVMs have no NIC**: every workload *microVM* backend boots the guest with a virtio-vsock device and **no net device at all** — Firecracker's config sequence omits `/network-interfaces`, libkrun pins `NetworkingMode::VsockDirect` (which never calls a net attach), HVF's device model has no net device (and `apple-container` is that same device model with a different kernel image), and the QEMU workload driver emits no `-netdev`. The non-microVM tiers reach the same end differently: the Wasm tier mediates no networking at all. Egress leaves the guest only over vsock, to the host-side substitution endpoint. This is what makes claim 10 (default-deny), claim 13 (no raw secret to the guest), and the audit chain mechanically enforceable: the host _originates_ every outbound connection, so it can authorize, substitute, and log it. `xtask check-vsock-only-egress` fails closed if `virtio_net`, a tap, or a userspace gateway token appears on a workload path. The builder VM is the opposite tier and **does** have a NIC — see **Host dependencies**.
+- **Firecracker-only on Linux; libkrun (macOS 13-25) / HVF (macOS 26+) on macOS**: no Docker/containers on any auto-detected runtime path. The only container-tier backend is `--hypervisor apple-container` (Apple's prebuilt container kernel on the in-house HVF VMM), and `auto_select` returns it only when explicitly selected; it is not a fallback. Builds run Nix inside the builder VM (libkrun on macOS 13-25 / HVF on macOS 26+ / libkrun on Linux, with an auto-fallback to the QEMU builder where libkrun can't create its VM — ADR-007; note the _builder_ VMM is not Firecracker even on Linux). The QEMU/microvm_nix backend (Plan 166) is a **`mvm`-only dev/test backend, never used by `mvmd`** — it carries no untrusted multi-tenant workload. Egress default-deny is enforced at one seam for every workload runner — Firecracker, libkrun, HVF, QEMU, and `apple-container`, which holds an `HvfRunner` and substitutes only the kernel image, so it inherits that seam verbatim: the per-VM `mvm-network-endpoint`, whose shared `EgressGate` is the sole claim-10 decision point. `xtask check-single-network-path` pins every runner to that one spawn site and endpoint binary so a backend cannot grow a second gate. Wasm has no guest network and remains outside the microVM funnel.
+- **Workload microVMs have no NIC**: every workload *microVM* backend boots the guest with a virtio-vsock device and **no net device at all** — Firecracker's config sequence omits `/network-interfaces`, libkrun pins `NetworkingMode::VsockDirect` (which never calls a net attach), HVF's device model has no net device (and `apple-container` is that same device model with a different kernel image), and the QEMU workload driver emits no `-netdev`. The non-microVM tiers reach the same end differently: the Wasm tier mediates no networking at all. Egress leaves the guest only over the `NetworkFlow` channel to the host-side endpoint. This is what makes claim 10 (default-deny), claim 13 (no raw secret to the guest), and the audit chain mechanically enforceable: the host endpoint _originates_ every outbound connection, so it can authorize, substitute, and log it. `xtask check-single-network-path` fails closed if a guest NIC, raw-packet stack, alternate spawn implementation, or second workload socket owner appears. The builder VM is the opposite tier and **does** have a NIC — see **Host dependencies**.
 - **No SSH in microVMs, ever**: microVMs are headless workloads. No sshd, no SSH keys, no SSH users in any rootfs. Guest communication uses Firecracker vsock only. The builder VM (where Nix builds run) is headless too — no interactive shell or console, just a build engine you debug through its logs. See **Security model** below for the full posture.
 - **Builder VM is headless**: there is no interactive shell into it. The builder VM exists solely to run `nix build` on behalf of `mvmctl build` / `mvmctl machine run`; `mvmctl bootstrap` optionally pre-fetches/builds its image ahead of time, but builds auto-bootstrap it on first use if you skip that step. On macOS 26+ Apple Silicon: a long-lived HVF builder VM with Nix + build tools. On other macOS: libkrun builder VM. On Linux with KVM: Firecracker directly. None of these start or SSH into a workload microVM — the builder VM and workload microVMs are always separate.
 - **Headless microVMs**: `mvmctl run` and `mvmctl machine start` boot Firecracker as a daemon. Interactive access via `mvmctl machine console` (PTY-over-vsock, dev-mode only).
@@ -250,16 +250,9 @@ ADR-001 §"Appendix: Cardoso minimum-viable-policy checklist".
    exercises the universal agent's runtime profile and signed grant boundary
    (W4.3). The unit and conformance tests enumerate the complete DevOnly
    request set.
-5. **Vsock framing + supervisor-config JSON + the datapath ingress are
-   fuzzed.** `cargo-fuzz` targets at `crates/mvm-agentd/fuzz/` cover
-   `GuestRequest` and `AuthenticatedFrame` (W4.2).
-   `crates/mvm-hostd/fuzz/fuzz_targets/fuzz_datapath_ingress.rs` covers the
-   userspace socket datapath's guest-facing ingress: IP admission (IPv4 and
-   IPv6, including the bounded extension-header walk), the datapath's own
-   re-read of an admitted packet, and the per-flow smoltcp stack guest bytes
-   reach through `deliver_from_guest`. It does not cover the privileged Linux
-   TUN datapath, which forwards whole packets rather than parsing them.
-   Plan 88 W6 adds
+5. **Vsock framing + supervisor-config JSON are fuzzed.** `cargo-fuzz`
+   targets at `crates/mvm-agentd/fuzz/` cover `GuestRequest` and
+   `AuthenticatedFrame` (W4.2). Plan 88 W6 adds
    `crates/deps/libkrun-sys/fuzz/fuzz_targets/fuzz_supervisor_config.rs` against the
    host-side `SupervisorConfig` parser the `mvm-libkrun-supervisor`
    binary reads on stdin. `#[serde(deny_unknown_fields)]` on every

@@ -115,15 +115,15 @@ use crate::state::{ActivationState, AgentBootState, AgentState, IntegrationState
 use crate::transport::{AgentListener, accept_control, bind_listener};
 
 use handlers::{
-    handle_checkpoint_integrations, handle_close_stream_input, handle_entrypoint_status,
-    handle_fs_diff, handle_fs_list, handle_fs_mkdir, handle_fs_move, handle_fs_read,
-    handle_fs_remove, handle_fs_stat, handle_fs_write, handle_integration_status,
+    handle_cancel_extension, handle_checkpoint_integrations, handle_close_stream_input,
+    handle_entrypoint_status, handle_fs_diff, handle_fs_list, handle_fs_mkdir, handle_fs_move,
+    handle_fs_read, handle_fs_remove, handle_fs_stat, handle_fs_write, handle_integration_status,
     handle_mount_volume, handle_ping, handle_post_restore, handle_primed_status,
     handle_probe_status, handle_proc_kill, handle_proc_list, handle_proc_send_input,
     handle_proc_signal, handle_proc_start, handle_proc_wait, handle_readiness_status,
-    handle_resource_usage, handle_run_entrypoint_request, handle_sleep_prep,
-    handle_start_port_forward, handle_start_unix_socket_forward, handle_stream_input,
-    handle_unmount_volume, handle_update_idle_timeout, handle_wake, handle_worker_status,
+    handle_resource_usage, handle_run_entrypoint_request, handle_run_extension, handle_sleep_prep,
+    handle_start_unix_socket_forward, handle_stream_input, handle_unmount_volume,
+    handle_update_idle_timeout, handle_wake, handle_worker_status,
 };
 use interactive::{
     handle_console_close, handle_console_open, handle_console_resize, handle_exec,
@@ -398,6 +398,9 @@ fn handle_client(
                 stream_input,
             } => handle_run_entrypoint_request(&mut ctx, stdin, timeout_secs, env, stream_input),
 
+            GuestRequest::RunExtension { dispatch } => handle_run_extension(ctx.file, dispatch),
+            GuestRequest::CancelExtension { cancellation } => handle_cancel_extension(cancellation),
+
             // The host→guest half of the stream plane. Admission happened on
             // the host, at the gate that holds the signed plan; what reaches
             // here is bytes it already cleared, in the order it cleared them.
@@ -407,8 +410,6 @@ fn handle_client(
             GuestRequest::RunDetached { argv, env } => handle_run_detached(argv, env),
 
             GuestRequest::FsDiff => handle_fs_diff(),
-
-            GuestRequest::StartPortForward { guest_port } => handle_start_port_forward(guest_port),
 
             GuestRequest::StartUnixSocketForward {
                 guest_path,
@@ -551,21 +552,6 @@ fn main() {
         .flatten()
         .map(|p| p.profile)
         .unwrap_or_else(|| mvm_core::security::SecurityPolicy::dev_defaults().profile);
-    eprintln!("mvm-guest-agent: profile={:?}", active_profile);
-
-    if crate::transport::unix_transport_selected() {
-        eprintln!(
-            "mvm-guest-agent: starting on unix socket {} (threshold={}, interval={}s)",
-            crate::transport::unix_socket_path().display(),
-            cfg.busy_threshold,
-            cfg.sample_interval_secs
-        );
-    } else {
-        eprintln!(
-            "mvm-guest-agent: starting on vsock port {} (threshold={}, interval={}s)",
-            cfg.port, cfg.busy_threshold, cfg.sample_interval_secs
-        );
-    }
 
     // PID-1 initramfs setup: mount early filesystems and install the
     // SIGCHLD reaper before the control plane comes up.  On non-PID-1
@@ -652,14 +638,6 @@ fn main() {
         .expect("SysRng entropy for guest signing key");
     let guest_signing_key = Arc::new(SigningKey::from_bytes(&guest_seed));
     boot_state.mark_vsock_bound();
-    eprintln!(
-        "mvm-guest-agent: control plane ready ({}ms)",
-        boot_state
-            .snapshot()
-            .boot_millis
-            .vsock_bound_ms
-            .unwrap_or(0)
-    );
 
     // Defer entrypoint validation + warm-pool startup to a
     // background thread chained in dependency order
@@ -723,17 +701,6 @@ fn main() {
 
     // Port forwarders are started on-demand via StartPortForward requests
     // from the host (works with all backends, no config drive needed).
-
-    match &listener {
-        AgentListener::Vsock(_) => eprintln!(
-            "mvm-guest-agent: listening on vsock port {} (entrypoint, warm pool, integrations, probes initializing in background)",
-            cfg.port
-        ),
-        AgentListener::Unix(_) => eprintln!(
-            "mvm-guest-agent: listening on unix socket {} (entrypoint, warm pool, integrations, probes initializing in background)",
-            crate::transport::unix_socket_path().display()
-        ),
-    }
 
     // Every accepted connection gets its own bounded worker so a long-running
     // data stream cannot prevent Ping, readiness, sleep, or shutdown requests

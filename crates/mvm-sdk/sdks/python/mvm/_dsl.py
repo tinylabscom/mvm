@@ -735,6 +735,39 @@ def derive_schema(
     return schema
 
 
+def ai_budget(
+    *,
+    max_input_tokens: int | None = None,
+    max_output_tokens: int | None = None,
+    max_total_tokens: int | None = None,
+) -> _ir.AiBudget:
+    """Token budget for AI egress metering.
+
+    Each limit is independent. A `None` field means no limit for that
+    category. The budget is enforced best-effort at response time: the
+    request that crosses the threshold is still allowed through and
+    recorded, and the *next* AI request is refused.
+    """
+    return _ir.AiBudget(
+        max_input_tokens=max_input_tokens,
+        max_output_tokens=max_output_tokens,
+        max_total_tokens=max_total_tokens,
+    )
+
+
+def ai_policy(
+    *,
+    metering: bool = True,
+    budget: _ir.AiBudget | None = None,
+) -> _ir.AiPolicy:
+    """AI egress metering/budget policy for `mvm.network(...)`.
+
+    `metering` enables per-VM token counting for known AI providers.
+    `budget` optionally refuses further AI requests once exceeded.
+    """
+    return _ir.AiPolicy(metering=metering, budget=budget)
+
+
 def network(
     *,
     mode: str = "none",
@@ -742,30 +775,20 @@ def network(
     egress: _ir.NetworkEgress | None = None,
     peers: list[str] | None = None,
     dns: _ir.NetworkDns | None = None,
-    raw_ip_stack: bool = False,
+    ai: _ir.AiPolicy | None = None,
 ) -> _ir.Network:
     """Declare an app's network posture (plan-0004 §Phase 5).
 
     `mode` is the high-level toggle: `"none"`, `"bridge"`, or
     `"host"` (host is rejected for function-entrypoint workloads).
-    `egress` / `peers` / `dns` layer granular grants on top.
+    `egress` / `peers` / `dns` layer granular grants on top. Applications
+    use the guest loopback HTTP proxy, SOCKS5h/UDP, controlled DNS, mediated
+    ping, or typed connectors; direct raw networking is unsupported.
 
-    `raw_ip_stack` declares that the workload needs a real in-guest IP
-    stack — raw sockets, ICMP, non-TCP/UDP protocols, or its own
-    resolver. It selects the transport, so it is a declaration about the
-    workload rather than a choice about the host. Leaving it out keeps
-    the socket-aware default, which is the stronger posture.
+    `ai` attaches an optional AI egress metering and budget policy to the
+    network posture. When set, the host records token usage for known AI
+    providers and refuses further AI requests once the budget is exceeded.
     """
-    # Refuse a non-boolean rather than reading it for truthiness. This kwarg
-    # decides which transport the workload is admitted for, so taking
-    # `"yes"` as true — or `"false"` as true, which truthiness also does —
-    # would strand it on a transport it cannot use. The static decorator
-    # parser refuses the same shape; both routes to the IR must agree.
-    if not isinstance(raw_ip_stack, bool):
-        raise TypeError(
-            f"raw_ip_stack must be a bool, got {type(raw_ip_stack).__name__} "
-            f"({raw_ip_stack!r})"
-        )
     # `NetworkMode` is `Union[NetworkMode1, NetworkMode2]`, and a Union is
     # not callable — constructing it raised TypeError for every caller.
     # Resolve against the enum arm rather than the union: `NetworkMode2` is
@@ -783,7 +806,7 @@ def network(
         egress=egress,
         peers=list(peers) if peers else [],
         dns=dns,
-        raw_ip_stack=raw_ip_stack,
+        ai=ai,
     )
 
 

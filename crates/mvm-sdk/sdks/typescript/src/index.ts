@@ -37,6 +37,8 @@ import type {
   Dependencies,
   Entrypoint,
   EnvValue,
+  AiBudget,
+  AiPolicy,
   HookCmd,
   Hooks,
   Image,
@@ -270,24 +272,47 @@ export function resources(opts: {
   };
 }
 
+/** Build an AI token budget for `network({ ai: ... })`. */
+export function aiBudget(opts: {
+  maxInputTokens?: number;
+  maxOutputTokens?: number;
+  maxTotalTokens?: number;
+}): AiBudget {
+  return {
+    max_input_tokens: opts.maxInputTokens,
+    max_output_tokens: opts.maxOutputTokens,
+    max_total_tokens: opts.maxTotalTokens,
+  };
+}
+
+/** Build an AI egress metering/budget policy for `network({ ai: ... })`. */
+export function aiPolicy(opts: {
+  metering?: boolean;
+  budget?: AiBudget;
+}): AiPolicy {
+  return {
+    metering: opts.metering ?? true,
+    budget: opts.budget,
+  };
+}
+
 /** Declare a network policy. v1 surface: mode + ports. Egress, peers,
  *  DNS land alongside the imperative Sandbox surface (Phase 7). */
 export function network(opts: {
   mode?: "none" | "bridge" | "host";
   ports?: PortForward[];
   /**
-   * The workload needs a real in-guest IP stack — raw sockets, ICMP,
-   * non-TCP/UDP protocols, or its own resolver. Selects the transport, so
-   * it is a declaration about the workload rather than a choice about the
-   * host. Omitting it keeps the socket-aware default.
+   * Optional AI egress metering and budget policy. When set, the host
+   * records token usage for known AI providers and refuses further AI
+   * requests once the budget is exceeded.
    */
-  rawIpStack?: boolean;
+  ai?: AiPolicy;
 }): Network {
   return {
     mode: opts.mode ?? "none",
     ports: opts.ports ?? [],
     peers: [],
-    ...(opts.rawIpStack ? { raw_ip_stack: true } : {}),
+    ...(opts.ai ? { ai: opts.ai } : {}),
   };
 }
 

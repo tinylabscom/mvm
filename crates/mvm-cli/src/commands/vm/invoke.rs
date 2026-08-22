@@ -259,7 +259,7 @@ fn admit_entrypoint_boot(
 ) -> Result<Option<EntrypointAdmission>> {
     let ledger = mvm_hostd::plan_admission::InMemoryNonceLedger::default();
     let ctx = super::up::admit_plan_for_boot(super::up::AdmitPlanForBootParams {
-        network_mode: crate::commands::machine::derive_network_mode(false),
+        network_mode: crate::commands::machine::preflight_network(),
         tenant: "local",
         vm_name: params.vm_name,
         backend_name: params.backend_name,
@@ -1254,6 +1254,11 @@ fn exit_code_for(event: &mvm_agentd::vsock::EntrypointEvent) -> i32 {
                 RunEntrypointError::PayloadCap => (1, "payload cap exceeded"),
                 RunEntrypointError::WrapperCrashed => (137, "wrapper crashed"),
                 RunEntrypointError::EntrypointInvalid => (1, "entrypoint invalid"),
+                // 130 = 128 + SIGINT (2), the conventional shell status for
+                // an explicitly canceled foreground operation. This reports
+                // the semantic cancellation, not whichever signal the bounded
+                // guest kill ladder ultimately needed.
+                RunEntrypointError::Canceled => (130, "canceled"),
                 // 142 = 128 + SIGALRM (14). The signal-style mapping
                 // matches `WrapperCrashed`'s 137 = 128 + SIGKILL (9)
                 // pattern; SIGALRM is repurposed here as a stable
@@ -2114,6 +2119,15 @@ mod tests {
             message: "segfault".into(),
         };
         assert_eq!(exit_code_for(&evt), 137);
+    }
+
+    #[test]
+    fn test_exit_code_canceled_maps_to_130() {
+        let evt = mvm_agentd::vsock::EntrypointEvent::Error {
+            kind: mvm_agentd::vsock::RunEntrypointError::Canceled,
+            message: "controller canceled the call".into(),
+        };
+        assert_eq!(exit_code_for(&evt), 130);
     }
 
     #[test]

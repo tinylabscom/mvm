@@ -191,7 +191,7 @@ pub fn admit_and_boot_local(
         stream_edges: Vec::new(),
         kernel_sha256: kernel_sha.as_deref(),
         network_mode: Default::default(),
-        l3_network: None,
+        ingress: Vec::new(),
         vm_name: &req.name,
         tenant: Some(LOCAL_TENANT),
         backend_name: &req.backend_name,
@@ -222,7 +222,9 @@ pub fn admit_and_boot_local(
         audit_labels: Default::default(),
         agent_verbs: None,
         services: Vec::new(),
+        extensions: Vec::new(),
         stream_retention: Default::default(),
+        attestation_mode: mvm_contract::plan::AttestationMode::Noop,
     };
 
     let path_string = |p: &Path| p.to_string_lossy().into_owned();
@@ -266,6 +268,7 @@ pub fn admit_and_boot_local(
             ledger: ctx.ledger,
             host_signer_keys_dir: ctx.host_signer_keys_dir,
             bundle_ctx: None,
+            extension_ctx: None,
             variant: mvm_core::plan::Variant::Dev,
             policy_bundle: None,
             emitter: ctx.emitter,

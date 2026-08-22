@@ -27,7 +27,7 @@ export function WhyNow() {
   return (
     <Section id="why-now" rule className="bg-raised">
       <Reveal>
-        <h2 className="lowercase font-display text-2xl font-bold leading-tight text-title sm:text-3xl">
+        <h2 className="lowercase font-display tracking-tight text-2xl font-semibold leading-tight text-title sm:text-3xl">
           code is getting cheaper to write.{" "}
           <span className="text-accent-2">so are exploits.</span>
         </h2>
@@ -57,7 +57,7 @@ export function WhyNow() {
         {/* No max-width cap: the first line needs the section's full
             column to stay on one line at desktop sizes. */}
         <p
-          className="font-display text-lg font-bold leading-snug text-title sm:text-2xl"
+          className="font-display tracking-tight text-lg font-semibold leading-snug text-title sm:text-2xl"
           style={{ marginTop: "2.5rem" }}
         >
           With MVM{" "}

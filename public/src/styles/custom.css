@@ -132,17 +132,27 @@ html {
 
 /* Docs content headings — same display face and tightened tracking as the
    homepage's headline treatment, so a docs h1 and a landing-page headline
-   read as the same typeface family rather than Starlight's UI default. */
+   read as the same typeface family rather than Starlight's UI default.
+   Weight 600, not 700: at Inter's display sizes 700 reads as shouting,
+   and the whole point of the tightened tracking is that the heading can
+   carry hierarchy without extra weight. `text-wrap: balance` stops a
+   two-line heading from leaving one orphaned word on line two, which is
+   most of what makes a long docs h2 look untended. */
 [data-has-sidebar] main h1,
 [data-has-sidebar] main h2,
 [data-has-sidebar] main h3,
 [data-has-sidebar] main h4 {
   font-family: var(--font-display);
+  font-weight: 600;
   letter-spacing: -0.015em;
+  text-wrap: balance;
 }
 
+/* Tracking is a function of size, not a constant: the same -0.015em that
+   tightens a 2.25rem h1 visibly cramps a 1rem h4. */
 [data-has-sidebar] main h1 {
   font-size: 2.25rem;
+  letter-spacing: -0.025em;
   margin-block-end: 1.5rem;
 }
 

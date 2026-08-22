@@ -104,6 +104,21 @@ pub fn server_config_for_sni(
         .context("rustls server config from minted leaf")
 }
 
+/// Build a TLS 1.3-capable server config from one host-owned PEM bundle.
+/// The bundle may contain a leaf plus intermediates and exactly one private
+/// key. Callers resolve it inside the endpoint and drop the zeroizing source
+/// immediately after this function returns.
+pub fn server_config_from_pem_bundle(pem: &str) -> Result<rustls::ServerConfig> {
+    let chain = pem_certs(pem).context("parse ingress TLS certificate chain")?;
+    let key = pem_private_key(pem).context("parse ingress TLS private key")?;
+    rustls::ServerConfig::builder_with_provider(rustls::crypto::ring::default_provider().into())
+        .with_safe_default_protocol_versions()
+        .context("rustls ingress protocol versions")?
+        .with_no_client_auth()
+        .with_single_cert(chain, key)
+        .context("rustls ingress server config")
+}
+
 /// The per-connection inputs to [`terminate_and_substitute`] that aren't the
 /// live socket, the forwarder, or the out-flag: the minted-leaf TLS `config`,
 /// the original destination, and the substitution/redaction machinery
@@ -480,6 +495,21 @@ mod tests {
         let mut out = Vec::new();
         conn.write_tls(&mut out).unwrap();
         out
+    }
+
+    #[test]
+    fn ingress_server_config_accepts_one_host_owned_pem_bundle() {
+        let dir = tempfile::tempdir().unwrap();
+        let ca = mvm_core::crypto::egress_ca::EgressCa::load_or_init_at(dir.path()).unwrap();
+        let intermediate = ca.mint_vm_intermediate(&["localhost"]).unwrap();
+        let leaf = intermediate.mint_leaf("localhost").unwrap();
+        let bundle = format!(
+            "{}{}{}",
+            leaf.cert_pem,
+            intermediate.cert_pem(),
+            leaf.key_pem
+        );
+        server_config_from_pem_bundle(&bundle).unwrap();
     }
 
     #[test]

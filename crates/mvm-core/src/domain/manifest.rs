@@ -34,6 +34,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
+use mvm_contract::policy::network_policy::AiPolicy;
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
 
@@ -360,6 +361,7 @@ impl Manifest {
             image: self.image.clone()?,
             net: self.net,
             allow_hosts: self.network.allow_hosts.clone(),
+            ai: self.network.ai.clone(),
             init: self.dev.init.clone(),
             volumes: self.dev.volumes.clone(),
             cpus: u32::from(self.cpus),
@@ -449,11 +451,14 @@ fn validate_volume_spec(spec: &str) -> Result<()> {
 pub struct ManifestNetwork {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allow_hosts: Vec<String>,
+    /// Optional AI egress metering and budget policy for this workload.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ai: Option<AiPolicy>,
 }
 
 impl ManifestNetwork {
     fn is_empty(&self) -> bool {
-        self.allow_hosts.is_empty()
+        self.allow_hosts.is_empty() && self.ai.is_none()
     }
 }
 
@@ -578,6 +583,7 @@ pub struct ManifestMachineWorkflow {
     pub image: String,
     pub net: bool,
     pub allow_hosts: Vec<String>,
+    pub ai: Option<AiPolicy>,
     pub init: Vec<String>,
     pub volumes: Vec<String>,
     pub cpus: u32,
@@ -922,6 +928,7 @@ impl PersistedManifest {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::util::test_env::TestEnv;
     use tempfile::TempDir;
 
     fn write(dir: &Path, name: &str, body: &str) {
@@ -952,6 +959,32 @@ mod tests {
         assert!(m.dev.volumes.is_empty());
         assert!(m.name.is_none());
         assert_eq!(m.schema_version, MANIFEST_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn parse_network_ai_policy_round_trips() {
+        let toml = r#"
+            image = "oci:alpine"
+            profile = "default"
+            vcpus = 2
+            mem = "1024M"
+            data_disk = "0"
+            [network]
+            allow_hosts = ["api.openai.com:443"]
+            [network.ai]
+            metering = true
+            [network.ai.budget]
+            max_total_tokens = 1_000_000
+        "#;
+        let m = Manifest::from_toml_str(toml).expect("parses");
+        let ai = m.network.ai.clone().expect("ai policy present");
+        assert!(ai.metering);
+        let budget = ai.budget.expect("budget present");
+        assert_eq!(budget.max_total_tokens, Some(1_000_000));
+
+        // The machine workflow projection preserves the policy.
+        let workflow = m.machine_workflow().expect("machine workflow");
+        assert_eq!(workflow.ai.as_ref(), Some(&ai));
     }
 
     #[test]
@@ -1592,6 +1625,10 @@ mod tests {
 
     #[test]
     fn slot_dir_for_manifest_path_combines_canonical_key_and_slot_dir() {
+        // Both helpers resolve MVM_HOME independently. Hold the shared env
+        // guard so another parallel test cannot change that process-wide
+        // input between the two calls.
+        let _env = TestEnv::new();
         let tmp = TempDir::new().unwrap();
         write(tmp.path(), "mvm.toml", minimal_manifest_toml());
         let key = canonical_key_for_path(&tmp.path().join("mvm.toml")).unwrap();

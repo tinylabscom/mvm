@@ -10,7 +10,7 @@ mod cold_launch;
 mod hvf_save_restore;
 mod initramfs;
 mod kernel_pin;
-mod l3_vsock;
+mod network_surface;
 mod oci_unpack;
 mod one_transport;
 mod policy_approval;

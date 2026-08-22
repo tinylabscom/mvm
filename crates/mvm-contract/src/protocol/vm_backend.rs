@@ -467,13 +467,6 @@ pub struct VmCapabilities {
     /// Backend supports host/vsock-mediated networking (egress/ingress brokers
     /// over vsock) instead of a guest NIC.
     pub host_vsock_proxy: bool,
-    /// Backend can carry the L3 TUN-over-vsock tunnel: dedicated vsock
-    /// ports for the guest agent's control and packet connections, with no
-    /// guest NIC of any kind. Strictly stronger than
-    /// [`host_vsock_proxy`](Self::host_vsock_proxy) — that mode brokers
-    /// sockets, this one carries raw IP packets — so a backend must
-    /// advertise it separately rather than inheriting it.
-    pub l3_vsock: bool,
     /// Backend can carry an interactive PTY exec/console session.
     pub pty_exec: bool,
     /// Backend permits an in-guest SSH server (production SSH). Always `false`
@@ -490,6 +483,13 @@ pub struct VmCapabilities {
     /// separately from what a caller requests so a refusal can name the gap.
     #[serde(default)]
     pub resource_controls: crate::protocol::resource_controls::ResourceControls,
+    /// Portable, typed dimensions that describe the backend's guest
+    /// environment, CPU execution mode, isolation boundary, and lifecycle
+    /// scope. Added so browser and native builds share the same capability
+    /// identity without pulling backend-specific constructors into the
+    /// contract crate.
+    #[serde(default)]
+    pub capability_dimensions: BackendCapabilityDimensions,
 }
 
 /// The capabilities a run/plan requires from its backend.
@@ -507,7 +507,6 @@ pub struct RequiredCapabilities {
     pub vsock: bool,
     pub no_routable_guest_nic: bool,
     pub host_vsock_proxy: bool,
-    pub l3_vsock: bool,
     pub pty_exec: bool,
 }
 
@@ -515,7 +514,7 @@ impl VmCapabilities {
     /// Names of the capabilities `required` asks for that this backend does
     /// not advertise. Empty means the backend can serve the request.
     pub fn shortfall(&self, required: &RequiredCapabilities) -> Vec<&'static str> {
-        let checks: [(bool, bool, &'static str); 10] = [
+        let checks: [(bool, bool, &'static str); 9] = [
             (
                 required.eager_cow_restore,
                 self.eager_cow_restore,
@@ -552,7 +551,6 @@ impl VmCapabilities {
                 self.host_vsock_proxy,
                 "host_vsock_proxy",
             ),
-            (required.l3_vsock, self.l3_vsock, "l3_vsock"),
             (required.pty_exec, self.pty_exec, "pty_exec"),
         ];
         checks
@@ -1224,6 +1222,13 @@ impl BackendSecurityProfile {
             .collect()
     }
 }
+// ---------------------------------------------------------------------------
+pub mod portable;
+
+pub use portable::{
+    ArtifactRef, ArtifactSetRef, AttestationTier, BackendCapabilityDimensions, BackendRequest,
+    BackendResponse, CpuExecution, GuestEnvironment, IsolationBoundary, LifecycleScope,
+};
 
 /// Summary info for a managed VM, returned by `VmBackend::list`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1280,6 +1285,10 @@ pub enum BackendKind {
     /// portability/demo backend: opt-in only, never returned by auto-detect,
     /// no hardware isolation boundary.
     Wasm,
+    /// Browser-hosted Linux tier running a real Nix-built Linux kernel under
+    /// QEMU-Wasm. Claim-free portability/development backend: opt-in only,
+    /// never returned by native auto-detect, no hardware isolation boundary.
+    WebLinux,
     /// Apple Container tier: workloads boot Apple's prebuilt container
     /// kernel (a fetched binary artifact) with the same universal initramfs
     /// and `ActivateEnvironment` flow as every other runner backend, on the
@@ -1303,6 +1312,7 @@ impl BackendKind {
             Self::Mock => "mock",
             Self::Hvf => "hvf",
             Self::Wasm => "wasm",
+            Self::WebLinux => "web-linux",
             Self::AppleContainer => "apple-container",
         }
     }
@@ -1328,6 +1338,7 @@ impl BackendKind {
             "mock" => Self::Mock,
             "hvf" => Self::Hvf,
             "wasm" => Self::Wasm,
+            "web-linux" => Self::WebLinux,
             "apple-container" => Self::AppleContainer,
             _ => return None,
         };
@@ -1365,6 +1376,7 @@ mod tests {
             BackendKind::Mock,
             BackendKind::Hvf,
             BackendKind::Wasm,
+            BackendKind::WebLinux,
             BackendKind::AppleContainer,
         ] {
             assert_eq!(
@@ -1393,12 +1405,14 @@ mod tests {
             BackendKind::Mock,
             BackendKind::Hvf,
             BackendKind::Wasm,
+            BackendKind::WebLinux,
             BackendKind::AppleContainer,
         ];
         // Pin the labels a report is read against.
         assert_eq!(BackendKind::Hvf.as_str(), "hvf");
         assert_eq!(BackendKind::Firecracker.as_str(), "firecracker");
         assert_eq!(BackendKind::AppleContainer.as_str(), "apple-container");
+        assert_eq!(BackendKind::WebLinux.as_str(), "web-linux");
         // Two backends sharing a label would silently merge their samples.
         for (i, a) in kinds.iter().enumerate() {
             for b in &kinds[i + 1..] {

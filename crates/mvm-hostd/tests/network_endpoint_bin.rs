@@ -100,6 +100,7 @@ impl Drop for Kill {
 fn endpoint_bin_serves_substitution_and_refuses_unbound_destination() {
     let dir = tempfile::tempdir().unwrap();
     let sock = dir.path().join("substitution.sock");
+    let connector = dir.path().join("connector.sock");
 
     // Host stores: a Bearer secret bound to api.openai.com only.
     FileBindingStore::with_dir(dir.path().join("bindings"))
@@ -124,6 +125,7 @@ fn endpoint_bin_serves_substitution_and_refuses_unbound_destination() {
 
     let cfg = EndpointConfig {
         tenant_id: "local".into(),
+        instance_id: "test".into(),
         secrets: vec![SecretBinding {
             name: "OPENAI_API_KEY".into(),
             source: SecretSource::Keystore {
@@ -143,10 +145,12 @@ fn endpoint_bin_serves_substitution_and_refuses_unbound_destination() {
         tls_intermediate: None,
         network_policy: None,
         network_limits: mvm_core::plan::NetworkLimits::default(),
+        ingress: Vec::new(),
         egress_mode: EgressMode::Wire,
         resolver: ResolverBackend::default(),
         session_marker: None,
         session_ready_socket: None,
+        connector_uds_path: Some(connector.clone()),
         flowmux_identity: None,
     };
 
@@ -174,7 +178,7 @@ fn endpoint_bin_serves_substitution_and_refuses_unbound_destination() {
     assert!(placeholder.starts_with("mvm-secret-"), "got {placeholder}");
 
     // The endpoint bound the UDS before the handshake, so it's reachable now.
-    let mut conn = UnixStream::connect(&sock).expect("connect to endpoint UDS");
+    let mut conn = UnixStream::connect(&connector).expect("connect to typed endpoint connector");
     let req = WireRequest {
         method: "POST".into(),
         // NOT in allowed_hosts — claim-12 bind-check refuses before forwarding,
@@ -234,6 +238,7 @@ fn endpoint_bin_claim10_gate_refuses_a_bound_but_unadmitted_destination() {
 
     let cfg = EndpointConfig {
         tenant_id: "local".into(),
+        instance_id: "test".into(),
         secrets: vec![SecretBinding {
             name: "OPENAI_API_KEY".into(),
             source: SecretSource::Keystore {
@@ -254,10 +259,12 @@ fn endpoint_bin_claim10_gate_refuses_a_bound_but_unadmitted_destination() {
         // Deny-all: the endpoint gates every destination — even the bound one.
         network_policy: Some(mvm_core::policy::network_policy::NetworkPolicy::deny_all()),
         network_limits: mvm_core::plan::NetworkLimits::default(),
+        ingress: Vec::new(),
         egress_mode: mvm_hostd::supervisor::network_endpoint::EgressMode::Wire,
         resolver: ResolverBackend::default(),
         session_marker: None,
         session_ready_socket: None,
+        connector_uds_path: None,
         flowmux_identity: None,
     };
 
@@ -323,6 +330,7 @@ fn a_flowmux_endpoint_keeps_serving_sessions_after_one_ends() {
 
     let cfg = EndpointConfig {
         tenant_id: "local".into(),
+        instance_id: "test".into(),
         secrets: vec![],
         transport: EndpointTransport::Uds { path: sock.clone() },
         redaction: mvm_core::policy::RedactionPolicy::default(),
@@ -337,10 +345,12 @@ fn a_flowmux_endpoint_keeps_serving_sessions_after_one_ends() {
         tls_intermediate: None,
         network_policy: None,
         network_limits: mvm_core::plan::NetworkLimits::default(),
+        ingress: Vec::new(),
         egress_mode: EgressMode::FlowMux,
         resolver: ResolverBackend::default(),
         session_marker: Some(session_marker.clone()),
         session_ready_socket: Some(session_ready_socket.clone()),
+        connector_uds_path: None,
         flowmux_identity: Some(FlowMuxIdentity {
             session_id: "keeps-serving".into(),
             host_signing_key_base64: b64.encode(host_key.to_bytes()),
@@ -423,6 +433,7 @@ fn a_flowmux_endpoint_enforces_one_admitted_ceiling_across_sessions() {
     let b64 = base64::engine::general_purpose::STANDARD;
     let cfg = EndpointConfig {
         tenant_id: "local".into(),
+        instance_id: "test".into(),
         secrets: vec![],
         transport: EndpointTransport::Uds { path: sock.clone() },
         redaction: mvm_core::policy::RedactionPolicy::default(),
@@ -440,9 +451,11 @@ fn a_flowmux_endpoint_enforces_one_admitted_ceiling_across_sessions() {
             .max_udp_associations(1)
             .build()
             .unwrap(),
+        ingress: Vec::new(),
         egress_mode: EgressMode::FlowMux,
         resolver: ResolverBackend::default(),
         session_marker: None,
+        connector_uds_path: None,
         session_ready_socket: None,
         flowmux_identity: Some(FlowMuxIdentity {
             session_id: "shared-limit".into(),
@@ -522,6 +535,7 @@ fn a_flowmux_endpoint_refuses_zero_limits_decoded_from_config() {
     let b64 = base64::engine::general_purpose::STANDARD;
     let mut cfg = serde_json::to_value(EndpointConfig {
         tenant_id: "local".into(),
+        instance_id: "test".into(),
         secrets: vec![],
         transport: EndpointTransport::Uds { path: sock },
         redaction: mvm_core::policy::RedactionPolicy::default(),
@@ -536,10 +550,12 @@ fn a_flowmux_endpoint_refuses_zero_limits_decoded_from_config() {
         tls_intermediate: None,
         network_policy: None,
         network_limits: mvm_core::plan::NetworkLimits::default(),
+        ingress: Vec::new(),
         egress_mode: EgressMode::FlowMux,
         resolver: ResolverBackend::default(),
         session_marker: None,
         session_ready_socket: None,
+        connector_uds_path: None,
         flowmux_identity: Some(FlowMuxIdentity {
             session_id: "invalid-limit".into(),
             host_signing_key_base64: b64.encode([23u8; 32]),

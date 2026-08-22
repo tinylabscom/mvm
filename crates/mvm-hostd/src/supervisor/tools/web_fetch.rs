@@ -35,13 +35,13 @@
 //! - Not a download tool — `mvm.download` is for retrieving artifacts
 //!   into the agent's persistent overlay (with checksum verification);
 //!   `web_fetch` is for inline-by-value reads.
-//! - Not a proxy — outbound traffic from the supervisor is fronted
-//!   by the same egress proxy (`L7EgressProxy`) that mediates the
-//!   guest's outbound traffic.
+//! - Not a proxy — the tool sends one typed request to the per-VM network
+//!   endpoint, which owns all DNS, connects, TLS, transformation, and audit.
 
 use std::collections::BTreeSet;
-use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use base64::Engine;
@@ -51,7 +51,7 @@ use thiserror::Error;
 use url::Url;
 
 use super::{HostMediatedTool, ToolInvokeError};
-use crate::supervisor::ssrf_guard::SsrfGuard;
+use crate::supervisor::network_endpoint_connector::EndpointHttpConnector;
 
 pub const TOOL_NAME: &str = "mvm.web_fetch";
 
@@ -98,7 +98,7 @@ pub enum FetchError {
 
 /// Default fetcher — refuses every call with [`FetchError::Unwired`].
 /// Used as the substrate's fail-closed placeholder; gets swapped for
-/// a real HTTP client in production.
+/// the endpoint connector adapter in production.
 pub struct NoopHttpFetcher;
 
 #[async_trait]
@@ -108,56 +108,14 @@ impl HttpFetcher for NoopHttpFetcher {
     }
 }
 
-/// Production [`HttpFetcher`] backed by [`mvm_http::Client`]. The
-/// client is built **per call** so the SSRF pre-resolve can pin
-/// the client to the validated IP set for that one host plus that one
-/// fetch — closing the DNS-rebinding window between our check and
-/// the client's connect.
-///
-/// Body reads use [`mvm_http::Response::chunk`] in a manual loop
-/// so `max_bytes` is enforced incrementally — a server that lies
-/// about Content-Length cannot exhaust supervisor memory.
-///
-/// HTTPS-only is enforced upstream in [`WebFetchTool::invoke`];
-/// the fetcher trusts its caller did that and does not re-check.
-/// Operator-supplied timeout via `HardenedHttpFetcher::new`
-/// (default 30 s) caps the round-trip wall-clock for both
-/// connect and read phases.
-///
-/// ## Hardening
-///
-/// - **No auto-redirect**: each per-call client is built
-///   with `mvm_http::redirect::Policy::none()`. An allowlisted
-///   upstream that responds 3xx surfaces the status code +
-///   headers verbatim; the agent must re-call with the new URL,
-///   which re-runs the per-host allowlist check in
-///   [`WebFetchTool::invoke`].
-/// - **SSRF / DNS-rebinding defense**: before each fetch,
-///   the host is resolved via [`tokio::net::lookup_host`] and
-///   every returned IP is classified through
-///   [`SsrfGuard::classify`]. Any private / loopback /
-///   link-local / multicast / metadata-service IP triggers a
-///   refusal. The validated IPs are pinned via a dedicated
-///   resolver (`mvm_http::PinnedResolver`) so the client cannot
-///   re-resolve to a different IP. The pre-resolve filter +
-///   pinned resolver are two independent layers — defense in
-///   depth.
-/// - **Exact body cap**: the chunk loop refuses *before* a
-///   chunk that would overflow `max_bytes` lands in the
-///   accumulator. The accumulated body is exactly `≤ max_bytes`
-///   on every successful return; a `BodyTooLarge` indicates the
-///   upstream wanted to send more.
+/// Production [`HttpFetcher`] backed by the per-VM endpoint's typed Unix
+/// connector. This process performs validation and authorization but cannot
+/// resolve or connect to the destination itself. DNS pinning, SSRF refusal,
+/// TLS 1.3, no-auto-redirect, substitution, response redaction, and audit are
+/// applied by the endpoint's shared hardened forwarder.
 #[derive(Debug)]
 pub struct HardenedHttpFetcher {
-    timeout_secs: u64,
-    /// When `false`, skip the pre-resolve + SSRF filter + pinned
-    /// resolver. Test seam only — production callers use
-    /// [`Self::new`] / [`Self::with_timeout_secs`] which set this
-    /// to `true`. The escape hatch exists so the redirect-policy +
-    /// body-cap tests (which talk to a `127.0.0.1` one-shot server)
-    /// can exercise those codepaths without tripping the SSRF guard
-    /// on loopback.
-    enforce_ssrf: bool,
+    connector: EndpointHttpConnector,
 }
 
 impl HardenedHttpFetcher {
@@ -167,170 +125,64 @@ impl HardenedHttpFetcher {
     /// hung connection occupy a tokio task forever.
     pub const DEFAULT_TIMEOUT_SECS: u64 = 30;
 
-    /// Build with [`Self::DEFAULT_TIMEOUT_SECS`]. SSRF guard
-    /// enabled.
-    ///
-    /// Returns `Result` for backward compatibility — construction
-    /// itself is infallible since the client is built
-    /// per-call inside [`Self::fetch`]. The signature stays
-    /// `Result` so callers that already pattern-match on it
-    /// (`.expect` / `match`) don't break.
-    pub fn new() -> Result<Self, FetchError> {
-        Self::with_timeout_secs(Self::DEFAULT_TIMEOUT_SECS)
+    #[must_use]
+    pub fn new(connector_uds_path: impl Into<PathBuf>) -> Self {
+        Self::with_timeout_secs(connector_uds_path, Self::DEFAULT_TIMEOUT_SECS)
     }
 
-    /// Build with an explicit timeout.
-    pub fn with_timeout_secs(timeout_secs: u64) -> Result<Self, FetchError> {
-        Ok(Self {
-            timeout_secs,
-            enforce_ssrf: true,
-        })
-    }
-
-    /// Test seam — build a fetcher with the SSRF guard disabled.
-    ///
-    /// Production callers MUST NOT use this; the loopback /
-    /// private-IP rejection is load-bearing for the tool's security
-    /// posture. The function is `pub` only so integration tests
-    /// under `crates/mvm-supervisor/tests/` can exercise the
-    /// redirect-policy + body-cap hardening against loopback fixtures
-    /// (`#[cfg(test)]` items in the library are invisible to
-    /// integration tests; the architecture.yml invariant scan
-    /// forbids binding TCP listeners in production source files
-    /// even inside inline `#[cfg(test)]` modules, so the
-    /// live-listener tests had to move out). Hidden from rustdoc
-    /// so the public-API surface still reads as "fetcher with SSRF
-    /// on".
-    #[doc(hidden)]
-    pub fn test_unsafe_no_ssrf(timeout_secs: u64) -> Self {
+    #[must_use]
+    pub fn with_timeout_secs(connector_uds_path: impl Into<PathBuf>, timeout_secs: u64) -> Self {
         Self {
-            timeout_secs,
-            enforce_ssrf: false,
+            connector: EndpointHttpConnector::new(
+                connector_uds_path,
+                Duration::from_secs(timeout_secs),
+            ),
         }
-    }
-
-    /// Build a one-shot `mvm_http::Client` for a single fetch.
-    /// When `enforce_ssrf` is on, the client is built with a
-    /// pinned DNS resolver that returns the supplied
-    /// `safe_addresses` verbatim for `host` — so the client cannot
-    /// re-resolve to a different IP between our check and the
-    /// connect.
-    fn build_client(
-        &self,
-        host: &str,
-        safe_addresses: Vec<SocketAddr>,
-    ) -> Result<mvm_http::Client, FetchError> {
-        // TLS floor matches the shared `hardened_client_builder`, so every
-        // HTTP surface in the supervisor refuses a downgrade to 1.2.
-        let mut builder = mvm_http::Client::builder()
-            .timeout(std::time::Duration::from_secs(self.timeout_secs))
-            .min_tls_version(crate::supervisor::tools::http_hardening::MIN_TLS_VERSION);
-        if self.enforce_ssrf {
-            // The pre-validated addresses are the only ones this client will
-            // dial, which is what closes the rebinding window between the check
-            // above and the connect below.
-            builder = builder.resolver(Arc::new(
-                mvm_http::PinnedResolver::new().with(host, safe_addresses),
-            ));
-        }
-        builder
-            .build()
-            .map_err(|e| FetchError::Network(format!("building HTTP client: {e}")))
     }
 }
 
 #[async_trait]
 impl HttpFetcher for HardenedHttpFetcher {
     async fn fetch(&self, url: &Url, max_bytes: u64) -> Result<FetchedResponse, FetchError> {
-        // Pre-resolve the host, run every returned
-        // IP through `SsrfGuard::classify`, and refuse if any
-        // resolve to a private / loopback / link-local /
-        // multicast / metadata IP. The validated IPs are pinned
-        // into the per-call client's resolver so the
-        // DNS-rebinding window between our check and the connect
-        // is closed.
-        let host = url
-            .host_str()
-            .ok_or_else(|| FetchError::Network("URL has no host component".to_string()))?
-            .to_string();
-        let port = url.port_or_known_default().ok_or_else(|| {
-            FetchError::Network("URL has no port and no scheme default".to_string())
-        })?;
-
-        let safe_addresses = if self.enforce_ssrf {
-            let resolved = tokio::net::lookup_host((host.as_str(), port))
-                .await
-                .map_err(|e| FetchError::Network(format!("DNS resolution for {host:?}: {e}")))?;
-            let mut blocked: Vec<String> = Vec::new();
-            let mut safe: Vec<SocketAddr> = Vec::new();
-            for sa in resolved {
-                match SsrfGuard::classify(sa.ip()) {
-                    Some(reason) => blocked.push(format!("{} ({reason})", sa.ip())),
-                    None => safe.push(sa),
-                }
-            }
-            if !blocked.is_empty() {
-                return Err(FetchError::Network(format!(
-                    "DNS for {host:?} resolves to blocked address(es) [{}]; \
-                     refusing to fetch (plan 65 W2 SSRF guard)",
-                    blocked.join(", ")
-                )));
-            }
-            if safe.is_empty() {
-                return Err(FetchError::Network(format!(
-                    "DNS for {host:?} returned no addresses"
-                )));
-            }
-            safe
-        } else {
-            Vec::new()
+        let request = mvm_core::substitution_wire::WireRequest {
+            method: "GET".into(),
+            url: url.as_str().to_string(),
+            headers: Vec::new(),
+            body_b64: String::new(),
         };
-
-        let client = self.build_client(&host, safe_addresses)?;
-        let mut response = client
-            .get(url.clone())
-            .send()
+        let response = self
+            .connector
+            .execute(&request)
             .await
             .map_err(|e| FetchError::Network(e.to_string()))?;
-        let status = response.status().as_u16();
-        let content_type = response
-            .headers()
-            .get(mvm_http::header::CONTENT_TYPE)
-            .and_then(|v| v.to_str().ok())
-            .map(String::from);
-
-        // Streaming accumulator — exact body cap.
-        //
-        // The chunk-overflow check runs **before** the chunk
-        // lands in the accumulator. The accumulated body is
-        // guaranteed to be `≤ cap` on every successful return; a
-        // `BodyTooLarge` indicates the upstream wanted to send
-        // more. The chunk that triggered the refusal has already
-        // been read into the client's internal buffer (we can't
-        // prevent that — the read happens during `.chunk().await`)
-        // but it never reaches the accumulator and the connection
-        // is dropped on the `?` return.
-        let cap = max_bytes as usize;
-        let mut body: Vec<u8> = Vec::with_capacity(cap.min(64 * 1024));
-        while let Some(chunk) = response
-            .chunk()
-            .await
-            .map_err(|e| FetchError::Network(e.to_string()))?
-        {
-            if body.len().saturating_add(chunk.len()) > cap {
-                return Err(FetchError::BodyTooLarge { limit: max_bytes });
+        match response {
+            mvm_core::substitution_wire::WireResponse::Ok {
+                status,
+                headers,
+                body_b64,
+            } => {
+                let body = base64::engine::general_purpose::STANDARD
+                    .decode(body_b64)
+                    .map_err(|_| {
+                        FetchError::Network("endpoint returned invalid body encoding".into())
+                    })?;
+                if body.len() > usize::try_from(max_bytes).unwrap_or(usize::MAX) {
+                    return Err(FetchError::BodyTooLarge { limit: max_bytes });
+                }
+                let content_type = headers
+                    .into_iter()
+                    .find(|(name, _)| name.eq_ignore_ascii_case("content-type"))
+                    .map(|(_, value)| value);
+                Ok(FetchedResponse {
+                    status,
+                    body,
+                    content_type,
+                })
             }
-            body.extend_from_slice(&chunk);
-            debug_assert!(
-                body.len() <= cap,
-                "body accumulator exceeded max_bytes — W3 invariant violated"
-            );
+            mvm_core::substitution_wire::WireResponse::Refused { message } => {
+                Err(FetchError::Network(message))
+            }
         }
-        Ok(FetchedResponse {
-            status,
-            body,
-            content_type,
-        })
     }
 }
 
@@ -872,12 +724,12 @@ mod tests {
 
     #[test]
     fn hardened_fetcher_constructs_with_default_timeout() {
-        let _f = HardenedHttpFetcher::new().expect("build default hardened fetcher");
+        let _f = HardenedHttpFetcher::new("/tmp/endpoint.sock");
     }
 
     #[test]
     fn hardened_fetcher_constructs_with_explicit_timeout() {
-        let _f = HardenedHttpFetcher::with_timeout_secs(5).expect("build with timeout");
+        let _f = HardenedHttpFetcher::with_timeout_secs("/tmp/endpoint.sock", 5);
     }
 
     #[test]
@@ -885,92 +737,17 @@ mod tests {
         // Compile-check: `HardenedHttpFetcher` satisfies the
         // `HttpFetcher` trait so it slots into
         // `WebFetchTool::with_fetcher`.
-        let f = HardenedHttpFetcher::new().unwrap();
+        let f = HardenedHttpFetcher::new("/tmp/endpoint.sock");
         let _tool =
             WebFetchTool::with_allowlist(["api.example".to_string()]).with_fetcher(Arc::new(f));
     }
 
-    // ──────────────────────────────────────────────────────────────
-    // Hardening — no auto-redirect + exact body cap
-    //
-    // Live-listener tests for those two boot a one-shot HTTP/1.1 server
-    // on 127.0.0.1 and exercise the real HTTP client. They live in
-    // `crates/mvm-supervisor/tests/web_fetch_loopback.rs` — the
-    // architecture.yml invariant scan forbids binding TCP listeners
-    // in production source files even inside inline `#[cfg(test)]`
-    // modules.
-    // ──────────────────────────────────────────────────────────────
-
-    // ──────────────────────────────────────────────────────────────
-    // SSRF guard rejects private / loopback / metadata
-    //
-    // These tests use the SSRF-enabled production constructor
-    // (`new()`) and point the fetcher at IP literals known to be
-    // in the SsrfGuard's deny list. No live HTTP server is needed
-    // — the rejection happens at the pre-resolve filter, before
-    // any network connection.
-    // ──────────────────────────────────────────────────────────────
-
     #[tokio::test]
-    async fn ssrf_guard_rejects_loopback_target() {
-        let fetcher = HardenedHttpFetcher::new().unwrap();
-        let url = Url::parse("http://127.0.0.1:9/").unwrap();
+    async fn unavailable_endpoint_refuses_without_a_direct_network_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        let fetcher = HardenedHttpFetcher::new(dir.path().join("absent.sock"));
+        let url = Url::parse("https://example.test/").unwrap();
         let err = fetcher.fetch(&url, 1024).await.unwrap_err();
-        match err {
-            FetchError::Network(msg) => {
-                assert!(msg.contains("SSRF guard"), "expected SSRF guard ref: {msg}");
-                assert!(msg.contains("loopback"), "expected loopback reason: {msg}");
-                assert!(msg.contains("127.0.0.1"), "expected IP in message: {msg}");
-            }
-            other => panic!("expected Network, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn ssrf_guard_rejects_aws_imds_target() {
-        // The cloud-metadata IP (169.254.169.254) has a specific
-        // SsrfGuard reason that wins over the generic link-local
-        // label. The error message must mention "metadata" so an
-        // operator reading the audit log understands the threat.
-        let fetcher = HardenedHttpFetcher::new().unwrap();
-        let url = Url::parse("http://169.254.169.254/latest/meta-data/").unwrap();
-        let err = fetcher.fetch(&url, 1024).await.unwrap_err();
-        match err {
-            FetchError::Network(msg) => {
-                assert!(msg.contains("metadata"), "expected metadata reason: {msg}");
-                assert!(
-                    msg.contains("169.254.169.254"),
-                    "expected IP in message: {msg}"
-                );
-            }
-            other => panic!("expected Network, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn ssrf_guard_rejects_rfc1918_private_target() {
-        let fetcher = HardenedHttpFetcher::new().unwrap();
-        let url = Url::parse("http://10.0.0.1/admin").unwrap();
-        let err = fetcher.fetch(&url, 1024).await.unwrap_err();
-        match err {
-            FetchError::Network(msg) => {
-                assert!(msg.contains("RFC1918"), "expected RFC1918 reason: {msg}");
-            }
-            other => panic!("expected Network, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn ssrf_guard_skipped_when_test_seam_used() {
-        // Compile + behavior pin: the test seam disables the guard
-        // so the redirect-policy + body-cap tests above can talk to
-        // 127.0.0.1. If a future refactor flips the default to
-        // "always SSRF regardless of flag", this test catches it.
-        let fetcher = HardenedHttpFetcher::test_unsafe_no_ssrf(30);
-        // We don't actually fetch — just observe that constructing
-        // a fetcher with the seam and then hitting loopback wouldn't
-        // trigger SsrfGuard. Confirmed implicitly by the
-        // redirect-policy + body-cap tests above succeeding.
-        assert!(!fetcher.enforce_ssrf);
+        assert!(matches!(err, FetchError::Network(_)));
     }
 }

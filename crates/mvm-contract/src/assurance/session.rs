@@ -21,6 +21,8 @@ use serde::{Deserialize, Serialize};
 use super::authority::EffectiveAuthority;
 use super::binding::MvmBinding;
 use super::ids::AssuranceId;
+use super::ids::Sha256Digest;
+use super::input::SessionRef;
 use crate::plan::types::{PlanId, TenantId};
 use crate::policy::network_policy::NetworkPolicy;
 
@@ -69,6 +71,15 @@ pub struct AdmittedAssuranceSession {
     pub authority: EffectiveAuthority,
     pub trial_id: AssuranceId,
     pub identity: PlanIdentity,
+    /// Provider/campaign identity, when this registration came from the
+    /// admission-bound provider path. Legacy registrations omit it and are
+    /// refused by the daemon rather than opened with guessed identity.
+    #[serde(default)]
+    pub session: Option<SessionRef>,
+    /// Source digest joined by the provider path. Legacy registrations omit
+    /// it and cannot open an assurance session.
+    #[serde(default)]
+    pub source_digest: Option<Sha256Digest>,
     /// The workload's admitted egress policy, which the probe consults.
     pub policy: NetworkPolicy,
     pub destinations: Vec<DeclaredEdge>,

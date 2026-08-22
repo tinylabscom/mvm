@@ -10,8 +10,8 @@ use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use mvm_agentd::vsock::{
-    ActivateEnvironment, GuestRequest, GuestResponse, RootfsConfig, RuntimeOverlayConfig,
-    VolumeConfig, VolumeConfigKind,
+    ActivateEnvironment, ExtensionConfig, GuestRequest, GuestResponse, RootfsConfig,
+    RuntimeOverlayConfig, VolumeConfig, VolumeConfigKind,
 };
 use mvm_core::protocol::vm_backend::{VerbGrantEnvelope, VmStartConfig, VmVolumeKind};
 
@@ -180,14 +180,51 @@ fn build_activation_environment(config: &VmStartConfig) -> Result<ActivateEnviro
     };
 
     let volumes = build_volume_configs(config)?;
+    let extensions = build_extension_configs(config)?;
     let verb_grant_envelope = read_verb_grant_envelope(&config.name)?;
 
     Ok(ActivateEnvironment {
         rootfs,
         runtime,
         volumes,
+        extensions,
         verb_grant_envelope,
     })
+}
+
+fn build_extension_configs(config: &VmStartConfig) -> Result<Vec<ExtensionConfig>> {
+    let plan_id = config
+        .extension_plan_id
+        .as_deref()
+        .map(|value| mvm_contract::assurance::AssuranceId::parse(value.replace(':', "-")))
+        .transpose()
+        .context("parsing extension plan id")?;
+    let devices = mvm_vmm::host::spec_map::workload_volume_devices(config);
+    config
+        .extensions
+        .iter()
+        .map(|binding| {
+            let digest = hex::encode(binding.pack_digest);
+            let mountpoint = format!("/run/mvm/extensions/{digest}");
+            let index = config
+                .volumes
+                .iter()
+                .position(|volume| volume.guest == mountpoint)
+                .ok_or_else(|| anyhow::anyhow!("extension {digest} has no admitted volume"))?;
+            let device = devices
+                .get(index)
+                .and_then(Clone::clone)
+                .ok_or_else(|| anyhow::anyhow!("extension {digest} has no block device"))?;
+            Ok(ExtensionConfig {
+                binding: binding.clone(),
+                plan_id: plan_id.clone().ok_or_else(|| {
+                    anyhow::anyhow!("extension {digest} has no admitted plan identity")
+                })?,
+                mountpoint,
+                device,
+            })
+        })
+        .collect()
 }
 
 /// Resolve the rootfs roothash from the config or the host sidecar file, if

@@ -134,7 +134,10 @@ impl HvfPersistentHostVm {
         .map_err(|e: BuilderVmError| anyhow::anyhow!(e))
         .context("materializing the nix-store image for the persistent builder")?;
 
-        let vm_name = format!("mvm-persistent-builder-hvf-{session_id}");
+        let vm_name = mvm_core::naming::persistent_builder_vm_name(
+            mvm_core::naming::BuilderVmSlot::Hvf,
+            session_id,
+        );
         let state_dir = vm_state_dir(&vm_name);
         std::fs::create_dir_all(&state_dir)
             .with_context(|| format!("creating builder state dir {}", state_dir.display()))?;

@@ -1,11 +1,35 @@
 # Refactor status
 
-Last updated: 2026-08-19
+Last updated: 2026-08-22
+## Completed
+
+- [x] **AI egress metering and token budgets** —
+      `specs/plans/2026-08-21-ai-egress-metering-and-budget.md`.
+      Provider-reported token counts (OpenAI + Anthropic) at the host
+      substitution endpoint, per-VM Prometheus metrics, audit records, and an
+      optional token budget that refuses further AI egress when exhausted.
+      Phases 1–6 complete and green (`cargo check`, `cargo clippy`,
+      `just check-gated`, unit/integration tests, and SDK tests). Builds on
+      Plan 313's seam; does not cover streaming relay or compaction.
 
 This is the cross-plan progress index. The owning plan remains authoritative
 for detailed scope and acceptance criteria.
 
 ## Completed issue closeouts
+
+- [x] **Issue #2657 — live BDD is visible and merge-gated.** Capability skips
+      are reported instead of disappearing from the test summary, and a
+      merge-queue/manual-only KVM lane runs one tagged Firecracker witness for
+      the README persistent-machine lifecycle. The CI-only selector composes
+      with the existing live and backend capability gates, so narrowing the
+      suite cannot accidentally authorize a live boot. Structural tests pin
+      the workflow trigger, recipe, selector, and exact public command
+      sequence.
+
+- [x] **Issue #2756 — Linux 6.12.104 kernel pin refresh.** The libkrunfw
+      firmware build and custom workload/builder kernels consume the same
+      kernel.org-verified source archive and SRI hash. Structural parity and
+      freshness checks report both pins synchronized and current.
 
 - [x] **Faster Rust compilation — nightly Cranelift development path.** The
       dated nightly compiler, eight frontend threads, and Cranelift cut a cold
@@ -328,6 +352,50 @@ for detailed scope and acceptance criteria.
 
 ## In-flight plans
 
+- [ ] **HVF builder state out of the workload VM namespace**
+      (`specs/plans/2026-08-21-hvf-builder-state-out-of-the-workload-namespace.md`).
+      The HVF builder family stages VM state under `~/.mvm/vms/` rather than
+      the builder cache root libkrun uses, so `machine ls` listed a running
+      `nix build` as a user machine and the orphan reaper never pruned a
+      finished build's dir. Both reading ends are fixed by name via
+      `mvm_core::naming::is_builder_owned_vm_name`; separating the two state
+      roots so the filter stops being the mechanism is open.
+
+- [~] **Plan 338 — WebLinux browser backend, builder, workbench, and `mvmd`
+      deployment client**
+      (`specs/plans/338-weblinux-browser-backend-builder-workbench-and-mvmd-deploy.md`).
+      ADR-049 renumbered from ADR-043 to avoid collision with the existing
+      ADR-043. ADR-024 updated to link ADR-049 while preserving the direct-WASI
+      claim-free boundary. ADR-006 updated to allow `mvmctl deploy` as an
+      authenticated `mvmd` client operation. Plan 338 registered in
+      `specs/SPRINT.md` and this file. First slice landed in PR #2776:
+      `BackendKind::WebLinux` with contract-level capability dimensions,
+      native `AnyBackend::WebLinux` stub that fails closed,
+      `BuilderBackendChoice::WebLinux` excluded from native auto-detect,
+      minimal portable lifecycle DTOs (`BackendRequest`/`BackendResponse`,
+      `ArtifactRef`/`ArtifactSetRef`), and matching tests. WS-2 engine
+      feasibility is now pinned: `ktock/qemu-wasm` 5a65998d47, Emscripten
+      3.1.50, zlib/libffi/pixman/glib/xterm-pty versions are recorded, and
+      `nix/packages/qemu-wasm.nix` packages the engine through the Nix
+      builder boundary. Build verification is queued for the Linux builder.
+
+- [~] **Security lane recovery — issue #2736.** The advisory finding is fixed,
+      the release-artifact bootstrap source now compiles with warnings denied,
+      and pull-request CI exercises that otherwise dormant feature directly.
+      Focused mutation witnesses cover authenticated-session signal validity,
+      live/dead endpoint readiness branches, redacted TLS material, builder
+      projection, and endpoint identity configuration.
+      Every dependency graph that contains `arrayref` resolves a byte-for-byte
+      vendored copy of the reviewed 0.3.9 upstream revision. Pinned file hashes
+      guard the vendored source, Git dependencies remain denied, and Nix image
+      sources plus the host build fingerprint retain that path dependency.
+      The exact Security rerun's capability-builder finding now has a direct
+      all-fields witness; its only remaining constructor mutant is documented
+      as the identical `Default::default()` expression rather than waived as
+      an untested behavior.
+      Closure remains gated on a clean Security workflow run from current
+      `main`, including every mutation shard and both reproducibility builds.
+
 - [x] **Secret bindings for forked children** —
       `specs/plans/2026-08-18-fork-inherits-secret-bindings.md`, issue #2698.
       Option A (W0 and A1–A6) is complete: fork bindings are explicit,
@@ -428,10 +496,24 @@ resume` takes a `current_head` and refuses when it differs from the
       fixtures had masked: the binding rejected every real `sha256:`-prefixed
       plan id, and the probe handler compared the guest's session identity
       against the supervisor's lookup key.
-      STILL OPEN: W5b a guest-side observer, W8 the framed-stdio provider, W9b
-      the `mvmctl machine run` seam (`machine run` drives `AnyBackend` directly
-      and never reaches the admit path W9 threaded). No certifying campaign can
-      run.
+      STILL OPEN: trusted hardware attestation and the full Scout-linked
+      certifying campaign. The supplied native x86_64 KVM host now proves the
+      concrete provider reaches a real Firecracker guest agent, observer,
+      exact cleanup, and host finalization; plan
+      `sha256:18a220846c25a6cec1f0b4f36dd4bfbab764f4e50671394e6da32acfcbd7ef16`
+      and grant digest
+      `sha256:b0991c541656cac6ebd02c27389a8b3c299b7cbadd6d4477653a0219545acf34`
+      are recorded. An identical retry replays the bounded terminal response
+      without a second VM. The run is `INCONCLUSIVE` because no TPM2/SEV-SNP/TDX
+      trust root is present and the probe reported no attempted effect. The
+      sibling now consumes MVM's published four-reference
+      `sha256:nul-separated-policy-refs-v1` vector over
+      `operator-network-v1`, `operator-egress-v1`, `operator-fs-v1`, and
+      `operator-tools-v1` and the exact digest
+      `sha256:5dd0de53b6d211f764728599e291e93a9491dc34f87596e906365fb74c95e0ff`.
+      A current Scout-linked attempt reached signed-plan admission but failed
+      closed before guest-agent startup on `mvm-oci-init` path-policy denial;
+      its identical retry replayed without a second execution.
 
 - [~] **Embedded-binary content store** — `specs/plans/2026-08-17-embedded-binary-content-store.md`.
       Phases 1–2 landed: both nested legs of `crates/mvm-cli/build.rs` are keyed
@@ -1700,27 +1782,56 @@ resume` takes a `current_head` and refuses when it differs from the
         sessions. Aggregate TCP/HTTP, UDP, DNS, ICMP, ingress-listener, and
         session ceilings survive session churn and return reservations on
         teardown; malformed admitted limits fail before the endpoint binds.
-  - [ ] FlowMux performance harness and labelled legacy/current baselines.
-  - [~] Typed HTTP uses FlowMux frames but still crosses a whole-message
-        compatibility seam; bounded end-to-end streaming and endpoint-owned
-        typed connector execution remain.
-  - [ ] Declared ingress runtime. The wire opcodes and state transitions exist;
-        endpoint listener and guest-adapter handling do not.
-  - [ ] Remove the rejected `raw_ip_stack`/`L3Vsock` public compatibility
-        surface now that the migration release condition has passed.
-  - [ ] Delete frozen L3 contract, guest, host, VMM, dependency, packaging,
-        kernel, CI, and test slices.
-  - [ ] Permanent single-path/socket-owner gates plus the final performance,
-        Firecracker, HVF, libkrun, BDD, supply-chain, and documentation matrix.
+  - [x] FlowMux performance harness and labelled legacy/current baselines.
+        Strict macOS arm64 and Linux x86_64 host-loopback reports are recorded;
+        their 21/28 pre-deletion threshold misses remain explicit, with no
+        approved exception, for the final closeout matrix to resolve.
+        The first post-deletion macOS candidate batches TCP credits and improves
+        the result to 20 misses (12/32 checks pass), but still fails the gate;
+        its raw report and comparison are recorded with no implied exception.
+  - [x] Bounded typed transformations and endpoint-owned connectors. Typed
+        HTTP now streams incrementally with bounded cross-frame transforms,
+        fail-closed cancellation and audit behavior; web fetch and search
+        authorize in their brokers but resolve, connect, and execute through
+        the per-VM network endpoint. The host performance probe enables only
+        the FlowMux client surface, keeping guest-only vsock dependencies out
+        of the host graph and the duplicate-major invariant clean.
+  - [x] Declared ingress runtime. Signed transport-neutral mappings reach exact
+      endpoint binds before readiness; TCP and bounded observed-peer UDP use
+      host-initiated FlowMux streams and declared guest-loopback targets.
+      HTTP/TLS transformations remain host-owned, TLS keys never enter the
+      guest contract, and opaque TCP stays explicitly non-transforming. Python
+      and TypeScript browser helpers declare their listener before boot and
+      preserve the existing OCI, command, egress, and readiness surfaces;
+      dynamic post-admission forwarding fails with migration guidance.
+  - [x] Remove the rejected `raw_ip_stack`/`L3Vsock` public compatibility
+        surface now that the migration release condition has passed. Public
+        IR, SDK, schema, CLI, fixtures, and docs expose no raw-network mode;
+        stale serialized input receives an explicit migration refusal, while
+        supported loopback adapters and typed connectors remain on FlowMux.
+  - [x] Delete frozen L3 contract, guest, host, VMM, dependency, packaging,
+        kernel, CI, and test slices. More than 41,000 lines and every L3-only
+        binary/dependency are gone; dependency, supply-chain, closure, full
+        workspace, gated-target, formatting, and BDD validation pass. The
+        standalone agent fuzz lock retains the reviewed vendored `arrayref`
+        patch through its `blake3` 1.8.6 pin.
+  - [x] Permanent single-path and socket-owner invariants replace the migration
+        ratchets. Synthetic fixtures reject every forbidden endpoint, backend,
+        channel, L3/NIC, and socket-owner shape, while projection tests prove
+        every flow family shares one admitted policy, budget, identity, VM
+        resource, and audit sink.
+  - [ ] Final performance, Firecracker, HVF, libkrun, BDD, supply-chain, and
+        documentation evidence matrix. A fresh macOS arm64 host-loopback
+        comparison remains failing and is retained as raw evidence; no
+        performance exception has been recorded. Firecracker now has a passing
+        admitted TCP/DNS witness on the approved Lima-KVM test tier; the wider
+        live matrix remains open.
 
-- [~] Plan 285 — L3 TUN-over-vsock network mode
+- [x] Plan 285 — L3 TUN-over-vsock network mode
   (`specs/plans/285-l3-tun-over-vsock.md`, ADR-036)
-  **Frozen by plan 316 Phase 0.** No feature work lands on this runtime path;
-  only security fixes needed to keep the tree safe during migration may modify
-  it. ADR-036 is superseded for production workload networking, and new
-  `raw_ip_stack=true` / `NetworkMode::L3Vsock` launches are refused. Deletion
-  is plan 316 Phase 7 (#2376). The completed workstreams below stand as
-  historical record.
+  **Retired and deleted by plan 316.** ADR-036 is superseded for production
+  workload networking. The completed workstreams below stand only as a
+  historical record of the removed implementation.
   - [x] W1–W8 — canonical `NetworkMode::L3Vsock`, the shared fuzzable wire
         protocol, the pure policy core, the guest `mvm-net-agent`, the
         machine-scoped host gateway, audit kinds, docs, and the unprivileged
@@ -1744,10 +1855,9 @@ resume` takes a `current_head` and refuses when it differs from the
         numeric ports are derived only at the VMM boundary
   - [x] Removed builder-role policy from `VmmSpec`; all boots require the
         typed substitution channel and HVF fails closed when it is absent
-  - [ ] macOS forwarding backend — capability-declared and refusing; the
-        userspace socket gateway is not implemented
-  - [ ] WSL2 validation on a real runner; node-to-node transport; mvmd
-        node-control RPC surface
+  - [~] Historical remainder intentionally descoped with deletion: macOS and
+        WSL2 forwarding validation, node-to-node transport, and the dormant
+        node-control surface are not part of the FlowMux product path.
 
 - [~] Plan 265 — Fast-start SLO, backend sequencing & competitive positioning
   (`specs/plans/265-fast-start-slo-sequencing-positioning.md`)

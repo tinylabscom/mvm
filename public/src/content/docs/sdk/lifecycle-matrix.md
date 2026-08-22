@@ -74,7 +74,7 @@ The next SDK work should close the highest-value gaps in this order:
    correlation.
 2. `files.read/list/remove(...)` with path validation tests.
 3. `logs(...)` with redaction and bounded streaming.
-4. `ports.forward(...)` with explicit policy.
+4. Declarative `network.ports` ingress with explicit policy.
 5. `snapshot(...)`, `cold()`, `resume()`, `destroy()`, and `detach()` with
    backend-aware state types.
 

@@ -78,7 +78,14 @@ pub(crate) fn write_response(file: &mut (impl Write + ?Sized), resp: &GuestRespo
     if let Err(error) = write_frame(file, selected) {
         // Do not append a fallback after an I/O error: the original frame may
         // already be partially written, so another prefix would corrupt it.
-        eprintln!("failed to write vsock response: {error}");
+        //
+        // Nothing is retried and the caller is not told, because there is
+        // nothing useful either could do: the sealed frame already spent its
+        // sequence number, so `AuthenticatedSession::write` has poisoned the
+        // session and no later frame on this connection can reach the host.
+        // The host learns of it as a closed connection, and this line is the
+        // only place the cause is recorded.
+        eprintln!("mvm-guest-agent: control response dropped, connection is finished: {error}");
     }
 }
 

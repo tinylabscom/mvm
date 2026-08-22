@@ -23,9 +23,11 @@
 
 pub mod authority;
 pub mod binding;
+pub mod counterparty;
 pub mod ids;
 pub mod input;
 pub mod outcome;
+pub mod policy;
 pub mod probe;
 pub mod session;
 pub mod wire;
@@ -37,22 +39,32 @@ pub use authority::{
     ApprovalSet, AuthorityCeiling, AuthorityError, AuthorityInputs, EffectiveAuthority,
 };
 pub use binding::{BindingError, MvmBinding, MvmBindingBuilder, RuntimeIdentity, SessionGrant};
+pub use counterparty::{
+    CAMPAIGN_PROVIDER_REQUEST_SCHEMA, CAMPAIGN_PROVIDER_RESPONSE_SCHEMA, CampaignProviderRequest,
+    CampaignProviderResponse, CounterpartyCampaign, CounterpartyRequestError,
+    MAX_CAMPAIGN_PROVIDER_BYTES, OPERATOR_SESSION_BUNDLE_SCHEMA, OperatorSessionBundle,
+};
 pub use ids::{
     AssuranceId, AssuranceIdError, DigestError, EvidenceRef, EvidenceRefError, Sha256Digest,
 };
 pub use input::{
-    AI_SESSION_INPUT_SCHEMA, AiSessionInput, AssuranceSessionRequest, Narrative, ObservationScope,
-    OutputContract, RequestedAuthority, SessionInputError, SessionRef, Severity, SourceRef,
-    SubjectKind, SyntheticInputs, ToolId,
+    AI_SESSION_INPUT_SCHEMA, AI_SESSION_REQUEST_SCHEMA, AiSessionInput, AssuranceSessionRequest,
+    Narrative, ObservationScope, OutputContract, RequestedAuthority, SessionInputError, SessionRef,
+    Severity, SourceRef, SubjectKind, SyntheticInputs, ToolId,
 };
 pub use outcome::{
     CandidateError, EvaluationInputs, EvidenceIdentity, EvidenceSet, HostObservation,
     InconclusiveReason, TRIAL_EVIDENCE_SCHEMA, TRIAL_RESULT_CANDIDATE_SCHEMA, TRIAL_RESULT_SCHEMA,
     TrialEvidenceRecord, TrialOutcome, TrialResultCandidate, TrialVerdict, evaluate,
 };
+pub use policy::{
+    EGRESS_POLICY_REF, FILESYSTEM_POLICY_REF, NETWORK_POLICY_REF, POLICY_DIGEST_ALGORITHM_V1,
+    PUBLISHED_POLICY_DIGEST, TOOL_POLICY_REF, policy_digest_from_refs,
+};
 pub use probe::{
-    PROBE_OBSERVATION_SCHEMA, PROBE_REQUEST_SCHEMA, ProbeInvocation, ProbeObservation,
-    ProbeRefusal, ProbeRequest,
+    HOST_ASSURANCE_SERVICE, PROBE_OBSERVATION_SCHEMA, PROBE_REQUEST_SCHEMA, ProbeInvocation,
+    ProbeObservation, ProbeObservationError, ProbeRefusal, ProbeRequest,
+    probe_capability_descriptor,
 };
 pub use session::{AdmittedAssuranceSession, DeclaredEdge, PlanIdentity};
 pub use wire::{
