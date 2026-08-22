@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>WebLinux demo — mvm</title>
+  <style>
+    :root {
+      --bg: #0d1117;
+      --panel: #161b22;
+      --border: #30363d;
+      --text: #c9d1d9;
+      --muted: #8b949e;
+      --accent: #58a6ff;
+      --success: #3fb950;
+      --error: #f85149;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.5;
+    }
+    header {
+      padding: 1rem 1.5rem;
+      border-bottom: 1px solid var(--border);
+      background: var(--panel);
+    }
+    header h1 { margin: 0; font-size: 1.25rem; }
+    header p { margin: 0.25rem 0 0; color: var(--muted); font-size: 0.875rem; }
+    main { padding: 1rem 1.5rem; }
+    .toolbar {
+      display: flex;
+      gap: 0.75rem;
+      align-items: center;
+      margin-bottom: 0.75rem;
+    }
+    button {
+      background: var(--accent);
+      color: #fff;
+      border: none;
+      border-radius: 6px;
+      padding: 0.5rem 1rem;
+      font-size: 0.875rem;
+      cursor: pointer;
+    }
+    button:disabled {
+      background: var(--border);
+      color: var(--muted);
+      cursor: not-allowed;
+    }
+    #status {
+      font-size: 0.875rem;
+      color: var(--muted);
+    }
+    #log {
+      background: #000;
+      color: #e6edf3;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 0.8125rem;
+      line-height: 1.4;
+      padding: 1rem;
+      height: 65vh;
+      overflow-y: auto;
+      white-space: pre-wrap;
+      word-break: break-word;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+    }
+    .ready { color: var(--success); font-weight: 600; }
+    .error { color: var(--error); font-weight: 600; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>WebLinux demo</h1>
+    <p>Browser-hosted QEMU-Wasm engine booting an mvm-built x86_64 Linux guest.</p>
+  </header>
+  <main>
+    <div class="toolbar">
+      <button id="runBtn">Run</button>
+      <button id="stopBtn" disabled>Stop</button>
+      <span id="status">Status: idle</span>
+    </div>
+    <pre id="log"></pre>
+  </main>
+  <script type="module" src="demo.js"></script>
+</body>
+</html>

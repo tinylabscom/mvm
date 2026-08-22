@@ -3,7 +3,7 @@
 Backing: preview
 Validation: none
 
-**Status:** DRAFT — scoping complete, engine build verified on the aarch64-linux HVF builder VM, Phase 1 engine hashes recorded
+**Status:** DRAFT — scoping complete, engine build verified on the aarch64-linux HVF builder VM, Phase 1 engine integration prototyped; a minimal `/demo/weblinux` page boots the smoke pack in a Worker and reaches `DEMO-RESULT: READY` in headless Chromium
 **Opened:** 2026-08-21
 **Depends on:** Plan 338 — WebLinux browser backend, builder, workbench, and `mvmd` deployment client
 **Related:** ADRs 006, 024, 049
@@ -99,7 +99,11 @@ cdf057a71b07e3b52b19cbe210bdefa59250d01a9810b960f7fe1f98eed95a27  bios/kvmvapic.
 
 ### Phase 0 — Demo scaffolding (ready now)
 
-- [ ] Add a new `public/demo/weblinux/` route or standalone page.
+- [x] Add a new `public/demo/weblinux/` route or standalone page.
+  Implemented as `public/src/pages/demo/weblinux.astro` (served with COOP/COEP
+  headers) plus the static source under `web/weblinux-demo/`. A `build.sh`
+  stages the Nix-built smoke pack and a `serve.py` serves it with the required
+  cross-origin-isolation headers.
 - [ ] OPFS workspace helper for fixture source and CAS objects.
 - [ ] TypeScript types generated from the Rust `BackendRequest` / `BackendResponse` / `BuildRequest` / `BuildProgress` schemas.
 - [ ] A minimal editor component and a terminal/log pane.
@@ -109,7 +113,10 @@ cdf057a71b07e3b52b19cbe210bdefa59250d01a9810b960f7fe1f98eed95a27  bios/kvmvapic.
 - [x] Run `nix build .#qemu-wasm-engine` on the Linux builder VM.
 - [x] Record and pin the resulting `.js`, `.wasm`, and pc-bios file hashes.
 - [ ] Add a fetch/cache helper that downloads the engine into the browser and verifies hashes.
-- [ ] Instantiate QEMU-Wasm in a Worker with the correct `ENV` and `INITIAL_MEMORY` settings.
+- [x] Instantiate QEMU-Wasm in a Worker with the correct runtime settings.
+  `web/weblinux-demo/worker.js` loads the engine, the Emscripten preload pack,
+  and `xterm-pty`, then boots the smoke guest with the same args used by the
+  upstream sample. Headless Chromium reaches `DEMO-RESULT: READY` in ~7 s.
 
 ### Phase 2 — Builder Worker
 
