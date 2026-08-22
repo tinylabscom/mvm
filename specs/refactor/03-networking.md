@@ -34,18 +34,13 @@ selector.
 
 ## Migration state
 
-The raw-packet path is **publicly removed and awaiting physical deletion**.
-Already-running VMs may drain, but new stale declarations are refused before
-they enter the admitted domain. A temporary `xtask check-l3-expansion-freeze`
-ratchet forbids new non-test references to the frozen implementation outside a
-shrink-only allowlist of files scheduled for deletion. Plan 285 and Plan 287
-remain frozen: only security fixes may touch their runtime path.
-
-Deletion of `mvm-contract::l3`, `NetworkMode`, `mvm-net/src/l3/`,
-`mvm-agentd/src/l3/`, `mvm-hostd/src/netd/`, `mvm-netd`, `mvm-net-agent`,
-`netd_spawn`, and smoltcp lands in Plan 316 Phase 7; the permanent
-`check-single-network-path` and socket-owner gates replace the temporary
-ratchet in Phase 8.
+The raw-packet path is physically deleted. New stale declarations are refused
+before they enter the admitted domain, while already-running VMs from an older
+release may drain during an upgrade. The permanent
+`xtask check-single-network-path` gate rejects a second endpoint or spawn seam,
+a backend without `NetworkFlow`, retired L3 or guest-NIC symbols, and any new
+workload socket owner outside the endpoint's exact allowlist. Synthetic tests
+prove every forbidden case and each narrow infrastructure exemption.
 
 ## Security properties on the socket-aware path
 

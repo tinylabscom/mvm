@@ -192,6 +192,12 @@ is also tracked as its own defect and may land first.
 
 ## Phase 2 — Token accounting
 
+> Non-streaming token accounting, per-VM budget enforcement, and the
+> user-facing `[network.ai]` policy are being implemented in
+> `specs/plans/2026-08-21-ai-egress-metering-and-budget.md`. This phase keeps
+> the streaming-specific accounting work (SSE framing and trailing-usage
+> extraction once Plan 313 Phase 1 lands).
+
 - [ ] Detect `Content-Type: text/event-stream` and parse SSE frames incrementally
       (`data:` lines, `\n\n` terminated), never buffering the whole stream.
 - [ ] Read provider-reported usage. Two protocol shapes, both real:

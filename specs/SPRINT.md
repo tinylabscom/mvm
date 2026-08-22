@@ -8,6 +8,17 @@
 > The current tree is treated as a **disposable v1**. This sprint restructures it completely.
 > **No legacy paths, no compatibility shims, no aliases.** Hard renames only.
 
+## In progress
+
+- [x] **AI egress metering and token budgets.**
+      `specs/plans/2026-08-21-ai-egress-metering-and-budget.md`.
+      Provider-reported token counts at the host substitution endpoint,
+      per-VM Prometheus metrics, chain-signed audit records, and an optional
+      token budget that refuses further AI egress when exhausted. OpenAI and
+      Anthropic in v1; provider additions are macro-declared.
+      All phases are complete and green (`cargo check`, `cargo clippy`,
+      `just check-gated`, unit/integration tests, and SDK tests).
+
 ## Delivered (archive — closed to new entries)
 
 > **Do not append here.** A new delivery entry goes in its own file under
@@ -2740,3 +2751,9 @@ The deletion slice's standalone `mvm-agentd` fuzz lock had resolved `blake3`
 the locked invariant lane to fail closed. The lock now pins `blake3` 1.8.6;
 the patch is active and the standalone all-target fuzz check passes with
 `--locked`.
+## 2026-08-21 FlowMux permanent-gate harness repair
+
+The host-binary manifest integration test now reuses Cargo's prebuilt `xtask`
+binary instead of starting a nested workspace compilation. The full workspace
+test run therefore retains the manifest synchronization assertion without
+racing concurrent doctest compilation.

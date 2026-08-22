@@ -12,6 +12,9 @@ use anyhow::{Context, Result};
 /// helpers, and the clock-stamped constructor those DTOs need.
 pub use mvm_contract::policy::audit::{AuditAction, AuditEntry, LocalAuditEvent, LocalAuditKind};
 
+/// Host-reported AI usage audit payload.
+pub mod ai_usage;
+
 // ============================================================================
 // Local mvmctl audit log (single-host operations)
 // ============================================================================

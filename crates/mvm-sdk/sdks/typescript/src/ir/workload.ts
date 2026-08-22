@@ -403,6 +403,10 @@ target: string
 }
 export interface Network {
 /**
+ * Optional AI egress metering and budget policy for this app.
+ */
+ai?: (AiPolicy | null)
+/**
  * DNS posture. `Some(None_)` = no resolver; `Some(System)` = inherit substrate default; `Some(Resolver)` = pin a single host:port resolver. Default (None) means "unspecified — substrate picks based on `mode`".
  */
 dns?: (NetworkDns | null)
@@ -416,6 +420,27 @@ mode: NetworkMode
  */
 peers?: string[]
 ports?: PortForward[]
+}
+/**
+ * AI-specific egress policy attached to a network grant.
+ */
+export interface AiPolicy {
+/**
+ * Optional token budget. `None` means no limit.
+ */
+budget?: (AiBudget | null)
+/**
+ * Whether to record AI token usage for this workload.
+ */
+metering?: boolean
+}
+/**
+ * Token budget for AI egress. A `None` field means no limit for that category.
+ */
+export interface AiBudget {
+max_input_tokens?: (number | null)
+max_output_tokens?: (number | null)
+max_total_tokens?: (number | null)
 }
 export interface NetworkEgress {
 /**
