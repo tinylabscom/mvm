@@ -1238,6 +1238,7 @@ mod tests {
     fn uds_cfg() -> EndpointConfig {
         EndpointConfig {
             tenant_id: "local".into(),
+            instance_id: "test".into(),
             secrets: Vec::new(),
             transport: EndpointTransport::Uds {
                 path: "/tmp/mvm-network-endpoint-test.sock".into(),
@@ -1275,6 +1276,7 @@ mod tests {
     fn config_with_resolver(resolver: ResolverBackend) -> EndpointConfig {
         EndpointConfig {
             tenant_id: "acme".into(),
+            instance_id: "test".into(),
             secrets: vec![],
             transport: EndpointTransport::Uds {
                 path: PathBuf::from("/tmp/mvm-network-endpoint-test.sock"),
@@ -1678,6 +1680,7 @@ mod tests {
         let guest_key = [2u8; 32];
         let cfg = EndpointConfig {
             tenant_id: "tenant".into(),
+            instance_id: "test".into(),
             secrets: Vec::new(),
             transport: EndpointTransport::Uds {
                 path: PathBuf::from("/tmp/mvm-flowmux-test.sock"),

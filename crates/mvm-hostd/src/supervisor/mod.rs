@@ -28,6 +28,7 @@
 //! - `supervisor` — `Supervisor` aggregate that owns the slots.
 
 pub mod accept_loop;
+pub mod ai_meter;
 pub mod artifact;
 pub mod audit;
 pub mod audit_checkpoint;

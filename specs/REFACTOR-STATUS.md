@@ -2,6 +2,17 @@
 
 Last updated: 2026-08-22
 
+## Completed
+
+- [x] **AI egress metering and token budgets** —
+      `specs/plans/2026-08-21-ai-egress-metering-and-budget.md`.
+      Provider-reported token counts (OpenAI + Anthropic) at the host
+      substitution endpoint, per-VM Prometheus metrics, audit records, and an
+      optional token budget that refuses further AI egress when exhausted.
+      Phases 1–6 complete and green (`cargo check`, `cargo clippy`,
+      `just check-gated`, unit/integration tests, and SDK tests). Builds on
+      Plan 313's seam; does not cover streaming relay or compaction.
+
 This is the cross-plan progress index. The owning plan remains authoritative
 for detailed scope and acceptance criteria.
 

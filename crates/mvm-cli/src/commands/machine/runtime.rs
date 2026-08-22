@@ -610,6 +610,7 @@ mod network_surface_tests {
             egress: None,
             peers: vec![],
             dns: None,
+            ai: None,
         }
     }
 

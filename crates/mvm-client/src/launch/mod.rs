@@ -466,6 +466,7 @@ fn persisted_spec_from_request(request: &LaunchRequest, name: &str) -> mp::Machi
         runtime_pack: false,
         net: false,
         allow_host: vec![],
+        ai: None,
         ports: vec![],
         cpus: request.cpus,
         memory: format!("{}M", request.memory_mib),
