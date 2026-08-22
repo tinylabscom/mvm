@@ -3,6 +3,7 @@ use crate::ir::hooks::Hooks;
 // Only pulled in by the `#[cfg(feature = "schema")]` `JsonSchemaShape`
 // impl and the `#[cfg_attr(feature = "schema", derive(...))]` derives
 // below (schemars-generated code calls `.to_owned()`).
+use crate::policy::network_policy::AiPolicy;
 #[cfg(feature = "schema")]
 use alloc::borrow::ToOwned;
 #[cfg(feature = "schema")]
@@ -647,6 +648,9 @@ pub struct Network {
     /// "unspecified — substrate picks based on `mode`".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dns: Option<NetworkDns>,
+    /// Optional AI egress metering and budget policy for this app.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ai: Option<AiPolicy>,
 }
 
 #[derive(Deserialize)]
@@ -661,6 +665,8 @@ struct NetworkWire {
     peers: Vec<String>,
     #[serde(default)]
     dns: Option<NetworkDns>,
+    #[serde(default)]
+    ai: Option<AiPolicy>,
     #[serde(default)]
     raw_ip_stack: Option<bool>,
 }
@@ -680,6 +686,7 @@ impl TryFrom<NetworkWire> for Network {
             egress: wire.egress,
             peers: wire.peers,
             dns: wire.dns,
+            ai: wire.ai,
         })
     }
 }

@@ -1,5 +1,9 @@
 # Plan 287 — Userspace socket datapath
 
+**Status: RETIRED AND DELETED — preserved as historical implementation and
+performance record.** Plan 316 and ADR-042 replaced this production path with
+FlowMux; the userspace L3 datapath and smoltcp dependency no longer ship.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Make `l3-vsock` work on hosts with no privileges — macOS always, Linux when TUN is unavailable — by terminating guest TCP/UDP in userspace and re-originating each admitted flow on a host socket.

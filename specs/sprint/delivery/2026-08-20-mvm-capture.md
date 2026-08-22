@@ -23,7 +23,7 @@ Implemented the first slice of `mvm capture`.
 - Added ADR-050 and plan `specs/plans/2026-08-20-mvm-capture.md`.
 - Made the `.env` redaction witness self-contained: it creates the secret file
   in a temporary project and therefore runs identically in a clean CI checkout.
-- Raised the all-features workspace closure ratchet by one, from 477 to 478,
+- Raised the all-features workspace closure ratchet by one, from 469 to 470,
   for the new first-party `mvm-capture` crate itself; its third-party
   dependencies were already present in the closure.
 - Kept bounded ELF inspection portable across Linux architectures: metadata

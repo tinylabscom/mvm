@@ -360,7 +360,6 @@ fn synthesis_input_for_app<'a>(
         stream_edges: Vec::new(),
         kernel_sha256: None,
         network_mode,
-        l3_network: None,
         ingress,
         vm_name: &app.name,
         tenant: None,

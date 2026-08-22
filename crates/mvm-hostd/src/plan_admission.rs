@@ -365,10 +365,6 @@ fn admit_plan_for_run_inner(
     // admitted under an id that genuinely addresses its content.
     verify_plan_id(&verified).context("plan_id content-address check")?;
 
-    // The retired raw-packet transport, checked again on the verified plan and
-    // not only in synthesis: admission is what a plan built elsewhere reaches,
-    // and the refusal has to hold for those too.
-    mvm_core::plan::refuse_retired_l3(&verified.network_mode, verified.l3_network.is_some())?;
     verified
         .validate_ingress()
         .context("validating signed ingress mappings")?;
@@ -715,7 +711,7 @@ fn admit_grants(plan: &ExecutionPlan, ceiling: &GrantCeiling, posture: RunPostur
 /// right answer to pick between them: enforcing the grant ignores a signed
 /// field, enforcing the field ignores what the ceiling was applied to. Refusing
 /// is the only choice that cannot silently run a workload under a bound nobody
-/// authored — the same posture the `network_mode` / `l3_network` pair takes.
+/// authored.
 ///
 /// The comparison runs against the projection, never against the grant
 /// directly, because the projection is lossy: an absent grant and an explicit
@@ -2132,7 +2128,6 @@ mod tests {
             stream_edges: Vec::new(),
             kernel_sha256: None,
             network_mode: Default::default(),
-            l3_network: None,
             ingress: Vec::new(),
             vm_name,
             tenant: None,

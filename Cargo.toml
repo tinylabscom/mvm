@@ -125,10 +125,6 @@ exclude = [
     # harness. Parallel role to mvm-libkrun/fuzz; same libfuzzer-sys linker
     # constraints apply.
     "crates/mvm-build/fuzz",
-    # Plan 141 / ADR-003 — gateway packet parse + payload-rebuild fuzz
-    # harness (`fuzz_packet_parse`). Same libfuzzer-sys linker constraints;
-    # CI gate at `.github/workflows/security.yml::fuzz`.
-    "crates/mvm-hostd/fuzz",
     # Response-head + chunked-framing parser for the in-house HTTP client —
     # the whole untrusted surface a hostile server reaches. Same libfuzzer-sys
     # linker constraints as the other fuzz crates.
@@ -272,7 +268,6 @@ mio = { version = "1", features = ["os-poll", "os-ext"] }
 # `std::net::TcpStream`. std has no non-blocking connect, and the alternative is
 # hand-marshalling `sockaddr_in`/`sockaddr_in6` through `unsafe`. Already in the
 # lockfile via tokio and mio, so this adds a name, not a build.
-socket2 = "0.6"
 
 # Seccomp BPF compilation (W2.4 — per-service syscall filtering inside
 # guests, applied via the `mvm-seccomp-apply` shim before execve into
@@ -445,7 +440,6 @@ chrono.workspace = true
 flate2.workspace = true
 sha2.workspace = true
 tar.workspace = true
-libkrun-sys.workspace = true
 mvm-fs.workspace = true
 mvm-vmm.workspace = true
 # Plan 60 Phase 4 — `tests/audit_total_coverage.rs` walks the

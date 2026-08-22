@@ -58,14 +58,13 @@ const BUDGETS: &[ClosureBudget] = &[
 /// a workspace crate holding subscriber assembly that `mvm-core` used to
 /// own, carrying no new third-party code on either target.
 ///
-/// 231 (was 233): ratcheted to the measured graph after adding `mvm-mcp`, the
-/// stdio-only adapter over the existing `mvm-client` facade. The adapter is one
-/// first-party crate and adds no third-party crate to mvmctl's already-linked
-/// dependency graph.
+/// 227 (was 233): deleting the superseded L3 stack removes seven crates from
+/// this graph; the first-party `mvm-mcp` adapter adds one and no third-party
+/// crates.
 ///
-/// 232 (was 231): `mvm-capture`, the project-environment capture frontend. It
+/// 228 (was 227): `mvm-capture`, the project-environment capture frontend. It
 /// adds one first-party crate and no new third-party crate to mvmctl's closure.
-const MACOS_CLOSURE_BUDGET: usize = 232;
+const MACOS_CLOSURE_BUDGET: usize = 228;
 
 /// Max distinct crates allowed in `mvmctl`'s default no-dev closure on
 /// `x86_64-unknown-linux-gnu`. Baseline measured 2026-06-17 against the audited default
@@ -126,21 +125,10 @@ const MACOS_CLOSURE_BUDGET: usize = 232;
 /// feature-gated `mvm-contract` package removes one package from the default
 /// closure while preserving the protocol-only default feature set.
 ///
-/// 278 (was 274): the userspace socket datapath, which is the macOS forwarding
-/// backend and the fallback wherever the Linux TUN probe fails, brings
-/// `smoltcp` (default features off — `medium-ip`, the two IP protocols and the
-/// two socket types only), `mio`, and `socket2`. It cannot be gated off by
-/// default: on macOS it is the only backend, so a build without it would refuse
-/// every `l3-vsock` plan on that platform. Four crates for a whole forwarding
-/// backend, and `smoltcp` is `#![deny(unsafe_code)]` and 0BSD.
 /// 279 (was 274): adopting `rayon` for parallel file walks, copies, ext4
 /// directory/symlink block emission, and dm-verity hash-tree computation;
 /// measured delta +5 crates (rayon, rayon-core, crossbeam-deque,
 /// crossbeam-epoch, crossbeam-utils).
-///
-/// 283 (was 279): making the userspace socket datapath's host-side polling,
-/// socket, and smoltcp protocol dependencies explicit in the shipping binary;
-/// measured delta +4 crates for the complete fallback forwarding backend.
 ///
 /// 284 (was 283): the `did:key` codec for receipt/conformance identity uses
 /// the audited `bs58` crate; it is zero-dependency and the only new crate in
@@ -194,13 +182,12 @@ const MACOS_CLOSURE_BUDGET: usize = 232;
 /// is now gated behind `addons`, since only the helper bins install one).
 /// Measured +1 here, -9 on the guest agent and the embedded musl bins.
 ///
-/// 240 (was 239): `mvm-mcp`, the stdio-only adapter over the existing
-/// `mvm-client` facade. It adds one first-party crate and no third-party crate
-/// to mvmctl's already-linked dependency graph.
+/// 236 (was 239): deleting the superseded L3 stack removes its retired graph;
+/// `mvm-mcp` contributes one first-party crate and no new third-party crate.
 ///
-/// 241 (was 240): `mvm-capture`, the project-environment capture frontend. It
+/// 237 (was 236): `mvm-capture`, the project-environment capture frontend. It
 /// adds one first-party crate and no new third-party crate to mvmctl's closure.
-pub(crate) const CLOSURE_BUDGET: usize = 241;
+pub(crate) const CLOSURE_BUDGET: usize = 237;
 
 pub fn run(workspace: &Path) -> Result<()> {
     for budget in BUDGETS {

@@ -174,7 +174,7 @@ mod tests {
 pub const PER_VM_HOST_BINARIES: &[PerVmBinary] = &[
     PerVmBinary {
         package: "mvm-hostd",
-        name: "mvm-netd",
+        name: "mvm-network-endpoint",
         features: "",
         scope: PerVmScope::Always,
     },
@@ -190,7 +190,7 @@ pub const PER_VM_HOST_BINARIES: &[PerVmBinary] = &[
         assert_eq!(
             got,
             vec![
-                ("mvm-netd".to_string(), "Always".to_string()),
+                ("mvm-network-endpoint".to_string(), "Always".to_string()),
                 ("mvm-hvf-supervisor".to_string(), "MacOsAarch64".to_string()),
             ]
         );
@@ -198,19 +198,20 @@ pub const PER_VM_HOST_BINARIES: &[PerVmBinary] = &[
 
     #[test]
     fn bin_flags_reads_continued_lines() {
-        let got =
-            bin_flags("cargo build -p mvm-hostd \\\n  --bin mvm-broker \\\n  --bin mvm-netd\n");
+        let got = bin_flags(
+            "cargo build -p mvm-hostd \\\n  --bin mvm-broker \\\n  --bin mvm-network-endpoint\n",
+        );
         assert!(got.contains("mvm-broker"));
-        assert!(got.contains("mvm-netd"));
+        assert!(got.contains("mvm-network-endpoint"));
     }
 
     #[test]
     fn required_hostbins_reads_base_and_extension() {
         let got = required_hostbins(
-            "          REQUIRED_HOSTBINS=\"mvm-netd mvm-broker\"\n\
+            "          REQUIRED_HOSTBINS=\"mvm-network-endpoint mvm-broker\"\n\
              REQUIRED_HOSTBINS=\"${REQUIRED_HOSTBINS} mvm-hvf-supervisor\"\n",
         );
-        assert!(got.contains("mvm-netd"));
+        assert!(got.contains("mvm-network-endpoint"));
         assert!(got.contains("mvm-broker"));
         assert!(got.contains("mvm-hvf-supervisor"));
         assert!(!got.iter().any(|s| s.contains("REQUIRED")));

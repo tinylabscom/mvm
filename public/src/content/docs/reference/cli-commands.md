@@ -73,7 +73,7 @@ guest-RPC surface, fleet-shaped workflows).
 | `mvmctl machine ls` | List every microVM: persistent machines and running transients (alias: `ps`) |
 | `mvmctl machine ls -a` | Also show transient machines that are no longer running |
 | `mvmctl machine ls --json` | Output as JSON |
-| `mvmctl machine forward <name> -p PORT` | Forward a port from a running VM to localhost |
+| `mvmctl machine run ... --port HOST:GUEST` | Declare signed TCP ingress before boot (repeatable) |
 | `mvmctl machine logs <name>` | View the workload's captured stdout/stderr — live while it runs, and still readable after it exits (`-f` to follow, `-n` for how many recorded records to replay first; a record is one captured write, not one line). Workload stdout is written to your stdout and stderr to your stderr, so an ordinary pipeline (`\| grep …`) filters the channel it asked for, and a closed pipe (`\| head -1`) ends the read cleanly rather than erroring. Falls back to the machine's console log when no output capture exists, saying so. Exits nonzero when there is no source at all, and warns on stderr when what it shows is a window rather than the whole run — a truncated capture, a pruned live window, or a hole between the recorded and live halves |
 | `mvmctl machine logs <name> --stream <stdout\|stderr\|trace\|all>` | Show one channel only (default `all`). Refused on a machine whose only source is its console log: that log merges both channels with no labels, so narrowing it has no honest answer. A recorded capture holding nothing on the requested channel is reported as such, not as a missing capture |
 | `mvmctl machine logs <name> --hypervisor` | View the VMM's own diagnostic log (`firecracker.log`) rather than workload output, `-f` to follow it. Firecracker writes one; the other backends do not |
@@ -556,7 +556,7 @@ guest, on any tier.
 | `mvmctl machine exec <name> -- <cmd>...` | Run a command in an already-started named machine |
 | `mvmctl machine exec <name> -it -- <cmd>...` | Run a command in an already-started named machine attached to a PTY |
 | `mvmctl machine exec <name>` | Omit the command to drop into an interactive shell (same as `machine shell`) |
-| `mvmctl machine shell <name>` | Attach an interactive shell/console to an already-started named machine |
+| `mvmctl machine shell <name>` | Attach an interactive shell/console to an already-started named machine — persistent or transient (a `machine run --name <name>` VM is reachable while it runs) |
 | `mvmctl machine stop <name>...` | Stop one or more already-started named machines (prompts for confirmation; pass `--yes` to skip) |
 | `mvmctl machine reconfigure <name> [flags]` | Patch a persistent machine's config and relaunch it. Only the flags you pass are changed; everything else (image, volumes, profile) is preserved. When the machine is running, it is stopped and restarted automatically; when stopped, the change is staged for the next `machine start`. |
 | `mvmctl machine reconfigure <name> --net` / `--no-net` | Enable or disable the dev-tier outbound network preset |

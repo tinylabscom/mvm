@@ -727,6 +727,7 @@ pub(in crate::commands) fn run_secure_with_source(
         // `[grants]` table.
         manifest: None,
         config: &host_config,
+        ai: None,
     })?;
     let network_policy = resolved_grants.network_policy.clone();
 

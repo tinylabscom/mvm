@@ -80,10 +80,6 @@ mvm-vmm.workspace = true
 # The secrets/PII scenarios drive the local SecretService to prove there is no
 # reveal path for stored values.
 mvm-client.workspace = true
-# The L3 policy core the l3-vsock witnesses drive directly: admission,
-# sessions, leases, and the guest-channel service map are all pure, so the
-# scenarios decide without a VM.
-mvm-net.workspace = true
 mvm-contract.workspace = true
 sha2.workspace = true
 hex.workspace = true

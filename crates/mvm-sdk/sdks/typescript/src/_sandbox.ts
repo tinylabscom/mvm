@@ -29,7 +29,7 @@
  * transport; the SDK itself never enters "plan" mode directly.
  */
 
-import type { EnvValue, Network, Resources } from "./ir/workload.js";
+import type { EnvValue, Network, PortForward, Resources } from "./ir/workload.js";
 import type {
   RuntimeFsEntry,
   RuntimeFsStat,
@@ -447,7 +447,6 @@ function lowerLiveOptions(options: SandboxCreateOptions): string[] {
   if ((network.mode ?? "none") !== "none") {
     rejectLiveOption("network.mode", "only the NIC-less `none` mode is supported");
   }
-  if (network.ports && network.ports.length > 0) rejectLiveOption("network.ports", "use Sandbox.forward after boot");
   if (network.peers && network.peers.length > 0) rejectLiveOption("network.peers", "the live CLI has no peer equivalent");
   if (network.dns !== undefined && network.dns !== null) rejectLiveOption("network.dns", "the live CLI has no DNS equivalent");
   if (network.egress === undefined || network.egress === null) return argv;
@@ -521,10 +520,6 @@ export class LiveTransport {
   readonly vmId: string;
   readonly buildMode: "dev" | "prod";
   private killed = false;
-  // Long-running `mvmctl machine forward` proxies spawned by `forward()`. Torn
-  // down in `kill()` so a port forwarder never outlives the VM.
-  private forwards: import("node:child_process").ChildProcess[] = [];
-
   constructor(opts: { mvmCliBin: string; vmId: string; buildMode: "dev" | "prod" }) {
     this.mvmCliBin = opts.mvmCliBin;
     this.vmId = opts.vmId;
@@ -537,6 +532,7 @@ export class LiveTransport {
     ttlSeconds: number;
     createArgs: string[];
     bootCommand: string[] | null;
+    ports: PortForward[];
   }): LiveTransport {
     let mvmCliBin: string;
     try {
@@ -554,10 +550,9 @@ export class LiveTransport {
       .replace(/[^a-z0-9-]/g, "-");
     const vmId = `sdk-${slug}-${suffix}`;
 
-    const argv = [
-      "machine",
-      "run",
-      "-d",
+    const argv = ["machine", "run"];
+    if (opts.ports.length === 0) argv.push("-d");
+    argv.push(
       "--up-json",
       "--name",
       vmId,
@@ -566,7 +561,20 @@ export class LiveTransport {
       ...opts.createArgs,
       "--ttl",
       `${opts.ttlSeconds}s`,
-    ];
+    );
+    for (const port of opts.ports) {
+      if (
+        port.proto !== "tcp" ||
+        port.transform !== "opaque" ||
+        port.host_addr !== "127.0.0.1" ||
+        port.guest_addr !== "127.0.0.1"
+      ) {
+        throw new SandboxModeError(
+          "Sandbox live mode currently accepts only opaque TCP ingress bound to host and guest 127.0.0.1",
+        );
+      }
+      argv.push("--port", `${port.host}:${port.guest}`);
+    }
     if (opts.bootCommand !== null) argv.push("--", ...opts.bootCommand);
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     let result;
@@ -1013,37 +1021,9 @@ export class LiveTransport {
     }
   }
 
-  forward(hostPort: number, guestPort: number): void {
-    const spec = `${hostPort}:${guestPort}`;
-    this.requireDev("forward", ["machine", "forward", this.vmId, "--port", spec]);
-    const shell = [this.mvmCliBin, "machine", "forward", this.vmId, "--port", spec];
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    // `mvmctl machine forward` blocks (runs the proxy until signalled), so spawn
-    // it detached + tracked; `kill()` terminates it.
-    let proc;
-    try {
-      proc = child.spawn(shell[0], shell.slice(1), { stdio: "ignore" });
-    } catch (err) {
-      throw new SandboxLiveError(
-        `\`${this.mvmCliBin}\` not found on disk; ${cliResolutionHint()}: ${String(err)}`,
-        { argv: shell },
-      );
-    }
-    this.forwards.push(proc);
-  }
-
   kill(): void {
     if (this.killed) return;
     this.killed = true;
-    // Tear down any port forwarders before the VM goes away.
-    for (const proc of this.forwards) {
-      try {
-        proc.kill();
-      } catch {
-        // best-effort cleanup
-      }
-    }
-    this.forwards = [];
     // `--yes` skips the interactive confirmation prompt; the sandbox tears down
     // non-interactively.
     const shell = [this.mvmCliBin, "machine", "stop", this.vmId, "--yes"];
@@ -1275,6 +1255,7 @@ export class Sandbox {
         ttlSeconds,
         createArgs: lowerLiveOptions(options),
         bootCommand: command ? [...command] : null,
+        ports: options.network?.ports ?? [],
       });
       const sb = new Sandbox(wid, live);
       liveSandbox = sb;
@@ -1413,15 +1394,10 @@ export class Sandbox {
     this._live.cp(`${this._live.vmId}:${guestPath}`, hostPath);
   }
 
-  /** Forward `hostPort` on the host to `guestPort` in the sandbox.
+  /** Refuse dynamic ingress changes after admission.
    *
-   *  Spawns `mvmctl machine forward <vm> --port <host>:<guest>` as a background
-   *  proxy that runs until the sandbox is torn down (`kill` /
-   *  `[Symbol.dispose]` terminate it).
-   *
-   *  Live mode only: exposing a port is a runtime action, so in record
-   *  mode this throws `SandboxModeError`. To declare a port mapping for a
-   *  recorded workload, use `mvm.network({ ports: [...] })`. */
+   *  Declare the mapping in `network.ports` before {@link Sandbox.create}; the
+   *  host binds only listeners present in the signed admission plan. */
   forward(hostPort: number, guestPort: number): void {
     for (const [label, p] of [
       ["hostPort", hostPort],
@@ -1431,13 +1407,10 @@ export class Sandbox {
         throw new RangeError(`${label} must be an integer in 1..65535`);
       }
     }
-    if (this._live === null) {
-      throw new SandboxModeError(
-        "`Sandbox.forward` is a live-mode operation; under MVM_SDK_MODE=record " +
-          "declare ports with `mvm.network({ ports: [...] })`.",
-      );
-    }
-    this._live.forward(hostPort, guestPort);
+    throw new SandboxModeError(
+      "dynamic `Sandbox.forward` is retired; declare ingress with " +
+        "`Sandbox.create(..., { network: mvm.network({ ports: [...] }) })` before boot",
+    );
   }
 
   kill(): void {
