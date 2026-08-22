@@ -294,6 +294,7 @@ impl Commands {
             Commands::Trust(a) => a.action.verb_name(),
             Commands::AgentSession(_) => "agent-session",
             Commands::Deps(_) => "deps",
+            Commands::Capture(a) => a.action.verb_name(),
             Commands::Artifact(_) => "artifact",
             Commands::SeccompAudit(_) => "seccomp-audit",
             #[cfg(feature = "builder-vm")]

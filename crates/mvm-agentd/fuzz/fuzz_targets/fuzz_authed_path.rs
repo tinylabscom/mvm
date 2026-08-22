@@ -1,5 +1,5 @@
 // Fuzz the *signed* path of the authenticated-frame
-// pipeline. The two existing targets (`fuzz_authenticated_frame`,
+// pipeline. The two existing targets (`fuzz_sealed_frame`,
 // `fuzz_guest_request`) cover the *pre-auth* parsers — they feed raw
 // bytes into `serde_json::from_slice` and assert "never panic." That
 // proves the unauthenticated parser is safe, but it doesn't exercise

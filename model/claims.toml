@@ -103,7 +103,7 @@ statement = "Vsock framing, supervisor-config JSON, and FlowMux's guest-facing d
 # accounting, and refusal-without-state-change invariants.
 witnesses = [
     "ci:fuzz_guest_request",
-    "ci:fuzz_authenticated_frame",
+    "ci:fuzz_sealed_frame",
     "ci:fuzz_supervisor_config",
     "ci:fuzz_network_flow_decode",
     "ci:fuzz_network_flow_state",
