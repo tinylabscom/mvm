@@ -71,6 +71,63 @@ pub fn validate_id(id: &str, kind: &str) -> Result<()> {
     Ok(())
 }
 
+/// Which persistent builder VM a name belongs to. The token is the on-disk
+/// state-dir infix, so the variants are the storage format and not a display
+/// nicety — renaming one strands every existing builder state dir.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuilderVmSlot {
+    /// The libkrun builder, `mvm-persistent-builder-vm-*`.
+    Libkrun,
+    /// The HVF builder, `mvm-persistent-builder-hvf-*`.
+    Hvf,
+}
+
+impl BuilderVmSlot {
+    fn token(self) -> &'static str {
+        match self {
+            Self::Libkrun => "vm",
+            Self::Hvf => "hvf",
+        }
+    }
+}
+
+/// Shared prefix of every long-lived builder VM name.
+const PERSISTENT_BUILDER_PREFIX: &str = "mvm-persistent-builder-";
+
+/// Shared prefix of every ephemeral per-job builder shell VM name.
+const BUILDER_SHELL_JOB_PREFIX: &str = "mvm-hvf-builder-shell-";
+
+/// Name of the long-lived builder VM for `session_id` in `slot`.
+pub fn persistent_builder_vm_name(slot: BuilderVmSlot, session_id: &str) -> String {
+    format!("{PERSISTENT_BUILDER_PREFIX}{}-{session_id}", slot.token())
+}
+
+/// Name of the ephemeral builder VM that runs one shell job and exits.
+pub fn builder_shell_vm_name(job_id: &str) -> String {
+    format!("{BUILDER_SHELL_JOB_PREFIX}{job_id}")
+}
+
+/// True when `name` is a VM the build system owns rather than one the user
+/// asked for.
+///
+/// These VMs write their runtime state into the same `~/.mvm/vms/` namespace
+/// as workload machines, so every surface that presents "the user's machines"
+/// has to exclude them by name — there is no other discriminator on disk. The
+/// predicate lives beside the two minting functions above so a change to the
+/// name format cannot silently stop matching.
+pub fn is_builder_owned_vm_name(name: &str) -> bool {
+    name.starts_with(PERSISTENT_BUILDER_PREFIX) || is_ephemeral_builder_vm_name(name)
+}
+
+/// True when `name` is a per-job builder VM: state that exists only for the
+/// duration of one build and is safe to remove once nothing owns it.
+///
+/// The persistent builder is deliberately excluded — its dir is its warm Nix
+/// store, and reaping it would throw away the cache it exists to hold.
+pub fn is_ephemeral_builder_vm_name(name: &str) -> bool {
+    name.starts_with(BUILDER_SHELL_JOB_PREFIX)
+}
+
 /// Generate a random instance ID: "i-" followed by 8 hex chars.
 pub fn generate_instance_id() -> String {
     let bytes: [u8; 4] = rand_bytes();
@@ -148,6 +205,52 @@ pub fn parse_instance_path(path: &str) -> Result<(&str, &str, &str)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The whole point of the predicate is that it recognises what the
+    /// minting functions produce; asserting against a hand-written literal
+    /// would let the two drift apart and still pass.
+    #[test]
+    fn builder_vm_names_are_recognised_as_builder_owned() {
+        for slot in [BuilderVmSlot::Libkrun, BuilderVmSlot::Hvf] {
+            let name = persistent_builder_vm_name(slot, "abc123");
+            assert!(
+                is_builder_owned_vm_name(&name),
+                "{name:?} must read as builder-owned"
+            );
+            assert!(
+                !is_ephemeral_builder_vm_name(&name),
+                "{name:?} is the warm store and must never read as ephemeral"
+            );
+        }
+        let job = builder_shell_vm_name("92326-1787337475138993000");
+        assert!(is_builder_owned_vm_name(&job));
+        assert!(is_ephemeral_builder_vm_name(&job));
+    }
+
+    /// The slot tokens are the on-disk state-dir infixes documented in
+    /// CLAUDE.md; changing one strands existing builder state.
+    #[test]
+    fn builder_slot_tokens_are_the_documented_on_disk_names() {
+        assert_eq!(
+            persistent_builder_vm_name(BuilderVmSlot::Libkrun, "s"),
+            "mvm-persistent-builder-vm-s"
+        );
+        assert_eq!(
+            persistent_builder_vm_name(BuilderVmSlot::Hvf, "s"),
+            "mvm-persistent-builder-hvf-s"
+        );
+        assert_eq!(builder_shell_vm_name("j"), "mvm-hvf-builder-shell-j");
+    }
+
+    #[test]
+    fn a_user_machine_name_is_not_builder_owned() {
+        for name in ["web", "builder", "mvm-builder", "my-persistent-builder-vm"] {
+            assert!(
+                !is_builder_owned_vm_name(name),
+                "{name:?} is a user machine"
+            );
+        }
+    }
 
     #[test]
     fn test_validate_id_valid() {

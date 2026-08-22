@@ -555,7 +555,7 @@ guest, on any tier.
 | `mvmctl machine exec <name> -- <cmd>...` | Run a command in an already-started named machine |
 | `mvmctl machine exec <name> -it -- <cmd>...` | Run a command in an already-started named machine attached to a PTY |
 | `mvmctl machine exec <name>` | Omit the command to drop into an interactive shell (same as `machine shell`) |
-| `mvmctl machine shell <name>` | Attach an interactive shell/console to an already-started named machine |
+| `mvmctl machine shell <name>` | Attach an interactive shell/console to an already-started named machine — persistent or transient (a `machine run --name <name>` VM is reachable while it runs) |
 | `mvmctl machine stop <name>...` | Stop one or more already-started named machines (prompts for confirmation; pass `--yes` to skip) |
 | `mvmctl machine reconfigure <name> [flags]` | Patch a persistent machine's config and relaunch it. Only the flags you pass are changed; everything else (image, volumes, profile) is preserved. When the machine is running, it is stopped and restarted automatically; when stopped, the change is staged for the next `machine start`. |
 | `mvmctl machine reconfigure <name> --net` / `--no-net` | Enable or disable the dev-tier outbound network preset |
