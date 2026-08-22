@@ -382,3 +382,263 @@ fn each_proof_is_bound_to_the_leaf_its_own_receipt_came_from() {
         );
     }
 }
+
+// ─────────────────────────────────────────────────────────────────
+// Verifier
+// ─────────────────────────────────────────────────────────────────
+
+use mvm_hostd::audit::receipt_archive_verify::{CheckResult, CompletenessResult, verify_archive};
+
+/// Rebuild an archive, applying `edit` to the member map first.
+fn rewrite(bytes: &[u8], edit: impl FnOnce(&mut Vec<(String, Vec<u8>)>)) -> Vec<u8> {
+    use std::io::Cursor;
+    let mut members: Vec<(String, Vec<u8>)> = Vec::new();
+    {
+        let mut archive = tar::Archive::new(Cursor::new(bytes));
+        for entry in archive.entries().expect("entries") {
+            let mut entry = entry.expect("entry");
+            let name = entry.path().expect("path").to_string_lossy().into_owned();
+            let mut buf = Vec::new();
+            entry.read_to_end(&mut buf).expect("read");
+            members.push((name, buf));
+        }
+    }
+    edit(&mut members);
+
+    let mut out = Cursor::new(Vec::<u8>::new());
+    {
+        let mut tar = tar::Builder::new(&mut out);
+        for (name, bytes) in &members {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(bytes.len() as u64);
+            header.set_mode(0o600);
+            header.set_cksum();
+            tar.append_data(&mut header, name, Cursor::new(bytes))
+                .expect("append");
+        }
+        tar.finish().expect("finish");
+    }
+    out.into_inner()
+}
+
+fn set_member(members: &mut [(String, Vec<u8>)], name: &str, bytes: Vec<u8>) {
+    let slot = members
+        .iter_mut()
+        .find(|(n, _)| n == name)
+        .unwrap_or_else(|| panic!("member {name} not present"));
+    slot.1 = bytes;
+}
+
+#[test]
+fn a_good_plan_scoped_archive_verifies_and_reports_attested_completeness() {
+    let dir = TempDir::new().unwrap();
+    let (bytes, _key) = build(
+        dir.path(),
+        ArchiveScope::Plan {
+            plan_id: sample_plan_id().0,
+        },
+    );
+    let report = verify_archive(&bytes).expect("verify");
+    assert_eq!(report.integrity, CheckResult::Passed, "{report:?}");
+    assert_eq!(report.inclusion, CheckResult::Passed, "{report:?}");
+    assert_eq!(
+        report.completeness,
+        CompletenessResult::Attested,
+        "a filtered archive's coverage is asserted, never checked"
+    );
+    assert_eq!(report.exit_code(), 0, "attested is not a failure");
+}
+
+#[test]
+fn a_tenant_scoped_archive_derives_its_completeness() {
+    let dir = TempDir::new().unwrap();
+    let (bytes, _key) = build(dir.path(), ArchiveScope::Tenant);
+    let report = verify_archive(&bytes).expect("verify");
+    assert_eq!(
+        report.completeness,
+        CompletenessResult::Derived,
+        "{report:?}"
+    );
+    assert_eq!(report.exit_code(), 0);
+}
+
+#[test]
+fn a_tampered_receipt_member_fails_integrity_and_sets_only_that_bit() {
+    let dir = TempDir::new().unwrap();
+    let (bytes, _key) = build(dir.path(), ArchiveScope::Tenant);
+    let signed = read_manifest(&bytes);
+    let victim = signed
+        .manifest
+        .members
+        .keys()
+        .find(|k| k.starts_with("receipts/"))
+        .expect("a receipt member")
+        .clone();
+
+    let tampered = rewrite(&bytes, |m| {
+        let mut b = m.iter().find(|(n, _)| *n == victim).unwrap().1.clone();
+        let last = b.len() - 1;
+        b[last] ^= 0x01;
+        set_member(m, &victim, b);
+    });
+
+    let report = verify_archive(&tampered).expect("verify runs to completion");
+    assert!(
+        matches!(report.integrity, CheckResult::Failed(_)),
+        "{report:?}"
+    );
+    assert_eq!(report.exit_code() & 1, 1, "integrity bit must be set");
+}
+
+#[test]
+fn a_proof_swapped_between_receipts_fails_inclusion() {
+    // Both proofs are genuine and both verify against the signed root. Only
+    // the binding to each receipt's own leaf catches the swap.
+    let dir = TempDir::new().unwrap();
+    let (bytes, _key) = build(dir.path(), ArchiveScope::Tenant);
+    let names = tar_member_names(&bytes);
+    let proofs: Vec<String> = names
+        .iter()
+        .filter(|n| n.starts_with("proofs/"))
+        .cloned()
+        .collect();
+    assert!(proofs.len() >= 2, "need two proofs to swap; had {proofs:?}");
+
+    let swapped = rewrite(&bytes, |m| {
+        let a = m.iter().find(|(n, _)| *n == proofs[0]).unwrap().1.clone();
+        let b = m.iter().find(|(n, _)| *n == proofs[1]).unwrap().1.clone();
+        set_member(m, &proofs[0], b);
+        set_member(m, &proofs[1], a);
+    });
+
+    let report = verify_archive(&swapped).expect("verify runs to completion");
+    assert!(
+        matches!(report.inclusion, CheckResult::Failed(_)),
+        "swapping two valid proofs must still fail: {report:?}"
+    );
+    assert_eq!(report.exit_code() & 2, 2, "inclusion bit must be set");
+}
+
+#[test]
+fn a_derivable_archive_missing_a_leaf_fails_completeness() {
+    let dir = TempDir::new().unwrap();
+    let (bytes, _key) = build(dir.path(), ArchiveScope::Tenant);
+
+    // Drop a leaf from the manifest. The manifest signature breaks too, which
+    // is correct and expected -- what this pins is that completeness reports
+    // its own failure rather than staying silent because integrity spoke.
+    let dropped = rewrite(&bytes, |m| {
+        let raw = m
+            .iter()
+            .find(|(n, _)| n == "manifest.json")
+            .unwrap()
+            .1
+            .clone();
+        let mut v: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+        let leaves = v["manifest"]["leaves"].as_array_mut().unwrap();
+        leaves.pop();
+        set_member(m, "manifest.json", serde_json::to_vec_pretty(&v).unwrap());
+    });
+
+    let report = verify_archive(&dropped).expect("verify runs to completion");
+    assert!(
+        matches!(report.completeness, CompletenessResult::Failed(_)),
+        "{report:?}"
+    );
+    assert_eq!(report.exit_code() & 4, 4, "completeness bit must be set");
+}
+
+#[test]
+fn a_foreign_host_key_fails_integrity() {
+    let dir = TempDir::new().unwrap();
+    let (bytes, _key) = build(dir.path(), ArchiveScope::Tenant);
+    let other = SigningKey::from_bytes(&[3u8; 32]);
+    let swapped = rewrite(&bytes, |m| {
+        set_member(m, "host.pub", other.verifying_key().to_bytes().to_vec());
+    });
+    let report = verify_archive(&swapped).expect("verify runs to completion");
+    assert!(
+        matches!(report.integrity, CheckResult::Failed(_)),
+        "an archive shipping a key other than its signer's must not pass: {report:?}"
+    );
+}
+
+/// Append a raw ustar member with an arbitrary name.
+///
+/// `tar::Builder` refuses to write a `..` path at all, which is a good
+/// property of that crate and useless for testing ours: the archive we need
+/// is one a hostile writer produced without it. So the header is hand-rolled.
+fn raw_tar_member(name: &str, data: &[u8]) -> Vec<u8> {
+    let mut header = [0u8; 512];
+    header[..name.len()].copy_from_slice(name.as_bytes());
+    header[100..107].copy_from_slice(b"0000600");
+    header[108..115].copy_from_slice(b"0000000");
+    header[116..123].copy_from_slice(b"0000000");
+    let size = format!("{:011o}", data.len());
+    header[124..135].copy_from_slice(size.as_bytes());
+    header[136..147].copy_from_slice(b"00000000000");
+    header[148..156].copy_from_slice(b"        "); // checksum field as spaces
+    header[156] = b'0'; // regular file
+    header[257..262].copy_from_slice(b"ustar");
+    header[263..265].copy_from_slice(b"00");
+    let sum: u32 = header.iter().map(|b| u32::from(*b)).sum();
+    let sum_field = format!("{sum:06o}\0 ");
+    header[148..156].copy_from_slice(sum_field.as_bytes());
+
+    let mut out = header.to_vec();
+    out.extend_from_slice(data);
+    let pad = (512 - data.len() % 512) % 512;
+    out.extend(std::iter::repeat_n(0u8, pad));
+    out
+}
+
+#[test]
+fn an_unsafe_member_path_is_refused_before_anything_is_checked() {
+    let dir = TempDir::new().unwrap();
+    let (bytes, _key) = build(dir.path(), ArchiveScope::Tenant);
+
+    // Splice a traversal member in ahead of the real archive body, then the
+    // two terminating zero blocks.
+    let mut evil = raw_tar_member("../escape.json", b"{}");
+    evil.extend_from_slice(&bytes);
+
+    let names = tar_member_names(&evil);
+    assert!(
+        names.iter().any(|n| n.contains("..")),
+        "the traversal name must survive into the archive or this test proves \
+         nothing; members were {names:?}"
+    );
+
+    let err = verify_archive(&evil).expect_err("must refuse, not report");
+    assert!(format!("{err:#}").contains("rejected"), "{err:#}");
+}
+
+#[test]
+fn an_oversize_archive_is_refused_before_allocating() {
+    let big = vec![0u8; mvm_hostd::audit::receipt_archive_verify::ARCHIVE_MAX_BYTES + 1];
+    let err = verify_archive(&big).expect_err("must refuse");
+    assert!(format!("{err:#}").contains("limit"), "{err:#}");
+}
+
+#[test]
+fn the_three_results_are_reported_independently() {
+    // One failure must not mask the others: a report names every problem.
+    let dir = TempDir::new().unwrap();
+    let (bytes, _key) = build(dir.path(), ArchiveScope::Tenant);
+    let broken = rewrite(&bytes, |m| {
+        let raw = m
+            .iter()
+            .find(|(n, _)| n == "manifest.json")
+            .unwrap()
+            .1
+            .clone();
+        let mut v: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+        v["manifest"]["leaves"].as_array_mut().unwrap().pop();
+        set_member(m, "manifest.json", serde_json::to_vec_pretty(&v).unwrap());
+    });
+    let report = verify_archive(&broken).expect("verify runs to completion");
+    // Integrity fails (signature) AND completeness fails (leaf count). Both
+    // bits, not just the first one encountered.
+    assert_eq!(report.exit_code() & 1, 1, "{report:?}");
+    assert_eq!(report.exit_code() & 4, 4, "{report:?}");
+}
