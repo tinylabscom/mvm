@@ -70,6 +70,12 @@ table when it sees the driver invoked, so the witness resolves for the same
 reason it always did — the gate runs in CI. Removing a gate from the table
 immediately unbacks its claims, verified by doing it.
 
+The consolidated workflow step also retains the established
+`(check-abi-layout)` display-name anchor. The conformance harness resolves
+claim witnesses directly from workflow-visible anchors, independently of the
+xtask ledger, so this keeps its claim check honest without duplicating the
+driver's gate table in a second crate.
+
 That also collapsed a duplicate: `check_conformance` had its own `ci:`
 resolver, a `text.contains(name)` scan that matched a name in a comment as
 readily as a live job — the weak form `ci_anchors` was written to replace.
