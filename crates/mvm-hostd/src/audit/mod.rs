@@ -14,6 +14,8 @@ pub mod host_keypair;
 /// tenant's chain-signed audit log.
 pub mod merkle;
 pub mod plan_persist;
+/// Writer for `.mvmev` evidence archives over the chain-signed audit log.
+pub mod receipt_archive;
 /// Read-only exporter from chain-signed audit entries to signed
 /// ExecutionReceipts.
 pub mod receipt_export;

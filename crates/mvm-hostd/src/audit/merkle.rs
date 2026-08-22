@@ -109,6 +109,40 @@ pub fn build_inclusion_in(
         .map_err(|e| anyhow::anyhow!("building inclusion proof for leaf {leaf_index}: {e}"))
 }
 
+/// Build and sign a transparency-log root over `tenant`'s chain, without
+/// writing anything.
+///
+/// [`crate::audit::emitter::AuditEmitter::publish_root`] is this plus the
+/// sidecar write. Split out because an evidence archive needs the signed root
+/// as a value and must not leave a published-root file behind as a side
+/// effect of exporting — but both paths have to produce byte-identical
+/// signing material, so there is one implementation.
+pub fn sign_root_in(
+    audit_dir: &Path,
+    tenant: &str,
+    signing_key: &ed25519_dalek::SigningKey,
+) -> Result<mvm_contract::merkle::SignedAuditRoot> {
+    use base64::Engine as _;
+    use ed25519_dalek::Signer as _;
+
+    let vk = signing_key.verifying_key();
+    let (root, tree_size) = build_root_in(audit_dir, tenant, &vk)?;
+    let root_hash = hex::encode(root);
+    let timestamp = chrono::Utc::now().to_rfc3339();
+    let payload =
+        mvm_contract::merkle::root_signing_bytes(tenant, tree_size, &root_hash, &timestamp)
+            .map_err(|e| anyhow::anyhow!("serializing Merkle root signing payload: {e}"))?;
+    let signature = signing_key.sign(&payload);
+    Ok(mvm_contract::merkle::SignedAuditRoot {
+        tenant: tenant.to_string(),
+        tree_size,
+        root_hash,
+        timestamp,
+        signature: base64::engine::general_purpose::STANDARD.encode(signature.to_bytes()),
+        signer_pubkey: hex::encode(vk.to_bytes()),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
