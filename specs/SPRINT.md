@@ -2757,7 +2757,6 @@ The host-binary manifest integration test now reuses Cargo's prebuilt `xtask`
 binary instead of starting a nested workspace compilation. The full workspace
 test run therefore retains the manifest synchronization assertion without
 racing concurrent doctest compilation.
-
 ## 2026-08-21 FlowMux Firecracker and CI evidence
 
 The approved Lima-KVM Firecracker tier now boots the FlowMux-only Alpine guest
