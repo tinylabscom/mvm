@@ -95,8 +95,8 @@
       flex: 1;
       background: #000;
       color: #e6edf3;
-      border: 1px solid var(--border);
-      border-radius: 4px;
+      border: none;
+      outline: none;
       padding: 0.4rem 0.6rem;
       font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
       font-size: 0.8125rem;
@@ -104,6 +104,28 @@
     .input-line input:disabled {
       background: var(--panel);
       color: var(--muted);
+    }
+    #cli-section {
+      margin-top: 1.5rem;
+    }
+    #cli-section h2 {
+      font-size: 1rem;
+      margin-bottom: 0.5rem;
+    }
+    #cli-section p {
+      color: var(--muted);
+      font-size: 0.875rem;
+      margin: 0 0 0.5rem;
+    }
+    #cli-command {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 1rem;
+      overflow-x: auto;
+      font-size: 0.8125rem;
+      line-height: 1.5;
+      color: var(--text);
     }
   </style>
 </head>
@@ -125,6 +147,24 @@
         <input id="command" type="text" spellcheck="false" autocomplete="off" disabled />
       </form>
     </div>
+    <section id="cli-section">
+      <h2>Run this machine from the CLI</h2>
+      <p>
+        The browser Worker boots the same kernel/rootfs artifact that
+        <code>mvmctl machine run</code> will accept once the WebLinux CLI
+        surface lands. The intended command is:
+      </p>
+      <pre id="cli-command">mvmctl machine run --hypervisor web-linux \
+  --kernel pack/kernel.img \
+  --rootfs pack/rootfs.bin \
+  --memory 512M --cpus 2</pre>
+      <p>
+        The artifact is a kernel + block-rootfs pair, so the CLI surface uses
+        <code>--rootfs</code> rather than <code>--initrd</code>. Until the
+        native WebLinux path is wired, the equivalent raw QEMU invocation is
+        used for the smoke test.
+      </p>
+    </section>
   </main>
   <script type="module" src="demo.js"></script>
 </body>

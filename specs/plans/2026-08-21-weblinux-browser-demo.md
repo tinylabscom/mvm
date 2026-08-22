@@ -106,7 +106,10 @@ cdf057a71b07e3b52b19cbe210bdefa59250d01a9810b960f7fe1f98eed95a27  bios/kvmvapic.
   cross-origin-isolation headers.
 - [ ] OPFS workspace helper for fixture source and CAS objects.
 - [ ] TypeScript types generated from the Rust `BackendRequest` / `BackendResponse` / `BuildRequest` / `BuildProgress` schemas.
-- [ ] A minimal editor component and a terminal/log pane.
+- [x] A minimal editor component and a terminal/log pane, plus terminal
+  polish (ANSI color rendering, bottom-docked input, command history) and a
+  CLI preview that advertises the intended
+  `mvmctl machine run --hypervisor web-linux ...` surface.
 
 ### Phase 1 — Engine integration (builder VM verified)
 

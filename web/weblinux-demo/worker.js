@@ -10,11 +10,6 @@ const marker = "QEMU-WASM-SMOKE-READY";
 let inputCallback = null;
 let outputBuffer = "";
 
-function stripAnsi(text) {
-  // Remove SGR color/style escape sequences (e.g. \x1b[1;34m, \x1b[m).
-  return text.replace(/\x1b\[[0-9;]*m/g, "");
-}
-
 function flushOutputBuffer() {
   let newline;
   while ((newline = outputBuffer.indexOf("\n")) !== -1) {
@@ -53,7 +48,6 @@ function createFakeTerminal() {
   return {
     write: (data, callback) => {
       let text = typeof data === "string" ? data : new TextDecoder().decode(data);
-      text = stripAnsi(text);
       outputBuffer += text;
       if (!markerSeen && outputBuffer.includes(marker)) {
         markerSeen = true;
@@ -98,13 +92,13 @@ self.onmessage = async (event) => {
     self.Module = self.Module || {};
     self.Module.print = (line) => {
       if (typeof line === "string") {
-        outputBuffer += `[print] ${stripAnsi(line)}\n`;
+        outputBuffer += `[print] ${line}\n`;
         flushOutputBuffer();
       }
     };
     self.Module.printErr = (line) => {
       if (typeof line === "string") {
-        outputBuffer += `[err] ${stripAnsi(line)}\n`;
+        outputBuffer += `[err] ${line}\n`;
         flushOutputBuffer();
       }
     };
