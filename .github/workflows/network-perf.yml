@@ -7,7 +7,6 @@ on:
       - "crates/mvm-agentd/src/flowmux.rs"
       - "crates/mvm-agentd/src/flowmux_sync.rs"
       - "crates/mvm-hostd/examples/network_perf_probe.rs"
-      - "crates/mvm-hostd/src/netd/userspace/**"
       - "crates/mvm-hostd/src/supervisor/flowmux/**"
       - "xtask/src/network_perf.rs"
       - "specs/benchmarks/network/**"
@@ -42,7 +41,7 @@ jobs:
           cargo build --release -p mvm-hostd --features network-perf --example network_perf_probe
           cargo build -p xtask
 
-      - name: Record paired reports
+      - name: Record FlowMux report
         env:
           MVM_NETWORK_PERF_HOST_ID: github-hosted-ubuntu-24.04-x86_64
           MVM_NETWORK_PERF_STORAGE: github-hosted-ephemeral-ssd
@@ -53,27 +52,11 @@ jobs:
           export MVM_NETWORK_PERF_CPU
           MVM_NETWORK_PERF_CPU="$(lscpu | sed -n 's/^Model name:[[:space:]]*//p' | head -1)"
 
-          MVM_NETWORK_PERF_IMPLEMENTATION=legacy_l3 \
-            target/debug/xtask network-perf run-probe \
-              --backend host-loopback \
-              --output network-perf-results/legacy-l3-linux-x86_64-host-loopback.json \
-              -- target/release/examples/network_perf_probe
-
           MVM_NETWORK_PERF_IMPLEMENTATION=flow_mux \
             target/debug/xtask network-perf run-probe \
               --backend host-loopback \
               --output network-perf-results/flow-mux-linux-x86_64-host-loopback.json \
               -- target/release/examples/network_perf_probe
-
-          set +e
-          target/debug/xtask network-perf compare \
-            --baseline network-perf-results/legacy-l3-linux-x86_64-host-loopback.json \
-            --candidate network-perf-results/flow-mux-linux-x86_64-host-loopback.json \
-            --output network-perf-results/comparison-linux-x86_64-host-loopback.json
-          comparison_status=$?
-          set -e
-          test -s network-perf-results/comparison-linux-x86_64-host-loopback.json
-          echo "comparison exit status: ${comparison_status} (the raw result is evidence, not a workflow override)"
 
       - name: Upload reports
         if: always()

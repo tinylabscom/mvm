@@ -516,6 +516,7 @@ mod tests {
             resolved_digest: None,
             net: false,
             allow_host: vec![],
+            ai: None,
             ports: vec![],
             cpus: 1,
             memory: "256M".to_string(),

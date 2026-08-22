@@ -30,10 +30,11 @@ Use JSON output where commands support it when integrating with tooling.
 ```sh
 mvmctl machine exec agent-sandbox -- python /work/task.py
 mvmctl machine fs ls agent-sandbox /work
-mvmctl machine forward agent-sandbox -p 8080:8080
 ```
 
-Command execution, file operations, and port forwarding cross trust boundaries. Keep command args explicit, file paths narrow, and ports intentional.
+Command execution and file operations cross trust boundaries. Keep command
+args explicit and file paths narrow. Declare ingress before boot with
+`machine run --port`.
 
 ## Preserve state
 

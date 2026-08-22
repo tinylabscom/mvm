@@ -187,14 +187,12 @@ fn relay_supervisor_config_with_handoff(
         (!c.is_empty()).then(|| c.to_string())
     };
 
-    // Collect explicitly host-dialable channels: dev consoles are range-gated,
-    // while TCP ingress appears only when the admitted launch spec declared it.
+    // Collect explicitly host-dialable dev console channels.
     let console_data_sockets = spec
         .vsock
         .iter()
         .filter(|p| {
             matches!(p.service, GuestService::ConsoleData { port } if dev_console_data_ports().any(|cp| cp == port))
-                || matches!(p.service, GuestService::IngressTcp { .. })
         })
         .map(|p| HostDialSocket {
             guest_port: p.port(),
@@ -426,8 +424,6 @@ impl VmmDriver for HvfDriver {
             // and always routes egress through the per-VM endpoint over vsock.
             no_routable_guest_nic: true,
             host_vsock_proxy: true,
-            // HVF presents no network device to the guest whatsoever.
-            l3_vsock: true,
             // The hvf VMM can serve the unpacked OCI tree as a read-only
             // virtiofs root (dev tier); the run-path tier gate selects it only for
             // non-prod, non-sealed workloads. This stays gated on the launchable

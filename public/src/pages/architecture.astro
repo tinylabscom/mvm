@@ -1,0 +1,27 @@
+---
+// The architecture overview, rendered inside the Starlight shell.
+//
+// This used to be public/architecture.html — a standalone file served
+// straight out of Astro's public/ directory, which meant it bypassed the
+// shell entirely and carried its own nav, its own palette, its own fonts
+// and its own dark-mode rules. Nothing kept those in sync with the rest of
+// the site, and nothing ever did.
+//
+// `template: "splash"` selects the landing chrome (header with the theme
+// toggle, no docs sidebar) rather than the docs chrome, because this is an
+// overview page and not a docs page. `hero: {}` is load-bearing: Page.astro
+// branches on it, and the hero branch is the one that skips PageTitle — so
+// the page's own headline is the only h1, rather than competing with a
+// Starlight-rendered "Architecture" above it.
+import StarlightPage from "@astrojs/starlight/components/StarlightPage.astro";
+---
+
+<StarlightPage
+  frontmatter={{
+    title: "Architecture",
+    description:
+      "How mvm runs untrusted code — AI agents, customer workloads, build jobs — inside sealed, immutable, hardware-isolated microVMs, and where it sits inside a company's systems.",
+    template: "splash",
+    hero: {},
+  }}
+/>

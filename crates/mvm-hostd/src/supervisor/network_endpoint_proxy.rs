@@ -23,7 +23,11 @@ use url::Url;
 use zeroize::Zeroizing;
 
 use mvm_contract::ir::AuthType;
+use mvm_core::observability::instance_metrics::{
+    InstanceLabels, InstanceMetricsRegistry, global as instance_metrics_global,
+};
 use mvm_core::plan::SecretBinding;
+use mvm_core::policy::audit::ai_usage::AiUsageRecord;
 use mvm_core::substitution_wire::{WireRequest, WireResponse};
 
 use crate::framing::{FrameError, read_json_frame, write_json_frame};
@@ -35,6 +39,7 @@ use crate::keyholder::{
 use crate::supervisor::accept_loop::{
     AcceptAction, classify_accept_error, record_listener_stopped,
 };
+use crate::supervisor::ai_meter;
 use crate::supervisor::audit_recorder::{EventCategory, Recorder};
 use crate::supervisor::network::stages::{RedactingSubstitution, RedactionHits};
 use crate::supervisor::reversible_replacement::{
@@ -747,6 +752,9 @@ pub enum FromPlanError {
 pub struct FromPlanInputs<'a> {
     pub plan_secrets: &'a [SecretBinding],
     pub tenant: &'a str,
+    /// VM instance identifier used to attribute AI egress metrics and audit
+    /// records. An empty string means the endpoint has no instance context.
+    pub instance_id: &'a str,
     pub bindings: &'a dyn BindingStore,
     /// The value resolver the service resolves each bound secret through. Built
     /// by the caller (`assemble`) from `EndpointConfig.resolver`: a
@@ -761,6 +769,9 @@ pub struct FromPlanInputs<'a> {
     pub reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy,
     pub tls_intermediate: Option<mvm_core::crypto::egress_ca::VmIntermediate>,
     pub recorder: Option<Recorder>,
+    /// Per-VM AI egress metering/budget policy. `None` means AI egress is not
+    /// metered and no budget is enforced.
+    pub ai_policy: Option<mvm_contract::policy::network_policy::AiPolicy>,
 }
 
 /// Forwards a prepared (credential-substituted) request to the real
@@ -971,7 +982,7 @@ pub struct SubstitutionService {
     redactor: RedactingSubstitution,
     /// Optional chain-signed audit recorder. When set, each substitution emits
     /// a `secret.substituted` entry (metadata only — claim 13).
-    recorder: Option<Recorder>,
+    recorder: Option<Arc<Recorder>>,
     /// The per-VM name-constrained intermediate the `https` terminator mints
     /// per-SNI leaves under. `None` ⇒ no TLS leg (`http`-only). Set from
     /// `EndpointConfig.tls_intermediate` at assemble.
@@ -987,7 +998,18 @@ pub struct SubstitutionService {
     /// against the VM's resolved network policy before any forward — an
     /// unadmitted `host:port` is refused here. `None` ⇒ this endpoint does not
     /// gate (the run loop's gate is still active); a `Some` gate fails closed.
-    egress_gate: Option<mvm_runtime::vmm::egress_gate::EgressGate>,
+    egress_gate: Option<Arc<mvm_runtime::vmm::egress_gate::EgressGate>>,
+    /// Per-VM AI egress metering/budget policy. `None` means AI egress is not
+    /// metered and no budget is enforced.
+    ai_policy: Option<mvm_contract::policy::network_policy::AiPolicy>,
+    /// Per-VM AI token budget tracker, present only when metering is enabled.
+    ai_tracker: Option<Arc<ai_meter::AiBudgetTracker>>,
+    /// VM instance identifier used to attribute AI egress metrics.
+    instance_id: Option<String>,
+    /// Optional per-VM metrics registry for AI counters. When `None`, the
+    /// process-global registry is used.
+    instance_metrics:
+        Option<Arc<mvm_core::observability::instance_metrics::InstanceMetricsRegistry>>,
 }
 
 /// Failure to resolve host-owned transformation material by its signed plan
@@ -1022,6 +1044,10 @@ struct PreparedFlow {
 /// still cannot reach a stable cut by twice that bound fails closed.
 const STREAM_TRANSFORM_OVERLAP: usize = 64 * 1024;
 const MAX_STREAM_TRANSFORM_PENDING: usize = STREAM_TRANSFORM_OVERLAP * 2;
+/// Cap on how much of a streaming AI response body we retain for trailing
+/// usage extraction. SSE usage blocks are small and appear at the end of the
+/// stream; this buffer only keeps the tail so guest bandwidth is unaffected.
+const MAX_AI_STREAM_BUFFER_BYTES: usize = 256 * 1024;
 
 pub(crate) struct StreamingRedactor {
     pending: Zeroizing<Vec<u8>>,
@@ -1195,6 +1221,10 @@ impl SubstitutionService {
             reversible_replacement_policy: mvm_core::policy::ReversibleReplacementPolicy::default(),
             replacement_engine: ReplacementEngine::new(),
             egress_gate: None,
+            ai_policy: None,
+            ai_tracker: None,
+            instance_id: None,
+            instance_metrics: None,
         }
     }
 
@@ -1353,6 +1383,12 @@ impl SubstitutionService {
     /// Attach a chain-signed audit recorder; each substitution then emits a
     /// `secret.substituted` entry (metadata only — claim 13).
     pub fn with_recorder(mut self, recorder: Recorder) -> Self {
+        self.recorder = Some(Arc::new(recorder));
+        self
+    }
+
+    /// Attach the endpoint's shared chain-signed audit sink.
+    pub fn with_shared_recorder(mut self, recorder: Arc<Recorder>) -> Self {
         self.recorder = Some(recorder);
         self
     }
@@ -1370,7 +1406,59 @@ impl SubstitutionService {
     /// Attach the claim-10 egress gate. Once attached, `process` refuses any
     /// destination the VM's network policy doesn't admit before forwarding.
     pub fn with_egress_gate(mut self, gate: mvm_runtime::vmm::egress_gate::EgressGate) -> Self {
+        self.egress_gate = Some(Arc::new(gate));
+        self
+    }
+
+    /// Attach the endpoint's shared claim-10 policy object.
+    pub fn with_shared_egress_gate(
+        mut self,
+        gate: Arc<mvm_runtime::vmm::egress_gate::EgressGate>,
+    ) -> Self {
         self.egress_gate = Some(gate);
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn shared_projection_ids(&self) -> (Option<usize>, Option<usize>) {
+        (
+            self.egress_gate
+                .as_ref()
+                .map(|gate| Arc::as_ptr(gate).cast::<()>() as usize),
+            self.recorder
+                .as_ref()
+                .map(|recorder| Arc::as_ptr(recorder).cast::<()>() as usize),
+        )
+    }
+
+    /// Attach the VM instance identifier used to attribute AI egress metrics
+    /// and audit records. Empty strings are treated as absent.
+    pub fn with_instance_id(mut self, instance_id: impl Into<String>) -> Self {
+        let id = instance_id.into();
+        self.instance_id = (!id.is_empty()).then_some(id);
+        self
+    }
+
+    /// Attach a per-VM AI egress metering/budget policy. Metering is only
+    /// active when `policy.metering` is `true`.
+    pub fn with_ai_policy(
+        mut self,
+        policy: mvm_contract::policy::network_policy::AiPolicy,
+    ) -> Self {
+        if policy.metering {
+            self.ai_tracker = Some(Arc::new(ai_meter::AiBudgetTracker::new(policy.budget)));
+        }
+        self.ai_policy = Some(policy);
+        self
+    }
+
+    /// Override the per-VM metrics registry used for AI counters. When not
+    /// set, the process-global registry is used.
+    pub fn with_instance_metrics(
+        mut self,
+        registry: Arc<mvm_core::observability::instance_metrics::InstanceMetricsRegistry>,
+    ) -> Self {
+        self.instance_metrics = Some(registry);
         self
     }
 
@@ -1387,6 +1475,7 @@ impl SubstitutionService {
         let FromPlanInputs {
             plan_secrets,
             tenant,
+            instance_id,
             bindings,
             resolver,
             forward_timeout_secs,
@@ -1395,11 +1484,14 @@ impl SubstitutionService {
             reversible_replacement,
             tls_intermediate,
             recorder,
+            ai_policy,
         } = inputs;
         let (registry, handed) = assemble_registry(plan_secrets, tenant, bindings)?;
         let forwarder: Arc<dyn Forwarder> =
             Arc::new(HardenedForwarder::new(forward_timeout_secs)?.with_proxy(proxy));
-        let mut service = Self::new(Arc::new(registry), resolver, forwarder).with_tenant(tenant);
+        let mut service = Self::new(Arc::new(registry), resolver, forwarder)
+            .with_tenant(tenant)
+            .with_instance_id(instance_id);
         service = service.with_redaction_policy(redaction);
         service = service.with_reversible_replacement_policy(reversible_replacement);
         if let Some(intermediate) = tls_intermediate {
@@ -1407,6 +1499,9 @@ impl SubstitutionService {
         }
         if let Some(recorder) = recorder {
             service = service.with_recorder(recorder);
+        }
+        if let Some(policy) = ai_policy {
+            service = service.with_ai_policy(policy);
         }
         Ok((Arc::new(service), handed))
     }
@@ -1436,7 +1531,7 @@ impl SubstitutionService {
                     AcceptAction::Fatal => {
                         tracing::error!(error = %e, "substitution endpoint accept failed; stopping");
                         record_listener_stopped(
-                            self.recorder.as_ref(),
+                            self.recorder.as_deref(),
                             "substitution-uds",
                             &e.to_string(),
                         )
@@ -1475,7 +1570,7 @@ impl SubstitutionService {
                     AcceptAction::Fatal => {
                         tracing::error!(error = %e, "vsock substitution accept failed; stopping");
                         record_listener_stopped(
-                            self.recorder.as_ref(),
+                            self.recorder.as_deref(),
                             "substitution-vsock",
                             &e.to_string(),
                         )
@@ -1488,7 +1583,7 @@ impl SubstitutionService {
                 Err(e) => {
                     tracing::error!(error = %e, "vsock accept task panicked; stopping");
                     record_listener_stopped(
-                        self.recorder.as_ref(),
+                        self.recorder.as_deref(),
                         "substitution-vsock",
                         &e.to_string(),
                     )
@@ -1549,7 +1644,7 @@ impl SubstitutionService {
                     AcceptAction::Fatal => {
                         tracing::error!(error = %e, "terminator accept failed; stopping");
                         record_listener_stopped(
-                            self.recorder.as_ref(),
+                            self.recorder.as_deref(),
                             "terminator",
                             &e.to_string(),
                         )
@@ -1836,10 +1931,24 @@ impl SubstitutionService {
             .request
             .take()
             .expect("a prepared flow owns exactly one request");
+        if self.ai_budget_exceeded() && ai_meter::is_known_ai_provider(&request.url) {
+            self.audit_ai_budget_exceeded(&flow, &request.url).await;
+            return WireResponse::Refused {
+                message: "AI egress budget exceeded".into(),
+            };
+        }
+        let ai_meta = self.ai_tracker().map(|_| AiRequestMeta {
+            method: request.method.clone(),
+            url: request.url.clone(),
+        });
         match self.forwarder.forward(request).await {
             Ok(mut response) => {
                 let reinject_proofs = flow.replacement_flow.reinject_response(&mut response);
                 self.audit_completed_flow(&flow, &reinject_proofs).await;
+                if let Some(meta) = ai_meta {
+                    self.record_ai_usage(&meta, response.status, &response.body)
+                        .await;
+                }
                 WireResponse::Ok {
                     status: response.status,
                     headers: response.headers,
@@ -1863,6 +1972,16 @@ impl SubstitutionService {
             .request
             .take()
             .expect("a prepared flow owns exactly one request");
+        if self.ai_budget_exceeded() && ai_meter::is_known_ai_provider(&request.url) {
+            self.audit_ai_budget_exceeded(&flow, &request.url).await;
+            return Err(WireResponse::Refused {
+                message: "AI egress budget exceeded".into(),
+            });
+        }
+        let ai_meta = self.ai_tracker().map(|_| AiRequestMeta {
+            method: request.method.clone(),
+            url: request.url.clone(),
+        });
         let upstream = self
             .forwarder
             .forward_stream(request)
@@ -1871,7 +1990,8 @@ impl SubstitutionService {
                 message: error.to_string(),
             })?;
 
-        self.transform_response_stream(flow, upstream).await
+        self.transform_response_stream(flow, upstream, ai_meta)
+            .await
     }
 
     /// Process a FlowMux request body as bounded chunks. Signing and
@@ -1962,6 +2082,16 @@ impl SubstitutionService {
             .request
             .take()
             .expect("a prepared flow owns exactly one request");
+        if self.ai_budget_exceeded() && ai_meter::is_known_ai_provider(&request.url) {
+            self.audit_ai_budget_exceeded(&flow, &request.url).await;
+            return Err(WireResponse::Refused {
+                message: "AI egress budget exceeded".into(),
+            });
+        }
+        let ai_meta = self.ai_tracker().map(|_| AiRequestMeta {
+            method: request.method.clone(),
+            url: request.url.clone(),
+        });
         let expected_len = head.body_len;
         let (sender, receiver) = tokio::sync::mpsc::channel(4);
         let service = Arc::clone(self);
@@ -2077,13 +2207,15 @@ impl SubstitutionService {
                 message: "request transform failed closed".into(),
             })?;
         flow.redaction_hits.merge(request_hits);
-        self.transform_response_stream(flow, upstream).await
+        self.transform_response_stream(flow, upstream, ai_meta)
+            .await
     }
 
     async fn transform_response_stream(
         self: &Arc<Self>,
         mut flow: PreparedFlow,
         mut upstream: ForwardStreamResponse,
+        ai_meta: Option<AiRequestMeta>,
     ) -> Result<ForwardStreamResponse, WireResponse> {
         // Reinject and redact response headers before any body byte can cross
         // to the guest. HTTP transfer framing belongs to the upstream leg, not
@@ -2123,8 +2255,14 @@ impl SubstitutionService {
         let (sender, receiver) = tokio::sync::mpsc::channel(4);
         let service = Arc::clone(self);
         let response_destination = flow.destination.clone();
+        let meter_streaming = ai_meta.is_some();
         tokio::spawn(async move {
             let mut redactor = StreamingRedactor::new();
+            let mut ai_body_buffer = if meter_streaming {
+                Some(Vec::with_capacity(0))
+            } else {
+                None
+            };
             let mut reinjector = StreamingReinjector::new();
             while let Some(next) = upstream.body.recv().await {
                 let chunk = match next {
@@ -2134,6 +2272,11 @@ impl SubstitutionService {
                         return;
                     }
                 };
+                if let Some(buf) = ai_body_buffer.as_mut().filter(|buf| {
+                    buf.len().saturating_add(chunk.len()) <= MAX_AI_STREAM_BUFFER_BYTES
+                }) {
+                    buf.extend_from_slice(&chunk);
+                }
                 let (reintroduced, proofs) = reinjector.push(&mut flow.replacement_flow, &chunk);
                 reinject_proofs.extend(proofs);
                 let (ready, hits) =
@@ -2226,6 +2369,11 @@ impl SubstitutionService {
                 return;
             }
             service.audit_completed_flow(&flow, &reinject_proofs).await;
+            if let (Some(meta), Some(body)) = (ai_meta, ai_body_buffer) {
+                service
+                    .record_streaming_ai_usage(&meta, response_status, &body)
+                    .await;
+            }
         });
 
         Ok(ForwardStreamResponse {
@@ -4129,6 +4277,8 @@ mod server_tests {
         let (_service, handed) = SubstitutionService::from_plan(FromPlanInputs {
             plan_secrets: &plan,
             tenant: "local",
+            instance_id: "",
+            ai_policy: None,
             bindings: &bindings,
             resolver,
             forward_timeout_secs: 30,
@@ -4201,6 +4351,8 @@ mod server_tests {
         let (service, _handed) = SubstitutionService::from_plan(FromPlanInputs {
             plan_secrets: &plan,
             tenant: "local",
+            instance_id: "",
+            ai_policy: None,
             bindings: &bindings,
             resolver,
             forward_timeout_secs: 30,
@@ -4504,6 +4656,163 @@ mod server_tests {
     }
 }
 
+/// Minimal request metadata captured for AI metering so the streaming path
+/// doesn't need to own the whole prepared request after it has been handed
+/// to the forwarder.
+#[derive(Debug, Clone)]
+struct AiRequestMeta {
+    method: String,
+    url: String,
+}
+
+impl SubstitutionService {
+    fn ai_tracker(&self) -> Option<&std::sync::Arc<ai_meter::AiBudgetTracker>> {
+        self.ai_tracker.as_ref()
+    }
+
+    fn ai_budget_exceeded(&self) -> bool {
+        self.ai_tracker().map(|t| t.is_exceeded()).unwrap_or(false)
+    }
+
+    async fn record_ai_usage(&self, meta: &AiRequestMeta, status: u16, body: &[u8]) {
+        let Some(tracker) = self.ai_tracker() else {
+            return;
+        };
+        let Some(usage) = ai_meter::extract_usage(&meta.url, body) else {
+            return;
+        };
+        let totals = tracker.record(&usage);
+        self.update_ai_metrics(totals);
+        if let Some(recorder) = &self.recorder {
+            let record = self.build_ai_usage_record(meta, status, &usage, totals.exceeded);
+            if let Err(e) = recorder.record_ai_usage(&record).await {
+                tracing::warn!(error = %e, "ai.usage audit emit failed");
+            }
+            if totals.exceeded {
+                emit_ai_budget_exceeded(recorder, &record).await;
+            }
+        }
+    }
+
+    async fn record_streaming_ai_usage(&self, meta: &AiRequestMeta, status: u16, body: &[u8]) {
+        let Some(tracker) = self.ai_tracker() else {
+            return;
+        };
+        let Some(usage) = ai_meter::extract_streaming_usage(&meta.url, body) else {
+            return;
+        };
+        let totals = tracker.record(&usage);
+        self.update_ai_metrics(totals);
+        if let Some(recorder) = &self.recorder {
+            let record = self.build_ai_usage_record(meta, status, &usage, totals.exceeded);
+            if let Err(e) = recorder.record_ai_usage(&record).await {
+                tracing::warn!(error = %e, "ai.usage audit emit failed");
+            }
+            if totals.exceeded {
+                emit_ai_budget_exceeded(recorder, &record).await;
+            }
+        }
+    }
+
+    async fn audit_ai_budget_exceeded(&self, flow: &PreparedFlow, url: &str) {
+        let Some(recorder) = &self.recorder else {
+            return;
+        };
+        let (host, port, path) = parse_url_parts(url);
+        let destination = flow.destination.as_deref().unwrap_or(&host);
+        let record = AiUsageRecord {
+            trace_id: String::new(),
+            span_id: String::new(),
+            host: destination.to_string(),
+            port,
+            method: String::new(),
+            path,
+            provider: String::new(),
+            model: None,
+            input_tokens: None,
+            output_tokens: None,
+            total_tokens: None,
+            status: 0,
+            budget_exceeded: true,
+        };
+        if let Err(e) = recorder.record_ai_budget_exceeded(&record).await {
+            tracing::warn!(error = %e, destination, "ai.budget_exceeded audit emit failed");
+        }
+    }
+
+    fn update_ai_metrics(&self, totals: ai_meter::UsageTotals) {
+        let Some(instance_id) = self.instance_id.as_deref() else {
+            return;
+        };
+        let registry: &InstanceMetricsRegistry = match &self.instance_metrics {
+            Some(r) => r.as_ref(),
+            None => instance_metrics_global(),
+        };
+        if !registry.update_ai_counters(
+            instance_id,
+            totals.requests,
+            totals.input_tokens,
+            totals.output_tokens,
+            totals.total_tokens,
+        ) {
+            let labels = InstanceLabels {
+                instance_id: instance_id.to_string(),
+                tenant: self.tenant.clone(),
+                template: String::new(),
+            };
+            registry.register(labels);
+            let _ = registry.update_ai_counters(
+                instance_id,
+                totals.requests,
+                totals.input_tokens,
+                totals.output_tokens,
+                totals.total_tokens,
+            );
+        }
+    }
+
+    fn build_ai_usage_record(
+        &self,
+        meta: &AiRequestMeta,
+        status: u16,
+        usage: &ai_meter::ExtractedUsage,
+        budget_exceeded: bool,
+    ) -> AiUsageRecord {
+        let (host, port, path) = parse_url_parts(&meta.url);
+        AiUsageRecord {
+            trace_id: String::new(),
+            span_id: String::new(),
+            host,
+            port,
+            method: meta.method.clone(),
+            path,
+            provider: usage.provider.to_string(),
+            model: usage.model.clone(),
+            input_tokens: usage.input_tokens,
+            output_tokens: usage.output_tokens,
+            total_tokens: usage.total_tokens,
+            status,
+            budget_exceeded,
+        }
+    }
+}
+
+async fn emit_ai_budget_exceeded(recorder: &Recorder, record: &AiUsageRecord) {
+    if let Err(e) = recorder.record_ai_budget_exceeded(record).await {
+        tracing::warn!(error = %e, "ai.budget_exceeded audit emit failed");
+    }
+}
+
+fn parse_url_parts(url: &str) -> (String, u16, String) {
+    let Some(u) = Url::parse(url).ok() else {
+        return (String::new(), 0, String::new());
+    };
+    let host = u.host_str().unwrap_or("").to_string();
+    let port = u.port_or_known_default().unwrap_or(0);
+    let path = u.path().to_string();
+    (host, port, path)
+}
+
 #[cfg(test)]
 #[test]
 fn ingress_transform_audit_contains_only_bounded_metadata() {
@@ -4595,5 +4904,244 @@ mod error_audit_tests {
             assert_eq!(error_audit(&err, false), ErrorAudit::Silent, "{err}");
             assert_eq!(error_audit(&err, true), ErrorAudit::Silent, "{err}");
         }
+    }
+}
+
+#[cfg(test)]
+mod ai_metering_tests {
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+    use base64::Engine;
+    use base64::engine::general_purpose::STANDARD as B64;
+
+    use super::*;
+    use crate::keyholder::SubstitutionRegistry;
+    use mvm_contract::policy::network_policy::AiPolicy;
+    use mvm_core::observability::instance_metrics::InstanceMetricsRegistry;
+    use secrecy::SecretBox;
+
+    struct NullResolver;
+
+    impl crate::keyholder::SecretResolver for NullResolver {
+        fn resolve(
+            &self,
+            _r: &crate::keyholder::SecretRef,
+        ) -> Result<SecretBox<Vec<u8>>, crate::keyholder::ResolveError> {
+            Err(crate::keyholder::ResolveError::Unbound {
+                name: String::new(),
+            })
+        }
+    }
+
+    struct TestForwarder {
+        status: u16,
+        body: Vec<u8>,
+    }
+
+    impl TestForwarder {
+        fn ok(body: impl Into<Vec<u8>>) -> Self {
+            Self {
+                status: 200,
+                body: body.into(),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Forwarder for TestForwarder {
+        async fn forward(&self, _req: PreparedRequest) -> Result<ForwardResponse, ForwardError> {
+            Ok(ForwardResponse {
+                status: self.status,
+                headers: Vec::new(),
+                body: self.body.clone(),
+            })
+        }
+
+        async fn forward_stream(
+            &self,
+            _req: PreparedRequest,
+        ) -> Result<ForwardStreamResponse, ForwardError> {
+            let (sender, receiver) = tokio::sync::mpsc::channel(2);
+            for chunk in self.body.chunks(64) {
+                sender
+                    .send(Ok(chunk.to_vec()))
+                    .await
+                    .map_err(|_| ForwardError::Failed("consumer closed".into()))?;
+            }
+            Ok(ForwardStreamResponse {
+                status: self.status,
+                headers: Vec::new(),
+                body_len: Some(self.body.len() as u64),
+                body: receiver,
+            })
+        }
+    }
+
+    fn openai_response() -> Vec<u8> {
+        br#"{"model":"gpt-4","usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}"#
+            .to_vec()
+    }
+
+    fn openai_stream() -> Vec<u8> {
+        b"data: {\"choices\":[]}\n\ndata: {\"model\":\"gpt-4\",\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":2,\"total_tokens\":5}}\n\n".to_vec()
+    }
+
+    fn wire_to(url: &str) -> WireRequest {
+        WireRequest {
+            method: "POST".into(),
+            url: url.into(),
+            headers: Vec::new(),
+            body_b64: B64.encode(b""),
+        }
+    }
+
+    fn metered_service(
+        forwarder: Arc<dyn Forwarder>,
+        policy: AiPolicy,
+    ) -> (Arc<SubstitutionService>, Arc<InstanceMetricsRegistry>) {
+        let metrics = Arc::new(InstanceMetricsRegistry::new());
+        let service = Arc::new(
+            SubstitutionService::new(
+                Arc::new(SubstitutionRegistry::default()),
+                Arc::new(NullResolver),
+                forwarder,
+            )
+            .with_instance_id("vm-1")
+            .with_ai_policy(policy)
+            .with_instance_metrics(Arc::clone(&metrics)),
+        );
+        (service, metrics)
+    }
+
+    #[tokio::test]
+    async fn process_records_openai_usage_in_tracker_and_metrics() {
+        let (service, metrics) = metered_service(
+            Arc::new(TestForwarder::ok(openai_response())),
+            AiPolicy::metered(),
+        );
+        let resp = service
+            .process(wire_to("https://api.openai.com/v1/chat/completions"))
+            .await;
+        assert!(matches!(resp, WireResponse::Ok { status: 200, .. }));
+
+        let tracker = service.ai_tracker().expect("metering was enabled");
+        assert_eq!(tracker.totals().requests, 1);
+        assert_eq!(tracker.totals().input_tokens, 10);
+        assert_eq!(tracker.totals().output_tokens, 5);
+        assert_eq!(tracker.totals().total_tokens, 15);
+
+        let (_, values) = metrics.get("vm-1").expect("instance registered");
+        assert_eq!(values.ai_requests_total, 1);
+        assert_eq!(values.ai_tokens_input_total, 10);
+        assert_eq!(values.ai_tokens_output_total, 5);
+        assert_eq!(values.ai_tokens_total_total, 15);
+    }
+
+    #[tokio::test]
+    async fn process_allows_request_that_exceeds_budget_then_refuses_the_next() {
+        let (service, _metrics) = metered_service(
+            Arc::new(TestForwarder::ok(openai_response())),
+            AiPolicy::metered_with_total_budget(5),
+        );
+
+        let first = service
+            .process(wire_to("https://api.openai.com/v1/chat/completions"))
+            .await;
+        assert!(matches!(first, WireResponse::Ok { status: 200, .. }));
+
+        let second = service
+            .process(wire_to("https://api.openai.com/v1/chat/completions"))
+            .await;
+        assert!(
+            matches!(second, WireResponse::Refused { ref message, .. } if message.contains("AI egress budget")),
+            "expected budget refusal, got {second:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn process_stream_records_openai_streaming_usage() {
+        let (service, metrics) = metered_service(
+            Arc::new(TestForwarder::ok(openai_stream())),
+            AiPolicy::metered(),
+        );
+        let stream = service
+            .process_stream(wire_to("https://api.openai.com/v1/chat/completions"))
+            .await
+            .expect("stream request succeeded");
+        assert_eq!(stream.status, 200);
+
+        // Drain the body so the spawned transform task finishes and records usage.
+        let mut receiver = stream.body;
+        let mut received = 0;
+        while let Some(chunk) = receiver.recv().await {
+            let chunk = chunk.expect("chunk ok");
+            received += chunk.len();
+        }
+        assert!(received > 0);
+
+        // Give the spawned task a moment to record usage.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let tracker = service.ai_tracker().expect("metering was enabled");
+        assert_eq!(tracker.totals().input_tokens, 3);
+        assert_eq!(tracker.totals().output_tokens, 2);
+        assert_eq!(tracker.totals().total_tokens, 5);
+
+        let (_, values) = metrics.get("vm-1").expect("instance registered");
+        assert_eq!(values.ai_tokens_total_total, 5);
+    }
+
+    #[tokio::test]
+    async fn unknown_provider_is_not_metered() {
+        let (service, metrics) = metered_service(
+            Arc::new(TestForwarder::ok(openai_response())),
+            AiPolicy::metered(),
+        );
+        let resp = service.process(wire_to("https://example.com/v1")).await;
+        assert!(matches!(resp, WireResponse::Ok { status: 200, .. }));
+
+        let tracker = service.ai_tracker().expect("metering was enabled");
+        assert_eq!(tracker.totals().requests, 0);
+        assert!(metrics.get("vm-1").is_none());
+    }
+
+    #[tokio::test]
+    async fn budget_refusal_only_blocks_known_ai_providers() {
+        let (service, _metrics) = metered_service(
+            Arc::new(TestForwarder::ok(openai_response())),
+            AiPolicy::metered_with_total_budget(5),
+        );
+
+        // First OpenAI call pushes the VM over budget.
+        let first = service
+            .process(wire_to("https://api.openai.com/v1/chat/completions"))
+            .await;
+        assert!(matches!(first, WireResponse::Ok { status: 200, .. }));
+
+        // A non-AI destination is still allowed after the budget is exhausted.
+        let other = service.process(wire_to("https://example.com/v1")).await;
+        assert!(matches!(other, WireResponse::Ok { status: 200, .. }));
+
+        // Another OpenAI call is refused.
+        let second = service
+            .process(wire_to("https://api.openai.com/v1/chat/completions"))
+            .await;
+        assert!(
+            matches!(second, WireResponse::Refused { ref message, .. } if message.contains("AI egress budget")),
+        );
+    }
+
+    #[tokio::test]
+    async fn disabled_policy_skips_metering() {
+        let (service, _metrics) = metered_service(
+            Arc::new(TestForwarder::ok(openai_response())),
+            AiPolicy::disabled(),
+        );
+        let resp = service
+            .process(wire_to("https://api.openai.com/v1/chat/completions"))
+            .await;
+        assert!(matches!(resp, WireResponse::Ok { status: 200, .. }));
+        assert!(service.ai_tracker().is_none());
     }
 }

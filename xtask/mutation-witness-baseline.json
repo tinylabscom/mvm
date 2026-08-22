@@ -8,13 +8,6 @@
       ]
     },
     {
-      "path": "crates/mvm-agentd/src/l3/privdrop.rs",
-      "package": "mvm-agentd",
-      "claims": [
-        2
-      ]
-    },
-    {
       "path": "crates/mvm-agentd/src/vsock/verb_grant.rs",
       "package": "mvm-agentd",
       "claims": [
@@ -203,6 +196,13 @@
       ]
     },
     {
+      "path": "crates/mvm-hostd/src/bin/mvm-network-endpoint.rs",
+      "package": "mvm-hostd",
+      "claims": [
+        10
+      ]
+    },
+    {
       "path": "crates/mvm-hostd/src/broker/registry.rs",
       "package": "mvm-hostd",
       "claims": [
@@ -314,11 +314,11 @@
   "uncovered_claims": [
     {
       "number": 5,
-      "why": "no fn: witness \u2014 witnessed by CI lanes only, nothing to mutate"
+      "why": "no fn: witness — witnessed by CI lanes only, nothing to mutate"
     },
     {
       "number": 7,
-      "why": "no fn: witness \u2014 witnessed by CI lanes only, nothing to mutate"
+      "why": "no fn: witness — witnessed by CI lanes only, nothing to mutate"
     },
     {
       "number": 16,
@@ -330,11 +330,6 @@
       "file": "crates/mvm-agentd/src/bin/mvm-seccomp-apply.rs",
       "mutant": "replace main with ()",
       "reason": "replaces the binary's entrypoint with a no-op. The only witness would be executing the built binary, which this package's own test suite does not do; the claim-2 witness it calls, set_no_new_privs, is asserted directly."
-    },
-    {
-      "file": "crates/mvm-agentd/src/l3/privdrop.rs",
-      "mutant": "replace drop_privileges -> DropReport with Default::default()",
-      "reason": "mutates only the cfg(not(target_os = \"linux\")) no-op implementation while the security mutation shard runs on Linux, so that body is not compiled. Non-Linux unit coverage asserts the complete no-op report, while the Linux shard executes the real drop in an isolated privileged child and verifies the thread's kernel privilege state."
     },
     {
       "file": "crates/mvm-backends/src/driver/hvf.rs",
@@ -359,11 +354,6 @@
     {
       "file": "crates/mvm-backends/src/driver/hvf.rs",
       "mutant": "delete field host_vsock_proxy from struct VmCapabilities expression in <impl VmmDriver for HvfDriver>::capabilities",
-      "reason": "VmCapabilities field constants are assertions about HVF backend capability; their correctness is covered by admission and backend-selection integration tests."
-    },
-    {
-      "file": "crates/mvm-backends/src/driver/hvf.rs",
-      "mutant": "delete field l3_vsock from struct VmCapabilities expression in <impl VmmDriver for HvfDriver>::capabilities",
       "reason": "VmCapabilities field constants are assertions about HVF backend capability; their correctness is covered by admission and backend-selection integration tests."
     },
     {
@@ -634,11 +624,6 @@
     {
       "file": "crates/mvm-backends/src/driver/libkrun.rs",
       "mutant": "delete field fs_quick_checkpoint from struct VmCapabilities expression in <impl VmmDriver for LibkrunDriver>::capabilities",
-      "reason": "VmCapabilities field constants are assertions about libkrun backend capability; their correctness is covered by admission and backend-selection integration tests."
-    },
-    {
-      "file": "crates/mvm-backends/src/driver/libkrun.rs",
-      "mutant": "delete field l3_vsock from struct VmCapabilities expression in <impl VmmDriver for LibkrunDriver>::capabilities",
       "reason": "VmCapabilities field constants are assertions about libkrun backend capability; their correctness is covered by admission and backend-selection integration tests."
     },
     {
