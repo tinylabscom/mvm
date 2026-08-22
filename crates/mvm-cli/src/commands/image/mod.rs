@@ -32,7 +32,6 @@ mod trust_policy;
 // sibling verb modules' `super::<name>` calls, and
 // `crate::commands::vm::exec`'s `super::super::image::<name>` reach-in.
 use cache::{inspect_image, list_rows, remove_image, render_inspect, render_list};
-pub(in crate::commands) use materialize::oci_guest_runtime_compile_pending;
 use oci_types::CosignIdentity;
 pub(in crate::commands) use pull_core::ensure_prod_digest_pin;
 use pull_core::pull_image_with_trust;

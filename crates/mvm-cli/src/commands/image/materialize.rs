@@ -356,16 +356,6 @@ pub(super) fn copy_tree(src: &Path, dst: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Whether booting an `--image` OCI run will cross-compile the mvm guest
-/// runtime from source first. Announcing this before the pull keeps the slow,
-/// output-silent artifact build from looking like a hang.
-pub(in crate::commands) fn oci_guest_runtime_compile_pending(cache_root: &Path) -> bool {
-    mvm_build::guest_agent_build::source_build_pending(
-        cache_root,
-        mvm_core::arch::GuestArch::host(),
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::super::oci_types::{CachedOciImage, CachedOciLayer};
