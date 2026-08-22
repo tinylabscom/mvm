@@ -927,36 +927,37 @@ impl FlowMuxSession {
             .map_err(|e| FlowMuxError::FrameRefused(format!("invalid UdpSend address: {e}")))?;
         let target = format!("{ip}:{port}");
 
-        if relay.2 == UdpPeerAdmission::GuestMayIntroduce
-            && let Some(reason) = self
+        if relay.2 == UdpPeerAdmission::GuestMayIntroduce {
+            if let Some(reason) = self
                 .substitution
                 .as_ref()
                 .and_then(|service| service.opaque_refusal_reason(&ip.to_string()))
-        {
-            warn!(stream_id, %target, reason, "FlowMux opaque UDP transform refused");
-            self.emit_audit(
-                EventCategory::Host,
-                "host.flow.denied",
-                BTreeMap::from([
-                    ("stream_id".to_string(), stream_id.to_string()),
-                    ("class".to_string(), "udp".to_string()),
-                    ("target".to_string(), target),
-                    ("reason".to_string(), "typed_transform_required".to_string()),
-                ]),
-            );
-            return Ok(());
-        }
-
-        match self.gate.decide_udp_request(&target) {
-            EgressVerdict::Allow { .. } => {}
-            EgressVerdict::Deny(reason) => {
-                warn!(stream_id, %target, %reason, "FlowMux UDP datagram denied");
+            {
+                warn!(stream_id, %target, reason, "FlowMux opaque UDP transform refused");
+                self.emit_audit(
+                    EventCategory::Host,
+                    "host.flow.denied",
+                    BTreeMap::from([
+                        ("stream_id".to_string(), stream_id.to_string()),
+                        ("class".to_string(), "udp".to_string()),
+                        ("target".to_string(), target),
+                        ("reason".to_string(), "typed_transform_required".to_string()),
+                    ]),
+                );
                 return Ok(());
             }
-            EgressVerdict::Malformed => {
-                return Err(FlowMuxError::FrameRefused(
-                    "malformed UDP destination".to_string(),
-                ));
+
+            match self.gate.decide_udp_request(&target) {
+                EgressVerdict::Allow { .. } => {}
+                EgressVerdict::Deny(reason) => {
+                    warn!(stream_id, %target, %reason, "FlowMux UDP datagram denied");
+                    return Ok(());
+                }
+                EgressVerdict::Malformed => {
+                    return Err(FlowMuxError::FrameRefused(
+                        "malformed UDP destination".to_string(),
+                    ));
+                }
             }
         }
 
@@ -1951,7 +1952,9 @@ mod tests {
             &reply,
         );
         let mut response = [0_u8; 32];
-        let (received, _) = external.recv_from(&mut response).unwrap();
+        let (received, _) = external
+            .recv_from(&mut response)
+            .expect("observed UDP peer must receive the guest reply");
         assert_eq!(&response[..received], b"udp-response");
 
         let unknown = std::net::UdpSocket::bind((local_test_ip(), 0)).unwrap();

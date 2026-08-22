@@ -121,6 +121,14 @@ host test graphs and preserves the duplicate-major dependency invariant.
       exhaustion, TLS-key non-disclosure, streaming transform, audit, and
       teardown tests plus BDD coverage.
 
+The public-surface CI rerun exposed a stack-order defect in the completed UDP
+ingress work: replies to peers already observed by an ingress mapping were
+still evaluated as guest-introduced outbound destinations. The session now
+applies outbound transform and egress admission only when the guest introduces
+a new peer; the relay's observed-peer table remains the authority for ingress
+replies and rejects unseen destinations. The focused regression passes five
+consecutive runs.
+
 ### W5 — Remove the rejected public compatibility surface
 
 - [x] Remove `raw_ip_stack` and `NetworkMode::L3Vsock` from the Rust IR,
