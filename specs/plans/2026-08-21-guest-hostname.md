@@ -28,6 +28,9 @@ name shown by `mvmctl machine ls`, without creating backend-specific boot paths.
 - [x] Cover valid, missing, malformed, syscall-error, shared-assembler, and
       boot-argument-validator paths with focused tests, plus cold/warm cmdline
       parity and backward-compatible wire round trips.
+- [x] Regenerate the protocol schema and Python and TypeScript bindings for the
+      optional post-restore hostname field, and pass the code-generation drift
+      gate.
 - [x] Add a live BDD scenario that runs `/bin/hostname` in a named machine.
 - [x] Update delivery and refactor status for issue #2789.
 

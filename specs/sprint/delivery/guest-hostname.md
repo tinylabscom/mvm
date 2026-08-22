@@ -13,4 +13,6 @@ legacy compatibility, and syscall errors are reported without a panic.
 
 Focused tests cover the shared backend path, malformed input, missing input,
 syscall failure, the artifact boot-argument validator, warm-parent parity, the
-post-restore wire round trip, and a live BDD `/bin/hostname` scenario.
+post-restore wire round trip, and a live BDD `/bin/hostname` scenario. The
+generated protocol schema and Python and TypeScript bindings carry the optional
+post-restore hostname, and the code-generation drift gate passes.

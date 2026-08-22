@@ -1749,6 +1749,13 @@
                   "format": "uint64",
                   "minimum": 0.0
                 },
+                "hostname": {
+                  "description": "Workload identity to install as the kernel hostname after a warm parent is restored into a named child. Legacy resume callers omit it and leave the current hostname unchanged.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
                 "token": {
                   "default": [
                     0,
