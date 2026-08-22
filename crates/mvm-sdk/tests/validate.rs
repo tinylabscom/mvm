@@ -300,6 +300,7 @@ fn workload_with_ingress(ports: Vec<PortForward>) -> Workload {
         egress: None,
         peers: vec![],
         dns: None,
+        ai: None,
     });
     workload
 }
