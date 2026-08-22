@@ -726,7 +726,7 @@ fn run_cargo_zigbuild(spec: ZigbuildSpec<'_>) {
     }
     let status = cmd.status().expect(
         "spawn `cargo zigbuild` — \
-         install with: `cargo install cargo-zigbuild --version 0.20.0`",
+         install with: `cargo install cargo-zigbuild --version 0.23.0`",
     );
     assert!(
         status.success(),
@@ -906,7 +906,7 @@ pub const BOOTSTRAP_SUPPORT_BINARIES: &[SourceBuiltBinary] = &[
     fn resolve_target_for_arch_picks_pinned_triple() {
         let toolchain: toml::Value = toml::from_str(
             "zig = \"0.13.0\"\n\
-             cargo-zigbuild = \"0.20.0\"\n\
+             cargo-zigbuild = \"0.23.0\"\n\
              [targets]\n\
              aarch64 = \"aarch64-unknown-linux-musl\"\n\
              x86_64 = \"x86_64-unknown-linux-musl\"\n",

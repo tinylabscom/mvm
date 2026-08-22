@@ -184,41 +184,48 @@ const JSON_BYTE_ARRAY_WORST_CASE: usize = 4;
 
 /// How far a payload byte expands between the handler and the wire.
 ///
-/// Content crosses *two* nested `Vec<u8>` JSON encodings, not one. First the
-/// `GuestRequest` / `GuestResponse` body is serialized, inflating each content
-/// byte. That whole JSON document is then sealed, and the resulting ciphertext
-/// is itself a `Vec<u8>` — `SignedPayload::payload` — which
-/// `AuthenticatedSession::write` serializes as a second integer array. Neither
-/// hop is base64, so the expansions multiply.
+/// One hop: the `GuestRequest` / `GuestResponse` body, where content is a
+/// `Vec<u8>` and `serde_json` writes it as an integer array. The envelope
+/// around that body is binary — `SealedFrame::encode` — so the ciphertext
+/// crosses no second JSON encoding.
 ///
-/// Sizing the chunk cap against a single encoding is what let a stdout chunk
-/// pass the handler's own [`MAX_FRAME_SIZE`] check and then fail the identical
-/// check on the sealed envelope, spending a sequence number on a frame that
-/// never reached the wire.
-const SEALED_ENVELOPE_EXPANSION: usize = JSON_BYTE_ARRAY_WORST_CASE * JSON_BYTE_ARRAY_WORST_CASE;
+/// It used to. When the envelope was JSON as well, this was `4 * 4` and the
+/// cap below was a quarter of what it is now, because a `Vec<u8>` ciphertext
+/// was itself re-encoded as an integer array. Sizing against a single hop
+/// while the wire charged for two is what let a stdout chunk pass the
+/// handler's own [`MAX_FRAME_SIZE`] check and then fail the identical check on
+/// the envelope.
+const SEALED_ENVELOPE_EXPANSION: usize = JSON_BYTE_ARRAY_WORST_CASE;
 
-/// Room reserved for everything in the two envelopes that is not content: the
-/// variant tags and field names, the session id, timestamp, signer id and
-/// signature, and the GCM tag. Generous on purpose — the cost of over-reserving
-/// is a slightly smaller chunk, and the cost of under-reserving is a dead
-/// session.
+/// Room reserved for everything in the frame that is not content: the body's
+/// own variant tags and field names, and the binary envelope's fixed header —
+/// session id, sequence, timestamp, signer id, signature — plus the GCM tag.
+/// Generous on purpose: over-reserving costs a slightly smaller chunk, and
+/// under-reserving costs a dead session.
 const SEALED_ENVELOPE_OVERHEAD: usize = 8 * 1024;
 
-/// Maximum raw user-content bytes placed in one JSON data-plane frame.
+/// Maximum raw user-content bytes placed in one data-plane frame.
 ///
 /// Derived from what the wire can actually carry rather than picked: a chunk
-/// this size is guaranteed to fit under [`MAX_FRAME_SIZE`] after both JSON
-/// encodings. `sealed_worst_case_chunk_fits_the_frame_cap` proves it against
-/// the real envelope.
+/// this size fits under [`MAX_FRAME_SIZE`] after the body encoding.
+/// `sealed_worst_case_chunk_fits_the_frame_cap` exercises it against the real
+/// envelope.
 pub const MAX_DATA_CHUNK_SIZE: usize =
     (MAX_FRAME_SIZE - SEALED_ENVELOPE_OVERHEAD) / SEALED_ENVELOPE_EXPANSION;
 
-// A chunk must survive both encodings with the envelope still inside the cap.
-// Stated as a build-time assertion so a future edit to either constant cannot
-// silently reintroduce a chunk size the wire will not carry.
+// A chunk must survive the body encoding with the envelope still inside the
+// cap. Stated as a build-time assertion so a future edit to either constant
+// cannot silently reintroduce a chunk size the wire will not carry.
 const _: () = assert!(
     MAX_DATA_CHUNK_SIZE * SEALED_ENVELOPE_EXPANSION + SEALED_ENVELOPE_OVERHEAD <= MAX_FRAME_SIZE
 );
+
+/// Largest encoded sealed frame the control plane accepts off the wire.
+///
+/// Bounds the binary envelope, not the plaintext inside it: [`MAX_FRAME_SIZE`]
+/// caps the `GuestRequest` / `GuestResponse` body, and the envelope adds the
+/// GCM tag and its fixed header on top of that.
+pub const MAX_SEALED_FRAME_SIZE: usize = MAX_FRAME_SIZE + SEALED_ENVELOPE_OVERHEAD;
 
 /// Number of transport reconnect attempts before giving up.
 const CONNECT_RETRIES: u32 = 4;

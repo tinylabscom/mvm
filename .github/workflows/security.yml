@@ -318,12 +318,12 @@ jobs:
           RUSTUP_TOOLCHAIN: nightly-2026-06-11
         run: cargo fuzz run fuzz_guest_request -- -max_total_time="$DURATION"
 
-      - name: Fuzz AuthenticatedFrame (fuzz_authenticated_frame)
+      - name: Fuzz SealedFrame (fuzz_sealed_frame)
         working-directory: crates/mvm-agentd
         env:
           DURATION: ${{ steps.duration.outputs.secs }}
           RUSTUP_TOOLCHAIN: nightly-2026-06-11
-        run: cargo fuzz run fuzz_authenticated_frame -- -max_total_time="$DURATION"
+        run: cargo fuzz run fuzz_sealed_frame -- -max_total_time="$DURATION"
 
       - name: Fuzz bounded DNS codec (fuzz_dns_codec)
         working-directory: crates/mvm-agentd
