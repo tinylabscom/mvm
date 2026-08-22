@@ -6,7 +6,8 @@
 // `serde_json::from_slice::<HostVmResponse>`. We're asserting only
 // that the deserializer never panics — every parse failure must be a
 // typed `serde_json::Error`, not an unwind. The signed-envelope layer
-// (`AuthenticatedFrame`) is fuzzed separately by fuzz_authed_path.rs;
+// (`SealedFrame`) is fuzzed separately by fuzz_sealed_frame.rs and
+// fuzz_authed_path.rs;
 // this target covers only the inner HostVmRequest / HostVmResponse
 // payloads.
 //

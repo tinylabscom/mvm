@@ -35,6 +35,10 @@ path = ".."
 
 [dependencies.mvm-core]
 path = "../../mvm-core"
+# `paired_sessions_for_test` builds a session from a handed-over shared secret
+# so the post-auth target can drive `Session::open` without a handshake per
+# iteration. Gated so it cannot reach a production build.
+features = ["test-support"]
 
 [dependencies.mvm-contract]
 path = "../../mvm-contract"

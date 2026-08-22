@@ -46,8 +46,7 @@ pub use connection::{
     send_request_stream, vsock_uds_path,
 };
 pub use framing::{
-    AuthenticatedSession, handshake_as_guest, handshake_as_host, read_authenticated_frame,
-    read_frame, verify_authenticated_frame, write_authenticated_frame, write_frame,
+    AuthenticatedSession, handshake_as_guest, handshake_as_host, read_frame, write_frame,
 };
 pub use request::{GuestRequest, StageFile};
 pub use request_policy::RequestClass;

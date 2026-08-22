@@ -10,7 +10,7 @@
 //! The session is deliberately low-level. Callers bring their own framing:
 //!
 //! - `mvm-agentd::vsock` wraps sealed payloads in length-prefixed JSON
-//!   `AuthenticatedFrame`s for control RPC.
+//!   binary `SealedFrame`s for control RPC.
 //! - `mvm-network-endpoint` will wrap sealed payloads in `MVFM` binary frames
 //!   for FlowMux.
 //!
@@ -462,6 +462,42 @@ impl Session {
 
         Ok(plaintext)
     }
+}
+
+/// Two sessions sharing key material, as a completed handshake would leave
+/// them, without performing one.
+///
+/// Gated behind `test-support` so it cannot reach a production build: it is
+/// handed a shared secret rather than agreeing one, which is precisely what a
+/// real session must never do. Exists so tests and the `fuzz_authed_path`
+/// harness can drive [`Session::open`] directly — a handshake per fuzz
+/// iteration would cost more than the code under test.
+#[cfg(any(test, feature = "test-support"))]
+pub fn paired_sessions_for_test(
+    host_key: SigningKey,
+    guest_key: SigningKey,
+    shared_secret: [u8; 32],
+    session_id: &str,
+) -> (Session, Session) {
+    let host = Session::from_material(
+        host_key.clone(),
+        HandshakeMaterial {
+            peer_verifying_key: guest_key.verifying_key(),
+            session_id: session_id.to_string(),
+            shared_secret,
+        },
+        SessionRole::Host,
+    );
+    let guest = Session::from_material(
+        guest_key,
+        HandshakeMaterial {
+            peer_verifying_key: host_key.verifying_key(),
+            session_id: session_id.to_string(),
+            shared_secret,
+        },
+        SessionRole::Guest,
+    );
+    (host, guest)
 }
 
 impl SealedFrame {
@@ -955,30 +991,12 @@ mod tests {
     /// just completed. The host uses `host_key`, the guest uses `guest_key`,
     /// and each knows the other's verifying key.
     fn paired_sessions() -> (Session, Session) {
-        let host_key = test_keypair();
-        let guest_key = test_keypair();
-        let shared_secret = rand::random::<[u8; 32]>();
-        let session_id = "paired-test-session";
-
-        let host = Session::from_material(
-            host_key.clone(),
-            HandshakeMaterial {
-                peer_verifying_key: guest_key.verifying_key(),
-                session_id: session_id.to_string(),
-                shared_secret,
-            },
-            SessionRole::Host,
-        );
-        let guest = Session::from_material(
-            guest_key,
-            HandshakeMaterial {
-                peer_verifying_key: host_key.verifying_key(),
-                session_id: session_id.to_string(),
-                shared_secret,
-            },
-            SessionRole::Guest,
-        );
-        (host, guest)
+        super::paired_sessions_for_test(
+            test_keypair(),
+            test_keypair(),
+            rand::random::<[u8; 32]>(),
+            "paired-test-session",
+        )
     }
 
     #[test]
@@ -1003,6 +1021,32 @@ mod tests {
             assert_eq!(received_session_id, session_id);
             assert_eq!(session.peer_verifying_key(), &host_verify);
         });
+    }
+
+    /// `Session::open` refuses a frame whose version or signature algorithm it
+    /// does not speak, before any signature or ciphertext is touched.
+    ///
+    /// The sealed path had no witness for this. It inherited the property from
+    /// the JSON envelope's serde tests, which went when that envelope did —
+    /// so this is the check's first direct coverage rather than a port.
+    #[test]
+    fn an_unsupported_version_or_sig_alg_is_refused() {
+        for mutate in [
+            (|f: &mut SealedFrame| f.version = PROTOCOL_VERSION_AUTHENTICATED.wrapping_add(1))
+                as fn(&mut SealedFrame),
+            |f: &mut SealedFrame| f.sig_alg = SIG_ALG_ED25519.wrapping_add(1),
+        ] {
+            let (mut host, mut guest) = paired_sessions();
+            let mut sealed = host.seal(b"payload").unwrap();
+            mutate(&mut sealed);
+            assert!(
+                matches!(
+                    guest.open(&sealed),
+                    Err(SessionError::UnsupportedVersion { .. })
+                ),
+                "an unspoken version or algorithm must be refused by name"
+            );
+        }
     }
 
     #[test]
