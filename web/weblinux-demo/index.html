@@ -55,19 +55,26 @@
       font-size: 0.875rem;
       color: var(--muted);
     }
-    #log {
+    #terminal {
       background: #000;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      height: 65vh;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    #log {
+      flex: 1;
       color: #e6edf3;
       font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
       font-size: 0.8125rem;
       line-height: 1.4;
       padding: 1rem;
-      height: 65vh;
+      margin: 0;
       overflow-y: auto;
       white-space: pre-wrap;
       word-break: break-word;
-      border: 1px solid var(--border);
-      border-radius: 6px;
     }
     .ready { color: var(--success); font-weight: 600; }
     .error { color: var(--error); font-weight: 600; }
@@ -75,7 +82,9 @@
       display: flex;
       gap: 0.5rem;
       align-items: center;
-      margin-top: 0.5rem;
+      padding: 0.5rem 1rem;
+      border-top: 1px solid var(--border);
+      background: #000;
     }
     .input-line .prompt {
       color: var(--accent);
@@ -109,11 +118,13 @@
       <button id="stopBtn" disabled>Stop</button>
       <span id="status">Status: idle</span>
     </div>
-    <pre id="log"></pre>
-    <form id="input-form" class="input-line" autocomplete="off">
-      <span class="prompt">$</span>
-      <input id="command" type="text" spellcheck="false" autocomplete="off" disabled />
-    </form>
+    <div id="terminal">
+      <pre id="log"></pre>
+      <form id="input-form" class="input-line" autocomplete="off">
+        <span class="prompt">$</span>
+        <input id="command" type="text" spellcheck="false" autocomplete="off" disabled />
+      </form>
+    </div>
   </main>
   <script type="module" src="demo.js"></script>
 </body>
