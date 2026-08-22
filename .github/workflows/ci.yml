@@ -1575,6 +1575,9 @@ jobs:
     env:
       CARGO_TERM_COLOR: always
       MVM_HOME: ${{ github.workspace }}/.mvm-ci
+      # A cold no-KVM build compiles the workload under TCG and can exceed
+      # the normal 30-minute builder deadline while still making progress.
+      MVM_BUILDER_VM_TIMEOUT_SECS: 7200
     steps:
       - uses: actions/checkout@v6
 

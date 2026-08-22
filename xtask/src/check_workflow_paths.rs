@@ -776,6 +776,10 @@ mod tests {
     fn aarch64_no_kvm_smoke_grants_runner_vhost_vsock_access() {
         let workflow = ci_workflow();
         let smoke = job_block(&workflow, "aarch64-no-kvm-smoke");
+        assert!(
+            smoke.contains("MVM_BUILDER_VM_TIMEOUT_SECS: 7200"),
+            "the no-KVM cold build must have enough time to compile under QEMU TCG"
+        );
         let grant = concat!(
             "      - name: Grant QEMU access to vhost-vsock\n",
             "        run: |\n",

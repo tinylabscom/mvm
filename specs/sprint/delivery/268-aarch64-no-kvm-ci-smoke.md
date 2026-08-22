@@ -51,3 +51,10 @@ so it skipped its own idempotent drive copy and failed closed on the missing
 projection. Egress startup now treats all three files as one identity contract
 and reprovisions whenever any member is absent. A regression test covers the
 two-file legacy state and the complete three-file state.
+
+With identity provisioning repaired, the live lane progressed into the real
+Nix workload build and was killed only by the generic 1,800-second builder
+deadline while QEMU TCG was still compiling successfully. The no-KVM smoke
+now gives that inner builder run 7,200 seconds, within the job's existing
+five-hour ceiling; normal accelerated builder runs keep their stricter
+30-minute default. The workflow policy test pins the TCG-specific override.
