@@ -1,17 +1,18 @@
 #!/usr/bin/env node
 /**
- * Smoke test for the browser-tier microVM demo and the static site.
+ * Smoke test for the WebLinux browser demo and the static site.
  *
  * This script starts a tiny static server from the built `public/dist`
- * directory and uses Playwright to visit the landing page (to catch any
- * site-wide console errors) and then drive the /demo page through launch,
- * shell commands, allow/deny policy, and stop.
+ * directory (with COOP/COEP headers required by SharedArrayBuffer) and uses
+ * Playwright to visit the landing page and drive the /demo/weblinux page
+ * through run, shell interaction, and stop.
  *
  * Prerequisites: Playwright must be installed in a discoverable Node scope.
  *   cd public && pnpm add -D playwright
  *
- * Run after building the site:
- *   just demo-build
+ * Run after building and staging the WebLinux demo assets:
+ *   nix build .#qemu-wasm-smoke-pack
+ *   ./web/weblinux-demo/build.sh result
  *   just docs-build
  *   node public/tests/demo-e2e.mjs
  */
@@ -55,7 +56,11 @@ function startServer(port) {
       if (file.endsWith("/")) file += "index.html";
       if (!fs.existsSync(file)) file = path.join(ROOT, "index.html");
       const ext = path.extname(file);
-      res.writeHead(200, { "Content-Type": mime[ext] || "application/octet-stream" });
+      res.writeHead(200, {
+        "Content-Type": mime[ext] || "application/octet-stream",
+        "Cross-Origin-Opener-Policy": "same-origin",
+        "Cross-Origin-Embedder-Policy": "require-corp",
+      });
       fs.createReadStream(file).pipe(res);
     });
     server.listen(port, () => resolve(server));
@@ -65,7 +70,17 @@ function startServer(port) {
 async function runCommand(page, cmd) {
   await page.fill("#command", cmd);
   await page.press("#command", "Enter");
-  await page.waitForTimeout(400);
+  await page.waitForTimeout(500);
+}
+
+async function waitForLog(page, needle, timeoutMs = 60000) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const log = await page.$eval("#log", (el) => el.textContent);
+    if (log.includes(needle)) return log;
+    await page.waitForTimeout(500);
+  }
+  throw new Error(`timed out waiting for log to include: ${needle}`);
 }
 
 async function main() {
@@ -89,56 +104,26 @@ async function main() {
     await page.goto("http://localhost:8788/", { waitUntil: "networkidle" });
     await page.waitForTimeout(500);
 
-    await page.goto("http://localhost:8788/demo/", { waitUntil: "networkidle" });
-    await page.waitForTimeout(1500);
+    // Open the WebLinux demo with autorun so the engine starts immediately.
+    await page.goto("http://localhost:8788/demo/weblinux/?autorun=1", { waitUntil: "networkidle" });
 
-    // Launch with default allowlist policy.
-    await page.click("#launch");
-    await page.waitForTimeout(1500);
+    // Wait for the worker to report ready.
+    await waitForLog(page, "DEMO-RESULT: READY", 120000);
 
-    const consoleText = await page.$eval("#console", (el) => el.textContent);
-    if (!consoleText.includes("MicroVM")) {
-      throw new Error("microVM did not report as running");
+    // Run a shell command inside the guest.
+    await runCommand(page, "uname -a");
+    const logAfterCmd = await waitForLog(page, "Linux", 30000);
+    if (!logAfterCmd.includes("qemu")) {
+      // The demo's uname -a output includes "qemu" when running under QEMU-Wasm.
+      throw new Error("guest uname did not look like the QEMU-Wasm Linux guest");
     }
 
-    await runCommand(page, "cat /etc/policy");
-    const policyText = await page.$eval("#console", (el) => el.textContent);
-    if (!policyText.includes('"type":"allowlist"')) {
-      throw new Error("policy file not displayed");
-    }
-
-    await runCommand(page, "fetch echo.mvm.local 443");
-    const allowText = await page.$eval("#console", (el) => el.textContent);
-    if (!allowText.includes("fetch: allowed")) {
-      throw new Error("expected allow decision for echo.mvm.local");
-    }
-    if (!allowText.includes("response from simulated demo destination")) {
-      throw new Error("expected simulated destination response for echo.mvm.local");
-    }
-
-    // Stop and verify the first VM's audit chain.
-    await page.click("#stop");
-    await page.waitForTimeout(300);
-    const chainAfterStop = await page.$eval("#audit-chain", (el) => el.textContent);
-    if (!chainAfterStop.includes("vm.start") || !chainAfterStop.includes("egress.allow") || !chainAfterStop.includes("vm.stop")) {
-      throw new Error("first audit chain missing expected events. Full chain:\n" + chainAfterStop);
-    }
-
-    // Switch to deny-all and relaunch.
-    await page.waitForTimeout(500);
-    await page.fill("#policy", '{"type":"allowlist","rules":[]}');
-    await page.click("#launch");
-    await page.waitForTimeout(1500);
-    await runCommand(page, "fetch echo.mvm.local 443");
-    const denyText = await page.$eval("#console", (el) => el.textContent);
-    if (!denyText.includes("fetch: denied")) {
-      throw new Error("expected deny decision for empty allowlist");
-    }
-
-    // The second VM's chain should contain vm.start and egress.deny.
-    const auditText = await page.$eval("#audit-chain", (el) => el.textContent);
-    if (!auditText.includes("vm.start") || !auditText.includes("egress.deny")) {
-      throw new Error("second audit chain missing expected events");
+    // Stop the VM and confirm the worker tears down cleanly.
+    await page.click("#stopBtn");
+    await page.waitForTimeout(1000);
+    const status = await page.$eval("#status", (el) => el.textContent);
+    if (!status.includes("stopped")) {
+      throw new Error("demo did not report stopped status");
     }
 
     const relevant = messages.filter((m) => !["debug", "log", "info"].includes(m.type));
