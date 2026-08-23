@@ -298,7 +298,7 @@ ipnet = { version = "2", features = ["serde"] }
 # deps, fuzzed upstream. Lands on the untrusted-guest-bytes path (claim 5),
 # so a mature parser beats a hand-rolled one.
 etherparse = "0.20"
-async-trait = "0.1"
+async-trait = "=0.1.89"
 
 # Pure-Rust DNS resolver, used only by the opt-in custom-dns feature.
 hickory-resolver = "0.26"

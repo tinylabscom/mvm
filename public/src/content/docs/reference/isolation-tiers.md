@@ -106,11 +106,28 @@ boot, and close enough that latency stops being the deciding factor. You keep
 the full-OS compatibility and the whole security-claim chain above; you are
 just not paying the cold-boot cost on every start.
 
-| | Cold boot | Warm snapshot-restore | No-OS tier cold start |
-| --- | --- | --- | --- |
-| Compatibility | Any Linux workload | Any Linux workload | Restricted ABI (often Wasm) |
-| Security-claim chain | Full | Full, re-verified on restore | Narrower by construction |
-| Typical latency | Hundreds of ms to a few seconds | Tens of milliseconds (Firecracker/KVM) | Sub-millisecond |
+|                      | Cold boot                       | Warm snapshot-restore                  | No-OS tier cold start       |
+| -------------------- | ------------------------------- | -------------------------------------- | --------------------------- |
+| Compatibility        | Any Linux workload              | Any Linux workload                     | Restricted ABI (often Wasm) |
+| Security-claim chain | Full                            | Full, re-verified on restore           | Narrower by construction    |
+| Typical latency      | Hundreds of ms to a few seconds | Tens of milliseconds (Firecracker/KVM) | Sub-millisecond             |
+
+## Browser-tier WASI backend
+
+The browser-tier backend (`BrowserWasi`) runs workloads inside the browser's own WebAssembly engine. It is **claim-free**: there is no hypervisor boundary, no guest kernel, and no hardware isolation. The browser's process and sandbox boundaries are the only isolation layers.
+
+| Feature         | Browser-tier                                                       |
+| --------------- | ------------------------------------------------------------------ |
+| Isolation       | Browser sandbox/process isolation only                             |
+| Guest kernel    | None (WASI module)                                                 |
+| Virtual devices | None (WASI capability model)                                       |
+| vsock           | None                                                               |
+| Verified boot   | None                                                               |
+| Snapshots       | None                                                               |
+| Network         | Egress mediated through host-imports (`mvm:egress`), no native NIC |
+| Secure claims   | None (claim-free tier)                                             |
+
+This tier exists for demos, playgrounds, and browser-local development. It cannot be auto-selected and is never used for production workloads. When a browser-tier backend is selected, the same admission, policy, and audit semantics that apply to host backends are enforced inside the browser's own WebAssembly engine.
 
 ## When to pick which
 

@@ -1675,7 +1675,7 @@ mod tests {
     #[test]
     fn validate_volume_mountpoint_accepts_normal_paths() {
         assert!(validate_volume_mountpoint("/data").is_ok());
-        assert!(validate_volume_mountpoint("/mnt/app").is_ok());
+        assert!(validate_volume_mountpoint("/data/app").is_ok());
         assert!(validate_volume_mountpoint("/work/nested/other").is_ok());
     }
 

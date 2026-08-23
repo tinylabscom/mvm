@@ -734,7 +734,8 @@ mod tests {
         assert!(test.contains("name: Test"));
         assert!(test.contains(
             "needs: [scope, test-workspace, test-workspace-aarch64, test-linux, \
-             test-release-witness, test-ebpf-telemetry, bdd-conformance, kernel]"
+             test-release-witness, test-ebpf-telemetry, bdd-conformance, kernel, \
+             aarch64-no-kvm-smoke]"
         ));
 
         // Every lane the aggregate names must also be read back in the loop that
@@ -751,6 +752,7 @@ mod tests {
             "\"$EBPF_RESULT\"",
             "\"$BDD_RESULT\"",
             "\"$KERNEL_RESULT\"",
+            "\"$NO_KVM_RESULT\"",
         ] {
             assert!(
                 test.contains(expected),
@@ -925,19 +927,25 @@ mod tests {
             smoke.find(grant) < smoke.find("Build and boot the sealed exit_code workload"),
             "vhost-vsock access must be granted before QEMU starts"
         );
-        let current_embedded_bins = concat!(
-            "      - name: Build mvmctl\n",
-            "        env:\n",
-            "          # This witness boots embedded builder-guest code. A restored Cargo\n",
-            "          # cache may contain binaries built from an older source tree, which\n",
-            "          # would make the live gate validate stale mvm-host-vm-init behavior.\n",
-            "          MVM_EMBED_NO_CACHE: 1\n",
-            "        run: cargo build --release -p mvmctl",
-        );
-        assert!(
-            smoke.contains(current_embedded_bins),
-            "the live AArch64 gate must rebuild embedded host binaries from its checkout"
-        );
+        let source_build = smoke
+            .find("Build source mvmctl and published-builder bootstrap helper")
+            .expect("the live AArch64 gate must build source-matched mvmctl");
+        let source_copy = smoke
+            .find("cp target/release/mvmctl /tmp/mvmctl-source-under-test")
+            .expect("the source-matched mvmctl must be preserved before helper compilation");
+        let bootstrap = smoke
+            .find("Bootstrap source-matched launch artifacts")
+            .expect("the source-matched mvmctl must bootstrap its launch artifacts");
+        let workload = smoke
+            .find("/tmp/mvmctl-source-under-test machine run")
+            .expect("the live workload must run through the source-matched mvmctl");
+        assert!(smoke.contains("MVM_EMBED_NO_CACHE: 1"));
+        assert!(smoke.contains("cargo build --release -p mvmctl --features user"));
+        assert!(smoke.contains(
+            "cargo build --release -p mvmctl --features \
+             user,release-artifact-bootstrap,release-channel"
+        ));
+        assert!(source_build < source_copy && source_copy < bootstrap && bootstrap < workload);
     }
 
     #[test]

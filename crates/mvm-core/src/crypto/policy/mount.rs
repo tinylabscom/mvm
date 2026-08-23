@@ -7,16 +7,15 @@
 //!
 //! # Policy shape
 //!
-//! - **Allow-roots** — a share may *only* land at or under `/data`,
-//!   `/work`, or `/mnt`. An allow-list, not a deny-list: the rootfs
+//! - **Allow-roots** — a share may *only* land at or under `/data` or
+//!   `/work`. An allow-list, not a deny-list: the rootfs
 //!   and every runtime-managed mount is off-limits *by construction*
 //!   rather than by enumeration, so a path the policy has never heard
 //!   of is refused rather than admitted.
 //! - **Protected paths** — the paths the mvm runtime owns. Most sit
-//!   outside the allow-roots and are already unreachable; the ones
-//!   that matter are those *inside* an allow-root, notably the config
-//!   and secret drives under `/mnt`, which the allow-roots alone
-//!   would admit.
+//!   outside the allow-roots and are already unreachable. They remain
+//!   explicit so refusals identify the runtime path being protected and
+//!   future allow-root changes cannot silently expose them.
 //!
 //! # Containment is bidirectional
 //!
@@ -25,13 +24,11 @@
 //! **ancestor** of one (mounting *over* a parent, which shadows
 //! everything beneath it).
 //!
-//! The ancestor direction is not decoration. `/mnt` is an allow-root
-//! and `/mnt/config` is protected, so a descendant-only check admits
-//! a share at `/mnt` that hides the config and secret drives — or,
-//! if the share mounts first, lands the secret drive *inside* a
-//! host-shared directory. Any reserved path beneath an allow-root has
-//! this shape; checking both directions closes the class rather than
-//! the instance.
+//! The ancestor direction is not decoration. A share at `/mnt` would
+//! hide the protected `/mnt/config` and `/mnt/secrets` drives — or, if
+//! the share mounts first, land them inside a host-shared directory.
+//! Any reserved path beneath a future allow-root has this shape;
+//! checking both directions closes the class rather than the instance.
 //!
 //! Pure logic — no fs I/O. Callers feed the policy a string from
 //! the wire and get a typed verdict. The agent runs the actual
@@ -42,17 +39,24 @@ use std::path::Path;
 use thiserror::Error;
 
 /// Subtrees a share may mount under.
-pub const MOUNT_ALLOW_ROOTS: &[&str] = &["/data", "/work", "/mnt"];
+///
+/// `/mnt` is deliberately absent. The runtime owns it: `/init` mounts the
+/// read-only config and secret drives at `/mnt/config` and `/mnt/secrets`
+/// before any user volume is attached. While `/mnt` was an allow-root, a
+/// share placed at `/mnt` passed both the allow-root check and the
+/// reserved-path check — the latter only refuses a path that *names* a
+/// reserved drive — and mounted over drives that were already there,
+/// hiding them from the guest. Leaving `/mnt` off the list makes the whole
+/// subtree unreachable to a user volume, so that cannot be expressed.
+pub const MOUNT_ALLOW_ROOTS: &[&str] = &["/data", "/work"];
 
 /// Paths the mvm runtime owns, which a share may neither sit inside
 /// nor shadow.
 ///
-/// The entries beneath an allow-root are the load-bearing ones —
-/// `/mnt/config` and `/mnt/secrets` are reachable under the
-/// allow-roots and must be carved back out. The rest are outside the
-/// allow-roots already; they are listed so a refusal names the runtime
-/// path it is protecting instead of reporting a bare allow-root miss,
-/// and so widening an allow-root later cannot silently expose them.
+/// These entries are outside the shipped allow-roots already. They are
+/// listed so a refusal names the runtime path it is protecting instead of
+/// reporting a bare allow-root miss, and so widening an allow-root later
+/// cannot silently expose them.
 pub const PROTECTED_RUNTIME_PATHS: &[&str] = &[
     // Reachable under an allow-root: the config and secret drives.
     "/mnt/config",
@@ -299,10 +303,26 @@ mod tests {
 
     #[test]
     fn accepts_allow_roots() {
-        for path in ["/data", "/data/x/y", "/work", "/work/sandbox", "/mnt/share"] {
+        for path in ["/data", "/data/x/y", "/work", "/work/sandbox"] {
             validate_mount_path(path)
                 .unwrap_or_else(|e| panic!("expected accept for {path:?}, got {e}"));
         }
+    }
+
+    /// `/mnt` belongs to the runtime: `/init` mounts the config and secret
+    /// drives beneath it before any user volume is attached. Restoring it to
+    /// the allow-roots reintroduces a share at `/mnt` mounting over drives
+    /// that are already there.
+    #[test]
+    fn mnt_is_not_an_allow_root_so_the_runtime_drives_are_unreachable() {
+        for path in ["/mnt", "/mnt/foo", "/mnt/config", "/mnt/secrets"] {
+            assert!(validate_mount_path(path).is_err(), "{path} must be refused");
+        }
+        assert!(matches!(
+            validate_mount_path("/mnt/foo"),
+            Err(MountPathError::OutsideAllowRoots { .. })
+        ));
+        assert!(!MOUNT_ALLOW_ROOTS.contains(&"/mnt"));
     }
 
     #[test]
@@ -352,11 +372,10 @@ mod tests {
     /// The ancestor half of the containment rule, which is the whole
     /// reason the check runs in both directions.
     ///
-    /// `/mnt` is an allow-root, so an allow-roots-plus-descendants check
-    /// admits it — and a share there hides `/mnt/config` and
-    /// `/mnt/secrets`, or lands the secret drive inside a host-shared
-    /// directory depending on mount order. Deleting `shadowed_protected`
-    /// must fail this test.
+    /// A share at `/mnt` hides `/mnt/config` and `/mnt/secrets`, or lands
+    /// the secret drive inside a host-shared directory depending on mount
+    /// order. The protected-path check stays ahead of the allow-root check
+    /// so this reports the shadowing hazard directly.
     #[test]
     fn bare_mnt_is_refused_because_it_shadows_the_config_drive() {
         let err = validate_mount_path("/mnt").unwrap_err();
@@ -383,10 +402,13 @@ mod tests {
                 "{reserved}/nested is under a reserved drive"
             );
         }
-        // Siblings under the same allow-root stay fine, including one
-        // that merely shares a string prefix with a reserved drive.
-        for ok in ["/mnt/share", "/mnt/configx", "/mnt/secretsy"] {
-            validate_mount_path(ok).unwrap_or_else(|e| panic!("{ok} should be allowed: {e}"));
+        // Distinct siblings are not protected-path matches, but `/mnt` is
+        // not a user allow-root, so they remain unreachable.
+        for denied in ["/mnt/share", "/mnt/configx", "/mnt/secretsy"] {
+            assert!(matches!(
+                validate_mount_path(denied),
+                Err(MountPathError::OutsideAllowRoots { .. })
+            ));
         }
     }
 

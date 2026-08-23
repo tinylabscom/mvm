@@ -1828,7 +1828,7 @@ fn volume_mount_emits_vm_volume_add_audit_entry() {
             "--host",
             host_share.to_str().expect("utf-8 path"),
             "--guest",
-            "/mnt/data",
+            "/data/volume",
         ])
         .output()
         .expect("spawn mvmctl volume mount");
@@ -1849,8 +1849,8 @@ fn volume_mount_emits_vm_volume_add_audit_entry() {
         "vm_volume_add must carry vm_name=vol-test-vm. Full log:\n{log}"
     );
     assert!(
-        log.contains("guest=/mnt/data"),
-        "vm_volume_add detail must record guest=/mnt/data. Full log:\n{log}"
+        log.contains("guest=/data/volume"),
+        "vm_volume_add detail must record guest=/data/volume. Full log:\n{log}"
     );
 }
 
@@ -1974,7 +1974,7 @@ fn volume_unmount_emits_vm_volume_remove_audit_entry() {
             "--host",
             host_share.to_str().expect("utf-8 path"),
             "--guest",
-            "/mnt/data",
+            "/data/volume",
         ])
         .output()
         .expect("spawn mvmctl volume mount");
@@ -1986,7 +1986,7 @@ fn volume_unmount_emits_vm_volume_remove_audit_entry() {
 
     let unmount = sandbox
         .mvmctl()
-        .args(["machine", "volume", "unmount", "vol-rm-vm", "/mnt/data"])
+        .args(["machine", "volume", "unmount", "vol-rm-vm", "/data/volume"])
         .output()
         .expect("spawn mvmctl volume unmount");
     assert!(
