@@ -48,6 +48,11 @@ stale output cannot be selected.
   the source binary then bootstraps source-matched runtime artifacts before the
   first launch. The tagged release workflow verifies the future-format signed
   overlay through the production downloader before publishing it
+- shared QEMU architecture defaults prove both the builder and workload paths
+  select the AArch64 `virt` machine and PL011 console; failed pre-daemonization
+  workload launches retain a bounded QEMU-log tail in the returned error
+- focused QEMU architecture, workload-driver, and builder suites: 2, 16, and
+  22 tests respectively
 - refreshed standalone `mvm-hostd` fuzz lock under stable and pinned nightly
 - `cargo test -p mvm-build --features release-channel --lib official_build_does_not_detect`
 - `cargo run -p xtask -- check-guest-binary-lists`

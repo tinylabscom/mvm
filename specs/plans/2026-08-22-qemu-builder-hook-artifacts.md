@@ -15,6 +15,13 @@ but produced no `rootfs.ext4`. The console contained the earlier causal error:
 ext4 rejected `loop` as an unknown filesystem parameter while the
 `before_build` hook runner tried to mount the file-backed image.
 
+After artifact preservation was repaired, the live witness reached the
+workload launch and exposed a separate architecture gap: the workload driver
+selected `qemu-system-aarch64` without the mandatory `virt` machine and still
+used the x86 serial-console default. QEMU exited before daemonizing, and
+transient cleanup removed its log before the workflow diagnostic step could
+read it.
+
 Two independent defects turned that mount failure into a merged regression:
 
 - the generated job shell used `if ! command; then hook_rc=$?`, so `hook_rc`
@@ -35,7 +42,11 @@ Two independent defects turned that mount failure into a merged regression:
       return path.
 - [x] Make the AArch64 no-KVM job a dependency of `Test`, while preserving its
       merge-group/manual-only execution contract for ordinary pull requests.
+- [x] Share the existing QEMU host-architecture machine and serial-console
+      mapping between builder and workload launches, and prove the AArch64
+      workload argv selects `-machine virt` plus `console=ttyAMA0`.
+- [x] Include a bounded tail of `qemu.log` in pre-daemonization launch errors
+      so transient cleanup cannot erase the causal diagnostic.
 - [ ] Pass focused tests, formatting, workspace check/test, all-target Clippy,
       Linux-gated checks, and the live merge-group witness.
 - [ ] Record delivery and refactor status, then merge the repair.
-

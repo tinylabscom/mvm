@@ -17,6 +17,7 @@ pub mod driver;
 pub mod host;
 pub mod hvf_handoff;
 pub mod post_restore;
+pub mod qemu_arch;
 pub mod quota;
 pub mod snapshot;
 pub mod vmm;

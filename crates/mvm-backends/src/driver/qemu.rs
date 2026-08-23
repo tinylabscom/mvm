@@ -35,6 +35,7 @@ use mvm_vmm::driver::spec::{KernelImage, VmmSpec, VsockDirection, VsockPort};
 use mvm_vmm::driver::traits::{DuplexStream, RunningVm, VmmDriver};
 use mvm_vmm::host::ui;
 use mvm_vmm::host::virtiofsd::{SpawnParams, VirtiofsdGuard, locate_virtiofsd};
+use mvm_vmm::qemu_arch::{machine_for_arch, serial_console_for_arch};
 
 /// The QEMU VMM driver: pure VMM mechanics, no policy and no admission. It
 /// boots what a `VmmSpec` describes and relays the guest's channels through
@@ -54,14 +55,17 @@ impl Default for QemuDriver {
     }
 }
 
-/// The default base kernel cmdline for a QEMU workload boot. QEMU guests use
-/// the `ttyS0` serial console (same serial line Firecracker uses), and carry
+/// The default base kernel cmdline for a QEMU workload boot. The serial device
+/// follows the QEMU machine for the host architecture, and the cmdline carries
 /// no NIC tokens — the converged path attaches no guest NIC. The root/init
 /// selection follows the boot shape; the shared cmdline assembler layers
 /// verity/grants/egress/uvols tokens on top of this.
-fn qemu_base_bootargs(virtiofs_root: bool, has_disk: bool) -> String {
+fn qemu_base_bootargs_for_arch(arch: &str, virtiofs_root: bool, has_disk: bool) -> String {
     // Serial console + reboot/panic behavior + stable interface naming.
-    let console = "console=ttyS0 reboot=k panic=1 net.ifnames=0";
+    let console = format!(
+        "console={} reboot=k panic=1 net.ifnames=0",
+        serial_console_for_arch(arch)
+    );
     if virtiofs_root {
         format!("{console} rootfstype=virtiofs root=mvmroot ro init=/init")
     } else if has_disk {
@@ -71,6 +75,10 @@ fn qemu_base_bootargs(virtiofs_root: bool, has_disk: bool) -> String {
         // so only the serial-console base is emitted here.
         console.to_string()
     }
+}
+
+fn qemu_base_bootargs(virtiofs_root: bool, has_disk: bool) -> String {
+    qemu_base_bootargs_for_arch(std::env::consts::ARCH, virtiofs_root, has_disk)
 }
 
 /// AF_UNIX socket path QEMU uses to connect to `virtiofsd` for a given
@@ -107,12 +115,27 @@ fn qemu_boot_argv(
     kvm: bool,
     pid_file: &Path,
 ) -> Vec<String> {
+    qemu_boot_argv_for_arch(spec, kernel, cid, kvm, pid_file, std::env::consts::ARCH)
+}
+
+fn qemu_boot_argv_for_arch(
+    spec: &VmmSpec,
+    kernel: &Path,
+    cid: u32,
+    kvm: bool,
+    pid_file: &Path,
+    arch: &str,
+) -> Vec<String> {
     let mut args: Vec<String> = Vec::new();
     args.push("-m".into());
     args.push(spec.memory_mib.to_string());
     let vcpus = spec.vcpus.clamp(1, u32::from(u8::MAX));
     args.push("-smp".into());
     args.push(vcpus.to_string());
+    if let Some(machine) = machine_for_arch(arch) {
+        args.push("-machine".into());
+        args.push(machine.into());
+    }
     if kvm {
         args.push("-enable-kvm".into());
         args.push("-cpu".into());
@@ -137,7 +160,7 @@ fn qemu_boot_argv(
     let has_disk = spec.initramfs.is_none() && !spec.blocks.is_empty();
     let trimmed = spec.cmdline.trim();
     let cmdline = if trimmed.is_empty() {
-        qemu_base_bootargs(has_virtiofs_root, has_disk)
+        qemu_base_bootargs_for_arch(arch, has_virtiofs_root, has_disk)
     } else {
         trimmed.to_string()
     };
@@ -216,6 +239,19 @@ fn qemu_boot_argv(
     args.push("-pidfile".into());
     args.push(pid_file.to_string_lossy().into_owned());
     args
+}
+
+fn qemu_log_tail(log_path: &Path, max_lines: usize) -> String {
+    let Ok(contents) = std::fs::read_to_string(log_path) else {
+        return "qemu log was unavailable".to_string();
+    };
+    let mut lines: Vec<&str> = contents.lines().rev().take(max_lines).collect();
+    lines.reverse();
+    if lines.is_empty() {
+        "qemu log was empty".to_string()
+    } else {
+        lines.join("\n")
+    }
 }
 
 /// Assemble the bridge wiring plan for a spec boot: every host-dialed
@@ -411,11 +447,13 @@ impl VmmDriver for QemuDriver {
             .status()
             .map_err(|e| anyhow!("spawn qemu ({qemu_bin}): {e}"))?;
         if !status.success() {
+            let log_path = state_dir.join(QEMU_LOG_FILE);
             bail!(
-                "qemu-system exited {} before daemonizing workload '{}'; see {}",
+                "qemu-system exited {} before daemonizing workload '{}'; {} tail:\n{}",
                 status.code().unwrap_or(-1),
                 spec.name,
-                state_dir.join(QEMU_LOG_FILE).display()
+                log_path.display(),
+                qemu_log_tail(&log_path, 40)
             );
         }
 
@@ -790,8 +828,12 @@ mod tests {
     #[test]
     fn base_bootargs_follow_the_boot_shape_with_no_nic_or_roothash_tokens() {
         let d = QemuDriver::new();
+        let console = format!(
+            "console={}",
+            serial_console_for_arch(std::env::consts::ARCH)
+        );
         let disk = d.workload_base_bootargs(false, true);
-        assert!(disk.contains("console=ttyS0"), "got: {disk}");
+        assert!(disk.contains(&console), "got: {disk}");
         assert!(disk.contains("root=/dev/vda"), "got: {disk}");
         assert!(disk.contains("init=/init"), "got: {disk}");
         assert!(!disk.contains("mvm.roothash="), "got: {disk}");
@@ -801,10 +843,10 @@ mod tests {
         let verity = d.workload_base_bootargs(false, false);
         assert!(!verity.contains("root="), "got: {verity}");
         assert!(!verity.contains("init=/init"), "got: {verity}");
-        assert!(verity.contains("console=ttyS0"), "got: {verity}");
+        assert!(verity.contains(&console), "got: {verity}");
 
         let virtiofs = d.workload_base_bootargs(true, false);
-        assert!(virtiofs.contains("console=ttyS0"), "got: {virtiofs}");
+        assert!(virtiofs.contains(&console), "got: {virtiofs}");
         assert!(virtiofs.contains("rootfstype=virtiofs"), "got: {virtiofs}");
         assert!(virtiofs.contains("root=mvmroot"), "got: {virtiofs}");
     }
@@ -888,12 +930,13 @@ mod tests {
     fn argv_defaults_the_cmdline_base_by_boot_shape_and_uses_tcg_without_kvm() {
         // Empty cmdline + an initramfs (no disk root) ⇒ console-only base.
         let spec = spec_with(KernelImage::Path("/img/vmlinux".into()), vec![], vec![]);
-        let argv = qemu_boot_argv(
+        let argv = qemu_boot_argv_for_arch(
             &spec,
             Path::new("/img/vmlinux"),
             3,
             false,
             Path::new("/state/w/qemu.pid"),
+            "x86_64",
         );
         let append = argvalue(&argv, "-append").expect("append");
         assert!(append.contains("console=ttyS0"), "got: {append}");
@@ -909,17 +952,49 @@ mod tests {
             vec![block("/img/rootfs.ext4", true, 0)],
         );
         spec.initramfs = None;
-        let argv = qemu_boot_argv(
+        let argv = qemu_boot_argv_for_arch(
             &spec,
             Path::new("/img/vmlinux"),
             3,
             true,
             Path::new("/state/w/qemu.pid"),
+            "x86_64",
         );
         let append = argvalue(&argv, "-append").expect("append");
         assert!(append.contains("root=/dev/vda"), "got: {append}");
         assert!(append.contains("init=/init"), "got: {append}");
         assert!(!argv.contains(&"-initrd".to_string()));
+    }
+
+    #[test]
+    fn aarch64_argv_selects_virt_machine_and_pl011_console() {
+        let spec = spec_with(KernelImage::Path("/img/vmlinux".into()), vec![], vec![]);
+        let argv = qemu_boot_argv_for_arch(
+            &spec,
+            Path::new("/img/vmlinux"),
+            3,
+            false,
+            Path::new("/state/w/qemu.pid"),
+            "aarch64",
+        );
+
+        assert_eq!(argvalue(&argv, "-machine"), Some("virt"));
+        let append = argvalue(&argv, "-append").expect("append");
+        assert!(append.contains("console=ttyAMA0"), "got: {append}");
+        assert!(!append.contains("console=ttyS0"), "got: {append}");
+    }
+
+    #[test]
+    fn qemu_log_tail_keeps_only_the_latest_bounded_diagnostics() {
+        let scratch = tempfile::tempdir().expect("scratch");
+        let log = scratch.path().join("qemu.log");
+        std::fs::write(&log, "one\ntwo\nthree\nfour\n").expect("write qemu log");
+
+        assert_eq!(qemu_log_tail(&log, 2), "three\nfour");
+        assert_eq!(
+            qemu_log_tail(&scratch.path().join("missing.log"), 2),
+            "qemu log was unavailable"
+        );
     }
 
     #[test]
