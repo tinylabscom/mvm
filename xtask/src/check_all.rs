@@ -114,6 +114,10 @@ pub const GATES: &[Gate] = &[
         crate::check_single_network_path::run,
     ),
     (
+        "check-single-workload-env",
+        crate::check_single_workload_env::run,
+    ),
+    (
         "check-no-guest-tool-client",
         crate::check_no_guest_tool_client::run,
     ),
