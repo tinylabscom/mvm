@@ -129,6 +129,9 @@ pub mod protocol;
 pub mod provenance;
 pub mod rate_limit;
 pub mod receipt;
+/// The signed index of an evidence archive: manifest, citations, and the
+/// checked-versus-asserted completeness distinction.
+pub mod receipt_archive;
 pub mod residency;
 /// What a caller declared a machine should boot from — the one type both the
 /// declaration boundary and the build side name.

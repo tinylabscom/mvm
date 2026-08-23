@@ -186,7 +186,7 @@ impl TranscriptCtx {
     }
 
     fn capture_dir(&self, tenant: &str, capture_id: &str) -> PathBuf {
-        self.transcripts_dir.join(tenant).join(capture_id)
+        config::transcript_capture_dir_at(&self.transcripts_dir, tenant, capture_id)
     }
 
     fn load_manifest(

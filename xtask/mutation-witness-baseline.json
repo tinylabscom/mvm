@@ -1023,11 +1023,6 @@
     },
     {
       "file": "crates/mvm-hostd/src/plan_admission.rs",
-      "mutant": "replace * with + in admit_within_host_budget",
-      "reason": "The BUNDLE_JSON_MAX_BYTES cap is fail-closed; shrinking it refuses strictly more input. Catching the mutation needs a fixture between the two sizes, which the existing boundary test deliberately avoids as a tautology."
-    },
-    {
-      "file": "crates/mvm-hostd/src/plan_admission.rs",
       "mutant": "replace AdmitAndStartParams<'a>::builder -> AdmitAndStartParamsBuilder<'a> with Default::default()",
       "reason": "provably equivalent: `AdmitAndStartParams::builder` is a one-line alias for `AdmitAndStartParamsBuilder::new()`, and this file's `impl Default for AdmitAndStartParamsBuilder` returns `Self::new()`, so `Default::default()` evaluates the identical expression. No test can distinguish the two, and the builder's own required-field refusal is asserted directly by the empty-builder test beside it."
     },

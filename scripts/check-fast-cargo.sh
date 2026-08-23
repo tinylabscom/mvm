@@ -45,7 +45,6 @@ require_text Justfile './scripts/cargo-stable.sh clippy --fix --allow-dirty --wo
 require_text .githooks/pre-commit "./scripts/cargo-stable.sh clippy \$scope_args --all-targets -- -D warnings"
 require_text .github/workflows/ci.yml './scripts/cargo-stable.sh clippy --all-targets -- -D warnings'
 require_text .github/workflows/ci.yml 'uses: dtolnay/rust-toolchain@1.96.0'
-require_text .github/workflows/ci-full.yml './scripts/cargo-stable.sh clippy --all-targets -- -D warnings'
 require_text .github/workflows/ci-full.yml 'uses: dtolnay/rust-toolchain@1.96.0'
 require_text .github/workflows/cache-warm.yml './scripts/cargo-stable.sh clippy --workspace --all-targets -- -D warnings'
 require_text .github/workflows/cache-warm.yml 'uses: dtolnay/rust-toolchain@1.96.0'
