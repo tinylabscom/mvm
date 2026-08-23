@@ -61,7 +61,13 @@ const BUDGETS: &[ClosureBudget] = &[
 /// 227 (was 233): deleting the superseded L3 stack removes seven crates from
 /// this graph; the first-party `mvm-mcp` adapter adds one and no third-party
 /// crates.
-const MACOS_CLOSURE_BUDGET: usize = 227;
+///
+/// 228 (was 227): `mvm-capture`, the project-environment capture frontend. It
+/// adds one first-party crate and no new third-party crate to mvmctl's closure.
+///
+/// 229 (was 228): the same compile-time `syn` 3 transition recorded for the
+/// Linux closure below.
+const MACOS_CLOSURE_BUDGET: usize = 229;
 
 /// Max distinct crates allowed in `mvmctl`'s default no-dev closure on
 /// `x86_64-unknown-linux-gnu`. Baseline measured 2026-06-17 against the audited default
@@ -181,7 +187,13 @@ const MACOS_CLOSURE_BUDGET: usize = 227;
 ///
 /// 236 (was 239): deleting the superseded L3 stack removes its retired graph;
 /// `mvm-mcp` contributes one first-party crate and no new third-party crate.
-pub(crate) const CLOSURE_BUDGET: usize = 236;
+///
+/// 237 (was 236): `mvm-capture`, the project-environment capture frontend. It
+/// adds one first-party crate and no new third-party crate to mvmctl's closure.
+///
+/// 238 (was 237): `async-trait` 0.1.92 removes a generated attribute rejected
+/// by current nightly Clippy and moves its compile-time parser to `syn` 3.
+pub(crate) const CLOSURE_BUDGET: usize = 238;
 
 pub fn run(workspace: &Path) -> Result<()> {
     for budget in BUDGETS {
