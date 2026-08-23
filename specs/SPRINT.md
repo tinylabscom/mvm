@@ -2744,6 +2744,15 @@ regression pinning that executable contract. The live lane forces a refresh of
 embedded host binaries so the guest always carries the checkout under test,
 even when Cargo caches are restored.
 
+## 2026-08-22 scheduled mutation witness repair
+
+Completed Security run 32552650847 exposed seven surviving authorization
+mutants in extension verification, budget narrowing, attachment, and assurance
+proxy collision handling. Focused boundary and one-field-at-a-time tests now
+catch the exact fail-open changes. A bounded local mutation proof caught all
+20 generated mutants across those predicates and the adjacent provenance
+fields; one obsolete accepted miss is removed from the ratchet.
+
 ## 2026-08-22 capture all-features closure witness
 
 The `mvm-capture` workspace addition raises the all-features closure by exactly

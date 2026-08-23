@@ -149,9 +149,9 @@ because the cap kills the runner rather than the job, the only trace was
 `The runner has received a shutdown signal` — naming no package, no file
 and no claim. A package may therefore be split further, spelled
 `mvm-hostd/1of2` in the matrix and passed through the same `--package`
-flag. Files are ordered by path and assigned by stride, so membership is a
-property of the committed surface rather than of resolution order, and
-adjacent siblings of similar cost land in different shards. The gate
+flag. Files are ordered by path and then packed onto the emptiest shard
+heaviest-first, so membership is a property of the committed surface
+rather than of resolution order. The gate
 checks the split is total: a missing index, a repeated one, disagreeing
 totals, or a bare entry alongside sharded ones all fail, because each
 leaves files nothing mutates while every remaining shard stays green.
@@ -168,19 +168,31 @@ that never finished contributed no failing job — and on a night where it
 was the only casualty, the empty failing set read as green and closed the
 tracking issue.
 
-**The split is by file count, and file count is not cost.** The first run
-of the two-shard split, on 2026-08-16, measured the gap: `1of2` finished
-five files in 100 minutes, while `2of2` drew `plan_admission` (93
-mutants), `supervisor/audit_file` (107) and `supervisor/network/stages`
-(108), spent its full 330 and never reached its fifth file. This
-package's files differ by roughly 4x, so an even count is an uneven job.
+**File count is not cost, and adding shards did not make it one.** The
+two-shard split measured the gap on 2026-08-16: `1of2` finished five files
+in 100 minutes while `2of2` drew `plan_admission` (93 mutants),
+`supervisor/audit_file` (107) and `supervisor/network/stages` (108), spent
+its full 330 and never reached its fifth file. The response was to cut
+`mvm-hostd` four ways, on the correct diagnosis but the wrong remedy: a
+cost-blind split of an unequal surface stays unequal at any width. It
+recurred on 2026-08-21, when `2of4` and `4of4` were both killed at 330
+minutes — round-robin had put the four most expensive files in the tree on
+those two shards — while `3of4` finished its three cheapest in 24.
 
-`mvm-hostd` is therefore cut four ways, which puts the two most expensive
-files in different shards and drops the worst known load from 335 mutants
-to 201 — about 200 minutes at the ~1 min/mutant that run measured. That
-is a bound with a measurement behind it, not a guess, but it is still a
-stride over a path-sorted list: if a shard breaches again, the next step
-is assignment by measured cost rather than more shards.
+Assignment is therefore by cost, not by stride: shards are packed
+longest-first, heaviest file onto the lightest shard. Cost is stood in for
+by source size, which needs nothing recorded or maintained beside the
+surface and tracks mutant count closely enough to pack with. Replaying the
+2026-08-21 per-file measurements through it splits that same surface
+188/189/191/193 minutes where round-robin gave 90/323/24/324 — 1.01x the
+ideal even split against 1.70x. `xtask`'s
+`cost_packing_balances_a_surface_that_round_robin_left_lopsided` pins the
+ratio against those measurements, and fails on the old assignment.
+
+`mvm-hostd` is cut six ways on top of that, putting the worst shard at
+~181 measured minutes, 55% of the budget. The headroom is deliberate: two
+of the per-file costs behind it are lower bounds, taken from shards killed
+part-way through a file.
 
 These are **accepted rather than scoped out** on purpose. Scoping would
 stop the lane measuring those files at all; accepting keeps the ratchet
