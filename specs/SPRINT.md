@@ -2496,6 +2496,7 @@ Browser-hosted demo scoped in `specs/plans/2026-08-21-weblinux-browser-demo.md`.
       - [x] 2.8.2 Package the image + engine + pc-bios into a browser preload pack (`nix/packages/qemu-wasm-smoke-pack.nix`) using Emscripten's `file_packager.py`; verified end-to-end in the builder VM.
       - [x] 2.8.3 Fix the `qemu-wasm-file-packager` wrapper so it expands the caller's `TMPDIR` at runtime instead of hardcoding the engine build-time `/build`; rerun the smoke test and confirm `SMOKE-RESULT: READY` in ~26 s.
       - [x] 2.8.4 Add a browser demo page (`public/src/pages/demo/weblinux.astro`) and a Worker that boots the smoke pack; verify `DEMO-RESULT: READY` in headless Chromium.
+      - [x] 2.8.5 Add a headless Chromium smoke suite (`scripts/run-qemu-wasm-smoke-suite.py`) that verifies `ps`, `top`, `tree`, loopback `ping`, and the `mvm.allow_host` /etc/hosts entry; fix UTF-8 decoding in the Worker so box-drawing characters are not mangled.  Host-bound SLIRP traffic is documented as unsupported in the browser engine because Emscripten's WebSocket socket emulation crashes the worker.
 
 Workstream 1 first slice (1.1, 1.7) and the WS-2 engine packaging
 scaffolding landed in PR #2776.

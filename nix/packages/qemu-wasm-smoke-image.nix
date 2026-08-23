@@ -37,6 +37,8 @@ let
       # for -nographic. The base config enables these only on arm64.
       "SERIAL_8250"
       "SERIAL_8250_CONSOLE"
+      # Networking stack for QEMU's user-mode LAN.
+      "NETDEVICES"
     ];
   };
 
@@ -50,6 +52,8 @@ let
     }
     ''
       mkdir -p rootfs/bin rootfs/etc rootfs/dev rootfs/proc rootfs/sys rootfs/tmp rootfs/run
+      # /etc/hosts is populated at boot from mvm.allow_host=... if provided.
+      touch rootfs/etc/hosts
       cp ${busybox}/bin/busybox rootfs/bin/busybox
       chmod +x rootfs/bin/busybox
       # Use the build-platform busybox to enumerate applets; the cross-built
@@ -64,8 +68,41 @@ let
       # permission/execution edge cases inside the minimal ext2 rootfs.
       ln -s bin/busybox rootfs/init
 
+      mkdir -p rootfs/etc/init.d
+
+      cat > rootfs/etc/init.d/rcS <<'EOF2'
+#!/bin/sh
+# Mount the pseudo-filesystems busybox ps/top need.
+/bin/mkdir -p /proc /sys /dev /tmp /run /dev/pts
+/bin/mount -t proc proc /proc
+/bin/mount -t sysfs sys /sys
+/bin/mount -t devtmpfs dev /dev 2>/dev/null || /bin/mount -t tmpfs dev /dev
+/bin/mount -t devpts devpts /dev/pts 2>/dev/null || true
+# Ensure a console device exists even if devtmpfs did not populate it.
+[ -c /dev/console ] || /bin/mknod /dev/console c 5 1 2>/dev/null || true
+
+# Bring up loopback and configure a static address on QEMU's user-mode LAN.
+/bin/ifconfig lo 127.0.0.1 up
+/bin/ifconfig eth0 10.0.2.15 netmask 255.255.255.0 up
+/bin/route add default gw 10.0.2.2 eth0 2>/dev/null || true
+
+# If the launcher passed mvm.allow_host=<host>, record it in /etc/hosts so the
+# demo page can show the allow-host plumbing.  In the browser engine, ICMP or
+# TCP to the QEMU user-mode gateway (10.0.2.2) currently crashes the worker
+# because Emscripten's socket emulation forwards host-bound traffic through a
+# WebSocket that SLIRP cannot satisfy; only loopback / self-addressed traffic
+# is safe in automated smoke tests.
+allowed_host=$(/bin/cat /proc/cmdline | /bin/tr ' ' '\n' | /bin/grep '^mvm.allow_host=' | /bin/cut -d= -f2)
+if [ -n "$allowed_host" ]; then
+  /bin/echo "10.0.2.2 $allowed_host" >> /etc/hosts
+fi
+
+/bin/echo QEMU-WASM-SMOKE-READY
+EOF2
+      chmod +x rootfs/etc/init.d/rcS
+
       cat > rootfs/etc/inittab <<'EOF2'
-::sysinit:/bin/echo QEMU-WASM-SMOKE-READY
+::sysinit:/etc/init.d/rcS
 console::respawn:-/bin/sh
 EOF2
 

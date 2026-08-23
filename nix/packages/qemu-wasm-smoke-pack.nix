@@ -109,12 +109,13 @@ stdenv.mkDerivation {
       '-M', 'pc',
       '-m', '512M',
       '-cpu', 'qemu64',
-      '-net', 'none',
+      '-netdev', 'user,id=net0',
+      '-device', 'virtio-net-pci,netdev=net0,romfile=',
       '-accel', 'tcg,tb-size=500',
       '-L', 'pack/',
       '-drive', 'if=virtio,format=raw,file=pack/rootfs.bin',
       '-kernel', 'pack/kernel.img',
-      '-append', 'earlyprintk=ttyS0 console=ttyS0 root=/dev/vda loglevel=4 nokaslr quiet'
+      '-append', 'earlyprintk=ttyS0 console=ttyS0 root=/dev/vda rw loglevel=4 nokaslr quiet'
     ];
   </script>
   <script src="pack.js"></script>

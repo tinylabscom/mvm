@@ -395,6 +395,8 @@ stdenv.mkDerivation (finalAttrs: {
           --enable-tcg \
           --with-coroutine=fiber \
           --enable-virtfs \
+          --enable-slirp \
+          -Ddefault_library=static \
           --extra-cflags="$EXTRA_CFLAGS" \
           --extra-cxxflags="$EXTRA_CFLAGS" \
           --extra-ldflags="$EXTRA_LDFLAGS"
@@ -420,6 +422,7 @@ stdenv.mkDerivation (finalAttrs: {
     )
     link_libs = (
         '-Wl,--start-group libqemuutil.a subprojects/dtc/libfdt/libfdt.a '
+        'subprojects/slirp/libslirp.a '
         '/builddeps/target/lib/libglib-2.0.a /builddeps/target/lib/libgobject-2.0.a '
         '/builddeps/target/lib/libgthread-2.0.a /builddeps/target/lib/libgmodule-2.0.a '
         '/builddeps/target/lib/libgio-2.0.a /builddeps/target/lib/libpcre2-8.a '

@@ -45,9 +45,12 @@ function postError(error) {
 // the UI and accept injected input from the main thread.
 function createFakeTerminal() {
   let markerSeen = false;
+  // Reuse a single streaming decoder so a UTF-8 character split across
+  // xterm-pty chunks is not replaced with U+FFFD.
+  const decoder = new TextDecoder();
   return {
     write: (data, callback) => {
-      let text = typeof data === "string" ? data : new TextDecoder().decode(data);
+      let text = typeof data === "string" ? data : decoder.decode(data, { stream: true });
       outputBuffer += text;
       if (!markerSeen && outputBuffer.includes(marker)) {
         markerSeen = true;
@@ -83,6 +86,9 @@ self.onmessage = async (event) => {
     return;
   }
 
+  const allowHost = event.data.allowHost ? String(event.data.allowHost).trim() : "";
+  console.log("[worker] allowHost received:", allowHost);
+
   try {
     postStatus("loading support scripts");
     self.importScripts(`${baseUrl}xterm-pty.js`, `${baseUrl}pack.js`);
@@ -105,17 +111,30 @@ self.onmessage = async (event) => {
     self.Module.onAbort = (what) => {
       postError(`abort: ${what}`);
     };
+
+    let kernelAppend = "earlyprintk=ttyS0 console=ttyS0 root=/dev/vda rw loglevel=4 nokaslr quiet";
+    if (allowHost) {
+      kernelAppend += ` mvm.allow_host=${allowHost}`;
+    }
+
     self.Module.arguments = [
       "-nographic",
       "-M", "pc",
       "-m", "512M",
       "-cpu", "qemu64",
-      "-net", "none",
+      // NOTE: QEMU's user-mode LAN is wired up for completeness, but the
+      // Emscripten build routes host-bound sockets through the browser's
+      // WebSocket layer.  That path currently crashes the worker with a
+      // divide-by-zero when SLIRP tries to forward ICMP/UDP/TCP to the host.
+      // Loopback traffic (127.0.0.1 / the guest's own IP) does not hit SLIRP
+      // and is safe; host-bound traffic should be avoided in smoke tests.
+      "-netdev", "user,id=net0",
+      "-device", "virtio-net-pci,netdev=net0,romfile=",
       "-accel", "tcg,tb-size=500",
       "-L", "pack/",
       "-drive", "if=virtio,format=raw,file=pack/rootfs.bin",
       "-kernel", "pack/kernel.img",
-      "-append", "earlyprintk=ttyS0 console=ttyS0 root=/dev/vda loglevel=4 nokaslr quiet"
+      "-append", kernelAppend
     ];
 
     const { master, slave } = self.openpty();

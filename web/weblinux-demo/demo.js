@@ -7,6 +7,7 @@ const runBtn = document.getElementById("runBtn");
 const stopBtn = document.getElementById("stopBtn");
 const inputForm = document.getElementById("input-form");
 const commandEl = document.getElementById("command");
+const allowHostEl = document.getElementById("allowHost");
 
 let worker = null;
 
@@ -153,6 +154,8 @@ function setStatus(text, cls) {
 function logLine(line) {
   logEl.innerHTML += ansiToHtml(line) + "\n";
   logEl.scrollTop = logEl.scrollHeight;
+  // Emit a copy to the console so headless test harnesses can observe demo output.
+  console.log("[demo] " + line.replace(/\n+$/, ""));
 }
 
 function clearLog() {
@@ -169,6 +172,7 @@ function stopWorker() {
   stopBtn.disabled = true;
   commandEl.disabled = true;
 }
+
 
 function runWorker() {
   stopWorker();
@@ -228,7 +232,9 @@ function runWorker() {
     commandEl.disabled = true;
   };
 
-  worker.postMessage({ type: "run" });
+  const allowHostValue = allowHostEl?.value || "";
+  console.log("[demo] sending allowHost:", allowHostValue);
+  worker.postMessage({ type: "run", allowHost: allowHostValue });
 }
 
 runBtn.addEventListener("click", runWorker);
@@ -278,4 +284,9 @@ commandEl.addEventListener("keydown", (event) => {
 // harness uses to verify the demo without requiring UI interaction.
 if (new URLSearchParams(location.search).has("autorun")) {
   runWorker();
+}
+
+const urlAllowHost = new URLSearchParams(location.search).get("allowHost");
+if (urlAllowHost && allowHostEl) {
+  allowHostEl.value = urlAllowHost;
 }

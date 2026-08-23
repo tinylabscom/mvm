@@ -55,14 +55,60 @@
       font-size: 0.875rem;
       color: var(--muted);
     }
-    #terminal {
-      background: #000;
+    .toolbar-label {
+      font-size: 0.875rem;
+      color: var(--muted);
+      margin-left: auto;
+    }
+    .toolbar input[type="text"] {
+      background: var(--panel);
+      color: var(--text);
       border: 1px solid var(--border);
       border-radius: 6px;
+      padding: 0.35rem 0.6rem;
+      font-size: 0.8125rem;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      min-width: 10rem;
+    }
+    .toolbar input[type="text"]:focus {
+      outline: none;
+      border-color: var(--accent);
+    }
+    #terminal {
+      background: #000;
+      border-radius: 10px;
+      border: none;
       height: 65vh;
       display: flex;
       flex-direction: column;
       overflow: hidden;
+      box-shadow: 0 20px 50px rgba(0, 0, 0, 0.5);
+    }
+    .terminal-header {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.65rem 0.875rem;
+      background: #1f242c;
+      -webkit-user-select: none;
+      user-select: none;
+    }
+    .terminal-header .dot {
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      box-shadow: inset 0 0 0 0.5px rgba(0,0,0,0.2);
+    }
+    .terminal-header .dot.close { background: #ff5f56; }
+    .terminal-header .dot.minimize { background: #ffbd2e; }
+    .terminal-header .dot.maximize { background: #27c93f; }
+    .terminal-header .title {
+      margin-left: auto;
+      margin-right: auto;
+      padding-right: 2.5rem;
+      font-size: 0.8125rem;
+      color: var(--muted);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
     }
     #log {
       flex: 1;
@@ -70,7 +116,7 @@
       font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
       font-size: 0.8125rem;
       line-height: 1.4;
-      padding: 1rem;
+      padding: 0.75rem 1rem;
       margin: 0;
       overflow-y: auto;
       white-space: pre-wrap;
@@ -83,7 +129,6 @@
       gap: 0.5rem;
       align-items: center;
       padding: 0.5rem 1rem;
-      border-top: 1px solid var(--border);
       background: #000;
     }
     .input-line .prompt {
@@ -105,28 +150,6 @@
       background: var(--panel);
       color: var(--muted);
     }
-    #cli-section {
-      margin-top: 1.5rem;
-    }
-    #cli-section h2 {
-      font-size: 1rem;
-      margin-bottom: 0.5rem;
-    }
-    #cli-section p {
-      color: var(--muted);
-      font-size: 0.875rem;
-      margin: 0 0 0.5rem;
-    }
-    #cli-command {
-      background: var(--panel);
-      border: 1px solid var(--border);
-      border-radius: 6px;
-      padding: 1rem;
-      overflow-x: auto;
-      font-size: 0.8125rem;
-      line-height: 1.5;
-      color: var(--text);
-    }
   </style>
 </head>
 <body>
@@ -139,32 +162,22 @@
       <button id="runBtn">Run</button>
       <button id="stopBtn" disabled>Stop</button>
       <span id="status">Status: idle</span>
+      <label for="allowHost" class="toolbar-label">allow-host</label>
+      <input id="allowHost" type="text" value="demo.mvm.local" spellcheck="false" />
     </div>
     <div id="terminal">
+      <div class="terminal-header">
+        <span class="dot close" aria-hidden="true"></span>
+        <span class="dot minimize" aria-hidden="true"></span>
+        <span class="dot maximize" aria-hidden="true"></span>
+        <span class="title">guest@weblinux:~</span>
+      </div>
       <pre id="log"></pre>
       <form id="input-form" class="input-line" autocomplete="off">
         <span class="prompt">$</span>
         <input id="command" type="text" spellcheck="false" autocomplete="off" disabled />
       </form>
     </div>
-    <section id="cli-section">
-      <h2>Run this machine from the CLI</h2>
-      <p>
-        The browser Worker boots the same kernel/rootfs artifact that
-        <code>mvmctl machine run</code> will accept once the WebLinux CLI
-        surface lands. The intended command is:
-      </p>
-      <pre id="cli-command">mvmctl machine run --hypervisor web-linux \
-  --kernel pack/kernel.img \
-  --rootfs pack/rootfs.bin \
-  --memory 512M --cpus 2</pre>
-      <p>
-        The artifact is a kernel + block-rootfs pair, so the CLI surface uses
-        <code>--rootfs</code> rather than <code>--initrd</code>. Until the
-        native WebLinux path is wired, the equivalent raw QEMU invocation is
-        used for the smoke test.
-      </p>
-    </section>
   </main>
   <script type="module" src="demo.js"></script>
 </body>

@@ -120,6 +120,10 @@ cdf057a71b07e3b52b19cbe210bdefa59250d01a9810b960f7fe1f98eed95a27  bios/kvmvapic.
   `web/weblinux-demo/worker.js` loads the engine, the Emscripten preload pack,
   and `xterm-pty`, then boots the smoke guest with the same args used by the
   upstream sample. Headless Chromium reaches `DEMO-RESULT: READY` in ~7 s.
+  > Known limitation: host-bound SLIRP traffic (ping/TCP/UDP to the QEMU
+  > user-mode gateway) triggers a WebSocket-forwarding divide-by-zero in the
+  > Emscripten build, so automated smoke tests exercise loopback networking
+  > (`ping 127.0.0.1`) and the `mvm.allow_host` /etc/hosts entry instead.
 
 ### Phase 2 — Builder Worker
 
