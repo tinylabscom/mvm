@@ -22,6 +22,11 @@ mutation surfaces are green again without weakening their policies.
   in the accepted baseline; the fail-open FlowMux confinement mutation is
   killed by an invalid-marker test that refuses before altering the test
   process.
+- Scope the claim-13 proxy mutation surface to the substitution adapter and
+  request-preparation boundary that the claim actually covers. Focused audit
+  witnesses pin zero-line checkpoint rejection and the exact entry count in a
+  pruning record; equivalent and performance-only cursor/prune mutants retain
+  explicit rationales.
 
 ## Evidence
 
@@ -30,3 +35,4 @@ mutation surfaces are green again without weakening their policies.
 - `bash scripts/check-no-ssh.test.sh`
 - focused `mvm-contract` and `mvm-hostd` tests
 - static mutation-surface validation
+- claim-13 mutation shard: 3 mutants, 2 caught, 1 unviable, 0 survivors

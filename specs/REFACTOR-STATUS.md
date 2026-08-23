@@ -26,6 +26,10 @@ for detailed scope and acceptance criteria.
       mutants are covered by focused constructor, ingress-generation,
       readiness, accept-ceiling, and pre-confinement refusal witnesses; only
       the provably identical disabled-policy constructor remains baselined.
+      Claim-13 mutation scope now measures its actual substitution boundary
+      (three mutants rather than the proxy module's unrelated transport
+      internals), and audit witnesses pin checkpoint and prune-accounting
+      behavior while equivalent/performance-only misses stay documented.
 
 - [x] **Issue #2657 — live BDD is visible and merge-gated.** Capability skips
       are reported instead of disappearing from the test summary, and a

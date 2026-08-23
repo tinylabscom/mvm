@@ -2840,3 +2840,10 @@ FlowMux witnesses now pin ingress generation teardown, authentication-gated
 readiness, the exact consecutive-accept failure ceiling, and Linux confinement
 input refusal. Only the constructor replacement that is byte-for-byte
 equivalent to `Default` is accepted with a recorded rationale.
+
+Two later hostd shards showed that the generic `substitute` witness name was
+mutating an entire 4,700-line proxy module. Its surface is now limited to the
+claim-relevant substitution adapter and request-preparation boundary: three
+mutants were measured, two caught and one unviable. Audit witnesses also pin a
+zero-line checkpoint's genesis fallback and the exact accountable-prune entry
+count; remaining equivalent or performance-only misses carry explicit reasons.
