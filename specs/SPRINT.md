@@ -1146,8 +1146,11 @@ updates only its own entry below.
       completed success is healthy; failed, cancelled, timed-out, and
       still-running observations fail closed even when the event watcher was
       never invoked. Pull-request and dispatch runs cannot overwrite scheduled
-      evidence. Lanes with no daily-or-better cron are reported as notes, not
-      judged: a pull-request lane is legitimately idle.
+      evidence. Pull requests validate witness resolution and schedule parsing
+      without reading mutable Actions history; only the independent schedule
+      enables reporting, so an in-flight nightly cannot make a PR red. Lanes
+      with no daily-or-better cron are reported as notes, not judged: a
+      pull-request lane is legitimately idle.
 
       Bundled: `ci-full.yml` now `cargo check`s the cargo-fuzz crates. They
       are workspace-excluded, so no lane compiled them and the nightly aborts

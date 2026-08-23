@@ -85,7 +85,7 @@ pub enum RunOutcome {
     },
 }
 
-pub fn run(workspace: &Path) -> Result<()> {
+pub fn run(workspace: &Path, check_reporting: bool) -> Result<()> {
     let workflows = resolve_witness_workflows(workspace)?;
     if workflows.is_empty() {
         bail!(
@@ -100,6 +100,13 @@ pub fn run(workspace: &Path) -> Result<()> {
 
     for wf in &workflows {
         let allowed = wf.max_age_hours();
+        if !should_read_run_history(allowed, check_reporting) {
+            match allowed {
+                Some(_) => checked += 1,
+                None => skipped.push(wf.file.clone()),
+            }
+            continue;
+        }
         // Only pay for an API call once the schedule says absence means
         // something.
         let latest = match allowed {
@@ -167,11 +174,22 @@ pub fn run(workspace: &Path) -> Result<()> {
         );
     }
 
-    eprintln!(
-        "check-claim-witness-freshness: clean ({checked} scheduled lane(s) fresh and successful, {} unscheduled)",
-        skipped.len()
-    );
+    if check_reporting {
+        eprintln!(
+            "check-claim-witness-freshness: clean ({checked} scheduled lane(s) fresh and successful, {} unscheduled)",
+            skipped.len()
+        );
+    } else {
+        eprintln!(
+            "check-claim-witness-freshness: clean ({} witness workflow(s) resolved; external run history reserved for scheduled reporting)",
+            workflows.len()
+        );
+    }
     Ok(())
+}
+
+fn should_read_run_history(allowed_hours: Option<u32>, check_reporting: bool) -> bool {
+    check_reporting && allowed_hours.is_some()
 }
 
 /// Decide freshness from an age and the schedule's allowance.
@@ -432,6 +450,13 @@ mod tests {
     #[test]
     fn a_workflow_with_no_cron_has_no_schedule() {
         assert_eq!(shortest_schedule_hours("on:\n  pull_request:\n"), None);
+    }
+
+    #[test]
+    fn pull_request_validation_never_reads_external_run_state() {
+        assert!(!should_read_run_history(Some(72), false));
+        assert!(!should_read_run_history(None, true));
+        assert!(should_read_run_history(Some(72), true));
     }
 
     #[test]

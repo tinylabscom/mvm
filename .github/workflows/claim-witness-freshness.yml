@@ -70,7 +70,9 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -o pipefail
-          if cargo run -p xtask -- check-claim-witness-freshness 2>&1 | tee freshness.log; then
+          if cargo run -p xtask -- check-claim-witness-freshness \
+            ${{ github.event_name == 'schedule' && '--check-reporting' || '' }} \
+            2>&1 | tee freshness.log; then
             echo "unhealthy=false" >> "$GITHUB_OUTPUT"
           else
             echo "unhealthy=true" >> "$GITHUB_OUTPUT"
@@ -119,10 +121,10 @@ jobs:
               --comment "Every claim-bearing scheduled lane is fresh and successful again. Watcher run: $RUN_URL"
           fi
 
-      # The gate's own verdict decides the job, so a pull-request run that
-      # breaks it is visible without waiting for a nightly.
-      - name: Fail the job when a lane is stale or unhealthy
+      # Pull requests validate the static resolver; scheduled runs additionally
+      # reconcile the latest external evidence.
+      - name: Fail the job when validation or scheduled reconciliation fails
         if: steps.check.outputs.unhealthy == 'true'
         run: |
-          echo "::error::a claim-bearing lane is stale or unhealthy — see the log above" >&2
+          echo "::error::claim-witness validation or scheduled reconciliation failed — see the log above" >&2
           exit 1

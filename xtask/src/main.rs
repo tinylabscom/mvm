@@ -265,7 +265,8 @@ fn main() -> Result<()> {
         }
         Some("check-claim-witness-freshness") => {
             let workspace = workspace_root();
-            check_claim_witness_freshness::run(&workspace)
+            let reporting = args.iter().any(|arg| arg == "--check-reporting");
+            check_claim_witness_freshness::run(&workspace, reporting)
         }
         Some("check-witness-citations") => {
             let workspace = workspace_root();

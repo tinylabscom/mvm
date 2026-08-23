@@ -14,12 +14,15 @@ updates the same tracking issue even when no `workflow_run` notification was
 delivered. Pull-request and manual-dispatch runs cannot overwrite that
 scheduled evidence.
 
+Pull requests validate witness resolution and schedule parsing without reading
+mutable Actions history. Only the independent scheduled run enables reporting,
+so a nightly that is still running cannot turn an otherwise valid PR red.
+
 ## Validation
 
 - focused unit tests cover success, failure, cancellation, timeout,
-  in-progress, absent, stale, and malformed observations
+  in-progress, absent, stale, malformed, and PR-static observations
 - `cargo fmt --all -- --check`
 - `cargo check --workspace`
 - `cargo clippy --workspace --all-targets -- -D warnings`
 - `cargo test --workspace`
-
