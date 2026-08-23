@@ -2744,6 +2744,23 @@ regression pinning that executable contract. The live lane forces a refresh of
 embedded host binaries so the guest always carries the checkout under test,
 even when Cargo caches are restored.
 
+## 2026-08-22 capture all-features closure witness
+
+The `mvm-capture` workspace addition raises the all-features closure by exactly
+one first-party node, from 469 to 470, without adding a new third-party crate.
+The feature-closure ratchet and delivery evidence now record that measured
+change explicitly.
+
+The AArch64 CI witness also proved that valid ELF metadata can live beyond the
+bounded inspection prefix. Capture now preserves the header evidence, omits
+unread segments with an explicit warning, and continues without executing or
+fully loading the discovered binary.
+
+The clean-checkout workspace lane exposed that the `.env` redaction witness
+had depended on a locally present ignored fixture file. It now creates the
+secret-bearing `.env` inside a temporary project, preserving the same negative
+privacy assertions while making the test deterministic in CI.
+
 ## 2026-08-22 FlowMux deletion fuzz-lock repair
 
 The deletion slice's standalone `mvm-agentd` fuzz lock had resolved `blake3`
