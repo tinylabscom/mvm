@@ -992,6 +992,11 @@
       "reason": "the discriminating input is a bare relative name that exists as a file or directory in the process's current directory. A test cannot create one without writing into the repo working tree or mutating process-global CWD shared by parallel tests under the documented cargo test fallback."
     },
     {
+      "file": "crates/mvm-contract/src/policy/network_policy.rs",
+      "mutant": "replace AiPolicy::disabled -> Self with Default::default()",
+      "reason": "provably equivalent: `AiPolicy::disabled` returns `Self::default()` directly. No test can distinguish the two expressions; the adjacent constructor test pins disabled equality and separately proves that `metered` differs by enabling metering."
+    },
+    {
       "file": "crates/mvm-contract/src/protocol/capability_negotiation.rs",
       "mutant": "replace ClientOperationCapabilities::builder -> ClientOperationCapabilitiesBuilder with Default::default()",
       "reason": "provably equivalent: `ClientOperationCapabilities::builder` returns `ClientOperationCapabilitiesBuilder::default()` directly, so the mutant evaluates the identical expression. No test can distinguish the two, while the adjacent builder test asserts that `build` preserves every enabled operation."

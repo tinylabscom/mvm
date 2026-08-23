@@ -22,7 +22,10 @@ for detailed scope and acceptance criteria.
       restoring the duplicate-version policy, while the no-SSH lane permits
       only the capture secret-filename denylist and excludes generated
       dependency/build trees. Positive and negative shell fixtures preserve
-      the fail-closed source boundary.
+      the fail-closed source boundary. Newly measured AI-policy and FlowMux
+      mutants are covered by focused constructor, ingress-generation,
+      readiness, accept-ceiling, and pre-confinement refusal witnesses; only
+      the provably identical disabled-policy constructor remains baselined.
 
 - [x] **Issue #2657 — live BDD is visible and merge-gated.** Capability skips
       are reported instead of disappearing from the test summary, and a

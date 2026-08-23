@@ -2833,3 +2833,10 @@ The no-SSH source gate now recognizes capture's private-key filename denylist
 as detector data and prunes generated dependency/build trees from its scan.
 A shell regression proves generated dependencies are ignored while a genuine
 source SSH token is still rejected.
+
+The same scheduled run measured new AI-policy and FlowMux mutants. Constructor
+tests distinguish metered policy from the disabled default, while focused
+FlowMux witnesses now pin ingress generation teardown, authentication-gated
+readiness, the exact consecutive-accept failure ceiling, and Linux confinement
+input refusal. Only the constructor replacement that is byte-for-byte
+equivalent to `Default` is accepted with a recorded rationale.
