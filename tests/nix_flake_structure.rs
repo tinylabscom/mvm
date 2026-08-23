@@ -786,6 +786,28 @@ fn mk_guest_installs_netinit_at_boot() {
 }
 
 #[test]
+fn mk_guest_assigns_ipv4_loopback_before_starting_guest_services() {
+    let path = nix_dir().join("lib").join("mk-guest.nix");
+    let content = fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("nix/lib/mk-guest.nix must be present: {e}"));
+    let address = content
+        .find("ip addr replace 127.0.0.1/8 dev lo")
+        .expect("guest init assigns the canonical IPv4 loopback address");
+    let agent = content
+        .find("# Stage 2.5 — guest agent supervisor")
+        .expect("guest init starts the guest agent");
+
+    assert!(
+        address < agent,
+        "loopback must have an address before any guest service binds it"
+    );
+    assert!(
+        content.contains("ifconfig lo 127.0.0.1 netmask 255.0.0.0 up"),
+        "the no-ip-applet fallback must assign the same address"
+    );
+}
+
+#[test]
 fn mk_guest_seeds_vsock_egress_dns_before_privilege_drop() {
     let path = nix_dir().join("lib").join("mk-guest.nix");
     let content = fs::read_to_string(&path)
@@ -1004,13 +1026,6 @@ fn runtime_overlay_flake_stages_egress_client_binary() {
          `/egress-client` inside the overlay ext4 so runtime-lean \
          sealed boots can source the egress shim from the mounted \
          runtime filesystem."
-    );
-    assert!(
-        content.contains("cp ${netAgent}/bin/mvm-net-agent \"$staging/net-agent\""),
-        "runtime-overlay flake must stage `mvm-net-agent` at `/net-agent` \
-         inside the overlay ext4. A guest booted for the l3-vsock mode that \
-         cannot resolve the agent refuses to start its workload, so a missing \
-         stage here is a failed boot rather than a degraded one."
     );
 }
 

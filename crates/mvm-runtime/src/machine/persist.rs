@@ -12,6 +12,7 @@ use std::fs;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
+use mvm_core::network_policy::AiPolicy;
 use serde::{Deserialize, Serialize};
 
 use mvm_core::atomic_io::atomic_write;
@@ -51,6 +52,10 @@ pub struct MachineSpec {
     pub runtime_pack: bool,
     pub net: bool,
     pub allow_host: Vec<String>,
+    /// Optional AI egress metering/budget policy, carried from the manifest's
+    /// `[network.ai]` table so the policy survives across machine starts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ai: Option<AiPolicy>,
     /// Declared loopback ingress mappings (`HOST:GUEST`). These are persisted
     /// so the backend can pre-open only the corresponding vsock channels.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -375,6 +380,7 @@ mod tests {
             runtime_pack: false,
             net: false,
             allow_host: vec![],
+            ai: None,
             ports: vec![],
             cpus: 2,
             memory: "512M".to_string(),
@@ -412,6 +418,22 @@ mod tests {
         // And a spec that granted nothing must not start emitting the key, so
         // rewriting an old spec does not gratuitously change its bytes.
         assert!(!serde_json::to_string(&spec).unwrap().contains("grants"));
+    }
+
+    #[test]
+    fn ai_policy_round_trips_through_json_and_skips_when_absent() {
+        let mut spec = spec_fixture("web");
+        spec.ai = Some(mvm_core::network_policy::AiPolicy::metered_with_total_budget(50_000));
+        let json = serde_json::to_string(&spec).expect("serialize");
+        let parsed: MachineSpec = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(parsed.ai, spec.ai);
+
+        let no_ai = spec_fixture("web");
+        let json = serde_json::to_string(&no_ai).expect("serialize");
+        assert!(
+            !json.contains("\"ai\""),
+            "absent ai must be omitted from JSON"
+        );
     }
 
     #[test]
@@ -591,6 +613,7 @@ mod tests {
             runtime_pack: false,
             net: false,
             allow_host: vec![],
+            ai: None,
             ports: vec![],
             cpus: 2,
             memory: "512M".into(),
@@ -764,6 +787,7 @@ mod tests {
         // Clear: Some(vec![]) empties the list.
         let base = MachineSpec {
             allow_host: vec!["old:443".into()],
+            ai: None,
             ..reconfigure_spec_fixture()
         };
         let clear_patch = ReconfigurePatch {

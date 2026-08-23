@@ -450,28 +450,6 @@ pub fn send_fs_request_on(stream: &mut UnixStream, req: GuestRequest) -> Result<
     }
 }
 
-/// Send a `StartPortForward` request on an already-connected stream.
-///
-/// Used by the Apple Container backend where the vsock connection is
-/// established via `VZVirtioSocketDevice` rather than a UDS path.
-///
-/// Performs the hello prelude internally so
-/// callers don't have to. `StartPortForward` is not a capability-gated
-/// operation, so an empty capability list is requested — the hello
-/// alone satisfies the agent's "no operational request before hello"
-/// rule.
-pub fn start_port_forward_on(stream: &mut UnixStream, guest_port: u16) -> Result<u32> {
-    let _ = negotiate_protocol(stream, Vec::new())?;
-    let resp = send_request(stream, &GuestRequest::StartPortForward { guest_port })?;
-    match resp {
-        GuestResponse::PortForwardStarted { vsock_port, .. } => Ok(vsock_port),
-        GuestResponse::Error { message } => {
-            bail!("Guest port-forward error: {}", message);
-        }
-        _ => bail!("Unexpected response to StartPortForward"),
-    }
-}
-
 /// Host-side helper: ask the guest agent to mount an already-attached
 /// virtio-fs volume at `guest_path`. `volume_name` is the virtio-fs tag
 /// the host registered (`uvol{idx}`). Returns the guest's canonical

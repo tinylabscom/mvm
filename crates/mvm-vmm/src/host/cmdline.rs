@@ -51,14 +51,10 @@ pub fn cmdline_overflow(cmdline: &str) -> Option<String> {
     })
 }
 
-/// Kernel cmdline token that turns on the in-guest vsock egress client.
-/// Emitted only when the run actually allows outbound egress and the workload
-/// carries no bound secrets, so the raw SOCKS path never contends with the
-/// substitution endpoint for the shared egress port.
-pub fn vsock_egress_cmdline_token(config: &VmStartConfig, state_dir: &Path) -> Option<String> {
-    (config.network_policy.allows_egress()
-        && !crate::host::egress_shared::state_has_bound_secrets(state_dir).unwrap_or(false))
-    .then(|| "mvm.vsock_egress=1".to_string())
+/// Kernel cmdline token that turns on the authenticated in-guest vsock client.
+pub fn vsock_egress_cmdline_token(config: &VmStartConfig, _state_dir: &Path) -> Option<String> {
+    crate::host::egress_shared::effective_vsock_egress(config)
+        .then(|| "mvm.vsock_egress=1".to_string())
 }
 
 /// Kernel cmdline token that gives the guest the workload's machine name.
@@ -341,10 +337,32 @@ mod tests {
     }
 
     #[test]
-    pub fn vsock_egress_cmdline_token_only_when_policy_allows_egress() {
+    pub fn vsock_egress_cmdline_token_for_ingress_under_deny_all() {
         let dir = tempfile::tempdir().unwrap();
         let deny_all = VmStartConfig::default();
         assert_eq!(vsock_egress_cmdline_token(&deny_all, dir.path()), None);
+
+        let mut plan = mvm_core::plan::test_support::PlanFixture::new().build();
+        plan.ingress.push(
+            mvm_core::plan::IngressMapping::builder()
+                .mapping_id(1)
+                .protocol(mvm_core::plan::IngressProtocol::Tcp)
+                .host_addr("127.0.0.1")
+                .host_port(8080)
+                .guest_addr("127.0.0.1")
+                .guest_port(8080)
+                .transform(mvm_core::plan::IngressTransform::Opaque)
+                .build()
+                .expect("valid ingress fixture"),
+        );
+        let ingress = VmStartConfig {
+            plan_json: Some(serde_json::to_string(&plan).expect("serialize ingress fixture")),
+            ..Default::default()
+        };
+        assert_eq!(
+            vsock_egress_cmdline_token(&ingress, dir.path()).as_deref(),
+            Some("mvm.vsock_egress=1")
+        );
 
         let allow_egress = VmStartConfig {
             network_policy: mvm_core::network_policy::NetworkPolicy::preset(

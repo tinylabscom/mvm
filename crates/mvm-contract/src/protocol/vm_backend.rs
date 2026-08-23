@@ -467,13 +467,6 @@ pub struct VmCapabilities {
     /// Backend supports host/vsock-mediated networking (egress/ingress brokers
     /// over vsock) instead of a guest NIC.
     pub host_vsock_proxy: bool,
-    /// Backend can carry the L3 TUN-over-vsock tunnel: dedicated vsock
-    /// ports for the guest agent's control and packet connections, with no
-    /// guest NIC of any kind. Strictly stronger than
-    /// [`host_vsock_proxy`](Self::host_vsock_proxy) — that mode brokers
-    /// sockets, this one carries raw IP packets — so a backend must
-    /// advertise it separately rather than inheriting it.
-    pub l3_vsock: bool,
     /// Backend can carry an interactive PTY exec/console session.
     pub pty_exec: bool,
     /// Backend permits an in-guest SSH server (production SSH). Always `false`
@@ -514,7 +507,6 @@ pub struct RequiredCapabilities {
     pub vsock: bool,
     pub no_routable_guest_nic: bool,
     pub host_vsock_proxy: bool,
-    pub l3_vsock: bool,
     pub pty_exec: bool,
 }
 
@@ -522,7 +514,7 @@ impl VmCapabilities {
     /// Names of the capabilities `required` asks for that this backend does
     /// not advertise. Empty means the backend can serve the request.
     pub fn shortfall(&self, required: &RequiredCapabilities) -> Vec<&'static str> {
-        let checks: [(bool, bool, &'static str); 10] = [
+        let checks: [(bool, bool, &'static str); 9] = [
             (
                 required.eager_cow_restore,
                 self.eager_cow_restore,
@@ -559,7 +551,6 @@ impl VmCapabilities {
                 self.host_vsock_proxy,
                 "host_vsock_proxy",
             ),
-            (required.l3_vsock, self.l3_vsock, "l3_vsock"),
             (required.pty_exec, self.pty_exec, "pty_exec"),
         ];
         checks

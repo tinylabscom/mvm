@@ -96,7 +96,7 @@ impl BuilderVm for QemuBuilderVm {
 
 /// Max wall-clock for a Stage 0 QEMU run (kernel compile + downloads). Wraps
 /// the qemu child in `timeout` so a hung guest can't block forever.
-const STAGE0_TIMEOUT_SECS: u32 = 7200;
+const STAGE0_TIMEOUT_SECS: u32 = 14_400;
 const QEMU_BUILDER_VSOCK_EGRESS_TOKEN: &str = "mvm.vsock_egress=1";
 const QEMU_BUILDER_VSOCK_EGRESS_PORT_TOKEN_PREFIX: &str = "mvm.vsock_egress_port=";
 const QEMU_BUILDER_VSOCK_EGRESS_PORT_BASE: u32 = 45_253;
@@ -267,20 +267,8 @@ fn run_stage0_qemu(
         cmd.arg("-drive")
             .arg(format!("file={},if=virtio,format=raw", disk.display()));
     }
-    // Read-only, matching how the shell-job and build paths attach it. Attached
-    // once: a second copy consumed another device letter and pushed the Nix
-    // store further down the enumeration, which is how the store ended up
-    // beyond where the guest looked for it.
     #[cfg(feature = "builder-vm")]
-    cmd.arg("-drive").arg(format!(
-        "file={},if=virtio,format=raw,readonly=on",
-        identity_drive.display()
-    ));
-    #[cfg(feature = "builder-vm")]
-    cmd.arg("-drive").arg(format!(
-        "file={},if=virtio,format=raw",
-        nix_store_lock.path().display()
-    ));
+    attach_stage0_identity_and_store(&mut cmd, &identity_drive, nix_store_lock.path());
     cmd.arg("-device")
         .arg(format!("vhost-vsock-pci,guest-cid={guest_cid}"));
     cmd.args(["-display", "none"]);
@@ -328,6 +316,18 @@ fn run_stage0_qemu(
         let _ = std::fs::remove_file(img);
     }
     Ok(())
+}
+
+/// Attach the two host-owned Stage 0 data disks exactly once and in a stable
+/// order: the read-only FlowMux identity followed by the writable Nix store.
+#[cfg(any(feature = "builder-vm", test))]
+fn attach_stage0_identity_and_store(cmd: &mut Command, identity_drive: &Path, nix_store: &Path) {
+    cmd.arg("-drive").arg(format!(
+        "file={},if=virtio,format=raw,readonly=on",
+        identity_drive.display()
+    ));
+    cmd.arg("-drive")
+        .arg(format!("file={},if=virtio,format=raw", nix_store.display()));
 }
 
 /// Recursively copy `src` into `dst`, skipping any directory whose name is in
@@ -728,9 +728,32 @@ mod tests {
         DEFAULT_MVM_HOME_DIR_NAME, DirStats, QEMU_STAGE0_OUT_ARTIFACT_NAMES,
         QEMU_STAGE0_VSOCK_GUEST_MODULES, WORK_EXT4_DIR_OVERHEAD_BYTES,
         WORK_EXT4_FILE_OVERHEAD_BYTES, WORK_EXT4_FIXED_HEADROOM_BYTES, WORK_TREE_EXCLUDE_DIRS,
-        copy_tree_filtered, dir_stats, locate_qemu_vsock_module,
+        attach_stage0_identity_and_store, copy_tree_filtered, dir_stats, locate_qemu_vsock_module,
     };
     use std::fs;
+
+    #[test]
+    fn stage0_attaches_one_identity_before_one_nix_store() {
+        let mut command = std::process::Command::new("qemu-system-test");
+        let identity = std::path::Path::new("/tmp/flowmux-identity.ext4");
+        let store = std::path::Path::new("/tmp/nix-store.img");
+
+        attach_stage0_identity_and_store(&mut command, identity, store);
+
+        let args: Vec<_> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            args,
+            vec![
+                "-drive",
+                "file=/tmp/flowmux-identity.ext4,if=virtio,format=raw,readonly=on",
+                "-drive",
+                "file=/tmp/nix-store.img,if=virtio,format=raw",
+            ]
+        );
+    }
 
     #[test]
     fn qemu_stage0_vsock_guest_module_list_is_ordered_by_dependency() {
@@ -1654,7 +1677,7 @@ mod vsock_module_tests {
     fn qemu_builder_defaults_leave_host_headroom() {
         assert_eq!(QEMU_BUILD_MEMORY_MIB, 6144);
         assert_eq!(QEMU_BUILD_VCPUS, 4);
-        assert_eq!(STAGE0_TIMEOUT_SECS, 7200);
+        assert_eq!(STAGE0_TIMEOUT_SECS, 14_400);
     }
 
     #[test]
@@ -1798,7 +1821,7 @@ fi
         );
     }
 
-    /// Each disk gets exactly one `-drive`.
+    /// Stage 0 delegates the host-owned disks to the single-purpose helper once.
     ///
     /// The FlowMux identity image was attached twice, which consumed a device
     /// letter and pushed the Nix store one slot further down the enumeration —
@@ -1806,7 +1829,7 @@ fi
     /// enumeration order and selected the 32 KiB identity image as its store,
     /// failing closed on every Stage 0 kernel build.
     #[test]
-    fn no_disk_is_attached_to_stage0_twice() {
+    fn stage0_calls_host_owned_disk_attachment_once() {
         let src = include_str!("qemu_builder.rs");
         let block = src
             .split_once("for disk in [&vda, &vdb, &vdc, &vdd]")
@@ -1816,16 +1839,11 @@ fi
             .expect("the drive list ends before the vsock device")
             .0;
 
-        for operand in [
-            "identity_drive.display()",
-            "nix_store_lock.path().display()",
-        ] {
-            let n = block.matches(operand).count();
-            assert_eq!(
-                n, 1,
-                "{operand} is attached {n} times; each disk takes exactly one \
-                 -drive, and a duplicate re-letters every disk behind it"
-            );
-        }
+        let calls = block.matches("attach_stage0_identity_and_store(").count();
+        assert_eq!(
+            calls, 1,
+            "the host-owned Stage 0 disks are attached through the helper {calls} times; \
+             duplicate attachment re-letters every disk behind them"
+        );
     }
 }

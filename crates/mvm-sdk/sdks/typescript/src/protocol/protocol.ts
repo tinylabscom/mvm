@@ -100,10 +100,6 @@ hostname?: (string | null)
 token?: [number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number]
 }
 } | "FsDiff" | {
-StartPortForward: {
-guest_port: number
-}
-} | {
 StartUnixSocketForward: {
 guest_path: string
 host_vsock_port: number
@@ -417,11 +413,6 @@ success: boolean
 } | {
 FsDiffResult: {
 changes: FsChange[]
-}
-} | {
-PortForwardStarted: {
-guest_port: number
-vsock_port: number
 }
 } | {
 UnixSocketForwardStarted: {

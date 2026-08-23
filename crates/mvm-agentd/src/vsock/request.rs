@@ -172,10 +172,6 @@ pub enum GuestRequest {
     },
     /// Request filesystem diff (changes since boot, from overlay or snapshot).
     FsDiff,
-    /// Start a vsock→TCP port forwarder for the given guest port.
-    /// The agent binds vsock port `PORT_FORWARD_BASE + guest_port` and
-    /// forwards each connection to `localhost:guest_port`.
-    StartPortForward { guest_port: u16 },
     /// Bind a guest Unix socket and forward each accepted connection to a host
     /// vsock port. The guest path must live under `/run/mvm/` (see
     /// `validate_unix_forward_guest_path`).
@@ -513,7 +509,6 @@ impl GuestRequest {
             Self::RunDetached { .. } => "run-detached",
             Self::PostRestore { .. } => "post-restore",
             Self::FsDiff => "fs-diff",
-            Self::StartPortForward { .. } => "start-port-forward",
             Self::StartUnixSocketForward { .. } => "start-unix-socket-forward",
             Self::ConsoleOpen { .. } => "console-open",
             Self::ConsoleClose { .. } => "console-close",
@@ -596,7 +591,6 @@ mod tests {
                 grant_envelope: None,
             },
             GuestRequest::FsDiff,
-            GuestRequest::StartPortForward { guest_port: 8080 },
             GuestRequest::StartUnixSocketForward {
                 guest_path: "/run/mvm/forward.sock".to_string(),
                 host_vsock_port: BROKER_PORT,
@@ -856,10 +850,9 @@ mod tests {
                 .unwrap_or_else(|e| panic!("seed {} failed to parse: {e}", path.display()));
             count += 1;
         }
-        // 5 baseline (ping, port-fwd, run-entrypoint, sleep-prep,
-        // worker-status) + 7 fs-* (A1) + 6 proc-* (A2) + 2 share-*
-        // (D) = 20.
-        assert!(count >= 20, "expected ≥20 corpus seeds, got {count}");
+        // 4 baseline (ping, run-entrypoint, sleep-prep, worker-status) +
+        // 7 fs-* + 6 proc-* + 2 share-* = 19.
+        assert!(count >= 19, "expected ≥19 corpus seeds, got {count}");
     }
 
     /// `follow_symlinks` defaults to `true` for read-shaped verbs and
@@ -1214,10 +1207,6 @@ mod tests {
             ),
             (GuestRequest::FsDiff, "fs-diff"),
             (
-                GuestRequest::StartPortForward { guest_port: 0 },
-                "start-port-forward",
-            ),
-            (
                 GuestRequest::StartUnixSocketForward {
                     guest_path: "/run/mvm/forward.sock".to_string(),
                     host_vsock_port: BROKER_PORT,
@@ -1286,7 +1275,6 @@ mod tests {
             GuestRequest::EntrypointStatus,
             GuestRequest::ReadinessStatus,
             GuestRequest::FsDiff,
-            GuestRequest::StartPortForward { guest_port: 0 },
             GuestRequest::CheckpointIntegrations {
                 integrations: vec![],
             },

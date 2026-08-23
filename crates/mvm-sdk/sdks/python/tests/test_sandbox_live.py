@@ -535,11 +535,12 @@ def test_all_dev_only_live_verbs_fail_closed_on_prod(tmp_path: Path) -> None:
         lambda: sb.files.move("/app/x", "/app/y"),
         lambda: sb.copy_in("/tmp/x", "/app/x"),
         lambda: sb.copy_out("/app/x", "/tmp/x"),
-        lambda: sb.forward(8080, 80),
     ]
     for operation in operations:
         with pytest.raises(mvm.SandboxDevOnly):
             operation()
+    with pytest.raises(mvm.SandboxModeError):
+        sb.forward(8080, 80)
     assert not any("proc start" in call or "fs " in call or "machine cp" in call for call in _read_fixture_log(tmp_path)[1:])
     sb.kill()
 
@@ -670,10 +671,10 @@ def test_copy_in_refused_in_record_mode() -> None:
         sb.copy_in("/tmp/x", "/app/x")
 
 
-# ── forward / ports (Plan 125 B1b) ───────────────────────────────────
+# ── declared ingress ─────────────────────────────────────────────────
 
 
-def test_forward_shells_to_mvmctl_forward(tmp_path: Path) -> None:
+def test_forward_refuses_dynamic_ingress_with_migration(tmp_path: Path) -> None:
     script = _write_fixture_mvmctl(
         tmp_path,
         up_envelope={"schema_version": 1, "vm_id": "sb-fwd-vm", "build_mode": "dev"},
@@ -682,34 +683,37 @@ def test_forward_shells_to_mvmctl_forward(tmp_path: Path) -> None:
     os.environ["MVM_CLI_BIN"] = str(script)
 
     sb = mvm.Sandbox.create("python-dev")
-    sb.forward(8080, 80)
-
-    # The fixture `forward` exits immediately (sleep 0); wait for it so its
-    # log line is flushed before we assert.
-    sb._live._forwards[0].wait(timeout=5)
-    calls = _read_fixture_log(tmp_path)
-    assert any(
-        c.startswith("machine forward sb-fwd-vm --port 8080:80") for c in calls
-    ), calls
+    with pytest.raises(mvm.SandboxModeError, match="before boot"):
+        sb.forward(8080, 80)
+    assert not any(c.startswith("machine forward") for c in _read_fixture_log(tmp_path))
 
 
-def test_forward_process_terminated_on_kill(tmp_path: Path) -> None:
+def test_declared_ingress_is_passed_to_machine_run(tmp_path: Path) -> None:
     script = _write_fixture_mvmctl(
         tmp_path,
         up_envelope={"schema_version": 1, "vm_id": "sb-fwd-vm", "build_mode": "dev"},
-        forward_sleep=30,
     )
     os.environ["MVM_SDK_MODE"] = "live"
     os.environ["MVM_CLI_BIN"] = str(script)
 
-    sb = mvm.Sandbox.create("python-dev")
-    sb.forward(8080, 80)
-    proc = sb._live._forwards[0]
-    assert proc.poll() is None  # still running (blocked on sleep)
-
-    sb.kill()
-    proc.wait(timeout=5)
-    assert proc.returncode is not None  # terminated by teardown
+    mvm.Sandbox.create(
+        "python-dev",
+        network={
+            "mode": "none",
+            "ports": [{
+                "mapping_id": 1,
+                "proto": "tcp",
+                "host_addr": "127.0.0.1",
+                "host": 8080,
+                "guest_addr": "127.0.0.1",
+                "guest": 80,
+                "transform": "opaque",
+            }],
+        },
+    )
+    run = _read_fixture_log(tmp_path)[0]
+    assert "--port 8080:80" in run
+    assert " -d " not in f" {run} "
 
 
 def test_forward_refused_in_record_mode() -> None:
@@ -927,7 +931,7 @@ def test_code_sandbox_node_uses_node_runner(tmp_path: Path) -> None:
 # ── BrowserSandbox typed helper (Plan 125 C2) ────────────────────────
 
 
-def test_browser_sandbox_forwards_cdp_and_endpoint(tmp_path: Path) -> None:
+def test_browser_sandbox_declares_cdp_and_endpoint(tmp_path: Path) -> None:
     script = _write_fixture_mvmctl(
         tmp_path,
         up_envelope={"schema_version": 1, "vm_id": "sb-br-vm", "build_mode": "dev"},
@@ -938,9 +942,7 @@ def test_browser_sandbox_forwards_cdp_and_endpoint(tmp_path: Path) -> None:
     bs = mvm.BrowserSandbox("chromium")
     try:
         assert bs.endpoint() == "http://localhost:9222"
-        bs.sandbox._live._forwards[0].wait(timeout=5)
-        calls = _read_fixture_log(tmp_path)
-        assert any(c.startswith("machine forward sb-br-vm --port 9222:9222") for c in calls), calls
+        assert "--port 9222:9222" in _read_fixture_log(tmp_path)[0]
     finally:
         bs.kill()
 
@@ -956,9 +958,7 @@ def test_browser_sandbox_custom_host_port(tmp_path: Path) -> None:
     bs = mvm.BrowserSandbox("chromium", host_port=18222)
     try:
         assert bs.endpoint() == "http://localhost:18222"
-        bs.sandbox._live._forwards[0].wait(timeout=5)
-        calls = _read_fixture_log(tmp_path)
-        assert any(c.startswith("machine forward sb-br-vm --port 18222:9222") for c in calls), calls
+        assert "--port 18222:9222" in _read_fixture_log(tmp_path)[0]
     finally:
         bs.kill()
 

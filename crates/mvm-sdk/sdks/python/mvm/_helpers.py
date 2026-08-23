@@ -15,7 +15,7 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Any
 
-from mvm._sandbox import Sandbox
+from mvm._sandbox import Sandbox, _encode_network
 
 __all__ = [
     "BrowserReadyError",
@@ -164,9 +164,8 @@ _BROWSERS: dict[str, _BrowserPreset] = {
 
 class BrowserSandbox:
     """A `Sandbox` preset for a headless browser: a baked browser image with
-    its CDP port forwarded to the host. Image + port preset only — no new
-    mechanism (the forward is `Sandbox.forward`, the protocol is the
-    browser's own CDP).
+    its CDP port declared as signed ingress before boot. Image + port preset
+    only — no new mechanism (the protocol is the browser's own CDP).
 
     `endpoint()` returns the host-side CDP HTTP base; pass it to a CDP client
     (Playwright/Puppeteer `connectOverCDP` / `browserURL`), which discovers
@@ -202,17 +201,34 @@ class BrowserSandbox:
             if preset.source_kind == "manifest"
             else {"image": preset.source}
         )
+        network = _encode_network(create_kwargs.pop("network", None)) or {
+            "mode": "none",
+            "ports": [],
+        }
+        ports = list(network.get("ports", []))
+        mapping_id = max(
+            (int(port["mapping_id"]) for port in ports),
+            default=0,
+        ) + 1
+        ports.append(
+            {
+                "mapping_id": mapping_id,
+                "proto": "tcp",
+                "host_addr": "127.0.0.1",
+                "host": self._host_port,
+                "guest_addr": "127.0.0.1",
+                "guest": preset.cdp_port,
+                "transform": "opaque",
+            }
+        )
+        network["ports"] = ports
         self._sandbox = Sandbox.create(
             workload_id=workload_id,
             command=command,
+            network=network,
             **source_kwargs,
             **create_kwargs,
         )
-        try:
-            self._sandbox.forward(self._host_port, preset.cdp_port)
-        except Exception:
-            self._sandbox.kill()
-            raise
 
     @property
     def sandbox(self) -> Sandbox:

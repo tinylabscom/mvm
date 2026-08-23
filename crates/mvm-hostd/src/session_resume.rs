@@ -86,7 +86,6 @@ pub fn synthesis_for_resume<'a>(
         secrets: Vec::new(),
         audit_event_prefix: None,
         network_mode: Default::default(),
-        l3_network: None,
         ingress: Vec::new(),
         // The local-run path takes the caller's grants; a resume has no
         // surface to declare any, so it declares none and the host ceiling

@@ -464,16 +464,6 @@ class GuestRequest19(Enum):
 
 
 @dataclass
-class StartPortForward:
-    guest_port: int
-
-
-@dataclass
-class GuestRequest20:
-    StartPortForward: StartPortForward
-
-
-@dataclass
 class StartUnixSocketForward:
     guest_path: str
     host_vsock_port: int
@@ -481,7 +471,7 @@ class StartUnixSocketForward:
 
 
 @dataclass
-class GuestRequest21:
+class GuestRequest20:
     StartUnixSocketForward: StartUnixSocketForward
 
 
@@ -494,7 +484,7 @@ class ConsoleOpen:
 
 
 @dataclass
-class GuestRequest22:
+class GuestRequest21:
     ConsoleOpen: ConsoleOpen
 
 
@@ -504,7 +494,7 @@ class ConsoleClose:
 
 
 @dataclass
-class GuestRequest23:
+class GuestRequest22:
     ConsoleClose: ConsoleClose
 
 
@@ -516,15 +506,15 @@ class ConsoleResize:
 
 
 @dataclass
-class GuestRequest24:
+class GuestRequest23:
     ConsoleResize: ConsoleResize
 
 
-class GuestRequest25(Enum):
+class GuestRequest24(Enum):
     EntrypointStatus = 'EntrypointStatus'
 
 
-class GuestRequest26(Enum):
+class GuestRequest25(Enum):
     ReadinessStatus = 'ReadinessStatus'
 
 
@@ -537,7 +527,7 @@ class FsRead:
 
 
 @dataclass
-class GuestRequest27:
+class GuestRequest26:
     FsRead: FsRead
 
 
@@ -553,7 +543,7 @@ class FsWrite:
 
 
 @dataclass
-class GuestRequest28:
+class GuestRequest27:
     FsWrite: FsWrite
 
 
@@ -564,7 +554,7 @@ class FsList:
 
 
 @dataclass
-class GuestRequest29:
+class GuestRequest28:
     FsList: FsList
 
 
@@ -575,7 +565,7 @@ class FsStat1:
 
 
 @dataclass
-class GuestRequest30:
+class GuestRequest29:
     FsStat: FsStat1
 
 
@@ -587,7 +577,7 @@ class FsMkdir:
 
 
 @dataclass
-class GuestRequest31:
+class GuestRequest30:
     FsMkdir: FsMkdir
 
 
@@ -599,7 +589,7 @@ class FsRemove:
 
 
 @dataclass
-class GuestRequest32:
+class GuestRequest31:
     FsRemove: FsRemove
 
 
@@ -611,7 +601,7 @@ class FsMove:
 
 
 @dataclass
-class GuestRequest33:
+class GuestRequest32:
     FsMove: FsMove
 
 
@@ -625,11 +615,11 @@ class ProcStart:
 
 
 @dataclass
-class GuestRequest34:
+class GuestRequest33:
     ProcStart: ProcStart
 
 
-class GuestRequest35(Enum):
+class GuestRequest34(Enum):
     ProcList = 'ProcList'
 
 
@@ -640,7 +630,7 @@ class ProcSignal:
 
 
 @dataclass
-class GuestRequest36:
+class GuestRequest35:
     ProcSignal: ProcSignal
 
 
@@ -651,7 +641,7 @@ class ProcSendInput:
 
 
 @dataclass
-class GuestRequest37:
+class GuestRequest36:
     ProcSendInput: ProcSendInput
 
 
@@ -662,7 +652,7 @@ class ProcWait:
 
 
 @dataclass
-class GuestRequest38:
+class GuestRequest37:
     ProcWait: ProcWait
 
 
@@ -672,7 +662,7 @@ class ProcKill:
 
 
 @dataclass
-class GuestRequest39:
+class GuestRequest38:
     ProcKill: ProcKill
 
 
@@ -684,7 +674,7 @@ class MountVolume:
 
 
 @dataclass
-class GuestRequest40:
+class GuestRequest39:
     MountVolume: MountVolume
 
 
@@ -695,7 +685,7 @@ class UnmountVolume:
 
 
 @dataclass
-class GuestRequest41:
+class GuestRequest40:
     UnmountVolume: UnmountVolume
 
 
@@ -705,7 +695,7 @@ class UpdateIdleTimeout:
 
 
 @dataclass
-class GuestRequest42:
+class GuestRequest41:
     UpdateIdleTimeout: UpdateIdleTimeout
 
 
@@ -716,12 +706,12 @@ class RunCode:
 
 
 @dataclass
-class GuestRequest43:
+class GuestRequest42:
     RunCode: RunCode
 
 
 @dataclass
-class GuestRequest45:
+class GuestRequest44:
     CloseStreamInput: CloseInput
 
 
@@ -909,24 +899,13 @@ class GuestResponse24:
 
 
 @dataclass
-class PortForwardStarted:
-    guest_port: int
-    vsock_port: int
-
-
-@dataclass
-class GuestResponse26:
-    PortForwardStarted: PortForwardStarted
-
-
-@dataclass
 class UnixSocketForwardStarted:
     guest_path: str
     host_vsock_port: int
 
 
 @dataclass
-class GuestResponse27:
+class GuestResponse26:
     UnixSocketForwardStarted: UnixSocketForwardStarted
 
 
@@ -937,7 +916,7 @@ class ConsoleOpened:
 
 
 @dataclass
-class GuestResponse28:
+class GuestResponse27:
     ConsoleOpened: ConsoleOpened
 
 
@@ -948,7 +927,7 @@ class ConsoleExited:
 
 
 @dataclass
-class GuestResponse29:
+class GuestResponse28:
     ConsoleExited: ConsoleExited
 
 
@@ -958,7 +937,7 @@ class ConsoleResized:
 
 
 @dataclass
-class GuestResponse30:
+class GuestResponse29:
     ConsoleResized: ConsoleResized
 
 
@@ -970,7 +949,7 @@ class EntrypointStatusReport:
 
 
 @dataclass
-class GuestResponse31:
+class GuestResponse30:
     EntrypointStatusReport: EntrypointStatusReport
 
 
@@ -981,7 +960,7 @@ class UpdateIdleTimeoutAck:
 
 
 @dataclass
-class GuestResponse37:
+class GuestResponse36:
     UpdateIdleTimeoutAck: UpdateIdleTimeoutAck
 
 
@@ -1563,7 +1542,7 @@ class GuestRequest16:
 
 
 @dataclass
-class GuestRequest44:
+class GuestRequest43:
     StreamInput: InputFrame
 
 
@@ -1606,27 +1585,27 @@ class GuestResponse25:
 
 
 @dataclass
-class GuestResponse32:
+class GuestResponse31:
     ReadinessStatusReport: ReadinessReport
 
 
 @dataclass
-class GuestResponse33:
+class GuestResponse32:
     FsResult: FsResult
 
 
 @dataclass
-class GuestResponse35:
+class GuestResponse34:
     ProcWaitEvent: ProcWaitEvent
 
 
 @dataclass
-class GuestResponse36:
+class GuestResponse35:
     VolumeMountResult: VolumeMountResult
 
 
 @dataclass
-class GuestResponse38:
+class GuestResponse37:
     StreamInputResult: StreamInputResult
 
 
@@ -1734,7 +1713,7 @@ class GuestResponse15:
 
 
 @dataclass
-class GuestResponse34:
+class GuestResponse33:
     ProcResult: ProcResult
 
 
@@ -1776,7 +1755,6 @@ GuestResponse = Union[
     GuestResponse35,
     GuestResponse36,
     GuestResponse37,
-    GuestResponse38,
 ]
 
 
@@ -1847,7 +1825,6 @@ GuestRequest = Union[
     GuestRequest42,
     GuestRequest43,
     GuestRequest44,
-    GuestRequest45,
 ]
 
 

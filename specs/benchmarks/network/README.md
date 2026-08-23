@@ -80,3 +80,13 @@ longer fail after the harness stopped charging each request for a complete
 authenticated-session handshake and stopped reusing process-lifetime peak
 RSS. No exception is approved or implied by these files. They are the
 pre-deletion baseline W8 must improve upon or explicitly resolve.
+
+## Recorded post-deletion candidate
+
+| Host | FlowMux report | Comparison to the matching legacy baseline |
+| --- | --- | --- |
+| macOS arm64, Apple M4 Max, APFS SSD | `flow-mux-macos-arm64-host-loopback-c22db543f1.json` | `comparison-macos-arm64-host-loopback-c22db543f1.json` |
+
+Credit updates are batched in this candidate. It passes 12 of 32 checks and
+misses 20: ten opaque-TCP, six UDP, and four transformed-HTTP connect checks.
+The comparison remains a failure and no exception is approved or implied.

@@ -295,12 +295,6 @@ impl VmmDriver for LibkrunDriver {
             // there is no net device in the guest's device tree to route.
             no_routable_guest_nic: true,
             host_vsock_proxy: true,
-            // libkrun attaches a virtio-net device and drains it, which
-            // satisfies `no_routable_guest_nic` (no upstream route) but
-            // not the L3 tunnel's stricter precondition: that mode
-            // requires the guest to have no network device at all, so
-            // `mvm0` is the only interface its stack can route to.
-            l3_vsock: false,
             // libkrun's C API doesn't expose virtio-balloon control
             // today; the upstream crate carries no `.balloon(...)`
             // builder. Declared `false` until wiring lands.
