@@ -379,6 +379,15 @@ fn resolve_fn(workspace: &Path, name: &str) -> bool {
     false
 }
 
+/// Resolve a `ci:` witness through the shared anchor rules.
+///
+/// This was its own substring scan — `text.contains(name)` over every
+/// workflow — which is the weaker of the two implementations the repo had
+/// for one question. It matched a name in a comment as readily as a live
+/// job, so a deleted lane kept its witness green, and it could not see a
+/// gate that runs inside the policy driver rather than as its own step.
+/// `claims_ledger::ci_anchors` already answered both correctly for
+/// `check-claim-catalog`; there is no reason for a second answer here.
 fn resolve_ci(workspace: &Path, name: &str) -> bool {
     let workflows = workspace.join(".github/workflows");
     let Ok(entries) = std::fs::read_dir(&workflows) else {
@@ -388,7 +397,9 @@ fn resolve_ci(workspace: &Path, name: &str) -> bool {
         let path = entry.path();
         if path.extension().is_some_and(|e| e == "yml" || e == "yaml")
             && let Ok(text) = std::fs::read_to_string(&path)
-            && text.contains(name)
+            && crate::claims_ledger::ci_anchors(&text)
+                .iter()
+                .any(|anchor| anchor == name)
         {
             return true;
         }

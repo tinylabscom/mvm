@@ -22,6 +22,7 @@
 //! mostly run on tags and cron, where a break is invisible for days.
 
 use anyhow::{Context, Result, bail};
+use std::collections::BTreeMap;
 use std::path::Path;
 
 /// A `cargo fuzz run` invocation resolved against its step's directory.
@@ -64,6 +65,103 @@ impl FuzzBudget {
     }
 }
 
+/// One version per action, across every workflow.
+///
+/// Split versions are how an artifact upload and the download meant to
+/// consume it drift apart: `publish-npm.yml` and `publish-pypi.yml` paired
+/// `upload-artifact@v4` with `download-artifact@v4` while eleven other
+/// lanes had moved to v7, so the pair was one major bump away from a
+/// handoff that fails only on the release path.
+fn action_version_conflicts(workflows: &[(String, String)]) -> Vec<String> {
+    let mut seen: BTreeMap<String, BTreeMap<String, Vec<String>>> = BTreeMap::new();
+    for (name, src) in workflows {
+        for (action, git_ref) in third_party_action_refs(src) {
+            seen.entry(action.to_string())
+                .or_default()
+                .entry(git_ref.to_string())
+                .or_default()
+                .push(name.clone());
+        }
+    }
+    seen.into_iter()
+        .filter(|(action, refs)| {
+            // The toolchain action encodes the channel in the ref, so
+            // several "versions" of it is the intended usage.
+            refs.len() > 1 && !FLOATING_REF_ALLOWED.contains(&action.as_str())
+        })
+        .map(|(action, refs)| {
+            let detail = refs
+                .iter()
+                .map(|(git_ref, files)| format!("{git_ref} ({})", files.join(", ")))
+                .collect::<Vec<_>>()
+                .join(" vs ");
+            format!("{action} is pinned to more than one version: {detail}")
+        })
+        .collect()
+}
+
+/// Third-party action refs allowed to float, and why.
+///
+/// `dtolnay/rust-toolchain` publishes no version tags: the channel is the
+/// branch name, and `@master` is the documented entry point when the
+/// toolchain is supplied as an input instead — which is how the lanes that
+/// pin a nightly *date* have to call it. Floating the action to pin the
+/// compiler is the trade that action's design forces.
+const FLOATING_REF_ALLOWED: [&str; 1] = ["dtolnay/rust-toolchain"];
+
+/// `uses:` refs that move under us.
+///
+/// `@main` and `@master` re-resolve on every run, so what executes is
+/// whatever the upstream default branch holds at that moment. This is not
+/// hypothetical distance: when this gate was written, all 18 of this
+/// repository's `nix-installer-action` uses floated on `@main`, which was
+/// 43 commits ahead of the newest release — 43 unreviewed commits running
+/// on the lanes that build and sign what we publish.
+fn third_party_action_refs(src: &str) -> impl Iterator<Item = (&str, &str)> {
+    src.lines().filter_map(|line| {
+        // Both step forms: `uses:` under a `- name:`, and `- uses:` where
+        // the step is nothing but its action. Missing the second was worth
+        // a test on its own — it is the more common of the two, so a
+        // parser that skips it reads a floating ref as clean.
+        let trimmed = line.trim();
+        let rest = trimmed
+            .strip_prefix("- uses:")
+            .or_else(|| trimmed.strip_prefix("uses:"))?
+            .trim();
+        // Local composite actions and reusable workflows are our own code.
+        if rest.starts_with("./") {
+            return None;
+        }
+        let (action, git_ref) = rest.split_once('@')?;
+        Some((action, git_ref.split_whitespace().next()?))
+    })
+}
+
+fn floating_action_refs(src: &str) -> Vec<String> {
+    third_party_action_refs(src)
+        .filter(|(action, git_ref)| {
+            matches!(*git_ref, "main" | "master") && !FLOATING_REF_ALLOWED.contains(action)
+        })
+        .map(|(action, git_ref)| format!("{action}@{git_ref}"))
+        .collect()
+}
+
+/// Count `setup-uv` steps that would resolve the tool version at runtime.
+fn unversioned_setup_uv_steps(src: &str) -> usize {
+    let lines = src.lines().collect::<Vec<_>>();
+    lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| line.contains("uses: astral-sh/setup-uv@"))
+        .filter(|(index, _)| {
+            !lines[index + 1..]
+                .iter()
+                .take_while(|next| !next.trim_start().starts_with("- "))
+                .any(|next| next.trim_start().starts_with("version:"))
+        })
+        .count()
+}
+
 pub fn run(workspace: &Path) -> Result<()> {
     let workflows = workflow_files(workspace)?;
     let members = workspace_package_names(workspace)?;
@@ -72,6 +170,8 @@ pub fn run(workspace: &Path) -> Result<()> {
     let mut checked_dirs = 0usize;
     let mut checked_targets = 0usize;
     let mut checked_packages = 0usize;
+    let mut checked_actions = 0usize;
+    let mut sources: Vec<(String, String)> = Vec::new();
 
     for path in &workflows {
         let src =
@@ -80,6 +180,20 @@ pub fn run(workspace: &Path) -> Result<()> {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
+
+        checked_actions += third_party_action_refs(&src).count();
+        sources.push((name.clone(), src.clone()));
+        for floating in floating_action_refs(&src) {
+            problems.push(format!(
+                "{name}: {floating} floats on a branch — pin it to a tag or \
+                 commit, or a run executes whatever upstream pushed last"
+            ));
+        }
+        if unversioned_setup_uv_steps(&src) > 0 {
+            problems.push(format!(
+                "{name}: setup-uv resolves the uv tool version at runtime — pin its `version` input"
+            ));
+        }
 
         for dir in working_directories(&src) {
             // A templated path (`${{ matrix.crate }}`) is resolved from the
@@ -125,12 +239,16 @@ pub fn run(workspace: &Path) -> Result<()> {
         }
     }
 
+    problems.extend(action_version_conflicts(&sources));
+
     if !problems.is_empty() {
         bail!(
-            "check-workflow-paths: {} stale workflow reference(s):\n  {}\n\n\
-             A workflow step pointing at a path that no longer exists fails \
-             before it runs anything. Update the workflow in the same change \
-             that moves or renames the directory.",
+            "check-workflow-paths: {} unsound workflow reference(s):\n  {}\n\n\
+             A step pointing at a path that no longer exists fails before it \
+             runs anything — update the workflow in the same change that moves \
+             or renames the directory. A step pointing at a branch runs \
+             whatever upstream pushed last: pin it to a tag or a commit sha, \
+             with the version in a trailing comment.",
             problems.len(),
             problems.join("\n  ")
         );
@@ -163,10 +281,11 @@ pub fn run(workspace: &Path) -> Result<()> {
     }
 
     eprintln!(
-        "check-workflow-paths: clean ({} working-directory, {} fuzz target(s), {} cargo -p package(s) across {} workflow file(s))",
+        "check-workflow-paths: clean ({} working-directory, {} fuzz target(s), {} cargo -p package(s), {} pinned action ref(s) across {} workflow file(s))",
         checked_dirs,
         checked_targets,
         checked_packages,
+        checked_actions,
         workflows.len()
     );
     Ok(())
@@ -564,7 +683,18 @@ mod tests {
         let lint_policy = job_block(&workflow, "lint-policy");
         assert!(lint_policy.contains("name: Invariant"));
         assert!(lint_policy.contains("bash scripts/check-no-orchestration-server.sh"));
-        assert!(lint_policy.contains("cargo run -p xtask -- check-conformance"));
+        // The policy gates arrive through the driver, so the lane pins the
+        // driver and `check_all`'s own tests pin the table's contents.
+        // Asserting a particular gate's step here again would just be the
+        // sixty-step list in another file.
+        assert!(lint_policy.contains("cargo run -p xtask -- check-all"));
+        assert!(lint_policy.contains("Policy gates (check-abi-layout) (single-network-path)"));
+        assert!(
+            crate::check_all::GATES
+                .iter()
+                .any(|(name, _)| *name == "check-conformance"),
+            "check-conformance must still be one of the gates the lane runs"
+        );
         let lint_features = job_block(&workflow, "lint-features");
         // One invocation covering the whole test-support subtree. Selecting a
         // package at a time made cargo resolve features once per package and
@@ -604,7 +734,8 @@ mod tests {
         assert!(test.contains("name: Test"));
         assert!(test.contains(
             "needs: [scope, test-workspace, test-workspace-aarch64, test-linux, \
-             test-release-witness, test-ebpf-telemetry, bdd-conformance, kernel]"
+             test-release-witness, test-ebpf-telemetry, bdd-conformance, kernel, \
+             aarch64-no-kvm-smoke]"
         ));
 
         // Every lane the aggregate names must also be read back in the loop that
@@ -621,6 +752,7 @@ mod tests {
             "\"$EBPF_RESULT\"",
             "\"$BDD_RESULT\"",
             "\"$KERNEL_RESULT\"",
+            "\"$NO_KVM_RESULT\"",
         ] {
             assert!(
                 test.contains(expected),
@@ -795,19 +927,25 @@ mod tests {
             smoke.find(grant) < smoke.find("Build and boot the sealed exit_code workload"),
             "vhost-vsock access must be granted before QEMU starts"
         );
-        let current_embedded_bins = concat!(
-            "      - name: Build mvmctl\n",
-            "        env:\n",
-            "          # This witness boots embedded builder-guest code. A restored Cargo\n",
-            "          # cache may contain binaries built from an older source tree, which\n",
-            "          # would make the live gate validate stale mvm-host-vm-init behavior.\n",
-            "          MVM_EMBED_NO_CACHE: 1\n",
-            "        run: cargo build --release -p mvmctl",
-        );
-        assert!(
-            smoke.contains(current_embedded_bins),
-            "the live AArch64 gate must rebuild embedded host binaries from its checkout"
-        );
+        let source_build = smoke
+            .find("Build source mvmctl and published-builder bootstrap helper")
+            .expect("the live AArch64 gate must build source-matched mvmctl");
+        let source_copy = smoke
+            .find("cp target/release/mvmctl /tmp/mvmctl-source-under-test")
+            .expect("the source-matched mvmctl must be preserved before helper compilation");
+        let bootstrap = smoke
+            .find("Bootstrap source-matched launch artifacts")
+            .expect("the source-matched mvmctl must bootstrap its launch artifacts");
+        let workload = smoke
+            .find("/tmp/mvmctl-source-under-test machine run")
+            .expect("the live workload must run through the source-matched mvmctl");
+        assert!(smoke.contains("MVM_EMBED_NO_CACHE: 1"));
+        assert!(smoke.contains("cargo build --release -p mvmctl --features user"));
+        assert!(smoke.contains(
+            "cargo build --release -p mvmctl --features \
+             user,release-artifact-bootstrap,release-channel"
+        ));
+        assert!(source_build < source_copy && source_copy < bootstrap && bootstrap < workload);
     }
 
     #[test]
@@ -857,6 +995,90 @@ mod tests {
         assert!(!kernel.contains("merge_group:"));
         assert!(kernel.contains("workflow_dispatch:"));
         assert!(kernel.contains("push:"));
+    }
+
+    /// A branch ref re-resolves on every run, so what executes is whatever
+    /// upstream pushed last.
+    #[test]
+    fn a_branch_ref_is_reported_and_a_pinned_one_is_not() {
+        let floating = "\
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: some/other-action@master
+";
+        let found = floating_action_refs(floating);
+        assert_eq!(
+            found,
+            vec![
+                "DeterminateSystems/nix-installer-action@main".to_string(),
+                "some/other-action@master".to_string(),
+            ]
+        );
+
+        let pinned = "\
+      - uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/rust-cache
+      - uses: ./.github/workflows/bdd.yml
+";
+        assert!(
+            floating_action_refs(pinned).is_empty(),
+            "a pinned ref, a tag, a local action and a reusable workflow are all fine"
+        );
+
+        // The trailing `# v22` comment must not be read as part of the ref.
+        assert!(
+            third_party_action_refs(pinned)
+                .any(|(_, r)| r == "ef8a148080ab6020fd15196c2084a2eea5ff2d25"),
+            "the sha must parse without the version comment attached"
+        );
+
+        // The documented exception, and only for the action that needs it.
+        assert!(floating_action_refs("      - uses: dtolnay/rust-toolchain@master\n").is_empty());
+        assert_eq!(
+            floating_action_refs("      - uses: dtolnay/other@master\n").len(),
+            1,
+            "the exception is per-action, not a blanket pass for the owner"
+        );
+    }
+
+    /// No workflow in the tree may float, exception aside.
+    #[test]
+    fn no_workflow_floats_a_third_party_action() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join(".github/workflows");
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_none_or(|e| e != "yml") {
+                continue;
+            }
+            let src = std::fs::read_to_string(&path).unwrap();
+            assert!(
+                floating_action_refs(&src).is_empty(),
+                "{}: {:?}",
+                path.display(),
+                floating_action_refs(&src)
+            );
+        }
+    }
+
+    #[test]
+    fn setup_uv_pins_the_tool_as_well_as_the_action() {
+        let unpinned = "\
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v8.2.0
+      - name: Next step
+";
+        assert_eq!(unversioned_setup_uv_steps(unpinned), 1);
+
+        let pinned = "\
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v8.2.0
+        with:
+          version: \"0.12.5\"
+      - name: Next step
+";
+        assert_eq!(unversioned_setup_uv_steps(pinned), 0);
     }
 
     /// Every security lane runs on a schedule someone will notice.

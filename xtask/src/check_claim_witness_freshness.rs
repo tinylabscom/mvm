@@ -1,8 +1,7 @@
 //! `xtask check-claim-witness-freshness`
 //!
 //! A claim whose witness is a CI lane has two ways to stop backing it. The
-//! lane can go **red**, and the lane can stop **running**. Those need
-//! different detectors, and only the first one is covered today.
+//! lane can go **red**, and the lane can stop **running**.
 //!
 //! `Security lane watch` reports a red lane, but it triggers on
 //! `workflow_run: [Security] completed` — so it fires only when Security
@@ -12,14 +11,22 @@
 //! 2026-06-16, then did not run again until 2026-07-21. Five weeks with
 //! every claim's ledger entry green and no evidence behind any of them.
 //!
-//! This gate asks the question absence-blind detectors cannot: *did the lane
-//! run at all?* For every scheduled workflow that anchors a `ci:` witness,
-//! it reads the most recent run and fails when that run is older than the
-//! schedule can explain.
+//! On its scheduled reporting pass this gate independently reconciles both
+//! properties. For every scheduled workflow that anchors a `ci:` witness, it
+//! reads the most recent scheduled run and fails when that run is older than
+//! the schedule can explain or did not complete successfully. Pull requests
+//! validate only the static mapping and schedules, because mutable run history
+//! cannot be repaired by the branch under review.
 //!
-//! Conclusions are deliberately **not** re-checked here. That is the other
-//! detector's job, and duplicating it would put two gates on one property
-//! and let them disagree.
+//! What *is* checked is that the other detector ran at all. `Security lane
+//! watch` fires on `workflow_run`, and an event that is never delivered
+//! produces no run, no verdict and no trace — which reads exactly like a
+//! green night. On 2026-08-21 the Security nightly completed at 11:36:49Z
+//! and no watcher run was created for it; every other sampled completion,
+//! cancelled ones included, did trigger one. That is a different property
+//! from the lane's conclusion and has a different owner, so checking it
+//! here duplicates nothing: this gate already owns "did the thing that was
+//! supposed to happen, happen?".
 
 use anyhow::{Context, Result, bail};
 use std::collections::{BTreeMap, BTreeSet};
@@ -70,7 +77,33 @@ pub enum Freshness {
     NotScheduled,
 }
 
-pub fn run(workspace: &Path) -> Result<()> {
+/// The fields needed from the latest scheduled Actions run.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LatestRun {
+    pub created_at: String,
+    pub status: String,
+    pub conclusion: Option<String>,
+}
+
+/// Whether the latest scheduled run established healthy evidence.
+#[derive(Debug, PartialEq, Eq)]
+pub enum RunOutcome {
+    Healthy,
+    Unhealthy {
+        status: String,
+        conclusion: Option<String>,
+    },
+}
+
+/// `check_reporting` reads mutable Actions history: it validates the latest
+/// scheduled run's cadence and outcome, then asks whether its watcher fired.
+///
+/// Off by default, and off on pull requests, because the two questions have
+/// different audiences. Pull requests still resolve every witness and parse
+/// every schedule, but an already-completed external run is history: no PR
+/// author can fix it. Historical reconciliation belongs to the scheduled run
+/// and its tracking issue.
+pub fn run(workspace: &Path, check_reporting: bool) -> Result<()> {
     let workflows = resolve_witness_workflows(workspace)?;
     if workflows.is_empty() {
         bail!(
@@ -85,15 +118,45 @@ pub fn run(workspace: &Path) -> Result<()> {
 
     for wf in &workflows {
         let allowed = wf.max_age_hours();
+        if !should_read_run_history(allowed, check_reporting) {
+            match allowed {
+                Some(_) => checked += 1,
+                None => skipped.push(wf.file.clone()),
+            }
+            continue;
+        }
         // Only pay for an API call once the schedule says absence means
         // something.
-        let age = match allowed {
-            Some(_) => latest_run_age_hours(&wf.file)?,
+        let latest = match allowed {
+            Some(_) => latest_scheduled_run(&wf.file)?,
             None => None,
         };
+        let age = latest
+            .as_ref()
+            .map(|run| {
+                age_hours_since(&run.created_at, now_unix()?).with_context(|| {
+                    format!(
+                        "interpreting run timestamp {:?} for {}",
+                        run.created_at, wf.file
+                    )
+                })
+            })
+            .transpose()?;
         match classify(age, allowed) {
             Freshness::NotScheduled => skipped.push(wf.file.clone()),
-            Freshness::Fresh => checked += 1,
+            Freshness::Fresh => {
+                let run = latest
+                    .as_ref()
+                    .expect("a fresh verdict requires a latest scheduled run");
+                match classify_outcome(run) {
+                    RunOutcome::Healthy => checked += 1,
+                    RunOutcome::Unhealthy { status, conclusion } => problems.push(format!(
+                        "{} latest scheduled run has status {status:?} and conclusion {:?} — \
+                         claim(s) {:?} are witnessed by {:?}",
+                        wf.file, conclusion, wf.claims, wf.witnesses
+                    )),
+                }
+            }
             Freshness::NeverRan => problems.push(format!(
                 "{} has never run, yet it backs claim(s) {:?} via {:?}",
                 wf.file, wf.claims, wf.witnesses
@@ -109,6 +172,30 @@ pub fn run(workspace: &Path) -> Result<()> {
         }
     }
 
+    // The reporting chain, not the verdict: a lane can run, finish red, and
+    // still tell nobody if the `workflow_run` event that drives the watcher
+    // is never delivered. See the module header for the night that happened.
+    let mut unreported = Vec::new();
+    for wf in workflows.iter().filter(|_| check_reporting) {
+        if wf.max_age_hours().is_none() {
+            continue;
+        }
+        let Some((_, finished)) = latest_completed_run(&wf.file)? else {
+            continue;
+        };
+        // Give a just-finished run time for its watcher to be queued.
+        if age_hours_since(&finished, now_unix()?)? < WATCHER_GRACE_HOURS {
+            continue;
+        }
+        if !watcher_ran_since(WATCHER_WORKFLOW, &finished)? {
+            unreported.push(format!(
+                "{} completed at {finished} and {WATCHER_WORKFLOW} never ran for it —                  claim(s) {:?} had no verdict reported either way",
+                wf.file, wf.claims
+            ));
+        }
+    }
+    problems.extend(unreported);
+
     for f in &skipped {
         eprintln!(
             "[note] {f} carries no schedule this gate can reason about — absence is not a signal there"
@@ -117,19 +204,30 @@ pub fn run(workspace: &Path) -> Result<()> {
 
     if !problems.is_empty() {
         bail!(
-            "check-claim-witness-freshness: {} claim-bearing lane(s) have stopped running:\n  {}\n\n\
-             A lane that does not run reports no failure, so a red-lane watcher stays silent and \
-             every claim it backs keeps a green ledger entry with nothing behind it.",
+            "check-claim-witness-freshness: {} claim-bearing lane problem(s):\n  {}\n\n\
+             Scheduled reporting independently reconciles cadence, conclusion, and watcher \
+             delivery so omitted events cannot turn failed or absent evidence into silence.",
             problems.len(),
             problems.join("\n  ")
         );
     }
 
-    eprintln!(
-        "check-claim-witness-freshness: clean ({checked} scheduled lane(s) fresh, {} unscheduled)",
-        skipped.len()
-    );
+    if check_reporting {
+        eprintln!(
+            "check-claim-witness-freshness: clean ({checked} scheduled lane(s) fresh and successful, {} unscheduled)",
+            skipped.len()
+        );
+    } else {
+        eprintln!(
+            "check-claim-witness-freshness: clean ({} witness workflow(s) resolved; external run history reserved for scheduled reporting)",
+            workflows.len()
+        );
+    }
     Ok(())
+}
+
+fn should_read_run_history(allowed_hours: Option<u32>, check_reporting: bool) -> bool {
+    check_reporting && allowed_hours.is_some()
 }
 
 /// Decide freshness from an age and the schedule's allowance.
@@ -147,6 +245,17 @@ pub fn classify(age_hours: Option<u32>, allowed_hours: Option<u32>) -> Freshness
             allowed_hours,
         },
         Some(_) => Freshness::Fresh,
+    }
+}
+
+pub fn classify_outcome(run: &LatestRun) -> RunOutcome {
+    if run.status == "completed" && run.conclusion.as_deref() == Some("success") {
+        RunOutcome::Healthy
+    } else {
+        RunOutcome::Unhealthy {
+            status: run.status.clone(),
+            conclusion: run.conclusion.clone(),
+        }
     }
 }
 
@@ -253,19 +362,23 @@ pub fn cron_interval_hours(expr: &str) -> Option<u32> {
     (count > 0).then(|| 24 / count.max(1))
 }
 
-/// Age in hours of the most recent run of `file` on the default branch, or
-/// None when it has never run.
-fn latest_run_age_hours(file: &str) -> Result<Option<u32>> {
+/// The most recent completed run of `file`, as `(created_at, updated_at)`.
+///
+/// `updated_at` is when the run finished, which is the instant the
+/// `workflow_run: completed` event should have been delivered.
+fn latest_completed_run(file: &str) -> Result<Option<(String, String)>> {
     let out = std::process::Command::new("gh")
         .args([
             "run",
             "list",
             "--workflow",
             file,
+            "--status",
+            "completed",
             "--limit",
             "1",
             "--json",
-            "createdAt",
+            "createdAt,updatedAt",
         ])
         .output()
         .with_context(|| format!("running `gh run list --workflow {file}`"))?;
@@ -275,27 +388,119 @@ fn latest_run_age_hours(file: &str) -> Result<Option<u32>> {
             String::from_utf8_lossy(&out.stderr).trim()
         );
     }
-    let text = String::from_utf8_lossy(&out.stdout);
-    let Some(created) = first_created_at(&text) else {
-        return Ok(None);
-    };
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .context("reading the system clock")?
-        .as_secs() as i64;
-    age_hours_since(&created, now)
-        .with_context(|| format!("interpreting run timestamp {created:?} for {file}"))
-        .map(Some)
+    Ok(first_completed_run(&String::from_utf8_lossy(&out.stdout)))
 }
 
-/// `createdAt` of the first entry in `gh run list --json createdAt` output.
-pub fn first_created_at(json: &str) -> Option<String> {
+/// `(createdAt, updatedAt)` of the first entry in a `gh run list` payload.
+pub fn first_completed_run(json: &str) -> Option<(String, String)> {
     let v: serde_json::Value = serde_json::from_str(json).ok()?;
-    v.as_array()?
-        .first()?
-        .get("createdAt")?
-        .as_str()
-        .map(str::to_string)
+    let first = v.as_array()?.first()?;
+    Some((
+        first.get("createdAt")?.as_str()?.to_string(),
+        first.get("updatedAt")?.as_str()?.to_string(),
+    ))
+}
+
+/// Whether a run of `watcher` was created at or after `after`.
+fn watcher_ran_since(watcher: &str, after: &str) -> Result<bool> {
+    let out = std::process::Command::new("gh")
+        .args([
+            "run",
+            "list",
+            "--workflow",
+            watcher,
+            "--limit",
+            "20",
+            "--json",
+            "createdAt",
+        ])
+        .output()
+        .with_context(|| format!("running `gh run list --workflow {watcher}`"))?;
+    if !out.status.success() {
+        bail!(
+            "gh run list --workflow {watcher} failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(any_created_at_or_after(
+        &String::from_utf8_lossy(&out.stdout),
+        after,
+    ))
+}
+
+/// True when any entry's `createdAt` is at or after `after`.
+///
+/// RFC3339 UTC timestamps from the same API sort lexicographically, which
+/// is why this compares strings rather than parsing.
+pub fn any_created_at_or_after(json: &str, after: &str) -> bool {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(json) else {
+        return false;
+    };
+    let Some(entries) = v.as_array() else {
+        return false;
+    };
+    entries.iter().any(|e| {
+        e.get("createdAt")
+            .and_then(|c| c.as_str())
+            .is_some_and(|c| c >= after)
+    })
+}
+
+/// How long after a run completes to still call a missing report "in flight".
+///
+/// The watcher is a single API-reading job; a minute is generous. An hour
+/// keeps the gate quiet if Actions is queuing, and it only ever runs
+/// against a run that finished before this gate's own cron fired.
+const WATCHER_GRACE_HOURS: u32 = 1;
+
+/// The workflow that reports a watched lane's per-job verdict.
+const WATCHER_WORKFLOW: &str = "security-lane-watch.yml";
+
+fn now_unix() -> Result<i64> {
+    Ok(std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .context("reading the system clock")?
+        .as_secs() as i64)
+}
+
+/// Most recent scheduled run of `file`, or None when it has never run.
+fn latest_scheduled_run(file: &str) -> Result<Option<LatestRun>> {
+    let out = std::process::Command::new("gh")
+        .args([
+            "run",
+            "list",
+            "--workflow",
+            file,
+            "--event",
+            "schedule",
+            "--limit",
+            "1",
+            "--json",
+            "createdAt,status,conclusion",
+        ])
+        .output()
+        .with_context(|| format!("running `gh run list --workflow {file}`"))?;
+    if !out.status.success() {
+        bail!(
+            "gh run list --workflow {file} failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(first_run(&String::from_utf8_lossy(&out.stdout)))
+}
+
+/// First entry in `gh run list --json createdAt,status,conclusion` output.
+pub fn first_run(json: &str) -> Option<LatestRun> {
+    let v: serde_json::Value = serde_json::from_str(json).ok()?;
+    let run = v.as_array()?.first()?;
+    Some(LatestRun {
+        created_at: run.get("createdAt")?.as_str()?.to_string(),
+        status: run.get("status")?.as_str()?.to_string(),
+        conclusion: run
+            .get("conclusion")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+    })
 }
 
 /// Hours between `rfc3339` and `now_unix`. Pure, so the verdict this gate
@@ -387,6 +592,13 @@ mod tests {
     }
 
     #[test]
+    fn pull_request_validation_never_reads_external_run_state() {
+        assert!(!should_read_run_history(Some(72), false));
+        assert!(!should_read_run_history(None, true));
+        assert!(should_read_run_history(Some(72), true));
+    }
+
+    #[test]
     fn staleness_is_measured_against_missed_firings() {
         // A daily lane tolerates a couple of missed nightlies, then trips.
         let allowed = 24 * MISSED_FIRINGS_ALLOWED;
@@ -426,14 +638,108 @@ mod tests {
         ));
     }
 
+    /// The incident this check exists for: a completed run with no watcher
+    /// run after it.
     #[test]
-    fn first_created_at_reads_the_newest_entry() {
-        let json = r#"[{"createdAt":"2026-07-31T05:26:57Z"},{"createdAt":"2026-07-30T05:17:49Z"}]"#;
-        assert_eq!(
-            first_created_at(json).as_deref(),
-            Some("2026-07-31T05:26:57Z")
+    fn a_completed_run_with_no_later_watcher_run_is_unreported() {
+        // The real timestamps from Security run 32448509693 and the newest
+        // security-lane-watch run that existed when it finished.
+        let finished = "2026-08-21T11:36:49Z";
+        let watcher_runs = r#"[
+            {"createdAt": "2026-08-21T04:53:22Z"},
+            {"createdAt": "2026-08-21T04:17:19Z"}
+        ]"#;
+        assert!(
+            !any_created_at_or_after(watcher_runs, finished),
+            "no watcher run followed the completion, which is the bug"
         );
-        assert_eq!(first_created_at("[]"), None);
+
+        // One created after it is the healthy shape.
+        let with_report = r#"[
+            {"createdAt": "2026-08-21T11:37:02Z"},
+            {"createdAt": "2026-08-21T04:53:22Z"}
+        ]"#;
+        assert!(any_created_at_or_after(with_report, finished));
+
+        // Exactly at the boundary counts as a report.
+        let exact = r#"[{"createdAt": "2026-08-21T11:36:49Z"}]"#;
+        assert!(any_created_at_or_after(exact, finished));
+    }
+
+    #[test]
+    fn an_empty_or_malformed_watcher_history_is_not_a_report() {
+        assert!(!any_created_at_or_after("[]", "2026-08-21T11:36:49Z"));
+        assert!(!any_created_at_or_after("not json", "2026-08-21T11:36:49Z"));
+        assert!(!any_created_at_or_after(
+            r#"[{"other": "field"}]"#,
+            "2026-08-21T11:36:49Z"
+        ));
+    }
+
+    #[test]
+    fn a_completed_run_payload_yields_both_timestamps() {
+        let json =
+            r#"[{"createdAt": "2026-08-21T04:53:00Z", "updatedAt": "2026-08-21T11:36:49Z"}]"#;
+        assert_eq!(
+            first_completed_run(json),
+            Some((
+                "2026-08-21T04:53:00Z".to_string(),
+                "2026-08-21T11:36:49Z".to_string()
+            ))
+        );
+        assert_eq!(first_completed_run("[]"), None);
+    }
+
+    #[test]
+    fn latest_scheduled_run_must_complete_successfully() {
+        let successful = LatestRun {
+            created_at: "2026-08-21T04:17:00Z".to_string(),
+            status: "completed".to_string(),
+            conclusion: Some("success".to_string()),
+        };
+        assert_eq!(classify_outcome(&successful), RunOutcome::Healthy);
+
+        for conclusion in ["failure", "cancelled", "timed_out"] {
+            let run = LatestRun {
+                conclusion: Some(conclusion.to_string()),
+                ..successful.clone()
+            };
+            assert_eq!(
+                classify_outcome(&run),
+                RunOutcome::Unhealthy {
+                    status: "completed".to_string(),
+                    conclusion: Some(conclusion.to_string()),
+                }
+            );
+        }
+
+        let running = LatestRun {
+            status: "in_progress".to_string(),
+            conclusion: None,
+            ..successful
+        };
+        assert_eq!(
+            classify_outcome(&running),
+            RunOutcome::Unhealthy {
+                status: "in_progress".to_string(),
+                conclusion: None,
+            }
+        );
+    }
+
+    #[test]
+    fn first_run_reads_status_and_conclusion() {
+        let json = r#"[{"createdAt":"2026-08-21T04:17:00Z","status":"completed","conclusion":"cancelled"}]"#;
+        assert_eq!(
+            first_run(json),
+            Some(LatestRun {
+                created_at: "2026-08-21T04:17:00Z".to_string(),
+                status: "completed".to_string(),
+                conclusion: Some("cancelled".to_string()),
+            })
+        );
+        assert_eq!(first_run("[]"), None);
+        assert_eq!(first_run("not json"), None);
     }
 
     #[test]

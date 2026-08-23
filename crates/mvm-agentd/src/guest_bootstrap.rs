@@ -100,6 +100,7 @@ fn report_read_only_skips() {
 }
 
 pub fn provision_guest_environment() -> Result<(), EgressClientMissing> {
+    provision_hostname();
     ensure_runtime_dirs();
     provision_workload_identity();
     mount_mediated_tools();
@@ -633,10 +634,20 @@ pub fn cmdline() -> String {
 }
 
 pub fn cmdline_value(key: &str) -> Option<String> {
-    let prefix = format!("{key}=");
-    cmdline()
-        .split_whitespace()
-        .find_map(|part| part.strip_prefix(&prefix).map(ToOwned::to_owned))
+    crate::guest_hostname::cmdline_value_from(&cmdline(), key).map(ToOwned::to_owned)
+}
+
+fn provision_hostname() {
+    match crate::guest_hostname::provision_from(
+        &cmdline(),
+        crate::guest_hostname::set_kernel_hostname,
+    ) {
+        Ok(true) => {}
+        Ok(false) => {
+            eprintln!("mvm-guest-init: no mvm.hostname token; keeping the kernel hostname")
+        }
+        Err(error) => eprintln!("mvm-guest-init: could not set guest hostname: {error}"),
+    }
 }
 
 pub fn cmdline_has_flag(flag: &str) -> bool {

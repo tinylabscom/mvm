@@ -54,6 +54,9 @@ pub(in crate::commands) fn resolve_or_pull_run_image(
     reference: &str,
     prod: bool,
 ) -> Result<ResolvedOciRunImage> {
+    ensure_prod_digest_pin(reference, prod)?;
+    ensure_prod_registry_reference_policy(reference, prod)?;
+    crate::commands::runtime_overlay::prepare_oci_guest_runtime(cache_root)?;
     resolve_or_pull_run_image_with(
         cache_root,
         reference,
@@ -202,11 +205,47 @@ pub(super) fn pull_image_with_trust(
     reference: &str,
     prod: bool,
 ) -> Result<(CachedOciImage, OciTrustDecision, String)> {
+    pull_image_with_trust_with_prepare(
+        cache_root,
+        reference,
+        prod,
+        crate::commands::runtime_overlay::prepare_oci_guest_runtime,
+    )
+}
+
+fn pull_image_with_trust_with_prepare(
+    cache_root: &Path,
+    reference: &str,
+    prod: bool,
+    prepare_guest_runtime: impl FnOnce(&Path) -> Result<()>,
+) -> Result<(CachedOciImage, OciTrustDecision, String)> {
     let image_ref: ImageReference = reference.parse()?;
     if prod && !image_ref.is_digest_pinned() {
         bail!("mvmctl image pull --prod requires a digest-pinned reference");
     }
+    ensure_prod_registry_policy(&image_ref, prod)?;
+    prepare_guest_runtime(cache_root)?;
     pull_image_ref(cache_root, image_ref, reference, prod)
+}
+
+fn ensure_prod_registry_reference_policy(reference: &str, prod: bool) -> Result<()> {
+    if !prod {
+        return Ok(());
+    }
+    if let source::ImageSource::Registry(_) = source::ImageSource::classify(reference)? {
+        let image_ref: ImageReference = reference.parse()?;
+        ensure_prod_registry_policy(&image_ref, true)?;
+    }
+    Ok(())
+}
+
+fn ensure_prod_registry_policy(image_ref: &ImageReference, prod: bool) -> Result<()> {
+    if !prod {
+        return Ok(());
+    }
+    let policy = load_oci_registry_policy()?;
+    enforce_registry_allowlist(image_ref, &policy)?;
+    ensure_signature_policy_is_configured(&policy)
 }
 
 #[tracing::instrument(skip_all, fields(reference = supplied_reference, prod))]
@@ -616,6 +655,29 @@ mod tests {
         assert!(
             err.to_string()
                 .contains("requires a digest-pinned reference"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn prod_pull_requires_registry_policy_before_guest_runtime_preparation() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(tmp.path());
+        env.remove("MVM_OCI_POLICY");
+        let cache_root = tmp.path().join("cache/oci");
+        let pinned = concat!(
+            "docker.io/library/alpine@sha256:",
+            "1111111111111111111111111111111111111111111111111111111111111111"
+        );
+
+        let err = pull_image_with_trust_with_prepare(&cache_root, pinned, true, |_| {
+            bail!("guest runtime preparation ran before production policy admission")
+        })
+        .expect_err("missing production policy must fail before artifact preparation");
+
+        assert!(
+            err.to_string().contains("requires an OCI registry policy"),
             "unexpected error: {err}"
         );
     }

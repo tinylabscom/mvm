@@ -10,8 +10,8 @@ export function DemoTeaser() {
   const base = rawBase.endsWith("/") ? rawBase.slice(0, -1) : rawBase;
   // The dialog (and its iframe) is only mounted after the click so
   // landing-page visitors don't pay for the wasm worker unless they ask
-  // for it. Embed mode (?embed=1) hides the demo's config pane and
-  // auto-launches, showing the console and audit chain side by side.
+  // for it. Autorun (?autorun=1) starts the WebLinux engine as soon as
+  // the iframe loads.
   const [open, setOpen] = useState(false);
 
   useEffect(() => {
@@ -40,11 +40,11 @@ export function DemoTeaser() {
             className="lowercase font-display tracking-tight text-2xl font-semibold leading-tight text-title sm:text-3xl"
             style={{ marginBottom: "1.5rem" }}
           >
-            run the sandbox demo.
+            run a linux vm in your browser.
           </h2>
           <p className="max-w-md text-base leading-relaxed text-body">
-            See policy, placeholder substitution, and chain-signed audit
-            verification run from the same wasm core the host uses — no install
+            See a real x86_64 Linux guest boot inside the browser under
+            the QEMU-Wasm engine — no install
             required.
           </p>
           <div style={{ marginTop: "2rem" }}>
@@ -68,7 +68,7 @@ export function DemoTeaser() {
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm sm:p-8"
           role="dialog"
           aria-modal="true"
-          aria-label="mvm browser-tier microVM demo"
+          aria-label="mvm WebLinux demo"
           onClick={(e) => {
             if (e.target === e.currentTarget) setOpen(false);
           }}
@@ -76,7 +76,7 @@ export function DemoTeaser() {
           <div className="relative w-full max-w-6xl overflow-hidden rounded-xl border border-code-border bg-code-canvas shadow-2xl shadow-black/50">
             <div className="flex items-center justify-between border-b border-code-border px-4 py-2.5">
               <p className="font-mono text-xs tracking-[0.14em] uppercase text-label">
-                mvm · browser-tier microVM
+                mvm · WebLinux demo
               </p>
               <button
                 type="button"
@@ -88,8 +88,8 @@ export function DemoTeaser() {
               </button>
             </div>
             <iframe
-              src={`${base}/demo/?embed=1`}
-              title="mvm browser-tier microVM demo"
+              src={`${base}/demo/weblinux/?autorun=1`}
+              title="mvm WebLinux demo"
               className="block h-128 w-full border-0"
             />
           </div>

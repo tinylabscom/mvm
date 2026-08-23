@@ -84,7 +84,7 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Install Nix
-        uses: DeterminateSystems/nix-installer-action@main
+        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@1.96.0
@@ -255,10 +255,9 @@ jobs:
   # The host-side `RuntimeOverlayResolver`
   # (`crates/mvm-build/src/runtime_overlay.rs`) downloads one
   # arch-qualified tarball plus a tarball sha256 sidecar, then
-  # installs the extracted canonical names (`overlay.ext4`,
-  # `overlay.verity`, `overlay.roothash`, `VERSION`,
-  # `checksums-sha256.txt`) into
-  # `~/.mvm/cache/runtime-overlay/<mvmctl-version>/<arch>/`.
+  # installs the overlay's canonical files into
+  # `~/.mvm/cache/runtime-overlay/<mvmctl-version>/<arch>/` and the six
+  # verified OCI materialization shims into the versioned OCI guest cache.
   runtime-overlay-image:
     # Skipped on a dry-run dispatch (see builder-vm-image).
     if: ${{ github.event_name == 'push' || github.event.inputs.dry_run == 'false' }}
@@ -281,7 +280,7 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Install Nix
-        uses: DeterminateSystems/nix-installer-action@main
+        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
 
       - name: Build runtime overlay image
         env:
@@ -299,14 +298,25 @@ jobs:
           cp -L "$STORE_PATH/overlay.verity"   "staging/runtime-overlay-${ARCH}/overlay.verity"
           cp -L "$STORE_PATH/overlay.roothash" "staging/runtime-overlay-${ARCH}/overlay.roothash"
           cp -L "$STORE_PATH/VERSION"          "staging/runtime-overlay-${ARCH}/VERSION"
+          for bin in \
+            mvm-oci-init mvm-guest-agent mvm-guest-netinit \
+            mvm-egress-client mvm-oci-entrypoint mvm-verity-init; do
+            cp -L "$STORE_PATH/guest-runtime/$bin" "staging/runtime-overlay-${ARCH}/$bin"
+          done
           (
             cd "staging/runtime-overlay-${ARCH}"
-            sha256sum overlay.ext4 overlay.verity overlay.roothash VERSION \
+            sha256sum \
+              overlay.ext4 overlay.verity overlay.roothash VERSION \
+              mvm-oci-init mvm-guest-agent mvm-guest-netinit \
+              mvm-egress-client mvm-oci-entrypoint mvm-verity-init \
               > checksums-sha256.txt
           )
           tar -C "staging/runtime-overlay-${ARCH}" \
             -czf "staging/runtime-overlay-${ARCH}.tar.gz" \
-            overlay.ext4 overlay.verity overlay.roothash VERSION checksums-sha256.txt
+            overlay.ext4 overlay.verity overlay.roothash VERSION \
+            mvm-oci-init mvm-guest-agent mvm-guest-netinit \
+            mvm-egress-client mvm-oci-entrypoint mvm-verity-init \
+            checksums-sha256.txt
           (
             cd staging
             sha256sum "runtime-overlay-${ARCH}.tar.gz" \
@@ -359,7 +369,7 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Install Nix
-        uses: DeterminateSystems/nix-installer-action@main
+        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
 
       - name: Build SDK sidecar image
         env:
@@ -424,7 +434,7 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Install Nix
-        uses: DeterminateSystems/nix-installer-action@main
+        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@1.96.0

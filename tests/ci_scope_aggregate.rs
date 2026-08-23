@@ -71,6 +71,8 @@ struct Verdict {
     bdd: &'static str,
     kernel_scope: &'static str,
     kernel: &'static str,
+    no_kvm_required: &'static str,
+    no_kvm: &'static str,
 }
 
 impl Verdict {
@@ -84,6 +86,8 @@ impl Verdict {
             bdd: "success",
             kernel_scope: "true",
             kernel: "success",
+            no_kvm_required: "true",
+            no_kvm: "success",
         }
     }
 
@@ -98,6 +102,8 @@ impl Verdict {
             bdd: "skipped",
             kernel_scope: "false",
             kernel: "success",
+            no_kvm_required: "false",
+            no_kvm: "skipped",
         }
     }
 
@@ -119,6 +125,8 @@ impl Verdict {
             .env("BDD_RESULT", self.bdd)
             .env("KERNEL_SCOPE", self.kernel_scope)
             .env("KERNEL_RESULT", self.kernel)
+            .env("NO_KVM_REQUIRED", self.no_kvm_required)
+            .env("NO_KVM_RESULT", self.no_kvm)
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -153,11 +161,23 @@ fn a_fully_in_scope_green_run_is_admitted() {
     assert!(Verdict::in_scope().accepts());
 }
 
+#[test]
+fn an_in_scope_pull_request_may_skip_the_merge_group_only_smoke() {
+    assert!(
+        Verdict {
+            no_kvm_required: "false",
+            no_kvm: "skipped",
+            ..Verdict::in_scope()
+        }
+        .accepts()
+    );
+}
+
 /// The gate must not have been widened into a rubber stamp. Each of these is a
 /// real failure that has to keep being caught, in whichever scope it can occur.
 #[test]
 fn a_genuine_failure_is_still_refused_in_either_scope() {
-    let cases: [(&str, Verdict); 6] = [
+    let cases: [(&str, Verdict); 7] = [
         (
             "a failing kernel build, in scope",
             Verdict {
@@ -200,10 +220,33 @@ fn a_genuine_failure_is_still_refused_in_either_scope() {
                 ..Verdict::in_scope()
             },
         ),
+        (
+            "the required aarch64 no-KVM smoke failing",
+            Verdict {
+                no_kvm: "failure",
+                ..Verdict::in_scope()
+            },
+        ),
     ];
     for (what, verdict) in cases {
         assert!(!verdict.accepts(), "the aggregate must refuse {what}");
     }
+}
+
+#[test]
+fn aggregate_depends_on_the_aarch64_no_kvm_smoke() {
+    let workflow = std::fs::read_to_string(".github/workflows/ci.yml")
+        .expect("failed to read .github/workflows/ci.yml");
+    let test_job = workflow
+        .split_once("\n  test:\n")
+        .map(|(_, rest)| rest)
+        .and_then(|rest| rest.split_once("\n  test-workspace:\n").map(|(job, _)| job))
+        .expect("Test aggregate job must remain delimited by test-workspace");
+    assert!(
+        test_job.contains("aarch64-no-kvm-smoke"),
+        "the required Test aggregate must depend on the live no-KVM smoke"
+    );
+    assert!(test_job.contains("NO_KVM_RESULT"));
 }
 
 /// A malformed scope output must fail closed rather than be read as one of the
