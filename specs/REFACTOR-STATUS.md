@@ -39,6 +39,11 @@ for detailed scope and acceptance criteria.
       preparation. Builder and workload QEMU launches share one architecture
       mapping, so AArch64 consistently selects the `virt` machine and PL011
       console; pre-daemonization failures retain a bounded QEMU-log tail.
+      Authenticated host handshakes preserve typed session errors so a peer
+      reset while the slow TCG guest becomes ready reaches the existing
+      bounded activation retry; identity and protocol rejections still fail
+      closed. Failed transient starts emit a redacted guest-console tail before
+      cleanup.
       The tagged release workflow separately verifies the signed
       future-format overlay through the production downloader before publish.
       The standalone hostd fuzz lock is refreshed for the current dependency

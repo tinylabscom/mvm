@@ -1296,6 +1296,13 @@ updates only its own entry below.
       and security builds opt into both explicitly, while the aarch64 witness
       can build its checked-out overlay and still download the published
       builder image.
+      **Update 2026-08-23:** the merge-group witness progressed through the
+      builder and exposed two workload-launch gaps. QEMU architecture defaults
+      are now shared so AArch64 selects `virt` and `ttyAMA0`. The subsequent
+      agent-readiness reset is preserved as a typed session peer hangup and
+      reaches the existing bounded activation retry; authenticated rejections
+      remain fail-closed, and failed transient starts retain a redacted console
+      tail before cleanup.
 
 - [x] **Backend shim removal — invert the driver/backend relationship.**
       `FcDriver`, `HvfDriver`, `LibkrunDriver`, and `QemuDriver` now own their

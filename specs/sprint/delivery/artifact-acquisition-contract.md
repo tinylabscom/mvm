@@ -51,6 +51,10 @@ stale output cannot be selected.
 - shared QEMU architecture defaults prove both the builder and workload paths
   select the AArch64 `virt` machine and PL011 console; failed pre-daemonization
   workload launches retain a bounded QEMU-log tail in the returned error
+- typed authenticated-session peer hangups survive host handshake context and
+  are retried during the bounded activation-ready window; authenticated
+  rejections are not retried, and failed transient starts emit a redacted
+  guest-console tail before cleanup
 - focused QEMU architecture, workload-driver, and builder suites: 2, 16, and
   22 tests respectively
 - refreshed standalone `mvm-hostd` fuzz lock under stable and pinned nightly

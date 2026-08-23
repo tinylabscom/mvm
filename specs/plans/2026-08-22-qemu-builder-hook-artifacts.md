@@ -22,6 +22,13 @@ used the x86 serial-console default. QEMU exited before daemonizing, and
 transient cleanup removed its log before the workflow diagnostic step could
 read it.
 
+After that launch gap was repaired, QEMU booted but the first authenticated
+agent handshake saw `ConnectionReset` while the TCG guest was still coming up.
+Activation already retries transport-level peer hangups for 30 seconds, but
+the host handshake had flattened `SessionError::Io` into message text, hiding
+the typed cause from the retry classifier and turning an ordinary readiness
+race into an immediate failed launch.
+
 Two independent defects turned that mount failure into a merged regression:
 
 - the generated job shell used `if ! command; then hook_rc=$?`, so `hook_rc`
@@ -47,6 +54,9 @@ Two independent defects turned that mount failure into a merged regression:
       workload argv selects `-machine virt` plus `console=ttyAMA0`.
 - [x] Include a bounded tail of `qemu.log` in pre-daemonization launch errors
       so transient cleanup cannot erase the causal diagnostic.
+- [x] Preserve typed host-handshake session errors, retry peer hangups while
+      the guest agent becomes ready, keep authenticated rejections fail-closed,
+      and emit the redacted guest-console tail before failed transient cleanup.
 - [ ] Pass focused tests, formatting, workspace check/test, all-target Clippy,
       Linux-gated checks, and the live merge-group witness.
 - [ ] Record delivery and refactor status, then merge the repair.
