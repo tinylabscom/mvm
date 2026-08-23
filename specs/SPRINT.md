@@ -1140,12 +1140,17 @@ updates only its own entry below.
       workflow anchoring it (reusing #1980's resolver, lifted into
       `claims_ledger` so one implementation serves both gates), derives the
       allowance from the cron, and fails when the newest run is older than
-      three missed firings. It deliberately does *not* re-check conclusions —
-      that is #1970's job, and two gates on one property would eventually
-      disagree. Lanes with no daily-or-better cron are reported as notes, not
-      judged: a pull-request lane is legitimately idle. Falsified by making
-      Security's cron hourly, which reported it 14h stale and named all eight
-      claims it backs.
+      three missed firings. After #2792 proved GitHub can omit a completed
+      run's `workflow_run` delivery entirely, the independent schedule also
+      reconciles the latest scheduled run's status and conclusion. Only a
+      completed success is healthy; failed, cancelled, timed-out, and
+      still-running observations fail closed even when the event watcher was
+      never invoked. Pull-request and dispatch runs cannot overwrite scheduled
+      evidence. Pull requests validate witness resolution and schedule parsing
+      without reading mutable Actions history; only the independent schedule
+      enables reporting, so an in-flight nightly cannot make a PR red. Lanes
+      with no daily-or-better cron are reported as notes, not judged: a
+      pull-request lane is legitimately idle.
 
       Bundled: `ci-full.yml` now `cargo check`s the cargo-fuzz crates. They
       are workspace-excluded, so no lane compiled them and the nightly aborts

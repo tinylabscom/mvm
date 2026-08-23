@@ -17,6 +17,13 @@ for detailed scope and acceptance criteria.
 
 ## Completed issue closeouts
 
+- [x] **Issue #2792 — Security watcher delivery has an independent backstop.**
+      The scheduled claim-witness reconciliation now inspects only scheduled
+      runs and requires the latest one to be fresh, completed, and successful.
+      A failed, cancelled, timed-out, or still-running nightly is therefore
+      reported even if GitHub omits the event-driven watcher's `workflow_run`
+      delivery; pull-request and dispatch runs cannot mask the evidence.
+
 - [x] **Issue #2789 — guest hostname follows the machine name.** The shared
       workload cmdline carries one validated `mvm.hostname=` token for cold
       boots, while warm children receive their final name through the existing
