@@ -17,6 +17,13 @@ for detailed scope and acceptance criteria.
 
 ## Completed issue closeouts
 
+- [x] **Scheduled Security dependency and no-SSH scanner repair.** The
+      supply-chain lane pins the last `async-trait` release on `syn` 2,
+      restoring the duplicate-version policy, while the no-SSH lane permits
+      only the capture secret-filename denylist and excludes generated
+      dependency/build trees. Positive and negative shell fixtures preserve
+      the fail-closed source boundary.
+
 - [x] **Issue #2657 — live BDD is visible and merge-gated.** Capability skips
       are reported instead of disappearing from the test summary, and a
       merge-queue/manual-only KVM lane runs one tagged Firecracker witness for
