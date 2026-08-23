@@ -505,8 +505,7 @@ fn copy_rootfs_with_hook(src_rootfs: &Path, dst: &Path) -> Result<(), String> {
         )
     })?;
     run_before_build_hook(&tmp_path)?;
-    std::fs::copy(&tmp_path, dst)
-        .map_err(|e| format!("copy {} -> {}: {e}", tmp_path.display(), dst.display()))?;
+    copy_artifact(&tmp_path, dst)?;
     let _ = tmp.close();
     Ok(())
 }
@@ -540,8 +539,10 @@ fn run_before_build_hook(rootfs_path: &Path) -> Result<(), String> {
 /// symlink farms), with a path-named error.
 fn copy_artifact(src: &Path, dst: &Path) -> Result<(), String> {
     std::fs::copy(src, dst)
-        .map(|_| ())
-        .map_err(|e| format!("copy {} -> {}: {e}", src.display(), dst.display()))
+        .map_err(|e| format!("copy {} -> {}: {e}", src.display(), dst.display()))?;
+    std::fs::File::open(dst)
+        .and_then(|file| file.sync_all())
+        .map_err(|e| format!("sync {}: {e}", dst.display()))
 }
 
 /// The `nix flake prefetch --json` argv for a

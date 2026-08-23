@@ -1139,17 +1139,12 @@ test --workspace --no-fail-fast` gate passes with zero failures after the
       workflow anchoring it (reusing #1980's resolver, lifted into
       `claims_ledger` so one implementation serves both gates), derives the
       allowance from the cron, and fails when the newest run is older than
-      three missed firings. After #2792 proved GitHub can omit a completed
-      run's `workflow_run` delivery entirely, the independent schedule also
-      reconciles the latest scheduled run's status and conclusion. Only a
-      completed success is healthy; failed, cancelled, timed-out, and
-      still-running observations fail closed even when the event watcher was
-      never invoked. Pull-request and dispatch runs cannot overwrite scheduled
-      evidence. Pull requests validate witness resolution and schedule parsing
-      without reading mutable Actions history; only the independent schedule
-      enables reporting, so an in-flight nightly cannot make a PR red. Lanes
-      with no daily-or-better cron are reported as notes, not judged: a
-      pull-request lane is legitimately idle.
+      three missed firings. It deliberately does *not* re-check conclusions —
+      that is #1970's job, and two gates on one property would eventually
+      disagree. Lanes with no daily-or-better cron are reported as notes, not
+      judged: a pull-request lane is legitimately idle. Falsified by making
+      Security's cron hourly, which reported it 14h stale and named all eight
+      claims it backs.
 
           Bundled: `ci-full.yml` now `cargo check`s the cargo-fuzz crates. They
           are workspace-excluded, so no lane compiled them and the nightly aborts
@@ -2762,6 +2757,18 @@ the builder image's explicit util-linux `/sbin/mount`, with a focused constant
 regression pinning that executable contract. The live lane forces a refresh of
 embedded host binaries so the guest always carries the checkout under test,
 even when Cargo caches are restored.
+
+## 2026-08-23 AArch64 builder rootfs journal sealing
+
+The merge-group AArch64 QEMU witness then reached workload activation and
+proved that a hook-mutated `rootfs.ext4` could be exported with a journal that
+still required recovery. Workload disks are hypervisor-enforced read-only, so
+the guest correctly refused to replay that journal. The builder hook boundary
+now runs offline `e2fsck` after all writable mounts are dropped, accepting only
+the clean and repaired exit codes; a still-mounted or damaged image fails the
+build instead of being published. Every export route also flushes the copied
+artifact before reporting completion, and the builder toolchain GC roots now
+retain `e2fsck` alongside `mkfs.ext4`.
 
 ## 2026-08-22 guest hostname generated-protocol parity
 
