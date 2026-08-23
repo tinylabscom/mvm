@@ -402,6 +402,12 @@ jobs:
       - name: one guest→host protocol
         run: cargo run -p xtask -- check-one-guest-protocol
 
+      # An image's declared environment is resolved once. The console used to
+      # assemble its own, which is why `machine run --image rust:latest -it`
+      # opened a shell with the image's own toolchain missing from PATH.
+      - name: one workload-env resolver (console and entrypoint agree on the image)
+        run: cargo run -p xtask -- check-single-workload-env
+
       # A wall-clock bound is declared once, as a grant. `exec_secs` is that
       # grant's projection into the plan's older encoding; a second writer is a
       # second declaration of one decision, and the two can disagree.
