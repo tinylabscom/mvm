@@ -29,6 +29,12 @@ a step, not the more common `- uses:` form, so it read 134 refs where there
 were 206 and would have called a floating ref clean. The unit test caught
 it before the gate shipped.
 
+The action pin alone is not enough for `setup-uv`: without its `version`
+input, the action fetches a remote "latest" manifest before any test runs.
+A hosted-runner fetch failure exposed that second floating boundary. Every
+CI and BDD setup now pins uv 0.12.5, and `check-workflow-paths` rejects a
+future `setup-uv` step that omits the tool version.
+
 Version split, found by the new check: `publish-npm.yml` and
 `publish-pypi.yml` paired `upload-artifact@v4` with `download-artifact@v4`
 while eleven other lanes were on v7 — one major bump away from a handoff

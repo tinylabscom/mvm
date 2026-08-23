@@ -146,6 +146,22 @@ fn floating_action_refs(src: &str) -> Vec<String> {
         .collect()
 }
 
+/// Count `setup-uv` steps that would resolve the tool version at runtime.
+fn unversioned_setup_uv_steps(src: &str) -> usize {
+    let lines = src.lines().collect::<Vec<_>>();
+    lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| line.contains("uses: astral-sh/setup-uv@"))
+        .filter(|(index, _)| {
+            !lines[index + 1..]
+                .iter()
+                .take_while(|next| !next.trim_start().starts_with("- "))
+                .any(|next| next.trim_start().starts_with("version:"))
+        })
+        .count()
+}
+
 pub fn run(workspace: &Path) -> Result<()> {
     let workflows = workflow_files(workspace)?;
     let members = workspace_package_names(workspace)?;
@@ -171,6 +187,11 @@ pub fn run(workspace: &Path) -> Result<()> {
             problems.push(format!(
                 "{name}: {floating} floats on a branch — pin it to a tag or \
                  commit, or a run executes whatever upstream pushed last"
+            ));
+        }
+        if unversioned_setup_uv_steps(&src) > 0 {
+            problems.push(format!(
+                "{name}: setup-uv resolves the uv tool version at runtime — pin its `version` input"
             ));
         }
 
@@ -1031,6 +1052,25 @@ mod tests {
                 floating_action_refs(&src)
             );
         }
+    }
+
+    #[test]
+    fn setup_uv_pins_the_tool_as_well_as_the_action() {
+        let unpinned = "\
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v8.2.0
+      - name: Next step
+";
+        assert_eq!(unversioned_setup_uv_steps(unpinned), 1);
+
+        let pinned = "\
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v8.2.0
+        with:
+          version: \"0.12.5\"
+      - name: Next step
+";
+        assert_eq!(unversioned_setup_uv_steps(pinned), 0);
     }
 
     /// Every security lane runs on a schedule someone will notice.
