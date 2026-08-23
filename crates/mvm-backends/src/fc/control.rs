@@ -196,9 +196,6 @@ pub fn stop_vm(name: &str) -> Result<()> {
         &mvm_core::config::vm_state_dir(name),
         name,
     );
-    // Same reasoning for the L3 gateway: a crashed guest must not leave a
-    // host TUN and an nft table behind.
-    mvm_vmm::host::netd_spawn::reap_netd(&mvm_core::config::vm_state_dir(name));
     if !host::is_vm_running(&pid_file)? {
         ui::info(&format!("VM '{}' is not running.", name));
         return Ok(());

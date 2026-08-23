@@ -387,7 +387,7 @@ async fn a_204_carries_no_body() {
 
 #[tokio::test]
 async fn request_body_and_headers_reach_the_server() {
-    let (addr, srv) = serve_raw(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok").await;
+    let (addr, srv) = serve_streamed_request(9).await;
     let c = client_for(addr);
     let resp = c
         .post(url_for(addr))

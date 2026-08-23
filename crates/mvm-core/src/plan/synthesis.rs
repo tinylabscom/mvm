@@ -45,10 +45,9 @@
 use crate::plan::{
     AdmissionProfile, ArtifactPolicy, AttestationMode, AttestationRequirement, AuditLabels,
     AuditTaxonomy, DepsVolumeBinding, EnvironmentRef, ExecutionPlan, FsPolicyRef, IngressMapping,
-    KeyRotationSpec, L3NetworkSpec, NetworkMode, Nonce, PlanId, PlanSeccompTier, PolicyRef,
-    PostRunLifecycle, Resources, RuntimeProfileRef, SCHEMA_VERSION, SecretBinding,
-    SecretReleasePolicy, SignedImageRef, StreamRetention, TenantId, TimeoutSpec, WorkloadId,
-    WorkloadIntent,
+    KeyRotationSpec, NetworkMode, Nonce, PlanId, PlanSeccompTier, PolicyRef, PostRunLifecycle,
+    Resources, RuntimeProfileRef, SCHEMA_VERSION, SecretBinding, SecretReleasePolicy,
+    SignedImageRef, StreamRetention, TenantId, TimeoutSpec, WorkloadId, WorkloadIntent,
 };
 use anyhow::Result;
 use chrono::{Duration, Utc};
@@ -128,9 +127,6 @@ pub struct SynthesisInput<'a> {
     /// the transport is admitted, never a host-side default the guest
     /// discovers at boot. `Default` is the closed mode.
     pub network_mode: NetworkMode,
-    /// The L3-tunnel contract, when `network_mode` selects it. Admission
-    /// refuses the pair being inconsistent in either direction.
-    pub l3_network: Option<L3NetworkSpec>,
     /// Exact host listeners and guest-loopback targets admitted for ingress.
     pub ingress: Vec<IngressMapping>,
     /// What this workload asks to be permitted to consume. `None` = it
@@ -242,7 +238,6 @@ pub struct SynthesisInputBuilder<'a> {
     secrets: Option<Vec<SecretBinding>>,
     audit_event_prefix: Option<&'a str>,
     network_mode: Option<NetworkMode>,
-    l3_network: Option<L3NetworkSpec>,
     ingress: Option<Vec<IngressMapping>>,
     grants: Option<mvm_contract::grants::Grants>,
     cpus: Option<u32>,
@@ -286,7 +281,6 @@ impl<'a> SynthesisInputBuilder<'a> {
             secrets: None,
             audit_event_prefix: None,
             network_mode: None,
-            l3_network: None,
             ingress: None,
             grants: None,
             cpus: None,
@@ -425,13 +419,6 @@ impl<'a> SynthesisInputBuilder<'a> {
     #[must_use]
     pub fn network_mode(mut self, network_mode: NetworkMode) -> Self {
         self.network_mode = Some(network_mode);
-        self
-    }
-
-    /// Set `l3_network`. Takes a value or an `Option`; unset means `None`.
-    #[must_use]
-    pub fn l3_network(mut self, l3_network: impl Into<Option<L3NetworkSpec>>) -> Self {
-        self.l3_network = l3_network.into();
         self
     }
 
@@ -613,7 +600,6 @@ impl<'a> SynthesisInputBuilder<'a> {
             network_mode: self
                 .network_mode
                 .ok_or(BuilderError::missing("SynthesisInput", "network_mode"))?,
-            l3_network: self.l3_network,
             ingress: self.ingress.unwrap_or_default(),
             grants: self.grants,
             cpus: self
@@ -668,17 +654,6 @@ impl<'a> Default for SynthesisInputBuilder<'a> {
     }
 }
 
-/// The L3 spec a plan carries, given its mode.
-///
-/// `Some` exactly when the mode is the tunnel, so the pair can never be
-/// half-set: an `l3_vsock` plan without a spec and a spec on a non-L3 plan
-/// are both refused at admission, and neither is constructible from here.
-/// A caller that supplied a spec keeps it; one that did not gets the
-/// version-1 defaults.
-fn l3_spec_for(_mode: NetworkMode, _supplied: Option<&L3NetworkSpec>) -> Option<L3NetworkSpec> {
-    None
-}
-
 /// Build an unsigned `ExecutionPlan` from CLI-shaped input.
 ///
 /// Generates a fresh `nonce` (128 random bits) per invocation and
@@ -690,11 +665,6 @@ fn l3_spec_for(_mode: NetworkMode, _supplied: Option<&L3NetworkSpec>) -> Option<
 pub fn synthesize_plan(input: &SynthesisInput<'_>) -> Result<ExecutionPlan> {
     let nonce = fresh_nonce();
     let now = Utc::now();
-
-    // Refuse the retired raw-packet transport before anything else is derived,
-    // so the operator gets the migration error rather than a plan that would
-    // fail later at a transport they never named.
-    crate::plan::refuse_retired_l3(&input.network_mode, input.l3_network.is_some())?;
 
     let tenant_str = input.tenant.unwrap_or(DEFAULT_TENANT);
     if tenant_str.is_empty() {
@@ -779,11 +749,6 @@ pub fn synthesize_plan(input: &SynthesisInput<'_>) -> Result<ExecutionPlan> {
         build_provenance: Default::default(),
         snapshot_at: Default::default(),
         network_mode: input.network_mode,
-        // Derived from the mode, never taken alongside it. The two fields
-        // disagreeing is an inadmissible plan (the compatibility gate
-        // refuses both directions), so synthesis is the one place that can
-        // guarantee they never do.
-        l3_network: l3_spec_for(input.network_mode, input.l3_network.as_ref()),
         network_limits: Default::default(),
         ingress: input.ingress.clone(),
         schema_version: SCHEMA_VERSION,
@@ -923,7 +888,6 @@ mod tests {
             grants: None,
             kernel_sha256: None,
             network_mode: NetworkMode::default(),
-            l3_network: None,
             ingress: Vec::new(),
             vm_name,
             tenant: None,
@@ -1296,61 +1260,6 @@ mod tests {
         let recovered =
             crate::plan::verify_plan(&signed, &[("host:test", &key.verifying_key())]).unwrap();
         assert_eq!(recovered.audit_labels["origin.descriptor"], "blake3:abc");
-    }
-}
-
-#[cfg(test)]
-mod l3_spec_tests {
-    use super::*;
-
-    /// The mode and the spec are two fields that must agree, and admission
-    /// refuses both directions of disagreement. Synthesis is the only place
-    /// that can guarantee they never do, so it derives one from the other.
-    #[test]
-    fn the_spec_is_present_exactly_when_the_mode_is_the_tunnel() {
-        assert!(l3_spec_for(NetworkMode::None, None).is_none());
-        assert!(l3_spec_for(NetworkMode::HostVsockProxy, None).is_none());
-    }
-
-    /// A spec offered alongside a non-L3 mode is dropped rather than
-    /// carried: keeping it would make the plan inadmissible.
-    #[test]
-    fn a_spec_on_a_non_l3_mode_is_dropped() {
-        let supplied = L3NetworkSpec::v1();
-        assert!(l3_spec_for(NetworkMode::HostVsockProxy, Some(&supplied)).is_none());
-    }
-
-    /// A caller that configured limits or ingress keeps them; only the
-    /// absent case gets defaults.
-    #[test]
-    fn a_supplied_spec_is_not_represented_in_a_new_plan() {
-        let mut supplied = L3NetworkSpec::v1();
-        supplied.max_flows = 17;
-        assert!(l3_spec_for(NetworkMode::HostVsockProxy, Some(&supplied)).is_none());
-    }
-
-    /// The IPv6 request travels in the signed plan, so what the host
-    /// allocates for is what was admitted rather than something the launch
-    /// path decided on its own.
-    #[test]
-    fn an_ipv6_l3_request_is_not_carried_into_a_new_plan() {
-        let supplied = L3NetworkSpec::v1().requesting_ipv6();
-        assert!(l3_spec_for(NetworkMode::HostVsockProxy, Some(&supplied)).is_none());
-    }
-
-    #[test]
-    fn an_absent_spec_stays_absent() {
-        assert!(l3_spec_for(NetworkMode::HostVsockProxy, None).is_none());
-    }
-
-    /// The end-to-end property: a synthesized plan is always admissible on
-    /// this axis, whichever mode it carries.
-    #[test]
-    fn every_synthesized_plan_has_a_consistent_mode_and_spec() {
-        for mode in [NetworkMode::None, NetworkMode::HostVsockProxy] {
-            let spec = l3_spec_for(mode, None);
-            assert!(spec.is_none(), "{mode:?} produced a retired L3 spec");
-        }
     }
 }
 

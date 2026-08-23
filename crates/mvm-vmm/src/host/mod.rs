@@ -19,7 +19,6 @@ pub mod flowmux_identity;
 pub mod host_agent_spawn;
 pub mod hvf_supervisor;
 pub mod linux_env;
-pub mod netd_spawn;
 pub mod network_endpoint_spawn;
 pub mod observability_target;
 pub mod process_exit;

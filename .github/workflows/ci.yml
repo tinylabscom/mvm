@@ -386,8 +386,8 @@ jobs:
       - name: Trust-gradient ledger
         run: cargo run -p xtask -- check-trust-gradient
 
-      - name: vsock-only egress (no guest NIC on the vmm/HVF path, ADR-100)
-        run: cargo run -p xtask -- check-vsock-only-egress
+      - name: single workload network path and socket owner (single-network-path)
+        run: cargo run -p xtask -- check-single-network-path
 
       # The in-guest toolbox is deliberately ungoverned — the microVM boundary
       # bounds it. What the boundary cannot bound is the guest originating a
@@ -401,21 +401,6 @@ jobs:
       # protocol is what killed egress on main with every test green.
       - name: one guest→host protocol
         run: cargo run -p xtask -- check-one-guest-protocol
-
-      # Tree-wide companion to the check above. The userspace network gateways
-      # went with the guest-NIC path; a reference coming back is how a second
-      # egress model grows back alongside the real one.
-      - name: no reference to a removed userspace network gateway
-        run: cargo run -p xtask -- check-no-gateway-names
-
-      # Temporary, shrink-only ratchet: the raw-packet workload networking path
-      # is frozen while the single flow-aware vsock path is built. Deleted with
-      # its last allowlist entry.
-      - name: l3 expansion freeze (no new raw-packet networking references)
-        run: cargo run -p xtask -- check-l3-expansion-freeze
-
-      - name: uniform vsock egress (Firecracker + libkrun + HVF use the WorkloadRunner seam)
-        run: cargo run -p xtask -- check-uniform-vsock-egress
 
       # A wall-clock bound is declared once, as a grant. `exec_secs` is that
       # grant's projection into the plan's older encoding; a second writer is a

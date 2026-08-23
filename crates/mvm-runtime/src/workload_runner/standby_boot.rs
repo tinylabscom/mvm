@@ -272,10 +272,7 @@ fn factory_parent_spec_inner(
         egress_gateway: Some(&egress),
         exit: &exit,
         broker: Some(&broker),
-        network_control: None,
-        network_data: None,
         console_data: Vec::new(),
-        ingress_tcp: Vec::new(),
     };
     VmmSpec {
         vsock: workload_vsock_ports(&sockets),
@@ -389,10 +386,7 @@ mod tests {
                 egress_gateway: Some(Path::new("/run/egress.sock")),
                 exit: Path::new("/run/workload.exit"),
                 broker: None,
-                network_control: None,
-                network_data: None,
                 console_data: Vec::new(),
-                ingress_tcp: Vec::new(),
             },
             cmdline: cmdline::runner_cmdline(launch, state_dir, fc_base),
             console_log: state_dir.join("console.log"),

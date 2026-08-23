@@ -67,20 +67,16 @@ processors=8
 
 Then restart WSL: `wsl --shutdown` and reopen the Ubuntu shell.
 
-## Port forwarding (Windows host ↔ mvm guest)
+## Declared ingress (Windows host ↔ mvm guest)
 
-mvm guests inside WSL2 run on the `172.16.0.0/24` TAP bridge, which is invisible from the Windows host by default. To expose a guest service to a Windows-side browser:
+mvm guests have no workload NIC. To expose a guest service to a Windows-side
+browser, declare its FlowMux ingress mapping before boot:
 
 1. **Boot a named machine that serves on port 8080**:
    ```bash
-   mvmctl machine run -d --name my-vm --manifest .
+   mvmctl machine run --name my-vm --manifest . --port 8080:8080
    ```
-2. **Forward the guest port to the WSL2 distro's loopback** with mvm's standard mechanism:
-   ```bash
-   mvmctl machine forward my-vm -p 8080:8080
-   ```
-   This binds `127.0.0.1:8080` inside the WSL2 distro to the guest's port 8080.
-3. **WSL2's automatic localhost forwarding** ([documented by Microsoft](https://learn.microsoft.com/en-us/windows/wsl/networking#accessing-network-applications)) makes `localhost:8080` on Windows reach the WSL2 distro's loopback. Open `http://localhost:8080` in a Windows browser and you're hitting the mvm guest.
+2. **WSL2's automatic localhost forwarding** ([documented by Microsoft](https://learn.microsoft.com/en-us/windows/wsl/networking#accessing-network-applications)) makes `localhost:8080` on Windows reach the WSL2 distro's loopback. Open `http://localhost:8080` in a Windows browser and you're hitting the admitted FlowMux listener.
 
 If localhost forwarding isn't working (some corporate VPN clients break it), fall back to the WSL2 distro's IP:
 
@@ -125,7 +121,7 @@ refuses DrvFs-backed repo/state paths. It then:
 - scaffolds and builds a temporary HTTP preset manifest;
 - proves transient `run --json --receipt`;
 - boots a persistent libkrun-backed machine and waits for guest-agent reachability;
-- verifies `machine exec`, `--allow-host` egress, `machine forward`, and clean stop.
+- verifies `machine exec`, `--allow-host` egress, declared FlowMux ingress, and clean stop.
 
 ## Future Backend Work
 

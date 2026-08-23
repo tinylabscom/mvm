@@ -215,7 +215,6 @@ mod tests {
                 socket_dir: tmp.path().join("sockets").join(vm_name),
             },
             network: mvm_runtime::base::observability_target::NetworkTarget {
-                has_netd: false,
                 substitution_socket: tmp.path().join("subst.sock"),
             },
             cgroup_path: None,

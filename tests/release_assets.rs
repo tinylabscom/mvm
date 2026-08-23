@@ -578,6 +578,39 @@ fn the_boot_image_tag_composes_the_url_the_workflow_uploads_to() {
     }
 }
 
+#[test]
+fn the_cross_compile_installers_share_a_cortex_flag_compatible_zigbuild() {
+    let workspace = fs::read_to_string("Cargo.toml").expect("read workspace manifest");
+    let version = workspace
+        .lines()
+        .find_map(|line| {
+            line.trim()
+                .strip_prefix("cargo-zigbuild = \"")
+                .and_then(|value| value.strip_suffix('"'))
+        })
+        .expect("workspace cargo-zigbuild pin");
+    let parts = version
+        .split('.')
+        .map(|part| part.parse::<u32>().expect("numeric cargo-zigbuild version"))
+        .collect::<Vec<_>>();
+    assert!(
+        parts.as_slice() >= &[0, 23, 0],
+        "cargo-zigbuild {version} forwards Rust's AArch64 cortex workaround to Zig, which rejects it"
+    );
+
+    for path in [
+        ".github/actions/install-zigbuild/action.yml",
+        "scripts/local-aarch64-no-kvm-smoke.sh",
+    ] {
+        let installer = fs::read_to_string(path)
+            .unwrap_or_else(|error| panic!("failed to read {path}: {error}"));
+        assert!(
+            installer.contains(&format!("cargo-zigbuild --version {version}")),
+            "{path} must install the workspace cargo-zigbuild pin {version}"
+        );
+    }
+}
+
 /// A CLI release with no boot image assets must not publish.
 ///
 /// The image train and the CLI train are now separate, so it is possible to cut

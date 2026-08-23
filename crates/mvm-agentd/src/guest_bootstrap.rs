@@ -695,8 +695,8 @@ fn base64_val(b: u8) -> Option<u8> {
 }
 
 pub fn bring_loopback_up() {
-    if let Err(e) = crate::guest_net::bring_iface_up("lo") {
-        eprintln!("mvm-guest-init: bring loopback up: {e}");
+    if let Err(e) = crate::guest_net::configure_loopback() {
+        eprintln!("mvm-guest-init: configure loopback: {e}");
     }
     if loopback_is_up() {
         return;

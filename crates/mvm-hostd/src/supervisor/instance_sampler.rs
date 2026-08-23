@@ -131,6 +131,10 @@ pub fn sample_once<S: Sources>(
         net_tx_packets: combined.net_tx_packets.unwrap_or(prev.net_tx_packets),
         uptime_secs,
         last_sample_unix_secs: now,
+        ai_requests_total: prev.ai_requests_total,
+        ai_tokens_input_total: prev.ai_tokens_input_total,
+        ai_tokens_output_total: prev.ai_tokens_output_total,
+        ai_tokens_total_total: prev.ai_tokens_total_total,
     };
     registry.update(&target.labels.instance_id, values)
 }

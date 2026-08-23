@@ -19,8 +19,8 @@ use crate::commands::vm::shared::VmStartParams;
 use crate::commands::vm::readiness::record_vm_readiness;
 
 use super::admission::{
-    AdmitPlanForBootParams, admit_plan_for_boot, attach_guest_boot_config, emit_failed_if,
-    emit_launched_if, enforce_shares_if, guest_profile_for_boot,
+    AdmitPlanForBootParams, admit_plan_for_boot_with_ingress, attach_guest_boot_config,
+    emit_failed_if, emit_launched_if, enforce_shares_if, guest_profile_for_boot,
 };
 use super::policy::shares_from_volume_cfg;
 use super::runtime_source::{
@@ -97,6 +97,28 @@ pub(in crate::commands) struct PersistentImageStartParams<'a> {
     /// [`network_policy`](Self::network_policy), which the caller derived from
     /// the same spec.
     pub grants: Option<mvm_contract::grants::Grants>,
+}
+
+fn machine_port_ingress(ports: &[String]) -> Result<Vec<mvm_core::plan::IngressMapping>> {
+    ports
+        .iter()
+        .enumerate()
+        .map(|(index, mapping)| {
+            let (host, guest) = crate::commands::shared::parse_port_spec(mapping)?;
+            let mapping_id = u16::try_from(index + 1)
+                .context("too many declared ingress mappings for the signed plan")?;
+            mvm_core::plan::IngressMapping::builder()
+                .mapping_id(mapping_id)
+                .protocol(mvm_core::plan::IngressProtocol::Tcp)
+                .host_addr("127.0.0.1")
+                .host_port(host)
+                .guest_addr("127.0.0.1")
+                .guest_port(guest)
+                .transform(mvm_core::plan::IngressTransform::Opaque)
+                .build()
+                .with_context(|| format!("lowering declared ingress mapping {mapping:?}"))
+        })
+        .collect()
 }
 
 fn persistent_oci_rootfs_requires_overlay_policy(rootfs_path: &std::path::Path) -> bool {
@@ -231,48 +253,52 @@ pub(in crate::commands) fn start_persistent_oci_machine(
     let initrd_path = persistent_oci_effective_initrd(rootfs_path, runtime_source_policy)?;
 
     let admission_ledger = InMemoryNonceLedger::new();
-    let admission = admit_plan_for_boot(AdmitPlanForBootParams {
-        network_mode: crate::commands::machine::preflight_network(),
-        tenant: "local",
-        vm_name: name,
-        backend_name,
-        rootfs_path,
-        precomputed_image_sha256: None,
-        boot_artifact_identity: None,
-        cpus,
-        mem_mib: u64::from(memory_mib),
-        seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
-        secret_release: mvm_core::plan::SecretReleasePolicy::default(),
-        secrets: vec![],
-        no_supervisor,
-        ledger: &admission_ledger,
-        keys_dir: None,
-        audit_dir: None,
-        policy_dir: None,
-        bundle_pin: None,
-        deps_volume: None,
-        shares: shares_from_volume_cfg(volumes),
-        redaction: mvm_core::policy::RedactionPolicy::default(),
-        network_policy: network_policy.clone(),
-        agent_verb_override: agent_verb.to_vec(),
-        // Persistent machines carrying a trailing argv run an ad-hoc Exec (DevOnly);
-        // they must not receive an attenuated ProdSafe-only grant. Baked-entrypoint
-        // boots (no argv, non-dev profile) keep the grant.
-        restrict_agent_verbs: crate::commands::vm::agent_verbs::grant_eligible(
-            false,
-            has_ad_hoc_argv,
-            profile == "dev",
-        ),
-        services: Vec::new(),
-        grants,
-        // The typed kind of the backend this start resolved, so the grant gate
-        // measures a declared bound against the mechanisms that tier has rather
-        // than refusing for want of an answer.
-        backend_kind: Some(mvm_client::backend_kind_for(backend_name)),
-        entrypoint: crate::commands::vm::entrypoint_resolve::ResolvedEntrypoint::unresolved(
-            "the persistent OCI start path resolves no entrypoint",
-        ),
-    })?;
+    let ingress = machine_port_ingress(ports)?;
+    let admission = admit_plan_for_boot_with_ingress(
+        AdmitPlanForBootParams {
+            network_mode: crate::commands::machine::preflight_network(),
+            tenant: "local",
+            vm_name: name,
+            backend_name,
+            rootfs_path,
+            precomputed_image_sha256: None,
+            boot_artifact_identity: None,
+            cpus,
+            mem_mib: u64::from(memory_mib),
+            seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
+            secret_release: mvm_core::plan::SecretReleasePolicy::default(),
+            secrets: vec![],
+            no_supervisor,
+            ledger: &admission_ledger,
+            keys_dir: None,
+            audit_dir: None,
+            policy_dir: None,
+            bundle_pin: None,
+            deps_volume: None,
+            shares: shares_from_volume_cfg(volumes),
+            redaction: mvm_core::policy::RedactionPolicy::default(),
+            network_policy: network_policy.clone(),
+            agent_verb_override: agent_verb.to_vec(),
+            // Persistent machines carrying a trailing argv run an ad-hoc Exec (DevOnly);
+            // they must not receive an attenuated ProdSafe-only grant. Baked-entrypoint
+            // boots (no argv, non-dev profile) keep the grant.
+            restrict_agent_verbs: crate::commands::vm::agent_verbs::grant_eligible(
+                false,
+                has_ad_hoc_argv,
+                profile == "dev",
+            ),
+            services: Vec::new(),
+            grants,
+            // The typed kind of the backend this start resolved, so the grant gate
+            // measures a declared bound against the mechanisms that tier has rather
+            // than refusing for want of an answer.
+            backend_kind: Some(mvm_client::backend_kind_for(backend_name)),
+            entrypoint: crate::commands::vm::entrypoint_resolve::ResolvedEntrypoint::unresolved(
+                "the persistent OCI start path resolves no entrypoint",
+            ),
+        },
+        ingress,
+    )?;
     let mut start_config = VmStartParams::builder()
         .name(name.to_string())
         .rootfs_path(rootfs_path.display().to_string())
@@ -296,13 +322,6 @@ pub(in crate::commands) fn start_persistent_oci_machine(
         .network_policy(network_policy)
         .build()?
         .into_start_config();
-    start_config.ports = ports
-        .iter()
-        .map(|mapping| {
-            let (host, guest) = crate::commands::shared::parse_port_spec(mapping)?;
-            Ok(mvm_core::vm_backend::VmPortMapping { host, guest })
-        })
-        .collect::<Result<Vec<_>>>()?;
     start_config.runtime_source_policy = runtime_source_policy;
     // Only dev-profile machines can be attached to later with `machine shell`
     // or `machine console`. Keep the host-side console listeners absent for
@@ -347,6 +366,27 @@ mod runtime_source_policy_for_workload_boot_tests {
 
     use mvm_core::util::test_env::TestEnv;
     use mvm_core::vm_backend::RuntimeSourcePolicy;
+
+    #[test]
+    fn machine_ports_lower_to_admitted_flowmux_ingress() {
+        let mappings = super::machine_port_ingress(&["18080:80".into(), "8443:443".into()])
+            .expect("valid CLI ports lower to ingress mappings");
+
+        assert_eq!(mappings.len(), 2);
+        assert_eq!(mappings[0].mapping_id, 1);
+        assert_eq!(mappings[0].host_addr, "127.0.0.1");
+        assert_eq!(mappings[0].host_port, 18080);
+        assert_eq!(mappings[0].guest_addr, "127.0.0.1");
+        assert_eq!(mappings[0].guest_port, 80);
+        assert_eq!(mappings[0].protocol, mvm_core::plan::IngressProtocol::Tcp);
+        assert_eq!(
+            mappings[0].transform,
+            mvm_core::plan::IngressTransform::Opaque
+        );
+        assert_eq!(mappings[1].mapping_id, 2);
+        assert_eq!(mappings[1].host_port, 8443);
+        assert_eq!(mappings[1].guest_port, 443);
+    }
 
     #[test]
     fn persistent_oci_console_preopen_is_limited_to_dev_profile() {

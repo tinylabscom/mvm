@@ -1034,7 +1034,6 @@ dependencies = [
 name = "mvm-agentd"
 version = "0.18.0"
 dependencies = [
- "aes-gcm",
  "anyhow",
  "base64",
  "chrono",
@@ -1048,7 +1047,6 @@ dependencies = [
  "seccompiler",
  "serde",
  "serde_json",
- "sha2",
  "thiserror",
  "tracing",
  "x25519-dalek",
@@ -1075,7 +1073,6 @@ dependencies = [
  "anyhow",
  "chrono",
  "ed25519-dalek",
- "ext4-view",
  "flate2",
  "hex",
  "libc",
@@ -1192,7 +1189,6 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-rustls",
- "tracing",
  "url",
 ]
 
@@ -1200,12 +1196,8 @@ dependencies = [
 name = "mvm-net"
 version = "0.18.0"
 dependencies = [
- "ipnet",
  "mvm-contract",
  "mvm-core",
- "serde",
- "sha2",
- "thiserror",
 ]
 
 [[package]]

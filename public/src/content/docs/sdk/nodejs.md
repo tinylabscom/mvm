@@ -39,6 +39,25 @@ export const worker = mvm.app({
 
 The AST compiler accepts the supported literal declaration shape and lowers it into Workload IR.
 
+
+### AI egress budget
+
+```ts
+export const llmWorker = mvm.app({
+  image: mvm.python_image({ python: "3.12" }),
+  network: mvm.network({
+    mode: "bridge",
+    egress: mvm.egress([mvm.hostPort("api.openai.com", 443)]),
+    ai: mvm.aiPolicy({
+      metering: true,
+      budget: mvm.aiBudget({ maxTotalTokens: 100_000 }),
+    }),
+  }),
+})((prompt: string): string => {
+  ...
+});
+```
+
 ## Security notes
 
 - Runtime scripts execute host-side SDK code.

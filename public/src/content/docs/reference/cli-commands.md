@@ -18,7 +18,7 @@ running VM live under `vm`, build-time verbs under `build`, observability
 under `ops`, install/environment lifecycle under `env`, and provenance &
 verification under `trust`. Domains that already own their own subcommands
 (`image`, `catalog`, `manifest`, `storage`, `network`, `cache`, `pool`,
-`secret`, `bundle`, `deps`, `artifact`) stay top-level.
+`secret`, `bundle`, `deps`, `artifact`, `capture`) stay top-level.
 
 | Group / top-level | Commands |
 |--------|----------|
@@ -28,7 +28,7 @@ verification under `trust`. Domains that already own their own subcommands
 | `ops <sub>` | `metrics`, `config`, `mcp` |
 | `env <sub>` | `bootstrap`, `cleanup`, `uninstall`, `update`, `sign` |
 | `trust <sub>` | `add`/`list`/`remove` (publishers), `attest`, `receipt`, `audit` |
-| Already-grouped top-level | `image`, `catalog`, `manifest`, `storage`, `network`, `cache`, `pool`, `secret`, `bundle`, `deps`, `artifact` |
+| Already-grouped top-level | `image`, `catalog`, `manifest`, `storage`, `network`, `cache`, `pool`, `secret`, `bundle`, `deps`, `artifact`, `capture` |
 
 **Beginner vs. advanced surfaces.** [`mvmctl machine`](#machine-beginner-ux)
 (further down) is the beginner-facing front door — one small command group for
@@ -45,6 +45,7 @@ guest-RPC surface, fleet-shaped workflows).
 
 | Command | Description |
 |---------|-------------|
+| `mvmctl capture` | Inspect a Linux project and selected commands, resolve the evidence into canonical MVM IR, and render or verify the resulting environment (`project`, `resolve`, and `verify` subcommands) |
 | `mvmctl machine run --flake <ref>` | Build a Nix flake and boot a transient VM |
 | `mvmctl machine run --manifest <path>` | Boot a pre-built manifest (`mvm.toml`, its directory, or a slot name; short form `-m`). Mutually exclusive with `--flake`/`--image` |
 | `mvmctl machine run --image <ref>` | Boot an OCI image (pulled/cached). Mutually exclusive with `--flake`/`--manifest` |
@@ -72,7 +73,7 @@ guest-RPC surface, fleet-shaped workflows).
 | `mvmctl machine ls` | List every microVM: persistent machines and running transients (alias: `ps`) |
 | `mvmctl machine ls -a` | Also show transient machines that are no longer running |
 | `mvmctl machine ls --json` | Output as JSON |
-| `mvmctl machine forward <name> -p PORT` | Forward a port from a running VM to localhost |
+| `mvmctl machine run ... --port HOST:GUEST` | Declare signed TCP ingress before boot (repeatable) |
 | `mvmctl machine logs <name>` | View the workload's captured stdout/stderr — live while it runs, and still readable after it exits (`-f` to follow, `-n` for how many recorded records to replay first; a record is one captured write, not one line). Workload stdout is written to your stdout and stderr to your stderr, so an ordinary pipeline (`\| grep …`) filters the channel it asked for, and a closed pipe (`\| head -1`) ends the read cleanly rather than erroring. Falls back to the machine's console log when no output capture exists, saying so. Exits nonzero when there is no source at all, and warns on stderr when what it shows is a window rather than the whole run — a truncated capture, a pruned live window, or a hole between the recorded and live halves |
 | `mvmctl machine logs <name> --stream <stdout\|stderr\|trace\|all>` | Show one channel only (default `all`). Refused on a machine whose only source is its console log: that log merges both channels with no labels, so narrowing it has no honest answer. A recorded capture holding nothing on the requested channel is reported as such, not as a missing capture |
 | `mvmctl machine logs <name> --hypervisor` | View the VMM's own diagnostic log (`firecracker.log`) rather than workload output, `-f` to follow it. Firecracker writes one; the other backends do not |
@@ -1119,6 +1120,52 @@ running microVM.
 | `mvmctl env uninstall -y` | Uninstall without confirmation |
 | `mvmctl env uninstall --all` | Also remove ~/.mvm/ config dir and /usr/local/bin/mvmctl binary |
 | `mvmctl env uninstall --dry-run` | Print what would be removed without removing |
+
+## Global Options
+## Capture
+
+Inspect a project environment, produce a reviewable capture report, resolve it to the canonical MVM IR, render Nix artifacts, and optionally verify them in the Linux builder VM.
+
+### `mvmctl capture project`
+
+Inspect a project directory and emit a versioned capture report.
+
+| Option | Description |
+|--------|-------------|
+| `<path>` | Project directory to inspect |
+| `--output <path>` | Output file for the capture report (required) |
+| `--run "<cmd>"` | Explicit command to record for later tracing/verification; repeatable |
+
+### `mvmctl capture resolve`
+
+Resolve a capture report into the canonical MVM IR.
+
+| Option | Description |
+|--------|-------------|
+| `<report>` | Capture report to resolve |
+| `--output <path>` | Output file for the canonical IR (required) |
+
+### `mvmctl capture verify`
+
+Render `flake.nix`, `launch.json`, and `workload.json` from the canonical IR and record verification status.
+
+| Option | Description |
+|--------|-------------|
+| `<environment>` | Canonical IR file produced by `capture resolve` |
+| `--manifest-dir <dir>` | Directory containing the project source (defaults to the current directory) |
+| `--out-dir <dir>` | Directory for rendered Nix artifacts and `verification.json` (defaults to a temp directory) |
+| `--run "<cmd>"` | Verification command to record or execute; repeatable |
+| `--exec-in-builder-vm` | Build the rendered flake inside the Linux builder VM via `mvmctl __builder-shell-job`. Requires a bootstrapped builder VM. Default behavior records the command without executing it |
+| `--boot-and-replay` | Boot a microVM inside the Linux builder VM and replay the verification command as the guest entrypoint. Requires a bootstrapped builder VM with working microVM support. Mutually exclusive with `--exec-in-builder-vm`; default behavior records the command without executing it |
+
+Output files written to `--out-dir`:
+
+- `flake.nix` — Nix flake defining the guest image.
+- `launch.json` — resolved entrypoint and metadata.
+- `workload.json` — host-side workload IR.
+- `verification.json` — canonical IR plus a `verification` array with one record per `--run` command.
+
+See the capture guide for security boundaries and limitations.
 
 ## Global Options
 
