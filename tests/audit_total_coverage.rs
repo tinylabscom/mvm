@@ -429,7 +429,15 @@ const TRANSCRIPT_SUB: &[(&str, AuditPosture)] = &[
 // their own: `publish-root` writes a signed-root sidecar derived from the chain
 // (not a new chain event), and `prove` / `verify-inclusion` are pure reads —
 // the same audit posture as `verify-cert`.
-const RECEIPTS_SUB: &[(&str, AuditPosture)] = &[("export", AuditPosture::ReadOnly)];
+// `trust audit receipts <sub>` — both verbs are pure reads of the chain-signed
+// log. `export` derives receipts and an evidence archive from entries that are
+// already there; `verify` only reads an archive file and never touches the
+// chain at all. Neither appends, which is the point: an exporter that emitted
+// its own entry would change the log it is trying to attest.
+const RECEIPTS_SUB: &[(&str, AuditPosture)] = &[
+    ("export", AuditPosture::ReadOnly),
+    ("verify", AuditPosture::ReadOnly),
+];
 
 // `trust audit provenance <sub>` — read-only PROV-O/Turtle export of the
 // chain-signed audit log. Does not emit new audit events.

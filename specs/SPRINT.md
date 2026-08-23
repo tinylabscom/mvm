@@ -2751,6 +2751,15 @@ hostname field had not reached the generated protocol artifacts. The protocol
 schema and Python and TypeScript bindings are now regenerated from the Rust
 wire type, keeping all supported SDK surfaces in parity.
 
+## 2026-08-22 scheduled mutation witness repair
+
+Completed Security run 32552650847 exposed seven surviving authorization
+mutants in extension verification, budget narrowing, attachment, and assurance
+proxy collision handling. Focused boundary and one-field-at-a-time tests now
+catch the exact fail-open changes. A bounded local mutation proof caught all
+20 generated mutants across those predicates and the adjacent provenance
+fields; one obsolete accepted miss is removed from the ratchet.
+
 ## 2026-08-22 capture all-features closure witness
 
 The `mvm-capture` workspace addition raises the all-features closure by exactly

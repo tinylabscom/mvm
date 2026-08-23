@@ -26,7 +26,13 @@ jobs:
     uses: ./.github/workflows/bdd.yml
 
   kernel:
-    name: Build kernels (${{ matrix.arch }})
+    # Deliberately NOT "Build kernels (<arch>)": that is ci.yml's job, and
+    # it is a required status check. Two workflows publishing one context
+    # name is readable only while their triggers stay disjoint — this one
+    # is tags and dispatch, ci.yml is pull_request and merge_group — and
+    # nothing about the name itself says so. This one publishes; ci.yml
+    # validates.
+    name: Publish kernels (${{ matrix.arch }})
     needs: [bdd]
     if: ${{ always() && (needs.bdd.result == 'success' || needs.bdd.result == 'skipped') }}
     strategy:

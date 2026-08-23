@@ -118,6 +118,11 @@ pub mod volume;
 pub mod vsock;
 pub mod worker_pool;
 pub mod worker_protocol;
+/// The single resolver for a workload's environment and working directory.
+/// Both the entrypoint runner and the interactive console read the image's
+/// declared runtime config through it.
+pub mod workload_env;
+
 /// Names the fixed workload uid/gid in the workload rootfs account databases,
 /// so `whoami`/`id`/`getpwuid` resolve inside images mvm did not build.
 pub mod workload_identity;

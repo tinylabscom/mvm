@@ -120,10 +120,27 @@ pub fn provision_guest_environment() -> Result<(), EgressClientMissing> {
 /// Both are cosmetic-until-they-aren't: without the home the shell starts in a
 /// directory it cannot write, and without the `/etc/passwd` entry `whoami`
 /// exits nonzero and `getpwuid()` returns `NULL` to any library that asks.
-/// Neither failure is worth refusing to boot over. A read-only rootfs cannot
-/// take either write, so use its writable `/tmp` fallback and leave the image's
-/// account databases unchanged without issuing syscalls that must fail.
+/// Neither failure is worth refusing to boot over.
+///
+/// The home comes from a tmpfs laid over a mount point the image carries,
+/// which needs no write to the root and so works on the read-only roots every
+/// workload actually boots with. The account entries are baked in at image
+/// materialization for the same reason; the writable-root branch below is the
+/// fallback for a root mvm did not materialize, and calls the same
+/// `provision_in` the materializer does.
 fn provision_workload_identity() {
+    if let Err(error) = crate::guest_mount::mount_workload_home() {
+        // Deliberately not routed through `note_optional_step`: that bucket
+        // means "the read-only root explains this", and mounting over a
+        // directory needs no write to the root. A failure here is its own
+        // fact and stays at full volume.
+        eprintln!(
+            "mvm-guest-init: could not mount a writable home at {} \
+             (continuing with {} as $HOME): {error}",
+            crate::guest_mount::WORKLOAD_HOME,
+            crate::guest_mount::WORKLOAD_HOME_FALLBACK
+        );
+    }
     if !crate::guest_mount::optional_image_writes_allowed(rootfs_is_read_only()) {
         return;
     }
