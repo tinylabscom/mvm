@@ -1,8 +1,9 @@
 name: Security lane watch
 
-# The Security workflow runs on release tags, a nightly cron, and manual
-# dispatch — never on a pull request. Nothing surfaces a failure, so a red
-# lane is invisible until somebody thinks to read run history. That is not
+# The workflows this watches — Security, and the pack signing round-trip —
+# run on release tags, a nightly cron, and manual dispatch, never on a pull
+# request. Nothing surfaces a failure, so a red lane is invisible until
+# somebody thinks to read run history. That is not
 # hypothetical: cargo-deny, cargo-audit, the fuzz lane, the flake-lock check
 # and builder-VM reproducibility were all red for six consecutive nights
 # before anyone noticed, and three of those five back numbered security
@@ -36,7 +37,7 @@ name: Security lane watch
 
 on:
   workflow_run:
-    workflows: ["Security"]
+    workflows: ["Security", "Pack signing smoke", "Extended CI"]
     types: [completed]
 
 permissions:
@@ -70,7 +71,8 @@ jobs:
           RUN_URL: ${{ github.event.workflow_run.html_url }}
           RUN_EVENT: ${{ github.event.workflow_run.event }}
           HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
-          TITLE: "Security lane is red"
+          WATCHED: ${{ github.event.workflow_run.name }}
+          TITLE: "${{ github.event.workflow_run.name }} lane is red"
         run: |
           set -euo pipefail
 
@@ -95,11 +97,11 @@ jobs:
           set -e
 
           if [ "$verdict" -eq 3 ]; then
-            echo "Security run $RUN_ID collected no per-job verdict; nothing to report."
+            echo "$WATCHED run $RUN_ID collected no per-job verdict; nothing to report."
             exit 0
           fi
           if [ "$verdict" -ne 0 ]; then
-            echo "::error::could not read the verdict of Security run $RUN_ID" >&2
+            echo "::error::could not read the verdict of $WATCHED run $RUN_ID" >&2
             exit 1
           fi
 
@@ -110,19 +112,19 @@ jobs:
             if [ -n "$EXISTING" ]; then
               # Backticks here are markdown, not command substitution; %s carries the values.
               # shellcheck disable=SC2016
-              printf 'Security run [%s](%s) on `%s` is green again — closing.\n' \
-                "$RUN_ID" "$RUN_URL" "$HEAD_SHA" > body.md
+              printf '%s run [%s](%s) on `%s` is green again — closing.\n' \
+                "$WATCHED" "$RUN_ID" "$RUN_URL" "$HEAD_SHA" > body.md
               gh issue comment "$EXISTING" --repo "$REPO" --body-file body.md
               gh issue close "$EXISTING" --repo "$REPO"
             fi
-            echo "Security run $RUN_ID: all jobs green."
+            echo "$WATCHED run $RUN_ID: all jobs green."
             exit 0
           fi
 
           {
             # Backticks here are markdown, not command substitution; %s carries the values.
             # shellcheck disable=SC2016
-            printf 'The `Security` workflow (%s) failed on `%s`.\n\n' "$RUN_EVENT" "$HEAD_SHA"
+            printf 'The `%s` workflow (%s) failed on `%s`.\n\n' "$WATCHED" "$RUN_EVENT" "$HEAD_SHA"
             printf 'Run: %s\n\n' "$RUN_URL"
             printf 'Failing or unfinished jobs:\n\n'
             cat failing.md

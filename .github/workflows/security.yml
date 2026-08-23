@@ -1311,3 +1311,188 @@ jobs:
       - name: Report skip (no eligible release yet)
         if: env.TARGET_TAG == ''
         run: echo "::notice::pack-reproducibility-runtime (${{ matrix.arch }}) skipped — no published release with an attested runtime pack manifest was found."
+
+  # Claim 11's witness. ADR-001's ledger cites this job by name, and until
+  # now it lived in ci-full.yml — a workflow-dispatch-only lane that had
+  # never been run, not once, since it was written. The ledger row was
+  # green the whole time on evidence nobody had ever gathered. It moves
+  # here because this is where every other `ci:` witness in that table
+  # already lives, and because a nightly is the only trigger that makes a
+  # lane's silence detectable.
+  app-deps-audit:
+    name: app-deps-audit (ADR-047 claim 9 / Plan 73 Followup D)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@nightly
+
+      - uses: ./.github/actions/install-zigbuild
+
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      - name: Cache cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-app-deps-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-app-deps-
+
+      - name: Run app-deps-audit smoke
+        run: ./scripts/test-app-deps-ci-gate.sh
+
+  # The OCI hardening lanes behind claim 14, likewise never run: they were
+  # six separate dispatch-only jobs in ci-full.yml, each a checkout, a
+  # toolchain, an apt install, a cache and one or two `cargo test`
+  # invocations. The only thing that differed between them was the test
+  # selector, so they are one matrix here.
+  #
+  # Their paths-filter steps are gone rather than ported. Each gated its
+  # real work on `steps.filter.outputs.oci == 'true' || github.ref ==
+  # 'refs/heads/main'`, and on this workflow's triggers the second arm is
+  # always true — the filter decided nothing and cost a step.
+  oci-hardening:
+    name: OCI hardening — ${{ matrix.lane.id }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        lane:
+          - id: layer-unpack-adversarial
+            test: cargo test --test oci_unpack_attacks -p mvm-fs -- --include-ignored
+          - id: digest-mismatch-reject
+            test: cargo test --test hermetic_registry -p mvm-fs rejects
+          - id: malformed-manifest
+            test: "cargo test -p mvm-fs -- manifest:: reference::"
+          - id: mutable-tag-prod-reject
+            zigbuild: true
+            test: cargo test -p mvm-cli -- prod_pull_requires_digest_pin prod_run_image_requires_digest_pin
+          - id: reproducibility
+            test: |
+              cargo test -p mvm-fs reproducibility_two_unpacks_match_modulo_inode
+              cargo test --test oci_ext4_materialization -p mvm-fs materialize_is_byte_deterministic
+          - id: image-runner-smoke
+            zigbuild: true
+            test: cargo test --test oci_ext4_materialization -p mvm-fs
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@nightly
+
+      - uses: ./.github/actions/install-zigbuild
+        if: matrix.lane.zigbuild
+
+      # The superset of what the individual lanes installed. e2fsprogs is
+      # only needed by two of them and costs seconds, which is cheaper than
+      # a per-lane package list that drifts out of step with the tests.
+      - name: Install system build deps
+        run: sudo apt-get update && sudo apt-get install -y libcap-ng-dev lld e2fsprogs
+
+      - name: Cache cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-oci-${{ matrix.lane.id }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-oci-${{ matrix.lane.id }}-
+
+      - name: ${{ matrix.lane.id }}
+        run: ${{ matrix.lane.test }}
+
+  # Claim 15's sealed-prod tier, and claims 1/2's confinement primitives.
+  #
+  # Both lanes were deleted along with ci-full.yml in the first pass of this
+  # consolidation, on the reasoning that the workflow had never run. That
+  # was the wrong conclusion from the right observation: a security lane
+  # that has never run is a lane to start running, not one to remove.
+  sealed-prod-allowlist:
+    name: Sealed-prod vsock allowlist (plan 76 Phase 1)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Install system build deps
+        run: sudo apt-get update && sudo apt-get install -y libcap-ng-dev
+
+      - name: Cache cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-sealed-prod-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-sealed-prod-
+
+      - name: Assert SealedProd vsock allowlist matches plan 76 §Phase 1
+        run: ./scripts/check-sealed-prod-allowlist.sh
+
+  jailer-property:
+    name: jailer property tests (seccomp + Landlock) (Plan 113 §Task 9)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Install system build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libcap-ng-dev lld
+
+      - name: Cache cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-jailer-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-jailer-
+
+      # Kept as a probe rather than an assertion because both property
+      # suites share `confine_self`, which applies Landlock first: without
+      # the LSM active the seccomp half cannot be reached either, and the
+      # failure would say nothing about this repo.
+      #
+      # It is a silent-skip risk and named as one: a skip leaves the job
+      # green with nothing exercised, and the watcher reads job
+      # conclusions, so it cannot tell that apart from a pass. The step
+      # summary below is what a reader has to check. Making the absence
+      # fail instead would be the stronger gate, but only once a runner
+      # image is pinned that is known to carry Landlock.
+      - name: Probe Landlock kernel support
+        id: landlock_probe
+        run: |
+          set -euo pipefail
+          uname -r
+          echo "active LSMs: $(cat /sys/kernel/security/lsm 2>/dev/null || echo '(unreadable)')"
+          if ! grep -qw landlock /sys/kernel/security/lsm 2>/dev/null; then
+            echo "::warning::Landlock LSM not active on this runner — the jailer property tests did NOT run."
+            echo "- :warning: jailer property tests **skipped**: Landlock LSM not active" >> "$GITHUB_STEP_SUMMARY"
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          cat /sys/kernel/security/landlock/abi_versions 2>/dev/null \
+            || echo "(abi_versions not exposed on this kernel)"
+          echo "available=true" >> "$GITHUB_OUTPUT"
+
+      - name: Run property tests (seccomp + Landlock)
+        if: steps.landlock_probe.outputs.available == 'true'
+        run: |
+          cargo test -p mvm-hostd \
+            --test seccomp_property \
+            --test landlock_property \
+            -- --ignored --nocapture
