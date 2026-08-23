@@ -7,8 +7,8 @@
 //! `Workload*` variants below are stubbed (the guest-side arm panics
 //! with `unimplemented!()` until their payloads are wired).
 //!
-//! The channel inherits the existing `AuthenticatedFrame` envelope
-//! (see [`mvm_core::security::AuthenticatedFrame`]) — no new key
+//! The channel inherits the existing sealed-frame envelope
+//! (see [`mvm_core::net::session::SealedFrame`]) — no new key
 //! material is introduced.
 //!
 //! ## Frame size cap

@@ -225,6 +225,7 @@ pub fn post_restore_at(
         &mut stream,
         &GuestRequest::PostRestore {
             token,
+            hostname: None,
             host_epoch_secs: None,
             grant_envelope: None,
         },
@@ -256,6 +257,7 @@ pub fn post_restore_with_grant_and_clock_at(
         &mut stream,
         &GuestRequest::PostRestore {
             token,
+            hostname: None,
             host_epoch_secs,
             grant_envelope,
         },

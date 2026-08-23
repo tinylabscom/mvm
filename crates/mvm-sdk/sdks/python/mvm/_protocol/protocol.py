@@ -1691,6 +1691,7 @@ class ExtensionPlanBinding:
 class PostRestore:
     grant_envelope: Optional[VerbGrantEnvelope] = None
     host_epoch_secs: Optional[int] = None
+    hostname: Optional[str] = None
     token: Optional[List[TokenItem]] = field(
         default_factory=lambda: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
     )

@@ -72,7 +72,7 @@ jobs:
       - uses: ./.github/actions/free-disk
 
       - name: Install Nix
-        uses: DeterminateSystems/nix-installer-action@main
+        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
 
       - name: Restore and publish the trusted Nix binary cache
         uses: DeterminateSystems/magic-nix-cache-action@v14

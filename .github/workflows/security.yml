@@ -703,7 +703,7 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Install Nix
-        uses: DeterminateSystems/nix-installer-action@main
+        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
 
       - name: Build runtime overlay and assert verity output
         run: |
@@ -760,7 +760,7 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Install Nix
-        uses: DeterminateSystems/nix-installer-action@main
+        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
 
       - name: Build runtime overlay and assert no SSH on the sealed image
         run: |
@@ -830,7 +830,7 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Install Nix
-        uses: DeterminateSystems/nix-installer-action@main
+        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
 
       - name: Assert every flake.lock is committed and in sync
         run: |
@@ -906,7 +906,7 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Install Nix
-        uses: DeterminateSystems/nix-installer-action@main
+        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
 
       # Plan 115 / ADR-065 — the builder-vm rootfs embeds the cross-compiled,
       # statically-musl-linked host-vm binaries, read from MVM_HOST_BIN_DIR at
@@ -1043,7 +1043,7 @@ jobs:
 
       - name: Install Nix
         if: env.TARGET_TAG != ''
-        uses: DeterminateSystems/nix-installer-action@main
+        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
 
       - name: Install Rust toolchain
         if: env.TARGET_TAG != ''
@@ -1211,7 +1211,7 @@ jobs:
 
       - name: Install Nix
         if: env.TARGET_TAG != ''
-        uses: DeterminateSystems/nix-installer-action@main
+        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
 
       - name: Install Rust toolchain
         if: env.TARGET_TAG != ''
