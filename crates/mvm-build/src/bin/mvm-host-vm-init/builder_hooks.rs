@@ -28,6 +28,10 @@ const MOUNT_POINT: &str = "/tmp/mvm-before-build-rootfs";
 /// Absolute path populated by the builder image from util-linux.
 const UTIL_LINUX_LOSETUP: &str = "/sbin/losetup";
 
+/// Offline filesystem checker used to replay and seal the ext4 journal after
+/// the writable hook mount has been torn down.
+const E2FSCK: &str = "/sbin/e2fsck";
+
 /// Grace period for the before_build hook. Build-time setup (DB
 /// migrations, cache warming) should complete promptly; if it hangs we
 /// fail the build rather than leaving a builder VM wedged.
@@ -92,6 +96,22 @@ pub enum BuilderHookError {
         #[source]
         source: std::io::Error,
     },
+
+    /// The offline rootfs journal check could not be started.
+    #[error("check rootfs journal for {rootfs}: {source}")]
+    CheckRootfs {
+        rootfs: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
+    /// The offline checker could not leave the rootfs in a clean state.
+    #[error("rootfs journal check for {rootfs} exited with code {code}: {stderr}")]
+    RootfsNotClean {
+        rootfs: PathBuf,
+        code: i32,
+        stderr: String,
+    },
 }
 
 /// Mount `rootfs_path` read-write at [`MOUNT_POINT`], bind-mount
@@ -136,16 +156,50 @@ pub fn run_before_build_hook(rootfs_path: &Path) -> Result<(), BuilderHookError>
         .map(|m| m.is_file())
         .unwrap_or(false);
 
-    if !hook_present {
+    let hook_result = if !hook_present {
         eprintln!("mvm-host-vm-init: no before_build hook at {HOOK_PATH}; treating as no-op");
+        Ok(())
+    } else {
+        eprintln!(
+            "mvm-host-vm-init: running before_build hook in {rootfs_path}",
+            rootfs_path = rootfs_path.display()
+        );
+        run_hook_in_chroot()
+    };
+
+    // Drop every bind mount, the rootfs mount, and its loop device before
+    // touching the image offline. If best-effort Drop cleanup ever leaves the
+    // image mounted, e2fsck refuses it and the artifact is not published.
+    drop(mounted_rootfs);
+    let journal_result = seal_rootfs_journal(rootfs_path);
+    match (hook_result, journal_result) {
+        (Err(hook_error), _) => Err(hook_error),
+        (Ok(()), result) => result,
+    }
+}
+
+fn seal_rootfs_journal(rootfs_path: &Path) -> Result<(), BuilderHookError> {
+    let output = Command::new(E2FSCK)
+        .args(["-p", "-f"])
+        .arg(rootfs_path)
+        .output()
+        .map_err(|source| BuilderHookError::CheckRootfs {
+            rootfs: rootfs_path.to_path_buf(),
+            source,
+        })?;
+    let code = output.status.code().unwrap_or(-1);
+    if e2fsck_exit_code_is_clean(code) {
         return Ok(());
     }
+    Err(BuilderHookError::RootfsNotClean {
+        rootfs: rootfs_path.to_path_buf(),
+        code,
+        stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+    })
+}
 
-    eprintln!(
-        "mvm-host-vm-init: running before_build hook in {rootfs_path}",
-        rootfs_path = rootfs_path.display()
-    );
-    run_hook_in_chroot()
+fn e2fsck_exit_code_is_clean(code: i32) -> bool {
+    matches!(code, 0 | 1)
 }
 
 struct LoopDevice {
@@ -327,9 +381,19 @@ mod tests {
         assert_eq!(HOOK_PATH, "/etc/mvm/hooks/before_build.sh");
         assert_eq!(MOUNT_POINT, "/tmp/mvm-before-build-rootfs");
         assert_eq!(UTIL_LINUX_LOSETUP, "/sbin/losetup");
+        assert_eq!(E2FSCK, "/sbin/e2fsck");
         assert_eq!(
             CHROOT_PATH,
             "/usr/local/sbin:/usr/local/bin:/sbin:/usr/sbin:/bin:/usr/bin"
         );
+    }
+
+    #[test]
+    fn e2fsck_clean_and_repaired_codes_are_accepted() {
+        assert!(e2fsck_exit_code_is_clean(0));
+        assert!(e2fsck_exit_code_is_clean(1));
+        for code in [2, 4, 8, 16, 32, 128, -1] {
+            assert!(!e2fsck_exit_code_is_clean(code), "code {code}");
+        }
     }
 }
