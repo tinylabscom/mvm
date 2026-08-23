@@ -299,7 +299,7 @@ jobs:
       # breaking four gates cost four pushes and four full lanes to find
       # that out. `cargo run -p xtask -- <gate>` still runs any one of
       # them on its own.
-      - name: Policy gates (check-abi-layout)
+      - name: Policy gates (check-abi-layout) (single-network-path)
         run: cargo run -p xtask -- check-all
 
 

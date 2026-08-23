@@ -667,6 +667,7 @@ mod tests {
         // Asserting a particular gate's step here again would just be the
         // sixty-step list in another file.
         assert!(lint_policy.contains("cargo run -p xtask -- check-all"));
+        assert!(lint_policy.contains("Policy gates (check-abi-layout) (single-network-path)"));
         assert!(
             crate::check_all::GATES
                 .iter()
