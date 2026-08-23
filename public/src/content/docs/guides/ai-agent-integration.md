@@ -28,6 +28,23 @@ Every tool result should include a sandbox identifier and audit/run identifier w
 - Use short TTLs for transient sandboxes.
 - Preserve cold state only when the workflow needs memory or filesystem continuity.
 
+
+## Egress metering for AI calls
+
+When the sandbox is allowed to reach AI providers, set a token budget so a
+runaway or compromised agent cannot consume unbounded API quota. Add the
+`[network.ai]` table to `mvm.toml`, or use the `ai_policy` / `aiBudget`
+helpers in the Python and TypeScript SDKs.
+
+- Metering is provider-specific; only known AI hosts are inspected.
+- Streaming responses require the provider to report trailing usage.
+- Budget enforcement refuses the next request after the limit is crossed.
+- Metrics and audit records include counts and metadata only.
+
+See [Network egress policy](/guides/network-egress-policy/) for configuration
+examples and metric names.
+
+
 ## Request and response mediation
 
 When an agent calls an external model or API through a runtime-owned path, keep

@@ -42,17 +42,22 @@ const BUDGET_TARGET: &str = "x86_64-unknown-linux-gnu";
 /// Lower it freely as deps drop; raising it must be justified in the change
 /// that does.
 ///
-/// 477 (was 476): the first-party `mvm-mcp` crate. It is the +1 itself — its
+/// 469 (was 476): deleting the superseded L3 stack and its unused direct
+/// dependencies removes eight crates, while the first-party `mvm-mcp` crate
+/// adds one. Its
 /// only dependencies are workspace crates already in this closure
 /// (`mvm-client`, `chrono`, `serde`, `serde_json`, `thiserror`, `tokio`), so it
 /// pulls in no third-party graph. That is the distinction this budget exists to
 /// police: it ratchets against *dependency* growth, and a new crate of ours that
 /// vendors nothing is not that.
 ///
-/// 476 (was 475): `sigstore-tuf` enters with the sigstore-verify 0.9→0.11
-/// upgrade; it was absent from 0.9's dependency graph and is reachable only
-/// behind the `manifest-verify` optional feature.
-const FEATURE_CLOSURE_BUDGET: usize = 477;
+/// 470 (was 469): the first-party `mvm-capture` workspace crate. Its third-party
+/// dependencies were already present; the single new closure node is the crate
+/// itself, compiled by the all-features workspace lanes.
+///
+/// 471 (was 470): `async-trait`'s nightly-Clippy compatibility release moves
+/// its compile-time parser to `syn` 3, the same measured +1 as the default tree.
+const FEATURE_CLOSURE_BUDGET: usize = 471;
 
 /// The two gates measure nested sets — everything in the default closure is
 /// reachable with all features on — so a feature budget at or below the default

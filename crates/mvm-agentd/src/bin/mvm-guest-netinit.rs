@@ -48,6 +48,16 @@
 
 #[cfg(target_os = "linux")]
 fn main() {
+    // Every supported workload network surface terminates on guest loopback.
+    // Assign the address as well as raising the link before any unprivileged
+    // proxy, DNS stub, or declared-ingress target attempts to bind it.
+    if let Err(error) = mvm_agentd::guest_net::configure_loopback() {
+        eprintln!(
+            "mvm-guest-netinit: loopback configuration failed: {error} \
+             (continuing — guest-local network adapters may be unavailable)"
+        );
+    }
+
     // Bring the guest network up FIRST — eth0 link-up → DHCP → static fallback —
     // before layering the mandatory-deny blackhole routes on top. The workload
     // guest's `/init` brings up only loopback; nothing else configures eth0, so

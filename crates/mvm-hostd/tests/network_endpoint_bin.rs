@@ -125,6 +125,7 @@ fn endpoint_bin_serves_substitution_and_refuses_unbound_destination() {
 
     let cfg = EndpointConfig {
         tenant_id: "local".into(),
+        instance_id: "test".into(),
         secrets: vec![SecretBinding {
             name: "OPENAI_API_KEY".into(),
             source: SecretSource::Keystore {
@@ -237,6 +238,7 @@ fn endpoint_bin_claim10_gate_refuses_a_bound_but_unadmitted_destination() {
 
     let cfg = EndpointConfig {
         tenant_id: "local".into(),
+        instance_id: "test".into(),
         secrets: vec![SecretBinding {
             name: "OPENAI_API_KEY".into(),
             source: SecretSource::Keystore {
@@ -328,6 +330,7 @@ fn a_flowmux_endpoint_keeps_serving_sessions_after_one_ends() {
 
     let cfg = EndpointConfig {
         tenant_id: "local".into(),
+        instance_id: "test".into(),
         secrets: vec![],
         transport: EndpointTransport::Uds { path: sock.clone() },
         redaction: mvm_core::policy::RedactionPolicy::default(),
@@ -430,6 +433,7 @@ fn a_flowmux_endpoint_enforces_one_admitted_ceiling_across_sessions() {
     let b64 = base64::engine::general_purpose::STANDARD;
     let cfg = EndpointConfig {
         tenant_id: "local".into(),
+        instance_id: "test".into(),
         secrets: vec![],
         transport: EndpointTransport::Uds { path: sock.clone() },
         redaction: mvm_core::policy::RedactionPolicy::default(),
@@ -531,6 +535,7 @@ fn a_flowmux_endpoint_refuses_zero_limits_decoded_from_config() {
     let b64 = base64::engine::general_purpose::STANDARD;
     let mut cfg = serde_json::to_value(EndpointConfig {
         tenant_id: "local".into(),
+        instance_id: "test".into(),
         secrets: vec![],
         transport: EndpointTransport::Uds { path: sock },
         redaction: mvm_core::policy::RedactionPolicy::default(),

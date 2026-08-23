@@ -27,7 +27,7 @@ pub(super) use parse::{
 };
 pub(super) use resolve::{
     ManifestArgRef, egress_enforcement_label, resolve_effective_hypervisor, resolve_flake_ref,
-    resolve_manifest_arg, resolve_run_network_policy, resolve_running_vm,
+    resolve_manifest_arg, resolve_run_network_policy,
 };
 pub(super) use start::VmStartParams;
 pub(super) use state::{CHILD_PIDS, IN_CONSOLE_MODE};

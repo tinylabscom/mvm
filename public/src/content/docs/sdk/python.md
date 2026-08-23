@@ -44,6 +44,27 @@ def run() -> str:
 
 The static compiler extracts literal decorator declarations without importing the module.
 
+
+### AI egress budget
+
+```python
+@mvm.app(
+    name="llm-worker",
+    source=mvm.local_path("."),
+    image=mvm.python_image({"python": "3.12"}),
+    network=mvm.network(
+        mode="bridge",
+        egress=mvm.egress([mvm.host_port("api.openai.com", 443)]),
+        ai=mvm.ai_policy(
+            metering=True,
+            budget=mvm.ai_budget(max_total_tokens=100_000),
+        ),
+    ),
+)
+def run(prompt: str) -> str:
+    ...
+```
+
 ## Security notes
 
 - Runtime scripts execute host-side SDK code.

@@ -89,9 +89,8 @@ mvmctl machine build
 # Boot (auto-selects best backend)
 mvmctl machine run --manifest .
 
-# Or run in the background, then forward a port
-mvmctl machine run --manifest . --name my-vm -d
-mvmctl machine forward my-vm -p 8080:8080
+# Or declare signed ingress before boot
+mvmctl machine run --manifest . --name my-vm --port 8080:8080
 ```
 
 Without a `mvm.toml` (just a flake), pass `--flake` explicitly — that legacy path still works:

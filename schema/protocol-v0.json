@@ -1791,30 +1791,6 @@
           ]
         },
         {
-          "description": "Start a vsock→TCP port forwarder for the given guest port. The agent binds vsock port `PORT_FORWARD_BASE + guest_port` and forwards each connection to `localhost:guest_port`.",
-          "type": "object",
-          "required": [
-            "StartPortForward"
-          ],
-          "properties": {
-            "StartPortForward": {
-              "type": "object",
-              "required": [
-                "guest_port"
-              ],
-              "properties": {
-                "guest_port": {
-                  "type": "integer",
-                  "format": "uint16",
-                  "minimum": 0.0
-                }
-              },
-              "additionalProperties": false
-            }
-          },
-          "additionalProperties": false
-        },
-        {
           "description": "Bind a guest Unix socket and forward each accepted connection to a host vsock port. The guest path must live under `/run/mvm/` (see `validate_unix_forward_guest_path`).",
           "type": "object",
           "required": [
@@ -3117,36 +3093,6 @@
                   "items": {
                     "$ref": "#/definitions/FsChange"
                   }
-                }
-              },
-              "additionalProperties": false
-            }
-          },
-          "additionalProperties": false
-        },
-        {
-          "description": "Port forward started successfully.",
-          "type": "object",
-          "required": [
-            "PortForwardStarted"
-          ],
-          "properties": {
-            "PortForwardStarted": {
-              "type": "object",
-              "required": [
-                "guest_port",
-                "vsock_port"
-              ],
-              "properties": {
-                "guest_port": {
-                  "type": "integer",
-                  "format": "uint16",
-                  "minimum": 0.0
-                },
-                "vsock_port": {
-                  "type": "integer",
-                  "format": "uint32",
-                  "minimum": 0.0
                 }
               },
               "additionalProperties": false

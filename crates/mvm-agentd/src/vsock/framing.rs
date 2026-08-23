@@ -8,7 +8,7 @@ use std::os::unix::net::UnixStream;
 use super::*;
 use anyhow::{Context, Result, bail};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
-use mvm_core::net::session::{SealedFrame, Session, SessionError};
+use mvm_core::net::session::{Session, SessionError, read_sealed_frame, write_sealed_frame};
 use mvm_core::security::{
     AuthenticatedFrame, PROTOCOL_VERSION_AUTHENTICATED, SIG_ALG_ED25519, SessionHello,
     SessionHelloAck,
@@ -376,41 +376,31 @@ impl AuthenticatedSession {
     /// actually happened.
     pub fn write<T: Serialize>(&mut self, stream: &mut impl Write, value: &T) -> Result<()> {
         let plaintext = serde_json::to_vec(value).with_context(|| "serialize control payload")?;
+        // Checked before `seal`, not after. Sealing spends a sequence number
+        // that cannot be reissued, so a payload already known to be too large
+        // has to be refused while the session is still usable — otherwise
+        // every oversize frame would also cost the connection.
+        if plaintext.len() > MAX_FRAME_SIZE {
+            bail!(
+                "control payload too large: {} bytes (max {MAX_FRAME_SIZE})",
+                plaintext.len()
+            );
+        }
         let sealed = self
             .inner
             .seal(&plaintext)
             .map_err(|error| anyhow::anyhow!("control frame seal failed: {error}"))?;
         let sequence = sealed.sequence;
-        let frame = AuthenticatedFrame {
-            version: sealed.version,
-            sig_alg: sealed.sig_alg,
-            session_id: sealed.session_id,
-            sequence: sealed.sequence,
-            timestamp: sealed.timestamp,
-            signed: SignedPayload {
-                payload: sealed.ciphertext,
-                signature: sealed.signature,
-                signer_id: sealed.signer_id,
-            },
-        };
-        write_frame(stream, &frame).inspect_err(|error| {
+        write_sealed_frame(stream, &sealed).map_err(|error| {
             self.inner.poison_send(sequence, error.to_string());
+            anyhow::anyhow!("control frame write failed: {error}")
         })
     }
 
     /// Read, authenticate, decrypt, and deserialize one control frame.
     pub fn read<T: serde::de::DeserializeOwned>(&mut self, stream: &mut impl Read) -> Result<T> {
-        let frame: AuthenticatedFrame = read_frame(stream)?;
-        let sealed = SealedFrame {
-            version: frame.version,
-            sig_alg: frame.sig_alg,
-            session_id: frame.session_id,
-            sequence: frame.sequence,
-            timestamp: frame.timestamp,
-            signature: frame.signed.signature,
-            signer_id: frame.signed.signer_id,
-            ciphertext: frame.signed.payload,
-        };
+        let sealed = read_sealed_frame(stream, MAX_SEALED_FRAME_SIZE)
+            .map_err(|error| anyhow::anyhow!("control frame read failed: {error}"))?;
         let plaintext = self
             .inner
             .open(&sealed)
@@ -813,34 +803,42 @@ mod tests {
         ));
     }
 
-    /// A chunk the old cap allowed is still too big for the wire. Pins the
-    /// boundary so a future edit that raises `MAX_DATA_CHUNK_SIZE` back toward
-    /// 48 KiB has to confront this.
+    /// An oversize payload is refused before it can spend a sequence number,
+    /// so the session survives it.
+    ///
+    /// The old JSON envelope discovered the size only after sealing, which
+    /// meant an oversize frame also cost the connection. Checking first is why
+    /// the second write below is expected to succeed rather than to report a
+    /// poisoned session. The size is taken from the derived cap rather than
+    /// written out, so raising the cap moves this test with it instead of
+    /// quietly making it vacuous.
     #[test]
-    fn a_chunk_above_the_cap_fails_the_write_and_poisons_the_session() {
-        let (_host, (_guest_stream, mut guest_session)) = confidential_pair();
+    fn a_payload_above_the_cap_is_refused_before_it_spends_a_sequence() {
+        let ((mut host_stream, mut host_session), (mut guest_stream, mut guest_session)) =
+            confidential_pair();
 
         let oversize = GuestResponse::ExecEvent(ExecEvent::Stdout {
-            chunk: vec![0xFF; 48 * 1024],
+            chunk: vec![0xFF; MAX_DATA_CHUNK_SIZE * 2],
         });
         let mut wire = Vec::new();
         let err = guest_session
             .write(&mut wire, &oversize)
-            .expect_err("48 KiB of worst-case bytes must not fit the sealed envelope");
+            .expect_err("twice the chunk cap must not fit the frame cap");
         assert!(
-            err.to_string().contains("Frame too large"),
-            "expected the frame cap to reject it, got {err}"
+            err.to_string().contains("control payload too large"),
+            "expected the payload cap to name itself, got {err}"
         );
         assert!(wire.is_empty(), "nothing may reach the wire on a rejection");
 
-        // The sequence that frame consumed cannot be reissued, so the session
-        // must be finished rather than silently one ahead of the peer.
-        let next = guest_session.write(&mut wire, &GuestResponse::Pong);
-        let err = next.expect_err("a poisoned session must refuse further writes");
-        assert!(
-            err.to_string().contains("session poisoned"),
-            "expected the poison to name itself, got {err}"
-        );
+        // The refusal cost no sequence, so the session is still usable and its
+        // next frame is still the one the peer is waiting for.
+        guest_session
+            .write(&mut guest_stream, &GuestResponse::Pong)
+            .expect("a refused payload must not end the session");
+        let received: GuestResponse = host_session
+            .read(&mut host_stream)
+            .expect("the peer is still in step");
+        assert!(matches!(received, GuestResponse::Pong));
     }
 
     /// The user-visible failure this fixes: a write that dies after the seal
@@ -922,32 +920,31 @@ mod tests {
         host_session
             .write(&mut host_stream, &GuestRequest::Ping)
             .unwrap();
-        let frame: AuthenticatedFrame = read_frame(&mut guest_stream).unwrap();
+        let frame = read_sealed_frame(&mut guest_stream, MAX_SEALED_FRAME_SIZE).unwrap();
         assert!(
             !frame
-                .signed
-                .payload
+                .ciphertext
                 .windows(b"Ping".len())
                 .any(|window| window == b"Ping")
         );
         let (mut valid_writer, mut valid_reader) = UnixStream::pair().unwrap();
-        write_frame(&mut valid_writer, &frame).unwrap();
+        write_sealed_frame(&mut valid_writer, &frame).unwrap();
         let accepted: GuestRequest = guest_session.read(&mut valid_reader).unwrap();
         assert!(matches!(accepted, GuestRequest::Ping));
 
         let (mut replay_writer, mut replay_reader) = UnixStream::pair().unwrap();
-        write_frame(&mut replay_writer, &frame).unwrap();
+        write_sealed_frame(&mut replay_writer, &frame).unwrap();
         let replay: anyhow::Result<GuestRequest> = guest_session.read(&mut replay_reader);
         assert!(replay.is_err(), "replayed control frame must be rejected");
 
         host_session
             .write(&mut host_stream, &GuestRequest::Ping)
             .unwrap();
-        let next_frame: AuthenticatedFrame = read_frame(&mut guest_stream).unwrap();
+        let next_frame = read_sealed_frame(&mut guest_stream, MAX_SEALED_FRAME_SIZE).unwrap();
         assert_eq!(next_frame.sequence, 3);
         let mut tampered = next_frame;
-        tampered.signed.payload[0] ^= 0x01;
-        write_frame(&mut tamper_writer, &tampered).unwrap();
+        tampered.ciphertext[0] ^= 0x01;
+        write_sealed_frame(&mut tamper_writer, &tampered).unwrap();
         let err: anyhow::Result<GuestRequest> = guest_session.read(&mut tamper_reader);
         assert!(err.is_err());
     }

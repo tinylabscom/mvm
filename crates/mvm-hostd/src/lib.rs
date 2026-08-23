@@ -50,15 +50,6 @@ pub mod jailer;
 /// [`keyholder::SecretResolver`] trait + the single-host
 /// [`keyholder::LocalResolver`].
 pub mod keyholder;
-/// `mvm-netd` — the host-side L3 tunnel gateway. Machine-scoped: a packet
-/// reaches host networking only after crossing vsock, binding to a
-/// host-owned session, and passing frame, IP, and signed-plan policy
-/// validation.
-pub mod netd;
-/// The node-control surface a fleet control plane calls to ask this host
-/// about its own networking. Node-local by construction: it answers only
-/// from state this node owns, scoped to the caller the kernel identifies.
-pub mod nodectl;
 pub mod operator_admitted_trial_booter;
 /// Redacting panic hook for the daemon bins. A panic payload is the one
 /// string the no-`Display`-on-secret-types gate cannot reach.

@@ -170,16 +170,6 @@
           mvmSrc = workspace;
         };
 
-      mvmNetAgentFor = system:
-        let
-          pkgs = import nixpkgs { inherit system; };
-        in
-        import (workspace + "/nix/packages/mvm-net-agent.nix") {
-          pkgs = pkgs.pkgsStatic;
-          lib = pkgs.lib;
-          mvmSrc = workspace;
-        };
-
       mvmAddonDnsFor = system:
         let
           pkgs = import nixpkgs { inherit system; };
@@ -372,7 +362,6 @@
           guest = mvmGuestFor system;
           runner = mvmRunnerFor system;
           egressClient = mvmEgressClientFor system;
-          netAgent = mvmNetAgentFor system;
           addonDns = mvmAddonDnsFor system;
           exitReport = mvmExitReportFor system;
         in
@@ -399,7 +388,7 @@
             # overlay ext4. The kernel mounts this at /mvm/runtime
             # inside the guest, so the *FS root* contains
             # /agent, /seccomp-apply, /netinit, /runner,
-            # /egress-client, /net-agent, /addon-dns, /exit-report, /sdk-py/,
+            # /egress-client, /addon-dns, /exit-report, /sdk-py/,
             # /sdk-ts/, /VERSION.
             staging="$TMPDIR/staging"
             mkdir -p "$staging"
@@ -409,7 +398,6 @@
             cp ${guest}/bin/mvm-guest-netinit    "$staging/netinit"
             cp ${runner}/bin/mvm-runner "$staging/runner"
             cp ${egressClient}/bin/mvm-egress-client "$staging/egress-client"
-            cp ${netAgent}/bin/mvm-net-agent "$staging/net-agent"
             cp ${addonDns}/bin/mvm-addon-dns "$staging/addon-dns"
             cp ${exitReport}/bin/mvm-exit-report "$staging/exit-report"
 

@@ -75,10 +75,10 @@ const VIRTIO_IRQ: u32 = 48;
 const VSOCK_MMIO_BASE: u64 = 0x0a00_0200;
 const VSOCK_IRQ: u32 = 49;
 /// virtio-fs windows start above the disk band (MAX_DISKS=6 → up to
-/// base+5*stride) and vsock. The first slot is the optional virtio-fs root;
+/// base+6*stride) and vsock. The first slot is the optional virtio-fs root;
 /// following slots are live user directory shares.
 const FS_MMIO_BASE: u64 = VIRTIO_MMIO_BASE + 7 * MMIO_STRIDE;
-const FS_IRQ: u32 = 54;
+const FS_IRQ: u32 = 55;
 /// Maximum number of user virtio-fs shares in one HVF guest. The bound keeps the
 /// MMIO and SPI allocations fixed and leaves the entropy device at a stable slot.
 const MAX_VIRTIOFS_SHARES: usize = 8;
@@ -89,8 +89,8 @@ const RNG_IRQ: u32 = FS_IRQ + MAX_VIRTIOFS_SHARES as u32 + 1;
 /// virtio-mmio window stride; each device occupies one 0x200 slot.
 const MMIO_STRIDE: u64 = 0x200;
 /// Max virtio-blk devices (`/dev/vda`..). The builder-with-runtime-overlay path
-/// needs five: rootfs, nix-store, input, output, and the read-only runtime
-/// overlay.
+/// needs six: rootfs, nix-store, input, output, the read-only runtime overlay,
+/// and the per-boot FlowMux identity drive.
 const MAX_DISKS: usize = 6;
 
 /// MMIO base + SPI for virtio-blk device `i` (`/dev/vda` = 0). Disk 0 keeps the
@@ -1428,17 +1428,17 @@ mod tests {
     }
 
     #[test]
-    fn fifth_disk_slot_stays_below_virtiofs_window() {
+    fn sixth_disk_slot_stays_below_virtiofs_window() {
         let (last_mmio, _) = disk_mmio(MAX_DISKS - 1);
         assert!(
             last_mmio + MMIO_STRIDE <= FS_MMIO_BASE,
-            "fifth disk must fit below the virtiofs MMIO window"
+            "sixth disk must fit below the virtiofs MMIO window"
         );
 
         let (next_mmio, _) = disk_mmio(MAX_DISKS);
         assert_eq!(
             next_mmio, FS_MMIO_BASE,
-            "a sixth disk would collide with the virtiofs root window"
+            "a seventh disk would collide with the virtiofs root window"
         );
     }
 

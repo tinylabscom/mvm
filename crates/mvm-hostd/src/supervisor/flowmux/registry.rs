@@ -566,6 +566,33 @@ impl StreamRegistry {
         Ok(())
     }
 
+    /// Restore guest credit once at least half of the initial window has been
+    /// consumed, returning the delta the peer must be told about.
+    ///
+    /// Batching updates avoids one authenticated frame per small payload while
+    /// retaining a bounded window. A payload that consumes the whole window is
+    /// replenished immediately; smaller writes share one update when the
+    /// remaining credit reaches the low-water mark.
+    pub fn replenish_guest_credit_if_low(
+        &mut self,
+        stream_id: u32,
+    ) -> Result<Option<u32>, RegistryError> {
+        let entry = self
+            .streams
+            .get_mut(&stream_id)
+            .ok_or(RegistryError::NotLive { stream_id })?;
+        let low_water = self.limits.initial_credit / 2;
+        if entry.guest_credit > low_water {
+            return Ok(None);
+        }
+        let delta = self
+            .limits
+            .initial_credit
+            .saturating_sub(entry.guest_credit);
+        entry.guest_credit = self.limits.initial_credit;
+        Ok((delta > 0).then_some(delta))
+    }
+
     /// Consume `len` bytes of host credit on `stream_id`.
     pub fn consume_host_credit(&mut self, stream_id: u32, len: u32) -> Result<(), RegistryError> {
         let entry = self
@@ -724,6 +751,42 @@ mod tests {
         reg.grant_guest_credit(id, 10).unwrap();
         assert_eq!(reg.get(id).unwrap().guest_credit, 80);
         assert!(reg.consume_guest_credit(id, 81).is_err());
+    }
+
+    #[test]
+    fn guest_credit_updates_are_batched_at_half_window() {
+        let mut reg = StreamRegistry::new(RegistryLimits {
+            max_tcp: 1,
+            max_udp: 0,
+            max_dns: 64,
+            initial_credit: 100,
+            ..Default::default()
+        });
+        let id = reg.alloc_guest(FlowClass::Tcp).unwrap();
+
+        reg.consume_guest_credit(id, 49).unwrap();
+        assert_eq!(reg.replenish_guest_credit_if_low(id).unwrap(), None);
+        assert_eq!(reg.get(id).unwrap().guest_credit, 51);
+
+        reg.consume_guest_credit(id, 1).unwrap();
+        assert_eq!(reg.replenish_guest_credit_if_low(id).unwrap(), Some(50));
+        assert_eq!(reg.get(id).unwrap().guest_credit, 100);
+    }
+
+    #[test]
+    fn whole_guest_window_is_replenished_immediately() {
+        let mut reg = StreamRegistry::new(RegistryLimits {
+            max_tcp: 1,
+            max_udp: 0,
+            max_dns: 64,
+            initial_credit: 100,
+            ..Default::default()
+        });
+        let id = reg.alloc_guest(FlowClass::Tcp).unwrap();
+
+        reg.consume_guest_credit(id, 100).unwrap();
+        assert_eq!(reg.replenish_guest_credit_if_low(id).unwrap(), Some(100));
+        assert_eq!(reg.get(id).unwrap().guest_credit, 100);
     }
 
     #[test]

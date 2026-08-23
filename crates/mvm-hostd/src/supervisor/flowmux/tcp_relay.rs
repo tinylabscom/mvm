@@ -84,7 +84,12 @@ pub(super) fn connect_first_admitted(
         }
         let budget = remaining.min(PER_IP_CONNECT_TIMEOUT);
         match TcpStream::connect_timeout(&std::net::SocketAddr::new(*ip, port), budget) {
-            Ok(stream) => return Some(stream),
+            Ok(stream) => {
+                if let Err(error) = stream.set_nodelay(true) {
+                    warn!(%ip, %port, %error, "FlowMux TCP_NODELAY setup failed");
+                }
+                return Some(stream);
+            }
             Err(e) => warn!(%ip, %port, error = %e, "FlowMux TCP connect attempt failed"),
         }
     }
@@ -190,4 +195,24 @@ pub(super) fn run_tcp_relay(params: TcpRelayParams) {
     // half-close/reset and retires it, so we do not race with in-flight guest
     // frames here.
     let _ = registry;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn admitted_connections_disable_nagle() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let accept = std::thread::spawn(move || listener.accept().unwrap());
+
+        let stream =
+            connect_first_admitted(&[address.ip()], address.port(), Duration::from_secs(1))
+                .expect("loopback listener accepts an admitted connection");
+        assert!(stream.nodelay().unwrap());
+
+        drop(stream);
+        let _ = accept.join().unwrap();
+    }
 }
