@@ -542,7 +542,7 @@ fn is_gzip_layer(media_type: &str) -> bool {
 mod tests {
     use super::super::oci_types::OciCacheIndex;
     use super::*;
-    use mvm_build::oci_runtime_inject::OciEntrypointConfig;
+    use mvm_build::oci_runtime_inject::ImageRuntimeConfig;
 
     fn sample_image(reference: &str, digest: &str, layer_path: &str) -> CachedOciImage {
         CachedOciImage {
@@ -624,7 +624,7 @@ mod tests {
         unpacked_root: &Path,
         rootfs_abs: &Path,
         image_label: &str,
-        _entrypoint: Option<&OciEntrypointConfig>,
+        _entrypoint: Option<&ImageRuntimeConfig>,
         _sealed: bool,
         deferred_nodes: Vec<mvm_fs::ext4::Node>,
     ) -> Result<()> {

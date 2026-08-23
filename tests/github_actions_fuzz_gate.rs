@@ -1,9 +1,10 @@
 //! Regression checks for the CI gate that compiles workspace-excluded fuzz crates.
 
-const WORKFLOWS: [&str; 2] = [
-    include_str!("../.github/workflows/ci.yml"),
-    include_str!("../.github/workflows/ci-full.yml"),
-];
+/// `ci-full.yml` used to be the second entry here. It was deleted after
+/// running zero times since it was written: a gate that lives only in a
+/// workflow nobody triggers is not a gate, and asserting on its text made
+/// it look like one.
+const WORKFLOWS: [&str; 1] = [include_str!("../.github/workflows/ci.yml")];
 
 #[test]
 fn fuzz_compile_gates_use_committed_lockfiles() {

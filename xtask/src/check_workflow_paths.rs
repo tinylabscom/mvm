@@ -867,6 +867,77 @@ mod tests {
         assert!(kernel.contains("push:"));
     }
 
+    /// Every security lane runs on a schedule someone will notice.
+    ///
+    /// This exists because the lanes below were deleted, not weakened:
+    /// `sealed-prod-allowlist` and `jailer-property` were removed with
+    /// `ci-full.yml` on the reasoning that the workflow had never been
+    /// triggered. It hadn't — the run count was zero and that was real —
+    /// but a security lane that has never run is one to start running.
+    /// Both now sit in `security.yml`, which is what
+    /// `security-lane-watch.yml` reports on.
+    #[test]
+    fn security_lanes_live_where_the_watcher_reads_them() {
+        let security = workflow("security.yml");
+        for lane in [
+            "sealed-prod-allowlist:",
+            "jailer-property:",
+            "app-deps-audit:",
+            "oci-hardening:",
+        ] {
+            assert!(
+                security.contains(lane),
+                "{lane} must live in security.yml — that is the workflow \
+                 security-lane-watch.yml watches, and these lanes back \
+                 numbered claims in ADR-001"
+            );
+        }
+
+        // Watched, and on a cadence. A lane only reachable by dispatch is
+        // one nobody runs; that is how these came to be dead in the first
+        // place.
+        let watcher = workflow("security-lane-watch.yml");
+        for (name, wf) in [
+            ("Security", "security.yml"),
+            ("Pack signing smoke", "pack-signing-smoke.yml"),
+            ("Extended CI", "ci-full.yml"),
+        ] {
+            assert!(
+                watcher.contains(name),
+                "security-lane-watch.yml must report on {name}"
+            );
+            assert!(
+                workflow(wf).contains("schedule:"),
+                "{wf} must run on a schedule, not dispatch alone"
+            );
+        }
+    }
+
+    /// Only one workflow may publish a required check's name.
+    ///
+    /// Both of these build kernels from the same script, and both once
+    /// declared `name: Build kernels (<arch>)` — a required status check.
+    /// It resolved unambiguously only because their triggers happen not to
+    /// overlap: give `kernel-build.yml` a `pull_request` or `merge_group`
+    /// trigger and two runs answer to one required context, with branch
+    /// protection reading whichever reported last. The test above pins the
+    /// triggers apart; this pins the names apart, so neither half of the
+    /// arrangement can quietly go away.
+    #[test]
+    fn only_one_workflow_claims_the_required_kernel_check_name() {
+        const REQUIRED: &str = "name: Build kernels (${{ matrix.arch }})";
+
+        assert!(
+            workflow("ci.yml").contains(REQUIRED),
+            "ci.yml owns the required kernel check name"
+        );
+        assert!(
+            !workflow("kernel-build.yml").contains(REQUIRED),
+            "kernel-build.yml must not publish the same check name as ci.yml — \
+             it is the tag-time publisher, not the required PR gate"
+        );
+    }
+
     #[test]
     fn trusted_main_warms_workspace_and_nix_outputs_for_validation() {
         let cache_action = workflow("../actions/rust-cache/action.yml");

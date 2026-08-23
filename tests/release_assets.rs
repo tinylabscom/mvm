@@ -37,6 +37,12 @@ fn boot_image_workflow() -> String {
         .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()))
 }
 
+fn ci_workflow() -> String {
+    let path = Path::new(".github/workflows/ci.yml");
+    fs::read_to_string(path)
+        .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()))
+}
+
 fn pages_workflow() -> String {
     let path = Path::new(".github/workflows/pages.yml");
     fs::read_to_string(path)
@@ -378,6 +384,10 @@ fn the_staged_microvm_boot_gate_covers_plain_and_sealed_boots() {
             "the sealed boot invocation must set {variable}"
         );
     }
+    assert!(
+        step.contains("MVM_RUNTIME_BOOT_INITRD=\"$HOME/.mvm/cache/initramfs/initramfs.cpio.gz\""),
+        "the staged universal initramfs must use the production cache path so activation runs"
+    );
 }
 
 /// The four jobs that build a boot image. They move as a set: splitting them
@@ -602,6 +612,15 @@ fn the_boot_image_tag_composes_the_url_the_workflow_uploads_to() {
             "the workflow must stage {staged:?}, or {url} 404s"
         );
     }
+}
+
+#[test]
+fn the_ci_boot_witness_pins_the_compiled_boot_image_tag() {
+    let tag = mvmctl::core::config::DEFAULT_BOOT_IMAGE_TAG;
+    assert!(
+        ci_workflow().contains(&format!("IMAGE_TAG: {tag}")),
+        "the merge-queue boot witness must validate the compiled default boot image tag {tag}"
+    );
 }
 
 #[test]
