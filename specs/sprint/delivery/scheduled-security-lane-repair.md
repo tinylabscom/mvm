@@ -27,6 +27,8 @@ mutation surfaces are green again without weakening their policies.
   witnesses pin zero-line checkpoint rejection and the exact entry count in a
   pruning record; equivalent and performance-only cursor/prune mutants retain
   explicit rationales.
+- Pin the broker's teaching-refusal ceiling at exactly eight attempts, so a
+  comparison reversal cannot make the service surface become terse early.
 
 ## Evidence
 

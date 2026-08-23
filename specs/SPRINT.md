@@ -2847,3 +2847,5 @@ claim-relevant substitution adapter and request-preparation boundary: three
 mutants were measured, two caught and one unviable. Audit witnesses also pin a
 zero-line checkpoint's genesis fallback and the exact accountable-prune entry
 count; remaining equivalent or performance-only misses carry explicit reasons.
+The final hostd shard's broker witness now asserts every teaching response up
+to the configured ceiling and the first terse response immediately after it.

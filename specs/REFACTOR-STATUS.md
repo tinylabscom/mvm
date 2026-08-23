@@ -29,7 +29,9 @@ for detailed scope and acceptance criteria.
       Claim-13 mutation scope now measures its actual substitution boundary
       (three mutants rather than the proxy module's unrelated transport
       internals), and audit witnesses pin checkpoint and prune-accounting
-      behavior while equivalent/performance-only misses stay documented.
+      behavior while equivalent/performance-only misses stay documented. The
+      broker's teaching-refusal ceiling is also mutation-pinned at its exact
+      transition.
 
 - [x] **Issue #2657 — live BDD is visible and merge-gated.** Capability skips
       are reported instead of disappearing from the test summary, and a
