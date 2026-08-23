@@ -570,18 +570,28 @@ jobs:
           - mvm-build
           - mvm-cli
           - mvm-core
-          # Four, not two, and the number is measured rather than chosen.
-          # Two shards ran on 2026-08-16: 1of2 finished five files in 100
-          # minutes while 2of2 drew plan_admission (93 mutants), audit_file
-          # (107) and network/stages (108), spent the full 330 and never
-          # reached its fifth file. Splitting by file count does not split by
-          # cost, and this package's files differ by roughly 4x. Four shards
-          # put the two most expensive in different jobs and cut the worst
-          # known load from 335 mutants to 201.
-          - mvm-hostd/1of4
-          - mvm-hostd/2of4
-          - mvm-hostd/3of4
-          - mvm-hostd/4of4
+          # Six, and the number is measured rather than chosen.
+          #
+          # Raising the count is the second half of the fix; the first is
+          # that xtask now packs shards longest-file-first instead of
+          # slicing by stride. Adding shards alone had already been tried:
+          # 2 -> 4 on 2026-08-16, on the correct diagnosis that splitting by
+          # file count does not split by cost. It recurred, because a
+          # cost-blind split of an unequal surface stays unequal at any
+          # width — on 2026-08-21 shards 2of4 and 4of4 were both killed at
+          # 330 minutes while 3of4 finished in 24.
+          #
+          # With cost-aware packing the surface splits evenly, and six
+          # shards put the worst at ~181 measured minutes, 55% of the
+          # budget. That headroom is deliberate: two of the per-file costs
+          # behind it are lower bounds, measured on shards that were killed
+          # part-way through a file.
+          - mvm-hostd/1of6
+          - mvm-hostd/2of6
+          - mvm-hostd/3of6
+          - mvm-hostd/4of6
+          - mvm-hostd/5of6
+          - mvm-hostd/6of6
           - mvm-contract
           - mvm-runtime
           - mvm-sdk
