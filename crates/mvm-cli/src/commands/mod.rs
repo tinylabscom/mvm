@@ -596,6 +596,9 @@ fn register_stream_plane() {
 fn configure_runtime_logging(cli: &Cli) {
     let verbose = cli.verbose > 0 || std::env::var_os("RUST_LOG").is_some();
     mvm_runtime::ui::set_verbose(verbose);
+    if cli.verbose > 0 {
+        set_cli_env(mvm_build::guest_agent_build::GUEST_BUILD_VERBOSE_ENV, "1");
+    }
     if cli.verbose > 0 && std::env::var_os("RUST_LOG").is_none() {
         set_cli_env("RUST_LOG", logging::filter_for_verbosity(cli.verbose));
     }

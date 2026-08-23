@@ -576,12 +576,18 @@ jobs:
           cargo nextest run -p mvm-agentd --features addons
           cargo check -p mvm-agentd --features addons --bins
 
-      # End-user release builds enable a bootstrap path that contributor builds
-      # deliberately omit. Keep that source compiled with warnings denied on
-      # every code-changing pull request so the nightly reproducibility lane is
-      # evidence, not the first compiler to see it.
-      - name: release-artifact bootstrap feature compiles
-        run: cargo check -p mvm-cli --features release-artifact-bootstrap --lib
+      # End-user release builds enable an acquisition policy that contributor
+      # builds deliberately omit: checkout proximity must never select a local
+      # compiler. Compile the CLI and execute the policy boundary tests on every
+      # code-changing pull request so the release workflow is not the first
+      # process to exercise that channel.
+      - name: release artifact acquisition contract
+        run: |
+          cargo check -p mvm-cli --features release-artifact-bootstrap --lib
+          cargo test -p mvm-build --features release-channel --lib \
+            artifact_acquisition
+          cargo test -p mvm-build --features release-channel --lib \
+            official_build_does_not_detect
 
       - name: Assert auto-detect still picks libkrun off Linux/HVF
         run: |
@@ -1590,9 +1596,16 @@ jobs:
 
       - uses: ./.github/actions/apt-deps
         with:
-          # qemu-system-arm provides qemu-system-aarch64; e2fsprogs provides the
-          # mkfs.ext4/debugfs tools the Stage 0 builder uses to pack images.
-          packages: qemu-system-arm ipxe-qemu e2fsprogs attr jq virtiofsd
+          # qemu-system-arm provides qemu-system-aarch64; ipxe-qemu provides
+          # efi-virtio.rom; virtiofsd shares the checkout with the builder VM;
+          # e2fsprogs provides the mkfs.ext4 and debugfs image-packing tools.
+          packages: qemu-system-arm ipxe-qemu virtiofsd e2fsprogs attr jq
+
+      - name: Allow unprivileged QEMU to use host vsock
+        run: |
+          test -c /dev/vhost-vsock
+          sudo chown "$(id -u):$(id -g)" /dev/vhost-vsock
+          test -r /dev/vhost-vsock && test -w /dev/vhost-vsock
 
       - uses: ./.github/actions/rust-cache
         with:
@@ -1604,22 +1617,35 @@ jobs:
           sudo chown "$USER" /dev/vhost-vsock
           sudo chmod 0600 /dev/vhost-vsock
 
-      # The release-cut bootstrap path can download a published builder VM
-      # image; the default source-checkout path would rebuild it from scratch
-      # inside Stage 0 under TCG, which is far too slow for a CI gate. Build
-      # with the release bootstrap feature and hide the in-repo builder VM
-      # flake so `mvmctl` treats this as an installed binary and downloads the
-      # published image instead.
-      - name: Build mvmctl
+      # The source binary is the end-to-end subject: merge-group code cannot
+      # download its new release-format runtime overlay until that code has
+      # merged and a release has published it. Keep a copy before building the
+      # release-channel helper, whose only job is to download the already-
+      # published builder VM. Building that VM from scratch under TCG is far
+      # too slow for a CI gate. The tagged release workflow separately drives
+      # the newly packaged overlay through the exact production downloader
+      # before publishing it.
+      - name: Build source mvmctl and published-builder bootstrap helper
         env:
           # This witness boots embedded builder-guest code. A restored Cargo
           # cache may contain binaries built from an older source tree, which
           # would make the live gate validate stale mvm-host-vm-init behavior.
           MVM_EMBED_NO_CACHE: 1
-        run: cargo build --release -p mvmctl --features release-artifact-bootstrap,release-channel
+        run: |
+          cargo build --release -p mvmctl --features user
+          cp target/release/mvmctl /tmp/mvmctl-source-under-test
+          cargo build --release -p mvmctl --features user,release-artifact-bootstrap,release-channel
 
       - name: Use published builder VM bootstrap path
         run: mv nix/images/builder-vm nix/images/builder-vm.hidden
+
+      - name: Download published builder VM
+        run: ./target/release/mvmctl --builder qemu __builder-vm-bootstrap -v
+
+      - name: Bootstrap source-matched launch artifacts
+        env:
+          MVM_KERNEL_SOURCE: auto
+        run: /tmp/mvmctl-source-under-test --builder qemu bootstrap --production -v
 
       - name: Build and boot the sealed exit_code workload under QEMU TCG
         id: first-boot
@@ -1629,7 +1655,7 @@ jobs:
           set -euo pipefail
           mkdir -p "$MVM_HOME"
           set +e
-          ./target/release/mvmctl machine run \
+          /tmp/mvmctl-source-under-test machine run \
             --flake examples/exit_code \
             --builder qemu \
             --hypervisor qemu \
@@ -1649,16 +1675,16 @@ jobs:
         id: bundle-roundtrip
         run: |
           set -euo pipefail
-          slot_hash=$(./target/release/mvmctl manifest ls --json 2>&1 | sed 's/\x1b\[[0-9;]*m//g' | jq -r '.[0].slot_hash')
-          ./target/release/mvmctl bundle export "$slot_hash" \
+          slot_hash=$(/tmp/mvmctl-source-under-test manifest ls --json 2>&1 | sed 's/\x1b\[[0-9;]*m//g' | jq -r '.[0].slot_hash')
+          /tmp/mvmctl-source-under-test bundle export "$slot_hash" \
             --out /tmp/exit-code-aarch64.mvmpkg \
             > /tmp/mvmctl-export.log 2>&1
-          ./target/release/mvmctl trust add "$MVM_HOME/keys/host-signer.pub"
-          install_output=$(./target/release/mvmctl bundle install /tmp/exit-code-aarch64.mvmpkg 2>&1 | tee /tmp/mvmctl-install.log)
+          /tmp/mvmctl-source-under-test trust add "$MVM_HOME/keys/host-signer.pub"
+          install_output=$(/tmp/mvmctl-source-under-test bundle install /tmp/exit-code-aarch64.mvmpkg 2>&1 | tee /tmp/mvmctl-install.log)
           installed_sha=$(printf '%s' "$install_output" | sed 's/\x1b\[[0-9;]*m//g' | awk '/Installed bundle / {print $3}')
           echo "installed bundle content address: $installed_sha"
           set +e
-          ./target/release/mvmctl machine run \
+          /tmp/mvmctl-source-under-test machine run \
             --manifest "$installed_sha" \
             --hypervisor qemu \
             -v \

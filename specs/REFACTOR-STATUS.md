@@ -17,6 +17,32 @@ for detailed scope and acceptance criteria.
 
 ## Completed issue closeouts
 
+- [x] **Artifact acquisition is explicit across source and release builds.**
+      Official binaries download verified launch artifacts even when invoked
+      from an mvm checkout; contributor binaries may build source-matched
+      artifacts and name that cold-build phase. Bootstrap now prepares the
+      kernel, initramfs, runtime overlay, and OCI guest shims. The release
+      overlay carries all six shims, contract tests prevent producer/consumer
+      drift, and worktree-stable Cargo targets reuse dependencies without
+      weakening content-keyed final caches. Production OCI admission runs
+      before artifact preparation, so a refused pull starts no build or
+      download. The merge-queue aarch64 smoke preserves and executes a
+      source-channel root CLI binary with user-facing manifest verification;
+      a separate release-channel helper downloads only the published builder
+      image because a pre-merge build cannot consume its not-yet-published
+      runtime archive format. It installs `virtiofsd` plus the `ipxe-qemu`
+      package that carries `efi-virtio.rom`, bootstraps source-matched runtime
+      artifacts before the first builder-backed launch, grants the hosted
+      runner's unprivileged QEMU process access to `/dev/vhost-vsock`, and
+      passes that one device into the local Docker witness. It pins the
+      dependency order that makes the overlay available before kernel
+      preparation. The tagged release workflow separately verifies the signed
+      future-format overlay through the production downloader before publish.
+      The standalone hostd fuzz lock is refreshed for the current dependency
+      graph.
+      The owning plan is
+      `specs/plans/2026-08-20-artifact-acquisition-contract.md`.
+
 - [x] **Issue #2657 — live BDD is visible and merge-gated.** Capability skips
       are reported instead of disappearing from the test summary, and a
       merge-queue/manual-only KVM lane runs one tagged Firecracker witness for
