@@ -65,6 +65,21 @@ pub mod receipt_type {
     pub const ASSURANCE_ATTESTATION_VERIFIED: &str = "assurance.attestation_verified";
 }
 
+/// Namespaced keys for the extensions an exporter attaches.
+///
+/// These are inside the signed payload, so a receipt lifted out of an archive
+/// and forwarded on its own still names the log position it came from. All are
+/// `mvm.`-prefixed: `extensions` is an open map, and an unprefixed key would
+/// collide with whatever a future writer chooses.
+pub mod extension_key {
+    /// Lowercase hex SHA-256 of the exact signed audit-entry bytes.
+    pub const AUDIT_DIGEST: &str = "mvm.audit_digest";
+    /// Merkle root hash the receipt was exported against.
+    pub const AUDIT_ROOT: &str = "mvm.audit_root";
+    /// Tree size that root was published at.
+    pub const TREE_SIZE: &str = "mvm.tree_size";
+}
+
 /// Outcome of the action described by a receipt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -171,6 +186,10 @@ pub enum ReceiptError {
     /// The `receipt_id` did not match the recomputed content address.
     #[error("receipt_id does not match recomputed content address")]
     ReceiptIdMismatch,
+
+    /// The archive's content address does not match its contents.
+    #[error("archive_id does not match recomputed content address")]
+    ArchiveIdMismatch,
     /// The `did:key` could not be parsed.
     #[error("did:key parse error: {0}")]
     DidKey(#[from] crate::did_key::DidKeyError),

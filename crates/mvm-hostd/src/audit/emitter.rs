@@ -47,11 +47,9 @@ use crate::supervisor::{
     AuditSigner, FileAuditSigner, PlanAuditEntry, audit_mirror, for_plan, transcript_sealed,
 };
 use anyhow::{Context, Result};
-use base64::Engine;
-use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use chrono::Utc;
-use ed25519_dalek::{Signer, SigningKey};
-use mvm_contract::merkle::{SignedAuditRoot, root_signing_bytes};
+use ed25519_dalek::SigningKey;
+use mvm_contract::merkle::SignedAuditRoot;
 use mvm_contract::provenance::{
     ActorRef, AttestationBinding, DecisionActorRole, DecisionCategory, DecisionId, DecisionOutcome,
     DecisionRecord, DecisionRecordBuilder,
@@ -1109,21 +1107,8 @@ impl AuditEmitter {
     /// `<audit_dir>/<tenant>.root.json` so a reader never observes a partial
     /// file.
     pub fn publish_root(&self, tenant: &str) -> Result<SignedAuditRoot> {
-        let vk = self.signing_key.verifying_key();
-        let (root, tree_size) = crate::audit::merkle::build_root_in(&self.audit_dir, tenant, &vk)?;
-        let root_hash = hex::encode(root);
-        let timestamp = chrono::Utc::now().to_rfc3339();
-        let payload = root_signing_bytes(tenant, tree_size, &root_hash, &timestamp)
-            .map_err(|e| anyhow::anyhow!("serializing Merkle root signing payload: {e}"))?;
-        let signature = self.signing_key.sign(&payload);
-        let signed = SignedAuditRoot {
-            tenant: tenant.to_string(),
-            tree_size,
-            root_hash,
-            timestamp,
-            signature: BASE64_STANDARD.encode(signature.to_bytes()),
-            signer_pubkey: hex::encode(vk.to_bytes()),
-        };
+        let signed =
+            crate::audit::merkle::sign_root_in(&self.audit_dir, tenant, &self.signing_key)?;
         let path = audit_root_path_for_tenant(&self.audit_dir, tenant);
         write_atomic(&path, serde_json::to_vec_pretty(&signed)?.as_slice())
             .with_context(|| format!("publishing signed root to {}", path.display()))?;

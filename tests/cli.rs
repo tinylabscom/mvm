@@ -471,3 +471,79 @@ fn machine_run_names_an_unknown_flag_instead_of_booting() {
         "the flag must never reach a guest shell, stderr: {stderr}"
     );
 }
+
+/// The archive flags have to be reachable, not merely declared.
+///
+/// This repo has shipped an `up::Args` whose flags were never wired to a
+/// `Commands` variant, so the surface existed and nothing could invoke it.
+/// Asserting `--help` succeeds is what distinguishes a dispatched verb from a
+/// struct nobody routes to.
+#[test]
+fn receipts_export_advertises_the_archive_flags() {
+    #[allow(deprecated)]
+    let out = Command::cargo_bin("mvmctl")
+        .unwrap()
+        .args(["trust", "audit", "receipts", "export", "--help"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "receipts export --help must exit 0, stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let help = String::from_utf8_lossy(&out.stdout);
+    for flag in ["--archive", "--full-chain", "--plan-id", "--json"] {
+        assert!(help.contains(flag), "help must advertise {flag}:\n{help}");
+    }
+    // Deliberately absent until chunk embedding lands: a flag whose only
+    // behaviour is an error is worse than no flag.
+    assert!(
+        !help.contains("--with-transcripts"),
+        "--with-transcripts must not be advertised while it can only fail:\n{help}"
+    );
+}
+
+#[test]
+fn receipts_verify_is_a_dispatched_verb() {
+    #[allow(deprecated)]
+    let out = Command::cargo_bin("mvmctl")
+        .unwrap()
+        .args(["trust", "audit", "receipts", "verify", "--help"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "receipts verify --help must exit 0, stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let help = String::from_utf8_lossy(&out.stdout);
+    assert!(help.to_lowercase().contains("archive"), "{help}");
+}
+
+/// `--json` prints receipts, `--archive` writes a file. Asking for both is a
+/// contradiction and clap should refuse it rather than silently picking one.
+#[test]
+fn receipts_export_refuses_json_and_archive_together() {
+    #[allow(deprecated)]
+    let out = Command::cargo_bin("mvmctl")
+        .unwrap()
+        .args([
+            "trust",
+            "audit",
+            "receipts",
+            "export",
+            "--json",
+            "--archive",
+            "/tmp/should-not-be-written.mvmev",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "clap must reject --json with --archive"
+    );
+    assert!(
+        !std::path::Path::new("/tmp/should-not-be-written.mvmev").exists(),
+        "a refused invocation must not have written anything"
+    );
+}
