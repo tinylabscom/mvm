@@ -794,7 +794,7 @@ mod tests {
         // first. This only proves the low-level mapper never fabricates a bogus
         // block device for a share it can't express.
         let cfg = VmStartConfig {
-            volumes: vec![dir_share_volume("/host/dir", "/mnt")],
+            volumes: vec![dir_share_volume("/host/dir", "/data")],
             ..base()
         };
         assert_eq!(nodes(&workload_blocks(&cfg)), vec!["/dev/vda"]);

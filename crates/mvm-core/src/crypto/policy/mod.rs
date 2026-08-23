@@ -16,7 +16,7 @@ pub mod tags;
 pub mod ttl;
 
 pub use mount::{
-    DEFAULT_MOUNT_ALLOW_ROOTS, DEFAULT_MOUNT_DENY_PREFIXES, MountPathError, MountPathPolicy,
+    MOUNT_ALLOW_ROOTS, MountPathError, MountPathPolicy, PROTECTED_RUNTIME_PATHS,
     validate_mount_path,
 };
 pub use path::{
