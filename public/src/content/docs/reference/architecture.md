@@ -18,7 +18,7 @@ on launcher and service traits.
 ## Multi-Backend Runtime Design
 
 Concrete runtime backends implement `mvm_core::vm_backend::VmBackend` — the one runtime
-behavior contract. Backend *discovery* (which backends exist and their metadata) lives in the
+behavior contract. Backend _discovery_ (which backends exist and their metadata) lives in the
 compile-time descriptor registry described below; the closed enum
 `mvm_runtime::backend::AnyBackend` is the dispatch layer for the operations that are still
 genuinely backend-specific:
@@ -29,13 +29,14 @@ genuinely backend-specific:
 
 ### Runtime backend matrix
 
-| Backend | Selection mode | Notes |
-|---------|----------------|-------|
-| Firecracker | Auto on Linux with native KVM | Production Tier 1 backend |
-| HVF | Auto on supported macOS 26+ hosts | Preferred macOS local backend (Hypervisor.framework, vsock-only) |
-| libkrun | Auto fallback on supported hosts | Fast local Tier 2 backend |
-| QEMU | Explicit opt-in (`--hypervisor qemu`) | Linux dev/test backend |
-| Mock | Explicit opt-in (`--hypervisor mock`) | Test-only in-memory backend |
+| Backend     | Selection mode                                | Notes                                                            |
+| ----------- | --------------------------------------------- | ---------------------------------------------------------------- |
+| Firecracker | Auto on Linux with native KVM                 | Production Tier 1 backend                                        |
+| HVF         | Auto on supported macOS 26+ hosts             | Preferred macOS local backend (Hypervisor.framework, vsock-only) |
+| libkrun     | Auto fallback on supported hosts              | Fast local Tier 2 backend                                        |
+| QEMU        | Explicit opt-in (`--hypervisor qemu`)         | Linux dev/test backend                                           |
+| BrowserWasi | Explicit opt-in (`--hypervisor browser-wasm`) | Browser-tier WASI backend (no hypervisor)                        |
+| Mock        | Explicit opt-in (`--hypervisor mock`)         | Test-only in-memory backend                                      |
 
 The backend descriptor registry in `crates/mvm-runtime/src/catalog.rs` is the single source of
 truth for backend discovery: each `BackendDescriptor` carries the selector, aliases, isolation
@@ -48,11 +49,11 @@ consumers construct from the same descriptors via `instantiate` / `instantiate_d
 mvm runs long-lived processes in three layers, one per trust tier. Authority decreases as
 you move away from the host, and each layer is trusted accordingly (see ADR-001 and ADR-090).
 
-| Layer | Process | Owns | Authority | Trust |
-|-------|---------|------|-----------|-------|
-| Host | the `mvmctl` control plane (plus, under the fleet, per-tenant signer/audit daemons) | host signing keys, plan admission, the chain-signed audit log, VM + pool lifecycle | full | trusted (TCB) |
-| Builder VM | the Linux builder environment (Nix + the builder store) | building guest/workload images | build-only | trusted to build; dev-tier |
-| Workload microVM | the guest agent | answering vsock RPCs for its one workload | none | untrusted |
+| Layer            | Process                                                                             | Owns                                                                               | Authority  | Trust                      |
+| ---------------- | ----------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------- | ---------- | -------------------------- |
+| Host             | the `mvmctl` control plane (plus, under the fleet, per-tenant signer/audit daemons) | host signing keys, plan admission, the chain-signed audit log, VM + pool lifecycle | full       | trusted (TCB)              |
+| Builder VM       | the Linux builder environment (Nix + the builder store)                             | building guest/workload images                                                     | build-only | trusted to build; dev-tier |
+| Workload microVM | the guest agent                                                                     | answering vsock RPCs for its one workload                                          | none       | untrusted                  |
 
 The governing rule: **a process never holds authority above its trust tier, and authority
 only ever decreases host → builder → workload.** Host signing keys, plan admission, and the
@@ -62,11 +63,19 @@ no signing key or admission code. `mvmctl`'s `check-trust-gradient` lint machine
 ledger (`specs/claims/trust-gradient.md`) on every PR; the ledger carries the host and workload
 rows today, and the builder row is added once the resident builder daemon (`mvm-builderd`) exists.
 
+### Browser-tier exception
+
+The browser-tier `BrowserWasi` backend runs inside the browser's own WebAssembly engine.
+It has **no hypervisor boundary** and runs the guest workload directly as a WASI module.
+This makes it a claim-free tier: it cannot assert any of the numbered security claims
+because there is no hardware isolation. It is for demos, playgrounds, and browser-local
+development only, and it is never auto-selected.
+
 What is installed where:
 
 - The **host** has `mvmctl` (and, under the fleet, the per-tenant `mvm-host-agent` +
   `mvm-signer-helper` daemons). Host Nix is optional.
-- The **builder VM** owns Nix and the build toolchain. Making the builder a *resident* typed
+- The **builder VM** owns Nix and the build toolchain. Making the builder a _resident_ typed
   vsock service (`mvm-builderd`) is the direction recorded in ADR-089 / Plan 204; today builder
   work is controlled job execution, not yet a resident daemon.
 - **Workload microVM images** contain neither `mvmctl` nor builder tooling — only the minimal
@@ -92,15 +101,15 @@ doctor`'s `residency` line as `<policy> — <source> — warm_target=N[, idle=Nm
 
 The workspace is organized by responsibility rather than by platform:
 
-| Area | Crates | Role |
-|------|--------|------|
-| Core types and contracts | `mvm-core` | Shared types, protocols, config helpers, canonical lightweight traits |
-| Runtime backends | `mvm-runtime` | VM lifecycle, backend adapters, storage/volume backends |
-| Build pipeline | `mvm-build` | Builder VM flow, artifact production, builder backend seams |
-| Host policy / supervision | `mvm-hostd` | Admission, audit, policy enforcement, launch preparation, per-VM host processes |
-| Guest / protocol surfaces | `mvm-agentd` | Guest agent and in-guest protocol tooling |
-| Domain-specific subsystems | `mvm-fs`, `mvm-net`, `mvm-contract` | OCI/filesystem handling, networking, audit-log verification |
-| CLI / SDK surface | `mvm-cli`, `mvm-sdk` | User interface and workload authoring APIs |
+| Area                       | Crates                              | Role                                                                            |
+| -------------------------- | ----------------------------------- | ------------------------------------------------------------------------------- |
+| Core types and contracts   | `mvm-core`                          | Shared types, protocols, config helpers, canonical lightweight traits           |
+| Runtime backends           | `mvm-runtime`                       | VM lifecycle, backend adapters, storage/volume backends                         |
+| Build pipeline             | `mvm-build`                         | Builder VM flow, artifact production, builder backend seams                     |
+| Host policy / supervision  | `mvm-hostd`                         | Admission, audit, policy enforcement, launch preparation, per-VM host processes |
+| Guest / protocol surfaces  | `mvm-agentd`                        | Guest agent and in-guest protocol tooling                                       |
+| Domain-specific subsystems | `mvm-fs`, `mvm-net`, `mvm-contract` | OCI/filesystem handling, networking, audit-log verification                     |
+| CLI / SDK surface          | `mvm-cli`, `mvm-sdk`                | User interface and workload authoring APIs                                      |
 
 The root crate (`mvmctl`) is the facade/runtime integration crate. `mvm-cli` is the binary-facing
 command surface.
@@ -130,20 +139,20 @@ Interpretation:
 
 These are the main behavior seams in the current codebase:
 
-| Trait | Owning crate | Purpose |
-|-------|--------------|---------|
-| `VmBackend` | `mvm-core` | Runtime VM lifecycle and capability contract |
-| `ShellEnvironment` | `mvm-core` | Minimal shell/logging seam for build flows |
-| `BuildEnvironment` | `mvm-core` | Extended build orchestration environment |
-| `LinuxEnv` | `mvm-core` | Linux execution boundary abstraction |
-| `KeyProvider` | `mvm-core` | Snapshot/secret key loading |
-| `SecretStore` | `mvm-core` | Secret retrieval/storage seam |
-| `ServiceHandler` | `mvm-core` | Protocol service dispatch |
-| `BuilderVm` | `mvm-build` | High-level builder VM driver |
-| `VmBackendForBuilder` | `mvm-build` | Low-level builder backend seam |
-| `BackendLauncher` | `mvm-hostd` | Host-side backend launch preparation/execution |
-| `NetworkProvider` | `mvm-net` | Network provisioning / policy seam |
-| `VolumeBackend` | `mvm-runtime` | Storage backend seam |
+| Trait                 | Owning crate  | Purpose                                        |
+| --------------------- | ------------- | ---------------------------------------------- |
+| `VmBackend`           | `mvm-core`    | Runtime VM lifecycle and capability contract   |
+| `ShellEnvironment`    | `mvm-core`    | Minimal shell/logging seam for build flows     |
+| `BuildEnvironment`    | `mvm-core`    | Extended build orchestration environment       |
+| `LinuxEnv`            | `mvm-core`    | Linux execution boundary abstraction           |
+| `KeyProvider`         | `mvm-core`    | Snapshot/secret key loading                    |
+| `SecretStore`         | `mvm-core`    | Secret retrieval/storage seam                  |
+| `ServiceHandler`      | `mvm-core`    | Protocol service dispatch                      |
+| `BuilderVm`           | `mvm-build`   | High-level builder VM driver                   |
+| `VmBackendForBuilder` | `mvm-build`   | Low-level builder backend seam                 |
+| `BackendLauncher`     | `mvm-hostd`   | Host-side backend launch preparation/execution |
+| `NetworkProvider`     | `mvm-net`     | Network provisioning / policy seam             |
+| `VolumeBackend`       | `mvm-runtime` | Storage backend seam                           |
 
 ### Ownership rule
 
@@ -194,11 +203,11 @@ operations. It is not the same thing as the selected workload runtime backend.
 
 ## Platform Support
 
-| Host platform | Default runtime path |
-|---------------|----------------------|
-| Linux with native KVM | Firecracker |
-| Supported macOS 26+ host | HVF |
-| Supported host with libkrun available | libkrun |
+| Host platform                         | Default runtime path |
+| ------------------------------------- | -------------------- |
+| Linux with native KVM                 | Firecracker          |
+| Supported macOS 26+ host              | HVF                  |
+| Supported host with libkrun available | libkrun              |
 
 Other backends such as QEMU exist, but they are selected explicitly rather than by
 default policy.

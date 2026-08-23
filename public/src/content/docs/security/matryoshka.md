@@ -72,7 +72,7 @@ cannot infer whether an explicitly granted capability is safe for your code.
 
 Each layer trusts only the layer **below** it. An attacker has to break through every boundary above to reach the host. A failure in any one layer is bounded — the layer below still enforces its own contract.
 
-This pattern (sometimes called the *matryoshka* model after the nested Russian dolls) is the same defense-in-depth used across the production microVM / hardened-isolation ecosystem. mvm's adaptation is that **L5 is enforced inside the guest** — even a guest-kernel compromise doesn't give arbitrary access to other in-guest services. See [ADR-001](https://github.com/tinylabscom/mvm/blob/main/specs/adrs/001-microvm-security-posture.md) for the full decision record.
+This pattern (sometimes called the _matryoshka_ model after the nested Russian dolls) is the same defense-in-depth used across the production microVM / hardened-isolation ecosystem. mvm's adaptation is that **L5 is enforced inside the guest** — even a guest-kernel compromise doesn't give arbitrary access to other in-guest services. See [ADR-001](https://github.com/tinylabscom/mvm/blob/main/specs/adrs/001-microvm-security-posture.md) for the full decision record.
 
 ## The claims
 
@@ -83,23 +83,23 @@ The claims that defend a nesting layer are what the layer model is about; the
 rest defend the supply chain and the admission path, which decide what is
 allowed to run inside those layers at all.
 
-| # | Claim | Defends layer | How it's enforced |
-|---|---|---|---|
-| 1 | No host-fs access from a guest beyond explicit shares | L2 / L5 | Per-service uid + seccomp `standard` default + setpriv bounding-set drop; user-volume allow-list defaulting to read-only |
-| 2 | No guest binary can elevate to uid 0 | L2 / L4 | `setpriv --no-new-privs` in launch path; `/etc/{passwd,group}` are read-only bind-mounts |
-| 3 | A tampered rootfs ext4 fails to boot | L3 | dm-verity sidecar + roothash on cmdline + a verity-aware initramfs owning the boot pivot |
-| 4 | A production-safe run cannot invoke DevOnly guest-agent verbs | L4 | Runtime profile + signed `VerbGrant` intersection; grant and conformance tests enforce the full DevOnly set |
-| 5 | Vsock framing, supervisor-config JSON, and the datapath ingress are fuzzed | L2 / L4 | `cargo-fuzz` targets over the host↔guest messages, the supervisor config parser, and the userspace datapath ingress; `deny_unknown_fields` on every type |
-| 6 | Pre-built dev image is hash-verified | supply chain | SHA-256 manifest streamed through the download; a mismatch rejects and deletes it |
-| 7 | Cargo deps are audited on every PR | supply chain | `cargo-deny` + `cargo-audit` jobs; reproducibility double-build |
-| 8 | Every workload runs from a signed, audited `ExecutionPlan` | admission | Ed25519 host-signer keypair; validity window + nonce replay-store; chain-signed admission entries |
-| 9 | Every published bundle is content-addressed and key_id-pinned | supply chain | A rejection ladder at fetch and at admit time: unknown key, tampered manifest, key_id mismatch, unsafe path, pin drift |
-| 10 | No untrusted workload reaches the network unless policy admits it | data containment | Policy defaults to deny-all; the workload guest has no NIC, so egress leaves only over vsock to a host endpoint that authorizes it |
-| 11 | Every application-dependency volume is sealed and audited | supply chain (app layer) | A hash-locked volume carrying an SBOM, a CVE scan, and a hash-chained manifest; admission refuses a tampered volume |
-| 12 | Every broker service is bound to a signed plan binding | admission | Binding-gated dispatch, enforced before the handler runs, with a rejection ladder for unbound and out-of-profile calls |
-| 13 | No raw secret value crosses the broker channel | data containment | Destination-bound, time-bound signed credentials only; raw secret bytes never leave the supervisor's address space |
-| 14 | Every OCI image admission records provenance in the audit log | supply chain | A provenance entry carries registry, repo, resolved digest, layer digests, and trust verdict; production refuses a mutable reference |
-| 15 | A sealed production microVM has no shell, no DevOnly verbs, no PTY | L4 | Only the dev `/init` serves a console; console capture is write-only with no host input; the host gate refuses `console` on a sealed image |
+| #   | Claim                                                                      | Defends layer            | How it's enforced                                                                                                                                        |
+| --- | -------------------------------------------------------------------------- | ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | No host-fs access from a guest beyond explicit shares                      | L2 / L5                  | Per-service uid + seccomp `standard` default + setpriv bounding-set drop; user-volume allow-list defaulting to read-only                                 |
+| 2   | No guest binary can elevate to uid 0                                       | L2 / L4                  | `setpriv --no-new-privs` in launch path; `/etc/{passwd,group}` are read-only bind-mounts                                                                 |
+| 3   | A tampered rootfs ext4 fails to boot                                       | L3                       | dm-verity sidecar + roothash on cmdline + a verity-aware initramfs owning the boot pivot                                                                 |
+| 4   | A production-safe run cannot invoke DevOnly guest-agent verbs              | L4                       | Runtime profile + signed `VerbGrant` intersection; grant and conformance tests enforce the full DevOnly set                                              |
+| 5   | Vsock framing, supervisor-config JSON, and the datapath ingress are fuzzed | L2 / L4                  | `cargo-fuzz` targets over the host↔guest messages, the supervisor config parser, and the userspace datapath ingress; `deny_unknown_fields` on every type |
+| 6   | Pre-built dev image is hash-verified                                       | supply chain             | SHA-256 manifest streamed through the download; a mismatch rejects and deletes it                                                                        |
+| 7   | Cargo deps are audited on every PR                                         | supply chain             | `cargo-deny` + `cargo-audit` jobs; reproducibility double-build                                                                                          |
+| 8   | Every workload runs from a signed, audited `ExecutionPlan`                 | admission                | Ed25519 host-signer keypair; validity window + nonce replay-store; chain-signed admission entries                                                        |
+| 9   | Every published bundle is content-addressed and key_id-pinned              | supply chain             | A rejection ladder at fetch and at admit time: unknown key, tampered manifest, key_id mismatch, unsafe path, pin drift                                   |
+| 10  | No untrusted workload reaches the network unless policy admits it          | data containment         | Policy defaults to deny-all; the workload guest has no NIC, so egress leaves only over vsock to a host endpoint that authorizes it                       |
+| 11  | Every application-dependency volume is sealed and audited                  | supply chain (app layer) | A hash-locked volume carrying an SBOM, a CVE scan, and a hash-chained manifest; admission refuses a tampered volume                                      |
+| 12  | Every broker service is bound to a signed plan binding                     | admission                | Binding-gated dispatch, enforced before the handler runs, with a rejection ladder for unbound and out-of-profile calls                                   |
+| 13  | No raw secret value crosses the broker channel                             | data containment         | Destination-bound, time-bound signed credentials only; raw secret bytes never leave the supervisor's address space                                       |
+| 14  | Every OCI image admission records provenance in the audit log              | supply chain             | A provenance entry carries registry, repo, resolved digest, layer digests, and trust verdict; production refuses a mutable reference                     |
+| 15  | A sealed production microVM has no shell, no DevOnly verbs, no PTY         | L4                       | Only the dev `/init` serves a console; console capture is write-only with no host input; the host gate refuses `console` on a sealed image               |
 
 Three further claims — 16 (egress substitution keeps a raw secret off the
 guest), 17 (workload stdin is grant-gated and secret-scanned), and 18 (workload
@@ -129,18 +129,18 @@ mvm runs on multiple backends. Not all backends carry every claim. The tier you
 actually get depends on which backend mvm picks for your run.
 
 The columns below are the **nesting layers**, so this matrix covers the claims
-that defend a layer. The supply-chain and admission claims (6, 7, 8, 9, 11, 12,
-14) are backend-independent — they gate what is allowed to run before any
+that defend a layer. The supply-chain and admission claims (6, 7, 8, 9, 11, 12, 14) are backend-independent — they gate what is allowed to run before any
 backend is chosen, and hold identically across all of them.
 
-| Backend | L1 | L2 | L3 | L4 | L5 | Tier |
-|---|---|---|---|---|---|---|
-| **Firecracker** (Linux + KVM) | ✅ | ✅ | ✅ | ✅ | ✅ | **Tier 1** — full ADR-001. Every layer-defending claim holds. |
-| **HVF** (macOS 26+ Apple Silicon — auto-default) | ✅ | ✅ | ⚠️ | ✅ | ✅ | Tier 2 — claim 3 (verified boot) partial; `Hypervisor.framework`, vsock-only egress (no guest NIC). The macOS-26 auto-default. |
-| **libkrun** (Linux KVM, macOS Apple Silicon HVF) | ✅ | ✅ | ⚠️ | ✅ | ✅ | Tier 2 — same as HVF. |
-| **QEMU** (Linux KVM/TCG) | ✅ | ⚠️ | ⚠️ | ✅ | ✅ | Tier 2 — claim 3 partial; QEMU's larger device model raises L2 audit cost. Deliberately outside claim 10's egress enforcement, because it carries no untrusted multi-tenant workload. **Dev/test only** (`--hypervisor qemu`; the no-`/dev/kvm` path via TCG software emulation). Never selected by `mvmd`. |
+| Backend                                          | L1  | L2  | L3  | L4  | L5  | Tier                                                                                                                                                                                                                                                                                                        |
+| ------------------------------------------------ | --- | --- | --- | --- | --- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Firecracker** (Linux + KVM)                    | ✅  | ✅  | ✅  | ✅  | ✅  | **Tier 1** — full ADR-001. Every layer-defending claim holds.                                                                                                                                                                                                                                               |
+| **HVF** (macOS 26+ Apple Silicon — auto-default) | ✅  | ✅  | ⚠️  | ✅  | ✅  | Tier 2 — claim 3 (verified boot) partial; `Hypervisor.framework`, vsock-only egress (no guest NIC). The macOS-26 auto-default.                                                                                                                                                                              |
+| **libkrun** (Linux KVM, macOS Apple Silicon HVF) | ✅  | ✅  | ⚠️  | ✅  | ✅  | Tier 2 — same as HVF.                                                                                                                                                                                                                                                                                       |
+| **QEMU** (Linux KVM/TCG)                         | ✅  | ⚠️  | ⚠️  | ✅  | ✅  | Tier 2 — claim 3 partial; QEMU's larger device model raises L2 audit cost. Deliberately outside claim 10's egress enforcement, because it carries no untrusted multi-tenant workload. **Dev/test only** (`--hypervisor qemu`; the no-`/dev/kvm` path via TCG software emulation). Never selected by `mvmd`. |
+| **BrowserWasi** (browser tier)                   | —   | ❌  | ❌  | ❌  | ❌  | **Claim-free** — no numbered claims. The browser's sandbox/process isolation is the only boundary; there is no hypervisor, no guest kernel, no vsock, and no verified boot.                                                                                                                                 |
 
-✅ = layer fully enforced.  ⚠️ = layer partial (named exception).  ❌ = layer collapsed (claim does not apply).
+✅ = layer fully enforced. ⚠️ = layer partial (named exception). ❌ = layer collapsed (claim does not apply). — = not applicable.
 
 ### No container fallback
 
@@ -150,6 +150,22 @@ There is no carve-out. ADR-034 has been retired and the Docker dev-tier
 backend removed (Plan 329). A host without a usable microVM backend fails
 closed; mvm does not offer a shared-kernel container path on any default,
 production, or explicitly selected runtime path.
+
+### Browser-tier WASI backend
+
+The `BrowserWasi` backend runs workloads inside the browser's own WebAssembly engine. It has **no hypervisor boundary** and runs the guest workload directly as a WASI module. This makes it a claim-free tier: it cannot assert any of the numbered security claims because there is no hardware isolation.
+
+The browser-tier backend:
+
+- Runs the workload as a WASI Preview 1 module inside the browser's WebAssembly engine
+- Has no Linux kernel, no initramfs, no vsock, and no virtual devices
+- Enforces isolation through the WASI capability model (preopened directories, host imports)
+- Mediates network egress through browser-native `fetch()` via the `mvm:egress` host import
+- Is **never auto-selected** and only available through explicit `--hypervisor browser-wasm`
+- Is for demos, playgrounds, and browser-local development only
+- Does **not** apply to production workloads
+
+When a browser-tier backend is selected, the same admission, policy, and audit semantics that apply to host backends are enforced inside the browser's own WebAssembly engine.
 
 ### Choosing a tier
 
