@@ -490,6 +490,12 @@ const DEPS_SUB: &[(&str, AuditPosture)] = &[
     ("capture-live", AuditPosture::Emits("DepsAudit")),
 ];
 
+const CAPTURE_SUB: &[(&str, AuditPosture)] = &[
+    ("project", AuditPosture::InteractiveOrControl),
+    ("resolve", AuditPosture::ReadOnly),
+    ("verify", AuditPosture::InteractiveOrControl),
+];
+
 /// Every top-level `mvmctl` subcommand keyed by its clap name.
 ///
 /// Order matches the `Commands` enum in
@@ -582,6 +588,7 @@ const AUDIT_POSTURE: &[(&str, AuditPosture)] = &[
     ),
     // Plan 73 Followup C — sealed deps-volume cache verbs.
     ("deps", AuditPosture::DelegatesToSub(DEPS_SUB)),
+    ("capture", AuditPosture::DelegatesToSub(CAPTURE_SUB)),
     // Plan 76 Phase 6 — portable signed `.mvm` artifacts.
     ("artifact", AuditPosture::DelegatesToSub(ARTIFACT_SUB)),
     // Host-side developer tool: ptrace a command and report syscalls. No host

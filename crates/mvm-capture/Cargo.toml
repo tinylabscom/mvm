@@ -1,0 +1,29 @@
+[package]
+name = "mvm-capture"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Project-environment capture frontend for mvm"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[dependencies]
+mvm-contract = { workspace = true, default-features = false }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tempfile.workspace = true
+which.workspace = true
+anyhow.workspace = true
+chrono.workspace = true
+sha2.workspace = true
+hex.workspace = true
+
+[dev-dependencies]
+mvm-sdk.workspace = true
+
+[lints]
+workspace = true
