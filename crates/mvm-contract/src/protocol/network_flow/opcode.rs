@@ -251,7 +251,7 @@ impl Opcode {
             // ends it, so it must be admitted while the stream is still
             // Opening rather than requiring a separate confirmation first.
             Self::IcmpReply | Self::IcmpRefused => &[FlowClass::Icmp],
-            Self::InboundReady | Self::InboundRefused => &[FlowClass::Ingress],
+            Self::InboundReady | Self::InboundRefused => &[FlowClass::Ingress, FlowClass::Udp],
             _ => return None,
         })
     }

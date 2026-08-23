@@ -129,28 +129,6 @@ pub struct CliWorld {
     /// Result of exercising the signed-plan share gate with an attachment the
     /// plan did not authorize.
     pub volume_admission_result: Option<Result<(), String>>,
-    // --- L3 TUN-over-vsock witnesses ---
-    /// The machine a launch-guard scenario built.
-    pub l3_machine: Option<mvm_runtime::machine::Machine>,
-    /// Verdict from the no-guest-NIC launch guard.
-    pub l3_guard_result: Option<Result<(), mvm_runtime::machine::nic_guard::NicGuardError>>,
-    /// Capability shortfall from a backend check, if any.
-    pub l3_backend_check: Option<Result<(), Vec<&'static str>>>,
-    /// The per-session admission state a packet scenario drives.
-    pub l3_admitter: Option<mvm_net::l3::L3Admitter>,
-    /// Outbound verdict, reduced to its stable reason label.
-    pub l3_verdict: Option<Result<(), &'static str>>,
-    /// Inbound verdict, same shape.
-    pub l3_inbound_verdict: Option<Result<(), &'static str>>,
-    /// The packet most recently admitted or refused.
-    pub l3_last_packet: Option<Vec<u8>>,
-    pub l3_previous_session: Option<mvm_net::l3::SessionId>,
-    pub l3_current_session: Option<mvm_net::l3::SessionId>,
-    pub l3_lease: Option<mvm_net::lease::NetworkLease>,
-    pub l3_lease_instance: Option<mvm_net::channel::VmInstanceIdentity>,
-    pub l3_lease_result: Option<Result<(), String>>,
-    pub l3_backend_capabilities: Option<mvm_hostd::netd::ForwardingCapabilities>,
-    pub l3_capability_shortfall: Option<Vec<String>>,
     /// `semantic_address` per fixture name, populated on a zero-exit
     /// `build address` run.
     pub addresses: HashMap<String, String>,

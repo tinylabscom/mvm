@@ -290,6 +290,139 @@ fn then_icmp_in_contract(_world: &mut CliWorld) {
     );
 }
 
+// ── declared ingress stays on the authenticated transport ────────────────────────
+
+fn exact_tcp_ingress() -> mvm_core::plan::IngressMapping {
+    use mvm_core::plan::{IngressMapping, IngressProtocol, IngressTransform};
+
+    IngressMapping::builder()
+        .mapping_id(17)
+        .protocol(IngressProtocol::Tcp)
+        .host_addr("127.0.0.1")
+        .host_port(8443)
+        .guest_addr("127.0.0.1")
+        .guest_port(8080)
+        .transform(IngressTransform::Opaque)
+        .build()
+        .expect("valid exact ingress mapping")
+}
+
+#[given("a signed exact TCP ingress mapping")]
+fn given_signed_exact_tcp_ingress(_world: &mut CliWorld) {
+    exact_tcp_ingress()
+        .validate()
+        .expect("mapping is admissible");
+}
+
+#[then("the mapping targets only guest loopback")]
+fn then_ingress_targets_loopback(_world: &mut CliWorld) {
+    let mapping = exact_tcp_ingress();
+    assert_eq!(mapping.guest_addr, "127.0.0.1");
+    assert!(
+        mvm_core::plan::IngressMapping::builder()
+            .mapping_id(18)
+            .protocol(mvm_core::plan::IngressProtocol::Tcp)
+            .host_addr("127.0.0.1")
+            .host_port(8444)
+            .guest_addr("10.0.2.15")
+            .guest_port(8080)
+            .transform(mvm_core::plan::IngressTransform::Opaque)
+            .build()
+            .is_err()
+    );
+}
+
+fn established_tcp_ingress_validator() -> mvm_contract::protocol::network_flow::SessionValidator {
+    use mvm_contract::protocol::network_flow::{
+        Direction, FrameFacts, IngressFlowKind, Opcode, SessionValidator,
+    };
+
+    let mut validator = SessionValidator::new_with_ingress([(17, IngressFlowKind::Tcp)]);
+    validator
+        .admit(&FrameFacts::new(Direction::GuestToHost, Opcode::Hello, 0))
+        .expect("guest authenticates the FlowMux session");
+    validator
+        .admit(&FrameFacts::new(
+            Direction::HostToGuest,
+            Opcode::HelloAck,
+            0,
+        ))
+        .expect("host acknowledges the authenticated FlowMux session");
+    validator
+}
+
+#[then("an admitted host-initiated stream names only that mapping")]
+fn then_ingress_names_admitted_mapping(_world: &mut CliWorld) {
+    use mvm_contract::protocol::network_flow::{Direction, FrameFacts, Opcode};
+
+    let mut validator = established_tcp_ingress_validator();
+    validator
+        .admit(
+            &FrameFacts::new(Direction::HostToGuest, Opcode::InboundOpen, 2)
+                .with_ingress_mapping(17),
+        )
+        .expect("signed host mapping opens on an even stream");
+}
+
+#[then("an undeclared host-initiated stream is refused")]
+fn then_undeclared_ingress_is_refused(_world: &mut CliWorld) {
+    use mvm_contract::protocol::network_flow::{Direction, FrameFacts, Opcode};
+
+    let mut validator = established_tcp_ingress_validator();
+    assert!(
+        validator
+            .admit(
+                &FrameFacts::new(Direction::HostToGuest, Opcode::InboundOpen, 2)
+                    .with_ingress_mapping(99),
+            )
+            .is_err()
+    );
+}
+
+fn tls_ingress() -> mvm_core::plan::IngressMapping {
+    use mvm_core::plan::{IngressMapping, IngressProtocol, IngressTransform};
+
+    IngressMapping::builder()
+        .mapping_id(19)
+        .protocol(IngressProtocol::Tcp)
+        .host_addr("127.0.0.1")
+        .host_port(9443)
+        .guest_addr("127.0.0.1")
+        .guest_port(8080)
+        .transform(IngressTransform::Tls)
+        .tls_secret("INGRESS_TLS_PEM")
+        .build()
+        .expect("valid TLS ingress mapping")
+}
+
+fn tls_binding() -> mvm_core::plan::SecretBinding {
+    mvm_core::plan::SecretBinding {
+        name: "INGRESS_TLS_PEM".to_string(),
+        source: mvm_core::plan::SecretSource::Keystore {
+            address: "ingress/tls".to_string(),
+        },
+    }
+}
+
+#[given("a signed TLS ingress mapping with a same-plan keystore reference")]
+fn given_signed_tls_ingress(_world: &mut CliWorld) {
+    tls_ingress().validate().expect("TLS mapping is structural");
+}
+
+#[then("the TLS ingress material binding is admitted")]
+fn then_tls_material_is_admitted(_world: &mut CliWorld) {
+    mvm_core::plan::validate_ingress_material(&[tls_ingress()], &[tls_binding()])
+        .expect("same-plan keystore material is admissible");
+}
+
+#[then("the serialized mapping contains only the secret reference")]
+fn then_tls_serialization_is_reference_only(_world: &mut CliWorld) {
+    let serialized = serde_json::to_string(&tls_ingress()).expect("serialize mapping");
+    assert!(serialized.contains("INGRESS_TLS_PEM"));
+    assert!(!serialized.contains("PRIVATE KEY"));
+    assert!(!serialized.contains("key_pem"));
+}
+
 // ── substitution must be live before a placeholder is handed out ─────────
 
 #[given("an endpoint config carrying a secret")]
@@ -402,6 +535,7 @@ fn secret_bearing_config() -> mvm_hostd::supervisor::network_endpoint::EndpointC
 
     EndpointConfig {
         tenant_id: "local".into(),
+        instance_id: "test".into(),
         secrets: vec![SecretBinding {
             name: "OPENAI_API_KEY".into(),
             source: SecretSource::Keystore {
@@ -414,6 +548,7 @@ fn secret_bearing_config() -> mvm_hostd::supervisor::network_endpoint::EndpointC
         redaction: mvm_core::policy::RedactionPolicy::default(),
         reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
         network_limits: mvm_core::plan::NetworkLimits::default(),
+        ingress: Vec::new(),
         forward_timeout_secs: 30,
         proxy_https: None,
         proxy_http: None,

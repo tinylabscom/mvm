@@ -436,7 +436,7 @@ impl OperatorConfiguredTrialBooter {
             secrets: Vec::new(),
             audit_event_prefix: Some("assurance.campaign"),
             network_mode: Default::default(),
-            l3_network: None,
+            ingress: Vec::new(),
             grants: None,
             cpus: self.config.workload.cpus,
             mem_mib: u64::from(self.config.workload.memory_mib),

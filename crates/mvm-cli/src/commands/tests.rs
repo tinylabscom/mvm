@@ -1847,8 +1847,8 @@ fn test_forward_multiple_positional() {
 
 #[test]
 fn test_forward_no_ports_parses() {
-    // forward with no ports should parse successfully — the runtime path
-    // falls back to persisted ports from run-info.json
+    // Stale invocations still parse so execution can return the targeted
+    // signed-ingress migration error.
     let cli = Cli::try_parse_from(["mvmctl", "machine", "forward", "swift"]).unwrap();
     let Commands::Machine(mg) = cli.command else {
         panic!("expected vm group")
@@ -2638,12 +2638,18 @@ fn test_audit_receipts_export_parses() {
                             tenant,
                             plan_id,
                             json,
+                            archive,
+                            full_chain,
                         },
                 },
         }) => {
             assert_eq!(tenant, "acme");
             assert_eq!(plan_id, None);
             assert!(json);
+            // The archive flags default off, so the pre-existing print path is
+            // what a bare `--json` export still takes.
+            assert_eq!(archive, None);
+            assert!(!full_chain);
         }
         _ => panic!("Expected Audit::Receipts::Export"),
     }

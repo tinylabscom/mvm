@@ -229,7 +229,7 @@ mod tests {
 [workspace.metadata.mvm.toolchain]
 rust = "1.91.1"
 zig = "0.13.0"
-cargo-zigbuild = "0.20.0"
+cargo-zigbuild = "0.23.0"
 
 [workspace.metadata.mvm.toolchain.targets]
 aarch64 = "aarch64-unknown-linux-musl"
@@ -240,7 +240,7 @@ aarch64 = "aarch64-unknown-linux-musl"
         let pin = read_pinned_toolchain(tmp.path(), "aarch64");
         assert_eq!(pin.rust, "1.91.1");
         assert_eq!(pin.zig, "0.13.0");
-        assert_eq!(pin.cargo_zigbuild, "0.20.0");
+        assert_eq!(pin.cargo_zigbuild, "0.23.0");
         assert_eq!(pin.target, "aarch64-unknown-linux-musl");
     }
 

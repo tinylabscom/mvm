@@ -39,7 +39,7 @@ pub use api::{
     query_probe_status_at, query_resource_usage, query_resource_usage_at, query_worker_status,
     query_worker_status_at, request_sleep_prep, send_fs_request, send_fs_request_on,
     send_proc_request, send_proc_request_on, send_proc_wait, send_proc_wait_on, signal_wake,
-    start_port_forward_on, workload_is_primed_at,
+    workload_is_primed_at,
 };
 pub use connection::{
     HOST_CID, connect_host_vsock, connect_to, connect_to_port, connect_to_port_once, send_request,
@@ -94,8 +94,7 @@ pub const GUEST_CID: u32 = 3;
 /// unprivileged on Linux — see the corrected comment in
 /// `nix/lib/minimal-init/default.nix::guestAgentBlock`.
 ///
-/// 5252 sits clearly above 1023 and below the port-forward range
-/// (`PORT_FORWARD_BASE` = 10_000) and the console-data range
+/// 5252 sits clearly above 1023 and below the console-data range
 /// (`CONSOLE_PORT_BASE` = 20_000), so the host-side proxy allowlist
 /// keeps its disjoint-union shape. The "52" tail is a
 /// callback to the historical port for grep-ability.
@@ -135,16 +134,11 @@ const _: () = assert!(EGRESS_PORT == 5253);
 /// mechanism [`EGRESS_PORT`] uses.
 ///
 /// 5300 sits above the privileged range and above 5251/5252/5253, and below
-/// the port-forward range ([`PORT_FORWARD_BASE`] = 10_000) and the
-/// console-data range ([`CONSOLE_PORT_BASE`] = 20_000), so the host-side proxy
+/// the console-data range ([`CONSOLE_PORT_BASE`] = 20_000), so the host-side proxy
 /// allowlist keeps its disjoint-union shape. It reuses the number the
 /// pre-broker secrets channel once held (that channel was removed), so there
 /// is no live collision.
 pub const BROKER_PORT: u32 = 5300;
-
-/// Base vsock port for TCP port forwarding.
-/// The forwarded vsock port = `PORT_FORWARD_BASE + guest_tcp_port`.
-pub const PORT_FORWARD_BASE: u32 = 10000;
 
 /// Base vsock port for interactive console PTY sessions.
 pub const CONSOLE_PORT_BASE: u32 = 20000;
@@ -184,12 +178,54 @@ pub const MIN_SUPPORTED_PROTOCOL_VERSION: u32 = 2;
 /// Maximum response frame size (256 KiB).
 pub const MAX_FRAME_SIZE: usize = 256 * 1024;
 
-/// Maximum raw user-content bytes placed in one JSON data-plane frame.
+/// Worst-case bytes one payload byte costs once `serde_json` has written it as
+/// a decimal element of a `Vec<u8>` array: `255,`.
+const JSON_BYTE_ARRAY_WORST_CASE: usize = 4;
+
+/// How far a payload byte expands between the handler and the wire.
 ///
-/// `Vec<u8>` serializes as a JSON integer array, whose worst case is four
-/// bytes per input byte (`255,`). Forty-eight KiB leaves room for the request
-/// or response envelope while remaining below [`MAX_FRAME_SIZE`].
-pub const MAX_DATA_CHUNK_SIZE: usize = 48 * 1024;
+/// One hop: the `GuestRequest` / `GuestResponse` body, where content is a
+/// `Vec<u8>` and `serde_json` writes it as an integer array. The envelope
+/// around that body is binary — `SealedFrame::encode` — so the ciphertext
+/// crosses no second JSON encoding.
+///
+/// It used to. When the envelope was JSON as well, this was `4 * 4` and the
+/// cap below was a quarter of what it is now, because a `Vec<u8>` ciphertext
+/// was itself re-encoded as an integer array. Sizing against a single hop
+/// while the wire charged for two is what let a stdout chunk pass the
+/// handler's own [`MAX_FRAME_SIZE`] check and then fail the identical check on
+/// the envelope.
+const SEALED_ENVELOPE_EXPANSION: usize = JSON_BYTE_ARRAY_WORST_CASE;
+
+/// Room reserved for everything in the frame that is not content: the body's
+/// own variant tags and field names, and the binary envelope's fixed header —
+/// session id, sequence, timestamp, signer id, signature — plus the GCM tag.
+/// Generous on purpose: over-reserving costs a slightly smaller chunk, and
+/// under-reserving costs a dead session.
+const SEALED_ENVELOPE_OVERHEAD: usize = 8 * 1024;
+
+/// Maximum raw user-content bytes placed in one data-plane frame.
+///
+/// Derived from what the wire can actually carry rather than picked: a chunk
+/// this size fits under [`MAX_FRAME_SIZE`] after the body encoding.
+/// `sealed_worst_case_chunk_fits_the_frame_cap` exercises it against the real
+/// envelope.
+pub const MAX_DATA_CHUNK_SIZE: usize =
+    (MAX_FRAME_SIZE - SEALED_ENVELOPE_OVERHEAD) / SEALED_ENVELOPE_EXPANSION;
+
+// A chunk must survive the body encoding with the envelope still inside the
+// cap. Stated as a build-time assertion so a future edit to either constant
+// cannot silently reintroduce a chunk size the wire will not carry.
+const _: () = assert!(
+    MAX_DATA_CHUNK_SIZE * SEALED_ENVELOPE_EXPANSION + SEALED_ENVELOPE_OVERHEAD <= MAX_FRAME_SIZE
+);
+
+/// Largest encoded sealed frame the control plane accepts off the wire.
+///
+/// Bounds the binary envelope, not the plaintext inside it: [`MAX_FRAME_SIZE`]
+/// caps the `GuestRequest` / `GuestResponse` body, and the envelope adds the
+/// GCM tag and its fixed header on top of that.
+pub const MAX_SEALED_FRAME_SIZE: usize = MAX_FRAME_SIZE + SEALED_ENVELOPE_OVERHEAD;
 
 /// Number of transport reconnect attempts before giving up.
 const CONNECT_RETRIES: u32 = 4;
@@ -283,6 +319,6 @@ mod tests {
     fn workload_exit_port_is_distinct_and_reserved() {
         assert_eq!(WORKLOAD_EXIT_PORT, 5251);
         assert_ne!(WORKLOAD_EXIT_PORT, GUEST_AGENT_PORT);
-        const { assert!(WORKLOAD_EXIT_PORT < PORT_FORWARD_BASE) }
+        const { assert!(WORKLOAD_EXIT_PORT < CONSOLE_PORT_BASE) }
     }
 }

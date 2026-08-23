@@ -773,6 +773,44 @@ mod tests {
     }
 
     #[test]
+    fn aarch64_no_kvm_smoke_grants_runner_vhost_vsock_access() {
+        let workflow = ci_workflow();
+        let smoke = job_block(&workflow, "aarch64-no-kvm-smoke");
+        assert!(
+            smoke.contains("MVM_BUILDER_VM_TIMEOUT_SECS: 7200"),
+            "the no-KVM cold build must have enough time to compile under QEMU TCG"
+        );
+        let grant = concat!(
+            "      - name: Grant QEMU access to vhost-vsock\n",
+            "        run: |\n",
+            "          test -c /dev/vhost-vsock\n",
+            "          sudo chown \"$USER\" /dev/vhost-vsock\n",
+            "          sudo chmod 0600 /dev/vhost-vsock",
+        );
+        assert!(
+            smoke.contains(grant),
+            "the hosted runner must grant its current user access to vhost-vsock"
+        );
+        assert!(
+            smoke.find(grant) < smoke.find("Build and boot the sealed exit_code workload"),
+            "vhost-vsock access must be granted before QEMU starts"
+        );
+        let current_embedded_bins = concat!(
+            "      - name: Build mvmctl\n",
+            "        env:\n",
+            "          # This witness boots embedded builder-guest code. A restored Cargo\n",
+            "          # cache may contain binaries built from an older source tree, which\n",
+            "          # would make the live gate validate stale mvm-host-vm-init behavior.\n",
+            "          MVM_EMBED_NO_CACHE: 1\n",
+            "        run: cargo build --release -p mvmctl",
+        );
+        assert!(
+            smoke.contains(current_embedded_bins),
+            "the live AArch64 gate must rebuild embedded host binaries from its checkout"
+        );
+    }
+
+    #[test]
     fn dedicated_mcp_smoke_lane_stays_out_of_ci() {
         let workflow = ci_workflow();
         for removed in [
@@ -819,6 +857,77 @@ mod tests {
         assert!(!kernel.contains("merge_group:"));
         assert!(kernel.contains("workflow_dispatch:"));
         assert!(kernel.contains("push:"));
+    }
+
+    /// Every security lane runs on a schedule someone will notice.
+    ///
+    /// This exists because the lanes below were deleted, not weakened:
+    /// `sealed-prod-allowlist` and `jailer-property` were removed with
+    /// `ci-full.yml` on the reasoning that the workflow had never been
+    /// triggered. It hadn't — the run count was zero and that was real —
+    /// but a security lane that has never run is one to start running.
+    /// Both now sit in `security.yml`, which is what
+    /// `security-lane-watch.yml` reports on.
+    #[test]
+    fn security_lanes_live_where_the_watcher_reads_them() {
+        let security = workflow("security.yml");
+        for lane in [
+            "sealed-prod-allowlist:",
+            "jailer-property:",
+            "app-deps-audit:",
+            "oci-hardening:",
+        ] {
+            assert!(
+                security.contains(lane),
+                "{lane} must live in security.yml — that is the workflow \
+                 security-lane-watch.yml watches, and these lanes back \
+                 numbered claims in ADR-001"
+            );
+        }
+
+        // Watched, and on a cadence. A lane only reachable by dispatch is
+        // one nobody runs; that is how these came to be dead in the first
+        // place.
+        let watcher = workflow("security-lane-watch.yml");
+        for (name, wf) in [
+            ("Security", "security.yml"),
+            ("Pack signing smoke", "pack-signing-smoke.yml"),
+            ("Extended CI", "ci-full.yml"),
+        ] {
+            assert!(
+                watcher.contains(name),
+                "security-lane-watch.yml must report on {name}"
+            );
+            assert!(
+                workflow(wf).contains("schedule:"),
+                "{wf} must run on a schedule, not dispatch alone"
+            );
+        }
+    }
+
+    /// Only one workflow may publish a required check's name.
+    ///
+    /// Both of these build kernels from the same script, and both once
+    /// declared `name: Build kernels (<arch>)` — a required status check.
+    /// It resolved unambiguously only because their triggers happen not to
+    /// overlap: give `kernel-build.yml` a `pull_request` or `merge_group`
+    /// trigger and two runs answer to one required context, with branch
+    /// protection reading whichever reported last. The test above pins the
+    /// triggers apart; this pins the names apart, so neither half of the
+    /// arrangement can quietly go away.
+    #[test]
+    fn only_one_workflow_claims_the_required_kernel_check_name() {
+        const REQUIRED: &str = "name: Build kernels (${{ matrix.arch }})";
+
+        assert!(
+            workflow("ci.yml").contains(REQUIRED),
+            "ci.yml owns the required kernel check name"
+        );
+        assert!(
+            !workflow("kernel-build.yml").contains(REQUIRED),
+            "kernel-build.yml must not publish the same check name as ci.yml — \
+             it is the tag-time publisher, not the required PR gate"
+        );
     }
 
     #[test]

@@ -171,6 +171,10 @@ pub struct FlowMuxIdentity {
 pub struct EndpointConfig {
     /// Tenant the workload belongs to — the store lookup key.
     pub tenant_id: String,
+    /// VM instance identifier. Used to attribute AI egress metrics and audit
+    /// records to this workload.
+    #[serde(default)]
+    pub instance_id: String,
     /// The admitted plan's `secrets` (name → source). Only
     /// [`mvm_core::plan::SecretSource::Keystore`] entries participate; the
     /// endpoint reconstructs each one's binding from the host binding store.
@@ -238,6 +242,9 @@ pub struct EndpointConfig {
     /// existed.
     #[serde(default)]
     pub network_limits: mvm_core::plan::NetworkLimits,
+    /// Exact signed ingress mappings this endpoint owns.
+    #[serde(default)]
+    pub ingress: Vec<mvm_core::plan::IngressMapping>,
     /// Which egress protocol the relayed guest stream carries. `Wire` (default,
     /// secret-bearing) keeps the existing WireRequest substitution serve loop; `Raw`
     /// selects the raw-TCP splice serve loop. Fixed at admission — never sniffed.
@@ -306,8 +313,64 @@ pub fn resolve_store_dirs(cfg: &EndpointConfig) -> anyhow::Result<(PathBuf, Path
 /// The stores are the same ones `mvmctl secret put` (values) and `mvmctl
 /// secret set` (bindings) populate; the endpoint runs as the same host user
 /// and opens them by path.
+/// Endpoint-wide objects projected once from the admitted network fields.
+///
+/// FlowMux sessions, typed connectors, typed HTTP, ingress transforms, DNS,
+/// TCP, and UDP all clone these `Arc`s. Equal reconstructed values are not
+/// sufficient here: one object identity is what prevents policy or audit
+/// configuration from drifting between surfaces.
+#[derive(Clone)]
+pub struct EndpointNetworkProjection {
+    gate: Option<Arc<mvm_runtime::vmm::egress_gate::EgressGate>>,
+    recorder: Option<Arc<crate::supervisor::audit_recorder::Recorder>>,
+}
+
+impl EndpointNetworkProjection {
+    /// Project the endpoint's admitted policy and audit sink exactly once.
+    #[must_use]
+    pub fn from_config(cfg: &EndpointConfig) -> Self {
+        let gate = cfg
+            .network_policy
+            .as_ref()
+            .map(build_egress_gate)
+            .map(Arc::new)
+            .or_else(|| {
+                (cfg.egress_mode == EgressMode::FlowMux)
+                    .then(|| Arc::new(mvm_runtime::vmm::egress_gate::EgressGate::default_deny()))
+            });
+        Self {
+            gate,
+            recorder: build_audit_recorder(&cfg.tenant_id).map(Arc::new),
+        }
+    }
+
+    /// The one claim-10 policy object used by all FlowMux surfaces.
+    pub fn flowmux_gate(&self) -> anyhow::Result<Arc<mvm_runtime::vmm::egress_gate::EgressGate>> {
+        self.gate
+            .as_ref()
+            .map(Arc::clone)
+            .context("FlowMux endpoint projection has no egress gate")
+    }
+
+    /// The endpoint's one optional chain-signed audit sink.
+    #[must_use]
+    pub fn recorder(&self) -> Option<Arc<crate::supervisor::audit_recorder::Recorder>> {
+        self.recorder.as_ref().map(Arc::clone)
+    }
+}
+
 pub fn assemble(
     cfg: &EndpointConfig,
+) -> anyhow::Result<(Arc<SubstitutionService>, HandedPlaceholders)> {
+    let projection = EndpointNetworkProjection::from_config(cfg);
+    assemble_with_projection(cfg, &projection)
+}
+
+/// Assemble the substitution/connector service over the endpoint's already
+/// projected policy and audit objects.
+pub fn assemble_with_projection(
+    cfg: &EndpointConfig,
+    projection: &EndpointNetworkProjection,
 ) -> anyhow::Result<(Arc<SubstitutionService>, HandedPlaceholders)> {
     let bindings = match &cfg.binding_store_dir {
         Some(dir) => FileBindingStore::with_dir(dir),
@@ -350,13 +413,6 @@ pub fn assemble(
         None => None,
     };
 
-    // Chain-signed substitution audit. Best-effort: if the host signer key
-    // exists at the standard location, attach a Recorder so a live substituting
-    // invoke leaves `secret.substituted` / `secret.redacted` entries (metadata
-    // only) in the per-tenant audit log; absent ⇒ the endpoint serves without
-    // audit rather than refusing (the same optional posture `with_recorder` had).
-    let recorder = build_audit_recorder(&cfg.tenant_id);
-
     // Build the service over the resolver assembled above. `from_plan` builds
     // the registry (from the local binding store), the forwarder, and threads
     // the redaction / reversible-replacement / TLS / recorder wiring; passing
@@ -369,10 +425,17 @@ pub fn assemble(
         tracing::info!(proxy = %p.summary(), "forward leg routed through an upstream proxy");
     }
 
+    let ai_policy = cfg
+        .network_policy
+        .as_ref()
+        .and_then(|policy| policy.ai())
+        .cloned();
+
     let (service, handed) = SubstitutionService::from_plan(
         crate::supervisor::network_endpoint_proxy::FromPlanInputs {
             plan_secrets: &cfg.secrets,
             tenant: &cfg.tenant_id,
+            instance_id: &cfg.instance_id,
             bindings: &bindings,
             resolver,
             forward_timeout_secs: cfg.forward_timeout_secs,
@@ -380,28 +443,24 @@ pub fn assemble(
             redaction: cfg.redaction.clone(),
             reversible_replacement: cfg.reversible_replacement.clone(),
             tls_intermediate,
-            recorder,
+            recorder: None,
+            ai_policy,
         },
     )?;
 
-    // Claim-10: when the backend threaded the VM's resolved network policy, this
-    // endpoint becomes the egress gate. Resolve host-allowlist pins once (fails
-    // closed on an unresolvable host), build the gate over the same claim-10
-    // projection every backend shares, and attach it. Absent ⇒ no gate here.
-    let service = match &cfg.network_policy {
-        Some(policy) => {
-            let gate = build_egress_gate(policy);
-            // from_plan just minted this Arc with no other holders, so the unwrap
-            // is infallible; attach the gate, then re-wrap.
-            let svc = Arc::try_unwrap(service)
-                .map_err(|_| anyhow::anyhow!("substitution service Arc unexpectedly shared"))?
-                .with_egress_gate(gate);
-            Arc::new(svc)
-        }
-        None => service,
-    };
+    // `from_plan` just minted this Arc with no other holders. Attach both
+    // endpoint-wide objects before exposing the service to connector, typed
+    // HTTP, terminator, or ingress tasks.
+    let mut service = Arc::try_unwrap(service)
+        .map_err(|_| anyhow::anyhow!("substitution service Arc unexpectedly shared"))?;
+    if let Some(gate) = projection.gate.as_ref() {
+        service = service.with_shared_egress_gate(Arc::clone(gate));
+    }
+    if let Some(recorder) = projection.recorder.as_ref() {
+        service = service.with_shared_recorder(Arc::clone(recorder));
+    }
 
-    Ok((service, handed))
+    Ok((Arc::new(service), handed))
 }
 
 /// Fingerprint every secret this endpoint can resolve, for the host→guest
@@ -537,9 +596,39 @@ mod tests {
         );
     }
 
+    #[test]
+    fn connector_service_uses_the_exact_endpoint_policy_and_audit_objects() {
+        let dir = tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("secrets")).unwrap();
+        std::fs::create_dir_all(dir.path().join("bindings")).unwrap();
+        let mut cfg = vsock_cfg(vec![], dir.path());
+        cfg.egress_mode = EgressMode::FlowMux;
+        cfg.network_policy = Some(mvm_core::policy::network_policy::NetworkPolicy::deny_all());
+
+        let gate = Arc::new(mvm_runtime::vmm::egress_gate::EgressGate::default_deny());
+        let recorder = Arc::new(crate::supervisor::audit_recorder::Recorder::new(
+            Arc::new(crate::supervisor::audit::NoopAuditSigner),
+            mvm_core::plan::TenantId("local".into()),
+        ));
+        let projection = EndpointNetworkProjection {
+            gate: Some(Arc::clone(&gate)),
+            recorder: Some(Arc::clone(&recorder)),
+        };
+
+        let (service, _) = assemble_with_projection(&cfg, &projection).unwrap();
+        assert_eq!(
+            service.shared_projection_ids(),
+            (
+                Some(Arc::as_ptr(&gate).cast::<()>() as usize),
+                Some(Arc::as_ptr(&recorder).cast::<()>() as usize),
+            )
+        );
+    }
+
     fn vsock_cfg(secrets: Vec<SecretBinding>, dir: &std::path::Path) -> EndpointConfig {
         EndpointConfig {
             tenant_id: "local".into(),
+            instance_id: "test".into(),
             secrets,
             transport: EndpointTransport::Vsock { port: 5253 },
             redaction: mvm_core::policy::RedactionPolicy::default(),
@@ -554,6 +643,7 @@ mod tests {
             tls_intermediate: None,
             network_policy: None,
             network_limits: mvm_core::plan::NetworkLimits::default(),
+            ingress: Vec::new(),
             egress_mode: EgressMode::Wire,
             resolver: ResolverBackend::default(),
             flowmux_identity: None,

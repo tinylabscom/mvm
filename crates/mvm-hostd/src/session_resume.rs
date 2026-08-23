@@ -86,7 +86,7 @@ pub fn synthesis_for_resume<'a>(
         secrets: Vec::new(),
         audit_event_prefix: None,
         network_mode: Default::default(),
-        l3_network: None,
+        ingress: Vec::new(),
         // The local-run path takes the caller's grants; a resume has no
         // surface to declare any, so it declares none and the host ceiling
         // has nothing to measure.
@@ -735,6 +735,7 @@ mod tests {
         assert_eq!(input.kernel_sha256, m.kernel_sha256.as_deref());
         assert_eq!(input.cpus, 2);
         assert_eq!(input.mem_mib, 512);
+        assert!(input.ingress.is_empty());
     }
     /// A host reading its own isolated config, so a ceiling assertion measures
     /// the directory this test wrote and never the developer's real one.

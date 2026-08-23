@@ -734,11 +734,8 @@ def greet(): pass
         assert_eq!(n.ports[0].guest, 8080);
     }
 
-    /// A workload that says nothing about its IP stack keeps the
-    /// socket-aware transport. This is the default and the stronger
-    /// posture, so silence must never mean "give me the tunnel".
     #[test]
-    fn network_helper_defaults_raw_ip_stack_off() {
+    fn network_helper_emits_no_retired_raw_field() {
         let src = r#"
 import mvm
 
@@ -750,13 +747,12 @@ def greet(): pass
 "#;
         let (w, _) = parse_str(src).expect("parse");
         let n = w.apps[0].network.as_ref().expect("network present");
-        assert!(!n.raw_ip_stack, "silence must not select the tunnel");
+        let json = serde_json::to_string(n).expect("network serializes");
+        assert!(!json.contains("raw_ip_stack"), "{json}");
     }
 
-    /// The declaration is what selects the L3 tunnel, so it has to make it
-    /// out of the parser.
     #[test]
-    fn network_helper_carries_a_declared_raw_ip_stack() {
+    fn network_helper_refuses_the_retired_raw_ip_stack_kwarg() {
         let src = r#"
 import mvm
 
@@ -766,29 +762,11 @@ import mvm
 )
 def greet(): pass
 "#;
-        let (w, _) = parse_str(src).expect("parse");
-        let n = w.apps[0].network.as_ref().expect("network present");
-        assert!(n.raw_ip_stack, "a declared need must reach the IR");
-    }
-
-    /// A non-boolean is a parse error rather than a silent default: this
-    /// kwarg changes what the workload is admitted for, and quietly reading
-    /// `raw_ip_stack="yes"` as false would strand it on a transport it
-    /// cannot use.
-    #[test]
-    fn network_helper_rejects_a_non_boolean_raw_ip_stack() {
-        let src = r#"
-import mvm
-
-@mvm.app(
-    image=mvm.python_image(python="3.12"),
-    network=mvm.network(mode="bridge", raw_ip_stack="yes"),
-)
-def greet(): pass
-"#;
-        let err = parse_str(src).expect_err("a non-boolean must not parse");
+        let err = parse_str(src).expect_err("the retired kwarg must not parse");
         let rendered = format!("{err:?}");
         assert!(rendered.contains("raw_ip_stack"), "{rendered}");
+        assert!(rendered.contains("retired"), "{rendered}");
+        assert!(rendered.contains("SOCKS5h/UDP"), "{rendered}");
     }
 
     #[test]

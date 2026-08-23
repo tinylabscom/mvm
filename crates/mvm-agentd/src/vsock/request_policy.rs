@@ -61,7 +61,6 @@ impl GuestRequest {
             GuestRequest::RunDetached { .. } => Verb::RunDetached,
             GuestRequest::PostRestore { .. } => Verb::PostRestore,
             GuestRequest::FsDiff => Verb::FsDiff,
-            GuestRequest::StartPortForward { .. } => Verb::StartPortForward,
             GuestRequest::StartUnixSocketForward { .. } => Verb::StartUnixSocketForward,
             GuestRequest::ConsoleOpen { .. } => Verb::ConsoleOpen,
             GuestRequest::ConsoleClose { .. } => Verb::ConsoleClose,
@@ -145,7 +144,6 @@ impl GuestRequest {
             | GuestRequest::ExecBatch { .. }
             | GuestRequest::RunDetached { .. }
             | GuestRequest::FsDiff
-            | GuestRequest::StartPortForward { .. }
             | GuestRequest::StartUnixSocketForward { .. }
             | GuestRequest::ConsoleOpen { .. }
             | GuestRequest::ConsoleClose { .. }
@@ -288,7 +286,6 @@ mod tests {
                 grant_envelope: None,
             },
             GuestRequest::FsDiff,
-            GuestRequest::StartPortForward { guest_port: 1 },
             GuestRequest::StartUnixSocketForward {
                 guest_path: "/run/mvm/forward.sock".to_string(),
                 host_vsock_port: BROKER_PORT,
@@ -525,7 +522,6 @@ mod tests {
                 length: 1,
                 follow_symlinks: true,
             },
-            GuestRequest::StartPortForward { guest_port: 8080 },
         ];
 
         for req in &dev_only_samples {

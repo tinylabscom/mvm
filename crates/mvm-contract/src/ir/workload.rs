@@ -3,6 +3,7 @@ use crate::ir::hooks::Hooks;
 // Only pulled in by the `#[cfg(feature = "schema")]` `JsonSchemaShape`
 // impl and the `#[cfg_attr(feature = "schema", derive(...))]` derives
 // below (schemars-generated code calls `.to_owned()`).
+use crate::policy::network_policy::AiPolicy;
 #[cfg(feature = "schema")]
 use alloc::borrow::ToOwned;
 #[cfg(feature = "schema")]
@@ -624,7 +625,7 @@ pub enum MountMode {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(deny_unknown_fields)]
+#[serde(try_from = "NetworkWire", deny_unknown_fields)]
 pub struct Network {
     pub mode: NetworkMode,
     #[serde(default)]
@@ -647,18 +648,47 @@ pub struct Network {
     /// "unspecified — substrate picks based on `mode`".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dns: Option<NetworkDns>,
-    /// The workload needs a real in-guest IP stack: raw sockets, ICMP,
-    /// non-TCP/UDP protocols, or its own resolver.
-    ///
-    /// A statement about the *workload*, not about a transport. It is what
-    /// selects the L3 tunnel, and it is declared here rather than chosen at
-    /// run time so the same workload resolves the same way on every host.
-    ///
-    /// Leave it off unless the workload genuinely needs it: the tunnel
-    /// cannot carry host-side secret substitution or cleartext redaction,
-    /// because the guest originates its own connections.
-    #[serde(default, skip_serializing_if = "core::ops::Not::not")]
-    pub raw_ip_stack: bool,
+    /// Optional AI egress metering and budget policy for this app.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ai: Option<AiPolicy>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NetworkWire {
+    mode: NetworkMode,
+    #[serde(default)]
+    ports: Vec<PortForward>,
+    #[serde(default)]
+    egress: Option<NetworkEgress>,
+    #[serde(default)]
+    peers: Vec<String>,
+    #[serde(default)]
+    dns: Option<NetworkDns>,
+    #[serde(default)]
+    ai: Option<AiPolicy>,
+    #[serde(default)]
+    raw_ip_stack: Option<bool>,
+}
+
+impl TryFrom<NetworkWire> for Network {
+    type Error = &'static str;
+
+    fn try_from(wire: NetworkWire) -> Result<Self, Self::Error> {
+        if wire.raw_ip_stack.is_some() {
+            return Err(
+                "raw_ip_stack has been retired; use the guest loopback HTTP proxy, SOCKS5h/UDP, controlled DNS, mediated ping, or a typed connector",
+            );
+        }
+        Ok(Self {
+            mode: wire.mode,
+            ports: wire.ports,
+            egress: wire.egress,
+            peers: wire.peers,
+            dns: wire.dns,
+            ai: wire.ai,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -720,17 +750,38 @@ pub enum NetworkMode {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct PortForward {
+    /// Stable non-zero ID carried by a host-initiated FlowMux open.
+    pub mapping_id: u16,
+    /// Exact host address to bind. Wildcards must be declared literally.
+    pub host_addr: String,
     pub guest: u16,
     pub host: u16,
     pub proto: PortProto,
+    /// Exact loopback target inside the guest.
+    pub guest_addr: String,
+    /// Host-owned content treatment required for this mapping.
+    pub transform: PortTransform,
+    /// Name of the workload secret containing a PEM certificate chain and
+    /// private key. Required only for `tls`; the raw material stays host-side.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls_secret: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum PortProto {
     Tcp,
     Udp,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum PortTransform {
+    Opaque,
+    Http,
+    Tls,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -1,7 +1,7 @@
 use mvm_sdk::ir::{
     App, AuthType, Concurrency, Entrypoint, EnvValue, ErrorCode, Format, HostPort, Image,
-    InProcessMode, Network, NetworkEgress, NetworkMode, PortForward, PortProto, Resources,
-    SecretMount, SecretRef, Source, Volume, WarmProcessConfig, Workload, validate,
+    InProcessMode, Network, NetworkEgress, NetworkMode, PortForward, PortProto, PortTransform,
+    Resources, SecretMount, SecretRef, Source, Volume, WarmProcessConfig, Workload, validate,
 };
 
 fn base_app() -> App {
@@ -222,16 +222,21 @@ fn rejects_persist_volume() {
 fn rejects_network_none_with_ports() {
     let mut w = base_workload();
     w.apps[0].network = Some(Network {
-        raw_ip_stack: false,
         mode: NetworkMode::None,
         ports: vec![PortForward {
+            mapping_id: 1,
+            host_addr: "127.0.0.1".to_string(),
             guest: 8080,
             host: 8080,
             proto: PortProto::Tcp,
+            guest_addr: "127.0.0.1".to_string(),
+            transform: PortTransform::Opaque,
+            tls_secret: None,
         }],
         egress: None,
         peers: vec![],
         dns: None,
+        ai: None,
     });
     let errs = validate(&w).unwrap_err();
     assert_eq!(errs[0].code, ErrorCode::NetworkPortsWithNone);
@@ -241,12 +246,12 @@ fn rejects_network_none_with_ports() {
 fn accepts_network_none_with_empty_ports() {
     let mut w = base_workload();
     w.apps[0].network = Some(Network {
-        raw_ip_stack: false,
         mode: NetworkMode::None,
         ports: vec![],
         egress: None,
         peers: vec![],
         dns: None,
+        ai: None,
     });
     validate(&w).unwrap();
 }
@@ -255,18 +260,102 @@ fn accepts_network_none_with_empty_ports() {
 fn accepts_bridge_network_with_ports() {
     let mut w = base_workload();
     w.apps[0].network = Some(Network {
-        raw_ip_stack: false,
         mode: NetworkMode::Bridge,
         ports: vec![PortForward {
+            mapping_id: 1,
+            host_addr: "127.0.0.1".to_string(),
             guest: 8080,
             host: 18080,
             proto: PortProto::Tcp,
+            guest_addr: "127.0.0.1".to_string(),
+            transform: PortTransform::Opaque,
+            tls_secret: None,
         }],
         egress: None,
         peers: vec![],
         dns: None,
+        ai: None,
     });
     validate(&w).unwrap();
+}
+
+fn ingress_mapping(mapping_id: u16, host: u16) -> PortForward {
+    PortForward {
+        mapping_id,
+        host_addr: "127.0.0.1".to_string(),
+        guest: 8080,
+        host,
+        proto: PortProto::Tcp,
+        guest_addr: "127.0.0.1".to_string(),
+        transform: PortTransform::Opaque,
+        tls_secret: None,
+    }
+}
+
+fn workload_with_ingress(ports: Vec<PortForward>) -> Workload {
+    let mut workload = base_workload();
+    workload.apps[0].network = Some(Network {
+        mode: NetworkMode::Bridge,
+        ports,
+        egress: None,
+        peers: vec![],
+        dns: None,
+        ai: None,
+    });
+    workload
+}
+
+#[test]
+fn rejects_duplicate_ingress_mapping_id() {
+    let workload =
+        workload_with_ingress(vec![ingress_mapping(1, 18080), ingress_mapping(1, 18081)]);
+    let errors = validate(&workload).unwrap_err();
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.code == ErrorCode::IngressDuplicateMapping),
+        "{errors:?}"
+    );
+}
+
+#[test]
+fn rejects_duplicate_ingress_bind() {
+    let workload =
+        workload_with_ingress(vec![ingress_mapping(1, 18080), ingress_mapping(2, 18080)]);
+    let errors = validate(&workload).unwrap_err();
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.code == ErrorCode::IngressDuplicateBind),
+        "{errors:?}"
+    );
+}
+
+#[test]
+fn rejects_non_loopback_ingress_guest_target() {
+    let mut mapping = ingress_mapping(1, 18080);
+    mapping.guest_addr = "10.0.0.2".to_string();
+    let errors = validate(&workload_with_ingress(vec![mapping])).unwrap_err();
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.code == ErrorCode::IngressGuestNotLoopback),
+        "{errors:?}"
+    );
+}
+
+#[test]
+fn rejects_typed_udp_ingress() {
+    let mut mapping = ingress_mapping(1, 18080);
+    mapping.proto = PortProto::Udp;
+    mapping.transform = PortTransform::Tls;
+    let errors = validate(&workload_with_ingress(vec![mapping])).unwrap_err();
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.code == ErrorCode::IngressUnsupportedTransform),
+        "{errors:?}"
+    );
 }
 
 fn function_app() -> App {
@@ -294,12 +383,12 @@ fn function_workload_rejects_host_network_mode() {
     let mut w = base_workload();
     w.apps[0] = function_app();
     w.apps[0].network = Some(Network {
-        raw_ip_stack: false,
         mode: NetworkMode::Host,
         ports: vec![],
         peers: vec![],
         egress: None,
         dns: None,
+        ai: None,
     });
     let errs = validate(&w).unwrap_err();
     assert!(
@@ -355,12 +444,12 @@ fn function_workload_with_bridge_network_validates() {
     let mut w = base_workload();
     w.apps[0] = function_app();
     w.apps[0].network = Some(Network {
-        raw_ip_stack: false,
         mode: NetworkMode::Bridge,
         ports: vec![],
         peers: vec![],
         egress: None,
         dns: None,
+        ai: None,
     });
     validate(&w).unwrap();
 }
@@ -372,12 +461,12 @@ fn command_workload_with_host_network_still_validates() {
     // command-style workloads keep their current network surface.
     let mut w = base_workload();
     w.apps[0].network = Some(Network {
-        raw_ip_stack: false,
         mode: NetworkMode::Host,
         ports: vec![],
         peers: vec![],
         egress: None,
         dns: None,
+        ai: None,
     });
     validate(&w).unwrap();
 }
@@ -440,12 +529,12 @@ fn rejects_host_network_on_function_entrypoint() {
         concurrency: None,
     }];
     w.apps[0].network = Some(Network {
-        raw_ip_stack: false,
         mode: NetworkMode::Host,
         ports: vec![],
         egress: None,
         peers: vec![],
         dns: None,
+        ai: None,
     });
     let errs = validate(&w).unwrap_err();
     assert!(
@@ -463,12 +552,12 @@ fn rejects_host_network_on_function_entrypoint() {
 fn allows_host_network_on_command_entrypoint() {
     let mut w = base_workload();
     w.apps[0].network = Some(Network {
-        raw_ip_stack: false,
         mode: NetworkMode::Host,
         ports: vec![],
         egress: None,
         peers: vec![],
         dns: None,
+        ai: None,
     });
     validate(&w).unwrap();
 }
@@ -626,7 +715,6 @@ fn accepts_innocent_field_names_in_schema() {
 fn rejects_wildcard_host_in_egress_allowlist() {
     let mut w = base_workload();
     w.apps[0].network = Some(Network {
-        raw_ip_stack: false,
         mode: NetworkMode::Bridge,
         ports: vec![],
         egress: Some(NetworkEgress {
@@ -643,6 +731,7 @@ fn rejects_wildcard_host_in_egress_allowlist() {
         }),
         peers: vec![],
         dns: None,
+        ai: None,
     });
     let errs = validate(&w).unwrap_err();
     assert!(errs
@@ -655,12 +744,12 @@ fn rejects_wildcard_host_in_egress_allowlist() {
 fn rejects_invalid_peer_id() {
     let mut w = base_workload();
     w.apps[0].network = Some(Network {
-        raw_ip_stack: false,
         mode: NetworkMode::Bridge,
         ports: vec![],
         egress: None,
         peers: vec!["Bad Peer".to_string()],
         dns: None,
+        ai: None,
     });
     let errs = validate(&w).unwrap_err();
     assert!(
@@ -673,7 +762,6 @@ fn rejects_invalid_peer_id() {
 fn accepts_well_formed_egress_and_peers() {
     let mut w = base_workload();
     w.apps[0].network = Some(Network {
-        raw_ip_stack: false,
         mode: NetworkMode::Bridge,
         ports: vec![],
         egress: Some(NetworkEgress {
@@ -684,6 +772,7 @@ fn accepts_well_formed_egress_and_peers() {
         }),
         peers: vec!["sibling-worker".into()],
         dns: None,
+        ai: None,
     });
     validate(&w).expect("well-formed granular grants should pass");
 }
@@ -825,45 +914,23 @@ fn rejects_concurrency_for_wasm_language() {
     assert_eq!(err.path, ".apps[0].entrypoint.concurrency");
 }
 
-// ---- raw_ip_stack declaration ----------------------------------------
-
-/// `raw_ip_stack` is what selects the L3 tunnel, so it has to survive the
-/// parse. Absent means false — the socket-aware default.
 #[test]
-fn network_raw_ip_stack_defaults_off_and_round_trips() {
-    let off = mvm_sdk::ir::Network {
-        mode: mvm_sdk::ir::NetworkMode::None,
-        raw_ip_stack: false,
-        ports: Vec::new(),
-        egress: None,
-        peers: Vec::new(),
-        dns: None,
-    };
+fn stale_raw_ip_stack_input_names_the_supported_migration() {
+    let json = r#"{
+        "mode":"bridge",
+        "ports":[],
+        "peers":[],
+        "raw_ip_stack":false
+    }"#;
+    let err = serde_json::from_str::<mvm_sdk::ir::Network>(json)
+        .expect_err("the retired field must not enter the IR");
+    let message = err.to_string();
     assert!(
-        !off.raw_ip_stack,
-        "a workload that says nothing must not land on the tunnel"
+        message.contains("raw_ip_stack has been retired"),
+        "{message}"
     );
-
-    let json = serde_json::to_string(&off).expect("serialize");
-    assert!(
-        !json.contains("raw_ip_stack"),
-        "the default must not bloat every serialized workload: {json}"
-    );
-    let back: mvm_sdk::ir::Network = serde_json::from_str(&json).expect("deserialize");
-    assert!(!back.raw_ip_stack);
-
-    let on = mvm_sdk::ir::Network {
-        raw_ip_stack: true,
-        ..off.clone()
-    };
-    let json = serde_json::to_string(&on).expect("serialize");
-    assert!(json.contains("raw_ip_stack"), "{json}");
-    let back: mvm_sdk::ir::Network = serde_json::from_str(&json).expect("deserialize");
-    assert!(
-        back.raw_ip_stack,
-        "a declared need must survive the round trip, or the workload \
-         silently loses its transport"
-    );
+    assert!(message.contains("SOCKS5h/UDP"), "{message}");
+    assert!(message.contains("typed connector"), "{message}");
 }
 
 // ────────────────────────────────────────────────────────────────────

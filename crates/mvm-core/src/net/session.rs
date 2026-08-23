@@ -67,6 +67,18 @@ pub enum SessionError {
     /// The send or receive sequence counter overflowed `u64`.
     #[error("sequence counter exhausted")]
     SequenceExhausted,
+    /// A sealed frame was spent without reaching the peer, so the session can
+    /// no longer be used in either direction.
+    #[error(
+        "session poisoned: frame {sequence} was sealed but never reached the peer ({reason}); \
+         the sequence is spent and cannot be reissued"
+    )]
+    Poisoned {
+        /// The sequence number the unsent frame consumed.
+        sequence: u64,
+        /// Why the frame did not reach the peer.
+        reason: String,
+    },
     /// A handshake message was malformed or inconsistent.
     #[error("invalid handshake: {0}")]
     InvalidHandshake(String),
@@ -203,6 +215,21 @@ pub struct Session {
     role: SessionRole,
     next_send_sequence: u64,
     next_receive_sequence: u64,
+    poison: Option<Poison>,
+}
+
+/// A sealed frame that was spent without reaching the peer.
+///
+/// Recorded rather than rolled back: the AES-GCM nonce derives from
+/// `(session_id, role, sequence)`, so re-sealing different plaintext under a
+/// spent sequence would reuse a nonce. A session that kept going instead would
+/// leave the peer one frame behind for the rest of its life, surfacing as an
+/// unexplained sequence mismatch several frames later rather than as the write
+/// failure that actually happened.
+#[derive(Debug, Clone)]
+struct Poison {
+    sequence: u64,
+    reason: String,
 }
 
 impl fmt::Debug for Session {
@@ -212,6 +239,7 @@ impl fmt::Debug for Session {
             .field("role", &self.role)
             .field("next_send_sequence", &self.next_send_sequence)
             .field("next_receive_sequence", &self.next_receive_sequence)
+            .field("poison", &self.poison)
             .finish_non_exhaustive()
     }
 }
@@ -265,6 +293,44 @@ impl Session {
             role,
             next_send_sequence: 1,
             next_receive_sequence: 1,
+            poison: None,
+        }
+    }
+
+    /// Record that `sequence` was sealed but never reached the peer, ending
+    /// this session.
+    ///
+    /// Callers that own the transport must call this when writing a sealed
+    /// frame fails. The sequence is spent either way — [`seal`](Self::seal)
+    /// advances the counter before the frame can be handed to a transport, and
+    /// it cannot be rewound without reusing an AES-GCM nonce. Every later
+    /// [`seal`](Self::seal) and [`open`](Self::open) then refuses and names
+    /// this cause, so the failure is reported where it happened instead of as
+    /// a sequence mismatch on the peer.
+    ///
+    /// The first poison wins; a later one does not overwrite the original
+    /// cause.
+    pub fn poison_send(&mut self, sequence: u64, reason: impl Into<String>) {
+        if self.poison.is_none() {
+            self.poison = Some(Poison {
+                sequence,
+                reason: reason.into(),
+            });
+        }
+    }
+
+    /// Whether an unsent sealed frame has ended this session.
+    pub fn is_poisoned(&self) -> bool {
+        self.poison.is_some()
+    }
+
+    fn check_poison(&self) -> Result<(), SessionError> {
+        match &self.poison {
+            Some(poison) => Err(SessionError::Poisoned {
+                sequence: poison.sequence,
+                reason: poison.reason.clone(),
+            }),
+            None => Ok(()),
         }
     }
 
@@ -287,7 +353,13 @@ impl Session {
     ///
     /// Advances the outbound sequence counter. The returned [`SealedFrame`]
     /// is owned; the caller frames it for transport.
+    ///
+    /// The sequence is spent the moment this returns, whether or not the frame
+    /// reaches the peer, so a caller whose transport write fails must call
+    /// [`poison_send`](Self::poison_send) with the frame's sequence. Dropping
+    /// the frame silently leaves the peer permanently one frame behind.
     pub fn seal(&mut self, plaintext: &[u8]) -> Result<SealedFrame, SessionError> {
+        self.check_poison()?;
         let sequence = self.next_send_sequence;
         let timestamp = chrono::Utc::now().to_rfc3339();
         let context = frame_context(
@@ -328,6 +400,7 @@ impl Session {
     /// Rejects replay, wrong session, wrong signer, bad signature, and
     /// tampered ciphertext. Advances the inbound sequence counter on success.
     pub fn open(&mut self, frame: &SealedFrame) -> Result<Vec<u8>, SessionError> {
+        self.check_poison()?;
         if frame.version != PROTOCOL_VERSION_AUTHENTICATED || frame.sig_alg != SIG_ALG_ED25519 {
             return Err(SessionError::UnsupportedVersion {
                 got: frame.version,
@@ -930,6 +1003,68 @@ mod tests {
             assert_eq!(received_session_id, session_id);
             assert_eq!(session.peer_verifying_key(), &host_verify);
         });
+    }
+
+    #[test]
+    fn poisoning_ends_the_session_in_both_directions() {
+        let (mut host, mut guest) = paired_sessions();
+
+        // A frame the transport accepted, to prove the poison is what stops
+        // the session rather than it never having worked.
+        let good = host.seal(b"first").unwrap();
+        assert_eq!(guest.open(&good).unwrap(), b"first");
+
+        // Sequence 2 is now spent on a frame the peer will never see.
+        let spent = host.seal(b"lost to the transport").unwrap();
+        assert_eq!(spent.sequence, 2);
+        host.poison_send(spent.sequence, "Frame too large: 700000 bytes (max 262144)");
+
+        assert!(host.is_poisoned());
+        let err = host.seal(b"third").unwrap_err();
+        let SessionError::Poisoned { sequence, reason } = err else {
+            panic!("expected Poisoned, got {err}");
+        };
+        assert_eq!(sequence, 2);
+        assert!(
+            reason.contains("Frame too large"),
+            "the poison must carry the original cause, got {reason}"
+        );
+
+        // Inbound too: a poisoned session is finished, not half usable.
+        let from_guest = guest.seal(b"reply").unwrap();
+        assert!(matches!(
+            host.open(&from_guest),
+            Err(SessionError::Poisoned { .. })
+        ));
+    }
+
+    #[test]
+    fn the_first_poison_cause_survives_a_later_one() {
+        let (mut host, _guest) = paired_sessions();
+        host.poison_send(1, "original cause");
+        host.poison_send(2, "downstream noise");
+        let SessionError::Poisoned { sequence, reason } = host.seal(b"x").unwrap_err() else {
+            panic!("expected Poisoned");
+        };
+        assert_eq!(sequence, 1);
+        assert_eq!(reason, "original cause");
+    }
+
+    /// The failure this replaces: without the poison the session kept sealing,
+    /// so the peer's very next `open` rejected a sequence gap it could not
+    /// explain. Pinned so a regression reads as the confusing error again.
+    #[test]
+    fn without_poisoning_a_dropped_frame_would_desync_the_peer() {
+        let (mut host, mut guest) = paired_sessions();
+        let _dropped = host.seal(b"never written").unwrap();
+        let next = host.seal(b"written").unwrap();
+        assert!(matches!(
+            guest.open(&next),
+            Err(SessionError::SequenceMismatch {
+                got: 2,
+                expected: 1
+            })
+        ));
     }
 
     #[test]

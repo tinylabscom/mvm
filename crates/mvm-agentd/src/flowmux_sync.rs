@@ -133,8 +133,15 @@ impl SyncFlowMux {
             .session
             .seal(&wire)
             .map_err(|e| anyhow::anyhow!("sealing {opcode:?}: {e}"))?;
-        write_sealed_frame(&mut self.stream, &sealed)
-            .map_err(|e| anyhow::anyhow!("writing {opcode:?}: {e}"))
+        // The seal already spent this sequence. A write that fails now cannot
+        // be retried under it — the AES-GCM nonce derives from the sequence —
+        // so the session ends here instead of running on one frame ahead of
+        // the peer.
+        let sequence = sealed.sequence;
+        write_sealed_frame(&mut self.stream, &sealed).map_err(|e| {
+            self.session.poison_send(sequence, e.to_string());
+            anyhow::anyhow!("writing {opcode:?}: {e}")
+        })
     }
 
     /// Read and open the next frame.
@@ -406,6 +413,54 @@ mod tests {
     /// `mvm-secret-abc`; every frame it emits is captured and checked to
     /// confirm the real value never appears in one. That is claim 13 on this
     /// transport, checked on the bytes rather than assumed from the design.
+    /// A FlowMux write that dies after the seal must end the session rather
+    /// than run on one frame ahead of the host. Same defect as the control
+    /// channel's: `seal` spends the sequence before the transport sees the
+    /// frame, and the AES-GCM nonce derives from that sequence, so it cannot
+    /// be reissued.
+    #[test]
+    fn a_send_that_never_reaches_the_host_ends_the_session() {
+        use mvm_core::net::session::Session;
+
+        let (mut guest_side, host_side) = UnixStream::pair().unwrap();
+        let guest_key = SigningKey::from_bytes(&[3u8; 32]);
+        let host_key = SigningKey::from_bytes(&[9u8; 32]);
+        let host_anchor = host_key.verifying_key();
+
+        let host = std::thread::spawn(move || {
+            let mut stream = host_side;
+            let (session, _peer) = Session::host(&mut stream, "poison-test", host_key).unwrap();
+            (stream, session)
+        });
+        let (session, _session_id) =
+            Session::guest(&mut guest_side, guest_key, &host_anchor).expect("guest handshake");
+        let _host = host.join().unwrap();
+
+        let mut mux = SyncFlowMux {
+            stream: guest_side,
+            session,
+            next_stream_id: 1,
+        };
+        // Closing our own write half makes every later write fail at the
+        // syscall, which is the shape a host that went away produces.
+        mux.stream.shutdown(std::net::Shutdown::Write).unwrap();
+
+        mux.send(Opcode::Hello, 0, b"first")
+            .expect_err("the write half is closed");
+
+        assert!(
+            mux.session.is_poisoned(),
+            "a spent sequence that never reached the host must end the session"
+        );
+        let err = mux
+            .send(Opcode::Hello, 0, b"second")
+            .expect_err("a poisoned session must refuse further sends");
+        assert!(
+            err.to_string().contains("session poisoned"),
+            "the refusal must name the cause, got {err}"
+        );
+    }
+
     #[test]
     fn a_placeholder_bearing_request_round_trips_and_the_guest_never_sees_the_credential() {
         use mvm_core::net::session::Session;

@@ -224,7 +224,7 @@ pub mod test_support {
             snapshot_at: Default::default(),
             network_mode: Default::default(),
             stream_retention: Default::default(),
-            l3_network: None,
+            ingress: Vec::new(),
             network_limits: Default::default(),
             schema_version: SCHEMA_VERSION,
             plan_id: PlanId("01HXTESTPLAN000000000000".to_string()),

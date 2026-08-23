@@ -74,16 +74,13 @@ const HOST_ROOTS: &[&str] = &[
 
 /// Files that may name a marker while not implementing one.
 ///
-/// `guest_netd.rs` and `socks5_udp.rs` still declare the constants; removing
-/// the declarations is a separate change from removing the protocol, and a
-/// declaration nothing dispatches on is inert. They are listed so that the
-/// *dispatch* sites, which are what matter, cannot hide among them.
+/// Core compatibility codecs and the remaining pure ICMP handler may still
+/// declare marker constants. They are listed so that a real dispatch site
+/// cannot hide among them.
 const MARKER_DECLARATION_SITES: &[&str] = &[
     "crates/mvm-core/src/guest_netd.rs",
     "crates/mvm-core/src/socks5_udp.rs",
-    "crates/mvm-hostd/src/supervisor/http_forward.rs",
     "crates/mvm-hostd/src/supervisor/icmp_handler.rs",
-    "crates/mvm-hostd/src/supervisor/dns_handler.rs",
 ];
 
 pub fn run(root: &Path) -> Result<()> {

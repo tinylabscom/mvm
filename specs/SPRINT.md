@@ -8,6 +8,17 @@
 > The current tree is treated as a **disposable v1**. This sprint restructures it completely.
 > **No legacy paths, no compatibility shims, no aliases.** Hard renames only.
 
+## In progress
+
+- [x] **AI egress metering and token budgets.**
+      `specs/plans/2026-08-21-ai-egress-metering-and-budget.md`.
+      Provider-reported token counts at the host substitution endpoint,
+      per-VM Prometheus metrics, chain-signed audit records, and an optional
+      token budget that refuses further AI egress when exhausted. OpenAI and
+      Anthropic in v1; provider additions are macro-declared.
+      All phases are complete and green (`cargo check`, `cargo clippy`,
+      `just check-gated`, unit/integration tests, and SDK tests).
+
 ## Delivered (archive — closed to new entries)
 
 > **Do not append here.** A new delivery entry goes in its own file under
@@ -861,11 +872,11 @@ test --workspace --no-fail-fast` gate passes with zero failures after the
       run on a KVM host (6/6, live forwarding witness, clean teardown); 23
       hermetic BDD scenarios in `s25_l3_vsock`. macOS is capability-declared
       and refuses; native Windows is not claimed.
-      **Retired by plan 316 (ADR-042).** This shipped, and it is now a second
-      production networking path with its own policy code — which is the
-      problem plan 316 fixes. Frozen as of Phase 0: new
-      `raw_ip_stack=true`/`L3Vsock` launches are refused at synthesis,
-      admission, and CLI preflight; running VMs drain; deletion is Phase 7.
+      **Retired and deleted by plan 316 (ADR-042).** The historical path has
+      been removed from the contract, guest, host, VMM, packaging, kernel, CI,
+      dependency, and live-test surfaces. FlowMux is now the only production
+      workload-networking implementation; permanent invariants and the final
+      backend evidence matrix remain in the active closeout plan.
 
 - [~] Workload stream plane — 22 tasks, **Phase 1 complete, Phase 2 landed
   dormant**. Tracked in `specs/plans/295-workload-stream-plane.md` and
@@ -2702,3 +2713,119 @@ The full Scout-linked attempt reached signed-plan admission but failed closed
 before guest-agent startup on `mvm-oci-init` user-volume path-policy denial;
 the exact retry replayed without a second execution. Trusted hardware
 attestation and a successful typed effect probe remain open.
+
+## 2026-08-21 FlowMux public-surface stack-order repair
+
+The public-surface slice now carries the ingress UDP observed-peer reply fix
+required by its own regression test. Outbound transform and egress admission
+remain mandatory for guest-introduced UDP destinations; replies to a peer
+already observed by the bounded ingress relay use that peer table instead.
+The focused regression passes five consecutive runs, including the path that
+rejects a forged unseen peer.
+
+## 2026-08-21 merge-queue actionlint download retry
+
+The pinned actionlint download now retries connection resets and other
+transient transfer failures with `curl --retry-all-errors`, while retaining a
+three-attempt bound, a two-second retry delay, and checksum verification. This
+repairs the infrastructure-only failure that ejected the otherwise-green
+aarch64 vsock permission PR from the merge queue.
+
+## 2026-08-21 claim-18 backend-alternative witness
+
+The scheduled Security mutation lane found that capability negotiation's
+WebLinux transport arm could be deleted while a wildcard silently selected the
+wrong UDS alternative. Recovery and transport alternatives now match every
+`BackendKind` exhaustively, and a focused WebLinux negotiation witness requires
+the browser-channel route. A missing backend arm is therefore a compile error,
+while the behavior-specific test catches a wrong explicit alternative.
+
+## 2026-08-22 AArch64 before-build loop mount repair
+
+The merge-group AArch64 QEMU witness completed its workload build but failed
+the before-build lifecycle hook because bare `mount` resolved to BusyBox.
+BusyBox forwarded `loop` to ext4 instead of allocating a loop device, so the
+guest powered down without returning `rootfs.ext4`. The hook runner now calls
+the builder image's explicit util-linux `/sbin/mount`, with a focused constant
+regression pinning that executable contract. The live lane forces a refresh of
+embedded host binaries so the guest always carries the checkout under test,
+even when Cargo caches are restored.
+
+## 2026-08-22 scheduled mutation witness repair
+
+Completed Security run 32552650847 exposed seven surviving authorization
+mutants in extension verification, budget narrowing, attachment, and assurance
+proxy collision handling. Focused boundary and one-field-at-a-time tests now
+catch the exact fail-open changes. A bounded local mutation proof caught all
+20 generated mutants across those predicates and the adjacent provenance
+fields; one obsolete accepted miss is removed from the ratchet.
+
+## 2026-08-22 capture all-features closure witness
+
+The `mvm-capture` workspace addition raises the all-features closure by exactly
+one first-party node, from 469 to 470, without adding a new third-party crate.
+The feature-closure ratchet and delivery evidence now record that measured
+change explicitly.
+
+The AArch64 CI witness also proved that valid ELF metadata can live beyond the
+bounded inspection prefix. Capture now preserves the header evidence, omits
+unread segments with an explicit warning, and continues without executing or
+fully loading the discovered binary.
+
+The clean-checkout workspace lane exposed that the `.env` redaction witness
+had depended on a locally present ignored fixture file. It now creates the
+secret-bearing `.env` inside a temporary project, preserving the same negative
+privacy assertions while making the test deterministic in CI.
+
+## 2026-08-22 FlowMux deletion fuzz-lock repair
+
+The deletion slice's standalone `mvm-agentd` fuzz lock had resolved `blake3`
+1.8.7, bypassing the workspace-reviewed vendored `arrayref` patch and causing
+the locked invariant lane to fail closed. The lock now pins `blake3` 1.8.6;
+the patch is active and the standalone all-target fuzz check passes with
+`--locked`.
+## 2026-08-21 FlowMux permanent-gate harness repair
+
+The host-binary manifest integration test now reuses Cargo's prebuilt `xtask`
+binary instead of starting a nested workspace compilation. The full workspace
+test run therefore retains the manifest synchronization assertion without
+racing concurrent doctest compilation.
+## 2026-08-21 FlowMux Firecracker and CI evidence
+
+The approved Lima-KVM Firecracker tier now boots the FlowMux-only Alpine guest
+and completes an admitted TCP/DNS fetch: `example.com:80` returns the Example
+Domain body with exit code zero. The post-stack CI rerun found a stale
+standalone SDK fuzz lockfile and an ingress UDP regression: the active session
+path applied outbound deny-all to replies for already observed ingress peers.
+The lockfile is regenerated, and only guest-introduced UDP destinations pass
+through outbound admission; observed-peer ingress replies remain constrained
+by the relay peer table. The focused ingress test passes five consecutive
+runs, the locked fuzz check passes on Rust 1.91.1, and hostd all-target Clippy
+passes with warnings denied. Performance, the wider backend behavior matrix,
+and libkrun evidence remain open.
+
+## 2026-08-21 FlowMux final-evidence validation follow-up
+
+The closeout branch now passes the complete macOS host workspace test,
+doc-test, check, and formatting chain after synchronizing the Python package
+root with the deleted browser helpers. The standalone SDK fuzz lock also pins
+`blake3` 1.8.6 so the workspace-reviewed vendored `arrayref` patch remains in
+the resolved graph; the focused supply-chain pin test and locked fuzz check
+pass. These are validation repairs only: the performance decision and wider
+Firecracker/HVF/libkrun live matrix remain open, so the W8 tracker and issue
+#2751 remain open.
+
+## 2026-08-22 FlowMux SDK ingress compatibility repair
+
+The final-evidence BDD lane exposed that its old SDK snapshot retired more than
+dynamic forwarding: it also overwrote typed OCI sources, boot commands,
+literal environment and egress lowering, and the pinned browser/readiness
+surface. Python and TypeScript now preserve those APIs while declaring opaque
+loopback TCP ingress on `machine run` before boot. Dynamic forwarding still
+fails closed with migration guidance, and both SDK suites cover the combined
+contract. The retired guest port-forward request has also been removed from
+the generated Python protocol binding, restoring schema drift checks. The same
+BDD rerun exposed outer nightly-only Cargo flags leaking
+into the pinned stable nested cross-compiler; nested builds now clear every
+outer toolchain, wrapper, and Rust flag variable, with a focused regression
+test covering the boundary.

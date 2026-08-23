@@ -92,3 +92,14 @@ Feature: One transport between a guest and its host endpoint
   Scenario: A launch with no endpoint at all is not refused
     Given a per-VM state dir with no endpoint
     Then the launch is admitted
+
+  Scenario: Declared ingress is an authenticated FlowMux operation
+    Given a signed exact TCP ingress mapping
+    Then the mapping targets only guest loopback
+    And an admitted host-initiated stream names only that mapping
+    But an undeclared host-initiated stream is refused
+
+  Scenario: TLS ingress keeps private material behind the endpoint
+    Given a signed TLS ingress mapping with a same-plan keystore reference
+    Then the TLS ingress material binding is admitted
+    And the serialized mapping contains only the secret reference

@@ -273,7 +273,7 @@ jobs:
       # 1800 was chosen when this lane had four targets. It has seventeen,
       # and seventeen half-hours do not fit in six. Every nightly run was
       # stopped partway down the list — most recently after eleven targets —
-      # so the last six, `fuzz_datapath_ingress` among them, had never
+      # so the last six targets had never
       # executed on a cron run at all. The job's conclusion was `cancelled`,
       # which the lane watcher did not count, so nothing said so.
       FUZZ_SECS_SCHEDULE: 720
@@ -318,12 +318,12 @@ jobs:
           RUSTUP_TOOLCHAIN: nightly-2026-06-11
         run: cargo fuzz run fuzz_guest_request -- -max_total_time="$DURATION"
 
-      - name: Fuzz AuthenticatedFrame (fuzz_authenticated_frame)
+      - name: Fuzz SealedFrame (fuzz_sealed_frame)
         working-directory: crates/mvm-agentd
         env:
           DURATION: ${{ steps.duration.outputs.secs }}
           RUSTUP_TOOLCHAIN: nightly-2026-06-11
-        run: cargo fuzz run fuzz_authenticated_frame -- -max_total_time="$DURATION"
+        run: cargo fuzz run fuzz_sealed_frame -- -max_total_time="$DURATION"
 
       - name: Fuzz bounded DNS codec (fuzz_dns_codec)
         working-directory: crates/mvm-agentd
@@ -435,38 +435,6 @@ jobs:
         # never passes its window, and a refused frame moves nothing.
         run: cargo fuzz run fuzz_network_flow_state -- -max_total_time="$DURATION"
 
-      - name: Fuzz gateway packet parse + rebuild (host-side)
-        working-directory: crates/mvm-hostd
-        env:
-          DURATION: ${{ steps.duration.outputs.secs }}
-          RUSTUP_TOOLCHAIN: nightly-2026-06-11
-        # Plan 141 / ADR-064 — `packet::parse` is the first real parse on
-        # the guest's network path (the bridge byte-copied opaquely before
-        # this plan); `rebuild_with_payload` re-serializes observer-modified
-        # frames. Both run on attacker-influenced bytes (claim 5). "Never
-        # panic on any input": parse fails closed to None on garbage, and
-        # re-emitting an accepted frame's own payload round-trips without
-        # panicking (Err on extension/over-MTU frames is the fail-closed
-        # path, not a panic).
-        run: cargo fuzz run fuzz_packet_parse -- -max_total_time="$DURATION"
-
-      - name: Fuzz userspace datapath ingress (fuzz_datapath_ingress)
-        working-directory: crates/mvm-hostd
-        env:
-          DURATION: ${{ steps.duration.outputs.secs }}
-          RUSTUP_TOOLCHAIN: nightly-2026-06-11
-        # The userspace socket datapath is the guest-facing ingress on any
-        # host with no privileged TUN path. Guest bytes off the vsock channel
-        # reach `L3Admitter::admit_outbound` (the first parse, IPv4 and IPv6),
-        # then the datapath's own re-read of an admitted packet in
-        # `send_to_network`, then the per-flow smoltcp stack — the only place
-        # guest bytes reach `Interface::poll`. Same "never panic on any input"
-        # contract as the other ingress targets. The IPv6 corpus is there even
-        # though admission refuses IPv6: the bounded extension-header walk runs
-        # before the version check refuses the packet, and smoltcp's
-        # `process_hopbyhop` runs before any address check.
-        run: cargo fuzz run fuzz_datapath_ingress -- -max_total_time="$DURATION"
-
       - name: Fuzz runtime recording (SDK trace)
         working-directory: crates/mvm-sdk
         env:
@@ -534,8 +502,6 @@ jobs:
             crates/deps/libkrun-sys/fuzz/artifacts/
             crates/mvm-fs/fuzz-oci/corpus/
             crates/mvm-fs/fuzz-oci/artifacts/
-            crates/mvm-hostd/fuzz/corpus/
-            crates/mvm-hostd/fuzz/artifacts/
             crates/mvm-sdk/fuzz/corpus/
             crates/mvm-sdk/fuzz/artifacts/
 
@@ -604,18 +570,28 @@ jobs:
           - mvm-build
           - mvm-cli
           - mvm-core
-          # Four, not two, and the number is measured rather than chosen.
-          # Two shards ran on 2026-08-16: 1of2 finished five files in 100
-          # minutes while 2of2 drew plan_admission (93 mutants), audit_file
-          # (107) and network/stages (108), spent the full 330 and never
-          # reached its fifth file. Splitting by file count does not split by
-          # cost, and this package's files differ by roughly 4x. Four shards
-          # put the two most expensive in different jobs and cut the worst
-          # known load from 335 mutants to 201.
-          - mvm-hostd/1of4
-          - mvm-hostd/2of4
-          - mvm-hostd/3of4
-          - mvm-hostd/4of4
+          # Six, and the number is measured rather than chosen.
+          #
+          # Raising the count is the second half of the fix; the first is
+          # that xtask now packs shards longest-file-first instead of
+          # slicing by stride. Adding shards alone had already been tried:
+          # 2 -> 4 on 2026-08-16, on the correct diagnosis that splitting by
+          # file count does not split by cost. It recurred, because a
+          # cost-blind split of an unequal surface stays unequal at any
+          # width — on 2026-08-21 shards 2of4 and 4of4 were both killed at
+          # 330 minutes while 3of4 finished in 24.
+          #
+          # With cost-aware packing the surface splits evenly, and six
+          # shards put the worst at ~181 measured minutes, 55% of the
+          # budget. That headroom is deliberate: two of the per-file costs
+          # behind it are lower bounds, measured on shards that were killed
+          # part-way through a file.
+          - mvm-hostd/1of6
+          - mvm-hostd/2of6
+          - mvm-hostd/3of6
+          - mvm-hostd/4of6
+          - mvm-hostd/5of6
+          - mvm-hostd/6of6
           - mvm-contract
           - mvm-runtime
           - mvm-sdk
@@ -1335,3 +1311,188 @@ jobs:
       - name: Report skip (no eligible release yet)
         if: env.TARGET_TAG == ''
         run: echo "::notice::pack-reproducibility-runtime (${{ matrix.arch }}) skipped — no published release with an attested runtime pack manifest was found."
+
+  # Claim 11's witness. ADR-001's ledger cites this job by name, and until
+  # now it lived in ci-full.yml — a workflow-dispatch-only lane that had
+  # never been run, not once, since it was written. The ledger row was
+  # green the whole time on evidence nobody had ever gathered. It moves
+  # here because this is where every other `ci:` witness in that table
+  # already lives, and because a nightly is the only trigger that makes a
+  # lane's silence detectable.
+  app-deps-audit:
+    name: app-deps-audit (ADR-047 claim 9 / Plan 73 Followup D)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@nightly
+
+      - uses: ./.github/actions/install-zigbuild
+
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      - name: Cache cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-app-deps-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-app-deps-
+
+      - name: Run app-deps-audit smoke
+        run: ./scripts/test-app-deps-ci-gate.sh
+
+  # The OCI hardening lanes behind claim 14, likewise never run: they were
+  # six separate dispatch-only jobs in ci-full.yml, each a checkout, a
+  # toolchain, an apt install, a cache and one or two `cargo test`
+  # invocations. The only thing that differed between them was the test
+  # selector, so they are one matrix here.
+  #
+  # Their paths-filter steps are gone rather than ported. Each gated its
+  # real work on `steps.filter.outputs.oci == 'true' || github.ref ==
+  # 'refs/heads/main'`, and on this workflow's triggers the second arm is
+  # always true — the filter decided nothing and cost a step.
+  oci-hardening:
+    name: OCI hardening — ${{ matrix.lane.id }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        lane:
+          - id: layer-unpack-adversarial
+            test: cargo test --test oci_unpack_attacks -p mvm-fs -- --include-ignored
+          - id: digest-mismatch-reject
+            test: cargo test --test hermetic_registry -p mvm-fs rejects
+          - id: malformed-manifest
+            test: "cargo test -p mvm-fs -- manifest:: reference::"
+          - id: mutable-tag-prod-reject
+            zigbuild: true
+            test: cargo test -p mvm-cli -- prod_pull_requires_digest_pin prod_run_image_requires_digest_pin
+          - id: reproducibility
+            test: |
+              cargo test -p mvm-fs reproducibility_two_unpacks_match_modulo_inode
+              cargo test --test oci_ext4_materialization -p mvm-fs materialize_is_byte_deterministic
+          - id: image-runner-smoke
+            zigbuild: true
+            test: cargo test --test oci_ext4_materialization -p mvm-fs
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@nightly
+
+      - uses: ./.github/actions/install-zigbuild
+        if: matrix.lane.zigbuild
+
+      # The superset of what the individual lanes installed. e2fsprogs is
+      # only needed by two of them and costs seconds, which is cheaper than
+      # a per-lane package list that drifts out of step with the tests.
+      - name: Install system build deps
+        run: sudo apt-get update && sudo apt-get install -y libcap-ng-dev lld e2fsprogs
+
+      - name: Cache cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-oci-${{ matrix.lane.id }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-oci-${{ matrix.lane.id }}-
+
+      - name: ${{ matrix.lane.id }}
+        run: ${{ matrix.lane.test }}
+
+  # Claim 15's sealed-prod tier, and claims 1/2's confinement primitives.
+  #
+  # Both lanes were deleted along with ci-full.yml in the first pass of this
+  # consolidation, on the reasoning that the workflow had never run. That
+  # was the wrong conclusion from the right observation: a security lane
+  # that has never run is a lane to start running, not one to remove.
+  sealed-prod-allowlist:
+    name: Sealed-prod vsock allowlist (plan 76 Phase 1)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Install system build deps
+        run: sudo apt-get update && sudo apt-get install -y libcap-ng-dev
+
+      - name: Cache cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-sealed-prod-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-sealed-prod-
+
+      - name: Assert SealedProd vsock allowlist matches plan 76 §Phase 1
+        run: ./scripts/check-sealed-prod-allowlist.sh
+
+  jailer-property:
+    name: jailer property tests (seccomp + Landlock) (Plan 113 §Task 9)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Install system build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libcap-ng-dev lld
+
+      - name: Cache cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-jailer-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-jailer-
+
+      # Kept as a probe rather than an assertion because both property
+      # suites share `confine_self`, which applies Landlock first: without
+      # the LSM active the seccomp half cannot be reached either, and the
+      # failure would say nothing about this repo.
+      #
+      # It is a silent-skip risk and named as one: a skip leaves the job
+      # green with nothing exercised, and the watcher reads job
+      # conclusions, so it cannot tell that apart from a pass. The step
+      # summary below is what a reader has to check. Making the absence
+      # fail instead would be the stronger gate, but only once a runner
+      # image is pinned that is known to carry Landlock.
+      - name: Probe Landlock kernel support
+        id: landlock_probe
+        run: |
+          set -euo pipefail
+          uname -r
+          echo "active LSMs: $(cat /sys/kernel/security/lsm 2>/dev/null || echo '(unreadable)')"
+          if ! grep -qw landlock /sys/kernel/security/lsm 2>/dev/null; then
+            echo "::warning::Landlock LSM not active on this runner — the jailer property tests did NOT run."
+            echo "- :warning: jailer property tests **skipped**: Landlock LSM not active" >> "$GITHUB_STEP_SUMMARY"
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          cat /sys/kernel/security/landlock/abi_versions 2>/dev/null \
+            || echo "(abi_versions not exposed on this kernel)"
+          echo "available=true" >> "$GITHUB_OUTPUT"
+
+      - name: Run property tests (seccomp + Landlock)
+        if: steps.landlock_probe.outputs.available == 'true'
+        run: |
+          cargo test -p mvm-hostd \
+            --test seccomp_property \
+            --test landlock_property \
+            -- --ignored --nocapture

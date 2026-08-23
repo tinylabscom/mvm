@@ -143,14 +143,14 @@ pub const GUEST_JOB_DIR: &str = "/job";
 const BUILDER_INPUT_DEVICE: &str = "/dev/vdc";
 const BUILDER_OUTPUT_DEVICE: &str = "/dev/vdd";
 const BUILDER_RUNTIME_DEVICE: &str = "/dev/vde";
-const PERSISTENT_BUILDER_RUNTIME_DEVICE: &str = "/dev/vdc";
+const BUILDER_VIRTIOFS_RUNTIME_DEVICE: &str = "/dev/vdc";
 const BUILDER_INPUT_DISK_MIN: u64 = 16 << 20;
 const BUILDER_VSOCK_EGRESS_TOKEN: &str = "mvm.vsock_egress=1";
 const BUILDER_SUBST_PID_FILE: &str = "substitution.pid";
 const BUILDER_SUBST_STDERR_LOG_FILE: &str = "substitution.stderr.log";
 const BUILDER_VM_BOOTSTRAP_BIN_ENV: &str = "MVM_BUILDER_VM_BOOTSTRAP_BIN";
 const BUILDER_VM_AUTO_BOOTSTRAP_SKIP_ENV: &str = "MVM_SKIP_BUILDER_VM_AUTO_BOOTSTRAP";
-const BUILDER_VM_CACHE_CONTRACT_VERSION: u32 = 3;
+const BUILDER_VM_CACHE_CONTRACT_VERSION: u32 = 4;
 
 /// Resolve (or locally build) the runtime overlay ext4 the builder VM sources
 /// its guest binaries from, failing closed when it cannot be produced.
@@ -253,7 +253,7 @@ fn builder_runtime_overlay_cmdline(base_cmdline: &str, runtime_device: &str) -> 
     append_cmdline_token(&cmdline, &format!("mvm.runtime_data={runtime_device}"))
 }
 
-fn persistent_builder_runtime_overlay_cmdline(base_cmdline: &str, runtime_device: &str) -> String {
+fn builder_virtiofs_runtime_overlay_cmdline(base_cmdline: &str, runtime_device: &str) -> String {
     let cmdline = builder_boot_contract_cmdline(base_cmdline);
     let cmdline = builder_vsock_egress_cmdline(&cmdline);
     let cmdline = append_cmdline_token(&cmdline, "mvm.runtime_source_policy=required_overlay");
@@ -702,16 +702,16 @@ pub(crate) fn builder_runtime_overlay_attachment<'a>(
     }
 }
 
-fn persistent_builder_runtime_overlay_attachment<'a>(
+pub(crate) fn builder_virtiofs_runtime_overlay_attachment<'a>(
     image: &'a BuilderVmImage,
     runtime_overlay: Option<&'a Path>,
 ) -> Option<BuilderRuntimeOverlayAttachment<'a>> {
     match (image, runtime_overlay) {
         (BuilderVmImage::Rootfs { cmdline, .. }, Some(runtime_overlay)) => {
             Some(BuilderRuntimeOverlayAttachment {
-                cmdline: persistent_builder_runtime_overlay_cmdline(
+                cmdline: builder_virtiofs_runtime_overlay_cmdline(
                     cmdline,
-                    PERSISTENT_BUILDER_RUNTIME_DEVICE,
+                    BUILDER_VIRTIOFS_RUNTIME_DEVICE,
                 ),
                 disk_path: runtime_overlay,
                 read_only: true,
@@ -4576,7 +4576,10 @@ impl LibkrunPersistentHostVm {
         let job_dir = builder_vm_cache_dir().join("jobs").join(&session_id);
         stage_persistent_job_dir(&job_dir)?;
 
-        let vm_name = format!("mvm-persistent-builder-vm-{session_id}");
+        let vm_name = mvm_core::naming::persistent_builder_vm_name(
+            mvm_core::naming::BuilderVmSlot::Libkrun,
+            &session_id,
+        );
         let vm_state_dir = builder_vm_cache_dir().join("vms").join(&vm_name);
         std::fs::create_dir_all(&vm_state_dir).map_err(|e| {
             BuilderVmError::ExtractionFailed(format!(
@@ -4635,7 +4638,7 @@ impl LibkrunPersistentHostVm {
             krun = krun.add_vsock_port(mvm_agentd::vsock::GUEST_AGENT_PORT);
         }
         if let Some(attachment) =
-            persistent_builder_runtime_overlay_attachment(&image, runtime_overlay.as_deref())
+            builder_virtiofs_runtime_overlay_attachment(&image, runtime_overlay.as_deref())
         {
             krun = krun.with_cmdline(attachment.cmdline).add_disk(
                 "runtime-overlay",
@@ -5890,13 +5893,13 @@ mod tests {
         .unwrap();
         std::fs::write(
             arch_dir.join("manifest.json"),
-            r#"{"cache_contract_version":3,"runtime_overlay_ready":false,"vsock_egress_ready":true}"#,
+            r#"{"cache_contract_version":4,"runtime_overlay_ready":false,"vsock_egress_ready":true}"#,
         )
         .unwrap();
 
         let err = ensure_builder_vm_image().unwrap_err();
         assert!(
-            format!("{err}").contains("cache_contract_version=3"),
+            format!("{err}").contains("cache_contract_version=4"),
             "got {err}"
         );
     }
@@ -5937,7 +5940,7 @@ mod tests {
 
         let err = ensure_builder_vm_image().unwrap_err();
         assert!(
-            format!("{err}").contains("cache_contract_version=3"),
+            format!("{err}").contains("cache_contract_version=4"),
             "got {err}"
         );
     }
@@ -5974,7 +5977,7 @@ mod tests {
         .unwrap();
         std::fs::write(
             arch_dir.join("manifest.json"),
-            r#"{"cache_contract_version":3,"runtime_overlay_ready":true,"vsock_egress_ready":true}"#,
+            r#"{"cache_contract_version":4,"runtime_overlay_ready":true,"vsock_egress_ready":true}"#,
         )
         .unwrap();
 
@@ -6018,7 +6021,7 @@ mod tests {
         std::fs::write(
             &script,
             format!(
-                "#!/bin/sh\nset -eu\narch_dir=\"$MVM_HOME/cache/builder-vm/{arch}\"\nmkdir -p \"$arch_dir\"\nprintf 'kernel' > \"$arch_dir/vmlinux\"\nprintf 'rootfs' > \"$arch_dir/rootfs.ext4\"\nprintf '%s\\n' 'console=hvc0 root=/dev/vda ro rootfstype=ext4 rootwait panic=-1 loglevel=8 init=/init mvm.chain_init=/sbin/mvm-host-vm-init' > \"$arch_dir/cmdline.txt\"\nmanifest_tmp=\"$arch_dir/manifest.$$.json.tmp\"\ncat > \"$manifest_tmp\" <<'EOF'\n{{\"cache_contract_version\":3,\"runtime_overlay_ready\":true,\"vsock_egress_ready\":true}}\nEOF\nmv \"$manifest_tmp\" \"$arch_dir/manifest.json\"\n"
+                "#!/bin/sh\nset -eu\narch_dir=\"$MVM_HOME/cache/builder-vm/{arch}\"\nmkdir -p \"$arch_dir\"\nprintf 'kernel' > \"$arch_dir/vmlinux\"\nprintf 'rootfs' > \"$arch_dir/rootfs.ext4\"\nprintf '%s\\n' 'console=hvc0 root=/dev/vda ro rootfstype=ext4 rootwait panic=-1 loglevel=8 init=/init mvm.chain_init=/sbin/mvm-host-vm-init' > \"$arch_dir/cmdline.txt\"\nmanifest_tmp=\"$arch_dir/manifest.$$.json.tmp\"\ncat > \"$manifest_tmp\" <<'EOF'\n{{\"cache_contract_version\":4,\"runtime_overlay_ready\":true,\"vsock_egress_ready\":true}}\nEOF\nmv \"$manifest_tmp\" \"$arch_dir/manifest.json\"\n"
             ),
         )
         .unwrap();
@@ -6073,7 +6076,7 @@ mod tests {
         .unwrap();
         std::fs::write(
             source_arch_dir.join("manifest.json"),
-            r#"{"cache_contract_version":3,"runtime_overlay_ready":true,"vsock_egress_ready":true}"#,
+            r#"{"cache_contract_version":4,"runtime_overlay_ready":true,"vsock_egress_ready":true}"#,
         )
         .unwrap();
 
@@ -6117,7 +6120,7 @@ mod tests {
         .unwrap();
         std::fs::write(
             source_arch_dir.join("manifest.json"),
-            r#"{"cache_contract_version":3,"runtime_overlay_ready":true,"vsock_egress_ready":true}"#,
+            r#"{"cache_contract_version":4,"runtime_overlay_ready":true,"vsock_egress_ready":true}"#,
         )
         .unwrap();
         let sums = crate::cache_install::digest_manifest(
@@ -6241,7 +6244,7 @@ mod tests {
         std::fs::write(
             &script,
             format!(
-                "#!/bin/sh\nset -eu\narch_dir=\"$MVM_HOME/cache/builder-vm/{arch}\"\nmkdir -p \"$arch_dir\"\nprintf 'kernel-new' > \"$arch_dir/vmlinux\"\nprintf 'rootfs-new' > \"$arch_dir/rootfs.ext4\"\nprintf '%s\\n' 'console=hvc0 root=/dev/vda ro rootfstype=ext4 rootwait panic=-1 loglevel=8 init=/init mvm.chain_init=/sbin/mvm-host-vm-init' > \"$arch_dir/cmdline.txt\"\nmanifest_tmp=\"$arch_dir/manifest.$$.json.tmp\"\ncat > \"$manifest_tmp\" <<'EOF'\n{{\"cache_contract_version\":3,\"runtime_overlay_ready\":true,\"vsock_egress_ready\":true}}\nEOF\nmv \"$manifest_tmp\" \"$arch_dir/manifest.json\"\n"
+                "#!/bin/sh\nset -eu\narch_dir=\"$MVM_HOME/cache/builder-vm/{arch}\"\nmkdir -p \"$arch_dir\"\nprintf 'kernel-new' > \"$arch_dir/vmlinux\"\nprintf 'rootfs-new' > \"$arch_dir/rootfs.ext4\"\nprintf '%s\\n' 'console=hvc0 root=/dev/vda ro rootfstype=ext4 rootwait panic=-1 loglevel=8 init=/init mvm.chain_init=/sbin/mvm-host-vm-init' > \"$arch_dir/cmdline.txt\"\nmanifest_tmp=\"$arch_dir/manifest.$$.json.tmp\"\ncat > \"$manifest_tmp\" <<'EOF'\n{{\"cache_contract_version\":4,\"runtime_overlay_ready\":true,\"vsock_egress_ready\":true}}\nEOF\nmv \"$manifest_tmp\" \"$arch_dir/manifest.json\"\n"
             ),
         )
         .unwrap();
@@ -6266,7 +6269,7 @@ mod tests {
             std::fs::read_to_string(target_arch_dir.join("manifest.json"))
                 .unwrap()
                 .trim(),
-            "{\"cache_contract_version\":3,\"runtime_overlay_ready\":true,\"vsock_egress_ready\":true}"
+            "{\"cache_contract_version\":4,\"runtime_overlay_ready\":true,\"vsock_egress_ready\":true}"
         );
         match image {
             BuilderVmImage::Rootfs {
@@ -7265,15 +7268,15 @@ mod tests {
     }
 
     #[test]
-    fn persistent_builder_runtime_overlay_uses_virtiofs_disk_layout() {
+    fn builder_virtiofs_runtime_overlay_uses_virtiofs_disk_layout() {
         let image = BuilderVmImage::new(
             PathBuf::from("/img/Image"),
             PathBuf::from("/img/rootfs.ext4"),
             "console=hvc0 root=/dev/vda".to_string(),
         );
         let overlay = Path::new("/cache/runtime-overlay.ext4");
-        let attachment = persistent_builder_runtime_overlay_attachment(&image, Some(overlay))
-            .expect("persistent rootfs builders attach the runtime overlay");
+        let attachment = builder_virtiofs_runtime_overlay_attachment(&image, Some(overlay))
+            .expect("virtio-fs rootfs builders attach the runtime overlay");
 
         assert_eq!(attachment.disk_path, overlay);
         assert!(attachment.read_only);

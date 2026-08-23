@@ -19,8 +19,12 @@ Networking differs by backend:
 ```
 MicroVM workload (no guest NIC)
     | loopback SOCKS5 TCP CONNECT / UDP ASSOCIATE
-    | authenticated vsock egress seam
-Host endpoint -- policy + host DNS -- internet
+    | controlled DNS / mediated ping / typed connectors
+    | authenticated FlowMux on vsock port 5253
+Per-VM mvm-network-endpoint
+    | signed policy + shared limits + host DNS + payload-free audit
+    | opaque TCP/UDP or explicitly typed transformation
+Internet or an admitted host-owned ingress listener
 ```
 
 Firecracker, HVF, and libkrun production workloads do not expose a guest NIC.
@@ -44,37 +48,23 @@ mvmctl machine run --hypervisor qemu --image alpine --net -- \
   sh -c 'wget -qO- https://example.com'
 ```
 
-QEMU attaches `virtio-net-pci` to its unprivileged `-netdev user` stack. The
-workload sees a normal guest interface, so TCP and UDP are transparent to the
-application and no host bridge, NAT rule, or elevated network setup is needed.
-QEMU is explicit dev/test infrastructure, is never selected automatically for
-production, and does not inherit the production NIC-less security claim.
-
-The QEMU user-mode stack follows the host's normal routing as seen by QEMU's
-user-mode network process, but its behavior differs from a host TAP bridge:
-incoming connections require explicit forwarding, and ICMP support is limited.
+QEMU uses the same NIC-less FlowMux path as every production backend. The
+workload reaches admitted destinations through the guest loopback adapters;
+the backend does not attach `virtio-net-pci`, SLIRP, TAP, or a host bridge.
 
 ## Port Forwarding
 
-To forward ports for an already-running machine, boot it with a name and then
-map guest ports to the host with `machine forward`:
-
-```bash
-mvmctl machine run --flake . --name my-vm -d
-mvmctl machine forward my-vm -p 8080:8080
-mvmctl machine forward my-vm -p 3000:3000 -p 8080:8080   # multiple ports
-```
-
-For a one-command foreground workflow, `machine run --port` boots a persistent
-machine and owns the loopback forwards until Ctrl-C:
+Declare ingress before boot so the exact host listener and guest-loopback
+target are covered by the signed admission plan:
 
 ```bash
 mvmctl machine run --flake . --name my-vm --port 8080:8080
 mvmctl machine run --flake . --name my-vm -p 3000:3000 -p 8080:8080
 ```
 
-`--port` cannot be combined with `--detach`: the attached CLI owns the
-forwarding processes. For a detached machine, run `machine forward` separately.
+`--port` makes the machine persistent and the per-VM FlowMux endpoint owns the
+listener for the machine lifecycle. Dynamic forwarding after admission is
+refused; update the machine declaration and restart when the mapping changes.
 
 ## vsock Communication
 
@@ -83,6 +73,7 @@ MicroVMs don't use networking for host communication -- they use **vsock**:
 | Port | Protocol | Purpose |
 |------|----------|---------|
 | 5252 | Length-prefixed JSON | Guest agent (health checks, status, snapshot lifecycle) |
+| 5253 | Authenticated FlowMux frames | TCP, UDP, DNS, mediated ping, typed connectors, declared ingress |
 
 The host connects by writing `CONNECT 5252\n` to the vsock socket and reading `OK 5252\n`. All requests are request/response pairs. vsock is supported on Firecracker, HVF, and microvm.nix backends.
 
@@ -128,11 +119,11 @@ image-backed machine — `mvmctl` now selects only backends that can keep the
 guest **NIC-less** and proxy outbound traffic over the host-vsock egress
 endpoint. The injected guest runtime starts `mvm-egress-client` and the runtime
 sets standard proxy env vars to its loopback SOCKS listener automatically.
-Today that contract is provided by `hvf`; if no available backend can
-provide it, the start is refused up front instead of silently degrading to a
-guest NIC. This enables tools such as `curl` and `wget`; it does **not** add
-raw ICMP, so `ping google.com` is still expected to fail. Use an HTTP/TCP probe
-as the smoke test instead.
+That contract is provided by Firecracker, HVF, and libkrun. If no available
+backend can provide it, the start is refused up front instead of silently
+degrading to a guest NIC. This enables tools such as `curl` and `wget` through
+the loopback adapters. General raw ICMP remains unsupported; the injected
+mediated ping helper is the only ICMP-shaped surface.
 
 For a repeatable live proof on macOS Apple Silicon, run:
 
@@ -184,11 +175,12 @@ The resolved profile is copied into the signed `ExecutionPlan` admission record 
 
 ## DNS
 
-Guest DNS is backend-specific. Firecracker guests use the host-side bridge/NAT
-path. HVF guests that request outbound egress use the host-vsock egress
-endpoint. libkrun guests seed `/etc/resolv.conf` toward the active virtual
-gateway inside the guest network path instead of copying a host nameserver into
-the kernel cmdline.
+Production guest DNS is backend-independent. The loopback DNS stub sends a
+typed FlowMux request to the same per-VM endpoint used by TCP, UDP, ingress,
+and connectors. The host resolver filters private, link-local, loopback,
+metadata, and rebinding answers before pinning an admitted result and emitting
+a payload-free audit record. A workload with no DNS grant has no fallback
+resolver or guest NIC.
 
 ### Local addon DNS (opt-in)
 

@@ -186,70 +186,12 @@ impl MachineAction {
     }
 }
 
-/// How a machine reaches the network.
-///
-/// **Not an operator choice, and not a host-dependent one.** The transport
-/// follows from a single question: does this workload need a real in-guest
-/// IP stack?
-///
-/// - **No** (almost always) → the socket-aware transport. It is the
-///   stronger posture: the host originates every connection, so secret
-///   substitution, cleartext redaction, and L7 policy all apply.
-/// - **Yes** → the L3 tunnel, which is the compatibility mode for raw
-///   sockets, ICMP, non-TCP/UDP protocols, and in-guest resolvers.
-///
-/// The need is declared by the *workload*, so the same workload resolves
-/// the same way on every host and the plan is reproducible. Host capability
-/// is deliberately **not** an input here — it is an admission check
-/// ([`check_host_can_serve`]), because a host that silently rewrote the
-/// transport would make one plan mean different things in different places.
-pub(in crate::commands) fn derive_network_mode(
-    needs_raw_ip_stack: bool,
-) -> mvm_contract::plan::NetworkMode {
-    if needs_raw_ip_stack {
-        mvm_contract::plan::NetworkMode::L3Vsock
-    } else {
-        mvm_contract::plan::NetworkMode::HostVsockProxy
-    }
-}
-
-/// Refuse a launch this host cannot serve.
-///
-/// Separate from the derivation on purpose: the mode is a property of the
-/// workload, and whether *this* machine can run it is a property of the
-/// host. Conflating them is how a plan starts meaning different things in
-/// different places.
-pub(in crate::commands) fn check_host_can_serve(
-    mode: mvm_contract::plan::NetworkMode,
-) -> anyhow::Result<()> {
-    if !mode.is_l3_vsock() {
-        return Ok(());
-    }
-    if let Err(err) = mvm_hostd::netd::host_datapath().is_available() {
-        anyhow::bail!(
-            "this workload needs a real in-guest IP stack, which this host cannot \
-             provide: {err}\n\
-             Workloads that do not set `raw_ip_stack` run here normally."
-        );
-    }
-    Ok(())
-}
-
 /// Settle and validate the networking configuration before anything boots.
 ///
-/// A workload declaring `raw_ip_stack` is refused here, at the declaration it
-/// wrote, rather than deeper down at a transport it never named: the in-guest
-/// IP stack has been retired, and the refusal names the loopback adapters and
-/// typed connectors that replace it. Everything below this point still
-/// resolves the tunnel for a VM that is already running, which is what lets
-/// those drain instead of being killed mid-flight.
-pub(in crate::commands) fn preflight_network(
-    needs_raw_ip_stack: bool,
-) -> anyhow::Result<mvm_contract::plan::NetworkMode> {
-    mvm_core::plan::refuse_raw_ip_stack(needs_raw_ip_stack)?;
-    let mode = derive_network_mode(needs_raw_ip_stack);
-    check_host_can_serve(mode)?;
-    Ok(mode)
+/// The public raw-packet mode is retired. Every newly admitted networked
+/// workload uses the authenticated, host-mediated FlowMux endpoint.
+pub(in crate::commands) fn preflight_network() -> mvm_contract::plan::NetworkMode {
+    mvm_contract::plan::NetworkMode::HostVsockProxy
 }
 
 /// Ephemeral image-backed run. Mirrors the relevant subset of `mvmctl run`'s
@@ -267,7 +209,7 @@ pub(in crate::commands) struct MachineRunArgs {
     /// Keep the machine running and return.
     #[arg(short = 'd', long)]
     pub detach: bool,
-    /// Forward HOST:GUEST (or PORT) while attached.
+    /// Declare signed TCP ingress HOST:GUEST (or PORT) before boot.
     #[arg(
         short,
         long,
@@ -414,7 +356,7 @@ impl MachineRunArgs {
     }
 
     /// `-d`/`--detach`, `--up-json`, `--ttl`, a declared `--healthcheck`, or
-    /// an attached port forward
+    /// declared FlowMux ingress
     /// makes the machine survive the command. `--tty`/`--name` are deliberately
     /// not consulted — persistence, interactivity, and identity are independent
     /// axes.
@@ -429,11 +371,6 @@ impl MachineRunArgs {
     /// Resolve the lifecycle mode purely from the flags. Fresh foreground runs
     /// need an image source and an argv; persistent runs just boot and return.
     fn resolve_mode(&self) -> Result<MachineRunMode> {
-        if !self.port.is_empty() && !self.run.argv.is_empty() {
-            bail!(
-                "`machine run --port` cannot also run an ad-hoc command; start the service from the image or manifest, or forward it afterward with `machine forward`"
-            );
-        }
         let mode = match (self.interactive(), self.persistent()) {
             (true, true) => bail!(
                 "`machine run -it` is foreground-only; use `machine exec <name> -it -- <cmd>` for an interactive command in a long-lived machine"
@@ -680,6 +617,7 @@ fn machine_run_spec(
         // a `[grants]` table.
         manifest: None,
         config: &config,
+        ai: None,
     })?;
     let _ = validate_machine_memory(&args.run.memory, None)?;
     let profile = run_profile_name(args.run.profile).to_string();
@@ -693,6 +631,7 @@ fn machine_run_spec(
         runtime_pack: args.run.runtime_pack,
         net: args.run.net,
         allow_host: args.run.allow_host.clone(),
+        ai: None,
         ports: args.port.clone(),
         cpus: args.run.cpus,
         memory: args.run.memory.clone(),
@@ -1134,6 +1073,7 @@ struct MachineSpecInputs<'a> {
     image: Option<&'a str>,
     net: bool,
     allow_host: &'a [String],
+    ai: Option<&'a mvm_core::network_policy::AiPolicy>,
     cpus: Option<u32>,
     cpu_limit: Option<u32>,
     timeout: Option<u64>,
@@ -1167,6 +1107,9 @@ fn build_machine_spec(inputs: MachineSpecInputs<'_>) -> Result<MachineSpec> {
     } else {
         inputs.allow_host.to_vec()
     };
+    let ai = inputs
+        .ai
+        .or(workflow.and_then(|workflow| workflow.ai.as_ref()));
     // Resolving grants also settles the egress policy, so validating it
     // here validates the same policy the machine will actually boot under.
     let config = mvm_core::user_config::load(None);
@@ -1178,6 +1121,7 @@ fn build_machine_spec(inputs: MachineSpecInputs<'_>) -> Result<MachineSpec> {
         grants_file: inputs.grants_file,
         manifest: workflow.map(|workflow| &workflow.grants),
         config: &config,
+        ai,
     })?;
     let cpus = inputs
         .cpus
@@ -1212,6 +1156,7 @@ fn build_machine_spec(inputs: MachineSpecInputs<'_>) -> Result<MachineSpec> {
         runtime_pack: false,
         net,
         allow_host,
+        ai: ai.cloned(),
         ports: Vec::new(),
         cpus,
         memory,
@@ -1265,6 +1210,7 @@ impl MachineCreateArgs {
             image: self.image.as_deref(),
             net: self.net,
             allow_host: &self.allow_host,
+            ai: None,
             cpus: self.cpus,
             cpu_limit: self.cpu_limit,
             timeout: self.timeout,

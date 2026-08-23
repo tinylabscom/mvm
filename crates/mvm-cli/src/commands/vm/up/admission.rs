@@ -259,6 +259,13 @@ impl std::fmt::Debug for AdmissionContext {
 pub(in crate::commands::vm) fn admit_plan_for_boot(
     p: AdmitPlanForBootParams<'_>,
 ) -> Result<Option<AdmissionContext>> {
+    admit_plan_for_boot_with_ingress(p, Vec::new())
+}
+
+pub(in crate::commands::vm) fn admit_plan_for_boot_with_ingress(
+    p: AdmitPlanForBootParams<'_>,
+    ingress: Vec<mvm_core::plan::IngressMapping>,
+) -> Result<Option<AdmissionContext>> {
     if p.no_supervisor {
         return Ok(None);
     }
@@ -364,7 +371,7 @@ pub(in crate::commands::vm) fn admit_plan_for_boot(
         stream_edges: Vec::new(),
         kernel_sha256: None,
         network_mode: p.network_mode,
-        l3_network: None,
+        ingress,
         vm_name: p.vm_name,
         tenant: Some(p.tenant),
         backend_name: p.backend_name,
@@ -1288,51 +1295,6 @@ mod admit_plan_tests {
     /// the ordinary ones that derive `HostVsockProxy` and get a broker stood up
     /// for them. The value is inside the signature, so the record was
     /// confidently wrong rather than merely absent.
-    /// Admit a plan carrying `mode`, with everything else held constant.
-    ///
-    /// Shared by the record-the-transport test and the retired-transport
-    /// refusal so the two differ only in the mode they pass.
-    fn admit_with_mode(
-        mode: mvm_contract::plan::NetworkMode,
-        keys_dir: &std::path::Path,
-        audit_dir: &std::path::Path,
-        rootfs: &std::path::Path,
-        ledger: &InMemoryNonceLedger,
-    ) -> Result<Option<AdmissionContext>> {
-        admit_plan_for_boot(AdmitPlanForBootParams {
-            network_mode: mode,
-            grants: None,
-            backend_kind: None,
-            tenant: "local",
-            vm_name: "vm-transport",
-            backend_name: "firecracker",
-            rootfs_path: rootfs,
-            precomputed_image_sha256: None,
-            boot_artifact_identity: None,
-            cpus: 1,
-            mem_mib: 128,
-            seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
-            secret_release: mvm_core::plan::SecretReleasePolicy::None,
-            secrets: Vec::new(),
-            no_supervisor: false,
-            ledger,
-            keys_dir: Some(keys_dir),
-            audit_dir: Some(audit_dir),
-            policy_dir: None,
-            bundle_pin: None,
-            deps_volume: None,
-            shares: Vec::new(),
-            redaction: mvm_core::policy::RedactionPolicy::default(),
-            network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
-            agent_verb_override: vec![],
-            restrict_agent_verbs: false,
-            services: Vec::new(),
-            entrypoint: crate::commands::vm::entrypoint_resolve::ResolvedEntrypoint::unresolved(
-                "test",
-            ),
-        })
-    }
-
     /// The retired in-guest IP stack does not boot, and says why.
     ///
     /// The refusal is the thing that keeps the migration to a single
@@ -1341,24 +1303,17 @@ mod admit_plan_tests {
     /// both replacements — not merely on `is_err()`.
     #[test]
     fn a_launch_asking_for_the_retired_ip_stack_is_refused() {
-        let keys_dir = tempfile::tempdir().unwrap();
-        let audit_dir = tempfile::tempdir().unwrap();
-        let rootfs_dir = tempfile::tempdir().unwrap();
-        let rootfs = write_rootfs(rootfs_dir.path(), b"transport");
-        let ledger = InMemoryNonceLedger::new();
-
-        let err = admit_with_mode(
-            mvm_contract::plan::NetworkMode::L3Vsock,
-            keys_dir.path(),
-            audit_dir.path(),
-            &rootfs,
-            &ledger,
-        )
-        .expect_err("the retired transport must not admit");
-        let msg = format!("{err:#}");
+        let mut plan = mvm_core::plan::test_support::PlanFixture::new().build();
+        plan.network_mode = mvm_contract::plan::NetworkMode::HostVsockProxy;
+        let json = serde_json::to_string(&plan)
+            .expect("plan serializes")
+            .replace("host_vsock_proxy", "l3_vsock");
+        let err = serde_json::from_str::<mvm_contract::plan::ExecutionPlan>(&json)
+            .expect_err("the retired transport must not enter the admitted type");
+        let msg = err.to_string();
         assert!(msg.contains("has been retired"), "{msg}");
-        assert!(msg.contains("loopback adapters"), "{msg}");
-        assert!(msg.contains("typed SDK connector"), "{msg}");
+        assert!(msg.contains("FlowMux loopback adapters"), "{msg}");
+        assert!(msg.contains("typed connector"), "{msg}");
     }
 
     #[test]
@@ -2271,6 +2226,7 @@ allow_hosts = ["localhost:8443"]
             grants_file: None,
             manifest: Some(&declared),
             config: &config,
+            ai: None,
         })
         .expect("the manifest's grants resolve");
 
@@ -2359,6 +2315,7 @@ allow_hosts = ["localhost:8443"]
             grants_file: None,
             manifest: Some(&declared),
             config: &config,
+            ai: None,
         })
         .expect("resolves");
 
@@ -2412,6 +2369,7 @@ allow_hosts = ["localhost:8443"]
             grants_file: None,
             manifest: Some(&declared),
             config: &config,
+            ai: None,
         })
         .expect_err("the resolver refuses a grant over this host's ceiling");
         let early = format!("{early:#}");
@@ -2432,6 +2390,7 @@ allow_hosts = ["localhost:8443"]
             grants_file: None,
             manifest: Some(&declared),
             config: &MvmConfig::default(),
+            ai: None,
         })
         .expect("an unbounded config resolves the same grant");
 
@@ -2491,6 +2450,7 @@ allow_hosts = ["localhost:8443"]
             grants_file: None,
             manifest: None,
             config: &config,
+            ai: None,
         })
         .expect("resolves");
         assert_eq!(resolved.plan_grants, None);

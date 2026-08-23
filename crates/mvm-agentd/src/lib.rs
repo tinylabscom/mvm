@@ -81,10 +81,6 @@ pub mod host_cost;
 pub mod host_time;
 pub mod icmp_client;
 pub mod integrations;
-/// The in-guest half of the L3 TUN-over-vsock tunnel: the `mvm0` device,
-/// its host-assigned configuration, the privilege drop, and the packet
-/// pump. `mvm0` terminates only in this agent.
-pub mod l3;
 pub mod lifecycle_hooks;
 /// Guest-side network defense. The `mvm-guest-netinit`
 /// binary calls into this module at boot to install kernel blackhole
@@ -93,9 +89,8 @@ pub mod lifecycle_hooks;
 /// `RawNetlinkInstaller` (a synchronous `AF_NETLINK` socket via libc)
 /// is Linux-only and gated inside the module.
 pub mod netinit;
-/// Shared rtnetlink plumbing: the kernel ABI constants, the request
-/// framing, and the synchronous socket that both `netinit`'s blackhole
-/// routes and the L3 agent's IPv6 bring-up send through.
+/// Shared rtnetlink plumbing: kernel ABI constants, request framing, and the
+/// synchronous socket used by `netinit`'s blackhole routes.
 pub mod netlink;
 pub mod probes;
 /// Restore-time guest wall-clock synchronization.
@@ -120,6 +115,11 @@ pub mod volume;
 pub mod vsock;
 pub mod worker_pool;
 pub mod worker_protocol;
+/// The single resolver for a workload's environment and working directory.
+/// Both the entrypoint runner and the interactive console read the image's
+/// declared runtime config through it.
+pub mod workload_env;
+
 /// Names the fixed workload uid/gid in the workload rootfs account databases,
 /// so `whoami`/`id`/`getpwuid` resolve inside images mvm did not build.
 pub mod workload_identity;

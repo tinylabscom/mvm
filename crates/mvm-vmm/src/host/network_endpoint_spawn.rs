@@ -13,7 +13,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use mvm_contract::builder::BuilderError;
 use mvm_contract::stream::secret_fingerprint::SecretFingerprint;
 use mvm_core::crypto::egress_ca::EgressCa;
-use mvm_core::plan::SecretBinding;
+use mvm_core::plan::{IngressMapping, SecretBinding};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -480,6 +480,8 @@ pub struct SubstitutionSpawnParams<'a> {
     pub network_policy: Option<&'a mvm_core::policy::network_policy::NetworkPolicy>,
     /// Transport-neutral resource ceilings from the admitted execution plan.
     pub network_limits: mvm_core::plan::NetworkLimits,
+    /// Exact signed ingress mappings this endpoint must own.
+    pub ingress: &'a [IngressMapping],
     /// `Some` ⇒ the endpoint resolves secret *values* remotely (see
     /// [`RemoteResolverSpawnConfig`]) instead of its local encrypted store.
     /// `None` preserves today's `Local` (unchanged) resolver behavior.
@@ -516,6 +518,7 @@ pub struct SubstitutionSpawnParamsBuilder<'a> {
     tls_intermediate: Option<(String, String)>,
     network_policy: Option<&'a mvm_core::policy::network_policy::NetworkPolicy>,
     network_limits: Option<mvm_core::plan::NetworkLimits>,
+    ingress: Option<&'a [IngressMapping]>,
     resolver_remote: Option<RemoteResolverSpawnConfig<'a>>,
     binding_store_dir: Option<&'a Path>,
     flowmux_identity: Option<FlowMuxIdentitySpawnConfig>,
@@ -537,6 +540,7 @@ impl<'a> SubstitutionSpawnParamsBuilder<'a> {
             tls_intermediate: None,
             network_policy: None,
             network_limits: None,
+            ingress: None,
             resolver_remote: None,
             binding_store_dir: None,
             flowmux_identity: None,
@@ -620,6 +624,13 @@ impl<'a> SubstitutionSpawnParamsBuilder<'a> {
         self
     }
 
+    /// Set the exact signed ingress mappings.
+    #[must_use]
+    pub fn ingress(mut self, ingress: &'a [IngressMapping]) -> Self {
+        self.ingress = Some(ingress);
+        self
+    }
+
     /// Set `resolver_remote`. Takes a value or an `Option`; unset means `None`.
     #[must_use]
     pub fn resolver_remote(
@@ -686,6 +697,9 @@ impl<'a> SubstitutionSpawnParamsBuilder<'a> {
                 "SubstitutionSpawnParams",
                 "network_limits",
             ))?,
+            ingress: self
+                .ingress
+                .ok_or(BuilderError::missing("SubstitutionSpawnParams", "ingress"))?,
             resolver_remote: self.resolver_remote,
             binding_store_dir: self.binding_store_dir,
             flowmux_identity: self.flowmux_identity,
@@ -763,6 +777,7 @@ pub fn endpoint_config_for_identity(
         tls_intermediate: None,
         network_policy: None,
         network_limits: mvm_core::plan::NetworkLimits::default(),
+        ingress: &[],
         resolver_remote: None,
         binding_store_dir: None,
         flowmux_identity,
@@ -793,6 +808,7 @@ fn build_endpoint_config_json(params: &SubstitutionSpawnParams<'_>) -> serde_jso
             "wire"
         },
         "network_limits": params.network_limits,
+        "ingress": params.ingress,
     });
     if let Some(marker) = params.session_marker.as_ref() {
         cfg["session_marker"] = serde_json::json!(marker);
@@ -1377,6 +1393,7 @@ mod tests {
             .secrets(&[])
             .redaction(&redaction)
             .network_limits(mvm_contract::plan::NetworkLimits::default())
+            .ingress(&[])
             .transport(EndpointTransport::Uds {
                 path: dir.path().join("sub.sock"),
             })
@@ -1439,6 +1456,7 @@ mod tests {
                 path: dir.path().join("endpoint.sock"),
             })
             .network_limits(limits)
+            .ingress(&[])
             .terminator_listen(terminator)
             .tls_intermediate(tls.clone())
             .network_policy(&network_policy)
@@ -1949,6 +1967,7 @@ mod tests {
             tls_intermediate: None,
             network_policy: None,
             network_limits: mvm_core::plan::NetworkLimits::default(),
+            ingress: &[],
             resolver_remote: None,
             binding_store_dir: None,
             flowmux_identity: None,
@@ -2011,6 +2030,7 @@ mod tests {
             tls_intermediate: None,
             network_policy: None,
             network_limits: mvm_core::plan::NetworkLimits::default(),
+            ingress: &[],
             resolver_remote: None,
             binding_store_dir: None,
             flowmux_identity: None,
@@ -2078,6 +2098,7 @@ mod tests {
             tls_intermediate: None,
             network_policy: None,
             network_limits: mvm_core::plan::NetworkLimits::default(),
+            ingress: &[],
             resolver_remote: None,
             binding_store_dir: None,
             flowmux_identity: None,
@@ -2146,6 +2167,7 @@ mod tests {
             tls_intermediate: None,
             network_policy: None,
             network_limits: mvm_core::plan::NetworkLimits::default(),
+            ingress: &[],
             resolver_remote: None,
             binding_store_dir: None,
             flowmux_identity: None,
@@ -2207,6 +2229,7 @@ mod tests {
             tls_intermediate: None,
             network_policy,
             network_limits: mvm_core::plan::NetworkLimits::default(),
+            ingress: &[],
             resolver_remote: None,
             binding_store_dir: None,
             flowmux_identity: None,

@@ -14,15 +14,13 @@ pub const FC_VERSION_DEFAULT: &str = match option_env!("MVM_FC_VERSION") {
 /// rather than a bare version, because it is spliced straight into a release
 /// download URL: `https://github.com/<repo>/releases/download/<tag>/<asset>`.
 ///
-/// **Nothing reads this yet.** `download_default_microvm_image` and the
-/// workload kernel fetch still build their URLs from the CLI's own version and
-/// must keep doing so until a `boot-image/v0.1.0` release actually exists —
-/// repointing them at a tag nobody has published turns every fresh install's
-/// first boot into a 404. Publishing that tag is the condition that unblocks
-/// the switch.
+/// Downloaders and the merge-queue boot witnesses must stay on this same
+/// published tag. Advancing the constant before the release exists turns every
+/// fresh install's first boot into a 404; advancing only one consumer makes CI
+/// validate a different image from the one users receive.
 pub const DEFAULT_BOOT_IMAGE_TAG: &str = match option_env!("MVM_BOOT_IMAGE_TAG") {
     Some(t) => t,
-    None => "boot-image/v0.1.0",
+    None => "boot-image/v0.1.3",
 };
 
 /// Host CPU architecture for arch-tagged downloads (the Firecracker release
@@ -666,7 +664,7 @@ pub fn vm_stream_socket_at(state_dir: &std::path::Path) -> std::path::PathBuf {
 /// workload's output capture is always-on, exactly one per VM, and lives and
 /// dies with the VM, so it is addressed the way the rest of that VM's state is.
 ///
-/// Survives the VM exiting: this is what `mvmctl logs` reads once the broker is
+/// Survives the VM exiting: this is what `mvmctl machine logs` reads once the broker is
 /// gone, which is half of "capturable while it runs *and* when it exits".
 pub fn vm_stream_transcript_dir_at(state_dir: &std::path::Path) -> std::path::PathBuf {
     state_dir.join("stream")
@@ -812,11 +810,36 @@ pub fn audit_root_path(tenant: &str) -> std::path::PathBuf {
     mvm_audit_dir().join(format!("{tenant}.root.json"))
 }
 
-/// Forensic transcript captures: `<mvm_home>/audit/transcripts/`. Each
-/// capture is `<tenant>/<vm>/<capture-id>/` holding `manifest.json` + encrypted
-/// chunk files. Kept under `audit/` since it is opt-in forensic evidence.
+/// Forensic transcript captures: `<mvm_home>/audit/transcripts/`. Kept under
+/// `audit/` since it is opt-in forensic evidence rather than VM state.
+///
+/// One capture is [`transcript_capture_dir`] — `<tenant>/<capture-id>/`. The
+/// VM is *not* a path component: a capture names its VM inside its manifest
+/// binding, and a reader discovers captures by scanning tenants rather than by
+/// knowing a VM name. This is the whole reason the tree is separate from
+/// [`vm_stream_transcript_dir`], which is per-VM state addressed the opposite
+/// way.
 pub fn mvm_transcripts_dir() -> std::path::PathBuf {
     mvm_audit_dir().join("transcripts")
+}
+
+/// One forensic capture: `<mvm_home>/audit/transcripts/<tenant>/<capture-id>/`,
+/// holding `manifest.json` plus encrypted segment files.
+pub fn transcript_capture_dir(tenant: &str, capture_id: &str) -> std::path::PathBuf {
+    transcript_capture_dir_at(&mvm_transcripts_dir(), tenant, capture_id)
+}
+
+/// Same as [`transcript_capture_dir`] when the caller already holds the
+/// transcripts root (tests point it at a temp dir).
+///
+/// One convention, two entry points — they must not drift, which is why the
+/// layout is written once here rather than joined inline at each reader.
+pub fn transcript_capture_dir_at(
+    transcripts_dir: &std::path::Path,
+    tenant: &str,
+    capture_id: &str,
+) -> std::path::PathBuf {
+    transcripts_dir.join(tenant).join(capture_id)
 }
 
 /// Filename suffix for a per-VM workload audit chain.
@@ -1649,5 +1672,35 @@ mod tests {
         );
 
         env.remove("MVM_HOME");
+    }
+
+    /// The forensic capture layout is `<tenant>/<capture-id>` -- two levels,
+    /// no VM component. Pinned because two doc comments in this file once
+    /// disagreed about it and the only consumer silently followed one of them.
+    #[test]
+    fn a_forensic_capture_is_tenant_then_capture_id_with_no_vm_component() {
+        let root = std::path::Path::new("/tmp/transcripts");
+        let dir = transcript_capture_dir_at(root, "acme", "capture-1");
+        assert_eq!(dir, root.join("acme").join("capture-1"));
+
+        let rel = dir.strip_prefix(root).expect("under the root");
+        assert_eq!(
+            rel.components().count(),
+            2,
+            "a VM component would make the capture unresolvable to a reader \
+             that only scanned tenants, which is how captures are discovered"
+        );
+    }
+
+    /// The by-name and by-root entry points must agree, or a writer and a
+    /// reader can each be correct and still miss each other.
+    #[test]
+    fn both_capture_dir_entry_points_agree() {
+        let tmp = std::env::temp_dir().join("mvm-transcript-layout-test");
+        let mut env = TestEnv::new();
+        env.isolate_mvm_home(&tmp);
+        let by_name = transcript_capture_dir("acme", "capture-1");
+        let by_root = transcript_capture_dir_at(&mvm_transcripts_dir(), "acme", "capture-1");
+        assert_eq!(by_name, by_root);
     }
 }

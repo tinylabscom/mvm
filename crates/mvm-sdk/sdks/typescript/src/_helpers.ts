@@ -200,15 +200,14 @@ function probeCdpVersion(port: number, timeoutMs: number): Promise<string> {
 }
 
 /** Options for {@link BrowserSandbox} — `Sandbox.create` options plus an
- *  optional host port override for the forwarded CDP port. */
+ *  optional host port override for the declared CDP ingress port. */
 export interface BrowserSandboxOptions extends SandboxCreateOptions {
   hostPort?: number;
 }
 
 /** A `Sandbox` preset for a headless browser: a baked browser image with its
- *  CDP port forwarded to the host. Image + port preset only — no new
- *  mechanism (the forward is `Sandbox.forward`, the protocol is the browser's
- *  own CDP).
+ *  CDP port declared as signed ingress before boot. Image + port preset only —
+ *  no new mechanism (the protocol is the browser's own CDP).
  *
  *  `endpoint()` returns the host-side CDP HTTP base; pass it to a CDP client
  *  (Playwright/Puppeteer `connectOverCDP` / `browserURL`), which discovers the
@@ -229,20 +228,35 @@ export class BrowserSandbox {
       throw new RangeError("the obscura provider does not allow command overrides");
     }
     this.hostPort = hostPort ?? preset.cdpPort;
+    const existingNetwork = createOptions.network ?? { mode: "none", ports: [] };
+    const existingPorts = existingNetwork.ports ?? [];
+    const mappingId = existingPorts.reduce(
+      (highest, mapping) => Math.max(highest, mapping.mapping_id),
+      0,
+    ) + 1;
     this._sandbox = Sandbox.create(preset.source, {
       ...createOptions,
+      network: {
+        ...existingNetwork,
+        ports: [
+          ...existingPorts,
+          {
+            mapping_id: mappingId,
+            proto: "tcp",
+            host_addr: "127.0.0.1",
+            host: this.hostPort,
+            guest_addr: "127.0.0.1",
+            guest: preset.cdpPort,
+            transform: "opaque",
+          },
+        ],
+      },
       ...(preset.command !== undefined
         ? { command: [...preset.command] }
         : callerCommand !== undefined
           ? { command: callerCommand }
           : {}),
     });
-    try {
-      this._sandbox.forward(this.hostPort, preset.cdpPort);
-    } catch (error) {
-      this._sandbox.kill();
-      throw error;
-    }
   }
 
   /** The underlying `Sandbox` for direct access. */

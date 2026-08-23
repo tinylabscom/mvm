@@ -461,6 +461,7 @@ fn wasm_network_endpoint_spawn_params<'a>(
         tls_intermediate: None,
         network_policy: Some(network_policy),
         network_limits: plan.network_limits,
+        ingress: &[],
         resolver_remote: None,
         binding_store_dir: None,
         flowmux_identity: None,
@@ -561,7 +562,6 @@ impl VmBackend for WasmBackend {
             // no later `stop()` boundary to reap the endpoint at, so its
             // decrypted secrets must not outlive this call either way.
             crate::network_endpoint_spawn::reap_network_endpoint(&state_dir, &config.name);
-            mvm_vmm::host::netd_spawn::reap_netd(&state_dir);
         }
         let completed = result?;
 
@@ -2021,6 +2021,9 @@ mod tests {
     // that must NOT mirror libkrun — the wasm tier never carries an identity.
     #[test]
     fn wasm_endpoint_plan_params_mirror_libkrun_with_wasm_deviations() {
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let secret = mvm_core::plan::SecretBinding {
             name: "API_KEY".to_string(),

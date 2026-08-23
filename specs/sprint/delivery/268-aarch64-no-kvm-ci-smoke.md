@@ -24,5 +24,37 @@ This is the closest CI approximation to the Raspberry Pi no-KVM path: the
 workload rootfs is built through the Stage 0 QEMU builder and the guest boots
 via QEMU TCG on a real aarch64 host.
 
+The hosted runner exposes `/dev/vhost-vsock` but leaves it inaccessible to the
+runner user. The job transfers that one ephemeral device node to the current
+user with mode `0600` before QEMU starts; an `xtask` workflow-structure test
+keeps the grant ordered before the first boot.
+
 Diagnostics (`console.log`, `firecracker.log`, `qemu.log`, and the captured
-mvmctl output) are dumped on failure.
+mvmctl output) are dumped on failure, including builder VM state under
+`$MVM_HOME/cache/builder-vm/vms`.
+
+The merge-queue witness also caught a QEMU-only drive-layout bug: the QEMU
+builder had reused the one-shot libkrun runtime-overlay attachment, whose
+kernel command line enables raw-disk job transport. QEMU supplies `/job` and
+`/out` through virtio-fs instead, so the guest interpreted the runtime and
+identity disks as nonexistent job input/output and never returned a result.
+QEMU now shares the virtio-fs runtime-overlay contract used by persistent
+builders: `/dev/vdc` is only the read-only runtime overlay, no disk-transport
+tokens are present, and the writable job/output shares remain authoritative.
+Unit tests pin both the shared attachment and the QEMU call-site contract.
+
+The corrected drive layout then exposed a release-skew compatibility case:
+an older published builder init copied the signing key and host anchor but not
+the newer empty ingress-target projection from the identity drive. The current
+egress client used the signing key alone as its "already provisioned" marker,
+so it skipped its own idempotent drive copy and failed closed on the missing
+projection. Egress startup now treats all three files as one identity contract
+and reprovisions whenever any member is absent. A regression test covers the
+two-file legacy state and the complete three-file state.
+
+With identity provisioning repaired, the live lane progressed into the real
+Nix workload build and was killed only by the generic 1,800-second builder
+deadline while QEMU TCG was still compiling successfully. The no-KVM smoke
+now gives that inner builder run 7,200 seconds, within the job's existing
+five-hour ceiling; normal accelerated builder runs keep their stricter
+30-minute default. The workflow policy test pins the TCG-specific override.

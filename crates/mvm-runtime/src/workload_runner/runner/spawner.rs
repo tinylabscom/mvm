@@ -31,6 +31,8 @@ pub struct NetworkEndpointSpawnRequest<'a> {
     pub network_policy: &'a NetworkPolicy,
     /// Transport-neutral resource ceilings from the admitted plan.
     pub network_limits: mvm_core::plan::NetworkLimits,
+    /// Exact signed ingress mappings owned by this endpoint.
+    pub ingress: &'a [mvm_core::plan::IngressMapping],
     /// Where the guest's half of the authenticated session comes from.
     pub identity: FlowMuxIdentitySource<'a>,
 }
@@ -68,7 +70,7 @@ impl NetworkEndpointSpawner for RealNetworkEndpointSpawner {
                 let material = FlowMuxIdentityMaterial::mint_from_host_signer(req.vm_name)
                     .context("minting this boot's FlowMux identity")?;
                 let drive = req.state_dir.join(IDENTITY_DRIVE_FILE);
-                material.write_drive(&drive)?;
+                material.write_drive_with_ingress(&drive, req.ingress)?;
                 // Persisted so a warm child claimed from this VM pins the key
                 // its restored guest actually holds.
                 material.persist_inheritable(req.state_dir)?;
@@ -110,6 +112,7 @@ impl NetworkEndpointSpawner for RealNetworkEndpointSpawner {
             tls_intermediate: None,
             network_policy: Some(req.network_policy),
             network_limits: req.network_limits,
+            ingress: req.ingress,
             resolver_remote: None,
             binding_store_dir: None,
             flowmux_identity: Some(identity),

@@ -31,9 +31,8 @@ For grant review, SDK declarations, and agent-tool policy, see [Network egress p
 Expose a guest service to the host:
 
 ```sh
-mvmctl machine run --flake . --name api-dev -d
-mvmctl machine forward api-dev -p 8080:8080
-mvmctl machine forward api-dev -p 3000:3000
+mvmctl machine run --flake . --name api-dev \
+  --port 8080:8080 --port 3000:3000
 ```
 
 Use readiness and logs while developing services:

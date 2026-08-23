@@ -259,7 +259,7 @@ fn admit_entrypoint_boot(
 ) -> Result<Option<EntrypointAdmission>> {
     let ledger = mvm_hostd::plan_admission::InMemoryNonceLedger::default();
     let ctx = super::up::admit_plan_for_boot(super::up::AdmitPlanForBootParams {
-        network_mode: crate::commands::machine::derive_network_mode(false),
+        network_mode: crate::commands::machine::preflight_network(),
         tenant: "local",
         vm_name: params.vm_name,
         backend_name: params.backend_name,

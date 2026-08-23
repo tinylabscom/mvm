@@ -60,13 +60,13 @@ use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 
 use crate::commands::build::trace_secret_scan::SecretFinding;
-use mvm_contract::ir::{App, Workload};
+use mvm_contract::ir::{App, PortProto, PortTransform, Workload};
 
 use super::managed_secrets::lower_app_secrets;
 use crate::commands::build::sandbox_record::{
     LoadedRecording, auto_exec_record_script, script_language_from_path,
 };
-use mvm_core::plan::SynthesisInput;
+use mvm_core::plan::{IngressMapping, IngressProtocol, IngressTransform, SynthesisInput};
 use mvm_hostd::plan_admission::{InMemoryNonceLedger, SystemClock, admit_for_run};
 
 use super::exec::{RunArgs, RunMode};
@@ -210,12 +210,7 @@ fn run_plan_mode(args: &RunArgs, sdk: &super::exec::SdkTransportArgs) -> Result<
     let mut failed_count = 0usize;
 
     for app in &workload.apps {
-        // The transport follows from what the app declared it needs, not
-        // from anything the operator passed: an app that needs a real
-        // in-guest IP stack gets the tunnel, everything else keeps the
-        // socket-aware path.
-        let needs_raw_ip = app.network.as_ref().is_some_and(|n| n.raw_ip_stack);
-        let network_mode = crate::commands::machine::preflight_network(needs_raw_ip)?;
+        let network_mode = crate::commands::machine::preflight_network();
         let input = synthesis_input_for_app(&workload, app, network_mode)?;
         // A recorded sandbox run is a developer artifact; nothing here is
         // sealed, so an unenforceable grant is reported, not fatal.
@@ -358,13 +353,14 @@ fn synthesis_input_for_app<'a>(
     // 1).
     let placeholder = placeholder_image_sha(&workload.id, &app.name);
     let leaked: &'static str = Box::leak(placeholder.into_boxed_str());
+    let ingress = lower_ingress(app)?;
 
     Ok(SynthesisInput {
         grants: None,
         stream_edges: Vec::new(),
         kernel_sha256: None,
         network_mode,
-        l3_network: None,
+        ingress,
         vm_name: &app.name,
         tenant: None,
         backend_name: "firecracker",
@@ -400,6 +396,42 @@ fn synthesis_input_for_app<'a>(
         stream_retention: Default::default(),
         attestation_mode: mvm_contract::plan::AttestationMode::Noop,
     })
+}
+
+fn lower_ingress(app: &App) -> Result<Vec<IngressMapping>> {
+    app.network
+        .as_ref()
+        .map(|network| {
+            network
+                .ports
+                .iter()
+                .map(|mapping| {
+                    let builder = IngressMapping::builder()
+                        .mapping_id(mapping.mapping_id)
+                        .protocol(match mapping.proto {
+                            PortProto::Tcp => IngressProtocol::Tcp,
+                            PortProto::Udp => IngressProtocol::Udp,
+                        })
+                        .host_addr(&mapping.host_addr)
+                        .host_port(mapping.host)
+                        .guest_addr(&mapping.guest_addr)
+                        .guest_port(mapping.guest)
+                        .transform(match mapping.transform {
+                            PortTransform::Opaque => IngressTransform::Opaque,
+                            PortTransform::Http => IngressTransform::Http,
+                            PortTransform::Tls => IngressTransform::Tls,
+                        });
+                    let builder = match mapping.tls_secret.as_deref() {
+                        Some(secret) => builder.tls_secret(secret),
+                        None => builder,
+                    };
+                    builder
+                        .build()
+                        .with_context(|| format!("invalid ingress mapping {}", mapping.mapping_id))
+                })
+                .collect()
+        })
+        .unwrap_or_else(|| Ok(Vec::new()))
 }
 
 /// SHA-256 over `workload_id::app_name` to derive a stable 64-char

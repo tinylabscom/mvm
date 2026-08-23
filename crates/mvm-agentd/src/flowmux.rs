@@ -19,16 +19,22 @@ use std::time::Duration;
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use mvm_contract::protocol::network_flow::hello::{Handshake, agree};
 use mvm_contract::protocol::network_flow::{
-    Direction, FrameError, Opcode, SessionValidator, decode, encode_into,
+    Direction, FrameError, MAX_UDP_DATAGRAM_LEN, Opcode, SessionValidator, decode, encode_into,
 };
 use mvm_core::net::session::Session;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::{mpsc, oneshot, watch};
 use tracing::{info, warn};
 
+use crate::flowmux_drive::GuestIngressTarget;
+mod reconnect;
 mod wire;
 
+pub use reconnect::{FlowMuxReconnectClient, ReconnectPolicy};
 pub use wire::{build_dns_query, decode_udp_addr, encode_udp_addr};
+
+mod client;
+mod pump;
 
 /// How this side names itself in a handshake refusal. Only ever read by a
 /// human reading the error.
@@ -103,7 +109,6 @@ impl FlowMuxError {
         Self::Refused(reason.into())
     }
 }
-
 impl From<FrameError> for FlowMuxError {
     fn from(value: FrameError) -> Self {
         Self::Frame(value.to_string())
@@ -146,6 +151,11 @@ struct UdpAssociationState {
     tx: mpsc::UnboundedSender<UdpEvent>,
 }
 
+struct InboundUdpDatagram {
+    peer: SocketAddr,
+    payload: Vec<u8>,
+}
+
 /// A request from a client handle to the session pump.
 #[derive(Debug)]
 enum ClientRequest {
@@ -184,6 +194,12 @@ enum ClientRequest {
     UdpSend {
         stream_id: u32,
         destination: SocketAddr,
+        payload: Vec<u8>,
+    },
+    /// Reply from a declared guest-loopback UDP target to an observed peer.
+    InboundUdpReply {
+        stream_id: u32,
+        peer: SocketAddr,
         payload: Vec<u8>,
     },
     /// Close a UDP association from the guest side.
@@ -236,659 +252,9 @@ pub struct FlowMuxClient {
     next_stream_id: Arc<AtomicU32>,
 }
 
-impl FlowMuxClient {
-    /// Connect to the host NetworkFlow channel and complete the FlowMux
-    /// handshake (`Hello` / `HelloAck`).
-    ///
-    /// The cryptographic session handshake is performed as the guest using
-    /// `guest_signing_key` and the pinned host anchor. After the handshake the
-    /// session task takes ownership of `stream` and runs until it closes.
-    pub async fn connect<S>(
-        stream: S,
-        guest_signing_key: SigningKey,
-        host_anchor: VerifyingKey,
-    ) -> Result<Self, FlowMuxError>
-    where
-        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
-    {
-        let handle = tokio::runtime::Handle::try_current()
-            .map_err(|e| FlowMuxError::Handshake(e.to_string()))?;
-
-        let handshake = tokio::task::spawn_blocking(move || {
-            let mut adapter = AsyncStreamSyncAdapter::new(stream, handle);
-            Session::guest(&mut adapter, guest_signing_key, &host_anchor)
-                .map_err(|e| FlowMuxError::Handshake(e.to_string()))
-                .map(|(session, session_id)| {
-                    let stream = adapter.into_inner();
-                    (session, session_id, stream)
-                })
-        })
-        .await
-        .map_err(|e| FlowMuxError::Handshake(e.to_string()))?;
-
-        let (session, _session_id, stream) = handshake?;
-
-        let (client_tx, client_rx) = mpsc::unbounded_channel();
-        let (state_tx, state_rx) = watch::channel(SessionState::Connecting);
-
-        let next_stream_id = Arc::new(AtomicU32::new(FIRST_GUEST_STREAM_ID));
-        let pump = SessionPump {
-            stream: Box::pin(stream),
-            session,
-            validator: SessionValidator::default(),
-            client_rx,
-            client_tx: client_tx.clone(),
-            state_tx,
-            tcp_streams: BTreeMap::new(),
-            udp_associations: BTreeMap::new(),
-            pending_opens: BTreeMap::new(),
-            pending_resolves: BTreeMap::new(),
-            frame_reader: FrameReader::default(),
-        };
-
-        tokio::spawn(async move {
-            if let Err(e) = pump.run().await {
-                warn!(error = %e, "FlowMux session pump ended");
-            }
-        });
-
-        Ok(Self {
-            tx: client_tx,
-            state: state_rx,
-            next_stream_id,
-        })
-    }
-
-    /// Wait until the session is ready, or fail if it becomes dead.
-    async fn await_ready(&self) -> Result<(), FlowMuxError> {
-        let mut state = self.state.clone();
-        loop {
-            let snapshot = state.borrow().clone();
-            match snapshot {
-                SessionState::Ready => return Ok(()),
-                SessionState::Dead(reason) => {
-                    return Err(FlowMuxError::SessionClosed(reason.to_string()));
-                }
-                SessionState::Connecting | SessionState::Reconnecting => {
-                    if state.changed().await.is_err() {
-                        return Err(FlowMuxError::SessionClosed("state watch closed".into()));
-                    }
-                }
-            }
-        }
-    }
-
-    /// Allocate a fresh odd guest stream ID.
-    fn alloc_stream_id(&self) -> u32 {
-        self.next_stream_id.fetch_add(2, Ordering::Relaxed)
-    }
-
-    /// A receiver that tracks the session lifecycle.
-    pub fn state(&self) -> watch::Receiver<SessionState> {
-        self.state.clone()
-    }
-
-    /// Open a TCP flow to `target` (`host:port`).
-    ///
-    /// This waits for the host to confirm the open with `Opened` before
-    /// returning. A refused open surfaces as [`FlowMuxError::Refused`].
-    pub async fn open_tcp(&self, target: &str) -> Result<FlowMuxStream, FlowMuxError> {
-        self.await_ready().await?;
-        let stream_id = self.alloc_stream_id();
-        let (tx, rx) = oneshot::channel();
-        self.tx
-            .send(ClientRequest::OpenTcp {
-                target: target.to_string(),
-                stream_id,
-                respond: tx,
-            })
-            .map_err(|_| FlowMuxError::ChannelClosed)?;
-        rx.await.map_err(|_| FlowMuxError::ChannelClosed)?
-    }
-
-    /// Open a UDP association.
-    pub async fn open_udp(&self) -> Result<FlowMuxUdpSocket, FlowMuxError> {
-        self.await_ready().await?;
-        let stream_id = self.alloc_stream_id();
-        let (tx, rx) = oneshot::channel();
-        self.tx
-            .send(ClientRequest::OpenUdp {
-                stream_id,
-                respond: tx,
-            })
-            .map_err(|_| FlowMuxError::ChannelClosed)?;
-        rx.await.map_err(|_| FlowMuxError::ChannelClosed)?
-    }
-
-    /// Resolve a DNS name. Returns the raw DNS response bytes.
-    pub async fn resolve(&self, name: &str, qtype: u16) -> Result<Vec<u8>, FlowMuxError> {
-        self.await_ready().await?;
-        let stream_id = self.alloc_stream_id();
-        let query = build_dns_query(name, qtype, stream_id as u16)?;
-        let (tx, rx) = oneshot::channel();
-        self.tx
-            .send(ClientRequest::Resolve {
-                stream_id,
-                query,
-                respond: tx,
-            })
-            .map_err(|_| FlowMuxError::ChannelClosed)?;
-        rx.await.map_err(|_| FlowMuxError::ChannelClosed)?
-    }
-}
-
-/// Background task that owns the FlowMux session.
-struct SessionPump<S> {
-    stream: Pin<Box<S>>,
-    session: mvm_core::net::session::Session,
-    validator: SessionValidator,
-    client_rx: mpsc::UnboundedReceiver<ClientRequest>,
-    client_tx: mpsc::UnboundedSender<ClientRequest>,
-    state_tx: watch::Sender<SessionState>,
-    tcp_streams: BTreeMap<u32, TcpStreamState>,
-    udp_associations: BTreeMap<u32, UdpAssociationState>,
-    pending_opens: BTreeMap<u32, PendingOpen>,
-    pending_resolves: BTreeMap<u32, oneshot::Sender<Result<Vec<u8>, FlowMuxError>>>,
-    /// Survives a `select!` cancellation so a half-read frame resumes.
-    frame_reader: FrameReader,
-}
-
-impl<S> SessionPump<S>
-where
-    S: AsyncRead + AsyncWrite + Unpin,
-{
-    async fn run(mut self) -> Result<(), FlowMuxError> {
-        let outcome = self.run_until_closed().await;
-        self.fail_all("session closed");
-        let reason: Arc<str> = match &outcome {
-            Ok(()) => Arc::from("session closed"),
-            Err(e) => Arc::from(e.to_string().as_str()),
-        };
-        let _ = self.state_tx.send(SessionState::Dead(reason));
-        outcome
-    }
-
-    async fn run_until_closed(&mut self) -> Result<(), FlowMuxError> {
-        self.send_hello().await?;
-        self.read_hello_ack().await?;
-        let _ = self.state_tx.send(SessionState::Ready);
-
-        loop {
-            tokio::select! {
-                biased;
-                req = self.client_rx.recv() => {
-                    match req {
-                        Some(req) => self.handle_request(req).await?,
-                        None => {
-                            info!("FlowMux client dropped; closing session");
-                            break;
-                        }
-                    }
-                }
-                frame = self
-                    .frame_reader
-                    .read(&mut self.stream, &mut self.session) => {
-                    match frame? {
-                        Some((opcode, stream_id, _payload_len, payload)) => {
-                            self.handle_frame(opcode, stream_id, payload).await?;
-                        }
-                        None => {
-                            info!("FlowMux peer closed session");
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-        Ok(())
-    }
-
-    fn fail_all(&mut self, reason: &str) {
-        let reason = reason.to_string();
-        for (_id, state) in std::mem::take(&mut self.tcp_streams) {
-            let _ = state.tx.send(StreamEvent::Reset(reason.clone()));
-        }
-        for (_id, state) in std::mem::take(&mut self.udp_associations) {
-            let _ = state.tx.send(UdpEvent::Reset(reason.clone()));
-        }
-        for (_id, pending) in std::mem::take(&mut self.pending_opens) {
-            complete_pending_open_error(pending, FlowMuxError::SessionClosed(reason.clone()));
-        }
-        for (_id, respond) in std::mem::take(&mut self.pending_resolves) {
-            let _ = respond.send(Err(FlowMuxError::SessionClosed(reason.clone())));
-        }
-    }
-
-    async fn send_hello(&mut self) -> Result<(), FlowMuxError> {
-        let payload = Handshake::local(GUEST_BUILD).encode();
-        self.validator
-            .admit(&frame_facts(
-                Direction::GuestToHost,
-                Opcode::Hello,
-                0,
-                payload.len() as u32,
-            ))
-            .map_err(|e| FlowMuxError::Frame(e.to_string()))?;
-        self.write_frame(Opcode::Hello, 0, &payload).await
-    }
-
-    async fn read_hello_ack(&mut self) -> Result<(), FlowMuxError> {
-        let (opcode, stream_id, payload_len, payload) =
-            self.read_frame().await?.ok_or_else(|| {
-                // The host closing here is the shape of a host that is not
-                // speaking FlowMux at all, so say so rather than reporting a
-                // bare disconnect the operator has to guess at.
-                FlowMuxError::SessionClosed(format!(
-                    "host closed the connection before answering the FlowMux handshake; \
-                     this guest is {GUEST_BUILD} — the host endpoint is either stale or \
-                     serving a different egress protocol"
-                ))
-            })?;
-        if opcode != Opcode::HelloAck || stream_id != 0 {
-            return Err(FlowMuxError::Frame(format!(
-                "expected HelloAck, got {opcode:?} on stream {stream_id}"
-            )));
-        }
-        let host = Handshake::decode(&payload).map_err(|e| FlowMuxError::Frame(e.to_string()))?;
-        agree(&Handshake::local(GUEST_BUILD), &host)
-            .map_err(|e| FlowMuxError::Frame(e.to_string()))?;
-        self.validator
-            .admit(&frame_facts(
-                Direction::HostToGuest,
-                Opcode::HelloAck,
-                stream_id,
-                payload_len,
-            ))
-            .map_err(|e| FlowMuxError::Frame(e.to_string()))?;
-        Ok(())
-    }
-
-    async fn handle_request(&mut self, req: ClientRequest) -> Result<(), FlowMuxError> {
-        match req {
-            ClientRequest::OpenTcp {
-                target,
-                stream_id,
-                respond,
-            } => {
-                self.do_open_tcp(target, stream_id, respond).await;
-            }
-            ClientRequest::OpenUdp { stream_id, respond } => {
-                self.do_open_udp(stream_id, respond).await;
-            }
-            ClientRequest::Resolve {
-                stream_id,
-                query,
-                respond,
-            } => {
-                self.do_resolve(stream_id, query, respond).await;
-            }
-            ClientRequest::SendData { stream_id, bytes } => {
-                self.send_data(stream_id, &bytes).await?;
-            }
-            ClientRequest::HalfClose { stream_id } => {
-                self.send_half_close(stream_id).await?;
-            }
-            ClientRequest::Reset { stream_id, reason } => {
-                self.send_reset(stream_id, &reason).await?;
-            }
-            ClientRequest::UdpSend {
-                stream_id,
-                destination,
-                payload,
-            } => {
-                self.send_udp(stream_id, destination, &payload).await?;
-            }
-            ClientRequest::CloseUdp { stream_id } => {
-                self.send_close_udp(stream_id).await?;
-            }
-        }
-        Ok(())
-    }
-
-    async fn do_open_tcp(
-        &mut self,
-        target: String,
-        stream_id: u32,
-        respond: oneshot::Sender<Result<FlowMuxStream, FlowMuxError>>,
-    ) {
-        if self
-            .validator
-            .admit(&frame_facts(
-                Direction::GuestToHost,
-                Opcode::OpenTcp,
-                stream_id,
-                target.len() as u32,
-            ))
-            .is_err()
-        {
-            let _ = respond.send(Err(FlowMuxError::SessionClosed("invalid open".into())));
-            return;
-        }
-
-        let (stream_event_tx, stream_event_rx) = mpsc::unbounded_channel();
-        self.pending_opens.insert(
-            stream_id,
-            PendingOpen::Tcp {
-                respond,
-                stream_event_tx,
-                stream_event_rx,
-            },
-        );
-
-        if let Err(e) = self
-            .write_frame(Opcode::OpenTcp, stream_id, target.as_bytes())
-            .await
-            && let Some(PendingOpen::Tcp { respond, .. }) = self.pending_opens.remove(&stream_id)
-        {
-            let _ = respond.send(Err(e));
-        }
-    }
-
-    async fn do_open_udp(
-        &mut self,
-        stream_id: u32,
-        respond: oneshot::Sender<Result<FlowMuxUdpSocket, FlowMuxError>>,
-    ) {
-        if self
-            .validator
-            .admit(&frame_facts(
-                Direction::GuestToHost,
-                Opcode::OpenUdp,
-                stream_id,
-                0,
-            ))
-            .is_err()
-        {
-            let _ = respond.send(Err(FlowMuxError::SessionClosed("invalid open".into())));
-            return;
-        }
-
-        let (udp_event_tx, udp_event_rx) = mpsc::unbounded_channel();
-        self.pending_opens.insert(
-            stream_id,
-            PendingOpen::Udp {
-                respond,
-                udp_event_tx,
-                udp_event_rx,
-            },
-        );
-
-        if let Err(e) = self.write_frame(Opcode::OpenUdp, stream_id, &[]).await
-            && let Some(PendingOpen::Udp { respond, .. }) = self.pending_opens.remove(&stream_id)
-        {
-            let _ = respond.send(Err(e));
-        }
-    }
-
-    async fn do_resolve(
-        &mut self,
-        stream_id: u32,
-        query: Vec<u8>,
-        respond: oneshot::Sender<Result<Vec<u8>, FlowMuxError>>,
-    ) {
-        if self
-            .validator
-            .admit(&frame_facts(
-                Direction::GuestToHost,
-                Opcode::Resolve,
-                stream_id,
-                query.len() as u32,
-            ))
-            .is_err()
-        {
-            let _ = respond.send(Err(FlowMuxError::SessionClosed("invalid resolve".into())));
-            return;
-        }
-
-        self.pending_resolves.insert(stream_id, respond);
-
-        if let Err(e) = self.write_frame(Opcode::Resolve, stream_id, &query).await
-            && let Some(respond) = self.pending_resolves.remove(&stream_id)
-        {
-            let _ = respond.send(Err(e));
-        }
-    }
-
-    async fn handle_frame(
-        &mut self,
-        opcode: Opcode,
-        stream_id: u32,
-        payload: Vec<u8>,
-    ) -> Result<(), FlowMuxError> {
-        self.validator
-            .admit(&inbound_frame_facts(opcode, stream_id, &payload))
-            .map_err(|e| FlowMuxError::Frame(e.to_string()))?;
-
-        match opcode {
-            Opcode::Opened => {
-                if let Some(PendingOpen::Tcp {
-                    respond,
-                    stream_event_tx,
-                    stream_event_rx,
-                }) = self.pending_opens.remove(&stream_id)
-                {
-                    let handle = FlowMuxStream {
-                        stream_id,
-                        tx: self.client_tx.clone(),
-                        rx: stream_event_rx,
-                        read_buf: Vec::new(),
-                    };
-                    self.tcp_streams.insert(
-                        stream_id,
-                        TcpStreamState {
-                            tx: stream_event_tx,
-                            host_half_closed: false,
-                        },
-                    );
-                    let _ = respond.send(Ok(handle));
-                }
-            }
-            Opcode::UdpOpened => {
-                if let Some(PendingOpen::Udp {
-                    respond,
-                    udp_event_tx,
-                    udp_event_rx,
-                }) = self.pending_opens.remove(&stream_id)
-                {
-                    let handle = FlowMuxUdpSocket {
-                        stream_id,
-                        tx: self.client_tx.clone(),
-                        rx: udp_event_rx,
-                    };
-                    self.udp_associations
-                        .insert(stream_id, UdpAssociationState { tx: udp_event_tx });
-                    let _ = respond.send(Ok(handle));
-                }
-            }
-            Opcode::Refused => {
-                let reason = String::from_utf8_lossy(&payload).into_owned();
-                if let Some(pending) = self.pending_opens.remove(&stream_id) {
-                    complete_pending_open_error(pending, FlowMuxError::refused(reason));
-                } else if let Some(respond) = self.pending_resolves.remove(&stream_id) {
-                    let _ = respond.send(Err(FlowMuxError::refused(reason)));
-                }
-            }
-            Opcode::Resolved => {
-                if let Some(respond) = self.pending_resolves.remove(&stream_id) {
-                    let _ = respond.send(Ok(payload));
-                }
-            }
-            Opcode::ResolveRefused => {
-                let reason = String::from_utf8_lossy(&payload).into_owned();
-                if let Some(respond) = self.pending_resolves.remove(&stream_id) {
-                    let _ = respond.send(Err(FlowMuxError::refused(reason)));
-                }
-            }
-            Opcode::Data => {
-                let consumed = u32::try_from(payload.len()).unwrap_or(u32::MAX);
-                let delivered = match self.tcp_streams.get_mut(&stream_id) {
-                    Some(state) => {
-                        let _ = state.tx.send(StreamEvent::Data(payload));
-                        true
-                    }
-                    None => false,
-                };
-                // Return the credit those bytes consumed.
-                //
-                // The host replenishes the guest's window on every DATA it
-                // relays, but nothing replenished the host's — so the host→guest
-                // window drained and the host reset the stream the moment it hit
-                // zero. That caps every download at one window (~48 KiB here) and
-                // surfaces as a truncated archive rather than as a flow-control
-                // failure. Only for a stream we still hold: replenishing one we
-                // have already retired would name a stream the host has closed.
-                if delivered && consumed > 0 {
-                    self.send_window_update(stream_id, consumed).await?;
-                }
-            }
-            Opcode::HalfClose => {
-                if let Some(state) = self.tcp_streams.get_mut(&stream_id) {
-                    state.host_half_closed = true;
-                    let _ = state.tx.send(StreamEvent::HalfClose);
-                }
-            }
-            Opcode::Reset => {
-                let reason = String::from_utf8_lossy(&payload).into_owned();
-                if let Some(state) = self.tcp_streams.remove(&stream_id) {
-                    let _ = state.tx.send(StreamEvent::Reset(reason.clone()));
-                }
-                if let Some(state) = self.udp_associations.remove(&stream_id) {
-                    let _ = state.tx.send(UdpEvent::Reset(reason.clone()));
-                }
-                if let Some(pending) = self.pending_opens.remove(&stream_id) {
-                    complete_pending_open_error(
-                        pending,
-                        FlowMuxError::SessionClosed(reason.clone()),
-                    );
-                }
-                if let Some(respond) = self.pending_resolves.remove(&stream_id) {
-                    let _ = respond.send(Err(FlowMuxError::SessionClosed(reason)));
-                }
-            }
-            Opcode::UdpRecv => {
-                if let Some(state) = self.udp_associations.get_mut(&stream_id)
-                    && let Ok((addr, body)) = decode_udp_addr(&payload)
-                {
-                    let _ = state.tx.send(UdpEvent::Recv(addr, body.to_vec()));
-                }
-            }
-            Opcode::CloseUdp => {
-                let reason = String::from_utf8_lossy(&payload).into_owned();
-                if let Some(state) = self.udp_associations.remove(&stream_id) {
-                    let _ = state.tx.send(UdpEvent::CloseUdp(reason));
-                }
-            }
-            Opcode::WindowUpdate => {
-                if payload.len() == 4 {
-                    let delta =
-                        u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]);
-                    if let Some(state) = self.tcp_streams.get_mut(&stream_id) {
-                        let _delta = delta;
-                        let _ = state.tx.send(StreamEvent::WindowUpdate);
-                    }
-                }
-            }
-            Opcode::GoAway => {
-                let reason = String::from_utf8_lossy(&payload).into_owned();
-                return Err(FlowMuxError::SessionClosed(reason));
-            }
-            _ => {
-                warn!(
-                    ?opcode,
-                    stream_id, "FlowMux client ignoring unexpected frame"
-                );
-            }
-        }
-        Ok(())
-    }
-
-    async fn send_data(&mut self, stream_id: u32, bytes: &[u8]) -> Result<(), FlowMuxError> {
-        self.write_frame(Opcode::Data, stream_id, bytes).await
-    }
-
-    async fn send_half_close(&mut self, stream_id: u32) -> Result<(), FlowMuxError> {
-        self.write_frame(Opcode::HalfClose, stream_id, &[]).await
-    }
-
-    /// Grant the host `delta` more bytes of room on this stream.
-    ///
-    /// The mirror of the host's replenish. A zero delta is a frame error by
-    /// the protocol, so callers only reach here with bytes actually consumed.
-    async fn send_window_update(&mut self, stream_id: u32, delta: u32) -> Result<(), FlowMuxError> {
-        self.write_frame(Opcode::WindowUpdate, stream_id, &delta.to_be_bytes())
-            .await?;
-        // Advance our own view of the host's allowance to match what we just
-        // told it. The validator only learns of credit it admits, so a grant
-        // that goes out on the wire without this leaves the local window
-        // shrinking while the host's grows — and the guest then refuses the
-        // host's data as over-credit, on a window it granted itself.
-        // The host keeps its own view in step the same way, via `mark_sent`.
-        let _ = self.validator.admit(
-            &mvm_contract::protocol::network_flow::FrameFacts::new(
-                Direction::GuestToHost,
-                Opcode::WindowUpdate,
-                stream_id,
-            )
-            .with_payload(4)
-            .with_credit(delta),
-        );
-        Ok(())
-    }
-
-    async fn send_reset(&mut self, stream_id: u32, reason: &str) -> Result<(), FlowMuxError> {
-        self.write_frame(Opcode::Reset, stream_id, reason.as_bytes())
-            .await
-    }
-
-    async fn send_udp(
-        &mut self,
-        stream_id: u32,
-        destination: SocketAddr,
-        payload: &[u8],
-    ) -> Result<(), FlowMuxError> {
-        let mut wire = encode_udp_addr(destination.ip(), destination.port());
-        wire.extend_from_slice(payload);
-        self.write_frame(Opcode::UdpSend, stream_id, &wire).await
-    }
-
-    async fn send_close_udp(&mut self, stream_id: u32) -> Result<(), FlowMuxError> {
-        self.write_frame(Opcode::CloseUdp, stream_id, &[]).await
-    }
-
-    async fn write_frame(
-        &mut self,
-        opcode: Opcode,
-        stream_id: u32,
-        payload: &[u8],
-    ) -> Result<(), FlowMuxError> {
-        let mut frame = Vec::new();
-        encode_into(&mut frame, opcode, stream_id, payload)
-            .map_err(|e| FlowMuxError::Frame(e.to_string()))?;
-        let sealed = self
-            .session
-            .seal(&frame)
-            .map_err(|e| FlowMuxError::Frame(e.to_string()))?;
-        let mut sealed_bytes = Vec::new();
-        sealed
-            .encode(&mut sealed_bytes)
-            .map_err(|e| FlowMuxError::Frame(e.to_string()))?;
-        let len = u32::try_from(sealed_bytes.len())
-            .map_err(|_| FlowMuxError::Frame("sealed frame too large".into()))?;
-        self.stream.write_all(&len.to_be_bytes()).await?;
-        self.stream.write_all(&sealed_bytes).await?;
-        self.stream.flush().await?;
-        Ok(())
-    }
-
-    async fn read_frame(&mut self) -> Result<Option<(Opcode, u32, u32, Vec<u8>)>, FlowMuxError> {
-        read_sealed_frame_from(&mut self.stream, &mut self.session).await
-    }
-}
-
 /// Largest sealed frame the guest will accept off the wire.
 const MAX_SEALED_LEN: usize = 1 << 20;
 
-/// One decoded frame: opcode, stream id, payload length, payload bytes.
 pub(crate) type DecodedFrame = (Opcode, u32, u32, Vec<u8>);
 
 /// The outcome of reading one frame. `Ok(None)` is a clean close on a frame
@@ -1226,6 +592,8 @@ fn inbound_frame_facts(
         payload.len() as u32,
     );
     match (opcode, payload) {
+        (Opcode::InboundOpen, payload) => decode_ingress_mapping_id(payload)
+            .map_or(facts, |mapping| facts.with_ingress_mapping(mapping)),
         (Opcode::WindowUpdate, [a, b, c, d]) => {
             facts.with_credit(u32::from_be_bytes([*a, *b, *c, *d]))
         }
@@ -1235,234 +603,9 @@ fn inbound_frame_facts(
     }
 }
 
-/// Default timeout for an individual call that waits through reconnect.
-const CALL_TIMEOUT: Duration = Duration::from_secs(30);
-
-/// Reconnect policy: bounded exponential backoff with a small absolute cap.
-#[derive(Debug, Clone, Copy)]
-pub struct ReconnectPolicy {
-    /// Initial delay before the first reconnect attempt.
-    pub initial_delay: Duration,
-    /// Maximum delay between attempts.
-    pub max_delay: Duration,
-    /// Maximum number of reconnect attempts before giving up.
-    pub max_attempts: u32,
-}
-
-impl Default for ReconnectPolicy {
-    fn default() -> Self {
-        Self {
-            initial_delay: Duration::from_millis(250),
-            max_delay: Duration::from_secs(16),
-            max_attempts: 10,
-        }
-    }
-}
-
-/// A reconnecting FlowMux client.
-///
-/// Wraps one active [`FlowMuxClient`] session and transparently re-creates it
-/// on transport failure. Live handles from a lost session fail promptly; new
-/// requests block until a fresh session is established or reconnect is
-/// exhausted. No request body, datagram, or `Open` frame is replayed across
-/// sessions.
-#[derive(Debug, Clone)]
-pub struct FlowMuxReconnectClient {
-    current: watch::Receiver<Option<Arc<FlowMuxClient>>>,
-}
-
-impl FlowMuxReconnectClient {
-    /// Connect to the host and start the reconnect owner.
-    ///
-    /// `connector` is called to obtain a new transport each time the current
-    /// session dies. The initial connection uses `connector()`; subsequent
-    /// attempts use the same factory under bounded exponential backoff.
-    pub async fn connect<S, F, Fut>(
-        connector: F,
-        guest_signing_key: SigningKey,
-        host_anchor: VerifyingKey,
-    ) -> Result<Self, FlowMuxError>
-    where
-        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
-        F: Fn() -> Fut + Send + Sync + 'static,
-        Fut: std::future::Future<Output = Result<S, FlowMuxError>> + Send,
-    {
-        let initial = connector().await?;
-        let client = Arc::new(
-            FlowMuxClient::connect(initial, guest_signing_key.clone(), host_anchor).await?,
-        );
-        let (current_tx, current_rx) = watch::channel(Some(Arc::clone(&client)));
-
-        tokio::spawn(async move {
-            let mut state_rx = client.state();
-            reconnect_loop(
-                connector,
-                guest_signing_key,
-                host_anchor,
-                current_tx,
-                &mut state_rx,
-                ReconnectPolicy::default(),
-            )
-            .await;
-        });
-
-        Ok(Self {
-            current: current_rx,
-        })
-    }
-
-    /// Wait until there is a ready session and return a clone of it.
-    ///
-    /// Two watches move independently here: `current` names which client the
-    /// reconnect loop owns, and the client's own state says whether that one
-    /// has finished its handshake. Waiting on only the first parks forever on
-    /// a client that is still connecting, since nothing replaces it.
-    async fn active_client(&self) -> Result<Arc<FlowMuxClient>, FlowMuxError> {
-        let mut current = self.current.clone();
-        loop {
-            let snapshot = current.borrow().clone();
-            let Some(client) = snapshot else {
-                if current.changed().await.is_err() {
-                    return Err(FlowMuxError::SessionClosed("reconnect owner gone".into()));
-                }
-                continue;
-            };
-
-            let mut state = client.state();
-            let settled = loop {
-                match state.borrow().clone() {
-                    SessionState::Ready => break Some(client),
-                    // Dead is the reconnect loop's cue; wait for the client it
-                    // puts in place rather than re-reading this one.
-                    SessionState::Dead(_) => break None,
-                    SessionState::Connecting | SessionState::Reconnecting => {}
-                }
-                tokio::select! {
-                    changed = state.changed() => {
-                        if changed.is_err() {
-                            break None;
-                        }
-                    }
-                    changed = current.changed() => {
-                        if changed.is_err() {
-                            return Err(FlowMuxError::SessionClosed("reconnect owner gone".into()));
-                        }
-                        break None;
-                    }
-                }
-            };
-            if let Some(client) = settled {
-                return Ok(client);
-            }
-            if current.has_changed().unwrap_or(false) {
-                continue;
-            }
-            if current.changed().await.is_err() {
-                return Err(FlowMuxError::SessionClosed("reconnect owner gone".into()));
-            }
-        }
-    }
-
-    /// Open a TCP flow to `target` (`host:port`).
-    pub async fn open_tcp(&self, target: &str) -> Result<FlowMuxStream, FlowMuxError> {
-        let client = tokio::time::timeout(CALL_TIMEOUT, self.active_client())
-            .await
-            .map_err(|_| FlowMuxError::SessionClosed("reconnect timed out".into()))??;
-        client.open_tcp(target).await
-    }
-
-    /// Open a UDP association.
-    pub async fn open_udp(&self) -> Result<FlowMuxUdpSocket, FlowMuxError> {
-        let client = tokio::time::timeout(CALL_TIMEOUT, self.active_client())
-            .await
-            .map_err(|_| FlowMuxError::SessionClosed("reconnect timed out".into()))??;
-        client.open_udp().await
-    }
-
-    /// Resolve a DNS name. Returns the raw DNS response bytes.
-    pub async fn resolve(&self, name: &str, qtype: u16) -> Result<Vec<u8>, FlowMuxError> {
-        let client = tokio::time::timeout(CALL_TIMEOUT, self.active_client())
-            .await
-            .map_err(|_| FlowMuxError::SessionClosed("reconnect timed out".into()))??;
-        client.resolve(name, qtype).await
-    }
-
-    /// Build a reconnect client from an existing watch receiver.
-    ///
-    /// Test-only: lets in-crate tests stand up a client that is already
-    /// connected to a mock host without going through the reconnect factory.
-    #[cfg(all(test, feature = "addons"))]
-    pub(crate) fn from_receiver(current: watch::Receiver<Option<Arc<FlowMuxClient>>>) -> Self {
-        Self { current }
-    }
-}
-
-async fn reconnect_loop<S, F, Fut>(
-    connector: F,
-    guest_signing_key: SigningKey,
-    host_anchor: VerifyingKey,
-    current_tx: watch::Sender<Option<Arc<FlowMuxClient>>>,
-    state_rx: &mut watch::Receiver<SessionState>,
-    policy: ReconnectPolicy,
-) where
-    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
-    F: Fn() -> Fut + Send + Sync,
-    Fut: std::future::Future<Output = Result<S, FlowMuxError>> + Send,
-{
-    let mut delay = policy.initial_delay;
-    let mut attempts = 0_u32;
-
-    loop {
-        // Wait for the current session to die.
-        loop {
-            if matches!(*state_rx.borrow(), SessionState::Dead(_)) {
-                break;
-            }
-            if state_rx.changed().await.is_err() {
-                // The session task dropped its state sender. That is the
-                // strongest evidence the session is gone, not a signal to stop
-                // watching — a session can end without ever publishing `Dead`.
-                // Returning here drops `current_tx`, so every waiter fails with
-                // "reconnect owner gone" and the guest never gets a second
-                // session, which is indistinguishable from having no network.
-                break;
-            }
-        }
-
-        attempts += 1;
-        if attempts > policy.max_attempts {
-            warn!("FlowMux reconnect exhausted; entering dead state");
-            let _ = current_tx.send(None);
-            return;
-        }
-
-        let jitter = Duration::from_millis(u64::from(rand::random::<u16>()) % 100);
-        tokio::time::sleep(delay + jitter).await;
-        delay = (delay * 2).min(policy.max_delay);
-
-        match connector().await {
-            Ok(stream) => {
-                match FlowMuxClient::connect(stream, guest_signing_key.clone(), host_anchor).await {
-                    Ok(client) => {
-                        let new_client = Arc::new(client);
-                        let state = new_client.state();
-                        if current_tx.send(Some(new_client)).is_err() {
-                            return;
-                        }
-                        *state_rx = state;
-                        attempts = 0;
-                        delay = policy.initial_delay;
-                    }
-                    Err(e) => {
-                        warn!(error = %e, "FlowMux reconnect handshake failed");
-                    }
-                }
-            }
-            Err(e) => {
-                warn!(error = %e, "FlowMux reconnect transport failed");
-            }
-        }
-    }
+fn decode_ingress_mapping_id(payload: &[u8]) -> Option<u16> {
+    let bytes: [u8; 2] = payload.get(..2)?.try_into().ok()?;
+    Some(u16::from_be_bytes(bytes))
 }
 
 #[cfg(test)]
@@ -1765,6 +908,222 @@ mod tests {
 
         stream.shutdown().await.unwrap();
 
+        host.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn guest_client_relays_declared_inbound_tcp_to_loopback() {
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let guest_port = listener.local_addr().unwrap().port();
+        let (guest_stream, host_stream) = tokio::io::duplex(4096);
+        let (guest_key, _guest_anchor) = generate_keypair();
+        let (host_key, host_anchor) = generate_keypair();
+
+        let host = tokio::spawn(async move {
+            let (mut host_stream, mut host_session) = host_handshake(host_stream, host_key).await;
+            let (opcode, _, _, _) = recv_frame(&mut host_stream, &mut host_session)
+                .await
+                .unwrap();
+            assert_eq!(opcode, Opcode::Hello);
+            send_frame(
+                &mut host_stream,
+                &mut host_session,
+                Opcode::HelloAck,
+                0,
+                &Handshake::local("test-host").encode(),
+            )
+            .await;
+
+            send_frame(
+                &mut host_stream,
+                &mut host_session,
+                Opcode::InboundOpen,
+                2,
+                &17_u16.to_be_bytes(),
+            )
+            .await;
+            let (opcode, stream_id, _, _) = recv_frame(&mut host_stream, &mut host_session)
+                .await
+                .unwrap();
+            assert_eq!((opcode, stream_id), (Opcode::InboundReady, 2));
+
+            send_frame(
+                &mut host_stream,
+                &mut host_session,
+                Opcode::Data,
+                2,
+                b"from-host",
+            )
+            .await;
+            loop {
+                let (opcode, stream_id, _, payload) =
+                    recv_frame(&mut host_stream, &mut host_session)
+                        .await
+                        .unwrap();
+                if opcode == Opcode::Data {
+                    assert_eq!(stream_id, 2);
+                    assert_eq!(payload, b"from-guest");
+                    break;
+                }
+                assert_eq!(opcode, Opcode::WindowUpdate);
+            }
+        });
+
+        let _client = FlowMuxClient::connect_with_ingress(
+            guest_stream,
+            guest_key,
+            host_anchor,
+            vec![GuestIngressTarget {
+                mapping_id: 17,
+                protocol: mvm_contract::plan::IngressProtocol::Tcp,
+                guest_addr: std::net::Ipv4Addr::LOCALHOST.to_string(),
+                guest_port,
+            }],
+        )
+        .await
+        .expect("guest handshake");
+
+        let (mut loopback, _) = listener.accept().await.unwrap();
+        let mut payload = [0_u8; 9];
+        loopback.read_exact(&mut payload).await.unwrap();
+        assert_eq!(&payload, b"from-host");
+        loopback.write_all(b"from-guest").await.unwrap();
+        host.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn guest_client_refuses_inbound_tcp_when_loopback_target_is_unavailable() {
+        let guest_port = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let (guest_stream, host_stream) = tokio::io::duplex(4096);
+        let (guest_key, _guest_anchor) = generate_keypair();
+        let (host_key, host_anchor) = generate_keypair();
+
+        let host = tokio::spawn(async move {
+            let (mut host_stream, mut host_session) = host_handshake(host_stream, host_key).await;
+            let (opcode, _, _, _) = recv_frame(&mut host_stream, &mut host_session)
+                .await
+                .unwrap();
+            assert_eq!(opcode, Opcode::Hello);
+            send_frame(
+                &mut host_stream,
+                &mut host_session,
+                Opcode::HelloAck,
+                0,
+                &Handshake::local("test-host").encode(),
+            )
+            .await;
+            send_frame(
+                &mut host_stream,
+                &mut host_session,
+                Opcode::InboundOpen,
+                2,
+                &23_u16.to_be_bytes(),
+            )
+            .await;
+            let (opcode, stream_id, _, reason) = recv_frame(&mut host_stream, &mut host_session)
+                .await
+                .unwrap();
+            assert_eq!((opcode, stream_id), (Opcode::InboundRefused, 2));
+            assert!(!reason.is_empty());
+        });
+
+        let _client = FlowMuxClient::connect_with_ingress(
+            guest_stream,
+            guest_key,
+            host_anchor,
+            vec![GuestIngressTarget {
+                mapping_id: 23,
+                protocol: mvm_contract::plan::IngressProtocol::Tcp,
+                guest_addr: std::net::Ipv4Addr::LOCALHOST.to_string(),
+                guest_port,
+            }],
+        )
+        .await
+        .expect("guest handshake");
+        host.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn guest_client_relays_declared_inbound_udp_to_loopback() {
+        let service = tokio::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let guest_port = service.local_addr().unwrap().port();
+        let external_peer = SocketAddr::new(std::net::Ipv4Addr::new(192, 0, 2, 44).into(), 4040);
+        let (guest_stream, host_stream) = tokio::io::duplex(4096);
+        let (guest_key, _guest_anchor) = generate_keypair();
+        let (host_key, host_anchor) = generate_keypair();
+
+        let host = tokio::spawn(async move {
+            let (mut host_stream, mut host_session) = host_handshake(host_stream, host_key).await;
+            let (opcode, _, _, _) = recv_frame(&mut host_stream, &mut host_session)
+                .await
+                .unwrap();
+            assert_eq!(opcode, Opcode::Hello);
+            send_frame(
+                &mut host_stream,
+                &mut host_session,
+                Opcode::HelloAck,
+                0,
+                &Handshake::local("test-host").encode(),
+            )
+            .await;
+            send_frame(
+                &mut host_stream,
+                &mut host_session,
+                Opcode::InboundOpen,
+                2,
+                &31_u16.to_be_bytes(),
+            )
+            .await;
+            let (opcode, stream_id, _, _) = recv_frame(&mut host_stream, &mut host_session)
+                .await
+                .unwrap();
+            assert_eq!((opcode, stream_id), (Opcode::InboundReady, 2));
+
+            let mut datagram = encode_udp_addr(external_peer.ip(), external_peer.port());
+            datagram.extend_from_slice(b"udp-request");
+            send_frame(
+                &mut host_stream,
+                &mut host_session,
+                Opcode::UdpRecv,
+                2,
+                &datagram,
+            )
+            .await;
+            let (opcode, stream_id, _, payload) = recv_frame(&mut host_stream, &mut host_session)
+                .await
+                .unwrap();
+            assert_eq!((opcode, stream_id), (Opcode::UdpSend, 2));
+            let (peer, body) = decode_udp_addr(&payload).unwrap();
+            assert_eq!(peer, external_peer);
+            assert_eq!(body, b"udp-response");
+        });
+
+        let _client = FlowMuxClient::connect_with_ingress(
+            guest_stream,
+            guest_key,
+            host_anchor,
+            vec![GuestIngressTarget {
+                mapping_id: 31,
+                protocol: mvm_contract::plan::IngressProtocol::Udp,
+                guest_addr: std::net::Ipv4Addr::LOCALHOST.to_string(),
+                guest_port,
+            }],
+        )
+        .await
+        .expect("guest handshake");
+
+        let mut request = [0_u8; 64];
+        let (received, source) = service.recv_from(&mut request).await.unwrap();
+        assert_eq!(&request[..received], b"udp-request");
+        service.send_to(b"udp-response", source).await.unwrap();
         host.await.unwrap();
     }
 

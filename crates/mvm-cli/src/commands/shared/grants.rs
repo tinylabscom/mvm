@@ -15,7 +15,7 @@ use mvm_contract::grants::{CpuGrant, EgressGrant, Grants, WallClockGrant};
 use mvm_core::grants_resolve::{
     GrantLayer, GrantProvenance, GrantSurface, load_grants_file, resolve_grants,
 };
-use mvm_core::network_policy::NetworkPolicy;
+use mvm_core::network_policy::{AiPolicy, NetworkPolicy};
 use mvm_core::user_config::MvmConfig;
 
 /// The grant-authoring flags of one invocation, plus the lower surfaces it
@@ -40,6 +40,9 @@ pub(in crate::commands) struct GrantInputs<'a> {
     pub manifest: Option<&'a Grants>,
     /// The operator's host config, for the dimensions nothing above named.
     pub config: &'a MvmConfig,
+    /// Optional AI egress metering/budget policy, usually from the
+    /// project manifest's `[network.ai]` table.
+    pub ai: Option<&'a AiPolicy>,
 }
 
 /// One invocation's resolved permission set and the egress policy that follows
@@ -87,7 +90,8 @@ pub(in crate::commands) fn resolve_run_grants(inputs: GrantInputs<'_>) -> Result
         plan_grants.as_ref().and_then(|g| g.egress.as_ref()),
         inputs.net,
         inputs.allow_host,
-    )?;
+    )?
+    .with_ai(inputs.ai.cloned());
     Ok(RunGrants {
         plan_grants,
         network_policy,
@@ -205,6 +209,7 @@ mod tests {
             grants_file: None,
             manifest: None,
             config,
+            ai: None,
         }
     }
 
@@ -217,6 +222,22 @@ mod tests {
             resolved.network_policy.resolve_rules().as_deref(),
             Some(&[][..]),
             "no grant and no flags is deny-all"
+        );
+    }
+
+    #[test]
+    fn ai_policy_from_input_is_attached_to_network_policy() {
+        let cfg = MvmConfig::default();
+        let ai = AiPolicy::metered_with_total_budget(100_000);
+        let resolved = resolve_run_grants(GrantInputs {
+            ai: Some(&ai),
+            ..inputs(&cfg, &[])
+        })
+        .expect("resolves");
+        assert_eq!(
+            resolved.network_policy.ai(),
+            Some(&ai),
+            "the input AI policy must ride through to the enforced network policy"
         );
     }
 

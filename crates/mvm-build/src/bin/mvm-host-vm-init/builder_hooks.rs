@@ -23,6 +23,12 @@ const HOOK_PATH: &str = "/etc/mvm/hooks/before_build.sh";
 /// does not depend on any host share.
 const MOUNT_POINT: &str = "/tmp/mvm-before-build-rootfs";
 
+/// Absolute path populated by the builder image from util-linux.
+///
+/// `/bin/mount` is the BusyBox applet. It does not allocate a loop device for
+/// `-o loop`; it forwards `loop` to ext4 as a filesystem option instead.
+const UTIL_LINUX_MOUNT: &str = "/sbin/mount";
+
 /// Grace period for the before_build hook. Build-time setup (DB
 /// migrations, cache warming) should complete promptly; if it hangs we
 /// fail the build rather than leaving a builder VM wedged.
@@ -151,7 +157,7 @@ fn mount_rootfs(rootfs_path: &Path) -> Result<(), BuilderHookError> {
     // util-linux mount -o loop allocates a loop device for the
     // file-backed ext4 image. The nix mount(2) syscall wrapper
     // lacks LOOP_SET_FD, so shell out.
-    let status = std::process::Command::new("mount")
+    let status = std::process::Command::new(UTIL_LINUX_MOUNT)
         .arg("-o")
         .arg("loop")
         .arg(rootfs_path)
@@ -263,6 +269,7 @@ mod tests {
         // the Nix factory. If they change, the wiring sites must update.
         assert_eq!(HOOK_PATH, "/etc/mvm/hooks/before_build.sh");
         assert_eq!(MOUNT_POINT, "/tmp/mvm-before-build-rootfs");
+        assert_eq!(UTIL_LINUX_MOUNT, "/sbin/mount");
         assert_eq!(
             CHROOT_PATH,
             "/usr/local/sbin:/usr/local/bin:/sbin:/usr/sbin:/bin:/usr/bin"

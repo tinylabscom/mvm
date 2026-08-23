@@ -141,17 +141,25 @@ fn alternative_for(capability: &'static str, backend: BackendKind) -> Capability
             BackendKind::Firecracker | BackendKind::Libkrun | BackendKind::Hvf => {
                 CapabilityAlternative::StandbyPool
             }
-            BackendKind::WebLinux => CapabilityAlternative::ColdStartFromSignedPlan,
-            _ => CapabilityAlternative::ColdStartFromSignedPlan,
+            BackendKind::Qemu
+            | BackendKind::Mock
+            | BackendKind::Wasm
+            | BackendKind::WebLinux
+            | BackendKind::AppleContainer => CapabilityAlternative::ColdStartFromSignedPlan,
         },
 
         // Transport capabilities. Every one of these ends at the same per-VM
         // substitution endpoint, so the substitute changes how the workload
         // reaches the seam, never whether policy and audit apply to it.
-        "vsock" | "host_vsock_proxy" | "l3_vsock" => match backend {
+        "vsock" | "host_vsock_proxy" => match backend {
             BackendKind::Wasm => CapabilityAlternative::NetworkEndpointOverWasmImport,
             BackendKind::WebLinux => CapabilityAlternative::NetworkEndpointOverBrowserChannel,
-            _ => CapabilityAlternative::NetworkEndpointOverUds,
+            BackendKind::Firecracker
+            | BackendKind::Libkrun
+            | BackendKind::Qemu
+            | BackendKind::Mock
+            | BackendKind::Hvf
+            | BackendKind::AppleContainer => CapabilityAlternative::NetworkEndpointOverUds,
         },
 
         // Interactive access. The stdin route carries bytes to an already
@@ -453,6 +461,18 @@ mod tests {
     }
 
     #[test]
+    fn the_web_linux_tier_reaches_the_endpoint_through_its_browser_channel() {
+        let required = require(|r| r.vsock = true);
+        let gaps = barren()
+            .negotiate(&required, BackendKind::WebLinux)
+            .expect_err("the browser-hosted tier has no native vsock device");
+        assert_eq!(
+            gaps[0].alternative,
+            CapabilityAlternative::NetworkEndpointOverBrowserChannel
+        );
+    }
+
+    #[test]
     fn a_missing_snapshot_tier_falls_back_to_replaying_the_signed_plan() {
         let required = require(|r| r.vcpu_state_snapshot = true);
         let gaps = barren()
@@ -650,13 +670,12 @@ mod tests {
             vsock: true,
             no_routable_guest_nic: true,
             host_vsock_proxy: true,
-            l3_vsock: true,
             pty_exec: true,
         };
         let gaps = barren()
             .negotiate(&required, BackendKind::Firecracker)
             .expect_err("a barren backend serves nothing");
-        assert_eq!(gaps.len(), 10, "every capability must produce a gap");
+        assert_eq!(gaps.len(), 9, "every capability must produce a gap");
         for gap in &gaps {
             assert!(
                 !gap.alternative

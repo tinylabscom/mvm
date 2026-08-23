@@ -107,6 +107,67 @@ pub(crate) struct StreamingReinjector {
     pending: Zeroizing<Vec<u8>>,
 }
 
+/// Bounded request-side replacement across arbitrary transport chunk
+/// boundaries. The retained overlap exceeds every configured detector
+/// fingerprint. A detected span that crosses the proposed cut moves the cut
+/// back to the span's start, so each byte is replaced exactly once and tokens
+/// remain eligible for response reinjection.
+pub(crate) struct StreamingReplacer {
+    pending: Zeroizing<Vec<u8>>,
+}
+
+const STREAM_REPLACEMENT_OVERLAP: usize = 64 * 1024;
+const MAX_STREAM_REPLACEMENT_PENDING: usize = STREAM_REPLACEMENT_OVERLAP * 2;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("streaming replacement could not establish a bounded safe cut")]
+pub(crate) struct StreamingReplacementError;
+
+impl StreamingReplacer {
+    pub(crate) fn new() -> Self {
+        Self {
+            pending: Zeroizing::new(Vec::new()),
+        }
+    }
+
+    pub(crate) fn push(
+        &mut self,
+        flow: &mut ReplacementFlow,
+        chunk: &[u8],
+    ) -> Result<(Vec<u8>, Vec<RewriteProofRecord>), StreamingReplacementError> {
+        self.pending.extend_from_slice(chunk);
+        if self.pending.len() <= STREAM_REPLACEMENT_OVERLAP {
+            return Ok((Vec::new(), Vec::new()));
+        }
+
+        let proposed = self.pending.len() - STREAM_REPLACEMENT_OVERLAP;
+        let stable = flow
+            .detect_spans(&self.pending)
+            .into_iter()
+            .filter(|span| span.start < proposed && span.end > proposed)
+            .map(|span| span.start)
+            .min()
+            .unwrap_or(proposed);
+        if stable == 0 && self.pending.len() > MAX_STREAM_REPLACEMENT_PENDING {
+            return Err(StreamingReplacementError);
+        }
+        if stable == 0 {
+            return Ok((Vec::new(), Vec::new()));
+        }
+        let suffix = self.pending.split_off(stable);
+        let ready = std::mem::replace(&mut *self.pending, suffix);
+        Ok(flow.replace_body(&ready))
+    }
+
+    pub(crate) fn finish(
+        &mut self,
+        flow: &mut ReplacementFlow,
+    ) -> (Vec<u8>, Vec<RewriteProofRecord>) {
+        let pending = std::mem::take(&mut *self.pending);
+        flow.replace_body(&pending)
+    }
+}
+
 impl StreamingReinjector {
     pub(crate) fn new() -> Self {
         Self {
@@ -510,6 +571,30 @@ mod tests {
         proofs.extend(tail_proofs);
         assert_eq!([first, second, tail].concat(), secret);
         assert_eq!(proofs.len(), 1, "one token produces one reinjection proof");
+    }
+
+    #[test]
+    fn request_secret_split_across_chunks_is_replaced_once() {
+        let engine = ReplacementEngine::new();
+        let mut flow = engine.start_flow("tenant-a", &enabled_action());
+        let secret = b"sk-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let mut first = vec![b'x'; STREAM_REPLACEMENT_OVERLAP - 10];
+        first.extend_from_slice(&secret[..10]);
+        let mut stream = StreamingReplacer::new();
+        let (ready, proofs) = stream.push(&mut flow, &first).unwrap();
+        assert!(ready.is_empty());
+        assert!(proofs.is_empty());
+
+        let (middle, mut proofs) = stream.push(&mut flow, &secret[10..]).unwrap();
+        let (tail, tail_proofs) = stream.finish(&mut flow);
+        proofs.extend(tail_proofs);
+        let transformed = [middle, tail].concat();
+        assert!(
+            !transformed
+                .windows(secret.len())
+                .any(|bytes| bytes == secret)
+        );
+        assert_eq!(proofs.len(), 1);
     }
 
     #[test]

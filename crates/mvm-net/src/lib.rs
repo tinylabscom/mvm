@@ -19,31 +19,13 @@
 //! carry claims-10/12/13 witnesses and move under their own follow-ups), and
 //! the egress-proxy substitution/scan seams.
 
-/// Backend-neutral guest channels: typed services over whatever the VMM
-/// uses to terminate the guest's vsock, plus the host-owned per-boot VM
-/// identity everything authorizes against.
+/// Backend-neutral typed services over the VMM's guest-vsock transport.
 pub mod channel;
 pub mod enforcement;
-/// Policy core for the opt-in L3 TUN-over-vsock network mode: session
-/// identity, address allocation, bounded flow state, per-packet admission,
-/// DNS bindings, and declared ingress. Pure — the host gateway supplies
-/// the I/O and the platform datapath.
-pub mod l3;
-/// The signed network lease: one grant of network identity for one VM boot,
-/// issued locally today and by a control plane later, verified the same way
-/// either way.
-pub mod lease;
 pub mod provider;
 pub mod registry;
 
-pub use channel::{
-    ChannelError, GuestChannelProvider, GuestConnection, GuestListener, GuestService, GuestStream,
-    VmInstanceIdentity,
-};
+pub use channel::GuestService;
 pub use enforcement::{EgressEnforcer, EgressWiring, EnforcementError};
-pub use lease::{
-    ControlPlaneLossPolicy, LeaseContext, LeaseError, LeaseRequest, LeaseVerifier,
-    LocalLeaseAuthority, NetworkLease, verify_lease,
-};
 pub use provider::{NetHandle, NetworkError, NetworkProvider, NetworkSpec};
 pub use registry::NetworkProviderRegistry;

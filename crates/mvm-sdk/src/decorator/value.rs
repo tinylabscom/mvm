@@ -12,8 +12,8 @@ use std::path::{Path, PathBuf};
 
 use crate::ir::{
     App, AuthType, Dependencies, Entrypoint, EnvValue, Format, HookCmd, Hooks, Image, Mount,
-    Network, NetworkEgress, NetworkMode, NodeTool, PortForward, PortProto, PythonTool, Resources,
-    SecretMount, SecretRef, Source, Workload,
+    Network, NetworkEgress, NetworkMode, NodeTool, PortForward, PortProto, PortTransform,
+    PythonTool, Resources, SecretMount, SecretRef, Source, Workload,
 };
 
 use super::ParseError;
@@ -419,14 +419,20 @@ fn helper_to_network(v: Value, path: &Path, line: usize) -> Result<Network, Pars
             });
         }
     };
-    // Declares that the workload needs a real in-guest IP stack. This is
-    // what selects the L3 tunnel; leaving it off keeps the socket-aware
-    // transport, which is the stronger posture.
-    let raw_ip_stack = pop_bool_kwarg(&mut kwargs, "raw_ip_stack", path, line, "mvm.network")?;
+    if kwargs.remove("raw_ip_stack").is_some() {
+        return Err(ParseError::HelperBadKwarg {
+            path: path.to_path_buf(),
+            line,
+            helper: "mvm.network".to_string(),
+            kwarg: "raw_ip_stack".to_string(),
+            detail: "retired; use the guest loopback HTTP proxy, SOCKS5h/UDP, controlled DNS, mediated ping, or a typed connector".to_string(),
+        });
+    }
     let ports = match kwargs.remove("ports") {
         Some(Value::List(items)) => items
             .into_iter()
-            .map(|v| match v {
+            .enumerate()
+            .map(|(index, v)| match v {
                 Value::Dict(mut d) => {
                     let guest = match d.remove("guest") {
                         Some(Value::Int(n)) => n as u16,
@@ -467,7 +473,85 @@ fn helper_to_network(v: Value, path: &Path, line: usize) -> Result<Network, Pars
                             });
                         }
                     };
-                    Ok(PortForward { guest, host, proto })
+                    let mapping_id = match d.remove("mapping_id") {
+                        Some(Value::Int(n)) => n as u16,
+                        None => u16::try_from(index.saturating_add(1)).unwrap_or(u16::MAX),
+                        other => {
+                            return Err(ParseError::HelperBadKwarg {
+                                path: path.to_path_buf(),
+                                line,
+                                helper: "mvm.network".to_string(),
+                                kwarg: "ports[].mapping_id".to_string(),
+                                detail: format!("expected integer, got {other:?}"),
+                            });
+                        }
+                    };
+                    let host_addr = match d.remove("host_addr") {
+                        Some(Value::Str(value)) => value,
+                        None => "127.0.0.1".to_string(),
+                        other => {
+                            return Err(ParseError::HelperBadKwarg {
+                                path: path.to_path_buf(),
+                                line,
+                                helper: "mvm.network".to_string(),
+                                kwarg: "ports[].host_addr".to_string(),
+                                detail: format!("expected string, got {other:?}"),
+                            });
+                        }
+                    };
+                    let guest_addr = match d.remove("guest_addr") {
+                        Some(Value::Str(value)) => value,
+                        None => "127.0.0.1".to_string(),
+                        other => {
+                            return Err(ParseError::HelperBadKwarg {
+                                path: path.to_path_buf(),
+                                line,
+                                helper: "mvm.network".to_string(),
+                                kwarg: "ports[].guest_addr".to_string(),
+                                detail: format!("expected string, got {other:?}"),
+                            });
+                        }
+                    };
+                    let transform = match d.remove("transform") {
+                        Some(Value::Str(value)) if value == "opaque" => PortTransform::Opaque,
+                        Some(Value::Str(value)) if value == "http" => PortTransform::Http,
+                        Some(Value::Str(value)) if value == "tls" => PortTransform::Tls,
+                        None => PortTransform::Opaque,
+                        other => {
+                            return Err(ParseError::HelperBadKwarg {
+                                path: path.to_path_buf(),
+                                line,
+                                helper: "mvm.network".to_string(),
+                                kwarg: "ports[].transform".to_string(),
+                                detail: format!(
+                                    "expected \"opaque\"/\"http\"/\"tls\", got {other:?}"
+                                ),
+                            });
+                        }
+                    };
+                    let tls_secret = match d.remove("tls_secret") {
+                        Some(Value::Str(value)) => Some(value),
+                        None => None,
+                        other => {
+                            return Err(ParseError::HelperBadKwarg {
+                                path: path.to_path_buf(),
+                                line,
+                                helper: "mvm.network".to_string(),
+                                kwarg: "ports[].tls_secret".to_string(),
+                                detail: format!("expected string, got {other:?}"),
+                            });
+                        }
+                    };
+                    Ok(PortForward {
+                        mapping_id,
+                        host_addr,
+                        guest,
+                        host,
+                        proto,
+                        guest_addr,
+                        transform,
+                        tls_secret,
+                    })
                 }
                 other => Err(ParseError::HelperBadKwarg {
                     path: path.to_path_buf(),
@@ -492,11 +576,11 @@ fn helper_to_network(v: Value, path: &Path, line: usize) -> Result<Network, Pars
     let _ = kwargs;
     Ok(Network {
         mode,
-        raw_ip_stack,
         ports,
         egress: None::<NetworkEgress>,
         peers: vec![],
         dns: None,
+        ai: None,
     })
 }
 
@@ -785,29 +869,6 @@ fn list_of_strings(
             }),
         })
         .collect()
-}
-
-/// Pop a boolean kwarg. Absent yields `false`; a non-boolean value is a
-/// parse error rather than a silent default, because the kwargs this is used
-/// for change what a workload is admitted for.
-fn pop_bool_kwarg(
-    map: &mut BTreeMap<String, Value>,
-    key: &str,
-    path: &Path,
-    line: usize,
-    helper: &str,
-) -> Result<bool, ParseError> {
-    match map.remove(key) {
-        None | Some(Value::None) => Ok(false),
-        Some(Value::Bool(b)) => Ok(b),
-        Some(other) => Err(ParseError::HelperBadKwarg {
-            path: path.to_path_buf(),
-            line,
-            helper: helper.to_string(),
-            kwarg: key.to_string(),
-            detail: format!("expected True/False, got {other:?}"),
-        }),
-    }
 }
 
 fn pop_string_kwarg(map: &mut BTreeMap<String, Value>, key: &str) -> Option<String> {

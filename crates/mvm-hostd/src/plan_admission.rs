@@ -365,10 +365,9 @@ fn admit_plan_for_run_inner(
     // admitted under an id that genuinely addresses its content.
     verify_plan_id(&verified).context("plan_id content-address check")?;
 
-    // The retired raw-packet transport, checked again on the verified plan and
-    // not only in synthesis: admission is what a plan built elsewhere reaches,
-    // and the refusal has to hold for those too.
-    mvm_core::plan::refuse_retired_l3(&verified.network_mode, verified.l3_network.is_some())?;
+    verified
+        .validate_ingress()
+        .context("validating signed ingress mappings")?;
 
     // Validity window — refuses plans whose now() is outside
     // [valid_from, valid_until). For freshly-synthesized plans this
@@ -503,13 +502,7 @@ fn verify_extension_packs(
                 serde_json::to_vec(contract).context("encoding extension contract")?,
             )
             .into();
-            if binding.extension_id != contract.extension_id
-                || binding.version != contract.version
-                || binding.contract_digest != contract_digest
-                || binding.placement != contract.placement
-                || binding.artifact != contract.artifact
-                || binding.entrypoint != contract.entrypoint
-            {
+            if !extension_binding_matches_contract(binding, contract, contract_digest) {
                 anyhow::bail!("extension binding does not match verified pack {digest_text}");
             }
             let maximum: std::collections::HashSet<_> = contract
@@ -534,7 +527,8 @@ fn verify_extension_packs(
             let artifact_size = std::fs::metadata(&artifact)
                 .with_context(|| format!("inspecting extension artifact for {digest_text}"))?
                 .len();
-            if artifact_size > binding.budgets.max_artifact_bytes {
+            if extension_artifact_exceeds_budget(artifact_size, binding.budgets.max_artifact_bytes)
+            {
                 anyhow::bail!(
                     "verified extension artifact exceeds admitted budget for {digest_text}"
                 );
@@ -545,6 +539,23 @@ fn verify_extension_packs(
             })
         })
         .collect()
+}
+
+fn extension_binding_matches_contract(
+    binding: &mvm_contract::protocol::extension_pack::ExtensionPlanBinding,
+    contract: &mvm_contract::protocol::extension_pack::ExtensionPackContract,
+    contract_digest: [u8; 32],
+) -> bool {
+    binding.extension_id == contract.extension_id
+        && binding.version == contract.version
+        && binding.contract_digest == contract_digest
+        && binding.placement == contract.placement
+        && binding.artifact == contract.artifact
+        && binding.entrypoint == contract.entrypoint
+}
+
+fn extension_artifact_exceeds_budget(artifact_size: u64, maximum_size: u64) -> bool {
+    artifact_size > maximum_size
 }
 
 fn budgets_are_narrower(
@@ -712,7 +723,7 @@ fn admit_grants(plan: &ExecutionPlan, ceiling: &GrantCeiling, posture: RunPostur
 /// right answer to pick between them: enforcing the grant ignores a signed
 /// field, enforcing the field ignores what the ceiling was applied to. Refusing
 /// is the only choice that cannot silently run a workload under a bound nobody
-/// authored — the same posture the `network_mode` / `l3_network` pair takes.
+/// authored.
 ///
 /// The comparison runs against the projection, never against the grant
 /// directly, because the projection is lossy: an absent grant and an explicit
@@ -1642,6 +1653,21 @@ fn launch_decision_record(plan: &ExecutionPlan, backend_name: &str) -> DecisionR
         .expect("launch decision record is well-formed")
 }
 
+fn attach_assurance_proxy(
+    config: &mut VmStartConfig,
+    proxy: mvm_contract::protocol::broker_control::ServiceProxyBinding,
+) -> Result<()> {
+    if config
+        .service_proxies
+        .iter()
+        .any(|binding| binding.service == proxy.service)
+    {
+        anyhow::bail!("assurance controller proxy service is already configured");
+    }
+    config.service_proxies.push(proxy);
+    Ok(())
+}
+
 /// What rolling a launch back needs to know. A struct rather than seven
 /// positional arguments, so a caller cannot silently swap the stage label for
 /// the reason.
@@ -1749,14 +1775,7 @@ pub fn start_admitted(params: StartAdmittedParams<'_>) -> Result<StartedMachine>
     if params.assurance.is_some() {
         let proxy = crate::assurance_session::prepare_controller_proxy(&config.name)
             .context("preparing admitted assurance controller proxy")?;
-        if config
-            .service_proxies
-            .iter()
-            .any(|binding| binding.service == proxy.service)
-        {
-            anyhow::bail!("assurance controller proxy service is already configured");
-        }
-        config.service_proxies.push(proxy);
+        attach_assurance_proxy(&mut config, proxy)?;
     }
 
     let backend_name = backend.name().to_string();
@@ -2129,7 +2148,7 @@ mod tests {
             stream_edges: Vec::new(),
             kernel_sha256: None,
             network_mode: Default::default(),
-            l3_network: None,
+            ingress: Vec::new(),
             vm_name,
             tenant: None,
             backend_name: "firecracker",
@@ -2191,6 +2210,203 @@ mod tests {
                 max_artifact_bytes: 1024 * 1024,
             },
         }
+    }
+
+    fn extension_contract(
+        binding: &mvm_contract::protocol::extension_pack::ExtensionPlanBinding,
+    ) -> mvm_contract::protocol::extension_pack::ExtensionPackContract {
+        mvm_contract::protocol::extension_pack::ExtensionPackContract {
+            schema: mvm_contract::protocol::extension_pack::EXTENSION_PACK_SCHEMA.to_string(),
+            extension_id: binding.extension_id.clone(),
+            version: binding.version.clone(),
+            protocol: mvm_contract::protocol::extension_pack::ExtensionProtocolRange {
+                min_mvm_version: mvm_contract::protocol::extension_pack::ExtensionVersion::parse(
+                    "0.18.0",
+                )
+                .expect("valid minimum extension version"),
+                max_mvm_version: mvm_contract::protocol::extension_pack::ExtensionVersion::parse(
+                    "0.18.9",
+                )
+                .expect("valid maximum extension version"),
+                min_protocol: 1,
+                max_protocol: 1,
+            },
+            placement: binding.placement,
+            artifact: binding.artifact.clone(),
+            entrypoint: binding.entrypoint.clone(),
+            capabilities: vec![mvm_contract::assurance::probe_capability_descriptor()],
+            budgets: binding.budgets,
+            revocation_identity: "org.example.generic-extension.release".to_string(),
+            permission_delta: "May execute one declared assurance probe.".to_string(),
+        }
+    }
+
+    fn admitted_with_extension(
+        binding: mvm_contract::protocol::extension_pack::ExtensionPlanBinding,
+        root: &std::path::Path,
+    ) -> AdmittedPlan {
+        let plan = mvm_core::plan::test_support::PlanFixture::new()
+            .extensions(vec![binding.clone()])
+            .build();
+        let signer_id = "host:extension-test".to_string();
+        let signed = mvm_core::plan::signing::sign_plan(
+            &plan,
+            &ed25519_dalek::SigningKey::from_bytes(&[31; 32]),
+            &signer_id,
+        );
+        let mut admitted = AdmittedPlan::for_test(plan, signer_id, signed);
+        admitted.extensions.push(AdmittedExtension {
+            binding,
+            root: root.to_path_buf(),
+        });
+        admitted
+    }
+
+    #[test]
+    fn extension_budget_comparison_requires_every_dimension() {
+        let maximum = extension_binding(
+            mvm_contract::protocol::extension_pack::ExtensionPlacement::GuestWorkload,
+        )
+        .budgets;
+        assert!(budgets_are_narrower(maximum, maximum));
+
+        let mut candidates = Vec::new();
+        let mut candidate = maximum;
+        candidate.cpu_millis += 1;
+        candidates.push(candidate);
+        let mut candidate = maximum;
+        candidate.memory_bytes += 1;
+        candidates.push(candidate);
+        let mut candidate = maximum;
+        candidate.duration_ms += 1;
+        candidates.push(candidate);
+        let mut candidate = maximum;
+        candidate.max_steps += 1;
+        candidates.push(candidate);
+        let mut candidate = maximum;
+        candidate.max_concurrency += 1;
+        candidates.push(candidate);
+        let mut candidate = maximum;
+        candidate.max_payload_bytes += 1;
+        candidates.push(candidate);
+        let mut candidate = maximum;
+        candidate.max_output_bytes += 1;
+        candidates.push(candidate);
+        let mut candidate = maximum;
+        candidate.max_artifact_bytes += 1;
+        candidates.push(candidate);
+
+        for candidate in candidates {
+            assert!(
+                !budgets_are_narrower(candidate, maximum),
+                "one widened budget dimension must refuse the whole binding"
+            );
+        }
+    }
+
+    #[test]
+    fn extension_binding_identity_requires_every_verified_field() {
+        let mut binding = extension_binding(
+            mvm_contract::protocol::extension_pack::ExtensionPlacement::GuestWorkload,
+        );
+        let contract = extension_contract(&binding);
+        let contract_digest: [u8; 32] = Sha256::digest(
+            serde_json::to_vec(&contract).expect("encode extension contract fixture"),
+        )
+        .into();
+        binding.contract_digest = contract_digest;
+        assert!(extension_binding_matches_contract(
+            &binding,
+            &contract,
+            contract_digest
+        ));
+
+        let mut mismatches = Vec::new();
+        let mut mismatch = binding.clone();
+        mismatch.extension_id =
+            mvm_contract::protocol::extension_pack::ExtensionId::parse("org.example.other")
+                .expect("valid alternate extension id");
+        mismatches.push(mismatch);
+        let mut mismatch = binding.clone();
+        mismatch.version = mvm_contract::protocol::extension_pack::ExtensionVersion::parse("1.0.1")
+            .expect("valid alternate extension version");
+        mismatches.push(mismatch);
+        let mut mismatch = binding.clone();
+        mismatch.contract_digest[0] ^= 1;
+        mismatches.push(mismatch);
+        let mut mismatch = binding.clone();
+        mismatch.placement =
+            mvm_contract::protocol::extension_pack::ExtensionPlacement::IsolatedController;
+        mismatches.push(mismatch);
+        let mut mismatch = binding.clone();
+        mismatch.artifact.push_str(".other");
+        mismatches.push(mismatch);
+        let mut mismatch = binding.clone();
+        mismatch.entrypoint.push_str("-other");
+        mismatches.push(mismatch);
+
+        for mismatch in mismatches {
+            assert!(
+                !extension_binding_matches_contract(&mismatch, &contract, contract_digest),
+                "one mismatched identity field must refuse the whole binding"
+            );
+        }
+    }
+
+    #[test]
+    fn extension_artifact_budget_is_inclusive_at_the_exact_limit() {
+        assert!(!extension_artifact_exceeds_budget(7, 8));
+        assert!(!extension_artifact_exceeds_budget(8, 8));
+        assert!(extension_artifact_exceeds_budget(9, 8));
+    }
+
+    #[test]
+    fn extension_attachment_sets_plan_identity_and_refuses_controller_placement() {
+        let root = tempfile::tempdir().expect("extension root");
+        let guest_binding = extension_binding(
+            mvm_contract::protocol::extension_pack::ExtensionPlacement::GuestWorkload,
+        );
+        let admitted = admitted_with_extension(guest_binding.clone(), root.path());
+        let mut config = mvm_core::vm_backend::VmStartConfig::default();
+        attach_admitted_extensions(&mut config, &admitted)
+            .expect("an admitted guest extension attaches");
+        assert_eq!(
+            config.extension_plan_id.as_deref(),
+            Some(admitted.plan_id().0.as_str())
+        );
+        assert_eq!(config.extensions, vec![guest_binding]);
+        assert_eq!(config.volumes.len(), 1);
+        let error = attach_admitted_extensions(&mut config, &admitted)
+            .expect_err("the same guest mountpoint must not attach twice");
+        assert!(error.to_string().contains("mountpoint collision"));
+
+        let controller_binding = extension_binding(
+            mvm_contract::protocol::extension_pack::ExtensionPlacement::IsolatedController,
+        );
+        let admitted = admitted_with_extension(controller_binding, root.path());
+        let error = attach_admitted_extensions(
+            &mut mvm_core::vm_backend::VmStartConfig::default(),
+            &admitted,
+        )
+        .expect_err("a controller extension must never reach guest attachment");
+        assert!(error.to_string().contains("isolated_controller"));
+    }
+
+    #[test]
+    fn assurance_proxy_attachment_refuses_a_duplicate_service() {
+        let proxy = mvm_contract::protocol::broker_control::ServiceProxyBinding {
+            service: mvm_contract::protocol::broker::ServiceId::parse(
+                mvm_contract::assurance::HOST_ASSURANCE_SERVICE,
+            )
+            .expect("valid assurance service"),
+            endpoint: "/tmp/mvm-assurance-test.sock".to_string(),
+            capabilities: vec![mvm_contract::assurance::probe_capability_descriptor()],
+        };
+        let mut config = mvm_core::vm_backend::VmStartConfig::default();
+        config.service_proxies.push(proxy.clone());
+        let error = attach_assurance_proxy(&mut config, proxy)
+            .expect_err("the same controller service must not be attached twice");
+        assert!(error.to_string().contains("already configured"));
     }
 
     #[test]

@@ -127,6 +127,12 @@ const EXEMPTIONS: &[(&str, &[Rule], &str)] = &[
         ".mvm-shaped test fixtures asserting host paths are redacted from normalized event detail; \
          it derives no mvm path",
     ),
+    (
+        "tests/release_assets.rs",
+        &[Rule::HomeLiteral],
+        "structural release tests inspect the boot workflow's shell command and pin its canonical \
+         production cache path; the test derives no host path",
+    ),
 ];
 
 pub fn run(workspace: &Path) -> Result<()> {

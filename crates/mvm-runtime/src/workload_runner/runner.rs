@@ -56,6 +56,7 @@ use mvm_vmm::host::spec_map::{
 };
 use mvm_vmm::post_restore::PostRestoreOutcome;
 
+mod admission;
 mod backend;
 mod broker;
 mod console_boot;
@@ -64,6 +65,7 @@ mod sockets;
 mod spawner;
 mod warm_claim;
 
+use admission::{admitted_ingress, admitted_network_limits};
 pub use broker::RealBrokerRegistrar;
 use refusal::{map_lineage_refusal, refuse, require_fresh_child_identity};
 use sockets::standing_sockets;
@@ -362,6 +364,7 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         std::fs::create_dir_all(&state_dir)
             .with_context(|| format!("create state dir {}", state_dir.display()))?;
         let network_limits = admitted_network_limits(inputs.config.plan_json.as_deref())?;
+        let ingress = admitted_ingress(inputs.config.plan_json.as_deref())?;
 
         // Spawn the per-child substitution endpoint through the shared
         // `ClaimGuards`, so a warm claim stands up the identical guarded endpoint
@@ -377,6 +380,7 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
                 redaction: inputs.redaction,
                 network_policy: inputs.network_policy,
                 network_limits,
+                ingress: &ingress,
                 // A cold boot mints this guest's identity and hands it a drive.
                 identity: FlowMuxIdentitySource::Mint,
             },
@@ -633,6 +637,7 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         let network_limits = plan
             .effective_network_limits()
             .map_err(|e| StandbyError::ClaimFailed(format!("network limits: {e}")))?;
+        let ingress = plan.ingress.clone();
         if let Some(file) = claim_debug.as_mut() {
             let _ = writeln!(
                 file,
@@ -652,6 +657,7 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
                     redaction: &redaction,
                     network_policy: &claim.network_policy,
                     network_limits,
+                    ingress: &ingress,
                     // A restored child already holds its parent's signing key
                     // in the memory image it woke from, and there is no way to
                     // put a different one there. Its endpoint pins what the
@@ -1380,17 +1386,6 @@ fn admitted_broker_bindings(
                 },
             )
         })
-}
-
-fn admitted_network_limits(plan_json: Option<&str>) -> Result<mvm_core::plan::NetworkLimits> {
-    plan_json
-        .map(mvm_core::plan::plan_from_admitted_json)
-        .transpose()
-        .context("parse admitted plan network limits")?
-        .map(|plan| plan.effective_network_limits())
-        .transpose()
-        .context("validate admitted plan network limits")
-        .map(Option::unwrap_or_default)
 }
 
 /// How many times to redraw a fresh child name before giving up. A collision is

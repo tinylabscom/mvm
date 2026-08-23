@@ -197,7 +197,9 @@ jobs:
                      nix/packaging/release/assert-init-shebang.sh \
                      nix/packaging/release/assert-kernel-format.sh \
                      scripts/check-no-orchestration-server.sh \
-                     scripts/check-no-orchestration-server.test.sh
+                     scripts/check-no-orchestration-server.test.sh \
+                     scripts/security-lane-verdict.sh \
+                     scripts/security-lane-verdict.test.sh
 
       - name: Release-asset verifier gate tests
         run: bash nix/packaging/release/verify-release-assets.test.sh
@@ -255,7 +257,7 @@ jobs:
         run: |
           set -euo pipefail
           tarball="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
-          curl -fL --retry 3 -o "$tarball" \
+          curl -fL --retry 3 --retry-all-errors --retry-delay 2 -o "$tarball" \
             "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/${tarball}"
           echo "${ACTIONLINT_SHA256}  ${tarball}" | sha256sum -c -
           tar -xzf "$tarball" actionlint
@@ -282,6 +284,11 @@ jobs:
 
       - name: Orchestration-server gate tests
         run: bash scripts/check-no-orchestration-server.test.sh
+
+      # The nightly security lanes do not run on a PR, so this is the only
+      # place their failure reporting is exercised before it has to work.
+      - name: Security lane verdict tests
+        run: bash scripts/security-lane-verdict.test.sh
 
       - name: Architecture scan not required for this diff
         if: needs.scope.outputs.architecture == 'false'
@@ -386,8 +393,8 @@ jobs:
       - name: Trust-gradient ledger
         run: cargo run -p xtask -- check-trust-gradient
 
-      - name: vsock-only egress (no guest NIC on the vmm/HVF path, ADR-100)
-        run: cargo run -p xtask -- check-vsock-only-egress
+      - name: single workload network path and socket owner (single-network-path)
+        run: cargo run -p xtask -- check-single-network-path
 
       # The in-guest toolbox is deliberately ungoverned — the microVM boundary
       # bounds it. What the boundary cannot bound is the guest originating a
@@ -402,20 +409,11 @@ jobs:
       - name: one guest→host protocol
         run: cargo run -p xtask -- check-one-guest-protocol
 
-      # Tree-wide companion to the check above. The userspace network gateways
-      # went with the guest-NIC path; a reference coming back is how a second
-      # egress model grows back alongside the real one.
-      - name: no reference to a removed userspace network gateway
-        run: cargo run -p xtask -- check-no-gateway-names
-
-      # Temporary, shrink-only ratchet: the raw-packet workload networking path
-      # is frozen while the single flow-aware vsock path is built. Deleted with
-      # its last allowlist entry.
-      - name: l3 expansion freeze (no new raw-packet networking references)
-        run: cargo run -p xtask -- check-l3-expansion-freeze
-
-      - name: uniform vsock egress (Firecracker + libkrun + HVF use the WorkloadRunner seam)
-        run: cargo run -p xtask -- check-uniform-vsock-egress
+      # An image's declared environment is resolved once. The console used to
+      # assemble its own, which is why `machine run --image rust:latest -it`
+      # opened a shell with the image's own toolchain missing from PATH.
+      - name: one workload-env resolver (console and entrypoint agree on the image)
+        run: cargo run -p xtask -- check-single-workload-env
 
       # A wall-clock bound is declared once, as a grant. `exec_secs` is that
       # grant's projection into the plan's older encoding; a second writer is a
@@ -1027,7 +1025,7 @@ jobs:
       # nobody had published. Boot images get their own tags precisely so
       # this pin stops moving with the CLI's version — keep it in step with
       # `DEFAULT_BOOT_IMAGE_TAG` in mvm-core's config.
-      IMAGE_TAG: boot-image/v0.1.0
+      IMAGE_TAG: boot-image/v0.1.3
       # Must track `crates/mvm-core/src/config.rs::FC_VERSION_DEFAULT`. The
       # launch path passes `--enable-pci`, which older Firecracker rejects
       # outright: it exits before creating its API socket, and the only symptom
@@ -1575,6 +1573,9 @@ jobs:
     env:
       CARGO_TERM_COLOR: always
       MVM_HOME: ${{ github.workspace }}/.mvm-ci
+      # A cold no-KVM build compiles the workload under TCG and can exceed
+      # the normal 30-minute builder deadline while still making progress.
+      MVM_BUILDER_VM_TIMEOUT_SECS: 7200
     steps:
       - uses: actions/checkout@v6
 
@@ -1595,6 +1596,12 @@ jobs:
         with:
           key: aarch64-no-kvm-smoke
 
+      - name: Grant QEMU access to vhost-vsock
+        run: |
+          test -c /dev/vhost-vsock
+          sudo chown "$USER" /dev/vhost-vsock
+          sudo chmod 0600 /dev/vhost-vsock
+
       # The release-cut bootstrap path can download a published builder VM
       # image; the default source-checkout path would rebuild it from scratch
       # inside Stage 0 under TCG, which is far too slow for a CI gate. Build
@@ -1602,6 +1609,11 @@ jobs:
       # flake so `mvmctl` treats this as an installed binary and downloads the
       # published image instead.
       - name: Build mvmctl
+        env:
+          # This witness boots embedded builder-guest code. A restored Cargo
+          # cache may contain binaries built from an older source tree, which
+          # would make the live gate validate stale mvm-host-vm-init behavior.
+          MVM_EMBED_NO_CACHE: 1
         run: cargo build --release -p mvmctl --features release-artifact-bootstrap,release-channel
 
       - name: Use published builder VM bootstrap path
@@ -1670,7 +1682,7 @@ jobs:
             fi
           done
           echo "===== VM state dirs ====="
-          for d in "$MVM_HOME"/vms/*/; do
+          for d in "$MVM_HOME"/vms/*/ "$MVM_HOME"/cache/builder-vm/vms/*/; do
             echo "--- $d ---"
             ls -la "$d" || true
             for f in console.log firecracker.log qemu.log; do

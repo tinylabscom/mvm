@@ -60,7 +60,7 @@ pub fn admit_probe_plan(
         stream_edges: Vec::new(),
         kernel_sha256: None,
         network_mode: Default::default(),
-        l3_network: None,
+        ingress: Vec::new(),
         vm_name,
         tenant: Some("bench"),
         backend_name,
