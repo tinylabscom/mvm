@@ -22,7 +22,6 @@ impl<D: VmmDriver + 'static, S: NetworkEndpointSpawner + 'static, B: BrokerRegis
         let endpoint_started = Instant::now();
         let state_dir = vm_state_dir(&id.0);
         reap_network_endpoint(&state_dir, &id.0);
-        mvm_vmm::host::netd_spawn::reap_netd(&state_dir);
         mvm_vmm::host::broker_services_spawn::reap_broker_services(&state_dir);
         mvm_vmm::host::host_agent_spawn::reap_host_agent_services_from_state(&state_dir, &id.0);
         let endpoint_reaping = endpoint_started.elapsed();
@@ -123,7 +122,6 @@ impl<D: VmmDriver + 'static, S: NetworkEndpointSpawner + 'static, B: BrokerRegis
             StartMode::Detached,
             config,
         )?;
-        mvm_vmm::host::netd_spawn::spawn_netd_if_needed(config, &state_dir, self.driver.kind())?;
 
         let default_redaction = RedactionPolicy::default();
         let decoded = decode_plan_secrets_from_state(&state_dir)?;
@@ -155,10 +153,7 @@ impl<D: VmmDriver + 'static, S: NetworkEndpointSpawner + 'static, B: BrokerRegis
         };
         match self.start_workload(&inputs) {
             Ok(_vm) => Ok(VmId(config.name.clone())),
-            Err(e) => {
-                mvm_vmm::host::netd_spawn::reap_netd(&state_dir);
-                Err(e)
-            }
+            Err(e) => Err(e),
         }
     }
 

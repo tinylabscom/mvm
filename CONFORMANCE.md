@@ -53,13 +53,13 @@ The three honesty levels (R2):
 
 | ID | Level | Statement | Witnesses |
 | --- | --- | --- | --- |
-| `MVM-SEC-10` | `build` | No untrusted workload reaches the network unless policy-admitted | `fn:policy_default_is_deny_all`, `fn:run_net_default_is_deny_all`, `fn:private_link_local_loopback_ula_metadata_are_forbidden`, `fn:emits_resolved_query_with_ip_list`, `ci:fuzz_dns_codec`, `fn:assert_vsock_only_device_model`, `fn:fork_restore_refuses_nic`, `fn:verify_and_resume_refuses_nic_on_restore` |
+| `MVM-SEC-10` | `build` | No untrusted workload reaches the network unless policy-admitted | `fn:policy_default_is_deny_all`, `fn:run_net_default_is_deny_all`, `fn:private_link_local_loopback_ula_metadata_are_forbidden`, `fn:emits_resolved_query_with_ip_list`, `fn:admitted_projection_is_one_object_graph_for_every_network_surface`, `ci:single-network-path`, `ci:fuzz_dns_codec`, `fn:assert_vsock_only_device_model`, `fn:fork_restore_refuses_nic`, `fn:verify_and_resume_refuses_nic_on_restore` |
 
 ## fuzz_surface
 
 | ID | Level | Statement | Witnesses |
 | --- | --- | --- | --- |
-| `MVM-SEC-05` | `build` | Vsock framing, supervisor-config JSON, and the userspace datapath's guest-facing ingress are fuzzed | `ci:fuzz_guest_request`, `ci:fuzz_sealed_frame`, `ci:fuzz_supervisor_config`, `ci:fuzz_datapath_ingress`, `ci:fuzz_input_frame` |
+| `MVM-SEC-05` | `build` | Vsock framing, supervisor-config JSON, and FlowMux's guest-facing decoder and session state are fuzzed | `ci:fuzz_guest_request`, `ci:fuzz_sealed_frame`, `ci:fuzz_supervisor_config`, `ci:fuzz_network_flow_decode`, `ci:fuzz_network_flow_state`, `ci:fuzz_input_frame` |
 
 ## guest_privilege
 
@@ -130,4 +130,3 @@ Never re-derived, vendored, or gated on.
 | `linux-seccomp` | Linux seccomp | https://www.kernel.org/doc/html/latest/userspace-api/seccomp_filter.html and ADR-001 §W2 | `MVM-SEC-01` |
 | `linux-setpriv` | util-linux setpriv | https://mirrors.edge.kernel.org/pub/linux/utils/util-linux/ and ADR-001 §W2.2 | `MVM-SEC-02` |
 | `rustsec` | RustSec Advisory Database | https://rustsec.org/advisories/ and deny.toml | `MVM-SEC-07` |
-

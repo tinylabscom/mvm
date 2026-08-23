@@ -35,19 +35,10 @@ use std::process::Command;
 /// enables; it is not evidence that either list has rotted.
 const ALLOWLIST: &[&str] = &[
     // Both bitflags majors are transitive; mvm depends on neither directly.
-    // The 1.x side has two independent parents — smoltcp 0.13.1 (the mvm-hostd
-    // userspace datapath) and the vmm-sys-util pair below — whose latest
-    // releases both declare bitflags ^1.0 with no feature selecting 2.x.
-    // Migrating either upstream alone leaves the duplicate in place; it takes
-    // both. See deny.toml's matching entry for the full audit.
+    // The 1.x side comes from vmm-sys-util, whose latest release still declares
+    // bitflags ^1.0 with no feature selecting 2.x. See deny.toml's matching
+    // entry for the full audit.
     "bitflags",
-    // Neither defmt major is compiled: both are optional dependencies nobody
-    // enables. smoltcp's `alloc` feature names `defmt?/alloc`, and that weak
-    // reference alone resolves defmt 0.3 into the lock beside the 1.1 jiff
-    // declares — `cargo tree -e normal -i defmt@0.3.100` and `@1.1.0` both
-    // print nothing. 0.3.100 is upstream's own shim over 1.1, so even were a
-    // defmt build ever enabled there would be one real copy behind the two.
-    "defmt",
     // `criterion` (the mvm-fs benchmark harness) pulls itertools 0.10, while
     // cucumber / derive-more / indexmap / zerotrie already resolve itertools
     // 0.14. Both majors are dev-only/test paths; criterion has no 0.14-compatible
@@ -60,17 +51,27 @@ const ALLOWLIST: &[&str] = &[
     // feature took the whole ASN.1 stack with it, so the shipped closure now
     // carries no nom at all and this entry covers the fuzz tooling alone.
     "nom",
+    // async-trait 0.1.92 requires syn 3 to stay compatible with current nightly
+    // Clippy; other proc macros have not yet converged from syn 1 and 2.
+    "syn",
     // The in-house VMM's rust-vmm virtio stack (virtio-queue) resolves
     // vmm-sys-util 0.15 while the Linux KVM stack (kvm-bindings/kvm-ioctls)
     // pins 0.12.1; the two rust-vmm families track different vmm-sys-util
     // majors until they converge.
     "vmm-sys-util",
-    // windows-sys 0.52 and 0.60/0.61 remain a split; windows-core follows.
-    // The per-architecture support crates (windows_aarch64_*, windows_i686_*,
-    // windows_x86_64_*, windows-targets) converged once rayon and rcgen's
-    // x509-parser feature were dropped — they are no longer duplicated.
+    // sysinfo remains on the Windows 0.52 family while Tokio and current
+    // Windows support crates use the 0.53 target shims. These are host-only.
     "windows-core",
     "windows-sys",
+    "windows-targets",
+    "windows_aarch64_gnullvm",
+    "windows_aarch64_msvc",
+    "windows_i686_gnu",
+    "windows_i686_gnullvm",
+    "windows_i686_msvc",
+    "windows_x86_64_gnu",
+    "windows_x86_64_gnullvm",
+    "windows_x86_64_msvc",
 ];
 
 pub fn run(workspace: &Path) -> Result<()> {

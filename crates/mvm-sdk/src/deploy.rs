@@ -796,6 +796,7 @@ mod tests {
                     egress: None,
                     peers: vec![],
                     dns: None,
+                    ai: None,
                 }),
                 resources: Resources {
                     cpu_cores: 1,

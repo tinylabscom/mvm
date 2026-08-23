@@ -62,7 +62,7 @@ pub(in crate::commands) enum VmCmd {
     /// Set or clear a sandbox TTL
     #[command(name = "set-ttl", hide = true)]
     SetTtl(set_ttl::Args),
-    /// Forward a port from a running microVM to localhost
+    /// Explain how to migrate dynamic forwarding to declared ingress
     #[command(hide = true)]
     Forward(forward::Args),
     /// Inspect and clean sandbox lifecycle state

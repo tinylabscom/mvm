@@ -49,7 +49,7 @@ source "$HOME/.cargo/env"
 rustup target add aarch64-unknown-linux-musl
 
 echo "Installing cargo-zigbuild ..."
-cargo install cargo-zigbuild --version 0.20.0 --locked
+cargo install cargo-zigbuild --version 0.23.0 --locked
 
 cd /work
 

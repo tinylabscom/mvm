@@ -96,23 +96,31 @@ fn frame(kind: ExtensionMessageKind, sequence: u64, payload: &[u8]) -> Vec<u8> {
     .expect("fixture frame encodes")
 }
 
+/// Path to the provider binary under test.
+///
+/// `CARGO_BIN_EXE_<name>` is a **compile-time** variable cargo provides to
+/// `env!`. `cargo test` also happens to export it into the test process, so
+/// reading it at runtime worked there and failed under `cargo nextest`, which
+/// runs the test binary directly — and nextest is the named gate. Resolving it
+/// at compile time works under both.
+fn provider_bin() -> &'static str {
+    env!("CARGO_BIN_EXE_mvm-extension-provider")
+}
+
 #[test]
 fn provider_process_injects_configured_runner_and_fails_closed_without_admitted_boot() {
     let state = tempfile::tempdir().expect("provider state");
     write_boot_config(state.path());
-    let mut child = Command::new(
-        std::env::var("CARGO_BIN_EXE_mvm-extension-provider")
-            .expect("cargo supplies the provider binary path"),
-    )
-    .arg("--state-root")
-    .arg(state.path())
-    .env_clear()
-    .env("MVM_HOME", state.path())
-    .stdin(Stdio::piped())
-    .stdout(Stdio::piped())
-    .stderr(Stdio::piped())
-    .spawn()
-    .expect("start provider process");
+    let mut child = Command::new(provider_bin())
+        .arg("--state-root")
+        .arg(state.path())
+        .env_clear()
+        .env("MVM_HOME", state.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start provider process");
 
     let bundle = include_bytes!("../../mvm-contract/fixtures/operator-session-bundle-v1.json");
     let request = include_bytes!("../../mvm-contract/fixtures/campaign-provider-request-v1.json");
@@ -205,15 +213,12 @@ fn provider_process_injects_configured_runner_and_fails_closed_without_admitted_
 #[test]
 fn provider_process_never_uses_ambient_home_or_mvm_state() {
     let ambient = tempfile::tempdir().expect("ambient trap");
-    let output = Command::new(
-        std::env::var("CARGO_BIN_EXE_mvm-extension-provider")
-            .expect("cargo supplies the provider binary path"),
-    )
-    .env_clear()
-    .env("HOME", ambient.path())
-    .env("MVM_HOME", ambient.path())
-    .output()
-    .expect("run provider without explicit state");
+    let output = Command::new(provider_bin())
+        .env_clear()
+        .env("HOME", ambient.path())
+        .env("MVM_HOME", ambient.path())
+        .output()
+        .expect("run provider without explicit state");
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("--state-root is required"));
     assert!(
@@ -229,15 +234,12 @@ fn provider_process_never_uses_ambient_home_or_mvm_state() {
 fn provider_refuses_boot_config_without_an_explicit_matching_global_mvm_home() {
     let state = tempfile::tempdir().expect("provider state");
     write_boot_config(state.path());
-    let output = Command::new(
-        std::env::var("CARGO_BIN_EXE_mvm-extension-provider")
-            .expect("cargo supplies the provider binary path"),
-    )
-    .arg("--state-root")
-    .arg(state.path())
-    .env_clear()
-    .output()
-    .expect("run provider without global MVM home");
+    let output = Command::new(provider_bin())
+        .arg("--state-root")
+        .arg(state.path())
+        .env_clear()
+        .output()
+        .expect("run provider without global MVM home");
     assert!(!output.status.success());
     assert!(
         String::from_utf8_lossy(&output.stderr)

@@ -11,7 +11,8 @@
     "astro": "astro",
     "check:tokens": "node scripts/check-no-hardcoded-hex.mjs",
     "check:samples": "node scripts/check-sample-provenance.mjs",
-    "check": "pnpm check:tokens && pnpm check:samples && pnpm build"
+    "check:perf": "node scripts/check-perf-provenance.mjs",
+    "check": "pnpm check:tokens && pnpm check:samples && pnpm check:perf && pnpm build"
   },
   "dependencies": {
     "@astrojs/react": "^4.4.2",

@@ -273,7 +273,7 @@ jobs:
       # 1800 was chosen when this lane had four targets. It has seventeen,
       # and seventeen half-hours do not fit in six. Every nightly run was
       # stopped partway down the list — most recently after eleven targets —
-      # so the last six, `fuzz_datapath_ingress` among them, had never
+      # so the last six targets had never
       # executed on a cron run at all. The job's conclusion was `cancelled`,
       # which the lane watcher did not count, so nothing said so.
       FUZZ_SECS_SCHEDULE: 720
@@ -435,38 +435,6 @@ jobs:
         # never passes its window, and a refused frame moves nothing.
         run: cargo fuzz run fuzz_network_flow_state -- -max_total_time="$DURATION"
 
-      - name: Fuzz gateway packet parse + rebuild (host-side)
-        working-directory: crates/mvm-hostd
-        env:
-          DURATION: ${{ steps.duration.outputs.secs }}
-          RUSTUP_TOOLCHAIN: nightly-2026-06-11
-        # Plan 141 / ADR-064 — `packet::parse` is the first real parse on
-        # the guest's network path (the bridge byte-copied opaquely before
-        # this plan); `rebuild_with_payload` re-serializes observer-modified
-        # frames. Both run on attacker-influenced bytes (claim 5). "Never
-        # panic on any input": parse fails closed to None on garbage, and
-        # re-emitting an accepted frame's own payload round-trips without
-        # panicking (Err on extension/over-MTU frames is the fail-closed
-        # path, not a panic).
-        run: cargo fuzz run fuzz_packet_parse -- -max_total_time="$DURATION"
-
-      - name: Fuzz userspace datapath ingress (fuzz_datapath_ingress)
-        working-directory: crates/mvm-hostd
-        env:
-          DURATION: ${{ steps.duration.outputs.secs }}
-          RUSTUP_TOOLCHAIN: nightly-2026-06-11
-        # The userspace socket datapath is the guest-facing ingress on any
-        # host with no privileged TUN path. Guest bytes off the vsock channel
-        # reach `L3Admitter::admit_outbound` (the first parse, IPv4 and IPv6),
-        # then the datapath's own re-read of an admitted packet in
-        # `send_to_network`, then the per-flow smoltcp stack — the only place
-        # guest bytes reach `Interface::poll`. Same "never panic on any input"
-        # contract as the other ingress targets. The IPv6 corpus is there even
-        # though admission refuses IPv6: the bounded extension-header walk runs
-        # before the version check refuses the packet, and smoltcp's
-        # `process_hopbyhop` runs before any address check.
-        run: cargo fuzz run fuzz_datapath_ingress -- -max_total_time="$DURATION"
-
       - name: Fuzz runtime recording (SDK trace)
         working-directory: crates/mvm-sdk
         env:
@@ -534,8 +502,6 @@ jobs:
             crates/deps/libkrun-sys/fuzz/artifacts/
             crates/mvm-fs/fuzz-oci/corpus/
             crates/mvm-fs/fuzz-oci/artifacts/
-            crates/mvm-hostd/fuzz/corpus/
-            crates/mvm-hostd/fuzz/artifacts/
             crates/mvm-sdk/fuzz/corpus/
             crates/mvm-sdk/fuzz/artifacts/
 

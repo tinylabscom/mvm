@@ -37,6 +37,19 @@ class AddonTier(Enum):
     in_vm = 'in_vm'
 
 
+@dataclass
+class AiBudget:
+    max_input_tokens: Optional[int] = None
+    max_output_tokens: Optional[int] = None
+    max_total_tokens: Optional[int] = None
+
+
+@dataclass
+class AiPolicy:
+    budget: Optional[AiBudget] = None
+    metering: Optional[bool] = False
+
+
 class AuthType(Enum):
     sigv4 = 'sigv4'
     hmac = 'hmac'
@@ -506,6 +519,7 @@ EnvValue = Union[EnvValue1, EnvValue2]
 @dataclass
 class Network:
     mode: NetworkMode
+    ai: Optional[AiPolicy] = None
     dns: Optional[NetworkDns] = None
     egress: Optional[NetworkEgress] = None
     peers: Optional[List[str]] = None

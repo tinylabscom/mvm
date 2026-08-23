@@ -90,16 +90,10 @@ pub fn plan_json_has_bound_secrets(plan_json: &str) -> bool {
     mvm_core::plan::plan_from_admitted_json(plan_json).is_ok_and(|plan| !plan.secrets.is_empty())
 }
 
-/// The kernel-cmdline token that tells the guest init to bring the L3
-/// tunnel up, or `None` when this launch is not an L3 launch.
-///
-/// Derived from the admitted plan the launch config already carries, so the
-/// mode the host signals to the guest is the one that was signed — not a
-/// separate host-side switch that could drift from it. An undecodable plan
-/// answers `None`, which is the closed side: a guest that is not told to
-/// start the tunnel simply has no network.
-pub fn l3_cmdline_token(_config: &VmStartConfig) -> Option<String> {
-    None
+/// True when an admitted plan declares at least one host-owned ingress mapping.
+/// Undecodable or absent plans remain the closed path.
+pub fn plan_json_has_ingress(plan_json: &str) -> bool {
+    mvm_core::plan::plan_from_admitted_json(plan_json).is_ok_and(|plan| !plan.ingress.is_empty())
 }
 
 /// True when the workload's persisted plan carries at least one bound secret
@@ -112,16 +106,15 @@ pub fn state_has_bound_secrets(state_dir: &Path) -> Result<bool> {
         .is_some_and(plan_json_has_bound_secrets))
 }
 
-/// Whether this launch's guest boots with its in-guest vsock egress client
-/// started — the *effective* egress enablement, not the raw policy.
+/// Whether this launch's guest boots with its authenticated vsock client
+/// started — the *effective* client enablement, not just the raw policy.
 ///
-/// The guest starts that client iff the launch allows egress **and** carries no
-/// bound secrets: a secret-bearing workload's egress goes through the host-side
-/// substitution endpoint, which owns the shared egress port, so the raw client
-/// stays off and must not contend for it. Both conditions are read off the
-/// launch config alone — the policy, and the admitted plan the config already
-/// carries — so this is answerable at warm-claim decision time, before the
-/// child has a state dir of its own.
+/// The guest starts that client when the launch allows egress, or when its
+/// admitted plan declares host-owned ingress, and it carries no bound secrets.
+/// A secret-bearing workload's egress goes through the host-side substitution
+/// endpoint, which owns the shared egress port, so the raw client stays off
+/// and must not contend for it. These inputs are read from the launch config,
+/// so the answer is available at warm-claim decision time.
 ///
 /// This is the value the warm pool partitions on. It is the same predicate the
 /// guest's cmdline token is derived from, with the plan read from the config
@@ -130,7 +123,11 @@ pub fn state_has_bound_secrets(state_dir: &Path) -> Result<bool> {
 /// side — it can only withhold the client from a warm child that a cold boot
 /// would have started it for, never the reverse.
 pub fn effective_vsock_egress(config: &VmStartConfig) -> bool {
-    config.network_policy.allows_egress()
+    let plan_has_ingress = config
+        .plan_json
+        .as_deref()
+        .is_some_and(plan_json_has_ingress);
+    (config.network_policy.allows_egress() || plan_has_ingress)
         && !config
             .plan_json
             .as_deref()
@@ -280,11 +277,7 @@ mod phase_a_tests {
 
     #[test]
     fn effective_egress_is_off_under_deny_all_whatever_the_plan_says() {
-        for plan in [
-            None,
-            Some(plan_json_without_secrets()),
-            Some(plan_json_with_one_bound_secret()),
-        ] {
+        for plan in [None, Some(plan_json_without_secrets())] {
             let cfg = VmStartConfig {
                 plan_json: plan,
                 ..Default::default()
@@ -294,77 +287,55 @@ mod phase_a_tests {
         }
     }
 
-    /// The effective value can never exceed the policy: whatever the plan says,
-    /// a launch that is not allowed off the box never boots the egress client.
     #[test]
-    fn effective_egress_never_exceeds_the_policy() {
-        for policy in [
-            NetworkPolicy::deny_all(),
-            NetworkPolicy::allow_list(vec![]),
-            NetworkPolicy::allow_list(vec![HostPort::new("api.example.com", 443)]),
-            NetworkPolicy::unrestricted(),
-        ] {
-            for plan in [
-                None,
-                Some(plan_json_without_secrets()),
-                Some(plan_json_with_one_bound_secret()),
-                Some("{}".to_string()),
-            ] {
-                let cfg = VmStartConfig {
-                    network_policy: policy.clone(),
-                    plan_json: plan,
-                    ..Default::default()
-                };
-                assert!(
-                    !effective_vsock_egress(&cfg) || cfg.network_policy.allows_egress(),
-                    "effective egress must imply the policy allows it: {:?}",
-                    cfg.network_policy
-                );
-            }
-        }
-    }
-}
-
-#[cfg(test)]
-mod l3_token_tests {
-    use super::*;
-    use mvm_core::plan::NetworkMode;
-
-    fn plan_json(mode: NetworkMode) -> String {
+    fn ingress_starts_client_under_deny_all_without_secrets() {
         let mut plan = mvm_core::plan::test_support::PlanFixture::new().build();
-        plan.network_mode = mode;
-        serde_json::to_string(&plan).expect("plan serializes")
-    }
-
-    fn config_with(plan_json: Option<String>) -> VmStartConfig {
-        VmStartConfig {
-            plan_json,
-            ..VmStartConfig::default()
-        }
-    }
-
-    #[test]
-    fn every_other_mode_yields_no_flag() {
-        for mode in [NetworkMode::None, NetworkMode::HostVsockProxy] {
-            let config = config_with(Some(plan_json(mode)));
-            assert_eq!(
-                l3_cmdline_token(&config),
-                None,
-                "{mode:?} must not start the tunnel"
-            );
-        }
+        plan.ingress.push(
+            mvm_core::plan::IngressMapping::builder()
+                .mapping_id(1)
+                .protocol(mvm_core::plan::IngressProtocol::Tcp)
+                .host_addr("127.0.0.1")
+                .host_port(8080)
+                .guest_addr("127.0.0.1")
+                .guest_port(8080)
+                .transform(mvm_core::plan::IngressTransform::Opaque)
+                .build()
+                .expect("valid ingress fixture"),
+        );
+        let cfg = VmStartConfig {
+            plan_json: Some(serde_json::to_string(&plan).expect("serialize ingress fixture")),
+            ..Default::default()
+        };
+        assert!(!cfg.network_policy.allows_egress());
+        assert!(effective_vsock_egress(&cfg));
     }
 
     #[test]
-    fn a_launch_with_no_plan_never_starts_the_tunnel() {
-        assert_eq!(l3_cmdline_token(&config_with(None)), None);
-    }
-
-    #[test]
-    fn an_undecodable_plan_fails_closed() {
-        // Not being told to start the tunnel means having no network, which
-        // is the safe side of an ambiguous plan.
-        let config = config_with(Some("{ not a plan".to_string()));
-        assert_eq!(l3_cmdline_token(&config), None);
+    fn ingress_does_not_bypass_secret_suppression() {
+        let mut plan = mvm_core::plan::test_support::PlanFixture::new()
+            .secrets(vec![mvm_core::plan::SecretBinding {
+                name: "API_KEY".into(),
+                source: mvm_core::plan::SecretSource::Keystore {
+                    address: "test-key".into(),
+                },
+            }])
+            .build();
+        plan.ingress.push(
+            mvm_core::plan::IngressMapping::builder()
+                .mapping_id(1)
+                .protocol(mvm_core::plan::IngressProtocol::Tcp)
+                .host_addr("127.0.0.1")
+                .host_port(8080)
+                .guest_addr("127.0.0.1")
+                .guest_port(8080)
+                .transform(mvm_core::plan::IngressTransform::Opaque)
+                .build()
+                .expect("valid ingress fixture"),
+        );
+        let cfg = VmStartConfig {
+            plan_json: Some(serde_json::to_string(&plan).expect("serialize ingress fixture")),
+            ..Default::default()
+        };
+        assert!(!effective_vsock_egress(&cfg));
     }
 }

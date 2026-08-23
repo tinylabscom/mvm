@@ -415,9 +415,10 @@ let
       /bin/busybox modprobe vmw_vsock_virtio_transport 2>/dev/null || true
     fi
 
-    # Stage 2.27 — bring up the loopback interface. The kernel creates `lo`
-    # administratively DOWN; nothing else in this init ups it, so `127.0.0.1`
-    # has no route and ANY guest-internal loopback service is unreachable
+    # Stage 2.27 — configure the loopback interface. The kernel creates `lo`
+    # administratively DOWN and without an IPv4 address; merely raising the
+    # link still leaves `127.0.0.1` unavailable, so ANY guest-internal
+    # loopback service is unreachable
     # (`connect()` → ENETUNREACH) — the egress forward proxy on
     # 127.0.0.1:18080, the in-guest addon-dns resolver, and any local service a
     # workload binds. Must run before the agent (which binds the forward proxy)
@@ -425,9 +426,11 @@ let
     # busybox applets in the defconfig this image already relies on for
     # `modprobe`. Non-fatal: a failure logs and leaves loopback down (the prior
     # behaviour), never wedges PID 1.
-    /bin/busybox ip link set lo up 2>/dev/null \
-      || /bin/busybox ifconfig lo up 2>/dev/null \
-      || echo "mvm-init: WARNING could not bring up loopback (no ip/ifconfig applet); guest-internal loopback (egress forward proxy, addon-dns) will be unreachable"
+    if ! /bin/busybox ip addr replace 127.0.0.1/8 dev lo 2>/dev/null \
+      || ! /bin/busybox ip link set lo up 2>/dev/null; then
+      /bin/busybox ifconfig lo 127.0.0.1 netmask 255.0.0.0 up 2>/dev/null \
+        || echo "mvm-init: WARNING could not configure loopback (no ip/ifconfig applet); guest-internal loopback (egress forward proxy, addon-dns) will be unreachable"
+    fi
 
     # Stage 2.45 — mount the optional config/secrets drives. The host uses a
     # deterministic block order: vdb=config, vdc=secrets. These mounts are
@@ -809,6 +812,7 @@ let
       MVM_EGRESS_CLIENT_BIN=/usr/local/bin/mvm-egress-client
     fi
     if [ -n "''${MVM_VSOCK_EGRESS:-}" ] && [ -n "$MVM_EGRESS_CLIENT_BIN" ]; then
+      /bin/busybox ip addr replace 127.0.0.1/8 dev lo 2>/dev/null || true
       /bin/busybox ip link set lo up 2>/dev/null || true
       /bin/busybox mkdir -p /run/mvm
       printf 'nameserver 127.0.0.1\n' > /run/mvm/resolv.conf

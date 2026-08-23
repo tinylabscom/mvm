@@ -735,6 +735,39 @@ def derive_schema(
     return schema
 
 
+def ai_budget(
+    *,
+    max_input_tokens: int | None = None,
+    max_output_tokens: int | None = None,
+    max_total_tokens: int | None = None,
+) -> _ir.AiBudget:
+    """Token budget for AI egress metering.
+
+    Each limit is independent. A `None` field means no limit for that
+    category. The budget is enforced best-effort at response time: the
+    request that crosses the threshold is still allowed through and
+    recorded, and the *next* AI request is refused.
+    """
+    return _ir.AiBudget(
+        max_input_tokens=max_input_tokens,
+        max_output_tokens=max_output_tokens,
+        max_total_tokens=max_total_tokens,
+    )
+
+
+def ai_policy(
+    *,
+    metering: bool = True,
+    budget: _ir.AiBudget | None = None,
+) -> _ir.AiPolicy:
+    """AI egress metering/budget policy for `mvm.network(...)`.
+
+    `metering` enables per-VM token counting for known AI providers.
+    `budget` optionally refuses further AI requests once exceeded.
+    """
+    return _ir.AiPolicy(metering=metering, budget=budget)
+
+
 def network(
     *,
     mode: str = "none",
@@ -742,6 +775,7 @@ def network(
     egress: _ir.NetworkEgress | None = None,
     peers: list[str] | None = None,
     dns: _ir.NetworkDns | None = None,
+    ai: _ir.AiPolicy | None = None,
 ) -> _ir.Network:
     """Declare an app's network posture (plan-0004 §Phase 5).
 
@@ -750,6 +784,10 @@ def network(
     `egress` / `peers` / `dns` layer granular grants on top. Applications
     use the guest loopback HTTP proxy, SOCKS5h/UDP, controlled DNS, mediated
     ping, or typed connectors; direct raw networking is unsupported.
+
+    `ai` attaches an optional AI egress metering and budget policy to the
+    network posture. When set, the host records token usage for known AI
+    providers and refuses further AI requests once the budget is exceeded.
     """
     # `NetworkMode` is `Union[NetworkMode1, NetworkMode2]`, and a Union is
     # not callable — constructing it raised TypeError for every caller.
@@ -768,6 +806,7 @@ def network(
         egress=egress,
         peers=list(peers) if peers else [],
         dns=dns,
+        ai=ai,
     )
 
 

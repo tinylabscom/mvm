@@ -99,7 +99,6 @@ Small bounded JSON in and out, with no user process or file payload bytes.
 | `SleepPrep` / `Wake` / `PostRestore` / `CheckpointIntegrations` | Ack | Snapshot lifecycle handshakes. |
 | `UpdateIdleTimeout` | Ack with previous + new values | Adjusts the idle-eviction window. |
 | `MountVolume` / `UnmountVolume` | `MountVolumeResult` (closed enum) | Volume metadata only — no file contents. |
-| `StartPortForward` | `PortForwardStarted { vsock_port, … }` | Sets up a vsock→TCP forwarder. The data plane on that forwarder is byte-for-byte; the *control* plane that asks for it is one frame. |
 | `ProcStart` / `ProcSignal` / `ProcKill` / `ProcList` | `ProcResult` (closed enum) | Process control. `ProcStart` accepts an `argv` up to capped length but does not echo it back. |
 | `FsStat` / `FsMkdir` / `FsRemove` / `FsMove` | `FsResult` (closed enum) | Bounded filesystem metadata and mutations. |
 | `ConsoleOpen` / `ConsoleClose` / `ConsoleResize` | Ack with vsock port | Allocates a PTY forwarder. The PTY itself runs on a different vsock port — that's the data plane. |
@@ -118,7 +117,7 @@ share the 48-request data admission budget.
 | `FsList` / `FsDiff` | Request → bounded metadata response | 256 KiB | Protocol-bounded result | Response itself | Result caps and frame cap fail closed. | No file contents. |
 | `Exec` / `ExecBatch` / `RunCode` (dev-only) | One-shot request and capture | 256 KiB | Protocol-bounded result | Response itself | Oversized encoded responses fail closed. | No. |
 | Console PTY traffic | Raw bytes on a dedicated vsock port | Raw transport | TTY-shaped reads | Close or PTY exit | Kernel/socket backpressure; only the host CID may connect. | No. |
-| Port-forward TCP traffic | Bidirectional bytes over the vsock port returned by `StartPortForward` | None — raw TCP | TCP-shaped reads | TCP teardown | None — kernel TCP. | No. Forwarded bytes never enter audit. |
+| Declared ingress | Authenticated FlowMux frames on `NetworkFlow` | 256 KiB per frame | Credit-bounded stream chunks | Flow close/refusal | Shared per-VM FlowMux budget. | Metadata only; payload bytes never enter audit. |
 
 ### Redaction invariant
 

@@ -128,7 +128,7 @@ per the threat model above.
 | 2 | No guest binary can elevate to uid 0 | L2/L4 | `setpriv --no-new-privs`; `/etc/{passwd,group,nsswitch.conf}` are read-only bind mounts, so a compromised service cannot mint a uid-0 entry |
 | 3 | A tampered rootfs ext4 fails to boot, on the block+ext4 backends | L3 | dm-verity sidecar + 64-hex roothash on the kernel cmdline + a verity-aware initramfs that owns the boot pivot in userspace; a flipped data block panics the kernel before userspace runs |
 | 4 | A production-safe run cannot invoke DevOnly guest-agent verbs | L4 | The universal agent classifies requests and requires both the runtime profile and a signed `VerbGrant`; the runtime-boundary CI lane and grant unit test cover the complete DevOnly set |
-| 5 | Vsock framing, supervisor-config JSON, and the userspace datapath's guest-facing ingress are fuzzed | L2/L4 | `cargo-fuzz` targets cover `GuestRequest`, the sealed control envelope `SealedFrame` parses off the wire, the host-side `SupervisorConfig` parser, and the userspace socket datapath's ingress — IP admission (IPv4 and IPv6, including the bounded extension-header walk), the datapath's re-read of an admitted packet, and the per-flow smoltcp stack; every host↔guest type is `#[serde(deny_unknown_fields)]` |
+| 5 | Vsock framing, supervisor-config JSON, and FlowMux's guest-facing decoder and session state are fuzzed | L2/L4 | `cargo-fuzz` targets cover `GuestRequest`, the sealed control envelope `SealedFrame` parsed off the wire, the host-side `SupervisorConfig` parser, FlowMux frame decoding, and valid-frame sequences against the shared session ceilings, stream-id retirement, credit accounting, and refusal-without-state-change invariants; every host↔guest type is `#[serde(deny_unknown_fields)]` |
 | 6 | The pre-built dev image is hash-verified | supply chain | The per-arch checksums manifest is fetched and the artifact is streamed through SHA-256; a mismatch rejects and deletes the download |
 | 7 | Cargo dependencies are audited on every PR | supply chain | `cargo-deny` and `cargo-audit` CI jobs; a reproducibility double-build catches non-determinism that could mask injection |
 | 8 | Every workload runs from a signed, audited `ExecutionPlan` | cross-cutting | An Ed25519 host-signer keypair signs a typed plan; a validity window and a nonce replay-store gate admission; every admission emits chain-signed `plan.admitted` / `plan.launched` / `plan.failed` audit entries |
@@ -405,13 +405,11 @@ backend falls below Tier 1.
 | QEMU (Linux KVM/TCG) | ✅ KVM where available | ⚠️ larger device-model TCB | ⚠️ partial verified boot | ✅ | ✅ | Tier 2 — a `mvm`-only Linux dev/test substrate, opt-in only, never reachable from the fleet orchestrator. It carries no untrusted multi-tenant workload, so claim-10 egress enforcement is deliberately not wired into its start path. This carve-out is type-enforced: a `WorkloadBackend` marker trait gates the admitted workload-launch path, and QEMU does not implement it, so it cannot reach that path regardless of prose. The test-only mock backend does implement the marker — it is a hermetic lifecycle test double that carries no real workload, so permitting it costs nothing. |
 | `wasm-sandbox` (browser / WASI preview) | ❌ | ❌ | ❌ | ❌ | ❌ | **Off the isolation scale.** No KVM, no real kernel, no TAP/virtio/vsock. Asserts none of the numbered claims and declares its own non-virtualization honestly; fails closed on any kernel/TAP/vsock request. Opt-in only; auto-detection never selects it. It is safe *because* it is single-principal — a developer's own code in their own browser sandbox, where the "malicious guest" adversary class does not apply — not because it holds any isolation claim. Promotion to a real, claim-bearing microVM re-materializes the workload from recorded intent through the audited build and admission pipeline; nothing produced in this claims-free tier carries authority into a claim-bearing one. |
 
-**Matrix scope — networking.** Every "no guest network interface" statement in
-the rows above describes the default socket-aware vsock path, which is the
-only path a new workload can now take. It does not describe the frozen
-`l3-vsock` mode, where the guest holds an `mvm0` TUN by design; see
-"The `l3-vsock` second path, and its retirement" below. A run's tier is
-otherwise unaffected by this: `l3-vsock` never changed a backend's isolation
-tier, only which policy implementation decided its egress.
+**Matrix scope — networking.** Every claim-bearing workload backend is
+NIC-less. The former `l3-vsock` compatibility mode and its guest TUN, packet
+protocol, host forwarders, and public selector have been deleted. QEMU's
+explicit dev/test user-mode networking remains outside the production
+workload claim boundary described by this matrix.
 
 **Tier discipline.** Tier 1 is the production default and the only tier
 that carries every numbered claim. Tier 2 backends hold every claim
@@ -419,49 +417,37 @@ except claim 3, which is scoped to the block+ext4 backends. There is no
 Tier 3: a shared-kernel container runtime holds none of the L1–L3
 isolation claims, so mvm ships no container-based backend at any tier.
 
-**Claim-10 coverage.** On the default socket-aware path, claim 10's
-default-deny egress is enforced at **one** seam for every backend that runs an
-untrusted workload: the per-VM substitution endpoint reached over vsock, whose
-shared `EgressGate` is the sole decision point. There is no host-side network
-chokepoint to enforce at, because such a workload guest has no network
-interface at all — Firecracker omits `/network-interfaces`, libkrun pins
-`NetworkingMode::VsockDirect`, and the HVF device model has no net device.
-Egress leaves the guest only over vsock, to a host-side endpoint the host
-itself originates the outbound connection from, which is what makes admission,
-substitution and the audit record possible.
+**Claim-10 coverage.** Claim 10's default-deny egress is enforced at **one**
+seam for every backend that runs an untrusted workload: the authenticated
+FlowMux session on `GuestService::NetworkFlow` terminates in one per-VM
+`mvm-network-endpoint`. One projection of the admitted signed plan supplies
+the endpoint's policy gate, resource budget, VM identity, declared ingress,
+typed connector, and payload-free audit sink. The endpoint is the only owner
+of workload outbound sockets and admitted ingress listeners.
 
-Two gates keep that true rather than aspirational. `xtask
-check-uniform-vsock-egress` pins Firecracker, libkrun and HVF to a single
-spawn site (`RealEndpointSpawner::spawn`), so a driver cannot grow a second
-gate or revert to a raw backend. `xtask check-vsock-only-egress` fails closed
-if `virtio_net`, a tap, or a userspace-gateway token appears on a workload
-path. QEMU is intentionally excluded, for the reason given in the tier matrix
-above.
+There is no packet-filter chokepoint because the guest has no routable network
+interface: Firecracker omits `/network-interfaces`, libkrun uses its direct
+vsock mode, and the HVF device model has no net device. TCP, UDP, controlled
+DNS, typed HTTP, and declared ingress are framed operations on the authenticated
+session; the host opens an external socket only after the shared gate admits
+the operation.
 
-**The `l3-vsock` second path, and its retirement.** ADR-036 added an opt-in
-compatibility mode (`raw_ip_stack=true`, `NetworkMode::L3Vsock`) in which the
-guest *does* get an IP stack, on an `mvm0` TUN, and tunnels raw IP packets to
-a host forwarder; ADR-037 added a second forwarder for it. On that path the
-guest originates connections, so the decision point is the L3 admitter and the
-forwarder's policy — not the `EgressGate` above — and host-side substitution
-and redaction cannot apply at all. Claim 10 held on that path through its own
-admitter, but through a *second* implementation, which is a weaker property
-than the "one decision point" this section asserts for the default path.
+Two permanent gates keep that true. `xtask check-single-network-path` pins all
+claim-bearing runners to the shared endpoint spawner, requires the one
+`NetworkFlow` channel, rejects retired L3/NIC symbols, and inventories every
+production workload `connect` and listener bind. `xtask
+check-one-guest-protocol` rejects a guest caller of the network-flow port that
+does not construct a FlowMux client. Synthetic negative fixtures prove a
+second path or socket owner fails CI, while a projection test proves all flow
+classes share the same admitted object graph.
 
-ADR-042 retires it. `raw_ip_stack=true` / `NetworkMode::L3Vsock` is now
-refused at synthesis and admission with a migration error; already-running VMs
-drain, and no new production L3 workload boots. `xtask
-check-l3-expansion-freeze` is a temporary shrink-only ratchet holding that
-line until Plan 316 Phase 7 deletes the path and Phase 8 replaces
-`check-uniform-vsock-egress`, `check-vsock-only-egress`, and the ratchet with
-`check-single-network-path` plus a socket-owner gate. Until that lands, read
-claim 10 as: one decision point on the only path a new workload can take, and
-a frozen second implementation with no new entrants.
-
-*Corrected 2026-08-11.* This section, and `specs/refactor/03-networking.md`,
-both asserted that a workload guest has no network interface at all, with no
-qualifier. That was written before `l3-vsock` shipped and was not revisited
-when it did. The paragraphs above restore the qualifier.
+**The retired `l3-vsock` path.** ADR-036 and ADR-037 historically supplied an
+opt-in raw-packet compatibility mode. ADR-042 superseded them, and the public
+mode, guest TUN and agent, packet protocol, policy branch, host forwarders,
+VMM hooks, dependencies, packaging, and temporary migration ratchets are now
+deleted. Stale serialized declarations fail at the outer compatibility
+boundary with guidance toward loopback adapters and typed connectors; the
+rejected mode is not representable in admitted domain types.
 
 *Corrected 2026-08-02.* This section previously described enforcement as
 "Firecracker via nftables default-deny on the TAP, and libkrun via the
@@ -471,18 +457,11 @@ mechanism was sound throughout — the description of it was not, which matters
 because this document is what a reviewer reads to decide whether to trust the
 posture.
 
-**Deny-all control-plane posture (DHCP/ARP).** A networked guest brings
-up its network interface at boot — link-up, then DHCP, then a static
-fallback — before the agent drops privileges. Under a deny-all policy the
-host-side flow gate drops every egress flow, including DHCP, with no
-control-plane carve-out: deny-all means deny-all. This does not hang the
-guest — the DHCP client exits immediately on no lease and the guest
-self-assigns its static fallback address, so the interface is
-administratively up with no admitted egress. ARP and IPv6 neighbor
-discovery are non-IP link-layer frames the bridge forwards unchanged;
-they reach only the local gateway and admit no IP egress, so they need no
-special handling under deny-all. When the policy admits egress, the flow
-gate opens and DHCP flows normally.
+**Deny-all posture.** A plan without a network grant has no `NetworkFlow`
+capability, and the NIC-less guest has no route around that absence. A plan
+with a narrow grant still begins from the same default-deny gate; only an
+admitted typed flow can cause the host endpoint to resolve a name, connect a
+socket, or bind an ingress listener.
 
 **Verified-boot scoping (claim 3).** dm-verity is block-device-specific:
 it covers the block+ext4 backends — Firecracker and the in-process
@@ -751,12 +730,12 @@ tracked separately as a follow-up audit (see "deferred follow-ups").
 | 2  | No guest binary can elevate to uid 0 | fn:set_no_new_privs, fn:virtiofs_mount_flags_keep_workspace_read_only, ci:check-abi-layout | setpriv --no-new-privs + RO config binds (ADR-001 §W2.2) | Shipped |
 | 3  | A tampered rootfs ext4 fails to boot | ci:verified-boot-artifacts, fn:verify_and_resume_rejects_tampered_mem, ci:check-abi-layout | dm-verity + roothash on **block+ext4** backends — Firecracker + Option B (ADR-001 §W3, ADR-106); the restore path also verifies the sealed snapshot envelope (HMAC + epoch) before resuming; virtiofs-root is a dev-tier path with a weaker contract that does **not** witness this claim (ADR-107) | Shipped |
 | 4  | A production-safe run cannot invoke DevOnly guest-agent verbs | fn:prod_safe_grant_refuses_all_dev_only_requests, ci:guest-agent-runtime-boundary | runtime profile + signed VerbGrant intersection (ADR-001 §W4.3) | Shipped |
-| 5  | Vsock framing + supervisor-config JSON + datapath ingress are fuzzed | ci:fuzz_guest_request, ci:fuzz_sealed_frame, ci:fuzz_supervisor_config, ci:fuzz_datapath_ingress, ci:fuzz_input_frame | cargo-fuzz (ADR-001 §W4.1/W4.2) | Shipped |
+| 5  | Vsock framing + supervisor-config JSON + FlowMux decode/state are fuzzed | ci:fuzz_guest_request, ci:fuzz_sealed_frame, ci:fuzz_supervisor_config, ci:fuzz_network_flow_decode, ci:fuzz_network_flow_state, ci:fuzz_input_frame | cargo-fuzz (ADR-001 §W4.1/W4.2) | Shipped |
 | 6  | The pre-built dev image is hash-verified | ci:hash-verify-tests, fn:download_runtime_overlay_rejects_checksum_mismatch | SHA-256 manifest (ADR-001 §W5.1) | Shipped |
 | 7  | Cargo deps are audited on every PR | ci:cargo-deny, ci:cargo-audit, ci:reproducibility | RUSTSEC + deny.toml (ADR-001 §W5.2/W5.3) | Shipped |
 | 8  | Every workload runs from a signed, audited ExecutionPlan | fn:synthesize_plan, fn:admit_for_run, fn:verify_audit_chain, fn:naively_dropping_old_entries_fails_verification_at_line_zero, fn:a_prune_record_that_over_claims_is_refused, fn:the_same_deletion_without_a_record_is_still_refused, fn:pruning_a_broken_chain_is_refused_before_anything_is_deleted, fn:a_spliced_segment_is_refused, fn:a_missing_segment_is_named_not_silently_skipped, fn:an_interrupted_rotation_continues_history_instead_of_restarting_it | Ed25519 + chain-signed audit log (ADR-014). The chain may be rotated into sequenced segments (Plan 319): `verify_audit_chain` now attests an unbroken chain from genesis **or from a signed handoff naming its predecessor segment and that predecessor's final chain hash**, and `verify_segment_set` attests the ordering and completeness of the segment set. A retired prefix may also be deliberately pruned (Plan 326): the chain then verifies **with a corroborated gap** rather than whole, and the prune record may only claim what the surviving handoff independently attests, so it cannot relabel an edit as a removal. Only the upper boundary of a pruned range is cross-checked. Tail truncation stays undetectable, as it was before rotation | Shipped |
 | 9  | Every published bundle is content-addressed and re-verified | fn:read_and_verify_bundle, fn:verify_plan_bundle | SHA-256 content-addressing (Sprint 52 W2) | Shipped |
-| 10 | No untrusted workload reaches the network unless policy-admitted | fn:policy_default_is_deny_all, fn:run_net_default_is_deny_all, ci:fuzz_dns_codec, fn:private_link_local_loopback_ula_metadata_are_forbidden, fn:emits_resolved_query_with_ip_list, fn:assert_vsock_only_device_model, fn:verify_and_resume_refuses_nic_on_restore, fn:fork_restore_refuses_nic | default-deny network policy + bounded DNS codec fuzzing + DNS-answer SSRF/rebinding filtering + chain-signed per-query DNS audit; warm-restore and fork-restore refuse any restored device model carrying a NIC before resuming vCPUs | Shipped |
+| 10 | No untrusted workload reaches the network unless policy-admitted | fn:policy_default_is_deny_all, fn:run_net_default_is_deny_all, ci:single-network-path, ci:fuzz_dns_codec, fn:private_link_local_loopback_ula_metadata_are_forbidden, fn:emits_resolved_query_with_ip_list, fn:admitted_projection_is_one_object_graph_for_every_network_surface, fn:assert_vsock_only_device_model, fn:verify_and_resume_refuses_nic_on_restore, fn:fork_restore_refuses_nic | one authenticated FlowMux endpoint + one admitted policy/budget/identity/audit projection + permanent single-path/socket-owner gate + bounded DNS codec fuzzing + DNS-answer SSRF/rebinding filtering + chain-signed per-query DNS audit; warm-restore and fork-restore refuse any restored device model carrying a NIC before resuming vCPUs | Shipped |
 | 11 | Every app-dep volume is hash-locked, CVE-scanned and SBOM-enumerated | ci:app-deps-audit, fn:verify_sealed_volume, fn:apply_install_gate | CycloneDX + pip-audit (ADR-047) | Shipped |
 | 12 | Every host-side service binding is plan-gated and audited | fn:unbound_service_returns_not_bound, fn:service_call_rejects_unknown_envelope_fields | ExecutionPlan.services binding (ADR-020) | Shipped |
 | 13 | No raw secret value crosses the broker channel | fn:encode_secret_env_cmdline_round_trips_pairs_as_single_token, fn:substitute | destination-bound signed credentials (ADR-023) | Shipped |

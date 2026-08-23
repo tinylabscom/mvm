@@ -25,7 +25,7 @@ export function CTABanner() {
                 rescues Tailwind's mx-auto here — that rule only matches divs,
                 so on an h2 the box stayed left of centre while its text
                 appeared centred. */}
-            <h2 className="text-balance lowercase font-display text-2xl font-bold leading-tight text-title sm:text-3xl">
+            <h2 className="text-balance lowercase font-display tracking-tight text-2xl font-semibold leading-tight text-title sm:text-3xl">
               run something you don&rsquo;t trust.
             </h2>
             {/* No max-width cap: the sentence should sit on one line at

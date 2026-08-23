@@ -124,7 +124,7 @@ pub struct FlowMuxSession {
     /// Active guest-initiated UDP associations. Each association runs in its
     /// own relay thread.
     udp_associations: SharedUdpAssociations,
-    gate: EgressGate,
+    gate: Arc<EgressGate>,
     read_buf: Vec<u8>,
     limits: RegistryLimits,
     connect_timeout: Duration,
@@ -171,7 +171,7 @@ pub struct FlowMuxAccept {
     host_key: SigningKey,
     guest_anchor: VerifyingKey,
     limits: RegistryLimits,
-    gate: EgressGate,
+    gate: Arc<EgressGate>,
     recorder: Option<Arc<Recorder>>,
     substitution: Option<Arc<crate::supervisor::network_endpoint_proxy::SubstitutionService>>,
     vm_resources: Option<Arc<FlowMuxVmResources>>,
@@ -188,6 +188,18 @@ impl FlowMuxAccept {
         guest_anchor: VerifyingKey,
         limits: RegistryLimits,
         gate: EgressGate,
+    ) -> Self {
+        Self::new_shared(session_id, host_key, guest_anchor, limits, Arc::new(gate))
+    }
+
+    /// Build from the endpoint's single shared claim-10 policy object.
+    #[must_use]
+    pub fn new_shared(
+        session_id: &str,
+        host_key: SigningKey,
+        guest_anchor: VerifyingKey,
+        limits: RegistryLimits,
+        gate: Arc<EgressGate>,
     ) -> Self {
         Self {
             session_id: session_id.to_string(),

@@ -91,23 +91,22 @@ id = "MVM-SEC-05"
 level = "build"
 witness_kinds = ["ci"]
 suite = "fuzz_surface"
-statement = "Vsock framing, supervisor-config JSON, and the userspace datapath's guest-facing ingress are fuzzed"
+statement = "Vsock framing, supervisor-config JSON, and FlowMux's guest-facing decoder and session state are fuzzed"
 # Named per fuzz target rather than by the lane, so each witness points at
 # something check-workflow-paths resolves to a real fuzz_targets/<name>.rs.
 # A bare lane name matched the job key and stayed green through ten
 # nightlies in which the lane ran no target at all.
 #
-# `fuzz_datapath_ingress` covers the userspace socket datapath: admission
-# (`ip::parse`, IPv4 and IPv6, including the bounded extension-header walk),
-# the datapath's own re-read of an admitted packet in `send_to_network`, and
-# the per-flow smoltcp stack guest bytes reach through `deliver_from_guest`.
-# It does not cover the privileged Linux TUN datapath, which hands whole
-# packets to the kernel rather than parsing them here.
+# `fuzz_network_flow_decode` covers the first FlowMux parser to touch
+# guest-controlled network bytes. `fuzz_network_flow_state` covers valid frame
+# sequences against the shared session ceilings, stream-id retirement, credit
+# accounting, and refusal-without-state-change invariants.
 witnesses = [
     "ci:fuzz_guest_request",
     "ci:fuzz_sealed_frame",
     "ci:fuzz_supervisor_config",
-    "ci:fuzz_datapath_ingress",
+    "ci:fuzz_network_flow_decode",
+    "ci:fuzz_network_flow_state",
     "ci:fuzz_input_frame",
 ]
 
@@ -184,6 +183,8 @@ witnesses = [
     "fn:run_net_default_is_deny_all",
     "fn:private_link_local_loopback_ula_metadata_are_forbidden",
     "fn:emits_resolved_query_with_ip_list",
+    "fn:admitted_projection_is_one_object_graph_for_every_network_surface",
+    "ci:single-network-path",
     "ci:fuzz_dns_codec",
     "fn:assert_vsock_only_device_model",
     "fn:fork_restore_refuses_nic",

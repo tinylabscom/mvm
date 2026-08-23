@@ -39,7 +39,7 @@ pub use api::{
     query_probe_status_at, query_resource_usage, query_resource_usage_at, query_worker_status,
     query_worker_status_at, request_sleep_prep, send_fs_request, send_fs_request_on,
     send_proc_request, send_proc_request_on, send_proc_wait, send_proc_wait_on, signal_wake,
-    start_port_forward_on, workload_is_primed_at,
+    workload_is_primed_at,
 };
 pub use connection::{
     HOST_CID, connect_host_vsock, connect_to, connect_to_port, connect_to_port_once, send_request,
@@ -93,8 +93,7 @@ pub const GUEST_CID: u32 = 3;
 /// unprivileged on Linux — see the corrected comment in
 /// `nix/lib/minimal-init/default.nix::guestAgentBlock`.
 ///
-/// 5252 sits clearly above 1023 and below the port-forward range
-/// (`PORT_FORWARD_BASE` = 10_000) and the console-data range
+/// 5252 sits clearly above 1023 and below the console-data range
 /// (`CONSOLE_PORT_BASE` = 20_000), so the host-side proxy allowlist
 /// keeps its disjoint-union shape. The "52" tail is a
 /// callback to the historical port for grep-ability.
@@ -134,16 +133,11 @@ const _: () = assert!(EGRESS_PORT == 5253);
 /// mechanism [`EGRESS_PORT`] uses.
 ///
 /// 5300 sits above the privileged range and above 5251/5252/5253, and below
-/// the port-forward range ([`PORT_FORWARD_BASE`] = 10_000) and the
-/// console-data range ([`CONSOLE_PORT_BASE`] = 20_000), so the host-side proxy
+/// the console-data range ([`CONSOLE_PORT_BASE`] = 20_000), so the host-side proxy
 /// allowlist keeps its disjoint-union shape. It reuses the number the
 /// pre-broker secrets channel once held (that channel was removed), so there
 /// is no live collision.
 pub const BROKER_PORT: u32 = 5300;
-
-/// Base vsock port for TCP port forwarding.
-/// The forwarded vsock port = `PORT_FORWARD_BASE + guest_tcp_port`.
-pub const PORT_FORWARD_BASE: u32 = 10000;
 
 /// Base vsock port for interactive console PTY sessions.
 pub const CONSOLE_PORT_BASE: u32 = 20000;
@@ -324,6 +318,6 @@ mod tests {
     fn workload_exit_port_is_distinct_and_reserved() {
         assert_eq!(WORKLOAD_EXIT_PORT, 5251);
         assert_ne!(WORKLOAD_EXIT_PORT, GUEST_AGENT_PORT);
-        const { assert!(WORKLOAD_EXIT_PORT < PORT_FORWARD_BASE) }
+        const { assert!(WORKLOAD_EXIT_PORT < CONSOLE_PORT_BASE) }
     }
 }

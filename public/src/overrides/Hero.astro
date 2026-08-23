@@ -1,18 +1,23 @@
 ---
 // Override Starlight's Hero component.
-// On the splash page (index), render our React landing page.
-// On all other pages, render the default Starlight Hero.
+//
+// The Hero slot is where this site renders full custom page bodies. That is
+// deliberate rather than incidental: Page.astro wraps the *page* slot in
+// MarkdownContent, whose `> * + *` sibling margins and heading rules would
+// fight a hand-laid-out page, while the hero slot sits outside it. So a
+// splash page here supplies its whole body through this component, keyed by
+// slug, and every other route falls through to the stock Starlight hero.
 import Default from "@astrojs/starlight/components/Hero.astro";
 import { Landing } from "../components/landing/Landing";
+import Architecture from "../components/architecture/Architecture.astro";
 
 const route = Astro.locals.starlightRoute;
 const isSplash = route?.entry?.data?.template === "splash";
+// "" is the site index. StarlightPage-rendered routes derive their slug
+// from the URL, so /architecture arrives here as "architecture".
+const splashSlug = isSplash ? route?.entry?.slug : undefined;
 ---
 
-{
-  isSplash ? (
-    <Landing client:load />
-  ) : (
-    <Default />
-  )
-}
+{splashSlug === "" && <Landing client:load />}
+{splashSlug === "architecture" && <Architecture />}
+{!isSplash && <Default />}
