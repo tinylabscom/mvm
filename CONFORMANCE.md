@@ -130,3 +130,4 @@ Never re-derived, vendored, or gated on.
 | `linux-seccomp` | Linux seccomp | https://www.kernel.org/doc/html/latest/userspace-api/seccomp_filter.html and ADR-001 §W2 | `MVM-SEC-01` |
 | `linux-setpriv` | util-linux setpriv | https://mirrors.edge.kernel.org/pub/linux/utils/util-linux/ and ADR-001 §W2.2 | `MVM-SEC-02` |
 | `rustsec` | RustSec Advisory Database | https://rustsec.org/advisories/ and deny.toml | `MVM-SEC-07` |
+
