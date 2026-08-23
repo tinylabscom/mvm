@@ -435,6 +435,8 @@ objc2-foundation = { version = "0.3", features = ["NSRunLoop", "NSDate", "NSAuto
 mvm-cli = { workspace = true, default-features = false, features = ["builder-vm", "libkrun-sys"] }
 
 [dev-dependencies]
+mvm-contract.workspace = true
+hex.workspace = true
 assert_cmd.workspace = true
 chrono.workspace = true
 flate2.workspace = true

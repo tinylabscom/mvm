@@ -204,7 +204,10 @@ pub fn run(workspace: &Path, mode: Mode, shard: Option<&ShardSpec>) -> Result<()
         let previous = read_baseline(&baseline_path).ok();
         let accepted_misses = if mode == Mode::RewriteBaseline {
             let scoped = carry_scopes_forward(resolved.clone(), previous.as_ref());
-            seed_accepted(&run_mutants_over(workspace, &for_shard(&scoped, shard))?)
+            seed_accepted(&run_mutants_over(
+                workspace,
+                &for_shard(workspace, &scoped, shard),
+            )?)
         } else {
             previous
                 .as_ref()
@@ -252,7 +255,7 @@ pub fn run(workspace: &Path, mode: Mode, shard: Option<&ShardSpec>) -> Result<()
         // The committed surface, not the freshly resolved one: resolution
         // cannot know about scopes, and running the unscoped surface would
         // report every out-of-claim mutant as a new miss.
-        let surface = for_shard(&baseline.surface, shard);
+        let surface = for_shard(workspace, &baseline.surface, shard);
         if surface.is_empty() {
             bail!(
                 "check-mutation-witnesses: --package {} matches no surface file. A shard that \
@@ -672,15 +675,46 @@ pub fn parse_shard_spec(raw: &str) -> Result<ShardSpec> {
 
 /// The surface files this shard owns, or all of them when unfiltered.
 ///
-/// Files are ordered by path before slicing, so which shard owns a file
+/// Files are ordered by path before packing, so which shard owns a file
 /// is a property of the committed surface rather than of resolution
 /// order — otherwise a file could migrate between shards without the
 /// baseline changing, and a survivor would appear and vanish by shard.
 ///
-/// The slice is by stride, not by contiguous block: adjacent surface
-/// files tend to be siblings of similar cost, so a block split loads one
-/// shard with the expensive half.
-pub fn for_shard(surface: &[SurfaceFile], spec: Option<&ShardSpec>) -> Vec<SurfaceFile> {
+/// Shards are packed longest-first by source size rather than sliced by
+/// stride. Mutation cost spans more than an order of magnitude across one
+/// package's surface, and a cost-blind split parks the expensive files
+/// together: `mvm-hostd` shards 2 and 4 were killed at the lane's timeout
+/// nightly, each holding two ~150-minute files, while shard 3 finished its
+/// three cheapest in 24 minutes. Size is a coarse stand-in for cost, but
+/// any cost-aware packing beats a blind one, and it needs nothing recorded
+/// or maintained alongside the surface.
+pub fn for_shard(
+    workspace: &Path,
+    surface: &[SurfaceFile],
+    spec: Option<&ShardSpec>,
+) -> Vec<SurfaceFile> {
+    for_shard_by_weight(surface, spec, &|f| source_weight(workspace, f))
+}
+
+/// A surface file's stand-in for mutation cost.
+///
+/// Never zero: a file the workspace cannot stat still has to land
+/// somewhere, and equal weights make the packing fall back to plain
+/// round-robin rather than piling every file onto the first shard.
+fn source_weight(workspace: &Path, file: &SurfaceFile) -> u64 {
+    std::fs::metadata(workspace.join(&file.path))
+        .map(|m| m.len())
+        .unwrap_or(0)
+        .max(1)
+}
+
+/// [`for_shard`] against a caller-supplied cost, so the packing can be
+/// tested without a workspace on disk.
+fn for_shard_by_weight(
+    surface: &[SurfaceFile],
+    spec: Option<&ShardSpec>,
+    weight: &dyn Fn(&SurfaceFile) -> u64,
+) -> Vec<SurfaceFile> {
     let Some(spec) = spec else {
         return surface.to_vec();
     };
@@ -693,12 +727,28 @@ pub fn for_shard(surface: &[SurfaceFile], spec: Option<&ShardSpec>) -> Vec<Surfa
     let Some((index, total)) = spec.shard else {
         return owned;
     };
-    owned
-        .into_iter()
-        .enumerate()
-        .filter(|(i, _)| i % total == index - 1)
-        .map(|(_, f)| f)
-        .collect()
+
+    // Heaviest file onto the lightest shard, ties by path then by shard
+    // index, so the assignment is a pure function of the surface.
+    let mut ordered: Vec<(u64, SurfaceFile)> = owned.into_iter().map(|f| (weight(&f), f)).collect();
+    ordered.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.path.cmp(&b.1.path)));
+
+    let mut loads = vec![0u64; total];
+    let mut mine = Vec::new();
+    for (w, file) in ordered {
+        let target = loads
+            .iter()
+            .enumerate()
+            .min_by_key(|(i, load)| (**load, *i))
+            .map(|(i, _)| i)
+            .expect("a shard total of zero is rejected when the spec is parsed");
+        loads[target] += w;
+        if target == index - 1 {
+            mine.push(file);
+        }
+    }
+    mine.sort_by(|a, b| a.path.cmp(&b.path));
+    mine
 }
 
 /// Copy each committed file's `scope` onto the freshly resolved surface.
@@ -1576,6 +1626,13 @@ jobs:
         );
     }
 
+    /// Shard a surface at uniform cost. The packing degenerates to
+    /// round-robin when every file weighs the same, which is what these
+    /// tests pin: membership, disjointness, coverage, order-independence.
+    fn even(surface: &[SurfaceFile], spec: Option<&ShardSpec>) -> Vec<SurfaceFile> {
+        for_shard_by_weight(surface, spec, &|_| 1)
+    }
+
     #[test]
     fn a_package_shard_selects_only_that_packages_files() {
         let surface = [
@@ -1583,7 +1640,7 @@ jobs:
             surface("crates/mvm-cli/src/b.rs", vec![2]),
             surface("crates/mvm-hostd/src/c.rs", vec![3]),
         ];
-        let cli = for_shard(
+        let cli = even(
             &surface,
             Some(&ShardSpec {
                 package: "mvm-cli".to_string(),
@@ -1594,7 +1651,7 @@ jobs:
         assert!(cli.iter().all(|s| s.package == "mvm-cli"));
 
         assert_eq!(
-            for_shard(
+            even(
                 &surface,
                 Some(&ShardSpec {
                     package: "mvm-hostd".to_string(),
@@ -1606,11 +1663,11 @@ jobs:
         );
         // Unfiltered is the whole surface, so a non-sharded run is
         // unchanged.
-        assert_eq!(for_shard(&surface, None).len(), 3);
+        assert_eq!(even(&surface, None).len(), 3);
         // A package with no surface files yields nothing, which the caller
         // turns into a failure rather than a silent pass.
         assert!(
-            for_shard(
+            even(
                 &surface,
                 Some(&ShardSpec {
                     package: "mvm-sdk".to_string(),
@@ -1638,7 +1695,7 @@ jobs:
                 package: (*p).to_string(),
                 shard: None,
             };
-            for f in for_shard(&surface, Some(&spec)) {
+            for f in even(&surface, Some(&spec)) {
                 seen.push(f.path);
             }
         }
@@ -1689,8 +1746,8 @@ jobs:
             .map(|n| surface(&format!("crates/mvm-hostd/src/{n}.rs"), vec![8]))
             .collect();
 
-        let one = for_shard(&surface, Some(&parse_shard_spec("mvm-hostd/1of2").unwrap()));
-        let two = for_shard(&surface, Some(&parse_shard_spec("mvm-hostd/2of2").unwrap()));
+        let one = even(&surface, Some(&parse_shard_spec("mvm-hostd/1of2").unwrap()));
+        let two = even(&surface, Some(&parse_shard_spec("mvm-hostd/2of2").unwrap()));
 
         // Disjoint.
         let a: BTreeSet<&str> = one.iter().map(|f| f.path.as_str()).collect();
@@ -1711,6 +1768,79 @@ jobs:
         assert!(one.len().abs_diff(two.len()) <= 1);
     }
 
+    /// The regression this packing exists for.
+    ///
+    /// These are the measured per-file costs of `mvm-hostd`'s surface from
+    /// the nightly of 2026-08-21 (Security run 32448509693), in minutes.
+    /// Round-robin over the path-sorted surface put `network/stages.rs` with
+    /// `plan_admission.rs` on one shard and `audit_file.rs` with
+    /// `network_endpoint_proxy.rs` on another; both ran past the lane's
+    /// 330-minute timeout and were killed, nightly, while a third shard
+    /// finished its three cheapest files in 24 minutes.
+    ///
+    /// The assertion is on balance, not on wall-clock minutes. Two of the
+    /// costs above are lower bounds — those shards were killed part-way
+    /// through a file, so the real number is higher — which makes any
+    /// absolute budget compared against them meaningless: round-robin's
+    /// worst shard measures 324, and would slip under a literal 330. Against
+    /// the ideal even split it is 1.70x, and that ratio is what separates a
+    /// cost-blind split from a cost-aware one.
+    #[test]
+    fn cost_packing_balances_a_surface_that_round_robin_left_lopsided() {
+        // (path, measured minutes)
+        let measured: [(&str, u64); 11] = [
+            ("crates/mvm-hostd/src/supervisor/network/stages.rs", 163),
+            ("crates/mvm-hostd/src/plan_admission.rs", 161),
+            ("crates/mvm-hostd/src/supervisor/audit_file.rs", 141),
+            (
+                "crates/mvm-hostd/src/supervisor/network_endpoint_proxy.rs",
+                132,
+            ),
+            ("crates/mvm-hostd/src/stream/input_gate.rs", 61),
+            ("crates/mvm-hostd/src/broker/registry.rs", 50),
+            ("crates/mvm-hostd/src/supervisor/network_endpoint.rs", 22),
+            ("crates/mvm-hostd/src/supervisor/wall_clock.rs", 9),
+            ("crates/mvm-hostd/src/keyholder/substitution.rs", 9),
+            ("crates/mvm-hostd/src/admission_budget.rs", 7),
+            ("crates/mvm-hostd/src/supervisor/dns_audit.rs", 6),
+        ];
+        let cost: BTreeMap<&str, u64> = measured.iter().copied().collect();
+        let surface: Vec<SurfaceFile> = measured
+            .iter()
+            .map(|(path, _)| surface(path, vec![8]))
+            .collect();
+
+        let total = 4;
+        let sum: u64 = measured.iter().map(|(_, c)| c).sum();
+        // Half again the ideal even split. Round-robin lands at 1.70x of it,
+        // longest-first at 1.01x, so the bound discriminates while leaving
+        // room for the surface to drift.
+        let ceiling = sum * 3 / (total as u64 * 2);
+
+        let mut covered: Vec<String> = Vec::new();
+        for index in 1..=total {
+            let spec = ShardSpec {
+                package: "mvm-hostd".to_string(),
+                shard: Some((index, total)),
+            };
+            let files = for_shard_by_weight(&surface, Some(&spec), &|f| cost[f.path.as_str()]);
+            let load: u64 = files.iter().map(|f| cost[f.path.as_str()]).sum();
+            assert!(
+                load <= ceiling,
+                "shard {index}of{total} carries {load} minutes against a {ceiling} \
+                 ceiling — the split is not cost-aware: {:?}",
+                files.iter().map(|f| &f.path).collect::<Vec<_>>()
+            );
+            covered.extend(files.into_iter().map(|f| f.path));
+        }
+
+        // Still a partition: a cheap shard must not come from dropped work.
+        covered.sort();
+        let mut all: Vec<String> = surface.iter().map(|f| f.path.clone()).collect();
+        all.sort();
+        assert_eq!(covered, all, "every file must land in exactly one shard");
+    }
+
     /// Which shard owns a file must not depend on the order resolution
     /// happened to emit, or a survivor would move between shards without
     /// the baseline changing.
@@ -1725,11 +1855,11 @@ jobs:
         backward.reverse();
 
         let spec = parse_shard_spec("mvm-hostd/1of2").unwrap();
-        let a: Vec<String> = for_shard(&forward, Some(&spec))
+        let a: Vec<String> = even(&forward, Some(&spec))
             .into_iter()
             .map(|f| f.path)
             .collect();
-        let b: Vec<String> = for_shard(&backward, Some(&spec))
+        let b: Vec<String> = even(&backward, Some(&spec))
             .into_iter()
             .map(|f| f.path)
             .collect();
