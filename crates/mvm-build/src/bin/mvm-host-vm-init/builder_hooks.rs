@@ -9,11 +9,13 @@
 //! Linux-only: the runner uses `mount`, `chroot`, and `wait` syscalls.
 
 use std::os::unix::process::CommandExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
 use nix::mount::{MsFlags, mount, umount};
+
+use crate::parse_loop_device;
 
 /// Canonical path to the before_build hook inside a workload rootfs.
 const HOOK_PATH: &str = "/etc/mvm/hooks/before_build.sh";
@@ -24,10 +26,11 @@ const HOOK_PATH: &str = "/etc/mvm/hooks/before_build.sh";
 const MOUNT_POINT: &str = "/tmp/mvm-before-build-rootfs";
 
 /// Absolute path populated by the builder image from util-linux.
-///
-/// `/bin/mount` is the BusyBox applet. It does not allocate a loop device for
-/// `-o loop`; it forwards `loop` to ext4 as a filesystem option instead.
-const UTIL_LINUX_MOUNT: &str = "/sbin/mount";
+const UTIL_LINUX_LOSETUP: &str = "/sbin/losetup";
+
+/// Offline filesystem checker used to replay and seal the ext4 journal after
+/// the writable hook mount has been torn down.
+const E2FSCK: &str = "/sbin/e2fsck";
 
 /// Grace period for the before_build hook. Build-time setup (DB
 /// migrations, cache warming) should complete promptly; if it hangs we
@@ -93,6 +96,22 @@ pub enum BuilderHookError {
         #[source]
         source: std::io::Error,
     },
+
+    /// The offline rootfs journal check could not be started.
+    #[error("check rootfs journal for {rootfs}: {source}")]
+    CheckRootfs {
+        rootfs: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
+    /// The offline checker could not leave the rootfs in a clean state.
+    #[error("rootfs journal check for {rootfs} exited with code {code}: {stderr}")]
+    RootfsNotClean {
+        rootfs: PathBuf,
+        code: i32,
+        stderr: String,
+    },
 }
 
 /// Mount `rootfs_path` read-write at [`MOUNT_POINT`], bind-mount
@@ -112,7 +131,7 @@ pub fn run_before_build_hook(rootfs_path: &Path) -> Result<(), BuilderHookError>
         source: e,
     })?;
 
-    mount_rootfs(rootfs_path)?;
+    let mut mounted_rootfs = MountedRootfs::mount(rootfs_path)?;
 
     // Ensure the chroot has the target directories for bind mounts.
     // mkGuest rootfses already include them, but creating them is
@@ -121,15 +140,15 @@ pub fn run_before_build_hook(rootfs_path: &Path) -> Result<(), BuilderHookError>
         let _ = std::fs::create_dir_all(format!("{MOUNT_POINT}/{subdir}"));
     }
 
-    let mut bind_mounts = Vec::new();
     for (src, dst) in [("/proc", "proc"), ("/sys", "sys"), ("/dev", "dev")] {
         let dst_path = format!("{MOUNT_POINT}/{dst}");
-        bind_mount(src, &dst_path).map_err(|e| BuilderHookError::BindMount {
-            src: src.to_string(),
-            dst: dst_path.clone(),
-            source: e,
-        })?;
-        bind_mounts.push(dst_path);
+        mounted_rootfs
+            .bind_mount(src, &dst_path)
+            .map_err(|e| BuilderHookError::BindMount {
+                src: src.to_string(),
+                dst: dst_path.clone(),
+                source: e,
+            })?;
     }
 
     let hook_in_chroot = format!("{MOUNT_POINT}{HOOK_PATH}");
@@ -137,67 +156,159 @@ pub fn run_before_build_hook(rootfs_path: &Path) -> Result<(), BuilderHookError>
         .map(|m| m.is_file())
         .unwrap_or(false);
 
-    if !hook_present {
+    let hook_result = if !hook_present {
         eprintln!("mvm-host-vm-init: no before_build hook at {HOOK_PATH}; treating as no-op");
-        cleanup_mounts(&bind_mounts);
+        Ok(())
+    } else {
+        eprintln!(
+            "mvm-host-vm-init: running before_build hook in {rootfs_path}",
+            rootfs_path = rootfs_path.display()
+        );
+        run_hook_in_chroot()
+    };
+
+    // Drop every bind mount, the rootfs mount, and its loop device before
+    // touching the image offline. If best-effort Drop cleanup ever leaves the
+    // image mounted, e2fsck refuses it and the artifact is not published.
+    drop(mounted_rootfs);
+    let journal_result = seal_rootfs_journal(rootfs_path);
+    match (hook_result, journal_result) {
+        (Err(hook_error), _) => Err(hook_error),
+        (Ok(()), result) => result,
+    }
+}
+
+fn seal_rootfs_journal(rootfs_path: &Path) -> Result<(), BuilderHookError> {
+    let output = Command::new(E2FSCK)
+        .args(["-p", "-f"])
+        .arg(rootfs_path)
+        .output()
+        .map_err(|source| BuilderHookError::CheckRootfs {
+            rootfs: rootfs_path.to_path_buf(),
+            source,
+        })?;
+    let code = output.status.code().unwrap_or(-1);
+    if e2fsck_exit_code_is_clean(code) {
         return Ok(());
     }
-
-    eprintln!(
-        "mvm-host-vm-init: running before_build hook in {rootfs_path}",
-        rootfs_path = rootfs_path.display()
-    );
-    let result = run_hook_in_chroot();
-
-    cleanup_mounts(&bind_mounts);
-    result
+    Err(BuilderHookError::RootfsNotClean {
+        rootfs: rootfs_path.to_path_buf(),
+        code,
+        stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+    })
 }
 
-fn mount_rootfs(rootfs_path: &Path) -> Result<(), BuilderHookError> {
-    // util-linux mount -o loop allocates a loop device for the
-    // file-backed ext4 image. The nix mount(2) syscall wrapper
-    // lacks LOOP_SET_FD, so shell out.
-    let status = std::process::Command::new(UTIL_LINUX_MOUNT)
-        .arg("-o")
-        .arg("loop")
-        .arg(rootfs_path)
-        .arg(MOUNT_POINT)
-        .status()
-        .map_err(|e| BuilderHookError::MountRootfs {
-            rootfs: rootfs_path.to_path_buf(),
-            mount_point: MOUNT_POINT,
-            source: e,
-        })?;
-    if !status.success() {
-        return Err(BuilderHookError::MountRootfs {
-            rootfs: rootfs_path.to_path_buf(),
-            mount_point: MOUNT_POINT,
-            source: std::io::Error::other(format!("mount exited with status {status}")),
-        });
+fn e2fsck_exit_code_is_clean(code: i32) -> bool {
+    matches!(code, 0 | 1)
+}
+
+struct LoopDevice {
+    path: PathBuf,
+}
+
+impl LoopDevice {
+    fn attach(rootfs_path: &Path) -> Result<Self, BuilderHookError> {
+        let output = Command::new(UTIL_LINUX_LOSETUP)
+            .args(["--find", "--show"])
+            .arg(rootfs_path)
+            .output()
+            .map_err(|e| BuilderHookError::MountRootfs {
+                rootfs: rootfs_path.to_path_buf(),
+                mount_point: MOUNT_POINT,
+                source: e,
+            })?;
+        if !output.status.success() {
+            return Err(BuilderHookError::MountRootfs {
+                rootfs: rootfs_path.to_path_buf(),
+                mount_point: MOUNT_POINT,
+                source: std::io::Error::other(format!(
+                    "losetup exited with status {}: {}",
+                    output.status,
+                    String::from_utf8_lossy(&output.stderr).trim()
+                )),
+            });
+        }
+        let path =
+            parse_loop_device(&output.stdout).map_err(|source| BuilderHookError::MountRootfs {
+                rootfs: rootfs_path.to_path_buf(),
+                mount_point: MOUNT_POINT,
+                source,
+            })?;
+        Ok(Self { path })
     }
-    Ok(())
 }
 
-fn bind_mount(source: &str, target: &str) -> Result<(), std::io::Error> {
-    std::fs::create_dir_all(target)?;
-    mount(
-        Some(source),
-        target,
-        None::<&str>,
-        MsFlags::MS_BIND | MsFlags::MS_REC,
-        None::<&str>,
-    )
-    .map_err(|e| std::io::Error::other(format!("{e}")))
-}
-
-fn cleanup_mounts(bind_mounts: &[String]) {
-    for m in bind_mounts.iter().rev() {
-        if let Err(e) = umount(m.as_str()) {
-            eprintln!("mvm-host-vm-init: warning: umount {m} failed: {e}");
+impl Drop for LoopDevice {
+    fn drop(&mut self) {
+        match Command::new(UTIL_LINUX_LOSETUP)
+            .arg("--detach")
+            .arg(&self.path)
+            .status()
+        {
+            Ok(status) if status.success() => {}
+            Ok(status) => eprintln!(
+                "mvm-host-vm-init: warning: detach {} exited {status}",
+                self.path.display()
+            ),
+            Err(error) => eprintln!(
+                "mvm-host-vm-init: warning: detach {} failed: {error}",
+                self.path.display()
+            ),
         }
     }
-    if let Err(e) = umount(MOUNT_POINT) {
-        eprintln!("mvm-host-vm-init: warning: umount {MOUNT_POINT} failed: {e}");
+}
+
+struct MountedRootfs {
+    _loop_device: LoopDevice,
+    bind_mounts: Vec<String>,
+}
+
+impl MountedRootfs {
+    fn mount(rootfs_path: &Path) -> Result<Self, BuilderHookError> {
+        let loop_device = LoopDevice::attach(rootfs_path)?;
+        mount(
+            Some(loop_device.path.as_path()),
+            MOUNT_POINT,
+            Some("ext4"),
+            MsFlags::empty(),
+            None::<&str>,
+        )
+        .map_err(|error| BuilderHookError::MountRootfs {
+            rootfs: rootfs_path.to_path_buf(),
+            mount_point: MOUNT_POINT,
+            source: std::io::Error::other(format!("{error}")),
+        })?;
+        Ok(Self {
+            _loop_device: loop_device,
+            bind_mounts: Vec::new(),
+        })
+    }
+
+    fn bind_mount(&mut self, source: &str, target: &str) -> Result<(), std::io::Error> {
+        std::fs::create_dir_all(target)?;
+        mount(
+            Some(source),
+            target,
+            None::<&str>,
+            MsFlags::MS_BIND | MsFlags::MS_REC,
+            None::<&str>,
+        )
+        .map_err(|error| std::io::Error::other(format!("{error}")))?;
+        self.bind_mounts.push(target.to_string());
+        Ok(())
+    }
+}
+
+impl Drop for MountedRootfs {
+    fn drop(&mut self) {
+        for mount_point in self.bind_mounts.iter().rev() {
+            if let Err(error) = umount(mount_point.as_str()) {
+                eprintln!("mvm-host-vm-init: warning: umount {mount_point} failed: {error}");
+            }
+        }
+        if let Err(error) = umount(MOUNT_POINT) {
+            eprintln!("mvm-host-vm-init: warning: umount {MOUNT_POINT} failed: {error}");
+        }
     }
 }
 
@@ -269,10 +380,20 @@ mod tests {
         // the Nix factory. If they change, the wiring sites must update.
         assert_eq!(HOOK_PATH, "/etc/mvm/hooks/before_build.sh");
         assert_eq!(MOUNT_POINT, "/tmp/mvm-before-build-rootfs");
-        assert_eq!(UTIL_LINUX_MOUNT, "/sbin/mount");
+        assert_eq!(UTIL_LINUX_LOSETUP, "/sbin/losetup");
+        assert_eq!(E2FSCK, "/sbin/e2fsck");
         assert_eq!(
             CHROOT_PATH,
             "/usr/local/sbin:/usr/local/bin:/sbin:/usr/sbin:/bin:/usr/bin"
         );
+    }
+
+    #[test]
+    fn e2fsck_clean_and_repaired_codes_are_accepted() {
+        assert!(e2fsck_exit_code_is_clean(0));
+        assert!(e2fsck_exit_code_is_clean(1));
+        for code in [2, 4, 8, 16, 32, 128, -1] {
+            assert!(!e2fsck_exit_code_is_clean(code), "code {code}");
+        }
     }
 }

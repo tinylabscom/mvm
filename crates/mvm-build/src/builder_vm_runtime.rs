@@ -638,6 +638,7 @@ if ! /sbin/mvm-host-vm-init run-before-build-hook "$BUILD_HOOK_ROOTFS"; then
     exit $hook_rc
 fi
 cp -L "$BUILD_HOOK_ROOTFS" /out/rootfs.ext4
+sync
 rm -f "$BUILD_HOOK_ROOTFS"
 
 if [ -n "$KERNEL_SRC" ]; then
@@ -679,12 +680,12 @@ fi
 
 # Pin the builder VM's own materialize toolchain under fixed GC roots so the
 # cap GC below can't reap it. The OCI rootfs materialize job runs
-# /sbin/mkfs.ext4 (and `mount`) inside this VM but registers no root of its
+# /sbin/mkfs.ext4, /sbin/e2fsck (and `mount`) inside this VM but registers no root of its
 # own, and a workload build's $NIX_OUT closure never carries e2fsprogs — so
-# without these roots a cap GC after a workload build leaves /sbin/mkfs.ext4
-# a dangling symlink and every later image run dies with "mkfs.ext4: not
+# without these roots a cap GC after a workload build leaves the filesystem
+# tools as dangling symlinks and every later image run dies with "mkfs.ext4: not
 # found". Best-effort; skips a tool already missing (recovery rebuilds it).
-for tool in /sbin/mkfs.ext4 mount; do
+for tool in /sbin/mkfs.ext4 /sbin/e2fsck mount; do
   tool_path=$(command -v "$tool" 2>/dev/null) || continue
   tool_store=$(readlink -f "$tool_path" 2>/dev/null) || continue
   [ -n "$tool_store" ] || continue
@@ -2071,6 +2072,13 @@ mod tests {
             hook_idx < out_copy_idx,
             "before_build hook must run before /out/rootfs.ext4 is copied"
         );
+        let sync_idx = body
+            .find("sync\nrm -f \"$BUILD_HOOK_ROOTFS\"")
+            .expect("artifact sync present");
+        assert!(
+            out_copy_idx < sync_idx,
+            "the exported rootfs must be flushed before the temporary image is removed"
+        );
         // A failed hook must fail the build, leaving no partial artifact.
         assert!(
             body.contains("mvm-builder-vm: before_build hook failed"),
@@ -2105,6 +2113,10 @@ mod tests {
         assert!(
             body.contains("/sbin/mkfs.ext4"),
             "toolchain pin must cover mkfs.ext4 in:\n{body}"
+        );
+        assert!(
+            body.contains("/sbin/e2fsck"),
+            "toolchain pin must cover the rootfs journal checker in:\n{body}"
         );
         let gc_idx = body.find("nix-collect-garbage").expect("gc present");
         assert!(
