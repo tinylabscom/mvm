@@ -1747,7 +1747,7 @@ mod tests {
         let mut config = cfg("x", "/tmp/mod.wasm");
         config.volumes = vec![mvm_core::vm_backend::VmVolume {
             host: "/host/disk.img".into(),
-            guest: "/mnt/disk".into(),
+            guest: "/data/disk".into(),
             size: "1G".into(),
             read_only: false,
             kind: mvm_core::vm_backend::VmVolumeKind::Disk,

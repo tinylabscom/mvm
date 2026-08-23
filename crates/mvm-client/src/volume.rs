@@ -411,12 +411,17 @@ mod tests {
         let home = TestVolumeHome::new();
         home.create_block("work", 16);
         let err = service()
-            .prepare_attachment(&attach("vm-1", "work", "/mnt/work", AccessMode::ReadOnly))
+            .prepare_attachment(&attach("vm-1", "work", "/data/work", AccessMode::ReadOnly))
             .unwrap_err();
         assert!(format!("{err:#}").contains("is locked"), "got: {err:#}");
 
         let err = service()
-            .prepare_attachment(&attach("vm-1", "ghost", "/mnt/ghost", AccessMode::ReadOnly))
+            .prepare_attachment(&attach(
+                "vm-1",
+                "ghost",
+                "/data/ghost",
+                AccessMode::ReadOnly,
+            ))
             .unwrap_err();
         assert!(
             format!("{err:#}").contains("no managed local volume"),
