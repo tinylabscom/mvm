@@ -11,9 +11,9 @@ name: Claim witness freshness
 # until 2026-07-21. Five weeks in which every claim kept a green ledger entry
 # with no evidence behind it, and no watcher could have said so.
 #
-# This independently covers both. It runs on its own schedule — deliberately
-# not `workflow_run`, since that delivery can be omitted — and asks whether
-# each claim-bearing scheduled lane ran and completed successfully.
+# This covers the second. It runs on its own schedule — deliberately not
+# `workflow_run`, since the whole point is to notice absence — and asks
+# whether each claim-bearing scheduled lane ran at all.
 #
 # It never blocks a merge. These lanes do not run on pull requests, so there
 # is nothing to block; the tracking issue is the enforcement surface, the
@@ -64,36 +64,45 @@ jobs:
           key: ${{ runner.os }}-cargo-freshness-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-freshness-
 
-      - name: Check that every claim-bearing scheduled lane is healthy
+      - name: Check that every claim-bearing scheduled lane still runs
         id: check
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -o pipefail
-          if cargo run -p xtask -- check-claim-witness-freshness \
-            ${{ github.event_name == 'schedule' && '--check-reporting' || '' }} \
-            2>&1 | tee freshness.log; then
-            echo "unhealthy=false" >> "$GITHUB_OUTPUT"
+          # --check-reporting additionally asks whether the watcher fired for
+          # each lane's last completed run. Scheduled runs only: an
+          # unreported run is history, and no pull request can fix it — a
+          # branch reddened for it teaches the author to ignore this gate.
+          # Staleness stays checked everywhere, because a cron edit under
+          # review can cause it.
+          extra=""
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            extra="--check-reporting"
+          fi
+          # shellcheck disable=SC2086
+          if cargo run -p xtask -- check-claim-witness-freshness $extra 2>&1 | tee freshness.log; then
+            echo "stale=false" >> "$GITHUB_OUTPUT"
           else
-            echo "unhealthy=true" >> "$GITHUB_OUTPUT"
+            echo "stale=true" >> "$GITHUB_OUTPUT"
           fi
 
       # A pull-request run reports through the job status; only the scheduled
       # run owns the issue, so a PR cannot open or close one.
       - name: Open or update the tracking issue
-        if: steps.check.outputs.unhealthy == 'true' && github.event_name == 'schedule'
+        if: steps.check.outputs.stale == 'true' && github.event_name == 'schedule'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TITLE: "Claim-bearing CI lane is stale or unhealthy"
+          TITLE: "Claim-bearing CI lane has stopped running"
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           {
-            echo "A workflow that backs one or more numbered security claims is stale"
-            echo "or its latest scheduled run did not complete successfully."
+            echo "A workflow that backs one or more numbered security claims has not run"
+            echo "recently enough for its own schedule."
             echo
-            echo "This scheduled backstop is independent of workflow_run delivery. The claims"
-            echo "below currently lack healthy evidence even if the event-driven watcher did"
-            echo "not receive the failed or cancelled run."
+            echo "This is the failure mode a red-lane watcher cannot see: nothing failed,"
+            echo "because nothing ran. The claims below currently have a green ledger entry"
+            echo "and no evidence behind it."
             echo
             echo '```'
             cat freshness.log
@@ -108,23 +117,23 @@ jobs:
             gh issue create --title "$TITLE" --body-file issue-body.md
           fi
 
-      - name: Close the tracking issue once every lane is healthy again
-        if: steps.check.outputs.unhealthy == 'false' && github.event_name == 'schedule'
+      - name: Close the tracking issue once every lane is running again
+        if: steps.check.outputs.stale == 'false' && github.event_name == 'schedule'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TITLE: "Claim-bearing CI lane is stale or unhealthy"
+          TITLE: "Claim-bearing CI lane has stopped running"
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           EXISTING=$(gh issue list --state open --search "$TITLE in:title" --json number --jq '.[0].number')
           if [ -n "$EXISTING" ]; then
             gh issue close "$EXISTING" \
-              --comment "Every claim-bearing scheduled lane is fresh and successful again. Watcher run: $RUN_URL"
+              --comment "Every claim-bearing scheduled lane is running again. Watcher run: $RUN_URL"
           fi
 
-      # Pull requests validate the static resolver; scheduled runs additionally
-      # reconcile the latest external evidence.
-      - name: Fail the job when validation or scheduled reconciliation fails
-        if: steps.check.outputs.unhealthy == 'true'
+      # The gate's own verdict decides the job, so a pull-request run that
+      # breaks it is visible without waiting for a nightly.
+      - name: Fail the job when a lane has stopped running
+        if: steps.check.outputs.stale == 'true'
         run: |
-          echo "::error::claim-witness validation or scheduled reconciliation failed — see the log above" >&2
+          echo "::error::a claim-bearing lane has stopped running — see the log above" >&2
           exit 1
