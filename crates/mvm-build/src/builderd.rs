@@ -505,8 +505,7 @@ fn copy_rootfs_with_hook(src_rootfs: &Path, dst: &Path) -> Result<(), String> {
         )
     })?;
     run_before_build_hook(&tmp_path)?;
-    std::fs::copy(&tmp_path, dst)
-        .map_err(|e| format!("copy {} -> {}: {e}", tmp_path.display(), dst.display()))?;
+    copy_artifact(&tmp_path, dst)?;
     let _ = tmp.close();
     Ok(())
 }
@@ -539,9 +538,21 @@ fn run_before_build_hook(rootfs_path: &Path) -> Result<(), String> {
 /// Copy one artifact, dereferencing symlinks (nix store paths are read-only
 /// symlink farms), with a path-named error.
 fn copy_artifact(src: &Path, dst: &Path) -> Result<(), String> {
-    std::fs::copy(src, dst)
-        .map(|_| ())
-        .map_err(|e| format!("copy {} -> {}: {e}", src.display(), dst.display()))
+    let permissions = std::fs::metadata(src)
+        .map_err(|e| format!("stat {}: {e}", src.display()))?
+        .permissions();
+    let mut source =
+        std::fs::File::open(src).map_err(|e| format!("open {}: {e}", src.display()))?;
+    let mut output =
+        std::fs::File::create(dst).map_err(|e| format!("create {}: {e}", dst.display()))?;
+    std::io::copy(&mut source, &mut output)
+        .map_err(|e| format!("copy {} -> {}: {e}", src.display(), dst.display()))?;
+    output
+        .set_permissions(permissions)
+        .map_err(|e| format!("set permissions on {}: {e}", dst.display()))?;
+    output
+        .sync_all()
+        .map_err(|e| format!("sync {}: {e}", dst.display()))
 }
 
 /// The `nix flake prefetch --json` argv for a
@@ -1301,6 +1312,39 @@ mod tests {
             b"rootfs-bytes"
         );
         assert!(!out.join("vmlinux").exists());
+    }
+
+    #[test]
+    fn copy_artifact_flushes_a_read_only_source_without_changing_its_mode() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("source");
+        let destination = tmp.path().join("destination");
+        std::fs::write(&source, b"sealed artifact").unwrap();
+        let mut permissions = std::fs::metadata(&source).unwrap().permissions();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(&source, permissions).unwrap();
+
+        copy_artifact(&source, &destination).unwrap();
+
+        assert_eq!(std::fs::read(&destination).unwrap(), b"sealed artifact");
+        assert!(
+            std::fs::metadata(&destination)
+                .unwrap()
+                .permissions()
+                .readonly()
+        );
+    }
+
+    #[test]
+    fn copy_artifact_names_a_missing_source() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("missing");
+        let destination = tmp.path().join("destination");
+
+        let error = copy_artifact(&source, &destination).unwrap_err();
+
+        assert!(error.contains(&source.display().to_string()), "{error}");
+        assert!(!destination.exists());
     }
 
     #[test]
