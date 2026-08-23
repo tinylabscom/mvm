@@ -567,8 +567,13 @@ jobs:
           SYSTEM="${ARCH}-linux"
           INITRAMFS_PATH=$(nix build "./nix/images/initramfs#packages.${SYSTEM}.default" \
             --no-link --print-out-paths | head -1)
-          mkdir -p initramfs-staging
-          cp -L "$INITRAMFS_PATH/initramfs.cpio.gz" initramfs-staging/initramfs.cpio.gz
+          # The runtime identifies the universal initramfs by its location in
+          # the mvm cache. Keep the staged witness on that production path so
+          # WorkloadRunner sends ActivateEnvironment instead of treating this
+          # as a legacy per-rootfs initramfs.
+          mkdir -p "$HOME/.mvm/cache/initramfs"
+          cp -L "$INITRAMFS_PATH/initramfs.cpio.gz" \
+            "$HOME/.mvm/cache/initramfs/initramfs.cpio.gz"
 
       - name: Boot the staged image before it becomes a release asset
         if: matrix.arch == 'x86_64'
@@ -600,7 +605,7 @@ jobs:
           cp "staging/default-microvm-meta-${ARCH}.json" staging/mvm-meta.json
           cargo test --test runtime_boot_bench \
             prebuilt_runtime_image_boots_within_budget -- --exact --nocapture
-          MVM_RUNTIME_BOOT_INITRD=initramfs-staging/initramfs.cpio.gz \
+          MVM_RUNTIME_BOOT_INITRD="$HOME/.mvm/cache/initramfs/initramfs.cpio.gz" \
           MVM_RUNTIME_BOOT_ROOTFS_VERITY="staging/default-microvm-rootfs-${ARCH}.verity" \
           MVM_RUNTIME_BOOT_ROOTFS_ROOTHASH="$(tr -d '[:space:]' < "staging/default-microvm-rootfs-${ARCH}.roothash")" \
             cargo test --test runtime_boot_bench \

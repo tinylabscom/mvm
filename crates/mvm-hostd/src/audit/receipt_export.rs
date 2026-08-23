@@ -4,10 +4,17 @@
 //! Converts the existing host-side chain-signed audit log into portable,
 //! offline-verifiable receipts without adding new runtime instrumentation.
 //!
-//! The exporter is deliberately conservative: it only emits receipts for
-//! audit events whose semantics are unambiguously mappable to a receipt
-//! type and outcome. Unknown events are skipped so a future audit-entry
-//! extension cannot silently change the meaning of an exported receipt.
+//! The exporter is deliberately conservative about what becomes a *receipt*:
+//! only audit events whose semantics are unambiguously mappable to a receipt
+//! type and outcome, so a future audit-entry extension cannot silently change
+//! the meaning of an exported receipt.
+//!
+//! Conservative is not the same as lossy. Every other in-scope entry —
+//! `flow.egress.*`, `stream.*`, `transcript.sealed`, and anything added later
+//! — is carried as a [`CitedEntry`] with its leaf index and digest. Receipts
+//! plus citations cover every in-scope entry exactly once, which is what makes
+//! "this export is complete" a checkable claim rather than a property of
+//! whichever events happened to be on the mapping list.
 
 use std::collections::BTreeMap;
 
@@ -36,30 +43,7 @@ pub fn export_receipts(
     plan_id_filter: Option<&str>,
     signing_key: &SigningKey,
 ) -> Result<Vec<SignedExecutionReceipt>> {
-    let path = crate::audit::emitter::audit_path_for_tenant(audit_dir, tenant);
-    if !path.exists() {
-        return Ok(Vec::new());
-    }
-    let entries = verify_audit_chain_entries(&path, &signing_key.verifying_key())
-        .with_context(|| format!("verifying audit chain for tenant '{tenant}'"))?;
-    let host_did = DidKey::from_verifying_key(signing_key.verifying_key()).to_did_key();
-    let signed_at = chrono::Utc::now().to_rfc3339();
-    let mut receipts = Vec::with_capacity(entries.len());
-    for entry in entries {
-        if let Some(filter) = plan_id_filter
-            && entry.plan_id.0 != filter
-        {
-            continue;
-        }
-        let receipt = match audit_entry_to_receipt(&entry, &host_did) {
-            Some(r) => r,
-            None => continue,
-        };
-        let signed = SignedExecutionReceipt::sign(receipt, signing_key, signed_at.clone())
-            .context("signing execution receipt")?;
-        receipts.push(signed);
-    }
-    Ok(receipts)
+    Ok(export_evidence(audit_dir, tenant, plan_id_filter, signing_key)?.receipts)
 }
 
 /// Convert one verified audit entry into an execution-receipt payload.
@@ -96,6 +80,202 @@ pub fn audit_entry_to_receipt(entry: &PlanAuditEntry, host_did: &str) -> Option<
     };
     receipt.receipt_id = receipt.compute_id().ok()?;
     Some(receipt)
+}
+
+/// What an audit entry becomes in an export.
+///
+/// Two arms rather than an `Option` so an event with no receipt mapping is a
+/// classification the caller has to handle, not a value that falls out of a
+/// `continue`. An export that silently skipped entries was indistinguishable
+/// from an export of a run that never produced them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntryMapping {
+    /// Maps to a receipt of this type and outcome.
+    Receipt {
+        /// Wire-stable receipt type.
+        receipt_type: &'static str,
+        /// Outcome the receipt records.
+        outcome: ReceiptOutcome,
+    },
+    /// No receipt mapping; carried as a citation instead.
+    Cited,
+}
+
+/// One in-scope audit entry that has no receipt mapping.
+///
+/// Carries enough to resolve the entry against the real audit tree: the leaf
+/// index it sits at and the digest of its exact signed bytes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CitedEntry {
+    /// 0-based index in the full verified chain, not within the filtered set.
+    pub leaf_index: u64,
+    /// `sha256:<hex>` of the exact signed entry bytes.
+    pub digest: String,
+    /// The audit entry's `event` name.
+    pub event: String,
+    /// Plan the entry is bound to.
+    pub plan_id: String,
+    /// RFC 3339 timestamp of the entry.
+    pub timestamp: String,
+}
+
+/// Everything one export accounts for: the receipts, and the entries that
+/// have no receipt mapping.
+///
+/// The two together cover every in-scope entry exactly once. That is the
+/// property `every_in_scope_entry_is_either_a_receipt_or_a_citation` pins.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ExportedEvidence {
+    /// Signed receipts, in chain order.
+    pub receipts: Vec<SignedExecutionReceipt>,
+    /// In-scope entries with no receipt mapping, in chain order.
+    pub cited: Vec<CitedEntry>,
+}
+
+/// The audit tree one export pass is anchored to.
+///
+/// Built once per export and shared by every receipt, so a run's receipts all
+/// name the same tree.
+pub struct ChainPosition {
+    root_hash: String,
+    tree_size: u64,
+}
+
+impl ChainPosition {
+    /// Build the Merkle root over `tenant`'s verified chain.
+    ///
+    /// Refuses on a chain that does not verify, because
+    /// [`crate::audit::merkle::build_root_in`] does — a root over a corrupt log
+    /// would attest the corruption.
+    pub fn build(
+        audit_dir: &std::path::Path,
+        tenant: &str,
+        signing_key: &SigningKey,
+    ) -> Result<Self> {
+        let (root, tree_size) =
+            crate::audit::merkle::build_root_in(audit_dir, tenant, &signing_key.verifying_key())?;
+        Ok(Self {
+            root_hash: hex::encode(root),
+            tree_size,
+        })
+    }
+
+    /// Stamp a receipt with where it came from, then re-address it.
+    ///
+    /// The extensions are signed material, so the content address has to be
+    /// recomputed after they land. Doing both here is deliberate: an insert
+    /// that forgot the recompute would produce a receipt whose `receipt_id`
+    /// does not match its own bytes, and `verify` would reject it far from the
+    /// line that caused it.
+    pub fn attach(&self, receipt: &mut ExecutionReceipt, entry: &PlanAuditEntry) -> Result<()> {
+        let digest = crate::audit::evidence::audit_entry_digest_hex(entry)
+            .with_context(|| format!("digesting audit entry '{}'", entry.event))?;
+        receipt.extensions.insert(
+            mvm_core::receipt::extension_key::AUDIT_DIGEST.to_string(),
+            Value::String(digest),
+        );
+        receipt.extensions.insert(
+            mvm_core::receipt::extension_key::AUDIT_ROOT.to_string(),
+            Value::String(self.root_hash.clone()),
+        );
+        receipt.extensions.insert(
+            mvm_core::receipt::extension_key::TREE_SIZE.to_string(),
+            Value::Number(self.tree_size.into()),
+        );
+        receipt.receipt_id = receipt
+            .compute_id()
+            .map_err(|e| anyhow::anyhow!("recomputing receipt id after stamping position: {e}"))?;
+        Ok(())
+    }
+
+    /// The root hash this pass is anchored to, as lowercase hex.
+    #[must_use]
+    pub fn root_hash(&self) -> &str {
+        &self.root_hash
+    }
+
+    /// The tree size that root was built at.
+    #[must_use]
+    pub fn tree_size(&self) -> u64 {
+        self.tree_size
+    }
+}
+
+/// Classify an audit `event`.
+///
+/// Every event resolves: unrecognised ones are [`EntryMapping::Cited`] rather
+/// than discarded.
+pub fn map_event(event: &str) -> EntryMapping {
+    match map_event_to_receipt_type(event) {
+        Some((receipt_type, outcome)) => EntryMapping::Receipt {
+            receipt_type,
+            outcome,
+        },
+        None => EntryMapping::Cited,
+    }
+}
+
+/// Export every in-scope audit entry: receipts where a mapping exists,
+/// citations everywhere else.
+///
+/// The chain is verified under `signing_key.verifying_key()` before any entry
+/// is converted. Leaf indices are positions in the **full** verified chain, so
+/// a citation addresses the real Merkle tree; an index counted within the
+/// filtered subset would not build a verifying inclusion proof.
+pub fn export_evidence(
+    audit_dir: &std::path::Path,
+    tenant: &str,
+    plan_id_filter: Option<&str>,
+    signing_key: &SigningKey,
+) -> Result<ExportedEvidence> {
+    let path = crate::audit::emitter::audit_path_for_tenant(audit_dir, tenant);
+    if !path.exists() {
+        return Ok(ExportedEvidence::default());
+    }
+    let entries = verify_audit_chain_entries(&path, &signing_key.verifying_key())
+        .with_context(|| format!("verifying audit chain for tenant '{tenant}'"))?;
+    let host_did = DidKey::from_verifying_key(signing_key.verifying_key()).to_did_key();
+    let signed_at = chrono::Utc::now().to_rfc3339();
+
+    // One root for the whole pass. Every receipt from this export cites it, and
+    // every inclusion proof an archive builds binds to it; a root rebuilt
+    // per-entry would let two receipts from one run name different trees.
+    let position = ChainPosition::build(audit_dir, tenant, signing_key)
+        .with_context(|| format!("building the audit root for tenant '{tenant}'"))?;
+
+    let mut out = ExportedEvidence::default();
+    for (leaf_index, entry) in entries.iter().enumerate() {
+        if let Some(filter) = plan_id_filter
+            && entry.plan_id.0 != filter
+        {
+            continue;
+        }
+        match map_event(&entry.event) {
+            EntryMapping::Receipt { .. } => {
+                let mut receipt = audit_entry_to_receipt(entry, &host_did).with_context(|| {
+                    format!("building a receipt for a mapped event '{}'", entry.event)
+                })?;
+                position
+                    .attach(&mut receipt, entry)
+                    .context("attaching the chain position to a receipt")?;
+                let signed = SignedExecutionReceipt::sign(receipt, signing_key, signed_at.clone())
+                    .context("signing execution receipt")?;
+                out.receipts.push(signed);
+            }
+            EntryMapping::Cited => {
+                let digest = crate::audit::evidence::audit_entry_digest_hex(entry)
+                    .with_context(|| format!("digesting audit entry '{}'", entry.event))?;
+                out.cited.push(CitedEntry {
+                    leaf_index: leaf_index as u64,
+                    digest: format!("sha256:{digest}"),
+                    event: entry.event.clone(),
+                    plan_id: entry.plan_id.0.clone(),
+                    timestamp: entry.timestamp.to_rfc3339(),
+                });
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// Map an audit `event` name to a receipt type and outcome.

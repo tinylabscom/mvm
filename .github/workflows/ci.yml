@@ -349,6 +349,12 @@ jobs:
       # it. A guest made FlowMux-only while the host still served the old
       # protocol is what killed egress on main with every test green.
 
+      # An image's declared environment is resolved once. The console used to
+      # assemble its own, which is why `machine run --image rust:latest -it`
+      # opened a shell with the image's own toolchain missing from PATH.
+      - name: one workload-env resolver (console and entrypoint agree on the image)
+        run: cargo run -p xtask -- check-single-workload-env
+
       # A wall-clock bound is declared once, as a grant. `exec_secs` is that
       # grant's projection into the plan's older encoding; a second writer is a
       # second declaration of one decision, and the two can disagree.
@@ -911,7 +917,7 @@ jobs:
       # nobody had published. Boot images get their own tags precisely so
       # this pin stops moving with the CLI's version — keep it in step with
       # `DEFAULT_BOOT_IMAGE_TAG` in mvm-core's config.
-      IMAGE_TAG: boot-image/v0.1.0
+      IMAGE_TAG: boot-image/v0.1.3
       # Must track `crates/mvm-core/src/config.rs::FC_VERSION_DEFAULT`. The
       # launch path passes `--enable-pci`, which older Firecracker rejects
       # outright: it exits before creating its API socket, and the only symptom
