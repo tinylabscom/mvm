@@ -57,6 +57,18 @@ pub fn vsock_egress_cmdline_token(config: &VmStartConfig, _state_dir: &Path) -> 
         .then(|| "mvm.vsock_egress=1".to_string())
 }
 
+/// Kernel cmdline token that gives the guest the workload's machine name.
+///
+/// The name crosses a whitespace-delimited boundary, so validate it again at
+/// the encoding seam even though normal machine creation already validates it.
+/// A malformed internal launch config must not be able to inject another
+/// kernel argument.
+pub fn hostname_cmdline_token(machine_name: &str) -> Option<String> {
+    mvm_core::naming::validate_vm_name(machine_name)
+        .is_ok()
+        .then(|| format!("mvm.hostname={machine_name}"))
+}
+
 fn verity_initrd_path(config: &VmStartConfig) -> Option<PathBuf> {
     config
         .verity_path
@@ -110,7 +122,17 @@ pub fn workload_cmdline(
     state_dir: &Path,
     base_bootargs: impl Fn(bool, bool) -> String,
 ) -> Option<String> {
+    workload_cmdline_for_hostname(config, state_dir, base_bootargs, Some(&config.name))
+}
+
+fn workload_cmdline_for_hostname(
+    config: &VmStartConfig,
+    state_dir: &Path,
+    base_bootargs: impl Fn(bool, bool) -> String,
+    guest_hostname: Option<&str>,
+) -> Option<String> {
     let egress = vsock_egress_cmdline_token(config, state_dir);
+    let hostname = guest_hostname.and_then(hostname_cmdline_token);
     let grants: Vec<String> = [
         verb_grant_cmdline_token(&config.name),
         require_grant_cmdline_token(&config.name),
@@ -123,6 +145,7 @@ pub fn workload_cmdline(
     let has_disk = !virtiofs_root && !config.rootfs_path.is_empty();
     let verity_is_enabled = verity_enabled(config);
     if egress.is_none()
+        && hostname.is_none()
         && grants.is_empty()
         && !verity_is_enabled
         && config.runtime_source_policy == mvm_core::vm_backend::RuntimeSourcePolicy::RootfsOnly
@@ -173,7 +196,7 @@ pub fn workload_cmdline(
     cmdline.push_str(&mvm_core::vm_backend::encode_runtime_source_policy_cmdline(
         config.runtime_source_policy,
     ));
-    for token in egress.into_iter().chain(grants) {
+    for token in hostname.into_iter().chain(egress).chain(grants) {
         cmdline.push(' ');
         cmdline.push_str(&token);
     }
@@ -197,7 +220,27 @@ pub fn runner_cmdline(
     state_dir: &Path,
     base_bootargs: impl Fn(bool, bool) -> String,
 ) -> String {
-    let base = workload_cmdline(config, state_dir, &base_bootargs);
+    runner_cmdline_for_hostname(config, state_dir, base_bootargs, Some(&config.name))
+}
+
+/// Assemble a factory parent's cmdline without binding it to the parent's
+/// temporary internal name. A restored child receives its own hostname over
+/// the post-restore identity handshake.
+pub fn runner_cmdline_without_hostname(
+    config: &VmStartConfig,
+    state_dir: &Path,
+    base_bootargs: impl Fn(bool, bool) -> String,
+) -> String {
+    runner_cmdline_for_hostname(config, state_dir, base_bootargs, None)
+}
+
+fn runner_cmdline_for_hostname(
+    config: &VmStartConfig,
+    state_dir: &Path,
+    base_bootargs: impl Fn(bool, bool) -> String,
+    guest_hostname: Option<&str>,
+) -> String {
+    let base = workload_cmdline_for_hostname(config, state_dir, &base_bootargs, guest_hostname);
     let mut tokens: Vec<String> = Vec::new();
     if !config.rootfs_path.is_empty() || config.virtiofs_root.is_some() {
         // HVF/libkrun workload guests have no RTC. Seed their wall clock before
@@ -331,6 +374,30 @@ mod tests {
             vsock_egress_cmdline_token(&allow_egress, dir.path()).as_deref(),
             Some("mvm.vsock_egress=1")
         );
+    }
+
+    #[test]
+    fn workload_cmdline_carries_the_machine_name_as_the_guest_hostname() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = VmStartConfig {
+            name: "build-worker-7".to_string(),
+            ..Default::default()
+        };
+
+        let cmdline =
+            workload_cmdline(&config, dir.path(), hvf_like_workload_bootargs).expect("cmdline");
+
+        assert!(
+            cmdline.contains("mvm.hostname=build-worker-7"),
+            "all workload backends consume this shared cmdline: {cmdline}"
+        );
+    }
+
+    #[test]
+    fn an_invalid_machine_name_cannot_inject_a_kernel_cmdline_token() {
+        assert_eq!(hostname_cmdline_token("worker mvm.vsock_egress=1"), None);
+        assert_eq!(hostname_cmdline_token("UPPERCASE"), None);
+        assert_eq!(hostname_cmdline_token("-leading"), None);
     }
 
     #[test]

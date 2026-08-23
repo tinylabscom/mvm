@@ -154,6 +154,11 @@ pub enum GuestRequest {
     PostRestore {
         #[serde(default)]
         token: [u8; mvm_core::crypto::vmgenid::GENID_BYTES],
+        /// Workload identity to install as the kernel hostname after a warm
+        /// parent is restored into a named child. Legacy resume callers omit
+        /// it and leave the current hostname unchanged.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hostname: Option<String>,
         /// Host wall-clock epoch seconds to apply before the init restart
         /// hook. Omitted by legacy callers that do not request clock sync.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -581,6 +586,7 @@ mod tests {
             },
             GuestRequest::PostRestore {
                 token: [0u8; mvm_core::crypto::vmgenid::GENID_BYTES],
+                hostname: None,
                 host_epoch_secs: None,
                 grant_envelope: None,
             },
@@ -701,6 +707,7 @@ mod tests {
         // A non-zero generation token survives the JSON round-trip intact.
         let req = GuestRequest::PostRestore {
             token: [9u8; GENID_BYTES],
+            hostname: Some("worker-9".to_string()),
             host_epoch_secs: Some(1_717_000_000),
             grant_envelope: None,
         };
@@ -708,10 +715,12 @@ mod tests {
         match serde_json::from_str::<GuestRequest>(&json).unwrap() {
             GuestRequest::PostRestore {
                 token,
+                hostname,
                 host_epoch_secs,
                 ..
             } => {
                 assert_eq!(token, [9u8; GENID_BYTES]);
+                assert_eq!(hostname.as_deref(), Some("worker-9"));
                 assert_eq!(host_epoch_secs, Some(1_717_000_000));
             }
             other => panic!("expected PostRestore, got {other:?}"),
@@ -1190,6 +1199,7 @@ mod tests {
             (
                 GuestRequest::PostRestore {
                     token: [0u8; mvm_core::crypto::vmgenid::GENID_BYTES],
+                    hostname: None,
                     host_epoch_secs: None,
                     grant_envelope: None,
                 },

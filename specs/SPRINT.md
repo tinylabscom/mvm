@@ -2744,6 +2744,13 @@ regression pinning that executable contract. The live lane forces a refresh of
 embedded host binaries so the guest always carries the checkout under test,
 even when Cargo caches are restored.
 
+## 2026-08-22 guest hostname generated-protocol parity
+
+The BDD code-generation drift gate caught that the optional post-restore
+hostname field had not reached the generated protocol artifacts. The protocol
+schema and Python and TypeScript bindings are now regenerated from the Rust
+wire type, keeping all supported SDK surfaces in parity.
+
 ## 2026-08-22 scheduled mutation witness repair
 
 Completed Security run 32552650847 exposed seven surviving authorization

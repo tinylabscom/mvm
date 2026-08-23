@@ -225,6 +225,7 @@ fn signal_guest_post_restore(name: &str) -> Result<()> {
         name,
         &VsockPostRestoreSignal {
             token,
+            hostname: Some(name.to_string()),
             grant_envelope: None,
         },
         POST_RESTORE_READY_TIMEOUT,
