@@ -58,3 +58,13 @@ deadline while QEMU TCG was still compiling successfully. The no-KVM smoke
 now gives that inner builder run 7,200 seconds, within the job's existing
 five-hour ceiling; normal accelerated builder runs keep their stricter
 30-minute default. The workflow policy test pins the TCG-specific override.
+
+The live witness then exposed two workload-launch gaps hidden by the earlier
+builder failures. Builder and workload QEMU launches now share one
+architecture mapping, so AArch64 selects the mandatory `virt` machine and the
+PL011 `ttyAMA0` console. Once QEMU booted, the first host handshake could race
+the slowly starting TCG guest and receive a peer reset. Host handshake context
+now preserves the typed session error, allowing the existing bounded
+activation retry to treat only peer hangups as readiness races while identity,
+signature, and protocol failures remain fail-closed. Failed transient starts
+also print a bounded, redacted guest-console tail before deleting their state.

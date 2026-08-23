@@ -3,7 +3,7 @@
 Backing: preview
 Validation: none
 
-**Status:** DRAFT — scoping complete, awaiting Linux builder VM availability before implementation begins
+**Status:** DRAFT — scoping complete, engine build verified on the aarch64-linux HVF builder VM, Phase 1 engine integration prototyped; a minimal `/demo/weblinux` page boots the smoke pack in a Worker and reaches `DEMO-RESULT: READY` in headless Chromium
 **Opened:** 2026-08-21
 **Depends on:** Plan 338 — WebLinux browser backend, builder, workbench, and `mvmd` deployment client
 **Related:** ADRs 006, 024, 049
@@ -39,10 +39,29 @@ Plan 338 added `nix/packages/qemu-wasm.nix` and exposed `.#qemu-wasm-engine` on 
 
 ```bash
 nix build .#qemu-wasm-engine
-ls result/bin/qemu-system-x86_64.js result/bin/qemu-system-x86_64.wasm
+ls result/libexec/qemu-wasm/qemu-system-x86_64.js \
+   result/libexec/qemu-wasm/qemu-system-x86_64.wasm \
+   result/libexec/qemu-wasm/qemu-system-x86_64.worker.js \
+   result/bin/qemu-wasm-file-packager
 ```
 
 Until that succeeds, the demo cannot proceed past scaffolding, because the browser has no other source for the engine artifacts. We will record the measured output hashes and use them as the demo's pinned engine reference.
+
+### Recorded engine artifact hashes
+
+Measured from the first successful `nix build .#qemu-wasm-engine` run inside
+the aarch64-linux HVF builder VM (build path `libexec/qemu-wasm/`, BIOS under
+`share/qemu-wasm/bios/`):
+
+```text
+016b2e62cb11ac05388b09c27aced4d7c4075c939ec59ba5df150b08e19f473f  qemu-system-x86_64.js
+c444cd2c9115c87bcccb41a322b6ceb297fce29b4271145b28ac47a01e3deb9d  qemu-system-x86_64.wasm
+e630b90bccea1eb3447357e56ddf520907200a61733b67624715210ba0ba995f  qemu-system-x86_64.worker.js
+f1d4f396011197eb989029659cde250751cc711c336b8fbbe6f77cfe0dc5dcd8  bios/bios-256k.bin
+651513519f9e0d5b99d3b051a8f5c68db69e987339b59a441d371068c34c146b  bios/vgabios-stdvga.bin
+cdf057a71b07e3b52b19cbe210bdefa59250d01a9810b960f7fe1f98eed95a27  bios/kvmvapic.bin
+9c49e255340c78fc12e54ed043462bca02fb7fca29b7cfab62ff88a5344b6950  bios/linuxboot_dma.bin
+```
 
 ## Demo flow
 
@@ -80,17 +99,31 @@ Until that succeeds, the demo cannot proceed past scaffolding, because the brows
 
 ### Phase 0 — Demo scaffolding (ready now)
 
-- [ ] Add a new `public/demo/weblinux/` route or standalone page.
+- [x] Add a new `public/demo/weblinux/` route or standalone page.
+  Implemented as `public/src/pages/demo/weblinux.astro` (served with COOP/COEP
+  headers) plus the static source under `web/weblinux-demo/`. A `build.sh`
+  stages the Nix-built smoke pack and a `serve.py` serves it with the required
+  cross-origin-isolation headers.
 - [ ] OPFS workspace helper for fixture source and CAS objects.
 - [ ] TypeScript types generated from the Rust `BackendRequest` / `BackendResponse` / `BuildRequest` / `BuildProgress` schemas.
-- [ ] A minimal editor component and a terminal/log pane.
+- [x] A minimal editor component and a terminal/log pane, plus terminal
+  polish (ANSI color rendering, bottom-docked input, command history) and a
+  CLI preview that advertises the intended
+  `mvmctl machine run --hypervisor web-linux ...` surface.
 
-### Phase 1 — Engine integration (blocked on builder VM)
+### Phase 1 — Engine integration (builder VM verified)
 
-- [ ] Run `nix build .#qemu-wasm-engine` on the Linux builder VM.
-- [ ] Record and pin the resulting `.js`, `.wasm`, and pc-bios file hashes.
+- [x] Run `nix build .#qemu-wasm-engine` on the Linux builder VM.
+- [x] Record and pin the resulting `.js`, `.wasm`, and pc-bios file hashes.
 - [ ] Add a fetch/cache helper that downloads the engine into the browser and verifies hashes.
-- [ ] Instantiate QEMU-Wasm in a Worker with the correct `ENV` and `INITIAL_MEMORY` settings.
+- [x] Instantiate QEMU-Wasm in a Worker with the correct runtime settings.
+  `web/weblinux-demo/worker.js` loads the engine, the Emscripten preload pack,
+  and `xterm-pty`, then boots the smoke guest with the same args used by the
+  upstream sample. Headless Chromium reaches `DEMO-RESULT: READY` in ~7 s.
+  > Known limitation: host-bound SLIRP traffic (ping/TCP/UDP to the QEMU
+  > user-mode gateway) triggers a WebSocket-forwarding divide-by-zero in the
+  > Emscripten build, so automated smoke tests exercise loopback networking
+  > (`ping 127.0.0.1`) and the `mvm.allow_host` /etc/hosts entry instead.
 
 ### Phase 2 — Builder Worker
 
@@ -118,7 +151,7 @@ Until that succeeds, the demo cannot proceed past scaffolding, because the brows
 
 ## Risks and open questions
 
-- **Builder VM availability.** The entire Phase 1 is blocked until the Linux builder VM can evaluate and build `nix/packages/qemu-wasm.nix`.
+- **Builder VM availability.** Resolved — the aarch64-linux HVF builder VM successfully evaluated and built `nix/packages/qemu-wasm.nix`. Remaining risk is reproducibility across rebuilds and hosts.
 - **Emscripten memory limits.** Browser Workers have hard heap and thread limits; the engine may need a stripped-down firmware set or a smaller default guest memory for the demo.
 - **Cross-origin isolation.** SharedArrayBuffer and pthreads require COOP/COEP headers on the demo host.
 - **Artifact portability.** The browser-built artifact must use the same digest scheme and manifest format as native builders, or export/import becomes a conversion problem.

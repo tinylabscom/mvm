@@ -121,10 +121,19 @@ fn workload_kernel_source(source_checkout: bool) -> KernelSource {
 }
 
 pub(super) fn default_workload_kernel_source(source_checkout: bool) -> KernelSource {
-    if source_checkout {
-        KernelSource::Compile
-    } else {
-        KernelSource::Download
+    default_workload_kernel_source_for(
+        mvm_build::artifact_acquisition::compiled_channel(),
+        source_checkout,
+    )
+}
+
+pub(super) fn default_workload_kernel_source_for(
+    channel: mvm_build::artifact_acquisition::DistributionChannel,
+    source_checkout: bool,
+) -> KernelSource {
+    match mvm_build::artifact_acquisition::default_acquisition(channel, source_checkout) {
+        mvm_build::artifact_acquisition::DefaultAcquisition::Build => KernelSource::Compile,
+        mvm_build::artifact_acquisition::DefaultAcquisition::Download => KernelSource::Download,
     }
 }
 

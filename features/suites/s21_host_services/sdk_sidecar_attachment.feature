@@ -44,7 +44,7 @@ Feature: SDK sidecar attaches only for admitted SDK host-service bindings
   Scenario: a wheel mount outside the guest allow-roots is refused before boot
     When I run mvmctl with "machine run --image python:3.12 --mount .:/wheels:ro --dry-run -- /bin/true" and an isolated mvm home
     Then the command exits with code 1
-    And the error output contains "user volumes may only mount under /data, /work, /mnt"
+    And the error output contains "outside the allow-roots"
     And the error output does not contain "guest agent did not become reachable"
 
   Scenario: a required sidecar that is missing from the cache fails the launch closed

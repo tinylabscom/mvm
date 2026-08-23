@@ -1,5 +1,8 @@
 pub mod app_deps;
 pub mod app_deps_gate;
+/// Compiled distribution channel and the default build-vs-download contract
+/// shared by every launch-critical artifact resolver.
+pub mod artifact_acquisition;
 pub mod artifacts;
 pub mod backend;
 /// Disk-only job/artifact transport for the hvf-VMM builder (tar-over-raw-

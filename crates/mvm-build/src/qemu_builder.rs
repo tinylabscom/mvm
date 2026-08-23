@@ -34,6 +34,9 @@ use crate::libkrun_builder::{
     prepopulate_stage0_nix_store_image, require_runtime_overlay_ext4, stage0_nix_store_image_name,
 };
 use mvm_core::config::DEFAULT_MVM_HOME_DIR_NAME;
+use mvm_vmm::qemu_arch::{
+    machine_for_arch as qemu_machine_for_arch, serial_console_for_arch as qemu_console_for_arch,
+};
 
 /// QEMU-backed builder VM (Linux). Constructed with `::default()`; no I/O at
 /// construction — the first I/O is in `run_stage0`.
@@ -640,21 +643,6 @@ fn locate_qemu() -> Result<String, BuilderVmError> {
                  (`apt install qemu-system-x86 qemu-utils` / `dnf install qemu-system-x86`)."
             ),
         })
-}
-
-fn qemu_machine_for_arch(arch: &str) -> Option<&'static str> {
-    match arch {
-        "aarch64" => Some("virt"),
-        "x86_64" => None,
-        _ => None,
-    }
-}
-
-fn qemu_console_for_arch(arch: &str) -> &'static str {
-    match arch {
-        "aarch64" => "ttyAMA0",
-        _ => "ttyS0",
-    }
 }
 
 /// The running kernel's `vmlinuz` + `initrd.img` under `/boot`. The stock

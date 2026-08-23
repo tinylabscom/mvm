@@ -47,12 +47,12 @@ When the initramfs is attached, the backend boots:
 The block layout is fixed by the workload runner (verity sidecars are
 attached only for verity-sealed boots):
 
-| Guest device | Content |
-| --- | --- |
-| `/dev/vda` | rootfs data |
-| `/dev/vdb` | rootfs dm-verity hash tree (verity boots only) |
-| `/dev/vdc` | runtime overlay data |
-| `/dev/vdd` | runtime overlay dm-verity hash tree |
+| Guest device | Content                                        |
+| ------------ | ---------------------------------------------- |
+| `/dev/vda`   | rootfs data                                    |
+| `/dev/vdb`   | rootfs dm-verity hash tree (verity boots only) |
+| `/dev/vdc`   | runtime overlay data                           |
+| `/dev/vdd`   | runtime overlay dm-verity hash tree            |
 
 A block-less virtiofs-root dev boot attaches no disks at all; the root comes
 from a virtio-fs tag instead.
@@ -90,9 +90,9 @@ vsock port — for every boot that attached the universal initramfs, verified
 or not. The message carries:
 
 - **Rootfs config** — one of three shapes: a dm-verity block root (`/dev/vda`
-  + `/dev/vdb` + roothash, from the launch config or the `rootfs.roothash`
-  sidecar), an unverified plain-block root (`/dev/vda` only), or a virtio-fs
-  root tag (`mvmroot`).
+  - `/dev/vdb` + roothash, from the launch config or the `rootfs.roothash`
+    sidecar), an unverified plain-block root (`/dev/vda` only), or a virtio-fs
+    root tag (`mvmroot`).
 - **Runtime overlay config** — `/dev/vdc`, `/dev/vdd`, and its roothash, when
   the boot carries an overlay. A rootfs-only boot sends no overlay.
 - **Volumes** — `DirShare` volumes translated to virtio-fs tags (`uvol0`,
@@ -190,6 +190,16 @@ model in adapted form — or honestly not at all:
   guest, so verified boot is host-agnostic and a WHP backend could target the
   same Tier 2 posture as HVF/libkrun once its egress gate lands. Until then,
   WSL2 with nested `/dev/kvm` is the supported Windows-adjacent path.
+- **BrowserWasi (browser tier)** — runs the workload as a WASI Preview 1 module
+  inside the browser's own WebAssembly engine. There is no Linux kernel, no
+  initramfs, and no vsock; the capability handshake is implemented through
+  browser-native WASI imports and preopened directories. The guest workload
+  receives environment configuration through preopened directories (`/etc`,
+  `/run/mvm`) and a host-provided `MVM_ACTIVATION_FILE` environment variable.
+  Network egress is mediated through the browser's `fetch()` API via the
+  `mvm:egress` host import, and file system isolation is enforced by the WASI
+  preopen set. The tier is claim-free (no hardware isolation) and never
+  auto-selected.
 
 ## Security properties
 

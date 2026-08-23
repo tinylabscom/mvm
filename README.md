@@ -153,24 +153,30 @@ mvmctl machine inspect web
 Nix builds run inside a **headless builder VM** that mvm manages for you — there
 is no interactive shell into it. It exists only to run `nix build`, and you debug
 it through its logs. It auto-bootstraps on the first `machine build` / `machine
-run`; to set up host tooling and pre-acquire both the builder image and the
-dm-verity workload kernel ahead of time:
+run`; to set up host tooling and pre-acquire all shared launch artifacts ahead
+of time:
 
 ```bash
-mvmctl bootstrap      # host setup + builder VM and workload-kernel acquisition
+mvmctl bootstrap      # host setup + builder VM, kernel, overlay, initramfs, guest shims
 mvmctl doctor         # diagnose host deps + the resolved builder/runtime backend
 ```
 
 `bootstrap` is safe to rerun. It verifies warm artifacts and only rebuilds or
-downloads what is missing or invalid. If a Stage 0 source build is interrupted,
-the incomplete output is never installed; rerunning resumes with the persistent
-Nix store still warm.
+downloads what is missing or invalid. Official release binaries download
+published, verified artifacts and never infer a local build merely because the
+command runs inside a source checkout. Contributor binaries build source-matched
+artifacts when that source is available. If a Stage 0 source build is
+interrupted, the incomplete output is never installed; rerunning resumes with
+the persistent Nix store still warm.
 
 For an interactive shell you want a _workload_ microVM, not the builder — use a
 transient run against a dev-tier image: `mvmctl machine run --image alpine -it -- /bin/sh`.
 
-On the first image-backed run, mvm may build and cache the workload kernel
-through Stage 0. If the output includes `builder egress endpoint ... exited
+On the first image-backed run from a contributor build, mvm may prepare and
+cache the guest runtime and workload kernel from local sources. The guest
+runtime phase is concise by default; pass `-v` to show Cargo's raw compilation
+progress. Official binaries download these version-matched artifacts instead.
+If the output includes `builder egress endpoint ... exited
 with status signal: 15 (SIGTERM)`, that line is normally cleanup: the
 host-side builder egress endpoint is terminated after the one-shot Stage 0
 build exits. The actionable error is the following one. In particular, a
@@ -248,8 +254,11 @@ mvmctl machine run --image python:3.12 -- python -c "print(2 + 2)"
 
 Provenance (registry, repo, resolved digest, layer list, cosign verdict) is
 recorded in the chain-signed audit log; `--prod` refuses mutable tags before any
-network fetch. In a source checkout, the first OCI boot automatically builds
-the dedicated dm-verity-capable workload kernel through Stage 0 and caches it.
+network fetch. A contributor binary built from a source checkout automatically
+builds and caches the source-matched guest runtime and dedicated
+dm-verity-capable workload kernel on first use. An official binary downloads
+the matching verified release artifacts by default and does not implicitly
+invoke the local Rust or Nix toolchain.
 Use `MVM_KERNEL_SOURCE=download` to prefer the matching hash-verified release
 kernel, or `mvmctl kernel build --which workload` when you want to prewarm it.
 

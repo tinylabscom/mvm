@@ -798,8 +798,9 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
     ///
     /// The parent's boot inputs are derived here, from the launch it will
     /// serve, through the same mappers `start_workload` uses — a factory parent
-    /// boots the device model and kernel cmdline a workload boots, minus the
-    /// host channels a workload is entitled to and it is not. That is not a
+    /// boots the device model and boot-shape cmdline a workload boots, minus
+    /// the claim-time hostname and host channels a workload is entitled to and
+    /// it is not. That is not a
     /// nicety: a child is restored out of the parent's saved memory and
     /// inherits both, so a parent assembled by a second recipe hands every
     /// child whatever that recipe got wrong.
@@ -822,7 +823,7 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         let launch = ctx.launch.ok_or_else(|| {
             StandbyError::SpawnFailed(format!(
                 "standby '{}' has no launch config to mirror: a warm parent boots the same \
-                 device model and kernel cmdline a workload does, so it cannot be assembled \
+                 device model and boot-shape kernel cmdline a workload does, so it cannot be assembled \
                  without the launch it will serve",
                 spec.id
             ))
@@ -1498,6 +1499,14 @@ mod tests {
 
     use crate::backends::hvf::HvfDriver;
     use crate::driver::MockDriver;
+
+    fn without_guest_hostname(cmdline: &str) -> String {
+        cmdline
+            .split_whitespace()
+            .filter(|token| !token.starts_with("mvm.hostname="))
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
 
     /// An `NetworkEndpointSpawner` test double: records the request it was handed and
     /// returns a canned UDS without spawning any process. `Mutex` (not `RefCell`)
@@ -3234,10 +3243,8 @@ mod tests {
             parent.blocks, workload.blocks,
             "the warm parent must attach the workload's whole disk stack, overlay included"
         );
-        assert_eq!(
-            parent.cmdline, workload.cmdline,
-            "the warm parent must boot the workload's kernel cmdline"
-        );
+        assert_eq!(parent.cmdline, without_guest_hostname(&workload.cmdline));
+        assert!(!parent.cmdline.contains("mvm.hostname="));
         assert_eq!(parent.kernel, workload.kernel);
         assert_eq!(parent.initramfs, workload.initramfs);
     }
@@ -3315,7 +3322,8 @@ mod tests {
             "the parent must boot it too, or every child restored from it has no network: {}",
             parent.cmdline
         );
-        assert_eq!(parent.cmdline, workload.cmdline);
+        assert_eq!(parent.cmdline, without_guest_hostname(&workload.cmdline));
+        assert!(!parent.cmdline.contains("mvm.hostname="));
         assert_eq!(parent.blocks, workload.blocks);
         assert!(
             !parent.cmdline.contains("api.example.com"),
