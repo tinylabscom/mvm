@@ -24,6 +24,15 @@ for detailed scope and acceptance criteria.
       reported even if GitHub omits the event-driven watcher's `workflow_run`
       delivery; pull-request and dispatch runs cannot mask the evidence.
 
+- [x] **Issue #2789 — guest hostname follows the machine name.** The shared
+      workload cmdline carries one validated `mvm.hostname=` token for cold
+      boots, while warm children receive their final name through the existing
+      post-restore identity handshake. Privileged guest code re-validates and
+      applies both before workload code starts. Missing legacy fields remain
+      compatible; the protocol schema and generated Python and TypeScript
+      bindings include the optional field; malformed values and syscall failures
+      are covered explicitly.
+
 - [x] **Issue #2657 — live BDD is visible and merge-gated.** Capability skips
       are reported instead of disappearing from the test summary, and a
       merge-queue/manual-only KVM lane runs one tagged Firecracker witness for

@@ -371,9 +371,16 @@ fn handle_client(
             GuestRequest::PrimedStatus => handle_primed_status(),
             GuestRequest::PostRestore {
                 token,
+                hostname,
                 host_epoch_secs,
                 grant_envelope,
-            } => handle_post_restore(&mut ctx, token, host_epoch_secs, grant_envelope),
+            } => handle_post_restore(
+                &mut ctx,
+                token,
+                hostname.as_deref(),
+                host_epoch_secs,
+                grant_envelope,
+            ),
 
             GuestRequest::Exec {
                 command,
