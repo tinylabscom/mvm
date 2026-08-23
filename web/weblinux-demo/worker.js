@@ -126,8 +126,8 @@ self.onmessage = async (event) => {
       // Emscripten build routes host-bound sockets through the browser's
       // WebSocket layer.  That path currently crashes the worker with a
       // divide-by-zero when SLIRP tries to forward ICMP/UDP/TCP to the host.
-      // Loopback traffic (127.0.0.1 / the guest's own IP) does not hit SLIRP
-      // and is safe; host-bound traffic should be avoided in smoke tests.
+      // The smoke rootfs resolves mvm.allow_host to 127.0.0.1 so that ping/
+      // fetch against the demo name stays on loopback and avoids SLIRP.
       "-netdev", "user,id=net0",
       "-device", "virtio-net-pci,netdev=net0,romfile=",
       "-accel", "tcg,tb-size=500",
@@ -144,12 +144,14 @@ self.onmessage = async (event) => {
     self.Module.pty = slave;
     self.Module["mainScriptUrlOrBlob"] = `${self.location.origin}${new URL("qemu-system-x86_64.js", self.location.href).pathname}`;
 
-    // Patch the TTY poll to avoid blocking on the pty.
+    // Patch the TTY poll to avoid blocking on the pty.  The original poll
+    // expects (stream, timeout) and is called with stream_ops as |this|.
     const interval = setInterval(() => {
       if (self.Module["TTY"]) {
         clearInterval(interval);
-        const oldPoll = self.Module["TTY"].stream_ops.poll;
-        self.Module["TTY"].stream_ops.poll = (stream, _timeout) => oldPoll.call(stream, 0);
+        const streamOps = self.Module["TTY"].stream_ops;
+        const oldPoll = streamOps.poll;
+        streamOps.poll = (stream, _timeout) => oldPoll.call(streamOps, stream, 0);
       }
     }, 10);
 

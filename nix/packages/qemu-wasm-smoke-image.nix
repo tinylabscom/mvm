@@ -87,14 +87,14 @@ let
 /bin/route add default gw 10.0.2.2 eth0 2>/dev/null || true
 
 # If the launcher passed mvm.allow_host=<host>, record it in /etc/hosts so the
-# demo page can show the allow-host plumbing.  In the browser engine, ICMP or
-# TCP to the QEMU user-mode gateway (10.0.2.2) currently crashes the worker
-# because Emscripten's socket emulation forwards host-bound traffic through a
-# WebSocket that SLIRP cannot satisfy; only loopback / self-addressed traffic
-# is safe in automated smoke tests.
+# demo page can show the allow-host plumbing.  Resolve it to loopback so the
+# guest can ping/connect to the name without sending ICMP/TCP through QEMU's
+# user-mode LAN; Emscripten's socket emulation forwards host-bound traffic to a
+# WebSocket that SLIRP cannot satisfy, which crashes the worker with a
+# divide-by-zero.
 allowed_host=$(/bin/cat /proc/cmdline | /bin/tr ' ' '\n' | /bin/grep '^mvm.allow_host=' | /bin/cut -d= -f2)
 if [ -n "$allowed_host" ]; then
-  /bin/echo "10.0.2.2 $allowed_host" >> /etc/hosts
+  /bin/echo "127.0.0.1 $allowed_host" >> /etc/hosts
 fi
 
 /bin/echo QEMU-WASM-SMOKE-READY
