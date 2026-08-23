@@ -1441,7 +1441,7 @@ fn mk_guest_uses_the_static_custom_privilege_helper() {
 }
 
 #[test]
-fn builder_hook_uses_the_installed_util_linux_mount() {
+fn builder_hook_uses_util_linux_losetup_before_the_mount_syscall() {
     let builder_flake_path = nix_dir().join("images/builder-vm/flake.nix");
     let builder_flake = fs::read_to_string(&builder_flake_path)
         .unwrap_or_else(|e| panic!("reading {}: {e}", builder_flake_path.display()));
@@ -1454,9 +1454,10 @@ fn builder_hook_uses_the_installed_util_linux_mount() {
     let hook = fs::read_to_string(&hook_path)
         .unwrap_or_else(|e| panic!("reading {}: {e}", hook_path.display()));
     assert!(
-        hook.contains("const UTIL_LINUX_MOUNT: &str = \"/sbin/mount\";")
-            && hook.contains("Command::new(UTIL_LINUX_MOUNT)"),
-        "the hook runner must bypass BusyBox and invoke the installed util-linux mount"
+        hook.contains("const UTIL_LINUX_LOSETUP: &str = \"/sbin/losetup\";")
+            && hook.contains("Command::new(UTIL_LINUX_LOSETUP)")
+            && hook.contains("mount("),
+        "the hook runner must allocate the loop device with util-linux before mounting it"
     );
     assert!(
         !hook.contains("Command::new(\"mount\")"),

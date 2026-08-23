@@ -74,6 +74,9 @@ fn activate_once(vm: &dyn RunningVm, env: &ActivateEnvironment) -> Result<()> {
 /// transport error worth retrying (as opposed to a real rejection or bug).
 fn is_retryable_activation_error(err: &anyhow::Error) -> bool {
     err.chain().any(|cause| {
+        if let Some(session) = cause.downcast_ref::<mvm_core::net::session::SessionError>() {
+            return session.is_peer_hangup();
+        }
         cause.downcast_ref::<std::io::Error>().is_some_and(|io| {
             matches!(
                 io.kind(),
@@ -303,6 +306,7 @@ pub(crate) fn read_verb_grant_envelope(vm_name: &str) -> Result<Option<VerbGrant
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mvm_core::net::session::SessionError;
     use mvm_core::util::test_env::TestEnv;
 
     const VALID_HASH: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -319,6 +323,26 @@ mod tests {
             rootfs_path: "/img/rootfs.ext4".into(),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn activation_retries_a_typed_session_peer_hangup() {
+        let error = anyhow::Error::new(SessionError::Io(std::io::Error::from(
+            std::io::ErrorKind::ConnectionReset,
+        )))
+        .context("host session handshake failed");
+
+        assert!(is_retryable_activation_error(&error));
+    }
+
+    #[test]
+    fn activation_does_not_retry_an_authenticated_session_rejection() {
+        let error = anyhow::Error::new(SessionError::PeerIdentityMismatch(
+            "unexpected guest identity".into(),
+        ))
+        .context("host session handshake failed");
+
+        assert!(!is_retryable_activation_error(&error));
     }
 
     #[test]

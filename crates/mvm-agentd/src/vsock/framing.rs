@@ -222,7 +222,7 @@ impl AuthenticatedSession {
         signing_key: SigningKey,
     ) -> Result<Self> {
         let (inner, _peer_key) = Session::host(stream, session_id, signing_key)
-            .map_err(|error| anyhow::anyhow!("host session handshake failed: {error}"))?;
+            .context("host session handshake failed")?;
         Ok(Self { inner })
     }
 
@@ -351,6 +351,24 @@ mod tests {
         assert_eq!(host_vk.as_bytes(), host_vk_expected.as_bytes());
         // Session ID was echoed correctly
         assert_eq!(received_session_id, session_id);
+    }
+
+    #[test]
+    fn host_handshake_preserves_the_typed_peer_hangup() {
+        let (mut host_stream, guest_stream) = UnixStream::pair().unwrap();
+        drop(guest_stream);
+
+        let Err(error) =
+            AuthenticatedSession::host(&mut host_stream, "peer-hangup", test_keypair())
+        else {
+            panic!("a vanished guest must fail the host handshake");
+        };
+        let session_error = error
+            .chain()
+            .find_map(|cause| cause.downcast_ref::<SessionError>())
+            .expect("the anyhow context must preserve SessionError");
+
+        assert!(session_error.is_peer_hangup());
     }
 
     #[test]

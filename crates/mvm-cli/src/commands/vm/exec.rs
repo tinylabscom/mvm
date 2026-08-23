@@ -1141,16 +1141,6 @@ pub(in crate::commands) fn resolve_launch_image_source(
     // support would panic the guest in early init opening
     // /dev/mapper/control, with no host signal. Fail fast instead.
     assert_workload_kernel_supports_verity(&kernel_path)?;
-    // A source-checkout run that needs the legacy rootfs guest runtime
-    // cross-compiles it inside materialization — a slow,
-    // output-silent host `cargo zigbuild`. Announce it so the run does
-    // not look wedged after the OCI pull logs.
-    if super::super::image::oci_guest_runtime_compile_pending(&oci_cache_root) {
-        ui::info(
-            "Compiling the mvm guest runtime from your source checkout \
-             (first build for these sources; cached afterward)…",
-        );
-    }
     let cached = super::super::image::resolve_or_pull_run_image(&oci_cache_root, reference, prod)?;
     ui::info(&format!(
         "Using OCI image {} ({})",
