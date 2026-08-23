@@ -43,7 +43,10 @@ for detailed scope and acceptance criteria.
       reset while the slow TCG guest becomes ready reaches the existing
       bounded activation retry; identity and protocol rejections still fail
       closed. Failed transient starts emit a redacted guest-console tail before
-      cleanup.
+      cleanup. Hook-mutated ext4 images are checked and journal-replayed
+      offline after the writable mount is dropped, then flushed at every export
+      boundary; a mounted or damaged image fails before publication, preserving
+      the workload's hypervisor-enforced read-only rootfs contract.
       The tagged release workflow separately verifies the signed
       future-format overlay through the production downloader before publish.
       The standalone hostd fuzz lock is refreshed for the current dependency

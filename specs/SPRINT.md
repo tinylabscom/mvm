@@ -2756,6 +2756,18 @@ regression pinning that executable contract. The live lane forces a refresh of
 embedded host binaries so the guest always carries the checkout under test,
 even when Cargo caches are restored.
 
+## 2026-08-23 AArch64 builder rootfs journal sealing
+
+The merge-group AArch64 QEMU witness then reached workload activation and
+proved that a hook-mutated `rootfs.ext4` could be exported with a journal that
+still required recovery. Workload disks are hypervisor-enforced read-only, so
+the guest correctly refused to replay that journal. The builder hook boundary
+now runs offline `e2fsck` after all writable mounts are dropped, accepting only
+the clean and repaired exit codes; a still-mounted or damaged image fails the
+build instead of being published. Every export route also flushes the copied
+artifact before reporting completion, and the builder toolchain GC roots now
+retain `e2fsck` alongside `mkfs.ext4`.
+
 ## 2026-08-22 guest hostname generated-protocol parity
 
 The BDD code-generation drift gate caught that the optional post-restore
