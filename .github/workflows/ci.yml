@@ -269,6 +269,8 @@ jobs:
 
       - name: Set up uv
         uses: astral-sh/setup-uv@v8.2.0
+        with:
+          version: "0.12.5"
       - name: Set up Node
         uses: actions/setup-node@v6
         with:
@@ -294,33 +296,22 @@ jobs:
         if: needs.scope.outputs.architecture == 'false'
         run: echo "No architecture-relevant paths changed."
 
-      - name: ADR coverage (informational)
-        continue-on-error: true
-        run: cargo run -p xtask -- check-adr-coverage
+      # One driver, not sixty steps. It runs every gate and reports all
+      # of them: the old shape stopped at the first failure, so a branch
+      # breaking four gates cost four pushes and four full lanes to find
+      # that out. `cargo run -p xtask -- <gate>` still runs any one of
+      # them on its own.
+      - name: Policy gates (check-abi-layout) (single-network-path)
+        run: cargo run -p xtask -- check-all
 
-      - name: No Debug/Display on secret-named types
-        run: cargo run -p xtask -- check-no-display-on-secret-types
 
-      - name: No positional audit::emit / event-chain calls
-        run: cargo run -p xtask -- check-audit-positional
 
-      - name: Broad-egress constructor stays builder-only
-        run: cargo run -p xtask -- check-build-egress-callers
 
-      - name: Workload-kernel reads go through the verified seam
-        run: cargo run -p xtask -- check-verified-kernel-reads
 
-      - name: No host-nix invocation (builds route through the builder VM)
-        run: cargo run -p xtask -- check-no-host-nix
 
-      - name: No Virtualization.framework / Containerization Swift (Apple Container rides the in-house HVF VMM)
-        run: cargo run -p xtask -- check-no-vz
 
-      - name: No forbidden dependency families
-        run: cargo run -p xtask -- check-forbidden-deps
 
-      - name: Gated doc claims
-        run: cargo run -p xtask -- check-doc-claims
+
 
       # Runs its own self-test first: a gate nobody has watched fail is a gate
       # nobody knows works, and this one is the relief valve for the exclusion
@@ -330,84 +321,35 @@ jobs:
           cargo run -p xtask -- check-declared-backing --self-test
           cargo run -p xtask -- check-declared-backing
 
-      - name: Machine docs guards
-        run: cargo run -p xtask -- check-machine-doc-guards
 
-      - name: No overclaiming
-        run: cargo run -p xtask -- check-no-overclaim
 
-      - name: Two product surfaces only (host + user)
-        run: cargo run -p xtask -- check-two-surfaces
 
-      - name: No spec refs in source comments
-        run: cargo run -p xtask -- check-no-spec-refs-in-comments
 
-      - name: No stringly backend-name dispatch
-        run: cargo run -p xtask -- check-no-string-backend-dispatch
 
-      - name: Single MVM_HOME root (no resolver bypass)
-        run: cargo run -p xtask -- check-single-home
 
-      - name: Tests that move MVM_HOME also isolate HOME
-        run: cargo run -p xtask -- check-test-home-isolation
 
-      - name: No baked network literals (IPs/ports/tmp-sockets)
-        run: cargo run -p xtask -- check-no-network-literals
 
-      - name: mvm-cli drives machines through the mvm-client facade
-        run: cargo run -p xtask -- check-cli-runtime-surface
 
-      - name: "`mvmctl --help` and the CLI reference describe one surface"
-        run: cargo run -p xtask -- check-cli-help-matches-docs
 
-      - name: repr(C) types carry a layout contract (check-abi-layout)
-        run: cargo run -p xtask -- check-abi-layout
 
-      - name: Conformance claim catalog
-        run: cargo run -p xtask -- check-claim-catalog
 
-      - name: Sprint delivery log stays one-file-per-entry
-        run: cargo run -p xtask -- check-sprint-append
 
-      - name: New plans are slug-named, not numbered
-        run: cargo run -p xtask -- check-plan-names
 
-      - name: Claim mutation surface is pinned
-        run: cargo run -p xtask -- check-mutation-witnesses
 
-      - name: Prose cites witnesses that exist
-        run: cargo run -p xtask -- check-witness-citations
 
-      - name: Security controls declare their reachability
-        run: cargo run -p xtask -- check-dormant-controls
 
-      - name: Conformance model is the single source (R1)
-        run: cargo run -p xtask -- check-conformance
 
-      - name: No deferred markers (R4)
-        run: cargo run -p xtask -- check-deferrals
 
-      - name: Honesty levels respected in docs (R2)
-        run: cargo run -p xtask -- check-honesty
 
-      - name: Trust-gradient ledger
-        run: cargo run -p xtask -- check-trust-gradient
-
-      - name: single workload network path and socket owner (single-network-path)
-        run: cargo run -p xtask -- check-single-network-path
 
       # The in-guest toolbox is deliberately ungoverned — the microVM boundary
       # bounds it. What the boundary cannot bound is the guest originating a
       # connection outward, so that is what this checks.
-      - name: no outbound tool client in guest-shipped code
-        run: cargo run -p xtask -- check-no-guest-tool-client
 
       # The other half of the same rule. The gate above says a guest has only
       # the vsock channel; this one says it speaks exactly one protocol over
       # it. A guest made FlowMux-only while the host still served the old
       # protocol is what killed egress on main with every test green.
-      - name: one guest→host protocol
-        run: cargo run -p xtask -- check-one-guest-protocol
 
       # An image's declared environment is resolved once. The console used to
       # assemble its own, which is why `machine run --image rust:latest -it`
@@ -418,60 +360,32 @@ jobs:
       # A wall-clock bound is declared once, as a grant. `exec_secs` is that
       # grant's projection into the plan's older encoding; a second writer is a
       # second declaration of one decision, and the two can disagree.
-      - name: one writer of exec_secs (the wall-clock grant's projection)
-        run: cargo run -p xtask -- check-single-exec-secs-writer
 
       # Whether a destination is bound by a secret's `allowed_hosts` is decided
       # by `host_is_bound` and nowhere else. A second copy is a second decision,
       # and the disagreement surfaces as a credential reaching a destination it
       # should not.
-      - name: one host-binding predicate (allowed_hosts is quantified in one place)
-        run: cargo run -p xtask -- check-single-host-predicate
 
-      - name: one stream redaction seam (every StreamBroker is built over the curated ruleset)
-        run: cargo run -p xtask -- check-stream-redaction-seam
 
-      - name: guest init parity (both inits share one post-mount bootstrap)
-        run: cargo run -p xtask -- check-guest-init-parity
 
-      - name: require-grant token confined to allowlist (guards mvmd no-brick invariant)
-        run: cargo run -p xtask -- check-require-grant-token-allowlist
 
-      - name: host-binaries manifest parity
-        run: cargo run -p xtask -- check-mvm-host-binaries-sync
 
       # release.yml runs on tags, so a per-VM binary added to the registry but
       # not to the release job is invisible until a user's downloaded mvmctl
       # fails to spawn it. Resolve it here, on the PR that adds it.
-      - name: release ships every spawnable per-VM binary
-        run: cargo run -p xtask -- check-per-vm-host-binaries-sync
 
-      - name: mvm-core default build is runtime-free
-        run: cargo run -p xtask -- check-core-runtime-free
 
-      - name: content-address digests stay deterministic
-        run: cargo run -p xtask -- check-content-address-determinism
 
-      - name: mvmctl default closure within budget
-        run: cargo run -p xtask -- check-closure-budget
 
       # Manifest-level sibling to the closure budgets, which resolve trees and
       # therefore cannot see a member pinning a version behind the workspace
       # table's back, or a table entry nobody inherits.
-      - name: workspace dependency table is the single version source
-        run: cargo run -p xtask -- check-workspace-dep-inheritance
 
       # Sibling to the default-closure budget: bounds what any *feature* can
       # pull in, which is where an off-by-default tree (wasm-backend's
       # wasmtime/cranelift family) would otherwise grow unobserved.
-      - name: no unbounded growth behind optional features
-        run: cargo run -p xtask -- check-feature-closure-budget
 
-      - name: no new duplicate-major dependencies
-        run: cargo run -p xtask -- check-duplicate-majors
 
-      - name: workflow paths and fuzz targets still exist
-        run: cargo run -p xtask -- check-workflow-paths
 
       - name: Detect fuzz-crate changes
         id: fuzz_changed
@@ -502,35 +416,15 @@ jobs:
           done
           exit "$fail"
 
-      - name: mvm-guest agent closure is runtime-free
-        run: cargo run -p xtask -- check-guest-agent-runtime-free
 
-      - name: guest agent forked in every bootable image
-        run: cargo run -p xtask -- check-guest-agent-in-all-images
 
-      - name: workload guest images bake no host/builder tools
-        run: cargo run -p xtask -- check-guest-images-no-builder-tools
 
-      - name: OCI guest-binary name lists agree
-        run: cargo run -p xtask -- check-guest-binary-lists
 
-      - name: no new builder shell-job dispatch sites
-        run: cargo run -p xtask -- check-builder-shell-job-sites
 
-      - name: every VMM boot path seeds the guest CSPRNG
-        run: cargo run -p xtask -- check-guest-entropy-seed
 
-      - name: runtime-overlay version pinned to workspace
-        run: cargo run -p xtask -- check-runtime-overlay-version
 
-      - name: no oversized production file bodies (≤1500 non-test lines)
-        run: cargo run -p xtask -- check-file-size
 
-      - name: SDK stubs match the Rust schemas (no drift)
-        run: cargo run -p xtask -- check-stubs
 
-      - name: Python and TypeScript IR fixtures match the Rust semantic address
-        run: cargo run -p xtask -- check-ir-parity
 
   lint-features:
     name: Lint feature coverage
@@ -897,6 +791,8 @@ jobs:
 
       - name: Set up uv
         uses: astral-sh/setup-uv@v8.2.0
+        with:
+          version: "0.12.5"
 
       - name: Set up Node
         uses: actions/setup-node@v6
@@ -1228,7 +1124,7 @@ jobs:
 
       - name: Install Nix
         if: needs.scope.outputs.kernel == 'true'
-        uses: DeterminateSystems/nix-installer-action@main
+        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
 
       - name: Build builder and workload kernels
         if: needs.scope.outputs.kernel == 'true'
@@ -1296,7 +1192,7 @@ jobs:
 
       - name: Install Nix
         if: needs.scope.outputs.nix == 'true'
-        uses: DeterminateSystems/nix-installer-action@main
+        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
 
       - name: Install Rust toolchain
         if: needs.scope.outputs.nix == 'true'
@@ -1436,7 +1332,7 @@ jobs:
 
       - name: Install Nix
         if: needs.scope.outputs.nix == 'true'
-        uses: DeterminateSystems/nix-installer-action@main
+        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
 
       - name: Restore Nix binary cache
         if: needs.scope.outputs.nix == 'true'

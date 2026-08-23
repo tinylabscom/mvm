@@ -20,6 +20,16 @@
 //! Conclusions are deliberately **not** re-checked here. That is the other
 //! detector's job, and duplicating it would put two gates on one property
 //! and let them disagree.
+//!
+//! What *is* checked is that the other detector ran at all. `Security lane
+//! watch` fires on `workflow_run`, and an event that is never delivered
+//! produces no run, no verdict and no trace — which reads exactly like a
+//! green night. On 2026-08-21 the Security nightly completed at 11:36:49Z
+//! and no watcher run was created for it; every other sampled completion,
+//! cancelled ones included, did trigger one. That is a different property
+//! from the lane's conclusion and has a different owner, so checking it
+//! here duplicates nothing: this gate already owns "did the thing that was
+//! supposed to happen, happen?".
 
 use anyhow::{Context, Result, bail};
 use std::collections::{BTreeMap, BTreeSet};
@@ -70,7 +80,17 @@ pub enum Freshness {
     NotScheduled,
 }
 
-pub fn run(workspace: &Path) -> Result<()> {
+/// `check_reporting` additionally asks whether the watcher fired for each
+/// lane's last completed run.
+///
+/// Off by default, and off on pull requests, because the two questions have
+/// different audiences. A lane that stopped firing can be *caused* by the
+/// diff under review — a cron edit that drops a lane out of scope — so that
+/// fails the PR. A completed run nobody reported on is history: no PR
+/// author can fix it, and failing their branch for it is how a gate teaches
+/// people to ignore it. That one belongs to the scheduled run and its
+/// tracking issue.
+pub fn run(workspace: &Path, check_reporting: bool) -> Result<()> {
     let workflows = resolve_witness_workflows(workspace)?;
     if workflows.is_empty() {
         bail!(
@@ -109,6 +129,30 @@ pub fn run(workspace: &Path) -> Result<()> {
         }
     }
 
+    // The reporting chain, not the verdict: a lane can run, finish red, and
+    // still tell nobody if the `workflow_run` event that drives the watcher
+    // is never delivered. See the module header for the night that happened.
+    let mut unreported = Vec::new();
+    for wf in workflows.iter().filter(|_| check_reporting) {
+        if wf.max_age_hours().is_none() {
+            continue;
+        }
+        let Some((_, finished)) = latest_completed_run(&wf.file)? else {
+            continue;
+        };
+        // Give a just-finished run time for its watcher to be queued.
+        if age_hours_since(&finished, now_unix()?)? < WATCHER_GRACE_HOURS {
+            continue;
+        }
+        if !watcher_ran_since(WATCHER_WORKFLOW, &finished)? {
+            unreported.push(format!(
+                "{} completed at {finished} and {WATCHER_WORKFLOW} never ran for it —                  claim(s) {:?} had no verdict reported either way",
+                wf.file, wf.claims
+            ));
+        }
+    }
+    problems.extend(unreported);
+
     for f in &skipped {
         eprintln!(
             "[note] {f} carries no schedule this gate can reason about — absence is not a signal there"
@@ -119,7 +163,8 @@ pub fn run(workspace: &Path) -> Result<()> {
         bail!(
             "check-claim-witness-freshness: {} claim-bearing lane(s) have stopped running:\n  {}\n\n\
              A lane that does not run reports no failure, so a red-lane watcher stays silent and \
-             every claim it backs keeps a green ledger entry with nothing behind it.",
+             every claim it backs keeps a green ledger entry with nothing behind it. A lane that \
+             runs but whose watcher never fires is the same silence reached the other way.",
             problems.len(),
             problems.join("\n  ")
         );
@@ -251,6 +296,107 @@ pub fn cron_interval_hours(expr: &str) -> Option<u32> {
     // A fixed hour, or an explicit list of them, fires that many times a day.
     let count = hour.split(',').filter(|p| !p.is_empty()).count() as u32;
     (count > 0).then(|| 24 / count.max(1))
+}
+
+/// The most recent completed run of `file`, as `(created_at, updated_at)`.
+///
+/// `updated_at` is when the run finished, which is the instant the
+/// `workflow_run: completed` event should have been delivered.
+fn latest_completed_run(file: &str) -> Result<Option<(String, String)>> {
+    let out = std::process::Command::new("gh")
+        .args([
+            "run",
+            "list",
+            "--workflow",
+            file,
+            "--status",
+            "completed",
+            "--limit",
+            "1",
+            "--json",
+            "createdAt,updatedAt",
+        ])
+        .output()
+        .with_context(|| format!("running `gh run list --workflow {file}`"))?;
+    if !out.status.success() {
+        bail!(
+            "gh run list --workflow {file} failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(first_completed_run(&String::from_utf8_lossy(&out.stdout)))
+}
+
+/// `(createdAt, updatedAt)` of the first entry in a `gh run list` payload.
+pub fn first_completed_run(json: &str) -> Option<(String, String)> {
+    let v: serde_json::Value = serde_json::from_str(json).ok()?;
+    let first = v.as_array()?.first()?;
+    Some((
+        first.get("createdAt")?.as_str()?.to_string(),
+        first.get("updatedAt")?.as_str()?.to_string(),
+    ))
+}
+
+/// Whether a run of `watcher` was created at or after `after`.
+fn watcher_ran_since(watcher: &str, after: &str) -> Result<bool> {
+    let out = std::process::Command::new("gh")
+        .args([
+            "run",
+            "list",
+            "--workflow",
+            watcher,
+            "--limit",
+            "20",
+            "--json",
+            "createdAt",
+        ])
+        .output()
+        .with_context(|| format!("running `gh run list --workflow {watcher}`"))?;
+    if !out.status.success() {
+        bail!(
+            "gh run list --workflow {watcher} failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(any_created_at_or_after(
+        &String::from_utf8_lossy(&out.stdout),
+        after,
+    ))
+}
+
+/// True when any entry's `createdAt` is at or after `after`.
+///
+/// RFC3339 UTC timestamps from the same API sort lexicographically, which
+/// is why this compares strings rather than parsing.
+pub fn any_created_at_or_after(json: &str, after: &str) -> bool {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(json) else {
+        return false;
+    };
+    let Some(entries) = v.as_array() else {
+        return false;
+    };
+    entries.iter().any(|e| {
+        e.get("createdAt")
+            .and_then(|c| c.as_str())
+            .is_some_and(|c| c >= after)
+    })
+}
+
+/// How long after a run completes to still call a missing report "in flight".
+///
+/// The watcher is a single API-reading job; a minute is generous. An hour
+/// keeps the gate quiet if Actions is queuing, and it only ever runs
+/// against a run that finished before this gate's own cron fired.
+const WATCHER_GRACE_HOURS: u32 = 1;
+
+/// The workflow that reports a watched lane's per-job verdict.
+const WATCHER_WORKFLOW: &str = "security-lane-watch.yml";
+
+fn now_unix() -> Result<i64> {
+    Ok(std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .context("reading the system clock")?
+        .as_secs() as i64)
 }
 
 /// Age in hours of the most recent run of `file` on the default branch, or
@@ -424,6 +570,58 @@ mod tests {
             classify(Some(gap_hours), Some(allowed)),
             Freshness::Stale { .. }
         ));
+    }
+
+    /// The incident this check exists for: a completed run with no watcher
+    /// run after it.
+    #[test]
+    fn a_completed_run_with_no_later_watcher_run_is_unreported() {
+        // The real timestamps from Security run 32448509693 and the newest
+        // security-lane-watch run that existed when it finished.
+        let finished = "2026-08-21T11:36:49Z";
+        let watcher_runs = r#"[
+            {"createdAt": "2026-08-21T04:53:22Z"},
+            {"createdAt": "2026-08-21T04:17:19Z"}
+        ]"#;
+        assert!(
+            !any_created_at_or_after(watcher_runs, finished),
+            "no watcher run followed the completion, which is the bug"
+        );
+
+        // One created after it is the healthy shape.
+        let with_report = r#"[
+            {"createdAt": "2026-08-21T11:37:02Z"},
+            {"createdAt": "2026-08-21T04:53:22Z"}
+        ]"#;
+        assert!(any_created_at_or_after(with_report, finished));
+
+        // Exactly at the boundary counts as a report.
+        let exact = r#"[{"createdAt": "2026-08-21T11:36:49Z"}]"#;
+        assert!(any_created_at_or_after(exact, finished));
+    }
+
+    #[test]
+    fn an_empty_or_malformed_watcher_history_is_not_a_report() {
+        assert!(!any_created_at_or_after("[]", "2026-08-21T11:36:49Z"));
+        assert!(!any_created_at_or_after("not json", "2026-08-21T11:36:49Z"));
+        assert!(!any_created_at_or_after(
+            r#"[{"other": "field"}]"#,
+            "2026-08-21T11:36:49Z"
+        ));
+    }
+
+    #[test]
+    fn a_completed_run_payload_yields_both_timestamps() {
+        let json =
+            r#"[{"createdAt": "2026-08-21T04:53:00Z", "updatedAt": "2026-08-21T11:36:49Z"}]"#;
+        assert_eq!(
+            first_completed_run(json),
+            Some((
+                "2026-08-21T04:53:00Z".to_string(),
+                "2026-08-21T11:36:49Z".to_string()
+            ))
+        );
+        assert_eq!(first_completed_run("[]"), None);
     }
 
     #[test]
