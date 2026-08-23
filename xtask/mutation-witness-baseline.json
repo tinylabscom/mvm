@@ -161,6 +161,13 @@
       ]
     },
     {
+      "path": "crates/mvm-core/src/crypto/policy/mount.rs",
+      "package": "mvm-core",
+      "claims": [
+        1
+      ]
+    },
+    {
       "path": "crates/mvm-core/src/plan/bundle.rs",
       "package": "mvm-core",
       "claims": [
