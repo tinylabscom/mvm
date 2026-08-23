@@ -3,8 +3,6 @@ use alloc::vec::Vec;
 
 use serde::{Deserialize, Serialize};
 
-use crate::protocol::signing::SignedPayload;
-
 /// Current authenticated protocol version.
 pub const PROTOCOL_VERSION_AUTHENTICATED: u8 = 2;
 
@@ -26,34 +24,6 @@ pub const SIG_ALG_ECDSA_P256: u8 = 0x02;
 // ============================================================================
 // Authenticated vsock frames
 // ============================================================================
-
-/// A versioned, signed vsock frame envelope.
-///
-/// After the initial CONNECT/OK handshake and session establishment,
-/// every frame becomes an `AuthenticatedFrame` containing the signed inner
-/// payload (the original `GuestRequest`/`GuestResponse`, or a
-/// `ServiceCall`/`ServiceResponse`) plus a 1-byte algorithm identifier so
-/// the signature can be verified without out-of-band algorithm negotiation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct AuthenticatedFrame {
-    /// Protocol version (2 = authenticated, 1 = legacy/unauthenticated).
-    pub version: u8,
-    /// Signature algorithm identifier. Currently `SIG_ALG_ED25519` (0x01);
-    /// `SIG_ALG_ECDSA_P256` (0x02) reserved for the macOS Secure Enclave
-    /// host-signer path. Unknown values must be rejected at frame parse so
-    /// a future PQC scheme can land without a wire-format hard fork.
-    pub sig_alg: u8,
-    /// Unique per-session identifier (assigned during handshake).
-    pub session_id: String,
-    /// Monotonically increasing sequence number for replay detection.
-    pub sequence: u64,
-    /// ISO 8601 timestamp of frame creation.
-    pub timestamp: String,
-    /// The signed inner payload. The bytes-to-sign for JSON payloads
-    /// use JCS (RFC 8785) under whichever `sig_alg` the frame carries.
-    pub signed: SignedPayload,
-}
 
 // ============================================================================
 // Session handshake
@@ -496,77 +466,6 @@ mod tests {
     use alloc::vec;
 
     use super::*;
-
-    #[test]
-    fn test_authenticated_frame_serde_roundtrip() {
-        let frame = AuthenticatedFrame {
-            version: PROTOCOL_VERSION_AUTHENTICATED,
-            sig_alg: SIG_ALG_ED25519,
-            session_id: "sess-001".to_string(),
-            sequence: 42,
-            timestamp: "2026-02-25T00:00:00Z".to_string(),
-            signed: SignedPayload {
-                payload: b"inner request json".to_vec(),
-                signature: vec![0u8; 64],
-                signer_id: "guest-key-1".to_string(),
-            },
-        };
-
-        let json = serde_json::to_string(&frame).unwrap();
-        let parsed: AuthenticatedFrame = serde_json::from_str(&json).unwrap();
-
-        assert_eq!(parsed.version, 2);
-        assert_eq!(parsed.sig_alg, SIG_ALG_ED25519);
-        assert_eq!(parsed.session_id, "sess-001");
-        assert_eq!(parsed.sequence, 42);
-        assert_eq!(parsed.signed.payload, b"inner request json");
-        assert_eq!(parsed.signed.signature.len(), 64);
-    }
-
-    #[test]
-    fn test_authenticated_frame_sig_alg_byte_round_trips() {
-        // Round-trip every reserved sig_alg value so future variants land
-        // as additive constants without a wire-format break.
-        for alg in [SIG_ALG_ED25519, SIG_ALG_ECDSA_P256] {
-            let frame = AuthenticatedFrame {
-                version: PROTOCOL_VERSION_AUTHENTICATED,
-                sig_alg: alg,
-                session_id: "sess-alg-test".to_string(),
-                sequence: 1,
-                timestamp: "2026-05-27T00:00:00Z".to_string(),
-                signed: SignedPayload {
-                    payload: b"".to_vec(),
-                    signature: vec![0u8; 64],
-                    signer_id: "alg-roundtrip".to_string(),
-                },
-            };
-            let json = serde_json::to_string(&frame).unwrap();
-            let parsed: AuthenticatedFrame = serde_json::from_str(&json).unwrap();
-            assert_eq!(parsed.sig_alg, alg);
-        }
-    }
-
-    #[test]
-    fn test_authenticated_frame_missing_sig_alg_field_rejected() {
-        // `deny_unknown_fields` + no default → an old frame without
-        // `sig_alg` must fail to parse. This is the no-backcompat
-        // contract: old frames hard-fail rather than silently decoding to
-        // a default (which would let a forged frame pretend to be a
-        // future PQC algorithm).
-        let pre_w1a = serde_json::json!({
-            "version": 2,
-            "session_id": "old",
-            "sequence": 0,
-            "timestamp": "2026-05-27T00:00:00Z",
-            "signed": {
-                "payload": [],
-                "signature": vec![0u8; 64],
-                "signer_id": "old"
-            }
-        });
-        let err = serde_json::from_value::<AuthenticatedFrame>(pre_w1a).unwrap_err();
-        assert!(err.to_string().contains("missing field `sig_alg`"));
-    }
 
     #[test]
     fn test_session_hello_serde_roundtrip() {
