@@ -359,6 +359,21 @@ for detailed scope and acceptance criteria.
 
 ## In-flight plans
 
+- [x] **Execution-receipt evidence archive**
+      (`specs/plans/2026-08-22-execution-receipt-evidence-archive.md`,
+      implementation plan `…-implementation.md`, ADR-110).
+      `receipts export` dropped every audit entry with no receipt mapping --
+      egress decisions, stream attach/input grants, sealed-transcript anchors
+      -- and said nothing about having done so. Tasks 1-8 shipped: an exhaustive
+      `EntryMapping` so nothing falls through, three self-locating receipt
+      extensions, a signed `.mvmev` archive with one inclusion proof per leaf,
+      and a verifier reporting integrity/inclusion/completeness separately with
+      a 1/2/4 exit bitmask. Completeness is `attested` for a plan-scoped
+      archive and `derivable` only under `--full-chain`; the two are never
+      collapsed. Open: transcript chunk embedding, blocked on which transcript
+      store is authoritative (ADR-110's open question). WS5 (mvmd blob store +
+      index) is specced in mvmd and not started.
+
 - [ ] **HVF builder state out of the workload VM namespace**
       (`specs/plans/2026-08-21-hvf-builder-state-out-of-the-workload-namespace.md`).
       The HVF builder family stages VM state under `~/.mvm/vms/` rather than
@@ -399,7 +414,11 @@ for detailed scope and acceptance criteria.
       The exact Security rerun's capability-builder finding now has a direct
       all-fields witness; its only remaining constructor mutant is documented
       as the identical `Default::default()` expression rather than waived as
-      an untested behavior.
+      an untested behavior. Completed run 32552650847 then exposed seven
+      authorization survivors in extension verification and attachment;
+      focused boundary and single-field witnesses catch all 20 generated
+      mutants across those predicates, and the now-caught host-budget miss has
+      been removed from the accepted baseline.
       Closure remains gated on a clean Security workflow run from current
       `main`, including every mutation shard and both reproducibility builds.
 

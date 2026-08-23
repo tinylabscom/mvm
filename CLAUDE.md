@@ -350,10 +350,16 @@ ADR-001 §"Appendix: Cardoso minimum-viable-policy checklist".
     (`mvm_build::app_deps_gate::apply_install_gate`); `mvmctl deps
    inspect` / `mvmctl deps audit` surface the sealed sidecars without
     a VM spawn. The `app-deps-audit` job lives in
-    `.github/workflows/ci-full.yml` (Followup D), not `ci.yml` — that
-    workflow is `workflow_dispatch`-only, so this lane does **not**
-    gate every PR; it runs on manual dispatch. It exercises `mvmctl
-   build compile` on
+    `.github/workflows/security.yml` (Followup D), not `ci.yml` — it runs
+    on the nightly cron and on release tags, so this lane does **not**
+    gate every PR. It lived in `ci-full.yml` until 2026-08-21, which was
+    `workflow_dispatch`-only and had been triggered zero times since it
+    was written: ADR-001's ledger cited `ci:app-deps-audit` for claim 11
+    the whole time, against a lane that had never once run. (`ci-full.yml`
+    still exists, as `Extended CI`, and now runs nightly — it kept the
+    lanes that are neither security-bearing nor duplicated by `ci.yml`,
+    including the repository's only macOS coverage.) It exercises
+    `mvmctl build compile` on
     `examples/python/hello-app-with-deps/`, seals a clean + a high-CVE
     fixture via `mvm-build`'s `mvm-app-deps-fixture-tool` example,
     asserts `mvmctl deps inspect --json` reports a well-formed report,
@@ -430,13 +436,16 @@ prod_pull_requires_digest_pin_before_network` and
     resolved digest before cache admission or boot. The OCI
     `unpack_layer` fuzz harness lives in
     `.github/workflows/security.yml`'s `fuzz` job (release-tag pushes
-    - nightly cron + manual dispatch); the
-      `oci-layer-unpack-adversarial`, `oci-digest-mismatch-reject`,
-      `oci-malformed-manifest`, `oci-mutable-tag-prod-reject`,
-      `oci-reproducibility`, and `oci-image-runner-smoke` lanes live in
-      `.github/workflows/ci-full.yml`, not `ci.yml` — that workflow is
-      `workflow_dispatch`-only, so none of the six gate a PR; they run
-      on manual dispatch.
+    - nightly cron + manual dispatch); the six OCI hardening lanes
+      (`layer-unpack-adversarial`, `digest-mismatch-reject`,
+      `malformed-manifest`, `mutable-tag-prod-reject`, `reproducibility`,
+      `image-runner-smoke`) are the `oci-hardening` matrix in
+      `.github/workflows/security.yml`, not `ci.yml` — so none of the six
+      gate a PR; they run nightly and on release tags. They were six
+      separate dispatch-only jobs in `ci-full.yml` until 2026-08-21 and
+      had never been run. Note that ADR-001's ledger does not cite them:
+      claim 14's row names no `ci:` witness, so this paragraph is prose
+      about lanes the gate does not check, and the table is what binds.
 15. **A sealed production microVM has no shell, no DevOnly guest-agent
     verbs, and no PTY.** The sole
     interactive path into a guest is the agent-served PTY-over-vsock

@@ -1,8 +1,9 @@
 name: Security lane watch
 
-# The Security workflow runs on release tags, a nightly cron, and manual
-# dispatch — never on a pull request. Nothing surfaces a failure, so a red
-# lane is invisible until somebody thinks to read run history. That is not
+# The workflows this watches — Security, and the pack signing round-trip —
+# run on release tags, a nightly cron, and manual dispatch, never on a pull
+# request. Nothing surfaces a failure, so a red lane is invisible until
+# somebody thinks to read run history. That is not
 # hypothetical: cargo-deny, cargo-audit, the fuzz lane, the flake-lock check
 # and builder-VM reproducibility were all red for six consecutive nights
 # before anyone noticed, and three of those five back numbered security
@@ -22,13 +23,21 @@ name: Security lane watch
 #      months after it stopped — but the API-reading approach costs nothing
 #      and does not have to be revisited when one does.
 #
+# Reading the API was necessary and, for a fortnight, not sufficient: a
+# guard above the read short-circuited whenever the run concluded
+# `cancelled`, which Actions does whenever any one job is cancelled — a
+# timed-out mutation shard included. The verdict now lives in
+# scripts/security-lane-verdict.sh, under test, because that contradiction
+# was invisible in the YAML and no assertion on the workflow text would
+# have found it.
+#
 # Failure opens or updates one tracking issue; a clean run closes it. The
 # issue is the enforcement surface, not a merge block: these lanes do not
 # run on PRs, so there is nothing to block.
 
 on:
   workflow_run:
-    workflows: ["Security"]
+    workflows: ["Security", "Pack signing smoke", "Extended CI"]
     types: [completed]
 
 permissions:
@@ -50,6 +59,10 @@ jobs:
       github.event.workflow_run.event == 'push'
     runs-on: ubuntu-latest
     steps:
+      # `workflow_run` checks out the default branch, not the triggering
+      # run's ref, so the verdict logic is always the reviewed copy.
+      - uses: actions/checkout@v6
+
       - name: Collect failing jobs and open, update, or close the tracking issue
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -57,37 +70,40 @@ jobs:
           RUN_ID: ${{ github.event.workflow_run.id }}
           RUN_URL: ${{ github.event.workflow_run.html_url }}
           RUN_EVENT: ${{ github.event.workflow_run.event }}
-          RUN_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
           HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
-          TITLE: "Security lane is red"
+          WATCHED: ${{ github.event.workflow_run.name }}
+          TITLE: "${{ github.event.workflow_run.name }} lane is red"
         run: |
           set -euo pipefail
 
-          # A run cancelled as a whole collected no verdict: every job reads
-          # `cancelled` whether it was about to pass or about to fail. The
-          # empty failing set below would then be reported as "green again"
-          # and close the tracking issue on evidence nobody gathered.
-          if [ "$RUN_CONCLUSION" = "cancelled" ]; then
-            echo "Security run $RUN_ID was cancelled; no per-job verdict to report."
+          # Per-job conclusions, not the run's aggregate. Two reasons, and
+          # the second cost this lane a fortnight of silence:
+          #
+          #   1. A continue-on-error job leaves the run green while
+          #      reporting its own failure here.
+          #   2. Actions concludes the whole RUN `cancelled` when any single
+          #      job is — including a job killed by its own
+          #      `timeout-minutes`. Reading the run's conclusion therefore
+          #      throws away every verdict its other thirty jobs reached.
+          #
+          # scripts/security-lane-verdict.sh owns that decision and is
+          # tested against the real payloads of the runs that went
+          # unreported. Exit 3 means no job reached a verdict at all, which
+          # is what an operator cancelling the run looks like.
+          set +e
+          gh api --paginate "repos/$REPO/actions/runs/$RUN_ID/jobs" \
+            | scripts/security-lane-verdict.sh > failing.md
+          verdict=$?
+          set -e
+
+          if [ "$verdict" -eq 3 ]; then
+            echo "$WATCHED run $RUN_ID collected no per-job verdict; nothing to report."
             exit 0
           fi
-
-          # Per-job conclusions, not the run's aggregate: a
-          # continue-on-error job leaves the run green while reporting its
-          # own failure here.
-          #
-          # `cancelled` is in the set deliberately. Actions reports a job
-          # killed by its own `timeout-minutes` as cancelled, not timed_out
-          # — the `timed_out` conclusion is in the schema and does not
-          # arrive in practice. Selecting on failure alone therefore read a
-          # mutation shard that never finished, and a fuzz lane killed at
-          # the six-hour platform cap, as jobs with nothing to say. Both had
-          # been happening nightly; both back numbered claims. The run-level
-          # guard above is what keeps an operator's cancellation out.
-          gh api --paginate "repos/$REPO/actions/runs/$RUN_ID/jobs" \
-            --jq '.jobs[] | select(.conclusion == "failure" or .conclusion == "timed_out"
-                                   or .conclusion == "cancelled")
-                  | "- \(.name) — [log](\(.html_url))"' > failing.md
+          if [ "$verdict" -ne 0 ]; then
+            echo "::error::could not read the verdict of $WATCHED run $RUN_ID" >&2
+            exit 1
+          fi
 
           EXISTING=$(gh issue list --repo "$REPO" --state open \
             --search "\"$TITLE\" in:title" --json number --jq '.[0].number // empty')
@@ -96,19 +112,19 @@ jobs:
             if [ -n "$EXISTING" ]; then
               # Backticks here are markdown, not command substitution; %s carries the values.
               # shellcheck disable=SC2016
-              printf 'Security run [%s](%s) on `%s` is green again — closing.\n' \
-                "$RUN_ID" "$RUN_URL" "$HEAD_SHA" > body.md
+              printf '%s run [%s](%s) on `%s` is green again — closing.\n' \
+                "$WATCHED" "$RUN_ID" "$RUN_URL" "$HEAD_SHA" > body.md
               gh issue comment "$EXISTING" --repo "$REPO" --body-file body.md
               gh issue close "$EXISTING" --repo "$REPO"
             fi
-            echo "Security run $RUN_ID: all jobs green."
+            echo "$WATCHED run $RUN_ID: all jobs green."
             exit 0
           fi
 
           {
             # Backticks here are markdown, not command substitution; %s carries the values.
             # shellcheck disable=SC2016
-            printf 'The `Security` workflow (%s) failed on `%s`.\n\n' "$RUN_EVENT" "$HEAD_SHA"
+            printf 'The `%s` workflow (%s) failed on `%s`.\n\n' "$WATCHED" "$RUN_EVENT" "$HEAD_SHA"
             printf 'Run: %s\n\n' "$RUN_URL"
             printf 'Failing or unfinished jobs:\n\n'
             cat failing.md
