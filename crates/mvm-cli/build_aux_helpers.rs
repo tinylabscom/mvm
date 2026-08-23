@@ -149,7 +149,7 @@ mod tests {
 pub const PER_VM_HOST_BINARIES: &[PerVmBinary] = &[
     PerVmBinary {
         package: "mvm-hostd",
-        name: "mvm-netd",
+        name: "mvm-network-endpoint",
         features: "",
         scope: PerVmScope::Always,
     },
@@ -163,7 +163,7 @@ pub const PER_VM_HOST_BINARIES: &[PerVmBinary] = &[
 "#;
         let got = parse_per_vm_binaries(src);
         assert_eq!(got.len(), 2);
-        assert_eq!(got[0].name, "mvm-netd");
+        assert_eq!(got[0].name, "mvm-network-endpoint");
         assert_eq!(got[0].scope, "Always");
         assert_eq!(got[1].features, "libkrun-sys");
         assert_eq!(got[1].scope, "RequiresLibkrun");

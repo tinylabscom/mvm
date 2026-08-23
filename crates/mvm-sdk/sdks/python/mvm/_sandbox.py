@@ -549,8 +549,6 @@ def _lower_live_options(
         _reject_live_option("network", f"unknown fields: {sorted(unknown)}")
     if encoded_network.get("mode", "none") != "none":
         _reject_live_option("network.mode", "only the NIC-less `none` mode is supported")
-    if encoded_network.get("ports"):
-        _reject_live_option("network.ports", "use Sandbox.forward after boot")
     if encoded_network.get("peers"):
         _reject_live_option("network.peers", "the live CLI has no peer equivalent")
     if encoded_network.get("dns") is not None:
@@ -730,10 +728,6 @@ class _LiveTransport:
         self.vm_id = vm_id
         self.build_mode = build_mode
         self._killed = False
-        # Long-running `mvmctl forward` proxies spawned by `forward()`.
-        # Torn down in `kill()` so a port forwarder never outlives the VM.
-        self._forwards: list[subprocess.Popen[bytes]] = []
-
     @classmethod
     def for_source(
         cls,
@@ -744,6 +738,7 @@ class _LiveTransport:
         ttl_seconds: int,
         create_args: list[str],
         boot_command: list[str] | None,
+        ports: list[dict[str, Any]],
     ) -> "_LiveTransport":
         """Run ``mvmctl machine run`` with a typed boot source and parse its
         JSON envelope. Raises
@@ -763,14 +758,25 @@ class _LiveTransport:
             mvm_cli_bin,
             "machine",
             "run",
-            "-d",
-            "--up-json",
-            "--name",
-            vm_id,
         ]
+        if not ports:
+            argv.append("-d")
+        argv.extend(["--up-json", "--name", vm_id])
         argv.extend(["--manifest" if source_kind == "manifest" else "--image", source])
         argv.extend(create_args)
         argv.extend(["--ttl", f"{ttl_seconds}s"])
+        for port in ports:
+            if (
+                port.get("proto") != "tcp"
+                or port.get("transform") != "opaque"
+                or port.get("host_addr") != "127.0.0.1"
+                or port.get("guest_addr") != "127.0.0.1"
+            ):
+                raise SandboxModeError(
+                    "Sandbox live mode currently accepts only opaque TCP ingress "
+                    "bound to host and guest 127.0.0.1"
+                )
+            argv.extend(["--port", f"{port['host']}:{port['guest']}"])
         if boot_command is not None:
             argv.append("--")
             argv.extend(boot_command)
@@ -1169,27 +1175,6 @@ class _LiveTransport:
                 stderr=result.stderr.decode("utf-8", errors="replace"),
             )
 
-    def forward(self, host_port: int, guest_port: int) -> None:
-        """Spawn ``mvmctl machine forward <vm> --port <host>:<guest>`` in the
-        background. `mvmctl machine forward` blocks (it runs the proxy until
-        signalled), so it is launched detached and tracked; `kill()`
-        terminates every forwarder so none outlives the sandbox."""
-        spec = f"{host_port}:{guest_port}"
-        self._require_dev("forward", ["machine", "forward", self.vm_id, "--port", spec])
-        shell = [self.mvm_cli_bin, "machine", "forward", self.vm_id, "--port", spec]
-        try:
-            proc = subprocess.Popen(
-                shell,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-        except FileNotFoundError as exc:
-            raise SandboxLiveError(
-                f"`{self.mvm_cli_bin}` not found on disk; {cli_resolution_hint()}",
-                argv=shell,
-            ) from exc
-        self._forwards.append(proc)
-
     def kill(self) -> None:
         """Shell ``mvmctl machine stop <vm>``. Idempotent — repeated kills
         from the context manager + an explicit `sb.kill()` are
@@ -1197,11 +1182,6 @@ class _LiveTransport:
         if self._killed:
             return
         self._killed = True
-        # Tear down any port forwarders before the VM goes away.
-        for proc in self._forwards:
-            if proc.poll() is None:
-                proc.terminate()
-        self._forwards.clear()
         # `--yes` skips the interactive confirmation prompt; the sandbox tears
         # down non-interactively.
         shell = [self.mvm_cli_bin, "machine", "stop", self.vm_id, "--yes"]
@@ -1449,6 +1429,7 @@ class Sandbox:
                 ttl_seconds=ttl_seconds,
                 create_args=create_args,
                 boot_command=command,
+                ports=list((_encode_network(network) or {}).get("ports", [])),
             )
             sb = cls(wid, live=live)
             _register_live(sb)
@@ -1653,14 +1634,10 @@ class Sandbox:
         self._live.cp(f"{self._live.vm_id}:{guest_path}", host_path)
 
     def forward(self, host_port: int, guest_port: int) -> None:
-        """Forward ``host_port`` on the host to ``guest_port`` in the
-        sandbox. Spawns ``mvmctl machine forward <vm> --port <host>:<guest>`` as
-        a background proxy that runs until the sandbox is torn down
-        (``kill`` / ``__exit__`` terminate it).
+        """Refuse dynamic ingress changes after admission.
 
-        Live mode only: exposing a port is a runtime action, so in record
-        mode this raises :class:`SandboxModeError`. To declare a port
-        mapping for a recorded workload, use ``mvm.network(ports=...)``.
+        Declare the mapping with ``network=mvm.network(ports=[...])`` when
+        creating the sandbox so it is covered by the signed admission plan.
         """
         if not isinstance(host_port, int) or isinstance(host_port, bool):
             raise TypeError("host_port must be an int")
@@ -1668,12 +1645,10 @@ class Sandbox:
             raise TypeError("guest_port must be an int")
         if not (0 < host_port < 65536) or not (0 < guest_port < 65536):
             raise ValueError("ports must be in 1..65535")
-        if self._live is None:
-            raise SandboxModeError(
-                "`Sandbox.forward` is a live-mode operation; under "
-                "MVM_SDK_MODE=record declare ports with `mvm.network(ports=...)`."
-            )
-        self._live.forward(host_port, guest_port)
+        raise SandboxModeError(
+            "dynamic `Sandbox.forward` is retired; declare ingress with "
+            "`Sandbox.create(..., network=mvm.network(ports=[...]))` before boot"
+        )
 
     def kill(self) -> None:
         """Issue a ``kill`` against the active transport.

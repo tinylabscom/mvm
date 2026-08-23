@@ -424,7 +424,6 @@ fn admit_standby_parent_plan(
         // L3 spec — the same "no workload authority" posture as the empty
         // secrets, services, and shares above.
         network_mode: mvm_contract::plan::NetworkMode::None,
-        l3_network: None,
         ingress: Vec::new(),
     };
     let ledger = InMemoryNonceLedger::new();

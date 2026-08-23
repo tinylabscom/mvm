@@ -19,7 +19,7 @@ export function Boundary() {
         <div className="grid overflow-hidden rounded-2xl border border-edge/50 lg:grid-cols-2">
           {/* Left half: the argument. */}
           <div className="p-8 sm:p-10 lg:p-12">
-            <h2 className="mb-4 lowercase font-display text-2xl font-bold leading-tight text-title sm:text-3xl">
+            <h2 className="mb-4 lowercase font-display tracking-tight text-2xl font-semibold leading-tight text-title sm:text-3xl">
               one boundary, three backends
             </h2>
             <p className="mb-6 max-w-md text-base leading-relaxed text-body">
@@ -43,7 +43,7 @@ export function Boundary() {
 
           {/* Right half: the figure. */}
           <div className="flex flex-col justify-center bg-accent-low p-8 sm:p-10 lg:p-12">
-            <p className="font-display text-5xl font-bold text-title sm:text-6xl">1</p>
+            <p className="font-display tracking-tight text-5xl font-semibold text-title sm:text-6xl">1</p>
             {/* text-emphasis, not text-body: body measured 4.26:1 on the accent-low
                 fill, just under the 4.5 AA floor for this size. */}
             <p className="mt-2 max-w-xs text-sm leading-relaxed text-emphasis">

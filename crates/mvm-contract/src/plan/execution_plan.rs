@@ -17,10 +17,9 @@ use crate::plan::bundle::PlanArtifact;
 use crate::plan::types::{
     AdmissionProfile, ArtifactPolicy, AttestationRequirement, AuditLabels, BuildProvenance,
     DepsVolumeBinding, EnvironmentRef, FsPolicyRef, HostShareGrant, IngressMapping,
-    IngressMappingsError, KeyRotationSpec, L3NetworkSpec, NetworkLimits, NetworkMode, Nonce,
-    PlanId, PolicyRef, PostRunLifecycle, ReleasePin, Resources, RuntimeProfileRef, SecretBinding,
-    SignedImageRef, StreamRetention, TenantId, WorkloadId, validate_ingress_mappings,
-    validate_ingress_material,
+    IngressMappingsError, KeyRotationSpec, NetworkLimits, NetworkMode, Nonce, PlanId, PolicyRef,
+    PostRunLifecycle, ReleasePin, Resources, RuntimeProfileRef, SecretBinding, SignedImageRef,
+    StreamRetention, TenantId, WorkloadId, validate_ingress_mappings, validate_ingress_material,
 };
 use crate::plan::verb::VerbId;
 use crate::protocol::broker::ServiceId;
@@ -113,12 +112,6 @@ pub struct ExecutionPlan {
     /// closed default.
     #[serde(default)]
     pub network_mode: NetworkMode,
-
-    /// Retired L3 tunnel parameters retained only so stale signed plans can be
-    /// rejected explicitly during migration. `#[serde(default)]` keeps old
-    /// plans without the field on the safe absent path.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub l3_network: Option<L3NetworkSpec>,
 
     /// Transport-neutral endpoint resource ceilings. Defaults are omitted so
     /// adding this signed field does not change bytes produced for existing
@@ -297,25 +290,11 @@ impl ExecutionPlan {
         validate_ingress_material(&self.ingress, &self.secrets)
     }
 
-    /// Resolve the transport-neutral networking ceilings for this plan.
-    ///
-    /// A pre-migration L3 plan can still carry non-default flow and DNS
-    /// ceilings in its legacy transport block. Those values are projected
-    /// into the neutral type here so callers have one limit interface while
-    /// the old signed representation remains verifiable.
+    /// Validate and return the admitted networking ceilings for this plan.
     pub fn effective_network_limits(
         &self,
     ) -> Result<NetworkLimits, crate::plan::types::NetworkLimitsError> {
-        if !self.network_limits.is_default() {
-            return self.network_limits.validate();
-        }
-        let Some(legacy) = &self.l3_network else {
-            return self.network_limits.validate();
-        };
-        NetworkLimits::builder()
-            .max_tcp_flows(legacy.max_flows)
-            .max_dns_bindings(legacy.max_dns_bindings)
-            .build()
+        self.network_limits.validate()
     }
 }
 
@@ -366,7 +345,6 @@ pub(crate) fn minimal_plan() -> ExecutionPlan {
         admission_profile: AdmissionProfile::local_default("vm:boot", PlanSeccompTier::Standard),
         network_policy: PolicyRef("local-default".to_string()),
         network_mode: Default::default(),
-        l3_network: None,
         ingress: Vec::new(),
         network_limits: Default::default(),
         snapshot_at: Default::default(),
@@ -422,21 +400,6 @@ mod tests {
         value.as_object_mut().unwrap().remove("network_limits");
         let back: ExecutionPlan = serde_json::from_value(value).unwrap();
         assert_eq!(back.network_limits, NetworkLimits::default());
-    }
-
-    #[test]
-    fn legacy_l3_limits_project_into_the_transport_neutral_type() {
-        let mut plan = minimal_plan();
-        let mut legacy = L3NetworkSpec::v1();
-        legacy.max_flows = 17;
-        legacy.max_dns_bindings = 23;
-        plan.l3_network = Some(legacy);
-
-        let effective = plan.effective_network_limits().unwrap();
-        assert_eq!(effective.max_tcp_flows, 17);
-        assert_eq!(effective.max_dns_bindings, 23);
-        assert_eq!(effective.max_udp_associations, 256);
-        assert_eq!(effective.max_ingress_listeners, 16);
     }
 
     #[test]

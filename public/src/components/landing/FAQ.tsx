@@ -49,7 +49,7 @@ export function FAQ() {
         <div className="lg:sticky lg:top-32 lg:self-start">
           <Reveal>
             <Eyebrow>Questions worth asking</Eyebrow>
-            <h2 className="lowercase font-display text-3xl font-bold leading-tight text-title sm:text-4xl">
+            <h2 className="lowercase font-display tracking-tight text-3xl font-semibold leading-tight text-title sm:text-4xl">
               faq
             </h2>
           </Reveal>

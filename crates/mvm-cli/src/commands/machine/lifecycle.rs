@@ -95,6 +95,7 @@ pub(super) fn resolve_start_spec(args: &MachineStartArgs) -> Result<(MachineSpec
         image: args.create_flags.image.as_deref(),
         net: args.create_flags.net,
         allow_host: &args.create_flags.allow_host,
+        ai: None,
         cpus: args.create_flags.cpus,
         cpu_limit: args.create_flags.cpu_limit,
         timeout: args.create_flags.timeout,
@@ -168,7 +169,8 @@ pub(super) fn start_machine(args: MachineStartArgs) -> Result<()> {
         spec.grants.as_ref().and_then(|g| g.egress.as_ref()),
         spec.net,
         &spec.allow_host,
-    )?;
+    )?
+    .with_ai(spec.ai.clone());
     let (memory_mib, mem_initial_mib) =
         validate_machine_memory(&spec.memory, spec.mem_initial.as_deref())?;
     let volume_cfg = build_machine_volume_cfg(&spec.volumes)?;

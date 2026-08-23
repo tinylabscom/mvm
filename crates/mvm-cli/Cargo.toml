@@ -30,6 +30,7 @@ mvm-mcp.workspace = true
 # `mvmctl compile` reads the Workload IR (mvm_contract::ir, re-exported from
 # mvm_contract::ir) and routes it through the compile pipeline.
 mvm-sdk.workspace = true
+mvm-capture.workspace = true
 # Direct IR access (`mvm_contract::ir::…`) for the command surfaces that
 # only need the DTOs, not the rest of the SDK's build-time tooling.
 mvm-contract.workspace = true
@@ -44,14 +45,12 @@ base64.workspace = true
 chrono.workspace = true
 ed25519-dalek.workspace = true
 rand.workspace = true
-secrecy.workspace = true
 uuid.workspace = true
 clap.workspace = true
 rustls.workspace = true
 libc.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-serde_jcs = "0.1"
 sha2.workspace = true
 tar.workspace = true
 flate2.workspace = true
@@ -62,7 +61,6 @@ notify = { workspace = true, optional = true }
 notify-debouncer-mini = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["io-util", "net", "rt", "time"] }
 tracing.workspace = true
-tracing-subscriber.workspace = true
 which.workspace = true
 
 [[example]]
@@ -81,8 +79,6 @@ sha2.workspace = true
 
 [dev-dependencies]
 mvm-core = { workspace = true, features = ["test-support"] }
-# Reached only from `#[cfg(test)] mod tests` in commands/machine.
-mvm-net.workspace = true
 assert_cmd.workspace = true
 ed25519-dalek.workspace = true
 rand.workspace = true

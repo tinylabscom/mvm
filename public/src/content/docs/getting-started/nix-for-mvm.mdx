@@ -259,12 +259,13 @@ You now have a complete flake. Build and boot it with port forwarding so you can
 # Build the VM image
 mvmctl machine build --flake .
 
-# Boot a named machine in the background, then forward host port 8080 → guest 8080
-mvmctl machine run --flake . --name hello --cpus 2 --memory 1024 -d
-mvmctl machine forward hello -p 8080:8080
+# Boot a named machine with admitted host port 8080 → guest 8080
+mvmctl machine run --flake . --name hello --cpus 2 --memory 1024 --port 8080:8080
 ```
 
-`machine forward` maps port 8080 on your host to port 8080 inside the microVM. Without it, the service runs but isn't reachable from outside the VM.
+`--port` records the exact mapping in the signed admission plan before the
+FlowMux endpoint binds it. Without declared ingress, the service runs but is
+not reachable from outside the VM.
 
 Once it's running, open your browser to [http://localhost:8080](http://localhost:8080). You should see:
 
@@ -279,8 +280,9 @@ mvmctl machine ls
 # View logs (including health check output)
 mvmctl machine logs hello -f
 
-# Forward additional ports from a running VM
-mvmctl machine forward hello -p 9090:9090
+# To change ingress, restart with the complete declared mapping set
+mvmctl machine stop hello
+mvmctl machine run --flake . --name hello --port 8080:8080 --port 9090:9090
 
 # Stop it
 mvmctl machine stop hello
@@ -288,11 +290,11 @@ mvmctl machine stop hello
 
 The first build downloads dependencies and takes a few minutes. Subsequent builds with the same `flake.lock` can be much faster because Nix reuses cached inputs and build outputs.
 
-:::tip[Run in the background]
-`-d` runs the machine detached (like `docker run -d`); forward ports separately:
+:::tip[Persistent service]
+Declaring ingress makes the machine persistent; the endpoint owns listeners
+for the VM lifecycle:
 ```bash
-mvmctl machine run --flake . --name hello -d
-mvmctl machine forward hello -p 8080:8080
+mvmctl machine run --flake . --name hello --port 8080:8080
 ```
 :::
 
@@ -302,11 +304,10 @@ Volumes let you pass files from your host into the microVM at boot — config fi
 
 ```bash
 # Mount host directories into the VM
-mvmctl machine run --flake . --name hello -d \
+mvmctl machine run --flake . --name hello --port 8080:8080 \
     --mount ./config:/mnt/config \
     --mount ./secrets:/mnt/secrets \
     --mount ./data:/mnt/data:1024
-mvmctl machine forward hello -p 8080:8080
 ```
 
 Inside the guest, the files appear at the mount paths:
@@ -321,10 +322,9 @@ Config and secrets are read-only by design — you don't want your app accidenta
 
 ```bash
 # Read-only config + read-write 1GB data volume
-mvmctl machine run --flake . --name hello -d \
+mvmctl machine run --flake . --name hello --port 8080:8080 \
     --mount ./config:/mnt/config \
     --mount ./data:/mnt/data:1024
-mvmctl machine forward hello -p 8080:8080
 ```
 
 Your service can read config and write data at runtime — no rebuild needed:

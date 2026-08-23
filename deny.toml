@@ -114,20 +114,32 @@ highlight = "all"
 # there and absent here is not drift; it is a duplication only the wider
 # graph can see. Compare them by that rule, not entry for entry.
 skip = [
-    # Windows host-target shim umbrellas. `windows-sys` and `windows-core`
-    # still coexist at two majors across the graph; they are host/build only
-    # and carry no runtime surface on the Linux guest path. The eleven
-    # per-arch link shims (`windows-targets`, `windows_<arch>_<abi>`) that
-    # used to be listed here have all converged to a single version and were
-    # removed -- a skip that matches nothing is a standing pre-authorisation
-    # for a duplicate that has not happened yet.
+    # Windows host-target shim umbrellas. `sysinfo` remains on windows 0.52,
+    # while Tokio and the current Windows support crates resolve the 0.53
+    # target shims. They are host/build-only and carry no Linux guest runtime
+    # surface; collapse this set when sysinfo moves to the newer family.
     "windows-core",
     "windows-sys",
+    "windows-targets",
+    "windows_aarch64_gnullvm",
+    "windows_aarch64_msvc",
+    "windows_i686_gnu",
+    "windows_i686_gnullvm",
+    "windows_i686_msvc",
+    "windows_x86_64_gnu",
+    "windows_x86_64_gnullvm",
+    "windows_x86_64_msvc",
 
     # Foundational crates mid v1->v2 ecosystem migration. mvm pins one major
     # for each it uses directly; the other is dragged in by deps that have not
     # finished migrating. Not collapsible without forking those deps.
     "getrandom",
+
+    # The workspace's Linux syscall users still use nix 0.29, while the
+    # maintained tokio-vsock/vsock transport family requires nix 0.31. The
+    # latter is the sole guest↔host network transport and cannot be removed;
+    # unify once the direct syscall call sites migrate together.
+    "nix",
 
     # vmm-sys-util 0.12.1 (Linux KVM: kvm-bindings 0.11 / kvm-ioctls 0.21)
     # vs 0.15.0 (the rust-vmm virtio primitives vm-memory / virtio-queue on the
@@ -137,15 +149,9 @@ skip = [
     "vmm-sys-util",
 
     # bitflags 1.3.2 vs 2.x. mvm depends on neither major directly — both are
-    # wholly transitive, so there is no local pin to change. The 1.x side has
-    # two independent parents in the shipped closure: smoltcp 0.13.1 (the
-    # mvm-hostd userspace datapath) and both vmm-sys-util majors above.
-    # smoltcp 0.13.1 is the latest release and declares bitflags ^1.0
-    # non-optionally, as does vmm-sys-util 0.15.0; neither exposes a feature
-    # that selects 2.x. Collapsing this therefore needs *both* smoltcp and the
-    # rust-vmm crates to migrate — moving either one alone changes nothing,
-    # which is why no upstream request is filed against one of them in
-    # isolation. It costs exactly one crate. Drop when both have moved.
+    # wholly transitive, so there is no local pin to change. The 1.x side comes
+    # from both vmm-sys-util majors above; their latest releases still declare
+    # bitflags ^1.0 with no feature selecting 2.x. It costs exactly one crate.
     "bitflags",
 ]
 skip-tree = []

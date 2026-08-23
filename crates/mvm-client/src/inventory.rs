@@ -342,6 +342,7 @@ mod tests {
             runtime_pack: false,
             net: false,
             allow_host: vec![],
+            ai: None,
             ports: vec![],
             cpus: 2,
             memory: "512M".to_string(),

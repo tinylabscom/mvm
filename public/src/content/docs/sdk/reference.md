@@ -25,7 +25,7 @@ The language SDKs should converge on:
 - `sandbox.commands.run(...)`
 - `sandbox.files.read/write/list/remove(...)`
 - `sandbox.logs(...)`
-- `sandbox.ports.forward(...)`
+- declarative `network.ports` on `Sandbox.create(...)`
 - `sandbox.snapshot(...)`
 - `sandbox.cold()` / `sandbox.resume()`
 - `sandbox.stop()` / `sandbox.destroy()`

@@ -1,7 +1,11 @@
 # Plan 285 — L3 TUN-over-vsock network mode
 
-**Status: In progress**
+**Status: RETIRED AND DELETED — preserved as historical implementation record**
 **ADR: [036](../adrs/036-l3-tun-over-vsock.md)**
+
+Plan 316 and ADR-042 replaced this production path with FlowMux. The complete
+L3 implementation was deleted by the FlowMux single-path closeout; the checked
+items below record what previously shipped and are not current product claims.
 
 Opt-in `l3-vsock` network mode: the guest gets a point-to-point `mvm0`
 TUN interface, the guest agent frames raw IP packets over dedicated

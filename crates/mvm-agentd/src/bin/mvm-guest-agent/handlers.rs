@@ -27,7 +27,7 @@ use crate::globals::{
     reseed_on_post_restore,
 };
 use crate::health::build_integration_reports;
-use crate::port_forward::{run_port_forwarder, start_unix_socket_forwarder};
+use crate::port_forward::start_unix_socket_forwarder;
 use crate::probe::build_probe_reports;
 use crate::socket::write_response;
 
@@ -715,18 +715,6 @@ pub(crate) fn handle_fs_diff() -> GuestResponse {
     // the rootfs is mounted read-only with an overlay.
     let changes = collect_fs_diff();
     GuestResponse::FsDiffResult { changes }
-}
-
-pub(crate) fn handle_start_port_forward(guest_port: u16) -> GuestResponse {
-    let vsock_port = mvm_agentd::vsock::PORT_FORWARD_BASE + guest_port as u32;
-    eprintln!("port-fwd: starting vsock:{vsock_port} → tcp://localhost:{guest_port}");
-    std::thread::spawn(move || {
-        run_port_forwarder(vsock_port, guest_port);
-    });
-    GuestResponse::PortForwardStarted {
-        guest_port,
-        vsock_port,
-    }
 }
 
 pub(crate) fn handle_start_unix_socket_forward(

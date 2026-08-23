@@ -8,7 +8,7 @@ ADR-001 §W4.2.
 | target                       | input                                                  | reason                                                                    |
 | ---------------------------- | ------------------------------------------------------ | ------------------------------------------------------------------------- |
 | `fuzz_guest_request`         | `GuestRequest` JSON frame                              | every host→guest RPC lands here                                           |
-| `fuzz_authenticated_frame`   | `AuthenticatedFrame` envelope JSON                     | runs *before* signature verification                                      |
+| `fuzz_sealed_frame`          | `SealedFrame::decode`, the control pre-auth ingress    | runs *before* signature verification                                      |
 | `fuzz_entrypoint_event`      | `EntrypointEvent` JSON (host-side stream)              | host's first parser surface for `RunEntrypoint` response frames           |
 | `fuzz_authed_path`           | (scenario × payload) pair, signed in-process           | drives `verify_authenticated_frame` past sig check; ensures tampered frames never reach inner deserializer |
 
