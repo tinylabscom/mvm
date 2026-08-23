@@ -3,7 +3,10 @@
 //! Installed ahead of busybox on `PATH`, so `ping example.com` inside a workload
 //! resolves to this rather than to a binary that will fail at `socket()`. A
 //! NIC-less guest has no route and no raw socket; the host echoes on its behalf
-//! over vsock, gated by the same allow-list every other egress verb uses.
+//! over vsock, gated by the same allow-list every other egress verb uses. The
+//! workload cannot open that vsock session itself — the guest identity is
+//! root-only — so this asks the guest's loopback mediator, the same way a
+//! workload's HTTP reaches the host through the loopback proxy.
 //!
 //! Output is ping-shaped on purpose — the familiar lines are the point of
 //! shadowing `ping` at all — with one addition: each reply reports the host's own
@@ -23,8 +26,9 @@ const DEFAULT_TIMEOUT_MS: u32 = 4_000;
 /// Default echo count. Unlike `ping`, this terminates: a workload's `ping` with
 /// no bound is a hang in a place nobody is watching.
 const DEFAULT_COUNT: u16 = 4;
-/// How long to wait for the host egress port.
-const CONNECT_TIMEOUT_SECS: u64 = 10;
+/// Slack over the per-echo wait before giving up on the mediator, which is
+/// waiting on the host in turn.
+const HOST_WAIT_SLACK_SECS: u64 = 10;
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -41,17 +45,26 @@ fn main() -> ExitCode {
         }
     };
 
-    match mvm_agentd::icmp_client::echo(&parsed, CONNECT_TIMEOUT_SECS) {
+    match mvm_agentd::icmp_client::echo(&parsed, HOST_WAIT_SLACK_SECS) {
         Ok(outcomes) => report(&parsed, &outcomes),
         Err(error) => {
-            // A refusal is the common case here and it is a policy answer, not a
-            // crash: say what the host said and point at the flag that fixes it.
+            // A refusal is the common case here and it is a policy answer, not
+            // a crash: say what the host said and point at the flag that fixes
+            // it. Only for a refusal, though — printing the flag hint after a
+            // transport failure sends the reader to re-check a flag they
+            // already passed, which is the one place the message must not
+            // point.
             eprintln!("mvm-ping: {error:#}");
-            eprintln!(
-                "mvm-ping: a host must be admitted to be pinged — \
-                 pass `--allow-host {}` to the run",
-                parsed.host
-            );
+            if error
+                .downcast_ref::<mvm_agentd::icmp_client::Refused>()
+                .is_some()
+            {
+                eprintln!(
+                    "mvm-ping: a host must be admitted to be pinged — \
+                     pass `--allow-host {}` to the run",
+                    parsed.host
+                );
+            }
             ExitCode::from(2)
         }
     }
