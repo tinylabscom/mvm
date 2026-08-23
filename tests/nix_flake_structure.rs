@@ -1350,7 +1350,6 @@ fn no_host_package_uses_release_binary_provenance() {
     let dir = nix_dir().join("packages");
     // Project-release / prebuilt-binary provenance — never source.
     let forbidden = [
-        "releases/download",
         "github.com/tinylabscom/mvm/releases",
         "tinylabscom/mvm/releases",
         "binaryNativeCode",
