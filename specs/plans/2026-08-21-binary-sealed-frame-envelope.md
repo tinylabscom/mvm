@@ -86,7 +86,7 @@ that no longer covers the parser the guest actually exposes.
 - [x] `fuzz_sealed_frame.rs` (renamed from `fuzz_authenticated_frame.rs`) fuzzes
       `serde_json::from_slice::<AuthenticatedFrame>` today. Retarget to
       `SealedFrame::decode`, which is the new untrusted entry point.
-- [ ] **Deferred with W4.** `fuzz_authed_path.rs` builds an `AuthenticatedFrame` and drives the
+- [x] **Completed by the post-auth fuzz work.** `fuzz_authed_path.rs` built an `AuthenticatedFrame` and drives the
       authenticated path. Rebuild it around the binary envelope.
 - [x] Checked against ADR-001's claim-5 row whether either target is named
       there by name, and update the row in the same change if so.
@@ -103,7 +103,7 @@ callers**: the only call sites are their own tests in `framing.rs` and the
 target aimed at it was aimed at something real. It no longer is.
 
 - [x] Establish whether they have a production caller. They do not.
-- [ ] **Deferred to its own change.** Deleting them takes `fuzz_authed_path`
+- [x] **Completed by the post-auth fuzz work.** Deleting them takes `fuzz_authed_path`
       with them, and that target is a claim-5 witness. Rebuilding it around
       `Session::open` — the real post-auth path, covering version, session id,
       replay, signer, signature and decrypt — is worth doing carefully rather

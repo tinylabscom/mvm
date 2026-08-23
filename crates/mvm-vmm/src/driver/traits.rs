@@ -244,6 +244,7 @@ pub trait VmmDriver: Send + Sync {
             child_vm_name,
             &VsockPostRestoreSignal {
                 token,
+                hostname: Some(child_vm_name.to_string()),
                 grant_envelope,
             },
             crate::post_restore::POST_RESTORE_READY_TIMEOUT,

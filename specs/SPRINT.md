@@ -1134,17 +1134,22 @@ test --workspace --no-fail-fast` gate passes with zero failures after the
       them, and no watcher could have said so.
 
       `xtask check-claim-witness-freshness` covers absence, on its own
-          schedule rather than on `workflow_run`, because the whole point is to
-          notice a lane that never ran. It maps each `ci:` witness onto the
-          workflow anchoring it (reusing #1980's resolver, lifted into
-          `claims_ledger` so one implementation serves both gates), derives the
-          allowance from the cron, and fails when the newest run is older than
-          three missed firings. It deliberately does *not* re-check conclusions —
-          that is #1970's job, and two gates on one property would eventually
-          disagree. Lanes with no daily-or-better cron are reported as notes, not
-          judged: a pull-request lane is legitimately idle. Falsified by making
-          Security's cron hourly, which reported it 14h stale and named all eight
-          claims it backs.
+      schedule rather than on `workflow_run`, because the whole point is to
+      notice a lane that never ran. It maps each `ci:` witness onto the
+      workflow anchoring it (reusing #1980's resolver, lifted into
+      `claims_ledger` so one implementation serves both gates), derives the
+      allowance from the cron, and fails when the newest run is older than
+      three missed firings. After #2792 proved GitHub can omit a completed
+      run's `workflow_run` delivery entirely, the independent schedule also
+      reconciles the latest scheduled run's status and conclusion. Only a
+      completed success is healthy; failed, cancelled, timed-out, and
+      still-running observations fail closed even when the event watcher was
+      never invoked. Pull-request and dispatch runs cannot overwrite scheduled
+      evidence. Pull requests validate witness resolution and schedule parsing
+      without reading mutable Actions history; only the independent schedule
+      enables reporting, so an in-flight nightly cannot make a PR red. Lanes
+      with no daily-or-better cron are reported as notes, not judged: a
+      pull-request lane is legitimately idle.
 
           Bundled: `ci-full.yml` now `cargo check`s the cargo-fuzz crates. They
           are workspace-excluded, so no lane compiled them and the nightly aborts
@@ -1290,6 +1295,13 @@ test --workspace --no-fail-fast` gate passes with zero failures after the
       and security builds opt into both explicitly, while the aarch64 witness
       can build its checked-out overlay and still download the published
       builder image.
+      **Update 2026-08-23:** the merge-group witness progressed through the
+      builder and exposed two workload-launch gaps. QEMU architecture defaults
+      are now shared so AArch64 selects `virt` and `ttyAMA0`. The subsequent
+      agent-readiness reset is preserved as a typed session peer hangup and
+      reaches the existing bounded activation retry; authenticated rejections
+      remain fail-closed, and failed transient starts retain a redacted console
+      tail before cleanup.
 
 - [x] **Backend shim removal — invert the driver/backend relationship.**
       `FcDriver`, `HvfDriver`, `LibkrunDriver`, and `QemuDriver` now own their
@@ -2750,6 +2762,13 @@ the builder image's explicit util-linux `/sbin/mount`, with a focused constant
 regression pinning that executable contract. The live lane forces a refresh of
 embedded host binaries so the guest always carries the checkout under test,
 even when Cargo caches are restored.
+
+## 2026-08-22 guest hostname generated-protocol parity
+
+The BDD code-generation drift gate caught that the optional post-restore
+hostname field had not reached the generated protocol artifacts. The protocol
+schema and Python and TypeScript bindings are now regenerated from the Rust
+wire type, keeping all supported SDK surfaces in parity.
 
 ## 2026-08-22 scheduled mutation witness repair
 

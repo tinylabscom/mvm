@@ -20,7 +20,7 @@
 //! same-uid UDS channels (the supervisor proxies + their broker /
 //! host-signer / audit-signer servers). It is **not** the host↔guest
 //! trust-boundary frame — that stays in `mvm_agentd::vsock`'s
-//! Ed25519-signed `AuthenticatedFrame` (session-id + sequence replay
+//! Ed25519-signed `SealedFrame` (session-id + sequence replay
 //! protection, separately fuzzed) until a pluggable `AuthStage` +
 //! optional encryption stage retrofit lands behind a real cargo-fuzz +
 //! live-boot validation pass. The seam below is the shape that retrofit

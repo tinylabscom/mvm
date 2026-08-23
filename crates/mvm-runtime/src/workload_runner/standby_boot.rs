@@ -12,7 +12,9 @@
 //! including the verity-sealed runtime overlay that is the single source of the
 //! guest agent — is reduced to a factory parent's and handed to the same
 //! mappers a workload boot uses: [`workload_device_spec`] for the device model
-//! and [`cmdline::runner_cmdline`] for the kernel cmdline.
+//! and [`cmdline::runner_cmdline_without_hostname`] for the kernel cmdline. A
+//! parent cannot carry a workload hostname because the pool may serve more
+//! than one named child; claim-time identity delivery installs the child name.
 //!
 //! The reduction is written as an exhaustive destructure plus an exhaustive
 //! struct literal, both without a `..` rest. Adding a field to `VmStartConfig`
@@ -206,8 +208,9 @@ pub fn factory_parent_config(
 }
 
 /// The factory parent's `VmmSpec`, assembled by the same mappers a workload
-/// boot uses, so a drive or cmdline token added to the workload's boot reaches
-/// the parent's too.
+/// boot uses, so a drive or boot-shape cmdline token added to the workload's
+/// boot reaches the parent's too. The hostname is intentionally excluded: a
+/// shared parent has no child's identity until the claim handshake.
 ///
 /// Saved-state parents deliberately carry no host channels. The live-HVF
 /// variant below adds authority-free stable agent, egress, broker, and exit
@@ -259,7 +262,7 @@ fn factory_parent_spec_inner(
     base_bootargs: impl Fn(bool, bool) -> String,
     live_handoff: bool,
 ) -> VmmSpec {
-    let cmdline = cmdline::runner_cmdline(config, state_dir, base_bootargs);
+    let cmdline = cmdline::runner_cmdline_without_hostname(config, state_dir, base_bootargs);
     if !live_handoff {
         return workload_device_spec(config, &cmdline, &state_dir.join("console.log"));
     }
@@ -393,6 +396,14 @@ mod tests {
         })
     }
 
+    fn without_guest_hostname(cmdline: &str) -> String {
+        cmdline
+            .split_whitespace()
+            .filter(|token| !token.starts_with("mvm.hostname="))
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
     /// The regression guard for the shipped defect: the parent booted a bare
     /// rootfs with base bootargs while the workload booted four drives and the
     /// verity/overlay cmdline tokens, so the parent's `/init` found no guest
@@ -418,10 +429,12 @@ mod tests {
             "the parent must attach the workload's whole disk stack, overlay included"
         );
         assert_eq!(
-            parent.cmdline, workload.cmdline,
+            parent.cmdline,
+            without_guest_hostname(&workload.cmdline),
             "the parent must boot the workload's kernel cmdline, verity and runtime-source \
-             tokens included"
+             tokens included, leaving claim identity for post-restore"
         );
+        assert!(!parent.cmdline.contains("mvm.hostname="));
         assert_eq!(parent.kernel, workload.kernel);
         assert_eq!(parent.initramfs, workload.initramfs);
         assert_eq!(parent.vcpus, workload.vcpus);
@@ -429,8 +442,8 @@ mod tests {
         assert_eq!(parent.mem_initial_mib, workload.mem_initial_mib);
     }
 
-    /// An egress-allowing launch: the parent must boot the *identical* cmdline
-    /// the workload does, egress token included.
+    /// An egress-allowing launch: the parent must boot the same shape cmdline
+    /// the workload does, egress token included and claim identity excluded.
     ///
     /// `mvm.vsock_egress=1` starts the guest's in-guest egress client, and a
     /// restored child inherits it from the parent's saved memory rather than
@@ -462,7 +475,8 @@ mod tests {
             workload.cmdline
         );
         assert_eq!(
-            parent.cmdline, workload.cmdline,
+            parent.cmdline,
+            without_guest_hostname(&workload.cmdline),
             "a parent warmed for an egress-allowing launch must boot that launch's cmdline"
         );
         assert_eq!(
@@ -528,15 +542,16 @@ mod tests {
             "a deny-all workload boots no egress client: {}",
             workload.cmdline
         );
-        assert_eq!(parent.cmdline, workload.cmdline);
+        assert_eq!(parent.cmdline, without_guest_hostname(&workload.cmdline));
+        assert!(!parent.cmdline.contains("mvm.hostname="));
     }
 
     /// The case that must never come out permissive. A secret-bearing workload's
     /// outbound traffic belongs to the host-side substitution endpoint, so a cold
     /// boot suppresses the guest's own egress client even though the policy allows
     /// egress. The pool keys on that *effective* value, so the parent warmed for
-    /// such a launch suppresses it too — and the two cmdlines come out equal, not
-    /// merely both token-less.
+    /// such a launch suppresses it too; the remaining difference is only the
+    /// child hostname delivered after restore.
     #[test]
     fn a_secret_bearing_launch_warms_a_parent_with_no_egress_client_either() {
         let _home = isolated_home();
@@ -581,7 +596,8 @@ mod tests {
             "so must the parent warmed for it: {}",
             parent.cmdline
         );
-        assert_eq!(parent.cmdline, workload.cmdline);
+        assert_eq!(parent.cmdline, without_guest_hostname(&workload.cmdline));
+        assert!(!parent.cmdline.contains("mvm.hostname="));
         assert!(!parent_cfg.network_policy.allows_egress());
         assert_eq!(parent_cfg.plan_json, None, "a parent still holds no plan");
     }

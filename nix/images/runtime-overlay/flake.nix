@@ -435,6 +435,18 @@
 
             mkdir -p $out
 
+            # Host-side OCI materialization needs this compatibility set before
+            # the overlay is attached. Publish the exact static binaries beside
+            # the disk so an installed mvmctl never needs a Rust toolchain.
+            mkdir -p $out/guest-runtime
+            cp ${guest}/bin/mvm-oci-init       $out/guest-runtime/mvm-oci-init
+            cp ${guest}/bin/mvm-guest-agent    $out/guest-runtime/mvm-guest-agent
+            cp ${guest}/bin/mvm-guest-netinit  $out/guest-runtime/mvm-guest-netinit
+            cp ${egressClient}/bin/mvm-egress-client $out/guest-runtime/mvm-egress-client
+            cp ${guest}/bin/mvm-oci-entrypoint $out/guest-runtime/mvm-oci-entrypoint
+            cp ${guest}/bin/mvm-verity-init    $out/guest-runtime/mvm-verity-init
+            chmod 0555 $out/guest-runtime/*
+
             # ext4 generation. Mirrors
             # `mvm_build::oci_to_rootfs::ext4::materialize_to_ext4`
             # parameters — same UUID / hash_seed / block size /

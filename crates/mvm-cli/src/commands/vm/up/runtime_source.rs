@@ -876,23 +876,50 @@ mod runtime_overlay_attach_tests {
         verity_bytes: &[u8],
         roothash_bytes: &[u8],
         version_bytes: &[u8],
+        arch: GuestArch,
     ) -> Vec<u8> {
-        let checksums = format!(
+        let guest_files: Vec<(&str, Vec<u8>)> =
+            mvm_build::guest_agent_build::OCI_GUEST_RUNTIME_BINARY_NAMES
+                .iter()
+                .map(|name| (*name, fake_static_elf(arch, name.as_bytes())))
+                .collect();
+        let mut checksums = format!(
             "{}  overlay.ext4\n{}  overlay.verity\n{}  overlay.roothash\n{}  VERSION\n",
             sha256_hex(ext4_bytes),
             sha256_hex(verity_bytes),
             sha256_hex(roothash_bytes),
             sha256_hex(version_bytes),
         );
+        for (name, bytes) in &guest_files {
+            checksums.push_str(&format!("{}  {name}\n", sha256_hex(bytes)));
+        }
         let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
         let mut tar = tar::Builder::new(encoder);
         append_archive_file(&mut tar, "overlay.ext4", ext4_bytes);
         append_archive_file(&mut tar, "overlay.verity", verity_bytes);
         append_archive_file(&mut tar, "overlay.roothash", roothash_bytes);
         append_archive_file(&mut tar, "VERSION", version_bytes);
+        for (name, bytes) in &guest_files {
+            append_archive_file(&mut tar, name, bytes);
+        }
         append_archive_file(&mut tar, "checksums-sha256.txt", checksums.as_bytes());
         let encoder = tar.into_inner().unwrap();
         encoder.finish().unwrap()
+    }
+
+    fn fake_static_elf(arch: GuestArch, tag: &[u8]) -> Vec<u8> {
+        let machine: u16 = match arch {
+            GuestArch::X86_64 => 0x3E,
+            GuestArch::Aarch64 => 0xB7,
+        };
+        let mut bytes = vec![0u8; 64];
+        bytes[..4].copy_from_slice(&[0x7f, b'E', b'L', b'F']);
+        bytes[4] = 2;
+        bytes[5] = 1;
+        bytes[18..20].copy_from_slice(&machine.to_le_bytes());
+        bytes[54..56].copy_from_slice(&56u16.to_le_bytes());
+        bytes.extend_from_slice(tag);
+        bytes
     }
 
     fn append_archive_file<W: std::io::Write>(tar: &mut tar::Builder<W>, path: &str, bytes: &[u8]) {
@@ -917,6 +944,7 @@ mod runtime_overlay_attach_tests {
             verity_bytes,
             roothash_text,
             version_text.as_bytes(),
+            arch,
         );
         write_fixture(&release_dir, &names.archive, &archive_bytes);
         write_fixture(

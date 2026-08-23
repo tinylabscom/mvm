@@ -90,6 +90,10 @@ grant_envelope?: (VerbGrantEnvelope | null)
  */
 host_epoch_secs?: (number | null)
 /**
+ * Workload identity to install as the kernel hostname after a warm parent is restored into a named child. Legacy resume callers omit it and leave the current hostname unchanged.
+ */
+hostname?: (string | null)
+/**
  * @minItems 16
  * @maxItems 16
  */

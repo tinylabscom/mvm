@@ -77,7 +77,7 @@ The three honesty levels (R2):
 
 | ID | Level | Statement | Witnesses |
 | --- | --- | --- | --- |
-| `MVM-SEC-01` | `build` | No host-fs access from a guest beyond explicit shares | `fn:seccomp_allows_listed_denies_unlisted`, `fn:validated_conversion_enforces_mount_allow_list`, `fn:dir_share_two_part_defaults_ro`, `fn:relay_config_maps_dir_shares_with_dax_and_read_only`, `fn:enforce_admitted_shares_refuses_unadmitted_or_mismatched`, `ci:seccomp-functional` |
+| `MVM-SEC-01` | `build` | No host-fs access from a guest beyond explicit shares | `fn:seccomp_allows_listed_denies_unlisted`, `fn:validated_conversion_enforces_mount_allow_list`, `fn:bare_mnt_is_refused_because_it_shadows_the_config_drive`, `fn:dir_share_two_part_defaults_ro`, `fn:relay_config_maps_dir_shares_with_dax_and_read_only`, `fn:enforce_admitted_shares_refuses_unadmitted_or_mismatched`, `ci:seccomp-functional` |
 
 ## oci_provenance
 

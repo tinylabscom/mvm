@@ -590,6 +590,7 @@ fn deliver_hvf_fork_post_restore(
         child_vm_name,
         &mvm_vmm::post_restore::VsockPostRestoreSignal {
             token,
+            hostname: Some(child_vm_name.to_string()),
             grant_envelope,
         },
         mvm_vmm::post_restore::POST_RESTORE_READY_TIMEOUT,

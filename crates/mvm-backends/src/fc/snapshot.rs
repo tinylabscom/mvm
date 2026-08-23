@@ -76,6 +76,7 @@ pub fn warm_restore_instance_from_path(
         name,
         &VsockPostRestoreSignal {
             token,
+            hostname: Some(name.to_string()),
             grant_envelope: None,
         },
         POST_RESTORE_READY_TIMEOUT,
