@@ -1908,6 +1908,9 @@ resume` takes a `current_head` and refuses when it differs from the
         persistence, chain-signed through the existing per-VM signer
   - [x] Exact tenant audit-chain anchor required before transcript key unwrap
         and decryption, with hermetic operator-path BDD coverage
+  - [x] Production operator `disarm` now emits that anchor from the VM's real
+        persisted admitted plan, refuses missing or cross-tenant bindings, and
+        does not duplicate the signed entry when retried
 
 - [x] Backend crate separation + HVF DAX + QEMU virtio-fs
       (**PR #2220**, branch `feat/backend-crate-separation`)
