@@ -158,12 +158,14 @@ stdenv.mkDerivation {
     window.Module.pty = slave;
     window.Module['mainScriptUrlOrBlob'] = location.origin + '/qemu-system-x86_64.js';
 
-    // Patch the TTY poll to avoid blocking on the pty.
+    // Patch the TTY poll to avoid blocking on the pty.  The original poll
+    // expects (stream, timeout) and is called with stream_ops as |this|.
     const interval = setInterval(() => {
       if (window.Module['TTY']) {
         clearInterval(interval);
-        const oldPoll = window.Module['TTY'].stream_ops.poll;
-        window.Module['TTY'].stream_ops.poll = (stream, timeout) => oldPoll.call(stream, 0);
+        const streamOps = window.Module['TTY'].stream_ops;
+        const oldPoll = streamOps.poll;
+        streamOps.poll = (stream, _timeout) => oldPoll.call(streamOps, stream, 0);
       }
     }, 10);
 
