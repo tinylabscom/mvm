@@ -2167,6 +2167,7 @@ mod tests {
             exit_report: make_bin("exit-report"),
             forward_proxy: make_bin("forward-proxy"),
             verity_init: make_bin("verity-init"),
+            forward_proxy: make_bin("forward-proxy"),
         };
 
         let artifact = build_runtime_overlay_from_guest_binaries(
