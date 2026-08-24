@@ -2775,6 +2775,13 @@ build instead of being published. Every export route also flushes the copied
 artifact before reporting completion, and the builder toolchain GC roots now
 retain `e2fsck` alongside `mkfs.ext4`.
 
+A follow-up merge-group witness proved that sealing only the writable temporary
+image was insufficient: the final copied artifact could still reach the
+read-only workload with recovery required. Every builder publication route now
+checks the destination image after the final copy and before its durability
+sync. The persistent-builder shell path also preserves the hook command's real
+exit status instead of the status of a negated condition.
+
 ## 2026-08-22 guest hostname generated-protocol parity
 
 The BDD code-generation drift gate caught that the optional post-restore
