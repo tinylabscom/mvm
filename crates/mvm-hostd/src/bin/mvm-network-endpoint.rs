@@ -487,14 +487,16 @@ impl IngressDispatcher {
         generation
     }
 
-    fn deactivate(&self, generation: u64) {
+    fn deactivate(&self, generation: u64) -> bool {
         let mut active = self
             .active
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        if active.generation == generation {
-            active.handle = None;
+        if active.generation != generation {
+            return false;
         }
+        active.handle = None;
+        true
     }
 }
 
@@ -1050,24 +1052,24 @@ async fn serve_flowmux(
             .context("FlowMux ingress requires the endpoint service")?
             .clone(),
     )?;
-    let mut consecutive_accept_errors = 0_u32;
+    let mut accept_errors = ConsecutiveAcceptErrors::default();
     loop {
         let stream = match listener.accept().await {
             Ok(stream) => {
-                consecutive_accept_errors = 0;
+                accept_errors.record_success();
                 stream
             }
             Err(e) => {
                 // A single failed accept is not a reason to take the VM's
                 // networking down; a listener that fails every time is, and
                 // spinning on it would burn a core silently.
-                consecutive_accept_errors += 1;
+                let fatal = accept_errors.record_failure();
                 warn!(
                     error = %e,
-                    consecutive = consecutive_accept_errors,
+                    consecutive = accept_errors.count(),
                     "FlowMux accept failed"
                 );
-                if consecutive_accept_errors >= MAX_CONSECUTIVE_ACCEPT_ERRORS {
+                if fatal {
                     return Err(anyhow::Error::new(e).context(format!(
                         "FlowMux listener failed {MAX_CONSECUTIVE_ACCEPT_ERRORS} times in a row"
                     )));
@@ -1149,6 +1151,24 @@ fn record_session_established(marker: Option<&std::path::Path>) -> Result<()> {
 /// How many back-to-back accept failures mean the listener itself is broken
 /// rather than one connection being unlucky.
 const MAX_CONSECUTIVE_ACCEPT_ERRORS: u32 = 16;
+
+#[derive(Default)]
+struct ConsecutiveAcceptErrors(u32);
+
+impl ConsecutiveAcceptErrors {
+    fn record_success(&mut self) {
+        self.0 = 0;
+    }
+
+    fn record_failure(&mut self) -> bool {
+        self.0 = self.0.saturating_add(1);
+        self.0 >= MAX_CONSECUTIVE_ACCEPT_ERRORS
+    }
+
+    fn count(&self) -> u32 {
+        self.0
+    }
+}
 
 /// The FlowMux accept side of a [`Bound`].
 ///
@@ -1339,6 +1359,64 @@ mod tests {
             Err(error) => error,
         };
         assert!(error.to_string().contains("ServeParams missing cfg"));
+    }
+
+    #[test]
+    fn ingress_deactivation_only_accepts_the_current_generation() {
+        let dispatcher = IngressDispatcher {
+            active: std::sync::Arc::new(std::sync::Mutex::new(ActiveIngress::default())),
+            udp: std::sync::Arc::new(Vec::new()),
+        };
+
+        assert!(!dispatcher.deactivate(1));
+        assert!(dispatcher.deactivate(0));
+    }
+
+    #[test]
+    fn repeated_accept_failures_trip_at_the_exact_ceiling_and_reset_on_success() {
+        let mut errors = ConsecutiveAcceptErrors::default();
+        for expected in 1..MAX_CONSECUTIVE_ACCEPT_ERRORS {
+            assert!(!errors.record_failure());
+            assert_eq!(errors.count(), expected);
+        }
+        assert!(errors.record_failure());
+        assert_eq!(errors.count(), MAX_CONSECUTIVE_ACCEPT_ERRORS);
+
+        errors.record_success();
+        assert_eq!(errors.count(), 0);
+        assert!(!errors.record_failure());
+        assert_eq!(errors.count(), 1);
+    }
+
+    #[tokio::test]
+    async fn session_waiter_does_not_signal_before_authentication_readiness() {
+        use tokio::io::AsyncReadExt as _;
+
+        let (server, mut client) = tokio::net::UnixStream::pair().unwrap();
+        let (ready_tx, ready_rx) = tokio::sync::watch::channel(false);
+        let waiter = tokio::spawn(notify_session_waiter(server, ready_rx));
+        let mut signal = [0_u8; 1];
+
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(50),
+                client.read_exact(&mut signal),
+            )
+            .await
+            .is_err(),
+            "a waiter must remain blocked until authentication is ready"
+        );
+
+        ready_tx.send(true).unwrap();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            client.read_exact(&mut signal),
+        )
+        .await
+        .expect("the ready waiter must be notified promptly")
+        .unwrap();
+        assert_eq!(signal, [1]);
+        waiter.await.unwrap().unwrap();
     }
 
     #[test]
@@ -1606,6 +1684,21 @@ mod tests {
         assert!(
             err.to_string().contains("write FlowMux session marker"),
             "unexpected: {err:#}"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn invalid_session_marker_refuses_before_process_confinement() {
+        let mut cfg = uds_cfg();
+        cfg.session_marker = Some(PathBuf::new());
+
+        let error = confine_endpoint(&cfg)
+            .expect_err("a marker without a parent must fail before process confinement");
+        assert!(
+            error
+                .to_string()
+                .contains("FlowMux session marker has no parent directory")
         );
     }
 

@@ -19,7 +19,8 @@
 # paper over an actual SSH reintroduction.
 set -euo pipefail
 
-cd "$(dirname "${BASH_SOURCE[0]}")/.."
+repo_root="${MVM_NO_SSH_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+cd "$repo_root"
 
 PATTERN='sshd|openssh|ssh-keygen|ssh-keyscan|ssh-copy-id|authorized_keys|known_hosts|id_rsa|id_ed25519|id_ecdsa|id_dsa|PermitRootLogin|PubkeyAuthentication|sshd_config|SSH_AUTH_SOCK|ssh-agent|ProxyJump|\bscp\b|git\+ssh'
 
@@ -28,10 +29,16 @@ ALLOWED_FILES=(
   # The gate itself: the pattern/comments above necessarily spell out
   # every banned token.
   "scripts/check-no-ssh.sh"
+  # The gate's regression test includes generated-directory and source
+  # fixtures to prove the scanner ignores the former and rejects the latter.
+  "scripts/check-no-ssh.test.sh"
   # Command-gate + threat-classifier: blocklist/detector data that flags
   # `.ssh/id_rsa` access and `ssh-keygen` invocation as guest threats.
   "crates/mvm-core/src/crypto/command_gate.rs"
   "crates/mvm-core/src/crypto/threat_classifier.rs"
+  # Capture excludes private-key-shaped project files from diagnostic
+  # archives. These names are denylist data, never SSH capability.
+  "crates/mvm-capture/src/collect/project.rs"
   # Host-share parser test: proves the user's SSH credential directory and a
   # private-key-shaped child path are refused as guest mount sources.
   "crates/mvm-cli/src/commands/shared/parse.rs"
@@ -73,7 +80,16 @@ while IFS= read -r match; do
     continue
   fi
   violations+="$match"$'\n'
-done < <(grep -rniE "$PATTERN" crates/ nix/ scripts/ public/ examples/ 2>/dev/null || true)
+done < <(
+  grep -rniE \
+    --exclude-dir=.git \
+    --exclude-dir=.mvm-test \
+    --exclude-dir=.venv \
+    --exclude-dir=node_modules \
+    --exclude-dir=target \
+    --exclude-dir=dist \
+    "$PATTERN" crates/ nix/ scripts/ public/ examples/ 2>/dev/null || true
+)
 
 if [ -n "$violations" ]; then
   echo "::endgroup::"

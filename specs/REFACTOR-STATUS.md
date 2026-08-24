@@ -25,6 +25,22 @@ for detailed scope and acceptance criteria.
       workload. The live secret-bearing substitution witness remains tracked
       by the owning FlowMux plan.
 
+- [x] **Scheduled Security dependency and no-SSH scanner repair.** The
+      supply-chain lane pins the last `async-trait` release on `syn` 2,
+      restoring the duplicate-version policy, while the no-SSH lane permits
+      only the capture secret-filename denylist and excludes generated
+      dependency/build trees. Positive and negative shell fixtures preserve
+      the fail-closed source boundary. Newly measured AI-policy and FlowMux
+      mutants are covered by focused constructor, ingress-generation,
+      readiness, accept-ceiling, and pre-confinement refusal witnesses; only
+      the provably identical disabled-policy constructor remains baselined.
+      Claim-13 mutation scope now measures its actual substitution boundary
+      (three mutants rather than the proxy module's unrelated transport
+      internals), and audit witnesses pin checkpoint and prune-accounting
+      behavior while equivalent/performance-only misses stay documented. The
+      broker's teaching-refusal ceiling is also mutation-pinned at its exact
+      transition.
+
 - [x] **Artifact acquisition is explicit across source and release builds.**
       Official binaries download verified launch artifacts even when invoked
       from an mvm checkout; contributor binaries may build source-matched
