@@ -17,6 +17,14 @@ for detailed scope and acceptance criteria.
 
 ## Completed issue closeouts
 
+- [x] **Nix guest FlowMux identity ownership.** The shell init now delegates
+      identity-drive mounting to a short root-owned Rust action, assigns only
+      the 0400 signing key to reserved service uid 989, and then starts the
+      long-lived egress client under `no_new_privs` with only low-port bind
+      capability. Workload, agent, and builder uid collisions fail at image
+      evaluation, and the network parser retains no mount privilege. See
+      `specs/sprint/delivery/2828-nix-flowmux-identity.md`.
+
 - [x] **FlowMux forward-proxy identity ownership.** Secret-substitution HTTP
       relays now run in an init-owned helper that can read the root-only guest
       signing key, rather than in the workload-uid guest agent. Both baked and

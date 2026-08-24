@@ -25,6 +25,32 @@ const DEFAULT_HOST_VSOCK_PORT: u32 = mvm_agentd::vsock::EGRESS_PORT;
 /// read it.
 const HOST_VSOCK_PORT_ENV: &str = "MVM_EGRESS_VSOCK_PORT";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StartupMode {
+    Serve,
+    ProvisionIdentityFor(u32),
+}
+
+fn startup_mode_from_args(args: impl IntoIterator<Item = String>) -> Result<StartupMode, String> {
+    let mut args = args.into_iter();
+    let Some(command) = args.next() else {
+        return Ok(StartupMode::Serve);
+    };
+    if command != "provision-identity-for" {
+        return Err(format!("unknown command {command:?}"));
+    }
+    let raw_uid = args
+        .next()
+        .ok_or_else(|| "provision-identity-for requires a non-root uid".to_string())?;
+    if args.next().is_some() {
+        return Err("provision-identity-for accepts exactly one uid".to_string());
+    }
+    match raw_uid.parse::<u32>() {
+        Ok(uid) if uid > 0 => Ok(StartupMode::ProvisionIdentityFor(uid)),
+        _ => Err(format!("invalid non-root egress service uid {raw_uid:?}")),
+    }
+}
+
 /// Resolve the host port to dial, falling back to the compiled-in default.
 ///
 /// Pure over the raw value so the fallback and the refusal are testable without
@@ -48,6 +74,17 @@ fn flowmux_identity_is_complete(paths: [&std::path::Path; 3]) -> bool {
 }
 
 fn main() -> ExitCode {
+    let mode = match startup_mode_from_args(std::env::args().skip(1)) {
+        Ok(mode) => mode,
+        Err(error) => {
+            eprintln!("mvm-egress-client: {error}");
+            return ExitCode::from(2);
+        }
+    };
+    if let StartupMode::ProvisionIdentityFor(uid) = mode {
+        return provision_identity_for(uid);
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -76,6 +113,23 @@ fn main() -> ExitCode {
 }
 
 #[cfg(target_os = "linux")]
+fn provision_identity_for(uid: u32) -> ExitCode {
+    match mvm_agentd::flowmux_drive::provision_identity_from_drive_for_uid(uid) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("mvm-egress-client: could not provision the FlowMux identity: {error}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn provision_identity_for(_uid: u32) -> ExitCode {
+    eprintln!("mvm-egress-client: FlowMux identity drives are only available on Linux guests");
+    ExitCode::from(1)
+}
+
+#[cfg(target_os = "linux")]
 fn run(addr: std::net::SocketAddr, host_port: u32) -> ExitCode {
     use mvm_agentd::flowmux::{FlowMuxError, FlowMuxReconnectClient};
     use mvm_agentd::flowmux_keys;
@@ -89,20 +143,16 @@ fn run(addr: std::net::SocketAddr, host_port: u32) -> ExitCode {
         }
     };
 
-    // Provision this boot's identity from the host-attached drive before
-    // loading it. Doing it here rather than in each guest init means one
-    // implementation covers every tier -- including the Nix-built `/init`,
-    // which is shell and would otherwise need a second copy of the
-    // superblock-label probe. Idempotent, so an init that already provisioned
-    // (Stage 0 and the builder VM do, to get a named refusal earlier) is
-    // unaffected.
+    // Identity-drive mounting is a short privileged init action. The
+    // long-lived parser reaches this point only after its init has handed the
+    // root-only signing key to the dedicated service uid.
     if !flowmux_identity_is_complete([
         std::path::Path::new(flowmux_keys::DEFAULT_GUEST_SIGNING_KEY_PATH),
         std::path::Path::new(flowmux_keys::DEFAULT_HOST_SIGNER_PUBKEY_PATH),
         std::path::Path::new(flowmux_keys::DEFAULT_INGRESS_TARGETS_PATH),
-    ]) && let Err(e) = mvm_agentd::flowmux_drive::provision_identity_from_drive()
-    {
-        eprintln!("mvm-egress-client: FlowMux identity not provisioned: {e}");
+    ]) {
+        eprintln!("mvm-egress-client: FlowMux identity was not provisioned by guest init");
+        return ExitCode::from(1);
     }
 
     let guest_signing_key = match rt.block_on(flowmux_keys::load_guest_signing_key()) {
@@ -204,6 +254,35 @@ fn run(_addr: std::net::SocketAddr, _host_port: u32) -> ExitCode {
 mod tests {
     use super::*;
 
+    #[test]
+    fn startup_mode_separates_privileged_provisioning_from_serving() {
+        assert_eq!(
+            startup_mode_from_args(Vec::<String>::new()),
+            Ok(StartupMode::Serve)
+        );
+        assert_eq!(
+            startup_mode_from_args(["provision-identity-for".into(), "989".into()]),
+            Ok(StartupMode::ProvisionIdentityFor(989))
+        );
+    }
+
+    #[test]
+    fn startup_mode_rejects_root_invalid_and_ambiguous_service_uids() {
+        for args in [
+            vec!["provision-identity-for".into(), "0".into()],
+            vec!["provision-identity-for".into(), "not-a-uid".into()],
+            vec!["provision-identity-for".into()],
+            vec!["serve".into()],
+            vec![
+                "provision-identity-for".into(),
+                "989".into(),
+                "extra".into(),
+            ],
+        ] {
+            assert!(startup_mode_from_args(args).is_err());
+        }
+    }
+
     /// A guest with no init-supplied port keeps the compiled-in default, which
     /// is what the fixed-port tiers rely on.
     #[test]
@@ -239,7 +318,7 @@ mod tests {
     }
 
     #[test]
-    fn a_legacy_partial_identity_is_reprovisioned() {
+    fn a_partial_identity_is_not_ready_for_the_deprivileged_service() {
         let dir = tempfile::tempdir().expect("tempdir");
         let signing_key = dir.path().join("flowmux-guest-signing-key");
         let host_anchor = dir.path().join("host-signer.pub");
