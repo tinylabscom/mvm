@@ -271,6 +271,12 @@ mvmctl machine ls
 
 If the machine is not listed, it was removed. If it shows with status "stopped" but `machine logs` fails, the state directory may be missing (perhaps due to a manual cleanup or an earlier failure).
 
+If the state directory still exists but all three output sources are missing,
+the error names the retained state and each missing source separately. This can
+indicate an interrupted boot or manual capture cleanup; run `mvmctl machine
+inspect <name>` to inspect the persisted machine before deciding whether to
+boot it again or remove it.
+
 ## Reading output from code
 
 The same stream is available to library and SDK callers through

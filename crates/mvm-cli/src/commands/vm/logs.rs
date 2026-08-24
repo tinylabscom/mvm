@@ -148,19 +148,22 @@ fn execute(args: Args) -> Result<()> {
                     state_dir.display()
                 );
             }
-            // State directory exists but no capture - provide more context
+            // State survived, so distinguish a missing capture from a machine
+            // that was removed or never booted.
             anyhow::bail!(
-                "microVM {:?} has no output capture:\n\
+                "microVM {:?} has a state directory at {} but no output capture:\n\
                  - no live broker at {}\n\
                  - no transcript at {}\n\
                  - no console capture at {}\n\
                  \n\
-                 Note: `machine logs` only works for VMs that have been booted at least once.\n\
-                 If this VM was recently removed, run `machine ls` to verify it still exists.",
+                 The retained state can indicate an interrupted boot or manual capture cleanup.\n\
+                 Run `machine inspect {}` to inspect the persisted machine, or `machine ls` to verify it still exists.",
                 vm,
+                state_dir.display(),
                 socket.display(),
                 transcript.display(),
-                console.display()
+                console.display(),
+                vm
             );
         }
         Err(err) => {
@@ -873,6 +876,27 @@ mod tests {
         assert!(rendered.contains("no state directory"), "{rendered}");
         // Verify it suggests the VM may have been removed
         assert!(rendered.contains("removed"), "{rendered}");
+    }
+
+    #[test]
+    fn retained_state_without_a_capture_is_diagnosed_separately() {
+        let (_env, _home) = isolated_home();
+        let state_dir = config::vm_state_dir("quiet-vm");
+        std::fs::create_dir_all(&state_dir).expect("state directory");
+
+        let err = execute(parse(&["quiet-vm"]).expect("parse"))
+            .expect_err("retained state without a capture must not read as empty output");
+        let rendered = format!("{err:#}");
+
+        assert!(
+            rendered.contains(&state_dir.display().to_string()),
+            "{rendered}"
+        );
+        assert!(rendered.contains("no live broker"), "{rendered}");
+        assert!(rendered.contains("no transcript"), "{rendered}");
+        assert!(rendered.contains("no console capture"), "{rendered}");
+        assert!(rendered.contains("interrupted boot"), "{rendered}");
+        assert!(rendered.contains("machine inspect quiet-vm"), "{rendered}");
     }
 
     #[test]
