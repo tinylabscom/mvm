@@ -1118,8 +1118,11 @@ pub fn stage_flake_dispatch_job(
          BUILD_HOOK_ROOTFS=\"/tmp/mvm-rootfs-before-build.ext4\"\n\
          cp -L \"$STORE_PATH/rootfs.ext4\" \"$BUILD_HOOK_ROOTFS\"\n\
          echo 'mvm-host-vm-init: running before_build hook' >&2\n\
-         if ! /sbin/mvm-host-vm-init run-before-build-hook \"$BUILD_HOOK_ROOTFS\"; then\n\
-             hook_rc=$?\n\
+         set +e\n\
+         /sbin/mvm-host-vm-init run-before-build-hook \"$BUILD_HOOK_ROOTFS\"\n\
+         hook_rc=$?\n\
+         set -e\n\
+         if [ \"$hook_rc\" -ne 0 ]; then\n\
              echo \"mvm-host-vm-init: before_build hook failed (exit $hook_rc)\" >&2\n\
              rm -f \"$BUILD_HOOK_ROOTFS\"\n\
              exit $hook_rc\n\
