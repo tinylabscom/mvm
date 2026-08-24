@@ -19,6 +19,15 @@
       All phases are complete and green (`cargo check`, `cargo clippy`,
       `just check-gated`, unit/integration tests, and SDK tests).
 
+- [ ] **Merge-queue throughput recovery.**
+      `specs/plans/2026-08-15-merge-queue-throughput.md`.
+      The `aarch64-no-kvm-smoke` job was promoted to a required merge-queue
+      gate and can take hours under QEMU TCG, serializing every merge. Moved
+      the job to `ci-full.yml` (nightly + manual dispatch) and removed it from
+      the `Test` aggregate so the queue can move. Structural tests assert the
+      new separation. Remaining: land the change, measure post-change queue
+      latency, and record the result.
+
 ## Delivered (archive — closed to new entries)
 
 > **Do not append here.** A new delivery entry goes in its own file under
