@@ -158,11 +158,6 @@ fn main() -> ExitCode {
     }
 
     #[cfg(target_os = "linux")]
-    if std::env::args().nth(1).as_deref() == Some("seal-rootfs-journal") {
-        return seal_rootfs_journal_subcommand();
-    }
-
-    #[cfg(target_os = "linux")]
     {
         linux::run()
     }
@@ -190,21 +185,6 @@ fn run_before_build_hook_subcommand() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("mvm-host-vm-init: run-before-build-hook failed: {e}");
-            ExitCode::FAILURE
-        }
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn seal_rootfs_journal_subcommand() -> ExitCode {
-    let rootfs = std::env::args().nth(2).unwrap_or_else(|| {
-        eprintln!("usage: mvm-host-vm-init seal-rootfs-journal <rootfs.ext4>");
-        std::process::exit(2);
-    });
-    match builder_hooks::seal_rootfs_journal(std::path::Path::new(&rootfs)) {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(e) => {
-            eprintln!("mvm-host-vm-init: seal-rootfs-journal failed: {e}");
             ExitCode::FAILURE
         }
     }

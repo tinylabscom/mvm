@@ -29,6 +29,12 @@ the host handshake had flattened `SessionError::Io` into message text, hiding
 the typed cause from the retry classifier and turning an ordinary readiness
 race into an immediate failed launch.
 
+After readiness was repaired, the merge-group witness reached guest workload
+activation and exposed an ext4 journal that still required recovery. The
+workload rootfs is intentionally attached read-only, so the guest could not
+replay the journal and correctly refused to mount it. The writable builder
+mount must therefore be torn down and the journal sealed before publication.
+
 Two independent defects turned that mount failure into a merged regression:
 
 - the generated job shell used `if ! command; then hook_rc=$?`, so `hook_rc`
@@ -57,6 +63,9 @@ Two independent defects turned that mount failure into a merged regression:
 - [x] Preserve typed host-handshake session errors, retry peer hangups while
       the guest agent becomes ready, keep authenticated rejections fail-closed,
       and emit the redacted guest-console tail before failed transient cleanup.
+- [x] Run an offline ext4 journal repair/check after every writable hook mount,
+      fail closed on mounted or damaged images, retain `e2fsck` across builder
+      GC, and flush every exported rootfs before reporting completion.
 - [ ] Pass focused tests, formatting, workspace check/test, all-target Clippy,
       Linux-gated checks, and the live merge-group witness.
 - [ ] Record delivery and refactor status, then merge the repair.

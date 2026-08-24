@@ -178,7 +178,7 @@ pub fn run_before_build_hook(rootfs_path: &Path) -> Result<(), BuilderHookError>
     }
 }
 
-pub fn seal_rootfs_journal(rootfs_path: &Path) -> Result<(), BuilderHookError> {
+fn seal_rootfs_journal(rootfs_path: &Path) -> Result<(), BuilderHookError> {
     let output = Command::new(E2FSCK)
         .args(["-p", "-f"])
         .arg(rootfs_path)
