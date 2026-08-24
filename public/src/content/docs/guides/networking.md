@@ -7,12 +7,12 @@ description: Network layout and connectivity in mvmctl microVMs.
 
 Networking differs by backend:
 
-| Backend | Network Type | Guest IP | Host Access |
-|---------|-------------|----------|-------------|
-| Firecracker (Linux native) | NIC-less vsock egress | — | Host endpoint; default-deny policy gate |
-| HVF (macOS 26+, default) | NIC-less vsock egress | — | Host endpoint; default-deny policy gate |
-| libkrun (macOS) | NIC-less vsock egress | — | Host endpoint; default-deny policy gate |
-| QEMU (Linux dev/test) | Rootless user-mode virtio | 10.0.2.15/24 | QEMU user-mode network; outside production claims |
+| Backend                    | Network Type              | Guest IP     | Host Access                                       |
+| -------------------------- | ------------------------- | ------------ | ------------------------------------------------- |
+| Firecracker (Linux native) | NIC-less vsock egress     | —            | Host endpoint; default-deny policy gate           |
+| HVF (macOS 26+, default)   | NIC-less vsock egress     | —            | Host endpoint; default-deny policy gate           |
+| libkrun (macOS)            | NIC-less vsock egress     | —            | Host endpoint; default-deny policy gate           |
+| QEMU (Linux dev/test)      | Rootless user-mode virtio | 10.0.2.15/24 | QEMU user-mode network; outside production claims |
 
 ## Production Network Layout
 
@@ -20,12 +20,18 @@ Networking differs by backend:
 MicroVM workload (no guest NIC)
     | loopback SOCKS5 TCP CONNECT / UDP ASSOCIATE
     | controlled DNS / mediated ping / typed connectors
-    | authenticated FlowMux on vsock port 5253
+    | authenticated FlowMux (L4 transport) on vsock port 5253
 Per-VM mvm-network-endpoint
     | signed policy + shared limits + host DNS + payload-free audit
     | opaque TCP/UDP or explicitly typed transformation
 Internet or an admitted host-owned ingress listener
 ```
+
+**FlowMux is a virtual transport (L4) protocol.** It multiplexes TCP connections,
+UDP datagrams, DNS queries, HTTP requests, ICMP echo (mediated ping), and
+host-initiated ingress connections over a single authenticated vsock session.
+The guest never holds a raw network socket—every connection originates at the
+host endpoint after admission policy is enforced.
 
 Firecracker, HVF, and libkrun production workloads do not expose a guest NIC.
 Proxy-aware TCP applications use the injected loopback SOCKS5 listener; UDP
@@ -70,9 +76,9 @@ refused; update the machine declaration and restart when the mapping changes.
 
 MicroVMs don't use networking for host communication -- they use **vsock**:
 
-| Port | Protocol | Purpose |
-|------|----------|---------|
-| 5252 | Length-prefixed JSON | Guest agent (health checks, status, snapshot lifecycle) |
+| Port | Protocol                     | Purpose                                                          |
+| ---- | ---------------------------- | ---------------------------------------------------------------- |
+| 5252 | Length-prefixed JSON         | Guest agent (health checks, status, snapshot lifecycle)          |
 | 5253 | Authenticated FlowMux frames | TCP, UDP, DNS, mediated ping, typed connectors, declared ingress |
 
 The host connects by writing `CONNECT 5252\n` to the vsock socket and reading `OK 5252\n`. All requests are request/response pairs. vsock is supported on Firecracker, HVF, and microvm.nix backends.
@@ -166,12 +172,12 @@ mvmctl machine run --flake . --profile dev           # dev ergonomics: explicit 
 
 The resolved profile is copied into the signed `ExecutionPlan` admission record — audit/provenance data binding the declared workload intent to the chosen posture, policy refs, secret-release posture, and audit labels — so `mvmctl trust audit verify` can prove which posture was admitted.
 
-| Profile | Env injection | Host shares |
-|---------|---------------|-------------|
-| `restrictive` | none | none |
-| `standard` (default) | explicit `-e KEY=VALUE` | read-only |
-| `dev` | explicit `-e KEY=VALUE` | read-write allowed |
-| `permissive` | explicit | read-write (requires `MVM_ACK_PERMISSIVE_RUN=1`) |
+| Profile              | Env injection           | Host shares                                      |
+| -------------------- | ----------------------- | ------------------------------------------------ |
+| `restrictive`        | none                    | none                                             |
+| `standard` (default) | explicit `-e KEY=VALUE` | read-only                                        |
+| `dev`                | explicit `-e KEY=VALUE` | read-write allowed                               |
+| `permissive`         | explicit                | read-write (requires `MVM_ACK_PERMISSIVE_RUN=1`) |
 
 ## DNS
 

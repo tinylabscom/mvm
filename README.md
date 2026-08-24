@@ -18,6 +18,15 @@ originates every outbound connection**. That is what makes default-deny egress,
 "no raw secret reaches the guest", and the audit chain mechanically enforceable
 rather than merely intended.
 
+**FlowMux: the virtual transport protocol over vsock**
+
+All guest→host traffic runs over a single authenticated **FlowMux session**
+— a virtual transport protocol that multiplexes TCP, UDP, DNS, HTTP, ICMP,
+and host-initiated ingress connections over one vsock stream. The guest uses
+standard loopback adapters (SOCKS5/HTTP proxy, DNS stub, mediated ping)
+to reach admitted destinations. Raw packet tunnels, NICs, or L3 modes are
+retired and rejected at admission.
+
 ```
 macOS 26+ (Apple Silicon)  →  in-house HVF VMM (Hypervisor.framework, zero extra deps)
 macOS 13–25                →  libkrun (Homebrew)
@@ -123,12 +132,19 @@ mvmctl machine run --image alpine -vvv --allow-host api.example.com -- ps aux
 ```
 
 # Cap AI API usage with a token budget by adding [network.ai] to mvm.toml:
-#   [network]
-#   allow_hosts = ["api.openai.com:443"]
-#   [network.ai]
-#   metering = true
-#   [network.ai.budget]
-#   max_total_tokens = 1_000_000
+
+# [network]
+
+# allow_hosts = ["api.openai.com:443"]
+
+# [network.ai]
+
+# metering = true
+
+# [network.ai.budget]
+
+# max_total_tokens = 1_000_000
+
 mvmctl machine run --flake . -- ./ask-model
 
 ### Persistent machines

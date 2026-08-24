@@ -8,6 +8,13 @@ routable network device. Guest loopback adapters describe connection intent to
 an authenticated per-VM endpoint over vsock, and the host opens only the
 connections admitted by the signed plan.
 
+FlowMux is a **virtual transport protocol** that runs over a single authenticated
+vsock session. It multiplexes multiple traffic classes—TCP, UDP, DNS, HTTP,
+ICMP (mediated ping), and host-initiated ingress—over one vsock stream rather
+than using raw packet tunnels or guest NICs. The guest uses standard loopback
+adapters (SOCKS5/HTTP proxy, DNS stub, mediated ping) to reach admitted destinations.
+Raw packet tunnels, NICs, and L3 modes are retired and rejected at admission.
+
 There is no transport selector. Declaring network policy makes the FlowMux
 service available; omitting it leaves networking closed. Retired raw-stack
 fields and packet-tunnel plan values are rejected with migration guidance
