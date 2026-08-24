@@ -126,6 +126,7 @@ fn cache_live_runtime_overlay(world: &CliWorld, source_dir: &Path, fingerprint: 
         ("mvm-addon-dns", &layout.addon_dns),
         ("mvm-exit-report", &layout.exit_report),
         ("mvm-ping", &layout.ping),
+        ("mvm-forward-proxy", &layout.forward_proxy),
     ] {
         let source = source_dir.join(source_name);
         fs::copy(&source, destination).unwrap_or_else(|error| {
