@@ -641,6 +641,7 @@ if [ "$hook_rc" -ne 0 ]; then
     exit $hook_rc
 fi
 cp -L "$BUILD_HOOK_ROOTFS" /out/rootfs.ext4
+/sbin/mvm-host-vm-init seal-rootfs-journal /out/rootfs.ext4
 sync
 rm -f "$BUILD_HOOK_ROOTFS"
 
@@ -2081,6 +2082,13 @@ mod tests {
         assert!(
             out_copy_idx < sync_idx,
             "the exported rootfs must be flushed before the temporary image is removed"
+        );
+        let final_seal_idx = body
+            .find("/sbin/mvm-host-vm-init seal-rootfs-journal /out/rootfs.ext4")
+            .expect("final exported artifact journal seal present");
+        assert!(
+            out_copy_idx < final_seal_idx && final_seal_idx < sync_idx,
+            "the final copied rootfs must be sealed before it is published"
         );
         // A failed hook must fail the build, leaving no partial artifact.
         assert!(

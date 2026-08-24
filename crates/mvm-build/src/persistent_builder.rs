@@ -1118,13 +1118,17 @@ pub fn stage_flake_dispatch_job(
          BUILD_HOOK_ROOTFS=\"/tmp/mvm-rootfs-before-build.ext4\"\n\
          cp -L \"$STORE_PATH/rootfs.ext4\" \"$BUILD_HOOK_ROOTFS\"\n\
          echo 'mvm-host-vm-init: running before_build hook' >&2\n\
-         if ! /sbin/mvm-host-vm-init run-before-build-hook \"$BUILD_HOOK_ROOTFS\"; then\n\
-             hook_rc=$?\n\
+         set +e\n\
+         /sbin/mvm-host-vm-init run-before-build-hook \"$BUILD_HOOK_ROOTFS\"\n\
+         hook_rc=$?\n\
+         set -e\n\
+         if [ \"$hook_rc\" -ne 0 ]; then\n\
              echo \"mvm-host-vm-init: before_build hook failed (exit $hook_rc)\" >&2\n\
              rm -f \"$BUILD_HOOK_ROOTFS\"\n\
              exit $hook_rc\n\
          fi\n\
          cp -L \"$BUILD_HOOK_ROOTFS\" \"$OUT_DIR/rootfs.ext4\"\n\
+         /sbin/mvm-host-vm-init seal-rootfs-journal \"$OUT_DIR/rootfs.ext4\"\n\
          sync\n\
          rm -f \"$BUILD_HOOK_ROOTFS\"\n\
          if [ -f \"$STORE_PATH/manifest.json\" ]; then\n\
@@ -1760,6 +1764,13 @@ mod tests {
         assert!(
             out_copy_idx < sync_idx,
             "the exported rootfs must be flushed before the temporary image is removed"
+        );
+        let final_seal_idx = body
+            .find("/sbin/mvm-host-vm-init seal-rootfs-journal \"$OUT_DIR/rootfs.ext4\"")
+            .expect("final exported artifact journal seal present");
+        assert!(
+            out_copy_idx < final_seal_idx && final_seal_idx < sync_idx,
+            "the final copied rootfs must be sealed before it is published"
         );
         assert!(
             body.contains("mvm-host-vm-init: before_build hook failed"),
