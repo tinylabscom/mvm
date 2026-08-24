@@ -43,6 +43,11 @@ which is enough to saturate that pool before ordinary pull-request work.
       default-branch cache warmer; restore them in validation jobs.
 - [x] Remove duplicated feature-test work and validate the optimized workflow
       shape with actionlint and focused tests.
+- [x] Move the `aarch64-no-kvm-smoke` job out of the merge queue. The cold
+      QEMU TCG path can take hours, and making it a required gate serialized
+      every merge. It remains in `ci-full.yml` (nightly + manual dispatch) so
+      the path is still exercised, and the structural tests assert it no longer
+      blocks the `Test` aggregate.
 - [ ] Run formatting, workspace check, the complete workspace test suite, and
       Linux all-target Clippy.
 - [ ] Land the workflow change through the merge queue, then update and read
