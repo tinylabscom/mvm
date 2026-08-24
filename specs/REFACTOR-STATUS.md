@@ -17,6 +17,14 @@ for detailed scope and acceptance criteria.
 
 ## Completed issue closeouts
 
+- [x] **FlowMux forward-proxy identity ownership.** Secret-substitution HTTP
+      relays now run in an init-owned helper that can read the root-only guest
+      signing key, rather than in the workload-uid guest agent. Both baked and
+      overlay runtime-source policies carry the helper, incomplete overlays
+      fail closed, and relay diagnostics do not expose privileged causes to the
+      workload. The live secret-bearing substitution witness remains tracked
+      by the owning FlowMux plan.
+
 - [x] **Scheduled Security dependency and no-SSH scanner repair.** The
       supply-chain lane pins the last `async-trait` release on `syn` 2,
       restoring the duplicate-version policy, while the no-SSH lane permits

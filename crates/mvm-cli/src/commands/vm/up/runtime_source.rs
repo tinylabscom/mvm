@@ -765,65 +765,29 @@ mod runtime_overlay_attach_tests {
 
     static ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    /// A payload carrying every path the resolver requires, optionally minus
+    /// the egress client — the one omission these tests actually exercise.
+    ///
+    /// Derived from `REQUIRED_OVERLAY_GUEST_PATHS` rather than restated: a
+    /// hand-written copy is one an added required path silently invalidates,
+    /// and it then fails as an unrelated integrity error rather than as a stale
+    /// fixture.
     fn valid_overlay_ext4_bytes(version: &str, include_egress_client: bool) -> Vec<u8> {
-        let mut nodes = vec![
-            Node::File {
-                path: "/agent".into(),
-                mode: 0o555,
-                data: b"agent".to_vec(),
+        let nodes: Vec<Node> = mvm_fs::overlay::REQUIRED_OVERLAY_GUEST_PATHS
+            .iter()
+            .filter(|path| include_egress_client || **path != "/egress-client")
+            .map(|path| Node::File {
+                path: (*path).into(),
+                // `VERSION` is data the resolver reads back, not a binary.
+                mode: if *path == "/VERSION" { 0o444 } else { 0o555 },
+                data: if *path == "/VERSION" {
+                    format!("{version}\n").into_bytes()
+                } else {
+                    path.trim_start_matches('/').as_bytes().to_vec()
+                },
                 xattrs: Vec::new(),
-            },
-            Node::File {
-                path: "/netinit".into(),
-                mode: 0o555,
-                data: b"netinit".to_vec(),
-                xattrs: Vec::new(),
-            },
-            Node::File {
-                path: "/seccomp-apply".into(),
-                mode: 0o555,
-                data: b"seccomp".to_vec(),
-                xattrs: Vec::new(),
-            },
-            Node::File {
-                path: "/runner".into(),
-                mode: 0o555,
-                data: b"runner".to_vec(),
-                xattrs: Vec::new(),
-            },
-            Node::File {
-                path: "/addon-dns".into(),
-                mode: 0o555,
-                data: b"addon-dns".to_vec(),
-                xattrs: Vec::new(),
-            },
-            Node::File {
-                path: "/exit-report".into(),
-                mode: 0o555,
-                data: b"exit-report".to_vec(),
-                xattrs: Vec::new(),
-            },
-            Node::File {
-                path: "/forward-proxy".into(),
-                mode: 0o555,
-                data: b"forward-proxy".to_vec(),
-                xattrs: Vec::new(),
-            },
-            Node::File {
-                path: "/VERSION".into(),
-                mode: 0o444,
-                data: format!("{version}\n").into_bytes(),
-                xattrs: Vec::new(),
-            },
-        ];
-        if include_egress_client {
-            nodes.push(Node::File {
-                path: "/egress-client".into(),
-                mode: 0o555,
-                data: b"egress".to_vec(),
-                xattrs: Vec::new(),
-            });
-        }
+            })
+            .collect();
         mvm_fs::ext4::build_image(nodes).expect("build valid overlay ext4 fixture")
     }
 

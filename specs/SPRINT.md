@@ -2877,3 +2877,16 @@ zero-line checkpoint's genesis fallback and the exact accountable-prune entry
 count; remaining equivalent or performance-only misses carry explicit reasons.
 The final hostd shard's broker witness now asserts every teaching response up
 to the configured ceiling and the first terse response immediately after it.
+
+## 2026-08-23 FlowMux forward-proxy identity repair
+
+- [x] Move the secret-substitution forward proxy out of the workload-uid guest
+      agent and into an init-owned helper that can read the root-only FlowMux
+      signing key on both guest init paths.
+- [x] Ship the helper in baked and runtime-overlay artifacts, fail overlay
+      validation when it is missing, and preserve the shared-kernel Unix-socket
+      endpoint path.
+- [x] Log the privileged relay failure chain while returning only a stable,
+      non-sensitive failure class to the workload.
+- [ ] Capture the live secret-bearing `OpenHttp` substitution witness; the
+      owning FlowMux plan keeps that hardware-backed acceptance item open.

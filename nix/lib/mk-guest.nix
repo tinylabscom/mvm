@@ -835,6 +835,35 @@ let
       export https_proxy="$ALL_PROXY"
     fi
 
+    # Stage 2.49 — loopback forward proxy for secret-bearing egress. Started
+    # unconditionally and, unlike every other helper here, as root: relaying
+    # opens an authenticated FlowMux session, which reads the root-only guest
+    # signing key. The workload must not be able to read that key, so the
+    # process that must cannot be the workload's own uid.
+    #
+    # Not gated on MVM_VSOCK_EGRESS. That token is *off* for exactly the
+    # launches that need this: a secret-bearing workload's egress goes through
+    # the host substitution endpoint, so its guest starts no vsock egress
+    # client and this listener is the whole of its egress. A workload with no
+    # placeholders has no HTTP_PROXY pointed here and it sees no connections.
+    MVM_FORWARD_PROXY_BIN=
+    if [ "$MVM_RUNTIME_SOURCE_POLICY" = rootfs_only ]; then
+      if [ -x /usr/local/bin/mvm-forward-proxy ]; then
+        MVM_FORWARD_PROXY_BIN=/usr/local/bin/mvm-forward-proxy
+      fi
+    elif [ -x /mvm/runtime/forward-proxy ]; then
+      MVM_FORWARD_PROXY_BIN=/mvm/runtime/forward-proxy
+    elif [ -x /usr/local/bin/mvm-forward-proxy ]; then
+      MVM_FORWARD_PROXY_BIN=/usr/local/bin/mvm-forward-proxy
+    fi
+    if [ -n "$MVM_FORWARD_PROXY_BIN" ]; then
+      /bin/busybox ip addr replace 127.0.0.1/8 dev lo 2>/dev/null || true
+      /bin/busybox ip link set lo up 2>/dev/null || true
+      /bin/busybox setsid "$MVM_FORWARD_PROXY_BIN" &
+    else
+      echo "mvm-init: no forward proxy resolved; secret-bearing egress has nothing to relay through"
+    fi
+
     # Stage 2.5 — guest agent supervisor. Fork the agent into
     # the background under its own uid before we drop to the
     # entrypoint. The agent is responsible for vsock RPC (host
