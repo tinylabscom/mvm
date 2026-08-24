@@ -2850,3 +2850,30 @@ BDD rerun exposed outer nightly-only Cargo flags leaking
 into the pinned stable nested cross-compiler; nested builds now clear every
 outer toolchain, wrapper, and Rust flag variable, with a focused regression
 test covering the boundary.
+
+## 2026-08-22 scheduled security-lane dependency and scanner repair
+
+The consolidated scheduled Security workflow exposed two latent failures.
+`async-trait` 0.1.92 introduced `syn` 3 beside the workspace's existing
+`syn` 2 graph, so the workspace now pins 0.1.89, the last compatible release,
+and cargo-deny again reports advisories, bans, licenses, and sources green.
+The no-SSH source gate now recognizes capture's private-key filename denylist
+as detector data and prunes generated dependency/build trees from its scan.
+A shell regression proves generated dependencies are ignored while a genuine
+source SSH token is still rejected.
+
+The same scheduled run measured new AI-policy and FlowMux mutants. Constructor
+tests distinguish metered policy from the disabled default, while focused
+FlowMux witnesses now pin ingress generation teardown, authentication-gated
+readiness, the exact consecutive-accept failure ceiling, and Linux confinement
+input refusal. Only the constructor replacement that is byte-for-byte
+equivalent to `Default` is accepted with a recorded rationale.
+
+Two later hostd shards showed that the generic `substitute` witness name was
+mutating an entire 4,700-line proxy module. Its surface is now limited to the
+claim-relevant substitution adapter and request-preparation boundary: three
+mutants were measured, two caught and one unviable. Audit witnesses also pin a
+zero-line checkpoint's genesis fallback and the exact accountable-prune entry
+count; remaining equivalent or performance-only misses carry explicit reasons.
+The final hostd shard's broker witness now asserts every teaching response up
+to the configured ceiling and the first terse response immediately after it.
