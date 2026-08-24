@@ -2164,6 +2164,7 @@ mod tests {
             addon_dns: make_bin("addon-dns"),
             exit_report: make_bin("exit-report"),
             verity_init: make_bin("verity-init"),
+            forward_proxy: make_bin("forward-proxy"),
         };
 
         let artifact = build_runtime_overlay_from_guest_binaries(

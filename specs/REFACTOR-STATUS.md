@@ -1,6 +1,6 @@
 # Refactor status
 
-Last updated: 2026-08-23
+Last updated: 2026-08-22
 ## Completed
 
 - [x] **AI egress metering and token budgets** —
@@ -16,6 +16,22 @@ This is the cross-plan progress index. The owning plan remains authoritative
 for detailed scope and acceptance criteria.
 
 ## Completed issue closeouts
+
+- [x] **Scheduled Security dependency and no-SSH scanner repair.** The
+      supply-chain lane pins the last `async-trait` release on `syn` 2,
+      restoring the duplicate-version policy, while the no-SSH lane permits
+      only the capture secret-filename denylist and excludes generated
+      dependency/build trees. Positive and negative shell fixtures preserve
+      the fail-closed source boundary. Newly measured AI-policy and FlowMux
+      mutants are covered by focused constructor, ingress-generation,
+      readiness, accept-ceiling, and pre-confinement refusal witnesses; only
+      the provably identical disabled-policy constructor remains baselined.
+      Claim-13 mutation scope now measures its actual substitution boundary
+      (three mutants rather than the proxy module's unrelated transport
+      internals), and audit witnesses pin checkpoint and prune-accounting
+      behavior while equivalent/performance-only misses stay documented. The
+      broker's teaching-refusal ceiling is also mutation-pinned at its exact
+      transition.
 
 - [x] **Artifact acquisition is explicit across source and release builds.**
       Official binaries download verified launch artifacts even when invoked
@@ -43,7 +59,10 @@ for detailed scope and acceptance criteria.
       reset while the slow TCG guest becomes ready reaches the existing
       bounded activation retry; identity and protocol rejections still fail
       closed. Failed transient starts emit a redacted guest-console tail before
-      cleanup.
+      cleanup. Hook-mutated ext4 images are checked and journal-replayed
+      offline after the writable mount is dropped, then flushed at every export
+      boundary; a mounted or damaged image fails before publication, preserving
+      the workload's hypervisor-enforced read-only rootfs contract.
       The tagged release workflow separately verifies the signed
       future-format overlay through the production downloader before publish.
       The standalone hostd fuzz lock is refreshed for the current dependency
@@ -145,7 +164,7 @@ for detailed scope and acceptance criteria.
       and cleared eight divergence entries while closing nothing.
       `_remote.ts` implements real-VM invocation, the stderr envelope scan, and
       `RemoteFunction` / `func` / `workload_ref` / `WorkloadRef` (a `Proxy`
-      where Python uses `__getattr__`). `MVM_NO_VM=1` is _refused_ with
+      where Python uses `__getattr__`). `MVM_NO_VM=1` is *refused* with
       `NoVmIntrospectionError` naming the reason rather than falling through to
       a real VM — the caller asked for local dispatch and would otherwise have
       got a microVM. `RemoteError` needed one registry extension (structured
@@ -199,7 +218,7 @@ for detailed scope and acceptance criteria.
 - [x] **Plan 337 WS-3 — Tier A constructors generated from a declarative
       registry.** The workstream the WS-1 spike existed to enable, and the
       first real test of its decision: all eight constructors now come from
-      `mvm-sdk/src/ctor_registry.rs` — parameters, defaults and _constraints_ —
+      `mvm-sdk/src/ctor_registry.rs` — parameters, defaults and *constraints* —
       rendered into both languages, with the Python hand-copies deleted and
       TypeScript gaining all eight for the first time. The constraint
       vocabulary needed is three cases, small enough to be worth the machinery
@@ -227,7 +246,7 @@ for detailed scope and acceptance criteria.
       generated so none of the mirror survives. `ErrorBase` models the
       hierarchy rather than per-language literals, and refuses to emit a
       Python-only `Warning` into TypeScript. **Scope correction:** Tier D's
-      eight named types are _not_ generated here — all eight are raised only by
+      eight named types are *not* generated here — all eight are raised only by
       Tier C's `_remote.py`, so emitting them into TypeScript would export
       classes nothing can throw and clear eight divergence entries while
       closing nothing; they land with WS-6. **WS-6.1 sizing found Tier C is two
@@ -243,13 +262,13 @@ for detailed scope and acceptance criteria.
 - [x] **Plan 337 WS-1 + WS-2 — SDK surface generated from Rust.** WS-1 spiked
       both mechanisms for extracting a constructor manifest from
       `mvm_sdk::ctor` and re-scoped the plan rather than stopping it: the
-      attribute/`inventory` mechanism recovered _less_ than the `syn` parse
+      attribute/`inventory` mechanism recovered *less* than the `syn` parse
       (an attribute sees one item, so it cannot resolve a default living in a
       sibling fn), and both failed identically on the facts that are simply
       absent from Rust — `port=53`, keyword-only calling, `1..=65535`, the
       `"pip-tools"` alias. Rust discharges those constraints statically, so
       extraction is the wrong direction; the manifest is authored
-      declaratively and records _constraints_, with `syn` re-scoped to a
+      declaratively and records *constraints*, with `syn` re-scoped to a
       coverage gate plus a golden-IR behavioural gate. Surfaced a live defect
       (#2559): Rust's `host_port` accepts port `0` where Python rejects it —
       fixed 2026-08-16 by moving the constraint to `mvm_contract::ir::validate`
@@ -262,7 +281,7 @@ for detailed scope and acceptance criteria.
       `tsc` erases, so a generated constant would be invisible to the s27
       runtime surface check). `MVM_CLI_BIN` was quadruplicated and invisible to
       every gate because all four copies agreed. TypeScript-only divergence is
-      now zero; the two `MVM_MACHINE_*` names were deliberately _not_ emitted
+      now zero; the two `MVM_MACHINE_*` names were deliberately *not* emitted
       into TypeScript, since nothing there read them, and were recorded as a
       behaviour gap until #2558 supplied the behaviour — the wrapper now bounds
       its subprocess with both, so the registry exports them and the divergence
@@ -360,11 +379,11 @@ for detailed scope and acceptance criteria.
 ## Fast machine substrate
 
 - [~] **Obscura browser provider pilot.** An explicit experimental provider,
-  typed SDK OCI source, honest live-option lowering, bounded CDP readiness,
-  and pinned Nix guest example are implemented on an isolated feature
-  branch. Chromium remains the default. Real-backend policy proof,
-  compatibility, full Nix/workspace, and native Linux gates remain open in
-  `specs/plans/2026-08-18-obscura-browser-provider.md`.
+      typed SDK OCI source, honest live-option lowering, bounded CDP readiness,
+      and pinned Nix guest example are implemented on an isolated feature
+      branch. Chromium remains the default. Real-backend policy proof,
+      compatibility, full Nix/workspace, and native Linux gates remain open in
+      `specs/plans/2026-08-18-obscura-browser-provider.md`.
 
 - [x] **Issue #2279 — define the fast machine substrate and canonical template
       contract.** The cross-plan note joins Plans 298, 299, 265, 270, and 292
@@ -427,45 +446,43 @@ for detailed scope and acceptance criteria.
       roots so the filter stops being the mechanism is open.
 
 - [~] **Plan 338 — WebLinux browser backend, builder, workbench, and `mvmd`
-  deployment client**
-  (`specs/plans/338-weblinux-browser-backend-builder-workbench-and-mvmd-deploy.md`).
-  ADR-049 renumbered from ADR-043 to avoid collision with the existing
-  ADR-043. ADR-024 updated to link ADR-049 while preserving the direct-WASI
-  claim-free boundary. ADR-006 updated to allow `mvmctl deploy` as an
-  authenticated `mvmd` client operation. Plan 338 registered in
-  `specs/SPRINT.md` and this file. First slice landed in PR #2776:
-  `BackendKind::WebLinux` with contract-level capability dimensions,
-  native `AnyBackend::WebLinux` stub that fails closed,
-  `BuilderBackendChoice::WebLinux` excluded from native auto-detect,
-  minimal portable lifecycle DTOs (`BackendRequest`/`BackendResponse`,
-  `ArtifactRef`/`ArtifactSetRef`), and matching tests. WS-2 engine
-  feasibility is now pinned: `ktock/qemu-wasm` 5a65998d47, Emscripten
-  3.1.50, zlib/libffi/pixman/glib/xterm-pty versions are recorded, and
-  `nix/packages/qemu-wasm.nix` packages the engine through the Nix
-  builder boundary. `nix build .#qemu-wasm-engine` verified inside the
-  aarch64-linux HVF builder VM; measured artifact hashes recorded in
-  `specs/plans/2026-08-21-weblinux-browser-demo.md`.
+      deployment client**
+      (`specs/plans/338-weblinux-browser-backend-builder-workbench-and-mvmd-deploy.md`).
+      ADR-049 renumbered from ADR-043 to avoid collision with the existing
+      ADR-043. ADR-024 updated to link ADR-049 while preserving the direct-WASI
+      claim-free boundary. ADR-006 updated to allow `mvmctl deploy` as an
+      authenticated `mvmd` client operation. Plan 338 registered in
+      `specs/SPRINT.md` and this file. First slice landed in PR #2776:
+      `BackendKind::WebLinux` with contract-level capability dimensions,
+      native `AnyBackend::WebLinux` stub that fails closed,
+      `BuilderBackendChoice::WebLinux` excluded from native auto-detect,
+      minimal portable lifecycle DTOs (`BackendRequest`/`BackendResponse`,
+      `ArtifactRef`/`ArtifactSetRef`), and matching tests. WS-2 engine
+      feasibility is now pinned: `ktock/qemu-wasm` 5a65998d47, Emscripten
+      3.1.50, zlib/libffi/pixman/glib/xterm-pty versions are recorded, and
+      `nix/packages/qemu-wasm.nix` packages the engine through the Nix
+      builder boundary. Build verification is queued for the Linux builder.
 
 - [~] **Security lane recovery — issue #2736.** The advisory finding is fixed,
-  the release-artifact bootstrap source now compiles with warnings denied,
-  and pull-request CI exercises that otherwise dormant feature directly.
-  Focused mutation witnesses cover authenticated-session signal validity,
-  live/dead endpoint readiness branches, redacted TLS material, builder
-  projection, and endpoint identity configuration.
-  Every dependency graph that contains `arrayref` resolves a byte-for-byte
-  vendored copy of the reviewed 0.3.9 upstream revision. Pinned file hashes
-  guard the vendored source, Git dependencies remain denied, and Nix image
-  sources plus the host build fingerprint retain that path dependency.
-  The exact Security rerun's capability-builder finding now has a direct
-  all-fields witness; its only remaining constructor mutant is documented
-  as the identical `Default::default()` expression rather than waived as
-  an untested behavior. Completed run 32552650847 then exposed seven
-  authorization survivors in extension verification and attachment;
-  focused boundary and single-field witnesses catch all 20 generated
-  mutants across those predicates, and the now-caught host-budget miss has
-  been removed from the accepted baseline.
-  Closure remains gated on a clean Security workflow run from current
-  `main`, including every mutation shard and both reproducibility builds.
+      the release-artifact bootstrap source now compiles with warnings denied,
+      and pull-request CI exercises that otherwise dormant feature directly.
+      Focused mutation witnesses cover authenticated-session signal validity,
+      live/dead endpoint readiness branches, redacted TLS material, builder
+      projection, and endpoint identity configuration.
+      Every dependency graph that contains `arrayref` resolves a byte-for-byte
+      vendored copy of the reviewed 0.3.9 upstream revision. Pinned file hashes
+      guard the vendored source, Git dependencies remain denied, and Nix image
+      sources plus the host build fingerprint retain that path dependency.
+      The exact Security rerun's capability-builder finding now has a direct
+      all-fields witness; its only remaining constructor mutant is documented
+      as the identical `Default::default()` expression rather than waived as
+      an untested behavior. Completed run 32552650847 then exposed seven
+      authorization survivors in extension verification and attachment;
+      focused boundary and single-field witnesses catch all 20 generated
+      mutants across those predicates, and the now-caught host-budget miss has
+      been removed from the accepted baseline.
+      Closure remains gated on a clean Security workflow run from current
+      `main`, including every mutation shard and both reproducibility builds.
 
 - [x] **Secret bindings for forked children** —
       `specs/plans/2026-08-18-fork-inherits-secret-bindings.md`, issue #2698.
@@ -477,67 +494,67 @@ for detailed scope and acceptance criteria.
       and deliberately deferred.
 
 - [~] **Durable agent sessions** —
-  `specs/plans/2026-08-18-durable-agent-sessions.md` (design) +
-  `specs/plans/2026-08-18-durable-session-substrate.md` (implementation,
-  Tasks 1–5 complete) +
-  `specs/plans/2026-08-18-durable-session-park.md` (implementation,
-  Tasks 1–5 complete) +
-  `specs/plans/2026-08-18-session-approval-head.md` (implementation,
-  Tasks 1–4 complete) +
-  `specs/plans/2026-08-18-resume-session-orchestrator.md` (implementation,
-  Tasks 1–3 complete) +
-  `specs/plans/2026-08-18-session-retention.md` (implementation, Tasks 1–3
-  complete). `CheckpointMeta` gains `Option<SessionBinding>`
-  (`session_id`/`generation`/`journal_cursor`/`approval_head`), folded
-  into `meta_digest` the same way `grants` already is; `approval_head` is
-  a dedicated `ApprovalHead` newtype, not `CheckpointDigest` reused.
-  `mvm_runtime::agent_session::AgentSessionStore` gives sessions a
-  filesystem store (`AgentSessionRecord`, `SandboxResidency`) over
-  `mvm_core::config::agent_sessions_dir()`, with `parent_checkpoint`
-  typed as a `CheckpointDigest` content-address rather than a mutable
-  `CheckpointId`. `fork_checkpoint`/`fork_vm_full` explicitly clear the
-  binding on a forked child. The park slice adds crash-safe record
-  writes through the shared `mvm_core::atomic_io::atomic_write` helper,
-  `ParkReason`/`StorageTier`/`select_tier`, four new record fields
-  (`journal_cursor`, `approval_head`, `storage_tier`, `park_reason`),
-  `AgentSessionRecord::park`/`resume` transitions with
-  `SessionTransitionError`, and store-level `park`/`resume` fenced on
-  the caller's expected generation — a check-then-act refusal, not a
-  compare-and-swap, so a second caller racing on the same generation is
-  not yet serialized; the module has no call sites yet, so nothing races
-  it in production today.
-  `ApprovalLedger::head()` (`crates/mvm-contract/src/policy/approval.rs`)
-  content-addresses the ledger's decision state — every record's
-  approval id, its capability, and its terminal state, deliberately
-  excluding wall-clock fields plus `resource_digest`, `policy_digest`,
-  `admission_plan_digest`, and `authorized_operators` — and `ParkInput`
-  lets a park commit the journal cursor and that head with the
-  transition in one fenced write instead of two. `AgentSessionStore::
+      `specs/plans/2026-08-18-durable-agent-sessions.md` (design) +
+      `specs/plans/2026-08-18-durable-session-substrate.md` (implementation,
+      Tasks 1–5 complete) +
+      `specs/plans/2026-08-18-durable-session-park.md` (implementation,
+      Tasks 1–5 complete) +
+      `specs/plans/2026-08-18-session-approval-head.md` (implementation,
+      Tasks 1–4 complete) +
+      `specs/plans/2026-08-18-resume-session-orchestrator.md` (implementation,
+      Tasks 1–3 complete) +
+      `specs/plans/2026-08-18-session-retention.md` (implementation, Tasks 1–3
+      complete). `CheckpointMeta` gains `Option<SessionBinding>`
+      (`session_id`/`generation`/`journal_cursor`/`approval_head`), folded
+      into `meta_digest` the same way `grants` already is; `approval_head` is
+      a dedicated `ApprovalHead` newtype, not `CheckpointDigest` reused.
+      `mvm_runtime::agent_session::AgentSessionStore` gives sessions a
+      filesystem store (`AgentSessionRecord`, `SandboxResidency`) over
+      `mvm_core::config::agent_sessions_dir()`, with `parent_checkpoint`
+      typed as a `CheckpointDigest` content-address rather than a mutable
+      `CheckpointId`. `fork_checkpoint`/`fork_vm_full` explicitly clear the
+      binding on a forked child. The park slice adds crash-safe record
+      writes through the shared `mvm_core::atomic_io::atomic_write` helper,
+      `ParkReason`/`StorageTier`/`select_tier`, four new record fields
+      (`journal_cursor`, `approval_head`, `storage_tier`, `park_reason`),
+      `AgentSessionRecord::park`/`resume` transitions with
+      `SessionTransitionError`, and store-level `park`/`resume` fenced on
+      the caller's expected generation — a check-then-act refusal, not a
+      compare-and-swap, so a second caller racing on the same generation is
+      not yet serialized; the module has no call sites yet, so nothing races
+      it in production today.
+      `ApprovalLedger::head()` (`crates/mvm-contract/src/policy/approval.rs`)
+      content-addresses the ledger's decision state — every record's
+      approval id, its capability, and its terminal state, deliberately
+      excluding wall-clock fields plus `resource_digest`, `policy_digest`,
+      `admission_plan_digest`, and `authorized_operators` — and `ParkInput`
+      lets a park commit the journal cursor and that head with the
+      transition in one fenced write instead of two. `AgentSessionStore::
 resume` takes a `current_head` and refuses when it differs from the
-  head recorded at park.
-  STILL OPEN: the quiesce sequence over the existing guest verbs is the
-  rest of WS3 — `CheckpointIntegrations`/`Wake` have no host-side caller
-  anywhere in the workspace, and while `GuestRequest::SleepPrep` does
-  have one (the Firecracker stop-time filesystem flush at
-  `crates/mvm-backends/src/driver/fc.rs`'s
-  `prepare_guest_filesystems_for_stop`), nothing on a park path calls
-  it. WS4 is DONE: the ledger-head comparison landed, `resume_session`
-  (`crates/mvm-hostd/src/session_resume.rs`) loads the record, refuses
-  anything but `Hibernated`, resolves the resume point, checks the
-  record's stored `meta_digest` against a fresh `compute_meta_digest()`,
-  runs `verify_content`, builds a `SynthesisInput` naming the session and
-  the generation the resume opens, admits it through
-  `mvm_hostd::plan_admission::admit_for_run`, and only then transitions
-  the record. Still open: nothing calls `ApprovalLedger::head()` to
-  produce the value either side of the step-2 comparison carries —
-  `resume_session` reads its caller-supplied `current_approval_head`
-  straight off the record; `PostRestore` fabric re-registration and
-  credential minting are not implemented; the synthesized plan carries
-  `grants: None`, so a resumed session re-arms neither a wall-clock bound
-  nor a CPU share; a session parked with `approval_head: None` resumes
-  with no ledger fence at all. WS5 is partial: retention classes, expiry,
-  a scheduler that calls `demote`, and actual byte movement between tiers
-  remain undelivered.
+      head recorded at park.
+      STILL OPEN: the quiesce sequence over the existing guest verbs is the
+      rest of WS3 — `CheckpointIntegrations`/`Wake` have no host-side caller
+      anywhere in the workspace, and while `GuestRequest::SleepPrep` does
+      have one (the Firecracker stop-time filesystem flush at
+      `crates/mvm-backends/src/driver/fc.rs`'s
+      `prepare_guest_filesystems_for_stop`), nothing on a park path calls
+      it. WS4 is DONE: the ledger-head comparison landed, `resume_session`
+      (`crates/mvm-hostd/src/session_resume.rs`) loads the record, refuses
+      anything but `Hibernated`, resolves the resume point, checks the
+      record's stored `meta_digest` against a fresh `compute_meta_digest()`,
+      runs `verify_content`, builds a `SynthesisInput` naming the session and
+      the generation the resume opens, admits it through
+      `mvm_hostd::plan_admission::admit_for_run`, and only then transitions
+      the record. Still open: nothing calls `ApprovalLedger::head()` to
+      produce the value either side of the step-2 comparison carries —
+      `resume_session` reads its caller-supplied `current_approval_head`
+      straight off the record; `PostRestore` fabric re-registration and
+      credential minting are not implemented; the synthesized plan carries
+      `grants: None`, so a resumed session re-arms neither a wall-clock bound
+      nor a CPU share; a session parked with `approval_head: None` resumes
+      with no ledger fence at all. WS5 is partial: retention classes, expiry,
+      a scheduler that calls `demote`, and actual byte movement between tiers
+      remain undelivered.
 
       WS6 and WS7 are DONE, both via
       `specs/plans/2026-08-19-session-cli-and-audit.md` and
@@ -554,61 +571,61 @@ resume` takes a `current_head` and refuses when it differs from the
       untouched.
 
 - [~] **Admission-bound AI assurance sessions** —
-  `specs/plans/2026-08-17-admission-bound-ai-assurance-sessions.md`. W1–W4,
-  W6/W7, W7b landed and W5 partial: the envelope, the authority
-  intersection, the fail-closed outcome ladder, `host.assurance.v1`,
-  resolvable audit/receipt citations, the workload-facing
-  `AssuranceCampaign`, the boot-path session lifecycle, and
-  `collect_evidence` — cleanup read through the admission budget's own
-  liveness probe, disposability off the signed plan.
-  `observer_verified` is deliberately only "MVM recorded a probe", not an
-  independent observer, and a test pins that a real session still evaluates
-  `INCONCLUSIVE` for `ObserverMissing`. Landing W7b exposed two bugs the
-  fixtures had masked: the binding rejected every real `sha256:`-prefixed
-  plan id, and the probe handler compared the guest's session identity
-  against the supervisor's lookup key.
-  STILL OPEN: trusted hardware attestation and the full Scout-linked
-  certifying campaign. The supplied native x86_64 KVM host now proves the
-  concrete provider reaches a real Firecracker guest agent, observer,
-  exact cleanup, and host finalization; plan
-  `sha256:18a220846c25a6cec1f0b4f36dd4bfbab764f4e50671394e6da32acfcbd7ef16`
-  and grant digest
-  `sha256:b0991c541656cac6ebd02c27389a8b3c299b7cbadd6d4477653a0219545acf34`
-  are recorded. An identical retry replays the bounded terminal response
-  without a second VM. The run is `INCONCLUSIVE` because no TPM2/SEV-SNP/TDX
-  trust root is present and the probe reported no attempted effect. The
-  sibling now consumes MVM's published four-reference
-  `sha256:nul-separated-policy-refs-v1` vector over
-  `operator-network-v1`, `operator-egress-v1`, `operator-fs-v1`, and
-  `operator-tools-v1` and the exact digest
-  `sha256:5dd0de53b6d211f764728599e291e93a9491dc34f87596e906365fb74c95e0ff`.
-  A current Scout-linked attempt reached signed-plan admission but failed
-  closed before guest-agent startup on `mvm-oci-init` path-policy denial;
-  its identical retry replayed without a second execution.
+      `specs/plans/2026-08-17-admission-bound-ai-assurance-sessions.md`. W1–W4,
+      W6/W7, W7b landed and W5 partial: the envelope, the authority
+      intersection, the fail-closed outcome ladder, `host.assurance.v1`,
+      resolvable audit/receipt citations, the workload-facing
+      `AssuranceCampaign`, the boot-path session lifecycle, and
+      `collect_evidence` — cleanup read through the admission budget's own
+      liveness probe, disposability off the signed plan.
+      `observer_verified` is deliberately only "MVM recorded a probe", not an
+      independent observer, and a test pins that a real session still evaluates
+      `INCONCLUSIVE` for `ObserverMissing`. Landing W7b exposed two bugs the
+      fixtures had masked: the binding rejected every real `sha256:`-prefixed
+      plan id, and the probe handler compared the guest's session identity
+      against the supervisor's lookup key.
+      STILL OPEN: trusted hardware attestation and the full Scout-linked
+      certifying campaign. The supplied native x86_64 KVM host now proves the
+      concrete provider reaches a real Firecracker guest agent, observer,
+      exact cleanup, and host finalization; plan
+      `sha256:18a220846c25a6cec1f0b4f36dd4bfbab764f4e50671394e6da32acfcbd7ef16`
+      and grant digest
+      `sha256:b0991c541656cac6ebd02c27389a8b3c299b7cbadd6d4477653a0219545acf34`
+      are recorded. An identical retry replays the bounded terminal response
+      without a second VM. The run is `INCONCLUSIVE` because no TPM2/SEV-SNP/TDX
+      trust root is present and the probe reported no attempted effect. The
+      sibling now consumes MVM's published four-reference
+      `sha256:nul-separated-policy-refs-v1` vector over
+      `operator-network-v1`, `operator-egress-v1`, `operator-fs-v1`, and
+      `operator-tools-v1` and the exact digest
+      `sha256:5dd0de53b6d211f764728599e291e93a9491dc34f87596e906365fb74c95e0ff`.
+      A current Scout-linked attempt reached signed-plan admission but failed
+      closed before guest-agent startup on `mvm-oci-init` path-policy denial;
+      its identical retry replayed without a second execution.
 
 - [~] **Embedded-binary content store** — `specs/plans/2026-08-17-embedded-binary-content-store.md`.
-  Phases 1–2 landed: both nested legs of `crates/mvm-cli/build.rs` are keyed
-  on their real dependency closure rather than on `PROFILE == "debug"` plus
-  "the file exists", and the store lives outside `target/` so worktrees,
-  profiles and target triples share it. Cold build **359s → 45.5s**; the
-  build script within it **332.7s → 0.4s**; an `mvm-cli` edit no longer
-  re-runs either leg. The dev profile keeps its stale-embedded-binary trade
-  deliberately, but a miss now knows it is stale and says so via
-  `cargo:warning=`. Supersedes the freshness half of
-  `specs/plans/2026-08-15-aux-helper-binary-freshness.md`.
-  STILL OPEN: Phase 3 (phantom build.rs tests, `MVM_LIBKRUN_HEADER`
-  rerun-if-env-changed), Phase 4 (dead crate edges; `deps_audit` and the
-  tree-sitter grammars off the serial path; the `mvm-hostd` audit cluster),
-  Phase 5 (sccache 4.2% Rust hit rate, worktree hygiene)
+      Phases 1–2 landed: both nested legs of `crates/mvm-cli/build.rs` are keyed
+      on their real dependency closure rather than on `PROFILE == "debug"` plus
+      "the file exists", and the store lives outside `target/` so worktrees,
+      profiles and target triples share it. Cold build **359s → 45.5s**; the
+      build script within it **332.7s → 0.4s**; an `mvm-cli` edit no longer
+      re-runs either leg. The dev profile keeps its stale-embedded-binary trade
+      deliberately, but a miss now knows it is stale and says so via
+      `cargo:warning=`. Supersedes the freshness half of
+      `specs/plans/2026-08-15-aux-helper-binary-freshness.md`.
+      STILL OPEN: Phase 3 (phantom build.rs tests, `MVM_LIBKRUN_HEADER`
+      rerun-if-env-changed), Phase 4 (dead crate edges; `deps_audit` and the
+      tree-sitter grammars off the serial path; the `mvm-hostd` audit cluster),
+      Phase 5 (sccache 4.2% Rust hit rate, worktree hygiene)
 
 - [~] **Agent tool and memory planes**
-  (`specs/plans/2026-08-18-agent-tool-and-memory-planes.md`). Opened
-  2026-08-18; no workstream started. Design only: ADR-045 gained sections
-  18-19 (an agent's tool surface is broker dispatch, and the catalog
-  derives from `ExecutionPlan.services` rather than from anything the guest
-  or its model says) and ADR-047 defines the memory plane. Sequenced behind
-  `specs/plans/2026-08-18-durable-agent-sessions.md` WS1, which owns the
-  session identity memory keys on and is itself unmerged.
+      (`specs/plans/2026-08-18-agent-tool-and-memory-planes.md`). Opened
+      2026-08-18; no workstream started. Design only: ADR-045 gained sections
+      18-19 (an agent's tool surface is broker dispatch, and the catalog
+      derives from `ExecutionPlan.services` rather than from anything the guest
+      or its model says) and ADR-047 defines the memory plane. Sequenced behind
+      `specs/plans/2026-08-18-durable-agent-sessions.md` WS1, which owns the
+      session identity memory keys on and is itself unmerged.
   - [x] WS1 — catalog derivation from the signed admission (PR #2705)
   - [x] WS2 — per-capability argument policy inside the descriptor digest (#2705)
   - [~] WS3 — the guest-side-client gate landed; the host-side adapter has not
@@ -618,21 +635,21 @@ resume` takes a `current_head` and refuses when it differs from the
   - [ ] WS10 — `mvmctl memory` read-only surface, tests + BDD
 
 - [~] **Launch path as declared stages**
-  (`specs/plans/2026-08-15-launch-path-as-declared-stages.md`). Opened
-  2026-08-15; no workstream started. Split out of the artifact-derived
-  runtime identity work, which landed first so its cache-staleness class
-  would not muddy these timing measurements.
+      (`specs/plans/2026-08-15-launch-path-as-declared-stages.md`). Opened
+      2026-08-15; no workstream started. Split out of the artifact-derived
+      runtime identity work, which landed first so its cache-staleness class
+      would not muddy these timing measurements.
   - [ ] WS1 — split the two `attach_*` calls into `lookup_*` + `attach_*`
   - [ ] WS2 — stage `resolve_launch`, parallel probes in stage 2
   - [ ] WS3 — `SubPhase` per stage + `every_launch_stage_is_timed`
   - [ ] WS4 — golden-compare `VmStartConfig`, record `dispatch_window_ms()`
 
 - [~] **Plan 335 — merge-queue throughput.** Automatic architecture and kernel
-  checks now share the main CI scope gate, required check names are
-  preserved transitively, duplicate runner allocations are removed, and
-  trusted default-branch Rust/Nix cache warming is added. Repository and
-  host validation are green; landing, Linux CI, and verified live queue
-  settings remain open.
+      checks now share the main CI scope gate, required check names are
+      preserved transitively, duplicate runner allocations are removed, and
+      trusted default-branch Rust/Nix cache warming is added. Repository and
+      host validation are green; landing, Linux CI, and verified live queue
+      settings remain open.
 
 - [~] Plan 330 — Decision provenance layer
   (`specs/plans/330-decision-provenance-layer.md`)
@@ -693,7 +710,7 @@ resume` takes a `current_head` and refuses when it differs from the
   - [x] Persistent Stage 0 ext4 reuse requires clean filesystem state; cold
         repair and warm reuse pass live ARM64 builder runs without ext4 errors
   - [~] Workspace tests expose unrelated non-deterministic `mvm-hostd` failures;
-    Linux all-target Clippy remains for CI or a supported builder entry point
+        Linux all-target Clippy remains for CI or a supported builder entry point
 
 - [x] Plan 316 — website and docs redesign (agent design review completed and maintainer sign-off received; merged via #2438)
       (`specs/plans/316-website-redesign.md`)
@@ -845,7 +862,7 @@ resume` takes a `current_head` and refuses when it differs from the
         privileged init path still fails closed
   - [x] Issue #2522 — the `EPERM` tolerance above covered the workload spawn
         but not the agent's own drop, which ran the same bounding-set narrowing
-        _after_ `set_capabilities` had already removed `CAP_SETPCAP`. Every
+        *after* `set_capabilities` had already removed `CAP_SETPCAP`. Every
         `machine run --image` failed: the errno left the `pre_exec` hook, the
         agent never started, and the host timed out waiting for it. The
         narrowing now runs before the identity change, while the caller still
@@ -1979,6 +1996,9 @@ resume` takes a `current_head` and refuses when it differs from the
         persistence, chain-signed through the existing per-VM signer
   - [x] Exact tenant audit-chain anchor required before transcript key unwrap
         and decryption, with hermetic operator-path BDD coverage
+  - [x] Production operator `disarm` now emits that anchor from the VM's real
+        persisted admitted plan, refuses missing or cross-tenant bindings, and
+        does not duplicate the signed entry when retried
 
 - [x] Backend crate separation + HVF DAX + QEMU virtio-fs
       (**PR #2220**, branch `feat/backend-crate-separation`)
@@ -2062,7 +2082,7 @@ resume` takes a `current_head` and refuses when it differs from the
         `mvm-contract`'s 9 no_std narrowings must stay local or `std` leaks
         into a wasm32 crate)
   - [x] Phase 5.5 — the gate for the class: `xtask
-    check-workspace-dep-inheritance`, plus a second
+        check-workspace-dep-inheritance`, plus a second
         `check-closure-budget` target for `aarch64-apple-darwin` (currently
         ungated, which is why the `hickory-proto` edge survived). Each proven
         red: re-pinning `thiserror = "1"`, re-adding `memchr`, and re-declaring

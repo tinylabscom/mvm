@@ -166,6 +166,25 @@ fn run(addr: std::net::SocketAddr, host_port: u32) -> ExitCode {
         }
     };
 
+    // The ICMP mediator serves `ping` for the unprivileged workload, which
+    // cannot read the signing key this process just loaded. Its own blocking
+    // thread rather than a task on this runtime: it opens a blocking FlowMux
+    // session per client, and `block_on` inside the runtime would panic. Bound
+    // here rather than on the thread, because the guest init waits only for the
+    // proxy port and a workload can already be running by the time a lazily
+    // bound listener is scheduled. A bind failure is not fatal — every other
+    // kind of egress still works without `ping`.
+    match mvm_agentd::icmp_mediator::bind_icmp_mediator() {
+        Ok(listener) => {
+            std::thread::spawn(move || {
+                if let Err(e) = mvm_agentd::icmp_mediator::serve_icmp_mediator(&listener) {
+                    eprintln!("mvm-egress-client: ICMP mediator stopped: {e:#}");
+                }
+            });
+        }
+        Err(e) => eprintln!("mvm-egress-client: ICMP mediator not serving: {e:#}"),
+    }
+
     match rt.block_on(mvm_agentd::flowmux_egress::run(addr, client)) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
