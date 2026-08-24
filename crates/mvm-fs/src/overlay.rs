@@ -74,7 +74,11 @@ pub const LOCAL_BUILD_EPOCH_FILE: &str = "BUILD_EPOCH";
 /// Guest-absolute paths every overlay ext4 payload must carry. The overlay is
 /// the single source of guest runtime binaries, so a missing entry means a
 /// boot that silently strands the agent — fail at resolve time instead.
-const REQUIRED_OVERLAY_GUEST_PATHS: &[&str] = &[
+///
+/// Public because every fixture that builds "a valid overlay" has to agree with
+/// it, and each hand-written copy is one an added entry silently invalidates —
+/// four of them existed, and adding `/forward-proxy` broke three.
+pub const REQUIRED_OVERLAY_GUEST_PATHS: &[&str] = &[
     "/agent",
     "/netinit",
     "/seccomp-apply",
