@@ -1404,6 +1404,22 @@ mod tests {
         );
     }
 
+    #[test]
+    fn unbound_name_teaching_uses_the_exact_attempt_ceiling() {
+        let registry = Registry::new();
+
+        for attempt in 1..=MAX_UNBOUND_ATTEMPTS_PER_NAME {
+            assert!(
+                registry.should_still_teach("host.time.v1"),
+                "attempt {attempt} must still teach the admitted surface"
+            );
+        }
+        assert!(
+            !registry.should_still_teach("host.time.v1"),
+            "the first attempt past the ceiling must be terse"
+        );
+    }
+
     #[tokio::test]
     async fn refusal_tracking_cannot_be_grown_without_bound() {
         let registry = Registry::new();

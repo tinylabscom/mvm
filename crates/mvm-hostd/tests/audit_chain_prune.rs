@@ -70,9 +70,20 @@ async fn a_pruned_chain_verifies_and_reports_its_gap() {
     let signer = rotated(dir.path(), 90).await;
     assert!(dir.path().join("local.seg-000002.jsonl").exists());
 
+    let expected_entries = u64::try_from(
+        verify_segment_set(dir.path(), "local", &key().verifying_key())
+            .unwrap()
+            .segments
+            .iter()
+            .filter(|segment| segment.seq <= 2 && !segment.active)
+            .filter_map(|segment| segment.entries)
+            .sum::<usize>(),
+    )
+    .expect("fixture entry count fits in u64");
+
     let pruned = signer.prune_through(&tenant(), 2).unwrap();
     assert_eq!(pruned.through, 2);
-    assert!(pruned.entries > 0);
+    assert_eq!(pruned.entries, expected_entries);
 
     assert!(!dir.path().join("local.seg-000001.jsonl").exists());
     assert!(!dir.path().join("local.seg-000002.jsonl").exists());

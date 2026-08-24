@@ -272,7 +272,12 @@
       "package": "mvm-hostd",
       "claims": [
         13
-      ]
+      ],
+      "scope": {
+        "examine_re": "prepare_request|SubstitutionDriver.*substitute",
+        "why": "This file enters claim 13's mutation surface because it implements the generically named `SubstitutionDriver::substitute` witness adapter. The claim-relevant boundary is that adapter plus `prepare_request`, which refuses substitution errors before forwarding. The rest of this 4,700-line module is FlowMux transport, streaming, redaction, AI metering, and vsock plumbing covered by its focused unit, integration, and fuzz suites rather than the no-secret-over-broker-channel claim.",
+        "excluded_tracked_by": "#2033"
+      }
     },
     {
       "path": "crates/mvm-hostd/src/supervisor/wall_clock.rs",
@@ -999,6 +1004,11 @@
       "reason": "the discriminating input is a bare relative name that exists as a file or directory in the process's current directory. A test cannot create one without writing into the repo working tree or mutating process-global CWD shared by parallel tests under the documented cargo test fallback."
     },
     {
+      "file": "crates/mvm-contract/src/policy/network_policy.rs",
+      "mutant": "replace AiPolicy::disabled -> Self with Default::default()",
+      "reason": "provably equivalent: `AiPolicy::disabled` returns `Self::default()` directly. No test can distinguish the two expressions; the adjacent constructor test pins disabled equality and separately proves that `metered` differs by enabling metering."
+    },
+    {
       "file": "crates/mvm-contract/src/protocol/capability_negotiation.rs",
       "mutant": "replace ClientOperationCapabilities::builder -> ClientOperationCapabilitiesBuilder with Default::default()",
       "reason": "provably equivalent: `ClientOperationCapabilities::builder` returns `ClientOperationCapabilitiesBuilder::default()` directly, so the mutant evaluates the identical expression. No test can distinguish the two, while the adjacent builder test asserts that `build` preserves every enabled operation."
@@ -1035,11 +1045,6 @@
     },
     {
       "file": "crates/mvm-hostd/src/supervisor/audit_file.rs",
-      "mutant": "replace > with == in highest_sealed_segment",
-      "reason": "observable only through `read_dir` ordering, which is unspecified. Under `==` the scan keeps whatever entry the directory yields first; whether that differs from the maximum depends on the filesystem, so a test asserting the difference would pass or fail on the host rather than on the code. `the_highest_sequence_wins_not_the_lowest` covers the sign flip, which is the mutation that is deterministically wrong."
-    },
-    {
-      "file": "crates/mvm-hostd/src/supervisor/audit_file.rs",
       "mutant": "replace > with >= in highest_sealed_segment",
       "reason": "equivalent. Segment file names are unique per sequence, so two entries never compare equal and `>` and `>=` select the same maximum on every input. No test can distinguish them because no input distinguishes them."
     },
@@ -1047,6 +1052,31 @@
       "file": "crates/mvm-hostd/src/supervisor/audit_file.rs",
       "mutant": "replace RotationPolicy::never -> Self with Default::default()",
       "reason": "RotationPolicy::never is a constant constructor; the policy behavior is exercised by audit-file integration tests that verify rotation decisions."
+    },
+    {
+      "file": "crates/mvm-hostd/src/supervisor/audit_file.rs",
+      "mutant": "replace * with +",
+      "reason": "changes the cursor tail's initial read window from 64 KiB to 1088 bytes. The backwards scan still widens until it reaches the final record or the file start, so this only adds reads; long-record and multibyte-boundary tests prove the result is unchanged."
+    },
+    {
+      "file": "crates/mvm-hostd/src/supervisor/audit_file.rs",
+      "mutant": "replace * with + in FileAuditSigner::restore_cursor",
+      "reason": "changes geometric tail-window growth into linear growth. Both paths monotonically widen to the file length and return the same final record hash; the mutant is slower but cannot change acceptance or chain contents."
+    },
+    {
+      "file": "crates/mvm-hostd/src/supervisor/audit_file.rs",
+      "mutant": "replace == with != in FileAuditSigner::prune_through",
+      "reason": "the segment set is fully verified for continuity immediately before this defensive presence check. For a valid multi-segment prefix both predicates find an entry; for a missing segment verification has already refused the prune. The only distinguishable single-segment case makes the mutant fail closed."
+    },
+    {
+      "file": "crates/mvm-hostd/src/supervisor/audit_file.rs",
+      "mutant": "replace > with == in FileAuditSigner::prune_through",
+      "reason": "after verification and range validation, `through` names an existing sealed segment and a later active segment exists. This side-effect-free existence check therefore succeeds with either the named segment or its successor; the active segment survival and past-end refusal are asserted separately."
+    },
+    {
+      "file": "crates/mvm-hostd/src/supervisor/audit_file.rs",
+      "mutant": "replace > with >= in FileAuditSigner::prune_through",
+      "reason": "after verification and range validation, `through` names an existing sealed segment and a later active segment exists. Both comparisons therefore find an entry, and the result is used only as an existence proof; no input reaching this point distinguishes them."
     },
     {
       "file": "crates/mvm-hostd/src/supervisor/network/stages.rs",

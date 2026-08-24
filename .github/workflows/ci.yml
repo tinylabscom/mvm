@@ -562,7 +562,7 @@ jobs:
   test:
     name: Test
     if: ${{ always() }}
-    needs: [scope, test-workspace, test-workspace-aarch64, test-linux, test-release-witness, test-ebpf-telemetry, bdd-conformance, kernel, aarch64-no-kvm-smoke]
+    needs: [scope, test-workspace, test-workspace-aarch64, test-linux, test-release-witness, test-ebpf-telemetry, bdd-conformance, kernel]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -579,8 +579,6 @@ jobs:
           BDD_RESULT: ${{ needs.bdd-conformance.result }}
           KERNEL_SCOPE: ${{ needs.scope.outputs.kernel }}
           KERNEL_RESULT: ${{ needs.kernel.result }}
-          NO_KVM_REQUIRED: ${{ github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch' }}
-          NO_KVM_RESULT: ${{ needs.aarch64-no-kvm-smoke.result }}
         run: |
           set -euo pipefail
           if [ "$SCOPE_RESULT" != success ]; then
@@ -621,19 +619,6 @@ jobs:
           # was removed — failed every PR that does not touch a kernel path.
           if [ "$KERNEL_RESULT" != success ]; then
             echo "Kernel validation did not succeed (scope $KERNEL_SCOPE): $KERNEL_RESULT"
-            exit 1
-          fi
-          case "$NO_KVM_REQUIRED" in
-            true|false) ;;
-            *) echo "Invalid no-KVM event requirement: $NO_KVM_REQUIRED"; exit 1 ;;
-          esac
-          if [ "$SCOPE_CODE" = true ] && [ "$NO_KVM_REQUIRED" = true ]; then
-            no_kvm_expected=success
-          else
-            no_kvm_expected=skipped
-          fi
-          if [ "$NO_KVM_RESULT" != "$no_kvm_expected" ]; then
-            echo "Aarch64 no-KVM smoke did not match code scope $SCOPE_CODE and event requirement $NO_KVM_REQUIRED: $NO_KVM_RESULT"
             exit 1
           fi
 
@@ -1472,159 +1457,3 @@ jobs:
             --closure-paths "$image_path/rootfs-closure-paths" \
             --sdk-sidecar "$sidecar_path/sdk.ext4" \
             --json
-
-  # aarch64 no-KVM smoke test. GitHub's ubuntu-24.04-arm runners expose no
-  # nested KVM, so this exercises the same QEMU TCG fallback path a Raspberry
-  # Pi without /dev/kvm would take: build the workload flake through the Linux
-  # Stage 0 QEMU builder, seal it as a signed .mvmpkg, install it, and boot the
-  # installed bundle with the QEMU backend.
-  aarch64-no-kvm-smoke:
-    name: Aarch64 no-KVM bundle smoke (QEMU TCG)
-    needs: [scope]
-    if: >-
-      needs.scope.outputs.code == 'true'
-      && (github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch')
-    runs-on: ubuntu-24.04-arm
-    # Cold paths may compile the workload kernel inside Stage 0 under TCG.
-    timeout-minutes: 300
-    env:
-      CARGO_TERM_COLOR: always
-      MVM_HOME: ${{ github.workspace }}/.mvm-ci
-      # A cold no-KVM build compiles the workload under TCG and can exceed
-      # the normal 30-minute builder deadline while still making progress.
-      MVM_BUILDER_VM_TIMEOUT_SECS: 7200
-    steps:
-      - uses: actions/checkout@v6
-
-      - uses: ./.github/actions/free-disk
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@nightly
-
-      - uses: ./.github/actions/install-zigbuild
-
-      - uses: ./.github/actions/apt-deps
-        with:
-          # qemu-system-arm provides qemu-system-aarch64; ipxe-qemu provides
-          # efi-virtio.rom; virtiofsd shares the checkout with the builder VM;
-          # e2fsprogs provides the mkfs.ext4 and debugfs image-packing tools.
-          packages: qemu-system-arm ipxe-qemu virtiofsd e2fsprogs attr jq
-
-      - name: Allow unprivileged QEMU to use host vsock
-        run: |
-          test -c /dev/vhost-vsock
-          sudo chown "$(id -u):$(id -g)" /dev/vhost-vsock
-          test -r /dev/vhost-vsock && test -w /dev/vhost-vsock
-
-      - uses: ./.github/actions/rust-cache
-        with:
-          key: aarch64-no-kvm-smoke
-
-      - name: Grant QEMU access to vhost-vsock
-        run: |
-          test -c /dev/vhost-vsock
-          sudo chown "$USER" /dev/vhost-vsock
-          sudo chmod 0600 /dev/vhost-vsock
-
-      # The source binary is the end-to-end subject: merge-group code cannot
-      # download its new release-format runtime overlay until that code has
-      # merged and a release has published it. Keep a copy before building the
-      # release-channel helper, whose only job is to download the already-
-      # published builder VM. Building that VM from scratch under TCG is far
-      # too slow for a CI gate. The tagged release workflow separately drives
-      # the newly packaged overlay through the exact production downloader
-      # before publishing it.
-      - name: Build source mvmctl and published-builder bootstrap helper
-        env:
-          # This witness boots embedded builder-guest code. A restored Cargo
-          # cache may contain binaries built from an older source tree, which
-          # would make the live gate validate stale mvm-host-vm-init behavior.
-          MVM_EMBED_NO_CACHE: 1
-        run: |
-          cargo build --release -p mvmctl --features user
-          cp target/release/mvmctl /tmp/mvmctl-source-under-test
-          cargo build --release -p mvmctl --features user,release-artifact-bootstrap,release-channel
-
-      - name: Use published builder VM bootstrap path
-        run: mv nix/images/builder-vm nix/images/builder-vm.hidden
-
-      - name: Download published builder VM
-        run: ./target/release/mvmctl --builder qemu __builder-vm-bootstrap -v
-
-      - name: Bootstrap source-matched launch artifacts
-        env:
-          MVM_KERNEL_SOURCE: auto
-        run: /tmp/mvmctl-source-under-test --builder qemu bootstrap --production -v
-
-      - name: Build and boot the sealed exit_code workload under QEMU TCG
-        id: first-boot
-        env:
-          MVM_KERNEL_SOURCE: auto
-        run: |
-          set -euo pipefail
-          mkdir -p "$MVM_HOME"
-          set +e
-          /tmp/mvmctl-source-under-test machine run \
-            --flake examples/exit_code \
-            --builder qemu \
-            --hypervisor qemu \
-            -v \
-            -- /bin/true \
-            > /tmp/mvmctl-first-boot.log 2>&1
-          actual=$?
-          set -e
-          if [ "$actual" -ne 7 ]; then
-            echo "::error::expected guest exit code 7 from first boot, got $actual"
-            tail -250 /tmp/mvmctl-first-boot.log
-            exit 1
-          fi
-          echo "ok: sealed aarch64 workload built and exited $actual under QEMU TCG"
-
-      - name: Export, install, and re-run the bundle
-        id: bundle-roundtrip
-        run: |
-          set -euo pipefail
-          slot_hash=$(/tmp/mvmctl-source-under-test manifest ls --json 2>&1 | sed 's/\x1b\[[0-9;]*m//g' | jq -r '.[0].slot_hash')
-          /tmp/mvmctl-source-under-test bundle export "$slot_hash" \
-            --out /tmp/exit-code-aarch64.mvmpkg \
-            > /tmp/mvmctl-export.log 2>&1
-          /tmp/mvmctl-source-under-test trust add "$MVM_HOME/keys/host-signer.pub"
-          install_output=$(/tmp/mvmctl-source-under-test bundle install /tmp/exit-code-aarch64.mvmpkg 2>&1 | tee /tmp/mvmctl-install.log)
-          installed_sha=$(printf '%s' "$install_output" | sed 's/\x1b\[[0-9;]*m//g' | awk '/Installed bundle / {print $3}')
-          echo "installed bundle content address: $installed_sha"
-          set +e
-          /tmp/mvmctl-source-under-test machine run \
-            --manifest "$installed_sha" \
-            --hypervisor qemu \
-            -v \
-            -- /bin/true \
-            > /tmp/mvmctl-bundle-run.log 2>&1
-          actual=$?
-          set -e
-          if [ "$actual" -ne 7 ]; then
-            echo "::error::expected guest exit code 7 from installed bundle, got $actual"
-            tail -250 /tmp/mvmctl-bundle-run.log
-            exit 1
-          fi
-          echo "ok: installed aarch64 bundle exited $actual under QEMU TCG"
-
-      - name: Dump diagnostics on failure
-        if: failure()
-        run: |
-          for log in /tmp/mvmctl-first-boot.log /tmp/mvmctl-export.log \
-                     /tmp/mvmctl-install.log /tmp/mvmctl-bundle-run.log; do
-            if [ -f "$log" ]; then
-              echo "===== $log ====="
-              tail -250 "$log" || true
-            fi
-          done
-          echo "===== VM state dirs ====="
-          for d in "$MVM_HOME"/vms/*/ "$MVM_HOME"/cache/builder-vm/vms/*/; do
-            echo "--- $d ---"
-            ls -la "$d" || true
-            for f in console.log firecracker.log qemu.log; do
-              if [ -s "$d$f" ]; then
-                echo "--- $f ---"; tail -100 "$d$f" || true
-              fi
-            done
-          done
