@@ -211,6 +211,7 @@ pub fn build_runtime_overlay_from_guest_binaries(
         (&bins.egress_client, root.join("egress-client")),
         (&bins.addon_dns, root.join("addon-dns")),
         (&bins.exit_report, root.join("exit-report")),
+        (&bins.forward_proxy, root.join("forward-proxy")),
     ];
     par_map(binaries.to_vec(), |(src, dst)| {
         stage_runtime_overlay_binary(src, &dst)
@@ -1246,6 +1247,7 @@ mod tests {
             "/seccomp-apply",
             "/runner",
             "/egress-client",
+            "/forward-proxy",
             "/addon-dns",
             "/exit-report",
         ];
@@ -2163,6 +2165,7 @@ mod tests {
             egress_client: make_bin("egress-client"),
             addon_dns: make_bin("addon-dns"),
             exit_report: make_bin("exit-report"),
+            forward_proxy: make_bin("forward-proxy"),
             verity_init: make_bin("verity-init"),
         };
 

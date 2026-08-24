@@ -808,6 +808,35 @@ fn mk_guest_assigns_ipv4_loopback_before_starting_guest_services() {
 }
 
 #[test]
+fn mk_guest_starts_the_forward_proxy_before_dropping_privileges() {
+    let path = nix_dir().join("lib").join("mk-guest.nix");
+    let content = fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("nix/lib/mk-guest.nix must be present: {e}"));
+    let proxy_start = content
+        .find("# Stage 2.49 — loopback forward proxy")
+        .expect("guest init starts the forward proxy");
+    let agent_start = content[proxy_start..]
+        .find("# Stage 2.5 — guest agent supervisor")
+        .map(|offset| proxy_start + offset)
+        .expect("the unprivileged guest agent starts after the forward proxy");
+    let proxy_block = &content[proxy_start..agent_start];
+
+    assert!(
+        proxy_block.contains("/mvm/runtime/forward-proxy")
+            && proxy_block.contains("/usr/local/bin/mvm-forward-proxy"),
+        "both runtime-source policies must resolve the privileged helper"
+    );
+    assert!(
+        proxy_block.contains("/bin/busybox setsid \"$MVM_FORWARD_PROXY_BIN\" &"),
+        "the init-owned process must start the proxy directly"
+    );
+    assert!(
+        !proxy_block.contains("mvm-setpriv"),
+        "the proxy reads the root-only FlowMux key and must not inherit the workload uid"
+    );
+}
+
+#[test]
 fn mk_guest_seeds_vsock_egress_dns_before_privilege_drop() {
     let path = nix_dir().join("lib").join("mk-guest.nix");
     let content = fs::read_to_string(&path)

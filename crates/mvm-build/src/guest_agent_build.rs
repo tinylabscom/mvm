@@ -131,6 +131,7 @@ pub struct RuntimeOverlayGuestBinaries {
     pub addon_dns: PathBuf,
     pub exit_report: PathBuf,
     pub ping: PathBuf,
+    pub forward_proxy: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -145,6 +146,7 @@ pub struct RuntimeOverlayGuestLayout {
     pub addon_dns: PathBuf,
     pub exit_report: PathBuf,
     pub ping: PathBuf,
+    pub forward_proxy: PathBuf,
 }
 
 impl RuntimeOverlayGuestLayout {
@@ -164,6 +166,7 @@ impl RuntimeOverlayGuestLayout {
             addon_dns: dir.join("addon-dns"),
             exit_report: dir.join("exit-report"),
             ping: dir.join("ping"),
+            forward_proxy: dir.join("forward-proxy"),
             dir,
         }
     }
@@ -178,6 +181,7 @@ impl RuntimeOverlayGuestLayout {
             && self.addon_dns.is_file()
             && self.exit_report.is_file()
             && self.ping.is_file()
+            && self.forward_proxy.is_file()
     }
 
     fn binaries(&self) -> RuntimeOverlayGuestBinaries {
@@ -191,6 +195,7 @@ impl RuntimeOverlayGuestLayout {
             addon_dns: self.addon_dns.clone(),
             exit_report: self.exit_report.clone(),
             ping: self.ping.clone(),
+            forward_proxy: self.forward_proxy.clone(),
         }
     }
 }
@@ -625,6 +630,8 @@ fn build_runtime_overlay_guest_binaries_into_cache(
         "mvm-addon-dns".to_string(),
         "--bin".to_string(),
         "mvm-exit-report".to_string(),
+        "--bin".to_string(),
+        "mvm-forward-proxy".to_string(),
         // mvm-egress-client + mvm-addon-dns are the async loopback helper
         // bins gated behind mvm-agentd's `addons` feature (see its
         // Cargo.toml) so the sealed agent's default build stays tokio-free.
@@ -642,6 +649,7 @@ fn build_runtime_overlay_guest_binaries_into_cache(
     install_one(&output_dir.join("mvm-egress-client"), &layout.egress_client)?;
     install_one(&output_dir.join("mvm-addon-dns"), &layout.addon_dns)?;
     install_one(&output_dir.join("mvm-exit-report"), &layout.exit_report)?;
+    install_one(&output_dir.join("mvm-forward-proxy"), &layout.forward_proxy)?;
 
     Ok(layout.binaries())
 }

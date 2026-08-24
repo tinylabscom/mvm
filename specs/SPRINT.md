@@ -2848,3 +2848,16 @@ BDD rerun exposed outer nightly-only Cargo flags leaking
 into the pinned stable nested cross-compiler; nested builds now clear every
 outer toolchain, wrapper, and Rust flag variable, with a focused regression
 test covering the boundary.
+
+## 2026-08-23 FlowMux forward-proxy identity repair
+
+- [x] Move the secret-substitution forward proxy out of the workload-uid guest
+      agent and into an init-owned helper that can read the root-only FlowMux
+      signing key on both guest init paths.
+- [x] Ship the helper in baked and runtime-overlay artifacts, fail overlay
+      validation when it is missing, and preserve the shared-kernel Unix-socket
+      endpoint path.
+- [x] Log the privileged relay failure chain while returning only a stable,
+      non-sensitive failure class to the workload.
+- [ ] Capture the live secret-bearing `OpenHttp` substitution witness; the
+      owning FlowMux plan keeps that hardware-backed acceptance item open.
