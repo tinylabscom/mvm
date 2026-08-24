@@ -99,10 +99,13 @@ Tests: `a_relay_failure_is_reported_without_exposing_its_cause`, the
 `resolve_forward_proxy_for_*` pair, `the_egress_client_and_the_forward_proxy_resolve_by_the_same_rule`,
 and `resolve_rejects_overlay_payload_missing_forward_proxy`.
 
-## Noticed, not fixed
+## Noticed, not fixed — [#2828](https://github.com/tinylabscom/mvm/issues/2828)
 
-`mk-guest.nix` launches `mvm-egress-client` under `setpriv --reuid=<agentUid>`, and that
-client mounts the identity drive itself — which needs `CAP_SYS_ADMIN`, and the launch grants
-only `net_bind_service`. If that reads the way it looks, the Nix-built tier's egress client
-cannot provision its own identity either. Not touched here: it is a different failure in a
-different tier, and this change gives that tier a working forward proxy regardless.
+The third instance of this family, in the Nix-built tier. `mk-guest.nix` launches
+`mvm-egress-client` under `setpriv --reuid=990 --no-new-privs` with `net_bind_service` as its
+only capability, and that client is the process the same file delegates identity provisioning
+to — which mounts the labelled drive with a raw `libc::mount`, needing `CAP_SYS_ADMIN`. Both
+Rust inits do that step as root before dropping privilege; only the shell `/init` defers it to
+a process it has already deprivileged. Filed with the chain rather than fixed here: a
+different failure in a different tier, and this change gives that tier a working forward proxy
+either way.
