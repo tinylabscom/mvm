@@ -586,6 +586,10 @@ mod tests {
         workflow("ci.yml")
     }
 
+    fn ci_full_workflow() -> String {
+        workflow("ci-full.yml")
+    }
+
     fn workflow(name: &str) -> String {
         std::fs::read_to_string(
             Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -734,8 +738,7 @@ mod tests {
         assert!(test.contains("name: Test"));
         assert!(test.contains(
             "needs: [scope, test-workspace, test-workspace-aarch64, test-linux, \
-             test-release-witness, test-ebpf-telemetry, bdd-conformance, kernel, \
-             aarch64-no-kvm-smoke]"
+             test-release-witness, test-ebpf-telemetry, bdd-conformance, kernel]"
         ));
 
         // Every lane the aggregate names must also be read back in the loop that
@@ -752,7 +755,6 @@ mod tests {
             "\"$EBPF_RESULT\"",
             "\"$BDD_RESULT\"",
             "\"$KERNEL_RESULT\"",
-            "\"$NO_KVM_RESULT\"",
         ] {
             assert!(
                 test.contains(expected),
@@ -906,7 +908,7 @@ mod tests {
 
     #[test]
     fn aarch64_no_kvm_smoke_grants_runner_vhost_vsock_access() {
-        let workflow = ci_workflow();
+        let workflow = ci_full_workflow();
         let smoke = job_block(&workflow, "aarch64-no-kvm-smoke");
         assert!(
             smoke.contains("MVM_BUILDER_VM_TIMEOUT_SECS: 7200"),

@@ -1264,6 +1264,16 @@ mod tests {
     }
 
     #[test]
+    fn ai_policy_constructors_preserve_metering_intent() {
+        assert_eq!(AiPolicy::disabled(), AiPolicy::default());
+
+        let policy = AiPolicy::metered();
+        assert!(policy.metering);
+        assert_eq!(policy.budget, None);
+        assert_ne!(policy, AiPolicy::default());
+    }
+
+    #[test]
     fn network_policy_with_ai_roundtrips() {
         let policy = NetworkPolicy::AllowList {
             rules: vec![HostPort::new("api.openai.com", 443)],
