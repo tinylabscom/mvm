@@ -804,6 +804,12 @@ mod runtime_overlay_attach_tests {
                 xattrs: Vec::new(),
             },
             Node::File {
+                path: "/forward-proxy".into(),
+                mode: 0o555,
+                data: b"forward-proxy".to_vec(),
+                xattrs: Vec::new(),
+            },
+            Node::File {
                 path: "/VERSION".into(),
                 mode: 0o444,
                 data: format!("{version}\n").into_bytes(),
