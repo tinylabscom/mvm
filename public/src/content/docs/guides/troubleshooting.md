@@ -26,6 +26,7 @@ mvmctl cache repair
 This clears `~/.mvm/cache/builder-vm/` so the next `mvmctl bootstrap`/`mvmctl build` cold-rebuilds it. Use it for a dangling-store error such as `error: path '/nix/store/…-source/flake.nix' does not exist`.
 
 Or for a full reset:
+
 ```bash
 mvmctl env uninstall
 mvmctl bootstrap
@@ -89,8 +90,8 @@ thread 'fc_vcpu 1' panicked at .../virtio/mmio.rs:320:
 Failed to activate device: BadActivate
 ```
 
-**Cause**: A from-scratch Stage 0 builder bootstrap against a *completely
-isolated, empty* cache (`MVM_HOME` pointed at a fresh temp dir — e.g. the `core_demo_e2e` smoke test under full
+**Cause**: A from-scratch Stage 0 builder bootstrap against a _completely
+isolated, empty_ cache (`MVM_HOME` pointed at a fresh temp dir — e.g. the `core_demo_e2e` smoke test under full
 isolation) can panic in the libkrun guest during virtio device activation,
 before userspace. The Stage 0 device topology is identical to a warm build, so
 this is not a device-count problem; it surfaces in the upstream VMM's
@@ -130,10 +131,34 @@ Check `mvmctl doctor` for the resolved network backend, and
 Snapshot may be corrupted after a Firecracker version change.
 
 **Fix**: Delete the snapshot and cold boot:
+
 ```bash
 mvmctl build <project-dir> --force
 mvmctl machine run --flake <project-dir> --name <name> -d
 ```
+
+## QEMU backend
+
+### `qemu-system-aarch64` or `mvmctl __qemu-vsock-bridge` linger after a run
+
+After `mvmctl machine run --hypervisor qemu ...` exits, the CLI should reap both
+the QEMU process and its detached `mvmctl __qemu-vsock-bridge` child. If either
+process is still alive after the command returns, the `mvmctl` binary you ran is
+likely stale — the teardown fix lives in the CLI binary itself.
+
+**Fix**: rebuild from source and make sure that binary is the one on your PATH:
+
+```bash
+cargo build --release --bin mvmctl
+# If you keep a manually-copied bin/mvmctl, recopy it:
+cp target/release/mvmctl bin/mvmctl
+```
+
+### Preserving transient VM state for debugging
+
+By default, transient runs remove their per-VM state directory under
+`~/.mvm/vms/<name>/` at teardown. Set `MVM_PRESERVE_TRANSIENT_STATE=1` to keep
+console logs, pid files, and bridge specs after the run for inspection.
 
 ## Build Issues
 
@@ -189,6 +214,7 @@ error: flake does not provide attribute ...
 **Cause**: Your `flake.lock` references an old nixpkgs or `mvm` flake version that doesn't have the expected outputs.
 
 **Fix**:
+
 ```bash
 nix flake update
 mvmctl build --flake .
@@ -203,6 +229,7 @@ error: No space left on device
 **Cause**: The Nix store or dev VM disk is full.
 
 **Fix**:
+
 ```bash
 # Check Nix store size (mvmctl doctor warns if >20 GiB)
 mvmctl doctor
@@ -286,7 +313,7 @@ command and a second admit/deny relay proof under `/tmp/`.
 ### `machine run --image X -- /bin/sh` exits immediately with no shell
 
 This is **by design**, not a crash. A plain `machine run` is the one-shot
-*transient* runner: it streams the command's output back to the host but never
+_transient_ runner: it streams the command's output back to the host but never
 forwards host stdin or allocates a terminal, so an interactive shell sees EOF on
 stdin and exits `0` right away.
 
@@ -359,6 +386,7 @@ The Firecracker microVM has an **isolated filesystem** and there's no shell into
 ### Builder VM is slow
 
 Persist a resource override, then re-provision it:
+
 ```bash
 mvmctl ops config set dev_vm_cpus 8
 mvmctl ops config set dev_vm_mem_gib 16
@@ -369,6 +397,7 @@ mvmctl bootstrap
 ### Wrong backend selected
 
 Force a specific backend:
+
 ```bash
 mvmctl machine run --flake . --hypervisor firecracker
 mvmctl machine run --flake . --hypervisor hvf
@@ -410,11 +439,11 @@ Hitting `KVM not available` on a cloud instance? Three options, in order of reco
 
 **Option 1 — Switch to a nested-virt instance type.** Most cloud providers added nested KVM in 2025–2026. After moving to one of these, Firecracker runs natively and you get full Tier 1 isolation:
 
-| Provider | Nested-virt instance families |
-|---|---|
-| AWS | C8i / M8i / R8i (Feb 2026 onward) — e.g. `c8i.4xlarge` |
-| GCE | n2 with `--enable-nested-virtualization` |
-| Azure | Dasv5 / Easv5 |
+| Provider | Nested-virt instance families                          |
+| -------- | ------------------------------------------------------ |
+| AWS      | C8i / M8i / R8i (Feb 2026 onward) — e.g. `c8i.4xlarge` |
+| GCE      | n2 with `--enable-nested-virtualization`               |
+| Azure    | Dasv5 / Easv5                                          |
 
 **Option 2 — Use the QEMU dev/test backend.** On a Linux host without `/dev/kvm`, run the software-emulated QEMU/TCG backend. It's a real microVM but **Tier 2 dev/test** — slower, larger TCB, partial verified boot (see the [Matryoshka model](/security/matryoshka)) — so use it for local dev/test, not production or untrusted workloads.
 
@@ -427,6 +456,7 @@ mvmctl machine run --flake . --hypervisor qemu
 ### Rootfs corrupted
 
 Re-run `mvmctl bootstrap` — it's idempotent and repaves any corrupted rootfs from the upstream squashfs without destroying the dev VM:
+
 ```bash
 mvmctl bootstrap
 ```
@@ -468,6 +498,7 @@ Emergency rotation when Sigstore TUF/Rekor is unavailable: `MVM_SKIP_COSIGN_VERI
 ### "Manifest is for v0.14.1 but mvmctl is v0.14.0"
 
 The manifest pins `manifest.version` to `mvmctl --version` exactly. Either:
+
 - Upgrade `mvmctl` to match (`brew upgrade mvmctl` / `cargo install mvmctl`); or
 - Use a manifest from the matching release (re-export from the v0.14.0 release page).
 
