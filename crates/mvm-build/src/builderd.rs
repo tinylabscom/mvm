@@ -506,6 +506,7 @@ fn copy_rootfs_with_hook(src_rootfs: &Path, dst: &Path) -> Result<(), String> {
     })?;
     run_before_build_hook(&tmp_path)?;
     copy_artifact(&tmp_path, dst)?;
+    run_builder_rootfs_command("seal-rootfs-journal", dst)?;
     let _ = tmp.close();
     Ok(())
 }
@@ -516,20 +517,24 @@ fn copy_rootfs_with_hook(src_rootfs: &Path, dst: &Path) -> Result<(), String> {
 /// `export_image_artifacts` on a dev host), the hook is skipped. The
 /// binary is always baked into the builder VM rootfs in production.
 fn run_before_build_hook(rootfs_path: &Path) -> Result<(), String> {
+    run_builder_rootfs_command("run-before-build-hook", rootfs_path)
+}
+
+fn run_builder_rootfs_command(command: &str, rootfs_path: &Path) -> Result<(), String> {
     let runner = std::path::Path::new("/sbin/mvm-host-vm-init");
     if !runner.is_file() {
         return Ok(());
     }
     let status = std::process::Command::new(runner)
-        .arg("run-before-build-hook")
+        .arg(command)
         .arg(rootfs_path)
         .status()
-        .map_err(|e| format!("spawn before_build hook runner: {e}"))?;
+        .map_err(|e| format!("spawn rootfs command {command}: {e}"))?;
     if status.success() {
         Ok(())
     } else {
         Err(format!(
-            "before_build hook failed (exit {:?})",
+            "rootfs command {command} failed (exit {:?})",
             status.code()
         ))
     }
