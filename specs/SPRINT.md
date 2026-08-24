@@ -2877,3 +2877,11 @@ zero-line checkpoint's genesis fallback and the exact accountable-prune entry
 count; remaining equivalent or performance-only misses carry explicit reasons.
 The final hostd shard's broker witness now asserts every teaching response up
 to the configured ceiling and the first terse response immediately after it.
+
+## 2026-08-24 transient start console diagnostic closeout
+
+- [x] Emit the guest console diagnostic before transient startup cleanup removes
+      the machine state directory.
+- [x] Preserve cleanup and return the original backend startup error.
+- [x] Record the delivered behavior in
+      `specs/sprint/delivery/2819-transient-start-console-diagnostic.md`.

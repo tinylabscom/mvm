@@ -1,6 +1,6 @@
 # Refactor status
 
-Last updated: 2026-08-22
+Last updated: 2026-08-24
 ## Completed
 
 - [x] **AI egress metering and token budgets** —
@@ -16,6 +16,12 @@ This is the cross-plan progress index. The owning plan remains authoritative
 for detailed scope and acceptance criteria.
 
 ## Completed issue closeouts
+
+- [x] **Transient start console diagnostics.** A transient backend-start
+      failure now prints the guest console diagnostic before deleting the
+      machine state directory, preserving the guest-side cause while retaining
+      cleanup and the original startup error. See
+      `specs/sprint/delivery/2819-transient-start-console-diagnostic.md`.
 
 - [x] **Scheduled Security dependency and no-SSH scanner repair.** The
       supply-chain lane pins the last `async-trait` release on `syn` 2,
