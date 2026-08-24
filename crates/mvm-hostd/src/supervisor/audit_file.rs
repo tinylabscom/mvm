@@ -1226,6 +1226,13 @@ fn usable_resume(checkpoint: Option<&ChainCheckpoint>, total_lines: usize) -> Op
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_zero_line_checkpoint_cannot_replace_the_genesis_anchor() {
+        let checkpoint = ChainCheckpoint::new(0, [0_u8; 32]);
+
+        assert!(usable_resume(Some(&checkpoint), 3).is_none());
+    }
+
     mod highest_sealed_segment_tests {
         use super::super::highest_sealed_segment;
         use mvm_core::config::audit_segment_file_name;
