@@ -1,4 +1,9 @@
 //! Regression checks for the aarch64 no-KVM smoke's binary build contract.
+//!
+//! The smoke lives in `ci-full.yml` (nightly / manual dispatch), not in the
+//! merge queue, because a cold QEMU TCG build can take hours and blocks the
+//! queue. The contract it exercises is still worth pinning: source binary
+//! preservation, release-helper separation, and the vsock/device setup.
 
 use std::fs;
 
@@ -20,16 +25,23 @@ const FIRST_MACHINE_RUN: &str = "/tmp/mvmctl-source-under-test machine run";
 
 #[test]
 fn aarch64_no_kvm_smokes_build_the_mvmctl_binary_they_execute() {
-    let workflow = fs::read_to_string(".github/workflows/ci.yml").expect("read CI workflow");
+    let ci_workflow = fs::read_to_string(".github/workflows/ci.yml").expect("read CI workflow");
+    assert!(
+        !ci_workflow.contains("aarch64-no-kvm-smoke:"),
+        "the merge-queue CI workflow must not define the aarch64 no-KVM smoke job"
+    );
+
+    let workflow =
+        fs::read_to_string(".github/workflows/ci-full.yml").expect("read extended CI workflow");
     let job = workflow
         .split("  aarch64-no-kvm-smoke:\n")
         .nth(1)
-        .expect("CI workflow must define the aarch64 no-KVM smoke job");
+        .expect("extended CI workflow must define the aarch64 no-KVM smoke job");
     let script = fs::read_to_string("scripts/local-aarch64-no-kvm-smoke.sh")
         .expect("read local aarch64 no-KVM smoke script");
 
     for (source, contents) in [
-        ("CI workflow", job),
+        ("extended CI workflow", job),
         ("local smoke script", script.as_str()),
     ] {
         assert!(
@@ -86,7 +98,7 @@ fn aarch64_no_kvm_smokes_build_the_mvmctl_binary_they_execute() {
 
     assert!(
         job.contains(REQUIRED_CI_VSOCK_OWNERSHIP),
-        "CI workflow must let the unprivileged QEMU process open /dev/vhost-vsock"
+        "extended CI workflow must let the unprivileged QEMU process open /dev/vhost-vsock"
     );
     assert!(
         script.contains(REQUIRED_LOCAL_VSOCK_DEVICE),

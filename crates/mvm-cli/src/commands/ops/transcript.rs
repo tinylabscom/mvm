@@ -23,6 +23,8 @@ use mvm_core::transcript::{
     TRANSCRIPT_KEK_RECIPIENT as KEK_RECIPIENT, TranscriptManifest, TranscriptWriter,
     TranscriptWriterConfig,
 };
+use mvm_hostd::audit::emitter::AuditEmitter;
+use mvm_hostd::audit::plan_persist::{PLAN_FILENAME, read_plan_at};
 use mvm_hostd::supervisor::audit::{
     LABEL_CAPTURE_ID, LABEL_CHUNK_COUNT, LABEL_TRANSCRIPT_ROOT, LABEL_VM_NAME,
     TRANSCRIPT_SEALED_EVENT,
@@ -163,6 +165,7 @@ struct CaptureSummary {
 struct TranscriptCtx {
     transcripts_dir: PathBuf,
     keys_dir: PathBuf,
+    vms_dir: PathBuf,
     audit_dir: PathBuf,
     verifying_key_path: PathBuf,
     /// Audit-log path override (tests). `None` → the default local audit log.
@@ -176,6 +179,7 @@ impl TranscriptCtx {
             transcripts_dir: config::mvm_transcripts_dir(),
             verifying_key_path: keys_dir.join(PUBLIC_FILENAME),
             keys_dir,
+            vms_dir: config::vms_dir(),
             audit_dir: config::mvm_audit_dir(),
             audit_path: None,
         }
@@ -248,6 +252,52 @@ impl TranscriptCtx {
 
     fn disarm(&self, tenant: &str, capture_id: &str) -> Result<()> {
         let (_dir, manifest) = self.load_manifest(tenant, capture_id)?;
+        self.validate_manifest_binding(tenant, capture_id, &manifest)?;
+
+        let plan_path = self
+            .vms_dir
+            .join(&manifest.binding.vm_name)
+            .join(PLAN_FILENAME);
+        let plan = read_plan_at(&plan_path).with_context(|| {
+            format!(
+                "reading the admitted plan for transcript VM '{}'",
+                manifest.binding.vm_name
+            )
+        })?;
+        if plan.tenant.0 != manifest.binding.tenant_id {
+            anyhow::bail!(
+                "admitted plan tenant '{}' does not match transcript tenant '{}'",
+                plan.tenant.0,
+                manifest.binding.tenant_id
+            );
+        }
+        if plan.workload.0 != manifest.binding.vm_name {
+            anyhow::bail!(
+                "admitted plan workload '{}' does not match transcript VM '{}'",
+                plan.workload.0,
+                manifest.binding.vm_name
+            );
+        }
+
+        let signer = super::super::vm::host_signer::load_or_init_at(&self.keys_dir)
+            .context("loading the host signer to anchor the sealed transcript")?;
+        match self.matching_chain_anchors(tenant, capture_id, &manifest)? {
+            0 => AuditEmitter::with_dir(signer.signing, &self.audit_dir)
+                .context("opening the host audit chain for the sealed transcript")?
+                .emit_transcript_sealed(
+                    &plan,
+                    capture_id,
+                    &manifest.binding.vm_name,
+                    &manifest.sealed_root_hex,
+                    manifest.chunks.len(),
+                )
+                .context("anchoring the sealed transcript in the host audit chain")?,
+            1 => {}
+            count => anyhow::bail!(
+                "expected at most one host-signed transcript seal in the audit chain for capture {capture_id}, found {count}"
+            ),
+        }
+
         self.audit(LocalAuditKind::TranscriptSealed, &manifest.binding.vm_name)
             .detail(format!(
                 "tenant={tenant} vm={} capture={capture_id} chunks={}",
@@ -325,16 +375,44 @@ impl TranscriptCtx {
         capture_id: &str,
         manifest: &TranscriptManifest,
     ) -> Result<()> {
+        let count = self.matching_chain_anchors(tenant, capture_id, manifest)?;
+        if count != 1 {
+            anyhow::bail!(
+                "expected exactly one host-signed transcript seal in the audit chain for capture {capture_id}, found {count}"
+            );
+        }
+        Ok(())
+    }
+
+    fn validate_manifest_binding(
+        &self,
+        tenant: &str,
+        capture_id: &str,
+        manifest: &TranscriptManifest,
+    ) -> Result<()> {
         transcript::verify_sealed_root(manifest).context("verifying transcript manifest root")?;
         if manifest.capture_id != capture_id || manifest.binding.tenant_id != tenant {
             anyhow::bail!(
                 "transcript binding does not match requested tenant/capture ({tenant}/{capture_id})"
             );
         }
+        Ok(())
+    }
+
+    fn matching_chain_anchors(
+        &self,
+        tenant: &str,
+        capture_id: &str,
+        manifest: &TranscriptManifest,
+    ) -> Result<usize> {
+        self.validate_manifest_binding(tenant, capture_id, manifest)?;
 
         let verifying_key = super::audit::load_verifying_key(&self.verifying_key_path)
             .context("loading trusted host audit verifying key")?;
         let chain_path = self.audit_dir.join(format!("{tenant}.jsonl"));
+        if !chain_path.exists() {
+            return Ok(0);
+        }
         let entries = verify_audit_chain_entries(&chain_path, &verifying_key)
             .with_context(|| format!("verifying audit chain {}", chain_path.display()))?;
         let matching: Vec<_> = entries
@@ -348,23 +426,18 @@ impl TranscriptCtx {
                         .is_some_and(|value| value == capture_id)
             })
             .collect();
-        if matching.len() != 1 {
-            anyhow::bail!(
-                "expected exactly one host-signed transcript seal for capture {capture_id}, found {}",
-                matching.len()
-            );
-        }
-        let entry = matching[0];
         let expected_chunks = manifest.chunks.len().to_string();
-        if entry.labels.get(LABEL_VM_NAME) != Some(&manifest.binding.vm_name)
-            || entry.labels.get(LABEL_TRANSCRIPT_ROOT) != Some(&manifest.sealed_root_hex)
-            || entry.labels.get(LABEL_CHUNK_COUNT) != Some(&expected_chunks)
-        {
-            anyhow::bail!(
-                "host-signed transcript seal does not match capture {capture_id} binding, root, or chunk count"
-            );
+        for entry in &matching {
+            if entry.labels.get(LABEL_VM_NAME) != Some(&manifest.binding.vm_name)
+                || entry.labels.get(LABEL_TRANSCRIPT_ROOT) != Some(&manifest.sealed_root_hex)
+                || entry.labels.get(LABEL_CHUNK_COUNT) != Some(&expected_chunks)
+            {
+                anyhow::bail!(
+                    "host-signed transcript seal does not match capture {capture_id} binding, root, or chunk count"
+                );
+            }
         }
-        Ok(())
+        Ok(matching.len())
     }
 
     fn audit(&self, kind: LocalAuditKind, vm: &str) -> LocalAuditBuilder {
@@ -410,10 +483,26 @@ mod tests {
         TranscriptCtx {
             transcripts_dir: root.join("transcripts"),
             keys_dir: root.join("keys"),
+            vms_dir: root.join("vms"),
             audit_dir: root.join("chain-audit"),
             verifying_key_path: root.join("keys/host-signer.pub"),
             audit_path: Some(root.join("audit.jsonl")),
         }
+    }
+
+    fn persist_plan(c: &TranscriptCtx, tenant: &str, vm: &str) {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let plan = mvm_core::plan::test_support::PlanFixture::new()
+            .tenant(tenant)
+            .workload(vm)
+            .plan_id(format!("transcript-{vm}"))
+            .build();
+        let vm_dir = c.vms_dir.join(vm);
+        std::fs::create_dir_all(&vm_dir).unwrap();
+        let path = vm_dir.join(mvm_hostd::audit::plan_persist::PLAN_FILENAME);
+        std::fs::write(&path, serde_json::to_vec_pretty(&plan).unwrap()).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
     }
 
     fn trusted_host_key(c: &TranscriptCtx) -> ed25519_dalek::SigningKey {
@@ -491,12 +580,59 @@ mod tests {
     }
 
     #[test]
-    fn disarm_emits_sealed() {
+    fn disarm_emits_one_host_signed_seal_from_the_persisted_plan() {
+        let d = tempfile::tempdir().unwrap();
+        let c = ctx(d.path());
+        persist_plan(&c, "t1", "vm1");
+        let id = c.arm("t1", "vm1", None, bounds()).unwrap();
+        c.disarm("t1", &id).unwrap();
+        c.disarm("t1", &id).unwrap();
+
+        let (_dir, manifest) = c.load_manifest("t1", &id).unwrap();
+        c.verify_chain_anchor("t1", &id, &manifest).unwrap();
+        let key = crate::commands::ops::audit::load_verifying_key(&c.verifying_key_path).unwrap();
+        let entries = verify_audit_chain_entries(&c.audit_dir.join("t1.jsonl"), &key).unwrap();
+        let seals: Vec<_> = entries
+            .iter()
+            .filter(|entry| entry.event == TRANSCRIPT_SEALED_EVENT)
+            .collect();
+        assert_eq!(seals.len(), 1, "repeated disarm must not fork evidence");
+        assert_eq!(
+            seals[0].labels.get(LABEL_TRANSCRIPT_ROOT),
+            Some(&manifest.sealed_root_hex)
+        );
+        assert!(audit_contains(&c, "transcript_sealed"));
+    }
+
+    #[test]
+    fn disarm_refuses_without_the_vms_persisted_plan() {
         let d = tempfile::tempdir().unwrap();
         let c = ctx(d.path());
         let id = c.arm("t1", "vm1", None, bounds()).unwrap();
-        c.disarm("t1", &id).unwrap();
-        assert!(audit_contains(&c, "transcript_sealed"));
+
+        let err = c
+            .disarm("t1", &id)
+            .expect_err("an unbound transcript must not be declared sealed");
+
+        assert!(format!("{err:#}").contains("plan.json"));
+        assert!(!c.audit_dir.join("t1.jsonl").exists());
+        assert!(!audit_contains(&c, "transcript_sealed"));
+    }
+
+    #[test]
+    fn disarm_refuses_a_plan_from_a_different_tenant() {
+        let d = tempfile::tempdir().unwrap();
+        let c = ctx(d.path());
+        persist_plan(&c, "other-tenant", "vm1");
+        let id = c.arm("t1", "vm1", None, bounds()).unwrap();
+
+        let err = c
+            .disarm("t1", &id)
+            .expect_err("a cross-tenant plan must not anchor the transcript");
+
+        assert!(format!("{err:#}").contains("tenant"));
+        assert!(!c.audit_dir.join("t1.jsonl").exists());
+        assert!(!audit_contains(&c, "transcript_sealed"));
     }
 
     #[test]

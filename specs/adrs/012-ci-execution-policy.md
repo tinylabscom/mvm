@@ -23,7 +23,7 @@ day-to-day development for no proportional benefit.
 |---|---|---|
 | `ci.yml` | `pull_request` + `merge_group` + `workflow_dispatch` | parallel compiler/policy/feature and workspace/Linux lanes with stable `lint` and `test` aggregate checks; Nix is added in the merge queue / manual dispatch |
 | `architecture.yml` | `workflow_dispatch` only | structural/architectural invariants. Its required check name `Invariant` moved to `ci.yml`'s `lint-policy` job, and its one script is a step there, so the file no longer runs on a pull request despite this row once saying it did |
-| `ci-full.yml` (`Extended CI`) | nightly cron + `workflow_dispatch` | the platform + live-VM matrix. Was `workflow_dispatch` only, and in that state ran **zero times** between being written and 2026-08-21 — including the only macOS lanes in the repository. "Operator-triggered" turned out to mean "never", so it now has a cadence |
+| `ci-full.yml` (`Extended CI`) | nightly cron + `workflow_dispatch` | the platform + live-VM matrix, including the `aarch64-no-kvm-smoke` QEMU TCG path. Was `workflow_dispatch` only, and in that state ran **zero times** between being written and 2026-08-21 — including the only macOS lanes in the repository. "Operator-triggered" turned out to mean "never", so it now has a cadence |
 | `security.yml` | `push: tags: v*` + nightly cron + `workflow_dispatch` | dependency audit / advisory scan, plus every claim witness that is not a `fn:` test. Release-time backstop plus nightly catch for new advisories. **See "Open: no security lane gates a merge" below** |
 | `pack-signing-smoke.yml` | nightly cron + `workflow_dispatch` | keyless cosign round-trip against the real Sigstore stack. Also ran zero times while dispatch-only |
 | `release.yml` | `push: tags: v*` | builds and publishes release artifacts |
@@ -164,10 +164,12 @@ commit on `main` does not run them a third time. An operator opts into the expen
 SDK-publication dry-run, and OCI-ratification matrix deliberately through
 `ci-full.yml`, rather than paying for it on every update.
 
-A change that only breaks on macOS or under live KVM is not caught until
-someone runs `ci-full.yml`, or until a release-time gate runs — there is
-a real gap between "the PR is green" and "every platform has been
-exercised."
+A change that only breaks on macOS, under live KVM, or on the aarch64 no-KVM
+QEMU TCG path is not caught until `ci-full.yml` runs (nightly or on manual
+dispatch) — there is a real gap between "the PR is green" and "every
+platform has been exercised." The `aarch64-no-kvm-smoke` job was moved out
+of the merge queue because a cold TCG build can take hours and serialized
+merges; it remains in `ci-full.yml` so the path is still exercised.
 
 Release-time-only gates (`security.yml`, `windows.yml`, `release.yml`)
 stay timed to minimize development cost while still forming a hard backstop
