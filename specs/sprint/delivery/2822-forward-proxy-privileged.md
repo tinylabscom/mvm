@@ -53,8 +53,9 @@ closure.
 Two consequences, both of which kept this hidden: the body carried only the outermost
 `anyhow` context — the message above stops at `flowmux-guest-signing-key` and never says
 `Permission denied` — and a client that prints "Bad Gateway" without the body made a broken
-relay indistinguishable from a refused destination. Relay failures are now logged, and the
-body carries the whole chain.
+relay indistinguishable from a refused destination. Relay failures now log the full chain in
+the trusted guest log. The untrusted workload gets the stable `forward proxy relay failed`
+class without privileged filesystem or endpoint details.
 
 ## Overlay
 
@@ -94,8 +95,7 @@ server: cloudflare
 content-length: 559
 ```
 
-Tests: `a_relay_failure_reaches_the_workload_with_its_cause` (confirmed red against
-`e.to_string()`, failing with the truncated message above), the
+Tests: `a_relay_failure_is_reported_without_exposing_its_cause`, the
 `resolve_forward_proxy_for_*` pair, `the_egress_client_and_the_forward_proxy_resolve_by_the_same_rule`,
 and `resolve_rejects_overlay_payload_missing_forward_proxy`.
 
