@@ -131,6 +131,7 @@ pub struct RuntimeOverlayGuestBinaries {
     pub addon_dns: PathBuf,
     pub exit_report: PathBuf,
     pub ping: PathBuf,
+    pub forward_proxy: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -145,6 +146,7 @@ pub struct RuntimeOverlayGuestLayout {
     pub addon_dns: PathBuf,
     pub exit_report: PathBuf,
     pub ping: PathBuf,
+    pub forward_proxy: PathBuf,
 }
 
 impl RuntimeOverlayGuestLayout {
@@ -164,6 +166,7 @@ impl RuntimeOverlayGuestLayout {
             addon_dns: dir.join("addon-dns"),
             exit_report: dir.join("exit-report"),
             ping: dir.join("ping"),
+            forward_proxy: dir.join("forward-proxy"),
             dir,
         }
     }
@@ -178,6 +181,7 @@ impl RuntimeOverlayGuestLayout {
             && self.addon_dns.is_file()
             && self.exit_report.is_file()
             && self.ping.is_file()
+            && self.forward_proxy.is_file()
     }
 
     fn binaries(&self) -> RuntimeOverlayGuestBinaries {
@@ -191,6 +195,7 @@ impl RuntimeOverlayGuestLayout {
             addon_dns: self.addon_dns.clone(),
             exit_report: self.exit_report.clone(),
             ping: self.ping.clone(),
+            forward_proxy: self.forward_proxy.clone(),
         }
     }
 }

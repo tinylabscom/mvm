@@ -31,6 +31,14 @@ pub const EGRESS_PROXY_READY_TIMEOUT: std::time::Duration = std::time::Duration:
 pub const DEFAULT_EGRESS_PROXY_URL: &str = "socks5h://127.0.0.1:1080";
 /// Loopback listen address of the in-guest DNS stub.
 pub const DEFAULT_DNS_STUB_LISTEN: &str = "127.0.0.1:53";
+/// Loopback listen address of the in-guest ICMP mediator.
+///
+/// A workload cannot open a FlowMux session of its own — the guest signing key
+/// is root-only — so `ping` asks this instead, and the process holding the
+/// identity performs the echo. Declared beside the proxy and the DNS stub
+/// because the three are one allocation decision: a guest loopback port that
+/// two of them want is a collision nobody sees until a boot.
+pub const ICMP_MEDIATOR_LISTEN: &str = "127.0.0.1:1081";
 /// First-line marker selecting DNS on the shared host egress stream.
 pub const DNS_FRAME_LINE: &str = "MVM_DNS/1";
 /// First-line marker selecting ICMP echo on the shared host egress stream.
