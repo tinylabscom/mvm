@@ -43,9 +43,12 @@ Feature: A workload reaches a key-value store without a network path
   # has guest code reach the store the way a real one does: through the sidecar
   # cdylib, over vsock, to the broker. It is `@live` because it needs a real
   # microVM.
+  # The guest-mount allow-roots are `/data` and `/work`. `/mnt` is mvm-owned
+  # (it carries the config and secret drives), so mounting there is refused —
+  # which is how the first live attempt of this scenario failed.
   @live
   Scenario: a booted workload round-trips a key through the broker
-    When I run mvmctl in an isolated live home with "run --runtime python --host-service host.kv.v1 --mount features/suites/s30_service_plane/fixtures:/mnt:ro --timeout 240 -- python /mnt/kv_roundtrip.py"
+    When I run mvmctl in an isolated live home with "run --runtime python --host-service host.kv.v1 --mount features/suites/s30_service_plane/fixtures:/work/fixtures:ro --timeout 300 -- python /work/fixtures/kv_roundtrip.py"
     Then the command exits with code 0
     And the output contains "KV-OK"
 
@@ -53,5 +56,5 @@ Feature: A workload reaches a key-value store without a network path
   # observable from inside a guest too -- not only at the registry.
   @live
   Scenario: an unbound workload is refused from inside the guest
-    When I run mvmctl in an isolated live home with "run --runtime python --host-service host.time.v1 --mount features/suites/s30_service_plane/fixtures:/mnt:ro --timeout 240 -- python /mnt/kv_roundtrip.py"
+    When I run mvmctl in an isolated live home with "run --runtime python --host-service host.time.v1 --mount features/suites/s30_service_plane/fixtures:/work/fixtures:ro --timeout 300 -- python /work/fixtures/kv_roundtrip.py"
     Then the command exits with code 1
