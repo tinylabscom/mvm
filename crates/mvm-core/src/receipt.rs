@@ -144,6 +144,20 @@ pub struct ExecutionReceipt {
     /// Optional hash link to the previous receipt in this chain.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prev_receipt_id: Option<String>,
+    /// RFC 3339 UTC timestamp when the action started, if known.
+    /// For `plan.exited`, this is the timestamp of the matching `plan.launched`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<String>,
+    /// RFC 3339 UTC timestamp when the action ended.
+    /// For `plan.exited`, this is the timestamp of the exit entry itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended_at: Option<String>,
+    /// Captured process exit code, when the receipt records a workload exit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    /// Capability grants admitted for this workload, e.g. agent verbs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub granted_capabilities: Vec<String>,
     /// RFC 3339 UTC timestamp of when the action occurred.
     pub issued_at: String,
     /// Namespace-prefixed extensions. Unknown keys are preserved by verifiers.
@@ -367,6 +381,10 @@ mod tests {
             outcome: ReceiptOutcome::Authorized,
             granted_by: None,
             prev_receipt_id: None,
+            started_at: None,
+            ended_at: None,
+            exit_code: None,
+            granted_capabilities: Vec::new(),
             issued_at: "2026-08-06T00:00:00+00:00".into(),
             extensions: BTreeMap::new(),
         }

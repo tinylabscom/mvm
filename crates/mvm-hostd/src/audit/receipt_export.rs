@@ -51,7 +51,11 @@ pub fn export_receipts(
 /// Returns `None` for events that have no defined receipt mapping.
 /// The receipt's `receipt_id` is computed from the canonical payload so
 /// callers can verify content addressing offline.
-pub fn audit_entry_to_receipt(entry: &PlanAuditEntry, host_did: &str) -> Option<ExecutionReceipt> {
+pub fn audit_entry_to_receipt(
+    entry: &PlanAuditEntry,
+    host_did: &str,
+    context: Option<&ReceiptContext>,
+) -> Option<ExecutionReceipt> {
     let (receipt_type, outcome) = map_event_to_receipt_type(&entry.event)?;
     let action = build_action(entry, receipt_type);
     let extensions = build_extensions(entry);
@@ -61,6 +65,24 @@ pub fn audit_entry_to_receipt(entry: &PlanAuditEntry, host_did: &str) -> Option<
     let principal_did = entry.labels.get("principal_did").cloned();
     let granted_by = entry.labels.get("granted_by").cloned();
     let prev_receipt_id = entry.labels.get("prev_receipt_id").cloned();
+
+    let started_at = context.and_then(|c| c.started_at.clone());
+    let ended_at = if receipt_type == receipt_type::PLAN_EXITED {
+        Some(entry.timestamp.to_rfc3339())
+    } else {
+        None
+    };
+    let exit_code = if receipt_type == receipt_type::PLAN_EXITED {
+        entry
+            .labels
+            .get("exit_code")
+            .and_then(|v| v.parse::<i32>().ok())
+    } else {
+        None
+    };
+    let granted_capabilities = context
+        .map(|c| c.granted_capabilities.clone())
+        .unwrap_or_default();
 
     let mut receipt = ExecutionReceipt {
         schema_version: 1,
@@ -75,6 +97,10 @@ pub fn audit_entry_to_receipt(entry: &PlanAuditEntry, host_did: &str) -> Option<
         outcome,
         granted_by,
         prev_receipt_id,
+        started_at,
+        ended_at,
+        exit_code,
+        granted_capabilities,
         issued_at: entry.timestamp.to_rfc3339(),
         extensions,
     };
@@ -99,6 +125,21 @@ pub enum EntryMapping {
     },
     /// No receipt mapping; carried as a citation instead.
     Cited,
+}
+
+/// Per-plan context gathered from the audit chain to enrich receipts.
+///
+/// The exporter is intentionally read-only over the audit log, so any value
+/// that appears on a receipt must have been recorded in the chain. This
+/// struct captures adjacent entries that are needed to give a `plan.exited`
+/// receipt a complete view of the run it summarizes.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReceiptContext {
+    /// Timestamp of the matching `plan.launched` entry, if one exists.
+    pub started_at: Option<String>,
+    /// Capability grants admitted for this workload, collected from
+    /// `plan.grant_required` and `plan.grants_enforced` entries.
+    pub granted_capabilities: Vec<String>,
 }
 
 /// One in-scope audit entry that has no receipt mapping.
@@ -243,6 +284,10 @@ pub fn export_evidence(
     let position = ChainPosition::build(audit_dir, tenant, signing_key)
         .with_context(|| format!("building the audit root for tenant '{tenant}'"))?;
 
+    // Build per-plan context once so every receipt for a plan can reference
+    // adjacent entries (e.g. `plan.launched` timestamp) without re-scanning.
+    let context_by_plan = build_context_map(&entries);
+
     let mut out = ExportedEvidence::default();
     for (leaf_index, entry) in entries.iter().enumerate() {
         if let Some(filter) = plan_id_filter
@@ -250,11 +295,13 @@ pub fn export_evidence(
         {
             continue;
         }
+        let context = context_by_plan.get(&entry.plan_id.0);
         match map_event(&entry.event) {
             EntryMapping::Receipt { .. } => {
-                let mut receipt = audit_entry_to_receipt(entry, &host_did).with_context(|| {
-                    format!("building a receipt for a mapped event '{}'", entry.event)
-                })?;
+                let mut receipt =
+                    audit_entry_to_receipt(entry, &host_did, context).with_context(|| {
+                        format!("building a receipt for a mapped event '{}'", entry.event)
+                    })?;
                 position
                     .attach(&mut receipt, entry)
                     .context("attaching the chain position to a receipt")?;
@@ -394,6 +441,57 @@ fn build_extensions(entry: &PlanAuditEntry) -> BTreeMap<String, Value> {
     ext
 }
 
+/// Build a per-plan context map from the verified audit chain.
+///
+/// This is a single pass that records information needed by receipts but
+/// stored in separate audit entries, such as the `plan.launched` timestamp
+/// and admitted capability grants.
+fn build_context_map(entries: &[PlanAuditEntry]) -> BTreeMap<String, ReceiptContext> {
+    let mut map: BTreeMap<String, ReceiptContext> = BTreeMap::new();
+
+    for entry in entries {
+        let ctx = map.entry(entry.plan_id.0.clone()).or_default();
+
+        if entry.event == "plan.launched" && ctx.started_at.is_none() {
+            ctx.started_at = Some(entry.timestamp.to_rfc3339());
+        }
+
+        if entry.event == "plan.grant_required" {
+            // Collect verb_N labels in order.
+            let mut verbs: Vec<String> = Vec::new();
+            let count = entry
+                .labels
+                .get("verb_count")
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(0);
+            for i in 0..count {
+                if let Some(verb) = entry.labels.get(&format!("verb_{i}")) {
+                    verbs.push(verb.clone());
+                }
+            }
+            if !verbs.is_empty() {
+                ctx.granted_capabilities = verbs;
+            }
+        }
+
+        if entry.event == "plan.grants_enforced" {
+            // Carry enforced tiers as capability annotations.
+            let mut caps = Vec::new();
+            if let Some(cpu) = entry.labels.get("grants_cpu_tier") {
+                caps.push(format!("cpu:{cpu}"));
+            }
+            if let Some(wall) = entry.labels.get("grants_wall_clock_tier") {
+                caps.push(format!("wall_clock:{wall}"));
+            }
+            if !caps.is_empty() {
+                ctx.granted_capabilities.extend(caps);
+            }
+        }
+    }
+
+    map
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -434,7 +532,7 @@ mod tests {
         let signing_key = SigningKey::from_bytes(&[1u8; 32]);
         let host_did = DidKey::from_verifying_key(signing_key.verifying_key()).to_did_key();
 
-        let receipt = audit_entry_to_receipt(&entry, &host_did).unwrap();
+        let receipt = audit_entry_to_receipt(&entry, &host_did, None).unwrap();
 
         assert_eq!(receipt.receipt_type, receipt_type::PLAN_ADMITTED);
         assert_eq!(receipt.outcome, ReceiptOutcome::Authorized);
@@ -455,7 +553,7 @@ mod tests {
             DidKey::from_verifying_key(SigningKey::from_bytes(&[2u8; 32]).verifying_key())
                 .to_did_key();
 
-        let receipt = audit_entry_to_receipt(&entry, &host_did).unwrap();
+        let receipt = audit_entry_to_receipt(&entry, &host_did, None).unwrap();
 
         assert_eq!(receipt.receipt_type, receipt_type::PLAN_LAUNCHED);
         assert_eq!(receipt.outcome, ReceiptOutcome::Running);
@@ -475,7 +573,7 @@ mod tests {
             DidKey::from_verifying_key(SigningKey::from_bytes(&[3u8; 32]).verifying_key())
                 .to_did_key();
 
-        let receipt = audit_entry_to_receipt(&entry, &host_did).unwrap();
+        let receipt = audit_entry_to_receipt(&entry, &host_did, None).unwrap();
 
         assert_eq!(receipt.receipt_type, receipt_type::PLAN_EXITED);
         assert_eq!(receipt.outcome, ReceiptOutcome::Failed);
@@ -487,7 +585,7 @@ mod tests {
         let signing_key = SigningKey::from_bytes(&[8u8; 32]);
         let host_did = DidKey::from_verifying_key(signing_key.verifying_key()).to_did_key();
 
-        let receipt = audit_entry_to_receipt(&entry, &host_did).expect("known event");
+        let receipt = audit_entry_to_receipt(&entry, &host_did, None).expect("known event");
 
         assert_eq!(
             receipt.receipt_type,
@@ -503,7 +601,7 @@ mod tests {
         let signing_key = SigningKey::from_bytes(&[9u8; 32]);
         let host_did = DidKey::from_verifying_key(signing_key.verifying_key()).to_did_key();
 
-        let receipt = audit_entry_to_receipt(&entry, &host_did).expect("known event");
+        let receipt = audit_entry_to_receipt(&entry, &host_did, None).expect("known event");
 
         assert_eq!(
             receipt.receipt_type,
@@ -519,7 +617,7 @@ mod tests {
         let signing_key = SigningKey::from_bytes(&[10u8; 32]);
         let host_did = DidKey::from_verifying_key(signing_key.verifying_key()).to_did_key();
 
-        let receipt = audit_entry_to_receipt(&entry, &host_did).expect("known event");
+        let receipt = audit_entry_to_receipt(&entry, &host_did, None).expect("known event");
 
         assert_eq!(
             receipt.receipt_type,
@@ -540,7 +638,7 @@ mod tests {
             DidKey::from_verifying_key(SigningKey::from_bytes(&[4u8; 32]).verifying_key())
                 .to_did_key();
 
-        let receipt = audit_entry_to_receipt(&entry, &host_did).unwrap();
+        let receipt = audit_entry_to_receipt(&entry, &host_did, None).unwrap();
 
         assert_eq!(receipt.receipt_type, receipt_type::CHECKPOINT_CREATED);
         assert_eq!(receipt.action.verb, "checkpoint");
@@ -554,7 +652,7 @@ mod tests {
             DidKey::from_verifying_key(SigningKey::from_bytes(&[5u8; 32]).verifying_key())
                 .to_did_key();
 
-        let result = audit_entry_to_receipt(&entry, &host_did);
+        let result = audit_entry_to_receipt(&entry, &host_did, None);
         assert!(result.is_none());
     }
 
@@ -598,6 +696,89 @@ mod tests {
         for signed in &receipts {
             assert!(signed.payload.prev_receipt_id.is_none());
         }
+    }
+
+    #[test]
+    fn exited_receipt_includes_exit_code_and_timing() {
+        let dir = tempfile::tempdir().unwrap();
+        let signing_key = SigningKey::from_bytes(&[11u8; 32]);
+        let signer = FileAuditSigner::open(signing_key.clone(), dir.path()).unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        let launched = {
+            let mut labels = BTreeMap::new();
+            labels.insert("backend".into(), "firecracker".into());
+            sample_audit_entry("plan.launched", labels)
+        };
+        let launched_at = launched.timestamp.to_rfc3339();
+
+        let exited = {
+            let mut labels = BTreeMap::new();
+            labels.insert("backend".into(), "firecracker".into());
+            labels.insert("exit_code".into(), "42".into());
+            sample_audit_entry("plan.exited", labels)
+        };
+        let exited_at = exited.timestamp.to_rfc3339();
+
+        rt.block_on(signer.sign_and_emit(&launched)).unwrap();
+        rt.block_on(signer.sign_and_emit(&exited)).unwrap();
+
+        let receipts = export_receipts(dir.path(), "local", None, &signing_key).unwrap();
+        assert_eq!(receipts.len(), 2);
+
+        let exit_receipt = receipts
+            .iter()
+            .find(|r| r.payload.receipt_type == receipt_type::PLAN_EXITED)
+            .expect("exit receipt exists");
+        assert_eq!(exit_receipt.payload.exit_code, Some(42));
+        assert_eq!(exit_receipt.payload.started_at, Some(launched_at));
+        assert_eq!(exit_receipt.payload.ended_at, Some(exited_at));
+        exit_receipt.verify().unwrap();
+    }
+
+    #[test]
+    fn grant_required_populates_capabilities_on_exported_receipts() {
+        let dir = tempfile::tempdir().unwrap();
+        let signing_key = SigningKey::from_bytes(&[12u8; 32]);
+        let signer = FileAuditSigner::open(signing_key.clone(), dir.path()).unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        let admitted = sample_audit_entry("plan.admitted", BTreeMap::new());
+
+        let grant_required = {
+            let mut labels = BTreeMap::new();
+            labels.insert("verb_count".into(), "2".into());
+            labels.insert("verb_0".into(), "read".into());
+            labels.insert("verb_1".into(), "write".into());
+            sample_audit_entry("plan.grant_required", labels)
+        };
+
+        let exited = {
+            let mut labels = BTreeMap::new();
+            labels.insert("exit_code".into(), "0".into());
+            sample_audit_entry("plan.exited", labels)
+        };
+
+        rt.block_on(signer.sign_and_emit(&admitted)).unwrap();
+        rt.block_on(signer.sign_and_emit(&grant_required)).unwrap();
+        rt.block_on(signer.sign_and_emit(&exited)).unwrap();
+
+        let receipts = export_receipts(dir.path(), "local", None, &signing_key).unwrap();
+        let exit_receipt = receipts
+            .iter()
+            .find(|r| r.payload.receipt_type == receipt_type::PLAN_EXITED)
+            .expect("exit receipt exists");
+        assert_eq!(
+            exit_receipt.payload.granted_capabilities,
+            vec!["read".to_string(), "write".to_string()]
+        );
+        exit_receipt.verify().unwrap();
     }
 
     #[test]

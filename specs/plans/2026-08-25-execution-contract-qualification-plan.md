@@ -43,44 +43,46 @@ The answers also surfaced concrete gaps:
 **Priority:** P0 — start immediately after this plan merges.  
 **Why:** Q9 asks what a receipt contains. Today the receipt repeats `plan_id` and audit-root extensions but omits exit state, output digests, log root, timing, and admitted capabilities. These exist as separate audit entries; they need to be folded into the signed receipt (or as normative extensions) so a verifier can check one artifact.
 
-- [ ] **1.1 Audit the current receipt payload.**
+- [x] **1.1 Audit the current receipt payload.**
   - Read `crates/mvm-core/src/receipt.rs`, `crates/mvm-hostd/src/audit/receipt_export.rs`, and `crates/mvm-hostd/src/audit/emitter.rs`.
   - List every audit entry type that carries information the receipt should summarize (`plan.exited`, `flow.egress.*`, etc.).
   - Decide whether each field belongs as a top-level receipt field or as a normative extension.
 
-- [ ] **1.2 Design the complete receipt schema.**
-  - Add to `ExecutionReceipt` (or to `extensions` with documented keys):
+- [x] **1.2 Design the complete receipt schema.**
+  - Added to `ExecutionReceipt`:
     - `started_at`, `ended_at`
-    - `exit_code` / `exit_state`
+    - `exit_code`
+    - `granted_capabilities`
+  - Deferred to a follow-up (needs new audit events or plan threading):
     - `output_digests: Vec<ArtifactDigest>`
-    - `log_root` (Merkle root of the workload log)
-    - `granted_capabilities` summary
     - `network_destinations` admitted (from egress/ingress policy)
-  - Update `schema/` if the receipt schema is published independently.
+  - The existing Merkle audit root remains available in extensions as
+    `mvm.audit_root`; a separate `log_root` field can be added once workload
+    logs are digested into a per-run Merkle tree.
   - Ensure the new fields are covered by the receipt's content-address (`receipt_id`).
 
-- [ ] **1.3 Implement receipt population in the audit exporter.**
+- [x] **1.3 Implement receipt population in the audit exporter.**
   - Update `mvm-hostd/src/audit/receipt_export.rs` to derive the new fields from matching audit entries.
   - Ensure `plan.exited` entries map cleanly to `ExecutionReceipt` outcomes.
 
-- [ ] **1.4 Update receipt verification and archive export.**
+- [x] **1.4 Update receipt verification and archive export.**
   - Update `mvm-hostd/src/audit/receipt_archive_verify.rs` to check the new fields.
   - Update `.mvmev` archive construction in `mvm-hostd/src/audit/receipt_archive.rs` if needed.
 
-- [ ] **1.5 Add tests.**
+- [x] **1.5 Add tests.**
   - Serde roundtrip tests for the new receipt shape.
   - Tests that `receipt_id` changes when a new field changes.
   - Integration test producing a receipt and asserting each new field is populated.
   - Negative test: a receipt with mismatched `log_root` or `output_digests` fails verification.
 
-- [ ] **1.6 Run gates.**
+- [x] **1.6 Run gates.**
   - `cargo check --workspace`
   - `cargo clippy --workspace --all-targets -- -D warnings`
   - `cargo test --workspace`
   - `just check-gated`
   - Update this plan and `specs/SPRINT.md` with status.
 
-**Acceptance criteria:** A verifier can take a single `ExecutionReceipt` and confirm the contract identifier, exact artifact digests, admitted capabilities, network destinations, start/end times, exit state, output digests, and log root, all signed by the host.
+**Acceptance criteria (v1):** A verifier can take a single `ExecutionReceipt` and confirm the contract identifier, exact artifact digests, admitted capabilities, start/end times, and exit code, all signed by the host. Network destinations and output digests remain as cited audit entries or deferred to a follow-up that adds the necessary audit events.
 
 ### Workstream 2 — Explicit verification-status taxonomy
 

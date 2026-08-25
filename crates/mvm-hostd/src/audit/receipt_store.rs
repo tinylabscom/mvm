@@ -278,6 +278,10 @@ mod tests {
             outcome: ReceiptOutcome::Authorized,
             granted_by: None,
             prev_receipt_id: prev,
+            started_at: None,
+            ended_at: None,
+            exit_code: None,
+            granted_capabilities: Vec::new(),
             issued_at: "2026-08-06T00:00:00+00:00".into(),
             extensions: BTreeMap::new(),
         };

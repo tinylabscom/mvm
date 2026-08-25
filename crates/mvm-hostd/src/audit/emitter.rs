@@ -1283,7 +1283,7 @@ impl AuditEmitter {
         let host_did =
             mvm_core::did_key::DidKey::from_verifying_key(self.signing_key.verifying_key())
                 .to_did_key();
-        let mut receipt = audit_entry_to_receipt(entry, &host_did).ok_or_else(|| {
+        let mut receipt = audit_entry_to_receipt(entry, &host_did, None).ok_or_else(|| {
             anyhow::anyhow!(
                 "audit event {} has no receipt mapping; evidence cannot cite it",
                 entry.event
@@ -1320,7 +1320,7 @@ impl AuditEmitter {
         let host_did =
             mvm_core::did_key::DidKey::from_verifying_key(self.signing_key.verifying_key())
                 .to_did_key();
-        let mut receipt = match audit_entry_to_receipt(entry, &host_did) {
+        let mut receipt = match audit_entry_to_receipt(entry, &host_did, None) {
             Some(r) => r,
             None => return,
         };
