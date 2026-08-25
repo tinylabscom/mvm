@@ -21,22 +21,42 @@ pub(super) fn slot_kernel_source(
     if built_vmlinux.is_file() {
         return Ok(built_vmlinux.to_path_buf());
     }
-    // Workload images rarely embed their own kernel (mkGuest outputs a rootfs).
-    // Boot a verified workload kernel when one is cached; it carries dm-verity
-    // and the virtio drivers the guest needs. Fall back to the builder kernel
-    // only when no workload kernel is available.
     let arch_str = arch.to_string();
-    if let mvm_build::kernel_fetch::KernelResolution::Cached(verified) =
-        mvm_build::kernel_fetch::resolve_kernel(cache_root, &arch_str, "workload", false)
-    {
-        return Ok(verified.path().to_path_buf());
-    }
-    let fallback = cache_root
+    let builder_kernel = cache_root
         .join("builder-vm")
         .join(&arch_str)
         .join("vmlinux");
-    if fallback.is_file() {
-        return Ok(fallback);
+    let verified_workload_kernel = || match mvm_build::kernel_fetch::resolve_kernel(
+        cache_root, &arch_str, "workload", false,
+    ) {
+        mvm_build::kernel_fetch::KernelResolution::Cached(verified) => {
+            Some(verified.path().to_path_buf())
+        }
+        mvm_build::kernel_fetch::KernelResolution::NeedsBuild(_)
+        | mvm_build::kernel_fetch::KernelResolution::NeedsFetch(_) => None,
+    };
+
+    // AArch64 guests need the workload kernel's platform and dm-verity support.
+    // The x86_64 builder kernel is the established persistent-machine kernel;
+    // keep it first there so an unrelated cached workload kernel cannot change
+    // a previously working boot path.
+    match arch {
+        GuestArch::Aarch64 => {
+            if let Some(workload_kernel) = verified_workload_kernel() {
+                return Ok(workload_kernel);
+            }
+            if builder_kernel.is_file() {
+                return Ok(builder_kernel);
+            }
+        }
+        GuestArch::X86_64 => {
+            if builder_kernel.is_file() {
+                return Ok(builder_kernel);
+            }
+            if let Some(workload_kernel) = verified_workload_kernel() {
+                return Ok(workload_kernel);
+            }
+        }
     }
     let workload_path =
         mvm_build::kernel_fetch::cached_kernel_path(cache_root, &arch_str, "workload");
@@ -522,12 +542,56 @@ mod tests {
     }
 
     #[test]
-    fn slot_kernel_source_prefers_verified_workload_kernel_fallback() {
+    fn slot_kernel_source_prefers_verified_workload_kernel_for_aarch64() {
         let tmp = tempfile::tempdir().unwrap();
         let built = tmp.path().join("build").join("vmlinux");
         let workload = tmp
             .path()
             .join("cache")
+            .join("builder-vm")
+            .join("aarch64")
+            .join("kernels")
+            .join("workload")
+            .join("vmlinux");
+        std::fs::create_dir_all(workload.parent().unwrap()).unwrap();
+        std::fs::write(&workload, b"workload-kernel").unwrap();
+        mvm_build::kernel_fetch::record_kernel_digest(&workload).unwrap();
+
+        let selected =
+            slot_kernel_source(&built, &tmp.path().join("cache"), GuestArch::Aarch64).unwrap();
+
+        assert_eq!(selected, workload);
+    }
+
+    #[test]
+    fn slot_kernel_source_prefers_builder_kernel_for_x86_64() {
+        let tmp = tempfile::tempdir().unwrap();
+        let built = tmp.path().join("build").join("vmlinux");
+        let cache = tmp.path().join("cache");
+        let builder = cache.join("builder-vm").join("x86_64").join("vmlinux");
+        let workload = cache
+            .join("builder-vm")
+            .join("x86_64")
+            .join("kernels")
+            .join("workload")
+            .join("vmlinux");
+        std::fs::create_dir_all(builder.parent().unwrap()).unwrap();
+        std::fs::write(&builder, b"builder-kernel").unwrap();
+        std::fs::create_dir_all(workload.parent().unwrap()).unwrap();
+        std::fs::write(&workload, b"workload-kernel").unwrap();
+        mvm_build::kernel_fetch::record_kernel_digest(&workload).unwrap();
+
+        let selected = slot_kernel_source(&built, &cache, GuestArch::X86_64).unwrap();
+
+        assert_eq!(selected, builder);
+    }
+
+    #[test]
+    fn slot_kernel_source_uses_verified_workload_kernel_for_x86_64_fallback() {
+        let tmp = tempfile::tempdir().unwrap();
+        let built = tmp.path().join("build").join("vmlinux");
+        let cache = tmp.path().join("cache");
+        let workload = cache
             .join("builder-vm")
             .join("x86_64")
             .join("kernels")
@@ -537,8 +601,7 @@ mod tests {
         std::fs::write(&workload, b"workload-kernel").unwrap();
         mvm_build::kernel_fetch::record_kernel_digest(&workload).unwrap();
 
-        let selected =
-            slot_kernel_source(&built, &tmp.path().join("cache"), GuestArch::X86_64).unwrap();
+        let selected = slot_kernel_source(&built, &cache, GuestArch::X86_64).unwrap();
 
         assert_eq!(selected, workload);
     }

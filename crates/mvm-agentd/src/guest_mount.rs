@@ -51,7 +51,7 @@ pub const RESTORE_AGENT_CAPABILITIES: u32 = (1u32 << CAP_KILL) | (1u32 << CAP_SY
 #[derive(Debug, thiserror::Error)]
 pub enum MountError {
     /// A syscall (mount, mkdir, pivot_root, setuid, ...) failed.
-    #[error("syscall failed: {context}")]
+    #[error("syscall failed: {context}: {source}")]
     Syscall {
         context: String,
         #[source]
@@ -1466,6 +1466,16 @@ mod tests {
     use std::io::{Seek, SeekFrom, Write};
 
     const FAKE_HASH: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    #[test]
+    fn syscall_error_display_includes_os_error() {
+        let source = std::io::Error::from_raw_os_error(libc::EINVAL);
+        let expected_source = source.to_string();
+        let rendered = MountError::syscall("mount rootfs", source).to_string();
+
+        assert!(rendered.contains("syscall failed: mount rootfs:"));
+        assert!(rendered.contains(&expected_source));
+    }
 
     /// Every early mount target must be created before it is mounted.
     ///
