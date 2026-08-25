@@ -2945,3 +2945,33 @@ to the configured ceiling and the first terse response immediately after it.
 - [x] Preserve networkless guest boot by making an absent identity optional
       only when vsock egress is not requested; unreadable and required
       identities remain fail-closed.
+
+## Follow-up (not started) — repository-to-signed-workload generator
+
+Prompted by the same 2026-08-25 survey of a commercial enterprise
+application-platform vendor that produced
+`specs/plans/2026-08-25-workload-service-plane.md`. That vendor's headline
+ergonomic is "push a repo and infrastructure appears". The ergonomic is worth
+having; the mechanism is not, because implicit provisioning is incompatible with
+admission — every workload boots from a signed `ExecutionPlan`, and `--prod`
+fails closed.
+
+The shape that fits mvm is a **generator, never a runtime**: point it at a git
+repository, have it infer the workload, and have it emit an `ExecutionPlan` for a
+human to sign. Nothing provisions as a side effect of inspection.
+
+No work has been done on this and none is scheduled. Open questions for whoever
+writes the plan:
+
+- [ ] Where inference lives. The SDK decorator parser already produces a
+      canonical `Workload` IR, and image entrypoints already resolve from an
+      `mvm-meta.json` sidecar. The generator should extend those rather than add
+      a third inference path.
+- [ ] How a repository declares a service requirement (a key-value store, a peer)
+      so the generator can populate `SynthesisInput.services`. Depends on the
+      bindings introduced by WS-A and WS-B of the service-plane plan.
+- [ ] What the generator refuses. An unpinned dependency, an unresolvable
+      entrypoint, and a resource shape over the admission ceiling should all fail
+      at generation time rather than at boot.
+- [ ] Whether the emitted plan is signed interactively or written unsigned for a
+      separate signing step. Unsigned-by-default is the safer starting posture.
