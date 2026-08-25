@@ -754,6 +754,9 @@ fn collect_markdown(dir: &Path, out: &mut Vec<PathBuf>) {
     for entry in entries.filter_map(Result::ok) {
         let path = entry.path();
         if path.is_dir() {
+            if path.file_name().is_some_and(|name| name == "node_modules") {
+                continue;
+            }
             collect_markdown(&path, out);
         } else if path
             .extension()
@@ -1183,6 +1186,21 @@ mod corpus_tests {
             })
             .sum();
         assert!(total > 200, "only extracted {total} mvmctl examples");
+    }
+
+    #[test]
+    fn dependency_markdown_is_not_part_of_the_documentation_corpus() {
+        let root = tempfile::tempdir().expect("create documentation fixture");
+        let sdk = root.path().join("crates/mvm-sdk/sdks/typescript");
+        let dependency = sdk.join("node_modules/dependency");
+        std::fs::create_dir_all(&dependency).expect("create dependency fixture");
+        std::fs::write(sdk.join("README.md"), "# SDK\n").expect("write SDK documentation");
+        std::fs::write(dependency.join("README.md"), "# Dependency\n")
+            .expect("write dependency documentation");
+
+        let files = documentation_files(root.path());
+
+        assert_eq!(files, vec![sdk.join("README.md")]);
     }
 
     #[test]

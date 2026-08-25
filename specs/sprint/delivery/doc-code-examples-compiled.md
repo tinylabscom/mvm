@@ -88,6 +88,12 @@ identifiable ones (`mvm.toml`, launch plan, Workload IR) into their real serde
 types, where `deny_unknown_fields` would catch a stale key, is the obvious next
 step and is also not done here.
 
+The corpus walker excludes generated `node_modules` trees. CI installs the
+TypeScript SDK dependencies before the BDD suite runs; dependency READMEs are
+not project documentation and may contain intentionally fragmentary JSON. A
+focused regression test creates an SDK README beside a dependency README and
+proves that only the project-owned document enters the corpus.
+
 Python and TypeScript examples — 103 blocks — remain unverified.
 
 ## Evidence
