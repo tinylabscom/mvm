@@ -10,7 +10,7 @@ This page shows the current TypeScript SDK shape for local sandbox lifecycle and
 ## Imperative runtime
 
 ```ts
-import { Sandbox } from "mvm-sdk";
+import { Sandbox } from "@runmvm/mvm";
 
 using sandbox = Sandbox.create("node-22", { workloadId: "quickstart" });
 sandbox.files.write("/app/main.js", "console.log('hello from mvm')");
@@ -32,7 +32,7 @@ mvmctl run --mode live ./quickstart.ts
 ## Static declaration
 
 ```ts
-import * as mvm from "mvm-sdk";
+import * as mvm from "@runmvm/mvm";
 
 export const hello = mvm.app({
   image: mvm.nix_packages(["nodejs_22"]),

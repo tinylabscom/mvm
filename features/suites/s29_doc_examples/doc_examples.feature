@@ -64,3 +64,15 @@ Feature: Documented examples work
     # Python: parse the snippet, then resolve every `mvm.<name>` it uses
     # against the real installed SDK.
     Then every documented Python example parses and names real SDK symbols
+
+  Scenario: documented TypeScript examples name real SDK exports
+    # Resolved from the SDK's `src/` export graph, not from a built `dist/`:
+    # `dist/` is absent in a fresh worktree, and depending on it would fail
+    # this gate for a reason that has nothing to do with the docs.
+    Then every documented TypeScript example names real SDK exports
+
+  Scenario: documented mkGuest calls name real attributes
+    # Read from `nix/lib/mk-guest.nix`'s argument set rather than evaluated:
+    # the hermetic lane has no `nix` binary, and the header is a flat
+    # attribute list that does not need one.
+    Then every documented mkGuest call names real attributes

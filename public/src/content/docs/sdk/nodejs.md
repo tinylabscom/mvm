@@ -28,7 +28,7 @@ Planned:
 ## Declaration
 
 ```ts
-import * as mvm from "mvm-sdk";
+import * as mvm from "@runmvm/mvm";
 
 export const worker = mvm.app({
   image: mvm.nix_packages(["nodejs_22"]),

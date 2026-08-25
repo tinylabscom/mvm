@@ -3,6 +3,10 @@ title: Your First MicroVM
 description: Write a Nix flake and boot a microVM.
 ---
 
+:::caution[Not implemented yet]
+The `healthChecks` block below is intended surface. `nix/lib/mk-guest.nix` does not accept it today.
+:::
+
 This guide walks through writing a Nix flake that builds a microVM image, then booting it with mvmctl.
 
 ## Understanding the Layers

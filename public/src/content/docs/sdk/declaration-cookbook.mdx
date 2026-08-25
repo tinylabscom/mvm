@@ -59,7 +59,7 @@ Security posture:
 <TabItem label="TypeScript">
 
 ```ts
-import * as mvm from "mvm-sdk";
+import * as mvm from "@runmvm/mvm";
 
 mvm.workload({ id: "hello-node" });
 
@@ -289,8 +289,8 @@ export const math = mvm.app({
   network: mvm.network({ mode: "none" }),
   dependencies: mvm.noDeps(),
   entrypoints: [
-    mvm.entrypointFunction({ module: "mathsvc", function: "add", primary: true }),
-    mvm.entrypointFunction({ module: "mathsvc", function: "mul" }),
+    mvm.entrypoint_function({ module: "mathsvc", function: "add", primary: true }),
+    mvm.entrypoint_function({ module: "mathsvc", function: "mul" }),
   ],
 })(() => undefined);
 ```

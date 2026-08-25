@@ -9,7 +9,7 @@
 //! Pure by construction (the only I/O is reading the doc files handed to it),
 //! so the parsing rules are unit-tested here rather than through the runner.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 /// Fence languages whose bodies are shell transcripts we extract commands from.
@@ -1051,6 +1051,90 @@ mod tests {
     }
 
     #[test]
+    fn mk_guest_parameters_come_from_the_argument_set() {
+        let source = concat!(
+            "# a comment\n",
+            "{ name\n",
+            ", entrypoint\n",
+            ", packages       ? [ ]\n",
+            ", vcpus          ? 1\n",
+            "}:\n",
+            "let unrelated = 1; in unrelated\n",
+        );
+        let names = mk_guest_parameters(source);
+        assert!(names.contains("name"));
+        assert!(names.contains("entrypoint"));
+        assert!(names.contains("packages"));
+        assert!(names.contains("vcpus"));
+        assert!(
+            !names.contains("unrelated"),
+            "the walk ran past the argument set: {names:?}"
+        );
+    }
+
+    #[test]
+    fn mk_guest_call_attributes_collapse_dotted_paths() {
+        let body = concat!(
+            "packages.default = mvm.lib.mkGuest {\n",
+            "  inherit pkgs;\n",
+            "  name = \"my-app\";\n",
+            "  entrypoint.command = [ \"/bin/x\" ];\n",
+            "};\n",
+        );
+        let found: Vec<String> = mk_guest_call_attributes(body)
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        assert!(found.contains(&"pkgs".to_string()), "{found:?}");
+        assert!(found.contains(&"name".to_string()), "{found:?}");
+        assert!(found.contains(&"entrypoint".to_string()), "{found:?}");
+        assert!(
+            !found.contains(&"command".to_string()),
+            "a dotted path leaked its tail: {found:?}"
+        );
+    }
+
+    #[test]
+    fn mk_guest_call_attributes_ignore_words_in_comments_and_strings() {
+        let body = concat!(
+            "mvm.lib.mkGuest {\n",
+            "  name = \"my-app\";\n",
+            "  dev = true;   # explicit override; auto-infer is false here\n",
+            "  entrypoint.command = [ \"/bin/sh\" \"-c\" \"per-service thing\" ];\n",
+            "}\n",
+        );
+        let found: Vec<String> = mk_guest_call_attributes(body)
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        for prose in ["auto", "per", "explicit", "service"] {
+            assert!(
+                !found.contains(&prose.to_string()),
+                "read {prose:?} out of a comment or string: {found:?}"
+            );
+        }
+        assert!(found.contains(&"dev".to_string()), "{found:?}");
+    }
+
+    #[test]
+    fn mk_guest_call_attributes_ignore_nested_attribute_sets() {
+        let body = concat!(
+            "mvm.lib.mkGuest {\n",
+            "  name = \"x\";\n",
+            "  entrypoint.services.web = { exec = \"run\"; };\n",
+            "}\n",
+        );
+        let found: Vec<String> = mk_guest_call_attributes(body)
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        assert!(
+            !found.contains(&"exec".to_string()),
+            "a nested attribute leaked to the top level: {found:?}"
+        );
+    }
+
+    #[test]
     fn tier_lookup_falls_back_to_the_longest_registered_prefix() {
         let policy = TierPolicy::from_entries([
             (vec!["machine".to_string()], Tier::Parse),
@@ -1122,4 +1206,148 @@ mod corpus_tests {
             }
         }
     }
+}
+
+/// The attribute names `mkGuest` accepts, read from its Nix argument set.
+///
+/// The docs teach `mkGuest` as the Nix authoring surface, so a renamed or
+/// removed attribute is drift of exactly the kind the Rust compiler and the
+/// SDK checkers catch elsewhere. Evaluating Nix would need a `nix` binary the
+/// hermetic lane does not have; the argument set is a flat `{ a, b ? x, ... }`
+/// header, which is readable without one.
+pub fn mk_guest_parameters(source: &str) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
+    let mut started = false;
+
+    for line in source.lines() {
+        let trimmed = line.trim_start();
+        // The header opens with `{ name` and closes with `}:`.
+        if !started {
+            if trimmed.starts_with("{ name") {
+                started = true;
+            } else {
+                continue;
+            }
+        } else if trimmed.starts_with("}:") {
+            break;
+        }
+        let candidate = trimmed.trim_start_matches(['{', ',']).trim_start();
+        let name: String = candidate
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+            .collect();
+        if !name.is_empty() {
+            names.insert(name);
+        }
+    }
+
+    names
+}
+
+/// The top-level attributes a documented `mkGuest { … }` call passes, with the
+/// line offset of each within the block.
+///
+/// Dotted paths collapse to their head (`entrypoint.command` is `entrypoint`),
+/// and `inherit` brings names in without an `=`, so both are handled.
+pub fn mk_guest_call_attributes(body: &str) -> Vec<(String, usize)> {
+    let Some(start) = body.find("mkGuest") else {
+        return Vec::new();
+    };
+    let Some(open) = body[start..].find('{').map(|offset| start + offset) else {
+        return Vec::new();
+    };
+
+    let mut attributes = Vec::new();
+    let mut depth = 0usize;
+    let mut line = body[..open].lines().count();
+    let mut at_item_start = false;
+
+    let bytes = body.as_bytes();
+    let mut index = open;
+    while index < body.len() {
+        let character = bytes[index] as char;
+        // A `#` comment runs to end of line, and a string can hold anything;
+        // words inside either are prose, not attributes.
+        if character == '#' {
+            let end = body[index..]
+                .find('\n')
+                .map_or(body.len(), |offset| index + offset);
+            index = end;
+            continue;
+        }
+        if character == '"' {
+            let mut cursor = index + 1;
+            while cursor < body.len() {
+                let inner = bytes[cursor] as char;
+                if inner == '\\' {
+                    cursor += 2;
+                    continue;
+                }
+                if inner == '"' {
+                    break;
+                }
+                if inner == '\n' {
+                    line += 1;
+                }
+                cursor += 1;
+            }
+            index = cursor + 1;
+            at_item_start = false;
+            continue;
+        }
+        match character {
+            '\n' => {
+                line += 1;
+                at_item_start = true;
+            }
+            '{' => {
+                depth += 1;
+                at_item_start = true;
+            }
+            '}' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    break;
+                }
+                at_item_start = true;
+            }
+            ';' => at_item_start = true,
+            c if c.is_whitespace() => {}
+            _ => {
+                if depth == 1 && at_item_start {
+                    let rest = &body[index..];
+                    let word: String = rest
+                        .chars()
+                        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                        .collect();
+                    if !word.is_empty() {
+                        // `inherit pkgs;` names come in without an `=`.
+                        if word == "inherit" {
+                            for inherited in rest[..rest.find(';').unwrap_or(rest.len())]
+                                .split_whitespace()
+                                .skip(1)
+                            {
+                                let clean: String = inherited
+                                    .chars()
+                                    .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                                    .collect();
+                                if !clean.is_empty() {
+                                    attributes.push((clean, line));
+                                }
+                            }
+                        } else {
+                            attributes.push((word.clone(), line));
+                        }
+                        index += word.len();
+                        at_item_start = false;
+                        continue;
+                    }
+                }
+                at_item_start = false;
+            }
+        }
+        index += 1;
+    }
+
+    attributes
 }

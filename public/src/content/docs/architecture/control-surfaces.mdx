@@ -69,7 +69,7 @@ with mvm.Sandbox.create("python-3.12", workload_id="tool") as sandbox:
 <TabItem label="TypeScript">
 
 ```ts
-import { Sandbox } from "mvm-sdk";
+import { Sandbox } from "@runmvm/mvm";
 
 using sandbox = Sandbox.create("node-22", { workloadId: "tool" });
 sandbox.files.write("/app/main.js", "console.log('hello')");
@@ -112,12 +112,12 @@ def run() -> str:
 <TabItem label="TypeScript">
 
 ```ts
-import * as mvm from "mvm-sdk";
+import * as mvm from "@runmvm/mvm";
 
 export const run = mvm.app({
   name: "worker",
   source: mvm.localPath("."),
-  image: mvm.nixPackages(["nodejs_22"]),
+  image: mvm.nix_packages(["nodejs_22"]),
   network: mvm.network({ mode: "deny" }),
 })((): string => "ok");
 ```

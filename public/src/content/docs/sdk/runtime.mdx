@@ -35,7 +35,7 @@ with mvm.Sandbox.create("python-3.12", workload_id="agent-tool") as sandbox:
 <TabItem label="TypeScript">
 
 ```ts
-import { Sandbox } from "mvm-sdk";
+import { Sandbox } from "@runmvm/mvm";
 
 using sandbox = Sandbox.create("node-22", { workloadId: "agent-tool" });
 sandbox.files.write("/app/main.js", "console.log('hello from mvm')");

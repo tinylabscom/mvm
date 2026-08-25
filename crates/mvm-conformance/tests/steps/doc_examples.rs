@@ -20,7 +20,8 @@ use clap::Command as ClapCommand;
 use cucumber::then;
 use mvm_conformance::doc_examples::{
     DocExample, ExampleSource, Tier, TierPolicy, doc_examples, documentation_files,
-    live_scenario_commands, mvmctl_lines_outside_fences,
+    live_scenario_commands, mk_guest_call_attributes, mk_guest_parameters,
+    mvmctl_lines_outside_fences,
 };
 
 use crate::world::CliWorld;
@@ -64,6 +65,17 @@ struct Manifest {
     planned: Vec<AbsentEntry>,
     #[serde(default)]
     absent: Vec<AbsentEntry>,
+    #[serde(default)]
+    nix_attribute: Vec<NixAttributeEntry>,
+}
+
+/// A `mkGuest` attribute the docs teach while its argument set does not accept
+/// it. Same contract as [`AbsentEntry`]: declared, and required to stay absent.
+#[derive(serde::Deserialize)]
+struct NixAttributeEntry {
+    name: String,
+    #[allow(dead_code)]
+    reason: String,
 }
 
 #[derive(serde::Deserialize)]
@@ -711,6 +723,16 @@ fn blocks_in(language: &[&str]) -> Vec<BlockPayload> {
 /// nearest thing these languages have to the compile step the Rust examples
 /// now get.
 fn run_checker(program: &str, script: &str, blocks: &[BlockPayload]) -> Vec<Finding> {
+    run_checker_with(program, script, blocks, &[])
+}
+
+/// As [`run_checker`], with extra environment for the checker process.
+fn run_checker_with(
+    program: &str,
+    script: &str,
+    blocks: &[BlockPayload],
+    env: &[(&str, std::path::PathBuf)],
+) -> Vec<Finding> {
     use std::io::Write as _;
     use std::process::Stdio;
 
@@ -723,6 +745,7 @@ fn run_checker(program: &str, script: &str, blocks: &[BlockPayload]) -> Vec<Find
     let mut child = std::process::Command::new(program)
         .arg(&script)
         .env("PYTHONPATH", root.join("crates/mvm-sdk/sdks/python"))
+        .envs(env.iter().map(|(k, v)| (*k, v.clone())))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -773,4 +796,87 @@ fn documented_python_examples_are_valid(_world: &mut CliWorld) {
     assert!(!blocks.is_empty(), "no Python examples were found to check");
     let findings = run_checker("python3", "check_python_examples.py", &blocks);
     report(&findings, "Python", blocks.len());
+}
+
+#[then(expr = "every documented TypeScript example names real SDK exports")]
+fn documented_typescript_examples_are_valid(_world: &mut CliWorld) {
+    let blocks = blocks_in(&["ts", "typescript"]);
+    assert!(
+        !blocks.is_empty(),
+        "no TypeScript examples were found to check"
+    );
+    let sdk = repo_root().join("crates/mvm-sdk/sdks/typescript/src");
+    let findings = run_checker_with(
+        "node",
+        "check_typescript_examples.mjs",
+        &blocks,
+        &[("MVM_TS_SDK_SRC", sdk)],
+    );
+    report(&findings, "TypeScript", blocks.len());
+}
+
+#[then(expr = "every documented mkGuest call names real attributes")]
+fn documented_mkguest_calls_are_valid(_world: &mut CliWorld) {
+    let root = repo_root();
+    let source = std::fs::read_to_string(root.join("nix/lib/mk-guest.nix"))
+        .expect("read nix/lib/mk-guest.nix");
+    let mut accepted = mk_guest_parameters(&source);
+    assert!(
+        accepted.len() > 5,
+        "read only {} mkGuest parameter(s) — the argument-set walk has gone blind",
+        accepted.len()
+    );
+    // `pkgs` is threaded in by every caller and consumed by the composition
+    // layer rather than declared in the inner argument set.
+    accepted.insert("pkgs".to_string());
+
+    let declared: BTreeSet<String> = manifest()
+        .nix_attribute
+        .into_iter()
+        .map(|entry| entry.name)
+        .collect();
+    for name in &declared {
+        assert!(
+            !accepted.contains(name),
+            "`{name}` is declared as an unimplemented mkGuest attribute but the \
+             argument set now accepts it — drop the [[nix_attribute]] entry and \
+             the docs' not-implemented note"
+        );
+    }
+
+    let mut failures = Vec::new();
+    let mut checked = 0usize;
+
+    for block in all_code_blocks() {
+        if block.language != "nix" || block.is_ignored() || block.body.contains('…') {
+            continue;
+        }
+        let attributes = mk_guest_call_attributes(&block.body);
+        if attributes.is_empty() {
+            continue;
+        }
+        checked += 1;
+        for (name, offset) in attributes {
+            if !accepted.contains(&name) && !declared.contains(&name) {
+                failures.push(format!(
+                    "  {}:{}\n     `mkGuest` takes no `{name}` attribute",
+                    block.file,
+                    block.line + offset
+                ));
+            }
+        }
+    }
+
+    assert!(
+        checked > 0,
+        "no documented mkGuest calls were found to check"
+    );
+    assert!(
+        failures.is_empty(),
+        "{} documented mkGuest attribute(s) do not exist (checked {checked} call \
+         site(s)). The guide teaches mkGuest as the Nix authoring surface, so a \
+         renamed attribute silently produces a guest nobody asked for:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
 }

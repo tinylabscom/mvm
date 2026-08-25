@@ -131,14 +131,14 @@ def greet(name: str) -> str:
 <TabItem label="TypeScript">
 
 ```ts
-import * as mvm from "mvm-sdk";
+import * as mvm from "@runmvm/mvm";
 
 export const greet = mvm.app({
   name: "hello",
-  image: mvm.nixPackages(["nodejs_22"]),
-  resources: mvm.resources({ vcpus: 1, memory_mb: 256 }),
-  dependencies: mvm.deps.none(),
-  entrypoint: mvm.entrypointFunction({
+  image: mvm.nix_packages(["nodejs_22"]),
+  resources: mvm.resources({ cpu_cores: 1, memory_mb: 256, rootfs_size_mb: 512 }),
+  dependencies: mvm.no_deps(),
+  entrypoint: mvm.entrypoint_function({
     language: "typescript",
     module: "app",
     function: "greet",
@@ -376,15 +376,15 @@ def _spec(): pass
 `entry.ts`:
 
 ```ts
-import * as mvm from "mvm-sdk";
+import * as mvm from "@runmvm/mvm";
 
 export const spec = mvm.app({
   name: "hello",
-  source: mvm.source.local("./src"),
-  image: mvm.nixPackages(["nodejs_22"]),
-  resources: mvm.resources({ vcpus: 1, memory_mb: 256 }),
-  dependencies: mvm.deps.none(),
-  entrypoint: mvm.entrypointFunction({
+  source: mvm.localPath("./src"),
+  image: mvm.nix_packages(["nodejs_22"]),
+  resources: mvm.resources({ cpu_cores: 1, memory_mb: 256, rootfs_size_mb: 512 }),
+  dependencies: mvm.no_deps(),
+  entrypoint: mvm.entrypoint_function({
     language: "typescript",
     module: "app",
     function: "greet",
