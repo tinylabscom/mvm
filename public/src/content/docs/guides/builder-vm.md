@@ -3,14 +3,14 @@ title: "Builder VM"
 description: How mvm builds Linux microVM images from the host without requiring you to enter a dev shell or install host-side Nix.
 ---
 
-The short version: **you run `mvmctl build` from the host, and mvm runs Nix inside the builder VM.** You do not need to enter an interactive dev shell to build a template or runtime image.
+The short version: **you run `mvmctl machine build` from the host, and mvm runs Nix inside the builder VM.** You do not need to enter an interactive dev shell to build a template or runtime image.
 
 The host process is the control plane. The builder VM is the Linux execution boundary for Nix evaluation, Nix builds, and image assembly. The runtime backend is separate: after the image is built, mvm boots the prebuilt kernel and rootfs with the selected microVM backend, such as Firecracker on Linux or Apple Virtualization on macOS.
 
 ```text
 macOS or Linux host
   |
-  | mvmctl build --flake .
+  | mvmctl machine build --flake .
   v
 host-side mvmctl process
   |
@@ -45,20 +45,20 @@ This separation is deliberate. A build can take seconds or minutes because it ma
 The normal build command is:
 
 ```bash
-mvmctl build --flake .
+mvmctl machine build --flake .
 ```
 
 That command should be run from your project directory on the host. `mvmctl` takes care of starting or reaching the builder VM, staging the flake, running the build, and copying the result back.
 
 The builder VM is headless by design — there is no interactive shell into it, not even for debugging. You never "enter" it to inspect the Linux build environment, manually run `nix build`, or check Nix store disk usage; you debug through its logs and structured output instead:
 
-- `mvmctl build --flake .` prints the build's own progress and errors.
+- `mvmctl machine build --flake .` prints the build's own progress and errors.
 - `mvmctl doctor` reports the resolved builder backend and its readiness.
 - A failing `nix build` inside the builder VM surfaces its error back to the host command that triggered it — there's no separate shell session to reproduce it in.
 
 None of the following ever require or offer a shell into the builder VM:
 
-- `mvmctl build --flake .`;
+- `mvmctl machine build --flake .`;
 - `mvmctl run`;
 - `mvmctl machine run --flake .`;
 - building a registered template;
@@ -70,7 +70,7 @@ For an explicit two-step flow:
 
 ```bash
 # 1. Build the runtime image.
-mvmctl build --flake .
+mvmctl machine build --flake .
 
 # 2. Boot the already-built image.
 mvmctl machine run --flake . --hypervisor hvf
@@ -125,10 +125,10 @@ mvmctl persistent-builder submit --flake path:/work --attr packages.aarch64-linu
 mvmctl persistent-builder stop
 ```
 
-`mvmctl build` also has an explicit escape hatch:
+`mvmctl machine build` also has an explicit escape hatch:
 
 ```bash
-mvmctl build --no-persistent-builder
+mvmctl machine build --no-persistent-builder
 ```
 
 The intended top-level DX is that developers do not need to invoke the low-level controls for normal use: `mvmctl bootstrap` pre-fetches the builder VM image, and `build` uses a persistent non-interactive builder by default when the platform supports it. If the persistent path is unavailable, the command should say why it fell back rather than silently changing the trust and performance model.
@@ -138,7 +138,7 @@ The intended top-level DX is that developers do not need to invoke the low-level
 From the user's perspective, the interface is the host command:
 
 ```bash
-mvmctl build --flake .
+mvmctl machine build --flake .
 ```
 
 Internally, mvm stages the build request into the builder boundary: source path, selected profile, target system, output directory, and job metadata. The builder runs the Linux-side build and returns structured artifact metadata to the host.
@@ -184,9 +184,9 @@ absence) is observable without starting a build.
 
 Host-side Nix is not required for normal mvm use.
 
-On macOS, host Nix also does not remove the need for a Linux build boundary: the guest image is a Linux artifact. A macOS `nix` install can be useful for editor tooling, formatting, or unrelated projects, but `mvmctl build` should treat the builder VM as the authoritative place where Nix evaluation and builds happen.
+On macOS, host Nix also does not remove the need for a Linux build boundary: the guest image is a Linux artifact. A macOS `nix` install can be useful for editor tooling, formatting, or unrelated projects, but `mvmctl machine build` should treat the builder VM as the authoritative place where Nix evaluation and builds happen.
 
-On Linux, the host may already be capable of Linux Nix builds, but mvm still keeps the same conceptual boundary: `mvmctl build` is the user-facing command, and the builder path owns image construction and cache policy. This keeps the CLI behavior consistent across platforms.
+On Linux, the host may already be capable of Linux Nix builds, but mvm still keeps the same conceptual boundary: `mvmctl machine build` is the user-facing command, and the builder path owns image construction and cache policy. This keeps the CLI behavior consistent across platforms.
 
 ## Caching
 
@@ -213,7 +213,7 @@ When measuring whether a prebuilt runtime image boots under a budget such as 200
 
 ```text
 Build benchmark:
-  host mvmctl build -> builder VM -> artifacts
+  host mvmctl machine build -> builder VM -> artifacts
 
 Runtime boot benchmark:
   existing artifacts -> runtime backend -> guest ready signal
@@ -231,7 +231,7 @@ For Apple Virtualization runtime tests, point the benchmark config at the built 
 
 ## Failure Modes
 
-If `mvmctl build` fails, check the phase named in the error:
+If `mvmctl machine build` fails, check the phase named in the error:
 
 | Symptom                          | Likely phase        | What to inspect                                                       |
 | -------------------------------- | ------------------- | --------------------------------------------------------------------- |

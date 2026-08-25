@@ -13,13 +13,13 @@ mvmctl machine build --flake ./agent-sandbox
 mvmctl machine run --flake ./agent-sandbox --name agent-sandbox -d
 ```
 
-`mvmctl build` uses the builder VM for Linux image construction. `mvmctl machine run` boots the runtime guest from the built artifact.
+`mvmctl machine build` uses the builder VM for Linux image construction. `mvmctl machine run` boots the runtime guest from the built artifact.
 
 ## Inspect
 
 ```sh
 mvmctl machine ls
-mvmctl boot-report agent-sandbox
+mvmctl machine boot-report agent-sandbox
 mvmctl machine logs agent-sandbox
 ```
 
@@ -39,15 +39,15 @@ args explicit and file paths narrow. Declare ingress before boot with
 ## Preserve state
 
 ```sh
-mvmctl pause agent-sandbox
-mvmctl resume agent-sandbox
+mvmctl machine pause agent-sandbox
+mvmctl machine resume agent-sandbox
 ```
 
 Full-VM memory checkpoints (vm-full class) are currently unavailable through the selectable workload runners; check `mvmctl doctor` for the authoritative capability before requesting them:
 
 ```sh
-mvmctl checkpoint create agent-sandbox --class vm-full
-mvmctl checkpoint restore agent-sandbox --name <checkpoint-name>
+mvmctl machine checkpoint create agent-sandbox --class vm-full
+mvmctl machine checkpoint restore agent-sandbox --name <checkpoint-name>
 ```
 
 Snapshots can contain memory, files, and runtime credentials. Apply retention and deletion policy.
@@ -56,7 +56,7 @@ Snapshots can contain memory, files, and runtime credentials. Apply retention an
 
 ```sh
 mvmctl machine stop agent-sandbox
-mvmctl cleanup
+mvmctl env cleanup
 ```
 
 Stopping compute is not the same as deleting all state. Check manifests, volumes, snapshots, and cache entries when you need stronger cleanup.

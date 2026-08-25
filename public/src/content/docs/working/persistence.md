@@ -12,14 +12,14 @@ For stateful agent and service workspaces, see [Persistent workspaces](/guides/p
 | --- | --- | --- |
 | Files inside a running VM | VM runtime disk | Lost when the VM is destroyed unless captured or copied out. |
 | Host-mounted files | Mount or copy workflow | Host exposure depends on mount mode and path selection. |
-| Managed local volume | `mvmctl volume` | Encrypted at rest when locked. |
+| Managed local volume | `mvmctl machine volume` | Encrypted at rest when locked. |
 | Machine state | pause/resume or checkpoint create/restore | May contain memory, files, processes, and credentials present in the guest. |
 
 ## Pause and resume
 
 ```sh
-mvmctl pause agent-sandbox
-mvmctl resume agent-sandbox
+mvmctl machine pause agent-sandbox
+mvmctl machine resume agent-sandbox
 ```
 
 The exact backend mechanics differ. See [Snapshots](/working/snapshots/) for the
@@ -35,8 +35,8 @@ supported recovery artifact is retained. See [Cold mode](/working/cold-mode/).
 
 ```sh
 mvmctl machine stop agent-sandbox
-mvmctl sandbox gc
-mvmctl cleanup
+mvmctl machine sandbox gc
+mvmctl env cleanup
 ```
 
 Stopping compute does not automatically erase every artifact. Check volumes, snapshots, receipts, logs, and caches when the workflow needs stronger cleanup.

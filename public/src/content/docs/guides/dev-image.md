@@ -137,10 +137,10 @@ The build path is the same as any mvm image:
 
 ```sh
 # From your project directory:
-mvmctl build --flake . --profile dev
+mvmctl machine build --flake . --profile dev
 ```
 
-If you intentionally manage your own Nix environment, you can run `nix build .#dev` directly. The normal mvm path is `mvmctl build`, which runs Nix inside the builder VM. Output is a derivation with `passthru.mvm.{accessible, sealed, expectedBootMs}`. Check it from a Nix-enabled debug environment:
+If you intentionally manage your own Nix environment, you can run `nix build .#dev` directly. The normal mvm path is `mvmctl machine build`, which runs Nix inside the builder VM. Output is a derivation with `passthru.mvm.{accessible, sealed, expectedBootMs}`. Check it from a Nix-enabled debug environment:
 
 ```sh
 nix eval .#dev.passthru.mvm
@@ -154,7 +154,7 @@ nix eval .#dev.passthru.mvm
 mvm runs Nix builds inside the project builder VM and copies the finished artifacts back to the host cache. You don't need Nix on your host, and you don't need to enter a dev shell before building. See [Builder VM](/guides/builder-vm/).
 
 - **Linux** (with `/dev/kvm`): the builder VM owns image construction; Firecracker is the default runtime backend.
-- **macOS Apple Silicon**: the host `mvmctl build` command orchestrates the builder VM. The resulting dev image can then boot on the selected macOS runtime backend.
+- **macOS Apple Silicon**: the host `mvmctl machine build` command orchestrates the builder VM. The resulting dev image can then boot on the selected macOS runtime backend.
 - **Windows / WSL2**: WSL2 with nested `/dev/kvm` is supported for the libkrun-backed workload runtime path. Native Windows and a Hyper-V managed Linux builder are not supported local paths today.
 
 ## Why this is structured this way

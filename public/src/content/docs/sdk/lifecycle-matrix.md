@@ -47,8 +47,8 @@ keep a workflow documented as planned.
 | Local SDK smoke script | Python or TypeScript `Sandbox.create(...)` in record mode | Produces Workload IR without booting a VM. |
 | Live SDK experiment | `mvmctl run --mode live ./script.py` or `.ts` | Exercises current live transport and cleanup helpers. |
 | Deployable workload declaration | Static declaration workflow | Avoids importing user modules during compile. |
-| Persistent service | `mvmctl build`, `mvmctl machine run`, `mvmctl machine logs`, `mvmctl machine stop` | CLI has the broadest lifecycle coverage today. |
-| Cold recovery test | `mvmctl pause/resume` or `mvmctl checkpoint create/restore` | Backend-specific state handling is visible. |
+| Persistent service | `mvmctl machine build`, `mvmctl machine run`, `mvmctl machine logs`, `mvmctl machine stop` | CLI has the broadest lifecycle coverage today. |
+| Cold recovery test | `mvmctl machine pause/resume` or `mvmctl machine checkpoint create/restore` | Backend-specific state handling is visible. |
 
 ## SDK parity rules
 

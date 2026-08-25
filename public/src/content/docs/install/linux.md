@@ -23,7 +23,7 @@ You'll need:
   If `/dev/kvm` exists but is `root`-only, add yourself to the `kvm` group: `sudo usermod -aG kvm "$USER"` (re-login required).
 - **Rust 1.85+** if you build `mvmctl` from source.
 
-You **do not need Nix on your host**. You run `mvmctl build` from the host, and mvm runs Nix evaluation and `nix build` through the project builder VM before extracting the resulting rootfs back to your host. See [Builder VM](/guides/builder-vm/) for the design.
+You **do not need Nix on your host**. You run `mvmctl machine build` from the host, and mvm runs Nix evaluation and `nix build` through the project builder VM before extracting the resulting rootfs back to your host. See [Builder VM](/guides/builder-vm/) for the design.
 
 ## Install mvmctl
 
@@ -74,7 +74,7 @@ mvmctl doctor
 
 ```bash
 mkdir my-app && cd my-app
-mvmctl init
+mvmctl init .
 mvmctl run
 ```
 
@@ -111,7 +111,7 @@ The upstream NixOS installer also works:
 sh <(curl -L https://nixos.org/nix/install) --daemon
 ```
 
-Installing host-side Nix does not change the normal `mvmctl build` contract: the CLI remains the host control plane, and the builder VM remains the image build boundary.
+Installing host-side Nix does not change the normal `mvmctl machine build` contract: the CLI remains the host control plane, and the builder VM remains the image build boundary.
 
 ## Distro-specific notes
 

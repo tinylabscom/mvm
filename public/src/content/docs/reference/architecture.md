@@ -189,7 +189,7 @@ construct an `Arc<dyn VmBackend>` straight from a descriptor instead of matching
 
 ## Build Pipeline
 
-`mvmctl build` and related build flows do not boot workload backends directly.
+`mvmctl machine build` and related build flows do not boot workload backends directly.
 
 Instead:
 

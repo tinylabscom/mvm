@@ -38,8 +38,8 @@ mvmctl machine run --flake . --name api-dev \
 Use readiness and logs while developing services:
 
 ```sh
-mvmctl wait api-dev --for all
-mvmctl boot-report api-dev
+mvmctl machine wait api-dev --for all
+mvmctl machine boot-report api-dev
 mvmctl machine logs api-dev -f
 ```
 

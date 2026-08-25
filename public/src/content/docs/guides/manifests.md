@@ -78,13 +78,13 @@ modules, services) or in `mvmd` (multi-VM topology, tenant policy, runtime deps)
 Three commands. That's the user model.
 
 ```bash
-mvmctl init                # scaffold mvm.toml + flake.nix in cwd
+mvmctl init .              # scaffold mvm.toml + flake.nix in cwd
 $EDITOR mvm.toml           # tweak sizing / profile to taste
-mvmctl build               # discover manifest, run nix build, persist artifacts
+mvmctl machine build               # discover manifest, run nix build, persist artifacts
 mvmctl machine run --manifest .                  # boot the built microVM
 ```
 
-Repeated edits are just edits. The next `mvmctl build` re-reads `mvm.toml` and re-runs the build. Resource changes (`vcpus`, `mem`, `data_disk`) update silently; identity changes (`flake`, `profile`) trip a drift refusal that asks you to `--force` or rename — see [Drift detection](#drift-detection) below.
+Repeated edits are just edits. The next `mvmctl machine build` re-reads `mvm.toml` and re-runs the build. Resource changes (`vcpus`, `mem`, `data_disk`) update silently; identity changes (`flake`, `profile`) trip a drift refusal that asks you to `--force` or rename — see [Drift detection](#drift-detection) below.
 
 For an image-backed durable machine:
 
@@ -110,12 +110,12 @@ transport is implemented.
 
 ### Manifest discovery
 
-`mvmctl build`, `mvmctl machine run`, `mvmctl run`, `mvmctl exec`, `mvmctl info`, `mvmctl rm` all accept an optional `[PATH]` argument:
+`mvmctl machine build`, `mvmctl machine run`, `mvmctl run`, `mvmctl machine exec`, `mvmctl machine inspect`, `mvmctl machine rm` all accept an optional `[PATH]` argument:
 
 ```bash
-mvmctl build                              # walks up from cwd looking for mvm.toml
-mvmctl build /abs/path/to/mvm.toml        # explicit file path
-mvmctl build /abs/path/to/project-dir     # explicit directory (resolves to mvm.toml inside)
+mvmctl machine build                              # walks up from cwd looking for mvm.toml
+mvmctl machine build /abs/path/to/mvm.toml        # explicit file path
+mvmctl machine build /abs/path/to/project-dir     # explicit directory (resolves to mvm.toml inside)
 ```
 
 Walk-up rules (Cargo-style): start at cwd, look for `mvm.toml` then `Mvmfile.toml` in each ancestor, stop at the first match, at a `.git` boundary, or at the filesystem root.
@@ -130,7 +130,7 @@ Both filenames are accepted with the same parser and schema. Use whichever fits 
 
 ```bash
 mvmctl init my-service              # scaffold into ./my-service
-mvmctl init                         # scaffold into cwd
+mvmctl init .                       # scaffold into cwd
 ```
 
 ### Presets
@@ -158,11 +158,14 @@ The planner outputs a structured plan (preset, features, http port, entrypoint, 
 ## Building
 
 ```bash
-mvmctl build                                 # discover manifest, build
-mvmctl build --force                          # rebuild even if the cache hits
-mvmctl build --update-hash                    # recompute Nix FOD hash (after package version bump)
-mvmctl build --vcpus 4 --mem 2G               # CLI overrides; persisted to the slot record
+mvmctl machine build                                 # discover manifest, build
+mvmctl machine build --force                          # rebuild even if the cache hits
+mvmctl machine build --update-hash                    # recompute Nix FOD hash (after package version bump)
 ```
+
+Sizing is a launch-time decision: pass `--cpus` / `--memory` to `mvmctl
+machine run`, or persist them on a named machine with `mvmctl machine create
+--cpus 4 --mem 2G`.
 
 Build artifacts are stored in a content-addressed registry under `~/.mvm/templates/<sha256(canonical_manifest_path)>/artifacts/revisions/<revision_hash>/`. The manifest's *path* identifies the project; `revision_hash = sha256(flake.lock + profile)` content-addresses the actual build outputs.
 
@@ -172,13 +175,12 @@ An unsupported request fails closed instead of downgrading to image-only.
 
 ## Listing / inspecting / removing
 
-Manifest registry operations live under `mvmctl manifest`. (The unprefixed `mvmctl machine ls` / `mvmctl info` / `mvmctl machine stop` continue to operate on **running VMs** — those are unchanged.)
+Manifest registry operations live under `mvmctl manifest`. (The unprefixed `mvmctl machine ls` / `mvmctl machine inspect` / `mvmctl machine stop` continue to operate on **running VMs** — those are unchanged.)
 
 ```bash
 mvmctl manifest ls                            # list built slots (manifest path, name, last built)
 mvmctl manifest ls --json                     # machine-readable
 mvmctl manifest ls --orphans                  # slots whose manifest file is gone
-mvmctl manifest ls --legacy                   # pre-refactor name-keyed slots (migration aid)
 
 mvmctl manifest info                          # details for the manifest at cwd / walked-up
 mvmctl manifest info /path/to/project         # explicit
@@ -199,7 +201,7 @@ mvmctl machine run --manifest /path/to/project           # explicit
 mvmctl machine run --manifest /path/to/project -- uname -a   # ephemeral one-shot
 ```
 
-If no current revision exists, you get an error with a hint to run `mvmctl build`. If the manifest's `vcpus`/`mem` differ from what the slot's snapshot was taken at, the snapshot is ignored and a cold-boot from the rootfs proceeds (with a warning).
+If no current revision exists, you get an error with a hint to run `mvmctl machine build`. If the manifest's `vcpus`/`mem` differ from what the slot's snapshot was taken at, the snapshot is ignored and a cold-boot from the rootfs proceeds (with a warning).
 
 ### Backend mismatch
 
@@ -228,7 +230,7 @@ mvmctl manifest push [PATH] [--revision <hash>]
 
 # consumer
 mvmctl manifest pull <CHANNEL-OR-HASH> [DIR]
-mvmctl manifest pull openclaw ./openclaw   # writes mvm.toml in DIR, installs artifacts
+mvmctl manifest pull <CHANNEL> <DIR>       # writes mvm.toml in DIR, installs artifacts
 mvmctl manifest verify --check-signature    # cosign verify (gated on plan 36)
 ```
 
@@ -236,7 +238,7 @@ Until plan 39 lands, transfer is via flake-level artifacts (Nix's own caching + 
 
 ## Drift detection
 
-The slot's `manifest.json` records the manifest's identity-shaping fields (`flake`, `profile`) at last build. If you edit `mvm.toml` to change either of those without `--force`, the next `mvmctl build` aborts with:
+The slot's `manifest.json` records the manifest's identity-shaping fields (`flake`, `profile`) at last build. If you edit `mvm.toml` to change either of those without `--force`, the next `mvmctl machine build` aborts with:
 
 > Manifest at `<path>` declares `flake=X, profile=Y`. The slot at `<sha256>` was last built with `flake=X', profile=Y'`. Pass `--force` to overwrite, or pick a different manifest directory.
 

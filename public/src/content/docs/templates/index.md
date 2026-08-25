@@ -19,12 +19,12 @@ the runtime sandbox should be; the flake says what goes inside the microVM.
 mvmctl init my-worker --preset worker
 cd my-worker
 $EDITOR mvm.toml
-mvmctl build
+mvmctl machine build
 mvmctl machine run --manifest .
 ```
 
 The build produces a manifest-keyed slot in the local registry. Subsequent
-`mvmctl build` calls re-read `mvm.toml`, rebuild the selected flake/profile,
+`mvmctl machine build` calls re-read `mvm.toml`, rebuild the selected flake/profile,
 and update the current revision for that slot.
 
 ## What makes a good template

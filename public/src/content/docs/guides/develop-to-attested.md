@@ -64,7 +64,7 @@ the image. That volume carries:
 - a hash-chained `meta.json` binding all of the above together
 
 ```bash
-mvmctl deps inspect     # read the sidecars without booting a VM
+mvmctl deps inspect HASH   # read the sidecars without booting a VM
 mvmctl deps audit
 ```
 

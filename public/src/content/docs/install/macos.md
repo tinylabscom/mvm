@@ -15,7 +15,7 @@ Intel Macs are not a supported local microVM host. Use a Linux machine with `/de
 - macOS 26+ for the HVF dev VM path.
 - libkrun installed for libkrun-backed builder/runtime components.
 
-You **do not need Nix on your Mac**. You run `mvmctl build` from macOS, and mvm runs Nix evaluation and `nix build` inside the Linux builder VM, then extracts the resulting rootfs back to the host. See [§"Linux builds on macOS"](#linux-builds-on-macos--zero-config-by-default) below for the design.
+You **do not need Nix on your Mac**. You run `mvmctl machine build` from macOS, and mvm runs Nix evaluation and `nix build` inside the Linux builder VM, then extracts the resulting rootfs back to the host. See [§"Linux builds on macOS"](#linux-builds-on-macos--zero-config-by-default) below for the design.
 
 ## Install mvmctl
 
@@ -63,13 +63,13 @@ cargo install mvmctl
 
 ## Linux Builds On macOS
 
-macOS Nix can't build Linux derivations natively, and most Mac users don't have Nix installed at all. mvm handles both cases **without requiring host-side configuration**: on `mvmctl build`, the host CLI stages the selected flake as a builder job, the Linux builder VM runs `nix build`, and mvm copies the resulting kernel/rootfs artifacts back to the host cache. See [Builder VM](/guides/builder-vm/) for the full control-plane flow.
+macOS Nix can't build Linux derivations natively, and most Mac users don't have Nix installed at all. mvm handles both cases **without requiring host-side configuration**: on `mvmctl machine build`, the host CLI stages the selected flake as a builder job, the Linux builder VM runs `nix build`, and mvm copies the resulting kernel/rootfs artifacts back to the host cache. See [Builder VM](/guides/builder-vm/) for the full control-plane flow.
 
 The builder VM is separate from the runtime VM. After the build completes, `mvmctl machine run` boots the already-built runtime image on the HVF backend (the macOS 26+ default). The build phase and boot phase can be benchmarked separately.
 
 ### Optional: host-side Nix for power users
 
-Most users skip this section. You may want host-side Nix if you're contributing to mvm itself, want Nix for editor tooling, or already run `nix-darwin` for unrelated reasons. Host-side Nix is not required by `mvmctl build`; the builder VM remains the Linux build boundary for mvm images.
+Most users skip this section. You may want host-side Nix if you're contributing to mvm itself, want Nix for editor tooling, or already run `nix-darwin` for unrelated reasons. Host-side Nix is not required by `mvmctl machine build`; the builder VM remains the Linux build boundary for mvm images.
 
 [Determinate Nix](https://determinate.systems/posts/determinate-nix-installer) is the easiest path:
 
@@ -77,7 +77,7 @@ Most users skip this section. You may want host-side Nix if you're contributing 
 curl --proto '=https' --tlsv1.2 -sSf -L https://install.determinate.systems/nix | sh -s -- install
 ```
 
-If you configure [`nix-darwin`'s `linux-builder`](https://nix.dev/manual/nix/stable/installation/installing-binary), it can be useful for direct `nix build` commands that you run yourself. It is not required for `mvmctl build`.
+If you configure [`nix-darwin`'s `linux-builder`](https://nix.dev/manual/nix/stable/installation/installing-binary), it can be useful for direct `nix build` commands that you run yourself. It is not required for `mvmctl machine build`.
 
 ## Verify
 
@@ -91,7 +91,7 @@ mvmctl doctor
 
 ```bash
 mkdir my-app && cd my-app
-mvmctl init
+mvmctl init .
 mvmctl run
 ```
 
@@ -101,7 +101,7 @@ mvmctl run
 
 **"Hypervisor.framework: entitlement missing"** — re-codesign the binary with the entitlement: `codesign --entitlements assets/mvmctl.entitlements -f -s - ~/.local/bin/mvmctl`. The release binary ships pre-signed; this only matters if you've stripped entitlements or built from source without the build script's signing step.
 
-**`nix build` fails with "a 'x86_64-linux' with features … is required"** — that is a direct host-side Nix command failing because macOS cannot build Linux derivations by itself. Use `mvmctl build --flake .` so the Linux build runs inside the builder VM. If you intentionally want direct `nix build` on macOS, configure [`nix-darwin`'s `linux-builder`](https://nix.dev/manual/nix/stable/installation/installing-binary).
+**`nix build` fails with "a 'x86_64-linux' with features … is required"** — that is a direct host-side Nix command failing because macOS cannot build Linux derivations by itself. Use `mvmctl machine build --flake .` so the Linux build runs inside the builder VM. If you intentionally want direct `nix build` on macOS, configure [`nix-darwin`'s `linux-builder`](https://nix.dev/manual/nix/stable/installation/installing-binary).
 
 **`mvmctl run` boots but `mvmctl machine console` fails to attach** — the `console` subcommand is only enabled for *accessible* images. If your `entrypoint.command = [ ... ]`, the build is *sealed* and console attach is rejected. Switch to `entrypoint.shell = "/bin/sh"` or pass `dev = true` in your `mkGuest` call. See [Building MicroVM Images](/guides/building-microvm-images).
 

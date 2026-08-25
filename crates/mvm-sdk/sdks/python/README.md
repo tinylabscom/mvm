@@ -23,8 +23,8 @@ def add(a: int, b: int) -> int:
 ```
 
 ```sh
-mvmctl compile app.py     # parse the script (no execution) → flake.nix + launch plan
-mvmctl up --flake .       # build the image and boot the microVM
+mvmctl build compile app.py   # parse the script (no execution) → flake.nix + launch plan
+mvmctl machine run --flake .     # build the image and boot the microVM
 ```
 
 `@mv.func` is the one-liner: it declares the workload, the app, and a function
@@ -51,7 +51,7 @@ def main(name: str) -> str:
 
 ## How it builds
 
-`mvmctl compile` reads your file **statically** — the decorator and the
+`mvmctl build compile` reads your file **statically** — the decorator and the
 `import mvm` line are parsed as data, never executed, so nothing in your module
 runs on the host. At image-build time the decorator and the `import mvm` line
 are **stripped** from the bundled source, so the guest runs your plain function

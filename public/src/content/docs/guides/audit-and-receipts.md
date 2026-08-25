@@ -49,13 +49,13 @@ and stderr are not streamed in that summary.
 Verify with the default host signer public key:
 
 ```sh
-mvmctl receipt verify /tmp/run-receipt.json
+mvmctl trust receipt verify /tmp/run-receipt.json
 ```
 
 Verify with an explicit Ed25519 public key:
 
 ```sh
-mvmctl receipt verify /tmp/run-receipt.json --pubkey ./host-signer.pub
+mvmctl trust receipt verify /tmp/run-receipt.json --pubkey ./host-signer.pub
 ```
 
 Verification should happen before a receipt is trusted by CI, copied into a
@@ -66,31 +66,31 @@ release artifact bundle, or attached to an external audit record.
 Show recent audit events:
 
 ```sh
-mvmctl audit tail -n 20
+mvmctl trust audit tail -n 20
 ```
 
 Follow new events:
 
 ```sh
-mvmctl audit tail -f
+mvmctl trust audit tail -f
 ```
 
 Read the chain-backed audit stream for the local tenant:
 
 ```sh
-mvmctl audit tail --chain --tenant local -n 20
+mvmctl trust audit tail --chain --tenant local -n 20
 ```
 
 Verify the chain links and signatures:
 
 ```sh
-mvmctl audit verify --tenant local
+mvmctl trust audit verify --tenant local
 ```
 
 Show chain entries for a specific plan identifier:
 
 ```sh
-mvmctl audit show 018f2d9b-7b52-7c9a-9233-2a62a4d8d521 --tenant local
+mvmctl trust audit show 018f2d9b-7b52-7c9a-9233-2a62a4d8d521 --tenant local
 ```
 
 Use the audit chain for host-local investigation. Use receipts when another
@@ -159,13 +159,13 @@ Boot reports are useful when the question is "did the sandbox boot and become
 ready?"
 
 ```sh
-mvmctl boot-report devbox --json
+mvmctl machine boot-report devbox --json
 ```
 
 Metrics are useful for dashboards and automated health checks:
 
 ```sh
-mvmctl metrics --json
+mvmctl ops metrics --json
 ```
 
 Metrics should stay operational: counts, durations, byte totals, IDs, states,

@@ -149,7 +149,7 @@ remain.
 
 - `bundle signature invalid` → the `.mvmpkg`'s manifest signature
   didn't match the local trust store. Source bundles from a
-  trusted publisher; `mvmctl bundle verify <path>` exits non-zero
+  trusted publisher; `mvmctl bundle fetch <path>` exits non-zero
   on mismatch without launching.
 - `bundle pin missing` (audit-chain admission) → the supervisor's
   signed-plan path failed to find a matching `PlanArtifact`. Pull

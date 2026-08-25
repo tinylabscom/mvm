@@ -28,29 +28,29 @@ that the backend supports live-memory warm start.
 Pause a running VM:
 
 ```sh
-mvmctl pause agent-sandbox
+mvmctl machine pause agent-sandbox
 ```
 
-`mvmctl pause` asks the backend snapshot transport to write `vmstate.bin` and
+`mvmctl machine pause` asks the backend snapshot transport to write `vmstate.bin` and
 `mem.bin` under the VM's instance snapshot directory, seals the sidecar with
 an epoch-bound HMAC envelope, and marks the VM as paused in the local registry.
 
 Resume it:
 
 ```sh
-mvmctl resume agent-sandbox
+mvmctl machine resume agent-sandbox
 ```
 
-`mvmctl resume` verifies the sealed envelope before loading the state and
+`mvmctl machine resume` verifies the sealed envelope before loading the state and
 clearing the paused flag. Replay of older sealed snapshots is refused by the
-epoch binding. `mvmctl resume --warm` is a distinct live-memory request and
+epoch binding. `mvmctl machine resume --warm` is a distinct live-memory request and
 fails closed when the selected backend cannot honor that tier.
 
 List and remove local sealed snapshots:
 
 ```sh
-mvmctl snapshot ls
-mvmctl snapshot rm agent-sandbox
+mvmctl machine snapshot ls
+mvmctl machine snapshot rm agent-sandbox
 ```
 
 ## Full-VM memory checkpoints
@@ -58,8 +58,8 @@ mvmctl snapshot rm agent-sandbox
 Full-VM memory checkpoints capture full guest state. They are currently unavailable through the selectable workload runners; request them only when `mvmctl doctor` reports a compatible backend and capability:
 
 ```sh
-mvmctl checkpoint create agent-sandbox --class vm-full
-mvmctl checkpoint restore agent-sandbox --name <checkpoint-name>
+mvmctl machine checkpoint create agent-sandbox --class vm-full
+mvmctl machine checkpoint restore agent-sandbox --name <checkpoint-name>
 ```
 
 `checkpoint create` pauses the VM, saves machine state and memory to the checkpoint directory, and records the content hash in the audit chain. `checkpoint restore` re-hashes the checkpoint content and records whether it matches the prior chain entry before restoring.
@@ -69,14 +69,14 @@ The restore proceeds even when the checkpoint hash is not in the local chain or 
 List and remove checkpoints:
 
 ```sh
-mvmctl checkpoint ls
-mvmctl checkpoint rm agent-sandbox --name <checkpoint-name>
+mvmctl machine checkpoint ls
+mvmctl machine checkpoint rm agent-sandbox --name <checkpoint-name>
 ```
 
 Fork a checkpoint to a new identity (new VM name, same state):
 
 ```sh
-mvmctl checkpoint fork agent-sandbox --name <checkpoint-name> --into new-sandbox
+mvmctl machine checkpoint fork agent-sandbox --name <checkpoint-name> --into new-sandbox
 ```
 
 ## Security implications

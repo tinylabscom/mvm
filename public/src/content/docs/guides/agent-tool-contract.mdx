@@ -67,7 +67,7 @@ the CLI while preserving the same contract the SDK target should expose.
 mvmctl machine build --flake ./agent-tool
 mvmctl machine run --flake ./agent-tool --name agent-tool-call -d
 mvmctl machine fs write agent-tool-call /work/main.py < /tmp/request-main.py
-mvmctl machine exec agent-tool-call --timeout 20 -- python /work/main.py
+mvmctl machine exec agent-tool-call -- python /work/main.py
 mvmctl machine logs agent-tool-call
 mvmctl machine stop agent-tool-call
 ```

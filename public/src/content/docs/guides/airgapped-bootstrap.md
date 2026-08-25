@@ -89,8 +89,8 @@ today," not an error.
 On a connected host, fetch and verify the builder pack:
 
 ```bash
-mvmctl pack download --kind builder    # fetch + verify, don't activate
-mvmctl pack update --kind builder      # fetch + verify + activate
+mvmctl pack download builder    # fetch + verify, don't activate
+mvmctl pack update builder      # fetch + verify + activate
 ```
 
 Carrying the resulting cache into a fully air-gapped host isn't a wired
