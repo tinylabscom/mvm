@@ -635,6 +635,29 @@ The admitted domain cannot represent the removed raw-network mode. Every
 network operation instead receives the endpoint's one signed-plan projection:
 the same policy, per-VM resource budget, identity, and payload-free audit sink.
 
+### vsock Protocol
+
+All communication between host and guest uses **vsock**, a Linux kernel facility for guest-host messaging:
+
+**Guest agent (port 5252)**: Uses a binary protocol with length-prefixed JSON frames:
+
+- 4-byte big-endian length header indicating payload size
+- JSON serialized request/response objects
+- Connection begins with `CONNECT 5252\n` / `OK 5252\n` handshake
+
+**FlowMux (port 5253)**: Authenticated frame-based protocol for egress and ingress, supporting:
+
+- TCP connections (via SOCKS5-like framing)
+- UDP datagrams
+- DNS queries
+- Typed connectors for secrets, PII detection, and audit logging
+
+All guest-to-host traffic crosses the host's control plane where it can be:
+
+- Audited (without exposing payload bytes)
+- Substituted (secrets replaced with placeholders)
+  -Admitted/denied (per signed execution plan)
+
 **The builder VM is the deliberate exception.** It runs `nix build` and does
 have a NIC, because it must reach package mirrors. It carries no untrusted
 tenant workload — a different tier with a different contract, and its network
@@ -720,11 +743,11 @@ docs** is a checked assertion, not prose. `just bdd` extracts all of them —
 currently 600+ invocations across 130+ pages, each with `file:line` provenance —
 and verifies each at one of three tiers:
 
-| Tier | What it proves | Runs |
-| --- | --- | --- |
-| `parse` | The real clap tree parses the invocation with full argument validation: a removed verb, renamed flag, rejected value, or wrong arity fails here. | Every PR, no VM |
-| `exec` | Additionally executed for real against an isolated `MVM_HOME`. | Every PR, no VM |
-| `live` | Additionally boots a real microVM. | `MVM_BDD_LIVE=1`, KVM/HVF host |
+| Tier    | What it proves                                                                                                                                   | Runs                           |
+| ------- | ------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------ |
+| `parse` | The real clap tree parses the invocation with full argument validation: a removed verb, renamed flag, rejected value, or wrong arity fails here. | Every PR, no VM                |
+| `exec`  | Additionally executed for real against an isolated `MVM_HOME`.                                                                                   | Every PR, no VM                |
+| `live`  | Additionally boots a real microVM.                                                                                                               | `MVM_BDD_LIVE=1`, KVM/HVF host |
 
 The tier assignment in `features/suites/s29_doc_examples/tiers.toml` is
 **total**: a documented command with no entry fails the suite by name, so a
