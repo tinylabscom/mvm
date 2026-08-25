@@ -808,7 +808,36 @@ fn mk_guest_assigns_ipv4_loopback_before_starting_guest_services() {
 }
 
 #[test]
-fn mk_guest_seeds_vsock_egress_dns_before_privilege_drop() {
+fn mk_guest_starts_the_forward_proxy_before_dropping_privileges() {
+    let path = nix_dir().join("lib").join("mk-guest.nix");
+    let content = fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("nix/lib/mk-guest.nix must be present: {e}"));
+    let proxy_start = content
+        .find("# Stage 2.49 — loopback forward proxy")
+        .expect("guest init starts the forward proxy");
+    let agent_start = content[proxy_start..]
+        .find("# Stage 2.5 — guest agent supervisor")
+        .map(|offset| proxy_start + offset)
+        .expect("the unprivileged guest agent starts after the forward proxy");
+    let proxy_block = &content[proxy_start..agent_start];
+
+    assert!(
+        proxy_block.contains("/mvm/runtime/forward-proxy")
+            && proxy_block.contains("/usr/local/bin/mvm-forward-proxy"),
+        "both runtime-source policies must resolve the privileged helper"
+    );
+    assert!(
+        proxy_block.contains("/bin/busybox setsid \"$MVM_FORWARD_PROXY_BIN\" &"),
+        "the init-owned process must start the proxy directly"
+    );
+    assert!(
+        !proxy_block.contains("mvm-setpriv"),
+        "the proxy reads the root-only FlowMux key and must not inherit the workload uid"
+    );
+}
+
+#[test]
+fn mk_guest_provisions_vsock_egress_identity_before_privilege_drop() {
     let path = nix_dir().join("lib").join("mk-guest.nix");
     let content = fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("nix/lib/mk-guest.nix must be present: {e}"));
@@ -827,17 +856,43 @@ fn mk_guest_seeds_vsock_egress_dns_before_privilege_drop() {
     let resolver_seed = egress_block
         .find("printf 'nameserver 127.0.0.1\\n' > /run/mvm/resolv.conf")
         .expect("egress init seeds the loopback DNS stub");
+    let required_mode = egress_block
+        .find("MVM_IDENTITY_PROVISION_COMMAND=provision-identity-for")
+        .expect("egress-enabled boots require the service identity");
+    let optional_mode = egress_block
+        .find("MVM_IDENTITY_PROVISION_COMMAND=provision-identity-for-if-present")
+        .expect("other boots provision an attached identity without requiring one");
+    let provision = egress_block
+        .find(
+            "\"$MVM_EGRESS_CLIENT_BIN\" \"$MVM_IDENTITY_PROVISION_COMMAND\" ${toString egressUid}",
+        )
+        .expect("root init provisions according to the boot's egress requirement");
     let spawn = egress_block
-        .find("-- \"$MVM_EGRESS_CLIENT_BIN\" &")
+        .find("--reuid=${toString egressUid} --regid=${toString egressUid}")
         .expect("egress init spawns the client");
 
     assert!(
-        loopback_up < resolver_seed && resolver_seed < spawn,
-        "loopback must be raised and resolv.conf seeded before the egress client starts"
+        required_mode < provision
+            && optional_mode < provision
+            && provision < loopback_up
+            && loopback_up < resolver_seed
+            && resolver_seed < spawn,
+        "the root-owned identity handoff and loopback must be ready before the egress client drops privilege"
     );
     assert!(
-        egress_block.contains("--inh-caps=+net_bind_service --ambient-caps=+net_bind_service"),
-        "the unprivileged egress client must retain only the capability needed to bind DNS :53"
+        egress_block.contains("--inh-caps=+net_bind_service --ambient-caps=+net_bind_service")
+            && egress_block.contains("--no-new-privs"),
+        "the long-lived client must retain only its low-port bind capability"
+    );
+    assert!(
+        !egress_block.contains("--inh-caps=+sys_admin")
+            && !egress_block.contains("--ambient-caps=+sys_admin"),
+        "the long-lived client must not retain mount privilege"
+    );
+    assert!(
+        content.contains("egressUid = 989;")
+            && content.contains("uid 989 is reserved for the FlowMux egress service"),
+        "the dedicated service uid must be fixed and protected from workload, agent, or builder reuse"
     );
 }
 

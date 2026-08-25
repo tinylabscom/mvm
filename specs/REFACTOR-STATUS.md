@@ -23,6 +23,24 @@ for detailed scope and acceptance criteria.
       cleanup and the original startup error. See
       `specs/sprint/delivery/2819-transient-start-console-diagnostic.md`.
 
+- [x] **Nix guest FlowMux identity ownership.** The shell init now delegates
+      identity-drive mounting to a short root-owned Rust action, assigns only
+      the 0400 signing key to reserved service uid 989, and then starts the
+      long-lived egress client under `no_new_privs` with only low-port bind
+      capability. Workload, agent, and builder uid collisions fail at image
+      evaluation, the network parser retains no mount privilege, and a
+      networkless boot tolerates only an absent identity drive while required
+      or unreadable identities still refuse. See
+      `specs/sprint/delivery/2828-nix-flowmux-identity.md`.
+
+- [x] **FlowMux forward-proxy identity ownership.** Secret-substitution HTTP
+      relays now run in an init-owned helper that can read the root-only guest
+      signing key, rather than in the workload-uid guest agent. Both baked and
+      overlay runtime-source policies carry the helper, incomplete overlays
+      fail closed, and relay diagnostics do not expose privileged causes to the
+      workload. The live secret-bearing substitution witness remains tracked
+      by the owning FlowMux plan.
+
 - [x] **Scheduled Security dependency and no-SSH scanner repair.** The
       supply-chain lane pins the last `async-trait` release on `syn` 2,
       restoring the duplicate-version policy, while the no-SSH lane permits

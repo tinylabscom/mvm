@@ -2885,3 +2885,30 @@ to the configured ceiling and the first terse response immediately after it.
 - [x] Preserve cleanup and return the original backend startup error.
 - [x] Record the delivered behavior in
       `specs/sprint/delivery/2819-transient-start-console-diagnostic.md`.
+
+## 2026-08-23 FlowMux forward-proxy identity repair
+
+- [x] Move the secret-substitution forward proxy out of the workload-uid guest
+      agent and into an init-owned helper that can read the root-only FlowMux
+      signing key on both guest init paths.
+- [x] Ship the helper in baked and runtime-overlay artifacts, fail overlay
+      validation when it is missing, and preserve the shared-kernel Unix-socket
+      endpoint path.
+- [x] Log the privileged relay failure chain while returning only a stable,
+      non-sensitive failure class to the workload.
+- [ ] Capture the live secret-bearing `OpenHttp` substitution witness; the
+      owning FlowMux plan keeps that hardware-backed acceptance item open.
+
+## 2026-08-23 Nix guest FlowMux identity handoff
+
+- [x] Move the Nix guest's identity-drive mount into a short root-owned Rust
+      provisioning action before the long-lived egress process drops privilege.
+- [x] Reserve service uid 989 for the 0400 signing key; refuse uid collisions
+      with the workload, guest agent, or optional builder.
+- [x] Keep the egress parser under `no_new_privs` with only
+      `CAP_NET_BIND_SERVICE`; do not retain mount capability.
+- [x] Cover the ordering and capability boundary structurally, plus valid and
+      invalid provisioning command modes in unit tests.
+- [x] Preserve networkless guest boot by making an absent identity optional
+      only when vsock egress is not requested; unreadable and required
+      identities remain fail-closed.
