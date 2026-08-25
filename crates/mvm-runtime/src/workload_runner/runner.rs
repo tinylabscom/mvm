@@ -1500,10 +1500,12 @@ mod tests {
     use crate::backends::hvf::HvfDriver;
     use crate::driver::MockDriver;
 
-    fn without_guest_hostname(cmdline: &str) -> String {
+    fn without_per_boot_tokens(cmdline: &str) -> String {
         cmdline
             .split_whitespace()
-            .filter(|token| !token.starts_with("mvm.hostname="))
+            .filter(|token| {
+                !token.starts_with("mvm.hostname=") && !token.starts_with("mvm.hostepoch=")
+            })
             .collect::<Vec<_>>()
             .join(" ")
     }
@@ -3243,7 +3245,10 @@ mod tests {
             parent.blocks, workload.blocks,
             "the warm parent must attach the workload's whole disk stack, overlay included"
         );
-        assert_eq!(parent.cmdline, without_guest_hostname(&workload.cmdline));
+        assert_eq!(
+            without_per_boot_tokens(&parent.cmdline),
+            without_per_boot_tokens(&workload.cmdline)
+        );
         assert!(!parent.cmdline.contains("mvm.hostname="));
         assert_eq!(parent.kernel, workload.kernel);
         assert_eq!(parent.initramfs, workload.initramfs);
@@ -3322,7 +3327,10 @@ mod tests {
             "the parent must boot it too, or every child restored from it has no network: {}",
             parent.cmdline
         );
-        assert_eq!(parent.cmdline, without_guest_hostname(&workload.cmdline));
+        assert_eq!(
+            without_per_boot_tokens(&parent.cmdline),
+            without_per_boot_tokens(&workload.cmdline)
+        );
         assert!(!parent.cmdline.contains("mvm.hostname="));
         assert_eq!(parent.blocks, workload.blocks);
         assert!(

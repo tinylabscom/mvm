@@ -107,7 +107,10 @@ for detailed scope and acceptance criteria.
       again after the final publication copy and before its durability sync;
       the persistent-builder path preserves the hook command's real exit
       status. A mounted or damaged image fails before publication, preserving
-      the workload's hypervisor-enforced read-only rootfs contract.
+      the workload's hypervisor-enforced read-only rootfs contract. The same
+      fail-closed check is emitted into one-shot and persistent job scripts so
+      source-checkout behavior stays correct when release bootstrap deliberately
+      boots a published builder image whose hook runner predates the repair.
       The tagged release workflow separately verifies the signed
       future-format overlay through the production downloader before publish.
       The standalone hostd fuzz lock is refreshed for the current dependency
