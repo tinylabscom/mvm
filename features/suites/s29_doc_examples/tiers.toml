@@ -494,20 +494,3 @@ reason = "the addon CLI is unbuilt; the migration guide says 'once the addon CLI
 [[absent]]
 path = "exec"
 reason = "the bare verb was merged into `run`; the CLI reference records the merge in the past tense"
-
-# mkGuest attributes the docs teach that its argument set does not accept.
-# Declared rather than deleted: these describe intended surface, and removing
-# the sections would lose the design. Each must stay absent — the suite fails
-# if one lands, so the docs get their "not implemented" note removed when it
-# becomes untrue.
-[[nix_attribute]]
-name = "healthChecks"
-reason = "per-service health probes are documented in the mkGuest guide but absent from nix/lib/mk-guest.nix"
-
-[[nix_attribute]]
-name = "volumeMounts"
-reason = "declared virtio-fs mounts are documented with a passthru.volumeMounts contract that mk-guest.nix never emits"
-
-[[nix_attribute]]
-name = "serviceGroup"
-reason = "service grouping is documented in the mkGuest guide but absent from nix/lib/mk-guest.nix"
