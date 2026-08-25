@@ -17,6 +17,13 @@ for detailed scope and acceptance criteria.
 
 ## Completed issue closeouts
 
+- [x] **Stopped-machine log diagnostics.** `machine logs` now distinguishes a
+      missing machine state directory from other capture-source failures,
+      reports the path it inspected, and directs operators to `machine ls`
+      instead of surfacing the raw stream error. Focused CLI tests preserve the
+      missing-state behavior. See
+      `specs/sprint/delivery/2824-stopped-vm-logs-error.md`.
+
 - [x] **Transient start console diagnostics.** A transient backend-start
       failure now prints the guest console diagnostic before deleting the
       machine state directory, preserving the guest-side cause while retaining

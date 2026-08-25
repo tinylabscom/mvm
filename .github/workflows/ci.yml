@@ -1457,4 +1457,3 @@ jobs:
             --closure-paths "$image_path/rootfs-closure-paths" \
             --sdk-sidecar "$sidecar_path/sdk.ext4" \
             --json
-

@@ -63,11 +63,11 @@ mvmctl machine logs my-machine
 
 `mvm` resolves three sources, in order, and tells you which one answered:
 
-| Source | When | What you get |
-| --- | --- | --- |
-| Live broker | The machine is running and this host is capturing it. | Channel-separated, hash-chained, live. |
-| Recorded transcript | The machine has ended, or you asked for history first. | Channel-separated, hash-chained, encrypted at rest, verified on read. |
-| Console log | Neither of the above. | One merged byte stream. Not redacted. No channels, no chain, no record boundaries. |
+| Source              | When                                                   | What you get                                                                       |
+| ------------------- | ------------------------------------------------------ | ---------------------------------------------------------------------------------- |
+| Live broker         | The machine is running and this host is capturing it.  | Channel-separated, hash-chained, live.                                             |
+| Recorded transcript | The machine has ended, or you asked for history first. | Channel-separated, hash-chained, encrypted at rest, verified on read.              |
+| Console log         | Neither of the above.                                  | One merged byte stream. Not redacted. No channels, no chain, no record boundaries. |
 
 A console-only read says so on stderr, because it cannot do four things the
 other two can:
@@ -119,7 +119,7 @@ recorded transcript seals to a Merkle root when the workload exits. `mvmctl
 machine logs` verifies what it reads:
 
 - A verification failure **exits nonzero**, the same as `mvmctl trust audit
-  verify`. What you were shown cannot be trusted.
+verify`. What you were shown cannot be trusted.
 - A pruned window is **not** a failure. It is retention doing its job, and it
   is reported as a gap notice.
 
@@ -158,7 +158,7 @@ You may also see:
   them or the writer fell behind. The live stream was unaffected; the recording
   has holes.
 - `the capture was sealed after the process recording it exited, so anything it
-  dropped on the way out is uncounted` — the counts above are a floor, not an
+dropped on the way out is uncounted` — the counts above are a floor, not an
   exact figure. See [limit 2](#2-a-detached-machines-later-output-is-not-recorded).
 - `microVM "…" has recorded output, but none of it is on the stderr channel` —
   the capture is healthy and your filter matched nothing. Not a missing
@@ -194,8 +194,8 @@ There is deliberately **no CLI flag** for this. A flag would make a missing
 transcript ambiguous: nobody reading the evidence later could tell a run that
 was admitted not to keep one from a run whose recording was lost or deleted.
 Because the mode is admitted, it is written into the `plan.admitted` entry of
-the chain-signed audit log, so you can always answer *was this run recorded?*
-even when you cannot answer *what did it print?*
+the chain-signed audit log, so you can always answer _was this run recorded?_
+even when you cannot answer _what did it print?_
 
 ```sh
 mvmctl trust audit verify        # the chain that carries the retention mode
@@ -253,6 +253,23 @@ what the recording covers is shown first, then the console log covering the
 rest — which is not redacted, merges stdout and stderr, is not hash-chained,
 and repeats the part the recording already showed
 ```
+
+## When there is no source at all
+
+`mvmctl machine logs` exits nonzero when it cannot find any source to read from.
+This happens when:
+
+1. The machine was removed with `machine rm` — both its spec and state directory are deleted
+2. The machine was never booted — it only has a spec (created with `machine create`) but no state directory exists
+3. The console capture file was manually deleted
+
+In these cases, the error message will indicate which state directory it looked in, and suggest that the machine may have been removed or never booted. To verify if a machine still exists, run:
+
+```sh
+mvmctl machine ls
+```
+
+If the machine is not listed, it was removed. If it shows with status "stopped" but `machine logs` fails, the state directory may be missing (perhaps due to a manual cleanup or an earlier failure).
 
 ## Reading output from code
 
