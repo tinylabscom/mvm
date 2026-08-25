@@ -850,10 +850,18 @@ fn render_prompt_generated_flake(name: &str, spec: &GeneratedTemplateSpec) -> St
 
     let mut service_entries = Vec::new();
     let mut health_entries = Vec::new();
+    // mkGuest requires an `entrypoint` and does not read top-level `services`,
+    // so a scaffold that only declared services could not evaluate at all.
+    // The first service becomes the entrypoint; the rest stay declared for
+    // when the multi-service supervisor lands.
+    let mut primary_command: Option<String> = None;
 
     if spec.features.contains(&ScaffoldFeature::Python) {
         service_entries.push(format!(
             "        services.app = {{\n          command = \"${{python}}/bin/python3 ${{appSrc}}/{python_entrypoint}\";\n          env = {{\n            PORT = \"{http_port}\";\n            PYTHONUNBUFFERED = \"1\";\n          }};\n        }};"
+        ));
+        primary_command.get_or_insert(format!(
+            "PORT={http_port} PYTHONUNBUFFERED=1 exec ${{python}}/bin/python3 ${{appSrc}}/{python_entrypoint}"
         ));
         health_entries.push(format!(
             "        healthChecks.app = {{\n          healthCmd = \"${{pkgs.curl}}/bin/curl -sf http://localhost:{http_port}{health_path} >/dev/null\";\n          healthIntervalSecs = 5;\n          healthTimeoutSecs = 3;\n        }};"
@@ -861,6 +869,9 @@ fn render_prompt_generated_flake(name: &str, spec: &GeneratedTemplateSpec) -> St
     } else if spec.features.contains(&ScaffoldFeature::Http) {
         service_entries.push(format!(
             "        services.web = {{\n          command = \"${{pkgs.python3}}/bin/python3 -m http.server {http_port}\";\n        }};"
+        ));
+        primary_command.get_or_insert(format!(
+            "exec ${{pkgs.python3}}/bin/python3 -m http.server {http_port}"
         ));
         health_entries.push(format!(
             "        healthChecks.web = {{\n          healthCmd = \"${{pkgs.curl}}/bin/curl -sf http://localhost:{http_port}{health_path} >/dev/null\";\n          healthIntervalSecs = 5;\n          healthTimeoutSecs = 3;\n        }};"
@@ -881,6 +892,9 @@ fn render_prompt_generated_flake(name: &str, spec: &GeneratedTemplateSpec) -> St
         };"#
             .to_string(),
         );
+        primary_command.get_or_insert(
+            "exec ${pkgs.postgresql}/bin/postgres -D ${pgData} -k /run/postgresql".to_string(),
+        );
         health_entries.push(
             r#"        healthChecks.postgres = {
           healthCmd = "${pkgs.postgresql}/bin/pg_isready -h localhost";
@@ -895,6 +909,9 @@ fn render_prompt_generated_flake(name: &str, spec: &GeneratedTemplateSpec) -> St
         service_entries.push(format!(
             "        services.worker = {{\n          preStart = \"mkdir -p /run/worker\";\n          command = \"${{pkgs.bash}}/bin/bash -c 'while true; do echo \\\"[worker] tick $(date)\\\"; touch /run/worker/healthy; sleep {worker_interval_secs}; done'\";\n        }};"
         ));
+        primary_command.get_or_insert(format!(
+            "mkdir -p /run/worker; exec ${{pkgs.bash}}/bin/bash -c 'while true; do echo \\\"[worker] tick $(date)\\\"; touch /run/worker/healthy; sleep {worker_interval_secs}; done'"
+        ));
         health_entries.push(format!(
             "        healthChecks.worker = {{\n          healthCmd = \"${{pkgs.bash}}/bin/bash -c 'test -f /run/worker/healthy'\";\n          healthIntervalSecs = {worker_interval_secs};\n          healthTimeoutSecs = 5;\n        }};"
         ));
@@ -902,6 +919,33 @@ fn render_prompt_generated_flake(name: &str, spec: &GeneratedTemplateSpec) -> St
 
     let mut body_lines = vec![format!("        name = \"{name}\";"), String::new()];
     body_lines.push(format!("        packages = [ {} ];", packages.join(" ")));
+
+    // The entrypoint is what actually runs. mkGuest requires it, and without
+    // one the generated flake failed to evaluate with "called without required
+    // argument 'entrypoint'" — every scaffolded project was unbuildable.
+    body_lines.push(String::new());
+    match primary_command.as_deref() {
+        Some(command) => {
+            body_lines.push(
+                "        # PID 1. The services below are declarations for the supervisor;"
+                    .to_string(),
+            );
+            body_lines.push(
+                "        # until it lands, the primary one runs here as the entrypoint."
+                    .to_string(),
+            );
+            body_lines.push(format!(
+                "        entrypoint.command = [ \"/bin/sh\" \"-c\" \"{command}\" ];"
+            ));
+        }
+        None => {
+            body_lines.push("        # PID 1. Replace with your own program.".to_string());
+            body_lines.push(
+                "        entrypoint.command = [ \"/bin/sh\" \"-c\" \"echo mvm guest ready; exec sleep infinity\" ];"
+                    .to_string(),
+            );
+        }
+    }
 
     if !service_entries.is_empty() {
         body_lines.push(String::new());
@@ -1188,9 +1232,10 @@ fn render_python_app_stub(port: u16, health_path: &str) -> String {
 mod tests {
     use super::{
         GeneratedTemplateSpec, ScaffoldFeature, build_openai_prompt_request,
-        generated_template_spec, infer_prompt_features, infer_prompt_preset, next_steps_lines,
-        parse_openai_prompt_response, render_manifest_toml, render_prompt_generated_flake,
-        resolve_scaffold_preset, scaffold_template_files, validate_openai_plan,
+        flake_content_for_preset, generated_template_spec, infer_prompt_features,
+        infer_prompt_preset, next_steps_lines, parse_openai_prompt_response, render_manifest_toml,
+        render_prompt_generated_flake, resolve_scaffold_preset, scaffold_template_files,
+        validate_openai_plan,
     };
 
     #[test]
@@ -1242,6 +1287,49 @@ mod tests {
                 python_entrypoint: Some("main.py".to_string()),
             }
         );
+    }
+
+    /// mkGuest requires `entrypoint` and never reads top-level `services`, so a
+    /// scaffold declaring only services failed to evaluate with "called without
+    /// required argument 'entrypoint'" — every generated project was
+    /// unbuildable. Every bundled preset must declare PID 1.
+    #[test]
+    fn every_bundled_preset_declares_an_entrypoint() {
+        for preset in ["minimal", "python", "http", "postgres", "worker"] {
+            let flake = flake_content_for_preset(preset)
+                .unwrap_or_else(|error| panic!("preset {preset}: {error}"));
+            assert!(
+                flake.contains("entrypoint.command"),
+                "preset {preset} declares no entrypoint; mkGuest will refuse it"
+            );
+        }
+    }
+
+    /// A prompt-generated flake has the same requirement, whichever features
+    /// the plan happened to select.
+    #[test]
+    fn prompt_generated_flakes_declare_an_entrypoint() {
+        for features in [
+            vec![ScaffoldFeature::Python],
+            vec![ScaffoldFeature::Http],
+            vec![ScaffoldFeature::Worker],
+            vec![ScaffoldFeature::Postgres],
+            vec![],
+        ] {
+            let spec = GeneratedTemplateSpec {
+                primary_preset: "minimal".to_string(),
+                features: features.clone(),
+                http_port: Some(8080),
+                health_path: Some("/".to_string()),
+                worker_interval_secs: Some(10),
+                python_entrypoint: Some("main.py".to_string()),
+            };
+            let flake = render_prompt_generated_flake("t", &spec);
+            assert!(
+                flake.contains("entrypoint.command"),
+                "features {features:?} produced a flake with no entrypoint"
+            );
+        }
     }
 
     #[test]

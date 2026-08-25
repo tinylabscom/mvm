@@ -161,7 +161,8 @@ let
     ++ (if serviceGroup == null || builtins.isString serviceGroup then [ ] else throw "mkGuest: serviceGroup must be a string or null");
 
   unenforcedNames =
-    (if healthChecks == { } then [ ] else [ "healthChecks" ])
+    (if services == { } then [ ] else [ "services" ])
+    ++ (if healthChecks == { } then [ ] else [ "healthChecks" ])
     ++ (if volumeMounts == { } then [ ] else [ "volumeMounts" ])
     ++ (if serviceGroup == null then [ ] else [ "serviceGroup" ]);
 
@@ -1618,7 +1619,7 @@ let
     # Declared-but-unenforced, recorded so a host or an audit can see the gap
     # between what the flake asked for and what the guest actually does.
     unenforced = {
-      inherit healthChecks volumeMounts serviceGroup;
+      inherit services healthChecks volumeMounts serviceGroup;
       names = unenforcedNames;
     };
   };

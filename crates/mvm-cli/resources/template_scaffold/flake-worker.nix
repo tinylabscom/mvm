@@ -16,6 +16,14 @@
 
         packages = [ pkgs.bash pkgs.coreutils ];
 
+        # PID 1. The services below are declarations for the supervisor;
+        # until it lands, the primary one runs here as the entrypoint.
+        entrypoint.command = [
+          "/bin/sh"
+          "-c"
+          "mkdir -p /run/worker; exec ${pkgs.bash}/bin/bash -c 'while true; do echo \"[worker] tick $(date)\"; touch /run/worker/healthy; sleep 10; done'"
+        ];
+
         # Long-running worker loop.  Replace the script body with your workload.
         services.worker = {
           preStart = "mkdir -p /run/worker";
