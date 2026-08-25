@@ -17,12 +17,6 @@ for detailed scope and acceptance criteria.
 
 ## Completed issue closeouts
 
-- [x] **Issue #2830 — Extended CI lanes restored.** Both macOS lanes trust
-      the `slp/krun` Homebrew tap and install libkrun before compiling its
-      consumers. The Linux builder-image smoke supplies all three binaries in
-      the host-binary manifest, including `mvm-builderd`. Structural tests pin
-      the two workflow contracts.
-
 - [x] **Retained-state log diagnostics.** When a machine state directory
       survives but every output capture is absent, `machine logs` now names
       the retained state, each missing source, and the likely interrupted-boot
@@ -121,6 +115,12 @@ for detailed scope and acceptance criteria.
       A failed, cancelled, timed-out, or still-running nightly is therefore
       reported even if GitHub omits the event-driven watcher's `workflow_run`
       delivery; pull-request and dispatch runs cannot mask the evidence.
+
+- [x] **Issue #2830 — Extended CI lanes restored.** Both macOS lanes trust
+      the `slp/krun` Homebrew tap and install libkrun before compiling its
+      consumers. The Linux builder-image smoke supplies all three binaries in
+      the host-binary manifest, including `mvm-builderd`. Structural tests pin
+      the two workflow contracts.
 
 - [x] **Issue #2789 — guest hostname follows the machine name.** The shared
       workload cmdline carries one validated `mvm.hostname=` token for cold
