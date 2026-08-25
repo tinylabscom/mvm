@@ -1127,9 +1127,8 @@ pub fn stage_flake_dispatch_job(
              rm -f \"$BUILD_HOOK_ROOTFS\"\n\
              exit $hook_rc\n\
          fi\n\
-         {seal_rootfs_journal_sh}\n\
          cp -L \"$BUILD_HOOK_ROOTFS\" \"$OUT_DIR/rootfs.ext4\"\n\
-         /sbin/mvm-host-vm-init seal-rootfs-journal \"$OUT_DIR/rootfs.ext4\"\n\
+         {seal_rootfs_journal_sh}\n\
          sync\n\
          rm -f \"$BUILD_HOOK_ROOTFS\"\n\
          if [ -f \"$STORE_PATH/manifest.json\" ]; then\n\
@@ -1139,7 +1138,8 @@ pub fn stage_flake_dispatch_job(
         store_path_sidecar = STORE_PATH_SIDECAR,
         flake_ref = shell_single_quote(flake_ref),
         attr = shell_single_quote(attr),
-        seal_rootfs_journal_sh = crate::builder_vm_runtime::SEAL_ROOTFS_JOURNAL_SH,
+        seal_rootfs_journal_sh =
+            crate::builder_vm_runtime::seal_rootfs_journal_sh("\"$OUT_DIR/rootfs.ext4\""),
     );
     let cmd_path = sub.join("cmd.sh");
     std::fs::write(&cmd_path, script)?;
@@ -1735,7 +1735,7 @@ mod tests {
     }
 
     #[test]
-    fn stage_flake_dispatch_job_runs_before_build_hook_before_copying_rootfs() {
+    fn stage_flake_dispatch_job_seals_final_artifact_without_a_new_builder_subcommand() {
         let scratch = tempfile::tempdir().expect("tempdir");
         let job_dir = scratch.path().to_path_buf();
         let job_id =
@@ -1754,14 +1754,14 @@ mod tests {
             .find("/sbin/mvm-host-vm-init run-before-build-hook")
             .expect("hook runner present");
         let journal_idx = body
-            .find("/sbin/e2fsck -p -f \"$BUILD_HOOK_ROOTFS\"")
+            .find("/sbin/e2fsck -p -f \"$OUT_DIR/rootfs.ext4\"")
             .expect("offline rootfs journal check present");
         let out_copy_idx = body
             .find("cp -L \"$BUILD_HOOK_ROOTFS\" \"$OUT_DIR/rootfs.ext4\"")
             .expect("final rootfs copy present");
         assert!(
-            hook_idx < journal_idx && journal_idx < out_copy_idx,
-            "the hook and offline journal check must run before rootfs.ext4 is copied to OUT_DIR"
+            hook_idx < out_copy_idx && out_copy_idx < journal_idx,
+            "the exported rootfs must be checked after the hook and final copy"
         );
         let sync_idx = body
             .find("sync\nrm -f \"$BUILD_HOOK_ROOTFS\"")
@@ -1770,11 +1770,8 @@ mod tests {
             out_copy_idx < sync_idx,
             "the exported rootfs must be flushed before the temporary image is removed"
         );
-        let final_seal_idx = body
-            .find("/sbin/mvm-host-vm-init seal-rootfs-journal \"$OUT_DIR/rootfs.ext4\"")
-            .expect("final exported artifact journal seal present");
         assert!(
-            out_copy_idx < final_seal_idx && final_seal_idx < sync_idx,
+            out_copy_idx < journal_idx && journal_idx < sync_idx,
             "the final copied rootfs must be sealed before it is published"
         );
         assert!(
@@ -1798,6 +1795,10 @@ mod tests {
         assert!(
             body.contains("rootfs journal check failed (exit $fsck_rc)"),
             "the offline checker must fail closed for every other exit code in:\n{body}"
+        );
+        assert!(
+            !body.contains("/sbin/mvm-host-vm-init seal-rootfs-journal"),
+            "source-rendered jobs must remain compatible with published builder binaries that predate the seal subcommand"
         );
     }
 

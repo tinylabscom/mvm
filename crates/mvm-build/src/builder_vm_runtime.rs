@@ -135,19 +135,23 @@ pub const MVM_BUILDER_STORE_GC_GIB_ENV: &str = "MVM_BUILDER_STORE_GC_GIB";
 /// newer host code. Running the offline checker in the generated job script
 /// therefore guarantees that the source-under-test can seal an image even
 /// when the builder image's hook-runner binary predates journal sealing.
-pub(crate) const SEAL_ROOTFS_JOURNAL_SH: &str = r#"echo "mvm-builder-vm: sealing rootfs journal" >&2
+pub(crate) fn seal_rootfs_journal_sh(rootfs_path: &str) -> String {
+    format!(
+        r#"echo "mvm-builder-vm: sealing rootfs journal" >&2
 set +e
-/sbin/e2fsck -p -f "$BUILD_HOOK_ROOTFS" >&2
+/sbin/e2fsck -p -f {rootfs_path} >&2
 fsck_rc=$?
 set -e
 case "$fsck_rc" in
   0|1) ;;
   *)
     echo "mvm-builder-vm: rootfs journal check failed (exit $fsck_rc)" >&2
-    rm -f "$BUILD_HOOK_ROOTFS"
+    rm -f {rootfs_path}
     exit "$fsck_rc"
     ;;
-esac"#;
+esac"#
+    )
+}
 
 /// Resolve the builder-store GC cap, in KiB, for substitution into the
 /// in-guest build script's `du -k` comparison. Reads
@@ -660,9 +664,8 @@ if [ "$hook_rc" -ne 0 ]; then
     rm -f "$BUILD_HOOK_ROOTFS"
     exit $hook_rc
 fi
-{seal_rootfs_journal_sh}
 cp -L "$BUILD_HOOK_ROOTFS" /out/rootfs.ext4
-/sbin/mvm-host-vm-init seal-rootfs-journal /out/rootfs.ext4
+{seal_rootfs_journal_sh}
 sync
 rm -f "$BUILD_HOOK_ROOTFS"
 
@@ -733,7 +736,7 @@ fi
         override_flag = override_flag,
         attr_path = shell_single_quote_escape(attr_path),
         gc_cap_kib = gc_cap_kib,
-        seal_rootfs_journal_sh = SEAL_ROOTFS_JOURNAL_SH,
+        seal_rootfs_journal_sh = seal_rootfs_journal_sh("\"/out/rootfs.ext4\""),
     )
 }
 
@@ -2075,7 +2078,7 @@ mod tests {
     }
 
     #[test]
-    fn render_flake_cmd_sh_runs_before_build_hook_before_copying_artifact() {
+    fn render_flake_cmd_sh_seals_final_artifact_without_a_new_builder_subcommand() {
         let body = render_flake_cmd_sh(".", "default", false);
         // The hook runner is invoked on a writable temp copy so the Nix
         // store output is never modified in place.
@@ -2087,19 +2090,20 @@ mod tests {
             body.contains("/tmp/mvm-rootfs-before-build.ext4"),
             "missing writable temp rootfs path in:\n{body}"
         );
-        // The hook must run before the final rootfs is copied to /out.
+        // The hook must run before the final rootfs is copied to /out, and the
+        // source-rendered script must seal that exact artifact itself.
         let hook_idx = body
             .find("/sbin/mvm-host-vm-init run-before-build-hook")
             .expect("hook runner present");
         let journal_idx = body
-            .find(r#"/sbin/e2fsck -p -f "$BUILD_HOOK_ROOTFS""#)
+            .find(r#"/sbin/e2fsck -p -f "/out/rootfs.ext4""#)
             .expect("offline rootfs journal check present");
         let out_copy_idx = body
             .find(r#"cp -L "$BUILD_HOOK_ROOTFS" /out/rootfs.ext4"#)
             .expect("final rootfs copy present");
         assert!(
-            hook_idx < journal_idx && journal_idx < out_copy_idx,
-            "the hook and offline journal check must run before /out/rootfs.ext4 is copied"
+            hook_idx < out_copy_idx && out_copy_idx < journal_idx,
+            "the exported rootfs must be checked after the hook and final copy"
         );
         let sync_idx = body
             .find("sync\nrm -f \"$BUILD_HOOK_ROOTFS\"")
@@ -2108,11 +2112,8 @@ mod tests {
             out_copy_idx < sync_idx,
             "the exported rootfs must be flushed before the temporary image is removed"
         );
-        let final_seal_idx = body
-            .find("/sbin/mvm-host-vm-init seal-rootfs-journal /out/rootfs.ext4")
-            .expect("final exported artifact journal seal present");
         assert!(
-            out_copy_idx < final_seal_idx && final_seal_idx < sync_idx,
+            out_copy_idx < journal_idx && journal_idx < sync_idx,
             "the final copied rootfs must be sealed before it is published"
         );
         // A failed hook must fail the build, leaving no partial artifact.
@@ -2141,6 +2142,10 @@ mod tests {
         assert!(
             body.contains("rootfs journal check failed (exit $fsck_rc)"),
             "the offline checker must fail closed for every other exit code in:\n{body}"
+        );
+        assert!(
+            !body.contains("/sbin/mvm-host-vm-init seal-rootfs-journal"),
+            "source-rendered jobs must remain compatible with published builder binaries that predate the seal subcommand"
         );
     }
 
