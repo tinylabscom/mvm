@@ -26,12 +26,10 @@ PY
 <TabItem label="Python">
 
 ```python
-from mvm import NetworkPolicy, Sandbox
+from mvm import Sandbox
 
-sandbox = Sandbox.create(
-    image="nix:./flake#python-tool",
-    network=NetworkPolicy.deny_by_default(),
-)
+# Egress is deny-by-default; naming no allow-list is what denies it.
+sandbox = Sandbox.create(image="nix:./flake#python-tool")
 
 try:
     result = sandbox.exec(["python", "-c", "print('hello')"])

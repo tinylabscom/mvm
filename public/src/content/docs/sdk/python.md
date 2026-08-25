@@ -36,6 +36,7 @@ import mvm
     name="worker",
     source=mvm.local_path("."),
     image=mvm.nix_packages(["python312"]),
+    resources=mvm.resources(cpu_cores=1, memory_mb=256, rootfs_size_mb=512),
     network=mvm.network(mode="deny"),
 )
 def run() -> str:

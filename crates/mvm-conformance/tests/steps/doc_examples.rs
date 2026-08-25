@@ -673,3 +673,104 @@ fn every_toml_and_json_block_parses(_world: &mut CliWorld) {
         failures.join("\n")
     );
 }
+
+/// A documented code block, in the shape the language checkers read on stdin.
+#[derive(serde::Serialize)]
+struct BlockPayload {
+    file: String,
+    line: usize,
+    body: String,
+}
+
+/// A finding one of the language checkers reported.
+#[derive(serde::Deserialize)]
+struct Finding {
+    file: String,
+    line: usize,
+    kind: String,
+    detail: String,
+}
+
+/// Blocks in `language`, skipping the ones that opt out or carry elisions.
+fn blocks_in(language: &[&str]) -> Vec<BlockPayload> {
+    all_code_blocks()
+        .into_iter()
+        .filter(|block| language.contains(&block.language.as_str()))
+        .filter(|block| !block.is_ignored() && !block.body.contains('…'))
+        .map(|block| BlockPayload {
+            file: block.file.clone(),
+            line: block.line,
+            body: block.body.clone(),
+        })
+        .collect()
+}
+
+/// Run a checker fixture over `blocks`, returning what it found.
+///
+/// The checker resolves names against the real installed SDK, so this is the
+/// nearest thing these languages have to the compile step the Rust examples
+/// now get.
+fn run_checker(program: &str, script: &str, blocks: &[BlockPayload]) -> Vec<Finding> {
+    use std::io::Write as _;
+    use std::process::Stdio;
+
+    let root = repo_root();
+    let script = root
+        .join("features/suites/s29_doc_examples/fixtures")
+        .join(script);
+    let payload = serde_json::to_vec(blocks).expect("serialize blocks");
+
+    let mut child = std::process::Command::new(program)
+        .arg(&script)
+        .env("PYTHONPATH", root.join("crates/mvm-sdk/sdks/python"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|error| {
+            panic!("spawn {program} {}: {error}", script.display());
+        });
+    child
+        .stdin
+        .as_mut()
+        .expect("checker stdin")
+        .write_all(&payload)
+        .expect("write blocks to checker");
+    let output = child.wait_with_output().expect("checker output");
+    assert!(
+        output.status.success(),
+        "{program} {} failed:\n{}",
+        script.display(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+        panic!(
+            "parse checker findings: {error}\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+    })
+}
+
+fn report(findings: &[Finding], language: &str, checked: usize) {
+    assert!(
+        findings.is_empty(),
+        "{} {language} example finding(s) across {checked} block(s). A snippet \
+         naming an SDK symbol that does not exist misleads a reader exactly like \
+         a stale CLI flag:\n{}",
+        findings.len(),
+        findings
+            .iter()
+            .map(|f| format!("  {}:{}  [{}]\n     {}", f.file, f.line, f.kind, f.detail))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+}
+
+#[then(expr = "every documented Python example parses and names real SDK symbols")]
+fn documented_python_examples_are_valid(_world: &mut CliWorld) {
+    let blocks = blocks_in(&["python", "py"]);
+    assert!(!blocks.is_empty(), "no Python examples were found to check");
+    let findings = run_checker("python3", "check_python_examples.py", &blocks);
+    report(&findings, "Python", blocks.len());
+}

@@ -62,14 +62,18 @@ Use the static decorator path when you need host-side compile without executing 
 <TabItem label="Python">
 
 ```python
-from mvm import Sandbox, NetworkPolicy, SecretRef
+import mvm
+from mvm import Sandbox
 
 sandbox = Sandbox.create(
     image="nix:./flake#agent-runtime",
-    network=NetworkPolicy.deny_by_default().allow_https("api.openai.com"),
-    secrets={"OPENAI_API_KEY": SecretRef("openai-api-key")},
-    cpu=2,
-    memory_mb=2048,
+    network={"egress": [{"host": "api.openai.com", "port": 443}]},
+    env={
+        "OPENAI_API_KEY": mvm.secret(
+            "openai-api-key", type="bearer", hosts=["api.openai.com"]
+        )
+    },
+    resources={"cpu_cores": 2, "memory_mb": 2048},
 )
 
 try:

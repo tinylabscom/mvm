@@ -113,11 +113,14 @@ import mvm
 
 @mvm.app(
     name="hello",
-    image=mvm.image.nix_packages(["python3"]),
-    resources=mvm.resources(vcpus=1, memory_mb=256),
-    dependencies=mvm.deps.none(),
+    source=mvm.local_path("."),
+    image=mvm.nix_packages(["python3"]),
+    resources=mvm.resources(cpu_cores=1, memory_mb=256, rootfs_size_mb=512),
+    dependencies=mvm.no_deps(),
+    entrypoint=mvm.entrypoint_function(
+        module="app", function="greet", language="python", format="json"
+    ),
 )
-@mvm.function(language="python", module="app", function="greet", format="json")
 def greet(name: str) -> str:
     return f"hello, {name}"
 ```
@@ -352,17 +355,17 @@ import mvm
 
 @mvm.app(
     name="hello",
-    source=mvm.source.local("./src"),
-    image=mvm.image.nix_packages(["python3"]),
-    resources=mvm.resources(vcpus=1, memory_mb=256),
-    dependencies=mvm.deps.none(),
-)
-@mvm.function(
-    language="python",
-    module="app",
-    function="greet",
-    format="json",
-    primary=True,
+    source=mvm.local_path("./src"),
+    image=mvm.nix_packages(["python3"]),
+    resources=mvm.resources(cpu_cores=1, memory_mb=256, rootfs_size_mb=512),
+    dependencies=mvm.no_deps(),
+    entrypoint=mvm.entrypoint_function(
+        module="app",
+        function="greet",
+        language="python",
+        format="json",
+        primary=True,
+    ),
 )
 def _spec(): pass
 ```

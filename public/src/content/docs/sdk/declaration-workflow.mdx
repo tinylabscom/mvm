@@ -44,7 +44,7 @@ import mvm
     name="agent-tool",
     source=mvm.local_path("."),
     image=mvm.nix_packages(["python312", "uv"]),
-    resources=mvm.resources(cpu_cores=1, memory_mb=512),
+    resources=mvm.resources(cpu_cores=1, memory_mb=512, rootfs_size_mb=512),
     network=mvm.network(mode="deny"),
     env={
         "MODEL_PATH": mvm.literal("/data/model.bin"),

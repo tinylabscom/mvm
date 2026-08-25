@@ -58,3 +58,9 @@ Feature: Documented examples work
 
   Scenario: documented TOML and JSON parses
     Then every documented TOML and JSON block parses
+
+  Scenario: documented Python examples name real SDK symbols
+    # The Rust examples get a compiler. This is the nearest equivalent for
+    # Python: parse the snippet, then resolve every `mvm.<name>` it uses
+    # against the real installed SDK.
+    Then every documented Python example parses and names real SDK symbols
