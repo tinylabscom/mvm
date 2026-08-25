@@ -215,6 +215,7 @@ fn probe_caps() -> RuntimeCaps {
         live_opted_in: std::env::var_os("MVM_BDD_LIVE").is_some(),
         firecracker_bootable: kvm_openable() && firecracker_on_path(),
         bundle_fixture: bundle_fixture_path().is_some(),
+        node_available: binary_on_path("node"),
     }
 }
 
@@ -238,8 +239,13 @@ fn kvm_openable() -> bool {
 
 /// A `firecracker` binary is resolvable on `PATH`.
 fn firecracker_on_path() -> bool {
+    binary_on_path("firecracker")
+}
+
+/// Whether `name` resolves to a file on `PATH`.
+fn binary_on_path(name: &str) -> bool {
     std::env::var_os("PATH")
-        .map(|paths| std::env::split_paths(&paths).any(|dir| dir.join("firecracker").is_file()))
+        .map(|paths| std::env::split_paths(&paths).any(|dir| dir.join(name).is_file()))
         .unwrap_or(false)
 }
 

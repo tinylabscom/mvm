@@ -30,6 +30,13 @@ pub const CI_LIVE_TAG: &str = "ci_live";
 /// without KVM (GitHub-hosted ARM runners, or any dev box lacking one).
 pub const FIRECRACKER_TAG: &str = "firecracker";
 
+/// Cucumber tag for a scenario that shells out to Node — the TypeScript
+/// example checkers. A host without Node is a real configuration (the KVM
+/// witness box is one), and failing there would report a missing toolchain as
+/// a documentation defect. Gated rather than skipped inside the step, so the
+/// run's own skip tally counts it instead of the scenario passing on no work.
+pub const NODE_TAG: &str = "node";
+
 /// Cucumber tag for a scenario that boots from a pre-built signed bundle.
 /// Sealing a bundle means a full image build, far too slow to run inline, so
 /// the operator supplies one with `MVM_BDD_BUNDLE=<path to .mvmpkg>` and the
@@ -50,6 +57,9 @@ pub struct RuntimeCaps {
     /// `MVM_BDD_BUNDLE` names a readable `.mvmpkg`, so a bundle-boot scenario
     /// has something to install.
     pub bundle_fixture: bool,
+    /// A `node` binary is resolvable, so the TypeScript example checkers can
+    /// run at all.
+    pub node_available: bool,
 }
 
 /// Decide whether a scenario with `tags` should run given the host `caps`.
@@ -83,6 +93,8 @@ pub enum ScenarioGate {
     NeedsFirecracker,
     /// No `.mvmpkg` for a bundle-boot scenario to install.
     NeedsBundleFixture,
+    /// No `node` on `PATH`, so the TypeScript example checkers cannot run.
+    NeedsNode,
     /// The merge-queue lane selected only `@ci_live` scenarios, and this
     /// scenario is outside that deliberately narrow subset.
     OutsideCiLiveSubset,
@@ -108,6 +120,9 @@ pub fn scenario_gate(tags: &[String], caps: RuntimeCaps) -> ScenarioGate {
     }
     if tagged(BUNDLE_TAG) && !caps.bundle_fixture {
         return ScenarioGate::NeedsBundleFixture;
+    }
+    if tagged(NODE_TAG) && !caps.node_available {
+        return ScenarioGate::NeedsNode;
     }
     ScenarioGate::Run
 }
@@ -136,6 +151,7 @@ impl ScenarioGate {
             Self::NeedsLiveOptIn => Some("need MVM_BDD_LIVE (these boot a real microVM)"),
             Self::NeedsFirecracker => Some("need /dev/kvm + firecracker on PATH"),
             Self::NeedsBundleFixture => Some("need MVM_BDD_BUNDLE to name a readable .mvmpkg"),
+            Self::NeedsNode => Some("need node on PATH (TypeScript example checkers)"),
             Self::OutsideCiLiveSubset => Some("outside the merge-queue @ci_live subset"),
         }
     }
@@ -153,11 +169,13 @@ mod tests {
         live_opted_in: false,
         firecracker_bootable: false,
         bundle_fixture: false,
+        node_available: false,
     };
     const ALL: RuntimeCaps = RuntimeCaps {
         live_opted_in: true,
         firecracker_bootable: true,
         bundle_fixture: true,
+        node_available: false,
     };
 
     #[test]
@@ -195,6 +213,7 @@ mod tests {
                 live_opted_in: true,
                 firecracker_bootable: false,
                 bundle_fixture: false,
+                node_available: false,
             },
         ));
     }
@@ -207,6 +226,7 @@ mod tests {
                 live_opted_in: true,
                 firecracker_bootable: false,
                 bundle_fixture: false,
+                node_available: false,
             },
         ));
         assert!(scenario_should_run(&tags(&["live", "firecracker"]), ALL));
@@ -221,6 +241,7 @@ mod tests {
                 live_opted_in: false,
                 firecracker_bootable: true,
                 bundle_fixture: false,
+                node_available: false,
             },
         ));
         // Live opt-in but missing capability → skipped.
@@ -230,6 +251,7 @@ mod tests {
                 live_opted_in: true,
                 firecracker_bootable: false,
                 bundle_fixture: false,
+                node_available: false,
             },
         ));
         // Both present → runs.
@@ -246,26 +268,31 @@ mod tests {
                 live_opted_in: false,
                 firecracker_bootable: false,
                 bundle_fixture: false,
+                node_available: false,
             },
             RuntimeCaps {
                 live_opted_in: true,
                 firecracker_bootable: false,
                 bundle_fixture: false,
+                node_available: false,
             },
             RuntimeCaps {
                 live_opted_in: true,
                 firecracker_bootable: true,
                 bundle_fixture: false,
+                node_available: false,
             },
             RuntimeCaps {
                 live_opted_in: true,
                 firecracker_bootable: true,
                 bundle_fixture: true,
+                node_available: false,
             },
             RuntimeCaps {
                 live_opted_in: false,
                 firecracker_bootable: true,
                 bundle_fixture: true,
+                node_available: false,
             },
         ];
         let shapes = [
@@ -297,16 +324,19 @@ mod tests {
             live_opted_in: false,
             firecracker_bootable: false,
             bundle_fixture: false,
+            node_available: false,
         };
         let live_only = RuntimeCaps {
             live_opted_in: true,
             firecracker_bootable: false,
             bundle_fixture: false,
+            node_available: false,
         };
         let bootable = RuntimeCaps {
             live_opted_in: true,
             firecracker_bootable: true,
             bundle_fixture: false,
+            node_available: false,
         };
 
         assert_eq!(
@@ -356,6 +386,7 @@ mod tests {
                     live_opted_in: true,
                     firecracker_bootable: false,
                     bundle_fixture: false,
+                    node_available: false,
                 },
                 true,
             ),

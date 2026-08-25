@@ -65,6 +65,7 @@ Feature: Documented examples work
     # against the real installed SDK.
     Then every documented Python example parses and names real SDK symbols
 
+  @node
   Scenario: documented TypeScript examples name real SDK exports
     # Resolved from the SDK's `src/` export graph, not from a built `dist/`:
     # `dist/` is absent in a fresh worktree, and depending on it would fail
@@ -77,6 +78,7 @@ Feature: Documented examples work
     # attribute list that does not need one.
     Then every documented mkGuest call names real attributes
 
+  @node
   Scenario: documented TypeScript examples typecheck against the local SDK
     # The Rust examples get a compiler; this is the same for TypeScript.
     # `@runmvm/mvm` is mapped to this checkout's `src/index.ts`, so the docs
