@@ -213,7 +213,7 @@ impl std::fmt::Display for IdentityDriveError {
 impl std::error::Error for IdentityDriveError {}
 
 #[cfg(target_os = "linux")]
-pub use linux::provision_identity_from_drive;
+pub use linux::{provision_identity_from_drive, provision_identity_from_drive_for_uid};
 
 #[cfg(target_os = "linux")]
 mod linux {
@@ -235,13 +235,28 @@ mod linux {
     /// the same whether the material arrived on a drive or, historically, some
     /// other way — every reader looks only at `/run/mvm`.
     pub fn provision_identity_from_drive() -> Result<(), IdentityDriveError> {
+        provision_identity_from_drive_with_owner(None)
+    }
+
+    /// Provision the identity for a dedicated non-root service uid.
+    ///
+    /// The short-lived caller must still have mount and ownership privileges.
+    /// Only the secret signing key changes owner; the trust anchor and ingress
+    /// map remain world-readable public inputs.
+    pub fn provision_identity_from_drive_for_uid(uid: u32) -> Result<(), IdentityDriveError> {
+        provision_identity_from_drive_with_owner(Some(uid))
+    }
+
+    fn provision_identity_from_drive_with_owner(
+        signing_key_uid: Option<u32>,
+    ) -> Result<(), IdentityDriveError> {
         let device = find_labeled_ext4_disk_among(virtio_block_devices(), IDENTITY_DRIVE_LABEL)
             .ok_or(IdentityDriveError::NotAttached)?;
 
         std::fs::create_dir_all(MOUNTPOINT).map_err(io_err("create the identity mountpoint"))?;
         mount_ro(&device, MOUNTPOINT)?;
 
-        let copied = copy_identity_files();
+        let copied = copy_identity_files(signing_key_uid);
         // Unmount whatever happened to the copy: leaving the drive mounted
         // would leave the signing key readable in the guest's namespace for
         // the whole run, which is exactly what /run/mvm's modes exist to avoid.
@@ -250,31 +265,43 @@ mod linux {
         copied
     }
 
-    fn copy_identity_files() -> Result<(), IdentityDriveError> {
+    fn copy_identity_files(signing_key_uid: Option<u32>) -> Result<(), IdentityDriveError> {
         std::fs::create_dir_all(RUN_MVM_DIR).map_err(io_err("create /run/mvm"))?;
         copy_one(
             GUEST_SIGNING_KEY_FILE,
             GUEST_SIGNING_KEY_MODE,
             "the guest signing key",
+            signing_key_uid,
         )?;
         copy_one(
             HOST_SIGNER_PUB_FILE,
             HOST_SIGNER_PUB_MODE,
             "the host-signer anchor",
+            None,
         )?;
         copy_one(
             INGRESS_TARGETS_FILE,
             INGRESS_TARGETS_MODE,
             "the declared ingress targets",
+            None,
         )
     }
 
-    fn copy_one(name: &str, mode: u32, what: &str) -> Result<(), IdentityDriveError> {
+    fn copy_one(
+        name: &str,
+        mode: u32,
+        what: &str,
+        owner_uid: Option<u32>,
+    ) -> Result<(), IdentityDriveError> {
         use std::os::unix::fs::PermissionsExt;
         let from = Path::new(MOUNTPOINT).join(name);
         let to = Path::new(RUN_MVM_DIR).join(name);
         let bytes = std::fs::read(&from).map_err(io_err(&format!("read {what} from the drive")))?;
         std::fs::write(&to, &bytes).map_err(io_err(&format!("write {what} to /run/mvm")))?;
+        if let Some(uid) = owner_uid {
+            std::os::unix::fs::chown(&to, Some(uid), Some(uid))
+                .map_err(io_err(&format!("assign {what} to service uid {uid}")))?;
+        }
         std::fs::set_permissions(&to, std::fs::Permissions::from_mode(mode))
             .map_err(io_err(&format!("set the mode on {what}")))
     }

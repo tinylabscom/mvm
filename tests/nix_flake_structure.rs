@@ -837,7 +837,7 @@ fn mk_guest_starts_the_forward_proxy_before_dropping_privileges() {
 }
 
 #[test]
-fn mk_guest_seeds_vsock_egress_dns_before_privilege_drop() {
+fn mk_guest_provisions_vsock_egress_identity_before_privilege_drop() {
     let path = nix_dir().join("lib").join("mk-guest.nix");
     let content = fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("nix/lib/mk-guest.nix must be present: {e}"));
@@ -856,17 +856,43 @@ fn mk_guest_seeds_vsock_egress_dns_before_privilege_drop() {
     let resolver_seed = egress_block
         .find("printf 'nameserver 127.0.0.1\\n' > /run/mvm/resolv.conf")
         .expect("egress init seeds the loopback DNS stub");
+    let required_mode = egress_block
+        .find("MVM_IDENTITY_PROVISION_COMMAND=provision-identity-for")
+        .expect("egress-enabled boots require the service identity");
+    let optional_mode = egress_block
+        .find("MVM_IDENTITY_PROVISION_COMMAND=provision-identity-for-if-present")
+        .expect("other boots provision an attached identity without requiring one");
+    let provision = egress_block
+        .find(
+            "\"$MVM_EGRESS_CLIENT_BIN\" \"$MVM_IDENTITY_PROVISION_COMMAND\" ${toString egressUid}",
+        )
+        .expect("root init provisions according to the boot's egress requirement");
     let spawn = egress_block
-        .find("-- \"$MVM_EGRESS_CLIENT_BIN\" &")
+        .find("--reuid=${toString egressUid} --regid=${toString egressUid}")
         .expect("egress init spawns the client");
 
     assert!(
-        loopback_up < resolver_seed && resolver_seed < spawn,
-        "loopback must be raised and resolv.conf seeded before the egress client starts"
+        required_mode < provision
+            && optional_mode < provision
+            && provision < loopback_up
+            && loopback_up < resolver_seed
+            && resolver_seed < spawn,
+        "the root-owned identity handoff and loopback must be ready before the egress client drops privilege"
     );
     assert!(
-        egress_block.contains("--inh-caps=+net_bind_service --ambient-caps=+net_bind_service"),
-        "the unprivileged egress client must retain only the capability needed to bind DNS :53"
+        egress_block.contains("--inh-caps=+net_bind_service --ambient-caps=+net_bind_service")
+            && egress_block.contains("--no-new-privs"),
+        "the long-lived client must retain only its low-port bind capability"
+    );
+    assert!(
+        !egress_block.contains("--inh-caps=+sys_admin")
+            && !egress_block.contains("--ambient-caps=+sys_admin"),
+        "the long-lived client must not retain mount privilege"
+    );
+    assert!(
+        content.contains("egressUid = 989;")
+            && content.contains("uid 989 is reserved for the FlowMux egress service"),
+        "the dedicated service uid must be fixed and protected from workload, agent, or builder reuse"
     );
 }
 
