@@ -16,23 +16,23 @@
 set -euo pipefail
 
 # Test names locked by plan 76 Phase 1. Adding a test to this list
-# requires updating EXPECTED_GUEST_COUNT / EXPECTED_CORE_COUNT to
+# requires updating EXPECTED_GUEST_COUNT / EXPECTED_CONTRACT_COUNT to
 # match.
 GUEST_TESTS=(
-  "vsock::tests::test_request_class_coverage_matches_sealed_prod_allowlist"
-  "vsock::tests::test_sealed_prod_rejects_dev_only_verbs"
-  "vsock::tests::test_sealed_prod_accepts_prod_safe_verbs"
-  "vsock::tests::test_unsupported_in_profile_response_roundtrip"
+  "vsock::request_policy::tests::test_request_class_coverage_matches_sealed_prod_allowlist"
+  "vsock::request_policy::tests::test_sealed_prod_rejects_dev_only_verbs"
+  "vsock::request_policy::tests::test_sealed_prod_accepts_prod_safe_verbs"
+  "vsock::response::tests::test_unsupported_in_profile_response_roundtrip"
 )
 EXPECTED_GUEST_COUNT=${#GUEST_TESTS[@]}
 
-CORE_TESTS=(
+CONTRACT_TESTS=(
   "policy::security::tests::test_security_policy_defaults"
   "policy::security::tests::test_security_policy_missing_profile_field_is_sealed_prod"
   "policy::security::tests::test_security_policy_dev_defaults_carries_dev_profile"
   "policy::security::tests::test_agent_profile_serde_kebab_case"
 )
-EXPECTED_CORE_COUNT=${#CORE_TESTS[@]}
+EXPECTED_CONTRACT_COUNT=${#CONTRACT_TESTS[@]}
 
 run_locked_tests() {
   local crate="$1"
@@ -70,7 +70,7 @@ run_locked_tests() {
 }
 
 run_locked_tests mvm-agentd "${EXPECTED_GUEST_COUNT}" "${GUEST_TESTS[@]}"
-run_locked_tests mvm-core   "${EXPECTED_CORE_COUNT}"  "${CORE_TESTS[@]}"
+run_locked_tests mvm-contract "${EXPECTED_CONTRACT_COUNT}" "${CONTRACT_TESTS[@]}"
 
 echo
-echo "✅ Sealed-prod vsock allowlist locked: ${EXPECTED_GUEST_COUNT} mvm-agentd + ${EXPECTED_CORE_COUNT} mvm-core tests pass."
+echo "✅ Sealed-prod vsock allowlist locked: ${EXPECTED_GUEST_COUNT} mvm-agentd + ${EXPECTED_CONTRACT_COUNT} mvm-contract tests pass."

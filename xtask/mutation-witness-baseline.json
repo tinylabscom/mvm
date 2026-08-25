@@ -909,46 +909,6 @@
       "reason": "the only witness is runtime_overlay_build.rs, which shells out to a real nix build and skips when nix is absent. The mutation lane installs no nix, so these paths never execute there. Coverage debt tracked in #2033."
     },
     {
-      "file": "crates/mvm-build/src/runtime_overlay.rs",
-      "mutant": "replace match guard local_source_cache_is_fresh( &resolver.layout(&arch.to_string()), &expected_fingerprint, )? with false in resolve_or_build_local_runtime_overlay",
-      "reason": "the only witness is runtime_overlay_build.rs, which shells out to a real nix build and skips when nix is absent. The mutation lane installs no nix, so these paths never execute there. Coverage debt tracked in #2033."
-    },
-    {
-      "file": "crates/mvm-build/src/runtime_overlay.rs",
-      "mutant": "replace match guard local_source_cache_is_fresh( &resolver.layout(&arch.to_string()), &expected_fingerprint, )? with true in resolve_or_build_local_runtime_overlay",
-      "reason": "the only witness is runtime_overlay_build.rs, which shells out to a real nix build and skips when nix is absent. The mutation lane installs no nix, so these paths never execute there. Coverage debt tracked in #2033."
-    },
-    {
-      "file": "crates/mvm-build/src/runtime_overlay.rs",
-      "mutant": "replace match guard out.status.success() with true in curl_download",
-      "reason": "the only witness is runtime_overlay_build.rs, which shells out to a real nix build and skips when nix is absent. The mutation lane installs no nix, so these paths never execute there. Coverage debt tracked in #2033."
-    },
-    {
-      "file": "crates/mvm-build/src/runtime_overlay.rs",
-      "mutant": "replace run_nix_build -> Result<(), RuntimeOverlayError> with Ok(())",
-      "reason": "the only witness is runtime_overlay_build.rs, which shells out to a real nix build and skips when nix is absent. The mutation lane installs no nix, so these paths never execute there. Coverage debt tracked in #2033."
-    },
-    {
-      "file": "crates/mvm-build/src/runtime_overlay.rs",
-      "mutant": "replace runtime_overlay_source_checkout_root -> Option<PathBuf> with None",
-      "reason": "the only witness is runtime_overlay_build.rs, which shells out to a real nix build and skips when nix is absent. The mutation lane installs no nix, so these paths never execute there. Coverage debt tracked in #2033."
-    },
-    {
-      "file": "crates/mvm-build/src/runtime_overlay.rs",
-      "mutant": "replace runtime_overlay_source_checkout_root -> Option<PathBuf> with Some(Default::default())",
-      "reason": "the only witness is runtime_overlay_build.rs, which shells out to a real nix build and skips when nix is absent. The mutation lane installs no nix, so these paths never execute there. Coverage debt tracked in #2033."
-    },
-    {
-      "file": "crates/mvm-build/src/runtime_overlay.rs",
-      "mutant": "replace write_local_build_epoch -> Result<(), RuntimeOverlayError> with Ok(())",
-      "reason": "the only witness is runtime_overlay_build.rs, which shells out to a real nix build and skips when nix is absent. The mutation lane installs no nix, so these paths never execute there. Coverage debt tracked in #2033."
-    },
-    {
-      "file": "crates/mvm-build/src/runtime_overlay.rs",
-      "mutant": "replace write_local_source_fingerprint -> Result<(), RuntimeOverlayError> with Ok(())",
-      "reason": "the only witness is runtime_overlay_build.rs, which shells out to a real nix build and skips when nix is absent. The mutation lane installs no nix, so these paths never execute there. Coverage debt tracked in #2033."
-    },
-    {
       "file": "crates/mvm-cli/src/commands/image/pull_core.rs",
       "mutant": "replace && with || in pull_image_with_trust",
       "reason": "widens the prod digest-pin refusal to fire on any unpinned reference rather than only under --prod, so it refuses strictly more than the real gate. Fail-closed: claim 14 asks that --prod refuses a mutable tag, which it still does. Catching it needs a dev-mode pull asserted not to bail, which reaches the network."
@@ -1017,6 +977,11 @@
       "file": "crates/mvm-core/src/plan/synthesis.rs",
       "mutant": "replace SynthesisInput<'a>::builder -> SynthesisInputBuilder<'a> with Default::default()",
       "reason": "provably equivalent: `SynthesisInput::builder` is a one-line alias for `SynthesisInputBuilder::new()`, and this file's `impl Default for SynthesisInputBuilder` returns `Self::new()`, so `Default::default()` evaluates the identical expression. No test can distinguish the two, and the builder's own required-field refusal is asserted directly by the empty-builder test beside it."
+    },
+    {
+      "file": "crates/mvm-hostd/src/bin/mvm-network-endpoint.rs",
+      "mutant": "replace confine_endpoint_without_lsm -> Result<()> with Ok(())",
+      "reason": "This is the macOS/Windows compatibility stub: those hosts have no Landlock or seccomp confinement to witness. The distinct function name keeps this exception from masking mutations of the Linux fail-closed confine_endpoint implementation."
     },
     {
       "file": "crates/mvm-hostd/src/admission_budget.rs",
