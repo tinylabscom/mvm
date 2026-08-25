@@ -154,7 +154,7 @@ impl KvStore {
 }
 
 /// Narrow a freshly created path to the owner. `~/.mvm` and every child is
-/// 0700 (W1.5); an entry written here inherits that posture explicitly rather
+/// owner-only; an entry written here inherits that posture explicitly rather
 /// than depending on the process umask.
 #[cfg(unix)]
 fn restrict_to_owner(path: &Path) -> std::io::Result<()> {
