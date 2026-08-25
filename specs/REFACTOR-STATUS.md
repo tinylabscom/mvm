@@ -17,6 +17,13 @@ for detailed scope and acceptance criteria.
 
 ## Completed issue closeouts
 
+- [x] **Retained-state log diagnostics.** When a machine state directory
+      survives but every output capture is absent, `machine logs` now names
+      the retained state, each missing source, and the likely interrupted-boot
+      or manual-cleanup cause. Operators are directed to `machine inspect` for
+      the persisted machine. See
+      `specs/sprint/delivery/2825-retained-state-logs-error.md`.
+
 - [x] **Stopped-machine log diagnostics.** `machine logs` now distinguishes a
       missing machine state directory from other capture-source failures,
       reports the path it inspected, and directs operators to `machine ls`
