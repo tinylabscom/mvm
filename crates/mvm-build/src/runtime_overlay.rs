@@ -1251,6 +1251,19 @@ mod tests {
         assert_eq!(runtime_overlay_source_checkout_root(), None);
     }
 
+    #[cfg(not(feature = "release-channel"))]
+    #[test]
+    fn contributor_build_detects_the_compiled_in_runtime_overlay_flake() {
+        let workspace_root = runtime_overlay_source_checkout_root()
+            .expect("a contributor build must detect its source checkout");
+        assert!(
+            workspace_root
+                .join("nix/images/runtime-overlay/flake.nix")
+                .is_file(),
+            "detected workspace root must contain the runtime-overlay flake"
+        );
+    }
+
     fn valid_overlay_ext4_bytes() -> Vec<u8> {
         let paths: &[&str] = &[
             "/agent",

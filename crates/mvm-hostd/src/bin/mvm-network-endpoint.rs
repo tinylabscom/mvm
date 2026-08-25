@@ -162,7 +162,10 @@ fn main() -> Result<()> {
     // applies to the runtime thread that drives the accept loop. Fail-closed:
     // any confinement error aborts before the first guest connection.
     runtime.block_on(async move {
+        #[cfg(target_os = "linux")]
         confine_endpoint(&cfg)?;
+        #[cfg(not(target_os = "linux"))]
+        confine_endpoint_without_lsm(&cfg)?;
         serve(
             ServeParams::builder()
                 .cfg(&cfg)
@@ -570,7 +573,7 @@ fn confine_endpoint(cfg: &EndpointConfig) -> Result<()> {
 /// is exercised — and therefore testable — on every host, matching the parity
 /// the jailer module keeps for its own types.
 #[cfg(not(target_os = "linux"))]
-fn confine_endpoint(cfg: &EndpointConfig) -> Result<()> {
+fn confine_endpoint_without_lsm(cfg: &EndpointConfig) -> Result<()> {
     let _ = resolver_uds_path(cfg);
     Ok(())
 }

@@ -1,6 +1,6 @@
 # Refactor status
 
-Last updated: 2026-08-24
+Last updated: 2026-08-25
 ## Completed
 
 - [x] **AI egress metering and token budgets** —
@@ -16,6 +16,14 @@ This is the cross-plan progress index. The owning plan remains authoritative
 for detailed scope and acceptance criteria.
 
 ## Completed issue closeouts
+
+- [x] **Issues #2841 and #2842 — scheduled security evidence is executable.**
+      Sealed-production policy witnesses now follow the refactored agent
+      modules and the `mvm-contract` source of truth. A contributor-checkout
+      witness catches the runtime-overlay predicate mutation, obsolete
+      accepted misses are removed, and the non-Linux confinement compatibility
+      stub can no longer mask mutations of Linux fail-closed confinement. See
+      `specs/sprint/delivery/2841-security-claim-witness-repair.md`.
 
 - [x] **Missing-state log recovery guidance.** The lifecycle-aware
       `machine logs` failure now gives operators the concrete `machine ls`
