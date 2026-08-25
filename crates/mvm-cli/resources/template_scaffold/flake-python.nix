@@ -32,6 +32,14 @@
 
         packages = [ python appSrc pkgs.curl ];
 
+        # PID 1. The services below are declarations for the supervisor;
+        # until it lands, the primary one runs here as the entrypoint.
+        entrypoint.command = [
+          "/bin/sh"
+          "-c"
+          "PORT=8080 PYTHONUNBUFFERED=1 exec ${python}/bin/python3 ${appSrc}/main.py"
+        ];
+
         services.app = {
           command = "${python}/bin/python3 ${appSrc}/main.py";
           env = {

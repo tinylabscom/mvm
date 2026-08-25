@@ -19,8 +19,9 @@ use std::path::{Path, PathBuf};
 use clap::Command as ClapCommand;
 use cucumber::then;
 use mvm_conformance::doc_examples::{
-    DocExample, ExampleSource, Tier, TierPolicy, doc_examples, documentation_files,
-    live_scenario_commands, mvmctl_lines_outside_fences,
+    DocExample, ExampleSource, Tier, TierPolicy, doc_examples, documentation_files, is_elided,
+    live_scenario_commands, mk_guest_call_attributes, mk_guest_parameters,
+    mvmctl_lines_outside_fences,
 };
 
 use crate::world::CliWorld;
@@ -64,6 +65,17 @@ struct Manifest {
     planned: Vec<AbsentEntry>,
     #[serde(default)]
     absent: Vec<AbsentEntry>,
+    #[serde(default)]
+    nix_attribute: Vec<NixAttributeEntry>,
+}
+
+/// A `mkGuest` attribute the docs teach while its argument set does not accept
+/// it. Same contract as [`AbsentEntry`]: declared, and required to stay absent.
+#[derive(serde::Deserialize)]
+struct NixAttributeEntry {
+    name: String,
+    #[allow(dead_code)]
+    reason: String,
 }
 
 #[derive(serde::Deserialize)]
@@ -589,4 +601,369 @@ fn every_inline_named_command_exists(_world: &mut CliWorld) {
         unknown.len(),
         unknown.join("\n")
     );
+}
+
+/// Every fenced block in the documentation set, with provenance.
+fn all_code_blocks() -> Vec<mvm_conformance::doc_examples::CodeBlock> {
+    let root = repo_root();
+    let mut blocks = Vec::new();
+    for path in documentation_files(&root) {
+        let relative = path
+            .strip_prefix(&root)
+            .unwrap_or(&path)
+            .display()
+            .to_string();
+        let body = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+        blocks.extend(mvm_conformance::doc_examples::code_blocks(&relative, &body));
+    }
+    blocks
+}
+
+#[then(expr = "every Rust example that opts out of compiling says why")]
+fn every_ignored_rust_block_states_a_reason(_world: &mut CliWorld) {
+    let mut unexplained = Vec::new();
+    let mut explained = 0usize;
+
+    for block in all_code_blocks() {
+        if block.language != "rust" || !block.is_ignored() {
+            continue;
+        }
+        match block.ignore_reason() {
+            Some(reason) if !reason.is_empty() => explained += 1,
+            _ => unexplained.push(format!(
+                "  {}\n     add a first line: // illustrative: <why this cannot compile>",
+                block.location()
+            )),
+        }
+    }
+
+    assert!(
+        unexplained.is_empty(),
+        "{} Rust example(s) opt out of compiling with no stated reason ({explained} \
+         do state one). An unexplained opt-out is how a wrong example survives — \
+         the marker looks deliberate and nobody can tell whether it still is:\n{}",
+        unexplained.len(),
+        unexplained.join("\n")
+    );
+}
+
+#[then(expr = "every documented TOML and JSON block parses")]
+fn every_toml_and_json_block_parses(_world: &mut CliWorld) {
+    let mut failures = Vec::new();
+    let mut checked = 0usize;
+
+    for block in all_code_blocks() {
+        // A block carrying placeholder syntax is a shape, not a document.
+        let illustrative = block.is_ignored() || is_elided(&block.body);
+        if illustrative {
+            continue;
+        }
+        match block.language.as_str() {
+            "toml" => {
+                checked += 1;
+                if let Err(error) = block.body.parse::<toml::Table>() {
+                    failures.push(format!("  {}  (toml)\n     {error}", block.location()));
+                }
+            }
+            "json" => {
+                checked += 1;
+                if let Err(error) = serde_json::from_str::<serde_json::Value>(&block.body) {
+                    failures.push(format!("  {}  (json)\n     {error}", block.location()));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    assert!(checked > 0, "no TOML or JSON blocks were found to check");
+    assert!(
+        failures.is_empty(),
+        "{} documented TOML/JSON block(s) do not parse (checked {checked}). A \
+         config a reader pastes has to be syntactically valid:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}
+
+/// A documented code block, in the shape the language checkers read on stdin.
+#[derive(serde::Serialize)]
+struct BlockPayload {
+    file: String,
+    line: usize,
+    body: String,
+}
+
+/// A finding one of the language checkers reported.
+#[derive(serde::Deserialize)]
+struct Finding {
+    file: String,
+    line: usize,
+    kind: String,
+    detail: String,
+}
+
+/// Blocks in `language`, skipping the ones that opt out or carry elisions.
+fn blocks_in(language: &[&str]) -> Vec<BlockPayload> {
+    all_code_blocks()
+        .into_iter()
+        .filter(|block| language.contains(&block.language.as_str()))
+        .filter(|block| !block.is_ignored() && !is_elided(&block.body))
+        .map(|block| BlockPayload {
+            file: block.file.clone(),
+            line: block.line,
+            body: block.body.clone(),
+        })
+        .collect()
+}
+
+/// Run a checker fixture over `blocks`, returning what it found.
+///
+/// The checker resolves names against the real installed SDK, so this is the
+/// nearest thing these languages have to the compile step the Rust examples
+/// now get.
+fn run_checker(program: &str, script: &str, blocks: &[BlockPayload]) -> Vec<Finding> {
+    run_checker_with(program, script, blocks, &[])
+}
+
+/// As [`run_checker`], with extra environment for the checker process.
+fn run_checker_with(
+    program: &str,
+    script: &str,
+    blocks: &[BlockPayload],
+    env: &[(&str, std::path::PathBuf)],
+) -> Vec<Finding> {
+    use std::io::Write as _;
+    use std::process::Stdio;
+
+    let root = repo_root();
+    let script = root
+        .join("features/suites/s29_doc_examples/fixtures")
+        .join(script);
+    let payload = serde_json::to_vec(blocks).expect("serialize blocks");
+
+    let spawned = std::process::Command::new(program)
+        .arg(&script)
+        .env("PYTHONPATH", root.join("crates/mvm-sdk/sdks/python"))
+        .envs(env.iter().map(|(k, v)| (*k, v.clone())))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn();
+    let mut child = match spawned {
+        Ok(child) => child,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            // No interpreter here. A host without Node is a real configuration
+            // (the KVM witness box is one); failing the suite for it would
+            // report a missing toolchain as a documentation defect.
+            eprintln!(
+                "[bdd] SKIPPED: {program} is not installed — {} did not run",
+                script.display()
+            );
+            return Vec::new();
+        }
+        Err(error) => panic!("spawn {program} {}: {error}", script.display()),
+    };
+    child
+        .stdin
+        .as_mut()
+        .expect("checker stdin")
+        .write_all(&payload)
+        .expect("write blocks to checker");
+    let output = child.wait_with_output().expect("checker output");
+    assert!(
+        output.status.success(),
+        "{program} {} failed:\n{}",
+        script.display(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+        panic!(
+            "parse checker findings: {error}\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+    })
+}
+
+fn report(findings: &[Finding], language: &str, checked: usize) {
+    assert!(
+        findings.is_empty(),
+        "{} {language} example finding(s) across {checked} block(s). A snippet \
+         naming an SDK symbol that does not exist misleads a reader exactly like \
+         a stale CLI flag:\n{}",
+        findings.len(),
+        findings
+            .iter()
+            .map(|f| format!("  {}:{}  [{}]\n     {}", f.file, f.line, f.kind, f.detail))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+}
+
+#[then(expr = "every documented Python example parses and names real SDK symbols")]
+fn documented_python_examples_are_valid(_world: &mut CliWorld) {
+    let blocks = blocks_in(&["python", "py"]);
+    assert!(!blocks.is_empty(), "no Python examples were found to check");
+    let findings = run_checker("python3", "check_python_examples.py", &blocks);
+    report(&findings, "Python", blocks.len());
+}
+
+#[then(expr = "every documented TypeScript example names real SDK exports")]
+fn documented_typescript_examples_are_valid(_world: &mut CliWorld) {
+    let blocks = blocks_in(&["ts", "typescript"]);
+    assert!(
+        !blocks.is_empty(),
+        "no TypeScript examples were found to check"
+    );
+    let sdk = repo_root().join("crates/mvm-sdk/sdks/typescript/src");
+    let findings = run_checker_with(
+        "node",
+        "check_typescript_examples.mjs",
+        &blocks,
+        &[("MVM_TS_SDK_SRC", sdk)],
+    );
+    report(&findings, "TypeScript", blocks.len());
+}
+
+#[then(expr = "every documented mkGuest call names real attributes")]
+fn documented_mkguest_calls_are_valid(_world: &mut CliWorld) {
+    let root = repo_root();
+    let source = std::fs::read_to_string(root.join("nix/lib/mk-guest.nix"))
+        .expect("read nix/lib/mk-guest.nix");
+    let mut accepted = mk_guest_parameters(&source);
+    assert!(
+        accepted.len() > 5,
+        "read only {} mkGuest parameter(s) — the argument-set walk has gone blind",
+        accepted.len()
+    );
+    // `pkgs` is threaded in by every caller and consumed by the composition
+    // layer rather than declared in the inner argument set.
+    accepted.insert("pkgs".to_string());
+
+    let declared: BTreeSet<String> = manifest()
+        .nix_attribute
+        .into_iter()
+        .map(|entry| entry.name)
+        .collect();
+    for name in &declared {
+        assert!(
+            !accepted.contains(name),
+            "`{name}` is declared as an unimplemented mkGuest attribute but the \
+             argument set now accepts it — drop the [[nix_attribute]] entry and \
+             the docs' not-implemented note"
+        );
+    }
+
+    let mut failures = Vec::new();
+    let mut checked = 0usize;
+
+    for block in all_code_blocks() {
+        if block.language != "nix" || block.is_ignored() || is_elided(&block.body) {
+            continue;
+        }
+        let attributes = mk_guest_call_attributes(&block.body);
+        if attributes.is_empty() {
+            continue;
+        }
+        checked += 1;
+        for (name, offset) in attributes {
+            if !accepted.contains(&name) && !declared.contains(&name) {
+                failures.push(format!(
+                    "  {}:{}\n     `mkGuest` takes no `{name}` attribute",
+                    block.file,
+                    block.line + offset
+                ));
+            }
+        }
+    }
+
+    assert!(
+        checked > 0,
+        "no documented mkGuest calls were found to check"
+    );
+    assert!(
+        failures.is_empty(),
+        "{} documented mkGuest attribute(s) do not exist (checked {checked} call \
+         site(s)). The guide teaches mkGuest as the Nix authoring surface, so a \
+         renamed attribute silently produces a guest nobody asked for:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}
+
+/// Exit status the TypeScript typechecker uses to say its toolchain is absent.
+const TOOLCHAIN_ABSENT: i32 = 3;
+
+#[then(expr = "every documented TypeScript example typechecks against the local SDK")]
+fn documented_typescript_examples_typecheck(_world: &mut CliWorld) {
+    use std::io::Write as _;
+    use std::process::Stdio;
+
+    // Typecheck only blocks that import the SDK. A block that does not is an
+    // excerpt — a few lines lifted out of a program, using names defined in
+    // prose around it — and demanding it compile standalone reports the missing
+    // context as 77 findings that are all the same non-problem. Those blocks
+    // are still covered by the name-resolution scenario.
+    let blocks: Vec<BlockPayload> = blocks_in(&["ts", "typescript"])
+        .into_iter()
+        .filter(|block| block.body.contains("from \"@runmvm/mvm\""))
+        .collect();
+    assert!(
+        !blocks.is_empty(),
+        "no self-contained TypeScript examples were found to typecheck"
+    );
+
+    let root = repo_root();
+    let sdk = root.join("crates/mvm-sdk/sdks/typescript");
+    let script = root
+        .join("features/suites/s29_doc_examples/fixtures")
+        .join("typecheck_typescript_examples.mjs");
+
+    let child = std::process::Command::new("node")
+        .arg(&script)
+        .env("MVM_TS_SDK_ROOT", &sdk)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn();
+    let mut child = match child {
+        Ok(child) => child,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            eprintln!(
+                "[bdd] SKIPPED: node is not installed — the TypeScript typecheck did not run"
+            );
+            return;
+        }
+        Err(error) => panic!("spawn node {}: {error}", script.display()),
+    };
+    child
+        .stdin
+        .as_mut()
+        .expect("typechecker stdin")
+        .write_all(&serde_json::to_vec(&blocks).expect("serialize blocks"))
+        .expect("write blocks");
+    let output = child.wait_with_output().expect("typechecker output");
+
+    if output.status.code() == Some(TOOLCHAIN_ABSENT) {
+        // The SDK dev toolchain is not installed. Say so loudly rather than
+        // passing quietly: the sibling name-resolution scenario still ran, so
+        // coverage is reduced here, not absent.
+        eprintln!(
+            "[bdd] SKIPPED: TypeScript typecheck — no SDK toolchain at {}.\n\
+             [bdd]   Run `just sdk-ts-install` to enable it. Name resolution \
+             still ran; argument shapes did not.",
+            sdk.display()
+        );
+        return;
+    }
+
+    assert!(
+        output.status.success(),
+        "typechecker failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let findings: Vec<Finding> =
+        serde_json::from_slice(&output.stdout).expect("parse typecheck findings");
+    report(&findings, "TypeScript typecheck", blocks.len());
 }

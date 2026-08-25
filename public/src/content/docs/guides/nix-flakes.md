@@ -3,6 +3,13 @@ title: Writing Nix Flakes
 description: Create custom Nix flakes that build microVM images for mvm.
 ---
 
+:::caution[Declared, not enforced]
+`healthChecks`, `volumeMounts` and `serviceGroup` are accepted by `mkGuest`
+and recorded in `passthru.mvm.unenforced`, but nothing acts on them yet: the
+multi-service supervisor is still a stub. A flake using them builds, and
+prints a warning at evaluation saying so.
+:::
+
 mvmctl uses Nix flakes to produce reproducible microVM images. You run `mvmctl machine build` from the host, and mvm runs Nix evaluation and `nix build` inside the Linux builder VM. The result is a kernel and rootfs that can boot on any supported runtime backend, including Firecracker, HVF, libkrun, and QEMU.
 
 You do not need to enter a dev shell to build a flake. The dev shell is only for manually debugging the Linux build environment. See [Builder VM](/guides/builder-vm/) for the full host-vs-builder model.

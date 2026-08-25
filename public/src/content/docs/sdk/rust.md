@@ -56,8 +56,7 @@ declaration that names nothing is refused here rather than at boot. The spec
 carries the parsed value and serializes it back as that same string.
 
 ```rust
-use mvm_client::{MvmClient, MachineSpec};
-use mvm_client_local::LocalBackend;
+use mvm_client::{LocalBackend, MachineSpec, MvmClient};
 
 // inside an async context:
 let client = LocalBackend::new();
@@ -89,7 +88,7 @@ piece of UI/service code drives either this host or a remote fleet:
 use mvm_client::{connect, MvmClient, Target};
 
 // In-process — this host's microVMs (auto-selected VMM). No daemon required.
-let local = connect(Target::Local)?;          // == mvm_client_local::LocalBackend::new()
+let local = connect(Target::Local)?;          // == mvm_client::LocalBackend::new()
 
 // Remote — a hosted fleet or a local sidecar over REST (feature `remote`).
 let remote = connect(Target::Gateway {
@@ -98,7 +97,7 @@ let remote = connect(Target::Gateway {
 })?;
 
 for m in remote.list_machines(Default::default()).await? {
-    println!("{}", m.id);
+    println!("{}", m.id.0);
 }
 ```
 

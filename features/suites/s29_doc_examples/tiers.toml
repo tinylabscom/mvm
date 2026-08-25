@@ -490,3 +490,7 @@ reason = "deliberately not a public verb — the reference says policy authoring
 [[absent]]
 path = "addon"
 reason = "the addon CLI is unbuilt; the migration guide says 'once the addon CLI lands'"
+
+[[absent]]
+path = "exec"
+reason = "the bare verb was merged into `run`; the CLI reference records the merge in the past tense"

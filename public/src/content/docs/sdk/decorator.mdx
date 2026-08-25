@@ -25,8 +25,11 @@ import mvm
     name="agent-tool",
     source=mvm.local_path("."),
     image=mvm.nix_packages(["python312", "uv"]),
-    resources=mvm.resources(cpu_cores=1, memory_mb=512),
-    network=mvm.network(mode="deny", allow_https=["api.openai.com"]),
+    resources=mvm.resources(cpu_cores=1, memory_mb=512, rootfs_size_mb=512),
+    network=mvm.network(
+        mode="none",
+        egress=mvm.egress([mvm.host_port("api.openai.com", 443)]),
+    ),
     env={
         "OPENAI_API_KEY": mvm.secret("openai-api-key", type="bearer", hosts=["api.openai.com"]),
     },
@@ -44,18 +47,20 @@ def run(prompt: str) -> str:
 <TabItem label="TypeScript">
 
 ```ts
-import * as mvm from "mvm-sdk";
+import * as mvm from "@runmvm/mvm";
 
 export const run = mvm.app({
   name: "agent-tool",
   source: mvm.localPath("."),
-  image: mvm.nixPackages(["nodejs_22", "pnpm"]),
+  image: mvm.nix_packages(["nodejs_22", "pnpm"]),
   resources: mvm.resources({ cpu_cores: 1, memory_mb: 512 }),
-  network: mvm.network({ mode: "deny", allow_https: ["api.openai.com"] }),
+  // The TypeScript `network()` surface is mode + ports + ai today; an egress
+  // allow-list is declared from Python or in mvm.toml.
+  network: mvm.network({ mode: "none" }),
   env: {
     OPENAI_API_KEY: mvm.secret("openai-api-key", { type: "bearer", hosts: ["api.openai.com"] }),
   },
-  entrypoint: mvm.entrypointFunction({
+  entrypoint: mvm.entrypoint_function({
     module: "tool",
     function: "run",
     primary: true,

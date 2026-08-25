@@ -325,8 +325,10 @@ executed on the host) and emits the flake + launch plan:
 import mvm
 
 @mvm.app(
+    name="greeter",
+    source=mvm.local_path("."),
     image=mvm.python_image(python="3.12"),
-    resources=mvm.resources(cpu=1, memory_mb=256),
+    resources=mvm.resources(cpu_cores=1, memory_mb=256, rootfs_size_mb=512),
     dependencies=mvm.python_deps(lockfile="uv.lock", tool="uv"),
     env={"BANNER": mvm.literal("hi")},
     before_start="export FOO=1",
@@ -406,8 +408,10 @@ and is _also_ read statically by `mvmctl build compile`.
 import mvm
 
 @mvm.app(
+    name="greeter",
+    source=mvm.local_path("."),
     image=mvm.node_image(node="22"),
-    resources=mvm.resources(cpu=1, memory_mb=256),
+    resources=mvm.resources(cpu_cores=1, memory_mb=256, rootfs_size_mb=512),
 )
 def greet(name: str) -> str:
     return f"hello {name}"
@@ -524,7 +528,7 @@ way, so the same UI code drives a local host or a remote fleet:
 use mvm_client::{connect, MvmClient, Target};
 
 // In-process — this host's microVMs, auto-selected VMM. No daemon required.
-let local = connect(Target::Local)?;              // == mvm_client_local::LocalBackend::new()
+let local = connect(Target::Local)?;              // == mvm_client::LocalBackend::new()
 
 // Remote — a hosted fleet or a local sidecar, over REST (needs feature `remote`).
 let remote = connect(Target::Gateway {
@@ -534,7 +538,7 @@ let remote = connect(Target::Gateway {
 
 // Identical methods on both: create / run / start / stop / remove, exec, logs, reconfigure.
 for m in remote.list_machines(Default::default()).await? {
-    println!("{}", m.id);
+    println!("{}", m.id.0);
 }
 ```
 

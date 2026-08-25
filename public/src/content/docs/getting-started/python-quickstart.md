@@ -58,8 +58,8 @@ import mvm
     name="hello-python",
     source=mvm.local_path("."),
     image=mvm.nix_packages(["python312"]),
-    resources=mvm.resources(cpu_cores=1, memory_mb=512),
-    network=mvm.network(mode="deny"),
+    resources=mvm.resources(cpu_cores=1, memory_mb=512, rootfs_size_mb=512),
+    network=mvm.network(mode="none"),
     entrypoint=mvm.entrypoint_function(
         module="app",
         function="main",

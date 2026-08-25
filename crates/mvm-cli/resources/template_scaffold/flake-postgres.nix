@@ -18,6 +18,14 @@
         packages = [ pkgs.postgresql pkgs.curl ];
 
         # PostgreSQL service — initialises the data directory on first boot.
+        # PID 1. The services below are declarations for the supervisor;
+        # until it lands, the primary one runs here as the entrypoint.
+        entrypoint.command = [
+          "/bin/sh"
+          "-c"
+          "exec ${pkgs.postgresql}/bin/postgres -D ${pgData} -k /run/postgresql"
+        ];
+
         services.postgres = {
           preStart = ''
             if [ ! -f ${pgData}/PG_VERSION ]; then

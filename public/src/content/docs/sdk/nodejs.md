@@ -28,12 +28,12 @@ Planned:
 ## Declaration
 
 ```ts
-import * as mvm from "mvm-sdk";
+import * as mvm from "@runmvm/mvm";
 
 export const worker = mvm.app({
   image: mvm.nix_packages(["nodejs_22"]),
   resources: mvm.resources({ cpu_cores: 1, memory_mb: 512 }),
-  network: mvm.network({ mode: "deny" }),
+  network: mvm.network({ mode: "none" }),
 })((input: string): string => input.toUpperCase());
 ```
 

@@ -50,3 +50,38 @@ Feature: Documented examples work
     # rather than fenced blocks. A stale spelling there reaches a reader
     # exactly like a stale one in a code block.
     Then every command named in the docs prose exists
+
+  Scenario: Rust examples that skip compiling say why
+    # `rust,ignore` is the only way a Rust example escapes the compiler, so an
+    # unexplained opt-out is exactly how a wrong example survives.
+    Then every Rust example that opts out of compiling says why
+
+  Scenario: documented TOML and JSON parses
+    Then every documented TOML and JSON block parses
+
+  Scenario: documented Python examples name real SDK symbols
+    # The Rust examples get a compiler. This is the nearest equivalent for
+    # Python: parse the snippet, then resolve every `mvm.<name>` it uses
+    # against the real installed SDK.
+    Then every documented Python example parses and names real SDK symbols
+
+  @node
+  Scenario: documented TypeScript examples name real SDK exports
+    # Resolved from the SDK's `src/` export graph, not from a built `dist/`:
+    # `dist/` is absent in a fresh worktree, and depending on it would fail
+    # this gate for a reason that has nothing to do with the docs.
+    Then every documented TypeScript example names real SDK exports
+
+  Scenario: documented mkGuest calls name real attributes
+    # Read from `nix/lib/mk-guest.nix`'s argument set rather than evaluated:
+    # the hermetic lane has no `nix` binary, and the header is a flat
+    # attribute list that does not need one.
+    Then every documented mkGuest call names real attributes
+
+  @node
+  Scenario: documented TypeScript examples typecheck against the local SDK
+    # The Rust examples get a compiler; this is the same for TypeScript.
+    # `@runmvm/mvm` is mapped to this checkout's `src/index.ts`, so the docs
+    # are checked against the SDK in this tree, not the published one. Skips
+    # loudly when the SDK dev toolchain is absent.
+    Then every documented TypeScript example typechecks against the local SDK

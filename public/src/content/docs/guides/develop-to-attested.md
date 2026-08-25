@@ -35,7 +35,10 @@ rather than resolved at build time:
 import mvm
 
 @mvm.app(
+    name="detector",
+    source=mvm.local_path("."),
     image=mvm.python_image(python="3.12"),
+    resources=mvm.resources(cpu_cores=1, memory_mb=512, rootfs_size_mb=1024),
     dependencies=mvm.python_deps(lockfile="uv.lock", tool="uv"),
 )
 def detect(path: str) -> int:

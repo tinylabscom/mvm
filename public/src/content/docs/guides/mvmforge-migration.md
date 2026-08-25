@@ -49,7 +49,7 @@ surface.
 ## Migration steps
 
 1. **Update imports.** Search-and-replace `from mvmforge` →
-   `from mvm` (Python) or `from "mvmforge-sdk"` → `from "mvm-sdk"`
+   `from mvm` (Python) or `from "mvmforge-sdk"` → `from "@runmvm/mvm"`
    (TypeScript).
 2. **Rename the decorator.** `@mv.func(...)` → `@mvm.app(...)`. The
    kwargs are unchanged.

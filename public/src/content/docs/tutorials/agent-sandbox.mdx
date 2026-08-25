@@ -36,12 +36,10 @@ Local mode talks to `mvm` on the same host. The microVM is the execution boundar
 <TabItem label="Python">
 
 ```python
-from mvm import Sandbox, NetworkPolicy
+from mvm import Sandbox
 
-sandbox = Sandbox.create(
-    image="nix:./flake#agent",
-    network=NetworkPolicy.deny_by_default(),
-)
+# Egress is deny-by-default; naming no allow-list is what denies it.
+sandbox = Sandbox.create(image="nix:./flake#agent")
 
 try:
     result = sandbox.exec(["python", "/work/agent.py"], timeout_seconds=60)

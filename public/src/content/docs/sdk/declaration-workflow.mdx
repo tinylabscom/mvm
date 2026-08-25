@@ -44,8 +44,8 @@ import mvm
     name="agent-tool",
     source=mvm.local_path("."),
     image=mvm.nix_packages(["python312", "uv"]),
-    resources=mvm.resources(cpu_cores=1, memory_mb=512),
-    network=mvm.network(mode="deny"),
+    resources=mvm.resources(cpu_cores=1, memory_mb=512, rootfs_size_mb=512),
+    network=mvm.network(mode="none"),
     env={
         "MODEL_PATH": mvm.literal("/data/model.bin"),
         "API_KEY": mvm.secret("agent-api-key", type="bearer", hosts=["api.example.com"]),
@@ -73,14 +73,14 @@ not run as part of static declaration extraction.
 <TabItem label="TypeScript">
 
 ```ts
-import * as mvm from "mvm-sdk";
+import * as mvm from "@runmvm/mvm";
 
 export const run = mvm.app({
   name: "agent-tool",
   source: mvm.localPath("."),
   image: mvm.nix_packages(["nodejs_22"]),
   resources: mvm.resources({ cpu_cores: 1, memory_mb: 512 }),
-  network: mvm.network({ mode: "deny" }),
+  network: mvm.network({ mode: "none" }),
   entrypoint: mvm.entrypoint_function({
     module: "tool",
     function: "run",

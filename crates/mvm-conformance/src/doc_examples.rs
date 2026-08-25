@@ -9,7 +9,7 @@
 //! Pure by construction (the only I/O is reading the doc files handed to it),
 //! so the parsing rules are unit-tested here rather than through the runner.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 /// Fence languages whose bodies are shell transcripts we extract commands from.
@@ -72,6 +72,9 @@ pub struct CodeBlock {
     pub line: usize,
     /// The fence's language token, lowercased; empty for a bare ``` fence.
     pub language: String,
+    /// Comma-separated fence attributes after the language (`rust,ignore`),
+    /// following rustdoc's convention.
+    pub attributes: Vec<String>,
     /// The block body, newline-joined, without the fences.
     pub body: String,
 }
@@ -80,6 +83,31 @@ impl CodeBlock {
     /// Whether this block is a shell transcript we extract commands from.
     pub fn is_shell(&self) -> bool {
         SHELL_LANGUAGES.contains(&self.language.as_str())
+    }
+
+    /// `file:line`, the form an editor and a CI log both linkify.
+    pub fn location(&self) -> String {
+        format!("{}:{}", self.file, self.line)
+    }
+
+    /// Whether the block opts out of compilation, rustdoc-style.
+    pub fn is_ignored(&self) -> bool {
+        self.attributes
+            .iter()
+            .any(|a| a == "ignore" || a == "no_compile")
+    }
+
+    /// The justification an ignored block must carry on its first line.
+    ///
+    /// An opt-out with no stated reason is how a wrong example survives: the
+    /// marker looks deliberate and nobody can tell whether it still is.
+    pub fn ignore_reason(&self) -> Option<&str> {
+        self.body
+            .lines()
+            .next()?
+            .trim()
+            .strip_prefix("// illustrative:")
+            .map(str::trim)
     }
 }
 
@@ -210,7 +238,19 @@ pub fn code_blocks(file: &str, contents: &str) -> Vec<CodeBlock> {
                             .split_whitespace()
                             .next()
                             .unwrap_or_default()
+                            .split(',')
+                            .next()
+                            .unwrap_or_default()
                             .to_ascii_lowercase(),
+                        attributes: info
+                            .split_whitespace()
+                            .next()
+                            .unwrap_or_default()
+                            .split(',')
+                            .skip(1)
+                            .map(|attribute| attribute.trim().to_ascii_lowercase())
+                            .filter(|attribute| !attribute.is_empty())
+                            .collect(),
                         body: String::new(),
                     });
                 }
@@ -714,6 +754,9 @@ fn collect_markdown(dir: &Path, out: &mut Vec<PathBuf>) {
     for entry in entries.filter_map(Result::ok) {
         let path = entry.path();
         if path.is_dir() {
+            if path.file_name().is_some_and(|name| name == "node_modules") {
+                continue;
+            }
             collect_markdown(&path, out);
         } else if path
             .extension()
@@ -1011,6 +1054,108 @@ mod tests {
     }
 
     #[test]
+    fn mk_guest_parameters_come_from_the_argument_set() {
+        let source = concat!(
+            "# a comment\n",
+            "{ name\n",
+            ", entrypoint\n",
+            ", packages       ? [ ]\n",
+            ", vcpus          ? 1\n",
+            "}:\n",
+            "let unrelated = 1; in unrelated\n",
+        );
+        let names = mk_guest_parameters(source);
+        assert!(names.contains("name"));
+        assert!(names.contains("entrypoint"));
+        assert!(names.contains("packages"));
+        assert!(names.contains("vcpus"));
+        assert!(
+            !names.contains("unrelated"),
+            "the walk ran past the argument set: {names:?}"
+        );
+    }
+
+    #[test]
+    fn mk_guest_call_attributes_collapse_dotted_paths() {
+        let body = concat!(
+            "packages.default = mvm.lib.mkGuest {\n",
+            "  inherit pkgs;\n",
+            "  name = \"my-app\";\n",
+            "  entrypoint.command = [ \"/bin/x\" ];\n",
+            "};\n",
+        );
+        let found: Vec<String> = mk_guest_call_attributes(body)
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        assert!(found.contains(&"pkgs".to_string()), "{found:?}");
+        assert!(found.contains(&"name".to_string()), "{found:?}");
+        assert!(found.contains(&"entrypoint".to_string()), "{found:?}");
+        assert!(
+            !found.contains(&"command".to_string()),
+            "a dotted path leaked its tail: {found:?}"
+        );
+    }
+
+    #[test]
+    fn mk_guest_call_attributes_ignore_words_in_comments_and_strings() {
+        let body = concat!(
+            "mvm.lib.mkGuest {\n",
+            "  name = \"my-app\";\n",
+            "  dev = true;   # explicit override; auto-infer is false here\n",
+            "  entrypoint.command = [ \"/bin/sh\" \"-c\" \"per-service thing\" ];\n",
+            "}\n",
+        );
+        let found: Vec<String> = mk_guest_call_attributes(body)
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        for prose in ["auto", "per", "explicit", "service"] {
+            assert!(
+                !found.contains(&prose.to_string()),
+                "read {prose:?} out of a comment or string: {found:?}"
+            );
+        }
+        assert!(found.contains(&"dev".to_string()), "{found:?}");
+    }
+
+    #[test]
+    fn mk_guest_call_attributes_ignore_nested_attribute_sets() {
+        let body = concat!(
+            "mvm.lib.mkGuest {\n",
+            "  name = \"x\";\n",
+            "  entrypoint.services.web = { exec = \"run\"; };\n",
+            "}\n",
+        );
+        let found: Vec<String> = mk_guest_call_attributes(body)
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        assert!(
+            !found.contains(&"exec".to_string()),
+            "a nested attribute leaked to the top level: {found:?}"
+        );
+    }
+
+    #[test]
+    fn an_ellipsis_line_marks_an_excerpt() {
+        assert!(is_elided("fn a() {\n  ...\n}\n"));
+        assert!(is_elided("let x = 1; // …\n"));
+    }
+
+    #[test]
+    fn spread_and_rest_syntax_are_not_elisions() {
+        assert!(
+            !is_elided("const b = { ...a, c: 1 };\n"),
+            "an object spread was read as an elision"
+        );
+        assert!(
+            !is_elided("function f(...args: string[]) {}\n"),
+            "a rest parameter was read as an elision"
+        );
+    }
+
+    #[test]
     fn tier_lookup_falls_back_to_the_longest_registered_prefix() {
         let policy = TierPolicy::from_entries([
             (vec!["machine".to_string()], Tier::Parse),
@@ -1062,6 +1207,21 @@ mod corpus_tests {
     }
 
     #[test]
+    fn dependency_markdown_is_not_part_of_the_documentation_corpus() {
+        let root = tempfile::tempdir().expect("create documentation fixture");
+        let sdk = root.path().join("crates/mvm-sdk/sdks/typescript");
+        let dependency = sdk.join("node_modules/dependency");
+        std::fs::create_dir_all(&dependency).expect("create dependency fixture");
+        std::fs::write(sdk.join("README.md"), "# SDK\n").expect("write SDK documentation");
+        std::fs::write(dependency.join("README.md"), "# Dependency\n")
+            .expect("write dependency documentation");
+
+        let files = documentation_files(root.path());
+
+        assert_eq!(files, vec![sdk.join("README.md")]);
+    }
+
+    #[test]
     fn dump_corpus() {
         if std::env::var_os("MVM_DUMP_CORPUS").is_none() {
             return;
@@ -1082,4 +1242,165 @@ mod corpus_tests {
             }
         }
     }
+}
+
+/// Whether a code block is abbreviated rather than complete.
+///
+/// Docs elide the uninteresting middle of an example, with a `…` or a line
+/// holding nothing but `...`. Such a block is a excerpt, not a program: it
+/// cannot compile or typecheck, and demanding that it does would push authors
+/// toward opting out entirely.
+///
+/// Only a line that is *solely* dots counts. `...` is legal syntax — a spread
+/// or a rest parameter — so a blanket substring test would silently drop real
+/// examples from checking.
+pub fn is_elided(body: &str) -> bool {
+    body.contains('…')
+        || body
+            .lines()
+            .any(|line| !line.trim().is_empty() && line.trim().chars().all(|c| c == '.'))
+}
+
+/// The attribute names `mkGuest` accepts, read from its Nix argument set.
+///
+/// The docs teach `mkGuest` as the Nix authoring surface, so a renamed or
+/// removed attribute is drift of exactly the kind the Rust compiler and the
+/// SDK checkers catch elsewhere. Evaluating Nix would need a `nix` binary the
+/// hermetic lane does not have; the argument set is a flat `{ a, b ? x, ... }`
+/// header, which is readable without one.
+pub fn mk_guest_parameters(source: &str) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
+    let mut started = false;
+
+    for line in source.lines() {
+        let trimmed = line.trim_start();
+        // The header opens with `{ name` and closes with `}:`.
+        if !started {
+            if trimmed.starts_with("{ name") {
+                started = true;
+            } else {
+                continue;
+            }
+        } else if trimmed.starts_with("}:") {
+            break;
+        }
+        let candidate = trimmed.trim_start_matches(['{', ',']).trim_start();
+        let name: String = candidate
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+            .collect();
+        if !name.is_empty() {
+            names.insert(name);
+        }
+    }
+
+    names
+}
+
+/// The top-level attributes a documented `mkGuest { … }` call passes, with the
+/// line offset of each within the block.
+///
+/// Dotted paths collapse to their head (`entrypoint.command` is `entrypoint`),
+/// and `inherit` brings names in without an `=`, so both are handled.
+pub fn mk_guest_call_attributes(body: &str) -> Vec<(String, usize)> {
+    let Some(start) = body.find("mkGuest") else {
+        return Vec::new();
+    };
+    let Some(open) = body[start..].find('{').map(|offset| start + offset) else {
+        return Vec::new();
+    };
+
+    let mut attributes = Vec::new();
+    let mut depth = 0usize;
+    let mut line = body[..open].lines().count();
+    let mut at_item_start = false;
+
+    let bytes = body.as_bytes();
+    let mut index = open;
+    while index < body.len() {
+        let character = bytes[index] as char;
+        // A `#` comment runs to end of line, and a string can hold anything;
+        // words inside either are prose, not attributes.
+        if character == '#' {
+            let end = body[index..]
+                .find('\n')
+                .map_or(body.len(), |offset| index + offset);
+            index = end;
+            continue;
+        }
+        if character == '"' {
+            let mut cursor = index + 1;
+            while cursor < body.len() {
+                let inner = bytes[cursor] as char;
+                if inner == '\\' {
+                    cursor += 2;
+                    continue;
+                }
+                if inner == '"' {
+                    break;
+                }
+                if inner == '\n' {
+                    line += 1;
+                }
+                cursor += 1;
+            }
+            index = cursor + 1;
+            at_item_start = false;
+            continue;
+        }
+        match character {
+            '\n' => {
+                line += 1;
+                at_item_start = true;
+            }
+            '{' => {
+                depth += 1;
+                at_item_start = true;
+            }
+            '}' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    break;
+                }
+                at_item_start = true;
+            }
+            ';' => at_item_start = true,
+            c if c.is_whitespace() => {}
+            _ => {
+                if depth == 1 && at_item_start {
+                    let rest = &body[index..];
+                    let word: String = rest
+                        .chars()
+                        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                        .collect();
+                    if !word.is_empty() {
+                        // `inherit pkgs;` names come in without an `=`.
+                        if word == "inherit" {
+                            for inherited in rest[..rest.find(';').unwrap_or(rest.len())]
+                                .split_whitespace()
+                                .skip(1)
+                            {
+                                let clean: String = inherited
+                                    .chars()
+                                    .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                                    .collect();
+                                if !clean.is_empty() {
+                                    attributes.push((clean, line));
+                                }
+                            }
+                        } else {
+                            attributes.push((word.clone(), line));
+                        }
+                        index += word.len();
+                        at_item_start = false;
+                        continue;
+                    }
+                }
+                at_item_start = false;
+            }
+        }
+        index += 1;
+    }
+
+    attributes
 }

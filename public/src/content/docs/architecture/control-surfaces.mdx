@@ -69,7 +69,7 @@ with mvm.Sandbox.create("python-3.12", workload_id="tool") as sandbox:
 <TabItem label="TypeScript">
 
 ```ts
-import { Sandbox } from "mvm-sdk";
+import { Sandbox } from "@runmvm/mvm";
 
 using sandbox = Sandbox.create("node-22", { workloadId: "tool" });
 sandbox.files.write("/app/main.js", "console.log('hello')");
@@ -101,7 +101,8 @@ import mvm
     name="worker",
     source=mvm.local_path("."),
     image=mvm.nix_packages(["python312"]),
-    network=mvm.network(mode="deny"),
+    resources=mvm.resources(cpu_cores=1, memory_mb=256, rootfs_size_mb=512),
+    network=mvm.network(mode="none"),
 )
 def run() -> str:
     return "ok"
@@ -111,13 +112,13 @@ def run() -> str:
 <TabItem label="TypeScript">
 
 ```ts
-import * as mvm from "mvm-sdk";
+import * as mvm from "@runmvm/mvm";
 
 export const run = mvm.app({
   name: "worker",
   source: mvm.localPath("."),
-  image: mvm.nixPackages(["nodejs_22"]),
-  network: mvm.network({ mode: "deny" }),
+  image: mvm.nix_packages(["nodejs_22"]),
+  network: mvm.network({ mode: "none" }),
 })((): string => "ok");
 ```
 

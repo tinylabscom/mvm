@@ -139,8 +139,47 @@ in
 # exits at boot → kernel panic. `null` (the default) keeps the legacy
 # single-file behaviour: PID 1 runs `/etc/mvm/entrypoint`.
 , bootCommand    ? null
+# Declared-but-unenforced surface. `mvmctl generate template` emits
+# `healthChecks` into its app/web/postgres/worker scaffolds and the mkGuest
+# guide teaches all three, but the multi-service supervisor they depend on is
+# still the stub below (`entrypointKind == "services"`). Rejecting them made
+# every scaffolded project fail to evaluate; accepting them silently would be
+# worse, so they are recorded in `passthru.mvm` and warned about at eval time.
+# When the supervisor lands, wire these in and drop the warning — the
+# conformance suite fails if the docs still call them unimplemented.
+, healthChecks   ? { }
+, volumeMounts   ? { }
+, serviceGroup   ? null
 }:
 let
+  # Shape checks for the declared-but-unenforced attributes. A typo in one of
+  # these would otherwise be invisible: they are recorded, not consumed, so
+  # nothing downstream would ever notice.
+  declaredButUnenforced =
+    (if builtins.isAttrs healthChecks then [ ] else throw "mkGuest: healthChecks must be an attribute set")
+    ++ (if builtins.isAttrs volumeMounts then [ ] else throw "mkGuest: volumeMounts must be an attribute set")
+    ++ (if serviceGroup == null || builtins.isString serviceGroup then [ ] else throw "mkGuest: serviceGroup must be a string or null");
+
+  unenforcedNames =
+    (if services == { } then [ ] else [ "services" ])
+    ++ (if healthChecks == { } then [ ] else [ "healthChecks" ])
+    ++ (if volumeMounts == { } then [ ] else [ "volumeMounts" ])
+    ++ (if serviceGroup == null then [ ] else [ "serviceGroup" ]);
+
+  # `seq` on the validation first: a shape error must surface regardless of
+  # which thunk the evaluator happens to force earliest, not only when some
+  # later binding drags it in.
+  warnUnenforced = value:
+    builtins.seq declaredButUnenforced (
+    if unenforcedNames == [ ] then
+      value
+    else
+      builtins.trace
+        ("mkGuest: ${builtins.concatStringsSep ", " unenforcedNames} "
+          + "declared but NOT enforced — the multi-service supervisor is not wired yet. "
+          + "The values are recorded in passthru.mvm for the host; nothing acts on them.")
+        value);
+
   entrypointKind = classifyEntrypoint entrypoint;
   isDev =
     if dev == null then entrypointKind == "shell"
@@ -1577,9 +1616,15 @@ let
     # that could silently degrade to a baked agent/netinit pair.
     runtimeLean = true;
     sshTemplateBan = builtins.seq assertNoSshTemplateInputs true;
+    # Declared-but-unenforced, recorded so a host or an audit can see the gap
+    # between what the flake asked for and what the guest actually does.
+    unenforced = {
+      inherit services healthChecks volumeMounts serviceGroup;
+      names = unenforcedNames;
+    };
   };
 in
-rootfsImage.overrideAttrs (old: {
+warnUnenforced (rootfsImage.overrideAttrs (old: {
   passthru = (old.passthru or { }) // {
     mvm = mvmMeta;
     inherit rootfsTree;
@@ -1596,4 +1641,4 @@ rootfsImage.overrideAttrs (old: {
     # `mvm-verity-init` without re-running the cargo build.
     inherit guestAgentPkg seccompApplyBinary verityInitBinary;
   };
-})
+}))

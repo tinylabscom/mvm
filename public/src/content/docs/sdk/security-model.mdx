@@ -86,13 +86,19 @@ transport failure, and cleanup failure.
 <TabItem label="Python">
 
 ```python
-from mvm import NetworkPolicy, Sandbox, SecretRef
+import mvm
+from mvm import Sandbox
 
+# Egress is deny-by-default; an allow-list is opt-in, host by host.
 with Sandbox.create(
     image="nix:./flake#agent-runtime",
-    network=NetworkPolicy.deny_by_default().allow_https("api.openai.com"),
-    secrets={"OPENAI_API_KEY": SecretRef("openai-api-key")},
-    ttl_seconds=1800,
+    network={"egress": [{"host": "api.openai.com", "port": 443}]},
+    env={
+        "OPENAI_API_KEY": mvm.secret(
+            "openai-api-key", type="bearer", hosts=["api.openai.com"]
+        )
+    },
+    ttl=1800,
 ) as sandbox:
     result = sandbox.commands.run(["python", "/work/tool.py"], timeout_seconds=30)
     print(result.stdout)

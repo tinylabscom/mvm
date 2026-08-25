@@ -3,6 +3,13 @@ title: Your First MicroVM
 description: Write a Nix flake and boot a microVM.
 ---
 
+:::caution[Declared, not enforced]
+`healthChecks`, `volumeMounts` and `serviceGroup` are accepted by `mkGuest`
+and recorded in `passthru.mvm.unenforced`, but nothing acts on them yet: the
+multi-service supervisor is still a stub. A flake using them builds, and
+prints a warning at evaluation saying so.
+:::
+
 This guide walks through writing a Nix flake that builds a microVM image, then booting it with mvmctl.
 
 ## Understanding the Layers
