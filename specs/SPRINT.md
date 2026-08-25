@@ -2895,6 +2895,15 @@ to the configured ceiling and the first terse response immediately after it.
 - [x] Cover the missing-state path with focused CLI regression tests and record
       the delivery in `specs/sprint/delivery/2824-stopped-vm-logs-error.md`.
 
+## 2026-08-24 retained-state log diagnostic closeout
+
+- [x] Distinguish retained machine state with missing captures from a removed or
+      never-booted machine.
+- [x] Name each missing capture source and direct operators to `machine inspect`
+      for the persisted machine.
+- [x] Cover the retained-state path with a focused CLI regression test and record
+      the delivery in `specs/sprint/delivery/2825-retained-state-logs-error.md`.
+
 ## 2026-08-23 FlowMux forward-proxy identity repair
 
 - [x] Move the secret-substitution forward proxy out of the workload-uid guest
