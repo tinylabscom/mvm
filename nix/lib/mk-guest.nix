@@ -277,6 +277,17 @@ let
   # Per-service derived gids come later; for now we keep it simple.
   agentUid = resolvedUids.agent;
   entrypointUid = resolvedUids.entrypoint;
+  # Dedicated owner for the root-provisioned FlowMux signing key. It must not
+  # overlap the workload, agent, or optional builder: only the egress service
+  # may read the 0400 key after init drops its mount privilege.
+  egressUid = 989;
+  assertDedicatedEgressUid =
+    if egressUid == 0
+      || egressUid == agentUid
+      || egressUid == entrypointUid
+      || (builderUid != null && egressUid == builderUid)
+    then throw "mkGuest: uid 989 is reserved for the FlowMux egress service"
+    else true;
 
   # Wrap a command-line in `setpriv` when the target uid is non-zero.
   #
@@ -622,12 +633,10 @@ let
       echo "mvm-init: provisioned verb-grant"
     fi
 
-    # The per-boot FlowMux identity is NOT provisioned here. The host attaches
-    # it as a small read-only ext4 drive labelled `mvm-identity`, and
-    # `mvm-egress-client` mounts it itself before loading its keys -- one
-    # implementation, in Rust, shared by every guest tier. Doing it here too
-    # would mean a second copy of the superblock-label probe written in shell,
-    # against busybox applets this image does not otherwise use.
+    # The per-boot FlowMux identity is provisioned after the runtime overlay is
+    # mounted and its Rust helper is resolved. The mount stays in one Rust
+    # implementation; the shell only orders that short privileged action before
+    # the long-lived service drops to its dedicated uid.
 
     # Stage 2.476 — declared runtime-source policy. The host carries
     # the per-boot runtime contract on the kernel cmdline; when
@@ -811,6 +820,17 @@ let
     elif [ -x /usr/local/bin/mvm-egress-client ]; then
       MVM_EGRESS_CLIENT_BIN=/usr/local/bin/mvm-egress-client
     fi
+    if [ -n "$MVM_EGRESS_CLIENT_BIN" ]; then
+      if [ -n "''${MVM_VSOCK_EGRESS:-}" ]; then
+        MVM_IDENTITY_PROVISION_COMMAND=provision-identity-for
+      else
+        MVM_IDENTITY_PROVISION_COMMAND=provision-identity-for-if-present
+      fi
+      if ! "$MVM_EGRESS_CLIENT_BIN" "$MVM_IDENTITY_PROVISION_COMMAND" ${toString egressUid}; then
+        echo "mvm-init: failed to provision FlowMux identity for the egress service"
+        exit 1
+      fi
+    fi
     if [ -n "''${MVM_VSOCK_EGRESS:-}" ] && [ -n "$MVM_EGRESS_CLIENT_BIN" ]; then
       /bin/busybox ip addr replace 127.0.0.1/8 dev lo 2>/dev/null || true
       /bin/busybox ip link set lo up 2>/dev/null || true
@@ -824,7 +844,7 @@ let
         /bin/busybox cp /run/mvm/resolv.conf /etc/resolv.conf
       fi
       /bin/busybox setsid ${setpriv} \
-        --reuid=${toString agentUid} --regid=${toString agentUid} \
+        --reuid=${toString egressUid} --regid=${toString egressUid} \
         --clear-groups --no-new-privs \
         --inh-caps=+net_bind_service --ambient-caps=+net_bind_service \
         -- "$MVM_EGRESS_CLIENT_BIN" &
@@ -833,6 +853,35 @@ let
       export HTTPS_PROXY="$ALL_PROXY"
       export http_proxy="$ALL_PROXY"
       export https_proxy="$ALL_PROXY"
+    fi
+
+    # Stage 2.49 — loopback forward proxy for secret-bearing egress. Started
+    # unconditionally and, unlike every other helper here, as root: relaying
+    # opens an authenticated FlowMux session, which reads the root-only guest
+    # signing key. The workload must not be able to read that key, so the
+    # process that must cannot be the workload's own uid.
+    #
+    # Not gated on MVM_VSOCK_EGRESS. That token is *off* for exactly the
+    # launches that need this: a secret-bearing workload's egress goes through
+    # the host substitution endpoint, so its guest starts no vsock egress
+    # client and this listener is the whole of its egress. A workload with no
+    # placeholders has no HTTP_PROXY pointed here and it sees no connections.
+    MVM_FORWARD_PROXY_BIN=
+    if [ "$MVM_RUNTIME_SOURCE_POLICY" = rootfs_only ]; then
+      if [ -x /usr/local/bin/mvm-forward-proxy ]; then
+        MVM_FORWARD_PROXY_BIN=/usr/local/bin/mvm-forward-proxy
+      fi
+    elif [ -x /mvm/runtime/forward-proxy ]; then
+      MVM_FORWARD_PROXY_BIN=/mvm/runtime/forward-proxy
+    elif [ -x /usr/local/bin/mvm-forward-proxy ]; then
+      MVM_FORWARD_PROXY_BIN=/usr/local/bin/mvm-forward-proxy
+    fi
+    if [ -n "$MVM_FORWARD_PROXY_BIN" ]; then
+      /bin/busybox ip addr replace 127.0.0.1/8 dev lo 2>/dev/null || true
+      /bin/busybox ip link set lo up 2>/dev/null || true
+      /bin/busybox setsid "$MVM_FORWARD_PROXY_BIN" &
+    else
+      echo "mvm-init: no forward proxy resolved; secret-bearing egress has nothing to relay through"
     fi
 
     # Stage 2.5 — guest agent supervisor. Fork the agent into
@@ -990,14 +1039,15 @@ let
   # one under-indented line anywhere in the block above silently moves every
   # other line — including the shebang — one column right. Assert the rendered
   # bytes instead of trusting the indentation to stay uniform.
-  initScript =
+  initScript = builtins.seq assertDedicatedEgressUid (
     lib.throwIf (!lib.hasPrefix "#!/bin/sh\n" initText) ''
       mkGuest: the rendered /init does not start with the "#!/bin/sh" shebang.
       The kernel exec()s /init and will panic with ENOEXEC. This almost always
       means a line inside the /init block of nix/lib/mk-guest.nix is indented
       less than its neighbours, which moves the whole script one or more
       columns right. Re-align that line.
-    '' (pkgs.writeScript "mvm-init" initText);
+    '' (pkgs.writeScript "mvm-init" initText)
+  );
 
   # Render the entrypoint as a shell-sourced fragment. /init does
   # `. /etc/mvm/entrypoint`, so this is just a script.
@@ -1218,7 +1268,7 @@ let
     '' else ""}
 
     # /etc/passwd + /etc/group provision root (mandatory for PID 1)
-    # plus the agent + entrypoint uids resolved at build time.
+    # plus the egress service, agent, and entrypoint uids resolved at build time.
     # These become read-only via bind-mount once the security
     # overlay lands; for now they're plain mode 0644.
     #
@@ -1229,6 +1279,7 @@ let
     cat > "$out/etc/passwd" <<EOF
     root:x:0:0:root:/root:/bin/sh
     EOF
+    printf 'mvm-egress:x:${toString egressUid}:${toString egressUid}:mvm FlowMux egress:/var/empty:/bin/false\n' >> "$out/etc/passwd"
     if [ "${toString agentUid}" != "0" ]; then
       printf 'mvm-agent:x:${toString agentUid}:${toString agentUid}:mvm guest agent:/var/empty:/bin/false\n' >> "$out/etc/passwd"
     fi
@@ -1245,6 +1296,7 @@ let
     cat > "$out/etc/group" <<EOF
     root:x:0:
     EOF
+    printf 'mvm-egress:x:${toString egressUid}:\n' >> "$out/etc/group"
     if [ "${toString agentUid}" != "0" ]; then
       printf 'mvm-agent:x:${toString agentUid}:\n' >> "$out/etc/group"
     fi

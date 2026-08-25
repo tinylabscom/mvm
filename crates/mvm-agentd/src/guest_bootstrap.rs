@@ -107,6 +107,7 @@ pub fn provision_guest_environment() -> Result<(), EgressClientMissing> {
     provision_egress_ca();
     provision_verb_grant();
     provision_flowmux_identity();
+    start_forward_proxy();
     run_one(resolve_exec([NETINIT_OVERLAY, NETINIT_FALLBACK]), "netinit");
     if cmdline_has_flag("mvm.vsock_egress=1") {
         start_vsock_egress()?;
@@ -165,6 +166,36 @@ fn provision_workload_identity() {
     }
 }
 
+/// Start the loopback forward proxy the substitution path relays through.
+///
+/// Here, as a privileged child, rather than inside the guest agent: relaying
+/// opens an authenticated FlowMux session, which reads the guest signing key,
+/// and the key is root-only precisely so the workload — whose uid the agent
+/// shares — cannot authenticate as its own guest. Served from the agent, every
+/// relay failed on that read and the workload got a `502`.
+///
+/// Unconditional, and not gated on `mvm.vsock_egress=1` in particular: that
+/// token is *off* for exactly the launches that need this. A secret-bearing
+/// workload's egress goes through the host substitution endpoint, so its guest
+/// deliberately starts no vsock egress client, and this listener is the whole
+/// of its egress. A workload with no placeholders has no `HTTP_PROXY` pointed
+/// here and the listener simply sees no connections.
+///
+/// Non-fatal if it cannot be resolved. Unlike the egress client, whose absence
+/// means an admitted network is silently unreachable, this one is used only by
+/// a launch that minted placeholders — and that launch fails loudly on its
+/// first request rather than quietly reaching the network unsubstituted.
+fn start_forward_proxy() {
+    let Some(proxy) = resolve_forward_proxy() else {
+        note_optional_step(
+            "loopback forward proxy (secret-bearing egress will have nothing to relay through)",
+            &"no executable at /mvm/runtime/forward-proxy or /usr/local/bin/mvm-forward-proxy",
+        );
+        return;
+    };
+    spawn_one(&proxy, "forward-proxy");
+}
+
 fn start_vsock_egress() -> Result<(), EgressClientMissing> {
     bring_loopback_up();
     if let Err(error) = crate::guest_net::seed_loopback_resolver() {
@@ -195,6 +226,10 @@ pub const NETINIT_OVERLAY: &str = "/mvm/runtime/netinit";
 pub const EGRESS_CLIENT: &str = "/usr/local/bin/mvm-egress-client";
 
 pub const EGRESS_CLIENT_OVERLAY: &str = "/mvm/runtime/egress-client";
+
+pub const FORWARD_PROXY: &str = "/usr/local/bin/mvm-forward-proxy";
+
+pub const FORWARD_PROXY_OVERLAY: &str = "/mvm/runtime/forward-proxy";
 
 /// Tools the image ships that cannot work in this guest, and the overlay
 /// binary that stands in for each.
@@ -531,12 +566,47 @@ pub fn resolve_egress_client_for(
     runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy,
     is_exec: impl Fn(&Path) -> bool,
 ) -> Option<PathBuf> {
+    resolve_runtime_binary_for(
+        runtime_source_policy,
+        EGRESS_CLIENT_OVERLAY,
+        EGRESS_CLIENT,
+        is_exec,
+    )
+}
+
+pub fn resolve_forward_proxy() -> Option<PathBuf> {
+    resolve_forward_proxy_for(runtime_source_policy(), is_executable)
+}
+
+pub fn resolve_forward_proxy_for(
+    runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy,
+    is_exec: impl Fn(&Path) -> bool,
+) -> Option<PathBuf> {
+    resolve_runtime_binary_for(
+        runtime_source_policy,
+        FORWARD_PROXY_OVERLAY,
+        FORWARD_PROXY,
+        is_exec,
+    )
+}
+
+/// Pick the overlay or the baked copy of one helper, per the boot's declared
+/// runtime-source policy.
+///
+/// One rule for every helper. A required-overlay boot is a statement about
+/// where *all* of the runtime came from, so a helper that quietly fell back to
+/// a baked copy would be the one binary in the guest the declaration did not
+/// cover — and it would take a reader comparing two ladders to notice.
+fn resolve_runtime_binary_for(
+    runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy,
+    overlay: &'static str,
+    baked: &'static str,
+    is_exec: impl Fn(&Path) -> bool,
+) -> Option<PathBuf> {
     let candidates: &[&str] = match runtime_source_policy {
-        mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay => &[EGRESS_CLIENT_OVERLAY],
-        mvm_core::vm_backend::RuntimeSourcePolicy::PreferOverlay => {
-            &[EGRESS_CLIENT_OVERLAY, EGRESS_CLIENT]
-        }
-        mvm_core::vm_backend::RuntimeSourcePolicy::RootfsOnly => &[EGRESS_CLIENT],
+        mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay => &[overlay],
+        mvm_core::vm_backend::RuntimeSourcePolicy::PreferOverlay => &[overlay, baked],
+        mvm_core::vm_backend::RuntimeSourcePolicy::RootfsOnly => &[baked],
     };
     candidates
         .iter()
@@ -889,6 +959,77 @@ mod tests {
             |_path| false,
         );
         assert_eq!(got, None);
+    }
+
+    /// The forward proxy follows the same declaration the egress client does.
+    /// A required-overlay boot that ran a baked copy would be one binary the
+    /// declaration did not actually cover.
+    #[test]
+    fn resolve_forward_proxy_for_required_overlay_does_not_fall_back_to_baked() {
+        assert_eq!(
+            resolve_forward_proxy_for(
+                mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay,
+                |path| path == Path::new(FORWARD_PROXY),
+            ),
+            None
+        );
+        assert_eq!(
+            resolve_forward_proxy_for(
+                mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay,
+                |path| path == Path::new(FORWARD_PROXY_OVERLAY),
+            ),
+            Some(PathBuf::from(FORWARD_PROXY_OVERLAY))
+        );
+    }
+
+    #[test]
+    fn resolve_forward_proxy_for_prefers_the_overlay_and_falls_back_when_allowed() {
+        assert_eq!(
+            resolve_forward_proxy_for(
+                mvm_core::vm_backend::RuntimeSourcePolicy::PreferOverlay,
+                |_| true
+            ),
+            Some(PathBuf::from(FORWARD_PROXY_OVERLAY))
+        );
+        assert_eq!(
+            resolve_forward_proxy_for(
+                mvm_core::vm_backend::RuntimeSourcePolicy::PreferOverlay,
+                |path| path == Path::new(FORWARD_PROXY),
+            ),
+            Some(PathBuf::from(FORWARD_PROXY))
+        );
+        assert_eq!(
+            resolve_forward_proxy_for(
+                mvm_core::vm_backend::RuntimeSourcePolicy::RootfsOnly,
+                |_| true
+            ),
+            Some(PathBuf::from(FORWARD_PROXY))
+        );
+    }
+
+    /// The two helpers must not drift apart: they are the same decision about
+    /// where the runtime came from, and the shared rule is what keeps them one.
+    #[test]
+    fn the_egress_client_and_the_forward_proxy_resolve_by_the_same_rule() {
+        for policy in [
+            mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay,
+            mvm_core::vm_backend::RuntimeSourcePolicy::PreferOverlay,
+            mvm_core::vm_backend::RuntimeSourcePolicy::RootfsOnly,
+        ] {
+            let only_baked = |overlay: &'static str, baked: &'static str| {
+                (
+                    resolve_runtime_binary_for(policy, overlay, baked, |p| p == Path::new(baked)),
+                    baked,
+                )
+            };
+            let (egress, egress_baked) = only_baked(EGRESS_CLIENT_OVERLAY, EGRESS_CLIENT);
+            let (proxy, proxy_baked) = only_baked(FORWARD_PROXY_OVERLAY, FORWARD_PROXY);
+            assert_eq!(
+                egress.map(|p| p == Path::new(egress_baked)),
+                proxy.map(|p| p == Path::new(proxy_baked)),
+                "{policy:?} treated the two helpers differently"
+            );
+        }
     }
 
     #[test]
