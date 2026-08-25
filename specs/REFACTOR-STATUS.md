@@ -17,6 +17,12 @@ for detailed scope and acceptance criteria.
 
 ## Completed issue closeouts
 
+- [x] **Missing-state log recovery guidance.** The lifecycle-aware
+      `machine logs` failure now gives operators the concrete `machine ls`
+      command for verifying whether the named machine still exists, with a
+      focused assertion preventing the recovery step from regressing. See
+      `specs/sprint/delivery/2826-missing-state-logs-recovery.md`.
+
 - [x] **Retained-state log diagnostics.** When a machine state directory
       survives but every output capture is absent, `machine logs` now names
       the retained state, each missing source, and the likely interrupted-boot
