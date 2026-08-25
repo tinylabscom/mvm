@@ -506,6 +506,7 @@ fn copy_rootfs_with_hook(src_rootfs: &Path, dst: &Path) -> Result<(), String> {
     })?;
     run_before_build_hook(&tmp_path)?;
     copy_artifact(&tmp_path, dst)?;
+    run_builder_rootfs_command("seal-rootfs-journal", dst)?;
     let _ = tmp.close();
     Ok(())
 }
