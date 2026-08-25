@@ -636,6 +636,33 @@ have a NIC, because it must reach package mirrors. It carries no untrusted
 tenant workload — a different tier with a different contract, and its network
 configuration is never consulted by any workload backend.
 
+#### Reaching a store without a network
+
+`--host-service host.kv.v1` binds a per-workload key-value store served on the
+host-services broker channel. The workload gets durable storage with no network
+path and no credential; the namespace comes from the supervisor's call context
+rather than any request field, so one workload cannot address another's by
+asking. A workload whose plan did not bind it gets `NotBound` before any
+handler runs. A catalog runtime can declare the services it needs, so the
+operator does not have to pass the flag every time — declared bindings and
+`--host-service` are unioned.
+
+#### Reaching another workload
+
+Peer addressing lets a workload dial `db.mvm.peer:5432` and have the host
+resolve and connect, with the name and its resolved address both bound in the
+signed plan. Resolution runs in front of the same gate that decides ordinary
+egress, so east-west inherits default-deny; a binding authorizes one
+`name:port` route; and the reserved `.mvm.peer` suffix keeps the two namespaces
+from overlapping. `xtask check-single-network-path` pins the branch to one
+place.
+
+**There is no CLI flag to author a peer binding yet.** The decision path is
+implemented and gated but not reachable from `mvmctl`, so this is a reserved
+namespace and a live enforcement path rather than a feature you can turn on.
+Peer dialing is TCP-only and peers are not reachable through the
+credential-substituting HTTP proxy.
+
 ## Security model
 
 mvm makes **fifteen numbered, CI-enforced security claims** (plus preview

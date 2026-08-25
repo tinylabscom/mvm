@@ -3,8 +3,9 @@
 Backing: preview
 Validation: none
 
-Status: **IN PROGRESS** — WS-A is wired end-to-end except A-6 (audit) and A-7
-(the negative-path suite beyond the gate's own unit tests). WS-B is complete
+Status: **IN PROGRESS** — WS-A's decision path is complete and gated, but A-9
+(threading a binding from the CLI to the gate) is not started, so nothing in
+production can construct a peer binding yet. WS-B is complete
 except a live witness (B-8). WS-C landed as C-1/C-3/C-4 after a
 correction: its premise was wrong, and no `catalog run` verb was needed. No claim in
 `specs/adrs/001-microvm-security-posture.md` depends on this work yet.
@@ -251,6 +252,52 @@ from a failure the first time.
   over the HTTP leg that substitutes credentials.
 - **No live witness.** Every test drives the gate directly. Nothing yet boots
   two workloads and has one dial the other.
+
+## 4b. WS-D — Docs and BDD
+
+Definition of done for anything in this plan: the README, the website docs, and
+the BDD suite reflect it. Added at the maintainer's direction on 2026-08-25.
+
+- [x] D-1. BDD suite `features/suites/s30_service_plane/` with three feature
+      files — peer addressing (8 scenarios over the real `EgressGate`), the host
+      key-value store (6 over the real registry and handler), and declared
+      runtime bindings (4 over the real catalog, plus one `@live` boot). Steps in
+      `crates/mvm-conformance/tests/steps/service_plane.rs` drive real seams, so
+      they are hermetic and gate on every PR rather than needing `MVM_BDD_LIVE`.
+- [x] D-2. README: a store section under the vsock-only invariant, and a peer
+      section that says plainly there is no CLI flag yet.
+- [x] D-3. Website: `guides/flowmux-networking.md` gains both sections, with the
+      peer half behind a `:::caution[Not yet authorable]` admonition.
+- [x] D-4. **A fabricated `--peer` flag was caught before it shipped.** The first
+      draft of D-3 documented `mvmctl machine run --peer <name>:<port>=<addr>:<port>`
+      with a worked example, and added a row for it to
+      `reference/cli-commands.md`. **No such flag exists.** Peer bindings are not
+      authorable from the CLI at all — `PeerBinding` is a contract type the gate
+      consumes, and nothing threads it from `mvmctl` through admission to the
+      supervisor. The row was removed and both documents rewritten to say so.
+      This is the exact failure `check-declared-backing` exists for, and no gate
+      covers prose about CLI flags, so it would have shipped.
+- [ ] D-5. Re-document peer usage once A-9 lands. Until then user docs must not
+      show a peer invocation.
+
+### A-9 — thread peer bindings from the CLI to the gate (NOT STARTED)
+
+The gap D-4 exposed. `EgressGate::decide_peer` is live, gated, and tested, and
+nothing can reach it in production because no peer binding is ever constructed
+outside a test. The thread is: a `--peer` flag on `RunArgs` → parsed
+`PeerBinding` → `SynthesisInput` → `ExecutionPlan` → supervisor config →
+endpoint config → `build_egress_gate` → `.with_peers(..)`. Six layers, and a
+partial thread is worse than none: it would put a binding in a signed plan that
+the gate never receives, so the plan would promise a route the runtime denies.
+
+- [ ] A-9.1 `--peer NAME:PORT=ADDR:PORT` on `RunArgs`, parsed and validated at
+      the CLI boundary the way `--host-service` is.
+- [ ] A-9.2 Carry peer bindings on `SynthesisInput` and into the signed plan.
+- [ ] A-9.3 Carry them through the supervisor config to the endpoint.
+- [ ] A-9.4 `build_egress_gate` calls `.with_peers(..)` from the admitted plan.
+- [ ] A-9.5 A test that a plan-authored binding reaches the gate — the one
+      assertion that would have caught this being absent.
+- [ ] A-9.6 Then D-5.
 
 ## 5. Sequencing
 

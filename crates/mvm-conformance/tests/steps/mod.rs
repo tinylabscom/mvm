@@ -19,6 +19,7 @@ mod runtime_overlay;
 mod sdk;
 mod sdk_sidecar;
 mod secrets_pii;
+mod service_plane;
 mod snapshot;
 mod transcript;
 mod verified_boot;
