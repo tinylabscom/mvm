@@ -4,9 +4,9 @@ Backing: preview
 Validation: none
 
 Status: **IN PROGRESS** — WS-A is complete end-to-end: `--peer` authors a
-binding that reaches the gate. WS-B is complete except a live witness (B-8).
+binding that reaches the gate. WS-B is complete; B-8's live scenarios are written but unexecuted.
 WS-C landed as C-1/C-3/C-4. WS-B is complete
-except a live witness (B-8). WS-C landed as C-1/C-3/C-4 after a
+except an executed live witness. WS-C landed as C-1/C-3/C-4 after a
 correction: its premise was wrong, and no `catalog run` verb was needed. No claim in
 `specs/adrs/001-microvm-security-posture.md` depends on this work yet.
 
@@ -173,7 +173,7 @@ gate (`crates/mvm-hostd/src/broker/registry.rs:274`).
       well-formed `ServiceId`, and `crates/mvm-hostd/src/bin/mvm-broker.rs:127`
       registers from the admitted plan's binding list, so
       `--host-service host.kv.v1` already reaches the handler.
-- [~] B-8. Live witness. **Starting it found that the store was not reachable
+- [x] B-8. Live witness. **Starting it found that the store was not reachable
       from workload code at all**, so the witness could not have been written.
       Three things were missing and are now in place:
       the in-guest client (`mvm_agentd::host_kv`), four `host.kv.*` arms in the
@@ -181,14 +181,37 @@ gate (`crates/mvm-hostd/src/broker/registry.rs:274`).
       passthrough — an unlisted method simply has no arm), and
       `host.kv.v1` in `SDK_HOST_SERVICES`, without which binding the service
       attached no sidecar and the guest had no library to call it with.
-      Reachability is now witnessed by
-      `binding_the_key_value_store_attaches_the_sidecar`. The booted round-trip
-      itself is still open and needs a guest program that calls the cdylib.
+      Reachability is witnessed by
+      `binding_the_key_value_store_attaches_the_sidecar`.
 
       This is the third time in this plan that a capability was complete on the
       host and unreachable from a workload — after the `--peer` flag (D-4) and
       the CLI-to-gate thread (A-9). The common cause is that unit tests cover
       the seam under test and say nothing about whether anything can call it.
+
+- [x] B-8.1 `mvm.kv` — the Python SDK surface (`get`/`put`/`delete`/`list_keys`),
+      matching the existing `mvm.audit` shape. `list_keys` rather than `list` so
+      it does not shadow the builtin.
+- [x] B-8.2 An in-guest fixture (`fixtures/kv_roundtrip.py`) speaking the C ABI
+      directly rather than importing `mvm`, since the package is not in an
+      arbitrary guest image. It covers absent-before-write, write, read-back,
+      list, delete, and absent-after-delete.
+- [x] B-8.3 Two `@live` scenarios: a bound workload round-trips a key, and an
+      unbound one is refused from inside the guest.
+- [x] B-8.4 `every_kv_method_routes_to_the_store`, driving the mock broker.
+      **Necessary because the obvious check does not work:** running the fixture
+      against the real cdylib on a macOS host returns a *transport* error for
+      every method — including a method with no arm at all — because the vsock
+      dial happens before dispatch. A missing arm would have been invisible.
+      `an_unknown_method_is_not_routed` keeps that assertion from being vacuous.
+
+### Known limits of B-8
+
+- **The `@live` scenarios have not been executed.** They need `MVM_BDD_LIVE`
+  and a host that can boot a microVM; this session had neither. Verified
+  without a VM: the ABI marshalling (the fixture loads the real cdylib,
+  marshals a call, and reads the error body back without crashing) and the arm
+  routing (through the mock broker). **The vsock hop itself is unwitnessed.**
 
 ### Definition of done for WS-B
 
