@@ -7,12 +7,12 @@ description: Network layout and connectivity in mvmctl microVMs.
 
 Networking differs by backend:
 
-| Backend | Network Type | Guest IP | Host Access |
-|---------|-------------|----------|-------------|
-| Firecracker (Linux native) | NIC-less vsock egress | — | Host endpoint; default-deny policy gate |
-| HVF (macOS 26+, default) | NIC-less vsock egress | — | Host endpoint; default-deny policy gate |
-| libkrun (macOS) | NIC-less vsock egress | — | Host endpoint; default-deny policy gate |
-| QEMU (Linux dev/test) | Rootless user-mode virtio | 10.0.2.15/24 | QEMU user-mode network; outside production claims |
+| Backend                    | Network Type              | Guest IP     | Host Access                                       |
+| -------------------------- | ------------------------- | ------------ | ------------------------------------------------- |
+| Firecracker (Linux native) | NIC-less vsock egress     | —            | Host endpoint; default-deny policy gate           |
+| HVF (macOS 26+, default)   | NIC-less vsock egress     | —            | Host endpoint; default-deny policy gate           |
+| libkrun (macOS)            | NIC-less vsock egress     | —            | Host endpoint; default-deny policy gate           |
+| QEMU (Linux dev/test)      | Rootless user-mode virtio | 10.0.2.15/24 | QEMU user-mode network; outside production claims |
 
 ## Production Network Layout
 
@@ -68,14 +68,42 @@ refused; update the machine declaration and restart when the mapping changes.
 
 ## vsock Communication
 
-MicroVMs don't use networking for host communication -- they use **vsock**:
+MicroVMs don't use networking for host communication -- they use **vsock** with two distinct protocols:
 
-| Port | Protocol | Purpose |
-|------|----------|---------|
-| 5252 | Length-prefixed JSON | Guest agent (health checks, status, snapshot lifecycle) |
+### Guest Agent Protocol (Port 5252)
+
+The guest agent (`mvm-guest-agent`) uses a **binary protocol with length-prefixed JSON frames**:
+
+1. **Connection handshake**:
+   - Host writes `CONNECT 5252\n` to the vsock socket
+   - Agent responds with `OK 5252\n`
+
+2. **Frame structure**:
+   - **4-byte length header** (big-endian `u32`) - payload size in bytes
+   - **JSON payload** - serialized request or response object
+
+3. **Features**:
+   - Health checks
+   - Worker status tracking
+   - Snapshot lifecycle coordination
+   - Remote command execution (dev-mode only)
+   - Filesystem diff reporting
+
+### FlowMux Protocol (Port 5253)
+
+**Authenticated FlowMux frames** for all egress and ingress traffic:
+
+- TCP connections (SOCKS5-like framing)
+- UDP datagrams
+- DNS queries
+- Typed connectors for secrets, PII detection, and audit logging
+
+All traffic crosses the host's control plane for audit, secret substitution, and policy enforcement.
+
+| Port | Protocol                     | Purpose                                                          |
+| ---- | ---------------------------- | ---------------------------------------------------------------- |
+| 5252 | Length-prefixed JSON frames  | Guest agent (health checks, status, snapshot lifecycle)          |
 | 5253 | Authenticated FlowMux frames | TCP, UDP, DNS, mediated ping, typed connectors, declared ingress |
-
-The host connects by writing `CONNECT 5252\n` to the vsock socket and reading `OK 5252\n`. All requests are request/response pairs. vsock is supported on Firecracker, HVF, and microvm.nix backends.
 
 For Firecracker, the host-side vsock UDS is scoped to the running VM directory:
 `<vm-dir>/runtime/v.sock`. It is not a global or master socket. `mvmctl machine run`
@@ -166,12 +194,12 @@ mvmctl machine run --flake . --profile dev           # dev ergonomics: explicit 
 
 The resolved profile is copied into the signed `ExecutionPlan` admission record — audit/provenance data binding the declared workload intent to the chosen posture, policy refs, secret-release posture, and audit labels — so `mvmctl trust audit verify` can prove which posture was admitted.
 
-| Profile | Env injection | Host shares |
-|---------|---------------|-------------|
-| `restrictive` | none | none |
-| `standard` (default) | explicit `-e KEY=VALUE` | read-only |
-| `dev` | explicit `-e KEY=VALUE` | read-write allowed |
-| `permissive` | explicit | read-write (requires `MVM_ACK_PERMISSIVE_RUN=1`) |
+| Profile              | Env injection           | Host shares                                      |
+| -------------------- | ----------------------- | ------------------------------------------------ |
+| `restrictive`        | none                    | none                                             |
+| `standard` (default) | explicit `-e KEY=VALUE` | read-only                                        |
+| `dev`                | explicit `-e KEY=VALUE` | read-write allowed                               |
+| `permissive`         | explicit                | read-write (requires `MVM_ACK_PERMISSIVE_RUN=1`) |
 
 ## DNS
 
