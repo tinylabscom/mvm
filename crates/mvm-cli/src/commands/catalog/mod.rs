@@ -46,6 +46,11 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
 }
 
 /// Load the bundled image catalog with built-in presets.
+///
+/// Every bundled entry is a base image: none declares an entrypoint, so none
+/// carries a `workload` shape and none is runnable. Authoring those shapes
+/// means knowing what each profile actually starts, which is a per-profile
+/// decision rather than something to infer from the profile name.
 pub fn load_bundled_catalog() -> mvm_core::catalog::Catalog {
     mvm_core::catalog::Catalog {
         schema_version: 1,
@@ -58,6 +63,7 @@ pub fn load_bundled_catalog() -> mvm_core::catalog::Catalog {
                 default_cpus: 1,
                 default_memory_mib: 256,
                 tags: vec!["base".to_string(), "minimal".to_string()],
+                workload: None,
             },
             mvm_core::catalog::CatalogEntry {
                 name: "http".to_string(),
@@ -67,6 +73,7 @@ pub fn load_bundled_catalog() -> mvm_core::catalog::Catalog {
                 default_cpus: 2,
                 default_memory_mib: 512,
                 tags: vec!["web".to_string(), "http".to_string(), "nginx".to_string()],
+                workload: None,
             },
             mvm_core::catalog::CatalogEntry {
                 name: "postgres".to_string(),
@@ -80,6 +87,7 @@ pub fn load_bundled_catalog() -> mvm_core::catalog::Catalog {
                     "sql".to_string(),
                     "postgres".to_string(),
                 ],
+                workload: None,
             },
             mvm_core::catalog::CatalogEntry {
                 name: "worker".to_string(),
@@ -89,6 +97,7 @@ pub fn load_bundled_catalog() -> mvm_core::catalog::Catalog {
                 default_cpus: 2,
                 default_memory_mib: 512,
                 tags: vec!["worker".to_string(), "background".to_string()],
+                workload: None,
             },
             mvm_core::catalog::CatalogEntry {
                 name: "python".to_string(),
@@ -98,6 +107,7 @@ pub fn load_bundled_catalog() -> mvm_core::catalog::Catalog {
                 default_cpus: 2,
                 default_memory_mib: 512,
                 tags: vec!["python".to_string(), "runtime".to_string()],
+                workload: None,
             },
         ],
     }

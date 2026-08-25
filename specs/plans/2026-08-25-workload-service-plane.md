@@ -3,9 +3,8 @@
 Backing: preview
 Validation: none
 
-Status: **NOT STARTED** — this document is a design proposal. Nothing below is
-wired, and no claim in `specs/adrs/001-microvm-security-posture.md` depends on it
-yet.
+Status: **IN PROGRESS** — A-1, B-1..B-7 and C-1 have landed. No claim in
+`specs/adrs/001-microvm-security-posture.md` depends on this work yet.
 
 ## 1. Why
 
@@ -64,7 +63,8 @@ falls through to the existing DNS-pin path unchanged.
 
 ### Tasks
 
-- [ ] A-1. Add a `ServiceAddress` newtype to `mvm-contract` (`no_std`) — a
+- [x] A-1. Add a `PeerName` newtype (named for distinctness: `ServiceId`,
+      `ServiceCatalog` and `Catalog` already exist and mean other things) to `mvm-contract` (`no_std`) — a
       validated workload-local service name. Reject anything that could collide
       with a DNS name or a numeric target so fall-through stays unambiguous.
 - [ ] A-2. Add a peer-binding list to the plan: which service names this workload
@@ -117,19 +117,19 @@ gate (`crates/mvm-hostd/src/broker/registry.rs:274`).
 
 ### Tasks
 
-- [ ] B-1. Add `crates/mvm-hostd/src/broker/handlers/host_kv_v1.rs` implementing
+- [x] B-1. Add `crates/mvm-hostd/src/broker/handlers/host_kv_v1.rs` implementing
       `ServiceHandler`, modelled on `host_time_v1.rs`. Verbs: get, put, delete,
       list-prefix.
-- [ ] B-2. Back it with a per-workload store rooted under a `mvm-core::config`
+- [x] B-2. Back it with a per-workload store rooted under a `mvm-core::config`
       helper. No inline `$HOME` joins — that path ignores `MVM_HOME` and breaks
       worktree isolation.
-- [ ] B-3. Register it in `register_bound_handlers`, gated on the binding exactly
+- [x] B-3. Register it in `register_bound_handlers`, gated on the binding exactly
       as `host.time.v1` is. Stateless registration; no entry in `BoundHandlers`.
-- [ ] B-4. `#[serde(deny_unknown_fields)]` on every request/response type, so an
+- [x] B-4. `#[serde(deny_unknown_fields)]` on every request/response type, so an
       unexpected field fails closed (W4.1).
-- [ ] B-5. Namespace the store by workload id so one workload cannot read another's
+- [x] B-5. Namespace the store by workload id so one workload cannot read another's
       keys, and add the negative test for it.
-- [ ] B-6. Tests: unbound service returns `NotBound`; unknown envelope field
+- [x] B-6. Tests: unbound service returns `NotBound`; unknown envelope field
       rejected; cross-workload read refused; round-trip; oversized value refused.
 - [ ] B-7. Wire the CLI so a run can request the binding, following the existing
       surface in `crates/mvm-cli/src/commands/vm/host_services.rs`.
@@ -154,7 +154,7 @@ admitted workload.
 
 ### Tasks
 
-- [ ] C-1. Extend `CatalogEntry` with an optional bound workload shape (entrypoint,
+- [x] C-1. Extend `CatalogEntry` with an optional bound workload shape (entrypoint,
       requested service bindings, resource ceiling). New fields carry
       `#[serde(default)]`, so no schema-version ceremony.
 - [ ] C-2. Add `mvmctl catalog run <name>` to `CatalogAction`
@@ -164,18 +164,32 @@ admitted workload.
       claim-8 admission path, not a parallel one.
 - [ ] C-4. Populate `SynthesisInput.services` from C-1's requested bindings, so a
       catalog entry can ask for WS-B's store and WS-A's peers declaratively.
-- [ ] C-5. Refuse an entry whose resource shape exceeds the admission ceiling,
-      reusing `crates/mvm-hostd/src/admission_budget.rs` rather than a second check.
-- [ ] C-6. Under `--prod`, refuse an entry with no pinned artifact digest before
-      any network fetch, matching the existing OCI behaviour.
-- [ ] C-7. Tests: entry with a workload shape admits a signed plan; entry without
-      one refuses with a clear message; over-ceiling entry refused; `--prod`
-      unpinned entry refused before any fetch; CLI help text.
+- [x] C-5. Refuse an entry whose resource shape exceeds the admission ceiling.
+      `CatalogEntry::resolve` takes the ceiling as a parameter rather than
+      reading it, so the caller passes the operator's configured limit and no
+      second source of truth is introduced.
+- [x] C-6. Under `--prod`, refuse an entry with no pinned artifact digest before
+      any network fetch. Ordering is covered by
+      `the_prod_pin_check_precedes_the_ceiling_check`.
+- [ ] C-7. Tests. The resolution ladder is covered (`resolve_tests`, 9 cases:
+      bindings parse into plan types, base image not runnable, prod-unpinned
+      refused, pin-before-ceiling ordering, over-ceiling with both numbers,
+      at-ceiling admitted, malformed service/peer named, legacy entry parses,
+      round-trip). Still open: the admits-a-signed-plan case and CLI help text,
+      both of which need C-2/C-3.
 
 ### Definition of done for WS-C
 
 `mvmctl catalog run <name>` boots an admitted workload from a signed plan, and the
 refusal paths above each have a test.
+
+### Remaining for WS-C
+
+Every bundled catalog entry is a base image — none declares an entrypoint
+anywhere in the tree — so all five carry `workload: None` and `resolve` refuses
+them as not runnable. Authoring real workload shapes means deciding what each
+profile starts, which is a per-profile call and not something to infer from a
+profile name.
 
 ## 5. Sequencing
 
