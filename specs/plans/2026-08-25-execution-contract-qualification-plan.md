@@ -1,5 +1,8 @@
 # Plan: Execution Contract — Artifact Identity Qualification
 
+Backing: preview
+Validation: none
+
 **Status:** Draft — awaiting PR review  
 **Date:** 2026-08-25  
 **Branch:** `feat/execution-contract-qualification`  
