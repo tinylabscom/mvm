@@ -137,7 +137,11 @@ impl RunPreflightSummary {
 
         // Report the backend the real run would auto-select, so the dry-run's
         // enforcement tier matches what an actual boot would record.
-        let policy = super::super::shared::resolve_run_network_policy(args.net, &args.allow_host)?;
+        let policy = super::super::shared::resolve_run_network_policy_with_peers(
+            args.net,
+            &args.allow_host,
+            &args.peer,
+        )?;
         let backend = match backend_override {
             Some(backend) => backend.to_string(),
             None => crate::exec::select_exec_backend(

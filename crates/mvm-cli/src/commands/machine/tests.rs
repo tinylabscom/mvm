@@ -3193,6 +3193,7 @@ fn the_argv_the_sdk_facade_emits_parses_back_into_the_grant_it_encoded() {
             cpu_limit_millicores: args.run.cpu_limit,
             timeout_secs: args.run.timeout,
             allow_host: &args.run.allow_host,
+            peer: &[],
             net: args.run.net,
             grants_file: args.run.grants_file.as_deref(),
             manifest: None,

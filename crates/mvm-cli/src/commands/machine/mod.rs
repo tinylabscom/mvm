@@ -610,6 +610,7 @@ fn machine_run_spec(
         cpu_limit_millicores: args.run.cpu_limit,
         timeout_secs: args.run.timeout,
         allow_host: &args.run.allow_host,
+        peer: &args.run.peer,
         net: args.run.net,
         grants_file: args.run.grants_file.as_deref(),
         // A persistent `machine run` names its source on the command line and
@@ -1073,6 +1074,7 @@ struct MachineSpecInputs<'a> {
     image: Option<&'a str>,
     net: bool,
     allow_host: &'a [String],
+    peer: &'a [String],
     ai: Option<&'a mvm_core::network_policy::AiPolicy>,
     cpus: Option<u32>,
     cpu_limit: Option<u32>,
@@ -1117,6 +1119,7 @@ fn build_machine_spec(inputs: MachineSpecInputs<'_>) -> Result<MachineSpec> {
         cpu_limit_millicores: inputs.cpu_limit,
         timeout_secs: inputs.timeout,
         allow_host: &allow_host,
+        peer: inputs.peer,
         net,
         grants_file: inputs.grants_file,
         manifest: workflow.map(|workflow| &workflow.grants),
@@ -1210,6 +1213,11 @@ impl MachineCreateArgs {
             image: self.image.as_deref(),
             net: self.net,
             allow_host: &self.allow_host,
+            // Peer routes are a transient-run capability today: they are not
+            // persisted on a machine spec, so a stored machine has none to
+            // reconcile. Passing an explicit empty set rather than plumbing a
+            // field keeps that visible here instead of looking like an omission.
+            peer: &[],
             ai: None,
             cpus: self.cpus,
             cpu_limit: self.cpu_limit,

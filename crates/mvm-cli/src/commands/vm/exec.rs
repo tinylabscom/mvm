@@ -269,6 +269,9 @@ pub(in crate::commands) struct RunArgs {
     /// Allow outbound access to HOST[:PORT] (repeatable).
     #[arg(long = "allow-host", value_name = "HOST[:PORT]")]
     pub allow_host: Vec<String>,
+    /// Bind a peer route this workload may dial (repeatable).
+    #[arg(long = "peer", value_name = "NAME:PORT=ADDR:PORT")]
+    pub peer: Vec<String>,
     /// Set how many vCPUs the guest sees (not a host CPU share).
     #[arg(long, default_value = "2")]
     pub cpus: u32,
@@ -572,6 +575,7 @@ impl Default for RunArgs {
             no_detect: false,
             net: false,
             allow_host: Vec::new(),
+            peer: Vec::new(),
             cpus: 2,
             cpu_limit: None,
             grants_file: None,
@@ -745,6 +749,7 @@ pub(in crate::commands) fn run_secure_with_source(
         cpu_limit_millicores: args.cpu_limit,
         timeout_secs: args.timeout,
         allow_host: &args.allow_host,
+        peer: &args.peer,
         net: args.net,
         grants_file: args.grants_file.as_deref(),
         // A transient run names its image on the command line and reads no
@@ -1448,7 +1453,11 @@ impl ReceiptInput {
     fn from_run_args(args: &RunArgs, backend: &str) -> Result<Self> {
         // Resolve the egress policy once: the requested posture and the honest
         // per-backend enforcement tier are two views of the same policy.
-        let policy = super::shared::resolve_run_network_policy(args.net, &args.allow_host)?;
+        let policy = super::shared::resolve_run_network_policy_with_peers(
+            args.net,
+            &args.allow_host,
+            &args.peer,
+        )?;
         let command = if let Some(path) = &args.launch_plan {
             ReceiptCommand::LaunchPlan {
                 path_sha256: sha256_hex(path.as_bytes()),

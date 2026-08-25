@@ -657,11 +657,18 @@ egress, so east-west inherits default-deny; a binding authorizes one
 from overlapping. `xtask check-single-network-path` pins the branch to one
 place.
 
-**There is no CLI flag to author a peer binding yet.** The decision path is
-implemented and gated but not reachable from `mvmctl`, so this is a reserved
-namespace and a live enforcement path rather than a feature you can turn on.
-Peer dialing is TCP-only and peers are not reachable through the
-credential-substituting HTTP proxy.
+```sh
+mvmctl run --peer db.mvm.peer:5432=127.0.0.1:34567 -- ./my-service
+```
+
+The binding rides the network policy, so it is signed, admitted, and delivered
+to the gate by the path that already carries every other egress decision — one
+field rather than a parallel channel that a layer could forget. A malformed
+route is refused at the CLI, before it can reach the plan.
+
+Peer dialing is TCP-only, peers are not reachable through the
+credential-substituting HTTP proxy, and peers are a transient-run capability —
+`machine create` does not persist a peer set.
 
 ## Security model
 

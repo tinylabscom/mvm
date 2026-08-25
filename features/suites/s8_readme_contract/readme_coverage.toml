@@ -99,6 +99,10 @@ classification = "static-only"
 language = ""
 
 [[block]]
+classification = "cli-bdd"
+language = "sh"
+
+[[block]]
 classification = "static-only"
 language = "bash"
 

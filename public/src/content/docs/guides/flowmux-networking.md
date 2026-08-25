@@ -70,15 +70,13 @@ other.
 
 ## Reaching another workload
 
-:::caution[Not yet authorable]
-The enforcement model below is implemented and gated, but there is **no CLI
-flag to author a peer binding yet**, so this is not something you can turn on
-today. It is documented here because the decision path is live and the
-namespace is reserved — not as a feature you can use.
-:::
+```sh
+mvmctl run --peer db.mvm.peer:5432=127.0.0.1:34567 -- ./my-service
+```
 
-The design is that a workload dials a peer by name — `db.mvm.peer:5432` — and
-the host resolves it and opens the connection. The name and the address it
+The workload dials `db.mvm.peer:5432`; the host resolves it and opens the
+connection. The left side is what the guest dials, the right is the peer's
+admitted ingress address — neither is inferred. The name and the address it
 resolves to are both bound in the signed plan, and that address is the peer's
 own admitted ingress mapping, so the reachable set is fixed at admission rather
 than discovered at runtime. The guest never learns an address and still has no
@@ -101,9 +99,17 @@ resolution rather than looked up as a public host.
 `xtask check-single-network-path` pins that branch to one place and both
 connect sites to it.
 
-Two limits hold regardless of how bindings are eventually authored: peer
-dialing is **TCP-only**, and peers are **not reachable through the
-credential-substituting HTTP proxy**.
+A malformed route is refused at the CLI rather than at the gate, so it never
+reaches the signed plan where it would read as an admitted destination that
+happens never to resolve.
+
+Three limits worth knowing:
+
+- Peer dialing is **TCP-only**. The UDP path uses a different decision and has
+  no peer branch.
+- Peers are **not reachable through the credential-substituting HTTP proxy**.
+- Peers are a **transient-run** capability. `machine create` and `machine start`
+  do not persist a peer set, so a stored machine has none.
 
 ## Applications that open direct sockets
 

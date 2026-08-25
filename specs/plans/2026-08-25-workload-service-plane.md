@@ -3,9 +3,9 @@
 Backing: preview
 Validation: none
 
-Status: **IN PROGRESS** — WS-A's decision path is complete and gated, but A-9
-(threading a binding from the CLI to the gate) is not started, so nothing in
-production can construct a peer binding yet. WS-B is complete
+Status: **IN PROGRESS** — WS-A is complete end-to-end: `--peer` authors a
+binding that reaches the gate. WS-B is complete except a live witness (B-8).
+WS-C landed as C-1/C-3/C-4. WS-B is complete
 except a live witness (B-8). WS-C landed as C-1/C-3/C-4 after a
 correction: its premise was wrong, and no `catalog run` verb was needed. No claim in
 `specs/adrs/001-microvm-security-posture.md` depends on this work yet.
@@ -277,27 +277,58 @@ the BDD suite reflect it. Added at the maintainer's direction on 2026-08-25.
       supervisor. The row was removed and both documents rewritten to say so.
       This is the exact failure `check-declared-backing` exists for, and no gate
       covers prose about CLI flags, so it would have shipped.
-- [ ] D-5. Re-document peer usage once A-9 lands. Until then user docs must not
-      show a peer invocation.
+- [x] D-5. Peer usage re-documented now that A-9 has landed, with every
+      documented invocation executed against the built binary first.
 
-### A-9 — thread peer bindings from the CLI to the gate (NOT STARTED)
+### A-9 — thread peer bindings from the CLI to the gate (DONE)
 
-The gap D-4 exposed. `EgressGate::decide_peer` is live, gated, and tested, and
-nothing can reach it in production because no peer binding is ever constructed
-outside a test. The thread is: a `--peer` flag on `RunArgs` → parsed
-`PeerBinding` → `SynthesisInput` → `ExecutionPlan` → supervisor config →
-endpoint config → `build_egress_gate` → `.with_peers(..)`. Six layers, and a
-partial thread is worse than none: it would put a binding in a signed plan that
-the gate never receives, so the plan would promise a route the runtime denies.
+The gap D-4 exposed, now closed. `mvmctl run --peer NAME:PORT=ADDR:PORT` and
+`machine run --peer ...` author a binding that reaches `EgressGate::decide_peer`.
 
-- [ ] A-9.1 `--peer NAME:PORT=ADDR:PORT` on `RunArgs`, parsed and validated at
-      the CLI boundary the way `--host-service` is.
-- [ ] A-9.2 Carry peer bindings on `SynthesisInput` and into the signed plan.
-- [ ] A-9.3 Carry them through the supervisor config to the endpoint.
-- [ ] A-9.4 `build_egress_gate` calls `.with_peers(..)` from the admitted plan.
-- [ ] A-9.5 A test that a plan-authored binding reaches the gate — the one
-      assertion that would have caught this being absent.
-- [ ] A-9.6 Then D-5.
+**The plan called for a parallel channel through six layers. That was the wrong
+shape.** A peer route *is* network policy — where this workload may connect —
+and `NetworkPolicy` is already threaded from the CLI through the signed plan to
+the endpoint that builds the gate. Carrying `peers` on the policy is one field
+instead of six re-threads, and it removes the failure the plan warned about by
+construction: there is no layer that can forget to pass it along.
+
+- [x] A-9.1 `--peer NAME:PORT=ADDR:PORT` on `RunArgs`, parsed by
+      `parse_peer_binding` and validated at the CLI boundary, so a malformed
+      route never reaches the signed plan.
+- [x] A-9.2 `NetworkPolicy` carries `peers` on both variants (`#[serde(default)]`,
+      so every existing policy document still parses).
+- [x] A-9.3 No new plumbing: the policy already crosses to the endpoint.
+- [x] A-9.4 `build_egress_gate` attaches `policy.peers()` at the same place it
+      projects the egress rules — one construction site for the whole gate.
+- [x] A-9.5 The assertion whose absence allowed D-4:
+      `a_peer_binding_on_the_admitted_policy_reaches_the_gate`. Three of the
+      four tests in that module go red when `.with_peers(..)` is removed.
+- [x] A-9.6 D-5 done: README, guide, and CLI reference document `--peer` with a
+      real invocation, and **every documented invocation was executed** before
+      the docs were committed.
+
+**A second partial thread was caught by running the binary, not by the tests.**
+With every unit test green, `mvmctl run --peer <malformed> --dry-run` exited 0.
+`--dry-run` returns before grants resolution, and both the preflight and the
+receipt resolved the policy through the two-argument
+`resolve_run_network_policy`, which drops peers. So the flag parsed, the tests
+passed, and the dry-run silently ignored it. Both sites now use
+`resolve_run_network_policy_with_peers`. The lesson is the same one D-4 taught
+from the other direction: a green unit suite says nothing about whether a user
+invocation reaches the code under test.
+
+`peers_survive_both_egress_arms` covers the related trap —
+`enforced_network_policy` has a projected-grant arm and a legacy arm, and a
+per-arm attachment would have dropped peers for any run that authored an egress
+grant.
+
+### Known limits of A-9
+
+- **Transient-run only.** `machine create` and `machine start` do not persist a
+  peer set. Both sites pass an explicit empty slice with a comment rather than
+  silently defaulting, so the gap is visible where it is taken.
+- **Not shown in the dry-run summary.** `--dry-run` prints `network: deny-all`
+  for a policy carrying peers; the preflight summary has no peer line yet.
 
 ## 5. Sequencing
 

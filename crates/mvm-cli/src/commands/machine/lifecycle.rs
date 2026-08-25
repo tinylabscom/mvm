@@ -95,6 +95,11 @@ pub(super) fn resolve_start_spec(args: &MachineStartArgs) -> Result<(MachineSpec
         image: args.create_flags.image.as_deref(),
         net: args.create_flags.net,
         allow_host: &args.create_flags.allow_host,
+        // Peer routes are a transient-run capability today: they are not
+        // persisted on a machine spec, so a stored machine has none to
+        // reconcile. Passing an explicit empty set rather than plumbing a
+        // field keeps that visible here instead of looking like an omission.
+        peer: &[],
         ai: None,
         cpus: args.create_flags.cpus,
         cpu_limit: args.create_flags.cpu_limit,
