@@ -3,7 +3,8 @@
 Backing: preview
 Validation: none
 
-Status: **IN PROGRESS** — A-1, B-1..B-7 and C-1 have landed. No claim in
+Status: **IN PROGRESS** — A-1, B-1..B-7 and C-1/C-5/C-6 have landed. WS-B is
+complete end-to-end except for a live witness (B-8). No claim in
 `specs/adrs/001-microvm-security-posture.md` depends on this work yet.
 
 ## 1. Why
@@ -131,8 +132,14 @@ gate (`crates/mvm-hostd/src/broker/registry.rs:274`).
       keys, and add the negative test for it.
 - [x] B-6. Tests: unbound service returns `NotBound`; unknown envelope field
       rejected; cross-workload read refused; round-trip; oversized value refused.
-- [ ] B-7. Wire the CLI so a run can request the binding, following the existing
-      surface in `crates/mvm-cli/src/commands/vm/host_services.rs`.
+- [x] B-7. Wire the CLI so a run can request the binding. **No new code was
+      needed.** `parse_host_service_bindings`
+      (`crates/mvm-cli/src/commands/vm/host_services.rs:16`) is generic over any
+      well-formed `ServiceId`, and `crates/mvm-hostd/src/bin/mvm-broker.rs:127`
+      registers from the admitted plan's binding list, so
+      `--host-service host.kv.v1` already reaches the handler.
+- [ ] B-8. Live witness. Every test so far drives the handler directly; nothing
+      yet exercises a booted workload reading and writing through the broker.
 
 ### Definition of done for WS-B
 
