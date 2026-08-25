@@ -117,6 +117,14 @@ impl<D: VmmDriver + 'static, S: NetworkEndpointSpawner + 'static, B: BrokerRegis
             std::path::Path::new(&config.rootfs_path),
             config.runtime_source_policy,
         )?;
+        #[cfg(target_os = "linux")]
+        {
+            if let Err(e) = mvm_build::builderd::repair_ext4_filesystem(std::path::Path::new(
+                &config.rootfs_path,
+            )) {
+                tracing::warn!(error = %e, rootfs = %config.rootfs_path, "failed to repair workload rootfs; continuing, but the read-only guest mount may fail if the journal is dirty");
+            }
+        }
         crate::base::runtime_meta::record_from_start_config(
             &config.name,
             StartMode::Detached,

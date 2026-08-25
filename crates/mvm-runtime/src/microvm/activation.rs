@@ -2,8 +2,8 @@
 //!
 //! After the VMM boots, the guest PID-1 agent waits in a fail-closed state
 //! that only accepts [`mvm_agentd::vsock::ActivateEnvironment`]. This module
-//! builds that message from the admitted [`VmStartConfig`] and the fixed
-//! virtio-blk slot layout produced by [`crate::workload_runner::spec_map::workload_blocks`],
+//! builds that message from the admitted [`VmStartConfig`] and the actual
+//! virtio-blk slot layout produced by [`mvm_vmm::host::spec_map::workload_blocks`],
 //! then sends it over the agent vsock channel.
 
 use std::path::Path;
@@ -17,7 +17,9 @@ use mvm_core::protocol::vm_backend::{VerbGrantEnvelope, VmStartConfig, VmVolumeK
 
 use crate::driver::traits::RunningVm;
 
-/// Fixed guest device nodes matching [`crate::workload_runner::spec_map::workload_blocks`].
+/// Fallback guest device nodes used when the block layout does not contain a
+/// matching source. The real devices are derived from [`workload_blocks`] so
+/// missing rootfs-verity slots do not shift the runtime overlay.
 const ROOTFS_DATA_DEV: &str = "/dev/vda";
 const ROOTFS_HASH_DEV: &str = "/dev/vdb";
 const RUNTIME_DATA_DEV: &str = "/dev/vdc";
@@ -133,11 +135,25 @@ where
 /// overlay triple is present — it is always verity-sealed.  Custom volumes
 /// are translated to virtio-fs tags when the config carries directory shares.
 ///
+/// Look up the guest device node for a host block source in the emitted layout.
+fn find_block_device(blocks: &[mvm_vmm::driver::spec::BlockDev], source: &str) -> Option<String> {
+    let source_path = std::path::Path::new(source);
+    blocks
+        .iter()
+        .find(|b| b.source == source_path)
+        .map(|b| b.device_node())
+}
+
 fn build_activation_environment(config: &VmStartConfig) -> Result<ActivateEnvironment> {
     // Verity is keyed off the hash device: `verity_path` set means the
     // backend attached the Merkle sidecar at the hash slot, so the root mounts
     // as dm-verity and must carry a roothash. No sidecar device means a plain
     // unverified mount, whatever the config's roothash field says.
+    let blocks = mvm_vmm::host::spec_map::workload_blocks(config);
+    let block_dev = |path: &str| {
+        find_block_device(&blocks, path).unwrap_or_else(|| ROOTFS_DATA_DEV.to_string())
+    };
+
     let rootfs = if config.virtiofs_root.is_some() {
         RootfsConfig {
             data_dev: String::new(),
@@ -150,15 +166,19 @@ fn build_activation_environment(config: &VmStartConfig) -> Result<ActivateEnviro
         let roothash = resolve_rootfs_roothash(config)
             .context("verity rootfs attached but no roothash in config or sidecar")?;
         RootfsConfig {
-            data_dev: ROOTFS_DATA_DEV.to_string(),
-            hash_dev: Some(ROOTFS_HASH_DEV.to_string()),
+            data_dev: block_dev(&config.rootfs_path),
+            hash_dev: config
+                .verity_path
+                .as_deref()
+                .and_then(|p| find_block_device(&blocks, p))
+                .or_else(|| Some(ROOTFS_HASH_DEV.to_string())),
             roothash: Some(roothash),
             virtiofs_tag: None,
             in_place: false,
         }
     } else {
         RootfsConfig {
-            data_dev: ROOTFS_DATA_DEV.to_string(),
+            data_dev: block_dev(&config.rootfs_path),
             hash_dev: None,
             roothash: None,
             virtiofs_tag: None,
@@ -168,15 +188,18 @@ fn build_activation_environment(config: &VmStartConfig) -> Result<ActivateEnviro
 
     // The overlay rides only as a complete triple — the same all-three-or-none
     // rule the block layout applies, so the guest never mounts a device the
-    // backend did not attach.
+    // backend did not attach. The device nodes follow the actual slot layout,
+    // not the hard-coded verity-everywhere assignment.
     let runtime = match (
         &config.runtime_overlay_path,
         &config.runtime_overlay_verity_path,
         &config.runtime_overlay_roothash,
     ) {
-        (Some(_), Some(_), Some(roothash)) => Some(RuntimeOverlayConfig {
-            data_dev: RUNTIME_DATA_DEV.to_string(),
-            hash_dev: RUNTIME_HASH_DEV.to_string(),
+        (Some(overlay), Some(verity), Some(roothash)) => Some(RuntimeOverlayConfig {
+            data_dev: find_block_device(&blocks, overlay)
+                .unwrap_or_else(|| RUNTIME_DATA_DEV.to_string()),
+            hash_dev: find_block_device(&blocks, verity)
+                .unwrap_or_else(|| RUNTIME_HASH_DEV.to_string()),
             roothash: roothash.clone(),
         }),
         _ => None,
@@ -415,6 +438,30 @@ mod tests {
         // An overlay roothash without its image/verity siblings is not a
         // complete triple, so no overlay is mounted.
         assert!(env.runtime.is_none());
+    }
+
+    #[test]
+    fn build_env_maps_runtime_overlay_to_next_slot_when_rootfs_has_no_verity() {
+        let (_env, _dir) = test_env();
+        let config = VmStartConfig {
+            name: "test-vm".into(),
+            rootfs_path: "/img/rootfs.ext4".into(),
+            runtime_overlay_path: Some("/img/runtime.ext4".into()),
+            runtime_overlay_verity_path: Some("/img/runtime.verity".into()),
+            runtime_overlay_roothash: Some(VALID_HASH.into()),
+            ..Default::default()
+        };
+
+        let env = build_activation_environment(&config).unwrap();
+        assert_eq!(env.rootfs.data_dev, "/dev/vda");
+        assert_eq!(env.rootfs.hash_dev, None);
+        assert_eq!(env.rootfs.roothash, None);
+        let runtime = env.runtime.as_ref().expect("overlay triple ⇒ runtime");
+        // No rootfs verity slot means the runtime overlay slides from
+        // /dev/vdc to /dev/vdb and its hash sidecar from /dev/vdd to /dev/vdc.
+        assert_eq!(runtime.data_dev, "/dev/vdb");
+        assert_eq!(runtime.hash_dev, "/dev/vdc");
+        assert_eq!(runtime.roothash, VALID_HASH);
     }
 
     #[test]

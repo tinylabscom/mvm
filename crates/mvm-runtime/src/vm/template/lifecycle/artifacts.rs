@@ -21,17 +21,30 @@ pub(super) fn slot_kernel_source(
     if built_vmlinux.is_file() {
         return Ok(built_vmlinux.to_path_buf());
     }
+    // Workload images rarely embed their own kernel (mkGuest outputs a rootfs).
+    // Boot a verified workload kernel when one is cached; it carries dm-verity
+    // and the virtio drivers the guest needs. Fall back to the builder kernel
+    // only when no workload kernel is available.
+    let arch_str = arch.to_string();
+    if let mvm_build::kernel_fetch::KernelResolution::Cached(verified) =
+        mvm_build::kernel_fetch::resolve_kernel(cache_root, &arch_str, "workload", false)
+    {
+        return Ok(verified.path().to_path_buf());
+    }
     let fallback = cache_root
         .join("builder-vm")
-        .join(arch.to_string())
+        .join(&arch_str)
         .join("vmlinux");
     if fallback.is_file() {
         return Ok(fallback);
     }
+    let workload_path =
+        mvm_build::kernel_fetch::cached_kernel_path(cache_root, &arch_str, "workload");
     anyhow::bail!(
-        "flake build produced no vmlinux at {} and the cached builder kernel fallback is absent at {}",
+        "flake build produced no vmlinux at {} and no verified workload kernel is cached at {} \
+         (create one with `mvmctl kernel build --which workload`)",
         built_vmlinux.display(),
-        fallback.display()
+        workload_path.display()
     )
 }
 
@@ -509,7 +522,29 @@ mod tests {
     }
 
     #[test]
-    fn slot_kernel_source_uses_builder_kernel_fallback() {
+    fn slot_kernel_source_prefers_verified_workload_kernel_fallback() {
+        let tmp = tempfile::tempdir().unwrap();
+        let built = tmp.path().join("build").join("vmlinux");
+        let workload = tmp
+            .path()
+            .join("cache")
+            .join("builder-vm")
+            .join("x86_64")
+            .join("kernels")
+            .join("workload")
+            .join("vmlinux");
+        std::fs::create_dir_all(workload.parent().unwrap()).unwrap();
+        std::fs::write(&workload, b"workload-kernel").unwrap();
+        mvm_build::kernel_fetch::record_kernel_digest(&workload).unwrap();
+
+        let selected =
+            slot_kernel_source(&built, &tmp.path().join("cache"), GuestArch::X86_64).unwrap();
+
+        assert_eq!(selected, workload);
+    }
+
+    #[test]
+    fn slot_kernel_source_falls_back_to_builder_kernel_when_workload_missing() {
         let tmp = tempfile::tempdir().unwrap();
         let built = tmp.path().join("build").join("vmlinux");
         let fallback = tmp
@@ -536,7 +571,7 @@ mod tests {
             .to_string();
 
         assert!(err.contains("flake build produced no vmlinux"));
-        assert!(err.contains("builder-vm/x86_64/vmlinux"));
+        assert!(err.contains("builder-vm/x86_64/kernels/workload/vmlinux"));
     }
 
     #[test]

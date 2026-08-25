@@ -29,7 +29,14 @@ fn make_wrapper() -> (tempfile::TempDir, ValidatedEntrypoint) {
     let tmp = tempfile::tempdir().expect("tempdir");
     let resolved = PathBuf::from(TEST_WRAPPER);
     let file = std::fs::File::open(&resolved).expect("open test wrapper");
-    (tmp, ValidatedEntrypoint { resolved, file })
+    (
+        tmp,
+        ValidatedEntrypoint {
+            resolved,
+            file,
+            use_resolved_path: false,
+        },
+    )
 }
 
 /// Execution deadline for the tests that assert on a wrapper's *result* —
@@ -432,7 +439,11 @@ fn test_execute_spawn_failed_when_program_missing() {
     let resolved = std::fs::canonicalize(&bogus).unwrap();
     let file = std::fs::File::open(&resolved).unwrap();
     std::fs::remove_file(&resolved).unwrap();
-    let entry = ValidatedEntrypoint { resolved, file };
+    let entry = ValidatedEntrypoint {
+        resolved,
+        file,
+        use_resolved_path: false,
+    };
     let outcome = execute(
         &entry,
         tmp.path(),

@@ -35,6 +35,11 @@ pub struct EntrypointPolicy {
     pub required_uid: u32,
     /// Required `st_gid` of the resolved wrapper.
     pub required_gid: u32,
+    /// When true, a `#!/bin/sh` style shebang on the resolved wrapper is
+    /// allowed. Sealed rootfs images currently bake the entrypoint as a
+    /// shell script under `/etc/mvm/entrypoint` rather than a wrapper
+    /// path, so the fallback policy needs to accept it.
+    pub allow_shell_shebang: bool,
 }
 
 impl EntrypointPolicy {
@@ -51,6 +56,30 @@ impl EntrypointPolicy {
             required_mode: 0o555,
             required_uid: 0,
             required_gid: 0,
+            allow_shell_shebang: false,
+        }
+    }
+
+    /// Fallback policy for sealed images that bake the entrypoint as a
+    /// script directly inside `/etc/mvm/entrypoint`. mkGuest currently emits
+    /// this shape for `entrypoint.command` images, so the agent treats the
+    /// marker file itself as the executable. The same ownership, mode, and
+    /// same-filesystem checks apply; only the path prefix and the shebang
+    /// restriction are relaxed.
+    pub fn sealed_script_marker() -> Self {
+        Self {
+            marker_path: PathBuf::from("/etc/mvm/entrypoint"),
+            allowed_prefix: PathBuf::from("/etc/mvm/"),
+            same_fs_as: Some(PathBuf::from("/etc/mvm")),
+            // mkGuest currently emits the script marker as 0755, so the
+            // fallback policy accepts either 0555 or 0755. Immutable baked
+            // files are still read-only in practice because the rootfs is
+            // mounted ro; tightening this to 0555 can follow the wrapper
+            // layout migration in mkGuest.
+            required_mode: 0o755,
+            required_uid: 0,
+            required_gid: 0,
+            allow_shell_shebang: true,
         }
     }
 
@@ -65,6 +94,56 @@ impl EntrypointPolicy {
                 source: e.to_string(),
             }
         })?;
+
+        // Sealed-script shortcut: mkGuest currently bakes the entrypoint as a
+        // shebang script directly inside the marker file. Treat the marker
+        // itself as the executable, applying the same ownership, mode, and
+        // same-filesystem checks as a wrapper path.
+        if self.allow_shell_shebang && raw.starts_with("#!") {
+            let resolved = self.marker_path.clone();
+            if !resolved.starts_with(&self.allowed_prefix) {
+                return Err(ValidationError::OutsideAllowedPrefix {
+                    resolved,
+                    allowed_prefix: self.allowed_prefix.clone(),
+                });
+            }
+            let metadata = std::fs::metadata(&resolved).map_err(|e| ValidationError::Stat {
+                path: resolved.clone(),
+                source: e.to_string(),
+            })?;
+            check_metadata(
+                &metadata,
+                &resolved,
+                self.required_uid,
+                self.required_gid,
+                self.required_mode,
+            )?;
+            if let Some(reference) = &self.same_fs_as {
+                let reference_meta =
+                    std::fs::metadata(reference).map_err(|e| ValidationError::Stat {
+                        path: reference.clone(),
+                        source: e.to_string(),
+                    })?;
+                if metadata.dev() != reference_meta.dev() {
+                    return Err(ValidationError::DifferentFilesystem {
+                        resolved: resolved.clone(),
+                        reference: reference.clone(),
+                        resolved_dev: metadata.dev(),
+                        reference_dev: reference_meta.dev(),
+                    });
+                }
+            }
+            let file = File::open(&resolved).map_err(|e| ValidationError::Open {
+                path: resolved.clone(),
+                source: e.to_string(),
+            })?;
+            return Ok(ValidatedEntrypoint {
+                resolved,
+                file,
+                use_resolved_path: true,
+            });
+        }
+
         let stated = PathBuf::from(raw.trim());
         if !stated.is_absolute() {
             return Err(ValidationError::NotAbsolute { path: stated });
@@ -116,9 +195,15 @@ impl EntrypointPolicy {
             path: resolved.clone(),
             source: e.to_string(),
         })?;
-        check_no_shell_shebang(&mut file, &resolved)?;
+        if !self.allow_shell_shebang {
+            check_no_shell_shebang(&mut file, &resolved)?;
+        }
 
-        Ok(ValidatedEntrypoint { resolved, file })
+        Ok(ValidatedEntrypoint {
+            resolved,
+            file,
+            use_resolved_path: false,
+        })
     }
 }
 
@@ -188,6 +273,10 @@ fn check_no_shell_shebang(file: &mut File, path: &Path) -> Result<(), Validation
 pub struct ValidatedEntrypoint {
     pub resolved: PathBuf,
     pub file: File,
+    /// When true, spawn the entrypoint via its resolved filesystem path
+    /// instead of `/proc/self/fd/<n>`. Needed for sealed-script markers
+    /// whose interpreter chain relies on file capabilities on the rootfs.
+    pub use_resolved_path: bool,
 }
 
 impl ValidatedEntrypoint {
@@ -200,6 +289,7 @@ impl ValidatedEntrypoint {
         Ok(Self {
             resolved: self.resolved.clone(),
             file: self.file.try_clone()?,
+            use_resolved_path: self.use_resolved_path,
         })
     }
 }
@@ -971,6 +1061,9 @@ fn dup_above_fd3(original: &std::fs::File) -> std::io::Result<std::os::fd::Owned
 /// with a validation fd at fd 3. `worker_pool::spawn_worker` does not
 /// install a fd-3 channel and so uses this function unchanged.
 pub(crate) fn spawn_path(entrypoint: &ValidatedEntrypoint) -> PathBuf {
+    if entrypoint.use_resolved_path {
+        return entrypoint.resolved.clone();
+    }
     #[cfg(target_os = "linux")]
     {
         use std::os::fd::AsRawFd;
@@ -1095,6 +1188,7 @@ mod tests {
             required_mode: mode,
             required_uid: uid,
             required_gid: gid,
+            allow_shell_shebang: false,
         }
     }
 

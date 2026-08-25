@@ -229,7 +229,7 @@ pub fn mount_rootfs(rootfs: &RootfsConfig) -> Result<PathBuf> {
             let fd = ctrl.as_raw_fd();
             dm_version(fd)?;
             setup_verity_target(fd, "root", &rootfs.data_dev, hash_dev, roothash)?;
-            let root_dm = resolved_dm_device("root", 0)?;
+            let root_dm = resolved_dm_device("root")?;
             mount(&root_dm, ROOTFS_STAGING, "ext4", libc::MS_RDONLY, "")?;
         } else {
             mount(
@@ -266,7 +266,7 @@ pub fn mount_runtime_overlay(runtime: Option<&RuntimeOverlayConfig>, root: &Path
             &runtime.hash_dev,
             &runtime.roothash,
         )?;
-        let runtime_dm = resolved_dm_device("runtime", 1)?;
+        let runtime_dm = resolved_dm_device("runtime")?;
         mount(
             &runtime_dm,
             &target.to_string_lossy(),
@@ -1244,17 +1244,37 @@ fn setup_verity_target(
 }
 
 #[cfg(target_os = "linux")]
-fn resolved_dm_device(name: &str, index: usize) -> Result<String> {
+fn resolved_dm_device(name: &str) -> Result<String> {
     let mapper = format!("/dev/mapper/{name}");
     if Path::new(&mapper).exists() {
         return Ok(mapper);
     }
-    let fallback = format!("/dev/dm-{index}");
-    if Path::new(&fallback).exists() {
-        return Ok(fallback);
+    // devtmpfs always creates /dev/dm-<minor>, but the minor is allocated
+    // dynamically and is not the creation order when earlier targets are
+    // absent (e.g. a plain rootfs means the runtime overlay is dm-0, not
+    // dm-1).  Resolve the actual node by reading the kernel's name record
+    // under /sys/block.
+    let sys_block = Path::new("/sys/block");
+    let entries =
+        std::fs::read_dir(sys_block).map_err(|e| MountError::syscall("read /sys/block", e))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| MountError::syscall("read /sys/block entry", e))?;
+        let fname = entry.file_name();
+        let fname = fname.to_string_lossy();
+        if !fname.starts_with("dm-") {
+            continue;
+        }
+        let name_file = entry.path().join("dm/name");
+        let dm_name = match std::fs::read_to_string(&name_file) {
+            Ok(n) => n,
+            Err(_) => continue,
+        };
+        if dm_name.trim() == name {
+            return Ok(format!("/dev/{fname}"));
+        }
     }
     Err(MountError::VeritySetup(format!(
-        "neither {mapper} nor {fallback} exists after DM_DEV_SUSPEND"
+        "no /sys/block/dm-* device named {name} after DM_DEV_SUSPEND"
     )))
 }
 

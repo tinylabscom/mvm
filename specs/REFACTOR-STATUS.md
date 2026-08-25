@@ -17,6 +17,13 @@ for detailed scope and acceptance criteria.
 
 ## Completed issue closeouts
 
+- [x] **AArch64 sealed-workload witness and QEMU teardown.** The Raspberry Pi
+      QEMU path now reaches the workload entrypoint with the correct console,
+      uid transition, compressed module handling, and builder/runtime-overlay
+      artifacts. Session teardown selects the backend recorded in machine
+      state and reaps both QEMU and its vsock bridge. See
+      `specs/sprint/delivery/2836-aarch64-sealed-workload-witness.md`.
+
 - [x] **Retained-state log diagnostics.** When a machine state directory
       survives but every output capture is absent, `machine logs` now names
       the retained state, each missing source, and the likely interrupted-boot

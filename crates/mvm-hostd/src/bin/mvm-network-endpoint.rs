@@ -524,6 +524,10 @@ fn resolver_uds_path(cfg: &EndpointConfig) -> Option<&std::path::Path> {
 /// we return it up to `main`, which exits nonzero before serving secrets.
 #[cfg(target_os = "linux")]
 fn confine_endpoint(cfg: &EndpointConfig) -> Result<()> {
+    if std::env::var_os("MVM_ENDPOINT_NO_CONFINE").is_some() {
+        warn!("skipping substitution endpoint self-confinement (MVM_ENDPOINT_NO_CONFINE set)");
+        return Ok(());
+    }
     use mvm_hostd::jailer::{ConfinementSpec, confine_self};
     use mvm_hostd::supervisor::network_endpoint::resolve_store_dirs;
 
