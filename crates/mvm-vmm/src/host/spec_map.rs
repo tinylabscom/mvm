@@ -55,7 +55,7 @@ pub fn workload_blocks(config: &VmStartConfig) -> Vec<BlockDev> {
     let mut blocks = vec![ro(&config.rootfs_path, 0)];
 
     if let Some(verity) = &config.verity_path {
-        blocks.push(ro(verity, 1));
+        blocks.push(ro(verity, blocks.len() as u8));
     }
 
     if let (Some(overlay), Some(overlay_verity), Some(_roothash)) = (
@@ -63,8 +63,8 @@ pub fn workload_blocks(config: &VmStartConfig) -> Vec<BlockDev> {
         &config.runtime_overlay_verity_path,
         &config.runtime_overlay_roothash,
     ) {
-        blocks.push(ro(overlay, 2));
-        blocks.push(ro(overlay_verity, 3));
+        blocks.push(ro(overlay, blocks.len() as u8));
+        blocks.push(ro(overlay_verity, blocks.len() as u8));
     }
 
     for volume in config

@@ -347,7 +347,20 @@ fn handle_client(
 
             GuestRequest::ActivateEnvironment(env) => {
                 match init::apply_activation(&env, boot_state) {
-                    Ok(()) => GuestResponse::ActivateEnvironmentAck,
+                    Ok(()) => {
+                        // Universal initramfs: the workload root was just
+                        // pivoted into place. Start entrypoint validation and
+                        // the warm pool in the background so activation stays
+                        // fast, while keeping the chained dependency order.
+                        if init::is_pid1() {
+                            let bs = Arc::clone(boot_state);
+                            std::thread::spawn(move || {
+                                init_entrypoint_validation(&bs);
+                                init_warm_pool(&bs);
+                            });
+                        }
+                        GuestResponse::ActivateEnvironmentAck
+                    }
                     Err(e) => {
                         let message = e.to_string();
                         boot_state.set_activation(ActivationState::Failed {
@@ -646,14 +659,13 @@ fn main() {
     let guest_signing_key = Arc::new(SigningKey::from_bytes(&guest_seed));
     boot_state.mark_vsock_bound();
 
-    // Defer entrypoint validation + warm-pool startup to a
-    // background thread chained in dependency order
-    // (warm pool reads `VALIDATED_ENTRYPOINT.get()`, so the sequence
-    // must stay serial inside this one thread). The accept loop
-    // below begins serving `Ping` / `ReadinessStatus` /
-    // `EntrypointStatus` immediately; `RunEntrypoint` returns
-    // `NotReady` until the entrypoint flips to `Ready`.
-    {
+    // On legacy per-rootfs boots the agent is not PID 1 and the workload
+    // root is already in place, so validate the entrypoint and start the warm
+    // pool now. On the universal initramfs path validation is deferred until
+    // after `ActivateEnvironment` pivots into the workload rootfs; running it
+    // here would validate the initramfs root, which has no
+    // `/etc/mvm/entrypoint`.
+    if !init::is_pid1() {
         let bs = Arc::clone(&boot_state);
         std::thread::spawn(move || {
             init_entrypoint_validation(&bs);

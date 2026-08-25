@@ -207,6 +207,7 @@ fn validate_extension(
         required_mode: 0o555,
         required_uid: 0,
         required_gid: 0,
+        allow_shell_shebang: false,
     }
     .validate()
     .map_err(|error| format!("validate extension entrypoint: {error}"))?;

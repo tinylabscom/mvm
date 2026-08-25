@@ -3924,6 +3924,11 @@ mod tests {
             admitted.plan().nonce.as_hex(),
             "nonce hex must match plan"
         );
+        assert_eq!(
+            envelope.grant.not_after,
+            admitted.plan().valid_until,
+            "a verb grant must not outlive its admitted plan"
+        );
         let pub_arr: [u8; 32] = hex::decode(&envelope.pubkey_hex)
             .unwrap()
             .try_into()

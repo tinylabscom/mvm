@@ -531,7 +531,7 @@ mod linux {
         // ── 5. Mount /dev/mapper/root at /sysroot. The initramfs ships
         //    /sysroot as an empty mount target. Read-only — verity is
         //    incompatible with writes.
-        let root_dm = resolved_dm_device("root", 0)?;
+        let root_dm = resolved_dm_device("root")?;
         do_mount(&root_dm, "/sysroot", "ext4", libc::MS_RDONLY, "")?;
         msg("mvm-verity-init: /sysroot mounted (verity-protected)");
 
@@ -550,7 +550,7 @@ mod linux {
         //    populating the cmdline arg.
         if let Some(rt) = cfg.runtime.as_ref() {
             setup_verity_target(fd, "runtime", &rt.data_dev, &rt.hash_dev, &rt.roothash)?;
-            let runtime_dm = resolved_dm_device("runtime", 1)?;
+            let runtime_dm = resolved_dm_device("runtime")?;
             do_mount(
                 &runtime_dm,
                 "/sysroot/mvm/runtime",
@@ -741,21 +741,41 @@ mod linux {
 
     /// Resolve the device path for a freshly-created dm-verity
     /// target named `name`. Prefer `/dev/mapper/<name>` (set up
-    /// by udev when available); fall back to `/dev/dm-<index>`
-    /// (which the kernel's devtmpfs creates regardless of
-    /// userspace daemons). `index` is the creation order — 0
-    /// for the rootfs target, 1 for the runtime overlay.
-    fn resolved_dm_device(name: &str, index: usize) -> Result<String, String> {
+    /// by udev when available); otherwise look up the dynamic
+    /// `/dev/dm-<minor>` node by scanning `/sys/block/dm-*/dm/name`.
+    /// The minor is not predictable from creation order when earlier
+    /// targets are absent, so the name-based lookup is required.
+    fn resolved_dm_device(name: &str) -> Result<String, String> {
         let mapper = format!("/dev/mapper/{name}");
         if Path::new(&mapper).exists() {
             return Ok(mapper);
         }
-        let fallback = format!("/dev/dm-{index}");
-        if Path::new(&fallback).exists() {
-            return Ok(fallback);
+        let sys_block = Path::new("/sys/block");
+        let entries = match std::fs::read_dir(sys_block) {
+            Ok(e) => e,
+            Err(e) => return Err(format!("read /sys/block: {e}")),
+        };
+        for entry in entries {
+            let entry = match entry {
+                Ok(e) => e,
+                Err(e) => return Err(format!("read /sys/block entry: {e}")),
+            };
+            let fname = entry.file_name();
+            let fname = fname.to_string_lossy();
+            if !fname.starts_with("dm-") {
+                continue;
+            }
+            let name_file = entry.path().join("dm/name");
+            let dm_name = match std::fs::read_to_string(&name_file) {
+                Ok(n) => n,
+                Err(_) => continue,
+            };
+            if dm_name.trim() == name {
+                return Ok(format!("/dev/{fname}"));
+            }
         }
         Err(format!(
-            "neither {mapper} nor {fallback} exists after DM_DEV_SUSPEND"
+            "no /sys/block/dm-* device named {name} after DM_DEV_SUSPEND"
         ))
     }
 

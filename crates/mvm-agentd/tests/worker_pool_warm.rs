@@ -31,6 +31,7 @@ fn validated_for_fake_runner() -> ValidatedEntrypoint {
     ValidatedEntrypoint {
         resolved: path,
         file,
+        use_resolved_path: false,
     }
 }
 

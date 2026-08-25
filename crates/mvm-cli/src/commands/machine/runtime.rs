@@ -294,6 +294,7 @@ fn run_entrypoint_action(args: MachineRunArgs, resolved_flake_slot: Option<Strin
         r#fn: None,
         attach: args.attach,
         network_policy,
+        hypervisor: args.run.hypervisor.clone(),
     })
 }
 

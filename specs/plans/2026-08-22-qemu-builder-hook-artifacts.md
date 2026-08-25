@@ -35,6 +35,14 @@ workload rootfs is intentionally attached read-only, so the guest could not
 replay the journal and correctly refused to mount it. The writable builder
 mount must therefore be torn down and the journal sealed before publication.
 
+Manual workflow run 32763211862 proved that sealing only inside the builder
+image's hook-runner binary is insufficient for the release-bootstrap witness:
+that lane deliberately boots the last published builder VM while exercising
+job scripts rendered by the source checkout. The old hook runner returned
+success without replaying the journal, and the exact read-only mount failure
+recurred. The source-rendered one-shot and persistent job scripts must
+therefore run the same fail-closed offline check before copying the artifact.
+
 Two independent defects turned that mount failure into a merged regression:
 
 - the generated job shell used `if ! command; then hook_rc=$?`, so `hook_rc`
@@ -66,6 +74,10 @@ Two independent defects turned that mount failure into a merged regression:
 - [x] Run an offline ext4 journal repair/check after every writable hook mount,
       fail closed on mounted or damaged images, retain `e2fsck` across builder
       GC, and flush every exported rootfs before reporting completion.
+- [x] Seal the writable temp image again in the source-rendered one-shot and
+      persistent job scripts so a source checkout remains correct when the
+      release-bootstrap path intentionally uses an older published builder
+      binary; accept only `e2fsck` exit 0/1 before copying the artifact.
 - [ ] Pass focused tests, formatting, workspace check/test, all-target Clippy,
       Linux-gated checks, and the live merge-group witness.
 - [ ] Record delivery and refactor status, then merge the repair.

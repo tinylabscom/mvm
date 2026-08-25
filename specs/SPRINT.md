@@ -2763,7 +2763,13 @@ now runs offline `e2fsck` after all writable mounts are dropped, accepting only
 the clean and repaired exit codes; a still-mounted or damaged image fails the
 build instead of being published. Every export route also flushes the copied
 artifact before reporting completion, and the builder toolchain GC roots now
-retain `e2fsck` alongside `mkfs.ext4`.
+retain `e2fsck` alongside `mkfs.ext4`. Manual workflow run 32763211862 then
+proved the release-bootstrap compatibility gap: it intentionally uses the last
+published builder binary, so binary-only sealing did not execute and the same
+read-only journal failure recurred. The source-rendered one-shot and persistent
+job scripts now perform the same fail-closed offline check after the hook and
+before export, so checkout behavior no longer depends on the builder image
+already containing the new hook-runner implementation.
 
 A follow-up merge-group witness proved that sealing only the writable temporary
 image was insufficient: the final copied artifact could still reach the
@@ -2945,3 +2951,12 @@ to the configured ceiling and the first terse response immediately after it.
 - [x] Preserve networkless guest boot by making an absent identity optional
       only when vsock egress is not requested; unreadable and required
       identities remain fail-closed.
+
+## 2026-08-24 AArch64 sealed-workload witness closeout
+
+- [x] Complete the sealed-workload QEMU path on Raspberry Pi, including the
+      AArch64 console, guest uid, compressed-module, and builder-overlay fixes.
+- [x] Resolve teardown through the backend recorded in machine state so QEMU
+      and its vsock bridge are reaped reliably.
+- [x] Preserve focused regressions and the hardware witness in
+      `specs/sprint/delivery/2836-aarch64-sealed-workload-witness.md`.

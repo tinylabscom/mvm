@@ -145,6 +145,15 @@ fn qemu_boot_argv_for_arch(
         args.push("max".into());
     }
 
+    // QEMU requires an explicit machine type on aarch64; the `virt` board
+    // is the generic reference platform that matches our virtio-blk/vsock
+    // device layout. x86_64 still boots with its built-in default, so we
+    // only override on architectures that need it.
+    if std::env::consts::ARCH == "aarch64" {
+        args.push("-machine".into());
+        args.push("virt".into());
+    }
+
     let has_virtiofs_root = spec.shares.iter().any(|s| s.tag == "mvmroot");
     let mem_arg = format!("{}M", spec.memory_mib);
 
@@ -443,6 +452,7 @@ impl VmmDriver for QemuDriver {
         }
 
         let argv = qemu_boot_argv(spec, &kernel, cid, kvm, &pid_file);
+        tracing::debug!(qemu_bin = %qemu_bin, argv = ?argv, "launching qemu-system");
         let status = bounded_qemu_command(&qemu_bin, &argv, spec, &state_dir)
             .status()
             .map_err(|e| anyhow!("spawn qemu ({qemu_bin}): {e}"))?;
@@ -865,7 +875,7 @@ mod tests {
             ],
         );
         let spec = VmmSpec {
-            cmdline: "  console=ttyS0 mvm.runtime_source_policy=required_overlay  ".into(),
+            cmdline: "  console=ttyAMA0 mvm.runtime_source_policy=required_overlay  ".into(),
             ..spec
         };
         let argv = qemu_boot_argv(
@@ -881,7 +891,7 @@ mod tests {
         // Non-empty spec cmdline is threaded verbatim (trimmed).
         assert_eq!(
             argvalue(&argv, "-append"),
-            Some("console=ttyS0 mvm.runtime_source_policy=required_overlay")
+            Some("console=ttyAMA0 mvm.runtime_source_policy=required_overlay")
         );
         assert_eq!(argvalue(&argv, "-m"), Some("512"));
         assert_eq!(argvalue(&argv, "-smp"), Some("2"));
