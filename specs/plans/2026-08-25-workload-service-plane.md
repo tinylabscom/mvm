@@ -5,7 +5,8 @@ Validation: none
 
 Status: **IN PROGRESS** — WS-A is wired end-to-end except A-6 (audit) and A-7
 (the negative-path suite beyond the gate's own unit tests). WS-B is complete
-except a live witness (B-8). WS-C has C-1/C-5/C-6; C-2/C-3 remain. No claim in
+except a live witness (B-8). WS-C landed as C-1/C-3/C-4 after a
+correction: its premise was wrong, and no `catalog run` verb was needed. No claim in
 `specs/adrs/001-microvm-security-posture.md` depends on this work yet.
 
 ## 1. Why
@@ -179,49 +180,65 @@ gate (`crates/mvm-hostd/src/broker/registry.rs:274`).
 A workload with the binding reads and writes keys over the broker; a workload
 without it gets `NotBound`; neither ever sees a credential or a socket.
 
-## 4. WS-C — Catalog entries that provision
+## 4. WS-C — Catalog entries that declare what they need
 
-**Problem.** `mvm_core::catalog::CatalogEntry`
-(`crates/mvm-core/src/catalog.rs:9`) is `{ name, description, flake_ref, profile,
-default_cpus, default_memory_mib, tags }`, and `mvmctl catalog` is `list` /
-`search` / `info` only — a phone book. `mvmctl template` is deliberately read-only
-too. There is no edge from "I found the entry" to "it is running".
+**The original framing here was wrong and is corrected in place.** It said the
+catalog was a phone book with "no edge from *I found the entry* to *it is
+running*". That is true of `mvm_core::catalog::Catalog` — the browse-only image
+catalog behind `mvmctl catalog list/search/info` — but there are **two**
+catalogs, and the other one already boots:
+`mvm_core::runtime_catalog::RuntimeCatalog` resolves `--runtime <name>` to an
+image and is also what project detection uses. `mvmctl run --runtime python`
+has worked the whole time.
 
-**Approach.** Give an entry a bound workload shape and add the run edge. Every
-downstream piece exists already: plan synthesis and signing, sealed dependency
-volumes, the egress gate. This is the shortest path from the catalog to a running,
-admitted workload.
+So no `catalog run` verb was added. Adding one would have created a second way
+to boot a catalogued name, which is the drift this plan exists to avoid.
 
-### Tasks
+What was genuinely missing is narrower and more useful: **a catalog entry could
+not declare what it needs.** An operator had to know that a given runtime wants
+a key-value store and pass `--host-service host.kv.v1` every time, learning it
+from a failure the first time.
 
-- [x] C-1. Extend `CatalogEntry` with an optional bound workload shape (entrypoint,
-      requested service bindings, resource ceiling). New fields carry
-      `#[serde(default)]`, so no schema-version ceremony.
-- [ ] C-2. Add `mvmctl catalog run <name>` to `CatalogAction`
-      (`crates/mvm-cli/src/commands/catalog/mod.rs`).
-- [ ] C-3. Map the entry to a `SynthesisInput` and admit through the existing
-      `synthesize_plan` (`crates/mvm-core/src/plan/synthesis.rs:665`) — reusing the
-      claim-8 admission path, not a parallel one.
-- [ ] C-4. Populate `SynthesisInput.services` from C-1's requested bindings, so a
-      catalog entry can ask for WS-B's store and WS-A's peers declaratively.
-- [x] C-5. Refuse an entry whose resource shape exceeds the admission ceiling.
-      `CatalogEntry::resolve` takes the ceiling as a parameter rather than
-      reading it, so the caller passes the operator's configured limit and no
-      second source of truth is introduced.
-- [x] C-6. Under `--prod`, refuse an entry with no pinned artifact digest before
-      any network fetch. Ordering is covered by
-      `the_prod_pin_check_precedes_the_ceiling_check`.
-- [ ] C-7. Tests. The resolution ladder is covered (`resolve_tests`, 9 cases:
-      bindings parse into plan types, base image not runnable, prod-unpinned
-      refused, pin-before-ceiling ordering, over-ceiling with both numbers,
-      at-ceiling admitted, malformed service/peer named, legacy entry parses,
-      round-trip). Still open: the admits-a-signed-plan case and CLI help text,
-      both of which need C-2/C-3.
+- [x] C-1. ~~Extend `CatalogEntry` with a bound workload shape.~~ Done first on
+      the *browse* catalog, which was the wrong type — it is not the one that
+      boots. Reverted in full (`catalog.rs` and its CLI table are byte-identical
+      to main again) and redone on `RuntimeEntry`, so there is one
+      runnable-entry concept rather than two overlapping ones.
+- [x] C-3. `RuntimeEntry` gains `services` and `peers`. `Detection` carries them
+      through **parsed**, not as strings, so a malformed entry is a catalog
+      error at resolution rather than a signed plan carrying a binding no
+      handler could satisfy.
+- [x] C-4. `--runtime` merges the entry's declared bindings into the run args,
+      which already flow to `SynthesisInput.services` via the existing
+      `resolve_bindings_and_sidecar` path. The merge is a **union**: the entry
+      declares what the runtime needs, the flag is what the operator asked for,
+      and neither may drop the other's binding.
+- [x] C-5/C-6. ~~Ceiling and `--prod` pin checks on the entry.~~ Dropped with the
+      reverted type. Both already exist on the run path they belong to —
+      admission owns the ceiling (`admission_budget.rs`) and `--prod` already
+      refuses mutable image references before any network fetch. Re-deriving
+      them per catalog entry would have been the second source of truth this
+      plan keeps arguing against.
+- [x] C-7. Tests. Catalog side (7): no builtin entry declares a binding;
+      declared bindings parse onto the detection; a malformed service or peer
+      refuses at resolution and the refusal names the entry; a matched entry
+      with malformed bindings is an error rather than a silent no-detection, by
+      command and by project file; a genuine miss is still `None`; an entry
+      without the new fields still parses. CLI side (4): a declared binding
+      reaches the run args; declared and operator bindings are unioned; a
+      binding both declared and passed appears once; an entry declaring nothing
+      changes nothing.
 
-### Definition of done for WS-C
+### Known limits of WS-C as landed
 
-`mvmctl catalog run <name>` boots an admitted workload from a signed plan, and the
-refusal paths above each have a test.
+- **No bundled runtime declares a binding.** Every entry is a language runtime
+  that works with nothing bound, and inventing a default would hand every
+  `--runtime python` user a service they never asked for. The mechanism is
+  live; the first real declaration is a per-runtime decision.
+- **Peers are carried but not yet consumed.** `Detection.peers` parses and
+  reaches the CLI. Threading it into the plan's peer bindings needs the
+  admission-side field from WS-A A-2 wired through the run path, which is not
+  done.
 
 ### Known limits of WS-A as landed
 
@@ -234,14 +251,6 @@ refusal paths above each have a test.
   over the HTTP leg that substitutes credentials.
 - **No live witness.** Every test drives the gate directly. Nothing yet boots
   two workloads and has one dial the other.
-
-### Remaining for WS-C
-
-Every bundled catalog entry is a base image — none declares an entrypoint
-anywhere in the tree — so all five carry `workload: None` and `resolve` refuses
-them as not runnable. Authoring real workload shapes means deciding what each
-profile starts, which is a per-profile call and not something to infer from a
-profile name.
 
 ## 5. Sequencing
 
