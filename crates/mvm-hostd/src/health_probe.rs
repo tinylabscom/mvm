@@ -516,6 +516,7 @@ mod tests {
             resolved_digest: None,
             net: false,
             allow_host: vec![],
+            peer: Vec::new(),
             ai: None,
             ports: vec![],
             cpus: 1,

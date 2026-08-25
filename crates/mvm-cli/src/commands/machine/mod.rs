@@ -632,6 +632,7 @@ fn machine_run_spec(
         runtime_pack: args.run.runtime_pack,
         net: args.run.net,
         allow_host: args.run.allow_host.clone(),
+        peer: Vec::new(),
         ai: None,
         ports: args.port.clone(),
         cpus: args.run.cpus,
@@ -674,6 +675,9 @@ pub(in crate::commands) struct MachineCreateArgs {
     /// Allow egress only to these hosts: `HOST[:PORT]` (repeatable).
     #[arg(long = "allow-host", value_name = "HOST[:PORT]")]
     pub allow_host: Vec<String>,
+    /// Bind a peer route this machine may dial (repeatable).
+    #[arg(long = "peer", value_name = "NAME:PORT=ADDR:PORT")]
+    pub peer: Vec<String>,
     /// vCPU cores the guest sees on lifecycle starts (not a host CPU share).
     #[arg(long)]
     pub cpus: Option<u32>,
@@ -770,6 +774,9 @@ pub(in crate::commands) struct MachineStartCreateFlags {
     /// Allow egress only to these hosts: `HOST[:PORT]` (repeatable).
     #[arg(long = "allow-host", value_name = "HOST[:PORT]")]
     pub allow_host: Vec<String>,
+    /// Bind a peer route this machine may dial (repeatable).
+    #[arg(long = "peer", value_name = "NAME:PORT=ADDR:PORT")]
+    pub peer: Vec<String>,
     /// vCPU cores the guest sees on lifecycle starts (not a host CPU share).
     #[arg(long)]
     pub cpus: Option<u32>,
@@ -1159,6 +1166,7 @@ fn build_machine_spec(inputs: MachineSpecInputs<'_>) -> Result<MachineSpec> {
         runtime_pack: false,
         net,
         allow_host,
+        peer: inputs.peer.to_vec(),
         ai: ai.cloned(),
         ports: Vec::new(),
         cpus,
@@ -1213,11 +1221,7 @@ impl MachineCreateArgs {
             image: self.image.as_deref(),
             net: self.net,
             allow_host: &self.allow_host,
-            // Peer routes are a transient-run capability today: they are not
-            // persisted on a machine spec, so a stored machine has none to
-            // reconcile. Passing an explicit empty set rather than plumbing a
-            // field keeps that visible here instead of looking like an omission.
-            peer: &[],
+            peer: &self.peer,
             ai: None,
             cpus: self.cpus,
             cpu_limit: self.cpu_limit,

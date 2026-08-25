@@ -52,6 +52,12 @@ pub struct MachineSpec {
     pub runtime_pack: bool,
     pub net: bool,
     pub allow_host: Vec<String>,
+    /// Peer routes this machine may dial (`NAME:PORT=ADDR:PORT`), persisted so
+    /// they survive a stop/start the way `allow_host` does. Stored raw rather
+    /// than parsed: the spec is the record of what the operator asked for, and
+    /// parsing happens once at launch where a refusal can be reported.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub peer: Vec<String>,
     /// Optional AI egress metering/budget policy, carried from the manifest's
     /// `[network.ai]` table so the policy survives across machine starts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -186,6 +192,7 @@ pub fn machine_config_matches(a: &MachineSpec, b: &MachineSpec) -> bool {
         && a.runtime_pack == b.runtime_pack
         && a.net == b.net
         && a.allow_host == b.allow_host
+        && a.peer == b.peer
         && a.ports == b.ports
         && a.cpus == b.cpus
         && a.memory == b.memory
@@ -216,6 +223,9 @@ pub fn machine_config_diff(current: &MachineSpec, desired: &MachineSpec) -> Stri
     }
     if current.allow_host != desired.allow_host {
         changed.push("allow-host");
+    }
+    if current.peer != desired.peer {
+        changed.push("peer");
     }
     if current.ports != desired.ports {
         changed.push("ports");
@@ -369,7 +379,7 @@ mod tests {
         }
     }
 
-    fn spec_fixture(name: &str) -> MachineSpec {
+    pub(super) fn spec_fixture(name: &str) -> MachineSpec {
         MachineSpec {
             schema_version: MACHINE_SPEC_SCHEMA_VERSION,
             name: name.to_string(),
@@ -380,6 +390,7 @@ mod tests {
             runtime_pack: false,
             net: false,
             allow_host: vec![],
+            peer: Vec::new(),
             ai: None,
             ports: vec![],
             cpus: 2,
@@ -613,6 +624,7 @@ mod tests {
             runtime_pack: false,
             net: false,
             allow_host: vec![],
+            peer: Vec::new(),
             ai: None,
             ports: vec![],
             cpus: 2,
@@ -787,6 +799,7 @@ mod tests {
         // Clear: Some(vec![]) empties the list.
         let base = MachineSpec {
             allow_host: vec!["old:443".into()],
+            peer: Vec::new(),
             ai: None,
             ..reconfigure_spec_fixture()
         };
@@ -825,5 +838,61 @@ mod tests {
         let (mem, mem_initial) = validate_machine_memory("512M", None).expect("no initial");
         assert_eq!(mem, 512);
         assert!(mem_initial.is_none());
+    }
+}
+
+#[cfg(test)]
+mod peer_persistence_tests {
+    use super::*;
+
+    fn spec_fixture(name: &str) -> MachineSpec {
+        super::tests::spec_fixture(name)
+    }
+
+    fn spec_with_peers(peers: &[&str]) -> MachineSpec {
+        let mut spec = spec_fixture("peered");
+        spec.peer = peers.iter().map(|s| s.to_string()).collect();
+        spec
+    }
+
+    /// The point of persisting the routes: a stored machine keeps them across
+    /// a stop/start, the way `allow_host` does. Without this the second start
+    /// would boot with no peers and the workload would fail to reach a
+    /// dependency it reached the first time.
+    #[test]
+    fn peers_round_trip_through_the_stored_spec() {
+        let spec = spec_with_peers(&["db.mvm.peer:5432=127.0.0.1:34567"]);
+        let json = serde_json::to_string(&spec).expect("serialize");
+        let back: MachineSpec = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.peer, spec.peer);
+    }
+
+    /// A spec written before the field existed still loads, and loads as
+    /// peerless rather than failing.
+    #[test]
+    fn a_spec_without_the_field_loads_as_peerless() {
+        let spec = spec_fixture("legacy");
+        let mut value = serde_json::to_value(&spec).expect("serialize");
+        value.as_object_mut().expect("object").remove("peer");
+        let back: MachineSpec = serde_json::from_value(value).expect("legacy spec loads");
+        assert!(back.peer.is_empty());
+    }
+
+    /// Changing the peer set is drift the reconciler has to report, or a
+    /// `machine start` with different routes would silently reuse the old ones.
+    #[test]
+    fn a_changed_peer_set_is_reported_as_drift() {
+        let current = spec_with_peers(&["db.mvm.peer:5432=127.0.0.1:34567"]);
+        let desired = spec_with_peers(&["cache.mvm.peer:6379=127.0.0.1:34568"]);
+        assert!(!machine_config_matches(&current, &desired));
+        assert!(machine_config_diff(&current, &desired).contains("peer"));
+    }
+
+    #[test]
+    fn an_unchanged_peer_set_is_not_drift() {
+        let a = spec_with_peers(&["db.mvm.peer:5432=127.0.0.1:34567"]);
+        let b = spec_with_peers(&["db.mvm.peer:5432=127.0.0.1:34567"]);
+        assert!(machine_config_matches(&a, &b));
+        assert!(!machine_config_diff(&a, &b).contains("peer"));
     }
 }

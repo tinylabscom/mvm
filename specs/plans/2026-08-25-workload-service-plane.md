@@ -336,13 +336,24 @@ invocation reaches the code under test.
 per-arm attachment would have dropped peers for any run that authored an egress
 grant.
 
-### Known limits of A-9
+### A-10 — the two A-9 gaps, closed
 
-- **Transient-run only.** `machine create` and `machine start` do not persist a
-  peer set. Both sites pass an explicit empty slice with a comment rather than
-  silently defaulting, so the gap is visible where it is taken.
-- **Not shown in the dry-run summary.** `--dry-run` prints `network: deny-all`
-  for a policy carrying peers; the preflight summary has no peer line yet.
+- [x] A-10.1 **Peers persist on a machine spec.** `--peer` is on
+      `machine create` and `machine start`, and `MachineSpec.peer` carries it,
+      so a stored machine keeps its routes across a stop/start the way
+      `allow_host` does. Without it a second start would boot peerless and the
+      workload would fail to reach a dependency it reached the first time.
+      `machine_config_diff` reports a changed peer set as drift, or a start
+      with different routes would silently reuse the old ones. A spec written
+      before the field existed loads as peerless rather than failing.
+      Stored raw rather than parsed: the spec records what the operator asked
+      for, and parsing happens once at launch where a refusal can be reported.
+- [x] A-10.2 **The dry-run summary names the routes.** It printed
+      `network: deny-all` for a policy carrying peers, which reads as "this
+      workload can reach nothing" — the opposite of true for the common shape
+      of a service that talks only to its own database. A `peers:` line now
+      reports each `name:port -> addr:port`, separate from the egress posture
+      because a peer route is not egress.
 
 ## 5. Sequencing
 
