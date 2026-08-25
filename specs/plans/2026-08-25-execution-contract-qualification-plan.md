@@ -53,9 +53,9 @@ The answers also surfaced concrete gaps:
     - `started_at`, `ended_at`
     - `exit_code`
     - `granted_capabilities`
-  - Deferred to a follow-up (needs new audit events or plan threading):
+    - `network_destinations` (host, port pairs from `plan.egress_destinations`)
+  - Deferred to a follow-up (needs new audit events or output artifact digestion):
     - `output_digests: Vec<ArtifactDigest>`
-    - `network_destinations` admitted (from egress/ingress policy)
   - The existing Merkle audit root remains available in extensions as
     `mvm.audit_root`; a separate `log_root` field can be added once workload
     logs are digested into a per-run Merkle tree.
@@ -82,7 +82,7 @@ The answers also surfaced concrete gaps:
   - `just check-gated`
   - Update this plan and `specs/SPRINT.md` with status.
 
-**Acceptance criteria (v1):** A verifier can take a single `ExecutionReceipt` and confirm the contract identifier, exact artifact digests, admitted capabilities, start/end times, and exit code, all signed by the host. Network destinations and output digests remain as cited audit entries or deferred to a follow-up that adds the necessary audit events.
+**Acceptance criteria (v1):** A verifier can take a single `ExecutionReceipt` and confirm the contract identifier, exact artifact digests, admitted capabilities, network destinations, start/end times, and exit code, all signed by the host. Output digests remain deferred until workload output artifacts are digested into audit entries.
 
 ### Workstream 2 — Explicit verification-status taxonomy
 

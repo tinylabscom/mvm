@@ -158,6 +158,10 @@ pub struct ExecutionReceipt {
     /// Capability grants admitted for this workload, e.g. agent verbs.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub granted_capabilities: Vec<String>,
+    /// Network destinations admitted for this workload, as (host, port) pairs.
+    /// `port = 0` means "any port for this host".
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub network_destinations: Vec<(String, u16)>,
     /// RFC 3339 UTC timestamp of when the action occurred.
     pub issued_at: String,
     /// Namespace-prefixed extensions. Unknown keys are preserved by verifiers.
@@ -385,6 +389,7 @@ mod tests {
             ended_at: None,
             exit_code: None,
             granted_capabilities: Vec::new(),
+            network_destinations: Vec::new(),
             issued_at: "2026-08-06T00:00:00+00:00".into(),
             extensions: BTreeMap::new(),
         }

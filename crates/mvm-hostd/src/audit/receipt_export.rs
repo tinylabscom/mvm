@@ -83,6 +83,9 @@ pub fn audit_entry_to_receipt(
     let granted_capabilities = context
         .map(|c| c.granted_capabilities.clone())
         .unwrap_or_default();
+    let network_destinations = context
+        .map(|c| c.network_destinations.clone())
+        .unwrap_or_default();
 
     let mut receipt = ExecutionReceipt {
         schema_version: 1,
@@ -101,6 +104,7 @@ pub fn audit_entry_to_receipt(
         ended_at,
         exit_code,
         granted_capabilities,
+        network_destinations,
         issued_at: entry.timestamp.to_rfc3339(),
         extensions,
     };
@@ -140,6 +144,9 @@ pub struct ReceiptContext {
     /// Capability grants admitted for this workload, collected from
     /// `plan.grant_required` and `plan.grants_enforced` entries.
     pub granted_capabilities: Vec<String>,
+    /// Network destinations admitted for this workload, collected from
+    /// `plan.egress_destinations` entries.
+    pub network_destinations: Vec<(String, u16)>,
 }
 
 /// One in-scope audit entry that has no receipt mapping.
@@ -487,6 +494,31 @@ fn build_context_map(entries: &[PlanAuditEntry]) -> BTreeMap<String, ReceiptCont
                 ctx.granted_capabilities.extend(caps);
             }
         }
+
+        if entry.event == "plan.egress_destinations" {
+            let count = entry
+                .labels
+                .get("destination_count")
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(0);
+            let mut destinations = Vec::new();
+            for i in 0..count {
+                let host = entry
+                    .labels
+                    .get(&format!("destination_{i}_host"))
+                    .cloned()
+                    .unwrap_or_default();
+                let port = entry
+                    .labels
+                    .get(&format!("destination_{i}_port"))
+                    .and_then(|v| v.parse::<u16>().ok())
+                    .unwrap_or(0);
+                destinations.push((host, port));
+            }
+            if !destinations.is_empty() {
+                ctx.network_destinations = destinations;
+            }
+        }
     }
 
     map
@@ -777,6 +809,53 @@ mod tests {
         assert_eq!(
             exit_receipt.payload.granted_capabilities,
             vec!["read".to_string(), "write".to_string()]
+        );
+        exit_receipt.verify().unwrap();
+    }
+
+    #[test]
+    fn egress_destinations_populate_network_destinations_on_exported_receipts() {
+        let dir = tempfile::tempdir().unwrap();
+        let signing_key = SigningKey::from_bytes(&[13u8; 32]);
+        let signer = FileAuditSigner::open(signing_key.clone(), dir.path()).unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        let admitted = sample_audit_entry("plan.admitted", BTreeMap::new());
+
+        let egress = {
+            let mut labels = BTreeMap::new();
+            labels.insert("destination_count".into(), "2".into());
+            labels.insert("destination_0_host".into(), "example.com".into());
+            labels.insert("destination_0_port".into(), "443".into());
+            labels.insert("destination_1_host".into(), "api.example.com".into());
+            labels.insert("destination_1_port".into(), "8443".into());
+            sample_audit_entry("plan.egress_destinations", labels)
+        };
+
+        let exited = {
+            let mut labels = BTreeMap::new();
+            labels.insert("exit_code".into(), "0".into());
+            sample_audit_entry("plan.exited", labels)
+        };
+
+        rt.block_on(signer.sign_and_emit(&admitted)).unwrap();
+        rt.block_on(signer.sign_and_emit(&egress)).unwrap();
+        rt.block_on(signer.sign_and_emit(&exited)).unwrap();
+
+        let receipts = export_receipts(dir.path(), "local", None, &signing_key).unwrap();
+        let exit_receipt = receipts
+            .iter()
+            .find(|r| r.payload.receipt_type == receipt_type::PLAN_EXITED)
+            .expect("exit receipt exists");
+        assert_eq!(
+            exit_receipt.payload.network_destinations,
+            vec![
+                ("example.com".to_string(), 443),
+                ("api.example.com".to_string(), 8443),
+            ]
         );
         exit_receipt.verify().unwrap();
     }
