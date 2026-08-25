@@ -273,6 +273,17 @@ pub fn mvm_deps_volumes_dir() -> String {
     format!("{}/volumes/deps", mvm_home())
 }
 
+/// Root of the per-workload key-value store served by `host.kv.v1`:
+/// `<mvm_home>/kv`.
+///
+/// Each immediate child is one workload's namespace, named by a digest of the
+/// workload id rather than the id itself. A workload id reaches this path from
+/// the supervisor's call context, so deriving a directory name from it directly
+/// would put a caller-influenced string in a filesystem path.
+pub fn mvm_kv_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from(mvm_home()).join("kv")
+}
+
 /// Snapshot store for copy-on-write warm-parent materialization:
 /// `<mvm_home>/snapshots`.
 pub fn mvm_snapshots_dir() -> String {
