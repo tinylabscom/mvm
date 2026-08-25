@@ -821,7 +821,12 @@ let
       MVM_EGRESS_CLIENT_BIN=/usr/local/bin/mvm-egress-client
     fi
     if [ -n "$MVM_EGRESS_CLIENT_BIN" ]; then
-      if ! "$MVM_EGRESS_CLIENT_BIN" provision-identity-for ${toString egressUid}; then
+      if [ -n "''${MVM_VSOCK_EGRESS:-}" ]; then
+        MVM_IDENTITY_PROVISION_COMMAND=provision-identity-for
+      else
+        MVM_IDENTITY_PROVISION_COMMAND=provision-identity-for-if-present
+      fi
+      if ! "$MVM_EGRESS_CLIENT_BIN" "$MVM_IDENTITY_PROVISION_COMMAND" ${toString egressUid}; then
         echo "mvm-init: failed to provision FlowMux identity for the egress service"
         exit 1
       fi

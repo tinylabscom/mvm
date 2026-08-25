@@ -26,9 +26,18 @@ const DEFAULT_HOST_VSOCK_PORT: u32 = mvm_agentd::vsock::EGRESS_PORT;
 const HOST_VSOCK_PORT_ENV: &str = "MVM_EGRESS_VSOCK_PORT";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IdentityRequirement {
+    Required,
+    IfPresent,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StartupMode {
     Serve,
-    ProvisionIdentityFor(u32),
+    ProvisionIdentityFor {
+        uid: u32,
+        requirement: IdentityRequirement,
+    },
 }
 
 fn startup_mode_from_args(args: impl IntoIterator<Item = String>) -> Result<StartupMode, String> {
@@ -36,19 +45,33 @@ fn startup_mode_from_args(args: impl IntoIterator<Item = String>) -> Result<Star
     let Some(command) = args.next() else {
         return Ok(StartupMode::Serve);
     };
-    if command != "provision-identity-for" {
-        return Err(format!("unknown command {command:?}"));
-    }
+    let requirement = match command.as_str() {
+        "provision-identity-for" => IdentityRequirement::Required,
+        "provision-identity-for-if-present" => IdentityRequirement::IfPresent,
+        _ => return Err(format!("unknown command {command:?}")),
+    };
     let raw_uid = args
         .next()
-        .ok_or_else(|| "provision-identity-for requires a non-root uid".to_string())?;
+        .ok_or_else(|| format!("{command} requires a non-root uid"))?;
     if args.next().is_some() {
-        return Err("provision-identity-for accepts exactly one uid".to_string());
+        return Err(format!("{command} accepts exactly one uid"));
     }
     match raw_uid.parse::<u32>() {
-        Ok(uid) if uid > 0 => Ok(StartupMode::ProvisionIdentityFor(uid)),
+        Ok(uid) if uid > 0 => Ok(StartupMode::ProvisionIdentityFor { uid, requirement }),
         _ => Err(format!("invalid non-root egress service uid {raw_uid:?}")),
     }
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn provisioning_failure_is_fatal(
+    requirement: IdentityRequirement,
+    error: &mvm_agentd::flowmux_drive::IdentityDriveError,
+) -> bool {
+    requirement == IdentityRequirement::Required
+        || !matches!(
+            error,
+            mvm_agentd::flowmux_drive::IdentityDriveError::NotAttached
+        )
 }
 
 /// Resolve the host port to dial, falling back to the compiled-in default.
@@ -81,8 +104,8 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    if let StartupMode::ProvisionIdentityFor(uid) = mode {
-        return provision_identity_for(uid);
+    if let StartupMode::ProvisionIdentityFor { uid, requirement } = mode {
+        return provision_identity_for(uid, requirement);
     }
 
     tracing_subscriber::fmt()
@@ -113,9 +136,10 @@ fn main() -> ExitCode {
 }
 
 #[cfg(target_os = "linux")]
-fn provision_identity_for(uid: u32) -> ExitCode {
+fn provision_identity_for(uid: u32, requirement: IdentityRequirement) -> ExitCode {
     match mvm_agentd::flowmux_drive::provision_identity_from_drive_for_uid(uid) {
         Ok(()) => ExitCode::SUCCESS,
+        Err(error) if !provisioning_failure_is_fatal(requirement, &error) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("mvm-egress-client: could not provision the FlowMux identity: {error}");
             ExitCode::from(1)
@@ -124,7 +148,7 @@ fn provision_identity_for(uid: u32) -> ExitCode {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn provision_identity_for(_uid: u32) -> ExitCode {
+fn provision_identity_for(_uid: u32, _requirement: IdentityRequirement) -> ExitCode {
     eprintln!("mvm-egress-client: FlowMux identity drives are only available on Linux guests");
     ExitCode::from(1)
 }
@@ -262,8 +286,36 @@ mod tests {
         );
         assert_eq!(
             startup_mode_from_args(["provision-identity-for".into(), "989".into()]),
-            Ok(StartupMode::ProvisionIdentityFor(989))
+            Ok(StartupMode::ProvisionIdentityFor {
+                uid: 989,
+                requirement: IdentityRequirement::Required,
+            })
         );
+        assert_eq!(
+            startup_mode_from_args(["provision-identity-for-if-present".into(), "989".into(),]),
+            Ok(StartupMode::ProvisionIdentityFor {
+                uid: 989,
+                requirement: IdentityRequirement::IfPresent,
+            })
+        );
+    }
+
+    #[test]
+    fn optional_provisioning_ignores_only_an_absent_drive() {
+        use mvm_agentd::flowmux_drive::IdentityDriveError;
+
+        assert!(!provisioning_failure_is_fatal(
+            IdentityRequirement::IfPresent,
+            &IdentityDriveError::NotAttached,
+        ));
+        assert!(provisioning_failure_is_fatal(
+            IdentityRequirement::Required,
+            &IdentityDriveError::NotAttached,
+        ));
+        assert!(provisioning_failure_is_fatal(
+            IdentityRequirement::IfPresent,
+            &IdentityDriveError::Unreadable("corrupt drive".into()),
+        ));
     }
 
     #[test]

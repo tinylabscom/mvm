@@ -1,6 +1,6 @@
 # Refactor status
 
-Last updated: 2026-08-22
+Last updated: 2026-08-24
 ## Completed
 
 - [x] **AI egress metering and token budgets** —
@@ -22,7 +22,9 @@ for detailed scope and acceptance criteria.
       the 0400 signing key to reserved service uid 989, and then starts the
       long-lived egress client under `no_new_privs` with only low-port bind
       capability. Workload, agent, and builder uid collisions fail at image
-      evaluation, and the network parser retains no mount privilege. See
+      evaluation, the network parser retains no mount privilege, and a
+      networkless boot tolerates only an absent identity drive while required
+      or unreadable identities still refuse. See
       `specs/sprint/delivery/2828-nix-flowmux-identity.md`.
 
 - [x] **FlowMux forward-proxy identity ownership.** Secret-substitution HTTP

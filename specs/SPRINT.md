@@ -2901,3 +2901,6 @@ to the configured ceiling and the first terse response immediately after it.
       `CAP_NET_BIND_SERVICE`; do not retain mount capability.
 - [x] Cover the ordering and capability boundary structurally, plus valid and
       invalid provisioning command modes in unit tests.
+- [x] Preserve networkless guest boot by making an absent identity optional
+      only when vsock egress is not requested; unreadable and required
+      identities remain fail-closed.

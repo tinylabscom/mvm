@@ -23,6 +23,10 @@ reserved uid.
 The same provisioning also makes the root-owned forward proxy usable on the
 secret-bearing path, where `mvm.vsock_egress` is intentionally absent. Public
 trust and ingress inputs remain mode 0444; only the secret key changes owner.
+When that egress flag is absent, provisioning tolerates only a genuinely
+absent identity drive so networkless guests keep booting. An attached but
+unreadable drive still refuses, and an egress-enabled boot still requires the
+drive.
 
 ## Verification
 
@@ -31,6 +35,9 @@ trust and ingress inputs remain mode 0444; only the secret key changes owner.
   capability, and rejects retained mount capability.
 - Startup-mode unit tests cover serve mode, the provisioning command, root uid,
   invalid uid, missing input, unknown commands, and extra arguments.
+- Required and if-present provisioning tests prove that only the optional
+  missing-drive case succeeds; the Nix structure witness pins both branches
+  ahead of privilege drop.
 - `mvm-agentd`'s full addon-enabled test suite and all mkGuest structure tests
   pass.
 - Workspace Clippy passes with warnings denied; the Linux-gated all-target
