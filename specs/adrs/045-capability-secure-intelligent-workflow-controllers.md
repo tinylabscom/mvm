@@ -9,6 +9,13 @@ Validation: none — this is a proposed design; no code implements it and no tes
 ADR-037 (`mvmd` production authority), ADR-040, ADR-041, ADR-042,
 ADR-047 (the agent memory plane); Plan 296,
 Plan 298, Plan 308, and Plan 329.  
+**Depends on:** ADR-046. The message fabric owns the messaging contract; this
+ADR defines no message types of its own and consumes `mvm_contract::fabric`.
+The workflow communication workstream cannot start before the fabric's local
+mailbox milestone lands.  
+**Reconciled by:** ADR-051, which names the shared workload actor model, settles
+the vocabulary split against this ADR, and records the rejection of a
+third-party actor framework.  
 **Research basis:**
 `specs/research/intelligent-capability-secure-microvm-workflows.md`.
 

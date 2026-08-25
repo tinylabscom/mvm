@@ -5,7 +5,7 @@ Validation: none — this is a proposed design; no code implements it and no tes
 
 ## Status
 
-**READY FOR IMPLEMENTATION AFTER ADR-043 IS REVIEWED.**
+**READY FOR IMPLEMENTATION AFTER ADR-046 IS REVIEWED.**
 
 This is the `mvm` half of the work. It builds the complete one-host fabric and
 the deterministic state-machine implementation that `mvmd` will replicate.
@@ -41,7 +41,7 @@ The same `ConversationCommand` and `ConversationStateMachine` are reused by
 
 ## Scope
 
-Plan 338 includes:
+This plan includes:
 
 - all guest, host-reader, and local-workload communication inventory;
 - one mandatory secure-channel substrate;
@@ -171,18 +171,18 @@ reachable fabric path may ship before M2.
 
 - [ ] Record exact `origin/main`, branch, worktree, host, and supported backend
       matrix in the delivery note.
-- [ ] Verify ADR-043 is the next free ADR number; renumber before editing if the
-      repository changed.
-- [ ] Verify Plan 338 is the next free plan number; renumber before editing if
-      the repository changed.
+- [x] Numbering resolved: this plan's ADR is ADR-046, and the plan itself is
+      slug-named per the current convention rather than carrying a number.
 - [ ] Read current `CLAUDE.md`/`AGENTS.md` and repository workflow rules.
 - [ ] Read ADRs 001, 014, 019, 020, 031, 035, 037, 040, 041, and 042.
 - [ ] Read Plans 265, 267, 274, 293, 294, 295, 296, 299, 302, 308, 311, 314,
       315, 318, 319, 328, 329, and 330 where present.
 - [ ] Inspect current workflow ADR/plan/research documents and record required
       message-fabric dependency edits.
-- [ ] Add ADR-043 and Plan 338 cross-references to the current sprint/status
+- [ ] Add ADR-046 and this plan's cross-references to the current sprint/status
       documents without marking implementation complete.
+- [ ] Read ADR-051 and treat its vocabulary decision as binding: this plan owns
+      the messaging contract, and the workflow plan consumes it.
 
 ### Communication-channel catalog
 
@@ -946,7 +946,7 @@ reachable fabric path may ship before M2.
 
 - [ ] Models, fuzzers, failpoints, crash sweeps, static checks, and canary scans
       are green.
-- [ ] Every ambiguity updates ADR-043 before claim promotion.
+- [ ] Every ambiguity updates ADR-046 before claim promotion.
 
 ---
 
@@ -1047,8 +1047,8 @@ cargo run -p xtask -- check-fabric-archive-inert
 
 ## Definition of done
 
-- [ ] Every Plan 338 checkbox is complete with evidence.
-- [ ] ADR-043 and implementation agree.
+- [ ] Every checkbox in this plan is complete with evidence.
+- [ ] ADR-046 and implementation agree.
 - [ ] One local guest-boundary fabric remains.
 - [ ] Stdio is guest-local compatibility only.
 - [ ] Two real microVMs communicate through durable E2E encrypted messages.

@@ -6,7 +6,7 @@ Validation: none — this is a proposed design; no code implements it and no tes
 **Status:** PROPOSED — no implementation has begun.  
 **Issue:** not yet assigned.  
 **Governing ADR:**
-`specs/adrs/043-capability-secure-intelligent-workflow-controllers.md`.  
+`specs/adrs/045-capability-secure-intelligent-workflow-controllers.md`.  
 **Research:**
 `specs/research/intelligent-capability-secure-microvm-workflows.md`.
 
@@ -208,7 +208,7 @@ performance, or storage semantics.
 
 ### Decisions
 
-- [ ] Confirm ADR-043 status and merge it before guest-reachable lifecycle code.
+- [ ] Confirm ADR-045 status and merge it before guest-reachable lifecycle code.
 - [ ] Amend ADR-001 with the controller, AI, workflow, mailbox, semantic,
       resource-amplification, and distributed threat model.
 - [ ] Decide whether ADR-037 is amended or superseded by the rule that every
@@ -654,20 +654,17 @@ turning raw stdout or direct guest addressing into a control plane.
 
 ### Mailbox contract
 
-- [ ] Add dependency-light mailbox types under `mvm-contract`:
-      - `MailboxAddress`;
-      - `MailboxEnvelope`;
-      - `MessageId`;
-      - `CorrelationId`;
-      - `CausationId`;
-      - `DeliveryAttempt`;
-      - `DeliveryReceipt`;
-      - `Acknowledgement`;
-      - `MailboxCursor`;
-      - `PayloadLocation`;
-      - `MessageClassification`;
-      - `MailboxRefusal`.
-- [ ] Every wire type uses bounded fields and `deny_unknown_fields`.
+- [ ] Consume `mvm_contract::fabric` for every messaging type. This plan defines
+      none of its own. ADR-051 settles the vocabulary: `MailboxAddress`,
+      `MessageId`, envelopes, correlation, causation, delivery attempts,
+      acknowledgement, and cursors have exactly one definition, in the message
+      fabric, and it is the fabric's.
+- [ ] Depend on the fabric's local mailbox milestone; this workstream cannot
+      start before it lands.
+- [ ] `ActorHandle` remains defined here, as the lifecycle capability
+      authorizing `observe_child`/`release_child`. It resolves to a
+      `MailboxAddress` and carries no second addressing scheme — no VM name,
+      node address, CID, socket path, or file descriptor.
 - [ ] Sender identity is absent from the authoritative guest-authored payload;
       the host stamps tenant, workflow, attempt, boot, plan digest, and
       controller generation from the authenticated channel.
@@ -1848,7 +1845,7 @@ mistaken for a production security property.
 
 Proceed only when:
 
-- ADR-043 and threat-model amendments are accepted;
+- ADR-045 and threat-model amendments are accepted;
 - production delegation rule is settled;
 - launch SLO is pinned;
 - mailbox ownership and encryption prerequisite are settled;

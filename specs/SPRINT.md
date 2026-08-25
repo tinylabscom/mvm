@@ -28,7 +28,6 @@
       new separation. Remaining: land the change, measure post-change queue
       latency, and record the result.
 
-
 - [ ] **Quantum-safe cryptography transition for mvm and mvmd.**
       `specs/plans/2026-08-25-quantum-safe-cryptography-transition.md`.
       Inventory the classical signature and key-exchange surfaces
@@ -38,6 +37,63 @@
       integrity, plans/bundles, release trust, TLS, and mvmd control-plane
       messages to hybrid mode. Plan is staged; no implementation work has
       started.
+
+## Roadmap — the workload actor model (proposed, not started)
+
+Four documents describe one thing: microVMs as addressable, supervised,
+independently-failing units that communicate only by message. All are
+`Backing: preview` / `Validation: none` — no code, no tests. Listed here so
+they stay on the roadmap rather than drifting apart again; ADR-051 exists
+because the first two were written days apart and collided in `mvm-contract`
+without either referencing the other.
+
+Build order is the dependency order below. The planner is the last thing built,
+and nothing depends on it.
+
+- [ ] **Shared vocabulary and the kameo decision.**
+      `specs/adrs/051-workload-actor-model.md`.
+      Names the workload actor, states the four invariants (one guest is one
+      actor; every actor is an ordinary admitted workload; authority only
+      attenuates; every message is durable, bounded, and audited), gives the
+      messaging contract to the fabric, and records why a third-party
+      in-process actor framework is rejected — the actors are microVMs behind
+      vsock, and supervision/restart conflicts with the fabric's deterministic
+      replay requirement. Defines the vertical slice below.
+
+- [ ] **Durable messaging: the secure message fabric.**
+      `specs/plans/2026-08-18-secure-message-fabric.md`, governed by
+      `specs/adrs/046-secure-message-fabric.md`.
+      One `ExclusiveInbox` per workload, E2E-encrypted under workload-owned
+      keys, at-least-once delivery over a deterministic SQLite-backed state
+      machine, dedup by idempotency key, per-route ordering, bounded queues for
+      offline recipients, crash redelivery, archive-before-purge. Supersedes
+      ADR-035 for guest↔host transport and retires stdout/stdin as a control
+      protocol. Budgets: p99 ≤ 10 ms first local durable 1 KiB message,
+      ≤ 200 ms prepared-cold `communication_ready`. **Blocks everything below.**
+
+- [ ] **A controller microVM that spawns worker microVMs.**
+      `specs/plans/2026-08-18-capability-secure-intelligent-workflows.md`,
+      governed by
+      `specs/adrs/045-capability-secure-intelligent-workflow-controllers.md`,
+      research basis
+      `specs/research/intelligent-capability-secure-microvm-workflows.md`.
+      `launch_child` / `observe_child` / `release_child`, `ActorHandle`,
+      transactional capacity reservation, the clean-parent invariant, private
+      stateful actor checkpoints, and a planner over a signed action catalog.
+      Every child is an ordinary admitted workload and
+      `effective_child_authority ⊆ effective_parent_authority`. Consumes
+      `mvm_contract::fabric`; defines no message types of its own.
+
+- [ ] **First increment: the vertical slice.**
+      A parent actor spawns one child, sends one durable message, receives one
+      response, and releases it; the child is destroyed and never re-enters
+      warm capacity. Done when the four invariants have negative witnesses —
+      over-requested authority refused, over-bound message refused rather than
+      truncated, response surviving a host crash between accept and ACK, and
+      the whole exchange in the chain-signed log with no payload bytes. This is
+      the increment that forces the vocabulary to be shared in code rather than
+      described as shared in prose.
+
 ## Delivered (archive — closed to new entries)
 
 > **Do not append here.** A new delivery entry goes in its own file under
