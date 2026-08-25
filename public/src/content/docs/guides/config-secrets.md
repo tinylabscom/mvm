@@ -38,21 +38,28 @@ Every file in the host directory is written to the corresponding drive image. Fo
 The same functionality is available programmatically for library consumers:
 
 ```rust
-use mvm_runtime::vm::microvm::{DriveFile, FlakeRunConfig};
+use mvm_runtime::microvm::FlakeRunConfig;
+use mvm_vmm::host::drive_file::DriveFile;
 
-let config = FlakeRunConfig {
-    config_files: vec![DriveFile {
-        name: "app.json".into(),
-        content: serde_json::to_string(&app_config)?,
-        mode: 0o444,
-    }],
-    secret_files: vec![DriveFile {
-        name: "app.env".into(),
-        content: format!("API_KEY={}", api_key),
-        mode: 0o400,
-    }],
-    ..base_config
-};
+fn with_config_and_secrets(
+    base_config: FlakeRunConfig,
+    app_config: &serde_json::Value,
+    api_key: &str,
+) -> Result<FlakeRunConfig, serde_json::Error> {
+    Ok(FlakeRunConfig {
+        config_files: vec![DriveFile {
+            name: "app.json".into(),
+            content: serde_json::to_string(app_config)?,
+            mode: 0o444,
+        }],
+        secret_files: vec![DriveFile {
+            name: "app.env".into(),
+            content: format!("API_KEY={api_key}"),
+            mode: 0o400,
+        }],
+        ..base_config
+    })
+}
 ```
 
 ## Managed Secrets

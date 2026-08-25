@@ -590,3 +590,86 @@ fn every_inline_named_command_exists(_world: &mut CliWorld) {
         unknown.join("\n")
     );
 }
+
+/// Every fenced block in the documentation set, with provenance.
+fn all_code_blocks() -> Vec<mvm_conformance::doc_examples::CodeBlock> {
+    let root = repo_root();
+    let mut blocks = Vec::new();
+    for path in documentation_files(&root) {
+        let relative = path
+            .strip_prefix(&root)
+            .unwrap_or(&path)
+            .display()
+            .to_string();
+        let body = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+        blocks.extend(mvm_conformance::doc_examples::code_blocks(&relative, &body));
+    }
+    blocks
+}
+
+#[then(expr = "every Rust example that opts out of compiling says why")]
+fn every_ignored_rust_block_states_a_reason(_world: &mut CliWorld) {
+    let mut unexplained = Vec::new();
+    let mut explained = 0usize;
+
+    for block in all_code_blocks() {
+        if block.language != "rust" || !block.is_ignored() {
+            continue;
+        }
+        match block.ignore_reason() {
+            Some(reason) if !reason.is_empty() => explained += 1,
+            _ => unexplained.push(format!(
+                "  {}\n     add a first line: // illustrative: <why this cannot compile>",
+                block.location()
+            )),
+        }
+    }
+
+    assert!(
+        unexplained.is_empty(),
+        "{} Rust example(s) opt out of compiling with no stated reason ({explained} \
+         do state one). An unexplained opt-out is how a wrong example survives — \
+         the marker looks deliberate and nobody can tell whether it still is:\n{}",
+        unexplained.len(),
+        unexplained.join("\n")
+    );
+}
+
+#[then(expr = "every documented TOML and JSON block parses")]
+fn every_toml_and_json_block_parses(_world: &mut CliWorld) {
+    let mut failures = Vec::new();
+    let mut checked = 0usize;
+
+    for block in all_code_blocks() {
+        // A block carrying placeholder syntax is a shape, not a document.
+        let illustrative = block.is_ignored() || block.body.contains('…');
+        if illustrative {
+            continue;
+        }
+        match block.language.as_str() {
+            "toml" => {
+                checked += 1;
+                if let Err(error) = block.body.parse::<toml::Table>() {
+                    failures.push(format!("  {}  (toml)\n     {error}", block.location()));
+                }
+            }
+            "json" => {
+                checked += 1;
+                if let Err(error) = serde_json::from_str::<serde_json::Value>(&block.body) {
+                    failures.push(format!("  {}  (json)\n     {error}", block.location()));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    assert!(checked > 0, "no TOML or JSON blocks were found to check");
+    assert!(
+        failures.is_empty(),
+        "{} documented TOML/JSON block(s) do not parse (checked {checked}). A \
+         config a reader pastes has to be syntactically valid:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}

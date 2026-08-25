@@ -50,3 +50,11 @@ Feature: Documented examples work
     # rather than fenced blocks. A stale spelling there reaches a reader
     # exactly like a stale one in a code block.
     Then every command named in the docs prose exists
+
+  Scenario: Rust examples that skip compiling say why
+    # `rust,ignore` is the only way a Rust example escapes the compiler, so an
+    # unexplained opt-out is exactly how a wrong example survives.
+    Then every Rust example that opts out of compiling says why
+
+  Scenario: documented TOML and JSON parses
+    Then every documented TOML and JSON block parses

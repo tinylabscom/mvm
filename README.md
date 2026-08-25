@@ -524,7 +524,7 @@ way, so the same UI code drives a local host or a remote fleet:
 use mvm_client::{connect, MvmClient, Target};
 
 // In-process — this host's microVMs, auto-selected VMM. No daemon required.
-let local = connect(Target::Local)?;              // == mvm_client_local::LocalBackend::new()
+let local = connect(Target::Local)?;              // == mvm_client::LocalBackend::new()
 
 // Remote — a hosted fleet or a local sidecar, over REST (needs feature `remote`).
 let remote = connect(Target::Gateway {
@@ -534,7 +534,7 @@ let remote = connect(Target::Gateway {
 
 // Identical methods on both: create / run / start / stop / remove, exec, logs, reconfigure.
 for m in remote.list_machines(Default::default()).await? {
-    println!("{}", m.id);
+    println!("{}", m.id.0);
 }
 ```
 

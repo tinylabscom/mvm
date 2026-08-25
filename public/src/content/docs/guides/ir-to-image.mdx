@@ -48,7 +48,8 @@ The IR is a JSON document with a fixed schema. It describes one or more applicat
 
 The top-level shape:
 
-```rust
+```rust,ignore
+// illustrative: the canonical shape of `mvm_contract::ir::Workload`, written with elisions
 pub struct Workload {
     pub schema_version: String,                       // currently "0.1"
     pub id: String,                                   // workload identifier
@@ -149,16 +150,22 @@ export const greet = mvm.app({
 <TabItem label="Rust">
 
 ```rust
-use mvm_sdk::{workload, image, resources};
+use mvm_sdk::{app, entrypoint_function, nix_packages, resources, workload};
 
-fn main() -> Result<(), mvm_sdk::EmitError> {
+// `build()` yields `BuildError` and `emit()` yields `EmitError`; there is no
+// conversion between them, so the caller boxes both.
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let wl = workload("hello")
-        .app(|a| a
-            .image(image::nix_packages(["python3"]))
-            .resources(resources(1, 256))
-            .function("python", "app", "greet", "json"))
+        .app(
+            app("hello")
+                .image(nix_packages(["python3"]))
+                .resources(resources(1, 256, 512))
+                .entrypoint(entrypoint_function("python", "app", "greet"))
+                .build()?,
+        )
         .build()?;
-    mvm_sdk::emit(&wl)
+    mvm_sdk::emit(&wl)?;
+    Ok(())
 }
 ```
 
@@ -484,7 +491,8 @@ The Workload IR types live in `crates/mvm-ir/src/workload.rs`. The full schema i
 
 ### `Source` — where the code comes from
 
-```rust
+```rust,ignore
+// illustrative: IR variant shape; sibling types are named but not in scope here
 enum Source {
     LocalPath  { path: String, include: Vec<String>, exclude: Vec<String> },
     NixDerivation { expr: String },
@@ -500,7 +508,8 @@ enum Source {
 
 ### `Image` — what the rootfs is built from
 
-```rust
+```rust,ignore
+// illustrative: IR variant shape; sibling types are named but not in scope here
 enum Image {
     NixPackages { packages: Vec<String> },
     OciBase     { reference: String, digest: String },
@@ -511,7 +520,8 @@ enum Image {
 
 ### `Dependencies` — language deps that aren't in stdlib
 
-```rust
+```rust,ignore
+// illustrative: IR variant shape; sibling types are named but not in scope here
 enum Dependencies {
     Python { lockfile: String, tool: PythonTool },   // Uv | PipTools
     Node   { lockfile: String, tool: NodeTool },     // Pnpm | Npm | Yarn
@@ -531,7 +541,8 @@ If your workload only needs the language standard library, set `dependencies = m
 
 ### `Entrypoint` — how the wrapper inside the microVM is dispatched
 
-```rust
+```rust,ignore
+// illustrative: IR variant shape; sibling types are named but not in scope here
 enum Entrypoint {
     Command  { command: Vec<String>, working_dir: String, env: BTreeMap<…> },
     Function {

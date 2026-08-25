@@ -72,6 +72,9 @@ pub struct CodeBlock {
     pub line: usize,
     /// The fence's language token, lowercased; empty for a bare ``` fence.
     pub language: String,
+    /// Comma-separated fence attributes after the language (`rust,ignore`),
+    /// following rustdoc's convention.
+    pub attributes: Vec<String>,
     /// The block body, newline-joined, without the fences.
     pub body: String,
 }
@@ -80,6 +83,31 @@ impl CodeBlock {
     /// Whether this block is a shell transcript we extract commands from.
     pub fn is_shell(&self) -> bool {
         SHELL_LANGUAGES.contains(&self.language.as_str())
+    }
+
+    /// `file:line`, the form an editor and a CI log both linkify.
+    pub fn location(&self) -> String {
+        format!("{}:{}", self.file, self.line)
+    }
+
+    /// Whether the block opts out of compilation, rustdoc-style.
+    pub fn is_ignored(&self) -> bool {
+        self.attributes
+            .iter()
+            .any(|a| a == "ignore" || a == "no_compile")
+    }
+
+    /// The justification an ignored block must carry on its first line.
+    ///
+    /// An opt-out with no stated reason is how a wrong example survives: the
+    /// marker looks deliberate and nobody can tell whether it still is.
+    pub fn ignore_reason(&self) -> Option<&str> {
+        self.body
+            .lines()
+            .next()?
+            .trim()
+            .strip_prefix("// illustrative:")
+            .map(str::trim)
     }
 }
 
@@ -210,7 +238,19 @@ pub fn code_blocks(file: &str, contents: &str) -> Vec<CodeBlock> {
                             .split_whitespace()
                             .next()
                             .unwrap_or_default()
+                            .split(',')
+                            .next()
+                            .unwrap_or_default()
                             .to_ascii_lowercase(),
+                        attributes: info
+                            .split_whitespace()
+                            .next()
+                            .unwrap_or_default()
+                            .split(',')
+                            .skip(1)
+                            .map(|attribute| attribute.trim().to_ascii_lowercase())
+                            .filter(|attribute| !attribute.is_empty())
+                            .collect(),
                         body: String::new(),
                     });
                 }

@@ -25,10 +25,12 @@ mvmctl machine run --flake /tmp/hello-app --entrypoint
 `launch.json` carries the merged hooks per phase. With this file:
 
 ```json
-"hooks": {
-  "before_start": [
-    { "kind": "shell", "line": "export FOO=1" }
-  ]
+{
+  "hooks": {
+    "before_start": [
+      { "kind": "shell", "line": "export FOO=1" }
+    ]
+  }
 }
 ```
 
