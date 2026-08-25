@@ -93,15 +93,20 @@ and nothing depends on it.
       the whole exchange in the chain-signed log with no payload bytes. This is
       the increment that forces the vocabulary to be shared in code rather than
       described as shared in prose.
+- [ ] **Execution Contract — artifact identity qualification.**
+      `specs/plans/2026-08-25-execution-contract-qualification-plan.md`.
+      Implement the work surfaced by answering the UOR/MVM qualification
+      questions: complete the execution receipt (exit state, output digests,
+      log root, timing, capabilities), add a verification-status taxonomy,
+      close the hardware-attestation/measured-boot gap, and add
+      continuation-state confidentiality guardrails. Design (but do not yet
+      implement) typed derivation edges and model/dataset artifact references.
+      Deferred items: TOCTOU-free spawn, `--with-transcripts` archives, and
+      verified kernel-cache reads (coordinate with Plan 288).
 
 ## Delivered (archive — closed to new entries)
 
-> **Do not append here.** A new delivery entry goes in its own file under
-> `specs/sprint/delivery/`. This section was a single append point that every
-> concurrent session wrote to, so it conflicted on essentially every rebase and
-> cost the other sessions a full re-gate of code that had not changed — see
-> `specs/sprint/delivery/README.md` and issue #2353. `xtask check-sprint-append`
-> fails if this list grows.
+
 
 - [x] Long-running interactive consoles no longer lose their input relay after
       15 minutes without keyboard activity. Guest output can continue
