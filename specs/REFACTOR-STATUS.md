@@ -17,11 +17,6 @@ for detailed scope and acceptance criteria.
 
 ## Completed issue closeouts
 
-- [x] **Issue #2831 — Linux 6.12.105 kernel pin refresh.** The libkrunfw
-      firmware build and custom workload/builder kernels consume the same
-      kernel.org-verified source archive and SRI hash. Structural parity and
-      freshness checks report both pins synchronized and current.
-
 - [x] **Retained-state log diagnostics.** When a machine state directory
       survives but every output capture is absent, `machine logs` now names
       the retained state, each missing source, and the likely interrupted-boot
@@ -140,6 +135,11 @@ for detailed scope and acceptance criteria.
       sequence.
 
 - [x] **Issue #2756 — Linux 6.12.104 kernel pin refresh.** The libkrunfw
+      firmware build and custom workload/builder kernels consume the same
+      kernel.org-verified source archive and SRI hash. Structural parity and
+      freshness checks report both pins synchronized and current.
+
+- [x] **Issue #2831 — Linux 6.12.105 kernel pin refresh.** The libkrunfw
       firmware build and custom workload/builder kernels consume the same
       kernel.org-verified source archive and SRI hash. Structural parity and
       freshness checks report both pins synchronized and current.
