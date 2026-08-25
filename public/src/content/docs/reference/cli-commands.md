@@ -222,7 +222,7 @@ is the command. `mvmctl env uninstall --all` also wipes `~/.mvm`, but it removes
 | `mvmctl secret get <name>`                             | Verify that a local secret exists without printing the value                                                                      |
 | `mvmctl secret ls`                                     | List stored secret names, and for bound secrets their auth type, destinations, and authoring provider                             |
 | `mvmctl secret rm <name>`                              | Remove a local secret                                                                                                             |
-| `mvmctl secret <put                                    | get                                                                                                                               | set | ls  | rm> --tenant <tenant>` | Use a non-default local tenant namespace. Default: `local` |
+| `mvmctl secret <put\|get\|set\|ls\|rm> --tenant <tenant>` | Use a non-default local tenant namespace. Default: `local` |
 
 `secret set` is `put` plus an egress binding: it records where the substituted
 credential may go and how it authenticates. `--provider` takes those from the
