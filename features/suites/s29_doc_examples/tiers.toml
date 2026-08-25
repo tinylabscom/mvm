@@ -1,0 +1,492 @@
+# Verification tier for every command path the documentation uses.
+#
+#   parse  the real clap tree parses the invocation, with full argument
+#          validation. Every documented example gets at least this.
+#   exec   additionally executed for real against an isolated MVM_HOME.
+#          Only for commands that touch nothing outside that home, reach no
+#          network, and boot no VM.
+#   live   additionally boots a real microVM (the @live scenarios).
+#
+# A lookup falls back to the longest registered prefix, so a group entry
+# covers its leaves unless a leaf overrides it. The assignment is total: a
+# documented path with no entry here fails the coverage scenario by name.
+
+[[command]]
+path = "bootstrap"
+tier = "parse"
+
+[[command]]
+path = "build compile"
+tier = "parse"
+
+[[command]]
+path = "build kernel build"
+tier = "parse"
+
+[[command]]
+path = "bundle fetch"
+tier = "parse"
+
+[[command]]
+path = "bundle install"
+tier = "parse"
+
+[[command]]
+path = "cache info"
+tier = "exec"
+
+[[command]]
+path = "cache prune"
+tier = "parse"
+
+[[command]]
+path = "cache repair"
+tier = "parse"
+
+[[command]]
+path = "catalog list"
+tier = "exec"
+
+[[command]]
+path = "deps audit"
+tier = "parse"
+
+[[command]]
+path = "deps capture-live"
+tier = "parse"
+
+[[command]]
+path = "deps inspect"
+tier = "parse"
+
+[[command]]
+path = "deps install"
+tier = "parse"
+
+[[command]]
+path = "doctor"
+tier = "exec"
+# doctor exits nonzero when it finds host problems; that is the command
+# working, not failing.
+exit_reports_host_state = true
+
+[[command]]
+path = "env cleanup"
+tier = "parse"
+
+[[command]]
+path = "env uninstall"
+tier = "parse"
+
+[[command]]
+path = "generate template"
+tier = "parse"
+
+[[command]]
+path = "image inspect"
+tier = "parse"
+
+[[command]]
+path = "init"
+tier = "parse"
+
+[[command]]
+path = "machine boot-report"
+tier = "parse"
+
+[[command]]
+path = "machine build"
+tier = "live"
+
+[[command]]
+path = "machine check-artifact"
+tier = "parse"
+
+[[command]]
+path = "machine checkpoint create"
+tier = "parse"
+
+[[command]]
+path = "machine checkpoint ls"
+tier = "exec"
+
+[[command]]
+path = "machine checkpoint restore"
+tier = "parse"
+
+[[command]]
+path = "machine console"
+tier = "parse"
+
+[[command]]
+path = "machine cp"
+tier = "parse"
+
+[[command]]
+path = "machine create"
+tier = "live"
+
+[[command]]
+path = "machine diff"
+tier = "parse"
+
+[[command]]
+path = "machine exec"
+tier = "live"
+
+[[command]]
+path = "machine fork"
+tier = "parse"
+
+[[command]]
+path = "machine fs ls"
+tier = "parse"
+
+[[command]]
+path = "machine fs write"
+tier = "parse"
+
+[[command]]
+path = "machine inspect"
+tier = "live"
+
+[[command]]
+path = "machine logs"
+tier = "live"
+
+[[command]]
+path = "machine ls"
+tier = "exec"
+
+[[command]]
+path = "machine pause"
+tier = "parse"
+
+[[command]]
+path = "machine proc start"
+tier = "parse"
+
+[[command]]
+path = "machine reconfigure"
+tier = "parse"
+
+[[command]]
+path = "machine restore"
+tier = "parse"
+
+[[command]]
+path = "machine resume"
+tier = "parse"
+
+[[command]]
+path = "machine rm"
+tier = "live"
+
+[[command]]
+path = "machine run"
+tier = "live"
+
+[[command]]
+path = "machine sandbox gc"
+tier = "parse"
+
+[[command]]
+path = "machine shell"
+tier = "parse"
+
+[[command]]
+path = "machine snapshot ls"
+tier = "exec"
+
+[[command]]
+path = "machine snapshot rm"
+tier = "parse"
+
+[[command]]
+path = "machine start"
+tier = "live"
+
+[[command]]
+path = "machine stop"
+tier = "live"
+
+[[command]]
+path = "machine volume catalog"
+tier = "parse"
+
+[[command]]
+path = "machine volume create"
+tier = "parse"
+
+[[command]]
+path = "machine volume delete"
+tier = "parse"
+
+[[command]]
+path = "machine volume lock"
+tier = "parse"
+
+[[command]]
+path = "machine volume ls"
+tier = "exec"
+
+[[command]]
+path = "machine volume mount"
+tier = "parse"
+
+[[command]]
+path = "machine volume restore"
+tier = "parse"
+
+[[command]]
+path = "machine volume snapshot"
+tier = "parse"
+
+[[command]]
+path = "machine volume unlock"
+tier = "parse"
+
+[[command]]
+path = "machine volume unmount"
+tier = "parse"
+
+[[command]]
+path = "machine wait"
+tier = "parse"
+
+[[command]]
+path = "manifest info"
+tier = "parse"
+
+[[command]]
+path = "manifest ls"
+tier = "exec"
+
+[[command]]
+path = "manifest prune"
+tier = "parse"
+
+[[command]]
+path = "manifest rm"
+tier = "parse"
+
+[[command]]
+path = "manifest verify"
+tier = "parse"
+
+[[command]]
+path = "network create"
+tier = "parse"
+
+[[command]]
+path = "network list"
+tier = "exec"
+
+[[command]]
+path = "ops config set"
+tier = "parse"
+
+[[command]]
+path = "ops metrics"
+tier = "exec"
+
+[[command]]
+path = "pack download"
+tier = "parse"
+
+[[command]]
+path = "pack update"
+tier = "parse"
+
+[[command]]
+path = "persistent-builder start"
+tier = "parse"
+
+[[command]]
+path = "persistent-builder status"
+tier = "parse"
+
+[[command]]
+path = "persistent-builder stop"
+tier = "parse"
+
+[[command]]
+path = "persistent-builder submit"
+tier = "parse"
+
+[[command]]
+path = "run"
+tier = "parse"
+
+[[command]]
+path = "secret get"
+tier = "parse"
+
+[[command]]
+path = "secret put"
+tier = "parse"
+
+[[command]]
+path = "template info"
+tier = "parse"
+
+[[command]]
+path = "template list"
+tier = "exec"
+
+[[command]]
+path = "template search"
+tier = "parse"
+
+[[command]]
+path = "trust add"
+tier = "parse"
+
+[[command]]
+path = "trust audit decisions export"
+tier = "parse"
+
+[[command]]
+path = "trust audit provenance export"
+tier = "parse"
+
+[[command]]
+path = "trust audit show"
+tier = "parse"
+
+[[command]]
+path = "trust audit tail"
+tier = "parse"
+
+[[command]]
+path = "trust audit verify"
+tier = "parse"
+
+[[command]]
+path = "trust list"
+tier = "exec"
+
+[[command]]
+path = "trust receipt verify"
+tier = "parse"
+
+[[command]]
+path = "machine forward"
+tier = "parse"
+
+[[command]]
+path = "secret set"
+tier = "parse"
+
+[[command]]
+path = "bench"
+tier = "parse"
+
+[[command]]
+path = "build address"
+tier = "parse"
+
+[[command]]
+path = "build runtime-overlay build"
+tier = "parse"
+
+[[command]]
+path = "build validate"
+tier = "parse"
+
+[[command]]
+path = "bundle gc"
+tier = "parse"
+
+[[command]]
+path = "env bootstrap"
+tier = "parse"
+
+[[command]]
+path = "env update"
+tier = "parse"
+
+[[command]]
+path = "kernel build"
+tier = "parse"
+
+[[command]]
+path = "ops config edit"
+tier = "parse"
+
+[[command]]
+path = "ops config show"
+tier = "exec"
+
+[[command]]
+path = "ops mcp stdio"
+tier = "parse"
+
+[[command]]
+path = "pack list"
+tier = "exec"
+
+[[command]]
+path = "pack prune"
+tier = "parse"
+
+[[command]]
+path = "plugin list"
+tier = "exec"
+
+[[command]]
+path = "pool status"
+tier = "parse"
+
+[[command]]
+path = "prepare"
+tier = "parse"
+
+[[command]]
+path = "secret ls"
+tier = "parse"
+
+[[command]]
+path = "secret providers"
+tier = "exec"
+
+[[command]]
+path = "shell-init"
+tier = "parse"
+
+[[command]]
+path = "watch"
+tier = "parse"
+
+# Documented as future syntax. Each entry must stay absent from the CLI: the
+# suite fails if one ships, so the docs get updated when it does.
+[[planned]]
+path = "manifest push"
+reason = "registry sharing is designed but unimplemented; the docs mark the section planned"
+
+[[planned]]
+path = "manifest pull"
+reason = "registry sharing is designed but unimplemented; the docs mark the section planned"
+
+# Commands the docs name while correctly describing them as gone or not yet
+# built. Each must stay absent: the suite fails if one ships, so a doc that
+# says "the former X" cannot outlive X's removal.
+[[absent]]
+path = "security"
+reason = "folded into `doctor`; the CLI reference documents the fold in the past tense"
+
+[[absent]]
+path = "flake"
+reason = "renamed to `build validate`; the reference records the rename"
+
+[[absent]]
+path = "dev"
+reason = "removed with `dev import-image`; the airgap and release guides describe its removal"
+
+[[absent]]
+path = "policy"
+reason = "deliberately not a public verb — the reference says policy authoring lives in mvmd"
+
+[[absent]]
+path = "addon"
+reason = "the addon CLI is unbuilt; the migration guide says 'once the addon CLI lands'"

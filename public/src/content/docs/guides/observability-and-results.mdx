@@ -76,9 +76,9 @@ mvmctl run \
 Then verify and inspect:
 
 ```sh
-mvmctl receipt verify /tmp/agent-run-receipt.json
-mvmctl audit tail -n 20
-mvmctl metrics --json
+mvmctl trust receipt verify /tmp/agent-run-receipt.json
+mvmctl trust audit tail -n 20
+mvmctl ops metrics --json
 ```
 
 Store the receipt path, exit status, run identifier, audit identifier, and
@@ -91,10 +91,10 @@ For a long-running sandbox:
 
 ```sh
 mvmctl machine run --flake ./service --name service-dev -d
-mvmctl wait service-dev --for all
-mvmctl boot-report service-dev --json
+mvmctl machine wait service-dev --for all
+mvmctl machine boot-report service-dev --json
 mvmctl machine logs service-dev -n 200
-mvmctl metrics --json
+mvmctl ops metrics --json
 ```
 
 Use:

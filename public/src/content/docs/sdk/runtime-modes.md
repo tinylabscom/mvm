@@ -86,7 +86,7 @@ then uses the local CLI for operations such as:
 
 - `mvmctl machine run --up-json --detach --name <generated-id> --manifest <template>`
 - `mvmctl machine fs write <vm> <path>`
-- `mvmctl proc start <vm> -- <argv>`
+- `mvmctl machine proc start <vm> -- <argv>`
 - `mvmctl machine stop <vm>`
 
 Live mode creates a real microVM. It should be used only when the caller is ready

@@ -110,7 +110,7 @@ mvmctl machine run --flake . --name my-vm --port 8080:8080
 Or build separately:
 
 ```bash
-mvmctl build --flake . --profile minimal
+mvmctl machine build --flake . --profile minimal
 mvmctl machine run --flake .
 ```
 
@@ -123,7 +123,7 @@ and records the flake target plus runtime sizing:
 mvmctl init base-worker --preset worker
 cd base-worker
 $EDITOR mvm.toml
-mvmctl build
+mvmctl machine build
 mvmctl machine run --manifest .
 ```
 
@@ -149,7 +149,7 @@ Browse the bundled catalog and scaffold from a curated entry:
 ```bash
 mvmctl catalog list                       # Browse available entries
 mvmctl init my-app --catalog minimal      # Scaffold from a catalog entry
-mvmctl build my-app                       # Build the manifest
+mvmctl machine build my-app                       # Build the manifest
 mvmctl machine run --manifest my-app                          # Boot the VM
 ```
 

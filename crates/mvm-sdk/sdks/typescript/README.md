@@ -26,17 +26,17 @@ export const greet = mvm.app({
 ```
 
 ```sh
-mvmctl compile app.ts     # parse the file (no execution) → flake.nix + launch plan
-mvmctl up --flake .       # build the image and boot the microVM
+mvmctl build compile app.ts   # parse the file (no execution) → flake.nix + launch plan
+mvmctl machine run --flake .  # build the image and boot the microVM
 ```
 
 `mvm.app({...})` is higher-order: it records the declaration and returns the
 function unchanged, so the same file runs normally under `tsx` / `node` and is
-also read statically by `mvmctl compile`.
+also read statically by `mvmctl build compile`.
 
 ## How it builds
 
-`mvmctl compile` reads your file **statically** — the `mvm.app({...})` call and
+`mvmctl build compile` reads your file **statically** — the `mvm.app({...})` call and
 the `import` are parsed as data, never executed, so nothing in your module runs
 on the host. At image-build time the framework call and the `@runmvm/mvm` import
 are **stripped** from the bundled source, so the guest runs your plain function

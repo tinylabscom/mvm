@@ -43,7 +43,7 @@ sh <(curl -L https://nixos.org/nix/install) --daemon
 . /etc/profile.d/nix.sh
 ```
 
-Installing host-side Nix is optional. The normal `mvmctl build` path still treats the CLI as the host control plane and the builder VM as the image build boundary. See [Builder VM](/guides/builder-vm/).
+Installing host-side Nix is optional. The normal `mvmctl machine build` path still treats the CLI as the host control plane and the builder VM as the image build boundary. See [Builder VM](/guides/builder-vm/).
 
 ## What about native Windows microVMs?
 

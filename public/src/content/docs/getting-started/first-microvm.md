@@ -96,7 +96,7 @@ mvmctl machine run --manifest . --name my-vm --port 8080:8080
 Without a `mvm.toml` (just a flake), pass `--flake` explicitly — that legacy path still works:
 
 ```bash
-mvmctl build --flake .
+mvmctl machine build --flake .
 mvmctl machine run --flake . --cpus 2 --memory 1024
 ```
 

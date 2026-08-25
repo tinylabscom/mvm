@@ -19,7 +19,7 @@ cp -R ./src /tmp/mvm-agent-work/src
 Prefer a Nix flake that declares the tools the agent needs:
 
 ```sh
-mvmctl build --flake .
+mvmctl machine build --flake .
 ```
 
 For local development through this repository, the builder VM is the Linux build boundary. The runtime guest later boots the built artifact.
@@ -42,8 +42,8 @@ Start with no egress for code analysis. If the task needs registries or model AP
 Use cold mode only when the agent needs to resume an environment with installed packages, caches, or intermediate files.
 
 ```sh
-mvmctl pause coding-agent
-mvmctl resume coding-agent
+mvmctl machine pause coding-agent
+mvmctl machine resume coding-agent
 ```
 
 Use `mvmctl machine stop` and cleanup commands when the task is complete.

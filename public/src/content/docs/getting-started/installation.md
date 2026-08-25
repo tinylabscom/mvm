@@ -97,11 +97,12 @@ If a future package-manager expression installs release binaries, it must stay
 separate from this source-built package and preserve release signature/checksum
 verification.
 
-## Self-Update
+## Updating
 
-```bash
-mvmctl update
-```
+`mvmctl` has no self-update command. Reinstall with the same
+method you used above — rerun the install script, or `git pull && cargo build
+--release` in a source checkout. Cached build artifacts are refreshed
+separately with `mvmctl pack update <KIND>`.
 
 ## Prerequisites
 
@@ -121,17 +122,18 @@ mvmctl automatically detects your platform at startup and selects the best VM ba
 There is no Docker or container backend on the runtime path. A `qemu`
 (microvm.nix) backend exists for local dev/test only and is never auto-selected.
 
-You don't need Nix on the host. On first build, mvm bootstraps or reuses a Linux builder VM, runs Nix evaluation and `nix build` inside it, and extracts the rootfs back. You run `mvmctl build` from the host; you do not need to enter a dev shell first. See [Builder VM](/guides/builder-vm/) for the full model.
+You don't need Nix on the host. On first build, mvm bootstraps or reuses a Linux builder VM, runs Nix evaluation and `nix build` inside it, and extracts the rootfs back. You run `mvmctl machine build` from the host; you do not need to enter a dev shell first. See [Builder VM](/guides/builder-vm/) for the full model.
 
 ### First-Time Setup
 
-After installation, run the setup wizard:
+After installation, run host setup:
 
 ```bash
-mvmctl init
+mvmctl bootstrap
 ```
 
-This walks through platform detection, dependency installation (Firecracker on Linux; the `slp/krun` Homebrew trio for libkrun on macOS 13–25, nothing extra for the HVF backend on macOS 26+), default network setup, and XDG directory creation. Use `--non-interactive` for scripted environments.
+This walks through platform detection, dependency installation (Firecracker on Linux; the `slp/krun` Homebrew trio for libkrun on macOS 13–25, nothing extra for the HVF backend on macOS 26+), default network setup, and XDG directory creation. Rerunning it is safe: it verifies warm artifacts and only
+rebuilds or downloads what is missing.
 
 Running `mvmctl bootstrap` -- or simply your first `mvmctl machine build` / `mvmctl machine run --flake ...` -- also handles setup automatically: mvm detects your platform, selects the backend, and stages the builder microVM image on first use.
 

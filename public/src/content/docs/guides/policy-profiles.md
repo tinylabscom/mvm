@@ -64,7 +64,7 @@ Rules:
 - `standard` accepts read-only host shares.
 
 Prefer read-only shares for test inputs, source snapshots, fixtures, and model
-context. Use `mvmctl cp` or a managed volume when changes must persist.
+context. Use `mvmctl machine cp` or a managed volume when changes must persist.
 
 ## Environment policy
 
@@ -137,7 +137,7 @@ runs:
 
 ```sh
 mvmctl run --profile restrictive --receipt /tmp/run-receipt.json -- python task.py
-mvmctl receipt verify /tmp/run-receipt.json
+mvmctl trust receipt verify /tmp/run-receipt.json
 ```
 
 Use [audit and receipts](/guides/audit-and-receipts/) for portable proof and

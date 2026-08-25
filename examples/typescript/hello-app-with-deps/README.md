@@ -4,7 +4,7 @@
 
 The decorator parser auto-fills source path, entrypoint shape, and language
 (`node`) exactly as the no-deps example. The difference is the bundled
-`package-lock.json`: `mvmctl compile` copies it into the artifact, and the
+`package-lock.json`: `mvmctl build compile` copies it into the artifact, and the
 generated `flake.nix` then builds `node_modules` **reproducibly at build time**
 inside the builder VM via nixpkgs' `importNpmLock` (hash-free — it reads the
 lockfile's integrity hashes directly). `node_modules` is baked into the

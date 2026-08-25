@@ -13,7 +13,7 @@ description: Getting started as a contributor to mvm.
 ### Do I need to install libkrun?
 
 It depends on your machine. The builder VM (the headless Linux guest that runs
-`nix build` inside `mvmctl build` / `mvmctl machine build` / `mvmctl machine
+`nix build` inside `mvmctl machine build` / `mvmctl machine build` / `mvmctl machine
 run`) auto-selects its host VMM:
 
 | Host | libkrun (`slp/krun/*`) needed? |

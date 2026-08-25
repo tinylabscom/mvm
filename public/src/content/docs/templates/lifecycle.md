@@ -11,7 +11,7 @@ manifest-keyed slot in the local registry.
 Edit `flake.nix`, source files, or `mvm.toml`, then run:
 
 ```sh
-mvmctl build
+mvmctl machine build
 ```
 
 Resource changes such as `vcpus`, `mem`, and `data_disk` update the slot

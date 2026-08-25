@@ -6,7 +6,7 @@ description: Build manifest-backed templates and inspect the local mvm registry.
 Build from the current project:
 
 ```sh
-mvmctl build
+mvmctl machine build
 ```
 
 Or point at a project directory or manifest file:
@@ -16,18 +16,18 @@ mvmctl machine build --flake ./my-worker
 mvmctl machine build --flake ./my-worker/mvm.toml
 ```
 
-`mvmctl build` discovers `mvm.toml` or `Mvmfile.toml`, runs the Nix build
+`mvmctl machine build` discovers `mvm.toml` or `Mvmfile.toml`, runs the Nix build
 through the builder VM where Linux build work belongs, and stores artifacts in
 a local slot keyed by the canonical manifest path.
 
 ## Build options
 
 ```sh
-mvmctl build --force
-mvmctl build --update-hash
-mvmctl build --vcpus 4 --mem 2G --data-disk 8G
-mvmctl build --snapshot
-mvmctl build --json
+mvmctl machine build --force
+mvmctl machine build --update-hash
+mvmctl machine run --flake . --cpus 4 --memory 2G
+mvmctl machine checkpoint create my-machine --class vm-full
+mvmctl machine build --json
 ```
 
 Snapshot builds are backend-specific. Do not present snapshot availability or
@@ -43,7 +43,7 @@ mvmctl manifest info ./my-worker --json
 mvmctl manifest verify
 ```
 
-Use `mvmctl machine ls`, `mvmctl info`, `mvmctl machine logs`, and `mvmctl machine stop` for running
+Use `mvmctl machine ls`, `mvmctl machine inspect`, `mvmctl machine logs`, and `mvmctl machine stop` for running
 VMs. Use `mvmctl manifest *` for build slots and registry state.
 
 ## Boot after build
@@ -54,7 +54,7 @@ mvmctl machine run --manifest ./my-worker -- uname -a
 ```
 
 If there is no built revision for the manifest, `mvmctl machine run` should fail with a
-hint to run `mvmctl build`.
+hint to run `mvmctl machine build`.
 
 ## Security checklist
 

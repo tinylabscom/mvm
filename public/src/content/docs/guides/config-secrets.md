@@ -138,7 +138,7 @@ cold-booting. Published latency numbers must name the backend, host, artifact,
 and readiness boundary.
 
 ```bash
-mvmctl machine build --flake ./openclaw --snapshot
+mvmctl machine build --flake ./openclaw
 mvmctl machine run --flake ./openclaw --name oc --port 3000:3000 \
     --mount nix/examples/openclaw/config:/mnt/config \
     --mount nix/examples/openclaw/secrets:/mnt/secrets

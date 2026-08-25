@@ -14,7 +14,7 @@ For a stricter model-facing tool API, see [Agent tool contract](/guides/agent-to
 mvmctl init ./agent-tool --preset python
 cd agent-tool
 $EDITOR flake.nix
-mvmctl build
+mvmctl machine build
 ```
 
 Keep the flake pinned. Add only the packages the tool needs.

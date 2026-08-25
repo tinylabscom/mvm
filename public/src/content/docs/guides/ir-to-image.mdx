@@ -121,7 +121,7 @@ def greet(name: str) -> str:
     return f"hello, {name}"
 ```
 
-`mvmctl emit entry.py` runs the user's module under `MVM_EMITTING=1` and `MVM_IR_OUT=/path/to/workload-ir.json`. The decorators build a `Workload` dataclass tree, `_dsl.emit_json()` calls `json.dumps(..., sort_keys=True, separators=(",", ":"))`, and the canonical bytes land at `MVM_IR_OUT` (or stdout when unset).
+`mvmctl build compile entry.py` runs the user's module under `MVM_EMITTING=1` and `MVM_IR_OUT=/path/to/workload-ir.json`. The decorators build a `Workload` dataclass tree, `_dsl.emit_json()` calls `json.dumps(..., sort_keys=True, separators=(",", ":"))`, and the canonical bytes land at `MVM_IR_OUT` (or stdout when unset).
 
 </TabItem>
 <TabItem label="TypeScript">
@@ -143,7 +143,7 @@ export const greet = mvm.app({
 })((name: string): string => `hello, ${name}`);
 ```
 
-`mvmctl emit entry.ts` runs the declaration under the same `MVM_EMITTING=1` and `MVM_IR_OUT=/path/to/workload-ir.json` contract. The TypeScript helpers emit canonical IR through the same schema-owned shape as Python.
+`mvmctl build compile entry.ts` runs the declaration under the same `MVM_EMITTING=1` and `MVM_IR_OUT=/path/to/workload-ir.json` contract. The TypeScript helpers emit canonical IR through the same schema-owned shape as Python.
 
 </TabItem>
 <TabItem label="Rust">
@@ -389,7 +389,7 @@ export const spec = mvm.app({
 
 ### The emitted IR
 
-`mvmctl emit entry.py > workload-ir.json` produces canonical JSON. With whitespace re-added for readability:
+`mvmctl build compile entry.py > workload-ir.json` produces canonical JSON. With whitespace re-added for readability:
 
 ```json
 {
@@ -419,7 +419,7 @@ export const spec = mvm.app({
 }
 ```
 
-`mvmctl validate workload-ir.json` accepts it. `ir_hash()` returns a stable lowercase-hex SHA-256; copy that hash anywhere you need to refer to this exact IR (launch plan, audit entry, cache key).
+`mvmctl build address workload-ir.json` accepts it and prints its address. `ir_hash()` returns a stable lowercase-hex SHA-256; copy that hash anywhere you need to refer to this exact IR (launch plan, audit entry, cache key).
 
 ### The flake
 
@@ -624,7 +624,7 @@ The admission profile is the security-posture binding. It records the declared i
 - `plan.launched` — backend dispatch succeeded
 - `plan.failed` — admission rejected, with reason
 
-All three reference `(plan_id, plan_version)`, the IR hash, and admission labels such as `intent`, `admission_profile`, and `seccomp_tier`. The log is hash-chained: entry N includes the hash of entry N-1. Tampering breaks `mvm_hostd::supervisor::verify_audit_chain`, which `mvmctl audit verify` surfaces as a nonzero exit.
+All three reference `(plan_id, plan_version)`, the IR hash, and admission labels such as `intent`, `admission_profile`, and `seccomp_tier`. The log is hash-chained: entry N includes the hash of entry N-1. Tampering breaks `mvm_hostd::supervisor::verify_audit_chain`, which `mvmctl trust audit verify` surfaces as a nonzero exit.
 
 The contract: **every workload mvm runs is launched from a signed ExecutionPlan that names a specific IR hash**. No IR hash, no launch.
 

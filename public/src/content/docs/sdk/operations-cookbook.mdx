@@ -21,14 +21,14 @@ language SDK tests prove them.
 | --- | --- | --- | --- |
 | Create sandbox recording | `mvm.Sandbox.create(...)` | `Sandbox.create(...)` | `mvmctl build compile` or `mvmctl run --mode plan` |
 | Create live sandbox | `mvmctl run --mode live ./script.py` | `mvmctl run --mode live ./script.ts` | `mvmctl machine run` |
-| Start command | `sandbox.commands.start([...])` | `sandbox.commands.start([...])` | `mvmctl proc start` or `mvmctl machine exec` |
+| Start command | `sandbox.commands.start([...])` | `sandbox.commands.start([...])` | `mvmctl machine proc start` or `mvmctl machine exec` |
 | Capture command result | Target `commands.run(...)` | Target `commands.run(...)` | CLI command result and receipt paths |
 | Write file | `sandbox.files.write(path, data)` | `sandbox.files.write(path, data)` | `mvmctl machine fs write` |
 | Read/list/remove file | Target helpers | Target helpers | `mvmctl machine fs read`, `mvmctl machine fs ls`, `mvmctl machine fs rm` |
 | Logs | Target helper | Target helper | `mvmctl machine logs` |
 | Ports | Target helper | Target helper | port-forwarding CLI commands |
-| Pause/resume | Target helper | Target helper | `mvmctl pause`, `mvmctl resume` |
-| Checkpoint create/restore | Target helper | Target helper | `mvmctl checkpoint create --class vm-full`, `mvmctl checkpoint restore` |
+| Pause/resume | Target helper | Target helper | `mvmctl machine pause`, `mvmctl machine resume` |
+| Checkpoint create/restore | Target helper | Target helper | `mvmctl machine checkpoint create --class vm-full`, `mvmctl machine checkpoint restore` |
 | Stop cleanup | context manager or `kill()` | `using`/`Symbol.dispose` or `kill()` | `mvmctl machine stop` |
 
 ## Current paths
@@ -236,10 +236,10 @@ await sandbox.destroy();
 Until those helpers are shipped, use:
 
 ```sh
-mvmctl pause agent-sandbox
-mvmctl resume agent-sandbox
-mvmctl checkpoint create agent-sandbox --class vm-full
-mvmctl checkpoint restore agent-sandbox --name after-index
+mvmctl machine pause agent-sandbox
+mvmctl machine resume agent-sandbox
+mvmctl machine checkpoint create agent-sandbox --class vm-full
+mvmctl machine checkpoint restore CHECKPOINT_ID
 mvmctl machine stop agent-sandbox
 ```
 

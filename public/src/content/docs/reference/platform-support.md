@@ -26,18 +26,18 @@ and which backend limitations apply.
 
 ## Build boundary by host
 
-The guest image is a Linux artifact even when the host is macOS. `mvmctl build`
+The guest image is a Linux artifact even when the host is macOS. `mvmctl machine build`
 is still a host command, but Linux-specific work belongs to the builder
 boundary.
 
 | Host                 | Where Nix/Linux image work happens                                                                  | User command                                             |
 | -------------------- | --------------------------------------------------------------------------------------------------- | -------------------------------------------------------- |
-| Linux with KVM       | Native Linux path or project builder boundary, depending on command.                                | `mvmctl build`                                           |
-| macOS Apple Silicon  | Project builder VM.                                                                                 | `mvmctl build`                                           |
+| Linux with KVM       | Native Linux path or project builder boundary, depending on command.                                | `mvmctl machine build`                                           |
+| macOS Apple Silicon  | Project builder VM.                                                                                 | `mvmctl machine build`                                           |
 | WSL2 with nested KVM | Supported workload runtime path inside the distro; builder/dev flows stay separate from this slice. | `mvmctl machine run`, `mvmctl run`, other workload verbs |
 | Windows native       | Future Linux backend/builder design.                                                                | Not supported today.                                     |
 
-You do not need host-side Nix for normal `mvmctl build` usage. The builder path
+You do not need host-side Nix for normal `mvmctl machine build` usage. The builder path
 owns Linux evaluation, image assembly, and artifact extraction.
 
 ## Runtime boundary by host

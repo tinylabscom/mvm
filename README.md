@@ -120,7 +120,6 @@ mvmctl machine run --image alpine --mount .:/work -- ls /work
 
 # Increase logging globally; RUST_LOG still overrides the generated filter
 mvmctl machine run --image alpine -vvv --allow-host api.example.com -- ps aux
-```
 
 # Cap AI API usage with a token budget by adding [network.ai] to mvm.toml:
 #   [network]
@@ -130,6 +129,7 @@ mvmctl machine run --image alpine -vvv --allow-host api.example.com -- ps aux
 #   [network.ai.budget]
 #   max_total_tokens = 1_000_000
 mvmctl machine run --flake . -- ./ask-model
+```
 
 ### Persistent machines
 
@@ -366,7 +366,7 @@ mvmctl deps capture-live HASH --vm dev-vm \
   --guest-sbom /mvm/deps/sbom.cdx.json \
   --guest-fetch-log /mvm/deps/fetch.log \
   --guest-cve /mvm/deps/cve.json              # export + reseal
-mvmctl deps inspect                       # SBOM + CVE + hash-chained meta, no VM needed
+mvmctl deps inspect HASH                  # SBOM + CVE + hash-chained meta, no VM needed
 mvmctl machine run --entrypoint --flake ./out
 ```
 
@@ -711,14 +711,32 @@ attestation.
 
 ## Documentation
 
-`just bdd` resolves every `mvmctl` example against the real command tree, checks
-every CLI option including hidden internal options, exercises the SDK fixtures,
-and rejects new README code blocks without a corresponding test witness. Static
-install, Nix, and embedding examples are checked for their required contract
-tokens; live boot, egress, and guest-I/O behavior remains covered by tagged
-integration scenarios. The merge queue also runs a KVM-backed fast witness for
-the persistent-machine path above: create, start, exec, logs, inspect, stop, and
-remove all operate one real Firecracker guest before the change can merge.
+Every `mvmctl` command printed in this README **or anywhere in the website
+docs** is a checked assertion, not prose. `just bdd` extracts all of them —
+currently 600+ invocations across 130+ pages, each with `file:line` provenance —
+and verifies each at one of three tiers:
+
+| Tier | What it proves | Runs |
+| --- | --- | --- |
+| `parse` | The real clap tree parses the invocation with full argument validation: a removed verb, renamed flag, rejected value, or wrong arity fails here. | Every PR, no VM |
+| `exec` | Additionally executed for real against an isolated `MVM_HOME`. | Every PR, no VM |
+| `live` | Additionally boots a real microVM. | `MVM_BDD_LIVE=1`, KVM/HVF host |
+
+The tier assignment in `features/suites/s29_doc_examples/tiers.toml` is
+**total**: a documented command with no entry fails the suite by name, so a
+newly documented verb cannot ship without someone deciding how it is proven. A
+`live` tier is checked against the scenarios that actually boot it, so the label
+cannot outlive its witness. Placeholder templates (`mvmctl <verb> …`) are exempt
+from parsing but their verb prefix is still resolved, so `<angle brackets>` are
+not an escape hatch — a command that never existed is either fixed or declared
+under `[[planned]]` with a reason. Commands stranded outside a code fence, which
+render as broken prose and silently drop out of extraction, fail too.
+
+`just bdd` also checks every CLI option including hidden internal ones, and
+exercises the SDK fixtures. The merge queue additionally runs a KVM-backed fast
+witness for the persistent-machine path above: create, start, exec, logs,
+inspect, stop, and remove all operate one real Firecracker guest before the
+change can merge.
 
 - [Getting started](public/src/content/docs/getting-started/) ·
   [Python quickstart](public/src/content/docs/getting-started/python-quickstart.md)

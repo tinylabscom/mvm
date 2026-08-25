@@ -11,7 +11,7 @@ CI should prefer disposable runtime guests and explicit build artifacts.
 export MVM_HOME="$PWD/.mvm-ci"
 
 mvmctl doctor --json
-mvmctl build ./ci-worker --json
+mvmctl machine build ./ci-worker --json
 mvmctl run --timeout 600 --receipt /tmp/mvm-run-receipt.json -- ./scripts/test.sh
 ```
 

@@ -18,7 +18,6 @@ data_disk = "0"
 Use CLI overrides for local experimentation:
 
 ```sh
-mvmctl machine build --flake ./my-app --vcpus 4 --mem 2G --data-disk 8G
 mvmctl machine run --flake ./my-app --cpus 4 --memory 2G
 ```
 
@@ -40,7 +39,7 @@ mvmctl doctor
 
 ## Files and volumes
 
-Keep host mounts narrow. Use `mvmctl machine fs`, `mvmctl cp`, and declared volumes
+Keep host mounts narrow. Use `mvmctl machine fs`, `mvmctl machine cp`, and declared volumes
 instead of broad writable host shares when running untrusted code.
 
 Snapshots and cold-mode artifacts may contain guest memory, generated files,

@@ -137,7 +137,7 @@ payload bytes. The list is the authoritative one:
   string is metadata only: byte counts, threshold, and cap.
 - `BackpressureReason::ServiceHealthPending { pending }` — service
   names only.
-- Receipts written by `mvmctl run` / `mvmctl machine run` / `mvmctl build`
+- Receipts written by `mvmctl run` / `mvmctl machine run` / `mvmctl machine build`
   store hashes and metadata. Raw stdout / stderr /
   stdin / env / argv values are never written.
 - `mvmctl machine ls --json` rows — the `readiness` and
@@ -251,7 +251,7 @@ once a background init thread actually ran.
 
 ### Host commands
 
-- `mvmctl wait <vm> --for <component> [--timeout <secs>]` —
+- `mvmctl machine wait <vm> --for <component> [--timeout <secs>]` —
   Blocks until the named component reaches `Ready`, `Disabled`,
   or `Failed`. Targets: `control-plane`, `entrypoint`,
   `warm-pool`, `integrations`, `probes`, or `all` (the default).
@@ -260,8 +260,8 @@ once a background init thread actually ran.
   `Disabled` counts as `Ready` (intentionally — a cold-tier
   image asking `--for warm-pool` must not spin forever).
 
-- `mvmctl boot-report <vm> [--json]` — Single round-trip; prints
-  the same `ReadinessReport` `mvmctl wait` polls, including the
+- `mvmctl machine boot-report <vm> [--json]` — Single round-trip; prints
+  the same `ReadinessReport` `mvmctl machine wait` polls, including the
   per-phase timing table. Useful right after `mvmctl machine run` to
   inspect cold-path latency.
 
@@ -361,8 +361,8 @@ The agent can report all filesystem changes since boot by walking the overlay up
 Query the diff from the host:
 
 ```bash
-mvmctl diff my-vm         # human-readable output
-mvmctl diff my-vm --json  # JSON array of {path, kind, size}
+mvmctl machine diff my-vm         # human-readable output
+mvmctl machine diff my-vm --json  # JSON array of {path, kind, size}
 ```
 
 This is useful for auditing what an AI agent modified during execution.

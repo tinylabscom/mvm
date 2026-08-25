@@ -3,7 +3,7 @@ title: Writing Nix Flakes
 description: Create custom Nix flakes that build microVM images for mvm.
 ---
 
-mvmctl uses Nix flakes to produce reproducible microVM images. You run `mvmctl build` from the host, and mvm runs Nix evaluation and `nix build` inside the Linux builder VM. The result is a kernel and rootfs that can boot on any supported runtime backend, including Firecracker, HVF, libkrun, and QEMU.
+mvmctl uses Nix flakes to produce reproducible microVM images. You run `mvmctl machine build` from the host, and mvm runs Nix evaluation and `nix build` inside the Linux builder VM. The result is a kernel and rootfs that can boot on any supported runtime backend, including Firecracker, HVF, libkrun, and QEMU.
 
 You do not need to enter a dev shell to build a flake. The dev shell is only for manually debugging the Linux build environment. See [Builder VM](/guides/builder-vm/) for the full host-vs-builder model.
 
@@ -290,7 +290,7 @@ All three helpers return the same shape: `{ package, service, healthCheck }`. Th
 
 ## Build Process
 
-When you run `mvmctl build --flake .`:
+When you run `mvmctl machine build --flake .`:
 
 1. The host CLI reads config and stages the selected flake/profile as a builder job.
 2. The builder VM runs Nix evaluation and `nix build` in Linux.
@@ -307,8 +307,8 @@ The same rootfs works on all backends (Firecracker, HVF, microvm.nix).
 The `--profile` flag selects which Nix output to build:
 
 ```bash
-mvmctl build --flake . --profile minimal
-mvmctl build --flake . --profile gateway
+mvmctl machine build --flake . --profile minimal
+mvmctl machine build --flake . --profile gateway
 ```
 
 These map to `packages.${system}.<profile>` in the flake.

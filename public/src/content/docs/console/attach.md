@@ -24,7 +24,7 @@ Use this for terminal-shaped checks. For normal automation, prefer:
 
 ```sh
 mvmctl machine exec devbox -- id
-mvmctl proc start devbox -- python /work/task.py
+mvmctl machine proc start devbox -- python /work/task.py
 ```
 
 ## Attach behavior

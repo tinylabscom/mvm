@@ -9,6 +9,7 @@
 //! shipped crate.
 
 pub mod claims;
+pub mod doc_examples;
 
 /// Cucumber tag for a scenario whose steps aren't implemented yet; always skipped.
 pub const PENDING_TAG: &str = "wip";

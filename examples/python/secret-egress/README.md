@@ -45,7 +45,7 @@ mvmctl build compile examples/python/secret-egress/app.py --out /tmp/secret-egre
 mvmctl machine run --flake /tmp/secret-egress
 ```
 
-`mvmctl compile` strips the managed `SecretRef` out of the baked image — the
+`mvmctl build compile` strips the managed `SecretRef` out of the baked image — the
 rootfs is secret-free by construction, the guest var is injected as an opaque
 placeholder only at boot — and writes the binding into `workload.json`, the
 admission input. `mvmctl machine run` auto-discovers `/tmp/secret-egress/workload.json`,

@@ -15,7 +15,7 @@ Each release includes, alongside the `.tar.gz` archives:
 
 | File | Purpose |
 |------|---------|
-| `checksums-sha256.txt` | SHA256 digests for all archives (verified automatically by `mvmctl update`) |
+| `checksums-sha256.txt` | SHA256 digests for all archives (verified automatically by `mvmctl env update`) |
 | `mvmctl-<target>.tar.gz.bundle` | Cosign signature bundle for each platform archive |
 | `sbom.cdx.json` | Software Bill of Materials (CycloneDX JSON) |
 | `sbom.cdx.json.bundle` | Cosign signature bundle for the SBOM |
@@ -99,7 +99,7 @@ cosign verify-blob \
 
 ## Verifying Checksums
 
-`mvmctl update` automatically downloads `checksums-sha256.txt` and verifies the SHA256 digest of the downloaded archive before installing. No manual step needed.
+`mvmctl env update` automatically downloads `checksums-sha256.txt` and verifies the SHA256 digest of the downloaded archive before installing. No manual step needed.
 
 To verify manually:
 
@@ -191,7 +191,7 @@ A compromised CDN or GitHub Releases page cannot forge a valid signature without
 
 ## Verifying the Builder Image Manifest
 
-Every release also publishes a cosign-keyless-signed manifest for the builder image (consumed by `mvmctl bootstrap` / `mvmctl pack download --kind builder` and mvmd's pool-build pipeline). The manifest is the trust anchor — it carries SHA-256 of every image artifact, the Nix store hash, the source git SHA, and the SHA-256 of every flake lockfile, all bound by one cosign signature.
+Every release also publishes a cosign-keyless-signed manifest for the builder image (consumed by `mvmctl bootstrap` / `mvmctl pack download builder` and mvmd's pool-build pipeline). The manifest is the trust anchor — it carries SHA-256 of every image artifact, the Nix store hash, the source git SHA, and the SHA-256 of every flake lockfile, all bound by one cosign signature.
 
 mvmctl verifies this automatically on every builder-pack fetch (`mvmctl bootstrap`, or the first `machine build` / `machine run --flake ...` that needs the builder VM). To verify manually:
 
