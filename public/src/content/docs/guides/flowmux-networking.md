@@ -57,6 +57,11 @@ the supervisor's call context rather than any request field, so one workload
 cannot address another's by asking for it. A workload whose signed plan did not
 bind the service gets `NotBound` before any handler runs.
 
+Workload code reaches the store through the language SDK, which loads the
+host-services library from the sidecar that binding the service attaches. There
+is no shell surface for it: a bare `sh` in the guest has nothing to call, by
+design — the store is for programs, not for poking at.
+
 Verbs are `get`, `put`, `delete`, and `list`. Keys are validated rather than
 sanitized — a key that would need rewriting to be safe is refused, because a
 caller that read back a different key than it wrote has no way to notice.

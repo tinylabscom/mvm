@@ -44,8 +44,9 @@ use std::ptr;
 use std::slice;
 
 use mvm_agentd::vsock::{BROKER_PORT, connect_host_vsock};
-use mvm_agentd::{host_audit, host_cost, host_time};
+use mvm_agentd::{host_audit, host_cost, host_kv, host_time};
 use mvm_core::protocol::host_audit::{EmitBatchRequest, EmitRequest};
+use mvm_core::protocol::host_kv::{KvDeleteRequest, KvGetRequest, KvListRequest, KvPutRequest};
 
 /// Call succeeded; `out` carries the typed response JSON.
 pub const MVM_HSVC_OK: i32 = 0;
@@ -136,6 +137,34 @@ fn dispatch_on(stream: &mut UnixStream, method: &str, request: &[u8]) -> Outcome
             },
             Err(o) => o,
         },
+        "host.kv.get" => match parse::<KvGetRequest>(request) {
+            Ok(req) => match host_kv::get_on(stream, &req.key) {
+                Ok(resp) => ok_json(&resp),
+                Err(e) => from_kv(e),
+            },
+            Err(o) => o,
+        },
+        "host.kv.put" => match parse::<KvPutRequest>(request) {
+            Ok(req) => match host_kv::put_on(stream, &req.key, &req.value) {
+                Ok(resp) => ok_json(&resp),
+                Err(e) => from_kv(e),
+            },
+            Err(o) => o,
+        },
+        "host.kv.delete" => match parse::<KvDeleteRequest>(request) {
+            Ok(req) => match host_kv::delete_on(stream, &req.key) {
+                Ok(resp) => ok_json(&resp),
+                Err(e) => from_kv(e),
+            },
+            Err(o) => o,
+        },
+        "host.kv.list" => match parse::<KvListRequest>(request) {
+            Ok(req) => match host_kv::list_on(stream, &req.prefix) {
+                Ok(resp) => ok_json(&resp),
+                Err(e) => from_kv(e),
+            },
+            Err(o) => o,
+        },
         "host.time.now" => match host_time::now_on(stream) {
             Ok(resp) => ok_json(&resp),
             Err(e) => from_time(e),
@@ -204,6 +233,32 @@ fn from_audit(err: host_audit::AuditError) -> Outcome {
 }
 
 /// Map a `host.time.v1` error onto a status + error JSON.
+fn from_kv(err: host_kv::KvError) -> Outcome {
+    use host_kv::KvError::*;
+    let (status, code, message) = match err {
+        NotBound => (
+            MVM_HSVC_NOT_BOUND,
+            "not_bound",
+            "host.kv.v1 not bound to this workload".to_string(),
+        ),
+        // A refused key is the caller's bug, not the host being down. Keeping
+        // them distinct is what lets a caller tell "fix the request" from
+        // "retry later".
+        BadRequest(m) => (MVM_HSVC_SERVICE, "bad_request", m),
+        Unavailable(m) => (MVM_HSVC_UNAVAILABLE, "unavailable", m),
+        Service { code, message } => (
+            MVM_HSVC_SERVICE,
+            "service_error",
+            format!("[{code:?}] {message}"),
+        ),
+        Transport(e) => (MVM_HSVC_TRANSPORT, "transport", e.to_string()),
+    };
+    Outcome {
+        status,
+        body: error_json(code, &message),
+    }
+}
+
 fn from_time(err: host_time::TimeError) -> Outcome {
     use host_time::TimeError::*;
     let (status, code, message) = match err {

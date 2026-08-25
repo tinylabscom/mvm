@@ -173,8 +173,22 @@ gate (`crates/mvm-hostd/src/broker/registry.rs:274`).
       well-formed `ServiceId`, and `crates/mvm-hostd/src/bin/mvm-broker.rs:127`
       registers from the admitted plan's binding list, so
       `--host-service host.kv.v1` already reaches the handler.
-- [ ] B-8. Live witness. Every test so far drives the handler directly; nothing
-      yet exercises a booted workload reading and writing through the broker.
+- [~] B-8. Live witness. **Starting it found that the store was not reachable
+      from workload code at all**, so the witness could not have been written.
+      Three things were missing and are now in place:
+      the in-guest client (`mvm_agentd::host_kv`), four `host.kv.*` arms in the
+      SDK cdylib's `dispatch_on` (which is a hardcoded match, not a generic
+      passthrough — an unlisted method simply has no arm), and
+      `host.kv.v1` in `SDK_HOST_SERVICES`, without which binding the service
+      attached no sidecar and the guest had no library to call it with.
+      Reachability is now witnessed by
+      `binding_the_key_value_store_attaches_the_sidecar`. The booted round-trip
+      itself is still open and needs a guest program that calls the cdylib.
+
+      This is the third time in this plan that a capability was complete on the
+      host and unreachable from a workload — after the `--peer` flag (D-4) and
+      the CLI-to-gate thread (A-9). The common cause is that unit tests cover
+      the seam under test and say nothing about whether anything can call it.
 
 ### Definition of done for WS-B
 
