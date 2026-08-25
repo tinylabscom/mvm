@@ -14,12 +14,15 @@ privilege transition, stages available compressed modules, and receives the
 required builder/runtime-overlay artifacts. Session teardown reads the recorded
 backend marker and reaps QEMU together with its vsock bridge. An opt-in
 diagnostic setting can retain transient state without changing the secure
-default cleanup behavior.
+default cleanup behavior. Pre-launch ext4 repair is limited to unsealed
+rootfs images: once dm-verity sidecars exist, the authenticated rootfs bytes
+remain immutable through launch instead of being changed by a late `e2fsck`.
 
 ## Validation
 
 - focused unit and integration tests cover entrypoint, mount, activation,
-  backend mapping, builder, and teardown behavior;
+  backend mapping, builder, teardown behavior, and the sealed/unsealed repair
+  boundary;
 - the Raspberry Pi QEMU witness ran the sealed exit-code workload and returned
   its expected status without leaving QEMU or vsock-bridge processes;
 - workspace CI remains the merge gate for formatting, Clippy, and full tests.
