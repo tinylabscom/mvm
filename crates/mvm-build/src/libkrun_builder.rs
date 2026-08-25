@@ -582,17 +582,18 @@ fn resolve_network_endpoint_path() -> Result<PathBuf, BuilderVmError> {
     for root in &target_roots {
         let built = root.join("debug").join("mvm-network-endpoint");
         if built.is_file() {
-            if endpoint_predates_running_exe(&built) {
-                return Err(BuilderVmError::ExtractionFailed(format!(
-                    "mvm-network-endpoint at {} is older than the running {} even after \
-                     rebuilding it; running them together would pair a guest and a host \
-                     from different builds",
-                    built.display(),
-                    std::env::current_exe()
-                        .map(|p| p.display().to_string())
-                        .unwrap_or_else(|_| "mvmctl".to_string()),
-                )));
-            }
+            // Deliberately no mtime re-check here. The comparison above is a
+            // cheap trigger for "might be stale, try a rebuild"; it is not a
+            // verdict, because it compares two artifacts' mtimes rather than
+            // the sources they came from.
+            //
+            // `cargo build` has just confirmed this binary is current with its
+            // sources in this workspace. When it was already current, cargo
+            // does not relink and the mtime does not move — so re-testing it
+            // against the running `mvmctl` failed forever with "even after
+            // rebuilding it". `cargo build --workspace --bins` links `mvmctl`
+            // last, so a normal build leaves the endpoint older every time and
+            // no amount of rebuilding could satisfy the check.
             return Ok(built);
         }
     }
