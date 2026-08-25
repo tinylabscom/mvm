@@ -21,17 +21,11 @@ const FAKE_ROOTHASH: &str = "0123456789abcdef0123456789abcdef0123456789abcdef012
 fn build_minimal_runtime_overlay(source_dir: &Path) -> mvm_fs::overlay::RuntimeOverlayArtifact {
     std::fs::create_dir_all(source_dir).expect("create overlay source dir");
 
-    let required_paths = [
-        "/agent",
-        "/netinit",
-        "/seccomp-apply",
-        "/runner",
-        "/egress-client",
-        "/addon-dns",
-        "/exit-report",
-        "/VERSION",
-    ];
-    let nodes: Vec<Node> = required_paths
+    // Taken from the resolver's own list rather than restated: a fixture that
+    // claims to carry "every required guest path" and then names them itself is
+    // one an added path silently makes wrong, and it fails as an unrelated
+    // integrity error rather than as a stale fixture.
+    let nodes: Vec<Node> = mvm_fs::overlay::REQUIRED_OVERLAY_GUEST_PATHS
         .iter()
         .map(|path| Node::File {
             path: path.to_string(),

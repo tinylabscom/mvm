@@ -630,6 +630,8 @@ fn build_runtime_overlay_guest_binaries_into_cache(
         "mvm-addon-dns".to_string(),
         "--bin".to_string(),
         "mvm-exit-report".to_string(),
+        "--bin".to_string(),
+        "mvm-forward-proxy".to_string(),
         // mvm-egress-client + mvm-addon-dns are the async loopback helper
         // bins gated behind mvm-agentd's `addons` feature (see its
         // Cargo.toml) so the sealed agent's default build stays tokio-free.
@@ -647,6 +649,7 @@ fn build_runtime_overlay_guest_binaries_into_cache(
     install_one(&output_dir.join("mvm-egress-client"), &layout.egress_client)?;
     install_one(&output_dir.join("mvm-addon-dns"), &layout.addon_dns)?;
     install_one(&output_dir.join("mvm-exit-report"), &layout.exit_report)?;
+    install_one(&output_dir.join("mvm-forward-proxy"), &layout.forward_proxy)?;
 
     Ok(layout.binaries())
 }

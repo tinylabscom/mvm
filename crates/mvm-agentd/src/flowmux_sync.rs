@@ -1,12 +1,10 @@
 //! Blocking one-shot FlowMux client for the guest's non-async callers.
 //!
 //! `mvm-egress-client` owns a long-lived async session and multiplexes the
-//! loopback proxy over it. Its other callers cannot reach that session: the
-//! forward proxy runs inside `mvm-guest-agent`, whose closure is deliberately
-//! tokio-free — that is what the `addons` feature gates, and the sealed agent
-//! stays on the near side of it — and the ICMP mediator runs on a blocking
-//! thread beside the runtime rather than on it. So they get this instead: open
-//! a connection, do one authenticated exchange on it, close.
+//! loopback proxy over it. Its blocking ICMP mediator cannot borrow that async
+//! session, and the secret-substitution forward proxy is a separate privileged
+//! process. They use this client instead: open a connection, do one
+//! authenticated exchange on it, close.
 //!
 //! Every caller here holds the guest signing key, which is root-only by
 //! construction. A process that runs as the workload cannot open a session at

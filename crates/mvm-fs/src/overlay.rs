@@ -74,12 +74,20 @@ pub const LOCAL_BUILD_EPOCH_FILE: &str = "BUILD_EPOCH";
 /// Guest-absolute paths every overlay ext4 payload must carry. The overlay is
 /// the single source of guest runtime binaries, so a missing entry means a
 /// boot that silently strands the agent — fail at resolve time instead.
-const REQUIRED_OVERLAY_GUEST_PATHS: &[&str] = &[
+///
+/// Public because every fixture that builds "a valid overlay" has to agree with
+/// it, and each hand-written copy is one an added entry silently invalidates —
+/// four of them existed, and adding `/forward-proxy` broke three.
+pub const REQUIRED_OVERLAY_GUEST_PATHS: &[&str] = &[
     "/agent",
     "/netinit",
     "/seccomp-apply",
     "/runner",
     "/egress-client",
+    // The whole of a secret-bearing workload's egress: that launch starts no
+    // vsock egress client, so an overlay without this strands it as completely
+    // as one without the agent.
+    "/forward-proxy",
     "/addon-dns",
     "/exit-report",
     "/VERSION",
@@ -750,7 +758,7 @@ mod tests {
             version,
             arch,
             &[
-                ("overlay.ext4", &valid_overlay_ext4_bytes(true, true, true)),
+                ("overlay.ext4", &valid_overlay_ext4_bytes()),
                 ("overlay.verity", b"verity-sidecar"),
                 ("overlay.roothash", format!("{FAKE_ROOTHASH}\n").as_bytes()),
                 ("VERSION", format!("{version}\n").as_bytes()),
@@ -758,67 +766,33 @@ mod tests {
         )
     }
 
-    fn valid_overlay_ext4_bytes(
-        include_egress_client: bool,
-        include_addon_dns: bool,
-        include_exit_report: bool,
-    ) -> Vec<u8> {
-        let mut nodes = vec![
-            Node::File {
-                path: "/agent".into(),
-                mode: 0o555,
-                data: b"agent".to_vec(),
+    /// A payload carrying every path the validator requires.
+    ///
+    /// Derived from `REQUIRED_OVERLAY_GUEST_PATHS` rather than listed again, so
+    /// adding a required entry cannot leave the fixture describing a payload
+    /// the validator would reject — which would fail every unrelated test at
+    /// once and name none of them the cause.
+    fn valid_overlay_ext4_bytes() -> Vec<u8> {
+        overlay_ext4_bytes_without(&[])
+    }
+
+    /// The same payload with `omitted` left out, for the rejection tests.
+    fn overlay_ext4_bytes_without(omitted: &[&str]) -> Vec<u8> {
+        let nodes: Vec<Node> = REQUIRED_OVERLAY_GUEST_PATHS
+            .iter()
+            .filter(|path| !omitted.contains(*path))
+            .map(|path| Node::File {
+                path: (*path).into(),
+                // `VERSION` is data the resolver reads back, not a binary.
+                mode: if *path == "/VERSION" { 0o444 } else { 0o555 },
+                data: if *path == "/VERSION" {
+                    b"0.14.0\n".to_vec()
+                } else {
+                    path.trim_start_matches('/').as_bytes().to_vec()
+                },
                 xattrs: Vec::new(),
-            },
-            Node::File {
-                path: "/netinit".into(),
-                mode: 0o555,
-                data: b"netinit".to_vec(),
-                xattrs: Vec::new(),
-            },
-            Node::File {
-                path: "/seccomp-apply".into(),
-                mode: 0o555,
-                data: b"seccomp".to_vec(),
-                xattrs: Vec::new(),
-            },
-            Node::File {
-                path: "/runner".into(),
-                mode: 0o555,
-                data: b"runner".to_vec(),
-                xattrs: Vec::new(),
-            },
-            Node::File {
-                path: "/VERSION".into(),
-                mode: 0o444,
-                data: b"0.14.0\n".to_vec(),
-                xattrs: Vec::new(),
-            },
-        ];
-        if include_egress_client {
-            nodes.push(Node::File {
-                path: "/egress-client".into(),
-                mode: 0o555,
-                data: b"egress".to_vec(),
-                xattrs: Vec::new(),
-            });
-        }
-        if include_addon_dns {
-            nodes.push(Node::File {
-                path: "/addon-dns".into(),
-                mode: 0o555,
-                data: b"addon-dns".to_vec(),
-                xattrs: Vec::new(),
-            });
-        }
-        if include_exit_report {
-            nodes.push(Node::File {
-                path: "/exit-report".into(),
-                mode: 0o555,
-                data: b"exit-report".to_vec(),
-                xattrs: Vec::new(),
-            });
-        }
+            })
+            .collect();
         crate::ext4::build_image(nodes).expect("build valid overlay ext4 fixture")
     }
 
@@ -968,7 +942,7 @@ mod tests {
             "0.14.0",
             "aarch64",
             &[
-                ("overlay.ext4", &valid_overlay_ext4_bytes(true, true, true)),
+                ("overlay.ext4", &valid_overlay_ext4_bytes()),
                 ("overlay.verity", b"sidecar"),
                 ("overlay.roothash", format!("{FAKE_ROOTHASH}\n").as_bytes()),
                 ("VERSION", b"0.14.0\n"),
@@ -1147,7 +1121,7 @@ mod tests {
             "0.14.0",
             "aarch64",
             &[
-                ("overlay.ext4", &valid_overlay_ext4_bytes(true, true, true)),
+                ("overlay.ext4", &valid_overlay_ext4_bytes()),
                 ("overlay.verity", b"sidecar"),
                 ("overlay.roothash", FAKE_ROOTHASH.as_bytes()),
                 ("VERSION", b"0.14.0"),
@@ -1164,7 +1138,10 @@ mod tests {
             "0.14.0",
             "aarch64",
             &[
-                ("overlay.ext4", &valid_overlay_ext4_bytes(false, true, true)),
+                (
+                    "overlay.ext4",
+                    &overlay_ext4_bytes_without(&["/egress-client"]),
+                ),
                 ("overlay.verity", b"sidecar"),
                 ("overlay.roothash", format!("{FAKE_ROOTHASH}\n").as_bytes()),
                 ("VERSION", b"0.14.0\n"),
@@ -1186,7 +1163,7 @@ mod tests {
             "0.14.0",
             "aarch64",
             &[
-                ("overlay.ext4", &valid_overlay_ext4_bytes(true, false, true)),
+                ("overlay.ext4", &overlay_ext4_bytes_without(&["/addon-dns"])),
                 ("overlay.verity", b"sidecar"),
                 ("overlay.roothash", format!("{FAKE_ROOTHASH}\n").as_bytes()),
                 ("VERSION", b"0.14.0\n"),
@@ -1208,7 +1185,10 @@ mod tests {
             "0.14.0",
             "aarch64",
             &[
-                ("overlay.ext4", &valid_overlay_ext4_bytes(true, true, false)),
+                (
+                    "overlay.ext4",
+                    &overlay_ext4_bytes_without(&["/exit-report"]),
+                ),
                 ("overlay.verity", b"sidecar"),
                 ("overlay.roothash", format!("{FAKE_ROOTHASH}\n").as_bytes()),
                 ("VERSION", b"0.14.0\n"),
@@ -1219,6 +1199,34 @@ mod tests {
         match err {
             OverlayError::PayloadIncomplete { missing_path, .. } => {
                 assert_eq!(missing_path, "/exit-report");
+            }
+            other => panic!("expected PayloadIncomplete, got {other:?}"),
+        }
+    }
+
+    /// A secret-bearing workload starts no vsock egress client, so this is the
+    /// whole of its egress: an overlay without it strands that workload as
+    /// completely as one without the agent, and must be refused at resolve
+    /// time rather than at its first request.
+    #[test]
+    fn resolve_rejects_overlay_payload_missing_forward_proxy() {
+        let cache = make_cache(
+            "0.14.0",
+            "aarch64",
+            &[
+                (
+                    "overlay.ext4",
+                    &overlay_ext4_bytes_without(&["/forward-proxy"]),
+                ),
+                ("overlay.verity", b"sidecar"),
+                ("overlay.roothash", format!("{FAKE_ROOTHASH}\n").as_bytes()),
+                ("VERSION", b"0.14.0\n"),
+            ],
+        );
+        let resolver = RuntimeOverlayResolver::new(cache.path().to_path_buf(), "0.14.0".into());
+        match resolver.resolve("aarch64").unwrap_err() {
+            OverlayError::PayloadIncomplete { missing_path, .. } => {
+                assert_eq!(missing_path, "/forward-proxy");
             }
             other => panic!("expected PayloadIncomplete, got {other:?}"),
         }
@@ -1395,11 +1403,7 @@ short  bar.ext4
     #[test]
     fn read_overlay_artifact_from_dir_reads_canonical_four_files() {
         let tmp = TempDir::new().unwrap();
-        std::fs::write(
-            tmp.path().join("overlay.ext4"),
-            valid_overlay_ext4_bytes(true, true, true),
-        )
-        .unwrap();
+        std::fs::write(tmp.path().join("overlay.ext4"), valid_overlay_ext4_bytes()).unwrap();
         std::fs::write(tmp.path().join("overlay.verity"), b"verity").unwrap();
         std::fs::write(
             tmp.path().join("overlay.roothash"),

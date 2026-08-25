@@ -395,6 +395,9 @@ Hermetic (gate every PR; these are what would have caught #2480):
 - [ ] There is exactly one guest→host protocol (drives the WS6 gate)
 - [ ] A launch without a FlowMux identity is refused, not booted
 - [ ] A secret-bearing workload boots only when substitution is live (the WS4 hard gate)
+- [x] The loopback substitution proxy runs in an init-owned process that holds
+      the root-only FlowMux identity; baked and overlay boots resolve the same
+      helper, and an incomplete overlay is refused before boot
 - [x] A launch whose guest authentication follows agent readiness waits for the
       authenticated-session event instead of racing a one-shot marker read
 - [ ] `machine run --image alpine --dry-run` reports the transport, as a
