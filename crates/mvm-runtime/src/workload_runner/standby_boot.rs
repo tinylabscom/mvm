@@ -396,10 +396,12 @@ mod tests {
         })
     }
 
-    fn without_guest_hostname(cmdline: &str) -> String {
+    fn without_per_boot_tokens(cmdline: &str) -> String {
         cmdline
             .split_whitespace()
-            .filter(|token| !token.starts_with("mvm.hostname="))
+            .filter(|token| {
+                !token.starts_with("mvm.hostname=") && !token.starts_with("mvm.hostepoch=")
+            })
             .collect::<Vec<_>>()
             .join(" ")
     }
@@ -429,8 +431,8 @@ mod tests {
             "the parent must attach the workload's whole disk stack, overlay included"
         );
         assert_eq!(
-            parent.cmdline,
-            without_guest_hostname(&workload.cmdline),
+            without_per_boot_tokens(&parent.cmdline),
+            without_per_boot_tokens(&workload.cmdline),
             "the parent must boot the workload's kernel cmdline, verity and runtime-source \
              tokens included, leaving claim identity for post-restore"
         );
@@ -475,8 +477,8 @@ mod tests {
             workload.cmdline
         );
         assert_eq!(
-            parent.cmdline,
-            without_guest_hostname(&workload.cmdline),
+            without_per_boot_tokens(&parent.cmdline),
+            without_per_boot_tokens(&workload.cmdline),
             "a parent warmed for an egress-allowing launch must boot that launch's cmdline"
         );
         assert_eq!(
@@ -542,7 +544,10 @@ mod tests {
             "a deny-all workload boots no egress client: {}",
             workload.cmdline
         );
-        assert_eq!(parent.cmdline, without_guest_hostname(&workload.cmdline));
+        assert_eq!(
+            without_per_boot_tokens(&parent.cmdline),
+            without_per_boot_tokens(&workload.cmdline)
+        );
         assert!(!parent.cmdline.contains("mvm.hostname="));
     }
 
@@ -596,7 +601,10 @@ mod tests {
             "so must the parent warmed for it: {}",
             parent.cmdline
         );
-        assert_eq!(parent.cmdline, without_guest_hostname(&workload.cmdline));
+        assert_eq!(
+            without_per_boot_tokens(&parent.cmdline),
+            without_per_boot_tokens(&workload.cmdline)
+        );
         assert!(!parent.cmdline.contains("mvm.hostname="));
         assert!(!parent_cfg.network_policy.allows_egress());
         assert_eq!(parent_cfg.plan_json, None, "a parent still holds no plan");
