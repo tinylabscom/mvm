@@ -2911,15 +2911,6 @@ to the configured ceiling and the first terse response immediately after it.
 - [x] Cover the retained-state path with a focused CLI regression test and record
       the delivery in `specs/sprint/delivery/2825-retained-state-logs-error.md`.
 
-## 2026-08-24 AArch64 sealed-workload witness closeout
-
-- [x] Complete the sealed-workload QEMU path on Raspberry Pi, including the
-      AArch64 console, guest uid, compressed-module, and builder-overlay fixes.
-- [x] Resolve teardown through the backend recorded in machine state so QEMU
-      and its vsock bridge are reaped reliably.
-- [x] Preserve focused regressions and the hardware witness in
-      `specs/sprint/delivery/2836-aarch64-sealed-workload-witness.md`.
-
 ## 2026-08-23 FlowMux forward-proxy identity repair
 
 - [x] Move the secret-substitution forward proxy out of the workload-uid guest
@@ -2946,3 +2937,12 @@ to the configured ceiling and the first terse response immediately after it.
 - [x] Preserve networkless guest boot by making an absent identity optional
       only when vsock egress is not requested; unreadable and required
       identities remain fail-closed.
+
+## 2026-08-24 AArch64 sealed-workload witness closeout
+
+- [x] Complete the sealed-workload QEMU path on Raspberry Pi, including the
+      AArch64 console, guest uid, compressed-module, and builder-overlay fixes.
+- [x] Resolve teardown through the backend recorded in machine state so QEMU
+      and its vsock bridge are reaped reliably.
+- [x] Preserve focused regressions and the hardware witness in
+      `specs/sprint/delivery/2836-aarch64-sealed-workload-witness.md`.
