@@ -491,6 +491,10 @@ reason = "deliberately not a public verb — the reference says policy authoring
 path = "addon"
 reason = "the addon CLI is unbuilt; the migration guide says 'once the addon CLI lands'"
 
+[[absent]]
+path = "exec"
+reason = "the bare verb was merged into `run`; the CLI reference records the merge in the past tense"
+
 # mkGuest attributes the docs teach that its argument set does not accept.
 # Declared rather than deleted: these describe intended surface, and removing
 # the sections would lose the design. Each must stay absent — the suite fails
