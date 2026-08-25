@@ -99,6 +99,14 @@ required-features = ["addons"]
 name = "mvm-ping"
 path = "src/bin/mvm-ping.rs"
 
+# The guest's loopback forward proxy for secret-bearing egress. Its own
+# privileged process because relaying opens an authenticated FlowMux session,
+# which reads the root-only guest signing key. No `addons` feature: the proxy is
+# entirely `std` and blocking.
+[[bin]]
+name = "mvm-forward-proxy"
+path = "src/bin/mvm-forward-proxy.rs"
+
 # In-guest one-shot workload-exit-code reporter over AF_VSOCK.
 [[bin]]
 name = "mvm-exit-report"
