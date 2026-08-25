@@ -47,9 +47,12 @@ and report the cold-build phase clearly.
   the local Docker witness passes through that one device. The runtime overlay
   is prepared before that builder produces the workload kernel.
   Hook-mutated rootfs images pass an offline journal repair/check after their
-  writable mount is dropped and are flushed before export completion; the
-  workload can therefore retain a hypervisor-enforced read-only rootfs without
-  relying on ext4's unsafe `noload` escape hatch.
+  writable mount is dropped. Each final destination image is checked again
+  after publication copy and before its durability sync; the workload can
+  therefore retain a hypervisor-enforced read-only rootfs without relying on
+  ext4's unsafe `noload` escape hatch. The persistent-builder path captures the
+  hook command's actual exit status before deciding whether publication may
+  continue.
   The tagged release workflow independently signs the newly packaged overlay
   and drives it through the exact production downloader before publish
 - refreshed standalone `mvm-hostd` fuzz lock passes stable and pinned-nightly
