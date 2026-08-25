@@ -2886,6 +2886,15 @@ to the configured ceiling and the first terse response immediately after it.
 - [x] Record the delivered behavior in
       `specs/sprint/delivery/2819-transient-start-console-diagnostic.md`.
 
+## 2026-08-24 stopped-machine log diagnostic closeout
+
+- [x] Distinguish a missing machine state directory from other output-capture
+      failures when `machine logs` has no readable source.
+- [x] Name the inspected state directory and direct operators to `machine ls`
+      instead of exposing the raw stream error.
+- [x] Cover the missing-state path with focused CLI regression tests and record
+      the delivery in `specs/sprint/delivery/2824-stopped-vm-logs-error.md`.
+
 ## 2026-08-23 FlowMux forward-proxy identity repair
 
 - [x] Move the secret-substitution forward proxy out of the workload-uid guest
