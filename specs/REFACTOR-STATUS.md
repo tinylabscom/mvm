@@ -17,6 +17,12 @@ for detailed scope and acceptance criteria.
 
 ## Completed issue closeouts
 
+- [x] **Transient start console diagnostics.** A transient backend-start
+      failure now prints the guest console diagnostic before deleting the
+      machine state directory, preserving the guest-side cause while retaining
+      cleanup and the original startup error. See
+      `specs/sprint/delivery/2819-transient-start-console-diagnostic.md`.
+
 - [x] **Nix guest FlowMux identity ownership.** The shell init now delegates
       identity-drive mounting to a short root-owned Rust action, assigns only
       the 0400 signing key to reserved service uid 989, and then starts the
