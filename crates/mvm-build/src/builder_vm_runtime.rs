@@ -138,6 +138,11 @@ pub const MVM_BUILDER_STORE_GC_GIB_ENV: &str = "MVM_BUILDER_STORE_GC_GIB";
 pub(crate) fn seal_rootfs_journal_sh(rootfs_path: &str) -> String {
     format!(
         r#"echo "mvm-builder-vm: sealing rootfs journal" >&2
+if ! chmod 0644 {rootfs_path}; then
+    echo "mvm-builder-vm: rootfs permission normalization failed" >&2
+    rm -f {rootfs_path}
+    exit 1
+fi
 set +e
 /sbin/e2fsck -p -f {rootfs_path} >&2
 fsck_rc=$?
@@ -2098,11 +2103,14 @@ mod tests {
         let journal_idx = body
             .find(r#"/sbin/e2fsck -p -f "/out/rootfs.ext4""#)
             .expect("offline rootfs journal check present");
+        let writable_idx = body
+            .find(r#"chmod 0644 "/out/rootfs.ext4""#)
+            .expect("final rootfs permission normalization present");
         let out_copy_idx = body
             .find(r#"cp -L "$BUILD_HOOK_ROOTFS" /out/rootfs.ext4"#)
             .expect("final rootfs copy present");
         assert!(
-            hook_idx < out_copy_idx && out_copy_idx < journal_idx,
+            hook_idx < out_copy_idx && out_copy_idx < writable_idx && writable_idx < journal_idx,
             "the exported rootfs must be checked after the hook and final copy"
         );
         let sync_idx = body
@@ -2142,6 +2150,11 @@ mod tests {
         assert!(
             body.contains("rootfs journal check failed (exit $fsck_rc)"),
             "the offline checker must fail closed for every other exit code in:\n{body}"
+        );
+        assert!(
+            body.contains("rootfs permission normalization failed")
+                && body.contains("rm -f \"/out/rootfs.ext4\""),
+            "an artifact that cannot be made writable for repair must be removed in:\n{body}"
         );
         assert!(
             !body.contains("/sbin/mvm-host-vm-init seal-rootfs-journal"),
