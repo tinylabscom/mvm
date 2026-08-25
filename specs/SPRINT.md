@@ -28,6 +28,16 @@
       new separation. Remaining: land the change, measure post-change queue
       latency, and record the result.
 
+
+- [ ] **Quantum-safe cryptography transition for mvm and mvmd.**
+      `specs/plans/2026-08-25-quantum-safe-cryptography-transition.md`.
+      Inventory the classical signature and key-exchange surfaces
+      (Ed25519, X25519, ECDSA P-256, TLS, cosign/Sigstore), adopt ML-KEM
+      and ML-DSA behind a `post-quantum` feature and `MVM_PQ_POLICY` knob,
+      and migrate host↔guest sessions, snapshots, attestation, binary
+      integrity, plans/bundles, release trust, TLS, and mvmd control-plane
+      messages to hybrid mode. Plan is staged; no implementation work has
+      started.
 ## Delivered (archive — closed to new entries)
 
 > **Do not append here.** A new delivery entry goes in its own file under
