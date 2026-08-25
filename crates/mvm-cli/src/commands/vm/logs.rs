@@ -143,7 +143,7 @@ fn execute(args: Args) -> Result<()> {
             if !state_dir.exists() {
                 anyhow::bail!(
                     "microVM {:?} has no state directory at {}; it may have been removed \
-                     or never booted",
+                     or never booted. Run `machine ls` to verify that it still exists",
                     vm,
                     state_dir.display()
                 );
@@ -876,6 +876,9 @@ mod tests {
         assert!(rendered.contains("no state directory"), "{rendered}");
         // Verify it suggests the VM may have been removed
         assert!(rendered.contains("removed"), "{rendered}");
+        // Give the operator a concrete next command instead of only naming
+        // possible causes.
+        assert!(rendered.contains("machine ls"), "{rendered}");
     }
 
     #[test]
