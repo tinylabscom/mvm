@@ -1756,11 +1756,14 @@ mod tests {
         let journal_idx = body
             .find("/sbin/e2fsck -p -f \"$OUT_DIR/rootfs.ext4\"")
             .expect("offline rootfs journal check present");
+        let writable_idx = body
+            .find("chmod 0644 \"$OUT_DIR/rootfs.ext4\"")
+            .expect("final rootfs permission normalization present");
         let out_copy_idx = body
             .find("cp -L \"$BUILD_HOOK_ROOTFS\" \"$OUT_DIR/rootfs.ext4\"")
             .expect("final rootfs copy present");
         assert!(
-            hook_idx < out_copy_idx && out_copy_idx < journal_idx,
+            hook_idx < out_copy_idx && out_copy_idx < writable_idx && writable_idx < journal_idx,
             "the exported rootfs must be checked after the hook and final copy"
         );
         let sync_idx = body
@@ -1795,6 +1798,11 @@ mod tests {
         assert!(
             body.contains("rootfs journal check failed (exit $fsck_rc)"),
             "the offline checker must fail closed for every other exit code in:\n{body}"
+        );
+        assert!(
+            body.contains("rootfs permission normalization failed")
+                && body.contains("rm -f \"$OUT_DIR/rootfs.ext4\""),
+            "an artifact that cannot be made writable for repair must be removed in:\n{body}"
         );
         assert!(
             !body.contains("/sbin/mvm-host-vm-init seal-rootfs-journal"),
