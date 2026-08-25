@@ -190,10 +190,10 @@ env={
 <TabItem label="TypeScript">
 
 ```ts
-env: {
+const env = {
   MODEL: mvm.literal("gpt-4.1-mini"),
   OPENAI_API_KEY: mvm.secret("openai-api-key", { type: "bearer", hosts: ["api.openai.com"], var: "OPENAI_API_KEY" }),
-}
+};
 ```
 
 </TabItem>

@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use clap::Command as ClapCommand;
 use cucumber::then;
 use mvm_conformance::doc_examples::{
-    DocExample, ExampleSource, Tier, TierPolicy, doc_examples, documentation_files,
+    DocExample, ExampleSource, Tier, TierPolicy, doc_examples, documentation_files, is_elided,
     live_scenario_commands, mk_guest_call_attributes, mk_guest_parameters,
     mvmctl_lines_outside_fences,
 };
@@ -655,7 +655,7 @@ fn every_toml_and_json_block_parses(_world: &mut CliWorld) {
 
     for block in all_code_blocks() {
         // A block carrying placeholder syntax is a shape, not a document.
-        let illustrative = block.is_ignored() || block.body.contains('…');
+        let illustrative = block.is_ignored() || is_elided(&block.body);
         if illustrative {
             continue;
         }
@@ -708,7 +708,7 @@ fn blocks_in(language: &[&str]) -> Vec<BlockPayload> {
     all_code_blocks()
         .into_iter()
         .filter(|block| language.contains(&block.language.as_str()))
-        .filter(|block| !block.is_ignored() && !block.body.contains('…'))
+        .filter(|block| !block.is_ignored() && !is_elided(&block.body))
         .map(|block| BlockPayload {
             file: block.file.clone(),
             line: block.line,
@@ -848,7 +848,7 @@ fn documented_mkguest_calls_are_valid(_world: &mut CliWorld) {
     let mut checked = 0usize;
 
     for block in all_code_blocks() {
-        if block.language != "nix" || block.is_ignored() || block.body.contains('…') {
+        if block.language != "nix" || block.is_ignored() || is_elided(&block.body) {
             continue;
         }
         let attributes = mk_guest_call_attributes(&block.body);
@@ -879,4 +879,71 @@ fn documented_mkguest_calls_are_valid(_world: &mut CliWorld) {
         failures.len(),
         failures.join("\n")
     );
+}
+
+/// Exit status the TypeScript typechecker uses to say its toolchain is absent.
+const TOOLCHAIN_ABSENT: i32 = 3;
+
+#[then(expr = "every documented TypeScript example typechecks against the local SDK")]
+fn documented_typescript_examples_typecheck(_world: &mut CliWorld) {
+    use std::io::Write as _;
+    use std::process::Stdio;
+
+    // Typecheck only blocks that import the SDK. A block that does not is an
+    // excerpt — a few lines lifted out of a program, using names defined in
+    // prose around it — and demanding it compile standalone reports the missing
+    // context as 77 findings that are all the same non-problem. Those blocks
+    // are still covered by the name-resolution scenario.
+    let blocks: Vec<BlockPayload> = blocks_in(&["ts", "typescript"])
+        .into_iter()
+        .filter(|block| block.body.contains("from \"@runmvm/mvm\""))
+        .collect();
+    assert!(
+        !blocks.is_empty(),
+        "no self-contained TypeScript examples were found to typecheck"
+    );
+
+    let root = repo_root();
+    let sdk = root.join("crates/mvm-sdk/sdks/typescript");
+    let script = root
+        .join("features/suites/s29_doc_examples/fixtures")
+        .join("typecheck_typescript_examples.mjs");
+
+    let mut child = std::process::Command::new("node")
+        .arg(&script)
+        .env("MVM_TS_SDK_ROOT", &sdk)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|error| panic!("spawn node {}: {error}", script.display()));
+    child
+        .stdin
+        .as_mut()
+        .expect("typechecker stdin")
+        .write_all(&serde_json::to_vec(&blocks).expect("serialize blocks"))
+        .expect("write blocks");
+    let output = child.wait_with_output().expect("typechecker output");
+
+    if output.status.code() == Some(TOOLCHAIN_ABSENT) {
+        // The SDK dev toolchain is not installed. Say so loudly rather than
+        // passing quietly: the sibling name-resolution scenario still ran, so
+        // coverage is reduced here, not absent.
+        eprintln!(
+            "[bdd] SKIPPED: TypeScript typecheck — no SDK toolchain at {}.\n\
+             [bdd]   Run `just sdk-ts-install` to enable it. Name resolution \
+             still ran; argument shapes did not.",
+            sdk.display()
+        );
+        return;
+    }
+
+    assert!(
+        output.status.success(),
+        "typechecker failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let findings: Vec<Finding> =
+        serde_json::from_slice(&output.stdout).expect("parse typecheck findings");
+    report(&findings, "TypeScript typecheck", blocks.len());
 }

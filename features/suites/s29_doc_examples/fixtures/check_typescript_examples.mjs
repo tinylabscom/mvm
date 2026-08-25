@@ -99,8 +99,53 @@ function namedImports(body, specifiers) {
   return found;
 }
 
+/**
+ * Blank out comments and string literals, preserving offsets.
+ *
+ * A comment mentioning `mvm.toml`, or a string containing `mvm.foo`, is prose.
+ * Scanning it for member accesses invents findings — and an invented finding
+ * costs more than a missed one, because it teaches the reader to ignore the
+ * gate. Replacing in place rather than deleting keeps line numbers honest.
+ */
+function stripCommentsAndStrings(body) {
+  let out = "";
+  let i = 0;
+  while (i < body.length) {
+    const two = body.slice(i, i + 2);
+    if (two === "//") {
+      const end = body.indexOf("\n", i);
+      const stop = end === -1 ? body.length : end;
+      out += " ".repeat(stop - i);
+      i = stop;
+      continue;
+    }
+    if (two === "/*") {
+      const end = body.indexOf("*/", i + 2);
+      const stop = end === -1 ? body.length : end + 2;
+      out += body.slice(i, stop).replace(/[^\n]/g, " ");
+      i = stop;
+      continue;
+    }
+    const ch = body[i];
+    if (ch === '"' || ch === "'" || ch === "`") {
+      let j = i + 1;
+      while (j < body.length && body[j] !== ch) {
+        if (body[j] === "\\") j += 1;
+        j += 1;
+      }
+      out += body.slice(i, Math.min(j + 1, body.length)).replace(/[^\n]/g, " ");
+      i = j + 1;
+      continue;
+    }
+    out += ch;
+    i += 1;
+  }
+  return out;
+}
+
 /** `alias.name` property accesses, with the line each appears on. */
-function memberUses(body, aliases) {
+function memberUses(rawBody, aliases) {
+  const body = stripCommentsAndStrings(rawBody);
   const found = [];
   for (const alias of aliases) {
     const pattern = new RegExp(`\\b${alias}\\.(\\w+)`, "g");

@@ -27,7 +27,7 @@ import mvm
     image=mvm.nix_packages(["python312", "uv"]),
     resources=mvm.resources(cpu_cores=1, memory_mb=512, rootfs_size_mb=512),
     network=mvm.network(
-        mode="deny",
+        mode="none",
         egress=mvm.egress([mvm.host_port("api.openai.com", 443)]),
     ),
     env={
@@ -54,7 +54,9 @@ export const run = mvm.app({
   source: mvm.localPath("."),
   image: mvm.nix_packages(["nodejs_22", "pnpm"]),
   resources: mvm.resources({ cpu_cores: 1, memory_mb: 512 }),
-  network: mvm.network({ mode: "deny", allow_https: ["api.openai.com"] }),
+  // The TypeScript `network()` surface is mode + ports + ai today; an egress
+  // allow-list is declared from Python or in mvm.toml.
+  network: mvm.network({ mode: "none" }),
   env: {
     OPENAI_API_KEY: mvm.secret("openai-api-key", { type: "bearer", hosts: ["api.openai.com"] }),
   },

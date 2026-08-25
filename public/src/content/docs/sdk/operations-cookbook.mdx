@@ -45,7 +45,7 @@ with mvm.Sandbox.create(
     ttl="30m",
     include=["src"],
     resources=mvm.resources(cpu_cores=1, memory_mb=512, rootfs_size_mb=1024),
-    network=mvm.network(mode="deny"),
+    network=mvm.network(mode="none"),
 ) as sandbox:
     sandbox.files.write("/app/main.py", "print('hello from mvm')")
     sandbox.commands.start(
@@ -80,12 +80,15 @@ using sandbox = Sandbox.create("node-22", {
   ttl: "30m",
   include: ["src"],
   resources: resources({ cpu_cores: 1, memory_mb: 512, rootfs_size_mb: 1024 }),
-  network: network({ mode: "deny" }),
+  network: network({ mode: "none" }),
 });
 
 sandbox.files.write("/app/main.js", "console.log('hello from mvm')");
 sandbox.commands.start(["node", "/app/main.js"], {
-  env: { MODE: "dev", API_KEY: secret("api-key") },
+  env: {
+    MODE: "dev",
+    API_KEY: secret("api-key", { type: "bearer", hosts: ["api.example.com"] }),
+  },
 });
 ```
 

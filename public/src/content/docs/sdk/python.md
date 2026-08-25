@@ -37,7 +37,7 @@ import mvm
     source=mvm.local_path("."),
     image=mvm.nix_packages(["python312"]),
     resources=mvm.resources(cpu_cores=1, memory_mb=256, rootfs_size_mb=512),
-    network=mvm.network(mode="deny"),
+    network=mvm.network(mode="none"),
 )
 def run() -> str:
     return "ok"

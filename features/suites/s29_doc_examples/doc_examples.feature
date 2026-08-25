@@ -76,3 +76,10 @@ Feature: Documented examples work
     # the hermetic lane has no `nix` binary, and the header is a flat
     # attribute list that does not need one.
     Then every documented mkGuest call names real attributes
+
+  Scenario: documented TypeScript examples typecheck against the local SDK
+    # The Rust examples get a compiler; this is the same for TypeScript.
+    # `@runmvm/mvm` is mapped to this checkout's `src/index.ts`, so the docs
+    # are checked against the SDK in this tree, not the published one. Skips
+    # loudly when the SDK dev toolchain is absent.
+    Then every documented TypeScript example typechecks against the local SDK

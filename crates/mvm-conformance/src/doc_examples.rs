@@ -1138,6 +1138,24 @@ mod tests {
     }
 
     #[test]
+    fn an_ellipsis_line_marks_an_excerpt() {
+        assert!(is_elided("fn a() {\n  ...\n}\n"));
+        assert!(is_elided("let x = 1; // …\n"));
+    }
+
+    #[test]
+    fn spread_and_rest_syntax_are_not_elisions() {
+        assert!(
+            !is_elided("const b = { ...a, c: 1 };\n"),
+            "an object spread was read as an elision"
+        );
+        assert!(
+            !is_elided("function f(...args: string[]) {}\n"),
+            "a rest parameter was read as an elision"
+        );
+    }
+
+    #[test]
     fn tier_lookup_falls_back_to_the_longest_registered_prefix() {
         let policy = TierPolicy::from_entries([
             (vec!["machine".to_string()], Tier::Parse),
@@ -1224,6 +1242,23 @@ mod corpus_tests {
             }
         }
     }
+}
+
+/// Whether a code block is abbreviated rather than complete.
+///
+/// Docs elide the uninteresting middle of an example, with a `…` or a line
+/// holding nothing but `...`. Such a block is a excerpt, not a program: it
+/// cannot compile or typecheck, and demanding that it does would push authors
+/// toward opting out entirely.
+///
+/// Only a line that is *solely* dots counts. `...` is legal syntax — a spread
+/// or a rest parameter — so a blanket substring test would silently drop real
+/// examples from checking.
+pub fn is_elided(body: &str) -> bool {
+    body.contains('…')
+        || body
+            .lines()
+            .any(|line| !line.trim().is_empty() && line.trim().chars().all(|c| c == '.'))
 }
 
 /// The attribute names `mkGuest` accepts, read from its Nix argument set.

@@ -37,7 +37,7 @@ import * as mvm from "@runmvm/mvm";
 export const hello = mvm.app({
   image: mvm.nix_packages(["nodejs_22"]),
   resources: mvm.resources({ cpu_cores: 1, memory_mb: 512 }),
-  network: mvm.network({ mode: "deny" }),
+  network: mvm.network({ mode: "none" }),
 })((name: string): string => `hello ${name}`);
 ```
 
