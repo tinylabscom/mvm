@@ -9,6 +9,8 @@
 /// cached action's output artifacts, and a verify-on-read helper that
 /// recomputes each artifact's digest before a cache entry is trusted.
 pub mod action;
+/// SCITT-compatible action state capsules with hash chaining and evidence binding.
+pub mod action_state;
 pub mod arch;
 pub mod at_rest;
 pub mod build_env;
