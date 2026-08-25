@@ -104,8 +104,10 @@ for detailed scope and acceptance criteria.
       bounded activation retry; identity and protocol rejections still fail
       closed. Failed transient starts emit a redacted guest-console tail before
       cleanup. Hook-mutated ext4 images are checked and journal-replayed
-      offline after the writable mount is dropped, then flushed at every export
-      boundary; a mounted or damaged image fails before publication, preserving
+      offline after the writable mount is dropped. Every destination is checked
+      again after the final publication copy and before its durability sync;
+      the persistent-builder path preserves the hook command's real exit
+      status. A mounted or damaged image fails before publication, preserving
       the workload's hypervisor-enforced read-only rootfs contract.
       The tagged release workflow separately verifies the signed
       future-format overlay through the production downloader before publish.
