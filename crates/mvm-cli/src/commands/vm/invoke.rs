@@ -86,6 +86,9 @@ pub(in crate::commands) struct EntrypointCall {
     /// endpoint so a baked entrypoint enforces egress identically to the
     /// transient argv path. Defaults to `deny_all`.
     pub network_policy: mvm_core::network_policy::NetworkPolicy,
+    /// Explicit hypervisor/backend selector passed through from `--hypervisor`.
+    /// When `None` the platform-default auto-selection is used.
+    pub hypervisor: Option<String>,
 }
 
 /// How a call's stdin is supplied.
@@ -425,9 +428,14 @@ pub(in crate::commands) fn run_entrypoint(call: EntrypointCall) -> Result<()> {
         .map(|w| super::managed_secrets::lower_workload_secrets(&w))
         .filter(|lowered| !lowered.secrets.is_empty())
         .unwrap_or_default();
-    let backend_name = mvm_runtime::backend::AnyBackend::auto_select()
-        .name()
-        .to_string();
+    let backend_name = if let Some(name) = call.hypervisor.as_deref() {
+        mvm_runtime::backend::AnyBackend::require_hypervisor_selectable(name)?;
+        mvm_runtime::backend::AnyBackend::from_hypervisor(name)
+    } else {
+        mvm_runtime::backend::AnyBackend::auto_select()
+    }
+    .name()
+    .to_string();
     let admit_backend = backend_name.clone();
     let cpus = call.cpus;
     let mem = call.memory_mib as u64;
@@ -466,6 +474,7 @@ pub(in crate::commands) fn run_entrypoint(call: EntrypointCall) -> Result<()> {
         call.memory_mib,
         &network_policy,
         Some(&admit),
+        Some(&backend_name),
     ) {
         Ok(vm) => {
             let ctx = admit_ctx.borrow_mut().take();
@@ -2335,6 +2344,7 @@ mod streamed_stdin_tests {
             r#fn: None,
             attach: true,
             network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
+            hypervisor: None,
         }
     }
 

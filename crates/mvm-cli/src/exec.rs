@@ -1910,6 +1910,10 @@ fn teardown_transient_vm(
 /// claim may replace the generated request name with a standby id, while plan
 /// admission has already persisted state under the generated name.
 fn remove_transient_state_dirs(effective_dir: &Path, requested_dir: &Path) {
+    if std::env::var_os("MVM_PRESERVE_TRANSIENT_STATE").is_some() {
+        eprintln!("[mvm] Preserving transient state dirs: {effective_dir:?} {requested_dir:?}");
+        return;
+    }
     remove_transient_state_dir(&effective_dir.to_string_lossy());
     if effective_dir != requested_dir {
         remove_transient_state_dir(&requested_dir.to_string_lossy());
@@ -2232,6 +2236,7 @@ pub fn boot_session_vm(
     memory_mib: u32,
     network_policy: &mvm_core::network_policy::NetworkPolicy,
     admit: Option<&SessionAdmit<'_>>,
+    backend_name: Option<&str>,
 ) -> Result<SessionVm> {
     let (spec, vmlinux, initrd, rootfs, rev) =
         mvm_runtime::vm::template::lifecycle::template_artifacts_for_boot(env)
@@ -2240,7 +2245,12 @@ pub fn boot_session_vm(
         .ok()
         .flatten();
 
-    let backend = AnyBackend::auto_select();
+    let backend = if let Some(name) = backend_name {
+        AnyBackend::require_hypervisor_selectable(name)?;
+        AnyBackend::from_hypervisor(name)
+    } else {
+        AnyBackend::auto_select()
+    };
     // Append the same nanosecond suffix transient_vm_name uses so
     // concurrent boots in the same session don't collide.
     let vm_name = format!("{}-{}", vm_name_prefix, transient_vm_name());
@@ -2419,7 +2429,11 @@ pub fn dispatch_in_session(
 /// propagated, since the reaper calls this from a background thread
 /// where there's nobody to receive an error.
 pub fn tear_down_session_vm(vm: SessionVm) {
-    let backend = AnyBackend::auto_select();
+    // Use the marker file in the VM's state dir to pick the backend that
+    // actually launched it. Falling back to auto_select() would dispatch
+    // teardown to the wrong VMM (e.g., libkrun instead of QEMU) and leave
+    // the guest process running.
+    let backend = AnyBackend::for_started_vm(&vm.vm_name).unwrap_or_else(AnyBackend::auto_select);
     if let Err(e) = backend.stop(&VmId(vm.vm_name.clone())) {
         tracing::warn!(vm = %vm.vm_name, err = %e, "session VM teardown failed");
     }

@@ -777,6 +777,11 @@ just lint            # cargo fmt --all -- --check  +  clippy -D warnings
 just ci              # lint + tests + doctests — run this before every PR
 ```
 
+When iterating on `mvmctl` itself, make sure you are running the freshly-built
+binary. A manually-copied `bin/mvmctl` or a stale `target/release/mvmctl` can
+miss backend fixes — for example, the QEMU session teardown that reaps
+`qemu-system-aarch64` and `mvmctl __qemu-vsock-bridge` after a transient run.
+
 The repository pins a dated nightly and installs Cranelift through
 `rust-toolchain.toml`. Development recipes route Cargo through
 `scripts/cargo-fast.sh`: dev builds use Cranelift and eight frontend threads,

@@ -1127,6 +1127,7 @@ pub fn stage_flake_dispatch_job(
              rm -f \"$BUILD_HOOK_ROOTFS\"\n\
              exit $hook_rc\n\
          fi\n\
+         {seal_rootfs_journal_sh}\n\
          cp -L \"$BUILD_HOOK_ROOTFS\" \"$OUT_DIR/rootfs.ext4\"\n\
          /sbin/mvm-host-vm-init seal-rootfs-journal \"$OUT_DIR/rootfs.ext4\"\n\
          sync\n\
@@ -1138,6 +1139,7 @@ pub fn stage_flake_dispatch_job(
         store_path_sidecar = STORE_PATH_SIDECAR,
         flake_ref = shell_single_quote(flake_ref),
         attr = shell_single_quote(attr),
+        seal_rootfs_journal_sh = crate::builder_vm_runtime::SEAL_ROOTFS_JOURNAL_SH,
     );
     let cmd_path = sub.join("cmd.sh");
     std::fs::write(&cmd_path, script)?;
@@ -1751,12 +1753,15 @@ mod tests {
         let hook_idx = body
             .find("/sbin/mvm-host-vm-init run-before-build-hook")
             .expect("hook runner present");
+        let journal_idx = body
+            .find("/sbin/e2fsck -p -f \"$BUILD_HOOK_ROOTFS\"")
+            .expect("offline rootfs journal check present");
         let out_copy_idx = body
             .find("cp -L \"$BUILD_HOOK_ROOTFS\" \"$OUT_DIR/rootfs.ext4\"")
             .expect("final rootfs copy present");
         assert!(
-            hook_idx < out_copy_idx,
-            "before_build hook must run before rootfs.ext4 is copied to OUT_DIR"
+            hook_idx < journal_idx && journal_idx < out_copy_idx,
+            "the hook and offline journal check must run before rootfs.ext4 is copied to OUT_DIR"
         );
         let sync_idx = body
             .find("sync\nrm -f \"$BUILD_HOOK_ROOTFS\"")
@@ -1775,6 +1780,24 @@ mod tests {
         assert!(
             body.contains("mvm-host-vm-init: before_build hook failed"),
             "missing hook failure message in:\n{body}"
+        );
+        assert!(
+            body.contains(
+                "set +e\n/sbin/mvm-host-vm-init run-before-build-hook \"$BUILD_HOOK_ROOTFS\"\nhook_rc=$?\nset -e"
+            ),
+            "the hook's real exit status must be captured before testing it in:\n{body}"
+        );
+        assert!(
+            !body.contains("if ! /sbin/mvm-host-vm-init run-before-build-hook"),
+            "negating the hook command loses its real exit status in:\n{body}"
+        );
+        assert!(
+            body.contains("0|1) ;;"),
+            "the offline checker must accept clean and repaired exit codes in:\n{body}"
+        );
+        assert!(
+            body.contains("rootfs journal check failed (exit $fsck_rc)"),
+            "the offline checker must fail closed for every other exit code in:\n{body}"
         );
     }
 

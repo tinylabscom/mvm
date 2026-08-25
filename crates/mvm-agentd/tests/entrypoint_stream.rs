@@ -56,7 +56,11 @@ fn loopback_pair() -> (UnixStream, UnixStream) {
 fn shell_entrypoint() -> ValidatedEntrypoint {
     let resolved = PathBuf::from("/bin/sh");
     let file = File::open(&resolved).expect("/bin/sh");
-    ValidatedEntrypoint { resolved, file }
+    ValidatedEntrypoint {
+        resolved,
+        file,
+        use_resolved_path: false,
+    }
 }
 
 fn caps() -> CallCaps {

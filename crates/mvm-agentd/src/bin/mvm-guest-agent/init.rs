@@ -49,6 +49,11 @@ pub(crate) fn early_setup() {
             fatal(&format!("early filesystem mount failed: {e}"));
         }
         provision_host_signer_anchor();
+        // In the universal initramfs path there is no second init to copy the
+        // signed verb-grant into /run/mvm before the agent starts listening.
+        // Pin it now from the kernel cmdline so the pre-activation trust
+        // decision sees the pinned grant before the agent accepts requests.
+        mvm_agentd::guest_bootstrap::provision_verb_grant();
         mvm_agentd::child_wait::install_orphan_reaper();
     }
 

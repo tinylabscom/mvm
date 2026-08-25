@@ -107,7 +107,10 @@ for detailed scope and acceptance criteria.
       again after the final publication copy and before its durability sync;
       the persistent-builder path preserves the hook command's real exit
       status. A mounted or damaged image fails before publication, preserving
-      the workload's hypervisor-enforced read-only rootfs contract.
+      the workload's hypervisor-enforced read-only rootfs contract. The same
+      fail-closed check is emitted into one-shot and persistent job scripts so
+      source-checkout behavior stays correct when release bootstrap deliberately
+      boots a published builder image whose hook runner predates the repair.
       The tagged release workflow separately verifies the signed
       future-format overlay through the production downloader before publish.
       The standalone hostd fuzz lock is refreshed for the current dependency
@@ -184,6 +187,13 @@ for detailed scope and acceptance criteria.
       live lifecycle suite covers Alpine `/tmp` writes and retains the
       absolute `/bin/ping` mediated-tool proof. Together with PRs #2690,
       #2709, and #2720, this closes the NIC-less and read-only boot-noise issue.
+
+- [x] **AArch64 sealed-workload witness and QEMU teardown.** The Raspberry Pi
+      QEMU path now reaches the workload entrypoint with the correct console,
+      uid transition, compressed module handling, and builder/runtime-overlay
+      artifacts. Session teardown selects the backend recorded in machine
+      state and reaps both QEMU and its vsock bridge. See
+      `specs/sprint/delivery/2836-aarch64-sealed-workload-witness.md`.
 
 - [x] **Issue #2684 — a sealed boot is reachable and proven before release.**
       The CLI release train publishes both universal-initramfs archives under

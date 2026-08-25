@@ -334,16 +334,33 @@ let
   # The full /etc/mvm/entrypoint body. For shell + command forms,
   # setpriv-wrap as appropriate. For services (still stubbed),
   # bail out with a clear note + recovery shell.
+  #
+  # The entrypoint is invoked both by PID 1 (as root) and by the guest
+  # agent (as the agent uid). When already non-root, skip the setpriv
+  # drop: the agent has already applied the desired isolation and no
+  # longer holds CAP_SETGID, so a second setpriv would fail on
+  # setgroups(clear). PID 1 still uses the explicit drop to enforce the
+  # entrypoint uid.
   entrypointCmd =
     if entrypointKind == "services" then
       ''
         echo "mkGuest: entrypoint.services is not yet wired in this iteration"
         echo "  (W5.2 ports the multi-service supervisor binary)"
         echo "  Falling through to a recovery shell for triage."
-        ${setprivWrap entrypointUid "/bin/sh -i"}
+        if [ "$(/bin/busybox id -u)" -eq 0 ]; then
+          ${setprivWrap entrypointUid "/bin/sh -i"}
+        else
+          /bin/sh -i
+        fi
       ''
     else
-      "${setprivWrap entrypointUid rawEntrypointCmd}";
+      ''
+        if [ "$(/bin/busybox id -u)" -eq 0 ]; then
+          ${setprivWrap entrypointUid rawEntrypointCmd}
+        else
+          ${rawEntrypointCmd}
+        fi
+      '';
 
   # /init — our PID 1. Pure POSIX shell; busybox provides every
   # utility used here. Boot-time-critical path so kept terse and

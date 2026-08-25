@@ -129,6 +129,26 @@ pub const DEFAULT_BUILDER_STORE_GC_GIB: u32 = 24;
 /// a typo must not disable the just-built-closure-preserving GC).
 pub const MVM_BUILDER_STORE_GC_GIB_ENV: &str = "MVM_BUILDER_STORE_GC_GIB";
 
+/// Source-rendered compatibility seal for workload rootfs images.
+///
+/// The host may deliberately boot the last published builder VM while testing
+/// newer host code. Running the offline checker in the generated job script
+/// therefore guarantees that the source-under-test can seal an image even
+/// when the builder image's hook-runner binary predates journal sealing.
+pub(crate) const SEAL_ROOTFS_JOURNAL_SH: &str = r#"echo "mvm-builder-vm: sealing rootfs journal" >&2
+set +e
+/sbin/e2fsck -p -f "$BUILD_HOOK_ROOTFS" >&2
+fsck_rc=$?
+set -e
+case "$fsck_rc" in
+  0|1) ;;
+  *)
+    echo "mvm-builder-vm: rootfs journal check failed (exit $fsck_rc)" >&2
+    rm -f "$BUILD_HOOK_ROOTFS"
+    exit "$fsck_rc"
+    ;;
+esac"#;
+
 /// Resolve the builder-store GC cap, in KiB, for substitution into the
 /// in-guest build script's `du -k` comparison. Reads
 /// [`MVM_BUILDER_STORE_GC_GIB_ENV`]; an unset, non-integer, or zero
@@ -640,6 +660,7 @@ if [ "$hook_rc" -ne 0 ]; then
     rm -f "$BUILD_HOOK_ROOTFS"
     exit $hook_rc
 fi
+{seal_rootfs_journal_sh}
 cp -L "$BUILD_HOOK_ROOTFS" /out/rootfs.ext4
 /sbin/mvm-host-vm-init seal-rootfs-journal /out/rootfs.ext4
 sync
@@ -712,6 +733,7 @@ fi
         override_flag = override_flag,
         attr_path = shell_single_quote_escape(attr_path),
         gc_cap_kib = gc_cap_kib,
+        seal_rootfs_journal_sh = SEAL_ROOTFS_JOURNAL_SH,
     )
 }
 
@@ -2069,12 +2091,15 @@ mod tests {
         let hook_idx = body
             .find("/sbin/mvm-host-vm-init run-before-build-hook")
             .expect("hook runner present");
+        let journal_idx = body
+            .find(r#"/sbin/e2fsck -p -f "$BUILD_HOOK_ROOTFS""#)
+            .expect("offline rootfs journal check present");
         let out_copy_idx = body
             .find(r#"cp -L "$BUILD_HOOK_ROOTFS" /out/rootfs.ext4"#)
             .expect("final rootfs copy present");
         assert!(
-            hook_idx < out_copy_idx,
-            "before_build hook must run before /out/rootfs.ext4 is copied"
+            hook_idx < journal_idx && journal_idx < out_copy_idx,
+            "the hook and offline journal check must run before /out/rootfs.ext4 is copied"
         );
         let sync_idx = body
             .find("sync\nrm -f \"$BUILD_HOOK_ROOTFS\"")
@@ -2108,6 +2133,14 @@ mod tests {
         assert!(
             !body.contains("if ! /sbin/mvm-host-vm-init run-before-build-hook"),
             "negating the hook command makes `$?` report the `!` result instead of the hook failure"
+        );
+        assert!(
+            body.contains("0|1) ;;"),
+            "the offline checker must accept clean and repaired exit codes in:\n{body}"
+        );
+        assert!(
+            body.contains("rootfs journal check failed (exit $fsck_rc)"),
+            "the offline checker must fail closed for every other exit code in:\n{body}"
         );
     }
 

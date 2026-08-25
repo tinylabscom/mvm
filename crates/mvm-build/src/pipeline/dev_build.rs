@@ -490,25 +490,34 @@ fn persistent_routing_allowed(
 ///   (a) mvmctl was compiled from a source checkout whose `nix/flake.nix`
 ///       still exists on disk (walk up from the compile-time manifest dir,
 ///       the same source-checkout signal the CLI's `find_builder_vm_flake`
-///       uses), and
+///       uses), or the user flake itself lives inside a source checkout
+///       whose `nix/flake.nix` can be discovered at runtime, and
 ///   (b) the user flake pins `mvm` to GitHub — so `--override-input mvm`
 ///       has an input to replace and we're genuinely swapping a remote
 ///       fetch for the local checkout.
 #[cfg(feature = "builder-vm")]
 fn local_mvm_workspace(user_flake: &std::path::Path) -> Option<std::path::PathBuf> {
-    let mut dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let workspace = loop {
-        if dir.join("nix/flake.nix").is_file() {
-            break dir;
-        }
-        if !dir.pop() {
-            return None;
-        }
-    };
+    let workspace = find_mvm_workspace_root(&std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")))
+        .or_else(|| find_mvm_workspace_root(user_flake))?;
     let flake_nix = std::fs::read_to_string(user_flake.join("flake.nix")).ok()?;
     flake_nix
         .contains("github:tinylabscom/mvm")
         .then_some(workspace)
+}
+
+/// Walk up from `start` until we find a directory containing
+/// `nix/flake.nix`, which marks the root of the mvm source tree.
+#[cfg(feature = "builder-vm")]
+fn find_mvm_workspace_root(start: &std::path::Path) -> Option<std::path::PathBuf> {
+    let mut dir = start.to_path_buf();
+    loop {
+        if dir.join("nix/flake.nix").is_file() {
+            return Some(dir);
+        }
+        if !dir.pop() {
+            return None;
+        }
+    }
 }
 
 #[cfg(feature = "builder-vm")]

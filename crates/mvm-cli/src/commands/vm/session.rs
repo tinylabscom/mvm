@@ -1087,6 +1087,7 @@ fn cmd_start(args: StartArgs) -> Result<()> {
         args.memory_mib,
         &mvm_core::network_policy::NetworkPolicy::deny_all(),
         Some(&admit),
+        Some(&backend_name),
     ) {
         Ok(vm) => {
             let ctx = admit_ctx.borrow_mut().take();
