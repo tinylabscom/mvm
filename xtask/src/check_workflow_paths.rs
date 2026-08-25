@@ -1129,6 +1129,37 @@ mod tests {
         }
     }
 
+    #[test]
+    fn extended_ci_macos_builds_install_libkrun_from_a_trusted_tap() {
+        let extended = workflow("ci-full.yml");
+        for job in ["apple", "libkrun-macos"] {
+            let body = job_body(&extended, job).expect("extended CI job must exist");
+            for command in [
+                "brew tap slp/krun",
+                "brew trust slp/krun",
+                "brew install slp/krun/libkrun",
+            ] {
+                assert!(
+                    body.contains(command),
+                    "{job} must run `{command}` before compiling libkrun consumers"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn extended_ci_builder_image_stubs_every_manifest_binary() {
+        let extended = workflow("ci-full.yml");
+        let body =
+            job_body(&extended, "builder-vm-image-linux").expect("builder VM image job must exist");
+        for binary in ["mvm-host-vm-init", "mvm-egress-proxy", "mvm-builderd"] {
+            assert!(
+                body.contains(&format!("$HOST_BIN_DIR/{binary}")),
+                "builder VM image smoke must provide the manifest binary {binary}"
+            );
+        }
+    }
+
     /// Only one workflow may publish a required check's name.
     ///
     /// Both of these build kernels from the same script, and both once

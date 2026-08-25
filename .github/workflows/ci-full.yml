@@ -147,8 +147,9 @@ jobs:
         # `vmlinux`, `rootfs.ext4`, `cmdline.txt`, `manifest.json`.
         #
         # Plan 115 / ADR-065: the flake reads `MVM_HOST_BIN_DIR`
-        # under `--impure` to inject mvm-host-vm-init + mvm-egress-proxy
-        # via extraFiles. mvmctl normally extracts its embedded copy
+        # under `--impure` to inject every binary declared by
+        # nix/lib/mvm-host-binaries.nix via extraFiles. mvmctl normally
+        # extracts its embedded copy
         # before invoking nix; CI uses placeholder files so the flake
         # evaluates + builds (the rootfs will contain placeholder
         # bytes at the binary install paths, which is fine for an
@@ -160,6 +161,7 @@ jobs:
           # at the names the manifest declares.
           : > "$HOST_BIN_DIR/mvm-host-vm-init"
           : > "$HOST_BIN_DIR/mvm-egress-proxy"
+          : > "$HOST_BIN_DIR/mvm-builderd"
           chmod 0755 "$HOST_BIN_DIR"/mvm-*
           MVM_HOST_BIN_DIR="$HOST_BIN_DIR" \
             nix build "./nix/images/builder-vm#packages.x86_64-linux.default" \
@@ -217,6 +219,12 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@nightly
+
+      - name: Install libkrun
+        run: |
+          brew tap slp/krun
+          brew trust slp/krun
+          brew install slp/krun/libkrun
 
       - name: Cache cargo
         uses: actions/cache@v5
@@ -286,7 +294,8 @@ jobs:
         # probes for.
         run: |
           brew tap slp/krun
-          brew install libkrun
+          brew trust slp/krun
+          brew install slp/krun/libkrun
 
       - name: Cache cargo
         if: steps.filter.outputs.libkrun == 'true' || github.ref == 'refs/heads/main'
