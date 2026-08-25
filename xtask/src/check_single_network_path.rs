@@ -118,8 +118,9 @@ pub fn run(workspace: &Path) -> Result<()> {
     check_retired_symbols(workspace)?;
     check_socket_owners(workspace)?;
     check_single_peer_resolver(workspace)?;
+    check_flow_audit_labels(workspace)?;
     eprintln!(
-        "check-single-network-path: clean — one endpoint implementation, one NetworkFlow channel per backend, no retired L3/NIC path, one workload socket owner, and one peer resolver"
+        "check-single-network-path: clean — one endpoint implementation, one NetworkFlow channel per backend, no retired L3/NIC path, one workload socket owner, one peer resolver, and payload-free flow audit labels"
     );
     Ok(())
 }
@@ -312,6 +313,69 @@ fn check_single_peer_resolver(workspace: &Path) -> Result<()> {
                  site: peer traffic goes over FlowMux, not the substitution proxy. If that \
                  is meant to change, change it deliberately and move this entry."
             );
+        }
+    }
+    Ok(())
+}
+
+/// Label keys a connect-path audit entry may carry.
+///
+/// Every one is metadata about *which* flow was decided, never anything from
+/// inside it. The chain records that a workload dialed `db.mvm.peer:5432` and
+/// what the verdict was; it does not record a byte the workload sent. Claim 12
+/// makes the same promise for the stream plane's entries, and it is worth
+/// exactly as much here.
+const FLOW_AUDIT_LABEL_KEYS: &[&str] = &[
+    "stream_id",
+    "class",
+    "route",
+    "target",
+    "reason",
+    "resolved_ips",
+    // The DNS question's name and record type. These name the destination
+    // being resolved, which is the same class of fact as `target` -- what the
+    // workload asked to reach, not anything it sent. A DNS query has no body
+    // to leak; if that ever changes, this entry is the thing to revisit.
+    "qname",
+    "qtype",
+];
+
+/// Files whose connect paths emit flow audit entries.
+const FLOW_AUDIT_SITES: &[&str] = &[
+    "crates/mvm-hostd/src/supervisor/flowmux.rs",
+    "crates/mvm-hostd/src/supervisor/flowmux/session.rs",
+];
+
+fn check_flow_audit_labels(workspace: &Path) -> Result<()> {
+    // Matches the `("key".to_string(), ..)` label entries the audit maps are
+    // built from. Deliberately source-level: the property is about which keys
+    // can ever be constructed, which no runtime test can establish.
+    let key =
+        Regex::new(r#"\(\s*"([a-z_]+)"\.to_string\(\)\s*,"#).context("compile label regex")?;
+    let allowed: std::collections::BTreeSet<&str> = FLOW_AUDIT_LABEL_KEYS.iter().copied().collect();
+
+    for rel in FLOW_AUDIT_SITES {
+        // NOT `production_code`: that blanks string literals, and the label
+        // keys *are* string literals — reading them through it finds nothing
+        // and the gate passes on anything. Strip the test module only.
+        let raw = read(workspace, rel)?;
+        let src = raw.split("#[cfg(test)]").next().unwrap_or(&raw).to_string();
+        for block in src.split("emit_audit(").skip(1) {
+            // Bound to the end of this call's label map.
+            let block = block.split("]),").next().unwrap_or(block);
+            for cap in key.captures_iter(block) {
+                let found = &cap[1];
+                if !allowed.contains(found) {
+                    bail!(
+                        "check-single-network-path: {rel} builds a flow audit label `{found}`, \
+                         which is not in the payload-free allow-list ({}). A flow audit entry \
+                         records which flow was decided, never anything from inside it. If the \
+                         new label is genuinely metadata, add it to FLOW_AUDIT_LABEL_KEYS and \
+                         say why in the review.",
+                        FLOW_AUDIT_LABEL_KEYS.join(", ")
+                    );
+                }
+            }
         }
     }
     Ok(())

@@ -97,12 +97,27 @@ falls through to the existing DNS-pin path unchanged.
       conservatively for now:** whether a peer request should ever receive a
       substituted credential. Refusing is the answer until someone decides
       otherwise.
-- [ ] A-6. Emit a chain-signed audit entry per resolved service dial, carrying the
-      binding and no payload bytes, following
-      `stream_audit_entries_carry_the_binding_and_no_payload_bytes`.
-- [ ] A-7. Tests: bound name resolves; unbound name denied; name resolving to a
-      stopped peer denied; a numeric target still takes the DNS-pin path; a plan
-      with no peer bindings admits nothing east-west.
+- [x] A-6. Emit a chain-signed audit entry per resolved peer dial carrying the
+      binding and no payload bytes. The entry already carried `target` (which
+      *is* the binding, `name:port`) and `resolved_ips`; what was missing was
+      which namespace decided it, so `decide_target` now returns a `Route`
+      alongside the verdict and every connect-path entry carries it. The route
+      comes back from the gate rather than being re-derived, because A-8
+      forbids a second suffix test outside the gate.
+      Payload-freedom is witnessed mechanically by `check_flow_audit_labels`:
+      the connect paths may only build labels from an allow-list. That is a
+      source-level property no runtime test can establish — it is about which
+      keys can ever be constructed.
+- [x] A-7. Tests (14 in `peer_tests`): bound route resolves to the peer's
+      ingress address; a gate with no bindings admits no peer; a bound peer on
+      an unbound port refused; an unbound name refused and the refusal lists
+      what is admitted; a malformed peer name is `Malformed`, not allowed; a
+      peer binding does not widen ordinary egress; first matching binding wins.
+      Route coverage: a peer target is the peer route whether allowed, refused,
+      or malformed; an ordinary host and a numeric target are the egress route.
+      Liveness: a stopped peer is still admitted by the gate and refused by the
+      connect — pinned deliberately so nobody later "fixes" the gate to probe
+      liveness.
 - [x] A-8. Extend `xtask check-single-network-path` (`check_single_peer_resolver`):
       the branch exists exactly once in the gate, both connect sites go through
       `decide_target`, neither calls `decide_peer` or re-derives the branch, and
@@ -207,6 +222,18 @@ admitted workload.
 
 `mvmctl catalog run <name>` boots an admitted workload from a signed plan, and the
 refusal paths above each have a test.
+
+### Known limits of WS-A as landed
+
+- **Peer dialing is TCP-only.** `handle_open_tcp` routes through
+  `decide_target`; `handle_open_udp` uses `decide_udp_addr` and has no peer
+  branch. A UDP dial to a peer name is refused by ordinary egress policy.
+  Widening it means giving the UDP path the same single-branch treatment, not
+  a second branch.
+- **The substitution proxy refuses peers** (A-5b), so a peer cannot be reached
+  over the HTTP leg that substitutes credentials.
+- **No live witness.** Every test drives the gate directly. Nothing yet boots
+  two workloads and has one dial the other.
 
 ### Remaining for WS-C
 

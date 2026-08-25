@@ -19,6 +19,38 @@ use mvm_core::policy::dns_pin::DnsPinRegistry;
 use mvm_core::policy::projection::{CanonicalEgress, Proto};
 use mvm_core::protocol::dns::DnsRecordType;
 
+/// Which namespace a guest target was decided in.
+///
+/// Recorded on the audit entry so a reader can tell a peer dial from ordinary
+/// egress without knowing the suffix rule, and so a flow that changed
+/// namespaces would be visible in the chain rather than inferred.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Route {
+    /// Resolved against the plan's admitted peer bindings.
+    Peer,
+    /// Decided against the plan's egress policy.
+    Egress,
+}
+
+impl Route {
+    /// Stable audit-label form.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Peer => "peer",
+            Self::Egress => "egress",
+        }
+    }
+}
+
+/// A decision plus the namespace it was made in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TargetDecision {
+    /// Allow / deny / malformed.
+    pub verdict: EgressVerdict,
+    /// Which namespace decided it.
+    pub route: Route,
+}
+
 /// Outcome of an egress request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EgressVerdict {
@@ -254,11 +286,21 @@ impl EgressGate {
     /// arm can shadow the other. Callers must not re-implement the branch:
     /// a second copy is how one of the two paths quietly stops being gated.
     /// `xtask check-single-network-path` pins the call sites for that reason.
-    pub fn decide_target(&self, host: &str, port: u16) -> EgressVerdict {
+    ///
+    /// The [`Route`] comes back with the verdict rather than being derivable
+    /// by the caller, so an auditor can record which namespace authorized a
+    /// flow without any call site re-testing the suffix.
+    pub fn decide_target(&self, host: &str, port: u16) -> TargetDecision {
         if PeerName::is_peer_target(host) {
-            self.decide_peer(host, port)
+            TargetDecision {
+                verdict: self.decide_peer(host, port),
+                route: Route::Peer,
+            }
         } else {
-            self.decide_request(&format!("{host}:{port}"))
+            TargetDecision {
+                verdict: self.decide_request(&format!("{host}:{port}")),
+                route: Route::Egress,
+            }
         }
     }
 
@@ -1360,6 +1402,96 @@ mod peer_tests {
                 ips: vec!["127.0.0.1".parse::<IpAddr>().unwrap()],
                 port: 1111,
             }
+        );
+    }
+
+    // ---- A-7: the route a decision was made in ----
+
+    #[test]
+    fn a_peer_target_is_decided_in_the_peer_route() {
+        let gate = gate_with(vec![peer("db.mvm.peer", 5432, "127.0.0.1", 34567)]);
+        let decision = gate.decide_target("db.mvm.peer", 5432);
+        assert_eq!(decision.route, Route::Peer);
+        assert!(matches!(decision.verdict, EgressVerdict::Allow { .. }));
+    }
+
+    /// A refused peer is still a *peer* decision. If the route flipped on
+    /// refusal, the audit chain would attribute a denied peer dial to egress
+    /// policy, which is the wrong thing to go read when debugging it.
+    #[test]
+    fn a_refused_peer_target_is_still_the_peer_route() {
+        let gate = EgressGate::default_deny();
+        let decision = gate.decide_target("db.mvm.peer", 5432);
+        assert_eq!(decision.route, Route::Peer);
+        assert!(matches!(decision.verdict, EgressVerdict::Deny(_)));
+    }
+
+    /// The suffix decides the namespace, not the bindings. A malformed peer
+    /// name is a peer decision that failed, never an egress lookup.
+    #[test]
+    fn a_malformed_peer_target_stays_in_the_peer_route() {
+        let gate = gate_with(vec![peer("db.mvm.peer", 5432, "127.0.0.1", 34567)]);
+        let decision = gate.decide_target("-db.mvm.peer", 5432);
+        assert_eq!(decision.route, Route::Peer);
+        assert_eq!(decision.verdict, EgressVerdict::Malformed);
+    }
+
+    #[test]
+    fn an_ordinary_host_is_decided_in_the_egress_route() {
+        let gate = gate_with(vec![peer("db.mvm.peer", 5432, "127.0.0.1", 34567)]);
+        assert_eq!(
+            gate.decide_target("api.example.com", 443).route,
+            Route::Egress
+        );
+    }
+
+    /// A numeric target keeps taking the egress path even when peers are
+    /// bound: admitting a peer must not change how an IP is decided.
+    #[test]
+    fn a_numeric_target_still_takes_the_egress_route() {
+        let gate = gate_with(vec![peer("db.mvm.peer", 5432, "127.0.0.1", 34567)]);
+        let decision = gate.decide_target("127.0.0.1", 34567);
+        assert_eq!(decision.route, Route::Egress);
+        assert!(
+            matches!(decision.verdict, EgressVerdict::Deny(_)),
+            "the peer's ingress address is not reachable as ordinary egress"
+        );
+    }
+
+    #[test]
+    fn route_labels_are_stable() {
+        assert_eq!(Route::Peer.as_str(), "peer");
+        assert_eq!(Route::Egress.as_str(), "egress");
+    }
+
+    /// The gate decides admission, not liveness. A stopped peer is still an
+    /// admitted route -- it is the connect that refuses. This test pins the
+    /// division of labour so nobody later "fixes" the gate to probe liveness.
+    #[test]
+    fn a_stopped_peer_is_still_admitted_by_the_gate_and_refused_by_the_connect() {
+        use std::net::{TcpListener, TcpStream};
+
+        // Bind then drop: the address is real and nothing is listening on it,
+        // which is exactly the shape of a peer whose VM has stopped.
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        drop(listener);
+
+        let gate = gate_with(vec![peer(
+            "db.mvm.peer",
+            5432,
+            &addr.ip().to_string(),
+            addr.port(),
+        )]);
+        let decision = gate.decide_target("db.mvm.peer", 5432);
+        assert!(
+            matches!(decision.verdict, EgressVerdict::Allow { .. }),
+            "admission does not depend on the peer being up"
+        );
+
+        assert!(
+            TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(500)).is_err(),
+            "a dial to a stopped peer fails at the connect, with nothing listening"
         );
     }
 }
