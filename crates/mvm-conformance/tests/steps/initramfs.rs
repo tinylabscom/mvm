@@ -107,20 +107,6 @@ fn isolated_home_warm_universal_initramfs(world: &mut CliWorld) {
     world.isolated_home = Some(tmp);
 }
 
-#[given("an isolated mvm home with a cold universal cache but a cached legacy verity initrd")]
-fn isolated_home_cold_universal_cached_verity_initrd(world: &mut CliWorld) {
-    let tmp = tempfile::tempdir().expect("scenario mvm home");
-    world.initramfs_boot_env = Some(isolated_boot_env(tmp.path()));
-    let layout = mvm_build::verity_initrd::VerityInitrdLayout::under(
-        &tmp.path().join("cache"),
-        env!("CARGO_PKG_VERSION"),
-        GuestArch::host(),
-    );
-    std::fs::create_dir_all(&layout.dir).expect("create the verity-initrd cache dir");
-    std::fs::write(&layout.initrd, b"legacy-verity-initrd").expect("seed the legacy verity initrd");
-    world.isolated_home = Some(tmp);
-}
-
 #[given("a sealed OCI rootfs with no sibling initrd")]
 fn sealed_oci_rootfs_without_sibling_initrd(world: &mut CliWorld) {
     let home = world
@@ -157,28 +143,6 @@ fn effective_initrd_is_empty(world: &mut CliWorld) {
         outcome.as_ref().map(Option::as_deref),
         Ok(None),
         "a warm universal initramfs must skip the legacy initrd entirely: {outcome:?}"
-    );
-}
-
-#[then("the effective initrd is the cached legacy verity initrd")]
-fn effective_initrd_is_cached_legacy_verity_initrd(world: &mut CliWorld) {
-    let home = world
-        .isolated_home
-        .as_ref()
-        .expect("a prior step must isolate the mvm home");
-    let layout = mvm_build::verity_initrd::VerityInitrdLayout::under(
-        &home.path().join("cache"),
-        env!("CARGO_PKG_VERSION"),
-        GuestArch::host(),
-    );
-    let outcome = world
-        .initramfs_boot_initrd
-        .as_ref()
-        .expect("a prior step must resolve the effective initrd");
-    assert_eq!(
-        outcome.as_ref().map(Option::as_deref),
-        Ok(Some(layout.initrd.to_str().expect("utf-8 initrd path"))),
-        "a cold universal cache must still run the legacy verity-initrd ladder: {outcome:?}"
     );
 }
 

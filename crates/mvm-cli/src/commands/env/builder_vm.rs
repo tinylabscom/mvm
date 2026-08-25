@@ -43,7 +43,6 @@ use default_microvm::DefaultMicrovmVariant;
 use default_microvm::workload_config_carries_dm_verity;
 pub(crate) use default_microvm::{
     assert_workload_kernel_supports_verity, ensure_default_microvm_image, ensure_workload_kernel,
-    ensure_workload_verity_initrd,
 };
 #[cfg(test)]
 use default_microvm::{

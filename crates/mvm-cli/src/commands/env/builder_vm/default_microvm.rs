@@ -1,7 +1,4 @@
 use super::*;
-use crate::commands::runtime_overlay::{
-    RuntimeOverlayAcquireMode, runtime_overlay_acquire_mode, runtime_overlay_source_checkout_root,
-};
 use mvm_build::boot_image_select::{self, BootImageAcquisition};
 
 pub(crate) fn ensure_default_microvm_image(
@@ -217,64 +214,6 @@ pub(super) fn evict_incompatible_workload_kernel(kernel: &std::path::Path) -> Re
         }
     }
     Ok(())
-}
-
-pub(crate) fn ensure_workload_verity_initrd() -> Result<String> {
-    let cache_root = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir());
-    let version = env!("CARGO_PKG_VERSION");
-    let arch = mvm_core::arch::GuestArch::host();
-    let layout = mvm_build::verity_initrd::VerityInitrdLayout::under(&cache_root, version, arch);
-    let workspace_root = workload_verity_initrd_source_checkout_root().filter(|_| {
-        runtime_overlay_acquire_mode() == RuntimeOverlayAcquireMode::BuildFromSourceCheckout
-    });
-    if let Some(ws) = workspace_root {
-        return mvm_build::verity_initrd::resolve_or_build_verity_initrd(
-            &cache_root,
-            version,
-            arch,
-            &ws,
-        )
-        .map(|p| p.display().to_string())
-        .context("build verity initrd from the source checkout");
-    }
-    if layout.initrd.is_file() {
-        return Ok(layout.initrd.display().to_string());
-    }
-
-    if let Some(bytes) = embedded_verity_init_bytes() {
-        return mvm_build::verity_initrd::install_prebuilt_verity_initrd(
-            bytes,
-            &cache_root,
-            version,
-            arch,
-        )
-        .map(|p| p.display().to_string())
-        .context("install embedded verity initrd");
-    }
-
-    anyhow::bail!(
-        "no verity initrd available: this build embeds no mvm-verity-init binary and there is no source checkout to cross-compile from"
-    )
-}
-
-fn workload_verity_initrd_source_checkout_root() -> Option<std::path::PathBuf> {
-    runtime_overlay_source_checkout_root().or_else(|| {
-        super::find_builder_vm_flake().ok().and_then(|flake_dir| {
-            std::path::PathBuf::from(flake_dir)
-                .parent()
-                .and_then(|p| p.parent())
-                .and_then(|p| p.parent())
-                .map(std::path::Path::to_path_buf)
-        })
-    })
-}
-
-fn embedded_verity_init_bytes() -> Option<&'static [u8]> {
-    crate::host_binaries::embedded::EMBEDDED
-        .iter()
-        .find(|b| b.name == "mvm-verity-init")
-        .map(|b| b.bytes)
-        .filter(|b| !b.is_empty())
 }
 
 pub(super) fn missing_workload_kernel_message(expected_path: &str) -> String {
