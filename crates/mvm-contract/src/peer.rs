@@ -135,6 +135,77 @@ impl fmt::Display for PeerName {
     }
 }
 
+/// One admitted peer route: the name a workload may dial, and where the host
+/// connects when it does.
+///
+/// The destination is carried here rather than discovered at dial time. A peer
+/// receives traffic through an admitted ingress mapping, whose `host_addr` /
+/// `host_port` are already in that peer's signed plan, so binding the resolved
+/// address into the *caller's* plan keeps the peer set signed instead of
+/// resolved against mutable runtime state. A workload's reachable peers are
+/// then fixed at admission, the same way its egress destinations are.
+///
+/// Liveness needs no separate check. Nothing is listening at the address until
+/// the peer's endpoint binds it, so a dial to a stopped peer is refused by the
+/// connect itself — fail-closed without a registry that could disagree with
+/// reality.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct PeerBinding {
+    /// The name the calling workload dials.
+    pub name: PeerName,
+    /// The port the calling workload dials. A dial to the right name on a port
+    /// this binding does not name is refused: a binding authorizes one route,
+    /// not a host.
+    pub port: u16,
+    /// Host address the peer's admitted ingress mapping binds.
+    pub host_addr: String,
+    /// Host port the peer's admitted ingress mapping binds.
+    pub host_port: u16,
+}
+
+/// Why a peer binding is structurally invalid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PeerBindingInvalid {
+    /// `host_addr` does not parse as an IP address. Names are not permitted:
+    /// a binding that had to be resolved could resolve differently later, and
+    /// the point of admitting the address is that it cannot.
+    HostAddressNotAnIp,
+    /// A port is zero.
+    ZeroPort,
+}
+
+impl fmt::Display for PeerBindingInvalid {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let msg = match self {
+            Self::HostAddressNotAnIp => "peer host_addr must be a literal IP address",
+            Self::ZeroPort => "peer ports must be in 1..=65535",
+        };
+        f.write_str(msg)
+    }
+}
+
+impl core::error::Error for PeerBindingInvalid {}
+
+impl PeerBinding {
+    /// Validate invariants that do not depend on host runtime state.
+    pub fn validate(&self) -> Result<(), PeerBindingInvalid> {
+        if self.port == 0 || self.host_port == 0 {
+            return Err(PeerBindingInvalid::ZeroPort);
+        }
+        if self.host_addr.parse::<core::net::IpAddr>().is_err() {
+            return Err(PeerBindingInvalid::HostAddressNotAnIp);
+        }
+        Ok(())
+    }
+
+    /// Whether this binding authorizes a dial to `name` on `port`.
+    pub fn admits(&self, name: &PeerName, port: u16) -> bool {
+        self.name == *name && self.port == port
+    }
+}
+
 impl TryFrom<String> for PeerName {
     type Error = PeerNameInvalid;
 
@@ -254,5 +325,77 @@ mod tests {
     #[test]
     fn invalid_reasons_render() {
         assert!(!PeerNameInvalid::MissingSuffix.to_string().is_empty());
+        assert!(!PeerBindingInvalid::ZeroPort.to_string().is_empty());
+    }
+
+    fn binding(port: u16, host_addr: &str, host_port: u16) -> PeerBinding {
+        PeerBinding {
+            name: PeerName::parse("db.mvm.peer").expect("valid"),
+            port,
+            host_addr: host_addr.into(),
+            host_port,
+        }
+    }
+
+    #[test]
+    fn a_well_formed_binding_validates() {
+        assert!(binding(5432, "127.0.0.1", 34567).validate().is_ok());
+        assert!(binding(5432, "::1", 34567).validate().is_ok());
+    }
+
+    /// A binding that had to be resolved could resolve differently later. The
+    /// whole point of admitting the address is that it cannot.
+    #[test]
+    fn a_binding_host_address_must_be_a_literal_ip() {
+        assert_eq!(
+            binding(5432, "db.internal", 34567).validate(),
+            Err(PeerBindingInvalid::HostAddressNotAnIp)
+        );
+    }
+
+    #[test]
+    fn zero_ports_are_refused_on_either_side() {
+        assert_eq!(
+            binding(0, "127.0.0.1", 34567).validate(),
+            Err(PeerBindingInvalid::ZeroPort)
+        );
+        assert_eq!(
+            binding(5432, "127.0.0.1", 0).validate(),
+            Err(PeerBindingInvalid::ZeroPort)
+        );
+    }
+
+    /// A binding authorizes one route, not a host: the same name on a port the
+    /// binding does not name is a different destination.
+    #[test]
+    fn a_binding_admits_only_its_own_name_and_port() {
+        let b = binding(5432, "127.0.0.1", 34567);
+        let db = PeerName::parse("db.mvm.peer").expect("valid");
+        let cache = PeerName::parse("cache.mvm.peer").expect("valid");
+        assert!(b.admits(&db, 5432));
+        assert!(
+            !b.admits(&db, 5433),
+            "a different port is a different route"
+        );
+        assert!(
+            !b.admits(&cache, 5432),
+            "a different name is a different peer"
+        );
+    }
+
+    #[test]
+    fn a_binding_round_trips_and_rejects_unknown_fields() {
+        let b = binding(5432, "127.0.0.1", 34567);
+        let json = serde_json::to_string(&b).expect("serialize");
+        assert_eq!(
+            serde_json::from_str::<PeerBinding>(&json).expect("parse"),
+            b
+        );
+
+        serde_json::from_value::<PeerBinding>(serde_json::json!({
+            "name": "db.mvm.peer", "port": 1, "host_addr": "127.0.0.1",
+            "host_port": 2, "weight": 3
+        }))
+        .expect_err("unknown field must be refused");
     }
 }

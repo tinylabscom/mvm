@@ -2416,6 +2416,20 @@ impl SubstitutionService {
         // refused here. (Audit of the claim-10 denial is a later increment; the
         // refusal itself is the enforcement.)
         if let Some(gate) = &self.egress_gate {
+            // A peer name is refused here even when the plan binds it. Peer
+            // traffic goes over FlowMux as raw TCP; this leg substitutes
+            // secrets into outbound HTTP, and whether a peer request should
+            // receive a substituted credential is a question nobody has
+            // answered. Refusing is the conservative answer and, unlike
+            // falling through to `decide_request`, it says so.
+            if let Some(host) = destination.as_deref()
+                && mvm_contract::peer::PeerName::is_peer_target(host)
+            {
+                return Err(WireResponse::Refused {
+                    message: "peer destinations are not reachable through the substitution proxy"
+                        .into(),
+                });
+            }
             let admitted = url_host_port(&req.url).as_deref().is_some_and(|hp| {
                 matches!(
                     gate.decide_request(hp),

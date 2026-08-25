@@ -3,8 +3,9 @@
 Backing: preview
 Validation: none
 
-Status: **IN PROGRESS** — A-1, B-1..B-7 and C-1/C-5/C-6 have landed. WS-B is
-complete end-to-end except for a live witness (B-8). No claim in
+Status: **IN PROGRESS** — WS-A is wired end-to-end except A-6 (audit) and A-7
+(the negative-path suite beyond the gate's own unit tests). WS-B is complete
+except a live witness (B-8). WS-C has C-1/C-5/C-6; C-2/C-3 remain. No claim in
 `specs/adrs/001-microvm-security-posture.md` depends on this work yet.
 
 ## 1. Why
@@ -68,28 +69,45 @@ falls through to the existing DNS-pin path unchanged.
       `ServiceCatalog` and `Catalog` already exist and mean other things) to `mvm-contract` (`no_std`) — a
       validated workload-local service name. Reject anything that could collide
       with a DNS name or a numeric target so fall-through stays unambiguous.
-- [ ] A-2. Add a peer-binding list to the plan: which service names this workload
+- [x] A-2. Add a peer-binding list to the plan (`PeerBinding` in `mvm-contract`): which service names this workload
       may dial, and which workload each resolves to. Mirrors the existing
       `SynthesisInput.services` field (`crates/mvm-core/src/plan/synthesis.rs:192`)
       rather than inventing a second binding shape.
-- [ ] A-3. Add `EgressGate::decide_service(&self, name, port)` beside the existing
+- [x] A-3. Add `EgressGate::decide_peer(&self, host, port)` beside the existing
       `decide_request` / `decide_addr` in
       `crates/mvm-vmm/src/vsock_egress_bridge/egress_gate.rs:167`. Default-deny on
       an unbound name, matching `default_deny()`.
-- [ ] A-4. Build a host-side registry mapping a bound name to the live peer's
-      endpoint socket. Fail closed when the peer is not running — a name that
-      resolves to a dead VM refuses rather than hanging.
-- [ ] A-5. Thread A-3 into both `decide_request` call sites (A-2 above). One
-      resolution helper, called from both — not two copies.
+- [x] A-4. ~~Build a host-side registry mapping a bound name to the live peer's
+      endpoint socket.~~ **Design changed; no registry was built.** A peer already
+      receives traffic through an admitted *ingress mapping*
+      (`mvm_contract::plan::types::IngressMapping`), whose `host_addr`/`host_port`
+      are in that peer's signed plan. Binding the resolved address into the
+      caller's plan makes the peer set signed rather than resolved against
+      mutable runtime state, which matches how egress destinations are handled
+      and removes a component that could disagree with reality. Liveness needs
+      no check: nothing listens at the address until the peer's endpoint binds
+      it, so a dial to a stopped peer is refused by the connect itself.
+- [x] A-5. Thread A-3 into both call sites through one helper. The helper is
+      `EgressGate::decide_target`, on the gate itself rather than beside it, so
+      the branch and the decision live in one type.
+- [x] A-5b. A third call site turned up that the plan had missed:
+      `network_endpoint_proxy.rs`, the secret-substitution HTTP leg. It now
+      refuses peer destinations explicitly instead of falling through to
+      `decide_request` and denying them by accident. **Open question, decided
+      conservatively for now:** whether a peer request should ever receive a
+      substituted credential. Refusing is the answer until someone decides
+      otherwise.
 - [ ] A-6. Emit a chain-signed audit entry per resolved service dial, carrying the
       binding and no payload bytes, following
       `stream_audit_entries_carry_the_binding_and_no_payload_bytes`.
 - [ ] A-7. Tests: bound name resolves; unbound name denied; name resolving to a
       stopped peer denied; a numeric target still takes the DNS-pin path; a plan
       with no peer bindings admits nothing east-west.
-- [ ] A-8. Extend `xtask check-single-network-path` so the new resolution helper is
-      pinned to the one spawn site, i.e. the gate cannot be bypassed by a second
-      resolver appearing later.
+- [x] A-8. Extend `xtask check-single-network-path` (`check_single_peer_resolver`):
+      the branch exists exactly once in the gate, both connect sites go through
+      `decide_target`, neither calls `decide_peer` or re-derives the branch, and
+      the refusal site resolves no peer. Both failure modes were mutation-checked
+      against the live gate.
 
 ### Definition of done for WS-A
 

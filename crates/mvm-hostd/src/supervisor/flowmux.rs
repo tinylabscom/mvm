@@ -659,7 +659,7 @@ impl FlowMuxSession {
             return Ok(());
         }
 
-        let (ips, port) = match self.gate.decide_request(&format!("{host}:{port}")) {
+        let (ips, port) = match self.gate.decide_target(host, port) {
             EgressVerdict::Allow { ips, port } => (ips, port),
             EgressVerdict::Deny(reason) => {
                 self.send_refused(stream_id, &reason.to_string())?;

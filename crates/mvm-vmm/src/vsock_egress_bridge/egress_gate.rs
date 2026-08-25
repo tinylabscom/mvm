@@ -13,6 +13,7 @@
 
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 
+use mvm_contract::peer::{PeerBinding, PeerName};
 use mvm_core::policy::dns_guard::dns_answer_forbidden;
 use mvm_core::policy::dns_pin::DnsPinRegistry;
 use mvm_core::policy::projection::{CanonicalEgress, Proto};
@@ -76,6 +77,16 @@ pub enum DenyReason {
         /// Ports the policy admits for `host`.
         admitted_ports: Vec<u16>,
     },
+    /// A peer dial the plan does not admit — either the name is bound to no
+    /// route, or it is bound on a different port. One variant covers both
+    /// because a binding authorizes a `name:port` route rather than a peer,
+    /// so "wrong port" is not a narrower miss than "wrong name".
+    PeerNotAdmitted {
+        /// The refused peer target as the guest asked for it (`name:port`).
+        target: String,
+        /// Every `name:port` route the plan admits for this workload.
+        admitted_routes: Vec<String>,
+    },
     /// A numeric destination outside every rule, or one under mandatory-deny
     /// (loopback / private / link-local) or a banned flow.
     AddressNotAdmitted {
@@ -132,6 +143,22 @@ impl std::fmt::Display for DenyReason {
                     .join(", ");
                 write!(f, "{host}:{port} is not admitted; allowed: {allowed}")
             }
+            Self::PeerNotAdmitted {
+                target,
+                admitted_routes,
+            } if admitted_routes.is_empty() => {
+                write!(f, "{target} is not admitted; no peers are admitted")
+            }
+            Self::PeerNotAdmitted {
+                target,
+                admitted_routes,
+            } => {
+                write!(
+                    f,
+                    "{target} is not admitted; allowed: {}",
+                    admitted_routes.join(", ")
+                )
+            }
             Self::AddressNotAdmitted { ip, port } => {
                 write!(f, "{ip}:{port} is not admitted")
             }
@@ -162,6 +189,10 @@ pub struct EgressGate {
     /// trusted host resolves it here (against the same pins `canonicalize` used) and
     /// policy-checks the pinned IP before connecting. The guest never resolves.
     pins: DnsPinRegistry,
+    /// Peer routes this workload may dial, admitted in its signed plan. Empty is
+    /// the default and admits nothing, so east-west inherits claim-10's posture
+    /// rather than needing its own.
+    peers: Vec<PeerBinding>,
 }
 
 impl EgressGate {
@@ -171,6 +202,7 @@ impl EgressGate {
         Self {
             egress: CanonicalEgress::Rules(Vec::new()),
             pins: DnsPinRegistry::new(),
+            peers: Vec::new(),
         }
     }
 
@@ -179,6 +211,7 @@ impl EgressGate {
         Self {
             egress,
             pins: DnsPinRegistry::new(),
+            peers: Vec::new(),
         }
     }
 
@@ -198,8 +231,72 @@ impl EgressGate {
             Ok(canon) => Self {
                 egress: canon,
                 pins: pins.clone(),
+                peers: Vec::new(),
             },
             Err(_) => Self::default_deny(),
+        }
+    }
+
+    /// Attach admitted peer routes. Separate from construction because every
+    /// existing call site builds a gate with no peers, and a workload with no
+    /// peer bindings must keep behaving exactly as it does today.
+    #[must_use]
+    pub fn with_peers(mut self, peers: Vec<PeerBinding>) -> Self {
+        self.peers = peers;
+        self
+    }
+
+    /// Decide a guest connect to `host:port`, whichever namespace it is in.
+    ///
+    /// **This is the one entry point every workload connect goes through.**
+    /// The two namespaces are disjoint by construction — a target either ends
+    /// in the peer suffix or it does not — so the branch is total and neither
+    /// arm can shadow the other. Callers must not re-implement the branch:
+    /// a second copy is how one of the two paths quietly stops being gated.
+    /// `xtask check-single-network-path` pins the call sites for that reason.
+    pub fn decide_target(&self, host: &str, port: u16) -> EgressVerdict {
+        if PeerName::is_peer_target(host) {
+            self.decide_peer(host, port)
+        } else {
+            self.decide_request(&format!("{host}:{port}"))
+        }
+    }
+
+    /// Decide a dial to a peer name.
+    ///
+    /// Called only for targets [`PeerName::is_peer_target`] claims, so a
+    /// malformed peer name lands here and is refused rather than falling
+    /// through to host-name resolution. The returned address is the peer's
+    /// admitted ingress mapping, so the caller connects to it exactly as it
+    /// would to any other allowed destination.
+    ///
+    /// Deny is the default: a gate with no peer bindings admits no peer.
+    pub fn decide_peer(&self, host: &str, port: u16) -> EgressVerdict {
+        let Ok(name) = PeerName::parse(host) else {
+            return EgressVerdict::Malformed;
+        };
+        let Some(binding) = self.peers.iter().find(|b| b.admits(&name, port)) else {
+            return EgressVerdict::Deny(DenyReason::PeerNotAdmitted {
+                target: format!("{name}:{port}"),
+                admitted_routes: self
+                    .peers
+                    .iter()
+                    .map(|b| format!("{}:{}", b.name, b.port))
+                    .collect(),
+            });
+        };
+        // A binding is validated before admission, so this parse cannot fail
+        // for an admitted plan. Refusing rather than unwrapping keeps a
+        // hand-built gate in a test from panicking the supervisor.
+        let Ok(ip) = binding.host_addr.parse::<IpAddr>() else {
+            return EgressVerdict::Deny(DenyReason::PeerNotAdmitted {
+                target: format!("{name}:{port}"),
+                admitted_routes: Vec::new(),
+            });
+        };
+        EgressVerdict::Allow {
+            ips: vec![ip],
+            port: binding.host_port,
         }
     }
 
@@ -1150,6 +1247,119 @@ mod tests {
                 ))
             }),
             DnsVerdict::Refused
+        );
+    }
+}
+
+#[cfg(test)]
+mod peer_tests {
+    use super::*;
+
+    fn peer(name: &str, port: u16, host_addr: &str, host_port: u16) -> PeerBinding {
+        PeerBinding {
+            name: PeerName::parse(name).expect("valid peer name"),
+            port,
+            host_addr: host_addr.into(),
+            host_port,
+        }
+    }
+
+    fn gate_with(peers: Vec<PeerBinding>) -> EgressGate {
+        EgressGate::default_deny().with_peers(peers)
+    }
+
+    #[test]
+    fn a_bound_route_resolves_to_the_peers_admitted_ingress_address() {
+        let gate = gate_with(vec![peer("db.mvm.peer", 5432, "127.0.0.1", 34567)]);
+        assert_eq!(
+            gate.decide_peer("db.mvm.peer", 5432),
+            EgressVerdict::Allow {
+                ips: vec!["127.0.0.1".parse::<IpAddr>().unwrap()],
+                port: 34567,
+            }
+        );
+    }
+
+    /// The whole posture in one test: a gate that admits no peer admits no
+    /// peer. East-west inherits claim-10's default rather than having its own.
+    #[test]
+    fn a_gate_with_no_peer_bindings_admits_nothing() {
+        let gate = EgressGate::default_deny();
+        let verdict = gate.decide_peer("db.mvm.peer", 5432);
+        assert!(matches!(verdict, EgressVerdict::Deny(_)));
+        if let EgressVerdict::Deny(reason) = verdict {
+            assert!(reason.to_string().contains("no peers are admitted"));
+        }
+    }
+
+    /// A binding authorizes one route. The same peer on another port is a
+    /// destination nobody signed for.
+    #[test]
+    fn a_bound_peer_on_an_unbound_port_is_refused() {
+        let gate = gate_with(vec![peer("db.mvm.peer", 5432, "127.0.0.1", 34567)]);
+        let verdict = gate.decide_peer("db.mvm.peer", 5433);
+        assert!(matches!(verdict, EgressVerdict::Deny(_)));
+        if let EgressVerdict::Deny(reason) = verdict {
+            let rendered = reason.to_string();
+            assert!(rendered.contains("db.mvm.peer:5433"));
+            assert!(
+                rendered.contains("db.mvm.peer:5432"),
+                "refusal names the route that is admitted"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unbound_peer_name_is_refused_and_the_refusal_lists_what_is_admitted() {
+        let gate = gate_with(vec![peer("db.mvm.peer", 5432, "127.0.0.1", 34567)]);
+        let verdict = gate.decide_peer("cache.mvm.peer", 5432);
+        if let EgressVerdict::Deny(reason) = verdict {
+            assert!(reason.to_string().contains("db.mvm.peer:5432"));
+        } else {
+            panic!("an unbound peer must be denied");
+        }
+    }
+
+    /// A malformed peer target reaches this decision (the branch is claimed on
+    /// suffix alone) and must not be admitted or handed onward.
+    #[test]
+    fn a_malformed_peer_name_is_malformed_not_allowed() {
+        let gate = gate_with(vec![peer("db.mvm.peer", 5432, "127.0.0.1", 34567)]);
+        assert_eq!(
+            gate.decide_peer("-db.mvm.peer", 5432),
+            EgressVerdict::Malformed
+        );
+    }
+
+    /// Peer routes and ordinary egress are separate namespaces. Admitting a
+    /// peer must not widen what the host-name path allows.
+    #[test]
+    fn a_peer_binding_does_not_widen_ordinary_egress() {
+        let gate = gate_with(vec![peer("db.mvm.peer", 5432, "127.0.0.1", 34567)]);
+        assert!(matches!(
+            gate.decide_request("db.mvm.peer:5432"),
+            EgressVerdict::Deny(_) | EgressVerdict::Malformed
+        ));
+        assert!(matches!(
+            gate.decide_request("127.0.0.1:34567"),
+            EgressVerdict::Deny(_) | EgressVerdict::Malformed
+        ));
+    }
+
+    /// The first matching binding wins, deterministically, so a duplicated
+    /// name cannot make resolution depend on iteration order.
+    #[test]
+    fn the_first_matching_binding_wins() {
+        let gate = gate_with(vec![
+            peer("db.mvm.peer", 5432, "127.0.0.1", 1111),
+            peer("db.mvm.peer", 5432, "127.0.0.1", 2222),
+        ]);
+        assert_eq!(
+            gate.decide_peer("db.mvm.peer", 5432),
+            EgressVerdict::Allow {
+                ips: vec!["127.0.0.1".parse::<IpAddr>().unwrap()],
+                port: 1111,
+            }
         );
     }
 }
