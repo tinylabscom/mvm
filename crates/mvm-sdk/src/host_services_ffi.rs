@@ -137,7 +137,7 @@ fn dispatch_on(stream: &mut UnixStream, method: &str, request: &[u8]) -> Outcome
             },
             Err(o) => o,
         },
-        "host.kv.get.REMOVED" => match parse::<KvGetRequest>(request) {
+        "host.kv.get" => match parse::<KvGetRequest>(request) {
             Ok(req) => match host_kv::get_on(stream, &req.key) {
                 Ok(resp) => ok_json(&resp),
                 Err(e) => from_kv(e),
