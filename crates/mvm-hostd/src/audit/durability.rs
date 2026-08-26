@@ -90,6 +90,7 @@ pub fn record_admission(
             if let Err(e) = emitter.emit_decision_record(plan, record) {
                 tracing::warn!(error = %e, "audit emit_decision_record failed (non-fatal)");
             }
+            publish_boundary_root(emitter, &plan.tenant.0, "admission");
             Ok(())
         }
         Err(e) if durability.is_required() => Err(e).context(
@@ -100,6 +101,34 @@ pub fn record_admission(
             tracing::warn!(error = %e, "audit emit_admitted failed (non-fatal, dev tier)");
             Ok(())
         }
+    }
+}
+
+/// Publish a signed Merkle root over the tenant's chain at an execution
+/// boundary.
+///
+/// A consistency proof relates two roots, so a log with no roots recorded at
+/// the moments that matter has nothing to be checked between. Admission and
+/// exit are those moments: they bracket the run, so a root at each is what
+/// lets a later verifier ask whether the log grew across it rather than
+/// changed underneath it.
+///
+/// Best-effort by design. Publishing a root reads and verifies the whole
+/// chain, and a workload must not be refused because that read failed --
+/// admission durability is already decided above by
+/// [`AuditDurability`], on the entry itself, which is the thing a
+/// sealed-production run cannot proceed without. A missing root weakens a
+/// later consistency check; a missing entry would mean the run was never
+/// recorded at all, and only the second is worth refusing a boot over.
+fn publish_boundary_root(emitter: &AuditEmitter, tenant: &str, boundary: &str) {
+    if let Err(e) = emitter.publish_root(tenant) {
+        tracing::warn!(
+            error = %format!("{e:#}"),
+            tenant,
+            boundary,
+            "could not publish an audit root at this boundary; the log stays intact but a \
+             later consistency check has one fewer point to verify against"
+        );
     }
 }
 
@@ -141,6 +170,49 @@ mod tests {
 
     fn plan() -> ExecutionPlan {
         mvm_core::plan::test_support::PlanFixture::new().build()
+    }
+
+    #[test]
+    fn admission_publishes_a_root_so_a_later_check_has_an_opening_bracket() {
+        // Without a root at admission there is no earlier point for a
+        // consistency proof to run against, and the machinery stays as
+        // unused as it was before it was wired.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let emitter = fresh_emitter(dir.path());
+        let plan = plan();
+
+        record_admission(
+            Some(&emitter),
+            &plan,
+            "host:test",
+            AuditDurability::BestEffort,
+        )
+        .expect("admission records");
+
+        let history =
+            crate::audit::emitter::audit_root_history_path_for_tenant(dir.path(), &plan.tenant.0);
+        let content = std::fs::read_to_string(&history).expect("a root history was written");
+        assert_eq!(
+            content.lines().filter(|l| !l.is_empty()).count(),
+            1,
+            "exactly one root published at admission"
+        );
+    }
+
+    #[test]
+    fn a_run_with_no_emitter_publishes_nothing_and_still_succeeds_in_dev() {
+        // The dev tier tolerates an absent chain; it must not start
+        // fabricating one on the way past.
+        let dir = tempfile::tempdir().expect("tempdir");
+        record_admission(None, &plan(), "host:test", AuditDurability::BestEffort)
+            .expect("dev tier tolerates no emitter");
+        assert!(
+            std::fs::read_dir(dir.path())
+                .expect("readable")
+                .next()
+                .is_none(),
+            "nothing was written"
+        );
     }
 
     #[test]

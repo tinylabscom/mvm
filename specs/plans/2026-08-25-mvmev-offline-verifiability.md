@@ -174,7 +174,7 @@ observable.
       RFC 6962 and unit-tested, with zero production callers anywhere outside the
       module. Nothing in the audit pipeline, the CLI, or the archive builds or
       checks one.
-- [ ] **5.2 Publish roots at execution boundaries.** `publish_root`
+- [x] **5.2 Publish roots at execution boundaries.** `publish_root`
       (`crates/mvm-hostd/src/audit/emitter.rs:1131`) has one caller, the manual
       `mvmctl trust audit publish-root` verb. Without roots published at
       admission and exit there is no sequence of roots to run 5.1 against.

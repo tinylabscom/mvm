@@ -966,11 +966,25 @@ impl LocalBackend {
         let exit_code = mvm_core::exit_capture::read_captured(&vm_state_dir(name));
         // Capture fidelity: a missing capture is recorded as uncaptured,
         // never attested as exit 0.
-        if let Some(emitter) = build_audit_emitter()
-            && let Err(e) =
+        if let Some(emitter) = build_audit_emitter() {
+            if let Err(e) =
                 emitter.emit_exited_with_capture(&outcome.plan, exit_code, &outcome.machine.backend)
-        {
-            tracing::warn!(error = %e, machine = name, "audit emit_exited failed (non-fatal)");
+            {
+                tracing::warn!(error = %e, machine = name, "audit emit_exited failed (non-fatal)");
+            }
+            // The closing bracket of the run. Admission published the opening
+            // one, so a verifier can prove the log only grew across the whole
+            // execution rather than changing underneath it. Best-effort for
+            // the same reason as at admission: a workload that already ran
+            // must not fail its exit report over a weakened later check.
+            if let Err(e) = emitter.publish_root(&outcome.plan.tenant.0) {
+                tracing::warn!(
+                    error = %format!("{e:#}"),
+                    machine = name,
+                    "could not publish an audit root at exit; the log stays intact but a later \
+                     consistency check has one fewer point to verify against"
+                );
+            }
         }
         if outcome.mode == LifecycleMode::Transient {
             self.cleanup_transient(name)?;
