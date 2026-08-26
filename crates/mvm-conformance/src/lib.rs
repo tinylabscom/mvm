@@ -38,10 +38,12 @@ pub const FIRECRACKER_TAG: &str = "firecracker";
 /// run's own skip tally counts it instead of the scenario passing on no work.
 pub const NODE_TAG: &str = "node";
 
-/// Cucumber tag for a scenario that boots from a pre-built signed bundle.
+/// Cucumber tag for a scenario that installs a pre-built signed bundle.
 /// Sealing a bundle means a full image build, far too slow to run inline, so
-/// the operator supplies one with `MVM_BDD_BUNDLE=<path to .mvmpkg>` and the
-/// scenario is skipped cleanly when that is absent.
+/// the operator supplies one with `MVM_BDD_BUNDLE=<path to .mvmpkg>` plus the
+/// publisher key it was sealed under in `MVM_BDD_BUNDLE_PUBKEY`; the scenario
+/// is skipped cleanly when either is absent. `scripts/make-bundle-fixture.sh`
+/// produces both.
 pub const BUNDLE_TAG: &str = "bundle";
 
 /// Host capabilities a scenario may require, probed once by the harness.
@@ -55,8 +57,9 @@ pub struct RuntimeCaps {
     /// A usable `/dev/kvm` and a `firecracker` binary on `PATH` are both present,
     /// so a real Firecracker boot can run here.
     pub firecracker_bootable: bool,
-    /// `MVM_BDD_BUNDLE` names a readable `.mvmpkg`, so a bundle-boot scenario
-    /// has something to install.
+    /// `MVM_BDD_BUNDLE` names a readable `.mvmpkg` *and* `MVM_BDD_BUNDLE_PUBKEY`
+    /// names the publisher key it was sealed under, so a bundle scenario has
+    /// something to install and a trust anchor that admits it.
     pub bundle_fixture: bool,
     /// A `node` binary is resolvable, so the TypeScript example checkers can
     /// run at all.
@@ -151,7 +154,10 @@ impl ScenarioGate {
             Self::Pending => Some("@wip"),
             Self::NeedsLiveOptIn => Some("need MVM_BDD_LIVE (these boot a real microVM)"),
             Self::NeedsFirecracker => Some("need /dev/kvm + firecracker on PATH"),
-            Self::NeedsBundleFixture => Some("need MVM_BDD_BUNDLE to name a readable .mvmpkg"),
+            Self::NeedsBundleFixture => Some(
+                "need MVM_BDD_BUNDLE to name a readable .mvmpkg and \
+                 MVM_BDD_BUNDLE_PUBKEY its publisher key",
+            ),
             Self::NeedsNode => Some("need node on PATH (TypeScript example checkers)"),
             Self::OutsideCiLiveSubset => Some("outside the merge-queue @ci_live subset"),
         }

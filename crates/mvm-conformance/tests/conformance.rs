@@ -214,15 +214,28 @@ fn probe_caps() -> RuntimeCaps {
     RuntimeCaps {
         live_opted_in: std::env::var_os("MVM_BDD_LIVE").is_some(),
         firecracker_bootable: kvm_openable() && firecracker_on_path(),
-        bundle_fixture: bundle_fixture_path().is_some(),
+        bundle_fixture: bundle_fixture_path().is_some() && bundle_pubkey_path().is_some(),
         node_available: binary_on_path("node"),
     }
 }
 
-/// The operator-supplied `.mvmpkg` a bundle-boot scenario installs, when
+/// The operator-supplied `.mvmpkg` a bundle scenario installs, when
 /// `MVM_BDD_BUNDLE` names one that actually exists.
 pub(crate) fn bundle_fixture_path() -> Option<std::path::PathBuf> {
     let path = std::path::PathBuf::from(std::env::var_os("MVM_BDD_BUNDLE")?);
+    path.is_file().then_some(path)
+}
+
+/// The publisher key the fixture was sealed under (`MVM_BDD_BUNDLE_PUBKEY`),
+/// 32 raw Ed25519 bytes as `mvmctl trust add` reads them.
+///
+/// Required alongside the archive, because a bundle installs into an isolated
+/// `MVM_HOME` whose trust store starts empty and verification correctly refuses
+/// an unknown `key_id`. Without this the scenario could never have passed —
+/// which is exactly what it did, invisibly, for as long as nobody set
+/// `MVM_BDD_BUNDLE` at all.
+pub(crate) fn bundle_pubkey_path() -> Option<std::path::PathBuf> {
+    let path = std::path::PathBuf::from(std::env::var_os("MVM_BDD_BUNDLE_PUBKEY")?);
     path.is_file().then_some(path)
 }
 
