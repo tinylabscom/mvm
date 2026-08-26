@@ -28,13 +28,6 @@ pub enum InitramfsBuildError {
     #[error(transparent)]
     Resolve(#[from] mvm_fs::initramfs::InitramfsError),
 
-    /// The requested operation is not supported on this host.
-    #[error("host does not support {operation}: {reason}")]
-    HostUnsupported {
-        operation: &'static str,
-        reason: &'static str,
-    },
-
     /// The deterministic cargo build failed (agent cross-compile or the
     /// cpio assembly).
     #[error("cargo initramfs build failed: {reason}")]
@@ -184,9 +177,17 @@ fn seed_from_default_cache(
 }
 
 /// Resolve a cached universal initramfs, or return an error describing why it
-/// is unavailable. A cold contributor cache on Linux falls back to the
-/// deterministic Cargo build; release distributions and non-Linux hosts use
-/// the published download.
+/// is unavailable. A cold contributor cache falls back to the deterministic
+/// Cargo build on every host; release distributions use the published
+/// download.
+///
+/// The build is not host-gated. It cross-compiles the guest agent with
+/// `cargo zigbuild` to the arch's musl triple and packs it into a
+/// deterministic cpio — the same portable path the runtime overlay already
+/// takes on macOS. Gating it to Linux left the macOS contributor with the
+/// download as its only arm; when the release carried no initramfs for the
+/// arch, the 404 was negative-cached for a day and every launch on that host
+/// booted with no initramfs at all.
 pub fn resolve_or_build_local_initramfs(
     _env: &dyn ShellEnvironment,
     cache_root: &Path,
@@ -201,31 +202,28 @@ pub fn resolve_or_build_local_initramfs(
         Err(e) => return Err(e),
     }
 
-    #[cfg(target_os = "linux")]
-    if crate::artifact_acquisition::compiled_channel().permits_automatic_builds() {
-        build_initramfs_with_cargo(cache_root, version, arch)
-    } else {
-        download_initramfs_with_negative_cache(version, arch, cache_root)
+    if !crate::artifact_acquisition::compiled_channel().permits_automatic_builds() {
+        return download_initramfs_with_negative_cache(version, arch, cache_root);
     }
-    #[cfg(not(target_os = "linux"))]
-    {
-        // macOS / non-Linux hosts cannot run the cargo cross-compile for a
-        // Linux initramfs here. Try to download a published release artifact
-        // into the cache before giving up. This mirrors the runtime-overlay
-        // download path.
-        match download_initramfs_with_negative_cache(version, arch, cache_root) {
-            Ok(artifact) => Ok(artifact),
-            Err(download_err) => {
-                tracing::debug!(
-                    error = %download_err,
-                    "initramfs download fallback unavailable"
-                );
-                Err(InitramfsBuildError::HostUnsupported {
-                    operation: "cargo initramfs build",
-                    reason: "universal initramfs build requires Linux and no published artifact was available; seed the cache from a Linux build",
-                })
-            }
-        }
+
+    // A source checkout builds; only a checkout-less source build falls back to
+    // the published artifact. Reporting both failures matters: the download arm
+    // 404s silently whenever the release for this version carries no initramfs
+    // for this arch, and on its own that reads as "unavailable" rather than
+    // "your checkout did not build".
+    let build_err = match build_initramfs_with_cargo(cache_root, version, arch) {
+        Ok(artifact) => return Ok(artifact),
+        Err(e) => e,
+    };
+    match download_initramfs_with_negative_cache(version, arch, cache_root) {
+        Ok(artifact) => Ok(artifact),
+        Err(download_err) => Err(InitramfsBuildError::CargoBuildFailed {
+            reason: format!(
+                "building the universal initramfs from this checkout failed ({build_err}), \
+                 and downloading the published {version} artifact for {arch} also failed \
+                 ({download_err})"
+            ),
+        }),
     }
 }
 
@@ -243,7 +241,6 @@ pub fn resolve_or_build_local_initramfs(
 /// kernels, images, and overlays, where toolchain variance matters; the
 /// flake's initramfs package stays as the optional publish-path build of
 /// the same artifact.
-#[cfg(target_os = "linux")]
 fn build_initramfs_with_cargo(
     cache_root: &Path,
     version: &str,
