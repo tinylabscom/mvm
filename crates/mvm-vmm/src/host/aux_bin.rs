@@ -25,8 +25,33 @@ pub struct AuxBin<'a> {
 /// Resolve `spec` to an on-disk binary. Never builds — the build script
 /// produces these; a missing one is a hard error with a recovery hint.
 pub fn resolve(spec: &AuxBin) -> Result<PathBuf> {
-    if let Some(p) = std::env::var_os(spec.env_var).map(PathBuf::from) {
+    resolve_from(
+        spec,
+        &Lookup {
+            override_path: std::env::var_os(spec.env_var).map(PathBuf::from),
+            dirs: assemble_candidate_dirs(
+                current_exe_dir(),
+                aux_bin_dir_from_env(),
+                workspace_target_dirs(),
+            ),
+            allow_stale: stale_reuse_allowed(),
+        },
+    )
+}
+
+/// Everything `resolve` reads from the environment, gathered so the resolution
+/// rules — including the staleness refusal — are testable without mutating
+/// process-global env.
+pub(crate) struct Lookup {
+    pub(crate) override_path: Option<PathBuf>,
+    pub(crate) dirs: Vec<PathBuf>,
+    pub(crate) allow_stale: bool,
+}
+
+fn resolve_from(spec: &AuxBin, lookup: &Lookup) -> Result<PathBuf> {
+    if let Some(p) = lookup.override_path.clone() {
         if p.is_file() {
+            refuse_if_stale(&p, lookup.allow_stale)?;
             return Ok(p);
         }
         bail!(
@@ -35,12 +60,8 @@ pub fn resolve(spec: &AuxBin) -> Result<PathBuf> {
             p.display()
         );
     }
-    let dirs = assemble_candidate_dirs(
-        current_exe_dir(),
-        aux_bin_dir_from_env(),
-        workspace_target_dirs(),
-    );
-    if let Some(found) = first_existing_bin(spec.bin, &dirs) {
+    if let Some(found) = first_existing_bin(spec.bin, &lookup.dirs) {
+        refuse_if_stale(&found, lookup.allow_stale)?;
         return Ok(found);
     }
     bail!(
@@ -51,6 +72,45 @@ pub fn resolve(spec: &AuxBin) -> Result<PathBuf> {
         env = spec.env_var,
         hint = missing_hint(spec.bin),
     )
+}
+
+/// Marker `mvm-cli`'s build script writes beside a helper it reused from a
+/// previous build instead of recompiling.
+///
+/// The build script only recompiles these when the content key misses, and an
+/// edit anywhere under `mvm-hostd`'s closure misses by construction — so
+/// rebuilding unconditionally cost 17.8s of every inner-loop build. Reusing
+/// silently is worse than slow, though: a supervisor that ignores your edit
+/// produces a guest that misbehaves with no visible cause. Detecting it here,
+/// at the moment of spawn, gets both — a fast build and a loud failure.
+///
+/// Only ever present in a source checkout's build-script directory. A
+/// downloaded release ships binaries with no marker beside them.
+fn stale_marker_for(bin: &Path) -> PathBuf {
+    let name = bin.file_name().unwrap_or_default().to_string_lossy();
+    bin.with_file_name(format!("{name}.mvm-stale"))
+}
+
+/// Escape hatch for the case where you know the reused helper is fine — for
+/// example an edit that touched only host-side CLI code.
+fn stale_reuse_allowed() -> bool {
+    std::env::var_os("MVM_ALLOW_STALE_AUX").is_some_and(|v| !v.is_empty())
+}
+
+/// Refuse a helper the build script flagged as not carrying this tree's
+/// changes. Fail closed: spawning it would silently produce a guest that
+/// ignores the edit under test.
+fn refuse_if_stale(bin: &Path, allowed: bool) -> Result<()> {
+    if allowed || !stale_marker_for(bin).is_file() {
+        return Ok(());
+    }
+    bail!(
+        "{} was reused from an earlier build and does NOT contain this source \
+         tree's changes, so spawning it would run a guest that ignores your \
+         edit. Run `just embed-refresh` to rebuild it, or set \
+         MVM_ALLOW_STALE_AUX=1 to use it anyway.",
+        bin.display()
+    );
 }
 
 /// Ordered directories to search for a helper: the build script's dir, then
@@ -196,6 +256,167 @@ mod tests {
             first_existing_bin("mvm-hvf-supervisor", &[tmp.path().to_path_buf()]),
             None
         );
+    }
+
+    #[test]
+    fn stale_marker_sits_beside_the_binary() {
+        assert_eq!(
+            stale_marker_for(Path::new("/aux/debug/mvm-hvf-supervisor")),
+            PathBuf::from("/aux/debug/mvm-hvf-supervisor.mvm-stale")
+        );
+    }
+
+    #[test]
+    fn unmarked_binary_is_admitted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bin = tmp.path().join("mvm-hvf-supervisor");
+        std::fs::write(&bin, b"bin").unwrap();
+        assert!(refuse_if_stale(&bin, false).is_ok());
+    }
+
+    #[test]
+    fn marked_binary_is_refused_with_an_actionable_message() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bin = tmp.path().join("mvm-hvf-supervisor");
+        std::fs::write(&bin, b"bin").unwrap();
+        std::fs::write(stale_marker_for(&bin), b"stale").unwrap();
+
+        let err = refuse_if_stale(&bin, false).unwrap_err().to_string();
+        assert!(err.contains("does NOT contain this source"), "{err}");
+        assert!(err.contains("just embed-refresh"), "{err}");
+        assert!(err.contains("MVM_ALLOW_STALE_AUX"), "{err}");
+    }
+
+    #[test]
+    fn marked_binary_is_admitted_when_the_override_is_set() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bin = tmp.path().join("mvm-hvf-supervisor");
+        std::fs::write(&bin, b"bin").unwrap();
+        std::fs::write(stale_marker_for(&bin), b"stale").unwrap();
+        assert!(refuse_if_stale(&bin, true).is_ok());
+    }
+
+    /// A marker for one helper must not condemn its neighbours — the build
+    /// script reuses and rebuilds them independently.
+    #[test]
+    fn marker_is_scoped_to_one_binary() {
+        let tmp = tempfile::tempdir().unwrap();
+        let stale = tmp.path().join("mvm-hvf-supervisor");
+        let fresh = tmp.path().join("mvm-network-endpoint");
+        std::fs::write(&stale, b"bin").unwrap();
+        std::fs::write(&fresh, b"bin").unwrap();
+        std::fs::write(stale_marker_for(&stale), b"stale").unwrap();
+
+        assert!(refuse_if_stale(&stale, false).is_err());
+        assert!(refuse_if_stale(&fresh, false).is_ok());
+    }
+
+    fn hvf_spec() -> AuxBin<'static> {
+        AuxBin {
+            bin: "mvm-hvf-supervisor",
+            env_var: "MVM_HVF_SUPERVISOR_PATH",
+        }
+    }
+
+    /// The refusal must be reachable through `resolve`, not merely defined —
+    /// an unwired gate is indistinguishable from no gate at all.
+    #[test]
+    fn resolve_refuses_a_stale_helper_found_by_directory_search() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bin = tmp.path().join("mvm-hvf-supervisor");
+        std::fs::write(&bin, b"bin").unwrap();
+        std::fs::write(stale_marker_for(&bin), b"stale").unwrap();
+
+        let err = resolve_from(
+            &hvf_spec(),
+            &Lookup {
+                override_path: None,
+                dirs: vec![tmp.path().to_path_buf()],
+                allow_stale: false,
+            },
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("just embed-refresh"), "{err}");
+    }
+
+    /// An explicit path override names a specific file but does not vouch for
+    /// its freshness, so it is gated on the same marker.
+    #[test]
+    fn resolve_refuses_a_stale_helper_reached_by_env_override() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bin = tmp.path().join("mvm-hvf-supervisor");
+        std::fs::write(&bin, b"bin").unwrap();
+        std::fs::write(stale_marker_for(&bin), b"stale").unwrap();
+
+        let err = resolve_from(
+            &hvf_spec(),
+            &Lookup {
+                override_path: Some(bin.clone()),
+                dirs: Vec::new(),
+                allow_stale: false,
+            },
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("just embed-refresh"), "{err}");
+    }
+
+    #[test]
+    fn resolve_admits_a_fresh_helper() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bin = tmp.path().join("mvm-hvf-supervisor");
+        std::fs::write(&bin, b"bin").unwrap();
+
+        let got = resolve_from(
+            &hvf_spec(),
+            &Lookup {
+                override_path: None,
+                dirs: vec![tmp.path().to_path_buf()],
+                allow_stale: false,
+            },
+        )
+        .unwrap();
+        assert_eq!(got, bin);
+    }
+
+    #[test]
+    fn resolve_admits_a_stale_helper_under_the_override() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bin = tmp.path().join("mvm-hvf-supervisor");
+        std::fs::write(&bin, b"bin").unwrap();
+        std::fs::write(stale_marker_for(&bin), b"stale").unwrap();
+
+        let got = resolve_from(
+            &hvf_spec(),
+            &Lookup {
+                override_path: None,
+                dirs: vec![tmp.path().to_path_buf()],
+                allow_stale: true,
+            },
+        )
+        .unwrap();
+        assert_eq!(got, bin);
+    }
+
+    /// A marker must not be mistaken for the binary itself.
+    #[test]
+    fn resolve_does_not_return_the_marker_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bin = tmp.path().join("mvm-hvf-supervisor");
+        std::fs::write(&bin, b"bin").unwrap();
+        std::fs::write(stale_marker_for(&bin), b"stale").unwrap();
+
+        let got = resolve_from(
+            &hvf_spec(),
+            &Lookup {
+                override_path: None,
+                dirs: vec![tmp.path().to_path_buf()],
+                allow_stale: true,
+            },
+        )
+        .unwrap();
+        assert!(!got.to_string_lossy().ends_with(".mvm-stale"), "{got:?}");
     }
 
     #[test]

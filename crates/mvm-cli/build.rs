@@ -338,7 +338,7 @@ fn main() {
         );
     }
 
-    build_native_aux_helpers(&workspace_root, &nested_target_dir, &mut cache);
+    build_native_aux_helpers(&workspace_root, &nested_target_dir, &mut cache, dev_profile);
 
     let embedded_rs = render_embedded_rs(&entries);
     std::fs::write(out_dir.join("embedded.rs"), embedded_rs).unwrap();
@@ -400,6 +400,7 @@ fn build_native_aux_helpers(
     workspace_root: &Path,
     nested_target_dir: &Path,
     cache: &mut EmbedCache,
+    dev_profile: bool,
 ) {
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     let target_arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
@@ -419,7 +420,24 @@ fn build_native_aux_helpers(
     // key is what makes skipping them safe: it cannot match unless the bytes
     // are the ones this tree produces. Note the profile is part of the
     // flavour, because unlike the musl leg these follow the outer profile.
+    //
+    // A key *miss* used to mean an unconditional nested rebuild, which is the
+    // single largest cost on the inner loop: every one of these binaries links
+    // `mvm-hostd` -> `mvm-core`, so any edit under those trees misses by
+    // construction and pays a nested `cargo build` of a 100K-LOC crate in a
+    // second target dir. Measured at 17.8s of a 20.9s rebuild (85%), with
+    // `mvm-cli` itself unable to start until it finished.
+    //
+    // The reason it could not simply reuse, the way the musl leg does, is that
+    // a stale *embedded* binary only sits inside `mvmctl`, whereas a stale
+    // supervisor is spawned — and a guest that quietly ignores your edit is a
+    // far worse failure than a slow build. So dev reuse here is paired with a
+    // marker file the runtime resolver refuses on. The staleness is detected
+    // at the moment of use rather than prevented at every build, which turns
+    // a silent wrong-behaviour boot into an instant, actionable error and
+    // takes the 17.8s off every edit that does not spawn a VM.
     let libkrun_present = libkrun_header_present();
+    let mut stale_helpers: Vec<String> = Vec::new();
     let aux_manifest_src = std::fs::read_to_string(
         workspace_root.join("crates/mvm-cli/src/host_binaries/manifest.rs"),
     )
@@ -443,6 +461,7 @@ fn build_native_aux_helpers(
         let installed = bin_dir.join(spec_bin);
 
         if cache.restore(key.as_deref(), spec_bin, &installed) {
+            clear_stale_marker(&bin_dir, spec_bin);
             eprintln!(
                 "[build.rs] per-VM host helper {} restored from the content store",
                 spec_bin
@@ -450,11 +469,69 @@ fn build_native_aux_helpers(
             continue;
         }
 
+        // Miss with a usable previous build present: reuse it and mark it, so
+        // the edit/check/clippy loop stops paying the nested build. Only under
+        // the dev profile, and only when a binary is actually there to reuse —
+        // a cold worktree still builds, and `--release` / `release-witness`
+        // always build, matching the musl leg's rule.
+        if dev_profile && installed.is_file() {
+            write_stale_marker(&bin_dir, spec_bin);
+            eprintln!(
+                "[build.rs] per-VM host helper {} is STALE — this build's \
+                 changes are NOT in it. Reused to keep the inner loop fast; \
+                 mvmctl refuses to spawn it until you run `just embed-refresh` \
+                 (or build with MVM_EMBED_NO_CACHE=1).",
+                spec_bin
+            );
+            stale_helpers.push(spec_bin.to_string());
+            continue;
+        }
+
         run_cargo_native_build(workspace_root, &aux_target, &profile, &spec);
         if installed.is_file() {
+            clear_stale_marker(&bin_dir, spec_bin);
             cache.publish(key.as_deref(), spec_bin, &installed);
         }
     }
+
+    // Same reasoning as the musl leg's warning: build-script stderr is hidden
+    // without `-vv`, and a developer whose supervisor edit will not reach the
+    // guest must be told without having to know to look.
+    if !stale_helpers.is_empty() {
+        println!(
+            "cargo:warning=per-VM host helpers are STALE and will be refused \
+             at spawn time: {}. Run `just embed-refresh` (or build with \
+             MVM_EMBED_NO_CACHE=1) before booting a VM.",
+            stale_helpers.join(", ")
+        );
+    }
+}
+
+/// Name of the marker written beside a reused-but-stale per-VM helper.
+///
+/// Kept in lockstep with `mvm_vmm::host::aux_bin`, which reads it. The two
+/// cannot share a constant: this build script is compiled before any workspace
+/// crate exists to import from.
+fn stale_marker_path(bin_dir: &Path, bin: &str) -> PathBuf {
+    bin_dir.join(format!("{bin}.mvm-stale"))
+}
+
+/// Mark `bin` as not carrying this tree's changes. Best-effort: a marker we
+/// fail to write costs the old silent-stale behaviour, not a broken build.
+fn write_stale_marker(bin_dir: &Path, bin: &str) {
+    let _ = std::fs::create_dir_all(bin_dir);
+    let _ = std::fs::write(
+        stale_marker_path(bin_dir, bin),
+        format!(
+            "{bin} was reused from a previous build and does not contain this \
+             source tree's changes.\n"
+        ),
+    );
+}
+
+/// Drop the marker once `bin` provably matches this tree.
+fn clear_stale_marker(bin_dir: &Path, bin: &str) {
+    let _ = std::fs::remove_file(stale_marker_path(bin_dir, bin));
 }
 
 /// Nested native `cargo build` for one helper into `target_dir`. Fail-open: a

@@ -739,6 +739,13 @@ resume` takes a `current_head` and refuses when it differs from the
       deliberately, but a miss now knows it is stale and says so via
       `cargo:warning=`. Supersedes the freshness half of
       `specs/plans/2026-08-15-aux-helper-binary-freshness.md`.
+      The per-VM aux leg — the last unconditional rebuild, and by 2026-08-26
+      **17.8s of a 20.9s** inner-loop rebuild (85%) — is now closed too by
+      `specs/plans/2026-08-26-aux-helper-staleness-gate.md`: it reuses on a key
+      miss under the dev profile and marks the binary, and
+      `mvm_vmm::host::aux_bin::resolve` refuses to spawn a marked helper. That
+      keeps #2058's no-silently-stale-supervisor guarantee while charging its
+      cost only to builds that actually boot a VM. Measured **20.9s → 8.5s**.
       STILL OPEN: Phase 3 (phantom build.rs tests, `MVM_LIBKRUN_HEADER`
       rerun-if-env-changed), Phase 4 (dead crate edges; `deps_audit` and the
       tree-sitter grammars off the serial path; the `mvm-hostd` audit cluster),
