@@ -696,14 +696,79 @@ impl std::fmt::Display for AutoStdinError {
 }
 impl std::error::Error for AutoStdinError {}
 
-/// Read one buffered stdin payload, capped. A TTY on stdin is interactive input
-/// for the terminal, not a workload payload, so it yields empty and never blocks.
+/// What the caller's stdin is, for the purpose of the implicit payload read.
+///
+/// Three states rather than a `bool`, because "not a terminal" was doing two
+/// jobs and only one of them is "a payload is waiting".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::commands) enum AutoStdin {
+    /// A terminal. Interactive input for the person at the keyboard, never a
+    /// workload payload.
+    Terminal,
+    /// Not a terminal, and nothing readable right now — stdin was inherited
+    /// rather than redirected at us.
+    Idle,
+    /// Not a terminal and readable now: the caller handed us something.
+    Ready,
+}
+
+/// Classify the real stdin fd without consuming a byte of it.
+///
+/// A terminal is decided first: a TTY with type-ahead buffered is *readable*,
+/// and reading it would steal the person's keystrokes.
+///
+/// Otherwise `poll` with a zero timeout answers "is there something here", which
+/// is the question the implicit read actually needs. A regular file and
+/// `/dev/null` always poll readable, so redirection still works; a pipe that was
+/// merely inherited does not, so it is left alone. `POLLHUP` counts as readable
+/// because a closed pipe yields EOF immediately rather than blocking.
+fn classify_stdin() -> AutoStdin {
+    use std::io::IsTerminal as _;
+    if std::io::stdin().is_terminal() {
+        return AutoStdin::Terminal;
+    }
+    if fd_is_readable_now(libc::STDIN_FILENO) {
+        AutoStdin::Ready
+    } else {
+        AutoStdin::Idle
+    }
+}
+
+/// Whether `fd` would yield something — bytes, EOF, or an error — without
+/// waiting. Split from [`classify_stdin`] so it can be exercised against a real
+/// pipe rather than whatever the test harness happens to have on fd 0.
+fn fd_is_readable_now(fd: std::os::fd::RawFd) -> bool {
+    let mut pfd = libc::pollfd {
+        fd,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // SAFETY: `pfd` is a single initialized `pollfd` living for the whole call,
+    // and the count matches. A zero timeout cannot block. `poll` writes only
+    // `revents`.
+    let ready = unsafe { libc::poll(&mut pfd, 1, 0) };
+    ready > 0 && pfd.revents != 0
+}
+
+/// Read one buffered stdin payload, capped.
+///
+/// Only [`AutoStdin::Ready`] is read. The other two yield empty without
+/// touching the fd, which is what keeps this from blocking: an inherited pipe
+/// that nobody ever writes to or closes used to park the whole launch here in
+/// `read_to_end` — before any VM was created, with no output and no timeout.
+///
+/// One residual: a producer that writes, then holds the pipe open without
+/// closing it, polls readable and then blocks in `read_to_end` waiting for the
+/// end it was promised. That is the contract this mode has — one whole buffered
+/// payload — and truncating at whatever happened to arrive first would be worse
+/// than waiting. Callers who want a stream rather than a payload have
+/// `--stdin -`, which is a different contract with the guest.
 fn read_auto_stdin_from<R: std::io::Read>(
     mut reader: R,
-    is_tty: bool,
+    stdin: AutoStdin,
     cap: usize,
 ) -> Result<Vec<u8>, AutoStdinError> {
-    if is_tty {
+    if stdin != AutoStdin::Ready {
         return Ok(Vec::new());
     }
     // Read cap+1 so an exactly-cap payload passes and the first over-cap byte trips.
@@ -720,8 +785,8 @@ fn read_auto_stdin_from<R: std::io::Read>(
 }
 
 /// Public entry: acquire the caller's stdin payload from the real stdin fd.
-pub(in crate::commands) fn read_auto_stdin(is_tty: bool) -> anyhow::Result<Vec<u8>> {
-    read_auto_stdin_from(std::io::stdin().lock(), is_tty, MAX_STDIN_BYTES)
+pub(in crate::commands) fn read_auto_stdin() -> anyhow::Result<Vec<u8>> {
+    read_auto_stdin_from(std::io::stdin().lock(), classify_stdin(), MAX_STDIN_BYTES)
         .map_err(|e| anyhow::anyhow!(e))
 }
 
@@ -1953,34 +2018,96 @@ mod captured_tests {
 
 #[cfg(test)]
 mod auto_stdin_tests {
-    use super::{AutoStdinError, read_auto_stdin_from};
+    use super::{AutoStdin, AutoStdinError, read_auto_stdin_from};
     use std::io::Cursor;
 
     #[test]
     fn tty_stdin_yields_empty_payload() {
         // A terminal on stdin is interactive, not input: never block reading it.
-        let got = read_auto_stdin_from(Cursor::new(b"ignored" as &[u8]), true, 1024).unwrap();
+        let got = read_auto_stdin_from(Cursor::new(b"ignored" as &[u8]), AutoStdin::Terminal, 1024)
+            .unwrap();
         assert!(got.is_empty());
     }
 
     #[test]
     fn piped_stdin_under_cap_is_read_whole() {
-        let got = read_auto_stdin_from(Cursor::new(b"STDIN-RT-42" as &[u8]), false, 1024).unwrap();
+        let got =
+            read_auto_stdin_from(Cursor::new(b"STDIN-RT-42" as &[u8]), AutoStdin::Ready, 1024)
+                .unwrap();
         assert_eq!(got, b"STDIN-RT-42");
     }
 
     #[test]
     fn piped_stdin_over_cap_fails_closed() {
         let payload = vec![b'x'; 2048];
-        let err = read_auto_stdin_from(Cursor::new(&payload[..]), false, 1024).unwrap_err();
+        let err =
+            read_auto_stdin_from(Cursor::new(&payload[..]), AutoStdin::Ready, 1024).unwrap_err();
         assert!(matches!(err, AutoStdinError::TooLarge { cap: 1024 }));
     }
 
     #[test]
     fn piped_stdin_exactly_at_cap_passes() {
         let payload = vec![b'x'; 1024];
-        let got = read_auto_stdin_from(Cursor::new(&payload[..]), false, 1024).unwrap();
+        let got = read_auto_stdin_from(Cursor::new(&payload[..]), AutoStdin::Ready, 1024).unwrap();
         assert_eq!(got.len(), 1024);
+    }
+
+    /// An inherited pipe must not be touched at all. Asserted with a reader that
+    /// panics if anyone reads it, because "returned empty" and "never read" are
+    /// different facts and only the second one cannot hang.
+    #[test]
+    fn idle_stdin_is_never_read() {
+        struct Explode;
+        impl std::io::Read for Explode {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                panic!("idle stdin must not be read — this is the blocking read that hung a launch")
+            }
+        }
+        let got = read_auto_stdin_from(Explode, AutoStdin::Idle, 1024).unwrap();
+        assert!(got.is_empty());
+    }
+
+    /// The probe itself, against real pipes. The first case is the bug: a pipe
+    /// with a live writer that has sent nothing is what `ssh host 'mvmctl ...'`,
+    /// CI runners and any script hand us, and reading it parks the launch
+    /// forever before a VM is ever created.
+    #[test]
+    fn the_readiness_probe_distinguishes_an_idle_pipe_from_a_written_one() {
+        use std::io::Write as _;
+        use std::os::fd::{AsRawFd as _, FromRawFd as _};
+
+        let mut fds = [0 as libc::c_int; 2];
+        // SAFETY: `fds` is a two-element array, which is what `pipe` writes.
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0, "pipe()");
+        // SAFETY: both fds come from a successful `pipe` and are owned here.
+        let (read_end, mut write_end) = unsafe {
+            (
+                std::fs::File::from_raw_fd(fds[0]),
+                std::fs::File::from_raw_fd(fds[1]),
+            )
+        };
+        let fd = read_end.as_raw_fd();
+
+        assert!(
+            !super::fd_is_readable_now(fd),
+            "a pipe whose writer has sent nothing must not read as ready"
+        );
+
+        write_end.write_all(b"payload").unwrap();
+        assert!(
+            super::fd_is_readable_now(fd),
+            "a pipe carrying data must read as ready"
+        );
+
+        // A closed writer is EOF, which is available immediately — reading it
+        // returns empty rather than blocking, so it counts as ready.
+        let mut drain = [0u8; 7];
+        std::io::Read::read_exact(&mut { &read_end }, &mut drain).unwrap();
+        drop(write_end);
+        assert!(
+            super::fd_is_readable_now(fd),
+            "a closed writer is EOF, which is readable now"
+        );
     }
 }
 

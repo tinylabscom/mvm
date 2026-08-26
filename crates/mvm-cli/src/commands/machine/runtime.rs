@@ -310,10 +310,7 @@ fn run_entrypoint_action(args: MachineRunArgs, resolved_flake_slot: Option<Strin
 /// - a path — read that file and send it as one payload; a file has an end the
 ///   host already knows, so there is nothing to stream.
 fn resolve_entrypoint_stdin(spec: Option<&str>) -> Result<invoke::EntrypointStdin> {
-    resolve_entrypoint_stdin_with(spec, || {
-        use std::io::IsTerminal as _;
-        invoke::read_auto_stdin(std::io::stdin().is_terminal())
-    })
+    resolve_entrypoint_stdin_with(spec, invoke::read_auto_stdin)
 }
 
 /// The mapping itself, with the one arm that reads this process's own stdin
@@ -389,8 +386,7 @@ pub(super) fn run_dispatch(cli: &Cli, mut args: MachineRunArgs, cfg: &MvmConfig)
             // both the transport decision and the signed plan.
             run_args.network_mode = network_mode;
             run_args.warm_pool_size = warm_pool_size;
-            use std::io::IsTerminal as _;
-            run_args.stdin = invoke::read_auto_stdin(std::io::stdin().is_terminal())?;
+            run_args.stdin = invoke::read_auto_stdin()?;
             let source = local_deployment
                 .as_ref()
                 .map(super::local_deployment_image_source)
@@ -412,7 +408,7 @@ pub(super) fn run_dispatch(cli: &Cli, mut args: MachineRunArgs, cfg: &MvmConfig)
             run_args.network_mode = network_mode;
             run_args.pty = true;
             run_args.warm_pool_size = warm_pool_size;
-            run_args.stdin = invoke::read_auto_stdin(std::io::stdin().is_terminal())?;
+            run_args.stdin = invoke::read_auto_stdin()?;
             let source = local_deployment
                 .as_ref()
                 .map(super::local_deployment_image_source)
