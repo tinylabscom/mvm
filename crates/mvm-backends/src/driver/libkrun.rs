@@ -382,11 +382,7 @@ impl VmmDriver for LibkrunDriver {
         let stdout = mvm_vmm::host::console_capture::open_console_capture(&console_log)
             .map(Stdio::from)
             .unwrap_or_else(|_| Stdio::null());
-        let stderr = mvm_vmm::host::console_capture::open_console_capture(
-            &state_dir.join("supervisor.stderr.log"),
-        )
-        .map(Stdio::from)
-        .unwrap_or_else(|_| Stdio::inherit());
+        let stderr = mvm_vmm::host::console_capture::supervisor_stderr(&state_dir);
         let mut child = bounded_supervisor_command(&supervisor, spec, &state_dir)
             .stdin(Stdio::piped())
             .stdout(stdout)

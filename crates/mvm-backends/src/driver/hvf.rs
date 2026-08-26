@@ -341,7 +341,9 @@ fn boot_with_handoff(
     let mut child = bounded_supervisor_command(&supervisor, spec, &paths.state_dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
-        .stderr(Stdio::inherit())
+        .stderr(mvm_vmm::host::console_capture::supervisor_stderr(
+            &paths.state_dir,
+        ))
         .spawn()
         .map_err(|e| anyhow!("spawn {}: {e}", supervisor.display()))?;
     child

@@ -241,14 +241,34 @@ fn launch_exits_with(world: &mut CliWorld, code: i64) {
     );
 }
 
+/// Assert on the guest's own stdout, never the combined streams.
+///
+/// `combined()` carries the CLI's diagnostics too — including the
+/// `MVM_PHASE_TIMING` table, which is full of digits. A short expectation like
+/// `"2"` matched that noise and passed without the guest ever printing it. The
+/// guest's output arrives on stdout; the diagnostics do not.
 #[then(expr = "the guest printed {string}")]
 fn guest_printed(world: &mut CliWorld, expected: String) {
     let record = last(world);
-    let combined = record.combined();
     assert!(
-        combined.contains(&expected),
-        "guest output did not contain {expected:?}.\n--- stdout ---\n{}\n--- stderr ---\n{}",
+        record.stdout.contains(&expected),
+        "guest stdout did not contain {expected:?}.\n--- stdout ---\n{}\n--- stderr ---\n{}",
         record.stdout,
+        record.stderr
+    );
+}
+
+/// Assert the guest's stdout is exactly one line with this content.
+///
+/// For a one-word answer like `nproc`, `contains` is too weak to be worth
+/// asserting: "1" is a substring of "16". This pins the whole line.
+#[then(expr = "the guest printed exactly {string}")]
+fn guest_printed_exactly(world: &mut CliWorld, expected: String) {
+    let record = last(world);
+    let actual = record.stdout.trim();
+    assert_eq!(
+        actual, expected,
+        "guest stdout was {actual:?}, expected exactly {expected:?}.\n--- stderr ---\n{}",
         record.stderr
     );
 }

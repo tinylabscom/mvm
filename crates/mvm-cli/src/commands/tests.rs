@@ -5317,6 +5317,45 @@ fn machine_run_up_json_guards_stdout() {
 }
 
 #[test]
+fn machine_run_up_json_withholds_the_started_banner() {
+    // The test above pins a parse-level flag and passed the whole time stdout
+    // was in fact being polluted: `run -d --up-json` printed
+    // "started machine <name>" ahead of the envelope, so the SDK's live
+    // transport died on `json.loads(stdout)` at line 1 column 1. Declaring
+    // stdout machine-readable is not the same as withholding the banner, so
+    // pin the banner decision itself.
+    let args = parse_machine_run(&["--up-json", "--name", "vm", "--image", "alpine"])
+        .expect("up-json run args parse");
+    assert!(
+        crate::commands::machine::runtime::banner_suppressed(&args),
+        "--up-json reserves stdout for the envelope, so the banner must be withheld"
+    );
+    // Pin the wiring too, not just the decision: a mapping that stopped
+    // consulting `banner_suppressed` would leave the assertion above green
+    // while stdout went back to carrying the banner.
+    assert!(
+        crate::commands::machine::runtime::start_args_for_run(&args, "vm").quiet,
+        "the start arguments a --up-json run boots under must carry quiet"
+    );
+}
+
+#[test]
+fn machine_run_without_up_json_keeps_the_started_banner() {
+    // The banner is the only feedback an interactive `-d` run gives, so
+    // suppressing it unconditionally would be a regression of its own.
+    let args = parse_machine_run(&["-d", "--name", "vm", "--image", "alpine"])
+        .expect("detached run args parse");
+    assert!(
+        !crate::commands::machine::runtime::banner_suppressed(&args),
+        "a plain detached run still tells the user the machine started"
+    );
+    assert!(
+        !crate::commands::machine::runtime::start_args_for_run(&args, "vm").quiet,
+        "a plain detached run boots without quiet"
+    );
+}
+
+#[test]
 fn sdk_live_mode_shelled_commands_keep_parsing() {
     // Every command the SDKs shell to must parse against the real Cli.
     // A future rename that breaks any of these will fail CI here first.

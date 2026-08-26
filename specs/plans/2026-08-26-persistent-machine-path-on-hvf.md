@@ -1,83 +1,122 @@
-# Persistent-machine path fails on HVF after the guest boots
+# HVF supervisor inherited the caller's stderr, hanging every captured-output caller
 
 Backing: shipped-source
 Validation: check-claim-catalog
 
 ## Status
 
-Open — tracked as #2885. Found by the new end-to-end launch suite
+Fixed. Found by the end-to-end launch suite
 (`features/suites/s31_launch_e2e/`) on 2026-08-26, on macOS 26 / Apple Silicon
-with the HVF backend.
+with the HVF backend. Tracked as #2885.
 
-This is **not** the launch regression fixed alongside it. That one — a cold
+This is **not** the launch regression fixed in #2884. That one — a cold
 universal-initramfs cache silently producing a guest with no runtime overlay —
-is fixed and witnessed in #2884. It had masked this defect completely: before the fix no
-guest booted at all on this host, so nothing ever reached the persistent path's
-post-boot steps.
+had masked this defect completely: before it, no guest booted at all on this
+host, so nothing ever reached the persistent path's post-boot steps.
 
-## Symptom
+## What the first diagnosis got wrong
 
-The README's documented persistent flow starts a guest that really is running,
-but the CLI never completes the step:
+The issue was originally filed as "`machine start` hangs and `machine exec`
+returns `os error 5`". Both halves were wrong, and the correction is recorded
+here rather than edited away.
+
+`machine start` returns in 0.4s and `machine exec` works. What made `start` look
+like it hung was the *shell pipeline* it was being observed through. The
+`os error 5` was a separate artifact: that machine had been left half-started by
+a debug-built supervisor that was SIGKILLed, and it does not reproduce on a
+cleanly started machine.
+
+## The actual defect
+
+`mvmctl machine start` spawns the detached `mvm-hvf-supervisor` with
+`stderr(Stdio::inherit())`. The supervisor owns its guest for the VM's whole
+life, so it held the **spawning process's stderr file descriptor** for that
+whole life. `mvmctl` exits 0 promptly, but any caller that captures stderr
+through a pipe and reads to EOF never sees EOF.
 
 ```
-mvmctl machine create e2e-web --image alpine --cpus 2 --memory 512M   # ok
-mvmctl machine start  e2e-web                                          # never returns
+mvmctl machine start X > file 2>&1     # 0.426s, exits 0
+mvmctl machine start X 2>&1 | cat      # never terminates
 ```
 
-`mvmctl machine ls` meanwhile reports the machine `running` on backend `hvf`,
-so the VM itself came up. Against an already-running machine:
+Reached by:
+
+- `Command::output()` — the BDD steps.
+- `subprocess.run(argv, capture_output=True)` — the Python SDK's live
+  transport, at every call site, so `mvmctl run --mode live` inherited it.
+- any `2>&1 | ...` shell pipeline.
+
+Invisible interactively at a TTY, because there is no pipe to hold open. Only
+automation sees it.
+
+## Fix
+
+libkrun already routed supervisor stderr to a per-VM log file; the two HVF
+sites were never converted. The routing is now one shared helper,
+`mvm_vmm::host::console_capture::supervisor_stderr`, used by all three
+(`hvf.rs`, `hvf_restore.rs`, `libkrun.rs`), so they cannot drift again. It
+falls back to `inherit` only when the state dir cannot be written — a boot
+that is already failing, where losing the diagnostics would be worse.
+
+## A second defect behind the first
+
+With the stderr leak fixed, the persistent lifecycle went green and the
+SDK live-mode scenario failed differently:
 
 ```
-mvmctl machine exec e2e-web -- uname -s
-failed to spawn: I/O error (os error 5)
+`mvmctl machine run --up-json` stdout is not valid JSON: Expecting value
 ```
 
-The SDK's live transport rides the same path — `_LiveTransport.for_source`
-shells `machine run -d --up-json --name <id> --image <ref> --ttl <n>s` — so
-`mvmctl run --mode live` fails with it. That invocation likewise leaves a
-running VM behind while the command hangs.
+`machine run -d --up-json` printed the human `started machine <name>` banner to
+**stdout**, ahead of the JSON envelope, so the SDK's `json.loads(stdout)` died
+on line 1 column 1. `machine start` already withheld the banner under `--json`;
+the `run` path hardcoded `quiet: false`.
 
-## What is unaffected
+`machine_run_up_json_guards_stdout` existed the whole time and passed the whole
+time — it asserts `emits_machine_readable_stdout()`, a parse-level flag, which
+says stdout is *reserved* and nothing about whether anything else writes to it.
+The construction of the start arguments is now a named function
+(`start_args_for_run`) so the wiring is pinned, not just the decision: a mapping
+that stopped consulting `banner_suppressed` would otherwise leave a
+`banner_suppressed`-only test green.
 
-Every transient shape works and is witnessed live by the same suite: `machine
-run --image`, multi-word argv after `--`, `--env`, `--mount`, `--allow-host`
-(egress reaches the target), default-deny without it, guest exit-code
-propagation, and `--cpus` / `--memory`. Warm dispatch measures 185–188ms,
-inside the 200ms budget. `mvmctl run --mode plan` admits a signed plan without
-booting.
+## Witnesses
 
-So the break is specific to the persistent/named path's post-boot handshake, not
-to booting.
-
-## Scenarios that currently fail
-
-Left red on purpose rather than deleted or tagged away. A suite that goes green
-by dropping the scenario it cannot pass is how the initramfs regression survived
-to a release.
-
+- `supervisor_stderr_creates_the_log_inside_the_state_dir`
+- `supervisor_stderr_truncates_a_previous_boots_log`
+- `supervisor_stderr_falls_back_when_the_state_dir_is_absent`
 - `s31_launch_e2e/cli_launch_modes.feature` — "the documented persistent machine
-  lifecycle operates one guest"
+  lifecycle operates one guest". The behavioural witness: its steps drive
+  `mvmctl` through `Command::output()`, so it cannot terminate while the
+  supervisor holds that pipe.
 - `s31_launch_e2e/sdk_and_library_modes.feature` — "a runtime-SDK script boots a
-  real guest in live mode"
+  real guest in live mode". Same, through the SDK's capture transport, and the
+  witness for the `--up-json` stdout pollution above.
+- `machine_run_up_json_withholds_the_started_banner` — pins both the decision
+  and the wiring; verified red against a `quiet: false` mutation.
+- `machine_run_without_up_json_keeps_the_started_banner` — an interactive `-d`
+  run still says the machine started.
 
-## Where to start
+The persistent-lifecycle scenario was `@wip` while this was open and is now
+un-tagged. The SDK live-mode scenario stays `@wip`, re-attributed: both blockers
+named here are fixed and it now boots a real guest, but it then fails on the
+first guest-RPC verb it issues. Every `fs` and `proc` verb answers "Unexpected
+response to ... verb" on a build predating this work — a host/agent wire drift
+tracked as #2887, in a different subsystem. Un-tag it there, not here.
 
-- `os error 5` is `EIO`. It surfaces from the spawn attempt against the running
-  guest, so the agent channel is reachable enough to try and not enough to
-  carry a command — look at the persistent path's agent socket handoff rather
-  than at boot.
-- The transient path reaches its agent fine on the same host and backend, so
-  diff the two: transient holds the supervisor for the command's lifetime,
-  persistent detaches and reconnects.
-- `mvmctl machine ls` reading `running` means the liveness probe and the agent
-  channel disagree; the shared five-marker probe is the thing that says
-  `running`.
+## A signing trap worth knowing
 
-## Checklist
+Verifying this cost a wrong turn worth recording. `cargo build` re-links the
+per-VM supervisor whenever its dependency graph changes and does **not**
+re-sign it; `mvm-hvf-supervisor` has no `ensure_signed()` of its own (the
+libkrun one does). macOS then SIGKILLs the unentitled binary, and the only
+symptom is:
 
-- [ ] Reproduce against `machine start` alone, separated from `machine create`
-- [ ] Establish whether the agent socket is ever bound on the persistent path
-- [ ] Fix the handshake, or fail closed with a message naming the real cause
-- [ ] Turn the two red scenarios green without weakening them
-- [ ] Confirm `mvmctl run --mode live` recovers with them
+```
+hvf supervisor exited before writing its PID file (status: signal: 9 (SIGKILL))
+```
+
+which names neither the signature nor the rebuild that dropped it. It reads
+exactly like a boot regression. `mvmctl env sign` fixes it, and
+`scripts/e2e-launch-modes.sh` now runs that after every build so the suite
+cannot fail this way again.

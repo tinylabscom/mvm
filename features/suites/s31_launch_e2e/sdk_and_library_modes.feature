@@ -25,10 +25,14 @@ Feature: the README's SDK entry points reach the same launch path
     And the output mentions "ADMITTED"
     And the output mentions "no microVM booted"
 
-  # @wip for the same reason as the persistent-lifecycle scenario: the SDK's
-  # live transport shells `machine run -d --up-json --name ... --ttl ...`, so it
-  # rides the persistent path and inherits its hang. See
-  # specs/plans/2026-08-26-persistent-machine-path-on-hvf.md.
+  # @wip on #2887, not on the launch path. The detached-supervisor leak and the
+  # `--up-json` stdout pollution that blocked this are both fixed — the script
+  # now boots a real guest and `Sandbox.create` returns. It then fails on the
+  # first guest-RPC verb it issues: `machine proc start` answers "Unexpected
+  # response to proc-control verb", as does every `fs` verb, on a build that
+  # predates this work. That is a host/agent wire drift in a different
+  # subsystem, and the scenario is red for it rather than for anything here.
+  # Un-tag when #2887 lands.
   @live @wip
   Scenario: a runtime-SDK script boots a real guest in live mode
     When I launch "run --mode live crates/mvm-conformance/fixtures/e2e/sandbox_script.py"

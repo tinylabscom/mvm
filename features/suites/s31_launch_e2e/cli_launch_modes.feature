@@ -66,22 +66,28 @@ Feature: every README-documented CLI launch mode boots a real guest
     Then the launch exits with code 7
     And the guest control plane came up
 
-  @live
+  # @wip on #2888. `--cpus` is silently ignored on the HVF workload path: the
+  # guest boots with one vCPU whatever is asked for, and `/proc/cpuinfo` agrees
+  # with `nproc`. Pre-existing — it reproduces on a build predating this suite.
+  # The scenario asserts what the README documents, so it stays as written.
+  #
+  # It passed in earlier runs of this suite for the wrong reason: the assertion
+  # matched against the combined streams, and the `MVM_PHASE_TIMING` table
+  # supplied a "2". `the guest printed exactly` reads the guest's own stdout,
+  # which is what makes the defect visible.
+  @live @wip
   Scenario: --cpus and --memory are honoured on a real boot
     When I launch "machine run --image alpine --cpus 2 --memory 512M -- nproc"
     Then the launch succeeds
-    And the guest printed "2"
+    And the guest printed exactly "2"
     And the guest control plane came up
 
-  # @wip, not deleted. This scenario is correct and the product is not: on HVF
-  # `machine start` boots a guest that `machine ls` reports as running, then
-  # never returns, and `machine exec` against it fails with `os error 5`. That
-  # defect was unreachable until the initramfs fix landed, because before it no
-  # guest booted at all. Tracked in
-  # specs/plans/2026-08-26-persistent-machine-path-on-hvf.md. The tag keeps the
-  # gate usable while the harness still prints it as pending on every run —
-  # deleting it is what would hide it.
-  @live @wip
+  # This scenario is the behavioural witness for the detached-supervisor stderr
+  # leak: the steps drive `mvmctl` through `Command::output()`, which reads
+  # stderr to EOF. While the HVF supervisor inherited the caller's stderr it
+  # held that pipe open for the guest's whole life, so this scenario never
+  # terminated even though `machine start` itself returned in under a second.
+  @live
   Scenario: the documented persistent machine lifecycle operates one guest
     Given no machine named "e2e-web"
     When I launch "machine create e2e-web --image alpine --cpus 2 --memory 512M"

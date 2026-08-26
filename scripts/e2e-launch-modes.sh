@@ -68,6 +68,15 @@ echo "==> building mvmctl + host helpers"
 # initramfs. Acquiring them inside a scenario would put minutes on each one, and
 # a scenario that times out reads as a launch failure rather than a cold cache.
 # ---------------------------------------------------------------------------
+# macOS kills an unentitled Hypervisor.framework binary with SIGKILL, and the
+# only symptom is "hvf supervisor exited before writing its PID file (status:
+# signal: 9)" — which names neither the signature nor the rebuild that dropped
+# it. `cargo build` re-links the per-VM supervisor whenever its dependency graph
+# changes and does not re-sign it, so a build step must always be followed by
+# this one or every HVF boot dies.
+echo "==> signing VMM binaries"
+"$MVMCTL" env sign
+
 echo "==> warming artifacts in $E2E_HOME"
 MVM_HOME="$E2E_HOME" "$MVMCTL" bootstrap
 

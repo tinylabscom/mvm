@@ -63,23 +63,7 @@ fn run_persistent(
         return Ok(());
     }
 
-    let booted = persist_and_boot_machine(
-        &name,
-        &spec,
-        action,
-        MachineStartArgs {
-            name: name.clone(),
-            create_flags: MachineStartCreateFlags::default(),
-            receipt: args.run.receipt.clone(),
-            json: args.run.json,
-            dry_run: false,
-            quiet: false,
-            hypervisor: args.run.hypervisor.clone(),
-            no_supervisor: args.no_supervisor,
-            kernel_pin: args.kernel_pin.clone(),
-            has_ad_hoc_argv: !args.run.argv.is_empty(),
-        },
-    )?;
+    let booted = persist_and_boot_machine(&name, &spec, action, start_args_for_run(&args, &name))?;
     if !booted && !args.run.json && !args.up_json {
         println!("machine {name} already running");
     }
@@ -169,6 +153,39 @@ pub(super) enum PostStart {
     PrintId,
     /// The default: follow the machine's output.
     Attach,
+}
+
+/// Whether the human `started machine <name>` banner must be withheld.
+///
+/// `--up-json` reserves stdout for exactly one JSON envelope. The banner was
+/// printed to stdout ahead of it, so a caller doing `json.loads(stdout)` failed
+/// on line 1 — which is how the SDK's live transport broke: it shells
+/// `machine run -d --up-json ...` and parses the result. `--json` is already
+/// withheld inside the start path itself, by the branch that prints the summary
+/// instead.
+pub(crate) fn banner_suppressed(args: &MachineRunArgs) -> bool {
+    args.up_json
+}
+
+/// Translate a persistent `machine run` into the start arguments it boots
+/// under.
+///
+/// Split out from the boot call so the `quiet` wiring is testable without a VM.
+/// A test that only pinned `banner_suppressed` would keep passing if this
+/// mapping stopped calling it, which is the shape of the bug it exists for.
+pub(crate) fn start_args_for_run(args: &MachineRunArgs, name: &str) -> MachineStartArgs {
+    MachineStartArgs {
+        name: name.to_string(),
+        create_flags: MachineStartCreateFlags::default(),
+        receipt: args.run.receipt.clone(),
+        json: args.run.json,
+        dry_run: false,
+        quiet: banner_suppressed(args),
+        hypervisor: args.run.hypervisor.clone(),
+        no_supervisor: args.no_supervisor,
+        kernel_pin: args.kernel_pin.clone(),
+        has_ad_hoc_argv: !args.run.argv.is_empty(),
+    }
 }
 
 /// Resolve the post-start behaviour from the flags alone, so the choice is
