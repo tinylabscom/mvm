@@ -95,10 +95,24 @@ it, and `.mvmev` carries neither the transcript nor a commitment to it.
 - [x] **2.1 Freeze a vector set.** Canonical-form inputs and expected bytes
       covering key ordering, escaping, integer bounds, empty containers, and
       nested objects.
-- [ ] **2.2 Freeze an end-to-end archive vector.** One `.mvmev` with a known
-      host key and expected outcomes for each of the three results.
-- [ ] **2.3 Add a negative vector set.** Tampered manifest, wrong-leaf proof,
-      missing member, digest drift.
+- [x] **2.2 End-to-end archive vector.** `tests/vectors/mvmev-archive-v1.tar`
+      (3-entry tenant-scoped chain under a committed test-only key) plus
+      `mvmev-archive-v1.json` stating the expected outcome for each of the three
+      results, the exit code, and the host pubkey. The test reads its
+      expectations from the sidecar rather than hardcoding them, so the
+      cross-language contract and the Rust assertions cannot drift apart. The
+      archive is committed rather than rebuilt because `signed_at` comes from
+      the wall clock and sits outside the signature -- and because a frozen
+      artifact pins what an *existing* archive must verify as, not what this
+      code happens to emit today.
+- [x] **2.3 Negative vector set.** All four, each derived by a single named
+      mutation of the same frozen archive so a failure is attributable to the
+      mutation and not to an independently built artifact. Tampered manifest,
+      missing member, and digest drift fail integrity. The wrong-leaf case
+      repairs and re-signs the manifest after swapping two proof bodies, so
+      **integrity passes and inclusion is the only check left that can catch
+      it** -- without the repair the digests would break first and the
+      `leaf_index` cross-check the verifier exists to perform would never run.
 - [x] **2.4 Gate the vectors.** A test that reads the frozen vectors, so a
       canonicalization change is a red test rather than a silent break.
 
