@@ -178,12 +178,17 @@ observable.
       (`crates/mvm-hostd/src/audit/emitter.rs:1131`) has one caller, the manual
       `mvmctl trust audit publish-root` verb. Without roots published at
       admission and exit there is no sequence of roots to run 5.1 against.
-- [ ] **5.3 Decide the off-host witness.** `merkle.rs:70-87` states the limit
-      directly: a consistency proof relates two roots the caller already holds,
-      and a host-signed root stored beside the log it attests carries no
-      tamper-evidence against that host. Detection needs somewhere the host
-      cannot rewrite a root. Choose a mechanism or record that this is
-      accepted, with the detection window stated.
+- [x] **5.3 Off-host witness.** `WitnessSink` trait with a file and an HTTP
+      impl, selected by `MVM_AUDIT_WITNESS` (unset = no witnessing, so no
+      network call the operator did not ask for). Fail-open: unsent roots stay
+      above a per-sink high-water mark into the root history and go out on the
+      next flush, so an outage costs delay rather than evidence. What it buys,
+      stated in the module doc rather than implied: it converts "detects
+      nothing against a malicious host" into "detects a host that rewrites the
+      log **after** a root reached the sink". Everything before the first
+      successful witness is unprotected, the detection window is the publishing
+      interval, and someone still has to *compare* -- a sink nobody reads
+      records evidence without checking anything.
 - [ ] **5.4 Carry a per-execution index into the tenant tree.** The tree is
       per-tenant; tracing one run means filtering by `plan_id` via
       `mvmctl trust audit show`. Decide whether a receipt should cite its own

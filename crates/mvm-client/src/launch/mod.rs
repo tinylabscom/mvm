@@ -977,13 +977,17 @@ impl LocalBackend {
             // execution rather than changing underneath it. Best-effort for
             // the same reason as at admission: a workload that already ran
             // must not fail its exit report over a weakened later check.
-            if let Err(e) = emitter.publish_root(&outcome.plan.tenant.0) {
-                tracing::warn!(
+            match emitter.publish_root(&outcome.plan.tenant.0) {
+                Ok(_) => mvm_hostd::audit::witness::flush_configured(
+                    emitter.audit_dir(),
+                    &outcome.plan.tenant.0,
+                ),
+                Err(e) => tracing::warn!(
                     error = %format!("{e:#}"),
                     machine = name,
                     "could not publish an audit root at exit; the log stays intact but a later \
                      consistency check has one fewer point to verify against"
-                );
+                ),
             }
         }
         if outcome.mode == LifecycleMode::Transient {

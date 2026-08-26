@@ -129,7 +129,12 @@ fn publish_boundary_root(emitter: &AuditEmitter, tenant: &str, boundary: &str) {
             "could not publish an audit root at this boundary; the log stays intact but a \
              later consistency check has one fewer point to verify against"
         );
+        return;
     }
+    // A root that never leaves this host is not a witness to anything this
+    // host might later do to the log. Fail-open and queued: see
+    // `crate::audit::witness`.
+    crate::audit::witness::flush_configured(emitter.audit_dir(), tenant);
 }
 
 fn admission_decision_record(plan: &ExecutionPlan, signer_id: &str) -> DecisionRecord {

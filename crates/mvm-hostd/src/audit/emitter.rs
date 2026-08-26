@@ -1141,6 +1141,11 @@ impl AuditEmitter {
     /// sidecar is written temp-then-fsync-then-rename to
     /// `<audit_dir>/<tenant>.root.json` so a reader never observes a partial
     /// file.
+    /// The directory this emitter's chains, roots, and witness marks live in.
+    pub fn audit_dir(&self) -> &Path {
+        &self.audit_dir
+    }
+
     pub fn publish_root(&self, tenant: &str) -> Result<SignedAuditRoot> {
         let signed =
             crate::audit::merkle::sign_root_in(&self.audit_dir, tenant, &self.signing_key)?;
