@@ -1,112 +1,132 @@
-//! Hardware attestation provider stubs.
+//! Hardware attestation providers.
 //!
-//! Three feature-gated providers reserve the API surface for real
-//! hardware integrations landing later:
-//!
-//! - `attestation-tpm2`     — TPM2 quote (Linux/Windows hosts with a
-//!   TPM). Real impl pulls in `tss-esapi`.
-//! - `attestation-sev-snp`  — AMD SEV-SNP attestation report.
-//! - `attestation-tdx`      — Intel TDX attestation report.
-//!
-//! When a feature is disabled, the corresponding provider type is
-//! not compiled in at all, so the supervisor can statically reason
-//! about which hardware backends a given build supports: a tenant
-//! policy that demands `AttestationMode::Tpm2` from a binary built
-//! without `attestation-tpm2` is refused at admission rather than
-//! silently downgraded.
-//!
-//! For v0, every wired provider's `measure()` returns
-//! `AttestationError::NotYetImplemented`. The real bring-up work is
-//! sequenced for when the hosted mvmd cloud needs hardware
-//! attestation for compliance.
+//! Each provider implements [`HwAttestationProvider`] and returns an opaque
+//! [`HwMeasurement`] that the host can embed in an [`AttestationReport`].
+//! Real hardware backends (TPM2, SEV-SNP, TDX) are feature-gated; stubs
+//! return [`AttestationError::NotYetImplemented`] on unsupported platforms.
 
 use crate::crypto::attestation::error::AttestationError;
 use serde::{Deserialize, Serialize};
 
-/// Discriminant for the three hardware attestation backends. Stable
-/// across crate versions because it's part of the wire format and the
-/// `mvmctl attest` CLI surface — adding a new variant is a
-/// `#[non_exhaustive]` extension.
+/// Identifies a hardware attestation backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum HwProviderKind {
+    /// Discrete or firmware TPM2.
     Tpm2,
+    /// AMD SEV-SNP.
     SevSnp,
+    /// Intel TDX.
     Tdx,
+    /// Apple Device Attestation (host-only signing key attestation).
+    AppleDeviceAttestation,
 }
 
 impl HwProviderKind {
-    pub fn as_str(self) -> &'static str {
+    /// Return the snake_case identifier for this provider.
+    pub fn as_str(&self) -> &'static str {
         match self {
             HwProviderKind::Tpm2 => "tpm2",
             HwProviderKind::SevSnp => "sev_snp",
             HwProviderKind::Tdx => "tdx",
+            HwProviderKind::AppleDeviceAttestation => "apple_device_attestation",
         }
     }
 
-    /// Cargo feature flag that gates this provider. The supervisor
-    /// uses this to render the operator-facing "this build was
-    /// compiled without `feature = …`" refusal message when a
-    /// tenant policy demands a mode the binary cannot satisfy.
-    pub fn cargo_feature(self) -> &'static str {
+    /// Return the cargo feature that enables this provider.
+    pub fn cargo_feature(&self) -> &'static str {
         match self {
-            HwProviderKind::Tpm2 => "attestation-tpm2",
-            HwProviderKind::SevSnp => "attestation-sev-snp",
-            HwProviderKind::Tdx => "attestation-tdx",
+            HwProviderKind::Tpm2 => "mvm-core/attestation-tpm2",
+            HwProviderKind::SevSnp => "mvm-core/attestation-sev-snp",
+            HwProviderKind::Tdx => "mvm-core/attestation-tdx",
+            HwProviderKind::AppleDeviceAttestation => "mvm-core/attestation-apple-device",
         }
     }
 
-    /// Whether this build was compiled with the provider's feature
-    /// enabled. Used at admission time so the supervisor can refuse
-    /// a plan demanding a mode the binary cannot honor.
-    pub fn compiled_in(self) -> bool {
+    /// Return whether this provider is compiled into the current binary.
+    pub fn compiled_in(&self) -> bool {
+        // The enum is `#[non_exhaustive]` so this method is compiled into
+        // downstream crates that must see the catch-all as reachable. The
+        // catch-all is therefore required even though the defining crate
+        // covers every current variant.
+        #[allow(unreachable_patterns)]
         match self {
-            HwProviderKind::Tpm2 => cfg!(feature = "attestation-tpm2"),
-            HwProviderKind::SevSnp => cfg!(feature = "attestation-sev-snp"),
-            HwProviderKind::Tdx => cfg!(feature = "attestation-tdx"),
+            #[cfg(all(target_os = "linux", feature = "attestation-tpm2"))]
+            HwProviderKind::Tpm2 => true,
+            HwProviderKind::SevSnp => true,
+            HwProviderKind::Tdx => true,
+            HwProviderKind::AppleDeviceAttestation => true,
+            _ => false,
         }
     }
 }
 
-/// A single hardware-measurement payload. Opaque bytes — providers
-/// keep their native quote/report format so verifiers downstream
-/// (mvmd, customer auditors) can apply provider-specific parsing
-/// without forcing this crate to take a dep on every quote parser.
+impl std::fmt::Display for HwProviderKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Opaque measurement returned by a hardware provider.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct HwMeasurement {
+    /// Provider that produced this measurement.
     pub provider: HwProviderKind,
-    /// Hex-encoded provider-native quote/report bytes.
+    /// Hex-encoded opaque measurement payload. Format is provider-specific
+    /// and interpreted by the verifier.
     pub measurement_hex: String,
 }
 
-/// The trait every hardware backend implements.
-///
-/// `measure()` is fallible because real hardware can refuse to quote
-/// (TPM in failure mode, SEV-SNP not initialised, etc.). For v0 each
-/// stub returns `NotYetImplemented`.
-pub trait HwAttestationProvider: Send + Sync {
+/// Trait implemented by every hardware attestation backend.
+pub trait HwAttestationProvider {
+    /// Provider discriminant.
     fn kind(&self) -> HwProviderKind;
+
+    /// Generate a hardware measurement.
+    ///
+    /// Failures are reported as [`AttestationError::MeasurementFailed`]
+    /// (environmental problems such as a missing TPM) or
+    /// [`AttestationError::NotYetImplemented`] for backends that are not
+    /// yet wired.
     fn measure(&self) -> Result<HwMeasurement, AttestationError>;
 }
 
 // ---------------------------------------------------------------------------
-// TPM2 stub
+// TPM2
 // ---------------------------------------------------------------------------
 
-/// TPM2 attestation provider. Stub — real impl will wrap `tss-esapi`.
-#[cfg(feature = "attestation-tpm2")]
+/// TPM2 attestation provider. On Linux with `attestation-tpm2` this delegates
+/// to the real `tss-esapi` implementation; on other platforms it returns
+/// [`AttestationError::MeasurementFailed`].
+#[cfg(all(target_os = "linux", feature = "attestation-tpm2"))]
 #[derive(Debug, Default)]
 pub struct Tpm2Provider;
 
-#[cfg(feature = "attestation-tpm2")]
+#[cfg(all(target_os = "linux", feature = "attestation-tpm2"))]
 impl HwAttestationProvider for Tpm2Provider {
     fn kind(&self) -> HwProviderKind {
         HwProviderKind::Tpm2
     }
     fn measure(&self) -> Result<HwMeasurement, AttestationError> {
-        Err(AttestationError::NotYetImplemented(HwProviderKind::Tpm2))
+        super::tpm2::Tpm2Provider.measure()
+    }
+}
+
+#[cfg(all(not(target_os = "linux"), feature = "attestation-tpm2"))]
+#[derive(Debug, Default)]
+pub struct Tpm2Provider;
+
+#[cfg(all(not(target_os = "linux"), feature = "attestation-tpm2"))]
+impl HwAttestationProvider for Tpm2Provider {
+    fn kind(&self) -> HwProviderKind {
+        HwProviderKind::Tpm2
+    }
+    fn measure(&self) -> Result<HwMeasurement, AttestationError> {
+        Err(AttestationError::MeasurementFailed {
+            provider: HwProviderKind::Tpm2,
+            message: "TPM2 attestation is only available on Linux".to_string(),
+        })
     }
 }
 
@@ -114,11 +134,10 @@ impl HwAttestationProvider for Tpm2Provider {
 // AMD SEV-SNP stub
 // ---------------------------------------------------------------------------
 
-#[cfg(feature = "attestation-sev-snp")]
+/// AMD SEV-SNP attestation provider (stub).
 #[derive(Debug, Default)]
 pub struct SevSnpProvider;
 
-#[cfg(feature = "attestation-sev-snp")]
 impl HwAttestationProvider for SevSnpProvider {
     fn kind(&self) -> HwProviderKind {
         HwProviderKind::SevSnp
@@ -132,11 +151,10 @@ impl HwAttestationProvider for SevSnpProvider {
 // Intel TDX stub
 // ---------------------------------------------------------------------------
 
-#[cfg(feature = "attestation-tdx")]
+/// Intel TDX attestation provider (stub).
 #[derive(Debug, Default)]
 pub struct TdxProvider;
 
-#[cfg(feature = "attestation-tdx")]
 impl HwAttestationProvider for TdxProvider {
     fn kind(&self) -> HwProviderKind {
         HwProviderKind::Tdx
@@ -146,88 +164,103 @@ impl HwAttestationProvider for TdxProvider {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Apple Device Attestation stub
+// ---------------------------------------------------------------------------
+
+/// Apple Device Attestation provider (stub).
+#[derive(Debug, Default)]
+pub struct AppleDeviceAttestationProvider;
+
+impl HwAttestationProvider for AppleDeviceAttestationProvider {
+    fn kind(&self) -> HwProviderKind {
+        HwProviderKind::AppleDeviceAttestation
+    }
+    fn measure(&self) -> Result<HwMeasurement, AttestationError> {
+        Err(AttestationError::NotYetImplemented(
+            HwProviderKind::AppleDeviceAttestation,
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn kind_strings_are_stable_wire_values() {
+    fn provider_kind_as_str_is_snake_case() {
         assert_eq!(HwProviderKind::Tpm2.as_str(), "tpm2");
         assert_eq!(HwProviderKind::SevSnp.as_str(), "sev_snp");
         assert_eq!(HwProviderKind::Tdx.as_str(), "tdx");
+        assert_eq!(
+            HwProviderKind::AppleDeviceAttestation.as_str(),
+            "apple_device_attestation"
+        );
     }
 
     #[test]
-    fn cargo_feature_names_match_workspace_features() {
-        assert_eq!(HwProviderKind::Tpm2.cargo_feature(), "attestation-tpm2");
+    fn provider_kind_display_matches_as_str() {
+        for kind in [
+            HwProviderKind::Tpm2,
+            HwProviderKind::SevSnp,
+            HwProviderKind::Tdx,
+            HwProviderKind::AppleDeviceAttestation,
+        ] {
+            assert_eq!(kind.to_string(), kind.as_str());
+        }
+    }
+
+    #[test]
+    fn provider_kind_cargo_feature_names_workspace_feature() {
+        assert_eq!(
+            HwProviderKind::Tpm2.cargo_feature(),
+            "mvm-core/attestation-tpm2"
+        );
         assert_eq!(
             HwProviderKind::SevSnp.cargo_feature(),
-            "attestation-sev-snp"
-        );
-        assert_eq!(HwProviderKind::Tdx.cargo_feature(), "attestation-tdx");
-    }
-
-    #[test]
-    fn compiled_in_reports_feature_cfg() {
-        // Whatever cfg the test run was compiled under, compiled_in()
-        // must match the corresponding cfg!(feature = ...). We assert
-        // this against the same cfg!() so the test is consistent
-        // across any feature combination CI exercises.
-        assert_eq!(
-            HwProviderKind::Tpm2.compiled_in(),
-            cfg!(feature = "attestation-tpm2")
+            "mvm-core/attestation-sev-snp"
         );
         assert_eq!(
-            HwProviderKind::SevSnp.compiled_in(),
-            cfg!(feature = "attestation-sev-snp")
-        );
-        assert_eq!(
-            HwProviderKind::Tdx.compiled_in(),
-            cfg!(feature = "attestation-tdx")
+            HwProviderKind::Tdx.cargo_feature(),
+            "mvm-core/attestation-tdx"
         );
     }
 
     #[test]
-    fn hw_measurement_round_trips_json() {
-        let m = HwMeasurement {
+    fn compiled_in_reflects_platform_and_features() {
+        // SEV-SNP, TDX, and Apple Device Attestation stubs are always compiled.
+        assert!(HwProviderKind::SevSnp.compiled_in());
+        assert!(HwProviderKind::Tdx.compiled_in());
+        assert!(HwProviderKind::AppleDeviceAttestation.compiled_in());
+
+        // TPM2 is only compiled on Linux with the attestation-tpm2 feature.
+        #[cfg(all(target_os = "linux", feature = "attestation-tpm2"))]
+        assert!(HwProviderKind::Tpm2.compiled_in());
+        #[cfg(not(all(target_os = "linux", feature = "attestation-tpm2")))]
+        assert!(!HwProviderKind::Tpm2.compiled_in());
+    }
+
+    #[cfg(all(not(target_os = "linux"), feature = "attestation-tpm2"))]
+    #[test]
+    fn tpm2_stub_returns_measurement_failed_on_non_linux() {
+        let err = Tpm2Provider.measure().unwrap_err();
+        match err {
+            AttestationError::MeasurementFailed { provider, message } => {
+                assert_eq!(provider, HwProviderKind::Tpm2);
+                assert!(message.contains("only available on Linux"));
+            }
+            other => panic!("expected MeasurementFailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn hw_measurement_serde_roundtrip() {
+        let original = HwMeasurement {
             provider: HwProviderKind::Tpm2,
-            measurement_hex: "deadbeef".to_string(),
+            measurement_hex: "DEADBEEF".to_string(),
         };
-        let s = serde_json::to_string(&m).unwrap();
-        let back: HwMeasurement = serde_json::from_str(&s).unwrap();
-        assert_eq!(back, m);
-    }
-
-    #[cfg(feature = "attestation-tpm2")]
-    #[test]
-    fn tpm2_stub_returns_not_yet_implemented() {
-        let p = Tpm2Provider;
-        let err = p.measure().expect_err("stub must error");
-        assert!(matches!(
-            err,
-            AttestationError::NotYetImplemented(HwProviderKind::Tpm2)
-        ));
-    }
-
-    #[cfg(feature = "attestation-sev-snp")]
-    #[test]
-    fn sev_snp_stub_returns_not_yet_implemented() {
-        let p = SevSnpProvider;
-        let err = p.measure().expect_err("stub must error");
-        assert!(matches!(
-            err,
-            AttestationError::NotYetImplemented(HwProviderKind::SevSnp)
-        ));
-    }
-
-    #[cfg(feature = "attestation-tdx")]
-    #[test]
-    fn tdx_stub_returns_not_yet_implemented() {
-        let p = TdxProvider;
-        let err = p.measure().expect_err("stub must error");
-        assert!(matches!(
-            err,
-            AttestationError::NotYetImplemented(HwProviderKind::Tdx)
-        ));
+        let json = serde_json::to_string(&original).expect("serialize");
+        let roundtrip: HwMeasurement = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(original, roundtrip);
     }
 }

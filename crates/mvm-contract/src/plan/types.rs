@@ -1011,9 +1011,9 @@ pub struct AttestationRequirement {
     pub mode: AttestationMode,
 }
 
-/// Attestation modes. Real TPM2 / SEV providers land later; the
-/// `Noop` mode lets every plan launch without attestation (today's
-/// behaviour) for backwards compat.
+/// Attestation modes. Real TPM2 / SEV / Apple providers land later;
+/// the `Noop` mode lets every plan launch without attestation
+/// (today's behaviour) for backwards compat.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AttestationMode {
@@ -1026,6 +1026,9 @@ pub enum AttestationMode {
     SevSnp,
     /// Intel TDX quote. Provider not yet implemented.
     Tdx,
+    /// Apple Device Attestation + Secure Enclave identity. Provider
+    /// not yet implemented.
+    AppleDeviceAttestation,
 }
 
 /// Release pinning: the workload runs at a specific release of
@@ -1701,5 +1704,49 @@ mod build_provenance_tests {
             !json.contains("initramfs"),
             "absent digests omitted: {json}"
         );
+    }
+}
+
+#[cfg(test)]
+mod attestation_mode_tests {
+    use super::*;
+
+    #[test]
+    fn attestation_mode_serializes_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&AttestationMode::Noop).unwrap(),
+            "\"noop\""
+        );
+        assert_eq!(
+            serde_json::to_string(&AttestationMode::Tpm2).unwrap(),
+            "\"tpm2\""
+        );
+        assert_eq!(
+            serde_json::to_string(&AttestationMode::SevSnp).unwrap(),
+            "\"sev_snp\""
+        );
+        assert_eq!(
+            serde_json::to_string(&AttestationMode::Tdx).unwrap(),
+            "\"tdx\""
+        );
+        assert_eq!(
+            serde_json::to_string(&AttestationMode::AppleDeviceAttestation).unwrap(),
+            "\"apple_device_attestation\""
+        );
+    }
+
+    #[test]
+    fn attestation_mode_round_trips_through_json() {
+        for mode in [
+            AttestationMode::Noop,
+            AttestationMode::Tpm2,
+            AttestationMode::SevSnp,
+            AttestationMode::Tdx,
+            AttestationMode::AppleDeviceAttestation,
+        ] {
+            let json = serde_json::to_string(&mode).unwrap();
+            let back: AttestationMode = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, mode, "{json} round-trip failed");
+        }
     }
 }

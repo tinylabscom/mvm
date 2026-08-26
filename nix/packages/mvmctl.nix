@@ -22,21 +22,30 @@
 , mvmSrc
 , libkrun ? null
 , libkrunfw ? null
+, tpm2-tss ? null
 , withBuilderVm ? true
 , withNativeLibkrun ? false
+, withTpm2 ? false
+, runTests ? true
 }:
 
 assert withNativeLibkrun -> libkrun != null;
 assert withNativeLibkrun -> libkrunfw != null;
 assert withNativeLibkrun -> withBuilderVm;
+assert withTpm2 -> tpm2-tss != null;
 
 let
   featureList =
-    lib.optionals withBuilderVm [ "mvmctl/builder-vm" ]
+    []
+    ++ lib.optionals withBuilderVm [
+      "mvm-cli/builder-vm"
+      "mvm-build/builder-vm"
+    ]
     ++ lib.optionals withNativeLibkrun [
       "mvm-cli/libkrun-sys"
       "mvm-hostd/libkrun-sys"
-    ];
+    ]
+    ++ lib.optionals withTpm2 [ "mvm-core/attestation-tpm2" ];
 in
 rustPlatform.buildRustPackage {
   pname = "mvmctl";
@@ -81,14 +90,16 @@ rustPlatform.buildRustPackage {
     "mvm-hostd"
   ];
 
+  doCheck = runTests;
+
   # cargo-auditable 0.6.5 runs `cargo metadata` from each rustc wrapper
   # invocation. With package-qualified native features enabled, that metadata
   # path treats `libkrun-sys` as an unqualified workspace feature and trips over
   # mvm-build's intentionally dep-only `libkrun-sys` dependency. Keep the
-  # default source-built mvmctl package auditable; disable the wrapper only for
-  # the opt-in native-libkrun variant so the native sidecar set still builds and
-  # runs its checks.
-  auditable = !withNativeLibkrun;
+  # default source-built mvmctl package auditable; disable the wrapper for the
+  # opt-in native-libkrun variant and for the TPM2 variant (which also enables
+  # package-qualified features) so those builds still compile and run checks.
+  auditable = !(withNativeLibkrun || withTpm2);
 
   nativeBuildInputs =
     [
@@ -106,6 +117,9 @@ rustPlatform.buildRustPackage {
   buildInputs = lib.optionals withNativeLibkrun [
     libkrun
     libkrunfw
+  ]
+  ++ lib.optionals withTpm2 [
+    tpm2-tss
   ];
 
   env = {

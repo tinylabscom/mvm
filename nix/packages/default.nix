@@ -55,9 +55,37 @@ let
     inherit mvmSrc;
     embeddedCargo = embeddedRustToolchain;
     embeddedRustc = embeddedRustToolchain;
+    zig = pkgs.zig_0_13;
+  };
+
+  mvmctl-tpm2 = pkgs.callPackage ./mvmctl.nix {
+    inherit mvmSrc;
+    embeddedCargo = embeddedRustToolchain;
+    embeddedRustc = embeddedRustToolchain;
+    tpm2-tss = pkgs.tpm2-tss;
+    withTpm2 = true;
+    runTests = false;
+    zig = pkgs.zig_0_13;
+  };
+
+  mvm-core-tpm2 = pkgs.callPackage ./mvm-core-tpm2.nix {
+    inherit mvmSrc;
+    tpm2-tss = pkgs.tpm2-tss;
+  };
+
+  mvm-core-tpm2-clippy = pkgs.callPackage ./mvm-core-tpm2-clippy.nix {
+    inherit mvmSrc;
+    tpm2-tss = pkgs.tpm2-tss;
+    clippy = pkgs.clippy;
+  };
+
+  mvm-core-tpm2-test = pkgs.callPackage ./mvm-core-tpm2-test.nix {
+    inherit mvmSrc;
+    tpm2-tss = pkgs.tpm2-tss;
+    swtpm = pkgs.swtpm;
   };
 in
 
 {
-  inherit mvmctl;
+  inherit mvmctl mvmctl-tpm2 mvm-core-tpm2 mvm-core-tpm2-clippy mvm-core-tpm2-test;
 } // nativeVmmPackages

@@ -35,7 +35,7 @@ const DEFAULT_NIX_STORE_MIB: u32 = 64 * 1024;
 const DEFAULT_OUTPUT_MIB: u32 = 4 * 1024;
 /// Default builder resources.
 const DEFAULT_VCPUS: u32 = 4;
-const DEFAULT_MEMORY_MIB: u32 = 8 * 1024;
+const DEFAULT_MEMORY_MIB: u32 = 16 * 1024;
 
 /// The HVF builder VM, exposed through the `BuilderVm` seam.
 pub struct HvfBuilderVm {

@@ -207,6 +207,12 @@
           default = hostPackages.mvmctl;
         }
         // nixpkgs.lib.optionalAttrs (system == "x86_64-linux" || system == "aarch64-linux") {
+          mvmctl-tpm2 = hostPackages.mvmctl-tpm2;
+          mvm-core-tpm2 = hostPackages.mvm-core-tpm2;
+          mvm-core-tpm2-clippy = hostPackages.mvm-core-tpm2-clippy;
+          mvm-core-tpm2-test = hostPackages.mvm-core-tpm2-test;
+        }
+        // nixpkgs.lib.optionalAttrs (system == "x86_64-linux" || system == "aarch64-linux") {
           inherit (hostPackages) libkrun libkrunfw mvmctl-native-libkrun qemu-wasm-engine qemu-wasm-smoke-image qemu-wasm-smoke-pack;
         }
         // nixpkgs.lib.optionalAttrs (builtins.elem system systems) {

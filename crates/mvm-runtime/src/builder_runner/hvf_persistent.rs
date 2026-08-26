@@ -44,7 +44,7 @@ use mvm_backends::driver::hvf::HvfDriver;
 /// Default persistent nix-store disk size (MiB), matching the one-shot builder.
 const DEFAULT_NIX_STORE_MIB: u32 = 64 * 1024;
 const DEFAULT_VCPUS: u32 = 4;
-const DEFAULT_MEMORY_MIB: u32 = 8 * 1024;
+const DEFAULT_MEMORY_MIB: u32 = 16 * 1024;
 
 /// Poll interval while waiting for the guest to publish its dispatch listener.
 const READY_POLL: Duration = Duration::from_millis(50);
