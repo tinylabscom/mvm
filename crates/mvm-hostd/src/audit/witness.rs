@@ -38,6 +38,7 @@
 //! the history it mirrors; a mark into the history cannot, and it recovers
 //! from an arbitrary outage by replaying whatever sits above it.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -162,6 +163,138 @@ impl WitnessSink for HttpWitnessSink {
     }
 }
 
+/// A witness that can be read back.
+///
+/// Deliberately separate from [`WitnessSink`]: shipping a root and reading one
+/// back are different capabilities, and a sink that cannot be read is still a
+/// perfectly good sink. Modelling it as one trait would force every sink to
+/// have a `recorded()` that some of them answer with an error, which is the
+/// illegal state this split makes unrepresentable.
+///
+/// [`HttpWitnessSink`] deliberately does not implement this. Reading roots back
+/// over HTTP needs a GET contract nobody has specified, and inventing one here
+/// would bake a guess into the wire.
+pub trait WitnessSource {
+    /// Every root this witness holds for `tenant`, oldest first.
+    fn recorded(&self, tenant: &str) -> Result<Vec<SignedAuditRoot>>;
+}
+
+impl WitnessSource for FileWitnessSink {
+    fn recorded(&self, tenant: &str) -> Result<Vec<SignedAuditRoot>> {
+        let Ok(content) = std::fs::read_to_string(&self.path) else {
+            return Ok(Vec::new());
+        };
+        let mut out = Vec::new();
+        for line in content.lines().filter(|l| !l.is_empty()) {
+            let root: SignedAuditRoot = serde_json::from_str(line)
+                .with_context(|| format!("decoding a root from {}", self.path.display()))?;
+            if root.tenant == tenant {
+                out.push(root);
+            }
+        }
+        Ok(out)
+    }
+}
+
+/// What a comparison against a witness found.
+///
+/// Counts and findings rather than a bool: "agreed on nothing" and "agreed on
+/// two hundred roots" are different statements about how much detection you
+/// actually have, and a caller rendering them the same would overstate the
+/// first.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DivergenceReport {
+    /// Roots the witness holds that the host still agrees with, byte for byte.
+    pub agreed: usize,
+    /// Roots the witness holds that the host no longer has at that size, or
+    /// now reports a different hash for. **Each of these is evidence the log
+    /// was rewritten after it was witnessed.**
+    pub diverged: Vec<Divergence>,
+    /// Roots the host has that the witness never received. Not evidence of
+    /// anything: an unsent tail is the normal state between flushes.
+    pub unwitnessed: usize,
+}
+
+impl DivergenceReport {
+    /// Whether the host and the witness disagree about any witnessed root.
+    #[must_use]
+    pub fn is_clean(&self) -> bool {
+        self.diverged.is_empty()
+    }
+}
+
+/// One root the host and the witness disagree about.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Divergence {
+    /// Tree size the witness recorded a root at.
+    pub tree_size: u64,
+    /// What the witness holds.
+    pub witnessed_root: String,
+    /// What the host now claims at that size, if it has anything at all.
+    pub host_root: Option<String>,
+}
+
+/// Compare what the host now claims against what a witness recorded.
+///
+/// **This is the half that turns shipped roots into detection.** Publishing to
+/// a witness records evidence; nothing is detected until someone compares. A
+/// witness nobody reads is an audit trail with no auditor.
+///
+/// Both sides' roots are signature-checked under `vk` first, so a divergence is
+/// always between two genuinely host-signed statements rather than between a
+/// real root and a forged one.
+///
+/// What a clean result means, exactly: for every root the witness holds, the
+/// host still reports the same root hash at the same tree size. It says nothing
+/// about entries added and removed between two witnessed roots, nor about
+/// anything after the newest one. The detection window is the witnessing
+/// interval, and this function cannot widen it.
+pub fn detect_divergence(
+    audit_dir: &Path,
+    tenant: &str,
+    source: &dyn WitnessSource,
+    vk: &ed25519_dalek::VerifyingKey,
+) -> Result<DivergenceReport> {
+    use mvm_contract::merkle::verify_signed_root;
+
+    let witnessed = source.recorded(tenant)?;
+    for (n, root) in witnessed.iter().enumerate() {
+        verify_signed_root(root, vk).map_err(|e| {
+            anyhow::anyhow!("witnessed root {} for {tenant} does not verify: {e}", n + 1)
+        })?;
+    }
+
+    let history_path = crate::audit::emitter::audit_root_history_path_for_tenant(audit_dir, tenant);
+    let host_content = std::fs::read_to_string(&history_path).unwrap_or_default();
+    let mut host_by_size: BTreeMap<u64, String> = BTreeMap::new();
+    for line in host_content.lines().filter(|l| !l.is_empty()) {
+        let root: SignedAuditRoot = serde_json::from_str(line)
+            .with_context(|| format!("decoding a root from {}", history_path.display()))?;
+        verify_signed_root(&root, vk)
+            .map_err(|e| anyhow::anyhow!("host root for {tenant} does not verify: {e}"))?;
+        host_by_size.insert(root.tree_size, root.root_hash);
+    }
+
+    let mut report = DivergenceReport::default();
+    for root in &witnessed {
+        match host_by_size.get(&root.tree_size) {
+            Some(h) if *h == root.root_hash => report.agreed += 1,
+            other => report.diverged.push(Divergence {
+                tree_size: root.tree_size,
+                witnessed_root: root.root_hash.clone(),
+                host_root: other.cloned(),
+            }),
+        }
+    }
+    let witnessed_sizes: std::collections::BTreeSet<u64> =
+        witnessed.iter().map(|r| r.tree_size).collect();
+    report.unwitnessed = host_by_size
+        .keys()
+        .filter(|s| !witnessed_sizes.contains(s))
+        .count();
+    Ok(report)
+}
+
 /// Path of the per-sink high-water mark: the tree size of the newest root
 /// this sink has acknowledged for this tenant.
 fn mark_path(audit_dir: &Path, tenant: &str, sink: &dyn WitnessSink) -> PathBuf {
@@ -240,6 +373,22 @@ pub fn configured_sink() -> Option<Box<dyn WitnessSink>> {
     } else {
         Some(Box::new(FileWitnessSink::new(value)))
     }
+}
+
+/// The configured witness as something readable, if it is readable at all.
+///
+/// `None` covers two different situations on purpose, and a caller must not
+/// conflate them: no witness is configured, or the configured one ships roots
+/// but cannot be read back (HTTP). Neither is an error; both mean "no
+/// comparison is possible from here".
+#[must_use]
+pub fn configured_source() -> Option<Box<dyn WitnessSource>> {
+    let raw = std::env::var("MVM_AUDIT_WITNESS").ok()?;
+    let value = raw.trim();
+    if value.is_empty() || value.starts_with("http://") || value.starts_with("https://") {
+        return None;
+    }
+    Some(Box::new(FileWitnessSink::new(value)))
 }
 
 /// Flush to the configured sink, reporting failure as a warning.
@@ -368,6 +517,150 @@ mod tests {
         *sink.fail.lock().unwrap() = false;
         assert_eq!(flush_to_sink(dir.path(), "local", &sink).unwrap(), 3);
         assert_eq!(*sink.accepted.lock().unwrap(), vec![1, 2, 3]);
+    }
+
+    /// A real chain + a real published root, so the comparison runs against
+    /// signed artifacts rather than hand-built structs that could disagree
+    /// with what the code actually writes.
+    fn seed_and_publish(
+        dir: &Path,
+        key: &ed25519_dalek::SigningKey,
+        n: usize,
+        tag: &str,
+    ) -> mvm_contract::merkle::SignedAuditRoot {
+        use crate::supervisor::{AuditSigner, FileAuditSigner, PlanAuditEntry};
+        let signer = FileAuditSigner::open(key.clone(), dir).unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        for i in 0..n {
+            let e = PlanAuditEntry {
+                timestamp: chrono::Utc::now(),
+                tenant: mvm_core::plan::TenantId("local".into()),
+                plan_id: mvm_core::plan::PlanId(format!("plan-{tag}-{i}")),
+                plan_version: 1,
+                bundle_id: None,
+                bundle_version: None,
+                image_name: "img".into(),
+                image_sha256: "abc".into(),
+                event: format!("{tag}-{i}"),
+                labels: std::collections::BTreeMap::new(),
+            };
+            rt.block_on(signer.sign_and_emit(&e)).unwrap();
+        }
+        crate::audit::emitter::AuditEmitter::with_dir(key.clone(), dir)
+            .unwrap()
+            .publish_root("local")
+            .unwrap()
+    }
+
+    fn fresh_key() -> ed25519_dalek::SigningKey {
+        use rand::Rng;
+        let mut seed = [0u8; 32];
+        rand::rng().fill_bytes(&mut seed);
+        ed25519_dalek::SigningKey::from_bytes(&seed)
+    }
+
+    #[test]
+    fn a_host_that_rewrote_its_log_after_witnessing_is_caught() {
+        // The whole point of shipping roots off-host. Every root on both sides
+        // is genuinely host-signed, so no signature check can find this --
+        // only comparing against what the witness kept.
+        let dir = tempfile::tempdir().unwrap();
+        let key = fresh_key();
+        let vk = key.verifying_key();
+        let sink = FileWitnessSink::new(dir.path().join("witness.jsonl"));
+
+        seed_and_publish(dir.path(), &key, 4, "real");
+        flush_to_sink(dir.path(), "local", &sink).unwrap();
+        assert!(
+            detect_divergence(dir.path(), "local", &sink, &vk)
+                .unwrap()
+                .is_clean(),
+            "an untouched log agrees with its witness"
+        );
+
+        // Rewrite history: same key, same tree size, different content.
+        std::fs::remove_file(dir.path().join("local.jsonl")).unwrap();
+        std::fs::remove_file(crate::audit::emitter::audit_root_history_path_for_tenant(
+            dir.path(),
+            "local",
+        ))
+        .unwrap();
+        seed_and_publish(dir.path(), &key, 4, "forged");
+
+        let report = detect_divergence(dir.path(), "local", &sink, &vk).unwrap();
+        assert!(
+            !report.is_clean(),
+            "a rewritten log must diverge from its witness"
+        );
+        let d = &report.diverged[0];
+        assert_eq!(d.tree_size, 4);
+        assert_ne!(
+            Some(&d.witnessed_root),
+            d.host_root.as_ref(),
+            "the divergence must be a genuine hash disagreement"
+        );
+    }
+
+    #[test]
+    fn a_host_that_dropped_a_witnessed_root_is_caught() {
+        // Deletion, not substitution: the host simply no longer has anything
+        // at that tree size. `host_root: None` says which of the two it was.
+        let dir = tempfile::tempdir().unwrap();
+        let key = fresh_key();
+        let vk = key.verifying_key();
+        let sink = FileWitnessSink::new(dir.path().join("witness.jsonl"));
+
+        seed_and_publish(dir.path(), &key, 3, "a");
+        flush_to_sink(dir.path(), "local", &sink).unwrap();
+        std::fs::write(
+            crate::audit::emitter::audit_root_history_path_for_tenant(dir.path(), "local"),
+            "",
+        )
+        .unwrap();
+
+        let report = detect_divergence(dir.path(), "local", &sink, &vk).unwrap();
+        assert!(!report.is_clean());
+        assert_eq!(report.diverged[0].host_root, None);
+    }
+
+    #[test]
+    fn an_unsent_tail_is_not_a_divergence() {
+        // The normal state between flushes. Reporting it as tampering would
+        // make the check cry wolf on every healthy host.
+        let dir = tempfile::tempdir().unwrap();
+        let key = fresh_key();
+        let vk = key.verifying_key();
+        let sink = FileWitnessSink::new(dir.path().join("witness.jsonl"));
+
+        seed_and_publish(dir.path(), &key, 2, "a");
+        flush_to_sink(dir.path(), "local", &sink).unwrap();
+        seed_and_publish(dir.path(), &key, 2, "b"); // published, never flushed
+
+        let report = detect_divergence(dir.path(), "local", &sink, &vk).unwrap();
+        assert!(report.is_clean(), "an unsent tail is not tampering");
+        assert_eq!(report.agreed, 1);
+        assert_eq!(report.unwitnessed, 1);
+    }
+
+    #[test]
+    fn an_empty_witness_detects_nothing_and_says_so() {
+        // Zero agreed is the honest answer. A bare "clean" here would read as
+        // "verified" when nothing was compared.
+        let dir = tempfile::tempdir().unwrap();
+        let key = fresh_key();
+        let sink = FileWitnessSink::new(dir.path().join("witness.jsonl"));
+        seed_and_publish(dir.path(), &key, 2, "a");
+
+        let report = detect_divergence(dir.path(), "local", &sink, &key.verifying_key()).unwrap();
+        assert_eq!(report.agreed, 0);
+        assert!(report.is_clean());
+        assert_eq!(
+            report.unwitnessed, 1,
+            "the host has a root nobody witnessed"
+        );
     }
 
     #[test]

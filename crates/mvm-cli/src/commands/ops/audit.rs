@@ -1231,6 +1231,67 @@ fn print_chain_line(line: &str) {
     }
 }
 
+/// Report the two append-only properties beyond "each entry is signed".
+///
+/// Both are reported, never merged into the chain's own verdict, because they
+/// attest different things: the chain verifying says every entry is signed and
+/// linked; these say the log was only ever appended to. A host can pass the
+/// first and fail the second.
+///
+/// Neither is fatal here. `verify` already exits nonzero on a chain refusal,
+/// and a missing witness is a configuration state rather than a finding -- but
+/// a *divergence* is a finding, and it is printed as an error so an operator
+/// reading the output cannot miss it.
+fn report_append_only(dir: &std::path::Path, tenant: &str, vk: &ed25519_dalek::VerifyingKey) {
+    match mvm_hostd::audit::merkle::verify_root_history(dir, tenant, vk) {
+        Ok(r) if r.roots == 0 => ui::info(
+            "No published audit roots, so nothing attests the log was only appended to. \
+             Roots are published at admission and exit.",
+        ),
+        Ok(r) => ui::success(&format!(
+            "append-only: {} published root(s), {} transition(s) proven a prefix extension",
+            r.roots, r.transitions_checked
+        )),
+        Err(e) => ui::error(&format!("append-only check failed: {e:#}")),
+    }
+
+    let Some(source) = mvm_hostd::audit::witness::configured_source() else {
+        // Said out loud rather than passed over in silence: without an
+        // off-host witness the roots above were all signed by this host and
+        // stored beside the log they attest, which is no evidence against
+        // this host rewriting both.
+        ui::info(
+            "No readable off-host witness configured (MVM_AUDIT_WITNESS), so a rewrite by \
+             this host is undetectable from here.",
+        );
+        return;
+    };
+    match mvm_hostd::audit::witness::detect_divergence(dir, tenant, source.as_ref(), vk) {
+        Ok(r) if !r.is_clean() => {
+            ui::error(&format!(
+                "WITNESS DIVERGENCE: {} witnessed root(s) disagree with this host",
+                r.diverged.len()
+            ));
+            for d in &r.diverged {
+                ui::error(&format!(
+                    "  tree_size {}: witness has {}, host has {}",
+                    d.tree_size,
+                    &d.witnessed_root,
+                    d.host_root.as_deref().unwrap_or("nothing")
+                ));
+            }
+        }
+        Ok(r) if r.agreed == 0 => ui::info(
+            "The configured witness holds no roots for this tenant yet; nothing was compared.",
+        ),
+        Ok(r) => ui::success(&format!(
+            "witness agrees on {} root(s); {} not yet witnessed",
+            r.agreed, r.unwitnessed
+        )),
+        Err(e) => ui::error(&format!("witness comparison failed: {e:#}")),
+    }
+}
+
 fn audit_verify(tenant: &str) -> Result<()> {
     let dir = default_audit_dir()?;
 
@@ -1266,6 +1327,8 @@ fn audit_verify(tenant: &str) -> Result<()> {
             summary.entries
         ));
     }
+
+    report_append_only(&dir, tenant, &signer.verifying);
 
     // Print a clear error AND propagate so the process exits nonzero.
     // `mvmctl trust audit verify` is meant for scripting.

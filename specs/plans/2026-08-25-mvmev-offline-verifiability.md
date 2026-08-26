@@ -222,6 +222,34 @@ observable.
 - [x] **5.5 Tests.** A consistency proof across a rotation boundary; a refused
       proof on a rewritten prefix; roots published at both boundaries.
 
+## Follow-on — the witness now has a consumer
+
+Landed after the plan's own items closed, because a witness nobody reads is an
+audit trail with no auditor and the plan would have shipped that gap.
+
+- [x] **Readback seam.** `WitnessSource`, deliberately separate from
+      `WitnessSink`: shipping a root and reading one back are different
+      capabilities. `FileWitnessSink` implements both; `HttpWitnessSink`
+      implements only the sink, because reading roots back over HTTP needs a
+      GET contract nobody has specified and guessing one would bake it into the
+      wire.
+- [x] **`detect_divergence`.** Compares what the host now claims against what a
+      witness recorded. Both sides are signature-checked first, so a divergence
+      is always between two genuinely host-signed statements — which is the
+      point: no signature check can find this, only the comparison can.
+- [x] **Reported by `mvmctl trust audit verify`.** Append-only status and
+      witness agreement print alongside the chain verdict, kept separate from
+      it because they attest different things and a host can pass one and fail
+      the other. With no witness configured it says so out loud rather than
+      passing silently.
+- [x] **Tests, mutation-checked.** Rewritten log, dropped root, unsent tail
+      (must *not* alarm), empty witness. Neutering the comparison turns the two
+      detection tests red.
+
+Still true and unchanged: detection reaches back only to the oldest witnessed
+root, the window is the witnessing interval, and tail truncation past the newest
+witnessed root stays undetectable.
+
 ## Open questions
 
 - Schema version 1 is the canonicalization identifier. A future change to the
