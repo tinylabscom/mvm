@@ -89,12 +89,36 @@ Nightly lanes `e2e-docs-linux` (Firecracker, `/dev/kvm`) and `e2e-docs-macos`
 - [ ] `examples/obscura/README.md` documented the retired `machine forward`.
       Fixed here — but its replacement, `machine run --port`, is
       `conflicts_with` `--detach`, and `machine create` takes no `--port`. A
-      detached guest with declared ingress has no expressible form; the example
-      now shows the foreground shape and says so.
+      detached guest with declared ingress has no expressible form (#2901); the
+      example now shows the foreground shape and says so.
 - [ ] `mvm.local_path` is exported by the Python SDK and taught in the README,
       but absent from `mvm_sdk::decorator::value::HELPER_ALLOWLIST`, so
-      `mvmctl build compile` rejects the README's own example. The exec fixture
-      omits the kwarg to prove the command; the mismatch itself is unresolved.
+      `mvmctl build compile` rejects the README's own example (#2902). The exec
+      fixture omits the kwarg to prove the command; the mismatch is unresolved.
+
+## What running it on real hosts found
+
+The suite's first real-host runs did not reach the scenarios — they were
+blocked in `bootstrap`, twice, for two unrelated reasons. Both are recorded
+because both block a release independently of this work.
+
+- **crates.io now 403s Nix's User-Agent** (#2904). It rejects any `User-Agent`
+  beginning with `curl/`, and Nix sends `curl/<ver> Nix/<ver>`. Every Rust
+  derivation in the builder VM image fails to fetch, so the source-checkout
+  Stage 0 build cannot complete on any host. `static.crates.io` is unaffected.
+- **A default build cannot verify a signature** (#2906). On Linux the builder
+  image resolves to a verified fetch, which refuses with "manifest-verify
+  feature is disabled in this build". The refusal is right; building without
+  the feature was the bug. `user` carries it. The remedy printed elsewhere in
+  the CLI — `--features release-artifact-bootstrap,manifest-verify` — names a
+  root feature that no longer exists and does not compile.
+
+Both changed the runner: it builds with `--features user`, defaults
+`MVM_BOOT_IMAGE=fetch`, and treats a bootstrap failure as loud rather than
+fatal. Aborting there discarded every result that did not depend on the builder
+image; the flake-build scenarios now fail naming themselves while the
+OCI-image ones still run, and the run repeats the warning at the end so the
+difference is not misread as a regression.
 
 ## Follow-on
 

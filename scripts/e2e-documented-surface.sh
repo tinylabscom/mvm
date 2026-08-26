@@ -91,11 +91,45 @@ MVM_HOME="$E2E_HOME" "$MVMCTL" doctor || true
 # `MVM_BDD_CI_LIVE_ONLY` here: that selector narrows to the merge-queue subset,
 # and narrowing is what let the macOS default backend go uncovered.
 # ---------------------------------------------------------------------------
+# Bounded, because a live scenario can hang rather than fail: a guest that
+# never completes its request leaves the runner waiting forever, and a release
+# gate that hangs is a gate nobody runs. Implemented here rather than with
+# `timeout(1)`, which is absent from a stock macOS and from the macOS runners.
+E2E_TIMEOUT_SECS="${MVM_E2E_TIMEOUT_SECS:-3600}"
+
 echo "==> documented examples + machine journey (cucumber, @live)"
+echo "    deadline: ${E2E_TIMEOUT_SECS}s"
+set +e
 CARGO_BIN_EXE_mvmctl="$MVMCTL" \
 MVM_BDD_LIVE=1 \
 MVM_E2E_HOME="$E2E_HOME" \
-  ./scripts/cargo-fast.sh test -p mvm-conformance --test conformance --features bdd
+  ./scripts/cargo-fast.sh test -p mvm-conformance --test conformance --features bdd &
+SUITE_PID=$!
+
+waited=0
+while kill -0 "$SUITE_PID" 2>/dev/null; do
+  if (( waited >= E2E_TIMEOUT_SECS )); then
+    echo
+    echo "!!! TIMEOUT after ${E2E_TIMEOUT_SECS}s — killing the suite."
+    echo "!!! A live scenario hung instead of failing. The last scenario printed"
+    echo "!!! above is where it stopped; raise MVM_E2E_TIMEOUT_SECS if it needs longer."
+    kill -TERM "$SUITE_PID" 2>/dev/null || true
+    sleep 5
+    kill -KILL "$SUITE_PID" 2>/dev/null || true
+    # Leave no guest behind holding a vsock socket or a vCPU thread.
+    pkill -f "mvm-hvf-supervisor" 2>/dev/null || true
+    pkill -f "mvm-libkrun-supervisor" 2>/dev/null || true
+    SUITE_STATUS=124
+    break
+  fi
+  sleep 5
+  waited=$((waited + 5))
+done
+if [[ -z "${SUITE_STATUS:-}" ]]; then
+  wait "$SUITE_PID"
+  SUITE_STATUS=$?
+fi
+set -e
 
 echo
 echo "==> done. Read the 'did NOT run' tally above, not just the pass count:"
@@ -105,3 +139,4 @@ if [[ -n "${BOOTSTRAP_FAILED:-}" ]]; then
   echo "!!! REMINDER: bootstrap failed this run. Any flake-build failure above"
   echo "!!! is that, not a regression in the command under test."
 fi
+exit "$SUITE_STATUS"
