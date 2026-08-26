@@ -610,6 +610,7 @@ fn machine_run_spec(
         cpu_limit_millicores: args.run.cpu_limit,
         timeout_secs: args.run.timeout,
         allow_host: &args.run.allow_host,
+        peer: &args.run.peer,
         net: args.run.net,
         grants_file: args.run.grants_file.as_deref(),
         // A persistent `machine run` names its source on the command line and
@@ -631,6 +632,7 @@ fn machine_run_spec(
         runtime_pack: args.run.runtime_pack,
         net: args.run.net,
         allow_host: args.run.allow_host.clone(),
+        peer: Vec::new(),
         ai: None,
         ports: args.port.clone(),
         cpus: args.run.cpus,
@@ -673,6 +675,9 @@ pub(in crate::commands) struct MachineCreateArgs {
     /// Allow egress only to these hosts: `HOST[:PORT]` (repeatable).
     #[arg(long = "allow-host", value_name = "HOST[:PORT]")]
     pub allow_host: Vec<String>,
+    /// Bind a peer route this machine may dial (repeatable).
+    #[arg(long = "peer", value_name = "NAME:PORT=ADDR:PORT")]
+    pub peer: Vec<String>,
     /// vCPU cores the guest sees on lifecycle starts (not a host CPU share).
     #[arg(long)]
     pub cpus: Option<u32>,
@@ -769,6 +774,9 @@ pub(in crate::commands) struct MachineStartCreateFlags {
     /// Allow egress only to these hosts: `HOST[:PORT]` (repeatable).
     #[arg(long = "allow-host", value_name = "HOST[:PORT]")]
     pub allow_host: Vec<String>,
+    /// Bind a peer route this machine may dial (repeatable).
+    #[arg(long = "peer", value_name = "NAME:PORT=ADDR:PORT")]
+    pub peer: Vec<String>,
     /// vCPU cores the guest sees on lifecycle starts (not a host CPU share).
     #[arg(long)]
     pub cpus: Option<u32>,
@@ -1073,6 +1081,7 @@ struct MachineSpecInputs<'a> {
     image: Option<&'a str>,
     net: bool,
     allow_host: &'a [String],
+    peer: &'a [String],
     ai: Option<&'a mvm_core::network_policy::AiPolicy>,
     cpus: Option<u32>,
     cpu_limit: Option<u32>,
@@ -1117,6 +1126,7 @@ fn build_machine_spec(inputs: MachineSpecInputs<'_>) -> Result<MachineSpec> {
         cpu_limit_millicores: inputs.cpu_limit,
         timeout_secs: inputs.timeout,
         allow_host: &allow_host,
+        peer: inputs.peer,
         net,
         grants_file: inputs.grants_file,
         manifest: workflow.map(|workflow| &workflow.grants),
@@ -1156,6 +1166,7 @@ fn build_machine_spec(inputs: MachineSpecInputs<'_>) -> Result<MachineSpec> {
         runtime_pack: false,
         net,
         allow_host,
+        peer: inputs.peer.to_vec(),
         ai: ai.cloned(),
         ports: Vec::new(),
         cpus,
@@ -1210,6 +1221,7 @@ impl MachineCreateArgs {
             image: self.image.as_deref(),
             net: self.net,
             allow_host: &self.allow_host,
+            peer: &self.peer,
             ai: None,
             cpus: self.cpus,
             cpu_limit: self.cpu_limit,

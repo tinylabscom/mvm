@@ -69,7 +69,7 @@ from mvm._dsl import (
 # `mvm.host.cost()`. These speak vsock to the per-VM broker from inside a
 # microVM; on the host they raise a clear transport error. Imported here so
 # `mvm.audit` / `mvm.host` resolve as attributes (no connection at import).
-from mvm import audit, host
+from mvm import audit, host, kv
 
 # The typed failures `mvm.audit.emit(...)` / `mvm.host.time()` raise. They live
 # in a private module, but a caller has to be able to name what it catches, so
@@ -138,11 +138,12 @@ from mvm._runtime.runtime import (
 # Submodules, so `import mvm; mvm.audit.emit(...)` works inside a booted
 # workload. Importing them is cheap — the shared object is loaded lazily on
 # first call, never at import — so this stays inert in host authoring use.
-from mvm import audit, host
+from mvm import audit, host, kv
 
 __all__ = [
     "audit",
     "host",
+    "kv",
     "DEFAULT_TTL_SECONDS",
     "MVM_CLI_BIN_ENV",
     "MVM_MACHINE_MAX_OUTPUT_ENV",

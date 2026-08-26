@@ -269,6 +269,9 @@ pub(in crate::commands) struct RunArgs {
     /// Allow outbound access to HOST[:PORT] (repeatable).
     #[arg(long = "allow-host", value_name = "HOST[:PORT]")]
     pub allow_host: Vec<String>,
+    /// Bind a peer route this workload may dial (repeatable).
+    #[arg(long = "peer", value_name = "NAME:PORT=ADDR:PORT")]
+    pub peer: Vec<String>,
     /// Set how many vCPUs the guest sees (not a host CPU share).
     #[arg(long, default_value = "2")]
     pub cpus: u32,
@@ -437,6 +440,7 @@ pub(in crate::commands) fn resolve_run_source(
             .resolve_named(&name)
             .map_err(|e| anyhow::anyhow!(e))?;
         args.image = Some(detection.image.clone());
+        adopt_declared_bindings(args, &detection);
         return Ok(ResolvedSource::Runtime(detection));
     }
 
@@ -452,12 +456,36 @@ pub(in crate::commands) fn resolve_run_source(
     }
 
     let present = project_files_in(cwd);
-    if let Some(detection) = catalog.detect(args.argv.first().map(String::as_str), &present) {
+    if let Some(detection) = catalog
+        .detect(args.argv.first().map(String::as_str), &present)
+        .map_err(|e| anyhow::anyhow!(e))?
+    {
         args.image = Some(detection.image.clone());
+        adopt_declared_bindings(args, &detection);
         return Ok(ResolvedSource::Runtime(detection));
     }
 
     Ok(ResolvedSource::BundledDefault)
+}
+
+/// Merge a catalog entry's declared host-service bindings into the run args.
+///
+/// The entry declares what the runtime needs; `--host-service` is what the
+/// operator asked for. Both end up in the signed plan, so this is a union
+/// rather than a default: an operator who passes the flag is adding to the
+/// entry's declaration, not replacing it, and neither can silently drop the
+/// other's binding.
+///
+/// Duplicates are dropped here rather than left for
+/// `parse_host_service_bindings`, so the count the user sees matches the count
+/// the plan carries.
+fn adopt_declared_bindings(args: &mut RunArgs, detection: &mvm_core::runtime_catalog::Detection) {
+    for service in &detection.services {
+        let raw = service.as_str().to_string();
+        if !args.host_service.contains(&raw) {
+            args.host_service.push(raw);
+        }
+    }
 }
 
 /// The plain filenames directly in `cwd`.
@@ -547,6 +575,7 @@ impl Default for RunArgs {
             no_detect: false,
             net: false,
             allow_host: Vec::new(),
+            peer: Vec::new(),
             cpus: 2,
             cpu_limit: None,
             grants_file: None,
@@ -720,6 +749,7 @@ pub(in crate::commands) fn run_secure_with_source(
         cpu_limit_millicores: args.cpu_limit,
         timeout_secs: args.timeout,
         allow_host: &args.allow_host,
+        peer: &args.peer,
         net: args.net,
         grants_file: args.grants_file.as_deref(),
         // A transient run names its image on the command line and reads no
@@ -1423,7 +1453,11 @@ impl ReceiptInput {
     fn from_run_args(args: &RunArgs, backend: &str) -> Result<Self> {
         // Resolve the egress policy once: the requested posture and the honest
         // per-backend enforcement tier are two views of the same policy.
-        let policy = super::shared::resolve_run_network_policy(args.net, &args.allow_host)?;
+        let policy = super::shared::resolve_run_network_policy_with_peers(
+            args.net,
+            &args.allow_host,
+            &args.peer,
+        )?;
         let command = if let Some(path) = &args.launch_plan {
             ReceiptCommand::LaunchPlan {
                 path_sha256: sha256_hex(path.as_bytes()),
@@ -2721,5 +2755,69 @@ mod tests {
         assert!(grant_eligible(false, false, false));
         // Dev profile stays permissive by contract.
         assert!(!grant_eligible(false, false, true));
+    }
+}
+
+#[cfg(test)]
+mod declared_binding_tests {
+    use super::*;
+
+    fn detection(services: &[&str]) -> mvm_core::runtime_catalog::Detection {
+        mvm_core::runtime_catalog::Detection {
+            runtime: "svc".to_string(),
+            image: "example:1".to_string(),
+            via: mvm_core::runtime_catalog::DetectedVia::Command("svc".to_string()),
+            services: services
+                .iter()
+                .map(|s| {
+                    mvm_contract::protocol::broker::ServiceId::parse(*s).expect("valid service id")
+                })
+                .collect(),
+            peers: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_declared_binding_reaches_the_run_args() {
+        let mut args = RunArgs::default();
+        adopt_declared_bindings(&mut args, &detection(&["host.kv.v1"]));
+        assert_eq!(args.host_service, vec!["host.kv.v1".to_string()]);
+    }
+
+    /// The entry declares what the runtime needs; the flag is what the
+    /// operator asked for. Both reach the signed plan, so neither may drop
+    /// the other's binding.
+    #[test]
+    fn a_declared_binding_and_an_operator_flag_are_unioned() {
+        let mut args = RunArgs {
+            host_service: vec!["host.time.v1".to_string()],
+            ..RunArgs::default()
+        };
+        adopt_declared_bindings(&mut args, &detection(&["host.kv.v1"]));
+        assert_eq!(
+            args.host_service,
+            vec!["host.time.v1".to_string(), "host.kv.v1".to_string()]
+        );
+    }
+
+    /// Deduped here rather than downstream, so the count the user sees is the
+    /// count the plan carries.
+    #[test]
+    fn a_binding_declared_and_also_passed_appears_once() {
+        let mut args = RunArgs {
+            host_service: vec!["host.kv.v1".to_string()],
+            ..RunArgs::default()
+        };
+        adopt_declared_bindings(&mut args, &detection(&["host.kv.v1"]));
+        assert_eq!(args.host_service, vec!["host.kv.v1".to_string()]);
+    }
+
+    /// The common case: an entry that declares nothing changes nothing, so
+    /// every existing `--runtime` invocation keeps its exact posture.
+    #[test]
+    fn an_entry_declaring_nothing_leaves_the_args_untouched() {
+        let mut args = RunArgs::default();
+        adopt_declared_bindings(&mut args, &detection(&[]));
+        assert!(args.host_service.is_empty());
     }
 }

@@ -104,6 +104,22 @@ impl Drop for ScenarioEnvGuard {
 #[derive(cucumber::World, Default)]
 pub struct CliWorld {
     pub last_run: Option<Output>,
+    /// Gate under test in the peer-addressing scenarios.
+    pub peer_gate: Option<mvm_vmm::vsock_egress_bridge::egress_gate::EgressGate>,
+    /// The most recent peer/egress decision.
+    pub peer_decision: Option<mvm_vmm::vsock_egress_bridge::egress_gate::TargetDecision>,
+    /// Broker registry under test in the key-value scenarios.
+    pub broker_registry: Option<mvm_hostd::broker::registry::Registry>,
+    /// Tempdir backing the key-value store, held so it outlives the scenario.
+    pub kv_root: Option<tempfile::TempDir>,
+    /// Outcome of the most recent broker dispatch.
+    pub kv_result: Option<mvm_core::protocol::handler::ServiceDispatchResult>,
+    /// Catalog under test in the declared-binding scenarios.
+    pub runtime_catalog: Option<mvm_core::runtime_catalog::RuntimeCatalog>,
+    /// Outcome of resolving a runtime by name, error rendered for assertion.
+    pub runtime_resolution: Option<Result<mvm_core::runtime_catalog::Detection, String>>,
+    /// Whether detection matched, or why it refused.
+    pub runtime_detection: Option<Result<bool, String>>,
     /// Id of the conformance claim currently being exercised by a claim scenario.
     pub current_claim_id: Option<String>,
     /// Local file:// registry created by template-registry scenarios.

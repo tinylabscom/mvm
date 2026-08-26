@@ -52,7 +52,11 @@ pub fn build_egress_gate(
 ) -> mvm_runtime::vmm::egress_gate::EgressGate {
     let pins = mvm_core::policy::dns_pin::resolve_network_policy_pins(policy);
     let now = chrono::Utc::now().to_rfc3339();
+    // Peer routes ride the policy, so they arrive here already admitted and
+    // need no separate thread. Attaching them at the same place the egress
+    // rules are projected keeps one construction site for the whole gate.
     mvm_runtime::vmm::egress_gate::EgressGate::from_network_policy(policy, &pins, &now)
+        .with_peers(policy.peers().to_vec())
 }
 
 /// Default remote-resolver round-trip timeout (connect + one request/response
@@ -1272,5 +1276,84 @@ mod proxy_config_tests {
     fn a_malformed_proxy_is_an_error_not_a_silent_direct_dial() {
         let cfg = cfg_with(Some("ftp://nope"), None, None);
         assert!(cfg.resolve_proxy().is_err());
+    }
+}
+
+#[cfg(test)]
+mod peer_thread_tests {
+    use mvm_contract::peer::{PeerBinding, PeerName};
+    use mvm_core::policy::network_policy::NetworkPolicy;
+    use mvm_runtime::vmm::egress_gate::EgressVerdict;
+
+    fn binding() -> PeerBinding {
+        PeerBinding {
+            name: PeerName::parse("db.mvm.peer").expect("valid"),
+            port: 5432,
+            host_addr: "127.0.0.1".to_string(),
+            host_port: 34567,
+        }
+    }
+
+    /// **The assertion whose absence let a documented `--peer` flag be written
+    /// against a path that could not carry one.** A binding on the admitted
+    /// policy has to arrive at the gate that decides the dial. Everything
+    /// between is plumbing; this is the property.
+    #[test]
+    fn a_peer_binding_on_the_admitted_policy_reaches_the_gate() {
+        let policy = NetworkPolicy::deny_all().with_peers(vec![binding()]);
+        let gate = super::build_egress_gate(&policy);
+        assert_eq!(
+            gate.decide_peer("db.mvm.peer", 5432),
+            EgressVerdict::Allow {
+                ips: vec!["127.0.0.1".parse().expect("ip")],
+                port: 34567,
+            }
+        );
+    }
+
+    /// Peers are orthogonal to egress: a workload that admits no outbound
+    /// destination at all may still reach its own database. If these were
+    /// coupled, the common shape would be impossible to express.
+    #[test]
+    fn a_deny_all_policy_still_carries_its_peers() {
+        let policy = NetworkPolicy::deny_all().with_peers(vec![binding()]);
+        let gate = super::build_egress_gate(&policy);
+        assert!(matches!(
+            gate.decide_peer("db.mvm.peer", 5432),
+            EgressVerdict::Allow { .. }
+        ));
+        assert!(matches!(
+            gate.decide_target("api.example.com", 443).verdict,
+            EgressVerdict::Deny(_)
+        ));
+    }
+
+    /// A policy with no peers builds a gate that admits none, so every
+    /// existing launch keeps its exact posture.
+    #[test]
+    fn a_policy_without_peers_admits_none() {
+        let gate = super::build_egress_gate(&NetworkPolicy::deny_all());
+        assert!(matches!(
+            gate.decide_peer("db.mvm.peer", 5432),
+            EgressVerdict::Deny(_)
+        ));
+    }
+
+    /// The policy crosses a process boundary as JSON on the endpoint's stdin.
+    /// A binding that did not survive that round trip would be admitted by the
+    /// CLI and absent at the gate -- the plan promising a route the runtime
+    /// denies.
+    #[test]
+    fn peers_survive_the_policy_serialization_the_endpoint_reads() {
+        let policy = NetworkPolicy::deny_all().with_peers(vec![binding()]);
+        let json = serde_json::to_string(&policy).expect("serialize");
+        let back: NetworkPolicy = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.peers(), policy.peers());
+
+        let gate = super::build_egress_gate(&back);
+        assert!(matches!(
+            gate.decide_peer("db.mvm.peer", 5432),
+            EgressVerdict::Allow { .. }
+        ));
     }
 }

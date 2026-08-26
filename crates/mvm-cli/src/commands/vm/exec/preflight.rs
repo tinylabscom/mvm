@@ -51,6 +51,13 @@ pub(super) struct RunPreflightInvocation {
     /// Honest per-backend enforcement fidelity for that posture (see
     /// `ReceiptInput::egress_enforcement`).
     pub(super) egress_enforcement: String,
+    /// Admitted peer routes, as `name:port -> addr:port`.
+    ///
+    /// Reported separately from `network_posture` because a peer route is not
+    /// egress: a workload dialing only its own database prints `deny-all`, and
+    /// without this line a reader would take that to mean it can reach nothing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(super) peers: Vec<String>,
     pub(super) command: ReceiptCommand,
     pub(super) env_keys: Vec<String>,
     pub(super) mounts: Vec<ReceiptMount>,
@@ -137,7 +144,11 @@ impl RunPreflightSummary {
 
         // Report the backend the real run would auto-select, so the dry-run's
         // enforcement tier matches what an actual boot would record.
-        let policy = super::super::shared::resolve_run_network_policy(args.net, &args.allow_host)?;
+        let policy = super::super::shared::resolve_run_network_policy_with_peers(
+            args.net,
+            &args.allow_host,
+            &args.peer,
+        )?;
         let backend = match backend_override {
             Some(backend) => backend.to_string(),
             None => crate::exec::select_exec_backend(
@@ -158,6 +169,11 @@ impl RunPreflightSummary {
                 profile: receipt_input.profile,
                 network_posture: receipt_input.network_posture,
                 egress_enforcement: receipt_input.egress_enforcement,
+                peers: policy
+                    .peers()
+                    .iter()
+                    .map(|b| format!("{}:{} -> {}:{}", b.name, b.port, b.host_addr, b.host_port))
+                    .collect(),
                 command: receipt_input.command,
                 env_keys: receipt_input.env_keys,
                 mounts: receipt_input.mounts,
@@ -207,6 +223,9 @@ pub(super) fn print_run_preflight_human(summary: &RunPreflightSummary) {
     );
     println!("profile: {}", summary.invocation.profile);
     println!("network: {}", summary.invocation.network_posture);
+    if !summary.invocation.peers.is_empty() {
+        println!("peers: {}", summary.invocation.peers.join(", "));
+    }
     println!("enforced: {}", summary.invocation.egress_enforcement);
     println!("command: {}", summary.invocation.command.describe());
     if summary.invocation.env_keys.is_empty() {

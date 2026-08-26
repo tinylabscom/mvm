@@ -38,9 +38,10 @@ pub const SDK_SIDECAR_LIB_PATH: &str = "/lib/libmvm_host_services.so";
 /// reviewer sees the whole SDK-reachable surface in one place. `broker.v1` is
 /// deliberately absent: it is the meta service the transport itself speaks, not
 /// a verb the SDK exposes to workload code.
-pub const SDK_HOST_SERVICES: [&str; 4] = [
+pub const SDK_HOST_SERVICES: [&str; 5] = [
     "host.audit.v1",
     "host.cost.v1",
+    "host.kv.v1",
     "host.secrets.v1",
     "host.time.v1",
 ];
@@ -162,5 +163,25 @@ mod tests {
     fn guest_paths_are_absolute() {
         assert!(SDK_SIDECAR_GUEST_PATH.starts_with('/'));
         assert!(SDK_SIDECAR_LIB_PATH.starts_with('/'));
+    }
+
+    /// The store is reachable from workload code only if the sidecar carrying
+    /// the cdylib is attached. Binding the service and *not* getting the
+    /// library is the shape that made it host-side-only: the handler
+    /// registered, the guest had nothing to call it with, and the docs claimed
+    /// a workload could use it.
+    #[test]
+    fn binding_the_key_value_store_attaches_the_sidecar() {
+        assert!(sdk_sidecar_required_for(&[svc("host.kv.v1")]));
+        assert!(is_sdk_host_service(&svc("host.kv.v1")));
+    }
+
+    /// The list is sorted so a reviewer sees the whole SDK-reachable surface
+    /// at a glance and a new entry cannot hide in the middle.
+    #[test]
+    fn the_sdk_host_service_list_stays_sorted() {
+        let mut sorted = SDK_HOST_SERVICES;
+        sorted.sort_unstable();
+        assert_eq!(SDK_HOST_SERVICES, sorted);
     }
 }

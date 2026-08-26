@@ -302,6 +302,16 @@ pub enum NetworkPolicy {
         /// Optional AI egress metering and budget policy.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         ai: Option<AiPolicy>,
+        /// Peer routes this workload may dial.
+        ///
+        /// Carried on the policy rather than beside it because a peer route is
+        /// network policy — where this workload may connect — and because the
+        /// policy is already threaded from the CLI through the signed plan to
+        /// the endpoint that builds the gate. A parallel channel would have to
+        /// be re-threaded through every one of those layers, and a layer that
+        /// forgot it would leave a plan promising a route the runtime denies.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        peers: Vec<crate::peer::PeerBinding>,
     },
     /// Explicit allowlist of host:port pairs.
     AllowList {
@@ -311,15 +321,43 @@ pub enum NetworkPolicy {
         /// Optional AI egress metering and budget policy.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         ai: Option<AiPolicy>,
+        /// Peer routes this workload may dial.
+        ///
+        /// Carried on the policy rather than beside it because a peer route is
+        /// network policy — where this workload may connect — and because the
+        /// policy is already threaded from the CLI through the signed plan to
+        /// the endpoint that builds the gate. A parallel channel would have to
+        /// be re-threaded through every one of those layers, and a layer that
+        /// forgot it would leave a plan promising a route the runtime denies.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        peers: Vec<crate::peer::PeerBinding>,
     },
 }
 
 impl NetworkPolicy {
+    /// Peer routes this policy admits. Empty is the default and admits none,
+    /// so east-west inherits claim-10's posture rather than having its own.
+    pub fn peers(&self) -> &[crate::peer::PeerBinding] {
+        match self {
+            Self::Preset { peers, .. } | Self::AllowList { peers, .. } => peers,
+        }
+    }
+
+    /// Attach peer routes, replacing any already present.
+    #[must_use]
+    pub fn with_peers(mut self, new_peers: Vec<crate::peer::PeerBinding>) -> Self {
+        match &mut self {
+            Self::Preset { peers, .. } | Self::AllowList { peers, .. } => *peers = new_peers,
+        }
+        self
+    }
+
     pub fn unrestricted() -> Self {
         Self::Preset {
             preset: NetworkPreset::Unrestricted,
             egress_mode: None,
             ai: None,
+            peers: Vec::new(),
         }
     }
 
@@ -340,6 +378,7 @@ impl NetworkPolicy {
             preset: NetworkPreset::None,
             egress_mode: None,
             ai: None,
+            peers: Vec::new(),
         }
     }
 
@@ -348,6 +387,7 @@ impl NetworkPolicy {
             preset,
             egress_mode: None,
             ai: None,
+            peers: Vec::new(),
         }
     }
 
@@ -359,6 +399,7 @@ impl NetworkPolicy {
             preset,
             egress_mode: Some(mode),
             ai: None,
+            peers: Vec::new(),
         }
     }
 
@@ -367,6 +408,7 @@ impl NetworkPolicy {
             rules,
             egress_mode: None,
             ai: None,
+            peers: Vec::new(),
         }
     }
 
@@ -376,6 +418,7 @@ impl NetworkPolicy {
             rules,
             egress_mode: Some(mode),
             ai: None,
+            peers: Vec::new(),
         }
     }
 
@@ -385,6 +428,7 @@ impl NetworkPolicy {
             preset,
             egress_mode: None,
             ai,
+            peers: Vec::new(),
         }
     }
 
@@ -394,6 +438,7 @@ impl NetworkPolicy {
             rules,
             egress_mode: None,
             ai,
+            peers: Vec::new(),
         }
     }
 
@@ -408,6 +453,7 @@ impl NetworkPolicy {
                 preset,
                 egress_mode,
                 ai,
+                peers: Vec::new(),
             },
             Self::AllowList {
                 rules, egress_mode, ..
@@ -415,6 +461,7 @@ impl NetworkPolicy {
                 rules,
                 egress_mode,
                 ai,
+                peers: Vec::new(),
             },
         }
     }
@@ -1279,6 +1326,7 @@ mod tests {
             rules: vec![HostPort::new("api.openai.com", 443)],
             egress_mode: None,
             ai: Some(AiPolicy::metered_with_total_budget(1_000_000)),
+            peers: Vec::new(),
         };
         let json = serde_json::to_string(&policy).unwrap();
         let back: NetworkPolicy = serde_json::from_str(&json).unwrap();

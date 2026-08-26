@@ -659,7 +659,12 @@ impl FlowMuxSession {
             return Ok(());
         }
 
-        let (ips, port) = match self.gate.decide_request(&format!("{host}:{port}")) {
+        let decision = self.gate.decide_target(host, port);
+        // Recorded on every audit entry this connect emits, so the chain says
+        // which namespace authorized (or refused) the flow rather than leaving
+        // a reader to infer it from the target's shape.
+        let route = decision.route.as_str().to_string();
+        let (ips, port) = match decision.verdict {
             EgressVerdict::Allow { ips, port } => (ips, port),
             EgressVerdict::Deny(reason) => {
                 self.send_refused(stream_id, &reason.to_string())?;
@@ -669,6 +674,7 @@ impl FlowMuxSession {
                     BTreeMap::from([
                         ("stream_id".to_string(), stream_id.to_string()),
                         ("class".to_string(), "tcp".to_string()),
+                        ("route".to_string(), route.clone()),
                         ("target".to_string(), target.to_string()),
                         ("reason".to_string(), "policy_denied".to_string()),
                     ]),
@@ -683,6 +689,7 @@ impl FlowMuxSession {
                     BTreeMap::from([
                         ("stream_id".to_string(), stream_id.to_string()),
                         ("class".to_string(), "tcp".to_string()),
+                        ("route".to_string(), route.clone()),
                         ("target".to_string(), target.to_string()),
                         ("reason".to_string(), "malformed".to_string()),
                     ]),
@@ -702,6 +709,7 @@ impl FlowMuxSession {
                 BTreeMap::from([
                     ("stream_id".to_string(), stream_id.to_string()),
                     ("class".to_string(), "tcp".to_string()),
+                    ("route".to_string(), route.clone()),
                     ("target".to_string(), target.to_string()),
                     ("reason".to_string(), "resource_exhausted".to_string()),
                 ]),
@@ -721,6 +729,7 @@ impl FlowMuxSession {
                     BTreeMap::from([
                         ("stream_id".to_string(), stream_id.to_string()),
                         ("class".to_string(), "tcp".to_string()),
+                        ("route".to_string(), route.clone()),
                         ("target".to_string(), target.to_string()),
                         ("reason".to_string(), "connect_failed".to_string()),
                     ]),
@@ -744,6 +753,7 @@ impl FlowMuxSession {
             BTreeMap::from([
                 ("stream_id".to_string(), stream_id.to_string()),
                 ("class".to_string(), "tcp".to_string()),
+                ("route".to_string(), route.clone()),
                 ("target".to_string(), target.to_string()),
                 ("resolved_ips".to_string(), Self::format_ips(&ips)),
             ]),

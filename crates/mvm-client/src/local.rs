@@ -1503,6 +1503,7 @@ mod tests {
             resolved_digest: None,
             net: false,
             allow_host: vec![],
+            peer: vec![],
             cpus: 2,
             memory: "512M".to_string(),
             mem_initial: None,

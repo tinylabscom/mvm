@@ -117,8 +117,10 @@ pub fn run(workspace: &Path) -> Result<()> {
     check_network_flow_channels(workspace)?;
     check_retired_symbols(workspace)?;
     check_socket_owners(workspace)?;
+    check_single_peer_resolver(workspace)?;
+    check_flow_audit_labels(workspace)?;
     eprintln!(
-        "check-single-network-path: clean — one endpoint implementation, one NetworkFlow channel per backend, no retired L3/NIC path, and one workload socket owner"
+        "check-single-network-path: clean — one endpoint implementation, one NetworkFlow channel per backend, no retired L3/NIC path, one workload socket owner, one peer resolver, and payload-free flow audit labels"
     );
     Ok(())
 }
@@ -234,6 +236,147 @@ fn check_network_flow_channels(workspace: &Path) -> Result<()> {
         bail!(
             "check-single-network-path: WorkloadRunner must map and boot the shared workload spec for every runner alias"
         );
+    }
+    Ok(())
+}
+
+/// Files permitted to decide a peer target.
+///
+/// The peer namespace and the host-name namespace share one input, and the
+/// branch between them lives in exactly one place: `EgressGate::decide_target`.
+/// A second copy of that branch is how one of the two paths quietly stops being
+/// gated — the copy gets a new caller, the caller drifts, and nothing says so.
+const PEER_BRANCH_OWNER: &str = "crates/mvm-vmm/src/vsock_egress_bridge/egress_gate.rs";
+
+/// The connect sites that route a guest target through the gate. Both must go
+/// through `decide_target`; neither may call `decide_peer` or re-derive the
+/// branch itself.
+const PEER_BRANCH_CALLERS: &[&str] = &[
+    "crates/mvm-hostd/src/supervisor/flowmux.rs",
+    "crates/mvm-hostd/src/supervisor/flowmux/session.rs",
+];
+
+/// Deliberate non-callers: production code that sees a target but must not
+/// resolve a peer through it. The substitution proxy refuses peer destinations
+/// outright rather than falling through, so it names the peer suffix without
+/// dispatching on it.
+const PEER_REFUSAL_SITES: &[&str] = &["crates/mvm-hostd/src/supervisor/network_endpoint_proxy.rs"];
+
+fn check_single_peer_resolver(workspace: &Path) -> Result<()> {
+    // The branch itself exists exactly once, in the gate.
+    let owner = production_code(&read(workspace, PEER_BRANCH_OWNER)?);
+    let branches = owner.matches("PeerName::is_peer_target").count();
+    if branches != 1 {
+        bail!(
+            "check-single-network-path: {PEER_BRANCH_OWNER} must contain exactly one \
+             peer/host branch (`PeerName::is_peer_target`), found {branches}. The branch \
+             is the single decision point; a second one is a second policy."
+        );
+    }
+    if !owner.contains("pub fn decide_target") {
+        bail!(
+            "check-single-network-path: {PEER_BRANCH_OWNER} must expose `decide_target` \
+             as the one entry point every workload connect goes through"
+        );
+    }
+
+    // Every connect site goes through it, and none reaches past it.
+    for rel in PEER_BRANCH_CALLERS {
+        let src = production_code(&read(workspace, rel)?);
+        if !src.contains("gate.decide_target(") {
+            bail!(
+                "check-single-network-path: {rel} must decide its guest target via \
+                 `gate.decide_target(..)`. A connect site that resolves a target another \
+                 way is outside the gate."
+            );
+        }
+        if src.contains("decide_peer(") {
+            bail!(
+                "check-single-network-path: {rel} calls `decide_peer` directly, bypassing \
+                 the peer/host branch in {PEER_BRANCH_OWNER}. Call `decide_target`."
+            );
+        }
+        if src.contains("is_peer_target") {
+            bail!(
+                "check-single-network-path: {rel} re-derives the peer/host branch. The \
+                 branch belongs to {PEER_BRANCH_OWNER} alone."
+            );
+        }
+    }
+
+    // A refusal site may name the suffix; it may not resolve through it.
+    for rel in PEER_REFUSAL_SITES {
+        let src = production_code(&read(workspace, rel)?);
+        if src.contains("decide_peer(") || src.contains("decide_target(") {
+            bail!(
+                "check-single-network-path: {rel} resolves a peer target. It is a refusal \
+                 site: peer traffic goes over FlowMux, not the substitution proxy. If that \
+                 is meant to change, change it deliberately and move this entry."
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Label keys a connect-path audit entry may carry.
+///
+/// Every one is metadata about *which* flow was decided, never anything from
+/// inside it. The chain records that a workload dialed `db.mvm.peer:5432` and
+/// what the verdict was; it does not record a byte the workload sent. Claim 12
+/// makes the same promise for the stream plane's entries, and it is worth
+/// exactly as much here.
+const FLOW_AUDIT_LABEL_KEYS: &[&str] = &[
+    "stream_id",
+    "class",
+    "route",
+    "target",
+    "reason",
+    "resolved_ips",
+    // The DNS question's name and record type. These name the destination
+    // being resolved, which is the same class of fact as `target` -- what the
+    // workload asked to reach, not anything it sent. A DNS query has no body
+    // to leak; if that ever changes, this entry is the thing to revisit.
+    "qname",
+    "qtype",
+];
+
+/// Files whose connect paths emit flow audit entries.
+const FLOW_AUDIT_SITES: &[&str] = &[
+    "crates/mvm-hostd/src/supervisor/flowmux.rs",
+    "crates/mvm-hostd/src/supervisor/flowmux/session.rs",
+];
+
+fn check_flow_audit_labels(workspace: &Path) -> Result<()> {
+    // Matches the `("key".to_string(), ..)` label entries the audit maps are
+    // built from. Deliberately source-level: the property is about which keys
+    // can ever be constructed, which no runtime test can establish.
+    let key =
+        Regex::new(r#"\(\s*"([a-z_]+)"\.to_string\(\)\s*,"#).context("compile label regex")?;
+    let allowed: std::collections::BTreeSet<&str> = FLOW_AUDIT_LABEL_KEYS.iter().copied().collect();
+
+    for rel in FLOW_AUDIT_SITES {
+        // NOT `production_code`: that blanks string literals, and the label
+        // keys *are* string literals — reading them through it finds nothing
+        // and the gate passes on anything. Strip the test module only.
+        let raw = read(workspace, rel)?;
+        let src = raw.split("#[cfg(test)]").next().unwrap_or(&raw).to_string();
+        for block in src.split("emit_audit(").skip(1) {
+            // Bound to the end of this call's label map.
+            let block = block.split("]),").next().unwrap_or(block);
+            for cap in key.captures_iter(block) {
+                let found = &cap[1];
+                if !allowed.contains(found) {
+                    bail!(
+                        "check-single-network-path: {rel} builds a flow audit label `{found}`, \
+                         which is not in the payload-free allow-list ({}). A flow audit entry \
+                         records which flow was decided, never anything from inside it. If the \
+                         new label is genuinely metadata, add it to FLOW_AUDIT_LABEL_KEYS and \
+                         say why in the review.",
+                        FLOW_AUDIT_LABEL_KEYS.join(", ")
+                    );
+                }
+            }
+        }
     }
     Ok(())
 }

@@ -95,6 +95,7 @@ pub(super) fn resolve_start_spec(args: &MachineStartArgs) -> Result<(MachineSpec
         image: args.create_flags.image.as_deref(),
         net: args.create_flags.net,
         allow_host: &args.create_flags.allow_host,
+        peer: &args.create_flags.peer,
         ai: None,
         cpus: args.create_flags.cpus,
         cpu_limit: args.create_flags.cpu_limit,

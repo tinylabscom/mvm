@@ -44,8 +44,9 @@ use std::ptr;
 use std::slice;
 
 use mvm_agentd::vsock::{BROKER_PORT, connect_host_vsock};
-use mvm_agentd::{host_audit, host_cost, host_time};
+use mvm_agentd::{host_audit, host_cost, host_kv, host_time};
 use mvm_core::protocol::host_audit::{EmitBatchRequest, EmitRequest};
+use mvm_core::protocol::host_kv::{KvDeleteRequest, KvGetRequest, KvListRequest, KvPutRequest};
 
 /// Call succeeded; `out` carries the typed response JSON.
 pub const MVM_HSVC_OK: i32 = 0;
@@ -136,6 +137,34 @@ fn dispatch_on(stream: &mut UnixStream, method: &str, request: &[u8]) -> Outcome
             },
             Err(o) => o,
         },
+        "host.kv.get" => match parse::<KvGetRequest>(request) {
+            Ok(req) => match host_kv::get_on(stream, &req.key) {
+                Ok(resp) => ok_json(&resp),
+                Err(e) => from_kv(e),
+            },
+            Err(o) => o,
+        },
+        "host.kv.put" => match parse::<KvPutRequest>(request) {
+            Ok(req) => match host_kv::put_on(stream, &req.key, &req.value) {
+                Ok(resp) => ok_json(&resp),
+                Err(e) => from_kv(e),
+            },
+            Err(o) => o,
+        },
+        "host.kv.delete" => match parse::<KvDeleteRequest>(request) {
+            Ok(req) => match host_kv::delete_on(stream, &req.key) {
+                Ok(resp) => ok_json(&resp),
+                Err(e) => from_kv(e),
+            },
+            Err(o) => o,
+        },
+        "host.kv.list" => match parse::<KvListRequest>(request) {
+            Ok(req) => match host_kv::list_on(stream, &req.prefix) {
+                Ok(resp) => ok_json(&resp),
+                Err(e) => from_kv(e),
+            },
+            Err(o) => o,
+        },
         "host.time.now" => match host_time::now_on(stream) {
             Ok(resp) => ok_json(&resp),
             Err(e) => from_time(e),
@@ -204,6 +233,32 @@ fn from_audit(err: host_audit::AuditError) -> Outcome {
 }
 
 /// Map a `host.time.v1` error onto a status + error JSON.
+fn from_kv(err: host_kv::KvError) -> Outcome {
+    use host_kv::KvError::*;
+    let (status, code, message) = match err {
+        NotBound => (
+            MVM_HSVC_NOT_BOUND,
+            "not_bound",
+            "host.kv.v1 not bound to this workload".to_string(),
+        ),
+        // A refused key is the caller's bug, not the host being down. Keeping
+        // them distinct is what lets a caller tell "fix the request" from
+        // "retry later".
+        BadRequest(m) => (MVM_HSVC_SERVICE, "bad_request", m),
+        Unavailable(m) => (MVM_HSVC_UNAVAILABLE, "unavailable", m),
+        Service { code, message } => (
+            MVM_HSVC_SERVICE,
+            "service_error",
+            format!("[{code:?}] {message}"),
+        ),
+        Transport(e) => (MVM_HSVC_TRANSPORT, "transport", e.to_string()),
+    };
+    Outcome {
+        status,
+        body: error_json(code, &message),
+    }
+}
+
 fn from_time(err: host_time::TimeError) -> Outcome {
     use host_time::TimeError::*;
     let (status, code, message) = match err {
@@ -648,5 +703,71 @@ mod tests {
     #[test]
     fn free_is_a_no_op_on_zeroed_buffer() {
         unsafe { mvm_hsvc_free(MvmHsvcBuf::empty()) };
+    }
+
+    /// Every `host.kv.*` method reaches the store rather than falling through
+    /// to the unknown-method arm.
+    ///
+    /// `dispatch_on` is a hardcoded match, not a generic passthrough, so an
+    /// arm that is missing produces a *method* failure. On a host with no
+    /// vsock every call fails at the dial before dispatch is reached, which is
+    /// why this drives the mock broker directly instead of the FFI entry
+    /// point — the transport error there would hide a missing arm.
+    #[test]
+    fn every_kv_method_routes_to_the_store() {
+        for (method, request, reply) in [
+            (
+                "host.kv.get",
+                serde_json::json!({"key": "k"}),
+                serde_json::json!({"value": [1, 2, 3]}),
+            ),
+            (
+                "host.kv.put",
+                serde_json::json!({"key": "k", "value": [1]}),
+                serde_json::json!({"replaced": false}),
+            ),
+            (
+                "host.kv.delete",
+                serde_json::json!({"key": "k"}),
+                serde_json::json!({"removed": true}),
+            ),
+            (
+                "host.kv.list",
+                serde_json::json!({"prefix": "k"}),
+                serde_json::json!({"keys": ["k"]}),
+            ),
+        ] {
+            let (mut client, server) = UnixStream::pair().unwrap();
+            let captured = Arc::new(Mutex::new(None));
+            let reply_for_thread = reply.clone();
+            let handle = serve_once(server, captured.clone(), move |call| ServiceResponse::Ok {
+                correlation_id: call.correlation_id.clone(),
+                payload: reply_for_thread,
+            });
+
+            let body = serde_json::to_vec(&request).unwrap();
+            let outcome = dispatch_on(&mut client, method, &body);
+            handle.join().unwrap();
+
+            assert_eq!(
+                outcome.status,
+                MVM_HSVC_OK,
+                "{method} did not route: {}",
+                String::from_utf8_lossy(&outcome.body)
+            );
+            let call = captured.lock().unwrap().take().unwrap();
+            assert_eq!(call.service.as_str(), "host.kv.v1", "{method}");
+            // The guest never names its own namespace on the wire.
+            assert!(call.payload.get("workload_id").is_none(), "{method}");
+        }
+    }
+
+    /// A method with no arm fails as a *method* problem, which is what makes
+    /// the assertion above meaningful rather than vacuous.
+    #[test]
+    fn an_unknown_method_is_not_routed() {
+        let (mut client, _server) = UnixStream::pair().unwrap();
+        let outcome = dispatch_on(&mut client, "host.kv.truncate", b"{}");
+        assert_ne!(outcome.status, MVM_HSVC_OK);
     }
 }

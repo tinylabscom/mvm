@@ -26,8 +26,9 @@ pub(super) use parse::{
     materialize_disk_volume, parse_port_spec, parse_volume_spec, vm_volume_from_spec_validated,
 };
 pub(super) use resolve::{
-    ManifestArgRef, egress_enforcement_label, resolve_effective_hypervisor, resolve_flake_ref,
-    resolve_manifest_arg, resolve_run_network_policy,
+    ManifestArgRef, egress_enforcement_label, parse_peer_binding, resolve_effective_hypervisor,
+    resolve_flake_ref, resolve_manifest_arg, resolve_run_network_policy,
+    resolve_run_network_policy_with_peers,
 };
 pub(super) use start::VmStartParams;
 pub(super) use state::{CHILD_PIDS, IN_CONSOLE_MODE};

@@ -5,6 +5,7 @@
 
 pub mod host_assurance_v1;
 pub mod host_audit_v1;
+pub mod host_kv_v1;
 pub mod host_time_v1;
 
 use std::sync::Arc;
@@ -12,6 +13,7 @@ use std::sync::Arc;
 use mvm_core::protocol::broker::ServiceId;
 
 use self::host_assurance_v1::HostAssuranceV1Handler;
+use self::host_kv_v1::HostKvV1Handler;
 use self::host_time_v1::HostTimeV1Handler;
 use super::registry::Registry;
 
@@ -35,6 +37,12 @@ pub fn register_bound_handlers(registry: &mut Registry, bindings: &[ServiceId]) 
     let host_time = ServiceId::parse("host.time.v1").expect("host.time.v1 is a valid ServiceId");
     if bindings.contains(&host_time) {
         registry.register(Arc::new(HostTimeV1Handler::new()));
+    }
+
+    let host_kv =
+        ServiceId::parse(host_kv_v1::HOST_KV_SERVICE).expect("host.kv.v1 is a valid ServiceId");
+    if bindings.contains(&host_kv) {
+        registry.register(Arc::new(HostKvV1Handler::new()));
     }
 
     let host_assurance = ServiceId::parse(host_assurance_v1::HOST_ASSURANCE_SERVICE)

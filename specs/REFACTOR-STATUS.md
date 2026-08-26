@@ -495,6 +495,23 @@ for detailed scope and acceptance criteria.
 
 ## In-flight plans
 
+- [ ] **Workload service plane**
+      (`specs/plans/2026-08-25-workload-service-plane.md`). Three workstreams
+      taken from a 2026-08-25 survey of a commercial enterprise
+      application-platform vendor, scoped deliberately as depth on existing
+      seams rather than new API surface -- the survey's main finding was that
+      `mvmd` already carries 143 gateway route modules (~90k lines) of which
+      only six touch provisioning at all. WS-A: workload-to-workload addressing
+      by name, resolved host-side in front of the two existing
+      `EgressGate::decide_request` call sites, so no guest NIC appears and
+      claim 10 still covers east-west. WS-B: a key-value store as a broker
+      handler beside `host_time_v1`, inheriting binding-gated dispatch and the
+      no-raw-secret channel property. WS-C: catalog entries gain a bound
+      workload shape and a run edge through the existing `synthesize_plan`
+      admission path. Not started; WS-C task C-4 depends on WS-A and WS-B
+      bindings. A repository-to-signed-workload generator is noted as an
+      unscheduled follow-up in `specs/SPRINT.md`.
+
 - [x] **Execution-receipt evidence archive**
       (`specs/plans/2026-08-22-execution-receipt-evidence-archive.md`,
       implementation plan `…-implementation.md`, ADR-110).

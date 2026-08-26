@@ -79,6 +79,7 @@ pub mod host_audit;
 /// In-guest `host.cost.v1` typed methods: `workload` / `tenant` spend queries
 /// over the broker transport.
 pub mod host_cost;
+pub mod host_kv;
 /// In-guest `host.time.v1` typed method: `now` host wall-clock query over the
 /// broker transport.
 pub mod host_time;
