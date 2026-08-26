@@ -17,6 +17,15 @@ for detailed scope and acceptance criteria.
 
 ## Completed issue closeouts
 
+- [x] **Issue #2874 — scheduled Security peer-policy mutation witness.**
+      `NetworkPolicy::peers()` now has a focused witness that distinguishes
+      both policy variants carrying an admitted peer from the deny-all empty
+      default. The exact surviving empty-slice mutant from Security run
+      32931995875 is caught; the second generated replacement is unviable.
+      Issue #2875 remains open as the scheduled-evidence tracker until the next
+      scheduled Security run records the repaired lane. See
+      `specs/sprint/delivery/2874-security-peer-policy-witness.md`.
+
 - [x] **Issues #2841 and #2842 — scheduled security evidence is executable.**
       Sealed-production policy witnesses now follow the refactored agent
       modules and the `mvm-contract` source of truth. A contributor-checkout
