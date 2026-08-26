@@ -546,9 +546,16 @@ docs-publish:
 demo-build:
     ./web/mvm-demo/build.sh
 
+# Build the weblinux demo assets (requires Linux builder)
+weblinux-demo-build:
+    ./web/weblinux-demo/build.sh
+
 # Stage the /demo assets only if they're missing; `just demo-build` forces a rebuild
 demo-assets:
     [ -d public/public/demo ] || just demo-build
+
+# Build all demo assets (wasm + weblinux); requires Linux for weblinux
+demo-build-all: demo-build weblinux-demo-build
 
 # ── VMM setup ────────────────────────────────────────────────────────────
 
