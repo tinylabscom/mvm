@@ -109,19 +109,37 @@ echo "==> Rust library seam (mvm-client, in-process)"
 KERNEL="$(find "$E2E_HOME/cache/builder-vm" -name vmlinux -path '*workload*' 2>/dev/null | head -1 || true)"
 ROOTFS="$(find "$E2E_HOME/cache/oci/rootfs" -name rootfs.ext4 2>/dev/null | head -1 || true)"
 
-if [[ -n "$KERNEL" && -n "$ROOTFS" ]]; then
-  echo "    kernel: $KERNEL"
-  echo "    rootfs: $ROOTFS"
+# The supervisor is not in `target/<profile>/`. mvmctl's build script puts it in
+# a nested aux-helper target dir, and `aux_bin::resolve` finds it from the
+# *mvmctl* exe's neighbourhood — which a `cargo test -p mvm-client` binary is
+# not in. Without this the seam fails with "mvm-hvf-supervisor not found",
+# which reads as a missing build rather than a lookup that cannot reach it.
+#
+# Absolute, and scoped to the debug profile: the test binaries are debug, and a
+# release supervisor here fails as "not a file" once the test's own working
+# directory differs from this script's.
+SUPERVISOR="$(cd "$REPO" && find "$TARGET_DIR/debug" -type f -name mvm-hvf-supervisor \
+  -path '*aux-helper-target*' 2>/dev/null | head -1 || true)"
+[[ -n "$SUPERVISOR" ]] && SUPERVISOR="$REPO/$SUPERVISOR"
+
+if [[ -n "$KERNEL" && -n "$ROOTFS" && -n "$SUPERVISOR" ]]; then
+  echo "    kernel:     $KERNEL"
+  echo "    rootfs:     $ROOTFS"
+  echo "    supervisor: $SUPERVISOR"
   MVM_E2E_KERNEL="$KERNEL" \
   MVM_E2E_ROOTFS="$ROOTFS" \
+  MVM_HVF_SUPERVISOR_PATH="$SUPERVISOR" \
   MVM_HOME="$E2E_HOME" \
     ./scripts/cargo-fast.sh test -p mvm-client --test launch_lifecycle_live \
       --test launch_lifecycle_live_hvf -- --ignored
 else
   # Loud, not silent: a skipped library seam is a coverage hole, and reporting
   # it as nothing is how the last one stayed open.
-  echo "!!! SKIPPED the Rust library seam: no workload kernel and/or OCI rootfs" >&2
-  echo "!!! under $E2E_HOME. Run a `machine run --image alpine` first." >&2
+  echo "!!! SKIPPED the Rust library seam. Missing:" >&2
+  [[ -z "$KERNEL" ]]     && echo "!!!   workload kernel under $E2E_HOME/cache/builder-vm" >&2
+  [[ -z "$ROOTFS" ]]     && echo "!!!   OCI rootfs under $E2E_HOME/cache/oci/rootfs" >&2
+  [[ -z "$SUPERVISOR" ]] && echo "!!!   mvm-hvf-supervisor under $TARGET_DIR" >&2
+  echo "!!! A skipped seam is a coverage hole, not a pass." >&2
   exit 1
 fi
 
