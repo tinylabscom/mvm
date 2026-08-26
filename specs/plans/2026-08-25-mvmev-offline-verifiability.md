@@ -130,6 +130,17 @@ the workload did".
 - [ ] **4.4 Surface the transcript root on the receipt.** As an extension key
       alongside `mvm.audit_root`, so a receipt lifted out of an archive still
       names the transcript it belongs to.
+- [ ] **4.7 Close the unchained-console gap.** The vsock path has two blind
+      windows by construction -- nothing before the guest agent starts, nothing
+      after it dies (`crates/mvm-hostd/src/stream/console_source.rs:6-11`). The
+      always-on console follower covers both, but the console file is
+      *unchained*: `plane.rs:26` contrasts it with the chained transcript, and
+      `logs.rs:14` renders a console-only read as "no channel separation, no
+      hash chain". So the boot and post-mortem window -- the forensically
+      interesting one -- is the part with no integrity chain. Decide whether
+      console-sourced records enter the chained transcript, or whether the
+      console capture gets its own sealed root.
+
 - [ ] **4.5 Tests.** Anchor emitted on seal; anchor emitted on replayed seal and
       distinguishable from a live one; label set pinned exhaustively so a future
       label carrying payload bytes fails, mirroring
@@ -137,9 +148,47 @@ the workload did".
 - [ ] **4.6 Run gates.** `just fmt-check`, `just clippy`, `just check-gated`,
       `cargo nextest run --workspace`, `just test-doc`, and the xtask gates.
 
+## Workstream 5 -- Operationalize the Merkle log
+
+**Priority:** P1. The tree is built correctly; the append-only machinery around
+it is implemented and unused.
+
+Construction is sound and non-obviously so: leaves are verbatim `SignedEnvelope`
+lines (`crates/mvm-hostd/src/audit/merkle.rs:11-18`), no root is built over a
+chain that does not verify, and `read_leaves` spans the whole segment set rather
+than the active segment (`merkle.rs:48-62`) so leaf indices stay globally
+ordered across rotation -- the property every previously issued inclusion proof
+rests on. What is missing is everything that would make the append-only property
+observable.
+
+- [ ] **5.1 Wire consistency proofs.** `build_consistency_proof` /
+      `verify_consistency` (`crates/mvm-contract/src/merkle.rs:555,623`) are full
+      RFC 6962 and unit-tested, with zero production callers anywhere outside the
+      module. Nothing in the audit pipeline, the CLI, or the archive builds or
+      checks one.
+- [ ] **5.2 Publish roots at execution boundaries.** `publish_root`
+      (`crates/mvm-hostd/src/audit/emitter.rs:1131`) has one caller, the manual
+      `mvmctl trust audit publish-root` verb. Without roots published at
+      admission and exit there is no sequence of roots to run 5.1 against.
+- [ ] **5.3 Decide the off-host witness.** `merkle.rs:70-87` states the limit
+      directly: a consistency proof relates two roots the caller already holds,
+      and a host-signed root stored beside the log it attests carries no
+      tamper-evidence against that host. Detection needs somewhere the host
+      cannot rewrite a root. Choose a mechanism or record that this is
+      accepted, with the detection window stated.
+- [ ] **5.4 Carry a per-execution index into the tenant tree.** The tree is
+      per-tenant; tracing one run means filtering by `plan_id` via
+      `mvmctl trust audit show`. Decide whether a receipt should cite its own
+      leaf range so a verifier can bound one execution without scanning.
+- [ ] **5.5 Tests.** A consistency proof across a rotation boundary; a refused
+      proof on a rewritten prefix; roots published at both boundaries.
+
 ## Open questions
 
 - Should the manifest carry a canonicalization identifier, so a future change is
   detectable by a verifier rather than silent? (WS1)
 - Does `Ephemeral` retention need an explicit chain entry recording that no
   transcript exists, so absence is attested rather than merely absent? (WS4)
+- Is tail truncation worth addressing, or is it accepted? `merkle.rs:95` says
+  it is undetectable today and that the consistency machinery does not change
+  that. (WS5)
