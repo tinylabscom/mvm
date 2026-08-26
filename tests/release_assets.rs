@@ -112,8 +112,12 @@ fn the_release_job_attaches_the_sdk_sidecar_assets() {
         boot_image.contains("  sdk-sidecar-image:"),
         "release-boot-image.yml must define the sdk-sidecar-image job"
     );
+    let publish_needs = job_block(&boot_image, "publish-boot-image")
+        .lines()
+        .find(|line| line.trim_start().starts_with("needs:"))
+        .expect("the boot image publish job must declare its dependencies");
     assert!(
-        boot_image.contains("sdk-sidecar-image, default-microvm]"),
+        publish_needs.contains("sdk-sidecar-image"),
         "the boot image publish job must declare the sdk-sidecar-image job in its needs"
     );
     // Both releases attach it for now: the download side still composes its URL
@@ -568,6 +572,61 @@ fn pages_workflow_installs_every_wasm_target_used_by_the_demo() {
     assert!(
         workflow.contains("targets: wasm32-unknown-unknown, wasm32-wasip1"),
         "pages.yml must install both the browser and guest WASM targets"
+    );
+}
+
+#[test]
+fn qemu_wasm_site_pack_is_built_once_on_the_boot_image_train() {
+    let boot_image = boot_image_workflow();
+    let pages = pages_workflow();
+    let publish_needs = job_block(&boot_image, "publish-boot-image")
+        .lines()
+        .find(|line| line.trim_start().starts_with("needs:"))
+        .expect("the boot image publish job must declare its dependencies");
+
+    assert!(
+        boot_image.contains("\n  qemu-wasm-site-pack:\n"),
+        "release-boot-image.yml must build the browser QEMU pack on the boot-image tag"
+    );
+    assert!(
+        boot_image.contains("nix build ./nix#qemu-wasm-smoke-pack"),
+        "the boot-image workflow must build the QEMU-WASM pack from the tagged tree"
+    );
+    assert!(
+        publish_needs.contains("qemu-wasm-site-pack"),
+        "the boot-image release must wait for the QEMU-WASM pack before publishing"
+    );
+    for asset in [
+        "qemu-wasm-smoke-pack.tar.gz",
+        "qemu-wasm-smoke-pack.tar.gz.sha256",
+        "qemu-wasm-smoke-pack.tar.gz.sha256.bundle",
+    ] {
+        assert!(
+            boot_image.contains(asset),
+            "the boot-image release must publish {asset} for site deployments"
+        );
+        assert!(
+            pages.contains(asset),
+            "pages.yml must download and verify {asset} instead of rebuilding QEMU"
+        );
+    }
+    assert!(
+        !pages.contains("nix build ./nix#qemu-wasm-smoke-pack"),
+        "site deployment must not rebuild the tagged QEMU-WASM pack"
+    );
+    assert!(
+        !pages.contains("nix-installer-action"),
+        "site deployment no longer needs Nix once the QEMU-WASM pack is released"
+    );
+    assert!(
+        pages.contains("cosign verify-blob")
+            && pages.contains("release-boot-image.yml@refs/tags/boot-image/v.*")
+            && pages.contains("sha256sum -c qemu-wasm-smoke-pack.tar.gz.sha256"),
+        "site deployment must verify the tag-built pack's release identity"
+    );
+    assert!(
+        pages.contains("./web/weblinux-demo/build.sh qemu-wasm-smoke-pack"),
+        "site deployment must stage the verified pack with the current demo shell"
     );
 }
 

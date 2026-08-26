@@ -56,17 +56,38 @@ jobs:
       - name: Install binaryen (wasm-opt)
         run: sudo apt-get update && sudo apt-get install -y binaryen
 
-      - name: Install nix
-        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
-        with:
-          determinate: false
-          extra-conf: |
-            extra-system-paths = /usr/bin
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
 
-      - name: Build weblinux demo assets
+      - name: Download verified WebLinux runtime pack
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          COSIGN_IDENTITY_REGEXP: "^https://github.com/${{ github.repository }}/.github/workflows/release-boot-image.yml@refs/tags/boot-image/v.*$"
+          COSIGN_OIDC_ISSUER: "https://token.actions.githubusercontent.com"
         run: |
-          nix build ./nix#qemu-wasm-smoke-pack
-          ./web/weblinux-demo/build.sh result
+          set -euo pipefail
+          BOOT_TAG="$(gh release list --repo "${GITHUB_REPOSITORY}" --limit 100 \
+            --json tagName --jq -r '
+              [ .[].tagName
+                | select(test("^boot-image/v[0-9]+\\.[0-9]+\\.[0-9]+$"))
+                | {tag: ., v: (ltrimstr("boot-image/v") | split(".") | map(tonumber))} ]
+              | sort_by(.v) | last | .tag // empty')"
+          if [ -z "${BOOT_TAG}" ]; then
+            echo "::error::no boot-image/v* release contains the WebLinux runtime pack" >&2
+            exit 1
+          fi
+          gh release download "${BOOT_TAG}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --pattern 'qemu-wasm-smoke-pack.tar.gz*'
+          cosign verify-blob \
+            --bundle qemu-wasm-smoke-pack.tar.gz.sha256.bundle \
+            --certificate-identity-regexp "${COSIGN_IDENTITY_REGEXP}" \
+            --certificate-oidc-issuer "${COSIGN_OIDC_ISSUER}" \
+            qemu-wasm-smoke-pack.tar.gz.sha256
+          sha256sum -c qemu-wasm-smoke-pack.tar.gz.sha256
+          mkdir qemu-wasm-smoke-pack
+          tar -xzf qemu-wasm-smoke-pack.tar.gz -C qemu-wasm-smoke-pack
+          ./web/weblinux-demo/build.sh qemu-wasm-smoke-pack
 
       - name: Build wasm demo
         working-directory: web/mvm-demo

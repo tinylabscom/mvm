@@ -735,9 +735,41 @@ jobs:
             staging/default-microvm-${{ matrix.arch }}.sbom.txt
             staging/default-microvm-${{ matrix.arch }}-checksums-sha256.txt
 
+  # Browser QEMU is an immutable runtime pack, not a website build input. Build
+  # it on the boot-image release cadence so a docs-only publish only downloads
+  # and verifies these bytes instead of compiling QEMU through Emscripten again.
+  qemu-wasm-site-pack:
+    if: ${{ github.event_name == 'push' || github.event.inputs.dry_run == 'false' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
+
+      - name: Build QEMU-WASM browser pack
+        run: |
+          set -euo pipefail
+          nix build ./nix#qemu-wasm-smoke-pack
+          mkdir -p staging
+          tar -C result -czf staging/qemu-wasm-smoke-pack.tar.gz .
+          (
+            cd staging
+            sha256sum qemu-wasm-smoke-pack.tar.gz \
+              > qemu-wasm-smoke-pack.tar.gz.sha256
+          )
+
+      - name: Upload QEMU-WASM browser pack
+        uses: actions/upload-artifact@v7
+        with:
+          name: qemu-wasm-site-pack
+          path: |
+            staging/qemu-wasm-smoke-pack.tar.gz
+            staging/qemu-wasm-smoke-pack.tar.gz.sha256
+
   publish-boot-image:
-    needs: [builder-vm-image, runtime-overlay-image, sdk-sidecar-image, default-microvm]
-    # `!cancelled()` rather than plain success: the four image jobs are
+    needs: [builder-vm-image, runtime-overlay-image, sdk-sidecar-image, default-microvm, qemu-wasm-site-pack]
+    # `!cancelled()` rather than plain success: the five image jobs are
     # independent artifacts and one arch's Nix build failing must not strand
     # the others, exactly as it does not strand the binary release next door.
     # It reaches this job so the completeness check below can name every
@@ -788,6 +820,7 @@ jobs:
           for blob in \
             artifacts/runtime-overlay-*.tar.gz \
             artifacts/sdk-sidecar-*.tar.gz \
+            artifacts/qemu-wasm-smoke-pack.tar.gz.sha256 \
             artifacts/builder-vm-*-checksums-sha256.txt \
             artifacts/default-microvm-*-checksums-sha256.txt; do
             cosign sign-blob \
@@ -824,6 +857,11 @@ jobs:
               [ -s "artifacts/${f}" ] || missing+=("${f}")
             done
           done
+          for f in \
+            qemu-wasm-smoke-pack.tar.gz \
+            qemu-wasm-smoke-pack.tar.gz.sha256; do
+            [ -s "artifacts/${f}" ] || missing+=("${f}")
+          done
           if [ ${#missing[@]} -gt 0 ]; then
             echo "::error::boot image release is incomplete — refusing to publish. Missing: ${missing[*]}" >&2
             echo "Re-run the failed image job(s); the successful ones are already uploaded as run artifacts." >&2
@@ -857,6 +895,9 @@ jobs:
             artifacts/sdk-sidecar-*.tar.gz
             artifacts/sdk-sidecar-*.tar.gz.sha256
             artifacts/sdk-sidecar-*.tar.gz.bundle
+            artifacts/qemu-wasm-smoke-pack.tar.gz
+            artifacts/qemu-wasm-smoke-pack.tar.gz.sha256
+            artifacts/qemu-wasm-smoke-pack.tar.gz.sha256.bundle
             artifacts/default-microvm-vmlinux-*
             artifacts/default-microvm-rootfs-*
             artifacts/default-microvm-meta-*
