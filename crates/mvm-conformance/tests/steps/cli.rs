@@ -223,15 +223,13 @@ pub(crate) fn run_mvmctl_isolated_live_home(world: &mut CliWorld, args: String) 
 /// guarantees the fixture exists before this scenario is selected.
 #[when(expr = "I install the bundle fixture")]
 fn install_bundle_fixture(world: &mut CliWorld) {
+    trust_the_fixture_publisher(world);
     let fixture = crate::bundle_fixture_path()
         .expect("`@bundle` scenarios only run when MVM_BDD_BUNDLE names a real file");
-    if world.isolated_home.is_none() {
-        world.isolated_home = Some(tempfile::tempdir().expect("create isolated MVM_HOME"));
-    }
     let home = world
         .isolated_home
         .as_ref()
-        .expect("isolated home is set above");
+        .expect("isolated home is set by trust_the_fixture_publisher");
     let output = mvmctl_command()
         .current_dir(workspace_root())
         .args(["bundle", "install"])
@@ -738,5 +736,75 @@ fn generated_project_contains_file(world: &mut CliWorld, file: String) {
     assert!(
         path.is_file(),
         "expected generated project to contain {file:?} at {path:?}"
+    );
+}
+
+/// Enrol the fixture's publisher key into the scenario's isolated trust store.
+///
+/// A bundle installs into a fresh `MVM_HOME`, whose trust store starts empty,
+/// and `read_and_verify_bundle` refuses an unknown `key_id` — correctly, that
+/// is claim 9. So an install scenario has to establish the trust anchor first,
+/// exactly as an operator adopting a publisher does.
+fn trust_the_fixture_publisher(world: &mut CliWorld) {
+    if world.isolated_home.is_none() {
+        world.isolated_home = Some(tempfile::tempdir().expect("create isolated MVM_HOME"));
+    }
+    let home = world
+        .isolated_home
+        .as_ref()
+        .expect("isolated home is set above");
+    let pubkey = crate::bundle_pubkey_path()
+        .expect("`@bundle` scenarios only run when MVM_BDD_BUNDLE_PUBKEY names a real file");
+    let output = mvmctl_command()
+        .current_dir(workspace_root())
+        .args(["trust", "add"])
+        .arg(&pubkey)
+        .env("HOME", home.path())
+        .env("MVM_HOME", home.path())
+        .output()
+        .expect("failed to spawn mvmctl trust add");
+    assert!(
+        output.status.success(),
+        "enrolling the fixture publisher failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// Install the fixture into a home that has *not* enrolled its publisher.
+#[when(expr = "I install the bundle fixture without trusting its publisher")]
+fn install_bundle_fixture_untrusted(world: &mut CliWorld) {
+    let fixture = crate::bundle_fixture_path()
+        .expect("`@bundle` scenarios only run when MVM_BDD_BUNDLE names a real file");
+    if world.isolated_home.is_none() {
+        world.isolated_home = Some(tempfile::tempdir().expect("create isolated MVM_HOME"));
+    }
+    let home = world
+        .isolated_home
+        .as_ref()
+        .expect("isolated home is set above");
+    world.last_run = Some(
+        mvmctl_command()
+            .current_dir(workspace_root())
+            .args(["bundle", "install"])
+            .arg(&fixture)
+            .env("HOME", home.path())
+            .env("MVM_HOME", home.path())
+            .output()
+            .expect("failed to spawn mvmctl"),
+    );
+}
+
+#[then(expr = "the failure names the untrusted publisher key")]
+fn failure_names_untrusted_key(world: &mut CliWorld) {
+    let run = world.last_run.as_ref().expect("a command has run");
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert!(
+        text.contains("trust store has no entry for key_id"),
+        "refusal must say the publisher is untrusted, not fail for some other \
+         reason; output was:\n{text}"
     );
 }
