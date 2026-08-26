@@ -479,7 +479,7 @@ Run a Sandbox script as an admission-only plan check or against a real VM:
 
 ```bash
 mvmctl run --mode plan ./script.py     # synthesize + sign + admit, no boot
-mvmctl run --mode live ./script.py     # boot a real microVM and execute
+mvmctl run --mode live --profile dev ./script.py  # explicitly enable dev-only Sandbox verbs
 ```
 
 Interactive surfaces (`exec`, `commands.start`, `console`) are **dev-tier only**;

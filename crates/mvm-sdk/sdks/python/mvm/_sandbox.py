@@ -75,7 +75,11 @@ from mvm._cli import MVM_CLI_BIN_ENV, cli_resolution_hint, resolve_cli_bin
 from mvm._dsl import literal as _literal_value
 # Owned by the Rust registry (crates/mvm-sdk/src/env.rs), generated into
 # `_env/vars.py`. Re-exported from this module for existing importers.
-from mvm._env.vars import MVM_SDK_MODE_ENV, MVM_SDK_OUT_PATH_ENV
+from mvm._env.vars import (
+    MVM_SDK_MODE_ENV,
+    MVM_SDK_OUT_PATH_ENV,
+    MVM_SDK_RUN_PROFILE_ENV,
+)
 from mvm._runtime.runtime import (
     RuntimeFsEntry,
     RuntimeFsStat,
@@ -84,6 +88,7 @@ from mvm._runtime.runtime import (
 __all__ = [
     "DEFAULT_TTL_SECONDS",
     "MVM_CLI_BIN_ENV",
+    "MVM_SDK_RUN_PROFILE_ENV",
     "ExecResult",
     "FsEntry",
     "FsStat",
@@ -762,6 +767,15 @@ class _LiveTransport:
         if not ports:
             argv.append("-d")
         argv.extend(["--up-json", "--name", vm_id])
+        profile = os.environ.get(MVM_SDK_RUN_PROFILE_ENV)
+        if profile is not None:
+            profile = profile.strip().lower()
+            if profile not in {"restrictive", "standard", "dev", "permissive"}:
+                raise SandboxModeError(
+                    f"{MVM_SDK_RUN_PROFILE_ENV}={profile!r} is invalid — expected one of: "
+                    "restrictive, standard, dev, permissive"
+                )
+            argv.extend(["--profile", profile])
         argv.extend(["--manifest" if source_kind == "manifest" else "--image", source])
         argv.extend(create_args)
         argv.extend(["--ttl", f"{ttl_seconds}s"])

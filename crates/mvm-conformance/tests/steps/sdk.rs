@@ -229,6 +229,9 @@ fn run_live_fixture(
     if language.eq_ignore_ascii_case("python") {
         command.env("PYTHONPATH", repo_root().join("crates/mvm-sdk/sdks/python"));
     }
+    if build_mode == "dev" {
+        command.env(mvm_sdk::env::MVM_SDK_RUN_PROFILE_ENV, "dev");
+    }
     let output = command
         .current_dir(repo_root())
         .arg(&script)

@@ -41,10 +41,12 @@ def _isolate() -> None:
     mvm.reset_recording()
     os.environ.pop("MVM_SDK_MODE", None)
     os.environ.pop("MVM_CLI_BIN", None)
+    os.environ.pop("MVM_SDK_RUN_PROFILE", None)
     yield
     mvm.reset_recording()
     os.environ.pop("MVM_SDK_MODE", None)
     os.environ.pop("MVM_CLI_BIN", None)
+    os.environ.pop("MVM_SDK_RUN_PROFILE", None)
 
 
 def _write_fixture_mvmctl(
@@ -231,6 +233,48 @@ def test_sandbox_create_live_parses_envelope_and_records_vm(
     assert calls[0].startswith("machine run -d --up-json --name ")
     assert "--manifest python-3.12" in calls[0]
     assert "--ttl" in calls[0]
+
+
+def test_sandbox_create_live_propagates_an_explicit_dev_profile(
+    tmp_path: Path,
+) -> None:
+    script = _write_fixture_mvmctl(
+        tmp_path,
+        up_envelope={
+            "schema_version": 1,
+            "vm_id": "sb-dev-vm",
+            "build_mode": "dev",
+        },
+    )
+    os.environ["MVM_SDK_MODE"] = "live"
+    os.environ["MVM_CLI_BIN"] = str(script)
+    os.environ[mvm.MVM_SDK_RUN_PROFILE_ENV] = "dev"
+
+    mvm.Sandbox.create("python-3.12", workload_id="testwid")
+
+    call = _read_fixture_log(tmp_path)[0]
+    assert "--profile dev" in call
+
+
+def test_sandbox_create_live_rejects_an_unknown_profile_before_boot(
+    tmp_path: Path,
+) -> None:
+    script = _write_fixture_mvmctl(
+        tmp_path,
+        up_envelope={
+            "schema_version": 1,
+            "vm_id": "unused",
+            "build_mode": "dev",
+        },
+    )
+    os.environ["MVM_SDK_MODE"] = "live"
+    os.environ["MVM_CLI_BIN"] = str(script)
+    os.environ[mvm.MVM_SDK_RUN_PROFILE_ENV] = "unknown"
+
+    with pytest.raises(mvm.SandboxModeError, match="MVM_SDK_RUN_PROFILE"):
+        mvm.Sandbox.create("python-3.12")
+
+    assert _read_fixture_log(tmp_path) == []
 
 
 def test_live_image_boot_lowers_literal_env_allowlist_and_command(tmp_path: Path) -> None:

@@ -175,6 +175,7 @@ When changing the Python SDK in this repo:
 ```sh
 cargo build -p mvm-cli
 export MVM_CLI_BIN="$PWD/target/debug/mvmctl"
+export MVM_SDK_RUN_PROFILE=dev  # explicit opt-in for files/process verbs
 uv venv
 . .venv/bin/activate
 uv pip install -e sdks/python

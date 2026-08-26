@@ -138,12 +138,14 @@ beforeEach(() => {
   mvm.resetRecording();
   delete process.env.MVM_SDK_MODE;
   delete process.env.MVM_CLI_BIN;
+  delete process.env.MVM_SDK_RUN_PROFILE;
 });
 
 afterEach(() => {
   mvm.resetRecording();
   delete process.env.MVM_SDK_MODE;
   delete process.env.MVM_CLI_BIN;
+  delete process.env.MVM_SDK_RUN_PROFILE;
   fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
@@ -320,6 +322,31 @@ describe("Sandbox.create (live mode)", () => {
     expect(calls[0]).toMatch(/^machine run -d --up-json --name /);
     expect(calls[0]).toContain("--manifest python-3.12");
     expect(calls[0]).toContain("--ttl");
+  });
+
+  it("propagates an explicit dev profile", () => {
+    const script = writeFixtureMvmctl({
+      upEnvelope: { schema_version: 1, vm_id: "sb-dev-vm", build_mode: "dev" },
+    });
+    process.env.MVM_SDK_MODE = "live";
+    process.env.MVM_CLI_BIN = script;
+    process.env[mvm.MVM_SDK_RUN_PROFILE_ENV] = "dev";
+
+    mvm.Sandbox.create("python-3.12", { workloadId: "testwid" });
+
+    expect(readFixtureLog()[0]).toContain("--profile dev");
+  });
+
+  it("rejects an unknown profile before boot", () => {
+    const script = writeFixtureMvmctl({
+      upEnvelope: { schema_version: 1, vm_id: "unused", build_mode: "dev" },
+    });
+    process.env.MVM_SDK_MODE = "live";
+    process.env.MVM_CLI_BIN = script;
+    process.env[mvm.MVM_SDK_RUN_PROFILE_ENV] = "unknown";
+
+    expect(() => mvm.Sandbox.create("python-3.12")).toThrow(/MVM_SDK_RUN_PROFILE/);
+    expect(readFixtureLog()).toEqual([]);
   });
 
   it("lowers an image, literal env, allowlist, and boot command", () => {
