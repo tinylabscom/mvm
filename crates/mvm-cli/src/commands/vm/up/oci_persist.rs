@@ -19,7 +19,7 @@ use crate::commands::vm::readiness::record_vm_readiness;
 
 use super::admission::{
     AdmitPlanForBootParams, admit_plan_for_boot_with_ingress, attach_guest_boot_config,
-    emit_failed_if, emit_launched_if, enforce_shares_if, guest_profile_for_boot,
+    emit_failed_if, emit_launched_if, enforce_kernel_if, enforce_shares_if, guest_profile_for_boot,
 };
 use super::policy::shares_from_volume_cfg;
 use super::runtime_source::{
@@ -226,6 +226,7 @@ pub(in crate::commands) fn start_persistent_oci_machine(
             vm_name: name,
             backend_name,
             rootfs_path,
+            kernel_path: Some(std::path::Path::new(&kernel_path)),
             precomputed_image_sha256: None,
             boot_artifact_identity: None,
             cpus,
@@ -306,6 +307,16 @@ pub(in crate::commands) fn start_persistent_oci_machine(
         }
     }
     enforce_shares_if(&admission, &start_config.volumes)?;
+    // Against the config the backend is about to be handed, not the local the
+    // plan was synthesized from — that is what makes this a check rather than a
+    // restatement of what admission already believed.
+    enforce_kernel_if(
+        &admission,
+        start_config
+            .kernel_path
+            .as_deref()
+            .map(std::path::Path::new),
+    )?;
     // VMM selection + workload-support check + start move behind the facade; the
     // admission gate (above) and the launched/failed emits stay here.
     if let Err(err) = mvm_client::start_prepared(backend_name, &start_config) {

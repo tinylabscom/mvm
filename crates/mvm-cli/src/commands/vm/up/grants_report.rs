@@ -123,6 +123,7 @@ mod tests {
             vm_name,
             backend_name: "libkrun",
             rootfs_path: &rootfs,
+            kernel_path: None,
             precomputed_image_sha256: None,
             boot_artifact_identity: None,
             cpus: 2,

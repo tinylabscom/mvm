@@ -1665,7 +1665,14 @@ pub fn resolve_launch(
     // snapshot restore is unavailable for workload admission.
     let t_admission = std::time::Instant::now();
     if let Some(admit_fn) = admit
-        && let Some(sub) = admit_fn(std::path::Path::new(&image.rootfs), &vm_name)?
+        && let Some(sub) = admit_fn(
+            std::path::Path::new(&image.rootfs),
+            start_config
+                .kernel_path
+                .as_deref()
+                .map(std::path::Path::new),
+            &vm_name,
+        )?
     {
         start_config.tenant_id = Some(sub.tenant_id);
         start_config.plan_json = Some(sub.plan_json);
@@ -2222,12 +2229,18 @@ pub struct SessionAuditSubstrate {
     pub config_files: Vec<mvm_core::vm_backend::VmFile>,
 }
 
-/// Admission callback: given the resolved rootfs + the generated vm_name (both
-/// known only inside `boot_session_vm`), produce the audit substrate, or `None`
-/// when the workload declares no secrets. Lives in the caller so admission stays
-/// in the command layer; `boot_session_vm` just applies the result.
-pub type SessionAdmit<'a> =
-    dyn Fn(&std::path::Path, &str) -> Result<Option<SessionAuditSubstrate>> + 'a;
+/// Admission callback: given the resolved rootfs, the kernel that will be
+/// booted, and the generated vm_name (all known only inside `boot_session_vm`),
+/// produce the audit substrate, or `None` when the workload declares no
+/// secrets. Lives in the caller so admission stays in the command layer;
+/// `boot_session_vm` just applies the result.
+///
+/// The kernel rides along for the same reason the rootfs does. A plan that
+/// names the image but not the kernel pins what the workload *is* and nothing
+/// about what confines it, so the callback cannot bind the environment it was
+/// admitted onto unless it is told which kernel that is.
+pub type SessionAdmit<'a> = dyn Fn(&std::path::Path, Option<&std::path::Path>, &str) -> Result<Option<SessionAuditSubstrate>>
+    + 'a;
 
 pub fn boot_session_vm(
     env: &str,
@@ -2305,7 +2318,14 @@ pub fn boot_session_vm(
     // bypasses the endpoint-spawn path. `None` admit ⇒ unchanged legacy path.
     let mut admitted_workload = false;
     if let Some(admit_fn) = admit
-        && let Some(sub) = admit_fn(std::path::Path::new(&rootfs), &vm_name)?
+        && let Some(sub) = admit_fn(
+            std::path::Path::new(&rootfs),
+            start_config
+                .kernel_path
+                .as_deref()
+                .map(std::path::Path::new),
+            &vm_name,
+        )?
     {
         start_config.tenant_id = Some(sub.tenant_id);
         start_config.plan_json = Some(sub.plan_json);
