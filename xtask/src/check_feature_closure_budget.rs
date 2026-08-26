@@ -57,7 +57,10 @@ const BUDGET_TARGET: &str = "x86_64-unknown-linux-gnu";
 ///
 /// 471 (was 470): `async-trait`'s nightly-Clippy compatibility release moves
 /// its compile-time parser to `syn` 3, the same measured +1 as the default tree.
-const FEATURE_CLOSURE_BUDGET: usize = 471;
+///
+/// 483 (was 471): the opt-in `tpm2` attestation provider requires the
+/// `tss-esapi` TPM command stack; the default `mvmctl` closure is unchanged.
+const FEATURE_CLOSURE_BUDGET: usize = 483;
 
 /// The two gates measure nested sets — everything in the default closure is
 /// reachable with all features on — so a feature budget at or below the default
