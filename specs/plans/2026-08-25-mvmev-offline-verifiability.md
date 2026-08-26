@@ -3,7 +3,7 @@
 Backing: preview
 Validation: focused
 
-**Status:** In progress — canonicalization spec + transcript anchoring + Merkle operationalization complete
+**Status:** Complete — every workstream landed; see #2865 (anchoring) and #2882 (the rest)
 **Date:** 2026-08-25
 **Branch:** `feat/mvmev-format-spec`
 **Issue:** #2863
@@ -173,8 +173,10 @@ the workload did".
       distinguishable from a live one; label set pinned exhaustively so a future
       label carrying payload bytes fails, mirroring
       `stream_audit_entries_carry_the_binding_and_no_payload_bytes`.
-- [ ] **4.6 Run gates.** `just fmt-check`, `just clippy`, `just check-gated`,
-      `cargo nextest run --workspace`, `just test-doc`, and the xtask gates.
+- [x] **4.6 Gates green.** CI run 32999330435 on `0623f57e88`: 13 jobs
+      succeeded, 4 skipped by path scope, none failed. The frozen-archive
+      vectors executed on both the x86 and aarch64 workspace lanes rather than
+      only being collected.
 
 ## Workstream 5 -- Operationalize the Merkle log
 

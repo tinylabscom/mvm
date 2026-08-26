@@ -538,7 +538,7 @@ for detailed scope and acceptance criteria.
       without redefining Cargo's built-in registry, and future derivations
       cannot silently restore the API endpoint.
 
-- [ ] **`.mvmev` offline verifiability**
+- [x] **`.mvmev` offline verifiability**
       (`specs/plans/2026-08-25-mvmev-offline-verifiability.md`, issue #2863).
       The format-level gap is complete: schema version 1 now normatively names
       RFC 8785 JCS over integer-only, ASCII JSON; the public reference specifies
