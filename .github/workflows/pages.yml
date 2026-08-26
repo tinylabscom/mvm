@@ -1,4 +1,4 @@
-name: Deploy GitHub Pages
+name: Deploy site to Cloudflare Pages
 
 # Deploys happen when a GitHub Release is published, with manual
 # dispatch available for operator-triggered docs publishes. The
@@ -12,8 +12,7 @@ on:
 
 permissions:
   contents: read
-  pages: write
-  id-token: write
+  deployments: write
 
 concurrency:
   group: pages
@@ -22,8 +21,8 @@ concurrency:
 jobs:
   deploy:
     environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
+      name: cloudflare-pages
+      url: ${{ steps.deployment.outputs.deployment-url }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -81,14 +80,12 @@ jobs:
         working-directory: public
         run: pnpm build
 
-      - name: Setup Pages
-        uses: actions/configure-pages@v5
-
-      - name: Upload artifact
-        uses: actions/upload-pages-artifact@v4
-        with:
-          path: public/dist
-
-      - name: Deploy to GitHub Pages
+      - name: Deploy to Cloudflare Pages
         id: deployment
-        uses: actions/deploy-pages@v4
+        uses: cloudflare/wrangler-action@v4
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          # Create a Cloudflare Pages project named `mvm` (or change this).
+          command: pages deploy public/dist --project-name=mvm --branch=main
+          gitHubToken: ${{ secrets.GITHUB_TOKEN }}

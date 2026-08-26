@@ -1,0 +1,6 @@
+# Cross-origin isolation headers for the WebLinux browser demo.
+# QEMU-Wasm uses pthreads, which require SharedArrayBuffer; browsers only
+# expose SharedArrayBuffer in a cross-origin-isolated context.
+/demo/weblinux/*
+  Cross-Origin-Opener-Policy: same-origin
+  Cross-Origin-Embedder-Policy: require-corp
