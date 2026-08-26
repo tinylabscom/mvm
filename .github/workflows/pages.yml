@@ -66,7 +66,7 @@ jobs:
 
       - name: Build weblinux demo assets
         run: |
-          nix build .#qemu-wasm-smoke-pack
+          nix build ./nix#qemu-wasm-smoke-pack
           ./web/weblinux-demo/build.sh result
 
       - name: Build wasm demo
