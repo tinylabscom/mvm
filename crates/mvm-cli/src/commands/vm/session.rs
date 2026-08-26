@@ -11,7 +11,7 @@
 //! v1 ships the table + the verbs. Sessions are populated by
 //! `crate::exec::boot_session_vm` (which now registers an entry per
 //! booted VM) and removed by `tear_down_session_vm` (which marks
-//! `state = Killed` for human-initiated `mvmctl session kill` calls or
+//! `state = Killed` for human-initiated `mvmctl machine session kill` calls or
 //! removes the file on graceful exit). Because `mvmctl invoke` today
 //! still boots-and-tears-down per call, sessions are short-lived; the
 //! warm-process pool path is what keeps a session materialised across
@@ -430,7 +430,7 @@ fn emit_stale_warnings(sessions: &[mvm_core::session::SessionRecord]) {
     if !long_lived_dev.is_empty() {
         eprintln!(
             "[mvm] WARN: {} long-lived dev session(s) older than 1 hour — \
-             check `mvmctl session info <id>` and consider `mvmctl session kill`:",
+             check `mvmctl machine session info <id>` and consider `mvmctl machine session kill`:",
             long_lived_dev.len()
         );
         for r in long_lived_dev {
@@ -500,7 +500,7 @@ fn cmd_set_timeout(args: SetTimeoutArgs) -> Result<()> {
         bail!(
             "--seconds {} exceeds the {}s hard ceiling (24h). \
              Long-running sessions are a foot-gun: extend periodically with \
-             repeated `mvmctl session set-timeout` calls, or split work \
+             repeated `mvmctl machine session set-timeout` calls, or split work \
              across shorter-lived sessions.",
             args.seconds,
             MAX_IDLE_TIMEOUT_SECS
@@ -728,7 +728,7 @@ fn cmd_attach(args: AttachArgs) -> Result<()> {
     })?;
 
     // Bump the session's invoke counter / last-used timestamp so
-    // observers (`mvmctl session info`) see the activity.
+    // observers (`mvmctl machine session info`) see the activity.
     if let Err(e) = session::update_session(&id, |r| {
         r.invoke_count = r.invoke_count.saturating_add(1);
         r.last_invoke_at = Some(rfc3339_now());
@@ -978,7 +978,7 @@ fn cmd_start(args: StartArgs) -> Result<()> {
     if args.idle_timeout > MAX_IDLE_TIMEOUT_SECS {
         bail!(
             "--idle-timeout {} exceeds the {}s hard ceiling (24h). \
-             Use `mvmctl session set-timeout` to extend periodically \
+             Use `mvmctl machine session set-timeout` to extend periodically \
              instead of opting in to an unbounded keepalive.",
             args.idle_timeout,
             MAX_IDLE_TIMEOUT_SECS

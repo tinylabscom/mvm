@@ -10,6 +10,7 @@
 
 pub mod claims;
 pub mod doc_examples;
+pub mod source_commands;
 
 /// Cucumber tag for a scenario whose steps aren't implemented yet; always skipped.
 pub const PENDING_TAG: &str = "wip";

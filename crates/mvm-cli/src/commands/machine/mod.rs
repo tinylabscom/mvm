@@ -1248,7 +1248,7 @@ fn load_machine_manifest_source(arg: &Path) -> Result<MachineManifestSource> {
         .with_context(|| format!("reading machine manifest {}", manifest_path.display()))?;
     let workflow = manifest.machine_workflow().ok_or_else(|| {
         anyhow!(
-            "machine create --manifest requires an image-backed manifest; flake-backed manifests belong to `mvmctl up`"
+            "machine create --manifest requires an image-backed manifest; flake-backed manifests belong to `mvmctl machine run --flake`"
         )
     })?;
     let base_dir = manifest_path

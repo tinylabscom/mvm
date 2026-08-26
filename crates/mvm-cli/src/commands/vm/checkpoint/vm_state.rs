@@ -38,8 +38,8 @@ pub(super) fn resolve_quiesced_vm_rootfs(name: &str) -> Result<PathBuf> {
         if !path.exists() {
             bail!(
                 "fs_quick checkpoint needs the VM's rootfs ({}), which is no longer \
-                 on disk. Pause instead of stopping: `mvmctl vm pause {name}`, \
-                 checkpoint, then `mvmctl vm resume {name}` — or use \
+                 on disk. Pause instead of stopping: `mvmctl machine pause {name}`, \
+                 checkpoint, then `mvmctl machine resume {name}` — or use \
                  `--class vm-full` on a running VM.",
                 path.display()
             );

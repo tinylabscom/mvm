@@ -494,3 +494,89 @@ reason = "the addon CLI is unbuilt; the migration guide says 'once the addon CLI
 [[absent]]
 path = "exec"
 reason = "the bare verb was merged into `run`; the CLI reference records the merge in the past tense"
+
+# `mvmctl …` phrases in CLI strings that are English, not invocations. Declared
+# rather than guessed at: every heuristic for telling prose from a command was
+# wrong in one direction or the other, and the worst — "is the first word a real
+# verb?" — drops exactly the strings that name a removed verb, which is the
+# defect this check exists to find.
+
+[[prose]]
+text = "mvmctl inside your"
+reason = "\"...the mvmctl inside your checkout\" — a noun phrase"
+
+[[prose]]
+text = "mvmctl for"
+reason = "\"...asks mvmctl for the kernel\" — a preposition"
+
+[[prose]]
+text = "mvmctl with it"
+reason = "\"...rebuild mvmctl with it enabled\" — a preposition"
+
+[[prose]]
+text = "mvmctl build will"
+reason = "\"a `mvmctl build` will...\" — the verb is real; `will` is the sentence"
+
+[[prose]]
+text = "mvmctl build to"
+reason = "\"...asks mvmctl build to emit\" — the verb is real; `to` is the sentence"
+
+[[prose]]
+text = "mvmctl build with"
+reason = "\"...a mvmctl build with keyless pack verification\" — a preposition"
+
+[[prose]]
+text = "mvmctl or under"
+reason = "\"...beside mvmctl or under the cache\" — a conjunction"
+
+[[prose]]
+text = "mvmctl binary"
+reason = "\"the mvmctl binary\" — a noun phrase"
+
+[[prose]]
+text = "mvmctl binary built"
+reason = "\"a mvmctl binary built from that checkout\" — a noun phrase"
+
+[[prose]]
+text = "mvmctl binary path"
+reason = "\"the mvmctl binary path for ...\" — a noun phrase"
+
+[[prose]]
+text = "mvmctl has no"
+reason = "\"mvmctl has no boot image\" — a sentence about the tool"
+
+[[prose]]
+text = "mvmctl cannot build"
+reason = "\"mvmctl cannot build a boot image locally\" — a sentence about the tool"
+
+[[prose]]
+text = "mvmctl was built"
+reason = "\"mvmctl was built without the feature\" — a sentence about the tool"
+
+[[prose]]
+text = "mvmctl was"
+reason = "\"mvmctl was updated\" — a sentence about the tool"
+
+[[prose]]
+text = "mvmctl built with"
+reason = "\"a mvmctl built with pack support\" — a noun phrase"
+
+[[prose]]
+text = "mvmctl release"
+reason = "\"the mvmctl release channel\" — a noun phrase"
+
+[[prose]]
+text = "mvmctl does not"
+reason = "\"mvmctl does not yet cross-compile\" — a sentence about the tool"
+
+[[prose]]
+text = "mvmctl must hand"
+reason = "\"mvmctl must hand the runner a console streamer\" — a test's description of an invariant"
+
+[[prose]]
+text = "mvmctl command that"
+reason = "\"any mvmctl command that signs to initialize\" — a noun phrase"
+
+[[prose]]
+text = "mvmctl template init"
+reason = "correctly describes a removed mode in the past tense: \"was a `mvmctl template init --vm` mode that no longer exists\""

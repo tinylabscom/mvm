@@ -20,7 +20,7 @@
 //!     own stdout / stderr as they arrive, byte for byte, while handing the
 //!     same frames to the VM's output capture — which redacts, chains, and
 //!     persists a copy of its own. The caller gets the workload's bytes;
-//!     `mvmctl logs` gets the masked ones; any divergence between the two is
+//!     `mvmctl machine logs` gets the masked ones; any divergence between the two is
 //!     named on stderr rather than left for the caller to discover,
 //!   - tears the VM down (unless `keep_alive`),
 //!   - exits with the wrapper's exit code (or non-zero on error).
@@ -967,7 +967,7 @@ impl CallOutput<'_> {
                 &mut self.sinks,
                 &format!(
                     "this call's output was not recorded: no output capture for microVM \
-                     {vm_name:?} in this process, so `mvmctl logs {vm_name}` will not show it"
+                     {vm_name:?} in this process, so `mvmctl machine logs {vm_name}` will not show it"
                 ),
             );
             return;
@@ -1061,7 +1061,7 @@ impl RecordedDivergence {
         }
         Some(format!(
             "recorded output differs from what this call printed — {}; \
-             the bytes above are the workload's own, `mvmctl logs {vm_name}` shows the \
+             the bytes above are the workload's own, `mvmctl machine logs {vm_name}` shows the \
              redacted copy",
             parts.join("; ")
         ))
@@ -1484,7 +1484,7 @@ mod streaming_tests {
     #[test]
     fn an_uncaptured_call_says_so_rather_than_leaving_the_operator_to_find_out() {
         // The residual from a `--attach` into a machine some other process
-        // booted: the call runs, but `mvmctl logs` will not show it.
+        // booted: the call runs, but `mvmctl machine logs` will not show it.
         let (mut out, mut err) = (Vec::new(), Vec::new());
         {
             let mut sinks = buffers(&mut out, &mut err);
@@ -1665,7 +1665,7 @@ mod stdin_grant_tests {
 
 #[cfg(test)]
 mod captured_tests {
-    //! What a call leaves behind, read back the way `mvmctl logs` reads it.
+    //! What a call leaves behind, read back the way `mvmctl machine logs` reads it.
     //!
     //! Driven against a real plane over a real encrypted transcript: the
     //! entrypoint source's whole reason to exist is that a reader can ask for

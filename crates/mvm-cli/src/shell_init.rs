@@ -106,7 +106,7 @@ pub fn ensure_shell_init() -> Result<()> {
     fs::write(&rc_path, new_contents)
         .with_context(|| format!("Failed to write {}", rc_path.display()))?;
 
-    ui::success(&format!("Added mvmctl shell init to {}", rc_path.display()));
+    ui::success(&format!("Added mvmctl shell-init to {}", rc_path.display()));
     Ok(())
 }
 

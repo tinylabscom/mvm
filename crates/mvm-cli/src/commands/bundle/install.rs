@@ -82,6 +82,9 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
         installed.manifest.key_id.0,
     );
     println!("  registry root: {}", installed.root.display());
-    println!("  launch with:   mvmctl up --manifest {}", installed.sha256);
+    println!(
+        "  launch with:   mvmctl machine run --manifest {}",
+        installed.sha256
+    );
     Ok(())
 }

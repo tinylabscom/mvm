@@ -135,10 +135,13 @@ binary is absent. This branch adds 9 scenarios, all passing, and introduces no
 new failures. 28 `@live` scenarios were skipped for want of a hypervisor, as
 designed; the live tier is proven on a KVM host, not here.
 
-## Known gap
+## The gap this left, since closed
 
-`mvmctl build compile --dev`'s own help text still says "Refused on `mvmctl
-compile` — use `mvmctl …`", naming the pre-`build` spelling. That string lives
-in the CLI source, not the docs, so this gate does not see it; the harness reads
-documentation, and help text is the CLI describing itself. Worth a follow-up
-sweep of user-facing strings in `crates/mvm-cli`.
+`mvmctl build compile --dev`'s own help text still said "Refused on `mvmctl
+compile`", naming the pre-`build` spelling. That string lives in the CLI source,
+not the docs, so this gate could not see it — the harness reads documentation,
+and help text is the CLI describing itself.
+
+The follow-up sweep found the gap was not one string but fifty-six, and is
+covered now by `cli_output_commands.feature`. See
+`specs/sprint/delivery/cli-output-names-real-commands.md`.

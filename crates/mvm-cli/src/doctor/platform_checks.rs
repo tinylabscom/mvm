@@ -269,14 +269,14 @@ pub(super) fn residency_check() -> Check {
     }
 }
 
-/// TypeScript runner probe — `mvmctl compile <script.ts>` auto-runs
+/// TypeScript runner probe — `mvmctl build compile <script.ts>` auto-runs
 /// the script on the host with `MVM_SDK_MODE=record` and lowers the
 /// emitted recording into a Workload. That path needs a TS-aware
 /// runner (`tsx`, `bun`, or `deno`); plain `node` can't execute `.ts`
 /// in mvm's supported Node range.
 ///
 /// **WARN (not FAIL) when missing.** A TS runner is only required if
-/// the user actually runs `mvmctl compile` on a `.ts` script — most
+/// the user actually runs `mvmctl build compile` on a `.ts` script — most
 /// mvm workflows (Python, IR-JSON, decorator-only TS) don't need one.
 /// Doctor surfaces the install hint so the gap is discoverable, but
 /// `mvmctl doctor` still exits 0 to avoid breaking CI on hosts that
@@ -293,7 +293,7 @@ pub(super) fn ts_runner_check() -> Check {
             category: "tools",
             ok: true,
             info: format!(
-                "project-local at {} (used by `mvmctl compile <script.ts>`)",
+                "project-local at {} (used by `mvmctl build compile <script.ts>`)",
                 p.display()
             ),
         };
@@ -321,7 +321,7 @@ pub(super) fn ts_runner_check() -> Check {
         // discover the project-local + global recipes.
         ok: true,
         info: format!(
-            "not found — {} (only required if you run `mvmctl compile <script.ts>`)",
+            "not found — {} (only required if you run `mvmctl build compile <script.ts>`)",
             crate::ts_runner::install_hint()
         ),
     }
