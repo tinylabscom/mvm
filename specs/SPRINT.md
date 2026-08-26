@@ -15,8 +15,10 @@
       Move the expensive browser QEMU pack build from every Cloudflare Pages
       deployment to the `boot-image/v*` release train. Pages downloads the
       latest semantic-versioned pack and verifies its keyless release identity
-      and checksum before staging the current demo shell. Workflow contracts,
-      actionlint, workspace tests/check/doctests, and Clippy are green.
+      and checksum before staging the current demo shell. The staged QEMU WASM
+      is explicitly gzip-compressed below Cloudflare Pages' per-file limit and
+      decompressed by the browser worker. Workflow contracts, actionlint,
+      workspace tests/check/doctests, and Clippy are green.
 
 - [x] **AI egress metering and token budgets.**
       `specs/plans/2026-08-21-ai-egress-metering-and-budget.md`.

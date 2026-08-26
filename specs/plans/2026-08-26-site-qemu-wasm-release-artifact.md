@@ -19,6 +19,8 @@ JavaScript shell remains sourced from the deploying revision.
       and safe staging through the existing WebLinux demo script.
 - [x] Add a workflow contract test that prevents Pages from rebuilding QEMU or
       accepting an unsigned pack.
+- [x] Compress the staged QEMU WebAssembly module below Cloudflare Pages'
+      25 MiB per-file limit and explicitly decompress it in the browser worker.
 - [x] Pass the focused release-assets suite, actionlint, workspace tests,
       workspace check, and Clippy with warnings denied.
 
@@ -31,3 +33,5 @@ JavaScript shell remains sourced from the deploying revision.
   fallback build or unsigned compatibility path.
 - The archive is produced from the tagged Nix derivation and is never rebuilt
   from an unrelated site revision.
+- The worker decompresses the staged gzip payload into `Module.wasmBinary`
+  before Emscripten starts, independent of CDN content-encoding behavior.

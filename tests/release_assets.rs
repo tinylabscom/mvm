@@ -630,6 +630,24 @@ fn qemu_wasm_site_pack_is_built_once_on_the_boot_image_train() {
     );
 }
 
+#[test]
+fn weblinux_qemu_module_is_staged_below_the_pages_file_limit() {
+    let build =
+        fs::read_to_string("web/weblinux-demo/build.sh").expect("read WebLinux build script");
+    let worker = fs::read_to_string("web/weblinux-demo/worker.js").expect("read WebLinux worker");
+
+    assert!(
+        build.contains("gzip -9 -n \"$DEST_DIR/qemu-system-x86_64.wasm\""),
+        "the oversized QEMU-WASM module must be compressed while staging"
+    );
+    assert!(
+        worker.contains("qemu-system-x86_64.wasm.gz")
+            && worker.contains("new DecompressionStream(\"gzip\")")
+            && worker.contains("self.Module.wasmBinary = await loadCompressedWasm()"),
+        "the worker must explicitly decompress the staged module before Emscripten starts"
+    );
+}
+
 /// The compiled-in boot image tag must name the release the workflow creates.
 ///
 /// The tag is spliced straight into a download URL, so a drift between the two

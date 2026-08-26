@@ -43,6 +43,13 @@ cp "$SCRIPT_DIR/index.html" "$DEST_DIR/index.html"
 cp "$SCRIPT_DIR/demo.js" "$DEST_DIR/demo.js"
 cp "$SCRIPT_DIR/worker.js" "$DEST_DIR/worker.js"
 
+# Cloudflare Pages rejects individual files larger than 25 MiB. The QEMU
+# module is larger uncompressed but comfortably fits once gzipped. Keep the
+# compressed suffix because the worker deliberately decompresses it before
+# handing the bytes to Emscripten; this does not depend on CDN content-encoding
+# behavior.
+gzip -9 -n "$DEST_DIR/qemu-system-x86_64.wasm"
+
 # The standalone index.html is also kept in the destination so the demo can
 # be served directly (e.g. with web/weblinux-demo/serve.py) without Astro.
 # Astro's src/pages/demo/weblinux.astro renders the same HTML with COOP/COEP
