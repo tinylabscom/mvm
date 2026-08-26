@@ -427,10 +427,49 @@ pub fn guest_binary_source() -> Result<GuestBinarySource, GuestAgentBuildError> 
     }
 }
 
+/// Fingerprints already computed in this process, by workspace root.
+///
+/// Only successes are stored. An error can be transient — a file being written
+/// as the walk passes it — and caching one would make a single unlucky moment
+/// permanent for the rest of the run.
+static SOURCE_FINGERPRINTS: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<PathBuf, String>>,
+> = std::sync::OnceLock::new();
+
 /// A stable content fingerprint over every workspace input that can change the
 /// OCI guest binaries: dependency lock, workspace manifest, shared core code,
 /// guest code, and this build recipe. Host-only CLI edits are excluded.
+///
+/// Memoized for the lifetime of the process. Nine call sites across the boot
+/// path ask for this, and a single `machine run` on a source checkout was
+/// answering it **six times** — six walks over 416 files and ~7.2 MB, ~2500
+/// file opens, for a value that cannot differ between them.
+///
+/// Process lifetime is the right scope because `mvmctl` is one-shot: every
+/// caller runs inside a single command, within a few hundred milliseconds of
+/// the others. A source tree edited inside that window would already produce
+/// disagreeing answers at different call sites today, and disagreement is
+/// worse than staleness — one leg would rebuild against a fingerprint another
+/// leg had already recorded. The memo makes the answer consistent as well as
+/// cheap. Anything long-running that later wants change detection needs a
+/// watcher, not a repeated full-tree hash.
 pub fn guest_source_fingerprint(workspace_root: &Path) -> Result<String, GuestAgentBuildError> {
+    let memo = SOURCE_FINGERPRINTS.get_or_init(Default::default);
+    if let Ok(cache) = memo.lock()
+        && let Some(hit) = cache.get(workspace_root)
+    {
+        return Ok(hit.clone());
+    }
+    let digest = compute_guest_source_fingerprint(workspace_root)?;
+    if let Ok(mut cache) = memo.lock() {
+        cache.insert(workspace_root.to_path_buf(), digest.clone());
+    }
+    Ok(digest)
+}
+
+/// The walk itself, split out so the memo above has something to wrap and a
+/// test can measure the uncached cost directly.
+fn compute_guest_source_fingerprint(workspace_root: &Path) -> Result<String, GuestAgentBuildError> {
     let mut hasher = Sha256::new();
     hasher.update(b"mvm-oci-guest-build-input-v1\0");
     for rel in [
@@ -1609,6 +1648,38 @@ rust = "1.91.1"
         assert!(fa.bytes().all(|x| x.is_ascii_hexdigit()));
     }
 
+    /// Six call sites on one `machine run` asked for this fingerprint, each
+    /// walking 416 files. The memo makes the second and later asks free — and
+    /// its cost is staleness within the process, asserted here rather than left
+    /// for someone to discover.
+    #[test]
+    fn the_fingerprint_is_computed_once_per_workspace_per_process() {
+        let dir = tempfile::tempdir().unwrap();
+        make_fake_checkout(dir.path(), "fn main() { println!(\"v1\"); }");
+
+        let first = guest_source_fingerprint(dir.path()).unwrap();
+
+        // Edit a declared input. The uncached walk must see it — otherwise this
+        // test would pass with a mutation that never happened.
+        std::fs::write(
+            dir.path().join("crates/mvm-agentd/src/main.rs"),
+            "fn main() { println!(\"v2\"); }",
+        )
+        .unwrap();
+        assert_ne!(
+            compute_guest_source_fingerprint(dir.path()).unwrap(),
+            first,
+            "the uncached walk must see the edit, or this test proves nothing"
+        );
+
+        // The memoized entry is what every later caller in this process gets.
+        assert_eq!(
+            guest_source_fingerprint(dir.path()).unwrap(),
+            first,
+            "a second ask in the same process must not re-walk the tree"
+        );
+    }
+
     #[test]
     fn fingerprint_fails_closed_when_a_declared_input_is_missing() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1694,13 +1765,19 @@ rust = "1.91.1"
         )
         .expect("write host-only src");
 
-        let before = runtime_overlay_source_checkout_fingerprint(root).expect("fingerprint before");
+        // Against the uncached walk: what this pins is that `mvm-contract/src`
+        // is one of the fingerprint's declared inputs, not how often the answer
+        // is recomputed. The public entry memoizes per process, so asking it
+        // twice about one path measures the memo instead of the input set.
+        // `the_fingerprint_is_computed_once_per_workspace_per_process` covers
+        // the memo itself.
+        let before = compute_guest_source_fingerprint(root).expect("fingerprint before");
         std::fs::write(
             root.join("crates/mvm-contract/src/lib.rs"),
             "pub fn wire() { println!(\"changed\"); }\n",
         )
         .expect("rewrite mvm-contract src");
-        let after = runtime_overlay_source_checkout_fingerprint(root).expect("fingerprint after");
+        let after = compute_guest_source_fingerprint(root).expect("fingerprint after");
 
         assert_ne!(before, after);
     }
