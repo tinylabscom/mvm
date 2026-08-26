@@ -21,6 +21,7 @@ JavaScript shell remains sourced from the deploying revision.
       accepting an unsigned pack.
 - [x] Compress the staged QEMU WebAssembly module below Cloudflare Pages'
       25 MiB per-file limit and explicitly decompress it in the browser worker.
+- [x] Ignore Wrangler's repository-local cache and account metadata.
 - [x] Pass the focused release-assets suite, actionlint, workspace tests,
       workspace check, and Clippy with warnings denied.
 

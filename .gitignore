@@ -52,6 +52,7 @@ nix/images/dev-prebuilt/
 # Worktree-local dev env (use .envrc.example as template)
 /.envrc
 /.codex/
+/.wrangler/
 /.codex-transfer/
 /.mvm-test/
 # Ad-hoc parallel-session isolation dirs (MVM_CACHE_DIR / MVM_DATA_DIR pointed
