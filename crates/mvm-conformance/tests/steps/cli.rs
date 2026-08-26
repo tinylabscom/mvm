@@ -11,6 +11,7 @@ use tokio::task::spawn_blocking;
 use tokio::time::timeout;
 
 use crate::world::CliWorld;
+use mvm_conformance::IsolatedHome;
 
 /// Build an `mvmctl` subprocess with the same binary discovery the rest of
 /// the conformance suite uses, plus the target directory on `PATH` so helper
@@ -102,8 +103,7 @@ fn run_mvmctl_isolated_home(world: &mut CliWorld, args: String) {
     let mut cmd = mvmctl_command();
     let output = cmd
         .args(args.split_whitespace())
-        .env("HOME", home.path())
-        .env("MVM_HOME", home.path())
+        .isolated_home(home.path())
         .output()
         .expect("failed to spawn mvmctl");
     world.last_run = Some(output);
@@ -123,9 +123,7 @@ fn run_mvmctl_in_isolated_home(world: &mut CliWorld, args: String) {
         .as_ref()
         .expect("`Given an isolated mvm home` must run before this step");
     let mut cmd = mvmctl_command();
-    cmd.args(args.split_whitespace())
-        .env("HOME", home.path())
-        .env("MVM_HOME", home.path());
+    cmd.args(args.split_whitespace()).isolated_home(home.path());
     if world.kernel_reacquisition_must_fail {
         cmd.env("MVM_KERNEL_SOURCE", "download")
             .env("MVM_UPDATE_DOWNLOAD_URL", "http://127.0.0.1:9");
@@ -209,8 +207,7 @@ pub(crate) fn run_mvmctl_isolated_live_home(world: &mut CliWorld, args: String) 
     command
         .current_dir(workspace_root())
         .args(args.split_whitespace())
-        .env("HOME", home.path())
-        .env("MVM_HOME", home.path());
+        .isolated_home(home.path());
     if world.warm_residency {
         command.env("MVM_RESIDENCY", "warm");
     }
@@ -234,8 +231,7 @@ fn install_bundle_fixture(world: &mut CliWorld) {
         .current_dir(workspace_root())
         .args(["bundle", "install"])
         .arg(&fixture)
-        .env("HOME", home.path())
-        .env("MVM_HOME", home.path())
+        .isolated_home(home.path())
         .output()
         .expect("failed to spawn mvmctl");
     // `Installed bundle <sha> (N artifacts, publisher key_id=...)`
@@ -276,8 +272,7 @@ fn boot_installed_bundle(world: &mut CliWorld, args: String) {
         .current_dir(workspace_root())
         .args(["machine", "run", "--manifest", &sha])
         .args(args.split_whitespace())
-        .env("HOME", home.path())
-        .env("MVM_HOME", home.path())
+        .isolated_home(home.path())
         .output()
         .expect("failed to spawn mvmctl");
     world.last_run = Some(output);
@@ -718,8 +713,7 @@ fn generate_project_from_template(world: &mut CliWorld, name: String) {
             &project_dir.to_string_lossy(),
         ])
         .env("MVM_TEMPLATE_REGISTRY", registry_url)
-        .env("HOME", &home_path)
-        .env("MVM_HOME", &home_path)
+        .isolated_home(&home_path)
         .env("MVM_SKIP_RECONCILE", "1")
         .output()
         .expect("failed to spawn mvmctl");
@@ -759,8 +753,7 @@ fn trust_the_fixture_publisher(world: &mut CliWorld) {
         .current_dir(workspace_root())
         .args(["trust", "add"])
         .arg(&pubkey)
-        .env("HOME", home.path())
-        .env("MVM_HOME", home.path())
+        .isolated_home(home.path())
         .output()
         .expect("failed to spawn mvmctl trust add");
     assert!(
@@ -787,8 +780,7 @@ fn install_bundle_fixture_untrusted(world: &mut CliWorld) {
             .current_dir(workspace_root())
             .args(["bundle", "install"])
             .arg(&fixture)
-            .env("HOME", home.path())
-            .env("MVM_HOME", home.path())
+            .isolated_home(home.path())
             .output()
             .expect("failed to spawn mvmctl"),
     );

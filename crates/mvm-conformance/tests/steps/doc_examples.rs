@@ -25,6 +25,7 @@ use mvm_conformance::doc_examples::{
 };
 
 use crate::world::CliWorld;
+use mvm_conformance::IsolatedHome;
 
 /// Repo root — two levels above this crate's manifest dir, resolved at compile
 /// time so the run does not depend on the process working directory.
@@ -340,8 +341,7 @@ fn collect_paths(command: &ClapCommand, prefix: &[String], out: &mut BTreeSet<Ve
 /// Run one documented example for real against a private `MVM_HOME`.
 fn execute(example: &DocExample, home: &Path) -> std::process::Output {
     crate::steps::cli::mvmctl_command()
-        .env("HOME", home)
-        .env("MVM_HOME", home)
+        .isolated_home(home)
         // Reconcile-on-entry converges live VM state; a doc example must not
         // reach for the host's real machines just to print its help.
         .env("MVM_SKIP_RECONCILE", "1")
