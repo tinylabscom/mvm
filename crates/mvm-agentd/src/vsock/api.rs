@@ -356,7 +356,7 @@ pub fn send_proc_request_on(stream: &mut UnixStream, req: GuestRequest) -> Resul
             | GuestRequest::ProcKill { .. }
     ));
     require_capabilities(stream, &[GuestCapability::ProcessRpc])?;
-    let resp = send_request(stream, &req)?;
+    let resp = call_unary(stream, &req)?;
     match resp {
         GuestResponse::ProcResult(r) => Ok(r),
         GuestResponse::Error { message } => {
@@ -442,7 +442,7 @@ pub fn send_fs_request(instance_dir: &str, req: GuestRequest) -> Result<FsResult
 /// over this for callers that still pass an instance dir (mvmd, mock).
 pub fn send_fs_request_on(stream: &mut UnixStream, req: GuestRequest) -> Result<FsResult> {
     require_capabilities(stream, &[GuestCapability::FilesystemRpc])?;
-    let resp = send_request(stream, &req)?;
+    let resp = call_unary(stream, &req)?;
     match resp {
         GuestResponse::FsResult(r) => Ok(r),
         GuestResponse::Error { message } => bail!("Guest FS RPC transport error: {}", message),
@@ -491,6 +491,82 @@ pub fn mount_volume_on(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn serve_unary_response(
+        mut guest: UnixStream,
+        capability: GuestCapability,
+        expected_verb: &'static str,
+        response: GuestResponse,
+    ) -> std::thread::JoinHandle<()> {
+        std::thread::spawn(move || {
+            let hello: GuestRequest = read_frame(&mut guest).unwrap();
+            assert!(matches!(hello, GuestRequest::ProtocolHello { .. }));
+            write_frame(
+                &mut guest,
+                &GuestResponse::ProtocolHelloAck {
+                    agent_protocol_version: PROTOCOL_VERSION,
+                    min_supported_version: MIN_SUPPORTED_PROTOCOL_VERSION,
+                    agent_version: env!("CARGO_PKG_VERSION").to_string(),
+                    capabilities: vec![capability],
+                },
+            )
+            .unwrap();
+
+            let request: GuestRequest = read_frame(&mut guest).unwrap();
+            assert_eq!(request.kind_name(), expected_verb);
+            write_frame(&mut guest, &response).unwrap();
+        })
+    }
+
+    #[test]
+    fn fs_rpc_surfaces_a_verb_grant_refusal() {
+        let (mut host, guest) = UnixStream::pair().unwrap();
+        let server = serve_unary_response(
+            guest,
+            GuestCapability::FilesystemRpc,
+            "fs-read",
+            GuestResponse::VerbNotAuthorized {
+                verb: "fs-read".to_string(),
+            },
+        );
+
+        let error = send_fs_request_on(
+            &mut host,
+            GuestRequest::FsRead {
+                path: "/tmp/data".to_string(),
+                offset: None,
+                length: 16,
+                follow_symlinks: false,
+            },
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("verb fs-read not authorized"));
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn proc_rpc_surfaces_an_agent_profile_refusal() {
+        let (mut host, guest) = UnixStream::pair().unwrap();
+        let server = serve_unary_response(
+            guest,
+            GuestCapability::ProcessRpc,
+            "proc-list",
+            GuestResponse::UnsupportedInProfile {
+                profile: mvm_core::security::AgentProfile::SealedProd,
+                verb: "proc-list".to_string(),
+            },
+        );
+
+        let error = send_proc_request_on(&mut host, GuestRequest::ProcList).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("verb proc-list unsupported in agent profile SealedProd")
+        );
+        server.join().unwrap();
+    }
 
     #[test]
     fn workload_is_primed_reflects_marker_presence() {

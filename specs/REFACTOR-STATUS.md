@@ -26,6 +26,14 @@ for detailed scope and acceptance criteria.
 
 ## Completed issue closeouts
 
+- [x] **Issue #2887 — guest RPC refusals and SDK live-profile propagation.**
+      Filesystem and process unary calls now preserve universal policy
+      refusals as typed errors. The live SDK carries an explicitly selected
+      dev profile into its nested machine launch while an omitted profile
+      remains standard, and Python/TypeScript share one generated environment
+      name plus the same validated argv contract. See
+      `specs/sprint/delivery/2887-guest-rpc-refusals.md`.
+
 - [x] **Issue #2874 — scheduled Security peer-policy mutation witness.**
       `NetworkPolicy::peers()` now has a focused witness that distinguishes
       both policy variants carrying an admitted peer from the deny-all empty

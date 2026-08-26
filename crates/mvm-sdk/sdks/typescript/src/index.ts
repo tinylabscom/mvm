@@ -96,6 +96,7 @@ export {
   MVM_CLI_BIN_ENV,
   MVM_SDK_MODE_ENV,
   MVM_SDK_OUT_PATH_ENV,
+  MVM_SDK_RUN_PROFILE_ENV,
   RecordingNotActiveError,
   Sandbox,
   SandboxDevOnly,

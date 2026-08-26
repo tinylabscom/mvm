@@ -195,6 +195,7 @@ When changing the TypeScript SDK in this repo:
 ```sh
 cargo build -p mvm-cli
 export MVM_CLI_BIN="$PWD/target/debug/mvmctl"
+export MVM_SDK_RUN_PROFILE=dev  # explicit opt-in for files/process verbs
 just sdk-install-typescript
 just sdk-build-typescript
 ```

@@ -11,6 +11,12 @@ export const MVM_CLI_BIN_ENV = "MVM_CLI_BIN";
 export const MVM_SDK_MODE_ENV = "MVM_SDK_MODE";
 
 /**
+ * Carries an explicitly selected security profile from `mvmctl run`
+ * into the live SDK's nested `mvmctl machine run` invocation.
+ */
+export const MVM_SDK_RUN_PROFILE_ENV = "MVM_SDK_RUN_PROFILE";
+
+/**
  * When set, the SDK writes its wire-shape recording JSON to this
  * path on exit, so a caller need not parse stdout.
  */

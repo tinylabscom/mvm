@@ -190,8 +190,8 @@ export const DEFAULT_TTL_SECONDS = 1800;
 
 // Owned by the Rust registry (crates/mvm-sdk/src/env.rs) and generated
 // into `_env/vars.ts`.
-export { MVM_SDK_MODE_ENV, MVM_SDK_OUT_PATH_ENV } from "./_env/vars.js";
-import { MVM_SDK_MODE_ENV, MVM_SDK_OUT_PATH_ENV } from "./_env/vars.js";
+export { MVM_SDK_MODE_ENV, MVM_SDK_OUT_PATH_ENV, MVM_SDK_RUN_PROFILE_ENV } from "./_env/vars.js";
+import { MVM_SDK_MODE_ENV, MVM_SDK_OUT_PATH_ENV, MVM_SDK_RUN_PROFILE_ENV } from "./_env/vars.js";
 
 
 let recording: RuntimeRecordingWire | null = null;
@@ -552,10 +552,25 @@ export class LiveTransport {
 
     const argv = ["machine", "run"];
     if (opts.ports.length === 0) argv.push("-d");
+    const rawProfile = process.env[MVM_SDK_RUN_PROFILE_ENV];
+    const profile = rawProfile?.trim().toLowerCase();
+    if (
+      profile !== undefined &&
+      profile !== "restrictive" &&
+      profile !== "standard" &&
+      profile !== "dev" &&
+      profile !== "permissive"
+    ) {
+      throw new SandboxModeError(
+        `${MVM_SDK_RUN_PROFILE_ENV}=${JSON.stringify(profile)} is invalid — expected one of: ` +
+          "restrictive, standard, dev, permissive",
+      );
+    }
     argv.push(
       "--up-json",
       "--name",
       vmId,
+      ...(profile === undefined ? [] : ["--profile", profile]),
       opts.source.kind === "manifest" ? "--manifest" : "--image",
       opts.source.value,
       ...opts.createArgs,

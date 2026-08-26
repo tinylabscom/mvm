@@ -3082,6 +3082,17 @@ to the configured ceiling and the first terse response immediately after it.
 - [x] Record the delivery in
       `specs/sprint/delivery/2874-security-peer-policy-witness.md`.
 
+## 2026-08-26 guest RPC refusal and SDK profile closeout
+
+- [x] Preserve `VerbNotAuthorized` and `UnsupportedInProfile` as typed errors
+      for filesystem and process unary RPCs.
+- [x] Propagate an explicit live SDK dev profile through the Rust-owned
+      environment contract without weakening the standard default.
+- [x] Keep Python and TypeScript validation and argv lowering in parity, with
+      focused language and Rust tests.
+- [x] Record the delivery in
+      `specs/sprint/delivery/2887-guest-rpc-refusals.md`.
+
 ## Follow-up (not started) — repository-to-signed-workload generator
 
 Prompted by the same 2026-08-25 survey of a commercial enterprise

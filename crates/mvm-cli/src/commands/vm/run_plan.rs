@@ -102,6 +102,9 @@ pub(in crate::commands) fn dispatch_sdk_mode(
 ///   We pass our own absolute path (resolved via
 ///   [`std::env::current_exe`]) so a `cargo run -- run --mode
 ///   live` flow finds the same `mvmctl` it invoked through.
+/// - `MVM_SDK_RUN_PROFILE=<profile>` — the explicit security profile
+///   selected on this outer command. The language SDK validates it and
+///   passes it to the nested `machine run`.
 /// - Inherited stdio + env — the SDK prints its own output;
 ///   nothing is captured here.
 ///
@@ -144,6 +147,7 @@ fn run_live_mode(args: &RunArgs) -> Result<()> {
         .arg(&script)
         .env(mvm_sdk::env::MVM_SDK_MODE_ENV, "live")
         .env(mvm_sdk::env::MVM_CLI_BIN_ENV, &mvmctl_bin)
+        .env(mvm_sdk::env::MVM_SDK_RUN_PROFILE_ENV, args.profile.as_str())
         .status()
         .with_context(|| {
             format!(
@@ -640,5 +644,10 @@ mod tests {
         args.argv = vec!["./foo.py".to_string()];
         let p = extract_script_arg(&args).expect("one positional");
         assert_eq!(p, PathBuf::from("./foo.py"));
+    }
+
+    #[test]
+    fn live_profile_env_name_is_owned_by_the_sdk_registry() {
+        assert_eq!(mvm_sdk::env::MVM_SDK_RUN_PROFILE_ENV, "MVM_SDK_RUN_PROFILE");
     }
 }
