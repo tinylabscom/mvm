@@ -132,8 +132,26 @@ if [ "$has_rust" -eq 1 ]; then
         # commit that touches one leaf crate. Narrow to the touched packages
         # when doing so provably checks the same code (see is_leaf_package),
         # and keep the full run in every case where it might not.
-        scope_args="--workspace"
-        scope_label="--workspace"
+        #
+        # `--all-targets` is 5x the whole cost, not a trim on it. Measured after
+        # a one-line mvm-core edit against a warm stable target dir:
+        #
+        #   --workspace --all-targets            4m37s
+        #   --workspace (libs + bins only)         54s
+        #   --workspace, then -p mvm-core
+        #     --all-targets                        60s
+        #
+        # So the non-leaf case runs two narrower passes instead of one wide one:
+        # every crate's libs and bins (which is what catches a change to a
+        # depended-on crate breaking a dependent), plus the full target set of
+        # just the crates you staged (which is where your own test-code lint
+        # drift lives). What that gives up is test-target lints in crates the
+        # commit did not touch — those can only newly fire if this change
+        # altered an API their test code uses, which is narrow, and CI still
+        # runs the full `--workspace --all-targets` sweep regardless.
+        sweep_args="--workspace --all-targets"
+        focus_args=""
+        scope_label="--workspace --all-targets"
         scope_reason="a staged crate has dependents"
 
         # A manifest, lockfile or cargo/toolchain config change can alter
@@ -168,25 +186,41 @@ if [ "$has_rust" -eq 1 ]; then
                         break
                     fi
                 done
+                pkg_args=""
+                for pkg in $pkgs; do
+                    pkg_args="$pkg_args -p $pkg"
+                done
                 if [ "$all_leaf" -eq 1 ]; then
-                    scope_args=""
-                    for pkg in $pkgs; do
-                        scope_args="$scope_args -p $pkg"
-                    done
-                    scope_label="${scope_args# }"
-                    echo "pre-commit: clippy scoped to$scope_args (nothing depends on these)"
+                    # Nothing depends on these, so the touched packages alone
+                    # cover everything the wide run would have.
+                    sweep_args=""
+                    focus_args="${pkg_args# } --all-targets"
+                    scope_label="${pkg_args# } --all-targets"
+                    echo "pre-commit: clippy scoped to$pkg_args (nothing depends on these)"
+                else
+                    sweep_args="--workspace"
+                    focus_args="${pkg_args# } --all-targets"
+                    scope_label="--workspace, then${pkg_args} --all-targets"
                 fi
             fi
         fi
 
-        if [ "$scope_label" = "--workspace" ]; then
+        if [ "$scope_label" = "--workspace --all-targets" ]; then
             echo "pre-commit: clippy covering the whole workspace — $scope_reason"
         fi
 
-        echo "pre-commit: stable cargo clippy $scope_label --all-targets -- -D warnings"
-        # Unquoted on purpose: $scope_args is a list of flags we built.
-        # shellcheck disable=SC2086
-        if ! ./scripts/cargo-stable.sh clippy $scope_args --all-targets -- -D warnings; then
+        echo "pre-commit: stable cargo clippy $scope_label -- -D warnings"
+        clippy_failed=0
+        for pass in "$sweep_args" "$focus_args"; do
+            [ -z "$pass" ] && continue
+            # Unquoted on purpose: $pass is a list of flags we built.
+            # shellcheck disable=SC2086
+            if ! ./scripts/cargo-stable.sh clippy $pass -- -D warnings; then
+                clippy_failed=1
+                break
+            fi
+        done
+        if [ "$clippy_failed" -eq 1 ]; then
             echo
             echo "  clippy failed. CI gates on the same '-D warnings' rule, so"
             echo "  this commit will fail on push. Re-run with MVM_SKIP_CLIPPY=1"

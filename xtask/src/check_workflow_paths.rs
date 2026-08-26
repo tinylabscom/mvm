@@ -794,7 +794,7 @@ mod tests {
         )
         .expect("Linux coverage script must be readable");
         for expected in [
-            "cargo +1.96.0 build -p mvm-contract --target wasm32-unknown-unknown",
+            "cargo +1.97.1 build -p mvm-contract --target wasm32-unknown-unknown",
             "cargo test -p mvm-conformance --test meta",
             "just bdd",
         ] {

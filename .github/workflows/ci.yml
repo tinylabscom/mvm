@@ -173,7 +173,7 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.96.0
+        uses: dtolnay/rust-toolchain@1.97.1
         with:
           components: rustfmt, clippy
 
@@ -303,6 +303,16 @@ jobs:
       # them on its own.
       - name: Policy gates (check-abi-layout) (single-network-path)
         run: cargo run -p xtask -- check-all
+
+      # `check-fast-cargo` pins the whole nightly-fast / stable-lint split —
+      # the toolchain versions, the cranelift and threads settings, and the
+      # exact invocations in the Justfile and the pre-commit hook. It is a
+      # shell script rather than an xtask gate, so `check-all` above does not
+      # reach it, and until now nothing in CI did either: it had gone red on
+      # main unnoticed when rust-toolchain.toml was bumped to
+      # nightly-2026-08-25 and bdd.yml was left on nightly-2026-08-08.
+      - name: Fast/stable toolchain split is pinned
+        run: ./scripts/check-fast-cargo.sh
 
 
 
@@ -436,7 +446,7 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.96.0
+        uses: dtolnay/rust-toolchain@1.97.1
         with:
           components: clippy
 
@@ -822,7 +832,7 @@ jobs:
 
       - name: Install pinned no_std toolchain and targets
         run: |
-          rustup toolchain install 1.96.0 --profile minimal \
+          rustup toolchain install 1.97.1 --profile minimal \
             --target wasm32-unknown-unknown,wasm32-wasip1,riscv32imac-unknown-none-elf
 
       - name: Install just
@@ -1202,7 +1212,7 @@ jobs:
 
       - name: Install Rust toolchain
         if: needs.scope.outputs.nix == 'true'
-        uses: dtolnay/rust-toolchain@1.96.0
+        uses: dtolnay/rust-toolchain@1.97.1
 
       - uses: ./.github/actions/apt-deps
         if: needs.scope.outputs.nix == 'true'

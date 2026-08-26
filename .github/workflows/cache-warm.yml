@@ -97,7 +97,7 @@ jobs:
       # Stable is what the lint lanes use, so warm the exact compiler and
       # Clippy artifacts those required checks restore.
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.96.0
+        uses: dtolnay/rust-toolchain@1.97.1
         with:
           components: clippy
 

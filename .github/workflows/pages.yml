@@ -45,7 +45,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.96.0
+          toolchain: 1.97.1
           # Two targets, two crates: `wasm-pack` builds the browser shim for
           # wasm32-unknown-unknown, and `web/mvm-demo-guest/build.sh` builds the
           # demo guest for wasm32-wasip1. Installing only the first fails the

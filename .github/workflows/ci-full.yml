@@ -280,7 +280,7 @@ jobs:
 
       - name: Install Rust toolchain
         if: steps.filter.outputs.libkrun == 'true' || github.ref == 'refs/heads/main'
-        uses: dtolnay/rust-toolchain@1.96.0
+        uses: dtolnay/rust-toolchain@1.97.1
         with:
           components: clippy
 
@@ -358,7 +358,7 @@ jobs:
 
       - name: Install Rust toolchain
         if: steps.filter.outputs.spawn == 'true' || github.ref == 'refs/heads/main'
-        uses: dtolnay/rust-toolchain@1.96.0
+        uses: dtolnay/rust-toolchain@1.97.1
 
       - name: Install firecracker
         if: steps.filter.outputs.spawn == 'true' || github.ref == 'refs/heads/main'

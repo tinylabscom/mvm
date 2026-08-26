@@ -2,7 +2,7 @@
 set -euo pipefail
 
 workspace_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-stable_toolchain="1.96.0"
+stable_toolchain="1.97.1"
 rustc_bin="$(rustup which --toolchain "${stable_toolchain}" rustc)"
 cargo_bin="$(rustup which --toolchain "${stable_toolchain}" cargo)"
 toolchain_bin="$(dirname "${cargo_bin}")"
