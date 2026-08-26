@@ -31,8 +31,8 @@ use ed25519_dalek::SigningKey;
 use mvm_core::did_key::DidKey;
 use mvm_core::plan::bundle::ensure_safe_path;
 use mvm_core::receipt_archive::{
-    ArchiveScope, Completeness, EvidenceManifest, LeafCitation, SignedEvidenceManifest,
-    TranscriptCitation,
+    ArchiveScope, Completeness, EVIDENCE_MANIFEST_SCHEMA_VERSION, EvidenceManifest, LeafCitation,
+    SignedEvidenceManifest, TranscriptCitation,
 };
 use sha2::{Digest, Sha256};
 
@@ -202,7 +202,7 @@ pub fn write_archive(req: &ArchiveRequest, signing_key: &SigningKey) -> Result<V
     parts.leaves.sort_by_key(|l| l.index);
 
     let manifest = EvidenceManifest {
-        schema_version: 1,
+        schema_version: EVIDENCE_MANIFEST_SCHEMA_VERSION,
         archive_id: String::new(),
         tenant: req.tenant.clone(),
         scope: req.scope.clone(),

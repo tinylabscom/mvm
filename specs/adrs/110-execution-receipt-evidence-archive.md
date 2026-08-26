@@ -42,6 +42,26 @@ audit/<tenant>*.jsonl      the raw chain lines
 
 Four decisions inside that are worth recording.
 
+### Format-level canonicalization
+
+`EvidenceManifest.schema_version` is also the format's canonicalization
+identifier. Schema 1 means RFC 8785 JCS over JSON restricted to integer numbers
+and ASCII string values and object keys. Any change to that rule requires a
+schema bump. The restriction makes ECMAScript float rendering and UTF-16 versus
+UTF-8 key-order differences unreachable.
+
+`manifest.json` is a pretty-printed `SignedEvidenceManifest` envelope; those
+file bytes are not signed. A verifier parses the envelope, selects the nested
+manifest, validates the version-1 value space, re-canonicalizes it, and checks
+the Ed25519 signature over those canonical bytes. `archive_id` is SHA-256 over
+the same canonical manifest with `archive_id` replaced by the empty string.
+Signed execution receipts follow the same canonicalization and blank-ID rule.
+
+The public evidence-archive reference is normative for the member layout,
+verification order, three-result procedure, and operator-visible ASCII input
+constraint. Frozen cross-language vectors pin the canonical bytes, archive ID,
+signature, and rejected values under `tests/vectors/`.
+
 ### 1. Every in-scope entry is accounted for, exactly once
 
 `map_event` returns a two-armed `EntryMapping` rather than an `Option`. An

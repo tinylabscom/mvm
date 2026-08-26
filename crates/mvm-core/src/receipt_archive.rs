@@ -34,6 +34,13 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
+/// Wire schema and canonicalization identifier for evidence manifests.
+///
+/// Schema 1 signs RFC 8785 JCS bytes after restricting every JSON number to
+/// an integer and every string and object key to ASCII. Changing any part of
+/// that rule requires a new schema version.
+pub const EVIDENCE_MANIFEST_SCHEMA_VERSION: u32 = 1;
+
 /// Whether the archive's scope completeness was checked or asserted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -130,7 +137,7 @@ pub struct EvidenceManifest {
 }
 
 fn schema_version_default() -> u32 {
-    1
+    EVIDENCE_MANIFEST_SCHEMA_VERSION
 }
 
 impl EvidenceManifest {

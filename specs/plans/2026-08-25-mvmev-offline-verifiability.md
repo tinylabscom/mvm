@@ -1,11 +1,11 @@
 # Plan: `.mvmev` Offline Verifiability — Format-Level Canonicalization and Transcript Anchoring
 
 Backing: preview
-Validation: none
+Validation: focused
 
-**Status:** Draft
+**Status:** In progress — format-level canonicalization complete
 **Date:** 2026-08-25
-**Branch:** `docs/mvmev-canonicalization-spec`
+**Branch:** `feat/mvmev-format-spec`
 **Issue:** #2863
 **Related:** ADR-110, `specs/plans/2026-08-25-execution-contract-qualification-plan.md` (its WS1 landed in #2855)
 
@@ -70,20 +70,20 @@ it, and `.mvmev` carries neither the transcript nor a commitment to it.
 
 **Priority:** P0. Blocks any third-party verifier.
 
-- [ ] **1.1 Write the canonicalization section.** In ADR-110 or a companion
+- [x] **1.1 Write the canonicalization section.** In ADR-110 or a companion
       reference doc: JCS (RFC 8785) as the base, the admissible value space
       (integers only, ASCII strings only), and why the restriction exists.
-- [ ] **1.2 Document the verification order.** Parse `manifest.json`,
+- [x] **1.2 Document the verification order.** Parse `manifest.json`,
       re-canonicalize, then check Ed25519 — stated explicitly, since the shipped
       bytes are not the signed bytes.
-- [ ] **1.3 Document the same rule for the other two digests.**
+- [x] **1.3 Document the same rule for the other two digests.**
       `SignedExecutionReceipt` (`crates/mvm-core/src/receipt.rs:281`) and
       `EvidenceManifest::compute_id` (`crates/mvm-core/src/receipt_archive.rs:144`,
       which clears `archive_id` before hashing).
-- [ ] **1.4 Publish the member layout.** `manifest.json`, `manifest.sig`,
+- [x] **1.4 Publish the member layout.** `manifest.json`, `manifest.sig`,
       `host.pub`, `host.did`, and the per-leaf proof members
       (`crates/mvm-hostd/src/audit/receipt_archive.rs:48-62`).
-- [ ] **1.5 Publish the three-result verification procedure.** Integrity,
+- [x] **1.5 Publish the three-result verification procedure.** Integrity,
       inclusion, completeness — kept separate, per
       `crates/mvm-hostd/src/audit/receipt_archive_verify.rs:1-26`, including why
       inclusion is two checks rather than one.
@@ -92,26 +92,26 @@ it, and `.mvmev` carries neither the transcript nor a commitment to it.
 
 **Priority:** P1. Turns WS1's prose into something checkable.
 
-- [ ] **2.1 Freeze a vector set.** Canonical-form inputs and expected bytes
+- [x] **2.1 Freeze a vector set.** Canonical-form inputs and expected bytes
       covering key ordering, escaping, integer bounds, empty containers, and
       nested objects.
 - [ ] **2.2 Freeze an end-to-end archive vector.** One `.mvmev` with a known
       host key and expected outcomes for each of the three results.
 - [ ] **2.3 Add a negative vector set.** Tampered manifest, wrong-leaf proof,
       missing member, digest drift.
-- [ ] **2.4 Gate the vectors.** A test that reads the frozen vectors, so a
+- [x] **2.4 Gate the vectors.** A test that reads the frozen vectors, so a
       canonicalization change is a red test rather than a silent break.
 
 ## Workstream 3 — Value-space constraint as a documented input rule
 
 **Priority:** P2. Small, but currently a surprise failure.
 
-- [ ] **3.1 Document the ASCII constraint where operators see it.** A non-ASCII
+- [x] **3.1 Document the ASCII constraint where operators see it.** A non-ASCII
       tenant id, workload id, or member path makes a manifest unsignable —
       export fails rather than emitting an unverifiable archive.
-- [ ] **3.2 Decide the boundary.** Reject non-ASCII identifiers at admission
+- [x] **3.2 Decide the boundary.** Reject non-ASCII identifiers at admission
       instead of at export, or keep the late failure and say so.
-- [ ] **3.3 Add a test for whichever boundary is chosen.**
+- [x] **3.3 Add a test for whichever boundary is chosen.**
 
 ## Workstream 4 — Anchor the stream-plane transcript root
 
@@ -193,8 +193,9 @@ observable.
 
 ## Open questions
 
-- Should the manifest carry a canonicalization identifier, so a future change is
-  detectable by a verifier rather than silent? (WS1)
+- Schema version 1 is the canonicalization identifier. A future change to the
+  canonicalization or admitted value space requires a schema bump, preserving
+  compatibility with every existing signed manifest.
 - Does `Ephemeral` retention need an explicit chain entry recording that no
   transcript exists, so absence is attested rather than merely absent? (WS4)
 - Is tail truncation worth addressing, or is it accepted? `merkle.rs:95` says

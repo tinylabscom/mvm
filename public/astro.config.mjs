@@ -239,6 +239,7 @@ export default defineConfig({
           label: "Reference",
           items: [
             { label: "CLI Commands", slug: "reference/cli-commands" },
+            { label: "Evidence archive format", slug: "reference/mvmev-format" },
             { label: "Programmatic Use", slug: "reference/programmatic-use" },
             { label: "Architecture", slug: "reference/architecture" },
             { label: "Isolation Tiers", slug: "reference/isolation-tiers" },

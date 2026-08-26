@@ -3032,6 +3032,18 @@ to the configured ceiling and the first terse response immediately after it.
 - [x] Preserve focused regressions and the hardware witness in
       `specs/sprint/delivery/2836-aarch64-sealed-workload-witness.md`.
 
+## 2026-08-26 `.mvmev` format-level verifiability
+
+- [x] Make manifest schema version 1 the compatibility-safe canonicalization
+      identifier: RFC 8785 JCS over integer-only, ASCII JSON.
+- [x] Publish the normative member layout, parse/recanonicalize/verify order,
+      SHA-256 address rules, and independent integrity, inclusion, and
+      completeness results.
+- [x] Freeze language-neutral canonicalization, rejected-value, archive-ID,
+      and Ed25519 vectors and gate them from Rust.
+- [x] Document the fail-closed ASCII export boundary without imposing a new
+      admission restriction on historical identifiers.
+
 ## Follow-up (not started) — repository-to-signed-workload generator
 
 Prompted by the same 2026-08-25 survey of a commercial enterprise
