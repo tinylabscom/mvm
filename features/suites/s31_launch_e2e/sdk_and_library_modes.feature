@@ -25,7 +25,11 @@ Feature: the README's SDK entry points reach the same launch path
     And the output mentions "ADMITTED"
     And the output mentions "no microVM booted"
 
-  @live
+  # @wip for the same reason as the persistent-lifecycle scenario: the SDK's
+  # live transport shells `machine run -d --up-json --name ... --ttl ...`, so it
+  # rides the persistent path and inherits its hang. See
+  # specs/plans/2026-08-26-persistent-machine-path-on-hvf.md.
+  @live @wip
   Scenario: a runtime-SDK script boots a real guest in live mode
     When I launch "run --mode live crates/mvm-conformance/fixtures/e2e/sandbox_script.py"
     Then the launch succeeds

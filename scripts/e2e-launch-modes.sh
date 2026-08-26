@@ -90,4 +90,9 @@ else
   exit 1
 fi
 
+# The harness prints a per-reason tally of what it declined to run, so a `@wip`
+# scenario is counted and named rather than silently absent. Two are pending on
+# the persistent-machine defect — see
+# specs/plans/2026-08-26-persistent-machine-path-on-hvf.md.
 echo "==> e2e launch gate: all modes exercised"
+echo "    check the scenario summary above for anything reported pending"
