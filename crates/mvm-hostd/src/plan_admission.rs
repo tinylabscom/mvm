@@ -1504,26 +1504,37 @@ impl<'a> Default for AdmitAndStartParamsBuilder<'a> {
 /// Fail-closed in both directions. A plan that pins a kernel and a launch
 /// config that supplies none is a refusal, not a pass — otherwise dropping the
 /// kernel path would be a way to skip the check.
-fn enforce_admitted_environment(config: &VmStartConfig, plan: &ExecutionPlan) -> Result<()> {
+/// Takes the kernel path rather than the whole [`VmStartConfig`] so the two
+/// admission seams can share one gate. `mvmctl` synthesizes and admits its plan
+/// without ever building a `VmStartConfig`, so a config-shaped signature meant
+/// the CLI — the seam that ships — could not call this at all.
+pub fn enforce_admitted_environment(
+    kernel_path: Option<&std::path::Path>,
+    plan: &ExecutionPlan,
+) -> Result<()> {
     let Some(environment) = plan.environment.as_ref() else {
         // No environment pinned. Plans predating the field, and backends that
         // boot their own bundled kernel, land here.
         return Ok(());
     };
-    let Some(kernel_path) = config.kernel_path.as_deref() else {
+    let Some(kernel_path) = kernel_path else {
         anyhow::bail!(
             "plan pins kernel {} but the launch config supplies no kernel path",
             environment.kernel_sha256
         );
     };
-    let actual = mvm_core::crypto::image_verify::sha256_file(std::path::Path::new(kernel_path))
-        .with_context(|| {
-            format!("hashing kernel at {kernel_path} for admitted-environment check")
+    let actual =
+        mvm_core::crypto::image_verify::sha256_file_cached(kernel_path).with_context(|| {
+            format!(
+                "hashing kernel at {} for admitted-environment check",
+                kernel_path.display()
+            )
         })?;
     if actual != environment.kernel_sha256 {
         anyhow::bail!(
-            "admitted-environment mismatch: plan pins kernel {} but {kernel_path} hashes to {actual}",
-            environment.kernel_sha256
+            "admitted-environment mismatch: plan pins kernel {} but {} hashes to {actual}",
+            environment.kernel_sha256,
+            kernel_path.display()
         );
     }
     Ok(())
@@ -1583,7 +1594,10 @@ fn run_post_admission_gates(
     if let Err(e) = enforce_admitted_shares(&config.volumes, admitted.plan()) {
         return Err(("admitted-shares", e));
     }
-    if let Err(e) = enforce_admitted_environment(&config, admitted.plan()) {
+    if let Err(e) = enforce_admitted_environment(
+        config.kernel_path.as_deref().map(std::path::Path::new),
+        admitted.plan(),
+    ) {
         return Err(("admitted-environment", e));
     }
     if let Err(e) = enforce_sdk_sidecar_attachment(&config.volumes, admitted.plan()) {
@@ -1966,13 +1980,6 @@ mod admitted_environment_tests {
         plan
     }
 
-    fn config_with_kernel(kernel: Option<&std::path::Path>) -> VmStartConfig {
-        VmStartConfig {
-            kernel_path: kernel.map(|k| k.display().to_string()),
-            ..VmStartConfig::default()
-        }
-    }
-
     fn write_kernel(dir: &std::path::Path, bytes: &[u8]) -> std::path::PathBuf {
         let p = dir.join("vmlinux");
         std::fs::write(&p, bytes).expect("write kernel fixture");
@@ -1985,11 +1992,8 @@ mod admitted_environment_tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let kernel = write_kernel(tmp.path(), b"workload-kernel");
         let sha = mvm_core::crypto::image_verify::sha256_file(&kernel).expect("hash");
-        enforce_admitted_environment(
-            &config_with_kernel(Some(&kernel)),
-            &plan_pinning(Some(&sha)),
-        )
-        .expect("matching kernel must be admitted");
+        enforce_admitted_environment(Some(kernel.as_path()), &plan_pinning(Some(&sha)))
+            .expect("matching kernel must be admitted");
     }
 
     /// A different kernel than the plan pinned is refused: same plan, same
@@ -2002,11 +2006,8 @@ mod admitted_environment_tests {
         let sha = mvm_core::crypto::image_verify::sha256_file(&kernel).expect("hash");
         std::fs::write(&kernel, b"a-general-purpose-kernel").expect("swap kernel");
 
-        let err = enforce_admitted_environment(
-            &config_with_kernel(Some(&kernel)),
-            &plan_pinning(Some(&sha)),
-        )
-        .expect_err("a substituted kernel must be refused");
+        let err = enforce_admitted_environment(Some(kernel.as_path()), &plan_pinning(Some(&sha)))
+            .expect_err("a substituted kernel must be refused");
         let msg = format!("{err:#}");
         assert!(
             msg.contains("admitted-environment mismatch"),
@@ -2017,11 +2018,8 @@ mod admitted_environment_tests {
     /// Dropping the kernel path must not be a way around the pin.
     #[test]
     fn pinned_plan_with_no_kernel_path_is_refused() {
-        let err = enforce_admitted_environment(
-            &config_with_kernel(None),
-            &plan_pinning(Some(&"a".repeat(64))),
-        )
-        .expect_err("a pinned plan with no kernel path must be refused");
+        let err = enforce_admitted_environment(None, &plan_pinning(Some(&"a".repeat(64))))
+            .expect_err("a pinned plan with no kernel path must be refused");
         assert!(format!("{err:#}").contains("supplies no kernel path"));
     }
 
@@ -2031,9 +2029,9 @@ mod admitted_environment_tests {
     fn unpinned_plan_is_unaffected() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let kernel = write_kernel(tmp.path(), b"whatever");
-        enforce_admitted_environment(&config_with_kernel(Some(&kernel)), &plan_pinning(None))
+        enforce_admitted_environment(Some(kernel.as_path()), &plan_pinning(None))
             .expect("an unpinned plan must be unaffected");
-        enforce_admitted_environment(&config_with_kernel(None), &plan_pinning(None))
+        enforce_admitted_environment(None, &plan_pinning(None))
             .expect("an unpinned plan with no kernel must be unaffected");
     }
 }

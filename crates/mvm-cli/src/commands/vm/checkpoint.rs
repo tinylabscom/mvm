@@ -1012,6 +1012,7 @@ fn boot_forked_child(p: BootForkedChildParams<'_>) -> Result<()> {
         vm_name: p.child_vm_name,
         backend_name: &effective_hypervisor,
         rootfs_path: p.instance_rootfs,
+        kernel_path: Some(std::path::Path::new(&vmlinux_path)),
         precomputed_image_sha256: None,
         boot_artifact_identity: None,
         cpus,

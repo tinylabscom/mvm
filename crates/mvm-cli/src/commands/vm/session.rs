@@ -1010,6 +1010,7 @@ fn cmd_start(args: StartArgs) -> Result<()> {
     let admit_ctx: Rc<RefCell<Option<super::up::AdmissionContext>>> = Rc::new(RefCell::new(None));
     let ctx_sink = Rc::clone(&admit_ctx);
     let admit = move |rootfs: &std::path::Path,
+                      kernel: Option<&std::path::Path>,
                       vm_name: &str|
           -> Result<Option<crate::exec::SessionAuditSubstrate>> {
         let ledger = mvm_hostd::plan_admission::InMemoryNonceLedger::default();
@@ -1017,6 +1018,7 @@ fn cmd_start(args: StartArgs) -> Result<()> {
             network_mode: crate::commands::machine::preflight_network(),
             tenant: "local",
             vm_name,
+            kernel_path: kernel,
             backend_name: &admit_backend,
             rootfs_path: rootfs,
             precomputed_image_sha256: None,

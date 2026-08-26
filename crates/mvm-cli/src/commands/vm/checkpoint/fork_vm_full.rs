@@ -380,6 +380,11 @@ fn admit_forked_child(p: &AdmitForkedChildParams<'_>) -> Result<AdmittedForkChil
             vm_name: p.child_vm_name,
             backend_name: p.backend_kind.as_str(),
             rootfs_path: &rootfs_blob,
+            // A fork resumes a saved VM state rather than booting a kernel of
+            // its own, so this admission has no kernel to name. Deliberately
+            // not the parent's: a child admitted under an environment it did
+            // not itself load would record a pin nothing here verified.
+            kernel_path: None,
             precomputed_image_sha256: recorded_sha,
             boot_artifact_identity: None,
             cpus: user_cfg.default_cpus,

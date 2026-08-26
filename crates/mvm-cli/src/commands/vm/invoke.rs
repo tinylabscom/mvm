@@ -143,6 +143,8 @@ struct EntrypointAdmission {
 
 struct EntrypointAdmissionParams<'a> {
     rootfs: &'a std::path::Path,
+    /// The kernel this boot loads, pinned into the plan alongside the image.
+    kernel_path: Option<&'a std::path::Path>,
     vm_name: &'a str,
     backend_name: &'a str,
     cpus: u32,
@@ -159,11 +161,13 @@ struct EntrypointAdmissionParams<'a> {
 impl<'a> EntrypointAdmissionParams<'a> {
     fn builder(
         rootfs: &'a std::path::Path,
+        kernel_path: Option<&'a std::path::Path>,
         vm_name: &'a str,
         backend_name: &'a str,
     ) -> EntrypointAdmissionParamsBuilder<'a> {
         EntrypointAdmissionParamsBuilder {
             rootfs,
+            kernel_path,
             vm_name,
             backend_name,
             cpus: 1,
@@ -179,6 +183,7 @@ impl<'a> EntrypointAdmissionParams<'a> {
 
 struct EntrypointAdmissionParamsBuilder<'a> {
     rootfs: &'a std::path::Path,
+    kernel_path: Option<&'a std::path::Path>,
     vm_name: &'a str,
     backend_name: &'a str,
     cpus: u32,
@@ -232,6 +237,7 @@ impl<'a> EntrypointAdmissionParamsBuilder<'a> {
     fn build(self) -> EntrypointAdmissionParams<'a> {
         EntrypointAdmissionParams {
             rootfs: self.rootfs,
+            kernel_path: self.kernel_path,
             vm_name: self.vm_name,
             backend_name: self.backend_name,
             cpus: self.cpus,
@@ -267,6 +273,7 @@ fn admit_entrypoint_boot(
         vm_name: params.vm_name,
         backend_name: params.backend_name,
         rootfs_path: params.rootfs,
+        kernel_path: params.kernel_path,
         precomputed_image_sha256: None,
         boot_artifact_identity: None,
         cpus: params.cpus,
@@ -447,10 +454,11 @@ pub(in crate::commands) fn run_entrypoint(call: EntrypointCall) -> Result<()> {
         std::rc::Rc::new(std::cell::RefCell::new(None));
     let ctx_sink = std::rc::Rc::clone(&admit_ctx);
     let admit = move |rootfs: &std::path::Path,
+                      kernel: Option<&std::path::Path>,
                       vm_name: &str|
           -> Result<Option<crate::exec::SessionAuditSubstrate>> {
         let admitted = admit_entrypoint_boot(
-            EntrypointAdmissionParams::builder(rootfs, vm_name, &admit_backend)
+            EntrypointAdmissionParams::builder(rootfs, kernel, vm_name, &admit_backend)
                 .cpus(cpus)
                 .mem_mib(mem)
                 .lowered_secrets(&lowered_secrets)
@@ -1579,7 +1587,7 @@ mod stdin_grant_tests {
         ) -> anyhow::Result<Option<super::EntrypointAdmission>> {
             let lowered = super::super::managed_secrets::LoweredPlanSecrets::default();
             admit_entrypoint_boot(
-                EntrypointAdmissionParams::builder(&self.rootfs, vm, "firecracker")
+                EntrypointAdmissionParams::builder(&self.rootfs, None, vm, "firecracker")
                     .lowered_secrets(&lowered)
                     .stream_stdin(stream_stdin)
                     .build(),
@@ -2008,7 +2016,7 @@ mod tests {
 
         let lowered_secrets = LoweredPlanSecrets::default();
         let admitted = admit_entrypoint_boot(
-            EntrypointAdmissionParams::builder(&rootfs, "invoke-proof-sealed", "firecracker")
+            EntrypointAdmissionParams::builder(&rootfs, None, "invoke-proof-sealed", "firecracker")
                 .cpus(1)
                 .mem_mib(256)
                 .lowered_secrets(&lowered_secrets)
@@ -2065,7 +2073,7 @@ mod tests {
         let policy = NetworkPolicy::allow_list(vec![HostPort::new("127.0.0.1", 443)]);
         let lowered_secrets = LoweredPlanSecrets::default();
         let admitted = admit_entrypoint_boot(
-            EntrypointAdmissionParams::builder(&rootfs, "invoke-proof-allow", "firecracker")
+            EntrypointAdmissionParams::builder(&rootfs, None, "invoke-proof-allow", "firecracker")
                 .cpus(1)
                 .mem_mib(256)
                 .lowered_secrets(&lowered_secrets)

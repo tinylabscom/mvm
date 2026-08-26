@@ -805,6 +805,7 @@ pub(in crate::commands) fn run_secure_with_source(
     let oci_provenance: OciProvenanceSink = std::rc::Rc::new(std::cell::RefCell::new(None));
     let provenance_for_admit = std::rc::Rc::clone(&oci_provenance);
     let admit = move |rootfs: &std::path::Path,
+                      kernel: Option<&std::path::Path>,
                       vm_name: &str|
           -> Result<Option<crate::exec::SessionAuditSubstrate>> {
         let ledger = mvm_hostd::plan_admission::InMemoryNonceLedger::default();
@@ -812,6 +813,7 @@ pub(in crate::commands) fn run_secure_with_source(
             network_mode: admit_network_mode,
             tenant: "local",
             vm_name,
+            kernel_path: kernel,
             backend_name: &admit_backend,
             rootfs_path: rootfs,
             precomputed_image_sha256: None,
