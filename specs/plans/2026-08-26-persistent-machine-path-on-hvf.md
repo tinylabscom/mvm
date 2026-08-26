@@ -5,13 +5,13 @@ Validation: check-claim-catalog
 
 ## Status
 
-Open. Found by the new end-to-end launch suite
+Open — tracked as #2885. Found by the new end-to-end launch suite
 (`features/suites/s31_launch_e2e/`) on 2026-08-26, on macOS 26 / Apple Silicon
 with the HVF backend.
 
 This is **not** the launch regression fixed alongside it. That one — a cold
 universal-initramfs cache silently producing a guest with no runtime overlay —
-is fixed and witnessed. It had masked this defect completely: before the fix no
+is fixed and witnessed in #2884. It had masked this defect completely: before the fix no
 guest booted at all on this host, so nothing ever reached the persistent path's
 post-boot steps.
 
