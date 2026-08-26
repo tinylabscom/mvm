@@ -43,14 +43,11 @@ fn managed_volume_path(world: &CliWorld, volume_name: &str) -> PathBuf {
 
 #[given("a cached live workload kernel")]
 fn cached_live_workload_kernel(world: &mut CliWorld) {
-    let source = PathBuf::from(
-        std::env::var_os("MVM_BDD_WORKLOAD_KERNEL")
-            .expect("MVM_BDD_WORKLOAD_KERNEL must name the live workload kernel"),
-    );
-    assert!(
-        source.is_file(),
-        "MVM_BDD_WORKLOAD_KERNEL does not name a file: {source:?}"
-    );
+    // The `@workload_kernel` gate guarantees this resolves before the scenario
+    // is selected, so reaching here without one is a harness bug, not an
+    // operator mistake.
+    let source = crate::workload_kernel_path()
+        .expect("`@workload_kernel` scenarios only run when a kernel resolves");
     let destination = isolated_home(world)
         .join("cache")
         .join("builder-vm")

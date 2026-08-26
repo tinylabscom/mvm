@@ -72,7 +72,7 @@ Feature: Encrypted block volume lifecycle and attachment
     Then the command exits with code 1
     And the local volume attachment lease catalog is empty
 
-  @live @firecracker
+  @live @firecracker @workload_kernel
   Scenario: a writable block volume persists guest bytes across restart
     Given an isolated mvm home
     And a cached live workload kernel
@@ -100,7 +100,7 @@ Feature: Encrypted block volume lifecycle and attachment
     When I run mvmctl in the isolated mvm home with "machine volume lock work"
     Then the command exits with code 0
 
-  @live @firecracker
+  @live @firecracker @workload_kernel
   Scenario: a read-only block attachment refuses a guest write
     Given an isolated mvm home
     And a cached live workload kernel

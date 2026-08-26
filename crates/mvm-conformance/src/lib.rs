@@ -46,6 +46,18 @@ pub const NODE_TAG: &str = "node";
 /// produces both.
 pub const BUNDLE_TAG: &str = "bundle";
 
+/// Cucumber tag for a scenario that boots a guest from a prebuilt *workload*
+/// kernel rather than building one. The kernel is taken from
+/// `MVM_BDD_WORKLOAD_KERNEL`, or from the host's own builder-VM cache when that
+/// is unset; the scenario is skipped cleanly when neither yields a file.
+///
+/// Before this tag existed the step read the variable with `.expect(...)`, so on
+/// a host with KVM the scenario *failed* — "MVM_BDD_WORKLOAD_KERNEL must name
+/// the live workload kernel" — instead of skipping. The variable is named in no
+/// Justfile recipe, no CI lane and no document, so that failure was the only
+/// outcome it ever had, and it read as a broken volume path.
+pub const WORKLOAD_KERNEL_TAG: &str = "workload_kernel";
+
 /// Host capabilities a scenario may require, probed once by the harness.
 ///
 /// Plain data so [`scenario_should_run`] is a pure decision the harness can
@@ -64,6 +76,9 @@ pub struct RuntimeCaps {
     /// A `node` binary is resolvable, so the TypeScript example checkers can
     /// run at all.
     pub node_available: bool,
+    /// A prebuilt workload kernel is resolvable, so a scenario that boots one
+    /// has something to boot.
+    pub workload_kernel: bool,
 }
 
 /// Decide whether a scenario with `tags` should run given the host `caps`.
@@ -97,6 +112,8 @@ pub enum ScenarioGate {
     NeedsFirecracker,
     /// No `.mvmpkg` for a bundle-boot scenario to install.
     NeedsBundleFixture,
+    /// No prebuilt workload kernel could be resolved.
+    NeedsWorkloadKernel,
     /// No `node` on `PATH`, so the TypeScript example checkers cannot run.
     NeedsNode,
     /// The merge-queue lane selected only `@ci_live` scenarios, and this
@@ -127,6 +144,9 @@ pub fn scenario_gate(tags: &[String], caps: RuntimeCaps) -> ScenarioGate {
     }
     if tagged(NODE_TAG) && !caps.node_available {
         return ScenarioGate::NeedsNode;
+    }
+    if tagged(WORKLOAD_KERNEL_TAG) && !caps.workload_kernel {
+        return ScenarioGate::NeedsWorkloadKernel;
     }
     ScenarioGate::Run
 }
@@ -159,6 +179,10 @@ impl ScenarioGate {
                  MVM_BDD_BUNDLE_PUBKEY its publisher key",
             ),
             Self::NeedsNode => Some("need node on PATH (TypeScript example checkers)"),
+            Self::NeedsWorkloadKernel => Some(
+                "need a prebuilt workload kernel (MVM_BDD_WORKLOAD_KERNEL, or one \
+                 in the host builder-VM cache)",
+            ),
             Self::OutsideCiLiveSubset => Some("outside the merge-queue @ci_live subset"),
         }
     }
@@ -177,12 +201,14 @@ mod tests {
         firecracker_bootable: false,
         bundle_fixture: false,
         node_available: false,
+        workload_kernel: false,
     };
     const ALL: RuntimeCaps = RuntimeCaps {
         live_opted_in: true,
         firecracker_bootable: true,
         bundle_fixture: true,
         node_available: false,
+        workload_kernel: true,
     };
 
     #[test]
@@ -197,6 +223,25 @@ mod tests {
         ));
         assert!(scenario_should_run(
             &tags(&["live", "firecracker", "bundle"]),
+            ALL
+        ));
+    }
+
+    /// The gate this exists for: without a resolvable kernel the scenario must
+    /// skip, not fail. It failed before — the step read the env var with
+    /// `.expect(...)`, so on a KVM host the only outcome it ever had was a
+    /// panic that read as a broken volume path.
+    #[test]
+    fn workload_kernel_scenario_skips_without_a_kernel() {
+        assert!(!scenario_should_run(
+            &tags(&["live", "firecracker", "workload_kernel"]),
+            RuntimeCaps {
+                workload_kernel: false,
+                ..ALL
+            },
+        ));
+        assert!(scenario_should_run(
+            &tags(&["live", "firecracker", "workload_kernel"]),
             ALL
         ));
     }
@@ -221,6 +266,7 @@ mod tests {
                 firecracker_bootable: false,
                 bundle_fixture: false,
                 node_available: false,
+                workload_kernel: false,
             },
         ));
     }
@@ -234,6 +280,7 @@ mod tests {
                 firecracker_bootable: false,
                 bundle_fixture: false,
                 node_available: false,
+                workload_kernel: false,
             },
         ));
         assert!(scenario_should_run(&tags(&["live", "firecracker"]), ALL));
@@ -249,6 +296,7 @@ mod tests {
                 firecracker_bootable: true,
                 bundle_fixture: false,
                 node_available: false,
+                workload_kernel: false,
             },
         ));
         // Live opt-in but missing capability → skipped.
@@ -259,6 +307,7 @@ mod tests {
                 firecracker_bootable: false,
                 bundle_fixture: false,
                 node_available: false,
+                workload_kernel: false,
             },
         ));
         // Both present → runs.
@@ -276,30 +325,35 @@ mod tests {
                 firecracker_bootable: false,
                 bundle_fixture: false,
                 node_available: false,
+                workload_kernel: false,
             },
             RuntimeCaps {
                 live_opted_in: true,
                 firecracker_bootable: false,
                 bundle_fixture: false,
                 node_available: false,
+                workload_kernel: false,
             },
             RuntimeCaps {
                 live_opted_in: true,
                 firecracker_bootable: true,
                 bundle_fixture: false,
                 node_available: false,
+                workload_kernel: false,
             },
             RuntimeCaps {
                 live_opted_in: true,
                 firecracker_bootable: true,
                 bundle_fixture: true,
                 node_available: false,
+                workload_kernel: true,
             },
             RuntimeCaps {
                 live_opted_in: false,
                 firecracker_bootable: true,
                 bundle_fixture: true,
                 node_available: false,
+                workload_kernel: true,
             },
         ];
         let shapes = [
@@ -332,18 +386,21 @@ mod tests {
             firecracker_bootable: false,
             bundle_fixture: false,
             node_available: false,
+            workload_kernel: false,
         };
         let live_only = RuntimeCaps {
             live_opted_in: true,
             firecracker_bootable: false,
             bundle_fixture: false,
             node_available: false,
+            workload_kernel: false,
         };
         let bootable = RuntimeCaps {
             live_opted_in: true,
             firecracker_bootable: true,
             bundle_fixture: false,
             node_available: false,
+            workload_kernel: false,
         };
 
         assert_eq!(
@@ -394,6 +451,7 @@ mod tests {
                     firecracker_bootable: false,
                     bundle_fixture: false,
                     node_available: false,
+                    workload_kernel: false,
                 },
                 true,
             ),
