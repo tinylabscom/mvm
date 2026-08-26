@@ -79,6 +79,10 @@ jobs:
         working-directory: public
         run: pnpm check:perf
 
+      - name: Check cross-origin isolation headers
+        working-directory: public
+        run: pnpm check:headers
+
       - name: Build
         working-directory: public
         run: pnpm build

@@ -1,6 +1,17 @@
 # Cross-origin isolation headers for the WebLinux browser demo.
 # QEMU-Wasm uses pthreads, which require SharedArrayBuffer; browsers only
 # expose SharedArrayBuffer in a cross-origin-isolated context.
-/demo/weblinux/*
+#
+# The scope is the whole site, not just /demo/weblinux/*, because the landing
+# page embeds the demo in an iframe (DemoTeaser.tsx). Isolation does not
+# propagate upward from a frame: a frame is cross-origin isolated only if the
+# top-level document is isolated too, so headers on the demo path alone leave
+# the embedded copy without SharedArrayBuffer.
+#
+# require-corp site-wide means every cross-origin subresource must carry CORP
+# or CORS headers or the browser blocks it. The site loads none today (external
+# origins appear only as link targets and a form action), so this is free; a
+# future third-party embed has to opt in explicitly.
+/*
   Cross-Origin-Opener-Policy: same-origin
   Cross-Origin-Embedder-Policy: require-corp
