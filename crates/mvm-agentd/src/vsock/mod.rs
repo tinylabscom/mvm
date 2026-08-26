@@ -65,7 +65,8 @@ pub use rpc::{
     ControlSession, RpcError, RunEntrypointCall, call_streaming, call_unary, check_response,
     negotiate_protocol, probe_agent_ready, read_exec_stream, require_capabilities,
     send_cancel_extension, send_close_stream_input, send_exec_streaming, send_run_code_streaming,
-    send_run_detached, send_run_entrypoint, send_run_extension, send_stream_input,
+    send_run_detached, send_run_entrypoint, send_run_entrypoint_while, send_run_extension,
+    send_stream_input,
 };
 pub use verb_grant::{
     HOST_SIGNER_PUB_CMDLINE_KEY, HOST_SIGNER_PUBKEY_PATH, TrustDecision, VERB_TRUST_POLICY_PATH,

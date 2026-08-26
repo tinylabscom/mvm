@@ -18,7 +18,7 @@ pub fn vsock_uds_path(instance_dir: &str) -> String {
 }
 
 /// Check if an IO error is a timeout (EAGAIN/EWOULDBLOCK or TimedOut).
-fn is_timeout_error(err: &std::io::Error) -> bool {
+pub(crate) fn is_timeout_error(err: &std::io::Error) -> bool {
     matches!(
         err.kind(),
         std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut

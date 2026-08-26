@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use nix::mount::{MsFlags, mount, umount};
+use nix::mount::{MntFlags, MsFlags, mount, umount, umount2};
 
 use crate::parse_loop_device;
 
@@ -299,16 +299,69 @@ impl MountedRootfs {
     }
 }
 
+/// Mount points currently under `root`, deepest first.
+///
+/// A recursive bind (`MS_REC`) of `/dev` brings `devpts`, `shm` and friends
+/// along, and each is a mount of its own. Unmounting only the paths we bound
+/// leaves those children mounted, the parent returns `EBUSY`, and the rootfs
+/// stays mounted — which is what made the later `e2fsck` exit 8 rather than
+/// seal the journal.
+fn mounts_under(root: &str) -> Vec<String> {
+    let Ok(mounts) = std::fs::read_to_string("/proc/self/mounts") else {
+        return Vec::new();
+    };
+    mounts_under_in(&mounts, root)
+}
+
+/// The parsing and ordering half of [`mounts_under`], split out so it can be
+/// tested without a `/proc` to read.
+fn mounts_under_in(mounts: &str, root: &str) -> Vec<String> {
+    let prefix = format!("{root}/");
+    let mut found: Vec<String> = mounts
+        .lines()
+        .filter_map(|line| line.split_whitespace().nth(1))
+        // `/proc/self/mounts` escapes spaces and tabs octally.
+        .map(|point| point.replace("\\040", " ").replace("\\011", "\t"))
+        .filter(|point| point == root || point.starts_with(&prefix))
+        .collect();
+    // Deepest first, so a child never keeps its parent busy.
+    found.sort_by_key(|point| std::cmp::Reverse(point.matches('/').count()));
+    found
+}
+
+/// Unmount everything under `root`, deepest first, and report whether the
+/// subtree is genuinely gone.
+///
+/// `MNT_DETACH` is the fallback rather than the default: a lazy unmount
+/// returns success while the filesystem is still in use, which would let the
+/// caller seal a journal that is still being written.
+fn unmount_tree(root: &str) -> bool {
+    for point in mounts_under(root) {
+        if umount(point.as_str()).is_ok() {
+            continue;
+        }
+        if let Err(error) = umount2(point.as_str(), MntFlags::MNT_DETACH) {
+            eprintln!("mvm-host-vm-init: warning: umount {point} failed: {error}");
+        }
+    }
+    let remaining = mounts_under(root);
+    if !remaining.is_empty() {
+        eprintln!(
+            "mvm-host-vm-init: warning: {} mount(s) still present under {root}: {}",
+            remaining.len(),
+            remaining.join(", ")
+        );
+        return false;
+    }
+    true
+}
+
 impl Drop for MountedRootfs {
     fn drop(&mut self) {
-        for mount_point in self.bind_mounts.iter().rev() {
-            if let Err(error) = umount(mount_point.as_str()) {
-                eprintln!("mvm-host-vm-init: warning: umount {mount_point} failed: {error}");
-            }
-        }
-        if let Err(error) = umount(MOUNT_POINT) {
-            eprintln!("mvm-host-vm-init: warning: umount {MOUNT_POINT} failed: {error}");
-        }
+        // Unmount the whole subtree rather than just the paths we bound: a
+        // recursive bind creates children we never recorded, and any one of
+        // them left mounted keeps the rootfs busy.
+        unmount_tree(MOUNT_POINT);
     }
 }
 
@@ -380,6 +433,48 @@ mod tests {
         // the Nix factory. If they change, the wiring sites must update.
         assert_eq!(HOOK_PATH, "/etc/mvm/hooks/before_build.sh");
         assert_eq!(MOUNT_POINT, "/tmp/mvm-before-build-rootfs");
+    }
+
+    /// The bug this replaced: only the recorded bind targets were unmounted,
+    /// so `MS_REC` children kept the rootfs busy, the parent umount returned
+    /// EBUSY, and `e2fsck` then exited 8 against a still-mounted filesystem.
+    #[test]
+    fn mounts_under_returns_children_before_their_parent() {
+        let mounts = concat!(
+            "/dev/root / ext4 rw 0 0\n",
+            "/dev/loop0 /tmp/mvm-before-build-rootfs ext4 rw 0 0\n",
+            "devtmpfs /tmp/mvm-before-build-rootfs/dev devtmpfs rw 0 0\n",
+            "devpts /tmp/mvm-before-build-rootfs/dev/pts devpts rw 0 0\n",
+        );
+        let found = mounts_under_in(mounts, MOUNT_POINT);
+        assert_eq!(
+            found,
+            vec![
+                "/tmp/mvm-before-build-rootfs/dev/pts",
+                "/tmp/mvm-before-build-rootfs/dev",
+                "/tmp/mvm-before-build-rootfs",
+            ],
+            "children must unmount before the parent"
+        );
+    }
+
+    #[test]
+    fn mounts_under_ignores_unrelated_and_prefix_lookalike_paths() {
+        let mounts = concat!(
+            "tmpfs /tmp tmpfs rw 0 0\n",
+            // Shares a prefix but is a different directory.
+            "tmpfs /tmp/mvm-before-build-rootfs-old ext4 rw 0 0\n",
+            "/dev/loop0 /tmp/mvm-before-build-rootfs ext4 rw 0 0\n",
+        );
+        let found = mounts_under_in(mounts, MOUNT_POINT);
+        assert_eq!(found, vec!["/tmp/mvm-before-build-rootfs"]);
+    }
+
+    #[test]
+    fn mounts_under_decodes_octal_escapes() {
+        let mounts = "tmpfs /tmp/mvm-before-build-rootfs/a\\040b tmpfs rw 0 0\n";
+        let found = mounts_under_in(mounts, MOUNT_POINT);
+        assert_eq!(found, vec!["/tmp/mvm-before-build-rootfs/a b"]);
         assert_eq!(UTIL_LINUX_LOSETUP, "/sbin/losetup");
         assert_eq!(E2FSCK, "/sbin/e2fsck");
         assert_eq!(

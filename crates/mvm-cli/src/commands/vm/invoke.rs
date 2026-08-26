@@ -812,7 +812,7 @@ fn dispatch_inner(call: EntrypointDispatch<'_>) -> Result<i32> {
     let mut capture = mvm_hostd::stream::EntrypointSink::for_vm(vm_name);
     let recorded = capture.is_recorded();
     let mut out = CallOutput::inherited();
-    let terminal = mvm_agentd::vsock::send_run_entrypoint(
+    let terminal = mvm_agentd::vsock::send_run_entrypoint_while(
         &mut stream,
         mvm_agentd::vsock::RunEntrypointCall {
             stdin: match stdin {
@@ -831,6 +831,10 @@ fn dispatch_inner(call: EntrypointDispatch<'_>) -> Result<i32> {
             stream_input: streaming,
         },
         |event| write_entrypoint_event(event, &mut capture, &mut out),
+        // Consulted only when the stream has gone quiet. A guest that dies
+        // mid-stream leaves the host socket open, so without this the read
+        // blocks forever and the run never returns.
+        || mvm_runtime::checkpoint::vm_is_running(vm_name),
     );
     drop(capture);
     // Before the `?`, not after: a call that failed truncated the caller's
