@@ -20,6 +20,7 @@ use std::process::Command;
 use std::time::Instant;
 
 use cucumber::{given, then, when};
+use mvm_conformance::IsolatedHome;
 
 use crate::steps::cli::{mvmctl_command, workspace_root};
 use crate::world::{CliWorld, LaunchRecord};
@@ -126,8 +127,7 @@ fn run_in_e2e_home(args: &str, extra_env: &[(&str, &str)]) -> LaunchRecord {
     command
         .current_dir(workspace_root())
         .args(shell_split(args))
-        .env("MVM_HOME", &home)
-        .env("HOME", &home)
+        .isolated_home(&home)
         .env("MVM_PHASE_TIMING", "1");
     for (key, value) in extra_env {
         command.env(key, value);
