@@ -42,6 +42,7 @@ struct Inner {
     resolver: Arc<dyn Resolve>,
     timeout: Option<Duration>,
     connect_timeout: Option<Duration>,
+    read_idle_timeout: Option<Duration>,
     default_headers: HeaderMap,
     max_response_bytes: Option<u64>,
     user_agent: HeaderValue,
@@ -116,6 +117,7 @@ pub struct ClientBuilder {
     resolver: Option<Arc<dyn Resolve>>,
     timeout: Option<Duration>,
     connect_timeout: Option<Duration>,
+    read_idle_timeout: Option<Duration>,
     default_headers: HeaderMap,
     max_response_bytes: Option<u64>,
     user_agent: String,
@@ -133,6 +135,7 @@ impl Default for ClientBuilder {
             resolver: None,
             timeout: None,
             connect_timeout: None,
+            read_idle_timeout: None,
             default_headers: HeaderMap::new(),
             max_response_bytes: None,
             user_agent: concat!("mvm/", env!("CARGO_PKG_VERSION")).to_string(),
@@ -165,6 +168,12 @@ impl ClientBuilder {
     }
 
     #[must_use]
+    /// Override how long a connected peer may send nothing before a read fails.
+    pub fn read_idle_timeout(mut self, d: Duration) -> Self {
+        self.read_idle_timeout = Some(d);
+        self
+    }
+
     pub fn connect_timeout(mut self, d: Duration) -> Self {
         self.connect_timeout = Some(d);
         self
@@ -223,6 +232,7 @@ impl ClientBuilder {
                 resolver: self.resolver.unwrap_or_else(|| Arc::new(SystemResolver)),
                 timeout: self.timeout,
                 connect_timeout: self.connect_timeout,
+                read_idle_timeout: self.read_idle_timeout,
                 default_headers: self.default_headers,
                 max_response_bytes: self.max_response_bytes,
                 user_agent,
@@ -648,6 +658,26 @@ async fn write_request_body(stream: &mut Stream, body: Option<RequestBody>) -> R
 /// is how an image pull came to sit in `SYN-SENT` for half an hour.
 pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// How long a connected peer may send nothing before the read gives up.
+///
+/// The companion to `DEFAULT_CONNECT_TIMEOUT`, and a default for the same
+/// reason: a peer that accepts and then goes silent never refuses, so an
+/// unbounded read parks in `epoll` forever. That is not hypothetical either —
+/// `mvmctl image pull` sat for five minutes consuming 0.187s of CPU, and a
+/// `machine run --image` outlived its own `--timeout 120` by 29 minutes.
+///
+/// Deliberately generous. This bounds *silence*, not slowness: a slow transfer
+/// that keeps delivering bytes re-arms the budget on every read, so only a
+/// genuinely stalled connection trips it.
+pub const DEFAULT_READ_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// The per-read idle budget. An unset timeout resolves to a finite default; it
+/// must never resolve to "wait indefinitely", which is what let a silent peer
+/// consume a whole request.
+fn read_idle_budget(configured: Option<Duration>) -> Duration {
+    configured.unwrap_or(DEFAULT_READ_IDLE_TIMEOUT)
+}
+
 /// Order candidate addresses IPv4-first.
 ///
 /// The timeout above makes a dead address survivable; this makes it cheap.
@@ -691,7 +721,10 @@ async fn connect(
             Ok(tcp) => {
                 tcp.set_nodelay(true).ok();
                 if !tls_wanted {
-                    return Ok(Stream::Plain(tcp));
+                    return Ok(Stream::plain(
+                        tcp,
+                        read_idle_budget(inner.read_idle_timeout),
+                    ));
                 }
                 let server_name = rustls_pki_types::ServerName::try_from(host.to_string())
                     .map_err(|_| Error::Url(format!("invalid dns name {host}")))?;
@@ -703,7 +736,10 @@ async fn connect(
                         host: host.to_string(),
                         source,
                     })?;
-                return Ok(Stream::Tls(Box::new(tls)));
+                return Ok(Stream::tls(
+                    Box::new(tls),
+                    read_idle_budget(inner.read_idle_timeout),
+                ));
             }
             Err(e) => last = Some(e),
         }
@@ -790,7 +826,10 @@ async fn connect_via_proxy(
         crate::proxy::ProxyKind::Socks5 => socks5_connect(tcp, proxy, host, port).await?,
     };
     if !tls_wanted {
-        return Ok(Stream::Plain(tcp));
+        return Ok(Stream::plain(
+            tcp,
+            read_idle_budget(inner.read_idle_timeout),
+        ));
     }
     // TLS terminates at the destination, not the proxy: the SNI and the
     // certificate checked are the destination's, so an HTTP proxy carrying this
@@ -805,7 +844,10 @@ async fn connect_via_proxy(
             host: host.to_string(),
             source,
         })?;
-    Ok(Stream::Tls(Box::new(tls)))
+    Ok(Stream::tls(
+        Box::new(tls),
+        read_idle_budget(inner.read_idle_timeout),
+    ))
 }
 
 fn proxy_auth_header(proxy: &crate::proxy::Proxy) -> Option<String> {
@@ -1113,6 +1155,7 @@ mod tests {
             resolver: Arc::new(SystemResolver),
             timeout: None,
             connect_timeout: None,
+            read_idle_timeout: None,
             default_headers: HeaderMap::new(),
             max_response_bytes: None,
             user_agent: HeaderValue::from_static("mvm-test"),
@@ -1283,6 +1326,121 @@ mod connect_resilience_tests {
     fn an_empty_or_single_family_list_is_unchanged() {
         assert!(ipv4_first(&[]).is_empty());
         assert_eq!(ipv4_first(&[v6(1), v6(2)]), vec![v6(1), v6(2)]);
+    }
+
+    /// A server that accepts and then never answers must not hang the client.
+    ///
+    /// This is the other half of the connect regression. `DEFAULT_CONNECT_TIMEOUT`
+    /// bounds *reaching* a peer, and nothing bounded what happens after: a peer
+    /// that completes the handshake and then goes silent leaves the request
+    /// parked in `epoll` forever, because the only deadline is the optional
+    /// whole-request `timeout`, which defaults to `None`.
+    ///
+    /// Observed in production shape: `mvmctl image pull alpine:latest` sat for
+    /// five minutes consuming 0.187s of CPU — blocked, not working — and a
+    /// `machine run --image` survived 29 minutes against `--timeout 120`.
+    ///
+    /// A real listener is used rather than a reserved address because the
+    /// property under test is "accepted then silent", which a black-holed
+    /// address cannot express: that one fails at connect, which is already
+    /// bounded.
+    #[tokio::test]
+    async fn a_peer_that_accepts_then_goes_silent_does_not_hang_forever() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind a local listener");
+        let addr = listener.local_addr().expect("listener has an address");
+
+        // Accept and hold the connection open, writing nothing, forever.
+        let _accepting = tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((socket, _)) = listener.accept().await {
+                held.push(socket);
+            }
+        });
+
+        let client = Client::builder()
+            .read_idle_timeout(Duration::from_millis(500))
+            .build()
+            .expect("build a client with a short idle budget");
+        let started = std::time::Instant::now();
+        let result = tokio::time::timeout(
+            Duration::from_secs(20),
+            client.get(format!("http://{addr}/never-answers")).send(),
+        )
+        .await;
+
+        match result {
+            Err(_) => panic!(
+                "the request was still parked after 20s with no bound of its own; \
+                 a silent peer must fail, not hang (elapsed {:?})",
+                started.elapsed()
+            ),
+            Ok(Ok(_)) => panic!("a silent peer cannot produce a successful response"),
+            Ok(Err(error)) => {
+                // It must give up on its own, and say why.
+                let text = error.to_string().to_lowercase();
+                assert!(
+                    text.contains("timeout") || text.contains("timed out"),
+                    "the failure must name the timeout, not surface as some \
+                     unrelated parse or connection error: {error}"
+                );
+            }
+        }
+    }
+
+    /// The counter-test, and the reason the bound is on idle time rather than
+    /// total duration.
+    ///
+    /// A large blob pull is legitimately slow. If the budget were a whole-request
+    /// deadline, fixing the hang would have broken exactly the multi-hundred-
+    /// megabyte image pulls it exists to protect — a worse bug than the one
+    /// being fixed, and one that would only show up on big images.
+    ///
+    /// Here the transfer takes far longer than the budget in total while no
+    /// single gap between reads exceeds it. That must succeed.
+    #[tokio::test]
+    async fn a_slow_but_progressing_transfer_is_not_cut_off() {
+        const BODY: &[u8] = b"0123456789";
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind a local listener");
+        let addr = listener.local_addr().expect("listener has an address");
+
+        let _serving = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept");
+            let header = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", BODY.len());
+            let _ = socket.write_all(header.as_bytes()).await;
+            // One byte at a time, each gap under the budget, total well over it.
+            for byte in BODY {
+                tokio::time::sleep(Duration::from_millis(120)).await;
+                if socket.write_all(&[*byte]).await.is_err() {
+                    return;
+                }
+                let _ = socket.flush().await;
+            }
+        });
+
+        let client = Client::builder()
+            .read_idle_timeout(Duration::from_millis(400))
+            .build()
+            .expect("build a client with a short idle budget");
+
+        let started = std::time::Instant::now();
+        let response = client
+            .get(format!("http://{addr}/slow"))
+            .send()
+            .await
+            .expect("a slow but progressing transfer must not be cut off");
+        let body = response.bytes().await.expect("read the drip-fed body");
+
+        assert_eq!(body.as_ref(), BODY);
+        assert!(
+            started.elapsed() > Duration::from_millis(400),
+            "the transfer should have outlived the idle budget in total, or it \
+             is not exercising the distinction: {:?}",
+            started.elapsed()
+        );
     }
 
     /// **The deterministic half of the regression.** An unset timeout must
