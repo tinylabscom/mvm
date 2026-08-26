@@ -510,8 +510,8 @@ for detailed scope and acceptance criteria.
       the opt-in forensic *network* capture path, so the transcript of what a
       workload actually printed sits beside the audit chain rather than inside
       it. WS4 anchors it and surfaces it on the receipt. Adjacent to, and
-      deliberately disjoint from, the qualification plan's WS1 (in flight on
-      `feat/ws1-execution-receipt-completeness`).
+      deliberately disjoint from, the qualification plan's WS1, which landed in
+      #2855.
 
 - [ ] **Workload service plane**
       (`specs/plans/2026-08-25-workload-service-plane.md`). Three workstreams

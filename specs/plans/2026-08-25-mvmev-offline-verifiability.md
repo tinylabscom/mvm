@@ -7,7 +7,7 @@ Validation: none
 **Date:** 2026-08-25
 **Branch:** `docs/mvmev-canonicalization-spec`
 **Issue:** #2863
-**Related:** ADR-110, `specs/plans/2026-08-25-execution-contract-qualification-plan.md` (WS1 is separately in flight on `feat/ws1-execution-receipt-completeness`)
+**Related:** ADR-110, `specs/plans/2026-08-25-execution-contract-qualification-plan.md` (its WS1 landed in #2855)
 
 ## Context
 
@@ -61,7 +61,8 @@ it, and `.mvmev` carries neither the transcript nor a commitment to it.
   a ciphertext-manifest root, matching what the existing network-capture path
   already does.
 - Re-doing WS1 of the qualification plan (exit code, timing, capabilities,
-  network destinations). That work is in flight elsewhere.
+  network destinations). That landed in #2855; WS4.4 below adds the transcript
+  root to the same receipt rather than revisiting those fields.
 
 ---
 
