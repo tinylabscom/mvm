@@ -212,6 +212,55 @@ if ! MVM_HOME="$E2E_HOME" "$MVMCTL" bootstrap; then
   BOOTSTRAP_FAILED=1
 fi
 
+# ---------------------------------------------------------------------------
+# Warm the launch artifacts, even when bootstrap did not get that far.
+#
+# `bootstrap` prepares the builder VM image *first* and deliberately skips the
+# runtime/initramfs warm when that step fails — there is a test pinning that
+# order. So a builder image that cannot be built leaves the universal
+# initramfs unbuilt, and since it is required on every host, each scenario then
+# cross-compiles the guest binaries itself: a multi-minute cargo build, inside
+# a scenario, repeated for every live scenario in the suite.
+#
+# One warm-up launch populates that cache once. Both steps are best-effort and
+# bounded: this is a warm-up, and a failure here should surface as the
+# scenarios failing on their own terms rather than as a dead run.
+# ---------------------------------------------------------------------------
+warm_launch_artifacts() {
+  echo "==> warming launch artifacts (runtime overlay + universal initramfs)"
+
+  MVM_HOME="$E2E_HOME" "$MVMCTL" build runtime-overlay build >/dev/null 2>&1 \
+    && echo "    runtime overlay ready" \
+    || echo "    runtime overlay: not warmed (scenarios needing it will say so)"
+
+  # Layout is cache/initramfs/<version>/<arch>/initramfs.cpio.gz. Globbed on
+  # version rather than hardcoded, so a version bump does not silently turn
+  # this check into "never cached" and pay the build every run.
+  if find "$E2E_HOME/cache/initramfs" -name initramfs.cpio.gz -size +0c 2>/dev/null \
+     | read -r _; then
+    echo "    universal initramfs already cached"
+    return 0
+  fi
+
+  echo "    building the universal initramfs once (cross-compiles guest binaries)"
+  MVM_HOME="$E2E_HOME" "$MVMCTL" machine run --name bdd-warmup --image alpine \
+    -- /bin/true >/dev/null 2>&1 &
+  local warm_pid=$! waited=0
+  while kill -0 "$warm_pid" 2>/dev/null; do
+    if (( waited >= ${MVM_E2E_WARMUP_SECS:-900} )); then
+      echo "    warm-up exceeded its budget; killing it and continuing"
+      kill -TERM "$warm_pid" 2>/dev/null || true
+      break
+    fi
+    sleep 10
+    waited=$((waited + 10))
+    (( waited % 60 == 0 )) && echo "    ... still warming (${waited}s)"
+  done
+  wait "$warm_pid" 2>/dev/null || true
+  echo "    warm-up done (${waited}s)"
+}
+warm_launch_artifacts
+
 echo "==> host posture"
 # `doctor` exits nonzero precisely when it has something to report, so its
 # status is information rather than a gate.

@@ -196,18 +196,26 @@ pub(crate) fn run_mvmctl_isolated_live_home(world: &mut CliWorld, args: String) 
     // paths (e.g. `examples/exit_code`) resolve the same way as a manual run
     // from the repo root, and the target directory is prepended to `PATH` so
     // helper binaries built alongside `mvmctl` are found.
-    if world.isolated_home.is_none() {
+    //
+    // The home is the artifact-warm one when `MVM_E2E_HOME` names it. A fresh
+    // tempdir per scenario looks like better isolation, but the guest binaries
+    // are cached *under the home*, so every such scenario re-cross-compiles
+    // them from scratch — minutes each, repeated across the live suite. The
+    // warm home is what makes a live run finish in a sane time.
+    let warm_home = std::env::var_os("MVM_E2E_HOME").map(std::path::PathBuf::from);
+    if warm_home.is_none() && world.isolated_home.is_none() {
         world.isolated_home = Some(tempfile::tempdir().expect("create isolated MVM_HOME"));
     }
-    let home = world
-        .isolated_home
-        .as_ref()
-        .expect("isolated home is set above");
+    let home: std::path::PathBuf = match (&warm_home, world.isolated_home.as_ref()) {
+        (Some(warm), _) => warm.clone(),
+        (None, Some(dir)) => dir.path().to_path_buf(),
+        (None, None) => unreachable!("one of the two is set above"),
+    };
     let mut command = mvmctl_command();
     command
         .current_dir(workspace_root())
         .args(args.split_whitespace())
-        .isolated_home(home.path());
+        .isolated_home(&home);
     if world.warm_residency {
         command.env("MVM_RESIDENCY", "warm");
     }
