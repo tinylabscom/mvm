@@ -14,6 +14,7 @@ use serde::Deserialize;
 
 use crate::steps::cli::mvmctl_command;
 use crate::world::CliWorld;
+use mvm_conformance::IsolatedHome;
 
 /// Repo root — two levels above this crate's manifest dir, resolved at compile
 /// time so the run is independent of the process working directory.
@@ -42,9 +43,7 @@ fn spawn_mvmctl(args: &str, home: Option<PathBuf>) -> std::process::Output {
     if let Some(home) = home {
         // Reconcile-on-entry converges live-VM state; disable it so a refusal
         // guard runs against a clean slate with no host side effects.
-        cmd.env("HOME", &home)
-            .env("MVM_HOME", &home)
-            .env("MVM_SKIP_RECONCILE", "1");
+        cmd.isolated_home(&home).env("MVM_SKIP_RECONCILE", "1");
     }
     cmd.args(args.split_whitespace())
         .output()

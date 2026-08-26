@@ -413,3 +413,173 @@ mod tests {
         );
     }
 }
+
+/// Point a command at an isolated `HOME` without orphaning the Rust toolchain.
+///
+/// Scenarios replace `HOME` so a run cannot touch the developer's real
+/// `~/.mvm`. But `rustup` locates its toolchains through `$HOME/.rustup` unless
+/// `RUSTUP_HOME` says otherwise, so replacing `HOME` alone also hides every
+/// installed toolchain and target from any command that compiles something.
+///
+/// On a source checkout that is not a subtle degradation. `mvmctl` cross-compiles
+/// the embedded host-vm binaries to musl, and under a bare isolated `HOME` that
+/// build either fails with
+///
+/// ```text
+/// error[E0463]: can't find crate for `core`
+///   = note: the `x86_64-unknown-linux-musl` target may not be installed
+/// ```
+///
+/// — which reads as a missing target on a host where the target *is* installed —
+/// or silently downloads a fresh toolchain into the throwaway directory, once per
+/// scenario, for as long as the suite runs.
+///
+/// So the state isolation is kept and the toolchain locators are passed through.
+/// `MVM_HOME` still points at the temporary directory; only rustup's and cargo's
+/// own roots survive, and neither is state the suite is trying to isolate.
+pub trait IsolatedHome {
+    /// Point this command at `home` for state, keeping the toolchain visible.
+    fn isolated_home(&mut self, home: impl AsRef<std::path::Path>) -> &mut Self;
+}
+
+impl IsolatedHome for std::process::Command {
+    fn isolated_home(&mut self, home: impl AsRef<std::path::Path>) -> &mut Self {
+        let home = home.as_ref();
+        self.env("HOME", home).env("MVM_HOME", home);
+        for (var, dir) in [("RUSTUP_HOME", ".rustup"), ("CARGO_HOME", ".cargo")] {
+            if let Some(value) = toolchain_root(var, dir) {
+                self.env(var, value);
+            }
+        }
+        self
+    }
+}
+
+/// Resolve a toolchain root: an explicit override wins, otherwise the directory
+/// under the *real* home, and only when it actually exists — passing a path that
+/// is not there would replace one confusing failure with another.
+fn toolchain_root(var: &str, dir: &str) -> Option<std::path::PathBuf> {
+    if let Some(explicit) = std::env::var_os(var) {
+        let path = std::path::PathBuf::from(explicit);
+        return path.is_dir().then_some(path);
+    }
+    let real_home = std::env::var_os("HOME")?;
+    let path = std::path::PathBuf::from(real_home).join(dir);
+    path.is_dir().then_some(path)
+}
+
+#[cfg(test)]
+mod isolate_home_tests {
+    use super::*;
+
+    /// The isolation itself must survive the fix: both state vars still point at
+    /// the scenario's directory, or the suite starts writing to the real `~/.mvm`.
+    #[test]
+    fn isolates_both_state_variables() {
+        let dir = std::env::temp_dir().join("mvm-isolate-home-test");
+        let mut command = std::process::Command::new("true");
+        command.isolated_home(&dir);
+
+        let vars: std::collections::BTreeMap<_, _> = command
+            .get_envs()
+            .filter_map(|(k, v)| Some((k.to_str()?.to_string(), v?.to_str()?.to_string())))
+            .collect();
+
+        assert_eq!(vars.get("HOME").map(String::as_str), dir.to_str());
+        assert_eq!(vars.get("MVM_HOME").map(String::as_str), dir.to_str());
+    }
+
+    /// The point of the change: a toolchain root that exists is handed through,
+    /// so a compiling command can still find the installed targets.
+    #[test]
+    fn passes_an_existing_toolchain_root_through() {
+        let real = std::env::temp_dir().join("mvm-isolate-home-rustup");
+        std::fs::create_dir_all(&real).expect("create fake RUSTUP_HOME");
+        // Safety: single-threaded test process; the var is restored below.
+        let previous = std::env::var_os("RUSTUP_HOME");
+        unsafe { std::env::set_var("RUSTUP_HOME", &real) };
+
+        let mut command = std::process::Command::new("true");
+        command.isolated_home(std::env::temp_dir());
+        let passed = command
+            .get_envs()
+            .any(|(k, v)| k == "RUSTUP_HOME" && v.map(|v| v == real.as_os_str()) == Some(true));
+
+        match previous {
+            Some(value) => unsafe { std::env::set_var("RUSTUP_HOME", value) },
+            None => unsafe { std::env::remove_var("RUSTUP_HOME") },
+        }
+        assert!(passed, "an existing RUSTUP_HOME must reach the child");
+    }
+
+    /// A root that does not exist is not forwarded: pointing rustup at a missing
+    /// directory trades one misleading failure for another.
+    #[test]
+    fn does_not_forward_a_missing_root() {
+        let previous = std::env::var_os("RUSTUP_HOME");
+        unsafe { std::env::set_var("RUSTUP_HOME", "/definitely/not/a/real/rustup/root") };
+
+        let mut command = std::process::Command::new("true");
+        command.isolated_home(std::env::temp_dir());
+        let forwarded = command.get_envs().any(|(k, _)| k == "RUSTUP_HOME");
+
+        match previous {
+            Some(value) => unsafe { std::env::set_var("RUSTUP_HOME", value) },
+            None => unsafe { std::env::remove_var("RUSTUP_HOME") },
+        }
+        assert!(!forwarded, "a missing root must not be forwarded");
+    }
+
+    /// No step may replace `HOME` by hand.
+    ///
+    /// `IsolatedHome::isolated_home` exists because replacing `HOME` alone hides
+    /// the Rust toolchain from any command that compiles something — on a source
+    /// checkout the embedded host-vm binaries then fail to cross-compile with
+    /// "the `x86_64-unknown-linux-musl` target may not be installed", on a host
+    /// where it is installed. That failure reads as a broken product, and it cost
+    /// a ninety-minute live run to find. A raw `.env("HOME", …)` reintroduces it
+    /// silently, so the rule is mechanical rather than remembered.
+    #[test]
+    fn no_step_sets_home_without_the_isolation_helper() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
+        let mut offenders = Vec::new();
+        let mut scanned = 0usize;
+
+        let mut stack = vec![dir.clone()];
+        while let Some(current) = stack.pop() {
+            for entry in std::fs::read_dir(&current).into_iter().flatten().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if path.extension().is_some_and(|e| e == "rs") {
+                    scanned += 1;
+                    let text = std::fs::read_to_string(&path).unwrap_or_default();
+                    for (number, line) in text.lines().enumerate() {
+                        if line.contains(r#".env("HOME""#) {
+                            offenders.push(format!(
+                                "  {}:{}",
+                                path.file_name().unwrap_or_default().to_string_lossy(),
+                                number + 1
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+
+        assert!(
+            scanned > 5,
+            "scanned only {scanned} step file(s) — the walk went blind, so this \
+             test would pass without checking anything"
+        );
+        assert!(
+            offenders.is_empty(),
+            "{} site(s) set HOME directly; use `command.isolated_home(path)` so the \
+             Rust toolchain stays visible to the child:\n{}",
+            offenders.len(),
+            offenders.join("\n")
+        );
+    }
+}

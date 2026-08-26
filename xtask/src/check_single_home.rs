@@ -61,6 +61,14 @@ const ALL_RULES: &[Rule] = &[
 /// narrowest rule class that the file legitimately needs.
 const EXEMPTIONS: &[(&str, &[Rule], &str)] = &[
     (
+        "crates/mvm-conformance/src/lib.rs",
+        &[Rule::HomeRead],
+        "locates rustup's and cargo's own roots, not mvm state: a scenario replaces \
+         HOME to isolate ~/.mvm, which also hides the installed Rust toolchain from \
+         any command that compiles, so the real $HOME is read to pass RUSTUP_HOME / \
+         CARGO_HOME through",
+    ),
+    (
         "crates/mvm-core/src/config.rs",
         ALL_RULES,
         "the single legitimate resolver: owns the MVM_HOME | $HOME/.mvm derivation and the child layout",

@@ -18,6 +18,7 @@ use mvm_runtime::vm::volume_registry::LocalVolumeCatalog;
 use crate::world::CliWorld;
 
 use super::cli::{mvmctl_command, workspace_root};
+use mvm_conformance::IsolatedHome;
 
 fn isolated_home(world: &CliWorld) -> &Path {
     world
@@ -210,8 +211,7 @@ fn execute_machine_shell(world: &mut CliWorld, script: String, machine: String) 
     let output = mvmctl_command()
         .current_dir(workspace_root())
         .args(["machine", "exec", &machine, "--", "/bin/sh", "-c", &script])
-        .env("HOME", home)
-        .env("MVM_HOME", home)
+        .isolated_home(home)
         .output()
         .expect("execute command in live volume machine");
     world.last_run = Some(output);
@@ -229,8 +229,7 @@ fn attempt_direct_start(world: &mut CliWorld, machine: String, backend: String) 
     let output = mvmctl_command()
         .current_dir(workspace_root())
         .args(["machine", "start", &machine, "--hypervisor", &backend])
-        .env("HOME", home)
-        .env("MVM_HOME", home)
+        .isolated_home(home)
         .env("MVM_DIRECT_BOOT", "1")
         .env("MVM_KERNEL_PATH", &kernel)
         .env("MVM_ROOTFS_PATH", &rootfs)
