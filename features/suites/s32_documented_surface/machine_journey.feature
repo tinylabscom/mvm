@@ -69,7 +69,11 @@ Feature: The documented machine verbs operate a real guest
 
   @live
   Scenario: the guest checkpoints and restores
-    When I run mvmctl against the journey machine with "machine checkpoint create bdd-journey"
+    # `--class vm-full` because that is the form the docs teach, and the two
+    # classes have opposite preconditions: `vm-full` checkpoints a *running*
+    # guest (it pauses internally), while the default `fs-quick` refuses one
+    # and wants it stopped or paused first.
+    When I run mvmctl against the journey machine with "machine checkpoint create bdd-journey --class vm-full"
     Then the command exits with code 0
     When I run mvmctl against the journey machine with "machine checkpoint ls bdd-journey"
     Then the command exits with code 0
