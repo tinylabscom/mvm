@@ -636,6 +636,12 @@ fn boot_kernel_impl(params: KernelBootUntilParams<'_>) -> Result<KernelBootResul
         initrd_bounds,
         &virtio_nodes,
         Some(&rng_seed),
+        // One, until the count reaches this process. `HvfSupervisorConfig`
+        // carries no `vcpus` field yet, so there is nothing truthful to pass —
+        // describing CPUs in the tree that no `hv_vcpu_create` backs would hang
+        // the guest waiting for secondaries that never arrive. Step 1 of #2888
+        // adds the field; this becomes `cfg.vcpus` then.
+        1,
     );
     if dtb.len() > FDT_MAX_SIZE as usize {
         return Err(HvfError::BadBoot(BootFault::DtbTooLarge {

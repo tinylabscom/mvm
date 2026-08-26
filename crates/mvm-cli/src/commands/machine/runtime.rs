@@ -253,8 +253,37 @@ fn apply_machine_ttl(name: &str, dur_str: &str) -> Result<()> {
     }
 }
 
+/// `build_mode` for the SDK boot envelope: the tier of the grant this launch
+/// actually carries, not the tier of the image it booted.
+///
+/// The SDK gates its DevOnly surfaces on this field —
+/// `if self.build_mode != "dev": raise SandboxDevOnly`. Reporting the image
+/// posture made that gate pass for a launch whose grant is ProdSafe-only, so
+/// the SDK went ahead and the *guest* refused instead, with a verb-grant error
+/// rather than the documented `SandboxDevOnly`. A caller cannot act on a field
+/// that answers a different question than the one it is asked.
+///
+/// A grant-eligible launch receives the attenuated ProdSafe verb set
+/// (`default_agent_verbs`), which admits no DevOnly verb — `--agent-verb`
+/// rejects them outright — so `fs`/`proc`/`exec` will be refused no matter how
+/// the image was built. That is `prod` from the SDK's point of view whatever
+/// the template says.
 fn resolve_build_mode_for_envelope(args: &MachineRunArgs, name: &str) -> &'static str {
+    if launch_carries_restricted_grant(args) {
+        return "prod";
+    }
     resolve_machine_build_mode(args.run.manifest.as_deref(), name)
+}
+
+/// Whether this launch is admitted with the attenuated ProdSafe-only verb
+/// grant. Mirrors the `restrict_agent_verbs` decision the persistent OCI start
+/// makes, so the envelope cannot disagree with the grant that was issued.
+pub(crate) fn launch_carries_restricted_grant(args: &MachineRunArgs) -> bool {
+    crate::commands::vm::agent_verbs::grant_eligible(
+        args.tty,
+        !args.run.argv.is_empty(),
+        matches!(args.run.profile, crate::commands::vm::exec::RunProfile::Dev),
+    )
 }
 
 /// Resolve a machine's `build_mode` (`"dev"` / `"prod"`) for the boot-time

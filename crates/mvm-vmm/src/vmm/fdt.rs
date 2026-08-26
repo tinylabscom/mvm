@@ -203,6 +203,27 @@ pub fn fresh_rng_seed() -> [u8; RNG_SEED_LEN] {
 /// unconditional, leaving `random.trust_bootloader=0` on the cmdline as the
 /// only way to turn it off — which mvm never sets. This is the same mechanism
 /// other arm64 VMMs use.
+/// MPIDR_EL1 affinity for logical CPU `index`.
+///
+/// Aff0 only, one core per cluster-of-one: `cpu@N` has affinity `N`. The vCPU's
+/// `MPIDR_EL1` must be set to the same value or `gic_populate_rdist` cannot
+/// match the CPU to its redistributor frame and the guest faults during IRQ
+/// init — before any console output, so the symptom is a silent hang.
+#[must_use]
+pub const fn mpidr_for_cpu(index: u32) -> u64 {
+    index as u64
+}
+
+/// Bytes of GIC redistributor MMIO for `vcpus` CPUs.
+///
+/// Each CPU owns one `GICV3_REDIST_STRIDE` frame and the kernel walks them
+/// consecutively from `GICV3_REDIST_BASE`. Advertising a region for fewer CPUs
+/// than the `cpus` node declares makes that walk run off the end of the region.
+#[must_use]
+pub const fn redistributor_region_size(vcpus: u32) -> u64 {
+    GICV3_REDIST_STRIDE * vcpus as u64
+}
+
 pub fn build_dtb(
     bootargs: &str,
     ram_base: u64,
@@ -210,7 +231,11 @@ pub fn build_dtb(
     initrd: Option<(u64, u64)>,
     virtio: &[(u64, u32)],
     rng_seed: Option<&[u8]>,
+    vcpus: u32,
 ) -> Vec<u8> {
+    // Zero CPUs is not a bootable machine; clamp rather than emit a `cpus` node
+    // the kernel will panic on.
+    let vcpus = vcpus.max(1);
     let reg_pair = |addr: u64, size: u64| {
         [
             (addr >> 32) as u32,
@@ -230,11 +255,20 @@ pub fn build_dtb(
     f.begin_node("cpus");
     f.prop_u32("#address-cells", 2);
     f.prop_u32("#size-cells", 0);
-    f.begin_node("cpu@0");
-    f.prop_str("device_type", "cpu");
-    f.prop_str("compatible", "arm,arm-v8");
-    f.prop_cells("reg", &[0, 0]); // MPIDR affinity 0 (2 address cells)
-    f.end_node();
+    for cpu in 0..vcpus {
+        let mpidr = mpidr_for_cpu(cpu);
+        f.begin_node(&format!("cpu@{mpidr:x}"));
+        f.prop_str("device_type", "cpu");
+        f.prop_str("compatible", "arm,arm-v8");
+        // Secondaries are parked until the guest brings them up with a PSCI
+        // `CPU_ON`; say so, or the kernel waits on a spin-table that no one
+        // releases. CPU 0 is entered directly by the boot protocol and needs no
+        // enable-method, but declaring it uniformly keeps the node shape one
+        // thing rather than two.
+        f.prop_str("enable-method", "psci");
+        f.prop_cells("reg", &[(mpidr >> 32) as u32, mpidr as u32]);
+        f.end_node();
+    }
     f.end_node();
 
     f.begin_node("memory");
@@ -263,7 +297,10 @@ pub fn build_dtb(
     f.prop_u32("phandle", GIC_PHANDLE);
     let mut intc_reg = Vec::new();
     intc_reg.extend_from_slice(&reg_pair(GICV3_DIST_BASE, GICV3_DIST_SIZE));
-    intc_reg.extend_from_slice(&reg_pair(GICV3_REDIST_BASE, GICV3_REDIST_STRIDE));
+    intc_reg.extend_from_slice(&reg_pair(
+        GICV3_REDIST_BASE,
+        redistributor_region_size(vcpus),
+    ));
     f.prop_cells("reg", &intc_reg);
     f.end_node();
 
@@ -330,6 +367,90 @@ mod tests {
         u32::from_be_bytes(b[at..at + 4].try_into().unwrap())
     }
 
+    /// Count `cpu@` node-name occurrences in the blob.
+    fn cpu_node_count(dtb: &[u8]) -> usize {
+        dtb.windows(4).filter(|w| *w == b"cpu@").count()
+    }
+
+    #[test]
+    fn one_cpu_node_per_vcpu() {
+        // The FDT is what tells the kernel how many CPUs exist at all. A single
+        // hardcoded `cpu@0` is why `--cpus N` had no effect: the guest cannot
+        // online a CPU the device tree does not describe.
+        for vcpus in [1u32, 2, 4, 8] {
+            let dtb = build_dtb(
+                "console=ttyAMA0",
+                0x4000_0000,
+                0x2000_0000,
+                None,
+                &[],
+                None,
+                vcpus,
+            );
+            assert_eq!(
+                cpu_node_count(&dtb),
+                vcpus as usize,
+                "expected {vcpus} cpu nodes"
+            );
+        }
+    }
+
+    #[test]
+    fn zero_vcpus_still_yields_a_bootable_single_cpu_tree() {
+        // A machine with no CPUs is not bootable; clamp rather than emit a
+        // `cpus` node the kernel panics on.
+        let dtb = build_dtb(
+            "console=ttyAMA0",
+            0x4000_0000,
+            0x2000_0000,
+            None,
+            &[],
+            None,
+            0,
+        );
+        assert_eq!(cpu_node_count(&dtb), 1);
+    }
+
+    #[test]
+    fn secondaries_are_declared_psci_startable() {
+        // Without `enable-method = "psci"` the kernel waits on a spin-table
+        // release that nothing performs, and the secondaries never come up.
+        let dtb = build_dtb(
+            "console=ttyAMA0",
+            0x4000_0000,
+            0x2000_0000,
+            None,
+            &[],
+            None,
+            4,
+        );
+        let needle = b"psci\0";
+        assert!(dtb.windows(needle.len()).any(|w| w == needle));
+    }
+
+    #[test]
+    fn the_redistributor_region_covers_every_cpu() {
+        // One frame per CPU, walked consecutively from the base. Advertising a
+        // region sized for fewer CPUs than `cpus` declares makes
+        // `gic_populate_rdist` run off the end — a fault during IRQ init, before
+        // any console output, so it presents as a silent hang.
+        assert_eq!(redistributor_region_size(1), GICV3_REDIST_STRIDE);
+        assert_eq!(redistributor_region_size(4), GICV3_REDIST_STRIDE * 4);
+        assert!(
+            redistributor_region_size(8) > redistributor_region_size(4),
+            "the region must grow with the CPU count"
+        );
+    }
+
+    #[test]
+    fn mpidr_affinity_matches_the_cpu_node_address() {
+        // The vCPU's MPIDR_EL1 and its `cpu@<addr>` reg must agree or the CPU
+        // cannot be matched to its redistributor frame.
+        for cpu in 0..4u32 {
+            assert_eq!(mpidr_for_cpu(cpu), u64::from(cpu));
+        }
+    }
+
     #[test]
     fn header_is_well_formed() {
         let dtb = build_dtb(
@@ -339,6 +460,7 @@ mod tests {
             None,
             &[],
             None,
+            1,
         );
         assert_eq!(be32(&dtb, 0), FDT_MAGIC);
         assert_eq!(be32(&dtb, 4) as usize, dtb.len(), "totalsize == blob len");
@@ -360,6 +482,7 @@ mod tests {
             None,
             &[],
             None,
+            1,
         );
         let needle = b"earlycon=pl011,mmio32,0x9000000";
         assert!(
@@ -384,7 +507,7 @@ mod tests {
 
     #[test]
     fn initrd_props_present_only_when_supplied() {
-        let without = build_dtb("x", 0x8000_0000, 0x2000_0000, None, &[], None);
+        let without = build_dtb("x", 0x8000_0000, 0x2000_0000, None, &[], None, 1);
         assert!(!without.windows(18).any(|w| w == b"linux,initrd-start"));
         let with = build_dtb(
             "x",
@@ -393,6 +516,7 @@ mod tests {
             Some((0x9000_0000, 0x9000_0600)),
             &[],
             None,
+            1,
         );
         assert!(with.windows(18).any(|w| w == b"linux,initrd-start"));
         assert!(with.windows(16).any(|w| w == b"linux,initrd-end"));
@@ -402,7 +526,7 @@ mod tests {
     fn emits_each_virtio_mmio_node_with_its_address_and_interrupt() {
         let base = 0x0a00_0e00u64;
         let irq = 55u32;
-        let dtb = build_dtb("x", 0x4000_0000, 0x1000_0000, None, &[(base, irq)], None);
+        let dtb = build_dtb("x", 0x4000_0000, 0x1000_0000, None, &[(base, irq)], None, 1);
 
         assert!(
             dtb.windows(b"virtio_mmio@a000e00\0".len())
@@ -429,7 +553,7 @@ mod tests {
 
     #[test]
     fn struct_block_is_4_byte_aligned() {
-        let dtb = build_dtb("x", 0x4000_0000, 0x1000_0000, None, &[], None);
+        let dtb = build_dtb("x", 0x4000_0000, 0x1000_0000, None, &[], None, 1);
         assert!(be32(&dtb, 8).is_multiple_of(4), "off_dt_struct 4-aligned");
         assert!(be32(&dtb, 16).is_multiple_of(8), "off_mem_rsvmap 8-aligned");
     }
@@ -439,7 +563,7 @@ mod tests {
         // The boot seed covers early userspace before the virtio-rng driver
         // probes; steady-state entropy does not make this injection redundant.
         let seed: Vec<u8> = (0..RNG_SEED_LEN as u8).collect();
-        let with = build_dtb("x", 0x4000_0000, 0x1000_0000, None, &[], Some(&seed));
+        let with = build_dtb("x", 0x4000_0000, 0x1000_0000, None, &[], Some(&seed), 1);
         assert!(
             with.windows(seed.len()).any(|w| w == seed.as_slice()),
             "the seed bytes must reach the blob verbatim"
@@ -452,7 +576,7 @@ mod tests {
 
     #[test]
     fn no_rng_seed_property_when_none_is_supplied() {
-        let without = build_dtb("x", 0x4000_0000, 0x1000_0000, None, &[], None);
+        let without = build_dtb("x", 0x4000_0000, 0x1000_0000, None, &[], None, 1);
         assert!(
             !without.windows(8).any(|w| w == b"rng-seed"),
             "an absent seed must not leave a stray property name behind"

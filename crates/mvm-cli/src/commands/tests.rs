@@ -5317,6 +5317,40 @@ fn machine_run_up_json_guards_stdout() {
 }
 
 #[test]
+fn up_json_reports_prod_when_the_launch_grant_is_prodsafe_only() {
+    // The SDK gates its DevOnly surfaces on this field:
+    //   if self.build_mode != "dev": raise SandboxDevOnly
+    // Reporting the *image* posture let that gate pass for a launch whose grant
+    // admits no DevOnly verb, so the SDK proceeded and the guest refused
+    // instead — with a verb-grant error rather than the documented
+    // SandboxDevOnly. The field has to answer the question it is asked: can
+    // this launch use DevOnly verbs?
+    //
+    // This is the exact argv the Python SDK's live transport shells: no tty, no
+    // trailing argv, no --profile dev. That is grant-eligible, so the launch
+    // carries the attenuated ProdSafe set.
+    let args = parse_machine_run(&["-d", "--up-json", "--name", "vm", "--image", "alpine"])
+        .expect("sdk-shaped run args parse");
+    assert!(
+        crate::commands::machine::runtime::launch_carries_restricted_grant(&args),
+        "an SDK-shaped launch is grant-eligible and gets the ProdSafe-only set"
+    );
+}
+
+#[test]
+fn a_trailing_argv_launch_is_not_grant_restricted() {
+    // Trailing argv means an ad-hoc Exec, which is DevOnly — such a launch must
+    // not receive the attenuated grant, so it is free to report the image's own
+    // posture.
+    let args = parse_machine_run(&["-d", "--name", "vm", "--image", "alpine", "--", "sh"])
+        .expect("argv run args parse");
+    assert!(
+        !crate::commands::machine::runtime::launch_carries_restricted_grant(&args),
+        "a trailing-argv run keeps the unrestricted grant"
+    );
+}
+
+#[test]
 fn machine_run_up_json_withholds_the_started_banner() {
     // The test above pins a parse-level flag and passed the whole time stdout
     // was in fact being polluted: `run -d --up-json` printed
