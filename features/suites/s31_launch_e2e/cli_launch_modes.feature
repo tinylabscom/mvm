@@ -66,20 +66,27 @@ Feature: every README-documented CLI launch mode boots a real guest
     Then the launch exits with code 7
     And the guest control plane came up
 
-  # @wip on #2888. `--cpus` is silently ignored on the HVF workload path: the
-  # guest boots with one vCPU whatever is asked for, and `/proc/cpuinfo` agrees
-  # with `nproc`. Pre-existing — it reproduces on a build predating this suite.
-  # The scenario asserts what the README documents, so it stays as written.
+  # HVF has no SMP — the device tree describes one CPU, PSCI implements no
+  # `CPU_ON`, and the supervisor config carries no vCPU count. `--cpus 2` used
+  # to exit 0 and hand back one CPU; it now refuses, which is the honest answer
+  # until SMP lands (#2888). Asserting the refusal rather than deleting the
+  # scenario keeps the limit visible in the suite.
   #
   # It passed in earlier runs of this suite for the wrong reason: the assertion
-  # matched against the combined streams, and the `MVM_PHASE_TIMING` table
-  # supplied a "2". `the guest printed exactly` reads the guest's own stdout,
-  # which is what makes the defect visible.
-  @live @wip
-  Scenario: --cpus and --memory are honoured on a real boot
+  # matched the combined streams and the `MVM_PHASE_TIMING` table supplied a
+  # "2". `the guest printed exactly` reads the guest's own stdout, which is what
+  # made the defect visible in the first place.
+  @live
+  Scenario: a vCPU count the backend cannot honour is refused, not silently reduced
     When I launch "machine run --image alpine --cpus 2 --memory 512M -- nproc"
+    Then the launch fails
+    And the output mentions "supports exactly 1 vCPU"
+
+  @live
+  Scenario: a single-vCPU launch with explicit memory boots
+    When I launch "machine run --image alpine --cpus 1 --memory 512M -- nproc"
     Then the launch succeeds
-    And the guest printed exactly "2"
+    And the guest printed exactly "1"
     And the guest control plane came up
 
   # This scenario is the behavioural witness for the detached-supervisor stderr

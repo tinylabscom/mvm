@@ -24,7 +24,7 @@ E2E_HOME="${MVM_E2E_HOME:-$HOME/.mvm}"
 
 # Floor on scenarios that must actually execute. See the assertion after the
 # cucumber run for why a count, not just an exit status.
-MIN_SCENARIOS=12
+MIN_SCENARIOS=15
 SCENARIO_LOG="$(mktemp -t mvm-e2e-scenarios)"
 TARGET_DIR="${CARGO_TARGET_DIR:-target}"
 MVMCTL="$TARGET_DIR/debug/mvmctl"
