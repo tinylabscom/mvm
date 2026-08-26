@@ -532,6 +532,10 @@ dev = [
 libkrun-sys = ["mvm-cli/libkrun-sys"]
 libkrun-live = ["mvm-cli/libkrun-live"]
 
+# Platform: link the TPM2 TSS provider. Kept root-owned so source-built host
+# packages remain cargo-auditable while selecting the Linux TPM dependency.
+attestation-tpm2 = ["mvm-core/attestation-tpm2"]
+
 # Internal library knob (NOT a product surface): compile mvm-core's gated hostd
 # IPC transport. `host` already includes it; exposed standalone so a downstream
 # host-side daemon can flip just the transport through the facade and stay lean
