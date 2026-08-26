@@ -3,11 +3,11 @@ title: "Nix for mvm: A Beginner's Guide"
 description: Learn just enough Nix to write your first mvm flake — no prior Nix experience required.
 ---
 
-:::caution[Declared, not enforced]
-`healthChecks`, `volumeMounts` and `serviceGroup` are accepted by `mkGuest`
-and recorded in `passthru.mvm.unenforced`, but nothing acts on them yet: the
-multi-service supervisor is still a stub. A flake using them builds, and
-prints a warning at evaluation saying so.
+:::note[Health checks run in the guest]
+`healthChecks` is rendered into `/etc/mvm/probes.d/<name>.json` in the image.
+The guest agent scans that directory at boot and runs each check on its own
+interval; results come back over vsock. `volumeMounts` and `serviceGroup` are
+still recorded rather than acted on — the multi-service supervisor is not wired.
 :::
 
 You don't need to be a Nix expert to use mvm. This guide teaches you exactly what you need to know to write a flake that builds a microVM image. If you've never seen a `.nix` file before, start here.

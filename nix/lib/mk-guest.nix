@@ -152,17 +152,49 @@ in
 , serviceGroup   ? null
 }:
 let
-  # Shape checks for the declared-but-unenforced attributes. A typo in one of
-  # these would otherwise be invisible: they are recorded, not consumed, so
-  # nothing downstream would ever notice.
+  # Shape checks. `healthChecks` is consumed (rendered into the guest's probe
+  # drop-in directory below); the rest are recorded only, so a typo in them
+  # would otherwise be invisible.
   declaredButUnenforced =
     (if builtins.isAttrs healthChecks then [ ] else throw "mkGuest: healthChecks must be an attribute set")
     ++ (if builtins.isAttrs volumeMounts then [ ] else throw "mkGuest: volumeMounts must be an attribute set")
     ++ (if serviceGroup == null || builtins.isString serviceGroup then [ ] else throw "mkGuest: serviceGroup must be a string or null");
 
+  # `healthChecks.<name> = { healthCmd; healthIntervalSecs?; healthTimeoutSecs?; }`
+  # becomes one `/etc/mvm/probes.d/<name>.json` drop-in per check.
+  #
+  # The guest agent already scans that directory at boot and runs each entry on
+  # its own interval (`probes::load_probe_dropin_dir`, then `probe_health_loop`),
+  # serving the results back over vsock as `ProbeStatus`. Every piece of that
+  # existed; nothing wrote the drop-ins, so the directory was always empty and a
+  # declared health check did nothing at all. This is the missing link.
+  probeDropIns = lib.mapAttrs'
+    (checkName: check:
+      let
+        cmd =
+          if check ? healthCmd then check.healthCmd
+          else throw "mkGuest: healthChecks.${checkName} must set `healthCmd`";
+        interval = if check ? healthIntervalSecs then check.healthIntervalSecs else 30;
+        timeout = if check ? healthTimeoutSecs then check.healthTimeoutSecs else 10;
+      in
+      lib.nameValuePair "/etc/mvm/probes.d/${checkName}.json" {
+        content = builtins.toJSON {
+          name = checkName;
+          inherit cmd;
+          interval_secs = interval;
+          timeout_secs = timeout;
+          output_format = "exit_code";
+        };
+        mode = "0444";
+      })
+    healthChecks;
+
+  # The caller's own files win: a flake that hand-writes a drop-in for the same
+  # path meant to, and silently replacing it would be worse than the collision.
+  extraFilesWithProbes = probeDropIns // extraFiles;
+
   unenforcedNames =
     (if services == { } then [ ] else [ "services" ])
-    ++ (if healthChecks == { } then [ ] else [ "healthChecks" ])
     ++ (if volumeMounts == { } then [ ] else [ "volumeMounts" ])
     ++ (if serviceGroup == null then [ ] else [ "serviceGroup" ]);
 
@@ -192,7 +224,7 @@ let
 
   extraFileLabel = path:
     let
-      rawSpec = extraFiles.${path};
+      rawSpec = extraFilesWithProbes.${path};
       spec =
         if builtins.isString rawSpec then { source = rawSpec; }
         else rawSpec;
@@ -204,13 +236,13 @@ let
   extraFileSourceRoots = lib.filter (source: source != "") (map
     (path:
       let
-        rawSpec = extraFiles.${path};
+        rawSpec = extraFilesWithProbes.${path};
         spec =
           if builtins.isString rawSpec then { source = rawSpec; }
           else rawSpec;
       in
       if spec ? source then spec.source else "")
-    (lib.attrNames extraFiles));
+    (lib.attrNames extraFilesWithProbes));
 
   sshClosureInfo = pkgs.closureInfo {
     rootPaths = packages ++ extraFileSourceRoots;
@@ -229,7 +261,7 @@ let
   assertNoSshTemplateInputs =
     let
       badPackages = lib.filter (pkg: containsSshMarker (packageLabel pkg)) packages;
-      badFiles = lib.filter (path: containsSshMarker (extraFileLabel path)) (lib.attrNames extraFiles);
+      badFiles = lib.filter (path: containsSshMarker (extraFileLabel path)) (lib.attrNames extraFilesWithProbes);
       badPackageNames = map (pkg: packageLabel pkg) badPackages;
       badFileNames = map (path: path) badFiles;
     in
@@ -1192,7 +1224,7 @@ let
   extraFilePopulation = lib.concatMapStringsSep "\n"
     (path:
       let
-        rawSpec = extraFiles.${path};
+        rawSpec = extraFilesWithProbes.${path};
         spec =
           if builtins.isString rawSpec then { source = rawSpec; }
           else rawSpec;
@@ -1221,7 +1253,7 @@ let
           "$out${path}"
       ''
     )
-    (lib.attrNames extraFiles);
+    (lib.attrNames extraFilesWithProbes);
 
   # ── Rootfs tree population ────────────────────────────────────
   #
@@ -1616,6 +1648,20 @@ let
     # that could silently degrade to a baked agent/netinit pair.
     runtimeLean = true;
     sshTemplateBan = builtins.seq assertNoSshTemplateInputs true;
+    # The probe drop-ins this guest carries, as `<path> -> <decoded entry>`.
+    # Exposed so a host (or a test) can see what the guest will actually run
+    # without building the rootfs to go and read the files.
+    #
+    # Read back out of `extraFilesWithProbes` — the exact set the rootfs
+    # population loop iterates — rather than out of `probeDropIns`. Deriving it
+    # from the rendering instead would report drop-ins that never reached the
+    # image: a first version of this did, and breaking the merge outright
+    # changed no assertion at all.
+    probes = lib.mapAttrs
+      (_: spec: builtins.fromJSON spec.content)
+      (lib.filterAttrs
+        (path: _: lib.hasPrefix "/etc/mvm/probes.d/" path)
+        extraFilesWithProbes);
     # Declared-but-unenforced, recorded so a host or an audit can see the gap
     # between what the flake asked for and what the guest actually does.
     unenforced = {

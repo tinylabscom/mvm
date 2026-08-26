@@ -3,11 +3,11 @@ title: Writing Nix Flakes
 description: Create custom Nix flakes that build microVM images for mvm.
 ---
 
-:::caution[Declared, not enforced]
-`healthChecks`, `volumeMounts` and `serviceGroup` are accepted by `mkGuest`
-and recorded in `passthru.mvm.unenforced`, but nothing acts on them yet: the
-multi-service supervisor is still a stub. A flake using them builds, and
-prints a warning at evaluation saying so.
+:::note[Health checks run in the guest]
+`healthChecks` is rendered into `/etc/mvm/probes.d/<name>.json` in the image.
+The guest agent scans that directory at boot and runs each check on its own
+interval; results come back over vsock. `volumeMounts` and `serviceGroup` are
+still recorded rather than acted on — the multi-service supervisor is not wired.
 :::
 
 mvmctl uses Nix flakes to produce reproducible microVM images. You run `mvmctl machine build` from the host, and mvm runs Nix evaluation and `nix build` inside the Linux builder VM. The result is a kernel and rootfs that can boot on any supported runtime backend, including Firecracker, HVF, libkrun, and QEMU.
