@@ -67,6 +67,13 @@ echo "==> building mvmctl + host helpers"
 # Every launch needs the workload kernel, the runtime overlay and the universal
 # initramfs. Acquiring them inside a scenario would put minutes on each one, and
 # a scenario that times out reads as a launch failure rather than a cold cache.
+#
+# Budget honestly: on a source checkout with a cold `~/.mvm` this is not a warm
+# up, it is a build. `bootstrap` compiles the per-VM supervisors and then runs a
+# Nix build inside the builder VM, which is tens of minutes and silent for most
+# of it. A change touching `mvm-agentd` also re-fingerprints the guest binaries,
+# so the runtime overlay and initramfs rebuild on the next boot even when the
+# cache was warm before. Subsequent runs against an unchanged tree are fast.
 # ---------------------------------------------------------------------------
 # macOS kills an unentitled Hypervisor.framework binary with SIGKILL, and the
 # only symptom is "hvf supervisor exited before writing its PID file (status:
