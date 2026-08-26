@@ -155,7 +155,7 @@ const MACOS_CLOSURE_BUDGET: usize = 229;
 /// scoped-thread `par_map` in `mvm-fs`, which is all five call sites needed.
 ///
 /// 262 (was 263): `fs2` existed only for `FileExt`'s advisory file locking,
-/// which std stabilized in 1.89 — well under the pinned 1.96 toolchain. std
+/// which std stabilized in 1.89 — well under the pinned 1.97 toolchain. std
 /// also splits contention out of the error type (`TryLockError::WouldBlock`
 /// vs `::Error`), so "another process holds it" stops riding on an errno
 /// comparison.
