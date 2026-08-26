@@ -1,6 +1,15 @@
 # Refactor status
 
 Last updated: 2026-08-26
+
+## In progress
+
+- [ ] **SDK surface contract repairs — issues #2902 and #2906.**
+      `specs/plans/2026-08-26-sdk-surface-contract-repairs.md`.
+      The README's `mvm.local_path` decorator source and the builder-pack Cargo
+      feature remediation are implemented and locally green; merge-queue
+      delivery remains.
+
 ## Completed
 
 - [x] **Site QEMU-WASM release artifact** —

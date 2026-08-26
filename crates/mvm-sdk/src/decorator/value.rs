@@ -22,9 +22,9 @@ use super::ParseError;
 /// kwarg-value position. Anything outside this set is rejected with
 /// [`ParseError::UnknownHelper`].
 ///
-/// Documented surface: `mvm.python_image`, `mvm.node_image`,
-/// `mvm.nix_packages`, `mvm.resources`, `mvm.network`, `mvm.secret`,
-/// `mvm.literal`, `mvm.hook`, `mvm.addons.database`,
+/// Documented surface: `mvm.local_path`, `mvm.python_image`,
+/// `mvm.node_image`, `mvm.nix_packages`, `mvm.resources`, `mvm.network`,
+/// `mvm.secret`, `mvm.literal`, `mvm.hook`, `mvm.addons.database`,
 /// `mvm.addons.service`. The list lives in code so adding a helper
 /// is a reviewed code change rather than a config update.
 ///
@@ -32,6 +32,7 @@ use super::ParseError;
 /// a TypeScript `app({...})` import becomes `mvm.app` before lookup)
 /// so the allowlist is a single source of truth.
 pub const HELPER_ALLOWLIST: &[&str] = &[
+    "mvm.local_path",
     "mvm.python_image",
     "mvm.node_image",
     "mvm.nix_packages",
@@ -175,7 +176,8 @@ pub fn lower_to_workload(
                     detail: format!("expected string list, got element {other:?}"),
                 }),
             })
-            .collect::<Result<Vec<_>, _>>()?,
+            .collect::<Result<Vec<_>, _>>()?
+            .into(),
         Some(other) => {
             return Err(ParseError::HelperBadKwarg {
                 path: path.to_path_buf(),
@@ -185,7 +187,29 @@ pub fn lower_to_workload(
                 detail: format!("expected string list, got {other:?}"),
             });
         }
-        None => vec!["**".to_string()],
+        None => None,
+    };
+
+    let source = match kwargs.remove("source") {
+        Some(value) => {
+            let mut source = helper_to_source(value, path, decorator_line)?;
+            if let Some(include) = include {
+                let Source::LocalPath {
+                    include: source_include,
+                    ..
+                } = &mut source
+                else {
+                    unreachable!("mvm.local_path always lowers to a local source")
+                };
+                *source_include = include;
+            }
+            source
+        }
+        None => Source::LocalPath {
+            path: ".".to_string(),
+            include: include.unwrap_or_else(|| vec!["**".to_string()]),
+            exclude: vec![],
+        },
     };
 
     // `addons` lowering deferred — Phase 4 ships with the IR field
@@ -219,11 +243,7 @@ pub fn lower_to_workload(
 
     let app = App {
         name: workload_id.clone(),
-        source: Source::LocalPath {
-            path: ".".to_string(),
-            include,
-            exclude: vec![],
-        },
+        source,
         image,
         entrypoints: vec![Entrypoint::Function {
             language: language.to_string(),
@@ -257,6 +277,92 @@ pub fn lower_to_workload(
         volumes: vec![],
         extensions: BTreeMap::new(),
     })
+}
+
+fn helper_to_source(v: Value, path: &Path, line: usize) -> Result<Source, ParseError> {
+    let Value::Helper {
+        name,
+        mut kwargs,
+        positional,
+    } = v
+    else {
+        return Err(ParseError::HelperBadKwarg {
+            path: path.to_path_buf(),
+            line,
+            helper: "mvm.app".to_string(),
+            kwarg: "source".to_string(),
+            detail: format!("expected mvm.local_path(...), got {v:?}"),
+        });
+    };
+    if name != "mvm.local_path" {
+        return Err(ParseError::HelperBadKwarg {
+            path: path.to_path_buf(),
+            line,
+            helper: "mvm.app".to_string(),
+            kwarg: "source".to_string(),
+            detail: format!("expected mvm.local_path(...), got {name}(...)"),
+        });
+    }
+
+    let source_path = match positional.as_slice() {
+        [Value::Str(value)] => value.clone(),
+        [] => {
+            pop_string_kwarg(&mut kwargs, "path").ok_or_else(|| ParseError::HelperMissingKwarg {
+                path: path.to_path_buf(),
+                line,
+                helper: "mvm.local_path".to_string(),
+                kwarg: "path",
+            })?
+        }
+        other => {
+            return Err(ParseError::HelperBadKwarg {
+                path: path.to_path_buf(),
+                line,
+                helper: "mvm.local_path".to_string(),
+                kwarg: "path".to_string(),
+                detail: format!("expected one string path, got {other:?}"),
+            });
+        }
+    };
+
+    let include =
+        strict_string_list_kwarg(&mut kwargs, "include", vec!["**".to_string()], path, line)?;
+    let exclude = strict_string_list_kwarg(&mut kwargs, "exclude", vec![], path, line)?;
+    if let Some((kwarg, value)) = kwargs.into_iter().next() {
+        return Err(ParseError::HelperBadKwarg {
+            path: path.to_path_buf(),
+            line,
+            helper: "mvm.local_path".to_string(),
+            kwarg,
+            detail: format!("unrecognized kwarg with value {value:?}"),
+        });
+    }
+
+    Ok(Source::LocalPath {
+        path: source_path,
+        include,
+        exclude,
+    })
+}
+
+fn strict_string_list_kwarg(
+    kwargs: &mut BTreeMap<String, Value>,
+    name: &str,
+    default: Vec<String>,
+    path: &Path,
+    line: usize,
+) -> Result<Vec<String>, ParseError> {
+    match kwargs.remove(name) {
+        Some(Value::List(items)) => list_of_strings(&items, path, line, "mvm.local_path", name),
+        Some(other) => Err(ParseError::HelperBadKwarg {
+            path: path.to_path_buf(),
+            line,
+            helper: "mvm.local_path".to_string(),
+            kwarg: name.to_string(),
+            detail: format!("expected string list, got {other:?}"),
+        }),
+        None => Ok(default),
+    }
 }
 
 fn helper_to_image(v: Value, path: &Path, line: usize) -> Result<Image, ParseError> {

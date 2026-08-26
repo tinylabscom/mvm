@@ -176,9 +176,36 @@ pub(in crate::commands) mod builder {
     ) -> Result<PromotedBuilderPack> {
         anyhow::bail!(
             "builder pack download requires an mvmctl built with --features \
-             release-artifact-bootstrap,manifest-verify (end-user release binaries carry \
+             user,release-artifact-bootstrap (end-user release binaries carry \
              this by default); this binary was built without it, so it cannot fetch a \
              published pack"
+        );
+    }
+}
+
+#[cfg(all(
+    test,
+    not(all(
+        feature = "release-artifact-bootstrap",
+        feature = "builder-vm",
+        feature = "manifest-verify"
+    ))
+))]
+mod tests {
+    #[test]
+    fn download_refusal_names_root_features_that_exist() {
+        let error = match super::builder::fetch_and_promote(None) {
+            Err(error) => error.to_string(),
+            Ok(_) => panic!("a build without the release feature must refuse"),
+        };
+
+        assert!(
+            error.contains("--features user,release-artifact-bootstrap"),
+            "the remediation must compile against the root package: {error}"
+        );
+        assert!(
+            !error.contains("release-artifact-bootstrap,manifest-verify"),
+            "the remediation must not name the removed root feature: {error}"
         );
     }
 }
