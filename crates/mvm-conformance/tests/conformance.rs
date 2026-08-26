@@ -216,6 +216,7 @@ fn probe_caps() -> RuntimeCaps {
         firecracker_bootable: kvm_openable() && firecracker_on_path(),
         bundle_fixture: bundle_fixture_path().is_some() && bundle_pubkey_path().is_some(),
         node_available: binary_on_path("node"),
+        workload_kernel: workload_kernel_path().is_some(),
     }
 }
 
@@ -237,6 +238,28 @@ pub(crate) fn bundle_fixture_path() -> Option<std::path::PathBuf> {
 pub(crate) fn bundle_pubkey_path() -> Option<std::path::PathBuf> {
     let path = std::path::PathBuf::from(std::env::var_os("MVM_BDD_BUNDLE_PUBKEY")?);
     path.is_file().then_some(path)
+}
+
+/// A prebuilt workload kernel for the block-volume scenarios.
+///
+/// `MVM_BDD_WORKLOAD_KERNEL` names one explicitly. When it is unset the host's
+/// own builder-VM cache is used — the same file the step would otherwise ask an
+/// operator to point at by hand, at the path `mvmctl` already writes it to. That
+/// default is what makes the lane runnable: the variable appears in no Justfile
+/// recipe, no CI lane and no document, so requiring it meant the scenarios ran
+/// nowhere.
+pub(crate) fn workload_kernel_path() -> Option<std::path::PathBuf> {
+    if let Some(explicit) = std::env::var_os("MVM_BDD_WORKLOAD_KERNEL") {
+        let path = std::path::PathBuf::from(explicit);
+        return path.is_file().then_some(path);
+    }
+    let cached = std::path::PathBuf::from(mvm_core::config::default_mvm_cache_dir())
+        .join("builder-vm")
+        .join(std::env::consts::ARCH)
+        .join("kernels")
+        .join("workload")
+        .join("vmlinux");
+    cached.is_file().then_some(cached)
 }
 
 /// `/dev/kvm` exists and this process can open it read-write — the mode a real

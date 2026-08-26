@@ -83,6 +83,14 @@ const SEED_SITES: &[(&str, &str)] = &[
         "xtask/src/check_test_home_isolation.rs",
         "defines the very patterns it scans for",
     ),
+    (
+        "crates/mvm-conformance/tests/conformance.rs",
+        "resolves the prebuilt workload kernel a `@workload_kernel` scenario boots. \
+         The seed is the point: the step copies that kernel into the scenario's \
+         isolated cache so a volume test does not have to build one. It cannot \
+         mask an absence assertion, because the scenarios assert about volume \
+         bytes and write refusal, never about whether a kernel is cached",
+    ),
 ];
 
 /// Symbols whose call reaches [`DEFAULT_CACHE_FN`]. A file naming any of
