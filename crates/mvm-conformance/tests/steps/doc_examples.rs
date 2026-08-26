@@ -67,6 +67,24 @@ struct Manifest {
     absent: Vec<AbsentEntry>,
     #[serde(default)]
     nix_attribute: Vec<NixAttributeEntry>,
+    #[serde(default)]
+    prose: Vec<ProseEntry>,
+}
+
+/// A `mvmctl …` phrase in a CLI string that is English, not an invocation:
+/// "the mvmctl binary", "mvmctl cannot build a boot image locally".
+///
+/// Declared rather than pattern-matched. Every heuristic I tried for telling
+/// prose from a command was wrong in one direction or the other — filtering on
+/// "is the first word a real verb" is worst of all, because a string naming a
+/// *removed* verb is exactly the defect, and that filter drops precisely those.
+/// So the rule is totality: a phrase either resolves against the clap tree or
+/// is written down here with a reason.
+#[derive(serde::Deserialize)]
+struct ProseEntry {
+    text: String,
+    #[allow(dead_code)]
+    reason: String,
 }
 
 /// A `mkGuest` attribute the docs teach while its argument set does not accept
@@ -966,4 +984,113 @@ fn documented_typescript_examples_typecheck(_world: &mut CliWorld) {
     let findings: Vec<Finding> =
         serde_json::from_slice(&output.stdout).expect("parse typecheck findings");
     report(&findings, "TypeScript typecheck", blocks.len());
+}
+
+/// Every `*.rs` file under a crate's `src/`.
+fn rust_sources(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            rust_sources(&path, out);
+        } else if path.extension().is_some_and(|e| e == "rs") {
+            out.push(path);
+        }
+    }
+}
+
+/// Resolve a command path against the clap tree, returning the depth matched.
+///
+/// Only the leading verb chain is judged. Trailing words are arguments, and
+/// demanding they parse would let prose through: `machine cp` takes positionals,
+/// so "mvmctl cp supports exactly one" *parses* with "supports exactly one"
+/// absorbed as arguments — a check built on "does it parse" calls that healthy.
+fn resolved_depth(root: &ClapCommand, words: &[String]) -> usize {
+    let mut cursor = root;
+    let mut depth = 0;
+    for word in words {
+        let Some(next) = cursor
+            .get_subcommands()
+            .find(|sub| sub.get_name() == word || sub.get_all_aliases().any(|alias| alias == word))
+        else {
+            break;
+        };
+        cursor = next;
+        depth += 1;
+    }
+    depth
+}
+
+#[then(expr = "every command named in mvmctl's own output is a real command")]
+fn cli_output_names_real_commands(_world: &mut CliWorld) {
+    let command = mvm_cli::commands::cli_command();
+    let prose: BTreeSet<String> = manifest()
+        .prose
+        .into_iter()
+        .map(|entry| entry.text)
+        .collect();
+
+    let mut sources = Vec::new();
+    rust_sources(&repo_root().join("crates/mvm-cli/src"), &mut sources);
+    assert!(
+        sources.len() > 100,
+        "found only {} Rust source(s) under crates/mvm-cli/src — the walk went blind",
+        sources.len()
+    );
+
+    let mut checked = 0usize;
+    let mut failures = Vec::new();
+    for path in sources {
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let relative = path
+            .strip_prefix(repo_root())
+            .unwrap_or(&path)
+            .display()
+            .to_string();
+        for found in mvm_conformance::source_commands::source_commands(&relative, &text) {
+            let rendered = found.rendered();
+            if prose.contains(&rendered) {
+                continue;
+            }
+            checked += 1;
+            let depth = resolved_depth(&command, &found.words);
+            if depth == 0 {
+                failures.push(format!(
+                    "  {}:{}\n     {rendered}\n     `{}` is not a command",
+                    found.file, found.line, found.words[0]
+                ));
+            } else if depth == 1 && found.words.len() > 1 {
+                // The verb resolved but its subcommand did not. Only a failure
+                // when the verb actually has subcommands — otherwise the second
+                // word is an argument (`mvmctl doctor json`).
+                let verb = command
+                    .get_subcommands()
+                    .find(|sub| {
+                        sub.get_name() == found.words[0]
+                            || sub.get_all_aliases().any(|a| a == found.words[0])
+                    })
+                    .expect("depth 1 means the verb resolved");
+                if verb.has_subcommands() {
+                    failures.push(format!(
+                        "  {}:{}\n     {rendered}\n     `{}` has no `{}` subcommand",
+                        found.file, found.line, found.words[0], found.words[1]
+                    ));
+                }
+            }
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "{} command(s) named in mvmctl's own output do not exist \
+         (checked {checked}). Fix the string, or if it is English rather than an \
+         invocation add a [[prose]] entry with a reason to \
+         features/suites/s29_doc_examples/tiers.toml:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
 }

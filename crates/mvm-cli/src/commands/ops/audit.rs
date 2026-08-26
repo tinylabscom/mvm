@@ -734,7 +734,7 @@ fn verify_cert(
     };
 
     // 1. Slurp the cert. `-` reads from stdin so an auditor can
-    //    `cat certs.json | mvmctl audit verify-cert -`.
+    //    `cat certs.json | mvmctl trust audit verify-cert -`.
     let raw = if cert == "-" {
         let mut buf = String::new();
         std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)
@@ -831,7 +831,7 @@ fn verify_cert(
     // 6. Render. Human summary to stderr always; receipts JSON to
     //    stdout when --json.
     eprintln!(
-        "mvmctl audit verify-cert: {} certificate(s) verified",
+        "mvmctl trust audit verify-cert: {} certificate(s) verified",
         verified.len()
     );
     for (r, chain_match) in verified.iter().zip(chain_matches.iter()) {
@@ -1268,7 +1268,7 @@ fn audit_verify(tenant: &str) -> Result<()> {
     }
 
     // Print a clear error AND propagate so the process exits nonzero.
-    // `mvmctl audit verify` is meant for scripting.
+    // `mvmctl trust audit verify` is meant for scripting.
     if let Some(refusal) = outcome.refusals.first() {
         anyhow::bail!(
             "{} verify failed ({}): {}",

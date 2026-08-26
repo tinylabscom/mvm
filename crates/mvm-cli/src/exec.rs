@@ -674,7 +674,7 @@ fn parse_workload_ir(apps: Vec<RawLaunchApp>, source: &str) -> Result<LaunchEntr
             .map(|a| a.name.as_deref().unwrap_or("<unnamed>"))
             .collect();
         anyhow::bail!(
-            "launch plan '{source}' has {} apps ({}); `mvmctl exec` v1 supports single-app workloads only",
+            "launch plan '{source}' has {} apps ({}); `mvmctl machine exec` v1 supports single-app workloads only",
             apps.len(),
             names.join(", "),
         );

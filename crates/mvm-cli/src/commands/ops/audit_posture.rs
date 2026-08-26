@@ -1,4 +1,4 @@
-//! `mvmctl audit posture` — security posture self-test.
+//! `mvmctl trust audit posture` — security posture self-test.
 //!
 //! Read-only diagnostic that reports which host-hardening
 //! mitigations are active on the calling host. Operators run it
@@ -28,7 +28,7 @@
 //! - No network calls. Doesn't probe upstreams to confirm they
 //!   advertise TLS 1.3; that would be a runtime cost + flake.
 //! - No write side effects. Operators on production hosts can
-//!   run `mvmctl audit posture --json` from a monitoring agent
+//!   run `mvmctl trust audit posture --json` from a monitoring agent
 //!   without risk of mutating state.
 
 use anyhow::Result;
@@ -109,7 +109,7 @@ pub fn build_report(home: Option<&std::path::Path>) -> PostureReport {
 fn render_human(report: &PostureReport) {
     let (ok, warn, fail) = report.summary_counts();
     eprintln!(
-        "mvmctl audit posture — security self-test ({} ok / {} warn / {} fail)",
+        "mvmctl trust audit posture — security self-test ({} ok / {} warn / {} fail)",
         ok, warn, fail
     );
     for c in &report.checks {
