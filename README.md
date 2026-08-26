@@ -108,8 +108,9 @@ mvmctl machine run --image python:3.12 \
 # Interactive dev shell (dev-tier images) — still transient
 mvmctl machine run --image alpine -it -- /bin/sh
 
-# Give it resources; admit specific egress only (audited; TCP/22 always refused)
-mvmctl machine run --image alpine --cpus 2 --memory 512M \
+# Give it resources; admit specific egress only (audited; TCP/22 always refused).
+# HVF currently supports exactly one guest vCPU; multi-vCPU backends may accept more.
+mvmctl machine run --image alpine --cpus 1 --memory 512M \
   --allow-host api.example.com:443 -- ./fetch
 
 # Build a Nix flake and run it transiently in one step
@@ -137,7 +138,8 @@ A persistent machine has a name and an on-disk spec: create once, start/stop/exe
 against it, reconfigure it, remove it when done.
 
 ```bash
-mvmctl machine create web --image nginx --cpus 2 --memory 512M
+# HVF currently supports exactly one guest vCPU; multi-vCPU backends may accept more.
+mvmctl machine create web --image nginx --cpus 1 --memory 512M
 mvmctl machine start web
 mvmctl machine exec  web -- nginx -v
 mvmctl machine logs  web

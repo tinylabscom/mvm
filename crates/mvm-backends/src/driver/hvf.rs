@@ -129,6 +129,13 @@ fn relay_supervisor_config_with_handoff(
     handoff: Option<&HandoffConfig>,
     exclusive_image_lock: Option<&Path>,
 ) -> Result<HvfSupervisorConfig> {
+    if spec.vcpus != 1 {
+        bail!(
+            "the hvf backend supports exactly 1 vCPU, but this launch requests {}",
+            spec.vcpus
+        );
+    }
+
     let kernel = match &spec.kernel {
         KernelImage::Path(p) => p.clone(),
         KernelImage::Bundled => {
@@ -1438,6 +1445,24 @@ mod tests {
             vec![],
         );
         assert!(relay_supervisor_config(&spec, &sample_paths()).is_err());
+    }
+
+    #[test]
+    fn relay_config_refuses_a_vcpu_count_hvf_cannot_honor() {
+        let mut spec = spec_with(
+            KernelImage::Path("/img/Image".into()),
+            vec![egress_port("/run/egress.sock")],
+            vec![],
+        );
+        spec.vcpus = 2;
+
+        let error = relay_supervisor_config(&spec, &sample_paths())
+            .expect_err("HVF must not silently reduce a multi-vCPU request");
+
+        assert_eq!(
+            error.to_string(),
+            "the hvf backend supports exactly 1 vCPU, but this launch requests 2"
+        );
     }
 
     #[test]
