@@ -97,6 +97,31 @@ impl Drop for ScenarioEnvGuard {
     }
 }
 
+/// One end-to-end launch's observable result: what the CLI said, and how long
+/// the guest took to become dispatchable.
+///
+/// Lives here rather than beside its steps because `tests/world.rs` is also
+/// auto-discovered as its own integration-test target, where `crate::steps`
+/// does not exist.
+#[derive(Debug, Default)]
+pub struct LaunchRecord {
+    pub stdout: String,
+    pub stderr: String,
+    pub exit_code: i32,
+    /// `dispatch_window` from `MVM_PHASE_TIMING=1`, in milliseconds.
+    pub dispatch_window_ms: Option<f64>,
+    /// Wall-clock for the whole `mvmctl` invocation.
+    pub wall: std::time::Duration,
+}
+
+impl LaunchRecord {
+    /// stdout and stderr together — the guest's own output and the CLI's
+    /// diagnostics arrive on different streams depending on the shape.
+    pub fn combined(&self) -> String {
+        format!("{}\n{}", self.stdout, self.stderr)
+    }
+}
+
 /// Constructed fresh for every scenario. Holds the result of the most
 /// recent CLI invocation so later `Then` steps can assert on it, plus the
 /// workload identities parsed from successful `build address` runs, keyed by
@@ -104,6 +129,11 @@ impl Drop for ScenarioEnvGuard {
 #[derive(cucumber::World, Default)]
 pub struct CliWorld {
     pub last_run: Option<Output>,
+    /// Artifact-warm `MVM_HOME` the end-to-end launch scenarios share.
+    pub e2e_home: Option<PathBuf>,
+    /// Result of the most recent end-to-end launch, including its measured
+    /// dispatch window.
+    pub last_launch: Option<LaunchRecord>,
     /// Gate under test in the peer-addressing scenarios.
     pub peer_gate: Option<mvm_vmm::vsock_egress_bridge::egress_gate::EgressGate>,
     /// The most recent peer/egress decision.

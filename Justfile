@@ -279,6 +279,15 @@ bdd:
     just sdk-build-typescript
     CARGO_BIN_EXE_mvmctl="${CARGO_TARGET_DIR:-target}/debug/mvmctl" ./scripts/cargo-fast.sh test -p mvm-conformance --test conformance --features bdd
 
+# End-to-end launch gate: boot a real guest through every README-documented
+# entry point (CLI verbs, runtime SDK, decorator SDK, Rust library facade) on
+# whatever backend this host has. Unlike `bdd-live-ci` this is deliberately NOT
+# narrowed to the merge-queue subset and NOT `@firecracker`-gated — that
+# narrowing is what left the macOS default backend with no lane that boots a
+# guest at all.
+e2e-launch:
+    ./scripts/e2e-launch-modes.sh
+
 # KVM-backed merge-queue witness for the cheap documented machine lifecycle.
 # The tag selector keeps registry/build-heavy live scenarios in their dedicated
 # witness lanes while proving that the public commands operate a real guest.

@@ -395,10 +395,41 @@ fn attach_universal_initramfs_with_resolver(
             );
         }
         Err(e) => {
+            // Fail closed. Nothing else mounts the runtime overlay: the guest
+            // `/init` baked into a workload rootfs has no code for it, and the
+            // `ActivateEnvironment` that does mount it is only sent on the
+            // universal-initramfs path. So a rootfs boot without an initramfs
+            // reaches PID 1 with an empty `/mvm/runtime` — no agent, no egress
+            // client — and dies as a kernel panic the host only sees as a
+            // 30-second agent-readiness timeout naming nothing.
+            //
+            // Swallowing this at debug level is what turned a missing artifact
+            // into that timeout. Refuse here, while the resolver's real error
+            // is still in hand.
+            if initramfs_is_required(start_config) {
+                return Err(anyhow::Error::new(e).context(format!(
+                    "the universal initramfs {version} for {arch} could not be resolved, and \
+                     this workload cannot boot without it: it is what mounts the guest runtime \
+                     overlay at /mvm/runtime, which carries the guest agent and the egress \
+                     client. Run `mvmctl doctor` to see the artifact state"
+                )));
+            }
             tracing::debug!(error = %e, "universal initramfs not attached");
         }
     }
     Ok(())
+}
+
+/// Whether this launch cannot boot without the universal initramfs.
+///
+/// True for every boot that has a guest root to mount and expects its runtime
+/// binaries from the overlay. Only a `RootfsOnly` launch — one that declares it
+/// brings its own agent baked into the image — can come up without it, and a
+/// kernel-less shape (wasm) has no initramfs leg at all.
+fn initramfs_is_required(config: &mvm_core::vm_backend::VmStartConfig) -> bool {
+    config.kernel_path.is_some()
+        && (!config.rootfs_path.is_empty() || config.virtiofs_root.is_some())
+        && config.runtime_source_policy != mvm_core::vm_backend::RuntimeSourcePolicy::RootfsOnly
 }
 
 // ── SDK sidecar ──────────────────────────────────────────────────────────────
@@ -1476,14 +1507,24 @@ mod universal_initramfs_attach_tests {
         }
     }
 
+    /// The resolver failure a cold cache produces, as the real ladder now
+    /// reports it (both acquisition arms having failed).
+    fn cold_cache_failure() -> mvm_build::initramfs::InitramfsBuildError {
+        mvm_build::initramfs::InitramfsBuildError::CargoBuildFailed {
+            reason: "automatic warming is disabled in this test".to_string(),
+        }
+    }
+
     #[test]
-    fn attach_universal_initramfs_if_cached_cold_cache_is_non_fatal() {
+    fn attach_universal_initramfs_if_cached_cold_cache_is_non_fatal_without_a_rootfs() {
         let mut env = TestEnv::new();
         let dir = tempfile::tempdir().unwrap();
         // HOME moves with MVM_HOME or the cache under test is not cold: the
         // initramfs resolver seeds a miss from `$HOME/.mvm/cache`.
         env.isolate_mvm_home(dir.path());
 
+        // No rootfs and no virtiofs root: an initramfs-only guest boots
+        // entirely from RAM, so there is no runtime overlay to strand.
         let mut sc = VmStartConfig {
             kernel_path: Some("/dummy/vmlinux".to_string()),
             ..Default::default()
@@ -1491,10 +1532,7 @@ mod universal_initramfs_attach_tests {
         let resolver_called = std::cell::Cell::new(false);
         attach_universal_initramfs_with_resolver(&mut sc, |_, _, _, _| {
             resolver_called.set(true);
-            Err(mvm_build::initramfs::InitramfsBuildError::HostUnsupported {
-                operation: "test cache miss",
-                reason: "automatic warming is disabled in this test",
-            })
+            Err(cold_cache_failure())
         })
         .unwrap();
 
@@ -1506,6 +1544,84 @@ mod universal_initramfs_attach_tests {
             sc.initrd_path.is_none(),
             "a cold-cache resolution failure leaves no initramfs attached"
         );
+    }
+
+    #[test]
+    fn attach_universal_initramfs_refuses_a_rootfs_boot_that_cannot_resolve_one() {
+        // The regression this exists for: the resolver failure used to be
+        // swallowed at debug level, so the launch continued with no initramfs.
+        // Nothing else mounts the runtime overlay, so PID 1 came up to an empty
+        // /mvm/runtime, found neither the agent nor the egress client, exited,
+        // and panicked the kernel. The host saw only "guest agent did not
+        // become reachable within 30s" — a message naming nothing that was
+        // actually wrong.
+        let mut env = TestEnv::new();
+        let dir = tempfile::tempdir().unwrap();
+        env.isolate_mvm_home(dir.path());
+
+        let mut sc = VmStartConfig {
+            kernel_path: Some("/dummy/vmlinux".to_string()),
+            rootfs_path: "/cache/oci/rootfs.ext4".to_string(),
+            runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay,
+            ..Default::default()
+        };
+        let error = attach_universal_initramfs_with_resolver(&mut sc, |_, _, _, _| {
+            Err(cold_cache_failure())
+        })
+        .expect_err("a rootfs boot with no resolvable initramfs must refuse");
+
+        let rendered = format!("{error:#}");
+        assert!(
+            rendered.contains("universal initramfs"),
+            "the refusal must name the missing artifact: {rendered}"
+        );
+        assert!(
+            rendered.contains("/mvm/runtime"),
+            "the refusal must say what the artifact would have mounted: {rendered}"
+        );
+        assert!(
+            sc.initrd_path.is_none(),
+            "a refused launch attaches nothing"
+        );
+    }
+
+    #[test]
+    fn attach_universal_initramfs_still_refuses_a_prefer_overlay_rootfs_boot() {
+        // PreferOverlay is the default policy, and it is the one every
+        // `machine run --image` launch actually carries into this function on a
+        // non-sealed image. It needs the initramfs for exactly the same reason
+        // RequiredOverlay does — only RootfsOnly declares a baked-in agent.
+        let mut env = TestEnv::new();
+        let dir = tempfile::tempdir().unwrap();
+        env.isolate_mvm_home(dir.path());
+
+        let mut sc = VmStartConfig {
+            kernel_path: Some("/dummy/vmlinux".to_string()),
+            rootfs_path: "/cache/oci/rootfs.ext4".to_string(),
+            runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy::PreferOverlay,
+            ..Default::default()
+        };
+        attach_universal_initramfs_with_resolver(&mut sc, |_, _, _, _| Err(cold_cache_failure()))
+            .expect_err("PreferOverlay with a rootfs must refuse too");
+    }
+
+    #[test]
+    fn attach_universal_initramfs_lets_a_rootfs_only_boot_through() {
+        // RootfsOnly is the one policy that declares "my image carries its own
+        // agent", so it is the one shape that can legitimately boot with no
+        // overlay and therefore no initramfs.
+        let mut env = TestEnv::new();
+        let dir = tempfile::tempdir().unwrap();
+        env.isolate_mvm_home(dir.path());
+
+        let mut sc = VmStartConfig {
+            kernel_path: Some("/dummy/vmlinux".to_string()),
+            rootfs_path: "/cache/oci/rootfs.ext4".to_string(),
+            runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy::RootfsOnly,
+            ..Default::default()
+        };
+        attach_universal_initramfs_with_resolver(&mut sc, |_, _, _, _| Err(cold_cache_failure()))
+            .expect("a rootfs-only boot brings its own agent and needs no initramfs");
     }
 
     #[test]

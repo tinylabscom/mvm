@@ -21,7 +21,7 @@ use mvm_core::vm_backend::VmStartConfig;
 
 #[cfg(test)]
 use crate::host::boot_config::booted_with_universal_initramfs;
-use crate::host::boot_config::{build_runtime_overlay_cmdline_args, non_verity_overlay_ext4};
+use crate::host::boot_config::non_verity_overlay_ext4;
 use crate::host::egress_bridge::{
     host_signer_pub_cmdline_token, require_grant_cmdline_token, verb_grant_cmdline_token,
 };
@@ -90,6 +90,28 @@ pub fn runtime_overlay(config: &VmStartConfig) -> Option<(&str, &str, &str)> {
     ))
 }
 
+/// The `mvm.runtime_data=` token for a non-verity boot, naming the device the
+/// runtime overlay was *actually* attached to.
+///
+/// Derived from [`workload_blocks`] rather than assumed, because the two
+/// disagreed: the layout appends the rootfs dm-verity sidecar whenever
+/// `verity_path` is set, but this branch runs whenever verity is *disabled* —
+/// and verity is disabled by a missing initramfs, not by a missing sidecar. An
+/// OCI image built with verified boot but launched without an initramfs
+/// therefore had its Merkle tree at `/dev/vdb` while the hardcoded token still
+/// said the overlay was there. Reading the slot off the layout cannot drift.
+///
+/// [`workload_blocks`]: crate::host::spec_map::workload_blocks
+fn build_runtime_overlay_cmdline_args_for_layout(config: &VmStartConfig) -> Option<String> {
+    let overlay = non_verity_overlay_ext4(config)?;
+    let overlay_path = Path::new(overlay);
+    let device = crate::host::spec_map::workload_blocks(config)
+        .iter()
+        .find(|block| block.source == overlay_path)
+        .map(crate::driver::spec::BlockDev::device_node)?;
+    Some(format!("mvm.runtime_data={device}"))
+}
+
 /// Assemble the workload kernel cmdline for `config`, or `None` when no extra
 /// tokens are needed (the driver then falls back to its own default base
 /// cmdline).
@@ -149,14 +171,11 @@ fn workload_cmdline_for_hostname(
     // roothashes/device paths over vsock via `ActivateEnvironment` after boot, so
     // its cmdline carries none of them. The legacy per-rootfs verity initramfs
     // is no longer supported.
-    // Non-verity boots carry the runtime overlay as a plain read-only
-    // `/dev/vdb` (attached by the backend's disk layout); emit the token its
-    // `/init` mounts from. Verity boots already emitted the dm-verity variant
-    // above.
+    // Non-verity boots carry the runtime overlay as a plain read-only block
+    // device; emit the token naming the device it actually landed on.
     if !verity_is_enabled
         && has_disk
-        && let Some(overlay_args) =
-            build_runtime_overlay_cmdline_args(None, non_verity_overlay_ext4(config).is_some())
+        && let Some(overlay_args) = build_runtime_overlay_cmdline_args_for_layout(config)
     {
         cmdline.push(' ');
         cmdline.push_str(&overlay_args);
@@ -281,6 +300,106 @@ mod tests {
             args.push_str(" root=/dev/vda rw init=/init");
         }
         args
+    }
+
+    /// A non-verity launch whose image *was* built with verified boot: the
+    /// rootfs carries a dm-verity sidecar, but no initramfs resolved, so verity
+    /// is disabled and the guest `/init` mounts the overlay from the
+    /// `mvm.runtime_data=` token.
+    fn sidecar_bearing_non_verity_config() -> VmStartConfig {
+        VmStartConfig {
+            name: "w".to_string(),
+            kernel_path: Some("/cache/vmlinux".to_string()),
+            rootfs_path: "/cache/oci/rootfs.ext4".to_string(),
+            verity_path: Some("/cache/oci/rootfs.verity".to_string()),
+            roothash: Some("a".repeat(64)),
+            // No initrd: this is what makes verity *disabled* despite the
+            // sidecar being present, and it is the exact shape a cold
+            // initramfs cache produced.
+            initrd_path: None,
+            runtime_overlay_path: Some("/cache/runtime-overlay/overlay.ext4".to_string()),
+            runtime_overlay_verity_path: Some("/cache/runtime-overlay/overlay.verity".to_string()),
+            runtime_overlay_roothash: Some("b".repeat(64)),
+            runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn runtime_data_token_names_the_device_the_overlay_actually_landed_on() {
+        // The regression: the token was hardcoded to /dev/vdb on every
+        // non-verity boot, but `workload_blocks` appends the rootfs dm-verity
+        // sidecar whenever `verity_path` is set — which is independent of
+        // whether verity is *enabled*. So on an image built with verified boot
+        // but launched without an initramfs, /dev/vdb was the rootfs Merkle
+        // tree and the overlay was one slot further along at /dev/vdc.
+        let config = sidecar_bearing_non_verity_config();
+        assert!(
+            !verity_enabled(&config),
+            "no initrd means verity is disabled, which is what selects this branch"
+        );
+
+        let token = build_runtime_overlay_cmdline_args_for_layout(&config)
+            .expect("a resolved overlay triple yields a token");
+
+        let blocks = crate::host::spec_map::workload_blocks(&config);
+        let overlay_device = blocks
+            .iter()
+            .find(|b| b.source == Path::new("/cache/runtime-overlay/overlay.ext4"))
+            .map(crate::driver::spec::BlockDev::device_node)
+            .expect("the overlay is in the attached layout");
+
+        assert_eq!(token, format!("mvm.runtime_data={overlay_device}"));
+        assert_eq!(
+            token, "mvm.runtime_data=/dev/vdc",
+            "rootfs=vda, rootfs verity sidecar=vdb, overlay=vdc"
+        );
+        assert_ne!(
+            token, "mvm.runtime_data=/dev/vdb",
+            "vdb is the rootfs Merkle tree on this shape, not the overlay"
+        );
+    }
+
+    #[test]
+    fn runtime_data_token_is_vdb_when_no_verity_sidecar_is_attached() {
+        // The plain OCI shape: no sidecar, so the overlay really is the second
+        // disk. The layout-derived token must agree with the old hardcoded
+        // answer here, or the fix would have moved a working case.
+        let mut config = sidecar_bearing_non_verity_config();
+        config.verity_path = None;
+        config.roothash = None;
+
+        assert_eq!(
+            build_runtime_overlay_cmdline_args_for_layout(&config).as_deref(),
+            Some("mvm.runtime_data=/dev/vdb"),
+        );
+    }
+
+    #[test]
+    fn assembled_cmdline_carries_the_layout_derived_runtime_device() {
+        // End of the seam: the token the guest actually receives.
+        let config = sidecar_bearing_non_verity_config();
+        let state = std::path::PathBuf::from("/tmp/nonexistent-state");
+        let cmdline = workload_cmdline(&config, &state, hvf_like_workload_bootargs)
+            .expect("a required-overlay boot always emits tokens");
+
+        assert!(
+            cmdline.contains("mvm.runtime_data=/dev/vdc"),
+            "assembled cmdline must point at the overlay's real slot: {cmdline}"
+        );
+        assert!(
+            !cmdline.contains("mvm.runtime_data=/dev/vdb"),
+            "must not point at the rootfs Merkle tree: {cmdline}"
+        );
+    }
+
+    #[test]
+    fn no_runtime_data_token_without_a_resolved_overlay() {
+        let mut config = sidecar_bearing_non_verity_config();
+        config.runtime_overlay_path = None;
+        config.runtime_overlay_verity_path = None;
+        config.runtime_overlay_roothash = None;
+        assert_eq!(build_runtime_overlay_cmdline_args_for_layout(&config), None);
     }
 
     #[test]
