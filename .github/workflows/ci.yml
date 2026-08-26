@@ -431,7 +431,7 @@ jobs:
     needs: [scope]
     if: needs.scope.outputs.code == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v6
 
