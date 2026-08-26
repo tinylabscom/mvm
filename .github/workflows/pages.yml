@@ -108,3 +108,14 @@ jobs:
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           command: pages deploy public/dist --project-name=mvm --branch=main
           gitHubToken: ${{ secrets.GITHUB_TOKEN }}
+
+      # `_headers` is inert unless the host reads it, so the only proof that
+      # this deployment is cross-origin isolated — and therefore that the
+      # WebLinux demo has a SharedArrayBuffer — is the wire. Checked against
+      # the deployment URL rather than the production domain: this step can
+      # only speak for what it just published. Whether users reach it is a DNS
+      # question, which "Site isolation watch" answers on its own schedule.
+      - name: Verify the deployment is cross-origin isolated
+        env:
+          DEPLOYMENT_URL: ${{ steps.deployment.outputs.deployment-url }}
+        run: ./scripts/check-site-isolation-headers.sh "$DEPLOYMENT_URL"

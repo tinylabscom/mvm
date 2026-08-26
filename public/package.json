@@ -12,7 +12,8 @@
     "check:tokens": "node scripts/check-no-hardcoded-hex.mjs",
     "check:samples": "node scripts/check-sample-provenance.mjs",
     "check:perf": "node scripts/check-perf-provenance.mjs",
-    "check": "pnpm check:tokens && pnpm check:samples && pnpm check:perf && pnpm build"
+    "check:headers": "node scripts/check-isolation-headers.mjs",
+    "check": "pnpm check:tokens && pnpm check:samples && pnpm check:perf && pnpm check:headers && pnpm build"
   },
   "dependencies": {
     "@astrojs/react": "^4.4.2",

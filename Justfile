@@ -545,6 +545,14 @@ docs-publish:
 # Alias for `docs-publish` using the Cloudflare Pages deployment name.
 pages-deploy: docs-publish
 
+# Check the live site sends the cross-origin isolation headers the demo needs
+docs-check-live-headers url="":
+    # No argument checks the domain in public/astro.config.mjs; pass a URL to
+    # check a preview deployment instead. `pnpm check:headers` gates the
+    # `_headers` config — this one gates what the host actually sends, which is
+    # a different question and the one that has been answered wrong.
+    ./scripts/check-site-isolation-headers.sh {{ url }}
+
 # Build the browser-tier microVM demo assets (wasm core + guest + fixtures)
 demo-build:
     ./web/mvm-demo/build.sh
