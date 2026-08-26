@@ -28,17 +28,150 @@ echo "    repo: $REPO"
 echo "    home: $E2E_HOME"
 
 # ---------------------------------------------------------------------------
+# Cleanup.
+#
+# Scoped to the `bdd-` prefix every suite-created machine carries. This home
+# defaults to the real `~/.mvm`, so an unscoped sweep would delete the machines
+# the person running this actually cares about. Nothing here matches a name the
+# suite did not create.
+#
+# Runs on the way in as well as the way out: a previous run killed at its
+# timeout — or with ^C — leaves a guest holding a vsock socket, and the next
+# run then fails on a name collision that looks like a broken verb.
+# ---------------------------------------------------------------------------
+reap() {
+  local phase="$1"
+  local names
+  names="$(MVM_HOME="$E2E_HOME" "$MVMCTL" machine ls 2>/dev/null \
+    | awk 'NR>1 && $1 ~ /^bdd-/ {print $1}' || true)"
+
+  if [[ -n "$names" ]]; then
+    echo "==> $phase cleanup: reaping $(echo "$names" | wc -w | tr -d ' ') bdd- machine(s)"
+    while read -r name; do
+      [[ -z "$name" ]] && continue
+      echo "    - $name"
+      MVM_HOME="$E2E_HOME" "$MVMCTL" machine stop "$name" --yes >/dev/null 2>&1 || true
+      MVM_HOME="$E2E_HOME" "$MVMCTL" machine rm "$name" --yes >/dev/null 2>&1 || true
+    done <<< "$names"
+  elif [[ "$phase" == "pre-run" ]]; then
+    echo "==> pre-run cleanup: no leftover bdd- machines"
+  fi
+
+  # State directories for suite machines, in case a spec was removed while its
+  # runtime directory survived.
+  if [[ -d "$E2E_HOME/vms" ]]; then
+    find "$E2E_HOME/vms" -maxdepth 1 -name 'bdd-*' -type d -exec rm -rf {} + 2>/dev/null || true
+  fi
+}
+
+# Per-VM supervisors outlive a killed suite and keep a vCPU thread and a vsock
+# socket alive. Only those whose state directory is gone are reaped, so a
+# supervisor belonging to someone else's machine is left alone.
+reap_orphan_supervisors() {
+  local pids
+  pids="$(pgrep -f 'mvm-(hvf|libkrun)-supervisor' 2>/dev/null || true)"
+  [[ -z "$pids" ]] && return 0
+  for pid in $pids; do
+    local args
+    args="$(ps -o args= -p "$pid" 2>/dev/null || true)"
+    case "$args" in
+      *bdd-*) echo "    - reaping orphan supervisor $pid"; kill -TERM "$pid" 2>/dev/null || true ;;
+    esac
+  done
+}
+
+# ---------------------------------------------------------------------------
+# Following the run.
+#
+# Cucumber captures a step's output and only prints it when the step fails, so
+# a multi-minute boot shows nothing at all while it happens. This watcher runs
+# beside the suite instead of inside it: it notices each microVM's state
+# directory appearing, announces it, and streams that guest's console with a
+# name prefix. That is the part worth watching — the guest actually coming up.
+#
+# On by default when stdout is a terminal. MVM_E2E_FOLLOW=0 turns it off,
+# MVM_E2E_FOLLOW=1 forces it on for a log file or CI.
+# ---------------------------------------------------------------------------
+if [[ -z "${MVM_E2E_FOLLOW:-}" ]]; then
+  if [[ -t 1 ]]; then MVM_E2E_FOLLOW=1; else MVM_E2E_FOLLOW=0; fi
+fi
+
+WATCHER_PID=""
+
+start_watcher() {
+  [[ "$MVM_E2E_FOLLOW" == "1" ]] || return 0
+  ./scripts/e2e-watch-vms.sh "$E2E_HOME" &
+  WATCHER_PID=$!
+  echo "==> following microVM lifecycle (MVM_E2E_FOLLOW=0 to silence)"
+  echo "    the same view from another terminal:"
+  echo "      scripts/e2e-watch-vms.sh $E2E_HOME"
+}
+
+stop_watcher() {
+  [[ -n "$WATCHER_PID" ]] || return 0
+  # The watcher's `tail` children are in its process group; kill the group.
+  # The watcher's `tail` children sit in its process group; signal the group
+  # so a follower does not outlive the run.
+  # The watcher reaps its own console followers from its EXIT trap.
+  kill -TERM "$WATCHER_PID" 2>/dev/null || true
+  WATCHER_PID=""
+}
+
+on_exit() {
+  local status=$?
+  stop_watcher
+  echo
+  reap "post-run"
+  reap_orphan_supervisors
+  return "$status"
+}
+trap on_exit EXIT
+trap 'echo; echo "!!! interrupted — cleaning up"; exit 130' INT TERM
+
+# ---------------------------------------------------------------------------
 # 1. Build what the suite drives.
 #
 # The conformance runner refuses to start against an `mvmctl` older than its own
 # sources, so this has to happen before the test binary runs, not alongside it.
 # ---------------------------------------------------------------------------
-# `user` carries manifest-verify. Without it the verified-fetch path refuses the
-# published builder VM image with "manifest-verify feature is disabled in this
-# build" — a default `cargo build` cannot check a signature, so it declines to
-# trust one. That refusal is correct; building without the feature is the bug.
-echo "==> building mvmctl (--features user)"
-./scripts/cargo-fast.sh build --bin mvmctl --features user
+# `--clean-only` reaps and exits: the escape hatch for a run killed hard enough
+# to skip its own trap. Deliberately before the build — cleaning up after an
+# interrupted run must not depend on the tree compiling.
+if [[ "${1:-}" == "--clean-only" ]]; then
+  if [[ ! -x "$MVMCTL" ]]; then
+    echo "no mvmctl at $MVMCTL — nothing to reap with" >&2
+    trap - EXIT
+    exit 1
+  fi
+  reap "manual"
+  reap_orphan_supervisors
+  trap - EXIT
+  echo "==> clean"
+  exit 0
+fi
+
+# `user` carries manifest-verify, which the verified-fetch path needs to accept
+# the published builder VM image. It is off by default anyway: that feature
+# pulls the sigstore/aws-lc stack, and on both hosts tested aws-lc-rs resolves
+# while its native symbols do not, failing the link outright. A build that does
+# not link runs nothing, which is strictly worse than losing the flake-build
+# scenarios to an unverifiable fetch. Set MVM_E2E_FEATURES=user where that
+# native toolchain is known good.
+E2E_FEATURES="${MVM_E2E_FEATURES-}"
+if [[ -n "$E2E_FEATURES" ]]; then
+  echo "==> building mvmctl (--features $E2E_FEATURES)"
+  ./scripts/cargo-fast.sh build --bin mvmctl --features "$E2E_FEATURES"
+else
+  echo "==> building mvmctl"
+  ./scripts/cargo-fast.sh build --bin mvmctl
+fi
+
+# Now that `mvmctl` exists, clear anything a previous run left behind. A guest
+# still holding its name makes the next run fail on a collision that reads as a
+# broken verb.
+reap "pre-run"
+reap_orphan_supervisors
+start_watcher
 
 # The TypeScript SDK scenarios import the SDK's built `dist/`, which is absent
 # in a fresh worktree. Without it they fail for a reason that has nothing to do

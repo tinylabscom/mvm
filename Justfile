@@ -305,6 +305,13 @@ e2e-launch:
 e2e-docs:
     ./scripts/e2e-documented-surface.sh
 
+# Reap machines a killed e2e run left behind. Scoped to the `bdd-` prefix the
+# suite creates, so it never touches a machine you made.
+#
+# Clean up after an interrupted e2e run
+e2e-docs-clean:
+    ./scripts/e2e-documented-surface.sh --clean-only
+
 # KVM-backed merge-queue witness for the cheap documented machine lifecycle.
 # The tag selector keeps registry/build-heavy live scenarios in their dedicated
 # witness lanes while proving that the public commands operate a real guest.
