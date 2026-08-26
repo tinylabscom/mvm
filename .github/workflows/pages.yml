@@ -1,13 +1,16 @@
 name: Deploy site to Cloudflare Pages
 
-# Deploys happen when a GitHub Release is published, with manual
-# dispatch available for operator-triggered docs publishes. The
-# previous `push: branches: [main] paths: [public/**]` trigger was
-# dropped in the ecosystem-wide CI cost reduction (no push-to-branch
-# triggers anywhere).
+# Deploys happen when a GitHub Release is published or a version tag is
+# pushed, with manual dispatch available for operator-triggered docs
+# publishes. The previous `push: branches: [main] paths: [public/**]`
+# trigger was dropped in the ecosystem-wide CI cost reduction (no
+# push-to-branch triggers anywhere).
 on:
   release:
     types: [published]
+  push:
+    tags:
+      - "v*"
   workflow_dispatch:
 
 permissions:
