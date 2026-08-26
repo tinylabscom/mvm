@@ -220,11 +220,10 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@nightly
 
+      - uses: ./.github/actions/install-zigbuild
+
       - name: Install libkrun
-        run: |
-          brew tap slp/krun
-          brew trust slp/krun
-          brew install slp/krun/libkrun
+        uses: ./.github/actions/install-libkrun
 
       - name: Cache cargo
         uses: actions/cache@v5
@@ -292,10 +291,7 @@ jobs:
         # `libkrun.dylib` under `/opt/homebrew/{include,lib}` on Apple
         # Silicon - exactly the layout `crates/deps/libkrun-sys/build.rs`
         # probes for.
-        run: |
-          brew tap slp/krun
-          brew trust slp/krun
-          brew install slp/krun/libkrun
+        uses: ./.github/actions/install-libkrun
 
       - name: Cache cargo
         if: steps.filter.outputs.libkrun == 'true' || github.ref == 'refs/heads/main'
@@ -549,8 +545,8 @@ jobs:
             --flake examples/exit_code \
             --builder qemu \
             --hypervisor qemu \
+            --entrypoint \
             -v \
-            -- /bin/true \
             > /tmp/mvmctl-first-boot.log 2>&1
           actual=$?
           set -e
@@ -577,8 +573,8 @@ jobs:
           /tmp/mvmctl-source-under-test machine run \
             --manifest "$installed_sha" \
             --hypervisor qemu \
+            --entrypoint \
             -v \
-            -- /bin/true \
             > /tmp/mvmctl-bundle-run.log 2>&1
           actual=$?
           set -e

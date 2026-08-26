@@ -1,0 +1,31 @@
+name: Install libkrun
+description: Install libkrun and its firmware from the trusted upstream Homebrew tap.
+
+runs:
+  using: composite
+  steps:
+    - name: Install libkrun and firmware
+      shell: bash
+      run: |
+        set -euo pipefail
+        brew tap slp/krun
+        brew trust slp/krun
+
+        # The firmware tap currently resolves a bottle basename that its
+        # release does not publish on some hosted-runner Homebrew versions.
+        # Build that small, checksum-pinned formula from source, then install
+        # libkrun normally. Retry the complete transaction for transient
+        # downloads without trusting a nonexistent bottle name.
+        for attempt in 1 2 3; do
+          if brew install --build-from-source slp/krun/libkrunfw \
+            && brew install slp/krun/libkrun; then
+            exit 0
+          fi
+
+          if [ "$attempt" -eq 3 ]; then
+            echo "::error::libkrun installation failed after $attempt attempts" >&2
+            exit 1
+          fi
+
+          sleep "$((attempt * 30))"
+        done

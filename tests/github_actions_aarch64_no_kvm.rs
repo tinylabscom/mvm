@@ -22,6 +22,8 @@ const REQUIRED_BUILDER_DOWNLOAD: &str =
 const REQUIRED_BOOTSTRAP: &str =
     "/tmp/mvmctl-source-under-test --builder qemu bootstrap --production -v";
 const FIRST_MACHINE_RUN: &str = "/tmp/mvmctl-source-under-test machine run";
+const REQUIRED_BAKED_ENTRYPOINT: &str = "--entrypoint";
+const FORBIDDEN_ENTRYPOINT_OVERRIDE: &str = "-- /bin/true";
 
 #[test]
 fn aarch64_no_kvm_smokes_build_the_mvmctl_binary_they_execute() {
@@ -59,6 +61,14 @@ fn aarch64_no_kvm_smokes_build_the_mvmctl_binary_they_execute() {
         assert!(
             !contents.contains(LIBRARY_ONLY_BUILD),
             "{source} must not build only the mvm-cli library"
+        );
+        assert!(
+            contents.contains(REQUIRED_BAKED_ENTRYPOINT),
+            "{source} must exercise the exit_code image's baked entrypoint"
+        );
+        assert!(
+            !contents.contains(FORBIDDEN_ENTRYPOINT_OVERRIDE),
+            "{source} must not replace the exit_code image's baked command with /bin/true"
         );
         assert!(
             contents.contains(REQUIRED_VIRTIOFS_PACKAGE),

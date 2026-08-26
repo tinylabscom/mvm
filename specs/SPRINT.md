@@ -3044,6 +3044,21 @@ to the configured ceiling and the first terse response immediately after it.
 - [x] Document the fail-closed ASCII export boundary without imposing a new
       admission restriction on historical identifiers.
 
+## 2026-08-26 Extended CI recovery
+
+- [x] Run the AArch64 sealed `exit_code` workload through its baked entrypoint
+      on both first boot and installed-bundle replay.
+- [x] Remove the `/bin/true` override that converted the intended exit 7 into a
+      successful exit 0.
+- [x] Reuse one trusted Homebrew installer for scheduled macOS and release
+      lanes, building checksum-pinned firmware from source to avoid the
+      upstream bottle-name mismatch and retaining bounded download retries.
+- [x] Install the pinned embedded-host cross toolchain before the Apple
+      workspace build invokes mvm-cli's build script.
+- [x] Pin both repairs with focused workflow-structure tests and actionlint.
+- [x] Record the delivery in
+      `specs/sprint/delivery/2870-extended-ci-recovery.md`.
+
 ## Follow-up (not started) — repository-to-signed-workload generator
 
 Prompted by the same 2026-08-25 survey of a commercial enterprise

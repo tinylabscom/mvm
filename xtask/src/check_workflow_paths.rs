@@ -1134,17 +1134,42 @@ mod tests {
         let extended = workflow("ci-full.yml");
         for job in ["apple", "libkrun-macos"] {
             let body = job_body(&extended, job).expect("extended CI job must exist");
-            for command in [
-                "brew tap slp/krun",
-                "brew trust slp/krun",
-                "brew install slp/krun/libkrun",
-            ] {
-                assert!(
-                    body.contains(command),
-                    "{job} must run `{command}` before compiling libkrun consumers"
-                );
-            }
+            assert!(
+                body.contains("uses: ./.github/actions/install-libkrun"),
+                "{job} must use the shared resilient libkrun installer"
+            );
         }
+
+        let action = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("..")
+                .join(".github/actions/install-libkrun/action.yml"),
+        )
+        .expect("shared libkrun installer must be readable");
+        for command in [
+            "brew tap slp/krun",
+            "brew trust slp/krun",
+            "brew install --build-from-source slp/krun/libkrunfw",
+            "brew install slp/krun/libkrun",
+            "for attempt in 1 2 3",
+        ] {
+            assert!(
+                action.contains(command),
+                "shared libkrun installer must contain `{command}`"
+            );
+        }
+
+        let apple = job_body(&extended, "apple").expect("Apple job must exist");
+        let embedded_toolchain = apple
+            .find("uses: ./.github/actions/install-zigbuild")
+            .expect("Apple workspace build must install the embedded-host toolchain");
+        let build = apple
+            .find("      - name: Build")
+            .expect("Apple workspace build step must exist");
+        assert!(
+            embedded_toolchain < build,
+            "Apple must install the embedded-host toolchain before building mvm-cli"
+        );
     }
 
     #[test]
