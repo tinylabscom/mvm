@@ -90,6 +90,7 @@ async fn sealed_transcript_with_chain_anchor(world: &mut CliWorld) {
                 &manifest.binding.vm_name,
                 &manifest.sealed_root_hex,
                 manifest.chunks.len(),
+                manifest.adopted,
             )
             .expect("anchor transcript root in host audit chain");
     })

@@ -1029,6 +1029,7 @@ impl AuditEmitter {
         vm_name: &str,
         sealed_root_hex: &str,
         chunk_count: usize,
+        adopted: bool,
     ) -> Result<()> {
         let entry = transcript_sealed(
             plan,
@@ -1037,6 +1038,7 @@ impl AuditEmitter {
             vm_name,
             sealed_root_hex,
             chunk_count,
+            adopted,
         );
         self.emit_entry(&entry)
     }
@@ -2064,7 +2066,7 @@ mod tests {
         let root = "cd".repeat(32);
 
         emitter
-            .emit_transcript_sealed(&plan, "capture-1", "vm-1", &root, 3)
+            .emit_transcript_sealed(&plan, "capture-1", "vm-1", &root, 3, false)
             .unwrap();
 
         let path = dir.path().join("local.jsonl");

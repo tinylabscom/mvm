@@ -495,6 +495,24 @@ for detailed scope and acceptance criteria.
 
 ## In-flight plans
 
+- [ ] **`.mvmev` offline verifiability**
+      (`specs/plans/2026-08-25-mvmev-offline-verifiability.md`, issue #2863).
+      Two gaps found auditing the execution-contract qualification answers.
+      (1) The archive's canonicalization is pinned in Rust and nowhere in the
+      format: `manifest.json` ships pretty-printed while the signature covers
+      `canonical_json(&manifest)`, so a third-party verifier must parse and
+      re-canonicalize, and nothing says so. The rule itself -- JCS over a value
+      space restricted to integers and ASCII -- is sound, and the restriction is
+      what makes the two real JCS divergences unreachable; it is just
+      undocumented. WS1-WS3 specify it, freeze cross-language vectors, and
+      settle the ASCII input constraint. (2) The stream-plane transcript root is
+      not chain-anchored: `emit_transcript_sealed` has one production caller,
+      the opt-in forensic *network* capture path, so the transcript of what a
+      workload actually printed sits beside the audit chain rather than inside
+      it. WS4 anchors it and surfaces it on the receipt. Adjacent to, and
+      deliberately disjoint from, the qualification plan's WS1, which landed in
+      #2855.
+
 - [ ] **Workload service plane**
       (`specs/plans/2026-08-25-workload-service-plane.md`). Three workstreams
       taken from a 2026-08-25 survey of a commercial enterprise
