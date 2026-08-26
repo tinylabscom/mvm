@@ -14,22 +14,28 @@
 [[command]]
 path = "bootstrap"
 tier = "parse"
+reason = "downloads or builds a multi-hundred-megabyte artifact over the network; the e2e runner performs it once as setup rather than as an assertion"
 
 [[command]]
 path = "build compile"
-tier = "parse"
+tier = "exec"
+fixture = "decorator-script"
+env = { PYTHONPATH = "crates/mvm-sdk/sdks/python" }
 
 [[command]]
 path = "build kernel build"
 tier = "parse"
+reason = "downloads or builds a multi-hundred-megabyte artifact over the network; the e2e runner performs it once as setup rather than as an assertion"
 
 [[command]]
 path = "bundle fetch"
 tier = "parse"
+reason = "needs a signed .mvmpkg published by a real publisher key; scripts/make-bundle-fixture.sh builds one, wiring it in is follow-on work"
 
 [[command]]
 path = "bundle install"
 tier = "parse"
+reason = "needs a signed .mvmpkg published by a real publisher key; scripts/make-bundle-fixture.sh builds one, wiring it in is follow-on work"
 
 [[command]]
 path = "cache info"
@@ -37,11 +43,11 @@ tier = "exec"
 
 [[command]]
 path = "cache prune"
-tier = "parse"
+tier = "exec"
 
 [[command]]
 path = "cache repair"
-tier = "parse"
+tier = "exec"
 
 [[command]]
 path = "catalog list"
@@ -50,18 +56,22 @@ tier = "exec"
 [[command]]
 path = "deps audit"
 tier = "parse"
+reason = "same sealed-volume fixture as deps inspect"
 
 [[command]]
 path = "deps capture-live"
 tier = "parse"
+reason = "reaches a package index over the network, so the outcome tracks the index rather than mvm"
 
 [[command]]
 path = "deps inspect"
 tier = "parse"
+reason = "names a sealed deps volume hash; mvm-app-deps-fixture-tool can seal one, wiring it in is follow-on work"
 
 [[command]]
 path = "deps install"
 tier = "parse"
+reason = "reaches a package index over the network, so the outcome tracks the index rather than mvm"
 
 [[command]]
 path = "doctor"
@@ -72,27 +82,30 @@ exit_reports_host_state = true
 
 [[command]]
 path = "env cleanup"
-tier = "parse"
+tier = "exec"
+env = { MVM_UNINSTALL_PATH_PREFIX = "sandbox" }
 
 [[command]]
 path = "env uninstall"
-tier = "parse"
+tier = "exec"
+env = { MVM_UNINSTALL_PATH_PREFIX = "sandbox" }
 
 [[command]]
 path = "generate template"
-tier = "parse"
+tier = "exec"
 
 [[command]]
 path = "image inspect"
 tier = "parse"
+reason = "needs an OCI image already pulled into the cache"
 
 [[command]]
 path = "init"
-tier = "parse"
+tier = "exec"
 
 [[command]]
 path = "machine boot-report"
-tier = "parse"
+tier = "live"
 
 [[command]]
 path = "machine build"
@@ -101,10 +114,11 @@ tier = "live"
 [[command]]
 path = "machine check-artifact"
 tier = "parse"
+reason = "names a signed .mvm artifact that only a real build produces"
 
 [[command]]
 path = "machine checkpoint create"
-tier = "parse"
+tier = "live"
 
 [[command]]
 path = "machine checkpoint ls"
@@ -113,14 +127,16 @@ tier = "exec"
 [[command]]
 path = "machine checkpoint restore"
 tier = "parse"
+reason = "documented only as a placeholder template, so there is no concrete invocation to execute"
 
 [[command]]
 path = "machine console"
 tier = "parse"
+reason = "an interactive PTY; driving it needs a pty harness rather than captured stdio"
 
 [[command]]
 path = "machine cp"
-tier = "parse"
+tier = "live"
 
 [[command]]
 path = "machine create"
@@ -129,6 +145,7 @@ tier = "live"
 [[command]]
 path = "machine diff"
 tier = "parse"
+reason = "needs the live journey guest; not yet added to features/suites/s32_documented_surface/machine_journey.feature"
 
 [[command]]
 path = "machine exec"
@@ -137,14 +154,16 @@ tier = "live"
 [[command]]
 path = "machine fork"
 tier = "parse"
+reason = "needs the live journey guest; not yet added to features/suites/s32_documented_surface/machine_journey.feature"
 
 [[command]]
 path = "machine fs ls"
-tier = "parse"
+tier = "live"
 
 [[command]]
 path = "machine fs write"
 tier = "parse"
+reason = "documented only as a placeholder template, so there is no concrete invocation to execute"
 
 [[command]]
 path = "machine inspect"
@@ -160,23 +179,26 @@ tier = "exec"
 
 [[command]]
 path = "machine pause"
-tier = "parse"
+tier = "live"
 
 [[command]]
 path = "machine proc start"
 tier = "parse"
+reason = "needs the live journey guest; not yet added to features/suites/s32_documented_surface/machine_journey.feature"
 
 [[command]]
 path = "machine reconfigure"
 tier = "parse"
+reason = "needs the live journey guest; not yet added to features/suites/s32_documented_surface/machine_journey.feature"
 
 [[command]]
 path = "machine restore"
 tier = "parse"
+reason = "needs the live journey guest; not yet added to features/suites/s32_documented_surface/machine_journey.feature"
 
 [[command]]
 path = "machine resume"
-tier = "parse"
+tier = "live"
 
 [[command]]
 path = "machine rm"
@@ -188,11 +210,12 @@ tier = "live"
 
 [[command]]
 path = "machine sandbox gc"
-tier = "parse"
+tier = "exec"
 
 [[command]]
 path = "machine shell"
 tier = "parse"
+reason = "an interactive shell; same pty constraint as machine console"
 
 [[command]]
 path = "machine snapshot ls"
@@ -201,6 +224,7 @@ tier = "exec"
 [[command]]
 path = "machine snapshot rm"
 tier = "parse"
+reason = "needs the live journey guest; not yet added to features/suites/s32_documented_surface/machine_journey.feature"
 
 [[command]]
 path = "machine start"
@@ -213,18 +237,22 @@ tier = "live"
 [[command]]
 path = "machine volume catalog"
 tier = "parse"
+reason = "refuses without MVM_GATEWAY_URL: the --remote form the docs show targets a gateway that lives in mvmd, not in this repo"
 
 [[command]]
 path = "machine volume create"
 tier = "parse"
+reason = "needs the live journey guest; not yet added to features/suites/s32_documented_surface/machine_journey.feature"
 
 [[command]]
 path = "machine volume delete"
 tier = "parse"
+reason = "refuses without MVM_GATEWAY_URL: the --remote form the docs show targets a gateway that lives in mvmd, not in this repo"
 
 [[command]]
 path = "machine volume lock"
 tier = "parse"
+reason = "needs the live journey guest; not yet added to features/suites/s32_documented_surface/machine_journey.feature"
 
 [[command]]
 path = "machine volume ls"
@@ -233,30 +261,37 @@ tier = "exec"
 [[command]]
 path = "machine volume mount"
 tier = "parse"
+reason = "refuses without MVM_GATEWAY_URL: the --remote form the docs show targets a gateway that lives in mvmd, not in this repo"
 
 [[command]]
 path = "machine volume restore"
 tier = "parse"
+reason = "refuses without MVM_GATEWAY_URL: the --remote form the docs show targets a gateway that lives in mvmd, not in this repo"
 
 [[command]]
 path = "machine volume snapshot"
 tier = "parse"
+reason = "documented only as a placeholder template, so there is no concrete invocation to execute"
 
 [[command]]
 path = "machine volume unlock"
 tier = "parse"
+reason = "needs the live journey guest; not yet added to features/suites/s32_documented_surface/machine_journey.feature"
 
 [[command]]
 path = "machine volume unmount"
 tier = "parse"
+reason = "needs the live journey guest; not yet added to features/suites/s32_documented_surface/machine_journey.feature"
 
 [[command]]
 path = "machine wait"
 tier = "parse"
+reason = "needs the live journey guest; not yet added to features/suites/s32_documented_surface/machine_journey.feature"
 
 [[command]]
 path = "manifest info"
 tier = "parse"
+reason = "needs a manifest carrying a built slot; `init` writes the manifest but only a real build inside the builder VM fills the slot"
 
 [[command]]
 path = "manifest ls"
@@ -264,19 +299,21 @@ tier = "exec"
 
 [[command]]
 path = "manifest prune"
-tier = "parse"
+tier = "exec"
 
 [[command]]
 path = "manifest rm"
 tier = "parse"
+reason = "needs a manifest carrying a built slot; `init` writes the manifest but only a real build inside the builder VM fills the slot"
 
 [[command]]
 path = "manifest verify"
 tier = "parse"
+reason = "needs a manifest carrying a built slot; `init` writes the manifest but only a real build inside the builder VM fills the slot"
 
 [[command]]
 path = "network create"
-tier = "parse"
+tier = "exec"
 
 [[command]]
 path = "network list"
@@ -284,7 +321,7 @@ tier = "exec"
 
 [[command]]
 path = "ops config set"
-tier = "parse"
+tier = "exec"
 
 [[command]]
 path = "ops metrics"
@@ -293,42 +330,50 @@ tier = "exec"
 [[command]]
 path = "pack download"
 tier = "parse"
+reason = "reaches a package index over the network, so the outcome tracks the index rather than mvm"
 
 [[command]]
 path = "pack update"
 tier = "parse"
+reason = "reaches a package index over the network, so the outcome tracks the index rather than mvm"
 
 [[command]]
 path = "persistent-builder start"
 tier = "parse"
+reason = "needs a live persistent-builder session, which the builder VM owns and no scenario currently starts"
 
 [[command]]
 path = "persistent-builder status"
-tier = "parse"
+tier = "exec"
 
 [[command]]
 path = "persistent-builder stop"
 tier = "parse"
+reason = "needs a live persistent-builder session, which the builder VM owns and no scenario currently starts"
 
 [[command]]
 path = "persistent-builder submit"
 tier = "parse"
+reason = "needs a live persistent-builder session, which the builder VM owns and no scenario currently starts"
 
 [[command]]
 path = "run"
 tier = "parse"
+reason = "executes the user's script on the host in record mode; needs a decorator fixture and an SDK on PYTHONPATH"
 
 [[command]]
 path = "secret get"
 tier = "parse"
+reason = "documented only as a placeholder template, so there is no concrete invocation to execute"
 
 [[command]]
 path = "secret put"
 tier = "parse"
+reason = "documented only as a placeholder template, so there is no concrete invocation to execute"
 
 [[command]]
 path = "template info"
-tier = "parse"
+tier = "exec"
 
 [[command]]
 path = "template list"
@@ -336,31 +381,32 @@ tier = "exec"
 
 [[command]]
 path = "template search"
-tier = "parse"
+tier = "exec"
 
 [[command]]
 path = "trust add"
 tier = "parse"
+reason = "names a publisher pubkey file that no fixture stages yet"
 
 [[command]]
 path = "trust audit decisions export"
-tier = "parse"
+tier = "exec"
 
 [[command]]
 path = "trust audit provenance export"
-tier = "parse"
+tier = "exec"
 
 [[command]]
 path = "trust audit show"
-tier = "parse"
+tier = "exec"
 
 [[command]]
 path = "trust audit tail"
-tier = "parse"
+tier = "exec"
 
 [[command]]
 path = "trust audit verify"
-tier = "parse"
+tier = "exec"
 
 [[command]]
 path = "trust list"
@@ -369,50 +415,62 @@ tier = "exec"
 [[command]]
 path = "trust receipt verify"
 tier = "parse"
+reason = "names a run receipt, which only a real launch produces"
 
 [[command]]
 path = "machine forward"
 tier = "parse"
+reason = "retired at runtime while still present in the clap tree; the docs no longer reference it"
 
 [[command]]
 path = "secret set"
 tier = "parse"
+reason = "documented only as a placeholder template, so there is no concrete invocation to execute"
 
 [[command]]
 path = "bench"
 tier = "parse"
+reason = "boots VMs in a measurement loop; the runtime is a benchmark budget, not a test budget"
 
 [[command]]
 path = "build address"
 tier = "parse"
+reason = "needs a compiled workload fixture to address"
 
 [[command]]
 path = "build runtime-overlay build"
 tier = "parse"
+reason = "downloads or builds a multi-hundred-megabyte artifact over the network; the e2e runner performs it once as setup rather than as an assertion"
 
 [[command]]
 path = "build validate"
 tier = "parse"
+reason = "needs a generated launch plan to validate"
 
 [[command]]
 path = "bundle gc"
 tier = "parse"
+reason = "needs a signed .mvmpkg published by a real publisher key; scripts/make-bundle-fixture.sh builds one, wiring it in is follow-on work"
 
 [[command]]
 path = "env bootstrap"
 tier = "parse"
+reason = "documented only as a placeholder template, so there is no concrete invocation to execute"
 
 [[command]]
 path = "env update"
 tier = "parse"
+reason = "downloads or builds a multi-hundred-megabyte artifact over the network; the e2e runner performs it once as setup rather than as an assertion"
 
 [[command]]
 path = "kernel build"
 tier = "parse"
+reason = "downloads or builds a multi-hundred-megabyte artifact over the network; the e2e runner performs it once as setup rather than as an assertion"
 
 [[command]]
 path = "ops config edit"
 tier = "parse"
+reason = "documented only as a placeholder template, so there is no concrete invocation to execute"
 
 [[command]]
 path = "ops config show"
@@ -421,6 +479,7 @@ tier = "exec"
 [[command]]
 path = "ops mcp stdio"
 tier = "parse"
+reason = "a long-lived stdio server: it never exits, so an exec-tier run would hang rather than assert"
 
 [[command]]
 path = "pack list"
@@ -429,6 +488,7 @@ tier = "exec"
 [[command]]
 path = "pack prune"
 tier = "parse"
+reason = "reaches a package index over the network, so the outcome tracks the index rather than mvm"
 
 [[command]]
 path = "plugin list"
@@ -437,14 +497,17 @@ tier = "exec"
 [[command]]
 path = "pool status"
 tier = "parse"
+reason = "documented only as a placeholder template, so there is no concrete invocation to execute"
 
 [[command]]
 path = "prepare"
 tier = "parse"
+reason = "documented only as a placeholder template, so there is no concrete invocation to execute"
 
 [[command]]
 path = "secret ls"
 tier = "parse"
+reason = "documented only as a placeholder template, so there is no concrete invocation to execute"
 
 [[command]]
 path = "secret providers"
@@ -453,13 +516,15 @@ tier = "exec"
 [[command]]
 path = "shell-init"
 tier = "parse"
+reason = "documented only as a placeholder template, so there is no concrete invocation to execute"
 
 [[command]]
 path = "watch"
 tier = "parse"
-
 # Documented as future syntax. Each entry must stay absent from the CLI: the
 # suite fails if one ships, so the docs get updated when it does.
+reason = "a long-lived watcher: it never exits on its own"
+
 [[planned]]
 path = "manifest push"
 reason = "registry sharing is designed but unimplemented; the docs mark the section planned"

@@ -84,6 +84,129 @@ jobs:
         # reads like latency coverage and is not.
         run: cargo test --test smoke_run_json_receipt --test runtime_boot_bench
 
+  e2e-docs-linux:
+    name: Documented surface e2e (Linux, Firecracker)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      # Must track `FC_VERSION_DEFAULT` in mvm-core. The workload launch path
+      # passes flags older Firecracker releases reject before opening the API
+      # socket, which otherwise surfaces as an unhelpful socket timeout.
+      FC_VERSION: v1.14.1
+      # Hosted runners protect their distro kernel under /boot. Use the
+      # published, hash-verified workload kernel rather than a Stage 0 source
+      # build that attempts to boot that unreadable host file.
+      MVM_KERNEL_SOURCE: download
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/free-disk
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@nightly
+
+      - uses: ./.github/actions/apt-deps
+        with:
+          packages: libcap-ng-dev lld qemu-system-x86 qemu-utils
+
+      - uses: ./.github/actions/install-zigbuild
+
+      - name: Install just
+        uses: taiki-e/install-action@v2
+        with:
+          tool: just
+
+      - uses: ./.github/actions/rust-cache
+        with:
+          key: e2e-docs-linux
+
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+
+      - name: Install firecracker
+        run: |
+          set -euo pipefail
+          curl -fL -o firecracker.tgz \
+            "https://github.com/firecracker-microvm/firecracker/releases/download/${FC_VERSION}/firecracker-${FC_VERSION}-x86_64.tgz"
+          tar -xzf firecracker.tgz
+          sudo install -m 0755 \
+            "release-${FC_VERSION}-x86_64/firecracker-${FC_VERSION}-x86_64" \
+            /usr/bin/firecracker
+          /usr/bin/firecracker --version
+
+      - name: Grant /dev/kvm access for the job
+        run: |
+          set -euo pipefail
+          if [ ! -e /dev/kvm ]; then
+            echo "::error::/dev/kvm missing on this runner — the documented surface cannot boot." >&2
+            exit 1
+          fi
+          sudo chmod 666 /dev/kvm
+
+      - name: Run the documented surface end to end
+        run: just e2e-docs
+
+      - name: Dump VMM diagnostics on failure
+        if: failure()
+        run: |
+          for d in "$HOME"/.mvm/vms/*/; do
+            echo "===== $d ====="
+            ls -la "$d" || true
+            for f in firecracker.log console.log; do
+              if [ -s "$d$f" ]; then
+                echo "--- $f ---"
+                tail -50 "$d$f"
+              fi
+            done
+          done
+
+  e2e-docs-macos:
+    name: Documented surface e2e (macOS, HVF)
+    # The macOS default backend is HVF, and every guest-booting BDD scenario
+    # before this one carried `@firecracker` — so the backend most users run
+    # had no lane that booted anything. This is that lane.
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Install just
+        uses: taiki-e/install-action@v2
+        with:
+          tool: just
+
+      - uses: ./.github/actions/rust-cache
+        with:
+          key: e2e-docs-macos
+
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+
+      - name: Run the documented surface end to end
+        run: just e2e-docs
+
+      - name: Dump VMM diagnostics on failure
+        if: failure()
+        run: |
+          for d in "$HOME"/.mvm/vms/*/; do
+            echo "===== $d ====="
+            ls -la "$d" || true
+            # HVF flushes console.log only when the supervisor exits, so an
+            # empty file here is not evidence of a silent guest.
+            for f in console.log supervisor.log; do
+              if [ -s "$d$f" ]; then
+                echo "--- $f ---"
+                tail -50 "$d$f"
+              fi
+            done
+          done
+
   sdk-release-dry-run:
     name: SDK release dry-run
     permissions:

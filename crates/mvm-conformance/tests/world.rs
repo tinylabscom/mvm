@@ -134,6 +134,8 @@ pub struct CliWorld {
     /// Result of the most recent end-to-end launch, including its measured
     /// dispatch window.
     pub last_launch: Option<LaunchRecord>,
+    /// Name of the shared guest the documented machine-verb journey drives.
+    pub journey_machine: Option<String>,
     /// Gate under test in the peer-addressing scenarios.
     pub peer_gate: Option<mvm_vmm::vsock_egress_bridge::egress_gate::EgressGate>,
     /// The most recent peer/egress decision.
