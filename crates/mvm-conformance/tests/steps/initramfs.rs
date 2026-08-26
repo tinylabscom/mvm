@@ -107,6 +107,15 @@ fn isolated_home_warm_universal_initramfs(world: &mut CliWorld) {
     world.isolated_home = Some(tmp);
 }
 
+#[given("an isolated mvm home with a cold universal initramfs cache")]
+fn isolated_home_cold_universal_initramfs(world: &mut CliWorld) {
+    let tmp = tempfile::tempdir().expect("scenario mvm home");
+    world.initramfs_boot_env = Some(isolated_boot_env(tmp.path()));
+    // Do not seed the cache: the resolver must not fall back to a legacy
+    // per-rootfs initrd just because the universal initramfs is absent.
+    world.isolated_home = Some(tmp);
+}
+
 #[given("a sealed OCI rootfs with no sibling initrd")]
 fn sealed_oci_rootfs_without_sibling_initrd(world: &mut CliWorld) {
     let home = world
@@ -117,6 +126,20 @@ fn sealed_oci_rootfs_without_sibling_initrd(world: &mut CliWorld) {
     std::fs::create_dir_all(rootfs.parent().expect("the rootfs has a parent dir"))
         .expect("create the rootfs dir");
     std::fs::write(&rootfs, b"rootfs").expect("write the rootfs");
+}
+
+#[given("a sealed OCI rootfs with a sibling legacy initrd")]
+fn sealed_oci_rootfs_with_sibling_legacy_initrd(world: &mut CliWorld) {
+    let home = world
+        .isolated_home
+        .as_ref()
+        .expect("a prior step must isolate the mvm home");
+    let rootfs = scenario_rootfs(home.path());
+    std::fs::create_dir_all(rootfs.parent().expect("the rootfs has a parent dir"))
+        .expect("create the rootfs dir");
+    std::fs::write(&rootfs, b"rootfs").expect("write the rootfs");
+    let legacy_initrd = rootfs.with_extension("initrd");
+    std::fs::write(&legacy_initrd, b"legacy initrd").expect("write the legacy sibling initrd");
 }
 
 #[when("the persistent OCI effective initrd is resolved for a required-overlay boot")]
