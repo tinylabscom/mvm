@@ -529,18 +529,21 @@ docs-dev: demo-assets
 docs-build: demo-assets
     cd public && pnpm build
 
-# Publish the docs site to GitHub Pages (dispatches pages.yml on main)
+# Publish the docs site to Cloudflare Pages (dispatches pages.yml on main)
 docs-publish:
-    # `pages.yml` is workflow_dispatch-only on purpose — the old
-    # `push: branches:[main] paths:[public/**]` trigger was dropped in the CI
-    # cost reduction — so a docs change reaches the site only when someone asks
-    # for it. That is why this recipe exists: otherwise publishing is an
-    # undocumented `gh workflow run` you have to already know about.
+    # `pages.yml` runs automatically when a release is published or a `v*`
+    # tag is pushed; this recipe exists for operator-triggered docs publishes.
+    # The old `push: branches:[main] paths:[public/**]` trigger was dropped in
+    # the CI cost reduction — so a docs-only change reaches the site only when
+    # someone asks for it or a release/tag fires.
     #
     # `--ref main`, never the current branch: Pages serves what is on main, and
     # dispatching from a branch would publish something nobody has merged.
     gh workflow run pages.yml --ref main
     @echo "Dispatched pages.yml on main. Watch it with: gh run watch \$(gh run list --workflow=pages.yml --limit 1 --json databaseId --jq '.[0].databaseId')"
+
+# Alias for `docs-publish` using the Cloudflare Pages deployment name.
+pages-deploy: docs-publish
 
 # Build the browser-tier microVM demo assets (wasm core + guest + fixtures)
 demo-build:

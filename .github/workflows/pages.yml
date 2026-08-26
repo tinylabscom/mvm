@@ -1,13 +1,16 @@
 name: Deploy site to Cloudflare Pages
 
-# Deploys happen when a GitHub Release is published, with manual
-# dispatch available for operator-triggered docs publishes. The
-# previous `push: branches: [main] paths: [public/**]` trigger was
-# dropped in the ecosystem-wide CI cost reduction (no push-to-branch
-# triggers anywhere).
+# Deploys happen when a GitHub Release is published or a version tag is
+# pushed, with manual dispatch available for operator-triggered docs
+# publishes. The previous `push: branches: [main] paths: [public/**]`
+# trigger was dropped in the ecosystem-wide CI cost reduction (no
+# push-to-branch triggers anywhere).
 on:
   release:
     types: [published]
+  push:
+    tags:
+      - "v*"
   workflow_dispatch:
 
 permissions:
@@ -80,12 +83,28 @@ jobs:
         working-directory: public
         run: pnpm build
 
+      - name: Verify cross-origin isolation headers are staged
+        run: |
+          if [ ! -f public/dist/_headers ]; then
+            echo "ERROR: public/dist/_headers is missing; Cloudflare Pages will not send COOP/COEP headers." >&2
+            exit 1
+          fi
+          echo "OK: public/dist/_headers present"
+
+      - name: Ensure Cloudflare Pages project exists
+        uses: cloudflare/wrangler-action@v4
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: pages project create mvm --production-branch=main
+          gitHubToken: ${{ secrets.GITHUB_TOKEN }}
+        continue-on-error: true
+
       - name: Deploy to Cloudflare Pages
         id: deployment
         uses: cloudflare/wrangler-action@v4
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          # Create a Cloudflare Pages project named `mvm` (or change this).
           command: pages deploy public/dist --project-name=mvm --branch=main
           gitHubToken: ${{ secrets.GITHUB_TOKEN }}
